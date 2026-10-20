@@ -398,7 +398,12 @@ mod app {
                         !packet.truncated
                             && !(options.mark != 0 && packet.mark == Some(options.mark))
                     });
+                    let now = Instant::now();
+                    let udp_admitted = original
+                        .map(|bytes| udp_packet_admitted(&mut udp_sessions, bytes, now))
+                        .unwrap_or(true);
                     let quic_hook = original
+                        .filter(|_| udp_admitted)
                         .map(|bytes| {
                             quic_sessions.quic_direction_hook_for_packet(bytes, queue_hook)
                         })
@@ -408,9 +413,7 @@ mod app {
                     let mut response_candidate = None;
                     let mut portal_candidate = None;
                     let mut redirect_candidate = None;
-                    let decision = if let Some(bytes) = original {
-                        let now = Instant::now();
-                        udp_sessions.observe_packet(bytes, now);
+                    let decision = if let Some(bytes) = original.filter(|_| udp_admitted) {
                         if options.mode == RuntimeMode::Apply {
                             scheduled.observe(bytes, now);
                             pending_applied.retain(|ticket, _| scheduled.has_pending(*ticket));
@@ -1382,6 +1385,11 @@ mod app {
         }
     }
 
+    fn udp_packet_admitted(sessions: &mut R2oUdpSessions, packet: &[u8], now: Instant) -> bool {
+        !r2k_core::packet::PacketView::parse(packet).is_some_and(|view| view.protocol == 17)
+            || sessions.observe_packet(packet, now)
+    }
+
     fn send_voice_proof_event(
         control: &mut Option<ControlServer>,
         flow_journal: &mut R2oFlowJournal,
@@ -1812,10 +1820,55 @@ mod app {
             RuntimeMode, TcpSessions, format_journal_details, format_journal_key, load_plan,
             needs_raw_socket, observe_quic_packet, parse_options, release_many_with, release_with,
             send_applied_event, send_hello_event, send_journal_snapshot, send_journal_updates,
+            udp_packet_admitted,
         };
+        use r2o_datapath::r2o_udp_sessions::R2oUdpSessions;
         use std::io;
         use std::os::unix::net::UnixStream;
-        use std::time::Instant;
+        use std::time::{Duration, Instant};
+
+        #[test]
+        fn заполненная_udp_таблица_останавливает_обработку_нового_потока() {
+            let mut sessions = R2oUdpSessions::new().unwrap();
+            let now = Instant::now();
+            for index in 0..1536_u16 {
+                let packet = udp_packet(
+                    [10, (index >> 8) as u8, index as u8, 1],
+                    [203, 0, 113, 8],
+                    53000,
+                    7000,
+                );
+                assert!(udp_packet_admitted(&mut sessions, &packet, now));
+            }
+
+            let refused = udp_packet([10, 7, 0, 1], [203, 0, 113, 8], 53000, 7000);
+            assert!(!udp_packet_admitted(
+                &mut sessions,
+                &refused,
+                now + Duration::from_secs(1)
+            ));
+            assert_eq!(sessions.stats().flows, 1536);
+            assert_eq!(sessions.stats().refusals, 1);
+        }
+
+        fn udp_packet(
+            source: [u8; 4],
+            destination: [u8; 4],
+            source_port: u16,
+            destination_port: u16,
+        ) -> Vec<u8> {
+            let mut packet = vec![0; 28];
+            packet[0] = 0x45;
+            packet[2..4].copy_from_slice(&28_u16.to_be_bytes());
+            packet[8] = 64;
+            packet[9] = 17;
+            packet[12..16].copy_from_slice(&source);
+            packet[16..20].copy_from_slice(&destination);
+            packet[20..22].copy_from_slice(&source_port.to_be_bytes());
+            packet[22..24].copy_from_slice(&destination_port.to_be_bytes());
+            packet[24..26].copy_from_slice(&8_u16.to_be_bytes());
+            packet
+        }
 
         #[test]
         fn controller_only_mode_requires_control_and_keeps_the_legacy_plan_mode() {
