@@ -1742,10 +1742,13 @@ struct DiscoveryOutcome {
     target: r2o_controller::discovery::DiscoveryTarget,
     plan_text: Option<String>,
     detail: String,
+    queue_expired: bool,
 }
 
 #[cfg(unix)]
 const R2O_DISCOVERY_QUEUE_CAPACITY: usize = 64;
+#[cfg(unix)]
+const R2O_DISCOVERY_TASK_LIFETIME: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 #[cfg(unix)]
 #[derive(Default)]
@@ -1759,6 +1762,7 @@ struct R2oDiscoveryQueue {
 #[cfg(unix)]
 struct R2oDiscoveryQueueEntry {
     target: r2o_controller::discovery::DiscoveryTarget,
+    queued_at: std::time::Instant,
     queued_event: u64,
     hot_event: u64,
 }
@@ -1769,7 +1773,11 @@ impl R2oDiscoveryQueue {
         self.entries.is_empty()
     }
 
-    fn enqueue(&mut self, target: r2o_controller::discovery::DiscoveryTarget) -> bool {
+    fn enqueue(
+        &mut self,
+        target: r2o_controller::discovery::DiscoveryTarget,
+        queued_at: std::time::Instant,
+    ) -> bool {
         if self.promote(&target) {
             return true;
         }
@@ -1779,10 +1787,27 @@ impl R2oDiscoveryQueue {
         self.event_sequence = self.event_sequence.wrapping_add(1);
         self.entries.push(R2oDiscoveryQueueEntry {
             target,
+            queued_at,
             queued_event: self.event_sequence,
             hot_event: 0,
         });
         true
+    }
+
+    fn r2o_expire(
+        &mut self,
+        now: std::time::Instant,
+    ) -> Vec<r2o_controller::discovery::DiscoveryTarget> {
+        let mut expired = Vec::new();
+        self.entries.retain(|entry| {
+            if now.saturating_duration_since(entry.queued_at) > R2O_DISCOVERY_TASK_LIFETIME {
+                expired.push(entry.target.clone());
+                false
+            } else {
+                true
+            }
+        });
+        expired
     }
 
     fn promote(&mut self, target: &r2o_controller::discovery::DiscoveryTarget) -> bool {
@@ -1798,14 +1823,24 @@ impl R2oDiscoveryQueue {
         true
     }
 
-    fn pop(&mut self) -> Option<r2o_controller::discovery::DiscoveryTarget> {
+    fn pop(
+        &mut self,
+        now: std::time::Instant,
+    ) -> (
+        Vec<r2o_controller::discovery::DiscoveryTarget>,
+        Option<r2o_controller::discovery::DiscoveryTarget>,
+    ) {
+        let expired = self.r2o_expire(now);
         let selected = self
             .entries
             .iter()
             .enumerate()
             .min_by_key(|(_, entry)| (std::cmp::Reverse(entry.hot_event), entry.queued_event))
-            .map(|(index, _)| index)?;
-        Some(self.entries.remove(selected).target)
+            .map(|(index, _)| index);
+        let Some(selected) = selected else {
+            return (expired, None);
+        };
+        (expired, Some(self.entries.remove(selected).target))
     }
 }
 
@@ -2363,7 +2398,7 @@ impl DiscoveryWorker {
                     let Some(_permit) = worker_gate.r2o_acquire(&worker_cancel) else {
                         break;
                     };
-                    let target = {
+                    let (expired, target) = {
                         let (queue, _) = &*worker_jobs;
                         let mut queue = queue
                             .lock()
@@ -2373,13 +2408,26 @@ impl DiscoveryWorker {
                             queue.waiting_for_slot = false;
                         }
                         if worker_cancel.load(Ordering::Relaxed) {
-                            None
+                            (Vec::new(), None)
                         } else {
-                            queue.pop()
+                            queue.pop(std::time::Instant::now())
                         }
                     };
+                    for target in expired {
+                        if outcome_sender
+                            .send(DiscoveryOutcome {
+                                target,
+                                plan_text: None,
+                                detail: "подозрение устарело в очереди".into(),
+                                queue_expired: true,
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
                     let Some(target) = target else {
-                        break;
+                        continue;
                     };
                     classify_discovery_target(target, Arc::clone(&worker_cancel), mark)
                 };
@@ -2437,7 +2485,7 @@ impl DiscoveryWorker {
         let enqueued = queue
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .enqueue(target.clone());
+            .enqueue(target.clone(), std::time::Instant::now());
         if enqueued {
             self.active.insert(target);
             wake.notify_one();
@@ -2464,13 +2512,38 @@ impl DiscoveryWorker {
         self.active.contains(target)
     }
 
+    fn r2o_expire_queued(
+        &mut self,
+        now: std::time::Instant,
+    ) -> Vec<r2o_controller::discovery::DiscoveryTarget> {
+        let expired = self
+            .jobs
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .r2o_expire(now);
+        for target in &expired {
+            self.active.remove(target);
+            self.seen.remove(target);
+            self.seen_order.retain(|seen| seen != target);
+            self.failed_at.remove(target);
+        }
+        expired
+    }
+
     fn try_outcome(&mut self) -> Option<DiscoveryOutcome> {
         let outcome = self.outcomes.try_recv().ok()?;
-        self.active.remove(&outcome.target);
-        if outcome.plan_text.is_none() && self.seen.contains(&outcome.target) {
+        if outcome.queue_expired {
+            self.active.remove(&outcome.target);
+            self.seen.remove(&outcome.target);
+            self.seen_order.retain(|seen| seen != &outcome.target);
+            self.failed_at.remove(&outcome.target);
+        } else if outcome.plan_text.is_none() && self.seen.contains(&outcome.target) {
+            self.active.remove(&outcome.target);
             self.failed_at
                 .insert(outcome.target.clone(), std::time::Instant::now());
         } else {
+            self.active.remove(&outcome.target);
             self.failed_at.remove(&outcome.target);
         }
         Some(outcome)
@@ -2504,6 +2577,7 @@ fn classify_discovery_target(
             target,
             plan_text: None,
             detail: "не удалось собрать профиль целевого TLS".into(),
+            queue_expired: false,
         };
     };
     let control = match Trigger::tls("disk.rzd.ru") {
@@ -2516,6 +2590,7 @@ fn classify_discovery_target(
                 target,
                 plan_text: None,
                 detail: format!("не удалось собрать контрольный TLS: {error}"),
+                queue_expired: false,
             };
         }
     };
@@ -2534,6 +2609,7 @@ fn classify_discovery_target(
         target,
         plan_text,
         detail: result.reason,
+        queue_expired: false,
     }
 }
 
@@ -2851,6 +2927,14 @@ impl ControlClient {
                 }
             }
             let r2o_now = std::time::Instant::now();
+            if let Some((worker, _, _, _)) = &mut discovery {
+                for target in worker.r2o_expire_queued(r2o_now) {
+                    println!(
+                        "подозрение {} устарело в очереди Discovery; сетевой замер не запускался",
+                        target.host
+                    );
+                }
+            }
             for r2o_trial in r2o_take_expired_voice_trials(&mut r2o_voice_trials, r2o_now) {
                 if let Err(error) = self.retire_r2o_voice_trial(&r2o_trial) {
                     eprintln!(
@@ -2887,7 +2971,15 @@ impl ControlClient {
             if let Some((worker, catalog, path, _)) = &mut discovery
                 && let Some(outcome) = worker.try_outcome()
             {
-                self.apply_discovery_outcome(outcome, catalog, path)?;
+                if outcome.queue_expired {
+                    println!(
+                        "подозрение {} устарело в очереди Discovery; сетевой замер не запускался",
+                        outcome.target.host
+                    );
+                } else {
+                    self.apply_discovery_outcome(outcome, catalog, path)?;
+                }
+                std::io::stdout().flush()?;
                 continue;
             }
             if let Some(r2o_outcome) = voice_discovery
@@ -6783,24 +6875,26 @@ mod tests {
         let second = target("second.example");
         let third = target("third.example");
         let mut queue = super::R2oDiscoveryQueue::default();
+        let now = std::time::Instant::now();
 
-        assert!(queue.enqueue(first.clone()));
-        assert!(queue.enqueue(second.clone()));
-        assert!(queue.enqueue(third.clone()));
+        assert!(queue.enqueue(first.clone(), now));
+        assert!(queue.enqueue(second.clone(), now));
+        assert!(queue.enqueue(third.clone(), now));
         assert!(queue.promote(&first));
         assert!(queue.promote(&third));
 
-        assert_eq!(queue.pop(), Some(third));
-        assert_eq!(queue.pop(), Some(first.clone()));
+        assert_eq!(queue.pop(now), (Vec::new(), Some(third)));
+        assert_eq!(queue.pop(now), (Vec::new(), Some(first.clone())));
         assert!(!queue.promote(&first));
-        assert_eq!(queue.pop(), Some(second));
-        assert_eq!(queue.pop(), None);
+        assert_eq!(queue.pop(now), (Vec::new(), Some(second)));
+        assert_eq!(queue.pop(now), (Vec::new(), None));
     }
 
     #[cfg(unix)]
     #[test]
     fn r2o_discovery_queue_matches_donor_capacity() {
         let mut queue = super::R2oDiscoveryQueue::default();
+        let now = std::time::Instant::now();
         for index in 0..super::R2O_DISCOVERY_QUEUE_CAPACITY {
             let target = r2o_controller::discovery::DiscoveryTarget {
                 host: format!("target-{index}.example"),
@@ -6808,7 +6902,7 @@ mod tests {
                 family: 4,
                 shape: SHAPE_MODERN,
             };
-            assert!(queue.enqueue(target));
+            assert!(queue.enqueue(target, now));
         }
         let extra = r2o_controller::discovery::DiscoveryTarget {
             host: "overflow.example".into(),
@@ -6817,8 +6911,98 @@ mod tests {
             shape: SHAPE_MODERN,
         };
 
-        assert!(!queue.enqueue(extra));
+        assert!(!queue.enqueue(extra, now));
         assert_eq!(queue.entries.len(), 64);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_discovery_queued_target_expires_only_after_ten_minutes() {
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "expired.example".into(),
+            endpoint: "127.0.0.1:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let queued_at = std::time::Instant::now();
+        let mut queue = super::R2oDiscoveryQueue::default();
+
+        assert!(queue.enqueue(target.clone(), queued_at));
+        assert!(queue.promote(&target));
+        assert!(
+            queue
+                .r2o_expire(queued_at + std::time::Duration::from_secs(600))
+                .is_empty()
+        );
+        assert_eq!(
+            queue.r2o_expire(
+                queued_at
+                    + std::time::Duration::from_secs(600)
+                    + std::time::Duration::from_nanos(1)
+            ),
+            vec![target]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_discovery_expiration_releases_target_and_keeps_worker_alive() {
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
+        let permit = gate.r2o_try_acquire().unwrap();
+        let mut worker = super::DiscoveryWorker::new(None, gate);
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "expired.example".into(),
+            endpoint: "invalid-endpoint".into(),
+            family: 4,
+            shape: 0,
+        };
+        let expired_after = std::time::Instant::now() + std::time::Duration::from_secs(601);
+        assert!(worker.queue(target.clone()));
+
+        let wait_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let waiting = worker
+                .jobs
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .waiting_for_slot;
+            if waiting {
+                break;
+            }
+            assert!(std::time::Instant::now() < wait_deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        assert_eq!(
+            worker.r2o_expire_queued(expired_after),
+            vec![target.clone()]
+        );
+        assert!(!worker.is_active(&target));
+        drop(permit);
+
+        let idle_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let waiting = worker
+                .jobs
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .waiting_for_slot;
+            if !waiting {
+                assert!(!worker.thread.as_ref().unwrap().is_finished());
+                break;
+            }
+            assert!(std::time::Instant::now() < idle_deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        assert!(worker.queue(target.clone()));
+        let outcome = worker
+            .outcomes
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(outcome.target, target);
     }
 
     #[cfg(unix)]
@@ -6971,6 +7155,7 @@ mod tests {
                 target: target.clone(),
                 plan_text: Some(plan_text),
                 detail: "test".into(),
+                queue_expired: false,
             };
             let result = client.apply_discovery_outcome(outcome, &mut catalog, &catalog_path);
             let (kind, body) = server.join().unwrap();

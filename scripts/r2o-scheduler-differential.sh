@@ -46,8 +46,23 @@ mkdir -p "$r2o_log_dir"
         -fsyntax-only -Xclang -ast-dump \
         "$r2o_donor_core/test_sched_quic_yield.c" 2>/dev/null \
         | grep -E 'FunctionDecl.*(quic_yield_tick|launch_or_queue|scenario)'
+    clang-18 -std=gnu11 -pthread \
+        -I"$r2o_donor_core/include" \
+        -I"$r2o_donor_core/../datapath/include" \
+        -DD2K_RELEASE_ID='"dev"' \
+        -fsyntax-only -Xclang -ast-dump \
+        "$r2o_donor_core/sched.c" 2>/dev/null \
+        | grep -E 'FunctionDecl.*(task_fail|launch_or_queue|d2k_sched_tick)'
     printf '\nТесты планировщика C-эталона\n'
     r2o_run_timed 'планировщик C' make -C "$r2o_donor_core" test-sched-quic-yield CC=clang-18
+    r2o_run_timed 'сборка планировщика C' make -B -C "$r2o_donor_core" test_sched CC=clang-18
+    r2o_run_timed 'истечение очереди Discovery C' sh -c \
+        "cd \"\$1\" && ./test_sched --lifecycle-only" sh "$r2o_donor_core"
+    printf '\nПроверка срока ожидания в R2O\n'
+    r2o_run_timed 'срок очереди R2O' cargo +1.98.0 test -p r2o-controller --bin r2o-controller \
+        --locked r2o_discovery_queued_target_expires
+    r2o_run_timed 'жизнь worker после очистки очереди' cargo +1.98.0 test -p r2o-controller --bin r2o-controller \
+        --locked r2o_discovery_expiration_releases_target_and_keeps_worker_alive
     printf '\nСценарий QUIC worker и приёма TCP в R2O\n'
     r2o_run_timed 'сценарий QUIC worker' cargo +1.98.0 test -p r2o-controller --bin r2o-controller \
         --locked r2o_quic_подбор -- --nocapture
