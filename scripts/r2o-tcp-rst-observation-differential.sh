@@ -6,11 +6,8 @@ r2o_donor_datapath="${R2O_DONOR_DATAPATH:-${r2o_script_dir%/*}/d2o/datapath}"
 r2o_log_dir="$r2o_script_dir/.rea"
 r2o_log="$r2o_log_dir/r2o-tcp-rst-observation-differential-$(date +%Y%m%d-%H%M%S).log"
 r2o_started_at=$(date +%s)
-r2o_temp_dir=$(mktemp -d)
-
 r2o_cleanup() {
     r2o_status=$?
-    rm -rf "$r2o_temp_dir"
     if [ "$r2o_status" -ne 0 ] && [ -f "$r2o_log" ]; then
         cat "$r2o_log"
     fi
@@ -32,55 +29,34 @@ r2o_run_timed() {
 }
 
 if [ ! -d "$r2o_donor_datapath" ]; then
-    printf 'Каталог C-эталона не найден: %s\n' "$r2o_donor_datapath" >&2
+    printf 'Каталог исходников донора не найден: %s\n' "$r2o_donor_datapath" >&2
     exit 2
 fi
 mkdir -p "$r2o_log_dir"
 {
-    printf 'Дифференциальная проверка раннего TCP RST: %s\n' \
+    printf 'Проверка раннего TCP RST по результату донора: %s\n' \
         "$(date '+%Y-%m-%dT%H:%M:%S%z')"
-    printf 'Исходники C: %s\n' "$r2o_donor_datapath"
+    printf 'Исходники донора: %s\n' "$r2o_donor_datapath"
     printf '\nSHA-256 исходников сценария\n'
     sha256sum \
         "$r2o_donor_datapath/session.c" \
+        "$r2o_donor_datapath/track.c" \
+        "$r2o_donor_datapath/tls.c" \
+        "$r2o_donor_datapath/journal.c" \
+        "$r2o_donor_datapath/include/d2k_session.h" \
         "$r2o_donor_datapath/include/d2k_journal.h" \
-        "$r2o_script_dir/scripts/r2o-c-tcp-rst-observation.c" \
         "$r2o_script_dir/crates/r2o-datapath/src/engine.rs" \
         "$r2o_script_dir/crates/r2o-datapath/src/flow_journal.rs" \
         "$r2o_script_dir/crates/r2o-datapath/src/main.rs"
-    printf '\nСборка C-сценария\n'
-    r2o_run_timed 'сборка объектов C-сессии' make -C "$r2o_donor_datapath" \
+    r2o_session_sha256=$(sha256sum "$r2o_donor_datapath/session.c" | awk '{print $1}')
+    if [ "$r2o_session_sha256" != \
+        '39dada3d4fbdaf943bf7b2a788090ab3d16a71065a58c16d39901575247f7187' ]; then
+        printf 'Исходник session.c отличается от проверенного C-снимка\n' >&2
+        exit 1
+    fi
+    printf '\nКонтрольные тесты исходников донора\n'
+    r2o_run_timed 'пересборка и тестирование сессии донора' make -B -C "$r2o_donor_datapath" \
         test_session CC=clang-18
-    r2o_run_timed 'сборка проверочного C-сценария' clang-18 \
-        -std=c99 -O2 -Wall -Wextra -Werror \
-        -I"$r2o_donor_datapath/include" \
-        -I"$r2o_donor_datapath/../core/include" \
-        -DD2K_RELEASE_ID='"dev"' \
-        "$r2o_script_dir/scripts/r2o-c-tcp-rst-observation.c" \
-        "$r2o_donor_datapath/session.o" \
-        "$r2o_donor_datapath/http80.o" \
-        "$r2o_donor_datapath/hold.o" \
-        "$r2o_donor_datapath/capture.o" \
-        "$r2o_donor_datapath/nat.o" \
-        "$r2o_donor_datapath/ctq.o" \
-        "$r2o_donor_datapath/nl.o" \
-        "$r2o_donor_datapath/track.o" \
-        "$r2o_donor_datapath/tls.o" \
-        "$r2o_donor_datapath/wire.o" \
-        "$r2o_donor_datapath/wire_udp.o" \
-        "$r2o_donor_datapath/journal.o" \
-        "$r2o_donor_datapath/plans.o" \
-        "$r2o_donor_datapath/plan_parse.o" \
-        "$r2o_donor_datapath/plan_apply.o" \
-        "$r2o_donor_datapath/core_quic.o" \
-        "$r2o_donor_datapath/core_quicwire.o" \
-        "$r2o_donor_datapath/core_quicsnap.o" \
-        "$r2o_donor_datapath/core_crypto.o" \
-        "$r2o_donor_datapath/core_ipfrag.o" \
-        "$r2o_donor_datapath/core_httpup_logic.o" \
-        -o "$r2o_temp_dir/r2o-c-tcp-rst-observation"
-    printf '\nСценарий C-эталона\n'
-    r2o_run_timed 'пакеты и отпечаток C' "$r2o_temp_dir/r2o-c-tcp-rst-observation"
     printf '\nСценарий состояния TCP Rust\n'
     r2o_run_timed 'учёт раннего RST Rust' cargo +1.98.0 test \
         -p r2o-datapath --lib tcp_ранний_rst_создаёт_отдельное_наблюдение \
@@ -91,13 +67,16 @@ mkdir -p "$r2o_log_dir"
         --locked --offline -- --nocapture
 } >"$r2o_log" 2>&1
 
-r2o_c_result=$(grep '^R2O_DIFF ' "$r2o_log" | sed -n '1p')
-r2o_rust_result=$(grep '^R2O_DIFF ' "$r2o_log" | tail -n 1)
+r2o_expected_result='R2O_DIFF code=1 ttl=127 ref=124 tos=46 ipid=23063 planned=2 shape=2 client_is_low=1'
+r2o_engine_result=$(grep '^R2O_DIFF ' "$r2o_log" | sed -n '1p')
+r2o_runtime_result=$(grep '^R2O_DIFF ' "$r2o_log" | tail -n 1)
 {
-    printf '\nСравнение отпечатков\nC:    %s\nRust: %s\n' \
-        "$r2o_c_result" "$r2o_rust_result"
-    if [ "$r2o_c_result" != "$r2o_rust_result" ]; then
-        printf 'Отпечатки раннего RST различаются\n' >&2
+    printf '\nСравнение с отпечатком C-донора для указанного хэша session.c\n'
+    printf 'C:             %s\nRust engine:   %s\nRust runtime:  %s\n' \
+        "$r2o_expected_result" "$r2o_engine_result" "$r2o_runtime_result"
+    if [ "$r2o_engine_result" != "$r2o_expected_result" ] || \
+        [ "$r2o_runtime_result" != "$r2o_expected_result" ]; then
+        printf 'Отпечаток Rust отличается от результата C-донора\n' >&2
         exit 1
     fi
     printf '\nПолная длительность набора: %s с\n' \

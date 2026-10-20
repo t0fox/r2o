@@ -1247,4 +1247,20 @@ else:
     raise SystemExit("ОШИБКА: пакет qdeny дошёл до UDP-сервера")
 PY
 
+kill -TERM "$R2OD_OBSERVE_PID"
+if wait "$R2OD_OBSERVE_PID"; then
+    R2OD_OBSERVE_PID=
+else
+    cat "$WORK/r2o-datapath-observe.log" >&2
+    echo "ОШИБКА: режим наблюдения не завершился после SIGTERM" >&2
+    exit 1
+fi
+if ! grep -Eq '^r2o-datapath: UDP-потоки [1-9][0-9]* из 2048, отказов 0$' \
+    "$WORK/r2o-datapath-observe.log"; then
+    cat "$WORK/r2o-datapath-observe.log" >&2
+    echo "ОШИБКА: runtime не сохранил UDP-потоки из NFQUEUE в итоговой сводке" >&2
+    exit 1
+fi
+echo "ПРОЙДЕНО: UDP-потоки из NFQUEUE сохранены и показаны в итоговой сводке"
+
 cat "$WORK/r2o-datapath.log" "$WORK/r2o-datapath-udplen.log" "$WORK/r2o-datapath-tcp.log" "$WORK/r2o-datapath-tcp6.log" "$WORK/r2o-datapath-tcp-delay.log" "$WORK/r2o-datapath-control.log" "$WORK/r2o-datapath-voice.log" "$WORK/r2o-datapath-observe.log" "$WORK/r2o-controller-observe.log" "$WORK/r2o-datapath-hold.log" "$WORK/r2o-datapath-ipv6.log"

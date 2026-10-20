@@ -23,6 +23,7 @@ mod app {
     use r2o_datapath::nfqueue::{QueueSocket, ReceiveError};
     use r2o_datapath::r2o_icmp_guard::R2oIcmpGuard;
     use r2o_datapath::r2o_quic::R2oQuicSessions;
+    use r2o_datapath::r2o_udp_sessions::R2oUdpSessions;
     use r2o_datapath::r2o_voice::{R2oVoiceSessions, R2oVoiceTrialProofs};
     use r2o_datapath::raw::RawSocket;
     use r2o_datapath::scheduler::{FlowTicket, ScheduledQueue};
@@ -174,6 +175,7 @@ mod app {
         let mut voice_sessions = R2oVoiceSessions::default();
         let mut voice_trial_proofs = R2oVoiceTrialProofs::default();
         let mut quic_sessions = R2oQuicSessions::default();
+        let mut udp_sessions = R2oUdpSessions::new()?;
         let mut icmp_guard = R2oIcmpGuard::default();
         let mut next_execution_id = 1_u64;
         let mut next_session_sweep = Instant::now();
@@ -191,6 +193,11 @@ mod app {
                     flow_journal.count(),
                     flow_journal.added(),
                     flow_journal.dropped()
+                );
+                let udp_stats = udp_sessions.stats();
+                eprintln!(
+                    "r2o-datapath: UDP-потоки {} из {}, отказов {}",
+                    udp_stats.flows, udp_stats.capacity, udp_stats.refusals
                 );
                 if icmp_guard.r2o_seen() != 0 || icmp_guard.r2o_noted() != 0 {
                     eprintln!(
@@ -295,6 +302,7 @@ mod app {
                         quic_sessions.mark_suspected(&event.key);
                     }
                 }
+                udp_sessions.expire(now);
                 next_session_sweep = now + Duration::from_secs(1);
             }
             let timeout = scheduled
@@ -402,6 +410,7 @@ mod app {
                     let mut redirect_candidate = None;
                     let decision = if let Some(bytes) = original {
                         let now = Instant::now();
+                        udp_sessions.observe_packet(bytes, now);
                         if options.mode == RuntimeMode::Apply {
                             scheduled.observe(bytes, now);
                             pending_applied.retain(|ticket, _| scheduled.has_pending(*ticket));
