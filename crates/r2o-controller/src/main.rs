@@ -1781,12 +1781,15 @@ struct DiscoveryOutcome {
     plan_text: Option<String>,
     detail: String,
     queue_expired: bool,
+    retry_after: Option<std::time::Duration>,
 }
 
 #[cfg(unix)]
 const R2O_DISCOVERY_QUEUE_CAPACITY: usize = 64;
 #[cfg(unix)]
 const R2O_DISCOVERY_TASK_LIFETIME: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+#[cfg(unix)]
+const R2O_DISCOVERY_FAILURE_RETRY: std::time::Duration = std::time::Duration::from_secs(120);
 
 #[cfg(unix)]
 #[derive(Default)]
@@ -1932,13 +1935,64 @@ struct DiscoveryWorker {
     seen: HashSet<r2o_controller::discovery::DiscoveryTarget>,
     seen_order: VecDeque<r2o_controller::discovery::DiscoveryTarget>,
     failed_at: HashMap<r2o_controller::discovery::DiscoveryTarget, std::time::Instant>,
+    failed_retry_after: HashMap<r2o_controller::discovery::DiscoveryTarget, std::time::Duration>,
     active: HashSet<r2o_controller::discovery::DiscoveryTarget>,
     thread: Option<JoinHandle<()>>,
 }
 
 #[cfg(unix)]
+#[cfg(test)]
 fn r2o_discovery_failure_retry_due(failed_at: std::time::Instant, now: std::time::Instant) -> bool {
-    now.saturating_duration_since(failed_at) >= std::time::Duration::from_secs(120)
+    r2o_discovery_failure_retry_due_after(failed_at, now, R2O_DISCOVERY_FAILURE_RETRY)
+}
+
+#[cfg(unix)]
+fn r2o_discovery_failure_retry_due_after(
+    failed_at: std::time::Instant,
+    now: std::time::Instant,
+    retry_after: std::time::Duration,
+) -> bool {
+    now.saturating_duration_since(failed_at) >= retry_after
+}
+
+#[cfg(unix)]
+fn r2o_run_with_deadline<T>(
+    worker_cancel: Arc<AtomicBool>,
+    lifetime: std::time::Duration,
+    run: impl FnOnce(Arc<AtomicBool>) -> T,
+) -> (T, bool) {
+    let r2o_deadline = std::time::Instant::now() + lifetime;
+    let r2o_task_cancel = Arc::new(AtomicBool::new(false));
+    let r2o_watch_cancel = Arc::clone(&r2o_task_cancel);
+    let r2o_worker_cancel = Arc::clone(&worker_cancel);
+    let (r2o_stop_sender, r2o_stop_receiver) = std::sync::mpsc::channel();
+    let r2o_watch = std::thread::spawn(move || {
+        loop {
+            if r2o_worker_cancel.load(Ordering::Relaxed) {
+                r2o_watch_cancel.store(true, Ordering::Relaxed);
+                break;
+            }
+            let r2o_now = std::time::Instant::now();
+            if r2o_now > r2o_deadline {
+                r2o_watch_cancel.store(true, Ordering::Relaxed);
+                break;
+            }
+            let r2o_remaining = r2o_deadline.saturating_duration_since(r2o_now);
+            match r2o_stop_receiver
+                .recv_timeout(r2o_remaining.min(std::time::Duration::from_millis(50)))
+            {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
+    });
+
+    let r2o_result = run(Arc::clone(&r2o_task_cancel));
+    let r2o_timed_out =
+        std::time::Instant::now() > r2o_deadline && !worker_cancel.load(Ordering::Relaxed);
+    let _ = r2o_stop_sender.send(());
+    let _ = r2o_watch.join();
+    (r2o_result, r2o_timed_out)
 }
 
 #[cfg(unix)]
@@ -2564,6 +2618,7 @@ impl DiscoveryWorker {
                                 plan_text: None,
                                 detail: "подозрение устарело в очереди".into(),
                                 queue_expired: true,
+                                retry_after: None,
                             })
                             .is_err()
                         {
@@ -2587,6 +2642,7 @@ impl DiscoveryWorker {
             seen: HashSet::new(),
             seen_order: VecDeque::new(),
             failed_at: HashMap::new(),
+            failed_retry_after: HashMap::new(),
             active: HashSet::new(),
             thread: Some(thread),
         }
@@ -2606,22 +2662,27 @@ impl DiscoveryWorker {
         }
         if self.seen.contains(&target) {
             let now = std::time::Instant::now();
-            if !self
-                .failed_at
+            let retry_after = self
+                .failed_retry_after
                 .get(&target)
-                .is_some_and(|failed_at| r2o_discovery_failure_retry_due(*failed_at, now))
-            {
+                .copied()
+                .unwrap_or(R2O_DISCOVERY_FAILURE_RETRY);
+            if !self.failed_at.get(&target).is_some_and(|failed_at| {
+                r2o_discovery_failure_retry_due_after(*failed_at, now, retry_after)
+            }) {
                 return false;
             }
             self.seen.remove(&target);
             self.seen_order.retain(|seen| seen != &target);
             self.failed_at.remove(&target);
+            self.failed_retry_after.remove(&target);
         }
         if self.seen_order.len() == 256
             && let Some(expired) = self.seen_order.pop_front()
         {
             self.seen.remove(&expired);
             self.failed_at.remove(&expired);
+            self.failed_retry_after.remove(&expired);
         }
         self.seen.insert(target.clone());
         self.seen_order.push_back(target.clone());
@@ -2638,6 +2699,7 @@ impl DiscoveryWorker {
             self.seen.remove(&target);
             self.seen_order.retain(|seen| seen != &target);
             self.failed_at.remove(&target);
+            self.failed_retry_after.remove(&target);
             false
         }
     }
@@ -2649,6 +2711,7 @@ impl DiscoveryWorker {
         self.seen.remove(&target);
         self.seen_order.retain(|seen| seen != &target);
         self.failed_at.remove(&target);
+        self.failed_retry_after.remove(&target);
         self.queue(target)
     }
 
@@ -2671,26 +2734,39 @@ impl DiscoveryWorker {
             self.seen.remove(target);
             self.seen_order.retain(|seen| seen != target);
             self.failed_at.remove(target);
+            self.failed_retry_after.remove(target);
         }
         expired
     }
 
     fn try_outcome(&mut self) -> Option<DiscoveryOutcome> {
         let outcome = self.outcomes.try_recv().ok()?;
+        Some(self.r2o_complete_outcome(outcome))
+    }
+
+    fn r2o_complete_outcome(&mut self, outcome: DiscoveryOutcome) -> DiscoveryOutcome {
         if outcome.queue_expired {
             self.active.remove(&outcome.target);
             self.seen.remove(&outcome.target);
             self.seen_order.retain(|seen| seen != &outcome.target);
             self.failed_at.remove(&outcome.target);
+            self.failed_retry_after.remove(&outcome.target);
         } else if outcome.plan_text.is_none() && self.seen.contains(&outcome.target) {
             self.active.remove(&outcome.target);
             self.failed_at
                 .insert(outcome.target.clone(), std::time::Instant::now());
+            if let Some(retry_after) = outcome.retry_after {
+                self.failed_retry_after
+                    .insert(outcome.target.clone(), retry_after);
+            } else {
+                self.failed_retry_after.remove(&outcome.target);
+            }
         } else {
             self.active.remove(&outcome.target);
             self.failed_at.remove(&outcome.target);
+            self.failed_retry_after.remove(&outcome.target);
         }
-        Some(outcome)
+        outcome
     }
 }
 
@@ -2722,6 +2798,7 @@ fn classify_discovery_target(
             plan_text: None,
             detail: "не удалось собрать профиль целевого TLS".into(),
             queue_expired: false,
+            retry_after: None,
         };
     };
     let control = match Trigger::tls("disk.rzd.ru") {
@@ -2735,25 +2812,39 @@ fn classify_discovery_target(
                 plan_text: None,
                 detail: format!("не удалось собрать контрольный TLS: {error}"),
                 queue_expired: false,
+                retry_after: None,
             };
         }
     };
-    let result = classify_run(
-        &target.endpoint,
-        &trigger,
-        ClassifyOptions {
-            mark,
-            control: Some(control),
-            cancel: Some(cancel),
-            ..ClassifyOptions::default()
-        },
-    );
-    let plan_text = result.hit.map(|hit| hit.plan_text);
+    let (result, timed_out) =
+        r2o_run_with_deadline(cancel, R2O_DISCOVERY_TASK_LIFETIME, |task_cancel| {
+            classify_run(
+                &target.endpoint,
+                &trigger,
+                ClassifyOptions {
+                    mark,
+                    control: Some(control),
+                    cancel: Some(task_cancel),
+                    ..ClassifyOptions::default()
+                },
+            )
+        });
+    let plan_text = if timed_out {
+        None
+    } else {
+        result.hit.map(|hit| hit.plan_text)
+    };
+    let detail = if timed_out {
+        "активный поиск превысил срок жизни 10 минут; частичный результат отброшен".into()
+    } else {
+        result.reason
+    };
     DiscoveryOutcome {
         target,
         plan_text,
-        detail: result.reason,
+        detail,
         queue_expired: false,
+        retry_after: timed_out.then_some(R2O_DISCOVERY_TASK_LIFETIME),
     }
 }
 
@@ -7432,6 +7523,105 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn r2o_таймаут_активного_поиска_освобождает_цель_для_нового_поколения() {
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "retry.example".into(),
+            endpoint: "invalid-endpoint".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let mut worker = super::DiscoveryWorker::new(
+            None,
+            r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1),
+        );
+        worker.seen.insert(target.clone());
+        worker.seen_order.push_back(target.clone());
+        worker.active.insert(target.clone());
+        let outcome = super::DiscoveryOutcome {
+            target: target.clone(),
+            plan_text: None,
+            detail: "активный поиск превысил срок жизни".into(),
+            queue_expired: false,
+            retry_after: Some(super::R2O_DISCOVERY_TASK_LIFETIME),
+        };
+
+        let finished = worker.r2o_complete_outcome(outcome);
+
+        assert!(finished.plan_text.is_none());
+        assert!(!worker.is_active(&target));
+        assert!(worker.seen.contains(&target));
+        assert!(!worker.queue(target.clone()));
+        assert_eq!(
+            worker.failed_retry_after.get(&target),
+            Some(&super::R2O_DISCOVERY_TASK_LIFETIME)
+        );
+        let now = std::time::Instant::now();
+        worker
+            .failed_at
+            .insert(target.clone(), now - std::time::Duration::from_secs(599));
+        assert!(!worker.queue(target.clone()));
+        worker.failed_at.insert(
+            target.clone(),
+            std::time::Instant::now() - std::time::Duration::from_secs(600),
+        );
+        assert!(worker.queue(target.clone()));
+        assert!(worker.is_active(&target));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_активный_поиск_отменяется_по_сроку_жизни() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        let worker_cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let (cancelled, expired) = super::r2o_run_with_deadline(
+            std::sync::Arc::clone(&worker_cancel),
+            Duration::from_millis(20),
+            |task_cancel| {
+                let limit = Instant::now() + Duration::from_secs(1);
+                while !task_cancel.load(Ordering::Relaxed) && Instant::now() < limit {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                task_cancel.load(Ordering::Relaxed)
+            },
+        );
+
+        assert!(cancelled);
+        assert!(expired);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn остановка_контроллера_прерывает_поиск_без_метки_таймаута() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        let worker_cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let cancel_signal = std::sync::Arc::clone(&worker_cancel);
+        let cancel_thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(10));
+            cancel_signal.store(true, Ordering::Relaxed);
+        });
+        let (cancelled, expired) = super::r2o_run_with_deadline(
+            std::sync::Arc::clone(&worker_cancel),
+            Duration::from_secs(1),
+            |task_cancel| {
+                let limit = Instant::now() + Duration::from_secs(2);
+                while !task_cancel.load(Ordering::Relaxed) && Instant::now() < limit {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                task_cancel.load(Ordering::Relaxed)
+            },
+        );
+        cancel_thread.join().unwrap();
+
+        assert!(cancelled);
+        assert!(!expired);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn discovery_persists_only_after_datapath_ack_and_rolls_back_on_rejection() {
         fn run_case(accept: bool) -> (bool, Catalog, Vec<u8>) {
             let work = std::env::temp_dir().join(format!(
@@ -7494,6 +7684,7 @@ mod tests {
                 plan_text: Some(plan_text),
                 detail: "test".into(),
                 queue_expired: false,
+                retry_after: None,
             };
             let result = client.apply_discovery_outcome(outcome, &mut catalog, &catalog_path);
             let (kind, body) = server.join().unwrap();
