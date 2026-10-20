@@ -78,6 +78,7 @@ struct TcpSession {
     reverse_tls_app_data: bool,
     reverse_server_hello: bool,
     reverse_payload_bytes_after_hello: u32,
+    reverse_packets_after_hello: u32,
     reverse_first_record_type: u8,
     reverse_record_types: u8,
     exchange_told: bool,
@@ -97,6 +98,7 @@ struct TcpSession {
     pending_fin_sequence_end: Option<u32>,
     fin_retry_queued: bool,
     fin_retry_reported: bool,
+    rst_cut_reported: bool,
     last_seen: Instant,
 }
 
@@ -122,6 +124,7 @@ impl TcpSession {
             reverse_tls_app_data: false,
             reverse_server_hello: false,
             reverse_payload_bytes_after_hello: 0,
+            reverse_packets_after_hello: 0,
             reverse_first_record_type: 0,
             reverse_record_types: 0,
             exchange_told: false,
@@ -141,6 +144,7 @@ impl TcpSession {
             pending_fin_sequence_end: None,
             fin_retry_queued: false,
             fin_retry_reported: false,
+            rst_cut_reported: false,
             last_seen: now,
         }
     }
@@ -163,6 +167,25 @@ pub struct R2oTcpExchangeEvent {
     pub planned: u8,
 }
 
+/// Отпечаток чужого RST, снятого защитой до первого ответа после ClientHello.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct R2oTcpRstCutEvent {
+    /// Канонический ключ TCP-потока.
+    pub key: [u8; KEY_LEN],
+    /// TTL снятого пакета и первого обратного пакета этого потока.
+    pub ttl: u8,
+    pub reference_ttl: u8,
+    /// Поля IP-заголовка снятого RST.
+    pub traffic_class: u8,
+    pub ip_id: u16,
+    /// Был ли замечен ServerHello до сброса.
+    pub server_hello: bool,
+    /// Был ли успешно применён план к этому потоку: 1 — да, 2 — нет.
+    pub planned: u8,
+    /// Направление клиента в каноническом ключе.
+    pub client_is_low: bool,
+}
+
 impl R2oTcpExchangeEvent {
     pub const PLANNED_YES: u8 = 1;
     pub const PLANNED_NO: u8 = 2;
@@ -172,6 +195,7 @@ impl R2oTcpExchangeEvent {
 pub struct TcpSessions {
     flows: HashMap<TcpFlowKey, TcpSession>,
     tcp_exchange_events: VecDeque<R2oTcpExchangeEvent>,
+    tcp_rst_cut_events: VecDeque<R2oTcpRstCutEvent>,
     fin_retry_events: VecDeque<R2oTcpFinRetryEvent>,
     rst_after_app_events: VecDeque<R2oTcpRstAfterAppEvent>,
 }
@@ -181,6 +205,7 @@ impl Default for TcpSessions {
         Self {
             flows: HashMap::with_capacity(MAX_TCP_SESSIONS),
             tcp_exchange_events: VecDeque::with_capacity(MAX_TCP_SESSIONS * 2),
+            tcp_rst_cut_events: VecDeque::with_capacity(MAX_TCP_SESSIONS),
             fin_retry_events: VecDeque::new(),
             rst_after_app_events: VecDeque::new(),
         }
@@ -205,6 +230,10 @@ impl TcpSessions {
 
     pub fn take_tcp_exchange_events(&mut self) -> Vec<R2oTcpExchangeEvent> {
         self.tcp_exchange_events.drain(..).collect()
+    }
+
+    pub fn take_tcp_rst_cut_events(&mut self) -> Vec<R2oTcpRstCutEvent> {
+        self.tcp_rst_cut_events.drain(..).collect()
     }
 
     pub fn mark_plan_done(&mut self, key: &[u8; KEY_LEN]) {
@@ -467,6 +496,8 @@ impl TcpSessions {
 
         let session = self.flows.get_mut(&key)?;
         let reverse_tls_app_data_before_packet = session.reverse_tls_app_data;
+        let reverse_packets_after_hello_before_packet = session.reverse_packets_after_hello;
+        let reverse_ttl_before_packet = session.reverse_ttl;
         if syn && ack && !session.direction_known {
             session.initiator = destination;
             session.direction_known = true;
@@ -511,6 +542,10 @@ impl TcpSessions {
             session.metrics.reverse_bytes =
                 session.metrics.reverse_bytes.saturating_add(packet_bytes);
             session.reverse_seen = true;
+            if session.hello_at.is_some() {
+                session.reverse_packets_after_hello =
+                    session.reverse_packets_after_hello.saturating_add(1);
+            }
             if syn && ack && session.rtt.is_none() {
                 session.rtt = session
                     .first_syn
@@ -572,6 +607,26 @@ impl TcpSessions {
         let mut keep_fin_session = false;
         let mut fin_retry_event = None;
         let mut rst_after_app_event = None;
+        let mut rst_cut_event = None;
+        if rst
+            && reverse
+            && session.hello_at.is_some()
+            && reverse_packets_after_hello_before_packet == 0
+            && session.guards & GUARD_RST_ALIEN != 0
+            && reverse_ttl_before_packet.is_some_and(|reference| reference != view.hop_limit)
+            && !session.rst_cut_reported
+        {
+            rst_cut_event = Some(R2oTcpRstCutEvent {
+                key: key.wire_key(),
+                ttl: view.hop_limit,
+                reference_ttl: reverse_ttl_before_packet.unwrap_or_default(),
+                traffic_class: view.traffic_class,
+                ip_id: view.ip_id,
+                server_hello: session.reverse_server_hello,
+                planned: if session.plan_done { 1 } else { 2 },
+                client_is_low: session.initiator == key.low,
+            });
+        }
         if rst && session.hello_at.is_some() && reverse_tls_app_data_before_packet {
             rst_after_app_event = Some(R2oTcpRstAfterAppEvent {
                 key: key.wire_key(),
@@ -626,6 +681,12 @@ impl TcpSessions {
             if !already_queued && self.rst_after_app_events.len() < MAX_TCP_SESSIONS {
                 self.rst_after_app_events.push_back(event);
             }
+        }
+        if let Some(event) = rst_cut_event
+            && self.tcp_rst_cut_events.len() < MAX_TCP_SESSIONS
+        {
+            self.tcp_rst_cut_events.push_back(event);
+            session.rst_cut_reported = true;
         }
         Some((key, reverse, tcp.flags, keep_fin_session))
     }
@@ -1152,7 +1213,7 @@ pub fn validate_runtime_plan(plan: &Plan) -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PacketDecision, R2oTcpFlowMetrics, TcpSessions, decide, decide_with_session,
+        KEY_LEN, PacketDecision, R2oTcpFlowMetrics, TcpSessions, decide, decide_with_session,
         validate_runtime_plan,
     };
     #[cfg(target_os = "linux")]
@@ -2205,7 +2266,6 @@ mod tests {
             ),
             PacketDecision::Transmit { .. }
         ));
-
         assert_eq!(
             decide_with_session(
                 &mut sessions,
@@ -2226,6 +2286,73 @@ mod tests {
             "настоящий RST с тем же TTL проходит",
         );
         assert_eq!(sessions.len(), 0, "настоящий RST закрывает поток");
+    }
+
+    #[test]
+    fn rst_alien_guard_журналирует_чужой_сброс_до_ответа_один_раз() {
+        let plan = tcp_fake_plan_with_rst_guard();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+
+        assert_eq!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]),
+            ),
+            PacketDecision::Accept,
+        );
+        assert_eq!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+            ),
+            PacketDecision::Accept,
+        );
+        assert!(matches!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(client, server, 0x18, 64, 700, &client_hello()),
+            ),
+            PacketDecision::Transmit { .. }
+        ));
+        let mut wire_key = [0; KEY_LEN];
+        wire_key[0] = 4;
+        wire_key[1..5].copy_from_slice(&client.0);
+        wire_key[17..21].copy_from_slice(&server.0);
+        wire_key[33..35].copy_from_slice(&client.1.to_be_bytes());
+        wire_key[35..37].copy_from_slice(&server.1.to_be_bytes());
+        wire_key[37] = 6;
+        sessions.mark_plan_done(&wire_key);
+
+        assert_eq!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(server, client, 0x14, 127, 900, &[]),
+            ),
+            PacketDecision::Drop,
+        );
+        let events = sessions.take_tcp_rst_cut_events();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].client_is_low);
+        assert_eq!(events[0].ttl, 127);
+        assert_eq!(events[0].reference_ttl, 124);
+        assert_eq!(events[0].planned, 1);
+
+        assert_eq!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(server, client, 0x14, 127, 900, &[]),
+            ),
+            PacketDecision::Drop,
+        );
+        assert!(sessions.take_tcp_rst_cut_events().is_empty());
+        assert_eq!(sessions.len(), 1, "снятый чужой RST не закрывает поток");
     }
 
     #[test]

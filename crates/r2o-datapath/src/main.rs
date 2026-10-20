@@ -1334,6 +1334,9 @@ mod app {
         for event in sessions.take_tcp_exchange_events() {
             flow_journal.record_tcp_exchange(at_ns, &event);
         }
+        for event in sessions.take_tcp_rst_cut_events() {
+            flow_journal.record_tcp_rst_cut(at_ns, &event);
+        }
         send_pending_tcp_fin_retry(sessions, control, flow_journal, journal_origin);
         decision
     }
@@ -2242,6 +2245,116 @@ mod app {
             assert_eq!(второй_обмен.num, 53);
             assert_eq!(второй_обмен.tos, 0x0c);
             assert!(второй_обмен.server_hello);
+        }
+
+        #[test]
+        fn r2o_передаёт_снятый_чужой_rst_из_runtime_в_общий_журнал() {
+            fn пакет_tcp(
+                source: ([u8; 4], u16),
+                destination: ([u8; 4], u16),
+                flags: u8,
+                ttl: u8,
+                sequence: u32,
+                payload: &[u8],
+            ) -> Vec<u8> {
+                let mut packet = vec![0; 40 + payload.len()];
+                let packet_len = packet.len() as u16;
+                packet[0] = 0x45;
+                packet[2..4].copy_from_slice(&packet_len.to_be_bytes());
+                packet[8] = ttl;
+                packet[9] = 6;
+                packet[12..16].copy_from_slice(&source.0);
+                packet[16..20].copy_from_slice(&destination.0);
+                packet[20..22].copy_from_slice(&source.1.to_be_bytes());
+                packet[22..24].copy_from_slice(&destination.1.to_be_bytes());
+                packet[24..28].copy_from_slice(&sequence.to_be_bytes());
+                packet[32] = 0x50;
+                packet[33] = flags;
+                packet[34..36].copy_from_slice(&4096_u16.to_be_bytes());
+                packet[40..].copy_from_slice(payload);
+                packet
+            }
+
+            let клиент: ([u8; 4], u16) = ([192, 0, 2, 10], 41000);
+            let сервер: ([u8; 4], u16) = ([198, 51, 100, 20], 443);
+            let mut client_hello = vec![0x16, 0x03, 0x03, 0, 47, 1, 0, 0, 43, 0x03, 0x03];
+            client_hello.extend_from_slice(&[0; 32]);
+            client_hello.extend_from_slice(&[0, 0, 2, 0x13, 1, 1, 0, 0, 0]);
+
+            let mut план = super::Plan::default();
+            план.transport = 6;
+            план.proto = 1;
+            план.guards = r2k_core::plan::GUARD_RST_ALIEN;
+            let mut sessions = TcpSessions::default();
+            let mut journal = R2oFlowJournal::with_capacity(4).unwrap();
+            let mut control = None;
+            let origin = Instant::now();
+            for packet in [
+                пакет_tcp(клиент, сервер, 0x02, 64, 700, &[]),
+                пакет_tcp(сервер, клиент, 0x12, 124, 900, &[]),
+                пакет_tcp(клиент, сервер, 0x18, 64, 700, &client_hello),
+            ] {
+                super::decide_with_tcp_session(
+                    &mut sessions,
+                    &план,
+                    &packet,
+                    &mut control,
+                    &mut journal,
+                    &origin,
+                );
+            }
+            let mut ключ = [0; r2k_core::control::KEY_LEN];
+            ключ[0] = 4;
+            ключ[1..5].copy_from_slice(&клиент.0);
+            ключ[17..21].copy_from_slice(&сервер.0);
+            ключ[33..35].copy_from_slice(&клиент.1.to_be_bytes());
+            ключ[35..37].copy_from_slice(&сервер.1.to_be_bytes());
+            ключ[37] = 6;
+            sessions.mark_plan_done(&ключ);
+
+            let сброс = пакет_tcp(сервер, клиент, 0x14, 127, 900, &[]);
+            assert_eq!(
+                super::decide_with_tcp_session(
+                    &mut sessions,
+                    &план,
+                    &сброс,
+                    &mut control,
+                    &mut journal,
+                    &origin,
+                ),
+                super::PacketDecision::Drop,
+            );
+            assert_eq!(journal.count(), 1);
+            let запись = journal.get(0).unwrap();
+            assert_eq!(
+                запись.kind,
+                r2o_datapath::flow_journal::R2oFlowJournalKind::R2oTcpRstCut
+            );
+            assert_eq!(запись.code, 4);
+            assert_eq!(запись.ttl, 127);
+            assert_eq!(запись.reference_ttl, 124);
+            assert_eq!(запись.planned, 1);
+            assert_eq!(запись.client_is_low, Some(true));
+            assert_eq!(запись.kind.russian_name(), "чужой RST TCP снят защитой");
+            let кадр = запись.to_event_frame().unwrap();
+            assert_eq!(
+                r2o_datapath::flow_journal::R2oFlowJournalEntry::from_event_frame(&кадр).unwrap(),
+                *запись
+            );
+
+            super::decide_with_tcp_session(
+                &mut sessions,
+                &план,
+                &сброс,
+                &mut control,
+                &mut journal,
+                &origin,
+            );
+            assert_eq!(
+                journal.count(),
+                1,
+                "повтор снятого RST не создаёт запись снова"
+            );
         }
 
         #[test]
