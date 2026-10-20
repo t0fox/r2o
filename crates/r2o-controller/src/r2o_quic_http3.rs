@@ -685,8 +685,8 @@ mod tests {
 
     #[test]
     fn r2o_quic_ping_ack_сверяется_с_номером_пакета() {
-        let start = Instant::now() + Duration::from_millis(10);
         let mut stall = R2oQuicHttp3Stall::r2o_initialize(Duration::from_millis(40), 1000, 5000);
+        let start = stall.last_progress_at;
 
         assert_eq!(
             stall.r2o_step(start + Duration::from_secs(1), 1000, 5000, None),
@@ -711,8 +711,8 @@ mod tests {
 
     #[test]
     fn r2o_quic_ping_ack_учитывается_при_одновременном_росте_тела() {
-        let start = Instant::now() + Duration::from_millis(10);
         let mut stall = R2oQuicHttp3Stall::r2o_initialize(Duration::from_millis(40), 1000, 5000);
+        let start = stall.last_progress_at;
 
         assert_eq!(
             stall.r2o_step(start + Duration::from_secs(1), 1000, 5000, None),
@@ -730,8 +730,8 @@ mod tests {
 
     #[test]
     fn r2o_quic_различает_обрыв_и_одностороннюю_передачу() {
-        let start = Instant::now() + Duration::from_millis(10);
         let mut stalled = R2oQuicHttp3Stall::r2o_initialize(Duration::from_millis(20), 1000, 5000);
+        let start = stalled.last_progress_at;
         assert_eq!(
             stalled.r2o_step(start + Duration::from_secs(1), 1000, 5000, None),
             Action::Probe
@@ -748,18 +748,19 @@ mod tests {
         );
 
         let mut one_way = R2oQuicHttp3Stall::r2o_initialize(Duration::from_millis(20), 1000, 5000);
+        let one_way_start = one_way.last_progress_at;
         assert_eq!(
-            one_way.r2o_step(start + Duration::from_secs(1), 1000, 5000, None),
+            one_way.r2o_step(one_way_start + Duration::from_secs(1), 1000, 5000, None),
             Action::Probe
         );
         one_way.r2o_sent(20);
         assert_eq!(
-            one_way.r2o_step(start + Duration::from_secs(2), 1000, 5100, None),
+            one_way.r2o_step(one_way_start + Duration::from_secs(2), 1000, 5100, None),
             Action::Probe
         );
         one_way.r2o_sent(21);
         assert_eq!(
-            one_way.r2o_step(start + Duration::from_secs(3), 1000, 5100, None),
+            one_way.r2o_step(one_way_start + Duration::from_secs(3), 1000, 5100, None),
             Action::OneWay
         );
     }

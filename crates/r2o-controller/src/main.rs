@@ -1551,70 +1551,108 @@ impl Drop for HttpSearchWorker {
 }
 
 #[cfg(unix)]
+const R2O_QUIC_DISCOVERY_WORKER_COUNT: usize = 2;
+
+#[cfg(unix)]
+type R2oQuicDiscoveryRunner = dyn Fn(
+        R2oQuicDiscoveryTask,
+        SyncSender<HttpSearchCommand>,
+        Arc<AtomicBool>,
+    ) -> Result<Option<(String, String)>, String>
+    + Send
+    + Sync;
+
+#[cfg(unix)]
 struct R2oQuicDiscoveryWorker {
     jobs: Option<SyncSender<R2oQuicDiscoveryTask>>,
     commands: Option<Receiver<HttpSearchCommand>>,
     outcomes: Receiver<R2oQuicDiscoveryOutcome>,
     cancel: Arc<AtomicBool>,
-    active: bool,
-    thread: Option<JoinHandle<()>>,
+    active: std::collections::HashSet<std::net::SocketAddr>,
+    threads: Vec<JoinHandle<()>>,
 }
 
 #[cfg(unix)]
 impl R2oQuicDiscoveryWorker {
     fn new() -> Self {
-        let (jobs, job_receiver) = mpsc::sync_channel::<R2oQuicDiscoveryTask>(1);
+        Self::r2o_new_with_runner(Arc::new(|mut task, commands, cancel| {
+            ControlClient::r2o_run_quic_discovery_trial(
+                task.server,
+                &task.snapshot,
+                &commands,
+                &cancel,
+                &mut task.permit,
+            )
+            .map_err(|error| error.to_string())
+        }))
+    }
+
+    fn r2o_new_with_runner(runner: Arc<R2oQuicDiscoveryRunner>) -> Self {
+        let (jobs, job_receiver) =
+            mpsc::sync_channel::<R2oQuicDiscoveryTask>(R2O_QUIC_DISCOVERY_WORKER_COUNT);
+        let job_receiver = Arc::new(std::sync::Mutex::new(job_receiver));
         let (command_sender, commands) = mpsc::sync_channel::<HttpSearchCommand>(16);
-        let (outcome_sender, outcomes) = mpsc::sync_channel(1);
+        let (outcome_sender, outcomes) =
+            mpsc::sync_channel::<R2oQuicDiscoveryOutcome>(R2O_QUIC_DISCOVERY_WORKER_COUNT);
         let cancel = Arc::new(AtomicBool::new(false));
-        let worker_cancel = Arc::clone(&cancel);
-        let thread = std::thread::spawn(move || {
-            while let Ok(mut task) = job_receiver.recv() {
-                if worker_cancel.load(Ordering::Relaxed) {
-                    break;
+        let mut threads = Vec::with_capacity(R2O_QUIC_DISCOVERY_WORKER_COUNT);
+        for _ in 0..R2O_QUIC_DISCOVERY_WORKER_COUNT {
+            let worker_jobs = Arc::clone(&job_receiver);
+            let worker_commands = command_sender.clone();
+            let worker_outcomes = outcome_sender.clone();
+            let worker_cancel = Arc::clone(&cancel);
+            let worker_runner = Arc::clone(&runner);
+            threads.push(std::thread::spawn(move || {
+                loop {
+                    let task = worker_jobs
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .recv();
+                    let Ok(task) = task else {
+                        break;
+                    };
+                    if worker_cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let server = task.server;
+                    let result =
+                        worker_runner(task, worker_commands.clone(), Arc::clone(&worker_cancel));
+                    if worker_outcomes
+                        .send(R2oQuicDiscoveryOutcome { server, result })
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
-                let result = ControlClient::r2o_run_quic_discovery_trial(
-                    task.server,
-                    &task.snapshot,
-                    &command_sender,
-                    &worker_cancel,
-                    &mut task.permit,
-                )
-                .map_err(|error| error.to_string());
-                if outcome_sender
-                    .send(R2oQuicDiscoveryOutcome {
-                        server: task.server,
-                        result,
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
+            }));
+        }
         Self {
             jobs: Some(jobs),
             commands: Some(commands),
             outcomes,
             cancel,
-            active: false,
-            thread: Some(thread),
+            active: std::collections::HashSet::new(),
+            threads,
         }
     }
 
     fn queue(&mut self, task: R2oQuicDiscoveryTask) -> bool {
+        let server = task.server;
+        if self.active.contains(&server) {
+            return false;
+        }
         let Some(jobs) = self.jobs.as_ref() else {
             return false;
         };
         if jobs.try_send(task).is_err() {
             return false;
         }
-        self.active = true;
+        self.active.insert(server);
         true
     }
 
-    fn is_active(&self) -> bool {
-        self.active
+    fn has_capacity(&self) -> bool {
+        self.active.len() < R2O_QUIC_DISCOVERY_WORKER_COUNT
     }
 
     fn try_command(&self) -> Option<HttpSearchCommand> {
@@ -1623,7 +1661,7 @@ impl R2oQuicDiscoveryWorker {
 
     fn try_outcome(&mut self) -> Option<R2oQuicDiscoveryOutcome> {
         let outcome = self.outcomes.try_recv().ok()?;
-        self.active = false;
+        self.active.remove(&outcome.server);
         Some(outcome)
     }
 }
@@ -1634,7 +1672,7 @@ impl Drop for R2oQuicDiscoveryWorker {
         self.cancel.store(true, Ordering::Relaxed);
         self.jobs.take();
         self.commands.take();
-        if let Some(thread) = self.thread.take() {
+        for thread in self.threads.drain(..) {
             let _ = thread.join();
         }
     }
@@ -3173,7 +3211,7 @@ impl ControlClient {
                         continue;
                     }
                     if let Some(worker) = quic_discovery.as_mut()
-                        && !worker.is_active()
+                        && worker.has_capacity()
                         && let Some((pending, permit)) = r2o_take_ready_quic_discovery(
                             &mut r2o_pending_quic_discovery,
                             &measurement_gate,
@@ -6315,6 +6353,73 @@ mod tests {
         assert!(matches!(outcome.result, Ok(None)));
         assert!(!work.join("каталог.json").exists());
         std::fs::remove_dir_all(work).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_quic_worker_одновременно_изолирует_два_адресных_опыта() {
+        use super::{R2oQuicDiscoveryTask, R2oQuicDiscoveryWorker};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Condvar, Mutex};
+
+        let состояние = Arc::new((Mutex::new(0_usize), Condvar::new(), AtomicUsize::new(0)));
+        let состояние_работника = Arc::clone(&состояние);
+        let mut worker = R2oQuicDiscoveryWorker::r2o_new_with_runner(Arc::new(
+            move |_task, _commands, _cancel| {
+                let (активные, сигнал, максимум) = &*состояние_работника;
+                let mut активные = активные
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *активные += 1;
+                максимум.fetch_max(*активные, Ordering::Relaxed);
+                сигнал.notify_all();
+                let (mut активные, _) = сигнал
+                    .wait_timeout_while(
+                        активные,
+                        std::time::Duration::from_secs(1),
+                        |активные| *активные < 2,
+                    )
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let параллельно = максимум.load(Ordering::Relaxed) == 2;
+                *активные -= 1;
+                сигнал.notify_all();
+                if параллельно {
+                    Ok(None)
+                } else {
+                    Err("второй адресный опыт не стартовал параллельно".into())
+                }
+            },
+        ));
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(2);
+        let first = R2oQuicDiscoveryTask {
+            server: "198.51.100.10:443".parse().unwrap(),
+            snapshot: Vec::new(),
+            permit: gate.r2o_try_acquire().unwrap(),
+        };
+        let second = R2oQuicDiscoveryTask {
+            server: "198.51.100.20:443".parse().unwrap(),
+            snapshot: Vec::new(),
+            permit: gate.r2o_try_acquire().unwrap(),
+        };
+
+        assert!(worker.queue(first));
+        assert!(worker.queue(second));
+        assert!(!worker.has_capacity());
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut completed = std::collections::HashSet::new();
+        while completed.len() < 2 {
+            if let Some(outcome) = worker.try_outcome() {
+                assert!(outcome.result.is_ok());
+                assert!(completed.insert(outcome.server));
+            } else {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+
+        assert_eq!(состояние.2.load(Ordering::Relaxed), 2);
+        assert!(worker.has_capacity());
     }
 
     #[cfg(unix)]

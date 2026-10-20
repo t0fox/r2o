@@ -38,7 +38,9 @@ mkdir -p "$r2o_log_dir"
 {
     printf 'Проверка планировщика R2O и C-эталона: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
     printf 'Исходники C: %s\n' "$r2o_donor_core"
-    printf '\nAST Clang 18: функции очереди и уступки QUIC\n'
+    printf '\nSHA-256 исходников C\n'
+    sha256sum "$r2o_donor_core/sched.c" "$r2o_donor_core/test_sched.c"
+    printf '\nAST Clang 18: адресные пробы, очередь и уступка QUIC\n'
     clang-18 -std=c99 -pthread \
         -I"$r2o_donor_core/include" \
         -I"$r2o_donor_core/../datapath/include" \
@@ -52,12 +54,24 @@ mkdir -p "$r2o_log_dir"
         -DD2K_RELEASE_ID='"dev"' \
         -fsyntax-only -Xclang -ast-dump \
         "$r2o_donor_core/sched.c" 2>/dev/null \
-        | grep -E 'FunctionDecl.*(task_fail|launch_or_queue|d2k_sched_tick)'
+        | grep -E 'FunctionDecl.*(addr_probe_remove|candidate_retire|task_fail|launch_or_queue|d2k_sched_tick)'
     printf '\nТесты планировщика C-эталона\n'
     r2o_run_timed 'планировщик C' make -C "$r2o_donor_core" test-sched-quic-yield CC=clang-18
-    r2o_run_timed 'сборка планировщика C' make -B -C "$r2o_donor_core" test_sched CC=clang-18
-    r2o_run_timed 'истечение очереди Discovery C' sh -c \
-        "cd \"\$1\" && ./test_sched --lifecycle-only" sh "$r2o_donor_core"
+    if [ "${R2O_SKIP_FULL_C_SCHEDULER:-0}" = 1 ]; then
+        r2o_sched_sha256=$(sha256sum "$r2o_donor_core/sched.c" | awk '{print $1}')
+        r2o_test_sched_sha256=$(sha256sum "$r2o_donor_core/test_sched.c" | awk '{print $1}')
+        if [ "$r2o_sched_sha256" != 1de9feaab19dcea1e493aea068295470cf3143adf83157b57663f1098132ae8a ] \
+            || [ "$r2o_test_sched_sha256" != a67f87e09a7fd93ed735b52f361e78590b9ce40679ab95e300accf0a3e9d51a3 ]; then
+            printf 'Ускоренный режим запрещён: SHA-256 C-эталона отличаются от полностью проверенных.\n' >&2
+            exit 2
+        fi
+        printf 'Полный набор test_sched пропущен: оба SHA-256 совпали с полностью проверенным C-эталоном.\n'
+    else
+        r2o_run_timed 'сборка планировщика C' make -B -C "$r2o_donor_core" test_sched CC=clang-18
+        r2o_run_timed 'сценарии планировщика C' sh -c \
+            "cd \"\$1\" && ./test_sched" sh "$r2o_donor_core"
+        printf 'Полный test_sched включает lifecycle очереди и параллельные адресные пробы.\n'
+    fi
     printf '\nПроверка срока ожидания в R2O\n'
     r2o_run_timed 'срок очереди R2O' cargo +1.98.0 test -p r2o-controller --bin r2o-controller \
         --locked r2o_discovery_queued_target_expires
@@ -72,6 +86,8 @@ mkdir -p "$r2o_log_dir"
     printf '\nСохранение подтверждённого QUIC-плана в R2O\n'
     r2o_run_timed 'сохранение QUIC-плана' cargo +1.98.0 test -p r2o-controller --bin r2o-controller \
         --locked r2o_quic_подтверждение_из_worker -- --nocapture
+    r2o_run_timed 'параллельные адресные опыты QUIC' cargo +1.98.0 test -p r2o-controller --bin r2o-controller \
+        --locked r2o_quic_worker_одновременно_изолирует_два_адресных_опыта -- --nocapture
     printf '\nТесты QUIC-логики и уступки слота в R2O\n'
     r2o_run_timed 'тесты QUIC' cargo +1.98.0 test -p r2o-controller --lib --locked r2o_quic -- --nocapture
     printf '\nПолная длительность набора: %s с\n' "$(( $(date +%s) - r2o_started_at ))"
@@ -81,6 +97,7 @@ grep -q 'QUIC question yield: 0 failures' "$r2o_log"
 grep -q 'r2o_quic_подбор_удаляет_все_пробы_без_двух_доказательств .*ok' "$r2o_log"
 grep -q 'r2o_quic_applied_collection_keeps_events_for_other_trials .*ok' "$r2o_log"
 grep -q 'r2o_quic_подтверждение_из_worker_сохраняет_и_устанавливает_план .*ok' "$r2o_log"
+grep -q 'r2o_quic_worker_одновременно_изолирует_два_адресных_опыта .*ok' "$r2o_log"
 printf 'Журнал проверки: %s\n' "$r2o_log"
 cat "$r2o_log"
 trap - EXIT

@@ -1013,6 +1013,21 @@ mod tests {
                 .recv_timeout(Duration::from_secs(2))
                 .unwrap();
         });
+        let first_waiting_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let queued = gate
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .waiters
+                .len();
+            if queued == 1 {
+                break;
+            }
+            assert!(std::time::Instant::now() < first_waiting_deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
         let second_gate = gate.clone();
         let (second_started_tx, second_started_rx) = mpsc::channel();
         let second = std::thread::spawn(move || {
