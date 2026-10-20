@@ -143,6 +143,7 @@ struct InitialDatagram {
 pub struct R2oQuicSessions {
     flows: HashMap<FlowKey, FlowState>,
     initial_ring: VecDeque<InitialDatagram>,
+    hello_reported: HashMap<FlowKey, Instant>,
     udp_exchange_events: VecDeque<R2oUdpExchangeEvent>,
 }
 
@@ -156,6 +157,15 @@ impl R2oQuicSessions {
         &mut self,
         packet: &[u8],
         hook: Option<u8>,
+    ) -> Option<super::capture::QuicHello> {
+        self.capture_hello_at_hook_at(packet, hook, Instant::now())
+    }
+
+    fn capture_hello_at_hook_at(
+        &mut self,
+        packet: &[u8],
+        hook: Option<u8>,
+        now: Instant,
     ) -> Option<super::capture::QuicHello> {
         let view = PacketView::parse(packet)
             .filter(|view| view.protocol == 17 && view.fragment & 0x3fff == 0)?;
@@ -178,6 +188,14 @@ impl R2oQuicSessions {
         let payload = packet.get(view.udp_payload_range(packet)?)?;
         let (version, dcid) = r2k_core::quic::r2k_quic_initial_flight_id(payload)?;
         let key = FlowKey::new(source, destination).0;
+
+        self.hello_reported
+            .retain(|_, last_seen| now.saturating_duration_since(*last_seen) < QUIC_IDLE);
+        if let Some(last_seen) = self.hello_reported.get_mut(&key) {
+            *last_seen = now;
+            self.initial_ring.retain(|entry| entry.key != key);
+            return None;
+        }
 
         if !self
             .initial_ring
@@ -214,6 +232,12 @@ impl R2oQuicSessions {
         };
 
         self.initial_ring.retain(|entry| entry.key != key);
+        if self.hello_reported.len() == MAX_QUIC_FLOWS {
+            if let Some(oldest) = self.hello_reported.keys().next().copied() {
+                self.hello_reported.remove(&oldest);
+            }
+        }
+        self.hello_reported.insert(key, now);
         Some(super::capture::QuicHello {
             key: key.wire_key(),
             host,
@@ -262,6 +286,9 @@ impl R2oQuicSessions {
             && r2k_core::quic::is_authenticated_initial(payload)
         {
             let (key, client_is_low) = FlowKey::new(source, destination);
+            if let Some(last_seen) = self.hello_reported.get_mut(&key) {
+                *last_seen = now;
+            }
             let first_initial = !self.flows.contains_key(&key);
             if first_initial && self.flows.len() >= MAX_QUIC_FLOWS {
                 return;
@@ -295,6 +322,9 @@ impl R2oQuicSessions {
         }
 
         let (key, _) = FlowKey::new(source, destination);
+        if let Some(last_seen) = self.hello_reported.get_mut(&key) {
+            *last_seen = now;
+        }
         let Some(flow) = self.flows.get_mut(&key) else {
             return;
         };
@@ -519,12 +549,14 @@ impl R2oQuicSessions {
     fn expire(&mut self, now: Instant) {
         self.flows
             .retain(|_, flow| now.saturating_duration_since(flow.last_seen) < QUIC_IDLE);
+        self.hello_reported
+            .retain(|_, last_seen| now.saturating_duration_since(*last_seen) < QUIC_IDLE);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{QUIC_SILENCE, R2oQuicSessions, r2o_quic_client_direction};
+    use super::{QUIC_IDLE, QUIC_SILENCE, R2oQuicSessions, r2o_quic_client_direction};
     #[cfg(target_os = "linux")]
     use crate::conntrack::R2oConntrackInfo;
     use crate::netlink::{
@@ -668,12 +700,15 @@ mod tests {
 
     #[test]
     fn собирает_событие_из_проверенного_initial() {
+        let start = Instant::now();
         let client = [192, 0, 2, 10];
         let server = [198, 51, 100, 20];
         let initial = ipv4_packet(client, server, 53_123, 443, INITIAL);
         let mut sessions = R2oQuicSessions::default();
 
-        let hello = sessions.capture_hello(&initial).unwrap();
+        let hello = sessions
+            .capture_hello_at_hook_at(&initial, None, start)
+            .unwrap();
         let event = r2k_core::control::decode_hello(&Frame {
             kind: r2k_core::control::EVENT_HELLO,
             body: hello.event_body().unwrap(),
@@ -688,6 +723,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(snapshot.datagrams(), &[INITIAL]);
+        assert!(
+            sessions
+                .capture_hello_at_hook_at(&initial, None, start + Duration::from_secs(1))
+                .is_none()
+        );
+        assert!(
+            sessions
+                .capture_hello_at_hook_at(
+                    &initial,
+                    None,
+                    start + QUIC_IDLE + Duration::from_secs(1)
+                )
+                .is_some()
+        );
     }
 
     #[test]
@@ -707,6 +756,7 @@ mod tests {
         assert_eq!(event.host, None);
         assert_eq!(event.key[37], 17);
         assert!(event.quic_snapshot.is_some());
+        assert!(sessions.capture_hello(&initial).is_none());
     }
 
     #[test]
@@ -829,6 +879,11 @@ mod tests {
             r2k_core::quic_snapshot::r2k_quic_snapshot_parse(hello.snapshot.as_deref().unwrap())
                 .unwrap();
         assert_eq!(snapshot.datagrams(), &[INITIAL_FIRST, INITIAL_SECOND]);
+        assert!(
+            sessions
+                .capture_hello(&ipv4_packet(client, server, 53_123, 443, INITIAL_SECOND,))
+                .is_none()
+        );
     }
 
     #[test]
