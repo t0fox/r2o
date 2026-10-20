@@ -223,9 +223,16 @@ mod app {
             }
             let now = Instant::now();
             if now >= next_session_sweep {
-                tcp_sessions.expire(now, Duration::from_secs(120));
                 let reverse_queue_visible = options.reverse_queue_visible
                     && control.as_ref().is_some_and(ControlServer::is_connected);
+                tcp_sessions.expire_with_silent(now, Duration::from_secs(120), |event| {
+                    let _ = send_tcp_silent_event(
+                        &mut control,
+                        &mut flow_journal,
+                        &journal_origin,
+                        &event,
+                    );
+                });
                 for event in tcp_sessions.sweep_silent(now, reverse_queue_visible) {
                     if send_tcp_silent_event(
                         &mut control,

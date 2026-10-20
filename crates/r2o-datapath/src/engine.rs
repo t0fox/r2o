@@ -215,6 +215,7 @@ impl R2oTcpExchangeEvent {
 /// Ограниченное состояние потока для runtime-защит и очистки соединений.
 pub struct TcpSessions {
     flows: HashMap<TcpFlowKey, TcpSession>,
+    reverse_visible_by_family: [bool; 2],
     tcp_exchange_events: VecDeque<R2oTcpExchangeEvent>,
     tcp_rst_events: VecDeque<R2oTcpRstEvent>,
     tcp_rst_cut_events: VecDeque<R2oTcpRstCutEvent>,
@@ -226,6 +227,7 @@ impl Default for TcpSessions {
     fn default() -> Self {
         Self {
             flows: HashMap::with_capacity(MAX_TCP_SESSIONS),
+            reverse_visible_by_family: [false; 2],
             tcp_exchange_events: VecDeque::with_capacity(MAX_TCP_SESSIONS * 2),
             tcp_rst_events: VecDeque::with_capacity(MAX_TCP_SESSIONS),
             tcp_rst_cut_events: VecDeque::with_capacity(MAX_TCP_SESSIONS),
@@ -274,13 +276,45 @@ impl TcpSessions {
     }
 
     pub fn expire(&mut self, now: Instant, idle: Duration) -> usize {
+        self.expire_with_silent(now, idle, |_| {})
+    }
+
+    /// Сообщить о ClientHello без ответа перед удалением устаревшего потока.
+    pub fn expire_with_silent(
+        &mut self,
+        now: Instant,
+        idle: Duration,
+        mut on_silent: impl FnMut(R2oTcpSilenceEvent),
+    ) -> usize {
+        let reverse_visible_by_family = self.reverse_visible_by_family;
         let before = self.flows.len();
-        self.flows.retain(|_, session| {
+        self.flows.retain(|key, session| {
             let idle_expired = now.saturating_duration_since(session.last_seen) >= idle;
             let fin_expired = session.pending_fin_at.is_some_and(|started| {
                 now.checked_duration_since(started)
                     .is_some_and(|elapsed| elapsed >= fin_retry_window(session.rtt))
             });
+
+            if idle_expired && !fin_expired {
+                let family_index = match key.low.address.family() {
+                    4 => Some(0),
+                    6 => Some(1),
+                    _ => None,
+                };
+                if family_index.is_some_and(|index| reverse_visible_by_family[index])
+                    && !session.silence_reported
+                    && session.reverse_packets_after_hello == 0
+                    && let Some(hello_at) = session.hello_at
+                {
+                    let elapsed = now.saturating_duration_since(hello_at);
+                    on_silent(R2oTcpSilenceEvent {
+                        key: key.wire_key(),
+                        client_is_low: session.initiator == key.low,
+                        elapsed_ms: elapsed.as_millis().min(u128::from(u32::MAX)) as u32,
+                    });
+                }
+            }
+
             !idle_expired && !fin_expired
         });
         before - self.flows.len()
@@ -521,6 +555,12 @@ impl TcpSessions {
                 .insert(key, TcpSession::new(initiator, syn && ack, None, now));
         }
 
+        let reverse_visible_by_family = &mut self.reverse_visible_by_family;
+        let family_index = match key.low.address.family() {
+            4 => Some(0),
+            6 => Some(1),
+            _ => None,
+        };
         let session = self.flows.get_mut(&key)?;
         let reverse_tls_app_data_before_packet = session.reverse_tls_app_data;
         let reverse_packets_after_hello_before_packet = session.reverse_packets_after_hello;
@@ -551,6 +591,11 @@ impl TcpSessions {
                         &mut session.reverse_data_packets,
                     );
                     session.reverse_seen = session.metrics.reverse_packets != 0;
+                    if session.reverse_seen
+                        && let Some(index) = family_index
+                    {
+                        reverse_visible_by_family[index] = true;
+                    }
                     session.reverse_ttl = None;
                     session.reverse_rst = false;
                 }
@@ -580,6 +625,9 @@ impl TcpSessions {
         let reverse = source != session.initiator;
         let packet_bytes = view.total_len as u64;
         if reverse {
+            if let Some(index) = family_index {
+                reverse_visible_by_family[index] = true;
+            }
             session.metrics.reverse_packets = session.metrics.reverse_packets.saturating_add(1);
             session.metrics.reverse_bytes =
                 session.metrics.reverse_bytes.saturating_add(packet_bytes);
@@ -1567,6 +1615,140 @@ mod tests {
                 .sweep_silent(start + Duration::from_secs(10), true)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn tcp_истечение_сообщает_о_clienthello_без_ответа_при_видимом_обратном_пути() {
+        let start = Instant::now();
+        let mut sessions = TcpSessions::default();
+        let witness_client = ([192, 0, 2, 10], 41000);
+        let witness_server = ([198, 51, 100, 20], 443);
+        sessions.track_packet(
+            &ipv4_tcp_packet(witness_client, witness_server, 0x02, 64, 700, &[]),
+            start,
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(witness_server, witness_client, 0x12, 124, 900, &[]),
+            start + Duration::from_millis(50),
+        );
+
+        let client = ([192, 0, 2, 11], 41001);
+        let server = ([198, 51, 100, 21], 443);
+        sessions.track_packet(
+            &ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]),
+            start + Duration::from_millis(60),
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello()),
+            start + Duration::from_millis(100),
+        );
+
+        let mut events = Vec::new();
+        let expired = sessions.expire_with_silent(
+            start + Duration::from_secs(120) + Duration::from_millis(100),
+            Duration::from_secs(120),
+            |event| events.push(event),
+        );
+        assert_eq!(expired, 2);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].key[37], 6);
+        assert!(events[0].client_is_low);
+        assert_eq!(events[0].elapsed_ms, 120_000);
+    }
+
+    #[test]
+    fn tcp_истечение_использует_ранее_увиденный_обратный_путь() {
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let deadline = start + Duration::from_secs(120) + Duration::from_millis(100);
+
+        let mut unseen = TcpSessions::default();
+        unseen.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start);
+        unseen.track_packet(
+            &ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello()),
+            start + Duration::from_millis(100),
+        );
+        let mut events = Vec::new();
+        unseen.expire_with_silent(deadline, Duration::from_secs(120), |event| {
+            events.push(event)
+        });
+        assert!(events.is_empty());
+
+        let mut visible = TcpSessions::default();
+        visible.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start);
+        visible.track_packet(
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+            start + Duration::from_millis(50),
+        );
+        visible.track_packet(
+            &ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello()),
+            start + Duration::from_millis(100),
+        );
+        visible.expire_with_silent(deadline, Duration::from_secs(120), |event| {
+            events.push(event)
+        });
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn tcp_истечение_не_сообщает_если_после_clienthello_уже_был_ответ() {
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        sessions.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start);
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+            start + Duration::from_millis(50),
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello()),
+            start + Duration::from_millis(100),
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x10, 124, 900, &[]),
+            start + Duration::from_millis(200),
+        );
+
+        let mut events = Vec::new();
+        sessions.expire_with_silent(
+            start + Duration::from_secs(120) + Duration::from_millis(200),
+            Duration::from_secs(120),
+            |event| events.push(event),
+        );
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn tcp_истечение_не_сообщает_при_одновременном_истечении_окна_fin() {
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        sessions.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start);
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+            start + Duration::from_millis(50),
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello()),
+            start + Duration::from_millis(100),
+        );
+        sessions
+            .flows
+            .values_mut()
+            .find(|session| session.hello_at.is_some())
+            .unwrap()
+            .pending_fin_at = Some(start + Duration::from_millis(100));
+
+        let mut events = Vec::new();
+        sessions.expire_with_silent(
+            start + Duration::from_secs(120) + Duration::from_millis(100),
+            Duration::from_secs(120),
+            |event| events.push(event),
+        );
+        assert!(events.is_empty());
     }
 
     #[test]
