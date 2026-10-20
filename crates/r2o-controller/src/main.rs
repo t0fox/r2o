@@ -1,20 +1,20 @@
 use r2k_core::control::{
     self, ADDR_PROBE_LEASE_MAX_MS, COMMAND_CLEAR, COMMAND_DEL_ADDR, COMMAND_DEL_ADDR_PROBE,
     COMMAND_DEL_VOICE_ADDR_PROBE, COMMAND_SET_ADDR, COMMAND_SET_ADDR_PROBE, COMMAND_SET_HTTPS,
-    COMMAND_SET_NAME, COMMAND_SET_VOICE_ADDR, COMMAND_SET_VOICE_ADDR_PROBE, EVENT_APPLIED,
-    EVENT_HELLO, EVENT_HTTP_PORTAL, EVENT_HTTP_RESPONSE, EVENT_R2O_JOURNAL_END,
-    EVENT_R2O_JOURNAL_ENTRY, EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_FIN_RETRY,
-    EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF,
-    EVENT_R2O_VOICE_SUSPECT, Frame, PROTOCOL_VERSION, RELEASE_ID, SHAPE_ECH_TCP, SHAPE_HTTP,
-    SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, VOICE_ADDR_PROBE_LEASE_MAX_MS, decode_ack,
-    decode_applied, decode_greeting, decode_hello, decode_http_portal, decode_http_response,
-    decode_r2o_quic_stall, decode_r2o_quic_suspect, decode_r2o_tcp_fin_retry,
-    decode_r2o_tcp_rst_after_app, decode_r2o_tcp_silence, decode_r2o_tcp_stall,
-    decode_r2o_voice_proof, decode_r2o_voice_suspect, encode_delete_addr, encode_delete_addr_probe,
-    encode_delete_name, encode_delete_name_probe, encode_delete_voice_addr_probe, encode_frame,
-    encode_set_addr, encode_set_addr_probe, encode_set_bypass, encode_set_https, encode_set_name,
-    encode_set_name_probe, encode_set_suffix, encode_set_voice_addr, encode_set_voice_addr_probe,
-    read_frame,
+    COMMAND_SET_NAME, COMMAND_SET_TCP_STALL_BUDGETS, COMMAND_SET_VOICE_ADDR,
+    COMMAND_SET_VOICE_ADDR_PROBE, EVENT_APPLIED, EVENT_HELLO, EVENT_HTTP_PORTAL,
+    EVENT_HTTP_RESPONSE, EVENT_R2O_JOURNAL_END, EVENT_R2O_JOURNAL_ENTRY, EVENT_R2O_QUIC_STALL,
+    EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_RST_AFTER_APP,
+    EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_SUSPECT,
+    Frame, PROTOCOL_VERSION, RELEASE_ID, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN,
+    SHAPE_QUIC, SHAPE_VOICE, VOICE_ADDR_PROBE_LEASE_MAX_MS, decode_ack, decode_applied,
+    decode_greeting, decode_hello, decode_http_portal, decode_http_response, decode_r2o_quic_stall,
+    decode_r2o_quic_suspect, decode_r2o_tcp_fin_retry, decode_r2o_tcp_rst_after_app,
+    decode_r2o_tcp_silence, decode_r2o_tcp_stall, decode_r2o_voice_proof, decode_r2o_voice_suspect,
+    encode_delete_addr, encode_delete_addr_probe, encode_delete_name, encode_delete_name_probe,
+    encode_delete_voice_addr_probe, encode_frame, encode_set_addr, encode_set_addr_probe,
+    encode_set_bypass, encode_set_https, encode_set_name, encode_set_name_probe, encode_set_suffix,
+    encode_set_tcp_stall_budgets, encode_set_voice_addr, encode_set_voice_addr_probe, read_frame,
 };
 use r2k_core::plan::{PROTO_HTTP, PROTO_VOICE, Plan};
 use r2o_controller::catalog::{Catalog, DomainObservation, GroupKey};
@@ -624,7 +624,7 @@ fn apply_catalog(socket_path: PathBuf, catalog_path: PathBuf) -> Result<(), Box<
     let catalog = Catalog::load(&catalog_path)?;
     let compiled = catalog_commands(&catalog)?;
     let mut client = ControlClient::connect(socket_path)?;
-    install_catalog(&mut client, &compiled.commands)?;
+    install_catalog(&mut client, &compiled)?;
     println!(
         "каталог обработан: установлено {}, пропущено неподдерживаемых {skipped}",
         compiled.commands.len(),
@@ -645,7 +645,7 @@ fn serve_catalog(
     let catalog = Catalog::load(&catalog_path)?;
     let compiled = catalog_commands(&catalog)?;
     let mut client = ControlClient::connect(socket_path)?;
-    install_catalog(&mut client, &compiled.commands)?;
+    install_catalog(&mut client, &compiled)?;
     println!(
         "каталог обработан: установлено {}, пропущено неподдерживаемых {}; {}",
         compiled.commands.len(),
@@ -743,6 +743,76 @@ fn clear_catalog(path: PathBuf) -> Result<(), Box<dyn Error>> {
 struct CompiledCatalog {
     commands: Vec<(String, Vec<u8>)>,
     skipped: usize,
+    tcp_stall_budgets: Vec<u16>,
+}
+
+#[cfg(unix)]
+const R2O_TCP_STALL_FIELD_BUDGET: u16 = 25;
+#[cfg(unix)]
+const R2O_TCP_STALL_BUDGETS_MAX: usize = 8;
+#[cfg(unix)]
+const R2O_TCP_STALL_BUDGET_SLACK: u32 = 3;
+
+#[cfg(unix)]
+fn r2o_box_tcp_stall_budget(box_record: &r2o_controller::catalog::BoxRecord) -> Option<u16> {
+    box_record.fingerprint.signals.iter().find_map(|signal| {
+        if !matches!(signal.kind.as_str(), "rx-volume" | "rx-volume-wire")
+            || !(1..=i32::from(u16::MAX)).contains(&signal.packets)
+        {
+            return None;
+        }
+        u16::try_from(signal.packets).ok()
+    })
+}
+
+#[cfg(unix)]
+fn r2o_tcp_stall_budgets(catalog: &Catalog) -> Vec<u16> {
+    let mut budgets = Vec::new();
+    for budget in catalog.boxes.iter().filter_map(r2o_box_tcp_stall_budget) {
+        if budgets.is_empty() {
+            budgets.push(R2O_TCP_STALL_FIELD_BUDGET);
+        }
+        if budgets.len() >= R2O_TCP_STALL_BUDGETS_MAX {
+            break;
+        }
+        if !budgets.contains(&budget) {
+            budgets.push(budget);
+        }
+    }
+    budgets
+}
+
+#[cfg(unix)]
+fn r2o_tcp_stall_budgets_for_name(catalog: &Catalog, host: &str) -> Vec<u16> {
+    let mut budgets = Vec::new();
+    for box_record in &catalog.boxes {
+        let Some(budget) = r2o_box_tcp_stall_budget(box_record) else {
+            continue;
+        };
+        let bound_to_tcp_name = box_record.bindings.iter().any(|binding| {
+            binding.enabled
+                && binding.kind == "name"
+                && binding.target == host
+                && (binding.transport == 0 || binding.transport == 6)
+        });
+        if bound_to_tcp_name && !budgets.contains(&budget) {
+            budgets.push(budget);
+            if budgets.len() == R2O_TCP_STALL_BUDGETS_MAX {
+                break;
+            }
+        }
+    }
+    budgets
+}
+
+#[cfg(unix)]
+fn r2o_tcp_stall_in_name_band(catalog: &Catalog, host: &str, packets: u32) -> bool {
+    let budgets = r2o_tcp_stall_budgets_for_name(catalog, host);
+    budgets.is_empty()
+        || budgets.iter().any(|budget| {
+            packets.saturating_add(R2O_TCP_STALL_BUDGET_SLACK) >= u32::from(*budget)
+                && packets <= u32::from(*budget) + R2O_TCP_STALL_BUDGET_SLACK
+        })
 }
 
 #[cfg(unix)]
@@ -982,7 +1052,11 @@ fn catalog_commands(catalog: &Catalog) -> Result<CompiledCatalog, Box<dyn Error>
         commands.extend(bypass_commands);
         commands.extend(suffix_commands);
     }
-    Ok(CompiledCatalog { commands, skipped })
+    Ok(CompiledCatalog {
+        commands,
+        skipped,
+        tcp_stall_budgets: r2o_tcp_stall_budgets(catalog),
+    })
 }
 
 #[cfg(unix)]
@@ -1069,10 +1143,10 @@ fn matching_domain_group<'a>(
 #[cfg(unix)]
 fn install_catalog(
     client: &mut ControlClient,
-    commands: &[(String, Vec<u8>)],
+    compiled: &CompiledCatalog,
 ) -> Result<(), Box<dyn Error>> {
     client.send_clear()?;
-    for (installed, (host, command)) in commands.iter().enumerate() {
+    for (installed, (host, command)) in compiled.commands.iter().enumerate() {
         let expected = command
             .get(4..6)
             .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
@@ -1085,6 +1159,22 @@ fn install_catalog(
                 .into()),
                 Err(clear_error) => Err(format!(
                     "установка каталога остановлена после {installed} привязок; не удалось очистить частичную таблицу; {host}: {error}; очистка при откате завершилась ошибкой: {clear_error}"
+                )
+                .into()),
+            };
+        }
+    }
+    if !compiled.tcp_stall_budgets.is_empty() {
+        let command = encode_set_tcp_stall_budgets(&compiled.tcp_stall_budgets)
+            .map_err(|error| format!("SET_TCP_STALL_BUDGETS: {error}"))?;
+        if let Err(error) = client.send_command(&command, COMMAND_SET_TCP_STALL_BUDGETS) {
+            return match client.send_clear() {
+                Ok(()) => Err(format!(
+                    "бюджеты потока TCP не установлены; таблица планов очищена: {error}"
+                )
+                .into()),
+                Err(clear_error) => Err(format!(
+                    "бюджеты потока TCP не установлены ({error}); очистка таблицы планов также не удалась: {clear_error}"
                 )
                 .into()),
             };
@@ -3999,6 +4089,40 @@ impl ControlClient {
                         "наблюдение TCP: поток {client} -> {server} замер на оценке {} пакетов; ответ не виден {} мс; это не подтверждает блокировку",
                         event.estimated_packets, event.elapsed_ms
                     );
+                    if let Some(worker) = &mut r2o_late_rx {
+                        let now = std::time::Instant::now();
+                        let mark = discovery.as_ref().and_then(|(_, _, _, mark)| *mark);
+                        match r2o_late_rx_hellos.take_for_tcp_stall(&event, mark, now) {
+                            Some(input) => {
+                                let host = input.options.name.clone();
+                                let in_band =
+                                    discovery.as_ref().is_none_or(|(_, catalog, _, _)| {
+                                        r2o_tcp_stall_in_name_band(
+                                            catalog,
+                                            &host,
+                                            event.estimated_packets,
+                                        )
+                                    });
+                                if !in_band {
+                                    println!(
+                                        "парная RX-проверка {host} не запущена: оценка {} пакетов вне измеренного бюджета коробки",
+                                        event.estimated_packets
+                                    );
+                                } else if worker.queue(input, now) {
+                                    println!(
+                                        "зависание TCP поставило парную identity/gzip RX-проверку для {host}"
+                                    );
+                                } else {
+                                    println!(
+                                        "парная RX-проверка {host} пропущена: очередь занята или действует десятиминутный предел"
+                                    );
+                                }
+                            }
+                            None => println!(
+                                "парная RX-проверка не запущена: нет свежего полного ClientHello с SNI для потока {client} -> {server}"
+                            ),
+                        }
+                    }
                     std::io::stdout().flush()?;
                     continue;
                 }
@@ -5290,10 +5414,10 @@ impl ControlClient {
             println!("каталог не записан; план не установлен: {error}");
             return Ok(());
         }
-        if let Err(install_error) = install_catalog(self, &compiled.commands) {
+        if let Err(install_error) = install_catalog(self, &compiled) {
             let file_rollback = previous.save_atomic(catalog_path, now);
             let runtime_rollback = catalog_commands(&previous)
-                .and_then(|previous_compiled| install_catalog(self, &previous_compiled.commands));
+                .and_then(|previous_compiled| install_catalog(self, &previous_compiled));
             return Err(match (file_rollback, runtime_rollback) {
                 (Ok(()), Ok(())) => format!(
                     "r2o-datapath не подтвердил обновлённый каталог; восстановлены прежние каталог и планы: {install_error}"
@@ -6167,17 +6291,19 @@ mod tests {
         http_search_candidates, http_search_key, matching_domain_group,
         measured_http_candidate_keys, normalize_plan_target, parse_classify_options,
         parse_serve_options, print_flow_journal, r2o_discovery_failure_retry_due,
-        r2o_http_failed_disposition, r2o_http_live_cut_recheck, r2o_voice_proof_matches_target,
+        r2o_http_failed_disposition, r2o_http_live_cut_recheck, r2o_tcp_stall_budgets,
+        r2o_tcp_stall_budgets_for_name, r2o_tcp_stall_in_name_band, r2o_voice_proof_matches_target,
         save_plan_file, shape_matches_plan,
     };
     use r2k_core::control::{
         COMMAND_DEL_NAME_PROBE, COMMAND_DEL_VOICE_ADDR_PROBE, COMMAND_SET_NAME,
-        COMMAND_SET_NAME_PROBE, COMMAND_SET_VOICE_ADDR, EVENT_APPLIED, EVENT_R2O_TCP_SILENT,
-        EVENT_R2O_TCP_STALL, Frame, KEY_LEN, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, encode_ack,
-        encode_ack_for_trial, encode_frame, encode_greeting, read_frame,
+        COMMAND_SET_NAME_PROBE, COMMAND_SET_TCP_STALL_BUDGETS, COMMAND_SET_VOICE_ADDR,
+        EVENT_APPLIED, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, Frame, KEY_LEN, SHAPE_MODERN,
+        SHAPE_QUIC, SHAPE_VOICE, encode_ack, encode_ack_for_trial, encode_frame, encode_greeting,
+        read_frame,
     };
     use r2k_core::plan::{PLAN_MAGIC, Plan};
-    use r2o_controller::catalog::{Binding, BoxRecord, Catalog};
+    use r2o_controller::catalog::{Binding, BoxRecord, Catalog, Fingerprint, Signal};
     use std::{collections::VecDeque, ffi::OsString, io::Write, path::PathBuf};
 
     #[cfg(unix)]
@@ -7111,6 +7237,67 @@ mod tests {
             "198.51.100.90".parse().unwrap(),
         ));
         std::fs::remove_dir_all(work).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn каталожные_tcp_бюджеты_учитывают_только_rx_сигналы_и_своё_имя() {
+        let measured = |kind: &str, packets: i32| Signal {
+            kind: kind.to_owned(),
+            packets,
+            ..Signal::default()
+        };
+        let bound = |transport: u8, enabled: bool| Binding {
+            kind: "name".to_owned(),
+            target: "example.com".to_owned(),
+            transport,
+            enabled,
+            ..Binding::default()
+        };
+        let catalog = Catalog {
+            boxes: vec![
+                BoxRecord {
+                    fingerprint: Fingerprint {
+                        signals: vec![
+                            measured("volume", 19),
+                            measured("rx-volume", 0),
+                            measured("rx-volume", 32),
+                            measured("rx-volume-wire", 44),
+                        ],
+                        ..Fingerprint::default()
+                    },
+                    bindings: vec![bound(6, true)],
+                    ..BoxRecord::default()
+                },
+                BoxRecord {
+                    fingerprint: Fingerprint {
+                        signals: vec![measured("rx-volume-wire", 64)],
+                        ..Fingerprint::default()
+                    },
+                    bindings: vec![bound(17, true)],
+                    ..BoxRecord::default()
+                },
+                BoxRecord {
+                    fingerprint: Fingerprint {
+                        signals: vec![measured("rx-volume", 48)],
+                        ..Fingerprint::default()
+                    },
+                    bindings: vec![bound(6, false)],
+                    ..BoxRecord::default()
+                },
+            ],
+            ..Catalog::default()
+        };
+
+        assert_eq!(r2o_tcp_stall_budgets(&catalog), [25, 32, 64, 48]);
+        assert!(r2o_tcp_stall_budgets(&Catalog::default()).is_empty());
+        assert_eq!(
+            r2o_tcp_stall_budgets_for_name(&catalog, "example.com"),
+            [32]
+        );
+        assert!(r2o_tcp_stall_in_name_band(&catalog, "example.com", 29));
+        assert!(!r2o_tcp_stall_in_name_band(&catalog, "example.com", 28));
+        assert!(r2o_tcp_stall_in_name_band(&catalog, "other.example", 7));
     }
 
     #[cfg(unix)]
@@ -8258,6 +8445,14 @@ mod tests {
                 assert_eq!(command.kind, COMMAND_SET_NAME);
                 let ack = encode_ack(command.kind, accept, if accept { 0 } else { 1 }).unwrap();
                 stream.write_all(&ack).unwrap();
+                if accept {
+                    let budgets = read_frame(&mut stream).unwrap();
+                    assert_eq!(budgets.kind, COMMAND_SET_TCP_STALL_BUDGETS);
+                    assert_eq!(budgets.body, [2, 0, 25, 0, 32]);
+                    stream
+                        .write_all(&encode_ack(budgets.kind, true, 0).unwrap())
+                        .unwrap();
+                }
                 if !accept {
                     for _ in 0..2 {
                         let clear = read_frame(&mut stream).unwrap();
@@ -8267,6 +8462,12 @@ mod tests {
                             .write_all(&encode_ack(clear.kind, true, 0).unwrap())
                             .unwrap();
                     }
+                    let budgets = read_frame(&mut stream).unwrap();
+                    assert_eq!(budgets.kind, COMMAND_SET_TCP_STALL_BUDGETS);
+                    assert_eq!(budgets.body, [2, 0, 25, 0, 32]);
+                    stream
+                        .write_all(&encode_ack(budgets.kind, true, 0).unwrap())
+                        .unwrap();
                 }
                 (command.kind, command.body)
             });
@@ -8286,7 +8487,20 @@ mod tests {
             };
             let plan_text =
                 r2o_controller::classify::plan_text_for_poison(&poison, &trigger, None, 0).unwrap();
-            let mut catalog = Catalog::default();
+            let mut catalog = Catalog {
+                boxes: vec![BoxRecord {
+                    fingerprint: Fingerprint {
+                        signals: vec![Signal {
+                            kind: "rx-volume".into(),
+                            packets: 32,
+                            ..Signal::default()
+                        }],
+                        ..Fingerprint::default()
+                    },
+                    ..BoxRecord::default()
+                }],
+                ..Catalog::default()
+            };
             let outcome = DiscoveryOutcome {
                 target: target.clone(),
                 plan_text: Some(plan_text),
@@ -8320,7 +8534,17 @@ mod tests {
 
         let (accepted, saved, _) = run_case(false);
         assert!(!accepted);
-        assert!(saved.boxes.is_empty());
+        assert_eq!(saved.boxes.len(), 1);
+        assert_eq!(saved.boxes[0].fingerprint.signals[0].packets, 32);
+        assert!(!r2o_controller::discovery::has_usable_binding(
+            &saved,
+            &r2o_controller::discovery::DiscoveryTarget {
+                host: "example.com".into(),
+                endpoint: "127.0.0.1:443".into(),
+                family: 4,
+                shape: SHAPE_MODERN,
+            }
+        ));
     }
 
     #[cfg(unix)]

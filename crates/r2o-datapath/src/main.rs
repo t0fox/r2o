@@ -1,11 +1,12 @@
 #[cfg(target_os = "linux")]
 mod app {
     use r2k_core::control::{
-        AppliedEvent, EVENT_APPLIED, EVENT_HELLO, EVENT_HTTP_PORTAL, EVENT_HTTP_RESPONSE,
-        EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_FIN_RETRY,
-        EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL,
-        EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_SUSPECT, HttpPortalEvent, HttpResponseEvent,
-        PROTOCOL_VERSION, R2oTcpFinRetryEvent, RELEASE_ID,
+        ACK_BAD_ARGS, ACK_OK, Ack, AppliedEvent, COMMAND_SET_TCP_STALL_BUDGETS, EVENT_APPLIED,
+        EVENT_HELLO, EVENT_HTTP_PORTAL, EVENT_HTTP_RESPONSE, EVENT_R2O_QUIC_STALL,
+        EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_RST_AFTER_APP,
+        EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_SUSPECT,
+        Frame, HttpPortalEvent, HttpResponseEvent, PROTOCOL_VERSION, R2oTcpFinRetryEvent,
+        RELEASE_ID, decode_set_tcp_stall_budgets,
     };
     use r2k_core::plan::{EmitKind, OriginalFate, PROTO_VOICE, Plan};
     use r2o_datapath::capture::{tcp_hello_from_packet, tcp_http_hello_from_packet};
@@ -40,6 +41,24 @@ mod app {
     use std::time::{Duration, Instant};
 
     static STOP: AtomicBool = AtomicBool::new(false);
+
+    fn handle_control_command(
+        name_plans: &mut NamePlans,
+        tcp_sessions: &mut TcpSessions,
+        frame: &Frame,
+    ) -> Ack {
+        if frame.kind != COMMAND_SET_TCP_STALL_BUDGETS {
+            return name_plans.handle(frame);
+        }
+        let result = decode_set_tcp_stall_budgets(frame)
+            .and_then(|budgets| tcp_sessions.set_tcp_stall_budgets(&budgets));
+        Ack {
+            command: frame.kind,
+            ok: result.is_ok(),
+            reason: if result.is_ok() { ACK_OK } else { ACK_BAD_ARGS },
+            trial_id: None,
+        }
+    }
 
     struct PendingApplied {
         event: AppliedEvent,
@@ -403,7 +422,7 @@ mod app {
             }
             if let Some(control) = control.as_mut() {
                 for command in control.poll()? {
-                    let ack = name_plans.handle(&command);
+                    let ack = handle_control_command(&mut name_plans, &mut tcp_sessions, &command);
                     control.send_ack(ack)?;
                 }
                 if control.is_connected() && !journal_peer_connected {
@@ -2018,10 +2037,11 @@ mod app {
     mod tests {
         use super::{
             ControlServer, NF_ACCEPT, NF_DROP, OriginalFate, R2oFlowJournal, R2oQuicSessions,
-            RuntimeMode, TcpSessions, format_journal_details, format_journal_key, load_plan,
-            needs_raw_socket, observe_quic_packet, parse_options, r2o_datapath_payload,
-            r2o_packet_route_skip, release_many_with, release_with, send_applied_event,
-            send_hello_event, send_journal_snapshot, send_journal_updates, udp_packet_admitted,
+            RuntimeMode, TcpSessions, format_journal_details, format_journal_key,
+            handle_control_command, load_plan, needs_raw_socket, observe_quic_packet,
+            parse_options, r2o_datapath_payload, r2o_packet_route_skip, release_many_with,
+            release_with, send_applied_event, send_hello_event, send_journal_snapshot,
+            send_journal_updates, udp_packet_admitted,
         };
         use r2o_datapath::netlink::{QueuePacket, R2O_NF_INET_FORWARD, R2O_NF_INET_POST_ROUTING};
         use r2o_datapath::r2o_route::{
@@ -2031,6 +2051,27 @@ mod app {
         use std::io;
         use std::os::unix::net::UnixStream;
         use std::time::{Duration, Instant};
+
+        #[test]
+        fn управляющая_команда_обновляет_бюджеты_tcp_и_отвергает_ошибку() {
+            let mut plans = r2o_datapath::control::NamePlans::default();
+            let mut sessions = TcpSessions::default();
+            let valid = r2k_core::control::Frame {
+                kind: r2k_core::control::COMMAND_SET_TCP_STALL_BUDGETS,
+                body: vec![2, 0, 15, 0, 35],
+            };
+            let ack = handle_control_command(&mut plans, &mut sessions, &valid);
+            assert!(ack.ok);
+            assert_eq!(ack.command, valid.kind);
+
+            let invalid = r2k_core::control::Frame {
+                kind: r2k_core::control::COMMAND_SET_TCP_STALL_BUDGETS,
+                body: vec![1, 0, 0],
+            };
+            let ack = handle_control_command(&mut plans, &mut sessions, &invalid);
+            assert!(!ack.ok);
+            assert_eq!(ack.reason, r2k_core::control::ACK_BAD_ARGS);
+        }
 
         #[test]
         fn заполненная_udp_таблица_останавливает_обработку_нового_потока() {

@@ -18,6 +18,7 @@ use crate::flow_capacity::R2oFlowCapacity;
 
 const TCP_STALL_PACKET_BUDGET: u64 = 25;
 const TCP_STALL_PACKET_SLACK: u64 = 3;
+const TCP_STALL_BUDGETS_MAX: usize = 8;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct TcpEndpoint {
@@ -218,6 +219,7 @@ impl R2oTcpExchangeEvent {
 pub struct TcpSessions {
     flows: HashMap<TcpFlowKey, TcpSession>,
     flow_capacity: R2oFlowCapacity,
+    tcp_stall_budgets: Vec<u16>,
     reverse_visible_by_family: [bool; 2],
     r2o_tcp_hello_flows: u64,
     r2o_reply_hidden: u64,
@@ -249,6 +251,7 @@ impl TcpSessions {
         Ok(Self {
             flows,
             flow_capacity,
+            tcp_stall_budgets: vec![TCP_STALL_PACKET_BUDGET as u16],
             reverse_visible_by_family: [false; 2],
             r2o_tcp_hello_flows: 0,
             r2o_reply_hidden: 0,
@@ -266,6 +269,20 @@ impl TcpSessions {
 
     pub fn is_empty(&self) -> bool {
         self.flows.is_empty()
+    }
+
+    /// Заменить набор порогов «зависания на бюджете»; пустой список сбрасывает полевой порог.
+    pub fn set_tcp_stall_budgets(&mut self, budgets: &[u16]) -> Result<(), &'static str> {
+        if budgets.len() > TCP_STALL_BUDGETS_MAX || budgets.contains(&0) {
+            return Err("для бюджета TCP допустимы не более восьми ненулевых значений");
+        }
+        self.tcp_stall_budgets.clear();
+        if budgets.is_empty() {
+            self.tcp_stall_budgets.push(TCP_STALL_PACKET_BUDGET as u16);
+        } else {
+            self.tcp_stall_budgets.extend_from_slice(budgets);
+        }
+        Ok(())
     }
 
     /// Возвращает счётчики активного потока по его ключу сетевого протокола.
@@ -485,7 +502,13 @@ impl TcpSessions {
         let estimate = u64::from(session.forward_data_packets)
             .saturating_add(u64::from(session.reverse_data_packets))
             .saturating_add(unseen);
-        let band_top = TCP_STALL_PACKET_BUDGET + TCP_STALL_PACKET_SLACK;
+        let band_top = u64::from(
+            self.tcp_stall_budgets
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(TCP_STALL_PACKET_BUDGET as u16),
+        ) + TCP_STALL_PACKET_SLACK;
         if estimate > band_top {
             session.stall_watch_off = true;
             return None;
@@ -510,7 +533,11 @@ impl TcpSessions {
             .rtt
             .map_or(Duration::ZERO, |rtt| rtt.saturating_mul(3))
             .max(Duration::from_secs(2));
-        if elapsed < rto || estimate + TCP_STALL_PACKET_SLACK < TCP_STALL_PACKET_BUDGET {
+        let inside_budget = self.tcp_stall_budgets.iter().any(|budget| {
+            estimate.saturating_add(TCP_STALL_PACKET_SLACK) >= u64::from(*budget)
+                && estimate <= u64::from(*budget) + TCP_STALL_PACKET_SLACK
+        });
+        if elapsed < rto || !inside_budget {
             return None;
         }
         Some(R2oTcpStallEvent {
@@ -1453,6 +1480,66 @@ mod tests {
             .unwrap();
         assert_eq!(event.elapsed_ms, 2100);
         assert_eq!(event.estimated_packets, 25);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tcp_учитывает_измеренный_бюджет_из_каталога() {
+        let mut sessions = TcpSessions::default();
+        sessions.set_tcp_stall_budgets(&[15, 35]).unwrap();
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        sessions.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start);
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+            start + Duration::from_millis(50),
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(
+                client,
+                server,
+                0x18,
+                64,
+                701,
+                &client_hello_with_sni_and_large_extension(),
+            ),
+            start + Duration::from_millis(100),
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x18, 124, 900, &[1, 2, 3]),
+            start + Duration::from_millis(200),
+        );
+        let probe = sessions.tcp_stall_candidates().pop().unwrap();
+        let baseline = R2oConntrackInfo {
+            original_packets: 10,
+            reply_packets: 15,
+            tcp_state: Some(3),
+        };
+        assert_eq!(
+            sessions.update_tcp_stall(start + Duration::from_secs(1), &probe.key, baseline),
+            None
+        );
+        let event = sessions
+            .update_tcp_stall(
+                start + Duration::from_millis(3100),
+                &probe.key,
+                R2oConntrackInfo {
+                    original_packets: 13,
+                    ..baseline
+                },
+            )
+            .unwrap();
+        assert_eq!(event.estimated_packets, 15);
+    }
+
+    #[test]
+    fn tcp_бюджеты_отвергают_ноль_и_список_длиннее_восьми() {
+        let mut sessions = TcpSessions::default();
+        assert!(sessions.set_tcp_stall_budgets(&[0]).is_err());
+        assert!(sessions.set_tcp_stall_budgets(&[1; 9]).is_err());
+        sessions.set_tcp_stall_budgets(&[]).unwrap();
+        assert!(sessions.set_tcp_stall_budgets(&[25]).is_ok());
     }
 
     #[cfg(target_os = "linux")]

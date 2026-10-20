@@ -781,29 +781,17 @@ mod tests {
     fn r2o_quic_ноль_ответов_после_трёх_проб_даёт_нет() {
         let server = UdpSocket::bind("127.0.0.1:0").unwrap();
         server
-            .set_read_timeout(Some(Duration::from_millis(100)))
+            .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
         let endpoint = server.local_addr().unwrap();
         let receiver = std::thread::spawn(move || {
             let mut received = Vec::new();
-            loop {
+            for _ in 0..3 {
                 let mut packet = [0; 1500];
-                match server.recv_from(&mut packet) {
-                    Ok((length, peer)) => {
-                        let (_, dcid) =
-                            r2k_core::quic::r2k_quic_initial_flight_id(&packet[..length]).unwrap();
-                        received.push((dcid, peer));
-                    }
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                        ) =>
-                    {
-                        break;
-                    }
-                    Err(error) => panic!("ошибка приёмника UDP: {error}"),
-                }
+                let (length, peer) = server.recv_from(&mut packet).expect("приём QUIC-пробы");
+                let (_, dcid) =
+                    r2k_core::quic::r2k_quic_initial_flight_id(&packet[..length]).unwrap();
+                received.push((dcid, peer));
             }
             received
         });

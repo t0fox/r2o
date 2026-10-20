@@ -1,18 +1,19 @@
 use r2k_core::control::{
     AppliedEvent, BindingContext, COMMAND_DEL_ADDR, COMMAND_DEL_ADDR_PROBE, COMMAND_DEL_NAME,
     COMMAND_SET_ADDR, COMMAND_SET_ADDR_PROBE, COMMAND_SET_HTTPS, COMMAND_SET_NAME_PROBE,
-    COMMAND_SET_VOICE_ADDR, COMMAND_SET_VOICE_ADDR_PROBE, EVENT_APPLIED, EVENT_HELLO,
-    EVENT_HTTP_RESPONSE, EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_FIN_RETRY,
-    EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF,
-    EVENT_R2O_VOICE_SUSPECT, Frame, HttpResponseEvent, KEY_LEN, R2oQuicSuspectEvent,
-    R2oTcpFinRetryEvent, R2oTcpRstAfterAppEvent, R2oTcpSilenceEvent, R2oTcpStallEvent,
-    R2oVoiceProofEvent, R2oVoiceSuspectEvent, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_MODERN, SHAPE_QUIC,
-    decode_ack, decode_applied, decode_hello, decode_http_response, decode_r2o_quic_stall,
-    decode_r2o_quic_suspect, decode_r2o_tcp_fin_retry, decode_r2o_tcp_rst_after_app,
-    decode_r2o_tcp_silence, decode_r2o_tcp_stall, decode_r2o_voice_proof, decode_r2o_voice_suspect,
+    COMMAND_SET_TCP_STALL_BUDGETS, COMMAND_SET_VOICE_ADDR, COMMAND_SET_VOICE_ADDR_PROBE,
+    EVENT_APPLIED, EVENT_HELLO, EVENT_HTTP_RESPONSE, EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT,
+    EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_SILENT,
+    EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_SUSPECT, Frame, HttpResponseEvent,
+    KEY_LEN, R2oQuicSuspectEvent, R2oTcpFinRetryEvent, R2oTcpRstAfterAppEvent, R2oTcpSilenceEvent,
+    R2oTcpStallEvent, R2oVoiceProofEvent, R2oVoiceSuspectEvent, SHAPE_ECH_TCP, SHAPE_HTTP,
+    SHAPE_MODERN, SHAPE_QUIC, decode_ack, decode_applied, decode_hello, decode_http_response,
+    decode_r2o_quic_stall, decode_r2o_quic_suspect, decode_r2o_tcp_fin_retry,
+    decode_r2o_tcp_rst_after_app, decode_r2o_tcp_silence, decode_r2o_tcp_stall,
+    decode_r2o_voice_proof, decode_r2o_voice_suspect, decode_set_tcp_stall_budgets,
     encode_ack_for_trial, encode_delete_addr, encode_delete_addr_probe, encode_delete_name,
     encode_set_addr, encode_set_addr_probe, encode_set_https, encode_set_name_probe,
-    encode_set_voice_addr, encode_set_voice_addr_probe, read_frame,
+    encode_set_tcp_stall_budgets, encode_set_voice_addr, encode_set_voice_addr_probe, read_frame,
 };
 use std::io::Cursor;
 
@@ -185,6 +186,29 @@ fn событие_зависшего_tcp_потока_кодируется_и_с
     let mut invalid = frame;
     invalid.body[KEY_LEN] = 2;
     assert!(decode_r2o_tcp_stall(&invalid).is_err());
+}
+
+#[test]
+fn бюджеты_tcp_кодируются_и_проверяются_включая_сброс_по_умолчанию() {
+    let encoded = encode_set_tcp_stall_budgets(&[25, 17, 41]).unwrap();
+    let frame = read_frame(&mut Cursor::new(encoded)).unwrap();
+    assert_eq!(frame.kind, COMMAND_SET_TCP_STALL_BUDGETS);
+    assert_eq!(decode_set_tcp_stall_budgets(&frame).unwrap(), [25, 17, 41]);
+
+    let reset = read_frame(&mut Cursor::new(encode_set_tcp_stall_budgets(&[]).unwrap())).unwrap();
+    assert!(decode_set_tcp_stall_budgets(&reset).unwrap().is_empty());
+    assert!(encode_set_tcp_stall_budgets(&[0]).is_err());
+    assert!(encode_set_tcp_stall_budgets(&[1; 9]).is_err());
+
+    let mut malformed = frame;
+    malformed.body[0] = 2;
+    assert!(decode_set_tcp_stall_budgets(&malformed).is_err());
+    let mut zero = read_frame(&mut Cursor::new(
+        encode_set_tcp_stall_budgets(&[25]).unwrap(),
+    ))
+    .unwrap();
+    zero.body[1..3].copy_from_slice(&0_u16.to_be_bytes());
+    assert!(decode_set_tcp_stall_budgets(&zero).is_err());
 }
 
 #[test]

@@ -4,7 +4,7 @@ use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-pub const PROTOCOL_VERSION: u16 = 34;
+pub const PROTOCOL_VERSION: u16 = 35;
 pub const FRAME_MAX: usize = 65_536;
 pub const KEY_LEN: usize = 38;
 pub const MAX_DNS_NAME_LEN: usize = 253;
@@ -42,6 +42,8 @@ pub const COMMAND_SET_VOICE_ADDR_PROBE: u16 = 0x0092;
 pub const COMMAND_DEL_VOICE_ADDR_PROBE: u16 = 0x0093;
 pub const COMMAND_SET_ADDR_PROBE: u16 = 0x0094;
 pub const COMMAND_DEL_ADDR_PROBE: u16 = 0x0095;
+pub const COMMAND_SET_TCP_STALL_BUDGETS: u16 = 0x0096;
+pub const MAX_TCP_STALL_BUDGETS: usize = 8;
 pub const VOICE_ADDR_PROBE_LEASE_MAX_MS: u32 = 120_000;
 pub const ADDR_PROBE_LEASE_MAX_MS: u32 = 120_000;
 pub const MAX_HTTPS_TTL_SECONDS: u32 = 6 * 60 * 60;
@@ -845,6 +847,39 @@ pub fn encode_set_https(name: &str, ttl_seconds: u32) -> Result<Vec<u8>, &'stati
     body.extend_from_slice(name.as_bytes());
     body.extend_from_slice(&ttl_seconds.to_be_bytes());
     encode_frame(COMMAND_SET_HTTPS, &body)
+}
+
+/// Кодирует полевой бюджет и измеренные пороги потока TCP.
+pub fn encode_set_tcp_stall_budgets(budgets: &[u16]) -> Result<Vec<u8>, &'static str> {
+    if budgets.len() > MAX_TCP_STALL_BUDGETS || budgets.contains(&0) {
+        return Err("для бюджета TCP допустимы не более восьми ненулевых значений");
+    }
+    let mut body = Vec::with_capacity(1 + budgets.len() * 2);
+    body.push(budgets.len() as u8);
+    for budget in budgets {
+        body.extend_from_slice(&budget.to_be_bytes());
+    }
+    encode_frame(COMMAND_SET_TCP_STALL_BUDGETS, &body)
+}
+
+/// Разбирает список бюджетов TCP; пустой список возвращает полевой порог.
+pub fn decode_set_tcp_stall_budgets(frame: &Frame) -> Result<Vec<u16>, &'static str> {
+    if frame.kind != COMMAND_SET_TCP_STALL_BUDGETS || frame.body.is_empty() {
+        return Err("неверный кадр установки бюджета TCP");
+    }
+    let count = usize::from(frame.body[0]);
+    if count > MAX_TCP_STALL_BUDGETS || frame.body.len() != 1 + count * 2 {
+        return Err("неверная длина списка бюджетов TCP");
+    }
+    let mut budgets = Vec::with_capacity(count);
+    for pair in frame.body[1..].chunks_exact(2) {
+        let budget = u16::from_be_bytes([pair[0], pair[1]]);
+        if budget == 0 {
+            return Err("бюджет TCP не может быть нулевым");
+        }
+        budgets.push(budget);
+    }
+    Ok(budgets)
 }
 
 pub fn encode_set_name_probe(

@@ -1,5 +1,5 @@
 use crate::{discovery::DiscoveryTarget, fetch::FetchOptions};
-use r2k_core::control::{HelloEvent, R2oTcpRstAfterAppEvent};
+use r2k_core::control::{HelloEvent, R2oTcpRstAfterAppEvent, R2oTcpStallEvent};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::Instant;
@@ -86,15 +86,32 @@ impl R2oLateRxCache {
         mark: Option<u32>,
         now: Instant,
     ) -> Option<R2oLateRxInput> {
+        self.take_for_flow(&reset.key, reset.client_is_low, mark, now)
+    }
+
+    pub fn take_for_tcp_stall(
+        &mut self,
+        event: &R2oTcpStallEvent,
+        mark: Option<u32>,
+        now: Instant,
+    ) -> Option<R2oLateRxInput> {
+        self.take_for_flow(&event.key, event.client_is_low, mark, now)
+    }
+
+    fn take_for_flow(
+        &mut self,
+        key: &[u8; r2k_core::control::KEY_LEN],
+        client_is_low: bool,
+        mark: Option<u32>,
+        now: Instant,
+    ) -> Option<R2oLateRxInput> {
         self.expire(now);
-        let (hello, captured) = self.entries.remove(&reset.key)?;
-        if hello.key != reset.key
-            || now.saturating_duration_since(captured) >= R2O_LATE_RX_CACHE_TTL
-        {
+        let (hello, captured) = self.entries.remove(key)?;
+        if hello.key != *key || now.saturating_duration_since(captured) >= R2O_LATE_RX_CACHE_TTL {
             return None;
         }
         let family = hello.key[0];
-        let (address, port_bytes) = if reset.client_is_low {
+        let (address, port_bytes) = if client_is_low {
             (&hello.key[17..], &hello.key[35..37])
         } else {
             (&hello.key[1..], &hello.key[33..35])
@@ -141,7 +158,9 @@ impl R2oLateRxCache {
 #[cfg(test)]
 mod tests {
     use super::{R2O_LATE_RX_CACHE_CAPACITY, R2oLateRxCache};
-    use r2k_core::control::{HelloEvent, R2oTcpRstAfterAppEvent, SHAPE_LEGACY, SHAPE_MODERN};
+    use r2k_core::control::{
+        HelloEvent, R2oTcpRstAfterAppEvent, R2oTcpStallEvent, SHAPE_LEGACY, SHAPE_MODERN,
+    };
     use std::time::{Duration, Instant};
 
     fn flow_key(client_is_low: bool) -> [u8; r2k_core::control::KEY_LEN] {
@@ -216,6 +235,27 @@ mod tests {
         assert_eq!(input.options.ip.unwrap().to_string(), "2001:db8::20");
         assert_eq!(input.options.port, 443);
         assert!(input.options.tls12);
+    }
+
+    #[test]
+    fn tcp_зависание_забирает_только_свежий_clienthello_того_же_потока() {
+        let now = Instant::now();
+        let mut cache = R2oLateRxCache::default();
+        let hello = hello(SHAPE_MODERN, true, Some(812));
+        assert!(cache.capture(&hello, now));
+        let event = R2oTcpStallEvent {
+            key: hello.key,
+            client_is_low: true,
+            elapsed_ms: 2_500,
+            estimated_packets: 25,
+        };
+
+        let input = cache.take_for_tcp_stall(&event, Some(17), now).unwrap();
+        assert_eq!(input.options.name, "example.com");
+        assert_eq!(input.options.ip.unwrap().to_string(), "198.51.100.9");
+        assert_eq!(input.options.mark, Some(17));
+        assert!(input.discovery_target.is_some());
+        assert!(cache.take_for_tcp_stall(&event, Some(17), now).is_none());
     }
 
     #[test]
