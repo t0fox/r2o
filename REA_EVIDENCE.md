@@ -4260,3 +4260,86 @@ GNU MIPS/QEMU, OpenWrt MIPS musl/QEMU, ARMv5/QEMU и NFQUEUE завершили�
 OpenWrt-роутере остаётся открытой. Таймер записал 274 с анализа и 1124 с
 реализации вместе с REA, тестами и контрольными сборками; итоговый C/Rust
 differential занял 12 с.
+
+## Журнал уровней TCP-обмена — 20.10.2026
+
+Донорский путь сверялся по текущему `session.c` и Clang 18 AST, без повторного
+анализа большого исполняемого файла. Использовано ранее сохранённое REA Evidence
+`ev_2a06b12520967e866d62e3048048a70cc79cd4df39e60d95edd3700973675bfa` для
+`session_packet.part.0`. Донорский код добавляет запись при первом обратном
+ответе после ClientHello и повышает уровень один раз при появлении TLS
+application data; накапливает длину и типы записей, ServerHello и факт
+применения плана. Хеши источника C и теста зафиксированы в журнале
+`.rea/r2o-tcp-exchange-differential-20261020-142458.log`.
+
+Для проверки целевой записи использован компактный Rust CGU-объект из свежей
+сборки, SHA-256 `6929a28725810c550f86c7d5da2fd960e4b51e0977ed630518166bac7cd7f5f3`.
+REA/Ghidra 12.1.4 выдала полное тело
+`R2oFlowJournal::record_tcp_exchange` (адрес `0x104830`, 601 байт), Evidence
+`ev_603ae7a5ba65261698e7cd298ca97b86168f8e1fa266c905349a21bad1927662`.
+Псевдокод заканчивает построение записи вызовом `push`. Ghidra восстановила
+прототип Rust-функции, но отображение полей структуры в псевдокоде искажено;
+соответствие полей сверено по исходнику, тесту сериализации и сквозному тесту
+runtime. Целый Rust ELF повторно не анализировался.
+
+Дифференциальный журнал подтверждает C `make test-session` и четыре Rust-сценария
+за 7 с. Rust проверяет первый обратный ответ, однократное повышение на
+application data, разбор ServerHello, счётчик байтов, поле плана, двоичное
+кодирование и выдачу событий из runtime. Полный datapath прошёл: 172 теста,
+0 ошибок, 3 штатных пропуска без Linux сетевых capabilities. Полный workspace:
+842 теста, 0 ошибок, 4 штатных пропуска. Успешны также форматирование,
+ShellCheck, `git diff --check`, workspace `-Dwarnings`, release-сборка и
+кросс-проверки AArch64, ARMv5, i686 и RISC-V.
+
+Проверка OpenWrt MIPS musl собрала все программы и запустила их под QEMU; прошли
+smoke-проверки каталога. NFQUEUE integration прошла для QUIC, TCP, HTTP,
+удержанных пакетов и остановки демона; синтаксис правил роутера и Telegram
+прошёл без установки правил. Журналы контрольного этапа:
+`.rea/r2o-tcp-exchange-datapath-tests.log`,
+`.rea/r2o-tcp-exchange-workspace-tests.log`,
+`.rea/r2o-tcp-exchange-warnings-check.log`,
+`.rea/r2o-tcp-exchange-release-build.log`,
+`.rea/r2o-tcp-exchange-openwrt-mips-qemu.log`,
+`.rea/r2o-tcp-exchange-nfqueue.log` и
+`.rea/r2o-tcp-exchange-firewall.log`. Все четыре кросс-лога имеют префикс
+`.rea/r2o-tcp-exchange-` и суффикс имени цели.
+
+## Первая обратная QUIC/UDP-датаграмма — 20.10.2026
+
+Донорский `handle_udp` в актуальном `datapath/session.c` и Clang 18 AST
+проверены для случая первой обратной датаграммы после QUIC Initial. Эталонный
+тест `test_nameless_exchange` подтверждает ровно одну запись общего Exchange,
+включая ответ нулевой длины; событие несёт код `0` и длину полезной нагрузки.
+Переиспользовано донорское REA Evidence
+`ev_0fc0d328089313aa03f9c4a5b4c8eeb2fbedd01804194dbaba7a261d2c995e80` для
+`handle_udp`. Хеши C `session.c`, `test_quic_session.c` и
+`include/d2k_journal.h` зафиксированы в журнале дифференциального прогона.
+
+В R2O добавлена выдача первой обратной UDP-датаграммы из QUIC-состояния через
+runtime в общий журнал потока. Событие создаётся один раз на поток, длина
+ограничивается полем протокола, пустой ответ сохраняется как нулевой размер.
+Затронуты `R2oQuicSessions::observe_packet_at_hook` и
+`R2oFlowJournal::record_udp_exchange`; целевой runtime и двоичная запись
+проверены сквозными тестами.
+
+REA/Ghidra 12.1.4 исследовала свежие компактные CGU-объекты, без повторного
+анализа Rust ELF. Для `R2oQuicSessions::observe_packet_at_hook` получено полное
+тело по адресу `0x101b60` (2585 байт), Evidence
+`ev_1d09bb42cfdf48a673ca64ab0d2723b3526d3b2bea907f0d286c12afcff5dc6e`, SHA-256
+объекта `25fc204d48276374e96cc5912555dab6bca02b7c505988e11ef4dca0e92863c7`.
+Псевдокод подтверждает ограничение очереди и добавление UDP-события. Для
+`R2oFlowJournal::record_udp_exchange` получено тело по адресу `0x104a90`
+(572 байта), Evidence `ev_ba90c51f9833364deee87f5ee4b47389ee3595f15a68535c730b5fedf9e49254`,
+SHA-256 объекта `6f0da050dd3705286273b6ae6ce560c47b4193f2fc3f42b9338a1aea23263800`;
+псевдокод подтверждает добавление записи. Отображение полей структуры в
+декомпиляторе не принималось за точную семантику: поля сверены по Rust-коду,
+тесту сериализации и runtime-тесту.
+
+C/Rust differential завершился за 20 с: C `make test-quic-session` и три
+адресных Rust-теста на состояние, сериализацию и передачу через runtime прошли.
+Полный `r2o-datapath` прошёл 175 тестов, 0 ошибок, 3 штатных пропуска; полный
+workspace — 71 набор, 845 тестов, 0 ошибок, 4 штатных пропуска. Прошли
+`cargo check --workspace --all-targets` с `-D warnings`, release workspace,
+cross-check AArch64, ARMv5, i686 и RISC-V, OpenWrt MIPS musl/QEMU, NFQUEUE,
+проверка правил firewall, `cargo fmt`, ShellCheck и `git diff --check`. Журналы
+этапа имеют префикс `.rea/r2o-udp-exchange-` в локальной папке `.rea/`.

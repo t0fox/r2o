@@ -1,3 +1,5 @@
+use crate::engine::R2oTcpExchangeEvent;
+use crate::r2o_quic::R2oUdpExchangeEvent;
 use r2k_core::control::{
     AppliedEvent, BindingContext, EVENT_APPLIED, EVENT_HELLO, EVENT_R2O_JOURNAL_END,
     EVENT_R2O_JOURNAL_ENTRY, EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_FIN_RETRY,
@@ -655,6 +657,31 @@ impl R2oFlowJournal {
             });
         }
         true
+    }
+
+    pub fn record_tcp_exchange(&mut self, at_ns: u64, event: &R2oTcpExchangeEvent) {
+        self.push(R2oFlowJournalEntry {
+            at_ns,
+            key: event.key,
+            kind: R2oFlowJournalKind::Exchange,
+            code: event.code,
+            num: event.num,
+            tos: event.tos,
+            server_hello: event.server_hello,
+            planned: event.planned,
+            ..R2oFlowJournalEntry::default()
+        });
+    }
+
+    pub fn record_udp_exchange(&mut self, at_ns: u64, event: &R2oUdpExchangeEvent) {
+        self.push(R2oFlowJournalEntry {
+            at_ns,
+            key: event.key,
+            kind: R2oFlowJournalKind::Exchange,
+            code: event.code,
+            num: event.num,
+            ..R2oFlowJournalEntry::default()
+        });
     }
 
     pub fn record_control_event(&mut self, at_ns: u64, event_type: u16, body: &[u8]) -> bool {

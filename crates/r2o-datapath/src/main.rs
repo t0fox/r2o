@@ -446,7 +446,14 @@ mod app {
                             if selected_plan.qdeny != 0 {
                                 quic_sessions.suppress_packet(bytes);
                             } else {
-                                quic_sessions.observe_packet_at_hook(bytes, now, queue_hook);
+                                observe_quic_packet(
+                                    &mut quic_sessions,
+                                    bytes,
+                                    now,
+                                    queue_hook,
+                                    &mut flow_journal,
+                                    &journal_origin,
+                                );
                             }
                         }
                         if observe_tls
@@ -784,6 +791,7 @@ mod app {
                             holding.note_http_execution(sequence, &event);
                         }
                         send_applied_event(
+                            &mut tcp_sessions,
                             &mut control,
                             &mut flow_journal,
                             journal_origin.elapsed().as_nanos().min(u64::MAX as u128) as u64,
@@ -796,6 +804,7 @@ mod app {
                 raw.as_ref(),
                 &mut scheduled,
                 &mut pending_applied,
+                &mut tcp_sessions,
                 &mut control,
                 &mut holding,
                 &mut voice_trial_proofs,
@@ -1321,8 +1330,31 @@ mod app {
         journal_origin: &Instant,
     ) -> PacketDecision {
         let decision = decide_with_session(sessions, plan, packet);
+        let at_ns = journal_timestamp(journal_origin);
+        for event in sessions.take_tcp_exchange_events() {
+            flow_journal.record_tcp_exchange(at_ns, &event);
+        }
         send_pending_tcp_fin_retry(sessions, control, flow_journal, journal_origin);
         decision
+    }
+
+    fn observe_quic_packet(
+        sessions: &mut R2oQuicSessions,
+        packet: &[u8],
+        now: Instant,
+        hook: Option<u8>,
+        flow_journal: &mut R2oFlowJournal,
+        journal_origin: &Instant,
+    ) {
+        sessions.observe_packet_at_hook(packet, now, hook);
+        let events = sessions.take_udp_exchange_events();
+        if events.is_empty() {
+            return;
+        }
+        let at_ns = journal_timestamp(journal_origin);
+        for event in events {
+            flow_journal.record_udp_exchange(at_ns, &event);
+        }
     }
 
     fn send_voice_proof_event(
@@ -1345,6 +1377,7 @@ mod app {
     }
 
     fn send_applied_event(
+        sessions: &mut TcpSessions,
         control: &mut Option<ControlServer>,
         flow_journal: &mut R2oFlowJournal,
         at_ns: u64,
@@ -1354,6 +1387,9 @@ mod app {
             return;
         };
         flow_journal.record_applied(at_ns, event);
+        if event.key[37] == 6 {
+            sessions.mark_plan_done(&event.key);
+        }
         let Some(control) = control.as_mut() else {
             return;
         };
@@ -1619,6 +1655,7 @@ mod app {
         raw: Option<&RawSocket>,
         scheduled: &mut ScheduledQueue,
         pending_applied: &mut HashMap<FlowTicket, PendingApplied>,
+        tcp_sessions: &mut TcpSessions,
         control: &mut Option<ControlServer>,
         holding: &mut HoldTable,
         voice_trial_proofs: &mut R2oVoiceTrialProofs,
@@ -1666,6 +1703,7 @@ mod app {
                         voice_trial_proofs.note_applied(&packet, &pending.event, Instant::now());
                     }
                     send_applied_event(
+                        tcp_sessions,
                         control,
                         flow_journal,
                         journal_timestamp(journal_origin),
@@ -1745,13 +1783,14 @@ mod app {
     #[cfg(test)]
     mod tests {
         use super::{
-            ControlServer, NF_ACCEPT, NF_DROP, OriginalFate, R2oFlowJournal, RuntimeMode,
-            format_journal_details, format_journal_key, load_plan, needs_raw_socket, parse_options,
-            release_many_with, release_with, send_applied_event, send_hello_event,
-            send_journal_snapshot, send_journal_updates,
+            ControlServer, NF_ACCEPT, NF_DROP, OriginalFate, R2oFlowJournal, R2oQuicSessions,
+            RuntimeMode, TcpSessions, format_journal_details, format_journal_key, load_plan,
+            needs_raw_socket, observe_quic_packet, parse_options, release_many_with, release_with,
+            send_applied_event, send_hello_event, send_journal_snapshot, send_journal_updates,
         };
         use std::io;
         use std::os::unix::net::UnixStream;
+        use std::time::Instant;
 
         #[test]
         fn controller_only_mode_requires_control_and_keeps_the_legacy_plan_mode() {
@@ -2031,7 +2070,13 @@ mod app {
             let mut control = None;
             let mut flow_journal = R2oFlowJournal::with_capacity(2).unwrap();
 
-            send_applied_event(&mut control, &mut flow_journal, 123, &event);
+            send_applied_event(
+                &mut super::TcpSessions::default(),
+                &mut control,
+                &mut flow_journal,
+                123,
+                &event,
+            );
 
             let entry = flow_journal.get(0).unwrap();
             assert_eq!(entry.at_ns, 123);
@@ -2043,6 +2088,255 @@ mod app {
             assert_eq!(entry.trial_id, [0x5a; 16]);
             assert_eq!(entry.execution_id, 77);
             assert_eq!(entry.binding, Some(event.binding));
+        }
+
+        #[test]
+        fn r2o_передаёт_tcp_обмен_из_runtime_в_общий_журнал() {
+            fn отправить_tcp_пакет(
+                sessions: &mut TcpSessions,
+                journal: &mut R2oFlowJournal,
+                control: &mut Option<ControlServer>,
+                origin: &Instant,
+                source: ([u8; 4], u16),
+                destination: ([u8; 4], u16),
+                flags: u8,
+                sequence: u32,
+                payload: &[u8],
+            ) {
+                let mut packet = vec![0; 40 + payload.len()];
+                let packet_len = packet.len() as u16;
+                packet[0] = 0x45;
+                packet[2..4].copy_from_slice(&packet_len.to_be_bytes());
+                packet[8] = 64;
+                packet[9] = 6;
+                packet[12..16].copy_from_slice(&source.0);
+                packet[16..20].copy_from_slice(&destination.0);
+                packet[20..22].copy_from_slice(&source.1.to_be_bytes());
+                packet[22..24].copy_from_slice(&destination.1.to_be_bytes());
+                packet[24..28].copy_from_slice(&sequence.to_be_bytes());
+                packet[32] = 0x50;
+                packet[33] = flags;
+                packet[34..36].copy_from_slice(&4096_u16.to_be_bytes());
+                packet[40..].copy_from_slice(payload);
+                super::decide_with_tcp_session(
+                    sessions,
+                    &super::Plan::default(),
+                    &packet,
+                    control,
+                    journal,
+                    origin,
+                );
+            }
+
+            let клиент: ([u8; 4], u16) = ([192, 0, 2, 10], 41000);
+            let сервер: ([u8; 4], u16) = ([198, 51, 100, 20], 443);
+            let mut ключ = [0; r2k_core::control::KEY_LEN];
+            ключ[0] = 4;
+            ключ[1..5].copy_from_slice(&клиент.0);
+            ключ[17..21].copy_from_slice(&сервер.0);
+            ключ[33..35].copy_from_slice(&клиент.1.to_be_bytes());
+            ключ[35..37].copy_from_slice(&сервер.1.to_be_bytes());
+            ключ[37] = 6;
+
+            let mut client_hello = vec![0x16, 0x03, 0x03, 0, 47, 1, 0, 0, 43, 0x03, 0x03];
+            client_hello.extend_from_slice(&[0; 32]);
+            client_hello.extend_from_slice(&[0, 0, 2, 0x13, 1, 1, 0, 0, 0]);
+            let mut server_hello = vec![0x16, 0x03, 0x03, 0, 42, 2, 0, 0, 38];
+            server_hello.extend_from_slice(&[0; 38]);
+            let application_data = [0x17, 0x03, 0x03, 0, 1, 0];
+
+            let mut sessions = TcpSessions::default();
+            let mut journal = R2oFlowJournal::with_capacity(4).unwrap();
+            let mut control = None;
+            let origin = Instant::now();
+            отправить_tcp_пакет(
+                &mut sessions,
+                &mut journal,
+                &mut control,
+                &origin,
+                клиент,
+                сервер,
+                0x02,
+                700,
+                &[],
+            );
+            отправить_tcp_пакет(
+                &mut sessions,
+                &mut journal,
+                &mut control,
+                &origin,
+                сервер,
+                клиент,
+                0x12,
+                900,
+                &[],
+            );
+            отправить_tcp_пакет(
+                &mut sessions,
+                &mut journal,
+                &mut control,
+                &origin,
+                клиент,
+                сервер,
+                0x18,
+                701,
+                &client_hello,
+            );
+            let applied = super::AppliedEvent {
+                key: ключ,
+                plan_id: [0xa5; 16],
+                trial_id: [0x5a; 16],
+                execution_id: 77,
+                binding: r2k_core::control::BindingContext {
+                    generation: 9,
+                    kind: 1,
+                    family: 4,
+                    shape: 2,
+                    temporary: true,
+                    epoch: [0x3c; 16],
+                },
+            };
+            send_applied_event(&mut sessions, &mut control, &mut journal, 1, &applied);
+            отправить_tcp_пакет(
+                &mut sessions,
+                &mut journal,
+                &mut control,
+                &origin,
+                сервер,
+                клиент,
+                0x18,
+                900,
+                &server_hello,
+            );
+            assert_eq!(journal.count(), 2);
+            let первый_обмен = journal.get(1).unwrap();
+            assert_eq!(первый_обмен.key, ключ);
+            assert_eq!(
+                первый_обмен.kind,
+                r2o_datapath::flow_journal::R2oFlowJournalKind::Exchange
+            );
+            assert_eq!(первый_обмен.code, 0x16);
+            assert_eq!(первый_обмен.num, 47);
+            assert_eq!(первый_обмен.tos, 0x04);
+            assert!(первый_обмен.server_hello);
+            assert_eq!(первый_обмен.planned, 1);
+
+            отправить_tcp_пакет(
+                &mut sessions,
+                &mut journal,
+                &mut control,
+                &origin,
+                сервер,
+                клиент,
+                0x18,
+                947,
+                &application_data,
+            );
+            assert_eq!(journal.count(), 3);
+            let второй_обмен = journal.get(2).unwrap();
+            assert_eq!(
+                второй_обмен.kind,
+                r2o_datapath::flow_journal::R2oFlowJournalKind::Exchange
+            );
+            assert_eq!(второй_обмен.code, 0x16);
+            assert_eq!(второй_обмен.num, 53);
+            assert_eq!(второй_обмен.tos, 0x0c);
+            assert!(второй_обмен.server_hello);
+        }
+
+        #[test]
+        fn r2o_передаёт_первый_udp_ответ_из_runtime_в_общий_журнал() {
+            fn пакет_udp(
+                source: ([u8; 4], u16),
+                destination: ([u8; 4], u16),
+                payload: &[u8],
+            ) -> Vec<u8> {
+                let mut packet = vec![0; 28 + payload.len()];
+                let packet_len = packet.len() as u16;
+                packet[0] = 0x45;
+                packet[2..4].copy_from_slice(&packet_len.to_be_bytes());
+                packet[8] = 64;
+                packet[9] = 17;
+                packet[12..16].copy_from_slice(&source.0);
+                packet[16..20].copy_from_slice(&destination.0);
+                packet[20..22].copy_from_slice(&source.1.to_be_bytes());
+                packet[22..24].copy_from_slice(&destination.1.to_be_bytes());
+                packet[24..26].copy_from_slice(&(8_u16 + payload.len() as u16).to_be_bytes());
+                packet[28..].copy_from_slice(payload);
+                packet
+            }
+
+            let initial = include_bytes!("../../r2k-core/tests/fixtures/quic_v1_initial.bin");
+            let client: ([u8; 4], u16) = ([192, 0, 2, 10], 53_123);
+            let server: ([u8; 4], u16) = ([198, 51, 100, 20], 443);
+            let start = Instant::now();
+            let mut sessions = R2oQuicSessions::default();
+            let mut journal = R2oFlowJournal::with_capacity(4).unwrap();
+            let mut initial_packet = пакет_udp(client, server, initial);
+
+            observe_quic_packet(
+                &mut sessions,
+                &initial_packet,
+                start,
+                None,
+                &mut journal,
+                &start,
+            );
+            assert_eq!(journal.count(), 0);
+
+            let reply = пакет_udp(server, client, b"reply");
+            observe_quic_packet(
+                &mut sessions,
+                &reply,
+                start + std::time::Duration::from_millis(100),
+                None,
+                &mut journal,
+                &start,
+            );
+            assert_eq!(journal.count(), 1);
+            let first_reply = journal.get(0).unwrap();
+            assert_eq!(first_reply.key[37], 17);
+            assert_eq!(&first_reply.key[1..5], &client.0);
+            assert_eq!(&first_reply.key[17..21], &server.0);
+            assert_eq!(
+                first_reply.kind,
+                r2o_datapath::flow_journal::R2oFlowJournalKind::Exchange
+            );
+            assert_eq!(first_reply.code, 0);
+            assert_eq!(first_reply.num, 5);
+
+            let later_reply = пакет_udp(server, client, b"later");
+            observe_quic_packet(
+                &mut sessions,
+                &later_reply,
+                start + std::time::Duration::from_millis(200),
+                None,
+                &mut journal,
+                &start,
+            );
+            assert_eq!(journal.count(), 1);
+
+            let second_client: ([u8; 4], u16) = ([192, 0, 2, 11], 53_124);
+            initial_packet = пакет_udp(second_client, server, initial);
+            observe_quic_packet(
+                &mut sessions,
+                &initial_packet,
+                start + std::time::Duration::from_millis(300),
+                None,
+                &mut journal,
+                &start,
+            );
+            let empty_reply = пакет_udp(server, second_client, &[]);
+            observe_quic_packet(
+                &mut sessions,
+                &empty_reply,
+                start + std::time::Duration::from_millis(400),
+                None,
+                &mut journal,
+                &start,
+            );
+            assert_eq!(journal.count(), 2);
+            assert_eq!(journal.get(1).unwrap().num, 0);
         }
 
         #[test]

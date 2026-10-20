@@ -99,7 +99,19 @@ struct FlowState {
     conntrack_mark: Option<R2oQuicConntrackMark>,
     last_seen: Instant,
     forward_after_initial: u32,
+    exchange_told: bool,
     suspected: bool,
+}
+
+/// Первая обратная UDP-датаграмма после проверенного QUIC Initial.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct R2oUdpExchangeEvent {
+    /// Канонический ключ UDP-потока.
+    pub key: [u8; KEY_LEN],
+    /// Код протокольного подтверждения; ноль означает только факт обмена.
+    pub code: u8,
+    /// Длина полезной нагрузки первой ответной датаграммы.
+    pub num: u32,
 }
 
 #[cfg(target_os = "linux")]
@@ -129,6 +141,7 @@ struct InitialDatagram {
 pub struct R2oQuicSessions {
     flows: HashMap<FlowKey, FlowState>,
     initial_ring: VecDeque<InitialDatagram>,
+    udp_exchange_events: VecDeque<R2oUdpExchangeEvent>,
 }
 
 impl R2oQuicSessions {
@@ -211,6 +224,10 @@ impl R2oQuicSessions {
         self.observe_packet_at_hook(packet, now, None);
     }
 
+    pub fn take_udp_exchange_events(&mut self) -> Vec<R2oUdpExchangeEvent> {
+        self.udp_exchange_events.drain(..).collect()
+    }
+
     pub fn observe_packet_at_hook(&mut self, packet: &[u8], now: Instant, hook: Option<u8>) {
         let Some(view) = PacketView::parse(packet)
             .filter(|view| view.protocol == 17 && view.fragment & 0x3fff == 0)
@@ -262,6 +279,7 @@ impl R2oQuicSessions {
                 conntrack_mark: None,
                 last_seen: now,
                 forward_after_initial: 0,
+                exchange_told: false,
                 suspected: false,
             });
             if !first_initial {
@@ -280,6 +298,16 @@ impl R2oQuicSessions {
             flow.forward_after_initial = flow.forward_after_initial.saturating_add(1);
             flow.last_forward = now;
         } else if source == flow.server && destination == flow.client {
+            if flow.last_reverse.is_none() && !flow.exchange_told {
+                flow.exchange_told = true;
+                if self.udp_exchange_events.len() < MAX_QUIC_FLOWS {
+                    self.udp_exchange_events.push_back(R2oUdpExchangeEvent {
+                        key: key.wire_key(),
+                        code: 0,
+                        num: payload.len().min(u32::MAX as usize) as u32,
+                    });
+                }
+            }
             #[cfg(target_os = "linux")]
             {
                 if flow.last_reverse.is_none() {
@@ -501,6 +529,48 @@ mod tests {
         include_bytes!("../../r2k-core/tests/fixtures/quic_v1_initial_no_sni.bin");
     const INITIAL_FIRST: &[u8] = include_bytes!("../tests/fixtures/quic_v1_initial_first.bin");
     const INITIAL_SECOND: &[u8] = include_bytes!("../tests/fixtures/quic_v1_initial_second.bin");
+
+    #[test]
+    fn quic_журналирует_только_первую_обратную_датаграмму_включая_пустую() {
+        let start = Instant::now();
+        let client = [192, 0, 2, 10];
+        let server = [198, 51, 100, 20];
+        let initial = ipv4_packet(client, server, 53_123, 443, INITIAL);
+        let mut sessions = R2oQuicSessions::default();
+        sessions.observe_packet(&initial, start);
+        assert!(sessions.take_udp_exchange_events().is_empty());
+
+        sessions.observe_packet(
+            &ipv4_packet(server, client, 443, 53_123, b"reply"),
+            start + Duration::from_millis(100),
+        );
+        let events = sessions.take_udp_exchange_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].key[37], 17);
+        assert_eq!(&events[0].key[1..5], &client);
+        assert_eq!(&events[0].key[17..21], &server);
+        assert_eq!(events[0].code, 0);
+        assert_eq!(events[0].num, 5);
+
+        sessions.observe_packet(
+            &ipv4_packet(server, client, 443, 53_123, b"later"),
+            start + Duration::from_millis(200),
+        );
+        assert!(sessions.take_udp_exchange_events().is_empty());
+
+        let second_client = [192, 0, 2, 11];
+        sessions.observe_packet(
+            &ipv4_packet(second_client, server, 53_124, 443, INITIAL),
+            start + Duration::from_millis(300),
+        );
+        sessions.observe_packet(
+            &ipv4_packet(server, second_client, 443, 53_124, &[]),
+            start + Duration::from_millis(400),
+        );
+        let empty = sessions.take_udp_exchange_events();
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].num, 0);
+    }
 
     fn ipv4_packet(
         source: [u8; 4],

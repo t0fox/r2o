@@ -8,6 +8,7 @@ use r2k_core::control::{
 use r2o_datapath::flow_journal::{
     R2oFlowJournal, R2oFlowJournalEntry, R2oFlowJournalKind, R2oFlowJournalSummary,
 };
+use r2o_datapath::r2o_quic::R2oUdpExchangeEvent;
 
 fn запись(номер: u64) -> R2oFlowJournalEntry {
     R2oFlowJournalEntry {
@@ -92,6 +93,74 @@ fn кольцо_хранит_новейшие_записи_и_выдаёт_их_
     assert_eq!(журнал.get(0).unwrap().at_ns, 2);
     assert_eq!(журнал.get(1).unwrap().at_ns, 3);
     assert!(журнал.get(2).is_none());
+}
+
+#[test]
+fn запись_tcp_обмена_передаёт_уровень_ответа_и_подтверждение_плана() {
+    let событие = r2o_datapath::engine::R2oTcpExchangeEvent {
+        key: {
+            let mut key = [0; KEY_LEN];
+            key[0] = 4;
+            key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+            key[17..21].copy_from_slice(&[198, 51, 100, 20]);
+            key[33..35].copy_from_slice(&41000_u16.to_be_bytes());
+            key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+            key[37] = 6;
+            key
+        },
+        code: 0x16,
+        num: 1234,
+        tos: 0x0c,
+        server_hello: true,
+        planned: 1,
+    };
+    let mut журнал = R2oFlowJournal::with_capacity(1).unwrap();
+
+    журнал.record_tcp_exchange(456, &событие);
+
+    let запись = журнал.get(0).unwrap();
+    assert_eq!(запись.at_ns, 456);
+    assert_eq!(запись.key, событие.key);
+    assert_eq!(запись.kind, R2oFlowJournalKind::Exchange);
+    assert_eq!(запись.code, 0x16);
+    assert_eq!(запись.num, 1234);
+    assert_eq!(запись.tos, 0x0c);
+    assert!(запись.server_hello);
+    assert_eq!(запись.planned, 1);
+    assert_eq!(
+        R2oFlowJournalEntry::from_event_frame(&запись.to_event_frame().unwrap()).unwrap(),
+        *запись
+    );
+}
+
+#[test]
+fn запись_udp_обмена_сохраняет_первый_ответ_и_длину_пустой_датаграммы() {
+    let mut ключ = [0; KEY_LEN];
+    ключ[0] = 4;
+    ключ[1..5].copy_from_slice(&[192, 0, 2, 10]);
+    ключ[17..21].copy_from_slice(&[198, 51, 100, 20]);
+    ключ[33..35].copy_from_slice(&53_123_u16.to_be_bytes());
+    ключ[35..37].copy_from_slice(&443_u16.to_be_bytes());
+    ключ[37] = 17;
+    let событие = R2oUdpExchangeEvent {
+        key: ключ,
+        code: 0,
+        num: 0,
+    };
+    let mut журнал = R2oFlowJournal::with_capacity(1).unwrap();
+
+    журнал.record_udp_exchange(789, &событие);
+
+    let запись = журнал.get(0).unwrap();
+    assert_eq!(запись.at_ns, 789);
+    assert_eq!(запись.key, ключ);
+    assert_eq!(запись.kind, R2oFlowJournalKind::Exchange);
+    assert_eq!(запись.code, 0);
+    assert_eq!(запись.num, 0);
+    assert_eq!(
+        R2oFlowJournalEntry::from_event_frame(&запись.to_event_frame().unwrap()).unwrap(),
+        *запись
+    );
 }
 
 #[test]

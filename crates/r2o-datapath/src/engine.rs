@@ -78,6 +78,11 @@ struct TcpSession {
     reverse_tls_app_data: bool,
     reverse_server_hello: bool,
     reverse_payload_bytes_after_hello: u32,
+    reverse_first_record_type: u8,
+    reverse_record_types: u8,
+    exchange_told: bool,
+    appdata_told: bool,
+    plan_done: bool,
     reverse_rst: bool,
     hello_has_sni: bool,
     forward_data_packets: u32,
@@ -117,6 +122,11 @@ impl TcpSession {
             reverse_tls_app_data: false,
             reverse_server_hello: false,
             reverse_payload_bytes_after_hello: 0,
+            reverse_first_record_type: 0,
+            reverse_record_types: 0,
+            exchange_told: false,
+            appdata_told: false,
+            plan_done: false,
             reverse_rst: false,
             hello_has_sni: false,
             forward_data_packets: 0,
@@ -136,9 +146,32 @@ impl TcpSession {
     }
 }
 
+/// Уровень ответного TCP-обмена, собранный по пакетам одного потока.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct R2oTcpExchangeEvent {
+    /// Канонический ключ TCP-потока.
+    pub key: [u8; KEY_LEN],
+    /// Тип первой TLS-записи в ответе сервера.
+    pub code: u8,
+    /// Число байтов ответа после ClientHello на момент события.
+    pub num: u32,
+    /// Набор встреченных типов TLS-записей: биты для типов 20–23.
+    pub tos: u8,
+    /// Был ли разобран ServerHello.
+    pub server_hello: bool,
+    /// Выполнялся ли к этому потоку план: 1 — да, 2 — нет.
+    pub planned: u8,
+}
+
+impl R2oTcpExchangeEvent {
+    pub const PLANNED_YES: u8 = 1;
+    pub const PLANNED_NO: u8 = 2;
+}
+
 /// Ограниченное состояние потока для runtime-защит и очистки соединений.
 pub struct TcpSessions {
     flows: HashMap<TcpFlowKey, TcpSession>,
+    tcp_exchange_events: VecDeque<R2oTcpExchangeEvent>,
     fin_retry_events: VecDeque<R2oTcpFinRetryEvent>,
     rst_after_app_events: VecDeque<R2oTcpRstAfterAppEvent>,
 }
@@ -147,6 +180,7 @@ impl Default for TcpSessions {
     fn default() -> Self {
         Self {
             flows: HashMap::with_capacity(MAX_TCP_SESSIONS),
+            tcp_exchange_events: VecDeque::with_capacity(MAX_TCP_SESSIONS * 2),
             fin_retry_events: VecDeque::new(),
             rst_after_app_events: VecDeque::new(),
         }
@@ -167,6 +201,20 @@ impl TcpSessions {
         self.flows.iter().find_map(|(flow_key, session)| {
             (flow_key.wire_key() == *key).then_some(session.metrics)
         })
+    }
+
+    pub fn take_tcp_exchange_events(&mut self) -> Vec<R2oTcpExchangeEvent> {
+        self.tcp_exchange_events.drain(..).collect()
+    }
+
+    pub fn mark_plan_done(&mut self, key: &[u8; KEY_LEN]) {
+        if let Some((_, session)) = self
+            .flows
+            .iter_mut()
+            .find(|(flow_key, _)| flow_key.wire_key() == *key)
+        {
+            session.plan_done = true;
+        }
     }
 
     pub fn expire(&mut self, now: Instant, idle: Duration) -> usize {
@@ -481,6 +529,32 @@ impl TcpSessions {
                     .saturating_add(payload.len().min(u32::MAX as usize) as u32);
                 session.reverse_tls_app_data |= payload.first() == Some(&0x17);
                 session.reverse_server_hello |= r2k_core::tls::parse(payload).is_server_hello;
+                if session.reverse_first_record_type == 0 {
+                    session.reverse_first_record_type = payload[0];
+                }
+                if (20..=23).contains(&payload[0]) {
+                    session.reverse_record_types |= 1 << (payload[0] - 20);
+                }
+                let has_application_data = session.reverse_record_types & (1 << 3) != 0;
+                if !session.exchange_told || (!session.appdata_told && has_application_data) {
+                    session.exchange_told = true;
+                    session.appdata_told |= has_application_data;
+                    let event = R2oTcpExchangeEvent {
+                        key: key.wire_key(),
+                        code: session.reverse_first_record_type,
+                        num: session.reverse_payload_bytes_after_hello,
+                        tos: session.reverse_record_types,
+                        server_hello: session.reverse_server_hello,
+                        planned: if session.plan_done {
+                            R2oTcpExchangeEvent::PLANNED_YES
+                        } else {
+                            R2oTcpExchangeEvent::PLANNED_NO
+                        },
+                    };
+                    if self.tcp_exchange_events.len() < MAX_TCP_SESSIONS * 2 {
+                        self.tcp_exchange_events.push_back(event);
+                    }
+                }
             }
             if tcp.flags & 0x04 != 0 {
                 session.reverse_rst = true;
@@ -1216,6 +1290,117 @@ mod tests {
                 reverse_bytes: 86,
             })
         );
+    }
+
+    #[test]
+    fn tcp_журнал_повышает_уровень_обмена_при_tls_application_data() {
+        let mut sessions = TcpSessions::default();
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        sessions.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start);
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+            start + Duration::from_millis(50),
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello()),
+            start + Duration::from_millis(100),
+        );
+
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x10, 124, 900, &[]),
+            start + Duration::from_millis(125),
+        );
+        assert!(sessions.take_tcp_exchange_events().is_empty());
+
+        let mut handshake_record = vec![0x16, 0x03, 0x03, 0, 42, 2, 0, 0, 38];
+        handshake_record.extend_from_slice(&[0; 38]);
+        assert!(r2k_core::tls::parse(&handshake_record).is_server_hello);
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x18, 124, 900, &handshake_record),
+            start + Duration::from_millis(150),
+        );
+        let first = sessions.take_tcp_exchange_events();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].code, 0x16);
+        assert_eq!(first[0].num, 47);
+        assert_eq!(first[0].tos, 0x04);
+        assert!(first[0].server_hello);
+        assert_eq!(first[0].planned, 2);
+
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x18, 124, 900, &handshake_record),
+            start + Duration::from_millis(200),
+        );
+        assert!(sessions.take_tcp_exchange_events().is_empty());
+
+        let application_data = [0x17, 0x03, 0x03, 0, 1, 0];
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x18, 124, 947, &application_data),
+            start + Duration::from_millis(250),
+        );
+        let second = sessions.take_tcp_exchange_events();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].code, 0x16);
+        assert_eq!(second[0].num, 100);
+        assert_eq!(second[0].tos, 0x0c);
+        assert_eq!(second[0].planned, 2);
+
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x18, 124, 953, &application_data),
+            start + Duration::from_millis(300),
+        );
+        assert!(sessions.take_tcp_exchange_events().is_empty());
+    }
+
+    #[test]
+    fn tcp_журналирует_application_data_как_первый_ответ_один_раз() {
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = r2o_tcp_hello_flow(start, client, server);
+        let application_data = [0x17, 0x03, 0x03, 0, 1, 0];
+
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x18, 124, 900, &application_data),
+            start + Duration::from_millis(150),
+        );
+        let events = sessions.take_tcp_exchange_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].code, 0x17);
+        assert_eq!(events[0].num, 6);
+        assert_eq!(events[0].tos, 0x08);
+        assert!(!events[0].server_hello);
+        assert_eq!(events[0].planned, 2);
+
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x18, 124, 906, &application_data),
+            start + Duration::from_millis(200),
+        );
+        assert!(sessions.take_tcp_exchange_events().is_empty());
+    }
+
+    #[test]
+    fn tcp_журнал_отмечает_план_только_после_подтверждённого_applied() {
+        let mut sessions = TcpSessions::default();
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        sessions.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start);
+        sessions.track_packet(
+            &ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello()),
+            start + Duration::from_millis(50),
+        );
+        let key = sessions.flows.keys().next().unwrap().wire_key();
+        sessions.mark_plan_done(&key);
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x18, 124, 900, &[0x16, 0x03, 0x03, 0, 1, 1]),
+            start + Duration::from_millis(100),
+        );
+        let events = sessions.take_tcp_exchange_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].planned, 1);
     }
 
     #[test]
