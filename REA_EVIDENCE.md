@@ -4558,3 +4558,57 @@ TLS-формы и возможность поставить другую точ�
 Итоговый журнал: `.rea/r2o-integrated-discovery-differential-final-20261020.log`.
 Полная C/Rust/workspace/QEMU-проверка относится к этой интегрированной ветке;
 физический прогон на OpenWrt-роутере остаётся вне среды.
+
+## Ранний TCP RST и QUIC Discovery в одном потоке — 20.10.2026
+
+Для раннего обратного TCP RST используется уже полученное REA Evidence донора
+`session_packet`: артефакт SHA-256
+`34fbfe639cf712b27e5a4f50dc0240451081e8c393aa4dfcbcd57f6c3c433ff5`, Evidence
+`ev_9672d9f25b9d40aeb617232e4ae04b2492ce51c4f858684f4113669c8592a6e7`.
+Целевое `TcpSessions::track_packet` переиспользует Evidence компактного объекта
+из проверки RST-CUT: SHA-256 объекта
+`4114a621925e10f8b5283274f5eaf30402d9ff16d80d1e7357e04e6de21b455e`, Evidence
+`ev_9762254a0ac8fdafa0c618fec9469217de50488708393421b3c3cd325dbd955e`.
+Повторную декомпиляцию не запускали: новая запись формы ClientHello проверена
+по текущему C-исходнику и C/Rust/runtime differential.
+
+Эталон C записал `D2K_SUSPECT_RST` до первого обратного ответа после
+ClientHello. Rust передаёт то же событие в общий журнал как `R2oTcpRst` с
+идентификатором 19 и сохраняет TTL, опорный TTL, TOS, IP ID, состояние плана,
+направление и TLS-форму. Для полного TLS 1.2 ClientHello C и обе Rust-ступени
+выдали одинаковую строку:
+`code=1 ttl=127 ref=124 tos=46 ipid=23063 planned=2 shape=2 client_is_low=1`.
+Снятый guard-ом RST остаётся `RST-CUT`; его событие также сохраняет форму 2.
+Clang 18 AST, C `test_session`, C/Rust differential и runtime-журналирование
+прошли. Журналы: `.rea/r2o-tcp-rst-observation-differential-20261020-181715.log`
+и `.rea/r2o-tcp-rst-cut-differential-20261020-181904.log`.
+
+Для QUIC Discovery переиспользовано REA Evidence донора `ct_flow`
+`ev_3a9ceff5a658dc989f60107e94ad2b22f6dcd80fea5a0ff04bf374e7bf0c009` и
+проверено актуальное поведение C-тестом `test_quic_session`. Rust сохраняет
+маркер корректного STUN Binding или Discord IP Discovery в том же потоке и
+исключает его как из выбора conntrack-stall кандидатов, так и из последующего
+обновления кандидата. Differential: контрольный QUIC поток сделал один запрос
+conntrack; STUN и Discord Discovery — ноль запросов и ноль подозрений. Скрипт
+`scripts/r2o-quic-stun-watch-differential.sh` сам находит соседний C-эталон и
+сохраняет журнал в `.rea/`.
+
+Полный datapath прошёл: 180 тестов, 0 ошибок, 3 штатных пропуска. Workspace:
+71 набор, 856 тестов, 0 ошибок, 4 штатных пропуска. Workspace `cargo check`,
+строгая проверка `-D warnings`, release-сборка, четыре CI cross-check,
+GNU MIPS/QEMU, OpenWrt MIPS musl/QEMU, ARMv5/QEMU, NFQUEUE, firewall, сценарии
+службы/обновления роутера, упаковка выпуска, форматирование и ShellCheck прошли.
+Журналы этапа: `.rea/r2o-workspace-integration-20261020.log`,
+`.rea/r2o-cross-checkpoint-20261020.log` и
+`.rea/r2o-platform-checkpoint-20261020.log`. Nightly сообщает старое
+предупреждение о `Atomic::fetch_update` в `r2o-telegram/src/routing.rs:300`;
+SDK OpenWrt также сообщает, что `STAGING_DIR` не задан, но сборка и QEMU прошли.
+
+Проверка отдельного изменения Discord NAK показала расхождение с сохранённым
+REA/C differential: C оставляет voice-пробу активной после неудачного
+продления и передвигает следующий интервал. Изменение снято с локальной ветки;
+его поведение не попало в R2O.
+
+Закрыто два сценария, но общая оценка остаётся **64,68%**: полное состояние
+TCP/UDP, DPI/QUIC и Discord всё ещё требуют остальных ветвей и полевой
+приёмки на OpenWrt.

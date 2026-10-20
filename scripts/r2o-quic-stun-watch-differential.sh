@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 r2o_root=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 r2o_workspace_parent=$(dirname "$r2o_root")
@@ -7,10 +7,22 @@ r2o_donor_datapath=${R2O_DONOR_DATAPATH:-$r2o_workspace_parent/d2o/datapath}
 r2o_log_dir="$r2o_root/.rea"
 r2o_log="$r2o_log_dir/r2o-quic-stun-watch-differential-$(date +%Y%m%d-%H%M%S).log"
 r2o_tmp=$(mktemp -d)
-trap 'rm -rf "$r2o_tmp"' EXIT HUP INT TERM
 
 mkdir -p "$r2o_log_dir"
-exec > >(tee "$r2o_log") 2>&1
+
+r2o_cleanup() {
+    r2o_status=$?
+    rm -rf "$r2o_tmp"
+    if [ "$r2o_status" -ne 0 ] && [ -f "$r2o_log" ]; then
+        cat "$r2o_log"
+    fi
+}
+trap r2o_cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+r2o_run() {
 
 if [ ! -d "$r2o_donor_datapath" ]; then
     printf 'Каталог C-эталона не найден: %s\n' "$r2o_donor_datapath" >&2
@@ -87,39 +99,36 @@ int main(void) {
 }
 EOF
 
-r2o_link_objects=(
-    "$r2o_donor_datapath/session.o"
-    "$r2o_donor_datapath/http80.o"
-    "$r2o_donor_datapath/hold.o"
-    "$r2o_donor_datapath/capture.o"
-    "$r2o_donor_datapath/nat.o"
-    "$r2o_donor_datapath/ctq.o"
-    "$r2o_donor_datapath/nl.o"
-    "$r2o_donor_datapath/track.o"
-    "$r2o_donor_datapath/tls.o"
-    "$r2o_donor_datapath/wire.o"
-    "$r2o_donor_datapath/wire_udp.o"
-    "$r2o_donor_datapath/journal.o"
-    "$r2o_donor_datapath/plans.o"
-    "$r2o_donor_datapath/plan_parse.o"
-    "$r2o_donor_datapath/plan_apply.o"
-    "$r2o_donor_datapath/core_quic.o"
-    "$r2o_donor_datapath/core_quicwire.o"
-    "$r2o_donor_datapath/core_quicsnap.o"
-    "$r2o_donor_datapath/core_crypto.o"
-    "$r2o_donor_datapath/core_ipfrag.o"
-    "$r2o_donor_datapath/core_httpup_logic.o"
-    "$r2o_donor_datapath/core_quichello.o"
-    "$r2o_donor_datapath/core_hello.o"
-    "$r2o_donor_datapath/core_tls13core.o"
-    "$r2o_donor_datapath/core_x25519.o"
-)
-
 clang-18 -std=c99 -O2 -Wall -Wextra -Werror \
     -I"$r2o_donor_datapath/include" \
     -I"$r2o_donor_datapath/../core/include" \
     -DD2K_RELEASE_ID='"diff"' \
-    "$r2o_tmp/quic_stun_watch.c" "${r2o_link_objects[@]}" \
+    "$r2o_tmp/quic_stun_watch.c" \
+    "$r2o_donor_datapath/session.o" \
+    "$r2o_donor_datapath/http80.o" \
+    "$r2o_donor_datapath/hold.o" \
+    "$r2o_donor_datapath/capture.o" \
+    "$r2o_donor_datapath/nat.o" \
+    "$r2o_donor_datapath/ctq.o" \
+    "$r2o_donor_datapath/nl.o" \
+    "$r2o_donor_datapath/track.o" \
+    "$r2o_donor_datapath/tls.o" \
+    "$r2o_donor_datapath/wire.o" \
+    "$r2o_donor_datapath/wire_udp.o" \
+    "$r2o_donor_datapath/journal.o" \
+    "$r2o_donor_datapath/plans.o" \
+    "$r2o_donor_datapath/plan_parse.o" \
+    "$r2o_donor_datapath/plan_apply.o" \
+    "$r2o_donor_datapath/core_quic.o" \
+    "$r2o_donor_datapath/core_quicwire.o" \
+    "$r2o_donor_datapath/core_quicsnap.o" \
+    "$r2o_donor_datapath/core_crypto.o" \
+    "$r2o_donor_datapath/core_ipfrag.o" \
+    "$r2o_donor_datapath/core_httpup_logic.o" \
+    "$r2o_donor_datapath/core_quichello.o" \
+    "$r2o_donor_datapath/core_hello.o" \
+    "$r2o_donor_datapath/core_tls13core.o" \
+    "$r2o_donor_datapath/core_x25519.o" \
     -o "$r2o_tmp/quic_stun_watch"
 
 "$r2o_tmp/quic_stun_watch"
@@ -130,3 +139,7 @@ cargo +1.98.0 test -p r2o-datapath --lib \
     --locked --offline -- --nocapture
 
 printf 'ПРОЙДЕНО: C и Rust исключают STUN и Discord Discovery из QUIC conntrack-stall.\n'
+}
+
+r2o_run >"$r2o_log" 2>&1
+cat "$r2o_log"
