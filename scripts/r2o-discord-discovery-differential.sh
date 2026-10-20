@@ -73,6 +73,9 @@ mkdir -p "$r2o_log_dir"
     r2o_run_timed 'продление Discord Discovery Rust' cargo +1.98.0 test \
         -p r2o-controller --bin r2o-controller --locked --offline \
         r2o_voice_discovery_продлевает_пробу_тем_же_id_до_срока_задачи
+    r2o_run_timed 'освобождение ожидающей voice-цели Rust' cargo +1.98.0 test \
+        -p r2o-controller --bin r2o-controller --locked --offline \
+        ожидающая_voice_цель_освобождается_через_две_минуты
     r2o_run_timed 'отказ после молчания точного voice-потока Rust' cargo +1.98.0 test \
         -p r2o-controller --bin r2o-controller --locked --offline \
         r2o_voice_watch_связывает_applied_с_точным_потоком_пробы
@@ -86,6 +89,7 @@ mkdir -p "$r2o_log_dir"
 grep -q 'voice scheduler: all checks passed' "$r2o_log"
 grep -q 'r2o_установка_voice_опыта_проверяет_ack_и_trial_id .*ok' "$r2o_log"
 grep -q 'r2o_voice_discovery_продлевает_пробу_тем_же_id_до_срока_задачи .*ok' "$r2o_log"
+grep -q 'ожидающая_voice_цель_освобождается_через_две_минуты .*ok' "$r2o_log"
 grep -q 'r2o_voice_watch_связывает_applied_с_точным_потоком_пробы .*ok' "$r2o_log"
 printf 'Журнал проверки: %s\n' "$r2o_log"
 cat "$r2o_log"
