@@ -4662,3 +4662,13 @@ Unable to find unique hash for varnode; новую декомпиляцию эт
 соответствующей цели из очереди cooldown. Чужой trial ID и прочие
 неустановленные исходы не снимают ограничение. Новый тест проверяет оба
 исхода; продление опыта отдельным NAK остаётся без изменения.
+
+## Десятиминутная пауза после неубедительного Discovery — 20.10.2026
+
+Для актуального донора переиспользовано REA Evidence `ev_e168f477abfff806aad481d465e818c0a498be82f9bd6d8302043b63e5facb95`: `d2k_sched_tick` из `sched.o`, SHA-256 `f08b18597755f7fb2f62aea24786717394e60cf1cf4c9b04af7ace139f2ec679`, Ghidra 12.1.4. Псевдокод подтверждает ветку завершённого результата `inconclusive`: отчёт результата, вызов `cooldown_record_part_0(..., 2)`, затем `task_fail`. Сохранённое тело повторно не декомпилировалось.
+
+Текущий `core/sched.c` имеет SHA-256 `1de9feaab19dcea1e493aea068295470cf3143adf83157b57663f1098132ae8a`; `SCHED_INCOMPLETE_BACKOFF_MS` равен 600000 мс, а тип 2 записывает этот срок для endpoint. SHA-256 текущего `test_sched.c` — `a67f87e09a7fd93ed735b52f361e78590b9ce40679ab95e300accf0a3e9d51a3`. В сохранённом журнале `.rea/r2o-scheduler-differential-20261020-114433.log` полный набор `test_sched` прошёл с теми же версиями исходников.
+
+В R2O `classify_discovery_target` передаёт вердикт в `r2o_discovery_retry_after`: точный `Verdict::Inconclusive` получает 600 секунд, таймаут сохраняет 600 секунд срока жизни задачи, прочие вердикты не меняют стандартную паузу 120 секунд. Rust-регрессия проверяет выбор интервала, обычный `Flaky`, таймаут и границу повторной постановки.
+
+Проверки: новый адресный тест прошёл; весь `r2o-controller` прошёл (89 тестов, один штатно пропущен в библиотеке; бинарные тесты также прошли). Полный workspace после одного разового сбоя QUIC replay теста прошёл при изолированном и полном повторе. Успешно завершились `cargo check --workspace --locked --offline`, `cargo build --workspace --locked --offline`, `cargo fmt --all -- --check`, `scripts/r2o-build-openwrt-mipsel-musl.sh`, `scripts/build-mipsel.sh` и `scripts/r2o-build-armv5-musleabi.sh`, включая QEMU smoke-проверки. Остались только прежние предупреждения SDK `STAGING_DIR` и устаревшего `Atomic::fetch_update`.

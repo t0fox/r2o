@@ -1790,6 +1790,8 @@ const R2O_DISCOVERY_QUEUE_CAPACITY: usize = 64;
 const R2O_DISCOVERY_TASK_LIFETIME: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 #[cfg(unix)]
 const R2O_DISCOVERY_FAILURE_RETRY: std::time::Duration = std::time::Duration::from_secs(120);
+#[cfg(unix)]
+const R2O_DISCOVERY_INCOMPLETE_RETRY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 #[cfg(unix)]
 #[derive(Default)]
@@ -2875,6 +2877,17 @@ impl Drop for DiscoveryWorker {
 }
 
 #[cfg(unix)]
+fn r2o_discovery_retry_after(timed_out: bool, verdict: Verdict) -> Option<std::time::Duration> {
+    if timed_out {
+        Some(R2O_DISCOVERY_TASK_LIFETIME)
+    } else if verdict == Verdict::Inconclusive {
+        Some(R2O_DISCOVERY_INCOMPLETE_RETRY)
+    } else {
+        None
+    }
+}
+
+#[cfg(unix)]
 fn classify_discovery_target(
     target: r2o_controller::discovery::DiscoveryTarget,
     cancel: Arc<AtomicBool>,
@@ -2922,6 +2935,7 @@ fn classify_discovery_target(
                 },
             )
         });
+    let retry_after = r2o_discovery_retry_after(timed_out, result.verdict);
     let plan_text = if timed_out {
         None
     } else {
@@ -2937,7 +2951,7 @@ fn classify_discovery_target(
         plan_text,
         detail,
         queue_expired: false,
-        retry_after: timed_out.then_some(R2O_DISCOVERY_TASK_LIFETIME),
+        retry_after,
     }
 }
 
@@ -7776,6 +7790,61 @@ mod tests {
             failed_at,
             failed_at + std::time::Duration::from_secs(120)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_неубедительный_замер_ждёт_десять_минут_до_повтора() {
+        use r2o_controller::classify::Verdict;
+        use std::time::Duration;
+
+        let retry_after = super::r2o_discovery_retry_after(false, Verdict::Inconclusive)
+            .expect("неубедительный результат должен задать отдельную паузу");
+        assert_eq!(retry_after, Duration::from_secs(10 * 60));
+        assert_eq!(
+            super::r2o_discovery_retry_after(false, Verdict::Flaky),
+            None
+        );
+        assert_eq!(
+            super::r2o_discovery_retry_after(true, Verdict::Inconclusive),
+            Some(super::R2O_DISCOVERY_TASK_LIFETIME)
+        );
+
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
+        let permit = gate.r2o_try_acquire().unwrap();
+        let mut worker = super::DiscoveryWorker::new(None, gate);
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "inconclusive.example".into(),
+            endpoint: "198.51.100.10:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        worker.seen.insert(target.clone());
+        worker.seen_order.push_back(target.clone());
+        worker
+            .active
+            .insert(super::r2o_discovery_task_key(&target), target.clone());
+        worker.r2o_complete_outcome(super::DiscoveryOutcome {
+            target: target.clone(),
+            plan_text: None,
+            detail: "неубедительный прямой замер".into(),
+            queue_expired: false,
+            retry_after: Some(retry_after),
+        });
+        assert!(!worker.queue(target.clone()));
+
+        let failure_key = super::r2o_discovery_failure_key(&target);
+        worker.failed_at.insert(
+            failure_key.clone(),
+            std::time::Instant::now() - Duration::from_secs(599),
+        );
+        assert!(!worker.queue(target.clone()));
+        worker
+            .failed_at
+            .insert(failure_key, std::time::Instant::now() - retry_after);
+        assert!(worker.queue(target.clone()));
+        drop(worker);
+        drop(permit);
     }
 
     #[cfg(unix)]
