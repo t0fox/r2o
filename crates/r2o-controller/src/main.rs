@@ -1809,6 +1809,18 @@ struct R2oDiscoveryQueueEntry {
 }
 
 #[cfg(unix)]
+fn r2o_discovery_task_key(target: &r2o_controller::discovery::DiscoveryTarget) -> (String, u8) {
+    (target.host.clone(), target.family)
+}
+
+#[cfg(unix)]
+fn r2o_discovery_failure_key(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+) -> (String, u8, String) {
+    (target.host.clone(), target.family, target.endpoint.clone())
+}
+
+#[cfg(unix)]
 impl R2oDiscoveryQueue {
     fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -1855,7 +1867,7 @@ impl R2oDiscoveryQueue {
         let Some(entry) = self
             .entries
             .iter_mut()
-            .find(|entry| &entry.target == target)
+            .find(|entry| r2o_discovery_task_key(&entry.target) == r2o_discovery_task_key(target))
         else {
             return false;
         };
@@ -1934,9 +1946,9 @@ struct DiscoveryWorker {
     cancel: Arc<AtomicBool>,
     seen: HashSet<r2o_controller::discovery::DiscoveryTarget>,
     seen_order: VecDeque<r2o_controller::discovery::DiscoveryTarget>,
-    failed_at: HashMap<r2o_controller::discovery::DiscoveryTarget, std::time::Instant>,
-    failed_retry_after: HashMap<r2o_controller::discovery::DiscoveryTarget, std::time::Duration>,
-    active: HashSet<r2o_controller::discovery::DiscoveryTarget>,
+    failed_at: HashMap<(String, u8, String), std::time::Instant>,
+    failed_retry_after: HashMap<(String, u8, String), std::time::Duration>,
+    active: HashMap<(String, u8), r2o_controller::discovery::DiscoveryTarget>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -2670,46 +2682,53 @@ impl DiscoveryWorker {
             seen_order: VecDeque::new(),
             failed_at: HashMap::new(),
             failed_retry_after: HashMap::new(),
-            active: HashSet::new(),
+            active: HashMap::new(),
             thread: Some(thread),
         }
     }
 
     fn queue(&mut self, target: r2o_controller::discovery::DiscoveryTarget) -> bool {
-        if self.active.contains(&target) {
+        let task_key = r2o_discovery_task_key(&target);
+        if let Some(active_target) = self.active.get(&task_key).cloned() {
             let (queue, wake) = &*self.jobs;
             let promoted = queue
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .promote(&target);
+                .promote(&active_target);
             if promoted {
                 wake.notify_one();
             }
             return promoted;
         }
-        if self.seen.contains(&target) {
+        let failure_key = r2o_discovery_failure_key(&target);
+        if let Some(failed_at) = self.failed_at.get(&failure_key).copied() {
             let now = std::time::Instant::now();
             let retry_after = self
                 .failed_retry_after
-                .get(&target)
+                .get(&failure_key)
                 .copied()
                 .unwrap_or(R2O_DISCOVERY_FAILURE_RETRY);
-            if !self.failed_at.get(&target).is_some_and(|failed_at| {
-                r2o_discovery_failure_retry_due_after(*failed_at, now, retry_after)
-            }) {
+            if !r2o_discovery_failure_retry_due_after(failed_at, now, retry_after) {
                 return false;
             }
-            self.seen.remove(&target);
-            self.seen_order.retain(|seen| seen != &target);
-            self.failed_at.remove(&target);
-            self.failed_retry_after.remove(&target);
+            self.r2o_clear_failed_endpoint(&failure_key);
+        }
+        if self.seen.contains(&target) {
+            return false;
         }
         if self.seen_order.len() == 256
             && let Some(expired) = self.seen_order.pop_front()
         {
             self.seen.remove(&expired);
-            self.failed_at.remove(&expired);
-            self.failed_retry_after.remove(&expired);
+            let expired_key = r2o_discovery_failure_key(&expired);
+            if !self
+                .seen_order
+                .iter()
+                .any(|seen| r2o_discovery_failure_key(seen) == expired_key)
+            {
+                self.failed_at.remove(&expired_key);
+                self.failed_retry_after.remove(&expired_key);
+            }
         }
         self.seen.insert(target.clone());
         self.seen_order.push_back(target.clone());
@@ -2719,31 +2738,48 @@ impl DiscoveryWorker {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .enqueue(target.clone(), std::time::Instant::now());
         if enqueued {
-            self.active.insert(target);
+            self.active.insert(task_key, target);
             wake.notify_one();
             true
         } else {
             self.seen.remove(&target);
             self.seen_order.retain(|seen| seen != &target);
-            self.failed_at.remove(&target);
-            self.failed_retry_after.remove(&target);
+            self.failed_at.remove(&failure_key);
+            self.failed_retry_after.remove(&failure_key);
             false
         }
     }
 
     fn queue_after_rx_cut(&mut self, target: r2o_controller::discovery::DiscoveryTarget) -> bool {
-        if self.active.contains(&target) {
+        if self.active.contains_key(&r2o_discovery_task_key(&target)) {
             return self.queue(target);
         }
         self.seen.remove(&target);
         self.seen_order.retain(|seen| seen != &target);
-        self.failed_at.remove(&target);
-        self.failed_retry_after.remove(&target);
+        let failure_key = r2o_discovery_failure_key(&target);
+        self.failed_at.remove(&failure_key);
+        self.failed_retry_after.remove(&failure_key);
         self.queue(target)
     }
 
+    fn r2o_clear_failed_endpoint(&mut self, failure_key: &(String, u8, String)) {
+        let matching: Vec<_> = self
+            .seen_order
+            .iter()
+            .filter(|seen| &r2o_discovery_failure_key(seen) == failure_key)
+            .cloned()
+            .collect();
+        for target in matching {
+            self.seen.remove(&target);
+        }
+        self.seen_order
+            .retain(|seen| &r2o_discovery_failure_key(seen) != failure_key);
+        self.failed_at.remove(failure_key);
+        self.failed_retry_after.remove(failure_key);
+    }
+
     fn is_active(&self, target: &r2o_controller::discovery::DiscoveryTarget) -> bool {
-        self.active.contains(target)
+        self.active.contains_key(&r2o_discovery_task_key(target))
     }
 
     fn r2o_expire_queued(
@@ -2757,11 +2793,15 @@ impl DiscoveryWorker {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .r2o_expire(now);
         for target in &expired {
-            self.active.remove(target);
+            let task_key = r2o_discovery_task_key(target);
+            if self.active.get(&task_key) == Some(target) {
+                self.active.remove(&task_key);
+            }
             self.seen.remove(target);
             self.seen_order.retain(|seen| seen != target);
-            self.failed_at.remove(target);
-            self.failed_retry_after.remove(target);
+            let failure_key = r2o_discovery_failure_key(target);
+            self.failed_at.remove(&failure_key);
+            self.failed_retry_after.remove(&failure_key);
         }
         expired
     }
@@ -2772,26 +2812,27 @@ impl DiscoveryWorker {
     }
 
     fn r2o_complete_outcome(&mut self, outcome: DiscoveryOutcome) -> DiscoveryOutcome {
+        let task_key = r2o_discovery_task_key(&outcome.target);
+        let failure_key = r2o_discovery_failure_key(&outcome.target);
+        if self.active.get(&task_key) == Some(&outcome.target) {
+            self.active.remove(&task_key);
+        }
         if outcome.queue_expired {
-            self.active.remove(&outcome.target);
             self.seen.remove(&outcome.target);
             self.seen_order.retain(|seen| seen != &outcome.target);
-            self.failed_at.remove(&outcome.target);
-            self.failed_retry_after.remove(&outcome.target);
+            self.failed_at.remove(&failure_key);
+            self.failed_retry_after.remove(&failure_key);
         } else if outcome.plan_text.is_none() && self.seen.contains(&outcome.target) {
-            self.active.remove(&outcome.target);
             self.failed_at
-                .insert(outcome.target.clone(), std::time::Instant::now());
+                .insert(failure_key.clone(), std::time::Instant::now());
             if let Some(retry_after) = outcome.retry_after {
-                self.failed_retry_after
-                    .insert(outcome.target.clone(), retry_after);
+                self.failed_retry_after.insert(failure_key, retry_after);
             } else {
-                self.failed_retry_after.remove(&outcome.target);
+                self.failed_retry_after.remove(&failure_key);
             }
         } else {
-            self.active.remove(&outcome.target);
-            self.failed_at.remove(&outcome.target);
-            self.failed_retry_after.remove(&outcome.target);
+            self.failed_at.remove(&failure_key);
+            self.failed_retry_after.remove(&failure_key);
         }
         outcome
     }
@@ -7550,6 +7591,137 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn r2o_discovery_сливает_endpoint_до_исхода_задачи_имени() {
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
+        let permit = gate.r2o_try_acquire().unwrap();
+        let mut worker = super::DiscoveryWorker::new(None, gate);
+        let first = r2o_controller::discovery::DiscoveryTarget {
+            host: "same.example".into(),
+            endpoint: "198.51.100.10:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let mut later_endpoint_and_shape = first.clone();
+        later_endpoint_and_shape.endpoint = "198.51.100.11:443".into();
+        later_endpoint_and_shape.shape = r2k_core::control::SHAPE_LEGACY;
+        assert!(worker.queue(first.clone()));
+        let wait_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let waiting = worker
+                .jobs
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .waiting_for_slot;
+            if waiting {
+                break;
+            }
+            assert!(std::time::Instant::now() < wait_deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        let before_promotion = {
+            let queue = worker
+                .jobs
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = &queue.entries[0];
+            (entry.queued_at, entry.queued_event, entry.hot_event)
+        };
+
+        assert!(worker.queue(later_endpoint_and_shape.clone()));
+        {
+            let (queue, _) = &*worker.jobs;
+            let queue = queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(queue.entries.len(), 1);
+            assert_eq!(queue.entries[0].target, first);
+            assert_eq!(queue.entries[0].target.endpoint, "198.51.100.10:443");
+            assert_eq!(queue.entries[0].target.shape, SHAPE_MODERN);
+            assert_eq!(queue.entries[0].queued_at, before_promotion.0);
+            assert_eq!(queue.entries[0].queued_event, before_promotion.1);
+            assert!(queue.entries[0].hot_event > before_promotion.2);
+        }
+
+        let selected = worker
+            .jobs
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop(std::time::Instant::now())
+            .1;
+        assert_eq!(selected, Some(first.clone()));
+        assert!(!worker.queue(later_endpoint_and_shape.clone()));
+        assert!(worker.jobs.0.lock().unwrap().is_empty());
+
+        let completed = super::DiscoveryOutcome {
+            target: first.clone(),
+            plan_text: None,
+            detail: "целевая проверка завершена".into(),
+            queue_expired: false,
+            retry_after: None,
+        };
+        worker.r2o_complete_outcome(completed);
+        assert!(
+            worker
+                .failed_at
+                .contains_key(&super::r2o_discovery_failure_key(&first))
+        );
+        assert!(worker.queue(later_endpoint_and_shape.clone()));
+        let queue = worker
+            .jobs
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(queue.entries.len(), 1);
+        assert_eq!(queue.entries[0].target, later_endpoint_and_shape);
+        drop(queue);
+        drop(worker);
+        drop(permit);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_discovery_failure_cooldown_ключует_endpoint_без_shape() {
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
+        let permit = gate.r2o_try_acquire().unwrap();
+        let mut worker = super::DiscoveryWorker::new(None, gate);
+        let first = r2o_controller::discovery::DiscoveryTarget {
+            host: "same.example".into(),
+            endpoint: "198.51.100.10:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        worker.seen.insert(first.clone());
+        worker.seen_order.push_back(first.clone());
+        worker.r2o_complete_outcome(super::DiscoveryOutcome {
+            target: first.clone(),
+            plan_text: None,
+            detail: "ошибка поиска".into(),
+            queue_expired: false,
+            retry_after: None,
+        });
+        assert!(
+            worker
+                .failed_at
+                .contains_key(&super::r2o_discovery_failure_key(&first))
+        );
+
+        let mut same_endpoint_other_shape = first.clone();
+        same_endpoint_other_shape.shape = r2k_core::control::SHAPE_LEGACY;
+        assert!(!worker.queue(same_endpoint_other_shape));
+
+        let mut another_endpoint = first;
+        another_endpoint.endpoint = "198.51.100.11:443".into();
+        assert!(worker.queue(another_endpoint));
+        drop(worker);
+        drop(permit);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn failed_discovery_becomes_eligible_after_the_donor_rest_period() {
         let failed_at = std::time::Instant::now();
 
@@ -7578,7 +7750,9 @@ mod tests {
         );
         worker.seen.insert(target.clone());
         worker.seen_order.push_back(target.clone());
-        worker.active.insert(target.clone());
+        worker
+            .active
+            .insert(super::r2o_discovery_task_key(&target), target.clone());
         let outcome = super::DiscoveryOutcome {
             target: target.clone(),
             plan_text: None,
@@ -7593,17 +7767,19 @@ mod tests {
         assert!(!worker.is_active(&target));
         assert!(worker.seen.contains(&target));
         assert!(!worker.queue(target.clone()));
+        let failure_key = super::r2o_discovery_failure_key(&target);
         assert_eq!(
-            worker.failed_retry_after.get(&target),
+            worker.failed_retry_after.get(&failure_key),
             Some(&super::R2O_DISCOVERY_TASK_LIFETIME)
         );
         let now = std::time::Instant::now();
-        worker
-            .failed_at
-            .insert(target.clone(), now - std::time::Duration::from_secs(599));
+        worker.failed_at.insert(
+            failure_key.clone(),
+            now - std::time::Duration::from_secs(599),
+        );
         assert!(!worker.queue(target.clone()));
         worker.failed_at.insert(
-            target.clone(),
+            failure_key,
             std::time::Instant::now() - std::time::Duration::from_secs(600),
         );
         assert!(worker.queue(target.clone()));
