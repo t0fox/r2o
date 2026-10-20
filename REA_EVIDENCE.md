@@ -4074,3 +4074,77 @@ REA здесь переиспользовал существующие Evidence:
 подтверждённым функциям и повторной декомпиляции большого Rust ELF не было.
 Закрыт один законченный сценарий параллельного выбора адресов; полный перенос
 scheduler/Discovery и проверка на физическом OpenWrt-роутере остаются открыты.
+
+## Подтверждение ACK временного Discord-плана — 20.10.2026
+
+Источник — актуальные `core/sched.c`, `core/test_sched.c`,
+`core/voice_discovery.c`, `core/test_voice_discovery.c` и `core/stun.c` из
+рабочей копии донора. Их SHA-256 записаны в
+`.rea/r2o-discord-discovery-differential-20261020-122748.log`. Clang 18 AST
+показал `d2k_voice_discovery_search`, `d2k_discovery_response`,
+`voice_trial_same_context`, `voice_confirm`, `voice_pending_dispatch` и
+`d2k_sched_event`. Исходный обработчик ACK в `d2k_sched_event` сверяет точный
+`trial_id`: местный NAK освобождает голосовой опыт, не объявляя сетевую цель
+нерабочей. Это также проверяется C сценарием `test_sched --voice-only`.
+
+Переиспользованные REA Evidence:
+`ev_d4c9a615a16aaa4d7bf795e2cc796f9cadb21c0055527b0ac1c779a8a2af2665`
+подтверждает выпуск последней ожидающей голосовой цели;
+`ev_6d6dede896e5f1e6fadf5f8501f9908cbd680e2a8dd3b8b65fb8b0154a49243d`
+сверяет клиента и адрес сервера;
+`ev_600f8df62e6597d59672f0b6963c664dd97b20c1a2829823bf61a2e32a942f6d`
+кодирует идентификатор временной пробы в ACK;
+`ev_977bb2b14639de109b3245b03b3415207dd84276d680dad6f7b897c00f6c871a`
+разбирает и возвращает этот ID. Для установки постоянного плана уже имеется
+`ev_530adb4da29a96f9554c011cb0f8beccbcd7f4b7b0a98101780930dfad99af67`.
+
+Новый путь Rust в `crates/r2o-controller/src/main.rs` принимает временный план
+только после положительного ACK с тем же `trial_id`. Чужой ID и NAK дают
+неустановленный результат; цикл наблюдения остаётся активен, кандидат не
+подтверждается. При отказе контроллер best-effort удаляет временный план по
+исходному ID; удаление считается подтверждённым только по положительному ACK с
+тем же ID. Ошибка очистки журналируется, ограниченная аренда остаётся страховкой.
+Тест `r2o_установка_voice_опыта_проверяет_ack_и_trial_id` проверяет положительный
+ACK с точным ID, NAK, устаревший положительный ACK с другим ID, точный ID команды
+удаления и отказ на чужой ID либо NAK удаления. До исправления чужой ID принимался.
+
+Для этой критической границы запрошен точечный REA-анализ `d2k_sched_event`.
+`rea doctor --target /mnt/e/d2o/core/test_sched --provider ghidra` сообщил
+`healthy: true`, включая Ghidra headless 12.1.4 и native decompiler. Тем не менее
+оба адресных запроса завершились `execution_failure` после `Headless startup
+complete`: целый `test_sched`, SHA-256
+`7ad3c15c46660a02956adbbe6586813d36bece4d241b29665e1ab89aaa0ddac9`, run ID
+`d9c0a199-988c-4a90-b258-599c82a31b1a`; затем отдельный `sched.o`, SHA-256
+`2eb9003cd6d9a358777f28f8120d36416fc193f9e639fbbe094a2a1effe4b901`, run ID
+`e78f500b-5848-4550-802b-0232ef374ebc`. Неизменённые запросы больше не
+повторялись. Поэтому ветка ACK проверена исходником C, AST, C тестом и Rust
+дифференциалом, а не выдана за результат Ghidra.
+
+Повторный сценарий C/Rust после проверки очистки занял 11 секунд:
+`.rea/r2o-discord-discovery-differential-20261020-124454.log`. C
+`test_voice_discovery` и `test_sched --voice-only` прошли; Rust Discovery дал
+18 успешных тестов и 1 штатный пропуск из-за Linux capabilities, datapath —
+8 успешных, тест подтверждения ACK и очистки — 1 успешный. Полный
+`r2o-controller`: 59 бинарных тестов, 89 библиотечных тестов и 1 штатный
+пропуск; интеграционные тесты прошли. Workspace: 835 пройдено, 0 ошибок,
+4 штатных пропуска; журнал —
+`.rea/r2o-discord-ack-workspace-tests-20261020.log`.
+
+После изменения повторены проверки предупреждений (19,51 с), workspace release
+(60 с), cross-check aarch64, ARMv5, i686 и riscv64 (4,89/4,71/5,25/4,78 с),
+GNU MIPS/QEMU (68 с), OpenWrt MIPS musl/QEMU (56,5 с), ARMv5/QEMU (71 с) и
+NFQUEUE. Все прошли; NFQUEUE проверил Discord voice-подделку перед исходным
+STUN-пакетом, voice suspect, QUIC, TCP и освобождение удержанных пакетов при
+SIGTERM. Журналы: `.rea/r2o-discord-ack-warnings-check-20261020.log`,
+`.rea/r2o-discord-ack-release-build-20261020.log`,
+`.rea/r2o-discord-ack-cross-checks-20261020.log`,
+`.rea/r2o-discord-ack-mips-gnu-qemu-20261020.log`,
+`.rea/r2o-discord-ack-openwrt-mips-qemu-20261020.log`,
+`.rea/r2o-discord-ack-armv5-qemu-20261020.log` и
+`.rea/r2o-discord-ack-nfqueue-20261020.log`.
+
+Таймер записал 171 секунду анализа, 912 секунд первой части реализации и ещё
+666 секунд доработки очистки и полной повторной проверки; всего для этого
+сценария учтено 1578 секунд реализации и один закрытый сценарий. Оценка остаётся
+**64,68%**: остальные части scheduler/Discovery и приёмка на физическом OpenWrt
+ещё открыты.

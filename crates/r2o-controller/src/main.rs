@@ -2783,7 +2783,7 @@ impl ControlClient {
         &mut self,
         target: r2o_controller::voice_discovery::R2oVoiceTarget,
         prefix: [u8; 20],
-    ) -> Result<R2oVoiceTrialContext, Box<dyn Error>> {
+    ) -> Result<Option<R2oVoiceTrialContext>, Box<dyn Error>> {
         use std::io::Read;
 
         let plan_text = r2o_controller::voice_discovery::r2o_voice_arm_plan_text(&prefix);
@@ -2803,14 +2803,38 @@ impl ControlClient {
             &plan_records,
             trial_id,
         )?;
-        self.send_command(&command, COMMAND_SET_VOICE_ADDR_PROBE)?;
-        Ok(R2oVoiceTrialContext {
+        let ack = self.exchange_command(&command, COMMAND_SET_VOICE_ADDR_PROBE)?;
+        if ack.trial_id != Some(trial_id) || !ack.ok {
+            let reason = if ack.trial_id != Some(trial_id) {
+                "подтверждение пришло с чужим trial ID".to_owned()
+            } else {
+                match ack.reason {
+                    control::ACK_BAD_PLAN => "план не подходит runtime".to_owned(),
+                    control::ACK_NO_ROOM => "таблица временных планов заполнена".to_owned(),
+                    control::ACK_BAD_ARGS => "датапат отверг аргументы".to_owned(),
+                    _ => "неизвестная причина отказа".to_owned(),
+                }
+            };
+            let rejected_trial = R2oVoiceTrialContext {
+                target,
+                trial_id,
+                plan_text,
+                expires_at: std::time::Instant::now()
+                    + std::time::Duration::from_millis(u64::from(VOICE_ADDR_PROBE_LEASE_MAX_MS)),
+            };
+            if let Err(error) = self.retire_r2o_voice_trial(&rejected_trial) {
+                eprintln!("не удалось удалить отклонённый временный voice-план: {error}");
+            }
+            eprintln!("SET_VOICE_ADDR_PROBE не принят: {reason}");
+            return Ok(None);
+        }
+        Ok(Some(R2oVoiceTrialContext {
             target,
             trial_id,
             plan_text,
             expires_at: std::time::Instant::now()
                 + std::time::Duration::from_millis(u64::from(VOICE_ADDR_PROBE_LEASE_MAX_MS)),
-        })
+        }))
     }
 
     fn retire_r2o_voice_trial(
@@ -2822,7 +2846,23 @@ impl ControlClient {
             trial.target.server,
             trial.trial_id,
         )?;
-        self.send_command(&delete, COMMAND_DEL_VOICE_ADDR_PROBE)
+        let ack = self.exchange_command(&delete, COMMAND_DEL_VOICE_ADDR_PROBE)?;
+        if ack.trial_id != Some(trial.trial_id) {
+            return Err("DEL_VOICE_ADDR_PROBE получил подтверждение с чужим trial ID".into());
+        }
+        if !ack.ok {
+            return Err(format!(
+                "DEL_VOICE_ADDR_PROBE не выполнена: {}",
+                match ack.reason {
+                    control::ACK_BAD_PLAN => "план не подходит runtime",
+                    control::ACK_NO_ROOM => "таблица временных планов заполнена",
+                    control::ACK_BAD_ARGS => "датапат отверг аргументы",
+                    _ => "неизвестная причина",
+                }
+            )
+            .into());
+        }
+        Ok(())
     }
 
     fn confirm_r2o_voice_trial(
@@ -3044,15 +3084,23 @@ impl ControlClient {
                         .as_ref()
                         .is_some_and(|(_, _, _, mark)| mark.is_some_and(|mark| mark != 0))
                     {
-                        let r2o_trial = self.install_r2o_voice_trial(r2o_target, prefix)?;
-                        let r2o_trial_id = r2o_trial.trial_id;
-                        r2o_voice_trials.insert(r2o_trial_id, r2o_trial);
-                        println!(
-                            "Discord Discovery повторяемо обрывался после {cutoff} ответов; временный адресный план поставлен для следующего потока {} -> {}:{}",
-                            r2o_target.client,
-                            r2o_target.server.ip(),
-                            r2o_target.server.port()
-                        );
+                        if let Some(r2o_trial) = self.install_r2o_voice_trial(r2o_target, prefix)? {
+                            let r2o_trial_id = r2o_trial.trial_id;
+                            r2o_voice_trials.insert(r2o_trial_id, r2o_trial);
+                            println!(
+                                "Discord Discovery повторяемо обрывался после {cutoff} ответов; временный адресный план поставлен для следующего потока {} -> {}:{}",
+                                r2o_target.client,
+                                r2o_target.server.ip(),
+                                r2o_target.server.port()
+                            );
+                        } else {
+                            eprintln!(
+                                "Discord Discovery {} -> {}:{}: датапат не подтвердил временный план с его trial ID; цель не подтверждена",
+                                r2o_target.client,
+                                r2o_target.server.ip(),
+                                r2o_target.server.port()
+                            );
+                        }
                     } else {
                         println!(
                             "поиск Discord Discovery {} -> {}:{}: план-кандидат измерен, но временная установка требует включённого поиска с ненулевой меткой",
@@ -7532,6 +7580,113 @@ mod tests {
         let plan = Plan::parse(&command.body[4..]).unwrap();
         assert_eq!(plan.transport, 17);
         assert_eq!(plan.proto, r2k_core::plan::PROTO_VOICE);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_установка_voice_опыта_проверяет_ack_и_trial_id() {
+        use std::os::unix::net::UnixStream;
+
+        let install = |ack_ok, ack_reason, mismatched_trial_id| {
+            let (client_stream, mut server_stream) = UnixStream::pair().unwrap();
+            let server = std::thread::spawn(move || {
+                let command = read_frame(&mut server_stream).unwrap();
+                assert_eq!(command.kind, super::COMMAND_SET_VOICE_ADDR_PROBE);
+                let trial_id: [u8; 16] =
+                    command.body[command.body.len() - 16..].try_into().unwrap();
+                let mut ack_trial_id = trial_id;
+                if mismatched_trial_id {
+                    ack_trial_id[0] ^= 1;
+                }
+                server_stream
+                    .write_all(
+                        &encode_ack_for_trial(command.kind, ack_ok, ack_reason, Some(ack_trial_id))
+                            .unwrap(),
+                    )
+                    .unwrap();
+                if !ack_ok || mismatched_trial_id {
+                    let delete = read_frame(&mut server_stream).unwrap();
+                    assert_eq!(delete.kind, COMMAND_DEL_VOICE_ADDR_PROBE);
+                    assert_eq!(&delete.body[delete.body.len() - 16..], &trial_id);
+                    server_stream
+                        .write_all(
+                            &encode_ack_for_trial(delete.kind, true, 0, Some(trial_id)).unwrap(),
+                        )
+                        .unwrap();
+                }
+            });
+            let mut client = ControlClient {
+                socket: client_stream,
+                pending_events: VecDeque::new(),
+                pending_applied_events: VecDeque::new(),
+                http_search_started: Default::default(),
+                http_challenge_cooldowns: Default::default(),
+            };
+            let target = r2o_controller::voice_discovery::R2oVoiceTarget {
+                client: "192.0.2.10".parse().unwrap(),
+                server: "198.51.100.20:50004".parse().unwrap(),
+            };
+            let prefix = r2k_core::stun::binding_request([0x36; 12]);
+            let result = client.install_r2o_voice_trial(target, prefix);
+            server.join().unwrap();
+            result
+        };
+
+        assert!(
+            install(true, 0, true).unwrap().is_none(),
+            "чужой trial ID принят за подтверждение опыта"
+        );
+        assert!(
+            install(false, r2k_core::control::ACK_NO_ROOM, false)
+                .unwrap()
+                .is_none(),
+            "локальный отказ датапата превратился в установленный опыт"
+        );
+        assert!(
+            install(true, 0, false).unwrap().is_some(),
+            "точное успешное подтверждение отклонено"
+        );
+
+        for (ack_ok, matching_trial_id) in [(true, false), (false, true)] {
+            let (client_stream, mut server_stream) = UnixStream::pair().unwrap();
+            let server = std::thread::spawn(move || {
+                let delete = read_frame(&mut server_stream).unwrap();
+                assert_eq!(delete.kind, COMMAND_DEL_VOICE_ADDR_PROBE);
+                let trial_id: [u8; 16] = delete.body[delete.body.len() - 16..].try_into().unwrap();
+                let mut ack_trial_id = trial_id;
+                if !matching_trial_id {
+                    ack_trial_id[0] ^= 1;
+                }
+                server_stream
+                    .write_all(
+                        &encode_ack_for_trial(delete.kind, ack_ok, 0, Some(ack_trial_id)).unwrap(),
+                    )
+                    .unwrap();
+            });
+            let mut client = ControlClient {
+                socket: client_stream,
+                pending_events: VecDeque::new(),
+                pending_applied_events: VecDeque::new(),
+                http_search_started: Default::default(),
+                http_challenge_cooldowns: Default::default(),
+            };
+            let trial = R2oVoiceTrialContext {
+                target: r2o_controller::voice_discovery::R2oVoiceTarget {
+                    client: "192.0.2.10".parse().unwrap(),
+                    server: "198.51.100.20:50004".parse().unwrap(),
+                },
+                trial_id: [0x42; 16],
+                plan_text: String::new(),
+                expires_at: std::time::Instant::now() + std::time::Duration::from_secs(1),
+            };
+            let result = client.retire_r2o_voice_trial(&trial);
+            server.join().unwrap();
+            assert_eq!(
+                result.is_ok(),
+                ack_ok && matching_trial_id,
+                "удаление должно требовать успешный ACK с точным trial ID"
+            );
+        }
     }
 
     #[cfg(unix)]
