@@ -2149,14 +2149,18 @@ impl R2oVoiceDiscoverySeen {
         self.r2o_order.push_back((target, now));
     }
 
+    fn r2o_remove(&mut self, target: &r2o_controller::voice_discovery::R2oVoiceTarget) {
+        self.r2o_targets.remove(target);
+        self.r2o_order.retain(|(queued, _)| queued != target);
+    }
+
     fn r2o_refresh(
         &mut self,
         target: r2o_controller::voice_discovery::R2oVoiceTarget,
         now: std::time::Instant,
     ) {
         self.r2o_prune(now);
-        self.r2o_targets.remove(&target);
-        self.r2o_order.retain(|(queued, _)| *queued != target);
+        self.r2o_remove(&target);
         self.r2o_insert(target, now);
     }
 }
@@ -2171,6 +2175,27 @@ struct R2oVoiceTrialContext {
     started_at: std::time::Instant,
     renew_at: std::time::Instant,
     expires_at: std::time::Instant,
+}
+
+#[cfg(unix)]
+enum R2oVoiceTrialInstallOutcome {
+    Installed(R2oVoiceTrialContext),
+    LocalRefusal,
+    NotInstalled,
+}
+
+#[cfg(unix)]
+impl R2oVoiceDiscoverySeen {
+    fn r2o_after_trial_install(
+        &mut self,
+        target: &r2o_controller::voice_discovery::R2oVoiceTarget,
+        outcome: &R2oVoiceTrialInstallOutcome,
+    ) {
+        // Совпавший NAK — местный отказ runtime, а не провал цели.
+        if matches!(outcome, R2oVoiceTrialInstallOutcome::LocalRefusal) {
+            self.r2o_remove(target);
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -3049,7 +3074,7 @@ impl ControlClient {
         target: r2o_controller::voice_discovery::R2oVoiceTarget,
         prefix: [u8; 20],
         started_at: std::time::Instant,
-    ) -> Result<Option<R2oVoiceTrialContext>, Box<dyn Error>> {
+    ) -> Result<R2oVoiceTrialInstallOutcome, Box<dyn Error>> {
         use std::io::Read;
 
         let plan_text = r2o_controller::voice_discovery::r2o_voice_arm_plan_text(&prefix);
@@ -3057,7 +3082,7 @@ impl ControlClient {
         let expires_at = started_at + R2O_VOICE_TRIAL_TASK_LIFETIME;
         if expires_at <= now {
             eprintln!("голосовая задача Discovery истекла до установки временного плана");
-            return Ok(None);
+            return Ok(R2oVoiceTrialInstallOutcome::NotInstalled);
         }
         let mut trial_id = [0; 16];
         std::fs::File::open("/dev/urandom")?.read_exact(&mut trial_id)?;
@@ -3075,6 +3100,7 @@ impl ControlClient {
         };
         let ack = self.set_r2o_voice_trial(&trial)?;
         if ack.trial_id != Some(trial_id) || !ack.ok {
+            let local_refusal = ack.trial_id == Some(trial_id) && !ack.ok;
             let reason = if ack.trial_id != Some(trial_id) {
                 "подтверждение пришло с чужим trial ID".to_owned()
             } else {
@@ -3089,9 +3115,13 @@ impl ControlClient {
                 eprintln!("не удалось удалить отклонённый временный voice-план: {error}");
             }
             eprintln!("SET_VOICE_ADDR_PROBE не принят: {reason}");
-            return Ok(None);
+            return Ok(if local_refusal {
+                R2oVoiceTrialInstallOutcome::LocalRefusal
+            } else {
+                R2oVoiceTrialInstallOutcome::NotInstalled
+            });
         }
-        Ok(Some(trial))
+        Ok(R2oVoiceTrialInstallOutcome::Installed(trial))
     }
 
     fn set_r2o_voice_trial(
@@ -3407,26 +3437,39 @@ impl ControlClient {
                         .as_ref()
                         .is_some_and(|(_, _, _, mark)| mark.is_some_and(|mark| mark != 0))
                     {
-                        if let Some(r2o_trial) = self.install_r2o_voice_trial(
+                        let r2o_install = self.install_r2o_voice_trial(
                             r2o_target,
                             prefix,
                             r2o_outcome.started_at,
-                        )? {
-                            let r2o_trial_id = r2o_trial.trial_id;
-                            r2o_voice_trials.insert(r2o_trial_id, r2o_trial);
-                            println!(
-                                "Discord Discovery повторяемо обрывался после {cutoff} ответов; временный адресный план поставлен для следующего потока {} -> {}:{}",
+                        )?;
+                        if let Some(worker) = voice_discovery.as_mut() {
+                            worker
+                                .r2o_seen
+                                .r2o_after_trial_install(&r2o_target, &r2o_install);
+                        }
+                        match r2o_install {
+                            R2oVoiceTrialInstallOutcome::Installed(r2o_trial) => {
+                                let r2o_trial_id = r2o_trial.trial_id;
+                                r2o_voice_trials.insert(r2o_trial_id, r2o_trial);
+                                println!(
+                                    "Discord Discovery повторяемо обрывался после {cutoff} ответов; временный адресный план поставлен для следующего потока {} -> {}:{}",
+                                    r2o_target.client,
+                                    r2o_target.server.ip(),
+                                    r2o_target.server.port()
+                                );
+                            }
+                            R2oVoiceTrialInstallOutcome::LocalRefusal => eprintln!(
+                                "Discord Discovery {} -> {}:{}: датапат локально отверг временный план; цель не подтверждена, следующий поток сможет повторить поиск",
                                 r2o_target.client,
                                 r2o_target.server.ip(),
                                 r2o_target.server.port()
-                            );
-                        } else {
-                            eprintln!(
+                            ),
+                            R2oVoiceTrialInstallOutcome::NotInstalled => eprintln!(
                                 "Discord Discovery {} -> {}:{}: датапат не подтвердил временный план с его trial ID; цель не подтверждена",
                                 r2o_target.client,
                                 r2o_target.server.ip(),
                                 r2o_target.server.port()
-                            );
+                            ),
                         }
                     } else {
                         println!(
@@ -8227,17 +8270,24 @@ mod tests {
         };
 
         assert!(
-            install(true, 0, true).unwrap().is_none(),
+            matches!(
+                install(true, 0, true).unwrap(),
+                super::R2oVoiceTrialInstallOutcome::NotInstalled
+            ),
             "чужой trial ID принят за подтверждение опыта"
         );
         assert!(
-            install(false, r2k_core::control::ACK_NO_ROOM, false)
-                .unwrap()
-                .is_none(),
+            matches!(
+                install(false, r2k_core::control::ACK_NO_ROOM, false).unwrap(),
+                super::R2oVoiceTrialInstallOutcome::LocalRefusal
+            ),
             "локальный отказ датапата превратился в установленный опыт"
         );
         assert!(
-            install(true, 0, false).unwrap().is_some(),
+            matches!(
+                install(true, 0, false).unwrap(),
+                super::R2oVoiceTrialInstallOutcome::Installed(_)
+            ),
             "точное успешное подтверждение отклонено"
         );
 
@@ -8651,6 +8701,34 @@ mod tests {
         r2o_seen.r2o_refresh(r2o_target, r2o_failure_at);
         assert!(r2o_seen.r2o_contains(&r2o_target, r2o_failure_at + Duration::from_secs(119)));
         assert!(!r2o_seen.r2o_contains(&r2o_target, r2o_failure_at + Duration::from_secs(120)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn местный_voice_nak_не_блокирует_повтор_по_следующему_потоку() {
+        use super::{R2oVoiceDiscoverySeen, R2oVoiceTrialInstallOutcome};
+        use std::net::{Ipv4Addr, SocketAddrV4};
+        use std::time::Instant;
+
+        let target = r2o_controller::voice_discovery::R2oVoiceTarget {
+            client: Ipv4Addr::new(192, 0, 2, 10),
+            server: SocketAddrV4::new(Ipv4Addr::new(198, 51, 100, 20), 50_004),
+        };
+        let now = Instant::now();
+        let mut seen = R2oVoiceDiscoverySeen::default();
+        seen.r2o_insert(target, now);
+        seen.r2o_after_trial_install(&target, &R2oVoiceTrialInstallOutcome::LocalRefusal);
+        assert!(
+            !seen.r2o_contains(&target, now),
+            "локальный NAK не должен ставить цель на отдых: новый поток может повторить поиск"
+        );
+
+        seen.r2o_insert(target, now);
+        seen.r2o_after_trial_install(&target, &R2oVoiceTrialInstallOutcome::NotInstalled);
+        assert!(
+            seen.r2o_contains(&target, now),
+            "отличный от NAK исход не должен снимать ограничение повтора"
+        );
     }
 
     #[cfg(unix)]
