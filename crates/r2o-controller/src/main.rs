@@ -1664,17 +1664,30 @@ impl R2oQuicDiscoveryWorker {
         self.active.remove(&outcome.server);
         Some(outcome)
     }
+
+    fn r2o_begin_shutdown(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        self.jobs.take();
+    }
+
+    fn r2o_all_finished(&self) -> bool {
+        self.threads.iter().all(JoinHandle::is_finished)
+    }
+
+    fn r2o_join(&mut self) {
+        for thread in self.threads.drain(..) {
+            let _ = thread.join();
+        }
+        self.commands.take();
+    }
 }
 
 #[cfg(unix)]
 impl Drop for R2oQuicDiscoveryWorker {
     fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
-        self.jobs.take();
+        self.r2o_begin_shutdown();
         self.commands.take();
-        for thread in self.threads.drain(..) {
-            let _ = thread.join();
-        }
+        self.r2o_join();
     }
 }
 
@@ -3367,9 +3380,339 @@ impl ControlClient {
         }
         let mut r2o_scheduler_tick_pending = false;
         let mut r2o_quic_command_first = false;
-        loop {
-            if r2o_scheduler_tick_pending && self.pending_events.is_empty() {
-                if wait_for_control_frame(&self.socket, std::time::Duration::ZERO)? {
+        let run_result = (|| -> Result<(), Box<dyn Error>> {
+            loop {
+                if r2o_scheduler_tick_pending && self.pending_events.is_empty() {
+                    if wait_for_control_frame(&self.socket, std::time::Duration::ZERO)? {
+                        let Some(frame) = read_optional_frame(&mut self.socket)? else {
+                            return Ok(());
+                        };
+                        self.pending_events.extend(r2o_read_control_batch(
+                            &mut self.socket,
+                            frame,
+                            256,
+                        )?);
+                    } else {
+                        measurement_gate.r2o_scheduler_tick();
+                        r2o_scheduler_tick_pending = false;
+                    }
+                }
+                let r2o_now = std::time::Instant::now();
+                if let Some((worker, _, _, _)) = &mut discovery {
+                    for target in worker.r2o_expire_queued(r2o_now) {
+                        println!(
+                            "подозрение {} устарело в очереди Discovery; сетевой замер не запускался",
+                            target.host
+                        );
+                    }
+                }
+                for r2o_trial in r2o_take_expired_voice_trials(&mut r2o_voice_trials, r2o_now) {
+                    if let Err(error) = self.retire_r2o_voice_trial(&r2o_trial) {
+                        eprintln!(
+                            "временный Discord-план истёк и удалится по аренде; досрочное снятие не удалось: {error}"
+                        );
+                    }
+                }
+                let r2o_has_pending_voice_target = voice_discovery
+                    .as_ref()
+                    .is_some_and(|worker| worker.schedule.pending.is_some());
+                for r2o_trial in r2o_take_stale_pending_voice_trials(
+                    &mut r2o_voice_trials,
+                    r2o_now,
+                    r2o_has_pending_voice_target,
+                ) {
+                    if let Err(error) = self.retire_r2o_voice_trial(&r2o_trial) {
+                        eprintln!(
+                            "Discord-проба не получила решения за две минуты; ожидающая цель продолжит после истечения аренды: {error}"
+                        );
+                    }
+                }
+                self.renew_due_r2o_voice_trials(&mut r2o_voice_trials, r2o_now);
+                if let Some(r2o_worker) = voice_discovery.as_mut() {
+                    r2o_worker.release_pending(r2o_voice_trials.is_empty());
+                }
+                let mut https_cache_changed = false;
+                while let Some(result) = https_probe.try_result() {
+                    let command = encode_set_https(&result.host, result.ttl_seconds)
+                        .map_err(|error| format!("команда проверки HTTPS: {error}"))?;
+                    self.send_command(&command, COMMAND_SET_HTTPS)?;
+                    println!(
+                        "проверка HTTPS {}: {}",
+                        result.host,
+                        result.state.description()
+                    );
+                    https_cache_changed = true;
+                }
+                if https_cache_changed && let Some(path) = &https_cache_path {
+                    let wall_now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    if let Err(error) =
+                        https_probe.save_cache(path, wall_now, std::time::Instant::now())
+                    {
+                        eprintln!("кэш HTTPS не сохранён: {error}");
+                    }
+                }
+                if let Some((worker, catalog, path, _)) = &mut discovery
+                    && let Some(outcome) = worker.try_outcome()
+                {
+                    if outcome.queue_expired {
+                        println!(
+                            "подозрение {} устарело в очереди Discovery; сетевой замер не запускался",
+                            outcome.target.host
+                        );
+                    } else {
+                        self.apply_discovery_outcome(outcome, catalog, path)?;
+                    }
+                    std::io::stdout().flush()?;
+                    continue;
+                }
+                if let Some(r2o_outcome) = voice_discovery
+                    .as_mut()
+                    .and_then(R2oVoiceDiscoveryWorker::try_outcome)
+                {
+                    let r2o_target = r2o_outcome.target;
+                    if let r2o_controller::voice_discovery::R2oDiscoveryVerdict::Blocked {
+                        prefix,
+                        cutoff,
+                    } = r2o_outcome.result.verdict
+                    {
+                        if r2o_voice_trials
+                            .values()
+                            .any(|r2o_trial| r2o_trial.target == r2o_target)
+                        {
+                            println!(
+                                "поиск Discord Discovery {} -> {}:{}: временный план для этой цели уже ждёт доказательство",
+                                r2o_target.client,
+                                r2o_target.server.ip(),
+                                r2o_target.server.port()
+                            );
+                        } else if discovery
+                            .as_ref()
+                            .is_some_and(|(_, _, _, mark)| mark.is_some_and(|mark| mark != 0))
+                        {
+                            let r2o_install = self.install_r2o_voice_trial(
+                                r2o_target,
+                                prefix,
+                                r2o_outcome.started_at,
+                            )?;
+                            if let Some(worker) = voice_discovery.as_mut() {
+                                worker
+                                    .r2o_seen
+                                    .r2o_after_trial_install(&r2o_target, &r2o_install);
+                            }
+                            match r2o_install {
+                                R2oVoiceTrialInstallOutcome::Installed(r2o_trial) => {
+                                    let r2o_trial_id = r2o_trial.trial_id;
+                                    r2o_voice_trials.insert(r2o_trial_id, r2o_trial);
+                                    println!(
+                                        "Discord Discovery повторяемо обрывался после {cutoff} ответов; временный адресный план поставлен для следующего потока {} -> {}:{}",
+                                        r2o_target.client,
+                                        r2o_target.server.ip(),
+                                        r2o_target.server.port()
+                                    );
+                                }
+                                R2oVoiceTrialInstallOutcome::LocalRefusal => eprintln!(
+                                    "Discord Discovery {} -> {}:{}: датапат локально отверг временный план; цель не подтверждена, следующий поток сможет повторить поиск",
+                                    r2o_target.client,
+                                    r2o_target.server.ip(),
+                                    r2o_target.server.port()
+                                ),
+                                R2oVoiceTrialInstallOutcome::NotInstalled => eprintln!(
+                                    "Discord Discovery {} -> {}:{}: датапат не подтвердил временный план с его trial ID; цель не подтверждена",
+                                    r2o_target.client,
+                                    r2o_target.server.ip(),
+                                    r2o_target.server.port()
+                                ),
+                            }
+                        } else {
+                            println!(
+                                "поиск Discord Discovery {} -> {}:{}: план-кандидат измерен, но временная установка требует включённого поиска с ненулевой меткой",
+                                r2o_target.client,
+                                r2o_target.server.ip(),
+                                r2o_target.server.port()
+                            );
+                        }
+                        std::io::stdout().flush()?;
+                        continue;
+                    }
+                    let r2o_detail =
+                        match &r2o_outcome.result.verdict {
+                            r2o_controller::voice_discovery::R2oDiscoveryVerdict::Continue => {
+                                "прямой Discovery пока не показал повторяемого обрыва".to_owned()
+                            }
+                            r2o_controller::voice_discovery::R2oDiscoveryVerdict::Clear => {
+                                "Discovery отвечает без кандидата на исправление".to_owned()
+                            }
+                            r2o_controller::voice_discovery::R2oDiscoveryVerdict::Flaky => {
+                                "граница обрыва не повторилась".to_owned()
+                            }
+                            r2o_controller::voice_discovery::R2oDiscoveryVerdict::Unmeasured => {
+                                r2o_outcome.result.error.clone().unwrap_or_else(|| {
+                                    "зонд не дал измеримого результата".to_owned()
+                                })
+                            }
+                            r2o_controller::voice_discovery::R2oDiscoveryVerdict::Blocked {
+                                ..
+                            } => "кандидат прошёл Discovery-проверку".to_owned(),
+                        };
+                    println!(
+                        "поиск Discord Discovery {} -> {}:{}: {}",
+                        r2o_target.client,
+                        r2o_target.server.ip(),
+                        r2o_target.server.port(),
+                        r2o_detail
+                    );
+                    std::io::stdout().flush()?;
+                    continue;
+                }
+                if let Some(outcome) = http_search.as_ref().and_then(HttpSearchWorker::try_outcome)
+                {
+                    self.complete_http_search(
+                        &outcome.target,
+                        outcome.disposition,
+                        std::time::Instant::now(),
+                    );
+                    if let Err(error) = outcome.result {
+                        eprintln!(
+                            "HTTP {}: поиск завершился с ошибкой: {error}",
+                            outcome.target.host
+                        );
+                    }
+                    continue;
+                }
+                if let Some(outcome) = quic_discovery
+                    .as_mut()
+                    .and_then(R2oQuicDiscoveryWorker::try_outcome)
+                {
+                    match outcome.result {
+                        Ok(Some((plan_text, candidate_name))) => {
+                            if let Some((_, catalog, path, _)) = &mut discovery {
+                                self.r2o_install_quic_candidate(
+                                    outcome.server,
+                                    &plan_text,
+                                    &candidate_name,
+                                    catalog,
+                                    path,
+                                )?;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => eprintln!("QUIC-испытание не завершено: {error}"),
+                    }
+                    std::io::stdout().flush()?;
+                    continue;
+                }
+                if let Some(outcome) = r2o_late_rx.as_ref().and_then(R2oLateRxWorker::try_outcome) {
+                    let host = outcome.input.options.name.clone();
+                    let discovery_target = outcome.input.discovery_target;
+                    if let Some(evidence) = outcome.result.evidence {
+                        println!(
+                            "парная RX-проверка {host}: обрыв подтверждён по identity/gzip, граница около {} КБ из {} КБ; событие не устанавливает план само по себе",
+                            evidence.cut_kb, evidence.expected_kb
+                        );
+                        if let Some(target) = discovery_target
+                            && let Some((worker, _, _, _)) = &mut discovery
+                        {
+                            if worker.is_active(&target) {
+                                println!(
+                                    "классификация {} уже выполняется; повторную задачу не создаю",
+                                    target.host
+                                );
+                            } else if worker.queue_after_rx_cut(target.clone()) {
+                                println!(
+                                    "подтверждённый RX-обрыв поставил классификацию {} в очередь",
+                                    target.host
+                                );
+                            } else {
+                                println!(
+                                    "классификация {} не поставлена: очередь занята",
+                                    target.host
+                                );
+                            }
+                        }
+                    } else {
+                        println!(
+                            "парная RX-проверка {host}: обрыв не подтверждён — {}",
+                            outcome.result.reason
+                        );
+                    }
+                    std::io::stdout().flush()?;
+                    continue;
+                }
+                let frame = if let Some(frame) = self.pending_events.pop_front() {
+                    frame
+                } else {
+                    let command = if r2o_quic_command_first {
+                        quic_discovery
+                            .as_ref()
+                            .and_then(R2oQuicDiscoveryWorker::try_command)
+                            .or_else(|| {
+                                http_search.as_ref().and_then(HttpSearchWorker::try_command)
+                            })
+                    } else {
+                        http_search
+                            .as_ref()
+                            .and_then(HttpSearchWorker::try_command)
+                            .or_else(|| {
+                                quic_discovery
+                                    .as_ref()
+                                    .and_then(R2oQuicDiscoveryWorker::try_command)
+                            })
+                    };
+                    r2o_quic_command_first = !r2o_quic_command_first;
+                    if let Some(command) = command
+                        && let Some((_, catalog, path, _)) = &mut discovery
+                    {
+                        self.service_http_search_command(command, catalog, path)?;
+                        continue;
+                    }
+                    if discovery.is_some()
+                        && let Some((pending_server, pending_captured)) = r2o_pending_quic_discovery
+                            .front()
+                            .map(|pending| (pending.server, pending.captured))
+                    {
+                        let now = std::time::Instant::now();
+                        if now.saturating_duration_since(pending_captured)
+                            > std::time::Duration::from_secs(60)
+                        {
+                            let expired = r2o_pending_quic_discovery
+                                .pop_front()
+                                .expect("проверенная очередь QUIC");
+                            quic_trial_cooldowns.remove(&expired.server.ip());
+                            println!(
+                                "QUIC-проба {} пропущена: снимок Initial устарел в очереди",
+                                pending_server
+                            );
+                            continue;
+                        }
+                        if let Some(worker) = quic_discovery.as_mut()
+                            && worker.has_capacity()
+                            && let Some((pending, permit)) = r2o_take_ready_quic_discovery(
+                                &mut r2o_pending_quic_discovery,
+                                &measurement_gate,
+                            )
+                        {
+                            if !worker.queue(R2oQuicDiscoveryTask {
+                                server: pending.server,
+                                snapshot: pending.snapshot,
+                                permit,
+                            }) {
+                                eprintln!(
+                                    "QUIC-испытание {} не попало в очередь worker",
+                                    pending.server
+                                );
+                            }
+                            std::io::stdout().flush()?;
+                            continue;
+                        }
+                    }
+                    if !wait_for_control_frame(&self.socket, std::time::Duration::from_millis(100))?
+                    {
+                        measurement_gate.r2o_scheduler_tick();
+                        continue;
+                    }
                     let Some(frame) = read_optional_frame(&mut self.socket)? else {
                         return Ok(());
                     };
@@ -3378,699 +3721,56 @@ impl ControlClient {
                         frame,
                         256,
                     )?);
-                } else {
-                    measurement_gate.r2o_scheduler_tick();
-                    r2o_scheduler_tick_pending = false;
+                    r2o_scheduler_tick_pending = true;
+                    self.pending_events
+                        .pop_front()
+                        .expect("добавленное событие управляющего канала")
+                };
+                if frame.kind == EVENT_R2O_JOURNAL_ENTRY {
+                    let entry =
+                        r2o_datapath::flow_journal::R2oFlowJournalEntry::from_event_frame(&frame)
+                            .map_err(|error| format!("событие журнала: {error}"))?;
+                    println!("{}", format_flow_journal_entry(&entry));
+                    std::io::stdout().flush()?;
+                    continue;
                 }
-            }
-            let r2o_now = std::time::Instant::now();
-            if let Some((worker, _, _, _)) = &mut discovery {
-                for target in worker.r2o_expire_queued(r2o_now) {
+                if frame.kind == EVENT_R2O_JOURNAL_END {
+                    let summary =
+                        r2o_datapath::flow_journal::R2oFlowJournalSummary::from_event_frame(&frame)
+                            .map_err(|error| format!("завершение снимка журнала: {error}"))?;
                     println!(
-                        "подозрение {} устарело в очереди Discovery; сетевой замер не запускался",
-                        target.host
+                        "снимок журнала: {} записей, всего {}, вытеснено {}",
+                        summary.count, summary.added, summary.dropped
                     );
+                    std::io::stdout().flush()?;
+                    continue;
                 }
-            }
-            for r2o_trial in r2o_take_expired_voice_trials(&mut r2o_voice_trials, r2o_now) {
-                if let Err(error) = self.retire_r2o_voice_trial(&r2o_trial) {
-                    eprintln!(
-                        "временный Discord-план истёк и удалится по аренде; досрочное снятие не удалось: {error}"
-                    );
-                }
-            }
-            let r2o_has_pending_voice_target = voice_discovery
-                .as_ref()
-                .is_some_and(|worker| worker.schedule.pending.is_some());
-            for r2o_trial in r2o_take_stale_pending_voice_trials(
-                &mut r2o_voice_trials,
-                r2o_now,
-                r2o_has_pending_voice_target,
-            ) {
-                if let Err(error) = self.retire_r2o_voice_trial(&r2o_trial) {
-                    eprintln!(
-                        "Discord-проба не получила решения за две минуты; ожидающая цель продолжит после истечения аренды: {error}"
-                    );
-                }
-            }
-            self.renew_due_r2o_voice_trials(&mut r2o_voice_trials, r2o_now);
-            if let Some(r2o_worker) = voice_discovery.as_mut() {
-                r2o_worker.release_pending(r2o_voice_trials.is_empty());
-            }
-            let mut https_cache_changed = false;
-            while let Some(result) = https_probe.try_result() {
-                let command = encode_set_https(&result.host, result.ttl_seconds)
-                    .map_err(|error| format!("команда проверки HTTPS: {error}"))?;
-                self.send_command(&command, COMMAND_SET_HTTPS)?;
-                println!(
-                    "проверка HTTPS {}: {}",
-                    result.host,
-                    result.state.description()
-                );
-                https_cache_changed = true;
-            }
-            if https_cache_changed && let Some(path) = &https_cache_path {
-                let wall_now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                if let Err(error) =
-                    https_probe.save_cache(path, wall_now, std::time::Instant::now())
-                {
-                    eprintln!("кэш HTTPS не сохранён: {error}");
-                }
-            }
-            if let Some((worker, catalog, path, _)) = &mut discovery
-                && let Some(outcome) = worker.try_outcome()
-            {
-                if outcome.queue_expired {
+                if frame.kind == EVENT_HTTP_PORTAL {
+                    let portal = decode_http_portal(&frame)
+                        .map_err(|error| format!("событие HTTP portal: {error}"))?;
                     println!(
-                        "подозрение {} устарело в очереди Discovery; сетевой замер не запускался",
-                        outcome.target.host
+                        "наблюдение HTTP-портала: IPv{}, форма=ответ HTTP-портала, Host={:?}",
+                        portal.key[0],
+                        String::from_utf8_lossy(&portal.host),
                     );
-                } else {
-                    self.apply_discovery_outcome(outcome, catalog, path)?;
-                }
-                std::io::stdout().flush()?;
-                continue;
-            }
-            if let Some(r2o_outcome) = voice_discovery
-                .as_mut()
-                .and_then(R2oVoiceDiscoveryWorker::try_outcome)
-            {
-                let r2o_target = r2o_outcome.target;
-                if let r2o_controller::voice_discovery::R2oDiscoveryVerdict::Blocked {
-                    prefix,
-                    cutoff,
-                } = r2o_outcome.result.verdict
-                {
-                    if r2o_voice_trials
-                        .values()
-                        .any(|r2o_trial| r2o_trial.target == r2o_target)
+                    std::io::stdout().flush()?;
+                    if let Some((host, address)) = target_from_portal(&portal) {
+                        https_probe.submit(&host, address, std::time::Instant::now());
+                    }
+                    if !portal.answered
+                        && let Some((_, catalog, _, mark)) = &mut discovery
+                        && let Some(target) =
+                            r2o_controller::discovery::DiscoveryTarget::from_http_portal(&portal)
                     {
-                        println!(
-                            "поиск Discord Discovery {} -> {}:{}: временный план для этой цели уже ждёт доказательство",
-                            r2o_target.client,
-                            r2o_target.server.ip(),
-                            r2o_target.server.port()
-                        );
-                    } else if discovery
-                        .as_ref()
-                        .is_some_and(|(_, _, _, mark)| mark.is_some_and(|mark| mark != 0))
-                    {
-                        let r2o_install = self.install_r2o_voice_trial(
-                            r2o_target,
-                            prefix,
-                            r2o_outcome.started_at,
-                        )?;
-                        if let Some(worker) = voice_discovery.as_mut() {
-                            worker
-                                .r2o_seen
-                                .r2o_after_trial_install(&r2o_target, &r2o_install);
-                        }
-                        match r2o_install {
-                            R2oVoiceTrialInstallOutcome::Installed(r2o_trial) => {
-                                let r2o_trial_id = r2o_trial.trial_id;
-                                r2o_voice_trials.insert(r2o_trial_id, r2o_trial);
-                                println!(
-                                    "Discord Discovery повторяемо обрывался после {cutoff} ответов; временный адресный план поставлен для следующего потока {} -> {}:{}",
-                                    r2o_target.client,
-                                    r2o_target.server.ip(),
-                                    r2o_target.server.port()
-                                );
-                            }
-                            R2oVoiceTrialInstallOutcome::LocalRefusal => eprintln!(
-                                "Discord Discovery {} -> {}:{}: датапат локально отверг временный план; цель не подтверждена, следующий поток сможет повторить поиск",
-                                r2o_target.client,
-                                r2o_target.server.ip(),
-                                r2o_target.server.port()
-                            ),
-                            R2oVoiceTrialInstallOutcome::NotInstalled => eprintln!(
-                                "Discord Discovery {} -> {}:{}: датапат не подтвердил временный план с его trial ID; цель не подтверждена",
-                                r2o_target.client,
-                                r2o_target.server.ip(),
-                                r2o_target.server.port()
-                            ),
-                        }
-                    } else {
-                        println!(
-                            "поиск Discord Discovery {} -> {}:{}: план-кандидат измерен, но временная установка требует включённого поиска с ненулевой меткой",
-                            r2o_target.client,
-                            r2o_target.server.ip(),
-                            r2o_target.server.port()
-                        );
-                    }
-                    std::io::stdout().flush()?;
-                    continue;
-                }
-                let r2o_detail = match &r2o_outcome.result.verdict {
-                    r2o_controller::voice_discovery::R2oDiscoveryVerdict::Continue => {
-                        "прямой Discovery пока не показал повторяемого обрыва".to_owned()
-                    }
-                    r2o_controller::voice_discovery::R2oDiscoveryVerdict::Clear => {
-                        "Discovery отвечает без кандидата на исправление".to_owned()
-                    }
-                    r2o_controller::voice_discovery::R2oDiscoveryVerdict::Flaky => {
-                        "граница обрыва не повторилась".to_owned()
-                    }
-                    r2o_controller::voice_discovery::R2oDiscoveryVerdict::Unmeasured => r2o_outcome
-                        .result
-                        .error
-                        .clone()
-                        .unwrap_or_else(|| "зонд не дал измеримого результата".to_owned()),
-                    r2o_controller::voice_discovery::R2oDiscoveryVerdict::Blocked { .. } => {
-                        "кандидат прошёл Discovery-проверку".to_owned()
-                    }
-                };
-                println!(
-                    "поиск Discord Discovery {} -> {}:{}: {}",
-                    r2o_target.client,
-                    r2o_target.server.ip(),
-                    r2o_target.server.port(),
-                    r2o_detail
-                );
-                std::io::stdout().flush()?;
-                continue;
-            }
-            if let Some(outcome) = http_search.as_ref().and_then(HttpSearchWorker::try_outcome) {
-                self.complete_http_search(
-                    &outcome.target,
-                    outcome.disposition,
-                    std::time::Instant::now(),
-                );
-                if let Err(error) = outcome.result {
-                    eprintln!(
-                        "HTTP {}: поиск завершился с ошибкой: {error}",
-                        outcome.target.host
-                    );
-                }
-                continue;
-            }
-            if let Some(outcome) = quic_discovery
-                .as_mut()
-                .and_then(R2oQuicDiscoveryWorker::try_outcome)
-            {
-                match outcome.result {
-                    Ok(Some((plan_text, candidate_name))) => {
-                        if let Some((_, catalog, path, _)) = &mut discovery {
-                            self.r2o_install_quic_candidate(
-                                outcome.server,
-                                &plan_text,
-                                &candidate_name,
-                                catalog,
-                                path,
-                            )?;
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(error) => eprintln!("QUIC-испытание не завершено: {error}"),
-                }
-                std::io::stdout().flush()?;
-                continue;
-            }
-            if let Some(outcome) = r2o_late_rx.as_ref().and_then(R2oLateRxWorker::try_outcome) {
-                let host = outcome.input.options.name.clone();
-                let discovery_target = outcome.input.discovery_target;
-                if let Some(evidence) = outcome.result.evidence {
-                    println!(
-                        "парная RX-проверка {host}: обрыв подтверждён по identity/gzip, граница около {} КБ из {} КБ; событие не устанавливает план само по себе",
-                        evidence.cut_kb, evidence.expected_kb
-                    );
-                    if let Some(target) = discovery_target
-                        && let Some((worker, _, _, _)) = &mut discovery
-                    {
-                        if worker.is_active(&target) {
-                            println!(
-                                "классификация {} уже выполняется; повторную задачу не создаю",
-                                target.host
-                            );
-                        } else if worker.queue_after_rx_cut(target.clone()) {
-                            println!(
-                                "подтверждённый RX-обрыв поставил классификацию {} в очередь",
-                                target.host
-                            );
-                        } else {
-                            println!(
-                                "классификация {} не поставлена: очередь занята",
-                                target.host
-                            );
-                        }
-                    }
-                } else {
-                    println!(
-                        "парная RX-проверка {host}: обрыв не подтверждён — {}",
-                        outcome.result.reason
-                    );
-                }
-                std::io::stdout().flush()?;
-                continue;
-            }
-            let frame = if let Some(frame) = self.pending_events.pop_front() {
-                frame
-            } else {
-                let command = if r2o_quic_command_first {
-                    quic_discovery
-                        .as_ref()
-                        .and_then(R2oQuicDiscoveryWorker::try_command)
-                        .or_else(|| http_search.as_ref().and_then(HttpSearchWorker::try_command))
-                } else {
-                    http_search
-                        .as_ref()
-                        .and_then(HttpSearchWorker::try_command)
-                        .or_else(|| {
-                            quic_discovery
-                                .as_ref()
-                                .and_then(R2oQuicDiscoveryWorker::try_command)
-                        })
-                };
-                r2o_quic_command_first = !r2o_quic_command_first;
-                if let Some(command) = command
-                    && let Some((_, catalog, path, _)) = &mut discovery
-                {
-                    self.service_http_search_command(command, catalog, path)?;
-                    continue;
-                }
-                if discovery.is_some()
-                    && let Some((pending_server, pending_captured)) = r2o_pending_quic_discovery
-                        .front()
-                        .map(|pending| (pending.server, pending.captured))
-                {
-                    let now = std::time::Instant::now();
-                    if now.saturating_duration_since(pending_captured)
-                        > std::time::Duration::from_secs(60)
-                    {
-                        let expired = r2o_pending_quic_discovery
-                            .pop_front()
-                            .expect("проверенная очередь QUIC");
-                        quic_trial_cooldowns.remove(&expired.server.ip());
-                        println!(
-                            "QUIC-проба {} пропущена: снимок Initial устарел в очереди",
-                            pending_server
-                        );
-                        continue;
-                    }
-                    if let Some(worker) = quic_discovery.as_mut()
-                        && worker.has_capacity()
-                        && let Some((pending, permit)) = r2o_take_ready_quic_discovery(
-                            &mut r2o_pending_quic_discovery,
-                            &measurement_gate,
-                        )
-                    {
-                        if !worker.queue(R2oQuicDiscoveryTask {
-                            server: pending.server,
-                            snapshot: pending.snapshot,
-                            permit,
-                        }) {
-                            eprintln!(
-                                "QUIC-испытание {} не попало в очередь worker",
-                                pending.server
-                            );
-                        }
-                        std::io::stdout().flush()?;
-                        continue;
-                    }
-                }
-                if !wait_for_control_frame(&self.socket, std::time::Duration::from_millis(100))? {
-                    measurement_gate.r2o_scheduler_tick();
-                    continue;
-                }
-                let Some(frame) = read_optional_frame(&mut self.socket)? else {
-                    return Ok(());
-                };
-                self.pending_events
-                    .extend(r2o_read_control_batch(&mut self.socket, frame, 256)?);
-                r2o_scheduler_tick_pending = true;
-                self.pending_events
-                    .pop_front()
-                    .expect("добавленное событие управляющего канала")
-            };
-            if frame.kind == EVENT_R2O_JOURNAL_ENTRY {
-                let entry =
-                    r2o_datapath::flow_journal::R2oFlowJournalEntry::from_event_frame(&frame)
-                        .map_err(|error| format!("событие журнала: {error}"))?;
-                println!("{}", format_flow_journal_entry(&entry));
-                std::io::stdout().flush()?;
-                continue;
-            }
-            if frame.kind == EVENT_R2O_JOURNAL_END {
-                let summary =
-                    r2o_datapath::flow_journal::R2oFlowJournalSummary::from_event_frame(&frame)
-                        .map_err(|error| format!("завершение снимка журнала: {error}"))?;
-                println!(
-                    "снимок журнала: {} записей, всего {}, вытеснено {}",
-                    summary.count, summary.added, summary.dropped
-                );
-                std::io::stdout().flush()?;
-                continue;
-            }
-            if frame.kind == EVENT_HTTP_PORTAL {
-                let portal = decode_http_portal(&frame)
-                    .map_err(|error| format!("событие HTTP portal: {error}"))?;
-                println!(
-                    "наблюдение HTTP-портала: IPv{}, форма=ответ HTTP-портала, Host={:?}",
-                    portal.key[0],
-                    String::from_utf8_lossy(&portal.host),
-                );
-                std::io::stdout().flush()?;
-                if let Some((host, address)) = target_from_portal(&portal) {
-                    https_probe.submit(&host, address, std::time::Instant::now());
-                }
-                if !portal.answered
-                    && let Some((_, catalog, _, mark)) = &mut discovery
-                    && let Some(target) =
-                        r2o_controller::discovery::DiscoveryTarget::from_http_portal(&portal)
-                {
-                    let queued = http_search.as_ref().is_some_and(|worker| {
-                        self.enqueue_http_search(
-                            worker,
-                            &target,
-                            b"/",
-                            r2o_controller::http_search::Answer::Injected,
-                            catalog,
-                            *mark,
-                            false,
-                        )
-                    });
-                    if !queued {
-                        println!(
-                            "HTTP {}: цель уже проверялась или очередь занята",
-                            target.host
-                        );
-                    }
-                }
-                continue;
-            }
-            if frame.kind == EVENT_R2O_VOICE_PROOF {
-                let proof = decode_r2o_voice_proof(&frame)
-                    .map_err(|error| format!("подтверждение Discord Discovery: {error}"))?;
-                let Some(trial) = r2o_voice_trials.get(&proof.trial_id).cloned() else {
-                    println!("Discovery-ответ не относится к активному временному voice-плану");
-                    std::io::stdout().flush()?;
-                    continue;
-                };
-                if trial.expires_at <= std::time::Instant::now() {
-                    r2o_voice_trials.remove(&proof.trial_id);
-                    if let Err(error) = self.retire_r2o_voice_trial(&trial) {
-                        eprintln!(
-                            "истёкший Discord-план удалится по аренде; досрочное снятие не удалось: {error}"
-                        );
-                    }
-                    println!("Discovery-ответ пришёл после истечения временного voice-плана");
-                    std::io::stdout().flush()?;
-                    continue;
-                }
-                if !r2o_voice_proof_matches_target(&proof, trial.target) {
-                    println!("Discovery-ответ пришёл по другому клиентскому или серверному адресу");
-                    std::io::stdout().flush()?;
-                    continue;
-                }
-                if let Some((_, catalog, path, _)) = &mut discovery {
-                    r2o_voice_trials.remove(&proof.trial_id);
-                    if let Err(error) =
-                        self.confirm_r2o_voice_trial(trial.clone(), &proof, catalog, path)
-                    {
-                        r2o_voice_trials.insert(trial.trial_id, trial);
-                        eprintln!("voice-план не подтверждён: {error}");
-                    }
-                } else {
-                    println!("Discovery-ответ получен без активного каталога автопоиска");
-                }
-                std::io::stdout().flush()?;
-                continue;
-            }
-            if frame.kind == EVENT_R2O_VOICE_SUSPECT {
-                let event = decode_r2o_voice_suspect(&frame)
-                    .map_err(|error| format!("событие голосового потока: {error}"))?;
-                let Some(r2o_target) =
-                    r2o_controller::voice_discovery::r2o_voice_target_from_event(&event)
-                else {
-                    println!("подозрение Discord voice содержит неполный адрес потока");
-                    std::io::stdout().flush()?;
-                    continue;
-                };
-                if let Some(r2o_trial) =
-                    r2o_take_silent_voice_trial(&mut r2o_voice_trials, &event.key, &r2o_target)
-                {
-                    if let Some(r2o_worker) = voice_discovery.as_mut() {
-                        r2o_worker
-                            .r2o_seen
-                            .r2o_refresh(r2o_trial.target, std::time::Instant::now());
-                    }
-                    if let Err(error) = self.retire_r2o_voice_trial(&r2o_trial) {
-                        eprintln!(
-                            "голосовой приём не пробил; временное правило истечёт по аренде, досрочное снятие не удалось: {error}"
-                        );
-                    }
-                    println!(
-                        "голосовой приём не пробил поток {} -> {}:{}; цель отложена на 120 секунд",
-                        r2o_target.client,
-                        r2o_target.server.ip(),
-                        r2o_target.server.port(),
-                    );
-                    std::io::stdout().flush()?;
-                    continue;
-                }
-                let r2o_queued = if let (Some(r2o_worker), Some((_, catalog, _, _))) =
-                    (&mut voice_discovery, &discovery)
-                {
-                    if r2o_voice_target_has_active_trial(&r2o_voice_trials, &r2o_target) {
-                        false
-                    } else {
-                        let r2o_known_prefix =
-                            r2o_known_voice_discovery_prefix(catalog, *r2o_target.server.ip());
-                        r2o_worker.queue(r2o_target, r2o_known_prefix, r2o_voice_trials.is_empty())
-                    }
-                } else {
-                    false
-                };
-                println!(
-                    "обнаружен Discord voice {} -> {}:{}; {}",
-                    r2o_target.client,
-                    r2o_target.server.ip(),
-                    r2o_target.server.port(),
-                    if r2o_queued {
-                        "зонд поставлен в ограниченную очередь"
-                    } else if voice_discovery.is_none() {
-                        "автопоиск отключён"
-                    } else {
-                        "цель уже проверялась или очередь занята"
-                    }
-                );
-                std::io::stdout().flush()?;
-                continue;
-            }
-            if matches!(frame.kind, EVENT_R2O_QUIC_SUSPECT | EVENT_R2O_QUIC_STALL) {
-                let quic_stalled = frame.kind == EVENT_R2O_QUIC_STALL;
-                let event = if quic_stalled {
-                    decode_r2o_quic_stall(&frame)
-                } else {
-                    decode_r2o_quic_suspect(&frame)
-                }
-                .map_err(|error| format!("событие наблюдения QUIC: {error}"))?;
-                let (client, server) = flow_socket_addresses(&event.key, event.client_is_low);
-                if quic_stalled {
-                    println!(
-                        "наблюдение QUIC: после видимого ответа серверные пакеты не доходят, клиент продолжает передачу: {client} -> {server}; это не подтверждает блокировку"
-                    );
-                } else {
-                    println!(
-                        "наблюдение QUIC: после повтора Initial ответ не виден минимум 2 с: {client} -> {server}; это не подтверждает блокировку"
-                    );
-                }
-                let Some((_, catalog, _, _)) = &mut discovery else {
-                    std::io::stdout().flush()?;
-                    continue;
-                };
-                if server.port() != 443 {
-                    println!("QUIC-проба пропущена: временный план поддерживает только UDP/443");
-                    std::io::stdout().flush()?;
-                    continue;
-                }
-                if r2o_controller::discovery::has_usable_quic_address_binding(catalog, server.ip())
-                {
-                    println!("QUIC-проба пропущена: для адреса уже сохранён проверенный план");
-                    std::io::stdout().flush()?;
-                    continue;
-                }
-                let now = std::time::Instant::now();
-                quic_trial_cooldowns.retain(|_, until| *until > now);
-                if quic_trial_cooldowns
-                    .get(&server.ip())
-                    .is_some_and(|until| *until > now)
-                {
-                    println!("QUIC-проба пропущена: для адреса действует часовой интервал повтора");
-                    std::io::stdout().flush()?;
-                    continue;
-                }
-                let Some(captured) = quic_snapshots
-                    .get(&event.key)
-                    .map(|(_, captured)| *captured)
-                else {
-                    println!("QUIC-проба пропущена: для потока нет снимка Initial");
-                    std::io::stdout().flush()?;
-                    continue;
-                };
-                if now.saturating_duration_since(captured) > std::time::Duration::from_secs(60) {
-                    quic_snapshots.remove(&event.key);
-                    println!("QUIC-проба пропущена: снимок Initial устарел");
-                    std::io::stdout().flush()?;
-                    continue;
-                }
-                if r2o_pending_quic_discovery.len() >= R2O_QUIC_TRIAL_QUEUE_CAPACITY {
-                    println!(
-                        "QUIC-проба {} не поставлена: общая очередь замеров заполнена",
-                        server
-                    );
-                    std::io::stdout().flush()?;
-                    continue;
-                }
-                let Some((snapshot, captured)) = quic_snapshots.remove(&event.key) else {
-                    println!("QUIC-проба пропущена: снимок Initial уже удалён");
-                    std::io::stdout().flush()?;
-                    continue;
-                };
-                quic_trial_cooldowns
-                    .insert(server.ip(), now + std::time::Duration::from_secs(60 * 60));
-                let queued = r2o_enqueue_quic_discovery(
-                    &mut r2o_pending_quic_discovery,
-                    server,
-                    snapshot,
-                    captured,
-                    &measurement_gate,
-                );
-                println!(
-                    "QUIC-проба {} поставлена в общую очередь замеров ({}/{})",
-                    server, queued, R2O_QUIC_TRIAL_QUEUE_CAPACITY
-                );
-                std::io::stdout().flush()?;
-                continue;
-            }
-            if frame.kind == EVENT_R2O_TCP_SILENT {
-                let event = decode_r2o_tcp_silence(&frame)
-                    .map_err(|error| format!("событие молчания TCP: {error}"))?;
-                let (client, server) = flow_socket_addresses(&event.key, event.client_is_low);
-                println!(
-                    "наблюдение TCP: после ClientHello нет видимого ответа {client} -> {server} за {} мс; это не подтверждает блокировку",
-                    event.elapsed_ms
-                );
-                std::io::stdout().flush()?;
-                continue;
-            }
-            if frame.kind == EVENT_R2O_TCP_STALL {
-                let event = decode_r2o_tcp_stall(&frame)
-                    .map_err(|error| format!("событие зависания TCP: {error}"))?;
-                let (client, server) = flow_socket_addresses(&event.key, event.client_is_low);
-                println!(
-                    "наблюдение TCP: поток {client} -> {server} замер на оценке {} пакетов; ответ не виден {} мс; это не подтверждает блокировку",
-                    event.estimated_packets, event.elapsed_ms
-                );
-                std::io::stdout().flush()?;
-                continue;
-            }
-            if frame.kind == EVENT_R2O_TCP_FIN_RETRY {
-                let event = decode_r2o_tcp_fin_retry(&frame)
-                    .map_err(|error| format!("событие повтора FIN TCP: {error}"))?;
-                let (client, server) = flow_socket_addresses(&event.key, event.client_is_low);
-                println!(
-                    "наблюдение TCP: клиент {client} повторил FIN после видимого ответа {server}; это не подтверждает блокировку"
-                );
-                std::io::stdout().flush()?;
-                continue;
-            }
-            if frame.kind == EVENT_R2O_TCP_RST_AFTER_APP {
-                let event = decode_r2o_tcp_rst_after_app(&frame)
-                    .map_err(|error| format!("событие позднего RST TCP: {error}"))?;
-                let (client, server) = flow_socket_addresses(&event.key, event.client_is_low);
-                println!(
-                    "наблюдение TCP: сброс после TLS app-data в потоке {client} -> {server}; событие требует парной проверки объёма и само по себе не подтверждает блокировку"
-                );
-                if let Some(worker) = &mut r2o_late_rx {
-                    let now = std::time::Instant::now();
-                    let mark = discovery.as_ref().and_then(|(_, _, _, mark)| *mark);
-                    match r2o_late_rx_hellos.take_for_rst(&event, mark, now) {
-                        Some(input) => {
-                            if worker.queue(input, now) {
-                                println!(
-                                    "поставлена в очередь парная identity/gzip RX-проверка для {} -> {}",
-                                    client, server
-                                );
-                            } else {
-                                println!(
-                                    "парная RX-проверка для {client} -> {server} пропущена: очередь занята или действует десятиминутный предел для имени"
-                                );
-                            }
-                        }
-                        None => println!(
-                            "парная RX-проверка для {client} -> {server} не запущена: нет свежего полного ClientHello с SNI"
-                        ),
-                    }
-                }
-                std::io::stdout().flush()?;
-                continue;
-            }
-            if frame.kind == EVENT_HTTP_RESPONSE {
-                let response = decode_http_response(&frame)
-                    .map_err(|error| format!("событие HTTP_RESPONSE: {error}"))?;
-                let outcome = match response.code {
-                    1 => "полный ответ",
-                    2 => "результат неизвестен",
-                    3 => "обнаружен портал",
-                    4 => "обрыв ответа",
-                    _ => unreachable!("декодер отвергает неизвестный исход HTTP_RESPONSE"),
-                };
-                println!(
-                    "наблюдение HTTP-ответа: IPv{}, Host={:?}, исход={}, статус={}, тело={} байт, путь={:?}, номер запроса={}, исполнение={}, привязка известна={}",
-                    response.key[0],
-                    String::from_utf8_lossy(&response.host),
-                    outcome,
-                    response.status,
-                    response.body_bytes,
-                    String::from_utf8_lossy(&response.path),
-                    response.request_no,
-                    response.execution_id,
-                    response.binding.is_known(),
-                );
-                std::io::stdout().flush()?;
-                if let Some((_, catalog, path, mark)) = &mut discovery {
-                    let live = response.binding.is_known()
-                        && !response.binding.temporary
-                        && response.binding.kind == 1
-                        && response.binding.family == response.key[0]
-                        && response.binding.shape == SHAPE_HTTP
-                        && response.execution_id != 0
-                        && response.request_ms != 0
-                        && response.trial_id.iter().all(|byte| *byte == 0);
-                    let mut target = None;
-                    let mut expected = None;
-                    if live && response.code == 3 {
-                        let candidate =
-                            r2o_controller::discovery::DiscoveryTarget::from_http_response(
-                                &response,
-                            );
-                        if let Some(candidate) = candidate
-                            && self.revoke_http_binding(&response, &candidate, catalog, path)?
-                        {
-                            self.http_search_started
-                                .remove(&http_search_key(&candidate));
-                            target = Some(candidate);
-                            expected = Some(r2o_controller::http_search::Answer::Injected);
-                        }
-                    } else if response.code == 4 {
-                        target = r2o_controller::discovery::DiscoveryTarget::from_http_response(
-                            &response,
-                        );
-                        expected = Some(r2o_controller::http_search::Answer::Cut);
-                    }
-                    if let (Some(target), Some(expected)) = (target, expected) {
                         let queued = http_search.as_ref().is_some_and(|worker| {
                             self.enqueue_http_search(
                                 worker,
                                 &target,
-                                &response.path,
-                                expected,
+                                b"/",
+                                r2o_controller::http_search::Answer::Injected,
                                 catalog,
                                 *mark,
-                                r2o_http_live_cut_recheck(response.code, live),
+                                false,
                             )
                         });
                         if !queued {
@@ -4080,108 +3780,490 @@ impl ControlClient {
                             );
                         }
                     }
+                    continue;
                 }
-                continue;
-            }
-            if frame.kind == EVENT_APPLIED {
-                let applied =
-                    decode_applied(&frame).map_err(|error| format!("событие APPLIED: {error}"))?;
-                if let Some(r2o_trial) = r2o_voice_trials.get_mut(&applied.trial_id)
-                    && r2o_trial.expires_at > std::time::Instant::now()
-                    && r2o_voice_applied_flow_matches(r2o_trial, &applied)
-                {
-                    r2o_trial.voice_flow_key = Some(applied.key);
-                }
-                self.remember_applied_event(applied.clone());
-                println!(
-                    "исполнение подтверждено: plan={:02x?}, trial={:02x?}, execution={}, привязка известна={}",
-                    applied.plan_id,
-                    applied.trial_id,
-                    applied.execution_id,
-                    applied.binding.is_known(),
-                );
-                std::io::stdout().flush()?;
-                continue;
-            }
-            if frame.kind != EVENT_HELLO {
-                continue;
-            }
-            let hello =
-                decode_hello(&frame).map_err(|error| format!("событие датапата: {error}"))?;
-            if r2o_late_rx.is_some() {
-                r2o_late_rx_hellos.capture(&hello, std::time::Instant::now());
-            }
-            if hello.key[37] == 17
-                && hello.shape == Some(SHAPE_QUIC)
-                && let Some(snapshot) = hello.quic_snapshot.as_ref()
-            {
-                let now = std::time::Instant::now();
-                quic_snapshots.retain(|_, (_, captured)| {
-                    now.duration_since(*captured) < std::time::Duration::from_secs(60)
-                });
-                if quic_snapshots.len() >= 128 && !quic_snapshots.contains_key(&hello.key) {
-                    if let Some(oldest) = quic_snapshots
-                        .iter()
-                        .min_by_key(|(_, (_, captured))| *captured)
-                        .map(|(key, _)| *key)
-                    {
-                        quic_snapshots.remove(&oldest);
+                if frame.kind == EVENT_R2O_VOICE_PROOF {
+                    let proof = decode_r2o_voice_proof(&frame)
+                        .map_err(|error| format!("подтверждение Discord Discovery: {error}"))?;
+                    let Some(trial) = r2o_voice_trials.get(&proof.trial_id).cloned() else {
+                        println!("Discovery-ответ не относится к активному временному voice-плану");
+                        std::io::stdout().flush()?;
+                        continue;
+                    };
+                    if trial.expires_at <= std::time::Instant::now() {
+                        r2o_voice_trials.remove(&proof.trial_id);
+                        if let Err(error) = self.retire_r2o_voice_trial(&trial) {
+                            eprintln!(
+                                "истёкший Discord-план удалится по аренде; досрочное снятие не удалось: {error}"
+                            );
+                        }
+                        println!("Discovery-ответ пришёл после истечения временного voice-плана");
+                        std::io::stdout().flush()?;
+                        continue;
                     }
+                    if !r2o_voice_proof_matches_target(&proof, trial.target) {
+                        println!(
+                            "Discovery-ответ пришёл по другому клиентскому или серверному адресу"
+                        );
+                        std::io::stdout().flush()?;
+                        continue;
+                    }
+                    if let Some((_, catalog, path, _)) = &mut discovery {
+                        r2o_voice_trials.remove(&proof.trial_id);
+                        if let Err(error) =
+                            self.confirm_r2o_voice_trial(trial.clone(), &proof, catalog, path)
+                        {
+                            r2o_voice_trials.insert(trial.trial_id, trial);
+                            eprintln!("voice-план не подтверждён: {error}");
+                        }
+                    } else {
+                        println!("Discovery-ответ получен без активного каталога автопоиска");
+                    }
+                    std::io::stdout().flush()?;
+                    continue;
                 }
-                quic_snapshots.insert(hello.key, (snapshot.clone(), now));
-            }
-            let family = hello.key[0];
-            let protocol_name = match (hello.key[37], hello.shape) {
-                (17, _) => "QUIC",
-                (6, Some(SHAPE_HTTP)) => "HTTP",
-                _ => "TLS",
-            };
-            let shape_name = hello.shape.map_or("неизвестна", |shape| match shape {
-                SHAPE_MODERN => "TLS 1.3",
-                SHAPE_LEGACY => "TLS 1.2",
-                SHAPE_ECH_TCP => "ECH/TLS 1.3",
-                SHAPE_QUIC => "QUIC",
-                SHAPE_HTTP => "HTTP-запрос",
-                _ => "неизвестна",
-            });
-            let name_kind = if hello.shape == Some(SHAPE_HTTP) {
-                "Host"
-            } else {
-                "SNI"
-            };
-            if let Some(ref host) = hello.host {
-                println!(
-                    "наблюдение {protocol_name}: IPv{family}, форма={shape_name}, {name_kind}={:?}",
-                    String::from_utf8_lossy(host),
-                );
-            } else {
-                println!(
-                    "наблюдение {protocol_name}: IPv{family}, форма={shape_name}, SNI отсутствует",
-                );
-            }
-            if let Some((worker, catalog, _, _)) = &mut discovery
-                && let Some(target) = r2o_controller::discovery::DiscoveryTarget::from_event(&hello)
-            {
-                if r2o_controller::discovery::has_usable_binding(catalog, &target) {
-                    println!("план каталога уже покрывает {} ({shape_name})", target.host);
-                } else if let Some(group) = matching_domain_group(catalog, &target) {
+                if frame.kind == EVENT_R2O_VOICE_SUSPECT {
+                    let event = decode_r2o_voice_suspect(&frame)
+                        .map_err(|error| format!("событие голосового потока: {error}"))?;
+                    let Some(r2o_target) =
+                        r2o_controller::voice_discovery::r2o_voice_target_from_event(&event)
+                    else {
+                        println!("подозрение Discord voice содержит неполный адрес потока");
+                        std::io::stdout().flush()?;
+                        continue;
+                    };
+                    if let Some(r2o_trial) =
+                        r2o_take_silent_voice_trial(&mut r2o_voice_trials, &event.key, &r2o_target)
+                    {
+                        if let Some(r2o_worker) = voice_discovery.as_mut() {
+                            r2o_worker
+                                .r2o_seen
+                                .r2o_refresh(r2o_trial.target, std::time::Instant::now());
+                        }
+                        if let Err(error) = self.retire_r2o_voice_trial(&r2o_trial) {
+                            eprintln!(
+                                "голосовой приём не пробил; временное правило истечёт по аренде, досрочное снятие не удалось: {error}"
+                            );
+                        }
+                        println!(
+                            "голосовой приём не пробил поток {} -> {}:{}; цель отложена на 120 секунд",
+                            r2o_target.client,
+                            r2o_target.server.ip(),
+                            r2o_target.server.port(),
+                        );
+                        std::io::stdout().flush()?;
+                        continue;
+                    }
+                    let r2o_queued = if let (Some(r2o_worker), Some((_, catalog, _, _))) =
+                        (&mut voice_discovery, &discovery)
+                    {
+                        if r2o_voice_target_has_active_trial(&r2o_voice_trials, &r2o_target) {
+                            false
+                        } else {
+                            let r2o_known_prefix =
+                                r2o_known_voice_discovery_prefix(catalog, *r2o_target.server.ip());
+                            r2o_worker.queue(
+                                r2o_target,
+                                r2o_known_prefix,
+                                r2o_voice_trials.is_empty(),
+                            )
+                        }
+                    } else {
+                        false
+                    };
                     println!(
-                        "область {} уже применяет план {} к {} ({shape_name}); новый поиск не запускаю",
-                        group.suffix, group.plan_id, target.host
+                        "обнаружен Discord voice {} -> {}:{}; {}",
+                        r2o_target.client,
+                        r2o_target.server.ip(),
+                        r2o_target.server.port(),
+                        if r2o_queued {
+                            "зонд поставлен в ограниченную очередь"
+                        } else if voice_discovery.is_none() {
+                            "автопоиск отключён"
+                        } else {
+                            "цель уже проверялась или очередь занята"
+                        }
                     );
-                } else if worker.queue(target.clone()) {
+                    std::io::stdout().flush()?;
+                    continue;
+                }
+                if matches!(frame.kind, EVENT_R2O_QUIC_SUSPECT | EVENT_R2O_QUIC_STALL) {
+                    let quic_stalled = frame.kind == EVENT_R2O_QUIC_STALL;
+                    let event = if quic_stalled {
+                        decode_r2o_quic_stall(&frame)
+                    } else {
+                        decode_r2o_quic_suspect(&frame)
+                    }
+                    .map_err(|error| format!("событие наблюдения QUIC: {error}"))?;
+                    let (client, server) = flow_socket_addresses(&event.key, event.client_is_low);
+                    if quic_stalled {
+                        println!(
+                            "наблюдение QUIC: после видимого ответа серверные пакеты не доходят, клиент продолжает передачу: {client} -> {server}; это не подтверждает блокировку"
+                        );
+                    } else {
+                        println!(
+                            "наблюдение QUIC: после повтора Initial ответ не виден минимум 2 с: {client} -> {server}; это не подтверждает блокировку"
+                        );
+                    }
+                    let Some((_, catalog, _, _)) = &mut discovery else {
+                        std::io::stdout().flush()?;
+                        continue;
+                    };
+                    if server.port() != 443 {
+                        println!(
+                            "QUIC-проба пропущена: временный план поддерживает только UDP/443"
+                        );
+                        std::io::stdout().flush()?;
+                        continue;
+                    }
+                    if r2o_controller::discovery::has_usable_quic_address_binding(
+                        catalog,
+                        server.ip(),
+                    ) {
+                        println!("QUIC-проба пропущена: для адреса уже сохранён проверенный план");
+                        std::io::stdout().flush()?;
+                        continue;
+                    }
+                    let now = std::time::Instant::now();
+                    quic_trial_cooldowns.retain(|_, until| *until > now);
+                    if quic_trial_cooldowns
+                        .get(&server.ip())
+                        .is_some_and(|until| *until > now)
+                    {
+                        println!(
+                            "QUIC-проба пропущена: для адреса действует часовой интервал повтора"
+                        );
+                        std::io::stdout().flush()?;
+                        continue;
+                    }
+                    let Some(captured) = quic_snapshots
+                        .get(&event.key)
+                        .map(|(_, captured)| *captured)
+                    else {
+                        println!("QUIC-проба пропущена: для потока нет снимка Initial");
+                        std::io::stdout().flush()?;
+                        continue;
+                    };
+                    if now.saturating_duration_since(captured) > std::time::Duration::from_secs(60)
+                    {
+                        quic_snapshots.remove(&event.key);
+                        println!("QUIC-проба пропущена: снимок Initial устарел");
+                        std::io::stdout().flush()?;
+                        continue;
+                    }
+                    if r2o_pending_quic_discovery.len() >= R2O_QUIC_TRIAL_QUEUE_CAPACITY {
+                        println!(
+                            "QUIC-проба {} не поставлена: общая очередь замеров заполнена",
+                            server
+                        );
+                        std::io::stdout().flush()?;
+                        continue;
+                    }
+                    let Some((snapshot, captured)) = quic_snapshots.remove(&event.key) else {
+                        println!("QUIC-проба пропущена: снимок Initial уже удалён");
+                        std::io::stdout().flush()?;
+                        continue;
+                    };
+                    quic_trial_cooldowns
+                        .insert(server.ip(), now + std::time::Duration::from_secs(60 * 60));
+                    let queued = r2o_enqueue_quic_discovery(
+                        &mut r2o_pending_quic_discovery,
+                        server,
+                        snapshot,
+                        captured,
+                        &measurement_gate,
+                    );
                     println!(
-                        "поставлен в очередь классификации: {} {}",
-                        target.endpoint, target.host
+                        "QUIC-проба {} поставлена в общую очередь замеров ({}/{})",
+                        server, queued, R2O_QUIC_TRIAL_QUEUE_CAPACITY
+                    );
+                    std::io::stdout().flush()?;
+                    continue;
+                }
+                if frame.kind == EVENT_R2O_TCP_SILENT {
+                    let event = decode_r2o_tcp_silence(&frame)
+                        .map_err(|error| format!("событие молчания TCP: {error}"))?;
+                    let (client, server) = flow_socket_addresses(&event.key, event.client_is_low);
+                    println!(
+                        "наблюдение TCP: после ClientHello нет видимого ответа {client} -> {server} за {} мс; это не подтверждает блокировку",
+                        event.elapsed_ms
+                    );
+                    std::io::stdout().flush()?;
+                    continue;
+                }
+                if frame.kind == EVENT_R2O_TCP_STALL {
+                    let event = decode_r2o_tcp_stall(&frame)
+                        .map_err(|error| format!("событие зависания TCP: {error}"))?;
+                    let (client, server) = flow_socket_addresses(&event.key, event.client_is_low);
+                    println!(
+                        "наблюдение TCP: поток {client} -> {server} замер на оценке {} пакетов; ответ не виден {} мс; это не подтверждает блокировку",
+                        event.estimated_packets, event.elapsed_ms
+                    );
+                    std::io::stdout().flush()?;
+                    continue;
+                }
+                if frame.kind == EVENT_R2O_TCP_FIN_RETRY {
+                    let event = decode_r2o_tcp_fin_retry(&frame)
+                        .map_err(|error| format!("событие повтора FIN TCP: {error}"))?;
+                    let (client, server) = flow_socket_addresses(&event.key, event.client_is_low);
+                    println!(
+                        "наблюдение TCP: клиент {client} повторил FIN после видимого ответа {server}; это не подтверждает блокировку"
+                    );
+                    std::io::stdout().flush()?;
+                    continue;
+                }
+                if frame.kind == EVENT_R2O_TCP_RST_AFTER_APP {
+                    let event = decode_r2o_tcp_rst_after_app(&frame)
+                        .map_err(|error| format!("событие позднего RST TCP: {error}"))?;
+                    let (client, server) = flow_socket_addresses(&event.key, event.client_is_low);
+                    println!(
+                        "наблюдение TCP: сброс после TLS app-data в потоке {client} -> {server}; событие требует парной проверки объёма и само по себе не подтверждает блокировку"
+                    );
+                    if let Some(worker) = &mut r2o_late_rx {
+                        let now = std::time::Instant::now();
+                        let mark = discovery.as_ref().and_then(|(_, _, _, mark)| *mark);
+                        match r2o_late_rx_hellos.take_for_rst(&event, mark, now) {
+                            Some(input) => {
+                                if worker.queue(input, now) {
+                                    println!(
+                                        "поставлена в очередь парная identity/gzip RX-проверка для {} -> {}",
+                                        client, server
+                                    );
+                                } else {
+                                    println!(
+                                        "парная RX-проверка для {client} -> {server} пропущена: очередь занята или действует десятиминутный предел для имени"
+                                    );
+                                }
+                            }
+                            None => println!(
+                                "парная RX-проверка для {client} -> {server} не запущена: нет свежего полного ClientHello с SNI"
+                            ),
+                        }
+                    }
+                    std::io::stdout().flush()?;
+                    continue;
+                }
+                if frame.kind == EVENT_HTTP_RESPONSE {
+                    let response = decode_http_response(&frame)
+                        .map_err(|error| format!("событие HTTP_RESPONSE: {error}"))?;
+                    let outcome = match response.code {
+                        1 => "полный ответ",
+                        2 => "результат неизвестен",
+                        3 => "обнаружен портал",
+                        4 => "обрыв ответа",
+                        _ => unreachable!("декодер отвергает неизвестный исход HTTP_RESPONSE"),
+                    };
+                    println!(
+                        "наблюдение HTTP-ответа: IPv{}, Host={:?}, исход={}, статус={}, тело={} байт, путь={:?}, номер запроса={}, исполнение={}, привязка известна={}",
+                        response.key[0],
+                        String::from_utf8_lossy(&response.host),
+                        outcome,
+                        response.status,
+                        response.body_bytes,
+                        String::from_utf8_lossy(&response.path),
+                        response.request_no,
+                        response.execution_id,
+                        response.binding.is_known(),
+                    );
+                    std::io::stdout().flush()?;
+                    if let Some((_, catalog, path, mark)) = &mut discovery {
+                        let live = response.binding.is_known()
+                            && !response.binding.temporary
+                            && response.binding.kind == 1
+                            && response.binding.family == response.key[0]
+                            && response.binding.shape == SHAPE_HTTP
+                            && response.execution_id != 0
+                            && response.request_ms != 0
+                            && response.trial_id.iter().all(|byte| *byte == 0);
+                        let mut target = None;
+                        let mut expected = None;
+                        if live && response.code == 3 {
+                            let candidate =
+                                r2o_controller::discovery::DiscoveryTarget::from_http_response(
+                                    &response,
+                                );
+                            if let Some(candidate) = candidate
+                                && self.revoke_http_binding(&response, &candidate, catalog, path)?
+                            {
+                                self.http_search_started
+                                    .remove(&http_search_key(&candidate));
+                                target = Some(candidate);
+                                expected = Some(r2o_controller::http_search::Answer::Injected);
+                            }
+                        } else if response.code == 4 {
+                            target = r2o_controller::discovery::DiscoveryTarget::from_http_response(
+                                &response,
+                            );
+                            expected = Some(r2o_controller::http_search::Answer::Cut);
+                        }
+                        if let (Some(target), Some(expected)) = (target, expected) {
+                            let queued = http_search.as_ref().is_some_and(|worker| {
+                                self.enqueue_http_search(
+                                    worker,
+                                    &target,
+                                    &response.path,
+                                    expected,
+                                    catalog,
+                                    *mark,
+                                    r2o_http_live_cut_recheck(response.code, live),
+                                )
+                            });
+                            if !queued {
+                                println!(
+                                    "HTTP {}: цель уже проверялась или очередь занята",
+                                    target.host
+                                );
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if frame.kind == EVENT_APPLIED {
+                    let applied = decode_applied(&frame)
+                        .map_err(|error| format!("событие APPLIED: {error}"))?;
+                    if let Some(r2o_trial) = r2o_voice_trials.get_mut(&applied.trial_id)
+                        && r2o_trial.expires_at > std::time::Instant::now()
+                        && r2o_voice_applied_flow_matches(r2o_trial, &applied)
+                    {
+                        r2o_trial.voice_flow_key = Some(applied.key);
+                    }
+                    self.remember_applied_event(applied.clone());
+                    println!(
+                        "исполнение подтверждено: plan={:02x?}, trial={:02x?}, execution={}, привязка известна={}",
+                        applied.plan_id,
+                        applied.trial_id,
+                        applied.execution_id,
+                        applied.binding.is_known(),
+                    );
+                    std::io::stdout().flush()?;
+                    continue;
+                }
+                if frame.kind != EVENT_HELLO {
+                    continue;
+                }
+                let hello =
+                    decode_hello(&frame).map_err(|error| format!("событие датапата: {error}"))?;
+                if r2o_late_rx.is_some() {
+                    r2o_late_rx_hellos.capture(&hello, std::time::Instant::now());
+                }
+                if hello.key[37] == 17
+                    && hello.shape == Some(SHAPE_QUIC)
+                    && let Some(snapshot) = hello.quic_snapshot.as_ref()
+                {
+                    let now = std::time::Instant::now();
+                    quic_snapshots.retain(|_, (_, captured)| {
+                        now.duration_since(*captured) < std::time::Duration::from_secs(60)
+                    });
+                    if quic_snapshots.len() >= 128 && !quic_snapshots.contains_key(&hello.key) {
+                        if let Some(oldest) = quic_snapshots
+                            .iter()
+                            .min_by_key(|(_, (_, captured))| *captured)
+                            .map(|(key, _)| *key)
+                        {
+                            quic_snapshots.remove(&oldest);
+                        }
+                    }
+                    quic_snapshots.insert(hello.key, (snapshot.clone(), now));
+                }
+                let family = hello.key[0];
+                let protocol_name = match (hello.key[37], hello.shape) {
+                    (17, _) => "QUIC",
+                    (6, Some(SHAPE_HTTP)) => "HTTP",
+                    _ => "TLS",
+                };
+                let shape_name = hello.shape.map_or("неизвестна", |shape| match shape {
+                    SHAPE_MODERN => "TLS 1.3",
+                    SHAPE_LEGACY => "TLS 1.2",
+                    SHAPE_ECH_TCP => "ECH/TLS 1.3",
+                    SHAPE_QUIC => "QUIC",
+                    SHAPE_HTTP => "HTTP-запрос",
+                    _ => "неизвестна",
+                });
+                let name_kind = if hello.shape == Some(SHAPE_HTTP) {
+                    "Host"
+                } else {
+                    "SNI"
+                };
+                if let Some(ref host) = hello.host {
+                    println!(
+                        "наблюдение {protocol_name}: IPv{family}, форма={shape_name}, {name_kind}={:?}",
+                        String::from_utf8_lossy(host),
                     );
                 } else {
                     println!(
-                        "классификация уже в очереди или очередь заполнена: {}",
-                        target.host
+                        "наблюдение {protocol_name}: IPv{family}, форма={shape_name}, SNI отсутствует",
                     );
                 }
+                if let Some((worker, catalog, _, _)) = &mut discovery
+                    && let Some(target) =
+                        r2o_controller::discovery::DiscoveryTarget::from_event(&hello)
+                {
+                    if r2o_controller::discovery::has_usable_binding(catalog, &target) {
+                        println!("план каталога уже покрывает {} ({shape_name})", target.host);
+                    } else if let Some(group) = matching_domain_group(catalog, &target) {
+                        println!(
+                            "область {} уже применяет план {} к {} ({shape_name}); новый поиск не запускаю",
+                            group.suffix, group.plan_id, target.host
+                        );
+                    } else if worker.queue(target.clone()) {
+                        println!(
+                            "поставлен в очередь классификации: {} {}",
+                            target.endpoint, target.host
+                        );
+                    } else {
+                        println!(
+                            "классификация уже в очереди или очередь заполнена: {}",
+                            target.host
+                        );
+                    }
+                }
+                std::io::stdout().flush()?;
             }
-            std::io::stdout().flush()?;
+        })();
+        let shutdown_result = if let (Some(worker), Some((_, catalog, path, _))) =
+            (quic_discovery.as_mut(), discovery.as_mut())
+        {
+            self.r2o_stop_quic_discovery(worker, catalog, path)
+        } else {
+            Ok(())
+        };
+        match (run_result, shutdown_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(run_error), Err(shutdown_error)) => Err(format!(
+                "цикл событий завершился с ошибкой ({run_error}); QUIC Discovery не удалось завершить ({shutdown_error})"
+            )
+            .into()),
+        }
+    }
+
+    fn r2o_stop_quic_discovery(
+        &mut self,
+        worker: &mut R2oQuicDiscoveryWorker,
+        catalog: &mut Catalog,
+        catalog_path: &std::path::Path,
+    ) -> Result<(), Box<dyn Error>> {
+        worker.r2o_begin_shutdown();
+        let mut cleanup_error = None;
+        while !worker.r2o_all_finished() {
+            while let Some(command) = worker.try_command() {
+                if let Err(error) = self.service_http_search_command(command, catalog, catalog_path)
+                {
+                    cleanup_error.get_or_insert_with(|| error.to_string());
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        while let Some(command) = worker.try_command() {
+            if let Err(error) = self.service_http_search_command(command, catalog, catalog_path) {
+                cleanup_error.get_or_insert_with(|| error.to_string());
+            }
+        }
+        worker.r2o_join();
+        if let Some(error) = cleanup_error {
+            Err(format!("не удалось завершить QUIC Discovery: {error}").into())
+        } else {
+            Ok(())
         }
     }
 
@@ -6915,6 +6997,73 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn r2o_остановка_quic_worker_обслуживает_удаление_временной_пробы() {
+        use super::{HttpSearchCommand, R2oQuicDiscoveryTask, R2oQuicDiscoveryWorker};
+        use std::sync::mpsc;
+        use std::sync::{Arc, atomic::Ordering};
+
+        let server = "198.51.100.10:443".parse().unwrap();
+        let local = "192.0.2.10:41000".parse().unwrap();
+        let trial_id = [0x41; 16];
+        let (started_sender, started_receiver) = mpsc::channel();
+        let mut worker = R2oQuicDiscoveryWorker::r2o_new_with_runner(Arc::new(
+            move |_task, commands, cancel| {
+                started_sender.send(()).unwrap();
+                while !cancel.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                let (reply, result) = mpsc::sync_channel(1);
+                commands
+                    .send(HttpSearchCommand::R2oDeleteQuicProbe {
+                        command: super::encode_delete_addr_probe(local, server, trial_id).unwrap(),
+                        reply,
+                    })
+                    .map_err(|error| error.to_string())?;
+                result
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .map_err(|error| error.to_string())??;
+                Ok(None)
+            },
+        ));
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
+        assert!(worker.queue(R2oQuicDiscoveryTask {
+            server,
+            snapshot: Vec::new(),
+            permit: gate.r2o_try_acquire().unwrap(),
+        }));
+        started_receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+
+        let (socket, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let control_thread = std::thread::spawn(move || {
+            let delete = read_frame(&mut peer).unwrap();
+            assert_eq!(delete.kind, super::COMMAND_DEL_ADDR_PROBE);
+            peer.write_all(&encode_ack(delete.kind, true, 0).unwrap())
+                .unwrap();
+        });
+        let mut client = super::ControlClient {
+            socket,
+            pending_events: VecDeque::new(),
+            pending_applied_events: VecDeque::new(),
+            http_search_started: std::collections::HashMap::new(),
+            http_challenge_cooldowns: std::collections::HashMap::new(),
+        };
+        let mut catalog = Catalog::default();
+
+        client
+            .r2o_stop_quic_discovery(
+                &mut worker,
+                &mut catalog,
+                std::path::Path::new("каталог.json"),
+            )
+            .unwrap();
+        control_thread.join().unwrap();
+        assert!(worker.r2o_all_finished());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn r2o_quic_подтверждение_из_worker_сохраняет_и_устанавливает_план() {
         let work = std::env::temp_dir().join(format!(
             "r2o-quic-install-{}-{}",
@@ -7762,7 +7911,6 @@ mod tests {
         assert!(worker.queue(first.clone()));
         assert!(worker.queue(third.clone()));
         drop(first_permit);
-        drop(second_permit);
 
         let outcome_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let outcome = loop {
@@ -7773,6 +7921,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         };
         assert_eq!(outcome.target, third);
+        drop(second_permit);
     }
 
     #[cfg(unix)]

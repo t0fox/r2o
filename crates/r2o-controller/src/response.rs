@@ -716,8 +716,10 @@ fn handshake(
     let owned_fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
     let fd = owned_fd.as_raw_fd();
     let mark = options.mark.unwrap_or(BYPASS_MARK) as libc::c_int;
-    set_socket_option(fd, libc::SOL_SOCKET, SO_MARK, mark)
-        .map_err(|error| format!("не удалось установить SO_MARK для TLS-зонда: {error}"))?;
+    if mark != 0 {
+        set_socket_option(fd, libc::SOL_SOCKET, SO_MARK, mark)
+            .map_err(|error| format!("не удалось установить SO_MARK для TLS-зонда: {error}"))?;
+    }
     set_socket_option(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, 1)
         .map_err(|error| format!("не удалось установить TCP_NODELAY для TLS-зонда: {error}"))?;
 

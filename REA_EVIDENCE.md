@@ -4823,3 +4823,39 @@ CI для ARM64 musl прошла; ARM64 GNU под QEMU прошёл `r2o-datap
 `Operation not supported` в пользовательском режиме QEMU) и `r2o-manager`
 (24 теста). Проверки конфигурации роутера и импорта менеджера прошли. Логи этапа:
 `.rea/r2o-flow-capacity-*20261021.log`.
+
+## Очистка QUIC-пробы при остановке Discovery — 21.10.2026
+
+Для поведения донора повторно использованы REA Evidence:
+
+| Наблюдение | Evidence | Область подтверждения |
+|---|---|---|
+| `d2k_plantab_del_addr_probe` | `ev_c669cbf72bf64146e22cf7c349e8c4e8f37435a1fd80c02791015ded52dd84a4` | Удаление адресной пробы по управляющей команде |
+| `addr_probe_remove` | `ev_0e00787312c35345aa6c4945321e9ab7379361be27adc72c8cd582719a815c2d` | Снятие временной записи |
+| `NamePlans::clear_probes` | `ev_b0f133505366bfdce8bba750010b318b564f102255135188a868c6ad30a64467` | Очистка временного состояния datapath |
+
+Повторная декомпиляция подтверждённых функций не запускалась. Для текущего
+донора Clang 18 AST подтвердил точки `d2k_sched_tick`, `task_fail` и `task_done`;
+ARM64 lifecycle-тест `test_sched --lifecycle-only` прошёл под QEMU: планировщик
+сообщил, что все проверки прошли. В R2O регрессионный тест подтвердил порядок
+отмены QUIC worker, передачи `DEL_ADDR_PROBE`, ожидания ACK и присоединения
+worker-потоков. Это доказывает проверенный сценарий жизненного цикла, не весь
+паритет планировщика.
+
+Сверка ARM64 сохранена в `.rea/r2o-discovery-quic-stop-20261021-010628.log`.
+SHA-256 `sched.c`: `1de9feaab19dcea1e493aea068295470cf3143adf83157b57663f1098132ae8a`;
+`test_sched.c`: `a67f87e09a7fd93ed735b52f361e78590b9ce40679ab95e300accf0a3e9d51a3`;
+Rust `main.rs`: `eb979b5489bb2b1d969ba597393f49645bfea50e31fdf455b1e3d9f5d377e039`.
+AST занял 1 с, C-кросс-сборка ARM64 — 50 с, C lifecycle под QEMU — 24 с, Rust
+регрессия под QEMU — 4 с.
+
+Весь workspace Rust прошёл на `aarch64-unknown-linux-gnu` под QEMU. Для
+`r2o-controller` прошли 86 библиотечных тестов, 71 бинарный тест и все
+интеграционные наборы. Четыре теста исключены только из-за ограничений
+пользовательского режима QEMU: проверки счётчиков `TCP_INFO`, локальной доставки UDP и системного
+rtnetlink. После уточнения семантики `Some(0)` все 11 тестов `response` прошли:
+TLS-зонд теперь не вызывает `SO_MARK`, когда маркировка отключена. Остальные
+архитектурные тесты отложены по указанию пользователя. Release-кросс-сборка
+workspace для `aarch64-unknown-linux-gnu` завершилась успешно; подтверждены ELF
+`ARM aarch64` для шести программ: `r2o-controller`, `r2o-datapath`, `r2o-fetch`,
+`r2o-manager`, `r2o-panel` и `r2o-telegram`.
