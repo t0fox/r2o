@@ -1,0 +1,2 @@
+scripts/r2o-tcp-rst-cut-differential.sh text eol=lf
+scripts/r2o-discovery-coalesce-differential.sh text eol=lf
