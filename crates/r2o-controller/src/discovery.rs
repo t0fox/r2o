@@ -17,6 +17,14 @@ pub struct DiscoveryTarget {
     pub shape: u8,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DirectClearBindingUpdate {
+    pub marked: usize,
+    pub removed: usize,
+    pub waiting: usize,
+    pub delete_runtime: bool,
+}
+
 impl DiscoveryTarget {
     /// Выбирать только именованные потоки TLS на стандартном порту HTTPS.
     pub fn from_event(event: &HelloEvent) -> Option<Self> {
@@ -249,6 +257,79 @@ pub fn has_usable_binding(catalog: &Catalog, target: &DiscoveryTarget) -> bool {
                 })
         })
     })
+}
+
+/// Сохранить прямой проход для точной TLS-привязки, не затрагивая другие формы.
+pub fn update_direct_clear_bindings(
+    catalog: &mut Catalog,
+    target: &DiscoveryTarget,
+    now: i64,
+    monotonic_now: std::time::Instant,
+) -> DirectClearBindingUpdate {
+    const RECHECK_GAP: std::time::Duration = std::time::Duration::from_secs(60);
+
+    let mut update = DirectClearBindingUpdate::default();
+    if now < 0
+        || !matches!(target.family, 4 | 6)
+        || !matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY)
+    {
+        return update;
+    }
+
+    for box_record in &mut catalog.boxes {
+        let mut changed = false;
+        let mut index = 0;
+        while index < box_record.bindings.len() {
+            let binding = &mut box_record.bindings[index];
+            let transport = if binding.transport == 0 {
+                6
+            } else {
+                binding.transport
+            };
+            let family = if binding.family == 0 {
+                4
+            } else {
+                binding.family
+            };
+            let matches_target = binding.kind == "name"
+                && binding.target == target.host
+                && transport == 6
+                && family == target.family
+                && (binding.shape == 0 || binding.shape == target.shape);
+            if !matches_target {
+                index += 1;
+                continue;
+            }
+
+            if binding.recheck_since.is_some() {
+                let independent = binding.recheck_mono.is_none_or(|started| {
+                    monotonic_now.saturating_duration_since(started) >= RECHECK_GAP
+                });
+                if independent {
+                    box_record.bindings.remove(index);
+                    update.removed += 1;
+                    changed = true;
+                    continue;
+                }
+                update.waiting += 1;
+                index += 1;
+                continue;
+            }
+
+            binding.recheck_since = Some(now.max(1));
+            binding.recheck_mono = Some(monotonic_now);
+            update.marked += 1;
+            changed = true;
+            update.delete_runtime |=
+                transport == 6 && family == target.family && binding.shape == target.shape;
+            index += 1;
+        }
+        if changed {
+            box_record.updated = now.max(1);
+        }
+    }
+
+    update
 }
 
 /// Сохранить измеренный план и соответствующую точную привязку имени.
@@ -777,5 +858,128 @@ mod tests {
             101
         ));
         assert!(unrelated.boxes[0].bindings[0].enabled);
+    }
+
+    #[test]
+    fn прямой_clear_снимает_только_точную_форму_и_ждёт_независимого_повтора() {
+        use super::{DiscoveryTarget, update_direct_clear_bindings};
+        use crate::catalog::{Binding, BoxRecord, Catalog};
+        use r2k_core::control::{SHAPE_ECH_TCP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC};
+        use std::time::{Duration, Instant};
+
+        let target = DiscoveryTarget {
+            host: "example.com".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let binding = |host: &str, family, shape| Binding {
+            kind: "name".into(),
+            target: host.into(),
+            enabled: true,
+            transport: 6,
+            family,
+            shape,
+            ..Binding::default()
+        };
+        let mut catalog = Catalog {
+            boxes: vec![BoxRecord {
+                bindings: vec![
+                    binding("example.com", 4, SHAPE_MODERN),
+                    binding("example.com", 4, SHAPE_LEGACY),
+                    binding("example.com", 4, SHAPE_ECH_TCP),
+                    binding("example.com", 4, SHAPE_QUIC),
+                    binding("example.com", 6, SHAPE_MODERN),
+                    binding("other.example", 4, SHAPE_MODERN),
+                ],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        let started = Instant::now();
+
+        let first = update_direct_clear_bindings(&mut catalog, &target, 100, started);
+
+        assert_eq!(first.marked, 1);
+        assert_eq!(first.removed, 0);
+        assert_eq!(first.waiting, 0);
+        assert!(first.delete_runtime);
+        assert_eq!(catalog.boxes[0].bindings[0].recheck_since, Some(100));
+        assert_eq!(catalog.boxes[0].bindings[0].recheck_mono, Some(started));
+        assert!(
+            catalog.boxes[0].bindings[1..]
+                .iter()
+                .all(|binding| binding.recheck_since.is_none())
+        );
+
+        let same_measurement = update_direct_clear_bindings(
+            &mut catalog,
+            &target,
+            159,
+            started + Duration::from_secs(59),
+        );
+        assert_eq!(same_measurement.waiting, 1);
+        assert_eq!(same_measurement.removed, 0);
+        assert!(!same_measurement.delete_runtime);
+
+        let independent_measurement = update_direct_clear_bindings(
+            &mut catalog,
+            &target,
+            160,
+            started + Duration::from_secs(60),
+        );
+        assert_eq!(independent_measurement.removed, 1);
+        assert_eq!(independent_measurement.marked, 0);
+        assert_eq!(independent_measurement.waiting, 0);
+        assert!(!independent_measurement.delete_runtime);
+        assert_eq!(catalog.boxes[0].bindings.len(), 5);
+        assert!(
+            catalog.boxes[0]
+                .bindings
+                .iter()
+                .all(|binding| binding.shape != SHAPE_MODERN
+                    || binding.target != "example.com"
+                    || binding.family != 4)
+        );
+        assert!(catalog.boxes[0].bindings.iter().any(|binding| {
+            binding.target == "example.com" && binding.family == 6 && binding.shape == SHAPE_MODERN
+        }));
+    }
+
+    #[test]
+    fn метка_перепроверки_после_перезапуска_считается_отдельным_замером() {
+        use super::{DiscoveryTarget, update_direct_clear_bindings};
+        use crate::catalog::{Binding, BoxRecord, Catalog};
+        use r2k_core::control::SHAPE_MODERN;
+
+        let target = DiscoveryTarget {
+            host: "restart.example".into(),
+            endpoint: "198.51.100.81:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let mut catalog = Catalog {
+            boxes: vec![BoxRecord {
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: target.host.clone(),
+                    enabled: true,
+                    transport: 6,
+                    family: 4,
+                    shape: SHAPE_MODERN,
+                    recheck_since: Some(99),
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+
+        let result =
+            update_direct_clear_bindings(&mut catalog, &target, 100, std::time::Instant::now());
+
+        assert_eq!(result.removed, 1);
+        assert_eq!(result.marked, 0);
+        assert!(catalog.boxes[0].bindings.is_empty());
     }
 }

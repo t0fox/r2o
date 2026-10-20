@@ -826,7 +826,7 @@ fn catalog_commands(catalog: &Catalog) -> Result<CompiledCatalog, Box<dyn Error>
     let mut skipped = 0_usize;
     for box_record in &catalog.boxes {
         for binding in &box_record.bindings {
-            if !binding.enabled {
+            if !binding.enabled || binding.recheck_since.is_some() {
                 continue;
             }
             if binding.kind == "addr"
@@ -1884,6 +1884,7 @@ struct DiscoveryOutcome {
     plan_text: Option<String>,
     detail: String,
     queue_expired: bool,
+    direct_clear: bool,
     retry_after: Option<std::time::Duration>,
 }
 
@@ -1900,6 +1901,14 @@ const R2O_DISCOVERY_WORKER_COUNT: usize = R2O_AUTOMATED_MEASUREMENT_SLOTS;
 const R2O_DISCOVERY_TASK_LIFETIME: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 #[cfg(unix)]
 const R2O_DISCOVERY_FAILURE_RETRY: std::time::Duration = std::time::Duration::from_secs(120);
+#[cfg(unix)]
+const R2O_DISCOVERY_CLEAR_RETRY_FIRST: std::time::Duration =
+    std::time::Duration::from_secs(10 * 60);
+#[cfg(unix)]
+const R2O_DISCOVERY_CLEAR_RETRY_SECOND: std::time::Duration =
+    std::time::Duration::from_secs(30 * 60);
+#[cfg(unix)]
+const R2O_DISCOVERY_CLEAR_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 #[cfg(unix)]
 const R2O_DISCOVERY_INCOMPLETE_RETRY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
@@ -2060,6 +2069,7 @@ struct DiscoveryWorker {
     seen_order: VecDeque<r2o_controller::discovery::DiscoveryTarget>,
     failed_at: HashMap<(String, u8, String), std::time::Instant>,
     failed_retry_after: HashMap<(String, u8, String), std::time::Duration>,
+    clear_streaks: HashMap<(String, u8, String), u8>,
     active: HashMap<(String, u8), r2o_controller::discovery::DiscoveryTarget>,
     threads: Vec<JoinHandle<()>>,
 }
@@ -2808,6 +2818,7 @@ impl DiscoveryWorker {
                                     plan_text: None,
                                     detail: "подозрение устарело в очереди".into(),
                                     queue_expired: true,
+                                    direct_clear: false,
                                     retry_after: None,
                                 })
                                 .is_err()
@@ -2834,6 +2845,7 @@ impl DiscoveryWorker {
             seen_order: VecDeque::new(),
             failed_at: HashMap::new(),
             failed_retry_after: HashMap::new(),
+            clear_streaks: HashMap::new(),
             active: HashMap::new(),
             threads,
         }
@@ -2880,6 +2892,7 @@ impl DiscoveryWorker {
             {
                 self.failed_at.remove(&expired_key);
                 self.failed_retry_after.remove(&expired_key);
+                self.clear_streaks.remove(&expired_key);
             }
         }
         self.seen.insert(target.clone());
@@ -2963,11 +2976,18 @@ impl DiscoveryWorker {
         Some(self.r2o_complete_outcome(outcome))
     }
 
-    fn r2o_complete_outcome(&mut self, outcome: DiscoveryOutcome) -> DiscoveryOutcome {
+    fn r2o_complete_outcome(&mut self, mut outcome: DiscoveryOutcome) -> DiscoveryOutcome {
         let task_key = r2o_discovery_task_key(&outcome.target);
         let failure_key = r2o_discovery_failure_key(&outcome.target);
         if self.active.get(&task_key) == Some(&outcome.target) {
             self.active.remove(&task_key);
+        }
+        if outcome.direct_clear {
+            let streak = self.clear_streaks.entry(failure_key.clone()).or_default();
+            *streak = streak.saturating_add(1);
+            outcome.retry_after = Some(r2o_discovery_clear_retry_after(*streak));
+        } else if !outcome.queue_expired {
+            self.clear_streaks.remove(&failure_key);
         }
         if outcome.queue_expired {
             self.seen.remove(&outcome.target);
@@ -3010,10 +3030,21 @@ impl Drop for DiscoveryWorker {
 fn r2o_discovery_retry_after(timed_out: bool, verdict: Verdict) -> Option<std::time::Duration> {
     if timed_out {
         Some(R2O_DISCOVERY_TASK_LIFETIME)
+    } else if verdict == Verdict::Clear {
+        Some(R2O_DISCOVERY_CLEAR_RETRY_FIRST)
     } else if verdict == Verdict::Inconclusive {
         Some(R2O_DISCOVERY_INCOMPLETE_RETRY)
     } else {
         None
+    }
+}
+
+#[cfg(unix)]
+fn r2o_discovery_clear_retry_after(streak: u8) -> std::time::Duration {
+    match streak {
+        0 | 1 => R2O_DISCOVERY_CLEAR_RETRY_FIRST,
+        2 => R2O_DISCOVERY_CLEAR_RETRY_SECOND,
+        _ => R2O_DISCOVERY_CLEAR_RETRY_MAX,
     }
 }
 
@@ -3034,6 +3065,7 @@ fn classify_discovery_target(
             plan_text: None,
             detail: "не удалось собрать профиль целевого TLS".into(),
             queue_expired: false,
+            direct_clear: false,
             retry_after: None,
         };
     };
@@ -3048,6 +3080,7 @@ fn classify_discovery_target(
                 plan_text: None,
                 detail: format!("не удалось собрать контрольный TLS: {error}"),
                 queue_expired: false,
+                direct_clear: false,
                 retry_after: None,
             };
         }
@@ -3081,6 +3114,7 @@ fn classify_discovery_target(
         plan_text,
         detail,
         queue_expired: false,
+        direct_clear: !timed_out && result.verdict == Verdict::Clear,
         retry_after,
     }
 }
@@ -5362,6 +5396,9 @@ impl ControlClient {
         catalog: &mut Catalog,
         catalog_path: &std::path::Path,
     ) -> Result<(), Box<dyn Error>> {
+        if outcome.direct_clear {
+            return self.apply_discovery_direct_clear(&outcome.target, catalog, catalog_path);
+        }
         let Some(source_text) = outcome.plan_text else {
             println!(
                 "автопоиск не дал применимого плана для {}: {}",
@@ -5441,6 +5478,74 @@ impl ControlClient {
                 "TLS 1.2"
             }
         );
+        Ok(())
+    }
+
+    fn apply_discovery_direct_clear(
+        &mut self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        catalog: &mut Catalog,
+        catalog_path: &std::path::Path,
+    ) -> Result<(), Box<dyn Error>> {
+        let (_lock, previous) = locked_catalog(catalog_path, catalog)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64;
+        let mut updated = previous.clone();
+        let result = r2o_controller::discovery::update_direct_clear_bindings(
+            &mut updated,
+            target,
+            now,
+            std::time::Instant::now(),
+        );
+        if result.marked == 0 && result.removed == 0 {
+            *catalog = previous;
+            if result.waiting != 0 {
+                println!(
+                    "{} напрямую проходит; привязка ждёт отдельной перепроверки",
+                    target.host
+                );
+            } else {
+                println!(
+                    "{} напрямую проходит; точной TLS-привязки в каталоге нет",
+                    target.host
+                );
+            }
+            return Ok(());
+        }
+
+        updated.save_atomic(catalog_path, now)?;
+        if result.delete_runtime {
+            let command = encode_delete_name(&target.host, 6, target.shape, target.family)?;
+            if let Err(delete_error) = self.send_command(&command, control::COMMAND_DEL_NAME) {
+                *catalog = updated;
+                return Err(format!(
+                    "прямая проверка {} сохранила пометку перепроверки, но runtime не подтвердил снятие привязки; каталог не восстановлен, чтобы не установить эту привязку повторно: {delete_error}",
+                    target.host
+                )
+                .into());
+            }
+        }
+        *catalog = updated;
+
+        if result.marked != 0 {
+            println!(
+                "{} напрямую проходит; точная привязка формы {} снята с runtime и сохранена для независимой перепроверки",
+                target.host, target.shape
+            );
+        }
+        if result.removed != 0 {
+            println!(
+                "{} повторно напрямую проходит; устаревшая точная привязка удалена из каталога",
+                target.host
+            );
+        }
+        if result.waiting != 0 {
+            println!(
+                "{} напрямую проходит; текущий замер слишком близок к предыдущей перепроверке",
+                target.host
+            );
+        }
         Ok(())
     }
 
@@ -7980,6 +8085,7 @@ mod tests {
                     plan_text: Some("план".into()),
                     detail: "завершено".into(),
                     queue_expired: false,
+                    direct_clear: false,
                     retry_after: None,
                 }
             },
@@ -8183,6 +8289,7 @@ mod tests {
             plan_text: None,
             detail: "целевая проверка завершена".into(),
             queue_expired: false,
+            direct_clear: false,
             retry_after: None,
         };
         worker.r2o_complete_outcome(completed);
@@ -8223,6 +8330,7 @@ mod tests {
             plan_text: None,
             detail: "ошибка поиска".into(),
             queue_expired: false,
+            direct_clear: false,
             retry_after: None,
         });
         assert!(
@@ -8294,6 +8402,7 @@ mod tests {
             plan_text: None,
             detail: "неубедительный прямой замер".into(),
             queue_expired: false,
+            direct_clear: false,
             retry_after: Some(retry_after),
         });
         assert!(!worker.queue(target.clone()));
@@ -8308,6 +8417,52 @@ mod tests {
             .failed_at
             .insert(failure_key, std::time::Instant::now() - retry_after);
         assert!(worker.queue(target.clone()));
+        drop(worker);
+        drop(permit);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_прямой_clear_увеличивает_отсрочку_десять_тридцать_шестьдесят_минут() {
+        use std::time::Duration;
+
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
+        let permit = gate.r2o_try_acquire().unwrap();
+        let mut worker = super::DiscoveryWorker::new(None, gate);
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "clear-backoff.example".into(),
+            endpoint: "198.51.100.10:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        worker.seen.insert(target.clone());
+        worker.seen_order.push_back(target.clone());
+
+        for (streak, minutes) in [(1, 10), (2, 30), (3, 60)] {
+            let outcome = worker.r2o_complete_outcome(super::DiscoveryOutcome {
+                target: target.clone(),
+                plan_text: None,
+                detail: "прямой CLEAR".into(),
+                queue_expired: false,
+                direct_clear: true,
+                retry_after: Some(Duration::from_secs(10 * 60)),
+            });
+            let expected = Duration::from_secs(minutes * 60);
+            assert_eq!(outcome.retry_after, Some(expected));
+            assert_eq!(
+                worker
+                    .clear_streaks
+                    .get(&super::r2o_discovery_failure_key(&target)),
+                Some(&streak)
+            );
+            assert_eq!(
+                worker
+                    .failed_retry_after
+                    .get(&super::r2o_discovery_failure_key(&target)),
+                Some(&expected)
+            );
+        }
+
         drop(worker);
         drop(permit);
     }
@@ -8335,6 +8490,7 @@ mod tests {
             plan_text: None,
             detail: "активный поиск превысил срок жизни".into(),
             queue_expired: false,
+            direct_clear: false,
             retry_after: Some(super::R2O_DISCOVERY_TASK_LIFETIME),
         };
 
@@ -8413,6 +8569,183 @@ mod tests {
 
         assert!(cancelled);
         assert!(!expired);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn прямой_clear_сохраняет_пометку_и_удаляет_только_свою_форму_из_runtime() {
+        let work = std::env::temp_dir().join(format!(
+            "r2o-direct-clear-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&work).unwrap();
+        let catalog_path = work.join("catalog.json");
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "clear.example".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let mut catalog = Catalog {
+            boxes: vec![BoxRecord {
+                created: 100,
+                updated: 100,
+                bindings: vec![
+                    Binding {
+                        kind: "name".into(),
+                        target: target.host.clone(),
+                        plan_id: "11".repeat(16),
+                        enabled: true,
+                        transport: 6,
+                        family: 4,
+                        shape: SHAPE_MODERN,
+                        ..Binding::default()
+                    },
+                    Binding {
+                        kind: "name".into(),
+                        target: target.host.clone(),
+                        plan_id: "22".repeat(16),
+                        enabled: false,
+                        transport: 6,
+                        family: 4,
+                        shape: r2k_core::control::SHAPE_LEGACY,
+                        ..Binding::default()
+                    },
+                ],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        catalog.save_atomic(&catalog_path, 100).unwrap();
+
+        let (client_stream, mut server_stream) = std::os::unix::net::UnixStream::pair().unwrap();
+        let server = std::thread::spawn(move || {
+            let command = read_frame(&mut server_stream).unwrap();
+            server_stream
+                .write_all(&encode_ack(command.kind, true, 0).unwrap())
+                .unwrap();
+            command
+        });
+        let mut client = ControlClient {
+            socket: client_stream,
+            pending_events: VecDeque::new(),
+            pending_applied_events: VecDeque::new(),
+            http_search_started: Default::default(),
+            http_challenge_cooldowns: Default::default(),
+        };
+        let outcome = DiscoveryOutcome {
+            target: target.clone(),
+            plan_text: None,
+            detail: "цель напрямую проходит".into(),
+            queue_expired: false,
+            direct_clear: true,
+            retry_after: None,
+        };
+
+        client
+            .apply_discovery_outcome(outcome, &mut catalog, &catalog_path)
+            .unwrap();
+
+        let deleted = server.join().unwrap();
+        assert_eq!(deleted.kind, r2k_core::control::COMMAND_DEL_NAME);
+        assert_eq!(
+            deleted.body,
+            super::encode_delete_name(&target.host, 6, SHAPE_MODERN, 4).unwrap()[6..]
+        );
+        assert!(catalog.boxes[0].bindings[0].recheck_since.is_some());
+        assert!(catalog.boxes[0].bindings[0].recheck_mono.is_some());
+        assert!(catalog.boxes[0].bindings[1].recheck_since.is_none());
+        assert!(catalog_commands(&catalog).unwrap().commands.is_empty());
+        let saved = std::fs::read_to_string(&catalog_path).unwrap();
+        assert!(saved.contains("recheck_since"));
+        assert!(!saved.contains("recheck_mono"));
+
+        std::fs::remove_dir_all(work).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn прямой_clear_оставляет_пометку_если_runtime_не_подтвердил_удаление() {
+        let work = std::env::temp_dir().join(format!(
+            "r2o-direct-clear-rejected-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&work).unwrap();
+        let catalog_path = work.join("catalog.json");
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "clear-rejected.example".into(),
+            endpoint: "198.51.100.81:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let mut catalog = Catalog {
+            boxes: vec![BoxRecord {
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: target.host.clone(),
+                    plan_id: "33".repeat(16),
+                    enabled: true,
+                    transport: 6,
+                    family: 4,
+                    shape: SHAPE_MODERN,
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        catalog.save_atomic(&catalog_path, 100).unwrap();
+
+        let (client_stream, mut server_stream) = std::os::unix::net::UnixStream::pair().unwrap();
+        let server = std::thread::spawn(move || {
+            let command = read_frame(&mut server_stream).unwrap();
+            server_stream
+                .write_all(&encode_ack(command.kind, false, 1).unwrap())
+                .unwrap();
+            command
+        });
+        let mut client = ControlClient {
+            socket: client_stream,
+            pending_events: VecDeque::new(),
+            pending_applied_events: VecDeque::new(),
+            http_search_started: Default::default(),
+            http_challenge_cooldowns: Default::default(),
+        };
+        let outcome = DiscoveryOutcome {
+            target: target.clone(),
+            plan_text: None,
+            detail: "цель напрямую проходит".into(),
+            queue_expired: false,
+            direct_clear: true,
+            retry_after: None,
+        };
+
+        assert!(
+            client
+                .apply_discovery_outcome(outcome, &mut catalog, &catalog_path)
+                .is_err()
+        );
+        assert_eq!(
+            server.join().unwrap().kind,
+            r2k_core::control::COMMAND_DEL_NAME
+        );
+        assert!(catalog.boxes[0].bindings[0].recheck_since.is_some());
+        assert!(catalog_commands(&catalog).unwrap().commands.is_empty());
+        assert!(
+            Catalog::load(&catalog_path).unwrap().boxes[0].bindings[0]
+                .recheck_since
+                .is_some()
+        );
+
+        std::fs::remove_dir_all(work).unwrap();
     }
 
     #[cfg(unix)]
@@ -8506,6 +8839,7 @@ mod tests {
                 plan_text: Some(plan_text),
                 detail: "test".into(),
                 queue_expired: false,
+                direct_clear: false,
                 retry_after: None,
             };
             let result = client.apply_discovery_outcome(outcome, &mut catalog, &catalog_path);

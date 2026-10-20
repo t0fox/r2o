@@ -135,6 +135,9 @@ pub struct Binding {
         skip_serializing_if = "option_is_zero"
     )]
     pub recheck_since: Option<i64>,
+    /// Монотонная отметка текущего процесса, не попадающая в файл каталога.
+    #[serde(skip)]
+    pub recheck_mono: Option<std::time::Instant>,
     #[serde(skip_serializing_if = "is_zero")]
     pub budget: u8,
 }
