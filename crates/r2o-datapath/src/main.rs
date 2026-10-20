@@ -162,6 +162,7 @@ mod app {
 
         let packet_type = (NFNL_SUBSYS_QUEUE << 8) | NFQNL_MSG_PACKET as u16;
         let mut batch = vec![0; 1 << 17];
+        let observe_plan = Plan::default();
         let mut scheduled = ScheduledQueue::default();
         let mut pending_applied = HashMap::<FlowTicket, PendingApplied>::new();
         let mut holding = HoldTable::default();
@@ -198,6 +199,11 @@ mod app {
                 eprintln!(
                     "r2o-datapath: UDP-потоки {} из {}, отказов {}",
                     udp_stats.flows, udp_stats.capacity, udp_stats.refusals
+                );
+                eprintln!(
+                    "r2o-datapath: ответ невидим очереди: {} из {} TCP-потоков с приветствием",
+                    tcp_sessions.r2o_reply_hidden(),
+                    tcp_sessions.r2o_tcp_hello_flows()
                 );
                 if icmp_guard.r2o_seen() != 0 || icmp_guard.r2o_noted() != 0 {
                     eprintln!(
@@ -401,14 +407,17 @@ mod app {
                         )?;
                         continue;
                     }
-                    let original = packet.payload.filter(|_| {
-                        !packet.truncated
-                            && !(options.mark != 0 && packet.mark == Some(options.mark))
-                    });
+                    let original = r2o_datapath_payload(&packet, options.mark);
                     let now = Instant::now();
                     let udp_admitted = original
                         .map(|bytes| udp_packet_admitted(&mut udp_sessions, bytes, now))
                         .unwrap_or(true);
+                    if options.mode == RuntimeMode::Observe
+                        && udp_admitted
+                        && let Some(bytes) = original
+                    {
+                        let _ = decide_with_session(&mut tcp_sessions, &observe_plan, bytes);
+                    }
                     let quic_hook = original
                         .filter(|_| udp_admitted)
                         .map(|bytes| {
@@ -1397,6 +1406,12 @@ mod app {
             || sessions.observe_packet(packet, now)
     }
 
+    fn r2o_datapath_payload<'a>(packet: &QueuePacket<'a>, mark: u32) -> Option<&'a [u8]> {
+        packet
+            .payload
+            .filter(|_| !packet.truncated && !(mark != 0 && packet.mark == Some(mark)))
+    }
+
     fn send_voice_proof_event(
         control: &mut Option<ControlServer>,
         flow_journal: &mut R2oFlowJournal,
@@ -1825,9 +1840,9 @@ mod app {
         use super::{
             ControlServer, NF_ACCEPT, NF_DROP, OriginalFate, R2oFlowJournal, R2oQuicSessions,
             RuntimeMode, TcpSessions, format_journal_details, format_journal_key, load_plan,
-            needs_raw_socket, observe_quic_packet, parse_options, release_many_with, release_with,
-            send_applied_event, send_hello_event, send_journal_snapshot, send_journal_updates,
-            udp_packet_admitted,
+            needs_raw_socket, observe_quic_packet, parse_options, r2o_datapath_payload,
+            release_many_with, release_with, send_applied_event, send_hello_event,
+            send_journal_snapshot, send_journal_updates, udp_packet_admitted,
         };
         use r2o_datapath::r2o_udp_sessions::R2oUdpSessions;
         use std::io;
@@ -1856,6 +1871,26 @@ mod app {
             ));
             assert_eq!(sessions.stats().flows, 1536);
             assert_eq!(sessions.stats().refusals, 1);
+        }
+
+        #[test]
+        fn r2o_метка_контроллера_исключает_зондовые_пакеты_из_состояния_datapath() {
+            let payload = [0x16, 0x03, 0x03];
+            let marked = super::QueuePacket {
+                mark: Some(45),
+                payload: Some(&payload),
+                ..Default::default()
+            };
+            assert!(r2o_datapath_payload(&marked, 45).is_none());
+            assert_eq!(r2o_datapath_payload(&marked, 46), Some(payload.as_slice()));
+            assert_eq!(r2o_datapath_payload(&marked, 0), Some(payload.as_slice()));
+
+            let truncated = super::QueuePacket {
+                payload: Some(&payload),
+                truncated: true,
+                ..Default::default()
+            };
+            assert!(r2o_datapath_payload(&truncated, 45).is_none());
         }
 
         fn udp_packet(

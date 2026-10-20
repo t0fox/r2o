@@ -99,6 +99,7 @@ struct TcpSession {
     fin_retry_queued: bool,
     fin_retry_reported: bool,
     rst_cut_reported: bool,
+    r2o_reply_hidden_reported: bool,
     client_shape: u8,
     last_seen: Instant,
 }
@@ -146,6 +147,7 @@ impl TcpSession {
             fin_retry_queued: false,
             fin_retry_reported: false,
             rst_cut_reported: false,
+            r2o_reply_hidden_reported: false,
             client_shape: 0,
             last_seen: now,
         }
@@ -216,6 +218,8 @@ impl R2oTcpExchangeEvent {
 pub struct TcpSessions {
     flows: HashMap<TcpFlowKey, TcpSession>,
     reverse_visible_by_family: [bool; 2],
+    r2o_tcp_hello_flows: u64,
+    r2o_reply_hidden: u64,
     tcp_exchange_events: VecDeque<R2oTcpExchangeEvent>,
     tcp_rst_events: VecDeque<R2oTcpRstEvent>,
     tcp_rst_cut_events: VecDeque<R2oTcpRstCutEvent>,
@@ -228,6 +232,8 @@ impl Default for TcpSessions {
         Self {
             flows: HashMap::with_capacity(MAX_TCP_SESSIONS),
             reverse_visible_by_family: [false; 2],
+            r2o_tcp_hello_flows: 0,
+            r2o_reply_hidden: 0,
             tcp_exchange_events: VecDeque::with_capacity(MAX_TCP_SESSIONS * 2),
             tcp_rst_events: VecDeque::with_capacity(MAX_TCP_SESSIONS),
             tcp_rst_cut_events: VecDeque::with_capacity(MAX_TCP_SESSIONS),
@@ -251,6 +257,16 @@ impl TcpSessions {
         self.flows.iter().find_map(|(flow_key, session)| {
             (flow_key.wire_key() == *key).then_some(session.metrics)
         })
+    }
+
+    /// Число распознанных пользовательских TCP-потоков с ClientHello.
+    pub fn r2o_tcp_hello_flows(&self) -> u64 {
+        self.r2o_tcp_hello_flows
+    }
+
+    /// Число потоков, где ACK указал на невидимый очереди ответ сервера.
+    pub fn r2o_reply_hidden(&self) -> u64 {
+        self.r2o_reply_hidden
     }
 
     pub fn take_tcp_exchange_events(&mut self) -> Vec<R2oTcpExchangeEvent> {
@@ -556,6 +572,8 @@ impl TcpSessions {
         }
 
         let reverse_visible_by_family = &mut self.reverse_visible_by_family;
+        let r2o_tcp_hello_flows = &mut self.r2o_tcp_hello_flows;
+        let r2o_reply_hidden = &mut self.r2o_reply_hidden;
         let family_index = match key.low.address.family() {
             4 => Some(0),
             6 => Some(1),
@@ -603,6 +621,7 @@ impl TcpSessions {
                 session.direction_known = true;
             }
             session.hello_at = Some(now);
+            *r2o_tcp_hello_flows = (*r2o_tcp_hello_flows).wrapping_add(1);
             session.hello_ack = ack.then_some(tcp.acknowledgment);
             session.hello_has_sni = hello.sni_range.is_some();
             session.client_shape = if session.hello_has_sni {
@@ -693,6 +712,18 @@ impl TcpSessions {
             session.metrics.forward_packets = session.metrics.forward_packets.saturating_add(1);
             session.metrics.forward_bytes =
                 session.metrics.forward_bytes.saturating_add(packet_bytes);
+        }
+        if !reverse
+            && ack
+            && !syn
+            && !session.r2o_reply_hidden_reported
+            && reverse_packets_after_hello_before_packet == 0
+            && session
+                .hello_ack
+                .is_some_and(|hello_ack| (tcp.acknowledgment.wrapping_sub(hello_ack) as i32) > 0)
+        {
+            *r2o_reply_hidden = (*r2o_reply_hidden).wrapping_add(1);
+            session.r2o_reply_hidden_reported = true;
         }
         let mut keep_fin_session = false;
         let mut fin_retry_event = None;
@@ -1470,6 +1501,91 @@ mod tests {
                 reverse_bytes: 86,
             })
         );
+    }
+
+    #[test]
+    fn r2o_tcp_учитывает_невидимый_ответ_один_раз_по_продвинутому_ack() {
+        let mut sessions = TcpSessions::default();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello());
+        hello[28..32].copy_from_slice(&1000_u32.to_be_bytes());
+        sessions.track_packet(&hello, Instant::now());
+        assert_eq!(sessions.r2o_tcp_hello_flows(), 1);
+        assert_eq!(sessions.r2o_reply_hidden(), 0);
+
+        let mut ack = ipv4_tcp_packet(client, server, 0x10, 64, 1200, &[]);
+        ack[28..32].copy_from_slice(&1100_u32.to_be_bytes());
+        assert_eq!(
+            decide_with_session(&mut sessions, &Plan::default(), &ack),
+            PacketDecision::Accept
+        );
+        assert_eq!(sessions.r2o_reply_hidden(), 1);
+
+        ack[28..32].copy_from_slice(&1200_u32.to_be_bytes());
+        decide_with_session(&mut sessions, &Plan::default(), &ack);
+        assert_eq!(sessions.r2o_reply_hidden(), 1);
+    }
+
+    #[test]
+    fn r2o_tcp_не_считает_видимый_ответ_и_повтор_hello_невидимыми() {
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+
+        let mut visible = TcpSessions::default();
+        let mut hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello());
+        hello[28..32].copy_from_slice(&1000_u32.to_be_bytes());
+        visible.track_packet(&hello, start);
+        visible.track_packet(
+            &ipv4_tcp_packet(server, client, 0x10, 124, 900, &[]),
+            start + Duration::from_millis(50),
+        );
+        let mut ack = ipv4_tcp_packet(client, server, 0x10, 64, 1200, &[]);
+        ack[28..32].copy_from_slice(&1100_u32.to_be_bytes());
+        visible.track_packet(&ack, start + Duration::from_millis(100));
+        assert_eq!(visible.r2o_tcp_hello_flows(), 1);
+        assert_eq!(visible.r2o_reply_hidden(), 0);
+
+        let mut repeat = TcpSessions::default();
+        let mut hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello());
+        hello[28..32].copy_from_slice(&1000_u32.to_be_bytes());
+        repeat.track_packet(&hello, start);
+        repeat.track_packet(&hello, start + Duration::from_millis(50));
+        assert_eq!(repeat.r2o_tcp_hello_flows(), 1);
+        assert_eq!(repeat.r2o_reply_hidden(), 0);
+
+        let mut without_ack = TcpSessions::default();
+        let hello = ipv4_tcp_packet(client, server, 0x08, 64, 701, &client_hello());
+        without_ack.track_packet(&hello, start);
+        let mut ack = ipv4_tcp_packet(client, server, 0x10, 64, 1200, &[]);
+        ack[28..32].copy_from_slice(&1100_u32.to_be_bytes());
+        without_ack.track_packet(&ack, start + Duration::from_millis(50));
+        assert_eq!(without_ack.r2o_tcp_hello_flows(), 1);
+        assert_eq!(without_ack.r2o_reply_hidden(), 0);
+    }
+
+    #[test]
+    fn r2o_tcp_сравнивает_ack_с_переполнением_серийного_номера() {
+        let mut sessions = TcpSessions::default();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello());
+        hello[28..32].copy_from_slice(&(u32::MAX - 7).to_be_bytes());
+        sessions.track_packet(&hello, Instant::now());
+
+        let mut ack = ipv4_tcp_packet(client, server, 0x10, 64, 1200, &[]);
+        ack[28..32].copy_from_slice(&5_u32.to_be_bytes());
+        sessions.track_packet(&ack, Instant::now());
+        assert_eq!(sessions.r2o_reply_hidden(), 1);
+
+        let mut reverse_wrap = TcpSessions::default();
+        let mut hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello());
+        hello[28..32].copy_from_slice(&5_u32.to_be_bytes());
+        reverse_wrap.track_packet(&hello, Instant::now());
+        ack[28..32].copy_from_slice(&(u32::MAX - 7).to_be_bytes());
+        reverse_wrap.track_packet(&ack, Instant::now());
+        assert_eq!(reverse_wrap.r2o_reply_hidden(), 0);
     }
 
     #[test]
