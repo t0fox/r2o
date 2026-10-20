@@ -1785,7 +1785,14 @@ struct DiscoveryOutcome {
 }
 
 #[cfg(unix)]
+type R2oDiscoveryRunner = dyn Fn(r2o_controller::discovery::DiscoveryTarget, Arc<AtomicBool>) -> DiscoveryOutcome
+    + Send
+    + Sync;
+
+#[cfg(unix)]
 const R2O_DISCOVERY_QUEUE_CAPACITY: usize = 64;
+#[cfg(unix)]
+const R2O_DISCOVERY_WORKER_COUNT: usize = R2O_AUTOMATED_MEASUREMENT_SLOTS;
 #[cfg(unix)]
 const R2O_DISCOVERY_TASK_LIFETIME: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 #[cfg(unix)]
@@ -1799,7 +1806,7 @@ struct R2oDiscoveryQueue {
     entries: Vec<R2oDiscoveryQueueEntry>,
     event_sequence: u64,
     #[cfg(test)]
-    waiting_for_slot: bool,
+    waiting_for_slot: usize,
 }
 
 #[cfg(unix)]
@@ -1951,7 +1958,7 @@ struct DiscoveryWorker {
     failed_at: HashMap<(String, u8, String), std::time::Instant>,
     failed_retry_after: HashMap<(String, u8, String), std::time::Duration>,
     active: HashMap<(String, u8), r2o_controller::discovery::DiscoveryTarget>,
-    thread: Option<JoinHandle<()>>,
+    threads: Vec<JoinHandle<()>>,
 }
 
 #[cfg(unix)]
@@ -2623,84 +2630,99 @@ impl DiscoveryWorker {
         mark: Option<u32>,
         measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
     ) -> Self {
+        let runner: Arc<R2oDiscoveryRunner> =
+            Arc::new(move |target, cancel| classify_discovery_target(target, cancel, mark));
+        Self::r2o_new_with_runner(measurement_gate, runner)
+    }
+
+    fn r2o_new_with_runner(
+        measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
+        runner: Arc<R2oDiscoveryRunner>,
+    ) -> Self {
         let jobs = Arc::new((
             std::sync::Mutex::new(R2oDiscoveryQueue::default()),
             std::sync::Condvar::new(),
         ));
         let (outcome_sender, outcomes) = mpsc::sync_channel(8);
         let cancel = Arc::new(AtomicBool::new(false));
-        let worker_cancel = Arc::clone(&cancel);
-        let worker_gate = measurement_gate.clone();
-        let worker_jobs = Arc::clone(&jobs);
-        let thread = std::thread::spawn(move || {
-            loop {
-                let has_jobs = {
-                    let (queue, wake) = &*worker_jobs;
-                    let mut queue = queue
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    loop {
-                        if worker_cancel.load(Ordering::Relaxed) {
-                            break false;
-                        }
-                        if !queue.is_empty() {
-                            #[cfg(test)]
-                            {
-                                queue.waiting_for_slot = true;
-                            }
-                            break true;
-                        }
-                        queue = wake
-                            .wait(queue)
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    }
-                };
-                if !has_jobs {
-                    break;
-                }
-                let outcome = {
-                    let Some(_permit) = worker_gate.r2o_acquire(&worker_cancel) else {
-                        break;
-                    };
-                    let (expired, target) = {
-                        let (queue, _) = &*worker_jobs;
+        let mut threads = Vec::with_capacity(R2O_DISCOVERY_WORKER_COUNT);
+        for _ in 0..R2O_DISCOVERY_WORKER_COUNT {
+            let worker_cancel = Arc::clone(&cancel);
+            let worker_gate = measurement_gate.clone();
+            let worker_jobs = Arc::clone(&jobs);
+            let worker_outcomes = outcome_sender.clone();
+            let worker_runner = Arc::clone(&runner);
+            threads.push(std::thread::spawn(move || {
+                loop {
+                    let has_jobs = {
+                        let (queue, wake) = &*worker_jobs;
                         let mut queue = queue
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        #[cfg(test)]
-                        {
-                            queue.waiting_for_slot = false;
-                        }
-                        if worker_cancel.load(Ordering::Relaxed) {
-                            (Vec::new(), None)
-                        } else {
-                            queue.pop(std::time::Instant::now())
+                        loop {
+                            if worker_cancel.load(Ordering::Relaxed) {
+                                break false;
+                            }
+                            if !queue.is_empty() {
+                                #[cfg(test)]
+                                {
+                                    queue.waiting_for_slot += 1;
+                                }
+                                break true;
+                            }
+                            queue = wake
+                                .wait(queue)
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
                         }
                     };
-                    for target in expired {
-                        if outcome_sender
-                            .send(DiscoveryOutcome {
-                                target,
-                                plan_text: None,
-                                detail: "подозрение устарело в очереди".into(),
-                                queue_expired: true,
-                                retry_after: None,
-                            })
-                            .is_err()
-                        {
-                            return;
-                        }
+                    if !has_jobs {
+                        break;
                     }
-                    let Some(target) = target else {
-                        continue;
+                    let outcome = {
+                        let permit = worker_gate.r2o_acquire(&worker_cancel);
+                        let (expired, target) = {
+                            let (queue, _) = &*worker_jobs;
+                            let mut queue = queue
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            #[cfg(test)]
+                            {
+                                queue.waiting_for_slot = queue.waiting_for_slot.saturating_sub(1);
+                            }
+                            if worker_cancel.load(Ordering::Relaxed) || permit.is_none() {
+                                (Vec::new(), None)
+                            } else {
+                                queue.pop(std::time::Instant::now())
+                            }
+                        };
+                        let Some(_permit) = permit else {
+                            break;
+                        };
+                        for target in expired {
+                            if worker_outcomes
+                                .send(DiscoveryOutcome {
+                                    target,
+                                    plan_text: None,
+                                    detail: "подозрение устарело в очереди".into(),
+                                    queue_expired: true,
+                                    retry_after: None,
+                                })
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        let Some(target) = target else {
+                            continue;
+                        };
+                        worker_runner(target, Arc::clone(&worker_cancel))
                     };
-                    classify_discovery_target(target, Arc::clone(&worker_cancel), mark)
-                };
-                if outcome_sender.send(outcome).is_err() {
-                    break;
+                    if worker_outcomes.send(outcome).is_err() {
+                        break;
+                    }
                 }
-            }
-        });
+            }));
+        }
         Self {
             jobs,
             outcomes,
@@ -2710,7 +2732,7 @@ impl DiscoveryWorker {
             failed_at: HashMap::new(),
             failed_retry_after: HashMap::new(),
             active: HashMap::new(),
-            thread: Some(thread),
+            threads,
         }
     }
 
@@ -2870,7 +2892,12 @@ impl Drop for DiscoveryWorker {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
         self.jobs.1.notify_all();
-        if let Some(thread) = self.thread.take() {
+        for thread in self.threads.drain(..) {
+            while !thread.is_finished() {
+                while self.outcomes.try_recv().is_ok() {}
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            while self.outcomes.try_recv().is_ok() {}
             let _ = thread.join();
         }
     }
@@ -7536,7 +7563,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .waiting_for_slot;
-            if waiting {
+            if waiting > 0 {
                 break;
             }
             assert!(std::time::Instant::now() < wait_deadline);
@@ -7558,8 +7585,8 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .waiting_for_slot;
-            if !waiting {
-                assert!(!worker.thread.as_ref().unwrap().is_finished());
+            if waiting == 0 {
+                assert!(worker.threads.iter().all(|thread| !thread.is_finished()));
                 break;
             }
             assert!(std::time::Instant::now() < idle_deadline);
@@ -7594,6 +7621,108 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn r2o_discovery_запускает_параллельные_задачи_в_пределах_общих_слотов() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex, mpsc};
+        use std::time::Duration;
+
+        let (started_sender, started_receiver) = mpsc::channel();
+        let runner_release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let worker_release = Arc::clone(&runner_release);
+        let runner = Arc::new(
+            move |target: r2o_controller::discovery::DiscoveryTarget, _cancel: Arc<AtomicBool>| {
+                started_sender.send(target.host.clone()).unwrap();
+                let (released, wake) = &*worker_release;
+                let released = released
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _ = wake
+                    .wait_timeout_while(released, Duration::from_secs(2), |released| !*released)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                super::DiscoveryOutcome {
+                    target,
+                    plan_text: Some("план".into()),
+                    detail: "завершено".into(),
+                    queue_expired: false,
+                    retry_after: None,
+                }
+            },
+        );
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(2);
+        let mut worker = super::DiscoveryWorker::r2o_new_with_runner(gate, runner);
+        let first = r2o_controller::discovery::DiscoveryTarget {
+            host: "first.example".into(),
+            endpoint: "127.0.0.1:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let second = r2o_controller::discovery::DiscoveryTarget {
+            host: "second.example".into(),
+            endpoint: "127.0.0.1:444".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let third = r2o_controller::discovery::DiscoveryTarget {
+            host: "third.example".into(),
+            endpoint: "127.0.0.1:445".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+
+        assert!(worker.queue(first));
+        assert!(worker.queue(second));
+        assert!(worker.queue(third));
+        let first_started = started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("первая задача должна начаться");
+        let second_started = match started_receiver.recv_timeout(Duration::from_millis(500)) {
+            Ok(host) => host,
+            Err(error) => {
+                *runner_release
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+                runner_release.1.notify_all();
+                panic!("вторая задача не стартовала одновременно: {error}");
+            }
+        };
+        assert_ne!(first_started, second_started);
+        assert!(
+            started_receiver
+                .recv_timeout(Duration::from_millis(50))
+                .is_err()
+        );
+        *runner_release
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        runner_release.1.notify_all();
+        assert_eq!(
+            started_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("очередь должна продолжить работу после освобождения слота"),
+            "third.example"
+        );
+        let mut outcomes = Vec::new();
+        for _ in 0..3 {
+            outcomes.push(
+                worker
+                    .outcomes
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("обе задачи должны вернуть результат")
+                    .target
+                    .host,
+            );
+        }
+        outcomes.sort();
+        assert_eq!(
+            outcomes,
+            ["first.example", "second.example", "third.example"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn r2o_discovery_worker_keeps_waiting_targets_promotable() {
         fn target(host: &str) -> r2o_controller::discovery::DiscoveryTarget {
             r2o_controller::discovery::DiscoveryTarget {
@@ -7623,7 +7752,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .waiting_for_slot;
-            if waiting {
+            if waiting > 0 {
                 break;
             }
             assert!(std::time::Instant::now() < waiting_deadline);
@@ -7670,7 +7799,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .waiting_for_slot;
-            if waiting {
+            if waiting > 0 {
                 break;
             }
             assert!(std::time::Instant::now() < wait_deadline);
