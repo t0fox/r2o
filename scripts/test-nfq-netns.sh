@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
 TARGET_DIR=${CARGO_TARGET_DIR:-"$ROOT/target"}
 BUILD_DEFAULT_BINARIES=0
 if [ "${R2OD_BIN+x}" != x ] || [ "${R2OC_BIN+x}" != x ]; then

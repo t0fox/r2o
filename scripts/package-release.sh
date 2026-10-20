@@ -18,6 +18,8 @@ case "$RELEASE_ID" in *[!A-Za-z0-9._-]*) echo "небезопасный иден
 ARCHES_SAFE=$(printf '%s' "$ARCHES" | tr -d ' ')
 case "$ARCHES_SAFE" in *[!A-Za-z0-9_-]*) echo "небезопасный список архитектур выпуска" >&2; exit 1 ;; esac
 
+# shellcheck disable=SC2086
+# Список выше ограничен поддерживаемыми именами и намеренно разбивается по пробелам.
 set -- $ARCHES
 [ "$#" -gt 0 ] || { echo "список архитектур выпуска пуст" >&2; exit 1; }
 ARCH_COUNT=$#
@@ -45,22 +47,22 @@ for ARCH do
     mkdir -p "$STAGE/builds" "$STAGE/router"
     for component in r2o-datapath r2o-controller r2o-panel r2o-telegram r2o-manager; do
         source="$SOURCE_BUILDS/$component-linux-$ARCH"
-        test -f "$source" && test -s "$source" || {
+        if ! test -f "$source" || ! test -s "$source"; then
             echo "не найден исполняемый файл выпуска: $source" >&2
             exit 1
-        }
-        test ! -L "$source" || {
+        fi
+        if test -L "$source"; then
             echo "исполняемый файл выпуска не должен быть символической ссылкой: $source" >&2
             exit 1
-        }
+        fi
         install -m 0755 "$source" "$STAGE/builds/"
     done
     for file in S99r2o S99r2o.shim r2o-firewall.sh r2o-tg-firewall.sh r2o-update-scheduler.sh openwrt-init config.default install.sh; do
         source="$ROOT/router/$file"
-        test -f "$source" && test ! -L "$source" || {
+        if ! test -f "$source" || test -L "$source"; then
             echo "файл адаптера роутера отсутствует или небезопасен: $source" >&2
             exit 1
-        }
+        fi
         mode=0644
         case "$file" in S99r2o|S99r2o.shim|r2o-firewall.sh|r2o-tg-firewall.sh|r2o-update-scheduler.sh|openwrt-init|install.sh) mode=0755 ;; esac
         install -m "$mode" "$source" "$STAGE/router/$file"

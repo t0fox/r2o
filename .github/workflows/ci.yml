@@ -1,44 +1,186 @@
-name: Rust CI
+name: Проверки R2O
 
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
-  check:
+  panel:
+    name: Панель — HTTP, CLI и безопасность
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - name: Check formatting
-        run: cargo fmt --all --check
-      - name: Run workspace tests
-        run: cargo test --workspace --locked
-      - name: Verify Telegram panel statistics rendering
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
+      - name: Проверить панель и её HTTP-обработчики
+        run: cargo test --locked --package r2o-panel
+
+  telegram:
+    name: Telegram — тесты клиента
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
+      - name: Запустить тесты Telegram-клиента
+        run: cargo test --locked --package r2o-telegram
+
+  panel-browser:
+    name: Chrome — раскладка и работа панели
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      R2O_CHROME_NO_SANDBOX: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # версия v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: browser-actions/setup-chrome@48ad923757ca74d66703209fe939badbdf80f2f4 # версия v2
+        id: chrome
+        with:
+          chrome-version: stable
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
+      - name: Собрать панель
+        run: cargo build --locked --package r2o-panel
+      - name: Проверить представление Telegram в статистике панели
         run: node crates/r2o-panel/tests/telegram_flow.cjs
-      - name: Verify release archive packaging
+      - name: Проверить Chrome, раскладку, навигацию и шрифты
+        env:
+          CHROME_BIN: ${{ steps.chrome.outputs.chrome-path }}
+          R2O_CAPTURE_DIR: ${{ runner.temp }}/panel-browser
+        run: |
+          mkdir -p "$R2O_CAPTURE_DIR"
+          node crates/r2o-panel/tests/browser.cjs
+      - name: Сохранить снимки панели и журнал браузера
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # версия v7.0.2
+        with:
+          name: r2o-panel-chrome
+          path: ${{ runner.temp }}/panel-browser
+          retention-days: 7
+          if-no-files-found: warn
+
+  shell:
+    name: Сценарии и проверки установки
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
+        with:
+          persist-credentials: false
+      - name: Установить ShellCheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+      - name: Проверить все сценарии оболочки
+        run: find scripts -type f -name '*.sh' -print0 | xargs -0 -r shellcheck -s sh
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # версия v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Проверить упаковку выпуска
         run: sh scripts/test-package-release.sh
-      - name: Verify router Telegram firewall lifecycle
-        run: sh scripts/test-router-tg-firewall.sh
-      - name: Verify router update activation ordering
-        run: sh scripts/test-router-update-lifecycle.sh
-      - name: Verify router nightly update scheduler
-        run: sh scripts/test-router-update-scheduler.sh
-      - name: Verify router auto-update controls
-        run: sh scripts/test-router-update-auto.sh
-      - name: Run clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Build release binaries
+      - name: Проверить сценарии обновления и службы роутера
+        run: |
+          set -euo pipefail
+          for test in \
+            scripts/test-router-firewall.sh \
+            scripts/test-router-tg-firewall.sh \
+            scripts/test-router-update-lifecycle.sh \
+            scripts/test-router-update-scheduler.sh \
+            scripts/test-router-update-auto.sh \
+            scripts/test-router-clear-found.sh \
+            scripts/test-router-telegram-service.sh; do
+            sh "$test"
+          done
+
+  datapath:
+    name: Датапат — тесты и переносимость
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
+      - name: Проверить сетевой исполнитель и сопутствующие пакеты
+        run: cargo test --locked --package r2o-datapath
+
+  core:
+    name: Ядро — тесты управляющего протокола
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
+      - name: Проверить ядро и его оракул
+        run: cargo test --locked --package r2k-core
+
+  sanitizers:
+    name: Датапат, ядро и панель под AddressSanitizer
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
+        with:
+          toolchain: nightly-2026-10-17
+          components: rust-src
+      - name: Запустить тесты с AddressSanitizer
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+          RUSTDOCFLAGS: -Zsanitizer=address
+        run: >-
+          cargo +nightly-2026-10-17 test -Zbuild-std --locked
+          --target x86_64-unknown-linux-gnu
+          --package r2o-datapath --package r2k-core --package r2o-panel
+
+  rust-workspace:
+    name: Рабочее пространство Rust — формат, тесты и сборка
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
+      - name: Проверить форматирование
+        run: cargo fmt --all --check
+      - name: Запустить все тесты рабочего пространства
+        run: cargo test --workspace --locked
+      - name: Проверить предупреждения компилятора
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo check --workspace --all-targets --locked
+      - name: Собрать выпускаемые программы
         run: cargo build --workspace --release --locked
-      - name: Verify router clear-found lifecycle
-        run: sh scripts/test-router-clear-found.sh
-      - name: Verify router Telegram process and readiness lifecycle
-        run: sh scripts/test-router-telegram-service.sh
 
   cross-check:
+    name: Кросс-проверка — ${{ matrix.target }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -60,40 +202,59 @@ jobs:
             compiler_variable: CC_riscv64gc_unknown_linux_musl
             compiler_command: riscv64-linux-gnu-gcc
     steps:
-      - uses: actions/checkout@v4
-      - name: Установить cross-compiler для цели
-        run: sudo apt-get update && sudo apt-get install -y "${{ matrix.compiler_package }}"
-      - name: Проверить Linux-цели сетевого движка
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
+        with:
+          target: ${{ matrix.target }}
+      - name: Установить кросс-компилятор
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq "${{ matrix.compiler_package }}"
+      - name: Проверить сетевые пакеты для целевой архитектуры
         env:
           TARGET: ${{ matrix.target }}
           COMPILER_VARIABLE: ${{ matrix.compiler_variable }}
           COMPILER_COMMAND: ${{ matrix.compiler_command }}
         run: |
           export "$COMPILER_VARIABLE=$COMPILER_COMMAND"
-          cargo check --locked --target "$TARGET" -p r2k-core -p r2o-datapath -p r2o-controller -p r2o-panel
+          cargo check --locked --target "$TARGET" \
+            --package r2k-core --package r2o-datapath \
+            --package r2o-controller --package r2o-panel
 
   nfqueue-integration:
+    name: Интеграция NFQUEUE в сетевом пространстве
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - name: Install packet-test tools
-        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables python3
-      - name: Build the datapath daemon
-        run: cargo build --release --locked --package r2o-datapath
-      - name: Exercise NFQUEUE in a temporary namespace
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
+      - name: Установить средства проверки сетевых пакетов
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq iproute2 nftables python3
+      - name: Собрать сетевой исполнитель
+        run: cargo build --release --locked --package r2o-datapath --package r2o-controller
+      - name: Проверить NFQUEUE во временном пространстве имён
         run: sudo sh scripts/test-nfq-netns.sh
-      - name: Validate router nftables rules without applying them
+      - name: Проверить правила nftables без применения
         run: sudo sh scripts/test-router-firewall.sh
 
   mipsel-release:
+    name: Выпуск GNU MIPS little-endian
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - name: Install MIPS cross tools
-        run: sudo apt-get update && sudo apt-get install -y gcc-mipsel-linux-gnu qemu-user
-      - name: Build and smoke test MIPS release
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
+        with:
+          target: mipsel-unknown-linux-gnu
+      - name: Установить кросс-компилятор и QEMU
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-mipsel-linux-gnu qemu-user binutils
+      - name: Собрать и проверить выпуск MIPS
         run: sh scripts/build-mipsel.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # версия v7.0.2
         with:
           name: r2o-mipsel-linux-gnu
           path: |
@@ -103,19 +264,23 @@ jobs:
             target/mipsel-unknown-linux-gnu/release/r2o-panel
             target/mipsel-unknown-linux-gnu/release/r2o-manager
             target/mipsel-unknown-linux-gnu/release/SHA256SUMS
+          retention-days: 7
           if-no-files-found: error
 
   openwrt-mipsel-musl:
-    name: Сборка и запуск OpenWrt MIPS little-endian musl
+    name: Выпуск OpenWrt MIPS little-endian musl
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
       - name: Установить QEMU и распаковщик SDK
-        run: sudo apt-get update && sudo apt-get install -y qemu-user zstd binutils curl
-      - name: Собрать и проверить пакет OpenWrt под QEMU
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user zstd binutils curl
+      - name: Собрать и проверить OpenWrt MIPS под QEMU
         run: sh scripts/r2o-build-openwrt-mipsel-musl.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # версия v7.0.2
         with:
           name: r2o-openwrt-mipsel-musl
           path: |
@@ -125,4 +290,60 @@ jobs:
             target/mipsel-unknown-linux-musl/release/r2o-panel
             target/mipsel-unknown-linux-musl/release/r2o-manager
             target/mipsel-unknown-linux-musl/release/SHA256SUMS
+          retention-days: 7
           if-no-files-found: error
+
+  armv5-musleabi:
+    name: Выпуск ARMv5 little-endian musleabi
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
+        with:
+          target: armv5te-unknown-linux-musleabi
+      - name: Установить ARM-компилятор и QEMU
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-arm-linux-gnueabi qemu-user binutils
+      - name: Собрать и проверить полный набор программ под QEMU
+        run: sh scripts/r2o-build-armv5-musleabi.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # версия v7.0.2
+        with:
+          name: r2o-armv5-linux-musleabi
+          path: |
+            target/armv5te-unknown-linux-musleabi/release/r2o-datapath
+            target/armv5te-unknown-linux-musleabi/release/r2o-controller
+            target/armv5te-unknown-linux-musleabi/release/r2o-telegram
+            target/armv5te-unknown-linux-musleabi/release/r2o-panel
+            target/armv5te-unknown-linux-musleabi/release/r2o-manager
+            target/armv5te-unknown-linux-musleabi/release/r2o-fetch
+            target/armv5te-unknown-linux-musleabi/release/SHA256SUMS
+          retention-days: 7
+          if-no-files-found: error
+
+  check:
+    name: check
+    if: always()
+    needs:
+      - panel
+      - telegram
+      - panel-browser
+      - shell
+      - datapath
+      - core
+      - sanitizers
+      - rust-workspace
+      - cross-check
+      - nfqueue-integration
+      - mipsel-release
+      - openwrt-mipsel-musl
+      - armv5-musleabi
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Завершиться ошибкой при пропуске или сбое проверки
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || needs.panel.result == 'skipped' || needs.telegram.result == 'skipped' || needs.panel-browser.result == 'skipped' || needs.shell.result == 'skipped' || needs.datapath.result == 'skipped' || needs.core.result == 'skipped' || needs.rust-workspace.result == 'skipped' || needs.cross-check.result == 'skipped' || needs.nfqueue-integration.result == 'skipped' || needs.mipsel-release.result == 'skipped' || needs.openwrt-mipsel-musl.result == 'skipped' || needs.armv5-musleabi.result == 'skipped' || (github.event_name != 'pull_request' && needs.sanitizers.result == 'skipped') }}
+        run: exit 1
+      - name: Все проверки завершились успешно
+        run: echo "Все проверки R2O пройдены"

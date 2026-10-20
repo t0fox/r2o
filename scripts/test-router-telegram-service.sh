@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 TG_BIN=${R2O_TG_TEST_BINARY:-$ROOT/target/release/r2o-telegram}
 [ -x "$TG_BIN" ] || { echo "требуется release-бинарный файл r2o-telegram: $TG_BIN" >&2; exit 2; }
 TEMP=$(mktemp -d)

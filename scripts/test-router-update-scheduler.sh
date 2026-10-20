@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 SCHEDULER=$ROOT/router/r2o-update-scheduler.sh
 [ -x "$SCHEDULER" ] || { echo "планировщик обновлений отсутствует или не исполняемый" >&2; exit 2; }
 TEMP=$(mktemp -d)
@@ -71,7 +71,10 @@ mkdir -p "$TEMP/manual/root/state"
 printf 'AUTOUPDATE=0\n' > "$TEMP/manual/root/config"
 run_tick "$TEMP/manual" 04 true
 grep -q '^check$' "$TEMP/manual/events"
-! grep -q '^launch:' "$TEMP/manual/events"
+if grep -q '^launch:' "$TEMP/manual/events"; then
+    echo "запуск установки обновления при выключенной настройке недопустим" >&2
+    exit 1
+fi
 
 mkdir -p "$TEMP/outside/root/state"
 printf 'AUTOUPDATE=1\n' > "$TEMP/outside/root/config"

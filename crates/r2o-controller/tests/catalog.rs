@@ -265,7 +265,10 @@ fn donor_catalog_import_cli_reports_and_publishes_the_migration() {
             .count(),
         18
     );
-    assert_eq!(fs::metadata(&donor).unwrap().len(), 96_149);
+    assert_eq!(
+        fs::read(&donor).unwrap().as_slice(),
+        include_bytes!("fixtures/donor/catalog-real.json").as_slice()
+    );
     fs::remove_dir_all(dir).unwrap();
 }
 

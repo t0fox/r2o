@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
 NIGHTLY=nightly-2026-10-17
 TARGET=mipsel-unknown-linux-gnu
 LINKER=${MIPSEL_LINUX_GNU_LINKER:-mipsel-linux-gnu-gcc}

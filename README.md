@@ -76,6 +76,12 @@ little-endian musl собирается командой `sh scripts/r2o-build-o
 эту сборку ещё предстоит проверить. Короткая проверка MIPS включает
 `r2o-manager --version`.
 
+Полный workspace для ARMv5 little-endian musleabi собирается и проверяется под
+QEMU командой `sh scripts/r2o-build-armv5-musleabi.sh`. Сценарий проверяет шесть
+статических ELF-программ, запускает их версии и проверяет операции каталога.
+Производительность и работу этой сборки на физическом ARM-маршрутизаторе ещё
+предстоит измерить.
+
 Бинарники находятся в `target/release/`. `r2o-telegram --help` показывает параметры
 прозрачного Telegram listener. `r2o-datapath --help` показывает параметры NFQUEUE;
 `r2o-datapath --check --plan plan.r2op` проверяет бинарный R2OP-план. `r2o-datapath --mode

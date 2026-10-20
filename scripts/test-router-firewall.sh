@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 NFT=$(command -v nft) || {
     echo "для проверки синтаксиса межсетевого экрана нужен nft" >&2
     exit 127

@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
 TARGET_DIR=${CARGO_TARGET_DIR:-"$ROOT/target"}
 R2OD_BIN=${R2OD_BIN:-"$TARGET_DIR/release/r2o-datapath"}
 R2OC_BIN=${R2OC_BIN:-"$TARGET_DIR/release/r2o-controller"}

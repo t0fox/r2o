@@ -50,10 +50,10 @@ else
         EXTRACTED_LINKER=$(find "$UNPACK_DIR" -path \
             '*/toolchain-mipsel_24kc_gcc-14.3.0_musl/bin/mipsel-openwrt-linux-musl-gcc' \
             -print -quit)
-        [ -n "$EXTRACTED_LINKER" ] && [ -x "$EXTRACTED_LINKER" ] || {
+        if [ -z "$EXTRACTED_LINKER" ] || [ ! -x "$EXTRACTED_LINKER" ]; then
             echo "сборка OpenWrt: в SDK не найден MIPS little-endian компилятор" >&2
             exit 1
-        }
+        fi
         EXTRACTED_SDK=${EXTRACTED_LINKER%/bin/mipsel-openwrt-linux-musl-gcc}
         mv "$EXTRACTED_SDK" "$SDK_ROOT"
         rm -rf "$UNPACK_DIR"

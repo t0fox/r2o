@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 R2OC_BIN=${R2OC_TEST_BINARY:-$ROOT/target/release/r2o-controller}
 [ -x "$R2OC_BIN" ] || { echo "нужен исполняемый файл r2o-controller из выпуска: $R2OC_BIN" >&2; exit 2; }
 TEMP=$(mktemp -d)
