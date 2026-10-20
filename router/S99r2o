@@ -25,6 +25,7 @@ CT6_PID=$RUN/r2o-controller6.pid
 PN_PID=$RUN/r2o-panel.pid
 QUEUE4=${QUEUE_NUM:-2000}
 QUEUE6=${QUEUE_NUM6:-2001}
+R2O_FLOW_CAPACITY=${R2O_FLOW_CAPACITY:-2048}
 MODE=${MODE:-observe}
 MARK=${MARK:-45}
 PROBE_MARK=${PROBE_MARK:-0}
@@ -46,6 +47,7 @@ UPD_PID=$RUN/update-scheduler.pid
 STATE=${STATE_DIR:-$ROOT/state}
 QUEUE4=${QUEUE_NUM:-2000}
 QUEUE6=${QUEUE_NUM6:-2001}
+R2O_FLOW_CAPACITY=${R2O_FLOW_CAPACITY:-2048}
 MODE=${MODE:-observe}
 MARK=${MARK:-45}
 PROBE_MARK=${PROBE_MARK:-0}
@@ -70,6 +72,15 @@ die() { say "$*" >&2; exit 1; }
 valid_number() {
     case "$1" in ''|*[!0-9]*) return 1 ;; esac
     [ "$1" -le "$2" ]
+}
+
+valid_positive_decimal() {
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    r2o_positive_value=$1
+    while [ "${r2o_positive_value#0}" != "$r2o_positive_value" ]; do
+        r2o_positive_value=${r2o_positive_value#0}
+    done
+    [ -n "$r2o_positive_value" ]
 }
 
 r2o_normalize_mark() {
@@ -99,6 +110,7 @@ r2o_normalize_only_mark() {
 
 valid_number "$QUEUE4" 65535 || die "неверный QUEUE_NUM"
 valid_number "$QUEUE6" 65535 || die "неверный QUEUE_NUM6"
+valid_positive_decimal "$R2O_FLOW_CAPACITY" || die "неверный R2O_FLOW_CAPACITY"
 [ "$QUEUE4" != "$QUEUE6" ] || die "QUEUE_NUM и QUEUE_NUM6 должны различаться"
 case "$MODE" in off|observe|apply) ;; *) die "неверный MODE" ;; esac
 case "$IPV6_ENABLED" in 0|1) ;; *) die "IPV6_ENABLED должен быть 0 или 1" ;; esac
@@ -185,7 +197,8 @@ start_datapath() {
     r2o_dp_pid=$3
     r2o_dp_log=$4
     r2o_dp_control=$5
-    set -- --queue "$r2o_dp_queue" --family "$r2o_dp_family" --mode "$MODE" --mark "$MARK"
+    set -- --queue "$r2o_dp_queue" --family "$r2o_dp_family" --mode "$MODE" --mark "$MARK" \
+        --r2o-flow-capacity "$R2O_FLOW_CAPACITY"
     [ "$PROBE_MARK" = 0 ] || set -- "$@" --probe-mark "$PROBE_MARK"
     [ -z "$ONLY_MARK" ] || set -- "$@" --only-mark "$ONLY_MARK"
     set -- "$@" --controller-only --control "$r2o_dp_control" --r2o-udp-reverse-visible

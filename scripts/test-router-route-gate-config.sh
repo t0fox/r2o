@@ -28,6 +28,7 @@ MODE=observe
 MARK=0x2d
 PROBE_MARK=0x2e
 ONLY_MARK=0xffffaaa/0xffffff00
+R2O_FLOW_CAPACITY=64
 IPV6_ENABLED=1
 EOF
 printf '2000 1\n2001 1\n' >"$r2o_temp/proc/net/netfilter/nfnetlink_queue"
@@ -73,6 +74,7 @@ for r2o_family in ipv4 ipv6; do
 done
 [ "$(grep -c '^r2o-datapath|' "$r2o_temp/launches")" -eq 2 ]
 grep -Fq "|--probe-mark|46|--only-mark|$r2o_mark/$r2o_mask" "$r2o_temp/launches"
+grep -Fq '|--r2o-flow-capacity|64' "$r2o_temp/launches"
 [ -s "$r2o_temp/root/run/r2o-datapath4.pid" ]
 [ -s "$r2o_temp/root/run/r2o-datapath6.pid" ]
 

@@ -7,15 +7,15 @@ use r2k_core::plan::{
     PacketInput, Plan,
 };
 use r2k_core::quic::is_authenticated_initial;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, TryReserveError, VecDeque};
 #[cfg(target_os = "linux")]
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
 use crate::conntrack::{R2oConntrackInfo, R2oConntrackTuple, tuple_from_socket_addrs};
+use crate::flow_capacity::R2oFlowCapacity;
 
-const MAX_TCP_SESSIONS: usize = 2048;
 const TCP_STALL_PACKET_BUDGET: u64 = 25;
 const TCP_STALL_PACKET_SLACK: u64 = 3;
 
@@ -217,6 +217,7 @@ impl R2oTcpExchangeEvent {
 /// Ограниченное состояние потока для runtime-защит и очистки соединений.
 pub struct TcpSessions {
     flows: HashMap<TcpFlowKey, TcpSession>,
+    flow_capacity: R2oFlowCapacity,
     reverse_visible_by_family: [bool; 2],
     r2o_tcp_hello_flows: u64,
     r2o_reply_hidden: u64,
@@ -229,21 +230,36 @@ pub struct TcpSessions {
 
 impl Default for TcpSessions {
     fn default() -> Self {
-        Self {
-            flows: HashMap::with_capacity(MAX_TCP_SESSIONS),
-            reverse_visible_by_family: [false; 2],
-            r2o_tcp_hello_flows: 0,
-            r2o_reply_hidden: 0,
-            tcp_exchange_events: VecDeque::with_capacity(MAX_TCP_SESSIONS * 2),
-            tcp_rst_events: VecDeque::with_capacity(MAX_TCP_SESSIONS),
-            tcp_rst_cut_events: VecDeque::with_capacity(MAX_TCP_SESSIONS),
-            fin_retry_events: VecDeque::new(),
-            rst_after_app_events: VecDeque::new(),
-        }
+        Self::try_with_capacity(R2oFlowCapacity::default())
+            .expect("не удалось выделить таблицу TCP-потоков r2o")
     }
 }
 
 impl TcpSessions {
+    /// Создать таблицу TCP-потоков заданного размера с проверкой выделения памяти.
+    pub fn try_with_capacity(flow_capacity: R2oFlowCapacity) -> Result<Self, TryReserveError> {
+        let mut flows = HashMap::new();
+        flows.try_reserve(flow_capacity.slots())?;
+        let mut tcp_exchange_events = VecDeque::new();
+        tcp_exchange_events.try_reserve(flow_capacity.slots().saturating_mul(2))?;
+        let mut tcp_rst_events = VecDeque::new();
+        tcp_rst_events.try_reserve(flow_capacity.slots())?;
+        let mut tcp_rst_cut_events = VecDeque::new();
+        tcp_rst_cut_events.try_reserve(flow_capacity.slots())?;
+        Ok(Self {
+            flows,
+            flow_capacity,
+            reverse_visible_by_family: [false; 2],
+            r2o_tcp_hello_flows: 0,
+            r2o_reply_hidden: 0,
+            tcp_exchange_events,
+            tcp_rst_events,
+            tcp_rst_cut_events,
+            fin_retry_events: VecDeque::new(),
+            rst_after_app_events: VecDeque::new(),
+        })
+    }
+
     pub fn len(&self) -> usize {
         self.flows.len()
     }
@@ -552,7 +568,7 @@ impl TcpSessions {
         let payload = packet.get(tcp.payload.clone()).unwrap_or_default();
 
         if new_connection {
-            if !self.flows.contains_key(&key) && self.flows.len() >= MAX_TCP_SESSIONS {
+            if !self.flows.contains_key(&key) && self.flows.len() >= self.flow_capacity.limit() {
                 return None;
             }
             let metrics = self
@@ -563,7 +579,7 @@ impl TcpSessions {
             session.metrics = metrics;
             self.flows.insert(key, session);
         } else if !self.flows.contains_key(&key) {
-            if self.flows.len() >= MAX_TCP_SESSIONS {
+            if self.flows.len() >= self.flow_capacity.limit() {
                 return None;
             }
             let initiator = if syn && ack { destination } else { source };
@@ -695,7 +711,8 @@ impl TcpSessions {
                             R2oTcpExchangeEvent::PLANNED_NO
                         },
                     };
-                    if self.tcp_exchange_events.len() < MAX_TCP_SESSIONS * 2 {
+                    if self.tcp_exchange_events.len() < self.flow_capacity.slots().saturating_mul(2)
+                    {
                         self.tcp_exchange_events.push_back(event);
                     }
                 }
@@ -813,7 +830,7 @@ impl TcpSessions {
                 .any(|queued| queued.key == event.key);
             if already_queued {
                 session.fin_retry_queued = true;
-            } else if self.fin_retry_events.len() < MAX_TCP_SESSIONS {
+            } else if self.fin_retry_events.len() < self.flow_capacity.slots() {
                 self.fin_retry_events.push_back(event);
                 session.fin_retry_queued = true;
             }
@@ -823,17 +840,17 @@ impl TcpSessions {
                 .rst_after_app_events
                 .iter()
                 .any(|queued| queued.key == event.key);
-            if !already_queued && self.rst_after_app_events.len() < MAX_TCP_SESSIONS {
+            if !already_queued && self.rst_after_app_events.len() < self.flow_capacity.slots() {
                 self.rst_after_app_events.push_back(event);
             }
         }
         if let Some(event) = rst_event
-            && self.tcp_rst_events.len() < MAX_TCP_SESSIONS
+            && self.tcp_rst_events.len() < self.flow_capacity.slots()
         {
             self.tcp_rst_events.push_back(event);
         }
         if let Some(event) = rst_cut_event
-            && self.tcp_rst_cut_events.len() < MAX_TCP_SESSIONS
+            && self.tcp_rst_cut_events.len() < self.flow_capacity.slots()
         {
             self.tcp_rst_cut_events.push_back(event);
             session.rst_cut_reported = true;
@@ -1368,6 +1385,7 @@ mod tests {
     };
     #[cfg(target_os = "linux")]
     use crate::conntrack::R2oConntrackInfo;
+    use crate::flow_capacity::R2oFlowCapacity;
     use r2k_core::packet::PacketView;
     use r2k_core::plan::{EmitKind, OriginalFate, Plan};
     use std::time::{Duration, Instant};
@@ -1586,6 +1604,44 @@ mod tests {
         ack[28..32].copy_from_slice(&(u32::MAX - 7).to_be_bytes());
         reverse_wrap.track_packet(&ack, Instant::now());
         assert_eq!(reverse_wrap.r2o_reply_hidden(), 0);
+    }
+
+    #[test]
+    fn tcp_таблица_отказывает_после_трёх_четвертей_слотов_и_обновляет_известные_потоки() {
+        let mut sessions =
+            TcpSessions::try_with_capacity(R2oFlowCapacity::from_requested(64).unwrap()).unwrap();
+        let start = Instant::now();
+        for index in 0..48_u16 {
+            let packet = ipv4_tcp_packet(
+                ([10, 0, (index >> 8) as u8, index as u8], 1000 + index),
+                ([203, 0, 113, 8], 443),
+                0x10,
+                64,
+                u32::from(index),
+                &[],
+            );
+            assert!(sessions.track_packet(&packet, start).is_some());
+        }
+
+        let refused = ipv4_tcp_packet(
+            ([10, 1, 0, 1], 50000),
+            ([203, 0, 113, 8], 443),
+            0x10,
+            64,
+            0,
+            &[],
+        );
+        assert!(sessions.track_packet(&refused, start).is_none());
+        let known = ipv4_tcp_packet(
+            ([10, 0, 0, 0], 1000),
+            ([203, 0, 113, 8], 443),
+            0x10,
+            64,
+            0,
+            &[],
+        );
+        assert!(sessions.track_packet(&known, start).is_some());
+        assert_eq!(sessions.len(), 48);
     }
 
     #[test]

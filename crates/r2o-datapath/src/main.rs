@@ -14,6 +14,7 @@ mod app {
     use r2o_datapath::engine::{
         PacketDecision, TcpSessions, WirePacket, decide_with_session, validate_runtime_plan,
     };
+    use r2o_datapath::flow_capacity::R2oFlowCapacity;
     use r2o_datapath::flow_journal::{R2oFlowJournal, R2oFlowJournalEntry, R2oFlowJournalSummary};
     use r2o_datapath::hold::{HoldOptions, HoldOutcome, HoldTable};
     use r2o_datapath::http_replace::build_http_redirect_packets;
@@ -58,6 +59,7 @@ mod app {
         copy_range: u32,
         queue_len: u32,
         journal_capacity: u32,
+        flow_capacity: R2oFlowCapacity,
         receive_buffer: i32,
         control_path: Option<PathBuf>,
         controller_only: bool,
@@ -195,7 +197,7 @@ mod app {
         let mut scheduled = ScheduledQueue::default();
         let mut pending_applied = HashMap::<FlowTicket, PendingApplied>::new();
         let mut holding = HoldTable::default();
-        let mut tcp_sessions = TcpSessions::default();
+        let mut tcp_sessions = TcpSessions::try_with_capacity(options.flow_capacity)?;
         let mut conntrack = R2oConntrackClient::open();
         if conntrack.is_none() {
             eprintln!(
@@ -205,7 +207,7 @@ mod app {
         let mut voice_sessions = R2oVoiceSessions::default();
         let mut voice_trial_proofs = R2oVoiceTrialProofs::default();
         let mut quic_sessions = R2oQuicSessions::default();
-        let mut udp_sessions = R2oUdpSessions::new()?;
+        let mut udp_sessions = R2oUdpSessions::with_capacity(options.flow_capacity)?;
         let mut icmp_guard = R2oIcmpGuard::default();
         let mut next_execution_id = 1_u64;
         let mut next_session_sweep = Instant::now();
@@ -990,6 +992,7 @@ mod app {
             copy_range: u16::MAX as u32,
             queue_len: 1024,
             journal_capacity: 256,
+            flow_capacity: R2oFlowCapacity::default(),
             receive_buffer: 4 * 1024 * 1024,
             control_path: None,
             controller_only: false,
@@ -1016,6 +1019,11 @@ mod app {
                 "--queue" => options.queue = Some(parse_value(arguments, &mut cursor, option)?),
                 "--journal" => {
                     options.journal_capacity = parse_value(arguments, &mut cursor, option)?
+                }
+                "--r2o-flow-capacity" => {
+                    let requested: u32 = parse_value(arguments, &mut cursor, option)?;
+                    options.flow_capacity = R2oFlowCapacity::from_requested(requested as usize)
+                        .ok_or_else(|| invalid("--r2o-flow-capacity должен быть больше нуля"))?;
                 }
                 "--family" => {
                     options.protocol_family = match next_value(arguments, &mut cursor, option)? {
@@ -1146,6 +1154,7 @@ mod app {
   --controller-only  запуск без статического плана; планы поступают через control socket
   --r2o-udp-reverse-visible  обратные UDP-пакеты проходят через ту же NFQUEUE
   --queue N          номер очереди NFQUEUE
+  --r2o-flow-capacity N число слотов TCP/UDP (по умолчанию 2048)
   --family ipv4|ipv6 протокол очереди (по умолчанию ipv4)
   --mode observe|apply пропускать пакеты или исполнять планы (по умолчанию apply)
   --mark N           ненулевая метка для raw-send и защиты от повторной обработки
@@ -2208,6 +2217,16 @@ mod app {
                 ])
                 .is_err()
             );
+        }
+
+        #[test]
+        fn r2o_ёмкость_таблиц_потоков_настраивается_и_ноль_отклоняется() {
+            let configured = parse_options(&["--r2o-flow-capacity".into(), "64".into()]).unwrap();
+            assert_eq!(configured.flow_capacity.slots(), 64);
+            assert_eq!(configured.flow_capacity.limit(), 48);
+            assert_eq!(parse_options(&[]).unwrap().flow_capacity.limit(), 1536);
+            assert!(parse_options(&["--r2o-flow-capacity".into(), "0".into(),]).is_err());
+            assert!(parse_options(&["--r2o-flow-capacity".into(), "4294967296".into()]).is_err());
         }
 
         #[test]

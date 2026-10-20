@@ -4,6 +4,7 @@ pub mod conntrack;
 #[cfg(target_os = "linux")]
 pub mod control;
 pub mod engine;
+pub mod flow_capacity;
 pub mod flow_journal;
 pub mod hold;
 pub mod http_replace;

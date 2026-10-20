@@ -15,6 +15,7 @@ const IMPORTABLE_KEYS: &[&str] = &[
     "STATE_DIR",
     "QUEUE_NUM",
     "QUEUE_NUM6",
+    "R2O_FLOW_CAPACITY",
     "IPV6_ENABLED",
     "MARK",
     "AUTOUPDATE",
@@ -238,6 +239,7 @@ fn import_donor_values(
             return Err(invalid_config("в конфигурации донора есть неверная строка"));
         };
         let target_key = match key {
+            "FLOWS" => "R2O_FLOW_CAPACITY",
             "D2K_PPE_DEOFFLOAD" | "CONTROL_SOCKET" | "DECOY_SNI" => {
                 unsupported.insert(key.to_owned());
                 continue;
@@ -313,6 +315,7 @@ fn validate_value(key: &str, value: &str, donor: bool) -> io::Result<()> {
                 })
         }
         "QUEUE_NUM" | "QUEUE_NUM6" | "TG_PORT" => value.parse::<u16>().is_ok(),
+        "R2O_FLOW_CAPACITY" => value.parse::<u32>().is_ok_and(|capacity| capacity > 0),
         "IPV6_ENABLED" | "AUTOUPDATE" | "TG_ENABLED" => matches!(value, "0" | "1"),
         "MARK" => valid_mark(value),
         "FW_BACKEND" => matches!(value, "auto" | "iptables" | "nft"),
