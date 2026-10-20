@@ -2,10 +2,15 @@
 set -euo pipefail
 
 r2o_root=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
-r2o_workspace_parent=$(dirname "$(dirname "$(dirname "$r2o_root")")")
+r2o_workspace_parent=$(dirname "$r2o_root")
 r2o_donor_datapath=${R2O_DONOR_DATAPATH:-$r2o_workspace_parent/d2o/datapath}
+r2o_log_dir="$r2o_root/.rea"
+r2o_log="$r2o_log_dir/r2o-quic-stun-watch-differential-$(date +%Y%m%d-%H%M%S).log"
 r2o_tmp=$(mktemp -d)
 trap 'rm -rf "$r2o_tmp"' EXIT HUP INT TERM
+
+mkdir -p "$r2o_log_dir"
+exec > >(tee "$r2o_log") 2>&1
 
 if [ ! -d "$r2o_donor_datapath" ]; then
     printf 'Каталог C-эталона не найден: %s\n' "$r2o_donor_datapath" >&2

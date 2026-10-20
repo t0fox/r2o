@@ -1071,6 +1071,16 @@ mod app {
             | R2oFlowJournalKind::R2oQuicStall
             | R2oFlowJournalKind::R2oTcpFinRetry
             | R2oFlowJournalKind::R2oTcpRstAfterApp => format!(" {direction}, код={}", entry.code),
+            R2oFlowJournalKind::R2oTcpRst => format!(
+                " {direction}, TTL={}, опорный_TTL={}, класс={}, IP_ID={}, ServerHello={}, план={}, форма={}",
+                entry.ttl,
+                entry.reference_ttl,
+                entry.tos,
+                entry.ip_id,
+                entry.server_hello,
+                entry.planned,
+                entry.client_shape
+            ),
             _ => String::new(),
         }
     }
@@ -1333,6 +1343,9 @@ mod app {
         let at_ns = journal_timestamp(journal_origin);
         for event in sessions.take_tcp_exchange_events() {
             flow_journal.record_tcp_exchange(at_ns, &event);
+        }
+        for event in sessions.take_tcp_rst_events() {
+            flow_journal.record_tcp_rst(at_ns, &event);
         }
         for event in sessions.take_tcp_rst_cut_events() {
             flow_journal.record_tcp_rst_cut(at_ns, &event);
@@ -2354,6 +2367,129 @@ mod app {
                 journal.count(),
                 1,
                 "повтор снятого RST не создаёт запись снова"
+            );
+        }
+
+        #[test]
+        fn r2o_передаёт_ранний_rst_в_общий_журнал() {
+            fn пакет_tcp(
+                source: ([u8; 4], u16),
+                destination: ([u8; 4], u16),
+                flags: u8,
+                ttl: u8,
+                sequence: u32,
+                payload: &[u8],
+            ) -> Vec<u8> {
+                let mut packet = vec![0; 40 + payload.len()];
+                let packet_len = packet.len() as u16;
+                packet[0] = 0x45;
+                packet[2..4].copy_from_slice(&packet_len.to_be_bytes());
+                packet[8] = ttl;
+                packet[9] = 6;
+                packet[12..16].copy_from_slice(&source.0);
+                packet[16..20].copy_from_slice(&destination.0);
+                packet[20..22].copy_from_slice(&source.1.to_be_bytes());
+                packet[22..24].copy_from_slice(&destination.1.to_be_bytes());
+                packet[24..28].copy_from_slice(&sequence.to_be_bytes());
+                packet[32] = 0x50;
+                packet[33] = flags;
+                packet[34..36].copy_from_slice(&4096_u16.to_be_bytes());
+                packet[40..].copy_from_slice(payload);
+                packet
+            }
+
+            let клиент: ([u8; 4], u16) = ([192, 0, 2, 10], 41000);
+            let сервер: ([u8; 4], u16) = ([198, 51, 100, 20], 443);
+            let mut sni = Vec::new();
+            sni.extend_from_slice(&15_u16.to_be_bytes());
+            sni.push(0);
+            sni.extend_from_slice(&12_u16.to_be_bytes());
+            sni.extend_from_slice(b"example.test");
+            let mut extensions = Vec::new();
+            extensions.extend_from_slice(&0_u16.to_be_bytes());
+            extensions.extend_from_slice(&(sni.len() as u16).to_be_bytes());
+            extensions.extend_from_slice(&sni);
+            let mut body = vec![0x03, 0x03];
+            body.extend_from_slice(&[0; 32]);
+            body.extend_from_slice(&[0, 0, 2, 0x13, 1, 1, 0]);
+            body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+            body.extend_from_slice(&extensions);
+            let mut handshake = vec![1];
+            handshake.extend_from_slice(&[
+                ((body.len() >> 16) & 0xff) as u8,
+                ((body.len() >> 8) & 0xff) as u8,
+                (body.len() & 0xff) as u8,
+            ]);
+            handshake.extend_from_slice(&body);
+            let mut client_hello = vec![0x16, 0x03, 0x03];
+            client_hello.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+            client_hello.extend_from_slice(&handshake);
+            let mut sessions = TcpSessions::default();
+            let mut journal = R2oFlowJournal::with_capacity(4).unwrap();
+            let mut control = None;
+            let origin = Instant::now();
+            for packet in [
+                пакет_tcp(клиент, сервер, 0x02, 64, 700, &[]),
+                пакет_tcp(сервер, клиент, 0x12, 124, 900, &[]),
+                пакет_tcp(клиент, сервер, 0x18, 64, 701, &client_hello),
+            ] {
+                super::decide_with_tcp_session(
+                    &mut sessions,
+                    &super::Plan::default(),
+                    &packet,
+                    &mut control,
+                    &mut journal,
+                    &origin,
+                );
+            }
+
+            let mut сброс = пакет_tcp(сервер, клиент, 0x14, 127, 900, &[]);
+            сброс[1] = 0x2e;
+            сброс[4..6].copy_from_slice(&0x5a17_u16.to_be_bytes());
+            assert_eq!(
+                super::decide_with_tcp_session(
+                    &mut sessions,
+                    &super::Plan::default(),
+                    &сброс,
+                    &mut control,
+                    &mut journal,
+                    &origin,
+                ),
+                super::PacketDecision::Accept,
+            );
+
+            assert_eq!(journal.count(), 1);
+            let entry = journal.get(0).unwrap();
+            assert_eq!(
+                entry.kind,
+                r2o_datapath::flow_journal::R2oFlowJournalKind::R2oTcpRst
+            );
+            assert_eq!(entry.code, 1);
+            assert_eq!(entry.ttl, 127);
+            assert_eq!(entry.reference_ttl, 124);
+            assert_eq!(entry.tos, 0x2e);
+            assert_eq!(entry.ip_id, 0x5a17);
+            assert!(!entry.server_hello);
+            assert_eq!(entry.planned, 2);
+            assert_eq!(entry.client_shape, r2k_core::control::SHAPE_LEGACY);
+            assert_eq!(entry.client_is_low, Some(true));
+            assert_eq!(
+                r2o_datapath::flow_journal::R2oFlowJournalEntry::from_event_frame(
+                    &entry.to_event_frame().unwrap()
+                )
+                .unwrap(),
+                *entry
+            );
+            println!(
+                "R2O_DIFF code={} ttl={} ref={} tos={} ipid={} planned={} shape={} client_is_low={}",
+                entry.code,
+                entry.ttl,
+                entry.reference_ttl,
+                entry.tos,
+                entry.ip_id,
+                entry.planned,
+                entry.client_shape,
+                u8::from(entry.client_is_low.unwrap_or_default()),
             );
         }
 

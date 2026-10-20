@@ -1,4 +1,4 @@
-use crate::engine::{R2oTcpExchangeEvent, R2oTcpRstCutEvent};
+use crate::engine::{R2oTcpExchangeEvent, R2oTcpRstCutEvent, R2oTcpRstEvent};
 use crate::r2o_quic::R2oUdpExchangeEvent;
 use r2k_core::control::{
     AppliedEvent, BindingContext, EVENT_APPLIED, EVENT_HELLO, EVENT_R2O_JOURNAL_END,
@@ -40,6 +40,7 @@ pub enum R2oFlowJournalKind {
     R2oTcpRstAfterApp,
     R2oVoiceProof,
     R2oTcpRstCut,
+    R2oTcpRst,
 }
 
 impl R2oFlowJournalKind {
@@ -64,6 +65,7 @@ impl R2oFlowJournalKind {
             Self::R2oTcpRstAfterApp => "RST TCP после TLS-данных",
             Self::R2oVoiceProof => "подтверждение голосового UDP-обмена",
             Self::R2oTcpRstCut => "чужой RST TCP снят защитой",
+            Self::R2oTcpRst => "RST TCP в ответ на ClientHello",
         }
     }
 }
@@ -387,6 +389,7 @@ fn journal_kind_id(kind: R2oFlowJournalKind) -> u8 {
         R2oFlowJournalKind::R2oVoiceProof => 16,
         R2oFlowJournalKind::R2oQuicStall => 17,
         R2oFlowJournalKind::R2oTcpRstCut => 18,
+        R2oFlowJournalKind::R2oTcpRst => 19,
     }
 }
 
@@ -411,6 +414,7 @@ fn journal_kind_from_id(id: u8) -> Result<R2oFlowJournalKind, &'static str> {
         16 => Ok(R2oFlowJournalKind::R2oVoiceProof),
         17 => Ok(R2oFlowJournalKind::R2oQuicStall),
         18 => Ok(R2oFlowJournalKind::R2oTcpRstCut),
+        19 => Ok(R2oFlowJournalKind::R2oTcpRst),
         _ => Err("неизвестный вид записи журнала"),
     }
 }
@@ -688,6 +692,25 @@ impl R2oFlowJournal {
             tos: event.traffic_class,
             server_hello: event.server_hello,
             planned: event.planned,
+            client_shape: event.client_shape,
+            client_is_low: Some(event.client_is_low),
+            ip_id: event.ip_id,
+            ..R2oFlowJournalEntry::default()
+        });
+    }
+
+    pub fn record_tcp_rst(&mut self, at_ns: u64, event: &R2oTcpRstEvent) {
+        self.push(R2oFlowJournalEntry {
+            at_ns,
+            key: event.key,
+            kind: R2oFlowJournalKind::R2oTcpRst,
+            code: 1,
+            ttl: event.ttl,
+            reference_ttl: event.reference_ttl,
+            tos: event.traffic_class,
+            server_hello: event.server_hello,
+            planned: event.planned,
+            client_shape: event.client_shape,
             client_is_low: Some(event.client_is_low),
             ip_id: event.ip_id,
             ..R2oFlowJournalEntry::default()

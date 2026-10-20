@@ -99,6 +99,7 @@ struct TcpSession {
     fin_retry_queued: bool,
     fin_retry_reported: bool,
     rst_cut_reported: bool,
+    client_shape: u8,
     last_seen: Instant,
 }
 
@@ -145,6 +146,7 @@ impl TcpSession {
             fin_retry_queued: false,
             fin_retry_reported: false,
             rst_cut_reported: false,
+            client_shape: 0,
             last_seen: now,
         }
     }
@@ -182,7 +184,26 @@ pub struct R2oTcpRstCutEvent {
     pub server_hello: bool,
     /// Был ли успешно применён план к этому потоку: 1 — да, 2 — нет.
     pub planned: u8,
+    /// Наблюдавшаяся форма ClientHello.
+    pub client_shape: u8,
     /// Направление клиента в каноническом ключе.
+    pub client_is_low: bool,
+}
+
+/// Отпечаток первого обратного RST после ClientHello, который пропущен дальше.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct R2oTcpRstEvent {
+    /// Канонический ключ TCP-потока.
+    pub key: [u8; KEY_LEN],
+    pub ttl: u8,
+    pub reference_ttl: u8,
+    pub traffic_class: u8,
+    pub ip_id: u16,
+    pub server_hello: bool,
+    /// 1 — план исполнен, 2 — план не исполнен.
+    pub planned: u8,
+    /// Наблюдавшаяся форма ClientHello.
+    pub client_shape: u8,
     pub client_is_low: bool,
 }
 
@@ -195,6 +216,7 @@ impl R2oTcpExchangeEvent {
 pub struct TcpSessions {
     flows: HashMap<TcpFlowKey, TcpSession>,
     tcp_exchange_events: VecDeque<R2oTcpExchangeEvent>,
+    tcp_rst_events: VecDeque<R2oTcpRstEvent>,
     tcp_rst_cut_events: VecDeque<R2oTcpRstCutEvent>,
     fin_retry_events: VecDeque<R2oTcpFinRetryEvent>,
     rst_after_app_events: VecDeque<R2oTcpRstAfterAppEvent>,
@@ -205,6 +227,7 @@ impl Default for TcpSessions {
         Self {
             flows: HashMap::with_capacity(MAX_TCP_SESSIONS),
             tcp_exchange_events: VecDeque::with_capacity(MAX_TCP_SESSIONS * 2),
+            tcp_rst_events: VecDeque::with_capacity(MAX_TCP_SESSIONS),
             tcp_rst_cut_events: VecDeque::with_capacity(MAX_TCP_SESSIONS),
             fin_retry_events: VecDeque::new(),
             rst_after_app_events: VecDeque::new(),
@@ -230,6 +253,10 @@ impl TcpSessions {
 
     pub fn take_tcp_exchange_events(&mut self) -> Vec<R2oTcpExchangeEvent> {
         self.tcp_exchange_events.drain(..).collect()
+    }
+
+    pub fn take_tcp_rst_events(&mut self) -> Vec<R2oTcpRstEvent> {
+        self.tcp_rst_events.drain(..).collect()
     }
 
     pub fn take_tcp_rst_cut_events(&mut self) -> Vec<R2oTcpRstCutEvent> {
@@ -533,6 +560,21 @@ impl TcpSessions {
             session.hello_at = Some(now);
             session.hello_ack = ack.then_some(tcp.acknowledgment);
             session.hello_has_sni = hello.sni_range.is_some();
+            session.client_shape = if session.hello_has_sni {
+                if hello.is_tls13 {
+                    if hello.ech_offer {
+                        r2k_core::control::SHAPE_ECH_TCP
+                    } else {
+                        r2k_core::control::SHAPE_MODERN
+                    }
+                } else if !hello.extensions_truncated {
+                    r2k_core::control::SHAPE_LEGACY
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
         }
         session.last_seen = now;
         let reverse = source != session.initiator;
@@ -607,7 +649,30 @@ impl TcpSessions {
         let mut keep_fin_session = false;
         let mut fin_retry_event = None;
         let mut rst_after_app_event = None;
+        let mut rst_event = None;
         let mut rst_cut_event = None;
+        let rst_dropped = rst
+            && reverse
+            && session.guards & GUARD_RST_ALIEN != 0
+            && reverse_ttl_before_packet.is_some_and(|reference| reference != view.hop_limit);
+        if rst
+            && reverse
+            && session.hello_at.is_some()
+            && reverse_packets_after_hello_before_packet == 0
+            && !rst_dropped
+        {
+            rst_event = Some(R2oTcpRstEvent {
+                key: key.wire_key(),
+                ttl: view.hop_limit,
+                reference_ttl: reverse_ttl_before_packet.unwrap_or_default(),
+                traffic_class: view.traffic_class,
+                ip_id: view.ip_id,
+                server_hello: session.reverse_server_hello,
+                planned: if session.plan_done { 1 } else { 2 },
+                client_shape: session.client_shape,
+                client_is_low: session.initiator == key.low,
+            });
+        }
         if rst
             && reverse
             && session.hello_at.is_some()
@@ -624,6 +689,7 @@ impl TcpSessions {
                 ip_id: view.ip_id,
                 server_hello: session.reverse_server_hello,
                 planned: if session.plan_done { 1 } else { 2 },
+                client_shape: session.client_shape,
                 client_is_low: session.initiator == key.low,
             });
         }
@@ -681,6 +747,11 @@ impl TcpSessions {
             if !already_queued && self.rst_after_app_events.len() < MAX_TCP_SESSIONS {
                 self.rst_after_app_events.push_back(event);
             }
+        }
+        if let Some(event) = rst_event
+            && self.tcp_rst_events.len() < MAX_TCP_SESSIONS
+        {
+            self.tcp_rst_events.push_back(event);
         }
         if let Some(event) = rst_cut_event
             && self.tcp_rst_cut_events.len() < MAX_TCP_SESSIONS
@@ -2315,7 +2386,7 @@ mod tests {
             decide_with_session(
                 &mut sessions,
                 &plan,
-                &ipv4_tcp_packet(client, server, 0x18, 64, 700, &client_hello()),
+                &ipv4_tcp_packet(client, server, 0x18, 64, 700, &client_hello_with_sni()),
             ),
             PacketDecision::Transmit { .. }
         ));
@@ -2342,6 +2413,8 @@ mod tests {
         assert_eq!(events[0].ttl, 127);
         assert_eq!(events[0].reference_ttl, 124);
         assert_eq!(events[0].planned, 1);
+        assert_eq!(events[0].client_shape, r2k_core::control::SHAPE_LEGACY);
+        assert!(sessions.take_tcp_rst_events().is_empty());
 
         assert_eq!(
             decide_with_session(
@@ -2353,6 +2426,55 @@ mod tests {
         );
         assert!(sessions.take_tcp_rst_cut_events().is_empty());
         assert_eq!(sessions.len(), 1, "снятый чужой RST не закрывает поток");
+    }
+
+    #[test]
+    fn tcp_ранний_rst_создаёт_отдельное_наблюдение() {
+        let plan = Plan::default();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+
+        for packet in [
+            ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]),
+            ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+            ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello_with_sni()),
+        ] {
+            assert_eq!(
+                decide_with_session(&mut sessions, &plan, &packet),
+                PacketDecision::Accept,
+            );
+        }
+
+        let mut rst = ipv4_tcp_packet(server, client, 0x14, 127, 900, &[]);
+        rst[1] = 0x2e;
+        rst[4..6].copy_from_slice(&0x5a17_u16.to_be_bytes());
+        assert_eq!(
+            decide_with_session(&mut sessions, &plan, &rst),
+            PacketDecision::Accept,
+        );
+
+        let events = sessions.take_tcp_rst_events();
+        assert_eq!(events.len(), 1);
+        let event = events[0];
+        assert_eq!(event.ttl, 127);
+        assert_eq!(event.reference_ttl, 124);
+        assert_eq!(event.traffic_class, 0x2e);
+        assert_eq!(event.ip_id, 0x5a17);
+        assert_eq!(event.planned, 2);
+        assert_eq!(event.client_shape, r2k_core::control::SHAPE_LEGACY);
+        assert!(event.client_is_low);
+        assert!(sessions.is_empty());
+        println!(
+            "R2O_DIFF code=1 ttl={} ref={} tos={} ipid={} planned={} shape={} client_is_low={}",
+            event.ttl,
+            event.reference_ttl,
+            event.traffic_class,
+            event.ip_id,
+            event.planned,
+            event.client_shape,
+            u8::from(event.client_is_low),
+        );
     }
 
     #[test]
@@ -2795,6 +2917,39 @@ mod tests {
         hello.extend_from_slice(&[0; 32]);
         hello.extend_from_slice(&[0, 0, 2, 0x13, 1, 1, 0, 0, 0]);
         hello
+    }
+
+    fn client_hello_with_sni() -> Vec<u8> {
+        let host = b"example.test";
+        let mut sni = Vec::new();
+        sni.extend_from_slice(&((host.len() + 3) as u16).to_be_bytes());
+        sni.push(0);
+        sni.extend_from_slice(&(host.len() as u16).to_be_bytes());
+        sni.extend_from_slice(host);
+
+        let mut extensions = Vec::new();
+        extensions.extend_from_slice(&0_u16.to_be_bytes());
+        extensions.extend_from_slice(&(sni.len() as u16).to_be_bytes());
+        extensions.extend_from_slice(&sni);
+
+        let mut body = vec![0x03, 0x03];
+        body.extend_from_slice(&[0; 32]);
+        body.extend_from_slice(&[0, 0, 2, 0x13, 1, 1, 0]);
+        body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        body.extend_from_slice(&extensions);
+
+        let mut handshake = vec![1];
+        handshake.extend_from_slice(&[
+            ((body.len() >> 16) & 0xff) as u8,
+            ((body.len() >> 8) & 0xff) as u8,
+            (body.len() & 0xff) as u8,
+        ]);
+        handshake.extend_from_slice(&body);
+
+        let mut record = vec![0x16, 0x03, 0x03];
+        record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+        record.extend_from_slice(&handshake);
+        record
     }
 
     fn client_hello_with_sni_and_large_extension() -> Vec<u8> {

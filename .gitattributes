@@ -1,2 +1,4 @@
 scripts/r2o-tcp-rst-cut-differential.sh text eol=lf
+scripts/r2o-tcp-rst-observation-differential.sh text eol=lf
+scripts/r2o-quic-stun-watch-differential.sh text eol=lf
 scripts/r2o-discovery-coalesce-differential.sh text eol=lf
