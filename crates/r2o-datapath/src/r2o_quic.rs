@@ -97,6 +97,8 @@ struct FlowState {
     first_response_rtt: Option<Duration>,
     #[cfg(target_os = "linux")]
     conntrack_mark: Option<R2oQuicConntrackMark>,
+    #[cfg(target_os = "linux")]
+    quic_stall_excluded: bool,
     last_seen: Instant,
     forward_after_initial: u32,
     exchange_told: bool,
@@ -277,6 +279,8 @@ impl R2oQuicSessions {
                 first_response_rtt: None,
                 #[cfg(target_os = "linux")]
                 conntrack_mark: None,
+                #[cfg(target_os = "linux")]
+                quic_stall_excluded: false,
                 last_seen: now,
                 forward_after_initial: 0,
                 exchange_told: false,
@@ -295,6 +299,12 @@ impl R2oQuicSessions {
             return;
         };
         if source == flow.client && destination == flow.server {
+            #[cfg(target_os = "linux")]
+            if r2k_core::stun::is_binding_request(payload)
+                || r2k_core::stun::is_discord_ip_discovery_request(payload)
+            {
+                flow.quic_stall_excluded = true;
+            }
             flow.forward_after_initial = flow.forward_after_initial.saturating_add(1);
             flow.last_forward = now;
         } else if source == flow.server && destination == flow.client {
@@ -406,6 +416,7 @@ impl R2oQuicSessions {
             .iter()
             .filter_map(|(key, flow)| {
                 if flow.suspected
+                    || flow.quic_stall_excluded
                     || flow.last_reverse.is_none()
                     || flow.first_response_rtt.is_none()
                 {
@@ -434,7 +445,7 @@ impl R2oQuicSessions {
             .flows
             .iter_mut()
             .find(|(flow_key, _)| flow_key.wire_key() == *key)?;
-        if flow.suspected || flow.last_reverse.is_none() {
+        if flow.suspected || flow.quic_stall_excluded || flow.last_reverse.is_none() {
             return None;
         }
         if flow
@@ -946,6 +957,60 @@ mod tests {
 
         sessions.suppress_packet(&initial);
         assert!(sessions.r2o_quic_stall_candidates().is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn quic_зависание_исключает_stun_и_discord_discovery_из_одного_потока() {
+        let start = Instant::now();
+        let client = [192, 0, 2, 10];
+        let server = [198, 51, 100, 20];
+        let initial = ipv4_packet(client, server, 53_123, 443, INITIAL);
+        let reply = ipv4_packet(server, client, 443, 53_123, b"reply");
+
+        let mut discovery = [0; 74];
+        discovery[..4].copy_from_slice(&[0, 1, 0, 70]);
+        discovery[4..8].copy_from_slice(&[1, 2, 3, 4]);
+        let stun = r2k_core::stun::binding_request([5; 12]);
+
+        for request in [stun.as_slice(), discovery.as_slice()] {
+            let mut sessions = R2oQuicSessions::default();
+            sessions.observe_packet(&initial, start);
+            sessions.observe_packet(&reply, start + Duration::from_millis(500));
+            let probe = sessions.r2o_quic_stall_candidates().pop().unwrap();
+            let baseline = R2oConntrackInfo {
+                original_packets: 10,
+                reply_packets: 9,
+                tcp_state: None,
+            };
+            assert_eq!(
+                sessions.update_r2o_quic_stall(
+                    start + Duration::from_millis(600),
+                    &probe.key,
+                    baseline,
+                ),
+                None
+            );
+
+            sessions.observe_packet(
+                &ipv4_packet(client, server, 53_123, 443, request),
+                start + Duration::from_millis(700),
+            );
+            sessions.observe_packet(&reply, start + Duration::from_millis(900));
+
+            assert!(sessions.r2o_quic_stall_candidates().is_empty());
+            assert_eq!(
+                sessions.update_r2o_quic_stall(
+                    start + Duration::from_millis(2_200),
+                    &probe.key,
+                    R2oConntrackInfo {
+                        original_packets: 13,
+                        ..baseline
+                    },
+                ),
+                None
+            );
+        }
     }
 
     #[test]
