@@ -4203,3 +4203,60 @@ GNU MIPS/QEMU (57 с), OpenWrt MIPS musl/QEMU (47 с), ARMv5/QEMU (66 с) и NFQ
 C/Rust differential занял 10 с. Учтён один функциональный сценарий.
 Процент общего переноса остаётся **64,68%**; другие части Discovery и полное
 машинное REA-покрытие целевого controller ещё открыты.
+
+## Отказ Discord voice-пробы после молчания потока — 20.10.2026
+
+Закрыт один сценарий voice-watch. C связывает временный план с точным `plan_id`,
+`trial_id`, клиентским IP и адресом сервера, сохраняет применённый UDP-поток и
+отказывает только после `D2K_SUSPECT_SILENT` для этого потока. Отказ снимает
+временную пробу и откладывает повторную цель на 120 секунд. Clang AST для
+`sched.c` подтвердил наличие `on_applied`, `on_suspect`, `voice_fail`,
+`task_fail`, `d2k_sched_event` и `d2k_sched_tick`; C сценарий
+`test_sched --voice-only` проверил молчание, отказ и одно точное удаление.
+
+В Rust контроллер запоминает ключ только при совпадении trial и ID плана,
+известной временной IPv4 voice-привязке, ненулевом execution ID и точной паре
+клиент/сервер. `EVENT_R2O_VOICE_SUSPECT` снимает только запись с тем же ключом и
+целью, отправляет удаление по исходному trial ID и обновляет двухминутный
+cooldown с момента отказа. Другой клиентский порт, серверный порт или цель не
+могут завершить чужую пробу. При ошибке удаления правило остаётся ограничено
+арендой датапата.
+
+REA Evidence `ev_33c82a53d10dc2eaa966d704ed63587c41a7b23ed7e38293dcd9a4fa60e347f4`
+получено для полного тела `on_suspect` из C-бинарника `test_sched`; оно включает
+путь проверки потока через `ev_matches_flow`. Использовано также ранее
+полученное Evidence `ev_6b7ca72b0f54798a1acf229b959f38478a2c0e4ee381a32ae9ff924e12d2f166`
+для `d2k_sched_tick`, где обрабатывается голосовой отказ. Исходный C
+`sched.c` имеет SHA-256
+`1de9feaab19dcea1e493aea068295470cf3143adf83157b57663f1098132ae8a`; C-тест
+`test_sched.c` —
+`a67f87e09a7fd93ed735b52f361e78590b9ce40679ab95e300accf0a3e9d51a3`.
+
+REA не смогло декомпилировать `d2k_sched_event`: Ghidra вернула
+`Recoverable Error: Unable to find unique hash for varnode`, run ID
+`162d2cb3-e11d-48eb-9c16-9c48f6e3304e`. Повтор этого запроса не выполнялся.
+Соответствующую ветку APPLIED проверили по исходнику C, AST и исполняемому C
+тесту. Большой Rust ELF повторно не анализировался; целевое REA-досье Rust остаётся
+ограничением.
+
+Дифференциальный набор
+`.rea/r2o-discord-discovery-differential-20261020-140129.log` прошёл: C
+`test_voice_discovery`, C `test_sched --voice-only`, адресные Rust-тесты
+сопоставления потока, продления, очереди и datapath. Полный `r2o-controller`:
+287 пройдено, 0 ошибок, 1 штатный пропуск. Workspace: 837 пройдено, 0 ошибок,
+4 штатных пропуска. `-Dwarnings`, release, cross-check aarch64/armv5/i686/riscv64,
+GNU MIPS/QEMU, OpenWrt MIPS musl/QEMU, ARMv5/QEMU и NFQUEUE завершились
+успешно. Журналы: `.rea/r2o-voice-watch-controller-tests.log`,
+`.rea/r2o-voice-watch-workspace-tests.log`,
+`.rea/r2o-voice-watch-warnings-check.log`,
+`.rea/r2o-voice-watch-release-build.log`,
+`.rea/r2o-voice-watch-cross-checks.log`,
+`.rea/r2o-voice-watch-mips-gnu-qemu.log`,
+`.rea/r2o-voice-watch-openwrt-qemu.log`,
+`.rea/r2o-voice-watch-armv5-qemu.log` и `.rea/r2o-voice-watch-nfq.log`.
+
+Общая оценка не меняется: **64,68%**. Закрыт один сценарий внутри
+незавершённого переноса Discord voice и scheduler/Discovery; приёмка на физическом
+OpenWrt-роутере остаётся открытой. Таймер записал 274 с анализа и 1124 с
+реализации вместе с REA, тестами и контрольными сборками; итоговый C/Rust
+differential занял 12 с.

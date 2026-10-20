@@ -2079,6 +2079,17 @@ impl R2oVoiceDiscoverySeen {
         self.r2o_targets.insert(target, now);
         self.r2o_order.push_back((target, now));
     }
+
+    fn r2o_refresh(
+        &mut self,
+        target: r2o_controller::voice_discovery::R2oVoiceTarget,
+        now: std::time::Instant,
+    ) {
+        self.r2o_prune(now);
+        self.r2o_targets.remove(&target);
+        self.r2o_order.retain(|(queued, _)| *queued != target);
+        self.r2o_insert(target, now);
+    }
 }
 
 #[cfg(unix)]
@@ -2087,6 +2098,7 @@ struct R2oVoiceTrialContext {
     target: r2o_controller::voice_discovery::R2oVoiceTarget,
     trial_id: [u8; 16],
     plan_text: String,
+    voice_flow_key: Option<[u8; r2k_core::control::KEY_LEN]>,
     renew_at: std::time::Instant,
     expires_at: std::time::Instant,
 }
@@ -2272,6 +2284,60 @@ fn r2o_voice_target_has_active_trial(
     target: &r2o_controller::voice_discovery::R2oVoiceTarget,
 ) -> bool {
     trials.values().any(|trial| &trial.target == target)
+}
+
+#[cfg(unix)]
+fn r2o_voice_applied_flow_matches(
+    trial: &R2oVoiceTrialContext,
+    event: &r2k_core::control::AppliedEvent,
+) -> bool {
+    let key = &event.key;
+    if event.trial_id != trial.trial_id
+        || event.execution_id == 0
+        || !event.binding.is_known()
+        || event.binding.kind != 2
+        || event.binding.family != 4
+        || event.binding.shape != SHAPE_VOICE
+        || !event.binding.temporary
+        || key[0] != 4
+        || key[37] != 17
+    {
+        return false;
+    }
+    let Ok(plan_bytes) = compile_text(&trial.plan_text) else {
+        return false;
+    };
+    let Ok(plan) = Plan::parse(&plan_bytes) else {
+        return false;
+    };
+    if plan.transport != 17 || plan.proto != PROTO_VOICE || event.plan_id != plan.id {
+        return false;
+    }
+
+    let first = std::net::SocketAddrV4::new(
+        std::net::Ipv4Addr::new(key[1], key[2], key[3], key[4]),
+        u16::from_be_bytes([key[33], key[34]]),
+    );
+    let second = std::net::SocketAddrV4::new(
+        std::net::Ipv4Addr::new(key[17], key[18], key[19], key[20]),
+        u16::from_be_bytes([key[35], key[36]]),
+    );
+    let server = trial.target.server;
+    (first.ip() == &trial.target.client && second == server && first.port() != 0)
+        || (second.ip() == &trial.target.client && first == server && second.port() != 0)
+}
+
+#[cfg(unix)]
+fn r2o_take_silent_voice_trial(
+    trials: &mut HashMap<[u8; 16], R2oVoiceTrialContext>,
+    key: &[u8; r2k_core::control::KEY_LEN],
+    target: &r2o_controller::voice_discovery::R2oVoiceTarget,
+) -> Option<R2oVoiceTrialContext> {
+    let trial_id = trials
+        .iter()
+        .find(|(_, trial)| &trial.target == target && trial.voice_flow_key.as_ref() == Some(key))
+        .map(|(trial_id, _)| *trial_id)?;
+    trials.remove(&trial_id)
 }
 
 #[cfg(unix)]
@@ -2843,6 +2909,7 @@ impl ControlClient {
             target,
             trial_id,
             plan_text,
+            voice_flow_key: None,
             renew_at: now + R2O_VOICE_TRIAL_RENEW_INTERVAL,
             expires_at,
         };
@@ -3483,6 +3550,28 @@ impl ControlClient {
                     std::io::stdout().flush()?;
                     continue;
                 };
+                if let Some(r2o_trial) =
+                    r2o_take_silent_voice_trial(&mut r2o_voice_trials, &event.key, &r2o_target)
+                {
+                    if let Some(r2o_worker) = voice_discovery.as_mut() {
+                        r2o_worker
+                            .r2o_seen
+                            .r2o_refresh(r2o_trial.target, std::time::Instant::now());
+                    }
+                    if let Err(error) = self.retire_r2o_voice_trial(&r2o_trial) {
+                        eprintln!(
+                            "голосовой приём не пробил; временное правило истечёт по аренде, досрочное снятие не удалось: {error}"
+                        );
+                    }
+                    println!(
+                        "голосовой приём не пробил поток {} -> {}:{}; цель отложена на 120 секунд",
+                        r2o_target.client,
+                        r2o_target.server.ip(),
+                        r2o_target.server.port(),
+                    );
+                    std::io::stdout().flush()?;
+                    continue;
+                }
                 let r2o_queued = if let (Some(r2o_worker), Some((_, catalog, _, _))) =
                     (&mut voice_discovery, &discovery)
                 {
@@ -3739,6 +3828,12 @@ impl ControlClient {
             if frame.kind == EVENT_APPLIED {
                 let applied =
                     decode_applied(&frame).map_err(|error| format!("событие APPLIED: {error}"))?;
+                if let Some(r2o_trial) = r2o_voice_trials.get_mut(&applied.trial_id)
+                    && r2o_trial.expires_at > std::time::Instant::now()
+                    && r2o_voice_applied_flow_matches(r2o_trial, &applied)
+                {
+                    r2o_trial.voice_flow_key = Some(applied.key);
+                }
                 self.remember_applied_event(applied.clone());
                 println!(
                     "исполнение подтверждено: plan={:02x?}, trial={:02x?}, execution={}, привязка известна={}",
@@ -7767,6 +7862,7 @@ mod tests {
                 },
                 trial_id: [0x42; 16],
                 plan_text: String::new(),
+                voice_flow_key: None,
                 renew_at: std::time::Instant::now() + std::time::Duration::from_secs(60),
                 expires_at: std::time::Instant::now() + std::time::Duration::from_secs(1),
             };
@@ -7804,6 +7900,7 @@ mod tests {
             target: r2o_target,
             trial_id: r2o_trial_id,
             plan_text: r2o_plan_text.clone(),
+            voice_flow_key: None,
             renew_at: r2o_started_at + R2O_VOICE_TRIAL_RENEW_INTERVAL,
             expires_at: r2o_started_at + R2O_VOICE_TRIAL_TASK_LIFETIME,
         };
@@ -7922,6 +8019,7 @@ mod tests {
                     target: r2o_target,
                     trial_id: r2o_trial_id,
                     plan_text: r2o_plan_text.clone(),
+                    voice_flow_key: None,
                     renew_at: r2o_started_at,
                     expires_at: r2o_started_at + R2O_VOICE_TRIAL_TASK_LIFETIME,
                 },
@@ -7945,6 +8043,92 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_voice_watch_связывает_applied_с_точным_потоком_пробы() {
+        use super::{
+            R2oVoiceTrialContext, r2o_take_silent_voice_trial, r2o_voice_applied_flow_matches,
+        };
+        use r2k_core::control::{AppliedEvent, BindingContext, KEY_LEN, SHAPE_VOICE};
+        use std::collections::HashMap;
+        use std::time::{Duration, Instant};
+
+        let target = r2o_controller::voice_discovery::R2oVoiceTarget {
+            client: "192.0.2.10".parse().unwrap(),
+            server: "198.51.100.20:50004".parse().unwrap(),
+        };
+        let trial_id = [0x42; 16];
+        let prefix = r2k_core::stun::binding_request([0x36; 12]);
+        let plan_text = r2o_controller::voice_discovery::r2o_voice_arm_plan_text(&prefix);
+        let plan_id = r2o_controller::voice_discovery::r2o_voice_arm_plan(&prefix)
+            .unwrap()
+            .id;
+        let now = Instant::now();
+        let trial = R2oVoiceTrialContext {
+            target,
+            trial_id,
+            plan_text,
+            voice_flow_key: None,
+            renew_at: now + Duration::from_secs(60),
+            expires_at: now + Duration::from_secs(600),
+        };
+        let mut key = [0; KEY_LEN];
+        key[0] = 4;
+        key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+        key[17..21].copy_from_slice(&[198, 51, 100, 20]);
+        key[33..35].copy_from_slice(&51_234_u16.to_be_bytes());
+        key[35..37].copy_from_slice(&50_004_u16.to_be_bytes());
+        key[37] = 17;
+        let applied = AppliedEvent {
+            key,
+            plan_id,
+            trial_id,
+            execution_id: 7,
+            binding: BindingContext {
+                generation: 1,
+                kind: 2,
+                family: 4,
+                shape: SHAPE_VOICE,
+                temporary: true,
+                epoch: [1; 16],
+            },
+        };
+
+        assert!(r2o_voice_applied_flow_matches(&trial, &applied));
+        let mut wrong_plan = applied.clone();
+        wrong_plan.plan_id[0] ^= 1;
+        assert!(!r2o_voice_applied_flow_matches(&trial, &wrong_plan));
+        let mut wrong_server = applied.clone();
+        wrong_server.key[35..37].copy_from_slice(&50_005_u16.to_be_bytes());
+        assert!(!r2o_voice_applied_flow_matches(&trial, &wrong_server));
+        let mut permanent = applied.clone();
+        permanent.binding.temporary = false;
+        assert!(!r2o_voice_applied_flow_matches(&trial, &permanent));
+
+        let trial = R2oVoiceTrialContext {
+            voice_flow_key: Some(applied.key),
+            ..trial
+        };
+        let mut trials = HashMap::from([(trial_id, trial)]);
+        let mut other_flow = applied.key;
+        other_flow[33..35].copy_from_slice(&51_235_u16.to_be_bytes());
+        assert!(r2o_take_silent_voice_trial(&mut trials, &other_flow, &target).is_none());
+        assert!(trials.contains_key(&trial_id));
+        let other_target = r2o_controller::voice_discovery::R2oVoiceTarget {
+            client: "192.0.2.11".parse().unwrap(),
+            server: target.server,
+        };
+        assert!(r2o_take_silent_voice_trial(&mut trials, &applied.key, &other_target).is_none());
+        assert!(trials.contains_key(&trial_id));
+        assert_eq!(
+            r2o_take_silent_voice_trial(&mut trials, &applied.key, &target)
+                .unwrap()
+                .trial_id,
+            trial_id
+        );
+        assert!(trials.is_empty());
     }
 
     #[cfg(unix)]
@@ -7995,6 +8179,7 @@ mod tests {
             target,
             trial_id,
             plan_text: r2o_controller::voice_discovery::r2o_voice_arm_plan_text(&prefix),
+            voice_flow_key: None,
             renew_at: std::time::Instant::now() + std::time::Duration::from_secs(60),
             expires_at: std::time::Instant::now() + std::time::Duration::from_secs(600),
         };
@@ -8048,7 +8233,10 @@ mod tests {
         r2o_seen.r2o_insert(r2o_target, r2o_now);
 
         assert!(r2o_seen.r2o_contains(&r2o_target, r2o_now + Duration::from_secs(119)));
-        assert!(!r2o_seen.r2o_contains(&r2o_target, r2o_now + Duration::from_secs(120)));
+        let r2o_failure_at = r2o_now + Duration::from_secs(30);
+        r2o_seen.r2o_refresh(r2o_target, r2o_failure_at);
+        assert!(r2o_seen.r2o_contains(&r2o_target, r2o_failure_at + Duration::from_secs(119)));
+        assert!(!r2o_seen.r2o_contains(&r2o_target, r2o_failure_at + Duration::from_secs(120)));
     }
 
     #[cfg(unix)]
@@ -8119,6 +8307,7 @@ mod tests {
                     target: r2o_target,
                     trial_id: [1; 16],
                     plan_text: String::new(),
+                    voice_flow_key: None,
                     renew_at: r2o_now - Duration::from_secs(30),
                     expires_at: r2o_now - Duration::from_secs(1),
                 },
@@ -8129,6 +8318,7 @@ mod tests {
                     target: r2o_target,
                     trial_id: [2; 16],
                     plan_text: String::new(),
+                    voice_flow_key: None,
                     renew_at: r2o_now + Duration::from_secs(30),
                     expires_at: r2o_now + Duration::from_secs(1),
                 },

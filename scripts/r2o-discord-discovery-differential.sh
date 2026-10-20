@@ -57,7 +57,7 @@ mkdir -p "$r2o_log_dir"
         -DD2K_RELEASE_ID='"dev"' \
         -fsyntax-only -Xclang -ast-dump \
         "$r2o_donor_core/sched.c" 2>/dev/null \
-        | grep -E 'FunctionDecl.*(voice_trial_send|voice_trial_same_context|voice_confirm|voice_pending_dispatch|d2k_sched_event|d2k_sched_tick)'
+        | grep -E 'FunctionDecl.*(voice_trial_send|voice_trial_same_context|voice_confirm|voice_pending_dispatch|on_applied|on_suspect|voice_fail|task_fail|d2k_sched_event|d2k_sched_tick)'
     printf '\nСборка тестов C\n'
     r2o_run_timed 'сборка тестов голоса C' make -C "$r2o_donor_core" \
         test_voice_discovery test_sched CC=clang-18
@@ -73,6 +73,9 @@ mkdir -p "$r2o_log_dir"
     r2o_run_timed 'продление Discord Discovery Rust' cargo +1.98.0 test \
         -p r2o-controller --bin r2o-controller --locked --offline \
         r2o_voice_discovery_продлевает_пробу_тем_же_id_до_срока_задачи
+    r2o_run_timed 'отказ после молчания точного voice-потока Rust' cargo +1.98.0 test \
+        -p r2o-controller --bin r2o-controller --locked --offline \
+        r2o_voice_watch_связывает_applied_с_точным_потоком_пробы
     r2o_run_timed 'алгоритм Discord Discovery Rust' cargo +1.98.0 test \
         -p r2o-controller --lib --locked --offline voice_discovery
     r2o_run_timed 'пакетное состояние Discord Rust' cargo +1.98.0 test \
@@ -83,6 +86,7 @@ mkdir -p "$r2o_log_dir"
 grep -q 'voice scheduler: all checks passed' "$r2o_log"
 grep -q 'r2o_установка_voice_опыта_проверяет_ack_и_trial_id .*ok' "$r2o_log"
 grep -q 'r2o_voice_discovery_продлевает_пробу_тем_же_id_до_срока_задачи .*ok' "$r2o_log"
+grep -q 'r2o_voice_watch_связывает_applied_с_точным_потоком_пробы .*ok' "$r2o_log"
 printf 'Журнал проверки: %s\n' "$r2o_log"
 cat "$r2o_log"
 trap - EXIT
