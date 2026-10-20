@@ -3,7 +3,7 @@ use crate::netlink::{
     config_params, kernel_error, verdict, verdict_payload,
 };
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 const ACK_TIMEOUT_MS: i32 = 1000;
 const ACK_ATTEMPTS: usize = 8;
@@ -117,6 +117,17 @@ impl QueueSocket {
         bytes: &mut Vec<u8>,
         timeout_ms: i32,
     ) -> Result<bool, ReceiveError> {
+        self.receive_timeout_with_fd(bytes, timeout_ms, None)
+            .map(|(received, _)| received)
+    }
+
+    /// Совместно ожидает NFQUEUE и дополнительный дескриптор без лишнего таймера опроса.
+    pub fn receive_timeout_with_fd(
+        &self,
+        bytes: &mut Vec<u8>,
+        timeout_ms: i32,
+        extra_fd: Option<RawFd>,
+    ) -> Result<(bool, bool), ReceiveError> {
         if timeout_ms < -1 {
             return Err(ReceiveError::Io(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -124,20 +135,33 @@ impl QueueSocket {
             )));
         }
         bytes.resize(RECEIVE_CAPACITY, 0);
-        let mut descriptor = libc::pollfd {
-            fd: self.fd.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let ready = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
+        let mut descriptors = [
+            libc::pollfd {
+                fd: self.fd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: extra_fd.unwrap_or(-1),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        let count = if extra_fd.is_some() { 2 } else { 1 };
+        let ready = unsafe { libc::poll(descriptors.as_mut_ptr(), count, timeout_ms) };
         if ready == 0 {
-            return Ok(false);
+            return Ok((false, false));
         }
         if ready < 0 {
             let error = io::Error::last_os_error();
             return Err(ReceiveError::Io(error));
         }
-        if descriptor.revents & libc::POLLIN == 0 {
+        let extra_ready = extra_fd.is_some()
+            && descriptors[1].revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0;
+        if descriptors[0].revents & libc::POLLIN == 0 {
+            if descriptors[0].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) == 0 {
+                return Ok((false, extra_ready));
+            }
             return Err(ReceiveError::Io(io::Error::other(
                 "NFQUEUE socket сообщил ошибку без готового пакета",
             )));
@@ -152,7 +176,7 @@ impl QueueSocket {
         };
         if received >= 0 {
             bytes.truncate(received as usize);
-            return Ok(true);
+            return Ok((true, extra_ready));
         }
         let error = io::Error::last_os_error();
         match error.raw_os_error() {

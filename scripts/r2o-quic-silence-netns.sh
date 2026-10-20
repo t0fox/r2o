@@ -42,6 +42,8 @@ fi
 printf '%s\n' '{"boxes":[]}' >"$WORK/catalog.json"
 ip netns add "$NS"
 ip netns exec "$NS" ip link set lo up
+ip netns exec "$NS" ip route add default dev lo
+ip netns exec "$NS" ip -6 route add default dev lo
 ip netns exec "$NS" nft add table inet r2o
 ip netns exec "$NS" nft 'add chain inet r2o output { type filter hook output priority 0; policy accept; }'
 ip netns exec "$NS" nft 'add chain inet r2o input { type filter hook input priority 0; policy accept; }'
@@ -51,6 +53,17 @@ ip netns exec "$NS" nft add rule inet r2o input udp sport 443 queue num "$QUEUE"
 ip netns exec "$NS" "$R2OD_BIN" --queue "$QUEUE" --family ipv4 --controller-only \
     --mark "$MARK" --control "$WORK/r2o-datapath.sock" --r2o-udp-reverse-visible \
     >"$WORK/r2o-datapath.log" 2>&1 &
+R2OD_PID=$!
+attempt=0
+while [ ! -S "$WORK/r2o-datapath.sock" ]; do
+    if ! kill -0 "$R2OD_PID" 2>/dev/null || [ "$attempt" -ge 100 ]; then
+        cat "$WORK/r2o-datapath.log" >&2
+        echo "ОШИБКА: datapath не создал управляющий сокет" >&2
+        exit 1
+    fi
+    sleep 0.05
+    attempt=$((attempt + 1))
+done
 ip netns exec "$NS" "$R2OC_BIN" --serve "$WORK/r2o-datapath.sock" "$WORK/catalog.json" \
     >"$WORK/r2o-controller.log" 2>&1 &
 

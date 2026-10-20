@@ -1,0 +1,79 @@
+#!/bin/sh
+set -eu
+
+r2o_root=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
+r2o_temp=$(mktemp -d)
+r2o_cleanup() {
+    r2o_status=$?
+    trap - EXIT HUP INT TERM
+    env R2O_DIR="$r2o_temp/root" R2O_CONFIG="$r2o_temp/root/config" \
+        R2O_MANAGER="$r2o_temp/manager" R2O_FIREWALL="$r2o_temp/firewall" \
+        R2O_PROC=/proc R2O_RUNTIME_DIR="$r2o_temp/runtime" \
+        R2O_NFQUEUE_STATUS="$r2o_temp/proc/net/netfilter/nfnetlink_queue" \
+        sh "$r2o_root/router/S99r2o" engine-stop >/dev/null 2>&1 || true
+    if [ "$r2o_status" -ne 0 ] && [ -f "$r2o_temp/launches" ]; then
+        cat "$r2o_temp/launches" >&2
+    fi
+    rm -rf "$r2o_temp"
+    exit "$r2o_status"
+}
+trap r2o_cleanup EXIT HUP INT TERM
+
+mkdir -p "$r2o_temp/root/releases/test/builds" "$r2o_temp/proc/net/netfilter"
+cp /bin/sleep "$r2o_temp/root/releases/test/builds/r2o-datapath-linux-test"
+cp /bin/sleep "$r2o_temp/root/releases/test/builds/r2o-controller-linux-test"
+chmod 0755 "$r2o_temp/root/releases/test/builds/"*
+cat >"$r2o_temp/root/config" <<EOF
+MODE=observe
+MARK=0x2d
+PROBE_MARK=0x2e
+ONLY_MARK=0xffffaaa/0xffffff00
+IPV6_ENABLED=1
+EOF
+printf '2000 1\n2001 1\n' >"$r2o_temp/proc/net/netfilter/nfnetlink_queue"
+cat >"$r2o_temp/manager" <<'EOF'
+#!/bin/sh
+set -eu
+[ "${1:-}" = exec ] || exit 2
+shift
+component=
+root=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --root) root=$2; shift 2 ;;
+        --component) component=$2; shift 2 ;;
+        --) shift; break ;;
+        *) exit 2 ;;
+    esac
+done
+printf '%s' "$component" >>"$R2O_LAUNCHES"
+for argument do printf '|%s' "$argument" >>"$R2O_LAUNCHES"; done
+printf '\n' >>"$R2O_LAUNCHES"
+exec "$root/releases/test/builds/$component-linux-test" 120
+EOF
+cat >"$r2o_temp/firewall" <<'EOF'
+#!/bin/sh
+case "${1:-}" in up|down|status) exit 0 ;; *) exit 2 ;; esac
+EOF
+chmod 0755 "$r2o_temp/manager" "$r2o_temp/firewall"
+
+env R2O_DIR="$r2o_temp/root" R2O_CONFIG="$r2o_temp/root/config" \
+    R2O_MANAGER="$r2o_temp/manager" R2O_FIREWALL="$r2o_temp/firewall" \
+    R2O_PROC=/proc R2O_RUNTIME_DIR="$r2o_temp/runtime" \
+    R2O_NFQUEUE_STATUS="$r2o_temp/proc/net/netfilter/nfnetlink_queue" \
+    R2O_LAUNCHES="$r2o_temp/launches" \
+    sh "$r2o_root/router/S99r2o" engine-start
+
+r2o_mark=$(printf '%d' 0xffffaaa)
+r2o_mask=$(printf '%d' 0xffffff00)
+for r2o_family in ipv4 ipv6; do
+    r2o_queue=2000
+    [ "$r2o_family" = ipv4 ] || r2o_queue=2001
+    grep -Fq "r2o-datapath|--queue|$r2o_queue|--family|$r2o_family" "$r2o_temp/launches"
+done
+[ "$(grep -c '^r2o-datapath|' "$r2o_temp/launches")" -eq 2 ]
+grep -Fq "|--probe-mark|46|--only-mark|$r2o_mark/$r2o_mask" "$r2o_temp/launches"
+[ -s "$r2o_temp/root/run/r2o-datapath4.pid" ]
+[ -s "$r2o_temp/root/run/r2o-datapath6.pid" ]
+
+echo "Проверена передача route-gate параметров из конфигурации в IPv4/IPv6 runtime"

@@ -23,6 +23,10 @@ mod app {
     use r2o_datapath::nfqueue::{QueueSocket, ReceiveError};
     use r2o_datapath::r2o_icmp_guard::R2oIcmpGuard;
     use r2o_datapath::r2o_quic::R2oQuicSessions;
+    use r2o_datapath::r2o_route::{
+        R2O_ROUTE_REFRESH_INTERVAL, R2O_ROUTE_SETTLE_INTERVAL, R2oRouteFamily, R2oRouteGate,
+        R2oRouteMonitor, R2oRoutePacket, R2oRoutePolicy, R2oRoutedFlows,
+    };
     use r2o_datapath::r2o_udp_sessions::R2oUdpSessions;
     use r2o_datapath::r2o_voice::{R2oVoiceSessions, R2oVoiceTrialProofs};
     use r2o_datapath::raw::RawSocket;
@@ -49,6 +53,8 @@ mod app {
         protocol_family: u16,
         mode: RuntimeMode,
         mark: u32,
+        probe_mark: u32,
+        only_mark: Option<R2oRoutePolicy>,
         copy_range: u32,
         queue_len: u32,
         journal_capacity: u32,
@@ -135,6 +141,29 @@ mod app {
             options.fail_open,
             options.receive_buffer,
         )?;
+        let mut route_gate = R2oRouteGate::default();
+        if let Some(policy) = options.only_mark {
+            route_gate.r2o_set_policy(Some(policy));
+            if policy.found {
+                eprintln!(
+                    "r2o-datapath: обслуживаю только метку политики 0x{:x}/0x{:x}",
+                    policy.mark, policy.mask
+                );
+            } else {
+                eprintln!(
+                    "r2o-datapath: выбранная политика не найдена, клиентские потоки пропускаю ядру"
+                );
+            }
+        }
+        let mut route_monitor = R2oRouteMonitor::default();
+        if let Err(error) = route_monitor.r2o_open_watch() {
+            eprintln!(
+                "r2o-datapath: уведомления rtnetlink недоступны ({error}); оставляю опрос раз в 30 секунд"
+            );
+        }
+        for error in route_monitor.r2o_refresh(&mut route_gate) {
+            eprintln!("r2o-datapath: не удалось обновить маршрутное состояние: {error}");
+        }
         let mut control = options
             .control_path
             .as_ref()
@@ -180,6 +209,9 @@ mod app {
         let mut icmp_guard = R2oIcmpGuard::default();
         let mut next_execution_id = 1_u64;
         let mut next_session_sweep = Instant::now();
+        let mut routed_flows = R2oRoutedFlows::default();
+        let mut last_route_refresh = Instant::now();
+        let mut next_route_refresh = last_route_refresh + R2O_ROUTE_REFRESH_INTERVAL;
         install_signal_handlers()?;
         loop {
             if STOP.load(Ordering::Relaxed) {
@@ -320,20 +352,53 @@ mod app {
             }
             let timeout = scheduled
                 .timeout_ms(now, 200)
-                .min(holding.timeout_ms(now, 200));
-            let received = match socket.receive_timeout(&mut batch, timeout) {
-                Ok(received) => received,
+                .min(holding.timeout_ms(now, 200))
+                .min(
+                    next_route_refresh
+                        .saturating_duration_since(now)
+                        .as_millis()
+                        .min(200) as i32,
+                );
+            let (received, route_ready) = match socket.receive_timeout_with_fd(
+                &mut batch,
+                timeout,
+                route_monitor.r2o_watch_fd(),
+            ) {
+                Ok(ready) => ready,
                 Err(ReceiveError::LostPackets) => {
                     eprintln!("r2o-datapath: ядро сообщило о потере NFQUEUE пакетов");
                     release_accepting(
                         &mut socket,
                         &holding.flush(Instant::now(), name_plans.revision(), true),
                     );
-                    false
+                    (false, false)
                 }
-                Err(ReceiveError::Io(error)) if error.kind() == io::ErrorKind::Interrupted => false,
+                Err(ReceiveError::Io(error)) if error.kind() == io::ErrorKind::Interrupted => {
+                    (false, false)
+                }
                 Err(ReceiveError::Io(error)) => return Err(error.into()),
             };
+            if route_ready {
+                match route_monitor.r2o_drain_watch() {
+                    Ok(true) => {
+                        let settled =
+                            (last_route_refresh + R2O_ROUTE_SETTLE_INTERVAL).max(Instant::now());
+                        next_route_refresh = next_route_refresh.min(settled);
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        eprintln!("r2o-datapath: ошибка чтения уведомлений rtnetlink: {error}");
+                    }
+                }
+            }
+            let route_now = Instant::now();
+            if route_now >= next_route_refresh {
+                for error in route_monitor.r2o_refresh(&mut route_gate) {
+                    eprintln!("r2o-datapath: не удалось обновить маршрутное состояние: {error}");
+                }
+                last_route_refresh = Instant::now();
+                next_route_refresh = last_route_refresh + R2O_ROUTE_REFRESH_INTERVAL;
+            }
             if let Some(control) = control.as_mut() {
                 for command in control.poll()? {
                     let ack = name_plans.handle(&command);
@@ -407,8 +472,26 @@ mod app {
                         )?;
                         continue;
                     }
-                    let original = r2o_datapath_payload(&packet, options.mark);
                     let now = Instant::now();
+                    if r2o_packet_route_skip(
+                        &mut route_gate,
+                        &mut routed_flows,
+                        &packet,
+                        queue_hook,
+                        options.protocol_family,
+                        options.probe_mark,
+                        options.mark,
+                        now,
+                    ) {
+                        send_verdicts(
+                            &mut socket,
+                            std::slice::from_ref(&packet_id),
+                            NF_ACCEPT,
+                            false,
+                        )?;
+                        continue;
+                    }
+                    let original = r2o_datapath_payload(&packet, options.mark);
                     let udp_admitted = original
                         .map(|bytes| udp_packet_admitted(&mut udp_sessions, bytes, now))
                         .unwrap_or(true);
@@ -902,6 +985,8 @@ mod app {
             protocol_family: libc::AF_INET as u16,
             mode: RuntimeMode::Apply,
             mark: 0,
+            probe_mark: 0,
+            only_mark: None,
             copy_range: u16::MAX as u32,
             queue_len: 1024,
             journal_capacity: 256,
@@ -946,7 +1031,22 @@ mod app {
                         _ => return Err(invalid("--mode принимает observe или apply")),
                     }
                 }
-                "--mark" => options.mark = parse_value(arguments, &mut cursor, option)?,
+                "--mark" => {
+                    options.mark = parse_mark(next_value(arguments, &mut cursor, option)?)
+                        .ok_or_else(|| invalid("неверное значение --mark"))?;
+                }
+                "--probe-mark" => {
+                    let value = next_value(arguments, &mut cursor, option)?;
+                    options.probe_mark = parse_mark(value)
+                        .ok_or_else(|| invalid("неверное значение --probe-mark"))?;
+                }
+                "--only-mark" => {
+                    options.only_mark = Some(parse_only_mark(next_value(
+                        arguments,
+                        &mut cursor,
+                        option,
+                    )?)?);
+                }
                 "--copy-range" => options.copy_range = parse_value(arguments, &mut cursor, option)?,
                 "--queue-len" => options.queue_len = parse_value(arguments, &mut cursor, option)?,
                 "--rcvbuf" => options.receive_buffer = parse_value(arguments, &mut cursor, option)?,
@@ -966,6 +1066,9 @@ mod app {
             return Err(invalid(
                 "--queue-len должен быть больше нуля, --rcvbuf неотрицательным",
             ));
+        }
+        if options.probe_mark != 0 && options.probe_mark == options.mark {
+            return Err(invalid("--probe-mark и --mark должны различаться"));
         }
         if options.controller_only && options.plan_explicit {
             return Err(invalid("--controller-only нельзя сочетать с --plan"));
@@ -1009,6 +1112,29 @@ mod app {
         Box::new(io::Error::new(io::ErrorKind::InvalidInput, message.into()))
     }
 
+    fn parse_mark(value: &str) -> Option<u32> {
+        value
+            .strip_prefix("0x")
+            .or_else(|| value.strip_prefix("0X"))
+            .map_or_else(
+                || value.parse().ok(),
+                |hex| u32::from_str_radix(hex, 16).ok(),
+            )
+    }
+
+    fn parse_only_mark(value: &str) -> Result<R2oRoutePolicy, Box<dyn Error>> {
+        if value == "none" {
+            return Ok(R2oRoutePolicy::new(false, 0, 0));
+        }
+        let (mark, mask) = value.split_once('/').unwrap_or((value, "0xffffffff"));
+        let mark = parse_mark(mark).ok_or_else(|| invalid("неверная метка --only-mark"))?;
+        let mask = parse_mark(mask).ok_or_else(|| invalid("неверная маска --only-mark"))?;
+        if mask == 0 {
+            return Err(invalid("маска --only-mark не может быть нулевой"));
+        }
+        Ok(R2oRoutePolicy::new(true, mark, mask))
+    }
+
     fn print_help() {
         println!(
             r#"r2o-datapath — Linux NFQUEUE datapath
@@ -1023,6 +1149,8 @@ mod app {
   --family ipv4|ipv6 протокол очереди (по умолчанию ipv4)
   --mode observe|apply пропускать пакеты или исполнять планы (по умолчанию apply)
   --mark N           ненулевая метка для raw-send и защиты от повторной обработки
+  --probe-mark N     метка зондов контроллера, исключаемая из route-gate
+  --only-mark M[/K]|none  обслуживать только потоки с меткой выбранной политики
   --copy-range N     размер копии пакета (64..65535)
   --queue-len N      глубина очереди (по умолчанию 1024)
   --journal N        глубина журнала потоков (256; 0 — выключить)
@@ -1410,6 +1538,48 @@ mod app {
         packet
             .payload
             .filter(|_| !packet.truncated && !(mark != 0 && packet.mark == Some(mark)))
+    }
+
+    fn r2o_packet_route_skip(
+        gate: &mut R2oRouteGate,
+        flows: &mut R2oRoutedFlows,
+        packet: &QueuePacket<'_>,
+        hook: Option<u8>,
+        protocol_family: u16,
+        probe_mark: u32,
+        datapath_mark: u32,
+        now: Instant,
+    ) -> bool {
+        let family = packet
+            .payload
+            .and_then(|bytes| bytes.first())
+            .map(|first| first >> 4)
+            .map(|family| match family {
+                6 => R2oRouteFamily::Ipv6,
+                _ => R2oRouteFamily::Ipv4,
+            })
+            .unwrap_or(if protocol_family == libc::AF_INET6 as u16 {
+                R2oRouteFamily::Ipv6
+            } else {
+                R2oRouteFamily::Ipv4
+            });
+        let route_mark = gate.r2o_route_mark(R2oRoutePacket {
+            family,
+            outbound: matches!(
+                hook,
+                Some(
+                    r2o_datapath::netlink::R2O_NF_INET_LOCAL_OUT
+                        | r2o_datapath::netlink::R2O_NF_INET_POST_ROUTING
+                )
+            ),
+            mark: packet.mark,
+            probe_mark,
+            datapath_mark,
+            output_ifindex: packet.output_device,
+        });
+        packet.payload.map_or(route_mark != 0, |bytes| {
+            flows.r2o_skip_packet(bytes, route_mark, now)
+        })
     }
 
     fn send_voice_proof_event(
@@ -1841,8 +2011,12 @@ mod app {
             ControlServer, NF_ACCEPT, NF_DROP, OriginalFate, R2oFlowJournal, R2oQuicSessions,
             RuntimeMode, TcpSessions, format_journal_details, format_journal_key, load_plan,
             needs_raw_socket, observe_quic_packet, parse_options, r2o_datapath_payload,
-            release_many_with, release_with, send_applied_event, send_hello_event,
-            send_journal_snapshot, send_journal_updates, udp_packet_admitted,
+            r2o_packet_route_skip, release_many_with, release_with, send_applied_event,
+            send_hello_event, send_journal_snapshot, send_journal_updates, udp_packet_admitted,
+        };
+        use r2o_datapath::netlink::{QueuePacket, R2O_NF_INET_FORWARD, R2O_NF_INET_POST_ROUTING};
+        use r2o_datapath::r2o_route::{
+            R2O_ROUTE_OTHER_DEV, R2oRouteFamily, R2oRouteGate, R2oRoutedFlows,
         };
         use r2o_datapath::r2o_udp_sessions::R2oUdpSessions;
         use std::io;
@@ -1893,6 +2067,61 @@ mod app {
             assert!(r2o_datapath_payload(&truncated, 45).is_none());
         }
 
+        #[test]
+        fn r2o_runtime_оставляет_весь_маршрутный_udp_поток_ядру() {
+            let mut gate = R2oRouteGate::default();
+            gate.r2o_set_rules(R2oRouteFamily::Ipv4, Vec::new());
+            gate.r2o_set_default_ifindices(R2oRouteFamily::Ipv4, Some(vec![5]));
+            let mut flows = R2oRoutedFlows::default();
+            let now = Instant::now();
+            let request = udp_packet([192, 0, 2, 1], [198, 51, 100, 2], 40000, 443);
+            let reply = udp_packet([198, 51, 100, 2], [192, 0, 2, 1], 443, 40000);
+            let outbound = QueuePacket {
+                payload: Some(&request),
+                hook: Some(R2O_NF_INET_POST_ROUTING),
+                output_device: Some(9),
+                ..Default::default()
+            };
+            assert!(r2o_packet_route_skip(
+                &mut gate,
+                &mut flows,
+                &outbound,
+                outbound.hook,
+                libc::AF_INET as u16,
+                0x2e,
+                0x2d,
+                now,
+            ));
+
+            let inbound = QueuePacket {
+                payload: Some(&reply),
+                hook: Some(R2O_NF_INET_FORWARD),
+                output_device: Some(2),
+                ..Default::default()
+            };
+            assert!(r2o_packet_route_skip(
+                &mut gate,
+                &mut flows,
+                &inbound,
+                inbound.hook,
+                libc::AF_INET as u16,
+                0x2e,
+                0x2d,
+                now + Duration::from_millis(1),
+            ));
+            assert_eq!(
+                gate.r2o_route_mark(super::R2oRoutePacket {
+                    family: R2oRouteFamily::Ipv4,
+                    outbound: true,
+                    mark: None,
+                    probe_mark: 0x2e,
+                    datapath_mark: 0x2d,
+                    output_ifindex: Some(9),
+                }),
+                R2O_ROUTE_OTHER_DEV
+            );
+        }
+
         fn udp_packet(
             source: [u8; 4],
             destination: [u8; 4],
@@ -1941,6 +2170,43 @@ mod app {
             assert_eq!(
                 old_options.plan_path,
                 std::path::Path::new("/etc/r2o/plans/current.r2op")
+            );
+        }
+
+        #[test]
+        fn r2o_параметры_route_gate_принимают_шестнадцатеричные_метки_и_none() {
+            let args = [
+                "--mark",
+                "0x2d",
+                "--probe-mark",
+                "0x2e",
+                "--only-mark",
+                "0xffffaaa/0xffffff00",
+            ]
+            .map(str::to_owned);
+            let options = parse_options(&args).unwrap();
+            assert_eq!(options.mark, 0x2d);
+            assert_eq!(options.probe_mark, 0x2e);
+            assert_eq!(
+                options.only_mark,
+                Some(super::R2oRoutePolicy::new(true, 0xffffaaa, 0xffffff00))
+            );
+
+            let none = parse_options(&["--only-mark".into(), "none".into()]).unwrap();
+            assert_eq!(
+                none.only_mark,
+                Some(super::R2oRoutePolicy::new(false, 0, 0))
+            );
+            assert!(parse_options(&["--only-mark".into(), "0x20/0".into()]).is_err());
+            assert!(parse_options(&["--mark".into(), "bad".into()]).is_err());
+            assert!(
+                parse_options(&[
+                    "--mark".into(),
+                    "0x2e".into(),
+                    "--probe-mark".into(),
+                    "0x2e".into(),
+                ])
+                .is_err()
             );
         }
 

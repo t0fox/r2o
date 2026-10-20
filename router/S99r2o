@@ -27,6 +27,8 @@ QUEUE4=${QUEUE_NUM:-2000}
 QUEUE6=${QUEUE_NUM6:-2001}
 MODE=${MODE:-observe}
 MARK=${MARK:-45}
+PROBE_MARK=${PROBE_MARK:-0}
+ONLY_MARK=${ONLY_MARK:-}
 IPV6_ENABLED=${IPV6_ENABLED:-1}
 PANEL_LISTEN=${PANEL_LISTEN:-127.0.0.1:8090}
 TG_ENABLED=${TG_ENABLED:-0}
@@ -46,6 +48,8 @@ QUEUE4=${QUEUE_NUM:-2000}
 QUEUE6=${QUEUE_NUM6:-2001}
 MODE=${MODE:-observe}
 MARK=${MARK:-45}
+PROBE_MARK=${PROBE_MARK:-0}
+ONLY_MARK=${ONLY_MARK:-}
 IPV6_ENABLED=${IPV6_ENABLED:-1}
 PANEL_LISTEN=${PANEL_LISTEN:-127.0.0.1:8090}
 TG_ENABLED=${TG_ENABLED:-0}
@@ -68,6 +72,31 @@ valid_number() {
     [ "$1" -le "$2" ]
 }
 
+r2o_normalize_mark() {
+    r2o_mark_value=$1
+    case "$r2o_mark_value" in
+        0x*|0X*) r2o_mark_value=$(printf '%d' "$r2o_mark_value") || return 1 ;;
+    esac
+    valid_number "$r2o_mark_value" 4294967295 || return 1
+    printf '%s' "$r2o_mark_value"
+}
+
+r2o_normalize_only_mark() {
+    case "$1" in
+        ''|none) printf '%s' "$1" ;;
+        */*)
+            r2o_only_value=${1%%/*}
+            r2o_only_mask=${1#*/}
+            case "$r2o_only_mask" in */*) return 1 ;; esac
+            r2o_only_value=$(r2o_normalize_mark "$r2o_only_value") || return 1
+            r2o_only_mask=$(r2o_normalize_mark "$r2o_only_mask") || return 1
+            [ "$r2o_only_mask" -ne 0 ] || return 1
+            printf '%s/%s' "$r2o_only_value" "$r2o_only_mask"
+            ;;
+        *) r2o_normalize_mark "$1" ;;
+    esac
+}
+
 valid_number "$QUEUE4" 65535 || die "неверный QUEUE_NUM"
 valid_number "$QUEUE6" 65535 || die "неверный QUEUE_NUM6"
 [ "$QUEUE4" != "$QUEUE6" ] || die "QUEUE_NUM и QUEUE_NUM6 должны различаться"
@@ -76,8 +105,10 @@ case "$IPV6_ENABLED" in 0|1) ;; *) die "IPV6_ENABLED должен быть 0 и�
 case "$AUTOUPDATE" in 1|yes) AUTOUPDATE=1 ;; 0|no) AUTOUPDATE=0 ;; *) die "AUTOUPDATE должен быть 0, 1, yes или no" ;; esac
 case "$TG_ENABLED" in 1|yes) TG_ENABLED=1 ;; 0|no) TG_ENABLED=0 ;; *) die "TG_ENABLED должен быть 0, 1, yes или no" ;; esac
 valid_number "$TG_PORT" 65535 && [ "$TG_PORT" -gt 0 ] || die "неверный TG_PORT"
-case "$MARK" in 0x*|0X*) MARK=$(printf '%d' "$MARK") || die "неверный MARK" ;; esac
-valid_number "$MARK" 4294967295 || die "неверный MARK"
+MARK=$(r2o_normalize_mark "$MARK") || die "неверный MARK"
+PROBE_MARK=$(r2o_normalize_mark "$PROBE_MARK") || die "неверный PROBE_MARK"
+[ "$PROBE_MARK" = 0 ] || [ "$PROBE_MARK" != "$MARK" ] || die "PROBE_MARK и MARK должны различаться"
+ONLY_MARK=$(r2o_normalize_only_mark "$ONLY_MARK") || die "неверный ONLY_MARK"
 
 prepare_dirs() {
     [ ! -L "$RUN" ] || die "каталог run не должен быть ссылкой"
@@ -148,6 +179,19 @@ spawn_component() {
     return 1
 }
 
+start_datapath() {
+    r2o_dp_queue=$1
+    r2o_dp_family=$2
+    r2o_dp_pid=$3
+    r2o_dp_log=$4
+    r2o_dp_control=$5
+    set -- --queue "$r2o_dp_queue" --family "$r2o_dp_family" --mode "$MODE" --mark "$MARK"
+    [ "$PROBE_MARK" = 0 ] || set -- "$@" --probe-mark "$PROBE_MARK"
+    [ -z "$ONLY_MARK" ] || set -- "$@" --only-mark "$ONLY_MARK"
+    set -- "$@" --controller-only --control "$r2o_dp_control" --r2o-udp-reverse-visible
+    spawn_component r2o-datapath "$r2o_dp_pid" "$r2o_dp_log" "$@"
+}
+
 queue_bound() {
     queue=$1
     [ -r "$NFQUEUE_STATUS" ] || return 1
@@ -189,16 +233,12 @@ engine_start() {
     engine_stop
     mark=$MARK
     case "$mark" in 0x*|0X*) mark=$(printf '%d' "$mark") ;; esac
-    if ! spawn_component r2o-datapath "$DP4_PID" "$LOG/r2o-datapath4.log" \
-        --queue "$QUEUE4" --family ipv4 --mode "$MODE" --mark "$mark" \
-        --controller-only --control "$SOCK4" --r2o-udp-reverse-visible; then
+    if ! start_datapath "$QUEUE4" ipv4 "$DP4_PID" "$LOG/r2o-datapath4.log" "$SOCK4"; then
         engine_stop
         return 1
     fi
     if [ "$IPV6_ENABLED" = 1 ]; then
-        if ! spawn_component r2o-datapath "$DP6_PID" "$LOG/r2o-datapath6.log" \
-            --queue "$QUEUE6" --family ipv6 --mode "$MODE" --mark "$mark" \
-            --controller-only --control "$SOCK6" --r2o-udp-reverse-visible; then
+        if ! start_datapath "$QUEUE6" ipv6 "$DP6_PID" "$LOG/r2o-datapath6.log" "$SOCK6"; then
             engine_stop
             return 1
         fi

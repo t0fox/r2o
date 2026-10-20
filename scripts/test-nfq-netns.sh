@@ -132,6 +132,8 @@ with open(sys.argv[1], "wb") as output:
 PY
 ip netns add "$NS"
 ip netns exec "$NS" ip link set lo up
+ip netns exec "$NS" ip route add default dev lo
+ip netns exec "$NS" ip -6 route add default dev lo
 ip netns exec "$NS" nft add table inet r2o
 ip netns exec "$NS" nft 'add chain inet r2o output { type filter hook output priority 0; policy accept; }'
 ip netns exec "$NS" nft 'add chain inet r2o input { type filter hook input priority 0; policy accept; }'
