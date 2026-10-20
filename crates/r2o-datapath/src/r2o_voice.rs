@@ -182,8 +182,11 @@ impl R2oVoiceTrialProofs {
         };
         let (key, _) = FlowKey::new(source, destination);
         let pending = self.pending.get(&key)?;
-        if pending.expires <= now || source != pending.server || destination != pending.client {
+        if pending.expires <= now {
             self.pending.remove(&key);
+            return None;
+        }
+        if source != pending.server || destination != pending.client {
             return None;
         }
         let payload = packet.get(view.udp_payload_range(packet)?)?;
@@ -481,6 +484,11 @@ mod tests {
         let request = discovery_request(ssrc);
         let sent = packet(client, server, 50_000, 50_004, &request);
         assert!(proofs.note_applied(&sent, &trial_applied(), start));
+        assert!(
+            proofs
+                .observe_response(&sent, start + Duration::from_millis(1))
+                .is_none()
+        );
 
         let mut wrong_response = [0; 74];
         wrong_response[..8].copy_from_slice(&[0, 2, 0, 70, 1, 2, 3, 4]);
@@ -490,7 +498,7 @@ mod tests {
             proofs
                 .observe_response(
                     &packet(server, client, 50_004, 50_000, &wrong_response),
-                    start + Duration::from_millis(1),
+                    start + Duration::from_millis(2),
                 )
                 .is_none()
         );
@@ -499,7 +507,7 @@ mod tests {
         let proof = proofs
             .observe_response(
                 &packet(server, client, 50_004, 50_000, &wrong_response),
-                start + Duration::from_millis(2),
+                start + Duration::from_millis(3),
             )
             .unwrap();
         assert_eq!(proof.trial_id, [0x55; 16]);
