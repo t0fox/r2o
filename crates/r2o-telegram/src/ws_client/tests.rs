@@ -1,0 +1,544 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
+
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use tokio::net::{TcpListener, TcpStream};
+
+use super::*;
+
+fn install_rustls_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
+fn test_certificate(domain: &str) -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
+    let cert = rcgen::generate_simple_self_signed(vec![domain.to_string()]).unwrap();
+    let cert_der = CertificateDer::from(cert.serialize_der().unwrap());
+    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.serialize_private_key_der()));
+    (cert_der, key_der)
+}
+
+#[test]
+fn media_tag_marks_only_media_dcs() {
+    assert_eq!(media_tag(true), "m");
+    assert_eq!(media_tag(false), "");
+}
+
+#[test]
+fn диагностический_wss_запрос_сохраняет_host_origin_и_binary_protocol() {
+    let request = websocket_request(
+        "worker.example",
+        "/apiws?dst=149.154.167.51&dc=2&media=0",
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(request.uri().host(), Some("worker.example"));
+    assert_eq!(request.headers()["Host"], "worker.example");
+    assert_eq!(request.headers()["Origin"], "https://web.telegram.org");
+    assert_eq!(request.headers()["Sec-WebSocket-Protocol"], "binary");
+}
+
+#[test]
+fn ordered_records_put_the_preferred_variant_first() {
+    let base = || "kws2.example".to_string();
+    let dash_one = || "kws2-1.example".to_string();
+
+    assert_eq!(
+        ordered_records(base(), dash_one(), false),
+        ["kws2.example", "kws2-1.example"]
+    );
+    assert_eq!(
+        ordered_records(base(), dash_one(), true),
+        ["kws2-1.example", "kws2.example"]
+    );
+}
+
+#[test]
+fn cf_ip_attempts_skip_edges_in_cooldown() {
+    let cooldowns = CooldownMap::new();
+    let ips = ["192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap()];
+    cooldowns.set(
+        (
+            ips[0],
+            "kws2.edge.example".to_string(),
+            "dc2-media-proxy".to_string(),
+        ),
+        Duration::from_secs(60),
+    );
+
+    assert_eq!(
+        cf_ip_attempts(&ips, 0, "kws2.edge.example", "dc2-media-proxy", &cooldowns),
+        [ips[1]]
+    );
+}
+
+#[test]
+fn cf_ip_cooldowns_are_scoped_by_domain_and_transport_route() {
+    let cooldowns = CooldownMap::new();
+    let ips = ["192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap()];
+    cooldowns.set(
+        (
+            ips[0],
+            "kws2.edge.example".to_string(),
+            "dc2-media-proxy".to_string(),
+        ),
+        Duration::from_secs(60),
+    );
+
+    assert_eq!(
+        cf_ip_attempts(&ips, 0, "kws4.edge.example", "dc4-proxy", &cooldowns),
+        ips
+    );
+}
+
+#[test]
+fn cf_ip_attempts_try_one_edge_when_every_edge_is_cooling() {
+    let cooldowns = CooldownMap::new();
+    let ips = ["192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap()];
+    for ip in ips {
+        cooldowns.set(
+            (ip, "kws2.edge.example".to_string(), "dc2-proxy".to_string()),
+            Duration::from_secs(60),
+        );
+    }
+
+    assert_eq!(
+        cf_ip_attempts(&ips, 1, "kws2.edge.example", "dc2-proxy", &cooldowns),
+        [ips[1]]
+    );
+}
+
+#[test]
+fn cf_ip_attempts_prioritize_a_recently_successful_edge_for_its_domain() {
+    let domain = "recent-edge-preference.example";
+    let route = "dc2-proxy";
+    let cooldowns = CooldownMap::new();
+    let ips = ["192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap()];
+    remember_cf_edge(domain, ips[1]);
+
+    assert_eq!(
+        cf_ip_attempts(&ips, 0, domain, route, &cooldowns),
+        [ips[1], ips[0]]
+    );
+
+    CF_EDGE_PREFERRED
+        .get()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .remove(domain);
+}
+
+#[tokio::test]
+async fn tls_verification_rejects_self_signed_certificates() {
+    install_rustls_provider();
+
+    let real_domain = "real.example.test";
+    let (cert, key) = test_certificate(real_domain);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert], key)
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        // Клиент должен прервать TLS-рукопожатие, поскольку не доверяет
+        // самоподписанному сертификату. Поэтому accept может завершиться
+        // ошибкой; именно это и проверяется ниже.
+        let _ = acceptor.accept(stream).await;
+    });
+
+    let tcp = TcpStream::connect(addr).await.unwrap();
+    let request = format!("wss://{real_domain}/apiws")
+        .into_client_request()
+        .unwrap();
+
+    let result = tls_handshake_and_upgrade(tcp, request).await;
+    assert!(
+        result.is_err(),
+        "expected certificate verification to reject the self-signed cert"
+    );
+
+    tokio::time::timeout(Duration::from_secs(2), server_task)
+        .await
+        .expect("server task timed out")
+        .ok();
+}
+
+#[tokio::test]
+#[allow(clippy::result_large_err)]
+async fn диагностическое_подключение_измеряет_tcp_tls_и_upgrade_раздельно() {
+    install_rustls_provider();
+    let (cert, key) = test_certificate("localhost");
+    let server_config = Arc::new(
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.clone()], key)
+            .unwrap(),
+    );
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert).unwrap();
+    let client_config = Arc::new(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let tls = tokio_rustls::TlsAcceptor::from(server_config)
+            .accept(tcp)
+            .await
+            .unwrap();
+        let _ws = tokio_tungstenite::accept_hdr_async(
+            tls,
+            |request: &tungstenite::handshake::server::Request,
+             mut response: tungstenite::handshake::server::Response| {
+                if request.headers().get("Sec-WebSocket-Protocol").is_some() {
+                    response
+                        .headers_mut()
+                        .insert("Sec-WebSocket-Protocol", "binary".parse().unwrap());
+                }
+                Ok(response)
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    let (mut ws, timing) = connect_probe_ws_with_config(
+        &address.ip().to_string(),
+        "localhost",
+        "/apiws",
+        true,
+        address.port(),
+        Duration::from_secs(2),
+        &crate::outbound::OutboundConnector::direct(),
+        client_config,
+    )
+    .await
+    .unwrap();
+    assert!(timing.tcp_ms.is_some());
+    assert!(timing.tls_ms.is_some());
+    assert!(timing.websocket_ms.is_some());
+    let _ = ws.close(None).await;
+    server.await.unwrap();
+}
+
+#[test]
+fn tls_client_configs_are_built_once_and_shared() {
+    install_rustls_provider();
+
+    // Повторное создание профиля для каждого соединения копировало хранилище
+    // примерно из 150 корней и сбрасывало кэш TLS-сеансов, исключая возобновление.
+    // Оба профиля должны каждый раз ссылаться на тот же объект.
+    let first = verifying_rustls_config();
+    let second = verifying_rustls_config();
+    assert!(Arc::ptr_eq(&first, &second));
+}
+
+#[test]
+fn websocket_buffers_are_bounded_for_many_connections() {
+    let config = ws_config();
+
+    assert_eq!(config.write_buffer_size, 16 * 1024);
+    assert_eq!(config.max_write_buffer_size, 4 * 1024 * 1024 + 16 * 1024);
+    assert_eq!(config.max_frame_size, Some(4 * 1024 * 1024));
+    assert_eq!(config.max_message_size, Some(4 * 1024 * 1024));
+}
+
+/// Регрессионная проверка возобновления TLS-сеанса.
+///
+/// Общий `ClientConfig` владеет кэшем сеансов. Если создавать профиль для
+/// каждого соединения отдельно, как раньше, возобновление невозможно и каждое
+/// рукопожатие будет полным. Два соединения с одним профилем должны выполнить
+/// сначала полное, затем возобновлённое рукопожатие.
+#[tokio::test]
+async fn a_second_connection_to_the_same_host_resumes_its_tls_session() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    install_rustls_provider();
+
+    let domain = "resumption.example.test";
+    let (cert, key) = test_certificate(domain);
+
+    let mut server_config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert.clone()], key)
+        .unwrap();
+    // Выдать билет, который клиент сможет использовать для возобновления.
+    server_config.send_tls13_tickets = 1;
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut tls = acceptor.accept(stream).await.unwrap();
+            tls.write_all(b"hi").await.unwrap();
+            tls.flush().await.unwrap();
+            let mut sink = Vec::new();
+            let _ = tls.read_to_end(&mut sink).await;
+        }
+    });
+
+    // Доверять тестовому сертификату, сохранив остальные настройки
+    // возобновления общего профиля.
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert).unwrap();
+    let config = Arc::new(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    );
+    let connector = tokio_rustls::TlsConnector::from(Arc::clone(&config));
+    let name = rustls::pki_types::ServerName::try_from(domain).unwrap();
+
+    let mut kinds = Vec::new();
+    for _ in 0..2 {
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let mut tls = connector.connect(name.clone(), tcp).await.unwrap();
+        // Прочитать приветствие сервера вместе с билетом сеанса и обработать
+        // билет до его повторного использования.
+        let mut buf = [0u8; 2];
+        tls.read_exact(&mut buf).await.unwrap();
+        kinds.push(tls.get_ref().1.handshake_kind());
+        tls.shutdown().await.unwrap();
+    }
+
+    assert_eq!(
+        kinds,
+        vec![
+            Some(rustls::HandshakeKind::Full),
+            Some(rustls::HandshakeKind::Resumed),
+        ],
+        "the shared config must let the second handshake resume"
+    );
+    let _ = tokio::time::timeout(Duration::from_secs(5), server).await;
+}
+
+#[tokio::test]
+async fn фрагментированное_binary_сообщение_возвращается_единым_mtproto_потоком() {
+    use tokio_tungstenite::tungstenite::protocol::frame::{
+        Frame,
+        coding::{Data, OpCode},
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut websocket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        websocket
+            .send(Message::Frame(Frame::message(
+                b"mtproto-".to_vec(),
+                OpCode::Data(Data::Binary),
+                false,
+            )))
+            .await
+            .unwrap();
+        websocket
+            .send(Message::Frame(Frame::message(
+                b"payload".to_vec(),
+                OpCode::Data(Data::Continue),
+                true,
+            )))
+            .await
+            .unwrap();
+    });
+
+    let stream = TcpStream::connect(address).await.unwrap();
+    let request = format!("ws://{address}/apiws")
+        .into_client_request()
+        .unwrap();
+    let (mut websocket, _) = client_async_tls_with_config(request, stream, Some(ws_config()), None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        ws_recv(&mut websocket).await.as_deref(),
+        Some(&b"mtproto-payload"[..])
+    );
+    server.await.unwrap();
+}
+
+// ─── Порядок попыток Cloudflare ──────────────────────────────────────────────
+
+fn drain(attempts: &mut CfAttempts) -> Vec<String> {
+    std::iter::from_fn(|| attempts.next_domain()).collect()
+}
+
+#[test]
+fn every_base_record_gets_a_second_attempt() {
+    // Регрессионная проверка: удаление этого повтора заметно увеличивало
+    // число соединений, переходящих на TCP fallback (см. документацию CfAttempts).
+    let domains = ["a.example".to_string(), "b.example".to_string()];
+    let mut attempts = CfAttempts::new(2, &domains);
+
+    assert_eq!(
+        drain(&mut attempts),
+        [
+            "kws2.a.example",
+            "kws2.a.example",
+            "kws2.b.example",
+            "kws2.b.example",
+        ]
+    );
+}
+
+#[test]
+fn no_dash_one_record_is_ever_attempted() {
+    // Через Cloudflare запись `-1` ведёт к тому же узлу, что и основная.
+    // Встроенные общие домены не содержат её, поэтому каждый поиск завершался
+    // бесполезным NXDOMAIN (issue #139).
+    let domains = ["a.example".to_string(), "b.example".to_string()];
+    let mut attempts = CfAttempts::new(203, &domains);
+
+    assert!(drain(&mut attempts).iter().all(|d| !d.contains("-1.")));
+}
+
+#[test]
+fn a_record_that_timed_out_is_not_retried() {
+    // Повтор записи, у которой истёк тайм-аут, добавил бы ещё один полный
+    // тайм-аут соединения перед переходом к следующему резервному маршруту.
+    let domains = ["a.example".to_string(), "b.example".to_string()];
+    let mut attempts = CfAttempts::new(2, &domains);
+
+    assert_eq!(attempts.next_domain().as_deref(), Some("kws2.a.example"));
+    attempts.note_timed_out();
+    assert_eq!(attempts.next_domain().as_deref(), Some("kws2.b.example"));
+    assert_eq!(attempts.next_domain().as_deref(), Some("kws2.b.example"));
+    assert_eq!(attempts.next_domain(), None);
+}
+
+#[test]
+fn lazy_attempts_rotate_domains_without_rebuilding_the_list() {
+    let domains = [
+        "a.example".to_string(),
+        "b.example".to_string(),
+        "c.example".to_string(),
+    ];
+    let mut attempts = CfAttempts::with_offset(2, &domains, 1);
+
+    assert_eq!(
+        drain(&mut attempts),
+        [
+            "kws2.b.example",
+            "kws2.b.example",
+            "kws2.c.example",
+            "kws2.c.example",
+            "kws2.a.example",
+            "kws2.a.example",
+        ]
+    );
+}
+
+#[test]
+fn lazy_attempts_preserve_duplicate_domain_deduplication() {
+    let domains = ["a.example".to_string(), "a.example".to_string()];
+    let mut attempts = CfAttempts::new(2, &domains);
+
+    assert_eq!(drain(&mut attempts), ["kws2.a.example", "kws2.a.example"]);
+}
+
+#[test]
+fn no_domains_means_no_attempts() {
+    let mut attempts = CfAttempts::new(2, &[]);
+
+    assert_eq!(attempts.next_domain(), None);
+}
+
+#[test]
+fn tcp_connect_timeout_skips_sibling_ws_domains() {
+    let timed_out = WsConnectResult::ConnectTimedOut("TCP connect timed out".into());
+    assert!(!should_try_next_ws_domain(&timed_out));
+    assert!(should_try_next_ws_domain(&WsConnectResult::TimedOut));
+}
+
+#[tokio::test]
+async fn direct_ws_hedges_sibling_hostname_and_cancels_the_loser() {
+    struct DropFlag(Arc<AtomicBool>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let slow_cancelled = Arc::new(AtomicBool::new(false));
+    let slow_flag = Arc::clone(&slow_cancelled);
+    let (winner, failures) = race_direct_ws_domains(
+        vec![
+            "kws2.web.telegram.org".into(),
+            "kws2-1.web.telegram.org".into(),
+        ],
+        move |domain| {
+            let slow_flag = Arc::clone(&slow_flag);
+            async move {
+                if domain == "kws2.web.telegram.org" {
+                    let _drop_flag = DropFlag(slow_flag);
+                    std::future::pending::<Result<String, WsConnectResult>>().await
+                } else {
+                    Ok(domain)
+                }
+            }
+        },
+    )
+    .await;
+
+    assert_eq!(
+        winner,
+        Some((
+            "kws2-1.web.telegram.org".into(),
+            "kws2-1.web.telegram.org".into()
+        ))
+    );
+    assert!(failures.is_empty());
+    assert!(slow_cancelled.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn direct_ws_stops_sibling_dial_after_tcp_connect_timeout() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let attempts_for_connect = Arc::clone(&attempts);
+    let (winner, failures) = race_direct_ws_domains(
+        vec![
+            "kws2.web.telegram.org".into(),
+            "kws2-1.web.telegram.org".into(),
+        ],
+        move |domain| {
+            let attempts = Arc::clone(&attempts_for_connect);
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err::<String, WsConnectResult>(WsConnectResult::ConnectTimedOut(domain))
+            }
+        },
+    )
+    .await;
+
+    assert!(winner.is_none());
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(failures.len(), 1);
+}
+
+#[test]
+fn cf_proxy_повторяет_транспортные_сбои_но_не_http_статусы() {
+    assert!(should_retry_cf_domain(&WsConnectResult::Failed(
+        "TLS".into()
+    )));
+    assert!(should_retry_cf_domain(&WsConnectResult::TimedOut));
+    assert!(!should_retry_cf_domain(&WsConnectResult::HttpStatus(429)));
+    assert!(!should_retry_cf_domain(&WsConnectResult::HttpStatus(503)));
+    assert!(!should_retry_cf_domain(&WsConnectResult::ConnectTimedOut(
+        "TCP timeout".into()
+    )));
+    assert!(!should_retry_cf_domain(&WsConnectResult::DnsFailed(
+        "NXDOMAIN".into()
+    )));
+}

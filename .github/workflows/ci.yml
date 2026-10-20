@@ -1,0 +1,128 @@
+name: Rust CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Run workspace tests
+        run: cargo test --workspace --locked
+      - name: Verify Telegram panel statistics rendering
+        run: node crates/r2o-panel/tests/telegram_flow.cjs
+      - name: Verify release archive packaging
+        run: sh scripts/test-package-release.sh
+      - name: Verify router Telegram firewall lifecycle
+        run: sh scripts/test-router-tg-firewall.sh
+      - name: Verify router update activation ordering
+        run: sh scripts/test-router-update-lifecycle.sh
+      - name: Verify router nightly update scheduler
+        run: sh scripts/test-router-update-scheduler.sh
+      - name: Verify router auto-update controls
+        run: sh scripts/test-router-update-auto.sh
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Build release binaries
+        run: cargo build --workspace --release --locked
+      - name: Verify router clear-found lifecycle
+        run: sh scripts/test-router-clear-found.sh
+      - name: Verify router Telegram process and readiness lifecycle
+        run: sh scripts/test-router-telegram-service.sh
+
+  cross-check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-musl
+            compiler_package: gcc-aarch64-linux-gnu
+            compiler_variable: CC_aarch64_unknown_linux_musl
+            compiler_command: aarch64-linux-gnu-gcc
+          - target: armv5te-unknown-linux-musleabi
+            compiler_package: gcc-arm-linux-gnueabi
+            compiler_variable: CC_armv5te_unknown_linux_musleabi
+            compiler_command: arm-linux-gnueabi-gcc
+          - target: i686-unknown-linux-musl
+            compiler_package: gcc-i686-linux-gnu
+            compiler_variable: CC_i686_unknown_linux_musl
+            compiler_command: i686-linux-gnu-gcc
+          - target: riscv64gc-unknown-linux-musl
+            compiler_package: gcc-riscv64-linux-gnu
+            compiler_variable: CC_riscv64gc_unknown_linux_musl
+            compiler_command: riscv64-linux-gnu-gcc
+    steps:
+      - uses: actions/checkout@v4
+      - name: Установить cross-compiler для цели
+        run: sudo apt-get update && sudo apt-get install -y "${{ matrix.compiler_package }}"
+      - name: Проверить Linux-цели сетевого движка
+        env:
+          TARGET: ${{ matrix.target }}
+          COMPILER_VARIABLE: ${{ matrix.compiler_variable }}
+          COMPILER_COMMAND: ${{ matrix.compiler_command }}
+        run: |
+          export "$COMPILER_VARIABLE=$COMPILER_COMMAND"
+          cargo check --locked --target "$TARGET" -p r2k-core -p r2o-datapath -p r2o-controller -p r2o-panel
+
+  nfqueue-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install packet-test tools
+        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables python3
+      - name: Build the datapath daemon
+        run: cargo build --release --locked --package r2o-datapath
+      - name: Exercise NFQUEUE in a temporary namespace
+        run: sudo sh scripts/test-nfq-netns.sh
+      - name: Validate router nftables rules without applying them
+        run: sudo sh scripts/test-router-firewall.sh
+
+  mipsel-release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MIPS cross tools
+        run: sudo apt-get update && sudo apt-get install -y gcc-mipsel-linux-gnu qemu-user
+      - name: Build and smoke test MIPS release
+        run: sh scripts/build-mipsel.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: r2o-mipsel-linux-gnu
+          path: |
+            target/mipsel-unknown-linux-gnu/release/r2o-datapath
+            target/mipsel-unknown-linux-gnu/release/r2o-controller
+            target/mipsel-unknown-linux-gnu/release/r2o-telegram
+            target/mipsel-unknown-linux-gnu/release/r2o-panel
+            target/mipsel-unknown-linux-gnu/release/r2o-manager
+            target/mipsel-unknown-linux-gnu/release/SHA256SUMS
+          if-no-files-found: error
+
+  openwrt-mipsel-musl:
+    name: Сборка и запуск OpenWrt MIPS little-endian musl
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Установить QEMU и распаковщик SDK
+        run: sudo apt-get update && sudo apt-get install -y qemu-user zstd binutils curl
+      - name: Собрать и проверить пакет OpenWrt под QEMU
+        run: sh scripts/r2o-build-openwrt-mipsel-musl.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: r2o-openwrt-mipsel-musl
+          path: |
+            target/mipsel-unknown-linux-musl/release/r2o-datapath
+            target/mipsel-unknown-linux-musl/release/r2o-controller
+            target/mipsel-unknown-linux-musl/release/r2o-telegram
+            target/mipsel-unknown-linux-musl/release/r2o-panel
+            target/mipsel-unknown-linux-musl/release/r2o-manager
+            target/mipsel-unknown-linux-musl/release/SHA256SUMS
+          if-no-files-found: error

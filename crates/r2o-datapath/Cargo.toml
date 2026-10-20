@@ -1,0 +1,16 @@
+[package]
+name = "r2o-datapath"
+version = "0.1.0"
+edition = "2024"
+description = "Linux NFQUEUE datapath daemon"
+
+[dependencies]
+r2k-core = { package = "r2k-core", path = "../r2k-core" }
+libc = "0.2.189"
+
+[lib]
+name = "r2o_datapath"
+
+[[bin]]
+name = "r2o-datapath"
+path = "src/main.rs"

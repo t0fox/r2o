@@ -1,0 +1,2107 @@
+//! Прямая HTTPS-проверка с измерением полноты HTTP-ответа.
+
+use std::io::{self, Read, Write};
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::os::unix::net::UnixStream;
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use crate::http_search::repeatable_path;
+use r2k_core::http_response::HttpResponseParser;
+use rustls::pki_types::ServerName;
+use rustls::{ProtocolVersion, RootCertStore, StreamOwned};
+
+const SO_MARK: libc::c_int = 36;
+const R2O_VOLUME_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+const R2O_VOLUME_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
+const R2O_VOLUME_TX_STEPS: usize = 10;
+const R2O_VOLUME_TX_CHUNK_BYTES: usize = 4000;
+const R2O_VOLUME_TX_INITIAL_READ: Duration = Duration::from_secs(12);
+const R2O_VOLUME_TX_READ_MIN: Duration = Duration::from_millis(1500);
+const R2O_VOLUME_TX_READ_MAX: Duration = Duration::from_secs(12);
+const R2O_VOLUME_TX_CHUNK_GAP: Duration = Duration::from_millis(50);
+const R2O_VOLUME_RX_DEADLINE: Duration = Duration::from_secs(6);
+const R2O_VOLUME_RX_PROBE_GAP: Duration = Duration::from_millis(500);
+
+/// Дождаться ClientHello TCP с заданным именем и вернуть длину его TLS-записи.
+pub fn r2o_fetch_snapshot_wire_len(
+    name: &str,
+    control_path: &Path,
+    r2o_wait: Duration,
+) -> Result<usize, String> {
+    let r2o_host = crate::domain::normalize(name)
+        .map_err(|error| format!("имя для снимка ClientHello недопустимо: {error}"))?;
+    let r2o_path = r2k_core::control::r2k_snapshot_socket_path(control_path);
+    let mut r2o_stream = UnixStream::connect(&r2o_path).map_err(|error| {
+        format!(
+            "не удалось подключиться к каналу снимка {}: {error}",
+            r2o_path.display()
+        )
+    })?;
+    let r2o_deadline = Instant::now()
+        .checked_add(r2o_wait)
+        .ok_or_else(|| "срок ожидания снимка слишком велик".to_owned())?;
+    let r2o_greeting = loop {
+        let r2o_remaining = r2o_deadline
+            .checked_duration_since(Instant::now())
+            .filter(|duration| !duration.is_zero())
+            .ok_or_else(|| format!("не дождались приветствия браузера к {name}"))?;
+        r2o_stream
+            .set_read_timeout(Some(r2o_remaining))
+            .map_err(|error| format!("не удалось настроить ожидание снимка: {error}"))?;
+        let r2o_frame = r2k_core::control::read_frame(&mut r2o_stream).map_err(|error| {
+            if matches!(
+                error.kind(),
+                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+            ) {
+                format!("не дождались приветствия датапата для {name}")
+            } else {
+                format!("связь с каналом снимка прервана: {error}")
+            }
+        })?;
+        if r2o_frame.kind == r2k_core::control::EVENT_PROTOCOL {
+            break r2k_core::control::decode_greeting(&r2o_frame)
+                .map_err(|error| format!("приветствие канала снимка: {error}"))?;
+        }
+        return Err("канал снимка не прислал приветствие датапата первым".into());
+    };
+    if r2o_greeting.version != r2k_core::control::PROTOCOL_VERSION
+        || r2o_greeting.release_id != r2k_core::control::RELEASE_ID
+    {
+        return Err(format!(
+            "несовместимый r2o-datapath: wire={}, release={}, нужен wire={}, release={}",
+            r2o_greeting.version,
+            r2o_greeting.release_id,
+            r2k_core::control::PROTOCOL_VERSION,
+            r2k_core::control::RELEASE_ID
+        ));
+    }
+
+    eprintln!(
+        "жду приветствие браузера к {name} (до {} мс): откройте сайт",
+        r2o_wait.as_millis()
+    );
+    loop {
+        let r2o_remaining = r2o_deadline
+            .checked_duration_since(Instant::now())
+            .filter(|duration| !duration.is_zero())
+            .ok_or_else(|| format!("не дождались приветствия браузера к {name}"))?;
+        r2o_stream
+            .set_read_timeout(Some(r2o_remaining))
+            .map_err(|error| format!("не удалось настроить ожидание снимка: {error}"))?;
+        let r2o_frame = r2k_core::control::read_frame(&mut r2o_stream).map_err(|error| {
+            if matches!(
+                error.kind(),
+                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+            ) {
+                format!("не дождались приветствия браузера к {name}")
+            } else {
+                format!("связь с каналом снимка прервана: {error}")
+            }
+        })?;
+        if r2o_frame.kind != r2k_core::control::EVENT_HELLO {
+            continue;
+        }
+        let r2o_hello = r2k_core::control::decode_hello(&r2o_frame)
+            .map_err(|error| format!("событие снимка ClientHello: {error}"))?;
+        if r2o_hello.key[37] != 6
+            || r2o_hello
+                .host
+                .as_deref()
+                .is_none_or(|host| !host.eq_ignore_ascii_case(r2o_host.as_bytes()))
+        {
+            continue;
+        }
+        let Some(r2o_wire_len) = r2o_hello.r2o_wire_len else {
+            continue;
+        };
+        eprintln!("снято приветствие браузера: {r2o_wire_len} байт");
+        return Ok(r2o_wire_len);
+    }
+}
+
+/// Параметры одного GET через TLS.
+#[derive(Clone, Debug)]
+pub struct FetchOptions {
+    pub name: String,
+    pub ip: Option<IpAddr>,
+    pub port: u16,
+    pub path: String,
+    pub deadline: Duration,
+    pub tls12: bool,
+    pub wire_len: Option<usize>,
+    pub mark: Option<u32>,
+}
+
+impl FetchOptions {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.name.is_empty()
+            || self.name.bytes().any(|byte| {
+                byte.is_ascii_control() || matches!(byte, b' ' | b'/' | b'\\' | b'@' | b'[' | b']')
+            })
+            || ServerName::try_from(self.name.clone()).is_err()
+        {
+            return Err("имя цели недопустимо для SNI и заголовка Host".into());
+        }
+        if self.port == 0 {
+            return Err("порт должен быть в диапазоне 1–65535".into());
+        }
+        if !repeatable_path(self.path.as_bytes()) {
+            return Err(
+                "путь должен быть безопасным абсолютным путём без запроса и фрагмента".into(),
+            );
+        }
+        if self.deadline.is_zero() {
+            return Err("срок ожидания должен быть больше нуля".into());
+        }
+        if self
+            .wire_len
+            .is_some_and(|length| length == 0 || length > 4096)
+        {
+            return Err("длина ClientHello должна быть от 1 до 4096 байт".into());
+        }
+        Ok(())
+    }
+}
+
+/// Результат TLS-рукопожатия и чтения одного HTTP-ответа.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FetchResult {
+    pub address: SocketAddr,
+    pub local_port: u16,
+    pub tls: Option<&'static str>,
+    pub status: u16,
+    pub body_bytes: u64,
+    pub body_expected: Option<u64>,
+    pub chunked: bool,
+    pub gzip: bool,
+    pub complete: bool,
+    pub elapsed: Duration,
+    pub reason: Option<String>,
+    pub r2o_volume_observation: crate::r2o_volume::R2oVolumeObservation,
+    pub r2o_resources: Vec<crate::r2o_resource::R2oResourceHint>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum R2oFetchEncoding {
+    Identity,
+    Gzip,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct R2oFetchVolumeRxResult {
+    pub first: Option<FetchResult>,
+    pub second: Option<FetchResult>,
+    pub third: Option<FetchResult>,
+    pub gzip: Option<FetchResult>,
+    pub evidence: Option<crate::r2o_volume::R2oVolumeRxEvidence>,
+    pub short_bytes: Option<u64>,
+    pub direct_complete: bool,
+    pub rx_tls_unavailable: bool,
+    pub measured_path: Option<String>,
+    pub retry_path: Option<String>,
+    pub failures: Vec<String>,
+    pub reason: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum R2oFetchVolumeTxVerdict {
+    Unreachable,
+    Short,
+    Cut,
+    Passed,
+}
+
+impl R2oFetchVolumeTxVerdict {
+    pub const fn r2o_label(self) -> &'static str {
+        match self {
+            Self::Unreachable => "цель не ответила",
+            Self::Short => "объём не набран — вердикта нет",
+            Self::Cut => "обрыв по объёму",
+            Self::Passed => "объём прошёл",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct R2oFetchVolumeTxResult {
+    pub address: SocketAddr,
+    pub verdict: R2oFetchVolumeTxVerdict,
+    pub at_kb: u32,
+    pub elapsed: Duration,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct R2oQuicFetchResult {
+    pub address: SocketAddr,
+    pub local_port: u16,
+    pub elapsed: Duration,
+    pub data: crate::r2o_quic_http3::R2oQuicHttp3Result,
+}
+
+/// Выполнить один GET через QUIC и HTTP/3.
+pub fn r2o_fetch_quic(options: &FetchOptions) -> Result<R2oQuicFetchResult, String> {
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    r2o_fetch_quic_with_roots(options, roots)
+}
+
+/// Выполнить QUIC GET с явно заданными корнями доверия.
+pub fn r2o_fetch_quic_with_roots(
+    options: &FetchOptions,
+    roots: RootCertStore,
+) -> Result<R2oQuicFetchResult, String> {
+    r2o_fetch_quic_with_roots_and_budget(options, roots, 0)
+}
+
+/// Выполнить HTTP/3-замер с системными корнями и бюджетом датаграмм.
+pub fn r2o_fetch_quic_with_budget(
+    options: &FetchOptions,
+    budget_packets: u32,
+) -> Result<R2oQuicFetchResult, String> {
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    r2o_fetch_quic_with_roots_and_budget(options, roots, budget_packets)
+}
+
+/// Выполнить HTTP/3-замер с заданными корнями и бюджетом датаграмм.
+pub fn r2o_fetch_quic_with_roots_and_budget(
+    options: &FetchOptions,
+    roots: RootCertStore,
+    budget_packets: u32,
+) -> Result<R2oQuicFetchResult, String> {
+    options.validate()?;
+    if options.tls12 {
+        return Err("QUIC использует TLS 1.3 и не поддерживает --tls12".into());
+    }
+    let started = Instant::now();
+    let address = resolve_target(options)?;
+    let socket = crate::r2o_quic_http3::r2o_quic_http3_udp_socket(address, options.mark)
+        .map_err(|error| format!("не удалось подготовить UDP-сокет для {address}: {error}"))?;
+    let local_port = socket
+        .local_addr()
+        .map_err(|error| format!("не удалось получить местный UDP-порт: {error}"))?
+        .port();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("не удалось запустить QUIC runtime: {error}"))?;
+    let data = runtime.block_on(crate::r2o_quic_http3::r2o_quic_http3_measure_with_wire_len(
+        socket,
+        address,
+        &options.name,
+        &options.path,
+        options.deadline,
+        roots,
+        budget_packets,
+        options.wire_len,
+    ));
+    Ok(R2oQuicFetchResult {
+        address,
+        local_port,
+        elapsed: started.elapsed(),
+        data,
+    })
+}
+
+/// Выполнить один HTTPS GET и дождаться конца HTTP-тела либо срока ожидания.
+pub fn fetch(options: &FetchOptions) -> Result<FetchResult, String> {
+    r2o_fetch_with_encoding(options, R2oFetchEncoding::Identity)
+}
+
+/// Выполнить HTTPS GET с выбранным кодированием тела и собрать сетевые признаки.
+pub fn r2o_fetch_with_encoding(
+    options: &FetchOptions,
+    r2o_encoding: R2oFetchEncoding,
+) -> Result<FetchResult, String> {
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    r2o_fetch_with_roots_and_encoding(options, r2o_encoding, roots)
+}
+
+fn r2o_fetch_with_roots_and_encoding(
+    options: &FetchOptions,
+    r2o_encoding: R2oFetchEncoding,
+    roots: RootCertStore,
+) -> Result<FetchResult, String> {
+    options.validate()?;
+    let address = resolve_target(options)?;
+    let started = Instant::now();
+    let deadline = started
+        .checked_add(options.deadline)
+        .ok_or_else(|| "срок ожидания слишком велик".to_owned())?;
+    let socket = connect_target(address, options.mark, remaining(deadline)?)
+        .map_err(|error| format!("не удалось подключиться к {address}: {error}"))?;
+    socket
+        .set_nodelay(true)
+        .map_err(|error| format!("не удалось настроить TCP-сокет: {error}"))?;
+
+    let mut connection = crate::r2o_tls::r2o_tls_client_connection(
+        &options.name,
+        options.tls12,
+        options.wire_len,
+        roots,
+    )?;
+    let mut r2o_socket = R2oTlsTcpStream::new(socket);
+    while connection.is_handshaking() {
+        set_deadline(&r2o_socket.socket, deadline)?;
+        connection
+            .complete_io(&mut r2o_socket)
+            .map_err(|error| format!("TLS-рукопожатие не завершилось: {error}"))?;
+    }
+    r2o_socket.r2o_reset_after_handshake();
+    let tls = match connection.protocol_version() {
+        Some(ProtocolVersion::TLSv1_3) => Some("1.3"),
+        Some(ProtocolVersion::TLSv1_2) => Some("1.2"),
+        _ => None,
+    };
+
+    let request = build_request(&options.name, &options.path, r2o_encoding);
+    let mut stream = StreamOwned::new(connection, r2o_socket);
+    set_deadline(&stream.sock.socket, deadline)?;
+    stream
+        .write_all(&request)
+        .and_then(|()| stream.flush())
+        .map_err(|error| format!("не удалось отправить HTTP-запрос: {error}"))?;
+
+    let local_port = stream
+        .sock
+        .socket
+        .local_addr()
+        .map_err(|error| format!("не удалось получить местный порт: {error}"))?
+        .port();
+    let mut parser = HttpResponseParser::new(false);
+    let mut buffer = [0_u8; 16 * 1024];
+    let mut reason = None;
+    let mut r2o_framing_valid = true;
+    let mut r2o_local_limit = false;
+    let mut r2o_body_expected_at_eof = None;
+    let mut r2o_pending_response = Vec::with_capacity(16 * 1024);
+    let mut r2o_pending_overflow = false;
+    let mut r2o_resource_tap: Option<crate::r2o_resource::R2oResourceBodyTap> = None;
+    loop {
+        if parser.is_complete() || parser.is_invalid() {
+            break;
+        }
+        if let Err(error) = set_deadline(&stream.sock.socket, deadline) {
+            reason = Some(error);
+            break;
+        }
+        match stream.read(&mut buffer) {
+            Ok(0) => {
+                r2o_framing_valid &= parser.headers_complete() && !parser.is_invalid();
+                r2o_body_expected_at_eof = parser
+                    .fixed_body_remaining()
+                    .map(|remaining| parser.body_bytes().saturating_add(remaining));
+                parser.feed(&[], true);
+                if !parser.is_complete() {
+                    reason = Some("сервер закрыл TLS-поток до завершения HTTP-ответа".into());
+                }
+                break;
+            }
+            Ok(length) => {
+                let r2o_bytes = &buffer[..length];
+                if parser.headers_complete() {
+                    if let Some(tap) = &mut r2o_resource_tap {
+                        tap.feed(r2o_bytes);
+                    }
+                } else if !r2o_pending_overflow {
+                    if r2o_pending_response.len() + length <= 64 * 1024 {
+                        r2o_pending_response.extend_from_slice(r2o_bytes);
+                    } else {
+                        r2o_pending_response.clear();
+                        r2o_pending_overflow = true;
+                    }
+                }
+                parser.feed(&buffer[..length], false);
+                if parser.headers_complete() && r2o_resource_tap.is_none() {
+                    let r2o_headers = parser.headers();
+                    if !parser.is_invalid()
+                        && !r2o_pending_overflow
+                        && r2o_fetch_resource_scan_allowed(parser.status(), r2o_headers)
+                        && let Some(r2o_header_start) = r2o_pending_response
+                            .windows(r2o_headers.len())
+                            .rposition(|window| window == r2o_headers)
+                    {
+                        let r2o_body_start = r2o_header_start + r2o_headers.len();
+                        let mut r2o_tap = crate::r2o_resource::R2oResourceBodyTap::new(
+                            r2o_fetch_chunked(r2o_headers),
+                        );
+                        r2o_tap.feed(&r2o_pending_response[r2o_body_start..]);
+                        r2o_resource_tap = Some(r2o_tap);
+                    }
+                    r2o_pending_response.clear();
+                }
+                if parser.is_invalid() {
+                    r2o_framing_valid = false;
+                    r2o_local_limit = !parser.headers_complete() && parser.headers().len() >= 8191;
+                    reason = Some("HTTP-ответ содержит неверное обрамление".into());
+                    break;
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ) =>
+            {
+                reason = Some("срок ожидания HTTP-ответа истёк".into());
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                r2o_framing_valid &= parser.headers_complete() && !parser.is_invalid();
+                r2o_body_expected_at_eof = parser
+                    .fixed_body_remaining()
+                    .map(|remaining| parser.body_bytes().saturating_add(remaining));
+                parser.feed(&[], true);
+                reason = Some("TLS-поток оборвался до завершения HTTP-ответа".into());
+                break;
+            }
+            Err(error) => {
+                reason = Some(format!("ошибка чтения HTTP-ответа: {error}"));
+                break;
+            }
+        }
+    }
+
+    if parser.is_invalid() && reason.is_none() {
+        reason = Some("HTTP-ответ содержит неверное обрамление".into());
+    }
+    let body_expected = parser
+        .fixed_body_remaining()
+        .map(|remaining| parser.body_bytes().saturating_add(remaining))
+        .or(r2o_body_expected_at_eof);
+    let headers = parser.headers();
+    let r2o_body_encoding = r2o_fetch_body_encoding(headers);
+    let r2o_body_has_length = header_value(headers, b"content-length").is_some();
+    let r2o_body_chunked = header_value(headers, b"transfer-encoding")
+        .is_some_and(|value| value.eq_ignore_ascii_case(b"chunked"));
+    let chunked = header_value(headers, b"transfer-encoding")
+        .is_some_and(|value| value.eq_ignore_ascii_case(b"chunked"));
+    let gzip = header_value(headers, b"content-encoding").is_some_and(|value| {
+        value
+            .split(|byte| *byte == b',')
+            .any(|encoding| trim_ascii(encoding).eq_ignore_ascii_case(b"gzip"))
+    });
+    let complete = parser.is_complete() && !parser.is_invalid();
+    let r2o_resources = if complete && r2o_fetch_resource_scan_allowed(parser.status(), headers) {
+        r2o_resource_tap
+            .as_ref()
+            .map(|tap| tap.resources().to_vec())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let r2o_tcp_after = r2o_tcp_counters(&stream.sock.socket);
+    let r2o_tls_wire_bytes = stream.sock.r2o_wire_bytes;
+    let r2o_data_packets = r2o_tcp_after.data_packets.unwrap_or(0);
+    let r2o_negotiated_tls = match tls {
+        Some("1.3") => Some(0x0304),
+        Some("1.2") => Some(0x0303),
+        _ => None,
+    };
+    let r2o_stage = if parser.status() != 0 || parser.headers_complete() {
+        crate::r2o_volume::R2oVolumeProbeStage::Application
+    } else {
+        crate::r2o_volume::R2oVolumeProbeStage::Handshake
+    };
+    let r2o_volume_observation = crate::r2o_volume::R2oVolumeObservation {
+        stage: r2o_stage,
+        name_valid: r2o_negotiated_tls.is_some(),
+        negotiated_tls: r2o_negotiated_tls,
+        local_limit: r2o_local_limit,
+        status: parser.status(),
+        body_complete: complete,
+        body_encoding: r2o_body_encoding,
+        body_framing_valid: parser.headers_complete() && r2o_framing_valid,
+        body_has_length: r2o_body_has_length,
+        body_chunked: r2o_body_chunked,
+        body_expected: body_expected.unwrap_or(0),
+        body_bytes: parser.body_bytes(),
+        rx_tls_wire_bytes: r2o_tls_wire_bytes,
+        rx_tls_record_missing: stream.sock.r2o_record_missing(),
+        data_packets: r2o_data_packets,
+        ..Default::default()
+    };
+
+    Ok(FetchResult {
+        address,
+        local_port,
+        tls,
+        status: parser.status(),
+        body_bytes: parser.body_bytes(),
+        body_expected,
+        chunked,
+        gzip,
+        complete,
+        elapsed: started.elapsed(),
+        reason,
+        r2o_volume_observation,
+        r2o_resources,
+    })
+}
+
+fn r2o_fetch_resource_scan_allowed(status: u16, headers: &[u8]) -> bool {
+    (200..300).contains(&status)
+        && header_value(headers, b"content-type").is_some_and(|value| {
+            value
+                .split(|byte| *byte == b';')
+                .next()
+                .is_some_and(|media_type| trim_ascii(media_type).eq_ignore_ascii_case(b"text/html"))
+        })
+        && r2o_fetch_body_encoding(headers) == crate::r2o_volume::R2oVolumeRxEncoding::Identity
+        && !headers.split(|byte| *byte == b'\n').skip(1).any(|line| {
+            line.strip_suffix(b"\r")
+                .and_then(|line| {
+                    let colon = line.iter().position(|byte| *byte == b':')?;
+                    line[..colon]
+                        .eq_ignore_ascii_case(b"cf-mitigated")
+                        .then_some(trim_ascii(&line[colon + 1..]))
+                })
+                .is_some_and(|value| value.eq_ignore_ascii_case(b"challenge"))
+        })
+}
+
+fn r2o_fetch_chunked(headers: &[u8]) -> bool {
+    header_value(headers, b"transfer-encoding")
+        .is_some_and(|value| value.eq_ignore_ascii_case(b"chunked"))
+}
+
+/// Выполнить отдельную RX-проверку identity/gzip с донорскими повторами.
+pub fn r2o_fetch_measure_rx_volume(options: &FetchOptions) -> R2oFetchVolumeRxResult {
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    r2o_fetch_measure_rx_volume_with_roots(options, roots)
+}
+
+fn r2o_fetch_measure_rx_volume_with_roots(
+    options: &FetchOptions,
+    roots: RootCertStore,
+) -> R2oFetchVolumeRxResult {
+    let r2o_result = r2o_fetch_measure_rx_volume_once(options, roots.clone());
+    let Some(r2o_short_bytes) = r2o_result.short_bytes else {
+        return r2o_result;
+    };
+    let r2o_direct_complete = r2o_result.direct_complete;
+    let r2o_original_first = r2o_result.first.clone();
+    let Some(r2o_first) = r2o_result.first.as_ref() else {
+        return r2o_result;
+    };
+    let Some(r2o_resource) = r2o_first.r2o_resources.iter().find(|resource| {
+        resource.host.eq_ignore_ascii_case(&options.name)
+            && crate::r2o_resource::r2o_resource_path_ok(&resource.path)
+            && resource.path != options.path
+    }) else {
+        return r2o_result;
+    };
+    let r2o_retry_path = r2o_resource.path.clone();
+    std::thread::sleep(R2O_VOLUME_RX_PROBE_GAP);
+    let mut r2o_retry_options = options.clone();
+    r2o_retry_options.path = r2o_retry_path.clone();
+    let mut r2o_retry = r2o_fetch_measure_rx_volume_once(&r2o_retry_options, roots);
+    r2o_retry.retry_path = Some(r2o_retry_path.clone());
+    if r2o_retry.rx_tls_unavailable
+        && r2o_retry.evidence.is_none()
+        && r2o_retry.short_bytes.is_none()
+    {
+        r2o_retry.short_bytes = Some(r2o_short_bytes);
+        r2o_retry.direct_complete = r2o_direct_complete;
+        if r2o_retry.first.is_none() {
+            r2o_retry.first = r2o_original_first;
+        }
+        r2o_retry.reason = format!(
+            "повтор по {r2o_retry_path} не установил TLS; исходный ответ завершился на {r2o_short_bytes} байтах, измерить обрыв нельзя: {}",
+            r2o_retry.reason
+        );
+    } else {
+        r2o_retry.reason = format!(
+            "повтор по CSS-пути {r2o_retry_path} после короткого ответа ({r2o_short_bytes} байт): {}",
+            r2o_retry.reason
+        );
+    }
+    r2o_retry
+}
+
+fn r2o_fetch_measure_rx_volume_once(
+    options: &FetchOptions,
+    roots: RootCertStore,
+) -> R2oFetchVolumeRxResult {
+    let mut r2o_result = R2oFetchVolumeRxResult::default();
+    if options.port == 80 {
+        r2o_result.reason = "для обычного HTTP отдельная TLS RX-проверка не применяется".into();
+        return r2o_result;
+    }
+    let mut r2o_options = options.clone();
+    r2o_options.deadline = R2O_VOLUME_RX_DEADLINE;
+    let r2o_first = match r2o_fetch_with_roots_and_encoding(
+        &r2o_options,
+        R2oFetchEncoding::Identity,
+        roots.clone(),
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            r2o_result.rx_tls_unavailable = error.starts_with("TLS-рукопожатие не завершилось:");
+            r2o_result.failures.push(error.clone());
+            r2o_result.reason = format!("первая identity-проверка не установила TLS/HTTP: {error}");
+            return r2o_result;
+        }
+    };
+    r2o_result.direct_complete = (200..300).contains(&r2o_first.status) && r2o_first.complete;
+    let r2o_first_observation = r2o_first.r2o_volume_observation;
+    if !crate::r2o_volume::r2o_volume_rx_partial(&r2o_first_observation) {
+        if r2o_first.status > 0 && r2o_first.complete && r2o_first.body_bytes < 12 * 1024 {
+            r2o_result.short_bytes = Some(r2o_first.body_bytes);
+            r2o_result.reason = format!(
+                "полный ответ содержит {} байт, меньше порога 12 КБ; RX-обрыв не измерен",
+                r2o_first.body_bytes
+            );
+        } else {
+            r2o_result.reason = format!(
+                "первая identity-проверка не подтвердила RX-обрыв: HTTP {}, {} байт{}",
+                r2o_first.status,
+                r2o_first.body_bytes,
+                r2o_first
+                    .reason
+                    .as_deref()
+                    .map(|reason| format!(" ({reason})"))
+                    .unwrap_or_default()
+            );
+        }
+        r2o_result.first = Some(r2o_first);
+        return r2o_result;
+    }
+    r2o_result.first = Some(r2o_first);
+    std::thread::sleep(R2O_VOLUME_RX_PROBE_GAP);
+    let r2o_second = match r2o_fetch_with_roots_and_encoding(
+        &r2o_options,
+        R2oFetchEncoding::Identity,
+        roots.clone(),
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            r2o_result.failures.push(error.clone());
+            r2o_result.reason = format!("повтор identity не завершился: {error}");
+            return r2o_result;
+        }
+    };
+    let r2o_second_observation = r2o_second.r2o_volume_observation;
+    let mut r2o_confirming_observation = r2o_second_observation;
+    if !crate::r2o_volume::r2o_volume_rx_pair_agrees(
+        &r2o_first_observation,
+        &r2o_second_observation,
+    ) {
+        if !crate::r2o_volume::r2o_volume_rx_needs_repeat(
+            &r2o_first_observation,
+            &r2o_second_observation,
+        ) {
+            r2o_result.reason = format!(
+                "identity-обрывы не согласовались: HTTP {}, {} байт, complete={}",
+                r2o_second.status, r2o_second.body_bytes, r2o_second.complete
+            );
+            r2o_result.second = Some(r2o_second);
+            return r2o_result;
+        }
+        r2o_result.second = Some(r2o_second);
+        std::thread::sleep(R2O_VOLUME_RX_PROBE_GAP);
+        let r2o_third = match r2o_fetch_with_roots_and_encoding(
+            &r2o_options,
+            R2oFetchEncoding::Identity,
+            roots.clone(),
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                r2o_result.failures.push(error.clone());
+                r2o_result.reason = format!("третий identity-замер не завершился: {error}");
+                return r2o_result;
+            }
+        };
+        r2o_confirming_observation = r2o_third.r2o_volume_observation;
+        if !crate::r2o_volume::r2o_volume_rx_pair_agrees(
+            &r2o_first_observation,
+            &r2o_confirming_observation,
+        ) {
+            r2o_result.reason = format!(
+                "третий identity-замер не подтвердил первый: HTTP {}, {} байт",
+                r2o_third.status, r2o_third.body_bytes
+            );
+            r2o_result.third = Some(r2o_third);
+            return r2o_result;
+        }
+        r2o_result.third = Some(r2o_third);
+    } else {
+        r2o_result.second = Some(r2o_second);
+    }
+
+    std::thread::sleep(R2O_VOLUME_RX_PROBE_GAP);
+    let r2o_gzip =
+        match r2o_fetch_with_roots_and_encoding(&r2o_options, R2oFetchEncoding::Gzip, roots) {
+            Ok(result) => result,
+            Err(error) => {
+                r2o_result.failures.push(error.clone());
+                r2o_result.reason = format!("gzip-контроль не завершился: {error}");
+                return r2o_result;
+            }
+        };
+    r2o_result.evidence = crate::r2o_volume::r2o_volume_rx_evidence(
+        &r2o_first_observation,
+        &r2o_confirming_observation,
+        &r2o_gzip.r2o_volume_observation,
+    );
+    if let Some(evidence) = &r2o_result.evidence {
+        r2o_result.reason = evidence.reason.clone();
+        r2o_result.measured_path = Some(options.path.clone());
+    } else {
+        r2o_result.reason = format!(
+            "gzip не подтвердил identity-обрыв: HTTP {}, {} байт, complete={}",
+            r2o_gzip.status, r2o_gzip.body_bytes, r2o_gzip.complete
+        );
+    }
+    r2o_result.gzip = Some(r2o_gzip);
+    r2o_result
+}
+
+/// Выполнить десять HEAD-шагов по одному TLS/TCP-соединению.
+pub fn r2o_fetch_measure_tx_volume(
+    options: &FetchOptions,
+) -> Result<R2oFetchVolumeTxResult, String> {
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    r2o_fetch_measure_tx_volume_with_roots(options, roots)
+}
+
+fn r2o_fetch_measure_tx_volume_with_roots(
+    options: &FetchOptions,
+    roots: RootCertStore,
+) -> Result<R2oFetchVolumeTxResult, String> {
+    options.validate()?;
+    let r2o_started = Instant::now();
+    let r2o_address = resolve_target(options)?;
+    let r2o_socket = match connect_target(r2o_address, options.mark, R2O_VOLUME_CONNECT_TIMEOUT) {
+        Ok(socket) => socket,
+        Err(error) => {
+            return Ok(R2oFetchVolumeTxResult {
+                address: r2o_address,
+                verdict: R2oFetchVolumeTxVerdict::Unreachable,
+                at_kb: 0,
+                elapsed: r2o_started.elapsed(),
+                reason: format!("нет TCP к {r2o_address}: {error}"),
+            });
+        }
+    };
+    if let Err(error) = r2o_socket.set_nodelay(true) {
+        return Ok(R2oFetchVolumeTxResult {
+            address: r2o_address,
+            verdict: R2oFetchVolumeTxVerdict::Unreachable,
+            at_kb: 0,
+            elapsed: r2o_started.elapsed(),
+            reason: format!("не удалось настроить TCP-сокет: {error}"),
+        });
+    }
+    let r2o_stream = if options.port == 80 {
+        R2oFetchVolumeStream::Plain(r2o_socket)
+    } else {
+        let r2o_deadline = Instant::now()
+            .checked_add(R2O_VOLUME_HANDSHAKE_TIMEOUT)
+            .ok_or_else(|| "срок TLS-рукопожатия слишком велик".to_owned())?;
+        let mut connection = match crate::r2o_tls::r2o_tls_client_connection(
+            &options.name,
+            options.tls12,
+            options.wire_len,
+            roots,
+        ) {
+            Ok(connection) => connection,
+            Err(error) => {
+                return Ok(R2oFetchVolumeTxResult {
+                    address: r2o_address,
+                    verdict: R2oFetchVolumeTxVerdict::Unreachable,
+                    at_kb: 0,
+                    elapsed: r2o_started.elapsed(),
+                    reason: format!("не удалось подготовить TLS: {error}"),
+                });
+            }
+        };
+        let mut r2o_tracked_socket = R2oTlsTcpStream::new(r2o_socket);
+        while connection.is_handshaking() {
+            if let Err(error) = set_deadline(&r2o_tracked_socket.socket, r2o_deadline) {
+                return Ok(R2oFetchVolumeTxResult {
+                    address: r2o_address,
+                    verdict: R2oFetchVolumeTxVerdict::Unreachable,
+                    at_kb: 0,
+                    elapsed: r2o_started.elapsed(),
+                    reason: error,
+                });
+            }
+            if let Err(error) = connection.complete_io(&mut r2o_tracked_socket) {
+                return Ok(R2oFetchVolumeTxResult {
+                    address: r2o_address,
+                    verdict: R2oFetchVolumeTxVerdict::Unreachable,
+                    at_kb: 0,
+                    elapsed: r2o_started.elapsed(),
+                    reason: format!("TLS-рукопожатие не завершилось: {error}"),
+                });
+            }
+        }
+        r2o_tracked_socket.r2o_reset_after_handshake();
+        R2oFetchVolumeStream::Tls(StreamOwned::new(connection, r2o_tracked_socket))
+    };
+    let mut r2o_stream = r2o_stream;
+    if let Err(error) = r2o_stream.r2o_set_write_timeout(R2O_VOLUME_CONNECT_TIMEOUT) {
+        return Ok(R2oFetchVolumeTxResult {
+            address: r2o_address,
+            verdict: R2oFetchVolumeTxVerdict::Unreachable,
+            at_kb: 0,
+            elapsed: r2o_started.elapsed(),
+            reason: format!("не удалось настроить срок отправки: {error}"),
+        });
+    }
+    let r2o_padding = r2o_volume_padding();
+    let mut r2o_read_timeout = R2O_VOLUME_TX_INITIAL_READ;
+    for r2o_step in 0..R2O_VOLUME_TX_STEPS {
+        let r2o_request = r2o_volume_head_request(&options.name, &r2o_padding, r2o_step != 0);
+        let r2o_request_started = Instant::now();
+        let r2o_result = r2o_stream
+            .write_all(&r2o_request)
+            .and_then(|()| r2o_stream.flush())
+            .and_then(|()| r2o_drain_head_response(&mut r2o_stream, r2o_read_timeout));
+        if let Err(error) = r2o_result {
+            let r2o_at_kb = (r2o_step * R2O_VOLUME_TX_CHUNK_BYTES / 1024) as u32;
+            let r2o_verdict = if r2o_step == 0 {
+                R2oFetchVolumeTxVerdict::Unreachable
+            } else if r2o_at_kb >= 12 {
+                R2oFetchVolumeTxVerdict::Cut
+            } else {
+                R2oFetchVolumeTxVerdict::Short
+            };
+            return Ok(R2oFetchVolumeTxResult {
+                address: r2o_address,
+                verdict: r2o_verdict,
+                at_kb: r2o_at_kb,
+                elapsed: r2o_started.elapsed(),
+                reason: format!("HEAD-шаг {} не прошёл: {error}", r2o_step + 1),
+            });
+        }
+        if r2o_step == 0 {
+            let r2o_rtt_ms = r2o_request_started.elapsed().as_millis();
+            let r2o_read_ms = r2o_rtt_ms.saturating_mul(3).clamp(
+                R2O_VOLUME_TX_READ_MIN.as_millis(),
+                R2O_VOLUME_TX_READ_MAX.as_millis(),
+            );
+            r2o_read_timeout = Duration::from_millis(r2o_read_ms as u64);
+        }
+        std::thread::sleep(R2O_VOLUME_TX_CHUNK_GAP);
+    }
+
+    Ok(R2oFetchVolumeTxResult {
+        address: r2o_address,
+        verdict: R2oFetchVolumeTxVerdict::Passed,
+        at_kb: (R2O_VOLUME_TX_STEPS * R2O_VOLUME_TX_CHUNK_BYTES / 1024) as u32,
+        elapsed: r2o_started.elapsed(),
+        reason: "лестница пройдена целиком".into(),
+    })
+}
+
+fn build_request(name: &str, path: &str, encoding: R2oFetchEncoding) -> Vec<u8> {
+    let mut request = Vec::with_capacity(name.len() + path.len() + 128);
+    request.extend_from_slice(b"GET ");
+    request.extend_from_slice(path.as_bytes());
+    request.extend_from_slice(b" HTTP/1.1\r\nHost: ");
+    request.extend_from_slice(name.as_bytes());
+    request.extend_from_slice(b"\r\nUser-Agent: Mozilla/5.0\r\nAccept: */*\r\nAccept-Encoding: ");
+    request.extend_from_slice(match encoding {
+        R2oFetchEncoding::Identity => b"identity",
+        R2oFetchEncoding::Gzip => b"gzip",
+    });
+    request.extend_from_slice(b"\r\nConnection: keep-alive\r\n\r\n");
+    request
+}
+
+fn r2o_fetch_body_encoding(headers: &[u8]) -> crate::r2o_volume::R2oVolumeRxEncoding {
+    let mut r2o_encoding = None;
+    for r2o_line in headers.split(|byte| *byte == b'\n').skip(1) {
+        let r2o_line = r2o_line.strip_suffix(b"\r").unwrap_or(r2o_line);
+        let Some(r2o_colon) = r2o_line.iter().position(|byte| *byte == b':') else {
+            continue;
+        };
+        if !r2o_line[..r2o_colon].eq_ignore_ascii_case(b"content-encoding") {
+            continue;
+        }
+        if r2o_encoding.is_some() {
+            return crate::r2o_volume::R2oVolumeRxEncoding::Other;
+        }
+        let r2o_value = trim_ascii(&r2o_line[r2o_colon + 1..]);
+        r2o_encoding = Some(if r2o_value.eq_ignore_ascii_case(b"gzip") {
+            crate::r2o_volume::R2oVolumeRxEncoding::Gzip
+        } else if r2o_value.eq_ignore_ascii_case(b"identity") {
+            crate::r2o_volume::R2oVolumeRxEncoding::Identity
+        } else {
+            crate::r2o_volume::R2oVolumeRxEncoding::Other
+        });
+    }
+    r2o_encoding.unwrap_or(crate::r2o_volume::R2oVolumeRxEncoding::Identity)
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct R2oTcpCounters {
+    data_packets: Option<u32>,
+}
+
+/// Считает байты и границы TLS-записей после рукопожатия, отделяя обрыв записи от FIN после полной записи.
+#[derive(Clone, Debug)]
+struct R2oTlsRecordTracker {
+    header: [u8; 5],
+    header_len: usize,
+    body_remaining: usize,
+    valid: bool,
+}
+
+impl Default for R2oTlsRecordTracker {
+    fn default() -> Self {
+        Self {
+            header: [0; 5],
+            header_len: 0,
+            body_remaining: 0,
+            valid: true,
+        }
+    }
+}
+
+impl R2oTlsRecordTracker {
+    fn observe(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            if !self.valid {
+                return;
+            }
+            if self.body_remaining != 0 {
+                self.body_remaining -= 1;
+                continue;
+            }
+            self.header[self.header_len] = byte;
+            self.header_len += 1;
+            if self.header_len != self.header.len() {
+                continue;
+            }
+            let content_type = self.header[0];
+            let version_major = self.header[1];
+            let version_minor = self.header[2];
+            let body_len = usize::from(u16::from_be_bytes([self.header[3], self.header[4]]));
+            self.valid = matches!(content_type, 20..=24)
+                && version_major == 3
+                && (1..=3).contains(&version_minor)
+                && body_len <= 18_432;
+            self.header_len = 0;
+            self.body_remaining = body_len;
+        }
+    }
+
+    fn body_is_missing(&self) -> bool {
+        self.valid && self.body_remaining != 0
+    }
+}
+
+struct R2oTlsTcpStream {
+    socket: TcpStream,
+    r2o_wire_bytes: u64,
+    r2o_records: R2oTlsRecordTracker,
+}
+
+impl R2oTlsTcpStream {
+    fn new(socket: TcpStream) -> Self {
+        Self {
+            socket,
+            r2o_wire_bytes: 0,
+            r2o_records: R2oTlsRecordTracker::default(),
+        }
+    }
+
+    fn r2o_reset_after_handshake(&mut self) {
+        self.r2o_wire_bytes = 0;
+        self.r2o_records = R2oTlsRecordTracker::default();
+    }
+
+    fn r2o_record_missing(&self) -> bool {
+        self.r2o_records.body_is_missing()
+    }
+}
+
+impl Read for R2oTlsTcpStream {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let length = self.socket.read(buffer)?;
+        if length != 0 {
+            self.r2o_wire_bytes = self.r2o_wire_bytes.saturating_add(length as u64);
+            self.r2o_records.observe(&buffer[..length]);
+        }
+        Ok(length)
+    }
+}
+
+impl Write for R2oTlsTcpStream {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.socket.write(buffer)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.socket.flush()
+    }
+}
+
+enum R2oFetchVolumeStream {
+    Plain(TcpStream),
+    Tls(StreamOwned<rustls::ClientConnection, R2oTlsTcpStream>),
+}
+
+impl R2oFetchVolumeStream {
+    fn r2o_set_read_timeout(&self, timeout: Duration) -> io::Result<()> {
+        match self {
+            Self::Plain(stream) => stream.set_read_timeout(Some(timeout)),
+            Self::Tls(stream) => stream.sock.socket.set_read_timeout(Some(timeout)),
+        }
+    }
+
+    fn r2o_set_write_timeout(&self, timeout: Duration) -> io::Result<()> {
+        match self {
+            Self::Plain(stream) => stream.set_write_timeout(Some(timeout)),
+            Self::Tls(stream) => stream.sock.socket.set_write_timeout(Some(timeout)),
+        }
+    }
+}
+
+impl Read for R2oFetchVolumeStream {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Plain(stream) => stream.read(buffer),
+            Self::Tls(stream) => stream.read(buffer),
+        }
+    }
+}
+
+impl Write for R2oFetchVolumeStream {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Plain(stream) => stream.write(buffer),
+            Self::Tls(stream) => stream.write(buffer),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Plain(stream) => stream.flush(),
+            Self::Tls(stream) => stream.flush(),
+        }
+    }
+}
+
+fn r2o_volume_head_request(name: &str, padding: &[u8], padded: bool) -> Vec<u8> {
+    let mut request = Vec::with_capacity(name.len() + padding.len() + 128);
+    request.extend_from_slice(b"HEAD / HTTP/1.1\r\nHost: ");
+    request.extend_from_slice(name.as_bytes());
+    request.extend_from_slice(b"\r\nUser-Agent: Mozilla/5.0\r\nConnection: keep-alive\r\n");
+    if padded {
+        request.extend_from_slice(b"X-Pad: ");
+        request.extend_from_slice(padding);
+        request.extend_from_slice(b"\r\n");
+    }
+    request.extend_from_slice(b"\r\n");
+    request
+}
+
+fn r2o_volume_padding() -> Vec<u8> {
+    const R2O_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut random = vec![0_u8; R2O_VOLUME_TX_CHUNK_BYTES];
+    if std::fs::File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut random))
+        .is_err()
+    {
+        for (index, byte) in random.iter_mut().enumerate() {
+            *byte = (index as u8).wrapping_mul(31).wrapping_add(7);
+        }
+    }
+    random
+        .into_iter()
+        .map(|byte| R2O_ALPHABET[usize::from(byte) % R2O_ALPHABET.len()])
+        .collect()
+}
+
+fn r2o_drain_head_response(stream: &mut R2oFetchVolumeStream, timeout: Duration) -> io::Result<()> {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "слишком долгий срок ответа"))?;
+    let mut parser = HttpResponseParser::new(true);
+    let mut buffer = [0_u8; 4096];
+    loop {
+        if parser.is_complete() {
+            return Ok(());
+        }
+        if parser.is_invalid() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "ответ HEAD содержит неверное обрамление",
+            ));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "истёк срок ожидания ответа HEAD",
+            ));
+        }
+        stream.r2o_set_read_timeout(remaining)?;
+        match stream.read(&mut buffer) {
+            Ok(0) => {
+                parser.feed(&[], true);
+                if parser.is_complete() {
+                    return Ok(());
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "сервер закрыл ответ HEAD до конца заголовков",
+                ));
+            }
+            Ok(length) => parser.feed(&buffer[..length], false),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn r2o_tcp_counters(stream: &TcpStream) -> R2oTcpCounters {
+    let mut r2o_info = std::mem::MaybeUninit::<libc::tcp_info>::zeroed();
+    let mut r2o_length = std::mem::size_of::<libc::tcp_info>() as libc::socklen_t;
+    let r2o_result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            libc::TCP_INFO,
+            r2o_info.as_mut_ptr().cast(),
+            &mut r2o_length,
+        )
+    };
+    if r2o_result != 0 {
+        return R2oTcpCounters::default();
+    }
+    let r2o_info = unsafe { r2o_info.assume_init() };
+    let r2o_length = r2o_length as usize;
+    let r2o_packets_end = std::mem::offset_of!(libc::tcp_info, tcpi_data_segs_out)
+        + std::mem::size_of_val(&r2o_info.tcpi_data_segs_out);
+    R2oTcpCounters {
+        data_packets: (r2o_length >= r2o_packets_end).then_some(
+            r2o_info
+                .tcpi_data_segs_in
+                .saturating_add(r2o_info.tcpi_data_segs_out),
+        ),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn r2o_tcp_counters(_stream: &TcpStream) -> R2oTcpCounters {
+    R2oTcpCounters::default()
+}
+
+fn header_value<'a>(headers: &'a [u8], expected: &[u8]) -> Option<&'a [u8]> {
+    headers
+        .split(|byte| *byte == b'\n')
+        .skip(1)
+        .filter_map(|line| line.strip_suffix(b"\r"))
+        .find_map(|line| {
+            let colon = line.iter().position(|byte| *byte == b':')?;
+            line[..colon]
+                .eq_ignore_ascii_case(expected)
+                .then_some(trim_ascii(&line[colon + 1..]))
+        })
+}
+
+fn trim_ascii(mut value: &[u8]) -> &[u8] {
+    while value.first().is_some_and(u8::is_ascii_whitespace) {
+        value = &value[1..];
+    }
+    while value.last().is_some_and(u8::is_ascii_whitespace) {
+        value = &value[..value.len() - 1];
+    }
+    value
+}
+
+fn resolve_target(options: &FetchOptions) -> Result<SocketAddr, String> {
+    if let Some(ip) = options.ip {
+        return Ok(SocketAddr::new(ip, options.port));
+    }
+    (options.name.as_str(), options.port)
+        .to_socket_addrs()
+        .map_err(|error| format!("имя {} не разрешилось: {error}", options.name))?
+        .next()
+        .ok_or_else(|| format!("для имени {} не найден адрес", options.name))
+}
+
+fn remaining(deadline: Instant) -> Result<Duration, String> {
+    let duration = deadline.saturating_duration_since(Instant::now());
+    if duration.is_zero() {
+        Err("срок ожидания TLS/HTTP-запроса истёк".into())
+    } else {
+        Ok(duration)
+    }
+}
+
+fn set_deadline(stream: &TcpStream, deadline: Instant) -> Result<(), String> {
+    let timeout = remaining(deadline)?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .and_then(|()| stream.set_write_timeout(Some(timeout)))
+        .map_err(|error| format!("не удалось задать срок ожидания сокета: {error}"))
+}
+
+fn connect_target(
+    address: SocketAddr,
+    mark: Option<u32>,
+    timeout: Duration,
+) -> io::Result<TcpStream> {
+    if let Some(mark) = mark {
+        return connect_marked(address, mark, timeout);
+    }
+    TcpStream::connect_timeout(&address, timeout)
+}
+
+#[cfg(target_os = "linux")]
+fn connect_marked(address: SocketAddr, mark: u32, timeout: Duration) -> io::Result<TcpStream> {
+    use std::os::fd::RawFd;
+
+    let domain = if address.is_ipv4() {
+        libc::AF_INET
+    } else {
+        libc::AF_INET6
+    };
+    let raw_fd = unsafe {
+        libc::socket(
+            domain,
+            libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+            libc::IPPROTO_TCP,
+        )
+    };
+    if raw_fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let owned = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+    let fd = owned.as_raw_fd();
+    set_socket_option(fd, libc::SOL_SOCKET, SO_MARK, mark as libc::c_int)?;
+    set_socket_option(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, 1)?;
+    let connect_result = connect_socket(fd, address)?;
+    if connect_result != 0 {
+        let error = io::Error::last_os_error();
+        if !matches!(
+            error.raw_os_error(),
+            Some(libc::EINPROGRESS | libc::EALREADY | libc::EINTR)
+        ) {
+            return Err(error);
+        }
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "слишком долгий срок"))?;
+        let mut poll_descriptor = libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "истёк срок подключения",
+                ));
+            }
+            let millis = remaining.as_millis().clamp(1, libc::c_int::MAX as u128) as libc::c_int;
+            let result = unsafe { libc::poll(&mut poll_descriptor, 1, millis) };
+            if result > 0 {
+                break;
+            }
+            if result == 0 {
+                continue;
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+        let mut socket_error: libc::c_int = 0;
+        let mut length = std::mem::size_of_val(&socket_error) as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_ERROR,
+                (&mut socket_error as *mut libc::c_int).cast(),
+                &mut length,
+            )
+        };
+        if result != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if socket_error != 0 {
+            return Err(io::Error::from_raw_os_error(socket_error));
+        }
+    }
+    let fd: RawFd = owned.into_raw_fd();
+    let stream = unsafe { TcpStream::from_raw_fd(fd) };
+    stream.set_nonblocking(false)?;
+    Ok(stream)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn connect_marked(_address: SocketAddr, _mark: u32, _timeout: Duration) -> io::Result<TcpStream> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "метка SO_MARK доступна только в Linux",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn set_socket_option(
+    fd: libc::c_int,
+    level: libc::c_int,
+    option: libc::c_int,
+    value: libc::c_int,
+) -> io::Result<()> {
+    let result = unsafe {
+        libc::setsockopt(
+            fd,
+            level,
+            option,
+            (&value as *const libc::c_int).cast(),
+            std::mem::size_of_val(&value) as libc::socklen_t,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn connect_socket(fd: libc::c_int, address: SocketAddr) -> io::Result<libc::c_int> {
+    match address {
+        SocketAddr::V4(address) => {
+            let raw = libc::sockaddr_in {
+                sin_family: libc::AF_INET as libc::sa_family_t,
+                sin_port: address.port().to_be(),
+                sin_addr: libc::in_addr {
+                    s_addr: u32::from_ne_bytes(address.ip().octets()),
+                },
+                sin_zero: [0; 8],
+            };
+            let result = unsafe {
+                libc::connect(
+                    fd,
+                    (&raw as *const libc::sockaddr_in).cast(),
+                    std::mem::size_of_val(&raw) as libc::socklen_t,
+                )
+            };
+            Ok(result)
+        }
+        SocketAddr::V6(address) => {
+            let raw = libc::sockaddr_in6 {
+                sin6_family: libc::AF_INET6 as libc::sa_family_t,
+                sin6_port: address.port().to_be(),
+                sin6_flowinfo: address.flowinfo(),
+                sin6_addr: libc::in6_addr {
+                    s6_addr: address.ip().octets(),
+                },
+                sin6_scope_id: address.scope_id(),
+            };
+            let result = unsafe {
+                libc::connect(
+                    fd,
+                    (&raw as *const libc::sockaddr_in6).cast(),
+                    std::mem::size_of_val(&raw) as libc::socklen_t,
+                )
+            };
+            Ok(result)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::r2o_volume::R2oVolumeRxEncoding;
+
+    #[test]
+    fn запрос_проверки_передаёт_выбранное_кодирование() {
+        let identity = build_request("example.com", "/", R2oFetchEncoding::Identity);
+        let gzip = build_request("example.com", "/", R2oFetchEncoding::Gzip);
+
+        assert!(
+            identity
+                .windows(b"Accept-Encoding: identity".len())
+                .any(|window| window == b"Accept-Encoding: identity")
+        );
+        assert!(
+            gzip.windows(b"Accept-Encoding: gzip".len())
+                .any(|window| window == b"Accept-Encoding: gzip")
+        );
+    }
+
+    #[test]
+    fn сканирование_ресурсов_доступно_только_для_identity_html_без_challenge() {
+        let html = b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n";
+        assert!(r2o_fetch_resource_scan_allowed(200, html));
+        assert!(!r2o_fetch_resource_scan_allowed(
+            200,
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Encoding: gzip\r\n\r\n"
+        ));
+        assert!(!r2o_fetch_resource_scan_allowed(
+            200,
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\ncf-mitigated: challenge\r\n\r\n"
+        ));
+        assert!(!r2o_fetch_resource_scan_allowed(
+            200,
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/css\r\n\r\n"
+        ));
+        assert!(!r2o_fetch_resource_scan_allowed(403, html));
+    }
+
+    #[test]
+    fn классификатор_кодирования_отвергает_неизвестную_и_составную_форму() {
+        assert_eq!(
+            r2o_fetch_body_encoding(b"HTTP/1.1 200 OK\r\n\r\n"),
+            R2oVolumeRxEncoding::Identity
+        );
+        assert_eq!(
+            r2o_fetch_body_encoding(b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n"),
+            R2oVolumeRxEncoding::Gzip
+        );
+        assert_eq!(
+            r2o_fetch_body_encoding(b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip, br\r\n\r\n"),
+            R2oVolumeRxEncoding::Other
+        );
+        assert_eq!(
+            r2o_fetch_body_encoding(
+                b"HTTP/1.1 200 OK\r\nContent-Encoding: identity\r\nContent-Encoding: gzip\r\n\r\n"
+            ),
+            R2oVolumeRxEncoding::Other
+        );
+    }
+
+    #[test]
+    fn https_замер_сохраняет_частичное_тело_tls_и_сетевые_счётчики() {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use rustls::{ServerConfig, ServerConnection};
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::mpsc;
+        use std::thread;
+
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+            .expect("создать сертификат localhost");
+        let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
+        let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certificate.serialize_private_key_der(),
+        ));
+        let server_config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate_der.clone()], private_key)
+            .unwrap();
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate_der).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("открыть HTTPS-приёмник");
+        let address = listener.local_addr().unwrap();
+        let (request_sender, request_receiver) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (socket, _) = listener.accept().expect("принять HTTPS-соединение");
+            let connection = ServerConnection::new(Arc::new(server_config)).unwrap();
+            let mut stream = StreamOwned::new(connection, socket);
+            let mut request = Vec::new();
+            let mut byte = [0_u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream
+                    .read_exact(&mut byte)
+                    .expect("прочитать заголовки запроса");
+                request.push(byte[0]);
+            }
+            request_sender.send(request).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nContent-Encoding: gzip\r\n\r\nabc",
+                )
+                .expect("отправить неполный ответ");
+        });
+
+        let options = FetchOptions {
+            name: "localhost".into(),
+            port: address.port(),
+            ip: Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            path: "/".into(),
+            deadline: Duration::from_secs(3),
+            tls12: false,
+            wire_len: None,
+            mark: None,
+        };
+        let result = r2o_fetch_with_roots_and_encoding(&options, R2oFetchEncoding::Gzip, roots)
+            .expect("завершить HTTPS-замер");
+        let request = request_receiver.recv().expect("получить HTTP-запрос");
+        server.join().unwrap();
+
+        assert!(
+            request
+                .windows(b"Accept-Encoding: gzip".len())
+                .any(|window| window == b"Accept-Encoding: gzip")
+        );
+        assert_eq!(result.status, 200);
+        assert_eq!(result.body_bytes, 3);
+        assert_eq!(result.body_expected, Some(12));
+        assert!(!result.complete);
+        assert_eq!(
+            result.r2o_volume_observation.body_encoding,
+            R2oVolumeRxEncoding::Gzip
+        );
+        assert!(result.r2o_volume_observation.body_framing_valid);
+        assert!(!result.r2o_volume_observation.rx_tls_record_missing);
+        assert!(result.r2o_volume_observation.rx_tls_wire_bytes > 0);
+        assert!(result.r2o_volume_observation.data_packets > 0);
+    }
+
+    #[test]
+    fn https_замер_подтверждает_неполное_тело_tls_записи() {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use rustls::{ServerConfig, ServerConnection};
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::mpsc;
+        use std::thread;
+
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+            .expect("создать сертификат localhost");
+        let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
+        let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certificate.serialize_private_key_der(),
+        ));
+        let mut server_config =
+            ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS12])
+                .with_no_client_auth()
+                .with_single_cert(vec![certificate_der.clone()], private_key)
+                .unwrap();
+        server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate_der).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("открыть HTTPS-приёмник");
+        let address = listener.local_addr().unwrap();
+        let (alpn_sender, alpn_receiver) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (socket, _) = listener.accept().expect("принять HTTPS-соединение");
+            let connection = ServerConnection::new(Arc::new(server_config)).unwrap();
+            let mut stream = StreamOwned::new(connection, socket);
+            let mut request = Vec::new();
+            let mut byte = [0_u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream
+                    .read_exact(&mut byte)
+                    .expect("прочитать заголовки запроса");
+                request.push(byte[0]);
+            }
+            alpn_sender
+                .send(stream.conn.alpn_protocol().map(<[u8]>::to_vec))
+                .unwrap();
+            stream
+                .conn
+                .writer()
+                .write_all(&vec![b'x'; 16_000])
+                .expect("поставить TLS-данные в очередь");
+            let mut encrypted = Vec::new();
+            stream
+                .conn
+                .write_tls(&mut encrypted)
+                .expect("зашифровать TLS-запись");
+            assert!(encrypted.len() > 12 * 1024);
+            stream
+                .sock
+                .write_all(&encrypted[..12 * 1024])
+                .expect("отправить только часть TLS-записи");
+        });
+
+        let options = FetchOptions {
+            name: "localhost".into(),
+            port: address.port(),
+            ip: Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            path: "/".into(),
+            deadline: Duration::from_secs(3),
+            tls12: true,
+            wire_len: None,
+            mark: None,
+        };
+        let result = r2o_fetch_with_roots_and_encoding(&options, R2oFetchEncoding::Identity, roots)
+            .expect("завершить HTTPS-замер");
+        server.join().unwrap();
+
+        assert_eq!(result.status, 0);
+        assert_eq!(result.tls, Some("1.2"));
+        assert_eq!(
+            alpn_receiver.recv().unwrap().as_deref(),
+            Some(&b"http/1.1"[..])
+        );
+        assert!(result.r2o_volume_observation.rx_tls_record_missing);
+        assert!(result.r2o_volume_observation.rx_tls_wire_bytes >= 12 * 1024);
+        assert!(crate::r2o_volume::r2o_volume_rx_partial(
+            &result.r2o_volume_observation
+        ));
+    }
+
+    #[test]
+    fn rx_объём_решает_противоречие_третьим_identity_и_gzip_контролем() {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use rustls::{ServerConfig, ServerConnection};
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::mpsc;
+        use std::thread;
+
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+            .expect("создать сертификат localhost");
+        let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
+        let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certificate.serialize_private_key_der(),
+        ));
+        let server_config = Arc::new(
+            ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(vec![certificate_der.clone()], private_key)
+                .unwrap(),
+        );
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate_der).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("открыть HTTPS-приёмник");
+        let address = listener.local_addr().unwrap();
+        let (request_sender, request_receiver) = mpsc::channel();
+        let server = thread::spawn(move || {
+            for attempt in 0..4 {
+                let (socket, _) = listener.accept().expect("принять HTTPS-соединение");
+                let connection = ServerConnection::new(server_config.clone()).unwrap();
+                let mut stream = StreamOwned::new(connection, socket);
+                let mut request = Vec::new();
+                let mut byte = [0_u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream
+                        .read_exact(&mut byte)
+                        .expect("прочитать заголовки запроса");
+                    request.push(byte[0]);
+                }
+                request_sender.send(request).unwrap();
+                let (encoding, length, body_length) = match attempt {
+                    0 | 2 => ("identity", 20 * 1024, 16 * 1024),
+                    1 => ("identity", 16 * 1024, 16 * 1024),
+                    _ => ("gzip", 2 * 1024, 2 * 1024),
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {length}\r\nContent-Encoding: {encoding}\r\n\r\n"
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("отправить заголовки ответа");
+                stream
+                    .write_all(&vec![b'x'; body_length])
+                    .expect("отправить тело ответа");
+            }
+        });
+
+        let options = FetchOptions {
+            name: "localhost".into(),
+            port: address.port(),
+            ip: Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            path: "/".into(),
+            deadline: Duration::from_secs(3),
+            tls12: false,
+            wire_len: None,
+            mark: None,
+        };
+        let result = r2o_fetch_measure_rx_volume_with_roots(&options, roots);
+        let requests = request_receiver
+            .try_iter()
+            .map(|request| String::from_utf8_lossy(&request).to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        server.join().unwrap();
+
+        assert_eq!(requests.len(), 4);
+        assert!(requests[0].contains("accept-encoding: identity"));
+        assert!(requests[1].contains("accept-encoding: identity"));
+        assert!(requests[2].contains("accept-encoding: identity"));
+        assert!(requests[3].contains("accept-encoding: gzip"));
+        assert!(result.first.is_some());
+        assert!(
+            result
+                .second
+                .as_ref()
+                .is_some_and(|response| response.complete)
+        );
+        assert!(result.third.is_some());
+        assert!(
+            result
+                .gzip
+                .as_ref()
+                .is_some_and(|response| response.complete)
+        );
+        let evidence = result.evidence.expect("получить RX-вердикт");
+        assert_eq!(
+            evidence.domain,
+            crate::r2o_volume::R2oVolumeRxDomain::HttpBody
+        );
+        assert_eq!(evidence.cut_kb, 16);
+        assert!(result.reason.contains("identity-тело"));
+    }
+
+    #[test]
+    fn rx_короткий_html_один_раз_повторяется_по_css_того_же_имени() {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use rustls::{ServerConfig, ServerConnection};
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::mpsc;
+        use std::thread;
+
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+            .expect("создать сертификат localhost");
+        let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
+        let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certificate.serialize_private_key_der(),
+        ));
+        let server_config = Arc::new(
+            ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(vec![certificate_der.clone()], private_key)
+                .unwrap(),
+        );
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate_der).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("открыть HTTPS-приёмник");
+        let address = listener.local_addr().unwrap();
+        let (request_sender, request_receiver) = mpsc::channel();
+        let server = thread::spawn(move || {
+            for attempt in 0..2 {
+                let (socket, _) = listener.accept().expect("принять HTTPS-соединение");
+                let connection = ServerConnection::new(server_config.clone()).unwrap();
+                let mut stream = StreamOwned::new(connection, socket);
+                let mut request = Vec::new();
+                let mut byte = [0_u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream
+                        .read_exact(&mut byte)
+                        .expect("прочитать заголовки запроса");
+                    request.push(byte[0]);
+                }
+                request_sender
+                    .send(String::from_utf8_lossy(&request).into_owned())
+                    .unwrap();
+                let (content_type, body) = if attempt == 0 {
+                    (
+                        "text/html",
+                        b"<link rel=stylesheet href='https://localhost/css/site.css'>".to_vec(),
+                    )
+                } else {
+                    ("text/css", vec![b'x'; 128])
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("отправить заголовки ответа");
+                stream.write_all(&body).expect("отправить тело ответа");
+            }
+        });
+
+        let options = FetchOptions {
+            name: "localhost".into(),
+            port: address.port(),
+            ip: Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            path: "/".into(),
+            deadline: Duration::from_secs(3),
+            tls12: false,
+            wire_len: None,
+            mark: None,
+        };
+        let result = r2o_fetch_measure_rx_volume_with_roots(&options, roots);
+        let requests = request_receiver.try_iter().collect::<Vec<_>>();
+        server.join().unwrap();
+
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("GET / HTTP/1.1\r\n"));
+        assert!(requests[1].starts_with("GET /css/site.css HTTP/1.1\r\n"));
+        assert_eq!(result.retry_path.as_deref(), Some("/css/site.css"));
+        assert_eq!(result.short_bytes, Some(128));
+        assert!(result.reason.contains("после короткого ответа"));
+    }
+
+    #[test]
+    fn rx_сохраняет_исходный_короткий_ответ_если_tls_css_повтор_не_начался() {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use rustls::{ServerConfig, ServerConnection};
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::thread;
+
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+            .expect("создать сертификат localhost");
+        let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
+        let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certificate.serialize_private_key_der(),
+        ));
+        let server_config = Arc::new(
+            ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(vec![certificate_der.clone()], private_key)
+                .unwrap(),
+        );
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate_der).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("открыть HTTPS-приёмник");
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (socket, _) = listener.accept().expect("принять исходный запрос");
+            let connection = ServerConnection::new(server_config.clone()).unwrap();
+            let mut stream = StreamOwned::new(connection, socket);
+            let mut request = Vec::new();
+            let mut byte = [0_u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream
+                    .read_exact(&mut byte)
+                    .expect("прочитать исходный запрос");
+                request.push(byte[0]);
+            }
+            let body = b"<link rel=stylesheet href='https://localhost/css/site.css'>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("отправить заголовки исходного ответа");
+            stream
+                .write_all(body)
+                .expect("отправить исходное короткое тело");
+            drop(stream);
+
+            let (socket, _) = listener.accept().expect("принять CSS-повтор");
+            drop(socket);
+        });
+
+        let options = FetchOptions {
+            name: "localhost".into(),
+            port: address.port(),
+            ip: Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            path: "/".into(),
+            deadline: Duration::from_secs(3),
+            tls12: false,
+            wire_len: None,
+            mark: None,
+        };
+        let result = r2o_fetch_measure_rx_volume_with_roots(&options, roots);
+        server.join().unwrap();
+
+        assert_eq!(result.retry_path.as_deref(), Some("/css/site.css"));
+        assert_eq!(
+            result.short_bytes,
+            result.first.as_ref().map(|response| response.body_bytes)
+        );
+        assert!(result.direct_complete);
+        assert!(
+            result
+                .first
+                .as_ref()
+                .is_some_and(|response| response.complete)
+        );
+        assert!(result.rx_tls_unavailable);
+        assert!(result.reason.contains("исходный ответ завершился"));
+    }
+
+    #[test]
+    fn исходящая_лестница_отправляет_десять_head_шагов_в_одном_tls_потоке() {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use rustls::{ServerConfig, ServerConnection};
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::mpsc;
+        use std::thread;
+
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+            .expect("создать сертификат localhost");
+        let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
+        let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certificate.serialize_private_key_der(),
+        ));
+        let server_config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate_der.clone()], private_key)
+            .unwrap();
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate_der).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("открыть HTTPS-приёмник");
+        let address = listener.local_addr().unwrap();
+        let (request_sender, request_receiver) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (socket, _) = listener.accept().expect("принять HTTPS-соединение");
+            let connection = ServerConnection::new(Arc::new(server_config)).unwrap();
+            let mut stream = StreamOwned::new(connection, socket);
+            for _ in 0..R2O_VOLUME_TX_STEPS {
+                let mut request = Vec::new();
+                let mut byte = [0_u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).expect("прочитать HEAD-запрос");
+                    request.push(byte[0]);
+                }
+                request_sender.send(request).unwrap();
+                stream
+                    .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+                    .expect("ответить на HEAD-запрос");
+            }
+        });
+
+        let options = FetchOptions {
+            name: "localhost".into(),
+            port: address.port(),
+            ip: Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            path: "/".into(),
+            deadline: Duration::from_secs(3),
+            tls12: false,
+            wire_len: None,
+            mark: None,
+        };
+        let result = r2o_fetch_measure_tx_volume_with_roots(&options, roots).unwrap();
+        let requests = request_receiver
+            .try_iter()
+            .map(|request| String::from_utf8_lossy(&request).into_owned())
+            .collect::<Vec<_>>();
+        server.join().unwrap();
+
+        assert_eq!(result.verdict, R2oFetchVolumeTxVerdict::Passed);
+        assert_eq!(result.at_kb, 39);
+        assert_eq!(requests.len(), 10);
+        assert!(requests[0].starts_with("HEAD / HTTP/1.1\r\n"));
+        assert!(!requests[0].contains("X-Pad:"));
+        for request in &requests[1..] {
+            let padding = request
+                .split_once("\r\nX-Pad: ")
+                .and_then(|(_, tail)| tail.split_once("\r\n"))
+                .map(|(padding, _)| padding)
+                .unwrap();
+            assert_eq!(padding.len(), R2O_VOLUME_TX_CHUNK_BYTES);
+            assert!(padding.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+        }
+    }
+
+    #[test]
+    fn исходящая_лестница_считает_обрыв_после_двенадцати_килобайт() {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use rustls::{ServerConfig, ServerConnection};
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::mpsc;
+        use std::thread;
+
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+            .expect("создать сертификат localhost");
+        let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
+        let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certificate.serialize_private_key_der(),
+        ));
+        let server_config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate_der.clone()], private_key)
+            .unwrap();
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate_der).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("открыть HTTPS-приёмник");
+        let address = listener.local_addr().unwrap();
+        let (request_sender, request_receiver) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (socket, _) = listener.accept().expect("принять HTTPS-соединение");
+            let connection = ServerConnection::new(Arc::new(server_config)).unwrap();
+            let mut stream = StreamOwned::new(connection, socket);
+            for step in 0..5 {
+                let mut request = Vec::new();
+                let mut byte = [0_u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).expect("прочитать HEAD-запрос");
+                    request.push(byte[0]);
+                }
+                request_sender.send(request).unwrap();
+                if step != 4 {
+                    stream
+                        .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+                        .expect("ответить на HEAD-запрос");
+                }
+            }
+        });
+
+        let options = FetchOptions {
+            name: "localhost".into(),
+            port: address.port(),
+            ip: Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            path: "/".into(),
+            deadline: Duration::from_secs(3),
+            tls12: false,
+            wire_len: None,
+            mark: None,
+        };
+        let result = r2o_fetch_measure_tx_volume_with_roots(&options, roots).unwrap();
+        let requests = request_receiver.try_iter().count();
+        server.join().unwrap();
+
+        assert_eq!(requests, 5);
+        assert_eq!(result.verdict, R2oFetchVolumeTxVerdict::Cut);
+        assert_eq!(result.at_kb, 15);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn счётчики_tcp_info_содержат_принятые_байты_и_пакеты() {
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("открыть TCP-приёмник");
+        let address = listener.local_addr().expect("адрес TCP-приёмника");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("принять соединение");
+            let mut request = [0_u8; 8];
+            stream.read_exact(&mut request).expect("прочитать запрос");
+            stream.write_all(b"answer!!").expect("отправить ответ");
+        });
+        let mut stream = TcpStream::connect(address).expect("подключиться к TCP-приёмнику");
+        stream.write_all(b"request!").expect("отправить запрос");
+        let mut response = [0_u8; 8];
+        stream.read_exact(&mut response).expect("прочитать ответ");
+        server.join().expect("дождаться TCP-приёмника");
+
+        let counters = r2o_tcp_counters(&stream);
+        assert!(counters.data_packets.is_some_and(|packets| packets >= 2));
+    }
+
+    #[test]
+    fn tls_счётчик_отличает_неполное_тело_записи_от_полной_записи() {
+        let mut tracker = R2oTlsRecordTracker::default();
+        tracker.observe(&[23, 3, 3, 0, 10, 1, 2, 3]);
+        assert!(tracker.body_is_missing());
+        tracker.observe(&[4, 5, 6, 7, 8, 9, 10]);
+        assert!(!tracker.body_is_missing());
+    }
+
+    #[test]
+    fn заданная_длина_client_hello_учитывает_заголовок_tls_записи() {
+        let mut roots = RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let mut connection =
+            crate::r2o_tls::r2o_tls_client_connection("example.com", false, Some(1275), roots)
+                .expect("создать TLS-соединение");
+        let mut bytes = Vec::new();
+        connection
+            .write_tls(&mut bytes)
+            .expect("записать ClientHello");
+
+        let record_len = usize::from(u16::from_be_bytes([bytes[3], bytes[4]]));
+        assert_eq!(record_len + 5, 1275);
+    }
+}

@@ -1,0 +1,16 @@
+[package]
+name = "r2k-core"
+version = "0.1.0"
+edition = "2024"
+description = "Платформонезависимые протокольные компоненты r2o-datapath"
+
+[dependencies]
+aes = "0.8.4"
+aes-gcm = "0.10.3"
+getrandom = "0.2.17"
+hkdf = "0.12.4"
+sha2 = "0.10.9"
+
+[lib]
+name = "r2k_core"
+

@@ -1,0 +1,2543 @@
+use r2k_core::control::{
+    KEY_LEN, R2oTcpFinRetryEvent, R2oTcpRstAfterAppEvent, R2oTcpSilenceEvent, R2oTcpStallEvent,
+};
+use r2k_core::packet::PacketView;
+use r2k_core::plan::{
+    EmitKind, GUARD_RST_ALIEN, OriginalFate, POISON_IPID_ZERO, PROTO_HTTP, PROTO_VOICE,
+    PacketInput, Plan,
+};
+use r2k_core::quic::is_authenticated_initial;
+use std::collections::{HashMap, VecDeque};
+#[cfg(target_os = "linux")]
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
+
+#[cfg(target_os = "linux")]
+use crate::conntrack::{R2oConntrackInfo, R2oConntrackTuple, tuple_from_socket_addrs};
+
+const MAX_TCP_SESSIONS: usize = 2048;
+const TCP_STALL_PACKET_BUDGET: u64 = 25;
+const TCP_STALL_PACKET_SLACK: u64 = 3;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct TcpEndpoint {
+    address: r2k_core::addr::Address,
+    port: u16,
+}
+
+impl TcpEndpoint {
+    fn order_key(self) -> (u8, [u8; 16], u16) {
+        (self.address.family(), self.address.bytes(), self.port)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct TcpFlowKey {
+    low: TcpEndpoint,
+    high: TcpEndpoint,
+}
+
+impl TcpFlowKey {
+    fn wire_key(self) -> [u8; KEY_LEN] {
+        let mut key = [0; KEY_LEN];
+        key[0] = self.low.address.family();
+        key[1..17].copy_from_slice(&self.low.address.bytes());
+        key[17..33].copy_from_slice(&self.high.address.bytes());
+        key[33..35].copy_from_slice(&self.low.port.to_be_bytes());
+        key[35..37].copy_from_slice(&self.high.port.to_be_bytes());
+        key[37] = 6;
+        key
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// Накопленные счётчики пакетов и сетевых байтов по направлениям TCP-потока.
+pub struct R2oTcpFlowMetrics {
+    /// Число пакетов от стороны, начавшей поток.
+    pub forward_packets: u32,
+    /// Число пакетов от обратной стороны потока.
+    pub reverse_packets: u32,
+    /// Суммарная длина IP-пакетов в прямом направлении.
+    pub forward_bytes: u64,
+    /// Суммарная длина IP-пакетов в обратном направлении.
+    pub reverse_bytes: u64,
+}
+
+struct TcpSession {
+    initiator: TcpEndpoint,
+    direction_known: bool,
+    metrics: R2oTcpFlowMetrics,
+    reverse_ttl: Option<u8>,
+    guards: u8,
+    first_syn: Option<Instant>,
+    rtt: Option<Duration>,
+    hello_at: Option<Instant>,
+    hello_ack: Option<u32>,
+    reverse_seen: bool,
+    response_payload: bool,
+    reverse_tls_app_data: bool,
+    reverse_server_hello: bool,
+    reverse_payload_bytes_after_hello: u32,
+    reverse_rst: bool,
+    hello_has_sni: bool,
+    forward_data_packets: u32,
+    reverse_data_packets: u32,
+    silence_reported: bool,
+    conntrack_reply_packets: Option<u64>,
+    conntrack_reply_at: Option<Instant>,
+    conntrack_original_mark: u64,
+    stall_watch_off: bool,
+    stall_reported: bool,
+    pending_fin_at: Option<Instant>,
+    pending_fin_sequence_end: Option<u32>,
+    fin_retry_queued: bool,
+    fin_retry_reported: bool,
+    last_seen: Instant,
+}
+
+impl TcpSession {
+    fn new(
+        initiator: TcpEndpoint,
+        direction_known: bool,
+        first_syn: Option<Instant>,
+        now: Instant,
+    ) -> Self {
+        Self {
+            initiator,
+            direction_known,
+            metrics: R2oTcpFlowMetrics::default(),
+            reverse_ttl: None,
+            guards: 0,
+            first_syn,
+            rtt: None,
+            hello_at: None,
+            hello_ack: None,
+            reverse_seen: false,
+            response_payload: false,
+            reverse_tls_app_data: false,
+            reverse_server_hello: false,
+            reverse_payload_bytes_after_hello: 0,
+            reverse_rst: false,
+            hello_has_sni: false,
+            forward_data_packets: 0,
+            reverse_data_packets: 0,
+            silence_reported: false,
+            conntrack_reply_packets: None,
+            conntrack_reply_at: None,
+            conntrack_original_mark: 0,
+            stall_watch_off: false,
+            stall_reported: false,
+            pending_fin_at: None,
+            pending_fin_sequence_end: None,
+            fin_retry_queued: false,
+            fin_retry_reported: false,
+            last_seen: now,
+        }
+    }
+}
+
+/// Ограниченное состояние потока для runtime-защит и очистки соединений.
+pub struct TcpSessions {
+    flows: HashMap<TcpFlowKey, TcpSession>,
+    fin_retry_events: VecDeque<R2oTcpFinRetryEvent>,
+    rst_after_app_events: VecDeque<R2oTcpRstAfterAppEvent>,
+}
+
+impl Default for TcpSessions {
+    fn default() -> Self {
+        Self {
+            flows: HashMap::with_capacity(MAX_TCP_SESSIONS),
+            fin_retry_events: VecDeque::new(),
+            rst_after_app_events: VecDeque::new(),
+        }
+    }
+}
+
+impl TcpSessions {
+    pub fn len(&self) -> usize {
+        self.flows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.flows.is_empty()
+    }
+
+    /// Возвращает счётчики активного потока по его ключу сетевого протокола.
+    pub fn r2o_flow_metrics(&self, key: &[u8; KEY_LEN]) -> Option<R2oTcpFlowMetrics> {
+        self.flows.iter().find_map(|(flow_key, session)| {
+            (flow_key.wire_key() == *key).then_some(session.metrics)
+        })
+    }
+
+    pub fn expire(&mut self, now: Instant, idle: Duration) -> usize {
+        let before = self.flows.len();
+        self.flows.retain(|_, session| {
+            let idle_expired = now.saturating_duration_since(session.last_seen) >= idle;
+            let fin_expired = session.pending_fin_at.is_some_and(|started| {
+                now.checked_duration_since(started)
+                    .is_some_and(|elapsed| elapsed >= fin_retry_window(session.rtt))
+            });
+            !idle_expired && !fin_expired
+        });
+        before - self.flows.len()
+    }
+
+    pub fn fin_retry_candidates(&self) -> Vec<R2oTcpFinRetryEvent> {
+        self.fin_retry_events.iter().cloned().collect()
+    }
+
+    pub fn mark_fin_retry(&mut self, key: &[u8; KEY_LEN]) {
+        self.fin_retry_events.retain(|event| event.key != *key);
+        if let Some((_, session)) = self
+            .flows
+            .iter_mut()
+            .find(|(flow_key, _)| flow_key.wire_key() == *key)
+        {
+            session.fin_retry_queued = false;
+            session.fin_retry_reported = true;
+        }
+    }
+
+    pub fn rst_after_app_candidates(&self) -> Vec<R2oTcpRstAfterAppEvent> {
+        self.rst_after_app_events.iter().cloned().collect()
+    }
+
+    pub fn mark_rst_after_app(&mut self, key: &[u8; KEY_LEN]) {
+        self.rst_after_app_events.retain(|event| event.key != *key);
+    }
+
+    pub fn sweep_silent(
+        &mut self,
+        now: Instant,
+        reverse_queue_visible: bool,
+    ) -> Vec<R2oTcpSilenceEvent> {
+        if !reverse_queue_visible {
+            return Vec::new();
+        }
+        let mut events = Vec::new();
+        for (key, session) in &mut self.flows {
+            let Some(hello_at) = session.hello_at else {
+                continue;
+            };
+            if session.silence_reported
+                || !session.reverse_seen
+                || session.response_payload
+                || session.reverse_rst
+                || now < hello_at
+            {
+                continue;
+            }
+            let elapsed = now.duration_since(hello_at);
+            let deadline = session.rtt.map_or(Duration::from_secs(2), |rtt| {
+                rtt.saturating_mul(8)
+                    .clamp(Duration::from_secs(1), Duration::from_secs(5))
+            });
+            if elapsed < deadline {
+                continue;
+            }
+            events.push(R2oTcpSilenceEvent {
+                key: key.wire_key(),
+                client_is_low: session.initiator == key.low,
+                elapsed_ms: elapsed.as_millis().min(u128::from(u32::MAX)) as u32,
+            });
+        }
+        events
+    }
+
+    pub fn mark_silent(&mut self, key: &[u8; KEY_LEN]) {
+        if let Some((_, session)) = self
+            .flows
+            .iter_mut()
+            .find(|(flow_key, _)| flow_key.wire_key() == *key)
+        {
+            session.silence_reported = true;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn tcp_stall_candidates(&self) -> Vec<R2oTcpStallProbe> {
+        self.flows
+            .iter()
+            .filter_map(|(key, session)| {
+                if !session.direction_known
+                    || !session.hello_has_sni
+                    || !session.response_payload
+                    || session.reverse_rst
+                    || session.guards != 0
+                    || session.stall_watch_off
+                    || session.stall_reported
+                {
+                    return None;
+                }
+                let server = if session.initiator == key.low {
+                    key.high
+                } else {
+                    key.low
+                };
+                let client_addr = SocketAddr::new(
+                    session.initiator.address.as_ip_addr(),
+                    session.initiator.port,
+                );
+                let server_addr = SocketAddr::new(server.address.as_ip_addr(), server.port);
+                Some(R2oTcpStallProbe {
+                    key: key.wire_key(),
+                    tuple: tuple_from_socket_addrs(client_addr, server_addr)?,
+                })
+            })
+            .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn update_tcp_stall(
+        &mut self,
+        now: Instant,
+        key: &[u8; KEY_LEN],
+        info: R2oConntrackInfo,
+    ) -> Option<R2oTcpStallEvent> {
+        let (flow_key, session) = self
+            .flows
+            .iter_mut()
+            .find(|(flow_key, _)| flow_key.wire_key() == *key)?;
+        if session.stall_watch_off || session.stall_reported || session.guards != 0 {
+            return None;
+        }
+        let Some(state) = info.tcp_state else {
+            return None;
+        };
+        if state != 3 {
+            session.stall_watch_off = true;
+            return None;
+        }
+
+        let unseen = info
+            .reply_packets
+            .saturating_sub(u64::from(session.metrics.reverse_packets));
+        let estimate = u64::from(session.forward_data_packets)
+            .saturating_add(u64::from(session.reverse_data_packets))
+            .saturating_add(unseen);
+        let band_top = TCP_STALL_PACKET_BUDGET + TCP_STALL_PACKET_SLACK;
+        if estimate > band_top {
+            session.stall_watch_off = true;
+            return None;
+        }
+        if session.conntrack_reply_packets != Some(info.reply_packets) {
+            session.conntrack_reply_packets = Some(info.reply_packets);
+            session.conntrack_original_mark = info.original_packets;
+            session.conntrack_reply_at = Some(now);
+            return None;
+        }
+        if unseen == 0
+            || info
+                .original_packets
+                .saturating_sub(session.conntrack_original_mark)
+                < 3
+        {
+            return None;
+        }
+        let reply_at = session.conntrack_reply_at?;
+        let elapsed = now.checked_duration_since(reply_at)?;
+        let rto = session
+            .rtt
+            .map_or(Duration::ZERO, |rtt| rtt.saturating_mul(3))
+            .max(Duration::from_secs(2));
+        if elapsed < rto || estimate + TCP_STALL_PACKET_SLACK < TCP_STALL_PACKET_BUDGET {
+            return None;
+        }
+        Some(R2oTcpStallEvent {
+            key: flow_key.wire_key(),
+            client_is_low: session.initiator == flow_key.low,
+            elapsed_ms: elapsed.as_millis().min(u128::from(u32::MAX)) as u32,
+            estimated_packets: estimate.min(u64::from(u32::MAX)) as u32,
+        })
+    }
+
+    pub fn mark_tcp_stall(&mut self, key: &[u8; KEY_LEN]) {
+        if let Some((_, session)) = self
+            .flows
+            .iter_mut()
+            .find(|(flow_key, _)| flow_key.wire_key() == *key)
+        {
+            session.stall_reported = true;
+        }
+    }
+
+    fn track_packet(
+        &mut self,
+        packet: &[u8],
+        now: Instant,
+    ) -> Option<(TcpFlowKey, bool, u8, bool)> {
+        let view = PacketView::parse(packet)?;
+        if view.protocol != 6 {
+            return None;
+        }
+        let tcp = view.tcp_segment(packet)?;
+        let source = TcpEndpoint {
+            address: view.src,
+            port: tcp.source_port,
+        };
+        let destination = TcpEndpoint {
+            address: view.dst,
+            port: tcp.destination_port,
+        };
+        let key = if source.order_key() <= destination.order_key() {
+            TcpFlowKey {
+                low: source,
+                high: destination,
+            }
+        } else {
+            TcpFlowKey {
+                low: destination,
+                high: source,
+            }
+        };
+        let syn = tcp.flags & 0x02 != 0;
+        let ack = tcp.flags & 0x10 != 0;
+        let rst = tcp.flags & 0x04 != 0;
+        let fin = tcp.flags & 0x01 != 0;
+        let new_connection = syn && !ack;
+        let payload = packet.get(tcp.payload.clone()).unwrap_or_default();
+
+        if new_connection {
+            if !self.flows.contains_key(&key) && self.flows.len() >= MAX_TCP_SESSIONS {
+                return None;
+            }
+            let metrics = self
+                .flows
+                .get(&key)
+                .map_or_else(R2oTcpFlowMetrics::default, |session| session.metrics);
+            let mut session = TcpSession::new(source, true, Some(now), now);
+            session.metrics = metrics;
+            self.flows.insert(key, session);
+        } else if !self.flows.contains_key(&key) {
+            if self.flows.len() >= MAX_TCP_SESSIONS {
+                return None;
+            }
+            let initiator = if syn && ack { destination } else { source };
+            self.flows
+                .insert(key, TcpSession::new(initiator, syn && ack, None, now));
+        }
+
+        let session = self.flows.get_mut(&key)?;
+        let reverse_tls_app_data_before_packet = session.reverse_tls_app_data;
+        if syn && ack && !session.direction_known {
+            session.initiator = destination;
+            session.direction_known = true;
+        }
+        let hello = if session.hello_at.is_none() && !payload.is_empty() {
+            let hello = r2k_core::tls::parse(payload);
+            hello.is_client_hello.then_some(hello)
+        } else {
+            None
+        };
+        if let Some(hello) = hello {
+            if !session.direction_known {
+                if source != session.initiator {
+                    std::mem::swap(
+                        &mut session.metrics.forward_packets,
+                        &mut session.metrics.reverse_packets,
+                    );
+                    std::mem::swap(
+                        &mut session.metrics.forward_bytes,
+                        &mut session.metrics.reverse_bytes,
+                    );
+                    std::mem::swap(
+                        &mut session.forward_data_packets,
+                        &mut session.reverse_data_packets,
+                    );
+                    session.reverse_seen = session.metrics.reverse_packets != 0;
+                    session.reverse_ttl = None;
+                    session.reverse_rst = false;
+                }
+                session.initiator = source;
+                session.direction_known = true;
+            }
+            session.hello_at = Some(now);
+            session.hello_ack = ack.then_some(tcp.acknowledgment);
+            session.hello_has_sni = hello.sni_range.is_some();
+        }
+        session.last_seen = now;
+        let reverse = source != session.initiator;
+        let packet_bytes = view.total_len as u64;
+        if reverse {
+            session.metrics.reverse_packets = session.metrics.reverse_packets.saturating_add(1);
+            session.metrics.reverse_bytes =
+                session.metrics.reverse_bytes.saturating_add(packet_bytes);
+            session.reverse_seen = true;
+            if syn && ack && session.rtt.is_none() {
+                session.rtt = session
+                    .first_syn
+                    .and_then(|first_syn| now.checked_duration_since(first_syn));
+            }
+            if session.reverse_ttl.is_none() {
+                session.reverse_ttl = Some(view.hop_limit);
+            }
+            if !payload.is_empty() {
+                session.reverse_data_packets = session.reverse_data_packets.saturating_add(1);
+            }
+            if session.hello_at.is_some() && !payload.is_empty() {
+                session.response_payload = true;
+                session.reverse_payload_bytes_after_hello = session
+                    .reverse_payload_bytes_after_hello
+                    .saturating_add(payload.len().min(u32::MAX as usize) as u32);
+                session.reverse_tls_app_data |= payload.first() == Some(&0x17);
+                session.reverse_server_hello |= r2k_core::tls::parse(payload).is_server_hello;
+            }
+            if tcp.flags & 0x04 != 0 {
+                session.reverse_rst = true;
+            }
+        } else {
+            if !payload.is_empty() {
+                session.forward_data_packets = session.forward_data_packets.saturating_add(1);
+            }
+        }
+        if !reverse {
+            session.metrics.forward_packets = session.metrics.forward_packets.saturating_add(1);
+            session.metrics.forward_bytes =
+                session.metrics.forward_bytes.saturating_add(packet_bytes);
+        }
+        let mut keep_fin_session = false;
+        let mut fin_retry_event = None;
+        let mut rst_after_app_event = None;
+        if rst && session.hello_at.is_some() && reverse_tls_app_data_before_packet {
+            rst_after_app_event = Some(R2oTcpRstAfterAppEvent {
+                key: key.wire_key(),
+                client_is_low: session.initiator == key.low,
+            });
+        }
+        if fin && !rst && !reverse && session.hello_at.is_some() {
+            let ack_beyond_response =
+                ack && session.hello_ack.is_some_and(|hello_ack| {
+                    let acknowledged = tcp.acknowledgment.wrapping_sub(hello_ack);
+                    (acknowledged as i32) > 0
+                        && acknowledged > session.reverse_payload_bytes_after_hello
+                }) && session.reverse_server_hello;
+            if session.reverse_tls_app_data || ack_beyond_response {
+                let fin_sequence_end = tcp.sequence.wrapping_add(payload.len() as u32);
+                let same_active_fin = session.pending_fin_sequence_end == Some(fin_sequence_end)
+                    && session.pending_fin_at.is_some_and(|started| {
+                        now.checked_duration_since(started)
+                            .is_some_and(|elapsed| elapsed < fin_retry_window(session.rtt))
+                    });
+                if same_active_fin {
+                    if !session.fin_retry_reported && !session.fin_retry_queued {
+                        fin_retry_event = Some(R2oTcpFinRetryEvent {
+                            key: key.wire_key(),
+                            client_is_low: session.initiator == key.low,
+                        });
+                    }
+                } else {
+                    session.pending_fin_at = Some(now);
+                    session.pending_fin_sequence_end = Some(fin_sequence_end);
+                }
+                keep_fin_session = true;
+            }
+        }
+        if let Some(event) = fin_retry_event {
+            let already_queued = self
+                .fin_retry_events
+                .iter()
+                .any(|queued| queued.key == event.key);
+            if already_queued {
+                session.fin_retry_queued = true;
+            } else if self.fin_retry_events.len() < MAX_TCP_SESSIONS {
+                self.fin_retry_events.push_back(event);
+                session.fin_retry_queued = true;
+            }
+        }
+        if let Some(event) = rst_after_app_event {
+            let already_queued = self
+                .rst_after_app_events
+                .iter()
+                .any(|queued| queued.key == event.key);
+            if !already_queued && self.rst_after_app_events.len() < MAX_TCP_SESSIONS {
+                self.rst_after_app_events.push_back(event);
+            }
+        }
+        Some((key, reverse, tcp.flags, keep_fin_session))
+    }
+}
+
+fn fin_retry_window(rtt: Option<Duration>) -> Duration {
+    rtt.map_or(Duration::from_secs(3), |rtt| {
+        rtt.saturating_mul(9).max(Duration::from_secs(3))
+    })
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct R2oTcpStallProbe {
+    pub key: [u8; KEY_LEN],
+    pub tuple: R2oConntrackTuple,
+}
+
+/// Применить план пакета с ограниченным состоянием TCP-потока для защит соединения.
+pub fn decide_with_session(
+    sessions: &mut TcpSessions,
+    plan: &Plan,
+    packet: &[u8],
+) -> PacketDecision {
+    let now = Instant::now();
+    let Some((key, reverse, flags, keep_fin_session)) = sessions.track_packet(packet, now) else {
+        let is_tcp = PacketView::parse(packet).is_some_and(|view| view.protocol == 6);
+        return if is_tcp && plan.guards & GUARD_RST_ALIEN != 0 {
+            PacketDecision::Accept
+        } else {
+            decide(plan, packet)
+        };
+    };
+
+    let view = PacketView::parse(packet).expect("tracked TCP packet remains parseable");
+    let rst = flags & 0x04 != 0;
+    let fin = flags & 0x01 != 0;
+    if rst
+        && reverse
+        && sessions.flows.get(&key).is_some_and(|session| {
+            session.guards & GUARD_RST_ALIEN != 0
+                && session
+                    .reverse_ttl
+                    .is_some_and(|reference| reference != view.hop_limit)
+        })
+    {
+        return PacketDecision::Drop;
+    }
+
+    let decision = decide_packet(plan, packet);
+    let applied = matches!(
+        &decision,
+        PacketDecision::Drop | PacketDecision::Replace(_) | PacketDecision::Transmit { .. }
+    ) || (plan.guards & GUARD_RST_ALIEN != 0
+        && guard_plan_applies_without_emissions(plan, packet));
+    if applied
+        && !reverse
+        && !rst
+        && !fin
+        && let Some(session) = sessions.flows.get_mut(&key)
+    {
+        session.guards = plan.guards;
+    }
+    if rst || (fin && !keep_fin_session) {
+        sessions.flows.remove(&key);
+    }
+    decision
+}
+
+fn guard_plan_applies_without_emissions(plan: &Plan, packet: &[u8]) -> bool {
+    let Some(view) = PacketView::parse(packet).filter(|view| view.protocol == 6) else {
+        return false;
+    };
+    let Some(input) = tcp_plan_input(plan, packet, &view) else {
+        return false;
+    };
+    plan.apply(&input)
+        .is_ok_and(|actions| actions.emits.is_empty() && actions.fate != OriginalFate::Hold)
+}
+
+fn tcp_plan_input<'a>(plan: &Plan, packet: &'a [u8], view: &PacketView) -> Option<PacketInput<'a>> {
+    if plan.transport != 6 || !matches!(plan.proto, 1 | PROTO_HTTP) {
+        return None;
+    }
+    let tcp = view.tcp_segment(packet)?;
+    let payload = packet
+        .get(tcp.payload.clone())
+        .filter(|bytes| !bytes.is_empty())?;
+
+    let tls = r2k_core::tls::parse(payload);
+    let http_host = r2k_core::httpup::request_host_range(payload);
+    let is_http = http_host.is_some();
+    if (plan.proto == PROTO_HTTP && !is_http) || (plan.proto != PROTO_HTTP && !tls.is_client_hello)
+    {
+        return None;
+    }
+
+    let mut input = PacketInput::new(payload, tcp.sequence);
+    input.is_tls13 = tls.is_tls13;
+    if let Some(range) =
+        http_host.or_else(|| tls.sni_range.filter(|range| range.end <= payload.len()))
+    {
+        input.have_sni = true;
+        input.sni_off = range.start;
+        input.sni_len = range.len();
+    }
+    input.segment_cap = usize::try_from(plan.segment_size).unwrap_or(0);
+    input.is_http = is_http;
+    Some(input)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PacketDecision {
+    Accept,
+    Drop,
+    Refused {
+        plan_id: [u8; 16],
+    },
+    Replace(Vec<u8>),
+    Transmit {
+        packets: Vec<WirePacket>,
+        fate: OriginalFate,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WirePacket {
+    pub packet: Vec<u8>,
+    pub kind: EmitKind,
+    pub delay_us: u32,
+}
+
+/// Применить план без состояния потока. Планы с защитами проходят без изменений;
+/// для них демон должен использовать [`decide_with_session`].
+pub fn decide(plan: &Plan, packet: &[u8]) -> PacketDecision {
+    if plan.guards & GUARD_RST_ALIEN != 0 {
+        return PacketDecision::Accept;
+    }
+    decide_packet(plan, packet)
+}
+
+fn decide_packet(plan: &Plan, packet: &[u8]) -> PacketDecision {
+    let Some(view) = PacketView::parse(packet) else {
+        return PacketDecision::Accept;
+    };
+    if view.protocol == 6 {
+        return decide_tcp(plan, packet, &view);
+    }
+    if view.protocol != 17 {
+        return PacketDecision::Accept;
+    }
+    let Some(payload_range) = view.udp_payload_range(packet) else {
+        return PacketDecision::Accept;
+    };
+    let payload = &packet[payload_range.clone()];
+
+    if plan.transport == 17 && plan.proto == PROTO_VOICE {
+        return decide_voice(plan, packet, &view, payload);
+    }
+
+    if plan.qdeny != 0 {
+        return if is_authenticated_initial(payload) {
+            PacketDecision::Drop
+        } else {
+            PacketDecision::Accept
+        };
+    }
+    let clearance = plan.r2k_is_quic_clearance_probe();
+    let ttl_probe = plan.r2k_is_quic_ttl_probe() || plan.r2k_is_quic_fallback_ttl_probe();
+    let length_probe = plan.r2k_is_quic_udp_length_probe();
+    let fragment_probe = plan.r2k_is_quic_ipfrag_plan();
+    let fake_probe = plan.r2k_is_quic_fake_probe();
+    if plan.qsplit == 0
+        && !length_probe
+        && !clearance
+        && !ttl_probe
+        && !fragment_probe
+        && !fake_probe
+    {
+        return PacketDecision::Accept;
+    }
+    if (plan.qsplit != 0 || length_probe || clearance || ttl_probe || fragment_probe || fake_probe)
+        && !is_authenticated_initial(payload)
+    {
+        return PacketDecision::Accept;
+    }
+
+    let mut input = PacketInput::new(payload, 0);
+    input.own_after_fakes = clearance;
+    let Ok(actions) = plan.apply(&input) else {
+        return PacketDecision::Refused { plan_id: plan.id };
+    };
+    if fragment_probe {
+        if actions.emits.len() != 1 || actions.emits[0].ipfrag != plan.ipfrag {
+            return PacketDecision::Accept;
+        }
+        let emission = &actions.emits[0];
+        let Some(fragments) = r2k_core::wire::build_udp_fragments(packet, emission) else {
+            return PacketDecision::Accept;
+        };
+        let packets = fragments
+            .into_iter()
+            .map(|packet| WirePacket {
+                packet,
+                kind: emission.kind,
+                delay_us: emission.delay_us,
+            })
+            .collect();
+        return PacketDecision::Transmit {
+            packets,
+            fate: actions.fate,
+        };
+    }
+    if actions.emits.len() == 1
+        && !fake_probe
+        && (plan.udplen != 0 || actions.emits[0].bytes.len() == payload.len())
+    {
+        let Some(replacement) =
+            replace_udp_payload(packet, &view, &payload_range, &actions.emits[0].bytes)
+        else {
+            return PacketDecision::Accept;
+        };
+        return PacketDecision::Replace(replacement);
+    }
+    if (!clearance && !ttl_probe && !fake_probe)
+        || actions.emits.is_empty()
+        || ((!fake_probe) && actions.emits.len() != 2)
+    {
+        return PacketDecision::Accept;
+    }
+    let mut packets = Vec::with_capacity(actions.emits.len());
+    for emission in &actions.emits {
+        let mut wire = vec![0; emission.bytes.len().saturating_add(48)];
+        let Some(length) = r2k_core::wire::build_udp_packet(packet, emission, &mut wire) else {
+            return PacketDecision::Accept;
+        };
+        wire.truncate(length);
+        packets.push(WirePacket {
+            packet: wire,
+            kind: emission.kind,
+            delay_us: emission.delay_us,
+        });
+    }
+    PacketDecision::Transmit {
+        packets,
+        fate: actions.fate,
+    }
+}
+
+fn decide_voice(plan: &Plan, packet: &[u8], view: &PacketView, payload: &[u8]) -> PacketDecision {
+    let Some(destination_port) = packet
+        .get(view.l4_offset + 2..view.l4_offset + 4)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u16::from_be_bytes)
+    else {
+        return PacketDecision::Accept;
+    };
+    if !r2k_core::stun::is_discord_voice_request(payload, destination_port) {
+        return PacketDecision::Accept;
+    }
+    let Ok(actions) = plan.apply(&PacketInput::new(payload, 0)) else {
+        return PacketDecision::Refused { plan_id: plan.id };
+    };
+    if actions.emits.is_empty() {
+        return if actions.fate == OriginalFate::Drop {
+            PacketDecision::Drop
+        } else {
+            PacketDecision::Accept
+        };
+    }
+
+    let mut packets = Vec::with_capacity(actions.emits.len());
+    for emission in &actions.emits {
+        let mut wire = vec![0; emission.bytes.len().saturating_add(48)];
+        let Some(length) = r2k_core::wire::build_udp_packet(packet, emission, &mut wire) else {
+            return PacketDecision::Accept;
+        };
+        wire.truncate(length);
+        packets.push(WirePacket {
+            packet: wire,
+            kind: emission.kind,
+            delay_us: emission.delay_us,
+        });
+    }
+    PacketDecision::Transmit {
+        packets,
+        fate: actions.fate,
+    }
+}
+
+fn decide_tcp(plan: &Plan, packet: &[u8], view: &PacketView) -> PacketDecision {
+    let Some(input) = tcp_plan_input(plan, packet, view) else {
+        return PacketDecision::Accept;
+    };
+
+    let Ok(actions) = plan.apply(&input) else {
+        return PacketDecision::Refused { plan_id: plan.id };
+    };
+    if actions.emits.is_empty() {
+        return if actions.fate == OriginalFate::Drop {
+            PacketDecision::Drop
+        } else {
+            PacketDecision::Accept
+        };
+    }
+    let Some(max_packet_len) = actions
+        .emits
+        .iter()
+        .filter_map(|emission| {
+            emission
+                .prefix
+                .len()
+                .checked_add(emission.bytes.len())?
+                .checked_add(100)
+        })
+        .max()
+    else {
+        return PacketDecision::Accept;
+    };
+    let mut buffer = vec![0; max_packet_len];
+    let mut packets = Vec::with_capacity(actions.emits.len());
+    for emission in &actions.emits {
+        let Some(len) = r2k_core::wire::build_tcp_packet(packet, emission, &mut buffer) else {
+            return PacketDecision::Accept;
+        };
+        packets.push(WirePacket {
+            packet: buffer[..len].to_vec(),
+            kind: emission.kind,
+            delay_us: emission.delay_us,
+        });
+    }
+    PacketDecision::Transmit {
+        packets,
+        fate: actions.fate,
+    }
+}
+
+fn replace_udp_payload(
+    packet: &[u8],
+    view: &PacketView,
+    payload_range: &std::ops::Range<usize>,
+    replacement: &[u8],
+) -> Option<Vec<u8>> {
+    if view.total_len > packet.len() || payload_range.end != view.total_len {
+        return None;
+    }
+    let udp_len = replacement.len().checked_add(8)?;
+    let udp_len_field = u16::try_from(udp_len).ok()?;
+    let total_len = view.l4_offset.checked_add(udp_len)?;
+    let mut output = packet[..payload_range.start].to_vec();
+    output.extend_from_slice(replacement);
+    if total_len != view.total_len {
+        match view.family {
+            4 => {
+                let total_len_field = u16::try_from(total_len).ok()?;
+                output
+                    .get_mut(2..4)?
+                    .copy_from_slice(&total_len_field.to_be_bytes());
+                update_ipv4_checksum(&mut output, view.l4_offset)?;
+            }
+            6 => {
+                let payload_len = u16::try_from(total_len.checked_sub(40)?).ok()?;
+                output
+                    .get_mut(4..6)?
+                    .copy_from_slice(&payload_len.to_be_bytes());
+            }
+            _ => return None,
+        }
+        output
+            .get_mut(view.l4_offset + 4..view.l4_offset + 6)?
+            .copy_from_slice(&udp_len_field.to_be_bytes());
+    }
+    let updated_view = PacketView::parse(&output)?;
+    update_udp_checksum(&mut output, &updated_view)?;
+    Some(output)
+}
+
+fn update_ipv4_checksum(packet: &mut [u8], header_len: usize) -> Option<()> {
+    if header_len < 20 || header_len > packet.len() {
+        return None;
+    }
+    packet.get_mut(10..12)?.fill(0);
+    let checksum = finish_checksum(sum_words(&packet[..header_len], 0));
+    packet[10..12].copy_from_slice(&checksum.to_be_bytes());
+    Some(())
+}
+
+fn update_udp_checksum(packet: &mut [u8], view: &PacketView) -> Option<()> {
+    let udp_start = view.l4_offset;
+    let udp_len = view.total_len.checked_sub(udp_start)?;
+    if udp_len < 8 || udp_len > u16::MAX as usize || view.total_len > packet.len() {
+        return None;
+    }
+    packet.get_mut(udp_start + 6..udp_start + 8)?.fill(0);
+    let mut sum = 0u64;
+    match view.family {
+        4 => {
+            sum = sum_words(packet.get(12..20)?, sum);
+            sum += 17;
+            sum += udp_len as u64;
+        }
+        6 => {
+            sum = sum_words(packet.get(8..40)?, sum);
+            sum += ((udp_len as u32) >> 16) as u64;
+            sum += (udp_len as u32 & 0xffff) as u64;
+            sum += 17;
+        }
+        _ => return None,
+    }
+    sum = sum_words(packet.get(udp_start..udp_start + udp_len)?, sum);
+    let checksum = finish_checksum(sum);
+    packet[udp_start + 6..udp_start + 8].copy_from_slice(&checksum.to_be_bytes());
+    Some(())
+}
+
+fn sum_words(bytes: &[u8], mut sum: u64) -> u64 {
+    let mut offset = 0;
+    while offset + 1 < bytes.len() {
+        sum += u64::from(u16::from_be_bytes([bytes[offset], bytes[offset + 1]]));
+        offset += 2;
+    }
+    if offset < bytes.len() {
+        sum += u64::from(bytes[offset]) << 8;
+    }
+    sum
+}
+
+fn finish_checksum(mut sum: u64) -> u16 {
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    let checksum = !(sum as u16);
+    if checksum == 0 { 0xffff } else { checksum }
+}
+
+pub fn validate_runtime_plan(plan: &Plan) -> Result<(), &'static str> {
+    if plan.transport == 17 && plan.proto == PROTO_VOICE {
+        if plan.qsplit != 0
+            || plan.qdeny != 0
+            || plan.ipfrag != 0
+            || plan.udplen != 0
+            || !plan.splits.is_empty()
+            || !plan.seq_overlays.is_empty()
+            || plan.oob_enabled
+            || plan.order != 0
+            || plan.segment_size != 0
+            || plan.wire_profile != 0
+            || plan.input_tls
+            || plan.input_len != 0
+            || plan.input_sni_off != 0
+            || plan.input_sni_len != 0
+            || plan.guards != 0
+            || plan.poison_used() != 0
+            || plan.poisons.iter().any(|poison| poison.seq_shift != 0)
+            || plan
+                .fakes
+                .iter()
+                .any(|fake| fake.placement != 0 || fake.tls_mod != 0)
+        {
+            return Err(
+                "runtime исполняет только UDP voice fake-before планы без неподдерживаемых операций",
+            );
+        }
+        return Ok(());
+    }
+    if plan.r2k_is_quic_clearance_probe() {
+        return Ok(());
+    }
+    if plan.r2k_is_quic_ttl_probe() || plan.r2k_is_quic_fallback_ttl_probe() {
+        return Ok(());
+    }
+    if plan.r2k_is_quic_ipfrag_plan() {
+        return Ok(());
+    }
+    if plan.r2k_is_quic_fake_probe() {
+        if plan.order != 0
+            || plan.guards != 0
+            || plan.input_len != 0
+            || plan.input_sni_off != 0
+            || plan.input_sni_len != 0
+            || plan.input_tls
+            || plan.settle_us != 0
+            || plan.segment_size != 0
+            || plan.wire_profile != 0
+            || plan.oob_enabled
+            || plan.oob_anchor != 0
+            || plan.oob_byte != 0
+            || plan.pace_us != 0
+            || plan.delay_us != 0
+            || !plan.splits.is_empty()
+            || !plan.seq_overlays.is_empty()
+            || plan.poison_used() != 0
+            || plan.poisons.iter().any(|poison| poison.seq_shift != 0)
+            || plan
+                .fakes
+                .iter()
+                .any(|fake| fake.placement != 0 || fake.gap_us != 0 || fake.tls_mod != 0)
+        {
+            return Err("QUIC-приманка поддерживает отправку перед Initial без TCP-операций");
+        }
+        return Ok(());
+    }
+    if plan.guards != 0 && !(plan.transport == 6 && matches!(plan.proto, 1 | PROTO_HTTP)) {
+        return Err("TCP guards требуют TLS или HTTP плана с состоянием потока");
+    }
+    if plan.qsplit != 0 || plan.qdeny != 0 {
+        return Ok(());
+    }
+    if plan.r2k_is_quic_udp_length_probe() {
+        return Ok(());
+    }
+    if plan.transport == 6 && matches!(plan.proto, 1 | PROTO_HTTP) {
+        if plan.guards & !GUARD_RST_ALIEN != 0 {
+            return Err("runtime не поддерживает один из TCP guards этого плана");
+        }
+        if plan.poison_used() & POISON_IPID_ZERO != 0 {
+            return Err("Linux raw socket меняет нулевой IPv4 ID; такой poison не исполняется");
+        }
+        return Ok(());
+    }
+    Err("runtime исполняет UDP QUIC/udplen и пакетные TCP TLS/HTTP планы")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        PacketDecision, R2oTcpFlowMetrics, TcpSessions, decide, decide_with_session,
+        validate_runtime_plan,
+    };
+    #[cfg(target_os = "linux")]
+    use crate::conntrack::R2oConntrackInfo;
+    use r2k_core::packet::PacketView;
+    use r2k_core::plan::{EmitKind, OriginalFate, Plan};
+    use std::time::{Duration, Instant};
+
+    const V1_INITIAL: &[u8] = include_bytes!("../../r2k-core/tests/fixtures/quic_v1_initial.bin");
+    const V2_INITIAL: &[u8] = include_bytes!("../../r2k-core/tests/fixtures/quic_v2_initial.bin");
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tcp_обнаруживает_зависший_поток_только_после_трёх_пакетов_и_двух_секунд() {
+        let mut sessions = TcpSessions::default();
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        sessions.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start);
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+            start + Duration::from_millis(50),
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(
+                client,
+                server,
+                0x18,
+                64,
+                701,
+                &client_hello_with_sni_and_large_extension(),
+            ),
+            start + Duration::from_millis(100),
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x18, 124, 900, &[1, 2, 3]),
+            start + Duration::from_millis(200),
+        );
+        let probe = sessions.tcp_stall_candidates().pop().unwrap();
+        let baseline = R2oConntrackInfo {
+            original_packets: 10,
+            reply_packets: 25,
+            tcp_state: Some(3),
+        };
+        assert_eq!(
+            sessions.update_tcp_stall(start + Duration::from_secs(1), &probe.key, baseline),
+            None
+        );
+        assert_eq!(
+            sessions.update_tcp_stall(
+                start + Duration::from_secs(3),
+                &probe.key,
+                R2oConntrackInfo {
+                    original_packets: 12,
+                    ..baseline
+                },
+            ),
+            None
+        );
+        let event = sessions
+            .update_tcp_stall(
+                start + Duration::from_millis(3100),
+                &probe.key,
+                R2oConntrackInfo {
+                    original_packets: 13,
+                    ..baseline
+                },
+            )
+            .unwrap();
+        assert_eq!(event.elapsed_ms, 2100);
+        assert_eq!(event.estimated_packets, 25);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tcp_определяет_клиента_по_hello_если_syn_не_попал_в_очередь() {
+        let mut sessions = TcpSessions::default();
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        sessions.track_packet(&ipv4_tcp_packet(server, client, 0x10, 124, 900, &[]), start);
+        sessions.track_packet(
+            &ipv4_tcp_packet(
+                client,
+                server,
+                0x18,
+                64,
+                701,
+                &client_hello_with_sni_and_large_extension(),
+            ),
+            start + Duration::from_millis(50),
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x18, 124, 900, &[1, 2, 3]),
+            start + Duration::from_millis(100),
+        );
+
+        let probe = sessions.tcp_stall_candidates().pop().unwrap();
+        assert_eq!(probe.tuple.source_port, 41000);
+        assert_eq!(probe.tuple.destination_port, 443);
+    }
+
+    #[test]
+    fn tcp_считает_пакеты_и_байты_по_направлениям_и_сохраняет_их_при_syn() {
+        let mut sessions = TcpSessions::default();
+        let now = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+
+        sessions.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), now);
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+            now + Duration::from_millis(50),
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(client, server, 0x18, 64, 701, b"request"),
+            now + Duration::from_millis(100),
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x18, 124, 900, b"answer"),
+            now + Duration::from_millis(150),
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(client, server, 0x02, 64, 1200, &[]),
+            now + Duration::from_millis(200),
+        );
+
+        let key = sessions.flows.keys().next().unwrap().wire_key();
+        assert_eq!(
+            sessions.r2o_flow_metrics(&key),
+            Some(R2oTcpFlowMetrics {
+                forward_packets: 3,
+                reverse_packets: 2,
+                forward_bytes: 127,
+                reverse_bytes: 86,
+            })
+        );
+    }
+
+    #[test]
+    fn r2o_tcp_silence_uses_rtt_and_requires_visible_reverse_traffic() {
+        let mut sessions = TcpSessions::default();
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        sessions.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start);
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+            start + Duration::from_millis(50),
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello()),
+            start + Duration::from_millis(100),
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x10, 124, 900, &[]),
+            start + Duration::from_millis(200),
+        );
+
+        let deadline = start + Duration::from_millis(1100);
+        assert!(sessions.sweep_silent(deadline, false).is_empty());
+        let events = sessions.sweep_silent(deadline, true);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].elapsed_ms, 1000);
+        assert_eq!(events[0].key[37], 6);
+        sessions.mark_silent(&events[0].key);
+        assert!(
+            sessions
+                .sweep_silent(start + Duration::from_secs(10), true)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn r2o_tcp_silence_is_suppressed_by_server_payload_or_reset() {
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+
+        let mut replied = r2o_tcp_hello_flow(start, client, server);
+        replied.track_packet(
+            &ipv4_tcp_packet(server, client, 0x18, 124, 900, b"response"),
+            start + Duration::from_millis(250),
+        );
+        assert!(
+            replied
+                .sweep_silent(start + Duration::from_secs(5), true)
+                .is_empty()
+        );
+
+        let mut reset = r2o_tcp_hello_flow(start, client, server);
+        reset.track_packet(
+            &ipv4_tcp_packet(server, client, 0x14, 124, 900, &[]),
+            start + Duration::from_millis(250),
+        );
+        assert!(
+            reset
+                .sweep_silent(start + Duration::from_secs(5), true)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn r2o_tcp_silence_without_measured_rtt_waits_two_seconds() {
+        let mut sessions = TcpSessions::default();
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        sessions.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start);
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x10, 124, 900, &[]),
+            start + Duration::from_millis(50),
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello()),
+            start + Duration::from_millis(100),
+        );
+
+        assert!(
+            sessions
+                .sweep_silent(start + Duration::from_millis(2099), true)
+                .is_empty()
+        );
+        assert_eq!(
+            sessions
+                .sweep_silent(start + Duration::from_millis(2100), true)
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn tcp_повтор_fin_после_ответа_сохраняет_поток_и_создаёт_улику_один_раз() {
+        let plan = tcp_guard_only_plan();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+        );
+        let mut hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello());
+        hello[28..32].copy_from_slice(&901_u32.to_be_bytes());
+        decide_with_session(&mut sessions, &plan, &hello);
+        let application_data = [0x17, 0x03, 0x03, 0, 1, 0];
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x18, 124, 900, &application_data),
+        );
+
+        let fin_sequence = 701 + client_hello().len() as u32;
+        let fin = ipv4_tcp_packet(client, server, 0x11, 64, fin_sequence, &[]);
+        assert_eq!(
+            decide_with_session(&mut sessions, &plan, &fin),
+            PacketDecision::Accept
+        );
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions.fin_retry_candidates().is_empty());
+
+        assert_eq!(
+            decide_with_session(&mut sessions, &plan, &fin),
+            PacketDecision::Accept
+        );
+        let events = sessions.fin_retry_candidates();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].client_is_low);
+        assert_eq!(events[0].key[37], 6);
+        assert_eq!(
+            decide_with_session(&mut sessions, &plan, &fin),
+            PacketDecision::Accept
+        );
+        assert_eq!(sessions.fin_retry_candidates().len(), 1);
+
+        let key = events[0].key;
+        sessions.mark_fin_retry(&key);
+        assert!(sessions.fin_retry_candidates().is_empty());
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x11, 124, 906, &[]),
+        );
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn tcp_rst_после_tls_app_data_создаёт_наблюдение_для_обоих_направлений() {
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let application_data = [0x17, 0x03, 0x03, 0, 1, 0];
+
+        for (source, destination) in [(client, server), (server, client)] {
+            let mut sessions = TcpSessions::default();
+            sessions.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start);
+            sessions.track_packet(
+                &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+                start + Duration::from_millis(50),
+            );
+            sessions.track_packet(
+                &ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello()),
+                start + Duration::from_millis(100),
+            );
+            sessions.track_packet(
+                &ipv4_tcp_packet(server, client, 0x18, 124, 900, &application_data),
+                start + Duration::from_millis(200),
+            );
+            sessions.track_packet(
+                &ipv4_tcp_packet(source, destination, 0x14, 64, 1000, &[]),
+                start + Duration::from_millis(300),
+            );
+
+            let events = sessions.rst_after_app_candidates();
+            assert_eq!(events.len(), 1);
+            assert!(events[0].client_is_low);
+            assert_eq!(events[0].key[37], 6);
+        }
+    }
+
+    #[test]
+    fn tcp_rst_до_tls_app_data_не_создаёт_наблюдение_позднего_сброса() {
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        sessions.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start);
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+            start + Duration::from_millis(50),
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello()),
+            start + Duration::from_millis(100),
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(client, server, 0x14, 64, 1200, &[]),
+            start + Duration::from_millis(200),
+        );
+
+        assert!(sessions.rst_after_app_candidates().is_empty());
+    }
+
+    #[test]
+    fn tcp_подтверждение_после_server_hello_учитывает_все_видимые_байты() {
+        let plan = tcp_guard_only_plan();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+        );
+        let mut hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello());
+        hello[28..32].copy_from_slice(&901_u32.to_be_bytes());
+        decide_with_session(&mut sessions, &plan, &hello);
+
+        let mut server_hello = vec![0x16, 0x03, 0x03, 0, 42, 2, 0, 0, 38];
+        server_hello.extend_from_slice(&[0; 38]);
+        assert!(r2k_core::tls::parse(&server_hello).is_server_hello);
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x18, 124, 900, &server_hello),
+        );
+
+        let fin_sequence = 701 + client_hello().len() as u32;
+        let mut fin = ipv4_tcp_packet(client, server, 0x11, 64, fin_sequence, &[]);
+        fin[28..32].copy_from_slice(&(901_u32 + server_hello.len() as u32 + 1).to_be_bytes());
+        decide_with_session(&mut sessions, &plan, &fin);
+        decide_with_session(&mut sessions, &plan, &fin);
+        assert_eq!(sessions.fin_retry_candidates().len(), 1);
+
+        let mut boundary = TcpSessions::default();
+        decide_with_session(
+            &mut boundary,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]),
+        );
+        decide_with_session(
+            &mut boundary,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+        );
+        decide_with_session(&mut boundary, &plan, &hello);
+        decide_with_session(
+            &mut boundary,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x18, 124, 900, &server_hello),
+        );
+        let mut boundary_fin = ipv4_tcp_packet(client, server, 0x11, 64, fin_sequence, &[]);
+        boundary_fin[28..32].copy_from_slice(&(901_u32 + server_hello.len() as u32).to_be_bytes());
+        decide_with_session(&mut boundary, &plan, &boundary_fin);
+        assert!(boundary.is_empty());
+    }
+
+    #[test]
+    fn tcp_поток_после_fin_истекает_по_ограниченному_окну_повтора() {
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        sessions.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start);
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+            start + Duration::from_millis(50),
+        );
+        let mut hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello());
+        hello[28..32].copy_from_slice(&901_u32.to_be_bytes());
+        sessions.track_packet(&hello, start + Duration::from_millis(100));
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x18, 124, 900, &[0x17, 3, 3, 0, 1, 0]),
+            start + Duration::from_millis(200),
+        );
+        let fin_sequence = 701 + client_hello().len() as u32;
+        let (key, _, _, keep_open) = sessions
+            .track_packet(
+                &ipv4_tcp_packet(client, server, 0x11, 64, fin_sequence, &[]),
+                start + Duration::from_millis(300),
+            )
+            .unwrap();
+        assert!(keep_open);
+
+        assert_eq!(
+            sessions.expire(
+                start + Duration::from_millis(3299),
+                Duration::from_secs(120),
+            ),
+            0
+        );
+        assert!(sessions.flows.contains_key(&key));
+        assert_eq!(
+            sessions.expire(
+                start + Duration::from_millis(3300),
+                Duration::from_secs(120),
+            ),
+            1
+        );
+        assert!(sessions.is_empty());
+    }
+
+    fn r2o_tcp_hello_flow(
+        start: Instant,
+        client: ([u8; 4], u16),
+        server: ([u8; 4], u16),
+    ) -> TcpSessions {
+        let mut sessions = TcpSessions::default();
+        sessions.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start);
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+            start + Duration::from_millis(50),
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello()),
+            start + Duration::from_millis(100),
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x10, 124, 900, &[]),
+            start + Duration::from_millis(200),
+        );
+        sessions
+    }
+
+    #[test]
+    fn qsplit_replaces_only_quic_payload_and_recomputes_ipv4_udp_checksum() {
+        let plan = qsplit_plan();
+        let input = ipv4_udp(V1_INITIAL);
+        let original = input.clone();
+        let PacketDecision::Replace(output) = decide(&plan, &input) else {
+            panic!("valid IPv4 QUIC Initial should be replaced");
+        };
+        let view = PacketView::parse(&output).unwrap();
+        let payload = view.udp_payload_range(&output).unwrap();
+        let expected = r2k_core::quic::initial_split_crypto(V1_INITIAL).unwrap();
+        assert_eq!(&output[payload], expected);
+        assert_eq!(&output[..20], &input[..20]);
+        assert_eq!(&output[20..26], &input[20..26]);
+        assert_ne!(&output[26..28], &input[26..28]);
+        assert_udp_checksum_valid(&output);
+        assert_eq!(input, original);
+    }
+
+    #[test]
+    fn отказ_udp_исполнителя_сохраняет_идентификатор_плана() {
+        let plan = udplen_refusal_plan();
+        let decision = decide(&plan, &ipv4_udp(V1_INITIAL));
+
+        assert_eq!(
+            decision,
+            PacketDecision::Refused {
+                plan_id: [0x77; 16],
+            }
+        );
+    }
+
+    #[test]
+    fn qsplit_recomputes_mandatory_ipv6_udp_checksum() {
+        let plan = qsplit_plan();
+        let input = ipv6_udp(V2_INITIAL);
+        let PacketDecision::Replace(output) = decide(&plan, &input) else {
+            panic!("valid IPv6 QUIC Initial should be replaced");
+        };
+        let view = PacketView::parse(&output).unwrap();
+        let payload = view.udp_payload_range(&output).unwrap();
+        assert_eq!(
+            &output[payload],
+            r2k_core::quic::initial_split_crypto(V2_INITIAL)
+                .unwrap()
+                .as_slice()
+        );
+        assert_udp_checksum_valid(&output);
+    }
+
+    #[test]
+    fn ipv4_quic_ipfrag_emits_the_selected_fragment_shape_and_drops_original() {
+        for shape in 1..=4 {
+            let plan = quic_ipfrag_plan(shape);
+            assert!(validate_runtime_plan(&plan).is_ok());
+            let input = ipv4_udp(V1_INITIAL);
+            let PacketDecision::Transmit { packets, fate } = decide(&plan, &input) else {
+                panic!("аутентичный QUIC Initial должен стать набором IP-фрагментов");
+            };
+            assert_eq!(fate, OriginalFate::Drop);
+            assert_eq!(packets.len(), if shape < 3 { 2 } else { 3 });
+            assert!(
+                packets
+                    .iter()
+                    .all(|packet| packet.kind == EmitKind::Payload && packet.delay_us == 0)
+            );
+            assert_eq!(
+                decide(&plan, &ipv4_udp(b"ordinary UDP")),
+                PacketDecision::Accept
+            );
+        }
+    }
+
+    #[test]
+    fn ipv6_quic_ipfrag_emits_the_selected_fragment_shape_and_drops_original() {
+        for shape in 1..=4 {
+            let plan = quic_ipfrag_plan(shape);
+            let input = ipv6_udp(V2_INITIAL);
+            let PacketDecision::Transmit { packets, fate } = decide(&plan, &input) else {
+                panic!("аутентичный QUIC Initial IPv6 должен дать IP-фрагменты");
+            };
+            assert_eq!(fate, OriginalFate::Drop);
+            assert_eq!(packets.len(), if shape < 3 { 2 } else { 3 });
+            assert!(packets.iter().all(|packet| packet.packet[6] == 44));
+        }
+    }
+
+    #[test]
+    fn qdeny_only_drops_an_authenticated_quic_initial() {
+        let plan =
+            Plan::parse(&plan_bytes(11, &[tlv(0x0002, &[17, 2]), tlv(0x0110, &[1])])).unwrap();
+        assert!(validate_runtime_plan(&plan).is_ok());
+        assert_eq!(decide(&plan, &ipv4_udp(V1_INITIAL)), PacketDecision::Drop);
+        assert_eq!(
+            decide(&plan, &ipv4_udp(b"ordinary UDP")),
+            PacketDecision::Accept
+        );
+
+        let mut corrupted = V1_INITIAL.to_vec();
+        corrupted[600] ^= 1;
+        assert_eq!(decide(&plan, &ipv4_udp(&corrupted)), PacketDecision::Accept);
+    }
+
+    #[test]
+    fn discord_voice_plan_sends_udp_fake_before_accepting_the_original() {
+        let plan = Plan::parse(&plan_bytes(
+            1,
+            &[
+                tlv(0x0002, &[17, 3]),
+                tlv(0x0010, &[0, 1, b'F', b'A', b'K', b'E']),
+                tlv(0x0011, &[0, 1, 2, 0, 0, 0, 0, 0]),
+                tlv(0x0101, &[0, 1, 0, 1, 1, 0, 0, 0, 0, 0]),
+            ],
+        ))
+        .unwrap();
+        assert!(validate_runtime_plan(&plan).is_ok());
+
+        let mut stun = [0; 20];
+        stun[..8].copy_from_slice(&[0, 1, 0, 0, 0x21, 0x12, 0xa4, 0x42]);
+        let mut input = ipv4_udp(&stun);
+        input[22..24].copy_from_slice(&50004_u16.to_be_bytes());
+        let PacketDecision::Transmit { packets, fate } = decide(&plan, &input) else {
+            panic!("Discord voice Binding request should produce its configured fake");
+        };
+        assert_eq!(fate, OriginalFate::Pass);
+        assert_eq!(packets.len(), 1);
+        let fake = &packets[0].packet;
+        let view = PacketView::parse(fake).unwrap();
+        let payload = view.udp_payload_range(fake).unwrap();
+        assert_eq!(&fake[payload], b"FAKE");
+        assert_eq!(
+            fake[8], 2,
+            "configured poison TTL must reach the wire packet"
+        );
+        assert_eq!(&fake[20..24], &input[20..24]);
+        assert_udp_checksum_valid(fake);
+        assert_eq!(
+            decide(&plan, &input),
+            PacketDecision::Transmit {
+                packets: packets.clone(),
+                fate: OriginalFate::Pass,
+            }
+        );
+
+        input[22..24].copy_from_slice(&3478_u16.to_be_bytes());
+        assert_eq!(decide(&plan, &input), PacketDecision::Accept);
+
+        let mut input_v6 = ipv6_udp(&stun);
+        input_v6[42..44].copy_from_slice(&50004_u16.to_be_bytes());
+        let PacketDecision::Transmit { packets, .. } = decide(&plan, &input_v6) else {
+            panic!("IPv6 Discord voice request should produce its configured fake");
+        };
+        let fake_v6 = &packets[0].packet;
+        let view = PacketView::parse(fake_v6).unwrap();
+        assert_eq!(view.family, 6);
+        assert_eq!(fake_v6[7], 2);
+        assert_udp_checksum_valid(fake_v6);
+    }
+
+    #[test]
+    fn udplen_appends_zeroes_and_updates_ipv4_and_udp_lengths_and_checksums() {
+        let plan = udplen_plan(7);
+        assert!(validate_runtime_plan(&plan).is_ok());
+        let input = ipv4_udp(V1_INITIAL);
+        let original = input.clone();
+        let PacketDecision::Replace(output) = decide(&plan, &input) else {
+            panic!("udplen plan should replace the authenticated QUIC Initial");
+        };
+        let view = PacketView::parse(&output).unwrap();
+        let payload = view.udp_payload_range(&output).unwrap();
+        assert_eq!(&output[payload.clone()][..V1_INITIAL.len()], V1_INITIAL);
+        assert_eq!(&output[payload][V1_INITIAL.len()..], &[0; 7]);
+        assert_eq!(view.total_len, 20 + 8 + V1_INITIAL.len() + 7);
+        assert_eq!(
+            u16::from_be_bytes([output[2], output[3]]) as usize,
+            output.len()
+        );
+        assert_eq!(
+            u16::from_be_bytes([output[view.l4_offset + 4], output[view.l4_offset + 5]]) as usize,
+            8 + V1_INITIAL.len() + 7
+        );
+        assert_ipv4_checksum_valid(&output, view.l4_offset);
+        assert_udp_checksum_valid(&output);
+        assert_eq!(input, original);
+    }
+
+    #[test]
+    fn udplen_updates_ipv6_payload_length_and_mandatory_udp_checksum() {
+        let plan = udplen_plan(3);
+        let input = ipv6_udp(V1_INITIAL);
+        let PacketDecision::Replace(output) = decide(&plan, &input) else {
+            panic!("udplen plan should replace the authenticated QUIC Initial");
+        };
+        let view = PacketView::parse(&output).unwrap();
+        let payload = view.udp_payload_range(&output).unwrap();
+        assert_eq!(&output[payload.clone()][..V1_INITIAL.len()], V1_INITIAL);
+        assert_eq!(&output[payload][V1_INITIAL.len()..], &[0; 3]);
+        assert_eq!(
+            usize::from(u16::from_be_bytes([output[4], output[5]])),
+            output.len() - 40
+        );
+        assert_eq!(
+            u16::from_be_bytes([output[view.l4_offset + 4], output[view.l4_offset + 5]]) as usize,
+            8 + V1_INITIAL.len() + 3
+        );
+        assert_udp_checksum_valid(&output);
+    }
+
+    #[test]
+    fn runtime_rejects_udplen_plans_that_need_multiple_raw_sends() {
+        let fake = [0, 1, 0, 0, 1, 0, 0, 0, 0, 0];
+        let plan = Plan::parse(&plan_bytes(
+            9,
+            &[
+                tlv(0x0002, &[17, 2]),
+                tlv(0x0010, &[0, 1, b'x']),
+                tlv(0x0101, &fake),
+                tlv(0x010e, &3_u16.to_be_bytes()),
+            ],
+        ))
+        .unwrap();
+        assert!(validate_runtime_plan(&plan).is_err());
+        assert_eq!(decide(&plan, &ipv4_udp(b"payload")), PacketDecision::Accept);
+    }
+
+    #[test]
+    fn r2o_безобидная_датаграмма_идёт_перед_quic_initial() {
+        let plan = r2o_quic_clearance_plan();
+        assert!(validate_runtime_plan(&plan).is_ok());
+
+        let input = ipv4_udp(V1_INITIAL);
+        let PacketDecision::Transmit { packets, fate } = decide(&plan, &input) else {
+            panic!("QUIC clearance should send a benign datagram before the Initial");
+        };
+        assert_eq!(fate, OriginalFate::Drop);
+        assert_eq!(packets.len(), 2);
+        assert_eq!(packets[0].kind, EmitKind::Fake);
+        assert_eq!(packets[1].kind, EmitKind::Payload);
+        for (packet, expected) in [
+            (&packets[0].packet, &[0; 16][..]),
+            (&packets[1].packet, V1_INITIAL),
+        ] {
+            let view = PacketView::parse(packet).unwrap();
+            let payload = view.udp_payload_range(packet).unwrap();
+            assert_eq!(&packet[payload], expected);
+            assert_udp_checksum_valid(packet);
+        }
+
+        assert_eq!(
+            decide(&plan, &ipv4_udp(b"later QUIC datagram")),
+            PacketDecision::Accept
+        );
+    }
+
+    #[test]
+    fn r2o_quic_ttl_probe_emits_two_exact_fakes_with_ttl_three() {
+        let plan = r2o_quic_ttl_probe_plan();
+        assert!(plan.r2k_is_quic_ttl_probe());
+        assert!(plan.r2k_is_quic_address_plan());
+        assert!(validate_runtime_plan(&plan).is_ok());
+
+        let input = ipv4_udp(V1_INITIAL);
+        let PacketDecision::Transmit { packets, fate } = decide(&plan, &input) else {
+            panic!("QUIC TTL-проба должна отправить две фальшивые датаграммы");
+        };
+        assert_eq!(fate, OriginalFate::Pass);
+        assert_eq!(packets.len(), 2);
+        for packet in &packets {
+            assert_eq!(packet.kind, EmitKind::Fake);
+            assert_eq!(packet.packet[8], 3);
+            let view = PacketView::parse(&packet.packet).unwrap();
+            let payload = view.udp_payload_range(&packet.packet).unwrap();
+            assert_eq!(
+                &packet.packet[payload],
+                r2k_core::plan::R2K_QUIC_TTL_PROBE_PAYLOAD
+            );
+            assert_udp_checksum_valid(&packet.packet);
+        }
+
+        assert_eq!(
+            decide(&plan, &ipv4_udp("не QUIC Initial".as_bytes())),
+            PacketDecision::Accept
+        );
+    }
+
+    #[test]
+    fn r2o_quic_резервная_ttl_лестница_разрешает_только_штатные_значения() {
+        let mut payload = vec![0, 1];
+        payload.extend_from_slice(r2k_core::plan::R2K_QUIC_TTL_PROBE_PAYLOAD);
+
+        for ttl in [5, 8, 12] {
+            let plan = Plan::parse(&plan_bytes(
+                10,
+                &[
+                    tlv(0x0002, &[17, 2]),
+                    tlv(0x0010, &payload),
+                    tlv(0x0011, &[0, 1, ttl, 0, 0, 0, 0, 0]),
+                    tlv(0x0101, &[0, 1, 0, 1, 2, 0, 0, 0, 0, 0]),
+                ],
+            ))
+            .unwrap();
+
+            assert!(plan.r2k_is_quic_address_plan());
+            assert!(validate_runtime_plan(&plan).is_ok());
+            let PacketDecision::Transmit { packets, .. } = decide(&plan, &ipv4_udp(V1_INITIAL))
+            else {
+                panic!("резервная QUIC-проба TTL должна отправить две приманки");
+            };
+            assert_eq!(packets.len(), 2);
+            assert!(packets.iter().all(|packet| packet.packet[8] == ttl));
+        }
+
+        let invalid = Plan::parse(&plan_bytes(
+            10,
+            &[
+                tlv(0x0002, &[17, 2]),
+                tlv(0x0010, &payload),
+                tlv(0x0011, &[0, 1, 4, 0, 0, 0, 0, 0]),
+                tlv(0x0101, &[0, 1, 0, 1, 2, 0, 0, 0, 0, 0]),
+            ],
+        ))
+        .unwrap();
+        assert!(!invalid.r2k_is_quic_address_plan());
+    }
+
+    #[test]
+    fn r2o_quic_приманки_и_адаптивный_разрез_выполняются_как_единое_испытание() {
+        let decoy = b"QUIC decoy";
+        let mut payload = vec![0, 1];
+        payload.extend_from_slice(decoy);
+        let plan = Plan::parse(&plan_bytes(
+            10,
+            &[
+                tlv(0x0002, &[17, 2]),
+                tlv(0x0010, &payload),
+                tlv(0x0101, &[0, 1, 0, 0, 1, 0, 0, 0, 0, 0]),
+            ],
+        ))
+        .unwrap();
+        assert!(plan.r2k_is_quic_address_plan());
+        assert!(validate_runtime_plan(&plan).is_ok());
+        let PacketDecision::Transmit { packets, fate } = decide(&plan, &ipv4_udp(V1_INITIAL))
+        else {
+            panic!("QUIC-проба должна отправить исходную приманку перед Initial");
+        };
+        assert_eq!(fate, OriginalFate::Pass);
+        assert_eq!(packets.len(), 1);
+        let view = PacketView::parse(&packets[0].packet).unwrap();
+        let range = view.udp_payload_range(&packets[0].packet).unwrap();
+        assert_eq!(&packets[0].packet[range], decoy);
+        assert_eq!(
+            decide(&plan, &ipv4_udp(b"ordinary UDP")),
+            PacketDecision::Accept
+        );
+
+        let mut default_payload = vec![0, 1];
+        default_payload.push(0x40);
+        default_payload.extend_from_slice(&[0; 619]);
+        let combined = Plan::parse(&plan_bytes(
+            10,
+            &[
+                tlv(0x0002, &[17, 2]),
+                tlv(0x0010, &default_payload),
+                tlv(0x010f, &[1]),
+                tlv(0x0101, &[0, 1, 0, 0, 11, 0, 0, 0, 0, 0]),
+            ],
+        ))
+        .unwrap();
+        assert!(validate_runtime_plan(&combined).is_ok());
+        let PacketDecision::Transmit { packets, fate } = decide(&combined, &ipv4_udp(V1_INITIAL))
+        else {
+            panic!("комбинация приманки и разреза CRYPTO должна дать пакетную серию");
+        };
+        assert_eq!(fate, OriginalFate::Drop);
+        assert_eq!(packets.len(), 12);
+        for packet in &packets[..11] {
+            let view = PacketView::parse(&packet.packet).unwrap();
+            let range = view.udp_payload_range(&packet.packet).unwrap();
+            assert_eq!(&packet.packet[range], &default_payload[2..]);
+            assert_udp_checksum_valid(&packet.packet);
+        }
+        let view = PacketView::parse(&packets[11].packet).unwrap();
+        let range = view.udp_payload_range(&packets[11].packet).unwrap();
+        assert_eq!(
+            &packets[11].packet[range],
+            r2k_core::quic::initial_split_crypto(V1_INITIAL).unwrap()
+        );
+        assert_udp_checksum_valid(&packets[11].packet);
+    }
+
+    #[test]
+    fn udplen_that_exceeds_the_ipv4_total_length_is_reported_as_refused() {
+        let plan = udplen_plan(u16::MAX);
+        let input = ipv4_udp(V1_INITIAL);
+        assert_eq!(
+            decide(&plan, &input),
+            PacketDecision::Refused { plan_id: [0; 16] }
+        );
+    }
+
+    #[test]
+    fn malformed_and_unsupported_packets_are_passed_through() {
+        let plan = qsplit_plan();
+        assert_eq!(decide(&plan, b"short"), PacketDecision::Accept);
+        assert_eq!(
+            decide(&plan, &ipv4_udp(b"not QUIC")),
+            PacketDecision::Accept
+        );
+        assert!(validate_runtime_plan(&Plan::default()).is_err());
+    }
+
+    #[test]
+    fn complete_tls_client_hello_becomes_a_wire_fake_and_keeps_the_original() {
+        let plan = tcp_fake_plan();
+        assert!(validate_runtime_plan(&plan).is_ok());
+        let input = ipv4_tcp(&client_hello(), 700);
+        let PacketDecision::Transmit { packets, fate } = decide(&plan, &input) else {
+            panic!("a complete TCP ClientHello should produce its configured fake");
+        };
+        assert_eq!(fate, OriginalFate::Pass);
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].kind, EmitKind::Fake);
+        let wire = &packets[0].packet;
+        let view = PacketView::parse(wire).unwrap();
+        let tcp = view.tcp_segment(wire).unwrap();
+        assert_eq!(tcp.sequence, 700);
+        assert_eq!(&wire[tcp.payload], b"FAKE");
+        assert!(r2k_core::wire::tcp_checksum_ok(wire));
+    }
+
+    #[test]
+    fn rst_alien_guard_profiles_the_reverse_ttl_and_keeps_the_flow_alive() {
+        let plan = tcp_fake_plan_with_rst_guard();
+        assert!(validate_runtime_plan(&plan).is_ok());
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        assert_eq!(
+            decide(&plan, &ipv4_tcp(&client_hello(), 700)),
+            PacketDecision::Accept,
+            "stateless callers cannot silently run a plan whose guard they cannot enforce",
+        );
+
+        assert_eq!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]),
+            ),
+            PacketDecision::Accept,
+        );
+        assert_eq!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+            ),
+            PacketDecision::Accept,
+        );
+        assert!(matches!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(client, server, 0x18, 64, 700, &client_hello()),
+            ),
+            PacketDecision::Transmit { .. }
+        ));
+
+        assert_eq!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(server, client, 0x14, 127, 900, &[]),
+            ),
+            PacketDecision::Drop,
+            "RST с TTL, отличным от первого ответа сервера, снимается",
+        );
+        assert_eq!(sessions.len(), 1, "снятый RST не закрывает поток");
+        assert_eq!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(server, client, 0x14, 124, 900, &[]),
+            ),
+            PacketDecision::Accept,
+            "настоящий RST с тем же TTL проходит",
+        );
+        assert_eq!(sessions.len(), 0, "настоящий RST закрывает поток");
+    }
+
+    #[test]
+    fn rst_alien_guard_после_tls_app_data_не_теряет_сигнал_объёма() {
+        let plan = tcp_fake_plan_with_rst_guard();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello()),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x18, 124, 900, &[0x17, 0x03, 0x03, 0, 1, 0]),
+        );
+
+        assert_eq!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(server, client, 0x14, 127, 900, &[]),
+            ),
+            PacketDecision::Drop,
+        );
+        let events = sessions.rst_after_app_candidates();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].client_is_low);
+        let key = events[0].key;
+        sessions.mark_rst_after_app(&key);
+        assert!(sessions.rst_after_app_candidates().is_empty());
+    }
+
+    #[test]
+    fn rst_alien_guard_does_not_apply_without_a_successful_plan() {
+        let plan = tcp_fake_plan();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+        );
+        assert!(matches!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(client, server, 0x18, 64, 700, &client_hello()),
+            ),
+            PacketDecision::Transmit { .. }
+        ));
+        assert_eq!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(server, client, 0x14, 127, 900, &[]),
+            ),
+            PacketDecision::Accept,
+            "план без guard не меняет судьбу входящего RST",
+        );
+        assert_eq!(sessions.len(), 0);
+    }
+
+    #[test]
+    fn rst_alien_guard_activates_for_a_valid_no_emission_plan() {
+        let plan = tcp_guard_only_plan();
+        assert!(validate_runtime_plan(&plan).is_ok());
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+        );
+        assert_eq!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(client, server, 0x18, 64, 700, &client_hello()),
+            ),
+            PacketDecision::Accept,
+            "guard-only plan leaves the original packet untouched",
+        );
+        assert_eq!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(server, client, 0x14, 127, 900, &[]),
+            ),
+            PacketDecision::Drop,
+            "successfully evaluated no-emission plan still installs its guard",
+        );
+    }
+
+    #[test]
+    fn tcp_session_table_expires_idle_flows_at_the_configured_boundary() {
+        let mut sessions = TcpSessions::default();
+        let now = Instant::now();
+        let packet = ipv4_tcp_packet(
+            ([192, 0, 2, 10], 41000),
+            ([198, 51, 100, 20], 443),
+            0x02,
+            64,
+            700,
+            &[],
+        );
+        sessions.track_packet(&packet, now).unwrap();
+        assert_eq!(
+            sessions.expire(now + Duration::from_secs(119), Duration::from_secs(120)),
+            0
+        );
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions.expire(now + Duration::from_secs(120), Duration::from_secs(120)),
+            1
+        );
+        assert_eq!(sessions.len(), 0);
+    }
+
+    #[test]
+    fn complete_http_request_splits_at_its_normalized_host_midpoint() {
+        let plan = http_split_plan();
+        let request = b"GET /p?q=1 HTTP/1.1\r\nHost: example.test:80\r\n\r\n";
+        let input = ipv4_tcp(request, 1000);
+        let PacketDecision::Transmit { packets, fate } = decide(&plan, &input) else {
+            panic!("a complete HTTP request should produce its configured split");
+        };
+        assert_eq!(fate, OriginalFate::Drop);
+        assert_eq!(packets.len(), 2);
+        let first = PacketView::parse(&packets[0].packet).unwrap();
+        let first_tcp = first.tcp_segment(&packets[0].packet).unwrap();
+        assert_eq!(
+            &packets[0].packet[first_tcp.payload.clone()],
+            &request[..33]
+        );
+        let second = PacketView::parse(&packets[1].packet).unwrap();
+        let second_tcp = second.tcp_segment(&packets[1].packet).unwrap();
+        assert_eq!(
+            &packets[1].packet[second_tcp.payload.clone()],
+            &request[33..]
+        );
+        assert_eq!(second_tcp.sequence, 1033);
+    }
+
+    #[test]
+    fn tcp_plan_over_wire_batch_limit_is_reported_as_refused() {
+        let plan = Plan::parse(&plan_bytes(
+            3,
+            &[
+                tlv(0x0002, &[6, 1]),
+                tlv(0x0100, &[0, 0, 0, 1]),
+                tlv(0x0108, &[0, 0, 0, 1]),
+            ],
+        ))
+        .unwrap();
+        let input = ipv4_tcp(&client_hello(), 700);
+
+        assert_eq!(
+            decide(&plan, &input),
+            PacketDecision::Refused { plan_id: [0; 16] }
+        );
+    }
+
+    #[test]
+    fn partial_tls_client_hello_can_split_at_its_complete_sni() {
+        let plan = Plan::parse(&plan_bytes(
+            2,
+            &[tlv(0x0002, &[6, 1]), tlv(0x0100, &[0, 5, 0, 0])],
+        ))
+        .unwrap();
+        let hello = client_hello_with_sni_and_large_extension();
+        let first_segment_len = 73;
+        let input = ipv4_tcp(&hello[..first_segment_len], 700);
+
+        let PacketDecision::Transmit { packets, fate } = decide(&plan, &input) else {
+            panic!("a complete SNI in a partial ClientHello should permit its split");
+        };
+        assert_eq!(fate, OriginalFate::Drop);
+        assert_eq!(packets.len(), 2);
+        let first = PacketView::parse(&packets[0].packet).unwrap();
+        let first_tcp = first.tcp_segment(&packets[0].packet).unwrap();
+        assert_eq!(first_tcp.payload.len(), 67);
+        let second = PacketView::parse(&packets[1].packet).unwrap();
+        let second_tcp = second.tcp_segment(&packets[1].packet).unwrap();
+        assert_eq!(second_tcp.sequence, 767);
+        assert_eq!(&packets[1].packet[second_tcp.payload.clone()], b"e.test");
+    }
+
+    #[test]
+    fn delayed_tcp_fakes_are_returned_with_their_relative_deadlines() {
+        let plan = Plan::parse(&plan_bytes(
+            0,
+            &[
+                tlv(0x0002, &[6, 1]),
+                tlv(0x0010, &[0, 1, b'F', b'A', b'K', b'E']),
+                tlv(0x0101, &[0, 1, 0, 0, 2, 0, 0, 1, 0x86, 0xa0]),
+            ],
+        ))
+        .unwrap();
+        assert!(validate_runtime_plan(&plan).is_ok());
+
+        let PacketDecision::Transmit { packets, fate } =
+            decide(&plan, &ipv4_tcp(&client_hello(), 700))
+        else {
+            panic!("delayed fake plan should produce a scheduled emission batch");
+        };
+        assert_eq!(fate, OriginalFate::Pass);
+        assert_eq!(packets.len(), 2);
+        assert_eq!(packets[0].delay_us, 0);
+        assert_eq!(packets[1].delay_us, 100_000);
+    }
+
+    fn qsplit_plan() -> Plan {
+        Plan::parse(&plan_bytes(10, &[tlv(0x0002, &[17, 2]), tlv(0x010f, &[1])])).unwrap()
+    }
+
+    fn udplen_refusal_plan() -> Plan {
+        Plan::parse(&plan_bytes(
+            9,
+            &[
+                tlv(0x0001, &[0x77; 16]),
+                tlv(0x0002, &[17, 2]),
+                tlv(0x010e, &u16::MAX.to_be_bytes()),
+            ],
+        ))
+        .unwrap()
+    }
+
+    fn quic_ipfrag_plan(shape: u8) -> Plan {
+        Plan::parse(&plan_bytes(
+            7,
+            &[tlv(0x0002, &[17, 2]), tlv(0x010c, &[shape])],
+        ))
+        .unwrap()
+    }
+
+    fn udplen_plan(increment: u16) -> Plan {
+        Plan::parse(&plan_bytes(
+            9,
+            &[tlv(0x0002, &[17, 2]), tlv(0x010e, &increment.to_be_bytes())],
+        ))
+        .unwrap()
+    }
+
+    fn r2o_quic_clearance_plan() -> Plan {
+        let mut payload = vec![0, 1];
+        payload.extend_from_slice(&[0; 16]);
+        Plan::parse(&plan_bytes(
+            10,
+            &[
+                tlv(0x0002, &[17, 2]),
+                tlv(0x0010, &payload),
+                tlv(0x0101, &[0, 1, 0, 0, 1, 0, 0, 0, 0, 0]),
+            ],
+        ))
+        .unwrap()
+    }
+
+    fn r2o_quic_ttl_probe_plan() -> Plan {
+        let mut payload = vec![0, 1];
+        payload.extend_from_slice(r2k_core::plan::R2K_QUIC_TTL_PROBE_PAYLOAD);
+        Plan::parse(&plan_bytes(
+            10,
+            &[
+                tlv(0x0002, &[17, 2]),
+                tlv(0x0010, &payload),
+                tlv(0x0011, &[0, 1, 3, 0, 0, 0, 0, 0]),
+                tlv(0x0101, &[0, 1, 0, 1, 2, 0, 0, 0, 0, 0]),
+            ],
+        ))
+        .unwrap()
+    }
+
+    fn tcp_fake_plan() -> Plan {
+        Plan::parse(&plan_bytes(
+            0,
+            &[
+                tlv(0x0002, &[6, 1]),
+                tlv(0x0010, &[0, 1, b'F', b'A', b'K', b'E']),
+                tlv(0x0101, &[0, 1, 0, 0, 1, 0, 0, 0, 0, 0]),
+            ],
+        ))
+        .unwrap()
+    }
+
+    fn tcp_fake_plan_with_rst_guard() -> Plan {
+        Plan::parse(&plan_bytes(
+            0,
+            &[
+                tlv(0x0002, &[6, 1]),
+                tlv(0x0010, &[0, 1, b'F', b'A', b'K', b'E']),
+                tlv(0x0101, &[0, 1, 0, 0, 1, 0, 0, 0, 0, 0]),
+                tlv(0x0104, &[1]),
+            ],
+        ))
+        .unwrap()
+    }
+
+    fn tcp_guard_only_plan() -> Plan {
+        Plan::parse(&plan_bytes(0, &[tlv(0x0002, &[6, 1]), tlv(0x0104, &[1])])).unwrap()
+    }
+
+    fn http_split_plan() -> Plan {
+        Plan::parse(&plan_bytes(
+            11,
+            &[tlv(0x0002, &[6, 4]), tlv(0x0100, &[0, 5, 0, 0])],
+        ))
+        .unwrap()
+    }
+
+    fn plan_bytes(minexec: u16, records: &[Vec<u8>]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&r2k_core::plan::PLAN_MAGIC);
+        bytes.extend_from_slice(&1_u16.to_be_bytes());
+        bytes.extend_from_slice(&minexec.to_be_bytes());
+        bytes.extend_from_slice(&0_u16.to_be_bytes());
+        bytes.extend_from_slice(&(records.len() as u16).to_be_bytes());
+        for record in records {
+            bytes.extend_from_slice(record);
+        }
+        bytes
+    }
+
+    fn tlv(kind: u16, value: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(4 + value.len());
+        bytes.extend_from_slice(&kind.to_be_bytes());
+        bytes.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(value);
+        bytes
+    }
+
+    fn ipv4_udp(payload: &[u8]) -> Vec<u8> {
+        let udp_len = 8 + payload.len();
+        let mut packet = vec![0; 20 + udp_len];
+        packet[0] = 0x45;
+        let ip_len = packet.len() as u16;
+        packet[2..4].copy_from_slice(&ip_len.to_be_bytes());
+        packet[4..6].copy_from_slice(&0x1234_u16.to_be_bytes());
+        packet[6..8].copy_from_slice(&0x4000_u16.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 17;
+        packet[12..16].copy_from_slice(&[192, 0, 2, 1]);
+        packet[16..20].copy_from_slice(&[198, 51, 100, 2]);
+        packet[20..22].copy_from_slice(&12345_u16.to_be_bytes());
+        packet[22..24].copy_from_slice(&443_u16.to_be_bytes());
+        packet[24..26].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        packet[28..].copy_from_slice(payload);
+        packet
+    }
+
+    fn ipv6_udp(payload: &[u8]) -> Vec<u8> {
+        let udp_len = 8 + payload.len();
+        let mut packet = vec![0; 40 + udp_len];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        packet[6] = 17;
+        packet[7] = 64;
+        packet[8..24].copy_from_slice(
+            &"2001:db8::1"
+                .parse::<std::net::Ipv6Addr>()
+                .unwrap()
+                .octets(),
+        );
+        packet[24..40].copy_from_slice(
+            &"2001:db8::2"
+                .parse::<std::net::Ipv6Addr>()
+                .unwrap()
+                .octets(),
+        );
+        packet[40..42].copy_from_slice(&12345_u16.to_be_bytes());
+        packet[42..44].copy_from_slice(&443_u16.to_be_bytes());
+        packet[44..46].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        packet[48..].copy_from_slice(payload);
+        packet
+    }
+
+    fn ipv4_tcp(payload: &[u8], sequence: u32) -> Vec<u8> {
+        ipv4_tcp_packet(
+            ([192, 0, 2, 10], 41000),
+            ([198, 51, 100, 20], 443),
+            0x18,
+            64,
+            sequence,
+            payload,
+        )
+    }
+
+    fn ipv4_tcp_packet(
+        source: ([u8; 4], u16),
+        destination: ([u8; 4], u16),
+        flags: u8,
+        ttl: u8,
+        sequence: u32,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut packet = vec![0; 40 + payload.len()];
+        packet[0] = 0x45;
+        let total_len = packet.len() as u16;
+        packet[2..4].copy_from_slice(&total_len.to_be_bytes());
+        packet[8] = ttl;
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&source.0);
+        packet[16..20].copy_from_slice(&destination.0);
+        packet[20..22].copy_from_slice(&source.1.to_be_bytes());
+        packet[22..24].copy_from_slice(&destination.1.to_be_bytes());
+        packet[24..28].copy_from_slice(&sequence.to_be_bytes());
+        packet[32] = 0x50;
+        packet[33] = flags;
+        packet[34..36].copy_from_slice(&4096u16.to_be_bytes());
+        packet[40..].copy_from_slice(payload);
+        packet
+    }
+
+    fn client_hello() -> Vec<u8> {
+        let mut hello = vec![0x16, 0x03, 0x03, 0, 47, 1, 0, 0, 43, 0x03, 0x03];
+        hello.extend_from_slice(&[0; 32]);
+        hello.extend_from_slice(&[0, 0, 2, 0x13, 1, 1, 0, 0, 0]);
+        hello
+    }
+
+    fn client_hello_with_sni_and_large_extension() -> Vec<u8> {
+        let host = b"example.test";
+        let mut sni_data = Vec::new();
+        sni_data.extend_from_slice(&((host.len() + 3) as u16).to_be_bytes());
+        sni_data.push(0);
+        sni_data.extend_from_slice(&(host.len() as u16).to_be_bytes());
+        sni_data.extend_from_slice(host);
+        let mut extensions = Vec::new();
+        extensions.extend_from_slice(&0_u16.to_be_bytes());
+        extensions.extend_from_slice(&(sni_data.len() as u16).to_be_bytes());
+        extensions.extend_from_slice(&sni_data);
+        extensions.extend_from_slice(&0x0015_u16.to_be_bytes());
+        extensions.extend_from_slice(&400_u16.to_be_bytes());
+        extensions.extend_from_slice(&[0x5a; 400]);
+
+        let mut body = vec![0x03, 0x03];
+        body.extend_from_slice(&[0; 32]);
+        body.extend_from_slice(&[0, 0, 2, 0x13, 1, 1, 0]);
+        body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        body.extend_from_slice(&extensions);
+
+        let mut handshake = vec![1];
+        handshake.extend_from_slice(&[
+            ((body.len() >> 16) & 0xff) as u8,
+            ((body.len() >> 8) & 0xff) as u8,
+            (body.len() & 0xff) as u8,
+        ]);
+        handshake.extend_from_slice(&body);
+        let mut record = vec![0x16, 0x03, 0x03];
+        record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+        record.extend_from_slice(&handshake);
+        record
+    }
+
+    fn assert_udp_checksum_valid(packet: &[u8]) {
+        let view = PacketView::parse(packet).unwrap();
+        let mut expected = packet.to_vec();
+        expected[view.l4_offset + 6..view.l4_offset + 8].fill(0);
+        super::update_udp_checksum(&mut expected, &view).unwrap();
+        assert_eq!(
+            &packet[view.l4_offset + 6..view.l4_offset + 8],
+            &expected[view.l4_offset + 6..view.l4_offset + 8]
+        );
+    }
+
+    fn assert_ipv4_checksum_valid(packet: &[u8], header_len: usize) {
+        let mut sum = 0_u64;
+        for word in packet[..header_len].chunks(2) {
+            sum += u64::from(u16::from_be_bytes([word[0], word[1]]));
+        }
+        while sum >> 16 != 0 {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+        assert_eq!(sum, 0xffff);
+    }
+}

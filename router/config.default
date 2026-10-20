@@ -1,0 +1,14 @@
+# Копировать только при первой установке; существующая конфигурация сохраняется при обновлении.
+SCHEMA=1
+MODE=apply
+STATE_DIR=/opt/r2o/state
+QUEUE_NUM=2000
+QUEUE_NUM6=2001
+IPV6_ENABLED=1
+MARK=45
+AUTOUPDATE=1
+FW_BACKEND=auto
+PANEL_LISTEN=127.0.0.1:8090
+TG_ENABLED=1
+TG_MODE=local
+# TG_PORT=1443

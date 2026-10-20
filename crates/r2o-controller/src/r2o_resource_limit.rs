@@ -1,0 +1,943 @@
+use std::collections::VecDeque;
+use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+const R2O_DEFAULT_MEASUREMENT_LIMIT: usize = 2;
+const R2O_MEASUREMENT_START_GAP_MS: u64 = 250;
+const R2O_CPU_SAMPLE_INTERVAL_MS: u64 = 1000;
+const R2O_CPU_EWMA_INTERVAL_MS: u64 = 10_000;
+const R2O_CPU_SHRINK_FREE: u64 = 250_000;
+const R2O_CPU_GROW_FREE: u64 = 400_000;
+const R2O_MEMORY_RESERVE_MIN_KB: u64 = 32 * 1024;
+const R2O_MEMORY_RESERVE_PERCENT: u64 = 20;
+const R2O_CONNTRACK_LIMIT_PERCENT: u64 = 60;
+const R2O_LIMIT_LOG_STABLE_MS: u64 = 10_000;
+const R2O_MEASUREMENT_LIMIT_CPU: u8 = 1;
+const R2O_MEASUREMENT_LIMIT_MEMORY: u8 = 2;
+const R2O_MEASUREMENT_LIMIT_CONNTRACK: u8 = 4;
+const R2O_MEASUREMENT_LIMIT_SLOTS: u8 = 8;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct R2oCpuCounters {
+    busy: u64,
+    total: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct R2oMemoryStats {
+    available_kb: u64,
+    total_kb: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct R2oConntrackStats {
+    count: u64,
+    max: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct R2oResourceReading {
+    cpu: Option<R2oCpuCounters>,
+    memory: Option<R2oMemoryStats>,
+    conntrack: Option<R2oConntrackStats>,
+}
+
+fn r2o_parse_cpu_stat(line: &str) -> Option<R2oCpuCounters> {
+    let fields = line.strip_prefix("cpu ")?;
+    let mut values = [0_u64; 8];
+    let mut count = 0;
+    for field in fields.split_whitespace().take(values.len()) {
+        values[count] = field.parse().ok()?;
+        count += 1;
+    }
+    if count < 4 {
+        return None;
+    }
+    let total = values[..count]
+        .iter()
+        .try_fold(0_u64, |sum, value| sum.checked_add(*value))?;
+    let idle = values[3].checked_add(values.get(4).copied().unwrap_or_default())?;
+    Some(R2oCpuCounters {
+        busy: total.checked_sub(idle)?,
+        total,
+    })
+}
+
+fn r2o_meminfo_field(text: &str, key: &str) -> Option<u64> {
+    text.lines().find_map(|line| {
+        line.strip_prefix(key)?
+            .strip_prefix(':')?
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()
+    })
+}
+
+fn r2o_parse_meminfo(text: &str) -> Option<R2oMemoryStats> {
+    let total_kb = r2o_meminfo_field(text, "MemTotal")?;
+    let available_kb = r2o_meminfo_field(text, "MemAvailable")?;
+    (total_kb > 0).then_some(R2oMemoryStats {
+        available_kb,
+        total_kb,
+    })
+}
+
+fn r2o_read_counter(path: &str) -> Option<u64> {
+    fs::read_to_string(path)
+        .ok()?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+impl R2oResourceReading {
+    fn r2o_read_proc() -> Self {
+        let cpu = fs::read_to_string("/proc/stat")
+            .ok()
+            .and_then(|text| text.lines().next().and_then(r2o_parse_cpu_stat));
+        let memory = fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|text| r2o_parse_meminfo(&text));
+        let conntrack = r2o_read_counter("/proc/sys/net/netfilter/nf_conntrack_count")
+            .zip(r2o_read_counter("/proc/sys/net/netfilter/nf_conntrack_max"))
+            .filter(|(_, max)| *max > 0)
+            .map(|(count, max)| R2oConntrackStats { count, max });
+        Self {
+            cpu,
+            memory,
+            conntrack,
+        }
+    }
+}
+
+struct R2oAdaptiveLimit {
+    max_slots: usize,
+    limit: usize,
+    grow_pending: bool,
+    cpu_previous: Option<R2oCpuCounters>,
+    cpu_free_u: Option<u64>,
+    cpu_try_ms: Option<u64>,
+    memory: Option<R2oMemoryStats>,
+    conntrack: Option<R2oConntrackStats>,
+    limiter: u8,
+    limit_since_ms: u64,
+    logged_valid: bool,
+    logged_limit: usize,
+    logged_limiter: u8,
+}
+
+impl R2oAdaptiveLimit {
+    fn new(max_slots: usize) -> Self {
+        let max_slots = max_slots.max(1);
+        let default_limit = R2O_DEFAULT_MEASUREMENT_LIMIT.min(max_slots);
+        Self {
+            max_slots,
+            limit: default_limit,
+            grow_pending: false,
+            cpu_previous: None,
+            cpu_free_u: None,
+            cpu_try_ms: None,
+            memory: None,
+            conntrack: None,
+            limiter: 0,
+            limit_since_ms: 0,
+            logged_valid: false,
+            logged_limit: default_limit,
+            logged_limiter: 0,
+        }
+    }
+
+    fn limit(&self) -> usize {
+        self.limit
+    }
+
+    fn r2o_sample(
+        &mut self,
+        now_ms: u64,
+        reading: R2oResourceReading,
+        active: usize,
+        queued: usize,
+    ) -> Option<String> {
+        let previous_limit = self.limit;
+        let previous_limiter = self.limiter;
+        let elapsed_ms = self
+            .cpu_try_ms
+            .map_or(0, |previous| now_ms.saturating_sub(previous).max(1));
+        self.cpu_try_ms = Some(now_ms);
+        self.memory = reading.memory.filter(|memory| memory.total_kb > 0);
+        self.conntrack = reading.conntrack.filter(|stats| stats.max > 0);
+
+        match reading.cpu {
+            Some(current) => {
+                if let Some(previous) = self.cpu_previous {
+                    if current.total > previous.total && current.busy >= previous.busy {
+                        let busy_delta = current.busy - previous.busy;
+                        let total_delta = current.total - previous.total;
+                        if busy_delta <= total_delta {
+                            let instant_free = 1_000_000
+                                - (u128::from(busy_delta) * 1_000_000 / u128::from(total_delta))
+                                    as u64;
+                            self.cpu_free_u = Some(match self.cpu_free_u {
+                                None => instant_free,
+                                Some(previous_free) => {
+                                    let delta =
+                                        i128::from(instant_free) - i128::from(previous_free);
+                                    let change = delta * i128::from(elapsed_ms)
+                                        / i128::from(elapsed_ms + R2O_CPU_EWMA_INTERVAL_MS);
+                                    (i128::from(previous_free) + change) as u64
+                                }
+                            });
+                        } else {
+                            self.cpu_free_u = None;
+                        }
+                    } else {
+                        self.cpu_free_u = None;
+                    }
+                } else {
+                    self.cpu_free_u = None;
+                }
+                self.cpu_previous = Some(current);
+            }
+            None => {
+                self.cpu_previous = None;
+                self.cpu_free_u = None;
+            }
+        }
+
+        let valid = self.cpu_free_u.is_some() && self.memory.is_some();
+        let cpu_free = self.cpu_free_u.unwrap_or_default();
+        let cpu_shrink = self
+            .cpu_free_u
+            .is_some_and(|free| free < R2O_CPU_SHRINK_FREE);
+        let cpu_hold = self
+            .cpu_free_u
+            .is_some_and(|free| !cpu_shrink && free < R2O_CPU_GROW_FREE);
+        let memory_short = self.memory.is_some_and(|memory| {
+            memory.available_kb
+                < R2O_MEMORY_RESERVE_MIN_KB.max(memory.total_kb * R2O_MEMORY_RESERVE_PERCENT / 100)
+        });
+        let conntrack_short = self.conntrack.is_some_and(|stats| {
+            u128::from(stats.count) * 100
+                >= u128::from(stats.max) * u128::from(R2O_CONNTRACK_LIMIT_PERCENT)
+        });
+
+        if !valid {
+            self.limit = R2O_DEFAULT_MEASUREMENT_LIMIT.min(self.max_slots);
+            self.grow_pending = false;
+        } else if cpu_shrink || memory_short || conntrack_short {
+            self.limit = (self.limit / 2).max(1);
+            self.grow_pending = false;
+        } else {
+            if !cpu_hold
+                && (self.grow_pending || (active >= self.limit && queued > 0))
+                && self.limit < self.max_slots
+            {
+                self.limit += 1;
+            }
+            self.grow_pending = false;
+        }
+
+        let mut limiter = 0;
+        if valid {
+            if cpu_shrink || cpu_hold {
+                limiter |= R2O_MEASUREMENT_LIMIT_CPU;
+            }
+            if memory_short {
+                limiter |= R2O_MEASUREMENT_LIMIT_MEMORY;
+            }
+            if conntrack_short {
+                limiter |= R2O_MEASUREMENT_LIMIT_CONNTRACK;
+            }
+            if limiter == 0 && self.limit >= self.max_slots {
+                limiter |= R2O_MEASUREMENT_LIMIT_SLOTS;
+            }
+        }
+        if self.limit != previous_limit || limiter != previous_limiter {
+            self.limit_since_ms = now_ms;
+        }
+        self.limiter = limiter;
+
+        if valid == self.logged_valid
+            && ((self.limit == self.logged_limit && limiter == self.logged_limiter)
+                || now_ms.saturating_sub(self.limit_since_ms) < R2O_LIMIT_LOG_STABLE_MS)
+        {
+            return None;
+        }
+        self.logged_valid = valid;
+        self.logged_limit = self.limit;
+        self.logged_limiter = limiter;
+        if !valid {
+            return Some(format!(
+                "замеров {active} из {} (нет данных о загрузке процессора и памяти — прежний предел)",
+                self.limit
+            ));
+        }
+
+        let reason = r2o_limiter_text(limiter);
+        let memory = self.memory.expect("проверенная память");
+        let conntrack = self
+            .conntrack
+            .map(|stats| format!("{} %", r2o_conntrack_percent(stats)))
+            .unwrap_or_else(|| "нет данных".into());
+        Some(format!(
+            "замеров {active} из {}, {}, процессор свободен {} %, память доступна {} МБ из {}, conntrack {conntrack}",
+            self.limit,
+            if reason.is_empty() {
+                "запас по всем ресурсам"
+            } else {
+                &reason
+            },
+            (cpu_free + 5000) / 10_000,
+            memory.available_kb / 1024,
+            memory.total_kb / 1024,
+        ))
+    }
+
+    fn r2o_mark_started(&mut self, active: usize) {
+        if active >= self.limit {
+            self.grow_pending = true;
+        }
+    }
+}
+
+fn r2o_conntrack_percent(stats: R2oConntrackStats) -> u64 {
+    if stats.count >= stats.max {
+        100
+    } else {
+        (u128::from(stats.count) * 100 / u128::from(stats.max)) as u64
+    }
+}
+
+fn r2o_limiter_text(limiter: u8) -> String {
+    [
+        (R2O_MEASUREMENT_LIMIT_CPU, "процессор"),
+        (R2O_MEASUREMENT_LIMIT_MEMORY, "память"),
+        (R2O_MEASUREMENT_LIMIT_CONNTRACK, "conntrack"),
+        (R2O_MEASUREMENT_LIMIT_SLOTS, "слоты"),
+    ]
+    .into_iter()
+    .filter_map(|(bit, name)| (limiter & bit != 0).then_some(name))
+    .collect::<Vec<_>>()
+    .join(" / ")
+}
+
+struct R2oGateState {
+    adaptive: R2oAdaptiveLimit,
+    active: usize,
+    waiters: VecDeque<u64>,
+    next_waiter: u64,
+    last_sample: Option<Instant>,
+    last_started: Option<Instant>,
+    scheduler_tick_seen: bool,
+}
+
+struct R2oGateShared {
+    state: Mutex<R2oGateState>,
+    changed: Condvar,
+    started: Instant,
+    minimum_start_gap: Option<Duration>,
+}
+
+#[derive(Clone)]
+pub struct R2oMeasurementGate {
+    shared: Arc<R2oGateShared>,
+}
+
+pub struct R2oMeasurementPermit {
+    shared: Arc<R2oGateShared>,
+}
+
+impl R2oMeasurementGate {
+    pub fn new(max_slots: usize) -> Self {
+        Self::r2o_new(max_slots, None)
+    }
+
+    pub fn r2o_with_start_gap(max_slots: usize) -> Self {
+        Self::r2o_new(
+            max_slots,
+            Some(Duration::from_millis(R2O_MEASUREMENT_START_GAP_MS)),
+        )
+    }
+
+    pub fn r2o_scheduler_tick(&self) {
+        if self.shared.minimum_start_gap.is_none() {
+            return;
+        }
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.scheduler_tick_seen {
+            return;
+        }
+        state.scheduler_tick_seen = true;
+        if state.last_started.is_some() {
+            state.last_started = Some(Instant::now());
+        }
+        self.shared.changed.notify_all();
+    }
+
+    fn r2o_new(max_slots: usize, minimum_start_gap: Option<Duration>) -> Self {
+        Self {
+            shared: Arc::new(R2oGateShared {
+                state: Mutex::new(R2oGateState {
+                    adaptive: R2oAdaptiveLimit::new(max_slots),
+                    active: 0,
+                    waiters: VecDeque::new(),
+                    next_waiter: 1,
+                    last_sample: None,
+                    last_started: None,
+                    scheduler_tick_seen: false,
+                }),
+                changed: Condvar::new(),
+                started: Instant::now(),
+                minimum_start_gap,
+            }),
+        }
+    }
+
+    pub fn r2o_try_acquire(&self) -> Option<R2oMeasurementPermit> {
+        self.r2o_refresh_if_due();
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let now = Instant::now();
+        if !state.waiters.is_empty()
+            || state.active >= state.adaptive.limit()
+            || (state.scheduler_tick_seen
+                && r2o_start_gap_remaining(state.last_started, now, self.shared.minimum_start_gap)
+                    .is_some())
+        {
+            return None;
+        }
+        state.active += 1;
+        state.last_started = Some(now);
+        let active = state.active;
+        state.adaptive.r2o_mark_started(active);
+        self.shared.changed.notify_all();
+        Some(R2oMeasurementPermit {
+            shared: Arc::clone(&self.shared),
+        })
+    }
+
+    pub fn r2o_acquire(&self, cancel: &AtomicBool) -> Option<R2oMeasurementPermit> {
+        let waiter = {
+            let mut state = self
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let waiter = state.next_waiter;
+            state.next_waiter = state.next_waiter.wrapping_add(1);
+            state.waiters.push_back(waiter);
+            waiter
+        };
+
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                let mut state = self
+                    .shared
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.waiters.retain(|queued| *queued != waiter);
+                self.shared.changed.notify_all();
+                return None;
+            }
+            self.r2o_refresh_if_due();
+            let mut state = self
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if cancel.load(Ordering::Relaxed) {
+                state.waiters.retain(|queued| *queued != waiter);
+                self.shared.changed.notify_all();
+                return None;
+            }
+            if state.waiters.front() == Some(&waiter) && state.active < state.adaptive.limit() {
+                let now = Instant::now();
+                if state.scheduler_tick_seen
+                    && let Some(delay) = r2o_start_gap_remaining(
+                        state.last_started,
+                        now,
+                        self.shared.minimum_start_gap,
+                    )
+                {
+                    let (state, _) = self
+                        .shared
+                        .changed
+                        .wait_timeout(state, delay.min(Duration::from_millis(100)))
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    drop(state);
+                    continue;
+                }
+                state.waiters.pop_front();
+                state.active += 1;
+                state.last_started = Some(now);
+                let active = state.active;
+                state.adaptive.r2o_mark_started(active);
+                self.shared.changed.notify_all();
+                return Some(R2oMeasurementPermit {
+                    shared: Arc::clone(&self.shared),
+                });
+            }
+            let (state, _) = self
+                .shared
+                .changed
+                .wait_timeout(state, Duration::from_millis(100))
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            drop(state);
+        }
+    }
+
+    fn r2o_refresh_if_due(&self) {
+        let now = Instant::now();
+        {
+            let mut state = self
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.last_sample.is_some_and(|last| {
+                now.saturating_duration_since(last)
+                    < Duration::from_millis(R2O_CPU_SAMPLE_INTERVAL_MS)
+            }) {
+                return;
+            }
+            state.last_sample = Some(now);
+        }
+
+        let reading = R2oResourceReading::r2o_read_proc();
+        let now_ms = now
+            .saturating_duration_since(self.shared.started)
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        let status = {
+            let mut state = self
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let active = state.active;
+            let queued = state.waiters.len();
+            let status = state.adaptive.r2o_sample(now_ms, reading, active, queued);
+            self.shared.changed.notify_all();
+            status
+        };
+        if let Some(status) = status {
+            println!("r2o-controller: {status}");
+        }
+    }
+}
+
+fn r2o_start_gap_remaining(
+    last_started: Option<Instant>,
+    now: Instant,
+    minimum_start_gap: Option<Duration>,
+) -> Option<Duration> {
+    let last_started = last_started?;
+    let minimum_start_gap = minimum_start_gap?;
+    let elapsed = now.saturating_duration_since(last_started);
+    (elapsed < minimum_start_gap).then(|| minimum_start_gap - elapsed)
+}
+
+impl Drop for R2oMeasurementPermit {
+    fn drop(&mut self) {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.active = state.active.saturating_sub(1);
+        self.shared.changed.notify_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        R2oAdaptiveLimit, R2oConntrackStats, R2oCpuCounters, R2oMeasurementGate, R2oMemoryStats,
+        R2oResourceReading, r2o_parse_cpu_stat, r2o_parse_meminfo,
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn r2o_разбор_cpu_исключает_idle_и_iowait() {
+        assert_eq!(
+            r2o_parse_cpu_stat("cpu  100 5 50 800 40 3 2 0 0 0\n"),
+            Some(R2oCpuCounters {
+                busy: 160,
+                total: 1000
+            }),
+        );
+        assert_eq!(r2o_parse_cpu_stat("cpu0 1 2 3 4\n"), None);
+        assert_eq!(r2o_parse_cpu_stat("cpu 1 2 3\n"), None);
+        assert_eq!(
+            r2o_parse_cpu_stat("cpu 1 2 3 4 18446744073709551616\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn r2o_разбор_meminfo_требует_memavailable_и_ненулевой_memtotal() {
+        assert_eq!(
+            r2o_parse_meminfo(
+                "MemTotal:         254000 kB\nMemFree: 10000 kB\nMemAvailable: 120000 kB\n"
+            ),
+            Some(R2oMemoryStats {
+                available_kb: 120000,
+                total_kb: 254000
+            }),
+        );
+        assert_eq!(
+            r2o_parse_meminfo("MemTotal: 254000 kB\nMemFree: 10000 kB\n"),
+            None
+        );
+        assert_eq!(
+            r2o_parse_meminfo("MemTotal: 0 kB\nMemAvailable: 1 kB\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn r2o_предел_растёт_по_одному_и_снижается_вдвое_при_нехватке_памяти() {
+        let mut limit = R2oAdaptiveLimit::new(4);
+        limit.r2o_sample(
+            0,
+            R2oResourceReading {
+                cpu: Some(R2oCpuCounters {
+                    busy: 100,
+                    total: 1000,
+                }),
+                memory: Some(R2oMemoryStats {
+                    available_kb: 400_000,
+                    total_kb: 512_000,
+                }),
+                conntrack: Some(R2oConntrackStats {
+                    count: 10,
+                    max: 100,
+                }),
+            },
+            0,
+            0,
+        );
+        assert_eq!(limit.limit(), 2);
+
+        limit.r2o_sample(
+            1000,
+            R2oResourceReading {
+                cpu: Some(R2oCpuCounters {
+                    busy: 200,
+                    total: 2000,
+                }),
+                memory: Some(R2oMemoryStats {
+                    available_kb: 400_000,
+                    total_kb: 512_000,
+                }),
+                conntrack: Some(R2oConntrackStats {
+                    count: 10,
+                    max: 100,
+                }),
+            },
+            2,
+            1,
+        );
+        assert_eq!(limit.limit(), 3);
+
+        limit.r2o_sample(
+            2000,
+            R2oResourceReading {
+                cpu: Some(R2oCpuCounters {
+                    busy: 300,
+                    total: 3000,
+                }),
+                memory: Some(R2oMemoryStats {
+                    available_kb: 100_000,
+                    total_kb: 512_000,
+                }),
+                conntrack: Some(R2oConntrackStats {
+                    count: 10,
+                    max: 100,
+                }),
+            },
+            3,
+            1,
+        );
+        assert_eq!(limit.limit(), 1);
+
+        limit.r2o_sample(
+            3000,
+            R2oResourceReading {
+                cpu: Some(R2oCpuCounters {
+                    busy: 400,
+                    total: 4000,
+                }),
+                memory: Some(R2oMemoryStats {
+                    available_kb: 400_000,
+                    total_kb: 512_000,
+                }),
+                conntrack: Some(R2oConntrackStats {
+                    count: 10,
+                    max: 100,
+                }),
+            },
+            1,
+            1,
+        );
+        assert_eq!(limit.limit(), 2);
+    }
+
+    #[test]
+    fn r2o_cpu_и_conntrack_ограничивают_новые_замеры() {
+        let mut limit = R2oAdaptiveLimit::new(4);
+        limit.r2o_sample(
+            0,
+            R2oResourceReading {
+                cpu: Some(R2oCpuCounters {
+                    busy: 100,
+                    total: 1000,
+                }),
+                memory: Some(R2oMemoryStats {
+                    available_kb: 400_000,
+                    total_kb: 512_000,
+                }),
+                conntrack: Some(R2oConntrackStats {
+                    count: 10,
+                    max: 100,
+                }),
+            },
+            0,
+            0,
+        );
+        limit.r2o_sample(
+            1000,
+            R2oResourceReading {
+                cpu: Some(R2oCpuCounters {
+                    busy: 900,
+                    total: 2000,
+                }),
+                memory: Some(R2oMemoryStats {
+                    available_kb: 400_000,
+                    total_kb: 512_000,
+                }),
+                conntrack: Some(R2oConntrackStats {
+                    count: 10,
+                    max: 100,
+                }),
+            },
+            2,
+            1,
+        );
+        assert_eq!(limit.limit(), 1);
+
+        let mut limit = R2oAdaptiveLimit::new(4);
+        limit.r2o_sample(
+            0,
+            R2oResourceReading {
+                cpu: Some(R2oCpuCounters {
+                    busy: 100,
+                    total: 1000,
+                }),
+                memory: Some(R2oMemoryStats {
+                    available_kb: 400_000,
+                    total_kb: 512_000,
+                }),
+                conntrack: Some(R2oConntrackStats {
+                    count: 10,
+                    max: 100,
+                }),
+            },
+            0,
+            0,
+        );
+        limit.r2o_sample(
+            1000,
+            R2oResourceReading {
+                cpu: Some(R2oCpuCounters {
+                    busy: 200,
+                    total: 2000,
+                }),
+                memory: Some(R2oMemoryStats {
+                    available_kb: 400_000,
+                    total_kb: 512_000,
+                }),
+                conntrack: Some(R2oConntrackStats {
+                    count: 60,
+                    max: 100,
+                }),
+            },
+            2,
+            1,
+        );
+        assert_eq!(limit.limit(), 1);
+    }
+
+    #[test]
+    fn r2o_полоса_cpu_от_двадцати_пяти_до_сорока_процентов_не_меняет_предел() {
+        let mut limit = R2oAdaptiveLimit::new(4);
+        let reading = |busy, total| R2oResourceReading {
+            cpu: Some(R2oCpuCounters { busy, total }),
+            memory: Some(R2oMemoryStats {
+                available_kb: 400_000,
+                total_kb: 512_000,
+            }),
+            conntrack: None,
+        };
+        limit.r2o_sample(0, reading(100, 1000), 0, 0);
+        limit.r2o_sample(1000, reading(800, 2000), 2, 1);
+        assert_eq!(limit.limit(), 2);
+        limit.r2o_sample(2000, reading(1500, 3000), 2, 1);
+        assert_eq!(limit.limit(), 2);
+    }
+
+    #[test]
+    fn r2o_conntrack_без_счётчика_не_ограничивает_замеры() {
+        let mut limit = R2oAdaptiveLimit::new(4);
+        let reading = |busy, total| R2oResourceReading {
+            cpu: Some(R2oCpuCounters { busy, total }),
+            memory: Some(R2oMemoryStats {
+                available_kb: 400_000,
+                total_kb: 512_000,
+            }),
+            conntrack: None,
+        };
+        limit.r2o_sample(0, reading(100, 1000), 0, 0);
+        limit.r2o_sample(1000, reading(200, 2000), 2, 1);
+        assert_eq!(limit.limit(), 3);
+    }
+
+    #[test]
+    fn r2o_причина_ограничения_журналируется_после_десяти_секунд_без_дребезга() {
+        let mut limit = R2oAdaptiveLimit::new(4);
+        let reading = |busy, total, available_kb| R2oResourceReading {
+            cpu: Some(R2oCpuCounters { busy, total }),
+            memory: Some(R2oMemoryStats {
+                available_kb,
+                total_kb: 512_000,
+            }),
+            conntrack: Some(R2oConntrackStats {
+                count: 10,
+                max: 100,
+            }),
+        };
+        assert!(
+            limit
+                .r2o_sample(0, reading(100, 1000, 400_000), 0, 0)
+                .is_none()
+        );
+        assert!(
+            limit
+                .r2o_sample(1000, reading(200, 2000, 400_000), 0, 0)
+                .is_some()
+        );
+        assert!(
+            limit
+                .r2o_sample(2000, reading(300, 3000, 100_000), 0, 0)
+                .is_none()
+        );
+        assert!(
+            limit
+                .r2o_sample(11_999, reading(400, 4000, 100_000), 0, 0)
+                .is_none()
+        );
+        assert!(
+            limit
+                .r2o_sample(12_000, reading(500, 5000, 100_000), 0, 0)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn r2o_ожидающий_замер_отменяется_без_удержания_слота() {
+        let gate = R2oMeasurementGate::new(1);
+        let held = gate.r2o_acquire(&AtomicBool::new(false)).unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
+        let worker_gate = gate.clone();
+        let (sender, receiver) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let acquired = worker_gate.r2o_acquire(&worker_cancel).is_some();
+            sender.send(acquired).unwrap();
+        });
+
+        std::thread::sleep(Duration::from_millis(30));
+        cancel.store(true, Ordering::Relaxed);
+        assert!(!receiver.recv_timeout(Duration::from_secs(2)).unwrap());
+        drop(held);
+        worker.join().unwrap();
+        assert!(gate.r2o_acquire(&AtomicBool::new(false)).is_some());
+    }
+
+    #[test]
+    fn r2o_неблокирующий_замер_уважает_предел_и_освобождение_слота() {
+        let gate = R2oMeasurementGate::new(1);
+        let first = gate.r2o_try_acquire().unwrap();
+        assert!(gate.r2o_try_acquire().is_none());
+        drop(first);
+        assert!(gate.r2o_try_acquire().is_some());
+    }
+
+    #[test]
+    fn r2o_ожидающие_старты_разделены_интервалом_в_250_мс() {
+        let gate = R2oMeasurementGate::r2o_with_start_gap(2);
+        let first_started = std::time::Instant::now();
+        let first = gate.r2o_try_acquire().unwrap();
+        gate.r2o_scheduler_tick();
+
+        assert!(gate.r2o_try_acquire().is_none());
+
+        let worker_gate = gate.clone();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let acquired = worker_gate.r2o_acquire(&AtomicBool::new(false)).is_some();
+            sender.send(acquired).unwrap();
+        });
+
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert_eq!(
+            gate.shared
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .active,
+            1
+        );
+        assert!(receiver.recv_timeout(Duration::from_secs(1)).unwrap());
+        assert!(first_started.elapsed() >= Duration::from_millis(250));
+
+        drop(first);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn r2o_до_первого_тика_разрешает_начальную_пачку_до_лимита() {
+        let gate = R2oMeasurementGate::r2o_with_start_gap(2);
+        let first = gate.r2o_try_acquire().unwrap();
+        let second = gate.r2o_try_acquire().unwrap();
+
+        assert!(gate.r2o_try_acquire().is_none());
+        drop(first);
+        let third = gate.r2o_try_acquire().unwrap();
+
+        gate.r2o_scheduler_tick();
+        drop(second);
+        drop(third);
+        assert!(gate.r2o_try_acquire().is_none());
+    }
+}

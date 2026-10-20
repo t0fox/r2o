@@ -1,0 +1,550 @@
+#!/bin/sh
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+PATH=/opt/sbin:/opt/bin:/opt/usr/sbin:/opt/usr/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+ROOT=${R2O_DIR:-/opt/r2o}
+CONF=${R2O_CONFIG:-$ROOT/config}
+INIT=${R2O_INIT:-/opt/etc/init.d/S99r2o}
+PROC=${R2O_PROC:-/proc}
+NFQUEUE_STATUS=${R2O_NFQUEUE_STATUS:-$PROC/net/netfilter/nfnetlink_queue}
+MANAGER=${R2O_MANAGER:-$ROOT/r2o-manager}
+RUN=$ROOT/run
+STATE=${STATE_DIR:-$ROOT/state}
+LOG=$ROOT/log
+RUNTIME=${R2O_RUNTIME_DIR:-/tmp/r2o}
+SOCK4=$RUN/r2o-datapath4.sock
+SOCK6=$RUN/r2o-datapath6.sock
+CATALOG=$STATE/catalog.json
+FIREWALL=${R2O_FIREWALL:-$SCRIPT_DIR/r2o-firewall.sh}
+DP4_PID=$RUN/r2o-datapath4.pid
+DP6_PID=$RUN/r2o-datapath6.pid
+CT4_PID=$RUN/r2o-controller4.pid
+CT6_PID=$RUN/r2o-controller6.pid
+PN_PID=$RUN/r2o-panel.pid
+QUEUE4=${QUEUE_NUM:-2000}
+QUEUE6=${QUEUE_NUM6:-2001}
+MODE=${MODE:-observe}
+MARK=${MARK:-45}
+IPV6_ENABLED=${IPV6_ENABLED:-1}
+PANEL_LISTEN=${PANEL_LISTEN:-127.0.0.1:8090}
+TG_ENABLED=${TG_ENABLED:-0}
+TG_MODE=${TG_MODE:-local}
+TG_PORT=${TG_PORT:-1443}
+TG_STATUS=${TG_STATUS:-$STATE/telegram.status}
+TG_STATS_SOCKET=${TG_STATS_SOCKET:-$STATE/telegram.stats.sock}
+TG_FIREWALL=${R2O_TG_FIREWALL:-$SCRIPT_DIR/r2o-tg-firewall.sh}
+TG_PID=$RUN/r2o-telegram.pid
+AUTOUPDATE=1
+UPDATER=$SCRIPT_DIR/r2o-update-scheduler.sh
+UPD_PID=$RUN/update-scheduler.pid
+
+[ ! -r "$CONF" ] || . "$CONF"
+STATE=${STATE_DIR:-$ROOT/state}
+QUEUE4=${QUEUE_NUM:-2000}
+QUEUE6=${QUEUE_NUM6:-2001}
+MODE=${MODE:-observe}
+MARK=${MARK:-45}
+IPV6_ENABLED=${IPV6_ENABLED:-1}
+PANEL_LISTEN=${PANEL_LISTEN:-127.0.0.1:8090}
+TG_ENABLED=${TG_ENABLED:-0}
+TG_MODE=${TG_MODE:-local}
+TG_PORT=${TG_PORT:-1443}
+TG_STATUS=${TG_STATUS:-$STATE/telegram.status}
+TG_STATS_SOCKET=${TG_STATS_SOCKET:-$STATE/telegram.stats.sock}
+TG_FIREWALL=${R2O_TG_FIREWALL:-$SCRIPT_DIR/r2o-tg-firewall.sh}
+TG_PID=$RUN/r2o-telegram.pid
+UPDATER=$SCRIPT_DIR/r2o-update-scheduler.sh
+UPD_PID=$RUN/update-scheduler.pid
+CATALOG=$STATE/catalog.json
+export R2O_DIR="$ROOT" R2O_CONFIG="$CONF" R2O_RUN_DIR="$RUN"
+
+say() { echo "r2o: $*"; }
+die() { say "$*" >&2; exit 1; }
+
+valid_number() {
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$1" -le "$2" ]
+}
+
+valid_number "$QUEUE4" 65535 || die "неверный QUEUE_NUM"
+valid_number "$QUEUE6" 65535 || die "неверный QUEUE_NUM6"
+[ "$QUEUE4" != "$QUEUE6" ] || die "QUEUE_NUM и QUEUE_NUM6 должны различаться"
+case "$MODE" in off|observe|apply) ;; *) die "неверный MODE" ;; esac
+case "$IPV6_ENABLED" in 0|1) ;; *) die "IPV6_ENABLED должен быть 0 или 1" ;; esac
+case "$AUTOUPDATE" in 1|yes) AUTOUPDATE=1 ;; 0|no) AUTOUPDATE=0 ;; *) die "AUTOUPDATE должен быть 0, 1, yes или no" ;; esac
+case "$TG_ENABLED" in 1|yes) TG_ENABLED=1 ;; 0|no) TG_ENABLED=0 ;; *) die "TG_ENABLED должен быть 0, 1, yes или no" ;; esac
+valid_number "$TG_PORT" 65535 && [ "$TG_PORT" -gt 0 ] || die "неверный TG_PORT"
+case "$MARK" in 0x*|0X*) MARK=$(printf '%d' "$MARK") || die "неверный MARK" ;; esac
+valid_number "$MARK" 4294967295 || die "неверный MARK"
+
+prepare_dirs() {
+    [ ! -L "$RUN" ] || die "каталог run не должен быть ссылкой"
+    [ ! -L "$STATE" ] || die "каталог state не должен быть ссылкой"
+    mkdir -p "$RUN" "$STATE" "$LOG" "$RUNTIME" || die "не создать рабочие каталоги"
+    chmod 0700 "$RUN" "$RUNTIME" 2>/dev/null || die "не закрыть права рабочих каталогов"
+    if [ ! -e "$CATALOG" ]; then
+        (umask 077; printf '{"schema":1,"boxes":[]}\n' > "$CATALOG") || die "не создать каталог решений"
+    fi
+    [ ! -L "$CATALOG" ] && [ -f "$CATALOG" ] || die "catalog должен быть обычным файлом"
+}
+
+process_path() {
+    pidfile=$1
+    pid=$(cat "$pidfile" 2>/dev/null) || return 1
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null || return 1
+    readlink "$PROC/$pid/exe" 2>/dev/null
+}
+
+component_running() {
+    component=$1
+    pidfile=$2
+    exe=$(process_path "$pidfile") || return 1
+    case "$exe" in
+        "$ROOT"/releases/*/builds/"$component"-linux-*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+stop_component() {
+    component=$1
+    pidfile=$2
+    if component_running "$component" "$pidfile"; then
+        pid=$(cat "$pidfile")
+        kill -TERM "$pid" 2>/dev/null || true
+        attempt=0
+        while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt 50 ]; do
+            attempt=$((attempt + 1))
+            sleep 0.1 2>/dev/null || sleep 1
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            exe=$(readlink "$PROC/$pid/exe" 2>/dev/null || true)
+            case "$exe" in "$ROOT"/releases/*/builds/"$component"-linux-*) kill -KILL "$pid" 2>/dev/null || true ;; esac
+        fi
+    fi
+    rm -f "$pidfile"
+}
+
+spawn_component() {
+    component=$1
+    pidfile=$2
+    logfile=$3
+    shift 3
+    component_running "$component" "$pidfile" && return 0
+    stop_component "$component" "$pidfile"
+    [ -x "$MANAGER" ] || die "нет executable manager $MANAGER"
+    start-stop-daemon -S -b -m -p "$pidfile" -x /bin/sh -- \
+        -c 'log=$1; shift; exec "$@" >> "$log" 2>&1' r2o-spawn "$logfile" \
+        "$MANAGER" exec --root "$ROOT" --component "$component" -- "$@" || return 1
+    attempt=0
+    while [ "$attempt" -lt 50 ]; do
+        component_running "$component" "$pidfile" && return 0
+        attempt=$((attempt + 1))
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    say "$component не запустился; см. $logfile"
+    return 1
+}
+
+queue_bound() {
+    queue=$1
+    [ -r "$NFQUEUE_STATUS" ] || return 1
+    awk -v q="$queue" '$1 == q && $2 != 0 { found=1 } END { exit !found }' "$NFQUEUE_STATUS"
+}
+
+wait_queue() {
+    queue=$1
+    attempt=0
+    while [ "$attempt" -lt 50 ]; do
+        queue_bound "$queue" && return 0
+        attempt=$((attempt + 1))
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    return 1
+}
+
+engine_stop() {
+    "$FIREWALL" down || say "не удалось полностью снять правила firewall"
+    stop_component r2o-controller "$CT4_PID"
+    stop_component r2o-controller "$CT6_PID"
+    stop_component r2o-datapath "$DP4_PID"
+    stop_component r2o-datapath "$DP6_PID"
+    rm -f "$SOCK4" "$SOCK6"
+    say "datapath остановлен"
+}
+
+engine_start() {
+    [ "$MODE" != off ] || { say "MODE=off — datapath не запускается"; return 1; }
+    prepare_dirs
+    [ -x "$FIREWALL" ] || die "нет firewall adapter $FIREWALL"
+    [ -x "$MANAGER" ] || die "нет release manager $MANAGER"
+    if component_running r2o-datapath "$DP4_PID" && component_running r2o-datapath "$DP6_PID" \
+        && component_running r2o-controller "$CT4_PID" && component_running r2o-controller "$CT6_PID" \
+        && "$FIREWALL" status >/dev/null 2>&1; then
+        say "IPv4/IPv6 datapath уже запущен"
+        return 0
+    fi
+    engine_stop
+    mark=$MARK
+    case "$mark" in 0x*|0X*) mark=$(printf '%d' "$mark") ;; esac
+    if ! spawn_component r2o-datapath "$DP4_PID" "$LOG/r2o-datapath4.log" \
+        --queue "$QUEUE4" --family ipv4 --mode "$MODE" --mark "$mark" \
+        --controller-only --control "$SOCK4" --r2o-udp-reverse-visible; then
+        engine_stop
+        return 1
+    fi
+    if [ "$IPV6_ENABLED" = 1 ]; then
+        if ! spawn_component r2o-datapath "$DP6_PID" "$LOG/r2o-datapath6.log" \
+            --queue "$QUEUE6" --family ipv6 --mode "$MODE" --mark "$mark" \
+            --controller-only --control "$SOCK6" --r2o-udp-reverse-visible; then
+            engine_stop
+            return 1
+        fi
+    fi
+    wait_queue "$QUEUE4" || { engine_stop; die "IPv4 NFQUEUE $QUEUE4 не привязалась"; }
+    if [ "$IPV6_ENABLED" = 1 ]; then
+        wait_queue "$QUEUE6" || { engine_stop; die "IPv6 NFQUEUE $QUEUE6 не привязалась"; }
+    fi
+    "$FIREWALL" up || { engine_stop; die "не поставить правила NFQUEUE"; }
+    if ! spawn_component r2o-controller "$CT4_PID" "$LOG/r2o-controller4.log" \
+        --serve "$SOCK4" "$CATALOG" --discover --mark "$mark"; then
+        engine_stop
+        return 1
+    fi
+    if [ "$IPV6_ENABLED" = 1 ] && ! spawn_component r2o-controller "$CT6_PID" "$LOG/r2o-controller6.log" \
+        --serve "$SOCK6" "$CATALOG" --discover --mark "$mark"; then
+        engine_stop
+        return 1
+    fi
+    say "datapath запущен: IPv4 очередь $QUEUE4, IPv6 $([ "$IPV6_ENABLED" = 1 ] && echo "$QUEUE6" || echo выключен), режим $MODE"
+}
+
+update_scheduler_running() {
+    [ -s "$UPD_PID" ] || return 1
+    update_pid=$(cat "$UPD_PID" 2>/dev/null) || return 1
+    case "$update_pid" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$update_pid" 2>/dev/null || return 1
+    update_cmdline=$(tr '\000' ' ' < "$PROC/$update_pid/cmdline" 2>/dev/null) || return 1
+    case "$update_cmdline" in *r2o-update-scheduler.sh*) return 0 ;; *) return 1 ;; esac
+}
+
+update_scheduler_start() {
+    [ -x "$UPDATER" ] || return 0
+    update_scheduler_running && return 0
+    rm -f "$UPD_PID"
+    start-stop-daemon -S -b -m -p "$UPD_PID" -x "$UPDATER" -- run || return 1
+    attempt=0
+    while [ "$attempt" -lt 20 ]; do
+        update_scheduler_running && return 0
+        attempt=$((attempt + 1))
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    return 1
+}
+
+update_scheduler_stop() {
+    if update_scheduler_running; then
+        update_pid=$(cat "$UPD_PID")
+        kill -TERM "$update_pid" 2>/dev/null || true
+        attempt=0
+        while kill -0 "$update_pid" 2>/dev/null && [ "$attempt" -lt 50 ]; do
+            attempt=$((attempt + 1))
+            sleep 0.1 2>/dev/null || sleep 1
+        done
+        kill -0 "$update_pid" 2>/dev/null && kill -KILL "$update_pid" 2>/dev/null || true
+    fi
+    rm -f "$UPD_PID"
+}
+
+clear_found() {
+    prepare_dirs || return 1
+    [ -x "$MANAGER" ] || die "нет release manager $MANAGER"
+    clear_found_restart=0
+    if component_running r2o-datapath "$DP4_PID" || component_running r2o-datapath "$DP6_PID" \
+        || component_running r2o-controller "$CT4_PID" || component_running r2o-controller "$CT6_PID"; then
+        clear_found_restart=1
+    fi
+    engine_stop || return 1
+    clear_found_result=0
+    "$MANAGER" exec --root "$ROOT" --component r2o-controller -- \
+        --clear-catalog "$CATALOG" || clear_found_result=$?
+    if [ "$clear_found_restart" = 1 ] && [ "$MODE" != off ]; then
+        engine_start || return 1
+    fi
+    [ "$clear_found_result" -eq 0 ] || return "$clear_found_result"
+    say "подобранный каталог очищен"
+}
+
+write_telegram_status() {
+    status_dir=$(dirname "$TG_STATUS")
+    mkdir -p "$status_dir" || return 1
+    temporary=$TG_STATUS.new.$$
+    (umask 022; printf '%s\n' "$1" > "$temporary") || return 1
+    chmod 0644 "$temporary" || { rm -f "$temporary"; return 1; }
+    mv -f "$temporary" "$TG_STATUS" || { rm -f "$temporary"; return 1; }
+}
+
+telegram_ready() {
+    component_running r2o-telegram "$TG_PID" || return 1
+    snapshot=$("$MANAGER" exec --root "$ROOT" --component r2o-telegram -- \
+        --stats --stats-socket-path "$TG_STATS_SOCKET" 2>/dev/null) || return 1
+    case "$snapshot" in *'"listener_ready":true'*) return 0 ;; *) return 1 ;; esac
+}
+
+export_telegram_config() {
+    for variable in TG_CA_BUNDLE TG_DC_MAP_REFRESH_SECS TG_HOST TG_MAX_CONNECTIONS \
+        TG_VERBOSE TG_QUIET TG_LOG_FILE TG_CF_DOMAIN TG_CF_WORKER_DOMAIN TG_CF_BALANCE \
+        TG_CF_IP TG_WS_ROUTING TG_WS_HEDGE_DELAY_MS TG_WS_HEDGE_LIMIT \
+        TG_WS_CONNECT_TIMEOUT TG_WS_FAIL_PROBE_TIMEOUT TG_WS_FAIL_COOLDOWN \
+        TG_WS_REDIRECT_COOLDOWN TG_IP_FAIL_COOLDOWN TG_HANDSHAKE_TIMEOUT \
+        TG_TCP_FALLBACK_TIMEOUT TG_CF_CONNECT_TIMEOUT TG_CF_FAIL_COOLDOWN \
+        TG_DEFAULT_DOMAINS; do
+        eval "is_set=\${$variable+x}"
+        if [ "$is_set" = x ]; then
+            export "$variable"
+        fi
+    done
+}
+
+telegram_stop() {
+    if [ -x "$TG_FIREWALL" ]; then
+        "$TG_FIREWALL" stop || return 1
+    fi
+    stop_component r2o-telegram "$TG_PID"
+    rm -f "$TG_STATS_SOCKET"
+    write_telegram_status stopped
+}
+
+telegram_start() {
+    if [ "$TG_ENABLED" != 1 ]; then
+        telegram_stop || return 1
+        return 0
+    fi
+    if [ "$TG_MODE" != local ]; then
+        write_telegram_status not_configured
+        say "Telegram включён, но поддерживается только TG_MODE=local"
+        return 1
+    fi
+    [ -x "$MANAGER" ] || return 1
+    [ -x "$TG_FIREWALL" ] || { write_telegram_status error; say "нет Telegram firewall adapter $TG_FIREWALL"; return 1; }
+    prepare_dirs || return 1
+    if component_running r2o-telegram "$TG_PID"; then
+        if telegram_ready; then
+            "$TG_FIREWALL" heal || { write_telegram_status error; return 1; }
+            "$TG_FIREWALL" sync-dc-map || say "не удалось синхронизировать динамическую карту Telegram DC"
+            write_telegram_status local
+            return 0
+        fi
+    fi
+    stop_component r2o-telegram "$TG_PID"
+    rm -f "$TG_STATS_SOCKET"
+    write_telegram_status connecting || return 1
+    export_telegram_config
+    R2O_TG_DC_MAP_ENDPOINTS_PATH="$STATE/telegram-dc-endpoints.tsv"
+    R2O_TG_DC_MAP_SYNC="$TG_FIREWALL"
+    export R2O_TG_DC_MAP_ENDPOINTS_PATH R2O_TG_DC_MAP_SYNC
+    spawn_component r2o-telegram "$TG_PID" "$LOG/telegram.log" \
+        --port "$TG_PORT" --stats-socket-path "$TG_STATS_SOCKET" \
+        --dc-map-path "$STATE/telegram-dc-map.json" \
+        --dc-map-endpoints-path "$STATE/telegram-dc-endpoints.tsv" || {
+        write_telegram_status error
+        return 1
+    }
+    attempt=0
+    while [ "$attempt" -lt 50 ]; do
+        if telegram_ready; then break; fi
+        attempt=$((attempt + 1))
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    if ! telegram_ready; then
+        stop_component r2o-telegram "$TG_PID"
+        rm -f "$TG_STATS_SOCKET"
+        write_telegram_status error
+        say "r2o-telegram не подтвердил готовность listener; см. $LOG/telegram.log"
+        return 1
+    fi
+    if ! "$TG_FIREWALL" start; then
+        stop_component r2o-telegram "$TG_PID"
+        rm -f "$TG_STATS_SOCKET"
+        write_telegram_status error
+        say "не удалось установить Telegram firewall"
+        return 1
+    fi
+    "$TG_FIREWALL" sync-dc-map || say "не удалось синхронизировать динамическую карту Telegram DC"
+    write_telegram_status local
+    say "локальный Telegram прокси готов на :$TG_PORT"
+}
+
+set_config_key() {
+    key=$1
+    value=$2
+    file_mode=$3
+    [ -f "$CONF" ] && [ ! -L "$CONF" ] || return 1
+    temporary=$CONF.new.$$
+    (umask 077; awk -v key="$key" -v value="$value" '
+        $0 ~ "^[[:space:]]*" key "=" { if (!done) print key "=" value; done=1; next }
+        { print }
+        END { if (!done) print key "=" value }
+    ' "$CONF" > "$temporary") || { rm -f "$temporary"; return 1; }
+    chmod "$file_mode" "$temporary" || { rm -f "$temporary"; return 1; }
+    mv -f "$temporary" "$CONF" || { rm -f "$temporary"; return 1; }
+}
+
+set_telegram_enabled() { set_config_key TG_ENABLED "$1" 0600; }
+
+set_update_auto() {
+    value=$1
+    set_config_key AUTOUPDATE "$value" 0600 || die "не изменить AUTOUPDATE"
+    "$MANAGER" update-auto --root "$ROOT" --enabled "$value"
+    AUTOUPDATE=$value
+}
+
+telegram_enable() {
+    set_telegram_enabled 1 || die "не изменить TG_ENABLED"
+    TG_ENABLED=1
+    telegram_start
+}
+
+telegram_disable() {
+    telegram_stop || return 1
+    set_telegram_enabled 0 || die "не изменить TG_ENABLED"
+    TG_ENABLED=0
+}
+
+telegram_restart() {
+    telegram_stop || return 1
+    telegram_start
+}
+
+telegram_reapply() {
+    [ "$TG_ENABLED" = 1 ] || return 0
+    if telegram_ready; then
+        "$TG_FIREWALL" heal || return 1
+        "$TG_FIREWALL" sync-dc-map || say "не удалось синхронизировать динамическую карту Telegram DC"
+    else
+        telegram_start
+    fi
+}
+
+panel_stop() { stop_component r2o-panel "$PN_PID"; }
+
+panel_start() {
+    prepare_dirs
+    [ -x "$MANAGER" ] || return 1
+    if component_running r2o-panel "$PN_PID"; then return 0; fi
+    rm -f "$RUNTIME/r2o-panel.health"
+    spawn_component r2o-panel "$PN_PID" "$LOG/panel.log" serve \
+        --health-file "$RUNTIME/r2o-panel.health" --config "$CONF" \
+        --live "$STATE/live.json" --assets "$ROOT/panel" --listen "$PANEL_LISTEN" \
+        --state-dir "$STATE" --mode "$MODE" --queue "$QUEUE4" \
+        --service "$INIT" --manager "$MANAGER" --manager-root "$ROOT" \
+        --engine-pid "$DP4_PID" --controller-pid "$CT4_PID" \
+        --telegram-pid "$TG_PID" --telegram-status "$TG_STATUS" \
+        --telegram-stats "$TG_STATS_SOCKET" --log "$LOG/panel.log"
+}
+
+start() {
+    [ "$MODE" = off ] && { say "MODE=off"; return 1; }
+    engine_start || return 1
+    telegram_start || say "Telegram не запущен; см. $LOG/telegram.log и $TG_STATUS"
+    panel_start || say "панель не запущена; datapath продолжает работу"
+    update_scheduler_start || say "ночная проверка обновлений не запустилась"
+}
+
+stop() {
+    update_scheduler_stop || say "не удалось остановить планировщик обновлений"
+    telegram_stop || say "не удалось безопасно остановить Telegram"
+    engine_stop
+    panel_stop
+}
+
+wait_health() {
+    attempt=0
+    while [ "$attempt" -lt 100 ]; do
+        if component_running r2o-datapath "$DP4_PID" && component_running r2o-controller "$CT4_PID" \
+            && queue_bound "$QUEUE4" && [ -s "$RUNTIME/r2o-panel.health" ]; then
+            if [ "$IPV6_ENABLED" = 0 ] || \
+                { component_running r2o-datapath "$DP6_PID" && component_running r2o-controller "$CT6_PID" && queue_bound "$QUEUE6"; }; then
+                return 0
+            fi
+        fi
+        attempt=$((attempt + 1))
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    return 1
+}
+
+update_install() {
+    stop || return 1
+    if ! "$MANAGER" update-install --root "$ROOT"; then
+        if "$INIT" start && wait_health; then
+            say "установка обновления не удалась; текущий release снова запущен"
+        else
+            say "установка обновления не удалась; текущий release не прошёл runtime-проверку"
+        fi
+        return 1
+    fi
+    if "$INIT" start && wait_health; then
+        say "обновление запущено и прошло runtime-проверку"
+        return 0
+    fi
+    say "новый release не прошёл runtime-проверку; выполняю rollback"
+    "$INIT" stop || true
+    "$MANAGER" rollback --root "$ROOT" || die "rollback не выполнен"
+    if "$INIT" start && wait_health; then
+        say "предыдущий release восстановлен"
+    else
+        die "предыдущий release восстановлен, но не прошёл runtime-проверку"
+    fi
+    return 1
+}
+
+status() {
+    echo "r2o"
+    component_running r2o-datapath "$DP4_PID" && echo "  r2o-datapath IPv4: работает" || echo "  r2o-datapath IPv4: не работает"
+    if [ "$IPV6_ENABLED" = 1 ]; then
+        component_running r2o-datapath "$DP6_PID" && echo "  r2o-datapath IPv6: работает" || echo "  r2o-datapath IPv6: не работает"
+    else
+        echo "  r2o-datapath IPv6: выключен конфигурацией"
+    fi
+    component_running r2o-controller "$CT4_PID" && echo "  r2o-controller IPv4: работает" || echo "  r2o-controller IPv4: не работает"
+    if [ "$IPV6_ENABLED" = 1 ]; then
+        component_running r2o-controller "$CT6_PID" && echo "  r2o-controller IPv6: работает" || echo "  r2o-controller IPv6: не работает"
+    fi
+    if [ "$TG_ENABLED" = 1 ]; then
+        component_running r2o-telegram "$TG_PID" && echo "  r2o-telegram: работает ($TG_MODE, :$TG_PORT)" || echo "  r2o-telegram: не работает (TG_ENABLED=1)"
+        [ ! -r "$TG_STATUS" ] || { printf '  Telegram status: '; cat "$TG_STATUS"; }
+    else
+        echo "  r2o-telegram: выключен конфигурацией"
+    fi
+    component_running r2o-panel "$PN_PID" && echo "  панель: работает" || echo "  панель: не работает"
+    update_scheduler_running && echo "  обновления: ночная проверка запланирована" || echo "  обновления: планировщик не работает"
+    queue_bound "$QUEUE4" && echo "  очередь IPv4 $QUEUE4: привязана" || echo "  очередь IPv4 $QUEUE4: не привязана"
+    if [ "$IPV6_ENABLED" = 1 ]; then
+        queue_bound "$QUEUE6" && echo "  очередь IPv6 $QUEUE6: привязана" || echo "  очередь IPv6 $QUEUE6: не привязана"
+    fi
+    "$FIREWALL" status >/dev/null 2>&1 && echo "  firewall: установлен" || echo "  firewall: отсутствует"
+}
+
+case "${1:-}" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop && start ;;
+    status) status ;;
+    engine-start) engine_start ;;
+    engine-stop) engine_stop ;;
+    engine-restart) engine_stop && engine_start ;;
+    reapply) component_running r2o-datapath "$DP4_PID" || die "r2o-datapath IPv4 не работает"; "$FIREWALL" up ;;
+    telegram-enable) telegram_enable ;;
+    telegram-disable) telegram_disable ;;
+    telegram-restart) telegram_restart ;;
+    telegram-reapply) telegram_reapply ;;
+    update-check) "$MANAGER" update-check --root "$ROOT" ;;
+    update-install) update_install ;;
+    update-auto-on) set_update_auto 1 ;;
+    update-auto-off) set_update_auto 0 ;;
+    clear-found) clear_found ;;
+    *) echo "usage: $0 {start|stop|restart|status|engine-start|engine-stop|engine-restart|reapply|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-reapply|update-check|update-install|update-auto-on|update-auto-off}" >&2; exit 2 ;;
+esac

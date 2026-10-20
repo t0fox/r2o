@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+ROOT=${R2O_DIR:-/opt/r2o}
+SLOTS=$ROOT/release-slots
+[ ! -L "$SLOTS" ] && [ -f "$SLOTS" ] || { echo "r2o: invalid release slot state" >&2; exit 1; }
+IFS= read -r header < "$SLOTS"
+release=$(sed -n '2p' "$SLOTS")
+[ "$header" = R2O-RELEASE-SLOTS-1 ] || { echo "r2o: invalid release slot state" >&2; exit 1; }
+case "$release" in ''|*[!A-Za-z0-9._-]*) echo "r2o: invalid active release id" >&2; exit 1 ;; esac
+adapter=$ROOT/releases/$release/router/S99r2o
+[ ! -L "$adapter" ] && [ -x "$adapter" ] || { echo "r2o: active router adapter is missing" >&2; exit 1; }
+exec "$adapter" "$@"

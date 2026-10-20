@@ -1,0 +1,29 @@
+[package]
+name = "r2o-controller"
+version = "0.1.0"
+edition = "2024"
+description = "Адаптивный контроллер и каталог решений r2o"
+
+[dependencies]
+r2k-core = { package = "r2k-core", path = "../r2k-core" }
+r2o-datapath = { package = "r2o-datapath", path = "../r2o-datapath" }
+libc = "0.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "0.26"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+time = { version = "0.3", features = ["formatting", "parsing"] }
+psl = "=2.1.241"
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+bytes = "1"
+http = "1"
+tokio = { version = "1", features = ["macros", "net", "rt", "time"] }
+
+[dev-dependencies]
+rcgen = "0.12"
+
+[[bin]]
+name = "r2o-controller"
+path = "src/main.rs"

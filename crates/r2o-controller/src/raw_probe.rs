@@ -1,0 +1,1820 @@
+use std::io;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use crate::classify::{
+    ClassifyOptions, ClassifyResult, DpiProps, Observation, Poison, PoisonHit, ProbeError,
+    ProbeTarget, TriState, Trigger, note_props_hit, note_props_miss, poison_supports_family,
+    poisons, strategy_for_poison, trigger_accepts,
+};
+use r2k_core::plan::{OriginalFate, Plan};
+use r2o_datapath::engine::{PacketDecision, decide};
+
+const TCP_SYN: u8 = 0x02;
+const TCP_RST: u8 = 0x04;
+const TCP_PSH: u8 = 0x08;
+const TCP_ACK: u8 = 0x10;
+const BYPASS_MARK: u32 = 0x2d;
+const MAX_TRACE: usize = 512;
+const MAX_RAW_RESPONSE: usize = 8192;
+const RST_TIMEOUT: Duration = Duration::from_secs(300);
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+static RAW_SELFTESTS: OnceLock<Mutex<[Option<Instant>; 2]>> = OnceLock::new();
+
+/// Проверить, может ли текущий процесс открыть raw-сокет отправки IPv4.
+pub fn raw_supported() -> bool {
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_INET,
+            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+            libc::IPPROTO_RAW,
+        )
+    };
+    if fd < 0 {
+        return false;
+    }
+    unsafe { libc::close(fd) };
+    true
+}
+
+pub fn sweep_poisons(
+    target: &ProbeTarget,
+    trigger: &Trigger,
+    options: &ClassifyOptions,
+    result: &mut ClassifyResult,
+) -> Result<Option<PoisonHit>, ProbeError> {
+    let remote = resolve_target(target)?;
+    let family = if remote.is_ipv4() { 4 } else { 6 };
+    let mut props = DpiProps::default();
+    let mut answered = Vec::new();
+    let mut raw_ok = 0usize;
+    let mut raw_errors = 0usize;
+    let mut cached_selftest = false;
+
+    if let Some(age) = raw_selftest_age(family) {
+        cached_selftest = true;
+        add_observation(
+            result,
+            Observation {
+                probe: "raw-selftest:кэш".into(),
+                cuts: Vec::new(),
+                delay: Duration::ZERO,
+                pass: 0,
+                fail: 0,
+                error: Some(format!(
+                    "прошла {} с назад в этом процессе, зондов не было",
+                    age.as_secs()
+                )),
+            },
+        );
+    } else {
+        let mut observation = Observation {
+            probe: "raw-selftest".into(),
+            cuts: Vec::new(),
+            delay: Duration::ZERO,
+            pass: 0,
+            fail: 0,
+            error: None,
+        };
+        let mut last_error = None;
+        for _ in 0..options.repeats {
+            if is_cancelled(options) {
+                result.stopped = true;
+                add_observation(result, observation);
+                return Err(ProbeError::Local("context canceled".into()));
+            }
+            result.probes += 1;
+            match RawConn::connect(
+                remote,
+                options.timeout,
+                effective_mark(options.mark),
+                options.cancel.as_deref(),
+            ) {
+                Ok(Some(connection)) => {
+                    drop(connection);
+                    observation.pass += 1;
+                    break;
+                }
+                Ok(None) => observation.fail += 1,
+                Err(error) => {
+                    observation.fail += 1;
+                    if observation.error.is_none() {
+                        observation.error = Some(format!("{error:?}"));
+                    }
+                    last_error = Some(error);
+                }
+            }
+        }
+        add_observation(result, observation.clone());
+        let passed = observation.pass > 0;
+        store_raw_selftest(family, passed);
+        if !passed {
+            return Err(last_error.unwrap_or_else(|| {
+                ProbeError::Transport("classify: SYN-ACK не пришёл при самопроверке raw".into())
+            }));
+        }
+    }
+    result.raw_usable = true;
+
+    for property in property_probes() {
+        if is_cancelled(options) {
+            result.stopped = true;
+            break;
+        }
+        let mut poison = property.poison;
+        let mut decoy = None;
+        match property.set {
+            Property::OverlapSni => {
+                let Some((offset, length)) = crate::hello::sni_bounds(&trigger.payload) else {
+                    continue;
+                };
+                if offset == 0 || length == 0 || offset + length >= trigger.payload.len() {
+                    continue;
+                }
+                poison.seqovl = (offset + length) as i32;
+            }
+            Property::WhiteTimestamp => {
+                let Some(white) = options
+                    .white
+                    .as_ref()
+                    .filter(|white| white.payload.len() >= 2)
+                else {
+                    continue;
+                };
+                decoy = Some(white.payload.as_slice());
+            }
+            _ if poison.decoy_hello => {
+                let Some(control) = options
+                    .control
+                    .as_ref()
+                    .filter(|control| control.payload.len() >= 2)
+                else {
+                    continue;
+                };
+                decoy = Some(control.payload.as_slice());
+            }
+            _ => {}
+        }
+
+        let mut observation = Observation {
+            probe: format!("свойство:{}", property.label),
+            cuts: Vec::new(),
+            delay: Duration::from_millis(poison.gap_ms.max(0) as u64),
+            pass: 0,
+            fail: 0,
+            error: None,
+        };
+        let mut local_error = false;
+        for _ in 0..options.repeats {
+            if is_cancelled(options) {
+                result.stopped = true;
+                break;
+            }
+            result.probes += 1;
+            match raw_probe_once(remote, trigger, &poison, decoy, options) {
+                Ok(true) => observation.pass += 1,
+                Ok(false) => observation.fail += 1,
+                Err(error) => {
+                    local_error = true;
+                    raw_errors += 1;
+                    observation.fail += 1;
+                    observation.error = Some(format!("{error:?}"));
+                    break;
+                }
+            }
+            raw_ok += 1;
+            if majority(observation.pass, options.repeats)
+                || !majority(
+                    observation.pass + (options.repeats - observation.pass - observation.fail),
+                    options.repeats,
+                )
+            {
+                break;
+            }
+        }
+        if !local_error {
+            answered.push(poison.clone());
+            apply_property(
+                &mut props,
+                property.set,
+                majority(observation.pass, options.repeats),
+            );
+        }
+        if !local_error && majority(observation.pass, options.repeats) {
+            match make_poison_hit(&poison, trigger, decoy) {
+                Ok(Some(hit)) => {
+                    add_observation(result, observation);
+                    note_props_hit(&mut props, &poison);
+                    return Ok(Some(hit));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    observation.error = Some(format!("найдено, но не исполняется: {error}"))
+                }
+            }
+        }
+        if !local_error && observation.pass == 0 {
+            note_props_miss(&mut props, &poison);
+        }
+        add_observation(result, observation.clone());
+        if should_recheck(cached_selftest, raw_ok, raw_errors) {
+            if !raw_recheck(remote, options, result)? {
+                result.raw_usable = false;
+                return Err(ProbeError::Local(
+                    "classify: raw self-test failed after local probe errors".into(),
+                ));
+            }
+            cached_selftest = false;
+            raw_ok = 0;
+            raw_errors = 0;
+        }
+    }
+
+    for poison in compose_from_props(
+        &props,
+        options.control.as_ref().map(|c| c.payload.as_slice()),
+    ) {
+        if is_cancelled(options) {
+            result.stopped = true;
+            break;
+        }
+        let decoy = poison
+            .decoy_hello
+            .then(|| {
+                options
+                    .control
+                    .as_ref()
+                    .map(|control| control.payload.as_slice())
+            })
+            .flatten();
+        if poison.decoy_hello && decoy.is_none() {
+            continue;
+        }
+        let mut observation = Observation {
+            probe: poison.name.clone(),
+            cuts: Vec::new(),
+            delay: Duration::from_millis(poison.gap_ms.max(0) as u64),
+            pass: 0,
+            fail: 0,
+            error: None,
+        };
+        let mut local_error = false;
+        for _ in 0..options.repeats {
+            if is_cancelled(options) {
+                result.stopped = true;
+                break;
+            }
+            result.probes += 1;
+            match raw_probe_once(remote, trigger, &poison, decoy, options) {
+                Ok(true) => {
+                    observation.pass += 1;
+                    raw_ok += 1;
+                }
+                Ok(false) => {
+                    observation.fail += 1;
+                    raw_ok += 1;
+                    break;
+                }
+                Err(error) => {
+                    observation.fail += 1;
+                    observation.error = Some(format!("{error:?}"));
+                    raw_errors += 1;
+                    local_error = true;
+                    break;
+                }
+            }
+        }
+        if !local_error && observation.pass == options.repeats {
+            match make_poison_hit(&poison, trigger, decoy) {
+                Ok(Some(hit)) => {
+                    add_observation(result, observation);
+                    return Ok(Some(hit));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    observation.error = Some(format!("найдено, но не исполняется: {error}"))
+                }
+            }
+        }
+        add_observation(result, observation.clone());
+        if should_recheck(cached_selftest, raw_ok, raw_errors) {
+            if !raw_recheck(remote, options, result)? {
+                result.raw_usable = false;
+                return Err(ProbeError::Local(
+                    "classify: raw self-test failed after local probe errors".into(),
+                ));
+            }
+            cached_selftest = false;
+            raw_ok = 0;
+            raw_errors = 0;
+        }
+    }
+
+    for poison in poisons() {
+        if is_cancelled(options) {
+            result.stopped = true;
+            break;
+        }
+        if !poison_supports_family(poison, family)
+            || poison.disorder_pos > 0 && poison.disorder_pos as usize >= trigger.payload.len()
+            || answered
+                .iter()
+                .any(|previous| previous.same_hypothesis(poison))
+        {
+            continue;
+        }
+        let decoy = if poison.decoy_hello {
+            let Some(control) = options
+                .control
+                .as_ref()
+                .filter(|control| control.payload.len() >= 2)
+            else {
+                continue;
+            };
+            Some(control.payload.as_slice())
+        } else {
+            None
+        };
+        let mut observation = Observation {
+            probe: format!("poison:{}", poison.name),
+            cuts: Vec::new(),
+            delay: Duration::from_millis(poison.gap_ms.max(0) as u64),
+            pass: 0,
+            fail: 0,
+            error: None,
+        };
+        let mut local_error = false;
+        for _ in 0..options.repeats {
+            if is_cancelled(options) {
+                result.stopped = true;
+                break;
+            }
+            result.probes += 1;
+            match raw_probe_once(remote, trigger, poison, decoy, options) {
+                Ok(true) => {
+                    observation.pass += 1;
+                    raw_ok += 1;
+                }
+                Ok(false) => {
+                    observation.fail += 1;
+                    raw_ok += 1;
+                    break;
+                }
+                Err(error) => {
+                    observation.fail += 1;
+                    raw_errors += 1;
+                    observation.error = Some(format!("{error:?}"));
+                    local_error = true;
+                    break;
+                }
+            }
+        }
+        if !local_error && observation.pass == options.repeats {
+            match make_poison_hit(poison, trigger, decoy) {
+                Ok(Some(hit)) => {
+                    add_observation(result, observation);
+                    note_props_hit(&mut props, poison);
+                    return Ok(Some(hit));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    observation.error = Some(format!("найдено, но не исполняется: {error}"))
+                }
+            }
+        }
+        if observation.pass == 0 && observation.error.is_none() {
+            note_props_miss(&mut props, poison);
+        }
+        add_observation(result, observation.clone());
+        if should_recheck(cached_selftest, raw_ok, raw_errors) {
+            if !raw_recheck(remote, options, result)? {
+                result.raw_usable = false;
+                return Err(ProbeError::Local(
+                    "classify: raw self-test failed after local probe errors".into(),
+                ));
+            }
+            cached_selftest = false;
+            raw_ok = 0;
+            raw_errors = 0;
+        }
+        if should_recheck(cached_selftest, raw_ok, raw_errors) {
+            if !raw_recheck(remote, options, result)? {
+                result.raw_usable = false;
+                return Err(ProbeError::Local(
+                    "classify: raw self-test failed after local probe errors".into(),
+                ));
+            }
+            cached_selftest = false;
+            raw_ok = 0;
+            raw_errors = 0;
+        }
+    }
+    Ok(None)
+}
+
+fn add_observation(result: &mut ClassifyResult, observation: Observation) {
+    if result.trace.len() < MAX_TRACE {
+        result.trace.push(observation);
+    }
+}
+
+fn effective_mark(mark: Option<u32>) -> u32 {
+    mark.unwrap_or(BYPASS_MARK)
+}
+
+fn is_cancelled(options: &ClassifyOptions) -> bool {
+    options
+        .cancel
+        .as_ref()
+        .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+}
+
+fn resolve_target(target: &ProbeTarget) -> Result<SocketAddr, ProbeError> {
+    let ipv6 = target.host.contains(':');
+    (target.host.as_str(), target.port)
+        .to_socket_addrs()
+        .map_err(|error| ProbeError::Transport(format!("dial tcp: {error}")))?
+        .find(|address| address.is_ipv6() == ipv6)
+        .ok_or_else(|| ProbeError::Transport("classify: адрес цели не разрешился".into()))
+}
+
+fn majority(pass: usize, total: usize) -> bool {
+    total != 0 && pass > total / 2
+}
+
+fn should_recheck(cached: bool, successes: usize, errors: usize) -> bool {
+    (cached && successes == 0 && errors >= 2) || errors >= 3
+}
+
+fn raw_selftest_age(family: u8) -> Option<Duration> {
+    let mut cache = RAW_SELFTESTS
+        .get_or_init(|| Mutex::new([None, None]))
+        .lock()
+        .ok()?;
+    let index = if family == 6 { 1 } else { 0 };
+    let at = cache[index]?;
+    let age = at.elapsed();
+    if age < Duration::from_secs(600) {
+        Some(age)
+    } else {
+        cache[index] = None;
+        None
+    }
+}
+
+fn store_raw_selftest(family: u8, passed: bool) {
+    if let Ok(mut cache) = RAW_SELFTESTS
+        .get_or_init(|| Mutex::new([None, None]))
+        .lock()
+    {
+        cache[if family == 6 { 1 } else { 0 }] = passed.then(Instant::now);
+    }
+}
+
+fn raw_recheck(
+    remote: SocketAddr,
+    options: &ClassifyOptions,
+    result: &mut ClassifyResult,
+) -> Result<bool, ProbeError> {
+    let mut observation = Observation {
+        probe: "raw-selftest".into(),
+        cuts: Vec::new(),
+        delay: Duration::ZERO,
+        pass: 0,
+        fail: 0,
+        error: None,
+    };
+    for _ in 0..options.repeats {
+        if is_cancelled(options) {
+            result.stopped = true;
+            observation.error = Some("context canceled".into());
+            break;
+        }
+        result.probes += 1;
+        match RawConn::connect(
+            remote,
+            options.timeout,
+            effective_mark(options.mark),
+            options.cancel.as_deref(),
+        ) {
+            Ok(Some(connection)) => {
+                drop(connection);
+                observation.pass += 1;
+                break;
+            }
+            Ok(None) => observation.fail += 1,
+            Err(error) => {
+                observation.fail += 1;
+                if observation.error.is_none() {
+                    observation.error = Some(format!("{error:?}"));
+                }
+            }
+        }
+    }
+    add_observation(result, observation.clone());
+    let passed = observation.pass > 0;
+    store_raw_selftest(if remote.is_ipv6() { 6 } else { 4 }, passed);
+    Ok(passed)
+}
+
+#[derive(Clone, Copy)]
+enum Property {
+    LeftOverlap,
+    Reorder,
+    Checksum,
+    ParsesL7,
+    Duplicates,
+    Md5,
+    SequenceWindow,
+    Timestamps,
+    OverlapSni,
+    DenseDuplicates,
+    WhiteTimestamp,
+    Syn,
+}
+
+struct PropertyProbe {
+    label: &'static str,
+    poison: Poison,
+    set: Property,
+}
+
+fn property_probes() -> Vec<PropertyProbe> {
+    let mut probes = Vec::with_capacity(12);
+    let mut add = |label: &'static str, name: &'static str, set: Property, poison: Poison| {
+        probes.push(PropertyProbe {
+            label,
+            poison: Poison {
+                name: name.into(),
+                ..poison
+            },
+            set,
+        });
+    };
+    add(
+        "перекрытие слева",
+        "seqovl-1",
+        Property::LeftOverlap,
+        Poison {
+            seqovl: 1,
+            ..Poison::default()
+        },
+    );
+    add(
+        "порядок сегментов",
+        "disorder",
+        Property::Reorder,
+        Poison {
+            disorder: true,
+            ..Poison::default()
+        },
+    );
+    add(
+        "контрольная сумма",
+        "badsum",
+        Property::Checksum,
+        Poison {
+            badsum: true,
+            ..Poison::default()
+        },
+    );
+    add(
+        "разбор протокола",
+        "badsum+hello",
+        Property::ParsesL7,
+        Poison {
+            badsum: true,
+            decoy_hello: true,
+            ..Poison::default()
+        },
+    );
+    add(
+        "повтор как ретрансмит",
+        "badsum-x2-g20",
+        Property::Duplicates,
+        Poison {
+            badsum: true,
+            repeats: 2,
+            gap_ms: 20,
+            ..Poison::default()
+        },
+    );
+    add(
+        "сверка MD5",
+        "md5",
+        Property::Md5,
+        Poison {
+            md5: true,
+            ..Poison::default()
+        },
+    );
+    add(
+        "окно seq",
+        "seq-out-of-window",
+        Property::SequenceWindow,
+        Poison {
+            seq_shift: -66_000,
+            ..Poison::default()
+        },
+    );
+    add(
+        "метка времени",
+        "ts",
+        Property::Timestamps,
+        Poison {
+            tcp_ts: true,
+            ..Poison::default()
+        },
+    );
+    add(
+        "перекрытие до конца имени",
+        "seqovl-sni",
+        Property::OverlapSni,
+        Poison::default(),
+    );
+    add(
+        "плотная серия",
+        "badsum-x7",
+        Property::DenseDuplicates,
+        Poison {
+            badsum: true,
+            repeats: 7,
+            ..Poison::default()
+        },
+    );
+    add(
+        "ECH-приветствие под меткой",
+        "white-hello-ts",
+        Property::WhiteTimestamp,
+        Poison {
+            tcp_ts: true,
+            decoy_hello: true,
+            repeats: 8,
+            split_pos: 2,
+            ..Poison::default()
+        },
+    );
+    add(
+        "данные в SYN",
+        "syndata",
+        Property::Syn,
+        Poison {
+            syn_data: true,
+            ..Poison::default()
+        },
+    );
+    probes
+}
+
+fn apply_property(props: &mut DpiProps, property: Property, passed: bool) {
+    match property {
+        Property::LeftOverlap => {
+            props.tolerates_left_overlap = if passed {
+                TriState::False
+            } else {
+                TriState::True
+            }
+        }
+        Property::Reorder => {
+            props.tolerates_reorder = if passed {
+                TriState::False
+            } else {
+                TriState::True
+            }
+        }
+        Property::Checksum if passed => props.validates_checksum = TriState::False,
+        Property::ParsesL7 if passed => {
+            props.parses_l7 = TriState::True;
+            props.validates_checksum = TriState::False;
+        }
+        Property::Duplicates | Property::DenseDuplicates if passed => {
+            props.counts_duplicates = TriState::True
+        }
+        Property::Md5 if passed => props.validates_md5 = TriState::False,
+        Property::SequenceWindow if passed => props.validates_seq_window = TriState::False,
+        Property::Timestamps if passed => props.validates_timestamps = TriState::False,
+        Property::OverlapSni if passed => props.overlap_covers_sni = TriState::True,
+        Property::WhiteTimestamp if passed => {
+            props.validates_timestamps = TriState::False;
+            props.parses_l7 = TriState::True;
+        }
+        Property::Syn if passed => props.inspects_syn = TriState::False,
+        _ => {}
+    }
+}
+
+fn compose_from_props(props: &DpiProps, control: Option<&[u8]>) -> Vec<Poison> {
+    let mut base = Poison {
+        badsum: props.validates_checksum != TriState::True,
+        decoy_hello: props.parses_l7 == TriState::True,
+        ..Poison::default()
+    };
+    let mut out = Vec::with_capacity(4);
+    if props.counts_duplicates == TriState::True {
+        let mut spaced = base.clone();
+        spaced.name = "СОБРАНО: серия с паузой".into();
+        spaced.repeats = 2;
+        spaced.gap_ms = 20;
+        out.push(spaced);
+        let mut dense = base.clone();
+        dense.name = "СОБРАНО: плотная серия".into();
+        dense.repeats = 7;
+        out.push(dense);
+    }
+    if props.tolerates_left_overlap == TriState::False {
+        let mut overlap = base.clone();
+        overlap.name = "СОБРАНО: фальшивка + перекрытие".into();
+        overlap.seqovl_exact = true;
+        overlap.decoy_hello = true;
+        overlap.repeats = 7;
+        if let Some(control) = control {
+            overlap.seqovl = control.len() as i32;
+        }
+        out.push(overlap);
+    }
+    if props.tolerates_reorder == TriState::False {
+        let mut disorder = base.clone();
+        disorder.name = "СОБРАНО: фальшивка + порядок".into();
+        disorder.disorder = true;
+        disorder.repeats = 7;
+        out.push(disorder);
+    }
+    if out.is_empty() {
+        base = Poison {
+            name: "СОБРАНО: всё сразу".into(),
+            badsum: true,
+            decoy_hello: true,
+            seqovl_exact: true,
+            disorder: true,
+            repeats: 7,
+            seqovl: control.map_or(0, |bytes| bytes.len() as i32),
+            ..Poison::default()
+        };
+        if control.is_some() {
+            out.push(base);
+        }
+    }
+    out
+}
+
+fn make_poison_hit(
+    poison: &Poison,
+    trigger: &Trigger,
+    decoy: Option<&[u8]>,
+) -> Result<Option<PoisonHit>, String> {
+    let Some(strategy) = strategy_for_poison(poison) else {
+        return Ok(None);
+    };
+    let plan_text = crate::classify::plan_text_for_poison(poison, trigger, decoy, 0)?;
+    let plan = crate::plan_text::compile_text(&plan_text)?;
+    let parsed = Plan::parse(&plan).map_err(|error| format!("compiled R2OP rejected: {error}"))?;
+    r2o_datapath::engine::validate_runtime_plan(&parsed)
+        .map_err(|error| format!("r2o-datapath runtime rejected: {error}"))?;
+    Ok(Some(PoisonHit {
+        name: poison.name.clone(),
+        strategy,
+        plan_text,
+        plan,
+    }))
+}
+
+fn raw_probe_once(
+    remote: SocketAddr,
+    trigger: &Trigger,
+    poison: &Poison,
+    decoy: Option<&[u8]>,
+    options: &ClassifyOptions,
+) -> Result<bool, ProbeError> {
+    let mut connection = RawConn::connect(
+        remote,
+        options.timeout,
+        effective_mark(options.mark),
+        options.cancel.as_deref(),
+    )?
+    .ok_or_else(|| ProbeError::Transport("classify: SYN-ACK не пришёл".into()))?;
+
+    if poison.syn_data {
+        let packet = build_control_packet(
+            connection.local,
+            connection.remote,
+            connection.source_port,
+            connection.destination_port,
+            connection.sequence,
+            connection.acknowledgment,
+            TCP_PSH | TCP_ACK | TCP_SYN,
+            &[],
+            &trigger.payload,
+        )
+        .ok_or_else(|| ProbeError::Local("classify: SYN-data пакет не собран".into()))?;
+        connection.send_ip_packet(&packet)?;
+        connection.sequence = connection
+            .sequence
+            .wrapping_add(trigger.payload.len() as u32);
+    } else {
+        let plan = crate::classify::plan_for_poison(poison, trigger, decoy, 0)
+            .map_err(ProbeError::Local)?;
+        let tcp_options = connection.template_options.as_deref().unwrap_or(&[]);
+        let input = build_control_packet(
+            connection.local,
+            connection.remote,
+            connection.source_port,
+            connection.destination_port,
+            connection.sequence,
+            connection.acknowledgment,
+            TCP_ACK | TCP_PSH,
+            tcp_options,
+            &trigger.payload,
+        )
+        .ok_or_else(|| ProbeError::Local("classify: входной TCP пакет не собран".into()))?;
+        match decide(&plan, &input) {
+            PacketDecision::Transmit {
+                packets,
+                fate: OriginalFate::Drop,
+            } => {
+                for packet in packets {
+                    if is_cancelled(options) {
+                        return Err(ProbeError::Local("context canceled".into()));
+                    }
+                    if packet.delay_us != 0 {
+                        cancellable_sleep(
+                            Duration::from_micros(u64::from(packet.delay_us)),
+                            options.cancel.as_deref(),
+                        )?;
+                    }
+                    connection.send_ip_packet(&packet.packet)?;
+                }
+            }
+            _ => {
+                return Err(ProbeError::Local(
+                    "не удалось исполнить измерительный план".into(),
+                ));
+            }
+        }
+        connection.sequence = connection
+            .sequence
+            .wrapping_add(trigger.payload.len() as u32 + u32::from(poison.oob));
+        if poison.disorder
+            && poison.disorder_pos == 0
+            && poison.seqovl == 0
+            && !poison.seqovl_exact
+            && !poison.fake_between
+        {
+            cancellable_sleep(Duration::from_millis(12), options.cancel.as_deref())?;
+        }
+    }
+
+    let Some(response) = connection.read_payload(options.timeout, options.cancel.as_deref())?
+    else {
+        return Ok(false);
+    };
+    Ok(trigger_accepts(trigger.accept, &response))
+}
+
+fn cancellable_sleep(
+    duration: Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<(), ProbeError> {
+    let deadline = Instant::now() + duration;
+    while Instant::now() < deadline {
+        if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            return Err(ProbeError::Local("context canceled".into()));
+        }
+        thread::sleep((deadline - Instant::now()).min(Duration::from_millis(20)));
+    }
+    Ok(())
+}
+
+fn run_command(program: &str, args: &[String]) -> Result<std::process::ExitStatus, String> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("{program}: {error}"))?;
+    let deadline = Instant::now() + COMMAND_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("{program}: command timed out"));
+            }
+            Err(error) => return Err(format!("{program}: {error}")),
+        }
+    }
+}
+
+fn internet_checksum(bytes: &[u8]) -> u16 {
+    let mut sum = 0u32;
+    for chunk in bytes.chunks(2) {
+        if chunk.len() == 2 {
+            sum += u32::from(u16::from_be_bytes([chunk[0], chunk[1]]));
+        } else {
+            sum += u32::from(chunk[0]) << 8;
+        }
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+#[cfg(test)]
+fn tcp_checksum_valid(source: IpAddr, destination: IpAddr, segment: &[u8]) -> bool {
+    tcp_checksum(source, destination, segment) == 0
+}
+
+fn tcp_checksum(source: IpAddr, destination: IpAddr, segment: &[u8]) -> u16 {
+    let mut pseudo = Vec::with_capacity(40 + segment.len());
+    match (source, destination) {
+        (IpAddr::V4(source), IpAddr::V4(destination)) => {
+            pseudo.extend_from_slice(&source.octets());
+            pseudo.extend_from_slice(&destination.octets());
+            pseudo.extend_from_slice(&[0, libc::IPPROTO_TCP as u8]);
+            pseudo.extend_from_slice(&(segment.len() as u16).to_be_bytes());
+        }
+        (IpAddr::V6(source), IpAddr::V6(destination)) => {
+            pseudo.extend_from_slice(&source.octets());
+            pseudo.extend_from_slice(&destination.octets());
+            pseudo.extend_from_slice(&(segment.len() as u32).to_be_bytes());
+            pseudo.extend_from_slice(&[0, 0, 0, libc::IPPROTO_TCP as u8]);
+        }
+        _ => return 0,
+    }
+    pseudo.extend_from_slice(segment);
+    internet_checksum(&pseudo)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_control_packet(
+    source: IpAddr,
+    destination: IpAddr,
+    source_port: u16,
+    destination_port: u16,
+    sequence: u32,
+    acknowledgment: u32,
+    flags: u8,
+    options: &[u8],
+    payload: &[u8],
+) -> Option<Vec<u8>> {
+    if source.is_ipv4() != destination.is_ipv4()
+        || options.len() > 40
+        || !options.len().is_multiple_of(4)
+    {
+        return None;
+    }
+    let tcp_len = 20usize
+        .checked_add(options.len())?
+        .checked_add(payload.len())?;
+    if tcp_len > u16::MAX as usize {
+        return None;
+    }
+    let ip_len: usize = if source.is_ipv4() { 20 } else { 40 };
+    let total_len = ip_len.checked_add(tcp_len)?;
+    if source.is_ipv4() && total_len > u16::MAX as usize {
+        return None;
+    }
+    let mut packet = vec![0; total_len];
+    let tcp_offset = match (source, destination) {
+        (IpAddr::V4(source), IpAddr::V4(destination)) => {
+            packet[0] = 0x45;
+            packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+            let id = random_u32() as u16;
+            packet[4..6].copy_from_slice(&if id == 0 { 1 } else { id }.to_be_bytes());
+            packet[8] = 64;
+            packet[9] = libc::IPPROTO_TCP as u8;
+            packet[12..16].copy_from_slice(&source.octets());
+            packet[16..20].copy_from_slice(&destination.octets());
+            let checksum = internet_checksum(&packet[..20]);
+            packet[10..12].copy_from_slice(&checksum.to_be_bytes());
+            20
+        }
+        (IpAddr::V6(source), IpAddr::V6(destination)) => {
+            packet[0] = 0x60;
+            packet[4..6].copy_from_slice(&(tcp_len as u16).to_be_bytes());
+            packet[6] = libc::IPPROTO_TCP as u8;
+            packet[7] = 64;
+            packet[8..24].copy_from_slice(&source.octets());
+            packet[24..40].copy_from_slice(&destination.octets());
+            40
+        }
+        _ => return None,
+    };
+    let tcp = &mut packet[tcp_offset..];
+    tcp[0..2].copy_from_slice(&source_port.to_be_bytes());
+    tcp[2..4].copy_from_slice(&destination_port.to_be_bytes());
+    tcp[4..8].copy_from_slice(&sequence.to_be_bytes());
+    tcp[8..12].copy_from_slice(&acknowledgment.to_be_bytes());
+    tcp[12] = (((20 + options.len()) / 4) as u8) << 4;
+    tcp[13] = flags;
+    tcp[14..16].copy_from_slice(&u16::MAX.to_be_bytes());
+    tcp[20..20 + options.len()].copy_from_slice(options);
+    tcp[20 + options.len()..].copy_from_slice(payload);
+    let checksum = tcp_checksum(source, destination, tcp);
+    tcp[16..18].copy_from_slice(&checksum.to_be_bytes());
+    Some(packet)
+}
+
+fn random_u32() -> u32 {
+    let mut output = 0u32;
+    let result = unsafe {
+        libc::getrandom(
+            (&mut output as *mut u32).cast(),
+            std::mem::size_of::<u32>(),
+            0,
+        )
+    };
+    if result as usize == std::mem::size_of::<u32>() {
+        output
+    } else {
+        (SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u32)
+            ^ (std::process::id().rotate_left(7))
+    }
+}
+
+static NEXT_SOURCE_PORT: OnceLock<AtomicU32> = OnceLock::new();
+
+fn next_source_port() -> u16 {
+    let next = NEXT_SOURCE_PORT.get_or_init(|| AtomicU32::new(random_u32() % 25_000));
+    30_000 + (next.fetch_add(1, Ordering::Relaxed) % 25_000) as u16
+}
+
+fn set_option<T>(fd: i32, level: i32, option: i32, value: &T) -> io::Result<()> {
+    let result = unsafe {
+        libc::setsockopt(
+            fd,
+            level,
+            option,
+            (value as *const T).cast(),
+            std::mem::size_of::<T>() as libc::socklen_t,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn local_address_for(remote: SocketAddr) -> io::Result<IpAddr> {
+    let bind_address = if remote.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    let socket = UdpSocket::bind(bind_address)?;
+    socket.connect(remote)?;
+    Ok(socket.local_addr()?.ip())
+}
+
+static IPTABLES_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+struct RstGuard {
+    source_port: u16,
+    destination: IpAddr,
+    destination_port: u16,
+    nft: bool,
+    comment: bool,
+}
+
+impl RstGuard {
+    fn install(source_port: u16, destination: SocketAddr) -> Result<Self, ProbeError> {
+        let nft = std::env::var("R2O_FW").as_deref() == Ok("nft");
+        let guard = Self {
+            source_port,
+            destination: destination.ip(),
+            destination_port: destination.port(),
+            nft,
+            comment: true,
+        };
+        if nft {
+            let args = guard.nft_args("add");
+            let status = run_command("nft", &args)
+                .map_err(|error| ProbeError::Local(format!("classify: {error}")))?;
+            if !status.success() {
+                return Err(ProbeError::Local(
+                    "classify: nft не добавил ключ подавления RST".into(),
+                ));
+            }
+            return Ok(guard);
+        }
+
+        sweep_stale_iptables();
+        let _lock = IPTABLES_LOCK.get_or_init(|| Mutex::new(())).lock().ok();
+        let args = guard.iptables_args(true, "-I");
+        let program = if destination.is_ipv6() {
+            "ip6tables"
+        } else {
+            "iptables"
+        };
+        let status = run_command(program, &args)
+            .map_err(|error| ProbeError::Local(format!("classify: {error}")))?;
+        if status.success() {
+            return Ok(guard);
+        }
+        let fallback = guard.iptables_args(false, "-I");
+        let status = run_command(program, &fallback)
+            .map_err(|error| ProbeError::Local(format!("classify: {error}")))?;
+        if status.success() {
+            return Ok(Self {
+                comment: false,
+                ..guard
+            });
+        }
+        Err(ProbeError::Local(format!(
+            "classify: {program} не установил подавление ядерного RST"
+        )))
+    }
+
+    fn nft_args(&self, verb: &str) -> Vec<String> {
+        let family = if self.destination.is_ipv6() {
+            "rst6"
+        } else {
+            "rst4"
+        };
+        let address = self.destination.to_string();
+        let timeout = if verb == "add" {
+            format!(" timeout {}s", RST_TIMEOUT.as_secs())
+        } else {
+            String::new()
+        };
+        vec![
+            verb.into(),
+            "element".into(),
+            "inet".into(),
+            "r2o_rst".into(),
+            family.into(),
+            format!(
+                "{{ {} . {} . {}{} }}",
+                self.source_port, address, self.destination_port, timeout
+            ),
+        ]
+    }
+
+    fn iptables_args(&self, comment: bool, operation: &str) -> Vec<String> {
+        let mut args = vec![
+            "-w".into(),
+            operation.into(),
+            "OUTPUT".into(),
+            "-p".into(),
+            "tcp".into(),
+            "--sport".into(),
+            self.source_port.to_string(),
+            "--tcp-flags".into(),
+            "RST".into(),
+            "RST".into(),
+        ];
+        if comment {
+            args.extend([
+                "-m".into(),
+                "comment".into(),
+                "--comment".into(),
+                format!("r2o-rst:{}", std::process::id()),
+            ]);
+        }
+        args.extend(["-j".into(), "DROP".into()]);
+        args
+    }
+}
+
+impl Drop for RstGuard {
+    fn drop(&mut self) {
+        if self.nft {
+            let _ = run_command("nft", &self.nft_args("delete"));
+            return;
+        }
+        let _lock = IPTABLES_LOCK.get_or_init(|| Mutex::new(())).lock().ok();
+        let program = if self.destination.is_ipv6() {
+            "ip6tables"
+        } else {
+            "iptables"
+        };
+        let args = self.iptables_args(self.comment, "-D");
+        if run_command(program, &args).is_ok_and(|status| status.success()) {
+            return;
+        }
+        if self.comment {
+            let _ = run_command(program, &self.iptables_args(false, "-D"));
+        }
+    }
+}
+
+fn sweep_stale_iptables() {
+    for program in ["iptables", "ip6tables"] {
+        let args: Vec<String> = vec!["-w".into(), "-S".into(), "OUTPUT".into()];
+        let Ok(mut child) = Command::new(program)
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            continue;
+        };
+        let deadline = Instant::now() + COMMAND_TIMEOUT;
+        let mut timed_out = false;
+        loop {
+            if child.try_wait().ok().flatten().is_some() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                timed_out = true;
+                let _ = child.kill();
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        if timed_out {
+            let _ = child.wait();
+        }
+        let Ok(output) = child.wait_with_output() else {
+            continue;
+        };
+        let rules = String::from_utf8_lossy(&output.stdout);
+        for line in rules
+            .lines()
+            .filter(|line| line.contains("--comment r2o-rst:"))
+        {
+            let Some((_, owner)) = line.split_once("--comment r2o-rst:") else {
+                continue;
+            };
+            let owner = owner.split_whitespace().next().unwrap_or_default();
+            let Ok(pid) = owner.parse::<i32>() else {
+                continue;
+            };
+            if unsafe { libc::kill(pid, 0) } == 0
+                || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+            {
+                continue;
+            }
+            let Some((_, source_port)) = line.split_once("--sport ") else {
+                continue;
+            };
+            let source_port = source_port.split_whitespace().next().unwrap_or_default();
+            let Ok(port) = source_port.parse::<u16>() else {
+                continue;
+            };
+            let args = vec![
+                "-w".into(),
+                "-D".into(),
+                "OUTPUT".into(),
+                "-p".into(),
+                "tcp".into(),
+                "--sport".into(),
+                port.to_string(),
+                "--tcp-flags".into(),
+                "RST".into(),
+                "RST".into(),
+                "-m".into(),
+                "comment".into(),
+                "--comment".into(),
+                format!("r2o-rst:{pid}"),
+                "-j".into(),
+                "DROP".into(),
+            ];
+            let _ = run_command(program, &args);
+        }
+    }
+}
+
+struct RawConn {
+    sender: OwnedFd,
+    receiver: OwnedFd,
+    _rst_guard: RstGuard,
+    local: IpAddr,
+    remote: IpAddr,
+    source_port: u16,
+    destination_port: u16,
+    sequence: u32,
+    acknowledgment: u32,
+    template_options: Option<Vec<u8>>,
+    recv_buffer: Vec<u8>,
+}
+
+impl RawConn {
+    fn connect(
+        remote: SocketAddr,
+        timeout: Duration,
+        mark: u32,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<Option<Self>, ProbeError> {
+        let local = local_address_for(remote).map_err(|error| {
+            ProbeError::Local(format!(
+                "classify: не удалось определить свой адрес: {error}"
+            ))
+        })?;
+        let family = if remote.is_ipv6() {
+            libc::AF_INET6
+        } else {
+            libc::AF_INET
+        };
+        let sender_fd = unsafe {
+            libc::socket(
+                family,
+                libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+                libc::IPPROTO_RAW,
+            )
+        };
+        if sender_fd < 0 {
+            return Err(ProbeError::Unsupported(format!(
+                "classify: raw sender: {}",
+                io::Error::last_os_error()
+            )));
+        }
+        let sender = unsafe { OwnedFd::from_raw_fd(sender_fd) };
+        let hdrincl = 1 as libc::c_int;
+        let option = if remote.is_ipv6() {
+            libc::IPV6_HDRINCL
+        } else {
+            libc::IP_HDRINCL
+        };
+        set_option(
+            sender.as_raw_fd(),
+            if remote.is_ipv6() {
+                libc::IPPROTO_IPV6
+            } else {
+                libc::IPPROTO_IP
+            },
+            option,
+            &hdrincl,
+        )
+        .map_err(|error| ProbeError::Local(format!("classify: IP_HDRINCL: {error}")))?;
+        if mark != 0 {
+            set_option(sender.as_raw_fd(), libc::SOL_SOCKET, libc::SO_MARK, &mark)
+                .map_err(|error| ProbeError::Local(format!("classify: SO_MARK: {error}")))?;
+        }
+        let receiver_fd = unsafe {
+            libc::socket(
+                family,
+                libc::SOCK_RAW | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                libc::IPPROTO_TCP,
+            )
+        };
+        if receiver_fd < 0 {
+            return Err(ProbeError::Unsupported(format!(
+                "classify: сырой сокет на приём: {}",
+                io::Error::last_os_error()
+            )));
+        }
+        let receiver = unsafe { OwnedFd::from_raw_fd(receiver_fd) };
+        if let IpAddr::V6(local) = local {
+            let mut address: libc::sockaddr_in6 = unsafe { std::mem::zeroed() };
+            address.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+            address.sin6_addr.s6_addr = local.octets();
+            let status = unsafe {
+                libc::bind(
+                    receiver.as_raw_fd(),
+                    (&address as *const libc::sockaddr_in6).cast(),
+                    std::mem::size_of_val(&address) as libc::socklen_t,
+                )
+            };
+            if status != 0 {
+                return Err(ProbeError::Local(format!(
+                    "classify: IPv6 receive bind: {}",
+                    io::Error::last_os_error()
+                )));
+            }
+        }
+        let source_port = next_source_port();
+        let rst_guard = RstGuard::install(source_port, remote)?;
+        let mut connection = Self {
+            sender,
+            receiver,
+            _rst_guard: rst_guard,
+            local,
+            remote: remote.ip(),
+            source_port,
+            destination_port: remote.port(),
+            sequence: random_u32(),
+            acknowledgment: 0,
+            template_options: None,
+            recv_buffer: vec![0; u16::MAX as usize],
+        };
+        let syn_options = [
+            2, 4, 0x05, 0xac, 4, 2, 8, 10, 0, 0, 0, 1, 0, 0, 0, 0, 1, 3, 3, 7,
+        ];
+        let mut rto = Duration::from_secs(1);
+        let deadline = Instant::now() + timeout;
+        let mut next_syn = Instant::now();
+        loop {
+            if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                return Err(ProbeError::Local("context canceled".into()));
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            if Instant::now() >= next_syn {
+                let packet = build_control_packet(
+                    connection.local,
+                    connection.remote,
+                    connection.source_port,
+                    connection.destination_port,
+                    connection.sequence,
+                    0,
+                    TCP_SYN,
+                    &syn_options,
+                    &[],
+                )
+                .ok_or_else(|| ProbeError::Local("classify: SYN пакет не собран".into()))?;
+                connection.send_ip_packet(&packet)?;
+                next_syn = Instant::now() + rto;
+                rto = rto.saturating_mul(2);
+            }
+            let wait_until = deadline.min(next_syn);
+            let Some(segment) = connection.receive_segment(wait_until, cancel)? else {
+                continue;
+            };
+            if segment.flags & TCP_RST != 0 {
+                return Ok(None);
+            }
+            if segment.flags & (TCP_SYN | TCP_ACK) == TCP_SYN | TCP_ACK
+                && segment.acknowledgment == connection.sequence.wrapping_add(1)
+            {
+                if let Some(timestamp) = timestamp_value(&segment.options) {
+                    connection.template_options = Some(timestamp_options(timestamp));
+                }
+                connection.sequence = connection.sequence.wrapping_add(1);
+                connection.acknowledgment = segment.sequence.wrapping_add(1);
+                let ack = build_control_packet(
+                    connection.local,
+                    connection.remote,
+                    connection.source_port,
+                    connection.destination_port,
+                    connection.sequence,
+                    connection.acknowledgment,
+                    TCP_ACK,
+                    &[],
+                    &[],
+                )
+                .ok_or_else(|| ProbeError::Local("classify: ACK пакет не собран".into()))?;
+                connection.send_ip_packet(&ack)?;
+                return Ok(Some(connection));
+            }
+        }
+    }
+
+    fn send_ip_packet(&self, packet: &[u8]) -> Result<(), ProbeError> {
+        let mut destination: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        let destination_len = match self.remote {
+            IpAddr::V4(address) => {
+                let sockaddr =
+                    unsafe { &mut *(&mut destination as *mut _ as *mut libc::sockaddr_in) };
+                sockaddr.sin_family = libc::AF_INET as libc::sa_family_t;
+                sockaddr.sin_addr.s_addr = u32::from_ne_bytes(address.octets());
+                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t
+            }
+            IpAddr::V6(address) => {
+                let sockaddr =
+                    unsafe { &mut *(&mut destination as *mut _ as *mut libc::sockaddr_in6) };
+                sockaddr.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+                sockaddr.sin6_addr.s6_addr = address.octets();
+                std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t
+            }
+        };
+        let sent = unsafe {
+            libc::sendto(
+                self.sender.as_raw_fd(),
+                packet.as_ptr().cast(),
+                packet.len(),
+                libc::MSG_DONTWAIT,
+                (&destination as *const libc::sockaddr_storage).cast(),
+                destination_len,
+            )
+        };
+        if sent >= 0 && sent as usize == packet.len() {
+            return Ok(());
+        }
+        let error = if sent < 0 {
+            io::Error::last_os_error()
+        } else {
+            io::Error::from(io::ErrorKind::WriteZero)
+        };
+        Err(ProbeError::Local(format!("classify: {error}")))
+    }
+
+    fn receive_segment(
+        &mut self,
+        until: Instant,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<Option<ReceivedSegment>, ProbeError> {
+        loop {
+            if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                return Err(ProbeError::Local("context canceled".into()));
+            }
+            let now = Instant::now();
+            if now >= until {
+                return Ok(None);
+            }
+            let millis = until
+                .saturating_duration_since(now)
+                .min(Duration::from_millis(100))
+                .as_millis()
+                .max(1) as libc::c_int;
+            let mut pollfd = libc::pollfd {
+                fd: self.receiver.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let polled = unsafe { libc::poll(&mut pollfd, 1, millis) };
+            if polled < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(ProbeError::Local(format!("classify: poll: {error}")));
+            }
+            if polled == 0 {
+                continue;
+            }
+            let mut peer: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+            let mut peer_len = std::mem::size_of_val(&peer) as libc::socklen_t;
+            let count = unsafe {
+                libc::recvfrom(
+                    self.receiver.as_raw_fd(),
+                    self.recv_buffer.as_mut_ptr().cast(),
+                    self.recv_buffer.len(),
+                    libc::MSG_DONTWAIT,
+                    (&mut peer as *mut libc::sockaddr_storage).cast(),
+                    &mut peer_len,
+                )
+            };
+            if count < 0 {
+                let error = io::Error::last_os_error();
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) {
+                    continue;
+                }
+                return Err(ProbeError::Local(format!("classify: recvfrom: {error}")));
+            }
+            let packet = &self.recv_buffer[..count as usize];
+            let (tcp_offset, packet_end) = match self.remote {
+                IpAddr::V4(remote) => {
+                    if packet.len() < 40
+                        || packet[0] >> 4 != 4
+                        || packet[9] != libc::IPPROTO_TCP as u8
+                    {
+                        continue;
+                    }
+                    let header = usize::from(packet[0] & 0x0f) * 4;
+                    let total = usize::from(u16::from_be_bytes([packet[2], packet[3]]));
+                    let fragment = u16::from_be_bytes([packet[6], packet[7]]);
+                    if header < 20
+                        || total > packet.len()
+                        || total < header + 20
+                        || fragment & 0x1fff != 0
+                        || packet[12..16] != remote.octets()
+                        || packet[16..20]
+                            != match self.local {
+                                IpAddr::V4(local) => local.octets(),
+                                _ => continue,
+                            }
+                    {
+                        continue;
+                    }
+                    (header, total)
+                }
+                IpAddr::V6(remote) => {
+                    if packet.len() < 20 || peer.ss_family != libc::AF_INET6 as libc::sa_family_t {
+                        continue;
+                    }
+                    let peer_address =
+                        unsafe { &*(&peer as *const _ as *const libc::sockaddr_in6) };
+                    if peer_address.sin6_addr.s6_addr != remote.octets() {
+                        continue;
+                    }
+                    (0, packet.len())
+                }
+            };
+            let tcp = &packet[tcp_offset..packet_end];
+            let header_len = usize::from(tcp[12] >> 4) * 4;
+            if header_len < 20
+                || header_len > tcp.len()
+                || u16::from_be_bytes([tcp[0], tcp[1]]) != self.destination_port
+                || u16::from_be_bytes([tcp[2], tcp[3]]) != self.source_port
+            {
+                continue;
+            }
+            let options = tcp[20..header_len].to_vec();
+            return Ok(Some(ReceivedSegment {
+                flags: tcp[13],
+                sequence: u32::from_be_bytes(tcp[4..8].try_into().expect("bounded TCP sequence")),
+                acknowledgment: u32::from_be_bytes(tcp[8..12].try_into().expect("bounded TCP ack")),
+                options,
+                payload: tcp[header_len..].to_vec(),
+            }));
+        }
+    }
+
+    fn read_payload(
+        &mut self,
+        timeout: Duration,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<Option<Vec<u8>>, ProbeError> {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            let Some(segment) = self.receive_segment(deadline, cancel)? else {
+                break;
+            };
+            if segment.flags & TCP_RST != 0 {
+                return Ok(None);
+            }
+            if !segment.payload.is_empty() {
+                if (segment.sequence.wrapping_sub(self.acknowledgment) as i32) > 0 {
+                    continue;
+                }
+                let skip = self.acknowledgment.wrapping_sub(segment.sequence) as usize;
+                if skip >= segment.payload.len() {
+                    continue;
+                }
+                return Ok(Some(
+                    segment.payload[skip..]
+                        .iter()
+                        .copied()
+                        .take(MAX_RAW_RESPONSE)
+                        .collect(),
+                ));
+            }
+        }
+        Ok(None)
+    }
+}
+
+struct ReceivedSegment {
+    flags: u8,
+    sequence: u32,
+    acknowledgment: u32,
+    options: Vec<u8>,
+    payload: Vec<u8>,
+}
+
+fn timestamp_value(options: &[u8]) -> Option<u32> {
+    let mut offset = 0;
+    while offset < options.len() {
+        match options[offset] {
+            0 => break,
+            1 => offset += 1,
+            8 if offset + 10 <= options.len() && options[offset + 1] == 10 => {
+                return Some(u32::from_be_bytes(
+                    options[offset + 2..offset + 6].try_into().ok()?,
+                ));
+            }
+            _ if offset + 2 <= options.len() => {
+                let length = usize::from(options[offset + 1]);
+                if length < 2 || offset + length > options.len() {
+                    break;
+                }
+                offset += length;
+            }
+            _ => break,
+        }
+    }
+    None
+}
+
+fn timestamp_options(server_timestamp: u32) -> Vec<u8> {
+    let mut options = vec![1, 1, 8, 10, 0, 0, 0, 1, 0, 0, 0, 0];
+    options[8..12].copy_from_slice(&server_timestamp.to_be_bytes());
+    options
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use r2k_core::plan::Plan;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn successful_poison_hit_carries_compiled_datapath_plan() {
+        let trigger = Trigger::tls("probe.example").unwrap();
+        let poison = Poison {
+            name: "badsum".into(),
+            badsum: true,
+            ..Poison::default()
+        };
+
+        let hit = make_poison_hit(&poison, &trigger, None).unwrap().unwrap();
+        let plan = Plan::parse(&hit.plan).unwrap();
+
+        assert_eq!(hit.name, "badsum");
+        assert!(hit.strategy.contains("badsum"));
+        assert_eq!(
+            crate::plan_text::compile_text(&hit.plan_text).unwrap(),
+            hit.plan
+        );
+        assert_eq!(
+            plan,
+            crate::classify::plan_for_poison(&poison, &trigger, None, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn measured_hit_plan_executes_through_the_datapath_packet_engine() {
+        let trigger = Trigger::tls("probe.example").unwrap();
+        let poison = Poison {
+            name: "badsum".into(),
+            badsum: true,
+            ..Poison::default()
+        };
+        let hit = make_poison_hit(&poison, &trigger, None).unwrap().unwrap();
+        let plan = Plan::parse(&hit.plan).unwrap();
+        let input = build_control_packet(
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2)),
+            40_000,
+            443,
+            0x1234_5678,
+            0,
+            TCP_PSH | TCP_ACK,
+            &[],
+            &trigger.payload,
+        )
+        .unwrap();
+
+        let r2o_datapath::engine::PacketDecision::Transmit { packets, .. } =
+            r2o_datapath::engine::decide(&plan, &input)
+        else {
+            panic!("the measured poison plan must execute in r2o-datapath");
+        };
+        assert!(!packets.is_empty());
+        let fake = &packets[0].packet;
+        let view = r2k_core::packet::PacketView::parse(fake).unwrap();
+        let tcp = view.tcp_segment(fake).unwrap();
+        assert_eq!(fake[tcp.payload].len(), trigger.payload.len() * 2);
+    }
+
+    #[test]
+    fn runtime_rejected_poison_cannot_be_reported_as_a_hit() {
+        let trigger = Trigger::tls("probe.example").unwrap();
+        let poison = Poison {
+            name: "badsum+ipid".into(),
+            badsum: true,
+            ip_id_zero: true,
+            ..Poison::default()
+        };
+
+        let error = make_poison_hit(&poison, &trigger, None).unwrap_err();
+
+        assert!(error.contains("r2o-datapath runtime rejected"));
+        assert!(error.contains("IPv4 ID"));
+    }
+
+    #[test]
+    fn builds_an_ipv4_syn_with_valid_ip_and_tcp_checksums() {
+        let packet = build_control_packet(
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2)),
+            40_000,
+            443,
+            0x1234_5678,
+            0,
+            TCP_SYN,
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(packet.len(), 40);
+        assert_eq!(&packet[..4], &[0x45, 0, 0, 40]);
+        assert_eq!(internet_checksum(&packet[..20]), 0);
+        assert_eq!(&packet[24..28], &0x1234_5678u32.to_be_bytes());
+        assert!(tcp_checksum_valid(
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2)),
+            &packet[20..]
+        ));
+    }
+
+    #[test]
+    fn builds_an_ipv6_syn_with_valid_tcp_checksum() {
+        let source = IpAddr::V6(Ipv6Addr::LOCALHOST);
+        let destination = IpAddr::V6("2001:db8::2".parse().unwrap());
+        let packet = build_control_packet(
+            source,
+            destination,
+            40_001,
+            8443,
+            0x8765_4321,
+            0,
+            TCP_SYN,
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(packet.len(), 60);
+        assert_eq!(packet[0] >> 4, 6);
+        assert!(tcp_checksum_valid(source, destination, &packet[40..]));
+    }
+}

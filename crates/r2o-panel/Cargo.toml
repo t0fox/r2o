@@ -1,0 +1,18 @@
+[package]
+name = "r2o-panel"
+version = "0.1.0"
+edition = "2024"
+description = "HTTP-панель управления r2o"
+
+[dependencies]
+libc = "0.2"
+r2k-core = { package = "r2k-core", path = "../r2k-core" }
+serde_json = "1"
+time = { version = "0.3", features = ["formatting"] }
+
+[lib]
+name = "r2o_panel"
+
+[[bin]]
+name = "r2o-panel"
+path = "src/main.rs"
