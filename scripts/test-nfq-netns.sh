@@ -56,6 +56,14 @@ if [ "$BUILD_DEFAULT_BINARIES" -eq 1 ] || \
     [ ! -x "$R2OD_BIN" ] || [ ! -x "$R2OC_BIN" ]; then
     cargo build --release --locked --package r2o-datapath --package r2o-controller
 fi
+r2o_version=$("$R2OD_BIN" --version)
+R2O_CONTROL_WIRE=${r2o_version##*wire=}
+case $R2O_CONTROL_WIRE in
+    ''|*[!0-9]*)
+        echo "не удалось прочитать версию control wire из r2o-datapath --version" >&2
+        exit 1
+        ;;
+esac
 R2OD_BIN="$R2OD_BIN" R2OC_BIN="$R2OC_BIN" sh "$SCRIPT_DIR/r2o-quic-silence-netns.sh"
 
 printf '\122\062\117\120\000\001\000\012\000\000\000\002\000\002\000\002\021\002\001\017\000\001\001' >"$WORK/quicsplit.r2op"
@@ -328,10 +336,13 @@ PY
 ip netns exec "$NS" "$R2OC_BIN" --apply-catalog \
     "$WORK/r2o-datapath-control.sock" "$WORK/catalog.json"
 
-ip netns exec "$NS" python3 <<'PY'
+ip netns exec "$NS" python3 - "$FIXTURE" <<'PY'
 import socket
+import sys
 import threading
 
+with open(sys.argv[1], "rb") as fixture:
+    initial = fixture.read()
 server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 server.bind(("127.0.0.1", 4444))
 server.settimeout(4)
@@ -343,11 +354,11 @@ def receive():
 thread = threading.Thread(target=receive)
 thread.start()
 client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-client.sendto(b"r2o-udplen", ("127.0.0.1", 4444))
+client.sendto(initial, ("127.0.0.1", 4444))
 thread.join(5)
 if thread.is_alive():
     raise SystemExit("ОШИБКА: UDP-датаграмма с удлинённой нагрузкой не дошла до сервера")
-expected = b"r2o-udplen" + b"\x00" * 7
+expected = initial + b"\x00" * 7
 if received["payload"] != expected:
     raise SystemExit(f"ОШИБКА: неожиданные данные UDP после удлинения: {received['payload']!r}")
 print("ПРОЙДЕНО: удлинение IPv4 UDP выполнено через NFQUEUE с корректными длиной и контрольными суммами")
@@ -901,7 +912,7 @@ if received != [b"FAKE", request]:
 print("ПРОЙДЕНО: контроллер установил @discord-voice, datapath отправил подделку перед исходным STUN-запросом")
 PY
 
-ip netns exec "$NS" python3 - "$WORK/r2o-datapath-voice.sock" <<'PY'
+ip netns exec "$NS" python3 - "$WORK/r2o-datapath-voice.sock" "$R2O_CONTROL_WIRE" <<'PY'
 import socket
 import struct
 import sys
@@ -926,8 +937,12 @@ controller = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 controller.settimeout(6)
 controller.connect(sys.argv[1])
 kind, greeting = read_frame(controller)
-if kind != 0x000A or struct.unpack("!H", greeting[38:40])[0] != 24:
-    raise SystemExit("ОШИБКА: datapath отправил неверное приветствие control wire")
+wire_version = int(sys.argv[2])
+if kind != 0x000A or len(greeting) < 40 or struct.unpack("!H", greeting[38:40])[0] != wire_version:
+    raise SystemExit(
+        "ОШИБКА: datapath отправил неверное приветствие control wire: "
+        f"kind=0x{kind:04x}, body={greeting.hex()}, ожидалась версия {wire_version}"
+    )
 
 server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 server.bind(("127.0.0.1", 50004))
@@ -959,7 +974,7 @@ while time.monotonic() < deadline:
         continue
     if len(event) != 39 or event[0] != 4 or event[37] != 17 or event[38] != 1:
         raise SystemExit(f"ОШИБКА: неверный ключ или направление voice-события: {event!r}")
-    print("ПРОЙДЕНО: NFQUEUE передала голосовое подозрение контроллеру по wire 24")
+    print(f"ПРОЙДЕНО: NFQUEUE передала голосовое подозрение контроллеру по wire {wire_version}")
     break
 else:
     raise SystemExit("ОШИБКА: datapath не передал событие голосового подозрения")

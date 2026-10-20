@@ -1266,8 +1266,19 @@ enum HttpSearchCommand {
         reply: SyncSender<Result<(), String>>,
     },
     CollectApplied {
+        trial_id: [u8; 16],
         timeout: std::time::Duration,
         reply: SyncSender<Result<Vec<r2k_core::control::AppliedEvent>, String>>,
+    },
+    R2oInstallQuicProbe {
+        command: Vec<u8>,
+        delete: Vec<u8>,
+        trial_id: [u8; 16],
+        reply: SyncSender<Result<r2k_core::control::Ack, String>>,
+    },
+    R2oDeleteQuicProbe {
+        command: Vec<u8>,
+        reply: SyncSender<Result<(), String>>,
     },
     InstallCandidate {
         target: r2o_controller::discovery::DiscoveryTarget,
@@ -1281,6 +1292,19 @@ struct HttpSearchOutcome {
     target: r2o_controller::discovery::DiscoveryTarget,
     result: Result<(), String>,
     disposition: HttpSearchDisposition,
+}
+
+#[cfg(unix)]
+struct R2oQuicDiscoveryTask {
+    server: std::net::SocketAddr,
+    snapshot: Vec<u8>,
+    permit: r2o_controller::r2o_resource_limit::R2oMeasurementPermit,
+}
+
+#[cfg(unix)]
+struct R2oQuicDiscoveryOutcome {
+    server: std::net::SocketAddr,
+    result: Result<Option<(String, String)>, String>,
 }
 
 #[cfg(unix)]
@@ -1520,6 +1544,96 @@ impl Drop for HttpSearchWorker {
         self.jobs.take();
         self.commands.take();
         self.outcomes.take();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+#[cfg(unix)]
+struct R2oQuicDiscoveryWorker {
+    jobs: Option<SyncSender<R2oQuicDiscoveryTask>>,
+    commands: Option<Receiver<HttpSearchCommand>>,
+    outcomes: Receiver<R2oQuicDiscoveryOutcome>,
+    cancel: Arc<AtomicBool>,
+    active: bool,
+    thread: Option<JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl R2oQuicDiscoveryWorker {
+    fn new() -> Self {
+        let (jobs, job_receiver) = mpsc::sync_channel::<R2oQuicDiscoveryTask>(1);
+        let (command_sender, commands) = mpsc::sync_channel::<HttpSearchCommand>(16);
+        let (outcome_sender, outcomes) = mpsc::sync_channel(1);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
+        let thread = std::thread::spawn(move || {
+            while let Ok(mut task) = job_receiver.recv() {
+                if worker_cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                let result = ControlClient::r2o_run_quic_discovery_trial(
+                    task.server,
+                    &task.snapshot,
+                    &command_sender,
+                    &worker_cancel,
+                    &mut task.permit,
+                )
+                .map_err(|error| error.to_string());
+                if outcome_sender
+                    .send(R2oQuicDiscoveryOutcome {
+                        server: task.server,
+                        result,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        Self {
+            jobs: Some(jobs),
+            commands: Some(commands),
+            outcomes,
+            cancel,
+            active: false,
+            thread: Some(thread),
+        }
+    }
+
+    fn queue(&mut self, task: R2oQuicDiscoveryTask) -> bool {
+        let Some(jobs) = self.jobs.as_ref() else {
+            return false;
+        };
+        if jobs.try_send(task).is_err() {
+            return false;
+        }
+        self.active = true;
+        true
+    }
+
+    fn is_active(&self) -> bool {
+        self.active
+    }
+
+    fn try_command(&self) -> Option<HttpSearchCommand> {
+        self.commands.as_ref()?.try_recv().ok()
+    }
+
+    fn try_outcome(&mut self) -> Option<R2oQuicDiscoveryOutcome> {
+        let outcome = self.outcomes.try_recv().ok()?;
+        self.active = false;
+        Some(outcome)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for R2oQuicDiscoveryWorker {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        self.jobs.take();
+        self.commands.take();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -2675,6 +2789,7 @@ impl ControlClient {
         let http_search = discovery
             .as_ref()
             .map(|_| HttpSearchWorker::new(measurement_gate.clone()));
+        let mut quic_discovery = discovery.as_ref().map(|_| R2oQuicDiscoveryWorker::new());
         let mut r2o_late_rx = discovery
             .as_ref()
             .map(|_| R2oLateRxWorker::new(measurement_gate.clone()));
@@ -2718,6 +2833,7 @@ impl ControlClient {
             }
         }
         let mut r2o_scheduler_tick_pending = false;
+        let mut r2o_quic_command_first = false;
         loop {
             if r2o_scheduler_tick_pending && self.pending_events.is_empty() {
                 if wait_for_control_frame(&self.socket, std::time::Duration::ZERO)? {
@@ -2861,6 +2977,28 @@ impl ControlClient {
                 }
                 continue;
             }
+            if let Some(outcome) = quic_discovery
+                .as_mut()
+                .and_then(R2oQuicDiscoveryWorker::try_outcome)
+            {
+                match outcome.result {
+                    Ok(Some((plan_text, candidate_name))) => {
+                        if let Some((_, catalog, path, _)) = &mut discovery {
+                            self.r2o_install_quic_candidate(
+                                outcome.server,
+                                &plan_text,
+                                &candidate_name,
+                                catalog,
+                                path,
+                            )?;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => eprintln!("QUIC-испытание не завершено: {error}"),
+                }
+                std::io::stdout().flush()?;
+                continue;
+            }
             if let Some(outcome) = r2o_late_rx.as_ref().and_then(R2oLateRxWorker::try_outcome) {
                 let host = outcome.input.options.name.clone();
                 let discovery_target = outcome.input.discovery_target;
@@ -2901,13 +3039,29 @@ impl ControlClient {
             let frame = if let Some(frame) = self.pending_events.pop_front() {
                 frame
             } else {
-                if let Some(command) = http_search.as_ref().and_then(HttpSearchWorker::try_command)
+                let command = if r2o_quic_command_first {
+                    quic_discovery
+                        .as_ref()
+                        .and_then(R2oQuicDiscoveryWorker::try_command)
+                        .or_else(|| http_search.as_ref().and_then(HttpSearchWorker::try_command))
+                } else {
+                    http_search
+                        .as_ref()
+                        .and_then(HttpSearchWorker::try_command)
+                        .or_else(|| {
+                            quic_discovery
+                                .as_ref()
+                                .and_then(R2oQuicDiscoveryWorker::try_command)
+                        })
+                };
+                r2o_quic_command_first = !r2o_quic_command_first;
+                if let Some(command) = command
                     && let Some((_, catalog, path, _)) = &mut discovery
                 {
                     self.service_http_search_command(command, catalog, path)?;
                     continue;
                 }
-                if let Some((_, catalog, path, _)) = &mut discovery
+                if discovery.is_some()
                     && let Some((pending_server, pending_captured)) = r2o_pending_quic_discovery
                         .front()
                         .map(|pending| (pending.server, pending.captured))
@@ -2926,17 +3080,22 @@ impl ControlClient {
                         );
                         continue;
                     }
-                    if let Some((pending, _permit)) = r2o_take_ready_quic_discovery(
-                        &mut r2o_pending_quic_discovery,
-                        &measurement_gate,
-                    ) {
-                        if let Err(error) = self.run_quic_discovery_trial(
-                            pending.server,
-                            &pending.snapshot,
-                            catalog,
-                            path,
-                        ) {
-                            eprintln!("QUIC-испытание не завершено: {error}");
+                    if let Some(worker) = quic_discovery.as_mut()
+                        && !worker.is_active()
+                        && let Some((pending, permit)) = r2o_take_ready_quic_discovery(
+                            &mut r2o_pending_quic_discovery,
+                            &measurement_gate,
+                        )
+                    {
+                        if !worker.queue(R2oQuicDiscoveryTask {
+                            server: pending.server,
+                            snapshot: pending.snapshot,
+                            permit,
+                        }) {
+                            eprintln!(
+                                "QUIC-испытание {} не попало в очередь worker",
+                                pending.server
+                            );
                         }
                         std::io::stdout().flush()?;
                         continue;
@@ -3574,15 +3733,75 @@ impl ControlClient {
                 }
                 let _ = reply.send(Ok(()));
             }
-            HttpSearchCommand::CollectApplied { timeout, reply } => {
+            HttpSearchCommand::CollectApplied {
+                trial_id,
+                timeout,
+                reply,
+            } => {
                 let result = self
-                    .collect_applied_events(timeout)
+                    .collect_applied_events(trial_id, timeout)
                     .map_err(|error| error.to_string());
                 if let Err(error) = &result {
                     let _ = reply.send(Err(error.clone()));
                     return Err(error.clone().into());
                 }
                 let _ = reply.send(result);
+            }
+            HttpSearchCommand::R2oInstallQuicProbe {
+                command,
+                delete,
+                trial_id,
+                reply,
+            } => {
+                let ack = match self.exchange_command(&command, COMMAND_SET_ADDR_PROBE) {
+                    Ok(ack) => ack,
+                    Err(error) => {
+                        match self.send_command(&delete, COMMAND_DEL_ADDR_PROBE) {
+                            Ok(()) => {
+                                let _ = reply.send(Err(format!(
+                                    "установка QUIC-пробы не подтверждена; временная привязка удалена: {error}"
+                                )));
+                            }
+                            Err(cleanup_error) => {
+                                let message = format!(
+                                    "установка QUIC-пробы не подтверждена ({error}); удалить временную привязку не удалось ({cleanup_error})"
+                                );
+                                let _ = reply.send(Err(message.clone()));
+                                return Err(message.into());
+                            }
+                        }
+                        return Ok(());
+                    }
+                };
+                if ack.trial_id != Some(trial_id) || !ack.ok {
+                    match self.send_command(&delete, COMMAND_DEL_ADDR_PROBE) {
+                        Ok(()) => {
+                            let _ = reply.send(Err(
+                                "датапат не подтвердил QUIC-пробу с ожидаемым trial ID; временная привязка удалена"
+                                    .to_owned(),
+                            ));
+                        }
+                        Err(cleanup_error) => {
+                            let message = format!(
+                                "датапат не подтвердил QUIC-пробу; удалить временную привязку не удалось: {cleanup_error}"
+                            );
+                            let _ = reply.send(Err(message.clone()));
+                            return Err(message.into());
+                        }
+                    }
+                    return Ok(());
+                }
+                let _ = reply.send(Ok(ack));
+            }
+            HttpSearchCommand::R2oDeleteQuicProbe { command, reply } => {
+                let result = self
+                    .send_command(&command, COMMAND_DEL_ADDR_PROBE)
+                    .map_err(|error| error.to_string());
+                if let Err(error) = result {
+                    let _ = reply.send(Err(error.clone()));
+                    return Err(error.into());
+                }
+                let _ = reply.send(Ok(()));
             }
             HttpSearchCommand::InstallCandidate { target, key, reply } => {
                 let result = self
@@ -3608,10 +3827,19 @@ impl ControlClient {
 
     fn collect_applied_events(
         &mut self,
+        trial_id: [u8; 16],
         timeout: std::time::Duration,
     ) -> Result<Vec<r2k_core::control::AppliedEvent>, Box<dyn Error>> {
         let deadline = std::time::Instant::now() + timeout;
-        let mut events: Vec<_> = self.pending_applied_events.drain(..).collect();
+        let mut events = Vec::new();
+        let pending = std::mem::take(&mut self.pending_applied_events);
+        for event in pending {
+            if event.trial_id == trial_id {
+                events.push(event);
+            } else {
+                self.remember_applied_event(event);
+            }
+        }
         loop {
             let queued = self.pending_events.len();
             for _ in 0..queued {
@@ -3620,7 +3848,11 @@ impl ControlClient {
                 };
                 if frame.kind == EVENT_APPLIED {
                     if let Ok(event) = decode_applied(&frame) {
-                        events.push(event);
+                        if event.trial_id == trial_id {
+                            events.push(event);
+                        } else {
+                            self.remember_applied_event(event);
+                        }
                     }
                 } else {
                     self.pending_events.push_back(frame);
@@ -3639,7 +3871,11 @@ impl ControlClient {
             };
             if frame.kind == EVENT_APPLIED {
                 if let Ok(event) = decode_applied(&frame) {
-                    events.push(event);
+                    if event.trial_id == trial_id {
+                        events.push(event);
+                    } else {
+                        self.remember_applied_event(event);
+                    }
                 }
             } else {
                 self.queue_async_frame(frame)?;
@@ -3656,7 +3892,8 @@ impl ControlClient {
     }
 
     fn run_quic_discovery_candidate(
-        &mut self,
+        commands: &SyncSender<HttpSearchCommand>,
+        cancel: &AtomicBool,
         server: std::net::SocketAddr,
         local: std::net::SocketAddr,
         probe: &mut r2o_controller::quic_replay::QuicReplayProbe,
@@ -3666,6 +3903,7 @@ impl ControlClient {
         request_timeout: std::time::Duration,
         roots: &rustls::RootCertStore,
         retry_strategy: bool,
+        measurement_permit: &mut r2o_controller::r2o_resource_limit::R2oMeasurementPermit,
     ) -> Result<Option<QuicDiscoveryTrialOutcome>, Box<dyn Error>> {
         use r2o_controller::quic_replay::{
             R2oQuicCandidateKind, R2oQuicFilterDecision, R2oQuicFilterResult,
@@ -3698,13 +3936,13 @@ impl ControlClient {
             trial_id,
         )?;
         let delete = encode_delete_addr_probe(local, server, trial_id)?;
-        let ack = self.exchange_command(&set, COMMAND_SET_ADDR_PROBE)?;
+        let ack = ask_http_controller(commands, |reply| HttpSearchCommand::R2oInstallQuicProbe {
+            command: set.clone(),
+            delete: delete.clone(),
+            trial_id,
+            reply,
+        })?;
         if !ack.ok || ack.trial_id != Some(trial_id) {
-            if let Err(error) = self.send_command(&delete, COMMAND_DEL_ADDR_PROBE) {
-                return Err(
-                    format!("не удалось удалить неподтверждённую QUIC-пробу: {error}").into(),
-                );
-            }
             println!(
                 "QUIC-кандидат «{}» не установлен: datapath не подтвердил его trial ID",
                 candidate.name
@@ -3728,8 +3966,15 @@ impl ControlClient {
                 applied: false,
             };
             for attempt in 0..attempts {
+                if !measurement_permit.r2o_yield_if_contended_with_cancel(cancel) {
+                    return Err("QUIC-испытание отменено во время ожидания слота".into());
+                }
                 let filter = probe.r2o_quic_probe_filter(request_timeout, attempt);
-                let events = self.collect_applied_events(std::time::Duration::from_millis(400))?;
+                let events = r2o_collect_controller_applied_events(
+                    commands,
+                    trial_id,
+                    std::time::Duration::from_millis(400),
+                )?;
                 applied |= events.iter().any(|event| {
                     applied_quic_trial_matches(event, trial_id, plan_id, local, server)
                 });
@@ -3761,7 +4006,11 @@ impl ControlClient {
                         roots.clone(),
                         r2o_controller::r2o_quic_http3::R2O_QUIC_HTTP3_DEFAULT_BUDGET_PACKETS,
                     ));
-                let events = self.collect_applied_events(std::time::Duration::from_millis(400))?;
+                let events = r2o_collect_controller_applied_events(
+                    commands,
+                    trial_id,
+                    std::time::Duration::from_millis(400),
+                )?;
                 applied |= events.iter().any(|event| {
                     applied_quic_trial_matches(event, trial_id, plan_id, local, server)
                 });
@@ -3781,36 +4030,37 @@ impl ControlClient {
             Ok(outcome)
         })();
 
-        if let Err(error) = self.send_command(&delete, COMMAND_DEL_ADDR_PROBE) {
-            return Err(format!("временную QUIC-пробу не удалось удалить: {error}").into());
-        }
+        ask_http_controller(commands, |reply| HttpSearchCommand::R2oDeleteQuicProbe {
+            command: delete,
+            reply,
+        })?;
         match trial_result {
             Ok(outcome) => Ok(Some(outcome)),
             Err(error) => Err(error),
         }
     }
 
-    fn run_quic_discovery_trial(
-        &mut self,
+    fn r2o_run_quic_discovery_trial(
         server: std::net::SocketAddr,
         snapshot: &[u8],
-        catalog: &mut Catalog,
-        catalog_path: &std::path::Path,
-    ) -> Result<(), Box<dyn Error>> {
+        commands: &SyncSender<HttpSearchCommand>,
+        cancel: &AtomicBool,
+        measurement_permit: &mut r2o_controller::r2o_resource_limit::R2oMeasurementPermit,
+    ) -> Result<Option<(String, String)>, Box<dyn Error>> {
         use r2o_controller::quic_replay::QuicReplayProbe;
 
         let mut probe = match QuicReplayProbe::prepare(server, snapshot, None) {
             Ok(probe) => probe,
             Err(error) => {
                 eprintln!("QUIC replay не подготовлен: {error}");
-                return Ok(());
+                return Ok(None);
             }
         };
         let parsed_snapshot = match r2k_core::quic_snapshot::r2k_quic_snapshot_parse(snapshot) {
             Some(parsed) => parsed,
             None => {
                 eprintln!("QUIC HTTP/3-проба пропущена: снимок Initial повреждён");
-                return Ok(());
+                return Ok(None);
             }
         };
         let server_name = match r2k_core::quic::r2k_quic_initial_sni_result_from_datagrams(
@@ -3820,7 +4070,7 @@ impl ControlClient {
                 Ok(server_name) => server_name,
                 Err(_) => {
                     eprintln!("QUIC HTTP/3-проба пропущена: SNI не является UTF-8");
-                    return Ok(());
+                    return Ok(None);
                 }
             },
             Ok(None) => {
@@ -3830,7 +4080,7 @@ impl ControlClient {
             }
             Err(error) => {
                 eprintln!("QUIC HTTP/3-проба пропущена: ClientHello повреждён: {error}");
-                return Ok(());
+                return Ok(None);
             }
         };
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -3856,7 +4106,7 @@ impl ControlClient {
         let baseline_verdict = r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&baseline);
         if baseline_verdict == r2k_core::quic::R2kQuicDataVerdict::Pass {
             println!("исходный HTTP/3 GET уже проходит; QUIC-план не устанавливаю");
-            return Ok(());
+            return Ok(None);
         }
 
         let local = probe.local_endpoint();
@@ -3873,7 +4123,12 @@ impl ControlClient {
         let mut strategy_candidates =
             r2o_controller::quic_replay::r2o_quic_discovery_candidates(&baseline, split_applicable);
         for candidate in strategy_candidates.drain(..) {
-            let outcome = match self.run_quic_discovery_candidate(
+            if cancel.load(Ordering::Relaxed) {
+                return Err("QUIC-испытание отменено".into());
+            }
+            let outcome = match Self::run_quic_discovery_candidate(
+                commands,
+                cancel,
                 server,
                 local,
                 &mut probe,
@@ -3883,6 +4138,7 @@ impl ControlClient {
                 request_timeout,
                 &roots,
                 true,
+                measurement_permit,
             ) {
                 Ok(Some(outcome)) => outcome,
                 Ok(None) => continue,
@@ -3963,7 +4219,12 @@ impl ControlClient {
                 {
                     continue;
                 }
-                let outcome = match self.run_quic_discovery_candidate(
+                if cancel.load(Ordering::Relaxed) {
+                    return Err("QUIC-испытание отменено".into());
+                }
+                let outcome = match Self::run_quic_discovery_candidate(
+                    commands,
+                    cancel,
                     server,
                     local,
                     &mut probe,
@@ -3973,6 +4234,7 @@ impl ControlClient {
                     request_timeout,
                     &roots,
                     false,
+                    measurement_permit,
                 ) {
                     Ok(Some(outcome)) => outcome,
                     Ok(None) => continue,
@@ -4038,7 +4300,12 @@ impl ControlClient {
                 {
                     continue;
                 }
-                let outcome = match self.run_quic_discovery_candidate(
+                if cancel.load(Ordering::Relaxed) {
+                    return Err("QUIC-испытание отменено".into());
+                }
+                let outcome = match Self::run_quic_discovery_candidate(
+                    commands,
+                    cancel,
                     server,
                     local,
                     &mut probe,
@@ -4048,6 +4315,7 @@ impl ControlClient {
                     request_timeout,
                     &roots,
                     false,
+                    measurement_permit,
                 ) {
                     Ok(Some(outcome)) => outcome,
                     Ok(None) => continue,
@@ -4124,9 +4392,19 @@ impl ControlClient {
         }
         let Some((plan_text, candidate_name)) = selected_plan else {
             println!("QUIC-подбор исчерпал доступные кандидаты без двух подтверждений");
-            return Ok(());
+            return Ok(None);
         };
+        Ok(Some((plan_text, candidate_name)))
+    }
 
+    fn r2o_install_quic_candidate(
+        &mut self,
+        server: std::net::SocketAddr,
+        plan_text: &str,
+        candidate_name: &str,
+        catalog: &mut Catalog,
+        catalog_path: &std::path::Path,
+    ) -> Result<(), Box<dyn Error>> {
         let (_lock, previous) = locked_catalog(catalog_path, catalog)?;
         if r2o_controller::discovery::has_usable_quic_address_binding(&previous, server.ip()) {
             *catalog = previous;
@@ -4985,10 +5263,11 @@ fn run_http_trial_task(
         port,
         reply,
     })?;
-    let events = ask_http_controller(commands, |reply| HttpSearchCommand::CollectApplied {
-        timeout: std::time::Duration::from_millis(500),
-        reply,
-    })?;
+    let events = r2o_collect_controller_applied_events(
+        commands,
+        trial_id,
+        std::time::Duration::from_millis(500),
+    )?;
     let result = match result {
         Ok(result) => Some(result),
         Err(error) => {
@@ -5037,6 +5316,30 @@ fn ask_http_controller<T: Send + 'static>(
     response
         .recv()
         .map_err(|_| "управляющий цикл HTTP-поиска закрыл ответ".to_owned())?
+}
+
+#[cfg(unix)]
+fn r2o_collect_controller_applied_events(
+    commands: &SyncSender<HttpSearchCommand>,
+    trial_id: [u8; 16],
+    timeout: std::time::Duration,
+) -> Result<Vec<r2k_core::control::AppliedEvent>, String> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut events = Vec::new();
+    loop {
+        events.extend(ask_http_controller(commands, |reply| {
+            HttpSearchCommand::CollectApplied {
+                trial_id,
+                timeout: std::time::Duration::ZERO,
+                reply,
+            }
+        })?);
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(events);
+        }
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(20)));
+    }
 }
 
 #[cfg(unix)]
@@ -5745,6 +6048,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn r2o_quic_подбор_удаляет_все_пробы_без_двух_доказательств() {
+        use super::{R2oQuicDiscoveryTask, R2oQuicDiscoveryWorker};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
         let work = std::env::temp_dir().join(format!(
             "r2o-quic-trial-{}-{}",
             std::process::id(),
@@ -5760,6 +6069,8 @@ mod tests {
             .unwrap();
         let endpoint = udp_server.local_addr().unwrap();
         let (candidate_done_tx, candidate_done_rx) = std::sync::mpsc::channel();
+        let control_done = Arc::new(AtomicBool::new(false));
+        let control_done_sender = Arc::clone(&control_done);
         let udp_thread = std::thread::spawn(move || {
             let mut peers = Vec::new();
             loop {
@@ -5827,6 +6138,24 @@ mod tests {
                     15 => assert_eq!(plan.ipfrag, 1),
                     _ => unreachable!(),
                 }
+                if candidate_index == 0 {
+                    let mut key = [0; KEY_LEN];
+                    key[0] = 4;
+                    key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+                    key[17..21].copy_from_slice(&[198, 51, 100, 20]);
+                    key[33..35].copy_from_slice(&41000_u16.to_be_bytes());
+                    key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+                    key[37] = 6;
+                    let event = r2k_core::control::R2oTcpSilenceEvent {
+                        key,
+                        client_is_low: true,
+                        elapsed_ms: 1000,
+                    };
+                    peer.write_all(
+                        &encode_frame(EVENT_R2O_TCP_SILENT, &event.event_body().unwrap()).unwrap(),
+                    )
+                    .unwrap();
+                }
                 peer.write_all(
                     &encode_ack_for_trial(super::COMMAND_SET_ADDR_PROBE, true, 0, Some(trial_id))
                         .unwrap(),
@@ -5838,6 +6167,7 @@ mod tests {
                 peer.write_all(&encode_ack(delete.kind, true, 0).unwrap())
                     .unwrap();
             }
+            control_done_sender.store(true, Ordering::Relaxed);
             candidate_done_tx.send(()).unwrap();
         });
         let mut client = ControlClient {
@@ -5847,24 +6177,102 @@ mod tests {
             http_search_started: std::collections::HashMap::new(),
             http_challenge_cooldowns: std::collections::HashMap::new(),
         };
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
+        let permit = gate
+            .r2o_acquire(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
         let snapshot = r2k_core::quic_snapshot::r2k_quic_snapshot_pack(&[&include_bytes!(
             "../../r2k-core/tests/fixtures/quic_v1_initial.bin"
         )[..]])
         .unwrap();
-        client
-            .run_quic_discovery_trial(
-                endpoint,
-                &snapshot,
-                &mut Catalog::default(),
-                &work.join("каталог.json"),
-            )
-            .unwrap();
+        let mut worker = R2oQuicDiscoveryWorker::new();
+        assert!(worker.queue(R2oQuicDiscoveryTask {
+            server: endpoint,
+            snapshot,
+            permit,
+        }));
+        let mut saw_tcp_while_quic_active = false;
+        let mut catalog = Catalog::default();
+        let outcome = loop {
+            if let Some(frame) = client.pending_events.pop_front() {
+                if frame.kind == EVENT_R2O_TCP_SILENT {
+                    let _ = r2k_core::control::decode_r2o_tcp_silence(&frame).unwrap();
+                    assert!(!control_done.load(Ordering::Relaxed));
+                    saw_tcp_while_quic_active = true;
+                }
+                continue;
+            }
+            if let Some(command) = worker.try_command() {
+                client
+                    .service_http_search_command(command, &mut catalog, &work.join("каталог.json"))
+                    .unwrap();
+                continue;
+            }
+            if let Some(outcome) = worker.try_outcome() {
+                break outcome;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        };
 
         let peers = udp_thread.join().unwrap();
         control_thread.join().unwrap();
+        drop(worker);
         assert!(peers.len() >= 48);
         assert!(peers.iter().all(|peer| *peer == peers[0]));
+        assert!(saw_tcp_while_quic_active);
+        assert!(matches!(outcome.result, Ok(None)));
         assert!(!work.join("каталог.json").exists());
+        std::fs::remove_dir_all(work).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_quic_подтверждение_из_worker_сохраняет_и_устанавливает_план() {
+        let work = std::env::temp_dir().join(format!(
+            "r2o-quic-install-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&work).unwrap();
+        let path = work.join("каталог.json");
+        let (socket, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let control_thread = std::thread::spawn(move || {
+            let install = read_frame(&mut peer).unwrap();
+            assert_eq!(install.kind, super::COMMAND_SET_ADDR);
+            assert_eq!(install.body[0], 4);
+            assert_eq!(&install.body[1..5], &[198, 51, 100, 90]);
+            let plan = Plan::parse(&install.body[18..]).unwrap();
+            assert!(plan.r2k_is_quic_address_plan());
+            peer.write_all(&encode_ack(install.kind, true, 0).unwrap())
+                .unwrap();
+        });
+        let mut client = ControlClient {
+            socket,
+            pending_events: VecDeque::new(),
+            pending_applied_events: VecDeque::new(),
+            http_search_started: std::collections::HashMap::new(),
+            http_challenge_cooldowns: std::collections::HashMap::new(),
+        };
+        let mut catalog = Catalog::default();
+        client
+            .r2o_install_quic_candidate(
+                "198.51.100.90:443".parse().unwrap(),
+                "r2o-plan 1 10\nid 00000000000000000000000000000000\nproto udp quic\nquicsplit 1\n",
+                "разрез ClientHello по CRYPTO",
+                &mut catalog,
+                &path,
+            )
+            .unwrap();
+
+        control_thread.join().unwrap();
+        assert!(path.is_file());
+        assert!(r2o_controller::discovery::has_usable_quic_address_binding(
+            &catalog,
+            "198.51.100.90".parse().unwrap(),
+        ));
         std::fs::remove_dir_all(work).unwrap();
     }
 
@@ -6006,6 +6414,44 @@ mod tests {
             client.pending_applied_events.back().unwrap().execution_id,
             257
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_quic_applied_collection_keeps_events_for_other_trials() {
+        let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut client = ControlClient {
+            socket,
+            pending_events: VecDeque::new(),
+            pending_applied_events: VecDeque::new(),
+            http_search_started: std::collections::HashMap::new(),
+            http_challenge_cooldowns: std::collections::HashMap::new(),
+        };
+        for (trial_id, execution_id) in [([1; 16], 1), ([2; 16], 2)] {
+            client.remember_applied_event(r2k_core::control::AppliedEvent {
+                key: [0; KEY_LEN],
+                plan_id: [0; 16],
+                trial_id,
+                execution_id,
+                binding: r2k_core::control::BindingContext {
+                    generation: 0,
+                    kind: 0,
+                    family: 0,
+                    shape: 0,
+                    temporary: false,
+                    epoch: [0; 16],
+                },
+            });
+        }
+
+        let events = client
+            .collect_applied_events([2; 16], std::time::Duration::ZERO)
+            .unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].trial_id, [2; 16]);
+        assert_eq!(client.pending_applied_events.len(), 1);
+        assert_eq!(client.pending_applied_events[0].trial_id, [1; 16]);
     }
 
     #[cfg(unix)]

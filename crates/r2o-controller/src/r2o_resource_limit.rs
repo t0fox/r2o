@@ -335,6 +335,20 @@ struct R2oGateState {
     scheduler_tick_seen: bool,
 }
 
+fn r2o_queue_measurement_waiter(state: &mut R2oGateState, after_first: bool) -> u64 {
+    let waiter = state.next_waiter;
+    state.next_waiter = state.next_waiter.wrapping_add(1);
+    let position = if after_first && !state.waiters.is_empty() {
+        1
+    } else if after_first {
+        0
+    } else {
+        state.waiters.len()
+    };
+    state.waiters.insert(position, waiter);
+    waiter
+}
+
 struct R2oGateShared {
     state: Mutex<R2oGateState>,
     changed: Condvar,
@@ -349,6 +363,7 @@ pub struct R2oMeasurementGate {
 
 pub struct R2oMeasurementPermit {
     shared: Arc<R2oGateShared>,
+    active: bool,
 }
 
 impl R2oMeasurementGate {
@@ -424,6 +439,7 @@ impl R2oMeasurementGate {
         self.shared.changed.notify_all();
         Some(R2oMeasurementPermit {
             shared: Arc::clone(&self.shared),
+            active: true,
         })
     }
 
@@ -434,12 +450,17 @@ impl R2oMeasurementGate {
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let waiter = state.next_waiter;
-            state.next_waiter = state.next_waiter.wrapping_add(1);
-            state.waiters.push_back(waiter);
-            waiter
+            r2o_queue_measurement_waiter(&mut state, false)
         };
 
+        self.r2o_wait_for_measurement_turn(waiter, cancel)
+    }
+
+    fn r2o_wait_for_measurement_turn(
+        &self,
+        waiter: u64,
+        cancel: &AtomicBool,
+    ) -> Option<R2oMeasurementPermit> {
         loop {
             if cancel.load(Ordering::Relaxed) {
                 let mut state = self
@@ -487,6 +508,7 @@ impl R2oMeasurementGate {
                 self.shared.changed.notify_all();
                 return Some(R2oMeasurementPermit {
                     shared: Arc::clone(&self.shared),
+                    active: true,
                 });
             }
             let (state, _) = self
@@ -538,6 +560,47 @@ impl R2oMeasurementGate {
     }
 }
 
+impl R2oMeasurementPermit {
+    pub fn r2o_yield_if_contended(&mut self) {
+        let _ = self.r2o_yield_if_contended_with_cancel(&AtomicBool::new(false));
+    }
+
+    pub fn r2o_yield_if_contended_with_cancel(&mut self, cancel: &AtomicBool) -> bool {
+        if !self.active {
+            return false;
+        }
+        let shared = Arc::clone(&self.shared);
+        let mut state = shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if cancel.load(Ordering::Relaxed) {
+            self.active = false;
+            state.active = state.active.saturating_sub(1);
+            drop(state);
+            shared.changed.notify_all();
+            return false;
+        }
+        if state.waiters.is_empty() {
+            return true;
+        }
+        self.active = false;
+        let gate = R2oMeasurementGate {
+            shared: Arc::clone(&shared),
+        };
+        let waiter = r2o_queue_measurement_waiter(&mut state, true);
+        state.active = state.active.saturating_sub(1);
+        drop(state);
+        shared.changed.notify_all();
+
+        let Some(mut replacement) = gate.r2o_wait_for_measurement_turn(waiter, cancel) else {
+            return false;
+        };
+        std::mem::swap(&mut self.active, &mut replacement.active);
+        true
+    }
+}
+
 fn r2o_start_gap_remaining(
     last_started: Option<Instant>,
     now: Instant,
@@ -551,6 +614,9 @@ fn r2o_start_gap_remaining(
 
 impl Drop for R2oMeasurementPermit {
     fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
         let mut state = self
             .shared
             .state
@@ -887,6 +953,183 @@ mod tests {
         let first = gate.r2o_try_acquire().unwrap();
         assert!(gate.r2o_try_acquire().is_none());
         drop(first);
+        assert!(gate.r2o_try_acquire().is_some());
+    }
+
+    #[test]
+    fn r2o_quic_уступает_слот_ожидающему_замеру() {
+        let gate = R2oMeasurementGate::new(1);
+        let mut quic = gate.r2o_acquire(&AtomicBool::new(false)).unwrap();
+        let worker_gate = gate.clone();
+        let (sender, receiver) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let permit = worker_gate.r2o_acquire(&AtomicBool::new(false)).unwrap();
+            sender.send(()).unwrap();
+            drop(permit);
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let queued = gate
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .waiters
+                .len();
+            if queued == 1 {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        quic.r2o_yield_if_contended();
+
+        receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            gate.shared
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .active,
+            1
+        );
+        drop(quic);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn r2o_quic_возобновляется_после_одного_ожидающего_замера() {
+        let gate = R2oMeasurementGate::new(1);
+        let mut quic = gate.r2o_acquire(&AtomicBool::new(false)).unwrap();
+        let first_gate = gate.clone();
+        let (first_started_tx, first_started_rx) = mpsc::channel();
+        let (release_first_tx, release_first_rx) = mpsc::channel();
+        let first = std::thread::spawn(move || {
+            let _permit = first_gate.r2o_acquire(&AtomicBool::new(false)).unwrap();
+            first_started_tx.send(()).unwrap();
+            release_first_rx
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap();
+        });
+        let second_gate = gate.clone();
+        let (second_started_tx, second_started_rx) = mpsc::channel();
+        let second = std::thread::spawn(move || {
+            let _permit = second_gate.r2o_acquire(&AtomicBool::new(false)).unwrap();
+            second_started_tx.send(()).unwrap();
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let queued = gate
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .waiters
+                .len();
+            if queued == 2 {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let (resumed_tx, resumed_rx) = mpsc::channel();
+        let resume = std::thread::spawn(move || {
+            let resumed = quic.r2o_yield_if_contended_with_cancel(&AtomicBool::new(false));
+            resumed_tx.send((resumed, quic)).unwrap();
+        });
+        first_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert!(matches!(
+            second_started_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        release_first_tx.send(()).unwrap();
+
+        let (resumed, quic) = resumed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(resumed);
+        assert!(matches!(
+            second_started_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        drop(quic);
+        second_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        first.join().unwrap();
+        second.join().unwrap();
+        resume.join().unwrap();
+        assert_eq!(
+            gate.shared
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .active,
+            0
+        );
+    }
+
+    #[test]
+    fn r2o_quic_отменяется_без_утечки_слота() {
+        let gate = R2oMeasurementGate::new(1);
+        let mut quic = gate.r2o_acquire(&AtomicBool::new(false)).unwrap();
+        let worker_gate = gate.clone();
+        let (sender, receiver) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let permit = worker_gate.r2o_acquire(&AtomicBool::new(false)).unwrap();
+            sender.send(()).unwrap();
+            drop(permit);
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let queued = gate
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .waiters
+                .len();
+            if queued == 1 {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let cancel = AtomicBool::new(true);
+        assert!(!quic.r2o_yield_if_contended_with_cancel(&cancel));
+        receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        drop(quic);
+        worker.join().unwrap();
+        assert_eq!(
+            gate.shared
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .active,
+            0
+        );
+        assert!(gate.r2o_try_acquire().is_some());
+    }
+
+    #[test]
+    fn r2o_quic_отмена_без_ожидающих_слотов_освобождает_слот() {
+        let gate = R2oMeasurementGate::new(1);
+        let mut quic = gate.r2o_acquire(&AtomicBool::new(false)).unwrap();
+
+        assert!(!quic.r2o_yield_if_contended_with_cancel(&AtomicBool::new(true)));
+        assert_eq!(
+            gate.shared
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .active,
+            0
+        );
         assert!(gate.r2o_try_acquire().is_some());
     }
 
