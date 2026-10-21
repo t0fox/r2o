@@ -1,7 +1,6 @@
 use crate::flow_capacity::R2oFlowCapacity;
 use crate::netlink::{
-    R2O_NF_INET_FORWARD, R2O_NF_INET_LOCAL_IN, R2O_NF_INET_LOCAL_OUT, R2O_NF_INET_POST_ROUTING,
-    R2O_NF_INET_PRE_ROUTING,
+    R2O_NF_INET_LOCAL_IN, R2O_NF_INET_LOCAL_OUT, R2O_NF_INET_POST_ROUTING, R2O_NF_INET_PRE_ROUTING,
 };
 use crate::r2o_quic::R2oUdpExchangeEvent;
 use r2k_core::addr::Address;
@@ -74,6 +73,7 @@ struct FlowState {
     plan_applied: bool,
     hello_seen: bool,
     hold_attempts: u8,
+    r2o_client_is_low: Option<bool>,
     r2o_client_packets_seen: u8,
     stun: Option<StunFlow>,
 }
@@ -145,10 +145,17 @@ impl R2oUdpSessions {
         let Some(key) = flow_key_from_packet(packet) else {
             return false;
         };
-        let r2o_client_packet = r2o_client_udp_packet(packet, hook);
+        let r2o_known_client_is_low = self
+            .flows
+            .get(&key)
+            .and_then(|r2o_flow| r2o_flow.r2o_client_is_low);
+        let (r2o_client_packet, r2o_client_is_low) =
+            r2o_udp_packet_direction(packet, key, hook, r2o_known_client_is_low)
+                .unwrap_or((false, r2o_known_client_is_low));
 
         if let Some(flow) = self.flows.get_mut(&key) {
             flow.last_seen = now;
+            flow.r2o_client_is_low = r2o_client_is_low;
             if r2o_client_packet {
                 flow.r2o_client_packets_seen = flow.r2o_client_packets_seen.saturating_add(1);
             }
@@ -165,6 +172,7 @@ impl R2oUdpSessions {
                 plan_applied: false,
                 hello_seen: false,
                 hold_attempts: 0,
+                r2o_client_is_low,
                 r2o_client_packets_seen: u8::from(r2o_client_packet),
                 stun: None,
             },
@@ -368,24 +376,50 @@ impl R2oUdpSessions {
     }
 }
 
-fn r2o_client_udp_packet(packet: &[u8], hook: Option<u8>) -> bool {
+fn r2o_udp_packet_direction(
+    packet: &[u8],
+    key: R2oUdpFlowKey,
+    hook: Option<u8>,
+    r2o_known_client_is_low: Option<bool>,
+) -> Option<(bool, Option<bool>)> {
     let Some(view) =
         PacketView::parse(packet).filter(|view| view.protocol == 17 && view.fragment & 0x3fff == 0)
     else {
-        return false;
+        return None;
     };
     let Some(udp) = packet.get(view.l4_offset..view.total_len) else {
-        return false;
+        return None;
     };
     if udp.len() < 8 {
-        return false;
+        return None;
     }
+    let r2o_source = Endpoint {
+        address: view.src,
+        port: u16::from_be_bytes([udp[0], udp[1]]),
+    };
+    let r2o_source_is_low = r2o_source == key.low;
     let source_port = u16::from_be_bytes([udp[0], udp[1]]);
     let destination_port = u16::from_be_bytes([udp[2], udp[3]]);
     match hook {
-        Some(R2O_NF_INET_LOCAL_OUT | R2O_NF_INET_POST_ROUTING) => true,
-        Some(R2O_NF_INET_LOCAL_IN | R2O_NF_INET_PRE_ROUTING | R2O_NF_INET_FORWARD) => false,
-        _ => destination_port == 443 && source_port != 443,
+        Some(R2O_NF_INET_LOCAL_OUT | R2O_NF_INET_POST_ROUTING) => {
+            Some((true, Some(r2o_source_is_low)))
+        }
+        Some(R2O_NF_INET_LOCAL_IN | R2O_NF_INET_PRE_ROUTING) => {
+            Some((false, r2o_known_client_is_low))
+        }
+        _ if let Some(r2o_client_is_low) = r2o_known_client_is_low => Some((
+            r2o_source_is_low == r2o_client_is_low,
+            Some(r2o_client_is_low),
+        )),
+        // FORWARD видит обе стороны транзитного потока; без сохранённого
+        // направления QUIC-клиента используем донорский резерв по порту 443.
+        _ => {
+            let r2o_from_client = destination_port == 443 && source_port != 443;
+            Some((
+                r2o_from_client,
+                r2o_from_client.then_some(r2o_source_is_low),
+            ))
+        }
     }
 }
 

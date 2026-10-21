@@ -1,4 +1,4 @@
-use r2o_datapath::netlink::{R2O_NF_INET_LOCAL_IN, R2O_NF_INET_LOCAL_OUT};
+use r2o_datapath::netlink::{R2O_NF_INET_FORWARD, R2O_NF_INET_LOCAL_OUT};
 use r2o_datapath::r2o_udp_sessions::R2oUdpSessions;
 use std::time::{Duration, Instant};
 
@@ -13,6 +13,47 @@ fn r2o_udp_hold_ограничивает_удержание_первыми_во�
         assert!(sessions.r2o_observe_packet_at_hook(
             &outbound,
             start + Duration::from_millis(index),
+            Some(R2O_NF_INET_FORWARD),
+        ));
+    }
+    for index in 0..4 {
+        assert!(sessions.r2o_observe_packet_at_hook(
+            &inbound,
+            start + Duration::from_millis(10 + index),
+            Some(R2O_NF_INET_FORWARD),
+        ));
+    }
+    assert!(sessions.r2o_observe_packet_at_hook(
+        &outbound,
+        start + Duration::from_millis(20),
+        Some(R2O_NF_INET_FORWARD),
+    ));
+    assert!(sessions.r2o_begin_hold(&outbound));
+
+    assert!(sessions.r2o_observe_packet_at_hook(
+        &outbound,
+        start + Duration::from_millis(21),
+        Some(R2O_NF_INET_FORWARD),
+    ));
+    assert!(sessions.r2o_observe_packet_at_hook(
+        &outbound,
+        start + Duration::from_millis(22),
+        Some(R2O_NF_INET_FORWARD),
+    ));
+    assert!(!sessions.r2o_begin_hold(&outbound));
+}
+
+#[test]
+fn r2o_udp_forward_сохраняет_известное_направление_при_двух_портах_443() {
+    let mut sessions = R2oUdpSessions::new().unwrap();
+    let start = Instant::now();
+    let outbound = udp_packet([10, 0, 0, 1], [203, 0, 113, 8], 443, 443);
+    let inbound = udp_packet([203, 0, 113, 8], [10, 0, 0, 1], 443, 443);
+
+    for index in 0..7 {
+        assert!(sessions.r2o_observe_packet_at_hook(
+            &outbound,
+            start + Duration::from_millis(index),
             Some(R2O_NF_INET_LOCAL_OUT),
         ));
     }
@@ -20,25 +61,20 @@ fn r2o_udp_hold_ограничивает_удержание_первыми_во�
         assert!(sessions.r2o_observe_packet_at_hook(
             &inbound,
             start + Duration::from_millis(10 + index),
-            Some(R2O_NF_INET_LOCAL_IN),
+            Some(R2O_NF_INET_FORWARD),
         ));
     }
     assert!(sessions.r2o_observe_packet_at_hook(
         &outbound,
         start + Duration::from_millis(20),
-        Some(R2O_NF_INET_LOCAL_OUT),
+        Some(R2O_NF_INET_FORWARD),
     ));
     assert!(sessions.r2o_begin_hold(&outbound));
 
     assert!(sessions.r2o_observe_packet_at_hook(
         &outbound,
         start + Duration::from_millis(21),
-        Some(R2O_NF_INET_LOCAL_OUT),
-    ));
-    assert!(sessions.r2o_observe_packet_at_hook(
-        &outbound,
-        start + Duration::from_millis(22),
-        Some(R2O_NF_INET_LOCAL_OUT),
+        Some(R2O_NF_INET_FORWARD),
     ));
     assert!(!sessions.r2o_begin_hold(&outbound));
 }

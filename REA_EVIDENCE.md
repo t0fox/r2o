@@ -5670,3 +5670,35 @@ hook, обратные пакеты окно не расходуют. Повто
 `.rea/r2o-udp-window-release-final-arm64-20261021.log` и
 `.rea/r2o-udp-window-smoke-final-arm64-20261021.log`. Другие архитектуры и
 физический роутер не проверялись.
+
+## Направление UDP на NFQUEUE FORWARD — 21.10.2026
+
+Переиспользовано REA Evidence `handle_udp`
+`ev_bcea4682cdbf3f115b7a3bb48abc8dac0aececc76d1d15da4c036a9706817bcc`:
+донор обрабатывает `FORWARD` в обоих направлениях, сначала учитывая известную
+ориентацию потока, а при её отсутствии используя резервное определение по
+порту 443. Ориентация, установленная на исходящем hook, теперь сохраняется в
+Rust-состоянии UDP-потока. Благодаря этому обратный пакет не расходует окно
+клиентского QUIC Initial, в том числе когда оба порта равны 443. Для этой
+сверки использован сохранённый `d2k_udp_path_pre` Evidence
+`ev_8677fe80f86fa111ad4039248f2672dc0b643df01e004ff07a666fcfef634710` и
+SHA-256 донорского `session.c`:
+`39dada3df4bdaf943bf7b2a788090ab3d16a71065a58c16d39901575247f7187`.
+Повторный анализ большого ELF не выполнялся: ранее зафиксированные ограничения
+Windows-провайдера REA приведены выше.
+
+Два регрессионных сценария сначала падали на прежней реализации, затем прошли
+после исправления. Итоговый ARM64/QEMU datapath crate: 245 прошло, 0 ошибок,
+3 штатных пропуска. Итоговый ARM64/QEMU workspace: 971 прошло, 0 ошибок,
+4 штатных пропуска в 73 наборах. Release workspace собран, все шесть программ
+ответили на `--version` под QEMU; `cargo fmt --all -- --check` и `git diff
+--check` прошли. Журналы:
+`.rea/r2o-udp-forward-window-red-arm64-20261021.log`,
+`.rea/r2o-udp-forward-known-red-arm64-20261021.log`,
+`.rea/r2o-udp-forward-window-green-arm64-20261021.log`,
+`.rea/r2o-udp-forward-window-green-arm64-final-20261021.log`,
+`.rea/r2o-udp-forward-window-datapath-final-arm64-20261021.log`,
+`.rea/r2o-udp-forward-window-workspace-final-arm64-20261021.log`,
+`.rea/r2o-udp-forward-window-release-final-arm64-20261021.log` и
+`.rea/r2o-udp-forward-window-smoke-final-arm64-20261021.log`. Другие архитектуры
+и физический роутер не проверялись.
