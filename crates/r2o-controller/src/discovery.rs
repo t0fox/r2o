@@ -67,6 +67,17 @@ impl DiscoveryTarget {
         })
     }
 
+    /// Преобразовать полный снимок TCP в цель того же классификатора.
+    pub fn from_client_shape(event: &r2k_core::control::ClientShapeEvent) -> Option<Self> {
+        Self::from_event(&HelloEvent {
+            key: event.key,
+            host: Some(event.host.clone()),
+            shape: Some(event.shape),
+            r2o_wire_len: Some(event.client_hello.len()),
+            quic_snapshot: None,
+        })
+    }
+
     /// Выбрать цель пассивного наблюдения портала HTTP на порту 80.
     pub fn from_http_portal(event: &HttpPortalEvent) -> Option<Self> {
         if event.answered || event.key[37] != 6 || !matches!(event.key[0], 4 | 6) {
@@ -231,6 +242,19 @@ pub fn revoke_http_response_binding(
 
 /// Проверить, покрывает ли пригодная точная привязка это имя и форму TLS.
 pub fn has_usable_binding(catalog: &Catalog, target: &DiscoveryTarget) -> bool {
+    has_usable_binding_with_input(catalog, target, None)
+}
+
+/// Проверить, покрывает ли цель привязка, измеренная только профилем.
+pub fn has_usable_profile_binding(catalog: &Catalog, target: &DiscoveryTarget) -> bool {
+    has_usable_binding_with_input(catalog, target, Some(2))
+}
+
+fn has_usable_binding_with_input(
+    catalog: &Catalog,
+    target: &DiscoveryTarget,
+    input: Option<u8>,
+) -> bool {
     catalog.boxes.iter().any(|box_record| {
         box_record.bindings.iter().any(|binding| {
             if !binding.enabled
@@ -239,6 +263,7 @@ pub fn has_usable_binding(catalog: &Catalog, target: &DiscoveryTarget) -> bool {
                 || !(binding.family == target.family || binding.family == 0 && target.family == 4)
                 || !(binding.transport == 6 || binding.transport == 0)
                 || !(binding.shape == target.shape || binding.shape == 0)
+                || input.is_some_and(|expected| binding.input != expected)
             {
                 return false;
             }
@@ -339,10 +364,22 @@ pub fn add_measured_binding(
     source_text: &str,
     now: i64,
 ) -> Result<String, String> {
+    add_measured_binding_with_input(catalog, target, source_text, now, 2)
+}
+
+/// Сохранить измеренный план с источником входного ClientHello.
+pub fn add_measured_binding_with_input(
+    catalog: &mut Catalog,
+    target: &DiscoveryTarget,
+    source_text: &str,
+    now: i64,
+    input: u8,
+) -> Result<String, String> {
     if !matches!(target.family, 4 | 6)
         || !matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_HTTP)
+        || !matches!(input, 1 | 2)
     {
-        return Err("discovery target has an unsupported family or TLS shape".into());
+        return Err("discovery target or input source is unsupported".into());
     }
     let normalized = crate::domain::normalize(&target.host)
         .map_err(|_| "discovery target has an invalid hostname")?;
@@ -457,7 +494,7 @@ pub fn add_measured_binding(
         family: target.family,
         shape: target.shape,
         verified_by: 1,
-        input: 2,
+        input,
         ..Binding::default()
     });
 
@@ -740,6 +777,29 @@ mod tests {
                 .ip(),
             IpAddr::V4(Ipv4Addr::new(198, 51, 100, 80))
         );
+    }
+
+    #[test]
+    fn профильная_привязка_отличается_от_проверенной_живыми_байтами() {
+        let target = DiscoveryTarget {
+            host: "example.com".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: r2k_core::control::SHAPE_MODERN,
+        };
+        let mut catalog = crate::catalog::Catalog::default();
+        super::add_measured_binding(
+            &mut catalog,
+            &target,
+            "r2o-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit sni_middle +0\n",
+            100,
+        )
+        .unwrap();
+
+        assert!(super::has_usable_binding(&catalog, &target));
+        assert!(super::has_usable_profile_binding(&catalog, &target));
+        catalog.boxes[0].bindings[0].input = 1;
+        assert!(!super::has_usable_profile_binding(&catalog, &target));
     }
 
     #[test]

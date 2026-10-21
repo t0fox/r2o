@@ -22,6 +22,7 @@ pub const EVENT_R2O_TCP_STALL: u16 = 0x0011;
 pub const EVENT_R2O_TCP_FIN_RETRY: u16 = 0x0012;
 pub const EVENT_R2O_TCP_RST_AFTER_APP: u16 = 0x0013;
 pub const EVENT_R2O_QUIC_STALL: u16 = 0x0016;
+pub const EVENT_CLIENT_SHAPE: u16 = 0x0017;
 pub const EVENT_R2O_JOURNAL_ENTRY: u16 = 0x0014;
 pub const EVENT_R2O_JOURNAL_END: u16 = 0x0015;
 pub const COMMAND_SET_NAME: u16 = 0x0081;
@@ -154,6 +155,60 @@ pub struct HelloEvent {
     pub r2o_wire_len: Option<usize>,
     /// Исходные QUIC Initial для последующей точной пробы.
     pub quic_snapshot: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClientShapeEvent {
+    pub key: [u8; KEY_LEN],
+    pub host: Vec<u8>,
+    pub shape: u8,
+    pub client_hello: Vec<u8>,
+}
+
+impl ClientShapeEvent {
+    /// Закодировать полный ClientHello вместе с потоком и проверяемой формой.
+    pub fn event_body(&self) -> Option<Vec<u8>> {
+        if !valid_flow_key(&self.key)
+            || self.key[37] != 6
+            || self.host.is_empty()
+            || self.host.len() > MAX_DNS_NAME_LEN
+            || !matches!(self.shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP)
+            || self.client_hello.len() > 4096
+            || self.client_hello.len() < 5
+        {
+            return None;
+        }
+        let tls = crate::tls::parse(&self.client_hello);
+        let client_shape = if tls.ech_offer {
+            SHAPE_ECH_TCP
+        } else if tls.is_tls13 {
+            SHAPE_MODERN
+        } else {
+            SHAPE_LEGACY
+        };
+        let sni = tls
+            .sni_range
+            .as_ref()
+            .and_then(|range| self.client_hello.get(range.clone()));
+        if !tls.is_client_hello
+            || tls.extensions_truncated
+            || tls.record_end != Some(self.client_hello.len())
+            || client_shape != self.shape
+            || sni.is_none_or(|name| !name.eq_ignore_ascii_case(&self.host))
+        {
+            return None;
+        }
+        let mut body =
+            Vec::with_capacity(KEY_LEN + 1 + self.host.len() + 5 + self.client_hello.len());
+        body.extend_from_slice(&self.key);
+        body.push(self.host.len() as u8);
+        body.extend_from_slice(&self.host);
+        body.push(self.shape);
+        body.extend_from_slice(&(self.client_hello.len() as u16).to_be_bytes());
+        body.extend_from_slice(&(self.client_hello.len() as u16).to_be_bytes());
+        body.extend_from_slice(&self.client_hello);
+        Some(body)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1190,6 +1245,60 @@ pub fn decode_hello(frame: &Frame) -> Result<HelloEvent, &'static str> {
         r2o_wire_len,
         quic_snapshot,
     })
+}
+
+pub fn decode_client_shape(frame: &Frame) -> Result<ClientShapeEvent, &'static str> {
+    if frame.kind != EVENT_CLIENT_SHAPE || frame.body.len() < KEY_LEN + 6 {
+        return Err("неверное событие полного ClientHello TCP");
+    }
+    let key: [u8; KEY_LEN] = frame.body[..KEY_LEN]
+        .try_into()
+        .map_err(|_| "неверный ключ события полного ClientHello")?;
+    if !valid_flow_key(&key) || key[37] != 6 {
+        return Err("снимок ClientHello привязан не к TCP-потоку");
+    }
+    let host_len = usize::from(frame.body[KEY_LEN]);
+    if host_len == 0 || host_len > MAX_DNS_NAME_LEN {
+        return Err("неверная длина имени полного ClientHello");
+    }
+    let shape_at = KEY_LEN + 1 + host_len;
+    let wire_len_at = shape_at + 1;
+    let snapshot_len_at = wire_len_at + 2;
+    let snapshot_at = snapshot_len_at + 2;
+    if frame.body.len() < snapshot_at {
+        return Err("усечён заголовок полного ClientHello");
+    }
+    let shape = frame.body[shape_at];
+    if !matches!(shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP) {
+        return Err("полный ClientHello имеет неподдерживаемую форму");
+    }
+    let wire_len = usize::from(u16::from_be_bytes([
+        frame.body[wire_len_at],
+        frame.body[wire_len_at + 1],
+    ]));
+    let snapshot_len = usize::from(u16::from_be_bytes([
+        frame.body[snapshot_len_at],
+        frame.body[snapshot_len_at + 1],
+    ]));
+    let snapshot_end = snapshot_at
+        .checked_add(snapshot_len)
+        .ok_or("переполнена длина полного ClientHello")?;
+    if !(5..=4096).contains(&snapshot_len)
+        || wire_len != snapshot_len
+        || snapshot_end != frame.body.len()
+    {
+        return Err("неверная длина полного ClientHello");
+    }
+    let event = ClientShapeEvent {
+        key,
+        host: frame.body[KEY_LEN + 1..shape_at].to_vec(),
+        shape,
+        client_hello: frame.body[snapshot_at..snapshot_end].to_vec(),
+    };
+    if event.event_body().is_none() {
+        return Err("форма, SNI или TLS-запись не совпадает со снимком ClientHello");
+    }
+    Ok(event)
 }
 
 fn valid_flow_key(key: &[u8; KEY_LEN]) -> bool {

@@ -66,6 +66,7 @@ pub struct TcpHello {
     pub host: Option<Vec<u8>>,
     pub shape: u8,
     pub r2o_wire_len: Option<usize>,
+    pub client_hello: Option<Vec<u8>>,
 }
 
 impl TcpHello {
@@ -89,6 +90,17 @@ impl TcpHello {
         }
         body
     }
+
+    /// Закодировать точный снимок TCP для повторного измерения слабой привязки.
+    pub fn shape_event_body(&self) -> Option<Vec<u8>> {
+        let event = r2k_core::control::ClientShapeEvent {
+            key: self.key.wire_key(),
+            host: self.host.clone()?,
+            shape: self.shape,
+            client_hello: self.client_hello.clone()?,
+        };
+        event.event_body()
+    }
 }
 
 pub fn tcp_http_hello_from_bytes(key: TcpFlowKey, bytes: &[u8]) -> Option<TcpHello> {
@@ -98,6 +110,7 @@ pub fn tcp_http_hello_from_bytes(key: TcpFlowKey, bytes: &[u8]) -> Option<TcpHel
         host: Some(host),
         shape: r2k_core::control::SHAPE_HTTP,
         r2o_wire_len: None,
+        client_hello: None,
     })
 }
 
@@ -136,6 +149,11 @@ pub fn tcp_hello_from_bytes(key: TcpFlowKey, bytes: &[u8]) -> Option<TcpHello> {
         host,
         shape,
         r2o_wire_len: tls.record_end,
+        client_hello: tls
+            .record_end
+            .filter(|length| *length == bytes.len())
+            .and_then(|length| bytes.get(..length))
+            .map(<[u8]>::to_vec),
     })
 }
 

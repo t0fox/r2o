@@ -2,19 +2,20 @@ use r2k_core::control::{
     self, ADDR_PROBE_LEASE_MAX_MS, COMMAND_CLEAR, COMMAND_DEL_ADDR, COMMAND_DEL_ADDR_PROBE,
     COMMAND_DEL_VOICE_ADDR_PROBE, COMMAND_SET_ADDR, COMMAND_SET_ADDR_PROBE, COMMAND_SET_HTTPS,
     COMMAND_SET_NAME, COMMAND_SET_TCP_STALL_BUDGETS, COMMAND_SET_VOICE_ADDR,
-    COMMAND_SET_VOICE_ADDR_PROBE, EVENT_APPLIED, EVENT_HELLO, EVENT_HTTP_PORTAL,
-    EVENT_HTTP_RESPONSE, EVENT_R2O_JOURNAL_END, EVENT_R2O_JOURNAL_ENTRY, EVENT_R2O_QUIC_STALL,
-    EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_RST_AFTER_APP,
-    EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_SUSPECT,
-    Frame, PROTOCOL_VERSION, RELEASE_ID, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN,
-    SHAPE_QUIC, SHAPE_VOICE, VOICE_ADDR_PROBE_LEASE_MAX_MS, decode_ack, decode_applied,
-    decode_greeting, decode_hello, decode_http_portal, decode_http_response, decode_r2o_quic_stall,
-    decode_r2o_quic_suspect, decode_r2o_tcp_fin_retry, decode_r2o_tcp_rst_after_app,
-    decode_r2o_tcp_silence, decode_r2o_tcp_stall, decode_r2o_voice_proof, decode_r2o_voice_suspect,
-    encode_delete_addr, encode_delete_addr_probe, encode_delete_name, encode_delete_name_probe,
-    encode_delete_voice_addr_probe, encode_frame, encode_set_addr, encode_set_addr_probe,
-    encode_set_bypass, encode_set_https, encode_set_name, encode_set_name_probe, encode_set_suffix,
-    encode_set_tcp_stall_budgets, encode_set_voice_addr, encode_set_voice_addr_probe, read_frame,
+    COMMAND_SET_VOICE_ADDR_PROBE, EVENT_APPLIED, EVENT_CLIENT_SHAPE, EVENT_HELLO,
+    EVENT_HTTP_PORTAL, EVENT_HTTP_RESPONSE, EVENT_R2O_JOURNAL_END, EVENT_R2O_JOURNAL_ENTRY,
+    EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_FIN_RETRY,
+    EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF,
+    EVENT_R2O_VOICE_SUSPECT, Frame, PROTOCOL_VERSION, RELEASE_ID, SHAPE_ECH_TCP, SHAPE_HTTP,
+    SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, VOICE_ADDR_PROBE_LEASE_MAX_MS, decode_ack,
+    decode_applied, decode_client_shape, decode_greeting, decode_hello, decode_http_portal,
+    decode_http_response, decode_r2o_quic_stall, decode_r2o_quic_suspect, decode_r2o_tcp_fin_retry,
+    decode_r2o_tcp_rst_after_app, decode_r2o_tcp_silence, decode_r2o_tcp_stall,
+    decode_r2o_voice_proof, decode_r2o_voice_suspect, encode_delete_addr, encode_delete_addr_probe,
+    encode_delete_name, encode_delete_name_probe, encode_delete_voice_addr_probe, encode_frame,
+    encode_set_addr, encode_set_addr_probe, encode_set_bypass, encode_set_https, encode_set_name,
+    encode_set_name_probe, encode_set_suffix, encode_set_tcp_stall_budgets, encode_set_voice_addr,
+    encode_set_voice_addr_probe, read_frame,
 };
 use r2k_core::plan::{PROTO_HTTP, PROTO_VOICE, Plan};
 use r2o_controller::catalog::{Catalog, DomainObservation, GroupKey};
@@ -2039,6 +2040,7 @@ fn r2o_run_discovery_candidate_trial(
     source_text: &str,
     mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
+    client_hello: Option<&[u8]>,
 ) -> (Result<r2o_controller::fetch::FetchResult, String>, bool) {
     let plan_id = match random_id() {
         Ok(id) => id,
@@ -2062,7 +2064,107 @@ fn r2o_run_discovery_candidate_trial(
         plan_text,
         group_plan: false,
     };
-    r2o_family_recovery_sibling_trial(target, destination, &candidate, mark, commands)
+    let (result, applied) =
+        r2o_family_recovery_sibling_trial(target, destination, &candidate, mark, commands);
+    if client_hello.is_some()
+        && r2o_family_recovery_decision(&result, applied) == R2oFamilyRecoveryDecision::Verified
+    {
+        let snapshot_applied = r2o_discovery_client_shape_trial(
+            target,
+            &candidate.plan_text,
+            client_hello.expect("снимок проверен выше"),
+            mark,
+            commands,
+        )
+        .unwrap_or(false);
+        return (result, applied && snapshot_applied);
+    }
+    (result, applied)
+}
+
+#[cfg(unix)]
+fn r2o_discovery_client_shape_trial(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    source_text: &str,
+    client_hello: &[u8],
+    mark: Option<u32>,
+    commands: &SyncSender<HttpSearchCommand>,
+) -> Result<bool, String> {
+    let destination = target
+        .endpoint
+        .parse::<std::net::SocketAddr>()
+        .map_err(|error| format!("адрес снимка ClientHello недопустим: {error}"))?;
+    let bound = BoundTcpProbe::open(target.family, mark)
+        .map_err(|error| format!("не удалось открыть сокет снимка ClientHello: {error}"))?;
+    let local_port = bound.local_port;
+    let trial_id = random_id().map_err(|error| error.to_string())?;
+    let records = compile_text(source_text).map_err(|error| error.to_string())?;
+    let plan = Plan::parse(&records).map_err(|error| error.to_string())?;
+    let command = encode_set_name_probe(
+        &target.host,
+        target.shape,
+        target.family,
+        local_port,
+        &records,
+        trial_id,
+    )
+    .map_err(|error| error.to_string())?;
+    let ack = ask_http_controller(commands, |reply| HttpSearchCommand::InstallProbe {
+        host: target.host.clone(),
+        shape: target.shape,
+        family: target.family,
+        port: local_port,
+        command,
+        trial_id,
+        reply,
+    })?;
+    if ack.trial_id != Some(trial_id) {
+        let _ = ask_http_controller(commands, |reply| HttpSearchCommand::DeleteProbe {
+            host: target.host.clone(),
+            shape: target.shape,
+            family: target.family,
+            port: local_port,
+            reply,
+        });
+        return Err("подтверждение пробы снимка содержит чужой trial ID".into());
+    }
+    if !ack.ok {
+        ask_http_controller(commands, |reply| HttpSearchCommand::DeleteProbe {
+            host: target.host.clone(),
+            shape: target.shape,
+            family: target.family,
+            port: local_port,
+            reply,
+        })?;
+        return Err("датапат отверг временный план снимка ClientHello".into());
+    }
+
+    let send_result = match bound.connect(destination, std::time::Duration::from_secs(8)) {
+        Ok((mut stream, _, connected_port, _)) if connected_port == local_port => {
+            std::io::Write::write_all(&mut stream, client_hello)
+                .map_err(|error| format!("не удалось отправить снимок ClientHello: {error}"))
+        }
+        Ok((_stream, _, _, _)) => Err("сокет снимка получил неожиданный локальный порт".into()),
+        Err(error) => Err(format!("не удалось подключить снимок ClientHello: {error}")),
+    };
+    let delete_result = ask_http_controller(commands, |reply| HttpSearchCommand::DeleteProbe {
+        host: target.host.clone(),
+        shape: target.shape,
+        family: target.family,
+        port: local_port,
+        reply,
+    });
+    let events = r2o_collect_controller_applied_events(
+        commands,
+        trial_id,
+        std::time::Duration::from_millis(500),
+    );
+    send_result?;
+    delete_result?;
+    let events = events?;
+    Ok(events.iter().any(|event| {
+        r2o_family_applied_flow_matches(event, target, local_port, plan.id, trial_id, true)
+    }))
 }
 
 #[cfg(unix)]
@@ -2703,6 +2805,7 @@ fn r2o_take_ready_quic_discovery(
 #[cfg(unix)]
 struct DiscoveryWorker {
     jobs: Arc<(std::sync::Mutex<R2oDiscoveryQueue>, std::sync::Condvar)>,
+    client_hellos: Arc<std::sync::Mutex<HashMap<(String, u8), Vec<u8>>>>,
     outcomes: Receiver<DiscoveryOutcome>,
     cancel: Arc<AtomicBool>,
     seen: HashSet<r2o_controller::discovery::DiscoveryTarget>,
@@ -2710,6 +2813,7 @@ struct DiscoveryWorker {
     failed_at: HashMap<(String, u8, String), std::time::Instant>,
     failed_retry_after: HashMap<(String, u8, String), std::time::Duration>,
     clear_streaks: HashMap<(String, u8, String), u8>,
+    client_snapshot_targets: HashSet<r2o_controller::discovery::DiscoveryTarget>,
     active: HashMap<(String, u8), r2o_controller::discovery::DiscoveryTarget>,
     threads: Vec<JoinHandle<()>>,
 }
@@ -3394,21 +3498,50 @@ impl DiscoveryWorker {
         measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
         commands: SyncSender<HttpSearchCommand>,
     ) -> Self {
+        let client_hellos = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let runner_client_hellos = Arc::clone(&client_hellos);
         let runner: Arc<R2oDiscoveryRunner> = Arc::new(move |target, cancel| {
-            let outcome = classify_discovery_target(target.clone(), cancel, mark);
+            let client_hello = runner_client_hellos
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&r2o_discovery_task_key(&target));
+            let outcome = classify_discovery_target_with_client_hello(
+                target.clone(),
+                client_hello.as_deref(),
+                cancel,
+                mark,
+            );
             let Some(plan_text) = outcome.plan_text.as_deref() else {
                 return outcome;
             };
-            let (result, applied) =
-                r2o_run_discovery_candidate_trial(&target, plan_text, mark, &commands);
+            let (result, applied) = r2o_run_discovery_candidate_trial(
+                &target,
+                plan_text,
+                mark,
+                &commands,
+                client_hello.as_deref(),
+            );
             r2o_confirm_discovery_outcome(outcome, result, applied)
         });
-        Self::r2o_new_with_runner(measurement_gate, runner)
+        Self::r2o_new_with_runner_and_client_hellos(measurement_gate, runner, client_hellos)
     }
 
+    #[cfg(test)]
     fn r2o_new_with_runner(
         measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
         runner: Arc<R2oDiscoveryRunner>,
+    ) -> Self {
+        Self::r2o_new_with_runner_and_client_hellos(
+            measurement_gate,
+            runner,
+            Arc::new(std::sync::Mutex::new(HashMap::new())),
+        )
+    }
+
+    fn r2o_new_with_runner_and_client_hellos(
+        measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
+        runner: Arc<R2oDiscoveryRunner>,
+        client_hellos: Arc<std::sync::Mutex<HashMap<(String, u8), Vec<u8>>>>,
     ) -> Self {
         let jobs = Arc::new((
             std::sync::Mutex::new(R2oDiscoveryQueue::default()),
@@ -3497,6 +3630,7 @@ impl DiscoveryWorker {
         }
         Self {
             jobs,
+            client_hellos,
             outcomes,
             cancel,
             seen: HashSet::new(),
@@ -3504,6 +3638,7 @@ impl DiscoveryWorker {
             failed_at: HashMap::new(),
             failed_retry_after: HashMap::new(),
             clear_streaks: HashMap::new(),
+            client_snapshot_targets: HashSet::new(),
             active: HashMap::new(),
             threads,
         }
@@ -3573,6 +3708,53 @@ impl DiscoveryWorker {
         }
     }
 
+    fn queue_client_snapshot(
+        &mut self,
+        target: r2o_controller::discovery::DiscoveryTarget,
+        client_hello: Vec<u8>,
+    ) -> bool {
+        let shape = r2k_core::tls::parse(&client_hello);
+        let observed_shape = if shape.ech_offer {
+            SHAPE_ECH_TCP
+        } else if shape.is_tls13 {
+            SHAPE_MODERN
+        } else {
+            SHAPE_LEGACY
+        };
+        if !matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY)
+            || observed_shape != target.shape
+            || Trigger::tls_client_hello(&target.host, &client_hello).is_err()
+        {
+            return false;
+        }
+        let task_key = r2o_discovery_task_key(&target);
+        if self.active.contains_key(&task_key) {
+            return false;
+        }
+        self.seen.remove(&target);
+        self.seen_order.retain(|seen| seen != &target);
+        self.client_hellos
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(task_key, client_hello);
+        if !self.queue(target.clone()) {
+            self.client_hellos
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&r2o_discovery_task_key(&target));
+            return false;
+        }
+        self.client_snapshot_targets.insert(target);
+        true
+    }
+
+    fn take_client_snapshot_provenance(
+        &mut self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+    ) -> bool {
+        self.client_snapshot_targets.remove(target)
+    }
+
     fn queue_after_confirmed_failure(
         &mut self,
         target: r2o_controller::discovery::DiscoveryTarget,
@@ -3640,6 +3822,10 @@ impl DiscoveryWorker {
     fn r2o_complete_outcome(&mut self, mut outcome: DiscoveryOutcome) -> DiscoveryOutcome {
         let task_key = r2o_discovery_task_key(&outcome.target);
         let failure_key = r2o_discovery_failure_key(&outcome.target);
+        self.client_hellos
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&task_key);
         if self.active.get(&task_key) == Some(&outcome.target) {
             self.active.remove(&task_key);
         }
@@ -3710,15 +3896,30 @@ fn r2o_discovery_clear_retry_after(streak: u8) -> std::time::Duration {
 }
 
 #[cfg(unix)]
+#[cfg(test)]
 fn classify_discovery_target(
     target: r2o_controller::discovery::DiscoveryTarget,
     cancel: Arc<AtomicBool>,
     mark: Option<u32>,
 ) -> DiscoveryOutcome {
-    let trigger = match target.shape {
-        SHAPE_MODERN => Trigger::tls13(&target.host),
-        SHAPE_LEGACY => Trigger::tls(&target.host),
-        _ => Err("форма TLS не поддерживается"),
+    classify_discovery_target_with_client_hello(target, None, cancel, mark)
+}
+
+#[cfg(unix)]
+fn classify_discovery_target_with_client_hello(
+    target: r2o_controller::discovery::DiscoveryTarget,
+    client_hello: Option<&[u8]>,
+    cancel: Arc<AtomicBool>,
+    mark: Option<u32>,
+) -> DiscoveryOutcome {
+    let trigger = if let Some(client_hello) = client_hello {
+        Trigger::tls_client_hello(&target.host, client_hello)
+    } else {
+        match target.shape {
+            SHAPE_MODERN => Trigger::tls13(&target.host),
+            SHAPE_LEGACY => Trigger::tls(&target.host),
+            _ => Err("форма TLS не поддерживается"),
+        }
     };
     let Ok(trigger) = trigger else {
         return DiscoveryOutcome {
@@ -4258,13 +4459,20 @@ impl ControlClient {
                 if let Some((worker, catalog, path, _)) = &mut discovery
                     && let Some(outcome) = worker.try_outcome()
                 {
+                    let client_input = worker.take_client_snapshot_provenance(&outcome.target)
+                        && outcome.plan_text.is_some();
                     if outcome.queue_expired {
                         println!(
                             "подозрение {} устарело в очереди Discovery; сетевой замер не запускался",
                             outcome.target.host
                         );
                     } else {
-                        self.apply_discovery_outcome(outcome, catalog, path)?;
+                        self.apply_discovery_outcome_with_input(
+                            outcome,
+                            catalog,
+                            path,
+                            if client_input { 1 } else { 2 },
+                        )?;
                     }
                     std::io::stdout().flush()?;
                     continue;
@@ -5077,6 +5285,39 @@ impl ControlClient {
                     std::io::stdout().flush()?;
                     continue;
                 }
+                if frame.kind == EVENT_CLIENT_SHAPE {
+                    let shape = decode_client_shape(&frame)
+                        .map_err(|error| format!("снимок ClientHello: {error}"))?;
+                    if let Some((worker, catalog, _, _)) = &mut discovery
+                        && let Some(target) =
+                            r2o_controller::discovery::DiscoveryTarget::from_client_shape(&shape)
+                        && (r2o_controller::discovery::has_usable_profile_binding(catalog, &target)
+                            || !r2o_controller::discovery::has_usable_binding(catalog, &target))
+                    {
+                        let profile_only =
+                            r2o_controller::discovery::has_usable_profile_binding(catalog, &target);
+                        if worker.queue_client_snapshot(target.clone(), shape.client_hello) {
+                            if profile_only {
+                                println!(
+                                    "привязка {} повторно измеряется по полному ClientHello клиента",
+                                    target.host
+                                );
+                            } else {
+                                println!(
+                                    "автоклассификация {} запущена по полному ClientHello клиента",
+                                    target.host
+                                );
+                            }
+                        } else {
+                            println!(
+                                "снимок {} пропущен: проверка уже запущена или очередь занята",
+                                target.host
+                            );
+                        }
+                    }
+                    std::io::stdout().flush()?;
+                    continue;
+                }
                 if frame.kind != EVENT_HELLO {
                     continue;
                 }
@@ -5137,7 +5378,12 @@ impl ControlClient {
                     && let Some(target) =
                         r2o_controller::discovery::DiscoveryTarget::from_event(&hello)
                 {
-                    if r2o_controller::discovery::has_usable_binding(catalog, &target) {
+                    if r2o_controller::discovery::has_usable_profile_binding(catalog, &target) {
+                        println!(
+                            "каталог покрывает {}, но привязка измерена профилем; жду полный снимок ClientHello",
+                            target.host
+                        );
+                    } else if r2o_controller::discovery::has_usable_binding(catalog, &target) {
                         println!("план каталога уже покрывает {} ({shape_name})", target.host);
                     } else if let Some(group) = matching_domain_group(catalog, &target) {
                         println!(
@@ -6229,11 +6475,22 @@ impl ControlClient {
         Ok(())
     }
 
+    #[cfg(test)]
     fn apply_discovery_outcome(
         &mut self,
         outcome: DiscoveryOutcome,
         catalog: &mut Catalog,
         catalog_path: &std::path::Path,
+    ) -> Result<(), Box<dyn Error>> {
+        self.apply_discovery_outcome_with_input(outcome, catalog, catalog_path, 2)
+    }
+
+    fn apply_discovery_outcome_with_input(
+        &mut self,
+        outcome: DiscoveryOutcome,
+        catalog: &mut Catalog,
+        catalog_path: &std::path::Path,
+        input: u8,
     ) -> Result<(), Box<dyn Error>> {
         if outcome.direct_clear {
             return self.apply_discovery_direct_clear(&outcome.target, catalog, catalog_path);
@@ -6245,7 +6502,11 @@ impl ControlClient {
             );
             return Ok(());
         };
-        if r2o_controller::discovery::has_usable_binding(catalog, &outcome.target) {
+        let remeasuring_profile = input == 1
+            && r2o_controller::discovery::has_usable_profile_binding(catalog, &outcome.target);
+        if r2o_controller::discovery::has_usable_binding(catalog, &outcome.target)
+            && !remeasuring_profile
+        {
             println!(
                 "автопоиск пропущен: каталог уже покрывает {}",
                 outcome.target.host
@@ -6254,7 +6515,11 @@ impl ControlClient {
         }
 
         let (_lock, previous) = locked_catalog(catalog_path, catalog)?;
-        if r2o_controller::discovery::has_usable_binding(&previous, &outcome.target) {
+        let remeasuring_profile = input == 1
+            && r2o_controller::discovery::has_usable_profile_binding(&previous, &outcome.target);
+        if r2o_controller::discovery::has_usable_binding(&previous, &outcome.target)
+            && !remeasuring_profile
+        {
             *catalog = previous;
             println!(
                 "автопоиск пропущен: другой контроллер уже сохранил план для {}",
@@ -6267,11 +6532,12 @@ impl ControlClient {
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
         let mut updated = previous.clone();
-        let plan_id = r2o_controller::discovery::add_measured_binding(
+        let plan_id = r2o_controller::discovery::add_measured_binding_with_input(
             &mut updated,
             &outcome.target,
             &source_text,
             now,
+            input,
         )
         .map_err(|error| format!("не удалось сохранить результат классификации: {error}"))?;
         let plan_text = updated
@@ -9482,6 +9748,93 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn r2o_discovery_очередь_сохраняет_снятый_clienthello_до_старта_задачи() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
+        let held = gate.r2o_try_acquire().unwrap();
+        let runner = Arc::new(
+            |target: r2o_controller::discovery::DiscoveryTarget, _cancel: Arc<AtomicBool>| {
+                super::DiscoveryOutcome {
+                    target,
+                    plan_text: None,
+                    detail: "проверка завершена".into(),
+                    queue_expired: false,
+                    direct_clear: false,
+                    retry_after: None,
+                }
+            },
+        );
+        let mut worker = super::DiscoveryWorker::r2o_new_with_runner(gate, runner);
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "example.com".into(),
+            endpoint: "198.51.100.2:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let captured = r2o_controller::hello::modern_client_hello("example.com").unwrap();
+
+        assert!(worker.queue_client_snapshot(target.clone(), captured.clone()));
+        assert_eq!(
+            worker
+                .client_hellos
+                .lock()
+                .unwrap()
+                .get(&super::r2o_discovery_task_key(&target)),
+            Some(&captured)
+        );
+        assert!(worker.take_client_snapshot_provenance(&target));
+        drop(held);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_снимок_clienthello_соблюдает_паузы_повтора_discovery() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
+        let held = gate.r2o_try_acquire().unwrap();
+        let runner = Arc::new(
+            |target: r2o_controller::discovery::DiscoveryTarget, _cancel: Arc<AtomicBool>| {
+                super::DiscoveryOutcome {
+                    target,
+                    plan_text: None,
+                    detail: "проверка завершена".into(),
+                    queue_expired: false,
+                    direct_clear: false,
+                    retry_after: None,
+                }
+            },
+        );
+        let mut worker = super::DiscoveryWorker::r2o_new_with_runner(gate, runner);
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "example.com".into(),
+            endpoint: "198.51.100.2:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let failure_key = super::r2o_discovery_failure_key(&target);
+        let failed_at = std::time::Instant::now();
+        worker.failed_at.insert(failure_key.clone(), failed_at);
+        worker
+            .failed_retry_after
+            .insert(failure_key.clone(), super::R2O_DISCOVERY_FAILURE_RETRY);
+        let captured = r2o_controller::hello::modern_client_hello("example.com").unwrap();
+
+        assert!(!worker.queue_client_snapshot(target, captured));
+        assert!(worker.client_hellos.lock().unwrap().is_empty());
+        assert_eq!(worker.failed_at.get(&failure_key), Some(&failed_at));
+        assert_eq!(
+            worker.failed_retry_after.get(&failure_key),
+            Some(&super::R2O_DISCOVERY_FAILURE_RETRY)
+        );
+        drop(held);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn r2o_discovery_запускает_параллельные_задачи_в_пределах_общих_слотов() {
         use std::sync::atomic::AtomicBool;
         use std::sync::{Arc, Mutex, mpsc};
@@ -11461,6 +11814,8 @@ mod tests {
                 Mutex::new(super::R2oDiscoveryQueue::default()),
                 Condvar::new(),
             )),
+            client_hellos: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            client_snapshot_targets: std::collections::HashSet::new(),
             outcomes,
             cancel: Arc::new(AtomicBool::new(false)),
             seen: std::collections::HashSet::from([target.clone()]),

@@ -1,7 +1,7 @@
 use r2k_core::addr::Address;
 use r2k_core::control::{
-    EVENT_HELLO, EVENT_HTTP_PORTAL, Frame, HttpPortalEvent, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC,
-    decode_hello, decode_http_portal,
+    EVENT_CLIENT_SHAPE, EVENT_HELLO, EVENT_HTTP_PORTAL, Frame, HttpPortalEvent, SHAPE_LEGACY,
+    SHAPE_MODERN, SHAPE_QUIC, decode_client_shape, decode_hello, decode_http_portal,
 };
 use r2o_datapath::capture::{TcpFlowKey, quic_hello_from_packet, tcp_hello_from_bytes};
 
@@ -62,6 +62,15 @@ fn captured_client_hello_events_keep_tls12_and_tls13_shapes_distinct() {
     assert_eq!(decoded.shape, Some(SHAPE_MODERN));
     assert_eq!(decoded.host, modern_event.host);
     assert_eq!(decoded.r2o_wire_len, Some(modern.len()));
+
+    let shape_body = modern_event.shape_event_body().unwrap();
+    let shape = decode_client_shape(&Frame {
+        kind: EVENT_CLIENT_SHAPE,
+        body: shape_body,
+    })
+    .unwrap();
+    assert_eq!(shape.client_hello, modern);
+    assert_eq!(shape.host.as_slice(), b"__SNI__");
 }
 
 #[test]

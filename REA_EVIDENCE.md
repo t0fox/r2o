@@ -5606,6 +5606,117 @@ Rust прошло. Журналы: `.rea/r2o-quic-mark-arm64-targeted-20261021.l
 `.rea/r2o-quic-mark-arm64-build-qemu-20261021.log`. Другие архитектуры и
 физический роутер не проверялись.
 
+## ClientHello до постановки автоклассификации в очередь — 21.10.2026
+
+Использовано существующее Evidence для донорского `core/sched.c:on_shape`
+(Clang 19 AST и актуальный `test_sched` на исходниках с SHA-256, указанными в
+разделе «Автоклассификатор: повторный замер по снятому TCP ClientHello» выше).
+REA уже установило ветвь `T_ASKING`: когда приходит полный клиентский снимок,
+он должен стать входом классификатора, а не остаться только диагностическими
+метаданными. Декомпиляцию и REA-проверки подтверждённого участка не повторял.
+
+В R2O полный `EVENT_CLIENT_SHAPE` теперь отправляется основному контроллеру
+перед `EVENT_HELLO`. Для цели без пригодной точной привязки это позволяет
+поставить Discovery сразу с фактическими байтами; для `input=2` продолжает
+работать подтверждённый перемер. Текущий формат `EVENT_HELLO`, содержимое
+журнала и поток `.snapshot` сохранены. События допускаются только после
+проверки полного TLS record, SNI, формы и TCP-ключа в `decode_client_shape`.
+
+Новый ARM64/QEMU тест проверки порядка событий ожидаемо упал на старом коде
+(контроллер получил `EVENT_HELLO` раньше снимка), затем прошёл после исправления.
+Полный `r2o-datapath`: 245 прошло, 0 ошибок, 3 штатных пропуска. Полный
+`r2o-controller`: 343 прошло, 0 ошибок, 1 штатный пропуск. Workspace: 977
+прошло, 0 ошибок, 4 штатных пропуска в 73 наборах. Финальная проверка controller
+повторена после настройки Debian ARM64 loader в WSL; исходный запуск упирался в
+отсутствующий ELF loader, а не в отказ теста. Форматирование и `git diff --check`
+прошли.
+
+Журналы: `.rea/priority1-clienthello-order-red-arm64.log`,
+`.rea/priority1-r2o-datapath-clienthello-order-arm64.log`,
+`.rea/priority1-r2o-controller-clienthello-order-arm64.log`,
+`.rea/priority1-r2o-controller-clienthello-order-arm64-final.log` и
+`.rea/priority1-workspace-clienthello-order-arm64.log`. Release workspace
+собран под ARM64, и все шесть программ прошли `--version` через QEMU; журналы:
+`.rea/priority1-workspace-clienthello-order-release-arm64.log` и
+`.rea/priority1-workspace-clienthello-order-smoke-arm64.log`. Ограничение REA для
+AArch64 ELF остаётся тем же: Windows provider не поддерживает формат; здесь
+использованы исходник, AST и C-тест донора. ECH и остальные ветви scheduler ещё
+не реализованы.
+
+## Автоклассификатор: повторный замер по снятому TCP ClientHello — 21.10.2026
+
+Закрыта одна ветвь `on_shape`: профильная TCP-привязка повторно измеряется,
+когда приходит полный ClientHello этого же имени. Свежие SHA-256 донорских
+файлов совпадают с сохранённым Evidence: `E:\d2o\core\sched.c` —
+`1de9feaab19dcea1e493aea068295470cf3143adf83157b57663f1098132ae8a`;
+`E:\d2o\core\test_sched.c` —
+`a67f87e09a7fd93ed735b52f361e78590b9ce40679ab95e300accf0a3e9d51a3`.
+В `on_shape` (строки 8138–8154) задача в состоянии `T_WATCHING` ищет привязку
+`D2K_INPUT_PROFILE` и вызывает `remeasure_snapped` с байтами и длиной события;
+для ожидающей задачи снимок становится входом классификатора и задаёт признак
+`trig_snapped`.
+
+Clang 19 выполнил `-fsyntax-only` и AST-дамп для `on_shape`. Журнал
+`.rea/r2o-donor-on-shape-clang-ast-20261021.log` содержит декларацию функции
+на строках исходника 7920–8157, поля `shape`/`shape_len`/`transport`, состояния
+`T_WATCHING`/`T_SHAPE_WAIT` и вызовы `remeasure_snapped`.
+
+REA 6.5.0 получил текущий объект планировщика
+`.rea/r2o-donor-sched-current.o`, SHA-256
+`04531800c43c9ac739bc24f9fa1cbbe46927ce77339f61defd19aed32e0ea8ca`; попытка
+`rea function ... on_shape` завершилась `provider_unavailable` /
+`target_format_unsupported`. Windows-провайдер Ghidra принимает PE и raw 6502,
+но не этот AArch64 ELF; Hopper недоступен, IDA не настроена. Поэтому семантика
+подтверждена актуальным C-исходником, Clang AST и существующим C-тестом, а не
+новой декомпиляцией ELF. Большой Rust ELF повторно не анализировался.
+
+В `r2o-datapath` добавлено отдельное событие `EVENT_CLIENT_SHAPE` (`0x0017`):
+оно несёт полный проверенный TLS record длиной 5–4096 байт, имя, форму и ключ
+TCP-потока. Старый `EVENT_HELLO` не менялся. Полный снимок направляется только
+основному сокету контроллера, не попадает в кольцевой журнал и канал
+`.snapshot`. Контроллер передаёт именно эти байты классификатору, сохраняет
+источник `input=1` только после полного HTTPS-подтверждения стандартным зондом
+и точного APPLIED на пробной HTTPS-сессии и на снятом ClientHello. Подтверждённая
+запись `input=1` заменяет слабую `input=2`, а не создаёт вторую привязку.
+Неудачный снимок сохраняет обычный 120-секундный cooldown; регрессионный тест
+сначала падал на обходе cooldown, затем прошёл. Этот сценарий охватывает TLS 1.2
+и TLS 1.3 без ECH; ECH и остальные ветви scheduler остаются незакрытыми.
+
+C/Rust-сверка выполнена парными регрессионными тестами: донорский `test_sched`
+на тех же хешах источника завершился сообщением «планировщик: все проверки
+прошли» (`.rea/r2o-donor-test-sched-aarch64.log`), включая перемер слабой
+профильной привязки (`test_sched.c`, строки 11028–11078). Rust-тесты проверяют
+тот же переход источника `input=2` → `input=1`, точное сохранение байтов и
+ограничение повтора. Точный клиентский профиль также проходит сохранённую
+побайтовую сверку C/Rust `legacy_profile_matches_c_reference_byte_for_byte`.
+
+Итоговые проверки ARM64/QEMU:
+
+| Набор | Наборов тестов | Успешно | Ошибки | Штатные пропуски |
+|---|---:|---:|---:|---:|
+| `r2k-core` | 16 | 127 | 0 | 0 |
+| `r2o-datapath` | 10 | 245 | 0 | 3 |
+| `r2o-controller` | 23 | 344 | 0 | 1 |
+| Весь workspace | 73 | 977 | 0 | 4 |
+
+Три пропущенных datapath-теста требуют Linux `CAP_NET_RAW`/`CAP_NET_ADMIN`;
+остальные штатные пропуски также указаны в журналах. Release workspace собран
+для AArch64, а шесть программ (`r2o-controller`, `r2o-datapath`, `r2o-fetch`,
+`r2o-manager`, `r2o-panel`, `r2o-telegram`) успешно запущены через QEMU с
+`--version`. `cargo fmt --all -- --check` и `git diff --check` прошли.
+
+Журналы: `.rea/priority1-clienthello-cooldown-red-arm64.log`,
+`.rea/priority1-clienthello-cooldown-green-arm64.log`,
+`.rea/priority1-r2k-core-arm64.log`, `.rea/priority1-r2o-datapath-arm64.log`,
+`.rea/priority1-r2o-controller-arm64-final.log`,
+`.rea/priority1-workspace-arm64-final.log`,
+`.rea/priority1-workspace-release-arm64-final.log`,
+`.rea/priority1-workspace-smoke-arm64-final.log`. Полная холодная сборка
+workspace-тестов заняла 9 мин 11 с; последующая полная пересборка controller
+после cooldown-правки — 51 с, release workspace — 1 мин 03 с. Закрыт один
+функциональный сценарий, а не вся область scheduler. Другие архитектуры и
+физический маршрутизатор в этой итерации не проверялись.
+
 ## Редактор runtime-настроек панели R2O — 21.10.2026
 
 Веб-панель получила редактор `MODE` и `QUEUE_NUM`. Смена каталога `STATE_DIR`

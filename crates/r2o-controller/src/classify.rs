@@ -89,6 +89,27 @@ impl Trigger {
             accept: Accept::ServerHello,
         })
     }
+
+    /// Собрать триггер из полного ClientHello, снятого с клиентского потока.
+    pub fn tls_client_hello(sni: &str, client_hello: &[u8]) -> Result<Self, &'static str> {
+        let tls = r2k_core::tls::parse(client_hello);
+        let captured_sni = tls
+            .sni_range
+            .as_ref()
+            .and_then(|range| client_hello.get(range.clone()));
+        if !tls.is_client_hello
+            || tls.extensions_truncated
+            || tls.record_end != Some(client_hello.len())
+            || captured_sni.is_none_or(|captured| !captured.eq_ignore_ascii_case(sni.as_bytes()))
+        {
+            return Err("снятый TLS ClientHello неполон или его SNI не совпадает с целью");
+        }
+        Ok(Self {
+            name: format!("tls:{sni}"),
+            payload: client_hello.to_vec(),
+            accept: Accept::ServerHello,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

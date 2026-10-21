@@ -405,6 +405,17 @@ fn trigger_acceptance_matches_the_donor_rules() {
 }
 
 #[test]
+fn живой_clienthello_становится_точным_триггером_классификатора() {
+    let captured = r2o_controller::hello::modern_client_hello("example.test").unwrap();
+    let trigger = Trigger::tls_client_hello("example.test", &captured).unwrap();
+
+    assert_eq!(trigger.payload, captured);
+    assert_eq!(trigger.accept, Accept::ServerHello);
+    assert!(Trigger::tls_client_hello("other.test", &trigger.payload).is_err());
+    assert!(Trigger::tls_client_hello("example.test", &trigger.payload[..20]).is_err());
+}
+
+#[test]
 fn poison_catalog_keeps_the_donor_order_and_all_85_unique_hypotheses() {
     let candidates = poisons();
     assert_eq!(candidates.len(), 85);

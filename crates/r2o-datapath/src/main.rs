@@ -962,6 +962,7 @@ mod app {
                                 &mut flow_journal,
                                 journal_origin.elapsed().as_nanos().min(u64::MAX as u128) as u64,
                                 &body,
+                                None,
                             );
                         }
                         let fed = holding.feed_observing(
@@ -1012,6 +1013,7 @@ mod app {
                                         journal_origin.elapsed().as_nanos().min(u64::MAX as u128)
                                             as u64,
                                         &hello.event_body(),
+                                        hello.shape_event_body(),
                                     );
                                 }
                                 let decision = if options.mode == RuntimeMode::Observe {
@@ -1040,6 +1042,7 @@ mod app {
                                     journal_origin.elapsed().as_nanos().min(u64::MAX as u128)
                                         as u64,
                                     &hello.event_body(),
+                                    hello.shape_event_body(),
                                 );
                                 if options.mode == RuntimeMode::Observe {
                                     PacketDecision::Accept
@@ -1905,12 +1908,21 @@ mod app {
         flow_journal: &mut R2oFlowJournal,
         at_ns: u64,
         body: &[u8],
+        client_shape: Option<Vec<u8>>,
     ) {
         flow_journal.record_control_event(at_ns, EVENT_HELLO, body);
-        for r2o_channel in [control, r2o_snapshot_control] {
-            if let Some(r2o_channel) = r2o_channel.as_mut()
-                && let Err(error) = r2o_channel.send_event(EVENT_HELLO, body)
-            {
+        if let Some(client_shape) = client_shape
+            && let Some(control) = control.as_mut()
+            && let Err(error) =
+                control.send_event(r2k_core::control::EVENT_CLIENT_SHAPE, &client_shape)
+        {
+            eprintln!("r2o-datapath: снимок ClientHello не отправлен: {error}");
+        }
+        for r2o_channel in [control.as_mut(), r2o_snapshot_control.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            if let Err(error) = r2o_channel.send_event(EVENT_HELLO, body) {
                 eprintln!("r2o-datapath: событие ClientHello не отправлено: {error}");
             }
         }
@@ -3257,12 +3269,47 @@ mod app {
             let mut body = vec![0; r2k_core::control::KEY_LEN];
             body[0] = 4;
             body[37] = 6;
-            body.push(12);
-            body.extend_from_slice(b"example.test");
+            body.push(7);
+            body.extend_from_slice(b"__SNI__");
             body.push(r2k_core::control::SHAPE_MODERN);
             body.extend_from_slice(&1275_u16.to_be_bytes());
-            send_hello_event(&mut control, &mut snapshot, &mut flow_journal, 42, &body);
+            let client_hello = include_str!("../../r2o-controller/src/profiles/modern.hex")
+                .lines()
+                .flat_map(|line| line.split('#').next().unwrap_or_default().bytes())
+                .filter(|byte| !byte.is_ascii_whitespace())
+                .collect::<Vec<_>>()
+                .chunks_exact(2)
+                .map(|pair| {
+                    let digit = |byte: u8| (byte as char).to_digit(16).unwrap() as u8;
+                    (digit(pair[0]) << 4) | digit(pair[1])
+                })
+                .collect::<Vec<_>>();
+            let key = body[..r2k_core::control::KEY_LEN].try_into().unwrap();
+            let client_shape = r2k_core::control::ClientShapeEvent {
+                key,
+                host: b"__SNI__".to_vec(),
+                shape: r2k_core::control::SHAPE_MODERN,
+                client_hello: client_hello.clone(),
+            }
+            .event_body()
+            .unwrap();
+            send_hello_event(
+                &mut control,
+                &mut snapshot,
+                &mut flow_journal,
+                42,
+                &body,
+                Some(client_shape),
+            );
 
+            let captured_shape = r2k_core::control::read_frame(&mut controller).unwrap();
+            assert_eq!(captured_shape.kind, r2k_core::control::EVENT_CLIENT_SHAPE);
+            assert_eq!(
+                r2k_core::control::decode_client_shape(&captured_shape)
+                    .unwrap()
+                    .client_hello,
+                client_hello
+            );
             for reader in [&mut controller, &mut browser_capture] {
                 let frame = r2k_core::control::read_frame(reader).unwrap();
                 assert_eq!(frame.kind, r2k_core::control::EVENT_HELLO);
@@ -3276,7 +3323,7 @@ mod app {
             assert_eq!(flow_journal.count(), 1);
             let recorded = flow_journal.get(0).unwrap();
             assert_eq!(recorded.at_ns, 42);
-            assert_eq!(recorded.name_len, 12);
+            assert_eq!(recorded.name_len, 7);
             assert_eq!(recorded.client_shape, r2k_core::control::SHAPE_MODERN);
             assert_eq!(recorded.num, 1275);
             drop(browser_capture);
