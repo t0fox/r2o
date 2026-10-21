@@ -372,6 +372,22 @@ impl Default for CaptureTable {
 }
 
 impl CaptureTable {
+    /// Возвращает длину непрерывной части ожидающего запроса и длину TLS-записи.
+    pub(crate) fn r2o_incomplete_summary(
+        &self,
+        key: TcpFlowKey,
+        generation: u64,
+    ) -> Option<(usize, Option<usize>)> {
+        let slot = self.slots.iter().find(|slot| {
+            slot.key == Some(key)
+                && slot.generation == generation
+                && slot.state == SlotState::Collecting
+        })?;
+        let declared_record_bytes = (slot.mode == CaptureMode::Tls && slot.contiguous >= 5)
+            .then(|| 5 + usize::from(u16::from_be_bytes([slot.bytes[3], slot.bytes[4]])));
+        Some((slot.contiguous, declared_record_bytes))
+    }
+
     pub fn feed(
         &mut self,
         key: TcpFlowKey,

@@ -7,6 +7,7 @@ use crate::capture::{
 use r2k_core::addr::Address;
 use r2k_core::control::{AppliedEvent, BindingContext, HttpPortalEvent, HttpResponseEvent};
 use r2k_core::packet::{PacketView, TcpSegmentView};
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 pub const HOLD_SLOTS: usize = 16;
@@ -44,6 +45,20 @@ pub struct FeedResult {
     pub outcome: HoldOutcome,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum R2oIncompleteCaptureKind {
+    Tls,
+    Http,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct R2oIncompleteCaptureDiagnostic {
+    pub flow: TcpFlowKey,
+    pub kind: R2oIncompleteCaptureKind,
+    pub captured_bytes: usize,
+    pub declared_record_bytes: Option<usize>,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct HoldOptions {
     pub revision: u64,
@@ -71,6 +86,7 @@ struct SynAnchor {
     server_sequence: Option<u32>,
     attempted: bool,
     saw_hello: bool,
+    unassembled_reported: bool,
 }
 
 struct HttpRequestFlow {
@@ -140,6 +156,7 @@ pub struct HoldTable {
     http_requests: Vec<HttpRequestFlow>,
     slots: Vec<HeldFlow>,
     capture: CaptureTable,
+    incomplete_diagnostics: VecDeque<R2oIncompleteCaptureDiagnostic>,
     next_generation: u64,
 }
 
@@ -167,6 +184,11 @@ impl HoldTable {
         {
             flow.ready_for_next = false;
         }
+    }
+
+    /// Забрать диагностику TLS/HTTP-заголовков, которые истекли до сборки.
+    pub fn r2o_take_incomplete_diagnostics(&mut self) -> Vec<R2oIncompleteCaptureDiagnostic> {
+        self.incomplete_diagnostics.drain(..).collect()
     }
 
     pub fn mark_http_response_answered(
@@ -691,9 +713,47 @@ impl HoldTable {
         let mut released = Vec::new();
         let mut index = 0;
         while index < self.slots.len() {
-            let slot = &self.slots[index];
-            if all || now >= slot.deadline || revision != slot.revision {
-                let key = slot.key;
+            let (key, generation, kind, deadline, slot_revision) = {
+                let slot = &self.slots[index];
+                (
+                    slot.key,
+                    slot.generation,
+                    slot.kind,
+                    slot.deadline,
+                    slot.revision,
+                )
+            };
+            if all || now >= deadline || revision != slot_revision {
+                let timed_out = !all && now >= deadline && revision == slot_revision;
+                if timed_out && self.incomplete_diagnostics.len() < HOLD_SLOTS {
+                    let should_report = self
+                        .syns
+                        .iter_mut()
+                        .find(|anchor| anchor.key == key && anchor.generation == generation)
+                        .is_some_and(|anchor| {
+                            if anchor.unassembled_reported {
+                                false
+                            } else {
+                                anchor.unassembled_reported = true;
+                                true
+                            }
+                        });
+                    if should_report
+                        && let Some((captured_bytes, declared_record_bytes)) =
+                            self.capture.r2o_incomplete_summary(key, generation)
+                    {
+                        self.incomplete_diagnostics
+                            .push_back(R2oIncompleteCaptureDiagnostic {
+                                flow: key,
+                                kind: match kind {
+                                    HoldKind::Tls => R2oIncompleteCaptureKind::Tls,
+                                    HoldKind::Http => R2oIncompleteCaptureKind::Http,
+                                },
+                                captured_bytes,
+                                declared_record_bytes,
+                            });
+                    }
+                }
                 released.extend(self.remove_slot(index));
                 self.capture.forget(&key);
             } else {
@@ -729,6 +789,7 @@ impl HoldTable {
             server_sequence: None,
             attempted: false,
             saw_hello: false,
+            unassembled_reported: false,
         };
         if let Some(existing) = self.syn_index(&key) {
             self.syns[existing] = anchor;
@@ -1788,6 +1849,69 @@ mod tests {
             hold.flush(now + Duration::from_millis(1), 5, false)
                 .contains(&4)
         );
+    }
+
+    #[test]
+    fn timeout_reports_unassembled_tls_record_once_per_flow() {
+        let now = Instant::now();
+        let mut hold = HoldTable::default();
+        let hello = hello();
+        let _ = hold.feed(1, &tcp_packet(3000, 0x02, &[]), now, 0, true, false);
+        assert_eq!(
+            hold.feed(2, &tcp_packet(3001, 0x18, &hello[..5]), now, 0, true, false)
+                .outcome,
+            HoldOutcome::Waiting
+        );
+
+        assert_eq!(hold.flush(now + HOLD_WAIT, 0, false), [2]);
+        let diagnostics = hold.r2o_take_incomplete_diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].kind, super::R2oIncompleteCaptureKind::Tls);
+        assert_eq!(diagnostics[0].captured_bytes, 5);
+        assert_eq!(diagnostics[0].declared_record_bytes, Some(hello.len()));
+        assert!(hold.r2o_take_incomplete_diagnostics().is_empty());
+
+        assert_eq!(
+            hold.feed(
+                3,
+                &tcp_packet(3001, 0x18, &hello[..5]),
+                now + HOLD_WAIT,
+                0,
+                true,
+                false
+            )
+            .outcome,
+            HoldOutcome::Pass
+        );
+        let _ = hold.flush(now + HOLD_WAIT * 2, 0, false);
+        assert!(hold.r2o_take_incomplete_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn timeout_reports_unassembled_http_headers() {
+        let now = Instant::now();
+        let mut hold = HoldTable::default();
+        let request = b"GET /page HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        let _ = hold.feed(1, &http_packet(4000, 0x02, &[]), now, 0, false, true);
+        assert_eq!(
+            hold.feed(
+                2,
+                &http_packet(4001, 0x18, &request[..8]),
+                now,
+                0,
+                false,
+                true,
+            )
+            .outcome,
+            HoldOutcome::Waiting
+        );
+
+        assert_eq!(hold.flush(now + HOLD_WAIT, 0, false), [2]);
+        let diagnostics = hold.r2o_take_incomplete_diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].kind, super::R2oIncompleteCaptureKind::Http);
+        assert_eq!(diagnostics[0].captured_bytes, 8);
+        assert_eq!(diagnostics[0].declared_record_bytes, None);
     }
 
     #[test]

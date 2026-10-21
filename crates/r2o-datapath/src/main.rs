@@ -297,6 +297,31 @@ mod app {
         Apply,
     }
 
+    fn r2o_report_incomplete_captures(holding: &mut HoldTable) {
+        for diagnostic in holding.r2o_take_incomplete_diagnostics() {
+            match (diagnostic.kind, diagnostic.declared_record_bytes) {
+                (r2o_datapath::hold::R2oIncompleteCaptureKind::Tls, Some(declared)) => {
+                    eprintln!(
+                        "r2o-datapath: TLS ClientHello не собрался для {:?}: запись объявляет {} байт, непрерывно собрано {}",
+                        diagnostic.flow, declared, diagnostic.captured_bytes
+                    );
+                }
+                (r2o_datapath::hold::R2oIncompleteCaptureKind::Tls, None) => {
+                    eprintln!(
+                        "r2o-datapath: TLS ClientHello не собрался для {:?}: заголовок записи не набран, непрерывно собрано {} байт",
+                        diagnostic.flow, diagnostic.captured_bytes
+                    );
+                }
+                (r2o_datapath::hold::R2oIncompleteCaptureKind::Http, _) => {
+                    eprintln!(
+                        "r2o-datapath: HTTP-запрос не собрался для {:?}: непрерывно собрано {} байт",
+                        diagnostic.flow, diagnostic.captured_bytes
+                    );
+                }
+            }
+        }
+    }
+
     pub fn run() -> Result<(), Box<dyn Error>> {
         let arguments: Vec<String> = std::env::args().skip(1).collect();
         if arguments
@@ -447,10 +472,9 @@ mod app {
             if STOP.load(Ordering::Relaxed) {
                 eprintln!("r2o-datapath: завершение по сигналу, освобождаю удержанные пакеты");
                 drain_queued(&mut socket, &mut batch, packet_type);
-                release_accepting(
-                    &mut socket,
-                    &holding.flush(Instant::now(), name_plans.revision(), true),
-                );
+                let released = holding.flush(Instant::now(), name_plans.revision(), true);
+                r2o_report_incomplete_captures(&mut holding);
+                release_accepting(&mut socket, &released);
                 r2o_release_udp_batches(
                     &mut socket,
                     raw.as_ref(),
@@ -611,10 +635,9 @@ mod app {
                 Ok(ready) => ready,
                 Err(ReceiveError::LostPackets) => {
                     eprintln!("r2o-datapath: ядро сообщило о потере NFQUEUE пакетов");
-                    release_accepting(
-                        &mut socket,
-                        &holding.flush(Instant::now(), name_plans.revision(), true),
-                    );
+                    let released = holding.flush(Instant::now(), name_plans.revision(), true);
+                    r2o_report_incomplete_captures(&mut holding);
+                    release_accepting(&mut socket, &released);
                     r2o_release_udp_batches(
                         &mut socket,
                         raw.as_ref(),
@@ -691,10 +714,9 @@ mod app {
             if let Some(r2o_snapshot_control) = r2o_snapshot_control.as_mut() {
                 let _ = r2o_snapshot_control.poll()?;
             }
-            release_accepting(
-                &mut socket,
-                &holding.flush(Instant::now(), name_plans.revision(), false),
-            );
+            let released = holding.flush(Instant::now(), name_plans.revision(), false);
+            r2o_report_incomplete_captures(&mut holding);
+            release_accepting(&mut socket, &released);
             r2o_release_udp_batches(
                 &mut socket,
                 raw.as_ref(),
@@ -977,6 +999,7 @@ mod app {
                                 observe_http,
                             },
                         );
+                        r2o_report_incomplete_captures(&mut holding);
                         release_accepting(&mut socket, &fed.released);
                         match fed.outcome {
                             HoldOutcome::Pass => {
