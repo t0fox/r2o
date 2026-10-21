@@ -586,7 +586,10 @@ pub fn r2o_probe_discovery_endpoint(
 }
 
 #[cfg(target_os = "linux")]
-fn r2o_set_socket_mark(r2o_fd: std::os::fd::RawFd, r2o_mark: u32) -> std::io::Result<()> {
+pub(crate) fn r2o_set_socket_mark(
+    r2o_fd: std::os::fd::RawFd,
+    r2o_mark: u32,
+) -> std::io::Result<()> {
     let r2o_set = unsafe {
         libc::setsockopt(
             r2o_fd,

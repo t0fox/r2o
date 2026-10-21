@@ -20,4 +20,5 @@ pub mod r2o_volume;
 mod raw_probe;
 pub mod response;
 pub mod voice_discovery;
+pub mod voice_measure;
 pub mod voice_targets;

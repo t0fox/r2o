@@ -29,6 +29,9 @@ use r2o_controller::plan_text::compile_text;
 #[cfg(unix)]
 use r2o_controller::r2o_late_rx::{R2oLateRxCache, R2oLateRxInput};
 use r2o_controller::response::{ResponseOptions, ResponseVerdict, probe_response};
+use r2o_controller::voice_measure::{
+    r2o_format_voice_measurement, r2o_measure_voice, r2o_parse_voice_options,
+};
 use r2o_controller::voice_targets::{r2o_format_voice_targets, r2o_read_voice_targets};
 use std::error::Error;
 #[cfg(unix)]
@@ -91,6 +94,12 @@ struct ServeCliOptions {
 
 fn main() {
     let r2o_arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    if let Some(r2o_code) = r2o_voice_check_command(&r2o_arguments) {
+        if r2o_code != 0 {
+            std::process::exit(r2o_code);
+        }
+        return;
+    }
     if let Some(r2o_code) = r2o_voice_list_command(&r2o_arguments) {
         if r2o_code != 0 {
             std::process::exit(r2o_code);
@@ -101,6 +110,30 @@ fn main() {
         eprintln!("r2o-controller: {error}");
         std::process::exit(1);
     }
+}
+
+fn r2o_voice_check_command(r2o_arguments: &[std::ffi::OsString]) -> Option<i32> {
+    if r2o_arguments
+        .first()
+        .is_none_or(|r2o_argument| r2o_argument != "--voice-check")
+    {
+        return None;
+    }
+    let r2o_options = match r2o_parse_voice_options(&r2o_arguments[1..]) {
+        Ok(r2o_options) => r2o_options,
+        Err(r2o_error) => {
+            eprintln!("r2o-controller: {r2o_error}");
+            eprintln!(
+                "использование: r2o-controller --voice-check [--addr IPv4:ПОРТ] [--control ХОСТ:ПОРТ] [--conntrack ФАЙЛ] [--wait МС] [--mark 0xN] [--discovery]"
+            );
+            return Some(2);
+        }
+    };
+    let r2o_result = r2o_measure_voice(&r2o_options);
+    print!("{}", r2o_format_voice_measurement(&r2o_result));
+    Some(i32::from(
+        r2o_result.verdict != r2o_controller::voice_measure::R2oVoiceVerdict::Clear,
+    ))
 }
 
 fn r2o_voice_list_command(r2o_arguments: &[std::ffi::OsString]) -> Option<i32> {
@@ -516,6 +549,9 @@ fn print_help() {
     );
     println!("  r2o-controller --import-donor-catalog ФАЙЛ КАТАЛОГА");
     println!("  r2o-controller --voice-list [--conntrack ФАЙЛ]");
+    println!(
+        "  r2o-controller --voice-check [--addr IPv4:ПОРТ] [--control ХОСТ:ПОРТ] [--conntrack ФАЙЛ] [--wait МС] [--mark 0xN] [--discovery]"
+    );
 }
 
 fn normalize_plan_target(target: &str, shape: u8) -> Result<String, String> {
