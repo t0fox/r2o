@@ -782,7 +782,14 @@ mod app {
                         continue;
                     }
                     let udp_admitted_from_queue = original_from_queue
-                        .map(|bytes| udp_packet_admitted(&mut udp_sessions, bytes, now))
+                        .map(|bytes| {
+                            r2o_udp_packet_admitted_at_hook(
+                                &mut udp_sessions,
+                                bytes,
+                                now,
+                                queue_hook,
+                            )
+                        })
                         .unwrap_or(true);
                     let mut replay_packet = None;
                     let mut udp_replay = None;
@@ -847,7 +854,12 @@ mod app {
                     let udp_admitted = original
                         .map(|bytes| {
                             if replay_packet.is_some() {
-                                udp_packet_admitted(&mut udp_sessions, bytes, now)
+                                r2o_udp_packet_admitted_at_hook(
+                                    &mut udp_sessions,
+                                    bytes,
+                                    now,
+                                    queue_hook,
+                                )
                             } else {
                                 udp_admitted_from_queue
                             }
@@ -2170,9 +2182,19 @@ mod app {
         }
     }
 
+    #[cfg(test)]
     fn udp_packet_admitted(sessions: &mut R2oUdpSessions, packet: &[u8], now: Instant) -> bool {
+        r2o_udp_packet_admitted_at_hook(sessions, packet, now, None)
+    }
+
+    fn r2o_udp_packet_admitted_at_hook(
+        sessions: &mut R2oUdpSessions,
+        packet: &[u8],
+        now: Instant,
+        hook: Option<u8>,
+    ) -> bool {
         !r2k_core::packet::PacketView::parse(packet).is_some_and(|view| view.protocol == 17)
-            || sessions.observe_packet(packet, now)
+            || sessions.r2o_observe_packet_at_hook(packet, now, hook)
     }
 
     fn r2o_udp_decide_once(
@@ -2783,11 +2805,14 @@ mod app {
             R2oQuicSessions, RuntimeMode, TcpSessions, format_journal_details, format_journal_key,
             handle_control_command, load_plan, needs_raw_socket, observe_quic_packet,
             observe_stun_packet, parse_options, r2o_datapath_payload, r2o_packet_route_skip,
-            r2o_udp_decide_once, release_many_with, release_with, send_applied_event,
-            send_hello_event, send_journal_snapshot, send_journal_updates, udp_packet_admitted,
+            r2o_udp_decide_once, r2o_udp_packet_admitted_at_hook, release_many_with, release_with,
+            send_applied_event, send_hello_event, send_journal_snapshot, send_journal_updates,
+            udp_packet_admitted,
         };
         use r2k_core::stun::binding_request;
-        use r2o_datapath::netlink::{QueuePacket, R2O_NF_INET_FORWARD, R2O_NF_INET_POST_ROUTING};
+        use r2o_datapath::netlink::{
+            QueuePacket, R2O_NF_INET_FORWARD, R2O_NF_INET_LOCAL_OUT, R2O_NF_INET_POST_ROUTING,
+        };
         use r2o_datapath::r2o_route::{
             R2O_ROUTE_OTHER_DEV, R2oRouteFamily, R2oRouteGate, R2oRoutedFlows,
         };
@@ -2839,6 +2864,44 @@ mod app {
             ));
             assert_eq!(sessions.stats().flows, 1536);
             assert_eq!(sessions.stats().refusals, 1);
+        }
+
+        #[test]
+        fn r2o_udp_hold_считает_повторную_обработку_головы_в_окне() {
+            let now = Instant::now();
+            let mut sessions = R2oUdpSessions::new().unwrap();
+            let packet = udp_packet([192, 0, 2, 1], [198, 51, 100, 2], 40_000, 443);
+            let hook = Some(R2O_NF_INET_LOCAL_OUT);
+
+            for index in 0..7 {
+                assert!(r2o_udp_packet_admitted_at_hook(
+                    &mut sessions,
+                    &packet,
+                    now + Duration::from_millis(index),
+                    hook,
+                ));
+            }
+            assert!(r2o_udp_packet_admitted_at_hook(
+                &mut sessions,
+                &packet,
+                now + Duration::from_millis(7),
+                hook,
+            ));
+            assert!(sessions.r2o_begin_hold(&packet));
+
+            assert!(r2o_udp_packet_admitted_at_hook(
+                &mut sessions,
+                &packet,
+                now + Duration::from_millis(8),
+                hook,
+            ));
+            assert!(r2o_udp_packet_admitted_at_hook(
+                &mut sessions,
+                &packet,
+                now + Duration::from_millis(9),
+                hook,
+            ));
+            assert!(!sessions.r2o_begin_hold(&packet));
         }
 
         #[test]

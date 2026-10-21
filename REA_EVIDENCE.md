@@ -5630,3 +5630,43 @@ REA подтверждает чтение и валидацию этих пар�
 `.rea/r2o-settings-workspace-arm64-20261021.log` и
 `.rea/r2o-settings-arm64-build-qemu-20261021.log`. Другие архитектуры и
 физический роутер не проверялись.
+
+## Окно удержания клиентского QUIC Initial — 21.10.2026
+
+REA повторно использует `handle_udp` Evidence
+`ev_bcea4682cdbf3f115b7a3bb48abc8dac0aececc76d1d15da4c036a9706817bcc` и
+`d2k_udp_path_pre` Evidence
+`ev_8677fe80f86fa111ad4039248f2672dc0b643df01e004ff07a666fcfef634710`.
+Первое Evidence подтверждает клиентский счётчик `fwd_pkts` и окно разбора,
+второе — место preflight-проверки hold в пути UDP. Новое `rea function` для
+`d2k_session_udp_hold_begin` недоступно: Windows provider отклонил ELF
+(`target_format_unsupported`), Hopper недоступен на Windows, IDA не настроена;
+REA objdump завершился `ERR_REA_WINDOWS_NATIVE`. Порог дополнительно сверен с
+исходником `session.c` донора SHA-256
+`39dada3df4bdaf943bf7b2a788090ab3d16a71065a58c16d39901575247f7187`.
+Clang 19.1.7 выполнил `-fsyntax-only` с AST-фильтром по
+`d2k_session_udp_hold_begin`; дамп подтвердил ранний отказ при `fwd_pkts >= 8`,
+а также проверки route mark, направления и фрагментов. Вывод сохранён в
+`.rea/r2o-donor-session-udp-hold-ast-20261021.log`.
+
+В C `d2k_session_udp_hold_begin` проверяет `fwd_pkts >= D2K_HELLO_WINDOW` до
+учёта текущего пакета; `handle_udp` увеличивает счётчик после определения
+клиентского направления и проверки нефрагментированной границы UDP. Rust
+учитывает текущий пакет до вызова hold, поэтому эквивалентная проверка —
+`r2o_client_packets_seen > UDP_HELLO_WINDOW`. Направление берётся из NFQUEUE
+hook, обратные пакеты окно не расходуют. Повторная обработка уже принятой пачки
+увеличивает счётчик головы ещё раз, как повторный вызов `session_packet` у донора.
+
+Новый ARM64/QEMU-тест сперва воспроизвёл удержание девятого пакета, затем прошёл
+после исправления. Полный `r2o-datapath`: 244 прошло, 0 ошибок, 3 штатных
+пропуска; workspace: 970 прошло, 0 ошибок, 4 штатных пропуска в 73 наборах.
+Из-за таймингового controller-теста общий прогон был последовательным; его
+изолированный ARM64-запуск прошёл. `cargo fmt --all -- --check` и `git diff
+--check` прошли. Release workspace собран под ARM64; все шесть программ
+ответили на `--version` под QEMU. Журналы: `.rea/r2o-udp-window-targeted-arm64-20261021.log`,
+`.rea/r2o-udp-window-runtime-arm64-20261021.log`,
+`.rea/r2o-udp-window-datapath-final-arm64-20261021.log`,
+`.rea/r2o-udp-window-workspace-final-arm64-20261021.log`,
+`.rea/r2o-udp-window-release-final-arm64-20261021.log` и
+`.rea/r2o-udp-window-smoke-final-arm64-20261021.log`. Другие архитектуры и
+физический роутер не проверялись.

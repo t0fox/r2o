@@ -1,5 +1,8 @@
 use crate::flow_capacity::R2oFlowCapacity;
-use crate::netlink::{R2O_NF_INET_LOCAL_OUT, R2O_NF_INET_POST_ROUTING};
+use crate::netlink::{
+    R2O_NF_INET_FORWARD, R2O_NF_INET_LOCAL_IN, R2O_NF_INET_LOCAL_OUT, R2O_NF_INET_POST_ROUTING,
+    R2O_NF_INET_PRE_ROUTING,
+};
 use crate::r2o_quic::R2oUdpExchangeEvent;
 use r2k_core::addr::Address;
 use r2k_core::control::KEY_LEN;
@@ -71,6 +74,7 @@ struct FlowState {
     plan_applied: bool,
     hello_seen: bool,
     hold_attempts: u8,
+    r2o_client_packets_seen: u8,
     stun: Option<StunFlow>,
 }
 
@@ -128,12 +132,26 @@ impl R2oUdpSessions {
 
     /// Обновить поток, если пакет содержит целый UDP-заголовок.
     pub fn observe_packet(&mut self, packet: &[u8], now: Instant) -> bool {
+        self.r2o_observe_packet_at_hook(packet, now, None)
+    }
+
+    /// Обновить поток и счётчик клиентских датаграмм с учётом направления NFQUEUE.
+    pub fn r2o_observe_packet_at_hook(
+        &mut self,
+        packet: &[u8],
+        now: Instant,
+        hook: Option<u8>,
+    ) -> bool {
         let Some(key) = flow_key_from_packet(packet) else {
             return false;
         };
+        let r2o_client_packet = r2o_client_udp_packet(packet, hook);
 
         if let Some(flow) = self.flows.get_mut(&key) {
             flow.last_seen = now;
+            if r2o_client_packet {
+                flow.r2o_client_packets_seen = flow.r2o_client_packets_seen.saturating_add(1);
+            }
             return true;
         }
         if self.flows.len() >= self.flow_capacity.limit() {
@@ -147,6 +165,7 @@ impl R2oUdpSessions {
                 plan_applied: false,
                 hello_seen: false,
                 hold_attempts: 0,
+                r2o_client_packets_seen: u8::from(r2o_client_packet),
                 stun: None,
             },
         );
@@ -307,7 +326,11 @@ impl R2oUdpSessions {
         else {
             return false;
         };
-        if flow.plan_applied || flow.hello_seen || flow.hold_attempts >= UDP_HELLO_WINDOW {
+        if flow.plan_applied
+            || flow.hello_seen
+            || flow.hold_attempts >= UDP_HELLO_WINDOW
+            || flow.r2o_client_packets_seen > UDP_HELLO_WINDOW
+        {
             return false;
         }
         flow.hold_attempts += 1;
@@ -342,6 +365,27 @@ impl R2oUdpSessions {
 
     pub fn is_empty(&self) -> bool {
         self.flows.is_empty()
+    }
+}
+
+fn r2o_client_udp_packet(packet: &[u8], hook: Option<u8>) -> bool {
+    let Some(view) =
+        PacketView::parse(packet).filter(|view| view.protocol == 17 && view.fragment & 0x3fff == 0)
+    else {
+        return false;
+    };
+    let Some(udp) = packet.get(view.l4_offset..view.total_len) else {
+        return false;
+    };
+    if udp.len() < 8 {
+        return false;
+    }
+    let source_port = u16::from_be_bytes([udp[0], udp[1]]);
+    let destination_port = u16::from_be_bytes([udp[2], udp[3]]);
+    match hook {
+        Some(R2O_NF_INET_LOCAL_OUT | R2O_NF_INET_POST_ROUTING) => true,
+        Some(R2O_NF_INET_LOCAL_IN | R2O_NF_INET_PRE_ROUTING | R2O_NF_INET_FORWARD) => false,
+        _ => destination_port == 443 && source_port != 443,
     }
 }
 
