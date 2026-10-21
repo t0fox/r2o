@@ -223,9 +223,9 @@ mod app {
                 "r2o-datapath: ctnetlink недоступен, обнаружение зависания TCP и QUIC выключено"
             );
         }
-        let mut voice_sessions = R2oVoiceSessions::default();
+        let mut voice_sessions = R2oVoiceSessions::try_with_capacity(options.flow_capacity)?;
         let mut voice_trial_proofs = R2oVoiceTrialProofs::default();
-        let mut quic_sessions = R2oQuicSessions::default();
+        let mut quic_sessions = R2oQuicSessions::try_with_capacity(options.flow_capacity)?;
         let mut udp_sessions = R2oUdpSessions::with_capacity(options.flow_capacity)?;
         let mut icmp_guard = R2oIcmpGuard::default();
         let mut next_execution_id = 1_u64;

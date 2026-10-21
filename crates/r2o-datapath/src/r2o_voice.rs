@@ -1,12 +1,12 @@
 //! Наблюдение молчания IPv4-потоков Discord voice.
 
+use crate::flow_capacity::R2oFlowCapacity;
 use r2k_core::addr::Address;
 use r2k_core::control::{KEY_LEN, R2oVoiceSuspectEvent};
 use r2k_core::packet::PacketView;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-const MAX_VOICE_FLOWS: usize = 2048;
 const VOICE_SILENCE: Duration = Duration::from_secs(2);
 const VOICE_IDLE: Duration = Duration::from_secs(120);
 const VOICE_TRIAL_LIMIT: usize = 1024;
@@ -76,9 +76,9 @@ struct FlowState {
 }
 
 /// Ограниченное состояние для наблюдения за голосовыми UDP-потоками.
-#[derive(Default)]
 pub struct R2oVoiceSessions {
     flows: HashMap<FlowKey, FlowState>,
+    flow_limit: usize,
 }
 
 struct PendingVoiceProof {
@@ -215,6 +215,16 @@ impl R2oVoiceTrialProofs {
 }
 
 impl R2oVoiceSessions {
+    /// Создать состояние с тем же пределом потоков, что и у UDP-таблицы.
+    pub fn try_with_capacity(
+        flow_capacity: R2oFlowCapacity,
+    ) -> Result<Self, std::collections::TryReserveError> {
+        let flow_limit = flow_capacity.limit();
+        let mut flows = HashMap::new();
+        flows.try_reserve(flow_limit)?;
+        Ok(Self { flows, flow_limit })
+    }
+
     /// Запомнить первый Discord IP Discovery или STUN-запрос и движение его потока.
     pub fn observe_packet(&mut self, packet: &[u8], now: Instant) {
         let Some(view) = PacketView::parse(packet).filter(|view| view.protocol == 17) else {
@@ -248,7 +258,7 @@ impl R2oVoiceSessions {
 
         if is_voice_request {
             let first_request = !self.flows.contains_key(&key);
-            if first_request && self.flows.len() >= MAX_VOICE_FLOWS {
+            if first_request && self.flows.len() >= self.flow_limit {
                 return;
             }
             let flow = self.flows.entry(key).or_insert_with(|| FlowState {
@@ -342,9 +352,19 @@ impl R2oVoiceSessions {
     }
 }
 
+impl Default for R2oVoiceSessions {
+    fn default() -> Self {
+        Self {
+            flows: HashMap::new(),
+            flow_limit: R2oFlowCapacity::default().limit(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{R2oVoiceSessions, R2oVoiceTrialProofs, VOICE_SILENCE};
+    use crate::flow_capacity::R2oFlowCapacity;
     use r2k_core::control::{BindingContext, decode_r2o_voice_suspect};
     use r2k_core::stun::is_discord_ip_discovery_request;
     use std::net::Ipv4Addr;
@@ -408,6 +428,48 @@ mod tests {
             kind: r2k_core::control::EVENT_R2O_VOICE_SUSPECT,
             body: event.event_body().unwrap(),
         }
+    }
+
+    #[test]
+    fn discord_учёт_не_превышает_порог_ёмкости_udp_таблицы() {
+        let now = Instant::now();
+        let limit = R2oFlowCapacity::default().limit();
+        let mut sessions = R2oVoiceSessions::default();
+        let request = discovery_request([1, 2, 3, 4]);
+        for offset in 0..=limit {
+            sessions.observe_packet(
+                &packet(
+                    [192, 0, 2, 10],
+                    [198, 51, 100, 20],
+                    40_000 + offset as u16,
+                    50_004,
+                    &request,
+                ),
+                now,
+            );
+        }
+        assert_eq!(sessions.len(), limit);
+    }
+
+    #[test]
+    fn discord_учёт_поддерживает_увеличенную_настройку_ёмкости() {
+        let now = Instant::now();
+        let capacity = R2oFlowCapacity::from_requested(4096).unwrap();
+        let mut sessions = R2oVoiceSessions::try_with_capacity(capacity).unwrap();
+        let request = discovery_request([1, 2, 3, 4]);
+        for offset in 0..2049 {
+            sessions.observe_packet(
+                &packet(
+                    [192, 0, 2, 10],
+                    [198, 51, 100, 20],
+                    40_000 + offset as u16,
+                    50_004,
+                    &request,
+                ),
+                now,
+            );
+        }
+        assert_eq!(sessions.len(), 2049);
     }
 
     #[test]

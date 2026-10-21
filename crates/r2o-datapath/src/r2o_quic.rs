@@ -4,6 +4,7 @@
 use crate::conntrack::{
     R2oConntrackInfo, R2oConntrackTuple, r2o_conntrack_tuple_from_socket_addrs,
 };
+use crate::flow_capacity::R2oFlowCapacity;
 use crate::netlink::{
     R2O_NF_INET_LOCAL_IN, R2O_NF_INET_LOCAL_OUT, R2O_NF_INET_POST_ROUTING, R2O_NF_INET_PRE_ROUTING,
 };
@@ -13,7 +14,6 @@ use r2k_core::packet::PacketView;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
-const MAX_QUIC_FLOWS: usize = 2048;
 const MAX_INITIAL_RING: usize = 32;
 const MAX_INITIAL_DATAGRAMS: usize = 4;
 const QUIC_SILENCE: Duration = Duration::from_secs(2);
@@ -139,15 +139,35 @@ struct InitialDatagram {
 }
 
 /// Ограниченное состояние для наблюдения за повторами QUIC Initial без ответа.
-#[derive(Default)]
 pub struct R2oQuicSessions {
     flows: HashMap<FlowKey, FlowState>,
     initial_ring: VecDeque<InitialDatagram>,
     hello_reported: HashMap<FlowKey, Instant>,
     udp_exchange_events: VecDeque<R2oUdpExchangeEvent>,
+    flow_limit: usize,
 }
 
 impl R2oQuicSessions {
+    /// Создать состояние с тем же пределом потоков, что и у UDP-таблицы.
+    pub fn try_with_capacity(
+        flow_capacity: R2oFlowCapacity,
+    ) -> Result<Self, std::collections::TryReserveError> {
+        let flow_limit = flow_capacity.limit();
+        let mut flows = HashMap::new();
+        flows.try_reserve(flow_limit)?;
+        let mut hello_reported = HashMap::new();
+        hello_reported.try_reserve(flow_limit)?;
+        let mut udp_exchange_events = VecDeque::new();
+        udp_exchange_events.try_reserve(flow_limit)?;
+        Ok(Self {
+            flows,
+            initial_ring: VecDeque::new(),
+            hello_reported,
+            udp_exchange_events,
+            flow_limit,
+        })
+    }
+
     /// Собрать имя из проверенных Initial одного UDP-потока.
     pub fn capture_hello(&mut self, packet: &[u8]) -> Option<super::capture::QuicHello> {
         self.capture_hello_at_hook(packet, None)
@@ -232,7 +252,7 @@ impl R2oQuicSessions {
         };
 
         self.initial_ring.retain(|entry| entry.key != key);
-        if self.hello_reported.len() == MAX_QUIC_FLOWS {
+        if self.hello_reported.len() == self.flow_limit {
             if let Some(oldest) = self.hello_reported.keys().next().copied() {
                 self.hello_reported.remove(&oldest);
             }
@@ -290,7 +310,7 @@ impl R2oQuicSessions {
                 *last_seen = now;
             }
             let first_initial = !self.flows.contains_key(&key);
-            if first_initial && self.flows.len() >= MAX_QUIC_FLOWS {
+            if first_initial && self.flows.len() >= self.flow_limit {
                 return;
             }
             let flow = self.flows.entry(key).or_insert_with(|| FlowState {
@@ -340,7 +360,7 @@ impl R2oQuicSessions {
         } else if source == flow.server && destination == flow.client {
             if flow.last_reverse.is_none() && !flow.exchange_told {
                 flow.exchange_told = true;
-                if self.udp_exchange_events.len() < MAX_QUIC_FLOWS {
+                if self.udp_exchange_events.len() < self.flow_limit {
                     self.udp_exchange_events.push_back(R2oUdpExchangeEvent {
                         key: key.wire_key(),
                         code: 0,
@@ -554,11 +574,24 @@ impl R2oQuicSessions {
     }
 }
 
+impl Default for R2oQuicSessions {
+    fn default() -> Self {
+        Self {
+            flows: HashMap::new(),
+            initial_ring: VecDeque::new(),
+            hello_reported: HashMap::new(),
+            udp_exchange_events: VecDeque::new(),
+            flow_limit: R2oFlowCapacity::default().limit(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{QUIC_IDLE, QUIC_SILENCE, R2oQuicSessions, r2o_quic_client_direction};
     #[cfg(target_os = "linux")]
     use crate::conntrack::R2oConntrackInfo;
+    use crate::flow_capacity::R2oFlowCapacity;
     use crate::netlink::{
         R2O_NF_INET_FORWARD, R2O_NF_INET_LOCAL_IN, R2O_NF_INET_LOCAL_OUT, R2O_NF_INET_POST_ROUTING,
         R2O_NF_INET_PRE_ROUTING,
@@ -572,6 +605,46 @@ mod tests {
         include_bytes!("../../r2k-core/tests/fixtures/quic_v1_initial_no_sni.bin");
     const INITIAL_FIRST: &[u8] = include_bytes!("../tests/fixtures/quic_v1_initial_first.bin");
     const INITIAL_SECOND: &[u8] = include_bytes!("../tests/fixtures/quic_v1_initial_second.bin");
+
+    #[test]
+    fn quic_учёт_не_превышает_порог_ёмкости_udp_таблицы() {
+        let now = Instant::now();
+        let limit = R2oFlowCapacity::default().limit();
+        let mut sessions = R2oQuicSessions::default();
+        for offset in 0..=limit {
+            sessions.observe_packet(
+                &ipv4_packet(
+                    [192, 0, 2, 10],
+                    [198, 51, 100, 20],
+                    40_000 + offset as u16,
+                    443,
+                    INITIAL,
+                ),
+                now,
+            );
+        }
+        assert_eq!(sessions.flows.len(), limit);
+    }
+
+    #[test]
+    fn quic_учёт_поддерживает_увеличенную_настройку_ёмкости() {
+        let now = Instant::now();
+        let capacity = R2oFlowCapacity::from_requested(4096).unwrap();
+        let mut sessions = R2oQuicSessions::try_with_capacity(capacity).unwrap();
+        for offset in 0..2049 {
+            sessions.observe_packet(
+                &ipv4_packet(
+                    [192, 0, 2, 10],
+                    [198, 51, 100, 20],
+                    40_000 + offset as u16,
+                    443,
+                    INITIAL,
+                ),
+                now,
+            );
+        }
+        assert_eq!(sessions.flows.len(), 2049);
+    }
 
     #[test]
     fn quic_журналирует_только_первую_обратную_датаграмму_включая_пустую() {
