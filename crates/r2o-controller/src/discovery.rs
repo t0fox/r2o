@@ -449,7 +449,7 @@ pub fn add_measured_binding(
         kind: "name".into(),
         target: target.host.clone(),
         plan_id: plan_id.clone(),
-        level: 1,
+        level: 3,
         confirmed: now,
         successes: prior_successes.saturating_add(1),
         enabled: true,
@@ -662,6 +662,16 @@ fn text_with_id(canonical: &str, id: &str) -> Result<String, String> {
     Ok(format!("{before}{replacement}{after}"))
 }
 
+/// Подставить отдельный идентификатор для временной проверки измеренного плана.
+pub fn plan_text_for_trial(text: &str, id: [u8; 16]) -> Result<String, String> {
+    let canonical = canonical_plan_text(text)?;
+    let id = id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    text_with_id(&canonical, &id)
+}
+
 fn stable_plan_id(family: u8, shape: u8, text: &str) -> String {
     fn hash(seed: u64, bytes: impl IntoIterator<Item = u8>) -> u64 {
         bytes.into_iter().fold(seed, |value, byte| {
@@ -730,6 +740,15 @@ mod tests {
                 .ip(),
             IpAddr::V4(Ipv4Addr::new(198, 51, 100, 80))
         );
+    }
+
+    #[test]
+    fn временный_план_получает_уникальный_id_без_изменения_его_содержимого() {
+        let text = "r2o-plan 1 5\nid 00000000000000000000000000000000\nproto tcp tls\nsplit sni_middle +8\n";
+        let trial = super::plan_text_for_trial(text, [0x5a; 16]).unwrap();
+
+        assert!(trial.contains("id 5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\n"));
+        assert!(trial.ends_with("proto tcp tls\nsplit sni_middle +8\n"));
     }
 
     #[test]

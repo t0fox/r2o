@@ -1824,6 +1824,25 @@ fn r2o_family_recovery_decision(
 }
 
 #[cfg(unix)]
+fn r2o_confirm_discovery_outcome(
+    mut outcome: DiscoveryOutcome,
+    result: Result<r2o_controller::fetch::FetchResult, String>,
+    applied: bool,
+) -> DiscoveryOutcome {
+    if outcome.plan_text.is_none()
+        || r2o_family_recovery_decision(&result, applied) == R2oFamilyRecoveryDecision::Verified
+    {
+        return outcome;
+    }
+    outcome.plan_text = None;
+    outcome.retry_after = Some(R2O_DISCOVERY_FAILURE_RETRY);
+    outcome.detail.push_str(
+        "; кандидат не сохранён: временная проба не получила полный HTTPS-ответ и точное APPLIED",
+    );
+    outcome
+}
+
+#[cfg(unix)]
 fn r2o_family_recovery_fetch(
     target: &r2o_controller::discovery::DiscoveryTarget,
     mark: Option<u32>,
@@ -2012,6 +2031,38 @@ fn r2o_family_recovery_sibling_trial(
         Ok((fetch, applied)) => (Ok(fetch), applied),
         Err(error) => (Err(error), false),
     }
+}
+
+#[cfg(unix)]
+fn r2o_run_discovery_candidate_trial(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    source_text: &str,
+    mark: Option<u32>,
+    commands: &SyncSender<HttpSearchCommand>,
+) -> (Result<r2o_controller::fetch::FetchResult, String>, bool) {
+    let plan_id = match random_id() {
+        Ok(id) => id,
+        Err(error) => return (Err(error.to_string()), false),
+    };
+    let plan_text = match r2o_controller::discovery::plan_text_for_trial(source_text, plan_id) {
+        Ok(text) => text,
+        Err(error) => return (Err(error), false),
+    };
+    let destination = match target.endpoint.parse::<std::net::SocketAddr>() {
+        Ok(destination) => destination,
+        Err(error) => {
+            return (
+                Err(format!("адрес Discovery-пробы недопустим: {error}")),
+                false,
+            );
+        }
+    };
+    let candidate = R2oFamilyRecoveryCandidate {
+        plan_id,
+        plan_text,
+        group_plan: false,
+    };
+    r2o_family_recovery_sibling_trial(target, destination, &candidate, mark, commands)
 }
 
 #[cfg(unix)]
@@ -3328,12 +3379,30 @@ fn applied_quic_trial_matches(
 
 #[cfg(unix)]
 impl DiscoveryWorker {
+    #[cfg(test)]
     fn new(
         mark: Option<u32>,
         measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
     ) -> Self {
         let runner: Arc<R2oDiscoveryRunner> =
             Arc::new(move |target, cancel| classify_discovery_target(target, cancel, mark));
+        Self::r2o_new_with_runner(measurement_gate, runner)
+    }
+
+    fn new_with_confirmation(
+        mark: Option<u32>,
+        measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
+        commands: SyncSender<HttpSearchCommand>,
+    ) -> Self {
+        let runner: Arc<R2oDiscoveryRunner> = Arc::new(move |target, cancel| {
+            let outcome = classify_discovery_target(target.clone(), cancel, mark);
+            let Some(plan_text) = outcome.plan_text.as_deref() else {
+                return outcome;
+            };
+            let (result, applied) =
+                r2o_run_discovery_candidate_trial(&target, plan_text, mark, &commands);
+            r2o_confirm_discovery_outcome(outcome, result, applied)
+        });
         Self::r2o_new_with_runner(measurement_gate, runner)
     }
 
@@ -4040,17 +4109,24 @@ impl ControlClient {
         let mut voice_discovery = discovery
             .as_ref()
             .map(|(_, _, mark)| R2oVoiceDiscoveryWorker::new(*mark, measurement_gate.clone()));
+        let http_search = discovery
+            .as_ref()
+            .map(|_| HttpSearchWorker::new(measurement_gate.clone()));
         let mut discovery = discovery.map(|(catalog, path, mark)| {
             (
-                DiscoveryWorker::new(mark, measurement_gate.clone()),
+                DiscoveryWorker::new_with_confirmation(
+                    mark,
+                    measurement_gate.clone(),
+                    http_search
+                        .as_ref()
+                        .expect("HTTP worker существует при активном Discovery")
+                        .command_sender(),
+                ),
                 catalog,
                 path,
                 mark,
             )
         });
-        let http_search = discovery
-            .as_ref()
-            .map(|_| HttpSearchWorker::new(measurement_gate.clone()));
         let mut family_recovery = discovery.as_ref().map(|_| {
             R2oFamilyRecoveryWorker::new(
                 measurement_gate.clone(),
@@ -7334,6 +7410,37 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn автоклассификатор_не_сохраняет_кандидат_без_полного_https_и_applied() {
+        let outcome = || DiscoveryOutcome {
+            target: DiscoveryTarget {
+                host: "example.com".into(),
+                endpoint: "198.51.100.20:443".into(),
+                family: 4,
+                shape: SHAPE_MODERN,
+            },
+            plan_text: Some("проверенный сырой пробой кандидат".into()),
+            detail: "кандидат найден".into(),
+            queue_expired: false,
+            direct_clear: false,
+            retry_after: None,
+        };
+
+        let без_applied =
+            super::r2o_confirm_discovery_outcome(outcome(), Ok(r2o_test_fetch_result()), false);
+        assert!(без_applied.plan_text.is_none());
+
+        let mut неполный = r2o_test_fetch_result();
+        неполный.complete = false;
+        let без_полного_https = super::r2o_confirm_discovery_outcome(outcome(), Ok(неполный), true);
+        assert!(без_полного_https.plan_text.is_none());
+
+        let подтверждённый =
+            super::r2o_confirm_discovery_outcome(outcome(), Ok(r2o_test_fetch_result()), true);
+        assert!(подтверждённый.plan_text.is_some());
+    }
+
+    #[cfg(unix)]
     fn r2o_test_fetch_result() -> FetchResult {
         FetchResult {
             address: "198.51.100.20:443".parse().unwrap(),
@@ -9654,9 +9761,20 @@ mod tests {
         let first_permit = gate.r2o_try_acquire().unwrap();
         let second_permit = gate.r2o_try_acquire().unwrap();
         let (started_sender, started_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let release_receiver = Arc::new(std::sync::Mutex::new(release_receiver));
+        let (finished_sender, finished_receiver) = mpsc::channel();
+        let runner_release = Arc::clone(&release_receiver);
         let runner = Arc::new(
             move |target: r2o_controller::discovery::DiscoveryTarget, _cancel: Arc<AtomicBool>| {
-                started_sender.send(target.host.clone()).unwrap();
+                let host = target.host.clone();
+                started_sender.send(host.clone()).unwrap();
+                runner_release
+                    .lock()
+                    .unwrap()
+                    .recv()
+                    .expect("тест должен отпустить Discovery runner");
+                finished_sender.send(host).unwrap();
                 super::DiscoveryOutcome {
                     target,
                     plan_text: Some("план".into()),
@@ -9700,7 +9818,13 @@ mod tests {
                 .expect("повышенная цель должна запуститься первой"),
             third.host
         );
-        drop(second_permit);
+        release_sender.send(()).unwrap();
+        assert_eq!(
+            finished_receiver
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("горячая цель должна освободить worker"),
+            third.host
+        );
 
         assert_eq!(
             started_receiver
@@ -9708,12 +9832,28 @@ mod tests {
                 .expect("первая старая цель должна запуститься после горячей"),
             first.host
         );
+        release_sender.send(()).unwrap();
+        assert_eq!(
+            finished_receiver
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("первая старая цель должна освободить worker"),
+            first.host
+        );
+
         assert_eq!(
             started_receiver
                 .recv_timeout(std::time::Duration::from_secs(2))
                 .expect("последняя цель должна сохранить порядок FIFO"),
             second.host
         );
+        release_sender.send(()).unwrap();
+        assert_eq!(
+            finished_receiver
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("последняя цель должна освободить worker"),
+            second.host
+        );
+        drop(second_permit);
     }
 
     #[cfg(unix)]
@@ -10341,6 +10481,8 @@ mod tests {
                 direct_clear: false,
                 retry_after: None,
             };
+            let outcome =
+                super::r2o_confirm_discovery_outcome(outcome, Ok(r2o_test_fetch_result()), true);
             let result = client.apply_discovery_outcome(outcome, &mut catalog, &catalog_path);
             let (kind, body) = server.join().unwrap();
             assert_eq!(kind, COMMAND_SET_NAME);
@@ -10360,6 +10502,16 @@ mod tests {
                 shape: SHAPE_MODERN,
             }
         ));
+        assert_eq!(
+            saved
+                .boxes
+                .iter()
+                .flat_map(|box_record| &box_record.bindings)
+                .find(|binding| binding.kind == "name" && binding.target == "example.com")
+                .unwrap()
+                .level,
+            3
+        );
         let name_len = usize::from(body[0]);
         assert_eq!(&body[1..1 + name_len], b"example.com");
         assert_eq!(body[1 + name_len], SHAPE_MODERN);
