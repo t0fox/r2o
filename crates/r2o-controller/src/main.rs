@@ -2622,7 +2622,7 @@ fn r2o_take_ready_quic_discovery(
         .front_mut()?
         .permit
         .take()
-        .or_else(|| gate.r2o_try_acquire())?;
+        .or_else(|| gate.r2o_try_acquire_queued())?;
     let entry = pending.pop_front()?;
     Some((entry, permit))
 }
@@ -9382,6 +9382,96 @@ mod tests {
             outcomes,
             ["first.example", "second.example", "third.example"]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_discovery_ожидающая_задача_не_обходит_первый_тик() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex, mpsc};
+        use std::time::{Duration, Instant};
+
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel::<()>();
+        let release_receiver = Arc::new(Mutex::new(release_receiver));
+        let runner_release = Arc::clone(&release_receiver);
+        let runner = Arc::new(
+            move |target: r2o_controller::discovery::DiscoveryTarget, _cancel: Arc<AtomicBool>| {
+                started_sender.send(target.host.clone()).unwrap();
+                runner_release
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .recv()
+                    .unwrap();
+                super::DiscoveryOutcome {
+                    target,
+                    plan_text: Some("план".into()),
+                    detail: "завершено".into(),
+                    queue_expired: false,
+                    direct_clear: false,
+                    retry_after: None,
+                }
+            },
+        );
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::r2o_with_start_gap(2);
+        let mut worker = super::DiscoveryWorker::r2o_new_with_runner(gate.clone(), runner);
+        let target = |host: &str, port| r2o_controller::discovery::DiscoveryTarget {
+            host: host.into(),
+            endpoint: format!("127.0.0.1:{port}"),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+
+        assert!(worker.queue(target("first.example", 443)));
+        assert!(worker.queue(target("second.example", 444)));
+        assert!(worker.queue(target("third.example", 445)));
+        let mut started = [
+            started_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("первая начальная задача должна начаться"),
+            started_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("вторая начальная задача должна начаться"),
+        ];
+        started.sort();
+        assert_eq!(started, ["first.example", "second.example"]);
+
+        release_sender.send(()).unwrap();
+        release_sender.send(()).unwrap();
+        let outcome_deadline = Instant::now() + Duration::from_secs(2);
+        let mut completed = 0;
+        while completed < 2 {
+            if worker.try_outcome().is_some() {
+                completed += 1;
+            } else {
+                assert!(
+                    Instant::now() < outcome_deadline,
+                    "обе начальные задачи должны завершиться"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        let before_tick = started_receiver.recv_timeout(Duration::from_millis(100));
+        if before_tick.is_ok() {
+            release_sender.send(()).unwrap();
+        }
+        assert!(
+            matches!(before_tick, Err(mpsc::RecvTimeoutError::Timeout)),
+            "уже ожидающая задача не должна стартовать до первого тика"
+        );
+
+        let tick_started = Instant::now();
+        gate.r2o_scheduler_tick();
+        let third_started = started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("ожидающая задача должна продолжиться после первого тика");
+        assert_eq!(third_started, "third.example");
+        assert!(
+            tick_started.elapsed() >= Duration::from_millis(250),
+            "после первого тика между выпусками должна пройти пауза 250 мс"
+        );
+        release_sender.send(()).unwrap();
     }
 
     #[cfg(unix)]

@@ -328,6 +328,8 @@ fn r2o_limiter_text(limiter: u8) -> String {
 struct R2oGateState {
     adaptive: R2oAdaptiveLimit,
     active: usize,
+    initial_start_limit: usize,
+    initial_starts: usize,
     waiters: VecDeque<u64>,
     next_waiter: u64,
     last_sample: Option<Instant>,
@@ -403,6 +405,8 @@ impl R2oMeasurementGate {
                 state: Mutex::new(R2oGateState {
                     adaptive: R2oAdaptiveLimit::new(max_slots),
                     active: 0,
+                    initial_start_limit: R2O_DEFAULT_MEASUREMENT_LIMIT.min(max_slots.max(1)),
+                    initial_starts: 0,
                     waiters: VecDeque::new(),
                     next_waiter: 1,
                     last_sample: None,
@@ -424,8 +428,7 @@ impl R2oMeasurementGate {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let now = Instant::now();
-        if !state.waiters.is_empty()
-            || state.active >= state.adaptive.limit()
+        if state.active >= state.adaptive.limit()
             || (state.scheduler_tick_seen
                 && r2o_start_gap_remaining(state.last_started, now, self.shared.minimum_start_gap)
                     .is_some())
@@ -433,6 +436,41 @@ impl R2oMeasurementGate {
             return None;
         }
         state.active += 1;
+        if self.shared.minimum_start_gap.is_some() && !state.scheduler_tick_seen {
+            state.initial_starts = state.initial_starts.saturating_add(1);
+        }
+        state.last_started = Some(now);
+        let active = state.active;
+        state.adaptive.r2o_mark_started(active);
+        self.shared.changed.notify_all();
+        Some(R2oMeasurementPermit {
+            shared: Arc::clone(&self.shared),
+            active: true,
+        })
+    }
+
+    /// Немедленно берёт слот только для уже ожидающей работы и сохраняет её очередь.
+    pub fn r2o_try_acquire_queued(&self) -> Option<R2oMeasurementPermit> {
+        self.r2o_refresh_if_due();
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let now = Instant::now();
+        if !state.waiters.is_empty()
+            || state.active >= state.adaptive.limit()
+            || r2o_initial_queue_waits_for_tick(&state, self.shared.minimum_start_gap)
+            || (state.scheduler_tick_seen
+                && r2o_start_gap_remaining(state.last_started, now, self.shared.minimum_start_gap)
+                    .is_some())
+        {
+            return None;
+        }
+        state.active += 1;
+        if self.shared.minimum_start_gap.is_some() && !state.scheduler_tick_seen {
+            state.initial_starts = state.initial_starts.saturating_add(1);
+        }
         state.last_started = Some(now);
         let active = state.active;
         state.adaptive.r2o_mark_started(active);
@@ -485,6 +523,15 @@ impl R2oMeasurementGate {
             }
             if state.waiters.front() == Some(&waiter) && state.active < state.adaptive.limit() {
                 let now = Instant::now();
+                if r2o_initial_queue_waits_for_tick(&state, self.shared.minimum_start_gap) {
+                    let (state, _) = self
+                        .shared
+                        .changed
+                        .wait_timeout(state, Duration::from_millis(100))
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    drop(state);
+                    continue;
+                }
                 if state.scheduler_tick_seen
                     && let Some(delay) = r2o_start_gap_remaining(
                         state.last_started,
@@ -502,6 +549,9 @@ impl R2oMeasurementGate {
                 }
                 state.waiters.pop_front();
                 state.active += 1;
+                if self.shared.minimum_start_gap.is_some() && !state.scheduler_tick_seen {
+                    state.initial_starts = state.initial_starts.saturating_add(1);
+                }
                 state.last_started = Some(now);
                 let active = state.active;
                 state.adaptive.r2o_mark_started(active);
@@ -558,6 +608,15 @@ impl R2oMeasurementGate {
             println!("r2o-controller: {status}");
         }
     }
+}
+
+fn r2o_initial_queue_waits_for_tick(
+    state: &R2oGateState,
+    minimum_start_gap: Option<Duration>,
+) -> bool {
+    minimum_start_gap.is_some()
+        && !state.scheduler_tick_seen
+        && state.initial_starts >= state.initial_start_limit
 }
 
 impl R2oMeasurementPermit {
