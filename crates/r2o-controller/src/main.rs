@@ -29,6 +29,7 @@ use r2o_controller::plan_text::compile_text;
 #[cfg(unix)]
 use r2o_controller::r2o_late_rx::{R2oLateRxCache, R2oLateRxInput};
 use r2o_controller::response::{ResponseOptions, ResponseVerdict, probe_response};
+use r2o_controller::voice_targets::{r2o_format_voice_targets, r2o_read_voice_targets};
 use std::error::Error;
 #[cfg(unix)]
 use std::path::Path;
@@ -89,14 +90,46 @@ struct ServeCliOptions {
 }
 
 fn main() {
-    if let Err(error) = run() {
+    let r2o_arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    if let Some(r2o_code) = r2o_voice_list_command(&r2o_arguments) {
+        if r2o_code != 0 {
+            std::process::exit(r2o_code);
+        }
+        return;
+    }
+    if let Err(error) = run(r2o_arguments) {
         eprintln!("r2o-controller: {error}");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<(), Box<dyn Error>> {
-    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+fn r2o_voice_list_command(r2o_arguments: &[std::ffi::OsString]) -> Option<i32> {
+    if r2o_arguments
+        .first()
+        .is_none_or(|r2o_argument| r2o_argument != "--voice-list")
+    {
+        return None;
+    }
+
+    let r2o_path = match r2o_arguments {
+        [r2o_command] if r2o_command == "--voice-list" => None,
+        [r2o_command, r2o_option, r2o_path]
+            if r2o_command == "--voice-list" && r2o_option == "--conntrack" =>
+        {
+            Some(PathBuf::from(r2o_path))
+        }
+        _ => {
+            eprintln!("использование: r2o-controller --voice-list [--conntrack ФАЙЛ]");
+            return Some(2);
+        }
+    };
+
+    let r2o_targets = r2o_read_voice_targets(r2o_path.as_deref());
+    print!("{}", r2o_format_voice_targets(&r2o_targets));
+    Some(i32::from(r2o_targets.is_empty()))
+}
+
+fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
     if arguments.len() == 1 && (arguments[0] == "--help" || arguments[0] == "-h") {
         print_help();
         return Ok(());
@@ -482,6 +515,7 @@ fn print_help() {
         "r2o-controller — каталог и контроллер r2o\n\nИспользование:\n  r2o-controller --check-catalog ФАЙЛ\n  r2o-controller --clear-catalog ФАЙЛ\n  r2o-controller --classify HOST PORT SNI [REPEATS] [--modern] [--allow-loopback] [--mark N] [--save-plan ФАЙЛ] [--arm СОКЕТ]\n  r2o-controller --probe-response HOST PORT SNI [REPEATS]\n  r2o-controller --set-name СОКЕТ HOST FAMILY SHAPE ПЛАН.r2op\n  r2o-controller --set-addr СОКЕТ IP SHAPE ПЛАН.r2op\n  r2o-controller --del-addr СОКЕТ IP SHAPE\n  r2o-controller --apply-catalog СОКЕТ КАТАЛОГ.json\n  r2o-controller --serve СОКЕТ КАТАЛОГ.json [--discover] [--mark N]\n  r2o-controller --watch СОКЕТ\n  r2o-controller --journal СОКЕТ\n  r2o-controller --http-candidates\n  r2o-controller --version\n  r2o-controller --help\n\nFAMILY: ipv4 или ipv6. SHAPE: modern, legacy, ech, http, quic или voice; voice использует HOST @discord-voice. Адресная привязка принимает modern, legacy, ech, quic или voice. QUIC поддерживает планы quicsplit, quicdeny, четыре формы IP-фрагментации после контрольной пробы, удлинение UDP, нулевую 16-байтовую фальшивку и пару фальшивых quic5 с TTL 3 после подтверждённого рукопожатия и зависания; --modern использует сохранённый TLS 1.3 ClientHello; --discover ставит новые TCP SNI в ограниченную очередь классификации и ищет обход HTTP-портала, а для Discord voice запускает ограниченный IP Discovery поиск, требующий --mark; --mark задаёт SO_MARK управляющим зондам и raw-пакетам; --save-plan создаёт новый файл и не перезаписывает существующий; --arm передаёт найденный план работающему r2o-datapath для соответствующей формы."
     );
     println!("  r2o-controller --import-donor-catalog ФАЙЛ КАТАЛОГА");
+    println!("  r2o-controller --voice-list [--conntrack ФАЙЛ]");
 }
 
 fn normalize_plan_target(target: &str, shape: u8) -> Result<String, String> {
