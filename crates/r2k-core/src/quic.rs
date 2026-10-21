@@ -257,6 +257,83 @@ pub fn initial_client_hello_sni(input: &[u8]) -> Option<Vec<u8>> {
     )
 }
 
+/// Собрать свежий QUIC v1 Initial с одним полным TLS ClientHello.
+pub fn r2k_quic_initial_build(
+    client_hello: &[u8],
+    source_connection_id: &[u8],
+    target_len: usize,
+) -> Option<Vec<u8>> {
+    if !(8..=MAX_CID).contains(&source_connection_id.len())
+        || !(1200..=MAX_PACKET).contains(&target_len)
+        || client_hello.len() < 4
+        || client_hello.len() > MAX_CLIENT_HELLO
+        || client_hello[0] != 1
+        || usize::try_from(read_u24(client_hello, 1)?)
+            .ok()?
+            .checked_add(4)?
+            != client_hello.len()
+    {
+        return None;
+    }
+    find_client_hello_sni_result(client_hello).ok()?;
+
+    let mut dcid = [0; 8];
+    let mut unique = false;
+    for _ in 0..4 {
+        getrandom::getrandom(&mut dcid).ok()?;
+        if dcid.as_slice() != source_connection_id {
+            unique = true;
+            break;
+        }
+    }
+    if !unique {
+        return None;
+    }
+
+    let mut clear_header = Vec::with_capacity(64);
+    clear_header.push(0xc0);
+    clear_header.extend_from_slice(&QUIC_V1.to_be_bytes());
+    clear_header.push(dcid.len() as u8);
+    clear_header.extend_from_slice(&dcid);
+    clear_header.push(source_connection_id.len() as u8);
+    clear_header.extend_from_slice(source_connection_id);
+    write_varint(0, &mut clear_header).ok()?;
+
+    let mut plain = Vec::with_capacity(target_len);
+    plain.push(0x06);
+    write_varint(0, &mut plain).ok()?;
+    write_varint(client_hello.len() as u64, &mut plain).ok()?;
+    plain.extend_from_slice(client_hello);
+
+    let (length_width, body_len) = [1usize, 2, 4, 8].into_iter().find_map(|width| {
+        let length = target_len.checked_sub(clear_header.len().checked_add(width)?)?;
+        let varint_width = match length {
+            0..=63 => 1,
+            64..=16_383 => 2,
+            16_384..=1_073_741_823 => 4,
+            _ => 8,
+        };
+        if varint_width != width || length < 20 {
+            return None;
+        }
+        let body_len = usize::try_from(length).ok()?.checked_sub(20)?;
+        (body_len >= plain.len()).then_some((width, body_len))
+    })?;
+    plain.resize(body_len, 0);
+    let length = u64::try_from(body_len.checked_add(20)?).ok()?;
+    let header_len = clear_header.len();
+    write_varint(length, &mut clear_header).ok()?;
+    if clear_header.len() - header_len != length_width
+        || clear_header.len() + body_len + 20 != target_len
+    {
+        return None;
+    }
+
+    let keys = derive_initial_keys(QUIC_V1, &dcid).ok()?;
+    let packet = seal_initial(&clear_header, &plain, 0, 4, keys).ok()?;
+    (packet.len() == target_len && is_authenticated_initial(&packet)).then_some(packet)
+}
+
 /// Повторно зашифровать клиентский Initial с новым DCID, сохранив его форму.
 pub(crate) fn r2k_quic_initial_reseal_for_dcid(input: &[u8], new_dcid: &[u8]) -> Option<Vec<u8>> {
     let header = parse_initial_header(input)?;
@@ -1168,6 +1245,22 @@ mod tests {
             super::r2k_quic_initial_flight_id(RFC_9001_INITIAL),
             super::r2k_quic_initial_flight_id(RFC_9369_INITIAL)
         );
+    }
+
+    #[test]
+    fn создаёт_аутентифицированный_quic_initial_из_clienthello() {
+        let client_hello = crypto_stream(&opened_frames(RFC_9001_INITIAL).frames);
+        let initial =
+            super::r2k_quic_initial_build(&client_hello, &[1, 2, 3, 4, 5, 6, 7, 8], 1200).unwrap();
+
+        assert_eq!(initial.len(), 1200);
+        assert!(super::is_authenticated_initial(&initial));
+        assert_eq!(
+            super::initial_client_hello_sni(&initial).as_deref(),
+            Some(b"example.com".as_slice())
+        );
+        assert!(super::r2k_quic_initial_build(&client_hello, &[1, 2, 3], 1200).is_none());
+        assert!(super::r2k_quic_initial_build(&client_hello, &[1; 8], 1199).is_none());
     }
 
     #[test]

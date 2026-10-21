@@ -4966,6 +4966,9 @@ impl ControlClient {
         let mut r2o_voice_trials = HashMap::<[u8; 16], R2oVoiceTrialContext>::new();
         let mut quic_snapshots =
             HashMap::<[u8; r2k_core::control::KEY_LEN], (Vec<u8>, std::time::Instant)>::new();
+        let mut quic_hello_names =
+            HashMap::<[u8; r2k_core::control::KEY_LEN], (Option<String>, std::time::Instant)>::new(
+            );
         let mut quic_trial_cooldowns = HashMap::<std::net::IpAddr, std::time::Instant>::new();
         let mut r2o_pending_quic_discovery = VecDeque::<R2oPendingQuicDiscovery>::new();
         if let Some(path) = &https_cache_path {
@@ -5592,21 +5595,6 @@ impl ControlClient {
                         std::io::stdout().flush()?;
                         continue;
                     }
-                    let Some(captured) = quic_snapshots
-                        .get(&event.key)
-                        .map(|(_, captured)| *captured)
-                    else {
-                        println!("QUIC-проба пропущена: для потока нет снимка Initial");
-                        std::io::stdout().flush()?;
-                        continue;
-                    };
-                    if now.saturating_duration_since(captured) > std::time::Duration::from_secs(60)
-                    {
-                        quic_snapshots.remove(&event.key);
-                        println!("QUIC-проба пропущена: снимок Initial устарел");
-                        std::io::stdout().flush()?;
-                        continue;
-                    }
                     if r2o_pending_quic_discovery.len() >= R2O_QUIC_TRIAL_QUEUE_CAPACITY {
                         println!(
                             "QUIC-проба {} не поставлена: общая очередь замеров заполнена",
@@ -5615,10 +5603,36 @@ impl ControlClient {
                         std::io::stdout().flush()?;
                         continue;
                     }
-                    let Some((snapshot, captured)) = quic_snapshots.remove(&event.key) else {
-                        println!("QUIC-проба пропущена: снимок Initial уже удалён");
-                        std::io::stdout().flush()?;
-                        continue;
+                    let (snapshot, captured) = match quic_snapshots.remove(&event.key) {
+                        Some((snapshot, captured))
+                            if now.saturating_duration_since(captured)
+                                <= std::time::Duration::from_secs(60) =>
+                        {
+                            (snapshot, captured)
+                        }
+                        _ => {
+                            let server_name = quic_hello_names
+                                .get(&event.key)
+                                .filter(|(_, seen)| {
+                                    now.saturating_duration_since(*seen)
+                                        <= std::time::Duration::from_secs(60)
+                                })
+                                .and_then(|(name, _)| name.as_deref());
+                            let Some(snapshot) =
+                                r2o_controller::quic_replay::r2o_quic_profile_snapshot(server_name)
+                            else {
+                                println!(
+                                    "QUIC-проба пропущена: не удалось собрать профиль Initial"
+                                );
+                                std::io::stdout().flush()?;
+                                continue;
+                            };
+                            println!(
+                                "QUIC Discovery использует свежий профиль {}",
+                                server_name.unwrap_or("без SNI")
+                            );
+                            (snapshot, now)
+                        }
                     };
                     quic_trial_cooldowns
                         .insert(server.ip(), now + std::time::Duration::from_secs(60 * 60));
@@ -5945,6 +5959,28 @@ impl ControlClient {
                     decode_hello(&frame).map_err(|error| format!("событие датапата: {error}"))?;
                 if r2o_late_rx.is_some() {
                     r2o_late_rx_hellos.capture(&hello, std::time::Instant::now());
+                }
+                if hello.key[37] == 17 {
+                    let now = std::time::Instant::now();
+                    quic_hello_names.retain(|_, (_, seen)| {
+                        now.saturating_duration_since(*seen) < std::time::Duration::from_secs(60)
+                    });
+                    if quic_hello_names.len() >= 128 && !quic_hello_names.contains_key(&hello.key) {
+                        if let Some(oldest) = quic_hello_names
+                            .iter()
+                            .min_by_key(|(_, (_, seen))| *seen)
+                            .map(|(key, _)| *key)
+                        {
+                            quic_hello_names.remove(&oldest);
+                        }
+                    }
+                    let name = hello
+                        .host
+                        .as_deref()
+                        .and_then(|host| std::str::from_utf8(host).ok())
+                        .filter(|host| !host.is_empty())
+                        .map(str::to_owned);
+                    quic_hello_names.insert(hello.key, (name, now));
                 }
                 if hello.key[37] == 17
                     && hello.shape == Some(SHAPE_QUIC)

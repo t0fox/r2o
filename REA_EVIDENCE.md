@@ -6275,3 +6275,54 @@ ARM64/QEMU; он проверяет два разных поздних сним�
 `.rea/r2o-quic-active-snapshot-mipsel-release.log`. Полная scheduler и session
 паритетность, CI и приёмка на реальном роутере не доказаны; оценка переноса
 остаётся **65,85%**.
+
+## Холодный запуск QUIC Discovery без QSN
+
+### Донор и REA
+
+Проверены ветви `fill_hellos` в `E:\d2o\core\sched.c` и тесты холодного старта
+из `E:\d2o\core\test_sched.c`. Донор запускает QUIC Discovery без снимка и
+создаёт профиль Initial; при наличии снимка соседнего имени пытается заменить
+SNI и при небезопасной замене использует профиль. SHA-256 источников:
+
+- `core/sched.c`: `1de9feaa b19dcea1 e493aea0 68295470 cf3143ad f83157b5 7663f109 8132ae8a`;
+- `core/test_sched.c`: `a67f87e0 9a7fd93e d735b52f 361e7859 0b9ce406 79ab95e3 00accf0a 3e9d51a3`;
+- объект `core/quichello.o`: `7fbbfc96 7974 5164 60d1 9786 0f20 9f1f 2187 b0a1 4ae5 aa83 cc12 3220 d933 805b`.
+
+REA `analyze_function("d2k_quic_probe_initial")` был запущен для объекта
+`quichello.o`, но вернул `provider_unavailable`, без Evidence ID. Диагностика:
+Windows Ghidra provider ограничен PE и raw 6502, Hopper не работает на Windows,
+IDA не настроен. Это ограничение провайдера, а не результат сравнения C и Rust.
+Для этой ветви REA-семантическое подтверждение отсутствует; вывод основан на
+исходнике, Clang AST scheduler и донорских тестах.
+
+### Rust-перенос
+
+`r2k_quic_initial_build` строит аутентифицированный QUIC v1 Initial точной длины
+1200 байт из проверенного полного ClientHello. Контроллер генерирует random,
+X25519 key share и CID через уже подключённый `ring`, добавляет ALPN `h3` и
+набор donor transport parameters, включая лимиты UDP и потоков, и `initial_source_connection_id`, совпадающий со SCID. До 128 недавних имён
+сохраняются по точному ключу потока на 60 секунд. Если QSN отсутствует или
+устарел, Discovery использует новое имя этого потока либо ClientHello без SNI.
+
+Новый тест ядра проверяет точную длину, аутентификацию, извлечение SNI и отказ на
+недопустимых границах. Тест `r2o_quic_профиль_собирает_проверяемый_clienthello_с_sni_и_без_него`
+сверяет SNI и полную структуру ClientHello через независимый `tls-parser`, а
+также связь транспортного параметра со SCID.
+
+Полный ARM64/QEMU workspace-проход: 1008 тестов прошло, 0 ошибок, 4
+игнорируемых, 73 набора; один поток. Изменённый controller прошёл `cargo check`
+для ARMv5te, ARMv7 и MIPS32 little-endian GNU. Release-контроллеры собраны и
+проверены как stripped ELF: ARM64 GNU/AArch64 — 4 920 328 байт, MIPS32 GNU —
+6 558 540 байт. ARM64 тесты запускались в QEMU; ARM32 и MIPS тесты не запускались.
+
+Журналы: `.rea/r2o-quic-cold-start-full-workspace-arm64-serial.log`,
+`.rea/r2o-quic-cold-start-core-controller-arm64.log`,
+`.rea/r2o-quic-cold-start-armv5te-check.log`,
+`.rea/r2o-quic-cold-start-armv7-check.log`,
+`.rea/r2o-quic-cold-start-mipsel-check.log`,
+`.rea/r2o-quic-cold-start-arm64-release.log` и
+`.rea/r2o-quic-cold-start-mipsel-release.log`.
+
+Остались открытыми переписывание соседнего снимка под другое SNI, все прочие
+ветви scheduler и `session.c`, а также приёмка на целевом роутере.

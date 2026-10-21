@@ -13,6 +13,45 @@ const R2O_QUIC_REPLAY_MAX_TIMEOUT: Duration = Duration::from_secs(10);
 const R2O_QUIC_REPLAY_MAX_RESPONSE: usize = 65_535;
 pub const R2O_QUIC_FRAGMENT_CONTROL_NAME: &str = "контроль прохождения IP-фрагментов, форма 1";
 
+/// Сформировать QSN с новым QUIC v1 Initial для холодного старта Discovery.
+pub fn r2o_quic_profile_snapshot(server_name: Option<&str>) -> Option<Vec<u8>> {
+    let provider = rustls::crypto::ring::default_provider();
+    let mut random = [0; 32];
+    provider.secure_random.fill(&mut random).ok()?;
+    let mut source_connection_id = [0; 8];
+    provider
+        .secure_random
+        .fill(&mut source_connection_id)
+        .ok()?;
+    let key_exchange = rustls::crypto::ring::kx_group::X25519.start().ok()?;
+    let public_key: [u8; 32] = key_exchange.pub_key().try_into().ok()?;
+
+    let mut extra_extensions = Vec::with_capacity(56);
+    extra_extensions.extend_from_slice(&[0, 0x39, 0, 52]);
+    extra_extensions.extend_from_slice(&[
+        0x01, 0x04, 0x80, 0x00, 0x75, 0x30, 0x03, 0x02, 0x45, 0xc0, 0x04, 0x04, 0x80, 0x10, 0x00,
+        0x00, 0x05, 0x04, 0x80, 0x04, 0x00, 0x00, 0x06, 0x04, 0x80, 0x04, 0x00, 0x00, 0x07, 0x04,
+        0x80, 0x04, 0x00, 0x00, 0x08, 0x02, 0x40, 0x64, 0x09, 0x02, 0x40, 0x64, 0x0f, 0x08,
+    ]);
+    extra_extensions.extend_from_slice(&source_connection_id);
+    let client_hello =
+        crate::r2o_tls::r2o_tls13_client_hello(&crate::r2o_tls::R2oTls13ClientHelloOptions {
+            server_name,
+            public_key: &public_key,
+            random: &random,
+            session_id_len: 0,
+            offer_tls12: false,
+            alpn: Some("h3"),
+            alpn_wire: None,
+            extra_extensions: &extra_extensions,
+            pad_to: 0,
+        })
+        .ok()?;
+    let initial =
+        r2k_core::quic::r2k_quic_initial_build(&client_hello, &source_connection_id, 1200)?;
+    r2k_core::quic_snapshot::r2k_quic_snapshot_pack(&[&initial])
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct QuicReplayResult {
     pub sent_datagrams: usize,
@@ -706,6 +745,52 @@ mod tests {
             R2oQuicFilterDecision::Unknown,
         ] {
             assert!(!r2o_quic_fragment_control_succeeded(decision, true));
+        }
+    }
+
+    #[test]
+    fn r2o_quic_профиль_собирает_проверяемый_clienthello_с_sni_и_без_него() {
+        for server_name in [Some("quic.example"), None] {
+            let packed = super::r2o_quic_profile_snapshot(server_name).unwrap();
+            let snapshot = r2k_core::quic_snapshot::r2k_quic_snapshot_parse(&packed).unwrap();
+            let datagrams = snapshot.datagrams();
+            assert_eq!(datagrams.len(), 1);
+            assert_eq!(datagrams[0].len(), 1200);
+            assert!(r2k_core::quic::is_authenticated_initial(datagrams[0]));
+            assert_eq!(
+                r2k_core::quic::r2k_quic_initial_sni_result_from_datagrams(datagrams).unwrap(),
+                server_name.map(|name| name.as_bytes().to_vec())
+            );
+
+            let client_hello =
+                r2k_core::quic::r2k_quic_initial_client_hello_from_datagrams(datagrams).unwrap();
+            let scid_length_offset = 6 + usize::from(datagrams[0][5]);
+            let scid_length = usize::from(datagrams[0][scid_length_offset]);
+            let scid_start = scid_length_offset + 1;
+            let scid = &datagrams[0][scid_start..scid_start + scid_length];
+            assert!(client_hello.windows(56).any(|extension| {
+                extension[..4] == [0, 0x39, 0, 52]
+                    && extension[4..46]
+                        == [
+                            0x01, 0x04, 0x80, 0x00, 0x75, 0x30, 0x03, 0x02, 0x45, 0xc0, 0x04, 0x04,
+                            0x80, 0x10, 0x00, 0x00, 0x05, 0x04, 0x80, 0x04, 0x00, 0x00, 0x06, 0x04,
+                            0x80, 0x04, 0x00, 0x00, 0x07, 0x04, 0x80, 0x04, 0x00, 0x00, 0x08, 0x02,
+                            0x40, 0x64, 0x09, 0x02, 0x40, 0x64,
+                        ]
+                    && extension[46..48] == [0x0f, 0x08]
+                    && &extension[48..] == scid
+            }));
+            let mut record = vec![22, 3, 1];
+            record.extend_from_slice(&(client_hello.len() as u16).to_be_bytes());
+            record.extend_from_slice(&client_hello);
+            let (remaining, messages) = tls_parser::parse_tls_plaintext(&record).unwrap();
+            assert!(remaining.is_empty());
+            assert!(matches!(
+                messages.msg.as_slice(),
+                [tls_parser::TlsMessage::Handshake(
+                    tls_parser::TlsMessageHandshake::ClientHello(_)
+                )]
+            ));
         }
     }
 
