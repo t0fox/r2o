@@ -876,6 +876,14 @@ mod app {
                             scheduled.observe(bytes, now);
                             pending_applied.retain(|ticket, _| scheduled.has_pending(*ticket));
                             voice_sessions.observe_packet(bytes, now);
+                            observe_stun_packet(
+                                &mut udp_sessions,
+                                bytes,
+                                now,
+                                queue_hook,
+                                &mut flow_journal,
+                                &journal_origin,
+                            );
                             if let Some(r2o_proof) = voice_trial_proofs.observe_response(bytes, now)
                             {
                                 send_voice_proof_event(
@@ -2143,6 +2151,25 @@ mod app {
         }
     }
 
+    fn observe_stun_packet(
+        sessions: &mut R2oUdpSessions,
+        packet: &[u8],
+        now: Instant,
+        hook: Option<u8>,
+        flow_journal: &mut R2oFlowJournal,
+        journal_origin: &Instant,
+    ) {
+        sessions.r2o_observe_stun_packet_at_hook(packet, now, hook);
+        let events = sessions.r2o_take_udp_exchange_events();
+        if events.is_empty() {
+            return;
+        }
+        let at_ns = journal_timestamp(journal_origin);
+        for event in events {
+            flow_journal.record_udp_exchange(at_ns, &event);
+        }
+    }
+
     fn udp_packet_admitted(sessions: &mut R2oUdpSessions, packet: &[u8], now: Instant) -> bool {
         !r2k_core::packet::PacketView::parse(packet).is_some_and(|view| view.protocol == 17)
             || sessions.observe_packet(packet, now)
@@ -2755,10 +2782,11 @@ mod app {
             ControlServer, NF_ACCEPT, NF_DROP, OriginalFate, PacketDecision, Plan, R2oFlowJournal,
             R2oQuicSessions, RuntimeMode, TcpSessions, format_journal_details, format_journal_key,
             handle_control_command, load_plan, needs_raw_socket, observe_quic_packet,
-            parse_options, r2o_datapath_payload, r2o_packet_route_skip, r2o_udp_decide_once,
-            release_many_with, release_with, send_applied_event, send_hello_event,
-            send_journal_snapshot, send_journal_updates, udp_packet_admitted,
+            observe_stun_packet, parse_options, r2o_datapath_payload, r2o_packet_route_skip,
+            r2o_udp_decide_once, release_many_with, release_with, send_applied_event,
+            send_hello_event, send_journal_snapshot, send_journal_updates, udp_packet_admitted,
         };
+        use r2k_core::stun::binding_request;
         use r2o_datapath::netlink::{QueuePacket, R2O_NF_INET_FORWARD, R2O_NF_INET_POST_ROUTING};
         use r2o_datapath::r2o_route::{
             R2O_ROUTE_OTHER_DEV, R2oRouteFamily, R2oRouteGate, R2oRoutedFlows,
@@ -3795,6 +3823,75 @@ mod app {
             );
             assert_eq!(journal.count(), 2);
             assert_eq!(journal.get(1).unwrap().num, 0);
+        }
+
+        #[test]
+        fn r2o_передаёт_stun_подтверждение_transaction_id_в_общий_журнал() {
+            fn пакет_udp(
+                source: ([u8; 4], u16),
+                destination: ([u8; 4], u16),
+                payload: &[u8],
+            ) -> Vec<u8> {
+                let mut packet = vec![0; 28 + payload.len()];
+                let packet_len = packet.len() as u16;
+                packet[0] = 0x45;
+                packet[2..4].copy_from_slice(&packet_len.to_be_bytes());
+                packet[8] = 64;
+                packet[9] = 17;
+                packet[12..16].copy_from_slice(&source.0);
+                packet[16..20].copy_from_slice(&destination.0);
+                packet[20..22].copy_from_slice(&source.1.to_be_bytes());
+                packet[22..24].copy_from_slice(&destination.1.to_be_bytes());
+                packet[24..26].copy_from_slice(&(8_u16 + payload.len() as u16).to_be_bytes());
+                packet[28..].copy_from_slice(payload);
+                packet
+            }
+
+            let client = ([192, 0, 2, 10], 53_123);
+            let server = ([198, 51, 100, 20], 3478);
+            let transaction_id = [8; 12];
+            let request = binding_request(transaction_id);
+            let mut response = [0; 20];
+            response[..8].copy_from_slice(&[0x01, 0x01, 0, 0, 0x21, 0x12, 0xa4, 0x42]);
+            response[8..].copy_from_slice(&transaction_id);
+            let start = Instant::now();
+            let mut sessions = R2oUdpSessions::new().unwrap();
+            let mut journal = R2oFlowJournal::with_capacity(4).unwrap();
+            let request_packet = пакет_udp(client, server, &request);
+            assert!(udp_packet_admitted(&mut sessions, &request_packet, start));
+            observe_stun_packet(
+                &mut sessions,
+                &request_packet,
+                start,
+                Some(R2O_NF_INET_POST_ROUTING),
+                &mut journal,
+                &start,
+            );
+
+            let response_packet = пакет_udp(server, client, &response);
+            assert!(udp_packet_admitted(
+                &mut sessions,
+                &response_packet,
+                start + Duration::from_millis(20),
+            ));
+            observe_stun_packet(
+                &mut sessions,
+                &response_packet,
+                start + Duration::from_millis(20),
+                Some(R2O_NF_INET_FORWARD),
+                &mut journal,
+                &start,
+            );
+
+            let event = journal.get(0).unwrap();
+            assert_eq!(
+                event.kind,
+                r2o_datapath::flow_journal::R2oFlowJournalKind::Exchange
+            );
+            assert_eq!(event.code, 2);
+            assert_eq!(event.num, response.len() as u32);
+            assert_eq!(&event.key[1..5], &client.0);
+            assert_eq!(&event.key[17..21], &server.0);
         }
 
         #[test]

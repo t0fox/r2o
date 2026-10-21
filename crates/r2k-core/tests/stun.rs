@@ -1,5 +1,5 @@
 use r2k_core::stun::{
-    MappedAddress, is_binding_request, is_discord_ip_discovery_request,
+    MappedAddress, is_binding_request, is_binding_response_for, is_discord_ip_discovery_request,
     is_discord_ip_discovery_response, is_discord_voice_request, parse_binding_response,
 };
 
@@ -65,6 +65,19 @@ fn rejects_foreign_and_malformed_binding_responses() {
     malformed_address[2..4].copy_from_slice(&12_u16.to_be_bytes());
     malformed_address.extend_from_slice(&[0, 0x20, 0, 8, 0, 3, 0, 0, 0, 0, 0, 0]);
     assert!(parse_binding_response(&malformed_address, &TXID).is_err());
+}
+
+#[test]
+fn recognizes_only_a_binding_response_for_the_exact_transaction_id() {
+    assert!(is_binding_response_for(RESPONSE_V4, &TXID));
+    let mut foreign = TXID;
+    foreign[0] ^= 0xff;
+    assert!(!is_binding_response_for(RESPONSE_V4, &foreign));
+    assert!(!is_binding_response_for(&RESPONSE_V4[..19], &TXID));
+
+    let mut wrong_cookie = RESPONSE_V4.to_vec();
+    wrong_cookie[4] ^= 1;
+    assert!(!is_binding_response_for(&wrong_cookie, &TXID));
 }
 
 #[test]

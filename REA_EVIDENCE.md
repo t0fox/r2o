@@ -5431,3 +5431,23 @@ REA и исходник подтверждают: корректный Binding R
 `.rea/r2o-generic-stun-workspace-arm64-tests-rerun.log`,
 `.rea/r2o-generic-stun-arm64-release-build.log` и
 `.rea/r2o-generic-stun-arm64-release-smoke.log`.
+
+## STUN: доказательство ответа по transaction ID — 21.10.2026
+
+REA Evidence `handle_udp` выше переиспользовано без повторного анализа.
+Сохранённые хеши исходника и `test_stun_session` из предыдущего раздела
+идентифицируют донорскую ветвь: сохраняется первый transaction ID запроса,
+чужой ID не даёт STUN-доказательство, а совпавший Binding Response выдаёт
+событие `EXCHANGE` с кодом `2` ровно один раз. Первый ответ с чужим содержимым
+отдельно даёт общий код `0`. В Rust добавлены строгая проверка Binding Response
+по ID, ограниченное состояние транзакции в UDP-таблице и передача обоих типов
+событий в общий runtime-журнал.
+
+Только ARM64: focused `r2k-core` и `r2o-datapath` — 369 прошло, 0 ошибок,
+3 raw-пропуска; workspace — 962 прошло, 0 ошибок, 4 raw-пропуска в 73 наборах.
+GNU release workspace собран, все шесть AArch64 ELF запущены через QEMU с
+`--version`; форматирование и `git diff --check` прошли. Другие архитектуры и
+физический роутер не проверялись. Журналы: `.rea/r2o-stun-transaction-arm64-focused-tests.log`,
+`.rea/r2o-stun-transaction-workspace-arm64-tests.log`,
+`.rea/r2o-stun-transaction-arm64-release-build.log` и
+`.rea/r2o-stun-transaction-arm64-release-smoke.log`.

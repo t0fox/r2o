@@ -1,11 +1,17 @@
 use crate::flow_capacity::R2oFlowCapacity;
+use crate::netlink::{R2O_NF_INET_LOCAL_OUT, R2O_NF_INET_POST_ROUTING};
+use crate::r2o_quic::R2oUdpExchangeEvent;
 use r2k_core::addr::Address;
+use r2k_core::control::KEY_LEN;
 use r2k_core::packet::PacketView;
-use std::collections::{HashMap, TryReserveError};
+use std::collections::{HashMap, TryReserveError, VecDeque};
 use std::time::{Duration, Instant};
 
 const UDP_IDLE: Duration = Duration::from_secs(120);
 const UDP_HELLO_WINDOW: u8 = 8;
+const R2O_UDP_PROOF_NONE: u8 = 0;
+const R2O_UDP_PROOF_STUN: u8 = 2;
+const STUN_TRANSACTION_ID_LEN: usize = 12;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct Endpoint {
@@ -39,14 +45,33 @@ impl R2oUdpFlowKey {
             }
         }
     }
+
+    fn wire_key(self) -> [u8; KEY_LEN] {
+        let mut key = [0; KEY_LEN];
+        key[0] = self.low.address.family();
+        key[1..17].copy_from_slice(&self.low.address.bytes());
+        key[17..33].copy_from_slice(&self.high.address.bytes());
+        key[33..35].copy_from_slice(&self.low.port.to_be_bytes());
+        key[35..37].copy_from_slice(&self.high.port.to_be_bytes());
+        key[37] = 17;
+        key
+    }
 }
 
-#[derive(Clone, Copy)]
+struct StunFlow {
+    client: Endpoint,
+    server: Endpoint,
+    transaction_id: [u8; STUN_TRANSACTION_ID_LEN],
+    exchange_told: bool,
+    proof_told: bool,
+}
+
 struct FlowState {
     last_seen: Instant,
     plan_applied: bool,
     hello_seen: bool,
     hold_attempts: u8,
+    stun: Option<StunFlow>,
 }
 
 pub(crate) fn flow_key_from_packet(packet: &[u8]) -> Option<R2oUdpFlowKey> {
@@ -77,6 +102,7 @@ pub struct R2oUdpTableStats {
 /// Ограниченное состояние всех корректных UDP-кортежей datapath.
 pub struct R2oUdpSessions {
     flows: HashMap<R2oUdpFlowKey, FlowState>,
+    udp_exchange_events: VecDeque<R2oUdpExchangeEvent>,
     flow_capacity: R2oFlowCapacity,
     refusals: u64,
 }
@@ -90,8 +116,11 @@ impl R2oUdpSessions {
     pub fn with_capacity(flow_capacity: R2oFlowCapacity) -> Result<Self, TryReserveError> {
         let mut flows = HashMap::new();
         flows.try_reserve(flow_capacity.slots())?;
+        let mut udp_exchange_events = VecDeque::new();
+        udp_exchange_events.try_reserve(flow_capacity.limit())?;
         Ok(Self {
             flows,
+            udp_exchange_events,
             flow_capacity,
             refusals: 0,
         })
@@ -118,9 +147,115 @@ impl R2oUdpSessions {
                 plan_applied: false,
                 hello_seen: false,
                 hold_attempts: 0,
+                stun: None,
             },
         );
         true
+    }
+
+    /// Связать ответный STUN Binding с первым запросом UDP-потока.
+    pub fn r2o_observe_stun_packet_at_hook(
+        &mut self,
+        packet: &[u8],
+        now: Instant,
+        hook: Option<u8>,
+    ) {
+        let Some(view) = PacketView::parse(packet)
+            .filter(|view| view.protocol == 17 && view.fragment & 0x1fff == 0)
+        else {
+            return;
+        };
+        let Some(udp) = packet.get(view.l4_offset..view.total_len) else {
+            return;
+        };
+        if udp.len() < 8 {
+            return;
+        }
+        let Some(payload_range) = view.udp_payload_range(packet) else {
+            return;
+        };
+        let Some(payload) = packet.get(payload_range) else {
+            return;
+        };
+        let key = R2oUdpFlowKey::new(
+            Endpoint {
+                address: view.src,
+                port: u16::from_be_bytes([udp[0], udp[1]]),
+            },
+            Endpoint {
+                address: view.dst,
+                port: u16::from_be_bytes([udp[2], udp[3]]),
+            },
+        );
+        let source = Endpoint {
+            address: view.src,
+            port: u16::from_be_bytes([udp[0], udp[1]]),
+        };
+        let destination = Endpoint {
+            address: view.dst,
+            port: u16::from_be_bytes([udp[2], udp[3]]),
+        };
+        let client_hook = matches!(hook, Some(R2O_NF_INET_LOCAL_OUT | R2O_NF_INET_POST_ROUTING));
+
+        let Some(flow) = self.flows.get_mut(&key) else {
+            return;
+        };
+        flow.last_seen = now;
+
+        if flow.stun.is_none() {
+            if !client_hook || !r2k_core::stun::is_binding_request(payload) {
+                return;
+            }
+            let Some(transaction_id) = payload.get(8..20).and_then(|bytes| bytes.try_into().ok())
+            else {
+                return;
+            };
+            flow.stun = Some(StunFlow {
+                client: source,
+                server: destination,
+                transaction_id,
+                exchange_told: false,
+                proof_told: false,
+            });
+            return;
+        }
+
+        let Some(stun) = flow.stun.as_mut() else {
+            return;
+        };
+        if source == stun.client && destination == stun.server {
+            return;
+        }
+        if source != stun.server || destination != stun.client {
+            return;
+        }
+
+        let proof_matches = r2k_core::stun::is_binding_response_for(payload, &stun.transaction_id);
+        if proof_matches && !stun.proof_told {
+            stun.proof_told = true;
+            stun.exchange_told = true;
+            if self.udp_exchange_events.len() < self.flow_capacity.limit() {
+                self.udp_exchange_events.push_back(R2oUdpExchangeEvent {
+                    key: key.wire_key(),
+                    code: R2O_UDP_PROOF_STUN,
+                    num: payload.len().min(u32::MAX as usize) as u32,
+                });
+            }
+        } else if !stun.exchange_told {
+            stun.exchange_told = true;
+            if self.udp_exchange_events.len() < self.flow_capacity.limit() {
+                self.udp_exchange_events.push_back(R2oUdpExchangeEvent {
+                    key: key.wire_key(),
+                    code: R2O_UDP_PROOF_NONE,
+                    num: payload.len().min(u32::MAX as usize) as u32,
+                });
+            }
+        }
+    }
+
+    /// Забрать накопленные события UDP-обмена и STUN-подтверждения.
+    pub fn r2o_take_udp_exchange_events(&mut self) -> Vec<R2oUdpExchangeEvent> {
+        self.udp_exchange_events.drain(..).collect()
     }
 
     /// Проверить, применялся ли уже план к этому UDP-потоку.
@@ -214,6 +349,8 @@ impl R2oUdpSessions {
 mod tests {
     use super::R2oUdpSessions;
     use crate::flow_capacity::R2oFlowCapacity;
+    use crate::netlink::{R2O_NF_INET_FORWARD, R2O_NF_INET_POST_ROUTING};
+    use r2k_core::stun::binding_request;
     use std::time::Instant;
 
     fn r2o_udp_packet(source_port: u16) -> Vec<u8> {
@@ -228,6 +365,33 @@ mod tests {
         packet[22..24].copy_from_slice(&443_u16.to_be_bytes());
         packet[24..26].copy_from_slice(&8_u16.to_be_bytes());
         packet
+    }
+
+    fn r2o_stun_packet(
+        source: ([u8; 4], u16),
+        destination: ([u8; 4], u16),
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut packet = vec![0; 28 + payload.len()];
+        let packet_len = packet.len() as u16;
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&packet_len.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 17;
+        packet[12..16].copy_from_slice(&source.0);
+        packet[16..20].copy_from_slice(&destination.0);
+        packet[20..22].copy_from_slice(&source.1.to_be_bytes());
+        packet[22..24].copy_from_slice(&destination.1.to_be_bytes());
+        packet[24..26].copy_from_slice(&(8_u16 + payload.len() as u16).to_be_bytes());
+        packet[28..].copy_from_slice(payload);
+        packet
+    }
+
+    fn r2o_stun_response(transaction_id: [u8; 12]) -> [u8; 20] {
+        let mut response = [0; 20];
+        response[..8].copy_from_slice(&[0x01, 0x01, 0, 0, 0x21, 0x12, 0xa4, 0x42]);
+        response[8..].copy_from_slice(&transaction_id);
+        response
     }
 
     #[test]
@@ -269,5 +433,82 @@ mod tests {
 
         assert!(!sessions.r2o_note_execution_failure(&packet, false, false, false, true));
         assert!(sessions.r2o_plan_applied(&packet));
+    }
+
+    #[test]
+    fn r2o_stun_сверяет_transaction_id_и_отдельно_журналирует_обмен() {
+        let client = ([192, 0, 2, 10], 53_123);
+        let server = ([198, 51, 100, 20], 3478);
+        let transaction_id = [9; 12];
+        let request = binding_request(transaction_id);
+        let mut foreign_id = transaction_id;
+        foreign_id[0] ^= 0xff;
+        let foreign_response = r2o_stun_response(foreign_id);
+        let matching_response = r2o_stun_response(transaction_id);
+        let start = Instant::now();
+        let mut sessions = R2oUdpSessions::new().unwrap();
+
+        let request_packet = r2o_stun_packet(client, server, &request);
+        assert!(sessions.observe_packet(&request_packet, start));
+        sessions.r2o_observe_stun_packet_at_hook(
+            &request_packet,
+            start,
+            Some(R2O_NF_INET_POST_ROUTING),
+        );
+        assert!(sessions.r2o_take_udp_exchange_events().is_empty());
+
+        let foreign_packet = r2o_stun_packet(server, client, &foreign_response);
+        assert!(sessions.observe_packet(&foreign_packet, start));
+        sessions.r2o_observe_stun_packet_at_hook(
+            &foreign_packet,
+            start + std::time::Duration::from_millis(10),
+            Some(R2O_NF_INET_FORWARD),
+        );
+        let generic = sessions.r2o_take_udp_exchange_events();
+        assert_eq!(generic.len(), 1);
+        assert_eq!(generic[0].code, 0);
+        assert_eq!(generic[0].num, 20);
+
+        let matching_packet = r2o_stun_packet(server, client, &matching_response);
+        assert!(sessions.observe_packet(&matching_packet, start));
+        sessions.r2o_observe_stun_packet_at_hook(
+            &matching_packet,
+            start + std::time::Duration::from_millis(20),
+            Some(R2O_NF_INET_FORWARD),
+        );
+        let proof = sessions.r2o_take_udp_exchange_events();
+        assert_eq!(proof.len(), 1);
+        assert_eq!(proof[0].code, 2);
+        assert_eq!(proof[0].num, 20);
+        assert_eq!(proof[0].key[37], 17);
+
+        sessions.r2o_observe_stun_packet_at_hook(
+            &matching_packet,
+            start + std::time::Duration::from_millis(30),
+            Some(R2O_NF_INET_FORWARD),
+        );
+        assert!(sessions.r2o_take_udp_exchange_events().is_empty());
+    }
+
+    #[test]
+    fn r2o_stun_не_создаёт_транзакцию_на_входящем_запросе() {
+        let client = ([192, 0, 2, 10], 53_123);
+        let server = ([198, 51, 100, 20], 3478);
+        let request = binding_request([4; 12]);
+        let response = r2o_stun_response([4; 12]);
+        let start = Instant::now();
+        let mut sessions = R2oUdpSessions::new().unwrap();
+        let request_packet = r2o_stun_packet(server, client, &request);
+        assert!(sessions.observe_packet(&request_packet, start));
+        sessions.r2o_observe_stun_packet_at_hook(&request_packet, start, Some(R2O_NF_INET_FORWARD));
+
+        let response_packet = r2o_stun_packet(client, server, &response);
+        assert!(sessions.observe_packet(&response_packet, start));
+        sessions.r2o_observe_stun_packet_at_hook(
+            &response_packet,
+            start + std::time::Duration::from_millis(10),
+            Some(R2O_NF_INET_FORWARD),
+        );
+        assert!(sessions.r2o_take_udp_exchange_events().is_empty());
     }
 }

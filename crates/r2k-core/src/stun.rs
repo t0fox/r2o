@@ -72,6 +72,11 @@ pub fn is_binding_request(packet: &[u8]) -> bool {
     is_binding(packet, BINDING_REQUEST)
 }
 
+/// Проверить Binding Response по типу, заголовку и идентификатору транзакции.
+pub fn is_binding_response_for(packet: &[u8], txid: &[u8; TXID_LEN]) -> bool {
+    is_binding(packet, BINDING_RESPONSE) && packet.get(8..HEADER_LEN) == Some(txid.as_slice())
+}
+
 /// Текущий запрос Discord IP Discovery содержит ровно 74 байта и нулевые поля
 /// адреса и порта. Сигнатуру нужно проверять строго.
 pub fn is_discord_ip_discovery_request(packet: &[u8]) -> bool {
