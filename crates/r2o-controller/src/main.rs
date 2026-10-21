@@ -9476,6 +9476,75 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn r2o_discovery_свежее_подозрение_соблюдает_паузу_при_занятом_замере() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex, mpsc};
+        use std::time::{Duration, Instant};
+
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel::<()>();
+        let release_receiver = Arc::new(Mutex::new(release_receiver));
+        let runner_release = Arc::clone(&release_receiver);
+        let runner = Arc::new(
+            move |target: r2o_controller::discovery::DiscoveryTarget, _cancel: Arc<AtomicBool>| {
+                started_sender
+                    .send((target.host.clone(), Instant::now()))
+                    .unwrap();
+                runner_release
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .recv()
+                    .unwrap();
+                super::DiscoveryOutcome {
+                    target,
+                    plan_text: Some("план".into()),
+                    detail: "завершено".into(),
+                    queue_expired: false,
+                    direct_clear: false,
+                    retry_after: None,
+                }
+            },
+        );
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::r2o_with_start_gap(2);
+        gate.r2o_scheduler_tick();
+        let mut worker = super::DiscoveryWorker::r2o_new_with_runner(gate, runner);
+        let target = |host: &str, port| r2o_controller::discovery::DiscoveryTarget {
+            host: host.into(),
+            endpoint: format!("127.0.0.1:{port}"),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+
+        assert!(worker.queue(target("running.example", 443)));
+        let (started, first_started_at) = started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("первый замер должен начаться");
+        assert_eq!(started, "running.example");
+        assert!(worker.queue(target("fresh.example", 444)));
+
+        let before_gap = started_receiver.recv_timeout(Duration::from_millis(200));
+        if before_gap.is_ok() {
+            release_sender.send(()).unwrap();
+        }
+        assert!(
+            matches!(before_gap, Err(mpsc::RecvTimeoutError::Timeout)),
+            "свежее подозрение не должно запускать второй замер до паузы 250 мс"
+        );
+
+        let (started, second_started_at) = started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("свежее подозрение должно начать замер после паузы");
+        assert_eq!(started, "fresh.example");
+        assert!(
+            second_started_at.duration_since(first_started_at) >= Duration::from_millis(245),
+            "второй замер должен ждать почти полные 250 мс после первого"
+        );
+        release_sender.send(()).unwrap();
+        release_sender.send(()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn r2o_discovery_worker_keeps_waiting_targets_promotable() {
         fn target(host: &str) -> r2o_controller::discovery::DiscoveryTarget {
             r2o_controller::discovery::DiscoveryTarget {
