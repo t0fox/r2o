@@ -103,6 +103,7 @@ struct FlowState {
     forward_after_initial: u32,
     exchange_told: bool,
     suspected: bool,
+    plan_applied: bool,
 }
 
 /// Событие UDP-обмена или протокольного подтверждения для журнала.
@@ -274,6 +275,35 @@ impl R2oQuicSessions {
         self.udp_exchange_events.drain(..).collect()
     }
 
+    /// Отметить, что к этому QUIC-потоку был применён план.
+    pub fn mark_plan_applied(&mut self, packet: &[u8]) -> bool {
+        let Some(view) = PacketView::parse(packet)
+            .filter(|view| view.protocol == 17 && view.fragment & 0x3fff == 0)
+        else {
+            return false;
+        };
+        let Some(udp) = packet
+            .get(view.l4_offset..view.total_len)
+            .filter(|udp| udp.len() >= 8)
+        else {
+            return false;
+        };
+        let source = Endpoint {
+            address: view.src,
+            port: u16::from_be_bytes([udp[0], udp[1]]),
+        };
+        let destination = Endpoint {
+            address: view.dst,
+            port: u16::from_be_bytes([udp[2], udp[3]]),
+        };
+        let (key, _) = FlowKey::new(source, destination);
+        let Some(flow) = self.flows.get_mut(&key) else {
+            return false;
+        };
+        flow.plan_applied = true;
+        true
+    }
+
     pub fn observe_packet_at_hook(&mut self, packet: &[u8], now: Instant, hook: Option<u8>) {
         let Some(view) = PacketView::parse(packet)
             .filter(|view| view.protocol == 17 && view.fragment & 0x3fff == 0)
@@ -332,6 +362,7 @@ impl R2oQuicSessions {
                 forward_after_initial: 0,
                 exchange_told: false,
                 suspected: false,
+                plan_applied: false,
             });
             if !first_initial {
                 flow.forward_after_initial = flow.forward_after_initial.saturating_add(1);
@@ -455,6 +486,7 @@ impl R2oQuicSessions {
             events.push(R2oQuicSuspectEvent {
                 key: key.wire_key(),
                 client_is_low: flow.client_is_low,
+                planned: flow.plan_applied,
             });
         }
         events
@@ -527,6 +559,7 @@ impl R2oQuicSessions {
         Some(R2oQuicSuspectEvent {
             key: flow_key.wire_key(),
             client_is_low: flow.client_is_low,
+            planned: flow.plan_applied,
         })
     }
 
@@ -749,6 +782,7 @@ mod tests {
 
         let mut sessions = R2oQuicSessions::default();
         sessions.observe_packet(&initial, start);
+        assert!(sessions.mark_plan_applied(&initial));
         assert!(sessions.sweep(start + QUIC_SILENCE, true).is_empty());
 
         sessions.observe_packet(
@@ -760,6 +794,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         let decoded = decode_r2o_quic_suspect(&event_frame(&events[0])).unwrap();
         assert!(decoded.client_is_low);
+        assert!(decoded.planned);
         assert_eq!(&decoded.key[1..5], &client);
         assert_eq!(decoded.key[0], 4);
 

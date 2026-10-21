@@ -4,7 +4,7 @@ use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-pub const PROTOCOL_VERSION: u16 = 40;
+pub const PROTOCOL_VERSION: u16 = 41;
 pub const FRAME_MAX: usize = 65_536;
 pub const KEY_LEN: usize = 38;
 pub const MAX_DNS_NAME_LEN: usize = 253;
@@ -224,6 +224,7 @@ pub struct R2oVoiceSuspectEvent {
 pub struct R2oQuicSuspectEvent {
     pub key: [u8; KEY_LEN],
     pub client_is_low: bool,
+    pub planned: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -373,9 +374,10 @@ impl R2oQuicSuspectEvent {
         if !valid_flow_key(&self.key) || self.key[37] != 17 {
             return None;
         }
-        let mut body = Vec::with_capacity(KEY_LEN + 1);
+        let mut body = Vec::with_capacity(KEY_LEN + 2);
         body.extend_from_slice(&self.key);
         body.push(u8::from(self.client_is_low));
+        body.push(u8::from(self.planned));
         Some(body)
     }
 }
@@ -1385,34 +1387,44 @@ pub fn decode_r2o_voice_suspect(frame: &Frame) -> Result<R2oVoiceSuspectEvent, &
 }
 
 pub fn decode_r2o_quic_suspect(frame: &Frame) -> Result<R2oQuicSuspectEvent, &'static str> {
-    if frame.kind != EVENT_R2O_QUIC_SUSPECT || frame.body.len() != KEY_LEN + 1 {
+    if frame.kind != EVENT_R2O_QUIC_SUSPECT || frame.body.len() != KEY_LEN + 2 {
         return Err("неверное событие подозрения молчания QUIC");
     }
     let key: [u8; KEY_LEN] = frame.body[..KEY_LEN]
         .try_into()
         .map_err(|_| "неверный ключ UDP-потока QUIC")?;
-    if !valid_flow_key(&key) || key[37] != 17 || frame.body[KEY_LEN] > 1 {
+    if !valid_flow_key(&key)
+        || key[37] != 17
+        || frame.body[KEY_LEN] > 1
+        || frame.body[KEY_LEN + 1] > 1
+    {
         return Err("подозрение содержит неверный UDP-поток или направление клиента");
     }
     Ok(R2oQuicSuspectEvent {
         key,
         client_is_low: frame.body[KEY_LEN] == 1,
+        planned: frame.body[KEY_LEN + 1] == 1,
     })
 }
 
 pub fn decode_r2o_quic_stall(frame: &Frame) -> Result<R2oQuicSuspectEvent, &'static str> {
-    if frame.kind != EVENT_R2O_QUIC_STALL || frame.body.len() != KEY_LEN + 1 {
+    if frame.kind != EVENT_R2O_QUIC_STALL || frame.body.len() != KEY_LEN + 2 {
         return Err("неверное событие зависания QUIC после ответа");
     }
     let key: [u8; KEY_LEN] = frame.body[..KEY_LEN]
         .try_into()
         .map_err(|_| "неверный ключ зависшего UDP-потока QUIC")?;
-    if !valid_flow_key(&key) || key[37] != 17 || frame.body[KEY_LEN] > 1 {
+    if !valid_flow_key(&key)
+        || key[37] != 17
+        || frame.body[KEY_LEN] > 1
+        || frame.body[KEY_LEN + 1] > 1
+    {
         return Err("зависание содержит неверный UDP-поток или направление клиента");
     }
     Ok(R2oQuicSuspectEvent {
         key,
         client_is_low: frame.body[KEY_LEN] == 1,
+        planned: frame.body[KEY_LEN + 1] == 1,
     })
 }
 
@@ -1850,5 +1862,38 @@ mod tcp_repeat_event_tests {
         let mut invalid = frame;
         invalid.body[KEY_LEN] = 2;
         assert!(decode_r2o_tcp_repeat(&invalid).is_err());
+    }
+}
+
+#[cfg(test)]
+mod quic_suspect_event_tests {
+    use super::{
+        EVENT_R2O_QUIC_SUSPECT, Frame, KEY_LEN, R2oQuicSuspectEvent, decode_r2o_quic_suspect,
+    };
+
+    #[test]
+    fn событие_молчания_quic_сохраняет_направление_и_применение_плана() {
+        let mut key = [0; KEY_LEN];
+        key[0] = 4;
+        key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+        key[17..21].copy_from_slice(&[198, 51, 100, 80]);
+        key[33..35].copy_from_slice(&45_000_u16.to_be_bytes());
+        key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+        key[37] = 17;
+        let event = R2oQuicSuspectEvent {
+            key,
+            client_is_low: true,
+            planned: true,
+        };
+        let frame = Frame {
+            kind: EVENT_R2O_QUIC_SUSPECT,
+            body: event.event_body().unwrap(),
+        };
+
+        assert_eq!(decode_r2o_quic_suspect(&frame), Ok(event));
+
+        let mut invalid = frame;
+        invalid.body[KEY_LEN + 1] = 2;
+        assert!(decode_r2o_quic_suspect(&invalid).is_err());
     }
 }

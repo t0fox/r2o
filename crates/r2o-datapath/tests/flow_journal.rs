@@ -401,6 +401,7 @@ fn журнал_сохраняет_детали_подозрения_quic_и_о�
     let событие = R2oQuicSuspectEvent {
         key,
         client_is_low: true,
+        planned: true,
     };
     let тело = событие.event_body().unwrap();
     let mut журнал = R2oFlowJournal::with_capacity(2).unwrap();
@@ -413,6 +414,7 @@ fn журнал_сохраняет_детали_подозрения_quic_и_о�
     assert_eq!(запись.kind, R2oFlowJournalKind::R2oQuicSuspect);
     assert_eq!(запись.key, key);
     assert_eq!(запись.client_is_low, Some(true));
+    assert_eq!(запись.planned, 1);
     assert_eq!(журнал.added(), 1);
 }
 
@@ -459,6 +461,7 @@ fn журнал_различает_зависание_quic_после_ответ
     let event = R2oQuicSuspectEvent {
         key,
         client_is_low: true,
+        planned: false,
     };
     let body = event.event_body().unwrap();
     let mut journal = R2oFlowJournal::with_capacity(1).unwrap();

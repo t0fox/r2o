@@ -334,6 +334,7 @@ fn событие_молчания_quic_строго_проверяет_ipv6_к�
     let event = R2oQuicSuspectEvent {
         key,
         client_is_low: true,
+        planned: false,
     };
     let frame = Frame {
         kind: EVENT_R2O_QUIC_SUSPECT,
@@ -362,6 +363,7 @@ fn r2o_событие_quic_зависания_проверяет_ключ_и_н�
     let event = R2oQuicSuspectEvent {
         key,
         client_is_low: true,
+        planned: true,
     };
     let frame = Frame {
         kind: EVENT_R2O_QUIC_STALL,

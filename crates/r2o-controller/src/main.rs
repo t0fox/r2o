@@ -5666,11 +5666,13 @@ impl ControlClient {
                     let (client, server) = flow_socket_addresses(&event.key, event.client_is_low);
                     if quic_stalled {
                         println!(
-                            "наблюдение QUIC: после видимого ответа серверные пакеты не доходят, клиент продолжает передачу: {client} -> {server}; это не подтверждает блокировку"
+                            "наблюдение QUIC: после видимого ответа серверные пакеты не доходят, клиент продолжает передачу: {client} -> {server}; план применялся={}; это не подтверждает блокировку",
+                            event.planned
                         );
                     } else {
                         println!(
-                            "наблюдение QUIC: после повтора Initial ответ не виден минимум 2 с: {client} -> {server}; это не подтверждает блокировку"
+                            "наблюдение QUIC: после повтора Initial ответ не виден минимум 2 с: {client} -> {server}; план применялся={}; это не подтверждает блокировку",
+                            event.planned
                         );
                     }
                     let Some((_, catalog, _, r2o_mark)) = &mut discovery else {
@@ -5684,13 +5686,20 @@ impl ControlClient {
                         std::io::stdout().flush()?;
                         continue;
                     }
-                    if r2o_controller::discovery::has_usable_quic_address_binding(
-                        catalog,
-                        server.ip(),
-                    ) {
+                    let has_quic_binding =
+                        r2o_controller::discovery::has_usable_quic_address_binding(
+                            catalog,
+                            server.ip(),
+                        );
+                    if r2o_quic_binding_blocks_retry(has_quic_binding, event.planned) {
                         println!("QUIC-проба пропущена: для адреса уже сохранён проверенный план");
                         std::io::stdout().flush()?;
                         continue;
+                    }
+                    if has_quic_binding && event.planned {
+                        println!(
+                            "QUIC-план на этом потоке уже применялся; адрес будет проверен повторно"
+                        );
                     }
                     let now = std::time::Instant::now();
                     quic_trial_cooldowns.retain(|_, until| *until > now);
@@ -8450,6 +8459,10 @@ fn random_id() -> std::io::Result<[u8; 16]> {
     Ok(id)
 }
 
+fn r2o_quic_binding_blocks_retry(binding_exists: bool, planned: bool) -> bool {
+    binding_exists && !planned
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
@@ -8467,8 +8480,9 @@ mod tests {
         normalize_plan_target, parse_classify_options, parse_serve_options, print_flow_journal,
         r2o_discovery_failure_retry_due, r2o_family_applied_flow_matches,
         r2o_family_recovery_decision, r2o_http_failed_disposition, r2o_http_live_cut_recheck,
-        r2o_tcp_stall_budgets, r2o_tcp_stall_budgets_for_name, r2o_tcp_stall_in_name_band,
-        r2o_voice_proof_matches_target, save_plan_file, shape_matches_plan,
+        r2o_quic_binding_blocks_retry, r2o_tcp_stall_budgets, r2o_tcp_stall_budgets_for_name,
+        r2o_tcp_stall_in_name_band, r2o_voice_proof_matches_target, save_plan_file,
+        shape_matches_plan,
     };
     use r2k_core::control::{
         BindingContext, COMMAND_DEL_NAME_PROBE, COMMAND_DEL_VOICE_ADDR_PROBE, COMMAND_SET_NAME,
@@ -8482,6 +8496,13 @@ mod tests {
     use r2o_controller::discovery::DiscoveryTarget;
     use r2o_controller::fetch::FetchResult;
     use std::{collections::VecDeque, ffi::OsString, io::Write, path::PathBuf};
+
+    #[test]
+    fn подтверждённый_quic_план_разрешает_повторную_проверку_адреса() {
+        assert!(r2o_quic_binding_blocks_retry(true, false));
+        assert!(!r2o_quic_binding_blocks_retry(true, true));
+        assert!(!r2o_quic_binding_blocks_retry(false, false));
+    }
 
     fn r2o_test_quic_initial_snapshot() -> Vec<u8> {
         r2k_core::quic_snapshot::r2k_quic_snapshot_pack(&[&include_bytes!(

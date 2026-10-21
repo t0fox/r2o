@@ -1011,6 +1011,7 @@ mod app {
                                 } else {
                                     r2o_udp_decide_once(
                                         &mut udp_sessions,
+                                        &mut quic_sessions,
                                         selected_plan,
                                         bytes,
                                         || {
@@ -2296,6 +2297,7 @@ mod app {
 
     fn r2o_udp_decide_once(
         sessions: &mut R2oUdpSessions,
+        quic_sessions: &mut R2oQuicSessions,
         plan: &Plan,
         packet: &[u8],
         decide: impl FnOnce() -> PacketDecision,
@@ -2310,6 +2312,7 @@ mod app {
         ) || (plan.qdeny == 0 && decision == PacketDecision::Drop);
         if applied {
             sessions.r2o_mark_plan_applied(packet);
+            quic_sessions.mark_plan_applied(packet);
         }
         decision
     }
@@ -3071,15 +3074,17 @@ mod app {
         fn r2o_udp_план_исполняется_один_раз_на_поток_и_снова_после_истечения() {
             let now = Instant::now();
             let mut sessions = R2oUdpSessions::new().unwrap();
+            let mut quic_sessions = R2oQuicSessions::default();
             let request = udp_packet([192, 0, 2, 1], [198, 51, 100, 2], 40_000, 443);
             assert!(udp_packet_admitted(&mut sessions, &request, now));
 
             let mut executions = 0;
             let plan = Plan::default();
-            let first = r2o_udp_decide_once(&mut sessions, &plan, &request, || {
-                executions += 1;
-                PacketDecision::Drop
-            });
+            let first =
+                r2o_udp_decide_once(&mut sessions, &mut quic_sessions, &plan, &request, || {
+                    executions += 1;
+                    PacketDecision::Drop
+                });
             assert_eq!(first, PacketDecision::Drop);
 
             let reply = udp_packet([198, 51, 100, 2], [192, 0, 2, 1], 443, 40_000);
@@ -3088,10 +3093,11 @@ mod app {
                 &reply,
                 now + Duration::from_millis(1)
             ));
-            let repeated = r2o_udp_decide_once(&mut sessions, &plan, &reply, || {
-                executions += 1;
-                PacketDecision::Drop
-            });
+            let repeated =
+                r2o_udp_decide_once(&mut sessions, &mut quic_sessions, &plan, &reply, || {
+                    executions += 1;
+                    PacketDecision::Drop
+                });
             assert_eq!(repeated, PacketDecision::Accept);
             assert_eq!(executions, 1);
 
@@ -3101,10 +3107,11 @@ mod app {
                 &request,
                 now + Duration::from_secs(120) + Duration::from_millis(1)
             ));
-            let next_flow = r2o_udp_decide_once(&mut sessions, &plan, &request, || {
-                executions += 1;
-                PacketDecision::Drop
-            });
+            let next_flow =
+                r2o_udp_decide_once(&mut sessions, &mut quic_sessions, &plan, &request, || {
+                    executions += 1;
+                    PacketDecision::Drop
+                });
             assert_eq!(next_flow, PacketDecision::Drop);
             assert_eq!(executions, 2);
 
@@ -3120,10 +3127,16 @@ mod app {
             };
             for expected_executions in [3, 4] {
                 assert_eq!(
-                    r2o_udp_decide_once(&mut sessions, &qdeny, &request, || {
-                        executions += 1;
-                        PacketDecision::Drop
-                    }),
+                    r2o_udp_decide_once(
+                        &mut sessions,
+                        &mut quic_sessions,
+                        &qdeny,
+                        &request,
+                        || {
+                            executions += 1;
+                            PacketDecision::Drop
+                        }
+                    ),
                     PacketDecision::Drop
                 );
                 assert_eq!(executions, expected_executions);
