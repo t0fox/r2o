@@ -4,7 +4,7 @@ use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-pub const PROTOCOL_VERSION: u16 = 38;
+pub const PROTOCOL_VERSION: u16 = 39;
 pub const FRAME_MAX: usize = 65_536;
 pub const KEY_LEN: usize = 38;
 pub const MAX_DNS_NAME_LEN: usize = 253;
@@ -23,6 +23,8 @@ pub const EVENT_R2O_TCP_FIN_RETRY: u16 = 0x0012;
 pub const EVENT_R2O_TCP_RST_AFTER_APP: u16 = 0x0013;
 pub const EVENT_R2O_QUIC_STALL: u16 = 0x0016;
 pub const EVENT_CLIENT_SHAPE: u16 = 0x0017;
+pub const EVENT_R2O_TCP_CLEAN_HANDSHAKE: u16 = 0x0018;
+pub const EVENT_R2O_TCP_EARLY_RST: u16 = 0x0019;
 pub const EVENT_R2O_JOURNAL_ENTRY: u16 = 0x0014;
 pub const EVENT_R2O_JOURNAL_END: u16 = 0x0015;
 pub const COMMAND_SET_NAME: u16 = 0x0081;
@@ -229,6 +231,41 @@ pub struct R2oTcpSilenceEvent {
     pub client_is_low: bool,
     pub planned: bool,
     pub elapsed_ms: u32,
+}
+
+/// Чистое TCP-рукопожатие без применённого плана.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct R2oTcpCleanHandshakeEvent {
+    pub key: [u8; KEY_LEN],
+}
+
+impl R2oTcpCleanHandshakeEvent {
+    pub fn event_body(&self) -> Option<Vec<u8>> {
+        if !valid_flow_key(&self.key) || self.key[37] != 6 {
+            return None;
+        }
+        Some(self.key.to_vec())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct R2oTcpEarlyRstEvent {
+    pub key: [u8; KEY_LEN],
+    pub client_is_low: bool,
+    pub planned: bool,
+}
+
+impl R2oTcpEarlyRstEvent {
+    pub fn event_body(&self) -> Option<Vec<u8>> {
+        if !valid_flow_key(&self.key) || self.key[37] != 6 {
+            return None;
+        }
+        let mut body = Vec::with_capacity(KEY_LEN + 2);
+        body.extend_from_slice(&self.key);
+        body.push(u8::from(self.client_is_low));
+        body.push(u8::from(self.planned));
+        Some(body)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1383,6 +1420,40 @@ pub fn decode_r2o_tcp_silence(frame: &Frame) -> Result<R2oTcpSilenceEvent, &'sta
     })
 }
 
+pub fn decode_r2o_tcp_clean_handshake(
+    frame: &Frame,
+) -> Result<R2oTcpCleanHandshakeEvent, &'static str> {
+    if frame.kind != EVENT_R2O_TCP_CLEAN_HANDSHAKE || frame.body.len() != KEY_LEN {
+        return Err("неверный размер события чистого TCP-рукопожатия");
+    }
+    let key: [u8; KEY_LEN] = frame.body[..]
+        .try_into()
+        .map_err(|_| "неверный ключ чистого TCP-рукопожатия")?;
+    if !valid_flow_key(&key) || key[37] != 6 {
+        return Err("событие чистого рукопожатия содержит неверный TCP-поток");
+    }
+    Ok(R2oTcpCleanHandshakeEvent { key })
+}
+
+pub fn decode_r2o_tcp_early_rst(frame: &Frame) -> Result<R2oTcpEarlyRstEvent, &'static str> {
+    if frame.kind != EVENT_R2O_TCP_EARLY_RST || frame.body.len() != KEY_LEN + 2 {
+        return Err("неверная длина события раннего TCP RST");
+    }
+    let key: [u8; KEY_LEN] = frame.body[..KEY_LEN]
+        .try_into()
+        .map_err(|_| "неверный ключ раннего TCP RST")?;
+    let client_is_low = frame.body[KEY_LEN];
+    let planned = frame.body[KEY_LEN + 1];
+    if !valid_flow_key(&key) || key[37] != 6 || client_is_low > 1 || planned > 1 {
+        return Err("событие раннего TCP RST содержит неверный поток");
+    }
+    Ok(R2oTcpEarlyRstEvent {
+        key,
+        client_is_low: client_is_low == 1,
+        planned: planned == 1,
+    })
+}
+
 pub fn decode_r2o_tcp_fin_retry(frame: &Frame) -> Result<R2oTcpFinRetryEvent, &'static str> {
     if frame.kind != EVENT_R2O_TCP_FIN_RETRY || frame.body.len() != KEY_LEN + 2 {
         return Err("неверная длина события повтора FIN в TCP");
@@ -1641,4 +1712,71 @@ fn valid_control_dns_name(value: &str) -> bool {
         && labels
             .iter()
             .any(|label| label.bytes().any(|byte| !byte.is_ascii_digit()))
+}
+
+#[cfg(test)]
+mod clean_handshake_event_tests {
+    use super::{
+        EVENT_R2O_TCP_CLEAN_HANDSHAKE, Frame, KEY_LEN, R2oTcpCleanHandshakeEvent,
+        decode_r2o_tcp_clean_handshake,
+    };
+
+    #[test]
+    fn событие_чистого_tcp_рукопожатия_принимает_только_tcp_ключ() {
+        let mut key = [0; KEY_LEN];
+        key[0] = 4;
+        key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+        key[17..21].copy_from_slice(&[198, 51, 100, 80]);
+        key[33..35].copy_from_slice(&45_000_u16.to_be_bytes());
+        key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+        key[37] = 6;
+        let event = R2oTcpCleanHandshakeEvent { key };
+        let frame = Frame {
+            kind: EVENT_R2O_TCP_CLEAN_HANDSHAKE,
+            body: event.event_body().unwrap(),
+        };
+
+        assert_eq!(decode_r2o_tcp_clean_handshake(&frame), Ok(event));
+
+        let mut udp_key = key;
+        udp_key[37] = 17;
+        assert!(
+            R2oTcpCleanHandshakeEvent { key: udp_key }
+                .event_body()
+                .is_none()
+        );
+    }
+}
+
+#[cfg(test)]
+mod early_rst_event_tests {
+    use super::{
+        EVENT_R2O_TCP_EARLY_RST, Frame, KEY_LEN, R2oTcpEarlyRstEvent, decode_r2o_tcp_early_rst,
+    };
+
+    #[test]
+    fn событие_раннего_rst_проверяет_tcp_направление_и_исполнение_плана() {
+        let mut key = [0; KEY_LEN];
+        key[0] = 4;
+        key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+        key[17..21].copy_from_slice(&[198, 51, 100, 80]);
+        key[33..35].copy_from_slice(&45_000_u16.to_be_bytes());
+        key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+        key[37] = 6;
+        let event = R2oTcpEarlyRstEvent {
+            key,
+            client_is_low: true,
+            planned: false,
+        };
+        let frame = Frame {
+            kind: EVENT_R2O_TCP_EARLY_RST,
+            body: event.event_body().unwrap(),
+        };
+
+        assert_eq!(decode_r2o_tcp_early_rst(&frame), Ok(event));
+
+        let mut invalid = frame;
+        invalid.body[KEY_LEN + 1] = 2;
+        assert!(decode_r2o_tcp_early_rst(&invalid).is_err());
+    }
 }

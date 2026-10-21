@@ -2,11 +2,13 @@ use crate::engine::{R2oTcpExchangeEvent, R2oTcpRstCutEvent, R2oTcpRstEvent};
 use crate::r2o_quic::R2oUdpExchangeEvent;
 use r2k_core::control::{
     AppliedEvent, BindingContext, EVENT_APPLIED, EVENT_HELLO, EVENT_R2O_JOURNAL_END,
-    EVENT_R2O_JOURNAL_ENTRY, EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_FIN_RETRY,
+    EVENT_R2O_JOURNAL_ENTRY, EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT,
+    EVENT_R2O_TCP_CLEAN_HANDSHAKE, EVENT_R2O_TCP_EARLY_RST, EVENT_R2O_TCP_FIN_RETRY,
     EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF,
     EVENT_R2O_VOICE_SUSPECT, Frame, KEY_LEN, decode_applied, decode_r2o_quic_stall,
-    decode_r2o_quic_suspect, decode_r2o_tcp_fin_retry, decode_r2o_tcp_rst_after_app,
-    decode_r2o_tcp_silence, decode_r2o_tcp_stall, decode_r2o_voice_proof, decode_r2o_voice_suspect,
+    decode_r2o_quic_suspect, decode_r2o_tcp_clean_handshake, decode_r2o_tcp_early_rst,
+    decode_r2o_tcp_fin_retry, decode_r2o_tcp_rst_after_app, decode_r2o_tcp_silence,
+    decode_r2o_tcp_stall, decode_r2o_voice_proof, decode_r2o_voice_suspect,
 };
 
 pub const R2O_JOURNAL_NAME_MAX: usize = 63;
@@ -824,6 +826,8 @@ impl R2oFlowJournal {
                     5,
                 )
             }),
+            EVENT_R2O_TCP_EARLY_RST => decode_r2o_tcp_early_rst(&frame).map(|_| ()),
+            EVENT_R2O_TCP_CLEAN_HANDSHAKE => decode_r2o_tcp_clean_handshake(&frame).map(|_| ()),
             EVENT_R2O_VOICE_PROOF => decode_r2o_voice_proof(&frame).map(|event| {
                 self.push(R2oFlowJournalEntry {
                     at_ns,

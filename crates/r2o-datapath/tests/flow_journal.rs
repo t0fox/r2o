@@ -1,8 +1,9 @@
 use r2k_core::control::{
     AppliedEvent, BindingContext, EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT,
-    EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_SILENT,
-    EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_SUSPECT, KEY_LEN,
-    R2oQuicSuspectEvent, R2oTcpFinRetryEvent, R2oTcpRstAfterAppEvent, R2oTcpSilenceEvent,
+    EVENT_R2O_TCP_CLEAN_HANDSHAKE, EVENT_R2O_TCP_EARLY_RST, EVENT_R2O_TCP_FIN_RETRY,
+    EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF,
+    EVENT_R2O_VOICE_SUSPECT, KEY_LEN, R2oQuicSuspectEvent, R2oTcpCleanHandshakeEvent,
+    R2oTcpEarlyRstEvent, R2oTcpFinRetryEvent, R2oTcpRstAfterAppEvent, R2oTcpSilenceEvent,
     R2oTcpStallEvent, R2oVoiceProofEvent, R2oVoiceSuspectEvent,
 };
 use r2o_datapath::flow_journal::{
@@ -412,6 +413,41 @@ fn журнал_сохраняет_детали_подозрения_quic_и_о�
     assert_eq!(запись.key, key);
     assert_eq!(запись.client_is_low, Some(true));
     assert_eq!(журнал.added(), 1);
+}
+
+#[test]
+fn журнал_проверяет_события_раннего_rst_и_чистого_tcp_рукопожатия() {
+    let mut key = [0; KEY_LEN];
+    key[0] = 4;
+    key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+    key[17..21].copy_from_slice(&[198, 51, 100, 80]);
+    key[33..35].copy_from_slice(&45_000_u16.to_be_bytes());
+    key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+    key[37] = 6;
+    let early_rst = R2oTcpEarlyRstEvent {
+        key,
+        client_is_low: true,
+        planned: false,
+    };
+    let clean_handshake = R2oTcpCleanHandshakeEvent { key };
+    let mut journal = R2oFlowJournal::with_capacity(2).unwrap();
+
+    assert!(journal.record_control_event(
+        100,
+        EVENT_R2O_TCP_EARLY_RST,
+        &early_rst.event_body().unwrap(),
+    ));
+    assert!(journal.record_control_event(
+        101,
+        EVENT_R2O_TCP_CLEAN_HANDSHAKE,
+        &clean_handshake.event_body().unwrap(),
+    ));
+    assert!(!journal.record_control_event(
+        102,
+        EVENT_R2O_TCP_EARLY_RST,
+        &early_rst.event_body().unwrap()[..KEY_LEN],
+    ));
+    assert_eq!(journal.added(), 0);
 }
 
 #[test]

@@ -4,12 +4,14 @@ use r2k_core::control::{
     COMMAND_SET_NAME, COMMAND_SET_TCP_STALL_BUDGETS, COMMAND_SET_VOICE_ADDR,
     COMMAND_SET_VOICE_ADDR_PROBE, EVENT_APPLIED, EVENT_CLIENT_SHAPE, EVENT_HELLO,
     EVENT_HTTP_PORTAL, EVENT_HTTP_RESPONSE, EVENT_R2O_JOURNAL_END, EVENT_R2O_JOURNAL_ENTRY,
-    EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_FIN_RETRY,
-    EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF,
-    EVENT_R2O_VOICE_SUSPECT, Frame, PROTOCOL_VERSION, RELEASE_ID, SHAPE_ECH_TCP, SHAPE_HTTP,
-    SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, VOICE_ADDR_PROBE_LEASE_MAX_MS, decode_ack,
+    EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_CLEAN_HANDSHAKE,
+    EVENT_R2O_TCP_EARLY_RST, EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_RST_AFTER_APP,
+    EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_SUSPECT,
+    Frame, HelloEvent, PROTOCOL_VERSION, RELEASE_ID, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_LEGACY,
+    SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, VOICE_ADDR_PROBE_LEASE_MAX_MS, decode_ack,
     decode_applied, decode_client_shape, decode_greeting, decode_hello, decode_http_portal,
-    decode_http_response, decode_r2o_quic_stall, decode_r2o_quic_suspect, decode_r2o_tcp_fin_retry,
+    decode_http_response, decode_r2o_quic_stall, decode_r2o_quic_suspect,
+    decode_r2o_tcp_clean_handshake, decode_r2o_tcp_early_rst, decode_r2o_tcp_fin_retry,
     decode_r2o_tcp_rst_after_app, decode_r2o_tcp_silence, decode_r2o_tcp_stall,
     decode_r2o_voice_proof, decode_r2o_voice_suspect, encode_delete_addr, encode_delete_addr_probe,
     encode_delete_name, encode_delete_name_probe, encode_delete_voice_addr_probe, encode_frame,
@@ -2812,6 +2814,111 @@ const R2O_DISCOVERY_CLEAR_RETRY_MAX: std::time::Duration = std::time::Duration::
 const R2O_DISCOVERY_INCOMPLETE_RETRY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 #[cfg(unix)]
+const R2O_CLEAN_HANDSHAKE_CAPACITY: usize = 16;
+#[cfg(unix)]
+const R2O_CLEAN_HANDSHAKE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+#[cfg(unix)]
+const R2O_TCP_HELLO_CAPACITY: usize = 128;
+
+#[cfg(unix)]
+#[derive(Default)]
+struct R2oCleanHandshakeCache {
+    entries: VecDeque<(String, u8, std::time::Instant)>,
+}
+
+#[cfg(unix)]
+impl R2oCleanHandshakeCache {
+    fn note(&mut self, name: &str, family: u8, now: std::time::Instant) {
+        self.entries
+            .retain(|(_, _, seen)| now.saturating_duration_since(*seen) <= R2O_CLEAN_HANDSHAKE_TTL);
+        if let Some((_, _, seen)) = self
+            .entries
+            .iter_mut()
+            .find(|(entry_name, entry_family, _)| entry_name == name && *entry_family == family)
+        {
+            *seen = now;
+            return;
+        }
+        if self.entries.len() == R2O_CLEAN_HANDSHAKE_CAPACITY {
+            self.entries.pop_front();
+        }
+        self.entries.push_back((name.to_owned(), family, now));
+    }
+
+    fn r2o_recent(&self, name: &str, family: u8, now: std::time::Instant) -> bool {
+        self.entries.iter().any(|(entry_name, entry_family, seen)| {
+            entry_name == name
+                && *entry_family == family
+                && now.saturating_duration_since(*seen) <= R2O_CLEAN_HANDSHAKE_TTL
+        })
+    }
+
+    fn suppresses_unplanned_tcp_suspicion(
+        &self,
+        name: &str,
+        family: u8,
+        planned: bool,
+        now: std::time::Instant,
+    ) -> bool {
+        !planned && self.r2o_recent(name, family, now)
+    }
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct R2oTcpHelloCache {
+    entries: HashMap<[u8; r2k_core::control::KEY_LEN], (HelloEvent, std::time::Instant)>,
+}
+
+#[cfg(unix)]
+impl R2oTcpHelloCache {
+    fn note(&mut self, hello: HelloEvent, now: std::time::Instant) {
+        self.entries
+            .retain(|_, (_, seen)| now.saturating_duration_since(*seen) <= R2O_CLEAN_HANDSHAKE_TTL);
+        if self.entries.len() >= R2O_TCP_HELLO_CAPACITY
+            && !self.entries.contains_key(&hello.key)
+            && let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (_, seen))| *seen)
+                .map(|(key, _)| *key)
+        {
+            self.entries.remove(&oldest);
+        }
+        self.entries.insert(hello.key, (hello, now));
+    }
+
+    fn clean_handshake_name(
+        &self,
+        key: &[u8; r2k_core::control::KEY_LEN],
+        now: std::time::Instant,
+    ) -> Option<String> {
+        let (hello, seen) = self.entries.get(key)?;
+        if now.saturating_duration_since(*seen) > R2O_CLEAN_HANDSHAKE_TTL {
+            return None;
+        }
+        hello
+            .host
+            .as_deref()
+            .and_then(|host| std::str::from_utf8(host).ok())
+            .filter(|host| !host.is_empty())
+            .and_then(|host| r2o_controller::domain::normalize(host).ok())
+    }
+
+    fn target_for_tcp_flow(
+        &self,
+        key: &[u8; r2k_core::control::KEY_LEN],
+        now: std::time::Instant,
+    ) -> Option<r2o_controller::discovery::DiscoveryTarget> {
+        let (hello, seen) = self.entries.get(key)?;
+        if now.saturating_duration_since(*seen) > R2O_CLEAN_HANDSHAKE_TTL {
+            return None;
+        }
+        r2o_controller::discovery::DiscoveryTarget::from_event(hello)
+    }
+}
+
+#[cfg(unix)]
 #[derive(Default)]
 struct R2oDiscoveryQueue {
     entries: Vec<R2oDiscoveryQueueEntry>,
@@ -4969,6 +5076,8 @@ impl ControlClient {
         let mut quic_hello_names =
             HashMap::<[u8; r2k_core::control::KEY_LEN], (Option<String>, std::time::Instant)>::new(
             );
+        let mut tcp_hello_names = R2oTcpHelloCache::default();
+        let mut clean_handshakes = R2oCleanHandshakeCache::default();
         let mut quic_trial_cooldowns = HashMap::<std::net::IpAddr, std::time::Instant>::new();
         let mut r2o_pending_quic_discovery = VecDeque::<R2oPendingQuicDiscovery>::new();
         if let Some(path) = &https_cache_path {
@@ -5717,6 +5826,104 @@ impl ControlClient {
                             "наблюдение TCP: после ClientHello нет видимого ответа {client} -> {server} за {} мс без применённого плана; это не подтверждает блокировку",
                             event.elapsed_ms
                         );
+                        let now = std::time::Instant::now();
+                        let target = tcp_hello_names.target_for_tcp_flow(&event.key, now);
+                        if let Some(target) = target {
+                            if clean_handshakes.suppresses_unplanned_tcp_suspicion(
+                                &target.host,
+                                target.family,
+                                event.planned,
+                                now,
+                            ) {
+                                println!(
+                                    "классификация {} пропущена: IPv{} недавно завершил TCP-рукопожатие без плана",
+                                    target.host, target.family
+                                );
+                            } else if let Some((worker, catalog, _, _)) = &mut discovery {
+                                if r2o_controller::discovery::has_usable_binding(catalog, &target)
+                                    || matching_domain_group(catalog, &target).is_some()
+                                {
+                                    println!(
+                                        "молчание без плана для {} не создаёт повторную задачу: каталог уже содержит применимое решение",
+                                        target.host
+                                    );
+                                } else if worker.queue(target.clone()) {
+                                    println!(
+                                        "молчание TCP без чистого рукопожатия поставило {} в очередь классификации",
+                                        target.host
+                                    );
+                                } else {
+                                    println!(
+                                        "классификация {} после молчания пропущена: задача уже выполняется, повтор запрещён или очередь занята",
+                                        target.host
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    std::io::stdout().flush()?;
+                    continue;
+                }
+                if frame.kind == EVENT_R2O_TCP_EARLY_RST {
+                    let event = decode_r2o_tcp_early_rst(&frame)
+                        .map_err(|error| format!("событие раннего TCP RST: {error}"))?;
+                    let (client, server) = flow_socket_addresses(&event.key, event.client_is_low);
+                    println!(
+                        "наблюдение TCP: ранний RST от сервера {client} -> {server}, план применён={}; событие само по себе не подтверждает блокировку",
+                        event.planned
+                    );
+                    let now = std::time::Instant::now();
+                    if let Some(target) = tcp_hello_names.target_for_tcp_flow(&event.key, now) {
+                        if clean_handshakes.suppresses_unplanned_tcp_suspicion(
+                            &target.host,
+                            target.family,
+                            event.planned,
+                            now,
+                        ) {
+                            println!(
+                                "классификация {} пропущена: IPv{} недавно завершил TCP-рукопожатие без плана",
+                                target.host, target.family
+                            );
+                        } else if let Some((worker, catalog, _, _)) = &mut discovery {
+                            let has_solution =
+                                r2o_controller::discovery::has_usable_binding(catalog, &target)
+                                    || matching_domain_group(catalog, &target).is_some();
+                            if event.planned {
+                                let queued = if has_solution {
+                                    worker.queue_after_confirmed_failure(target.clone())
+                                } else {
+                                    worker.queue(target.clone())
+                                };
+                                println!(
+                                    "ранний TCP RST поставил {} на повторную проверку плана: {}",
+                                    target.host,
+                                    if queued {
+                                        "задача поставлена"
+                                    } else {
+                                        "задача уже выполняется или очередь занята"
+                                    }
+                                );
+                            } else if has_solution {
+                                println!(
+                                    "RST без плана для {} не создаёт задачу: каталог уже содержит применимое решение",
+                                    target.host
+                                );
+                            } else if worker.queue(target.clone()) {
+                                println!(
+                                    "ранний TCP RST без чистого рукопожатия поставил {} в очередь классификации",
+                                    target.host
+                                );
+                            } else {
+                                println!(
+                                    "классификация {} после раннего RST пропущена: задача уже выполняется или очередь занята",
+                                    target.host
+                                );
+                            }
+                        }
+                    } else {
+                        println!(
+                            "классификация после раннего RST не запущена: нет свежего ClientHello с SNI того же потока"
+                        );
                     }
                     std::io::stdout().flush()?;
                     continue;
@@ -5919,6 +6126,15 @@ impl ControlClient {
                     std::io::stdout().flush()?;
                     continue;
                 }
+                if frame.kind == EVENT_R2O_TCP_CLEAN_HANDSHAKE {
+                    let event = decode_r2o_tcp_clean_handshake(&frame)
+                        .map_err(|error| format!("чистое TCP-рукопожатие: {error}"))?;
+                    let now = std::time::Instant::now();
+                    if let Some(name) = tcp_hello_names.clean_handshake_name(&event.key, now) {
+                        clean_handshakes.note(&name, event.key[0], now);
+                    }
+                    continue;
+                }
                 if frame.kind == EVENT_CLIENT_SHAPE {
                     let shape = decode_client_shape(&frame)
                         .map_err(|error| format!("снимок ClientHello: {error}"))?;
@@ -5959,6 +6175,10 @@ impl ControlClient {
                     decode_hello(&frame).map_err(|error| format!("событие датапата: {error}"))?;
                 if r2o_late_rx.is_some() {
                     r2o_late_rx_hellos.capture(&hello, std::time::Instant::now());
+                }
+                if hello.key[37] == 6 {
+                    let now = std::time::Instant::now();
+                    tcp_hello_names.note(hello.clone(), now);
                 }
                 if hello.key[37] == 17 {
                     let now = std::time::Instant::now();
@@ -7392,6 +7612,8 @@ impl ControlClient {
                 | EVENT_R2O_TCP_STALL
                 | EVENT_R2O_TCP_FIN_RETRY
                 | EVENT_R2O_TCP_RST_AFTER_APP
+                | EVENT_R2O_TCP_CLEAN_HANDSHAKE
+                | EVENT_R2O_TCP_EARLY_RST
                 | EVENT_R2O_VOICE_SUSPECT
                 | EVENT_R2O_JOURNAL_ENTRY
                 | EVENT_R2O_JOURNAL_END
@@ -8186,8 +8408,8 @@ mod tests {
     use r2k_core::control::{
         BindingContext, COMMAND_DEL_NAME_PROBE, COMMAND_DEL_VOICE_ADDR_PROBE, COMMAND_SET_NAME,
         COMMAND_SET_NAME_PROBE, COMMAND_SET_TCP_STALL_BUDGETS, COMMAND_SET_VOICE_ADDR,
-        EVENT_APPLIED, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, Frame, HttpResponseEvent,
-        KEY_LEN, SHAPE_HTTP, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, encode_ack,
+        EVENT_APPLIED, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, Frame, HelloEvent,
+        HttpResponseEvent, KEY_LEN, SHAPE_HTTP, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, encode_ack,
         encode_ack_for_trial, encode_frame, encode_greeting, read_frame,
     };
     use r2k_core::plan::{PLAN_MAGIC, Plan};
@@ -8201,6 +8423,71 @@ mod tests {
             "../../r2k-core/tests/fixtures/quic_v1_initial.bin"
         )[..]])
         .unwrap()
+    }
+
+    #[test]
+    fn кэш_чистого_tcp_рукопожатия_сверяет_имя_семейство_срок_и_ёмкость() {
+        let now = std::time::Instant::now();
+        let mut cache = super::R2oCleanHandshakeCache::default();
+        cache.note("clean.example", 4, now);
+
+        assert!(cache.r2o_recent("clean.example", 4, now));
+        assert!(cache.suppresses_unplanned_tcp_suspicion("clean.example", 4, false, now));
+        assert!(!cache.suppresses_unplanned_tcp_suspicion("clean.example", 4, true, now));
+        assert!(!cache.r2o_recent("other.example", 4, now));
+        assert!(!cache.r2o_recent("clean.example", 6, now));
+        assert!(!cache.suppresses_unplanned_tcp_suspicion("clean.example", 6, false, now));
+        assert!(cache.r2o_recent("clean.example", 4, now + std::time::Duration::from_secs(60),));
+        assert!(!cache.r2o_recent("clean.example", 4, now + std::time::Duration::from_secs(61),));
+
+        for index in 0..16 {
+            cache.note(&format!("other-{index}.example"), 4, now);
+        }
+        assert!(!cache.r2o_recent("clean.example", 4, now));
+    }
+
+    #[test]
+    fn кэш_tcp_приветствий_связывает_имя_цель_и_подозрение_с_точным_потоком() {
+        let now = std::time::Instant::now();
+        let mut key = [0; KEY_LEN];
+        key[0] = 4;
+        key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+        key[17..21].copy_from_slice(&[198, 51, 100, 80]);
+        key[33..35].copy_from_slice(&45_000_u16.to_be_bytes());
+        key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+        key[37] = 6;
+        let hello = HelloEvent {
+            key,
+            host: Some(b"CLEAN.Example.COM.".to_vec()),
+            shape: Some(SHAPE_MODERN),
+            r2o_wire_len: Some(812),
+            quic_snapshot: None,
+        };
+        let mut cache = super::R2oTcpHelloCache::default();
+        cache.note(hello, now);
+
+        assert_eq!(
+            cache.clean_handshake_name(&key, now).as_deref(),
+            Some("clean.example.com")
+        );
+        let target = cache.target_for_tcp_flow(&key, now).unwrap();
+        assert_eq!(target.host, "clean.example.com");
+        assert_eq!(target.family, 4);
+
+        let mut foreign = key;
+        foreign[4] = 11;
+        assert!(cache.clean_handshake_name(&foreign, now).is_none());
+        assert!(cache.target_for_tcp_flow(&foreign, now).is_none());
+        assert!(
+            cache
+                .clean_handshake_name(&key, now + std::time::Duration::from_secs(61))
+                .is_none()
+        );
+        assert!(
+            cache
+                .target_for_tcp_flow(&key, now + std::time::Duration::from_secs(61))
+                .is_none()
+        );
     }
 
     #[cfg(unix)]

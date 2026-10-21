@@ -3,17 +3,19 @@ mod app {
     use r2k_core::control::{
         ACK_BAD_ARGS, ACK_OK, Ack, AppliedEvent, COMMAND_SET_TCP_STALL_BUDGETS, EVENT_APPLIED,
         EVENT_HELLO, EVENT_HTTP_PORTAL, EVENT_HTTP_RESPONSE, EVENT_R2O_QUIC_STALL,
-        EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_RST_AFTER_APP,
-        EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_SUSPECT,
-        Frame, HttpPortalEvent, HttpResponseEvent, PROTOCOL_VERSION, R2oTcpFinRetryEvent,
-        RELEASE_ID, decode_set_tcp_stall_budgets,
+        EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_CLEAN_HANDSHAKE, EVENT_R2O_TCP_EARLY_RST,
+        EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_SILENT,
+        EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_SUSPECT, Frame,
+        HttpPortalEvent, HttpResponseEvent, PROTOCOL_VERSION, R2oTcpCleanHandshakeEvent,
+        R2oTcpEarlyRstEvent, R2oTcpFinRetryEvent, RELEASE_ID, decode_set_tcp_stall_budgets,
     };
     use r2k_core::plan::{EmitKind, OriginalFate, PROTO_VOICE, Plan};
     use r2o_datapath::capture::{tcp_hello_from_packet, tcp_http_hello_from_packet};
     use r2o_datapath::conntrack::R2oConntrackClient;
     use r2o_datapath::control::{ControlServer, NamePlans};
     use r2o_datapath::engine::{
-        PacketDecision, TcpSessions, WirePacket, decide_with_session, validate_runtime_plan,
+        PacketDecision, R2oTcpExchangeEvent, R2oTcpRstEvent, TcpSessions, WirePacket,
+        decide_with_session, validate_runtime_plan,
     };
     use r2o_datapath::flow_capacity::R2oFlowCapacity;
     use r2o_datapath::flow_journal::{R2oFlowJournal, R2oFlowJournalEntry, R2oFlowJournalSummary};
@@ -2168,15 +2170,56 @@ mod app {
         let at_ns = journal_timestamp(journal_origin);
         for event in sessions.take_tcp_exchange_events() {
             flow_journal.record_tcp_exchange(at_ns, &event);
+            if let Some(clean) = r2o_clean_handshake_event(&event)
+                && let Some(body) = clean.event_body()
+            {
+                send_observed_control_event(
+                    control,
+                    flow_journal,
+                    journal_origin,
+                    EVENT_R2O_TCP_CLEAN_HANDSHAKE,
+                    &body,
+                    "чистого TCP-рукопожатия",
+                );
+            }
         }
         for event in sessions.take_tcp_rst_events() {
             flow_journal.record_tcp_rst(at_ns, &event);
+            if let Some(early_rst) = r2o_tcp_early_rst_event(&event)
+                && let Some(body) = early_rst.event_body()
+            {
+                send_observed_control_event(
+                    control,
+                    flow_journal,
+                    journal_origin,
+                    EVENT_R2O_TCP_EARLY_RST,
+                    &body,
+                    "раннего TCP RST",
+                );
+            }
         }
         for event in sessions.take_tcp_rst_cut_events() {
             flow_journal.record_tcp_rst_cut(at_ns, &event);
         }
         send_pending_tcp_fin_retry(sessions, control, flow_journal, journal_origin);
         decision
+    }
+
+    fn r2o_clean_handshake_event(
+        exchange: &R2oTcpExchangeEvent,
+    ) -> Option<R2oTcpCleanHandshakeEvent> {
+        (exchange.server_hello && exchange.planned == R2oTcpExchangeEvent::PLANNED_NO)
+            .then_some(R2oTcpCleanHandshakeEvent { key: exchange.key })
+    }
+
+    fn r2o_tcp_early_rst_event(event: &R2oTcpRstEvent) -> Option<R2oTcpEarlyRstEvent> {
+        (event.planned == R2oTcpExchangeEvent::PLANNED_YES
+            || event.planned == R2oTcpExchangeEvent::PLANNED_NO)
+            .then_some(R2oTcpEarlyRstEvent {
+                key: event.key,
+                client_is_low: event.client_is_low,
+                planned: event.planned == R2oTcpExchangeEvent::PLANNED_YES,
+            })
     }
 
     fn observe_quic_packet(
@@ -2839,12 +2882,14 @@ mod app {
             ControlServer, NF_ACCEPT, NF_DROP, OriginalFate, PacketDecision, Plan, R2oFlowJournal,
             R2oQuicSessions, RuntimeMode, TcpSessions, format_journal_details, format_journal_key,
             handle_control_command, load_plan, needs_raw_socket, observe_quic_packet,
-            observe_stun_packet, parse_options, r2o_datapath_payload, r2o_packet_route_skip,
-            r2o_udp_decide_once, r2o_udp_packet_admitted_at_hook, release_many_with, release_with,
-            send_applied_event, send_hello_event, send_journal_snapshot, send_journal_updates,
-            udp_packet_admitted,
+            observe_stun_packet, parse_options, r2o_clean_handshake_event, r2o_datapath_payload,
+            r2o_packet_route_skip, r2o_tcp_early_rst_event, r2o_udp_decide_once,
+            r2o_udp_packet_admitted_at_hook, release_many_with, release_with, send_applied_event,
+            send_hello_event, send_journal_snapshot, send_journal_updates, udp_packet_admitted,
         };
+        use r2k_core::control::{KEY_LEN, R2oTcpCleanHandshakeEvent, R2oTcpEarlyRstEvent};
         use r2k_core::stun::binding_request;
+        use r2o_datapath::engine::{R2oTcpExchangeEvent, R2oTcpRstEvent};
         use r2o_datapath::netlink::{
             QueuePacket, R2O_NF_INET_FORWARD, R2O_NF_INET_LOCAL_OUT, R2O_NF_INET_POST_ROUTING,
         };
@@ -2853,6 +2898,70 @@ mod app {
         };
         use r2o_datapath::r2o_udp_sessions::R2oUdpSessions;
         use std::io;
+
+        #[test]
+        fn чистым_событием_считается_только_tcp_serverhello_без_плана() {
+            let mut key = [0; KEY_LEN];
+            key[0] = 4;
+            key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+            key[17..21].copy_from_slice(&[198, 51, 100, 80]);
+            key[33..35].copy_from_slice(&45_000_u16.to_be_bytes());
+            key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+            key[37] = 6;
+            let exchange = R2oTcpExchangeEvent {
+                key,
+                code: 22,
+                num: 40,
+                tos: 1,
+                server_hello: true,
+                planned: R2oTcpExchangeEvent::PLANNED_NO,
+            };
+
+            assert_eq!(
+                r2o_clean_handshake_event(&exchange),
+                Some(R2oTcpCleanHandshakeEvent { key })
+            );
+            let mut planned = exchange;
+            planned.planned = R2oTcpExchangeEvent::PLANNED_YES;
+            assert_eq!(r2o_clean_handshake_event(&planned), None);
+            let mut incomplete = exchange;
+            incomplete.server_hello = false;
+            assert_eq!(r2o_clean_handshake_event(&incomplete), None);
+        }
+
+        #[test]
+        fn ранний_rst_сохраняет_направление_и_факт_исполнения_плана() {
+            let mut key = [0; KEY_LEN];
+            key[0] = 4;
+            key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+            key[17..21].copy_from_slice(&[198, 51, 100, 80]);
+            key[33..35].copy_from_slice(&45_000_u16.to_be_bytes());
+            key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+            key[37] = 6;
+            let event = R2oTcpRstEvent {
+                key,
+                ttl: 124,
+                reference_ttl: 64,
+                traffic_class: 0,
+                ip_id: 0,
+                server_hello: false,
+                planned: R2oTcpExchangeEvent::PLANNED_NO,
+                client_shape: 0,
+                client_is_low: true,
+            };
+
+            assert_eq!(
+                r2o_tcp_early_rst_event(&event),
+                Some(R2oTcpEarlyRstEvent {
+                    key,
+                    client_is_low: true,
+                    planned: false,
+                })
+            );
+            let mut unknown = event;
+            unknown.planned = 0;
+            assert_eq!(r2o_tcp_early_rst_event(&unknown), None);
+        }
         use std::os::unix::net::UnixStream;
         use std::time::{Duration, Instant};
 

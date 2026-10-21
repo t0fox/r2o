@@ -6326,3 +6326,102 @@ X25519 key share и CID через уже подключённый `ring`, до�
 
 Остались открытыми переписывание соседнего снимка под другое SNI, все прочие
 ветви scheduler и `session.c`, а также приёмка на целевом роутере.
+
+## Чистое TCP-рукопожатие и ранний RST — 22.10.2026
+
+### Источник и REA
+
+Сверены `E:\d2o\core\sched.c`: `note_clean_handshake` (9164),
+`clean_handshake_recent` (9186), подавление неподтверждённых RST/repeat/silence
+(7485), и регрессионный сценарий `E:\d2o\core\test_sched.c` (5189–5192).
+Хэши donor-источников SHA-256:
+
+- `core/sched.c`: `1DE9FEAAB19DCEA1E493AEA068295470CF3143ADF83157B57663F1098132AE8A`;
+- `core/test_sched.c`: `A67F87E09A7FD93ED735B52F361E78590B9CE40679AB95E300ACCF0A3E9D51A3`.
+
+REA вызывался для `note_clean_handshake`, однако активная Ghidra-конфигурация
+Windows не принимает ELF `quichello.o` (`target_format_unsupported`), поэтому
+REA не вернул Evidence ID и не подтвердил семантику бинарным анализом. Повторный
+разбор уже отклонённого ELF не выполнялся. Ghidra установлена и проходит `rea
+doctor`; установка другого провайдера здесь не устраняет ограничение текущего
+REA backend. Для переноса использованы актуальный C-код и donor-регрессия; это
+ограничение явно оставляет REA-бинарное подтверждение неизвестным.
+
+### Rust-перенос
+
+В `r2k-core::control` добавлены строгие события чистого TCP ServerHello и раннего
+серверного RST; протокол изменён с версии 38 на 39. Datapath публикует чистое
+рукопожатие только для разобранного ServerHello без применённого плана, а
+наблюдённый ранний RST теперь поступает в runtime-контроллер вместо записи
+только в локальный журнал. Контроллер хранит точное соответствие TCP-потока
+ClientHello и SNI ограниченное время; перед кэшированием имя приводится к той
+же DNS-нормализации, что и Discovery (регистр и завершающая точка). Кэш чистых
+рукопожатий ограничен 16 записями и 60 секундами. Он подавляет неподтверждённые
+молчание/RST в это окно,
+но оставляет включённым повторный поиск при RST потока с применённым планом.
+Поздний RST после TLS app-data остаётся отдельным путём проверки объёма.
+
+Изменены только Rust-файлы:
+`crates/r2k-core/src/control.rs`,
+`crates/r2o-datapath/src/main.rs`,
+`crates/r2o-datapath/src/flow_journal.rs`,
+`crates/r2o-datapath/tests/flow_journal.rs` и
+`crates/r2o-controller/src/main.rs`. C-переносов и новых crate-зависимостей
+нет. `x509-parser` уже разбирает сертификат измерителя, `etherparse` проверяет
+IP-разбор, `tls-parser` служит независимым TLS oracle, `proptest` проверяет
+границы входа; криптография использует существующий `ring`.
+
+### Проверки, совместимость и размер
+
+- ARM64/QEMU полный workspace после нормализации SNI, один поток: 1015 прошло,
+  0 ошибок, 4 штатных
+  пропуска, 73 набора. Свежая проверка `r2o-datapath/tests/flow_journal.rs`:
+  20/20. ARM32 и MIPS тесты не запускались.
+- `cargo check` затронутых crate прошёл на ARMv5te, ARMv7 и MIPS32
+  little-endian GNU; ни одна из этих целей не исполнялась.
+- ARM64 GNU/AArch64 stripped ELF: controller 4 920 328 байт, datapath
+  856 784 байта.
+- ARMv5te musl/ARM EABI5 stripped ELF: controller 4 918 208 байт, datapath
+  1 051 360 байт.
+- ARMv7 musl/ARM EABI5 stripped ELF: controller 4 721 596 байт, datapath
+  920 236 байт.
+- MIPS32 little-endian GNU stripped ELF: controller 6 558 540 байт, datapath
+  1 249 108 байт. MIPS release собран с `mipsel-linux-gnu-gcc`; бинарники не
+  запускались.
+
+Первая команда focused-тестов не дошла до тестов: не был установлен target
+linker AArch64, и host linker отверг архитектурный флаг. Повтор с
+`aarch64-linux-gnu-gcc` прошёл. Первая MIPS release-команда выбрала host `cc` и
+пыталась связать MIPS-объект как x86-64; повтор с `mipsel-linux-gnu-gcc` прошёл.
+Это ошибки конфигурации вызова, не отрицательные результаты тестирования.
+
+Журналы в игнорируемом `.rea/`:
+
+- `r2o-clean-handshake-early-rst-focused-arm64-rerun.log`;
+- `r2o-clean-handshake-early-rst-workspace-arm64.log`;
+- `r2o-clean-handshake-early-rst-flow-journal-arm64.log`;
+- `r2o-clean-handshake-early-rst-armv5te-check.log`;
+- `r2o-clean-handshake-early-rst-armv7-check.log`;
+- `r2o-clean-handshake-early-rst-mipsel-check.log`;
+- `r2o-clean-handshake-early-rst-arm64-release.log`;
+- `r2o-clean-handshake-early-rst-armv5te-release.log`;
+- `r2o-clean-handshake-early-rst-armv7-release.log`;
+- `r2o-clean-handshake-early-rst-mipsel-release-rerun.log`;
+- `r2o-clean-handshake-normalized-host-controller-arm64.log`;
+- `r2o-clean-handshake-normalized-host-workspace-arm64.log`;
+- `r2o-clean-handshake-final-armv5te-check.log`;
+- `r2o-clean-handshake-final-armv7-check.log`;
+- `r2o-clean-handshake-final-mipsel-check.log`;
+- файлы `r2o-clean-handshake-final-*-release.log`.
+
+Холодная ARM64 test-compilation и linking заняли 11 мин 52 с; повторная
+компиляция финального diff заняла 4 мин 26 с. `ld` ожидал ввод-вывод через WSL
+9p на `/mnt/e`. Для следующих длительных прогонов стоит
+проверить линковку через LLD либо Linux-native worktree и сравнить время до
+замены штатного пути. Это кандидат на оптимизацию процесса, не основание
+снижать обязательный полный прогон.
+
+Автоматический сигнал повторного ClientHello (`REPEAT`) пока не перенесён:
+датапат не публикует ему эквивалентное runtime-событие. Остальные ветви scheduler,
+полный `session.c`, CI и приёмка на реальном роутере не закрыты; эта итерация не
+доказывает полный функциональный паритет.
