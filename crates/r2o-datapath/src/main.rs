@@ -618,13 +618,20 @@ mod app {
                                 if options.mode == RuntimeMode::Observe {
                                     PacketDecision::Accept
                                 } else {
-                                    decide_with_tcp_session(
-                                        &mut tcp_sessions,
+                                    r2o_udp_decide_once(
+                                        &mut udp_sessions,
                                         selected_plan,
                                         bytes,
-                                        &mut control,
-                                        &mut flow_journal,
-                                        &journal_origin,
+                                        || {
+                                            decide_with_tcp_session(
+                                                &mut tcp_sessions,
+                                                selected_plan,
+                                                bytes,
+                                                &mut control,
+                                                &mut flow_journal,
+                                                &journal_origin,
+                                            )
+                                        },
                                     )
                                 }
                             }
@@ -1566,6 +1573,26 @@ mod app {
             || sessions.observe_packet(packet, now)
     }
 
+    fn r2o_udp_decide_once(
+        sessions: &mut R2oUdpSessions,
+        plan: &Plan,
+        packet: &[u8],
+        decide: impl FnOnce() -> PacketDecision,
+    ) -> PacketDecision {
+        if sessions.r2o_plan_applied(packet) {
+            return PacketDecision::Accept;
+        }
+        let decision = decide();
+        let applied = matches!(
+            &decision,
+            PacketDecision::Replace(_) | PacketDecision::Transmit { .. }
+        ) || (plan.qdeny == 0 && decision == PacketDecision::Drop);
+        if applied {
+            sessions.r2o_mark_plan_applied(packet);
+        }
+        decision
+    }
+
     fn r2o_datapath_payload<'a>(packet: &QueuePacket<'a>, mark: u32) -> Option<&'a [u8]> {
         packet
             .payload
@@ -2040,12 +2067,12 @@ mod app {
     #[cfg(test)]
     mod tests {
         use super::{
-            ControlServer, NF_ACCEPT, NF_DROP, OriginalFate, R2oFlowJournal, R2oQuicSessions,
-            RuntimeMode, TcpSessions, format_journal_details, format_journal_key,
+            ControlServer, NF_ACCEPT, NF_DROP, OriginalFate, PacketDecision, Plan, R2oFlowJournal,
+            R2oQuicSessions, RuntimeMode, TcpSessions, format_journal_details, format_journal_key,
             handle_control_command, load_plan, needs_raw_socket, observe_quic_packet,
-            parse_options, r2o_datapath_payload, r2o_packet_route_skip, release_many_with,
-            release_with, send_applied_event, send_hello_event, send_journal_snapshot,
-            send_journal_updates, udp_packet_admitted,
+            parse_options, r2o_datapath_payload, r2o_packet_route_skip, r2o_udp_decide_once,
+            release_many_with, release_with, send_applied_event, send_hello_event,
+            send_journal_snapshot, send_journal_updates, udp_packet_admitted,
         };
         use r2o_datapath::netlink::{QueuePacket, R2O_NF_INET_FORWARD, R2O_NF_INET_POST_ROUTING};
         use r2o_datapath::r2o_route::{
@@ -2099,6 +2126,69 @@ mod app {
             ));
             assert_eq!(sessions.stats().flows, 1536);
             assert_eq!(sessions.stats().refusals, 1);
+        }
+
+        #[test]
+        fn r2o_udp_план_исполняется_один_раз_на_поток_и_снова_после_истечения() {
+            let now = Instant::now();
+            let mut sessions = R2oUdpSessions::new().unwrap();
+            let request = udp_packet([192, 0, 2, 1], [198, 51, 100, 2], 40_000, 443);
+            assert!(udp_packet_admitted(&mut sessions, &request, now));
+
+            let mut executions = 0;
+            let plan = Plan::default();
+            let first = r2o_udp_decide_once(&mut sessions, &plan, &request, || {
+                executions += 1;
+                PacketDecision::Drop
+            });
+            assert_eq!(first, PacketDecision::Drop);
+
+            let reply = udp_packet([198, 51, 100, 2], [192, 0, 2, 1], 443, 40_000);
+            assert!(udp_packet_admitted(
+                &mut sessions,
+                &reply,
+                now + Duration::from_millis(1)
+            ));
+            let repeated = r2o_udp_decide_once(&mut sessions, &plan, &reply, || {
+                executions += 1;
+                PacketDecision::Drop
+            });
+            assert_eq!(repeated, PacketDecision::Accept);
+            assert_eq!(executions, 1);
+
+            sessions.expire(now + Duration::from_secs(120) + Duration::from_millis(1));
+            assert!(udp_packet_admitted(
+                &mut sessions,
+                &request,
+                now + Duration::from_secs(120) + Duration::from_millis(1)
+            ));
+            let next_flow = r2o_udp_decide_once(&mut sessions, &plan, &request, || {
+                executions += 1;
+                PacketDecision::Drop
+            });
+            assert_eq!(next_flow, PacketDecision::Drop);
+            assert_eq!(executions, 2);
+
+            sessions.expire(now + Duration::from_secs(240) + Duration::from_millis(1));
+            assert!(udp_packet_admitted(
+                &mut sessions,
+                &request,
+                now + Duration::from_secs(240) + Duration::from_millis(1)
+            ));
+            let qdeny = Plan {
+                qdeny: 1,
+                ..Plan::default()
+            };
+            for expected_executions in [3, 4] {
+                assert_eq!(
+                    r2o_udp_decide_once(&mut sessions, &qdeny, &request, || {
+                        executions += 1;
+                        PacketDecision::Drop
+                    }),
+                    PacketDecision::Drop
+                );
+                assert_eq!(executions, expected_executions);
+            }
         }
 
         #[test]

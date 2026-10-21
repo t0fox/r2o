@@ -40,6 +40,30 @@ impl FlowKey {
     }
 }
 
+#[derive(Clone, Copy)]
+struct FlowState {
+    last_seen: Instant,
+    plan_applied: bool,
+}
+
+fn flow_key_from_packet(packet: &[u8]) -> Option<FlowKey> {
+    let view = PacketView::parse(packet)
+        .filter(|view| view.protocol == 17 && view.fragment & 0x1fff == 0)?;
+    let udp = packet.get(view.l4_offset..view.total_len)?;
+    if udp.len() < 8 {
+        return None;
+    }
+    let source = Endpoint {
+        address: view.src,
+        port: u16::from_be_bytes([udp[0], udp[1]]),
+    };
+    let destination = Endpoint {
+        address: view.dst,
+        port: u16::from_be_bytes([udp[2], udp[3]]),
+    };
+    Some(FlowKey::new(source, destination))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct R2oUdpTableStats {
     pub flows: usize,
@@ -49,7 +73,7 @@ pub struct R2oUdpTableStats {
 
 /// Ограниченное состояние всех корректных UDP-кортежей datapath.
 pub struct R2oUdpSessions {
-    flows: HashMap<FlowKey, Instant>,
+    flows: HashMap<FlowKey, FlowState>,
     flow_capacity: R2oFlowCapacity,
     refusals: u64,
 }
@@ -72,44 +96,49 @@ impl R2oUdpSessions {
 
     /// Обновить поток, если пакет содержит целый UDP-заголовок.
     pub fn observe_packet(&mut self, packet: &[u8], now: Instant) -> bool {
-        let Some(view) = PacketView::parse(packet)
-            .filter(|view| view.protocol == 17 && view.fragment & 0x1fff == 0)
-        else {
+        let Some(key) = flow_key_from_packet(packet) else {
             return false;
         };
-        let Some(udp) = packet
-            .get(view.l4_offset..view.total_len)
-            .filter(|udp| udp.len() >= 8)
-        else {
-            return false;
-        };
-        let source = Endpoint {
-            address: view.src,
-            port: u16::from_be_bytes([udp[0], udp[1]]),
-        };
-        let destination = Endpoint {
-            address: view.dst,
-            port: u16::from_be_bytes([udp[2], udp[3]]),
-        };
-        let key = FlowKey::new(source, destination);
 
-        if let Some(last_seen) = self.flows.get_mut(&key) {
-            *last_seen = now;
+        if let Some(flow) = self.flows.get_mut(&key) {
+            flow.last_seen = now;
             return true;
         }
         if self.flows.len() >= self.flow_capacity.limit() {
             self.refusals = self.refusals.saturating_add(1);
             return false;
         }
-        self.flows.insert(key, now);
+        self.flows.insert(
+            key,
+            FlowState {
+                last_seen: now,
+                plan_applied: false,
+            },
+        );
         true
+    }
+
+    /// Проверить, применялся ли уже план к этому UDP-потоку.
+    pub fn r2o_plan_applied(&self, packet: &[u8]) -> bool {
+        flow_key_from_packet(packet)
+            .and_then(|key| self.flows.get(&key))
+            .is_some_and(|flow| flow.plan_applied)
+    }
+
+    /// Отметить первое применение плана к UDP-потоку.
+    pub fn r2o_mark_plan_applied(&mut self, packet: &[u8]) -> bool {
+        let Some(flow) = flow_key_from_packet(packet).and_then(|key| self.flows.get_mut(&key))
+        else {
+            return false;
+        };
+        !std::mem::replace(&mut flow.plan_applied, true)
     }
 
     /// Удалить записи, не обновлявшиеся в течение заданного срока.
     pub fn expire(&mut self, now: Instant) -> usize {
         let before = self.flows.len();
-        self.flows.retain(|_, last_seen| {
-            !(now >= *last_seen && now.duration_since(*last_seen) >= UDP_IDLE)
+        self.flows.retain(|_, flow| {
+            !(now >= flow.last_seen && now.duration_since(flow.last_seen) >= UDP_IDLE)
         });
         before - self.flows.len()
     }
