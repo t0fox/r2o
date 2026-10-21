@@ -76,6 +76,10 @@ little-endian musl собирается командой `sh scripts/r2o-build-o
 эту сборку ещё предстоит проверить. Короткая проверка MIPS включает
 `r2o-manager --version`.
 
+Полный OpenWrt ARM64 musl workspace собирается командой
+`sh scripts/r2o-build-openwrt-aarch64-musl.sh`; она проверяет AArch64 ELF,
+статическую связь с musl и запускает пять программ и операции каталога под QEMU.
+
 Полный workspace для ARMv5 little-endian musleabi собирается и проверяется под
 QEMU командой `sh scripts/r2o-build-armv5-musleabi.sh`. Сценарий проверяет шесть
 статических ELF-программ, запускает их версии и проверяет операции каталога.

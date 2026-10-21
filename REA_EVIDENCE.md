@@ -5366,3 +5366,41 @@ release workspace и smoke-проверка шести ARM64 бинарнико�
 Другие архитектуры не собирались и не тестировались. Сводка и сетевые журналы:
 `.rea/r2o-nfq-arm64-final-20261021.md`,
 `.rea/r2o-nfq-arm64-logs-20261021.tar.gz`.
+
+## OpenWrt ARM64 musl: выпускные ELF — 21.10.2026
+
+Официальный OpenWrt 25.12.5 toolchain для Rockchip ARMv8:
+[`индекс SDK`](https://downloads.openwrt.org/releases/25.12.5/targets/rockchip/armv8/).
+Архив `openwrt-toolchain-25.12.5-rockchip-armv8_gcc-14.3.0_musl.Linux-x86_64.tar.zst`
+проверен по SHA-256
+`37875a8a69b46c9dc2a8c8bfd34a14f5de03fbea775f7cf8569f7e709c93403b`.
+Сценарий `scripts/r2o-build-openwrt-aarch64-musl.sh` собирает весь workspace
+под `aarch64-unknown-linux-musl`, требует target-компонент Rust для startup и
+unwind-объектов, проверяет статическую связь ELF и запускает все пять программ
+под QEMU ARM64. Smoke-команды проверяют версии и очистку/валидность каталога.
+
+REA `inspect_rust_binary` зафиксировал ARM64 ELF, 64 бита и little-endian:
+
+| Компонент | SHA-256 | REA Evidence |
+|---|---|---|
+| `r2o-datapath` | `9d1a1e6c289c993048096bfeb2cc92dd887fb3afc8870fe7d282bb48f334bc55` | `ev_6e343ba0566f5ca1a9528a0f4e47522241bc32fbfc6c04fe698bb6b5e2ea0f5d` |
+| `r2o-controller` | `3824aa71f5554b1effa1e0b9517af371d4d142ab9172f6e8eee751ac8e2327a9` | `ev_cc7270008734f962de94789f661e70cfd3444363422340efadb3a82a244dcdd8` |
+| `r2o-telegram` | `9a5bc6ef634dedcfb60fdebcd7ab11d0ef5b25c2661f96b90a25939a3065296c` | `ev_c452849321c453040a68188cdfaf9759727755b69594202fd8faeb16756df728` |
+| `r2o-panel` | `9a3fe350caa5112293d754758c3ddd51df4b4a0d77287e69e83b1fec04f7c2ec` | `ev_11c7a06fa5d95566354f7ecdc6da8992d915dd2624f94ef105ec8dbeefde6687` |
+| `r2o-manager` | `77b1ecae3e0e434f6acba998ea0f6aac26d3355141208db8dc86fba52e66afa8` | `ev_8c08b7b67040941efe0a0f3218f78b190ca0f96332a965e6a5d0f29f5639c7af` |
+
+Для пяти ELF `inspect_with_objdump(file_headers)` также вернул Evidence, но
+установленный BFD сообщил `architecture: UNKNOWN!`; архитектурный вывод objdump
+поэтому не используется. `inspect_rust_binary` определил `arm64` во всех пяти
+случаях. Встроенного `.dep-v0` dependency manifest в этих бинарниках нет;
+REA-сверка здесь подтверждает только формат, архитектуру, разрядность и порядок
+байтов, не зависимости и не функциональные тела.
+
+На ARM64 QEMU/musl прошли все 24 теста `r2o-manager` (16 библиотечных и 8 CLI).
+Фактический пакет `r2o-aarch64-openwrt-musl.tar.gz` собран, распакован во
+временный каталог, установлен ARM64 `r2o-manager install-local`, и менеджер из
+активного слота ответил на `--version`. Это локальный пакетный smoke, не
+подписанная публикация и не физический роутер. Журналы:
+`.rea/r2o-openwrt-aarch64-release-20261021.log`,
+`.rea/r2o-openwrt-aarch64-manager-tests-20261021.log`,
+`.rea/r2o-openwrt-aarch64-package-install-20261021.log`.
