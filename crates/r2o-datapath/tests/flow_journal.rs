@@ -1,10 +1,11 @@
 use r2k_core::control::{
     AppliedEvent, BindingContext, EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT,
     EVENT_R2O_TCP_CLEAN_HANDSHAKE, EVENT_R2O_TCP_EARLY_RST, EVENT_R2O_TCP_FIN_RETRY,
-    EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF,
-    EVENT_R2O_VOICE_SUSPECT, KEY_LEN, R2oQuicSuspectEvent, R2oTcpCleanHandshakeEvent,
-    R2oTcpEarlyRstEvent, R2oTcpFinRetryEvent, R2oTcpRstAfterAppEvent, R2oTcpSilenceEvent,
-    R2oTcpStallEvent, R2oVoiceProofEvent, R2oVoiceSuspectEvent,
+    EVENT_R2O_TCP_REPEAT, EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL,
+    EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_SUSPECT, KEY_LEN, R2oQuicSuspectEvent,
+    R2oTcpCleanHandshakeEvent, R2oTcpEarlyRstEvent, R2oTcpFinRetryEvent, R2oTcpRepeatEvent,
+    R2oTcpRstAfterAppEvent, R2oTcpSilenceEvent, R2oTcpStallEvent, R2oVoiceProofEvent,
+    R2oVoiceSuspectEvent,
 };
 use r2o_datapath::flow_journal::{
     R2oFlowJournal, R2oFlowJournalEntry, R2oFlowJournalKind, R2oFlowJournalSummary,
@@ -560,6 +561,21 @@ fn журнал_сохраняет_все_типы_подозрений_r2o() {
             0,
             0,
             6,
+        ),
+        (
+            EVENT_R2O_TCP_REPEAT,
+            R2oTcpRepeatEvent {
+                key: tcp_key,
+                client_is_low: true,
+                planned: true,
+            }
+            .event_body()
+            .unwrap(),
+            R2oFlowJournalKind::Suspect,
+            1,
+            0,
+            0,
+            2,
         ),
         (
             EVENT_R2O_TCP_RST_AFTER_APP,

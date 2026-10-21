@@ -4,10 +4,11 @@ mod app {
         ACK_BAD_ARGS, ACK_OK, Ack, AppliedEvent, COMMAND_SET_TCP_STALL_BUDGETS, EVENT_APPLIED,
         EVENT_HELLO, EVENT_HTTP_PORTAL, EVENT_HTTP_RESPONSE, EVENT_R2O_QUIC_STALL,
         EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_CLEAN_HANDSHAKE, EVENT_R2O_TCP_EARLY_RST,
-        EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_SILENT,
-        EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_SUSPECT, Frame,
-        HttpPortalEvent, HttpResponseEvent, PROTOCOL_VERSION, R2oTcpCleanHandshakeEvent,
-        R2oTcpEarlyRstEvent, R2oTcpFinRetryEvent, RELEASE_ID, decode_set_tcp_stall_budgets,
+        EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_REPEAT, EVENT_R2O_TCP_RST_AFTER_APP,
+        EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_SUSPECT,
+        Frame, HttpPortalEvent, HttpResponseEvent, PROTOCOL_VERSION, R2oTcpCleanHandshakeEvent,
+        R2oTcpEarlyRstEvent, R2oTcpFinRetryEvent, R2oTcpRepeatEvent, RELEASE_ID,
+        decode_set_tcp_stall_budgets,
     };
     use r2k_core::plan::{EmitKind, OriginalFate, PROTO_VOICE, Plan};
     use r2o_datapath::capture::{tcp_hello_from_packet, tcp_http_hello_from_packet};
@@ -2195,6 +2196,24 @@ mod app {
                     EVENT_R2O_TCP_EARLY_RST,
                     &body,
                     "раннего TCP RST",
+                );
+            }
+        }
+        for event in sessions.take_tcp_repeat_events() {
+            if let Some(body) = (R2oTcpRepeatEvent {
+                key: event.key,
+                client_is_low: event.client_is_low,
+                planned: event.planned,
+            })
+            .event_body()
+            {
+                send_observed_control_event(
+                    control,
+                    flow_journal,
+                    journal_origin,
+                    EVENT_R2O_TCP_REPEAT,
+                    &body,
+                    "повтора ClientHello TCP",
                 );
             }
         }

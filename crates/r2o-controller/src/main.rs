@@ -5,19 +5,19 @@ use r2k_core::control::{
     COMMAND_SET_VOICE_ADDR_PROBE, EVENT_APPLIED, EVENT_CLIENT_SHAPE, EVENT_HELLO,
     EVENT_HTTP_PORTAL, EVENT_HTTP_RESPONSE, EVENT_R2O_JOURNAL_END, EVENT_R2O_JOURNAL_ENTRY,
     EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_CLEAN_HANDSHAKE,
-    EVENT_R2O_TCP_EARLY_RST, EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_RST_AFTER_APP,
-    EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_SUSPECT,
-    Frame, HelloEvent, PROTOCOL_VERSION, RELEASE_ID, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_LEGACY,
-    SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, VOICE_ADDR_PROBE_LEASE_MAX_MS, decode_ack,
-    decode_applied, decode_client_shape, decode_greeting, decode_hello, decode_http_portal,
-    decode_http_response, decode_r2o_quic_stall, decode_r2o_quic_suspect,
+    EVENT_R2O_TCP_EARLY_RST, EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_REPEAT,
+    EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF,
+    EVENT_R2O_VOICE_SUSPECT, Frame, HelloEvent, PROTOCOL_VERSION, RELEASE_ID, SHAPE_ECH_TCP,
+    SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, VOICE_ADDR_PROBE_LEASE_MAX_MS,
+    decode_ack, decode_applied, decode_client_shape, decode_greeting, decode_hello,
+    decode_http_portal, decode_http_response, decode_r2o_quic_stall, decode_r2o_quic_suspect,
     decode_r2o_tcp_clean_handshake, decode_r2o_tcp_early_rst, decode_r2o_tcp_fin_retry,
-    decode_r2o_tcp_rst_after_app, decode_r2o_tcp_silence, decode_r2o_tcp_stall,
-    decode_r2o_voice_proof, decode_r2o_voice_suspect, encode_delete_addr, encode_delete_addr_probe,
-    encode_delete_name, encode_delete_name_probe, encode_delete_voice_addr_probe, encode_frame,
-    encode_set_addr, encode_set_addr_probe, encode_set_bypass, encode_set_https, encode_set_name,
-    encode_set_name_probe, encode_set_suffix, encode_set_tcp_stall_budgets, encode_set_voice_addr,
-    encode_set_voice_addr_probe, read_frame,
+    decode_r2o_tcp_repeat, decode_r2o_tcp_rst_after_app, decode_r2o_tcp_silence,
+    decode_r2o_tcp_stall, decode_r2o_voice_proof, decode_r2o_voice_suspect, encode_delete_addr,
+    encode_delete_addr_probe, encode_delete_name, encode_delete_name_probe,
+    encode_delete_voice_addr_probe, encode_frame, encode_set_addr, encode_set_addr_probe,
+    encode_set_bypass, encode_set_https, encode_set_name, encode_set_name_probe, encode_set_suffix,
+    encode_set_tcp_stall_budgets, encode_set_voice_addr, encode_set_voice_addr_probe, read_frame,
 };
 use r2k_core::plan::{PROTO_HTTP, PROTO_VOICE, Plan};
 use r2o_controller::catalog::{Catalog, DomainObservation, GroupKey};
@@ -5928,6 +5928,70 @@ impl ControlClient {
                     std::io::stdout().flush()?;
                     continue;
                 }
+                if frame.kind == EVENT_R2O_TCP_REPEAT {
+                    let event = decode_r2o_tcp_repeat(&frame)
+                        .map_err(|error| format!("событие повторного ClientHello TCP: {error}"))?;
+                    let (client, server) = flow_socket_addresses(&event.key, event.client_is_low);
+                    println!(
+                        "наблюдение TCP: ClientHello повторён без TLS-ответа {client} -> {server}, план применён={}; повтор сам по себе не подтверждает блокировку",
+                        event.planned
+                    );
+                    let now = std::time::Instant::now();
+                    if let Some(target) = tcp_hello_names.target_for_tcp_flow(&event.key, now) {
+                        if clean_handshakes.suppresses_unplanned_tcp_suspicion(
+                            &target.host,
+                            target.family,
+                            event.planned,
+                            now,
+                        ) {
+                            println!(
+                                "классификация {} пропущена: IPv{} недавно завершил TCP-рукопожатие без плана",
+                                target.host, target.family
+                            );
+                        } else if let Some((worker, catalog, _, _)) = &mut discovery {
+                            let has_solution =
+                                r2o_controller::discovery::has_usable_binding(catalog, &target)
+                                    || matching_domain_group(catalog, &target).is_some();
+                            if event.planned {
+                                let queued = if has_solution {
+                                    worker.queue_after_confirmed_failure(target.clone())
+                                } else {
+                                    worker.queue(target.clone())
+                                };
+                                println!(
+                                    "повтор ClientHello под планом поставил {} на проверку: {}",
+                                    target.host,
+                                    if queued {
+                                        "задача поставлена"
+                                    } else {
+                                        "задача уже выполняется или очередь занята"
+                                    }
+                                );
+                            } else if has_solution {
+                                println!(
+                                    "повтор ClientHello без плана для {} не создаёт задачу: каталог уже содержит применимое решение",
+                                    target.host
+                                );
+                            } else if worker.queue(target.clone()) {
+                                println!(
+                                    "повтор ClientHello без плана поставил {} в очередь классификации",
+                                    target.host
+                                );
+                            } else {
+                                println!(
+                                    "классификация {} после повтора ClientHello пропущена: задача уже выполняется или очередь занята",
+                                    target.host
+                                );
+                            }
+                        }
+                    } else {
+                        println!(
+                            "классификация после повтора ClientHello не запущена: нет свежего ClientHello с SNI того же потока"
+                        );
+                    }
+                    std::io::stdout().flush()?;
+                    continue;
+                }
                 if frame.kind == EVENT_R2O_TCP_STALL {
                     let event = decode_r2o_tcp_stall(&frame)
                         .map_err(|error| format!("событие зависания TCP: {error}"))?;
@@ -7614,6 +7678,7 @@ impl ControlClient {
                 | EVENT_R2O_TCP_RST_AFTER_APP
                 | EVENT_R2O_TCP_CLEAN_HANDSHAKE
                 | EVENT_R2O_TCP_EARLY_RST
+                | EVENT_R2O_TCP_REPEAT
                 | EVENT_R2O_VOICE_SUSPECT
                 | EVENT_R2O_JOURNAL_ENTRY
                 | EVENT_R2O_JOURNAL_END
@@ -9312,6 +9377,28 @@ mod tests {
         let event = Frame {
             kind: EVENT_R2O_TCP_SILENT,
             body: vec![0; KEY_LEN + 6],
+        };
+
+        client.queue_async_frame(event.clone()).unwrap();
+
+        assert_eq!(client.pending_events, VecDeque::from([event]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_controller_queues_tcp_repeat_events_for_later_processing() {
+        let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut client = ControlClient {
+            socket,
+            send_maxlen: 0,
+            pending_events: VecDeque::new(),
+            pending_applied_events: VecDeque::new(),
+            http_search_started: std::collections::HashMap::new(),
+            http_challenge_cooldowns: std::collections::HashMap::new(),
+        };
+        let event = Frame {
+            kind: r2k_core::control::EVENT_R2O_TCP_REPEAT,
+            body: vec![0; KEY_LEN + 2],
         };
 
         client.queue_async_frame(event.clone()).unwrap();

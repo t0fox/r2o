@@ -73,11 +73,15 @@ struct TcpSession {
     first_syn: Option<Instant>,
     rtt: Option<Duration>,
     hello_at: Option<Instant>,
+    hello_seq: Option<u32>,
+    hello_repeats: u8,
+    repeat_reported: bool,
     hello_ack: Option<u32>,
     reverse_seen: bool,
     response_payload: bool,
     reverse_tls_app_data: bool,
     reverse_server_hello: bool,
+    reverse_tls_reply: bool,
     reverse_payload_bytes_after_hello: u32,
     reverse_packets_after_hello: u32,
     reverse_first_record_type: u8,
@@ -121,11 +125,15 @@ impl TcpSession {
             first_syn,
             rtt: None,
             hello_at: None,
+            hello_seq: None,
+            hello_repeats: 0,
+            repeat_reported: false,
             hello_ack: None,
             reverse_seen: false,
             response_payload: false,
             reverse_tls_app_data: false,
             reverse_server_hello: false,
+            reverse_tls_reply: false,
             reverse_payload_bytes_after_hello: 0,
             reverse_packets_after_hello: 0,
             reverse_first_record_type: 0,
@@ -210,6 +218,13 @@ pub struct R2oTcpRstEvent {
     pub client_is_low: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct R2oTcpRepeatEvent {
+    pub key: [u8; KEY_LEN],
+    pub client_is_low: bool,
+    pub planned: bool,
+}
+
 impl R2oTcpExchangeEvent {
     pub const PLANNED_YES: u8 = 1;
     pub const PLANNED_NO: u8 = 2;
@@ -225,6 +240,7 @@ pub struct TcpSessions {
     r2o_reply_hidden: u64,
     tcp_exchange_events: VecDeque<R2oTcpExchangeEvent>,
     tcp_rst_events: VecDeque<R2oTcpRstEvent>,
+    tcp_repeat_events: VecDeque<R2oTcpRepeatEvent>,
     tcp_rst_cut_events: VecDeque<R2oTcpRstCutEvent>,
     fin_retry_events: VecDeque<R2oTcpFinRetryEvent>,
     rst_after_app_events: VecDeque<R2oTcpRstAfterAppEvent>,
@@ -246,6 +262,8 @@ impl TcpSessions {
         tcp_exchange_events.try_reserve(flow_capacity.slots().saturating_mul(2))?;
         let mut tcp_rst_events = VecDeque::new();
         tcp_rst_events.try_reserve(flow_capacity.slots())?;
+        let mut tcp_repeat_events = VecDeque::new();
+        tcp_repeat_events.try_reserve(flow_capacity.slots())?;
         let mut tcp_rst_cut_events = VecDeque::new();
         tcp_rst_cut_events.try_reserve(flow_capacity.slots())?;
         Ok(Self {
@@ -257,6 +275,7 @@ impl TcpSessions {
             r2o_reply_hidden: 0,
             tcp_exchange_events,
             tcp_rst_events,
+            tcp_repeat_events,
             tcp_rst_cut_events,
             fin_retry_events: VecDeque::new(),
             rst_after_app_events: VecDeque::new(),
@@ -308,6 +327,10 @@ impl TcpSessions {
 
     pub fn take_tcp_rst_events(&mut self) -> Vec<R2oTcpRstEvent> {
         self.tcp_rst_events.drain(..).collect()
+    }
+
+    pub fn take_tcp_repeat_events(&mut self) -> Vec<R2oTcpRepeatEvent> {
+        self.tcp_repeat_events.drain(..).collect()
     }
 
     pub fn take_tcp_rst_cut_events(&mut self) -> Vec<R2oTcpRstCutEvent> {
@@ -625,6 +648,7 @@ impl TcpSessions {
             _ => None,
         };
         let session = self.flows.get_mut(&key)?;
+        let hello_was_seen = session.hello_at.is_some();
         let reverse_tls_app_data_before_packet = session.reverse_tls_app_data;
         let reverse_packets_after_hello_before_packet = session.reverse_packets_after_hello;
         let reverse_ttl_before_packet = session.reverse_ttl;
@@ -666,6 +690,7 @@ impl TcpSessions {
                 session.direction_known = true;
             }
             session.hello_at = Some(now);
+            session.hello_seq = Some(tcp.sequence);
             *r2o_tcp_hello_flows = (*r2o_tcp_hello_flows).wrapping_add(1);
             session.hello_ack = ack.then_some(tcp.acknowledgment);
             session.hello_has_sni = hello.sni_range.is_some();
@@ -717,7 +742,13 @@ impl TcpSessions {
                     .reverse_payload_bytes_after_hello
                     .saturating_add(payload.len().min(u32::MAX as usize) as u32);
                 session.reverse_tls_app_data |= payload.first() == Some(&0x17);
-                session.reverse_server_hello |= r2k_core::tls::parse(payload).is_server_hello;
+                let response_tls = r2k_core::tls::parse(payload);
+                session.reverse_server_hello |= response_tls.is_server_hello;
+                session.reverse_tls_reply |= response_tls.is_server_hello
+                    || (response_tls.is_tls_record
+                        && response_tls.record_type == 23
+                        && response_tls.record_end.is_some_and(|end| end > 5)
+                        && payload.get(2).is_some_and(|minor| *minor <= 3));
                 if session.reverse_first_record_type == 0 {
                     session.reverse_first_record_type = payload[0];
                 }
@@ -752,6 +783,23 @@ impl TcpSessions {
         } else {
             if !payload.is_empty() {
                 session.forward_data_packets = session.forward_data_packets.saturating_add(1);
+            }
+        }
+        let mut repeat_event = None;
+        if hello_was_seen
+            && !reverse
+            && !payload.is_empty()
+            && session.hello_seq == Some(tcp.sequence)
+            && !session.reverse_tls_reply
+            && !session.repeat_reported
+        {
+            session.hello_repeats = session.hello_repeats.saturating_add(1).min(2);
+            if session.hello_repeats >= 2 {
+                repeat_event = Some(R2oTcpRepeatEvent {
+                    key: key.wire_key(),
+                    client_is_low: session.initiator == key.low,
+                    planned: session.plan_done,
+                });
             }
         }
         if !reverse {
@@ -878,6 +926,12 @@ impl TcpSessions {
             && self.tcp_rst_events.len() < self.flow_capacity.slots()
         {
             self.tcp_rst_events.push_back(event);
+        }
+        if let Some(event) = repeat_event
+            && self.tcp_repeat_events.len() < self.flow_capacity.slots()
+        {
+            self.tcp_repeat_events.push_back(event);
+            session.repeat_reported = true;
         }
         if let Some(event) = rst_cut_event
             && self.tcp_rst_cut_events.len() < self.flow_capacity.slots()
@@ -1673,6 +1727,87 @@ mod tests {
         without_ack.track_packet(&ack, start + Duration::from_millis(50));
         assert_eq!(without_ack.r2o_tcp_hello_flows(), 1);
         assert_eq!(without_ack.r2o_reply_hidden(), 0);
+    }
+
+    #[test]
+    fn r2o_tcp_подозревает_два_повтора_clienthello_с_тем_же_sequence() {
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello());
+        let mut sessions = TcpSessions::default();
+
+        sessions.track_packet(&hello, start);
+        assert!(sessions.take_tcp_repeat_events().is_empty());
+        sessions.track_packet(&hello, start + Duration::from_millis(50));
+        assert!(sessions.take_tcp_repeat_events().is_empty());
+        sessions.track_packet(&hello, start + Duration::from_millis(100));
+
+        let events = sessions.take_tcp_repeat_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].key,
+            sessions.flows.keys().next().unwrap().wire_key()
+        );
+        assert!(events[0].client_is_low);
+        assert!(!events[0].planned);
+
+        sessions.track_packet(&hello, start + Duration::from_millis(150));
+        assert!(sessions.take_tcp_repeat_events().is_empty());
+
+        let mut planned = TcpSessions::default();
+        planned.track_packet(&hello, start);
+        let key = planned.flows.keys().next().unwrap().wire_key();
+        planned.mark_plan_done(&key);
+        planned.track_packet(&hello, start + Duration::from_millis(50));
+        planned.track_packet(&hello, start + Duration::from_millis(100));
+        assert!(planned.take_tcp_repeat_events()[0].planned);
+    }
+
+    #[test]
+    fn r2o_tcp_повтор_учитывает_только_клиентский_sequence_без_ответа_tls() {
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello());
+        let mut server_hello = vec![0x16, 0x03, 0x03, 0, 42, 2, 0, 0, 38, 0x03, 0x03];
+        server_hello.extend_from_slice(&[0; 32]);
+        server_hello.extend_from_slice(&[0, 0x13, 0x01, 0]);
+        let replies = [
+            (vec![0x17, 0x03, 0x03, 0, 1, 0], true),
+            (server_hello, true),
+            (vec![0x17], false),
+            (vec![0x17, 0x03, 0xff, 0, 1, 0], false),
+        ];
+
+        for (reply, answered) in replies {
+            let mut sessions = TcpSessions::default();
+            sessions.track_packet(&hello, start);
+            sessions.track_packet(
+                &ipv4_tcp_packet(server, client, 0x18, 124, 900, &reply),
+                start + Duration::from_millis(25),
+            );
+            sessions.track_packet(&hello, start + Duration::from_millis(50));
+            sessions.track_packet(&hello, start + Duration::from_millis(75));
+            assert_eq!(
+                !sessions.take_tcp_repeat_events().is_empty(),
+                !answered,
+                "TLS-ответ={reply:02x?}"
+            );
+        }
+
+        let mut sessions = TcpSessions::default();
+        sessions.track_packet(&hello, start);
+        let mut other_sequence = hello.clone();
+        other_sequence[24..28].copy_from_slice(&702_u32.to_be_bytes());
+        sessions.track_packet(&other_sequence, start + Duration::from_millis(50));
+        sessions.track_packet(&other_sequence, start + Duration::from_millis(75));
+        assert!(sessions.take_tcp_repeat_events().is_empty());
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x18, 124, 701, &client_hello()),
+            start + Duration::from_millis(100),
+        );
+        assert!(sessions.take_tcp_repeat_events().is_empty());
     }
 
     #[test]
