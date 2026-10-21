@@ -4,7 +4,7 @@ use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-pub const PROTOCOL_VERSION: u16 = 41;
+pub const PROTOCOL_VERSION: u16 = 42;
 pub const FRAME_MAX: usize = 65_536;
 pub const KEY_LEN: usize = 38;
 pub const MAX_DNS_NAME_LEN: usize = 253;
@@ -26,6 +26,7 @@ pub const EVENT_CLIENT_SHAPE: u16 = 0x0017;
 pub const EVENT_R2O_TCP_CLEAN_HANDSHAKE: u16 = 0x0018;
 pub const EVENT_R2O_TCP_EARLY_RST: u16 = 0x0019;
 pub const EVENT_R2O_TCP_REPEAT: u16 = 0x001a;
+pub const EVENT_R2O_TCP_RST_CUT: u16 = 0x001b;
 pub const EVENT_R2O_JOURNAL_ENTRY: u16 = 0x0014;
 pub const EVENT_R2O_JOURNAL_END: u16 = 0x0015;
 pub const COMMAND_SET_NAME: u16 = 0x0081;
@@ -257,6 +258,13 @@ pub struct R2oTcpEarlyRstEvent {
     pub planned: bool,
 }
 
+/// TCP RST, снятый защитой до первого ответа на ClientHello.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct R2oTcpRstCutSignalEvent {
+    pub key: [u8; KEY_LEN],
+    pub client_is_low: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Повторный ClientHello TCP без распознанного ответа сервера.
 pub struct R2oTcpRepeatEvent {
@@ -287,6 +295,18 @@ impl R2oTcpEarlyRstEvent {
         body.extend_from_slice(&self.key);
         body.push(u8::from(self.client_is_low));
         body.push(u8::from(self.planned));
+        Some(body)
+    }
+}
+
+impl R2oTcpRstCutSignalEvent {
+    pub fn event_body(&self) -> Option<Vec<u8>> {
+        if !valid_flow_key(&self.key) || self.key[37] != 6 {
+            return None;
+        }
+        let mut body = Vec::with_capacity(KEY_LEN + 1);
+        body.extend_from_slice(&self.key);
+        body.push(u8::from(self.client_is_low));
         Some(body)
     }
 }
@@ -1488,6 +1508,24 @@ pub fn decode_r2o_tcp_early_rst(frame: &Frame) -> Result<R2oTcpEarlyRstEvent, &'
     })
 }
 
+pub fn decode_r2o_tcp_rst_cut_signal(
+    frame: &Frame,
+) -> Result<R2oTcpRstCutSignalEvent, &'static str> {
+    if frame.kind != EVENT_R2O_TCP_RST_CUT || frame.body.len() != KEY_LEN + 1 {
+        return Err("неверная длина события защитно снятого TCP RST");
+    }
+    let key: [u8; KEY_LEN] = frame.body[..KEY_LEN]
+        .try_into()
+        .map_err(|_| "неверный ключ защитно снятого TCP RST")?;
+    if !valid_flow_key(&key) || key[37] != 6 || frame.body[KEY_LEN] > 1 {
+        return Err("событие защитно снятого RST содержит неверный поток или направление");
+    }
+    Ok(R2oTcpRstCutSignalEvent {
+        key,
+        client_is_low: frame.body[KEY_LEN] == 1,
+    })
+}
+
 pub fn decode_r2o_tcp_repeat(frame: &Frame) -> Result<R2oTcpRepeatEvent, &'static str> {
     if frame.kind != EVENT_R2O_TCP_REPEAT || frame.body.len() != KEY_LEN + 2 {
         return Err("неверная длина события повторного ClientHello TCP");
@@ -1895,5 +1933,38 @@ mod quic_suspect_event_tests {
         let mut invalid = frame;
         invalid.body[KEY_LEN + 1] = 2;
         assert!(decode_r2o_quic_suspect(&invalid).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tcp_rst_cut_event_tests {
+    use super::{
+        EVENT_R2O_TCP_RST_CUT, Frame, KEY_LEN, R2oTcpRstCutSignalEvent,
+        decode_r2o_tcp_rst_cut_signal,
+    };
+
+    #[test]
+    fn защитно_снятый_rst_передаёт_направление_потока() {
+        let mut key = [0; KEY_LEN];
+        key[0] = 4;
+        key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+        key[17..21].copy_from_slice(&[198, 51, 100, 80]);
+        key[33..35].copy_from_slice(&45_000_u16.to_be_bytes());
+        key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+        key[37] = 6;
+        let event = R2oTcpRstCutSignalEvent {
+            key,
+            client_is_low: true,
+        };
+        let frame = Frame {
+            kind: EVENT_R2O_TCP_RST_CUT,
+            body: event.event_body().unwrap(),
+        };
+
+        assert_eq!(decode_r2o_tcp_rst_cut_signal(&frame), Ok(event));
+
+        let mut invalid = frame;
+        invalid.body[KEY_LEN] = 2;
+        assert!(decode_r2o_tcp_rst_cut_signal(&invalid).is_err());
     }
 }

@@ -5,18 +5,18 @@ mod app {
         EVENT_HELLO, EVENT_HTTP_PORTAL, EVENT_HTTP_RESPONSE, EVENT_R2O_QUIC_STALL,
         EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_CLEAN_HANDSHAKE, EVENT_R2O_TCP_EARLY_RST,
         EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_REPEAT, EVENT_R2O_TCP_RST_AFTER_APP,
-        EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_SUSPECT,
-        Frame, HttpPortalEvent, HttpResponseEvent, PROTOCOL_VERSION, R2oTcpCleanHandshakeEvent,
-        R2oTcpEarlyRstEvent, R2oTcpFinRetryEvent, R2oTcpRepeatEvent, RELEASE_ID,
-        decode_set_tcp_stall_budgets,
+        EVENT_R2O_TCP_RST_CUT, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF,
+        EVENT_R2O_VOICE_SUSPECT, Frame, HttpPortalEvent, HttpResponseEvent, PROTOCOL_VERSION,
+        R2oTcpCleanHandshakeEvent, R2oTcpEarlyRstEvent, R2oTcpFinRetryEvent, R2oTcpRepeatEvent,
+        R2oTcpRstCutSignalEvent, RELEASE_ID, decode_set_tcp_stall_budgets,
     };
     use r2k_core::plan::{EmitKind, OriginalFate, PROTO_VOICE, Plan};
     use r2o_datapath::capture::{tcp_hello_from_packet, tcp_http_hello_from_packet};
     use r2o_datapath::conntrack::R2oConntrackClient;
     use r2o_datapath::control::{ControlServer, NamePlans};
     use r2o_datapath::engine::{
-        PacketDecision, R2oTcpExchangeEvent, R2oTcpRstEvent, TcpSessions, WirePacket,
-        decide_with_session, validate_runtime_plan,
+        PacketDecision, R2oTcpExchangeEvent, R2oTcpRstCutEvent, R2oTcpRstEvent, TcpSessions,
+        WirePacket, decide_with_session, validate_runtime_plan,
     };
     use r2o_datapath::flow_capacity::R2oFlowCapacity;
     use r2o_datapath::flow_journal::{R2oFlowJournal, R2oFlowJournalEntry, R2oFlowJournalSummary};
@@ -2220,6 +2220,17 @@ mod app {
         }
         for event in sessions.take_tcp_rst_cut_events() {
             flow_journal.record_tcp_rst_cut(at_ns, &event);
+            let signal = r2o_tcp_rst_cut_signal_event(&event);
+            if let Some(body) = signal.event_body() {
+                send_observed_control_event(
+                    control,
+                    flow_journal,
+                    journal_origin,
+                    EVENT_R2O_TCP_RST_CUT,
+                    &body,
+                    "защитно снятого TCP RST",
+                );
+            }
         }
         send_pending_tcp_fin_retry(sessions, control, flow_journal, journal_origin);
         decision
@@ -2240,6 +2251,13 @@ mod app {
                 client_is_low: event.client_is_low,
                 planned: event.planned == R2oTcpExchangeEvent::PLANNED_YES,
             })
+    }
+
+    fn r2o_tcp_rst_cut_signal_event(event: &R2oTcpRstCutEvent) -> R2oTcpRstCutSignalEvent {
+        R2oTcpRstCutSignalEvent {
+            key: event.key,
+            client_is_low: event.client_is_low,
+        }
     }
 
     fn observe_quic_packet(
@@ -2905,13 +2923,16 @@ mod app {
             R2oQuicSessions, RuntimeMode, TcpSessions, format_journal_details, format_journal_key,
             handle_control_command, load_plan, needs_raw_socket, observe_quic_packet,
             observe_stun_packet, parse_options, r2o_clean_handshake_event, r2o_datapath_payload,
-            r2o_packet_route_skip, r2o_tcp_early_rst_event, r2o_udp_decide_once,
-            r2o_udp_packet_admitted_at_hook, release_many_with, release_with, send_applied_event,
-            send_hello_event, send_journal_snapshot, send_journal_updates, udp_packet_admitted,
+            r2o_packet_route_skip, r2o_tcp_early_rst_event, r2o_tcp_rst_cut_signal_event,
+            r2o_udp_decide_once, r2o_udp_packet_admitted_at_hook, release_many_with, release_with,
+            send_applied_event, send_hello_event, send_journal_snapshot, send_journal_updates,
+            udp_packet_admitted,
         };
-        use r2k_core::control::{KEY_LEN, R2oTcpCleanHandshakeEvent, R2oTcpEarlyRstEvent};
+        use r2k_core::control::{
+            KEY_LEN, R2oTcpCleanHandshakeEvent, R2oTcpEarlyRstEvent, R2oTcpRstCutSignalEvent,
+        };
         use r2k_core::stun::binding_request;
-        use r2o_datapath::engine::{R2oTcpExchangeEvent, R2oTcpRstEvent};
+        use r2o_datapath::engine::{R2oTcpExchangeEvent, R2oTcpRstCutEvent, R2oTcpRstEvent};
         use r2o_datapath::netlink::{
             QueuePacket, R2O_NF_INET_FORWARD, R2O_NF_INET_LOCAL_OUT, R2O_NF_INET_POST_ROUTING,
         };
@@ -2983,6 +3004,41 @@ mod app {
             let mut unknown = event;
             unknown.planned = 0;
             assert_eq!(r2o_tcp_early_rst_event(&unknown), None);
+        }
+
+        #[test]
+        fn защитно_снятый_rst_передаёт_сигнал_для_планировщика() {
+            let mut key = [0; KEY_LEN];
+            key[0] = 4;
+            key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+            key[17..21].copy_from_slice(&[198, 51, 100, 80]);
+            key[33..35].copy_from_slice(&45_000_u16.to_be_bytes());
+            key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+            key[37] = 6;
+            let packet_event = R2oTcpRstCutEvent {
+                key,
+                ttl: 127,
+                reference_ttl: 64,
+                traffic_class: 0x2e,
+                ip_id: 1234,
+                server_hello: false,
+                planned: 2,
+                client_shape: 1,
+                client_is_low: true,
+            };
+
+            let signal = r2o_tcp_rst_cut_signal_event(&packet_event);
+            let frame = r2k_core::control::Frame {
+                kind: r2k_core::control::EVENT_R2O_TCP_RST_CUT,
+                body: signal.event_body().unwrap(),
+            };
+            assert_eq!(
+                r2k_core::control::decode_r2o_tcp_rst_cut_signal(&frame),
+                Ok(R2oTcpRstCutSignalEvent {
+                    key,
+                    client_is_low: true,
+                })
+            );
         }
         use std::os::unix::net::UnixStream;
         use std::time::{Duration, Instant};
@@ -3811,8 +3867,25 @@ mod app {
             план.guards = r2k_core::plan::GUARD_RST_ALIEN;
             let mut sessions = TcpSessions::default();
             let mut journal = R2oFlowJournal::with_capacity(4).unwrap();
-            let mut control = None;
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let directory = std::env::temp_dir().join(format!("r2o-rst-cut-{nonce}"));
+            std::fs::create_dir(&directory).unwrap();
+            let control_path = directory.join("datapath.sock");
+            let mut control = Some(ControlServer::open(&control_path, u16::MAX as u32).unwrap());
+            let mut controller = UnixStream::connect(&control_path).unwrap();
             let origin = Instant::now();
+            control.as_mut().unwrap().poll().unwrap();
+            assert_eq!(
+                r2k_core::control::decode_greeting(
+                    &r2k_core::control::read_frame(&mut controller).unwrap()
+                )
+                .unwrap()
+                .version,
+                r2k_core::control::PROTOCOL_VERSION
+            );
             for packet in [
                 пакет_tcp(клиент, сервер, 0x02, 64, 700, &[]),
                 пакет_tcp(сервер, клиент, 0x12, 124, 900, &[]),
@@ -3848,6 +3921,19 @@ mod app {
                 ),
                 super::PacketDecision::Drop,
             );
+            let signal = loop {
+                let frame = r2k_core::control::read_frame(&mut controller).unwrap();
+                if frame.kind == r2k_core::control::EVENT_R2O_TCP_RST_CUT {
+                    break frame;
+                }
+            };
+            assert_eq!(
+                r2k_core::control::decode_r2o_tcp_rst_cut_signal(&signal).unwrap(),
+                R2oTcpRstCutSignalEvent {
+                    key: ключ,
+                    client_is_low: true,
+                }
+            );
             assert_eq!(journal.count(), 1);
             let запись = journal.get(0).unwrap();
             assert_eq!(
@@ -3879,6 +3965,9 @@ mod app {
                 1,
                 "повтор снятого RST не создаёт запись снова"
             );
+            drop(control);
+            drop(controller);
+            std::fs::remove_dir_all(directory).unwrap();
         }
 
         #[test]

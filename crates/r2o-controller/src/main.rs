@@ -6,18 +6,19 @@ use r2k_core::control::{
     EVENT_HTTP_PORTAL, EVENT_HTTP_RESPONSE, EVENT_R2O_JOURNAL_END, EVENT_R2O_JOURNAL_ENTRY,
     EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_CLEAN_HANDSHAKE,
     EVENT_R2O_TCP_EARLY_RST, EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_REPEAT,
-    EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF,
-    EVENT_R2O_VOICE_SUSPECT, Frame, HelloEvent, PROTOCOL_VERSION, RELEASE_ID, SHAPE_ECH_TCP,
-    SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, VOICE_ADDR_PROBE_LEASE_MAX_MS,
-    decode_ack, decode_applied, decode_client_shape, decode_greeting, decode_hello,
-    decode_http_portal, decode_http_response, decode_r2o_quic_stall, decode_r2o_quic_suspect,
-    decode_r2o_tcp_clean_handshake, decode_r2o_tcp_early_rst, decode_r2o_tcp_fin_retry,
-    decode_r2o_tcp_repeat, decode_r2o_tcp_rst_after_app, decode_r2o_tcp_silence,
-    decode_r2o_tcp_stall, decode_r2o_voice_proof, decode_r2o_voice_suspect, encode_delete_addr,
-    encode_delete_addr_probe, encode_delete_name, encode_delete_name_probe,
-    encode_delete_voice_addr_probe, encode_frame, encode_set_addr, encode_set_addr_probe,
-    encode_set_bypass, encode_set_https, encode_set_name, encode_set_name_probe, encode_set_suffix,
-    encode_set_tcp_stall_budgets, encode_set_voice_addr, encode_set_voice_addr_probe, read_frame,
+    EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_RST_CUT, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL,
+    EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_SUSPECT, Frame, HelloEvent, PROTOCOL_VERSION,
+    RELEASE_ID, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE,
+    VOICE_ADDR_PROBE_LEASE_MAX_MS, decode_ack, decode_applied, decode_client_shape,
+    decode_greeting, decode_hello, decode_http_portal, decode_http_response, decode_r2o_quic_stall,
+    decode_r2o_quic_suspect, decode_r2o_tcp_clean_handshake, decode_r2o_tcp_early_rst,
+    decode_r2o_tcp_fin_retry, decode_r2o_tcp_repeat, decode_r2o_tcp_rst_after_app,
+    decode_r2o_tcp_rst_cut_signal, decode_r2o_tcp_silence, decode_r2o_tcp_stall,
+    decode_r2o_voice_proof, decode_r2o_voice_suspect, encode_delete_addr, encode_delete_addr_probe,
+    encode_delete_name, encode_delete_name_probe, encode_delete_voice_addr_probe, encode_frame,
+    encode_set_addr, encode_set_addr_probe, encode_set_bypass, encode_set_https, encode_set_name,
+    encode_set_name_probe, encode_set_suffix, encode_set_tcp_stall_budgets, encode_set_voice_addr,
+    encode_set_voice_addr_probe, read_frame,
 };
 use r2k_core::plan::{PROTO_HTTP, PROTO_VOICE, Plan};
 use r2o_controller::catalog::{Catalog, DomainObservation, GroupKey};
@@ -4273,6 +4274,18 @@ impl DiscoveryWorker {
         self.queue(target)
     }
 
+    fn queue_after_fresh_suspect(
+        &mut self,
+        target: r2o_controller::discovery::DiscoveryTarget,
+    ) -> bool {
+        if self.active.contains_key(&r2o_discovery_task_key(&target)) {
+            return self.queue(target);
+        }
+        self.seen.remove(&target);
+        self.seen_order.retain(|seen| seen != &target);
+        self.queue(target)
+    }
+
     fn r2o_clear_failed_endpoint(&mut self, failure_key: &(String, u8, String)) {
         let matching: Vec<_> = self
             .seen_order
@@ -5869,6 +5882,40 @@ impl ControlClient {
                                 }
                             }
                         }
+                    }
+                    std::io::stdout().flush()?;
+                    continue;
+                }
+                if frame.kind == EVENT_R2O_TCP_RST_CUT {
+                    let event = decode_r2o_tcp_rst_cut_signal(&frame)
+                        .map_err(|error| format!("событие защитно снятого TCP RST: {error}"))?;
+                    let (client, server) = flow_socket_addresses(&event.key, event.client_is_low);
+                    println!(
+                        "наблюдение TCP: защита сняла чужой RST до ответа {client} -> {server}; это сильный сигнал для повторной классификации"
+                    );
+                    let now = std::time::Instant::now();
+                    if let Some(target) = tcp_hello_names.target_for_tcp_flow(&event.key, now) {
+                        if let Some((worker, _, _, _)) = &mut discovery {
+                            let queued = worker.queue_after_fresh_suspect(target.clone());
+                            println!(
+                                "снятый защитой RST поставил {} в очередь классификации: {}",
+                                target.host,
+                                if queued {
+                                    "задача поставлена"
+                                } else {
+                                    "задача уже выполняется, повтор ожидает cooldown или очередь занята"
+                                }
+                            );
+                        } else {
+                            println!(
+                                "классификация {} после снятого RST пропущена: Discovery не подключён",
+                                target.host
+                            );
+                        }
+                    } else {
+                        println!(
+                            "классификация после снятого RST не запущена: нет свежего ClientHello с SNI того же потока"
+                        );
                     }
                     std::io::stdout().flush()?;
                     continue;
@@ -11748,6 +11795,41 @@ mod tests {
         let mut another_endpoint = first;
         another_endpoint.endpoint = "198.51.100.11:443".into();
         assert!(worker.queue(another_endpoint));
+        drop(worker);
+        drop(permit);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_снятый_защитой_rst_снимает_дедупликацию_но_соблюдает_cooldown() {
+        use std::time::{Duration, Instant};
+
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
+        let permit = gate.r2o_try_acquire().unwrap();
+        let mut worker = super::DiscoveryWorker::new(None, gate);
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "rst-cut.example".into(),
+            endpoint: "198.51.100.10:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let failure_key = super::r2o_discovery_failure_key(&target);
+        let now = Instant::now();
+        worker.seen.insert(target.clone());
+        worker.seen_order.push_back(target.clone());
+        worker.failed_at.insert(failure_key.clone(), now);
+        worker
+            .failed_retry_after
+            .insert(failure_key.clone(), Duration::from_secs(600));
+
+        assert!(!worker.queue_after_fresh_suspect(target.clone()));
+        assert!(!worker.seen.contains(&target));
+        assert!(worker.failed_at.contains_key(&failure_key));
+
+        worker
+            .failed_at
+            .insert(failure_key, now - Duration::from_secs(601));
+        assert!(worker.queue_after_fresh_suspect(target));
         drop(worker);
         drop(permit);
     }
