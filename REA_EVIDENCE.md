@@ -6143,3 +6143,39 @@ Rust `HoldTable` теперь сохраняет до 16 диагностик з
 ARM32 и MIPS проверялись только компиляцией. Общий TCP/UDP-перенос, другие ветви
 планировщика и физическая приёмка роутера остаются открытыми; общая оценка не
 изменена (**65,85%**).
+
+## ClientHello во время активной задачи Discovery — 21.10.2026
+
+Переиспользовано уже сохранённое Evidence `core/sched.c:on_shape`: Clang 19 AST
+(`.rea/r2o-donor-on-shape-clang-ast-20261021.log`), актуальные хеши `sched.c`
+(`1de9feaab19dcea1e493aea068295470cf3143adf83157b57663f1098132ae8a`) и
+`test_sched.c`
+(`a67f87e09a7fd93ed735b52f361e78590b9ce40679ab95e300accf0a3e9d51a3`), а также
+донорский тестовый журнал `.rea/r2o-donor-test-sched-aarch64.log`. AST ветви
+`T_ASKING` показывает сохранение снимка задачи и остановку текущего поиска перед
+использованием новых байтов. Ранее записанная попытка `rea function on_shape`
+получила `target_format_unsupported`; повторно разбирать ELF не нужно.
+
+В Rust добавлены отмена на уровне активной Discovery-цели и слот последнего
+ClientHello. Устаревший исход не проходит к сохранению, а гонка между завершением
+классификации и пробным применением закрыта проверкой токена отмены. Регрессионный
+тест проверяет старый endpoint/снимок, сигнал отмены, подавление старого плана и
+перезапуск с последними endpoint и байтами. На старом поведении тест упал на
+`queue_client_snapshot`; исправленный сценарий прошёл на ARM64/QEMU.
+
+Полный ARM64/QEMU workspace: 1005 прошло, 0 ошибок, 4 штатных пропуска в 73
+наборах. Полный crate `r2o-controller` прошёл при повторном запуске: 135 тестов
+библиотеки и 90 тестов бинарника; остальные unit и integration suites пакета
+завершились без ошибок. Первый общий запуск поймал нестабильность отдельной
+250-мс проверки планировщика; её изолированный повтор и повтор полного crate
+прошли. `cargo fmt --all --check` и `git diff --check` прошли.
+
+ARMv5te и ARMv7 прошли `cargo check -p r2o-controller`. Release-контроллеры
+собраны для ARM64 GNU и MIPS32 little-endian GNU; заголовки ELF проверены, MIPS
+`objdump` распознал `mips:isa32r2`. Размеры stripped ELF: ARM64 — 4 920 328
+байт, MIPS — 6 493 004 байта. Бинарники не запускались на нецелевых
+архитектурах. Журналы: `.rea/r2o-discovery-clienthello-workspace-arm64.log`,
+`.rea/r2o-discovery-clienthello-active-arm64-repeat.log`,
+`.rea/r2o-discovery-clienthello-arm-cross-checks.log` и
+`.rea/r2o-discovery-clienthello-release-sizes.log`. Остальные ветви scheduler
+и испытание на физическом маршрутизаторе ещё не закрыты.

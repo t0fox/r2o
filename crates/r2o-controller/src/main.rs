@@ -2850,6 +2850,7 @@ fn r2o_take_ready_quic_discovery(
 struct DiscoveryWorker {
     jobs: Arc<(std::sync::Mutex<R2oDiscoveryQueue>, std::sync::Condvar)>,
     client_hellos: Arc<std::sync::Mutex<HashMap<(String, u8), Vec<u8>>>>,
+    active_cancels: Arc<std::sync::Mutex<HashMap<(String, u8), Arc<AtomicBool>>>>,
     outcomes: Receiver<DiscoveryOutcome>,
     cancel: Arc<AtomicBool>,
     seen: HashSet<r2o_controller::discovery::DiscoveryTarget>,
@@ -2858,6 +2859,8 @@ struct DiscoveryWorker {
     failed_retry_after: HashMap<(String, u8, String), std::time::Duration>,
     clear_streaks: HashMap<(String, u8, String), u8>,
     client_snapshot_targets: HashSet<r2o_controller::discovery::DiscoveryTarget>,
+    pending_client_snapshots:
+        HashMap<(String, u8), (r2o_controller::discovery::DiscoveryTarget, Vec<u8>)>,
     active: HashMap<(String, u8), r2o_controller::discovery::DiscoveryTarget>,
     threads: Vec<JoinHandle<()>>,
 }
@@ -3600,6 +3603,9 @@ impl DiscoveryWorker {
                 mark,
                 ech_config.as_ref(),
             );
+            if cancel.load(Ordering::Relaxed) {
+                return outcome;
+            }
             let Some(plan_text) = outcome.plan_text.as_deref() else {
                 return outcome;
             };
@@ -3778,11 +3784,13 @@ impl DiscoveryWorker {
         ));
         let (outcome_sender, outcomes) = mpsc::sync_channel(8);
         let cancel = Arc::new(AtomicBool::new(false));
+        let active_cancels = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let mut threads = Vec::with_capacity(R2O_DISCOVERY_WORKER_COUNT);
         for _ in 0..R2O_DISCOVERY_WORKER_COUNT {
             let worker_cancel = Arc::clone(&cancel);
             let worker_gate = measurement_gate.clone();
             let worker_jobs = Arc::clone(&jobs);
+            let task_cancels = Arc::clone(&active_cancels);
             let worker_outcomes = outcome_sender.clone();
             let worker_runner = Arc::clone(&runner);
             threads.push(std::thread::spawn(move || {
@@ -3849,7 +3857,32 @@ impl DiscoveryWorker {
                         let Some(target) = target else {
                             continue;
                         };
-                        worker_runner(target, Arc::clone(&worker_cancel))
+                        let task_key = r2o_discovery_task_key(&target);
+                        let task_cancel = task_cancels
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .get(&task_key)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                Arc::new(AtomicBool::new(worker_cancel.load(Ordering::Relaxed)))
+                            });
+                        let outcome = if task_cancel.load(Ordering::Relaxed) {
+                            DiscoveryOutcome {
+                                target,
+                                plan_text: None,
+                                detail: "задача заменена свежим ClientHello".into(),
+                                queue_expired: false,
+                                direct_clear: false,
+                                retry_after: None,
+                            }
+                        } else {
+                            worker_runner(target, Arc::clone(&task_cancel))
+                        };
+                        task_cancels
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .remove(&task_key);
+                        outcome
                     };
                     if worker_outcomes.send(outcome).is_err() {
                         break;
@@ -3860,6 +3893,7 @@ impl DiscoveryWorker {
         Self {
             jobs,
             client_hellos,
+            active_cancels,
             outcomes,
             cancel,
             seen: HashSet::new(),
@@ -3868,6 +3902,7 @@ impl DiscoveryWorker {
             failed_retry_after: HashMap::new(),
             clear_streaks: HashMap::new(),
             client_snapshot_targets: HashSet::new(),
+            pending_client_snapshots: HashMap::new(),
             active: HashMap::new(),
             threads,
         }
@@ -3920,15 +3955,21 @@ impl DiscoveryWorker {
         self.seen.insert(target.clone());
         self.seen_order.push_back(target.clone());
         let (queue, wake) = &*self.jobs;
-        let enqueued = queue
+        let mut queue = queue
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .enqueue(target.clone(), std::time::Instant::now());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let enqueued = queue.enqueue(target.clone(), std::time::Instant::now());
         if enqueued {
+            self.active_cancels
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(task_key.clone(), Arc::new(AtomicBool::new(false)));
             self.active.insert(task_key, target);
+            drop(queue);
             wake.notify_one();
             true
         } else {
+            drop(queue);
             self.seen.remove(&target);
             self.seen_order.retain(|seen| seen != &target);
             self.failed_at.remove(&failure_key);
@@ -3958,7 +3999,17 @@ impl DiscoveryWorker {
         }
         let task_key = r2o_discovery_task_key(&target);
         if self.active.contains_key(&task_key) {
-            return false;
+            self.pending_client_snapshots
+                .insert(task_key.clone(), (target, client_hello));
+            if let Some(cancel) = self
+                .active_cancels
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&task_key)
+            {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            return true;
         }
         self.seen.remove(&target);
         self.seen_order.retain(|seen| seen != &target);
@@ -4031,6 +4082,10 @@ impl DiscoveryWorker {
             .r2o_expire(now);
         for target in &expired {
             let task_key = r2o_discovery_task_key(target);
+            self.active_cancels
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&task_key);
             if self.active.get(&task_key) == Some(target) {
                 self.active.remove(&task_key);
             }
@@ -4044,8 +4099,57 @@ impl DiscoveryWorker {
     }
 
     fn try_outcome(&mut self) -> Option<DiscoveryOutcome> {
+        self.r2o_schedule_pending_client_snapshots();
         let outcome = self.outcomes.try_recv().ok()?;
+        let task_key = r2o_discovery_task_key(&outcome.target);
+        if self.pending_client_snapshots.contains_key(&task_key) {
+            if self.active.get(&task_key) == Some(&outcome.target) {
+                self.active.remove(&task_key);
+            }
+            self.seen.remove(&outcome.target);
+            self.seen_order.retain(|seen| seen != &outcome.target);
+            let failure_key =
+                r2o_discovery_failure_key(&self.pending_client_snapshots.get(&task_key)?.0);
+            self.failed_at.remove(&failure_key);
+            self.failed_retry_after.remove(&failure_key);
+            self.r2o_schedule_pending_client_snapshots();
+            return None;
+        }
         Some(self.r2o_complete_outcome(outcome))
+    }
+
+    fn r2o_schedule_pending_client_snapshots(&mut self) {
+        let ready = self
+            .pending_client_snapshots
+            .keys()
+            .filter(|task_key| !self.active.contains_key(*task_key))
+            .cloned()
+            .collect::<Vec<_>>();
+        for task_key in ready {
+            let Some((target, client_hello)) = self.pending_client_snapshots.remove(&task_key)
+            else {
+                continue;
+            };
+            self.seen.remove(&target);
+            self.seen_order.retain(|seen| seen != &target);
+            let failure_key = r2o_discovery_failure_key(&target);
+            self.failed_at.remove(&failure_key);
+            self.failed_retry_after.remove(&failure_key);
+            self.client_hellos
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(task_key.clone(), client_hello.clone());
+            if self.queue(target.clone()) {
+                self.client_snapshot_targets.insert(target);
+            } else {
+                self.client_hellos
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&task_key);
+                self.pending_client_snapshots
+                    .insert(task_key, (target, client_hello));
+            }
+        }
     }
 
     fn r2o_complete_outcome(&mut self, mut outcome: DiscoveryOutcome) -> DiscoveryOutcome {
@@ -4090,6 +4194,14 @@ impl DiscoveryWorker {
 impl Drop for DiscoveryWorker {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
+        for cancel in self
+            .active_cancels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+        {
+            cancel.store(true, Ordering::Relaxed);
+        }
         self.jobs.1.notify_all();
         for thread in self.threads.drain(..) {
             while !thread.is_finished() {
@@ -10254,6 +10366,104 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn r2o_активный_discovery_перезапускается_по_новому_clienthello() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        use std::sync::{Arc, Mutex, mpsc};
+        use std::time::{Duration, Instant};
+
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
+        let snapshots = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let runner_snapshots = Arc::clone(&snapshots);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let runner_attempts = Arc::clone(&attempts);
+        let (started_sender, started_receiver) = mpsc::channel();
+        let runner = Arc::new(
+            move |target: r2o_controller::discovery::DiscoveryTarget, cancel: Arc<AtomicBool>| {
+                let key = super::r2o_discovery_task_key(&target);
+                let hello = runner_snapshots.lock().unwrap().remove(&key).unwrap();
+                started_sender
+                    .send((target.clone(), hello, Arc::clone(&cancel)))
+                    .unwrap();
+                let attempt = runner_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if attempt == 0 {
+                    while !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                }
+                super::DiscoveryOutcome {
+                    target,
+                    plan_text: Some(
+                        if attempt == 0 {
+                            "устаревший"
+                        } else {
+                            "новый"
+                        }
+                        .into(),
+                    ),
+                    detail: "проверка завершена".into(),
+                    queue_expired: false,
+                    direct_clear: false,
+                    retry_after: None,
+                }
+            },
+        );
+        let mut worker = super::DiscoveryWorker::r2o_new_with_runner_and_client_hellos(
+            gate,
+            runner,
+            Arc::clone(&snapshots),
+        );
+        let first_target = r2o_controller::discovery::DiscoveryTarget {
+            host: "example.com".into(),
+            endpoint: "198.51.100.2:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let latest_target = r2o_controller::discovery::DiscoveryTarget {
+            endpoint: "198.51.100.3:443".into(),
+            ..first_target.clone()
+        };
+        let first_hello = r2o_controller::hello::modern_client_hello("example.com").unwrap();
+        let mut latest_hello = first_hello.clone();
+        latest_hello[11] ^= 1;
+
+        assert!(worker.queue_client_snapshot(first_target.clone(), first_hello.clone()));
+        let (started_target, started_hello, cancel) = started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(started_target, first_target);
+        assert_eq!(started_hello, first_hello);
+        assert!(worker.queue_client_snapshot(latest_target.clone(), latest_hello.clone()));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut latest_start = None;
+        let mut completed = None;
+        while Instant::now() < deadline {
+            if let Some(outcome) = worker.try_outcome() {
+                completed = Some(outcome);
+                break;
+            }
+            if latest_start.is_none()
+                && let Ok(start) = started_receiver.try_recv()
+            {
+                latest_start = Some(start);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        if latest_start.is_none() {
+            latest_start = started_receiver.recv_timeout(Duration::from_secs(1)).ok();
+        }
+
+        assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
+        let (target, hello, _) = latest_start.expect("перезапуск должен получить свежий снимок");
+        assert_eq!(target, latest_target);
+        assert_eq!(hello, latest_hello);
+        let outcome = completed.expect("перезапуск должен завершиться");
+        assert_eq!(outcome.target, latest_target);
+        assert_eq!(outcome.plan_text.as_deref(), Some("новый"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn r2o_discovery_очередь_сохраняет_снятый_clienthello_до_старта_задачи() {
         use std::sync::Arc;
         use std::sync::atomic::AtomicBool;
@@ -12322,7 +12532,9 @@ mod tests {
                 Condvar::new(),
             )),
             client_hellos: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            active_cancels: Arc::new(Mutex::new(std::collections::HashMap::new())),
             client_snapshot_targets: std::collections::HashSet::new(),
+            pending_client_snapshots: std::collections::HashMap::new(),
             outcomes,
             cancel: Arc::new(AtomicBool::new(false)),
             seen: std::collections::HashSet::from([target.clone()]),
