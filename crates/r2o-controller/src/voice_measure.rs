@@ -8,6 +8,18 @@ use std::time::{Duration, Instant};
 pub const R2O_VOICE_REPEATS: u8 = 3;
 pub const R2O_VOICE_DEFAULT_WAIT: Duration = Duration::from_secs(3);
 pub const R2O_VOICE_DEFAULT_CONTROL: &str = "stun.cloudflare.com:3478";
+const R2O_VOICE_ARM_MAX: usize = 1600;
+const R2O_VOICE_ARM_PROFILES: [(&str, Option<&[u8]>); 3] = [
+    ("active_discord_udp", None),
+    ("stun", Some(include_bytes!("../assets/voice/stun.bin"))),
+    (
+        "quic_dbankcloud",
+        Some(include_bytes!(
+            "../assets/voice/quic_initial_dbankcloud_ru.bin"
+        )),
+    ),
+];
+const R2O_VOICE_ARM_COPIES: [u8; 2] = [1, 6];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum R2oVoiceVerdict {
@@ -20,6 +32,13 @@ pub enum R2oVoiceVerdict {
     Unmeasured,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct R2oVoiceArm {
+    pub name: &'static str,
+    pub bytes: &'static [u8],
+    pub copies: u8,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct R2oVoiceMeasurement {
     pub verdict: R2oVoiceVerdict,
@@ -28,6 +47,7 @@ pub struct R2oVoiceMeasurement {
     pub probes: u32,
     pub marked: bool,
     pub discovery_verified: bool,
+    pub arm: Option<R2oVoiceArm>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -130,6 +150,7 @@ pub fn r2o_measure_voice(r2o_options: &R2oVoiceOptions) -> R2oVoiceMeasurement {
             probes: 0,
             marked: r2o_options.mark.is_some_and(|r2o_mark| r2o_mark != 0),
             discovery_verified: false,
+            arm: None,
         };
     };
     let mut r2o_result = R2oVoiceMeasurement {
@@ -139,6 +160,7 @@ pub fn r2o_measure_voice(r2o_options: &R2oVoiceOptions) -> R2oVoiceMeasurement {
         probes: 0,
         marked: r2o_options.mark.is_some_and(|r2o_mark| r2o_mark != 0),
         discovery_verified: false,
+        arm: None,
     };
 
     if r2o_options.discovery {
@@ -211,7 +233,9 @@ pub fn r2o_measure_voice(r2o_options: &R2oVoiceOptions) -> R2oVoiceMeasurement {
         r2o_address,
         r2o_observation,
         r2o_control,
-        |r2o_server, r2o_wait, r2o_mark| r2o_ask_voice(r2o_server, r2o_wait, r2o_mark),
+        |r2o_server, r2o_wait, r2o_mark, r2o_arm| {
+            r2o_ask_voice_with_arm(r2o_server, r2o_wait, r2o_mark, r2o_arm)
+        },
     );
     R2oVoiceMeasurement {
         probes: r2o_result.probes.saturating_add(r2o_evaluated.probes),
@@ -252,6 +276,13 @@ pub fn r2o_format_voice_measurement(r2o_result: &R2oVoiceMeasurement) -> String 
     if r2o_result.discovery_verified {
         r2o_output
             .push_str("\nПриём:     Discovery-серия подтверждена; звук проверяется в приложении\n");
+    } else if let Some(r2o_arm) = r2o_result.arm {
+        r2o_output.push_str(&format!(
+            "\nПриманка:  кандидат {} ({} копий, {} байт); ответы STUN не подтверждают работу голосовой сессии\n",
+            r2o_arm.name,
+            r2o_arm.copies,
+            r2o_arm.bytes.len()
+        ));
     } else if r2o_result.verdict == R2oVoiceVerdict::Blocked {
         r2o_output.push_str(
             "\nПриём:     зондом не проверяется — голосовая точка молчит посторонним;\n           проверять можно только на самом разговоре, через датапат\n",
@@ -268,7 +299,7 @@ fn r2o_evaluate_voice<F>(
     mut r2o_ask: F,
 ) -> R2oVoiceMeasurement
 where
-    F: FnMut(SocketAddrV4, Duration, Option<u32>) -> R2oVoiceTally,
+    F: FnMut(SocketAddrV4, Duration, Option<u32>, Option<R2oVoiceArm>) -> R2oVoiceTally,
 {
     let mut r2o_result = R2oVoiceMeasurement {
         verdict: R2oVoiceVerdict::Unmeasured,
@@ -277,6 +308,7 @@ where
         probes: 0,
         marked: r2o_options.mark.is_some_and(|r2o_mark| r2o_mark != 0),
         discovery_verified: false,
+        arm: None,
     };
     match r2o_observation {
         R2oVoiceObservation::Answers => {
@@ -290,7 +322,7 @@ where
             );
         }
         R2oVoiceObservation::Silent { packets: _ } => {
-            let r2o_direct = r2o_ask(r2o_address, r2o_options.wait, r2o_options.mark);
+            let r2o_direct = r2o_ask(r2o_address, r2o_options.wait, r2o_options.mark, None);
             r2o_record_voice_tally(&mut r2o_result, r2o_direct);
             if r2o_direct.passed == R2O_VOICE_REPEATS {
                 r2o_result.verdict = R2oVoiceVerdict::Clear;
@@ -312,8 +344,12 @@ where
                     r2o_direct.errors, R2O_VOICE_REPEATS
                 );
             } else if let Some(r2o_control_address) = r2o_control {
-                let r2o_control_tally =
-                    r2o_ask(r2o_control_address, r2o_options.wait, r2o_options.mark);
+                let r2o_control_tally = r2o_ask(
+                    r2o_control_address,
+                    r2o_options.wait,
+                    r2o_options.mark,
+                    None,
+                );
                 r2o_record_voice_tally(&mut r2o_result, r2o_control_tally);
                 if r2o_control_tally.passed == 0 && r2o_control_tally.errors != 0 {
                     r2o_result.reason = format!(
@@ -331,6 +367,25 @@ where
                     r2o_result.reason = format!(
                         "поток к {r2o_address} идёт, а ответов нет ни одного, при живом публичном STUN: режут именно этот поток"
                     );
+                    r2o_search_voice_arms(
+                        &mut r2o_result,
+                        r2o_address,
+                        r2o_options.wait,
+                        r2o_options.mark,
+                        &mut r2o_ask,
+                    );
+                    if let Some(r2o_arm) = r2o_result.arm {
+                        r2o_result.reason.push_str(&format!(
+                            "; исходный поиск нашёл {} ({} копий), {} байт",
+                            r2o_arm.name,
+                            r2o_arm.copies,
+                            r2o_arm.bytes.len()
+                        ));
+                    } else {
+                        r2o_result
+                            .reason
+                            .push_str("; исходный перебор голосовых приманок ответа не получил");
+                    }
                 }
             } else {
                 r2o_result.reason = format!(
@@ -340,7 +395,7 @@ where
             }
         }
         R2oVoiceObservation::Unseen => {
-            let r2o_direct = r2o_ask(r2o_address, r2o_options.wait, r2o_options.mark);
+            let r2o_direct = r2o_ask(r2o_address, r2o_options.wait, r2o_options.mark, None);
             r2o_record_voice_tally(&mut r2o_result, r2o_direct);
             if r2o_direct.passed == R2O_VOICE_REPEATS {
                 r2o_result.verdict = R2oVoiceVerdict::Clear;
@@ -366,6 +421,38 @@ where
         }
     }
     r2o_result
+}
+
+fn r2o_search_voice_arms<F>(
+    r2o_result: &mut R2oVoiceMeasurement,
+    r2o_address: SocketAddrV4,
+    r2o_wait: Duration,
+    r2o_mark: Option<u32>,
+    r2o_ask: &mut F,
+) where
+    F: FnMut(SocketAddrV4, Duration, Option<u32>, Option<R2oVoiceArm>) -> R2oVoiceTally,
+{
+    for (r2o_name, r2o_bytes) in R2O_VOICE_ARM_PROFILES {
+        let Some(r2o_bytes) = r2o_bytes else {
+            continue;
+        };
+        if r2o_bytes.is_empty() || r2o_bytes.len() > R2O_VOICE_ARM_MAX {
+            continue;
+        }
+        for r2o_copies in R2O_VOICE_ARM_COPIES {
+            let r2o_arm = R2oVoiceArm {
+                name: r2o_name,
+                bytes: r2o_bytes,
+                copies: r2o_copies,
+            };
+            let r2o_tally = r2o_ask(r2o_address, r2o_wait, r2o_mark, Some(r2o_arm));
+            r2o_record_voice_tally(r2o_result, r2o_tally);
+            if r2o_tally.passed == R2O_VOICE_REPEATS {
+                r2o_result.arm = Some(r2o_arm);
+                return;
+            }
+        }
+    }
 }
 
 fn r2o_record_voice_tally(r2o_result: &mut R2oVoiceMeasurement, r2o_tally: R2oVoiceTally) {
@@ -446,10 +533,20 @@ fn r2o_resolve_voice_control(r2o_control: &str) -> Option<SocketAddrV4> {
         })
 }
 
+#[cfg(test)]
 fn r2o_ask_voice(
     r2o_server: SocketAddrV4,
     r2o_wait: Duration,
     r2o_mark: Option<u32>,
+) -> R2oVoiceTally {
+    r2o_ask_voice_with_arm(r2o_server, r2o_wait, r2o_mark, None)
+}
+
+fn r2o_ask_voice_with_arm(
+    r2o_server: SocketAddrV4,
+    r2o_wait: Duration,
+    r2o_mark: Option<u32>,
+    r2o_arm: Option<R2oVoiceArm>,
 ) -> R2oVoiceTally {
     #[cfg(target_os = "linux")]
     {
@@ -465,6 +562,15 @@ fn r2o_ask_voice(
             marked: true,
             ..R2oVoiceTally::default()
         };
+        if r2o_arm.is_some_and(|r2o_arm| {
+            r2o_arm.bytes.is_empty()
+                || r2o_arm.bytes.len() > R2O_VOICE_ARM_MAX
+                || r2o_arm.copies == 0
+        }) {
+            r2o_tally.errors = R2O_VOICE_REPEATS;
+            r2o_tally.marked = false;
+            return r2o_tally;
+        }
         let r2o_started = Instant::now();
         let mut r2o_random = match std::fs::File::open("/dev/urandom") {
             Ok(r2o_random) => r2o_random,
@@ -510,6 +616,19 @@ fn r2o_ask_voice(
             if r2o_socket.connect(SocketAddr::V4(r2o_server)).is_err() {
                 r2o_tally.errors = r2o_tally.errors.saturating_add(1);
                 continue;
+            }
+            if let Some(r2o_arm) = r2o_arm {
+                let mut r2o_failed = false;
+                for _ in 0..r2o_arm.copies {
+                    if r2o_socket.send(r2o_arm.bytes).ok() != Some(r2o_arm.bytes.len()) {
+                        r2o_failed = true;
+                        break;
+                    }
+                }
+                if r2o_failed {
+                    r2o_tally.errors = r2o_tally.errors.saturating_add(1);
+                    continue;
+                }
             }
             let r2o_request = r2k_core::stun::binding_request(r2o_txid);
             if r2o_socket.send(&r2o_request).ok() != Some(r2o_request.len()) {
@@ -603,7 +722,7 @@ fn r2o_ask_voice(
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (r2o_server, r2o_wait, r2o_mark);
+        let _ = (r2o_server, r2o_wait, r2o_mark, r2o_arm);
         R2oVoiceTally {
             errors: R2O_VOICE_REPEATS,
             marked: false,
@@ -655,9 +774,9 @@ fn r2o_parse_voice_mark(r2o_value: &str) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        R2O_VOICE_REPEATS, R2oVoiceObservation, R2oVoiceOptions, R2oVoiceTally, R2oVoiceVerdict,
-        r2o_ask_voice, r2o_evaluate_voice, r2o_parse_voice_options, r2o_select_voice_target,
-        r2o_voice_observation,
+        R2O_VOICE_REPEATS, R2oVoiceArm, R2oVoiceObservation, R2oVoiceOptions, R2oVoiceTally,
+        R2oVoiceVerdict, r2o_ask_voice, r2o_ask_voice_with_arm, r2o_evaluate_voice,
+        r2o_parse_voice_options, r2o_select_voice_target, r2o_voice_observation,
     };
     use crate::voice_targets::R2oVoiceTarget;
     use std::ffi::OsString;
@@ -802,7 +921,7 @@ mod tests {
             r2o_address,
             R2oVoiceObservation::Answers,
             None,
-            |_, _, _| {
+            |_, _, _, _| {
                 r2o_calls += 1;
                 R2oVoiceTally::default()
             },
@@ -820,7 +939,7 @@ mod tests {
             SocketAddrV4::new(Ipv4Addr::new(35, 217, 0, 67), 50_004),
             R2oVoiceObservation::Young { packets: 2 },
             None,
-            |_, _, _| panic!("молодой поток не должен запускать зонды"),
+            |_, _, _, _| panic!("молодой поток не должен запускать зонды"),
         );
         assert_eq!(r2o_result.verdict, R2oVoiceVerdict::Unmeasured);
     }
@@ -833,13 +952,35 @@ mod tests {
             r2o_address,
             R2oVoiceObservation::Unseen,
             None,
-            |r2o_server, _, _| {
+            |r2o_server, _, _, r2o_arm| {
                 assert_eq!(r2o_server, r2o_address);
+                assert!(r2o_arm.is_none());
                 r2o_tally(R2O_VOICE_REPEATS, 0)
             },
         );
         assert_eq!(r2o_result.verdict, R2oVoiceVerdict::Clear);
         assert_eq!(r2o_result.probes, 3);
+    }
+
+    #[test]
+    fn прямой_ответ_цели_не_запускает_перебор_голосовых_приманок() {
+        let r2o_address = SocketAddrV4::new(Ipv4Addr::new(35, 217, 0, 67), 50_004);
+        let mut r2o_calls = 0;
+        let r2o_result = r2o_evaluate_voice(
+            &R2oVoiceOptions::default(),
+            r2o_address,
+            R2oVoiceObservation::Silent { packets: 4 },
+            None,
+            |_, _, _, r2o_arm| {
+                r2o_calls += 1;
+                assert!(r2o_arm.is_none());
+                r2o_tally(R2O_VOICE_REPEATS, 0)
+            },
+        );
+
+        assert_eq!(r2o_result.verdict, R2oVoiceVerdict::Clear);
+        assert_eq!(r2o_result.arm, None);
+        assert_eq!(r2o_calls, 1);
     }
 
     #[test]
@@ -849,7 +990,7 @@ mod tests {
             SocketAddrV4::new(Ipv4Addr::new(35, 217, 0, 67), 50_004),
             R2oVoiceObservation::Unseen,
             None,
-            |_, _, _| r2o_tally(1, 0),
+            |_, _, _, _| r2o_tally(1, 0),
         );
         assert_eq!(r2o_result.verdict, R2oVoiceVerdict::Flaky);
     }
@@ -861,7 +1002,7 @@ mod tests {
             SocketAddrV4::new(Ipv4Addr::new(35, 217, 0, 67), 50_004),
             R2oVoiceObservation::Silent { packets: 4 },
             Some(SocketAddrV4::new(Ipv4Addr::new(1, 1, 1, 1), 3478)),
-            |_, _, _| r2o_tally(0, R2O_VOICE_REPEATS),
+            |_, _, _, _| r2o_tally(0, R2O_VOICE_REPEATS),
         );
         assert_eq!(r2o_result.verdict, R2oVoiceVerdict::Unmeasured);
         assert_eq!(r2o_result.probes, 0);
@@ -876,8 +1017,8 @@ mod tests {
             SocketAddrV4::new(Ipv4Addr::new(35, 217, 0, 67), 50_004),
             R2oVoiceObservation::Silent { packets: 4 },
             Some(r2o_control),
-            |r2o_server, _, _| {
-                r2o_calls.push(r2o_server);
+            |r2o_server, _, _, r2o_arm| {
+                r2o_calls.push((r2o_server, r2o_arm.is_some()));
                 R2oVoiceTally {
                     marked: true,
                     ..R2oVoiceTally::default()
@@ -885,8 +1026,10 @@ mod tests {
             },
         );
         assert_eq!(r2o_result.verdict, R2oVoiceVerdict::NoUdp);
-        assert_eq!(r2o_calls.len(), 2);
-        assert_eq!(r2o_calls[1], r2o_control);
+        assert_eq!(
+            r2o_calls,
+            [(r2o_result.address.unwrap(), false), (r2o_control, false)]
+        );
     }
 
     #[test]
@@ -901,9 +1044,20 @@ mod tests {
             SocketAddrV4::new(Ipv4Addr::new(35, 217, 0, 67), 50_004),
             R2oVoiceObservation::Silent { packets: 5 },
             Some(r2o_control),
-            |r2o_server, _, _| {
-                r2o_calls.push(r2o_server);
-                if r2o_server == r2o_control {
+            |r2o_server, _, _, r2o_arm| {
+                r2o_calls.push((
+                    r2o_server,
+                    r2o_arm.map(|r2o_arm| (r2o_arm.name, r2o_arm.copies)),
+                ));
+                if r2o_arm.is_some() {
+                    if r2o_arm.is_some_and(|r2o_arm| {
+                        r2o_arm.name == "quic_dbankcloud" && r2o_arm.copies == 1
+                    }) {
+                        r2o_tally(R2O_VOICE_REPEATS, 0)
+                    } else {
+                        r2o_tally(0, 0)
+                    }
+                } else if r2o_server == r2o_control {
                     r2o_tally(1, 0)
                 } else {
                     r2o_tally(0, 0)
@@ -912,7 +1066,51 @@ mod tests {
         );
         assert_eq!(r2o_result.verdict, R2oVoiceVerdict::Blocked);
         assert!(r2o_result.marked);
-        assert_eq!(r2o_calls, [r2o_result.address.unwrap(), r2o_control]);
+        assert_eq!(
+            r2o_calls,
+            [
+                (r2o_result.address.unwrap(), None),
+                (r2o_control, None),
+                (r2o_result.address.unwrap(), Some(("stun", 1))),
+                (r2o_result.address.unwrap(), Some(("stun", 6))),
+                (r2o_result.address.unwrap(), Some(("quic_dbankcloud", 1))),
+            ]
+        );
+        assert_eq!(
+            r2o_result.arm,
+            Some(R2oVoiceArm {
+                name: "quic_dbankcloud",
+                bytes: include_bytes!("../assets/voice/quic_initial_dbankcloud_ru.bin"),
+                copies: 1,
+            })
+        );
+        assert_eq!(r2o_result.probes, 15);
+        let r2o_output = super::r2o_format_voice_measurement(&r2o_result);
+        assert!(r2o_output.contains("кандидат quic_dbankcloud"));
+        assert!(r2o_output.contains("не подтверждают работу голосовой сессии"));
+    }
+
+    #[test]
+    fn непринятая_приманка_не_меняет_вердикт_и_перебирает_оба_числа_копий() {
+        let r2o_control = SocketAddrV4::new(Ipv4Addr::new(1, 1, 1, 1), 3478);
+        let r2o_result = r2o_evaluate_voice(
+            &R2oVoiceOptions::default(),
+            SocketAddrV4::new(Ipv4Addr::new(35, 217, 0, 67), 50_004),
+            R2oVoiceObservation::Silent { packets: 4 },
+            Some(r2o_control),
+            |r2o_server, _, _, r2o_arm| {
+                if r2o_arm.is_none() && r2o_server == r2o_control {
+                    r2o_tally(1, 0)
+                } else {
+                    r2o_tally(0, 0)
+                }
+            },
+        );
+
+        assert_eq!(r2o_result.verdict, R2oVoiceVerdict::Blocked);
+        assert_eq!(r2o_result.arm, None);
+        assert!(r2o_result.reason.contains("перебор голосовых приманок"));
+        assert_eq!(r2o_result.probes, 18);
     }
 
     #[test]
@@ -947,5 +1145,58 @@ mod tests {
         assert_eq!(r2o_result.errors, 0);
         assert!(!r2o_result.marked);
         assert!(r2o_result.rtt_ms.is_some());
+    }
+
+    #[test]
+    fn отправляет_копии_приманки_перед_каждым_stun_запросом_arm64_linux() {
+        const R2O_TEST_ARM: &[u8] = b"r2o-test-voice-arm";
+        let r2o_server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        r2o_server
+            .set_read_timeout(Some(Duration::from_secs(4)))
+            .unwrap();
+        let r2o_address = match r2o_server.local_addr().unwrap() {
+            std::net::SocketAddr::V4(r2o_address) => r2o_address,
+            std::net::SocketAddr::V6(_) => unreachable!(),
+        };
+        let r2o_thread = std::thread::spawn(move || {
+            let mut r2o_sequences = std::collections::HashMap::new();
+            let mut r2o_buffer = [0; 1500];
+            for _ in 0..usize::from(R2O_VOICE_REPEATS) * 3 {
+                let (r2o_size, r2o_client) = r2o_server.recv_from(&mut r2o_buffer).unwrap();
+                let r2o_payload = r2o_buffer[..r2o_size].to_vec();
+                let r2o_sequence = r2o_sequences
+                    .entry(r2o_client)
+                    .or_insert_with(Vec::<Vec<u8>>::new);
+                if r2o_payload == R2O_TEST_ARM {
+                    assert!(r2o_sequence.len() < 2);
+                    r2o_sequence.push(r2o_payload);
+                    continue;
+                }
+                assert_eq!(r2o_payload.len(), 20);
+                assert_eq!(r2o_sequence.len(), 2);
+                assert!(r2o_sequence.iter().all(|r2o_copy| r2o_copy == R2O_TEST_ARM));
+                let mut r2o_response = [0; 20];
+                r2o_response[..2].copy_from_slice(&0x0101_u16.to_be_bytes());
+                r2o_response[4..8].copy_from_slice(&0x2112_a442_u32.to_be_bytes());
+                r2o_response[8..].copy_from_slice(&r2o_payload[8..20]);
+                r2o_server.send_to(&r2o_response, r2o_client).unwrap();
+            }
+            assert_eq!(r2o_sequences.len(), usize::from(R2O_VOICE_REPEATS));
+        });
+        let r2o_result = r2o_ask_voice_with_arm(
+            r2o_address,
+            Duration::from_secs(2),
+            None,
+            Some(R2oVoiceArm {
+                name: "test",
+                bytes: R2O_TEST_ARM,
+                copies: 2,
+            }),
+        );
+        r2o_thread.join().unwrap();
+
+        assert_eq!(r2o_result.passed, R2O_VOICE_REPEATS);
+        assert_eq!(r2o_result.errors, 0);
+        assert!(!r2o_result.marked);
     }
 }
