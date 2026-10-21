@@ -44,6 +44,7 @@
       <a href="#boxes" data-nav="boxes"><span>Коробки</span><b id="nav-boxes"></b></a>
       <a href="#telegram" data-nav="telegram"><span>Telegram-туннель</span><b id="nav-telegram"></b></a>
       <a href="#updates" data-nav="updates"><span>Обновления</span><b id="nav-updates"></b></a>
+      <a href="#r2o-settings" data-nav="r2o-settings"><span>Настройки R2O</span><b></b></a>
       <a href="#diagnostics" data-nav="diagnostics"><span>Диагностика</span><b id="nav-diagnostics"></b></a>
     </nav>
 
@@ -124,6 +125,31 @@
           </div>
           <p class="upd-meta update-result" id="update-result" hidden></p>
         </div>
+      </section>
+
+      <section class="sheet" id="r2o-settings" aria-labelledby="r2o-settings-title">
+        <header class="sheet-head">
+          <h2 id="r2o-settings-title">Настройки R2O</h2>
+          <p>Режим работы движка и номер очереди NFQUEUE. После сохранения службы перезапустятся.</p>
+        </header>
+        <form class="r2o-settings" id="r2o-settings-form">
+          <label class="r2o-settings-field" for="r2o-settings-mode">
+            <span>Режим движка</span>
+            <select id="r2o-settings-mode" required>
+              <option value="off">Выключен</option>
+              <option value="observe">Только наблюдение</option>
+              <option value="apply">Применение обхода</option>
+            </select>
+          </label>
+          <label class="r2o-settings-field" for="r2o-settings-queue">
+            <span>Номер очереди NFQUEUE</span>
+            <input id="r2o-settings-queue" type="number" min="0" max="65535" step="1" required>
+          </label>
+          <div class="r2o-settings-actions">
+            <p id="r2o-settings-message" role="status" aria-live="polite"></p>
+            <button class="btn" data-variant="primary" type="submit" disabled>Сохранить и перезапустить</button>
+          </div>
+        </form>
       </section>
 
       <section class="sheet" id="diagnostics" aria-labelledby="diagnostics-title">

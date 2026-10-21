@@ -11,6 +11,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 const REQUEST_MAX: usize = 16 * 1024;
 const BODY_MAX: usize = 4 * 1024 * 1024;
+const CONFIG_BODY_MAX: usize = 4096;
 const WORKER_BODY_MAX: usize = 4096;
 const WORKER_MAX: usize = 8;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -208,6 +209,12 @@ pub fn handle_request(config: &Config, raw: &[u8]) -> Response {
             return text_response(405, "method not allowed\n");
         }
         return api_workers(config, &request);
+    }
+    if request.path == "/api/config" {
+        if !matches!(request.method, "GET" | "POST") {
+            return text_response(405, "method not allowed\n");
+        }
+        return r2o_api_config(config, &request);
     }
     if request.path == "/api/update" {
         if request.method != "GET" {
@@ -873,6 +880,108 @@ fn start_action_command(
     Ok(())
 }
 
+fn r2o_api_config(config: &Config, request: &Request<'_>) -> Response {
+    if request.method == "GET" {
+        let mut settings = Config::default();
+        if parse_config(&config.config_path, &mut settings, &[]).is_err() {
+            return json_response(
+                500,
+                &json!({"ok":false,"message":"Не удалось прочитать настройки R2O"}),
+            );
+        }
+        return json_response(
+            200,
+            &json!({
+                "mode":settings.mode,
+                "queue_num":settings.queue_num,
+                "editable":settings.config_exists && config.control_enabled
+            }),
+        );
+    }
+    if !config.control_enabled || !same_origin(request) {
+        return json_response(
+            403,
+            &json!({"ok":false,"message":"Изменять настройки можно только с этой панели"}),
+        );
+    }
+    if !request.header("Content-Type").is_some_and(|s| {
+        s.get(..16)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("application/json"))
+    }) {
+        return json_response(
+            415,
+            &json!({"ok":false,"message":"Ожидаются настройки в формате JSON"}),
+        );
+    }
+    if request.header("Transfer-Encoding").is_some() {
+        return json_response(
+            400,
+            &json!({"ok":false,"message":"Проверьте режим и номер очереди NFQUEUE"}),
+        );
+    }
+    let length = request.header("Content-Length").and_then(|s| {
+        (!s.is_empty() && s.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| s.parse::<usize>().ok())
+            .flatten()
+    });
+    if length.is_none_or(|n| n == 0 || n > CONFIG_BODY_MAX) || length != Some(request.body.len()) {
+        return json_response(
+            400,
+            &json!({"ok":false,"message":"Проверьте режим и номер очереди NFQUEUE"}),
+        );
+    }
+    let (mode, queue_num) = match r2o_config_from_json(request.body) {
+        Ok(settings) => settings,
+        Err(()) => {
+            return json_response(
+                400,
+                &json!({"ok":false,"message":"Укажите режим и номер очереди от 0 до 65535"}),
+            );
+        }
+    };
+    if r2o_write_settings_config(&config.config_path, &mode, queue_num).is_err() {
+        return json_response(
+            500,
+            &json!({"ok":false,"message":"Не удалось сохранить настройки R2O"}),
+        );
+    }
+    match start_service_action(config, "engine-restart") {
+        Ok(()) => json_response(
+            202,
+            &json!({"ok":true,"message":"Настройки сохранены, службы R2O перезапускаются"}),
+        ),
+        Err(ActionError::Busy) => json_response(
+            409,
+            &json!({"ok":false,"message":"Настройки сохранены, дождитесь завершения текущей команды"}),
+        ),
+        Err(ActionError::Start) => json_response(
+            500,
+            &json!({"ok":false,"message":"Настройки сохранены, но службы R2O не удалось перезапустить"}),
+        ),
+    }
+}
+
+fn r2o_config_from_json(body: &[u8]) -> Result<(String, u16), ()> {
+    if body.len() > CONFIG_BODY_MAX {
+        return Err(());
+    }
+    let value: Value = serde_json::from_slice(body).map_err(|_| ())?;
+    let object = value.as_object().ok_or(())?;
+    if object.len() != 2 || !object.contains_key("mode") || !object.contains_key("queue_num") {
+        return Err(());
+    }
+    let mode = object.get("mode").and_then(Value::as_str).ok_or(())?;
+    if !matches!(mode, "off" | "observe" | "apply") {
+        return Err(());
+    }
+    let queue_num = object
+        .get("queue_num")
+        .and_then(Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok())
+        .ok_or(())?;
+    Ok((mode.into(), queue_num))
+}
+
 fn api_workers(config: &Config, request: &Request<'_>) -> Response {
     if request.method == "GET" {
         return match worker_domains_from_config(&config.config_path) {
@@ -1127,6 +1236,82 @@ fn write_worker_config(path: &Path, domains: &[String]) -> std::io::Result<()> {
         output.push_str(&domains.join(","));
         output.push('\n');
     }
+    r2o_write_config_atomically(path, &output, &metadata, "workers")
+}
+
+fn r2o_write_settings_config(path: &Path, mode: &str, queue_num: u16) -> std::io::Result<()> {
+    let (source, metadata) = read_regular_file_with_metadata(path, BODY_MAX)?;
+    if source.contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "нулевой байт в конфигурации",
+        ));
+    }
+    let text = String::from_utf8(source)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let mut output = String::with_capacity(text.len().saturating_add(32));
+    let mut r2o_mode_comment = String::new();
+    let mut r2o_queue_comment = String::new();
+    for r2o_original_line in text.split_inclusive('\n') {
+        let line = r2o_original_line.trim_end_matches(['\r', '\n']);
+        let key = r2o_config_line_key(line);
+        if matches!(key, Some("MODE" | "QUEUE_NUM")) {
+            if let (Some(key), Some((_, value))) = (key, line.split_once('=')) {
+                if let Some(at) = value.find(" #") {
+                    let comment = &value[at..];
+                    if key == "MODE" {
+                        r2o_mode_comment = comment.into();
+                    } else {
+                        r2o_queue_comment = comment.into();
+                    }
+                }
+            }
+            continue;
+        }
+        output.push_str(r2o_original_line);
+    }
+    let mut r2o_settings = String::with_capacity(32);
+    r2o_settings.push_str("MODE=");
+    r2o_settings.push_str(mode);
+    r2o_settings.push_str(&r2o_mode_comment);
+    r2o_settings.push('\n');
+    r2o_settings.push_str("QUEUE_NUM=");
+    r2o_settings.push_str(&queue_num.to_string());
+    r2o_settings.push_str(&r2o_queue_comment);
+    r2o_settings.push('\n');
+    let r2o_separator_len = usize::from(!output.is_empty() && !output.ends_with('\n'));
+    if output
+        .len()
+        .saturating_add(r2o_separator_len)
+        .saturating_add(r2o_settings.len())
+        > BODY_MAX
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "конфигурация слишком велика",
+        ));
+    }
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push_str(&r2o_settings);
+    r2o_write_config_atomically(path, &output, &metadata, "settings")
+}
+
+fn r2o_config_line_key(line: &str) -> Option<&str> {
+    let line = line.trim_start_matches([' ', '\t']);
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    line.split_once('=').map(|(key, _)| key.trim())
+}
+
+fn r2o_write_config_atomically(
+    path: &Path,
+    output: &str,
+    metadata: &fs::Metadata,
+    suffix: &str,
+) -> std::io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let name = path
         .file_name()
@@ -1134,7 +1319,7 @@ fn write_worker_config(path: &Path, domains: &[String]) -> std::io::Result<()> {
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "config filename"))?;
     for attempt in 0..8 {
         let temporary = parent.join(format!(
-            ".{name}.workers.{}.{}",
+            ".{name}.{suffix}.{}.{}",
             std::process::id(),
             attempt
         ));

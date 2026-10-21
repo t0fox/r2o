@@ -339,6 +339,9 @@
     this.flash = null;
     this.workerDialog = null;
     this.workerDomains = [];
+    this.r2oSettingsDirty = false;
+    this.r2oSettingsSaving = false;
+    this.r2oSettingsSaved = null;
     this.$ = function (id) { return doc.getElementById(id); };
   }
 
@@ -391,6 +394,7 @@
     this.spy();
     this.navMotion();
     this.drawMark();
+    this.initR2oSettings();
     this.poll();
     this.initUpdates();
     this.checkUpdates(false);
@@ -505,6 +509,63 @@
     if (node) { node.textContent = text; node.hidden = !text; }
   };
 
+  App.prototype.initR2oSettings = function () {
+    var self = this, form = this.$("r2o-settings-form");
+    if (!form) return;
+    form.addEventListener("input", function () { self.r2oSettingsDirty = true; });
+    form.addEventListener("change", function () { self.r2oSettingsDirty = true; });
+    form.addEventListener("submit", function (event) {
+      event.preventDefault();
+      self.saveR2oSettings();
+    });
+  };
+
+  App.prototype.renderR2oSettings = function (m) {
+    var form = this.$("r2o-settings-form");
+    if (!form) return;
+    var snap = m.snap, mode = this.$("r2o-settings-mode"), queue = this.$("r2o-settings-queue");
+    if (this.r2oSettingsSaved && snap.mode === this.r2oSettingsSaved.mode &&
+        num(snap.queue_num) === this.r2oSettingsSaved.queue_num) this.r2oSettingsSaved = null;
+    if (!this.r2oSettingsDirty) {
+      mode.value = this.r2oSettingsSaved ? this.r2oSettingsSaved.mode : str(snap.mode);
+      queue.value = String(this.r2oSettingsSaved ? this.r2oSettingsSaved.queue_num : num(snap.queue_num) || 0);
+    }
+    var button = form.querySelector('button[type="submit"]');
+    button.disabled = !snap.controls_enabled || !snap.config_exists || snap.control_state === "running" || this.r2oSettingsSaving;
+  };
+
+  App.prototype.saveR2oSettings = function () {
+    var self = this, form = this.$("r2o-settings-form"), message = this.$("r2o-settings-message");
+    if (!form || this.r2oSettingsSaving || !this.m || !this.m.snap.controls_enabled || !this.m.snap.config_exists) return;
+    var settings = { mode: this.$("r2o-settings-mode").value, queue_num: Number(this.$("r2o-settings-queue").value) };
+    if (["off", "observe", "apply"].indexOf(settings.mode) < 0 ||
+        !Number.isInteger(settings.queue_num) || settings.queue_num < 0 || settings.queue_num > 65535) return;
+    this.r2oSettingsSaving = true;
+    message.textContent = "Сохраняем настройки…";
+    message.setAttribute("data-tone", "");
+    this.renderR2oSettings(this.m);
+    this.win.fetch("/api/config", {
+      method: "POST", cache: "no-store", credentials: "same-origin",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(settings)
+    }).then(function (reply) {
+      return reply.json().catch(function () { return {}; }).then(function (body) {
+        if (!reply.ok) throw new Error(str(body.message) || "Не удалось сохранить настройки R2O.");
+        self.r2oSettingsSaved = settings;
+        self.r2oSettingsDirty = false;
+        message.textContent = str(body.message) || "Настройки сохранены.";
+        message.setAttribute("data-tone", "");
+      });
+    }).catch(function (error) {
+      message.textContent = str(error && error.message) || "Не удалось сохранить настройки R2O.";
+      message.setAttribute("data-tone", "bad");
+    }).then(function () {
+      self.r2oSettingsSaving = false;
+      self.renderR2oSettings(self.m);
+      self.poll();
+      self.win.setTimeout(function () { self.poll(); }, 800);
+    });
+  };
+
   App.prototype.pollUpdates = function () {
     var self = this;
     if (this.doc.hidden || this.updateInflight || !this.$("updates-body")) return Promise.resolve();
@@ -614,6 +675,7 @@
     this.renderNow(m);
     this.renderCatalog(false);
     this.renderTelegram(m);
+    this.renderR2oSettings(m);
     this.renderDiagnostics(m);
     this.renderNav(m);
     if (!this.arrived) {
@@ -2229,7 +2291,7 @@
       }
       self.moveMarker();
     }, { rootMargin: "-20% 0px -55% 0px", threshold: [0, .1, .3, .6] });
-    ["now", "families", "boxes", "telegram", "updates", "diagnostics"].forEach(function (id) {
+    ["now", "families", "boxes", "telegram", "updates", "r2o-settings", "diagnostics"].forEach(function (id) {
       var s = doc.getElementById(id);
       if (s) io.observe(s);
     });

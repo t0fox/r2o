@@ -171,6 +171,7 @@ fn root_serves_existing_panel_html() {
     assert_eq!(status, 200);
     assert!(content_type.starts_with("text/html"));
     assert!(body.contains("<!doctype html") || body.contains("<!DOCTYPE html"));
+    assert!(body.contains("r2o-settings-form"));
 }
 
 #[test]
@@ -467,6 +468,98 @@ fn worker_domains_are_normalized_and_saved_without_losing_other_config() {
     assert!(saved.contains("KEEP_ME=yes"));
     assert_eq!(saved.matches("TG_CF_WORKER_DOMAIN=").count(), 1);
     assert!(saved.contains("TG_CF_WORKER_DOMAIN=new.workers.dev\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn r2o_settings_are_read_saved_and_restart_engine() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new();
+    let config_path = temp.file("config");
+    let service_path = temp.file("S99r2o");
+    let service_log = temp.file("service-arguments");
+    fs::write(
+        &config_path,
+        "# Основные настройки\nMODE=observe # режим R2O\nQUEUE_NUM=2000 # номер очереди\nKEEP_ME=yes\n",
+    )
+    .unwrap();
+    fs::write(
+        &service_path,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            service_log.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&service_path, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let mut config = Config::default();
+    config.config_path = config_path.clone();
+    config.service_path = service_path;
+    config.control_enabled = true;
+
+    let (r2o_status, _, r2o_body) = request(
+        &config,
+        "GET /api/config HTTP/1.1\r\nHost: router.local\r\n\r\n",
+    );
+    assert_eq!(r2o_status, 200);
+    let r2o_settings: Value = serde_json::from_str(&r2o_body).unwrap();
+    assert_eq!(r2o_settings["mode"], "observe");
+    assert_eq!(r2o_settings["queue_num"], 2000);
+    assert_eq!(r2o_settings["editable"], true);
+
+    let r2o_body = r#"{"mode":"apply","queue_num":321}"#;
+    let r2o_raw = format!(
+        "POST /api/config HTTP/1.1\r\nHost: router.local\r\nOrigin: http://router.local\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{r2o_body}",
+        r2o_body.len()
+    );
+    let r2o_response = handle_request(&config, r2o_raw.as_bytes());
+    assert_eq!(r2o_response.status, 202);
+
+    let r2o_saved = fs::read_to_string(config_path).unwrap();
+    assert!(r2o_saved.contains("# Основные настройки\n"));
+    assert!(r2o_saved.contains("KEEP_ME=yes\n"));
+    assert_eq!(r2o_saved.matches("MODE=").count(), 1);
+    assert_eq!(r2o_saved.matches("QUEUE_NUM=").count(), 1);
+    assert!(r2o_saved.contains("MODE=apply # режим R2O\n"));
+    assert!(r2o_saved.contains("QUEUE_NUM=321 # номер очереди\n"));
+
+    let r2o_deadline = Instant::now() + Duration::from_secs(2);
+    while !service_log.exists() && Instant::now() < r2o_deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(fs::read_to_string(service_log).unwrap(), "engine-restart\n");
+}
+
+#[test]
+fn r2o_settings_reject_invalid_values_and_cross_origin_writes() {
+    let temp = TempDir::new();
+    let config_path = temp.file("config");
+    fs::write(&config_path, "MODE=observe\nQUEUE_NUM=2000\nKEEP_ME=yes\n").unwrap();
+    let mut config = Config::default();
+    config.config_path = config_path.clone();
+    config.control_enabled = true;
+
+    let r2o_before = fs::read_to_string(&config_path).unwrap();
+    for r2o_body in [
+        r#"{"mode":"apply\nTG_ENABLED=0","queue_num":321}"#,
+        r#"{"mode":"apply","queue_num":65536}"#,
+        r#"{"mode":"apply","queue_num":321,"state_dir":"/tmp"}"#,
+    ] {
+        let r2o_raw = format!(
+            "POST /api/config HTTP/1.1\r\nHost: router.local\r\nOrigin: http://router.local\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{r2o_body}",
+            r2o_body.len()
+        );
+        assert_eq!(handle_request(&config, r2o_raw.as_bytes()).status, 400);
+    }
+    let r2o_body = r#"{"mode":"apply","queue_num":321}"#;
+    let r2o_raw = format!(
+        "POST /api/config HTTP/1.1\r\nHost: router.local\r\nOrigin: http://attacker.local\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{r2o_body}",
+        r2o_body.len()
+    );
+    assert_eq!(handle_request(&config, r2o_raw.as_bytes()).status, 403);
+    assert_eq!(fs::read_to_string(config_path).unwrap(), r2o_before);
 }
 
 #[cfg(unix)]
