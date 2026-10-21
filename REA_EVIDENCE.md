@@ -6179,3 +6179,99 @@ ARMv5te и ARMv7 прошли `cargo check -p r2o-controller`. Release-конт�
 `.rea/r2o-discovery-clienthello-arm-cross-checks.log` и
 `.rea/r2o-discovery-clienthello-release-sizes.log`. Остальные ветви scheduler
 и испытание на физическом маршрутизаторе ещё не закрыты.
+
+## Независимые TLS/IP-парсеры и актуальные размеры — 21.10.2026
+
+Зависимости уже находились в `main`; повторно их не добавлял. `x509-parser`
+используется TLS-измерителем после проверки сертификата Rustls. Rustls уже
+настроен на существующий `ring`; `x509-parser` подключён без необязательной
+криптографической проверки. `tls-parser`, `etherparse` и `proptest` остаются
+только тестовыми зависимостями соответствующих crates. Отдельные криптографические
+версии AES-GCM/SHA-2, которые уже нужны HPKE для ECH, не менял.
+
+ARM64/QEMU: `r2k-core` — 136 прошло; datapath — 249 прошло, 3 штатно пропущено
+из-за Linux capabilities; TLS-измеритель — 1 прошло; `response` suite — 13
+прошло. Журналы:
+
+- `.rea/r2o-tls-dependencies-arm64.log` — `r2k-core` и полный datapath;
+- `.rea/r2o-tls-controller-arm64.log` — X.509 unit test и response suite;
+- `.rea/r2o-tls-cross-checks.log` — workspace cross-checks ARMv5te/ARMv7;
+- `.rea/r2o-tls-release-sizes-arm64-mips.log` — полные release-сборки и ELF.
+
+ARMv5te и ARMv7 `cargo check --workspace` прошли. Полные release workspace
+сборки ARM64 GNU (2 мин 54 с) и MIPS32 little-endian GNU (3 мин 25 с) прошли.
+Заголовки распознаны как ELF64/AArch64 и ELF32/MIPS little-endian. Размеры
+stripped бинарников в байтах:
+
+| Бинарник | ARM64 GNU | MIPS32 little-endian GNU |
+|---|---:|---:|
+| `r2o-controller` | 4 985 960 | 6 624 160 |
+| `r2o-datapath` | 856 784 | 1 249 108 |
+| `r2o-fetch` | 2 560 960 | 3 215 776 |
+| `r2o-manager` | 856 776 | 1 183 832 |
+| `r2o-panel` | 1 118 992 | 1 314 856 |
+| `r2o-telegram` | 4 597 480 | 5 905 676 |
+
+Не запускал MIPS/ARM32 ELF. Эта проверка подтверждает переносимость текущих
+зависимостей и парсеров, но не закрывает функциональные пробелы или приёмку на
+физическом роутере; общая оценка остаётся **65,85%**.
+
+## Повтор QUIC Initial во время активного Discovery — 21.10.2026
+
+### Донор и границы анализа
+
+Использованы уже сохранённые результаты для `core/sched.c:on_shape`, без
+повторной декомпиляции большого ELF:
+
+- SHA-256 `E:\d2o\core\sched.c`:
+  `1de9feaab19dcea1e493aea068295470cf3143adf83157b57663f1098132ae8a`;
+- SHA-256 `E:\d2o\core\test_sched.c`:
+  `a67f87e09a7fd93ed735b52f361e78590b9ce40679ab95e300accf0a3e9d51a3`;
+- Clang AST: `.rea/r2o-donor-on-shape-clang-ast-20261021.log`;
+- REA вызов `function on_shape` завершился `target_format_unsupported`;
+- ARM64/QEMU donor test log: `.rea/r2o-donor-test-sched-aarch64.log`, итог
+  `планировщик: все проверки прошли`.
+
+В `test_sched.c` донорский тест блокирует QUIC worker, подаёт новый Initial,
+проверяет неизменность активного снимка и требует ровно один повтор с точными
+байтами события. Отдельный сценарий делает то же во время VERIFY и требует
+отбросить временный кандидат. AST и тестовый исходник остаются основным
+подтверждением семантики, потому что REA не поддержал формат donor ELF.
+
+### Перенос и проверка
+
+Rust-контроллер принимает только валидный QSN для UDP/QUIC, того же серверного
+socket и SNI. Пока первое испытание идёт, слот хранит самый новый снимок, не
+меняя вход активной задачи. После первого возврата worker запускает ещё один
+проход с этим снимком и удерживает measurement permit; флаг задачи блокирует
+третий проход. В канал результата уходит только исход последнего запуска.
+
+TDD журнал `.rea/r2o-quic-active-snapshot-red-arm64.log` фиксирует ожидаемый
+первый отказ до добавления `queue_client_snapshot`. После реализации новый тест
+`r2o_quic_discovery_повторяет_один_раз_с_последним_clienthello` прошёл на
+ARM64/QEMU; он проверяет два разных поздних снимка, выбор последнего и отказ от
+дополнительного события во втором проходе. Старые worker-тесты переведены с
+пустого QSN на проверенный fixture; рабочая валидация не ослаблялась.
+
+Проверки текущего состояния:
+
+- ARM64/QEMU `r2o-controller`: 91 прошло;
+- ARM64/QEMU полный workspace с `--test-threads=1`: 1006 прошло, 0 ошибок,
+  4 штатных пропуска, 73 набора;
+- один параллельный полный запуск встретил существующий тайминговый отказ
+  проверки 250 мс; изолированный повтор прошёл, затем прошёл полный серийный
+  запуск. `.rea/r2o-discovery-250ms-arm64-isolated.log` содержит повтор;
+- `cargo check` контроллера прошёл на ARMv5te и ARMv7;
+- release ELF пересобраны, stripped и распознаны как ELF64/AArch64 (ARM64 GNU,
+  4 920 328 байт) и ELF32/MIPS little-endian (MIPS32 GNU, 6 493 004 байта).
+  ARM64 использовал Rust 1.98.0, MIPS — nightly с `build-std`; эти размеры
+  приводятся как раздельные результаты сборок, а MIPS ELF не запускался.
+
+Журналы: `.rea/r2o-quic-full-workspace-arm64-serial.log`,
+`.rea/r2o-quic-active-snapshot-arm64.log`,
+`.rea/r2o-quic-active-snapshot-armv5te-check.log`,
+`.rea/r2o-quic-active-snapshot-armv7-check.log`,
+`.rea/r2o-quic-active-snapshot-arm64-release.log` и
+`.rea/r2o-quic-active-snapshot-mipsel-release.log`. Полная scheduler и session
+паритетность, CI и приёмка на реальном роутере не доказаны; оценка переноса
+остаётся **65,85%**.
