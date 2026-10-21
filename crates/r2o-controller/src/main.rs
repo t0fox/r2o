@@ -7735,6 +7735,7 @@ impl ControlClient {
                 | EVENT_R2O_TCP_CLEAN_HANDSHAKE
                 | EVENT_R2O_TCP_EARLY_RST
                 | EVENT_R2O_TCP_REPEAT
+                | EVENT_R2O_TCP_RST_CUT
                 | EVENT_R2O_VOICE_SUSPECT
                 | EVENT_R2O_JOURNAL_ENTRY
                 | EVENT_R2O_JOURNAL_END
@@ -9467,6 +9468,28 @@ mod tests {
         let event = Frame {
             kind: r2k_core::control::EVENT_R2O_TCP_REPEAT,
             body: vec![0; KEY_LEN + 2],
+        };
+
+        client.queue_async_frame(event.clone()).unwrap();
+
+        assert_eq!(client.pending_events, VecDeque::from([event]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_controller_queues_tcp_rst_cut_events_for_later_processing() {
+        let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut client = ControlClient {
+            socket,
+            send_maxlen: 0,
+            pending_events: VecDeque::new(),
+            pending_applied_events: VecDeque::new(),
+            http_search_started: std::collections::HashMap::new(),
+            http_challenge_cooldowns: std::collections::HashMap::new(),
+        };
+        let event = Frame {
+            kind: r2k_core::control::EVENT_R2O_TCP_RST_CUT,
+            body: vec![0; KEY_LEN + 1],
         };
 
         client.queue_async_frame(event.clone()).unwrap();
@@ -11535,20 +11558,15 @@ mod tests {
         assert_eq!(started, "running.example");
         assert!(worker.queue(target("fresh.example", 444)));
 
-        let before_gap = started_receiver.recv_timeout(Duration::from_millis(200));
         let second_started = started_receiver.recv_timeout(Duration::from_secs(2));
         let _ = release_sender.send(());
         let _ = release_sender.send(());
-        assert!(
-            matches!(before_gap, Err(mpsc::RecvTimeoutError::Timeout)),
-            "свежее подозрение не должно запускать второй замер до паузы 250 мс"
-        );
         let (started, second_started_at) =
             second_started.expect("свежее подозрение должно начать замер после паузы");
         assert_eq!(started, "fresh.example");
         assert!(
-            second_started_at.duration_since(first_started_at) >= Duration::from_millis(200),
-            "второй замер не должен начинаться раньше проверенного интервала"
+            second_started_at.duration_since(first_started_at) >= Duration::from_millis(250),
+            "между стартами Discovery должно пройти не менее 250 мс"
         );
     }
 
