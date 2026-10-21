@@ -1554,6 +1554,7 @@ struct HttpSearchOutcome {
 struct R2oQuicDiscoveryTask {
     server: std::net::SocketAddr,
     snapshot: Vec<u8>,
+    r2o_mark: Option<u32>,
     permit: r2o_controller::r2o_resource_limit::R2oMeasurementPermit,
 }
 
@@ -2256,6 +2257,7 @@ impl R2oQuicDiscoveryWorker {
                 &commands,
                 &cancel,
                 &mut task.permit,
+                task.r2o_mark,
             )
             .map_err(|error| error.to_string())
         }))
@@ -2607,6 +2609,7 @@ struct R2oPendingQuicDiscovery {
     server: std::net::SocketAddr,
     snapshot: Vec<u8>,
     captured: std::time::Instant,
+    r2o_mark: Option<u32>,
     permit: Option<r2o_controller::r2o_resource_limit::R2oMeasurementPermit>,
 }
 
@@ -2616,12 +2619,14 @@ fn r2o_enqueue_quic_discovery(
     server: std::net::SocketAddr,
     snapshot: Vec<u8>,
     captured: std::time::Instant,
+    r2o_mark: Option<u32>,
     gate: &r2o_controller::r2o_resource_limit::R2oMeasurementGate,
 ) -> usize {
     pending.push_back(R2oPendingQuicDiscovery {
         server,
         snapshot,
         captured,
+        r2o_mark,
         permit: gate.r2o_try_acquire(),
     });
     pending.len()
@@ -4465,6 +4470,7 @@ impl ControlClient {
                             if !worker.queue(R2oQuicDiscoveryTask {
                                 server: pending.server,
                                 snapshot: pending.snapshot,
+                                r2o_mark: pending.r2o_mark,
                                 permit,
                             }) {
                                 quic_trial_cooldowns.remove(&pending.server.ip());
@@ -4651,7 +4657,7 @@ impl ControlClient {
                             "наблюдение QUIC: после повтора Initial ответ не виден минимум 2 с: {client} -> {server}; это не подтверждает блокировку"
                         );
                     }
-                    let Some((_, catalog, _, _)) = &mut discovery else {
+                    let Some((_, catalog, _, r2o_mark)) = &mut discovery else {
                         std::io::stdout().flush()?;
                         continue;
                     };
@@ -4717,6 +4723,7 @@ impl ControlClient {
                         server,
                         snapshot,
                         captured,
+                        *r2o_mark,
                         &measurement_gate,
                     );
                     println!(
@@ -5662,10 +5669,11 @@ impl ControlClient {
         commands: &SyncSender<HttpSearchCommand>,
         cancel: &AtomicBool,
         measurement_permit: &mut r2o_controller::r2o_resource_limit::R2oMeasurementPermit,
+        r2o_mark: Option<u32>,
     ) -> Result<Option<(String, String)>, Box<dyn Error>> {
         use r2o_controller::quic_replay::QuicReplayProbe;
 
-        let mut probe = match QuicReplayProbe::prepare(server, snapshot, None) {
+        let mut probe = match QuicReplayProbe::prepare(server, snapshot, r2o_mark) {
             Ok(probe) => probe,
             Err(error) => {
                 eprintln!("QUIC replay не подготовлен: {error}");
@@ -7479,6 +7487,7 @@ mod tests {
                 "127.0.0.1:443".parse().unwrap(),
                 vec![1, 2, 3],
                 std::time::Instant::now(),
+                Some(77),
                 &gate,
             ),
             1
@@ -7486,6 +7495,7 @@ mod tests {
         gate.r2o_scheduler_tick();
         let (entry, permit) = super::r2o_take_ready_quic_discovery(&mut pending, &gate).unwrap();
         assert_eq!(entry.snapshot, [1, 2, 3]);
+        assert_eq!(entry.r2o_mark, Some(77));
         drop(permit);
         assert!(gate.r2o_try_acquire().is_none());
 
@@ -7498,6 +7508,7 @@ mod tests {
                 "127.0.0.1:443".parse().unwrap(),
                 vec![4, 5, 6],
                 std::time::Instant::now(),
+                None,
                 &full_gate,
             ),
             1
@@ -8199,6 +8210,7 @@ mod tests {
         assert!(worker.queue(R2oQuicDiscoveryTask {
             server: endpoint,
             snapshot,
+            r2o_mark: None,
             permit,
         }));
         let mut saw_tcp_while_quic_active = false;
@@ -8377,11 +8389,13 @@ mod tests {
         let first = R2oQuicDiscoveryTask {
             server: "198.51.100.10:443".parse().unwrap(),
             snapshot: Vec::new(),
+            r2o_mark: None,
             permit: gate.r2o_try_acquire().unwrap(),
         };
         let second = R2oQuicDiscoveryTask {
             server: "198.51.100.20:443".parse().unwrap(),
             snapshot: Vec::new(),
+            r2o_mark: None,
             permit: gate.r2o_try_acquire().unwrap(),
         };
         assert!(worker.queue(first));
@@ -8454,11 +8468,13 @@ mod tests {
         let first = R2oQuicDiscoveryTask {
             server: "198.51.100.10:443".parse().unwrap(),
             snapshot: Vec::new(),
+            r2o_mark: None,
             permit: gate.r2o_try_acquire().unwrap(),
         };
         let second = R2oQuicDiscoveryTask {
             server: "198.51.100.20:443".parse().unwrap(),
             snapshot: Vec::new(),
+            r2o_mark: None,
             permit: gate.r2o_try_acquire().unwrap(),
         };
 
@@ -8479,6 +8495,47 @@ mod tests {
         }
 
         assert_eq!(состояние.2.load(Ordering::Relaxed), 2);
+        assert!(worker.has_capacity());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_quic_worker_передает_метку_в_исполнитель() {
+        use super::{R2oQuicDiscoveryTask, R2oQuicDiscoveryWorker};
+        use std::sync::{Arc, mpsc};
+
+        let (метка_sender, метка_receiver) = mpsc::channel();
+        let mut worker =
+            R2oQuicDiscoveryWorker::r2o_new_with_runner(Arc::new(move |task, _, _| {
+                метка_sender
+                    .send(task.r2o_mark)
+                    .map_err(|error| error.to_string())?;
+                Ok(None)
+            }));
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
+        assert!(worker.queue(R2oQuicDiscoveryTask {
+            server: "198.51.100.77:443".parse().unwrap(),
+            snapshot: Vec::new(),
+            r2o_mark: Some(77),
+            permit: gate.r2o_try_acquire().unwrap(),
+        }));
+
+        assert_eq!(
+            метка_receiver
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap(),
+            Some(77)
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if let Some(outcome) = worker.try_outcome() {
+                assert_eq!(outcome.server, "198.51.100.77:443".parse().unwrap());
+                assert!(matches!(outcome.result, Ok(None)));
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         assert!(worker.has_capacity());
     }
 
@@ -8516,6 +8573,7 @@ mod tests {
         assert!(worker.queue(R2oQuicDiscoveryTask {
             server,
             snapshot: Vec::new(),
+            r2o_mark: None,
             permit: gate.r2o_try_acquire().unwrap(),
         }));
         started_receiver
