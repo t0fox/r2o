@@ -9546,6 +9546,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn r2o_discovery_worker_keeps_waiting_targets_promotable() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, mpsc};
+
         fn target(host: &str) -> r2o_controller::discovery::DiscoveryTarget {
             r2o_controller::discovery::DiscoveryTarget {
                 host: host.into(),
@@ -9558,13 +9561,27 @@ mod tests {
         let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(2);
         let first_permit = gate.r2o_try_acquire().unwrap();
         let second_permit = gate.r2o_try_acquire().unwrap();
-        let mut worker = super::DiscoveryWorker::new(None, gate);
+        let (started_sender, started_receiver) = mpsc::channel();
+        let runner = Arc::new(
+            move |target: r2o_controller::discovery::DiscoveryTarget, _cancel: Arc<AtomicBool>| {
+                started_sender.send(target.host.clone()).unwrap();
+                super::DiscoveryOutcome {
+                    target,
+                    plan_text: Some("план".into()),
+                    detail: "завершено".into(),
+                    queue_expired: false,
+                    direct_clear: false,
+                    retry_after: None,
+                }
+            },
+        );
+        let mut worker = super::DiscoveryWorker::r2o_new_with_runner(gate, runner);
         let first = target("first.example");
         let second = target("second.example");
         let third = target("third.example");
 
         assert!(worker.queue(first.clone()));
-        assert!(worker.queue(second));
+        assert!(worker.queue(second.clone()));
         assert!(worker.queue(third.clone()));
         let waiting_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
@@ -9585,16 +9602,26 @@ mod tests {
         assert!(worker.queue(third.clone()));
         drop(first_permit);
 
-        let outcome_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        let outcome = loop {
-            if let Some(outcome) = worker.try_outcome() {
-                break outcome;
-            }
-            assert!(std::time::Instant::now() < outcome_deadline);
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        };
-        assert_eq!(outcome.target, third);
+        assert_eq!(
+            started_receiver
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("повышенная цель должна запуститься первой"),
+            third.host
+        );
         drop(second_permit);
+
+        assert_eq!(
+            started_receiver
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("первая старая цель должна запуститься после горячей"),
+            first.host
+        );
+        assert_eq!(
+            started_receiver
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("последняя цель должна сохранить порядок FIFO"),
+            second.host
+        );
     }
 
     #[cfg(unix)]

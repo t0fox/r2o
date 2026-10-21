@@ -5516,3 +5516,14 @@ musl release собрал пять статически связанных пр�
 дошла до тестов: Cargo выбрал x86-64 `cc` для ARM64-цели. Повтор с явным
 `aarch64-linux-gnu-gcc` прошёл (`.rea/r2o-scheduler-fresh-suspicion-arm64-linker-retry.log`).
 Другие архитектуры не тестировались.
+
+Сценарий приоритета «горячей» цели в `test_sched.c` (строки 5091–5124)
+проверяет, что повторное подозрение поднимает уже ожидающую цель выше старых,
+а оставшиеся продолжают в FIFO. Существующее полное REA Evidence
+`d2k_sched_tick` выше переиспользовано; SHA-256 исходников совпадают с таблицей.
+В Rust runtime-тесте
+`r2o_discovery_worker_keeps_waiting_targets_promotable` после результата
+повышенной цели теперь проверяется запуск обеих оставшихся задач в исходном
+порядке. ARM64/QEMU focused-прогон прошёл: 1 тест, 0 ошибок
+(`.rea/r2o-scheduler-hot-queue-order-arm64-final.log`). Полный C `test_sched`
+для тех же хешей прошёл на ARM64/QEMU (`.rea/r2o-donor-test-sched-aarch64.log`).
