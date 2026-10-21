@@ -511,6 +511,7 @@ fn журнал_сохраняет_все_типы_подозрений_r2o() {
             R2oTcpFinRetryEvent {
                 key: tcp_key,
                 client_is_low: false,
+                planned: false,
             }
             .event_body()
             .unwrap(),

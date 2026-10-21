@@ -4,7 +4,7 @@ use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-pub const PROTOCOL_VERSION: u16 = 35;
+pub const PROTOCOL_VERSION: u16 = 36;
 pub const FRAME_MAX: usize = 65_536;
 pub const KEY_LEN: usize = 38;
 pub const MAX_DNS_NAME_LEN: usize = 253;
@@ -187,6 +187,7 @@ pub struct R2oTcpStallEvent {
 pub struct R2oTcpFinRetryEvent {
     pub key: [u8; KEY_LEN],
     pub client_is_low: bool,
+    pub planned: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -200,9 +201,10 @@ impl R2oTcpFinRetryEvent {
         if !valid_flow_key(&self.key) || self.key[37] != 6 {
             return None;
         }
-        let mut body = Vec::with_capacity(KEY_LEN + 1);
+        let mut body = Vec::with_capacity(KEY_LEN + 2);
         body.extend_from_slice(&self.key);
         body.push(u8::from(self.client_is_low));
+        body.push(u8::from(self.planned));
         Some(body)
     }
 }
@@ -1246,19 +1248,21 @@ pub fn decode_r2o_tcp_silence(frame: &Frame) -> Result<R2oTcpSilenceEvent, &'sta
 }
 
 pub fn decode_r2o_tcp_fin_retry(frame: &Frame) -> Result<R2oTcpFinRetryEvent, &'static str> {
-    if frame.kind != EVENT_R2O_TCP_FIN_RETRY || frame.body.len() != KEY_LEN + 1 {
+    if frame.kind != EVENT_R2O_TCP_FIN_RETRY || frame.body.len() != KEY_LEN + 2 {
         return Err("неверная длина события повтора FIN в TCP");
     }
     let key: [u8; KEY_LEN] = frame.body[..KEY_LEN]
         .try_into()
         .map_err(|_| "неверный ключ TCP-потока с повтором FIN")?;
     let client_is_low = frame.body[KEY_LEN];
-    if !valid_flow_key(&key) || key[37] != 6 || client_is_low > 1 {
+    let planned = frame.body[KEY_LEN + 1];
+    if !valid_flow_key(&key) || key[37] != 6 || client_is_low > 1 || planned > 1 {
         return Err("событие повтора FIN содержит неверный TCP-поток");
     }
     Ok(R2oTcpFinRetryEvent {
         key,
         client_is_low: client_is_low == 1,
+        planned: planned == 1,
     })
 }
 

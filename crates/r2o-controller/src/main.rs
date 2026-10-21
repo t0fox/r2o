@@ -4164,9 +4164,39 @@ impl ControlClient {
                     let event = decode_r2o_tcp_fin_retry(&frame)
                         .map_err(|error| format!("событие повтора FIN TCP: {error}"))?;
                     let (client, server) = flow_socket_addresses(&event.key, event.client_is_low);
-                    println!(
-                        "наблюдение TCP: клиент {client} повторил FIN после видимого ответа {server}; это не подтверждает блокировку"
-                    );
+                    if event.planned {
+                        println!(
+                            "наблюдение TCP: поток {client} -> {server} повторил FIN под применённым планом; парную проверку без плана не запускаю"
+                        );
+                    } else {
+                        println!(
+                            "наблюдение TCP: поток {client} -> {server} повторил FIN без применённого плана; запускаю парную проверку объёма ответа"
+                        );
+                        if let Some(worker) = &mut r2o_late_rx {
+                            let now = std::time::Instant::now();
+                            let mark = discovery.as_ref().and_then(|(_, _, _, mark)| *mark);
+                            match r2o_late_rx_hellos.take_for_fin_retry(&event, mark, now) {
+                                Some(input) => {
+                                    if worker.queue(input, now) {
+                                        println!(
+                                            "повтор FIN поставил парную identity/gzip RX-проверку для {client} -> {server}"
+                                        );
+                                    } else {
+                                        println!(
+                                            "парная RX-проверка для {client} -> {server} пропущена: очередь занята или действует десятиминутный предел для имени"
+                                        );
+                                    }
+                                }
+                                None => println!(
+                                    "парная RX-проверка для {client} -> {server} не запущена: нет свежего полного ClientHello с SNI"
+                                ),
+                            }
+                        } else {
+                            println!(
+                                "парная RX-проверка для {client} -> {server} не запущена: измеритель не подключён"
+                            );
+                        }
+                    }
                     std::io::stdout().flush()?;
                     continue;
                 }

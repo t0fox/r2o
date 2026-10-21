@@ -223,6 +223,7 @@ fn событие_повтора_fin_tcp_кодируется_и_строго_п
     let event = R2oTcpFinRetryEvent {
         key,
         client_is_low: true,
+        planned: false,
     };
     let frame = Frame {
         kind: EVENT_R2O_TCP_FIN_RETRY,
@@ -230,9 +231,29 @@ fn событие_повтора_fin_tcp_кодируется_и_строго_п
     };
     assert_eq!(decode_r2o_tcp_fin_retry(&frame).unwrap(), event);
 
+    let planned = R2oTcpFinRetryEvent {
+        planned: true,
+        ..event.clone()
+    };
+    let planned_frame = Frame {
+        kind: EVENT_R2O_TCP_FIN_RETRY,
+        body: planned.event_body().unwrap(),
+    };
+    assert_eq!(decode_r2o_tcp_fin_retry(&planned_frame).unwrap(), planned);
+
     let mut invalid = frame;
     invalid.body[KEY_LEN] = 2;
     assert!(decode_r2o_tcp_fin_retry(&invalid).is_err());
+
+    let mut invalid = event.event_body().unwrap();
+    invalid[KEY_LEN + 1] = 2;
+    assert!(
+        decode_r2o_tcp_fin_retry(&Frame {
+            kind: EVENT_R2O_TCP_FIN_RETRY,
+            body: invalid,
+        })
+        .is_err()
+    );
 }
 
 #[test]

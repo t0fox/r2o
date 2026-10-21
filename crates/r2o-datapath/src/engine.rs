@@ -841,6 +841,7 @@ impl TcpSessions {
                         fin_retry_event = Some(R2oTcpFinRetryEvent {
                             key: key.wire_key(),
                             client_is_low: session.initiator == key.low,
+                            planned: session.plan_done,
                         });
                     }
                 } else {
@@ -2110,6 +2111,7 @@ mod tests {
         let events = sessions.fin_retry_candidates();
         assert_eq!(events.len(), 1);
         assert!(events[0].client_is_low);
+        assert!(!events[0].planned);
         assert_eq!(events[0].key[37], 6);
         assert_eq!(
             decide_with_session(&mut sessions, &plan, &fin),
@@ -2126,6 +2128,37 @@ mod tests {
             &ipv4_tcp_packet(server, client, 0x11, 124, 906, &[]),
         );
         assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn tcp_повтор_fin_передаёт_признак_применённого_плана() {
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let start = Instant::now();
+        let mut sessions = TcpSessions::default();
+        sessions.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start);
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+            start + Duration::from_millis(50),
+        );
+        let mut hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello());
+        hello[28..32].copy_from_slice(&901_u32.to_be_bytes());
+        sessions.track_packet(&hello, start + Duration::from_millis(100));
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x18, 124, 900, &[0x17, 0x03, 0x03, 0, 1, 0]),
+            start + Duration::from_millis(150),
+        );
+        let key = sessions.flows.keys().next().unwrap().wire_key();
+        sessions.mark_plan_done(&key);
+
+        let fin_sequence = 701 + client_hello().len() as u32;
+        let fin = ipv4_tcp_packet(client, server, 0x11, 64, fin_sequence, &[]);
+        sessions.track_packet(&fin, start + Duration::from_millis(200));
+        sessions.track_packet(&fin, start + Duration::from_millis(300));
+
+        let events = sessions.fin_retry_candidates();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].planned);
     }
 
     #[test]

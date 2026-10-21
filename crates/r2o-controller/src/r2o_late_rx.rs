@@ -1,5 +1,7 @@
 use crate::{discovery::DiscoveryTarget, fetch::FetchOptions};
-use r2k_core::control::{HelloEvent, R2oTcpRstAfterAppEvent, R2oTcpStallEvent};
+use r2k_core::control::{
+    HelloEvent, R2oTcpFinRetryEvent, R2oTcpRstAfterAppEvent, R2oTcpStallEvent,
+};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::Instant;
@@ -98,6 +100,18 @@ impl R2oLateRxCache {
         self.take_for_flow(&event.key, event.client_is_low, mark, now)
     }
 
+    pub fn take_for_fin_retry(
+        &mut self,
+        event: &R2oTcpFinRetryEvent,
+        mark: Option<u32>,
+        now: Instant,
+    ) -> Option<R2oLateRxInput> {
+        if event.planned {
+            return None;
+        }
+        self.take_for_flow(&event.key, event.client_is_low, mark, now)
+    }
+
     fn take_for_flow(
         &mut self,
         key: &[u8; r2k_core::control::KEY_LEN],
@@ -159,7 +173,8 @@ impl R2oLateRxCache {
 mod tests {
     use super::{R2O_LATE_RX_CACHE_CAPACITY, R2oLateRxCache};
     use r2k_core::control::{
-        HelloEvent, R2oTcpRstAfterAppEvent, R2oTcpStallEvent, SHAPE_LEGACY, SHAPE_MODERN,
+        HelloEvent, R2oTcpFinRetryEvent, R2oTcpRstAfterAppEvent, R2oTcpStallEvent, SHAPE_LEGACY,
+        SHAPE_MODERN,
     };
     use std::time::{Duration, Instant};
 
@@ -256,6 +271,29 @@ mod tests {
         assert_eq!(input.options.mark, Some(17));
         assert!(input.discovery_target.is_some());
         assert!(cache.take_for_tcp_stall(&event, Some(17), now).is_none());
+    }
+
+    #[test]
+    fn парная_проверка_fin_retry_разрешена_только_без_плана() {
+        let now = Instant::now();
+        let mut cache = R2oLateRxCache::default();
+        let hello = hello(SHAPE_MODERN, true, Some(812));
+        assert!(cache.capture(&hello, now));
+
+        let planned = R2oTcpFinRetryEvent {
+            key: hello.key,
+            client_is_low: true,
+            planned: true,
+        };
+        assert!(cache.take_for_fin_retry(&planned, None, now).is_none());
+
+        let unplanned = R2oTcpFinRetryEvent {
+            planned: false,
+            ..planned
+        };
+        let input = cache.take_for_fin_retry(&unplanned, None, now).unwrap();
+        assert_eq!(input.options.name, "example.com");
+        assert_eq!(input.options.wire_len, Some(812));
     }
 
     #[test]
