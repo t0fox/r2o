@@ -411,10 +411,12 @@ fn r2o_событие_молчания_tcp_проверяет_ключ_напр�
 
 #[test]
 fn encodes_http_probe_command_and_round_trips_its_correlated_ack() {
-    let plan = b"R2OP-plan-fixture";
+    let mut plan = r2o_tls_plan_records();
+    plan[6..8].copy_from_slice(&11_u16.to_be_bytes());
+    *plan.last_mut().unwrap() = r2k_core::plan::PROTO_HTTP;
     let trial_id = [0x5a; 16];
     let bytes =
-        encode_set_name_probe("example.test", SHAPE_HTTP, 6, 40123, plan, trial_id).unwrap();
+        encode_set_name_probe("example.test", SHAPE_HTTP, 6, 40123, &plan, trial_id).unwrap();
     let command = read_frame(&mut Cursor::new(bytes)).unwrap();
     assert_eq!(command.kind, COMMAND_SET_NAME_PROBE);
     assert_eq!(command.body[0], 12);
@@ -427,6 +429,32 @@ fn encodes_http_probe_command_and_round_trips_its_correlated_ack() {
     let ack = decode_ack(&ack_frame).unwrap();
     assert!(ack.ok);
     assert_eq!(ack.trial_id, Some(trial_id));
+}
+
+#[test]
+fn tcp_probe_encoder_accepts_tls_shapes_and_rejects_incompatible_plans() {
+    let plan = r2o_tls_plan_records();
+    for shape in [SHAPE_MODERN, SHAPE_ECH_TCP] {
+        assert!(encode_set_name_probe("example.test", shape, 4, 40123, &plan, [0x31; 16]).is_ok());
+    }
+    assert!(
+        encode_set_name_probe("example.test", SHAPE_QUIC, 4, 40123, &plan, [0x31; 16]).is_err()
+    );
+
+    let mut http_plan = plan;
+    http_plan[6..8].copy_from_slice(&11_u16.to_be_bytes());
+    *http_plan.last_mut().unwrap() = r2k_core::plan::PROTO_HTTP;
+    assert!(
+        encode_set_name_probe(
+            "example.test",
+            SHAPE_MODERN,
+            4,
+            40123,
+            &http_plan,
+            [0x31; 16]
+        )
+        .is_err()
+    );
 }
 
 fn voice_plan_records() -> Vec<u8> {

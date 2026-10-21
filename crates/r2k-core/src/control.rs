@@ -1,10 +1,10 @@
-use crate::plan::{PROTO_VOICE, Plan};
+use crate::plan::{PROTO_HTTP, PROTO_VOICE, Plan};
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-pub const PROTOCOL_VERSION: u16 = 37;
+pub const PROTOCOL_VERSION: u16 = 38;
 pub const FRAME_MAX: usize = 65_536;
 pub const KEY_LEN: usize = 38;
 pub const MAX_DNS_NAME_LEN: usize = 253;
@@ -897,8 +897,13 @@ pub fn encode_set_name_probe(
     if name.is_empty() || name.len() > u8::MAX as usize {
         return Err("имя должно занимать от 1 до 255 байт");
     }
-    if shape != SHAPE_HTTP || !matches!(family, 4 | 6) || source_port == 0 {
-        return Err("HTTP probe требует форму HTTP, IP family и ненулевой source port");
+    if !valid_name_probe_plan_records(shape, plan_records)
+        || !matches!(family, 4 | 6)
+        || source_port == 0
+    {
+        return Err(
+            "временная TCP-проба требует совместимые форму и план, IP family и ненулевой source port",
+        );
     }
     let mut body = Vec::with_capacity(5 + name.len() + plan_records.len() + trial_id.len());
     body.push(name.len() as u8);
@@ -945,8 +950,10 @@ pub fn encode_delete_name_probe(
     if name.is_empty() || name.len() > u8::MAX as usize {
         return Err("имя должно занимать от 1 до 255 байт");
     }
-    if shape != SHAPE_HTTP || !matches!(family, 4 | 6) || source_port == 0 {
-        return Err("HTTP probe delete требует форму HTTP, IP family и ненулевой source port");
+    if !valid_tcp_probe_shape(shape) || !matches!(family, 4 | 6) || source_port == 0 {
+        return Err(
+            "удаление временной TCP-пробы требует поддерживаемую форму, IP family и ненулевой source port",
+        );
     }
     let mut body = Vec::with_capacity(5 + name.len());
     body.push(name.len() as u8);
@@ -954,6 +961,21 @@ pub fn encode_delete_name_probe(
     body.extend_from_slice(&[shape, family]);
     body.extend_from_slice(&source_port.to_be_bytes());
     encode_frame(COMMAND_DEL_NAME_PROBE, &body)
+}
+
+fn valid_tcp_probe_shape(shape: u8) -> bool {
+    matches!(
+        shape,
+        SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP | SHAPE_HTTP
+    )
+}
+
+fn valid_name_probe_plan_records(shape: u8, records: &[u8]) -> bool {
+    Plan::parse(records).is_ok_and(|plan| match shape {
+        SHAPE_HTTP => plan.transport == 6 && plan.proto == PROTO_HTTP,
+        SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP => plan.transport == 6 && plan.proto == 1,
+        _ => false,
+    })
 }
 
 pub fn encode_ack(command: u16, ok: bool, reason: u8) -> Result<Vec<u8>, &'static str> {

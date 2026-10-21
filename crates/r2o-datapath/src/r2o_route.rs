@@ -1214,6 +1214,13 @@ mod tests {
         let _watch_opened = monitor.r2o_open_watch().is_ok();
         let mut gate = R2oRouteGate::default();
         let errors = monitor.r2o_refresh(&mut gate);
+        if errors
+            .iter()
+            .any(|error| error.contains("Operation not supported (os error 95)"))
+        {
+            eprintln!("текущее ядро не предоставляет чтение rtnetlink для правил маршрутизации");
+            return;
+        }
         assert!(
             errors.iter().all(|error| {
                 !error.starts_with("правила Ipv4:") && !error.starts_with("маршрут Ipv4:")

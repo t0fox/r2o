@@ -325,6 +325,16 @@ impl NamePlans {
             }
             return self.find_addr(view.dst, shape);
         };
+        if let Some(probe) = self.probes.get(&NameProbeKey {
+            name: NamePlanKey {
+                host: canonical_plan_name(sni, shape)?,
+                family: view.family,
+                shape,
+            },
+            source_port: tcp.source_port,
+        }) {
+            return Some(&probe.plan);
+        }
         self.find(sni, view.family, shape)
             .or_else(|| {
                 (shape == SHAPE_ECH_TCP)
@@ -835,7 +845,7 @@ impl NamePlans {
         };
         let family = body[2 + name_len];
         let source_port = u16::from_be_bytes([body[3 + name_len], body[4 + name_len]]);
-        if shape != SHAPE_HTTP || !matches!(family, 4 | 6) || source_port == 0 {
+        if !valid_tcp_shape(shape) || !matches!(family, 4 | 6) || source_port == 0 {
             return (false, control::ACK_BAD_ARGS);
         }
         let key = NameProbeKey {
@@ -850,8 +860,12 @@ impl NamePlans {
             Ok(plan) => plan,
             Err(_) => return (false, control::ACK_BAD_PLAN),
         };
-        if plan.transport != 6 || plan.proto != PROTO_HTTP || validate_runtime_plan(&plan).is_err()
-        {
+        let proto_matches = match shape {
+            SHAPE_HTTP => plan.proto == PROTO_HTTP,
+            SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP => plan.proto == 1,
+            _ => false,
+        };
+        if plan.transport != 6 || !proto_matches || validate_runtime_plan(&plan).is_err() {
             return (false, control::ACK_BAD_PLAN);
         }
         if !self.probes.contains_key(&key) && self.probes.len() >= MAX_NAME_PLANS {
@@ -1087,7 +1101,7 @@ impl NamePlans {
         };
         let family = body[2 + name_len];
         let source_port = u16::from_be_bytes([body[3 + name_len], body[4 + name_len]]);
-        if shape != SHAPE_HTTP || !matches!(family, 4 | 6) || source_port == 0 {
+        if !valid_tcp_shape(shape) || !matches!(family, 4 | 6) || source_port == 0 {
             return (false, control::ACK_BAD_ARGS);
         }
         self.probes.remove(&NameProbeKey {
@@ -1719,10 +1733,10 @@ mod tests {
     }
     use r2k_core::control::{
         self, COMMAND_CLEAR, COMMAND_DEL_ADDR, COMMAND_DEL_BYPASS, COMMAND_DEL_NAME,
-        COMMAND_DEL_SUFFIX, COMMAND_SET_ADDR, COMMAND_SET_BYPASS, COMMAND_SET_NAME,
-        COMMAND_SET_NAME_PROBE, COMMAND_SET_SUFFIX, EVENT_HELLO, Frame, SHAPE_HTTP, SHAPE_LEGACY,
-        SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, encode_delete_addr, encode_set_addr,
-        encode_set_voice_addr, encode_set_voice_addr_probe,
+        COMMAND_DEL_NAME_PROBE, COMMAND_DEL_SUFFIX, COMMAND_SET_ADDR, COMMAND_SET_BYPASS,
+        COMMAND_SET_NAME, COMMAND_SET_NAME_PROBE, COMMAND_SET_SUFFIX, EVENT_HELLO, Frame,
+        SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, encode_delete_addr,
+        encode_set_addr, encode_set_voice_addr, encode_set_voice_addr_probe,
     };
     use std::net::{IpAddr, Ipv4Addr};
     use std::os::unix::fs::PermissionsExt;
@@ -2405,6 +2419,72 @@ mod tests {
             plans
                 .applied_event_for_packet(&http_tcp_packet(host, source_port + 1), 43)
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn tls_probe_plan_matches_only_its_source_port_and_reports_temporary_applied() {
+        let host = "example.test";
+        let source_port = 50_000_u16;
+        let trial_id = [0xabu8; 16];
+        let probe_id = [0x33; 16];
+        let mut plan = plan_header(11, 2);
+        plan.extend_from_slice(&[0x00, 0x01, 0x00, 0x10]);
+        plan.extend_from_slice(&probe_id);
+        plan.extend_from_slice(&[0x00, 0x02, 0x00, 0x02, 0x06, 1]);
+        let mut body = vec![host.len() as u8];
+        body.extend_from_slice(host.as_bytes());
+        body.extend_from_slice(&[SHAPE_MODERN, 4]);
+        body.extend_from_slice(&source_port.to_be_bytes());
+        body.extend_from_slice(&plan);
+        body.extend_from_slice(&trial_id);
+
+        let mut plans = NamePlans::default();
+        assert!(plans.handle(&set_name(host)).ok);
+        let ack = plans.handle(&Frame {
+            kind: COMMAND_SET_NAME_PROBE,
+            body,
+        });
+        assert!(ack.ok, "TLS probe plan was rejected: {}", ack.reason);
+        assert_eq!(ack.trial_id, Some(trial_id));
+
+        let packet = tcp_tls_packet(host);
+        assert_eq!(
+            plans.select(&packet).map(|selected| selected.id),
+            Some(probe_id)
+        );
+        let applied = plans.applied_event_for_packet(&packet, 44).unwrap();
+        assert_eq!(applied.plan_id, probe_id);
+        assert_eq!(applied.trial_id, trial_id);
+        assert!(applied.binding.temporary);
+        assert_eq!(applied.binding.shape, SHAPE_MODERN);
+
+        let mut other_port = packet.clone();
+        other_port[20..22].copy_from_slice(&(source_port + 1).to_be_bytes());
+        assert_eq!(
+            plans.select(&other_port).map(|selected| selected.id),
+            Some([0; 16])
+        );
+        let applied = plans.applied_event_for_packet(&other_port, 45).unwrap();
+        assert_eq!(applied.plan_id, [0; 16]);
+        assert_eq!(applied.trial_id, [0; 16]);
+        assert!(!applied.binding.temporary);
+
+        let mut delete_body = vec![host.len() as u8];
+        delete_body.extend_from_slice(host.as_bytes());
+        delete_body.extend_from_slice(&[SHAPE_MODERN, 4]);
+        delete_body.extend_from_slice(&source_port.to_be_bytes());
+        assert!(
+            plans
+                .handle(&Frame {
+                    kind: COMMAND_DEL_NAME_PROBE,
+                    body: delete_body,
+                })
+                .ok
+        );
+        assert_eq!(
+            plans.select(&packet).map(|selected| selected.id),
+            Some([0; 16])
         );
     }
 
