@@ -8192,6 +8192,186 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn r2o_quic_параллельные_адресные_пробы_сохраняют_поколения_и_снимаются_точно() {
+        use super::{HttpSearchCommand, R2oQuicDiscoveryTask, R2oQuicDiscoveryWorker};
+        use std::collections::HashSet;
+        use std::os::unix::net::UnixStream;
+        use std::sync::{Arc, Barrier};
+
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(2);
+        let plan_records = Arc::new(
+            super::compile_text(
+                "r2o-plan 1 10\nid 11111111111111111111111111111111\nproto udp quic\nquicsplit 1\n",
+            )
+            .unwrap(),
+        );
+        let barrier = Arc::new(Barrier::new(2));
+        let runner_barrier = Arc::clone(&barrier);
+        let runner_plan = Arc::clone(&plan_records);
+        let mut worker = R2oQuicDiscoveryWorker::r2o_new_with_runner(Arc::new(
+            move |task, commands, _cancel| {
+                let server = task.server;
+                let _permit = task.permit;
+                let trial_byte = match server.ip() {
+                    std::net::IpAddr::V4(address) => address.octets()[3],
+                    std::net::IpAddr::V6(_) => return Err("ожидался IPv4-адрес".into()),
+                };
+                let local = std::net::SocketAddr::new(
+                    "192.0.2.10".parse().unwrap(),
+                    41000 + u16::from(trial_byte),
+                );
+                let trial_id = [trial_byte; 16];
+                let set = super::encode_set_addr_probe(
+                    local,
+                    server,
+                    super::ADDR_PROBE_LEASE_MAX_MS,
+                    &runner_plan,
+                    trial_id,
+                )
+                .map_err(str::to_owned)?;
+                let delete = super::encode_delete_addr_probe(local, server, trial_id)
+                    .map_err(str::to_owned)?;
+                let ack = super::ask_http_controller(&commands, |reply| {
+                    HttpSearchCommand::R2oInstallQuicProbe {
+                        command: set,
+                        delete: delete.clone(),
+                        trial_id,
+                        reply,
+                    }
+                })?;
+                if !ack.ok || ack.trial_id != Some(trial_id) {
+                    return Err("точная QUIC-проба не получила подтверждение".into());
+                }
+                runner_barrier.wait();
+                super::ask_http_controller(&commands, |reply| {
+                    HttpSearchCommand::R2oDeleteQuicProbe {
+                        command: delete,
+                        reply,
+                    }
+                })?;
+                Ok(None)
+            },
+        ));
+
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        let control_thread = std::thread::spawn(move || {
+            let mut active = HashSet::new();
+            let mut probes = Vec::new();
+            let mut maximum_active = 0;
+            for _ in 0..4 {
+                let frame = read_frame(&mut peer).unwrap();
+                match frame.kind {
+                    super::COMMAND_SET_ADDR_PROBE => {
+                        let key: [u8; KEY_LEN] = frame.body[..KEY_LEN].try_into().unwrap();
+                        let trial_id: [u8; 16] =
+                            frame.body[KEY_LEN..KEY_LEN + 16].try_into().unwrap();
+                        assert_eq!(key[0], 4);
+                        assert_eq!(key[37], 17);
+                        assert_eq!(&key[1..5], &[192, 0, 2, 10]);
+                        assert_eq!(u16::from_be_bytes([key[35], key[36]]), 443);
+                        assert_eq!(trial_id, [key[20]; 16]);
+                        assert!(active.insert((key, trial_id)));
+                        maximum_active = maximum_active.max(active.len());
+                        probes.push((key, trial_id));
+                        peer.write_all(
+                            &encode_ack_for_trial(
+                                super::COMMAND_SET_ADDR_PROBE,
+                                true,
+                                0,
+                                Some(trial_id),
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap();
+                    }
+                    super::COMMAND_DEL_ADDR_PROBE => {
+                        let key: [u8; KEY_LEN] = frame.body[..KEY_LEN].try_into().unwrap();
+                        let trial_id: [u8; 16] =
+                            frame.body[KEY_LEN..KEY_LEN + 16].try_into().unwrap();
+                        assert!(active.remove(&(key, trial_id)));
+                        peer.write_all(
+                            &encode_ack(super::COMMAND_DEL_ADDR_PROBE, true, 0).unwrap(),
+                        )
+                        .unwrap();
+                    }
+                    other => panic!("неожиданная команда QUIC-пробы: {other}"),
+                }
+            }
+            assert_eq!(maximum_active, 2);
+            assert_eq!(probes.len(), 2);
+            assert!(active.is_empty());
+            let mut destinations = probes
+                .iter()
+                .map(|(key, _)| {
+                    std::net::Ipv4Addr::from(<[u8; 4]>::try_from(&key[17..21]).unwrap())
+                })
+                .collect::<Vec<_>>();
+            destinations.sort_unstable();
+            assert_eq!(
+                destinations,
+                [
+                    std::net::Ipv4Addr::new(198, 51, 100, 10),
+                    std::net::Ipv4Addr::new(198, 51, 100, 20)
+                ]
+            );
+            assert_ne!(probes[0].1, probes[1].1);
+            assert_ne!(
+                [probes[0].0[33], probes[0].0[34]],
+                [probes[1].0[33], probes[1].0[34]]
+            );
+        });
+
+        let mut client = ControlClient {
+            socket,
+            pending_events: VecDeque::new(),
+            pending_applied_events: VecDeque::new(),
+            http_search_started: std::collections::HashMap::new(),
+            http_challenge_cooldowns: std::collections::HashMap::new(),
+        };
+        let mut catalog = Catalog::default();
+        let first = R2oQuicDiscoveryTask {
+            server: "198.51.100.10:443".parse().unwrap(),
+            snapshot: Vec::new(),
+            permit: gate.r2o_try_acquire().unwrap(),
+        };
+        let second = R2oQuicDiscoveryTask {
+            server: "198.51.100.20:443".parse().unwrap(),
+            snapshot: Vec::new(),
+            permit: gate.r2o_try_acquire().unwrap(),
+        };
+        assert!(worker.queue(first));
+        assert!(worker.queue(second));
+        assert!(!worker.has_capacity());
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut completed = HashSet::new();
+        while completed.len() < 2 {
+            if let Some(command) = worker.try_command() {
+                client
+                    .service_http_search_command(
+                        command,
+                        &mut catalog,
+                        std::path::Path::new("параллельные-адресные-пробы.json"),
+                    )
+                    .unwrap();
+                continue;
+            }
+            if let Some(outcome) = worker.try_outcome() {
+                assert!(matches!(outcome.result, Ok(None)));
+                assert!(completed.insert(outcome.server));
+            } else {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+
+        control_thread.join().unwrap();
+        assert!(catalog.boxes.is_empty());
+        assert!(worker.has_capacity());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn r2o_quic_worker_одновременно_изолирует_два_адресных_опыта() {
         use super::{R2oQuicDiscoveryTask, R2oQuicDiscoveryWorker};
         use std::sync::atomic::{AtomicUsize, Ordering};
