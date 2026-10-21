@@ -1615,6 +1615,23 @@ fn r2o_http_live_cut_recheck(response_code: u8, live: bool) -> bool {
 }
 
 #[cfg(unix)]
+fn r2o_http_search_from_response(
+    response: &r2k_core::control::HttpResponseEvent,
+) -> Option<(
+    r2o_controller::discovery::DiscoveryTarget,
+    &[u8],
+    r2o_controller::http_search::Answer,
+)> {
+    let target = r2o_controller::discovery::DiscoveryTarget::from_http_response(response)?;
+    let expected = match response.code {
+        3 => r2o_controller::http_search::Answer::Injected,
+        4 => r2o_controller::http_search::Answer::Cut,
+        _ => return None,
+    };
+    Some((target, &response.path, expected))
+}
+
+#[cfg(unix)]
 #[derive(Clone, Copy)]
 struct HttpSearchWindow {
     started: std::time::Instant,
@@ -4509,29 +4526,6 @@ impl ControlClient {
                     if let Some((host, address)) = target_from_portal(&portal) {
                         https_probe.submit(&host, address, std::time::Instant::now());
                     }
-                    if !portal.answered
-                        && let Some((_, catalog, _, mark)) = &mut discovery
-                        && let Some(target) =
-                            r2o_controller::discovery::DiscoveryTarget::from_http_portal(&portal)
-                    {
-                        let queued = http_search.as_ref().is_some_and(|worker| {
-                            self.enqueue_http_search(
-                                worker,
-                                &target,
-                                b"/",
-                                r2o_controller::http_search::Answer::Injected,
-                                catalog,
-                                *mark,
-                                false,
-                            )
-                        });
-                        if !queued {
-                            println!(
-                                "HTTP {}: цель уже проверялась или очередь занята",
-                                target.host
-                            );
-                        }
-                    }
                     continue;
                 }
                 if frame.kind == EVENT_R2O_VOICE_PROOF {
@@ -4950,33 +4944,20 @@ impl ControlClient {
                             && response.execution_id != 0
                             && response.request_ms != 0
                             && response.trial_id.iter().all(|byte| *byte == 0);
-                        let mut target = None;
-                        let mut expected = None;
-                        if live && response.code == 3 {
-                            let candidate =
-                                r2o_controller::discovery::DiscoveryTarget::from_http_response(
-                                    &response,
-                                );
-                            if let Some(candidate) = candidate
-                                && self.revoke_http_binding(&response, &candidate, catalog, path)?
-                            {
-                                self.http_search_started
-                                    .remove(&http_search_key(&candidate));
-                                target = Some(candidate);
-                                expected = Some(r2o_controller::http_search::Answer::Injected);
+                        if let Some((target, request_path, expected)) =
+                            r2o_http_search_from_response(&response)
+                            && (response.code != 3
+                                || !live
+                                || self.revoke_http_binding(&response, &target, catalog, path)?)
+                        {
+                            if live && response.code == 3 {
+                                self.http_search_started.remove(&http_search_key(&target));
                             }
-                        } else if response.code == 4 {
-                            target = r2o_controller::discovery::DiscoveryTarget::from_http_response(
-                                &response,
-                            );
-                            expected = Some(r2o_controller::http_search::Answer::Cut);
-                        }
-                        if let (Some(target), Some(expected)) = (target, expected) {
                             let queued = http_search.as_ref().is_some_and(|worker| {
                                 self.enqueue_http_search(
                                     worker,
                                     &target,
-                                    &response.path,
+                                    request_path,
                                     expected,
                                     catalog,
                                     *mark,
@@ -7189,17 +7170,70 @@ mod tests {
         r2o_voice_proof_matches_target, save_plan_file, shape_matches_plan,
     };
     use r2k_core::control::{
-        COMMAND_DEL_NAME_PROBE, COMMAND_DEL_VOICE_ADDR_PROBE, COMMAND_SET_NAME,
+        BindingContext, COMMAND_DEL_NAME_PROBE, COMMAND_DEL_VOICE_ADDR_PROBE, COMMAND_SET_NAME,
         COMMAND_SET_NAME_PROBE, COMMAND_SET_TCP_STALL_BUDGETS, COMMAND_SET_VOICE_ADDR,
-        EVENT_APPLIED, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, Frame, KEY_LEN, SHAPE_HTTP,
-        SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, encode_ack, encode_ack_for_trial, encode_frame,
-        encode_greeting, read_frame,
+        EVENT_APPLIED, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, Frame, HttpResponseEvent,
+        KEY_LEN, SHAPE_HTTP, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, encode_ack,
+        encode_ack_for_trial, encode_frame, encode_greeting, read_frame,
     };
     use r2k_core::plan::{PLAN_MAGIC, Plan};
     use r2o_controller::catalog::{Binding, BoxRecord, Catalog, Fingerprint, Signal};
     use r2o_controller::discovery::DiscoveryTarget;
     use r2o_controller::fetch::FetchResult;
     use std::{collections::VecDeque, ffi::OsString, io::Write, path::PathBuf};
+
+    #[cfg(unix)]
+    fn r2o_http_response(code: u8, path: &[u8]) -> HttpResponseEvent {
+        let mut key = [0; KEY_LEN];
+        key[0] = 4;
+        key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+        key[17..21].copy_from_slice(&[198, 51, 100, 80]);
+        key[33..35].copy_from_slice(&45_000_u16.to_be_bytes());
+        key[35..37].copy_from_slice(&80_u16.to_be_bytes());
+        key[37] = 6;
+        HttpResponseEvent {
+            key,
+            code,
+            host: b"Example.com".to_vec(),
+            execution_id: 0,
+            plan_id: [0; 16],
+            trial_id: [0; 16],
+            request_ms: 0,
+            path: path.to_vec(),
+            binding: BindingContext {
+                generation: 0,
+                kind: 0,
+                family: 0,
+                shape: 0,
+                temporary: false,
+                epoch: [0; 16],
+            },
+            status: 200,
+            body_bytes: 1024,
+            request_no: 1,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_http_search_сохраняет_путь_повторяемого_запроса() {
+        let portal = r2o_http_response(3, b"/account/view");
+        let (target, path, expected) = super::r2o_http_search_from_response(&portal).unwrap();
+        assert_eq!(target.host, "example.com");
+        assert_eq!(path, b"/account/view");
+        assert!(matches!(
+            expected,
+            r2o_controller::http_search::Answer::Injected
+        ));
+
+        let cut = r2o_http_response(4, b"/watch/42");
+        let (_, path, expected) = super::r2o_http_search_from_response(&cut).unwrap();
+        assert_eq!(path, b"/watch/42");
+        assert!(matches!(expected, r2o_controller::http_search::Answer::Cut));
+        assert!(
+            super::r2o_http_search_from_response(&r2o_http_response(3, b"//host/admin")).is_none()
+        );
+    }
 
     #[cfg(unix)]
     #[test]

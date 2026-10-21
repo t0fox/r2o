@@ -5527,3 +5527,40 @@ musl release собрал пять статически связанных пр�
 порядке. ARM64/QEMU focused-прогон прошёл: 1 тест, 0 ошибок
 (`.rea/r2o-scheduler-hot-queue-order-arm64-final.log`). Полный C `test_sched`
 для тех же хешей прошёл на ARM64/QEMU (`.rea/r2o-donor-test-sched-aarch64.log`).
+
+## HTTP Discovery: сохранение исходного пути — 21.10.2026
+
+| Функция донора | REA Evidence | Подтверждённое поведение |
+|---|---|---|
+| `d2k_httpsearch_portal` | `ev_22feb6eba6a27ac325327c8f9cc22b8ec5350e3c672bb01362c0e3acc12d3f20` | Не ставит цель повторно, если путь запроса утрачен или не поддержан; не подменяет его на `GET /`. |
+| `d2k_httpsearch_cut` | `ev_779e84ffbdb499ce988785ca74743fc2cc49b35d0d9f47523ecd87e3dc10ed53` | Принимает только повторяемый путь ответа с обрывом и передаёт его в тот же поиск портала. |
+
+REA 6.5.0/Ghidra 12.1.4 исследовал текущую функцию портала из объекта
+`donor-httpsearch-current.o`, SHA-256
+`4dcfd7aad4708599914c923ea80cc5371a1e28124737c08905582f8ec2342a6a`;
+результат сохранён локально в `.rea/r2o-httpsearch-portal-rea-20261021.json`.
+Досье обрыва переиспользовано из
+`.rea/donor-httpsearch-cut.json`. SHA-256 исходников донора на момент сверки:
+`d2o/core/httpsearch.c` —
+`e9c98bc7f0bc6487a30ef2fe88ebd4a1ce27d71852edec605e03ec1f43df50e7`,
+`d2o/datapath/session.c` —
+`39dada3d4fbdaf943bf7b2a788090ab3d16a71065a58c16d39901575247f7187`.
+
+В Rust исходный путь уже передавался в `HttpResponseEvent`; расхождение было в
+маршруте контроллера: ветка `EVENT_HTTP_PORTAL` запускала `GET /` независимо
+от запроса. Теперь поиск запускается из `HTTP_RESPONSE` с кодом 3 или 4,
+сохраняет исходные байты пути и выбирает базовый ответ `Injected`/`Cut`.
+Невалидный путь по-прежнему отбрасывается `DiscoveryTarget::from_http_response`;
+успешный отзыв постоянной HTTP-привязки для кода 3 сохранён. В датапате
+`HTTP_RESPONSE` передаётся до `HTTP_PORTAL`.
+
+Только ARM64/QEMU: новый регрессионный тест прошёл; полный
+`r2o-controller` — 337 прошло, 0 ошибок, 1 штатный пропуск; полный workspace —
+965 прошло, 0 ошибок, 4 штатных пропуска в 73 наборах. Итоговые журналы:
+`.rea/r2o-http-response-arm64-targeted-final-20261021.log`,
+`.rea/r2o-httpsearch-donor-arm64-build-20261021.log`,
+`.rea/r2o-httpsearch-donor-arm64-20261021.log` и
+`.rea/r2o-http-response-arm64-workspace-final-20261021.log`. Первый
+параллельный прогон контроллера завис на существующем тайминговом тесте;
+изолированный и последовательные прогоны прошли. Другие архитектуры, release
+сборка и физический роутер в этой итерации не проверялись.
