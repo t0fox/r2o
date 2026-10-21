@@ -1,8 +1,8 @@
 //! Разбор событий и постоянное хранение измеренных результатов TCP-поиска.
 
 use r2k_core::control::{
-    HelloEvent, HttpPortalEvent, HttpResponseEvent, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN,
-    SHAPE_QUIC,
+    HelloEvent, HttpPortalEvent, HttpResponseEvent, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_LEGACY,
+    SHAPE_MODERN, SHAPE_QUIC,
 };
 use r2k_core::plan::Plan as RuntimePlan;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -32,7 +32,7 @@ impl DiscoveryTarget {
             return None;
         }
         let shape = event.shape?;
-        if !matches!(shape, SHAPE_MODERN | SHAPE_LEGACY) {
+        if !matches!(shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP) {
             return None;
         }
         let host = String::from_utf8(event.host.clone()?).ok()?;
@@ -152,6 +152,66 @@ impl DiscoveryTarget {
             shape: SHAPE_HTTP,
         })
     }
+}
+
+const R2O_ECH_WITNESS_LIMIT: usize = 32;
+
+/// Собрать ограниченный список HTTPS-владельцев, способных подтвердить ECH.
+pub fn r2o_ech_witness_candidates(catalog: &Catalog, target: &DiscoveryTarget) -> Vec<String> {
+    if target.shape != SHAPE_ECH_TCP {
+        return Vec::new();
+    }
+
+    let mut candidates = Vec::with_capacity(R2O_ECH_WITNESS_LIMIT);
+    let mut add = |name: &str| {
+        if !name.is_empty()
+            && name != target.host
+            && candidates.len() < R2O_ECH_WITNESS_LIMIT
+            && !candidates.iter().any(|candidate| candidate == name)
+        {
+            candidates.push(name.to_owned());
+        }
+    };
+
+    for family_pass in [target.family, if target.family == 4 { 6 } else { 4 }] {
+        for binding in catalog.boxes.iter().flat_map(|record| &record.bindings) {
+            if binding.enabled
+                && binding.level >= 3
+                && binding.transport == 6
+                && binding.family == family_pass
+                && binding.target == target.host
+                && !binding.ech_origin.is_empty()
+            {
+                add(&binding.ech_origin);
+            }
+        }
+    }
+
+    for binding in catalog.boxes.iter().flat_map(|record| &record.bindings) {
+        if binding.enabled && binding.level >= 3 && !binding.ech_origin.is_empty() {
+            add(&binding.ech_origin);
+        }
+    }
+
+    let mut confirmed_names: Vec<_> = catalog
+        .boxes
+        .iter()
+        .flat_map(|record| &record.bindings)
+        .filter(|binding| {
+            binding.enabled
+                && binding.level >= 3
+                && binding.kind == "name"
+                && !binding.target.is_empty()
+                && binding.ech_origin.is_empty()
+        })
+        .map(|binding| (binding.confirmed, binding.target.as_str()))
+        .collect();
+    confirmed_names.sort_by(|left, right| right.0.cmp(&left.0));
+    for (_, name) in confirmed_names {
+        add(name);
+    }
+
+    candidates
 }
 
 /// Отозвать HTTP-привязку только при совпадении сохранённого плана и живого события.
@@ -724,9 +784,59 @@ fn stable_plan_id(family: u8, shape: u8, text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::DiscoveryTarget;
+    use super::{DiscoveryTarget, r2o_ech_witness_candidates};
     use r2k_core::control::{BindingContext, HttpResponseEvent, KEY_LEN, SHAPE_HTTP};
     use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn r2o_ech_свидетели_сохраняют_приоритет_каталога_и_семейства() {
+        use crate::catalog::{Binding, BoxRecord, Catalog};
+
+        fn binding(target: &str, origin: &str, family: u8, confirmed: i64) -> Binding {
+            Binding {
+                kind: "name".into(),
+                target: target.into(),
+                ech_origin: origin.into(),
+                level: 3,
+                confirmed,
+                enabled: true,
+                transport: 6,
+                family,
+                ..Binding::default()
+            }
+        }
+
+        let target = DiscoveryTarget {
+            host: "cloudflare-ech.com".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: r2k_core::control::SHAPE_ECH_TCP,
+        };
+        let catalog = Catalog {
+            boxes: vec![BoxRecord {
+                bindings: vec![
+                    binding(&target.host, "family-witness.example", 4, 50),
+                    binding(&target.host, "other-family.example", 6, 40),
+                    binding("other-target.example", "third-witness.example", 6, 30),
+                    binding("new-target.example", "", 4, 200),
+                    binding("old-target.example", "", 6, 100),
+                ],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+
+        assert_eq!(
+            r2o_ech_witness_candidates(&catalog, &target),
+            [
+                "family-witness.example",
+                "other-family.example",
+                "third-witness.example",
+                "new-target.example",
+                "old-target.example",
+            ]
+        );
+    }
 
     fn response() -> HttpResponseEvent {
         let mut key = [0; KEY_LEN];

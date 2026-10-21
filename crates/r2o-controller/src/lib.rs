@@ -3,6 +3,7 @@ pub mod classify;
 mod classify_measured;
 pub mod discovery;
 pub mod domain;
+pub mod ech;
 pub mod fetch;
 mod groups;
 pub mod hello;
@@ -14,6 +15,7 @@ pub mod r2o_late_rx;
 pub mod r2o_quic_http3;
 pub mod r2o_resource;
 pub mod r2o_resource_limit;
+pub mod r2o_rx_volume;
 pub mod r2o_tls;
 pub mod r2o_volume;
 #[cfg(target_os = "linux")]

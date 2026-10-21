@@ -9,6 +9,8 @@ r2k-core = { package = "r2k-core", path = "../r2k-core" }
 r2o-datapath = { package = "r2o-datapath", path = "../r2o-datapath" }
 libc = "0.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+hpke = { version = "0.14.1", default-features = false, features = ["alloc", "getrandom", "x25519", "aes"] }
+x509-parser = { version = "0.18.1", default-features = false }
 webpki-roots = "0.26"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -23,6 +25,8 @@ tokio = { version = "1", features = ["macros", "net", "rt", "time"] }
 
 [dev-dependencies]
 rcgen = "0.12"
+proptest = "1.12.0"
+tls-parser = "0.12.2"
 
 [[bin]]
 name = "r2o-controller"

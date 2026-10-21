@@ -197,6 +197,39 @@ fn accepts_a_message_header_split_across_records_and_recognizes_alerts() {
 }
 
 #[test]
+fn r2o_tls_измеритель_сверяется_с_независимым_tls_parser() {
+    let server_done = record(22, &[14, 0, 0, 0]);
+    let (remaining, parsed) = tls_parser::parse_tls_plaintext(&server_done).unwrap();
+    assert!(remaining.is_empty());
+    assert!(matches!(
+        parsed.msg.as_slice(),
+        [tls_parser::TlsMessage::Handshake(
+            tls_parser::TlsMessageHandshake::ServerDone(_)
+        )]
+    ));
+    assert_eq!(scan12(&server_done), Scan12::ServerHelloDone);
+
+    let alert = record(21, &[2, 40]);
+    let (remaining, parsed) = tls_parser::parse_tls_plaintext(&alert).unwrap();
+    assert!(remaining.is_empty());
+    assert!(matches!(
+        parsed.msg.as_slice(),
+        [tls_parser::TlsMessage::Alert(_)]
+    ));
+    assert_eq!(scan12(&alert), Scan12::FatalAlert);
+}
+
+proptest::proptest! {
+    #[test]
+    fn r2o_tls_измеритель_не_паникует_на_произвольных_ответах(
+        bytes in proptest::collection::vec(proptest::num::u8::ANY, 0..4096)
+    ) {
+        let _ = scan12(&bytes);
+        let _ = scan_server_hello(&bytes);
+    }
+}
+
+#[test]
 fn response_probe_is_not_applicable_without_a_target_server_hello() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();

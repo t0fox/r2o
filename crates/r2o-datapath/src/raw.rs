@@ -229,6 +229,7 @@ fn set_option<T>(fd: i32, level: i32, option: i32, value: &T) -> io::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::outgoing_packet;
+    use proptest::prelude::*;
     use r2k_core::plan::{Emission, EmitKind};
 
     fn original_v4() -> Vec<u8> {
@@ -302,5 +303,30 @@ mod tests {
         let mut invalid_v6 = ipv6[0].clone();
         invalid_v6[43] |= 2;
         assert!(outgoing_packet(&invalid_v6, libc::AF_INET6).is_none());
+    }
+
+    #[test]
+    fn r2o_ip_разбор_совпадает_с_etherparse_на_ipv4_и_ipv6() {
+        for (packet, family) in [
+            (original_v4(), libc::AF_INET),
+            (original_v6(), libc::AF_INET6),
+        ] {
+            let independent = etherparse::SlicedPacket::from_ip(&packet).unwrap();
+            assert!(independent.transport.is_some());
+            assert_eq!(
+                outgoing_packet(&packet, family).unwrap().family,
+                if family == libc::AF_INET { 4 } else { 6 }
+            );
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn r2o_raw_разбор_не_паникует_на_произвольных_пакетах(
+            packet in proptest::collection::vec(any::<u8>(), 0..2048)
+        ) {
+            let _ = outgoing_packet(&packet, libc::AF_INET);
+            let _ = outgoing_packet(&packet, libc::AF_INET6);
+        }
     }
 }

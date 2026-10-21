@@ -172,6 +172,7 @@ pub struct FetchResult {
     pub local_port: u16,
     pub tls: Option<&'static str>,
     pub status: u16,
+    pub cloudflare_challenge: bool,
     pub body_bytes: u64,
     pub body_expected: Option<u64>,
     pub chunked: bool,
@@ -338,6 +339,36 @@ pub fn r2o_fetch_connected_stream(
         Instant::now(),
         R2oFetchEncoding::Identity,
         roots,
+        None,
+    )
+}
+
+/// Выполнить HTTP GET по ECH и завершиться ошибкой, если сервер его отклонил.
+pub fn r2o_fetch_ech_connected_stream(
+    options: &FetchOptions,
+    stream: TcpStream,
+    ech: &rustls::client::EchConfig,
+) -> Result<FetchResult, String> {
+    options.validate()?;
+    let address = resolve_target(options)?;
+    let peer = stream
+        .peer_addr()
+        .map_err(|error| format!("не удалось проверить адрес ECH-зонда: {error}"))?;
+    if peer != address {
+        return Err(format!(
+            "TCP-сокет подключён к {peer}, ожидался HTTPS-адрес {address}"
+        ));
+    }
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    r2o_fetch_connected_stream_with_roots_and_encoding(
+        options,
+        stream,
+        address,
+        Instant::now(),
+        R2oFetchEncoding::Identity,
+        roots,
+        Some(ech),
     )
 }
 
@@ -371,6 +402,7 @@ fn r2o_fetch_with_roots_and_encoding(
         started,
         r2o_encoding,
         roots,
+        None,
     )
 }
 
@@ -381,6 +413,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding(
     started: Instant,
     r2o_encoding: R2oFetchEncoding,
     roots: RootCertStore,
+    ech: Option<&rustls::client::EchConfig>,
 ) -> Result<FetchResult, String> {
     let deadline = started
         .checked_add(options.deadline)
@@ -389,18 +422,28 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding(
         .set_nodelay(true)
         .map_err(|error| format!("не удалось настроить TCP-сокет: {error}"))?;
 
-    let mut connection = crate::r2o_tls::r2o_tls_client_connection(
-        &options.name,
-        options.tls12,
-        options.wire_len,
-        roots,
-    )?;
+    let mut connection = if let Some(ech) = ech {
+        crate::r2o_tls::r2o_tls_ech_client_connection(&options.name, roots, ech.clone())?
+    } else {
+        crate::r2o_tls::r2o_tls_client_connection(
+            &options.name,
+            options.tls12,
+            options.wire_len,
+            roots,
+        )?
+    };
     let mut r2o_socket = R2oTlsTcpStream::new(socket);
     while connection.is_handshaking() {
         set_deadline(&r2o_socket.socket, deadline)?;
         connection
             .complete_io(&mut r2o_socket)
             .map_err(|error| format!("TLS-рукопожатие не завершилось: {error}"))?;
+    }
+    if ech.is_some() && connection.ech_status() != rustls::client::EchStatus::Accepted {
+        return Err(format!(
+            "сервер не подтвердил ECH: {:?}",
+            connection.ech_status()
+        ));
     }
     r2o_socket.r2o_reset_after_handshake();
     let tls = match connection.protocol_version() {
@@ -525,6 +568,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding(
         .map(|remaining| parser.body_bytes().saturating_add(remaining))
         .or(r2o_body_expected_at_eof);
     let headers = parser.headers();
+    let cloudflare_challenge = r2o_fetch_is_cloudflare_challenge(headers);
     let r2o_body_encoding = r2o_fetch_body_encoding(headers);
     let r2o_body_has_length = header_value(headers, b"content-length").is_some();
     let r2o_body_chunked = header_value(headers, b"transfer-encoding")
@@ -582,6 +626,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding(
         local_port,
         tls,
         status: parser.status(),
+        cloudflare_challenge,
         body_bytes: parser.body_bytes(),
         body_expected,
         chunked,
@@ -603,16 +648,20 @@ fn r2o_fetch_resource_scan_allowed(status: u16, headers: &[u8]) -> bool {
                 .is_some_and(|media_type| trim_ascii(media_type).eq_ignore_ascii_case(b"text/html"))
         })
         && r2o_fetch_body_encoding(headers) == crate::r2o_volume::R2oVolumeRxEncoding::Identity
-        && !headers.split(|byte| *byte == b'\n').skip(1).any(|line| {
-            line.strip_suffix(b"\r")
-                .and_then(|line| {
-                    let colon = line.iter().position(|byte| *byte == b':')?;
-                    line[..colon]
-                        .eq_ignore_ascii_case(b"cf-mitigated")
-                        .then_some(trim_ascii(&line[colon + 1..]))
-                })
-                .is_some_and(|value| value.eq_ignore_ascii_case(b"challenge"))
-        })
+        && !r2o_fetch_is_cloudflare_challenge(headers)
+}
+
+fn r2o_fetch_is_cloudflare_challenge(headers: &[u8]) -> bool {
+    headers.split(|byte| *byte == b'\n').skip(1).any(|line| {
+        line.strip_suffix(b"\r")
+            .and_then(|line| {
+                let colon = line.iter().position(|byte| *byte == b':')?;
+                line[..colon]
+                    .eq_ignore_ascii_case(b"cf-mitigated")
+                    .then_some(trim_ascii(&line[colon + 1..]))
+            })
+            .is_some_and(|value| value.eq_ignore_ascii_case(b"challenge"))
+    })
 }
 
 fn r2o_fetch_chunked(headers: &[u8]) -> bool {
@@ -1508,6 +1557,19 @@ mod tests {
             b"HTTP/1.1 200 OK\r\nContent-Type: text/css\r\n\r\n"
         ));
         assert!(!r2o_fetch_resource_scan_allowed(403, html));
+    }
+
+    #[test]
+    fn r2o_fetch_отличает_точный_cf_challenge_от_похожих_заголовков() {
+        assert!(r2o_fetch_is_cloudflare_challenge(
+            b"HTTP/1.1 403 Forbidden\r\ncf-mitigated: challenge\r\n\r\n"
+        ));
+        assert!(!r2o_fetch_is_cloudflare_challenge(
+            b"HTTP/1.1 403 Forbidden\r\nx-cf-mitigated: challenge\r\n\r\n"
+        ));
+        assert!(!r2o_fetch_is_cloudflare_challenge(
+            b"HTTP/1.1 403 Forbidden\r\ncf-mitigated: not-a-challenge\r\n\r\n"
+        ));
     }
 
     #[test]

@@ -391,6 +391,24 @@ mod tests {
     }
 
     #[test]
+    fn r2o_clienthello_совпадает_с_независимым_tls_parser() {
+        let name = b"example.test";
+        let mut extensions = server_name(name);
+        extensions.extend(extension(EXT_SUPPORTED_VERSIONS, &[2, 3, 4]));
+        let packet = client_hello(&extensions);
+        let (remaining, record) = tls_parser::parse_tls_plaintext(&packet).unwrap();
+
+        assert!(remaining.is_empty());
+        assert!(matches!(
+            record.msg.as_slice(),
+            [tls_parser::TlsMessage::Handshake(
+                tls_parser::TlsMessageHandshake::ClientHello(_)
+            )]
+        ));
+        assert!(parse(&packet).is_client_hello);
+    }
+
+    #[test]
     fn partial_key_share_keeps_sni_and_marks_tls13_form_unknown_or_present() {
         let name = b"router.example";
         let mut extensions = server_name(name);

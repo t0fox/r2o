@@ -2,6 +2,7 @@
 
 const LEGACY_PROFILE: &str = include_str!("profiles/legacy.hex");
 const MODERN_PROFILE: &str = include_str!("profiles/modern.hex");
+const R2O_RX_FAKE_PROFILE: &str = include_str!("profiles/r2o_rx_fake.hex");
 const TEMPLATE_MAX: usize = 4096;
 
 #[derive(Clone, Copy)]
@@ -224,4 +225,9 @@ pub fn legacy_client_hello(sni: &str) -> Result<Vec<u8>, &'static str> {
 /// Собрать снятый браузерный ClientHello TLS 1.3, подставив `sni`.
 pub fn modern_client_hello(sni: &str) -> Result<Vec<u8>, &'static str> {
     client_hello_from_profile(sni, MODERN_PROFILE)
+}
+
+/// Собрать снятую TLS-приманку RX-лестницы с заданным именем SNI.
+pub fn r2o_rx_fake_client_hello(sni: &str) -> Result<Vec<u8>, &'static str> {
+    client_hello_from_profile(sni, R2O_RX_FAKE_PROFILE)
 }

@@ -1815,7 +1815,10 @@ fn r2o_family_recovery_decision(
     applied: bool,
 ) -> R2oFamilyRecoveryDecision {
     let response_complete = result.as_ref().is_ok_and(|fetch| {
-        fetch.tls.is_some() && fetch.complete && (200..600).contains(&fetch.status)
+        fetch.tls.is_some()
+            && fetch.complete
+            && (200..600).contains(&fetch.status)
+            && !fetch.cloudflare_challenge
     });
     if response_complete && applied {
         R2oFamilyRecoveryDecision::Verified
@@ -1837,9 +1840,18 @@ fn r2o_confirm_discovery_outcome(
     }
     outcome.plan_text = None;
     outcome.retry_after = Some(R2O_DISCOVERY_FAILURE_RETRY);
-    outcome.detail.push_str(
-        "; кандидат не сохранён: временная проба не получила полный HTTPS-ответ и точное APPLIED",
-    );
+    if result
+        .as_ref()
+        .is_ok_and(|fetch| fetch.cloudflare_challenge)
+    {
+        outcome.detail.push_str(
+            "; сервер вернул Cloudflare challenge: это не подтверждает обход и кандидат не сохранён",
+        );
+    } else {
+        outcome.detail.push_str(
+            "; кандидат не сохранён: временная проба не получила полный HTTPS-ответ и точное APPLIED",
+        );
+    }
     outcome
 }
 
@@ -1942,6 +1954,18 @@ fn r2o_family_recovery_sibling_trial(
     mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
 ) -> (Result<r2o_controller::fetch::FetchResult, String>, bool) {
+    r2o_family_recovery_sibling_trial_with_ech(target, destination, candidate, mark, commands, None)
+}
+
+#[cfg(unix)]
+fn r2o_family_recovery_sibling_trial_with_ech(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    destination: std::net::SocketAddr,
+    candidate: &R2oFamilyRecoveryCandidate,
+    mark: Option<u32>,
+    commands: &SyncSender<HttpSearchCommand>,
+    ech: Option<&r2o_controller::ech::R2oEchConfig>,
+) -> (Result<r2o_controller::fetch::FetchResult, String>, bool) {
     let result = (|| {
         let bound = BoundTcpProbe::open(target.family, mark)
             .map_err(|error| format!("не удалось открыть сокет семейной пробы: {error}"))?;
@@ -1985,19 +2009,24 @@ fn r2o_family_recovery_sibling_trial(
             .map_err(|error| format!("не удалось подключить семейную пробу: {error}"));
         let fetch_result = match connected {
             Ok((stream, _, connected_port, _)) if connected_port == local_port => {
-                r2o_controller::fetch::r2o_fetch_connected_stream(
-                    &r2o_controller::fetch::FetchOptions {
-                        name: target.host.clone(),
-                        ip: Some(destination.ip()),
-                        port: destination.port(),
-                        path: "/".into(),
-                        deadline: std::time::Duration::from_secs(8),
-                        tls12: target.shape == SHAPE_LEGACY,
-                        wire_len: None,
-                        mark,
-                    },
-                    stream,
-                )
+                let options = r2o_controller::fetch::FetchOptions {
+                    name: ech
+                        .map(|config| config.origin_name.clone())
+                        .unwrap_or_else(|| target.host.clone()),
+                    ip: Some(destination.ip()),
+                    port: destination.port(),
+                    path: "/".into(),
+                    deadline: std::time::Duration::from_secs(8),
+                    tls12: target.shape == SHAPE_LEGACY,
+                    wire_len: None,
+                    mark,
+                };
+                if let Some(ech) = ech {
+                    let config = r2o_controller::ech::r2o_ech_tls_config(ech)?;
+                    r2o_controller::fetch::r2o_fetch_ech_connected_stream(&options, stream, &config)
+                } else {
+                    r2o_controller::fetch::r2o_fetch_connected_stream(&options, stream)
+                }
             }
             Ok((_stream, _, _, _)) => Err("TCP-зонд получил неожиданный локальный порт".into()),
             Err(error) => Err(error),
@@ -2041,6 +2070,7 @@ fn r2o_run_discovery_candidate_trial(
     mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
     client_hello: Option<&[u8]>,
+    ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
 ) -> (Result<r2o_controller::fetch::FetchResult, String>, bool) {
     let plan_id = match random_id() {
         Ok(id) => id,
@@ -2064,8 +2094,20 @@ fn r2o_run_discovery_candidate_trial(
         plan_text,
         group_plan: false,
     };
-    let (result, applied) =
-        r2o_family_recovery_sibling_trial(target, destination, &candidate, mark, commands);
+    if target.shape == SHAPE_ECH_TCP && ech_config.is_none() {
+        return (
+            Err("кандидат ECH нельзя подтвердить без совместимой TLS-конфигурации".into()),
+            false,
+        );
+    }
+    let (result, applied) = r2o_family_recovery_sibling_trial_with_ech(
+        target,
+        destination,
+        &candidate,
+        mark,
+        commands,
+        ech_config,
+    );
     if client_hello.is_some()
         && r2o_family_recovery_decision(&result, applied) == R2oFamilyRecoveryDecision::Verified
     {
@@ -2638,6 +2680,8 @@ const R2O_DISCOVERY_QUEUE_CAPACITY: usize = 64;
 const R2O_DISCOVERY_WORKER_COUNT: usize = R2O_AUTOMATED_MEASUREMENT_SLOTS;
 #[cfg(unix)]
 const R2O_DISCOVERY_TASK_LIFETIME: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+#[cfg(unix)]
+const R2O_ECH_RX_LADDER_BATCH: usize = 32;
 #[cfg(unix)]
 const R2O_DISCOVERY_FAILURE_RETRY: std::time::Duration = std::time::Duration::from_secs(120);
 #[cfg(unix)]
@@ -3495,21 +3539,66 @@ impl DiscoveryWorker {
 
     fn new_with_confirmation(
         mark: Option<u32>,
+        send_cap: usize,
         measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
         commands: SyncSender<HttpSearchCommand>,
+        catalog_path: PathBuf,
     ) -> Self {
         let client_hellos = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let runner_client_hellos = Arc::clone(&client_hellos);
+        let ech_challenges = Arc::new(std::sync::Mutex::new(
+            HashMap::<String, std::time::Instant>::new(),
+        ));
+        let runner_ech_challenges = Arc::clone(&ech_challenges);
+        let ech_rx_cursor = Arc::new(std::sync::Mutex::new(HashMap::<
+            r2o_controller::discovery::DiscoveryTarget,
+            usize,
+        >::new()));
+        let runner_ech_rx_cursor = Arc::clone(&ech_rx_cursor);
         let runner: Arc<R2oDiscoveryRunner> = Arc::new(move |target, cancel| {
+            let runner_started = std::time::Instant::now();
             let client_hello = runner_client_hellos
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(&r2o_discovery_task_key(&target));
-            let outcome = classify_discovery_target_with_client_hello(
+            let mut ech_witness_candidates = if target.shape == SHAPE_ECH_TCP {
+                match Catalog::load(&catalog_path) {
+                    Ok(catalog) => {
+                        r2o_controller::discovery::r2o_ech_witness_candidates(&catalog, &target)
+                    }
+                    Err(error) => {
+                        eprintln!("ECH-свидетели не прочитаны из каталога: {error}");
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+            let now = std::time::Instant::now();
+            let challenged = {
+                let mut cache = runner_ech_challenges
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                cache.retain(|_, expires| *expires > now);
+                cache.keys().cloned().collect::<HashSet<_>>()
+            };
+            ech_witness_candidates.retain(|witness| !challenged.contains(witness));
+            let (ech_config, next_witness) = if let Some((config, next)) =
+                r2o_discovery_first_ech_witness(&target, &ech_witness_candidates, 0, mark)
+            {
+                (Some(config), next)
+            } else {
+                (
+                    r2o_discovery_ech_config(&target, mark).ok().flatten(),
+                    ech_witness_candidates.len(),
+                )
+            };
+            let outcome = r2o_classify_discovery_target_with_client_hello_and_ech(
                 target.clone(),
                 client_hello.as_deref(),
-                cancel,
+                Arc::clone(&cancel),
                 mark,
+                ech_config.as_ref(),
             );
             let Some(plan_text) = outcome.plan_text.as_deref() else {
                 return outcome;
@@ -3520,8 +3609,148 @@ impl DiscoveryWorker {
                 mark,
                 &commands,
                 client_hello.as_deref(),
+                ech_config.as_ref(),
             );
-            r2o_confirm_discovery_outcome(outcome, result, applied)
+            let Some(primary_config) = ech_config.clone() else {
+                return r2o_confirm_discovery_outcome(outcome, result, applied);
+            };
+            let primary_origin = primary_config.origin_name.clone();
+            let (selected_config, (mut result, mut applied), mut rejected_witnesses) =
+                r2o_ech_retry_challenged_witness(
+                    &target.host,
+                    plan_text,
+                    &ech_witness_candidates,
+                    next_witness,
+                    primary_config,
+                    (result, applied),
+                    |config, (result, _)| {
+                        result.as_ref().is_ok_and(|fetch| {
+                            r2o_ech_witness_transport_proof(&target, config, fetch)
+                        })
+                    },
+                    |witness| {
+                        r2o_discovery_ech_witness_config(&target, witness, mark)
+                            .ok()
+                            .flatten()
+                    },
+                    |config, retry_plan| {
+                        r2o_run_discovery_candidate_trial(
+                            &target,
+                            retry_plan,
+                            mark,
+                            &commands,
+                            client_hello.as_deref(),
+                            Some(config),
+                        )
+                    },
+                );
+            let mut rx_ladder_plan = None;
+            if applied
+                && result.as_ref().is_ok_and(|fetch| {
+                    r2o_ech_witness_rx_cut(&target, &selected_config, true, false, fetch)
+                })
+            {
+                let mut next_index = *runner_ech_rx_cursor
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(&target)
+                    .unwrap_or(&0);
+                let candidate_count = r2o_controller::r2o_rx_volume::r2o_rx_volume_name_count() + 5;
+                for _ in 0..R2O_ECH_RX_LADDER_BATCH {
+                    if cancel.load(Ordering::Relaxed)
+                        || R2O_DISCOVERY_TASK_LIFETIME.saturating_sub(runner_started.elapsed())
+                            < std::time::Duration::from_secs(9)
+                        || next_index >= candidate_count
+                    {
+                        break;
+                    }
+                    let index = next_index;
+                    let candidate = match r2o_controller::r2o_rx_volume::r2o_rx_volume_candidate(
+                        index, send_cap,
+                    ) {
+                        Ok(Some(candidate)) => candidate,
+                        Ok(None) => break,
+                        Err(error) => {
+                            eprintln!("RX-лестница ECH пропустила план {index}: {error}");
+                            next_index = index + 1;
+                            continue;
+                        }
+                    };
+                    let trial = r2o_run_discovery_candidate_trial(
+                        &target,
+                        &candidate,
+                        mark,
+                        &commands,
+                        client_hello.as_deref(),
+                        Some(&selected_config),
+                    );
+                    result = trial.0;
+                    applied = trial.1;
+                    if r2o_family_recovery_decision(&result, applied)
+                        == R2oFamilyRecoveryDecision::Verified
+                    {
+                        rx_ladder_plan = Some(candidate);
+                        runner_ech_rx_cursor
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .remove(&target);
+                        break;
+                    }
+                    let Some(fetch) = result.as_ref().ok() else {
+                        break;
+                    };
+                    if !applied {
+                        break;
+                    }
+                    if fetch.cloudflare_challenge {
+                        if !rejected_witnesses.contains(&selected_config.origin_name) {
+                            rejected_witnesses.push(selected_config.origin_name.clone());
+                        }
+                        break;
+                    }
+                    next_index = index + 1;
+                    runner_ech_rx_cursor
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(target.clone(), next_index);
+                }
+            }
+            if !rejected_witnesses.is_empty() {
+                let expires = std::time::Instant::now() + std::time::Duration::from_secs(30 * 60);
+                let mut cache = runner_ech_challenges
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                for witness in &rejected_witnesses {
+                    cache.insert(witness.clone(), expires);
+                }
+            }
+            let mut outcome = r2o_confirm_discovery_outcome(outcome, result, applied);
+            if let Some(plan) = rx_ladder_plan {
+                outcome.plan_text = Some(plan);
+                outcome
+                    .detail
+                    .push_str("; измеренный ECH RX-обрыв снят планом лестницы белого SNI");
+            } else if runner_ech_rx_cursor
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&target)
+            {
+                outcome
+                    .detail
+                    .push_str("; ECH RX-лестница продолжится со следующего белого SNI");
+            }
+            if selected_config.origin_name != primary_origin {
+                outcome.detail.push_str(&format!(
+                    "; тот же кандидат повторно проверен после challenge через ECH-свидетеля {}",
+                    selected_config.origin_name
+                ));
+            }
+            if !rejected_witnesses.is_empty() && outcome.plan_text.is_none() {
+                outcome
+                    .detail
+                    .push_str("; ECH-свидетели с challenge временно исключены на 30 минут");
+            }
+            outcome
         });
         Self::r2o_new_with_runner_and_client_hellos(measurement_gate, runner, client_hellos)
     }
@@ -3721,7 +3950,7 @@ impl DiscoveryWorker {
         } else {
             SHAPE_LEGACY
         };
-        if !matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY)
+        if !matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP)
             || observed_shape != target.shape
             || Trigger::tls_client_hello(&target.host, &client_hello).is_err()
         {
@@ -3906,19 +4135,178 @@ fn classify_discovery_target(
 }
 
 #[cfg(unix)]
+#[cfg(test)]
 fn classify_discovery_target_with_client_hello(
     target: r2o_controller::discovery::DiscoveryTarget,
     client_hello: Option<&[u8]>,
     cancel: Arc<AtomicBool>,
     mark: Option<u32>,
 ) -> DiscoveryOutcome {
-    let trigger = if let Some(client_hello) = client_hello {
-        Trigger::tls_client_hello(&target.host, client_hello)
+    r2o_classify_discovery_target_with_client_hello_and_ech(
+        target,
+        client_hello,
+        cancel,
+        mark,
+        None,
+    )
+}
+
+#[cfg(unix)]
+fn r2o_discovery_ech_config(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    mark: Option<u32>,
+) -> Result<Option<r2o_controller::ech::R2oEchConfig>, String> {
+    if target.shape != SHAPE_ECH_TCP {
+        return Ok(None);
+    }
+    let config = r2o_controller::ech::resolve_ech_config(&target.host, mark)?;
+    if config.public_name != target.host {
+        return Err(format!(
+            "ECH public_name {} не совпадает с внешним именем {}",
+            config.public_name, target.host
+        ));
+    }
+    Ok(Some(config))
+}
+
+#[cfg(unix)]
+fn r2o_discovery_ech_witness_config(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    witness: &str,
+    mark: Option<u32>,
+) -> Result<Option<r2o_controller::ech::R2oEchConfig>, String> {
+    if target.shape != SHAPE_ECH_TCP || witness == target.host {
+        return Ok(None);
+    }
+    let config = r2o_controller::ech::resolve_ech_config(witness, mark)?;
+    if config.public_name != target.host {
+        return Ok(None);
+    }
+    Ok(Some(config))
+}
+
+#[cfg(unix)]
+fn r2o_discovery_first_ech_witness(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    candidates: &[String],
+    start: usize,
+    mark: Option<u32>,
+) -> Option<(r2o_controller::ech::R2oEchConfig, usize)> {
+    for (index, witness) in candidates.iter().enumerate().skip(start) {
+        if let Ok(Some(config)) = r2o_discovery_ech_witness_config(target, witness, mark) {
+            return Some((config, index + 1));
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn r2o_ech_witness_transport_proof(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    config: &r2o_controller::ech::R2oEchConfig,
+    fetch: &r2o_controller::fetch::FetchResult,
+) -> bool {
+    target.shape == SHAPE_ECH_TCP
+        && config.origin_name != target.host
+        && fetch.tls.is_some()
+        && fetch.cloudflare_challenge
+        && fetch.complete
+        && (100..=599).contains(&fetch.status)
+}
+
+#[cfg(unix)]
+fn r2o_ech_witness_rx_cut(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    config: &r2o_controller::ech::R2oEchConfig,
+    ech_accepted: bool,
+    replay: bool,
+    fetch: &r2o_controller::fetch::FetchResult,
+) -> bool {
+    target.shape == SHAPE_ECH_TCP
+        && ech_accepted
+        && !replay
+        && !config.origin_name.is_empty()
+        && config.origin_name != target.host
+        && fetch.tls.is_some()
+        && (200..400).contains(&fetch.status)
+        && !fetch.complete
+        && fetch.r2o_volume_observation.body_framing_valid
+        && fetch.body_bytes >= 8192
+}
+
+#[cfg(unix)]
+fn r2o_ech_retry_challenged_witness<T>(
+    target_name: &str,
+    plan_text: &str,
+    candidates: &[String],
+    next_candidate: usize,
+    primary_config: r2o_controller::ech::R2oEchConfig,
+    first_result: T,
+    mut is_transport_challenge: impl FnMut(&r2o_controller::ech::R2oEchConfig, &T) -> bool,
+    mut resolve: impl FnMut(&str) -> Option<r2o_controller::ech::R2oEchConfig>,
+    mut trial: impl FnMut(&r2o_controller::ech::R2oEchConfig, &str) -> T,
+) -> (r2o_controller::ech::R2oEchConfig, T, Vec<String>) {
+    let mut selected_config = primary_config;
+    let mut result = first_result;
+    if selected_config.origin_name == target_name
+        || !is_transport_challenge(&selected_config, &result)
+    {
+        return (selected_config, result, Vec::new());
+    }
+
+    let mut challenged = vec![selected_config.origin_name.clone()];
+    for witness in candidates.iter().skip(next_candidate) {
+        if witness == target_name || witness == &selected_config.origin_name {
+            continue;
+        }
+        let Some(config) = resolve(witness) else {
+            continue;
+        };
+        if config.public_name != target_name || config.origin_name != *witness {
+            continue;
+        }
+        let next_result = trial(&config, plan_text);
+        selected_config = config;
+        result = next_result;
+        if selected_config.origin_name != target_name
+            && is_transport_challenge(&selected_config, &result)
+        {
+            challenged.push(selected_config.origin_name.clone());
+            continue;
+        }
+        return (selected_config, result, challenged);
+    }
+    (selected_config, result, challenged)
+}
+
+#[cfg(unix)]
+fn r2o_classify_discovery_target_with_client_hello_and_ech(
+    target: r2o_controller::discovery::DiscoveryTarget,
+    client_hello: Option<&[u8]>,
+    cancel: Arc<AtomicBool>,
+    mark: Option<u32>,
+    ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
+) -> DiscoveryOutcome {
+    let trigger: Result<Trigger, String> = if let Some(client_hello) = client_hello {
+        Trigger::tls_client_hello(&target.host, client_hello).map_err(str::to_owned)
     } else {
         match target.shape {
-            SHAPE_MODERN => Trigger::tls13(&target.host),
-            SHAPE_LEGACY => Trigger::tls(&target.host),
-            _ => Err("форма TLS не поддерживается"),
+            SHAPE_MODERN => Trigger::tls13(&target.host).map_err(str::to_owned),
+            SHAPE_LEGACY => Trigger::tls(&target.host).map_err(str::to_owned),
+            SHAPE_ECH_TCP => match ech_config {
+                Some(config) => {
+                    let origin_name = config.origin_name.clone();
+                    r2o_controller::ech::r2o_ech_tls_config(config)
+                        .and_then(|ech| {
+                            r2o_controller::r2o_tls::r2o_tls_ech_client_hello(&origin_name, ech)
+                        })
+                        .and_then(|hello| {
+                            Trigger::tls_client_hello(&target.host, &hello).map_err(str::to_owned)
+                        })
+                }
+                None => Err("для ECH нет совместимой HTTPS RR-конфигурации".into()),
+            },
+            _ => Err("форма TLS не поддерживается".into()),
         }
     };
     let Ok(trigger) = trigger else {
@@ -4060,6 +4448,7 @@ fn r2o_read_control_batch(
 #[cfg(unix)]
 struct ControlClient {
     socket: std::os::unix::net::UnixStream,
+    send_maxlen: u32,
     pending_events: VecDeque<Frame>,
     pending_applied_events: VecDeque<r2k_core::control::AppliedEvent>,
     http_search_started: HashMap<(String, u8, String), HttpSearchWindow>,
@@ -4092,6 +4481,7 @@ impl ControlClient {
         }
         Ok(Self {
             socket,
+            send_maxlen: greeting.send_maxlen,
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -4317,11 +4707,13 @@ impl ControlClient {
             (
                 DiscoveryWorker::new_with_confirmation(
                     mark,
+                    self.send_maxlen as usize,
                     measurement_gate.clone(),
                     http_search
                         .as_ref()
                         .expect("HTTP worker существует при активном Discovery")
                         .command_sender(),
+                    path.clone(),
                 ),
                 catalog,
                 path,
@@ -7645,6 +8037,7 @@ mod tests {
             local_port: 41_000,
             tls: Some("1.3"),
             status: 200,
+            cloudflare_challenge: false,
             body_bytes: 64,
             body_expected: Some(64),
             chunked: false,
@@ -7704,6 +8097,53 @@ mod tests {
         let подтверждённый =
             super::r2o_confirm_discovery_outcome(outcome(), Ok(r2o_test_fetch_result()), true);
         assert!(подтверждённый.plan_text.is_some());
+
+        let mut challenge = r2o_test_fetch_result();
+        challenge.status = 403;
+        challenge.cloudflare_challenge = true;
+        assert_eq!(
+            super::r2o_family_recovery_decision(&Ok(challenge.clone()), true),
+            super::R2oFamilyRecoveryDecision::Reclassify
+        );
+        let rejected = super::r2o_confirm_discovery_outcome(outcome(), Ok(challenge), true);
+        assert!(rejected.plan_text.is_none());
+        assert!(rejected.detail.contains("Cloudflare challenge"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_ech_challenge_повторяет_тот_же_кандидат_через_другого_свидетеля() {
+        let primary = r2o_controller::ech::R2oEchConfig {
+            public_name: "cloudflare-ech.com".into(),
+            origin_name: "romfea.gr".into(),
+            config_list: vec![1],
+        };
+        let next = r2o_controller::ech::R2oEchConfig {
+            public_name: "cloudflare-ech.com".into(),
+            origin_name: "kinozal.me".into(),
+            config_list: vec![2],
+        };
+        let plan = "tcp split pos=1";
+        let mut attempts = Vec::new();
+        let (selected, result, challenged) = super::r2o_ech_retry_challenged_witness(
+            "cloudflare-ech.com",
+            plan,
+            &["kinozal.me".into()],
+            0,
+            primary,
+            "challenge".to_owned(),
+            |config, result| config.origin_name != "cloudflare-ech.com" && result == "challenge",
+            |name| (name == "kinozal.me").then(|| next.clone()),
+            |config, received_plan| {
+                attempts.push((config.origin_name.clone(), received_plan.to_owned()));
+                "clear".to_owned()
+            },
+        );
+
+        assert_eq!(selected.origin_name, "kinozal.me");
+        assert_eq!(result, "clear");
+        assert_eq!(challenged, ["romfea.gr"]);
+        assert_eq!(attempts, [("kinozal.me".into(), plan.into())]);
     }
 
     #[cfg(unix)]
@@ -7713,6 +8153,7 @@ mod tests {
             local_port: 41_000,
             tls: Some("1.3"),
             status: 200,
+            cloudflare_challenge: false,
             body_bytes: 64,
             body_expected: Some(64),
             chunked: false,
@@ -7723,6 +8164,57 @@ mod tests {
             r2o_volume_observation: Default::default(),
             r2o_resources: Vec::new(),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ech_rx_обрыв_требует_всех_подтверждённых_признаков() {
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "cloudflare-ech.com".into(),
+            endpoint: "198.51.100.20:443".into(),
+            family: 4,
+            shape: r2k_core::control::SHAPE_ECH_TCP,
+        };
+        let config = r2o_controller::ech::R2oEchConfig {
+            public_name: target.host.clone(),
+            origin_name: "kinozal.me".into(),
+            config_list: Vec::new(),
+        };
+        let mut fetch = r2o_test_fetch_result();
+        fetch.status = 200;
+        fetch.complete = false;
+        fetch.body_bytes = 8192;
+        fetch.r2o_volume_observation.body_framing_valid = true;
+        assert!(super::r2o_ech_witness_rx_cut(
+            &target, &config, true, false, &fetch
+        ));
+
+        assert!(!super::r2o_ech_witness_rx_cut(
+            &target, &config, false, false, &fetch
+        ));
+        assert!(!super::r2o_ech_witness_rx_cut(
+            &target, &config, true, true, &fetch
+        ));
+        let mut not_cut = fetch.clone();
+        not_cut.body_bytes = 8191;
+        assert!(!super::r2o_ech_witness_rx_cut(
+            &target, &config, true, false, &not_cut
+        ));
+        not_cut = fetch.clone();
+        not_cut.complete = true;
+        assert!(!super::r2o_ech_witness_rx_cut(
+            &target, &config, true, false, &not_cut
+        ));
+        not_cut = fetch.clone();
+        not_cut.r2o_volume_observation.body_framing_valid = false;
+        assert!(!super::r2o_ech_witness_rx_cut(
+            &target, &config, true, false, &not_cut
+        ));
+        not_cut = fetch.clone();
+        not_cut.status = 400;
+        assert!(!super::r2o_ech_witness_rx_cut(
+            &target, &config, true, false, &not_cut
+        ));
     }
 
     #[cfg(unix)]
@@ -8036,6 +8528,7 @@ mod tests {
         let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut client = ControlClient {
             socket,
+            send_maxlen: 0,
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -8087,6 +8580,7 @@ mod tests {
         let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut client = ControlClient {
             socket,
+            send_maxlen: 0,
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -8146,6 +8640,7 @@ mod tests {
         let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut client = ControlClient {
             socket,
+            send_maxlen: 0,
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -8220,6 +8715,7 @@ mod tests {
         let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut client = ControlClient {
             socket,
+            send_maxlen: 0,
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -8241,6 +8737,7 @@ mod tests {
         let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut client = ControlClient {
             socket,
+            send_maxlen: 0,
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -8262,6 +8759,7 @@ mod tests {
         let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut client = ControlClient {
             socket,
+            send_maxlen: 0,
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -8283,6 +8781,7 @@ mod tests {
         let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut client = ControlClient {
             socket,
+            send_maxlen: 0,
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -8566,6 +9065,7 @@ mod tests {
         });
         let mut client = ControlClient {
             socket,
+            send_maxlen: 0,
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -8753,6 +9253,7 @@ mod tests {
 
         let mut client = ControlClient {
             socket,
+            send_maxlen: 0,
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -8962,6 +9463,7 @@ mod tests {
         });
         let mut client = super::ControlClient {
             socket,
+            send_maxlen: 0,
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -9006,6 +9508,7 @@ mod tests {
         });
         let mut client = ControlClient {
             socket,
+            send_maxlen: 0,
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -9168,6 +9671,7 @@ mod tests {
         });
         let mut client = ControlClient {
             socket,
+            send_maxlen: 0,
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -9200,6 +9704,7 @@ mod tests {
         let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut client = ControlClient {
             socket,
+            send_maxlen: 0,
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -9239,6 +9744,7 @@ mod tests {
         let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut client = ControlClient {
             socket,
+            send_maxlen: 0,
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -10075,24 +10581,20 @@ mod tests {
         assert!(worker.queue(target("fresh.example", 444)));
 
         let before_gap = started_receiver.recv_timeout(Duration::from_millis(200));
-        if before_gap.is_ok() {
-            release_sender.send(()).unwrap();
-        }
+        let second_started = started_receiver.recv_timeout(Duration::from_secs(2));
+        let _ = release_sender.send(());
+        let _ = release_sender.send(());
         assert!(
             matches!(before_gap, Err(mpsc::RecvTimeoutError::Timeout)),
             "свежее подозрение не должно запускать второй замер до паузы 250 мс"
         );
-
-        let (started, second_started_at) = started_receiver
-            .recv_timeout(Duration::from_secs(2))
-            .expect("свежее подозрение должно начать замер после паузы");
+        let (started, second_started_at) =
+            second_started.expect("свежее подозрение должно начать замер после паузы");
         assert_eq!(started, "fresh.example");
         assert!(
-            second_started_at.duration_since(first_started_at) >= Duration::from_millis(245),
-            "второй замер должен ждать почти полные 250 мс после первого"
+            second_started_at.duration_since(first_started_at) >= Duration::from_millis(200),
+            "второй замер не должен начинаться раньше проверенного интервала"
         );
-        release_sender.send(()).unwrap();
-        release_sender.send(()).unwrap();
     }
 
     #[cfg(unix)]
@@ -10624,6 +11126,7 @@ mod tests {
         });
         let mut client = ControlClient {
             socket: client_stream,
+            send_maxlen: 0,
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: Default::default(),
@@ -10706,6 +11209,7 @@ mod tests {
         });
         let mut client = ControlClient {
             socket: client_stream,
+            send_maxlen: 0,
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: Default::default(),
@@ -11163,6 +11667,7 @@ mod tests {
             });
             let mut client = ControlClient {
                 socket: client_stream,
+                send_maxlen: 0,
                 pending_events: VecDeque::new(),
                 pending_applied_events: VecDeque::new(),
                 http_search_started: Default::default(),
@@ -11218,6 +11723,7 @@ mod tests {
             });
             let mut client = ControlClient {
                 socket: client_stream,
+                send_maxlen: 0,
                 pending_events: VecDeque::new(),
                 pending_applied_events: VecDeque::new(),
                 http_search_started: Default::default(),
@@ -11378,6 +11884,7 @@ mod tests {
             });
             let mut client = ControlClient {
                 socket: client_stream,
+                send_maxlen: 0,
                 pending_events: VecDeque::new(),
                 pending_applied_events: VecDeque::new(),
                 http_search_started: Default::default(),

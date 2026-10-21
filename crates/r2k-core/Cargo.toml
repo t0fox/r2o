@@ -11,6 +11,9 @@ getrandom = "0.2.17"
 hkdf = "0.12.4"
 sha2 = "0.10.9"
 
+[dev-dependencies]
+tls-parser = "0.12.2"
+
 [lib]
 name = "r2k_core"
 

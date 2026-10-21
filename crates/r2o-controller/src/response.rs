@@ -275,6 +275,13 @@ fn https_connection(
     rustls::ClientConnection::new(config, server_name).map_err(|_| HttpsProbeState::Unconfirmed)
 }
 
+fn https_certificate_der_is_parseable(der: &[u8]) -> bool {
+    matches!(
+        x509_parser::parse_x509_certificate(der),
+        Ok((remaining, _)) if remaining.is_empty()
+    )
+}
+
 fn https_socket(
     address: SocketAddr,
     expected_mark: u32,
@@ -401,6 +408,15 @@ pub fn probe_https_state(host: &str, address: SocketAddr, mark: Option<u32>) -> 
             }
             Ok(_) => {}
         }
+    }
+    let Some(leaf) = connection
+        .peer_certificates()
+        .and_then(|certificates| certificates.first())
+    else {
+        return HttpsProbeState::Unconfirmed;
+    };
+    if !https_certificate_der_is_parseable(leaf.as_ref()) {
+        return HttpsProbeState::Unconfirmed;
     }
     HttpsProbeState::Served
 }
@@ -1037,5 +1053,21 @@ pub fn decide(target: i32, control: i32, unmeasured: i32, repeats: i32) -> Respo
         reason,
         target,
         control,
+    }
+}
+
+#[cfg(test)]
+mod x509_tests {
+    use super::https_certificate_der_is_parseable;
+
+    #[test]
+    fn r2o_tls_измеритель_разбирает_сертификат_через_x509_parser() {
+        let certificate =
+            rcgen::generate_simple_self_signed(vec!["example.test".to_owned()]).unwrap();
+        let der = certificate.serialize_der().unwrap();
+
+        assert!(https_certificate_der_is_parseable(&der));
+        assert!(!https_certificate_der_is_parseable(&der[..der.len() - 1]));
+        assert!(!https_certificate_der_is_parseable(&[]));
     }
 }

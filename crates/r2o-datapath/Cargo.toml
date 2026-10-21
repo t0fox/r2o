@@ -8,6 +8,10 @@ description = "Linux NFQUEUE datapath daemon"
 r2k-core = { package = "r2k-core", path = "../r2k-core" }
 libc = "0.2.189"
 
+[dev-dependencies]
+etherparse = "0.21.0"
+proptest = "1.12.0"
+
 [lib]
 name = "r2o_datapath"
 

@@ -1,4 +1,6 @@
-use r2k_core::control::{HelloEvent, HttpPortalEvent, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN};
+use r2k_core::control::{
+    HelloEvent, HttpPortalEvent, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN,
+};
 use r2o_controller::catalog::Catalog;
 use r2o_controller::discovery::{DiscoveryTarget, add_measured_binding, has_usable_binding};
 use r2o_controller::http_search::{candidate_text, stable_id};
@@ -47,6 +49,16 @@ fn event_target_uses_the_remote_endpoint_and_keeps_tls_shapes_separate() {
     assert_eq!(target.endpoint, "198.51.100.2:443");
     assert_eq!(target.family, 4);
     assert_eq!(target.shape, SHAPE_MODERN);
+}
+
+#[test]
+fn событие_выбирает_ech_для_зашифрованной_пробы_clienthello() {
+    let target =
+        DiscoveryTarget::from_event(&hello(Some("cloudflare-ech.com"), 4, Some(SHAPE_ECH_TCP)))
+            .unwrap();
+
+    assert_eq!(target.host, "cloudflare-ech.com");
+    assert_eq!(target.shape, SHAPE_ECH_TCP);
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use r2k_core::addr::Address;
 use r2k_core::control::{EVENT_HELLO, Frame, decode_hello};
 use r2o_controller::classify::{Accept, Trigger};
-use r2o_controller::hello::{legacy_client_hello, modern_client_hello};
+use r2o_controller::hello::{legacy_client_hello, modern_client_hello, r2o_rx_fake_client_hello};
 use r2o_datapath::capture::{TcpFlowKey, tcp_hello_from_bytes};
 
 fn assert_lengths_match(hello: &[u8]) {
@@ -56,6 +56,18 @@ fn modern_profile_replaces_sni_and_preserves_tls13_shape() {
     assert_eq!(&hello[offset..offset + length], b"youtube.com");
     assert!(r2k_core::tls::parse(&hello).is_tls13);
     assert_eq!(hello, include_bytes!("fixtures/modern-youtube-c.bin"));
+}
+
+#[test]
+fn r2o_rx_fake_profile_matches_c_reference_byte_for_byte() {
+    assert_eq!(
+        r2o_rx_fake_client_hello("hcaptcha.com").unwrap(),
+        include_bytes!("fixtures/r2o-rx-fake-hcaptcha-c.bin")
+    );
+    assert_eq!(
+        r2o_rx_fake_client_hello("video.edge.example.net").unwrap(),
+        include_bytes!("fixtures/r2o-rx-fake-longname-c.bin")
+    );
 }
 
 #[test]

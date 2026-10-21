@@ -52,6 +52,48 @@ pub fn r2o_tls_client_connection(
         .map_err(|error| format!("не удалось начать TLS-рукопожатие: {error}"))
 }
 
+/// Создать TLS 1.3 соединение с ECH и корнями системно поддерживаемых серверов.
+pub fn r2o_tls_ech_client_connection(
+    name: &str,
+    roots: rustls::RootCertStore,
+    ech: rustls::client::EchConfig,
+) -> Result<rustls::ClientConnection, String> {
+    let mut provider = rustls::crypto::ring::default_provider();
+    provider.cipher_suites = vec![rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256];
+    provider.kx_groups = vec![
+        rustls::crypto::ring::kx_group::X25519,
+        rustls::crypto::ring::kx_group::SECP256R1,
+    ];
+    let mut config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(provider))
+        .with_ech(rustls::client::EchMode::Enable(ech))
+        .map_err(|error| format!("не удалось включить ECH: {error}"))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let server_name = rustls::pki_types::ServerName::try_from(name.to_owned())
+        .map_err(|_| "имя цели недопустимо для внутреннего TLS SNI".to_owned())?;
+    rustls::ClientConnection::new(std::sync::Arc::new(config), server_name)
+        .map_err(|error| format!("не удалось начать ECH-рукопожатие: {error}"))
+}
+
+/// Собрать зашифрованный ClientHello, чтобы классификатор проверял ту же форму.
+pub fn r2o_tls_ech_client_hello(
+    name: &str,
+    ech: rustls::client::EchConfig,
+) -> Result<Vec<u8>, String> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let mut connection = r2o_tls_ech_client_connection(name, roots, ech)?;
+    let mut hello = Vec::with_capacity(2048);
+    connection
+        .write_tls(&mut hello)
+        .map_err(|error| format!("не удалось собрать ECH ClientHello: {error}"))?;
+    if hello.len() < 6 || hello[0] != 22 || hello[5] != 1 {
+        return Err("Rustls не собрал полный TLS ClientHello с ECH".into());
+    }
+    Ok(hello)
+}
+
 /// Параметры сборки клиентского приветствия TLS 1.3.
 pub struct R2oTls13ClientHelloOptions<'a> {
     pub server_name: Option<&'a str>,

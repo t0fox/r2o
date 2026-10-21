@@ -5852,3 +5852,254 @@ ARM64/QEMU: новый тест запрета неполного подтвер
 обнаружил гонку наблюдения в тесте порядка worker-ов; тест получил барьер,
 проверяющий очередь последовательно, после чего прошёл. Другие архитектуры и
 физический роутер не проверялись.
+
+## ECH: разрешение HTTPS RR — 21.10.2026
+
+Использованы существующие REA-досье, без повторного анализа подтверждённых
+функций:
+
+- `ev_c149abefc49483ea939fd1cb9c6882e8c59cbed6d931bf7f545176b7dab59201` —
+  сбор полного ClientHello из TCP-сегментов;
+- `ev_f333541053baf3017835a9fa846c804ad6b279f05fea8f2c1d9e340401d4be15` —
+  распознавание ECH offer после полной сборки ClientHello;
+- `ev_8013b56cdc3831114acc3096e3e694d71ee13b70091c9b45aeaefdfc14169e43` —
+  TLS 1.3/ECH-зонд донора с GET и потоковой оценкой HTTP-ответа.
+
+Текущие исходники донора сверены напрямую и через Clang 19 AST. Функция
+`d2k_ech_config_parse` в `core/tls13core.c` проверяет длину списка и записей,
+находит только конфигурацию KEM X25519 (`0x0020`) с ключом 32 байта,
+HKDF-SHA256/AES-128-GCM (`0x0001/0x0001`), допустимым `public_name`, без
+неизвестных обязательных расширений и с размером записи до 512 байт.
+`d2k_ech_resolve` в `core/verify.c` запрашивает HTTPS RR по UDP, ждёт не дольше
+1500 мс, проверяет владельца и приоритет ServiceMode, разрешает корневую или
+совпадающую цель, принимает только порт 443 и извлекает ключ ECH 5. В Rust
+использован тот же тестовый ECHConfigList из `core/test_ech.c`.
+
+Хеши источников донора: `verify.c` —
+`765ae5c68e22e8a983575fec60fa7e235e6a3c2475c9c217eea90e088e06feb2`,
+`tls13core.c` —
+`dd815fdae76f8c45c1b8d7a85eae7989d99b495f250cff663d81be632beea79b1`,
+`test_ech.c` —
+`18b72e7e690356f89081928db71d88d31cd648622feb45f856ccc5bbb45acdcf`.
+Clang AST сохранён в `.rea/d2o-ech-config-clang-ast.log`.
+
+Свежего REA-досье для `d2k_ech_config_parse`/`d2k_ech_resolve` в этом проходе
+получить не удалось: вызов `current_document` вернул `provider_unavailable`.
+Диагностика REA указала, что Ghidra не настроена (`GHIDRA_INSTALL_DIR` не задана),
+Windows Ghidra lane не принимает целевой ELF AArch64, Hopper не поддерживается на
+Windows, а IDA не зарегистрирована. Это ограничение зафиксировано; существующие
+REA Evidence и первичный C-исходник не подменяются новым несуществующим Evidence
+ID.
+
+Новая Rust-реализация: `crates/r2o-controller/src/ech.rs`, SHA-256
+`aaa276fb2d15fd3dabb17be8e843a2a48ddadea7792ebb14a2a94411f45fe1d0`. В ней
+добавлен ограниченный UDP-запрос типа 65 с `SO_MARK`, разбор ответа и выбор одной
+донор-совместимой конфигурации. Регрессионные тесты покрывают тестовый список
+донора, неполные/неподдерживаемые конфигурации, DNS owner и transaction ID,
+петли указателей и полный UDP-обмен с локальным сервером.
+
+ARM64/QEMU: ECH-набор — 5/5; весь `r2o-controller` — 349 прошло, 0 ошибок,
+1 штатный пропуск. Из-за зависшего
+параллельного запуска полный crate повторно проверен с `--test-threads=1`; этот
+прогон и отдельное воспроизведение теста очереди прошли. Журналы:
+`.rea/r2o-ech-resolver-arm64.log`,
+`.rea/r2o-ech-discovery-timer-isolated-arm64.log` и
+`.rea/r2o-ech-controller-arm64-sequential.log`. Прерванный параллельный запуск
+`.rea/r2o-ech-controller-arm64.log` не считается успешной проверкой.
+
+Этот слой ещё не вызывается планировщиком и не доказывает ECH-прохождение.
+TLS/ECH backend, подбор свидетелей, полная HTTP-проверка и сохранение после точного
+`APPLIED` остаются открытыми; процент переноса не повышен.
+
+## ECH: runtime и повторный запрос REA — 21.10.2026
+
+Свежую декомпиляцию не выполнял: ранее подтверждённый участок сверялся по
+исходникам и Clang AST, повторный анализ большого ELF не требовался. Для проверки
+сохранённого донорского ID `ev_8013b56cdc3831114acc3096e3e694d71ee13b70091c9b45aeaefdfc14169e43`
+вызван REA `get_evidence_bundle` с точным фильтром. Текущий ответ:
+`matching_records=0`, `total_retained_records=0`, `unknown_revisions=0`; новый
+REA Evidence ID не создан. Старые ID остаются историческими ссылками из более
+раннего журнала и не считаются повторно подтверждёнными.
+
+Изменённый ECH-модуль: `crates/r2o-controller/src/ech.rs`, SHA-256
+`51af7ae11fc1addef09c1e6391f825028e1d59114343aa80a96394cebf355620`.
+Поверх DNS-разбора добавлены HPKE-адаптер, генерация ECH ClientHello и runtime
+путь до подтверждения плана. Тест HPKE проверяет отправителя и получателя на
+одном сообщении.
+
+ARM64/QEMU:
+
+- ECH-фильтр: 8 прошло, 0 ошибок; `.rea/r2o-ech-runtime-targeted-arm64.log`.
+- Полный `r2o-controller`: 353 прошло, 0 ошибок, 1 штатный пропуск в 23
+  наборах; `.rea/r2o-ech-runtime-controller-arm64.log`.
+- Полный workspace: 986 прошло, 0 ошибок, 4 штатных пропуска в 73 наборах;
+  `.rea/r2o-ech-runtime-workspace-arm64.log`. Холодная компиляция тестов заняла
+  9 мин 08 с.
+- ARM64 `cargo check -p r2o-controller --locked --offline` завершился без
+  ошибок; `.rea/r2o-ech-runtime-check-arm64-final.log`.
+
+Пока не измерены размеры релизных бинарников после текущих изменений, не
+проверены MIPS/ARMv5/ARMv7 cross-build и не выполнена приёмка на физическом
+роутере. REA-провайдер/архив удерживаемых Evidence не предоставил свежего
+досье; это ограничение не заменяется выводом Rust-тестов.
+
+## TLS/IP измеритель: независимые разборщики — 21.10.2026
+
+Нового REA-досье в этом подэтапе нет: это не новый перенос донорской функции,
+а независимая проверка уже перенесённых TLS/IP разборщиков. REA и его прежние
+Evidence ID не считаются подтверждением приведённых ниже тестов.
+
+Изменённые исходники и SHA-256:
+
+- `crates/r2o-controller/src/response.rs` —
+  `58f72db7e39f5032525d54d79a20c6d8585033b7ab054558cba23444aca34536`;
+- `crates/r2k-core/src/tls.rs` —
+  `2aaa31465554a541b4a746f613c1cdf7a9843f0dd4ac2a145b22b7bdb738949e`;
+- `crates/r2o-datapath/src/raw.rs` —
+  `9ebe8a86d22941a4b1e904bc8813839646339f3b697403a20a4477ef2ede7da1`;
+- `crates/r2o-controller/tests/response.rs` —
+  `b889d2cfae637cc4a5cfe67c69eaa531ad10e6b70171ae923e8fb3bb005c2868`.
+
+ARM64/QEMU тесты затронутых crates: 731 прошло, 0 ошибок, 4 штатных пропуска
+в 49 наборах. Журнал: `.rea/r2o-independent-parsers-crates-arm64.log`.
+Тесты TLS сравнивают структурные сообщения `ClientHello`, `ServerDone` и
+`Alert` с независимым `tls-parser`; тесты datapath сравнивают принятие UDP/IPv4
+и UDP/IPv6 пакетов с `etherparse`; property-тесты генерируют произвольные
+входные байты для TLS/raw разборщиков. Эта проверка не заменяет C/Rust
+дифференциальные сценарии и REA-досье.
+
+Полный workspace ARM64/QEMU после этих изменений завершился успешно: 992 прошло,
+0 ошибок, 4 штатных пропуска в 73 наборах; `.rea/r2o-independent-parsers-workspace-arm64.log`.
+Форматирование и `git diff --check` прошли.
+
+Совместимость сборки и размеры бинарников:
+
+- MIPS32 little-endian GNU: полный release cross-build, 3 мин 14 с;
+  `.rea/r2o-mipsel-release-cross-build.log`.
+- ARMv5te musleabi: `cargo check --workspace` прошёл;
+  `.rea/r2o-armv5te-cross-check.log`.
+- ARMv7 musleabihf: `cargo check --workspace` прошёл;
+  `.rea/r2o-armv7-cross-check.log`.
+- ARM64 GNU: полный release build прошёл;
+  `.rea/r2o-arm64-release-build.log`.
+
+Размеры stripped release ELF (байты; GNU dynamic libc):
+
+| Бинарник | ARM64 | MIPS32 little-endian |
+|---|---:|---:|
+| `r2o-controller` | 4 985 960 | 6 558 620 |
+| `r2o-datapath` | 856 784 | 1 183 572 |
+| `r2o-fetch` | 2 560 960 | 3 215 776 |
+| `r2o-manager` | 856 776 | 1 183 832 |
+| `r2o-panel` | 1 118 992 | 1 314 856 |
+| `r2o-telegram` | 4 597 480 | 5 905 676 |
+
+Тесты запускались только под ARM64/QEMU. MIPS/ARM32 бинарники не запускались;
+физическая проверка роутера не проводилась. Ранее сохранённые REA Evidence ID
+и выводы парсерных тестов не переобъявляются доказательством полного переноса
+донорского сценария. Основные непройденные области и открытые REA ограничения
+сохраняются.
+
+## ECH: RX-обрыв свидетеля и контроль сборок — 21.10.2026
+
+REA использован повторно только для ранее не закрытого критического условия
+`ech_witness_rx_cut`; повторный анализ большого ELF r2o не выполнялся. В WSL
+REA 6.5.0/Ghidra 12.1.4 создано локальное досье
+`.rea/r2o-donor-ech-witness-rx-cut-ghidra.md`, Evidence ID
+`ev_be4cd93af643375f6a70bc962150c5c810a7b8912492a11b521df4b9856ee476`.
+Досье получено статическим анализом C-донорского тестового сценария; оно
+подтверждает условия helper: TCP, ECH offer без replay, непустое имя свидетеля,
+отличное от цели, принятый ECH и валидное имя, HTTP 200–399, неполное тело,
+валидное framing и более 8191 байта. Это подтверждает только предикат, не
+перенос RX-лестницы. MCP-хранилище REA при запросе точного ID вернуло 0
+удерживаемых записей; для этой проверки доступно сохранённое локальное досье
+REA CLI.
+
+Исторический импорт исходников через REA CLI в WSL: source manifest
+`hsm_7f19ba9ba27bafcb1c739df2ca6d3bc69f4671ae0006db732f495fb9c818dedc8`,
+graph SHA-256 `dac09000da1b379cf8cb343c3b49a4ed44cc763cb222ba4c93cab42cf64976d0`,
+корень исходников SHA-256
+`7ece18110b1ad6f55421c17b767242d5360f7d5450a2e8260130f157ddca797e`.
+Импорт частичный: 1070 элементов и 79 связей. Временная копия донора находится
+в `/tmp/r2o-d2o-reference-20261021` на ревизии
+`eb848976ed9491791b7f2130b874867b61b2ca5d`.
+
+ARM64/QEMU Evidence:
+
+- C-донорский `test_sched_summary`: AArch64-сборка и запуск под QEMU прошли;
+  `.rea/r2o-ech-witness-donor-arm64.log`.
+- `r2o-controller`: 359 прошло, 0 ошибок, 1 штатный пропуск в 23 наборах;
+  `.rea/r2o-ech-witness-controller-arm64.log`, компиляция 4 мин 48 с.
+- Полный workspace: 995 прошло, 0 ошибок, 4 штатных пропуска в 73 наборах;
+  `.rea/r2o-ech-witness-workspace-arm64.log`, компиляция 5 мин 56 с.
+- ARM64 GNU release build прошёл за 2 мин 30 с;
+  `.rea/r2o-ech-witness-arm64-release-build.log`.
+- `cargo fmt --all -- --check` и `git diff --check` прошли до сборок.
+
+Cross-build Evidence, без запуска тестов/бинарников на этих архитектурах:
+
+- ARMv5te musleabi workspace `cargo check`: прошёл за 31,85 с;
+  `.rea/r2o-ech-witness-armv5te-cross-check.log`.
+- ARMv7 musleabihf workspace `cargo check`: прошёл за 31,30 с;
+  `.rea/r2o-ech-witness-armv7-cross-check.log`.
+- MIPS little-endian GNU workspace release build: прошёл за 2 мин 19 с;
+  `.rea/r2o-ech-witness-mipsel-release-cross-build.log`.
+- ARM64/MIPS stripped ELF-размеры зафиксированы в
+  `.rea/r2o-ech-witness-release-sizes.txt`; бинарники перед strip копировались
+  в `/tmp/r2o-ech-release-sizes`, target-артефакты не изменялись.
+
+Сценарий Cloudflare challenge-свидетеля подключён к Discovery. Сценарий
+`ech_witness_rx_cut` с генерацией и перебором белых SNI-планов пока открыт;
+тесты не доказывают работу на реальном роутере. Общий прогресс полного паритета
+остаётся **65,85%**.
+
+## ECH RX-обрыв свидетеля и белая SNI-лестница — 21.10.2026
+
+### REA-основание
+
+Использовано локальное REA/Ghidra-досье
+`.rea/r2o-donor-ech-witness-rx-cut-ghidra.md`, Evidence ID
+`ev_be4cd93af643375f6a70bc962150c5c810a7b8912492a11b521df4b9856ee476`.
+Оно подтверждает донорский предикат: TCP, ECH offer без replay, имя свидетеля
+не пусто и отличается от цели, ECH принят, имя валидно, HTTP 200–399,
+неполное тело, корректное framing и не менее 8192 байт. Этот анализ
+переиспользован; большие ELF повторно не разбирались. Сохранённое REA-досье
+подтверждает только предикат, а не конечное runtime-поведение всей лестницы.
+
+### Реализация и дифференциальные проверки
+
+После такого RX-обрыва `r2o-controller` строит до 32 планов по донорскому
+списку из 266 имён, затем пять вариантов разбиения `hcaptcha.com`. План
+проверяется только после ECH-свидетеля; длина генерируемой пробы получает
+согласованный datapath `send_maxlen`. Курсор поиска сохраняется в состоянии
+цели. Подтверждение требует завершённого HTTPS без challenge и точного
+`APPLIED`.
+
+Фикстуры получены вызовом C-донора; временные C harness находятся только в
+игнорируемом `.rea/`, production-код r2o остаётся Rust. ARM64/QEMU тесты
+сравнили байты ClientHello для короткого и длинного SNI, три полных плана
+(включая разбиение на две и пять частей), принятие всех 266 имён и границы
+плана. Список whitelist сверён побайтно с донором, SHA-256:
+`184aec1436b065637a47d1ef1def4a1def6c494252b0da2efe9c3361069dbf1f`.
+
+- `r2o-controller`: 366 прошло, 0 ошибок, 1 штатный пропуск в 23 наборах;
+  `.rea/r2o-ech-rx-ladder-controller-arm64-final.log`.
+- Полный workspace на ARM64/QEMU: 1002 прошло, 0 ошибок, 4 штатных пропуска
+  в 73 наборах; `.rea/r2o-ech-rx-ladder-workspace-arm64-final.log`.
+- ARMv5te musleabi `cargo check --workspace` прошёл;
+  `.rea/r2o-ech-rx-ladder-armv5te-check.log`.
+- ARMv7 musleabihf `cargo check --workspace` прошёл;
+  `.rea/r2o-ech-rx-ladder-armv7-check.log`.
+- MIPS32 little-endian GNU release-сборка прошла за 3 мин 36 с;
+  `.rea/r2o-ech-rx-ladder-mipsel-release.log`.
+- ARM64 GNU release-сборка прошла за 3 мин 13 с;
+  `.rea/r2o-ech-rx-ladder-arm64-release.log`.
+- Размеры release ELF после `strip --strip-unneeded`; оригиналы не изменялись:
+  `.rea/r2o-ech-rx-ladder-release-sizes.txt`.
+- `cargo +1.98.0 fmt --all -- --check` и `git diff --check` прошли.
+
+Тесты и запуск бинарников выполнялись только на ARM64/QEMU. ARM32 и MIPS
+проверялись сборкой, их исполняемые файлы не запускались. Проверка на физическом
+роутере отсутствует; поэтому этот сценарий не увеличивает общую оценку **65,85%**.
+Остаются открытыми полный перенос scheduler/session и остальных подсистем,
+а также фактическая приёмка на Keenetic/OpenWrt.
