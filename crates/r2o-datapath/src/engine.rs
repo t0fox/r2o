@@ -1141,7 +1141,9 @@ fn decide_voice(plan: &Plan, packet: &[u8], view: &PacketView, payload: &[u8]) -
     else {
         return PacketDecision::Accept;
     };
-    if !r2k_core::stun::is_discord_voice_request(payload, destination_port) {
+    if !r2k_core::stun::is_discord_voice_request(payload, destination_port)
+        && !r2k_core::stun::is_binding_request(payload)
+    {
         return PacketDecision::Accept;
     }
     let Ok(actions) = plan.apply(&PacketInput::new(payload, 0)) else {
@@ -2457,7 +2459,7 @@ mod tests {
     }
 
     #[test]
-    fn discord_voice_plan_sends_udp_fake_before_accepting_the_original() {
+    fn voice_plan_sends_udp_fake_for_discord_and_regular_stun_requests() {
         let plan = Plan::parse(&plan_bytes(
             1,
             &[
@@ -2498,6 +2500,11 @@ mod tests {
         );
 
         input[22..24].copy_from_slice(&3478_u16.to_be_bytes());
+        assert!(matches!(
+            decide(&plan, &input),
+            PacketDecision::Transmit { .. }
+        ));
+        input[29] = 9;
         assert_eq!(decide(&plan, &input), PacketDecision::Accept);
 
         let mut input_v6 = ipv6_udp(&stun);

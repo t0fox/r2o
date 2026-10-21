@@ -5404,3 +5404,30 @@ REA-сверка здесь подтверждает только формат, 
 `.rea/r2o-openwrt-aarch64-release-20261021.log`,
 `.rea/r2o-openwrt-aarch64-manager-tests-20261021.log`,
 `.rea/r2o-openwrt-aarch64-package-install-20261021.log`.
+
+## Обычный STUN и адресный voice-план — 21.10.2026
+
+Для переноса использовано REA Evidence `ev_2880307833520b2a4e0aebba0e5015318f321eef63a30db95fbb4a271b3c861e`:
+Ghidra 12.1.4 разобрал `handle_udp` донорского AArch64 ELF с полной связностью
+отношений. SHA-256 ELF: `ACD78C046439909A208F9E07B9B324CD5C901EAC2E9E576ADBEABEFEAC459832`.
+Участок исходника `datapath/session.c` имеет SHA-256
+`39DADA3D4FBDAF943BF7B2A788090AB3D16A71065A58C16D39901575247F7187`, тест
+`datapath/test_stun_session.c` —
+`8EDAEEEC9EBA67F250D6DBF1C965BB8102E9DC3A15F8B7E334998DCC7A3827C8`.
+REA и исходник подтверждают: корректный Binding Request вне Discord-класса
+получает `SHAPE_VOICE` без имени и может выбрать только адресный план сервера;
+не-STUN payload и другой адрес назначения не должны совпадать.
+
+В Rust перенесены выбор адресного плана и его исполнение перед исходным
+пакетом для обычного STUN. Донорский ARM64 `test_stun_session` прошёл под QEMU;
+проверки Rust на ARM64/QEMU прошли. Первый workspace запуск обнаружил только
+отсутствующий sysroot у вложенного QEMU-процесса; после задания
+`QEMU_LD_PREFIX=/usr/aarch64-linux-gnu` весь workspace прошёл: 958 успешно,
+0 ошибок, 4 raw-теста штатно пропущены в 73 наборах. ARM64 GNU release workspace
+собран, все шесть ELF распознаны как AArch64 и запущены через QEMU с `--version`.
+`cargo fmt --all -- --check` и `git diff --check` прошли. Другие архитектуры и
+физический роутер не проверялись. Артефакты REA и журналы: `.rea/r2o-generic-stun-arm64-rea.json`,
+`.rea/r2o-generic-stun-arm64-tests.log`, `.rea/r2o-generic-stun-donor-arm64.log`,
+`.rea/r2o-generic-stun-workspace-arm64-tests-rerun.log`,
+`.rea/r2o-generic-stun-arm64-release-build.log` и
+`.rea/r2o-generic-stun-arm64-release-smoke.log`.

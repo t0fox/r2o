@@ -254,6 +254,9 @@ impl NamePlans {
                         )
                     });
             }
+            if r2k_core::stun::is_binding_request(payload) {
+                return self.find_addr(view.dst, SHAPE_VOICE);
+            }
             let source_port = packet
                 .get(view.l4_offset..view.l4_offset + 2)
                 .and_then(|bytes| bytes.try_into().ok())
@@ -2147,6 +2150,35 @@ mod tests {
         assert!(plans.select(&discord_stun).is_some());
         discord_stun[22..24].copy_from_slice(&3478_u16.to_be_bytes());
         assert!(plans.select(&discord_stun).is_none());
+    }
+
+    #[test]
+    fn r2o_обычный_stun_получает_только_адресный_voice_план() {
+        let r2o_server = Ipv4Addr::new(198, 51, 100, 2);
+        let mut r2o_plan = plan_header(1, 2);
+        r2o_plan.extend_from_slice(&[0x00, 0x01, 0x00, 0x10]);
+        r2o_plan.extend_from_slice(&[0x25; 16]);
+        r2o_plan.extend_from_slice(&[0x00, 0x02, 0x00, 0x02, 17, r2k_core::plan::PROTO_VOICE]);
+        let command = encode_set_addr(IpAddr::V4(r2o_server), SHAPE_VOICE, &r2o_plan).unwrap();
+        let command = control::read_frame(&mut std::io::Cursor::new(command)).unwrap();
+        let mut plans = NamePlans::default();
+        assert!(plans.handle(&command).ok);
+
+        let request = r2k_core::stun::binding_request([7; 12]);
+        let packet = udp_packet(&request, 3478);
+        assert_eq!(plans.select(&packet).map(|plan| plan.id), Some([0x25; 16]));
+        let applied = plans.applied_event_for_packet(&packet, 9).unwrap();
+        assert_eq!(applied.plan_id, [0x25; 16]);
+        assert_eq!(applied.binding.shape, SHAPE_VOICE);
+        assert!(
+            plans
+                .select(&udp_packet("обычный UDP".as_bytes(), 3478))
+                .is_none()
+        );
+
+        let mut other_server = packet;
+        other_server[16..20].copy_from_slice(&[203, 0, 113, 5]);
+        assert!(plans.select(&other_server).is_none());
     }
 
     #[test]
