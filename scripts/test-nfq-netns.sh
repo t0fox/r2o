@@ -952,7 +952,7 @@ server.settimeout(3)
 received = []
 
 def receive_datagrams():
-    for _ in range(4):
+    for _ in range(3):
         received.append(server.recvfrom(2048)[0])
 
 receiver = threading.Thread(target=receive_datagrams)
@@ -966,8 +966,8 @@ client.sendto(request, ("127.0.0.1", 50004))
 client.close()
 receiver.join(3)
 server.close()
-if receiver.is_alive() or received != [b"FAKE", request, b"FAKE", request]:
-    raise SystemExit(f"ОШИБКА: voice-поток изменён при повторном Discovery: {received!r}")
+if receiver.is_alive() or received != [b"FAKE", request, request]:
+    raise SystemExit(f"ОШИБКА: voice-план повторно применён к одному UDP-потоку или изменил пакет: {received!r}")
 
 deadline = time.monotonic() + 5
 while time.monotonic() < deadline:

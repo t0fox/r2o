@@ -14,6 +14,7 @@ pub mod nfqueue;
 pub mod r2o_icmp_guard;
 pub mod r2o_quic;
 pub mod r2o_route;
+pub mod r2o_udp_hold;
 pub mod r2o_udp_sessions;
 pub mod r2o_voice;
 #[cfg(target_os = "linux")]

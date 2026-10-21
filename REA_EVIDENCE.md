@@ -5255,10 +5255,114 @@ REA запускался только для статического анали
 канонического UDP-потока, а runtime не отмечает `qdeny`-DROP как исполненный
 план. Регрессионный сценарий проверяет обе стороны потока, повтор после
 истечения и повторное отбрасывание `qdeny`. Ветвь разрешения повтора при
-ошибке частичной отправки (`udp_replan`) и UDP hold/replay ещё не перенесены.
+ошибке частичной отправки (`udp_replan`) остаётся открытой; UDP hold/replay
+описан ниже.
 
 Только `aarch64-unknown-linux-gnu` под QEMU: workspace — 938 прошло, 0 ошибок,
 4 штатно пропущено в 72 тестовых бинарниках; release workspace собран, все шесть
 бинарников подтверждены как ARM aarch64 и запущены с `--version`. `cargo fmt`
 и `git diff --check` прошли. Сырые журналы — `.rea/r2o-udp-plan-once-arm64-*`;
 остальные архитектуры не собирались и не тестировались.
+
+## UDP QUIC hold/replay и отложенное освобождение — 21.10.2026
+
+Повторно использованы сохранённые REA Evidence для ветвей UDP-пути и выпуска
+пакетов: `d2k_udp_path_pre` —
+`ev_8677fe80f86fa111ad4039248f2672dc0b643df01e004ff07a666fcfef634710`,
+`d2k_udp_path_post` —
+`ev_f25ebdbec8e500e4e05f3b50dde55dfe97cf238231d3308664bdbd8c9e0afa9b`,
+`d2k_udp_out_batch` —
+`ev_7375154c8e85846d1377794a18ba8b879efbd8d6adda61b8a60a173c7ec21dc9`,
+`d2k_udp_out_late` —
+`ev_31345279bac626643502f14801fc2701792bd04298dac6cbd030f03926f6d7f5`.
+Повторная декомпиляция не выполнялась. Сверены исходники донора из HEAD
+`eb848976ed9491791b7f2130b874867b61b2ca5d`: `datapath/udp_path.c`
+(`2622fe3d00411f9affd4d0acd4b05ac52dd19366a2d8a15725d4a236f13e13ca`),
+`datapath/udp_release.c`
+(`a33832af9e13797452d5349c36fc199f203d5d229f12dca9067e3d5b32ed08b2`) и
+`datapath/test_udp_path.c`
+(`31135fa37d7b736ccd3a1e31cf6610cc7306bee8bd68d0ea7638c882a2073e60`).
+
+В Rust перенесены ограниченный hold исходящих QUIC Initial, сборка split
+ClientHello, FIFO replay с исходными verdict ID и mark, fail-open по сроку,
+отложенные verdict/raw-resend и ограниченное окно для позднего хвоста того же
+потока. Runtime связывает удержанный verdict с тикетом планировщика, сохраняет
+порядок head/tail при выпуске и отменяет только состояние соответствующего
+потока при сбое. Добавлены 18 тестов в
+`crates/r2o-datapath/tests/udp_hold.rs`; целевой проект остаётся Rust-only.
+
+Дифференциальная ARM64-проверка собрала только временную копию C-донора как
+эталон, запустила её через QEMU и подтвердила один verdict на ID, порядок
+хвостов после головы и окно конфликтов. Затем прошли все 18 Rust-тестов. Журнал:
+`.rea/r2o-udp-hold-differential-arm64-20261021-081224.log`.
+Полный workspace под `aarch64-unknown-linux-gnu` и QEMU: 956 прошло, 0 ошибок,
+4 теста raw-пакетов штатно пропущены без Linux `CAP_NET_RAW`/`CAP_NET_ADMIN`;
+73 тестовых набора. Release workspace ARM64 собран; все шесть программ
+распознаны как ELF AArch64 и ответили на `--version` через QEMU.
+Тест панели переведён с абсолютного таймера на барьер запуска команды; целевой
+тест прошёл. Журналы итогового прогона: `.rea/r2o-workspace-test-arm64-final-20261021.log`,
+`.rea/r2o-workspace-release-arm64-final-20261021.log`,
+`.rea/r2o-workspace-smoke-arm64-final-20261021.log`.
+
+Другие архитектуры по указанию отложены. `udp_replan` после частичного отказа
+отправки и полный NFQUEUE/netns прогон в этой итерации не проверялись.
+
+## Повтор плана UDP после потери датаграммы — 21.10.2026
+
+Повторно использовано REA Evidence `ev_bcea4682cdbf3f115b7a3bb48abc8dac0aececc76d1d15da4c036a9706817bcc`
+для `handle_udp` из `datapath/test_session`; подтверждены проверка `plan_done`
+и разрешение повтора по `udp_replan`. Условие исхода отказа сверено по исходнику
+`datapath/session.c` из HEAD `eb848976ed9491791b7f2130b874867b61b2ca5d`, SHA-256
+`39dada3df4bdaf943bf7b2a788090ab3d16a71065a58c16d39901575247f7187`:
+при отсутствии payload на проводе потеря определяется как
+`orig_spent ? orig_taken : sends_done > 0`. Новую декомпиляцию не запускал:
+Windows Ghidra P0 не принимает ELF (`target_format_unsupported`), а уже
+имеющегося Evidence для `handle_udp` достаточно; неизвестное поведение сверено
+в исходнике.
+
+В `R2oUdpSessions` добавлен сброс `plan_applied` только при том же условии
+потери. Runtime теперь различает реально отправленные пакеты и emit, только
+поставленный в очередь; отложенный сбой сохраняет пакет, факт отправок и
+состояние исходного verdict даже для плана без события журнала. Уже ушедший
+payload блокирует повтор. Целевой проект остаётся Rust-only.
+
+`cargo fmt --all -- --check`, ARM64 `cargo check` бинаря и полный crate
+`r2o-datapath` под `aarch64-unknown-linux-gnu`/QEMU прошли: 238 тестов прошли,
+3 теста сырых сокетов штатно пропущены. Полный workspace прошёл: 957 тестов,
+0 ошибок, 4 raw-теста пропущены, 73 набора; release workspace собран, все шесть
+бинарников распознаны как ARM64 ELF и ответили на `--version` через QEMU.
+Новый тест покрывает комбинации частичной отправки, судьбы исходного пакета и
+факта выхода payload. Журналы: `.rea/r2o-udp-replan-arm64-final-20261021.log`,
+`.rea/r2o-workspace-test-arm64-udp-replan-final-20261021.log`,
+`.rea/r2o-workspace-release-arm64-udp-replan-final-20261021.log` и
+`.rea/r2o-workspace-smoke-arm64-udp-replan-final-20261021.log`. Полный
+NFQUEUE/netns сценарий в WSL user-mode QEMU возвращает
+`SO_MARK: Protocol not available`; ограничение закрыто отдельной полной ARM64
+VM ниже. Другие архитектуры не собирались и не тестировались.
+
+## Сетевой datapath на системной ARM64 VM — 21.10.2026
+
+Поведение повтора Discord STUN сверено с `datapath/session.c` донора HEAD
+`eb848976ed9491791b7f2130b874867b61b2ca5d`: после успешного плана C выставляет
+`plan_done` и повторяет его только при `udp_replan` после потери исполнения.
+Существующий Rust-тест `r2o_udp_план_исполняется_один_раз_на_поток_и_снова_после_истечения`
+задаёт такое же поведение. В `scripts/test-nfq-netns.sh` исправлено ошибочное
+ожидание второго fake на том же UDP-потоке; тест теперь требует последовательность
+`FAKE, запрос, запрос`.
+
+Проверена попытка REA 6.5.0 `rea function` на донорском `d2kd` и
+`rea execute-rizin-command`. Настроенный Windows Ghidra 12.1.4 P0 отвергает ELF
+с `target_format_unsupported` (поддерживаются PE и raw 6502); Rizin-операция REA
+для этого target недоступна. Новую декомпиляцию не заявляю; спорное ожидание
+установлено по исходнику донора и существующему Rust unit-тесту.
+
+На Debian 13 ARM64 под полной системной эмуляцией QEMU прошёл весь
+`scripts/test-nfq-netns.sh`: 23 проверки NFQUEUE/controller, в том числе UDP,
+QUIC, TCP, IPv6, TLS/HTTP, расписания, Discord voice, удержание пакетов и
+завершение службы. Raw socket наборы запущены с root на ARM64 kernel: три
+различных теста прошли в обоих собранных тестовых бинарниках. Полный workspace
+ARM64/QEMU ранее прошёл: 957 успешно, 0 ошибок, 4 штатно пропущены в 73 наборах;
+release workspace и smoke-проверка шести ARM64 бинарников также прошли.
+Другие архитектуры не собирались и не тестировались. Сводка и сетевые журналы:
+`.rea/r2o-nfq-arm64-final-20261021.md`,
+`.rea/r2o-nfq-arm64-logs-20261021.tar.gz`.

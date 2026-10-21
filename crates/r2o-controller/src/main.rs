@@ -7086,11 +7086,22 @@ fn run_http_trial_socket(
     host: &str,
     request_path: &[u8],
 ) -> Result<HttpTrialSocketResult, String> {
-    use std::io::Write;
-
-    let (mut stream, client, _, rtt_us) = bound
+    let (stream, client, _, rtt_us) = bound
         .connect(destination, std::time::Duration::from_secs(6))
         .map_err(|error| error.to_string())?;
+    r2o_run_http_trial_stream(stream, client, rtt_us, host, request_path)
+}
+
+#[cfg(unix)]
+fn r2o_run_http_trial_stream(
+    mut stream: std::net::TcpStream,
+    client: std::net::IpAddr,
+    rtt_us: i64,
+    host: &str,
+    request_path: &[u8],
+) -> Result<HttpTrialSocketResult, String> {
+    use std::io::Write;
+
     let request = build_http_get_request(host, request_path)
         .ok_or_else(|| "HTTP-путь нельзя повторить".to_owned())?;
     let mut result = HttpTrialSocketResult {
@@ -8798,7 +8809,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn http_probe_reuses_a_bound_socket_for_two_complete_responses() {
-        use super::{BoundTcpProbe, run_http_trial_socket};
+        use super::{BoundTcpProbe, r2o_run_http_trial_stream};
         use std::io::{Read, Write};
         use std::net::TcpListener;
 
@@ -8821,13 +8832,11 @@ mod tests {
             }
         });
 
-        let result = run_http_trial_socket(
-            BoundTcpProbe::open(4, Some(0)).unwrap(),
-            destination,
-            "example.com",
-            b"/",
-        )
-        .unwrap();
+        let (stream, client, _, _) = BoundTcpProbe::open(4, Some(0))
+            .unwrap()
+            .connect(destination, std::time::Duration::from_secs(6))
+            .unwrap();
+        let result = r2o_run_http_trial_stream(stream, client, 0, "example.com", b"/").unwrap();
         server.join().unwrap();
 
         assert_eq!(result.requests_sent, 2);
@@ -9406,7 +9415,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .waiting_for_slot;
-            if waiting > 0 {
+            if waiting >= 2 {
                 break;
             }
             assert!(std::time::Instant::now() < waiting_deadline);

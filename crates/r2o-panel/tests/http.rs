@@ -471,19 +471,31 @@ fn worker_domains_are_normalized_and_saved_without_losing_other_config() {
 
 #[cfg(unix)]
 #[test]
-fn service_actions_return_before_a_slow_command_finishes() {
+fn r2o_служебная_команда_панели_остаётся_асинхронной() {
     use std::os::unix::fs::PermissionsExt;
     let temp = TempDir::new();
     let service = temp.file("service.sh");
-    fs::write(&service, "#!/bin/sh\nsleep 0.25\nexit 7\n").unwrap();
+    let r2o_started_marker = temp.file("r2o-started");
+    let r2o_release_marker = temp.file("r2o-release");
+    fs::write(
+        &service,
+        "#!/bin/sh\nr2o_base=${0%/*}\nprintf started >\"$r2o_base/r2o-started\"\nr2o_count=0\nwhile [ ! -e \"$r2o_base/r2o-release\" ] && [ \"$r2o_count\" -lt 300 ]; do\n sleep 0.01\n r2o_count=$((r2o_count + 1))\ndone\nexit 7\n",
+    )
+    .unwrap();
     fs::set_permissions(&service, fs::Permissions::from_mode(0o700)).unwrap();
     let mut config = Config::default();
     config.service_path = service;
     config.control_enabled = true;
-    let started = Instant::now();
     let raw = b"POST /api/control/stop HTTP/1.1\r\nHost: router.local\r\nOrigin: http://router.local\r\nContent-Length: 0\r\n\r\n";
     assert_eq!(handle_request(&config, raw).status, 202);
-    assert!(started.elapsed().as_millis() < 150);
+    let started_deadline = Instant::now() + Duration::from_secs(2);
+    while !r2o_started_marker.exists() {
+        assert!(
+            Instant::now() < started_deadline,
+            "команда службы не запустилась"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
     let (_, _, running) = request(
         &config,
         "GET /api/status HTTP/1.1\r\nHost: localhost\r\n\r\n",
@@ -492,6 +504,7 @@ fn service_actions_return_before_a_slow_command_finishes() {
         serde_json::from_str::<Value>(&running).unwrap()["snapshot"]["control_state"],
         "running"
     );
+    fs::write(r2o_release_marker, "готово").unwrap();
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         let (_, _, finished) = request(
