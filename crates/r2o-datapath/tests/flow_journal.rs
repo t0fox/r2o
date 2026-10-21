@@ -476,17 +476,20 @@ fn журнал_сохраняет_все_типы_подозрений_r2o() {
             0,
             0,
             0,
+            0,
         ),
         (
             EVENT_R2O_TCP_SILENT,
             R2oTcpSilenceEvent {
                 key: tcp_key,
                 client_is_low: true,
+                planned: true,
                 elapsed_ms: 1200,
             }
             .event_body()
             .unwrap(),
             R2oFlowJournalKind::R2oTcpSilent,
+            1,
             1200,
             0,
             3,
@@ -502,6 +505,7 @@ fn журнал_сохраняет_все_типы_подозрений_r2o() {
             .event_body()
             .unwrap(),
             R2oFlowJournalKind::R2oTcpStall,
+            0,
             3400,
             27,
             8,
@@ -518,6 +522,7 @@ fn журнал_сохраняет_все_типы_подозрений_r2o() {
             R2oFlowJournalKind::R2oTcpFinRetry,
             0,
             0,
+            0,
             6,
         ),
         (
@@ -531,15 +536,19 @@ fn журнал_сохраняет_все_типы_подозрений_r2o() {
             R2oFlowJournalKind::R2oTcpRstAfterApp,
             0,
             0,
+            0,
             5,
         ),
     ];
     let mut журнал = R2oFlowJournal::with_capacity(cases.len()).unwrap();
 
-    for (index, (event_type, body, kind, elapsed_ms, num, code)) in cases.iter().enumerate() {
+    for (index, (event_type, body, kind, planned, elapsed_ms, num, code)) in
+        cases.iter().enumerate()
+    {
         assert!(журнал.record_control_event(index as u64, *event_type, body));
         let entry = журнал.get(index).unwrap();
         assert_eq!(entry.kind, *kind);
+        assert_eq!(entry.planned, *planned);
         assert_eq!(entry.elapsed_ms, *elapsed_ms);
         assert_eq!(entry.num, *num);
         assert_eq!(entry.code, *code);

@@ -1244,7 +1244,11 @@ mod app {
                 entry.mapped_port
             ),
             R2oFlowJournalKind::R2oTcpSilent => {
-                format!(" {direction}, прошло={} мс", entry.elapsed_ms)
+                format!(
+                    " {direction}, план={}, прошло={} мс",
+                    if entry.planned == 1 { "да" } else { "нет" },
+                    entry.elapsed_ms
+                )
             }
             R2oFlowJournalKind::R2oTcpStall => format!(
                 " {direction}, прошло={} мс, пакетов={}",

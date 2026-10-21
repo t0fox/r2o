@@ -1,6 +1,6 @@
 use crate::{discovery::DiscoveryTarget, fetch::FetchOptions};
 use r2k_core::control::{
-    HelloEvent, R2oTcpFinRetryEvent, R2oTcpRstAfterAppEvent, R2oTcpStallEvent,
+    HelloEvent, R2oTcpFinRetryEvent, R2oTcpRstAfterAppEvent, R2oTcpSilenceEvent, R2oTcpStallEvent,
 };
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -112,6 +112,24 @@ impl R2oLateRxCache {
         self.take_for_flow(&event.key, event.client_is_low, mark, now)
     }
 
+    pub fn discovery_target_for_tcp_silence(
+        &mut self,
+        event: &R2oTcpSilenceEvent,
+        now: Instant,
+    ) -> Option<DiscoveryTarget> {
+        if !event.planned {
+            return None;
+        }
+        self.expire(now);
+        let (hello, captured) = self.entries.get(&event.key)?;
+        if hello.key != event.key
+            || now.saturating_duration_since(*captured) >= R2O_LATE_RX_CACHE_TTL
+        {
+            return None;
+        }
+        DiscoveryTarget::from_event(hello)
+    }
+
     fn take_for_flow(
         &mut self,
         key: &[u8; r2k_core::control::KEY_LEN],
@@ -173,8 +191,8 @@ impl R2oLateRxCache {
 mod tests {
     use super::{R2O_LATE_RX_CACHE_CAPACITY, R2oLateRxCache};
     use r2k_core::control::{
-        HelloEvent, R2oTcpFinRetryEvent, R2oTcpRstAfterAppEvent, R2oTcpStallEvent, SHAPE_LEGACY,
-        SHAPE_MODERN,
+        HelloEvent, R2oTcpFinRetryEvent, R2oTcpRstAfterAppEvent, R2oTcpSilenceEvent,
+        R2oTcpStallEvent, SHAPE_LEGACY, SHAPE_MODERN,
     };
     use std::time::{Duration, Instant};
 
@@ -294,6 +312,56 @@ mod tests {
         let input = cache.take_for_fin_retry(&unplanned, None, now).unwrap();
         assert_eq!(input.options.name, "example.com");
         assert_eq!(input.options.wire_len, Some(812));
+    }
+
+    #[test]
+    fn молчание_перепроверяет_только_плановый_поток_и_не_забирает_clienthello() {
+        let now = Instant::now();
+        let mut cache = R2oLateRxCache::default();
+        let hello = hello(SHAPE_MODERN, true, Some(812));
+        assert!(cache.capture(&hello, now));
+
+        let event = R2oTcpSilenceEvent {
+            key: hello.key,
+            client_is_low: true,
+            planned: false,
+            elapsed_ms: 1000,
+        };
+        assert!(
+            cache
+                .discovery_target_for_tcp_silence(&event, now)
+                .is_none()
+        );
+
+        let planned = R2oTcpSilenceEvent {
+            planned: true,
+            ..event
+        };
+        let target = cache
+            .discovery_target_for_tcp_silence(&planned, now)
+            .unwrap();
+        assert_eq!(target.host, "example.com");
+        assert_eq!(target.endpoint, "198.51.100.9:443");
+        assert_eq!(
+            cache
+                .discovery_target_for_tcp_silence(&planned, now)
+                .unwrap(),
+            target
+        );
+
+        let mut foreign = planned.clone();
+        foreign.key = flow_key(true);
+        foreign.key[4] = 8;
+        assert!(
+            cache
+                .discovery_target_for_tcp_silence(&foreign, now)
+                .is_none()
+        );
+        assert!(
+            cache
+                .discovery_target_for_tcp_silence(&planned, now + Duration::from_secs(61))
+                .is_none()
+        );
     }
 
     #[test]

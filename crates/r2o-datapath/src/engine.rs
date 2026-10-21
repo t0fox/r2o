@@ -359,6 +359,7 @@ impl TcpSessions {
                     on_silent(R2oTcpSilenceEvent {
                         key: key.wire_key(),
                         client_is_low: session.initiator == key.low,
+                        planned: session.plan_done,
                         elapsed_ms: elapsed.as_millis().min(u128::from(u32::MAX)) as u32,
                     });
                 }
@@ -425,6 +426,7 @@ impl TcpSessions {
             events.push(R2oTcpSilenceEvent {
                 key: key.wire_key(),
                 client_is_low: session.initiator == key.low,
+                planned: session.plan_done,
                 elapsed_ms: elapsed.as_millis().min(u128::from(u32::MAX)) as u32,
             });
         }
@@ -1862,6 +1864,8 @@ mod tests {
             &ipv4_tcp_packet(server, client, 0x10, 124, 900, &[]),
             start + Duration::from_millis(200),
         );
+        let key = sessions.flows.keys().next().unwrap().wire_key();
+        sessions.mark_plan_done(&key);
 
         let deadline = start + Duration::from_millis(1100);
         assert!(sessions.sweep_silent(deadline, false).is_empty());
@@ -1869,6 +1873,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].elapsed_ms, 1000);
         assert_eq!(events[0].key[37], 6);
+        assert!(events[0].planned);
         sessions.mark_silent(&events[0].key);
         assert!(
             sessions
@@ -1913,6 +1918,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].key[37], 6);
         assert!(events[0].client_is_low);
+        assert!(!events[0].planned);
         assert_eq!(events[0].elapsed_ms, 120_000);
     }
 
@@ -1945,10 +1951,13 @@ mod tests {
             &ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello()),
             start + Duration::from_millis(100),
         );
+        let key = visible.flows.keys().next().unwrap().wire_key();
+        visible.mark_plan_done(&key);
         visible.expire_with_silent(deadline, Duration::from_secs(120), |event| {
             events.push(event)
         });
         assert_eq!(events.len(), 1);
+        assert!(events[0].planned);
     }
 
     #[test]

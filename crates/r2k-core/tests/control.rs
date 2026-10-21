@@ -383,6 +383,7 @@ fn r2o_событие_молчания_tcp_проверяет_ключ_напр�
     let event = R2oTcpSilenceEvent {
         key,
         client_is_low: true,
+        planned: true,
         elapsed_ms: 1000,
     };
     let frame = Frame {
@@ -399,8 +400,12 @@ fn r2o_событие_молчания_tcp_проверяет_ключ_напр�
     invalid_direction.body[KEY_LEN] = 2;
     assert!(decode_r2o_tcp_silence(&invalid_direction).is_err());
 
+    let mut invalid_planned = frame.clone();
+    invalid_planned.body[KEY_LEN + 1] = 2;
+    assert!(decode_r2o_tcp_silence(&invalid_planned).is_err());
+
     let mut invalid_interval = frame;
-    invalid_interval.body[KEY_LEN + 1..KEY_LEN + 5].copy_from_slice(&0_u32.to_be_bytes());
+    invalid_interval.body[KEY_LEN + 2..KEY_LEN + 6].copy_from_slice(&0_u32.to_be_bytes());
     assert!(decode_r2o_tcp_silence(&invalid_interval).is_err());
 }
 

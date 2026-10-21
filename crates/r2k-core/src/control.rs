@@ -4,7 +4,7 @@ use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-pub const PROTOCOL_VERSION: u16 = 36;
+pub const PROTOCOL_VERSION: u16 = 37;
 pub const FRAME_MAX: usize = 65_536;
 pub const KEY_LEN: usize = 38;
 pub const MAX_DNS_NAME_LEN: usize = 253;
@@ -172,6 +172,7 @@ pub struct R2oQuicSuspectEvent {
 pub struct R2oTcpSilenceEvent {
     pub key: [u8; KEY_LEN],
     pub client_is_low: bool,
+    pub planned: bool,
     pub elapsed_ms: u32,
 }
 
@@ -244,9 +245,10 @@ impl R2oTcpSilenceEvent {
         if !valid_flow_key(&self.key) || self.key[37] != 6 || self.elapsed_ms == 0 {
             return None;
         }
-        let mut body = Vec::with_capacity(KEY_LEN + 5);
+        let mut body = Vec::with_capacity(KEY_LEN + 6);
         body.extend_from_slice(&self.key);
         body.push(u8::from(self.client_is_low));
+        body.push(u8::from(self.planned));
         body.extend_from_slice(&self.elapsed_ms.to_be_bytes());
         Some(body)
     }
@@ -1225,24 +1227,27 @@ pub fn decode_r2o_quic_stall(frame: &Frame) -> Result<R2oQuicSuspectEvent, &'sta
 }
 
 pub fn decode_r2o_tcp_silence(frame: &Frame) -> Result<R2oTcpSilenceEvent, &'static str> {
-    if frame.kind != EVENT_R2O_TCP_SILENT || frame.body.len() != KEY_LEN + 5 {
+    if frame.kind != EVENT_R2O_TCP_SILENT || frame.body.len() != KEY_LEN + 6 {
         return Err("неверная длина события молчания TCP");
     }
     let key: [u8; KEY_LEN] = frame.body[..KEY_LEN]
         .try_into()
         .map_err(|_| "неверный ключ TCP-потока")?;
     let client_is_low = frame.body[KEY_LEN];
+    let planned = frame.body[KEY_LEN + 1];
     let elapsed_ms = u32::from_be_bytes(
-        frame.body[KEY_LEN + 1..KEY_LEN + 5]
+        frame.body[KEY_LEN + 2..KEY_LEN + 6]
             .try_into()
             .map_err(|_| "обрезан интервал молчания TCP")?,
     );
-    if !valid_flow_key(&key) || key[37] != 6 || client_is_low > 1 || elapsed_ms == 0 {
+    if !valid_flow_key(&key) || key[37] != 6 || client_is_low > 1 || planned > 1 || elapsed_ms == 0
+    {
         return Err("событие молчания содержит неверный TCP-поток");
     }
     Ok(R2oTcpSilenceEvent {
         key,
         client_is_low: client_is_low == 1,
+        planned: planned == 1,
         elapsed_ms,
     })
 }
