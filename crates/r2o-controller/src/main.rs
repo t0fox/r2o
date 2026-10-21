@@ -72,6 +72,15 @@ const R2O_LATE_RX_COOLDOWN: std::time::Duration = std::time::Duration::from_secs
 const R2O_AUTOMATED_MEASUREMENT_SLOTS: usize = 5;
 #[cfg(unix)]
 const R2O_QUIC_TRIAL_QUEUE_CAPACITY: usize = 8;
+#[cfg(unix)]
+const R2O_QUIC_DISCOVERY_FOUND_COOLDOWN: std::time::Duration =
+    std::time::Duration::from_secs(60 * 60);
+#[cfg(unix)]
+const R2O_QUIC_DISCOVERY_INCONCLUSIVE_COOLDOWN: std::time::Duration =
+    std::time::Duration::from_secs(10 * 60);
+#[cfg(unix)]
+const R2O_QUIC_DISCOVERY_FAILURE_COOLDOWN: std::time::Duration =
+    std::time::Duration::from_secs(2 * 60);
 
 #[cfg(unix)]
 const CONTROL_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
@@ -1552,6 +1561,17 @@ struct R2oQuicDiscoveryTask {
 struct R2oQuicDiscoveryOutcome {
     server: std::net::SocketAddr,
     result: Result<Option<(String, String)>, String>,
+}
+
+#[cfg(unix)]
+fn r2o_quic_discovery_cooldown(
+    result: &Result<Option<(String, String)>, String>,
+) -> std::time::Duration {
+    match result {
+        Ok(Some(_)) => R2O_QUIC_DISCOVERY_FOUND_COOLDOWN,
+        Ok(None) => R2O_QUIC_DISCOVERY_INCONCLUSIVE_COOLDOWN,
+        Err(_) => R2O_QUIC_DISCOVERY_FAILURE_COOLDOWN,
+    }
 }
 
 #[cfg(unix)]
@@ -4313,6 +4333,10 @@ impl ControlClient {
                     .as_mut()
                     .and_then(R2oQuicDiscoveryWorker::try_outcome)
                 {
+                    quic_trial_cooldowns.insert(
+                        outcome.server.ip(),
+                        std::time::Instant::now() + r2o_quic_discovery_cooldown(&outcome.result),
+                    );
                     match outcome.result {
                         Ok(Some((plan_text, candidate_name))) => {
                             if let Some((_, catalog, path, _)) = &mut discovery {
@@ -4426,6 +4450,7 @@ impl ControlClient {
                                 snapshot: pending.snapshot,
                                 permit,
                             }) {
+                                quic_trial_cooldowns.remove(&pending.server.ip());
                                 eprintln!(
                                     "QUIC-испытание {} не попало в очередь worker",
                                     pending.server
@@ -7436,6 +7461,26 @@ mod tests {
         drop(held);
         assert!(super::r2o_take_ready_quic_discovery(&mut queued, &full_gate).is_none());
         assert_eq!(queued.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_quic_discovery_задаёт_повтор_по_исходу_испытания() {
+        assert_eq!(
+            super::r2o_quic_discovery_cooldown(&Ok(Some((
+                "план".to_owned(),
+                "кандидат".to_owned(),
+            )))),
+            std::time::Duration::from_secs(60 * 60)
+        );
+        assert_eq!(
+            super::r2o_quic_discovery_cooldown(&Ok(None)),
+            std::time::Duration::from_secs(10 * 60)
+        );
+        assert_eq!(
+            super::r2o_quic_discovery_cooldown(&Err("сбой".to_owned())),
+            std::time::Duration::from_secs(2 * 60)
+        );
     }
 
     #[cfg(unix)]
