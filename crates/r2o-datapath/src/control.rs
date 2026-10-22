@@ -1530,6 +1530,21 @@ impl ControlServer {
         self.flush()
     }
 
+    /// Объявляет новый общий предел отправки уже подключённому контроллеру.
+    pub fn r2o_set_send_maxlen(&mut self, send_maxlen: u32) -> io::Result<()> {
+        if self.send_maxlen == send_maxlen {
+            return Ok(());
+        }
+        self.send_maxlen = send_maxlen;
+        if self.peer.is_some() {
+            let greeting = control::encode_greeting(send_maxlen)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+            self.enqueue(greeting);
+            self.flush()?;
+        }
+        Ok(())
+    }
+
     pub fn is_connected(&self) -> bool {
         self.peer.is_some()
     }
@@ -1892,6 +1907,41 @@ mod tests {
         assert_eq!(event.kind, EVENT_HELLO);
         assert_eq!(event.body, body);
 
+        drop(client);
+        drop(server);
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn control_server_announces_updated_send_limit_to_connected_controller() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("r2o-control-limit-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("control.sock");
+        let mut server = ControlServer::open(&path, 1280).unwrap();
+        let mut client = UnixStream::connect(&path).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        assert!(server.poll().unwrap().is_empty());
+        assert_eq!(
+            control::decode_greeting(&control::read_frame(&mut client).unwrap())
+                .unwrap()
+                .send_maxlen,
+            1280
+        );
+
+        server.r2o_set_send_maxlen(1500).unwrap();
+        assert_eq!(
+            control::decode_greeting(&control::read_frame(&mut client).unwrap())
+                .unwrap()
+                .send_maxlen,
+            1500
+        );
         drop(client);
         drop(server);
         std::fs::remove_dir(&directory).unwrap();

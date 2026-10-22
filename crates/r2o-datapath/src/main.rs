@@ -502,26 +502,11 @@ mod app {
         } else {
             None
         };
-        if send_maxlen != 0 && plan.max_emit() > send_maxlen {
-            return Err(invalid(format!(
-                "план требует посылку до {} байт, а общий предел равен {}",
-                plan.max_emit(),
-                send_maxlen
-            )));
-        }
         let family_name = if options.protocol_family == libc::AF_INET as u16 {
             "IPv4"
         } else {
             "IPv6"
         };
-        let mut socket = QueueSocket::open(
-            queue,
-            options.protocol_family,
-            options.copy_range,
-            options.queue_len,
-            options.fail_open,
-            options.receive_buffer,
-        )?;
         let mut route_gate = R2oRouteGate::default();
         if let Some(policy) = options.only_mark {
             route_gate.r2o_set_policy(Some(policy));
@@ -545,10 +530,32 @@ mod app {
         for error in route_monitor.r2o_refresh(&mut route_gate) {
             eprintln!("r2o-datapath: не удалось обновить маршрутное состояние: {error}");
         }
+        if let (Some(raw), Some(ifindices)) = (raw.as_ref(), route_gate.r2o_egress_ifindices())
+            && let Some(maxlen) = raw.r2o_adopt_egress(&ifindices)
+        {
+            eprintln!(
+                "r2o-datapath: предел посылки {} байт выбран по MTU выходного маршрута",
+                maxlen
+            );
+        }
+        let effective_send_maxlen = raw.as_ref().map_or(send_maxlen, RawSocket::maxlen);
+        if effective_send_maxlen != 0 && plan.max_emit() > effective_send_maxlen {
+            return Err(invalid(format!(
+                "план требует посылку до {} байт, а общий предел равен {}",
+                plan.max_emit(),
+                effective_send_maxlen
+            )));
+        }
         let mut control = options
             .control_path
             .as_ref()
-            .map(|path| ControlServer::open(path, u16::MAX as u32))
+            .map(|path| {
+                ControlServer::open(
+                    path,
+                    raw.as_ref()
+                        .map_or(u16::MAX as u32, |raw| raw.maxlen() as u32),
+                )
+            })
             .transpose()?;
         let mut r2o_snapshot_control = options
             .control_path
@@ -557,7 +564,15 @@ mod app {
             .map(|path| ControlServer::open(path, u16::MAX as u32))
             .transpose()?;
         let mut name_plans = NamePlans::default();
-        name_plans.r2o_set_send_maxlen(raw.as_ref().map_or(send_maxlen, RawSocket::maxlen));
+        name_plans.r2o_set_send_maxlen(effective_send_maxlen);
+        let mut socket = QueueSocket::open(
+            queue,
+            options.protocol_family,
+            options.copy_range,
+            options.queue_len,
+            options.fail_open,
+            options.receive_buffer,
+        )?;
         let mut flow_journal = R2oFlowJournal::with_capacity(options.journal_capacity as usize)?;
         let journal_origin = Instant::now();
         let mut journal_seen = 0_u64;
@@ -889,6 +904,19 @@ mod app {
             if route_now >= next_route_refresh {
                 for error in route_monitor.r2o_refresh(&mut route_gate) {
                     eprintln!("r2o-datapath: не удалось обновить маршрутное состояние: {error}");
+                }
+                if let (Some(raw), Some(ifindices)) =
+                    (raw.as_ref(), route_gate.r2o_egress_ifindices())
+                    && let Some(maxlen) = raw.r2o_adopt_egress(&ifindices)
+                {
+                    name_plans.r2o_set_send_maxlen(maxlen);
+                    if let Some(control) = control.as_mut() {
+                        control.r2o_set_send_maxlen(maxlen as u32)?;
+                    }
+                    eprintln!(
+                        "r2o-datapath: предел посылки обновлён до {} байт по MTU выходного маршрута",
+                        maxlen
+                    );
                 }
                 last_route_refresh = Instant::now();
                 next_route_refresh = last_route_refresh + R2O_ROUTE_REFRESH_INTERVAL;

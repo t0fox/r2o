@@ -6,6 +6,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 const R2O_ROUTE_MTU_CACHE_CAPACITY: usize = 16;
+const R2O_RAW_MTU_FLOOR: usize = 576;
 
 /// Помеченный raw-сокет Linux для целых TCP/UDP-пакетов и UDP-фрагментов IPv4/IPv6.
 #[derive(Debug)]
@@ -15,6 +16,7 @@ pub struct RawSocket {
     mark: u32,
     maxlen: Cell<usize>,
     maxlen_declared: bool,
+    egress_mtu: Cell<Option<usize>>,
     route_mtu_cache: RefCell<R2oRouteMtuCache>,
 }
 
@@ -61,6 +63,7 @@ impl RawSocket {
             mark,
             maxlen: Cell::new(maxlen),
             maxlen_declared,
+            egress_mtu: Cell::new(None),
             route_mtu_cache: RefCell::new(R2oRouteMtuCache::default()),
         })
     }
@@ -68,6 +71,20 @@ impl RawSocket {
     /// Возвращает общий предел длины одной посылки.
     pub fn maxlen(&self) -> usize {
         self.maxlen.get()
+    }
+
+    /// Подстраивает общий предел под MTU интерфейсов текущих выходных маршрутов.
+    /// `Some` возвращается только при изменении предела.
+    pub fn r2o_adopt_egress(&self, ifindices: &[u32]) -> Option<usize> {
+        if self.maxlen_declared {
+            return None;
+        }
+        let mtu = r2o_select_egress_mtu(ifindices, r2o_interface_mtu_by_index)?;
+        if self.egress_mtu.replace(Some(mtu)) == Some(mtu) || mtu == self.maxlen.get() {
+            return None;
+        }
+        self.maxlen.set(mtu);
+        Some(mtu)
     }
 
     /// Возвращает предел посылки для семейства и адреса назначения.
@@ -213,6 +230,37 @@ fn r2o_interface_mtu(interface: &str) -> Option<usize> {
         .parse::<usize>()
         .ok()
         .filter(|mtu| *mtu != 0)
+}
+
+fn r2o_interface_mtu_by_index(ifindex: u32) -> Option<usize> {
+    use std::ffi::CStr;
+
+    if ifindex == 0 {
+        return None;
+    }
+    let mut name = [0 as libc::c_char; libc::IF_NAMESIZE];
+    if unsafe { libc::if_indextoname(ifindex, name.as_mut_ptr()) }.is_null() {
+        return None;
+    }
+    let name = unsafe { CStr::from_ptr(name.as_ptr()) }.to_str().ok()?;
+    r2o_interface_mtu(name)
+}
+
+fn r2o_select_egress_mtu(
+    ifindices: &[u32],
+    mut interface_mtu: impl FnMut(u32) -> Option<usize>,
+) -> Option<usize> {
+    let mut smallest = None;
+    for &ifindex in ifindices {
+        if ifindex == 0 {
+            continue;
+        }
+        let Some(mtu) = interface_mtu(ifindex).filter(|mtu| *mtu >= R2O_RAW_MTU_FLOOR) else {
+            continue;
+        };
+        smallest = Some(smallest.map_or(mtu, |current: usize| current.min(mtu)));
+    }
+    smallest
 }
 
 fn r2o_parse_interface_flags(value: &str) -> Option<u32> {
@@ -543,7 +591,8 @@ fn set_option<T>(fd: i32, level: i32, option: i32, value: &T) -> io::Result<()> 
 mod tests {
     use super::{
         R2O_ROUTE_MTU_CACHE_CAPACITY, R2oRouteMtuCache, outgoing_packet,
-        r2o_effective_route_maxlen, r2o_parse_interface_flags, r2o_tls_route_segment_cap_with,
+        r2o_effective_route_maxlen, r2o_parse_interface_flags, r2o_select_egress_mtu,
+        r2o_tls_route_segment_cap_with,
     };
     use proptest::prelude::*;
     use r2k_core::plan::{Emission, EmitKind};
@@ -701,6 +750,24 @@ mod tests {
         assert_eq!(r2o_parse_interface_flags("0x1003\n"), Some(0x1003));
         assert_eq!(r2o_parse_interface_flags("1003"), Some(0x1003));
         assert_eq!(r2o_parse_interface_flags("unknown"), None);
+    }
+
+    #[test]
+    fn общий_предел_берёт_наименьший_доступный_mtu_выходных_интерфейсов() {
+        let mut queried = Vec::new();
+        let mtu = r2o_select_egress_mtu(&[7, 0, 9, 7, 11], |ifindex| {
+            queried.push(ifindex);
+            match ifindex {
+                7 => Some(1500),
+                9 => Some(1280),
+                11 => Some(575),
+                _ => None,
+            }
+        });
+        assert_eq!(mtu, Some(1280));
+        assert_eq!(queried, [7, 9, 7, 11]);
+        assert_eq!(r2o_select_egress_mtu(&[1, 2], |_| Some(575)), None);
+        assert_eq!(r2o_select_egress_mtu(&[0], |_| Some(1500)), None);
     }
 
     fn fragments(original: &[u8]) -> Vec<Vec<u8>> {

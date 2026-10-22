@@ -3,19 +3,20 @@ use r2k_core::control::{
     COMMAND_DEL_ADDR_PROBE, COMMAND_DEL_VOICE_ADDR_PROBE, COMMAND_SET_ADDR, COMMAND_SET_ADDR_PROBE,
     COMMAND_SET_HTTPS, COMMAND_SET_NAME, COMMAND_SET_TCP_STALL_BUDGETS, COMMAND_SET_VOICE_ADDR,
     COMMAND_SET_VOICE_ADDR_PROBE, EVENT_APPLIED, EVENT_CLIENT_SHAPE, EVENT_HELLO,
-    EVENT_HTTP_PORTAL, EVENT_HTTP_RESPONSE, EVENT_R2O_JOURNAL_END, EVENT_R2O_JOURNAL_ENTRY,
-    EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_CLEAN_HANDSHAKE,
-    EVENT_R2O_TCP_EARLY_RST, EVENT_R2O_TCP_EXCHANGE, EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_REPEAT,
-    EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_RST_CUT, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL,
-    EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_SUSPECT, Frame, HelloEvent, PROTOCOL_VERSION,
-    RELEASE_ID, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE,
-    VOICE_ADDR_PROBE_LEASE_MAX_MS, decode_ack, decode_applied, decode_client_shape,
-    decode_greeting, decode_hello, decode_http_portal, decode_http_response, decode_r2o_quic_stall,
-    decode_r2o_quic_suspect, decode_r2o_tcp_clean_handshake, decode_r2o_tcp_early_rst,
-    decode_r2o_tcp_exchange, decode_r2o_tcp_fin_retry, decode_r2o_tcp_repeat,
-    decode_r2o_tcp_rst_after_app, decode_r2o_tcp_rst_cut_signal, decode_r2o_tcp_silence,
-    decode_r2o_tcp_stall, decode_r2o_voice_proof, decode_r2o_voice_suspect, encode_arm_shape,
-    encode_delete_addr, encode_delete_addr_probe, encode_delete_name, encode_delete_name_probe,
+    EVENT_HTTP_PORTAL, EVENT_HTTP_RESPONSE, EVENT_PROTOCOL, EVENT_R2O_JOURNAL_END,
+    EVENT_R2O_JOURNAL_ENTRY, EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT,
+    EVENT_R2O_TCP_CLEAN_HANDSHAKE, EVENT_R2O_TCP_EARLY_RST, EVENT_R2O_TCP_EXCHANGE,
+    EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_REPEAT, EVENT_R2O_TCP_RST_AFTER_APP,
+    EVENT_R2O_TCP_RST_CUT, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF,
+    EVENT_R2O_VOICE_SUSPECT, Frame, HelloEvent, PROTOCOL_VERSION, RELEASE_ID, SHAPE_ECH_TCP,
+    SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, VOICE_ADDR_PROBE_LEASE_MAX_MS,
+    decode_ack, decode_applied, decode_client_shape, decode_greeting, decode_hello,
+    decode_http_portal, decode_http_response, decode_r2o_quic_stall, decode_r2o_quic_suspect,
+    decode_r2o_tcp_clean_handshake, decode_r2o_tcp_early_rst, decode_r2o_tcp_exchange,
+    decode_r2o_tcp_fin_retry, decode_r2o_tcp_repeat, decode_r2o_tcp_rst_after_app,
+    decode_r2o_tcp_rst_cut_signal, decode_r2o_tcp_silence, decode_r2o_tcp_stall,
+    decode_r2o_voice_proof, decode_r2o_voice_suspect, encode_arm_shape, encode_delete_addr,
+    encode_delete_addr_probe, encode_delete_name, encode_delete_name_probe,
     encode_delete_voice_addr_probe, encode_frame, encode_set_addr, encode_set_addr_probe,
     encode_set_bypass, encode_set_https, encode_set_name, encode_set_name_probe, encode_set_suffix,
     encode_set_tcp_stall_budgets, encode_set_voice_addr, encode_set_voice_addr_probe, read_frame,
@@ -54,7 +55,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 #[cfg(unix)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[cfg(unix)]
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
@@ -4692,7 +4693,7 @@ impl DiscoveryWorker {
 
     fn new_with_confirmation(
         mark: Option<u32>,
-        send_cap: usize,
+        send_cap: Arc<AtomicUsize>,
         measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
         commands: SyncSender<HttpSearchCommand>,
         catalog_path: PathBuf,
@@ -4705,6 +4706,7 @@ impl DiscoveryWorker {
         ));
         let runner_ech_challenges = Arc::clone(&ech_challenges);
         let runner_recent_tcp_names = Arc::clone(&recent_tcp_names);
+        let runner_send_cap = Arc::clone(&send_cap);
         let ech_witness_resolutions = Arc::new(std::sync::Mutex::new(
             R2oEchWitnessResolutionCache::default(),
         ));
@@ -4921,7 +4923,8 @@ impl DiscoveryWorker {
                     }
                     let index = next_index;
                     let candidate = match r2o_controller::r2o_rx_volume::r2o_rx_volume_candidate(
-                        index, send_cap,
+                        index,
+                        runner_send_cap.load(Ordering::Relaxed),
                     ) {
                         Ok(Some(candidate)) => candidate,
                         Ok(None) => break,
@@ -5970,6 +5973,7 @@ fn r2o_read_control_batch(
 struct ControlClient {
     socket: std::os::unix::net::UnixStream,
     send_maxlen: u32,
+    send_cap: Arc<AtomicUsize>,
     pending_events: VecDeque<Frame>,
     pending_applied_events: VecDeque<r2k_core::control::AppliedEvent>,
     http_search_started: HashMap<(String, u8, String), HttpSearchWindow>,
@@ -6048,6 +6052,7 @@ impl ControlClient {
         Ok(Self {
             socket,
             send_maxlen: greeting.send_maxlen,
+            send_cap: Arc::new(AtomicUsize::new(greeting.send_maxlen as usize)),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -6274,7 +6279,7 @@ impl ControlClient {
             (
                 DiscoveryWorker::new_with_confirmation(
                     mark,
-                    self.send_maxlen as usize,
+                    Arc::clone(&self.send_cap),
                     measurement_gate.clone(),
                     http_search
                         .as_ref()
@@ -6875,6 +6880,10 @@ impl ControlClient {
                         .pop_front()
                         .expect("добавленное событие управляющего канала")
                 };
+                if frame.kind == EVENT_PROTOCOL {
+                    self.r2o_update_send_cap(&frame)?;
+                    continue;
+                }
                 if frame.kind == EVENT_R2O_JOURNAL_ENTRY {
                     let entry =
                         r2o_datapath::flow_journal::R2oFlowJournalEntry::from_event_frame(&frame)
@@ -9465,9 +9474,13 @@ impl ControlClient {
     }
 
     fn queue_async_frame(&mut self, frame: Frame) -> Result<(), Box<dyn Error>> {
+        if frame.kind == EVENT_PROTOCOL {
+            self.r2o_update_send_cap(&frame)?;
+        }
         if !matches!(
             frame.kind,
-            EVENT_HELLO
+            EVENT_PROTOCOL
+                | EVENT_HELLO
                 | EVENT_APPLIED
                 | EVENT_CLIENT_SHAPE
                 | EVENT_HTTP_PORTAL
@@ -9493,6 +9506,22 @@ impl ControlClient {
             return Err("очередь событий контроллера заполнена".into());
         }
         self.pending_events.push_back(frame);
+        Ok(())
+    }
+
+    fn r2o_update_send_cap(&mut self, frame: &Frame) -> Result<(), Box<dyn Error>> {
+        let greeting = decode_greeting(frame)
+            .map_err(|error| format!("обновлённое приветствие датапата: {error}"))?;
+        if greeting.version != PROTOCOL_VERSION || greeting.release_id != RELEASE_ID {
+            return Err(format!(
+                "несовместимое обновлённое приветствие датапата: wire={}, release={}, нужен wire={PROTOCOL_VERSION}, release={RELEASE_ID}",
+                greeting.version, greeting.release_id
+            )
+            .into());
+        }
+        self.send_maxlen = greeting.send_maxlen;
+        self.send_cap
+            .store(greeting.send_maxlen as usize, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -10414,6 +10443,11 @@ mod tests {
     use r2k_core::plan::{PLAN_MAGIC, Plan};
     use r2o_controller::catalog::{Binding, BoxRecord, Catalog, Fingerprint, Signal};
     use r2o_controller::discovery::DiscoveryTarget;
+    #[cfg(unix)]
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     #[cfg(unix)]
     #[test]
@@ -11799,6 +11833,7 @@ mod tests {
         let mut client = ControlClient {
             socket,
             send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -11851,6 +11886,7 @@ mod tests {
         let mut client = ControlClient {
             socket,
             send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -11911,6 +11947,7 @@ mod tests {
         let mut client = ControlClient {
             socket,
             send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -11986,6 +12023,7 @@ mod tests {
         let mut client = ControlClient {
             socket,
             send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -12003,11 +12041,37 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn controller_applies_a_dynamic_datapath_send_limit_before_queueing_the_event() {
+        let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let send_cap = Arc::new(AtomicUsize::new(1200));
+        let mut client = ControlClient {
+            socket,
+            send_maxlen: 1200,
+            send_cap: Arc::clone(&send_cap),
+            pending_events: VecDeque::new(),
+            pending_applied_events: VecDeque::new(),
+            http_search_started: std::collections::HashMap::new(),
+            http_challenge_cooldowns: std::collections::HashMap::new(),
+        };
+        let bytes = r2k_core::control::encode_greeting(1500).unwrap();
+        let mut encoded = std::io::Cursor::new(bytes);
+        let greeting = read_frame(&mut encoded).unwrap();
+
+        client.queue_async_frame(greeting.clone()).unwrap();
+
+        assert_eq!(client.send_maxlen, 1500);
+        assert_eq!(send_cap.load(Ordering::Relaxed), 1500);
+        assert_eq!(client.pending_events, VecDeque::from([greeting]));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn r2o_controller_queues_tcp_silence_events_for_later_processing() {
         let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut client = ControlClient {
             socket,
             send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -12030,6 +12094,7 @@ mod tests {
         let mut client = ControlClient {
             socket,
             send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -12052,6 +12117,7 @@ mod tests {
         let mut client = ControlClient {
             socket,
             send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -12074,6 +12140,7 @@ mod tests {
         let mut client = ControlClient {
             socket,
             send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -12096,6 +12163,7 @@ mod tests {
         let mut client = ControlClient {
             socket,
             send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -12380,6 +12448,7 @@ mod tests {
         let mut client = ControlClient {
             socket,
             send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -12708,6 +12777,7 @@ mod tests {
         let mut client = ControlClient {
             socket,
             send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -12930,6 +13000,7 @@ mod tests {
         let mut client = super::ControlClient {
             socket,
             send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -12975,6 +13046,7 @@ mod tests {
         let mut client = ControlClient {
             socket,
             send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -13138,6 +13210,7 @@ mod tests {
         let mut client = ControlClient {
             socket,
             send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -13171,6 +13244,7 @@ mod tests {
         let mut client = ControlClient {
             socket,
             send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -13211,6 +13285,7 @@ mod tests {
         let mut client = ControlClient {
             socket,
             send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
@@ -14775,6 +14850,7 @@ mod tests {
         let mut client = ControlClient {
             socket: client_stream,
             send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: Default::default(),
@@ -14858,6 +14934,7 @@ mod tests {
         let mut client = ControlClient {
             socket: client_stream,
             send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             http_search_started: Default::default(),
@@ -15316,6 +15393,7 @@ mod tests {
             let mut client = ControlClient {
                 socket: client_stream,
                 send_maxlen: 0,
+                send_cap: Arc::new(AtomicUsize::new(0)),
                 pending_events: VecDeque::new(),
                 pending_applied_events: VecDeque::new(),
                 http_search_started: Default::default(),
@@ -15372,6 +15450,7 @@ mod tests {
             let mut client = ControlClient {
                 socket: client_stream,
                 send_maxlen: 0,
+                send_cap: Arc::new(AtomicUsize::new(0)),
                 pending_events: VecDeque::new(),
                 pending_applied_events: VecDeque::new(),
                 http_search_started: Default::default(),
@@ -15533,6 +15612,7 @@ mod tests {
             let mut client = ControlClient {
                 socket: client_stream,
                 send_maxlen: 0,
+                send_cap: Arc::new(AtomicUsize::new(0)),
                 pending_events: VecDeque::new(),
                 pending_applied_events: VecDeque::new(),
                 http_search_started: Default::default(),

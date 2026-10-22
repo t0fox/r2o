@@ -148,6 +148,24 @@ impl R2oRouteGate {
         }
     }
 
+    /// Возвращает объединённые выходные интерфейсы известных IPv4/IPv6 маршрутов.
+    pub fn r2o_egress_ifindices(&self) -> Option<Vec<u32>> {
+        let mut ifindices = Vec::new();
+        for family in [
+            self.r2o_default_ifindices_v4.as_deref(),
+            self.r2o_default_ifindices_v6.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .flatten()
+        {
+            if *family != 0 && !ifindices.contains(family) {
+                ifindices.push(*family);
+            }
+        }
+        (!ifindices.is_empty()).then_some(ifindices)
+    }
+
     /// Включает ограничение выбранной политикой или отключает его значением `None`.
     pub fn r2o_set_policy(&mut self, policy: Option<R2oRoutePolicy>) {
         self.r2o_policy = policy;
@@ -1051,6 +1069,18 @@ mod tests {
         );
         gate.r2o_set_default_ifindices(R2oRouteFamily::Ipv4, None);
         assert_eq!(gate.r2o_route_mark(r2o_packet(true, None, Some(9))), 0);
+    }
+
+    #[test]
+    fn r2o_выходные_интерфейсы_объединяют_семейства_и_убирают_дубли() {
+        let mut gate = R2oRouteGate::default();
+        assert_eq!(gate.r2o_egress_ifindices(), None);
+        gate.r2o_set_default_ifindices(R2oRouteFamily::Ipv4, Some(vec![5, 8, 8, 0]));
+        gate.r2o_set_default_ifindices(R2oRouteFamily::Ipv6, Some(vec![8, 9]));
+        assert_eq!(gate.r2o_egress_ifindices(), Some(vec![5, 8, 9]));
+        gate.r2o_set_default_ifindices(R2oRouteFamily::Ipv4, Some(Vec::new()));
+        gate.r2o_set_default_ifindices(R2oRouteFamily::Ipv6, Some(Vec::new()));
+        assert_eq!(gate.r2o_egress_ifindices(), None);
     }
 
     #[test]
