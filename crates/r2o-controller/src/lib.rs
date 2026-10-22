@@ -12,6 +12,7 @@ pub mod https_probe;
 pub mod plan_text;
 pub mod quic_replay;
 pub mod r2o_late_rx;
+pub mod r2o_quic_deny;
 pub mod r2o_quic_http3;
 pub mod r2o_resource;
 pub mod r2o_resource_limit;

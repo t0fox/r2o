@@ -4,7 +4,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 #[test]
 fn raw_tcp_sender_requires_a_nonzero_queue_bypass_mark() {
-    let error = RawSocket::open(libc::AF_INET, 0).unwrap_err();
+    let error = RawSocket::open(libc::AF_INET, 0, None).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 }
 
@@ -79,7 +79,7 @@ fn marked_ipv4_tcp_packet_is_visible_on_loopback() {
     };
     let mut packet = [0; 128];
     let packet_len = r2k_core::wire::build_tcp_packet(&original, &emitted, &mut packet).unwrap();
-    let sender = RawSocket::open(libc::AF_INET, 0x5252).unwrap();
+    let sender = RawSocket::open(libc::AF_INET, 0x5252, None).unwrap();
     sender.send_packet(&packet[..packet_len]).unwrap();
 
     let mut received = [0; 256];
@@ -179,7 +179,7 @@ fn marked_ipv4_udp_packet_is_visible_on_loopback() {
     };
     let mut packet = [0; 128];
     let packet_len = r2k_core::wire::build_udp_packet(&original, &emitted, &mut packet).unwrap();
-    let sender = RawSocket::open(libc::AF_INET, 0x5252).unwrap();
+    let sender = RawSocket::open(libc::AF_INET, 0x5252, None).unwrap();
     sender.send_packet(&packet[..packet_len]).unwrap();
 
     let mut received = [0; 256];
@@ -279,7 +279,7 @@ fn marked_ipv4_udp_fragments_reassemble_on_loopback() {
         bytes: payload.clone(),
     };
     let fragments = r2k_core::wire::build_udp_fragments(&original, &emitted).unwrap();
-    let sender = RawSocket::open(libc::AF_INET, 0x5252).unwrap();
+    let sender = RawSocket::open(libc::AF_INET, 0x5252, None).unwrap();
     for fragment in &fragments {
         sender.send_packet(fragment).unwrap();
     }

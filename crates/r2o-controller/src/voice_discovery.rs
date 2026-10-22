@@ -466,7 +466,7 @@ pub fn r2o_probe_discovery_endpoint(
         };
         let r2o_sender = match (r2o_prefix, r2o_mark) {
             (Some(_), Some(mark)) => Some(
-                r2o_datapath::raw::RawSocket::open(libc::AF_INET, mark).map_err(|error| {
+                r2o_datapath::raw::RawSocket::open(libc::AF_INET, mark, None).map_err(|error| {
                     format!("не открыть отмеченный raw-сокет Discovery: {error}")
                 })?,
             ),

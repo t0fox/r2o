@@ -75,6 +75,36 @@ fn recognizes_the_same_portal_location_for_packet_by_packet_processing() {
 }
 
 #[test]
+fn распознаёт_порталы_операторов_из_актуального_донора() {
+    let hosts: [&[u8]; 6] = [
+        b"eais.rkn.gov.ru",
+        b"lawfilter.ertelecom.ru",
+        b"blackhole.svyaztelecom.ru",
+        b"warning.rt.ru",
+        b"warn.beeline.ru",
+        b"deny.megafon.ru",
+    ];
+    for host in hosts {
+        let mut response = b"HTTP/1.1 302 Found\r\nLocation: http://".to_vec();
+        response.extend_from_slice(host);
+        response.extend_from_slice(b"/blocked\r\nContent-Length: 0\r\n\r\n");
+        assert_eq!(
+            portal_location(b"example.org", &response),
+            Some(host.to_vec()),
+            "донорский портал {host:?} не распознан"
+        );
+    }
+    let megafon = b"HTTP/1.1 302 Found\r\nLocation: https://m.megafonpro.ru/rkn-auth\r\nContent-Length: 0\r\n\r\n";
+    assert_eq!(
+        portal_location(b"example.org", megafon),
+        Some(b"m.megafonpro.ru".to_vec())
+    );
+    assert!(portal_response(b"GET /path HTTP/1.1\r\nHost: example.org\r\n\r\n", megafon).is_some());
+    let unrelated = b"HTTP/1.1 302 Found\r\nLocation: https://isp.example.org/rkn-landing/rkn\r\nContent-Length: 0\r\n\r\n";
+    assert_eq!(portal_location(b"example.org", unrelated), None);
+}
+
+#[test]
 fn rejects_ambiguous_or_malformed_request_and_redirect_headers() {
     assert!(!request_safe(
         b"GET / HTTP/1.1\r\nHost: example.org\r\nHost: evil.org\r\n\r\n"

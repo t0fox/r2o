@@ -72,7 +72,9 @@ struct FlowState {
     last_seen: Instant,
     plan_applied: bool,
     hello_seen: bool,
+    controller_probe: bool,
     hold_attempts: u8,
+    hold_replay_first: bool,
     r2o_client_is_low: Option<bool>,
     r2o_client_packets_seen: u8,
     stun: Option<StunFlow>,
@@ -109,6 +111,7 @@ pub struct R2oUdpSessions {
     udp_exchange_events: VecDeque<R2oUdpExchangeEvent>,
     flow_capacity: R2oFlowCapacity,
     refusals: u64,
+    r2o_idle_timeout: Duration,
 }
 
 impl R2oUdpSessions {
@@ -127,7 +130,13 @@ impl R2oUdpSessions {
             udp_exchange_events,
             flow_capacity,
             refusals: 0,
+            r2o_idle_timeout: UDP_IDLE,
         })
+    }
+
+    /// Настроить срок хранения состояния UDP-потоков.
+    pub fn r2o_set_idle_timeout(&mut self, timeout: Duration) {
+        self.r2o_idle_timeout = timeout;
     }
 
     /// Обновить поток, если пакет содержит целый UDP-заголовок.
@@ -142,6 +151,26 @@ impl R2oUdpSessions {
         now: Instant,
         hook: Option<u8>,
     ) -> bool {
+        self.r2o_observe_packet_mode(packet, now, hook, false)
+    }
+
+    /// Обновить поток зонда без учёта в пользовательской статистике UDP.
+    pub fn r2o_observe_probe_packet_at_hook(
+        &mut self,
+        packet: &[u8],
+        now: Instant,
+        hook: Option<u8>,
+    ) -> bool {
+        self.r2o_observe_packet_mode(packet, now, hook, true)
+    }
+
+    fn r2o_observe_packet_mode(
+        &mut self,
+        packet: &[u8],
+        now: Instant,
+        hook: Option<u8>,
+        controller_probe: bool,
+    ) -> bool {
         let Some(key) = flow_key_from_packet(packet) else {
             return false;
         };
@@ -155,6 +184,7 @@ impl R2oUdpSessions {
 
         if let Some(flow) = self.flows.get_mut(&key) {
             flow.last_seen = now;
+            flow.controller_probe |= controller_probe;
             flow.r2o_client_is_low = r2o_client_is_low;
             if r2o_client_packet {
                 flow.r2o_client_packets_seen = flow.r2o_client_packets_seen.saturating_add(1);
@@ -162,7 +192,9 @@ impl R2oUdpSessions {
             return true;
         }
         if self.flows.len() >= self.flow_capacity.limit() {
-            self.refusals = self.refusals.saturating_add(1);
+            if !controller_probe {
+                self.refusals = self.refusals.saturating_add(1);
+            }
             return false;
         }
         self.flows.insert(
@@ -171,7 +203,9 @@ impl R2oUdpSessions {
                 last_seen: now,
                 plan_applied: false,
                 hello_seen: false,
+                controller_probe,
                 hold_attempts: 0,
+                hold_replay_first: false,
                 r2o_client_is_low,
                 r2o_client_packets_seen: u8::from(r2o_client_packet),
                 stun: None,
@@ -292,6 +326,44 @@ impl R2oUdpSessions {
             .is_some_and(|flow| flow.plan_applied)
     }
 
+    /// Определить, является ли пакет первым клиентским пакетом потока UDP.
+    /// Сохранить исключение первого UDP-пакета для повторной головы QUIC.
+    pub fn r2o_mark_hold_replay_first(&mut self, packet: &[u8]) -> bool {
+        let Some(flow) = flow_key_from_packet(packet).and_then(|key| self.flows.get_mut(&key))
+        else {
+            return false;
+        };
+        flow.hold_replay_first = true;
+        true
+    }
+
+    /// Проверить первый пакет, учитывая одноразовый replay после QUIC-сборки.
+    pub fn r2o_is_first_client_packet(&mut self, packet: &[u8]) -> bool {
+        let Some(key) = flow_key_from_packet(packet) else {
+            return false;
+        };
+        let Some(flow) = self.flows.get_mut(&key) else {
+            return false;
+        };
+        let is_client = r2o_udp_packet_direction(packet, key, None, flow.r2o_client_is_low)
+            .is_some_and(|(is_client, _)| is_client);
+        let replay_first = std::mem::replace(&mut flow.hold_replay_first, false);
+        is_client && (replay_first || flow.r2o_client_packets_seen <= 1)
+    }
+
+    /// Проверить первый клиентский пакет UDP-потока для окна поздних копий.
+    pub fn r2o_udp_opening(&self, packet: &[u8]) -> bool {
+        let Some(key) = flow_key_from_packet(packet) else {
+            return false;
+        };
+        let Some(flow) = self.flows.get(&key) else {
+            return false;
+        };
+        flow.r2o_client_packets_seen == 1
+            && r2o_udp_packet_direction(packet, key, None, flow.r2o_client_is_low)
+                .is_some_and(|(is_client, _)| is_client)
+    }
+
     /// Отметить первое применение плана к UDP-потоку.
     pub fn r2o_mark_plan_applied(&mut self, packet: &[u8]) -> bool {
         let Some(flow) = flow_key_from_packet(packet).and_then(|key| self.flows.get_mut(&key))
@@ -357,15 +429,20 @@ impl R2oUdpSessions {
     /// Удалить записи, не обновлявшиеся в течение заданного срока.
     pub fn expire(&mut self, now: Instant) -> usize {
         let before = self.flows.len();
+        let idle_timeout = self.r2o_idle_timeout;
         self.flows.retain(|_, flow| {
-            !(now >= flow.last_seen && now.duration_since(flow.last_seen) >= UDP_IDLE)
+            !(now >= flow.last_seen && now.duration_since(flow.last_seen) >= idle_timeout)
         });
         before - self.flows.len()
     }
 
     pub fn stats(&self) -> R2oUdpTableStats {
         R2oUdpTableStats {
-            flows: self.flows.len(),
+            flows: self
+                .flows
+                .values()
+                .filter(|flow| !flow.controller_probe)
+                .count(),
             capacity: self.flow_capacity.slots(),
             refusals: self.refusals,
         }
@@ -427,9 +504,9 @@ fn r2o_udp_packet_direction(
 mod tests {
     use super::R2oUdpSessions;
     use crate::flow_capacity::R2oFlowCapacity;
-    use crate::netlink::{R2O_NF_INET_FORWARD, R2O_NF_INET_POST_ROUTING};
+    use crate::netlink::{R2O_NF_INET_FORWARD, R2O_NF_INET_LOCAL_OUT, R2O_NF_INET_POST_ROUTING};
     use r2k_core::stun::binding_request;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     fn r2o_udp_packet(source_port: u16) -> Vec<u8> {
         let mut packet = vec![0; 28];
@@ -485,6 +562,54 @@ mod tests {
         assert_eq!(sessions.stats().flows, 48);
         assert_eq!(sessions.stats().capacity, 64);
         assert_eq!(sessions.stats().refusals, 1);
+    }
+
+    #[test]
+    fn r2o_udp_зонд_сохраняет_состояние_и_не_попадает_в_статистику() {
+        let mut sessions = R2oUdpSessions::new().unwrap();
+        let now = Instant::now();
+        let probe = r2o_udp_packet(45_001);
+        let client = r2o_udp_packet(45_002);
+
+        assert!(sessions.r2o_observe_probe_packet_at_hook(&probe, now, None));
+        assert!(sessions.observe_packet(&client, now));
+        assert_eq!(sessions.stats().flows, 1);
+        assert!(sessions.r2o_is_first_client_packet(&probe));
+
+        assert!(sessions.r2o_mark_plan_applied(&probe));
+        assert!(sessions.r2o_plan_applied(&probe));
+        assert!(sessions.r2o_observe_probe_packet_at_hook(&client, now, None));
+        assert_eq!(sessions.stats().flows, 0);
+    }
+
+    #[test]
+    fn r2o_udp_replay_сохраняет_исключение_первой_датаграммы_ровно_на_один_пакет() {
+        let mut sessions = R2oUdpSessions::new().unwrap();
+        let packet = r2o_udp_packet(44321);
+        let now = Instant::now();
+        let hook = Some(R2O_NF_INET_LOCAL_OUT);
+
+        assert!(sessions.r2o_observe_packet_at_hook(&packet, now, hook));
+        assert!(sessions.r2o_begin_hold(&packet));
+        assert!(sessions.r2o_mark_hold_replay_first(&packet));
+        assert!(
+            sessions.r2o_observe_packet_at_hook(&packet, now + Duration::from_millis(1), hook,)
+        );
+        assert!(sessions.r2o_is_first_client_packet(&packet));
+        assert!(!sessions.r2o_is_first_client_packet(&packet));
+    }
+
+    #[test]
+    fn r2o_udp_срок_хранения_состояния_настраивается() {
+        let start = Instant::now();
+        let packet = r2o_udp_packet(45_003);
+        let mut sessions = R2oUdpSessions::new().unwrap();
+        sessions.r2o_set_idle_timeout(Duration::from_secs(5));
+        assert!(sessions.observe_packet(&packet, start));
+
+        assert_eq!(sessions.expire(start + Duration::from_secs(4)), 0);
+        assert_eq!(sessions.expire(start + Duration::from_secs(5)), 1);
+        assert_eq!(sessions.stats().flows, 0);
     }
 
     #[test]

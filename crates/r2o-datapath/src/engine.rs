@@ -40,6 +40,37 @@ struct TcpFlowKey {
 }
 
 impl TcpFlowKey {
+    fn from_packet(packet: &[u8]) -> Option<Self> {
+        let view = PacketView::parse(packet)?;
+        if view.protocol != 6 {
+            return None;
+        }
+        let tcp = view.tcp_segment(packet)?;
+        let source = TcpEndpoint {
+            address: view.src,
+            port: tcp.source_port,
+        };
+        let destination = TcpEndpoint {
+            address: view.dst,
+            port: tcp.destination_port,
+        };
+        Some(Self::from_endpoints(source, destination))
+    }
+
+    fn from_endpoints(source: TcpEndpoint, destination: TcpEndpoint) -> Self {
+        if source.order_key() <= destination.order_key() {
+            Self {
+                low: source,
+                high: destination,
+            }
+        } else {
+            Self {
+                low: destination,
+                high: source,
+            }
+        }
+    }
+
     fn wire_key(self) -> [u8; KEY_LEN] {
         let mut key = [0; KEY_LEN];
         key[0] = self.low.address.family();
@@ -68,10 +99,14 @@ pub struct R2oTcpFlowMetrics {
 struct TcpSession {
     initiator: TcpEndpoint,
     direction_known: bool,
+    controller_probe: bool,
     r2o_http_requests: r2k_core::httpup::R2oHttpRequestSequence,
     metrics: R2oTcpFlowMetrics,
     reverse_ttl: Option<u8>,
     guards: u8,
+    execution_id: u64,
+    r2o_execution_pending: bool,
+    damaged: bool,
     first_syn: Option<Instant>,
     rtt: Option<Duration>,
     hello_at: Option<Instant>,
@@ -80,6 +115,7 @@ struct TcpSession {
     repeat_reported: bool,
     hello_ack: Option<u32>,
     reverse_seen: bool,
+    reverse_syn_ack_seen: bool,
     response_payload: bool,
     reverse_tls_app_data: bool,
     reverse_server_hello: bool,
@@ -121,10 +157,14 @@ impl TcpSession {
         Self {
             initiator,
             direction_known,
+            controller_probe: false,
             r2o_http_requests: r2k_core::httpup::R2oHttpRequestSequence::default(),
             metrics: R2oTcpFlowMetrics::default(),
             reverse_ttl: None,
             guards: 0,
+            execution_id: 0,
+            r2o_execution_pending: false,
+            damaged: false,
             first_syn,
             rtt: None,
             hello_at: None,
@@ -133,6 +173,7 @@ impl TcpSession {
             repeat_reported: false,
             hello_ack: None,
             reverse_seen: false,
+            reverse_syn_ack_seen: false,
             response_payload: false,
             reverse_tls_app_data: false,
             reverse_server_hello: false,
@@ -273,6 +314,7 @@ struct TrackedTcpPacket {
     sni_next_segment: bool,
     forward_packet_count: u32,
     first_payload_byte: Option<u8>,
+    controller_probe: bool,
 }
 
 /// Ограниченное состояние потока для runtime-защит и очистки соединений.
@@ -356,8 +398,40 @@ impl TcpSessions {
     /// Возвращает счётчики активного потока по его ключу сетевого протокола.
     pub fn r2o_flow_metrics(&self, key: &[u8; KEY_LEN]) -> Option<R2oTcpFlowMetrics> {
         self.flows.iter().find_map(|(flow_key, session)| {
-            (flow_key.wire_key() == *key).then_some(session.metrics)
+            (flow_key.wire_key() == *key && !session.controller_probe).then_some(session.metrics)
         })
+    }
+
+    /// Проверить, наблюдалось ли обратное TCP-рукопожатие для пакета.
+    pub fn r2o_syn_ack_seen_for_packet(&self, packet: &[u8]) -> bool {
+        let Some(view) = PacketView::parse(packet).filter(|view| view.protocol == 6) else {
+            return false;
+        };
+        let Some(tcp) = view.tcp_segment(packet) else {
+            return false;
+        };
+        let source = TcpEndpoint {
+            address: view.src,
+            port: tcp.source_port,
+        };
+        let destination = TcpEndpoint {
+            address: view.dst,
+            port: tcp.destination_port,
+        };
+        let key = if source.order_key() <= destination.order_key() {
+            TcpFlowKey {
+                low: source,
+                high: destination,
+            }
+        } else {
+            TcpFlowKey {
+                low: destination,
+                high: source,
+            }
+        };
+        self.flows
+            .get(&key)
+            .is_some_and(|session| session.reverse_syn_ack_seen)
     }
 
     pub fn r2o_http_keepalive_stats(&self) -> R2oHttpKeepAliveStats {
@@ -400,8 +474,115 @@ impl TcpSessions {
             .iter_mut()
             .find(|(flow_key, _)| flow_key.wire_key() == *key)
         {
+            session.r2o_execution_pending = false;
             session.plan_done = true;
         }
+    }
+
+    /// Привязать попытку отправки к текущему поколению TCP-потока.
+    pub fn r2o_begin_execution(
+        &mut self,
+        packet: &[u8],
+        execution_id: u64,
+    ) -> Option<[u8; KEY_LEN]> {
+        if execution_id == 0 {
+            return None;
+        }
+        let key = TcpFlowKey::from_packet(packet)?;
+        let session = self.flows.get_mut(&key)?;
+        if session.damaged {
+            return None;
+        }
+        session.execution_id = execution_id;
+        session.r2o_execution_pending = true;
+        Some(key.wire_key())
+    }
+
+    /// Проверить, испорчено ли текущее поколение TCP-потока.
+    pub fn r2o_is_damaged_packet(&self, packet: &[u8]) -> bool {
+        TcpFlowKey::from_packet(packet)
+            .and_then(|key| self.flows.get(&key))
+            .is_some_and(|session| session.damaged)
+    }
+
+    /// Проверить, что отложенная посылка относится к активному исполнению.
+    pub fn r2o_send_pending(&self, key: &[u8; KEY_LEN], execution_id: u64) -> bool {
+        self.flows
+            .iter()
+            .find(|(flow_key, _)| flow_key.wire_key() == *key)
+            .is_some_and(|(_, session)| {
+                execution_id != 0
+                    && session.execution_id == execution_id
+                    && session.r2o_execution_pending
+                    && !session.damaged
+            })
+    }
+
+    /// Зачесть завершение только той попытке, которая ещё принадлежит потоку.
+    pub fn r2o_mark_plan_done_for_execution(
+        &mut self,
+        key: &[u8; KEY_LEN],
+        execution_id: u64,
+    ) -> bool {
+        let Some((_, session)) = self
+            .flows
+            .iter_mut()
+            .find(|(flow_key, _)| flow_key.wire_key() == *key)
+        else {
+            return false;
+        };
+        if execution_id == 0
+            || session.execution_id != execution_id
+            || !session.r2o_execution_pending
+            || session.damaged
+        {
+            return false;
+        }
+        session.plan_done = true;
+        session.r2o_execution_pending = false;
+        true
+    }
+
+    /// Снять ожидание попытки, которая завершилась без порчи потока.
+    pub fn r2o_mark_execution_failed_for_execution(
+        &mut self,
+        key: &[u8; KEY_LEN],
+        execution_id: u64,
+    ) -> bool {
+        let Some((_, session)) = self
+            .flows
+            .iter_mut()
+            .find(|(flow_key, _)| flow_key.wire_key() == *key)
+        else {
+            return false;
+        };
+        if execution_id == 0 || session.execution_id != execution_id || session.damaged {
+            return false;
+        }
+        session.r2o_execution_pending = false;
+        true
+    }
+
+    /// Пометить поток испорченным после частичной отправки полезной нагрузки.
+    pub fn r2o_mark_damaged_for_execution(
+        &mut self,
+        key: &[u8; KEY_LEN],
+        execution_id: u64,
+    ) -> bool {
+        let Some((_, session)) = self
+            .flows
+            .iter_mut()
+            .find(|(flow_key, _)| flow_key.wire_key() == *key)
+        else {
+            return false;
+        };
+        if execution_id == 0 || session.execution_id != execution_id || session.damaged {
+            return false;
+        }
+        session.damaged = true;
+        session.r2o_execution_pending = false;
+        session.guards = 0;
+        true
     }
 
     pub fn expire(&mut self, now: Instant, idle: Duration) -> usize {
@@ -430,7 +611,8 @@ impl TcpSessions {
                     6 => Some(1),
                     _ => None,
                 };
-                if family_index.is_some_and(|index| reverse_visible_by_family[index])
+                if !session.controller_probe
+                    && family_index.is_some_and(|index| reverse_visible_by_family[index])
                     && !session.silence_reported
                     && session.reverse_packets_after_hello == 0
                     && let Some(hello_at) = session.hello_at
@@ -488,6 +670,7 @@ impl TcpSessions {
                 continue;
             };
             if session.silence_reported
+                || session.controller_probe
                 || !session.reverse_seen
                 || session.response_payload
                 || session.reverse_rst
@@ -529,6 +712,7 @@ impl TcpSessions {
             .iter()
             .filter_map(|(key, session)| {
                 if !session.direction_known
+                    || session.controller_probe
                     || !session.hello_has_sni
                     || !session.response_payload
                     || session.reverse_rst
@@ -640,7 +824,17 @@ impl TcpSessions {
         }
     }
 
+    #[cfg(test)]
     fn track_packet(&mut self, packet: &[u8], now: Instant) -> Option<TrackedTcpPacket> {
+        self.track_packet_mode(packet, now, false)
+    }
+
+    fn track_packet_mode(
+        &mut self,
+        packet: &[u8],
+        now: Instant,
+        controller_probe: bool,
+    ) -> Option<TrackedTcpPacket> {
         let view = PacketView::parse(packet)?;
         if view.protocol != 6 {
             return None;
@@ -654,17 +848,7 @@ impl TcpSessions {
             address: view.dst,
             port: tcp.destination_port,
         };
-        let key = if source.order_key() <= destination.order_key() {
-            TcpFlowKey {
-                low: source,
-                high: destination,
-            }
-        } else {
-            TcpFlowKey {
-                low: destination,
-                high: source,
-            }
-        };
+        let key = TcpFlowKey::from_endpoints(source, destination);
         let syn = tcp.flags & 0x02 != 0;
         let ack = tcp.flags & 0x10 != 0;
         let rst = tcp.flags & 0x04 != 0;
@@ -681,6 +865,7 @@ impl TcpSessions {
                 .get(&key)
                 .map_or_else(R2oTcpFlowMetrics::default, |session| session.metrics);
             let mut session = TcpSession::new(source, true, Some(now), now);
+            session.controller_probe = controller_probe;
             if destination.port == 80 {
                 session.r2o_http_requests =
                     r2k_core::httpup::R2oHttpRequestSequence::new(tcp.sequence.wrapping_add(1));
@@ -705,6 +890,10 @@ impl TcpSessions {
             _ => None,
         };
         let session = self.flows.get_mut(&key)?;
+        if controller_probe {
+            session.controller_probe = true;
+        }
+        let controller_probe = session.controller_probe;
         let hello_was_seen = session.hello_at.is_some();
         let reverse_tls_app_data_before_packet = session.reverse_tls_app_data;
         let reverse_packets_after_hello_before_packet = session.reverse_packets_after_hello;
@@ -727,6 +916,8 @@ impl TcpSessions {
                 .saturating_add(1)
         };
         let tls_parse_attempted = !hello_was_seen
+            && !rst
+            && !fin
             && (!reverse_before_hello || !session.direction_known)
             && !payload.is_empty()
             && forward_packet_count_before_hello <= TCP_HELLO_WINDOW;
@@ -756,7 +947,8 @@ impl TcpSessions {
                         &mut session.reverse_data_packets,
                     );
                     session.reverse_seen = session.metrics.reverse_packets != 0;
-                    if session.reverse_seen
+                    if !controller_probe
+                        && session.reverse_seen
                         && let Some(index) = family_index
                     {
                         reverse_visible_by_family[index] = true;
@@ -769,7 +961,9 @@ impl TcpSessions {
             }
             session.hello_at = Some(now);
             session.hello_seq = Some(tcp.sequence);
-            *r2o_tcp_hello_flows = (*r2o_tcp_hello_flows).wrapping_add(1);
+            if !controller_probe {
+                *r2o_tcp_hello_flows = (*r2o_tcp_hello_flows).wrapping_add(1);
+            }
             session.hello_ack = ack.then_some(tcp.acknowledgment);
             session.hello_has_sni = hello.sni_range.is_some();
             session.client_shape = if session.hello_has_sni {
@@ -792,13 +986,14 @@ impl TcpSessions {
         let reverse = source != session.initiator;
         let packet_bytes = view.total_len as u64;
         if reverse {
-            if let Some(index) = family_index {
+            if !controller_probe && let Some(index) = family_index {
                 reverse_visible_by_family[index] = true;
             }
             session.metrics.reverse_packets = session.metrics.reverse_packets.saturating_add(1);
             session.metrics.reverse_bytes =
                 session.metrics.reverse_bytes.saturating_add(packet_bytes);
             session.reverse_seen = true;
+            session.reverse_syn_ack_seen |= syn && ack;
             if session.hello_at.is_some() {
                 session.reverse_packets_after_hello =
                     session.reverse_packets_after_hello.saturating_add(1);
@@ -849,7 +1044,9 @@ impl TcpSessions {
                             R2oTcpExchangeEvent::PLANNED_NO
                         },
                     };
-                    if self.tcp_exchange_events.len() < self.flow_capacity.slots().saturating_mul(2)
+                    if !controller_probe
+                        && self.tcp_exchange_events.len()
+                            < self.flow_capacity.slots().saturating_mul(2)
                     {
                         self.tcp_exchange_events.push_back(event);
                     }
@@ -864,7 +1061,10 @@ impl TcpSessions {
             }
         }
         let mut repeat_event = None;
-        if hello_was_seen
+        if !controller_probe
+            && !rst
+            && !fin
+            && hello_was_seen
             && !reverse
             && !payload.is_empty()
             && session.hello_seq == Some(tcp.sequence)
@@ -885,7 +1085,8 @@ impl TcpSessions {
             session.metrics.forward_bytes =
                 session.metrics.forward_bytes.saturating_add(packet_bytes);
         }
-        if !reverse
+        if !controller_probe
+            && !reverse
             && ack
             && !syn
             && !session.r2o_reply_hidden_reported
@@ -906,7 +1107,8 @@ impl TcpSessions {
             && reverse
             && session.guards & GUARD_RST_ALIEN != 0
             && reverse_ttl_before_packet.is_some_and(|reference| reference != view.hop_limit);
-        if rst
+        if !controller_probe
+            && rst
             && reverse
             && session.hello_at.is_some()
             && reverse_packets_after_hello_before_packet == 0
@@ -924,7 +1126,8 @@ impl TcpSessions {
                 client_is_low: session.initiator == key.low,
             });
         }
-        if rst
+        if !controller_probe
+            && rst
             && reverse
             && session.hello_at.is_some()
             && reverse_packets_after_hello_before_packet == 0
@@ -944,13 +1147,22 @@ impl TcpSessions {
                 client_is_low: session.initiator == key.low,
             });
         }
-        if rst && session.hello_at.is_some() && reverse_tls_app_data_before_packet {
+        if !controller_probe
+            && rst
+            && session.hello_at.is_some()
+            && reverse_tls_app_data_before_packet
+        {
             rst_after_app_event = Some(R2oTcpRstAfterAppEvent {
                 key: key.wire_key(),
                 client_is_low: session.initiator == key.low,
             });
         }
-        if fin && !rst && !reverse && session.hello_at.is_some() {
+        if fin
+            && !rst
+            && !reverse
+            && session.hello_at.is_some()
+            && (session.plan_done || !controller_probe)
+        {
             let ack_beyond_response =
                 ack && session.hello_ack.is_some_and(|hello_ack| {
                     let acknowledged = tcp.acknowledgment.wrapping_sub(hello_ack);
@@ -979,7 +1191,7 @@ impl TcpSessions {
                 keep_fin_session = true;
             }
         }
-        if let Some(event) = fin_retry_event {
+        if !controller_probe && let Some(event) = fin_retry_event {
             let already_queued = self
                 .fin_retry_events
                 .iter()
@@ -991,7 +1203,7 @@ impl TcpSessions {
                 session.fin_retry_queued = true;
             }
         }
-        if let Some(event) = rst_after_app_event {
+        if !controller_probe && let Some(event) = rst_after_app_event {
             let already_queued = self
                 .rst_after_app_events
                 .iter()
@@ -1000,18 +1212,21 @@ impl TcpSessions {
                 self.rst_after_app_events.push_back(event);
             }
         }
-        if let Some(event) = rst_event
+        if !controller_probe
+            && let Some(event) = rst_event
             && self.tcp_rst_events.len() < self.flow_capacity.slots()
         {
             self.tcp_rst_events.push_back(event);
         }
-        if let Some(event) = repeat_event
+        if !controller_probe
+            && let Some(event) = repeat_event
             && self.tcp_repeat_events.len() < self.flow_capacity.slots()
         {
             self.tcp_repeat_events.push_back(event);
             session.repeat_reported = true;
         }
-        if let Some(event) = rst_cut_event
+        if !controller_probe
+            && let Some(event) = rst_cut_event
             && self.tcp_rst_cut_events.len() < self.flow_capacity.slots()
         {
             self.tcp_rst_cut_events.push_back(event);
@@ -1028,6 +1243,7 @@ impl TcpSessions {
             sni_next_segment,
             forward_packet_count: session.metrics.forward_packets,
             first_payload_byte: (!rst && !fin).then(|| payload.first().copied()).flatten(),
+            controller_probe,
         })
     }
 }
@@ -1051,8 +1267,47 @@ pub fn decide_with_session(
     plan: &Plan,
     packet: &[u8],
 ) -> PacketDecision {
+    decide_with_session_mode(sessions, plan, packet, false, 0)
+}
+
+/// Применить план в потоке зонда, не выдавая его за пользовательское наблюдение.
+pub fn decide_with_session_probe(
+    sessions: &mut TcpSessions,
+    plan: &Plan,
+    packet: &[u8],
+) -> PacketDecision {
+    decide_with_session_mode(sessions, plan, packet, true, 0)
+}
+
+/// Применить план с пределом TCP-посылки, вычисленным по MTU маршрута.
+pub fn decide_with_session_mtu(
+    sessions: &mut TcpSessions,
+    plan: &Plan,
+    packet: &[u8],
+    tcp_segment_cap: usize,
+) -> PacketDecision {
+    decide_with_session_mode(sessions, plan, packet, false, tcp_segment_cap)
+}
+
+/// Применить план зонда с пределом TCP-посылки по MTU маршрута.
+pub fn decide_with_session_probe_mtu(
+    sessions: &mut TcpSessions,
+    plan: &Plan,
+    packet: &[u8],
+    tcp_segment_cap: usize,
+) -> PacketDecision {
+    decide_with_session_mode(sessions, plan, packet, true, tcp_segment_cap)
+}
+
+fn decide_with_session_mode(
+    sessions: &mut TcpSessions,
+    plan: &Plan,
+    packet: &[u8],
+    controller_probe: bool,
+    tcp_segment_cap: usize,
+) -> PacketDecision {
     let now = Instant::now();
-    let Some(tracked) = sessions.track_packet(packet, now) else {
+    let Some(tracked) = sessions.track_packet_mode(packet, now, controller_probe) else {
         let is_tcp = PacketView::parse(packet).is_some_and(|view| view.protocol == 6);
         if is_tcp && plan.transport == 6 && plan.proto == PROTO_HTTP {
             return PacketDecision::Accept;
@@ -1060,7 +1315,7 @@ pub fn decide_with_session(
         return if is_tcp && plan.guards & GUARD_RST_ALIEN != 0 {
             PacketDecision::Accept
         } else {
-            decide(plan, packet)
+            decide_packet_with_segment_cap(plan, packet, tcp_segment_cap)
         };
     };
     let key = tracked.key;
@@ -1081,6 +1336,19 @@ pub fn decide_with_session(
         })
     {
         return PacketDecision::Drop;
+    }
+    if rst || fin {
+        if !keep_fin_session {
+            sessions.flows.remove(&key);
+        }
+        return PacketDecision::Accept;
+    }
+    if sessions
+        .flows
+        .get(&key)
+        .is_some_and(|session| session.damaged)
+    {
+        return PacketDecision::Accept;
     }
 
     let http_observation = view
@@ -1105,32 +1373,36 @@ pub fn decide_with_session(
         http_observation,
         r2k_core::httpup::R2oHttpRequestObservation::Request { .. }
     );
-    match http_observation {
-        r2k_core::httpup::R2oHttpRequestObservation::Request {
-            later,
-            end_known,
-            aligned,
-        } => {
-            if later {
-                sessions.http_keepalive_stats.later =
-                    sessions.http_keepalive_stats.later.saturating_add(1);
+    if !tracked.controller_probe {
+        match http_observation {
+            r2k_core::httpup::R2oHttpRequestObservation::Request {
+                later,
+                end_known,
+                aligned,
+            } => {
+                if later {
+                    sessions.http_keepalive_stats.later =
+                        sessions.http_keepalive_stats.later.saturating_add(1);
+                }
+                if !end_known {
+                    sessions.http_keepalive_stats.open_end =
+                        sessions.http_keepalive_stats.open_end.saturating_add(1);
+                }
+                if !aligned {
+                    sessions.http_keepalive_stats.unaligned =
+                        sessions.http_keepalive_stats.unaligned.saturating_add(1);
+                }
             }
-            if !end_known {
-                sessions.http_keepalive_stats.open_end =
-                    sessions.http_keepalive_stats.open_end.saturating_add(1);
-            }
-            if !aligned {
+            r2k_core::httpup::R2oHttpRequestObservation::Unaligned => {
                 sessions.http_keepalive_stats.unaligned =
                     sessions.http_keepalive_stats.unaligned.saturating_add(1);
             }
+            r2k_core::httpup::R2oHttpRequestObservation::Ignored => {}
         }
-        r2k_core::httpup::R2oHttpRequestObservation::Unaligned => {
-            sessions.http_keepalive_stats.unaligned =
-                sessions.http_keepalive_stats.unaligned.saturating_add(1);
-        }
-        r2k_core::httpup::R2oHttpRequestObservation::Ignored => {}
     }
-    if let Some(first_byte) = tracked.first_payload_byte {
+    if !tracked.controller_probe
+        && let Some(first_byte) = tracked.first_payload_byte
+    {
         if reverse {
             sessions.tcp_payload_stats.reverse =
                 sessions.tcp_payload_stats.reverse.saturating_add(1);
@@ -1149,19 +1421,25 @@ pub fn decide_with_session(
                 sessions.tcp_payload_stats.sni_next_seg.saturating_add(1);
         }
     }
+    let execution_state = sessions.flows.get(&key);
+    if execution_state.is_some_and(|session| {
+        (session.plan_done && !http_request) || (session.r2o_execution_pending && http_request)
+    }) {
+        return PacketDecision::Accept;
+    }
     let r2o_http_plan = plan.transport == 6 && plan.proto == PROTO_HTTP;
     let r2o_http_plan_allowed = !r2o_http_plan || http_request;
     let decision = if !r2o_http_plan_allowed {
         PacketDecision::Accept
     } else {
-        decide_packet(plan, packet)
+        decide_packet_with_segment_cap(plan, packet, tcp_segment_cap)
     };
     let applied = matches!(
         &decision,
         PacketDecision::Drop | PacketDecision::Replace(_) | PacketDecision::Transmit { .. }
     ) || (r2o_http_plan_allowed
         && plan.guards & GUARD_RST_ALIEN != 0
-        && guard_plan_applies_without_emissions(plan, packet));
+        && guard_plan_applies_without_emissions(plan, packet, tcp_segment_cap));
     if applied
         && !reverse
         && !rst
@@ -1170,24 +1448,36 @@ pub fn decide_with_session(
     {
         session.guards = plan.guards;
     }
-    if rst || (fin && !keep_fin_session) {
-        sessions.flows.remove(&key);
+    if applied && matches!(&decision, PacketDecision::Accept | PacketDecision::Drop) {
+        if let Some(session) = sessions.flows.get_mut(&key) {
+            session.plan_done = true;
+            session.r2o_execution_pending = false;
+        }
     }
     decision
 }
 
-fn guard_plan_applies_without_emissions(plan: &Plan, packet: &[u8]) -> bool {
+fn guard_plan_applies_without_emissions(
+    plan: &Plan,
+    packet: &[u8],
+    tcp_segment_cap: usize,
+) -> bool {
     let Some(view) = PacketView::parse(packet).filter(|view| view.protocol == 6) else {
         return false;
     };
-    let Some(input) = tcp_plan_input(plan, packet, &view) else {
+    let Some(input) = tcp_plan_input(plan, packet, &view, tcp_segment_cap) else {
         return false;
     };
     plan.apply(&input)
         .is_ok_and(|actions| actions.emits.is_empty() && actions.fate != OriginalFate::Hold)
 }
 
-fn tcp_plan_input<'a>(plan: &Plan, packet: &'a [u8], view: &PacketView) -> Option<PacketInput<'a>> {
+fn tcp_plan_input<'a>(
+    plan: &Plan,
+    packet: &'a [u8],
+    view: &PacketView,
+    tcp_segment_cap: usize,
+) -> Option<PacketInput<'a>> {
     if plan.transport != 6 || !matches!(plan.proto, 1 | PROTO_HTTP) {
         return None;
     }
@@ -1213,7 +1503,7 @@ fn tcp_plan_input<'a>(plan: &Plan, packet: &'a [u8], view: &PacketView) -> Optio
         input.sni_off = range.start;
         input.sni_len = range.len();
     }
-    input.segment_cap = usize::try_from(plan.segment_size).unwrap_or(0);
+    input.segment_cap = tcp_segment_cap;
     input.is_http = is_http;
     Some(input)
 }
@@ -1245,15 +1535,19 @@ pub fn decide(plan: &Plan, packet: &[u8]) -> PacketDecision {
     if plan.guards & GUARD_RST_ALIEN != 0 {
         return PacketDecision::Accept;
     }
-    decide_packet(plan, packet)
+    decide_packet_with_segment_cap(plan, packet, 0)
 }
 
-fn decide_packet(plan: &Plan, packet: &[u8]) -> PacketDecision {
+fn decide_packet_with_segment_cap(
+    plan: &Plan,
+    packet: &[u8],
+    tcp_segment_cap: usize,
+) -> PacketDecision {
     let Some(view) = PacketView::parse(packet) else {
         return PacketDecision::Accept;
     };
     if view.protocol == 6 {
-        return decide_tcp(plan, packet, &view);
+        return decide_tcp(plan, packet, &view, tcp_segment_cap);
     }
     if view.protocol != 17 {
         return PacketDecision::Accept;
@@ -1399,8 +1693,13 @@ fn decide_voice(plan: &Plan, packet: &[u8], view: &PacketView, payload: &[u8]) -
     }
 }
 
-fn decide_tcp(plan: &Plan, packet: &[u8], view: &PacketView) -> PacketDecision {
-    let Some(input) = tcp_plan_input(plan, packet, view) else {
+fn decide_tcp(
+    plan: &Plan,
+    packet: &[u8],
+    view: &PacketView,
+    tcp_segment_cap: usize,
+) -> PacketDecision {
+    let Some(input) = tcp_plan_input(plan, packet, view, tcp_segment_cap) else {
         return PacketDecision::Accept;
     };
 
@@ -1635,7 +1934,8 @@ pub fn validate_runtime_plan(plan: &Plan) -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        KEY_LEN, PacketDecision, R2oTcpFlowMetrics, TcpSessions, decide, decide_with_session,
+        KEY_LEN, PacketDecision, R2oTcpFlowMetrics, TcpFlowKey, TcpSessions, decide,
+        decide_with_session, decide_with_session_mtu, decide_with_session_probe,
         validate_runtime_plan,
     };
     #[cfg(target_os = "linux")]
@@ -2387,7 +2687,7 @@ mod tests {
 
     #[test]
     fn tcp_повтор_fin_после_ответа_сохраняет_поток_и_создаёт_улику_один_раз() {
-        let plan = tcp_guard_only_plan();
+        let plan = Plan::default();
         let client = ([192, 0, 2, 10], 41000);
         let server = ([198, 51, 100, 20], 443);
         let mut sessions = TcpSessions::default();
@@ -3097,6 +3397,44 @@ mod tests {
     }
 
     #[test]
+    fn controller_probe_applies_tcp_plan_without_user_metrics_or_events() {
+        let client = ([192, 0, 2, 10], 41_001);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        let hello = ipv4_tcp_packet(client, server, 0x18, 64, 700, &client_hello());
+        let decision = decide_with_session_probe(&mut sessions, &tcp_fake_plan(), &hello);
+        let PacketDecision::Transmit { packets, .. } = decision else {
+            panic!("TCP-план не применился к probe ClientHello");
+        };
+        assert_eq!(packets.len(), 1);
+        assert_eq!(sessions.r2o_tcp_hello_flows(), 0);
+        assert_eq!(sessions.r2o_reply_hidden(), 0);
+        assert!(sessions.take_tcp_exchange_events().is_empty());
+        assert!(sessions.take_tcp_rst_events().is_empty());
+        assert!(sessions.take_tcp_repeat_events().is_empty());
+        assert!(sessions.take_tcp_rst_cut_events().is_empty());
+
+        let key = sessions.flows.keys().next().unwrap().wire_key();
+        assert!(sessions.r2o_flow_metrics(&key).is_none());
+        let reply = ipv4_tcp_packet(server, client, 0x18, 120, 900, &[0x17, 0x03, 0x03, 0, 1, 0]);
+        let _ = decide_with_session(&mut sessions, &Plan::default(), &reply);
+        assert!(sessions.take_tcp_exchange_events().is_empty());
+        assert!(
+            sessions
+                .sweep_silent(Instant::now() + Duration::from_secs(10), true)
+                .is_empty()
+        );
+
+        let mut silent = Vec::new();
+        sessions.expire_with_silent(
+            Instant::now() + Duration::from_secs(121),
+            Duration::from_secs(120),
+            |event| silent.push(event),
+        );
+        assert!(silent.is_empty());
+    }
+
+    #[test]
     fn rst_alien_guard_profiles_the_reverse_ttl_and_keeps_the_flow_alive() {
         let plan = tcp_fake_plan_with_rst_guard();
         assert!(validate_runtime_plan(&plan).is_ok());
@@ -3153,6 +3491,222 @@ mod tests {
             "настоящий RST с тем же TTL проходит",
         );
         assert_eq!(sessions.len(), 0, "настоящий RST закрывает поток");
+    }
+
+    #[test]
+    fn tcp_отказ_повреждает_только_свое_поколение_и_снимает_защиту_rst() {
+        let plan = tcp_fake_plan_with_rst_guard();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        let syn = ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]);
+        let syn_ack = ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]);
+        let hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello());
+
+        assert_eq!(
+            decide_with_session(&mut sessions, &plan, &syn),
+            PacketDecision::Accept
+        );
+        assert_eq!(
+            decide_with_session(&mut sessions, &plan, &syn_ack),
+            PacketDecision::Accept
+        );
+        assert!(matches!(
+            decide_with_session(&mut sessions, &plan, &hello),
+            PacketDecision::Transmit { .. }
+        ));
+        let key = sessions.r2o_begin_execution(&hello, 41).unwrap();
+        assert!(sessions.r2o_send_pending(&key, 41));
+        assert!(!sessions.r2o_is_damaged_packet(&hello));
+        assert!(!sessions.r2o_mark_damaged_for_execution(&key, 40));
+        assert!(!sessions.r2o_mark_plan_done_for_execution(&key, 40));
+        assert!(sessions.r2o_mark_damaged_for_execution(&key, 41));
+        assert!(!sessions.r2o_send_pending(&key, 41));
+        assert!(sessions.r2o_is_damaged_packet(&hello));
+        let flow_key = TcpFlowKey::from_packet(&hello).unwrap();
+        assert_eq!(sessions.flows[&flow_key].guards, 0);
+        assert_eq!(
+            decide_with_session(&mut sessions, &plan, &hello),
+            PacketDecision::Accept
+        );
+        assert_eq!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(server, client, 0x14, 127, 900, &[]),
+            ),
+            PacketDecision::Accept,
+            "испорченный поток не удерживает поддельный RST",
+        );
+        assert!(sessions.is_empty(), "RST закрывает испорченное соединение");
+
+        let new_syn = ipv4_tcp_packet(client, server, 0x02, 64, 3000, &[]);
+        assert_eq!(
+            decide_with_session(&mut sessions, &plan, &new_syn),
+            PacketDecision::Accept
+        );
+        assert!(!sessions.r2o_is_damaged_packet(&new_syn));
+        assert!(!sessions.r2o_mark_damaged_for_execution(&key, 41));
+        assert!(!sessions.r2o_mark_plan_done_for_execution(&key, 41));
+        let new_hello = ipv4_tcp_packet(client, server, 0x18, 64, 3001, &client_hello());
+        assert!(matches!(
+            decide_with_session(&mut sessions, &plan, &new_hello),
+            PacketDecision::Transmit { .. }
+        ));
+        let new_key = sessions.r2o_begin_execution(&new_hello, 43).unwrap();
+        assert_eq!(new_key, key);
+        assert!(sessions.r2o_send_pending(&new_key, 43));
+        assert!(!sessions.r2o_send_pending(&new_key, 41));
+        assert!(!sessions.r2o_mark_damaged_for_execution(&new_key, 41));
+        assert!(sessions.r2o_mark_plan_done_for_execution(&new_key, 43));
+    }
+
+    #[test]
+    fn tcp_fin_не_получает_план_и_закрывает_запись_потока() {
+        let plan = tcp_fake_plan_with_rst_guard();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        assert_eq!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]),
+            ),
+            PacketDecision::Accept
+        );
+        assert_eq!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+            ),
+            PacketDecision::Accept
+        );
+        let hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello());
+        assert!(matches!(
+            decide_with_session(&mut sessions, &plan, &hello),
+            PacketDecision::Transmit { .. }
+        ));
+
+        assert_eq!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(client, server, 0x11, 64, 701, &[]),
+            ),
+            PacketDecision::Accept
+        );
+        assert!(sessions.is_empty(), "обычный FIN освобождает запись потока");
+    }
+
+    #[test]
+    fn tcp_clienthello_в_терминальном_пакете_не_разбирается() {
+        let plan = tcp_fake_plan_with_rst_guard();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+        );
+
+        assert_eq!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(client, server, 0x19, 64, 701, &client_hello()),
+            ),
+            PacketDecision::Accept
+        );
+        assert_eq!(sessions.r2o_tcp_hello_flows(), 0);
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn tcp_повторный_clienthello_не_получает_уже_выполненный_план() {
+        let plan = tcp_fake_plan_with_rst_guard();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+        );
+        let hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello());
+        assert!(matches!(
+            decide_with_session(&mut sessions, &plan, &hello),
+            PacketDecision::Transmit { .. }
+        ));
+        let key = sessions.r2o_begin_execution(&hello, 51).unwrap();
+        assert!(sessions.r2o_send_pending(&key, 51));
+        assert!(sessions.r2o_mark_plan_done_for_execution(&key, 51));
+        assert!(!sessions.r2o_send_pending(&key, 51));
+        assert_eq!(
+            decide_with_session(&mut sessions, &plan, &hello),
+            PacketDecision::Accept,
+        );
+    }
+
+    #[test]
+    fn r2o_http_keepalive_ждёт_завершения_предыдущего_исполнения() {
+        let plan = http_split_plan();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 80);
+        let mut sessions = TcpSessions::default();
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x02, 64, 1000, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+        );
+        let first = b"GET /first HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        let first_sequence = 1001;
+        let first_packet = ipv4_tcp_packet(client, server, 0x18, 64, first_sequence, first);
+        assert!(matches!(
+            decide_with_session(&mut sessions, &plan, &first_packet),
+            PacketDecision::Transmit { .. }
+        ));
+        let key = sessions.r2o_begin_execution(&first_packet, 61).unwrap();
+
+        let second = b"GET /second HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        let second_sequence = first_sequence.wrapping_add(first.len() as u32);
+        assert_eq!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(client, server, 0x18, 64, second_sequence, second),
+            ),
+            PacketDecision::Accept,
+        );
+        assert!(sessions.r2o_mark_plan_done_for_execution(&key, 61));
+
+        let third = b"GET /third HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        let third_sequence = second_sequence.wrapping_add(second.len() as u32);
+        assert!(matches!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(client, server, 0x18, 64, third_sequence, third),
+            ),
+            PacketDecision::Transmit { .. }
+        ));
     }
 
     #[test]
@@ -3893,6 +4447,50 @@ mod tests {
         let second_tcp = second.tcp_segment(&packets[1].packet).unwrap();
         assert_eq!(second_tcp.sequence, 767);
         assert_eq!(&packets[1].packet[second_tcp.payload.clone()], b"e.test");
+    }
+
+    #[test]
+    fn tcp_маршрутный_mtu_ограничивает_каждую_посылку_полезной_нагрузки() {
+        let plan = Plan::parse(&plan_bytes(
+            0,
+            &[
+                tlv(0x0002, &[6, 1]),
+                tlv(0x0010, &[0, 1, b'F', b'A', b'K', b'E']),
+                tlv(0x0101, &[0, 1, 0, 0, 1, 0, 0, 0, 0, 0]),
+                tlv(0x0105, &[0, 0, 0x3a, 0x98]),
+            ],
+        ))
+        .unwrap();
+        let packet = ipv4_tcp(&client_hello_with_sni_and_large_extension(), 700);
+        let mut sessions = TcpSessions::default();
+        let PacketDecision::Transmit { packets, .. } =
+            decide_with_session_mtu(&mut sessions, &plan, &packet, 128)
+        else {
+            panic!("маршрутный предел должен разбить TCP-посылки плана");
+        };
+
+        let mut fake_packets = 0;
+        let mut payload_packets = 0;
+        for emitted in packets
+            .iter()
+            .filter(|emitted| emitted.kind == EmitKind::Fake)
+        {
+            let view = PacketView::parse(&emitted.packet).unwrap();
+            let tcp = view.tcp_segment(&emitted.packet).unwrap();
+            assert_eq!(tcp.payload.len(), 4);
+            fake_packets += 1;
+        }
+        for emitted in packets
+            .iter()
+            .filter(|emitted| emitted.kind == EmitKind::Payload)
+        {
+            let view = PacketView::parse(&emitted.packet).unwrap();
+            let tcp = view.tcp_segment(&emitted.packet).unwrap();
+            assert!(tcp.payload.len() <= 128);
+            payload_packets += 1;
+        }
+        assert_eq!(fake_packets, 1);
+        assert!(payload_packets > 2);
     }
 
     #[test]

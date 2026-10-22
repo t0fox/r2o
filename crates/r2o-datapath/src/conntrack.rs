@@ -1,6 +1,7 @@
 //! Запросы счётчиков потоков через Linux ctnetlink.
 
 use crate::netlink::{MessageIter, NLMSG_ERROR};
+use r2k_core::packet::PacketView;
 use std::io;
 use std::net::SocketAddr;
 use std::os::fd::RawFd;
@@ -14,6 +15,7 @@ const NLA_HEADER_LEN: usize = 4;
 const NLA_TYPE_MASK: u16 = 0x3fff;
 const NLA_F_NESTED: u16 = 0x8000;
 const CTA_TUPLE_ORIG: u16 = 1;
+const CTA_TUPLE_REPLY: u16 = 2;
 const CTA_COUNTERS_ORIG: u16 = 9;
 const CTA_COUNTERS_REPLY: u16 = 10;
 const CTA_PROTOINFO: u16 = 4;
@@ -33,7 +35,7 @@ const CTA_PROTOINFO_TCP_STATE: u16 = 1;
 const TCP_CONNTRACK_ESTABLISHED: u8 = 3;
 const NLMSG_HEADER_LEN: usize = 16;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct R2oConntrackTuple {
     pub family: u8,
     pub protocol: u8,
@@ -41,6 +43,19 @@ pub struct R2oConntrackTuple {
     pub destination: [u8; 16],
     pub source_port: u16,
     pub destination_port: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct R2oConntrackNatSource {
+    pub family: u8,
+    pub address: [u8; 16],
+    pub port: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct R2oConntrackEntry {
+    pub info: Option<R2oConntrackInfo>,
+    pub nat_source: Option<R2oConntrackNatSource>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -116,6 +131,10 @@ pub fn encode_get(sequence: u32, tuple: &R2oConntrackTuple) -> Option<Vec<u8>> {
 }
 
 pub fn decode_info(bytes: &[u8], sequence: u32) -> Option<R2oConntrackInfo> {
+    decode_entry(bytes, sequence).and_then(|entry| entry.info)
+}
+
+pub fn decode_entry(bytes: &[u8], sequence: u32) -> Option<R2oConntrackEntry> {
     for message in MessageIter::new(bytes) {
         if message.sequence != sequence
             || message.kind != ((NFNL_SUBSYS_CTNETLINK << 8) | IPCTNL_MSG_CT_NEW)
@@ -124,20 +143,69 @@ pub fn decode_info(bytes: &[u8], sequence: u32) -> Option<R2oConntrackInfo> {
             continue;
         }
         let attributes = &message.body[4..];
-        let original_packets = parse_counter(find_attribute(attributes, CTA_COUNTERS_ORIG).ok()??)?;
-        let reply_packets = parse_counter(find_attribute(attributes, CTA_COUNTERS_REPLY).ok()??)?;
+        let reply_tuple = find_attribute(attributes, CTA_TUPLE_REPLY).ok()??;
+        let nat_source = parse_reply_nat_source(reply_tuple).ok()?;
+        let original_packets = find_attribute(attributes, CTA_COUNTERS_ORIG)
+            .ok()
+            .flatten()
+            .and_then(parse_counter);
+        let reply_packets = find_attribute(attributes, CTA_COUNTERS_REPLY)
+            .ok()
+            .flatten()
+            .and_then(parse_counter);
         let tcp_state = find_attribute(attributes, CTA_PROTOINFO)
             .ok()?
             .and_then(|protocol| find_attribute(protocol, CTA_PROTOINFO_TCP).ok()?)
             .and_then(|tcp| find_attribute(tcp, CTA_PROTOINFO_TCP_STATE).ok()?)
             .and_then(|state| state.first().copied());
-        return Some(R2oConntrackInfo {
-            original_packets,
-            reply_packets,
-            tcp_state,
-        });
+        let info = original_packets
+            .zip(reply_packets)
+            .map(|(original_packets, reply_packets)| R2oConntrackInfo {
+                original_packets,
+                reply_packets,
+                tcp_state,
+            });
+        return Some(R2oConntrackEntry { info, nat_source });
     }
     None
+}
+
+fn parse_reply_nat_source(attributes: &[u8]) -> Result<Option<R2oConntrackNatSource>, ()> {
+    let Some(ip) = find_attribute(attributes, CTA_TUPLE_IP)? else {
+        return Ok(None);
+    };
+    let Some(protocol) = find_attribute(attributes, CTA_TUPLE_PROTO)? else {
+        return Ok(None);
+    };
+    let Some(port) = find_attribute(protocol, CTA_PROTO_DST_PORT)? else {
+        return Ok(None);
+    };
+    if port.len() != 2 {
+        return Ok(None);
+    }
+    if let Some(address) = find_attribute(ip, CTA_IP_V4_DST)? {
+        if address.len() != 4 {
+            return Ok(None);
+        }
+        let mut bytes = [0; 16];
+        bytes[..4].copy_from_slice(address);
+        return Ok(Some(R2oConntrackNatSource {
+            family: 4,
+            address: bytes,
+            port: u16::from_be_bytes([port[0], port[1]]),
+        }));
+    }
+    if let Some(address) = find_attribute(ip, CTA_IP_V6_DST)? {
+        if address.len() != 16 {
+            return Ok(None);
+        }
+        return Ok(Some(R2oConntrackNatSource {
+            family: 6,
+            address: address.try_into().map_err(|_| ())?,
+            port: u16::from_be_bytes([port[0], port[1]]),
+        }));
+    }
+    Ok(None)
 }
 
 fn parse_counter(attributes: &[u8]) -> Option<u64> {
@@ -227,11 +295,15 @@ impl R2oConntrackClient {
     }
 
     pub fn query(&mut self, tuple: &R2oConntrackTuple) -> Option<R2oConntrackInfo> {
+        self.query_entry(tuple).and_then(|entry| entry.info)
+    }
+
+    pub fn query_entry(&mut self, tuple: &R2oConntrackTuple) -> Option<R2oConntrackEntry> {
         self.sequence = self.sequence.wrapping_add(1).max(1);
         let sequence = self.sequence;
         let request = encode_get(sequence, tuple)?;
         self.send(&request).ok()?;
-        self.receive_info(sequence)
+        self.receive_entry(sequence)
     }
 
     fn probe(&mut self) -> bool {
@@ -272,7 +344,7 @@ impl R2oConntrackClient {
             return false;
         }
         let response = &response[..read as usize];
-        if decode_info(response, sequence).is_some() {
+        if decode_entry(response, sequence).is_some() {
             return true;
         }
         MessageIter::new(response).any(|message| {
@@ -309,7 +381,7 @@ impl R2oConntrackClient {
         Ok(())
     }
 
-    fn receive_info(&self, sequence: u32) -> Option<R2oConntrackInfo> {
+    fn receive_entry(&self, sequence: u32) -> Option<R2oConntrackEntry> {
         let mut response = [0_u8; 4096];
         for _ in 0..8 {
             let read = unsafe {
@@ -325,7 +397,7 @@ impl R2oConntrackClient {
             }
             let response = &response[..read as usize];
             if MessageIter::new(response).any(|message| message.sequence == sequence) {
-                return decode_info(response, sequence);
+                return decode_entry(response, sequence);
             }
         }
         None
@@ -343,6 +415,26 @@ pub fn tuple_from_socket_addrs(
     server: SocketAddr,
 ) -> Option<R2oConntrackTuple> {
     r2o_conntrack_tuple_from_socket_addrs(client, server, 6)
+}
+
+pub fn tuple_from_packet(packet: &[u8]) -> Option<R2oConntrackTuple> {
+    let view = PacketView::parse(packet)?;
+    if !matches!(view.protocol, 6 | 17) || view.fragment & 0x1fff != 0 {
+        return None;
+    }
+    let ports = packet.get(view.l4_offset..view.l4_offset.checked_add(4)?)?;
+    let mut source = [0; 16];
+    let mut destination = [0; 16];
+    source.copy_from_slice(&view.src.bytes());
+    destination.copy_from_slice(&view.dst.bytes());
+    Some(R2oConntrackTuple {
+        family: view.family,
+        protocol: view.protocol,
+        source,
+        destination,
+        source_port: u16::from_be_bytes([ports[0], ports[1]]),
+        destination_port: u16::from_be_bytes([ports[2], ports[3]]),
+    })
 }
 
 pub fn r2o_conntrack_tuple_from_socket_addrs(
@@ -384,9 +476,10 @@ pub fn r2o_conntrack_tuple_from_socket_addrs(
 mod tests {
     use super::{
         CTA_COUNTERS_ORIG, CTA_COUNTERS_PACKETS, CTA_COUNTERS_REPLY, CTA_COUNTERS32_PACKETS,
-        CTA_PROTO_DST_PORT, CTA_PROTO_SRC_PORT, CTA_TUPLE_IP, CTA_TUPLE_ORIG, CTA_TUPLE_PROTO,
-        R2oConntrackInfo, R2oConntrackTuple, decode_info, encode_get, find_attribute,
-        tuple_from_socket_addrs,
+        CTA_IP_V4_DST, CTA_IP_V4_SRC, CTA_PROTO_DST_PORT, CTA_PROTO_NUM, CTA_PROTO_SRC_PORT,
+        CTA_TUPLE_IP, CTA_TUPLE_ORIG, CTA_TUPLE_PROTO, CTA_TUPLE_REPLY, R2oConntrackInfo,
+        R2oConntrackNatSource, R2oConntrackTuple, decode_entry, decode_info, encode_get,
+        find_attribute, tuple_from_socket_addrs,
     };
     use crate::netlink::MessageIter;
     use std::net::SocketAddr;
@@ -402,6 +495,28 @@ mod tests {
                 tcp_state: Some(3),
             })
         );
+    }
+
+    #[test]
+    fn извлекает_внешний_адрес_и_порт_из_обратного_кортежа() {
+        let message = ответ_conntrack(7, 22, 25, Some(3));
+        assert_eq!(
+            decode_entry(&message, 7).unwrap().nat_source,
+            Some(R2oConntrackNatSource {
+                family: 4,
+                address: [203, 0, 113, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                port: 62000,
+            })
+        );
+    }
+
+    #[test]
+    fn подтверждает_запись_без_счётчиков_conntrack() {
+        let message = ответ_conntrack_без_счётчиков(7);
+        let entry = decode_entry(&message, 7).unwrap();
+        assert_eq!(entry.info, None);
+        assert!(entry.nat_source.is_some());
+        assert_eq!(decode_info(&message, 7), None);
     }
 
     #[test]
@@ -495,6 +610,25 @@ mod tests {
         );
         атрибут(&mut body, 9 | 0x8000, &original_counter);
         атрибут(&mut body, 10 | 0x8000, &reply_counter);
+        let mut reply_ip = Vec::new();
+        атрибут(&mut reply_ip, CTA_IP_V4_SRC, &[198, 51, 100, 20]);
+        атрибут(&mut reply_ip, CTA_IP_V4_DST, &[203, 0, 113, 9]);
+        let mut reply_protocol = Vec::new();
+        атрибут(&mut reply_protocol, CTA_PROTO_NUM, &[17]);
+        атрибут(
+            &mut reply_protocol,
+            CTA_PROTO_SRC_PORT,
+            &443_u16.to_be_bytes(),
+        );
+        атрибут(
+            &mut reply_protocol,
+            CTA_PROTO_DST_PORT,
+            &62000_u16.to_be_bytes(),
+        );
+        let mut reply_tuple = Vec::new();
+        атрибут(&mut reply_tuple, CTA_TUPLE_IP | 0x8000, &reply_ip);
+        атрибут(&mut reply_tuple, CTA_TUPLE_PROTO | 0x8000, &reply_protocol);
+        атрибут(&mut body, CTA_TUPLE_REPLY | 0x8000, &reply_tuple);
         if let Some(tcp_state) = tcp_state {
             let mut tcp = Vec::new();
             атрибут(&mut tcp, 1, &[tcp_state]);
@@ -502,6 +636,36 @@ mod tests {
             атрибут(&mut protocol, 1 | 0x8000, &tcp);
             атрибут(&mut body, 4 | 0x8000, &protocol);
         }
+        let mut message = vec![0; 16];
+        message.extend_from_slice(&body);
+        let message_len = message.len() as u32;
+        message[..4].copy_from_slice(&message_len.to_ne_bytes());
+        message[4..6].copy_from_slice(&0x0100_u16.to_ne_bytes());
+        message[8..12].copy_from_slice(&sequence.to_ne_bytes());
+        message
+    }
+
+    fn ответ_conntrack_без_счётчиков(sequence: u32) -> Vec<u8> {
+        let mut body = vec![2, 0, 0, 0];
+        let mut reply_ip = Vec::new();
+        атрибут(&mut reply_ip, CTA_IP_V4_SRC, &[198, 51, 100, 20]);
+        атрибут(&mut reply_ip, CTA_IP_V4_DST, &[203, 0, 113, 9]);
+        let mut reply_protocol = Vec::new();
+        атрибут(&mut reply_protocol, CTA_PROTO_NUM, &[17]);
+        атрибут(
+            &mut reply_protocol,
+            CTA_PROTO_SRC_PORT,
+            &443_u16.to_be_bytes(),
+        );
+        атрибут(
+            &mut reply_protocol,
+            CTA_PROTO_DST_PORT,
+            &62000_u16.to_be_bytes(),
+        );
+        let mut reply_tuple = Vec::new();
+        атрибут(&mut reply_tuple, CTA_TUPLE_IP | 0x8000, &reply_ip);
+        атрибут(&mut reply_tuple, CTA_TUPLE_PROTO | 0x8000, &reply_protocol);
+        атрибут(&mut body, CTA_TUPLE_REPLY | 0x8000, &reply_tuple);
         let mut message = vec![0; 16];
         message.extend_from_slice(&body);
         let message_len = message.len() as u32;
@@ -527,6 +691,25 @@ mod tests {
         );
         атрибут(&mut body, CTA_COUNTERS_ORIG | 0x8000, &original_counter);
         атрибут(&mut body, CTA_COUNTERS_REPLY | 0x8000, &reply_counter);
+        let mut reply_ip = Vec::new();
+        атрибут(&mut reply_ip, CTA_IP_V4_SRC, &[198, 51, 100, 20]);
+        атрибут(&mut reply_ip, CTA_IP_V4_DST, &[203, 0, 113, 9]);
+        let mut reply_protocol = Vec::new();
+        атрибут(&mut reply_protocol, CTA_PROTO_NUM, &[17]);
+        атрибут(
+            &mut reply_protocol,
+            CTA_PROTO_SRC_PORT,
+            &443_u16.to_be_bytes(),
+        );
+        атрибут(
+            &mut reply_protocol,
+            CTA_PROTO_DST_PORT,
+            &62000_u16.to_be_bytes(),
+        );
+        let mut reply_tuple = Vec::new();
+        атрибут(&mut reply_tuple, CTA_TUPLE_IP | 0x8000, &reply_ip);
+        атрибут(&mut reply_tuple, CTA_TUPLE_PROTO | 0x8000, &reply_protocol);
+        атрибут(&mut body, CTA_TUPLE_REPLY | 0x8000, &reply_tuple);
         let mut message = vec![0; 16];
         message.extend_from_slice(&body);
         let message_len = message.len() as u32;

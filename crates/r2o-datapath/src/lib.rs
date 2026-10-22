@@ -11,6 +11,8 @@ pub mod http_replace;
 pub mod netlink;
 #[cfg(target_os = "linux")]
 pub mod nfqueue;
+#[cfg(target_os = "linux")]
+pub mod r2o_conntrack_gate;
 pub mod r2o_icmp_guard;
 pub mod r2o_quic;
 pub mod r2o_route;

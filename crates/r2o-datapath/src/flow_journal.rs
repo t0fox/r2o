@@ -638,7 +638,7 @@ impl R2oFlowJournal {
         at_ns: u64,
         event: &AppliedEvent,
         code: u8,
-        payload_on_wire: bool,
+        damaged: bool,
     ) -> bool {
         if event.event_body().is_none() {
             return false;
@@ -654,7 +654,7 @@ impl R2oFlowJournal {
             trial_id: event.trial_id,
             ..R2oFlowJournalEntry::default()
         });
-        if payload_on_wire {
+        if damaged {
             self.push(R2oFlowJournalEntry {
                 at_ns,
                 execution_id: event.execution_id,

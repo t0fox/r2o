@@ -146,6 +146,7 @@ pub struct R2oQuicSessions {
     hello_reported: HashMap<FlowKey, Instant>,
     udp_exchange_events: VecDeque<R2oUdpExchangeEvent>,
     flow_limit: usize,
+    r2o_idle_timeout: Duration,
 }
 
 impl R2oQuicSessions {
@@ -166,7 +167,13 @@ impl R2oQuicSessions {
             hello_reported,
             udp_exchange_events,
             flow_limit,
+            r2o_idle_timeout: QUIC_IDLE,
         })
+    }
+
+    /// Настроить срок хранения состояния QUIC-потоков и снимков приветствий.
+    pub fn r2o_set_idle_timeout(&mut self, timeout: Duration) {
+        self.r2o_idle_timeout = timeout;
     }
 
     /// Собрать имя из проверенных Initial одного UDP-потока.
@@ -210,8 +217,9 @@ impl R2oQuicSessions {
         let (version, dcid) = r2k_core::quic::r2k_quic_initial_flight_id(payload)?;
         let key = FlowKey::new(source, destination).0;
 
+        let idle_timeout = self.r2o_idle_timeout;
         self.hello_reported
-            .retain(|_, last_seen| now.saturating_duration_since(*last_seen) < QUIC_IDLE);
+            .retain(|_, last_seen| now.saturating_duration_since(*last_seen) < idle_timeout);
         if let Some(last_seen) = self.hello_reported.get_mut(&key) {
             *last_seen = now;
             self.initial_ring.retain(|entry| entry.key != key);
@@ -468,27 +476,26 @@ impl R2oQuicSessions {
 
     /// Выдать одно наблюдение после повтора Initial и двух секунд без ответа.
     pub fn sweep(&mut self, now: Instant, reverse_queue_visible: bool) -> Vec<R2oQuicSuspectEvent> {
-        self.expire(now);
-        if !reverse_queue_visible {
-            return Vec::new();
-        }
         let mut events = Vec::new();
-        for (key, flow) in &mut self.flows {
-            if flow.suspected
-                || flow.forward_after_initial == 0
-                || now.saturating_duration_since(flow.first_initial) < QUIC_SILENCE
-                || flow
-                    .last_reverse
-                    .is_some_and(|last_reverse| last_reverse >= flow.last_forward)
-            {
-                continue;
+        if reverse_queue_visible {
+            for (key, flow) in &mut self.flows {
+                if flow.suspected
+                    || flow.forward_after_initial == 0
+                    || now.saturating_duration_since(flow.first_initial) < QUIC_SILENCE
+                    || flow
+                        .last_reverse
+                        .is_some_and(|last_reverse| last_reverse >= flow.last_forward)
+                {
+                    continue;
+                }
+                events.push(R2oQuicSuspectEvent {
+                    key: key.wire_key(),
+                    client_is_low: flow.client_is_low,
+                    planned: flow.plan_applied,
+                });
             }
-            events.push(R2oQuicSuspectEvent {
-                key: key.wire_key(),
-                client_is_low: flow.client_is_low,
-                planned: flow.plan_applied,
-            });
         }
+        self.expire(now);
         events
     }
 
@@ -600,10 +607,11 @@ impl R2oQuicSessions {
     }
 
     fn expire(&mut self, now: Instant) {
+        let idle_timeout = self.r2o_idle_timeout;
         self.flows
-            .retain(|_, flow| now.saturating_duration_since(flow.last_seen) < QUIC_IDLE);
+            .retain(|_, flow| now.saturating_duration_since(flow.last_seen) < idle_timeout);
         self.hello_reported
-            .retain(|_, last_seen| now.saturating_duration_since(*last_seen) < QUIC_IDLE);
+            .retain(|_, last_seen| now.saturating_duration_since(*last_seen) < idle_timeout);
     }
 }
 
@@ -615,6 +623,7 @@ impl Default for R2oQuicSessions {
             hello_reported: HashMap::new(),
             udp_exchange_events: VecDeque::new(),
             flow_limit: R2oFlowCapacity::default().limit(),
+            r2o_idle_timeout: QUIC_IDLE,
         }
     }
 }
@@ -807,6 +816,24 @@ mod tests {
     }
 
     #[test]
+    fn r2o_quic_проверяет_тишину_до_удаления_по_idle() {
+        let start = Instant::now();
+        let client = [192, 0, 2, 10];
+        let server = [198, 51, 100, 20];
+        let mut sessions = R2oQuicSessions::default();
+        sessions.r2o_set_idle_timeout(Duration::from_secs(1));
+        sessions.observe_packet(&ipv4_packet(client, server, 53_123, 443, INITIAL), start);
+        sessions.observe_packet(
+            &ipv4_packet(client, server, 53_123, 443, INITIAL),
+            start + Duration::from_millis(800),
+        );
+
+        let events = sessions.sweep(start + QUIC_SILENCE, true);
+        assert_eq!(events.len(), 1);
+        assert!(sessions.flows.is_empty());
+    }
+
+    #[test]
     fn собирает_событие_из_проверенного_initial() {
         let start = Instant::now();
         let client = [192, 0, 2, 10];
@@ -992,6 +1019,41 @@ mod tests {
                 .capture_hello(&ipv4_packet(client, server, 53_123, 443, INITIAL_SECOND,))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn r2o_quic_сохраняет_неполный_initial_после_истечения_состояния_потока() {
+        let start = Instant::now();
+        let client = [192, 0, 2, 10];
+        let server = [198, 51, 100, 20];
+        let mut sessions = R2oQuicSessions::default();
+        sessions.r2o_set_idle_timeout(Duration::from_secs(5));
+
+        assert!(
+            sessions
+                .capture_hello_at_hook_at(
+                    &ipv4_packet(client, server, 53_123, 443, INITIAL_FIRST),
+                    None,
+                    start,
+                )
+                .is_none()
+        );
+        assert_eq!(sessions.initial_ring.len(), 1);
+        assert!(
+            sessions
+                .sweep(start + Duration::from_secs(6), false)
+                .is_empty()
+        );
+        assert_eq!(sessions.initial_ring.len(), 1);
+        let hello = sessions
+            .capture_hello_at_hook_at(
+                &ipv4_packet(client, server, 53_123, 443, INITIAL_SECOND),
+                None,
+                start + Duration::from_secs(6),
+            )
+            .unwrap();
+        assert_eq!(hello.host, b"example.com");
+        assert!(sessions.initial_ring.is_empty());
     }
 
     #[test]

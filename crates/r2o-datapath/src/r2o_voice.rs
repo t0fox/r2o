@@ -79,6 +79,7 @@ struct FlowState {
 pub struct R2oVoiceSessions {
     flows: HashMap<FlowKey, FlowState>,
     flow_limit: usize,
+    r2o_idle_timeout: Duration,
 }
 
 struct PendingVoiceProof {
@@ -222,7 +223,16 @@ impl R2oVoiceSessions {
         let flow_limit = flow_capacity.limit();
         let mut flows = HashMap::new();
         flows.try_reserve(flow_limit)?;
-        Ok(Self { flows, flow_limit })
+        Ok(Self {
+            flows,
+            flow_limit,
+            r2o_idle_timeout: VOICE_IDLE,
+        })
+    }
+
+    /// Настроить срок хранения состояния голосовых UDP-потоков.
+    pub fn r2o_set_idle_timeout(&mut self, timeout: Duration) {
+        self.r2o_idle_timeout = timeout;
     }
 
     /// Запомнить первый Discord IP Discovery или STUN-запрос и движение его потока.
@@ -302,26 +312,25 @@ impl R2oVoiceSessions {
         now: Instant,
         reverse_queue_visible: bool,
     ) -> Vec<R2oVoiceSuspectEvent> {
-        self.expire(now);
-        if !reverse_queue_visible {
-            return Vec::new();
-        }
         let mut events = Vec::new();
-        for (key, flow) in &mut self.flows {
-            if flow.suspected
-                || flow.forward_after_hello == 0
-                || now.saturating_duration_since(flow.hello) < VOICE_SILENCE
-                || flow
-                    .last_reverse
-                    .is_some_and(|last_reverse| last_reverse >= flow.last_forward)
-            {
-                continue;
+        if reverse_queue_visible {
+            for (key, flow) in &mut self.flows {
+                if flow.suspected
+                    || flow.forward_after_hello == 0
+                    || now.saturating_duration_since(flow.hello) < VOICE_SILENCE
+                    || flow
+                        .last_reverse
+                        .is_some_and(|last_reverse| last_reverse >= flow.last_forward)
+                {
+                    continue;
+                }
+                events.push(R2oVoiceSuspectEvent {
+                    key: key.wire_key(),
+                    client_is_low: flow.client_is_low,
+                });
             }
-            events.push(R2oVoiceSuspectEvent {
-                key: key.wire_key(),
-                client_is_low: flow.client_is_low,
-            });
         }
+        self.expire(now);
         events
     }
 
@@ -338,8 +347,9 @@ impl R2oVoiceSessions {
 
     pub fn expire(&mut self, now: Instant) -> usize {
         let before = self.flows.len();
+        let idle_timeout = self.r2o_idle_timeout;
         self.flows
-            .retain(|_, flow| now.saturating_duration_since(flow.last_seen) < VOICE_IDLE);
+            .retain(|_, flow| now.saturating_duration_since(flow.last_seen) < idle_timeout);
         before - self.flows.len()
     }
 
@@ -357,6 +367,7 @@ impl Default for R2oVoiceSessions {
         Self {
             flows: HashMap::new(),
             flow_limit: R2oFlowCapacity::default().limit(),
+            r2o_idle_timeout: VOICE_IDLE,
         }
     }
 }
@@ -473,6 +484,27 @@ mod tests {
     }
 
     #[test]
+    fn r2o_discord_срок_хранения_состояния_настраивается() {
+        let start = Instant::now();
+        let mut sessions = R2oVoiceSessions::default();
+        sessions.r2o_set_idle_timeout(Duration::from_secs(5));
+        let request = discovery_request([1, 2, 3, 4]);
+        sessions.observe_packet(
+            &packet(
+                [192, 0, 2, 10],
+                [198, 51, 100, 20],
+                50_000,
+                50_004,
+                &request,
+            ),
+            start,
+        );
+
+        assert_eq!(sessions.expire(start + Duration::from_secs(4)), 0);
+        assert_eq!(sessions.expire(start + Duration::from_secs(5)), 1);
+    }
+
+    #[test]
     fn голосовое_подозрение_требует_пакет_клиента_и_видимость_ответов() {
         let start = Instant::now();
         let client = [192, 0, 2, 10];
@@ -507,6 +539,25 @@ mod tests {
                 .sweep(start + VOICE_SILENCE + Duration::from_secs(1), true)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn r2o_discord_проверяет_тишину_до_удаления_по_idle() {
+        let start = Instant::now();
+        let client = [192, 0, 2, 10];
+        let server = [198, 51, 100, 20];
+        let mut sessions = R2oVoiceSessions::default();
+        sessions.r2o_set_idle_timeout(Duration::from_secs(1));
+        let request = discovery_request([1, 2, 3, 4]);
+        sessions.observe_packet(&packet(client, server, 50_000, 50_004, &request), start);
+        sessions.observe_packet(
+            &packet(client, server, 50_000, 50_004, b"media"),
+            start + Duration::from_millis(100),
+        );
+
+        let events = sessions.sweep(start + VOICE_SILENCE, true);
+        assert_eq!(events.len(), 1);
+        assert!(sessions.is_empty());
     }
 
     #[test]

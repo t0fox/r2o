@@ -16,7 +16,8 @@ mod app {
     use r2o_datapath::control::{ControlServer, NamePlans};
     use r2o_datapath::engine::{
         PacketDecision, R2oTcpExchangeEvent, R2oTcpRstCutEvent, R2oTcpRstEvent, TcpSessions,
-        WirePacket, decide_with_session, validate_runtime_plan,
+        WirePacket, decide_with_session, decide_with_session_mtu, decide_with_session_probe,
+        decide_with_session_probe_mtu, validate_runtime_plan,
     };
     use r2o_datapath::flow_capacity::R2oFlowCapacity;
     use r2o_datapath::flow_journal::{R2oFlowJournal, R2oFlowJournalEntry, R2oFlowJournalSummary};
@@ -26,6 +27,7 @@ mod app {
         MessageIter, NF_ACCEPT, NF_DROP, NFNL_SUBSYS_QUEUE, NFQNL_MSG_PACKET, QueuePacket,
     };
     use r2o_datapath::nfqueue::{QueueSocket, ReceiveError};
+    use r2o_datapath::r2o_conntrack_gate::{R2oConntrackGate, guard_decision};
     use r2o_datapath::r2o_icmp_guard::R2oIcmpGuard;
     use r2o_datapath::r2o_quic::R2oQuicSessions;
     use r2o_datapath::r2o_route::{
@@ -39,7 +41,7 @@ mod app {
     };
     use r2o_datapath::r2o_udp_sessions::R2oUdpSessions;
     use r2o_datapath::r2o_voice::{R2oVoiceSessions, R2oVoiceTrialProofs};
-    use r2o_datapath::raw::RawSocket;
+    use r2o_datapath::raw::{RawSocket, r2o_pick_maxlen};
     use r2o_datapath::scheduler::{FlowTicket, ScheduledQueue};
     use std::collections::HashMap;
     use std::error::Error;
@@ -86,6 +88,29 @@ mod app {
             R2oRouteFamily::Ipv6
         };
         !route_gate.r2o_mark_is_routed(family, mark)
+    }
+
+    fn r2o_udp_mark_plain_pass(
+        sessions: &R2oUdpSessions,
+        follow: &mut R2oUdpFollowTable,
+        route_gate: &R2oRouteGate,
+        probe_mark: u32,
+        mark: u32,
+        packet: &[u8],
+        now: Instant,
+        receive_seq: u64,
+        can_resend: bool,
+    ) -> bool {
+        if !can_resend
+            || !r2k_core::packet::PacketView::parse(packet).is_some_and(|view| {
+                view.family == 4 && view.protocol == 17 && view.fragment & 0x3fff == 0
+            })
+            || !sessions.r2o_udp_opening(packet)
+            || !r2o_udp_packet_is_neutral(route_gate, probe_mark, mark, packet)
+        {
+            return false;
+        }
+        follow.r2o_mark(packet, now, None, receive_seq)
     }
 
     fn r2o_release_udp_batch(
@@ -255,15 +280,102 @@ mod app {
         r2o_release_delayed_udp_batch(queue, batch, false);
     }
 
+    #[derive(Clone, Copy)]
+    struct R2oTcpExecution {
+        key: [u8; r2k_core::control::KEY_LEN],
+        id: u64,
+    }
+
+    fn r2o_finish_tcp_execution(
+        sessions: &mut TcpSessions,
+        execution: Option<R2oTcpExecution>,
+        successful: bool,
+        payload_on_wire: bool,
+        original_spent: bool,
+        original_taken: bool,
+    ) -> bool {
+        let Some(execution) = execution else {
+            return false;
+        };
+        if successful {
+            sessions.r2o_mark_plan_done_for_execution(&execution.key, execution.id);
+            false
+        } else if payload_on_wire || (original_spent && original_taken) {
+            sessions.r2o_mark_damaged_for_execution(&execution.key, execution.id)
+        } else {
+            sessions.r2o_mark_execution_failed_for_execution(&execution.key, execution.id);
+            false
+        }
+    }
+
+    fn r2o_release_damaged_tcp_hold(
+        queue: &mut QueueSocket,
+        holding: &mut HoldTable,
+        packet: Option<&[u8]>,
+    ) {
+        if let Some(packet) = packet {
+            let ids = holding.r2o_release_damaged_flow(packet);
+            release_accepting(queue, &ids);
+        }
+    }
+
+    fn r2o_execution_is_damaged(
+        protocol: u8,
+        payload_on_wire: bool,
+        original_spent: bool,
+        original_taken: bool,
+    ) -> bool {
+        payload_on_wire || (protocol == 6 && original_spent && original_taken)
+    }
+
     struct PendingApplied {
         event: Option<AppliedEvent>,
+        tcp_execution: Option<R2oTcpExecution>,
         sequence: Option<u32>,
         voice_request: Option<Vec<u8>>,
         r2o_udp_packet: Option<Vec<u8>>,
+        r2o_tcp_packet: Option<Vec<u8>>,
         r2o_sends_done: bool,
         payload_on_wire: bool,
-        r2o_original_spent: bool,
-        r2o_original_taken: bool,
+        original_spent: bool,
+        original_taken: bool,
+    }
+
+    fn r2o_fail_pending_applied(
+        sessions: &mut TcpSessions,
+        flow_journal: &mut R2oFlowJournal,
+        at_ns: u64,
+        pending: &PendingApplied,
+        code: u8,
+    ) -> bool {
+        if pending
+            .tcp_execution
+            .is_some_and(|execution| !sessions.r2o_send_pending(&execution.key, execution.id))
+        {
+            return false;
+        }
+        let damaged = r2o_finish_tcp_execution(
+            sessions,
+            pending.tcp_execution,
+            false,
+            pending.payload_on_wire,
+            pending.original_spent,
+            pending.original_taken,
+        );
+        if let Some(event) = pending.event.as_ref() {
+            flow_journal.record_execution_failure(
+                at_ns,
+                event,
+                code,
+                r2o_execution_is_damaged(
+                    event.key[37],
+                    pending.payload_on_wire,
+                    pending.original_spent,
+                    pending.original_taken,
+                ),
+            );
+        }
+        damaged
     }
 
     struct PendingUdpRelease {
@@ -279,12 +391,14 @@ mod app {
         protocol_family: u16,
         mode: RuntimeMode,
         mark: u32,
+        interface: Option<String>,
         probe_mark: u32,
         only_mark: Option<R2oRoutePolicy>,
         copy_range: u32,
         queue_len: u32,
         journal_capacity: u32,
         flow_capacity: R2oFlowCapacity,
+        r2o_idle_timeout: Duration,
         receive_buffer: i32,
         control_path: Option<PathBuf>,
         controller_only: bool,
@@ -365,6 +479,11 @@ mod app {
             );
             return Ok(());
         }
+        let send_maxlen = if options.mode == RuntimeMode::Apply {
+            r2o_pick_maxlen(options.interface.as_deref())
+        } else {
+            0
+        };
 
         let queue = options
             .queue
@@ -376,10 +495,18 @@ mod app {
             Some(RawSocket::open(
                 i32::from(options.protocol_family),
                 options.mark,
+                options.interface.as_deref(),
             )?)
         } else {
             None
         };
+        if send_maxlen != 0 && plan.max_emit() > send_maxlen {
+            return Err(invalid(format!(
+                "план требует посылку до {} байт, а общий предел равен {}",
+                plan.max_emit(),
+                send_maxlen
+            )));
+        }
         let family_name = if options.protocol_family == libc::AF_INET as u16 {
             "IPv4"
         } else {
@@ -428,6 +555,7 @@ mod app {
             .map(|path| ControlServer::open(path, u16::MAX as u32))
             .transpose()?;
         let mut name_plans = NamePlans::default();
+        name_plans.r2o_set_send_maxlen(raw.as_ref().map_or(send_maxlen, RawSocket::maxlen));
         let mut flow_journal = R2oFlowJournal::with_capacity(options.journal_capacity as usize)?;
         let journal_origin = Instant::now();
         let mut journal_seen = 0_u64;
@@ -450,15 +578,27 @@ mod app {
         let mut holding = HoldTable::default();
         let mut tcp_sessions = TcpSessions::try_with_capacity(options.flow_capacity)?;
         let mut conntrack = R2oConntrackClient::open();
+        let no_conntrack_table = !std::path::Path::new("/proc/net/nf_conntrack").exists();
         if conntrack.is_none() {
-            eprintln!(
-                "r2o-datapath: ctnetlink недоступен, обнаружение зависания TCP и QUIC выключено"
-            );
+            if no_conntrack_table {
+                eprintln!(
+                    "r2o-datapath: таблица conntrack отсутствует; планы обычных пакетов используют исходный кортеж, UDP-фрагментация без NAT-контекста отклоняется"
+                );
+            } else {
+                eprintln!(
+                    "r2o-datapath: ctnetlink недоступен; обнаружение зависания выключено, планы кроме первого пакета и TCP после SYN-ACK будут отклоняться"
+                );
+            }
         }
+        let mut conntrack_gate =
+            R2oConntrackGate::with_table_state(options.flow_capacity.limit(), no_conntrack_table);
         let mut voice_sessions = R2oVoiceSessions::try_with_capacity(options.flow_capacity)?;
         let mut voice_trial_proofs = R2oVoiceTrialProofs::default();
         let mut quic_sessions = R2oQuicSessions::try_with_capacity(options.flow_capacity)?;
         let mut udp_sessions = R2oUdpSessions::with_capacity(options.flow_capacity)?;
+        voice_sessions.r2o_set_idle_timeout(options.r2o_idle_timeout);
+        quic_sessions.r2o_set_idle_timeout(options.r2o_idle_timeout);
+        udp_sessions.r2o_set_idle_timeout(options.r2o_idle_timeout);
         let mut udp_holds = R2oUdpHoldTable::new();
         let mut udp_deferred_verdicts = R2oUdpDeferredVerdicts::new();
         let mut udp_deferred_resends = R2oUdpDeferredResends::new();
@@ -478,6 +618,43 @@ mod app {
                 let released = holding.flush(Instant::now(), name_plans.revision(), true);
                 r2o_report_incomplete_captures(&mut holding);
                 release_accepting(&mut socket, &released);
+                for (ticket, pending) in pending_udp_releases.drain() {
+                    scheduled.cancel(ticket);
+                    r2o_cancel_delayed_udp_batch(
+                        &mut socket,
+                        &mut udp_follow,
+                        &mut udp_deferred_verdicts,
+                        &mut udp_deferred_resends,
+                        pending,
+                    );
+                }
+                let shutdown_at_ns = journal_timestamp(&journal_origin);
+                for (ticket, pending) in pending_applied.drain() {
+                    scheduled.cancel(ticket);
+                    let damaged = r2o_fail_pending_applied(
+                        &mut tcp_sessions,
+                        &mut flow_journal,
+                        shutdown_at_ns,
+                        &pending,
+                        r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_QUEUE,
+                    );
+                    if damaged {
+                        r2o_release_damaged_tcp_hold(
+                            &mut socket,
+                            &mut holding,
+                            pending.r2o_tcp_packet.as_deref(),
+                        );
+                    }
+                    if let Some(packet) = pending.r2o_udp_packet.as_deref() {
+                        udp_sessions.r2o_note_execution_failure(
+                            packet,
+                            pending.r2o_sends_done,
+                            pending.payload_on_wire,
+                            pending.original_spent,
+                            pending.original_taken,
+                        );
+                    }
+                }
                 r2o_release_udp_batches(
                     &mut socket,
                     raw.as_ref(),
@@ -555,11 +732,12 @@ mod app {
                 }
                 return Ok(());
             }
+            name_plans.r2o_set_send_maxlen(raw.as_ref().map_or(send_maxlen, RawSocket::maxlen));
             let now = Instant::now();
             if now >= next_session_sweep {
                 let reverse_queue_visible = options.reverse_queue_visible
                     && control.as_ref().is_some_and(ControlServer::is_connected);
-                tcp_sessions.expire_with_silent(now, Duration::from_secs(120), |event| {
+                tcp_sessions.expire_with_silent(now, options.r2o_idle_timeout, |event| {
                     let _ = send_tcp_silent_event(
                         &mut control,
                         &mut flow_journal,
@@ -727,7 +905,6 @@ mod app {
                     journal_peer_connected = false;
                     name_plans.clear_probes();
                     voice_trial_proofs.clear();
-                    pending_applied.clear();
                 }
             }
             send_pending_tcp_fin_retry(
@@ -795,6 +972,7 @@ mod app {
                         continue;
                     }
                     let now = Instant::now();
+                    let controller_probe = r2o_is_controller_probe(packet.mark, options.probe_mark);
                     let original_from_queue = r2o_datapath_payload(&packet, options.mark);
                     if options.mode == RuntimeMode::Apply
                         && let Some(bytes) = original_from_queue
@@ -841,6 +1019,7 @@ mod app {
                                 bytes,
                                 now,
                                 queue_hook,
+                                controller_probe,
                             )
                         })
                         .unwrap_or(true);
@@ -903,6 +1082,9 @@ mod app {
                             }
                         }
                     }
+                    if let Some(replay) = replay_packet.as_deref() {
+                        udp_sessions.r2o_mark_hold_replay_first(replay);
+                    }
                     let original = replay_packet.as_deref().or(original_from_queue);
                     let udp_admitted = original
                         .map(|bytes| {
@@ -912,6 +1094,7 @@ mod app {
                                     bytes,
                                     now,
                                     queue_hook,
+                                    controller_probe,
                                 )
                             } else {
                                 udp_admitted_from_queue
@@ -922,7 +1105,12 @@ mod app {
                         && udp_admitted
                         && let Some(bytes) = original
                     {
-                        let _ = decide_with_session(&mut tcp_sessions, &observe_plan, bytes);
+                        if controller_probe {
+                            let _ =
+                                decide_with_session_probe(&mut tcp_sessions, &observe_plan, bytes);
+                        } else {
+                            let _ = decide_with_session(&mut tcp_sessions, &observe_plan, bytes);
+                        }
                     }
                     let quic_hook = original
                         .filter(|_| udp_admitted)
@@ -938,25 +1126,30 @@ mod app {
                     let mut udp_quic_deny = false;
                     let decision = if let Some(bytes) = original.filter(|_| udp_admitted) {
                         if options.mode == RuntimeMode::Apply {
-                            scheduled.observe(bytes, now);
+                            if !controller_probe {
+                                scheduled.observe(bytes, now);
+                            }
                             pending_applied.retain(|ticket, _| scheduled.has_pending(*ticket));
-                            voice_sessions.observe_packet(bytes, now);
-                            observe_stun_packet(
-                                &mut udp_sessions,
-                                bytes,
-                                now,
-                                queue_hook,
-                                &mut flow_journal,
-                                &journal_origin,
-                            );
-                            if let Some(r2o_proof) = voice_trial_proofs.observe_response(bytes, now)
-                            {
-                                send_voice_proof_event(
-                                    &mut control,
+                            if !controller_probe {
+                                voice_sessions.observe_packet(bytes, now);
+                                observe_stun_packet(
+                                    &mut udp_sessions,
+                                    bytes,
+                                    now,
+                                    queue_hook,
                                     &mut flow_journal,
                                     &journal_origin,
-                                    &r2o_proof,
                                 );
+                                if let Some(r2o_proof) =
+                                    voice_trial_proofs.observe_response(bytes, now)
+                                {
+                                    send_voice_proof_event(
+                                        &mut control,
+                                        &mut flow_journal,
+                                        &journal_origin,
+                                        &r2o_proof,
+                                    );
+                                }
                             }
                         }
                         let family =
@@ -967,12 +1160,18 @@ mod app {
                                     .is_some_and(|family| name_plans.has_tls_candidate(family)));
                         let allow_http = options.mode == RuntimeMode::Apply
                             && family.is_some_and(|family| name_plans.has_http_candidate(family));
-                        let observe_tls = control.as_ref().is_some_and(ControlServer::is_connected)
-                            || r2o_snapshot_control
-                                .as_ref()
-                                .is_some_and(ControlServer::is_connected);
-                        let observe_http =
-                            control.as_ref().is_some_and(ControlServer::is_connected);
+                        let observe_tls = !controller_probe
+                            && (control.as_ref().is_some_and(ControlServer::is_connected)
+                                || r2o_snapshot_control
+                                    .as_ref()
+                                    .is_some_and(ControlServer::is_connected));
+                        let observe_http = !controller_probe
+                            && control.as_ref().is_some_and(ControlServer::is_connected);
+                        let tcp_flow_damaged = tcp_sessions.r2o_is_damaged_packet(bytes);
+                        if tcp_flow_damaged {
+                            let released = holding.r2o_release_damaged_flow(bytes);
+                            release_accepting(&mut socket, &released);
+                        }
                         let inspect_quic = observe_tls
                             || family.is_some_and(|family| name_plans.has_quic_candidate(family));
                         let quic_hello = prefetched_quic_hello.take().or_else(|| {
@@ -990,11 +1189,11 @@ mod app {
                                 quic_hook,
                             )
                             .unwrap_or(&plan);
-                        udp_quic_deny = selected_plan.qdeny != 0;
+                        udp_quic_deny = selected_plan.qdeny != 0 && !controller_probe;
                         if options.mode == RuntimeMode::Apply {
-                            if selected_plan.qdeny != 0 {
+                            if selected_plan.qdeny != 0 && !controller_probe {
                                 quic_sessions.suppress_packet(bytes);
-                            } else {
+                            } else if !controller_probe {
                                 observe_quic_packet(
                                     &mut quic_sessions,
                                     bytes,
@@ -1005,7 +1204,8 @@ mod app {
                                 );
                             }
                         }
-                        if observe_tls
+                        if !controller_probe
+                            && observe_tls
                             && let Some(body) =
                                 quic_hello.as_ref().and_then(|hello| hello.event_body())
                         {
@@ -1018,18 +1218,18 @@ mod app {
                                 None,
                             );
                         }
-                        let fed = holding.feed_observing(
-                            packet_id,
-                            bytes,
-                            now,
-                            HoldOptions {
-                                revision: name_plans.revision(),
-                                allow_tls,
-                                allow_http,
-                                observe_tls,
-                                observe_http,
-                            },
-                        );
+                        let hold_options = HoldOptions {
+                            revision: name_plans.revision(),
+                            allow_tls: allow_tls && !tcp_flow_damaged,
+                            allow_http: allow_http && !tcp_flow_damaged,
+                            observe_tls,
+                            observe_http,
+                        };
+                        let fed = if controller_probe {
+                            holding.feed_controller_probe(packet_id, bytes, now, hold_options)
+                        } else {
+                            holding.feed_observing(packet_id, bytes, now, hold_options)
+                        };
                         r2o_report_incomplete_captures(&mut holding);
                         release_accepting(&mut socket, &fed.released);
                         match fed.outcome {
@@ -1037,19 +1237,36 @@ mod app {
                                 if options.mode == RuntimeMode::Observe {
                                     PacketDecision::Accept
                                 } else {
+                                    let first_udp_packet =
+                                        udp_sessions.r2o_is_first_client_packet(bytes);
                                     r2o_udp_decide_once(
                                         &mut udp_sessions,
                                         &mut quic_sessions,
                                         selected_plan,
                                         bytes,
                                         || {
-                                            decide_with_tcp_session(
+                                            let decision = decide_with_tcp_session_mode(
                                                 &mut tcp_sessions,
                                                 selected_plan,
                                                 bytes,
                                                 &mut control,
                                                 &mut flow_journal,
                                                 &journal_origin,
+                                                controller_probe,
+                                                raw.as_ref().map_or(0, |raw| {
+                                                    raw.tls_route_segment_cap(bytes)
+                                                }),
+                                            );
+                                            let tcp_syn_ack_seen =
+                                                tcp_sessions.r2o_syn_ack_seen_for_packet(bytes);
+                                            guard_decision(
+                                                &mut conntrack_gate,
+                                                &mut conntrack,
+                                                bytes,
+                                                decision,
+                                                selected_plan.id,
+                                                first_udp_packet,
+                                                tcp_syn_ack_seen,
                                             )
                                         },
                                     )
@@ -1058,8 +1275,9 @@ mod app {
                             HoldOutcome::Waiting => continue,
                             HoldOutcome::Drop => PacketDecision::Drop,
                             HoldOutcome::Ready { ids, packet } => {
-                                if let Some(hello) = tcp_hello_from_packet(&packet)
-                                    .or_else(|| tcp_http_hello_from_packet(&packet))
+                                if !controller_probe
+                                    && let Some(hello) = tcp_hello_from_packet(&packet)
+                                        .or_else(|| tcp_http_hello_from_packet(&packet))
                                 {
                                     send_hello_event(
                                         &mut control,
@@ -1074,7 +1292,7 @@ mod app {
                                 let decision = if options.mode == RuntimeMode::Observe {
                                     PacketDecision::Accept
                                 } else {
-                                    decide_with_tcp_session(
+                                    let decision = decide_with_tcp_session_mode(
                                         &mut tcp_sessions,
                                         name_plans
                                             .select_with_quic_host(&packet, None)
@@ -1083,6 +1301,23 @@ mod app {
                                         &mut control,
                                         &mut flow_journal,
                                         &journal_origin,
+                                        controller_probe,
+                                        raw.as_ref()
+                                            .map_or(0, |raw| raw.tls_route_segment_cap(&packet)),
+                                    );
+                                    let selected = name_plans
+                                        .select_with_quic_host(&packet, None)
+                                        .unwrap_or(&plan);
+                                    let tcp_syn_ack_seen =
+                                        tcp_sessions.r2o_syn_ack_seen_for_packet(&packet);
+                                    guard_decision(
+                                        &mut conntrack_gate,
+                                        &mut conntrack,
+                                        &packet,
+                                        decision,
+                                        selected.id,
+                                        false,
+                                        tcp_syn_ack_seen,
                                     )
                                 };
                                 batch_ids = ids;
@@ -1090,25 +1325,41 @@ mod app {
                                 decision
                             }
                             HoldOutcome::Observed { hello } => {
-                                send_hello_event(
-                                    &mut control,
-                                    &mut r2o_snapshot_control,
-                                    &mut flow_journal,
-                                    journal_origin.elapsed().as_nanos().min(u64::MAX as u128)
-                                        as u64,
-                                    &hello.event_body(),
-                                    hello.shape_event_body(),
-                                );
+                                if !controller_probe {
+                                    send_hello_event(
+                                        &mut control,
+                                        &mut r2o_snapshot_control,
+                                        &mut flow_journal,
+                                        journal_origin.elapsed().as_nanos().min(u64::MAX as u128)
+                                            as u64,
+                                        &hello.event_body(),
+                                        hello.shape_event_body(),
+                                    );
+                                }
                                 if options.mode == RuntimeMode::Observe {
                                     PacketDecision::Accept
                                 } else {
-                                    decide_with_tcp_session(
+                                    let decision = decide_with_tcp_session_mode(
                                         &mut tcp_sessions,
                                         selected_plan,
                                         bytes,
                                         &mut control,
                                         &mut flow_journal,
                                         &journal_origin,
+                                        controller_probe,
+                                        raw.as_ref()
+                                            .map_or(0, |raw| raw.tls_route_segment_cap(bytes)),
+                                    );
+                                    let tcp_syn_ack_seen =
+                                        tcp_sessions.r2o_syn_ack_seen_for_packet(bytes);
+                                    guard_decision(
+                                        &mut conntrack_gate,
+                                        &mut conntrack,
+                                        bytes,
+                                        decision,
+                                        selected_plan.id,
+                                        false,
+                                        tcp_syn_ack_seen,
                                     )
                                 }
                             }
@@ -1117,9 +1368,11 @@ mod app {
                                 portal,
                                 redirect,
                             } => {
-                                response_candidate = Some(event);
-                                portal_candidate = portal;
-                                redirect_candidate = redirect;
+                                if !controller_probe {
+                                    response_candidate = Some(event);
+                                    portal_candidate = portal;
+                                    redirect_candidate = redirect;
+                                }
                                 PacketDecision::Accept
                             }
                         }
@@ -1150,8 +1403,9 @@ mod app {
                             .tcp_segment(packet)
                             .map(|segment| segment.sequence)
                     });
-                    if let (PacketDecision::Refused { plan_id }, Some(packet)) =
-                        (&decision, tx_original)
+                    if !controller_probe
+                        && let (PacketDecision::Refused { plan_id }, Some(packet)) =
+                            (&decision, tx_original)
                         && let Some(key) =
                             r2o_datapath::control::flow_journal_key_for_packet(packet)
                     {
@@ -1173,25 +1427,35 @@ mod app {
                             binding,
                         );
                     }
-                    let mut applied_candidate = if matches!(
+                    let decision_execution_id = if matches!(
                         &decision,
                         PacketDecision::Replace(_) | PacketDecision::Transmit { .. }
-                    ) {
-                        let event = tx_original.and_then(|bytes| {
-                            name_plans.applied_event_for_packet_at_hook(
-                                bytes,
-                                next_execution_id,
-                                quic_hook,
-                            )
-                        });
-                        if event.is_some() {
-                            next_execution_id = next_execution_id.wrapping_add(1).max(1);
-                        }
-                        event
+                    ) && tx_original.is_some()
+                    {
+                        let execution_id = next_execution_id;
+                        next_execution_id = next_execution_id.wrapping_add(1).max(1);
+                        Some(execution_id)
                     } else {
                         None
                     };
-                    if let Some(event) = applied_candidate.as_ref() {
+                    let tcp_execution =
+                        tx_original
+                            .zip(decision_execution_id)
+                            .and_then(|(packet, id)| {
+                                tcp_sessions
+                                    .r2o_begin_execution(packet, id)
+                                    .map(|key| R2oTcpExecution { key, id })
+                            });
+                    let mut applied_candidate = decision_execution_id.and_then(|execution_id| {
+                        tx_original.and_then(|bytes| {
+                            name_plans.applied_event_for_packet_at_hook(
+                                bytes,
+                                execution_id,
+                                quic_hook,
+                            )
+                        })
+                    });
+                    if !controller_probe && let Some(event) = applied_candidate.as_ref() {
                         flow_journal
                             .record_plan_prepared(journal_timestamp(&journal_origin), event);
                     }
@@ -1258,6 +1522,23 @@ mod app {
                                     });
                                 if !late_tail_handled {
                                     send_verdicts(&mut socket, ids, NF_ACCEPT, false)?;
+                                    if options.mode == RuntimeMode::Apply
+                                        && !controller_probe
+                                        && udp_replay.is_none()
+                                        && let Some(bytes) = original
+                                    {
+                                        r2o_udp_mark_plain_pass(
+                                            &udp_sessions,
+                                            &mut udp_follow,
+                                            &route_gate,
+                                            options.probe_mark,
+                                            packet.mark.unwrap_or(0),
+                                            bytes,
+                                            now,
+                                            udp_receive_seq,
+                                            raw.is_some(),
+                                        );
+                                    }
                                 }
                                 response_delivered = true;
                             }
@@ -1282,6 +1563,23 @@ mod app {
                                     });
                                 if !late_tail_handled {
                                     send_verdicts(&mut socket, ids, NF_ACCEPT, false)?;
+                                    if options.mode == RuntimeMode::Apply
+                                        && !controller_probe
+                                        && udp_replay.is_none()
+                                        && let Some(bytes) = original
+                                    {
+                                        r2o_udp_mark_plain_pass(
+                                            &udp_sessions,
+                                            &mut udp_follow,
+                                            &route_gate,
+                                            options.probe_mark,
+                                            packet.mark.unwrap_or(0),
+                                            bytes,
+                                            now,
+                                            udp_receive_seq,
+                                            raw.is_some(),
+                                        );
+                                    }
                                 }
                                 response_delivered = true;
                             }
@@ -1315,12 +1613,35 @@ mod app {
                                                 false,
                                             );
                                         }
+                                        let damaged = r2o_finish_tcp_execution(
+                                            &mut tcp_sessions,
+                                            tcp_execution,
+                                            false,
+                                            false,
+                                            false,
+                                            false,
+                                        );
+                                        if damaged {
+                                            r2o_release_damaged_tcp_hold(
+                                                &mut socket,
+                                                &mut holding,
+                                                tx_original,
+                                            );
+                                        }
                                         response_delivered = true;
                                     } else {
                                         execution_succeeded = true;
                                     }
                                 } else {
                                     send_verdicts(&mut socket, ids, NF_ACCEPT, false)?;
+                                    r2o_finish_tcp_execution(
+                                        &mut tcp_sessions,
+                                        tcp_execution,
+                                        false,
+                                        false,
+                                        false,
+                                        false,
+                                    );
                                     response_delivered = true;
                                 }
                             }
@@ -1431,7 +1752,10 @@ mod app {
                                             let r2o_is_udp =
                                                 r2k_core::packet::PacketView::parse(tx_original)
                                                     .is_some_and(|view| view.protocol == 17);
-                                            if event.is_some() || r2o_is_udp {
+                                            if event.is_some()
+                                                || r2o_is_udp
+                                                || tcp_execution.is_some()
+                                            {
                                                 let voice_request = event
                                                     .as_ref()
                                                     .is_some_and(|event| {
@@ -1445,14 +1769,16 @@ mod app {
                                                     ticket,
                                                     PendingApplied {
                                                         event,
+                                                        tcp_execution,
                                                         sequence: tx_sequence,
                                                         voice_request,
                                                         r2o_udp_packet,
+                                                        r2o_tcp_packet: tcp_execution
+                                                            .map(|_| tx_original.to_vec()),
                                                         r2o_sends_done,
                                                         payload_on_wire,
-                                                        r2o_original_spent: !udp_batch_deferred,
-                                                        r2o_original_taken: fate
-                                                            == OriginalFate::Drop,
+                                                        original_spent: !udp_batch_deferred,
+                                                        original_taken: fate == OriginalFate::Drop,
                                                     },
                                                 );
                                             }
@@ -1462,6 +1788,8 @@ mod app {
                                         code,
                                         r2o_sends_done,
                                         payload_on_wire,
+                                        original_spent,
+                                        original_taken,
                                     } => {
                                         if let Some(batch) = udp_replay.as_ref() {
                                             let pending = PendingUdpRelease {
@@ -1496,7 +1824,27 @@ mod app {
                                                 journal_timestamp(&journal_origin),
                                                 event,
                                                 code,
-                                                payload_on_wire,
+                                                r2o_execution_is_damaged(
+                                                    event.key[37],
+                                                    payload_on_wire,
+                                                    original_spent,
+                                                    original_taken,
+                                                ),
+                                            );
+                                        }
+                                        let damaged = r2o_finish_tcp_execution(
+                                            &mut tcp_sessions,
+                                            tcp_execution,
+                                            false,
+                                            payload_on_wire,
+                                            original_spent,
+                                            original_taken,
+                                        );
+                                        if damaged {
+                                            r2o_release_damaged_tcp_hold(
+                                                &mut socket,
+                                                &mut holding,
+                                                Some(tx_original),
                                             );
                                         }
                                         udp_sessions.r2o_note_execution_failure(
@@ -1527,7 +1875,7 @@ mod app {
                             udp_receive_seq,
                         );
                     }
-                    if let Some(mut event) = response_candidate {
+                    if !controller_probe && let Some(mut event) = response_candidate {
                         if !response_delivered {
                             holding.reject_http_response(&event.key, event.request_no);
                             event.code = 2;
@@ -1538,11 +1886,21 @@ mod app {
                             send_http_portal_event(&mut control, &portal);
                         }
                     }
+                    if execution_succeeded {
+                        r2o_finish_tcp_execution(
+                            &mut tcp_sessions,
+                            tcp_execution,
+                            true,
+                            false,
+                            false,
+                            false,
+                        );
+                    }
                     if execution_succeeded && let Some(event) = applied_candidate {
-                        if let Some(packet) = tx_original {
+                        if !controller_probe && let Some(packet) = tx_original {
                             voice_trial_proofs.note_applied(packet, &event, Instant::now());
                         }
-                        if let Some(sequence) = tx_sequence {
+                        if !controller_probe && let Some(sequence) = tx_sequence {
                             holding.note_http_execution(sequence, &event);
                         }
                         send_applied_event(
@@ -1666,12 +2024,14 @@ mod app {
             protocol_family: libc::AF_INET as u16,
             mode: RuntimeMode::Apply,
             mark: 0,
+            interface: None,
             probe_mark: 0,
             only_mark: None,
             copy_range: u16::MAX as u32,
             queue_len: 1024,
             journal_capacity: 256,
             flow_capacity: R2oFlowCapacity::default(),
+            r2o_idle_timeout: Duration::from_secs(120),
             receive_buffer: 4 * 1024 * 1024,
             control_path: None,
             controller_only: false,
@@ -1704,6 +2064,10 @@ mod app {
                     options.flow_capacity = R2oFlowCapacity::from_requested(requested as usize)
                         .ok_or_else(|| invalid("--r2o-flow-capacity должен быть больше нуля"))?;
                 }
+                "--idle" => {
+                    let seconds: u32 = parse_value(arguments, &mut cursor, option)?;
+                    options.r2o_idle_timeout = Duration::from_secs(u64::from(seconds));
+                }
                 "--family" => {
                     options.protocol_family = match next_value(arguments, &mut cursor, option)? {
                         "ipv4" | "4" => libc::AF_INET as u16,
@@ -1721,6 +2085,9 @@ mod app {
                 "--mark" => {
                     options.mark = parse_mark(next_value(arguments, &mut cursor, option)?)
                         .ok_or_else(|| invalid("неверное значение --mark"))?;
+                }
+                "--iface" => {
+                    options.interface = Some(next_value(arguments, &mut cursor, option)?.into());
                 }
                 "--probe-mark" => {
                     let value = next_value(arguments, &mut cursor, option)?;
@@ -1833,10 +2200,12 @@ mod app {
   --controller-only  запуск без статического плана; планы поступают через control socket
   --r2o-udp-reverse-visible  обратные UDP-пакеты проходят через ту же NFQUEUE
   --queue N          номер очереди NFQUEUE
+  --idle SEC         срок удаления молчащего состояния потока (по умолчанию 120; 0 — без ожидания)
   --r2o-flow-capacity N число слотов TCP/UDP (по умолчанию 2048)
   --family ipv4|ipv6 протокол очереди (по умолчанию ipv4)
   --mode observe|apply пропускать пакеты или исполнять планы (по умолчанию apply)
   --mark N           ненулевая метка для raw-send и защиты от повторной обработки
+  --iface NAME       интерфейс, чей MTU ограничивает длину посылки
   --probe-mark N     метка зондов контроллера, исключаемая из route-gate
   --only-mark M[/K]|none  обслуживать только потоки с меткой выбранной политики
   --copy-range N     размер копии пакета (64..65535)
@@ -1954,6 +2323,10 @@ mod app {
             && (plan.transport == 6
                 || plan.proto == PROTO_VOICE
                 || plan.r2k_is_quic_ipfrag_plan()
+                || plan.r2k_is_quic_clearance_probe()
+                || plan.r2k_is_quic_ttl_probe()
+                || plan.r2k_is_quic_fallback_ttl_probe()
+                || plan.r2k_is_quic_fake_probe()
                 || has_control)
     }
 
@@ -2188,6 +2561,7 @@ mod app {
         }
     }
 
+    #[cfg(test)]
     fn decide_with_tcp_session(
         sessions: &mut TcpSessions,
         plan: &Plan,
@@ -2196,11 +2570,43 @@ mod app {
         flow_journal: &mut R2oFlowJournal,
         journal_origin: &Instant,
     ) -> PacketDecision {
-        let decision = decide_with_session(sessions, plan, packet);
+        decide_with_tcp_session_mode(
+            sessions,
+            plan,
+            packet,
+            control,
+            flow_journal,
+            journal_origin,
+            false,
+            0,
+        )
+    }
+
+    fn decide_with_tcp_session_mode(
+        sessions: &mut TcpSessions,
+        plan: &Plan,
+        packet: &[u8],
+        control: &mut Option<ControlServer>,
+        flow_journal: &mut R2oFlowJournal,
+        journal_origin: &Instant,
+        controller_probe: bool,
+        tcp_segment_cap: usize,
+    ) -> PacketDecision {
+        if controller_probe && plan.qdeny != 0 {
+            return PacketDecision::Accept;
+        }
+        let decision = if controller_probe {
+            decide_with_session_probe_mtu(sessions, plan, packet, tcp_segment_cap)
+        } else {
+            decide_with_session_mtu(sessions, plan, packet, tcp_segment_cap)
+        };
         let at_ns = journal_timestamp(journal_origin);
         for event in sessions.take_tcp_exchange_events() {
-            flow_journal.record_tcp_exchange(at_ns, &event);
-            if let Some(clean) = r2o_clean_handshake_event(&event)
+            if !controller_probe {
+                flow_journal.record_tcp_exchange(at_ns, &event);
+            }
+            if !controller_probe
+                && let Some(clean) = r2o_clean_handshake_event(&event)
                 && let Some(body) = clean.event_body()
             {
                 send_observed_control_event(
@@ -2214,8 +2620,11 @@ mod app {
             }
         }
         for event in sessions.take_tcp_rst_events() {
-            flow_journal.record_tcp_rst(at_ns, &event);
-            if let Some(early_rst) = r2o_tcp_early_rst_event(&event)
+            if !controller_probe {
+                flow_journal.record_tcp_rst(at_ns, &event);
+            }
+            if !controller_probe
+                && let Some(early_rst) = r2o_tcp_early_rst_event(&event)
                 && let Some(body) = early_rst.event_body()
             {
                 send_observed_control_event(
@@ -2229,12 +2638,13 @@ mod app {
             }
         }
         for event in sessions.take_tcp_repeat_events() {
-            if let Some(body) = (R2oTcpRepeatEvent {
-                key: event.key,
-                client_is_low: event.client_is_low,
-                planned: event.planned,
-            })
-            .event_body()
+            if !controller_probe
+                && let Some(body) = (R2oTcpRepeatEvent {
+                    key: event.key,
+                    client_is_low: event.client_is_low,
+                    planned: event.planned,
+                })
+                .event_body()
             {
                 send_observed_control_event(
                     control,
@@ -2247,9 +2657,11 @@ mod app {
             }
         }
         for event in sessions.take_tcp_rst_cut_events() {
-            flow_journal.record_tcp_rst_cut(at_ns, &event);
+            if !controller_probe {
+                flow_journal.record_tcp_rst_cut(at_ns, &event);
+            }
             let signal = r2o_tcp_rst_cut_signal_event(&event);
-            if let Some(body) = signal.event_body() {
+            if !controller_probe && let Some(body) = signal.event_body() {
                 send_observed_control_event(
                     control,
                     flow_journal,
@@ -2328,7 +2740,7 @@ mod app {
 
     #[cfg(test)]
     fn udp_packet_admitted(sessions: &mut R2oUdpSessions, packet: &[u8], now: Instant) -> bool {
-        r2o_udp_packet_admitted_at_hook(sessions, packet, now, None)
+        r2o_udp_packet_admitted_at_hook(sessions, packet, now, None, false)
     }
 
     fn r2o_udp_packet_admitted_at_hook(
@@ -2336,9 +2748,14 @@ mod app {
         packet: &[u8],
         now: Instant,
         hook: Option<u8>,
+        controller_probe: bool,
     ) -> bool {
         !r2k_core::packet::PacketView::parse(packet).is_some_and(|view| view.protocol == 17)
-            || sessions.r2o_observe_packet_at_hook(packet, now, hook)
+            || if controller_probe {
+                sessions.r2o_observe_probe_packet_at_hook(packet, now, hook)
+            } else {
+                sessions.r2o_observe_packet_at_hook(packet, now, hook)
+            }
     }
 
     fn r2o_udp_decide_once(
@@ -2377,6 +2794,10 @@ mod app {
         packet
             .payload
             .filter(|_| !packet.truncated && !(mark != 0 && packet.mark == Some(mark)))
+    }
+
+    fn r2o_is_controller_probe(mark: Option<u32>, probe_mark: u32) -> bool {
+        probe_mark != 0 && mark == Some(probe_mark)
     }
 
     fn r2o_packet_route_skip(
@@ -2452,7 +2873,7 @@ mod app {
         };
         flow_journal.record_applied(at_ns, event);
         if event.key[37] == 6 {
-            sessions.mark_plan_done(&event.key);
+            sessions.r2o_mark_plan_done_for_execution(&event.key, event.execution_id);
         }
         let Some(control) = control.as_mut() else {
             return;
@@ -2572,7 +2993,19 @@ mod app {
             code: u8,
             r2o_sends_done: bool,
             payload_on_wire: bool,
+            original_spent: bool,
+            original_taken: bool,
         },
+    }
+
+    fn r2o_first_oversized_emit(
+        packets: &[WirePacket],
+        mut route_maxlen: impl FnMut(&[u8]) -> usize,
+    ) -> Option<(usize, usize)> {
+        packets.iter().find_map(|packet| {
+            let limit = route_maxlen(&packet.packet);
+            (packet.packet.len() > limit).then_some((packet.packet.len(), limit))
+        })
     }
 
     fn transmit_many(
@@ -2593,8 +3026,25 @@ mod app {
                 code: r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_SEND,
                 r2o_sends_done: false,
                 payload_on_wire: false,
+                original_spent: !packet_ids.is_empty(),
+                original_taken: false,
             });
         };
+        if let Some((packet_len, route_maxlen)) =
+            r2o_first_oversized_emit(&packets, |packet| raw.packet_route_maxlen(packet))
+        {
+            eprintln!(
+                "r2o-datapath: план отклонён до отправки: пакет {packet_len} байт превышает предел маршрута {route_maxlen}"
+            );
+            release_many(queue, packet_ids, OriginalFate::Pass, false)?;
+            return Ok(TransmissionOutcome::Failed {
+                code: r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_TOO_LONG,
+                r2o_sends_done: false,
+                payload_on_wire: false,
+                original_spent: !packet_ids.is_empty(),
+                original_taken: false,
+            });
+        }
         let now = Instant::now();
         let mut due = now;
         let mut first_delayed = packets.len();
@@ -2608,6 +3058,8 @@ mod app {
                     code: r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_TOO_LONG,
                     r2o_sends_done: false,
                     payload_on_wire: false,
+                    original_spent: !packet_ids.is_empty(),
+                    original_taken: false,
                 });
             };
             due = next_due;
@@ -2626,6 +3078,8 @@ mod app {
                     code: r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_QUEUE,
                     r2o_sends_done: false,
                     payload_on_wire: false,
+                    original_spent: !packet_ids.is_empty(),
+                    original_taken: false,
                 });
             };
             Some(ticket)
@@ -2658,6 +3112,8 @@ mod app {
                     code: r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_TOO_LONG,
                     r2o_sends_done,
                     payload_on_wire,
+                    original_spent: !packet_ids.is_empty(),
+                    original_taken: false,
                 });
             };
             due = next_due;
@@ -2681,6 +3137,8 @@ mod app {
                         code: r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_SEND,
                         r2o_sends_done,
                         payload_on_wire,
+                        original_spent: !packet_ids.is_empty(),
+                        original_taken: payload_committed,
                     });
                 }
                 r2o_sends_done = true;
@@ -2697,6 +3155,8 @@ mod app {
                     code: r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_QUEUE,
                     r2o_sends_done,
                     payload_on_wire,
+                    original_spent: !packet_ids.is_empty(),
+                    original_taken: false,
                 });
             };
             let kind = emitted.kind;
@@ -2717,6 +3177,8 @@ mod app {
                     code: r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_QUEUE,
                     r2o_sends_done,
                     payload_on_wire,
+                    original_spent: !packet_ids.is_empty(),
+                    original_taken: payload_committed,
                 });
             }
             payload_committed |= kind == EmitKind::Payload;
@@ -2749,6 +3211,17 @@ mod app {
         journal_origin: &Instant,
     ) {
         while let Some((emitted, ticket)) = scheduled.pop_due(Instant::now()) {
+            if pending_applied
+                .get(&ticket)
+                .and_then(|pending| pending.tcp_execution)
+                .is_some_and(|execution| {
+                    !tcp_sessions.r2o_send_pending(&execution.key, execution.id)
+                })
+            {
+                scheduled.cancel(ticket);
+                pending_applied.remove(&ticket);
+                continue;
+            }
             let Some(raw) = raw else {
                 eprintln!("r2o-datapath: отложенный emit отменён без raw socket");
                 scheduled.cancel(ticket);
@@ -2762,12 +3235,18 @@ mod app {
                     );
                 }
                 if let Some(pending) = pending_applied.remove(&ticket) {
-                    if let Some(event) = pending.event.as_ref() {
-                        flow_journal.record_execution_failure(
-                            journal_timestamp(journal_origin),
-                            event,
-                            r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_SEND,
-                            pending.payload_on_wire,
+                    let damaged = r2o_fail_pending_applied(
+                        tcp_sessions,
+                        flow_journal,
+                        journal_timestamp(journal_origin),
+                        &pending,
+                        r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_SEND,
+                    );
+                    if damaged {
+                        r2o_release_damaged_tcp_hold(
+                            queue,
+                            holding,
+                            pending.r2o_tcp_packet.as_deref(),
                         );
                     }
                     if let Some(packet) = pending.r2o_udp_packet.as_deref() {
@@ -2775,8 +3254,8 @@ mod app {
                             packet,
                             pending.r2o_sends_done,
                             pending.payload_on_wire,
-                            pending.r2o_original_spent,
-                            pending.r2o_original_taken,
+                            pending.original_spent,
+                            pending.original_taken,
                         );
                     }
                 }
@@ -2795,12 +3274,18 @@ mod app {
                     );
                 }
                 if let Some(pending) = pending_applied.remove(&ticket) {
-                    if let Some(event) = pending.event.as_ref() {
-                        flow_journal.record_execution_failure(
-                            journal_timestamp(journal_origin),
-                            event,
-                            r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_SEND,
-                            pending.payload_on_wire,
+                    let damaged = r2o_fail_pending_applied(
+                        tcp_sessions,
+                        flow_journal,
+                        journal_timestamp(journal_origin),
+                        &pending,
+                        r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_SEND,
+                    );
+                    if damaged {
+                        r2o_release_damaged_tcp_hold(
+                            queue,
+                            holding,
+                            pending.r2o_tcp_packet.as_deref(),
                         );
                     }
                     if let Some(packet) = pending.r2o_udp_packet.as_deref() {
@@ -2808,8 +3293,8 @@ mod app {
                             packet,
                             pending.r2o_sends_done,
                             pending.payload_on_wire,
-                            pending.r2o_original_spent,
-                            pending.r2o_original_taken,
+                            pending.original_spent,
+                            pending.original_taken,
                         );
                     }
                 }
@@ -2831,6 +3316,14 @@ mod app {
                 if !scheduled.has_pending(ticket)
                     && let Some(pending) = pending_applied.remove(&ticket)
                 {
+                    r2o_finish_tcp_execution(
+                        tcp_sessions,
+                        pending.tcp_execution,
+                        true,
+                        false,
+                        false,
+                        false,
+                    );
                     if let Some(event) = pending.event {
                         if let Some(sequence) = pending.sequence {
                             holding.note_http_execution(sequence, &event);
@@ -2870,21 +3363,23 @@ mod app {
             if scheduled.has_pending(*ticket) {
                 true
             } else {
-                if let Some(event) = pending.event.as_ref() {
-                    flow_journal.record_execution_failure(
-                        at_ns,
-                        event,
-                        r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_QUEUE,
-                        pending.payload_on_wire,
-                    );
+                let damaged = r2o_fail_pending_applied(
+                    tcp_sessions,
+                    flow_journal,
+                    at_ns,
+                    pending,
+                    r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_QUEUE,
+                );
+                if damaged {
+                    r2o_release_damaged_tcp_hold(queue, holding, pending.r2o_tcp_packet.as_deref());
                 }
                 if let Some(packet) = pending.r2o_udp_packet.as_deref() {
                     udp_sessions.r2o_note_execution_failure(
                         packet,
                         pending.r2o_sends_done,
                         pending.payload_on_wire,
-                        pending.r2o_original_spent,
-                        pending.r2o_original_taken,
+                        pending.original_spent,
+                        pending.original_taken,
                     );
                 }
                 false
@@ -2947,19 +3442,23 @@ mod app {
     #[cfg(test)]
     mod tests {
         use super::{
-            ControlServer, NF_ACCEPT, NF_DROP, OriginalFate, PacketDecision, Plan, R2oFlowJournal,
-            R2oQuicSessions, RuntimeMode, TcpSessions, format_journal_details, format_journal_key,
-            handle_control_command, load_plan, needs_raw_socket, observe_quic_packet,
-            observe_stun_packet, parse_options, r2o_clean_handshake_event, r2o_datapath_payload,
+            ControlServer, EmitKind, NF_ACCEPT, NF_DROP, OriginalFate, PacketDecision,
+            PendingApplied, Plan, R2oFlowJournal, R2oQuicSessions, R2oTcpExecution, RuntimeMode,
+            TcpSessions, WirePacket, decide_with_tcp_session_mode, format_journal_details,
+            format_journal_key, handle_control_command, load_plan, needs_raw_socket,
+            observe_quic_packet, observe_stun_packet, parse_options, r2o_clean_handshake_event,
+            r2o_datapath_payload, r2o_execution_is_damaged, r2o_fail_pending_applied,
+            r2o_finish_tcp_execution, r2o_first_oversized_emit, r2o_is_controller_probe,
             r2o_packet_route_skip, r2o_tcp_early_rst_event, r2o_tcp_rst_cut_signal_event,
-            r2o_udp_decide_once, r2o_udp_packet_admitted_at_hook, release_many_with, release_with,
-            send_applied_event, send_hello_event, send_journal_snapshot, send_journal_updates,
-            udp_packet_admitted,
+            r2o_udp_decide_once, r2o_udp_mark_plain_pass, r2o_udp_packet_admitted_at_hook,
+            release_many_with, release_with, send_applied_event, send_hello_event,
+            send_journal_snapshot, send_journal_updates, udp_packet_admitted,
         };
         use r2k_core::control::{
             KEY_LEN, R2oTcpCleanHandshakeEvent, R2oTcpEarlyRstEvent, R2oTcpRstCutSignalEvent,
         };
         use r2k_core::stun::binding_request;
+        use r2o_datapath::engine::decide_with_session;
         use r2o_datapath::engine::{R2oTcpExchangeEvent, R2oTcpRstCutEvent, R2oTcpRstEvent};
         use r2o_datapath::netlink::{
             QueuePacket, R2O_NF_INET_FORWARD, R2O_NF_INET_LOCAL_OUT, R2O_NF_INET_POST_ROUTING,
@@ -2967,8 +3466,213 @@ mod app {
         use r2o_datapath::r2o_route::{
             R2O_ROUTE_OTHER_DEV, R2oRouteFamily, R2oRouteGate, R2oRoutedFlows,
         };
+        use r2o_datapath::r2o_udp_hold::R2oUdpFollowTable;
         use r2o_datapath::r2o_udp_sessions::R2oUdpSessions;
         use std::io;
+
+        const QUIC_INITIAL: &[u8] =
+            include_bytes!("../../r2k-core/tests/fixtures/quic_v1_initial.bin");
+
+        #[test]
+        fn учёт_повреждения_исполнения_различает_tcp_и_udp() {
+            assert!(r2o_execution_is_damaged(6, false, true, true));
+            assert!(!r2o_execution_is_damaged(17, false, true, true));
+            assert!(r2o_execution_is_damaged(17, true, false, false));
+            assert!(!r2o_execution_is_damaged(6, false, true, false));
+        }
+
+        #[test]
+        fn tcp_отказ_при_снятом_оригинале_повреждает_поток() {
+            fn syn_packet() -> Vec<u8> {
+                let mut packet = vec![0; 40];
+                packet[0] = 0x45;
+                packet[2..4].copy_from_slice(&40_u16.to_be_bytes());
+                packet[8] = 64;
+                packet[9] = 6;
+                packet[12..16].copy_from_slice(&[192, 0, 2, 10]);
+                packet[16..20].copy_from_slice(&[198, 51, 100, 20]);
+                packet[20..22].copy_from_slice(&41000_u16.to_be_bytes());
+                packet[22..24].copy_from_slice(&443_u16.to_be_bytes());
+                packet[24..28].copy_from_slice(&700_u32.to_be_bytes());
+                packet[32] = 0x50;
+                packet[33] = 0x02;
+                packet
+            }
+
+            let packet = syn_packet();
+            let mut damaged = TcpSessions::default();
+            assert_eq!(
+                decide_with_session(&mut damaged, &Plan::default(), &packet),
+                PacketDecision::Accept,
+            );
+            let key = damaged.r2o_begin_execution(&packet, 71).unwrap();
+            r2o_finish_tcp_execution(
+                &mut damaged,
+                Some(R2oTcpExecution { key, id: 71 }),
+                false,
+                false,
+                true,
+                true,
+            );
+            assert!(damaged.r2o_is_damaged_packet(&packet));
+
+            let mut intact = TcpSessions::default();
+            decide_with_session(&mut intact, &Plan::default(), &packet);
+            let key = intact.r2o_begin_execution(&packet, 72).unwrap();
+            assert!(intact.r2o_send_pending(&key, 72));
+            assert!(!r2o_finish_tcp_execution(
+                &mut intact,
+                Some(R2oTcpExecution { key, id: 72 }),
+                false,
+                false,
+                true,
+                false,
+            ));
+            assert!(!intact.r2o_is_damaged_packet(&packet));
+            assert!(!intact.r2o_send_pending(&key, 72));
+            assert!(!intact.r2o_mark_plan_done_for_execution(&key, 72));
+        }
+
+        #[test]
+        fn завершение_отмечает_и_журналирует_незаконченный_tcp_план_один_раз() {
+            let mut packet = vec![0; 40];
+            packet[0] = 0x45;
+            packet[2..4].copy_from_slice(&40_u16.to_be_bytes());
+            packet[8] = 64;
+            packet[9] = 6;
+            packet[12..16].copy_from_slice(&[192, 0, 2, 10]);
+            packet[16..20].copy_from_slice(&[198, 51, 100, 20]);
+            packet[20..22].copy_from_slice(&41000_u16.to_be_bytes());
+            packet[22..24].copy_from_slice(&443_u16.to_be_bytes());
+            packet[24..28].copy_from_slice(&700_u32.to_be_bytes());
+            packet[32] = 0x50;
+            packet[33] = 0x02;
+
+            let mut sessions = TcpSessions::default();
+            decide_with_session(&mut sessions, &Plan::default(), &packet);
+            let key = sessions.r2o_begin_execution(&packet, 77).unwrap();
+            let event = r2k_core::control::AppliedEvent {
+                key,
+                plan_id: [0xa5; 16],
+                trial_id: [0x5a; 16],
+                execution_id: 77,
+                binding: r2k_core::control::BindingContext {
+                    generation: 9,
+                    kind: 1,
+                    family: 4,
+                    shape: 2,
+                    temporary: true,
+                    epoch: [0x3c; 16],
+                },
+            };
+            let pending = PendingApplied {
+                event: Some(event),
+                tcp_execution: Some(R2oTcpExecution { key, id: 77 }),
+                sequence: None,
+                voice_request: None,
+                r2o_udp_packet: None,
+                r2o_tcp_packet: Some(packet),
+                r2o_sends_done: false,
+                payload_on_wire: false,
+                original_spent: true,
+                original_taken: true,
+            };
+            let mut journal = R2oFlowJournal::with_capacity(4).unwrap();
+
+            assert!(r2o_fail_pending_applied(
+                &mut sessions,
+                &mut journal,
+                123,
+                &pending,
+                r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_QUEUE,
+            ));
+            assert_eq!(journal.count(), 2);
+            assert_eq!(
+                journal.get(0).unwrap().kind,
+                r2o_datapath::flow_journal::R2oFlowJournalKind::PlanUnsent,
+            );
+            assert_eq!(
+                journal.get(1).unwrap().kind,
+                r2o_datapath::flow_journal::R2oFlowJournalKind::PlanDamaged,
+            );
+            assert!(!r2o_fail_pending_applied(
+                &mut sessions,
+                &mut journal,
+                124,
+                &pending,
+                r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_QUEUE,
+            ));
+            assert_eq!(journal.count(), 2);
+        }
+
+        #[test]
+        fn метка_зонда_требует_ненулевого_точного_совпадения() {
+            assert!(!r2o_is_controller_probe(None, 0x2e));
+            assert!(!r2o_is_controller_probe(Some(0x2e), 0));
+            assert!(r2o_is_controller_probe(Some(0x2e), 0x2e));
+            assert!(!r2o_is_controller_probe(Some(0x2f), 0x2e));
+        }
+
+        #[test]
+        fn проверяет_все_посылки_по_маршрутному_mtu_до_первой_отправки() {
+            let packets = [
+                WirePacket {
+                    packet: vec![1; 100],
+                    kind: EmitKind::Fake,
+                    delay_us: 0,
+                },
+                WirePacket {
+                    packet: vec![2; 1501],
+                    kind: EmitKind::Payload,
+                    delay_us: 0,
+                },
+            ];
+            let mut checked = 0;
+            assert_eq!(
+                r2o_first_oversized_emit(&packets, |_| {
+                    checked += 1;
+                    1500
+                }),
+                Some((1501, 1500))
+            );
+            assert_eq!(checked, 2);
+        }
+
+        #[test]
+        fn quicdeny_пропускает_проверочный_initial_контроллера() {
+            let mut packet = udp_packet([192, 0, 2, 10], [198, 51, 100, 20], 50_501, 443);
+            packet.extend_from_slice(QUIC_INITIAL);
+            let ip_length = packet.len() as u16;
+            packet[2..4].copy_from_slice(&ip_length.to_be_bytes());
+            packet[24..26].copy_from_slice(&(8_u16 + QUIC_INITIAL.len() as u16).to_be_bytes());
+            let plan = Plan {
+                transport: 17,
+                proto: 2,
+                qdeny: 1,
+                ..Plan::default()
+            };
+            assert!(r2k_core::quic::is_authenticated_initial(QUIC_INITIAL));
+
+            let mut sessions = TcpSessions::default();
+            let mut control = None;
+            let mut journal = R2oFlowJournal::with_capacity(4).unwrap();
+            let origin = std::time::Instant::now();
+            assert_eq!(
+                decide_with_tcp_session_mode(
+                    &mut sessions,
+                    &plan,
+                    &packet,
+                    &mut control,
+                    &mut journal,
+                    &origin,
+                    true,
+                    0,
+                ),
+                PacketDecision::Accept
+            );
+            assert!(sessions.is_empty());
+            assert_eq!(journal.count(), 0);
+        }
 
         #[test]
         fn чистым_событием_считается_только_tcp_serverhello_без_плана() {
@@ -3129,6 +3833,7 @@ mod app {
                     &packet,
                     now + Duration::from_millis(index),
                     hook,
+                    false,
                 ));
             }
             assert!(r2o_udp_packet_admitted_at_hook(
@@ -3136,6 +3841,7 @@ mod app {
                 &packet,
                 now + Duration::from_millis(7),
                 hook,
+                false,
             ));
             assert!(sessions.r2o_begin_hold(&packet));
 
@@ -3144,14 +3850,90 @@ mod app {
                 &packet,
                 now + Duration::from_millis(8),
                 hook,
+                false,
             ));
             assert!(r2o_udp_packet_admitted_at_hook(
                 &mut sessions,
                 &packet,
                 now + Duration::from_millis(9),
                 hook,
+                false,
             ));
             assert!(!sessions.r2o_begin_hold(&packet));
+        }
+
+        #[test]
+        fn обычный_принятый_первый_udp_пакет_открывает_окно_только_для_клиента() {
+            let now = Instant::now();
+            let hook = Some(R2O_NF_INET_LOCAL_OUT);
+            let packet = udp_packet([192, 0, 2, 1], [198, 51, 100, 2], 40_000, 3478);
+            let mut sessions = R2oUdpSessions::new().unwrap();
+            let mut follow = R2oUdpFollowTable::new();
+            let route_gate = R2oRouteGate::default();
+
+            assert!(r2o_udp_packet_admitted_at_hook(
+                &mut sessions,
+                &packet,
+                now,
+                hook,
+                false,
+            ));
+            assert!(r2o_udp_mark_plain_pass(
+                &sessions,
+                &mut follow,
+                &route_gate,
+                0,
+                0,
+                &packet,
+                now,
+                1,
+                true,
+            ));
+            assert!(follow.r2o_match(&packet, now, 1).is_some());
+
+            assert!(r2o_udp_packet_admitted_at_hook(
+                &mut sessions,
+                &packet,
+                now + std::time::Duration::from_millis(1),
+                hook,
+                false,
+            ));
+            assert!(!r2o_udp_mark_plain_pass(
+                &sessions,
+                &mut follow,
+                &route_gate,
+                0,
+                0,
+                &packet,
+                now + std::time::Duration::from_millis(1),
+                2,
+                true,
+            ));
+            assert!(
+                follow
+                    .r2o_match(&packet, now + std::time::Duration::from_millis(6), 2)
+                    .is_none()
+            );
+
+            let reply = udp_packet([198, 51, 100, 2], [192, 0, 2, 1], 3478, 40_000);
+            assert!(r2o_udp_packet_admitted_at_hook(
+                &mut sessions,
+                &reply,
+                now + std::time::Duration::from_millis(7),
+                Some(r2o_datapath::netlink::R2O_NF_INET_LOCAL_IN),
+                false,
+            ));
+            assert!(!r2o_udp_mark_plain_pass(
+                &sessions,
+                &mut follow,
+                &route_gate,
+                0,
+                0,
+                &reply,
+                now + std::time::Duration::from_millis(7),
+                3,
+                true,
+            ));
         }
 
         #[test]
@@ -3330,6 +4112,8 @@ mod app {
                 "--r2o-udp-reverse-visible",
                 "--queue",
                 "2000",
+                "--iface",
+                "eth0",
                 "--mark",
                 "45",
             ]
@@ -3338,6 +4122,7 @@ mod app {
             assert!(options.controller_only);
             assert!(options.reverse_queue_visible);
             assert_eq!(options.mode, RuntimeMode::Apply);
+            assert_eq!(options.interface.as_deref(), Some("eth0"));
             assert_eq!(
                 options.control_path.as_deref(),
                 Some(std::path::Path::new("/tmp/r2o-datapath.sock"))
@@ -3398,6 +4183,25 @@ mod app {
             assert_eq!(parse_options(&[]).unwrap().flow_capacity.limit(), 1536);
             assert!(parse_options(&["--r2o-flow-capacity".into(), "0".into(),]).is_err());
             assert!(parse_options(&["--r2o-flow-capacity".into(), "4294967296".into()]).is_err());
+        }
+
+        #[test]
+        fn r2o_срок_хранения_потоков_совпадает_с_донорским_параметром_idle() {
+            assert_eq!(parse_options(&[]).unwrap().r2o_idle_timeout.as_secs(), 120);
+            assert_eq!(
+                parse_options(&["--idle".into(), "17".into()])
+                    .unwrap()
+                    .r2o_idle_timeout
+                    .as_secs(),
+                17
+            );
+            assert_eq!(
+                parse_options(&["--idle".into(), "0".into()])
+                    .unwrap()
+                    .r2o_idle_timeout,
+                Duration::ZERO
+            );
+            assert!(parse_options(&["--idle".into(), "4294967296".into()]).is_err());
         }
 
         #[test]
@@ -3713,7 +4517,7 @@ mod app {
                 flags: u8,
                 sequence: u32,
                 payload: &[u8],
-            ) {
+            ) -> Vec<u8> {
                 let mut packet = vec![0; 40 + payload.len()];
                 let packet_len = packet.len() as u16;
                 packet[0] = 0x45;
@@ -3737,6 +4541,7 @@ mod app {
                     journal,
                     origin,
                 );
+                packet
             }
 
             let клиент: ([u8; 4], u16) = ([192, 0, 2, 10], 41000);
@@ -3782,7 +4587,7 @@ mod app {
                 900,
                 &[],
             );
-            отправить_tcp_пакет(
+            let hello_packet = отправить_tcp_пакет(
                 &mut sessions,
                 &mut journal,
                 &mut control,
@@ -3807,6 +4612,7 @@ mod app {
                     epoch: [0x3c; 16],
                 },
             };
+            assert_eq!(sessions.r2o_begin_execution(&hello_packet, 77), Some(ключ));
             send_applied_event(&mut sessions, &mut control, &mut journal, 1, &applied);
             отправить_tcp_пакет(
                 &mut sessions,
@@ -4309,7 +5115,7 @@ mod app {
         }
 
         #[test]
-        fn observe_mode_does_not_open_a_raw_socket_for_tcp_or_control() {
+        fn raw_socket_is_opened_only_for_transmit_plans_or_control() {
             let tcp_plan = super::Plan {
                 transport: 6,
                 ..super::Plan::default()
@@ -4320,19 +5126,81 @@ mod app {
                 ipfrag: 1,
                 ..super::Plan::default()
             };
-            assert!(!needs_raw_socket(RuntimeMode::Observe, &tcp_plan, false));
-            assert!(!needs_raw_socket(
-                RuntimeMode::Observe,
+            let clearance_plan = super::Plan {
+                minexec: 10,
+                transport: 17,
+                proto: r2k_core::plan::PROTO_QUIC,
+                payloads: vec![r2k_core::plan::Payload {
+                    id: 1,
+                    bytes: vec![0; 16],
+                }],
+                fakes: vec![r2k_core::plan::Fake {
+                    payload_id: 1,
+                    poison_id: 0,
+                    repeats: 1,
+                    placement: 0,
+                    gap_us: 0,
+                    tls_mod: 0,
+                }],
+                ..super::Plan::default()
+            };
+            let ttl_plan = super::Plan {
+                minexec: 10,
+                transport: 17,
+                proto: r2k_core::plan::PROTO_QUIC,
+                payloads: vec![r2k_core::plan::Payload {
+                    id: 1,
+                    bytes: r2k_core::plan::R2K_QUIC_TTL_PROBE_PAYLOAD.to_vec(),
+                }],
+                poisons: vec![r2k_core::plan::Poison {
+                    id: 1,
+                    ttl: 3,
+                    flags: 0,
+                    seq_shift: 0,
+                }],
+                fakes: vec![r2k_core::plan::Fake {
+                    payload_id: 1,
+                    poison_id: 1,
+                    repeats: 2,
+                    placement: 0,
+                    gap_us: 0,
+                    tls_mod: 0,
+                }],
+                ..super::Plan::default()
+            };
+            let fake_plan = super::Plan {
+                minexec: 10,
+                transport: 17,
+                proto: r2k_core::plan::PROTO_QUIC,
+                payloads: vec![r2k_core::plan::Payload {
+                    id: 1,
+                    bytes: vec![1],
+                }],
+                fakes: vec![r2k_core::plan::Fake {
+                    payload_id: 1,
+                    poison_id: 0,
+                    repeats: 1,
+                    placement: 0,
+                    gap_us: 0,
+                    tls_mod: 0,
+                }],
+                ..super::Plan::default()
+            };
+            for plan in [
+                &tcp_plan,
                 &fragment_plan,
-                false
-            ));
+                &clearance_plan,
+                &ttl_plan,
+                &fake_plan,
+            ] {
+                assert!(!needs_raw_socket(RuntimeMode::Observe, plan, false));
+                assert!(needs_raw_socket(RuntimeMode::Apply, plan, false));
+            }
             assert!(!needs_raw_socket(
                 RuntimeMode::Observe,
                 &super::Plan::default(),
                 true
             ));
-            assert!(needs_raw_socket(RuntimeMode::Apply, &tcp_plan, false));
-            assert!(needs_raw_socket(RuntimeMode::Apply, &fragment_plan, false));
             assert!(needs_raw_socket(
                 RuntimeMode::Apply,
                 &super::Plan::default(),

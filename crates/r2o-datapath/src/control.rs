@@ -84,6 +84,7 @@ pub struct NamePlans {
     voice_addr_probes: HashMap<VoiceProbeKey, VoiceProbePlan>,
     addr_probes: HashMap<[u8; control::KEY_LEN], AddrProbePlan>,
     https_names: HashMap<String, Instant>,
+    send_maxlen: usize,
     revision: u64,
     epoch: [u8; 16],
 }
@@ -140,6 +141,7 @@ impl Default for NamePlans {
             voice_addr_probes: HashMap::new(),
             addr_probes: HashMap::new(),
             https_names: HashMap::new(),
+            send_maxlen: 0,
             revision: 0,
             epoch,
         }
@@ -147,6 +149,16 @@ impl Default for NamePlans {
 }
 
 impl NamePlans {
+    /// Задаёт предел одной raw-посылки, чтобы отклонять неподходящие планы до установки.
+    pub fn r2o_set_send_maxlen(&mut self, maxlen: usize) {
+        self.send_maxlen = maxlen;
+    }
+
+    fn r2o_plan_valid(&self, plan: &Plan) -> bool {
+        validate_runtime_plan(plan).is_ok()
+            && (self.send_maxlen == 0 || plan.max_emit() <= self.send_maxlen)
+    }
+
     pub fn handle(&mut self, frame: &Frame) -> Ack {
         let addr_probe = matches!(frame.kind, COMMAND_SET_ADDR_PROBE | COMMAND_DEL_ADDR_PROBE);
         let trial_id = if addr_probe {
@@ -631,7 +643,7 @@ impl NamePlans {
             SHAPE_VOICE => plan.transport == 17 && plan.proto == PROTO_VOICE,
             _ => false,
         };
-        if !compatible || validate_runtime_plan(&plan).is_err() {
+        if !compatible || !self.r2o_plan_valid(&plan) {
             return (false, control::ACK_BAD_PLAN);
         }
         if !self.plans.contains_key(&key) && self.plans.len() >= MAX_NAME_PLANS {
@@ -659,7 +671,7 @@ impl NamePlans {
             Ok(plan) => plan,
             Err(_) => return (false, control::ACK_BAD_PLAN),
         };
-        if !addr_plan_matches_shape(shape, &plan) || validate_runtime_plan(&plan).is_err() {
+        if !addr_plan_matches_shape(shape, &plan) || !self.r2o_plan_valid(&plan) {
             return (false, control::ACK_BAD_PLAN);
         }
         let key = AddrPlanKey { address, shape };
@@ -707,7 +719,7 @@ impl NamePlans {
             SHAPE_QUIC => valid_quic_plan(&plan),
             _ => false,
         };
-        if !compatible || validate_runtime_plan(&plan).is_err() {
+        if !compatible || !self.r2o_plan_valid(&plan) {
             return (false, control::ACK_BAD_PLAN);
         }
         let key = SuffixPlanKey {
@@ -868,7 +880,7 @@ impl NamePlans {
             SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP => plan.proto == 1,
             _ => false,
         };
-        if plan.transport != 6 || !proto_matches || validate_runtime_plan(&plan).is_err() {
+        if plan.transport != 6 || !proto_matches || !self.r2o_plan_valid(&plan) {
             return (false, control::ACK_BAD_PLAN);
         }
         if !self.probes.contains_key(&key) && self.probes.len() >= MAX_NAME_PLANS {
@@ -903,7 +915,7 @@ impl NamePlans {
         };
         if r2o_plan.transport != 17
             || r2o_plan.proto != PROTO_VOICE
-            || validate_runtime_plan(&r2o_plan).is_err()
+            || !self.r2o_plan_valid(&r2o_plan)
         {
             return (false, control::ACK_BAD_PLAN);
         }
@@ -964,7 +976,7 @@ impl NamePlans {
         };
         if r2o_plan.transport != 17
             || r2o_plan.proto != PROTO_VOICE
-            || validate_runtime_plan(&r2o_plan).is_err()
+            || !self.r2o_plan_valid(&r2o_plan)
         {
             return (false, control::ACK_BAD_PLAN);
         }
@@ -1690,6 +1702,7 @@ fn canonical_name(bytes: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{ControlServer, MAX_NAME_PLANS, NamePlans};
+    use r2k_core::plan::Plan;
 
     fn plan_header(minexec: u16, records: u16) -> Vec<u8> {
         let mut bytes = super::PLAN_MAGIC.to_vec();
@@ -1828,6 +1841,33 @@ mod tests {
                 })
                 .ok
         );
+    }
+
+    #[test]
+    fn name_plan_отклоняется_если_максимальная_посылка_выше_mtu() {
+        let mut plans = NamePlans::default();
+        let mut frame = set_name("example.test");
+        let prefix_len = 1 + "example.test".len() + 2;
+        frame.body.truncate(prefix_len);
+        frame.body.extend_from_slice(&plan_header(0, 4));
+        frame.body.extend_from_slice(&[0x00, 0x01, 0x00, 0x10]);
+        frame.body.extend_from_slice(&[0; 16]);
+        frame
+            .body
+            .extend_from_slice(&[0x00, 0x02, 0x00, 0x02, 0x06, 0x01]);
+        frame
+            .body
+            .extend_from_slice(&[0x00, 0x10, 0x00, 0x06, 0x00, 0x01, b'F', b'A', b'K', b'E']);
+        frame
+            .body
+            .extend_from_slice(&[0x01, 0x01, 0x00, 0x0a, 0x00, 0x01, 0, 0, 1, 0, 0, 0, 0, 0]);
+        let plan = Plan::parse(&frame.body[prefix_len..]).unwrap();
+
+        plans.r2o_set_send_maxlen(1);
+        assert!(!plans.handle(&frame).ok);
+        plans.r2o_set_send_maxlen(1500);
+        let ack = plans.handle(&frame);
+        assert!(ack.ok, "reason={} max_emit={}", ack.reason, plan.max_emit());
     }
 
     #[test]

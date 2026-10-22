@@ -298,6 +298,7 @@ struct CaptureInput<'a> {
     anchor: Option<u32>,
     bytes: &'a [u8],
     mode: CaptureMode,
+    visible: bool,
 }
 
 struct CaptureSlot {
@@ -309,6 +310,7 @@ struct CaptureSlot {
     high: usize,
     state: SlotState,
     mode: CaptureMode,
+    visible: bool,
     bytes: [u8; CAPTURE_BYTES],
     present: [u8; CAPTURE_BYTES / 8],
 }
@@ -324,6 +326,7 @@ impl Default for CaptureSlot {
             high: 0,
             state: SlotState::Free,
             mode: CaptureMode::Tls,
+            visible: false,
             bytes: [0; CAPTURE_BYTES],
             present: [0; CAPTURE_BYTES / 8],
         }
@@ -338,6 +341,7 @@ impl CaptureSlot {
         now: Instant,
         sequence: u32,
         mode: CaptureMode,
+        visible: bool,
     ) {
         self.bytes.fill(0);
         self.present.fill(0);
@@ -349,12 +353,14 @@ impl CaptureSlot {
         self.high = 0;
         self.state = SlotState::Collecting;
         self.mode = mode;
+        self.visible = visible;
     }
 
     fn free(&mut self) {
         self.key = None;
         self.started = None;
         self.state = SlotState::Free;
+        self.visible = false;
     }
 
     fn has_byte(&self, index: usize) -> bool {
@@ -411,6 +417,19 @@ impl CaptureTable {
         anchor: Option<u32>,
         bytes: &[u8],
     ) -> CaptureResult {
+        self.feed_with_visibility(key, generation, now, sequence, anchor, bytes, true)
+    }
+
+    pub(crate) fn feed_with_visibility(
+        &mut self,
+        key: TcpFlowKey,
+        generation: u64,
+        now: Instant,
+        sequence: u32,
+        anchor: Option<u32>,
+        bytes: &[u8],
+        visible: bool,
+    ) -> CaptureResult {
         self.feed_mode(CaptureInput {
             key,
             generation,
@@ -419,6 +438,7 @@ impl CaptureTable {
             anchor,
             bytes,
             mode: CaptureMode::Tls,
+            visible,
         })
     }
 
@@ -431,6 +451,19 @@ impl CaptureTable {
         anchor: Option<u32>,
         bytes: &[u8],
     ) -> CaptureResult {
+        self.feed_http_with_visibility(key, generation, now, sequence, anchor, bytes, true)
+    }
+
+    pub(crate) fn feed_http_with_visibility(
+        &mut self,
+        key: TcpFlowKey,
+        generation: u64,
+        now: Instant,
+        sequence: u32,
+        anchor: Option<u32>,
+        bytes: &[u8],
+        visible: bool,
+    ) -> CaptureResult {
         self.feed_mode(CaptureInput {
             key,
             generation,
@@ -439,6 +472,7 @@ impl CaptureTable {
             anchor,
             bytes,
             mode: CaptureMode::Http,
+            visible,
         })
     }
 
@@ -451,6 +485,7 @@ impl CaptureTable {
             anchor,
             bytes,
             mode,
+            visible,
         } = input;
         if bytes.is_empty() {
             return CaptureResult::Ignored;
@@ -465,7 +500,7 @@ impl CaptureTable {
                     .and_then(|started| now.checked_duration_since(started))
                     .is_none_or(|age| age >= CAPTURE_TTL);
                 if expired {
-                    if slot.state == SlotState::Collecting {
+                    if slot.state == SlotState::Collecting && slot.visible {
                         self.stats.expired = self.stats.expired.saturating_add(1);
                         if slot.mode == CaptureMode::Tls {
                             self.stats.tls_expired = self.stats.tls_expired.saturating_add(1);
@@ -500,16 +535,20 @@ impl CaptureTable {
                 return CaptureResult::Ignored;
             }
             let Some(index) = vacant else {
-                self.stats.full = self.stats.full.saturating_add(1);
-                if mode == CaptureMode::Tls {
-                    self.stats.tls_full = self.stats.tls_full.saturating_add(1);
+                if visible {
+                    self.stats.full = self.stats.full.saturating_add(1);
+                    if mode == CaptureMode::Tls {
+                        self.stats.tls_full = self.stats.tls_full.saturating_add(1);
+                    }
                 }
                 return CaptureResult::Full;
             };
             let start_sequence = anchor.unwrap_or(sequence);
-            self.slots[index].start(key, generation, now, start_sequence, mode);
+            self.slots[index].start(key, generation, now, start_sequence, mode, visible);
             index
         };
+        self.slots[index].visible &= visible;
+        let capture_visible = self.slots[index].visible;
 
         let result = {
             let slot = &mut self.slots[index];
@@ -528,7 +567,7 @@ impl CaptureTable {
                     let present = &mut slot.present[position / 8];
                     if *present & mask != 0 && slot.bytes[position] != byte {
                         slot.state = SlotState::Rejected;
-                        return self.reject_result(mode);
+                        return self.reject_result(mode, capture_visible);
                     }
                     slot.bytes[position] = byte;
                     *present |= mask;
@@ -559,12 +598,14 @@ impl CaptureTable {
         };
 
         match result {
-            Err(()) => self.reject_result(mode),
+            Err(()) => self.reject_result(mode, capture_visible),
             Ok(None) => CaptureResult::Incomplete,
             Ok(Some((sequence, bytes))) => {
-                self.stats.completed = self.stats.completed.saturating_add(1);
-                if mode == CaptureMode::Tls {
-                    self.stats.tls_completed = self.stats.tls_completed.saturating_add(1);
+                if capture_visible {
+                    self.stats.completed = self.stats.completed.saturating_add(1);
+                    if mode == CaptureMode::Tls {
+                        self.stats.tls_completed = self.stats.tls_completed.saturating_add(1);
+                    }
                 }
                 CaptureResult::Complete { sequence, bytes }
             }
@@ -583,10 +624,12 @@ impl CaptureTable {
         self.stats
     }
 
-    fn reject_result(&mut self, mode: CaptureMode) -> CaptureResult {
-        self.stats.rejected = self.stats.rejected.saturating_add(1);
-        if mode == CaptureMode::Tls {
-            self.stats.tls_rejected = self.stats.tls_rejected.saturating_add(1);
+    fn reject_result(&mut self, mode: CaptureMode, visible: bool) -> CaptureResult {
+        if visible {
+            self.stats.rejected = self.stats.rejected.saturating_add(1);
+            if mode == CaptureMode::Tls {
+                self.stats.tls_rejected = self.stats.tls_rejected.saturating_add(1);
+            }
         }
         CaptureResult::Rejected
     }

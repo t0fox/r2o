@@ -87,6 +87,7 @@ struct SynAnchor {
     attempted: bool,
     saw_hello: bool,
     unassembled_reported: bool,
+    controller_probe: bool,
     r2o_http_requests: r2k_core::httpup::R2oHttpRequestSequence,
 }
 
@@ -285,6 +286,41 @@ impl HoldTable {
         now: Instant,
         options: HoldOptions,
     ) -> FeedResult {
+        self.feed_observing_mode(id, packet, now, options, false)
+    }
+
+    /// Обработать пакет зонда, сохранив удержание и применение плана без диагностики потока.
+    pub fn feed_controller_probe(
+        &mut self,
+        id: u32,
+        packet: &[u8],
+        now: Instant,
+        options: HoldOptions,
+    ) -> FeedResult {
+        self.feed_observing_mode(id, packet, now, options, true)
+    }
+
+    /// Отпустить ранее удержанные пакеты потока после отказа исполнения.
+    pub fn r2o_release_damaged_flow(&mut self, packet: &[u8]) -> Vec<u32> {
+        let Some((_, _, key, _, _)) = parse_tcp(packet) else {
+            return Vec::new();
+        };
+        let Some(index) = self.slot_index(&key) else {
+            return Vec::new();
+        };
+        let released = self.remove_slot(index);
+        self.capture.forget(&key);
+        released
+    }
+
+    fn feed_observing_mode(
+        &mut self,
+        id: u32,
+        packet: &[u8],
+        now: Instant,
+        options: HoldOptions,
+        controller_probe: bool,
+    ) -> FeedResult {
         let HoldOptions {
             revision,
             allow_tls,
@@ -310,7 +346,7 @@ impl HoldTable {
             }
             self.capture.forget(&key);
             self.http_requests.retain(|flow| flow.key != key);
-            self.remember_syn(key, source, tcp.sequence, now);
+            self.remember_syn(key, source, tcp.sequence, now, controller_probe);
             return FeedResult {
                 released,
                 outcome: HoldOutcome::Pass,
@@ -319,6 +355,7 @@ impl HoldTable {
 
         if let Some(anchor_index) = self.syn_index(&key) {
             self.syns[anchor_index].seen = now;
+            self.syns[anchor_index].controller_probe |= controller_probe;
             if source != self.syns[anchor_index].client && tcp.flags & 0x12 == 0x12 {
                 self.syns[anchor_index].server_sequence = Some(tcp.sequence);
                 self.syns[anchor_index].rtt =
@@ -364,11 +401,23 @@ impl HoldTable {
             && destination.port == 80
             && (payload.starts_with(b"GET ") || payload.starts_with(b"HEAD "))
         {
-            self.remember_syn(key, source, tcp.sequence.wrapping_sub(1), now);
+            self.remember_syn(
+                key,
+                source,
+                tcp.sequence.wrapping_sub(1),
+                now,
+                controller_probe,
+            );
             anchor_index = self.syn_index(&key);
         }
         if anchor_index.is_none() && observe_tls && tls_record_head(payload) {
-            self.remember_syn(key, source, tcp.sequence.wrapping_sub(1), now);
+            self.remember_syn(
+                key,
+                source,
+                tcp.sequence.wrapping_sub(1),
+                now,
+                controller_probe,
+            );
             anchor_index = self.syn_index(&key);
             if let Some(index) = anchor_index {
                 self.syns[index].attempted = true;
@@ -498,14 +547,16 @@ impl HoldTable {
                     && anchor.attempted
                     && !anchor.saw_hello
                     && tcp.flags & 0x05 == 0
-                    && let CaptureResult::Complete { bytes, .. } = self.capture.feed(
-                        key,
-                        anchor.generation,
-                        now,
-                        tcp.sequence,
-                        Some(anchor.sequence.wrapping_add(1)),
-                        payload,
-                    )
+                    && let CaptureResult::Complete { bytes, .. } =
+                        self.capture.feed_with_visibility(
+                            key,
+                            anchor.generation,
+                            now,
+                            tcp.sequence,
+                            Some(anchor.sequence.wrapping_add(1)),
+                            payload,
+                            !anchor.controller_probe,
+                        )
                 {
                     self.syns[anchor_index].saw_hello = true;
                     self.capture.forget(&key);
@@ -520,14 +571,16 @@ impl HoldTable {
                     && destination.port == 80
                     && (!anchor.saw_hello || r2o_next_http_request)
                     && tcp.flags & 0x05 == 0
-                    && let CaptureResult::Complete { sequence, bytes } = self.capture.feed_http(
-                        key,
-                        anchor.generation,
-                        now,
-                        tcp.sequence,
-                        (!r2o_next_http_request).then_some(anchor.sequence.wrapping_add(1)),
-                        payload,
-                    )
+                    && let CaptureResult::Complete { sequence, bytes } =
+                        self.capture.feed_http_with_visibility(
+                            key,
+                            anchor.generation,
+                            now,
+                            tcp.sequence,
+                            (!r2o_next_http_request).then_some(anchor.sequence.wrapping_add(1)),
+                            payload,
+                            !anchor.controller_probe,
+                        )
                 {
                     self.syns[anchor_index]
                         .r2o_http_requests
@@ -637,21 +690,23 @@ impl HoldTable {
         });
 
         let capture = match self.slots[index].kind {
-            HoldKind::Tls => self.capture.feed(
+            HoldKind::Tls => self.capture.feed_with_visibility(
                 key,
                 anchor.generation,
                 now,
                 tcp.sequence,
                 Some(self.slots[index].anchor),
                 payload,
+                !anchor.controller_probe,
             ),
-            HoldKind::Http => self.capture.feed_http(
+            HoldKind::Http => self.capture.feed_http_with_visibility(
                 key,
                 anchor.generation,
                 now,
                 tcp.sequence,
                 Some(self.slots[index].anchor),
                 payload,
+                !anchor.controller_probe,
             ),
         };
         match capture {
@@ -746,6 +801,9 @@ impl HoldTable {
                         .iter_mut()
                         .find(|anchor| anchor.key == key && anchor.generation == generation)
                         .is_some_and(|anchor| {
+                            if anchor.controller_probe {
+                                return false;
+                            }
                             if anchor.unassembled_reported {
                                 false
                             } else {
@@ -789,7 +847,14 @@ impl HoldTable {
         max_ms.min(millis.min(i32::MAX as u128) as i32)
     }
 
-    fn remember_syn(&mut self, key: TcpFlowKey, client: Endpoint, sequence: u32, now: Instant) {
+    fn remember_syn(
+        &mut self,
+        key: TcpFlowKey,
+        client: Endpoint,
+        sequence: u32,
+        now: Instant,
+        controller_probe: bool,
+    ) {
         self.syns
             .retain(|anchor| now.saturating_duration_since(anchor.seen) < SYN_TRACK_TTL);
         self.next_generation = self.next_generation.wrapping_add(1).max(1);
@@ -805,6 +870,7 @@ impl HoldTable {
             attempted: false,
             saw_hello: false,
             unassembled_reported: false,
+            controller_probe,
             r2o_http_requests: r2k_core::httpup::R2oHttpRequestSequence::new(
                 sequence.wrapping_add(1),
             ),
@@ -1288,6 +1354,31 @@ mod tests {
         );
         assert_eq!(hold.r2o_capture_stats().completed, 1);
         assert_eq!(hold.r2o_capture_stats().tls_completed, 1);
+    }
+
+    #[test]
+    fn повреждённый_tcp_поток_отпускает_накопленные_пакеты() {
+        let now = Instant::now();
+        let mut hold = HoldTable::default();
+        let syn = tcp_packet(1000, 0x02, &[]);
+        assert_eq!(
+            hold.feed(1, &syn, now, 0, true, false).outcome,
+            HoldOutcome::Pass
+        );
+        let hello = hello();
+        let first = tcp_packet(1001, 0x18, &hello[..5]);
+        assert_eq!(
+            hold.feed(2, &first, now, 0, true, false).outcome,
+            HoldOutcome::Waiting
+        );
+
+        assert_eq!(hold.r2o_release_damaged_flow(&first), vec![2]);
+        let tail = tcp_packet(1006, 0x18, &hello[5..]);
+        assert_eq!(
+            hold.feed_observing(3, &tail, now, HoldOptions::default(),)
+                .outcome,
+            HoldOutcome::Pass
+        );
     }
 
     #[test]
@@ -1975,6 +2066,43 @@ mod tests {
         );
         let _ = hold.flush(now + HOLD_WAIT * 2, 0, false);
         assert!(hold.r2o_take_incomplete_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn timeout_keeps_controller_probe_capture_out_of_diagnostics() {
+        let now = Instant::now();
+        let mut hold = HoldTable::default();
+        let options = HoldOptions {
+            revision: 0,
+            allow_tls: true,
+            ..HoldOptions::default()
+        };
+        let hello = hello();
+        let _ = hold.feed_controller_probe(1, &tcp_packet(3000, 0x02, &[]), now, options);
+        assert_eq!(
+            hold.feed_controller_probe(2, &tcp_packet(3001, 0x18, &hello[..5]), now, options,)
+                .outcome,
+            HoldOutcome::Waiting
+        );
+
+        assert_eq!(hold.flush(now + HOLD_WAIT, 0, false), [2]);
+        assert!(hold.r2o_take_incomplete_diagnostics().is_empty());
+
+        let mut complete = HoldTable::default();
+        let _ = complete.feed_controller_probe(3, &tcp_packet(4000, 0x02, &[]), now, options);
+        assert_eq!(
+            complete
+                .feed_controller_probe(4, &tcp_packet(4001, 0x18, &hello[..5]), now, options,)
+                .outcome,
+            HoldOutcome::Waiting
+        );
+        assert!(matches!(
+            complete
+                .feed_controller_probe(5, &tcp_packet(4006, 0x18, &hello[5..]), now, options,)
+                .outcome,
+            HoldOutcome::Ready { .. }
+        ));
+        assert_eq!(complete.r2o_capture_stats(), super::CaptureStats::default());
     }
 
     #[test]

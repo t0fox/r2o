@@ -27,6 +27,7 @@ r2o_show_log_on_error() {
     if [ "$r2o_status" -ne 0 ] && [ -f "$r2o_log" ]; then
         cat "$r2o_log"
     fi
+    exit "$r2o_status"
 }
 trap r2o_show_log_on_error EXIT
 

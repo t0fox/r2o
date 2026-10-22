@@ -191,7 +191,7 @@ pub fn r2o_http_plan_request(input: &[u8]) -> Option<R2oHttpPlanRequest> {
 pub fn portal_response(request: &[u8], upstream: &[u8]) -> Option<Vec<u8>> {
     let request = parse_request(request)?;
     let portal = portal_host(request.host, upstream)?;
-    if !portal_marker(&portal) {
+    if !known_portal_host(&portal) && !portal_marker(&portal) {
         return None;
     }
     build_redirect(request.host, request.target)
@@ -200,7 +200,7 @@ pub fn portal_response(request: &[u8], upstream: &[u8]) -> Option<Vec<u8>> {
 /// Вернуть имя стороннего портала, распознанное в заголовках ответа.
 pub fn portal_location(host: &[u8], response: &[u8]) -> Option<Vec<u8>> {
     let portal = portal_host(host, response)?;
-    portal_marker(&portal).then_some(portal)
+    (known_portal_host(&portal) || portal_marker(&portal)).then_some(portal)
 }
 
 /// Сформировать соответствующий HTTPS-ответ 307 для проверенного DNS-имени
@@ -472,19 +472,33 @@ fn same_host(left: &[u8], right: &[u8]) -> bool {
 }
 
 fn portal_marker(host: &[u8]) -> bool {
-    const MARKERS: [&[u8]; 6] = [
+    const MARKERS: [&[u8]; 8] = [
         b"lawfilter",
         b"blockpage",
         b"blocked",
         b"censorship",
         b"access-denied",
         b"provider-filter",
+        b"megafonpro",
+        b"blackhole",
     ];
     host.split(|&byte| byte == b'.').any(|label| {
         MARKERS
             .iter()
             .any(|marker| label.eq_ignore_ascii_case(marker))
     })
+}
+
+fn known_portal_host(host: &[u8]) -> bool {
+    const HOSTS: [&[u8]; 6] = [
+        b"eais.rkn.gov.ru",
+        b"lawfilter.ertelecom.ru",
+        b"blackhole.svyaztelecom.ru",
+        b"warning.rt.ru",
+        b"warn.beeline.ru",
+        b"deny.megafon.ru",
+    ];
+    HOSTS.iter().any(|known| same_host(host, known))
 }
 
 fn build_redirect(host: &[u8], target: &[u8]) -> Option<Vec<u8>> {
