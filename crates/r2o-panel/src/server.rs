@@ -239,6 +239,11 @@ pub fn handle_request(config: &Config, raw: &[u8]) -> Response {
     }
     for (route, file, content_type) in [
         ("/assets/favicon.svg", "favicon.svg", "image/svg+xml"),
+        (
+            "/assets/refresh-mask.svg",
+            "refresh-mask.svg",
+            "image/svg+xml",
+        ),
         ("/assets/panel.css", "panel.css", "text/css; charset=utf-8"),
         (
             "/assets/panel.js",
@@ -260,8 +265,33 @@ pub fn handle_request(config: &Config, raw: &[u8]) -> Response {
             "gsap.js",
             "application/javascript; charset=utf-8",
         ),
+        (
+            "/assets/panel-motion.js",
+            "panel-motion.js",
+            "application/javascript; charset=utf-8",
+        ),
+        (
+            "/assets/panel-lava.js",
+            "panel-lava.js",
+            "application/javascript; charset=utf-8",
+        ),
         ("/assets/onest.woff2", "fonts/onest.woff2", "font/woff2"),
         ("/assets/jbmono.woff2", "fonts/jbmono.woff2", "font/woff2"),
+        (
+            "/assets/nunito-cyrillic.woff2",
+            "fonts/nunito-cyrillic.woff2",
+            "font/woff2",
+        ),
+        (
+            "/assets/nunito-latin.woff2",
+            "fonts/nunito-latin.woff2",
+            "font/woff2",
+        ),
+        (
+            "/assets/jetbrains-mono-lava.woff2",
+            "fonts/jetbrains-mono-lava.woff2",
+            "font/woff2",
+        ),
     ] {
         if request.path == route {
             return static_asset(config, &request, file, content_type);
@@ -1412,13 +1442,21 @@ fn embedded_asset(name: &str) -> Option<&'static [u8]> {
     Some(match name {
         "index.html" => include_bytes!("../assets/index.html"),
         "favicon.svg" => include_bytes!("../assets/favicon.svg"),
+        "refresh-mask.svg" => include_bytes!("../assets/refresh-mask.svg"),
         "panel.css" => include_bytes!("../assets/panel.css"),
         "panel.js" => include_bytes!("../assets/panel.js"),
         "telegram-flow.js" => include_bytes!("../assets/telegram-flow.js"),
         "telegram-flow-prototype.js" => include_bytes!("../assets/telegram-flow-prototype.js"),
         "gsap.js" => include_bytes!("../assets/gsap.js"),
+        "panel-motion.js" => include_bytes!("../assets/panel-motion.js"),
+        "panel-lava.js" => include_bytes!("../assets/panel-lava.js"),
         "fonts/onest.woff2" => include_bytes!("../assets/fonts/onest.woff2"),
         "fonts/jbmono.woff2" => include_bytes!("../assets/fonts/jbmono.woff2"),
+        "fonts/nunito-cyrillic.woff2" => include_bytes!("../assets/fonts/nunito-cyrillic.woff2"),
+        "fonts/nunito-latin.woff2" => include_bytes!("../assets/fonts/nunito-latin.woff2"),
+        "fonts/jetbrains-mono-lava.woff2" => {
+            include_bytes!("../assets/fonts/jetbrains-mono-lava.woff2")
+        }
         _ => return None,
     })
 }

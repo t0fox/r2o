@@ -269,7 +269,8 @@
     check: "M5 12.5l4.5 4.5L19 7.5",
     cross: "M6.5 6.5l11 11M17.5 6.5l-11 11",
     dash: "M6 12h12",
-    send: "M21 3 3 10.5l7 2.5 2.5 7zM10 13l5-5"
+    send: "M21 3 3 10.5l7 2.5 2.5 7zM10 13l5-5",
+    settings: "M4 7h10M18 7h2M4 17h2M10 17h10M14 4v6M8 14v6"
   };
 
   function el(doc, tag, cls, text) {
@@ -511,6 +512,10 @@
 
   App.prototype.initR2oSettings = function () {
     var self = this, form = this.$("r2o-settings-form");
+    var dialog = this.$("r2o-settings");
+    if (dialog) dialog.addEventListener("click", function (event) {
+      if (event.target === dialog || (event.target.closest && event.target.closest("[data-settings-close]"))) dialog.close();
+    });
     if (!form) return;
     form.addEventListener("input", function () { self.r2oSettingsDirty = true; });
     form.addEventListener("change", function () { self.r2oSettingsDirty = true; });
@@ -743,6 +748,17 @@
         buttons.push(this.button("start", "Запустить движок", "play", "primary", busy || snap.mode === "off"));
       }
     }
+    var settings = el(doc, "button", "btn");
+    settings.type = "button";
+    settings.setAttribute("data-control", "settings");
+    settings.setAttribute("aria-label", "Настройки R2O");
+    settings.title = "Настройки R2O";
+    add(settings, icon(doc, "settings"), el(doc, "span", "btn-label-long", "Настройки"));
+    settings.addEventListener("click", function () {
+      var dialog = self.$("r2o-settings");
+      if (dialog && typeof dialog.showModal === "function") dialog.showModal();
+    });
+    buttons.push(settings);
     var flipState = Motion.on() && Motion.Flip && box.children.length ? Motion.Flip.getState(box.children) : null;
     var oldIcons = {};
     for (var oi = 0; oi < box.children.length; oi++) {
@@ -2291,7 +2307,7 @@
       }
       self.moveMarker();
     }, { rootMargin: "-20% 0px -55% 0px", threshold: [0, .1, .3, .6] });
-    ["now", "families", "boxes", "telegram", "updates", "r2o-settings", "diagnostics"].forEach(function (id) {
+    ["now", "families", "boxes", "telegram", "updates", "diagnostics"].forEach(function (id) {
       var s = doc.getElementById(id);
       if (s) io.observe(s);
     });

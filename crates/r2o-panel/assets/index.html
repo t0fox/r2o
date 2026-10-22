@@ -3,27 +3,35 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light dark">
-  <title>R2O</title>
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#141019">
+  <title>r2o — панель R2O</title>
   <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
-  <link rel="preload" href="/assets/onest.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/assets/nunito-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/assets/nunito-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/assets/jetbrains-mono-lava.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/assets/panel.css">
   <script src="/assets/gsap.js" defer></script>
   <script src="/assets/telegram-flow.js" defer></script>
   <script src="/assets/telegram-flow-prototype.js" defer></script>
   <script src="/assets/panel.js" defer></script>
+  <script src="/assets/panel-motion.js" defer></script>
+  <script src="/assets/panel-lava.js" defer></script>
 </head>
 <body>
-  <a class="skip" href="#now">К текущему состоянию</a>
+<a class="skip" href="#now">К текущему состоянию</a>
 
   <header class="mast" id="mast">
     <div class="mast-id">
-      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
-        <rect class="mark-ground" width="32" height="32" rx="7"/>
-        <path class="mark-line" d="M4 20h7c2 0 3-1.2 3.6-3l.8-2.4C16 12.8 17 12 18.6 12h0c1.6 0 2.6.8 3.2 2.6l.8 2.4c.6 1.8 1.6 3 3.6 3H28"/>
-        <rect class="mark-block" x="14.5" y="17.5" width="8" height="6" rx="1"/>
+      <svg class="mark" viewBox="0 0 64 64" aria-hidden="true">
+        <defs><linearGradient id="r2o-route-gradient" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#e9c7ff"/><stop offset=".48" stop-color="#a855f7"/><stop offset="1" stop-color="#7c3aed"/></linearGradient></defs>
+        <circle cx="9.5" cy="25.5" r="5" fill="#d8b4fe"/>
+        <path class="mark-route" d="M10 25.5H18.5C24.5 25.5 23 13 35.5 12C48 11 55 21 51 31.5C48 39.5 37 43 29 51H51" fill="none" stroke="url(#r2o-route-gradient)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M46 44L53 51L46 58" fill="none" stroke="#c084fc" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="36.5" cy="29" r="8.2" fill="#271530" stroke="#b57cee" stroke-width="1.5"/>
+        <path d="M32 33.5L41 24.5" fill="none" stroke="#d8b4fe" stroke-width="2.5" stroke-linecap="round"/>
       </svg>
-      <span class="wordmark">R2O</span>
+      <span class="wordmark">r2o</span>
       <span class="mast-host" id="host"></span>
     </div>
 
@@ -42,17 +50,19 @@
       <a href="#now" data-nav="now"><span>Сейчас</span><b id="nav-now"></b></a>
       <a href="#families" data-nav="families"><span>Семейства</span><b id="nav-families"></b></a>
       <a href="#boxes" data-nav="boxes"><span>Коробки</span><b id="nav-boxes"></b></a>
-      <a href="#telegram" data-nav="telegram"><span>Telegram-туннель</span><b id="nav-telegram"></b></a>
+      <a href="#telegram" data-nav="telegram"><span>Telegram</span><b id="nav-telegram"></b></a>
       <a href="#updates" data-nav="updates"><span>Обновления</span><b id="nav-updates"></b></a>
-      <a href="#r2o-settings" data-nav="r2o-settings"><span>Настройки R2O</span><b></b></a>
       <a href="#diagnostics" data-nav="diagnostics"><span>Диагностика</span><b id="nav-diagnostics"></b></a>
     </nav>
 
     <main id="app">
       <section class="sheet sheet-now" id="now" aria-labelledby="now-title">
-        <h1 class="statement" id="now-title">Получаем состояние…</h1>
-        <p class="lede" id="now-lede"></p>
-        <div class="slots" id="slots"></div>
+        <div class="hero">
+          <p class="hero-pill"><span>R2O</span>Обход блокировок на роутере</p>
+          <h1 class="statement" id="now-title">Получаем состояние…</h1>
+          <p class="lede" id="now-lede"></p>
+          <div class="slots" id="slots"></div>
+        </div>
         <ol class="searches" id="searches" aria-label="Текущие поиски"></ol>
       </section>
 
@@ -61,12 +71,14 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></svg>
           <span class="visually-hidden">Найти цель</span>
           <input id="filter" type="search" placeholder="Найти домен или адрес в семействах и коробках" autocomplete="off" spellcheck="false">
+          <kbd class="filter-key" aria-hidden="true">/</kbd>
         </label>
         <p class="filter-count" id="filter-count" aria-live="polite"></p>
       </div>
 
       <section class="sheet" id="families" aria-labelledby="families-title">
         <header class="sheet-head">
+          <span class="kicker">Обходы</span>
           <h2 id="families-title">Семейства</h2>
           <p>Обход, подтверждённый на нескольких доменах одного суффикса, применяется ко всему семейству. Исключения остаются отдельными.</p>
         </header>
@@ -75,6 +87,7 @@
 
       <section class="sheet" id="boxes" aria-labelledby="boxes-title">
         <header class="sheet-head">
+          <span class="kicker">Каталог</span>
           <h2 id="boxes-title">Коробки</h2>
           <p>Коробка — измеренное поведение блокировки. Для совместимой коробки сначала проверяется уже найденный план.</p>
         </header>
@@ -83,6 +96,7 @@
 
       <section class="sheet sheet-telegram" id="telegram" aria-labelledby="telegram-title">
         <header class="sheet-head">
+          <span class="kicker">Служба</span>
           <h2 id="telegram-title">Telegram-туннель</h2>
           <p>Отдельная служба со своим состоянием. Обходы R2O через неё не идут.</p>
         </header>
@@ -91,6 +105,7 @@
 
       <section class="sheet sheet-updates" id="updates" aria-labelledby="updates-title">
         <header class="sheet-head">
+          <span class="kicker">Выпуски</span>
           <h2 id="updates-title">Обновления</h2>
           <p>Новые выпуски R2O. Настройки, регистрация Telegram и найденные обходы сохраняются.</p>
         </header>
@@ -127,48 +142,63 @@
         </div>
       </section>
 
-      <section class="sheet" id="r2o-settings" aria-labelledby="r2o-settings-title">
-        <header class="sheet-head">
-          <h2 id="r2o-settings-title">Настройки R2O</h2>
-          <p>Режим работы движка и номер очереди NFQUEUE. После сохранения службы перезапустятся.</p>
-        </header>
-        <form class="r2o-settings" id="r2o-settings-form">
-          <label class="r2o-settings-field" for="r2o-settings-mode">
-            <span>Режим движка</span>
-            <select id="r2o-settings-mode" required>
-              <option value="off">Выключен</option>
-              <option value="observe">Только наблюдение</option>
-              <option value="apply">Применение обхода</option>
-            </select>
-          </label>
-          <label class="r2o-settings-field" for="r2o-settings-queue">
-            <span>Номер очереди NFQUEUE</span>
-            <input id="r2o-settings-queue" type="number" min="0" max="65535" step="1" required>
-          </label>
-          <div class="r2o-settings-actions">
-            <p id="r2o-settings-message" role="status" aria-live="polite"></p>
-            <button class="btn" data-variant="primary" type="submit" disabled>Сохранить и перезапустить</button>
-          </div>
-        </form>
-      </section>
-
       <section class="sheet" id="diagnostics" aria-labelledby="diagnostics-title">
         <header class="sheet-head">
+          <span class="kicker">Состояние</span>
           <h2 id="diagnostics-title">Диагностика</h2>
           <p>Что движок может подтвердить сам, чего не измеряет, и с какими настройками запущен.</p>
         </header>
         <div id="diagnostics-body"></div>
       </section>
 
-      <footer class="colophon" id="colophon"></footer>
+      <footer class="foot">
+        <div class="foot-brand">
+          <svg class="foot-mark" viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="r2o-route-gradient-foot" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#e9c7ff"/><stop offset=".48" stop-color="#a855f7"/><stop offset="1" stop-color="#7c3aed"/></linearGradient></defs>
+<circle cx="9.5" cy="25.5" r="5" fill="#d8b4fe"/>
+<path class="mark-route" d="M10 25.5H18.5C24.5 25.5 23 13 35.5 12C48 11 55 21 51 31.5C48 39.5 37 43 29 51H51" fill="none" stroke="url(#r2o-route-gradient-foot)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M46 44L53 51L46 58" fill="none" stroke="#c084fc" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="36.5" cy="29" r="8.2" fill="#271530" stroke="#b57cee" stroke-width="1.5"/>
+<path d="M32 33.5L41 24.5" fill="none" stroke="#d8b4fe" stroke-width="2.5" stroke-linecap="round"/></svg>
+          <span>r2o · панель R2O</span>
+        </div>
+        <div class="colophon" id="colophon"></div>
+        <p class="foot-legal">Панель работает локально на роутере и обращается только к его /api.</p>
+      </footer>
     </main>
   </div>
 
-  <!-- Необратимую операцию подтверждает ДИАЛОГ, а не второе нажатие кнопки:
-       предупреждение обязано быть прочитано целиком, а в подпись кнопки оно
-       не влезает. Текст ставит panel.js (CONFIRM), разметка пустая — иначе
-       предупреждение о несуществующей операции мелькнуло бы без JS. -->
-  <dialog class="ask" id="ask" aria-labelledby="ask-title" aria-describedby="ask-text">
+
+
+  <dialog class="settings-dialog" id="r2o-settings" aria-labelledby="r2o-settings-title">
+    <header class="settings-head">
+      <div>
+        <span class="kicker">Движок</span>
+        <h2 id="r2o-settings-title">Настройки R2O</h2>
+        <p>Режим работы движка и номер очереди NFQUEUE. После сохранения службы перезапустятся.</p>
+      </div>
+      <button class="btn" type="button" data-settings-close>Закрыть</button>
+    </header>
+    <form class="r2o-settings" id="r2o-settings-form">
+      <label class="r2o-settings-field" for="r2o-settings-mode">
+        <span>Режим движка</span>
+        <select id="r2o-settings-mode" required>
+          <option value="off">Выключен</option>
+          <option value="observe">Только наблюдение</option>
+          <option value="apply">Применение обхода</option>
+        </select>
+      </label>
+      <label class="r2o-settings-field" for="r2o-settings-queue">
+        <span>Номер очереди NFQUEUE</span>
+        <input id="r2o-settings-queue" type="number" min="0" max="65535" step="1" required>
+      </label>
+      <div class="r2o-settings-actions">
+        <p id="r2o-settings-message" role="status" aria-live="polite"></p>
+        <button class="btn" data-variant="primary" type="submit" disabled>Сохранить и перезапустить</button>
+      </div>
+    </form>
+  </dialog>
+<dialog class="ask" id="ask" aria-labelledby="ask-title" aria-describedby="ask-text">
+    <span class="ask-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg></span>
     <h2 id="ask-title"></h2>
     <p id="ask-text"></p>
     <div class="ask-actions">
