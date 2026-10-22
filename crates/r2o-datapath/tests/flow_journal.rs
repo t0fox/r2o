@@ -541,11 +541,12 @@ fn журнал_сохраняет_все_типы_подозрений_r2o() {
                 client_is_low: true,
                 elapsed_ms: 3400,
                 estimated_packets: 27,
+                planned: true,
             }
             .event_body()
             .unwrap(),
             R2oFlowJournalKind::R2oTcpStall,
-            0,
+            1,
             3400,
             27,
             8,
@@ -585,11 +586,12 @@ fn журнал_сохраняет_все_типы_подозрений_r2o() {
             R2oTcpRstAfterAppEvent {
                 key: tcp_key,
                 client_is_low: true,
+                planned: true,
             }
             .event_body()
             .unwrap(),
             R2oFlowJournalKind::R2oTcpRstAfterApp,
-            0,
+            1,
             0,
             0,
             5,

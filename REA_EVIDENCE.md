@@ -6986,3 +6986,11 @@ REA повторно не запускался: переиспользуются
 Сверка включала донорские C-тесты сессии и полный `test_sched`, а также восемь C/Rust сценариев TCP/UDP, RST, счётчиков и route/mark. Все завершились успешно. Исправлен `scripts/r2o-scheduler-differential.sh`: `EXIT`-ловушка теперь сохраняет исходный код ошибки теста и не может представить провал как успех.
 
 Полный workspace host и AArch64/QEMU: оба прогона — 1 097 passed, 0 failed, 4 ignored, 73 test suites. Полные release-сборки workspace прошли для AArch64 GNU, ARMv5te musl EABI5 и MIPS32 GNU. ARMv5 бинарники прошли QEMU smoke; `qemu-mipsel` в среде отсутствует. `cargo fmt --all -- --check` прошёл. Проверка на физическом роутере не выполнялась. Нового бинарного REA Evidence нет: доступный провайдер отклонил ELF; приёмка опирается на SHA-идентифицированные исходники, C-наборы и C/Rust сценарии.
+
+## Дополнение к приёмке по актуальному донору `c3df4ec` — 22.10.2026
+
+Эталон `t0fox/d2o` commit `c3df4ec0796081fab7c5f964b09f4688fa74aa06`. В отдельной временной копии SHA-256: `datapath/session.c=f3bc8c4ddd334a189c63dc1bbf868eff258c2fdff3199e285d4a098d2ad3fe1f`, `core/sched.c=67f5c245ddf1f9cd4361c256d36a93bc37060a699548169759823845c4da1312`, `core/test_sched.c=c811faca5ae143c3f0118d79c198bd2f70faa64bdf6d0e153ef48d97153a5921`. Копия `E:\d2o` не изменялась.
+
+В эту сверку вошли C `test_session`, полный `test_sched`, `test_sched_summary`, `test_catalog_sync`, `test_sched_quic_yield`; все прошли. Русский перенос отказов каталожных планов проверен socket- и CLI-сценариями вместе с сохранением строгого отката при live Discovery. `cargo test --workspace --locked`, `cargo fmt --all -- --check` и `git diff --check` прошли.
+
+Workspace release-сборки и QEMU smoke прошли для ARMv5 musl EABI, MIPS32 GNU, OpenWrt MIPS32 musl и OpenWrt AArch64 musl. Физический роутер не проверялся. REA/Ghidra не запускался: ветви подтверждены исходником и исполняемыми C/Rust-тестами; новое бинарное Evidence не заявляется.

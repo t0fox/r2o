@@ -706,6 +706,37 @@ pub fn r2o_fetch_measure_rx_volume_with_fallback_path(
     r2o_fetch_measure_rx_volume_with_fallback_path_and_roots(options, fallback_path, roots)
 }
 
+fn r2o_fetch_rx_probe(
+    options: &FetchOptions,
+    encoding: R2oFetchEncoding,
+    roots: RootCertStore,
+) -> Result<FetchResult, String> {
+    let first = r2o_fetch_with_roots_and_encoding(options, encoding, roots.clone())?;
+    if !r2o_fetch_rx_probe_needs_repeat(&first) {
+        return Ok(first);
+    }
+
+    drop(first);
+    std::thread::sleep(R2O_VOLUME_RX_PROBE_GAP);
+    r2o_fetch_with_roots_and_encoding(options, encoding, roots)
+}
+
+fn r2o_fetch_rx_probe_needs_repeat(result: &FetchResult) -> bool {
+    let observation = &result.r2o_volume_observation;
+    let early_success = (200..300).contains(&result.status)
+        && !result.complete
+        && result.body_bytes < crate::r2o_volume::R2O_VOLUME_MIN_BYTES;
+    (result.status == 0 || early_success)
+        && observation.name_valid
+        && matches!(observation.negotiated_tls, Some(0x0303 | 0x0304))
+        && !observation.local_limit
+        && !crate::r2o_volume::r2o_volume_rx_partial(observation)
+}
+
+fn r2o_fetch_rx_probe_is_unmeasured(result: &FetchResult) -> bool {
+    r2o_fetch_rx_probe_needs_repeat(result)
+}
+
 fn r2o_fetch_measure_rx_volume_with_fallback_path_and_roots(
     options: &FetchOptions,
     fallback_path: Option<&str>,
@@ -815,29 +846,24 @@ fn r2o_fetch_measure_rx_volume_once(
     }
     let mut r2o_options = options.clone();
     r2o_options.deadline = R2O_VOLUME_RX_DEADLINE;
-    let r2o_first = match r2o_fetch_with_roots_and_encoding(
-        &r2o_options,
-        R2oFetchEncoding::Identity,
-        roots.clone(),
-    ) {
-        Ok(result) => result,
-        Err(error) => {
-            r2o_result.rx_tls_unavailable = error.starts_with("TLS-рукопожатие не завершилось:");
-            r2o_result.failures.push(error.clone());
-            r2o_result.reason = format!("первая identity-проверка не установила TLS/HTTP: {error}");
-            return r2o_result;
-        }
-    };
+    let r2o_first =
+        match r2o_fetch_rx_probe(&r2o_options, R2oFetchEncoding::Identity, roots.clone()) {
+            Ok(result) => result,
+            Err(error) => {
+                r2o_result.rx_tls_unavailable =
+                    error.starts_with("TLS-рукопожатие не завершилось:");
+                r2o_result.failures.push(error.clone());
+                r2o_result.reason =
+                    format!("первая identity-проверка не установила TLS/HTTP: {error}");
+                return r2o_result;
+            }
+        };
     r2o_result.direct_complete = (200..300).contains(&r2o_first.status) && r2o_first.complete;
     let r2o_first_observation = r2o_first.r2o_volume_observation;
     if !crate::r2o_volume::r2o_volume_rx_partial(&r2o_first_observation) {
-        r2o_result.rx_unmeasured = (r2o_first.status == 0 || !r2o_first.complete)
-            && r2o_first_observation.stage == crate::r2o_volume::R2oVolumeProbeStage::Handshake
-            && r2o_first_observation.name_valid
-            && matches!(r2o_first_observation.negotiated_tls, Some(0x0303 | 0x0304))
+        r2o_result.rx_unmeasured = r2o_fetch_rx_probe_is_unmeasured(&r2o_first)
             && !r2o_result.direct_complete
-            && !r2o_result.rx_tls_unavailable
-            && !r2o_first_observation.local_limit;
+            && !r2o_result.rx_tls_unavailable;
         if r2o_first.status > 0 && r2o_first.complete && r2o_first.body_bytes < 12 * 1024 {
             r2o_result.short_bytes = Some(r2o_first.body_bytes);
             r2o_result.reason = format!(
@@ -861,18 +887,15 @@ fn r2o_fetch_measure_rx_volume_once(
     }
     r2o_result.first = Some(r2o_first);
     std::thread::sleep(R2O_VOLUME_RX_PROBE_GAP);
-    let r2o_second = match r2o_fetch_with_roots_and_encoding(
-        &r2o_options,
-        R2oFetchEncoding::Identity,
-        roots.clone(),
-    ) {
-        Ok(result) => result,
-        Err(error) => {
-            r2o_result.failures.push(error.clone());
-            r2o_result.reason = format!("повтор identity не завершился: {error}");
-            return r2o_result;
-        }
-    };
+    let r2o_second =
+        match r2o_fetch_rx_probe(&r2o_options, R2oFetchEncoding::Identity, roots.clone()) {
+            Ok(result) => result,
+            Err(error) => {
+                r2o_result.failures.push(error.clone());
+                r2o_result.reason = format!("повтор identity не завершился: {error}");
+                return r2o_result;
+            }
+        };
     let r2o_second_observation = r2o_second.r2o_volume_observation;
     let mut r2o_confirming_observation = r2o_second_observation;
     if !crate::r2o_volume::r2o_volume_rx_pair_agrees(
@@ -892,18 +915,15 @@ fn r2o_fetch_measure_rx_volume_once(
         }
         r2o_result.second = Some(r2o_second);
         std::thread::sleep(R2O_VOLUME_RX_PROBE_GAP);
-        let r2o_third = match r2o_fetch_with_roots_and_encoding(
-            &r2o_options,
-            R2oFetchEncoding::Identity,
-            roots.clone(),
-        ) {
-            Ok(result) => result,
-            Err(error) => {
-                r2o_result.failures.push(error.clone());
-                r2o_result.reason = format!("третий identity-замер не завершился: {error}");
-                return r2o_result;
-            }
-        };
+        let r2o_third =
+            match r2o_fetch_rx_probe(&r2o_options, R2oFetchEncoding::Identity, roots.clone()) {
+                Ok(result) => result,
+                Err(error) => {
+                    r2o_result.failures.push(error.clone());
+                    r2o_result.reason = format!("третий identity-замер не завершился: {error}");
+                    return r2o_result;
+                }
+            };
         r2o_confirming_observation = r2o_third.r2o_volume_observation;
         if !crate::r2o_volume::r2o_volume_rx_pair_agrees(
             &r2o_first_observation,
@@ -922,15 +942,14 @@ fn r2o_fetch_measure_rx_volume_once(
     }
 
     std::thread::sleep(R2O_VOLUME_RX_PROBE_GAP);
-    let r2o_gzip =
-        match r2o_fetch_with_roots_and_encoding(&r2o_options, R2oFetchEncoding::Gzip, roots) {
-            Ok(result) => result,
-            Err(error) => {
-                r2o_result.failures.push(error.clone());
-                r2o_result.reason = format!("gzip-контроль не завершился: {error}");
-                return r2o_result;
-            }
-        };
+    let r2o_gzip = match r2o_fetch_rx_probe(&r2o_options, R2oFetchEncoding::Gzip, roots) {
+        Ok(result) => result,
+        Err(error) => {
+            r2o_result.failures.push(error.clone());
+            r2o_result.reason = format!("gzip-контроль не завершился: {error}");
+            return r2o_result;
+        }
+    };
     r2o_result.evidence = crate::r2o_volume::r2o_volume_rx_evidence(
         &r2o_first_observation,
         &r2o_confirming_observation,
@@ -1843,6 +1862,101 @@ mod tests {
         assert!(crate::r2o_volume::r2o_volume_rx_partial(
             &result.r2o_volume_observation
         ));
+    }
+
+    #[test]
+    fn rx_повторяет_тот_же_запрос_после_незавершённого_tls_ответа() {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use rustls::{ServerConfig, ServerConnection};
+        use std::net::{TcpListener, TcpStream};
+        use std::sync::Arc;
+        use std::sync::mpsc;
+        use std::thread;
+
+        fn accept_before(listener: &TcpListener) -> TcpStream {
+            let deadline = std::time::Instant::now() + Duration::from_secs(4);
+            loop {
+                match listener.accept() {
+                    Ok((socket, _)) => return socket,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "повторный RX-запрос не пришёл"
+                        );
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("принять RX-запрос: {error}"),
+                }
+            }
+        }
+
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+            .expect("создать сертификат localhost");
+        let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
+        let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certificate.serialize_private_key_der(),
+        ));
+        let server_config = Arc::new(
+            ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(vec![certificate_der.clone()], private_key)
+                .unwrap(),
+        );
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate_der).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("открыть HTTPS-приёмник");
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (request_sender, request_receiver) = mpsc::channel();
+        let server = thread::spawn(move || {
+            for attempt in 0..2 {
+                let socket = accept_before(&listener);
+                let connection = ServerConnection::new(server_config.clone()).unwrap();
+                let mut stream = StreamOwned::new(connection, socket);
+                let mut request = Vec::new();
+                let mut byte = [0_u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).expect("прочитать RX-запрос");
+                    request.push(byte[0]);
+                }
+                request_sender.send(request).unwrap();
+                if attempt == 0 {
+                    stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nx")
+                        .expect("оборвать первый RX-ответ");
+                } else {
+                    stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Type: text/plain\r\n\r\nx")
+                        .expect("завершить повторный RX-ответ");
+                }
+            }
+        });
+
+        let options = FetchOptions {
+            name: "localhost".into(),
+            port: address.port(),
+            ip: Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            path: "/same".into(),
+            deadline: Duration::from_secs(3),
+            tls12: false,
+            wire_len: None,
+            mark: None,
+        };
+        let result = r2o_fetch_rx_probe(&options, R2oFetchEncoding::Identity, roots)
+            .expect("завершить повторный RX-запрос");
+        let requests = request_receiver.try_iter().collect::<Vec<_>>();
+        server.join().unwrap();
+
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.starts_with(b"GET /same HTTP/1.1\r\n"))
+        );
+        assert_eq!(result.status, 200);
+        assert!(result.complete);
+        assert_eq!(result.body_bytes, 1);
     }
 
     #[test]

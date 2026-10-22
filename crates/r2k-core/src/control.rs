@@ -4,7 +4,7 @@ use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-pub const PROTOCOL_VERSION: u16 = 42;
+pub const PROTOCOL_VERSION: u16 = 43;
 pub const FRAME_MAX: usize = 65_536;
 pub const KEY_LEN: usize = 38;
 pub const MAX_DNS_NAME_LEN: usize = 253;
@@ -354,6 +354,7 @@ pub struct R2oTcpStallEvent {
     pub client_is_low: bool,
     pub elapsed_ms: u32,
     pub estimated_packets: u32,
+    pub planned: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -367,6 +368,7 @@ pub struct R2oTcpFinRetryEvent {
 pub struct R2oTcpRstAfterAppEvent {
     pub key: [u8; KEY_LEN],
     pub client_is_low: bool,
+    pub planned: bool,
 }
 
 impl R2oTcpFinRetryEvent {
@@ -387,9 +389,10 @@ impl R2oTcpRstAfterAppEvent {
         if !valid_flow_key(&self.key) || self.key[37] != 6 {
             return None;
         }
-        let mut body = Vec::with_capacity(KEY_LEN + 1);
+        let mut body = Vec::with_capacity(KEY_LEN + 2);
         body.extend_from_slice(&self.key);
         body.push(u8::from(self.client_is_low));
+        body.push(u8::from(self.planned));
         Some(body)
     }
 }
@@ -403,11 +406,12 @@ impl R2oTcpStallEvent {
         {
             return None;
         }
-        let mut body = Vec::with_capacity(KEY_LEN + 9);
+        let mut body = Vec::with_capacity(KEY_LEN + 10);
         body.extend_from_slice(&self.key);
         body.push(u8::from(self.client_is_low));
         body.extend_from_slice(&self.elapsed_ms.to_be_bytes());
         body.extend_from_slice(&self.estimated_packets.to_be_bytes());
+        body.push(u8::from(self.planned));
         Some(body)
     }
 }
@@ -1719,24 +1723,26 @@ pub fn decode_r2o_tcp_fin_retry(frame: &Frame) -> Result<R2oTcpFinRetryEvent, &'
 }
 
 pub fn decode_r2o_tcp_rst_after_app(frame: &Frame) -> Result<R2oTcpRstAfterAppEvent, &'static str> {
-    if frame.kind != EVENT_R2O_TCP_RST_AFTER_APP || frame.body.len() != KEY_LEN + 1 {
+    if frame.kind != EVENT_R2O_TCP_RST_AFTER_APP || frame.body.len() != KEY_LEN + 2 {
         return Err("неверная длина события позднего RST после TLS app-data");
     }
     let key: [u8; KEY_LEN] = frame.body[..KEY_LEN]
         .try_into()
         .map_err(|_| "неверный ключ TCP-потока с поздним RST")?;
     let client_is_low = frame.body[KEY_LEN];
-    if !valid_flow_key(&key) || key[37] != 6 || client_is_low > 1 {
+    let planned = frame.body[KEY_LEN + 1];
+    if !valid_flow_key(&key) || key[37] != 6 || client_is_low > 1 || planned > 1 {
         return Err("событие позднего RST содержит неверный TCP-поток");
     }
     Ok(R2oTcpRstAfterAppEvent {
         key,
         client_is_low: client_is_low == 1,
+        planned: planned == 1,
     })
 }
 
 pub fn decode_r2o_tcp_stall(frame: &Frame) -> Result<R2oTcpStallEvent, &'static str> {
-    if frame.kind != EVENT_R2O_TCP_STALL || frame.body.len() != KEY_LEN + 9 {
+    if frame.kind != EVENT_R2O_TCP_STALL || frame.body.len() != KEY_LEN + 10 {
         return Err("неверный размер события зависшего TCP-потока");
     }
     let key: [u8; KEY_LEN] = frame.body[..KEY_LEN]
@@ -1760,7 +1766,8 @@ pub fn decode_r2o_tcp_stall(frame: &Frame) -> Result<R2oTcpStallEvent, &'static 
             .try_into()
             .expect("длина проверена"),
     );
-    if elapsed_ms == 0 || estimated_packets == 0 {
+    let planned = frame.body[KEY_LEN + 9];
+    if elapsed_ms == 0 || estimated_packets == 0 || planned > 1 {
         return Err("событие зависшего TCP-потока содержит пустую оценку");
     }
     Ok(R2oTcpStallEvent {
@@ -1768,6 +1775,7 @@ pub fn decode_r2o_tcp_stall(frame: &Frame) -> Result<R2oTcpStallEvent, &'static 
         client_is_low,
         elapsed_ms,
         estimated_packets,
+        planned: planned == 1,
     })
 }
 

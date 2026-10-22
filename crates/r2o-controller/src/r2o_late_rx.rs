@@ -107,9 +107,6 @@ impl R2oLateRxCache {
         mark: Option<u32>,
         now: Instant,
     ) -> Option<R2oLateRxInput> {
-        if event.planned {
-            return None;
-        }
         self.take_for_flow(&event.key, event.client_is_low, mark, now)
     }
 
@@ -228,6 +225,7 @@ mod tests {
         let reset = R2oTcpRstAfterAppEvent {
             key: hello.key,
             client_is_low: true,
+            planned: true,
         };
 
         let input = cache.take_for_rst(&reset, None, now).unwrap();
@@ -264,6 +262,7 @@ mod tests {
         let reset = R2oTcpRstAfterAppEvent {
             key: hello.key,
             client_is_low: false,
+            planned: true,
         };
 
         let input = cache.take_for_rst(&reset, None, now).unwrap();
@@ -284,6 +283,7 @@ mod tests {
             client_is_low: true,
             elapsed_ms: 2_500,
             estimated_packets: 25,
+            planned: false,
         };
 
         let input = cache.take_for_tcp_stall(&event, Some(17), now).unwrap();
@@ -295,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn парная_проверка_fin_retry_разрешена_только_без_плана() {
+    fn парная_проверка_fin_retry_поддерживает_обе_формы_исполнения() {
         let now = Instant::now();
         let mut cache = R2oLateRxCache::default();
         let hello = hello(SHAPE_MODERN, true, Some(812));
@@ -306,7 +306,8 @@ mod tests {
             client_is_low: true,
             planned: true,
         };
-        assert!(cache.take_for_fin_retry(&planned, None, now).is_none());
+        assert!(cache.take_for_fin_retry(&planned, None, now).is_some());
+        assert!(cache.capture(&hello, now));
 
         let unplanned = R2oTcpFinRetryEvent {
             planned: false,
@@ -381,6 +382,7 @@ mod tests {
                     &R2oTcpRstAfterAppEvent {
                         key: foreign,
                         client_is_low: true,
+                        planned: false,
                     },
                     None,
                     now,
@@ -393,6 +395,7 @@ mod tests {
                     &R2oTcpRstAfterAppEvent {
                         key: hello.key,
                         client_is_low: true,
+                        planned: false,
                     },
                     None,
                     now + Duration::from_secs(61),
@@ -429,6 +432,7 @@ mod tests {
                     &R2oTcpRstAfterAppEvent {
                         key: first_key.unwrap(),
                         client_is_low: true,
+                        planned: false,
                     },
                     None,
                     now + Duration::from_secs(1),

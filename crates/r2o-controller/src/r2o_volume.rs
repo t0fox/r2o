@@ -1,4 +1,4 @@
-const R2O_VOLUME_MIN_BYTES: u64 = 12 * 1024;
+pub(crate) const R2O_VOLUME_MIN_BYTES: u64 = 12 * 1024;
 const R2O_VOLUME_BYTE_SLACK: u64 = 4 * 1024;
 const R2O_VOLUME_PACKET_SLACK: u32 = 3;
 

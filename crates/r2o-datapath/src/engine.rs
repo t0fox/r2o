@@ -811,6 +811,7 @@ impl TcpSessions {
             client_is_low: session.initiator == flow_key.low,
             elapsed_ms: elapsed.as_millis().min(u128::from(u32::MAX)) as u32,
             estimated_packets: estimate.min(u64::from(u32::MAX)) as u32,
+            planned: session.plan_done,
         })
     }
 
@@ -1155,6 +1156,7 @@ impl TcpSessions {
             rst_after_app_event = Some(R2oTcpRstAfterAppEvent {
                 key: key.wire_key(),
                 client_is_low: session.initiator == key.low,
+                planned: session.plan_done,
             });
         }
         if fin
@@ -2009,6 +2011,7 @@ mod tests {
             .unwrap();
         assert_eq!(event.elapsed_ms, 2100);
         assert_eq!(event.estimated_packets, 25);
+        assert!(!event.planned);
     }
 
     #[cfg(target_os = "linux")]
@@ -2808,6 +2811,7 @@ mod tests {
             assert_eq!(events.len(), 1);
             assert!(events[0].client_is_low);
             assert_eq!(events[0].key[37], 6);
+            assert!(!events[0].planned);
         }
     }
 
@@ -3853,6 +3857,8 @@ mod tests {
             &plan,
             &ipv4_tcp_packet(server, client, 0x18, 124, 900, &[0x17, 0x03, 0x03, 0, 1, 0]),
         );
+        let key = sessions.flows.keys().next().unwrap().wire_key();
+        sessions.mark_plan_done(&key);
 
         assert_eq!(
             decide_with_session(
@@ -3865,8 +3871,8 @@ mod tests {
         let events = sessions.rst_after_app_candidates();
         assert_eq!(events.len(), 1);
         assert!(events[0].client_is_low);
-        let key = events[0].key;
-        sessions.mark_rst_after_app(&key);
+        assert!(events[0].planned);
+        sessions.mark_rst_after_app(&events[0].key);
         assert!(sessions.rst_after_app_candidates().is_empty());
     }
 

@@ -17,6 +17,15 @@ pub struct DiscoveryTarget {
     pub shape: u8,
 }
 
+/// Перевести неподтверждённый ECH offer на обычный TLS-путь GREASE.
+pub fn regrade_ech_grease(target: &mut DiscoveryTarget) -> bool {
+    if target.shape != SHAPE_ECH_TCP {
+        return false;
+    }
+    target.shape = SHAPE_MODERN;
+    true
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DirectClearBindingUpdate {
     pub marked: usize,
@@ -324,6 +333,35 @@ pub fn has_usable_binding(catalog: &Catalog, target: &DiscoveryTarget) -> bool {
 /// Проверить, покрывает ли цель привязка, измеренная только профилем.
 pub fn has_usable_profile_binding(catalog: &Catalog, target: &DiscoveryTarget) -> bool {
     has_usable_binding_with_input(catalog, target, Some(2))
+}
+
+/// Проверить, покрывает ли активная подтверждённая привязка видимую форму потока.
+/// Мягкие привязки и привязки на повторной проверке не подавляют новое наблюдение.
+pub fn has_covering_binding(catalog: &Catalog, target: &DiscoveryTarget) -> bool {
+    catalog.boxes.iter().any(|box_record| {
+        box_record.bindings.iter().any(|binding| {
+            let family = if binding.family == 0 {
+                4
+            } else {
+                binding.family
+            };
+            let transport = if binding.transport == 0 {
+                6
+            } else {
+                binding.transport
+            };
+            binding.enabled
+                && binding.level >= 3
+                && binding.recheck_since.is_none()
+                && binding.kind == "name"
+                && binding.target == target.host
+                && family == target.family
+                && transport == 6
+                && (binding.shape == 0
+                    || binding.shape == target.shape
+                    || binding.shape == SHAPE_MODERN && target.shape == SHAPE_ECH_TCP)
+        })
+    })
 }
 
 fn has_usable_binding_with_input(
@@ -801,7 +839,9 @@ fn stable_plan_id(family: u8, shape: u8, text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{DiscoveryTarget, r2o_ech_witness_candidates};
-    use r2k_core::control::{BindingContext, HttpResponseEvent, KEY_LEN, SHAPE_HTTP};
+    use r2k_core::control::{
+        BindingContext, HttpResponseEvent, KEY_LEN, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_MODERN,
+    };
     use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
@@ -852,6 +892,60 @@ mod tests {
                 "old-target.example",
             ]
         );
+    }
+
+    #[test]
+    fn современная_привязка_покрывает_ech_и_снятая_с_проверки_не_покрывает() {
+        use crate::catalog::{Binding, BoxRecord, Catalog};
+
+        let target = DiscoveryTarget {
+            host: "example.com".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: SHAPE_ECH_TCP,
+        };
+        let binding = Binding {
+            kind: "name".into(),
+            target: target.host.clone(),
+            level: 3,
+            enabled: true,
+            transport: 6,
+            family: 4,
+            shape: SHAPE_MODERN,
+            ..Binding::default()
+        };
+        let catalog = Catalog {
+            boxes: vec![BoxRecord {
+                bindings: vec![binding.clone()],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        assert!(super::has_covering_binding(&catalog, &target));
+
+        let mut recheck = binding;
+        recheck.recheck_since = Some(1);
+        let recheck_catalog = Catalog {
+            boxes: vec![BoxRecord {
+                bindings: vec![recheck],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        assert!(!super::has_covering_binding(&recheck_catalog, &target));
+    }
+
+    #[test]
+    fn неподтверждённый_ech_offer_переходит_на_обычную_форму_tls13() {
+        let mut target = DiscoveryTarget {
+            host: "example.com".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: SHAPE_ECH_TCP,
+        };
+        assert!(super::regrade_ech_grease(&mut target));
+        assert_eq!(target.shape, SHAPE_MODERN);
+        assert!(!super::regrade_ech_grease(&mut target));
     }
 
     #[test]

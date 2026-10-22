@@ -1135,10 +1135,11 @@ fn apply_catalog(socket_path: PathBuf, catalog_path: PathBuf) -> Result<(), Box<
     let catalog = Catalog::load(&catalog_path)?;
     let compiled = catalog_commands(&catalog)?;
     let mut client = ControlClient::connect(socket_path)?;
-    install_catalog(&mut client, &compiled)?;
+    let installed = install_catalog_best_effort(&mut client, &compiled)?;
+    report_catalog_refusals(&installed);
     println!(
         "каталог обработан: установлено {}, пропущено неподдерживаемых {skipped}",
-        compiled.commands.len(),
+        installed.installed,
         skipped = compiled.skipped
     );
     Ok(())
@@ -1156,10 +1157,11 @@ fn serve_catalog(
     let catalog = Catalog::load(&catalog_path)?;
     let compiled = catalog_commands(&catalog)?;
     let mut client = ControlClient::connect(socket_path)?;
-    install_catalog(&mut client, &compiled)?;
+    let installed = install_catalog_best_effort(&mut client, &compiled)?;
+    report_catalog_refusals(&installed);
     println!(
         "каталог обработан: установлено {}, пропущено неподдерживаемых {}; {}",
-        compiled.commands.len(),
+        installed.installed,
         compiled.skipped,
         if discover {
             "наблюдение и автопоиск активны"
@@ -1854,46 +1856,123 @@ fn matching_domain_recovery_candidates(
 }
 
 #[cfg(unix)]
+#[derive(Debug, Default, Eq, PartialEq)]
+struct CatalogInstallSummary {
+    installed: usize,
+    refused: usize,
+    last_refusal: Option<&'static str>,
+}
+
+#[cfg(unix)]
 fn install_catalog(
     client: &mut ControlClient,
     compiled: &CompiledCatalog,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<CatalogInstallSummary, Box<dyn Error>> {
+    install_catalog_with_policy(client, compiled, false)
+}
+
+#[cfg(unix)]
+fn install_catalog_best_effort(
+    client: &mut ControlClient,
+    compiled: &CompiledCatalog,
+) -> Result<CatalogInstallSummary, Box<dyn Error>> {
+    install_catalog_with_policy(client, compiled, true)
+}
+
+#[cfg(unix)]
+fn install_catalog_with_policy(
+    client: &mut ControlClient,
+    compiled: &CompiledCatalog,
+    continue_plan_refusals: bool,
+) -> Result<CatalogInstallSummary, Box<dyn Error>> {
     client.send_clear()?;
+    let mut summary = CatalogInstallSummary::default();
     for (installed, (host, command)) in compiled.commands.iter().enumerate() {
         let expected = command
             .get(4..6)
             .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
             .ok_or("собранная команда каталога обрезана")?;
-        if let Err(error) = client.send_command(command, expected) {
-            return match client.send_clear() {
-                Ok(()) => Err(format!(
-                    "установка каталога остановлена после {installed} привязок; частичная таблица очищена; {host}: {error}"
-                )
-                .into()),
-                Err(clear_error) => Err(format!(
-                    "установка каталога остановлена после {installed} привязок; не удалось очистить частичную таблицу; {host}: {error}; очистка при откате завершилась ошибкой: {clear_error}"
-                )
-                .into()),
+        if continue_plan_refusals
+            && matches!(
+                expected,
+                COMMAND_SET_NAME | COMMAND_SET_ADDR | control::COMMAND_SET_SUFFIX
+            )
+        {
+            let ack = match client.exchange_command(command, expected) {
+                Ok(ack) => ack,
+                Err(error) => {
+                    return Err(rollback_catalog_install(
+                        client,
+                        installed,
+                        format!("{host}: {error}"),
+                    ));
+                }
             };
+            if !ack.ok {
+                summary.refused += 1;
+                summary.last_refusal = Some(ack_reason_text(ack.reason));
+                continue;
+            }
+        } else if let Err(error) = client.send_command(command, expected) {
+            return Err(rollback_catalog_install(
+                client,
+                installed,
+                format!("{host}: {error}"),
+            ));
         }
+        summary.installed += 1;
     }
     if !compiled.tcp_stall_budgets.is_empty() {
         let command = encode_set_tcp_stall_budgets(&compiled.tcp_stall_budgets)
             .map_err(|error| format!("SET_TCP_STALL_BUDGETS: {error}"))?;
         if let Err(error) = client.send_command(&command, COMMAND_SET_TCP_STALL_BUDGETS) {
-            return match client.send_clear() {
-                Ok(()) => Err(format!(
-                    "бюджеты потока TCP не установлены; таблица планов очищена: {error}"
-                )
-                .into()),
-                Err(clear_error) => Err(format!(
-                    "бюджеты потока TCP не установлены ({error}); очистка таблицы планов также не удалась: {clear_error}"
-                )
-                .into()),
-            };
+            return Err(rollback_catalog_install(
+                client,
+                summary.installed + summary.refused,
+                format!("бюджеты потока TCP: {error}"),
+            ));
         }
     }
-    Ok(())
+    Ok(summary)
+}
+
+#[cfg(unix)]
+fn rollback_catalog_install(
+    client: &mut ControlClient,
+    installed: usize,
+    error: impl std::fmt::Display,
+) -> Box<dyn Error> {
+    match client.send_clear() {
+        Ok(()) => format!(
+            "установка каталога остановлена после {installed} привязок; частичная таблица очищена; {error}"
+        )
+        .into(),
+        Err(clear_error) => format!(
+            "установка каталога остановлена после {installed} привязок; не удалось очистить частичную таблицу; {error}; очистка при откате завершилась ошибкой: {clear_error}"
+        )
+        .into(),
+    }
+}
+
+#[cfg(unix)]
+fn ack_reason_text(reason: u8) -> &'static str {
+    match reason {
+        control::ACK_BAD_PLAN => "план не подходит runtime",
+        control::ACK_NO_ROOM => "таблица планов заполнена",
+        control::ACK_BAD_ARGS => "датапат отверг аргументы",
+        _ => "неизвестная причина",
+    }
+}
+
+#[cfg(unix)]
+fn report_catalog_refusals(summary: &CatalogInstallSummary) {
+    if summary.refused > 0 {
+        println!(
+            "каталог: датапат отверг планов с прошлой сводки: {} ({}) — обход по этим целям не исполняется, причина в журнале датапата",
+            summary.refused,
+            summary.last_refusal.unwrap_or("неизвестная причина")
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -2240,6 +2319,20 @@ struct R2oLateRxWorker {
     cancel: Arc<AtomicBool>,
     cooldowns: HashMap<String, std::time::Instant>,
     thread: Option<JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+fn r2o_late_rx_is_covered_by_catalog(
+    input: &R2oLateRxInput,
+    planned: bool,
+    catalog: Option<&Catalog>,
+) -> bool {
+    !planned
+        && input.discovery_target.as_ref().is_some_and(|target| {
+            catalog.is_some_and(|catalog| {
+                r2o_controller::discovery::has_covering_binding(catalog, target)
+            })
+        })
 }
 
 #[cfg(unix)]
@@ -4680,21 +4773,58 @@ impl DiscoveryWorker {
                 cache.keys().cloned().collect::<HashSet<_>>()
             };
             ech_witness_candidates.retain(|witness| !challenged.contains(witness));
-            let (ech_config, next_witness) = if let Some((config, next)) =
-                r2o_discovery_first_ech_witness(
+            let known_ech_origin = candidate_catalog.as_ref().and_then(|catalog| {
+                catalog
+                    .boxes
+                    .iter()
+                    .flat_map(|box_record| &box_record.bindings)
+                    .find(|binding| {
+                        binding.enabled
+                            && binding.level >= 3
+                            && binding.kind == "name"
+                            && binding.target == target.host
+                            && matches!(binding.transport, 0 | 6)
+                            && (binding.family == target.family
+                                || binding.family == 0 && target.family == 4)
+                            && !binding.ech_origin.is_empty()
+                    })
+                    .map(|binding| binding.ech_origin.clone())
+            });
+            let known_origin_config = known_ech_origin.as_deref().and_then(|witness| {
+                r2o_discovery_ech_witness_config(
                     &target,
-                    &ech_witness_candidates,
-                    0,
+                    witness,
                     mark,
                     &runner_ech_witness_resolutions,
-                ) {
-                (Some(config), next)
-            } else {
-                (
-                    r2o_discovery_ech_config(&target, mark).ok().flatten(),
-                    ech_witness_candidates.len(),
                 )
+                .ok()
+                .flatten()
+            });
+            let direct_ech_config = known_origin_config
+                .is_none()
+                .then(|| r2o_discovery_ech_config(&target, mark).ok().flatten())
+                .flatten();
+            let ech_configuration_proven =
+                direct_ech_config.is_some() || known_origin_config.is_some();
+            let witness_search = if ech_configuration_proven {
+                ech_witness_candidates.as_slice()
+            } else {
+                &ech_witness_candidates[..ech_witness_candidates.len().min(4)]
             };
+            let (witness_config, next_witness) = r2o_discovery_first_ech_witness(
+                &target,
+                witness_search,
+                0,
+                mark,
+                &runner_ech_witness_resolutions,
+            )
+            .map_or((None, witness_search.len()), |(config, next)| {
+                (Some(config), next)
+            });
+            let ech_config = witness_config.or(known_origin_config).or(direct_ech_config);
+            let mut target = target;
+            let ech_grease =
+                ech_config.is_none() && r2o_controller::discovery::regrade_ech_grease(&mut target);
             let outcome = r2o_classify_discovery_target_with_client_hello_and_ech(
                 target.clone(),
                 client_hello.as_deref(),
@@ -4702,6 +4832,12 @@ impl DiscoveryWorker {
                 mark,
                 ech_config.as_ref(),
             );
+            let mut outcome = outcome;
+            if ech_grease {
+                outcome.detail.push_str(
+                    "; ECH-конфигурация имени не подтверждена — веду ClientHello как TLS 1.3 GREASE",
+                );
+            }
             if cancel.load(Ordering::Relaxed) {
                 return outcome;
             }
@@ -7073,6 +7209,9 @@ impl ControlClient {
                                 );
                             } else if let Some((worker, catalog, _, _)) = &mut discovery {
                                 if r2o_controller::discovery::has_usable_binding(catalog, &target)
+                                    || r2o_controller::discovery::has_covering_binding(
+                                        catalog, &target,
+                                    )
                                     || matching_domain_group(catalog, &target).is_some()
                                 {
                                     println!(
@@ -7153,6 +7292,9 @@ impl ControlClient {
                         } else if let Some((worker, catalog, _, _)) = &mut discovery {
                             let has_solution =
                                 r2o_controller::discovery::has_usable_binding(catalog, &target)
+                                    || r2o_controller::discovery::has_covering_binding(
+                                        catalog, &target,
+                                    )
                                     || matching_domain_group(catalog, &target).is_some();
                             if event.planned {
                                 let queued = if has_solution {
@@ -7217,6 +7359,9 @@ impl ControlClient {
                         } else if let Some((worker, catalog, _, _)) = &mut discovery {
                             let has_solution =
                                 r2o_controller::discovery::has_usable_binding(catalog, &target)
+                                    || r2o_controller::discovery::has_covering_binding(
+                                        catalog, &target,
+                                    )
                                     || matching_domain_group(catalog, &target).is_some();
                             if event.planned {
                                 let queued = if has_solution {
@@ -7263,13 +7408,25 @@ impl ControlClient {
                         .map_err(|error| format!("событие зависания TCP: {error}"))?;
                     let (client, server) = flow_socket_addresses(&event.key, event.client_is_low);
                     println!(
-                        "наблюдение TCP: поток {client} -> {server} замер на оценке {} пакетов; ответ не виден {} мс; это не подтверждает блокировку",
-                        event.estimated_packets, event.elapsed_ms
+                        "наблюдение TCP: поток {client} -> {server} замер на оценке {} пакетов; ответ не виден {} мс; план применялся={}; это не подтверждает блокировку",
+                        event.estimated_packets, event.elapsed_ms, event.planned
                     );
                     if let Some(worker) = &mut r2o_late_rx {
                         let now = std::time::Instant::now();
                         let mark = discovery.as_ref().and_then(|(_, _, _, mark)| *mark);
                         match r2o_late_rx_hellos.take_for_tcp_stall(&event, mark, now) {
+                            Some(input)
+                                if r2o_late_rx_is_covered_by_catalog(
+                                    &input,
+                                    event.planned,
+                                    discovery.as_ref().map(|(_, catalog, _, _)| catalog),
+                                ) =>
+                            {
+                                println!(
+                                    "парная RX-проверка {} пропущена: подтверждённая привязка покрывает форму потока без применённого плана",
+                                    input.options.name
+                                );
+                            }
                             Some(mut input) => {
                                 if let Some((discovery_worker, catalog, _, _)) = discovery.as_ref()
                                 {
@@ -7314,42 +7471,52 @@ impl ControlClient {
                     let (client, server) = flow_socket_addresses(&event.key, event.client_is_low);
                     if event.planned {
                         println!(
-                            "наблюдение TCP: поток {client} -> {server} повторил FIN под применённым планом; парную проверку без плана не запускаю"
+                            "наблюдение TCP: поток {client} -> {server} повторил FIN под применённым планом; запускаю контрольную RX-проверку"
                         );
                     } else {
                         println!(
                             "наблюдение TCP: поток {client} -> {server} повторил FIN без применённого плана; запускаю парную проверку объёма ответа"
                         );
-                        if let Some(worker) = &mut r2o_late_rx {
-                            let now = std::time::Instant::now();
-                            let mark = discovery.as_ref().and_then(|(_, _, _, mark)| *mark);
-                            match r2o_late_rx_hellos.take_for_fin_retry(&event, mark, now) {
-                                Some(mut input) => {
-                                    if let Some((discovery_worker, catalog, _, _)) =
-                                        discovery.as_ref()
-                                    {
-                                        discovery_worker
-                                            .prepare_late_rx_resource_paths(&mut input, catalog);
-                                    }
-                                    if worker.queue(input, now) {
-                                        println!(
-                                            "повтор FIN поставил парную identity/gzip RX-проверку для {client} -> {server}"
-                                        );
-                                    } else {
-                                        println!(
-                                            "парная RX-проверка для {client} -> {server} пропущена: очередь занята или действует десятиминутный предел для имени"
-                                        );
-                                    }
-                                }
-                                None => println!(
-                                    "парная RX-проверка для {client} -> {server} не запущена: нет свежего полного ClientHello с SNI"
-                                ),
+                    }
+                    if let Some(worker) = &mut r2o_late_rx {
+                        let now = std::time::Instant::now();
+                        let mark = discovery.as_ref().and_then(|(_, _, _, mark)| *mark);
+                        match r2o_late_rx_hellos.take_for_fin_retry(&event, mark, now) {
+                            Some(input)
+                                if r2o_late_rx_is_covered_by_catalog(
+                                    &input,
+                                    event.planned,
+                                    discovery.as_ref().map(|(_, catalog, _, _)| catalog),
+                                ) =>
+                            {
+                                println!(
+                                    "парная RX-проверка для {client} -> {server} пропущена: подтверждённая привязка покрывает форму потока без применённого плана"
+                                );
                             }
-                        } else {
-                            println!(
-                                "парная RX-проверка для {client} -> {server} не запущена: измеритель не подключён"
-                            );
+                            Some(mut input) => {
+                                if let Some((discovery_worker, catalog, _, _)) = discovery.as_ref()
+                                {
+                                    discovery_worker
+                                        .prepare_late_rx_resource_paths(&mut input, catalog);
+                                }
+                                if worker.queue(input, now) {
+                                    println!(
+                                        "повтор FIN поставил парную identity/gzip RX-проверку для {client} -> {server}"
+                                    );
+                                } else {
+                                    println!(
+                                        "парная RX-проверка для {client} -> {server} пропущена: очередь занята или действует десятиминутный предел для имени"
+                                    );
+                                }
+                            }
+                            None => println!(
+                                "парная RX-проверка для {client} -> {server} не запущена: нет свежего полного ClientHello с SNI"
+                            ),
                         }
+                    } else {
+                        println!(
+                            "парная RX-проверка для {client} -> {server} не запущена: измеритель не подключён"
+                        );
                     }
                     std::io::stdout().flush()?;
                     continue;
@@ -7365,6 +7532,17 @@ impl ControlClient {
                         let now = std::time::Instant::now();
                         let mark = discovery.as_ref().and_then(|(_, _, _, mark)| *mark);
                         match r2o_late_rx_hellos.take_for_rst(&event, mark, now) {
+                            Some(input)
+                                if r2o_late_rx_is_covered_by_catalog(
+                                    &input,
+                                    event.planned,
+                                    discovery.as_ref().map(|(_, catalog, _, _)| catalog),
+                                ) =>
+                            {
+                                println!(
+                                    "парная RX-проверка для {client} -> {server} пропущена: подтверждённая привязка покрывает форму потока без применённого плана"
+                                );
+                            }
                             Some(mut input) => {
                                 if let Some((discovery_worker, catalog, _, _)) = discovery.as_ref()
                                 {
@@ -7491,6 +7669,9 @@ impl ControlClient {
                         worker.remember_client_snapshot(&target, &shape.client_hello);
                         if r2o_controller::discovery::has_usable_profile_binding(catalog, &target)
                             || !r2o_controller::discovery::has_usable_binding(catalog, &target)
+                                && !r2o_controller::discovery::has_covering_binding(
+                                    catalog, &target,
+                                )
                         {
                             let profile_only =
                                 r2o_controller::discovery::has_usable_profile_binding(
@@ -7624,7 +7805,9 @@ impl ControlClient {
                             "каталог покрывает {}, но привязка измерена профилем; жду полный снимок ClientHello",
                             target.host
                         );
-                    } else if r2o_controller::discovery::has_usable_binding(catalog, &target) {
+                    } else if r2o_controller::discovery::has_usable_binding(catalog, &target)
+                        || r2o_controller::discovery::has_covering_binding(catalog, &target)
+                    {
                         println!("план каталога уже покрывает {} ({shape_name})", target.host);
                     } else if let Some(group) = matching_domain_group(catalog, &target) {
                         println!(
@@ -9132,7 +9315,7 @@ impl ControlClient {
             let runtime_rollback = catalog_commands(&previous)
                 .and_then(|previous_compiled| install_catalog(self, &previous_compiled));
             return Err(match (file_rollback, runtime_rollback) {
-                (Ok(()), Ok(())) => format!(
+                (Ok(()), Ok(_)) => format!(
                     "r2o-datapath не подтвердил обновлённый каталог; восстановлены прежние каталог и планы: {install_error}"
                 ),
                 (file_result, runtime_result) => format!(
@@ -9230,12 +9413,7 @@ impl ControlClient {
         if ack.ok {
             return Ok(());
         }
-        let reason = match ack.reason {
-            control::ACK_BAD_PLAN => "план не подходит runtime",
-            control::ACK_NO_ROOM => "таблица планов заполнена",
-            control::ACK_BAD_ARGS => "датапат отверг аргументы",
-            _ => "неизвестная причина",
-        };
+        let reason = ack_reason_text(ack.reason);
         let command_name = match expected {
             COMMAND_CLEAR => "CLEAR",
             COMMAND_SET_ADDR => "SET_ADDR",
@@ -10211,12 +10389,13 @@ mod tests {
     #[cfg(unix)]
     use super::saved_http_candidate_keys;
     use super::{
-        ClassifyCliOptions, ControlClient, DiscoveryOutcome, HttpCandidateHistory,
-        HttpCandidateProgress, HttpLiveFailures, HttpSearchCommand, HttpSearchDisposition,
-        HttpSearchTask, HttpSearchWindow, HttpSearchWorker, R2oFamilyRecoveryDecision,
-        R2oVoiceTrialContext, ServeCliOptions, advance_http_candidate, applied_quic_trial_matches,
-        baseline_silence_starts_search, binding_shape_transport, catalog_commands,
-        failed_http_programs, flow_socket_addresses, http_search_candidates, http_search_key,
+        CatalogInstallSummary, ClassifyCliOptions, CompiledCatalog, ControlClient,
+        DiscoveryOutcome, HttpCandidateHistory, HttpCandidateProgress, HttpLiveFailures,
+        HttpSearchCommand, HttpSearchDisposition, HttpSearchTask, HttpSearchWindow,
+        HttpSearchWorker, R2oFamilyRecoveryDecision, R2oVoiceTrialContext, ServeCliOptions,
+        advance_http_candidate, applied_quic_trial_matches, baseline_silence_starts_search,
+        binding_shape_transport, catalog_commands, failed_http_programs, flow_socket_addresses,
+        http_search_candidates, http_search_key, install_catalog_best_effort,
         matching_domain_group, matching_domain_recovery_candidates, measured_http_candidate_keys,
         normalize_plan_target, parse_classify_options, parse_serve_options, print_flow_journal,
         r2o_discovery_failure_retry_due, r2o_family_applied_flow_matches,
@@ -10235,6 +10414,64 @@ mod tests {
     use r2k_core::plan::{PLAN_MAGIC, Plan};
     use r2o_controller::catalog::{Binding, BoxRecord, Catalog, Fingerprint, Signal};
     use r2o_controller::discovery::DiscoveryTarget;
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_catalog_counts_refusals_and_keeps_installing_remaining_plans() {
+        use std::io::Write;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let socket_path = std::env::temp_dir().join(format!("r2o-catalog-refusal-{nonce}.sock"));
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            peer.write_all(&encode_greeting(u16::MAX as u32).unwrap())
+                .unwrap();
+            let clear = read_frame(&mut peer).unwrap();
+            assert_eq!(clear.kind, super::COMMAND_CLEAR);
+            peer.write_all(&encode_ack(clear.kind, true, 0).unwrap())
+                .unwrap();
+
+            for (ok, reason) in [
+                (false, r2k_core::control::ACK_BAD_PLAN),
+                (true, r2k_core::control::ACK_OK),
+                (false, r2k_core::control::ACK_NO_ROOM),
+            ] {
+                let command = read_frame(&mut peer).unwrap();
+                assert_eq!(command.kind, COMMAND_SET_NAME);
+                peer.write_all(&encode_ack(command.kind, ok, reason).unwrap())
+                    .unwrap();
+            }
+        });
+
+        let command = encode_frame(COMMAND_SET_NAME, &[]).unwrap();
+        let compiled = CompiledCatalog {
+            commands: vec![
+                ("bad-plan.example".into(), command.clone()),
+                ("installed.example".into(), command.clone()),
+                ("full-table.example".into(), command),
+            ],
+            skipped: 0,
+            tcp_stall_budgets: Vec::new(),
+        };
+        let mut client = ControlClient::connect(socket_path.clone()).unwrap();
+        let summary = install_catalog_best_effort(&mut client, &compiled).unwrap();
+
+        server.join().unwrap();
+        std::fs::remove_file(socket_path).unwrap();
+        assert_eq!(
+            summary,
+            CatalogInstallSummary {
+                installed: 1,
+                refused: 2,
+                last_refusal: Some("таблица планов заполнена"),
+            }
+        );
+    }
     use r2o_controller::fetch::FetchResult;
     use std::{collections::VecDeque, ffi::OsString, io::Write, path::PathBuf};
 
@@ -11844,7 +12081,7 @@ mod tests {
         };
         let event = Frame {
             kind: EVENT_R2O_TCP_STALL,
-            body: vec![0; KEY_LEN + 9],
+            body: vec![0; KEY_LEN + 10],
         };
 
         client.queue_async_frame(event.clone()).unwrap();

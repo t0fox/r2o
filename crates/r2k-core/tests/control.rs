@@ -176,6 +176,7 @@ fn событие_зависшего_tcp_потока_кодируется_и_с
         client_is_low: true,
         elapsed_ms: 2_500,
         estimated_packets: 25,
+        planned: true,
     };
     let frame = Frame {
         kind: EVENT_R2O_TCP_STALL,
@@ -184,7 +185,7 @@ fn событие_зависшего_tcp_потока_кодируется_и_с
     assert_eq!(decode_r2o_tcp_stall(&frame).unwrap(), event);
 
     let mut invalid = frame;
-    invalid.body[KEY_LEN] = 2;
+    invalid.body[KEY_LEN + 9] = 2;
     assert!(decode_r2o_tcp_stall(&invalid).is_err());
 }
 
@@ -268,6 +269,7 @@ fn событие_rst_после_tls_app_data_кодируется_и_строг
     let event = R2oTcpRstAfterAppEvent {
         key,
         client_is_low: true,
+        planned: true,
     };
     let frame = Frame {
         kind: EVENT_R2O_TCP_RST_AFTER_APP,
@@ -276,7 +278,7 @@ fn событие_rst_после_tls_app_data_кодируется_и_строг
     assert_eq!(decode_r2o_tcp_rst_after_app(&frame).unwrap(), event);
 
     let mut invalid = frame;
-    invalid.body[KEY_LEN] = 2;
+    invalid.body[KEY_LEN + 1] = 2;
     assert!(decode_r2o_tcp_rst_after_app(&invalid).is_err());
 }
 

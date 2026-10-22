@@ -758,14 +758,14 @@ fn apply_empty_catalog_clears_name_plans() {
 }
 
 #[test]
-fn apply_catalog_clears_partial_bindings_after_a_set_failure() {
+fn apply_catalog_skips_refused_binding_and_installs_following_binding() {
     let work = temporary_directory();
     fs::create_dir(&work).unwrap();
     let socket_path = work.join("control.sock");
     let catalog_path = work.join("catalog.json");
     fs::write(
         &catalog_path,
-        br#"{"boxes":[{"id":"box-1","created":"2026-10-18T00:00:00Z","updated":"2026-10-18T00:00:00Z","plans":[{"id":"plan-1","proto":"tls","text":"r2o-plan 1 11\nproto tcp tls\nsplit sni_middle +0\n","added":"2026-10-18T00:00:00Z","successes":1,"enabled":true}],"bindings":[{"kind":"name","target":"example.test","plan_id":"plan-1","level":1,"confirmed":"2026-10-18T00:00:00Z","successes":1,"enabled":true,"transport":6,"family":4,"shape":1}]}]}"#,
+        br#"{"boxes":[{"id":"box-1","created":"2026-10-18T00:00:00Z","updated":"2026-10-18T00:00:00Z","plans":[{"id":"plan-1","proto":"tls","text":"r2o-plan 1 11\nproto tcp tls\nsplit sni_middle +0\n","added":"2026-10-18T00:00:00Z","successes":1,"enabled":true},{"id":"plan-2","proto":"tls","text":"r2o-plan 1 11\nproto tcp tls\nsplit sni_middle +0\n","added":"2026-10-18T00:00:00Z","successes":1,"enabled":true}],"bindings":[{"kind":"name","target":"rejected.example.test","plan_id":"plan-1","level":1,"confirmed":"2026-10-18T00:00:00Z","successes":1,"enabled":true,"transport":6,"family":4,"shape":1},{"kind":"name","target":"accepted.example.test","plan_id":"plan-2","level":1,"confirmed":"2026-10-18T00:00:00Z","successes":1,"enabled":true,"transport":6,"family":4,"shape":1}]}]}"#,
     )
     .unwrap();
 
@@ -796,12 +796,11 @@ fn apply_catalog_clears_partial_bindings_after_a_set_failure() {
         nack.extend_from_slice(&[0x00, 0x81, 0, 2]);
         stream.write_all(&frame(0x0008, &nack)).unwrap();
 
-        let (kind, body) = read_frame(&mut stream);
-        assert_eq!(kind, 0x0085);
-        assert!(body.is_empty());
+        let (kind, _) = read_frame(&mut stream);
+        assert_eq!(kind, 0x0081);
         let mut ack = vec![0; KEY_LEN];
         ack[0] = 4;
-        ack.extend_from_slice(&[0x00, 0x85, 1, 0]);
+        ack.extend_from_slice(&[0x00, 0x81, 1, 0]);
         stream.write_all(&frame(0x0008, &ack)).unwrap();
         Ok(())
     });
@@ -814,8 +813,14 @@ fn apply_catalog_clears_partial_bindings_after_a_set_failure() {
         ])
         .output()
         .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("частичная таблица очищена"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("датапат отверг планов с прошлой сводки: 1"));
+    assert!(stdout.contains("каталог обработан: установлено 1"));
     server.join().unwrap().unwrap();
     let _ = fs::remove_dir_all(&work);
 }
