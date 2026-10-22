@@ -5879,6 +5879,11 @@ fn r2o_ech_witness_rx_cut(
         && config.origin_name != target.host
         && fetch.tls.is_some()
         && (200..400).contains(&fetch.status)
+        && !matches!(
+            fetch.http_outcome,
+            r2o_controller::fetch::R2oFetchHttpOutcome::Blocked
+                | r2o_controller::fetch::R2oFetchHttpOutcome::LegalDenial
+        )
         && !fetch.complete
         && fetch.r2o_volume_observation.body_framing_valid
         && fetch.body_bytes >= 8192
@@ -11635,6 +11640,15 @@ mod tests {
         ));
         not_cut = fetch.clone();
         not_cut.status = 400;
+        assert!(!super::r2o_ech_witness_rx_cut(
+            &target, &config, true, false, &not_cut
+        ));
+        not_cut = fetch.clone();
+        not_cut.http_outcome = r2o_controller::fetch::R2oFetchHttpOutcome::Blocked;
+        assert!(!super::r2o_ech_witness_rx_cut(
+            &target, &config, true, false, &not_cut
+        ));
+        not_cut.http_outcome = r2o_controller::fetch::R2oFetchHttpOutcome::LegalDenial;
         assert!(!super::r2o_ech_witness_rx_cut(
             &target, &config, true, false, &not_cut
         ));
