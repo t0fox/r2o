@@ -154,7 +154,7 @@ impl DiscoveryTarget {
     }
 }
 
-const R2O_ECH_WITNESS_LIMIT: usize = 32;
+pub const R2O_ECH_WITNESS_LIMIT: usize = 32;
 
 /// Собрать ограниченный список HTTPS-владельцев, способных подтвердить ECH.
 pub fn r2o_ech_witness_candidates(

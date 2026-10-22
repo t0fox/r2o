@@ -2880,6 +2880,22 @@ impl R2oEchWitnessResolutionCache {
         (now.saturating_duration_since(entry.checked_at) <= ttl).then(|| entry.config.clone())
     }
 
+    fn cached_witness_names(&self, public_name: &str, now: std::time::Instant) -> Vec<String> {
+        self.entries
+            .iter()
+            .flatten()
+            .filter(|entry| {
+                now.saturating_duration_since(entry.checked_at) <= R2O_DISCOVERY_ECH_RR_POSITIVE_TTL
+                    && entry
+                        .config
+                        .as_ref()
+                        .is_some_and(|config| config.public_name == public_name)
+            })
+            .take(r2o_controller::discovery::R2O_ECH_WITNESS_LIMIT)
+            .map(|entry| entry.name.clone())
+            .collect()
+    }
+
     fn store(
         &mut self,
         name: &str,
@@ -2903,6 +2919,26 @@ impl R2oEchWitnessResolutionCache {
             checked_at: now,
         });
     }
+}
+
+#[cfg(unix)]
+fn r2o_merge_ech_witness_candidates(
+    public_name: &str,
+    cached: &[String],
+    discovered: &[String],
+) -> Vec<String> {
+    let mut candidates = Vec::with_capacity(r2o_controller::discovery::R2O_ECH_WITNESS_LIMIT);
+    for name in cached.iter().chain(discovered) {
+        if name.is_empty()
+            || name == public_name
+            || candidates.len() >= r2o_controller::discovery::R2O_ECH_WITNESS_LIMIT
+            || candidates.iter().any(|candidate| candidate == name)
+        {
+            continue;
+        }
+        candidates.push(name.clone());
+    }
+    candidates
 }
 
 #[cfg(unix)]
@@ -3954,7 +3990,7 @@ impl DiscoveryWorker {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(&r2o_discovery_task_key(&target));
-            let mut ech_witness_candidates = if target.shape == SHAPE_ECH_TCP {
+            let discovered_witness_candidates = if target.shape == SHAPE_ECH_TCP {
                 match Catalog::load(&catalog_path) {
                     Ok(catalog) => {
                         let recent_names = runner_recent_tcp_names
@@ -3976,6 +4012,19 @@ impl DiscoveryWorker {
                 Vec::new()
             };
             let now = std::time::Instant::now();
+            let cached_witness_candidates = if target.shape == SHAPE_ECH_TCP {
+                runner_ech_witness_resolutions
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .cached_witness_names(&target.host, now)
+            } else {
+                Vec::new()
+            };
+            let mut ech_witness_candidates = r2o_merge_ech_witness_candidates(
+                &target.host,
+                &cached_witness_candidates,
+                &discovered_witness_candidates,
+            );
             let challenged = {
                 let mut cache = runner_ech_challenges
                     .lock()
@@ -9183,6 +9232,52 @@ mod tests {
                 )
                 .is_none()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ech_rr_свежие_положительные_свидетели_получают_приоритет() {
+        let now = std::time::Instant::now();
+        let mut cache = super::R2oEchWitnessResolutionCache::default();
+        let config = |public_name: &str| r2o_controller::ech::R2oEchConfig {
+            public_name: public_name.into(),
+            origin_name: "witness.example".into(),
+            config_list: vec![1],
+        };
+        cache.store("known-one.example", Some(config("public.example")), now);
+        cache.store("known-two.example", Some(config("public.example")), now);
+        cache.store("wrong.example", Some(config("other.example")), now);
+        cache.store("negative.example", None, now);
+        cache.store(
+            "expired.example",
+            Some(config("public.example")),
+            now - super::R2O_DISCOVERY_ECH_RR_POSITIVE_TTL - std::time::Duration::from_nanos(1),
+        );
+
+        let cached = cache.cached_witness_names("public.example", now);
+        let mut discovered = vec!["known-one.example".into(), "public.example".into()];
+        discovered.extend((0..40).map(|index| format!("catalog-{index}.example")));
+        let candidates =
+            super::r2o_merge_ech_witness_candidates("public.example", &cached, &discovered);
+
+        assert_eq!(
+            &candidates[..3],
+            [
+                "known-one.example",
+                "known-two.example",
+                "catalog-0.example"
+            ]
+        );
+        assert_eq!(
+            candidates.len(),
+            r2o_controller::discovery::R2O_ECH_WITNESS_LIMIT
+        );
+        assert!(!candidates.iter().any(|name| {
+            matches!(
+                name.as_str(),
+                "public.example" | "wrong.example" | "negative.example" | "expired.example"
+            )
+        }));
     }
 
     #[cfg(unix)]

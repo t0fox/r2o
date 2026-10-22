@@ -6821,3 +6821,25 @@ Release cross-build без исполнения: AArch64 GNU controller/datapath
 Общая оценка остаётся **66,35%**: перенесена одна ветвь повторного использования ECH-свидетеля, а не весь scheduler/discovery. TCP/UDP state, остальные приоритетные сценарии и физическая приёмка на роутерах остаются незакрытыми.
 
 Локальные журналы, игнорируемые Git: `.rea/r2o-ech-rr-cache-rea-function.json`, `.rea/r2o-ech-rr-store-rea-function.json`, `.rea/r2o-ech-pick-witness-rea-function.json`, `.rea/r2o-ech-rr-cache-red-negative-arm64.log`, `.rea/r2o-ech-rr-cache-focused-arm64-negative-v3.log`, `.rea/r2o-ech-rr-cache-controller-negative-v3.log`, `.rea/r2o-ech-rr-cache-workspace-negative-v3.log`, `.rea/r2o-ech-rr-cache-release-arm64-negative-v3.log`, `.rea/r2o-ech-rr-cache-release-mipsel-negative-v3.log`, `.rea/r2o-ech-rr-cache-release-armv5-negative-v3.log` и `.rea/r2o-ech-rr-cache-check-armv7-negative-v3.log`.
+
+## Приоритет кэшированных ECH-свидетелей в новом Discovery — 22.10.2026
+
+### C-источник и REA-границы
+
+В актуальном `E:\d2o\core\sched.c` (SHA-256 `1de9feaab19dcea1e493aea068295470cf3143adf83157b57663f1098132ae8a`) ветвь `start_search` (начало функции — строка 6423) сначала обходит 256 записей `ech_rr` в порядке слотов и добавляет до 32 свежих имён, чьи HTTPS RR уже подтвердили тот же `public_name`. Только после них добавляются подтверждённые ECH-привязки и прочие источники кандидатов. Это использует три REA-проверенных примитива из предыдущей части: точный поиск `ech_rr_known`, кольцевую запись `ech_rr_store` и выбор/пропуск свидетеля `ech_pick_witness`.
+
+В `E:\d2o\core\test_sched.c` (SHA-256 `a67f87e09a7fd93ed735b52f361e78590b9ce40679ab95e300accf0a3e9d51a3`) строки 2761–2833 содержат сценарии приоритета собственного подтверждённого имени, ограничения 32 кандидатов и повторного Discovery с ожиданием 11 минут, где HTTPS RR должны оставаться кэшированными. После Rust-проверок полный C `test_sched` был пересобран `aarch64-linux-gnu-gcc` и исполнен через `qemu-aarch64 -L /usr/aarch64-linux-gnu`; результат: `планировщик: все проверки прошли`, код выхода 0. Перед запуском SHA-256 обоих донорских файлов совпали с указанными выше. Журнал: `.rea/r2o-ech-cached-witness-donor-arm64.log`.
+
+Для полного `start_search` выполнена одна узкая попытка `rea function` по `.rea/r2o-donor-sched-current.o`, SHA-256 `04531800c43c9ac739bc24f9fa1cbbe46927ce77339f61defd19aed32e0ea8ca`. Она завершилась `provider_unavailable`: Ghidra на Windows вернула `target_format_unsupported` для AArch64 ELF, Hopper вернул `unsupported_host`, IDA не настроена. Новый Evidence ID не создан; это ограничение провайдера, а не положительное сравнение функции. Уже полученные Evidence ID и их coverage описаны в предыдущей секции. Полный Rust ELF повторно не анализировался.
+
+### Rust-перенос и проверка
+
+`R2oEchWitnessResolutionCache::cached_witness_names` берёт только свежие положительные записи с точным `public_name`, перечисляет их в порядке слотов кольца и ограничивает 32 именами. `r2o_merge_ech_witness_candidates` ставит их перед каталогом/недавними именами, исключает целевое имя, пустые и повторные имена, затем ограничивает общий список тем же публичным лимитом. После объединения сохраняется существующее исключение временно оспоренных challenge-свидетелей. Кэш отрицательных ответов остаётся только статусом и на повторе не делает DNS-запрос.
+
+Тест `ech_rr_свежие_положительные_свидетели_получают_приоритет` проверяет порядок двух кэшированных положительных имён, точный `public_name`, отрицательный и истёкший статус, исключение собственной цели, удаление дубликатов и общий предел 32. RED зафиксировал отсутствие второго имени в начале очереди; GREEN прошёл на ARM64/QEMU. Полный controller — 384 passed, 0 failed, 1 ignored, 23 набора; полный workspace ARM64/QEMU — 1 041 passed, 0 failed, 4 ignored, 73 набора. `cargo +1.98.0 fmt --all -- --check` и `git diff --check` прошли.
+
+Полные release workspace AArch64 GNU, MIPS32 little-endian GNU и ARMv5te musl EABI5 собраны после этого изменения; ARMv7 musleabihf прошёл workspace `cargo check`. Размеры всех шести бинарников совпали с таблицей предыдущей секции (controller: 5 051 496 / 6 755 236 / 5 049 344 Б по указанным архитектурам). На MIPS остаётся одно предупреждение `AtomicUsize::fetch_update` в Telegram. MIPS/ARM не тестировались и ELF не запускались; физические роутеры не принимали участие.
+
+Зависимости, API и криптографический backend не менялись. Оценка проекта остаётся **66,35%**: эта ветвь закрывает возврат известных ECH-свидетелей в очередь, но не весь scheduler/discovery или продукт.
+
+Журналы, игнорируемые Git: `.rea/r2o-ech-cached-witness-priority-red-arm64.log`, `.rea/r2o-ech-cached-witness-priority-arm64.log`, `.rea/r2o-ech-cached-witness-priority-controller-arm64.log`, `.rea/r2o-ech-cached-witness-priority-workspace-arm64.log`, `.rea/r2o-ech-cached-witness-priority-release-arm64.log`, `.rea/r2o-ech-cached-witness-priority-release-mipsel.log`, `.rea/r2o-ech-cached-witness-priority-release-armv5.log`, `.rea/r2o-ech-cached-witness-priority-check-armv7.log` и `.rea/r2o-ech-cached-witness-donor-arm64.log`.
