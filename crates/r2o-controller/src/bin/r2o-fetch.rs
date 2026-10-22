@@ -105,13 +105,7 @@ fn run() -> Result<i32, String> {
             "--mark" => {
                 index += 1;
                 let value = argument(&arguments, index, "--mark")?;
-                let (value, radix) = value
-                    .strip_prefix("0x")
-                    .map_or((value, 10), |hex| (hex, 16));
-                mark = Some(
-                    u32::from_str_radix(value, radix)
-                        .map_err(|error| format!("неверная метка SO_MARK: {error}"))?,
-                );
+                mark = Some(parse_mark(value)?);
             }
             "--tls12" => tls12 = true,
             "--quic" => r2o_quic = true,
@@ -645,6 +639,20 @@ fn argument<'a>(
         .ok_or_else(|| format!("значение {option} должно быть в UTF-8"))
 }
 
+fn parse_mark(value: &str) -> Result<u32, String> {
+    let (digits, radix) = if let Some(digits) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        (digits, 16)
+    } else if value.len() > 1 && value.starts_with('0') {
+        (&value[1..], 8)
+    } else {
+        (value, 10)
+    };
+    u32::from_str_radix(digits, radix).map_err(|error| format!("неверная метка SO_MARK: {error}"))
+}
+
 fn print_help() {
     println!(
         "r2o-fetch — HTTPS-проверка с измерением полноты ответа\n\n\
@@ -672,4 +680,25 @@ fn print_help() {
          Снимок выполняется до запроса и заменяет значение --wire.\n\
          --ladder измеряет TCP/TLS даже при наличии --quic."
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_mark;
+
+    #[test]
+    fn mark_parser_matches_c_decimal_hex_and_octal_forms() {
+        assert_eq!(parse_mark("45").unwrap(), 45);
+        assert_eq!(parse_mark("0x2d").unwrap(), 45);
+        assert_eq!(parse_mark("0X2D").unwrap(), 45);
+        assert_eq!(parse_mark("055").unwrap(), 45);
+        assert_eq!(parse_mark("0").unwrap(), 0);
+    }
+
+    #[test]
+    fn mark_parser_rejects_invalid_and_negative_values() {
+        assert!(parse_mark("08").is_err());
+        assert!(parse_mark("-1").is_err());
+        assert!(parse_mark("0x").is_err());
+    }
 }

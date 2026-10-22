@@ -11,7 +11,7 @@ cleanup() {
     trap - EXIT HUP INT TERM
     env R2O_DIR="$TEMP/root" R2O_CONFIG="$TEMP/root/config" \
         R2O_MANAGER="$TEMP/manager" R2O_TG_TEST_BINARY="$TEMP/root/releases/test/builds/r2o-telegram-linux-test" \
-        R2O_TG_FIREWALL="$TEMP/tg-firewall" R2O_INIT="$ROOT/router/S99r2o" \
+        R2O_TG_FIREWALL="$TEMP/tg-firewall" R2O_INIT="$TEMP/init-wrapper" \
         R2O_PROC=/proc R2O_RUNTIME_DIR="$TEMP/runtime" \
         sh "$ROOT/router/S99r2o" telegram-disable >/dev/null 2>&1 || true
     if [ "$result" -ne 0 ] && [ -f "$TEMP/root/log/telegram.log" ]; then
@@ -21,6 +21,11 @@ cleanup() {
     exit "$result"
 }
 trap cleanup EXIT HUP INT TERM
+cat > "$TEMP/init-wrapper" <<EOF
+#!/bin/sh
+exec sh "$ROOT/router/S99r2o" "\$@"
+EOF
+chmod 0755 "$TEMP/init-wrapper"
 mkdir -p "$TEMP/root/releases/test/builds" "$TEMP/root/state"
 cp "$TG_BIN" "$TEMP/root/releases/test/builds/r2o-telegram-linux-test"
 printf 'TG_ENABLED=0\nTG_MODE=local\nTG_PORT=30443\nSTATE_DIR=%s\n' \
@@ -64,7 +69,7 @@ run_service() {
     env R2O_DIR="$TEMP/root" R2O_CONFIG="$TEMP/root/config" \
         R2O_MANAGER="$TEMP/manager" R2O_TG_TEST_BINARY="$TEMP/root/releases/test/builds/r2o-telegram-linux-test" \
         R2O_TG_FIREWALL="$TEMP/tg-firewall" R2O_PROC=/proc \
-        R2O_INIT="$ROOT/router/S99r2o" \
+        R2O_INIT="$TEMP/init-wrapper" \
         R2O_TG_MANAGER_FAIL="$TEMP/manager-fail" \
         R2O_TG_FIREWALL_FAIL="$TEMP/firewall-fail" \
         TG_WATCHDOG_INTERVAL=1 TG_WATCHDOG_FAILURE_LIMIT=1 \
