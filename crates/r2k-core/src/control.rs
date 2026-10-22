@@ -27,6 +27,7 @@ pub const EVENT_R2O_TCP_CLEAN_HANDSHAKE: u16 = 0x0018;
 pub const EVENT_R2O_TCP_EARLY_RST: u16 = 0x0019;
 pub const EVENT_R2O_TCP_REPEAT: u16 = 0x001a;
 pub const EVENT_R2O_TCP_RST_CUT: u16 = 0x001b;
+pub const EVENT_R2O_TCP_EXCHANGE: u16 = 0x001c;
 pub const EVENT_R2O_JOURNAL_ENTRY: u16 = 0x0014;
 pub const EVENT_R2O_JOURNAL_END: u16 = 0x0015;
 pub const COMMAND_SET_NAME: u16 = 0x0081;
@@ -35,6 +36,7 @@ pub const COMMAND_DEL_NAME: u16 = 0x0083;
 pub const COMMAND_DEL_ADDR: u16 = 0x0084;
 pub const COMMAND_CLEAR: u16 = 0x0085;
 pub const COMMAND_STATS: u16 = 0x0086;
+pub const COMMAND_ARM_SHAPE: u16 = 0x0087;
 pub const COMMAND_SET_NAME_PROBE: u16 = 0x0088;
 pub const COMMAND_DEL_NAME_PROBE: u16 = 0x008b;
 pub const COMMAND_SET_SUFFIX: u16 = 0x008c;
@@ -85,6 +87,13 @@ pub fn r2k_snapshot_socket_path(control_path: &Path) -> PathBuf {
 pub struct Frame {
     pub kind: u16,
     pub body: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArmShapeCommand {
+    pub name: Vec<u8>,
+    pub transport: u8,
+    pub family: u8,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -263,6 +272,34 @@ pub struct R2oTcpEarlyRstEvent {
 pub struct R2oTcpRstCutSignalEvent {
     pub key: [u8; KEY_LEN],
     pub client_is_low: bool,
+}
+
+/// Полный ответный TLS-обмен одного TCP-потока, нужный для точечной проверки.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct R2oTcpExchangeEvent {
+    pub key: [u8; KEY_LEN],
+    pub first_record_type: u8,
+    pub bytes_after_client_hello: u32,
+    /// Биты типов TLS-записей 20–23.
+    pub record_types: u8,
+    pub server_hello: bool,
+    pub planned: bool,
+}
+
+impl R2oTcpExchangeEvent {
+    pub fn event_body(&self) -> Option<Vec<u8>> {
+        if !valid_flow_key(&self.key) || self.key[37] != 6 || self.record_types & !0x0f != 0 {
+            return None;
+        }
+        let mut body = Vec::with_capacity(KEY_LEN + 8);
+        body.extend_from_slice(&self.key);
+        body.push(self.first_record_type);
+        body.extend_from_slice(&self.bytes_after_client_hello.to_be_bytes());
+        body.push(self.record_types);
+        body.push(u8::from(self.server_hello));
+        body.push(u8::from(self.planned));
+        Some(body)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -531,6 +568,42 @@ impl HttpResponseEvent {
         body.extend_from_slice(&self.request_no.to_be_bytes());
         Some(body)
     }
+}
+
+/// Request one retained or future ClientHello snapshot for a name and address family.
+pub fn encode_arm_shape(name: &str, transport: u8, family: u8) -> Result<Vec<u8>, &'static str> {
+    if name.is_empty()
+        || name.len() > MAX_DNS_NAME_LEN
+        || !matches!(transport, 6 | 17)
+        || !matches!(family, 4 | 6)
+    {
+        return Err("запрос снимка требует имя, транспорт и IP family из протокола");
+    }
+    let mut body = Vec::with_capacity(name.len() + 3);
+    body.push(name.len() as u8);
+    body.extend_from_slice(name.as_bytes());
+    body.extend_from_slice(&[transport, family]);
+    encode_frame(COMMAND_ARM_SHAPE, &body)
+}
+
+pub fn decode_arm_shape(frame: &Frame) -> Result<ArmShapeCommand, &'static str> {
+    if frame.kind != COMMAND_ARM_SHAPE || frame.body.len() < 3 {
+        return Err("неверная команда ARM_SHAPE");
+    }
+    let name_len = usize::from(frame.body[0]);
+    if name_len == 0
+        || name_len > MAX_DNS_NAME_LEN
+        || frame.body.len() != name_len + 3
+        || !matches!(frame.body[name_len + 1], 6 | 17)
+        || !matches!(frame.body[name_len + 2], 4 | 6)
+    {
+        return Err("неверные имя, транспорт или IP family команды ARM_SHAPE");
+    }
+    Ok(ArmShapeCommand {
+        name: frame.body[1..name_len + 1].to_vec(),
+        transport: frame.body[name_len + 1],
+        family: frame.body[name_len + 2],
+    })
 }
 
 pub fn encode_frame(kind: u16, body: &[u8]) -> Result<Vec<u8>, &'static str> {
@@ -1390,6 +1463,53 @@ fn valid_flow_key(key: &[u8; KEY_LEN]) -> bool {
                 && key[21..33].iter().all(|byte| *byte == 0))
 }
 
+#[cfg(test)]
+mod r2o_tcp_exchange_control_tests {
+    use super::{EVENT_R2O_TCP_EXCHANGE, Frame, R2oTcpExchangeEvent, decode_r2o_tcp_exchange};
+
+    fn event() -> R2oTcpExchangeEvent {
+        let mut key = [0; super::KEY_LEN];
+        key[0] = 4;
+        key[1..5].copy_from_slice(&[192, 0, 2, 4]);
+        key[17..21].copy_from_slice(&[198, 51, 100, 7]);
+        key[33..35].copy_from_slice(&443_u16.to_be_bytes());
+        key[35..37].copy_from_slice(&52_314_u16.to_be_bytes());
+        key[37] = 6;
+        R2oTcpExchangeEvent {
+            key,
+            first_record_type: 22,
+            bytes_after_client_hello: 1_380,
+            record_types: 0x0c,
+            server_hello: true,
+            planned: true,
+        }
+    }
+
+    #[test]
+    fn tcp_exchange_round_trips_server_hello_and_application_record_evidence() {
+        let expected = event();
+        let frame = Frame {
+            kind: EVENT_R2O_TCP_EXCHANGE,
+            body: expected.event_body().unwrap(),
+        };
+        assert_eq!(decode_r2o_tcp_exchange(&frame), Ok(expected));
+    }
+
+    #[test]
+    fn tcp_exchange_rejects_invalid_tls_type_bits_and_non_tcp_keys() {
+        let mut expected = event();
+        expected.record_types = 0x10;
+        assert!(expected.event_body().is_none());
+
+        let mut frame = Frame {
+            kind: EVENT_R2O_TCP_EXCHANGE,
+            body: event().event_body().unwrap(),
+        };
+        frame.body[super::KEY_LEN + 7] = 2;
+        assert!(decode_r2o_tcp_exchange(&frame).is_err());
+    }
+}
+
 pub fn decode_r2o_voice_suspect(frame: &Frame) -> Result<R2oVoiceSuspectEvent, &'static str> {
     if frame.kind != EVENT_R2O_VOICE_SUSPECT || frame.body.len() != KEY_LEN + 1 {
         return Err("неверное событие подозрения голосового потока");
@@ -1504,6 +1624,40 @@ pub fn decode_r2o_tcp_early_rst(frame: &Frame) -> Result<R2oTcpEarlyRstEvent, &'
     Ok(R2oTcpEarlyRstEvent {
         key,
         client_is_low: client_is_low == 1,
+        planned: planned == 1,
+    })
+}
+
+pub fn decode_r2o_tcp_exchange(frame: &Frame) -> Result<R2oTcpExchangeEvent, &'static str> {
+    if frame.kind != EVENT_R2O_TCP_EXCHANGE || frame.body.len() != KEY_LEN + 8 {
+        return Err("неверная длина события TCP-обмена");
+    }
+    let key: [u8; KEY_LEN] = frame.body[..KEY_LEN]
+        .try_into()
+        .map_err(|_| "неверный ключ события TCP-обмена")?;
+    let first_record_type = frame.body[KEY_LEN];
+    let bytes_after_client_hello = u32::from_be_bytes(
+        frame.body[KEY_LEN + 1..KEY_LEN + 5]
+            .try_into()
+            .expect("длина проверена"),
+    );
+    let record_types = frame.body[KEY_LEN + 5];
+    let server_hello = frame.body[KEY_LEN + 6];
+    let planned = frame.body[KEY_LEN + 7];
+    if !valid_flow_key(&key)
+        || key[37] != 6
+        || record_types & !0x0f != 0
+        || server_hello > 1
+        || planned > 1
+    {
+        return Err("событие TCP-обмена содержит неверный поток или признаки");
+    }
+    Ok(R2oTcpExchangeEvent {
+        key,
+        first_record_type,
+        bytes_after_client_hello,
+        record_types,
+        server_hello: server_hello == 1,
         planned: planned == 1,
     })
 }
@@ -1966,5 +2120,38 @@ mod tcp_rst_cut_event_tests {
         let mut invalid = frame;
         invalid.body[KEY_LEN] = 2;
         assert!(decode_r2o_tcp_rst_cut_signal(&invalid).is_err());
+    }
+}
+
+#[cfg(test)]
+mod arm_shape_command_tests {
+    use super::{COMMAND_ARM_SHAPE, Frame, decode_arm_shape, encode_arm_shape};
+
+    #[test]
+    fn arm_shape_roundtrips_name_transport_and_family() {
+        let bytes = encode_arm_shape("ask.example", 6, 6).unwrap();
+        let frame = super::read_frame(&mut std::io::Cursor::new(bytes)).unwrap();
+        assert_eq!(frame.kind, COMMAND_ARM_SHAPE);
+        assert_eq!(
+            decode_arm_shape(&frame),
+            Ok(super::ArmShapeCommand {
+                name: b"ask.example".to_vec(),
+                transport: 6,
+                family: 6,
+            })
+        );
+    }
+
+    #[test]
+    fn arm_shape_rejects_invalid_transport_family_and_empty_name() {
+        assert!(encode_arm_shape("", 6, 4).is_err());
+        assert!(encode_arm_shape("ask.example", 17, 4).is_ok());
+        assert!(encode_arm_shape("ask.example", 6, 5).is_err());
+
+        let frame = Frame {
+            kind: COMMAND_ARM_SHAPE,
+            body: vec![3, b'a', b'b', b'c', 5, 4],
+        };
+        assert!(decode_arm_shape(&frame).is_err());
     }
 }

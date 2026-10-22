@@ -4,11 +4,13 @@ mod app {
         ACK_BAD_ARGS, ACK_OK, Ack, AppliedEvent, COMMAND_SET_TCP_STALL_BUDGETS, EVENT_APPLIED,
         EVENT_HELLO, EVENT_HTTP_PORTAL, EVENT_HTTP_RESPONSE, EVENT_R2O_QUIC_STALL,
         EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_CLEAN_HANDSHAKE, EVENT_R2O_TCP_EARLY_RST,
-        EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_REPEAT, EVENT_R2O_TCP_RST_AFTER_APP,
-        EVENT_R2O_TCP_RST_CUT, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF,
-        EVENT_R2O_VOICE_SUSPECT, Frame, HttpPortalEvent, HttpResponseEvent, PROTOCOL_VERSION,
-        R2oTcpCleanHandshakeEvent, R2oTcpEarlyRstEvent, R2oTcpFinRetryEvent, R2oTcpRepeatEvent,
-        R2oTcpRstCutSignalEvent, RELEASE_ID, decode_set_tcp_stall_budgets,
+        EVENT_R2O_TCP_EXCHANGE, EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_REPEAT,
+        EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_RST_CUT, EVENT_R2O_TCP_SILENT,
+        EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_SUSPECT, Frame,
+        HttpPortalEvent, HttpResponseEvent, PROTOCOL_VERSION, R2oTcpCleanHandshakeEvent,
+        R2oTcpEarlyRstEvent, R2oTcpExchangeEvent as R2oTcpExchangeControlEvent,
+        R2oTcpFinRetryEvent, R2oTcpRepeatEvent, R2oTcpRstCutSignalEvent, RELEASE_ID,
+        decode_set_tcp_stall_budgets,
     };
     use r2k_core::plan::{EmitKind, OriginalFate, PROTO_VOICE, Plan};
     use r2o_datapath::capture::{tcp_hello_from_packet, tcp_http_hello_from_packet};
@@ -893,7 +895,20 @@ mod app {
             }
             if let Some(control) = control.as_mut() {
                 for command in control.poll()? {
-                    let ack = handle_control_command(&mut name_plans, &mut tcp_sessions, &command);
+                    let ack = if command.kind == r2k_core::control::COMMAND_ARM_SHAPE {
+                        let (ack, captured) = control.arm_client_shape(&command);
+                        if let Some(body) = captured
+                            && let Err(error) =
+                                control.send_event(r2k_core::control::EVENT_CLIENT_SHAPE, &body)
+                        {
+                            eprintln!(
+                                "r2o-datapath: сохранённый ClientHello не отправлен: {error}"
+                            );
+                        }
+                        ack
+                    } else {
+                        handle_control_command(&mut name_plans, &mut tcp_sessions, &command)
+                    };
                     control.send_ack(ack)?;
                 }
                 if control.is_connected() && !journal_peer_connected {
@@ -2341,10 +2356,20 @@ mod app {
         flow_journal.record_control_event(at_ns, EVENT_HELLO, body);
         if let Some(client_shape) = client_shape
             && let Some(control) = control.as_mut()
-            && let Err(error) =
-                control.send_event(r2k_core::control::EVENT_CLIENT_SHAPE, &client_shape)
         {
-            eprintln!("r2o-datapath: снимок ClientHello не отправлен: {error}");
+            match control.observe_client_shape(&client_shape) {
+                Ok(Some(body)) if control.is_connected() => {
+                    if let Err(error) =
+                        control.send_event(r2k_core::control::EVENT_CLIENT_SHAPE, &body)
+                    {
+                        eprintln!("r2o-datapath: снимок ClientHello не отправлен: {error}");
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!("r2o-datapath: неверный снимок ClientHello: {error}");
+                }
+            }
         }
         for r2o_channel in [control.as_mut(), r2o_snapshot_control.as_mut()]
             .into_iter()
@@ -2604,6 +2629,20 @@ mod app {
         for event in sessions.take_tcp_exchange_events() {
             if !controller_probe {
                 flow_journal.record_tcp_exchange(at_ns, &event);
+                if let Some(body) = (R2oTcpExchangeControlEvent {
+                    key: event.key,
+                    first_record_type: event.code,
+                    bytes_after_client_hello: event.num,
+                    record_types: event.tos,
+                    server_hello: event.server_hello,
+                    planned: event.planned == R2oTcpExchangeEvent::PLANNED_YES,
+                })
+                .event_body()
+                    && let Some(control) = control.as_mut()
+                    && let Err(error) = control.send_event(EVENT_R2O_TCP_EXCHANGE, &body)
+                {
+                    eprintln!("r2o-datapath: событие TCP-обмена не отправлено: {error}");
+                }
             }
             if !controller_probe
                 && let Some(clean) = r2o_clean_handshake_event(&event)
@@ -4318,6 +4357,27 @@ mod app {
                 r2k_core::control::PROTOCOL_VERSION
             );
 
+            use std::io::Write;
+            controller
+                .write_all(&r2k_core::control::encode_arm_shape("__SNI__", 6, 4).unwrap())
+                .unwrap();
+            let mut commands = control.as_mut().unwrap().poll().unwrap();
+            assert_eq!(commands.len(), 1);
+            let (ack, cached) = control
+                .as_mut()
+                .unwrap()
+                .arm_client_shape(&commands.remove(0));
+            assert!(ack.ok);
+            assert!(cached.is_none());
+            control.as_mut().unwrap().send_ack(ack).unwrap();
+            assert!(
+                r2k_core::control::decode_ack(
+                    &r2k_core::control::read_frame(&mut controller).unwrap()
+                )
+                .unwrap()
+                .ok
+            );
+
             let mut body = vec![0; r2k_core::control::KEY_LEN];
             body[0] = 4;
             body[37] = 6;
@@ -4362,6 +4422,13 @@ mod app {
                     .client_hello,
                 client_hello
             );
+            let cached_arm = r2k_core::control::Frame {
+                kind: r2k_core::control::COMMAND_ARM_SHAPE,
+                body: vec![7, b'_', b'_', b'S', b'N', b'I', b'_', b'_', 6, 4],
+            };
+            let (cached_ack, cached_body) = control.as_mut().unwrap().arm_client_shape(&cached_arm);
+            assert!(cached_ack.ok);
+            assert_eq!(cached_body, Some(captured_shape.body));
             for reader in [&mut controller, &mut browser_capture] {
                 let frame = r2k_core::control::read_frame(reader).unwrap();
                 assert_eq!(frame.kind, r2k_core::control::EVENT_HELLO);

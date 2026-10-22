@@ -1,26 +1,31 @@
 use r2k_core::control::{
-    self, ADDR_PROBE_LEASE_MAX_MS, COMMAND_CLEAR, COMMAND_DEL_ADDR, COMMAND_DEL_ADDR_PROBE,
-    COMMAND_DEL_VOICE_ADDR_PROBE, COMMAND_SET_ADDR, COMMAND_SET_ADDR_PROBE, COMMAND_SET_HTTPS,
-    COMMAND_SET_NAME, COMMAND_SET_TCP_STALL_BUDGETS, COMMAND_SET_VOICE_ADDR,
+    self, ADDR_PROBE_LEASE_MAX_MS, COMMAND_ARM_SHAPE, COMMAND_CLEAR, COMMAND_DEL_ADDR,
+    COMMAND_DEL_ADDR_PROBE, COMMAND_DEL_VOICE_ADDR_PROBE, COMMAND_SET_ADDR, COMMAND_SET_ADDR_PROBE,
+    COMMAND_SET_HTTPS, COMMAND_SET_NAME, COMMAND_SET_TCP_STALL_BUDGETS, COMMAND_SET_VOICE_ADDR,
     COMMAND_SET_VOICE_ADDR_PROBE, EVENT_APPLIED, EVENT_CLIENT_SHAPE, EVENT_HELLO,
     EVENT_HTTP_PORTAL, EVENT_HTTP_RESPONSE, EVENT_R2O_JOURNAL_END, EVENT_R2O_JOURNAL_ENTRY,
     EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_CLEAN_HANDSHAKE,
-    EVENT_R2O_TCP_EARLY_RST, EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_REPEAT,
+    EVENT_R2O_TCP_EARLY_RST, EVENT_R2O_TCP_EXCHANGE, EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_REPEAT,
     EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_RST_CUT, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL,
     EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_SUSPECT, Frame, HelloEvent, PROTOCOL_VERSION,
     RELEASE_ID, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE,
     VOICE_ADDR_PROBE_LEASE_MAX_MS, decode_ack, decode_applied, decode_client_shape,
     decode_greeting, decode_hello, decode_http_portal, decode_http_response, decode_r2o_quic_stall,
     decode_r2o_quic_suspect, decode_r2o_tcp_clean_handshake, decode_r2o_tcp_early_rst,
-    decode_r2o_tcp_fin_retry, decode_r2o_tcp_repeat, decode_r2o_tcp_rst_after_app,
-    decode_r2o_tcp_rst_cut_signal, decode_r2o_tcp_silence, decode_r2o_tcp_stall,
-    decode_r2o_voice_proof, decode_r2o_voice_suspect, encode_delete_addr, encode_delete_addr_probe,
-    encode_delete_name, encode_delete_name_probe, encode_delete_voice_addr_probe, encode_frame,
-    encode_set_addr, encode_set_addr_probe, encode_set_bypass, encode_set_https, encode_set_name,
-    encode_set_name_probe, encode_set_suffix, encode_set_tcp_stall_budgets, encode_set_voice_addr,
-    encode_set_voice_addr_probe, read_frame,
+    decode_r2o_tcp_exchange, decode_r2o_tcp_fin_retry, decode_r2o_tcp_repeat,
+    decode_r2o_tcp_rst_after_app, decode_r2o_tcp_rst_cut_signal, decode_r2o_tcp_silence,
+    decode_r2o_tcp_stall, decode_r2o_voice_proof, decode_r2o_voice_suspect, encode_arm_shape,
+    encode_delete_addr, encode_delete_addr_probe, encode_delete_name, encode_delete_name_probe,
+    encode_delete_voice_addr_probe, encode_frame, encode_set_addr, encode_set_addr_probe,
+    encode_set_bypass, encode_set_https, encode_set_name, encode_set_name_probe, encode_set_suffix,
+    encode_set_tcp_stall_budgets, encode_set_voice_addr, encode_set_voice_addr_probe, read_frame,
 };
 use r2k_core::plan::{PROTO_HTTP, PROTO_VOICE, Plan};
+use r2o_controller::ask::{
+    ASK_WAIT, AskCliOptions, AskControlInput, AskQuestion, AskSnapshotInput, compose_plan_texts,
+    hello_shape, hello_sni, parse_ask_options, question_plan, read_hex_file,
+    record_question_passed, validate_hello,
+};
 use r2o_controller::catalog::{Catalog, DomainObservation, GroupKey};
 use r2o_controller::classify::{Accept, ClassifyOptions, Trigger, Verdict, run as classify_run};
 use r2o_controller::domain::normalize;
@@ -109,6 +114,12 @@ struct ServeCliOptions {
 
 fn main() {
     let r2o_arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    if let Some(r2o_code) = r2o_ask_command(&r2o_arguments) {
+        if r2o_code != 0 {
+            std::process::exit(r2o_code);
+        }
+        return;
+    }
     if let Some(r2o_code) = r2o_voice_check_command(&r2o_arguments) {
         if r2o_code != 0 {
             std::process::exit(r2o_code);
@@ -124,6 +135,418 @@ fn main() {
     if let Err(error) = run(r2o_arguments) {
         eprintln!("r2o-controller: {error}");
         std::process::exit(1);
+    }
+}
+
+fn r2o_ask_command(arguments: &[std::ffi::OsString]) -> Option<i32> {
+    if arguments.first().is_none_or(|argument| argument != "--ask") {
+        return None;
+    }
+    if matches!(arguments, [command, help] if command == "--ask" && (help == "--help" || help == "-h"))
+    {
+        println!("{}", r2o_controller::ask::ask_help());
+        return Some(0);
+    }
+    let options = match parse_ask_options(&arguments[1..]) {
+        Ok(options) => options,
+        Err(error) => {
+            eprintln!(
+                "r2o-controller: {error}\n{}",
+                r2o_controller::ask::ask_help()
+            );
+            return Some(2);
+        }
+    };
+    #[cfg(unix)]
+    {
+        match run_r2o_ask(options) {
+            Ok(code) => Some(code),
+            Err(error) => {
+                eprintln!("r2o-controller --ask: {error}");
+                Some(1)
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = options;
+        eprintln!("r2o-controller --ask поддерживается только на Unix");
+        Some(1)
+    }
+}
+
+#[cfg(unix)]
+fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
+    use std::io::Write;
+
+    let mut trigger_bytes = match &options.trigger {
+        AskSnapshotInput::File(path) => Some(
+            read_hex_file(path)
+                .map_err(|error| format!("--hello-hex {}: {error}", path.display()))?,
+        ),
+        AskSnapshotInput::Capture => None,
+    };
+    if let Some(bytes) = &trigger_bytes {
+        validate_hello(bytes, &options.sni)
+            .map_err(|error| format!("ClientHello цели: {error}"))?;
+    }
+
+    let mut control_bytes = match &options.control {
+        Some(AskControlInput::File(path)) => Some(
+            read_hex_file(path)
+                .map_err(|error| format!("--control-hex {}: {error}", path.display()))?,
+        ),
+        _ => None,
+    };
+    if let Some(bytes) = &control_bytes {
+        let control_sni =
+            hello_sni(bytes).map_err(|error| format!("control ClientHello: {error}"))?;
+        validate_hello(bytes, &control_sni)
+            .map_err(|error| format!("control ClientHello: {error}"))?;
+    }
+
+    let family = if options.target_ip.is_ipv4() { 4 } else { 6 };
+    let destination = std::net::SocketAddr::new(options.target_ip, options.port);
+    let mut client = ControlClient::connect(options.control_path.clone())?;
+    let mut trigger_timed_out = false;
+    if trigger_bytes.is_none() {
+        client.arm_client_shape(&options.sni, family)?;
+        trigger_bytes = client
+            .wait_for_client_shape(&options.sni, family, options.arm_wait.unwrap_or(ASK_WAIT))?
+            .map(|event| event.client_hello);
+        trigger_timed_out = trigger_bytes.is_none();
+    }
+
+    let mut control_timed_out = false;
+    if let Some(AskControlInput::Capture(control_sni)) = &options.control {
+        client.arm_client_shape(control_sni, family)?;
+        control_bytes = client
+            .wait_for_client_shape(control_sni, family, options.arm_wait.unwrap_or(ASK_WAIT))?
+            .map(|event| event.client_hello);
+        control_timed_out = control_bytes.is_none();
+    }
+
+    if let Some(bytes) = &trigger_bytes {
+        validate_hello(bytes, &options.sni)
+            .map_err(|error| format!("снимок ClientHello цели: {error}"))?;
+        if let Some(path) = &options.save_trigger {
+            save_ask_snapshot(path, "триггера", &options.sni, bytes);
+        }
+    }
+    if let Some(bytes) = &control_bytes {
+        let control_sni = match &options.control {
+            Some(AskControlInput::Capture(name)) => name.clone(),
+            _ => hello_sni(bytes).map_err(|error| format!("control ClientHello: {error}"))?,
+        };
+        validate_hello(bytes, &control_sni)
+            .map_err(|error| format!("control ClientHello: {error}"))?;
+        if let Some(path) = &options.save_control {
+            save_ask_snapshot(path, "control", &control_sni, bytes);
+        }
+    }
+
+    println!("цель: {}:{}", options.target_ip, options.port);
+    println!("имя (--sni): {}", options.sni);
+    println!("управляющий сокет: {}", options.control_path.display());
+    println!(
+        "метка (--mark): 0x{:x}; зонд отправляется без метки",
+        options.mark
+    );
+    match &trigger_bytes {
+        Some(bytes) => println!(
+            "снимок триггера: {} байт, SNI {}",
+            bytes.len(),
+            hello_sni(bytes).unwrap_or_else(|_| "не найден".into())
+        ),
+        None if trigger_timed_out => println!(
+            "снимок триггера: не получен за {} мс",
+            options.arm_wait.unwrap_or(ASK_WAIT).as_millis()
+        ),
+        None => println!("снимок триггера: не получен"),
+    }
+    match (&options.control, &control_bytes) {
+        (None, _) => println!("снимок control: не запрошен"),
+        (_, Some(bytes)) => println!(
+            "снимок control: {} байт, SNI {}",
+            bytes.len(),
+            hello_sni(bytes).unwrap_or_else(|_| "не найден".into())
+        ),
+        (_, None) if control_timed_out => println!(
+            "снимок control: не получен за {} мс",
+            options.arm_wait.unwrap_or(ASK_WAIT).as_millis()
+        ),
+        (_, None) => println!("снимок control: не получен"),
+    }
+
+    let Some(trigger_bytes) = trigger_bytes else {
+        println!("опрос не выполнен: нет полного ClientHello цели");
+        for (index, question) in AskQuestion::ALL.iter().enumerate() {
+            println!(
+                "[{}/5] {} — не задан: снимок триггера не получен",
+                index + 1,
+                question.label()
+            );
+        }
+        return Ok(0);
+    };
+    let trigger = validate_hello(&trigger_bytes, &options.sni)
+        .map_err(|error| format!("ClientHello цели: {error}"))?;
+    let control_trigger = control_bytes
+        .as_deref()
+        .map(|bytes| {
+            let control_sni = hello_sni(bytes)?;
+            validate_hello(bytes, &control_sni)
+        })
+        .transpose()?;
+    let shape = hello_shape(&trigger_bytes)?;
+    let mut properties = r2o_controller::classify::DpiProps::default();
+
+    for (index, question) in AskQuestion::ALL.iter().copied().enumerate() {
+        if question == AskQuestion::ProtocolParse && control_trigger.is_none() {
+            println!(
+                "[{}/5] {} — не задан: нет control ClientHello",
+                index + 1,
+                question.label()
+            );
+            continue;
+        }
+        let plan_id = random_id()?;
+        let trial_id = random_id()?;
+        let (plan_text, plan) = match question_plan(
+            question,
+            &trigger,
+            control_trigger
+                .as_ref()
+                .map(|value| value.payload.as_slice()),
+            plan_id,
+        ) {
+            Ok(plan) => plan,
+            Err(error) => {
+                println!(
+                    "[{}/5] {} — не задан: план не собран ({error})",
+                    index + 1,
+                    question.label()
+                );
+                continue;
+            }
+        };
+        let plan_records = compile_text(&plan_text)?;
+        if plan.id != plan_id {
+            return Err("план вопроса потерял случайный идентификатор".into());
+        }
+        let bound = match BoundTcpProbe::open(family, Some(0)) {
+            Ok(bound) => bound,
+            Err(error) => {
+                println!(
+                    "[{}/5] {} — не задан: не удалось занять порт вопроса ({error})",
+                    index + 1,
+                    question.label()
+                );
+                continue;
+            }
+        };
+        let source_port = bound.local_port;
+        let command = encode_set_name_probe(
+            &options.sni,
+            shape,
+            family,
+            source_port,
+            &plan_records,
+            trial_id,
+        )?;
+        let ack = match client.exchange_command(&command, control::COMMAND_SET_NAME_PROBE) {
+            Ok(ack) => ack,
+            Err(error) => {
+                if let Err(cleanup_error) =
+                    client.delete_name_probe(&options.sni, shape, family, source_port)
+                {
+                    return Err(format!(
+                        "подтверждение вопроса {} не получено ({error}); временный план не снят: {cleanup_error}",
+                        question.label()
+                    )
+                    .into());
+                }
+                println!(
+                    "[{}/5] {} — не измерено: нет подтверждения плана ({error}); временный план снят",
+                    index + 1,
+                    question.label()
+                );
+                continue;
+            }
+        };
+        if ack.trial_id != Some(trial_id) {
+            client.delete_name_probe(&options.sni, shape, family, source_port)?;
+            println!(
+                "[{}/5] {} — не измерено: подтверждение пришло с чужим trial ID; временный план снят",
+                index + 1,
+                question.label()
+            );
+            continue;
+        }
+        if !ack.ok {
+            println!(
+                "[{}/5] {} — план не принят датапатом (код {})",
+                index + 1,
+                question.label(),
+                ack.reason
+            );
+            continue;
+        }
+
+        let connection = bound.connect(destination, ASK_WAIT);
+        let (mut stream, local_ip, local_port, _) = match connection {
+            Ok(connection) => connection,
+            Err(error) => {
+                let cleanup = client.delete_name_probe(&options.sni, shape, family, source_port);
+                if let Err(cleanup_error) = cleanup {
+                    return Err(format!(
+                        "вопрос {} не подключился ({error}); временный план не снят: {cleanup_error}",
+                        question.label()
+                    )
+                    .into());
+                }
+                println!(
+                    "[{}/5] {} — не измерено: соединение не установлено ({error}); временный план снят",
+                    index + 1,
+                    question.label()
+                );
+                continue;
+            }
+        };
+        if local_port != source_port {
+            drop(stream);
+            client.delete_name_probe(&options.sni, shape, family, source_port)?;
+            println!(
+                "[{}/5] {} — не измерено: локальный порт изменился; временный план снят",
+                index + 1,
+                question.label()
+            );
+            continue;
+        }
+        let expected_key = r2o_ask_flow_key(local_ip, local_port, destination);
+        let sent = stream.write_all(&trigger_bytes);
+        let proof = match sent {
+            Ok(()) => {
+                client.wait_for_ask_proof(trial_id, plan_id, expected_key, family, shape, ASK_WAIT)
+            }
+            Err(error) => Err(Box::<dyn Error>::from(error)),
+        };
+        drop(stream);
+        let proof = match proof {
+            Ok(proof) => proof,
+            Err(error) => {
+                let cleanup = client.delete_name_probe(&options.sni, shape, family, source_port);
+                if let Err(cleanup_error) = cleanup {
+                    return Err(format!(
+                        "вопрос {} завершился ({error}); временный план не снят: {cleanup_error}",
+                        question.label()
+                    )
+                    .into());
+                }
+                return Err(format!(
+                    "вопрос {} не удалось проверить: {error}; временный план снят",
+                    question.label()
+                )
+                .into());
+            }
+        };
+
+        if proof.applied && proof.exchange_seen && proof.server_hello {
+            record_question_passed(&mut properties, question);
+            println!(
+                "[{}/5] {} — пройден: план применён и получен ServerHello",
+                index + 1,
+                question.label()
+            );
+            println!("план вопроса, подтверждённый этим измерением:\n{plan_text}");
+            break;
+        }
+
+        client.delete_name_probe(&options.sni, shape, family, source_port)?;
+        let missing = if !proof.applied {
+            "план к потоку не применён"
+        } else if !proof.exchange_seen {
+            "событие TCP-обмена не получено"
+        } else {
+            "ServerHello не подтверждён"
+        };
+        println!(
+            "[{}/5] {} — не измерено: {missing}; временный план снят",
+            index + 1,
+            question.label()
+        );
+    }
+
+    println!("итоговые свойства инспектора:");
+    println!(
+        "  tolerates_left_overlap = {}",
+        r2o_tri_state(properties.tolerates_left_overlap)
+    );
+    println!(
+        "  tolerates_reorder      = {}",
+        r2o_tri_state(properties.tolerates_reorder)
+    );
+    println!(
+        "  validates_checksum     = {}",
+        r2o_tri_state(properties.validates_checksum)
+    );
+    println!(
+        "  parses_l7              = {}",
+        r2o_tri_state(properties.parses_l7)
+    );
+    println!(
+        "  counts_duplicates      = {}",
+        r2o_tri_state(properties.counts_duplicates)
+    );
+    let decoy_sni = control_bytes
+        .as_deref()
+        .and_then(|bytes| hello_sni(bytes).ok());
+    let composed = compose_plan_texts(&properties, &trigger, shape, decoy_sni.as_deref(), 0)?;
+    if composed.is_empty() {
+        println!("выведенные планы: нет (не хватает имени control-приманки)");
+    } else {
+        println!("выведенные планы:");
+        for (index, plan) in composed.iter().enumerate() {
+            println!("\nплан {}/{}:\n{}", index + 1, composed.len(), plan);
+        }
+    }
+    Ok(0)
+}
+
+#[cfg(unix)]
+fn save_ask_snapshot(path: &std::path::Path, kind: &str, sni: &str, bytes: &[u8]) {
+    let mut contents = format!(
+        "# снимок {kind}, имя {sni}, {} байт — снят r2o-controller с живого датапата\n",
+        bytes.len()
+    );
+    for (index, byte) in bytes.iter().enumerate() {
+        contents.push_str(&format!("{byte:02x}"));
+        if (index + 1) % 32 == 0 {
+            contents.push('\n');
+        }
+    }
+    if !bytes.len().is_multiple_of(32) {
+        contents.push('\n');
+    }
+    match std::fs::write(path, contents) {
+        Ok(()) => println!(
+            "снимок {kind} сохранён: {} ({} байт)",
+            path.display(),
+            bytes.len()
+        ),
+        Err(error) => eprintln!(
+            "r2o-controller: снимок {kind} не сохранён в {}: {error}",
+            path.display()
+        ),
+    }
+}
+
+#[cfg(unix)]
+fn r2o_tri_state(value: r2o_controller::classify::TriState) -> &'static str {
+    match value {
+        r2o_controller::classify::TriState::Unset => "не измерено",
+        r2o_controller::classify::TriState::False => "нет",
+        r2o_controller::classify::TriState::True => "да",
     }
 }
 
@@ -561,6 +984,9 @@ fn save_plan_file(path: &std::path::Path, plan: &[u8]) -> std::io::Result<()> {
 fn print_help() {
     println!(
         "r2o-controller — каталог и контроллер r2o\n\nИспользование:\n  r2o-controller --check-catalog ФАЙЛ\n  r2o-controller --clear-catalog ФАЙЛ\n  r2o-controller --classify HOST PORT SNI [REPEATS] [--modern] [--allow-loopback] [--mark N] [--save-plan ФАЙЛ] [--arm СОКЕТ]\n  r2o-controller --probe-response HOST PORT SNI [REPEATS]\n  r2o-controller --set-name СОКЕТ HOST FAMILY SHAPE ПЛАН.r2op\n  r2o-controller --set-addr СОКЕТ IP SHAPE ПЛАН.r2op\n  r2o-controller --del-addr СОКЕТ IP SHAPE\n  r2o-controller --apply-catalog СОКЕТ КАТАЛОГ.json\n  r2o-controller --serve СОКЕТ КАТАЛОГ.json [--discover] [--mark N]\n  r2o-controller --watch СОКЕТ\n  r2o-controller --journal СОКЕТ\n  r2o-controller --http-candidates\n  r2o-controller --version\n  r2o-controller --help\n\nFAMILY: ipv4 или ipv6. SHAPE: modern, legacy, ech, http, quic или voice; voice использует HOST @discord-voice. Адресная привязка принимает modern, legacy, ech, quic или voice. QUIC поддерживает планы quicsplit, quicdeny, четыре формы IP-фрагментации после контрольной пробы, удлинение UDP, нулевую 16-байтовую фальшивку и пару фальшивых quic5 с TTL 3 после подтверждённого рукопожатия и зависания; --modern использует сохранённый TLS 1.3 ClientHello; --discover ставит новые TCP SNI в ограниченную очередь классификации и ищет обход HTTP-портала, а для Discord voice запускает ограниченный IP Discovery поиск, требующий --mark; --mark задаёт SO_MARK управляющим зондам и raw-пакетам; --save-plan создаёт новый файл и не перезаписывает существующий; --arm передаёт найденный план работающему r2o-datapath для соответствующей формы."
+    );
+    println!(
+        "  r2o-controller --ask --control СОКЕТ --ip IP --sni ИМЯ (--hello-hex ФАЙЛ | --arm-wait-ms МС)"
     );
     println!("  r2o-controller --import-donor-catalog ФАЙЛ КАТАЛОГА");
     println!("  r2o-controller --voice-list [--conntrack ФАЙЛ]");
@@ -5415,6 +5841,51 @@ struct ControlClient {
 }
 
 #[cfg(unix)]
+#[derive(Default)]
+struct R2oAskProof {
+    applied: bool,
+    exchange_seen: bool,
+    server_hello: bool,
+}
+
+#[cfg(unix)]
+impl R2oAskProof {
+    fn observe_applied(
+        &mut self,
+        event: &r2k_core::control::AppliedEvent,
+        expected_key: &[u8; r2k_core::control::KEY_LEN],
+        plan_id: [u8; 16],
+        trial_id: [u8; 16],
+        family: u8,
+        shape: u8,
+    ) -> bool {
+        if event.trial_id != trial_id {
+            return false;
+        }
+        self.applied |=
+            r2o_ask_applied_matches(event, expected_key, plan_id, trial_id, family, shape);
+        true
+    }
+
+    fn observe_exchange(
+        &mut self,
+        event: &r2k_core::control::R2oTcpExchangeEvent,
+        expected_key: &[u8; r2k_core::control::KEY_LEN],
+    ) -> bool {
+        if event.key != *expected_key {
+            return false;
+        }
+        self.exchange_seen = true;
+        self.server_hello |= event.server_hello;
+        true
+    }
+
+    fn passed(&self) -> bool {
+        self.applied && self.exchange_seen && self.server_hello
+    }
+}
+
+#[cfg(unix)]
 struct QuicDiscoveryTrialOutcome {
     plan_text: String,
     data: Option<r2o_controller::r2o_quic_http3::R2oQuicHttp3Result>,
@@ -7598,6 +8069,176 @@ impl ControlClient {
         }
     }
 
+    fn wait_for_client_shape(
+        &mut self,
+        host: &str,
+        family: u8,
+        timeout: std::time::Duration,
+    ) -> Result<Option<r2k_core::control::ClientShapeEvent>, Box<dyn Error>> {
+        let deadline = std::time::Instant::now()
+            .checked_add(timeout)
+            .ok_or("срок захвата ClientHello слишком велик")?;
+        loop {
+            let queued = self.pending_events.len();
+            for _ in 0..queued {
+                let Some(frame) = self.pending_events.pop_front() else {
+                    break;
+                };
+                if frame.kind == EVENT_CLIENT_SHAPE {
+                    let event = decode_client_shape(&frame)
+                        .map_err(|error| format!("снимок ClientHello: {error}"))?;
+                    if event.key[0] == family && event.host.eq_ignore_ascii_case(host.as_bytes()) {
+                        return Ok(Some(event));
+                    }
+                } else {
+                    self.pending_events.push_back(frame);
+                }
+            }
+
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            if !wait_for_control_frame(
+                &self.socket,
+                remaining.min(std::time::Duration::from_millis(100)),
+            )? {
+                continue;
+            }
+            let Some(frame) = read_optional_frame(&mut self.socket)? else {
+                return Err("соединение с датапатом закрыто во время захвата ClientHello".into());
+            };
+            if frame.kind == EVENT_CLIENT_SHAPE {
+                let event = decode_client_shape(&frame)
+                    .map_err(|error| format!("снимок ClientHello: {error}"))?;
+                if event.key[0] == family && event.host.eq_ignore_ascii_case(host.as_bytes()) {
+                    return Ok(Some(event));
+                }
+            } else {
+                self.queue_async_frame(frame)?;
+            }
+        }
+    }
+
+    fn arm_client_shape(&mut self, host: &str, family: u8) -> Result<(), Box<dyn Error>> {
+        let command =
+            encode_arm_shape(host, 6, family).map_err(|error| format!("ARM_SHAPE: {error}"))?;
+        let ack = self.exchange_command(&command, COMMAND_ARM_SHAPE)?;
+        if ack.ok {
+            Ok(())
+        } else {
+            Err(format!("датапат отверг ARM_SHAPE для {host} (код {})", ack.reason).into())
+        }
+    }
+
+    fn wait_for_ask_proof(
+        &mut self,
+        trial_id: [u8; 16],
+        plan_id: [u8; 16],
+        expected_key: [u8; r2k_core::control::KEY_LEN],
+        family: u8,
+        shape: u8,
+        timeout: std::time::Duration,
+    ) -> Result<R2oAskProof, Box<dyn Error>> {
+        let deadline = std::time::Instant::now()
+            .checked_add(timeout)
+            .ok_or("срок проверки TCP-обмена слишком велик")?;
+        let mut proof = R2oAskProof::default();
+
+        let pending_applied = std::mem::take(&mut self.pending_applied_events);
+        for event in pending_applied {
+            if event.trial_id == trial_id {
+                proof.applied |= r2o_ask_applied_matches(
+                    &event,
+                    &expected_key,
+                    plan_id,
+                    trial_id,
+                    family,
+                    shape,
+                );
+            } else {
+                self.remember_applied_event(event);
+            }
+        }
+
+        loop {
+            let queued = self.pending_events.len();
+            for _ in 0..queued {
+                let Some(frame) = self.pending_events.pop_front() else {
+                    break;
+                };
+                if !self.observe_ask_proof_frame(
+                    &frame,
+                    &mut proof,
+                    &expected_key,
+                    plan_id,
+                    trial_id,
+                    family,
+                    shape,
+                )? {
+                    self.pending_events.push_back(frame);
+                }
+            }
+            if proof.passed() {
+                return Ok(proof);
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(proof);
+            }
+            let wait = remaining.min(std::time::Duration::from_millis(100));
+            if !wait_for_control_frame(&self.socket, wait)? {
+                continue;
+            }
+            let Some(frame) = read_optional_frame(&mut self.socket)? else {
+                return Err("соединение с датапатом закрыто во время проверки TCP-обмена".into());
+            };
+            if !self.observe_ask_proof_frame(
+                &frame,
+                &mut proof,
+                &expected_key,
+                plan_id,
+                trial_id,
+                family,
+                shape,
+            )? {
+                self.queue_async_frame(frame)?;
+            }
+            if proof.passed() {
+                return Ok(proof);
+            }
+        }
+    }
+
+    fn observe_ask_proof_frame(
+        &mut self,
+        frame: &Frame,
+        proof: &mut R2oAskProof,
+        expected_key: &[u8; r2k_core::control::KEY_LEN],
+        plan_id: [u8; 16],
+        trial_id: [u8; 16],
+        family: u8,
+        shape: u8,
+    ) -> Result<bool, Box<dyn Error>> {
+        if frame.kind == EVENT_APPLIED {
+            let event =
+                decode_applied(frame).map_err(|error| format!("событие APPLIED: {error}"))?;
+            if !proof.observe_applied(&event, expected_key, plan_id, trial_id, family, shape) {
+                self.remember_applied_event(event);
+            }
+            return Ok(true);
+        }
+        if frame.kind == EVENT_R2O_TCP_EXCHANGE {
+            let event = decode_r2o_tcp_exchange(frame)
+                .map_err(|error| format!("событие TCP-обмена: {error}"))?;
+            if !proof.observe_exchange(&event, expected_key) {
+                return Ok(false);
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     fn remember_applied_event(&mut self, event: r2k_core::control::AppliedEvent) {
         const APPLIED_EVENT_LIMIT: usize = 256;
         if self.pending_applied_events.len() == APPLIED_EVENT_LIMIT {
@@ -8650,6 +9291,7 @@ impl ControlClient {
             frame.kind,
             EVENT_HELLO
                 | EVENT_APPLIED
+                | EVENT_CLIENT_SHAPE
                 | EVENT_HTTP_PORTAL
                 | EVENT_HTTP_RESPONSE
                 | EVENT_R2O_QUIC_STALL
@@ -8662,6 +9304,7 @@ impl ControlClient {
                 | EVENT_R2O_TCP_EARLY_RST
                 | EVENT_R2O_TCP_REPEAT
                 | EVENT_R2O_TCP_RST_CUT
+                | EVENT_R2O_TCP_EXCHANGE
                 | EVENT_R2O_VOICE_SUSPECT
                 | EVENT_R2O_JOURNAL_ENTRY
                 | EVENT_R2O_JOURNAL_END
@@ -8673,6 +9316,130 @@ impl ControlClient {
         }
         self.pending_events.push_back(frame);
         Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn r2o_ask_applied_matches(
+    event: &r2k_core::control::AppliedEvent,
+    key: &[u8; r2k_core::control::KEY_LEN],
+    plan_id: [u8; 16],
+    trial_id: [u8; 16],
+    family: u8,
+    shape: u8,
+) -> bool {
+    event.key == *key
+        && event.plan_id == plan_id
+        && event.trial_id == trial_id
+        && event.execution_id != 0
+        && event.binding.is_known()
+        && event.binding.kind == 1
+        && event.binding.family == family
+        && event.binding.shape == shape
+        && event.binding.temporary
+}
+
+#[cfg(unix)]
+fn r2o_ask_flow_key(
+    client_ip: std::net::IpAddr,
+    client_port: u16,
+    server: std::net::SocketAddr,
+) -> [u8; r2k_core::control::KEY_LEN] {
+    let client = r2k_core::addr::Address::new(client_ip);
+    let server_address = r2k_core::addr::Address::new(server.ip());
+    let client_order = (client.family(), client.bytes(), client_port);
+    let server_order = (
+        server_address.family(),
+        server_address.bytes(),
+        server.port(),
+    );
+    let (low, high) = if client_order <= server_order {
+        ((client, client_port), (server_address, server.port()))
+    } else {
+        ((server_address, server.port()), (client, client_port))
+    };
+    let mut key = [0; r2k_core::control::KEY_LEN];
+    key[0] = low.0.family();
+    key[1..17].copy_from_slice(&low.0.bytes());
+    key[17..33].copy_from_slice(&high.0.bytes());
+    key[33..35].copy_from_slice(&low.1.to_be_bytes());
+    key[35..37].copy_from_slice(&high.1.to_be_bytes());
+    key[37] = 6;
+    key
+}
+
+#[cfg(all(test, unix))]
+mod r2o_ask_proof_tests {
+    use super::R2oAskProof;
+    use r2k_core::control::{
+        AppliedEvent, BindingContext, KEY_LEN, R2oTcpExchangeEvent, SHAPE_LEGACY,
+    };
+
+    fn flow_key() -> [u8; KEY_LEN] {
+        let mut key = [0; KEY_LEN];
+        key[0] = 4;
+        key[1..5].copy_from_slice(&[192, 0, 2, 1]);
+        key[17..21].copy_from_slice(&[198, 51, 100, 2]);
+        key[33..35].copy_from_slice(&45_000_u16.to_be_bytes());
+        key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+        key[37] = 6;
+        key
+    }
+
+    #[test]
+    fn pass_waits_for_matching_applied_and_server_hello_events() {
+        let key = flow_key();
+        let plan_id = [7; 16];
+        let trial_id = [8; 16];
+        let mut proof = R2oAskProof::default();
+        assert!(proof.observe_exchange(
+            &R2oTcpExchangeEvent {
+                key,
+                first_record_type: 22,
+                bytes_after_client_hello: 1_380,
+                record_types: 0x04,
+                server_hello: false,
+                planned: false,
+            },
+            &key,
+        ));
+        assert!(!proof.passed());
+
+        assert!(proof.observe_applied(
+            &AppliedEvent {
+                key,
+                plan_id,
+                trial_id,
+                execution_id: 1,
+                binding: BindingContext {
+                    generation: 1,
+                    kind: 1,
+                    family: 4,
+                    shape: SHAPE_LEGACY,
+                    temporary: true,
+                    epoch: [1; 16],
+                },
+            },
+            &key,
+            plan_id,
+            trial_id,
+            4,
+            SHAPE_LEGACY,
+        ));
+        assert!(!proof.passed());
+
+        assert!(proof.observe_exchange(
+            &R2oTcpExchangeEvent {
+                key,
+                first_record_type: 22,
+                bytes_after_client_hello: 1_500,
+                record_types: 0x04,
+                server_hello: true,
+                planned: false,
+            },
+            &key,
+        ));
+        assert!(proof.passed());
     }
 }
 

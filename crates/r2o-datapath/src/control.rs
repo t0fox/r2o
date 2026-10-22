@@ -1,13 +1,13 @@
 use crate::engine::validate_runtime_plan;
 use r2k_core::addr::Address;
 use r2k_core::control::{
-    self, Ack, AppliedEvent, BindingContext, COMMAND_CLEAR, COMMAND_DEL_ADDR,
+    self, Ack, AppliedEvent, BindingContext, COMMAND_ARM_SHAPE, COMMAND_CLEAR, COMMAND_DEL_ADDR,
     COMMAND_DEL_ADDR_PROBE, COMMAND_DEL_BYPASS, COMMAND_DEL_NAME, COMMAND_DEL_NAME_PROBE,
     COMMAND_DEL_SUFFIX, COMMAND_DEL_VOICE_ADDR_PROBE, COMMAND_SET_ADDR, COMMAND_SET_ADDR_PROBE,
     COMMAND_SET_BYPASS, COMMAND_SET_HTTPS, COMMAND_SET_NAME, COMMAND_SET_NAME_PROBE,
     COMMAND_SET_SUFFIX, COMMAND_SET_VOICE_ADDR, COMMAND_SET_VOICE_ADDR_PROBE, Frame,
     MAX_HTTPS_TTL_SECONDS, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC,
-    SHAPE_VOICE,
+    SHAPE_VOICE, decode_arm_shape, decode_client_shape,
 };
 use r2k_core::packet::PacketView;
 #[cfg(test)]
@@ -1429,6 +1429,17 @@ pub struct ControlServer {
     output: VecDeque<PendingWrite>,
     output_bytes: usize,
     dropped_events: u64,
+    last_client_shapes: [Option<CachedClientShape>; 2],
+    armed_client_shapes: [Option<Vec<u8>>; 2],
+}
+
+struct CachedClientShape {
+    host: Vec<u8>,
+    event_body: Vec<u8>,
+}
+
+fn shape_family_slot(family: u8) -> usize {
+    usize::from(family == 6)
 }
 
 impl ControlServer {
@@ -1490,6 +1501,8 @@ impl ControlServer {
             output: VecDeque::new(),
             output_bytes: 0,
             dropped_events: 0,
+            last_client_shapes: [None, None],
+            armed_client_shapes: [None, None],
         })
     }
 
@@ -1523,6 +1536,79 @@ impl ControlServer {
 
     pub fn dropped_events(&self) -> u64 {
         self.dropped_events
+    }
+
+    /// ARM_SHAPE: serve a matching cached TCP ClientHello immediately or arm one capture.
+    pub fn arm_client_shape(&mut self, frame: &Frame) -> (Ack, Option<Vec<u8>>) {
+        let Ok(command) = decode_arm_shape(frame) else {
+            return (
+                Ack {
+                    command: COMMAND_ARM_SHAPE,
+                    ok: false,
+                    reason: control::ACK_BAD_ARGS,
+                    trial_id: None,
+                },
+                None,
+            );
+        };
+        if command.transport != 6 {
+            return (
+                Ack {
+                    command: COMMAND_ARM_SHAPE,
+                    ok: false,
+                    reason: control::ACK_BAD_ARGS,
+                    trial_id: None,
+                },
+                None,
+            );
+        }
+        let slot = shape_family_slot(command.family);
+        if let Some(cached) = &self.last_client_shapes[slot]
+            && cached.host.eq_ignore_ascii_case(&command.name)
+        {
+            return (
+                Ack {
+                    command: COMMAND_ARM_SHAPE,
+                    ok: true,
+                    reason: control::ACK_OK,
+                    trial_id: None,
+                },
+                Some(cached.event_body.clone()),
+            );
+        }
+        self.armed_client_shapes[slot] = Some(command.name);
+        (
+            Ack {
+                command: COMMAND_ARM_SHAPE,
+                ok: true,
+                reason: control::ACK_OK,
+                trial_id: None,
+            },
+            None,
+        )
+    }
+
+    /// Retain the latest TCP ClientHello per family and satisfy a matching one-shot arm.
+    pub fn observe_client_shape(&mut self, body: &[u8]) -> Result<Option<Vec<u8>>, &'static str> {
+        let event = decode_client_shape(&Frame {
+            kind: control::EVENT_CLIENT_SHAPE,
+            body: body.to_vec(),
+        })?;
+        let family = event.key[0];
+        let slot = shape_family_slot(family);
+        self.last_client_shapes[slot] = Some(CachedClientShape {
+            host: event.host.clone(),
+            event_body: body.to_vec(),
+        });
+        if self.armed_client_shapes[slot]
+            .as_ref()
+            .is_some_and(|host| host.eq_ignore_ascii_case(&event.host))
+        {
+            self.armed_client_shapes[slot] = None;
+            Ok(Some(body.to_vec()))
+        } else {
+            Ok(None)
+        }
     }
 
     fn accept_peer(&mut self) {
