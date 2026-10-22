@@ -19,6 +19,7 @@ use crate::flow_capacity::R2oFlowCapacity;
 const TCP_STALL_PACKET_BUDGET: u64 = 25;
 const TCP_STALL_PACKET_SLACK: u64 = 3;
 const TCP_STALL_BUDGETS_MAX: usize = 8;
+const TCP_HELLO_WINDOW: u32 = 8;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct TcpEndpoint {
@@ -243,11 +244,43 @@ pub struct R2oHttpKeepAliveStats {
     pub open_end: u64,
 }
 
+/// Счётчики TCP-нагрузки, не распознанной как ClientHello.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct R2oTcpPayloadStats {
+    /// Пакеты с нагрузкой в обратном направлении.
+    pub reverse: u64,
+    /// Прямые пакеты с нагрузкой после распознанного ClientHello.
+    pub after_hello: u64,
+    /// Прямые пакеты, пришедшие после окна поиска ClientHello.
+    pub late: u64,
+    /// Прямые пакеты в окне, которые не разобраны как ClientHello или HTTP.
+    pub not_hello: u64,
+    /// Первый байт последней нагрузки, не распознанной как ClientHello.
+    pub last_first_byte: u8,
+    /// ClientHello распознан, но SNI и конец TLS-записи ещё не видны.
+    pub sni_next_seg: u64,
+}
+
+#[derive(Clone, Copy)]
+struct TrackedTcpPacket {
+    key: TcpFlowKey,
+    reverse: bool,
+    flags: u8,
+    keep_fin_session: bool,
+    hello_was_seen: bool,
+    tls_parse_attempted: bool,
+    tls_is_client_hello: bool,
+    sni_next_segment: bool,
+    forward_packet_count: u32,
+    first_payload_byte: Option<u8>,
+}
+
 /// Ограниченное состояние потока для runtime-защит и очистки соединений.
 pub struct TcpSessions {
     flows: HashMap<TcpFlowKey, TcpSession>,
     flow_capacity: R2oFlowCapacity,
     http_keepalive_stats: R2oHttpKeepAliveStats,
+    tcp_payload_stats: R2oTcpPayloadStats,
     tcp_stall_budgets: Vec<u16>,
     reverse_visible_by_family: [bool; 2],
     r2o_tcp_hello_flows: u64,
@@ -284,6 +317,7 @@ impl TcpSessions {
             flows,
             flow_capacity,
             http_keepalive_stats: R2oHttpKeepAliveStats::default(),
+            tcp_payload_stats: R2oTcpPayloadStats::default(),
             tcp_stall_budgets: vec![TCP_STALL_PACKET_BUDGET as u16],
             reverse_visible_by_family: [false; 2],
             r2o_tcp_hello_flows: 0,
@@ -328,6 +362,10 @@ impl TcpSessions {
 
     pub fn r2o_http_keepalive_stats(&self) -> R2oHttpKeepAliveStats {
         self.http_keepalive_stats
+    }
+
+    pub fn r2o_tcp_payload_stats(&self) -> R2oTcpPayloadStats {
+        self.tcp_payload_stats
     }
 
     /// Число распознанных пользовательских TCP-потоков с ClientHello.
@@ -602,11 +640,7 @@ impl TcpSessions {
         }
     }
 
-    fn track_packet(
-        &mut self,
-        packet: &[u8],
-        now: Instant,
-    ) -> Option<(TcpFlowKey, bool, u8, bool)> {
+    fn track_packet(&mut self, packet: &[u8], now: Instant) -> Option<TrackedTcpPacket> {
         let view = PacketView::parse(packet)?;
         if view.protocol != 6 {
             return None;
@@ -679,12 +713,33 @@ impl TcpSessions {
             session.initiator = destination;
             session.direction_known = true;
         }
-        let hello = if session.hello_at.is_none() && !payload.is_empty() {
-            let hello = r2k_core::tls::parse(payload);
-            hello.is_client_hello.then_some(hello)
+        let reverse_before_hello = source != session.initiator;
+        let forward_packet_count_before_hello = if session.direction_known {
+            session
+                .metrics
+                .forward_packets
+                .saturating_add(u32::from(!reverse_before_hello))
+        } else {
+            session
+                .metrics
+                .forward_packets
+                .saturating_add(session.metrics.reverse_packets)
+                .saturating_add(1)
+        };
+        let tls_parse_attempted = !hello_was_seen
+            && (!reverse_before_hello || !session.direction_known)
+            && !payload.is_empty()
+            && forward_packet_count_before_hello <= TCP_HELLO_WINDOW;
+        let hello = if tls_parse_attempted {
+            let parsed = r2k_core::tls::parse(payload);
+            parsed.is_client_hello.then_some(parsed)
         } else {
             None
         };
+        let sni_next_segment = hello
+            .as_ref()
+            .is_some_and(|parsed| parsed.sni_range.is_none() && parsed.record_end.is_none());
+        let tls_is_client_hello = hello.is_some();
         if let Some(hello) = hello {
             if !session.direction_known {
                 if source != session.initiator {
@@ -962,7 +1017,18 @@ impl TcpSessions {
             self.tcp_rst_cut_events.push_back(event);
             session.rst_cut_reported = true;
         }
-        Some((key, reverse, tcp.flags, keep_fin_session))
+        Some(TrackedTcpPacket {
+            key,
+            reverse,
+            flags: tcp.flags,
+            keep_fin_session,
+            hello_was_seen,
+            tls_parse_attempted,
+            tls_is_client_hello,
+            sni_next_segment,
+            forward_packet_count: session.metrics.forward_packets,
+            first_payload_byte: (!rst && !fin).then(|| payload.first().copied()).flatten(),
+        })
     }
 }
 
@@ -986,7 +1052,7 @@ pub fn decide_with_session(
     packet: &[u8],
 ) -> PacketDecision {
     let now = Instant::now();
-    let Some((key, reverse, flags, keep_fin_session)) = sessions.track_packet(packet, now) else {
+    let Some(tracked) = sessions.track_packet(packet, now) else {
         let is_tcp = PacketView::parse(packet).is_some_and(|view| view.protocol == 6);
         if is_tcp && plan.transport == 6 && plan.proto == PROTO_HTTP {
             return PacketDecision::Accept;
@@ -997,6 +1063,10 @@ pub fn decide_with_session(
             decide(plan, packet)
         };
     };
+    let key = tracked.key;
+    let reverse = tracked.reverse;
+    let flags = tracked.flags;
+    let keep_fin_session = tracked.keep_fin_session;
 
     let view = PacketView::parse(packet).expect("tracked TCP packet remains parseable");
     let rst = flags & 0x04 != 0;
@@ -1059,6 +1129,25 @@ pub fn decide_with_session(
                 sessions.http_keepalive_stats.unaligned.saturating_add(1);
         }
         r2k_core::httpup::R2oHttpRequestObservation::Ignored => {}
+    }
+    if let Some(first_byte) = tracked.first_payload_byte {
+        if reverse {
+            sessions.tcp_payload_stats.reverse =
+                sessions.tcp_payload_stats.reverse.saturating_add(1);
+        } else if tracked.hello_was_seen {
+            sessions.tcp_payload_stats.after_hello =
+                sessions.tcp_payload_stats.after_hello.saturating_add(1);
+        } else if tracked.forward_packet_count > TCP_HELLO_WINDOW {
+            sessions.tcp_payload_stats.late = sessions.tcp_payload_stats.late.saturating_add(1);
+        } else if tracked.tls_parse_attempted && !tracked.tls_is_client_hello && !http_request {
+            sessions.tcp_payload_stats.not_hello =
+                sessions.tcp_payload_stats.not_hello.saturating_add(1);
+            sessions.tcp_payload_stats.last_first_byte = first_byte;
+        }
+        if !reverse && tracked.sni_next_segment {
+            sessions.tcp_payload_stats.sni_next_seg =
+                sessions.tcp_payload_stats.sni_next_seg.saturating_add(1);
+        }
     }
     let r2o_http_plan = plan.transport == 6 && plan.proto == PROTO_HTTP;
     let r2o_http_plan_allowed = !r2o_http_plan || http_request;
@@ -2523,13 +2612,14 @@ mod tests {
             start + Duration::from_millis(200),
         );
         let fin_sequence = 701 + client_hello().len() as u32;
-        let (key, _, _, keep_open) = sessions
+        let tracked = sessions
             .track_packet(
                 &ipv4_tcp_packet(client, server, 0x11, 64, fin_sequence, &[]),
                 start + Duration::from_millis(300),
             )
             .unwrap();
-        assert!(keep_open);
+        let key = tracked.key;
+        assert!(tracked.keep_fin_session);
 
         assert_eq!(
             sessions.expire(
@@ -3608,6 +3698,134 @@ mod tests {
         assert_eq!(stats.later, 1);
         assert_eq!(stats.unaligned, 1);
         assert_eq!(stats.open_end, 1);
+    }
+
+    #[test]
+    fn r2o_tcp_сводка_нагрузки_разделяет_направление_окно_и_sni() {
+        let mut sessions = TcpSessions::default();
+        let plan = Plan::default();
+        let server = ([198, 51, 100, 20], 443);
+        let client = ([192, 0, 2, 10], 41000);
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x02, 64, 1000, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x10, 64, 1001, &[]),
+        );
+        let not_hello = [0x16, 0x03, 0x03];
+        for index in 0..6 {
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(client, server, 0x18, 64, 1001 + index, &not_hello),
+            );
+        }
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x18, 64, 2000, &not_hello),
+        );
+        let after_window_hello = client_hello();
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x18, 64, 2100, &after_window_hello),
+        );
+        assert_eq!(sessions.r2o_tcp_hello_flows(), 0);
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x18, 124, 900, &[0x17, 3, 3]),
+        );
+
+        let partial_client = (client.0, client.1 + 1);
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(partial_client, server, 0x02, 64, 3000, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, partial_client, 0x12, 124, 4000, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(partial_client, server, 0x10, 64, 3001, &[]),
+        );
+        let mut hello = client_hello_with_sni();
+        hello.truncate(60);
+        let partial = r2k_core::tls::parse(&hello);
+        assert!(partial.is_client_hello);
+        assert!(partial.sni_range.is_none());
+        assert!(partial.record_end.is_none());
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(partial_client, server, 0x18, 64, 3001, &hello),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(partial_client, server, 0x18, 64, 3061, &[1, 2, 3]),
+        );
+
+        let http_client = (client.0, client.1 + 2);
+        let http_server = (server.0, 80);
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(http_client, http_server, 0x02, 64, 5000, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(http_server, http_client, 0x12, 124, 6000, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(http_client, http_server, 0x10, 64, 5001, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(
+                http_client,
+                http_server,
+                0x18,
+                64,
+                5001,
+                b"GET / HTTP/1.1\r\nHost: example.test\r\n\r\n",
+            ),
+        );
+
+        let stats = sessions.r2o_tcp_payload_stats();
+        assert_eq!(stats.reverse, 1);
+        assert_eq!(stats.after_hello, 1);
+        assert_eq!(stats.late, 2);
+        assert_eq!(stats.not_hello, 6);
+        assert_eq!(stats.last_first_byte, 0x16);
+        assert_eq!(stats.sni_next_seg, 1);
+        println!(
+            "СВОДКА {} {} {} {} {:02x} {}",
+            stats.reverse,
+            stats.after_hello,
+            stats.late,
+            stats.not_hello,
+            stats.last_first_byte,
+            stats.sni_next_seg
+        );
     }
 
     proptest! {

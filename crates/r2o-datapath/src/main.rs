@@ -505,6 +505,19 @@ mod app {
                     tcp_sessions.r2o_reply_hidden(),
                     tcp_sessions.r2o_tcp_hello_flows()
                 );
+                let payload_stats = tcp_sessions.r2o_tcp_payload_stats();
+                eprintln!(
+                    "r2o-datapath: нагрузка мимо приветствия: обратная {}, после приветствия {}, за окном {}, не приветствие {} (первый байт {:#04x})",
+                    payload_stats.reverse,
+                    payload_stats.after_hello,
+                    payload_stats.late,
+                    payload_stats.not_hello,
+                    payload_stats.last_first_byte
+                );
+                eprintln!(
+                    "r2o-datapath: имя ClientHello в следующем сегменте: {}",
+                    payload_stats.sni_next_seg
+                );
                 let http_stats = tcp_sessions.r2o_http_keepalive_stats();
                 if http_stats.later != 0 || http_stats.unaligned != 0 || http_stats.open_end != 0 {
                     eprintln!(
