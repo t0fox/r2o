@@ -12,6 +12,7 @@ const R2O_LATE_RX_CACHE_TTL: std::time::Duration = std::time::Duration::from_sec
 pub struct R2oLateRxInput {
     pub options: FetchOptions,
     pub discovery_target: Option<DiscoveryTarget>,
+    pub alternate_path: Option<String>,
 }
 
 #[derive(Default)]
@@ -177,6 +178,7 @@ impl R2oLateRxCache {
         Some(R2oLateRxInput {
             discovery_target,
             options,
+            alternate_path: None,
         })
     }
 
@@ -235,6 +237,7 @@ mod tests {
         assert_eq!(input.options.port, 443);
         assert_eq!(input.options.wire_len, Some(812));
         assert!(!input.options.tls12);
+        assert!(input.alternate_path.is_none());
         assert_eq!(input.discovery_target.unwrap().endpoint, "198.51.100.9:443");
         assert!(cache.take_for_rst(&reset, None, now).is_none());
     }

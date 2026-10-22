@@ -1199,16 +1199,23 @@ fn r2o_public_resource_ip(address: std::net::IpAddr) -> bool {
 fn r2o_target_confirmed_probe_path(
     catalog: &Catalog,
     target: &r2o_controller::discovery::DiscoveryTarget,
-) -> String {
+) -> Option<String> {
     let Ok(endpoint) = target.endpoint.parse::<std::net::SocketAddr>() else {
-        return "/".into();
+        return None;
     };
     if endpoint.port() != 443
         || target.host.parse::<std::net::IpAddr>().is_ok()
         || !r2o_public_resource_ip(endpoint.ip())
+        || !matches!(target.family, 4 | 6)
+        || endpoint.is_ipv4() != (target.family == 4)
     {
-        return "/".into();
+        return None;
     }
+    let (transport, shape) = match target.shape {
+        SHAPE_ECH_TCP => (6, SHAPE_MODERN),
+        SHAPE_QUIC => (17, SHAPE_QUIC),
+        shape => (6, shape),
+    };
     catalog
         .boxes
         .iter()
@@ -1218,9 +1225,13 @@ fn r2o_target_confirmed_probe_path(
                 && binding.level >= 3
                 && binding.kind == "name"
                 && binding.target == target.host
-                && binding.transport == 6
-                && binding.family == target.family
-                && binding.shape == target.shape
+                && binding.transport == transport
+                && (if binding.family == 0 {
+                    4
+                } else {
+                    binding.family
+                }) == target.family
+                && binding.shape == shape
                 && r2o_controller::r2o_resource::r2o_resource_path_ok(&binding.probe_path)
         })
         .reduce(|best, binding| {
@@ -1231,7 +1242,38 @@ fn r2o_target_confirmed_probe_path(
             }
         })
         .map(|binding| binding.probe_path.clone())
-        .unwrap_or_else(|| "/".into())
+}
+
+#[cfg(unix)]
+fn r2o_discovery_resource_probe_paths(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    catalog: Option<&Catalog>,
+    memory: &std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>,
+) -> (String, Option<String>) {
+    let Ok(endpoint) = target.endpoint.parse::<std::net::SocketAddr>() else {
+        return ("/".into(), None);
+    };
+    if endpoint.port() != 443
+        || target.host.parse::<std::net::IpAddr>().is_ok()
+        || !r2o_public_resource_ip(endpoint.ip())
+        || !matches!(target.family, 4 | 6)
+        || endpoint.is_ipv4() != (target.family == 4)
+    {
+        return ("/".into(), None);
+    }
+    let confirmed = catalog.and_then(|catalog| r2o_target_confirmed_probe_path(catalog, target));
+    let (proven, hint) = memory
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .paths_for_host(&target.host, std::time::Instant::now());
+    let primary = confirmed
+        .or_else(|| proven.clone())
+        .or_else(|| hint.clone())
+        .unwrap_or_else(|| "/".into());
+    let alternate = proven
+        .filter(|path| path != &primary)
+        .or_else(|| hint.filter(|path| path != &primary));
+    (primary, alternate)
 }
 
 #[cfg(unix)]
@@ -1247,11 +1289,18 @@ fn matching_domain_group<'a>(
     catalog: &'a Catalog,
     target: &r2o_controller::discovery::DiscoveryTarget,
 ) -> Option<&'a r2o_controller::catalog::DomainGroup> {
-    let selected_path = r2o_target_confirmed_probe_path(catalog, target);
+    if target.shape == SHAPE_QUIC {
+        return None;
+    }
+    let selected_path = r2o_target_confirmed_probe_path(catalog, target).unwrap_or_default();
     let key = GroupKey {
         transport: 6,
         family: target.family,
-        shape: target.shape,
+        shape: if target.shape == SHAPE_ECH_TCP {
+            SHAPE_MODERN
+        } else {
+            target.shape
+        },
         probe_path: if selected_path == "/" {
             String::new()
         } else {
@@ -2149,10 +2198,12 @@ fn r2o_family_recovery_sibling_trial_with_ech(
 fn r2o_run_discovery_candidate_trial(
     target: &r2o_controller::discovery::DiscoveryTarget,
     source_text: &str,
+    probe_path: &str,
     mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
     client_hello: Option<&[u8]>,
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
+    resource_memory: &std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>,
 ) -> (Result<r2o_controller::fetch::FetchResult, String>, bool) {
     let plan_id = match random_id() {
         Ok(id) => id,
@@ -2175,7 +2226,7 @@ fn r2o_run_discovery_candidate_trial(
         plan_id,
         plan_text,
         group_plan: false,
-        probe_path: "/".into(),
+        probe_path: probe_path.into(),
     };
     if target.shape == SHAPE_ECH_TCP && ech_config.is_none() {
         return (
@@ -2191,6 +2242,12 @@ fn r2o_run_discovery_candidate_trial(
         commands,
         ech_config,
     );
+    if let Ok(fetch) = &result {
+        resource_memory
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remember_hints(&fetch.r2o_resources, std::time::Instant::now());
+    }
     if client_hello.is_some()
         && r2o_family_recovery_decision(&result, applied) == R2oFamilyRecoveryDecision::Verified
     {
@@ -2350,7 +2407,10 @@ impl R2oLateRxWorker {
                     let Some(_permit) = worker_gate.r2o_acquire(&worker_cancel) else {
                         break;
                     };
-                    r2o_controller::fetch::r2o_fetch_measure_rx_volume(&input.options)
+                    r2o_controller::fetch::r2o_fetch_measure_rx_volume_with_fallback_path(
+                        &input.options,
+                        input.alternate_path.as_deref(),
+                    )
                 };
                 if outcome_sender
                     .send(R2oLateRxOutcome { input, result })
@@ -3339,6 +3399,7 @@ fn r2o_take_ready_quic_discovery(
 struct DiscoveryWorker {
     jobs: Arc<(std::sync::Mutex<R2oDiscoveryQueue>, std::sync::Condvar)>,
     client_hellos: Arc<std::sync::Mutex<HashMap<(String, u8), Vec<u8>>>>,
+    resource_memory: Arc<std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>>,
     active_cancels: Arc<std::sync::Mutex<HashMap<(String, u8), Arc<AtomicBool>>>>,
     outcomes: Receiver<DiscoveryOutcome>,
     cancel: Arc<AtomicBool>,
@@ -4055,30 +4116,40 @@ impl DiscoveryWorker {
             usize,
         >::new()));
         let runner_ech_rx_cursor = Arc::clone(&ech_rx_cursor);
+        let resource_memory = Arc::new(std::sync::Mutex::new(
+            r2o_controller::r2o_resource::R2oResourceMemory::default(),
+        ));
+        let runner_resource_memory = Arc::clone(&resource_memory);
         let runner: Arc<R2oDiscoveryRunner> = Arc::new(move |target, cancel| {
             let runner_started = std::time::Instant::now();
             let client_hello = runner_client_hellos
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(&r2o_discovery_task_key(&target));
+            let candidate_catalog = match Catalog::load(&catalog_path) {
+                Ok(catalog) => Some(catalog),
+                Err(error) => {
+                    if target.shape == SHAPE_ECH_TCP {
+                        eprintln!("ECH-свидетели не прочитаны из каталога: {error}");
+                    }
+                    None
+                }
+            };
             let discovered_witness_candidates = if target.shape == SHAPE_ECH_TCP {
-                match Catalog::load(&catalog_path) {
-                    Ok(catalog) => {
+                candidate_catalog
+                    .as_ref()
+                    .map(|catalog| {
                         let recent_names = runner_recent_tcp_names
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .ech_witness_names(&target, std::time::Instant::now());
                         r2o_controller::discovery::r2o_ech_witness_candidates(
-                            &catalog,
+                            catalog,
                             &target,
                             &recent_names,
                         )
-                    }
-                    Err(error) => {
-                        eprintln!("ECH-свидетели не прочитаны из каталога: {error}");
-                        Vec::new()
-                    }
-                }
+                    })
+                    .unwrap_or_default()
             } else {
                 Vec::new()
             };
@@ -4132,13 +4203,20 @@ impl DiscoveryWorker {
             let Some(plan_text) = outcome.plan_text.as_deref() else {
                 return outcome;
             };
+            let (probe_path, _) = r2o_discovery_resource_probe_paths(
+                &target,
+                candidate_catalog.as_ref(),
+                &runner_resource_memory,
+            );
             let (result, applied) = r2o_run_discovery_candidate_trial(
                 &target,
                 plan_text,
+                &probe_path,
                 mark,
                 &commands,
                 client_hello.as_deref(),
                 ech_config.as_ref(),
+                &runner_resource_memory,
             );
             let Some(primary_config) = ech_config.clone() else {
                 return r2o_confirm_discovery_outcome(outcome, result, applied);
@@ -4171,10 +4249,12 @@ impl DiscoveryWorker {
                         r2o_run_discovery_candidate_trial(
                             &target,
                             retry_plan,
+                            &probe_path,
                             mark,
                             &commands,
                             client_hello.as_deref(),
                             Some(config),
+                            &runner_resource_memory,
                         )
                     },
                 );
@@ -4213,10 +4293,12 @@ impl DiscoveryWorker {
                     let trial = r2o_run_discovery_candidate_trial(
                         &target,
                         &candidate,
+                        &probe_path,
                         mark,
                         &commands,
                         client_hello.as_deref(),
                         Some(&selected_config),
+                        &runner_resource_memory,
                     );
                     result = trial.0;
                     applied = trial.1;
@@ -4286,7 +4368,12 @@ impl DiscoveryWorker {
             }
             outcome
         });
-        Self::r2o_new_with_runner_and_client_hellos(measurement_gate, runner, client_hellos)
+        Self::r2o_new_with_runner_and_client_hellos(
+            measurement_gate,
+            runner,
+            client_hellos,
+            resource_memory,
+        )
     }
 
     #[cfg(test)]
@@ -4298,6 +4385,9 @@ impl DiscoveryWorker {
             measurement_gate,
             runner,
             Arc::new(std::sync::Mutex::new(HashMap::new())),
+            Arc::new(std::sync::Mutex::new(
+                r2o_controller::r2o_resource::R2oResourceMemory::default(),
+            )),
         )
     }
 
@@ -4305,6 +4395,7 @@ impl DiscoveryWorker {
         measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
         runner: Arc<R2oDiscoveryRunner>,
         client_hellos: Arc<std::sync::Mutex<HashMap<(String, u8), Vec<u8>>>>,
+        resource_memory: Arc<std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>>,
     ) -> Self {
         let jobs = Arc::new((
             std::sync::Mutex::new(R2oDiscoveryQueue::default()),
@@ -4421,6 +4512,7 @@ impl DiscoveryWorker {
         Self {
             jobs,
             client_hellos,
+            resource_memory,
             active_cancels,
             outcomes,
             cancel,
@@ -4436,6 +4528,23 @@ impl DiscoveryWorker {
             active: HashMap::new(),
             threads,
         }
+    }
+
+    fn remember_proven_resource(&self, host: &str, path: &str, now: std::time::Instant) -> bool {
+        self.resource_memory
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remember_proven_path(host, path, now)
+    }
+
+    fn prepare_late_rx_resource_paths(&self, input: &mut R2oLateRxInput, catalog: &Catalog) {
+        let Some(target) = input.discovery_target.as_ref() else {
+            return;
+        };
+        let (path, alternate_path) =
+            r2o_discovery_resource_probe_paths(target, Some(catalog), &self.resource_memory);
+        input.options.path = path;
+        input.alternate_path = alternate_path;
     }
 
     fn queue(&mut self, target: r2o_controller::discovery::DiscoveryTarget) -> bool {
@@ -5805,11 +5914,17 @@ impl ControlClient {
                 if let Some(outcome) = r2o_late_rx.as_ref().and_then(R2oLateRxWorker::try_outcome) {
                     let host = outcome.input.options.name.clone();
                     let discovery_target = outcome.input.discovery_target;
+                    let measured_path = outcome.result.measured_path.clone();
                     if let Some(evidence) = outcome.result.evidence {
                         println!(
                             "парная RX-проверка {host}: обрыв подтверждён по identity/gzip, граница около {} КБ из {} КБ; событие не устанавливает план само по себе",
                             evidence.cut_kb, evidence.expected_kb
                         );
+                        if let (Some(path), Some((worker, _, _, _))) =
+                            (measured_path.as_deref(), &mut discovery)
+                        {
+                            worker.remember_proven_resource(&host, path, std::time::Instant::now());
+                        }
                         if let Some(target) = discovery_target
                             && let Some((worker, _, _, _)) = &mut discovery
                         {
@@ -6456,7 +6571,12 @@ impl ControlClient {
                         let now = std::time::Instant::now();
                         let mark = discovery.as_ref().and_then(|(_, _, _, mark)| *mark);
                         match r2o_late_rx_hellos.take_for_tcp_stall(&event, mark, now) {
-                            Some(input) => {
+                            Some(mut input) => {
+                                if let Some((discovery_worker, catalog, _, _)) = discovery.as_ref()
+                                {
+                                    discovery_worker
+                                        .prepare_late_rx_resource_paths(&mut input, catalog);
+                                }
                                 let host = input.options.name.clone();
                                 let in_band =
                                     discovery.as_ref().is_none_or(|(_, catalog, _, _)| {
@@ -6505,7 +6625,13 @@ impl ControlClient {
                             let now = std::time::Instant::now();
                             let mark = discovery.as_ref().and_then(|(_, _, _, mark)| *mark);
                             match r2o_late_rx_hellos.take_for_fin_retry(&event, mark, now) {
-                                Some(input) => {
+                                Some(mut input) => {
+                                    if let Some((discovery_worker, catalog, _, _)) =
+                                        discovery.as_ref()
+                                    {
+                                        discovery_worker
+                                            .prepare_late_rx_resource_paths(&mut input, catalog);
+                                    }
                                     if worker.queue(input, now) {
                                         println!(
                                             "повтор FIN поставил парную identity/gzip RX-проверку для {client} -> {server}"
@@ -6540,7 +6666,12 @@ impl ControlClient {
                         let now = std::time::Instant::now();
                         let mark = discovery.as_ref().and_then(|(_, _, _, mark)| *mark);
                         match r2o_late_rx_hellos.take_for_rst(&event, mark, now) {
-                            Some(input) => {
+                            Some(mut input) => {
+                                if let Some((discovery_worker, catalog, _, _)) = discovery.as_ref()
+                                {
+                                    discovery_worker
+                                        .prepare_late_rx_resource_paths(&mut input, catalog);
+                                }
                                 if worker.queue(input, now) {
                                     println!(
                                         "поставлена в очередь парная identity/gzip RX-проверка для {} -> {}",
@@ -9007,6 +9138,9 @@ mod tests {
             client_hellos: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            resource_memory: std::sync::Arc::new(std::sync::Mutex::new(
+                r2o_controller::r2o_resource::R2oResourceMemory::default(),
+            )),
             active_cancels: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
@@ -9880,6 +10014,127 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn обычный_discovery_выбирает_подтверждение_перед_измерением_и_упоминанием() {
+        use r2o_controller::catalog::{Binding, BoxRecord, Catalog};
+        use r2o_controller::discovery::DiscoveryTarget;
+        use r2o_controller::r2o_resource::{R2oResourceHint, R2oResourceMemory};
+
+        let now = std::time::Instant::now();
+        let memory = std::sync::Mutex::new(R2oResourceMemory::default());
+        memory.lock().unwrap().remember_hints(
+            &[R2oResourceHint {
+                host: "media.example.net".into(),
+                path: "/css/mentioned.css".into(),
+            }],
+            now,
+        );
+        assert_eq!(
+            super::r2o_discovery_resource_probe_paths(
+                &DiscoveryTarget {
+                    host: "media.example.net".into(),
+                    endpoint: "198.51.100.20:443".into(),
+                    family: 4,
+                    shape: SHAPE_MODERN,
+                },
+                None,
+                &memory,
+            ),
+            ("/css/mentioned.css".into(), None)
+        );
+
+        memory.lock().unwrap().remember_proven_path(
+            "media.example.net",
+            "/css/proven.css",
+            now + std::time::Duration::from_secs(1),
+        );
+        let target = DiscoveryTarget {
+            host: "media.example.net".into(),
+            endpoint: "198.51.100.20:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        assert_eq!(
+            super::r2o_discovery_resource_probe_paths(&target, None, &memory),
+            ("/css/proven.css".into(), None)
+        );
+
+        let catalog = Catalog {
+            boxes: vec![BoxRecord {
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: "media.example.net".into(),
+                    level: 3,
+                    confirmed: 10,
+                    enabled: true,
+                    transport: 6,
+                    family: 0,
+                    shape: SHAPE_MODERN,
+                    probe_path: "/css/confirmed.css".into(),
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        assert_eq!(
+            super::r2o_discovery_resource_probe_paths(&target, Some(&catalog), &memory),
+            ("/css/confirmed.css".into(), Some("/css/proven.css".into()))
+        );
+        assert_eq!(
+            super::r2o_discovery_resource_probe_paths(
+                &DiscoveryTarget {
+                    shape: SHAPE_ECH_TCP,
+                    ..target.clone()
+                },
+                Some(&catalog),
+                &memory,
+            ),
+            ("/css/confirmed.css".into(), Some("/css/proven.css".into()))
+        );
+        let quic_catalog = Catalog {
+            boxes: vec![BoxRecord {
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: "media.example.net".into(),
+                    level: 3,
+                    confirmed: 10,
+                    enabled: true,
+                    transport: 17,
+                    family: 4,
+                    shape: SHAPE_QUIC,
+                    probe_path: "/css/quic.css".into(),
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        assert_eq!(
+            super::r2o_discovery_resource_probe_paths(
+                &DiscoveryTarget {
+                    shape: SHAPE_QUIC,
+                    ..target.clone()
+                },
+                Some(&quic_catalog),
+                &memory,
+            ),
+            ("/css/quic.css".into(), Some("/css/proven.css".into()),)
+        );
+        assert_eq!(
+            super::r2o_discovery_resource_probe_paths(
+                &DiscoveryTarget {
+                    endpoint: "10.0.0.20:443".into(),
+                    ..target
+                },
+                Some(&catalog),
+                &memory,
+            ),
+            ("/".into(), None)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn подтверждённый_путь_при_равной_отметке_сохраняет_первую_привязку() {
         use r2o_controller::catalog::{Binding, BoxRecord, Catalog};
         use r2o_controller::discovery::DiscoveryTarget;
@@ -9918,7 +10173,7 @@ mod tests {
 
         assert_eq!(
             super::r2o_target_confirmed_probe_path(&catalog, &target),
-            "/first.css"
+            Some("/first.css".into())
         );
     }
 
@@ -12062,6 +12317,9 @@ mod tests {
             gate,
             runner,
             Arc::clone(&snapshots),
+            Arc::new(std::sync::Mutex::new(
+                r2o_controller::r2o_resource::R2oResourceMemory::default(),
+            )),
         );
         let first_target = r2o_controller::discovery::DiscoveryTarget {
             host: "example.com".into(),
@@ -14215,6 +14473,9 @@ mod tests {
                 Condvar::new(),
             )),
             client_hellos: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            resource_memory: Arc::new(Mutex::new(
+                r2o_controller::r2o_resource::R2oResourceMemory::default(),
+            )),
             active_cancels: Arc::new(Mutex::new(std::collections::HashMap::new())),
             client_snapshot_targets: std::collections::HashSet::new(),
             pending_client_snapshots: std::collections::HashMap::new(),

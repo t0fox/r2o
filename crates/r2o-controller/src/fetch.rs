@@ -676,6 +676,65 @@ pub fn r2o_fetch_measure_rx_volume(options: &FetchOptions) -> R2oFetchVolumeRxRe
     r2o_fetch_measure_rx_volume_with_roots(options, roots)
 }
 
+pub fn r2o_fetch_measure_rx_volume_with_fallback_path(
+    options: &FetchOptions,
+    fallback_path: Option<&str>,
+) -> R2oFetchVolumeRxResult {
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    r2o_fetch_measure_rx_volume_with_fallback_path_and_roots(options, fallback_path, roots)
+}
+
+fn r2o_fetch_measure_rx_volume_with_fallback_path_and_roots(
+    options: &FetchOptions,
+    fallback_path: Option<&str>,
+    roots: RootCertStore,
+) -> R2oFetchVolumeRxResult {
+    let primary = r2o_fetch_measure_rx_volume_with_roots(options, roots.clone());
+    let Some(short_bytes) = primary.short_bytes else {
+        return primary;
+    };
+    let Some(path) = fallback_path.filter(|path| {
+        *path != options.path
+            && primary.retry_path.as_deref() != Some(*path)
+            && crate::r2o_resource::r2o_resource_path_ok(path)
+    }) else {
+        return primary;
+    };
+
+    std::thread::sleep(R2O_VOLUME_RX_PROBE_GAP);
+    let mut fallback_options = options.clone();
+    fallback_options.path = path.into();
+    let fallback = r2o_fetch_measure_rx_volume_with_roots(&fallback_options, roots);
+    r2o_fetch_rx_fallback_result(primary, fallback, path, short_bytes)
+}
+
+fn r2o_fetch_rx_fallback_result(
+    mut primary: R2oFetchVolumeRxResult,
+    mut fallback: R2oFetchVolumeRxResult,
+    path: &str,
+    short_bytes: u64,
+) -> R2oFetchVolumeRxResult {
+    if fallback.evidence.is_some() {
+        if fallback.measured_path.is_none() {
+            fallback.measured_path = Some(path.into());
+        }
+        fallback.retry_path = Some(path.into());
+        fallback.reason = format!(
+            "запасной путь {path} подтвердил RX-обрыв после короткого ответа ({short_bytes} байт): {}",
+            fallback.reason
+        );
+        fallback
+    } else {
+        primary.retry_path = Some(path.into());
+        primary.reason = format!(
+            "{}; запасной путь {path} не подтвердил RX-обрыв: {}",
+            primary.reason, fallback.reason
+        );
+        primary
+    }
+}
+
 fn r2o_fetch_measure_rx_volume_with_roots(
     options: &FetchOptions,
     roots: RootCertStore,
@@ -1943,6 +2002,138 @@ mod tests {
         assert_eq!(result.retry_path.as_deref(), Some("/css/site.css"));
         assert_eq!(result.short_bytes, Some(128));
         assert!(result.reason.contains("после короткого ответа"));
+    }
+
+    #[test]
+    fn запасной_путь_принимается_только_с_доказанным_rx_обрывом() {
+        let primary = R2oFetchVolumeRxResult {
+            short_bytes: Some(243),
+            direct_complete: true,
+            reason: "основной путь ответил коротким телом".into(),
+            ..Default::default()
+        };
+        let fallback = R2oFetchVolumeRxResult {
+            short_bytes: Some(512),
+            reason: "запасной путь тоже короткий".into(),
+            ..Default::default()
+        };
+
+        let kept = r2o_fetch_rx_fallback_result(primary.clone(), fallback, "/css/known.css", 243);
+        assert_eq!(kept.short_bytes, Some(243));
+        assert!(kept.evidence.is_none());
+        assert!(kept.reason.contains("основной путь"));
+
+        let proven = R2oFetchVolumeRxResult {
+            evidence: Some(crate::r2o_volume::R2oVolumeRxEvidence {
+                domain: crate::r2o_volume::R2oVolumeRxDomain::HttpBody,
+                cut_kb: 16,
+                expected_kb: 20,
+                cut_packets: 0,
+                compressed_complete: true,
+                reason: "identity-тело оборвано".into(),
+            }),
+            ..Default::default()
+        };
+        let selected = r2o_fetch_rx_fallback_result(primary, proven, "/css/known.css", 243);
+        assert!(selected.evidence.is_some());
+        assert_eq!(selected.measured_path.as_deref(), Some("/css/known.css"));
+        assert_eq!(selected.retry_path.as_deref(), Some("/css/known.css"));
+    }
+
+    #[test]
+    fn rx_короткий_ответ_повторяется_по_уже_наблюдавшемуся_пути() {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use rustls::{ServerConfig, ServerConnection};
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::mpsc;
+        use std::thread;
+
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+            .expect("создать сертификат localhost");
+        let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
+        let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certificate.serialize_private_key_der(),
+        ));
+        let server_config = Arc::new(
+            ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(vec![certificate_der.clone()], private_key)
+                .unwrap(),
+        );
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate_der).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("открыть HTTPS-приёмник");
+        let address = listener.local_addr().unwrap();
+        let (request_sender, request_receiver) = mpsc::channel();
+        let server = thread::spawn(move || {
+            for attempt in 0..5 {
+                let (socket, _) = listener.accept().expect("принять HTTPS-соединение");
+                let connection = ServerConnection::new(server_config.clone()).unwrap();
+                let mut stream = StreamOwned::new(connection, socket);
+                let mut request = Vec::new();
+                let mut byte = [0_u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream
+                        .read_exact(&mut byte)
+                        .expect("прочитать заголовки запроса");
+                    request.push(byte[0]);
+                }
+                request_sender.send(request).unwrap();
+                let (encoding, length, body_length) = match attempt {
+                    0 => ("identity", 128, 128),
+                    1 | 3 => ("identity", 20 * 1024, 16 * 1024),
+                    2 => ("identity", 16 * 1024, 16 * 1024),
+                    _ => ("gzip", 2 * 1024, 2 * 1024),
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {length}\r\nContent-Encoding: {encoding}\r\n\r\n"
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("отправить заголовки ответа");
+                stream
+                    .write_all(&vec![b'x'; body_length])
+                    .expect("отправить тело ответа");
+            }
+        });
+
+        let options = FetchOptions {
+            name: "localhost".into(),
+            port: address.port(),
+            ip: Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            path: "/".into(),
+            deadline: Duration::from_secs(3),
+            tls12: false,
+            wire_len: None,
+            mark: None,
+        };
+        let result = r2o_fetch_measure_rx_volume_with_fallback_path_and_roots(
+            &options,
+            Some("/css/known.css"),
+            roots,
+        );
+        let requests = request_receiver
+            .try_iter()
+            .map(|request| String::from_utf8_lossy(&request).to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        server.join().unwrap();
+
+        assert_eq!(requests.len(), 5);
+        assert!(requests[0].starts_with("get / http/1.1\r\n"));
+        assert!(
+            requests[1..]
+                .iter()
+                .all(|request| request.starts_with("get /css/known.css http/1.1\r\n"))
+        );
+        assert_eq!(result.measured_path.as_deref(), Some("/css/known.css"));
+        assert_eq!(result.retry_path.as_deref(), Some("/css/known.css"));
+        assert_eq!(
+            result.evidence.as_ref().map(|evidence| evidence.cut_kb),
+            Some(16)
+        );
+        assert!(result.reason.contains("запасной путь"));
     }
 
     #[test]

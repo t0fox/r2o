@@ -2,11 +2,117 @@ const R2O_RESOURCE_LIMIT: usize = 2;
 const R2O_RESOURCE_BODY_LIMIT: usize = 32_768;
 const R2O_RESOURCE_TAG_LIMIT: usize = 2048;
 const R2O_RESOURCE_URL_LIMIT: usize = 600;
+const R2O_RESOURCE_MEMORY_LIMIT: usize = 8;
+const R2O_RESOURCE_MEMORY_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct R2oResourceHint {
     pub host: String,
     pub path: String,
+}
+
+#[derive(Clone, Debug)]
+struct R2oResourceMemoryEntry {
+    host: String,
+    path: String,
+    expires: std::time::Instant,
+    proven: bool,
+}
+
+#[derive(Debug)]
+pub struct R2oResourceMemory {
+    entries: [Option<R2oResourceMemoryEntry>; R2O_RESOURCE_MEMORY_LIMIT],
+    next: usize,
+}
+
+impl Default for R2oResourceMemory {
+    fn default() -> Self {
+        Self {
+            entries: std::array::from_fn(|_| None),
+            next: 0,
+        }
+    }
+}
+
+impl R2oResourceMemory {
+    pub fn remember_hints(&mut self, hints: &[R2oResourceHint], now: std::time::Instant) {
+        if hints.len() > R2O_RESOURCE_LIMIT {
+            return;
+        }
+        for hint in hints {
+            if hint.host.is_empty() || !r2o_resource_path_ok(&hint.path) {
+                continue;
+            }
+            let existing = self
+                .entries
+                .iter()
+                .position(|entry| entry.as_ref().is_some_and(|entry| entry.host == hint.host));
+            if existing.is_some_and(|slot| {
+                self.entries[slot].as_ref().is_some_and(|entry| {
+                    entry.proven && entry.expires > now && entry.path != hint.path
+                })
+            }) {
+                continue;
+            }
+            let slot = existing.unwrap_or_else(|| self.r2o_next_slot());
+            self.entries[slot] = Some(R2oResourceMemoryEntry {
+                host: hint.host.clone(),
+                path: hint.path.clone(),
+                expires: now + R2O_RESOURCE_MEMORY_TTL,
+                proven: false,
+            });
+        }
+    }
+
+    pub fn remember_proven_path(
+        &mut self,
+        host: &str,
+        path: &str,
+        now: std::time::Instant,
+    ) -> bool {
+        if host.is_empty() || !r2o_resource_path_ok(path) {
+            return false;
+        }
+        let slot = self
+            .entries
+            .iter()
+            .position(|entry| entry.as_ref().is_some_and(|entry| entry.host == host))
+            .unwrap_or_else(|| self.r2o_next_slot());
+        self.entries[slot] = Some(R2oResourceMemoryEntry {
+            host: host.into(),
+            path: path.into(),
+            expires: now + R2O_RESOURCE_MEMORY_TTL,
+            proven: true,
+        });
+        true
+    }
+
+    pub fn paths_for_host(
+        &self,
+        host: &str,
+        now: std::time::Instant,
+    ) -> (Option<String>, Option<String>) {
+        let mut proven = None;
+        let mut hint = None;
+        for entry in self.entries.iter().flatten().filter(|entry| {
+            entry.expires > now && entry.host == host && r2o_resource_path_ok(&entry.path)
+        }) {
+            if entry.proven {
+                if proven.is_none() {
+                    proven = Some(entry.path.clone());
+                }
+            } else if hint.is_none() {
+                hint = Some(entry.path.clone());
+            }
+        }
+        (proven, hint)
+    }
+
+    fn r2o_next_slot(&mut self) -> usize {
+        let slot = self.next;
+        self.next = (self.next + 1) % R2O_RESOURCE_MEMORY_LIMIT;
+        slot
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -446,4 +552,102 @@ fn r2o_parse_chunk_size(line: &[u8]) -> Option<usize> {
         size = size.checked_mul(16)?.checked_add(digit)?;
     }
     Some(size)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{R2oResourceHint, R2oResourceMemory};
+    use std::time::{Duration, Instant};
+
+    fn hint(host: &str, path: &str) -> R2oResourceHint {
+        R2oResourceHint {
+            host: host.into(),
+            path: path.into(),
+        }
+    }
+
+    #[test]
+    fn кэш_упоминаний_истекает_через_час() {
+        let now = Instant::now();
+        let mut memory = R2oResourceMemory::default();
+        memory.remember_hints(&[hint("media.example.net", "/css/site.css")], now);
+
+        assert_eq!(
+            memory.paths_for_host("media.example.net", now),
+            (None, Some("/css/site.css".into()))
+        );
+        assert_eq!(
+            memory.paths_for_host("media.example.net", now + Duration::from_secs(3600)),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn доказанный_путь_защищён_от_другого_упоминания_и_равный_путь_понижает_доказательство() {
+        let now = Instant::now();
+        let mut memory = R2oResourceMemory::default();
+        memory.remember_hints(&[hint("media.example.net", "/css/site.css")], now);
+        assert!(memory.remember_proven_path(
+            "media.example.net",
+            "/css/site.css",
+            now + Duration::from_secs(1)
+        ));
+
+        memory.remember_hints(
+            &[hint("media.example.net", "/css/other.css")],
+            now + Duration::from_secs(2),
+        );
+        assert_eq!(
+            memory.paths_for_host("media.example.net", now + Duration::from_secs(2)),
+            (Some("/css/site.css".into()), None)
+        );
+
+        memory.remember_hints(
+            &[hint("media.example.net", "/css/site.css")],
+            now + Duration::from_secs(3),
+        );
+        memory.remember_hints(
+            &[hint("media.example.net", "/css/other.css")],
+            now + Duration::from_secs(4),
+        );
+        assert_eq!(
+            memory.paths_for_host("media.example.net", now + Duration::from_secs(4)),
+            (None, Some("/css/other.css".into()))
+        );
+    }
+
+    #[test]
+    fn кэш_отвергает_пачку_больше_двух_упоминаний() {
+        let now = Instant::now();
+        let mut memory = R2oResourceMemory::default();
+        memory.remember_hints(
+            &[
+                hint("a.example.net", "/a.css"),
+                hint("b.example.net", "/b.css"),
+                hint("c.example.net", "/c.css"),
+            ],
+            now,
+        );
+
+        assert_eq!(memory.paths_for_host("a.example.net", now), (None, None));
+        assert_eq!(memory.paths_for_host("b.example.net", now), (None, None));
+        assert_eq!(memory.paths_for_host("c.example.net", now), (None, None));
+    }
+
+    #[test]
+    fn кэш_упоминаний_вытесняет_по_кольцу_из_восьми_слотов() {
+        let now = Instant::now();
+        let mut memory = R2oResourceMemory::default();
+        for index in 0..9 {
+            let host = format!("{index}.example.net");
+            let path = format!("/{index}.css");
+            memory.remember_hints(&[hint(&host, &path)], now);
+        }
+
+        assert_eq!(memory.paths_for_host("0.example.net", now), (None, None));
+        assert_eq!(
+            memory.paths_for_host("8.example.net", now),
+            (None, Some("/8.css".into()))
+        );
+    }
 }

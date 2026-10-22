@@ -6865,3 +6865,25 @@ ARM64/QEMU: workspace — 1 042 пройдено, 0 ошибок, 4 штатны
 Логи кросс-проверок: `.rea/r2o-family-recovery-probe-path-check-final-aarch64.log`, `.rea/r2o-family-recovery-probe-path-check-final-armv7.log`, `.rea/r2o-family-recovery-probe-path-check-final-mipsel.log`, `.rea/r2o-family-recovery-probe-path-release-final-aarch64.log`, `.rea/r2o-family-recovery-probe-path-release-final-armv7.log` и `.rea/r2o-family-recovery-probe-path-release-final-mipsel.log`. Неудачная попытка ARMv7 musl сохранена в `.rea/r2o-family-recovery-probe-path-check-armv7.log`. `cargo fmt --all -- --check` и `git diff --check` прошли.
 
 Проектная оценка остаётся **66,35%**: эта ветвь подтверждает путь группового восстановления, но не закрывает весь scheduler/discovery или полный перенос `session.c`.
+
+## Кэш путей ресурсов и запасной RX-путь — 22.10.2026
+
+### Источник, REA и покрытие
+
+Донор: `E:\d2o\core\sched.c`, SHA-256 `1de9feaab19dcea1e493aea068295470cf3143adf83157b57663f1098132ae8a`; тестовый файл `E:\d2o\core\test_sched.c`, SHA-256 `a67f87e09a7fd93ed735b52f361e78590b9ce40679ab95e300accf0a3e9d51a3`. В `select_resource_path` донор пропускает неподходящие транспорт/порт/имя/адрес, выбирает свежую точную подтверждённую привязку, затем proven-путь, затем HTML-упоминание; альтернативой становится уже наблюдавшийся путь, отличный от основного. `worker_volume` повторяет измерение по этой альтернативе только после короткого завершённого ответа и принимает замену лишь при доказанном RX-обрыве (`sched.c`, строки 2367–2419 и 6266–6318).
+
+REA `get_evidence_bundle` с фильтром точного SHA `sched.c` вернул 0 записей. Новое бинарное Evidence для этих функций не создано: предыдущий запрос `select_resource_path` завершился `provider_unavailable`/`target_format_unsupported` в Windows Ghidra; Hopper недоступен, IDA не настроена. Использованы сохранённые ограниченные Clang AST: `.rea/r2o-family-recovery-select-resource-path-ast.txt`, `.rea/r2o-discovery-resource-memory-remember-ast.txt` и `.rea/r2o-discovery-resource-memory-proven-ast.txt`. Эти AST и исходник не выдаются за REA Evidence.
+
+### Реализация и независимая проверка
+
+В `r2o-controller` добавлен восьмислотовый кэш путей с часовым сроком, сохранением доказанного пути от чужого HTML-упоминания и ограничением двух подсказок на ответ. Discovery выбирает основной/запасной путь с тем же порядком, а поздняя RX-проверка после TCP stall, FIN retry и RST использует оба пути. Запасной результат заменяет исходный только при `evidence.is_some()`; в противном случае остаётся короткий исходный ответ без блокирующего вердикта.
+
+Новый ARM64/QEMU локальный TLS-сценарий проверяет запрос по основному пути, короткий ответ, повтор по заранее наблюдавшемуся пути и установление доказательства на запасном. Отдельный тест фиксирует fail-closed правило для запасного ответа без доказательства. В тесте выбора ресурса покрыты приоритеты подтверждённого/proven/hint/root путей, QUIC и ECH-форма, приватная цель и запасной proven-путь.
+
+Затронутый controller на ARM64/QEMU: 392 passed, 0 failed, 1 ignored, 23 набора. Полный workspace: 1 049 passed, 0 failed, 4 ignored, 73 набора. Один первый запуск workspace зафиксировал чувствительный к задержке тест панели (`:0`, окно 300 мс) под полной компиляционной нагрузкой; тот же тест прошёл изолированно, а последовательный повтор полного workspace прошёл.
+
+Workspace `cargo check` и release-сборки: AArch64 GNU и ARMv7 GNU hard-float — успешно; MIPS32 little-endian — успешно через nightly `-Z build-std=std,panic_abort`. На MIPS остаётся несвязанный warning о `AtomicUsize::fetch_update` в `r2o-telegram/src/routing.rs`. Размеры controller/datapath: AArch64 5 051 496 / 856 784 Б; ARMv7 hard-float 4 853 140 / 920 680 Б; MIPS32r2 6 755 236 / 1 249 108 Б. `readelf` подтвердил ELF64 AArch64, ELF32 ARMv7 EABI5 hard-float и ELF32 MIPS32r2. Тесты запускались только ARM64/QEMU, кросс-бинарники не запускались; физический роутер не проверялся.
+
+Зависимости уже были прямыми и использованными: `x509-parser` — TLS-сертификат в HTTPS-измерителе; `tls-parser` и `etherparse` — независимые проверки TLS/IP; `proptest` — проверки произвольных входов. Новых зависимостей и криптографии поверх существующего `ring` не добавлялось.
+
+Локальные журналы: `.rea/r2o-resource-fallback-controller-arm64.log`, `.rea/r2o-resource-fallback-workspace-arm64-rerun.log`, `.rea/r2o-resource-fallback-panel-port0-arm64.log`, `.rea/r2o-resource-fallback-check-aarch64.log`, `.rea/r2o-resource-fallback-check-armv7.log`, `.rea/r2o-resource-fallback-check-mipsel-nightly.log`, `.rea/r2o-resource-fallback-release-aarch64.log`, `.rea/r2o-resource-fallback-release-armv7.log` и `.rea/r2o-resource-fallback-release-mipsel-nightly.log`. Проектная оценка остаётся **66,35%**: следующими остаются остальные ветви scheduler/classifier и полный TCP/UDP session.
