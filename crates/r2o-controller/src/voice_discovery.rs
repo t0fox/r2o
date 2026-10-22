@@ -285,14 +285,16 @@ where
                 error: None,
             };
         }
-        if r2o_outcome.probe.received == 0 {
+        let r2o_is_first_direct_probe = r2o_trace.direct_probes.len() == 1;
+        if r2o_is_first_direct_probe && r2o_outcome.probe.received == 0 {
             return R2oDiscoverySearchResult {
                 trace: r2o_trace,
                 verdict: R2oDiscoveryVerdict::Continue,
                 error: None,
             };
         }
-        if r2o_outcome.probe.sent == R2O_DISCOVERY_EXCHANGES
+        if r2o_is_first_direct_probe
+            && r2o_outcome.probe.sent == R2O_DISCOVERY_EXCHANGES
             && r2o_outcome.probe.received == R2O_DISCOVERY_EXCHANGES
         {
             return R2oDiscoverySearchResult {
@@ -300,6 +302,19 @@ where
                 verdict: R2oDiscoveryVerdict::Clear,
                 error: None,
             };
+        }
+        if !r2o_is_first_direct_probe {
+            let r2o_cutoff = r2o_trace.direct_probes[0].received;
+            if r2o_cutoff == 0
+                || r2o_outcome.probe.received != r2o_cutoff
+                || r2o_cutoff.checked_add(1) != Some(r2o_outcome.probe.sent)
+            {
+                return R2oDiscoverySearchResult {
+                    trace: r2o_trace,
+                    verdict: R2oDiscoveryVerdict::Flaky,
+                    error: None,
+                };
+            }
         }
     }
 
@@ -1176,6 +1191,62 @@ mod tests {
                 cutoff: 12,
             }
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn r2o_полное_ответное_повторение_после_обрыва_считается_плавающим() {
+        use super::{R2oDiscoveryProbeOutcome, R2oDiscoveryVerdict, r2o_search_discovery_with};
+
+        let mut r2o_calls = 0;
+        let r2o_result = r2o_search_discovery_with(
+            None,
+            || panic!("неустойчивая граница не должна переходить к подбору"),
+            |_| {
+                r2o_calls += 1;
+                let r2o_probe_result = if r2o_calls == 1 {
+                    r2o_probe(13, 12)
+                } else {
+                    r2o_probe(R2O_DISCOVERY_EXCHANGES, R2O_DISCOVERY_EXCHANGES)
+                };
+                R2oDiscoveryProbeOutcome {
+                    probe: r2o_probe_result,
+                    error: None,
+                }
+            },
+        );
+
+        assert_eq!(r2o_calls, 2);
+        assert_eq!(r2o_result.trace.direct_probes.len(), 2);
+        assert_eq!(r2o_result.verdict, R2oDiscoveryVerdict::Flaky);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn r2o_нулевой_ответ_после_обрыва_считается_плавающим() {
+        use super::{R2oDiscoveryProbeOutcome, R2oDiscoveryVerdict, r2o_search_discovery_with};
+
+        let mut r2o_calls = 0;
+        let r2o_result = r2o_search_discovery_with(
+            None,
+            || panic!("неустойчивая граница не должна переходить к подбору"),
+            |_| {
+                r2o_calls += 1;
+                let r2o_probe_result = if r2o_calls == 1 {
+                    r2o_probe(13, 12)
+                } else {
+                    r2o_probe(1, 0)
+                };
+                R2oDiscoveryProbeOutcome {
+                    probe: r2o_probe_result,
+                    error: None,
+                }
+            },
+        );
+
+        assert_eq!(r2o_calls, 2);
+        assert_eq!(r2o_result.trace.direct_probes.len(), 2);
+        assert_eq!(r2o_result.verdict, R2oDiscoveryVerdict::Flaky);
     }
 
     #[cfg(target_os = "linux")]
