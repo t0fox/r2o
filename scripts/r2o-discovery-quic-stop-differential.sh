@@ -45,6 +45,7 @@ fi
     printf '\nClang AST жизненного цикла задачи C\n'
 } >"$r2o_log"
 
+# shellcheck disable=SC2016 # параметры раскрываются во вложенном sh -c
 r2o_run 'разбор AST планировщика C' sh -c \
     'clang-18 -std=gnu11 -pthread -I"$2/include" -I"$2/../datapath/include" -DD2K_RELEASE_ID="dev" -fsyntax-only -Xclang -ast-dump "$1" 2>/dev/null | grep -E "FunctionDecl.*(d2k_sched_tick|task_fail|task_done)"' \
     _ "$r2o_donor_core/sched.c" "$r2o_donor_core"

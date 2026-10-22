@@ -170,8 +170,10 @@ C
         "$r2o_script_dir/crates/r2o-datapath/src/engine.rs"
 } >"$r2o_log"
 
-make -B -C "$r2o_donor" test_session CC=aarch64-linux-gnu-gcc >>"$r2o_log" 2>&1
-qemu-aarch64 -L /usr/aarch64-linux-gnu "$r2o_donor/test_session" >>"$r2o_log" 2>&1
+{
+    make -B -C "$r2o_donor" test_session CC=aarch64-linux-gnu-gcc
+    qemu-aarch64 -L /usr/aarch64-linux-gnu "$r2o_donor/test_session"
+} >>"$r2o_log" 2>&1
 aarch64-linux-gnu-gcc -std=c99 -O2 -Wall -Wextra -Werror \
     -I"$r2o_donor/include" -I"$r2o_donor/../core/include" \
     -o "$r2o_oracle" "$r2o_harness" \

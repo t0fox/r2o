@@ -235,7 +235,11 @@ jobs:
       - name: Собрать сетевой исполнитель
         run: cargo build --release --locked --package r2o-datapath --package r2o-controller
       - name: Проверить NFQUEUE во временном пространстве имён
-        run: sudo sh scripts/test-nfq-netns.sh
+        run: >-
+          sudo env
+          R2OD_BIN="$GITHUB_WORKSPACE/target/release/r2o-datapath"
+          R2OC_BIN="$GITHUB_WORKSPACE/target/release/r2o-controller"
+          sh scripts/test-nfq-netns.sh
       - name: Проверить правила nftables без применения
         run: sudo sh scripts/test-router-firewall.sh
 
@@ -248,8 +252,6 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
-        with:
-          target: mipsel-unknown-linux-gnu
       - name: Установить кросс-компилятор и QEMU
         run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-mipsel-linux-gnu qemu-user binutils
       - name: Собрать и проверить выпуск MIPS
@@ -276,6 +278,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
+      - name: Загрузить зависимости для автономной MIPS-сборки
+        run: cargo fetch --locked
       - name: Установить QEMU и распаковщик SDK
         run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user zstd binutils curl
       - name: Собрать и проверить OpenWrt MIPS под QEMU
@@ -304,6 +308,8 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
         with:
           target: aarch64-unknown-linux-musl
+      - name: Загрузить зависимости для автономной ARM64-сборки
+        run: cargo fetch --locked
       - name: Установить QEMU и распаковщик SDK
         run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user zstd binutils curl
       - name: Собрать и проверить OpenWrt ARM64 под QEMU

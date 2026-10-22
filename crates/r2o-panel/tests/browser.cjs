@@ -139,7 +139,7 @@ async function main() {
   await evaluate("document.fonts.ready.then(() => true)");
 
   assert.equal(await evaluate("document.title.startsWith('R2O')"), true, "заголовок страницы панели");
-  assert.equal(await evaluate("document.querySelectorAll('#app > section').length"), 6, "все разделы панели отображаются");
+  assert.equal(await evaluate("document.querySelectorAll('#app > section').length"), 7, "все разделы панели отображаются");
   assert.equal(await evaluate("document.fonts.check('16px Onest')"), true, "локальный шрифт Onest загружен");
 
   for (const [name, width, height] of [
