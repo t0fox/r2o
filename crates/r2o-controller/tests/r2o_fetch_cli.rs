@@ -39,3 +39,106 @@ fn r2o_budget_quic_принимает_целое_и_отклоняет_tls12_д�
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("QUIC использует TLS 1.3"));
 }
+
+#[test]
+fn r2o_json_reports_an_empty_address_without_falling_back_to_dns() {
+    let output = r2o_run_fetch(&["--name", "localhost", "--ip", "", "--quic", "--json"]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--json must return a JSON result");
+    assert_eq!(value["schema"], 2);
+    assert_eq!(value["shape"], "dns_failed");
+    assert_eq!(value["measured"], false);
+    assert_eq!(value["name"], "localhost");
+    assert_eq!(value["ip"], serde_json::Value::Null);
+}
+
+#[test]
+fn r2o_json_keeps_quic_stream_bytes_separate_from_http_body_bytes() {
+    let output = r2o_run_fetch(&[
+        "--name",
+        "stand.example",
+        "--ip",
+        "127.0.0.1",
+        "--port",
+        "1",
+        "--quic",
+        "--deadline",
+        "100",
+        "--json",
+    ]);
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("QUIC --json must return a JSON result");
+    assert!(value["body_bytes"].is_null());
+    assert!(value["quic_stream_bytes"].is_u64());
+    assert_eq!(value["headers_inspected"], false);
+    assert!(value["location"].is_null());
+    assert_eq!(value["level"], 0);
+    assert_eq!(value["local_port"], 0);
+}
+
+#[test]
+fn r2o_json_reports_tcp_transport_failure_in_the_c_schema() {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port().to_string();
+    drop(listener);
+    let output = r2o_run_fetch(&[
+        "--name",
+        "stand.example",
+        "--ip",
+        "127.0.0.1",
+        "--port",
+        &port,
+        "--deadline",
+        "100",
+        "--json",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("TCP --json must return a JSON result");
+    assert_eq!(value["schema"], 2);
+    assert_eq!(value["client"], "d2k-own-profile");
+    assert_eq!(value["shape"], "tcp");
+    assert_eq!(value["ip"], "127.0.0.1");
+    assert_eq!(value["http_status"], 0);
+    assert_eq!(value["response_complete"], false);
+    assert_eq!(value["headers_inspected"], true);
+    assert_eq!(value["level"], 0);
+    assert_eq!(value["measured"], true);
+    assert_eq!(value["reason"], "нет TCP");
+}
+
+#[test]
+fn r2o_json_keeps_transmit_and_receive_ladder_results_separate() {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port().to_string();
+    drop(listener);
+    let output = r2o_run_fetch(&[
+        "--name",
+        "stand.example",
+        "--ip",
+        "127.0.0.1",
+        "--port",
+        &port,
+        "--ladder",
+        "--json",
+    ]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("ladder --json must return a JSON result");
+    assert_eq!(value["shape"], "ladder");
+    assert_eq!(value["tx_passed"], false);
+    assert!(value["reason"].as_str().unwrap().starts_with("нет TCP:"));
+    assert!(value["rx_cut"].is_boolean());
+    assert!(value["rx_short"].is_boolean());
+    assert!(value["rx_unmeasured"].is_boolean());
+    assert!(value["rx_direct_complete"].is_boolean());
+    assert!(value["rx_tls_unavailable"].is_boolean());
+    assert!(value["measured_path"].is_string());
+    assert_eq!(value["rx_reason"], "");
+}

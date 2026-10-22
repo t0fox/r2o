@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -21,7 +21,7 @@ fn main() {
 
 fn run() -> Result<i32, String> {
     let mut name = None;
-    let mut ip = None;
+    let mut ip_raw = None;
     let mut port = 443_u16;
     let mut path = "/".to_owned();
     let mut deadline = Duration::from_millis(15_000);
@@ -40,6 +40,9 @@ fn run() -> Result<i32, String> {
                 .join("run/r2o-datapath4.sock")
         });
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    let r2o_json = arguments
+        .iter()
+        .any(|argument| argument.to_str() == Some("--json"));
 
     if arguments.len() == 1 && matches!(arguments[0].to_str(), Some("--help" | "-h")) {
         print_help();
@@ -62,11 +65,7 @@ fn run() -> Result<i32, String> {
             }
             "--ip" => {
                 index += 1;
-                ip = Some(
-                    argument(&arguments, index, "--ip")?
-                        .parse::<IpAddr>()
-                        .map_err(|error| format!("неверный IP-адрес: {error}"))?,
-                );
+                ip_raw = Some(argument(&arguments, index, "--ip")?.to_owned());
             }
             "--port" => {
                 index += 1;
@@ -124,6 +123,7 @@ fn run() -> Result<i32, String> {
                 r2o_quic_budget_set = true;
             }
             "--ladder" => r2o_ladder = true,
+            "--json" => {}
             _ => return Err(format!("неизвестный параметр {option}; используйте --help")),
         }
         index += 1;
@@ -134,6 +134,56 @@ fn run() -> Result<i32, String> {
     }
 
     let name = name.ok_or_else(|| "обязателен параметр --name".to_owned())?;
+    let ip = match ip_raw {
+        Some(value) => match value.parse::<IpAddr>() {
+            Ok(address) => Some(address),
+            Err(_) if value.is_empty() => {
+                if r2o_json {
+                    r2o_print_dns_failed(&name);
+                } else {
+                    eprintln!("имя {} не разрешилось", name);
+                }
+                return Ok(2);
+            }
+            Err(error) => return Err(format!("неверный IP-адрес: {error}")),
+        },
+        None => None,
+    };
+    let ip = match ip {
+        Some(ip) => ip,
+        None => match (name.as_str(), port).to_socket_addrs() {
+            Ok(mut addresses) => match addresses.next() {
+                Some(address) => address.ip(),
+                None => {
+                    if r2o_json {
+                        r2o_print_dns_failed(&name);
+                    } else {
+                        eprintln!("имя {} не разрешилось", name);
+                    }
+                    return Ok(2);
+                }
+            },
+            Err(error) => {
+                if r2o_json {
+                    r2o_print_dns_failed(&name);
+                } else {
+                    eprintln!("имя {} не разрешилось: {error}", name);
+                }
+                return Ok(2);
+            }
+        },
+    };
+    if !r2o_quic && wire_len.is_none() {
+        wire_len = Some(
+            if tls12 {
+                r2o_controller::hello::legacy_client_hello(&name)
+            } else {
+                r2o_controller::hello::modern_client_hello(&name)
+            }
+            .map_err(|error| format!("не удалось собрать профиль ClientHello: {error}"))?
+            .len(),
+        );
+    }
     if let Some(r2o_wait) = r2o_snapshot.filter(|wait| !wait.is_zero()) {
         wire_len = Some(r2o_fetch_snapshot_wire_len(
             &name,
@@ -151,7 +201,7 @@ fn run() -> Result<i32, String> {
     }
     let options = FetchOptions {
         name,
-        ip,
+        ip: Some(ip),
         port,
         path,
         deadline,
@@ -163,7 +213,70 @@ fn run() -> Result<i32, String> {
     if r2o_ladder {
         let r2o_started = std::time::Instant::now();
         let r2o_tx = r2o_fetch_measure_tx_volume(&options)?;
-        let r2o_rx = r2o_fetch_measure_rx_volume(&options);
+        let r2o_rx = if options.port == 80 || r2o_tx.reason.starts_with("нет TCP к ") {
+            Default::default()
+        } else {
+            r2o_fetch_measure_rx_volume(&options)
+        };
+        if r2o_json {
+            let r2o_verdict = match r2o_tx.verdict {
+                R2oFetchVolumeTxVerdict::Unreachable => "unreachable",
+                R2oFetchVolumeTxVerdict::Short => "short",
+                R2oFetchVolumeTxVerdict::Cut => "cut",
+                R2oFetchVolumeTxVerdict::Passed => "passed",
+            };
+            let r2o_verdict_human = match r2o_tx.verdict {
+                R2oFetchVolumeTxVerdict::Unreachable => "мишень не ответила",
+                R2oFetchVolumeTxVerdict::Short => "объём не набран — вердикта нет",
+                R2oFetchVolumeTxVerdict::Cut => "обрыв по объёму",
+                R2oFetchVolumeTxVerdict::Passed => "объём прошёл",
+            };
+            let r2o_rx_cut = r2o_rx.evidence.is_some();
+            let r2o_reason = r2o_tx
+                .reason
+                .strip_prefix(&format!("нет TCP к {}: ", r2o_tx.address))
+                .map(|reason| {
+                    format!(
+                        "нет TCP: {}",
+                        reason.split(" (os error ").next().unwrap_or(reason)
+                    )
+                })
+                .unwrap_or_else(|| r2o_tx.reason.clone());
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema": 2,
+                    "shape": "ladder",
+                    "mode": "ladder",
+                    "name": options.name,
+                    "ip": r2o_tx.address.ip().to_string(),
+                    "port": options.port,
+                    "verdict": r2o_verdict,
+                    "verdict_human": r2o_verdict_human,
+                    "tx_passed": r2o_tx.verdict == R2oFetchVolumeTxVerdict::Passed,
+                    "at_kb": r2o_tx.at_kb,
+                    "rx_cut": r2o_rx_cut,
+                    "rx_at_kb": r2o_rx.evidence.as_ref().map_or(0, |evidence| evidence.cut_kb),
+                    "elapsed_ms": r2o_started.elapsed().as_millis(),
+                    "reason": r2o_reason,
+                    "rx_short": r2o_rx.short_bytes.is_some(),
+                    "rx_unmeasured": r2o_rx.rx_unmeasured,
+                    "rx_direct_complete": r2o_rx.direct_complete,
+                    "rx_tls_unavailable": r2o_rx.rx_tls_unavailable,
+                    "measured_path": r2o_rx.measured_path.as_deref().unwrap_or(""),
+                    "rx_reason": r2o_rx.reason,
+                })
+            );
+            return Ok(
+                if r2o_tx.verdict == R2oFetchVolumeTxVerdict::Cut || r2o_rx_cut {
+                    1
+                } else if r2o_tx.verdict == R2oFetchVolumeTxVerdict::Passed {
+                    0
+                } else {
+                    2
+                },
+            );
+        }
         println!(
             "цель:        {} ({}:{}), путь {}",
             options.name,
@@ -209,7 +322,7 @@ fn run() -> Result<i32, String> {
                     format!(", {} пакетов с данными", evidence.cut_packets)
                 }
             );
-        } else {
+        } else if !r2o_rx.reason.is_empty() {
             println!("вход:        {}", r2o_rx.reason);
         }
         println!("время:       {} мс", r2o_started.elapsed().as_millis());
@@ -219,23 +332,148 @@ fn run() -> Result<i32, String> {
         for failure in &r2o_rx.failures {
             println!("ошибка RX:   {failure}");
         }
-        let mut r2o_failed =
-            r2o_tx.verdict == R2oFetchVolumeTxVerdict::Cut || r2o_rx.evidence.is_some();
-        if r2o_quic {
-            r2o_failed |= !r2o_run_quic(&options, r2o_quic_budget_packets)?;
-        }
-        return Ok(i32::from(r2o_failed));
+        return Ok(
+            if r2o_tx.verdict == R2oFetchVolumeTxVerdict::Cut || r2o_rx.evidence.is_some() {
+                1
+            } else if r2o_tx.verdict == R2oFetchVolumeTxVerdict::Passed {
+                0
+            } else {
+                2
+            },
+        );
     }
     if r2o_quic {
-        return Ok(i32::from(!r2o_run_quic(&options, r2o_quic_budget_packets)?));
+        let r2o_result = r2o_fetch_quic_with_budget(&options, r2o_quic_budget_packets)?;
+        if r2o_json {
+            let r2o_status = r2o_result.data.status;
+            let r2o_handshake = r2o_result.data.handshake_confirmed;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema": 2,
+                    "client": "d2k-own-profile",
+                    "name": options.name,
+                    "shape": "quic",
+                    "ip": r2o_result.address.ip().to_string(),
+                    "port": options.port,
+                    "path": options.path,
+                    "protocol": "quic",
+                    "body_bytes": null,
+                    "quic_stream_bytes": r2o_result.data.body_bytes,
+                    "body_expected": null,
+                    "body_has_length": null,
+                    "headers_inspected": false,
+                    "location": null,
+                    "cloudflare_challenge": null,
+                    "wire_requested": options.wire_len.unwrap_or(0),
+                    "mark": options.mark.unwrap_or(0),
+                    "elapsed_ms": r2o_result.elapsed.as_millis(),
+                    "local_port": if r2o_handshake { r2o_result.local_port } else { 0 },
+                    "negotiated_tls": if r2o_handshake { 0x0304 } else { 0 },
+                    "http_status": r2o_status,
+                    "response_complete": r2o_result.data.complete,
+                    "level": if r2o_status > 0 { 3 } else if r2o_handshake { 2 } else { 0 },
+                    "local_refusal": false,
+                    "measured": true,
+                    "name_ok": if r2o_handshake { 1 } else { -1 },
+                    "reason": r2o_result.data.error.as_deref().unwrap_or(""),
+                })
+            );
+            return Ok(i32::from(
+                !(r2o_result.data.complete || r2o_result.data.budget_passed),
+            ));
+        }
+        r2o_print_quic_result(&options, &r2o_result, r2o_quic_budget_packets);
+        return Ok(i32::from(
+            !(r2o_result.data.complete || r2o_result.data.budget_passed),
+        ));
     }
+    let r2o_fetch_started = std::time::Instant::now();
     let result = match fetch(&options) {
         Ok(result) => result,
         Err(error) => {
+            if r2o_json {
+                let r2o_no_tcp = error.starts_with("не удалось подключиться к ");
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "schema": 2,
+                        "client": "d2k-own-profile",
+                        "name": options.name,
+                        "shape": "tcp",
+                        "ip": ip.to_string(),
+                        "port": options.port,
+                        "path": options.path,
+                        "protocol": if options.tls12 { "tls12" } else { "tls13" },
+                        "body_bytes": 0,
+                        "body_expected": 0,
+                        "body_has_length": false,
+                        "headers_inspected": true,
+                        "cloudflare_challenge": false,
+                        "location": "",
+                        "wire_requested": options.wire_len.unwrap_or(0),
+                        "mark": options.mark.unwrap_or(0),
+                        "elapsed_ms": r2o_fetch_started.elapsed().as_millis(),
+                        "local_port": 0,
+                        "negotiated_tls": 0,
+                        "http_status": 0,
+                        "response_complete": false,
+                        "level": if r2o_no_tcp { 0 } else { 1 },
+                        "local_refusal": false,
+                        "measured": true,
+                        "name_ok": -1,
+                        "reason": if r2o_no_tcp { "нет TCP" } else { &error },
+                    })
+                );
+                return Ok(1);
+            }
             eprintln!("r2o-fetch: {error}");
             return Ok(1);
         }
     };
+    if r2o_json {
+        let r2o_level = if result.cloudflare_challenge {
+            4
+        } else if result.status > 0 {
+            3
+        } else if result.tls.is_some() {
+            2
+        } else {
+            1
+        };
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema": 2,
+                "client": "d2k-own-profile",
+                "name": options.name,
+                "shape": "tcp",
+                "ip": result.address.ip().to_string(),
+                "port": options.port,
+                "path": options.path,
+                "protocol": if options.tls12 { "tls12" } else { "tls13" },
+                "body_bytes": result.body_bytes,
+                "body_expected": result.body_expected.unwrap_or(0),
+                "body_has_length": result.body_has_length,
+                "headers_inspected": true,
+                "cloudflare_challenge": result.cloudflare_challenge,
+                "location": result.location,
+                "wire_requested": options.wire_len.unwrap_or(0),
+                "mark": options.mark.unwrap_or(0),
+                "elapsed_ms": result.elapsed.as_millis(),
+                "local_port": result.local_port,
+                "negotiated_tls": match result.tls { Some("1.3") => 0x0304, Some("1.2") => 0x0303, _ => 0 },
+                "http_status": result.status,
+                "response_complete": result.complete,
+                "level": r2o_level,
+                "local_refusal": false,
+                "measured": true,
+                "name_ok": if result.tls.is_some() { 1 } else { -1 },
+                "reason": result.reason.as_deref().unwrap_or(""),
+            })
+        );
+        return Ok(i32::from(!result.complete));
+    }
     println!(
         "цель:        {} ({}), путь {}",
         options.name, result.address, options.path
@@ -292,10 +530,18 @@ fn run() -> Result<i32, String> {
     Ok(i32::from(!result.complete))
 }
 
-fn r2o_run_quic(options: &FetchOptions, budget_packets: u32) -> Result<bool, String> {
-    let result = r2o_fetch_quic_with_budget(options, budget_packets)?;
-    r2o_print_quic_result(options, &result, budget_packets);
-    Ok(result.data.complete || result.data.budget_passed)
+fn r2o_print_dns_failed(name: &str) {
+    println!(
+        "{}",
+        serde_json::json!({
+            "schema": 2,
+            "shape": "dns_failed",
+            "measured": false,
+            "name": name,
+            "ip": null,
+            "reason": "адрес не разрешился"
+        })
+    );
 }
 
 fn r2o_print_quic_result(
@@ -410,6 +656,7 @@ fn print_help() {
                      по умолчанию R2O_CONTROL_SOCKET или /opt/r2o/run/r2o-datapath4.sock\n\
          --deadline  срок ожидания, по умолчанию 15000 мс\n\
          --mark      установить SO_MARK до подключения; без метки действуют планы datapath\n\n\
+         --json      вывести результат в машиночитаемой схеме JSON\n\
          Для TCP длина включает пять байт заголовка TLS-записи; для QUIC — только handshake-сообщение.\n\
          Снимок выполняется до запроса и заменяет значение --wire.\n\
          --ladder измеряет TCP/TLS даже при наличии --quic."

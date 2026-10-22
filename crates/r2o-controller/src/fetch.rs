@@ -175,6 +175,8 @@ pub struct FetchResult {
     pub cloudflare_challenge: bool,
     pub body_bytes: u64,
     pub body_expected: Option<u64>,
+    pub body_has_length: bool,
+    pub location: String,
     pub chunked: bool,
     pub gzip: bool,
     pub complete: bool,
@@ -199,6 +201,7 @@ pub struct R2oFetchVolumeRxResult {
     pub evidence: Option<crate::r2o_volume::R2oVolumeRxEvidence>,
     pub short_bytes: Option<u64>,
     pub direct_complete: bool,
+    pub rx_unmeasured: bool,
     pub rx_tls_unavailable: bool,
     pub measured_path: Option<String>,
     pub retry_path: Option<String>,
@@ -285,11 +288,14 @@ pub fn r2o_fetch_quic_with_roots_and_budget(
         .local_addr()
         .map_err(|error| format!("не удалось получить местный UDP-порт: {error}"))?
         .port();
+    let r2o_socket_monitor = socket
+        .try_clone()
+        .map_err(|error| format!("не удалось отслеживать UDP-ошибки: {error}"))?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| format!("не удалось запустить QUIC runtime: {error}"))?;
-    let data = runtime.block_on(crate::r2o_quic_http3::r2o_quic_http3_measure_with_wire_len(
+    let mut data = runtime.block_on(crate::r2o_quic_http3::r2o_quic_http3_measure_with_wire_len(
         socket,
         address,
         &options.name,
@@ -299,6 +305,16 @@ pub fn r2o_fetch_quic_with_roots_and_budget(
         budget_packets,
         options.wire_len,
     ));
+    if !data.handshake_confirmed && data.status == 0 {
+        if let Some(error) = r2o_socket_monitor
+            .take_error()
+            .map_err(|error| format!("не удалось проверить UDP-сокет: {error}"))?
+        {
+            data.error = Some(format!(
+                "рукопожатия нет: датаграмма не прочиталась: {error}"
+            ));
+        }
+    }
     Ok(R2oQuicFetchResult {
         address,
         local_port,
@@ -571,6 +587,9 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding(
     let cloudflare_challenge = r2o_fetch_is_cloudflare_challenge(headers);
     let r2o_body_encoding = r2o_fetch_body_encoding(headers);
     let r2o_body_has_length = header_value(headers, b"content-length").is_some();
+    let location = header_value(headers, b"location")
+        .map(|value| String::from_utf8_lossy(trim_ascii(value)).into_owned())
+        .unwrap_or_default();
     let r2o_body_chunked = header_value(headers, b"transfer-encoding")
         .is_some_and(|value| value.eq_ignore_ascii_case(b"chunked"));
     let chunked = header_value(headers, b"transfer-encoding")
@@ -629,6 +648,8 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding(
         cloudflare_challenge,
         body_bytes: parser.body_bytes(),
         body_expected,
+        body_has_length: r2o_body_has_length,
+        location,
         chunked,
         gzip,
         complete,
@@ -810,6 +831,13 @@ fn r2o_fetch_measure_rx_volume_once(
     r2o_result.direct_complete = (200..300).contains(&r2o_first.status) && r2o_first.complete;
     let r2o_first_observation = r2o_first.r2o_volume_observation;
     if !crate::r2o_volume::r2o_volume_rx_partial(&r2o_first_observation) {
+        r2o_result.rx_unmeasured = (r2o_first.status == 0 || !r2o_first.complete)
+            && r2o_first_observation.stage == crate::r2o_volume::R2oVolumeProbeStage::Handshake
+            && r2o_first_observation.name_valid
+            && matches!(r2o_first_observation.negotiated_tls, Some(0x0303 | 0x0304))
+            && !r2o_result.direct_complete
+            && !r2o_result.rx_tls_unavailable
+            && !r2o_first_observation.local_limit;
         if r2o_first.status > 0 && r2o_first.complete && r2o_first.body_bytes < 12 * 1024 {
             r2o_result.short_bytes = Some(r2o_first.body_bytes);
             r2o_result.reason = format!(
