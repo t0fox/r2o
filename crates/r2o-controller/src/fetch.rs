@@ -134,6 +134,10 @@ pub struct FetchOptions {
     pub mark: Option<u32>,
 }
 
+fn effective_mark(mark: Option<u32>) -> Option<u32> {
+    mark.filter(|mark| *mark != 0)
+}
+
 impl FetchOptions {
     pub fn validate(&self) -> Result<(), String> {
         if self.name.is_empty()
@@ -330,31 +334,33 @@ pub fn r2o_fetch_quic_with_roots_and_budget(
     }
     let started = Instant::now();
     let address = resolve_target(options)?;
-    let socket =
-        match crate::r2o_quic_http3::r2o_quic_http3_udp_socket_detailed(address, options.mark) {
-            Ok(socket) => socket,
-            Err(error) if error.local_refusal => {
-                return Ok(r2o_quic_fetch_setup_failure(
-                    address,
-                    started,
-                    "метка измерительного сокета не поставилась".into(),
-                    true,
-                    budget_packets > 0,
-                ));
-            }
-            Err(error) => {
-                return Ok(r2o_quic_fetch_setup_failure(
-                    address,
-                    started,
-                    format!(
-                        "рукопожатия нет: не удалось подготовить UDP-сокет для {address}: {}",
-                        error.source
-                    ),
-                    false,
-                    budget_packets > 0,
-                ));
-            }
-        };
+    let socket = match crate::r2o_quic_http3::r2o_quic_http3_udp_socket_detailed(
+        address,
+        effective_mark(options.mark),
+    ) {
+        Ok(socket) => socket,
+        Err(error) if error.local_refusal => {
+            return Ok(r2o_quic_fetch_setup_failure(
+                address,
+                started,
+                "метка измерительного сокета не поставилась".into(),
+                true,
+                budget_packets > 0,
+            ));
+        }
+        Err(error) => {
+            return Ok(r2o_quic_fetch_setup_failure(
+                address,
+                started,
+                format!(
+                    "рукопожатия нет: не удалось подготовить UDP-сокет для {address}: {}",
+                    error.source
+                ),
+                false,
+                budget_packets > 0,
+            ));
+        }
+    };
     let local_port = match socket.local_addr() {
         Ok(address) => address.port(),
         Err(error) => {
@@ -1898,7 +1904,7 @@ fn connect_target(
     mark: Option<u32>,
     timeout: Duration,
 ) -> Result<TcpStream, ConnectTargetError> {
-    if let Some(mark) = mark {
+    if let Some(mark) = effective_mark(mark) {
         return connect_marked(address, mark, timeout);
     }
     TcpStream::connect_timeout(&address, timeout).map_err(Into::into)
@@ -2086,6 +2092,13 @@ fn connect_socket(fd: libc::c_int, address: SocketAddr) -> io::Result<libc::c_in
 mod tests {
     use super::*;
     use crate::r2o_volume::R2oVolumeRxEncoding;
+
+    #[test]
+    fn нулевая_tcp_метка_означает_обычный_непомеченный_сокет() {
+        assert_eq!(effective_mark(None), None);
+        assert_eq!(effective_mark(Some(0)), None);
+        assert_eq!(effective_mark(Some(0x2f)), Some(0x2f));
+    }
 
     fn response_for_classification(
         status: u16,

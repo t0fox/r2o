@@ -47,7 +47,7 @@ fn r2o_quic_http3_udp_socket_with_mark_setter(
         0,
     );
     let socket = UdpSocket::bind(bind).map_err(R2oQuicUdpSocketError::ordinary)?;
-    if let Some(mark) = mark {
+    if let Some(mark) = mark.filter(|mark| *mark != 0) {
         set_mark(&socket, mark).map_err(R2oQuicUdpSocketError::local_refusal)?;
     }
     socket
@@ -715,6 +715,25 @@ mod tests {
     use std::net::SocketAddr;
     use std::time::Duration;
     use tokio::time::Instant;
+
+    #[test]
+    fn нулевая_quic_метка_не_устанавливается() {
+        let mut set_mark_called = false;
+        let socket = r2o_quic_http3_udp_socket_with_mark_setter(
+            "127.0.0.1:443".parse().unwrap(),
+            Some(0),
+            |_, _| {
+                set_mark_called = true;
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "нулевая метка не должна устанавливаться",
+                ))
+            },
+        );
+
+        assert!(!set_mark_called);
+        assert!(socket.is_ok());
+    }
 
     #[test]
     fn ошибка_установки_quic_метки_классифицируется_как_локальный_отказ() {

@@ -367,7 +367,11 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
             &plan_records,
             trial_id,
         )?;
-        let ack = match client.exchange_command(&command, control::COMMAND_SET_NAME_PROBE) {
+        let ack = match client.exchange_command_with_timeout(
+            &command,
+            control::COMMAND_SET_NAME_PROBE,
+            ASK_WAIT,
+        ) {
             Ok(ack) => ack,
             Err(error) => {
                 if let Err(cleanup_error) =
@@ -10652,13 +10656,30 @@ impl ControlClient {
         command: &[u8],
         expected: u16,
     ) -> Result<r2k_core::control::Ack, Box<dyn Error>> {
+        self.exchange_command_with_timeout(command, expected, CONTROL_ACK_TIMEOUT)
+    }
+
+    fn exchange_command_with_timeout(
+        &mut self,
+        command: &[u8],
+        expected: u16,
+        timeout: std::time::Duration,
+    ) -> Result<r2k_core::control::Ack, Box<dyn Error>> {
         use std::io::Write;
         self.socket.write_all(command)?;
-        let deadline = std::time::Instant::now() + CONTROL_ACK_TIMEOUT;
+        let deadline = std::time::Instant::now() + timeout;
         let ack_frame = loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() || !wait_for_control_frame(&self.socket, remaining)? {
-                return Err("датапат не подтвердил управляющую команду за 3 секунды".into());
+                let timeout_label = if timeout == CONTROL_ACK_TIMEOUT {
+                    "3 секунды".to_owned()
+                } else {
+                    format!("{} мс", timeout.as_millis())
+                };
+                return Err(format!(
+                    "датапат не подтвердил управляющую команду за {timeout_label}"
+                )
+                .into());
             }
             let frame = read_optional_frame(&mut self.socket)?
                 .ok_or("соединение с датапатом закрыто до подтверждения команды")?;
@@ -10780,10 +10801,11 @@ fn r2o_ask_flow_key(
 
 #[cfg(all(test, unix))]
 mod r2o_ask_proof_tests {
-    use super::R2oAskProof;
+    use super::{ASK_WAIT, ControlClient, R2oAskProof, encode_frame, read_frame};
     use r2k_core::control::{
         AppliedEvent, BindingContext, KEY_LEN, R2oTcpExchangeEvent, RefusedEvent, SHAPE_LEGACY,
     };
+    use r2k_core::control::{COMMAND_SET_NAME_PROBE, encode_ack};
 
     fn flow_key() -> [u8; KEY_LEN] {
         let mut key = [0; KEY_LEN];
@@ -10890,6 +10912,40 @@ mod r2o_ask_proof_tests {
 
         assert!(!proof.observe_refused(&refusal, &key, [7; 16], [8; 16]));
         assert!(!proof.finished());
+    }
+
+    #[test]
+    fn ask_accepts_a_plan_ack_that_arrives_after_the_generic_three_second_deadline() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+        use std::time::Duration;
+
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        let peer_thread = std::thread::spawn(move || {
+            let command = read_frame(&mut peer).unwrap();
+            std::thread::sleep(Duration::from_millis(3_200));
+            peer.write_all(&encode_ack(command.kind, true, 0).unwrap())
+                .unwrap();
+        });
+        let mut client = ControlClient {
+            socket,
+            send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
+            pending_events: Default::default(),
+            pending_applied_events: Default::default(),
+            http_search_started: Default::default(),
+            http_challenge_cooldowns: Default::default(),
+        };
+        let command = encode_frame(COMMAND_SET_NAME_PROBE, &[]).unwrap();
+
+        let ack = client
+            .exchange_command_with_timeout(&command, COMMAND_SET_NAME_PROBE, ASK_WAIT)
+            .unwrap();
+
+        assert!(ack.ok);
+        peer_thread.join().unwrap();
     }
 }
 

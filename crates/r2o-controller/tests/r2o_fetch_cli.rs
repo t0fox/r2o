@@ -8,6 +8,14 @@ fn r2o_run_fetch(args: &[&str]) -> std::process::Output {
 }
 
 #[test]
+fn r2o_short_version_flag_matches_donor() {
+    let output = r2o_run_fetch(&["-v"]);
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("r2o-fetch "));
+}
+
+#[test]
 fn r2o_help_показывает_бюджет_quic_и_значение_по_умолчанию() {
     let output = r2o_run_fetch(&["--help"]);
     assert!(output.status.success());

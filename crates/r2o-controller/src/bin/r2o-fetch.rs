@@ -48,7 +48,7 @@ fn run() -> Result<i32, String> {
         print_help();
         return Ok(0);
     }
-    if arguments.len() == 1 && matches!(arguments[0].to_str(), Some("--version" | "-V")) {
+    if arguments.len() == 1 && matches!(arguments[0].to_str(), Some("--version" | "-v" | "-V")) {
         println!("r2o-fetch {}", env!("CARGO_PKG_VERSION"));
         return Ok(0);
     }
@@ -105,7 +105,7 @@ fn run() -> Result<i32, String> {
             "--mark" => {
                 index += 1;
                 let value = argument(&arguments, index, "--mark")?;
-                mark = Some(parse_mark(value)?);
+                mark = parse_mark(value)?;
             }
             "--tls12" => tls12 = true,
             "--quic" => r2o_quic = true,
@@ -279,16 +279,13 @@ fn run() -> Result<i32, String> {
             options.path
         );
         println!(
-            "приветствие: {}, {}, метка {}",
+            "приветствие: {}, {}, {}",
             options
                 .wire_len
                 .map(|length| format!("ClientHello {length} байт"))
                 .unwrap_or_else(|| "профиль rustls, длина не задана".into()),
             if options.tls12 { "TLS 1.2" } else { "TLS 1.3" },
-            options
-                .mark
-                .map(|value| format!("0x{value:x}"))
-                .unwrap_or_else(|| "0x0".into())
+            ladder_mark_label(options.mark)
         );
         println!(
             "лестница:    {}{}",
@@ -639,7 +636,7 @@ fn argument<'a>(
         .ok_or_else(|| format!("значение {option} должно быть в UTF-8"))
 }
 
-fn parse_mark(value: &str) -> Result<u32, String> {
+fn parse_mark(value: &str) -> Result<Option<u32>, String> {
     let (digits, radix) = if let Some(digits) = value
         .strip_prefix("0x")
         .or_else(|| value.strip_prefix("0X"))
@@ -650,7 +647,14 @@ fn parse_mark(value: &str) -> Result<u32, String> {
     } else {
         (value, 10)
     };
-    u32::from_str_radix(digits, radix).map_err(|error| format!("неверная метка SO_MARK: {error}"))
+    u32::from_str_radix(digits, radix)
+        .map(|mark| (mark != 0).then_some(mark))
+        .map_err(|error| format!("неверная метка SO_MARK: {error}"))
+}
+
+fn ladder_mark_label(mark: Option<u32>) -> String {
+    mark.map(|value| format!("метка 0x{value:x}"))
+        .unwrap_or_else(|| "через планы (как браузер, без метки)".into())
 }
 
 fn print_help() {
@@ -684,15 +688,15 @@ fn print_help() {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_mark;
+    use super::{ladder_mark_label, parse_mark};
 
     #[test]
     fn mark_parser_matches_c_decimal_hex_and_octal_forms() {
-        assert_eq!(parse_mark("45").unwrap(), 45);
-        assert_eq!(parse_mark("0x2d").unwrap(), 45);
-        assert_eq!(parse_mark("0X2D").unwrap(), 45);
-        assert_eq!(parse_mark("055").unwrap(), 45);
-        assert_eq!(parse_mark("0").unwrap(), 0);
+        assert_eq!(parse_mark("45").unwrap(), Some(45));
+        assert_eq!(parse_mark("0x2d").unwrap(), Some(45));
+        assert_eq!(parse_mark("0X2D").unwrap(), Some(45));
+        assert_eq!(parse_mark("055").unwrap(), Some(45));
+        assert_eq!(parse_mark("0").unwrap(), None);
     }
 
     #[test]
@@ -700,5 +704,14 @@ mod tests {
         assert!(parse_mark("08").is_err());
         assert!(parse_mark("-1").is_err());
         assert!(parse_mark("0x").is_err());
+    }
+
+    #[test]
+    fn ladder_label_distinguishes_datapath_plan_from_marked_socket() {
+        assert_eq!(
+            ladder_mark_label(None),
+            "через планы (как браузер, без метки)"
+        );
+        assert_eq!(ladder_mark_label(Some(0x2f)), "метка 0x2f");
     }
 }
