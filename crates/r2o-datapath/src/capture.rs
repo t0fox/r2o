@@ -104,7 +104,8 @@ impl TcpHello {
 }
 
 pub fn tcp_http_hello_from_bytes(key: TcpFlowKey, bytes: &[u8]) -> Option<TcpHello> {
-    let (host, _) = r2k_core::httpup::request_target(bytes)?;
+    let request = r2k_core::httpup::r2o_http_plan_request(bytes)?;
+    let host = bytes.get(request.host_range)?.to_vec();
     Some(TcpHello {
         key,
         host: Some(host),
@@ -376,6 +377,15 @@ impl Default for CaptureTable {
 }
 
 impl CaptureTable {
+    pub(crate) fn r2o_http_capture_active(&self, key: TcpFlowKey, generation: u64) -> bool {
+        self.slots.iter().any(|slot| {
+            slot.key == Some(key)
+                && slot.generation == generation
+                && slot.mode == CaptureMode::Http
+                && slot.state == SlotState::Collecting
+        })
+    }
+
     /// Возвращает длину непрерывной части ожидающего запроса и длину TLS-записи.
     pub(crate) fn r2o_incomplete_summary(
         &self,

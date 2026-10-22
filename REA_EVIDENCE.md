@@ -6680,3 +6680,53 @@ cargo +1.98.0 fmt --all -- --check — успешно. MIPS32 GNU release cross-
 Перенесены только четыре runtime-счётчика захвата. Общие причины нагрузки
 reverse/after_hello/late/not_hello, последний байт, sni_next_seg и HTTP
 later/unaligned/open_end этим изменением не закрыты.
+
+## HTTP keep-alive после POST — 22.10.2026
+
+Донорский E:\d2o\datapath\session.c (SHA-256
+39dada3d4fbdaf943bf7b2a788090ab3d16a71065a58c16d39901575247f7187,
+строки 2039–2124) подтверждает якорь первого запроса на SYN+1, последующий
+запрос только на точной границе http_next, вычисление конца заголовка и тела
+по Content-Length, а также отказ от позднего применения плана при разрыве,
+пересечении границы или неразобранном запросе.
+
+Парсер E:\d2o\datapath\http80.c (SHA-256
+68d84381be71757f403b078a29b6ade5873e0ad390b08d496290132a6e2ebd7b) и
+потоковый помощник E:\d2o\datapath\include\d2k_http_request_stream.h
+(SHA-256 800ae6cf9c8633fdea8c7a057929fb490fd62dac0c2e19b1038297cbbef024bb)
+задают разбор origin-form, Host, Content-Length и неопределённое состояние для
+небезопасного framing. В test_http_hello.c (SHA-256
+538c9d0d6f3507434c6e63614aea747a7d8056e8a5eae810b4ce2e8160a0d368, строки
+532–763) находятся проверки split, sequence wrap, 70-КБ тела, поддельного
+запроса внутри тела, pipeline, пропуска, пересечения, chunked и split-header.
+
+Rust-сценарий реализован в crates/r2k-core/src/httpup.rs и
+crates/r2o-datapath/src/{engine,hold,capture,control}.rs. Добавлены тесты
+Content-Length/sequence, 70-КБ POST с ложным GET в теле, pipeline/пересечение,
+неоднозначный framing и сборка разделённого следующего GET.
+
+REA проверен отдельно: get_evidence_bundle по точным SHA-256 session.c,
+http80.c и tls13core.c вернул total_retained_records=0. list_documents
+завершился provider_unavailable: Windows Ghidra P0 отклоняет ELF, Hopper на
+Windows недоступен, IDA не настроен. Поэтому эти результаты не являются
+REA-доказательством эквивалентности; поведение сверено по донорскому исходнику
+и его тестам, Rust-покрытие подтверждено ниже.
+
+Полный workspace ARM64/QEMU: 1 032 пройдено, 0 ошибок, 4 штатных пропуска,
+73 набора. Оптимизированная кросс-сборка без запуска: AArch64 GNU — controller
+4 920 328 Б, datapath 856 784 Б; MIPS32 GNU — 6 558 544 / 1 249 108 Б;
+ARMv5te musl EABI5 — 4 918 208 / 1 116 896 Б, статические ELF. Для MIPS
+использован ночной выпуск Rust с самостоятельной сборкой стандартной библиотеки, поскольку стабильный toolchain не поставляет
+готовый target mipsel-unknown-linux-gnu. На не-ARM64 тесты не запускались.
+
+Проверка зависимостей по манифестам и графу Cargo: x509-parser 0.18.1
+напрямую подключён к контроллеру с отключёнными crypto-фичами;
+etherparse 0.21.0, tls-parser 0.12.2 и proptest 1.12.0 уже используются
+в независимых тестах. ring 0.17.14 остаётся существующей криптографической основой для
+rustls/Quinn и Telegram; дополнительный crypto backend не добавлялся.
+
+Журналы локальные, .rea/ игнорируется Git:
+.rea/r2o-http-x509-workspace-arm64.log,
+.rea/r2o-http-x509-aarch64-release.log,
+.rea/r2o-http-x509-mipsel-release.log,
+.rea/r2o-http-x509-armv5-release.log.

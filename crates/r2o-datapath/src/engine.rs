@@ -67,6 +67,7 @@ pub struct R2oTcpFlowMetrics {
 struct TcpSession {
     initiator: TcpEndpoint,
     direction_known: bool,
+    r2o_http_requests: r2k_core::httpup::R2oHttpRequestSequence,
     metrics: R2oTcpFlowMetrics,
     reverse_ttl: Option<u8>,
     guards: u8,
@@ -119,6 +120,7 @@ impl TcpSession {
         Self {
             initiator,
             direction_known,
+            r2o_http_requests: r2k_core::httpup::R2oHttpRequestSequence::default(),
             metrics: R2oTcpFlowMetrics::default(),
             reverse_ttl: None,
             guards: 0,
@@ -628,6 +630,10 @@ impl TcpSessions {
                 .get(&key)
                 .map_or_else(R2oTcpFlowMetrics::default, |session| session.metrics);
             let mut session = TcpSession::new(source, true, Some(now), now);
+            if destination.port == 80 {
+                session.r2o_http_requests =
+                    r2k_core::httpup::R2oHttpRequestSequence::new(tcp.sequence.wrapping_add(1));
+            }
             session.metrics = metrics;
             self.flows.insert(key, session);
         } else if !self.flows.contains_key(&key) {
@@ -965,6 +971,9 @@ pub fn decide_with_session(
     let now = Instant::now();
     let Some((key, reverse, flags, keep_fin_session)) = sessions.track_packet(packet, now) else {
         let is_tcp = PacketView::parse(packet).is_some_and(|view| view.protocol == 6);
+        if is_tcp && plan.transport == 6 && plan.proto == PROTO_HTTP {
+            return PacketDecision::Accept;
+        }
         return if is_tcp && plan.guards & GUARD_RST_ALIEN != 0 {
             PacketDecision::Accept
         } else {
@@ -987,11 +996,30 @@ pub fn decide_with_session(
         return PacketDecision::Drop;
     }
 
-    let decision = decide_packet(plan, packet);
+    let http_request =
+        view.tcp_segment(packet)
+            .filter(|tcp| !reverse && tcp.destination_port == 80)
+            .and_then(|tcp| {
+                let payload = packet.get(tcp.payload.clone())?;
+                (!payload.is_empty()).then(|| {
+                    sessions.flows.get_mut(&key).is_some_and(|session| {
+                        session.r2o_http_requests.observe(tcp.sequence, payload)
+                    })
+                })
+            })
+            .unwrap_or(false);
+    let r2o_http_plan = plan.transport == 6 && plan.proto == PROTO_HTTP;
+    let r2o_http_plan_allowed = !r2o_http_plan || http_request;
+    let decision = if !r2o_http_plan_allowed {
+        PacketDecision::Accept
+    } else {
+        decide_packet(plan, packet)
+    };
     let applied = matches!(
         &decision,
         PacketDecision::Drop | PacketDecision::Replace(_) | PacketDecision::Transmit { .. }
-    ) || (plan.guards & GUARD_RST_ALIEN != 0
+    ) || (r2o_http_plan_allowed
+        && plan.guards & GUARD_RST_ALIEN != 0
         && guard_plan_applies_without_emissions(plan, packet));
     if applied
         && !reverse
@@ -1472,6 +1500,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     use crate::conntrack::R2oConntrackInfo;
     use crate::flow_capacity::R2oFlowCapacity;
+    use proptest::prelude::*;
     use r2k_core::packet::PacketView;
     use r2k_core::plan::{EmitKind, OriginalFate, Plan};
     use std::time::{Duration, Instant};
@@ -3266,6 +3295,212 @@ mod tests {
             &request[33..]
         );
         assert_eq!(second_tcp.sequence, 1033);
+    }
+
+    #[test]
+    fn r2o_http_keepalive_учитывает_тело_post_и_игнорирует_подделку() {
+        let plan = http_split_plan();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 80);
+        let mut sessions = TcpSessions::default();
+        let syn_sequence = u32::MAX - 300;
+        assert_eq!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(client, server, 0x02, 64, syn_sequence, &[]),
+            ),
+            PacketDecision::Accept,
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+        );
+
+        let first = b"GET / HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        let mut sequence = syn_sequence.wrapping_add(1);
+        assert!(matches!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(client, server, 0x18, 64, sequence, first),
+            ),
+            PacketDecision::Transmit { .. }
+        ));
+        sequence = sequence.wrapping_add(first.len() as u32);
+
+        let post = b"POST /upload HTTP/1.1\r\nHost: example.test\r\nContent-Length: 70000\r\n\r\n";
+        assert!(matches!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(client, server, 0x18, 64, sequence, post),
+            ),
+            PacketDecision::Transmit { .. }
+        ));
+        let body_start = sequence.wrapping_add(post.len() as u32);
+        let body_end = body_start.wrapping_add(70000);
+        let fake = b"GET /inside-body HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        let mut body = vec![b'x'; 70000];
+        body[..fake.len()].copy_from_slice(fake);
+        for (index, chunk) in body.chunks(1400).enumerate() {
+            let body_sequence = body_start.wrapping_add((index * 1400) as u32);
+            assert_eq!(
+                decide_with_session(
+                    &mut sessions,
+                    &plan,
+                    &ipv4_tcp_packet(client, server, 0x18, 64, body_sequence, chunk),
+                ),
+                PacketDecision::Accept,
+                "данные тела POST не должны получать план",
+            );
+        }
+
+        let second = b"GET /after-upload HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        assert!(matches!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(client, server, 0x18, 64, body_end, second),
+            ),
+            PacketDecision::Transmit { .. }
+        ));
+    }
+
+    #[test]
+    fn r2o_http_keepalive_пропускает_конвейер_и_пересечённую_границу() {
+        let plan = http_split_plan();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 80);
+        let mut sessions = TcpSessions::default();
+        let mut sequence = 1000_u32;
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x02, 64, sequence, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+        );
+        sequence = sequence.wrapping_add(1);
+
+        let pipelined = b"GET /one HTTP/1.1\r\nHost: example.test\r\n\r\nGET /two HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        assert!(matches!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(client, server, 0x18, 64, sequence, pipelined),
+            ),
+            PacketDecision::Transmit { .. }
+        ));
+        let second = b"GET /later HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        assert_eq!(
+            decide_with_session(
+                &mut sessions,
+                &plan,
+                &ipv4_tcp_packet(client, server, 0x18, 64, sequence.wrapping_add(39), second,),
+            ),
+            PacketDecision::Accept,
+            "конвейер делает следующую границу неоднозначной",
+        );
+
+        let mut crossed = TcpSessions::default();
+        sequence = 5000;
+        decide_with_session(
+            &mut crossed,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x02, 64, sequence, &[]),
+        );
+        decide_with_session(
+            &mut crossed,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+        );
+        sequence = sequence.wrapping_add(1);
+        let post = b"POST /x HTTP/1.1\r\nHost: example.test\r\nContent-Length: 5\r\n\r\n";
+        assert!(matches!(
+            decide_with_session(
+                &mut crossed,
+                &plan,
+                &ipv4_tcp_packet(client, server, 0x18, 64, sequence, post),
+            ),
+            PacketDecision::Transmit { .. }
+        ));
+        let boundary = sequence.wrapping_add(post.len() as u32).wrapping_add(5);
+        let mut combined = b"abcde".to_vec();
+        combined.extend_from_slice(second);
+        assert_eq!(
+            decide_with_session(
+                &mut crossed,
+                &plan,
+                &ipv4_tcp_packet(
+                    client,
+                    server,
+                    0x18,
+                    64,
+                    boundary.wrapping_sub(5),
+                    &combined,
+                ),
+            ),
+            PacketDecision::Accept,
+            "сегмент, пересёкший границу тела и запроса, пропускается",
+        );
+        assert_eq!(
+            decide_with_session(
+                &mut crossed,
+                &plan,
+                &ipv4_tcp_packet(client, server, 0x18, 64, boundary, second),
+            ),
+            PacketDecision::Accept,
+            "после пересечения границы поток больше не классифицируется",
+        );
+    }
+
+    #[test]
+    fn r2o_http_неоднозначный_framing_не_задаёт_следующую_границу() {
+        for request in [
+            b"POST /x HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n"
+                .as_slice(),
+            b"GET / HTTP/1.1\r\nHost: example.test\r\nUpgrade: websocket\r\n\r\n",
+            b"POST /x HTTP/1.1\r\nHost: example.test\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\n",
+            b"POST /x HTTP/1.1\r\nHost: example.test\r\nBad Header: x\r\n\r\n",
+        ] {
+            let parsed = r2k_core::httpup::r2o_http_plan_request(request).unwrap();
+            assert!(parsed.host_range.end <= request.len());
+            assert_eq!(parsed.end_offset, None);
+            assert!(!r2k_core::httpup::request_safe(request));
+        }
+
+        assert!(
+            r2k_core::httpup::r2o_http_plan_request(b"GET / HTTP/1.1\r\nHost: 192.0.2.1\r\n\r\n")
+                .is_none()
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn r2o_http_content_length_задаёт_точную_границу(
+            first in any::<u32>(),
+            body_len in 1_u32..10_000,
+        ) {
+            let request = format!(
+                "POST /upload HTTP/1.1\r\nHost: example.test\r\nContent-Length: {body_len}\r\n\r\n"
+            );
+            let parsed = r2k_core::httpup::r2o_http_plan_request(request.as_bytes()).unwrap();
+            prop_assert_eq!(parsed.end_offset, Some(request.len() + body_len as usize));
+
+            let mut sequence = r2k_core::httpup::R2oHttpRequestSequence::new(first);
+            prop_assert!(sequence.observe(first, request.as_bytes()));
+            let body_sequence = first.wrapping_add(request.len() as u32);
+            prop_assert!(!sequence.candidate(body_sequence, body_len as usize));
+            let next_sequence = body_sequence.wrapping_add(body_len);
+            let next = b"GET /next HTTP/1.1\r\nHost: example.test\r\n\r\n";
+            prop_assert!(sequence.candidate(next_sequence, next.len()));
+            prop_assert!(sequence.observe(next_sequence, next));
+        }
     }
 
     #[test]

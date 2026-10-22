@@ -7,6 +7,90 @@ struct Request<'a> {
     host: &'a [u8],
     target: &'a [u8],
     host_range: Range<usize>,
+    method: &'a [u8],
+    header_len: usize,
+    end_offset: Option<usize>,
+}
+
+/// Границы HTTP-запроса, пригодные для выбора плана и отслеживания keep-alive.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct R2oHttpPlanRequest {
+    /// Диапазон нормализованного имени Host внутри исходного сегмента.
+    pub host_range: Range<usize>,
+    /// Длина запроса до конца заголовков.
+    pub header_len: usize,
+    /// Смещение конца запроса, если framing однозначен.
+    pub end_offset: Option<usize>,
+}
+
+/// Последовательные HTTP-запросы одного TCP-потока с fail-open при потере границы.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct R2oHttpRequestSequence {
+    first: Option<u32>,
+    next: Option<u32>,
+    checked: bool,
+    disabled: bool,
+}
+
+impl R2oHttpRequestSequence {
+    /// Начать отслеживание после SYN, который был виден runtime.
+    pub const fn new(first: u32) -> Self {
+        Self {
+            first: Some(first),
+            next: None,
+            checked: false,
+            disabled: false,
+        }
+    }
+
+    /// Проверить, начинается ли сегмент на доказанной границе запроса.
+    pub fn candidate(&mut self, sequence: u32, payload_len: usize) -> bool {
+        if self.disabled {
+            return false;
+        }
+        if !self.checked {
+            return self.first == Some(sequence);
+        }
+        let Some(next) = self.next else {
+            return false;
+        };
+        let distance = sequence.wrapping_sub(next) as i32;
+        if distance == 0 {
+            return true;
+        }
+        let segment_end = sequence.wrapping_add(payload_len as u32);
+        if distance > 0 || segment_end.wrapping_sub(next) as i32 > 0 {
+            self.next = None;
+            self.disabled = true;
+        }
+        false
+    }
+
+    /// Принять полный запрос и запомнить следующую границу, если framing известен.
+    pub fn observe(&mut self, sequence: u32, payload: &[u8]) -> bool {
+        if !self.candidate(sequence, payload.len()) {
+            return false;
+        }
+        let Some(request) = r2o_http_plan_request(payload) else {
+            self.first = None;
+            self.next = None;
+            self.checked = true;
+            self.disabled = true;
+            return false;
+        };
+        self.first = None;
+        self.checked = true;
+        self.next = request
+            .end_offset
+            .filter(|&end| end >= payload.len())
+            .map(|end| sequence.wrapping_add(end as u32));
+        true
+    }
+
+    /// Сообщить, что первый запрос или keep-alive-запрос уже проверен.
+    pub const fn is_checked(self) -> bool {
+        self.checked
+    }
 }
 
 /// `true`, если запрос GET или HEAD полностью получен, не содержит тела и имеет
@@ -23,7 +107,17 @@ pub fn request_target(input: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
 
 /// Вернуть диапазон нормализованного Host для привязки HTTP, аналогичной SNI.
 pub fn request_host_range(input: &[u8]) -> Option<Range<usize>> {
-    Some(parse_request(input)?.host_range)
+    Some(r2o_http_plan_request(input)?.host_range)
+}
+
+/// Разобрать начало HTTP-запроса для выбора плана без предположений о теле.
+pub fn r2o_http_plan_request(input: &[u8]) -> Option<R2oHttpPlanRequest> {
+    let request = parse_plan_request(input)?;
+    Some(R2oHttpPlanRequest {
+        host_range: request.host_range,
+        header_len: request.header_len,
+        end_offset: request.end_offset,
+    })
 }
 
 /// Вернуть ответ 307 только для безопасного запроса, на который явно ответил
@@ -58,6 +152,17 @@ pub fn redirect_https(host: &[u8], target: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn parse_request(input: &[u8]) -> Option<Request<'_>> {
+    let request = parse_plan_request(input)?;
+    if (request.method != b"GET" && request.method != b"HEAD")
+        || request.end_offset != Some(request.header_len)
+        || request.header_len != input.len()
+    {
+        return None;
+    }
+    Some(request)
+}
+
+fn parse_plan_request(input: &[u8]) -> Option<Request<'_>> {
     if input.len() < 16 {
         return None;
     }
@@ -65,7 +170,7 @@ fn parse_request(input: &[u8]) -> Option<Request<'_>> {
     let first = &input[..first_end];
     let first_space = first.iter().position(|&byte| byte == b' ')?;
     let method = &first[..first_space];
-    if method != b"GET" && method != b"HEAD" {
+    if method.is_empty() || method.len() > 20 || !method.iter().all(u8::is_ascii_uppercase) {
         return None;
     }
     let target_start = first_space + 1;
@@ -88,6 +193,8 @@ fn parse_request(input: &[u8]) -> Option<Request<'_>> {
     let mut host = None;
     let mut host_start = None;
     let mut content_length_seen = false;
+    let mut content_length = None;
+    let mut boundary_known = true;
     let mut cursor = first_end + 2;
     loop {
         let line_start = cursor;
@@ -97,10 +204,20 @@ fn parse_request(input: &[u8]) -> Option<Request<'_>> {
         if line.is_empty() {
             break;
         }
+        if line
+            .iter()
+            .any(|&byte| byte == 0x7f || (byte < 0x20 && byte != b'\t'))
+        {
+            boundary_known = false;
+        }
         let Some(colon) = line.iter().position(|&byte| byte == b':') else {
+            boundary_known = false;
             continue;
         };
         let name = &line[..colon];
+        if name.is_empty() || !name.iter().all(|byte| is_http_token(*byte)) {
+            boundary_known = false;
+        }
         let value = trim_ows(&line[colon + 1..]);
         if name.eq_ignore_ascii_case(b"Host") {
             if host.is_some() || value.is_empty() || value.len() >= 256 {
@@ -114,17 +231,29 @@ fn parse_request(input: &[u8]) -> Option<Request<'_>> {
             host_start = Some(line_start + raw_start + leading);
             host = Some(value);
         } else if name.eq_ignore_ascii_case(b"Content-Length") {
-            if content_length_seen || value != b"0" {
-                return None;
+            if content_length_seen {
+                boundary_known = false;
+                content_length = None;
+            } else if let Some(length) = parse_content_length(value) {
+                content_length = Some(length);
+            } else {
+                boundary_known = false;
             }
             content_length_seen = true;
-        } else if name.eq_ignore_ascii_case(b"Transfer-Encoding") {
-            return None;
+        } else if name.eq_ignore_ascii_case(b"Transfer-Encoding")
+            || name.eq_ignore_ascii_case(b"Upgrade")
+        {
+            boundary_known = false;
         }
     }
-    if cursor != input.len() {
-        return None;
-    }
+    let header_len = cursor;
+    let end_offset = if boundary_known {
+        header_len
+            .checked_add(content_length.unwrap_or_default())
+            .filter(|&end| end <= 0x7fff_ffff)
+    } else {
+        None
+    };
 
     let mut host = host?;
     let host_start = host_start?;
@@ -138,10 +267,39 @@ fn parse_request(input: &[u8]) -> Option<Request<'_>> {
         host = &host[..host.len() - 1];
     }
     let host_range = host_start..host_start + host.len();
-    valid_dns_host(host).then_some(Request {
+    valid_http_name_host(host).then_some(Request {
         host,
         target,
         host_range,
+        method,
+        header_len,
+        end_offset,
+    })
+}
+
+fn is_http_token(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+}
+
+fn valid_http_name_host(host: &[u8]) -> bool {
+    if !valid_dns_host(host) {
+        return false;
+    }
+    let last_label = host.rsplit(|&byte| byte == b'.').next().unwrap_or_default();
+    !last_label.iter().all(u8::is_ascii_digit)
+}
+
+fn parse_content_length(value: &[u8]) -> Option<usize> {
+    if value.is_empty() {
+        return None;
+    }
+    value.iter().try_fold(0_usize, |length, byte| {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        length
+            .checked_mul(10)?
+            .checked_add(usize::from(*byte - b'0'))
     })
 }
 

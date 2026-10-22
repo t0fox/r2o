@@ -2430,6 +2430,16 @@ mod tests {
             plans.select(&packet).map(|selected| selected.id),
             Some([0x11; 16])
         );
+        let post = b"POST /upload HTTP/1.1\r\nHost: example.test\r\nContent-Length: 70000\r\n\r\n";
+        let mut post_packet = packet[..40].to_vec();
+        post_packet.extend_from_slice(post);
+        let post_packet_len = post_packet.len() as u16;
+        post_packet[2..4].copy_from_slice(&post_packet_len.to_be_bytes());
+        assert_eq!(
+            plans.select(&post_packet).map(|selected| selected.id),
+            Some([0x11; 16]),
+            "HTTP-план выбирается для POST с объявленным телом",
+        );
         let applied = plans.applied_event_for_packet(&packet, 42).unwrap();
         assert_eq!(applied.plan_id, [0x11; 16]);
         assert_eq!(applied.trial_id, trial_id);

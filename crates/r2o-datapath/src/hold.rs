@@ -1,8 +1,8 @@
 //! Ограниченное удержание NFQUEUE-пакетов для сегментированных TLS ClientHello.
 
 use crate::capture::{
-    CAPTURE_BYTES, CaptureResult, CaptureStats, CaptureTable, TcpFlowKey, TcpHello,
-    tcp_hello_from_bytes, tcp_http_hello_from_bytes,
+    CaptureResult, CaptureStats, CaptureTable, TcpFlowKey, TcpHello, tcp_hello_from_bytes,
+    tcp_http_hello_from_bytes,
 };
 use r2k_core::addr::Address;
 use r2k_core::control::{AppliedEvent, BindingContext, HttpPortalEvent, HttpResponseEvent};
@@ -87,6 +87,7 @@ struct SynAnchor {
     attempted: bool,
     saw_hello: bool,
     unassembled_reported: bool,
+    r2o_http_requests: r2k_core::httpup::R2oHttpRequestSequence,
 }
 
 struct HttpRequestFlow {
@@ -112,7 +113,6 @@ struct HttpRequestFlow {
     response_reported: bool,
     answered: bool,
     ready_for_next: bool,
-    next_request_capturing: bool,
     seen: Instant,
 }
 
@@ -441,11 +441,34 @@ impl HoldTable {
             };
         }
         let offset = tcp.sequence.wrapping_sub(anchor.sequence.wrapping_add(1));
-        if offset >= HOLD_EARLY_WINDOW {
-            if let Some(index) = slot_index {
-                released.extend(self.remove_slot(index));
-                self.capture.forget(&key);
+        let r2o_http_followup = anchor.r2o_http_requests.is_checked();
+        let r2o_http_capture_active = self.capture.r2o_http_capture_active(key, anchor.generation);
+        let r2o_http_request_candidate = if destination.port == 80
+            && source == anchor.client
+            && slot_index.is_none()
+            && !r2o_http_capture_active
+        {
+            self.syns[anchor_index]
+                .r2o_http_requests
+                .candidate(tcp.sequence, payload.len())
+        } else {
+            false
+        };
+        if r2o_http_request_candidate {
+            let complete = r2k_core::httpup::r2o_http_plan_request(payload).is_some();
+            if complete || !(allow_http || observe_http) || !incomplete_http_head(payload) {
+                self.syns[anchor_index]
+                    .r2o_http_requests
+                    .observe(tcp.sequence, payload);
             }
+        }
+        let r2o_next_http_request =
+            (r2o_http_request_candidate || r2o_http_capture_active) && r2o_http_followup;
+        if offset >= HOLD_EARLY_WINDOW
+            && slot_index.is_none()
+            && !r2o_http_request_candidate
+            && !r2o_http_capture_active
+        {
             return FeedResult {
                 released,
                 outcome: HoldOutcome::Pass,
@@ -462,36 +485,11 @@ impl HoldTable {
             self.syns[anchor_index].attempted = true;
         }
         let anchor = self.syns[anchor_index];
-        let next_http_request = if observe_http && destination.port == 80 {
-            if let Some(flow) = self.http_requests.iter_mut().find(|flow| {
-                flow.key == key
-                    && flow.client == source
-                    && flow.generation == anchor.generation
-                    && flow.ready_for_next
-            }) {
-                let offset = tcp.sequence.wrapping_sub(flow.request_end);
-                if !flow.next_request_capturing
-                    && tcp.sequence == flow.request_end
-                    && (payload.starts_with(b"GET ") || payload.starts_with(b"HEAD "))
-                {
-                    flow.next_request_capturing = true;
-                }
-                flow.next_request_capturing
-                    && (offset as i32) >= 0
-                    && (offset as usize) < CAPTURE_BYTES
-            } else {
-                false
-            }
-        } else {
-            false
-        };
         let tls_head = offset == 0 && incomplete_tls_head(payload);
-        let http_head =
-            offset == 0 && destination.port == 80 && allow_http && incomplete_http_head(payload);
+        let http_head = r2o_http_request_candidate && allow_http && incomplete_http_head(payload);
         let start_allowed = slot_index.is_some()
-            || !anchor.attempted
-                && !anchor.saw_hello
-                && (allow_tls && (offset != 0 || tls_head) || http_head);
+            || !anchor.attempted && !anchor.saw_hello && allow_tls && (offset != 0 || tls_head)
+            || http_head;
         let index = if let Some(index) = slot_index {
             index
         } else {
@@ -520,17 +518,20 @@ impl HoldTable {
                 }
                 if observe_http
                     && destination.port == 80
-                    && (!anchor.saw_hello || next_http_request)
+                    && (!anchor.saw_hello || r2o_next_http_request)
                     && tcp.flags & 0x05 == 0
                     && let CaptureResult::Complete { sequence, bytes } = self.capture.feed_http(
                         key,
                         anchor.generation,
                         now,
                         tcp.sequence,
-                        (!next_http_request).then_some(anchor.sequence.wrapping_add(1)),
+                        (!r2o_next_http_request).then_some(anchor.sequence.wrapping_add(1)),
                         payload,
                     )
                 {
+                    self.syns[anchor_index]
+                        .r2o_http_requests
+                        .observe(sequence, &bytes);
                     if let Some((host, path)) = r2k_core::httpup::request_target(&bytes) {
                         self.remember_http_request(
                             key,
@@ -590,7 +591,11 @@ impl HoldTable {
                 generation: anchor.generation,
                 revision,
                 deadline,
-                anchor: anchor.sequence.wrapping_add(1),
+                anchor: if r2o_http_followup {
+                    tcp.sequence
+                } else {
+                    anchor.sequence.wrapping_add(1)
+                },
                 kind,
                 packets: Vec::with_capacity(HOLD_PACKETS),
             });
@@ -687,6 +692,11 @@ impl HoldTable {
                         outcome: HoldOutcome::Waiting,
                     };
                 };
+                if held.kind == HoldKind::Http {
+                    self.syns[anchor_index]
+                        .r2o_http_requests
+                        .observe(sequence, &bytes);
+                }
                 FeedResult {
                     released,
                     outcome: HoldOutcome::Ready {
@@ -795,6 +805,9 @@ impl HoldTable {
             attempted: false,
             saw_hello: false,
             unassembled_reported: false,
+            r2o_http_requests: r2k_core::httpup::R2oHttpRequestSequence::new(
+                sequence.wrapping_add(1),
+            ),
         };
         if let Some(existing) = self.syn_index(&key) {
             self.syns[existing] = anchor;
@@ -873,7 +886,6 @@ impl HoldTable {
             response_reported: false,
             answered: false,
             ready_for_next: false,
-            next_request_capturing: false,
             seen: now,
         };
         if let Some(flow) = self.http_requests.iter_mut().find(|flow| flow.key == key) {
@@ -1406,6 +1418,76 @@ mod tests {
             HoldOutcome::Pass,
             "retransmitted request must not emit a duplicate observation"
         );
+    }
+
+    #[test]
+    fn r2o_http_keepalive_собирает_разделённый_запрос_после_тела_post() {
+        let now = Instant::now();
+        let mut hold = HoldTable::default();
+        let options = HoldOptions {
+            allow_http: true,
+            ..HoldOptions::default()
+        };
+        assert_eq!(
+            hold.feed_observing(1, &http_packet(1000, 0x02, &[]), now, options)
+                .outcome,
+            HoldOutcome::Pass,
+        );
+        let first = b"GET / HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        assert_eq!(
+            hold.feed_observing(2, &http_packet(1001, 0x18, first), now, options)
+                .outcome,
+            HoldOutcome::Pass,
+        );
+        let post = b"POST /upload HTTP/1.1\r\nHost: example.test\r\nContent-Length: 70000\r\n\r\n";
+        let post_sequence = 1001 + first.len() as u32;
+        assert_eq!(
+            hold.feed_observing(3, &http_packet(post_sequence, 0x18, post), now, options)
+                .outcome,
+            HoldOutcome::Pass,
+        );
+        let body_start = post_sequence + post.len() as u32;
+        let body = vec![b'x'; 70000];
+        for (index, chunk) in body.chunks(1400).enumerate() {
+            assert_eq!(
+                hold.feed_observing(
+                    4 + index as u32,
+                    &http_packet(body_start + (index * 1400) as u32, 0x18, chunk),
+                    now,
+                    options,
+                )
+                .outcome,
+                HoldOutcome::Pass,
+            );
+        }
+
+        let request = b"GET /after-upload HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        let sequence = body_start + 70000;
+        let split = 19;
+        assert_eq!(
+            hold.feed_observing(
+                60,
+                &http_packet(sequence, 0x18, &request[..split]),
+                now,
+                options,
+            )
+            .outcome,
+            HoldOutcome::Waiting,
+        );
+        let result = hold.feed_observing(
+            61,
+            &http_packet(sequence + split as u32, 0x18, &request[split..]),
+            now,
+            options,
+        );
+        let HoldOutcome::Ready { ids, packet } = result.outcome else {
+            panic!("разделённый keep-alive-запрос после тела должен быть собран");
+        };
+        assert_eq!(ids, [60, 61]);
+        let view = r2k_core::packet::PacketView::parse(&packet).unwrap();
+        let tcp = view.tcp_segment(&packet).unwrap();
+        assert_eq!(tcp.sequence, sequence);
+        assert_eq!(&packet[tcp.payload], request);
     }
 
     #[test]
