@@ -1057,7 +1057,8 @@ mod app {
                     }
                     let udp_admitted_from_queue = original_from_queue
                         .map(|bytes| {
-                            r2o_udp_packet_admitted_at_hook(
+                            r2o_udp_packet_admitted_for_mode(
+                                options.mode,
                                 &mut udp_sessions,
                                 bytes,
                                 now,
@@ -1368,6 +1369,7 @@ mod app {
                                 decision
                             }
                             HoldOutcome::Observed { hello } => {
+                                tcp_sessions.r2o_note_captured_client_shape(bytes, hello.shape);
                                 if !controller_probe {
                                     send_hello_event(
                                         &mut control,
@@ -2825,6 +2827,18 @@ mod app {
             }
     }
 
+    fn r2o_udp_packet_admitted_for_mode(
+        mode: RuntimeMode,
+        sessions: &mut R2oUdpSessions,
+        packet: &[u8],
+        now: Instant,
+        hook: Option<u8>,
+        controller_probe: bool,
+    ) -> bool {
+        mode == RuntimeMode::Observe
+            || r2o_udp_packet_admitted_at_hook(sessions, packet, now, hook, controller_probe)
+    }
+
     fn r2o_udp_decide_once(
         sessions: &mut R2oUdpSessions,
         quic_sessions: &mut R2oQuicSessions,
@@ -3518,8 +3532,8 @@ mod app {
             r2o_finish_tcp_execution, r2o_first_oversized_emit, r2o_is_controller_probe,
             r2o_packet_route_skip, r2o_tcp_early_rst_event, r2o_tcp_rst_cut_signal_event,
             r2o_udp_decide_once, r2o_udp_mark_plain_pass, r2o_udp_packet_admitted_at_hook,
-            release_many_with, release_with, send_applied_event, send_hello_event,
-            send_journal_snapshot, send_journal_updates, udp_packet_admitted,
+            r2o_udp_packet_admitted_for_mode, release_many_with, release_with, send_applied_event,
+            send_hello_event, send_journal_snapshot, send_journal_updates, udp_packet_admitted,
         };
         use r2k_core::control::{
             KEY_LEN, R2oTcpCleanHandshakeEvent, R2oTcpEarlyRstEvent, R2oTcpRstCutSignalEvent,
@@ -3882,6 +3896,47 @@ mod app {
                 &mut sessions,
                 &refused,
                 now + Duration::from_secs(1)
+            ));
+            assert_eq!(sessions.stats().flows, 1536);
+            assert_eq!(sessions.stats().refusals, 1);
+        }
+
+        #[test]
+        fn observe_режим_не_резервирует_таблицу_исполнения_udp() {
+            let mut sessions = R2oUdpSessions::new().unwrap();
+            let now = Instant::now();
+            for index in 0..1536_u16 {
+                let packet = udp_packet(
+                    [10, (index >> 8) as u8, index as u8, 1],
+                    [203, 0, 113, 8],
+                    53000,
+                    7000,
+                );
+                assert!(r2o_udp_packet_admitted_at_hook(
+                    &mut sessions,
+                    &packet,
+                    now,
+                    Some(R2O_NF_INET_LOCAL_OUT),
+                    false,
+                ));
+            }
+
+            let packet = udp_packet([10, 7, 0, 1], [203, 0, 113, 8], 53000, 7000);
+            assert!(r2o_udp_packet_admitted_for_mode(
+                RuntimeMode::Observe,
+                &mut sessions,
+                &packet,
+                now + Duration::from_secs(1),
+                Some(R2O_NF_INET_LOCAL_OUT),
+                false,
+            ));
+            assert!(!r2o_udp_packet_admitted_for_mode(
+                RuntimeMode::Apply,
+                &mut sessions,
+                &packet,
+                now + Duration::from_secs(1),
+                Some(R2O_NF_INET_LOCAL_OUT),
+                false,
             ));
             assert_eq!(sessions.stats().flows, 1536);
             assert_eq!(sessions.stats().refusals, 1);

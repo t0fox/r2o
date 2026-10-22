@@ -7048,3 +7048,40 @@ Release workspace-сборки и QEMU smoke повторно прошли дл�
 Эталон — `t0fox/d2o` `86b05b96457fccdec6b7ddc0e8478508f80f0bab`. SHA-256: `core/d2kfetch.c` `6bb3a4bd5275f5ded7e29281fdbbc3b29bc603ece9848dda30329ac1f9bfc1dd`; `core/d2kask.c` `06965b6b6d4b2891dbec98c7765fa3e7eca7b4695539af9636589f725824cdb4`; `core/verify.c` `f7de7267b5dbeaf3ac3b143cd0a7d2077dd13bcadbe31c56c9162a3429f1e443`; `core/test_d2kask.c` `17483acbe0cd4daa0c553e3ee8a0e3f58e9e0a0ac110ab6a92ad7700d4d58020`; `core/test_verify.c` `9d49d99acb6bcca9acec916e14a80ada20f43d9068fcbc8ea53fa3a378774504`; `core/test_verify_http.c` `ef633566e7811e74a6510cf53e20bd4a87d0a75365c4c846d8621b5767b533e6`.
 
 Донорские `test_d2kask`, `test_verify` и `test_verify_http` прошли из изолированного snapshot. Rust целевые регрессии и полный `cargo test --workspace --locked` прошли; `cargo fmt --all -- --check` и `git diff --check` прошли. ARMv5 musl и OpenWrt MIPS32r2 musl release/QEMU smoke прошли. Проверка относится к перечисленным Fetch/ask различиям; полный функциональный паритет проекта и работа на физическом роутере этой записью не утверждаются.
+
+## Приёмка `datapath/session.c` и `core/sched.c` — donor `86b05b9`, 23.10.2026
+
+Источник — `t0fox/d2o`, commit `86b05b96457fccdec6b7ddc0e8478508f80f0bab`,
+изолированный snapshot; рабочий checkout `E:\d2o` не менялся. SHA-256:
+`datapath/session.c` — `f3bc8c4ddd334a189c63dc1bbf868eff258c2fdff3199e285d4a098d2ad3fe1f`,
+`core/sched.c` — `67f5c245ddf1f9cd4361c256d36a93bc37060a699548169759823845c4da1312`,
+`core/test_sched.c` — `c811faca5ae143c3f0118d79c198bd2f70faa64bdf6d0e153ef48d97153a5921`.
+
+Сверены последние изменения scheduler `8c6fa71` (late-close, ECH shape,
+повторная RX-оценка) и `c3df4ec` (сводка отказов каталога) с Rust state
+machine и событийной архитектурой. Дополнительно выявлено, что
+`R2oLateRxCache` отвергал ECH/TLS 1.3 ClientHello, хотя донорский volume path
+измеряет его как TLS 1.3 и сохраняет его длину. Rust-кэш теперь принимает ECH,
+сохраняет форму для discovery и строит парную пробу с `tls12=false`; тест
+`кэш_принимает_ech_как_tls13_и_отвергает_события_без_длины_clienthello`
+проверяет форму, длину и TLS-режим. Предыдущие регрессии покрывают ECH-переход
+сессии после сборки ClientHello, Observe admission для UDP, совместимость
+современной привязки, неполный RX и отказы установки планов.
+
+Из donor snapshot Clang 18 с `-Wall -Wextra -Werror` собраны и прошли полный
+`test_sched`, `test_sched_summary` и `test_catalog_sync`. C-сессия: полный набор
+`track`, `session`, `quic-session`, `stun-session`, `capture`, `hold`,
+`udp-hold`, `udp-release`, `udp-path`, `wire-udp`, `nat`, `journal`,
+`routemark`, `plans` и `ctlprobe` прошёл; журнал
+`.rea/r2o-session-c-tests-86b05b.log`. Rust `cargo test --workspace --locked`
+завершился успешно (controller: 127 passed); `cargo fmt --all -- --check` и
+`git diff --check` прошли.
+
+Полные release/QEMU проверки прошли командами
+`scripts/r2o-build-armv5-musleabi.sh` и
+`scripts/r2o-build-openwrt-mipsel-musl.sh`: шесть ARMv5 и пять OpenWrt MIPS32r2
+бинарников прошли QEMU smoke; проверка каталога прошла на обеих целях.
+REA/Ghidra не запускались: ветви однозначно заданы donor C и покрыты C/Rust
+regression tests. Новое binary Evidence не заявляется. Физический роутер не
+проверялся; эта приёмка относится только к `session.c` и `sched.c`, не к
+полному функциональному паритету проекта.

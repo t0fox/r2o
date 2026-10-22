@@ -402,6 +402,24 @@ impl TcpSessions {
         })
     }
 
+    /// Обновить предварительную форму ClientHello после полной сборки захвата.
+    pub fn r2o_note_captured_client_shape(&mut self, packet: &[u8], shape: u8) -> bool {
+        if shape != r2k_core::control::SHAPE_ECH_TCP {
+            return false;
+        }
+        let Some(key) = TcpFlowKey::from_packet(packet) else {
+            return false;
+        };
+        let Some(session) = self.flows.get_mut(&key) else {
+            return false;
+        };
+        if session.client_shape != r2k_core::control::SHAPE_MODERN {
+            return false;
+        }
+        session.client_shape = r2k_core::control::SHAPE_ECH_TCP;
+        true
+    }
+
     /// Проверить, наблюдалось ли обратное TCP-рукопожатие для пакета.
     pub fn r2o_syn_ack_seen_for_packet(&self, packet: &[u8]) -> bool {
         let Some(view) = PacketView::parse(packet).filter(|view| view.protocol == 6) else {
@@ -2813,6 +2831,52 @@ mod tests {
             assert_eq!(events[0].key[37], 6);
             assert!(!events[0].planned);
         }
+    }
+
+    #[test]
+    fn tcp_полный_ech_capture_уточняет_форму_для_последующего_rst() {
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut client_hello = client_hello_with_sni();
+        let supported_versions = [0, 43, 0, 3, 2, 3, 4];
+        client_hello.extend_from_slice(&supported_versions);
+        let extensions_len = u16::from_be_bytes([client_hello[50], client_hello[51]])
+            .wrapping_add(supported_versions.len() as u16);
+        client_hello[50..52].copy_from_slice(&extensions_len.to_be_bytes());
+        let handshake_len =
+            u32::from_be_bytes([0, client_hello[6], client_hello[7], client_hello[8]])
+                + supported_versions.len() as u32;
+        client_hello[6..9].copy_from_slice(&handshake_len.to_be_bytes()[1..]);
+        let record_len = u16::from_be_bytes([client_hello[3], client_hello[4]])
+            .wrapping_add(supported_versions.len() as u16);
+        client_hello[3..5].copy_from_slice(&record_len.to_be_bytes());
+        assert!(r2k_core::tls::parse(&client_hello).is_tls13);
+        let mut sessions = TcpSessions::default();
+        sessions.track_packet(
+            &ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello),
+            start,
+        );
+        assert_eq!(
+            sessions.flows.values().next().unwrap().client_shape,
+            r2k_core::control::SHAPE_MODERN,
+        );
+
+        let packet = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello);
+        assert!(
+            sessions.r2o_note_captured_client_shape(&packet, r2k_core::control::SHAPE_ECH_TCP,)
+        );
+        assert!(
+            !sessions.r2o_note_captured_client_shape(&packet, r2k_core::control::SHAPE_LEGACY,)
+        );
+
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x04, 124, 900, &[]),
+            start + Duration::from_millis(10),
+        );
+        let events = sessions.take_tcp_rst_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].client_shape, r2k_core::control::SHAPE_ECH_TCP);
     }
 
     #[test]

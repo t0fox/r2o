@@ -28,7 +28,9 @@ impl R2oLateRxCache {
         let Some(shape) = hello.shape.filter(|shape| {
             matches!(
                 *shape,
-                r2k_core::control::SHAPE_MODERN | r2k_core::control::SHAPE_LEGACY
+                r2k_core::control::SHAPE_MODERN
+                    | r2k_core::control::SHAPE_LEGACY
+                    | r2k_core::control::SHAPE_ECH_TCP
             )
         }) else {
             return false;
@@ -405,13 +407,28 @@ mod tests {
     }
 
     #[test]
-    fn кэш_не_принимает_ech_и_события_без_длины_clienthello() {
+    fn кэш_принимает_ech_как_tls13_и_отвергает_события_без_длины_clienthello() {
         let now = Instant::now();
         let mut cache = R2oLateRxCache::default();
-        assert!(!cache.capture(
-            &hello(r2k_core::control::SHAPE_ECH_TCP, true, Some(812)),
-            now
-        ));
+        let ech = hello(r2k_core::control::SHAPE_ECH_TCP, true, Some(812));
+        assert!(cache.capture(&ech, now));
+        let input = cache
+            .take_for_rst(
+                &R2oTcpRstAfterAppEvent {
+                    key: ech.key,
+                    client_is_low: true,
+                    planned: true,
+                },
+                None,
+                now,
+            )
+            .unwrap();
+        assert!(!input.options.tls12);
+        assert_eq!(input.options.wire_len, Some(812));
+        assert_eq!(
+            input.discovery_target.unwrap().shape,
+            r2k_core::control::SHAPE_ECH_TCP
+        );
         assert!(!cache.capture(&hello(SHAPE_MODERN, true, None), now));
     }
 
