@@ -2835,8 +2835,9 @@ mod app {
         hook: Option<u8>,
         controller_probe: bool,
     ) -> bool {
-        mode == RuntimeMode::Observe
-            || r2o_udp_packet_admitted_at_hook(sessions, packet, now, hook, controller_probe)
+        let admitted =
+            r2o_udp_packet_admitted_at_hook(sessions, packet, now, hook, controller_probe);
+        mode == RuntimeMode::Observe || admitted
     }
 
     fn r2o_udp_decide_once(
@@ -3902,7 +3903,25 @@ mod app {
         }
 
         #[test]
-        fn observe_режим_не_резервирует_таблицу_исполнения_udp() {
+        fn observe_режим_сохраняет_udp_поток_для_наблюдения() {
+            let mut sessions = R2oUdpSessions::new().unwrap();
+            let now = Instant::now();
+            let packet = udp_packet([10, 7, 0, 1], [203, 0, 113, 8], 53000, 7000);
+
+            assert!(r2o_udp_packet_admitted_for_mode(
+                RuntimeMode::Observe,
+                &mut sessions,
+                &packet,
+                now,
+                Some(R2O_NF_INET_LOCAL_OUT),
+                false,
+            ));
+            assert_eq!(sessions.stats().flows, 1);
+            assert_eq!(sessions.stats().refusals, 0);
+        }
+
+        #[test]
+        fn observe_режим_не_отказывает_при_полной_udp_таблице() {
             let mut sessions = R2oUdpSessions::new().unwrap();
             let now = Instant::now();
             for index in 0..1536_u16 {
@@ -3939,7 +3958,7 @@ mod app {
                 false,
             ));
             assert_eq!(sessions.stats().flows, 1536);
-            assert_eq!(sessions.stats().refusals, 1);
+            assert_eq!(sessions.stats().refusals, 2);
         }
 
         #[test]
