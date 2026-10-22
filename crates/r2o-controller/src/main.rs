@@ -2802,6 +2802,14 @@ const R2O_DISCOVERY_TASK_LIFETIME: std::time::Duration = std::time::Duration::fr
 #[cfg(unix)]
 const R2O_DISCOVERY_ECH_INPUT_CAPACITY: usize = 8;
 #[cfg(unix)]
+const R2O_DISCOVERY_ECH_RR_CAPACITY: usize = 256;
+#[cfg(unix)]
+const R2O_DISCOVERY_ECH_RR_POSITIVE_TTL: std::time::Duration =
+    std::time::Duration::from_secs(6 * 60 * 60);
+#[cfg(unix)]
+const R2O_DISCOVERY_ECH_RR_NEGATIVE_TTL: std::time::Duration =
+    std::time::Duration::from_secs(30 * 60);
+#[cfg(unix)]
 const R2O_ECH_RX_LADDER_BATCH: usize = 32;
 #[cfg(unix)]
 const R2O_DISCOVERY_FAILURE_RETRY: std::time::Duration = std::time::Duration::from_secs(120);
@@ -2826,6 +2834,76 @@ const R2O_TCP_HELLO_CAPACITY: usize = 128;
 const R2O_RECENT_TCP_NAME_CAPACITY: usize = 512;
 #[cfg(unix)]
 const R2O_RECENT_TCP_NAME_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+#[cfg(unix)]
+struct R2oEchWitnessResolution {
+    name: String,
+    config: Option<r2o_controller::ech::R2oEchConfig>,
+    checked_at: std::time::Instant,
+}
+
+#[cfg(unix)]
+struct R2oEchWitnessResolutionCache {
+    entries: Vec<Option<R2oEchWitnessResolution>>,
+    next: usize,
+}
+
+#[cfg(unix)]
+impl Default for R2oEchWitnessResolutionCache {
+    fn default() -> Self {
+        Self {
+            entries: std::iter::repeat_with(|| None)
+                .take(R2O_DISCOVERY_ECH_RR_CAPACITY)
+                .collect(),
+            next: 0,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl R2oEchWitnessResolutionCache {
+    fn lookup(
+        &self,
+        name: &str,
+        now: std::time::Instant,
+    ) -> Option<Option<r2o_controller::ech::R2oEchConfig>> {
+        let entry = self
+            .entries
+            .iter()
+            .flatten()
+            .find(|entry| entry.name == name)?;
+        let ttl = if entry.config.is_some() {
+            R2O_DISCOVERY_ECH_RR_POSITIVE_TTL
+        } else {
+            R2O_DISCOVERY_ECH_RR_NEGATIVE_TTL
+        };
+        (now.saturating_duration_since(entry.checked_at) <= ttl).then(|| entry.config.clone())
+    }
+
+    fn store(
+        &mut self,
+        name: &str,
+        config: Option<r2o_controller::ech::R2oEchConfig>,
+        now: std::time::Instant,
+    ) {
+        let slot = if let Some(slot) = self
+            .entries
+            .iter()
+            .position(|entry| entry.as_ref().is_some_and(|entry| entry.name == name))
+        {
+            slot
+        } else {
+            let slot = self.next;
+            self.next = (self.next + 1) % R2O_DISCOVERY_ECH_RR_CAPACITY;
+            slot
+        };
+        self.entries[slot] = Some(R2oEchWitnessResolution {
+            name: name.to_owned(),
+            config,
+            checked_at: now,
+        });
+    }
+}
 
 #[cfg(unix)]
 #[derive(Default)]
@@ -3861,6 +3939,10 @@ impl DiscoveryWorker {
         ));
         let runner_ech_challenges = Arc::clone(&ech_challenges);
         let runner_recent_tcp_names = Arc::clone(&recent_tcp_names);
+        let ech_witness_resolutions = Arc::new(std::sync::Mutex::new(
+            R2oEchWitnessResolutionCache::default(),
+        ));
+        let runner_ech_witness_resolutions = Arc::clone(&ech_witness_resolutions);
         let ech_rx_cursor = Arc::new(std::sync::Mutex::new(HashMap::<
             r2o_controller::discovery::DiscoveryTarget,
             usize,
@@ -3903,8 +3985,13 @@ impl DiscoveryWorker {
             };
             ech_witness_candidates.retain(|witness| !challenged.contains(witness));
             let (ech_config, next_witness) = if let Some((config, next)) =
-                r2o_discovery_first_ech_witness(&target, &ech_witness_candidates, 0, mark)
-            {
+                r2o_discovery_first_ech_witness(
+                    &target,
+                    &ech_witness_candidates,
+                    0,
+                    mark,
+                    &runner_ech_witness_resolutions,
+                ) {
                 (Some(config), next)
             } else {
                 (
@@ -3951,9 +4038,14 @@ impl DiscoveryWorker {
                         })
                     },
                     |witness| {
-                        r2o_discovery_ech_witness_config(&target, witness, mark)
-                            .ok()
-                            .flatten()
+                        r2o_discovery_ech_witness_config(
+                            &target,
+                            witness,
+                            mark,
+                            &runner_ech_witness_resolutions,
+                        )
+                        .ok()
+                        .flatten()
                     },
                     |config, retry_plan| {
                         r2o_run_discovery_candidate_trial(
@@ -4671,15 +4763,47 @@ fn r2o_discovery_ech_witness_config(
     target: &r2o_controller::discovery::DiscoveryTarget,
     witness: &str,
     mark: Option<u32>,
+    cache: &std::sync::Mutex<R2oEchWitnessResolutionCache>,
 ) -> Result<Option<r2o_controller::ech::R2oEchConfig>, String> {
     if target.shape != SHAPE_ECH_TCP || witness == target.host {
         return Ok(None);
     }
-    let config = r2o_controller::ech::resolve_ech_config(witness, mark)?;
-    if config.public_name != target.host {
-        return Ok(None);
+    r2o_discovery_resolve_ech_witness_cached(cache, witness, &target.host, || {
+        r2o_controller::ech::resolve_ech_config(witness, mark)
+    })
+}
+
+#[cfg(unix)]
+fn r2o_discovery_resolve_ech_witness_cached(
+    cache: &std::sync::Mutex<R2oEchWitnessResolutionCache>,
+    witness: &str,
+    public_name: &str,
+    resolve: impl FnOnce() -> Result<r2o_controller::ech::R2oEchConfig, String>,
+) -> Result<Option<r2o_controller::ech::R2oEchConfig>, String> {
+    let now = std::time::Instant::now();
+    let cached = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .lookup(witness, now);
+    let result = if let Some(cached) = cached {
+        Ok(cached)
+    } else {
+        let result = resolve();
+        cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .store(
+                witness,
+                result.as_ref().ok().cloned(),
+                std::time::Instant::now(),
+            );
+        result.map(Some)
+    };
+    match result {
+        Ok(Some(config)) if config.public_name == public_name => Ok(Some(config)),
+        Ok(_) => Ok(None),
+        Err(error) => Err(error),
     }
-    Ok(Some(config))
 }
 
 #[cfg(unix)]
@@ -4688,9 +4812,10 @@ fn r2o_discovery_first_ech_witness(
     candidates: &[String],
     start: usize,
     mark: Option<u32>,
+    cache: &std::sync::Mutex<R2oEchWitnessResolutionCache>,
 ) -> Option<(r2o_controller::ech::R2oEchConfig, usize)> {
     for (index, witness) in candidates.iter().enumerate().skip(start) {
-        if let Ok(Some(config)) = r2o_discovery_ech_witness_config(target, witness, mark) {
+        if let Ok(Some(config)) = r2o_discovery_ech_witness_config(target, witness, mark, cache) {
             return Some((config, index + 1));
         }
     }
@@ -9010,6 +9135,154 @@ mod tests {
             cache.ech_witness_names(&target, now + std::time::Duration::from_secs(601)),
             []
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ech_rr_сохраняет_положительный_и_отрицательный_ответ_до_срока() {
+        let now = std::time::Instant::now();
+        let mut cache = super::R2oEchWitnessResolutionCache::default();
+        let config = r2o_controller::ech::R2oEchConfig {
+            public_name: "public.example".into(),
+            origin_name: "witness.example".into(),
+            config_list: vec![1, 2, 3],
+        };
+
+        cache.store("positive.example", Some(config.clone()), now);
+        cache.store("negative.example", None, now);
+
+        assert_eq!(
+            cache.lookup(
+                "positive.example",
+                now + std::time::Duration::from_secs(6 * 60 * 60)
+            ),
+            Some(Some(config))
+        );
+        assert!(
+            cache
+                .lookup(
+                    "positive.example",
+                    now + std::time::Duration::from_secs(6 * 60 * 60)
+                        + std::time::Duration::from_nanos(1)
+                )
+                .is_none()
+        );
+        assert_eq!(
+            cache.lookup(
+                "negative.example",
+                now + std::time::Duration::from_secs(11 * 60)
+            ),
+            Some(None)
+        );
+        assert!(
+            cache
+                .lookup(
+                    "negative.example",
+                    now + std::time::Duration::from_secs(30 * 60)
+                        + std::time::Duration::from_nanos(1)
+                )
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ech_rr_переиспользует_разрешение_и_сверяет_public_name() {
+        let cache = std::sync::Mutex::new(super::R2oEchWitnessResolutionCache::default());
+        let calls = std::cell::Cell::new(0);
+        let config = r2o_controller::ech::R2oEchConfig {
+            public_name: "public.example".into(),
+            origin_name: "witness.example".into(),
+            config_list: vec![1, 2, 3],
+        };
+        let mut resolve = || {
+            calls.set(calls.get() + 1);
+            Ok(config.clone())
+        };
+
+        assert_eq!(
+            super::r2o_discovery_resolve_ech_witness_cached(
+                &cache,
+                "witness.example",
+                "public.example",
+                &mut resolve,
+            ),
+            Ok(Some(config.clone()))
+        );
+        assert_eq!(
+            super::r2o_discovery_resolve_ech_witness_cached(
+                &cache,
+                "witness.example",
+                "other-public.example",
+                || panic!("свежую HTTPS RR-запись не запрашиваем повторно"),
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            super::r2o_discovery_resolve_ech_witness_cached(
+                &cache,
+                "witness.example",
+                "public.example",
+                || panic!("положительный HTTPS RR уже кэширован"),
+            ),
+            Ok(Some(config))
+        );
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ech_rr_отрицательное_разрешение_не_повторяет_dns_запрос() {
+        let cache = std::sync::Mutex::new(super::R2oEchWitnessResolutionCache::default());
+        let calls = std::cell::Cell::new(0);
+        let mut resolve = || {
+            calls.set(calls.get() + 1);
+            Err("HTTPS RR не содержит подходящей ECH-конфигурации".to_owned())
+        };
+
+        assert_eq!(
+            super::r2o_discovery_resolve_ech_witness_cached(
+                &cache,
+                "negative.example",
+                "public.example",
+                &mut resolve,
+            ),
+            Err("HTTPS RR не содержит подходящей ECH-конфигурации".into())
+        );
+        assert_eq!(
+            super::r2o_discovery_resolve_ech_witness_cached(
+                &cache,
+                "negative.example",
+                "public.example",
+                || panic!("отрицательный HTTPS RR уже кэширован"),
+            ),
+            Ok(None)
+        );
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ech_rr_кэш_ограничен_256_именами_и_обновление_не_двигает_кольцо() {
+        let now = std::time::Instant::now();
+        let mut cache = super::R2oEchWitnessResolutionCache::default();
+        let config = || r2o_controller::ech::R2oEchConfig {
+            public_name: "public.example".into(),
+            origin_name: "witness.example".into(),
+            config_list: vec![1],
+        };
+
+        for index in 0..256 {
+            cache.store(&format!("witness-{index}.example"), Some(config()), now);
+        }
+        cache.store("witness-256.example", Some(config()), now);
+        cache.store("witness-256.example", None, now);
+        cache.store("witness-new.example", Some(config()), now);
+
+        assert!(cache.lookup("witness-0.example", now).is_none());
+        assert!(cache.lookup("witness-1.example", now).is_none());
+        assert_eq!(cache.lookup("witness-256.example", now), Some(None));
+        assert!(cache.lookup("witness-new.example", now).is_some());
     }
 
     #[cfg(unix)]

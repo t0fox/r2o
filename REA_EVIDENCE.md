@@ -6778,3 +6778,46 @@ REA был проверен в этой итерации. `list_documents` от�
 Release cross-build без исполнения: AArch64 GNU controller/datapath — 4 920 328 / 856 784 Б; MIPS32 GNU — 6 558 544 / 1 249 108 Б; ARMv5te musl EABI5 — 4 918 208 / 1 116 896 Б. Для MIPS использована nightly-стандартная библиотека. MIPS и ARMv5 — только сборка; проверка тестами и запуск бинарников не выполнялись. Физический маршрутизатор не проверялся.
 
 Журналы локальны и игнорируются Git: `.rea/r2o-ech-input-cooldown-focused-arm64.log`, `.rea/r2o-ech-input-cooldown-controller-arm64.log`, `.rea/r2o-ech-input-cooldown-controller-serial-arm64.log`, `.rea/r2o-ech-input-cooldown-timing-isolated-arm64.log`, `.rea/r2o-ech-input-cooldown-workspace-arm64.log`, `.rea/r2o-ech-input-cooldown-donor-sched-arm64.log`, `.rea/r2o-ech-input-cooldown-aarch64-release.log`, `.rea/r2o-ech-input-cooldown-mipsel-release.log` и `.rea/r2o-ech-input-cooldown-armv5-release.log`.
+
+## Кэш разрешения HTTPS RR для ECH-свидетелей — 22.10.2026
+
+### Донор и REA Evidence
+
+Проверенный донорский файл: `E:\d2o\core\sched.c`, SHA-256 `1de9feaab19dcea1e493aea068295470cf3143adf83157b57663f1098132ae8a`. Узкая REA-декомпиляция выполнена для `.rea/r2o-donor-sched-current.o`, SHA-256 `04531800c43c9ac739bc24f9fa1cbbe46927ce77339f61defd19aed32e0ea8ca`; объект — arm64, Ghidra связала исходник `sched.c` через DWARF. Временная метка объекта — 21 октября, исходника — 18 октября; точного манифеста сборки объекта нет, поэтому результат не заявляется как доказательство идентичного build input.
+
+* `ech_rr_known`, Evidence `ev_e69d34d3a7a0663bef73adfb833caf522f59c10611257f783b3e1184fab0f3a4`: проверяет 256 слотов; граница TTL включительна; свежий положительный ответ возвращается только для точного публичного имени, свежий отрицательный или несовпадающий ответ даёт отказ, неизвестный/истёкший — cache miss.
+* `ech_rr_store`, Evidence `ev_ea4731e0108d66f9f28c683276aa68ce641ad0c3140a4727dd3c2052897f21ae`: повторное имя обновляется на месте без сдвига курсора; новое имя занимает текущий слот кольца и продвигает курсор modulo 256. Донорские сроки: 30 минут для отрицательного и 6 часов для положительного ответа.
+* `ech_pick_witness`, Evidence `ev_fcfb04b927217e6fbaa679b08c3fb7ab857d0799cd13bf73395525742377ef08`: свежий отрицательный/несовпадающий ответ пропускается, свежая подходящая запись не вызывает DNS resolver; неизвестный ответ разрешается и кэшируется после resolver-вызова, который выполняется без `s->mu`.
+
+Для каждого досье REA сообщил полное покрытие известных связей тела функции. Это описание декомпилированного узкого object, а не утверждение о runtime-инвариантах для неразрешённых косвенных ссылок. Сырые отчёты: `.rea/r2o-ech-rr-cache-rea-function.json`, `.rea/r2o-ech-rr-store-rea-function.json` и `.rea/r2o-ech-pick-witness-rea-function.json`. Полный ELF повторно не анализировался.
+
+Донорский тестовый файл `E:\d2o\core\test_sched.c`, SHA-256 `a67f87e09a7fd93ed735b52f361e78590b9ce40679ab95e300accf0a3e9d51a3`, содержит режим 1 без ECH, который перед повторным сценарием продвигает время на 11 минут и ограничивает повторные resolver-вызовы. В этой итерации сам донорский тестовый бинарник повторно не исполнялся.
+
+### Rust-перенос и проверки
+
+В `crates/r2o-controller/src/main.rs` добавлен общий `R2oEchWitnessResolutionCache` на 256 имён в Discovery worker. Успешная конфигурация хранится 6 часов, отрицательный статус HTTPS RR — 30 минут. Первая ошибка resolver возвращается текущему вызову и кэшируется только как отсутствие конфигурации; повторный вызов получает `Ok(None)`, что в обоих Discovery-путях означает пропуск свидетеля без нового DNS-запроса. Проверка `public_name` выполняется заново для текущей цели, чтобы один результат не связывал свидетеля навсегда с чужим именем. Mutex удерживается только на lookup/store, не во время сетевого DNS-запроса. Кольцевое вытеснение и обновление существующего имени соответствуют донорской модели.
+
+Четыре теста проверяют TTL обеих категорий, повторное использование положительного ответа, отсеивание несовпадающего `public_name`, повторное использование отрицательного ответа и ограничение/обновление 256-слотового кольца. Целевой прогон ARM64/QEMU: 4 passed. Полный controller: 383 passed, 0 failed, 1 ignored, 23 набора. Полный workspace ARM64/QEMU: 1 040 passed, 0 failed, 4 ignored, 73 набора. `cargo +1.98.0 fmt --all -- --check` и `git diff --check` прошли.
+
+### Платформы и размер файлов
+
+Полный release workspace собран без запуска для AArch64 GNU, MIPS32 little-endian GNU и ARMv5te musl EABI5. Полный ARMv7 musleabihf workspace прошёл `cargo check`. На MIPS использован `nightly-2026-10-17` с `-Z build-std=std,panic_abort`; появился один существующий warning о переименовании `AtomicUsize::fetch_update` в `r2o-telegram/src/routing.rs:300`. Тесты и запуск ELF на MIPS/ARM не выполнялись.
+
+Размеры файлов в байтах:
+
+| Бинарник | AArch64 GNU | MIPS32 GNU | ARMv5te musl EABI5 |
+| --- | ---: | ---: | ---: |
+| `r2o-controller` | 5 051 496 | 6 755 236 | 5 049 344 |
+| `r2o-datapath` | 856 784 | 1 249 108 | 1 116 896 |
+| `r2o-fetch` | 2 560 960 | 3 215 776 | 2 558 856 |
+| `r2o-manager` | 856 776 | 1 183 832 | 920 312 |
+| `r2o-panel` | 1 118 992 | 1 314 856 | 1 247 968 |
+| `r2o-telegram` | 4 597 480 | 5 905 676 | 4 593 032 |
+
+В предыдущей записи размеров controller имел 4 920 328 Б на AArch64, 6 558 544 Б на MIPS32 и 4 918 208 Б на ARMv5te. Текущие разницы — соответственно +131 168, +196 692 и +131 136 Б; остальные пять программ совпали с предыдущими размерами. Хранение отрицательного результата как статуса вместо клонируемой строки ошибки не изменило размер ELF. Причина прироста controller по символам не локализована; проектного лимита размера бинарника нет. ELF-заголовки подтверждены как ELF64/AArch64, ELF32 little-endian/MIPS32r2 и ELF32/ARM EABI5 soft-float.
+
+Проверка зависимостей подтвердила, что новых записей Cargo для этой итерации не требуется: `x509-parser 0.18.1` используется собственным измерителем для разбора DER после проверки сертификата rustls; `etherparse 0.21.0`, `tls-parser 0.12.2` и `proptest 1.12.0` применяются в независимых тестах. `ring 0.17.14` остаётся существующей криптографической основой rustls/Quinn и Telegram.
+
+Общая оценка остаётся **66,35%**: перенесена одна ветвь повторного использования ECH-свидетеля, а не весь scheduler/discovery. TCP/UDP state, остальные приоритетные сценарии и физическая приёмка на роутерах остаются незакрытыми.
+
+Локальные журналы, игнорируемые Git: `.rea/r2o-ech-rr-cache-rea-function.json`, `.rea/r2o-ech-rr-store-rea-function.json`, `.rea/r2o-ech-pick-witness-rea-function.json`, `.rea/r2o-ech-rr-cache-red-negative-arm64.log`, `.rea/r2o-ech-rr-cache-focused-arm64-negative-v3.log`, `.rea/r2o-ech-rr-cache-controller-negative-v3.log`, `.rea/r2o-ech-rr-cache-workspace-negative-v3.log`, `.rea/r2o-ech-rr-cache-release-arm64-negative-v3.log`, `.rea/r2o-ech-rr-cache-release-mipsel-negative-v3.log`, `.rea/r2o-ech-rr-cache-release-armv5-negative-v3.log` и `.rea/r2o-ech-rr-cache-check-armv7-negative-v3.log`.
