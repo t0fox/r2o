@@ -91,6 +91,9 @@ jobs:
           sudo apt-get install -y -qq shellcheck
       - name: Проверить все сценарии оболочки
         run: find scripts -type f -name '*.sh' -print0 | xargs -0 -r shellcheck -s sh
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
+      - name: Собрать контроллер для проверки очистки каталога
+        run: cargo build --locked --release --package r2o-controller --bin r2o-controller
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # версия v7.1.0
         with:
           node-version: '24'
