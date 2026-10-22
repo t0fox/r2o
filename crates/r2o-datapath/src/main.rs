@@ -505,6 +505,14 @@ mod app {
                     tcp_sessions.r2o_reply_hidden(),
                     tcp_sessions.r2o_tcp_hello_flows()
                 );
+                let capture_stats = holding.r2o_capture_stats();
+                eprintln!(
+                    "r2o-datapath: снимки TLS/TCP: завершено {}, отклонено {}, истекло {}, отказов ёмкости {}",
+                    capture_stats.tls_completed,
+                    capture_stats.tls_rejected,
+                    capture_stats.tls_expired,
+                    capture_stats.tls_full
+                );
                 if icmp_guard.r2o_seen() != 0 || icmp_guard.r2o_noted() != 0 {
                     eprintln!(
                         "r2o-datapath: ICMP: пакетов {}, снято ответов на собственные фальшивки {}, фальшивок с пониженным TTL учтено {}",

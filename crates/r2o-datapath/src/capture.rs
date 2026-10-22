@@ -258,6 +258,10 @@ pub struct CaptureStats {
     pub rejected: u64,
     pub expired: u64,
     pub full: u64,
+    pub tls_completed: u64,
+    pub tls_rejected: u64,
+    pub tls_expired: u64,
+    pub tls_full: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -453,6 +457,9 @@ impl CaptureTable {
                 if expired {
                     if slot.state == SlotState::Collecting {
                         self.stats.expired = self.stats.expired.saturating_add(1);
+                        if slot.mode == CaptureMode::Tls {
+                            self.stats.tls_expired = self.stats.tls_expired.saturating_add(1);
+                        }
                     }
                     slot.free();
                 }
@@ -484,6 +491,9 @@ impl CaptureTable {
             }
             let Some(index) = vacant else {
                 self.stats.full = self.stats.full.saturating_add(1);
+                if mode == CaptureMode::Tls {
+                    self.stats.tls_full = self.stats.tls_full.saturating_add(1);
+                }
                 return CaptureResult::Full;
             };
             let start_sequence = anchor.unwrap_or(sequence);
@@ -508,7 +518,7 @@ impl CaptureTable {
                     let present = &mut slot.present[position / 8];
                     if *present & mask != 0 && slot.bytes[position] != byte {
                         slot.state = SlotState::Rejected;
-                        return self.reject_result();
+                        return self.reject_result(mode);
                     }
                     slot.bytes[position] = byte;
                     *present |= mask;
@@ -539,10 +549,13 @@ impl CaptureTable {
         };
 
         match result {
-            Err(()) => self.reject_result(),
+            Err(()) => self.reject_result(mode),
             Ok(None) => CaptureResult::Incomplete,
             Ok(Some((sequence, bytes))) => {
                 self.stats.completed = self.stats.completed.saturating_add(1);
+                if mode == CaptureMode::Tls {
+                    self.stats.tls_completed = self.stats.tls_completed.saturating_add(1);
+                }
                 CaptureResult::Complete { sequence, bytes }
             }
         }
@@ -560,8 +573,11 @@ impl CaptureTable {
         self.stats
     }
 
-    fn reject_result(&mut self) -> CaptureResult {
+    fn reject_result(&mut self, mode: CaptureMode) -> CaptureResult {
         self.stats.rejected = self.stats.rejected.saturating_add(1);
+        if mode == CaptureMode::Tls {
+            self.stats.tls_rejected = self.stats.tls_rejected.saturating_add(1);
+        }
         CaptureResult::Rejected
     }
 }

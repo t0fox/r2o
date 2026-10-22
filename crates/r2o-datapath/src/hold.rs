@@ -1,8 +1,8 @@
 //! Ограниченное удержание NFQUEUE-пакетов для сегментированных TLS ClientHello.
 
 use crate::capture::{
-    CAPTURE_BYTES, CaptureResult, CaptureTable, TcpFlowKey, TcpHello, tcp_hello_from_bytes,
-    tcp_http_hello_from_bytes,
+    CAPTURE_BYTES, CaptureResult, CaptureStats, CaptureTable, TcpFlowKey, TcpHello,
+    tcp_hello_from_bytes, tcp_http_hello_from_bytes,
 };
 use r2k_core::addr::Address;
 use r2k_core::control::{AppliedEvent, BindingContext, HttpPortalEvent, HttpResponseEvent};
@@ -161,6 +161,11 @@ pub struct HoldTable {
 }
 
 impl HoldTable {
+    /// Возвращает накопленные счётчики сборки TCP-приветствий и HTTP-запросов.
+    pub fn r2o_capture_stats(&self) -> CaptureStats {
+        self.capture.stats()
+    }
+
     pub fn note_http_execution(&mut self, sequence: u32, event: &AppliedEvent) {
         let Some(flow) = self.http_requests.iter_mut().find(|flow| {
             flow.key.wire_key() == event.key
@@ -1269,6 +1274,8 @@ mod tests {
             u16::from_be_bytes([packet[2], packet[3]]) as usize,
             packet.len()
         );
+        assert_eq!(hold.r2o_capture_stats().completed, 1);
+        assert_eq!(hold.r2o_capture_stats().tls_completed, 1);
     }
 
     #[test]
@@ -1384,6 +1391,7 @@ mod tests {
         assert!(result.released.is_empty());
         assert_eq!(hello.host.as_deref(), Some(b"example.test".as_slice()));
         assert_eq!(hello.shape, r2k_core::control::SHAPE_HTTP);
+        assert_eq!(hold.r2o_capture_stats().tls_completed, 0);
         assert_eq!(
             hold.feed_observing(
                 4,

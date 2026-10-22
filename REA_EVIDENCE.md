@@ -6638,3 +6638,45 @@ TTL сверены с донорским исходником и тестом. �
 6 558 544 Б, ARMv5te musl 4 918 208 Б. Выполнены только ARM64 тесты; MIPS и
 ARMv5 запускались только как компиляторные проверки. Журналы сохранены локально
 в `.rea/r2o-ech-recent-witness-*.log`.
+
+## Счётчики TLS-сборки TCP при остановке runtime — 22.10.2026
+
+В текущем E:\d2o\datapath\session.c (SHA-256
+39dada3d4fbdaf943bf7b2a788090ab3d16a71065a58c16d39901575247f7187)
+d2k_session_payload_stats отдаёт capture_complete, capture_rejected,
+capture_expired, capture_full. Донорский E:\d2o\datapath\d2kd.c
+(SHA-256 26c9384a693a0513e970823866d98c665da2b31fd2cb2537e59980b569826b08,
+строки 856–879) выводит эти четыре значения при остановке. Исходник тестов
+test_session.c имеет SHA-256
+d9f4bd539d35dc8bd7684b64959bd333769fd5a284ec9832247ef2fbf382736c.
+
+В Rust добавлены TLS-раздельные поля к CaptureStats, учитываемые при
+завершении, отклонении, истечении и переполнении слотов. HoldTable отдаёт
+снимок счётчиков, а r2o-datapath выводит эти TLS-поля на штатном завершении.
+Это сохраняет смысл донора, так как та же Rust-таблица обслуживает HTTP-сборку.
+Тест split ClientHello проверяет, что завершённая TLS-сборка учитывается через
+runtime-объект; тест HTTP-наблюдения проверяет, что HTTP не увеличивает TLS
+счётчик.
+
+REA get_evidence_bundle для SHA текущего session.c вернул
+total_retained_records=0. list_documents завершился provider_unavailable:
+на Windows Ghidra P0 отклоняет ELF, Hopper не поддерживается на Windows, IDA
+не настроен. Повторную декомпиляцию ELF не запускал; новых REA Evidence для
+этой простой диагностической ветви нет. Ранее сохранённые session Evidence
+относятся к другим ветвям и не используются как подтверждение этих полей.
+
+Проверки на ARM64/QEMU: cargo +1.98.0 test -p r2o-datapath --locked —
+255 пройдено, 0 ошибок, 3 capability-теста пропущены штатно;
+cargo +1.98.0 fmt --all -- --check — успешно. MIPS32 GNU release cross-build
+успешен, ELF32 little-endian, 1 249 108 Б; ARMv5te musleabi release cross-build
+успешен, ELF32 little-endian EABI5 soft-float, 1 116 896 Б. На MIPS и ARMv5
+тесты и бинарники не запускались. Физический роутер не проверялся.
+
+Журналы локальные, .rea/ игнорируется Git:
+.rea/r2o-session-capture-stats-arm64.log,
+.rea/r2o-session-capture-stats-mipsel-build.log,
+.rea/r2o-session-capture-stats-armv5-build.log.
+
+Перенесены только четыре runtime-счётчика захвата. Общие причины нагрузки
+reverse/after_hello/late/not_hello, последний байт, sni_next_seg и HTTP
+later/unaligned/open_end этим изменением не закрыты.
