@@ -7,6 +7,16 @@ pub fn r2o_rx_volume_name_count() -> usize {
     R2O_RX_VOLUME_NAMES.lines().count()
 }
 
+/// Имя сети в той же последовательности, которую использует C-планировщик.
+pub fn r2o_rx_volume_name(index: usize) -> Option<&'static str> {
+    R2O_RX_VOLUME_NAMES.lines().nth(index)
+}
+
+/// Число вариантов разреза для уже известного белого имени.
+pub fn r2o_rx_volume_plan_count() -> usize {
+    R2O_RX_VOLUME_SPLITS.len()
+}
+
 /// Построить один TCP-template план для приёма на объёмном RX-обрыве.
 pub fn r2o_rx_volume_plan(variant: usize, name: &str, send_cap: usize) -> Result<String, String> {
     let split = *R2O_RX_VOLUME_SPLITS
@@ -51,7 +61,8 @@ mod tests {
     use r2k_core::plan::{Plan, WIRE_TCP_TEMPLATE};
 
     use super::{
-        R2O_RX_VOLUME_NAMES, r2o_rx_volume_candidate, r2o_rx_volume_name_count, r2o_rx_volume_plan,
+        R2O_RX_VOLUME_NAMES, r2o_rx_volume_candidate, r2o_rx_volume_name, r2o_rx_volume_name_count,
+        r2o_rx_volume_plan,
     };
 
     #[test]
@@ -59,6 +70,9 @@ mod tests {
         assert_eq!(r2o_rx_volume_name_count(), 266);
         assert_eq!(R2O_RX_VOLUME_NAMES.lines().next(), Some("9gag.com"));
         assert_eq!(R2O_RX_VOLUME_NAMES.lines().last(), Some("zoho.com"));
+        assert_eq!(r2o_rx_volume_name(0), Some("9gag.com"));
+        assert_eq!(r2o_rx_volume_name(265), Some("zoho.com"));
+        assert_eq!(r2o_rx_volume_name(266), None);
     }
 
     #[test]

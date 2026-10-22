@@ -1355,6 +1355,35 @@ fn locked_catalog(
 }
 
 #[cfg(unix)]
+fn r2o_discovery_record_network_whitelist(
+    path: &Path,
+    fallback: &Catalog,
+    discovered_name: Option<&str>,
+) -> Result<(), String> {
+    let (_lock, mut catalog) = locked_catalog(path, fallback).map_err(|error| error.to_string())?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_secs() as i64;
+    let network = catalog
+        .network_whitelist
+        .get_or_insert_with(r2o_controller::catalog::NetworkWhitelist::default);
+    if let Some(name) = discovered_name {
+        if !network.name.is_empty() && network.name != name {
+            return Ok(());
+        }
+        network.name = name.to_owned();
+        network.searched = true;
+        network.confirmed_at = Some(now.max(1));
+    } else if network.name.is_empty() {
+        network.searched = true;
+    }
+    catalog
+        .save_atomic(path, now.max(1))
+        .map_err(|error| format!("не удалось сохранить белое имя сети: {error}"))
+}
+
+#[cfg(unix)]
 fn clear_catalog(path: PathBuf) -> Result<(), Box<dyn Error>> {
     let (_lock, _current) = locked_catalog(&path, &Catalog::default())?;
     let updated = std::time::SystemTime::now()
@@ -5034,12 +5063,19 @@ impl DiscoveryWorker {
                     r2o_ech_witness_rx_cut(&target, &selected_config, true, false, fetch)
                 })
             {
+                let network_probe = candidate_catalog.as_ref().is_some_and(|catalog| {
+                    catalog
+                        .network_whitelist
+                        .as_ref()
+                        .is_none_or(|network| network.name.is_empty() && !network.searched)
+                });
+                let mut discovered_network_name = None;
                 let mut next_index = *runner_ech_rx_cursor
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .get(&target)
                     .unwrap_or(&0);
-                let candidate_count = r2o_controller::r2o_rx_volume::r2o_rx_volume_name_count() + 5;
+                let candidate_count = r2o_ech_rx_ladder_candidate_count(network_probe);
                 for _ in 0..R2O_ECH_RX_LADDER_BATCH {
                     if cancel.load(Ordering::Relaxed)
                         || R2O_DISCOVERY_TASK_LIFETIME.saturating_sub(runner_started.elapsed())
@@ -5049,8 +5085,10 @@ impl DiscoveryWorker {
                         break;
                     }
                     let index = next_index;
-                    let candidate = match r2o_controller::r2o_rx_volume::r2o_rx_volume_candidate(
+                    let (candidate, discovered_name) = match r2o_ech_rx_ladder_candidate(
                         index,
+                        network_probe,
+                        white_name,
                         runner_send_cap.load(Ordering::Relaxed),
                     ) {
                         Ok(Some(candidate)) => candidate,
@@ -5058,6 +5096,10 @@ impl DiscoveryWorker {
                         Err(error) => {
                             eprintln!("RX-лестница ECH пропустила план {index}: {error}");
                             next_index = index + 1;
+                            runner_ech_rx_cursor
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .insert(target.clone(), next_index);
                             continue;
                         }
                     };
@@ -5077,6 +5119,7 @@ impl DiscoveryWorker {
                         == R2oFamilyRecoveryDecision::Verified
                     {
                         rx_ladder_plan = Some(candidate);
+                        discovered_network_name = discovered_name;
                         runner_ech_rx_cursor
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -5100,6 +5143,36 @@ impl DiscoveryWorker {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .insert(target.clone(), next_index);
+                }
+                if let Some(name) = discovered_network_name.as_deref() {
+                    if let Some(catalog) = candidate_catalog.as_ref() {
+                        if let Err(error) = r2o_discovery_record_network_whitelist(
+                            &catalog_path,
+                            catalog,
+                            Some(name),
+                        ) {
+                            eprintln!("не удалось сохранить найденное белое имя сети: {error}");
+                        }
+                    }
+                } else if network_probe && next_index >= candidate_count {
+                    runner_ech_rx_cursor
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(&target);
+                    if let Some(catalog) = candidate_catalog.as_ref() {
+                        if let Err(error) =
+                            r2o_discovery_record_network_whitelist(&catalog_path, catalog, None)
+                        {
+                            eprintln!(
+                                "не удалось сохранить исчерпание поиска белого имени: {error}"
+                            );
+                        }
+                    }
+                } else if next_index >= candidate_count {
+                    runner_ech_rx_cursor
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(&target);
                 }
             }
             if !rejected_witnesses.is_empty() {
@@ -5889,6 +5962,36 @@ fn r2o_ech_witness_rx_cut(
         && !fetch.complete
         && fetch.r2o_volume_observation.body_framing_valid
         && fetch.body_bytes >= 8192
+}
+
+#[cfg(unix)]
+fn r2o_ech_rx_ladder_candidate_count(network_probe: bool) -> usize {
+    if network_probe {
+        r2o_controller::r2o_rx_volume::r2o_rx_volume_name_count()
+    } else {
+        r2o_controller::r2o_rx_volume::r2o_rx_volume_plan_count()
+    }
+}
+
+#[cfg(unix)]
+fn r2o_ech_rx_ladder_candidate(
+    index: usize,
+    network_probe: bool,
+    white_name: &str,
+    send_cap: usize,
+) -> Result<Option<(String, Option<String>)>, String> {
+    if network_probe {
+        let Some(name) = r2o_controller::r2o_rx_volume::r2o_rx_volume_name(index) else {
+            return Ok(None);
+        };
+        let plan = r2o_controller::r2o_rx_volume::r2o_rx_volume_plan(0, name, send_cap)?;
+        Ok(Some((plan, Some(name.to_owned()))))
+    } else if index < r2o_controller::r2o_rx_volume::r2o_rx_volume_plan_count() {
+        r2o_controller::r2o_rx_volume::r2o_rx_volume_plan(index, white_name, send_cap)
+            .map(|plan| Some((plan, None)))
+    } else {
+        Ok(None)
+    }
 }
 
 #[cfg(unix)]
@@ -11654,6 +11757,90 @@ mod tests {
         assert!(!super::r2o_ech_witness_rx_cut(
             &target, &config, true, false, &not_cut
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ech_rx_лестница_выбирает_имена_или_пять_разрезов_из_состояния_каталога() {
+        assert_eq!(super::r2o_ech_rx_ladder_candidate_count(true), 266);
+        assert_eq!(
+            super::r2o_ech_rx_ladder_candidate_count(false),
+            r2o_controller::r2o_rx_volume::r2o_rx_volume_plan_count()
+        );
+
+        let (candidate, discovered_name) =
+            super::r2o_ech_rx_ladder_candidate(0, true, "hcaptcha.com", 1492)
+                .unwrap()
+                .unwrap();
+        assert_eq!(discovered_name.as_deref(), Some("9gag.com"));
+        assert_eq!(
+            candidate,
+            r2o_controller::r2o_rx_volume::r2o_rx_volume_plan(0, "9gag.com", 1492).unwrap()
+        );
+        assert!(
+            super::r2o_ech_rx_ladder_candidate(266, true, "hcaptcha.com", 1492)
+                .unwrap()
+                .is_none()
+        );
+
+        let (candidate, discovered_name) =
+            super::r2o_ech_rx_ladder_candidate(0, false, "media.example", 1492)
+                .unwrap()
+                .unwrap();
+        assert_eq!(discovered_name, None);
+        assert_eq!(
+            candidate,
+            r2o_controller::r2o_rx_volume::r2o_rx_volume_plan(0, "media.example", 1492).unwrap()
+        );
+        assert!(
+            super::r2o_ech_rx_ladder_candidate(5, false, "media.example", 1492)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ech_rx_лестница_сохраняет_найденное_имя_и_исчерпание_поиска() {
+        let work = std::env::temp_dir().join(format!(
+            "r2o-network-whitelist-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&work).unwrap();
+        let path = work.join("catalog.json");
+        let fallback = Catalog::default();
+
+        super::r2o_discovery_record_network_whitelist(&path, &fallback, None).unwrap();
+        let searched = Catalog::load(&path).unwrap();
+        let network = searched.network_whitelist.as_ref().unwrap();
+        assert!(network.searched);
+        assert!(network.name.is_empty());
+        assert_eq!(network.confirmed_at, None);
+
+        super::r2o_discovery_record_network_whitelist(&path, &fallback, Some("9gag.com")).unwrap();
+        let confirmed = Catalog::load(&path).unwrap();
+        let network = confirmed.network_whitelist.as_ref().unwrap();
+        assert!(network.searched);
+        assert_eq!(network.name, "9gag.com");
+        assert!(network.confirmed_at.is_some());
+
+        super::r2o_discovery_record_network_whitelist(&path, &fallback, Some("zoho.com")).unwrap();
+        assert_eq!(
+            Catalog::load(&path)
+                .unwrap()
+                .network_whitelist
+                .unwrap()
+                .name,
+            "9gag.com"
+        );
+
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(work.join("catalog.json.lock")).unwrap();
+        std::fs::remove_dir(work).unwrap();
     }
 
     #[cfg(unix)]
