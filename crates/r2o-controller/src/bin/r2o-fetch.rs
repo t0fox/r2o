@@ -134,6 +134,32 @@ fn run() -> Result<i32, String> {
     }
 
     let name = name.ok_or_else(|| "обязателен параметр --name".to_owned())?;
+    if !r2o_quic && wire_len.is_none() {
+        wire_len = Some(
+            if tls12 {
+                r2o_controller::hello::legacy_client_hello(&name)
+            } else {
+                r2o_controller::hello::modern_client_hello(&name)
+            }
+            .map_err(|error| format!("не удалось собрать профиль ClientHello: {error}"))?
+            .len(),
+        );
+    }
+    if let Some(r2o_wait) = r2o_snapshot.filter(|wait| !wait.is_zero()) {
+        wire_len = Some(r2o_fetch_snapshot_wire_len(
+            &name,
+            &r2o_control_path,
+            r2o_wait,
+        )?);
+        if r2o_quic {
+            wire_len = Some(
+                wire_len
+                    .and_then(|length| length.checked_sub(5))
+                    .filter(|length| *length != 0)
+                    .ok_or_else(|| "TCP-снимок короче заголовка TLS-записи".to_owned())?,
+            );
+        }
+    }
     let ip = match ip_raw {
         Some(value) => match value.parse::<IpAddr>() {
             Ok(address) => Some(address),
@@ -173,32 +199,6 @@ fn run() -> Result<i32, String> {
             }
         },
     };
-    if !r2o_quic && wire_len.is_none() {
-        wire_len = Some(
-            if tls12 {
-                r2o_controller::hello::legacy_client_hello(&name)
-            } else {
-                r2o_controller::hello::modern_client_hello(&name)
-            }
-            .map_err(|error| format!("не удалось собрать профиль ClientHello: {error}"))?
-            .len(),
-        );
-    }
-    if let Some(r2o_wait) = r2o_snapshot.filter(|wait| !wait.is_zero()) {
-        wire_len = Some(r2o_fetch_snapshot_wire_len(
-            &name,
-            &r2o_control_path,
-            r2o_wait,
-        )?);
-        if r2o_quic {
-            wire_len = Some(
-                wire_len
-                    .and_then(|length| length.checked_sub(5))
-                    .filter(|length| *length != 0)
-                    .ok_or_else(|| "TCP-снимок короче заголовка TLS-записи".to_owned())?,
-            );
-        }
-    }
     let options = FetchOptions {
         name,
         ip: Some(ip),

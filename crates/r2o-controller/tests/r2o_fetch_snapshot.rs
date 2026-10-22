@@ -51,6 +51,8 @@ fn r2o_fetch_snapshot_берёт_длину_именно_для_запрошен
         .args([
             "--name",
             "example.test",
+            "--ip",
+            "127.0.0.1",
             "--port",
             "0",
             "--wire",

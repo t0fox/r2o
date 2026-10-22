@@ -54,6 +54,64 @@ fn r2o_json_reports_an_empty_address_without_falling_back_to_dns() {
     assert_eq!(value["ip"], serde_json::Value::Null);
 }
 
+#[cfg(unix)]
+#[test]
+fn r2o_fetch_snapshot_precedes_address_validation() {
+    use std::io::Write;
+    use std::os::unix::net::UnixListener;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let work = std::env::temp_dir().join(format!("r2o-fetch-cli-snapshot-{nonce}"));
+    std::fs::create_dir(&work).unwrap();
+    let control = work.join("datapath.sock");
+    let snapshot = r2k_core::control::r2k_snapshot_socket_path(&control);
+    let listener = UnixListener::bind(&snapshot).unwrap();
+    let datapath = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .write_all(&r2k_core::control::encode_greeting(4096).unwrap())
+            .unwrap();
+        let mut body = vec![0; r2k_core::control::KEY_LEN];
+        body[0] = 4;
+        body[37] = 6;
+        body.push(b"example.test".len() as u8);
+        body.extend_from_slice(b"example.test");
+        body.push(r2k_core::control::SHAPE_MODERN);
+        body.extend_from_slice(&1200_u16.to_be_bytes());
+        stream
+            .write_all(
+                &r2k_core::control::encode_frame(r2k_core::control::EVENT_HELLO, &body).unwrap(),
+            )
+            .unwrap();
+    });
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_r2o-fetch"))
+        .args([
+            "--name",
+            "example.test",
+            "--ip",
+            "not-an-ip",
+            "--snapshot=1000",
+        ])
+        .arg("--control")
+        .arg(&control)
+        .output()
+        .expect("запустить r2o-fetch");
+    let error = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        error.contains("снято приветствие браузера: 1200 байт"),
+        "{error}"
+    );
+    assert!(error.contains("неверный IP-адрес"), "{error}");
+    datapath.join().unwrap();
+    std::fs::remove_dir_all(work).unwrap();
+}
+
 #[test]
 fn r2o_json_keeps_quic_stream_bytes_separate_from_http_body_bytes() {
     let output = r2o_run_fetch(&[
