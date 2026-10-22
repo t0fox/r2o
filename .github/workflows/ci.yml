@@ -108,7 +108,10 @@ jobs:
             scripts/test-router-update-auto.sh \
             scripts/test-router-clear-found.sh \
             scripts/test-router-telegram-service.sh; do
-            sh "$test"
+            case "$test" in
+              scripts/test-router-firewall.sh) sudo sh "$test" ;;
+              *) sh "$test" ;;
+            esac
           done
 
   datapath:
@@ -278,8 +281,6 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
-      - name: Загрузить зависимости для автономной MIPS-сборки
-        run: cargo fetch --locked
       - name: Установить QEMU и распаковщик SDK
         run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user zstd binutils curl
       - name: Собрать и проверить OpenWrt MIPS под QEMU
@@ -308,8 +309,6 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
         with:
           target: aarch64-unknown-linux-musl
-      - name: Загрузить зависимости для автономной ARM64-сборки
-        run: cargo fetch --locked
       - name: Установить QEMU и распаковщик SDK
         run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user zstd binutils curl
       - name: Собрать и проверить OpenWrt ARM64 под QEMU

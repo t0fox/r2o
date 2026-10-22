@@ -80,7 +80,7 @@ AR_aarch64_unknown_linux_musl="$ARCHIVER" \
 STAGING_DIR="$SDK" \
 CARGO_PROFILE_RELEASE_PANIC=abort \
     cargo +"$NIGHTLY" -Z build-std=std,panic_abort build \
-        --workspace --release --locked --offline --target "$TARGET"
+        --workspace --release --locked --target "$TARGET"
 
 BIN_DIR="$TARGET_DIR/$TARGET/release"
 for component in r2o-datapath r2o-controller r2o-telegram r2o-panel r2o-manager; do

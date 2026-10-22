@@ -292,6 +292,8 @@ fn direct_route_key(dc: u32, is_media: bool, ip: &str) -> DirectRouteKey {
 struct HedgePermit;
 
 impl HedgePermit {
+    // `try_update` is newer than the workspace's pinned Rust 1.98 toolchain.
+    #[allow(deprecated)]
     fn try_acquire(limit: usize) -> Option<Self> {
         if limit == 0 {
             return None;
