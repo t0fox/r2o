@@ -1926,6 +1926,49 @@ fn r2o_discovery_volume_cut(
 }
 
 #[cfg(unix)]
+fn r2o_discovery_volume_rx_ladder_eligible(
+    rx: &r2o_controller::fetch::R2oFetchVolumeRxResult,
+) -> bool {
+    rx.evidence.is_some()
+}
+
+#[cfg(unix)]
+fn r2o_discovery_partial_rx_inconclusive_reason(
+    observation: &r2o_controller::r2o_volume::R2oVolumeObservation,
+) -> Option<String> {
+    if !r2o_controller::r2o_volume::r2o_volume_rx_partial(observation) {
+        return None;
+    }
+    let wire_partial = observation.status == 0 && observation.rx_tls_record_missing;
+    let (domain, bytes) = if wire_partial {
+        ("TLS wire", observation.rx_tls_wire_bytes)
+    } else {
+        ("HTTP body", observation.body_bytes)
+    };
+    Some(format!(
+        "RX {domain} оборвался после {bytes} байт; повторный объёмный замер не завершён"
+    ))
+}
+
+#[cfg(unix)]
+fn r2o_discovery_mark_partial_rx_inconclusive(
+    outcome: &mut DiscoveryOutcome,
+    observation: &r2o_controller::r2o_volume::R2oVolumeObservation,
+    volume_proven: bool,
+) -> bool {
+    if volume_proven {
+        return false;
+    }
+    let Some(reason) = r2o_discovery_partial_rx_inconclusive_reason(observation) else {
+        return false;
+    };
+    outcome.direct_clear = false;
+    outcome.retry_after = Some(R2O_DISCOVERY_INCOMPLETE_RETRY);
+    outcome.detail.push_str(&format!("; {reason}"));
+    true
+}
+
+#[cfg(unix)]
 fn r2o_discovery_volume_fingerprint(
     tx: &Result<r2o_controller::fetch::R2oFetchVolumeTxResult, String>,
     rx: &r2o_controller::fetch::R2oFetchVolumeRxResult,
@@ -3847,9 +3890,13 @@ const R2O_ECH_RX_LADDER_BATCH: usize = 32;
 #[cfg(unix)]
 const R2O_DISCOVERY_FAILURE_RETRY: std::time::Duration = std::time::Duration::from_secs(120);
 #[cfg(unix)]
+const R2O_DISCOVERY_CHALLENGE_RETRY: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+#[cfg(unix)]
 const R2O_VOLUME_LADDER_BATCH: usize = 32;
 #[cfg(unix)]
 const R2O_VOLUME_SEARCH_CACHE_CAPACITY: usize = 256;
+#[cfg(unix)]
+const R2O_DISCOVERY_CHALLENGE_COOLDOWN_CAPACITY: usize = 128;
 #[cfg(unix)]
 const R2O_DISCOVERY_CLEAR_RETRY_FIRST: std::time::Duration =
     std::time::Duration::from_secs(10 * 60);
@@ -4438,6 +4485,7 @@ struct DiscoveryWorker {
     seen_order: VecDeque<r2o_controller::discovery::DiscoveryTarget>,
     failed_at: HashMap<(String, u8, String), std::time::Instant>,
     failed_retry_after: HashMap<(String, u8, String), std::time::Duration>,
+    challenge_cooldowns: HashMap<(String, u8), std::time::Instant>,
     ech_input_clearable_failures: HashSet<(String, u8, String)>,
     ech_input_names: VecDeque<(String, u8)>,
     clear_streaks: HashMap<(String, u8, String), u8>,
@@ -5675,6 +5723,7 @@ impl DiscoveryWorker {
             seen_order: VecDeque::new(),
             failed_at: HashMap::new(),
             failed_retry_after: HashMap::new(),
+            challenge_cooldowns: HashMap::new(),
             ech_input_clearable_failures: HashSet::new(),
             ech_input_names: VecDeque::new(),
             clear_streaks: HashMap::new(),
@@ -5702,7 +5751,42 @@ impl DiscoveryWorker {
         input.alternate_path = alternate_path;
     }
 
+    fn r2o_discovery_challenge_active(
+        &mut self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        now: std::time::Instant,
+    ) -> bool {
+        self.challenge_cooldowns.retain(|_, until| *until > now);
+        self.challenge_cooldowns
+            .get(&(target.host.clone(), target.family))
+            .is_some_and(|until| *until > now)
+    }
+
+    fn r2o_record_discovery_challenge(
+        &mut self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        now: std::time::Instant,
+    ) {
+        self.challenge_cooldowns.retain(|_, until| *until > now);
+        let key = (target.host.clone(), target.family);
+        if !self.challenge_cooldowns.contains_key(&key)
+            && self.challenge_cooldowns.len() >= R2O_DISCOVERY_CHALLENGE_COOLDOWN_CAPACITY
+            && let Some(oldest) = self
+                .challenge_cooldowns
+                .iter()
+                .min_by_key(|(_, until)| **until)
+                .map(|(key, _)| key.clone())
+        {
+            self.challenge_cooldowns.remove(&oldest);
+        }
+        self.challenge_cooldowns
+            .insert(key, now + R2O_DISCOVERY_CHALLENGE_RETRY);
+    }
+
     fn queue(&mut self, target: r2o_controller::discovery::DiscoveryTarget) -> bool {
+        if self.r2o_discovery_challenge_active(&target, std::time::Instant::now()) {
+            return false;
+        }
         let task_key = r2o_discovery_task_key(&target);
         if let Some(active_target) = self.active.get(&task_key).cloned() {
             let (queue, wake) = &*self.jobs;
@@ -5795,6 +5879,9 @@ impl DiscoveryWorker {
         target: r2o_controller::discovery::DiscoveryTarget,
         client_hello: Vec<u8>,
     ) -> bool {
+        if self.r2o_discovery_challenge_active(&target, std::time::Instant::now()) {
+            return false;
+        }
         if !self.remember_client_snapshot(&target, &client_hello) {
             return false;
         }
@@ -5978,6 +6065,9 @@ impl DiscoveryWorker {
         let outcome = self.outcomes.try_recv().ok()?;
         let task_key = r2o_discovery_task_key(&outcome.target);
         if self.pending_client_snapshots.contains_key(&task_key) {
+            if r2o_discovery_volume_challenge_outcome(&outcome) {
+                self.r2o_record_discovery_challenge(&outcome.target, std::time::Instant::now());
+            }
             if self.active.get(&task_key) == Some(&outcome.target) {
                 self.active.remove(&task_key);
             }
@@ -6006,6 +6096,9 @@ impl DiscoveryWorker {
             else {
                 continue;
             };
+            if self.r2o_discovery_challenge_active(&target, std::time::Instant::now()) {
+                continue;
+            }
             self.seen.remove(&target);
             self.seen_order.retain(|seen| seen != &target);
             let failure_key = r2o_discovery_failure_key(&target);
@@ -6030,6 +6123,9 @@ impl DiscoveryWorker {
     }
 
     fn r2o_complete_outcome(&mut self, mut outcome: DiscoveryOutcome) -> DiscoveryOutcome {
+        if r2o_discovery_volume_challenge_outcome(&outcome) {
+            self.r2o_record_discovery_challenge(&outcome.target, std::time::Instant::now());
+        }
         let task_key = r2o_discovery_task_key(&outcome.target);
         let failure_key = r2o_discovery_failure_key(&outcome.target);
         let ech_input_clearable = !outcome.queue_expired
@@ -6393,6 +6489,15 @@ fn r2o_discovery_volume_recovery(
     };
 
     if !r2o_discovery_volume_cut(&search.tx, &search.rx) {
+        if search.rx.evidence.is_none()
+            && let Some(first) = search.rx.first.as_ref()
+        {
+            r2o_discovery_mark_partial_rx_inconclusive(
+                outcome,
+                &first.r2o_volume_observation,
+                false,
+            );
+        }
         return false;
     }
 
@@ -6467,11 +6572,15 @@ fn r2o_discovery_volume_recovery(
             );
             break;
         };
+        if fetch.cloudflare_challenge {
+            r2o_discovery_stop_volume_search_for_challenge(outcome, target, searches);
+            return true;
+        }
         search.tried_plans.push(candidate.clone());
-        if !applied || fetch.cloudflare_challenge {
-            outcome.detail.push_str(
-                "; сохранённый объёмно-совместимый план не получил точное применение или встретил challenge",
-            );
+        if !applied {
+            outcome
+                .detail
+                .push_str("; сохранённый объёмно-совместимый план не получил точное применение");
         }
     }
     let known_plans_remain = known_plans
@@ -6534,20 +6643,38 @@ fn r2o_discovery_volume_recovery(
                 .push_str("; собственный измеренный план не завершил пробу, повторю его");
             return true;
         };
-        search.tried_plans.push(candidate.to_owned());
-        if !applied || fetch.cloudflare_challenge {
-            outcome.detail.push_str(
-                "; собственный измеренный план не получил точное применение или встретил challenge",
-            );
+        if fetch.cloudflare_challenge {
+            r2o_discovery_stop_volume_search_for_challenge(outcome, target, searches);
+            return true;
         }
+        search.tried_plans.push(candidate.to_owned());
+        if !applied {
+            outcome
+                .detail
+                .push_str("; собственный измеренный план не получил точное применение");
+        }
+    }
+
+    if !r2o_discovery_volume_rx_ladder_eligible(&search.rx) {
+        searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(target);
+        outcome.plan_text = None;
+        outcome.retry_after = Some(R2O_DISCOVERY_INCOMPLETE_RETRY);
+        outcome.detail.push_str(
+            "; подтверждён только исходящий TX-обрыв — RX fake-SNI-лестница не запускается",
+        );
+        return true;
     }
 
     if target.shape != SHAPE_MODERN {
         searches
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(target.clone(), search);
-        outcome.retry_after = Some(R2O_DISCOVERY_FAILURE_RETRY);
+            .remove(target);
+        outcome.plan_text = None;
+        outcome.retry_after = Some(R2O_DISCOVERY_INCOMPLETE_RETRY);
         outcome.detail.push_str(
             "; TLS 1.2 не поддерживает fake-SNI/RX-лестницу, сохранённые совместимые планы исчерпаны",
         );
@@ -6622,9 +6749,13 @@ fn r2o_discovery_volume_recovery(
             ));
             break;
         };
-        if !applied || fetch.cloudflare_challenge {
+        if fetch.cloudflare_challenge {
+            r2o_discovery_stop_volume_search_for_challenge(outcome, target, searches);
+            return true;
+        }
+        if !applied {
             outcome.detail.push_str(&format!(
-                "; проба объёмного плана {index} не получила точное применение или встретила challenge; повторю её"
+                "; проба объёмного плана {index} не получила точное применение; повторю её"
             ));
             break;
         }
@@ -6655,7 +6786,7 @@ fn r2o_discovery_volume_recovery(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(target);
-        outcome.retry_after = Some(R2O_DISCOVERY_FAILURE_RETRY);
+        outcome.retry_after = Some(R2O_DISCOVERY_INCOMPLETE_RETRY);
         outcome
             .detail
             .push_str("; варианты объёмной лестницы исчерпаны без подтверждённого обхода");
@@ -6682,6 +6813,35 @@ fn r2o_discovery_volume_recovery_eligible(outcome: &DiscoveryOutcome) -> bool {
     !outcome.queue_expired
         && outcome.direct_clear
         && matches!(outcome.target.shape, SHAPE_MODERN | SHAPE_LEGACY)
+}
+
+#[cfg(unix)]
+fn r2o_discovery_volume_challenge_outcome(outcome: &DiscoveryOutcome) -> bool {
+    outcome.volume_recovery
+        && !outcome.direct_clear
+        && outcome.plan_text.is_none()
+        && outcome.retry_after == Some(R2O_DISCOVERY_CHALLENGE_RETRY)
+}
+
+#[cfg(unix)]
+fn r2o_discovery_stop_volume_search_for_challenge(
+    outcome: &mut DiscoveryOutcome,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    searches: &std::sync::Mutex<R2oDiscoveryVolumeSearchCache>,
+) {
+    searches
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(target);
+    outcome.direct_clear = false;
+    outcome.plan_text = None;
+    outcome.volume_recovery = true;
+    outcome.volume_fingerprint = None;
+    outcome.volume_box_id = None;
+    outcome.retry_after = Some(R2O_DISCOVERY_CHALLENGE_RETRY);
+    outcome.detail.push_str(
+        "; получен Cloudflare challenge — объёмный перебор остановлен, цель отдыхает 60 минут",
+    );
 }
 
 #[cfg(unix)]
@@ -11693,6 +11853,7 @@ mod tests {
             seen_order: std::collections::VecDeque::new(),
             failed_at: std::collections::HashMap::new(),
             failed_retry_after: std::collections::HashMap::new(),
+            challenge_cooldowns: std::collections::HashMap::new(),
             ech_input_clearable_failures: std::collections::HashSet::new(),
             ech_input_names: std::collections::VecDeque::new(),
             clear_streaks: std::collections::HashMap::new(),
@@ -12769,6 +12930,174 @@ mod tests {
             ..clear
         };
         assert!(!super::r2o_discovery_volume_recovery_eligible(&expired));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unpaired_partial_rx_downgrades_clear_and_uses_incomplete_retry() {
+        use r2o_controller::r2o_volume::{
+            R2oVolumeObservation, R2oVolumeProbeStage, R2oVolumeRxEncoding,
+        };
+
+        let target = DiscoveryTarget {
+            host: "media.example".into(),
+            endpoint: "192.0.2.31:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let mut outcome = DiscoveryOutcome {
+            target: target.clone(),
+            plan_text: None,
+            detail: "прямой замер завершился".into(),
+            queue_expired: false,
+            direct_clear: true,
+            volume_recovery: false,
+            volume_fingerprint: None,
+            volume_box_id: None,
+            retry_after: None,
+        };
+        let body_partial = R2oVolumeObservation {
+            status: 206,
+            body_encoding: R2oVolumeRxEncoding::Identity,
+            body_framing_valid: true,
+            body_has_length: true,
+            body_expected: 24_000,
+            body_bytes: 23_900,
+            ..Default::default()
+        };
+        assert!(super::r2o_discovery_mark_partial_rx_inconclusive(
+            &mut outcome,
+            &body_partial,
+            false,
+        ));
+        assert!(!outcome.direct_clear);
+        assert_eq!(
+            outcome.retry_after,
+            Some(super::R2O_DISCOVERY_INCOMPLETE_RETRY)
+        );
+        assert!(
+            outcome
+                .detail
+                .contains("RX HTTP body оборвался после 23900 байт")
+        );
+
+        let tls_wire_partial = R2oVolumeObservation {
+            stage: R2oVolumeProbeStage::Handshake,
+            name_valid: true,
+            negotiated_tls: Some(0x0303),
+            rx_tls_wire_bytes: 14_005,
+            rx_tls_record_missing: true,
+            ..Default::default()
+        };
+        let mut tls_outcome = DiscoveryOutcome {
+            direct_clear: true,
+            ..outcome
+        };
+        assert!(!super::r2o_discovery_mark_partial_rx_inconclusive(
+            &mut tls_outcome,
+            &tls_wire_partial,
+            true,
+        ));
+        assert!(tls_outcome.direct_clear);
+        assert!(super::r2o_discovery_mark_partial_rx_inconclusive(
+            &mut tls_outcome,
+            &tls_wire_partial,
+            false,
+        ));
+        assert!(!tls_outcome.direct_clear);
+        assert!(
+            tls_outcome
+                .detail
+                .contains("RX TLS wire оборвался после 14005 байт")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tx_volume_cut_does_not_enable_the_rx_fake_sni_ladder() {
+        let tx_only = r2o_controller::fetch::R2oFetchVolumeRxResult::default();
+        assert!(!super::r2o_discovery_volume_rx_ladder_eligible(&tx_only));
+
+        let rx_cut = r2o_controller::fetch::R2oFetchVolumeRxResult {
+            evidence: Some(r2o_controller::r2o_volume::R2oVolumeRxEvidence {
+                domain: r2o_controller::r2o_volume::R2oVolumeRxDomain::HttpBody,
+                cut_kb: 16,
+                expected_kb: 32,
+                cut_packets: 16,
+                compressed_complete: true,
+                reason: "body cut".into(),
+            }),
+            ..Default::default()
+        };
+        assert!(super::r2o_discovery_volume_rx_ladder_eligible(&rx_cut));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn volume_cloudflare_challenge_stops_search_and_cools_down_the_name() {
+        let target = DiscoveryTarget {
+            host: "media.example".into(),
+            endpoint: "192.0.2.31:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let now = std::time::Instant::now();
+        let mut searches = super::R2oDiscoveryVolumeSearchCache::default();
+        searches.insert(
+            target.clone(),
+            super::R2oDiscoveryVolumeSearch {
+                key: super::R2oDiscoveryVolumeSearchKey {
+                    wire_len: None,
+                    send_cap: 1200,
+                    probe_path: "/".into(),
+                    alternate_path: None,
+                    network_probe: false,
+                    white_name: "hcaptcha.com".into(),
+                },
+                measured_at: now,
+                tx: Err("fixture".into()),
+                rx: Default::default(),
+                next_candidate: 4,
+                tried_plans: vec!["known plan".into()],
+            },
+        );
+        let mut outcome = DiscoveryOutcome {
+            target: target.clone(),
+            plan_text: Some("candidate".into()),
+            detail: String::new(),
+            queue_expired: false,
+            direct_clear: true,
+            volume_recovery: false,
+            volume_fingerprint: Some(Default::default()),
+            volume_box_id: Some("box".into()),
+            retry_after: None,
+        };
+
+        let searches = std::sync::Mutex::new(searches);
+        super::r2o_discovery_stop_volume_search_for_challenge(&mut outcome, &target, &searches);
+        assert!(super::r2o_discovery_volume_challenge_outcome(&outcome));
+        assert!(searches.lock().unwrap().entries.is_empty());
+        assert!(outcome.plan_text.is_none());
+        assert!(outcome.volume_fingerprint.is_none());
+        assert!(outcome.volume_box_id.is_none());
+        assert_eq!(
+            outcome.retry_after,
+            Some(super::R2O_DISCOVERY_CHALLENGE_RETRY)
+        );
+
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        worker.r2o_complete_outcome(outcome);
+        let other_address = DiscoveryTarget {
+            endpoint: "192.0.2.32:443".into(),
+            ..target.clone()
+        };
+        assert!(!worker.queue(other_address.clone()));
+
+        worker.challenge_cooldowns.insert(
+            (target.host, target.family),
+            std::time::Instant::now() - std::time::Duration::from_secs(1),
+        );
+        assert!(worker.queue(other_address));
     }
 
     #[cfg(unix)]
@@ -17676,6 +18005,7 @@ mod tests {
                 std::time::Instant::now(),
             )]),
             failed_retry_after: std::collections::HashMap::new(),
+            challenge_cooldowns: std::collections::HashMap::new(),
             ech_input_clearable_failures: std::collections::HashSet::new(),
             ech_input_names: std::collections::VecDeque::new(),
             clear_streaks: std::collections::HashMap::new(),
