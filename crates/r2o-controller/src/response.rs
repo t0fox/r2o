@@ -2,7 +2,7 @@
 
 use std::fs::File;
 use std::io::{self, Read};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -258,12 +258,60 @@ pub fn probe_https_name(host: &str, address: SocketAddr, mark: Option<u32>) -> b
 }
 
 fn https_client_config() -> std::sync::Arc<rustls::ClientConfig> {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let verifier = HttpsProbeVerifier {
+        algorithms: rustls::crypto::ring::default_provider().signature_verification_algorithms,
+    };
     let config = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
+        .dangerous()
+        .with_custom_certificate_verifier(std::sync::Arc::new(verifier))
         .with_no_client_auth();
     std::sync::Arc::new(config)
+}
+
+#[derive(Debug)]
+struct HttpsProbeVerifier {
+    algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
+}
+
+impl rustls::client::danger::ServerCertVerifier for HttpsProbeVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        // The donor classifies leaf SANs without a trust store; TLS signatures remain verified.
+        if !https_certificate_der_is_parseable(end_entity.as_ref()) {
+            return Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::BadEncoding,
+            ));
+        }
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        signature: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, signature, &self.algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        signature: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, signature, &self.algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.algorithms.supported_schemes()
+    }
 }
 
 fn https_connection(
@@ -280,6 +328,48 @@ fn https_certificate_der_is_parseable(der: &[u8]) -> bool {
         x509_parser::parse_x509_certificate(der),
         Ok((remaining, _)) if remaining.is_empty()
     )
+}
+
+fn https_certificate_name_matches(der: &[u8], host: &str) -> Option<bool> {
+    let (_, certificate) = x509_parser::parse_x509_certificate(der).ok()?;
+    let alternative_names = certificate
+        .tbs_certificate
+        .subject_alternative_name()
+        .ok()??;
+    let address = host.parse::<IpAddr>().ok();
+    let mut has_supported_name = false;
+    for name in &alternative_names.value.general_names {
+        match name {
+            x509_parser::extensions::GeneralName::DNSName(pattern) => {
+                has_supported_name = true;
+                if address.is_none() && https_dns_name_matches(pattern, host) {
+                    return Some(true);
+                }
+            }
+            x509_parser::extensions::GeneralName::IPAddress(bytes) => {
+                has_supported_name = true;
+                let matches = match address {
+                    Some(IpAddr::V4(address)) => *bytes == address.octets(),
+                    Some(IpAddr::V6(address)) => *bytes == address.octets(),
+                    None => false,
+                };
+                if matches {
+                    return Some(true);
+                }
+            }
+            _ => {}
+        }
+    }
+    has_supported_name.then_some(false)
+}
+
+fn https_dns_name_matches(pattern: &str, host: &str) -> bool {
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        return host
+            .split_once('.')
+            .is_some_and(|(label, rest)| !label.is_empty() && rest.eq_ignore_ascii_case(suffix));
+    }
+    pattern.eq_ignore_ascii_case(host)
 }
 
 fn https_socket(
@@ -415,10 +505,11 @@ pub fn probe_https_state(host: &str, address: SocketAddr, mark: Option<u32>) -> 
     else {
         return HttpsProbeState::Unconfirmed;
     };
-    if !https_certificate_der_is_parseable(leaf.as_ref()) {
-        return HttpsProbeState::Unconfirmed;
+    match https_certificate_name_matches(leaf.as_ref(), host) {
+        Some(true) => HttpsProbeState::Served,
+        Some(false) => HttpsProbeState::OtherName,
+        None => HttpsProbeState::Unconfirmed,
     }
-    HttpsProbeState::Served
 }
 
 fn get_socket_mark(fd: libc::c_int) -> io::Result<libc::c_int> {
@@ -1058,7 +1149,9 @@ pub fn decide(target: i32, control: i32, unmeasured: i32, repeats: i32) -> Respo
 
 #[cfg(test)]
 mod x509_tests {
-    use super::https_certificate_der_is_parseable;
+    use super::{
+        https_certificate_der_is_parseable, https_certificate_name_matches, https_dns_name_matches,
+    };
 
     #[test]
     fn r2o_tls_измеритель_разбирает_сертификат_через_x509_parser() {
@@ -1069,5 +1162,38 @@ mod x509_tests {
         assert!(https_certificate_der_is_parseable(&der));
         assert!(!https_certificate_der_is_parseable(&der[..der.len() - 1]));
         assert!(!https_certificate_der_is_parseable(&[]));
+    }
+
+    #[test]
+    fn https_probe_matches_only_a_single_donor_wildcard_label() {
+        assert!(https_dns_name_matches("*.example.test", "a.example.test"));
+        assert!(!https_dns_name_matches("*.example.test", "example.test"));
+        assert!(!https_dns_name_matches(
+            "*.example.test",
+            "a.b.example.test"
+        ));
+        assert!(https_dns_name_matches("EXAMPLE.test", "example.TEST"));
+    }
+
+    #[test]
+    fn https_probe_matches_ip_subject_alternative_names() {
+        let mut parameters = rcgen::CertificateParams::default();
+        parameters.subject_alt_names =
+            vec![rcgen::SanType::IpAddress("192.0.2.1".parse().unwrap())];
+        let certificate = rcgen::Certificate::from_params(parameters).unwrap();
+        let der = certificate.serialize_der().unwrap();
+
+        assert_eq!(
+            https_certificate_name_matches(&der, "192.0.2.1"),
+            Some(true)
+        );
+        assert_eq!(
+            https_certificate_name_matches(&der, "192.0.2.2"),
+            Some(false)
+        );
+        assert_eq!(
+            https_certificate_name_matches(&der, "example.test"),
+            Some(false)
+        );
     }
 }

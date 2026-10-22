@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener};
 use std::thread;
 use std::time::Duration;
 
@@ -13,6 +13,39 @@ fn record(kind: u8, payload: &[u8]) -> Vec<u8> {
     output.extend_from_slice(&(payload.len() as u16).to_be_bytes());
     output.extend_from_slice(payload);
     output
+}
+
+fn self_signed_tls_server(name: &str) -> (SocketAddr, thread::JoinHandle<()>) {
+    let certificate = rcgen::generate_simple_self_signed(vec![name.to_owned()]).unwrap();
+    let cert = rustls::pki_types::CertificateDer::from(certificate.serialize_der().unwrap());
+    let key = rustls::pki_types::PrivatePkcs8KeyDer::from(certificate.serialize_private_key_der());
+    let config = std::sync::Arc::new(
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert], key.into())
+            .unwrap(),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut connection =
+                rustls::ServerConnection::new(std::sync::Arc::clone(&config)).unwrap();
+            while connection.is_handshaking() {
+                if connection.complete_io(&mut stream).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    (address, server)
 }
 
 #[test]
@@ -31,6 +64,28 @@ fn https_probe_does_not_accept_a_plain_http_listener() {
         HttpsProbeState::TlsBlocked
     );
     assert!(!probe_https_name("example.test", address, Some(0)));
+    server.join().unwrap();
+}
+
+#[test]
+fn https_probe_matches_the_leaf_name_without_requiring_a_trust_chain() {
+    let (address, server) = self_signed_tls_server("example.test");
+
+    assert_eq!(
+        probe_https_state("example.test", address, Some(0)),
+        HttpsProbeState::Served
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn https_probe_classifies_a_different_leaf_name_after_tls() {
+    let (address, server) = self_signed_tls_server("other.test");
+
+    assert_eq!(
+        probe_https_state("example.test", address, Some(0)),
+        HttpsProbeState::OtherName
+    );
     server.join().unwrap();
 }
 
