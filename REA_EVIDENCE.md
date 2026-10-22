@@ -6758,3 +6758,23 @@ REA был проверен в этой итерации. `list_documents` от�
 Зависимости: `x509-parser` 0.18.1 уже подключён к контроллеру без включённых криптографических функций; `etherparse` 0.21.0, `tls-parser` 0.12.2 и `proptest` 1.12.0 уже подключены в соответствующих пакетах. Криптография использует существующий `ring` через rustls/Quinn и Telegram; новые криптографические зависимости не добавлялись.
 
 Локальные журналы, игнорируемые Git: `.rea/r2o-tcp-payload-stats-20261022-043734.log`, `.rea/r2o-tcp-payload-stats-datapath-arm64-final.log`, `.rea/r2o-tcp-payload-stats-workspace-arm64-final.log`, `.rea/r2o-tcp-payload-stats-aarch64-release-final.log`, `.rea/r2o-tcp-payload-stats-mipsel-release-final.log` и `.rea/r2o-tcp-payload-stats-armv5-release-final.log`; нормализованные C/Rust результаты находятся в `.rea/r2o-tcp-payload-stats-c.normalized` и `.rea/r2o-tcp-payload-stats-rust.normalized`.
+
+## ECH-вход снимает cooldown незавершённого профильного Discovery — 22.10.2026
+
+### Донор и границы поведения
+
+Текущий `E:\d2o\core\sched.c`, SHA-256 `1de9feaab19dcea1e493aea068295470cf3143adf83157b57663f1098132ae8a`, в `on_shape` (строки 8002–8020) распознаёт ECH ClientHello по байтам и сохраняет его в кэш ёмкостью восемь записей по имени и семейству. Только при новом admission вызывается `cooldown_clear_nonchallenge(s, name, 6, family, 1, 1)`: снимается исчерпанный cooldown обычного профиля, с сохранением ECH и challenge-состояний. Снимок ECH затем записывается в выбранный слот.
+
+Донорский `E:\d2o\core\test_sched.c`, SHA-256 `a67f87e09a7fd93ed735b52f361e78590b9ce40679ab95e300accf0a3e9d51a3`, свежо пересобран как ARM64 и полный `test_sched` выполнен под QEMU. Результат: `планировщик: все проверки прошли`. Это общий регрессионный прогон планировщика; отдельного утверждения, что тест донора изолированно проверяет именно очистку данного cooldown, нет.
+
+### REA и Rust-перенос
+
+Переиспользовано сохранённое REA/Clang 19 AST `core/sched.c:on_shape` из `.rea/r2o-donor-on-shape-clang-ast-20261021.log` для того же SHA `sched.c`. Оно ранее использовалось для сверки обработки снимков `on_shape`; нужный вызов очистки и его параметры дополнительно сверены с актуальным исходником выше. Предыдущая попытка REA `function on_shape` завершилась `target_format_unsupported` на ELF. Повторная декомпиляция не запускалась: доступный Windows Ghidra-провайдер по-прежнему не принимает этот ELF, а уже сохранённый AST и исходник доступны. Поэтому для точной ветви cooldown новая REA-декомпиляция не заявляется.
+
+В `crates/r2o-controller/src/main.rs` добавлен ограниченный admission-кэш `(имя, семейство)` на восемь значений и набор ключей только для активных отказов с `R2O_DISCOVERY_INCOMPLETE_RETRY`, без плана, прямого CLEAR и ECH-формы. Первый корректный ECH ClientHello удаляет подходящие профильные cooldown и dedupe-ключи. Истечение и иные штатные удаления очищают маркеры вместе с отказом. Новые тесты `новый_ech_clienthello_снимает_один_старый_профильный_отказ` и `новый_ech_clienthello_сохраняет_паузы_challenge_ech_и_clear` проверяют однократность и сохранение остальных классов cooldown.
+
+Красный этап TDD: до реализации корректный ECH ClientHello не ставил новый snapshot в Discovery. После исправления fixture оба теста прошли. Первичный параллельный полный controller-suite один раз не уложился в существующий порог тайминга (245 мс вместо 250 мс); тот тест отдельно и весь controller-suite последовательно прошли. Полный ARM64/QEMU workspace: 1 036 passed, 0 failed, 4 ignored, 73 suites. `cargo fmt --check` и `git diff --check` прошли.
+
+Release cross-build без исполнения: AArch64 GNU controller/datapath — 4 920 328 / 856 784 Б; MIPS32 GNU — 6 558 544 / 1 249 108 Б; ARMv5te musl EABI5 — 4 918 208 / 1 116 896 Б. Для MIPS использована nightly-стандартная библиотека. MIPS и ARMv5 — только сборка; проверка тестами и запуск бинарников не выполнялись. Физический маршрутизатор не проверялся.
+
+Журналы локальны и игнорируются Git: `.rea/r2o-ech-input-cooldown-focused-arm64.log`, `.rea/r2o-ech-input-cooldown-controller-arm64.log`, `.rea/r2o-ech-input-cooldown-controller-serial-arm64.log`, `.rea/r2o-ech-input-cooldown-timing-isolated-arm64.log`, `.rea/r2o-ech-input-cooldown-workspace-arm64.log`, `.rea/r2o-ech-input-cooldown-donor-sched-arm64.log`, `.rea/r2o-ech-input-cooldown-aarch64-release.log`, `.rea/r2o-ech-input-cooldown-mipsel-release.log` и `.rea/r2o-ech-input-cooldown-armv5-release.log`.

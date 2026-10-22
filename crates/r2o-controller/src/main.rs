@@ -2800,6 +2800,8 @@ const R2O_DISCOVERY_WORKER_COUNT: usize = R2O_AUTOMATED_MEASUREMENT_SLOTS;
 #[cfg(unix)]
 const R2O_DISCOVERY_TASK_LIFETIME: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 #[cfg(unix)]
+const R2O_DISCOVERY_ECH_INPUT_CAPACITY: usize = 8;
+#[cfg(unix)]
 const R2O_ECH_RX_LADDER_BATCH: usize = 32;
 #[cfg(unix)]
 const R2O_DISCOVERY_FAILURE_RETRY: std::time::Duration = std::time::Duration::from_secs(120);
@@ -3159,6 +3161,8 @@ struct DiscoveryWorker {
     seen_order: VecDeque<r2o_controller::discovery::DiscoveryTarget>,
     failed_at: HashMap<(String, u8, String), std::time::Instant>,
     failed_retry_after: HashMap<(String, u8, String), std::time::Duration>,
+    ech_input_clearable_failures: HashSet<(String, u8, String)>,
+    ech_input_names: VecDeque<(String, u8)>,
     clear_streaks: HashMap<(String, u8, String), u8>,
     client_snapshot_targets: HashSet<r2o_controller::discovery::DiscoveryTarget>,
     pending_client_snapshots:
@@ -4212,6 +4216,8 @@ impl DiscoveryWorker {
             seen_order: VecDeque::new(),
             failed_at: HashMap::new(),
             failed_retry_after: HashMap::new(),
+            ech_input_clearable_failures: HashSet::new(),
+            ech_input_names: VecDeque::new(),
             clear_streaks: HashMap::new(),
             client_snapshot_targets: HashSet::new(),
             pending_client_snapshots: HashMap::new(),
@@ -4261,6 +4267,7 @@ impl DiscoveryWorker {
             {
                 self.failed_at.remove(&expired_key);
                 self.failed_retry_after.remove(&expired_key);
+                self.ech_input_clearable_failures.remove(&expired_key);
                 self.clear_streaks.remove(&expired_key);
             }
         }
@@ -4286,6 +4293,7 @@ impl DiscoveryWorker {
             self.seen_order.retain(|seen| seen != &target);
             self.failed_at.remove(&failure_key);
             self.failed_retry_after.remove(&failure_key);
+            self.ech_input_clearable_failures.remove(&failure_key);
             false
         }
     }
@@ -4308,6 +4316,9 @@ impl DiscoveryWorker {
             || Trigger::tls_client_hello(&target.host, &client_hello).is_err()
         {
             return false;
+        }
+        if observed_shape == SHAPE_ECH_TCP && self.r2o_record_ech_input(&target) {
+            self.r2o_clear_ech_profile_failures(&target.host, target.family);
         }
         let task_key = r2o_discovery_task_key(&target);
         if self.active.contains_key(&task_key) {
@@ -4340,6 +4351,39 @@ impl DiscoveryWorker {
         true
     }
 
+    fn r2o_record_ech_input(
+        &mut self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+    ) -> bool {
+        if self
+            .ech_input_names
+            .iter()
+            .any(|(name, family)| name == &target.host && *family == target.family)
+        {
+            return false;
+        }
+        if self.ech_input_names.len() == R2O_DISCOVERY_ECH_INPUT_CAPACITY {
+            self.ech_input_names.pop_front();
+        }
+        self.ech_input_names
+            .push_back((target.host.clone(), target.family));
+        true
+    }
+
+    fn r2o_clear_ech_profile_failures(&mut self, host: &str, family: u8) {
+        let failures = self
+            .ech_input_clearable_failures
+            .iter()
+            .filter(|(failed_host, failed_family, _)| {
+                failed_host == host && *failed_family == family
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for failure in failures {
+            self.r2o_clear_failed_endpoint(&failure);
+        }
+    }
+
     fn take_client_snapshot_provenance(
         &mut self,
         target: &r2o_controller::discovery::DiscoveryTarget,
@@ -4359,6 +4403,7 @@ impl DiscoveryWorker {
         let failure_key = r2o_discovery_failure_key(&target);
         self.failed_at.remove(&failure_key);
         self.failed_retry_after.remove(&failure_key);
+        self.ech_input_clearable_failures.remove(&failure_key);
         self.queue(target)
     }
 
@@ -4388,6 +4433,7 @@ impl DiscoveryWorker {
             .retain(|seen| &r2o_discovery_failure_key(seen) != failure_key);
         self.failed_at.remove(failure_key);
         self.failed_retry_after.remove(failure_key);
+        self.ech_input_clearable_failures.remove(failure_key);
     }
 
     fn is_active(&self, target: &r2o_controller::discovery::DiscoveryTarget) -> bool {
@@ -4418,6 +4464,7 @@ impl DiscoveryWorker {
             let failure_key = r2o_discovery_failure_key(target);
             self.failed_at.remove(&failure_key);
             self.failed_retry_after.remove(&failure_key);
+            self.ech_input_clearable_failures.remove(&failure_key);
         }
         expired
     }
@@ -4436,6 +4483,7 @@ impl DiscoveryWorker {
                 r2o_discovery_failure_key(&self.pending_client_snapshots.get(&task_key)?.0);
             self.failed_at.remove(&failure_key);
             self.failed_retry_after.remove(&failure_key);
+            self.ech_input_clearable_failures.remove(&failure_key);
             self.r2o_schedule_pending_client_snapshots();
             return None;
         }
@@ -4459,6 +4507,7 @@ impl DiscoveryWorker {
             let failure_key = r2o_discovery_failure_key(&target);
             self.failed_at.remove(&failure_key);
             self.failed_retry_after.remove(&failure_key);
+            self.ech_input_clearable_failures.remove(&failure_key);
             self.client_hellos
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -4479,6 +4528,16 @@ impl DiscoveryWorker {
     fn r2o_complete_outcome(&mut self, mut outcome: DiscoveryOutcome) -> DiscoveryOutcome {
         let task_key = r2o_discovery_task_key(&outcome.target);
         let failure_key = r2o_discovery_failure_key(&outcome.target);
+        let ech_input_clearable = !outcome.queue_expired
+            && outcome.plan_text.is_none()
+            && !outcome.direct_clear
+            && outcome.target.shape != SHAPE_ECH_TCP
+            && outcome.retry_after == Some(R2O_DISCOVERY_INCOMPLETE_RETRY);
+        self.ech_input_clearable_failures.remove(&failure_key);
+        if ech_input_clearable {
+            self.ech_input_clearable_failures
+                .insert(failure_key.clone());
+        }
         self.client_hellos
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -4498,6 +4557,7 @@ impl DiscoveryWorker {
             self.seen_order.retain(|seen| seen != &outcome.target);
             self.failed_at.remove(&failure_key);
             self.failed_retry_after.remove(&failure_key);
+            self.ech_input_clearable_failures.remove(&failure_key);
         } else if outcome.plan_text.is_none() && self.seen.contains(&outcome.target) {
             self.failed_at
                 .insert(failure_key.clone(), std::time::Instant::now());
@@ -4509,6 +4569,7 @@ impl DiscoveryWorker {
         } else {
             self.failed_at.remove(&failure_key);
             self.failed_retry_after.remove(&failure_key);
+            self.ech_input_clearable_failures.remove(&failure_key);
         }
         outcome
     }
@@ -8630,8 +8691,8 @@ mod tests {
         BindingContext, COMMAND_DEL_NAME_PROBE, COMMAND_DEL_VOICE_ADDR_PROBE, COMMAND_SET_NAME,
         COMMAND_SET_NAME_PROBE, COMMAND_SET_TCP_STALL_BUDGETS, COMMAND_SET_VOICE_ADDR,
         EVENT_APPLIED, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, Frame, HelloEvent,
-        HttpResponseEvent, KEY_LEN, SHAPE_HTTP, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, encode_ack,
-        encode_ack_for_trial, encode_frame, encode_greeting, read_frame,
+        HttpResponseEvent, KEY_LEN, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_MODERN, SHAPE_QUIC,
+        SHAPE_VOICE, encode_ack, encode_ack_for_trial, encode_frame, encode_greeting, read_frame,
     };
     use r2k_core::plan::{PLAN_MAGIC, Plan};
     use r2o_controller::catalog::{Binding, BoxRecord, Catalog, Fingerprint, Signal};
@@ -8651,6 +8712,192 @@ mod tests {
             "../../r2k-core/tests/fixtures/quic_v1_initial.bin"
         )[..]])
         .unwrap()
+    }
+
+    fn r2o_test_tls_ech_client_hello() -> Vec<u8> {
+        let mut handshake = include_bytes!("../tests/fixtures/r2o_tls13_client_hello.bin").to_vec();
+        let mut offset = 4 + 2 + 32;
+        offset += 1 + usize::from(handshake[offset]);
+        let cipher_suites = usize::from(u16::from_be_bytes([
+            handshake[offset],
+            handshake[offset + 1],
+        ]));
+        offset += 2 + cipher_suites;
+        offset += 1 + usize::from(handshake[offset]);
+        let extensions_length_offset = offset;
+        let extensions_length = usize::from(u16::from_be_bytes([
+            handshake[offset],
+            handshake[offset + 1],
+        ]));
+        let insert_at = offset + 2 + extensions_length;
+        let ech_extension = [0xfe, 0x0d, 0, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0xaa, 0xbb];
+        handshake.splice(insert_at..insert_at, ech_extension);
+        handshake[extensions_length_offset..extensions_length_offset + 2]
+            .copy_from_slice(&((extensions_length + ech_extension.len()) as u16).to_be_bytes());
+        let handshake_length = (handshake.len() - 4) as u32;
+        handshake[1] = (handshake_length >> 16) as u8;
+        handshake[2] = (handshake_length >> 8) as u8;
+        handshake[3] = handshake_length as u8;
+
+        let mut record = vec![
+            0x16,
+            0x03,
+            0x01,
+            (handshake.len() >> 8) as u8,
+            handshake.len() as u8,
+        ];
+        record.extend_from_slice(&handshake);
+        assert!(r2k_core::tls::parse(&record).ech_offer);
+        assert!(super::Trigger::tls_client_hello("example.com", &record).is_ok());
+        record
+    }
+
+    fn r2o_test_discovery_worker_without_threads() -> super::DiscoveryWorker {
+        let (_sender, outcomes) = std::sync::mpsc::sync_channel(8);
+        super::DiscoveryWorker {
+            jobs: std::sync::Arc::new((
+                std::sync::Mutex::new(super::R2oDiscoveryQueue::default()),
+                std::sync::Condvar::new(),
+            )),
+            client_hellos: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            active_cancels: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            outcomes,
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            seen: std::collections::HashSet::new(),
+            seen_order: std::collections::VecDeque::new(),
+            failed_at: std::collections::HashMap::new(),
+            failed_retry_after: std::collections::HashMap::new(),
+            ech_input_clearable_failures: std::collections::HashSet::new(),
+            ech_input_names: std::collections::VecDeque::new(),
+            clear_streaks: std::collections::HashMap::new(),
+            client_snapshot_targets: std::collections::HashSet::new(),
+            pending_client_snapshots: std::collections::HashMap::new(),
+            active: std::collections::HashMap::new(),
+            threads: Vec::new(),
+        }
+    }
+
+    fn r2o_test_record_failed_discovery(
+        worker: &mut super::DiscoveryWorker,
+        target: DiscoveryTarget,
+        retry_after: std::time::Duration,
+        direct_clear: bool,
+    ) {
+        worker.seen.insert(target.clone());
+        worker.seen_order.push_back(target.clone());
+        worker.r2o_complete_outcome(DiscoveryOutcome {
+            target,
+            plan_text: None,
+            detail: "измерение завершено без классификации".into(),
+            queue_expired: false,
+            direct_clear,
+            retry_after: Some(retry_after),
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn новый_ech_clienthello_снимает_один_старый_профильный_отказ() {
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        let profile = DiscoveryTarget {
+            host: "example.com".into(),
+            endpoint: "198.51.100.10:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let failure_key = super::r2o_discovery_failure_key(&profile);
+        r2o_test_record_failed_discovery(
+            &mut worker,
+            profile,
+            super::R2O_DISCOVERY_INCOMPLETE_RETRY,
+            false,
+        );
+
+        let mut ech_target = DiscoveryTarget {
+            host: "example.com".into(),
+            endpoint: "198.51.100.10:443".into(),
+            family: 4,
+            shape: SHAPE_ECH_TCP,
+        };
+        let hello = r2o_test_tls_ech_client_hello();
+        assert!(worker.queue_client_snapshot(ech_target.clone(), hello.clone()));
+        assert!(!worker.failed_at.contains_key(&failure_key));
+
+        worker.jobs.0.lock().unwrap().entries.clear();
+        worker
+            .active
+            .remove(&super::r2o_discovery_task_key(&ech_target));
+        worker.seen.remove(&ech_target);
+        worker.seen_order.retain(|seen| seen != &ech_target);
+        ech_target.shape = SHAPE_MODERN;
+        r2o_test_record_failed_discovery(
+            &mut worker,
+            ech_target,
+            super::R2O_DISCOVERY_INCOMPLETE_RETRY,
+            false,
+        );
+
+        let ech_target = DiscoveryTarget {
+            host: "example.com".into(),
+            endpoint: "198.51.100.10:443".into(),
+            family: 4,
+            shape: SHAPE_ECH_TCP,
+        };
+        assert!(!worker.queue_client_snapshot(ech_target, hello));
+        assert!(worker.failed_at.contains_key(&failure_key));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn новый_ech_clienthello_сохраняет_паузы_challenge_ech_и_clear() {
+        let hello = r2o_test_tls_ech_client_hello();
+        let cases = [
+            (
+                SHAPE_MODERN,
+                std::time::Duration::from_secs(120),
+                false,
+                "антибот-проверка",
+            ),
+            (
+                SHAPE_ECH_TCP,
+                super::R2O_DISCOVERY_INCOMPLETE_RETRY,
+                false,
+                "ECH",
+            ),
+            (
+                SHAPE_MODERN,
+                super::R2O_DISCOVERY_CLEAR_RETRY_FIRST,
+                true,
+                "прямой CLEAR",
+            ),
+        ];
+        for (shape, retry_after, direct_clear, reason) in cases {
+            let mut worker = r2o_test_discovery_worker_without_threads();
+            let failed = DiscoveryTarget {
+                host: "example.com".into(),
+                endpoint: "198.51.100.10:443".into(),
+                family: 4,
+                shape,
+            };
+            let failure_key = super::r2o_discovery_failure_key(&failed);
+            r2o_test_record_failed_discovery(&mut worker, failed, retry_after, direct_clear);
+
+            let ech_target = DiscoveryTarget {
+                host: "example.com".into(),
+                endpoint: "198.51.100.10:443".into(),
+                family: 4,
+                shape: SHAPE_ECH_TCP,
+            };
+            assert!(
+                !worker.queue_client_snapshot(ech_target, hello.clone()),
+                "ECH-вход не должен снимать паузу {reason}"
+            );
+            assert!(worker.failed_at.contains_key(&failure_key));
+        }
     }
 
     #[test]
@@ -13485,6 +13732,8 @@ mod tests {
                 std::time::Instant::now(),
             )]),
             failed_retry_after: std::collections::HashMap::new(),
+            ech_input_clearable_failures: std::collections::HashSet::new(),
+            ech_input_names: std::collections::VecDeque::new(),
             clear_streaks: std::collections::HashMap::new(),
             active: std::collections::HashMap::new(),
             threads: Vec::new(),
