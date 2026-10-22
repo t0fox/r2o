@@ -1178,6 +1178,63 @@ fn group_path(transport: u8, path: &str) -> &str {
 }
 
 #[cfg(unix)]
+fn r2o_public_resource_ip(address: std::net::IpAddr) -> bool {
+    match address {
+        std::net::IpAddr::V4(address) => {
+            let [first, second, _, _] = address.octets();
+            first != 0
+                && first != 10
+                && first != 127
+                && first < 224
+                && !(first == 169 && second == 254)
+                && !(first == 192 && second == 168)
+                && !(first == 172 && (16..=31).contains(&second))
+                && !(first == 100 && (64..=127).contains(&second))
+        }
+        std::net::IpAddr::V6(address) => address.octets()[0] & 0xe0 == 0x20,
+    }
+}
+
+#[cfg(unix)]
+fn r2o_target_confirmed_probe_path(
+    catalog: &Catalog,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+) -> String {
+    let Ok(endpoint) = target.endpoint.parse::<std::net::SocketAddr>() else {
+        return "/".into();
+    };
+    if endpoint.port() != 443
+        || target.host.parse::<std::net::IpAddr>().is_ok()
+        || !r2o_public_resource_ip(endpoint.ip())
+    {
+        return "/".into();
+    }
+    catalog
+        .boxes
+        .iter()
+        .flat_map(|box_record| &box_record.bindings)
+        .filter(|binding| {
+            binding.enabled
+                && binding.level >= 3
+                && binding.kind == "name"
+                && binding.target == target.host
+                && binding.transport == 6
+                && binding.family == target.family
+                && binding.shape == target.shape
+                && r2o_controller::r2o_resource::r2o_resource_path_ok(&binding.probe_path)
+        })
+        .reduce(|best, binding| {
+            if binding.confirmed > best.confirmed {
+                binding
+            } else {
+                best
+            }
+        })
+        .map(|binding| binding.probe_path.clone())
+        .unwrap_or_else(|| "/".into())
+}
+
+#[cfg(unix)]
 fn domain_member(name: &str, suffix: &str) -> bool {
     name == suffix
         || name
@@ -1190,14 +1247,24 @@ fn matching_domain_group<'a>(
     catalog: &'a Catalog,
     target: &r2o_controller::discovery::DiscoveryTarget,
 ) -> Option<&'a r2o_controller::catalog::DomainGroup> {
+    let selected_path = r2o_target_confirmed_probe_path(catalog, target);
     let key = GroupKey {
         transport: 6,
         family: target.family,
         shape: target.shape,
+        probe_path: if selected_path == "/" {
+            String::new()
+        } else {
+            selected_path
+        },
         ..GroupKey::default()
     };
     let domain_state = catalog.domain_state.as_ref()?;
     let group = domain_state.match_domain(&target.host, &key)?;
+    let probe_path = group_path(group.key.transport, &group.key.probe_path);
+    if probe_path != "/" && !r2o_controller::r2o_resource::r2o_resource_path_ok(probe_path) {
+        return None;
+    }
     let groups = &domain_state.groups;
     if groups.iter().any(|other| {
         other.suffix == group.suffix
@@ -1297,6 +1364,7 @@ fn matching_domain_recovery_candidates(
                     plan_id: plan.id,
                     plan_text: saved_plan.text.clone(),
                     group_plan: group_pass,
+                    probe_path: group_path(group.key.transport, &group.key.probe_path).into(),
                 });
                 break;
             }
@@ -1697,6 +1765,7 @@ struct R2oFamilyRecoveryCandidate {
     plan_id: [u8; 16],
     plan_text: String,
     group_plan: bool,
+    probe_path: String,
 }
 
 #[cfg(unix)]
@@ -1871,6 +1940,7 @@ fn r2o_confirm_discovery_outcome(
 fn r2o_family_recovery_fetch(
     target: &r2o_controller::discovery::DiscoveryTarget,
     mark: Option<u32>,
+    probe_path: &str,
 ) -> Result<r2o_controller::fetch::FetchResult, String> {
     let endpoint = target
         .endpoint
@@ -1880,7 +1950,7 @@ fn r2o_family_recovery_fetch(
         name: target.host.clone(),
         ip: Some(endpoint.ip()),
         port: endpoint.port(),
-        path: "/".into(),
+        path: probe_path.into(),
         deadline: std::time::Duration::from_secs(8),
         tls12: target.shape == SHAPE_LEGACY,
         wire_len: None,
@@ -1916,7 +1986,7 @@ fn r2o_family_recovery_run(
         }
         outcome.plan_id = candidate.plan_id;
         let trial = if candidate.group_plan {
-            let result = r2o_family_recovery_fetch(&task.target, task.mark);
+            let result = r2o_family_recovery_fetch(&task.target, task.mark, &candidate.probe_path);
             let applied = r2o_collect_controller_applied_events(
                 commands,
                 [0; 16],
@@ -2027,7 +2097,7 @@ fn r2o_family_recovery_sibling_trial_with_ech(
                         .unwrap_or_else(|| target.host.clone()),
                     ip: Some(destination.ip()),
                     port: destination.port(),
-                    path: "/".into(),
+                    path: candidate.probe_path.clone(),
                     deadline: std::time::Duration::from_secs(8),
                     tls12: target.shape == SHAPE_LEGACY,
                     wire_len: None,
@@ -2105,6 +2175,7 @@ fn r2o_run_discovery_candidate_trial(
         plan_id,
         plan_text,
         group_plan: false,
+        probe_path: "/".into(),
     };
     if target.shape == SHAPE_ECH_TCP && ech_config.is_none() {
         return (
@@ -9701,6 +9772,7 @@ mod tests {
                 transport: 6,
                 family: 4,
                 shape: SHAPE_MODERN,
+                probe_path: "/css/site.css".into(),
                 recheck_since,
                 ..Binding::default()
             }
@@ -9714,6 +9786,7 @@ mod tests {
                     transport: 6,
                     family: 4,
                     shape: SHAPE_MODERN,
+                    probe_path: "/css/site.css".into(),
                     ..Default::default()
                 },
                 evidence: 1,
@@ -9762,6 +9835,11 @@ mod tests {
                     bindings: vec![binding("f.example.net", &recheck_plan, Some(9))],
                     ..BoxRecord::default()
                 },
+                BoxRecord {
+                    plans: vec![group_plan.clone()],
+                    bindings: vec![binding("media.example.net", &group_plan, None)],
+                    ..BoxRecord::default()
+                },
             ],
             domain_state: Some(domain_state),
             ..Catalog::default()
@@ -9793,6 +9871,55 @@ mod tests {
         assert!(!candidates[1].group_plan);
         assert_eq!(candidates[2].plan_id, [3; 16]);
         assert!(!candidates[2].group_plan);
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.probe_path == "/css/site.css")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn подтверждённый_путь_при_равной_отметке_сохраняет_первую_привязку() {
+        use r2o_controller::catalog::{Binding, BoxRecord, Catalog};
+        use r2o_controller::discovery::DiscoveryTarget;
+
+        let binding = |probe_path: &str| Binding {
+            kind: "name".into(),
+            target: "media.example.net".into(),
+            level: 3,
+            confirmed: 10,
+            enabled: true,
+            transport: 6,
+            family: 4,
+            shape: SHAPE_MODERN,
+            probe_path: probe_path.into(),
+            ..Binding::default()
+        };
+        let catalog = Catalog {
+            boxes: vec![
+                BoxRecord {
+                    bindings: vec![binding("/first.css")],
+                    ..BoxRecord::default()
+                },
+                BoxRecord {
+                    bindings: vec![binding("/second.css")],
+                    ..BoxRecord::default()
+                },
+            ],
+            ..Catalog::default()
+        };
+        let target = DiscoveryTarget {
+            host: "media.example.net".into(),
+            endpoint: "198.51.100.20:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+
+        assert_eq!(
+            super::r2o_target_confirmed_probe_path(&catalog, &target),
+            "/first.css"
+        );
     }
 
     #[cfg(unix)]
