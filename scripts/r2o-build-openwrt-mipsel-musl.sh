@@ -74,6 +74,7 @@ CARGO_TARGET_DIR="$TARGET_DIR" \
 CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_LINKER="$LINKER" \
 CC_mipsel_unknown_linux_musl="$LINKER" \
 AR_mipsel_unknown_linux_musl="$ARCHIVER" \
+STAGING_DIR="$SDK" \
 CARGO_PROFILE_RELEASE_PANIC=abort \
     cargo +"$NIGHTLY" -Z build-std=std,panic_abort build \
         --workspace --release --locked --target "$TARGET"
