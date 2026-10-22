@@ -35,12 +35,15 @@ fn parses_chunked_body_and_trailers_at_every_segment_boundary() {
 
 #[test]
 fn rejects_malformed_or_ambiguous_response_framing() {
-    let cases: [&[u8]; 10] = [
+    let cases: [&[u8]; 13] = [
         b"HTTP/1.1 200 OK\r\nX: x\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n",
+        b"HTTP/1.1 200\r\nContent-Length: 0\r\n\r\n",
+        b"HTTP/1.1 000 Unknown\r\nContent-Length: 0\r\n\r\n",
+        b"HTTP/1.1 600 Unknown\r\nContent-Length: 0\r\n\r\n",
         b"HTTP/1.1 200 O\rK\r\nContent-Length: 0\r\n\r\n",
         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;foo=\"unterminated\r\nx\r\n",
         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n:\r\n\r\n",
-        b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\nx",
+        b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nx",
         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n0\r\n\r\n",
         b"HTTP/1.1 200 OK\r\nContent-Length: 18446744073709551616\r\n\r\n",
         b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nx",
@@ -54,6 +57,30 @@ fn rejects_malformed_or_ambiguous_response_framing() {
         assert!(response.is_invalid(), "response was accepted: {bytes:?}");
         assert!(!response.is_complete());
     }
+}
+
+#[test]
+fn accepts_repeated_identical_content_length_fields() {
+    let mut response = HttpResponseParser::new(false);
+    response.feed(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 01\r\n\r\nx",
+        false,
+    );
+    assert!(response.is_complete());
+    assert!(!response.is_invalid());
+    assert_eq!(response.body_bytes(), 1);
+}
+
+#[test]
+fn preserves_valid_status_when_header_framing_is_invalid() {
+    let mut response = HttpResponseParser::new(false);
+    response.feed(
+        b"HTTP/1.1 451 Unavailable\r\nContent-Length: invalid\r\n\r\n",
+        false,
+    );
+    assert!(response.is_invalid());
+    assert!(!response.headers_complete());
+    assert_eq!(response.status(), 451);
 }
 
 #[test]

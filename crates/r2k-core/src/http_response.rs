@@ -173,6 +173,8 @@ impl HttpResponseParser {
     }
 
     fn finish_headers(&mut self) {
+        self.status =
+            parse_status_line(&self.header[..self.header_len]).map_or(0, |(_, status)| status);
         let Some((status, content_length, chunked)) =
             parse_headers(&self.header[..self.header_len])
         else {
@@ -258,18 +260,7 @@ fn invalid_line_byte(byte: u8) -> bool {
 }
 
 fn parse_headers(bytes: &[u8]) -> Option<(u16, Option<u64>, bool)> {
-    let status_end = find_crlf(bytes)?;
-    let status_line = bytes.get(..status_end)?;
-    if status_line.len() < 12
-        || !(status_line.starts_with(b"HTTP/1.0 ") || status_line.starts_with(b"HTTP/1.1 "))
-        || status_line[9..12].iter().any(|byte| !byte.is_ascii_digit())
-        || status_line.len() > 12 && status_line[12] != b' '
-    {
-        return None;
-    }
-    let status = u16::from(status_line[9] - b'0') * 100
-        + u16::from(status_line[10] - b'0') * 10
-        + u16::from(status_line[11] - b'0');
+    let (status_end, status) = parse_status_line(bytes)?;
 
     let mut content_length = None;
     let mut transfer_encoding = false;
@@ -286,10 +277,11 @@ fn parse_headers(bytes: &[u8]) -> Option<(u16, Option<u64>, bool)> {
         let name = &line[..colon];
         let value = trim_ascii_whitespace(&line[colon + 1..]);
         if name.eq_ignore_ascii_case(b"Content-Length") {
-            if content_length.is_some() {
+            let parsed = parse_decimal(value)?;
+            if content_length.is_some_and(|previous| previous != parsed) {
                 return None;
             }
-            content_length = Some(parse_decimal(value)?);
+            content_length = Some(parsed);
         } else if name.eq_ignore_ascii_case(b"Transfer-Encoding") {
             if transfer_encoding || !value.eq_ignore_ascii_case(b"chunked") {
                 return None;
@@ -302,6 +294,25 @@ fn parse_headers(bytes: &[u8]) -> Option<(u16, Option<u64>, bool)> {
         return None;
     }
     Some((status, content_length, transfer_encoding))
+}
+
+fn parse_status_line(bytes: &[u8]) -> Option<(usize, u16)> {
+    let status_end = find_crlf(bytes)?;
+    let status_line = bytes.get(..status_end)?;
+    if status_line.len() < 13
+        || !(status_line.starts_with(b"HTTP/1.0 ") || status_line.starts_with(b"HTTP/1.1 "))
+        || !(b'1'..=b'5').contains(&status_line[9])
+        || status_line[10..12]
+            .iter()
+            .any(|byte| !byte.is_ascii_digit())
+        || status_line[12] != b' '
+    {
+        return None;
+    }
+    let status = u16::from(status_line[9] - b'0') * 100
+        + u16::from(status_line[10] - b'0') * 10
+        + u16::from(status_line[11] - b'0');
+    Some((status_end, status))
 }
 
 fn find_crlf(bytes: &[u8]) -> Option<usize> {

@@ -172,6 +172,7 @@ pub struct FetchResult {
     pub local_port: u16,
     pub tls: Option<&'static str>,
     pub status: u16,
+    pub http_outcome: R2oFetchHttpOutcome,
     pub cloudflare_challenge: bool,
     pub body_bytes: u64,
     pub body_expected: Option<u64>,
@@ -180,10 +181,20 @@ pub struct FetchResult {
     pub chunked: bool,
     pub gzip: bool,
     pub complete: bool,
+    pub application_verified: bool,
     pub elapsed: Duration,
     pub reason: Option<String>,
     pub r2o_volume_observation: crate::r2o_volume::R2oVolumeObservation,
     pub r2o_resources: Vec<crate::r2o_resource::R2oResourceHint>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum R2oFetchHttpOutcome {
+    #[default]
+    Neutral,
+    Positive,
+    Blocked,
+    LegalDenial,
 }
 
 /// Ошибка прямого HTTPS-замера с отдельной отметкой локального отказа.
@@ -568,196 +579,280 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding(
         _ => None,
     };
 
-    let request = build_request(&options.name, &options.path, r2o_encoding);
     let mut stream = StreamOwned::new(connection, r2o_socket);
-    set_deadline(&stream.sock.socket, deadline)?;
-    stream
-        .write_all(&request)
-        .and_then(|()| stream.flush())
-        .map_err(|error| format!("не удалось отправить HTTP-запрос: {error}"))?;
-
     let local_port = stream
         .sock
         .socket
         .local_addr()
         .map_err(|error| format!("не удалось получить местный порт: {error}"))?
         .port();
-    let mut parser = HttpResponseParser::new(false);
-    let mut buffer = [0_u8; 16 * 1024];
-    let mut reason = None;
-    let mut r2o_framing_valid = true;
-    let mut r2o_local_limit = false;
-    let mut r2o_body_expected_at_eof = None;
-    let mut r2o_pending_response = Vec::with_capacity(16 * 1024);
-    let mut r2o_pending_overflow = false;
-    let mut r2o_resource_tap: Option<crate::r2o_resource::R2oResourceBodyTap> = None;
+    let mut request_path = options.path.clone();
+    let root_probe = options.path == "/";
+    let mut redirects = 0;
     loop {
-        if parser.is_complete() || parser.is_invalid() {
-            break;
-        }
-        if let Err(error) = set_deadline(&stream.sock.socket, deadline) {
-            reason = Some(error);
-            break;
-        }
-        match stream.read(&mut buffer) {
-            Ok(0) => {
-                r2o_framing_valid &= parser.headers_complete() && !parser.is_invalid();
-                r2o_body_expected_at_eof = parser
-                    .fixed_body_remaining()
-                    .map(|remaining| parser.body_bytes().saturating_add(remaining));
-                parser.feed(&[], true);
-                if !parser.is_complete() {
-                    reason = Some("сервер закрыл TLS-поток до завершения HTTP-ответа".into());
-                }
+        let request = build_request(&options.name, &request_path, r2o_encoding);
+        set_deadline(&stream.sock.socket, deadline)?;
+        stream
+            .write_all(&request)
+            .and_then(|()| stream.flush())
+            .map_err(|error| format!("не удалось отправить HTTP-запрос: {error}"))?;
+
+        let mut parser = HttpResponseParser::new(false);
+        let mut buffer = [0_u8; 16 * 1024];
+        let mut reason = None;
+        let mut r2o_framing_valid = true;
+        let mut r2o_local_limit = false;
+        let mut r2o_body_expected_at_eof = None;
+        let mut r2o_pending_response = Vec::with_capacity(16 * 1024);
+        let mut r2o_pending_overflow = false;
+        let mut r2o_resource_tap: Option<crate::r2o_resource::R2oResourceBodyTap> = None;
+        let mut r2o_reply_body_tap: Option<crate::r2o_resource::R2oResourceBodyTap> = None;
+        loop {
+            if parser.is_complete() || parser.is_invalid() {
                 break;
             }
-            Ok(length) => {
-                let r2o_bytes = &buffer[..length];
-                if parser.headers_complete() {
-                    if let Some(tap) = &mut r2o_resource_tap {
-                        tap.feed(r2o_bytes);
+            if let Err(error) = set_deadline(&stream.sock.socket, deadline) {
+                reason = Some(error);
+                break;
+            }
+            match stream.read(&mut buffer) {
+                Ok(0) => {
+                    r2o_framing_valid &= parser.headers_complete() && !parser.is_invalid();
+                    r2o_body_expected_at_eof = parser
+                        .fixed_body_remaining()
+                        .map(|remaining| parser.body_bytes().saturating_add(remaining));
+                    parser.feed(&[], true);
+                    if !parser.is_complete() {
+                        reason = Some("сервер закрыл TLS-поток до завершения HTTP-ответа".into());
                     }
-                } else if !r2o_pending_overflow {
-                    if r2o_pending_response.len() + length <= 64 * 1024 {
-                        r2o_pending_response.extend_from_slice(r2o_bytes);
-                    } else {
+                    break;
+                }
+                Ok(length) => {
+                    let r2o_bytes = &buffer[..length];
+                    if parser.headers_complete() {
+                        if let Some(tap) = &mut r2o_resource_tap {
+                            tap.feed(r2o_bytes);
+                        }
+                        if let Some(tap) = &mut r2o_reply_body_tap {
+                            tap.feed(r2o_bytes);
+                        }
+                    } else if !r2o_pending_overflow {
+                        if r2o_pending_response.len() + length <= 64 * 1024 {
+                            r2o_pending_response.extend_from_slice(r2o_bytes);
+                        } else {
+                            r2o_pending_response.clear();
+                            r2o_pending_overflow = true;
+                        }
+                    }
+                    parser.feed(&buffer[..length], false);
+                    if parser.headers_complete() && r2o_resource_tap.is_none() {
+                        let r2o_headers = parser.headers();
+                        if !parser.is_invalid()
+                            && !r2o_pending_overflow
+                            && r2o_fetch_resource_scan_allowed(parser.status(), r2o_headers)
+                            && let Some(r2o_header_start) = r2o_pending_response
+                                .windows(r2o_headers.len())
+                                .rposition(|window| window == r2o_headers)
+                        {
+                            let r2o_body_start = r2o_header_start + r2o_headers.len();
+                            let mut r2o_tap = crate::r2o_resource::R2oResourceBodyTap::new(
+                                r2o_fetch_chunked(r2o_headers),
+                            );
+                            r2o_tap.feed(&r2o_pending_response[r2o_body_start..]);
+                            r2o_resource_tap = Some(r2o_tap);
+                        }
+                        if !parser.is_invalid()
+                            && !r2o_pending_overflow
+                            && (400..=599).contains(&parser.status())
+                            && r2o_fetch_body_encoding(r2o_headers)
+                                == crate::r2o_volume::R2oVolumeRxEncoding::Identity
+                            && let Some(r2o_header_start) = r2o_pending_response
+                                .windows(r2o_headers.len())
+                                .rposition(|window| window == r2o_headers)
+                        {
+                            let r2o_body_start = r2o_header_start + r2o_headers.len();
+                            let mut r2o_tap =
+                                crate::r2o_resource::R2oResourceBodyTap::new_body_only(
+                                    r2o_fetch_chunked(r2o_headers),
+                                );
+                            r2o_tap.feed(&r2o_pending_response[r2o_body_start..]);
+                            r2o_reply_body_tap = Some(r2o_tap);
+                        }
                         r2o_pending_response.clear();
-                        r2o_pending_overflow = true;
+                    }
+                    if parser.is_invalid() {
+                        r2o_framing_valid = false;
+                        r2o_local_limit =
+                            !parser.headers_complete() && parser.headers().len() >= 8191;
+                        reason = Some("HTTP-ответ содержит неверное обрамление".into());
+                        break;
                     }
                 }
-                parser.feed(&buffer[..length], false);
-                if parser.headers_complete() && r2o_resource_tap.is_none() {
-                    let r2o_headers = parser.headers();
-                    if !parser.is_invalid()
-                        && !r2o_pending_overflow
-                        && r2o_fetch_resource_scan_allowed(parser.status(), r2o_headers)
-                        && let Some(r2o_header_start) = r2o_pending_response
-                            .windows(r2o_headers.len())
-                            .rposition(|window| window == r2o_headers)
-                    {
-                        let r2o_body_start = r2o_header_start + r2o_headers.len();
-                        let mut r2o_tap = crate::r2o_resource::R2oResourceBodyTap::new(
-                            r2o_fetch_chunked(r2o_headers),
-                        );
-                        r2o_tap.feed(&r2o_pending_response[r2o_body_start..]);
-                        r2o_resource_tap = Some(r2o_tap);
-                    }
-                    r2o_pending_response.clear();
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    reason = Some("срок ожидания HTTP-ответа истёк".into());
+                    break;
                 }
-                if parser.is_invalid() {
-                    r2o_framing_valid = false;
-                    r2o_local_limit = !parser.headers_complete() && parser.headers().len() >= 8191;
-                    reason = Some("HTTP-ответ содержит неверное обрамление".into());
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                    r2o_framing_valid &= parser.headers_complete() && !parser.is_invalid();
+                    r2o_body_expected_at_eof = parser
+                        .fixed_body_remaining()
+                        .map(|remaining| parser.body_bytes().saturating_add(remaining));
+                    parser.feed(&[], true);
+                    reason = Some("TLS-поток оборвался до завершения HTTP-ответа".into());
+                    break;
+                }
+                Err(error) => {
+                    reason = Some(format!("ошибка чтения HTTP-ответа: {error}"));
                     break;
                 }
             }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                ) =>
+        }
+
+        if parser.is_invalid() && reason.is_none() {
+            reason = Some("HTTP-ответ содержит неверное обрамление".into());
+        }
+        let body_expected = parser
+            .fixed_body_remaining()
+            .map(|remaining| parser.body_bytes().saturating_add(remaining))
+            .or(r2o_body_expected_at_eof);
+        let headers = parser.headers();
+        let cloudflare_challenge = r2o_fetch_is_cloudflare_challenge(headers);
+        let r2o_body_encoding = r2o_fetch_body_encoding(headers);
+        let r2o_body_has_length = header_value(headers, b"content-length").is_some();
+        let location = header_value(headers, b"location")
+            .map(|value| String::from_utf8_lossy(trim_ascii(value)).into_owned())
+            .unwrap_or_default();
+        let r2o_body_chunked = header_value(headers, b"transfer-encoding")
+            .is_some_and(|value| value.eq_ignore_ascii_case(b"chunked"));
+        let chunked = header_value(headers, b"transfer-encoding")
+            .is_some_and(|value| value.eq_ignore_ascii_case(b"chunked"));
+        let gzip = header_value(headers, b"content-encoding").is_some_and(|value| {
+            value
+                .split(|byte| *byte == b',')
+                .any(|encoding| trim_ascii(encoding).eq_ignore_ascii_case(b"gzip"))
+        });
+        let location_count = header_values(headers, b"location").count();
+        let location_valid = location_count <= 1
+            && (location.is_empty() || !location.bytes().any(|byte| byte <= 0x20 || byte == 0x7f));
+        r2o_framing_valid &= location_valid;
+        let complete = parser.is_complete() && !parser.is_invalid() && location_valid;
+        let http_outcome = r2o_fetch_http_outcome(
+            parser.status(),
+            location.as_bytes(),
+            r2o_body_encoding == crate::r2o_volume::R2oVolumeRxEncoding::Identity,
+            r2o_reply_body_tap
+                .as_ref()
+                .map_or(&[][..], crate::r2o_resource::R2oResourceBodyTap::prefix),
+            parser.body_bytes().saturating_add(u64::from(!complete)),
+        );
+        let mut application_verified = complete
+            && parser.status() >= 200
+            && !cloudflare_challenge
+            && !matches!(
+                http_outcome,
+                R2oFetchHttpOutcome::Blocked | R2oFetchHttpOutcome::LegalDenial
+            );
+        let is_redirect = (300..400).contains(&parser.status());
+        if is_redirect {
+            application_verified = false;
+            let same_origin_path = r2o_fetch_same_origin_redirect(&location, &options.name);
+            if complete
+                && r2o_framing_valid
+                && let Some(next_path) = same_origin_path.as_ref()
             {
-                reason = Some("срок ожидания HTTP-ответа истёк".into());
-                break;
+                if redirects < 3
+                    && (root_probe || crate::r2o_resource::r2o_resource_path_ok(next_path))
+                {
+                    request_path.clone_from(next_path);
+                    redirects += 1;
+                    continue;
+                }
+                if !root_probe && !crate::r2o_resource::r2o_resource_path_ok(next_path) {
+                    reason = Some("stylesheet перенаправлен не на ресурс; не подтверждено".into());
+                }
+            } else if root_probe
+                && complete
+                && same_origin_path.is_none()
+                && http_outcome != R2oFetchHttpOutcome::Blocked
+                && !cloudflare_challenge
+                && r2o_fetch_external_https_redirect(parser.status(), location.as_bytes())
+            {
+                application_verified = true;
             }
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
-                r2o_framing_valid &= parser.headers_complete() && !parser.is_invalid();
-                r2o_body_expected_at_eof = parser
-                    .fixed_body_remaining()
-                    .map(|remaining| parser.body_bytes().saturating_add(remaining));
-                parser.feed(&[], true);
-                reason = Some("TLS-поток оборвался до завершения HTTP-ответа".into());
-                break;
-            }
-            Err(error) => {
-                reason = Some(format!("ошибка чтения HTTP-ответа: {error}"));
-                break;
+            if !application_verified && reason.is_none() {
+                reason = Some(format!(
+                    "HTTP {} redirect не подтверждает страницу этой цели",
+                    parser.status()
+                ));
             }
         }
-    }
+        let r2o_resources = if complete && r2o_fetch_resource_scan_allowed(parser.status(), headers)
+        {
+            r2o_resource_tap
+                .as_ref()
+                .map(|tap| tap.resources().to_vec())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let r2o_tcp_after = r2o_tcp_counters(&stream.sock.socket);
+        let r2o_tls_wire_bytes = stream.sock.r2o_wire_bytes;
+        let r2o_data_packets = r2o_tcp_after.data_packets.unwrap_or(0);
+        let r2o_negotiated_tls = match tls {
+            Some("1.3") => Some(0x0304),
+            Some("1.2") => Some(0x0303),
+            _ => None,
+        };
+        let r2o_stage = if parser.status() != 0 || parser.headers_complete() {
+            crate::r2o_volume::R2oVolumeProbeStage::Application
+        } else {
+            crate::r2o_volume::R2oVolumeProbeStage::Handshake
+        };
+        let r2o_volume_observation = crate::r2o_volume::R2oVolumeObservation {
+            stage: r2o_stage,
+            name_valid: r2o_negotiated_tls.is_some(),
+            negotiated_tls: r2o_negotiated_tls,
+            local_limit: r2o_local_limit,
+            status: parser.status(),
+            body_complete: complete,
+            body_encoding: r2o_body_encoding,
+            body_framing_valid: parser.headers_complete() && r2o_framing_valid,
+            body_has_length: r2o_body_has_length,
+            body_chunked: r2o_body_chunked,
+            body_expected: body_expected.unwrap_or(0),
+            body_bytes: parser.body_bytes(),
+            rx_tls_wire_bytes: r2o_tls_wire_bytes,
+            rx_tls_record_missing: stream.sock.r2o_record_missing(),
+            data_packets: r2o_data_packets,
+            ..Default::default()
+        };
 
-    if parser.is_invalid() && reason.is_none() {
-        reason = Some("HTTP-ответ содержит неверное обрамление".into());
+        return Ok(FetchResult {
+            address,
+            local_port,
+            tls,
+            status: parser.status(),
+            http_outcome,
+            cloudflare_challenge,
+            body_bytes: parser.body_bytes(),
+            body_expected,
+            body_has_length: r2o_body_has_length,
+            location,
+            chunked,
+            gzip,
+            complete,
+            application_verified,
+            elapsed: started.elapsed(),
+            reason,
+            r2o_volume_observation,
+            r2o_resources,
+        });
     }
-    let body_expected = parser
-        .fixed_body_remaining()
-        .map(|remaining| parser.body_bytes().saturating_add(remaining))
-        .or(r2o_body_expected_at_eof);
-    let headers = parser.headers();
-    let cloudflare_challenge = r2o_fetch_is_cloudflare_challenge(headers);
-    let r2o_body_encoding = r2o_fetch_body_encoding(headers);
-    let r2o_body_has_length = header_value(headers, b"content-length").is_some();
-    let location = header_value(headers, b"location")
-        .map(|value| String::from_utf8_lossy(trim_ascii(value)).into_owned())
-        .unwrap_or_default();
-    let r2o_body_chunked = header_value(headers, b"transfer-encoding")
-        .is_some_and(|value| value.eq_ignore_ascii_case(b"chunked"));
-    let chunked = header_value(headers, b"transfer-encoding")
-        .is_some_and(|value| value.eq_ignore_ascii_case(b"chunked"));
-    let gzip = header_value(headers, b"content-encoding").is_some_and(|value| {
-        value
-            .split(|byte| *byte == b',')
-            .any(|encoding| trim_ascii(encoding).eq_ignore_ascii_case(b"gzip"))
-    });
-    let complete = parser.is_complete() && !parser.is_invalid();
-    let r2o_resources = if complete && r2o_fetch_resource_scan_allowed(parser.status(), headers) {
-        r2o_resource_tap
-            .as_ref()
-            .map(|tap| tap.resources().to_vec())
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    let r2o_tcp_after = r2o_tcp_counters(&stream.sock.socket);
-    let r2o_tls_wire_bytes = stream.sock.r2o_wire_bytes;
-    let r2o_data_packets = r2o_tcp_after.data_packets.unwrap_or(0);
-    let r2o_negotiated_tls = match tls {
-        Some("1.3") => Some(0x0304),
-        Some("1.2") => Some(0x0303),
-        _ => None,
-    };
-    let r2o_stage = if parser.status() != 0 || parser.headers_complete() {
-        crate::r2o_volume::R2oVolumeProbeStage::Application
-    } else {
-        crate::r2o_volume::R2oVolumeProbeStage::Handshake
-    };
-    let r2o_volume_observation = crate::r2o_volume::R2oVolumeObservation {
-        stage: r2o_stage,
-        name_valid: r2o_negotiated_tls.is_some(),
-        negotiated_tls: r2o_negotiated_tls,
-        local_limit: r2o_local_limit,
-        status: parser.status(),
-        body_complete: complete,
-        body_encoding: r2o_body_encoding,
-        body_framing_valid: parser.headers_complete() && r2o_framing_valid,
-        body_has_length: r2o_body_has_length,
-        body_chunked: r2o_body_chunked,
-        body_expected: body_expected.unwrap_or(0),
-        body_bytes: parser.body_bytes(),
-        rx_tls_wire_bytes: r2o_tls_wire_bytes,
-        rx_tls_record_missing: stream.sock.r2o_record_missing(),
-        data_packets: r2o_data_packets,
-        ..Default::default()
-    };
-
-    Ok(FetchResult {
-        address,
-        local_port,
-        tls,
-        status: parser.status(),
-        cloudflare_challenge,
-        body_bytes: parser.body_bytes(),
-        body_expected,
-        body_has_length: r2o_body_has_length,
-        location,
-        chunked,
-        gzip,
-        complete,
-        elapsed: started.elapsed(),
-        reason,
-        r2o_volume_observation,
-        r2o_resources,
-    })
 }
 
 fn r2o_fetch_resource_scan_allowed(status: u16, headers: &[u8]) -> bool {
@@ -1504,17 +1599,205 @@ fn r2o_tcp_counters(_stream: &TcpStream) -> R2oTcpCounters {
     R2oTcpCounters::default()
 }
 
-fn header_value<'a>(headers: &'a [u8], expected: &[u8]) -> Option<&'a [u8]> {
+fn header_value<'a>(headers: &'a [u8], expected: &'a [u8]) -> Option<&'a [u8]> {
+    header_values(headers, expected).next()
+}
+
+fn header_values<'a>(headers: &'a [u8], expected: &'a [u8]) -> impl Iterator<Item = &'a [u8]> {
     headers
         .split(|byte| *byte == b'\n')
         .skip(1)
         .filter_map(|line| line.strip_suffix(b"\r"))
-        .find_map(|line| {
+        .filter_map(move |line| {
             let colon = line.iter().position(|byte| *byte == b':')?;
             line[..colon]
                 .eq_ignore_ascii_case(expected)
                 .then_some(trim_ascii(&line[colon + 1..]))
         })
+}
+
+fn r2o_fetch_same_origin_redirect(location: &str, host: &str) -> Option<String> {
+    let value = location.as_bytes();
+    if value
+        .iter()
+        .any(|&byte| byte <= 0x20 || byte == 0x7f || byte == b'#')
+    {
+        return None;
+    }
+
+    let mut path = value;
+    if value.len() >= 8 && value[..8].eq_ignore_ascii_case(b"https://") {
+        let authority_start = 8;
+        let authority_end = value[authority_start..]
+            .iter()
+            .position(|&byte| matches!(byte, b'/' | b'?' | b'#'))
+            .map_or(value.len(), |offset| authority_start + offset);
+        let authority = &value[authority_start..authority_end];
+        let same_host = authority.eq_ignore_ascii_case(host.as_bytes())
+            || authority.len() == host.len() + 4
+                && authority[..host.len()].eq_ignore_ascii_case(host.as_bytes())
+                && authority[host.len()..].eq_ignore_ascii_case(b":443");
+        if !same_host {
+            return None;
+        }
+        path = &value[authority_end..];
+        if path.first() == Some(&b'?') {
+            let mut with_root = Vec::with_capacity(path.len() + 1);
+            with_root.push(b'/');
+            with_root.extend_from_slice(path);
+            return String::from_utf8(with_root).ok();
+        }
+        if path.first() != Some(&b'/') {
+            path = b"/";
+        }
+    } else if path.first() != Some(&b'/') {
+        return None;
+    }
+
+    if path.is_empty()
+        || path.len() >= 1024
+        || path[0] != b'/'
+        || path
+            .iter()
+            .any(|&byte| byte <= 0x20 || byte == 0x7f || byte == b'#')
+    {
+        return None;
+    }
+    String::from_utf8(path.to_vec()).ok()
+}
+
+fn r2o_fetch_external_https_redirect(status: u16, location: &[u8]) -> bool {
+    if !matches!(status, 301 | 302 | 303 | 307 | 308)
+        || location.len() < 9
+        || !location[..8].eq_ignore_ascii_case(b"https://")
+    {
+        return false;
+    }
+    let authority_end = location[8..]
+        .iter()
+        .position(|&byte| matches!(byte, b'/' | b'?' | b'#'))
+        .map_or(location.len(), |offset| offset + 8);
+    let authority = &location[8..authority_end];
+    let host_chars = authority
+        .iter()
+        .filter(|&&byte| byte.is_ascii_alphanumeric())
+        .count();
+    host_chars != 0
+        && authority.iter().all(|&byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b':' | b'[' | b']')
+        })
+        && location[authority_end..]
+            .iter()
+            .all(|&byte| byte > 0x20 && byte != 0x7f)
+}
+
+fn r2o_fetch_http_outcome(
+    status: u16,
+    location: &[u8],
+    identity_encoding: bool,
+    body_prefix: &[u8],
+    body_total: u64,
+) -> R2oFetchHttpOutcome {
+    if status == 451 {
+        return R2oFetchHttpOutcome::LegalDenial;
+    }
+    if (200..300).contains(&status) || status == 304 {
+        return R2oFetchHttpOutcome::Positive;
+    }
+    if matches!(status, 301 | 302 | 303 | 307 | 308) {
+        if r2o_fetch_portal_location(location).is_some() {
+            return R2oFetchHttpOutcome::Blocked;
+        }
+        return if location.first() == Some(&b'/')
+            && location.get(1).is_some_and(|byte| *byte != b'/')
+        {
+            R2oFetchHttpOutcome::Positive
+        } else {
+            R2oFetchHttpOutcome::Neutral
+        };
+    }
+    if !(400..=599).contains(&status) || !identity_encoding {
+        return R2oFetchHttpOutcome::Neutral;
+    }
+    if r2o_fetch_ascii_contains(body_prefix, b"access blocked by rkn")
+        || r2o_fetch_body_has_portal(body_prefix, body_total)
+    {
+        R2oFetchHttpOutcome::Blocked
+    } else {
+        R2oFetchHttpOutcome::Neutral
+    }
+}
+
+fn r2o_fetch_portal_location(location: &[u8]) -> Option<&'static str> {
+    let mut authority = if location.len() >= 7 && location[..7].eq_ignore_ascii_case(b"http://") {
+        &location[7..]
+    } else if location.len() >= 8 && location[..8].eq_ignore_ascii_case(b"https://") {
+        &location[8..]
+    } else if location.starts_with(b"//") {
+        &location[2..]
+    } else {
+        return None;
+    };
+    let end = authority
+        .iter()
+        .position(|&byte| matches!(byte, b'/' | b'?' | b'#') || byte <= 0x20)
+        .unwrap_or(authority.len());
+    authority = &authority[..end];
+    if let Some(userinfo) = authority.iter().rposition(|&byte| byte == b'@') {
+        authority = &authority[userinfo + 1..];
+    }
+    if let Some(colon) = authority.iter().rposition(|&byte| byte == b':')
+        && colon + 1 < authority.len()
+        && authority[colon + 1..].iter().all(u8::is_ascii_digit)
+    {
+        authority = &authority[..colon];
+    }
+    let authority = authority.strip_suffix(b".").unwrap_or(authority);
+    [
+        (b"eais.rkn.gov.ru" as &[u8], "eais.rkn.gov.ru"),
+        (b"lawfilter.ertelecom.ru", "lawfilter.ertelecom.ru"),
+        (b"blackhole.svyaztelecom.ru", "blackhole.svyaztelecom.ru"),
+        (b"warning.rt.ru", "warning.rt.ru"),
+        (b"warn.beeline.ru", "warn.beeline.ru"),
+        (b"deny.megafon.ru", "deny.megafon.ru"),
+    ]
+    .into_iter()
+    .find_map(|(known, name)| authority.eq_ignore_ascii_case(known).then_some(name))
+}
+
+fn r2o_fetch_ascii_contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+fn r2o_fetch_body_has_portal(body: &[u8], total: u64) -> bool {
+    const PORTALS: [&[u8]; 6] = [
+        b"eais.rkn.gov.ru",
+        b"lawfilter.ertelecom.ru",
+        b"blackhole.svyaztelecom.ru",
+        b"warning.rt.ru",
+        b"warn.beeline.ru",
+        b"deny.megafon.ru",
+    ];
+    PORTALS.iter().any(|portal| {
+        body.windows(portal.len())
+            .enumerate()
+            .any(|(start, window)| {
+                if !window.eq_ignore_ascii_case(portal)
+                    || start != 0 && r2o_fetch_http_host_char(body[start - 1])
+                    || start + portal.len() == body.len() && total > body.len() as u64
+                {
+                    return false;
+                }
+                start + portal.len() == body.len()
+                    || !r2o_fetch_http_host_char(body[start + portal.len()])
+            })
+    })
+}
+
+fn r2o_fetch_http_host_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-')
 }
 
 fn trim_ascii(mut value: &[u8]) -> &[u8] {
@@ -1871,6 +2154,157 @@ mod tests {
             ),
             R2oVolumeRxEncoding::Other
         );
+    }
+
+    #[test]
+    fn same_origin_redirects_are_safe_and_portals_match_donor_signatures() {
+        assert_eq!(
+            r2o_fetch_same_origin_redirect("/next?q=1", "example.com").as_deref(),
+            Some("/next?q=1")
+        );
+        assert_eq!(
+            r2o_fetch_same_origin_redirect("https://EXAMPLE.com:443/next", "example.com")
+                .as_deref(),
+            Some("/next")
+        );
+        assert_eq!(
+            r2o_fetch_same_origin_redirect("https://example.com?next=1", "example.com").as_deref(),
+            Some("/?next=1")
+        );
+        assert!(r2o_fetch_same_origin_redirect("https://other.example/", "example.com").is_none());
+        assert!(r2o_fetch_same_origin_redirect("/next#fragment", "example.com").is_none());
+        assert!(r2o_fetch_same_origin_redirect("/bad path", "example.com").is_none());
+        assert!(r2o_fetch_external_https_redirect(
+            302,
+            b"https://other.example/next"
+        ));
+        assert!(!r2o_fetch_external_https_redirect(
+            300,
+            b"https://other.example/next"
+        ));
+
+        assert_eq!(
+            r2o_fetch_http_outcome(
+                302,
+                b"https://user@WARNING.RT.RU.:443/blocked",
+                true,
+                &[],
+                0,
+            ),
+            R2oFetchHttpOutcome::Blocked
+        );
+        assert_eq!(
+            r2o_fetch_http_outcome(302, b"https://warning.rt.ru.evil.example/", true, &[], 0),
+            R2oFetchHttpOutcome::Neutral
+        );
+        assert_eq!(
+            r2o_fetch_http_outcome(302, b"/login", true, &[], 0),
+            R2oFetchHttpOutcome::Positive
+        );
+        assert_eq!(
+            r2o_fetch_http_outcome(403, b"", true, b"Access Blocked By RKN", 21),
+            R2oFetchHttpOutcome::Blocked
+        );
+        assert_eq!(
+            r2o_fetch_http_outcome(403, b"", true, b"eais.rkn.gov.ru", 15),
+            R2oFetchHttpOutcome::Blocked
+        );
+        assert_eq!(
+            r2o_fetch_http_outcome(403, b"", true, b"eais.rkn.gov.ru", 16),
+            R2oFetchHttpOutcome::Neutral
+        );
+        assert_eq!(
+            r2o_fetch_http_outcome(403, b"", false, b"access blocked by rkn", 21),
+            R2oFetchHttpOutcome::Neutral
+        );
+        assert_eq!(
+            r2o_fetch_http_outcome(403, b"", true, b"xnot-eais.rkn.gov.ru", 20),
+            R2oFetchHttpOutcome::Neutral
+        );
+        assert_eq!(
+            r2o_fetch_http_outcome(451, b"", true, &[], 0),
+            R2oFetchHttpOutcome::LegalDenial
+        );
+
+        let mut body = crate::r2o_resource::R2oResourceBodyTap::new_body_only(true);
+        body.feed(b"5\r\neais.");
+        body.feed(b"\r\nA\r\nrkn.gov.ru\r\n0\r\n\r\n");
+        assert_eq!(body.prefix(), b"eais.rkn.gov.ru");
+    }
+
+    #[test]
+    fn https_fetch_follows_same_origin_redirects_on_the_original_tls_connection() {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use rustls::{ServerConfig, ServerConnection};
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::mpsc;
+        use std::thread;
+
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+            .expect("создать сертификат localhost");
+        let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
+        let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certificate.serialize_private_key_der(),
+        ));
+        let server_config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate_der.clone()], private_key)
+            .unwrap();
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate_der).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("открыть HTTPS-приёмник");
+        let address = listener.local_addr().unwrap();
+        let (request_sender, request_receiver) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (socket, _) = listener.accept().expect("принять HTTPS-соединение");
+            let connection = ServerConnection::new(Arc::new(server_config)).unwrap();
+            let mut stream = StreamOwned::new(connection, socket);
+            let mut requests = Vec::new();
+            for response in [
+                &b"HTTP/1.1 302 Found\r\nLocation: /landing\r\nContent-Length: 0\r\n\r\n"[..],
+                &b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npage"[..],
+            ]
+            .into_iter()
+            {
+                let mut request = Vec::new();
+                let mut byte = [0_u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream
+                        .read_exact(&mut byte)
+                        .expect("прочитать заголовки запроса");
+                    request.push(byte[0]);
+                }
+                requests.push(request);
+                stream.write_all(response).expect("отправить HTTP-ответ");
+                stream.flush().expect("сбросить HTTP-ответ");
+            }
+            request_sender.send(requests).unwrap();
+        });
+
+        let options = FetchOptions {
+            name: "localhost".into(),
+            port: address.port(),
+            ip: Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            path: "/".into(),
+            deadline: Duration::from_secs(3),
+            tls12: false,
+            wire_len: None,
+            mark: None,
+        };
+        let result = r2o_fetch_with_roots_and_encoding(&options, R2oFetchEncoding::Identity, roots)
+            .expect("завершить HTTPS-замер с redirect");
+        let requests = request_receiver.recv().expect("получить оба HTTP-запроса");
+        server.join().unwrap();
+
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with(b"GET / HTTP/1.1\r\n"));
+        assert!(requests[1].starts_with(b"GET /landing HTTP/1.1\r\n"));
+        assert_eq!(result.status, 200);
+        assert_eq!(result.http_outcome, R2oFetchHttpOutcome::Positive);
+        assert!(result.complete);
+        assert!(result.application_verified);
     }
 
     #[test]

@@ -430,10 +430,20 @@ pub struct R2oResourceBodyTap {
     chunked: bool,
     state: R2oResourceChunkState,
     scanner: R2oResourceScan,
+    prefix: Vec<u8>,
+    scan_resources: bool,
 }
 
 impl R2oResourceBodyTap {
     pub fn new(chunked: bool) -> Self {
+        Self::with_resource_scan(chunked, true)
+    }
+
+    pub fn new_body_only(chunked: bool) -> Self {
+        Self::with_resource_scan(chunked, false)
+    }
+
+    fn with_resource_scan(chunked: bool, scan_resources: bool) -> Self {
         Self {
             chunked,
             state: if chunked {
@@ -442,12 +452,14 @@ impl R2oResourceBodyTap {
                 R2oResourceChunkState::Done
             },
             scanner: R2oResourceScan::default(),
+            prefix: Vec::with_capacity(4096),
+            scan_resources,
         }
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
         if !self.chunked {
-            self.scanner.feed(bytes);
+            self.feed_entity(bytes);
             return;
         }
         let mut cursor = 0;
@@ -476,7 +488,7 @@ impl R2oResourceBodyTap {
                 }
                 R2oResourceChunkState::Data(remaining) => {
                     let length = remaining.min(bytes.len() - cursor);
-                    self.scanner.feed(&bytes[cursor..cursor + length]);
+                    self.feed_entity(&bytes[cursor..cursor + length]);
                     cursor += length;
                     self.state = if length == remaining {
                         R2oResourceChunkState::DataCr
@@ -530,6 +542,19 @@ impl R2oResourceBodyTap {
 
     pub fn resources(&self) -> &[R2oResourceHint] {
         self.scanner.resources()
+    }
+
+    pub fn prefix(&self) -> &[u8] {
+        &self.prefix
+    }
+
+    fn feed_entity(&mut self, bytes: &[u8]) {
+        let remaining = 4096_usize.saturating_sub(self.prefix.len());
+        self.prefix
+            .extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+        if self.scan_resources {
+            self.scanner.feed(bytes);
+        }
     }
 }
 

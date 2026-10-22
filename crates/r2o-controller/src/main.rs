@@ -2594,8 +2594,14 @@ fn r2o_family_recovery_decision(
     let response_complete = result.as_ref().is_ok_and(|fetch| {
         fetch.tls.is_some()
             && fetch.complete
+            && fetch.application_verified
             && (200..600).contains(&fetch.status)
             && !fetch.cloudflare_challenge
+            && !matches!(
+                fetch.http_outcome,
+                r2o_controller::fetch::R2oFetchHttpOutcome::Blocked
+                    | r2o_controller::fetch::R2oFetchHttpOutcome::LegalDenial
+            )
     });
     if response_complete && applied {
         R2oFamilyRecoveryDecision::Verified
@@ -11422,6 +11428,7 @@ mod tests {
             local_port: 41_000,
             tls: Some("1.3"),
             status: 200,
+            http_outcome: r2o_controller::fetch::R2oFetchHttpOutcome::Positive,
             cloudflare_challenge: false,
             body_bytes: 64,
             body_expected: Some(64),
@@ -11430,6 +11437,7 @@ mod tests {
             chunked: false,
             gzip: false,
             complete: true,
+            application_verified: true,
             elapsed: std::time::Duration::from_millis(30),
             reason: None,
             r2o_volume_observation: Default::default(),
@@ -11442,6 +11450,30 @@ mod tests {
         assert_eq!(
             r2o_family_recovery_decision(&Ok(fetch.clone()), true),
             R2oFamilyRecoveryDecision::Verified
+        );
+        let mut unresolved_redirect = fetch.clone();
+        unresolved_redirect.status = 302;
+        unresolved_redirect.location = "/landing".into();
+        unresolved_redirect.application_verified = false;
+        assert_eq!(
+            r2o_family_recovery_decision(&Ok(unresolved_redirect), true),
+            R2oFamilyRecoveryDecision::Reclassify
+        );
+        let mut blocked_page = fetch.clone();
+        blocked_page.status = 403;
+        blocked_page.http_outcome = r2o_controller::fetch::R2oFetchHttpOutcome::Blocked;
+        blocked_page.application_verified = false;
+        assert_eq!(
+            r2o_family_recovery_decision(&Ok(blocked_page), true),
+            R2oFamilyRecoveryDecision::Reclassify
+        );
+        let mut legal_denial = fetch.clone();
+        legal_denial.status = 451;
+        legal_denial.http_outcome = r2o_controller::fetch::R2oFetchHttpOutcome::LegalDenial;
+        legal_denial.application_verified = false;
+        assert_eq!(
+            r2o_family_recovery_decision(&Ok(legal_denial), true),
+            R2oFamilyRecoveryDecision::Reclassify
         );
         let mut incomplete = fetch;
         incomplete.complete = false;
@@ -11540,6 +11572,7 @@ mod tests {
             local_port: 41_000,
             tls: Some("1.3"),
             status: 200,
+            http_outcome: r2o_controller::fetch::R2oFetchHttpOutcome::Positive,
             cloudflare_challenge: false,
             body_bytes: 64,
             body_expected: Some(64),
@@ -11548,6 +11581,7 @@ mod tests {
             chunked: false,
             gzip: false,
             complete: true,
+            application_verified: true,
             elapsed: std::time::Duration::from_millis(30),
             reason: None,
             r2o_volume_observation: Default::default(),
