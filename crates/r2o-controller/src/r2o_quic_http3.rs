@@ -16,6 +16,29 @@ pub fn r2o_quic_http3_udp_socket(
     server: SocketAddr,
     mark: Option<u32>,
 ) -> std::io::Result<UdpSocket> {
+    r2o_quic_http3_udp_socket_detailed(server, mark).map_err(|error| error.source)
+}
+
+/// Ошибка настройки UDP-сокета и признак локального отказа установки метки.
+#[derive(Debug)]
+pub struct R2oQuicUdpSocketError {
+    pub source: std::io::Error,
+    pub local_refusal: bool,
+}
+
+/// Создать QUIC-сокет, сохранив причину отказа установки SO_MARK.
+pub fn r2o_quic_http3_udp_socket_detailed(
+    server: SocketAddr,
+    mark: Option<u32>,
+) -> Result<UdpSocket, R2oQuicUdpSocketError> {
+    r2o_quic_http3_udp_socket_with_mark_setter(server, mark, r2o_quic_http3_set_socket_mark)
+}
+
+fn r2o_quic_http3_udp_socket_with_mark_setter(
+    server: SocketAddr,
+    mark: Option<u32>,
+    set_mark: impl FnOnce(&UdpSocket, u32) -> std::io::Result<()>,
+) -> Result<UdpSocket, R2oQuicUdpSocketError> {
     let bind = SocketAddr::new(
         match server.ip() {
             IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -23,12 +46,30 @@ pub fn r2o_quic_http3_udp_socket(
         },
         0,
     );
-    let socket = UdpSocket::bind(bind)?;
+    let socket = UdpSocket::bind(bind).map_err(R2oQuicUdpSocketError::ordinary)?;
     if let Some(mark) = mark {
-        r2o_quic_http3_set_socket_mark(&socket, mark)?;
+        set_mark(&socket, mark).map_err(R2oQuicUdpSocketError::local_refusal)?;
     }
-    socket.connect(server)?;
+    socket
+        .connect(server)
+        .map_err(R2oQuicUdpSocketError::ordinary)?;
     Ok(socket)
+}
+
+impl R2oQuicUdpSocketError {
+    fn ordinary(source: std::io::Error) -> Self {
+        Self {
+            source,
+            local_refusal: false,
+        }
+    }
+
+    fn local_refusal(source: std::io::Error) -> Self {
+        Self {
+            source,
+            local_refusal: true,
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -61,6 +102,7 @@ fn r2o_quic_http3_set_socket_mark(_socket: &UdpSocket, _mark: u32) -> std::io::R
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct R2oQuicHttp3Result {
+    pub local_refusal: bool,
     pub handshake_confirmed: bool,
     pub status: u16,
     pub body_bytes: u64,
@@ -668,11 +710,29 @@ async fn r2o_quic_http3_wait_with_stall<F: Future>(
 mod tests {
     use super::{
         R2oQuicHttp3Budget, R2oQuicHttp3Stall, R2oQuicHttp3StallAction as Action,
-        r2o_quic_http3_authority,
+        r2o_quic_http3_authority, r2o_quic_http3_udp_socket_with_mark_setter,
     };
     use std::net::SocketAddr;
     use std::time::Duration;
     use tokio::time::Instant;
+
+    #[test]
+    fn ошибка_установки_quic_метки_классифицируется_как_локальный_отказ() {
+        let error = r2o_quic_http3_udp_socket_with_mark_setter(
+            "127.0.0.1:443".parse().unwrap(),
+            Some(0x2f),
+            |_, _| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "тестовый отказ SO_MARK",
+                ))
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.local_refusal);
+        assert_eq!(error.source.kind(), std::io::ErrorKind::PermissionDenied);
+    }
 
     #[test]
     fn заключает_ipv6_literal_в_скобки_в_http3_authority() {

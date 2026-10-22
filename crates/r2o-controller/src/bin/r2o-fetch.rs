@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use r2o_controller::fetch::{
-    FetchOptions, R2oFetchVolumeTxVerdict, fetch, r2o_fetch_measure_rx_volume,
+    FetchOptions, R2oFetchVolumeTxVerdict, r2o_fetch_detailed, r2o_fetch_measure_rx_volume,
     r2o_fetch_measure_tx_volume, r2o_fetch_quic_with_budget, r2o_fetch_snapshot_wire_len,
 };
 use r2o_controller::r2o_quic_http3::R2O_QUIC_HTTP3_DEFAULT_BUDGET_PACKETS;
@@ -372,28 +372,33 @@ fn run() -> Result<i32, String> {
                     "negotiated_tls": if r2o_handshake { 0x0304 } else { 0 },
                     "http_status": r2o_status,
                     "response_complete": r2o_result.data.complete,
-                    "level": if r2o_status > 0 { 3 } else if r2o_handshake { 2 } else { 0 },
-                    "local_refusal": false,
-                    "measured": true,
+                    "level": if r2o_result.data.local_refusal { 0 } else if r2o_status > 0 { 3 } else if r2o_handshake { 2 } else { 0 },
+                    "local_refusal": r2o_result.data.local_refusal,
+                    "measured": !r2o_result.data.local_refusal,
                     "name_ok": if r2o_handshake { 1 } else { -1 },
                     "reason": r2o_result.data.error.as_deref().unwrap_or(""),
                 })
             );
-            return Ok(i32::from(
-                !(r2o_result.data.complete || r2o_result.data.budget_passed),
-            ));
+            return Ok(if r2o_result.data.local_refusal {
+                2
+            } else {
+                i32::from(!(r2o_result.data.complete || r2o_result.data.budget_passed))
+            });
         }
         r2o_print_quic_result(&options, &r2o_result, r2o_quic_budget_packets);
-        return Ok(i32::from(
-            !(r2o_result.data.complete || r2o_result.data.budget_passed),
-        ));
+        return Ok(if r2o_result.data.local_refusal {
+            2
+        } else {
+            i32::from(!(r2o_result.data.complete || r2o_result.data.budget_passed))
+        });
     }
     let r2o_fetch_started = std::time::Instant::now();
-    let result = match fetch(&options) {
+    let result = match r2o_fetch_detailed(&options) {
         Ok(result) => result,
         Err(error) => {
             if r2o_json {
-                let r2o_no_tcp = error.starts_with("не удалось подключиться к ");
+                let r2o_no_tcp =
+                    !error.local_refusal && error.message.starts_with("не удалось подключиться к ");
                 println!(
                     "{}",
                     serde_json::json!({
@@ -418,16 +423,20 @@ fn run() -> Result<i32, String> {
                         "negotiated_tls": 0,
                         "http_status": 0,
                         "response_complete": false,
-                        "level": if r2o_no_tcp { 0 } else { 1 },
-                        "local_refusal": false,
-                        "measured": true,
+                        "level": if error.local_refusal || r2o_no_tcp { 0 } else { 1 },
+                        "local_refusal": error.local_refusal,
+                        "measured": !error.local_refusal,
                         "name_ok": -1,
-                        "reason": if r2o_no_tcp { "нет TCP" } else { &error },
+                        "reason": if error.local_refusal { &error.message } else if r2o_no_tcp { "нет TCP" } else { &error.message },
                     })
                 );
-                return Ok(1);
+                return Ok(if error.local_refusal { 2 } else { 1 });
             }
-            eprintln!("r2o-fetch: {error}");
+            if error.local_refusal {
+                eprintln!("r2o-fetch: НЕ ИЗМЕРЕНО: локальный отказ: {}", error.message);
+                return Ok(2);
+            }
+            eprintln!("r2o-fetch: {}", error.message);
             return Ok(1);
         }
     };
@@ -607,7 +616,9 @@ fn r2o_print_quic_result(
     }
     println!(
         "итог:        {}",
-        if result.data.complete {
+        if result.data.local_refusal {
+            "НЕ ИЗМЕРЕНО: локальный отказ"
+        } else if result.data.complete {
             "ОТВЕТ ПОЛУЧЕН ЦЕЛИКОМ"
         } else if result.data.budget_required && result.data.budget_passed {
             "БЮДЖЕТ ПРОЙДЕН, ПОВТОРНЫЕ ОТВЕТЫ ПОЛУЧЕНЫ"

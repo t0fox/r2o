@@ -34,7 +34,9 @@ use r2o_controller::http_search::{
     candidate_key_from_plan_text, candidate_keys, candidate_program, candidate_text,
     measured_poison_keys, stable_id,
 };
-use r2o_controller::https_probe::{HttpsProbeWorker, target_from_portal};
+use r2o_controller::https_probe::{
+    HttpsProbeWorker, target_from_http_response, target_from_portal,
+};
 use r2o_controller::plan_text::compile_text;
 #[cfg(unix)]
 use r2o_controller::r2o_late_rx::{R2oLateRxCache, R2oLateRxInput};
@@ -7600,6 +7602,9 @@ impl ControlClient {
                         response.binding.is_known(),
                     );
                     std::io::stdout().flush()?;
+                    if let Some((host, address)) = target_from_http_response(&response) {
+                        https_probe.submit(&host, address, std::time::Instant::now());
+                    }
                     if let Some((_, catalog, path, mark)) = &mut discovery {
                         let live = response.binding.is_known()
                             && !response.binding.temporary

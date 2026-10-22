@@ -1,6 +1,7 @@
 //! Ограниченная очередь проверок HTTPS для имён из HTTP-порталов.
 
 use crate::response::{HttpsProbeState, probe_https_state};
+use r2k_core::control::{HttpPortalEvent, HttpResponseEvent, KEY_LEN};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -27,26 +28,43 @@ pub struct HttpsProbeResult {
     pub state: HttpsProbeState,
 }
 
-pub fn target_from_portal(
-    event: &r2k_core::control::HttpPortalEvent,
-) -> Option<(String, SocketAddr)> {
-    if event.answered || event.key[37] != 6 || !matches!(event.key[0], 4 | 6) {
+pub fn target_from_portal(event: &HttpPortalEvent) -> Option<(String, SocketAddr)> {
+    if event.answered {
         return None;
     }
-    let host = std::str::from_utf8(&event.host).ok()?;
+    target_from_http_key(&event.key, &event.host)
+}
+
+/// Returns the HTTPS target for an unsolicited HTTP portal observation, which
+/// the datapath reports as HTTP_RESPONSE rather than HTTP_PORTAL.
+pub fn target_from_http_response(event: &HttpResponseEvent) -> Option<(String, SocketAddr)> {
+    if event.code != 3
+        || event.trial_id.iter().any(|byte| *byte != 0)
+        || u16::from_be_bytes([event.key[35], event.key[36]]) != 80
+    {
+        return None;
+    }
+    target_from_http_key(&event.key, &event.host)
+}
+
+fn target_from_http_key(key: &[u8; KEY_LEN], host_bytes: &[u8]) -> Option<(String, SocketAddr)> {
+    if key[37] != 6 || !matches!(key[0], 4 | 6) {
+        return None;
+    }
+    let host = std::str::from_utf8(host_bytes).ok()?;
     let host = crate::domain::normalize(host).ok()?;
     if r2k_core::control::encode_set_https(&host, 1).is_err() {
         return None;
     }
-    let low_port = u16::from_be_bytes([event.key[33], event.key[34]]);
-    let high_port = u16::from_be_bytes([event.key[35], event.key[36]]);
+    let low_port = u16::from_be_bytes([key[33], key[34]]);
+    let high_port = u16::from_be_bytes([key[35], key[36]]);
     let address = match (low_port, high_port) {
         (80, 80) => return None,
-        (80, _) => &event.key[1..17],
-        (_, 80) => &event.key[17..33],
+        (80, _) => &key[1..17],
+        (_, 80) => &key[17..33],
         _ => return None,
     };
-    let ip = match event.key[0] {
+    let ip = match key[0] {
         4 => IpAddr::V4(Ipv4Addr::new(
             address[0], address[1], address[2], address[3],
         )),
@@ -355,9 +373,9 @@ impl Drop for HttpsProbeWorker {
 
 #[cfg(test)]
 mod tests {
-    use super::{HttpsProbeWorker, target_from_portal};
+    use super::{HttpsProbeWorker, target_from_http_response, target_from_portal};
     use crate::response::HttpsProbeState;
-    use r2k_core::control::HttpPortalEvent;
+    use r2k_core::control::{BindingContext, HttpPortalEvent, HttpResponseEvent, KEY_LEN};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::time::Instant;
 
@@ -383,6 +401,69 @@ mod tests {
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2)), 443),
             ))
         );
+    }
+
+    fn portal_response() -> HttpResponseEvent {
+        let mut key = [0; KEY_LEN];
+        key[0] = 4;
+        key[1..5].copy_from_slice(&[192, 0, 2, 1]);
+        key[17..21].copy_from_slice(&[198, 51, 100, 2]);
+        key[33..35].copy_from_slice(&40_123_u16.to_be_bytes());
+        key[35..37].copy_from_slice(&80_u16.to_be_bytes());
+        key[37] = 6;
+        HttpResponseEvent {
+            key,
+            code: 3,
+            host: b"Example.test".to_vec(),
+            execution_id: 0,
+            plan_id: [0; 16],
+            trial_id: [0; 16],
+            request_ms: 0,
+            path: b"/blocked".to_vec(),
+            binding: BindingContext {
+                generation: 0,
+                kind: 0,
+                family: 0,
+                shape: 0,
+                temporary: false,
+                epoch: [0; 16],
+            },
+            status: 302,
+            body_bytes: 0,
+            request_no: 1,
+        }
+    }
+
+    #[test]
+    fn late_portal_response_starts_https_probe_without_trial() {
+        let response = portal_response();
+        assert_eq!(
+            target_from_http_response(&response),
+            Some((
+                "example.test".to_owned(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2)), 443),
+            ))
+        );
+    }
+
+    #[test]
+    fn only_unowned_http_portal_responses_start_https_probe() {
+        let mut response = portal_response();
+        response.trial_id[0] = 1;
+        assert_eq!(target_from_http_response(&response), None);
+
+        let mut response = portal_response();
+        response.code = 1;
+        assert_eq!(target_from_http_response(&response), None);
+
+        let mut response = portal_response();
+        response.key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+        assert_eq!(target_from_http_response(&response), None);
+
+        let mut response = portal_response();
+        response.key[33..35].copy_from_slice(&80_u16.to_be_bytes());
+        response.key[35..37].copy_from_slice(&40_123_u16.to_be_bytes());
+        assert_eq!(target_from_http_response(&response), None);
     }
 
     #[test]

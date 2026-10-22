@@ -186,6 +186,22 @@ pub struct FetchResult {
     pub r2o_resources: Vec<crate::r2o_resource::R2oResourceHint>,
 }
 
+/// Ошибка прямого HTTPS-замера с отдельной отметкой локального отказа.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct R2oFetchError {
+    pub message: String,
+    pub local_refusal: bool,
+}
+
+impl From<String> for R2oFetchError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            local_refusal: false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum R2oFetchEncoding {
     Identity,
@@ -282,19 +298,59 @@ pub fn r2o_fetch_quic_with_roots_and_budget(
     }
     let started = Instant::now();
     let address = resolve_target(options)?;
-    let socket = crate::r2o_quic_http3::r2o_quic_http3_udp_socket(address, options.mark)
-        .map_err(|error| format!("не удалось подготовить UDP-сокет для {address}: {error}"))?;
-    let local_port = socket
-        .local_addr()
-        .map_err(|error| format!("не удалось получить местный UDP-порт: {error}"))?
-        .port();
-    let r2o_socket_monitor = socket
-        .try_clone()
-        .map_err(|error| format!("не удалось отслеживать UDP-ошибки: {error}"))?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let socket =
+        match crate::r2o_quic_http3::r2o_quic_http3_udp_socket_detailed(address, options.mark) {
+            Ok(socket) => socket,
+            Err(error) if error.local_refusal => {
+                return Ok(r2o_quic_fetch_setup_failure(
+                    address,
+                    started,
+                    "метка измерительного сокета не поставилась".into(),
+                    true,
+                    budget_packets > 0,
+                ));
+            }
+            Err(error) => {
+                return Ok(r2o_quic_fetch_setup_failure(
+                    address,
+                    started,
+                    format!(
+                        "рукопожатия нет: не удалось подготовить UDP-сокет для {address}: {}",
+                        error.source
+                    ),
+                    false,
+                    budget_packets > 0,
+                ));
+            }
+        };
+    let local_port = match socket.local_addr() {
+        Ok(address) => address.port(),
+        Err(error) => {
+            return Ok(r2o_quic_fetch_setup_failure(
+                address,
+                started,
+                format!("рукопожатия нет: не удалось получить местный UDP-порт: {error}"),
+                false,
+                budget_packets > 0,
+            ));
+        }
+    };
+    let r2o_socket_monitor = socket.try_clone().ok();
+    let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|error| format!("не удалось запустить QUIC runtime: {error}"))?;
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return Ok(r2o_quic_fetch_setup_failure(
+                address,
+                started,
+                format!("рукопожатия нет: не удалось запустить QUIC runtime: {error}"),
+                false,
+                budget_packets > 0,
+            ));
+        }
+    };
     let mut data = runtime.block_on(crate::r2o_quic_http3::r2o_quic_http3_measure_with_wire_len(
         socket,
         address,
@@ -306,13 +362,12 @@ pub fn r2o_fetch_quic_with_roots_and_budget(
         options.wire_len,
     ));
     if !data.handshake_confirmed && data.status == 0 {
-        if let Some(error) = r2o_socket_monitor
-            .take_error()
-            .map_err(|error| format!("не удалось проверить UDP-сокет: {error}"))?
-        {
-            data.error = Some(format!(
-                "рукопожатия нет: датаграмма не прочиталась: {error}"
-            ));
+        if let Some(monitor) = r2o_socket_monitor {
+            if let Ok(Some(error)) = monitor.take_error() {
+                data.error = Some(format!(
+                    "рукопожатия нет: датаграмма не прочиталась: {error}"
+                ));
+            }
         }
     }
     Ok(R2oQuicFetchResult {
@@ -321,6 +376,26 @@ pub fn r2o_fetch_quic_with_roots_and_budget(
         elapsed: started.elapsed(),
         data,
     })
+}
+
+fn r2o_quic_fetch_setup_failure(
+    address: SocketAddr,
+    started: Instant,
+    reason: String,
+    local_refusal: bool,
+    budget_required: bool,
+) -> R2oQuicFetchResult {
+    R2oQuicFetchResult {
+        address,
+        local_port: 0,
+        elapsed: started.elapsed(),
+        data: crate::r2o_quic_http3::R2oQuicHttp3Result {
+            local_refusal,
+            budget_required,
+            error: Some(reason),
+            ..Default::default()
+        },
+    }
 }
 
 /// Выполнить один HTTPS GET и дождаться конца HTTP-тела либо срока ожидания.
@@ -398,19 +473,43 @@ pub fn r2o_fetch_with_encoding(
     r2o_fetch_with_roots_and_encoding(options, r2o_encoding, roots)
 }
 
+/// Выполнить HTTPS GET и сохранить признак локального отказа SO_MARK для CLI.
+pub fn r2o_fetch_detailed(options: &FetchOptions) -> Result<FetchResult, R2oFetchError> {
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    r2o_fetch_with_roots_and_encoding_detailed(options, R2oFetchEncoding::Identity, roots)
+}
+
 fn r2o_fetch_with_roots_and_encoding(
     options: &FetchOptions,
     r2o_encoding: R2oFetchEncoding,
     roots: RootCertStore,
 ) -> Result<FetchResult, String> {
+    r2o_fetch_with_roots_and_encoding_detailed(options, r2o_encoding, roots)
+        .map_err(|error| error.message)
+}
+
+fn r2o_fetch_with_roots_and_encoding_detailed(
+    options: &FetchOptions,
+    r2o_encoding: R2oFetchEncoding,
+    roots: RootCertStore,
+) -> Result<FetchResult, R2oFetchError> {
     options.validate()?;
     let address = resolve_target(options)?;
     let started = Instant::now();
     let deadline = started
         .checked_add(options.deadline)
         .ok_or_else(|| "срок ожидания слишком велик".to_owned())?;
-    let socket = connect_target(address, options.mark, remaining(deadline)?)
-        .map_err(|error| format!("не удалось подключиться к {address}: {error}"))?;
+    let socket = connect_target(address, options.mark, remaining(deadline)?).map_err(|error| {
+        R2oFetchError {
+            message: if error.local_refusal {
+                "метка измерительного сокета не поставилась".into()
+            } else {
+                format!("не удалось подключиться к {address}: {}", error.source)
+            },
+            local_refusal: error.local_refusal,
+        }
+    })?;
     r2o_fetch_connected_stream_with_roots_and_encoding(
         options,
         socket,
@@ -420,6 +519,7 @@ fn r2o_fetch_with_roots_and_encoding(
         roots,
         None,
     )
+    .map_err(Into::into)
 }
 
 fn r2o_fetch_connected_stream_with_roots_and_encoding(
@@ -1455,19 +1555,69 @@ fn set_deadline(stream: &TcpStream, deadline: Instant) -> Result<(), String> {
         .map_err(|error| format!("не удалось задать срок ожидания сокета: {error}"))
 }
 
+#[derive(Debug)]
+struct ConnectTargetError {
+    source: io::Error,
+    local_refusal: bool,
+}
+
+impl ConnectTargetError {
+    fn ordinary(source: io::Error) -> Self {
+        Self {
+            source,
+            local_refusal: false,
+        }
+    }
+
+    fn local_refusal(source: io::Error) -> Self {
+        Self {
+            source,
+            local_refusal: true,
+        }
+    }
+}
+
+impl From<io::Error> for ConnectTargetError {
+    fn from(source: io::Error) -> Self {
+        Self::ordinary(source)
+    }
+}
+
+impl std::fmt::Display for ConnectTargetError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
 fn connect_target(
     address: SocketAddr,
     mark: Option<u32>,
     timeout: Duration,
-) -> io::Result<TcpStream> {
+) -> Result<TcpStream, ConnectTargetError> {
     if let Some(mark) = mark {
         return connect_marked(address, mark, timeout);
     }
-    TcpStream::connect_timeout(&address, timeout)
+    TcpStream::connect_timeout(&address, timeout).map_err(Into::into)
 }
 
 #[cfg(target_os = "linux")]
-fn connect_marked(address: SocketAddr, mark: u32, timeout: Duration) -> io::Result<TcpStream> {
+fn connect_marked(
+    address: SocketAddr,
+    mark: u32,
+    timeout: Duration,
+) -> Result<TcpStream, ConnectTargetError> {
+    connect_marked_with_setter(address, mark, timeout, |fd, mark| {
+        set_socket_option(fd, libc::SOL_SOCKET, SO_MARK, mark as libc::c_int)
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn connect_marked_with_setter(
+    address: SocketAddr,
+    mark: u32,
+    timeout: Duration,
+    set_mark: impl FnOnce(std::os::fd::RawFd, u32) -> io::Result<()>,
+) -> Result<TcpStream, ConnectTargetError> {
     use std::os::fd::RawFd;
 
     let domain = if address.is_ipv4() {
@@ -1483,11 +1633,11 @@ fn connect_marked(address: SocketAddr, mark: u32, timeout: Duration) -> io::Resu
         )
     };
     if raw_fd < 0 {
-        return Err(io::Error::last_os_error());
+        return Err(io::Error::last_os_error().into());
     }
     let owned = unsafe { OwnedFd::from_raw_fd(raw_fd) };
     let fd = owned.as_raw_fd();
-    set_socket_option(fd, libc::SOL_SOCKET, SO_MARK, mark as libc::c_int)?;
+    set_mark(fd, mark).map_err(ConnectTargetError::local_refusal)?;
     set_socket_option(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, 1)?;
     let connect_result = connect_socket(fd, address)?;
     if connect_result != 0 {
@@ -1496,7 +1646,7 @@ fn connect_marked(address: SocketAddr, mark: u32, timeout: Duration) -> io::Resu
             error.raw_os_error(),
             Some(libc::EINPROGRESS | libc::EALREADY | libc::EINTR)
         ) {
-            return Err(error);
+            return Err(error.into());
         }
         let deadline = Instant::now()
             .checked_add(timeout)
@@ -1509,10 +1659,9 @@ fn connect_marked(address: SocketAddr, mark: u32, timeout: Duration) -> io::Resu
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "истёк срок подключения",
-                ));
+                return Err(
+                    io::Error::new(io::ErrorKind::TimedOut, "истёк срок подключения").into(),
+                );
             }
             let millis = remaining.as_millis().clamp(1, libc::c_int::MAX as u128) as libc::c_int;
             let result = unsafe { libc::poll(&mut poll_descriptor, 1, millis) };
@@ -1524,7 +1673,7 @@ fn connect_marked(address: SocketAddr, mark: u32, timeout: Duration) -> io::Resu
             }
             let error = io::Error::last_os_error();
             if error.kind() != io::ErrorKind::Interrupted {
-                return Err(error);
+                return Err(error.into());
             }
         }
         let mut socket_error: libc::c_int = 0;
@@ -1539,10 +1688,10 @@ fn connect_marked(address: SocketAddr, mark: u32, timeout: Duration) -> io::Resu
             )
         };
         if result != 0 {
-            return Err(io::Error::last_os_error());
+            return Err(io::Error::last_os_error().into());
         }
         if socket_error != 0 {
-            return Err(io::Error::from_raw_os_error(socket_error));
+            return Err(io::Error::from_raw_os_error(socket_error).into());
         }
     }
     let fd: RawFd = owned.into_raw_fd();
@@ -1552,11 +1701,15 @@ fn connect_marked(address: SocketAddr, mark: u32, timeout: Duration) -> io::Resu
 }
 
 #[cfg(not(target_os = "linux"))]
-fn connect_marked(_address: SocketAddr, _mark: u32, _timeout: Duration) -> io::Result<TcpStream> {
-    Err(io::Error::new(
+fn connect_marked(
+    _address: SocketAddr,
+    _mark: u32,
+    _timeout: Duration,
+) -> Result<TcpStream, ConnectTargetError> {
+    Err(ConnectTargetError::local_refusal(io::Error::new(
         io::ErrorKind::Unsupported,
         "метка SO_MARK доступна только в Linux",
-    ))
+    )))
 }
 
 #[cfg(target_os = "linux")]
@@ -1629,6 +1782,26 @@ fn connect_socket(fd: libc::c_int, address: SocketAddr) -> io::Result<libc::c_in
 mod tests {
     use super::*;
     use crate::r2o_volume::R2oVolumeRxEncoding;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ошибка_установки_tcp_метки_классифицируется_как_локальный_отказ() {
+        let error = connect_marked_with_setter(
+            "127.0.0.1:443".parse().unwrap(),
+            0x2f,
+            Duration::from_secs(1),
+            |_, _| {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "тестовый отказ SO_MARK",
+                ))
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.local_refusal);
+        assert_eq!(error.source.kind(), io::ErrorKind::PermissionDenied);
+    }
 
     #[test]
     fn запрос_проверки_передаёт_выбранное_кодирование() {
