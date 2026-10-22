@@ -267,6 +267,9 @@ impl NamePlans {
                     });
             }
             if r2k_core::stun::is_binding_request(payload) {
+                if let Some((r2o_plan, _, _, _)) = self.voice_address_binding(packet) {
+                    return Some(r2o_plan);
+                }
                 return self.find_addr(view.dst, SHAPE_VOICE);
             }
             let source_port = packet
@@ -555,7 +558,9 @@ impl NamePlans {
         let r2o_source_port = u16::from_be_bytes([r2o_udp[0], r2o_udp[1]]);
         let r2o_destination_port = u16::from_be_bytes([r2o_udp[2], r2o_udp[3]]);
         let r2o_payload = packet.get(view.udp_payload_range(packet)?)?;
-        if !r2k_core::stun::is_discord_voice_request(r2o_payload, r2o_destination_port) {
+        if !r2k_core::stun::is_discord_voice_request(r2o_payload, r2o_destination_port)
+            && !r2k_core::stun::is_binding_request(r2o_payload)
+        {
             return None;
         }
         let r2o_source = Ipv4Addr::from(<[u8; 4]>::try_from(&view.src.bytes()[..4]).ok()?);
@@ -2394,6 +2399,36 @@ mod tests {
         r2o_other_client[12..16].copy_from_slice(&[192, 0, 2, 99]);
         assert!(plans.select(&r2o_other_client).is_none());
         assert!(plans.select(&udp_packet(&r2o_request, 50_005)).is_none());
+    }
+
+    #[test]
+    fn обычный_stun_на_точной_voice_цели_получает_временный_план() {
+        use std::net::{Ipv4Addr, SocketAddrV4};
+
+        let client = Ipv4Addr::new(192, 0, 2, 1);
+        let server = SocketAddrV4::new(Ipv4Addr::new(198, 51, 100, 2), 3478);
+        let trial_id = [0x72; 16];
+        let mut plan = plan_header(1, 2);
+        plan.extend_from_slice(&[0x00, 0x01, 0x00, 0x10]);
+        plan.extend_from_slice(&[0x26; 16]);
+        plan.extend_from_slice(&[0x00, 0x02, 0x00, 0x02, 17, r2k_core::plan::PROTO_VOICE]);
+        let command =
+            encode_set_voice_addr_probe(client, server, 120_000, &plan, trial_id).unwrap();
+        let command = control::read_frame(&mut std::io::Cursor::new(command)).unwrap();
+        let mut plans = NamePlans::default();
+        assert!(plans.handle(&command).ok);
+
+        let mut discovery = [0; 74];
+        discovery[..4].copy_from_slice(&[0, 1, 0, 70]);
+        let discovery_packet = udp_packet(&discovery, server.port());
+        assert_eq!(plans.select(&discovery_packet).unwrap().id, [0x26; 16]);
+
+        let request = r2k_core::stun::binding_request([0x19; 12]);
+        let stun_packet = udp_packet(&request, server.port());
+        let applied = plans.applied_event_for_packet(&stun_packet, 8).unwrap();
+        assert_eq!(applied.plan_id, [0x26; 16]);
+        assert_eq!(applied.trial_id, trial_id);
+        assert!(applied.binding.temporary);
     }
 
     #[test]
