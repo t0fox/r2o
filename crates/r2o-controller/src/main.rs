@@ -2820,6 +2820,10 @@ const R2O_CLEAN_HANDSHAKE_CAPACITY: usize = 16;
 const R2O_CLEAN_HANDSHAKE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 #[cfg(unix)]
 const R2O_TCP_HELLO_CAPACITY: usize = 128;
+#[cfg(unix)]
+const R2O_RECENT_TCP_NAME_CAPACITY: usize = 512;
+#[cfg(unix)]
+const R2O_RECENT_TCP_NAME_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 #[cfg(unix)]
 #[derive(Default)]
@@ -2916,6 +2920,80 @@ impl R2oTcpHelloCache {
             return None;
         }
         r2o_controller::discovery::DiscoveryTarget::from_event(hello)
+    }
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct R2oRecentTcpNameCache {
+    entries: Vec<Option<([u8; r2k_core::control::KEY_LEN], String, std::time::Instant)>>,
+    next: usize,
+}
+
+#[cfg(unix)]
+impl R2oRecentTcpNameCache {
+    fn note(&mut self, hello: &HelloEvent, now: std::time::Instant) {
+        if hello.key[37] != 6 {
+            return;
+        }
+        let Some(name) = hello
+            .host
+            .as_deref()
+            .and_then(|host| std::str::from_utf8(host).ok())
+            .and_then(|host| r2o_controller::domain::normalize(host).ok())
+        else {
+            return;
+        };
+
+        if let Some((_, seen_name, seen_at)) = self
+            .entries
+            .iter_mut()
+            .flatten()
+            .find(|(key, _, _)| key == &hello.key)
+        {
+            *seen_name = name;
+            *seen_at = now;
+            return;
+        }
+
+        let entry = Some((hello.key, name, now));
+        if self.entries.len() < R2O_RECENT_TCP_NAME_CAPACITY {
+            self.entries.push(entry);
+        } else {
+            self.entries[self.next] = entry;
+            self.next = (self.next + 1) % R2O_RECENT_TCP_NAME_CAPACITY;
+        }
+    }
+
+    fn ech_witness_names(
+        &self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        now: std::time::Instant,
+    ) -> Vec<(String, bool)> {
+        let Ok(endpoint) = target.endpoint.parse::<std::net::SocketAddr>() else {
+            return Vec::new();
+        };
+        self.entries
+            .iter()
+            .flatten()
+            .filter_map(|(key, name, seen_at)| {
+                if now.saturating_duration_since(*seen_at) > R2O_RECENT_TCP_NAME_TTL
+                    || key[0] != target.family
+                {
+                    return None;
+                }
+                let same_address = match (target.family, endpoint.ip()) {
+                    (4, std::net::IpAddr::V4(address)) => {
+                        key[1..5] == address.octets() || key[17..21] == address.octets()
+                    }
+                    (6, std::net::IpAddr::V6(address)) => {
+                        key[1..17] == address.octets() || key[17..33] == address.octets()
+                    }
+                    _ => false,
+                };
+                Some((name.clone(), same_address))
+            })
+            .collect()
     }
 }
 
@@ -3770,6 +3848,7 @@ impl DiscoveryWorker {
         measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
         commands: SyncSender<HttpSearchCommand>,
         catalog_path: PathBuf,
+        recent_tcp_names: Arc<std::sync::Mutex<R2oRecentTcpNameCache>>,
     ) -> Self {
         let client_hellos = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let runner_client_hellos = Arc::clone(&client_hellos);
@@ -3777,6 +3856,7 @@ impl DiscoveryWorker {
             HashMap::<String, std::time::Instant>::new(),
         ));
         let runner_ech_challenges = Arc::clone(&ech_challenges);
+        let runner_recent_tcp_names = Arc::clone(&recent_tcp_names);
         let ech_rx_cursor = Arc::new(std::sync::Mutex::new(HashMap::<
             r2o_controller::discovery::DiscoveryTarget,
             usize,
@@ -3791,7 +3871,15 @@ impl DiscoveryWorker {
             let mut ech_witness_candidates = if target.shape == SHAPE_ECH_TCP {
                 match Catalog::load(&catalog_path) {
                     Ok(catalog) => {
-                        r2o_controller::discovery::r2o_ech_witness_candidates(&catalog, &target)
+                        let recent_names = runner_recent_tcp_names
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .ech_witness_names(&target, std::time::Instant::now());
+                        r2o_controller::discovery::r2o_ech_witness_candidates(
+                            &catalog,
+                            &target,
+                            &recent_names,
+                        )
                     }
                     Err(error) => {
                         eprintln!("ECH-свидетели не прочитаны из каталога: {error}");
@@ -5051,6 +5139,7 @@ impl ControlClient {
         let http_search = discovery
             .as_ref()
             .map(|_| HttpSearchWorker::new(measurement_gate.clone()));
+        let tcp_witness_names = Arc::new(std::sync::Mutex::new(R2oRecentTcpNameCache::default()));
         let mut discovery = discovery.map(|(catalog, path, mark)| {
             (
                 DiscoveryWorker::new_with_confirmation(
@@ -5062,6 +5151,7 @@ impl ControlClient {
                         .expect("HTTP worker существует при активном Discovery")
                         .command_sender(),
                     path.clone(),
+                    Arc::clone(&tcp_witness_names),
                 ),
                 catalog,
                 path,
@@ -6299,6 +6389,10 @@ impl ControlClient {
                 if hello.key[37] == 6 {
                     let now = std::time::Instant::now();
                     tcp_hello_names.note(hello.clone(), now);
+                    tcp_witness_names
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .note(&hello, now);
                 }
                 if hello.key[37] == 17 {
                     let now = std::time::Instant::now();
@@ -8621,6 +8715,53 @@ mod tests {
             cache
                 .target_for_tcp_flow(&key, now + std::time::Duration::from_secs(61))
                 .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn кэш_недавних_tcp_имён_даёт_свидетелей_с_адресом_и_сроком_жизни() {
+        let now = std::time::Instant::now();
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "cloudflare-ech.com".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: r2k_core::control::SHAPE_ECH_TCP,
+        };
+        let hello = |name: &[u8], server: [u8; 4], port: u16| {
+            let mut key = [0; KEY_LEN];
+            key[0] = 4;
+            key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+            key[17..21].copy_from_slice(&server);
+            key[33..35].copy_from_slice(&port.to_be_bytes());
+            key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+            key[37] = 6;
+            HelloEvent {
+                key,
+                host: Some(name.to_vec()),
+                shape: Some(SHAPE_MODERN),
+                r2o_wire_len: None,
+                quic_snapshot: None,
+            }
+        };
+        let mut cache = super::R2oRecentTcpNameCache::default();
+        cache.note(&hello(b"SAME.Example.", [198, 51, 100, 80], 41_001), now);
+        cache.note(
+            &hello(b"stale.example", [203, 0, 113, 5], 41_002),
+            now - std::time::Duration::from_secs(601),
+        );
+        cache.note(&hello(b"cross.example", [203, 0, 113, 5], 41_003), now);
+
+        assert_eq!(
+            cache.ech_witness_names(&target, now),
+            [
+                ("same.example".into(), true),
+                ("cross.example".into(), false),
+            ]
+        );
+        assert_eq!(
+            cache.ech_witness_names(&target, now + std::time::Duration::from_secs(601)),
+            []
         );
     }
 
@@ -11564,9 +11705,11 @@ mod tests {
         let (started, second_started_at) =
             second_started.expect("свежее подозрение должно начать замер после паузы");
         assert_eq!(started, "fresh.example");
+        let start_gap = second_started_at.duration_since(first_started_at);
         assert!(
-            second_started_at.duration_since(first_started_at) >= Duration::from_millis(250),
-            "между стартами Discovery должно пройти не менее 250 мс"
+            start_gap >= Duration::from_millis(250),
+            "между стартами Discovery должно пройти не менее 250 мс, прошло {} мс",
+            start_gap.as_millis()
         );
     }
 

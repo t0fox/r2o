@@ -157,7 +157,11 @@ impl DiscoveryTarget {
 const R2O_ECH_WITNESS_LIMIT: usize = 32;
 
 /// Собрать ограниченный список HTTPS-владельцев, способных подтвердить ECH.
-pub fn r2o_ech_witness_candidates(catalog: &Catalog, target: &DiscoveryTarget) -> Vec<String> {
+pub fn r2o_ech_witness_candidates(
+    catalog: &Catalog,
+    target: &DiscoveryTarget,
+    recent_names: &[(String, bool)],
+) -> Vec<String> {
     if target.shape != SHAPE_ECH_TCP {
         return Vec::new();
     }
@@ -193,6 +197,12 @@ pub fn r2o_ech_witness_candidates(catalog: &Catalog, target: &DiscoveryTarget) -
         }
     }
 
+    for (name, same_address) in recent_names {
+        if *same_address {
+            add(name);
+        }
+    }
+
     let mut confirmed_names: Vec<_> = catalog
         .boxes
         .iter()
@@ -209,6 +219,12 @@ pub fn r2o_ech_witness_candidates(catalog: &Catalog, target: &DiscoveryTarget) -
     confirmed_names.sort_by(|left, right| right.0.cmp(&left.0));
     for (_, name) in confirmed_names {
         add(name);
+    }
+
+    for (name, same_address) in recent_names {
+        if !same_address {
+            add(name);
+        }
     }
 
     candidates
@@ -827,13 +843,52 @@ mod tests {
         };
 
         assert_eq!(
-            r2o_ech_witness_candidates(&catalog, &target),
+            r2o_ech_witness_candidates(&catalog, &target, &[]),
             [
                 "family-witness.example",
                 "other-family.example",
                 "third-witness.example",
                 "new-target.example",
                 "old-target.example",
+            ]
+        );
+    }
+
+    #[test]
+    fn r2o_ech_свидетели_ставят_свежие_имена_по_приоритету_адреса() {
+        use crate::catalog::{Binding, BoxRecord, Catalog};
+
+        let target = DiscoveryTarget {
+            host: "cloudflare-ech.com".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: r2k_core::control::SHAPE_ECH_TCP,
+        };
+        let catalog = Catalog {
+            boxes: vec![BoxRecord {
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: "own.example".into(),
+                    level: 3,
+                    confirmed: 100,
+                    enabled: true,
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+
+        let recent_names = vec![
+            ("same-address.example".into(), true),
+            ("other-address.example".into(), false),
+        ];
+        assert_eq!(
+            r2o_ech_witness_candidates(&catalog, &target, &recent_names),
+            [
+                "same-address.example",
+                "own.example",
+                "other-address.example"
             ]
         );
     }

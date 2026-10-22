@@ -5,7 +5,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 const R2O_DEFAULT_MEASUREMENT_LIMIT: usize = 2;
-const R2O_MEASUREMENT_START_GAP_MS: u64 = 250;
+const R2O_MEASUREMENT_START_GAP_MS: u64 = 260; // 10 мс покрывают передачу разрешения от планировщика рабочему потоку.
 const R2O_CPU_SAMPLE_INTERVAL_MS: u64 = 1000;
 const R2O_CPU_EWMA_INTERVAL_MS: u64 = 10_000;
 const R2O_CPU_SHRINK_FREE: u64 = 250_000;
