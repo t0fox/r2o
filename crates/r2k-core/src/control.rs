@@ -9,6 +9,7 @@ pub const FRAME_MAX: usize = 65_536;
 pub const KEY_LEN: usize = 38;
 pub const MAX_DNS_NAME_LEN: usize = 253;
 pub const EVENT_HELLO: u16 = 0x0001;
+pub const EVENT_REFUSED: u16 = 0x0004;
 pub const EVENT_APPLIED: u16 = 0x0009;
 pub const EVENT_ACK: u16 = 0x0008;
 pub const EVENT_PROTOCOL: u16 = 0x000a;
@@ -156,6 +157,18 @@ impl AppliedEvent {
         body.extend_from_slice(&self.binding.epoch);
         Some(body)
     }
+}
+
+/// Refused or incompletely sent plan, correlated with its original trial.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RefusedEvent {
+    pub key: [u8; KEY_LEN],
+    pub code: u8,
+    pub plan_id: [u8; 16],
+    pub trial_id: [u8; 16],
+    pub client_shape: Option<u8>,
+    pub execution_id: Option<u64>,
+    pub binding: Option<BindingContext>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1318,6 +1331,169 @@ pub fn decode_applied(frame: &Frame) -> Result<AppliedEvent, &'static str> {
         ),
         binding,
     })
+}
+
+pub fn decode_refused(frame: &Frame) -> Result<RefusedEvent, &'static str> {
+    const BASE_LEN: usize = KEY_LEN + 1 + 16 + 16;
+    if frame.kind != EVENT_REFUSED
+        || !(frame.body.len() == BASE_LEN
+            || frame.body.len() == BASE_LEN + 1
+            || frame.body.len() == BASE_LEN + 1 + EXECUTION_CONTEXT_LEN)
+    {
+        return Err("неверный размер события REFUSED");
+    }
+    let key: [u8; KEY_LEN] = frame.body[..KEY_LEN]
+        .try_into()
+        .map_err(|_| "неверный ключ события REFUSED")?;
+    if !valid_flow_key(&key) {
+        return Err("событие REFUSED содержит неверный ключ потока");
+    }
+    let code = frame.body[KEY_LEN];
+    let plan_start = KEY_LEN + 1;
+    let plan_id = frame.body[plan_start..plan_start + 16]
+        .try_into()
+        .map_err(|_| "неверный идентификатор плана в событии REFUSED")?;
+    let trial_start = plan_start + 16;
+    let trial_id = frame.body[trial_start..trial_start + 16]
+        .try_into()
+        .map_err(|_| "неверный идентификатор испытания в событии REFUSED")?;
+    let client_shape = if frame.body.len() > BASE_LEN {
+        let shape = frame.body[BASE_LEN];
+        if shape > SHAPE_HTTP {
+            return Err("событие REFUSED содержит неизвестную форму ClientHello");
+        }
+        Some(shape)
+    } else {
+        None
+    };
+
+    let (execution_id, binding) = if frame.body.len() == BASE_LEN + 1 + EXECUTION_CONTEXT_LEN {
+        let context = &frame.body[BASE_LEN + 1..];
+        let binding = BindingContext {
+            generation: u64::from_be_bytes(
+                context[8..16]
+                    .try_into()
+                    .map_err(|_| "неверное поколение привязки REFUSED")?,
+            ),
+            kind: context[16],
+            family: context[17],
+            shape: context[18],
+            temporary: match context[19] {
+                0 => false,
+                1 => true,
+                _ => return Err("неверный признак временной привязки REFUSED"),
+            },
+            epoch: context[20..36]
+                .try_into()
+                .map_err(|_| "неверная эпоха таблицы привязок REFUSED")?,
+        };
+        if !valid_binding(&binding) {
+            return Err("событие REFUSED содержит неверную привязку");
+        }
+        (
+            Some(u64::from_be_bytes(
+                context[..8]
+                    .try_into()
+                    .map_err(|_| "неверный идентификатор исполнения REFUSED")?,
+            )),
+            Some(binding),
+        )
+    } else {
+        (None, None)
+    };
+
+    Ok(RefusedEvent {
+        key,
+        code,
+        plan_id,
+        trial_id,
+        client_shape,
+        execution_id,
+        binding,
+    })
+}
+
+#[cfg(test)]
+mod refused_event_tests {
+    use super::{
+        BindingContext, EVENT_REFUSED, Frame, KEY_LEN, RefusedEvent, SHAPE_LEGACY, decode_refused,
+    };
+
+    fn key() -> [u8; KEY_LEN] {
+        let mut key = [0; KEY_LEN];
+        key[0] = 4;
+        key[1..5].copy_from_slice(&[192, 0, 2, 5]);
+        key[17..21].copy_from_slice(&[198, 51, 100, 9]);
+        key[33..35].copy_from_slice(&443_u16.to_be_bytes());
+        key[35..37].copy_from_slice(&51_234_u16.to_be_bytes());
+        key[37] = 6;
+        key
+    }
+
+    #[test]
+    fn refused_decodes_exact_trial_and_execution_context() {
+        let expected = RefusedEvent {
+            key: key(),
+            code: 3,
+            plan_id: [7; 16],
+            trial_id: [8; 16],
+            client_shape: Some(SHAPE_LEGACY),
+            execution_id: Some(9),
+            binding: Some(BindingContext {
+                generation: 10,
+                kind: 1,
+                family: 4,
+                shape: SHAPE_LEGACY,
+                temporary: true,
+                epoch: [11; 16],
+            }),
+        };
+        let mut body = Vec::new();
+        body.extend_from_slice(&expected.key);
+        body.push(expected.code);
+        body.extend_from_slice(&expected.plan_id);
+        body.extend_from_slice(&expected.trial_id);
+        body.push(expected.client_shape.unwrap());
+        body.extend_from_slice(&expected.execution_id.unwrap().to_be_bytes());
+        body.extend_from_slice(&expected.binding.unwrap().generation.to_be_bytes());
+        body.extend_from_slice(&[
+            expected.binding.unwrap().kind,
+            expected.binding.unwrap().family,
+            expected.binding.unwrap().shape,
+            u8::from(expected.binding.unwrap().temporary),
+        ]);
+        body.extend_from_slice(&expected.binding.unwrap().epoch);
+
+        assert_eq!(
+            decode_refused(&Frame {
+                kind: EVENT_REFUSED,
+                body,
+            }),
+            Ok(expected)
+        );
+    }
+
+    #[test]
+    fn refused_accepts_legacy_identity_and_rejects_truncation() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&key());
+        body.push(0);
+        body.extend_from_slice(&[1; 16]);
+        body.extend_from_slice(&[2; 16]);
+        let frame = Frame {
+            kind: EVENT_REFUSED,
+            body,
+        };
+        let event = decode_refused(&frame).unwrap();
+        assert_eq!(event.code, 0);
+        assert_eq!(event.client_shape, None);
+        assert_eq!(event.execution_id, None);
+        assert_eq!(event.binding, None);
+
+        let mut truncated = frame;
+        truncated.body.pop();
+        assert!(decode_refused(&truncated).is_err());
+    }
 }
 
 pub fn decode_hello(frame: &Frame) -> Result<HelloEvent, &'static str> {

@@ -8,18 +8,19 @@ use r2k_core::control::{
     EVENT_R2O_TCP_CLEAN_HANDSHAKE, EVENT_R2O_TCP_EARLY_RST, EVENT_R2O_TCP_EXCHANGE,
     EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_REPEAT, EVENT_R2O_TCP_RST_AFTER_APP,
     EVENT_R2O_TCP_RST_CUT, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF,
-    EVENT_R2O_VOICE_SUSPECT, Frame, HelloEvent, PROTOCOL_VERSION, RELEASE_ID, SHAPE_ECH_TCP,
-    SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, VOICE_ADDR_PROBE_LEASE_MAX_MS,
-    decode_ack, decode_applied, decode_client_shape, decode_greeting, decode_hello,
-    decode_http_portal, decode_http_response, decode_r2o_quic_stall, decode_r2o_quic_suspect,
-    decode_r2o_tcp_clean_handshake, decode_r2o_tcp_early_rst, decode_r2o_tcp_exchange,
-    decode_r2o_tcp_fin_retry, decode_r2o_tcp_repeat, decode_r2o_tcp_rst_after_app,
-    decode_r2o_tcp_rst_cut_signal, decode_r2o_tcp_silence, decode_r2o_tcp_stall,
-    decode_r2o_voice_proof, decode_r2o_voice_suspect, encode_arm_shape, encode_delete_addr,
-    encode_delete_addr_probe, encode_delete_name, encode_delete_name_probe,
-    encode_delete_voice_addr_probe, encode_frame, encode_set_addr, encode_set_addr_probe,
-    encode_set_bypass, encode_set_https, encode_set_name, encode_set_name_probe, encode_set_suffix,
-    encode_set_tcp_stall_budgets, encode_set_voice_addr, encode_set_voice_addr_probe, read_frame,
+    EVENT_R2O_VOICE_SUSPECT, EVENT_REFUSED, Frame, HelloEvent, PROTOCOL_VERSION, RELEASE_ID,
+    SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE,
+    VOICE_ADDR_PROBE_LEASE_MAX_MS, decode_ack, decode_applied, decode_client_shape,
+    decode_greeting, decode_hello, decode_http_portal, decode_http_response, decode_r2o_quic_stall,
+    decode_r2o_quic_suspect, decode_r2o_tcp_clean_handshake, decode_r2o_tcp_early_rst,
+    decode_r2o_tcp_exchange, decode_r2o_tcp_fin_retry, decode_r2o_tcp_repeat,
+    decode_r2o_tcp_rst_after_app, decode_r2o_tcp_rst_cut_signal, decode_r2o_tcp_silence,
+    decode_r2o_tcp_stall, decode_r2o_voice_proof, decode_r2o_voice_suspect, decode_refused,
+    encode_arm_shape, encode_delete_addr, encode_delete_addr_probe, encode_delete_name,
+    encode_delete_name_probe, encode_delete_voice_addr_probe, encode_frame, encode_set_addr,
+    encode_set_addr_probe, encode_set_bypass, encode_set_https, encode_set_name,
+    encode_set_name_probe, encode_set_suffix, encode_set_tcp_stall_budgets, encode_set_voice_addr,
+    encode_set_voice_addr_probe, read_frame,
 };
 use r2k_core::plan::{PROTO_HTTP, PROTO_VOICE, Plan};
 use r2o_controller::ask::{
@@ -303,6 +304,7 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
         .transpose()?;
     let shape = hello_shape(&trigger_bytes)?;
     let mut properties = r2o_controller::classify::DpiProps::default();
+    let mut passed_question = None;
 
     for (index, question) in AskQuestion::ALL.iter().copied().enumerate() {
         if question == AskQuestion::ProtocolParse && control_trigger.is_none() {
@@ -334,12 +336,20 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
             }
         };
         let plan_records = compile_text(&plan_text)?;
+        let plan_len = plan_records.len();
         if plan.id != plan_id {
             return Err("план вопроса потерял случайный идентификатор".into());
         }
         let bound = match BoundTcpProbe::open(family, Some(0)) {
             Ok(bound) => bound,
             Err(error) => {
+                r2o_print_ask_trace(
+                    plan_len,
+                    "не отправлен",
+                    None,
+                    None,
+                    "не удалось занять порт вопроса",
+                );
                 println!(
                     "[{}/5] {} — не задан: не удалось занять порт вопроса ({error})",
                     index + 1,
@@ -369,6 +379,13 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
                     )
                     .into());
                 }
+                r2o_print_ask_trace(
+                    plan_len,
+                    "SET_NAME_PROBE не подтверждён",
+                    None,
+                    None,
+                    "SET_NAME_PROBE не подтверждён",
+                );
                 println!(
                     "[{}/5] {} — не измерено: нет подтверждения плана ({error}); временный план снят",
                     index + 1,
@@ -379,6 +396,13 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
         };
         if ack.trial_id != Some(trial_id) {
             client.delete_name_probe(&options.sni, shape, family, source_port)?;
+            r2o_print_ask_trace(
+                plan_len,
+                "получено чужое подтверждение",
+                None,
+                None,
+                "trial ID подтверждения не совпал",
+            );
             println!(
                 "[{}/5] {} — не измерено: подтверждение пришло с чужим trial ID; временный план снят",
                 index + 1,
@@ -387,6 +411,13 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
             continue;
         }
         if !ack.ok {
+            r2o_print_ask_trace(
+                plan_len,
+                &format!("датапат отверг — {}", r2o_ask_ack_reason(ack.reason)),
+                None,
+                None,
+                "датапат отверг план",
+            );
             println!(
                 "[{}/5] {} — план не принят датапатом (код {})",
                 index + 1,
@@ -408,6 +439,13 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
                     )
                     .into());
                 }
+                r2o_print_ask_trace(
+                    plan_len,
+                    "датапат принял",
+                    None,
+                    None,
+                    "обращение к цели не состоялось",
+                );
                 println!(
                     "[{}/5] {} — не измерено: соединение не установлено ({error}); временный план снят",
                     index + 1,
@@ -417,8 +455,15 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
             }
         };
         if local_port != source_port {
-            drop(stream);
             client.delete_name_probe(&options.sni, shape, family, source_port)?;
+            drop(stream);
+            r2o_print_ask_trace(
+                plan_len,
+                "датапат принял",
+                Some(local_port),
+                None,
+                "локальный порт сокета изменился",
+            );
             println!(
                 "[{}/5] {} — не измерено: локальный порт изменился; временный план снят",
                 index + 1,
@@ -427,14 +472,25 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
             continue;
         }
         let expected_key = r2o_ask_flow_key(local_ip, local_port, destination);
-        let sent = stream.write_all(&trigger_bytes);
-        let proof = match sent {
-            Ok(()) => {
-                client.wait_for_ask_proof(trial_id, plan_id, expected_key, family, shape, ASK_WAIT)
-            }
-            Err(error) => Err(Box::<dyn Error>::from(error)),
-        };
-        drop(stream);
+        if let Err(error) = stream.write_all(&trigger_bytes) {
+            drop(stream);
+            client.delete_name_probe(&options.sni, shape, family, source_port)?;
+            r2o_print_ask_trace(
+                plan_len,
+                "датапат принял",
+                Some(local_port),
+                None,
+                "снимок ClientHello не отправился полностью",
+            );
+            println!(
+                "[{}/5] {} — не измерено: снимок ClientHello не отправился ({error}); временный план снят",
+                index + 1,
+                question.label()
+            );
+            continue;
+        }
+        let proof =
+            client.wait_for_ask_proof(trial_id, plan_id, expected_key, family, shape, ASK_WAIT);
         let proof = match proof {
             Ok(proof) => proof,
             Err(error) => {
@@ -446,26 +502,70 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
                     )
                     .into());
                 }
-                return Err(format!(
-                    "вопрос {} не удалось проверить: {error}; временный план снят",
+                drop(stream);
+                r2o_print_ask_trace(
+                    plan_len,
+                    "датапат принял",
+                    Some(local_port),
+                    None,
+                    "сбор события обмена прервался",
+                );
+                println!(
+                    "[{}/5] {} — не измерено: сбор события обмена прервался ({error}); временный план снят",
+                    index + 1,
                     question.label()
-                )
-                .into());
+                );
+                continue;
             }
         };
 
         if proof.applied && proof.exchange_seen && proof.server_hello {
+            drop(stream);
             record_question_passed(&mut properties, question);
+            r2o_print_ask_trace(
+                plan_len,
+                "датапат принял",
+                Some(local_port),
+                Some(&proof),
+                "вопрос прошёл",
+            );
             println!(
                 "[{}/5] {} — пройден: план применён и получен ServerHello",
                 index + 1,
                 question.label()
             );
             println!("план вопроса, подтверждённый этим измерением:\n{plan_text}");
+            passed_question = Some(index);
             break;
         }
 
+        if let Some(code) = proof.unsent_code {
+            client.delete_name_probe(&options.sni, shape, family, source_port)?;
+            drop(stream);
+            r2o_print_ask_trace(
+                plan_len,
+                "датапат принял",
+                Some(local_port),
+                Some(&proof),
+                "посылка плана не покинула машину",
+            );
+            println!(
+                "[{}/5] {} — не измерено: план не был полностью отправлен (код отказа {code}); временный план снят",
+                index + 1,
+                question.label()
+            );
+            continue;
+        }
+
         client.delete_name_probe(&options.sni, shape, family, source_port)?;
+        drop(stream);
+        r2o_print_ask_trace(
+            plan_len,
+            "датапат принял",
+            Some(local_port),
+            Some(&proof),
+            "вопрос не получил полного доказательства",
+        );
         let missing = if !proof.applied {
             "план к потоку не применён"
         } else if !proof.exchange_seen {
@@ -478,6 +578,16 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
             index + 1,
             question.label()
         );
+    }
+
+    if let Some(passed_index) = passed_question {
+        for (index, question) in AskQuestion::ALL.iter().enumerate().skip(passed_index + 1) {
+            println!(
+                "[{}/5] {} — не задан: предыдущий вопрос уже дал ответ, опрос остановлен",
+                index + 1,
+                question.label()
+            );
+        }
     }
 
     println!("итоговые свойства инспектора:");
@@ -4829,12 +4939,19 @@ impl DiscoveryWorker {
             let mut target = target;
             let ech_grease =
                 ech_config.is_none() && r2o_controller::discovery::regrade_ech_grease(&mut target);
+            let white_name = candidate_catalog
+                .as_ref()
+                .and_then(|catalog| catalog.network_whitelist.as_ref())
+                .map(|network| network.name.as_str())
+                .filter(|name| !name.is_empty())
+                .unwrap_or("hcaptcha.com");
             let outcome = r2o_classify_discovery_target_with_client_hello_and_ech(
                 target.clone(),
                 client_hello.as_deref(),
                 Arc::clone(&cancel),
                 mark,
                 ech_config.as_ref(),
+                white_name,
             );
             let mut outcome = outcome;
             if ech_grease {
@@ -5641,6 +5758,7 @@ fn classify_discovery_target_with_client_hello(
         cancel,
         mark,
         None,
+        "hcaptcha.com",
     )
 }
 
@@ -5812,6 +5930,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech(
     cancel: Arc<AtomicBool>,
     mark: Option<u32>,
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
+    white_name: &str,
 ) -> DiscoveryOutcome {
     let trigger: Result<Trigger, String> = if let Some(client_hello) = client_hello {
         Trigger::tls_client_hello(&target.host, client_hello).map_err(str::to_owned)
@@ -5861,6 +5980,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech(
             };
         }
     };
+    let white = r2o_discovery_white_trigger(white_name);
     let (result, timed_out) =
         r2o_run_with_deadline(cancel, R2O_DISCOVERY_TASK_LIFETIME, |task_cancel| {
             classify_run(
@@ -5869,6 +5989,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech(
                 ClassifyOptions {
                     mark,
                     control: Some(control),
+                    white,
                     cancel: Some(task_cancel),
                     ..ClassifyOptions::default()
                 },
@@ -5893,6 +6014,17 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech(
         direct_clear: !timed_out && result.verdict == Verdict::Clear,
         retry_after,
     }
+}
+
+#[cfg(unix)]
+fn r2o_discovery_white_trigger(name: &str) -> Option<Trigger> {
+    r2o_controller::hello::r2o_rx_fake_client_hello(name)
+        .ok()
+        .map(|payload| Trigger {
+            name: "white".into(),
+            payload,
+            accept: Accept::TlsRecord,
+        })
 }
 
 #[cfg(unix)]
@@ -5988,6 +6120,8 @@ struct R2oAskProof {
     applied: bool,
     exchange_seen: bool,
     server_hello: bool,
+    unsent_code: Option<u8>,
+    exchange: Option<r2k_core::control::R2oTcpExchangeEvent>,
 }
 
 #[cfg(unix)]
@@ -6019,12 +6153,91 @@ impl R2oAskProof {
         }
         self.exchange_seen = true;
         self.server_hello |= event.server_hello;
+        self.exchange = Some(*event);
         true
     }
 
     fn passed(&self) -> bool {
         self.applied && self.exchange_seen && self.server_hello
     }
+
+    fn finished(&self) -> bool {
+        self.passed() || self.unsent_code.is_some()
+    }
+
+    fn observe_refused(
+        &mut self,
+        event: &r2k_core::control::RefusedEvent,
+        expected_key: &[u8; r2k_core::control::KEY_LEN],
+        plan_id: [u8; 16],
+        trial_id: [u8; 16],
+    ) -> bool {
+        if event.key != *expected_key || event.plan_id != plan_id || event.trial_id != trial_id {
+            return false;
+        }
+        if event.code != 0 {
+            self.unsent_code = Some(event.code);
+        }
+        true
+    }
+}
+
+#[cfg(unix)]
+fn r2o_ask_ack_reason(code: u8) -> &'static str {
+    match code {
+        r2k_core::control::ACK_BAD_PLAN => "план не разобрался",
+        r2k_core::control::ACK_BAD_ARGS => "аргументы команды не разобрались",
+        r2k_core::control::ACK_NO_ROOM => "нет места в таблице планов",
+        _ => "неизвестная причина",
+    }
+}
+
+#[cfg(unix)]
+fn r2o_ask_print_seen_types(mask: u8) -> String {
+    let types = [
+        (20, "20 смена шифра"),
+        (21, "21 тревога"),
+        (22, "22 рукопожатие"),
+        (23, "23 прикладные данные"),
+    ];
+    let seen = types
+        .into_iter()
+        .filter_map(|(record_type, label)| (mask & (1 << (record_type - 20)) != 0).then_some(label))
+        .collect::<Vec<_>>();
+    if seen.is_empty() {
+        "ни одной".into()
+    } else {
+        seen.join(", ")
+    }
+}
+
+#[cfg(unix)]
+fn r2o_print_ask_trace(
+    plan_len: usize,
+    plan_status: &str,
+    local_port: Option<u16>,
+    proof: Option<&R2oAskProof>,
+    stop_reason: &str,
+) {
+    println!("  план: {plan_len} байт, {plan_status}");
+    match local_port {
+        Some(port) => match proof.and_then(|proof| proof.exchange) {
+            Some(exchange) => println!(
+                "  обмен: с местного порта {port}, {} байт, первая запись типа {}, встречены типы: {}",
+                exchange.bytes_after_client_hello,
+                exchange.first_record_type,
+                r2o_ask_print_seen_types(exchange.record_types)
+            ),
+            None => {
+                println!("  обмен: обращение с местного порта {port}, события обмена не пришло")
+            }
+        },
+        None => println!("  обмен: до обращения к цели дело не дошло"),
+    }
+    if let Some(code) = proof.and_then(|proof| proof.unsent_code) {
+        println!("  отказ отправки плана: код {code}");
+    }
+    println!("  причина остановки: {stop_reason}");
 }
 
 #[cfg(unix)]
@@ -8376,7 +8589,7 @@ impl ControlClient {
                     self.pending_events.push_back(frame);
                 }
             }
-            if proof.passed() {
+            if proof.finished() {
                 return Ok(proof);
             }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -8401,7 +8614,7 @@ impl ControlClient {
             )? {
                 self.queue_async_frame(frame)?;
             }
-            if proof.passed() {
+            if proof.finished() {
                 return Ok(proof);
             }
         }
@@ -8424,6 +8637,11 @@ impl ControlClient {
                 self.remember_applied_event(event);
             }
             return Ok(true);
+        }
+        if frame.kind == EVENT_REFUSED {
+            let event =
+                decode_refused(frame).map_err(|error| format!("событие REFUSED: {error}"))?;
+            return Ok(proof.observe_refused(&event, expected_key, plan_id, trial_id));
         }
         if frame.kind == EVENT_R2O_TCP_EXCHANGE {
             let event = decode_r2o_tcp_exchange(frame)
@@ -9487,6 +9705,7 @@ impl ControlClient {
             EVENT_PROTOCOL
                 | EVENT_HELLO
                 | EVENT_APPLIED
+                | EVENT_REFUSED
                 | EVENT_CLIENT_SHAPE
                 | EVENT_HTTP_PORTAL
                 | EVENT_HTTP_RESPONSE
@@ -9584,7 +9803,7 @@ fn r2o_ask_flow_key(
 mod r2o_ask_proof_tests {
     use super::R2oAskProof;
     use r2k_core::control::{
-        AppliedEvent, BindingContext, KEY_LEN, R2oTcpExchangeEvent, SHAPE_LEGACY,
+        AppliedEvent, BindingContext, KEY_LEN, R2oTcpExchangeEvent, RefusedEvent, SHAPE_LEGACY,
     };
 
     fn flow_key() -> [u8; KEY_LEN] {
@@ -9652,6 +9871,46 @@ mod r2o_ask_proof_tests {
             &key,
         ));
         assert!(proof.passed());
+    }
+
+    #[test]
+    fn matching_unsent_refusal_finishes_question_without_a_box_verdict() {
+        let key = flow_key();
+        let plan_id = [7; 16];
+        let trial_id = [8; 16];
+        let mut proof = R2oAskProof::default();
+        let refusal = RefusedEvent {
+            key,
+            code: 4,
+            plan_id,
+            trial_id,
+            client_shape: Some(SHAPE_LEGACY),
+            execution_id: None,
+            binding: None,
+        };
+
+        assert!(proof.observe_refused(&refusal, &key, plan_id, trial_id));
+        assert_eq!(proof.unsent_code, Some(4));
+        assert!(proof.finished());
+        assert!(!proof.passed());
+    }
+
+    #[test]
+    fn unrelated_refusal_does_not_finish_an_ask_question() {
+        let key = flow_key();
+        let mut proof = R2oAskProof::default();
+        let refusal = RefusedEvent {
+            key,
+            code: 4,
+            plan_id: [9; 16],
+            trial_id: [8; 16],
+            client_shape: Some(SHAPE_LEGACY),
+            execution_id: None,
+            binding: None,
+        };
+
+        assert!(!proof.observe_refused(&refusal, &key, [7; 16], [8; 16]));
+        assert!(!proof.finished());
     }
 }
 
@@ -13632,6 +13891,18 @@ mod tests {
     fn classify_options_accept_modern_profile() {
         let args = ["--modern"].map(OsString::from);
         assert!(parse_classify_options(&args).unwrap().modern);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_classification_supplies_the_c_white_clienthello() {
+        let white = super::r2o_discovery_white_trigger("hcaptcha.com").unwrap();
+        assert_eq!(white.name, "white");
+        assert_eq!(white.accept, super::Accept::TlsRecord);
+        assert_eq!(
+            white.payload,
+            include_bytes!("../tests/fixtures/r2o-rx-fake-hcaptcha-c.bin")
+        );
     }
 
     #[cfg(unix)]
