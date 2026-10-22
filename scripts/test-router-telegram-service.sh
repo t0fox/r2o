@@ -4,6 +4,7 @@ set -eu
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 TG_BIN=${R2O_TG_TEST_BINARY:-$ROOT/target/release/r2o-telegram}
 [ -x "$TG_BIN" ] || { echo "требуется release-бинарный файл r2o-telegram: $TG_BIN" >&2; exit 2; }
+fail() { echo "ОШИБКА: $*" >&2; exit 1; }
 TEMP=$(mktemp -d)
 cleanup() {
     result=$?
@@ -111,6 +112,19 @@ while [ "$attempt" -lt 300 ]; do
     attempt=$((attempt + 1))
     sleep 0.1
 done
+if [ "$recovered" != yes ]; then
+    watchdog_pid=$(cat "$TEMP/root/run/r2o-telegram-watchdog.pid" 2>/dev/null || true)
+    telegram_pid=$(cat "$TEMP/root/run/r2o-telegram.pid" 2>/dev/null || true)
+    echo "сторож: pid=$watchdog_pid cmdline=$(tr '\000' ' ' < "/proc/$watchdog_pid/cmdline" 2>/dev/null || true)" >&2
+    echo "listener: pid=$telegram_pid exe=$(readlink "/proc/$telegram_pid/exe" 2>/dev/null || true)" >&2
+    for state in telegram-health.failures telegram-health.restarts telegram-health.restart-limited; do
+        if [ -e "$TEMP/root/state/$state" ]; then
+            echo "$state: $(cat "$TEMP/root/state/$state" 2>/dev/null || true)" >&2
+        else
+            echo "$state: отсутствует" >&2
+        fi
+    done
+fi
 [ "$recovered" = yes ] || fail "сторож не восстановил завершившийся Rust Telegram listener"
 
 : > "$TEMP/manager-fail"
