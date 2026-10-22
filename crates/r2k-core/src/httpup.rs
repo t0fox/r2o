@@ -32,6 +32,32 @@ pub struct R2oHttpRequestSequence {
     disabled: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum R2oHttpRequestCandidate {
+    First,
+    Later,
+    Unaligned,
+    Ignored,
+}
+
+/// Результат проверки TCP-границы HTTP-запроса.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum R2oHttpRequestObservation {
+    /// Сегмент относится к телу, повтору или не наблюдаемой границе.
+    Ignored,
+    /// Следующая граница пропущена, пересечена или содержит не HTTP-запрос.
+    Unaligned,
+    /// Запрос распознан на первой или следующей границе.
+    Request {
+        /// Запрос идёт после первого запроса TCP-потока.
+        later: bool,
+        /// Конец запроса и тела однозначен по заголовкам.
+        end_known: bool,
+        /// Сегмент не содержит дополнительные байты за концом запроса.
+        aligned: bool,
+    },
+}
+
 impl R2oHttpRequestSequence {
     /// Начать отслеживание после SYN, который был виден runtime.
     pub const fn new(first: u32) -> Self {
@@ -45,46 +71,86 @@ impl R2oHttpRequestSequence {
 
     /// Проверить, начинается ли сегмент на доказанной границе запроса.
     pub fn candidate(&mut self, sequence: u32, payload_len: usize) -> bool {
+        matches!(
+            self.candidate_state(sequence, payload_len),
+            R2oHttpRequestCandidate::First | R2oHttpRequestCandidate::Later
+        )
+    }
+
+    fn candidate_state(&mut self, sequence: u32, payload_len: usize) -> R2oHttpRequestCandidate {
         if self.disabled {
-            return false;
+            return R2oHttpRequestCandidate::Ignored;
         }
         if !self.checked {
-            return self.first == Some(sequence);
+            return if self.first == Some(sequence) {
+                R2oHttpRequestCandidate::First
+            } else {
+                R2oHttpRequestCandidate::Ignored
+            };
         }
         let Some(next) = self.next else {
-            return false;
+            return R2oHttpRequestCandidate::Ignored;
         };
         let distance = sequence.wrapping_sub(next) as i32;
         if distance == 0 {
-            return true;
+            return R2oHttpRequestCandidate::Later;
         }
         let segment_end = sequence.wrapping_add(payload_len as u32);
         if distance > 0 || segment_end.wrapping_sub(next) as i32 > 0 {
             self.next = None;
             self.disabled = true;
+            return R2oHttpRequestCandidate::Unaligned;
         }
-        false
+        R2oHttpRequestCandidate::Ignored
     }
 
     /// Принять полный запрос и запомнить следующую границу, если framing известен.
     pub fn observe(&mut self, sequence: u32, payload: &[u8]) -> bool {
-        if !self.candidate(sequence, payload.len()) {
-            return false;
+        matches!(
+            self.observe_detailed(sequence, payload),
+            R2oHttpRequestObservation::Request { .. }
+        )
+    }
+
+    /// Обновить последовательность запросов и вернуть диагностический исход.
+    pub fn observe_detailed(&mut self, sequence: u32, payload: &[u8]) -> R2oHttpRequestObservation {
+        let candidate = self.candidate_state(sequence, payload.len());
+        if candidate == R2oHttpRequestCandidate::Unaligned {
+            return R2oHttpRequestObservation::Unaligned;
+        }
+        if !matches!(
+            candidate,
+            R2oHttpRequestCandidate::First | R2oHttpRequestCandidate::Later
+        ) {
+            return R2oHttpRequestObservation::Ignored;
         }
         let Some(request) = r2o_http_plan_request(payload) else {
             self.first = None;
             self.next = None;
             self.checked = true;
             self.disabled = true;
-            return false;
+            return if candidate == R2oHttpRequestCandidate::Later {
+                R2oHttpRequestObservation::Unaligned
+            } else {
+                R2oHttpRequestObservation::Ignored
+            };
         };
         self.first = None;
         self.checked = true;
+        let end_known = request.end_offset.is_some();
+        let aligned = request.end_offset.is_none_or(|end| end >= payload.len());
         self.next = request
             .end_offset
             .filter(|&end| end >= payload.len())
             .map(|end| sequence.wrapping_add(end as u32));
-        true
+        if !end_known || !aligned {
+            self.disabled = true;
+        }
+        R2oHttpRequestObservation::Request {
+            later: candidate == R2oHttpRequestCandidate::Later,
+            end_known,
+            aligned,
+        }
     }
 
     /// Сообщить, что первый запрос или keep-alive-запрос уже проверен.

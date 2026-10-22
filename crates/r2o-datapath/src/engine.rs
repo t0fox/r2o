@@ -232,10 +232,22 @@ impl R2oTcpExchangeEvent {
     pub const PLANNED_NO: u8 = 2;
 }
 
+/// Итоговые счётчики разбора HTTP keep-alive в потоках TCP.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct R2oHttpKeepAliveStats {
+    /// Число распознанных запросов после первого запроса потока.
+    pub later: u64,
+    /// Число неоднозначных или пропущенных границ запросов.
+    pub unaligned: u64,
+    /// Число запросов без известного конца тела.
+    pub open_end: u64,
+}
+
 /// Ограниченное состояние потока для runtime-защит и очистки соединений.
 pub struct TcpSessions {
     flows: HashMap<TcpFlowKey, TcpSession>,
     flow_capacity: R2oFlowCapacity,
+    http_keepalive_stats: R2oHttpKeepAliveStats,
     tcp_stall_budgets: Vec<u16>,
     reverse_visible_by_family: [bool; 2],
     r2o_tcp_hello_flows: u64,
@@ -271,6 +283,7 @@ impl TcpSessions {
         Ok(Self {
             flows,
             flow_capacity,
+            http_keepalive_stats: R2oHttpKeepAliveStats::default(),
             tcp_stall_budgets: vec![TCP_STALL_PACKET_BUDGET as u16],
             reverse_visible_by_family: [false; 2],
             r2o_tcp_hello_flows: 0,
@@ -311,6 +324,10 @@ impl TcpSessions {
         self.flows.iter().find_map(|(flow_key, session)| {
             (flow_key.wire_key() == *key).then_some(session.metrics)
         })
+    }
+
+    pub fn r2o_http_keepalive_stats(&self) -> R2oHttpKeepAliveStats {
+        self.http_keepalive_stats
     }
 
     /// Число распознанных пользовательских TCP-потоков с ClientHello.
@@ -996,18 +1013,53 @@ pub fn decide_with_session(
         return PacketDecision::Drop;
     }
 
-    let http_request =
-        view.tcp_segment(packet)
-            .filter(|tcp| !reverse && tcp.destination_port == 80)
-            .and_then(|tcp| {
-                let payload = packet.get(tcp.payload.clone())?;
-                (!payload.is_empty()).then(|| {
-                    sessions.flows.get_mut(&key).is_some_and(|session| {
-                        session.r2o_http_requests.observe(tcp.sequence, payload)
-                    })
-                })
-            })
-            .unwrap_or(false);
+    let http_observation = view
+        .tcp_segment(packet)
+        .filter(|tcp| !reverse && tcp.destination_port == 80)
+        .and_then(|tcp| {
+            let payload = packet.get(tcp.payload.clone())?;
+            if payload.is_empty() {
+                return None;
+            }
+            Some(sessions.flows.get_mut(&key).map_or(
+                r2k_core::httpup::R2oHttpRequestObservation::Ignored,
+                |session| {
+                    session
+                        .r2o_http_requests
+                        .observe_detailed(tcp.sequence, payload)
+                },
+            ))
+        })
+        .unwrap_or(r2k_core::httpup::R2oHttpRequestObservation::Ignored);
+    let http_request = matches!(
+        http_observation,
+        r2k_core::httpup::R2oHttpRequestObservation::Request { .. }
+    );
+    match http_observation {
+        r2k_core::httpup::R2oHttpRequestObservation::Request {
+            later,
+            end_known,
+            aligned,
+        } => {
+            if later {
+                sessions.http_keepalive_stats.later =
+                    sessions.http_keepalive_stats.later.saturating_add(1);
+            }
+            if !end_known {
+                sessions.http_keepalive_stats.open_end =
+                    sessions.http_keepalive_stats.open_end.saturating_add(1);
+            }
+            if !aligned {
+                sessions.http_keepalive_stats.unaligned =
+                    sessions.http_keepalive_stats.unaligned.saturating_add(1);
+            }
+        }
+        r2k_core::httpup::R2oHttpRequestObservation::Unaligned => {
+            sessions.http_keepalive_stats.unaligned =
+                sessions.http_keepalive_stats.unaligned.saturating_add(1);
+        }
+        r2k_core::httpup::R2oHttpRequestObservation::Ignored => {}
+    }
     let r2o_http_plan = plan.transport == 6 && plan.proto == PROTO_HTTP;
     let r2o_http_plan_allowed = !r2o_http_plan || http_request;
     let decision = if !r2o_http_plan_allowed {
@@ -3478,6 +3530,84 @@ mod tests {
             r2k_core::httpup::r2o_http_plan_request(b"GET / HTTP/1.1\r\nHost: 192.0.2.1\r\n\r\n")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn r2o_http_keepalive_считает_поздние_невыравненные_и_открытые_концы() {
+        let plan = http_split_plan();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 80);
+        let mut sessions = TcpSessions::default();
+        let mut sequence = 1000_u32;
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x02, 64, sequence, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+        );
+        sequence = sequence.wrapping_add(1);
+        let first = b"GET / HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x18, 64, sequence, first),
+        );
+        sequence = sequence.wrapping_add(first.len() as u32);
+        let post = b"POST /x HTTP/1.1\r\nHost: example.test\r\nContent-Length: 5\r\n\r\n";
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x18, 64, sequence, post),
+        );
+        let crossing = b"abcdeGET /next HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(
+                client,
+                server,
+                0x18,
+                64,
+                sequence.wrapping_add(post.len() as u32),
+                crossing,
+            ),
+        );
+
+        let next_client = (client.0, client.1 + 1);
+        let next_sequence = 5000_u32;
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(next_client, server, 0x02, 64, next_sequence, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, next_client, 0x12, 124, 1900, &[]),
+        );
+        let chunked =
+            b"POST /x HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n";
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(
+                next_client,
+                server,
+                0x18,
+                64,
+                next_sequence.wrapping_add(1),
+                chunked,
+            ),
+        );
+
+        let stats = sessions.r2o_http_keepalive_stats();
+        assert_eq!(stats.later, 1);
+        assert_eq!(stats.unaligned, 1);
+        assert_eq!(stats.open_end, 1);
     }
 
     proptest! {

@@ -505,6 +505,13 @@ mod app {
                     tcp_sessions.r2o_reply_hidden(),
                     tcp_sessions.r2o_tcp_hello_flows()
                 );
+                let http_stats = tcp_sessions.r2o_http_keepalive_stats();
+                if http_stats.later != 0 || http_stats.unaligned != 0 || http_stats.open_end != 0 {
+                    eprintln!(
+                        "r2o-datapath: HTTP с постоянным соединением: следующих запросов распознано {}, границ потеряно или пересечено {}, концов запроса неизвестно {}",
+                        http_stats.later, http_stats.unaligned, http_stats.open_end
+                    );
+                }
                 let capture_stats = holding.r2o_capture_stats();
                 eprintln!(
                     "r2o-datapath: снимки TLS/TCP: завершено {}, отклонено {}, истекло {}, отказов ёмкости {}",
