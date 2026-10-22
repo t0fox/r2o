@@ -26,7 +26,9 @@ printf '%s\n' \
     router/openwrt-init \
     router/r2o-firewall.sh \
     router/r2o-tg-firewall.sh \
-    router/r2o-update-scheduler.sh | sort > "$TEMP/expected"
+    router/r2o-update-scheduler.sh \
+    router/r2o-log-maintenance.sh \
+    router/r2o-telegram-watchdog.sh | sort > "$TEMP/expected"
 cmp "$TEMP/expected" "$TEMP/entries"
 python3 - "$TEMP/out/latest.json" "$TEMP/out/r2o-mipsel.tar.gz" <<'PY'
 import hashlib

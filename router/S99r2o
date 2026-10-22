@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 
 PATH=/opt/sbin:/opt/bin:/opt/usr/sbin:/opt/usr/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
@@ -39,10 +39,15 @@ TG_STATUS=${TG_STATUS:-$STATE/telegram.status}
 TG_STATS_SOCKET=${TG_STATS_SOCKET:-$STATE/telegram.stats.sock}
 TG_FIREWALL=${R2O_TG_FIREWALL:-$SCRIPT_DIR/r2o-tg-firewall.sh}
 TG_PID=$RUN/r2o-telegram.pid
+TG_WATCHDOG=${R2O_TG_WATCHDOG:-$SCRIPT_DIR/r2o-telegram-watchdog.sh}
+TG_WD_PID=$RUN/r2o-telegram-watchdog.pid
 AUTOUPDATE=1
 UPDATER=$SCRIPT_DIR/r2o-update-scheduler.sh
 UPD_PID=$RUN/update-scheduler.pid
+LOG_WORKER=${R2O_LOG_MAINTENANCE:-$SCRIPT_DIR/r2o-log-maintenance.sh}
+LM_PID=$RUN/r2o-log-maintenance.pid
 
+# shellcheck disable=SC1090  # конфигурация owner-managed, путь задаётся выше
 [ ! -r "$CONF" ] || . "$CONF"
 STATE=${STATE_DIR:-$ROOT/state}
 QUEUE4=${QUEUE_NUM:-2000}
@@ -61,8 +66,12 @@ TG_STATUS=${TG_STATUS:-$STATE/telegram.status}
 TG_STATS_SOCKET=${TG_STATS_SOCKET:-$STATE/telegram.stats.sock}
 TG_FIREWALL=${R2O_TG_FIREWALL:-$SCRIPT_DIR/r2o-tg-firewall.sh}
 TG_PID=$RUN/r2o-telegram.pid
+TG_WATCHDOG=${R2O_TG_WATCHDOG:-$SCRIPT_DIR/r2o-telegram-watchdog.sh}
+TG_WD_PID=$RUN/r2o-telegram-watchdog.pid
 UPDATER=$SCRIPT_DIR/r2o-update-scheduler.sh
 UPD_PID=$RUN/update-scheduler.pid
+LOG_WORKER=${R2O_LOG_MAINTENANCE:-$SCRIPT_DIR/r2o-log-maintenance.sh}
+LM_PID=$RUN/r2o-log-maintenance.pid
 CATALOG=$STATE/catalog.json
 export R2O_DIR="$ROOT" R2O_CONFIG="$CONF" R2O_RUN_DIR="$RUN"
 
@@ -237,6 +246,7 @@ engine_start() {
     prepare_dirs
     [ -x "$FIREWALL" ] || die "нет firewall adapter $FIREWALL"
     [ -x "$MANAGER" ] || die "нет release manager $MANAGER"
+    log_maintenance_start || say "ротация журналов не запустилась"
     if component_running r2o-datapath "$DP4_PID" && component_running r2o-datapath "$DP6_PID" \
         && component_running r2o-controller "$CT4_PID" && component_running r2o-controller "$CT6_PID" \
         && "$FIREWALL" status >/dev/null 2>&1; then
@@ -311,6 +321,84 @@ update_scheduler_stop() {
     rm -f "$UPD_PID"
 }
 
+log_maintenance_running() {
+    [ -s "$LM_PID" ] || return 1
+    log_pid=$(cat "$LM_PID" 2>/dev/null) || return 1
+    case "$log_pid" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$log_pid" 2>/dev/null || return 1
+    log_cmdline=$(tr '\000' ' ' < "$PROC/$log_pid/cmdline" 2>/dev/null) || return 1
+    case "$log_cmdline" in *r2o-log-maintenance.sh*) return 0 ;; *) return 1 ;; esac
+}
+
+log_maintenance_start() {
+    [ -x "$LOG_WORKER" ] || return 0
+    log_maintenance_running && return 0
+    prepare_dirs || return 1
+    command -v start-stop-daemon >/dev/null 2>&1 || return 1
+    rm -f "$LM_PID"
+    start-stop-daemon -S -b -m -p "$LM_PID" -x "$LOG_WORKER" -- run || return 1
+    attempt=0
+    while [ "$attempt" -lt 20 ]; do
+        log_maintenance_running && return 0
+        attempt=$((attempt + 1))
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    return 1
+}
+
+log_maintenance_stop() {
+    if log_maintenance_running; then
+        log_pid=$(cat "$LM_PID")
+        kill -TERM "$log_pid" 2>/dev/null || true
+        attempt=0
+        while kill -0 "$log_pid" 2>/dev/null && [ "$attempt" -lt 50 ]; do
+            attempt=$((attempt + 1))
+            sleep 0.1 2>/dev/null || sleep 1
+        done
+        if kill -0 "$log_pid" 2>/dev/null; then kill -KILL "$log_pid" 2>/dev/null || true; fi
+    fi
+    rm -f "$LM_PID"
+}
+
+telegram_watchdog_running() {
+    [ -s "$TG_WD_PID" ] || return 1
+    tg_wd_pid=$(cat "$TG_WD_PID" 2>/dev/null) || return 1
+    case "$tg_wd_pid" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$tg_wd_pid" 2>/dev/null || return 1
+    tg_wd_cmdline=$(tr '\000' ' ' < "$PROC/$tg_wd_pid/cmdline" 2>/dev/null) || return 1
+    case "$tg_wd_cmdline" in *r2o-telegram-watchdog.sh*) return 0 ;; *) return 1 ;; esac
+}
+
+telegram_watchdog_start() {
+    [ -x "$TG_WATCHDOG" ] || return 0
+    telegram_watchdog_running && return 0
+    prepare_dirs || return 1
+    command -v start-stop-daemon >/dev/null 2>&1 || return 1
+    rm -f "$TG_WD_PID"
+    start-stop-daemon -S -b -m -p "$TG_WD_PID" -x "$TG_WATCHDOG" -- run || return 1
+    attempt=0
+    while [ "$attempt" -lt 20 ]; do
+        telegram_watchdog_running && return 0
+        attempt=$((attempt + 1))
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    return 1
+}
+
+telegram_watchdog_stop() {
+    if telegram_watchdog_running; then
+        tg_wd_pid=$(cat "$TG_WD_PID")
+        kill -TERM "$tg_wd_pid" 2>/dev/null || true
+        attempt=0
+        while kill -0 "$tg_wd_pid" 2>/dev/null && [ "$attempt" -lt 50 ]; do
+            attempt=$((attempt + 1))
+            sleep 0.1 2>/dev/null || sleep 1
+        done
+        if kill -0 "$tg_wd_pid" 2>/dev/null; then kill -KILL "$tg_wd_pid" 2>/dev/null || true; fi
+    fi
+    rm -f "$TG_WD_PID"
+}
+
 clear_found() {
     prepare_dirs || return 1
     [ -x "$MANAGER" ] || die "нет release manager $MANAGER"
@@ -362,6 +450,7 @@ export_telegram_config() {
 }
 
 telegram_stop() {
+    telegram_watchdog_stop
     if [ -x "$TG_FIREWALL" ]; then
         "$TG_FIREWALL" stop || return 1
     fi
@@ -383,11 +472,13 @@ telegram_start() {
     [ -x "$MANAGER" ] || return 1
     [ -x "$TG_FIREWALL" ] || { write_telegram_status error; say "нет Telegram firewall adapter $TG_FIREWALL"; return 1; }
     prepare_dirs || return 1
+    log_maintenance_start || say "ротация журналов не запустилась"
     if component_running r2o-telegram "$TG_PID"; then
         if telegram_ready; then
             "$TG_FIREWALL" heal || { write_telegram_status error; return 1; }
             "$TG_FIREWALL" sync-dc-map || say "не удалось синхронизировать динамическую карту Telegram DC"
             write_telegram_status local
+            telegram_watchdog_start || say "сторож Telegram не запустился"
             return 0
         fi
     fi
@@ -427,6 +518,7 @@ telegram_start() {
     fi
     "$TG_FIREWALL" sync-dc-map || say "не удалось синхронизировать динамическую карту Telegram DC"
     write_telegram_status local
+    telegram_watchdog_start || say "сторож Telegram не запустился"
     say "локальный Telegram прокси готов на :$TG_PORT"
 }
 
@@ -461,9 +553,9 @@ telegram_enable() {
 }
 
 telegram_disable() {
-    telegram_stop || return 1
     set_telegram_enabled 0 || die "не изменить TG_ENABLED"
     TG_ENABLED=0
+    telegram_stop || return 1
 }
 
 telegram_restart() {
@@ -476,15 +568,24 @@ telegram_reapply() {
     if telegram_ready; then
         "$TG_FIREWALL" heal || return 1
         "$TG_FIREWALL" sync-dc-map || say "не удалось синхронизировать динамическую карту Telegram DC"
+        telegram_watchdog_start || say "сторож Telegram не запустился"
     else
         telegram_start
     fi
+}
+
+heal() {
+    if component_running r2o-datapath "$DP4_PID"; then
+        "$FIREWALL" status >/dev/null 2>&1 || reapply || return 1
+    fi
+    telegram_reapply
 }
 
 panel_stop() { stop_component r2o-panel "$PN_PID"; }
 
 panel_start() {
     prepare_dirs
+    log_maintenance_start || say "ротация журналов не запустилась"
     [ -x "$MANAGER" ] || return 1
     if component_running r2o-panel "$PN_PID"; then return 0; fi
     rm -f "$RUNTIME/r2o-panel.health"
@@ -511,6 +612,7 @@ stop() {
     telegram_stop || say "не удалось безопасно остановить Telegram"
     engine_stop
     panel_stop
+    log_maintenance_stop
 }
 
 wait_health() {
@@ -568,11 +670,13 @@ status() {
     fi
     if [ "$TG_ENABLED" = 1 ]; then
         component_running r2o-telegram "$TG_PID" && echo "  r2o-telegram: работает ($TG_MODE, :$TG_PORT)" || echo "  r2o-telegram: не работает (TG_ENABLED=1)"
+        telegram_watchdog_running && echo "  сторож Telegram: работает" || echo "  сторож Telegram: не работает"
         [ ! -r "$TG_STATUS" ] || { printf '  Telegram status: '; cat "$TG_STATUS"; }
     else
         echo "  r2o-telegram: выключен конфигурацией"
     fi
     component_running r2o-panel "$PN_PID" && echo "  панель: работает" || echo "  панель: не работает"
+    log_maintenance_running && echo "  ротация журналов: работает" || echo "  ротация журналов: не работает"
     update_scheduler_running && echo "  обновления: ночная проверка запланирована" || echo "  обновления: планировщик не работает"
     queue_bound "$QUEUE4" && echo "  очередь IPv4 $QUEUE4: привязана" || echo "  очередь IPv4 $QUEUE4: не привязана"
     if [ "$IPV6_ENABLED" = 1 ]; then
@@ -599,5 +703,9 @@ case "${1:-}" in
     update-auto-on) set_update_auto 1 ;;
     update-auto-off) set_update_auto 0 ;;
     clear-found) clear_found ;;
-    *) echo "usage: $0 {start|stop|restart|status|engine-start|engine-stop|engine-restart|reapply|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-reapply|update-check|update-install|update-auto-on|update-auto-off}" >&2; exit 2 ;;
+    log-tick) "$LOG_WORKER" tick ;;
+    heal) heal ;;
+    tg-heal) telegram_reapply ;;
+    tg-stop-rules) "$TG_FIREWALL" stop ;;
+    *) echo "usage: $0 {start|stop|restart|status|engine-start|engine-stop|engine-restart|reapply|heal|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-reapply|tg-heal|tg-stop-rules|update-check|update-install|update-auto-on|update-auto-off|log-tick}" >&2; exit 2 ;;
 esac

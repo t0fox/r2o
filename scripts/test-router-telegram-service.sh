@@ -10,7 +10,8 @@ cleanup() {
     trap - EXIT HUP INT TERM
     env R2O_DIR="$TEMP/root" R2O_CONFIG="$TEMP/root/config" \
         R2O_MANAGER="$TEMP/manager" R2O_TG_TEST_BINARY="$TEMP/root/releases/test/builds/r2o-telegram-linux-test" \
-        R2O_TG_FIREWALL="$TEMP/tg-firewall" R2O_PROC=/proc R2O_RUNTIME_DIR="$TEMP/runtime" \
+        R2O_TG_FIREWALL="$TEMP/tg-firewall" R2O_INIT="$ROOT/router/S99r2o" \
+        R2O_PROC=/proc R2O_RUNTIME_DIR="$TEMP/runtime" \
         sh "$ROOT/router/S99r2o" telegram-disable >/dev/null 2>&1 || true
     if [ "$result" -ne 0 ] && [ -f "$TEMP/root/log/telegram.log" ]; then
         cat "$TEMP/root/log/telegram.log" >&2
@@ -38,6 +39,11 @@ case "${1:-}" in
             esac
         done
         [ "$component" = r2o-telegram ] || exit 2
+        case "$*" in
+            *--stats*)
+                if [ -n "${R2O_TG_MANAGER_FAIL:-}" ] && [ -e "$R2O_TG_MANAGER_FAIL" ]; then exit 1; fi
+                ;;
+        esac
         if [ -n "${R2O_TG_ENV_CAPTURE:-}" ]; then
             printf '%s|%s\n' "${R2O_TG_DC_MAP_SYNC:-}" "${R2O_TG_DC_MAP_ENDPOINTS_PATH:-}" >> "$R2O_TG_ENV_CAPTURE"
         fi
@@ -48,6 +54,7 @@ EOF
 cat > "$TEMP/tg-firewall" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$1" >> "$TG_FW_CALLS"
+[ "$1" != stop ] || [ -z "${R2O_TG_FIREWALL_FAIL:-}" ] || [ ! -e "$R2O_TG_FIREWALL_FAIL" ] || exit 1
 exit 0
 EOF
 chmod 0755 "$TEMP/manager" "$TEMP/tg-firewall"
@@ -56,6 +63,12 @@ run_service() {
     env R2O_DIR="$TEMP/root" R2O_CONFIG="$TEMP/root/config" \
         R2O_MANAGER="$TEMP/manager" R2O_TG_TEST_BINARY="$TEMP/root/releases/test/builds/r2o-telegram-linux-test" \
         R2O_TG_FIREWALL="$TEMP/tg-firewall" R2O_PROC=/proc \
+        R2O_INIT="$ROOT/router/S99r2o" \
+        R2O_TG_MANAGER_FAIL="$TEMP/manager-fail" \
+        R2O_TG_FIREWALL_FAIL="$TEMP/firewall-fail" \
+        TG_WATCHDOG_INTERVAL=1 TG_WATCHDOG_FAILURE_LIMIT=1 \
+        TG_WATCHDOG_RESTART_WINDOW=60 TG_WATCHDOG_MAX_RESTARTS=2 \
+        TG_WATCHDOG_BACKOFF_BASE=1 TG_WATCHDOG_BACKOFF_MAX=1 \
         R2O_RUNTIME_DIR="$TEMP/runtime" R2O_TG_ENV_CAPTURE="$TEMP/tg-env-capture" \
         R2O_NFQUEUE_STATUS=/dev/null TG_FW_CALLS="$TEMP/firewall-calls" \
         sh "$ROOT/router/S99r2o" "$1"
@@ -65,6 +78,7 @@ run_service telegram-enable
 grep -q '^TG_ENABLED=1$' "$TEMP/root/config"
 grep -q '^local$' "$TEMP/root/state/telegram.status"
 [ -s "$TEMP/root/run/r2o-telegram.pid" ]
+[ -s "$TEMP/root/run/r2o-telegram-watchdog.pid" ]
 python3 - 30443 <<'PY'
 import socket
 import sys
@@ -81,10 +95,48 @@ grep -q '^start$' "$TEMP/firewall-calls"
 grep -q '^sync-dc-map$' "$TEMP/firewall-calls" || fail "служба не синхронизировала карту DC после запуска firewall"
 grep -qF "$TEMP/tg-firewall|$TEMP/root/state/telegram-dc-endpoints.tsv" "$TEMP/tg-env-capture" || fail "служба не передала прокси путь адаптера и манифеста"
 
+old_pid=$(cat "$TEMP/root/run/r2o-telegram.pid")
+kill -KILL "$old_pid"
+attempt=0
+recovered=
+while [ "$attempt" -lt 300 ]; do
+    new_pid=$(cat "$TEMP/root/run/r2o-telegram.pid" 2>/dev/null || true)
+    if [ -n "$new_pid" ] && [ "$new_pid" != "$old_pid" ] && kill -0 "$new_pid" 2>/dev/null; then
+        snapshot=$(env R2O_DIR="$TEMP/root" R2O_CONFIG="$TEMP/root/config" \
+            R2O_MANAGER="$TEMP/manager" R2O_TG_TEST_BINARY="$TEMP/root/releases/test/builds/r2o-telegram-linux-test" \
+            "$TEMP/manager" exec --component r2o-telegram -- --stats \
+                --stats-socket-path "$TEMP/root/state/telegram.stats.sock" 2>/dev/null || true)
+        case "$snapshot" in *'"listener_ready":true'*) recovered=yes; break ;; esac
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.1
+done
+[ "$recovered" = yes ] || fail "сторож не восстановил завершившийся Rust Telegram listener"
+
+: > "$TEMP/manager-fail"
+attempt=0
+while [ ! -e "$TEMP/root/state/telegram-health.restart-limited" ]; do
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt 200 ] || fail "сторож не применил ограничение частоты перезапусков"
+    sleep 0.1
+done
+[ "$(wc -l < "$TEMP/root/state/telegram-health.restarts")" -eq 2 ] || \
+    fail "сторож превысил лимит двух перезапусков в окне"
+sleep 2
+[ "$(wc -l < "$TEMP/root/state/telegram-health.restarts")" -eq 2 ] || \
+    fail "сторож продолжал перезапуски после достижения лимита"
+
+touch "$TEMP/firewall-fail"
+if run_service telegram-disable; then
+    fail "отказ Telegram firewall неожиданно завершил disable успешно"
+fi
+grep -q '^TG_ENABLED=0$' "$TEMP/root/config" || fail "отказ очистки firewall потерял запрошенное выключение"
+rm -f "$TEMP/firewall-fail"
 run_service telegram-disable
 grep -q '^TG_ENABLED=0$' "$TEMP/root/config"
 grep -q '^stopped$' "$TEMP/root/state/telegram.status"
 [ ! -e "$TEMP/root/run/r2o-telegram.pid" ]
+[ ! -e "$TEMP/root/run/r2o-telegram-watchdog.pid" ]
 [ ! -e "$TEMP/root/state/telegram.stats.sock" ]
 grep -q '^stop$' "$TEMP/firewall-calls"
 

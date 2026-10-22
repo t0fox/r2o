@@ -167,10 +167,10 @@ fn first_config_initialization_imports_supported_settings_without_evaluating_don
     let donor = temp.0.join("donor-config");
     fs::write(
         &defaults,
-        "SCHEMA=1\nMODE=apply\nSTATE_DIR=/opt/r2o/state\nQUEUE_NUM=2000\nQUEUE_NUM6=2001\nR2O_FLOW_CAPACITY=2048\nIPV6_ENABLED=1\nMARK=45\nAUTOUPDATE=1\nFW_BACKEND=auto\nPANEL_LISTEN=127.0.0.1:8090\nTG_ENABLED=1\nTG_MODE=local\n",
+        "SCHEMA=1\nMODE=apply\nSTATE_DIR=/opt/r2o/state\nQUEUE_NUM=2000\nQUEUE_NUM6=2001\nR2O_FLOW_CAPACITY=2048\nIPV6_ENABLED=1\nMARK=45\nAUTOUPDATE=1\nLOGMAX=2097152\nLOGKEEP=1048576\nLOG_EVERY=60\nFW_BACKEND=auto\nPANEL_LISTEN=127.0.0.1:8090\nTG_ENABLED=1\nTG_MODE=local\n",
     )
     .unwrap();
-    let donor_text = "SCHEMA=1\nMODE=observe\nSTATE_DIR=/opt/d2k/state\nQUEUE_NUM=1234\nQUEUE_NUM6=1235\nFLOWS=64\nMARK=0x2f\nTG_ENABLED=0\nTG_MODE=relay\nTG_PORT=1445\nCONTROL_SOCKET=/opt/d2k/run/d2kd.sock\nD2K_PPE_DEOFFLOAD=1\nUNKNOWN=$(touch SHOULD_NOT_RUN)\n";
+    let donor_text = "SCHEMA=1\nMODE=observe\nSTATE_DIR=/opt/d2k/state\nQUEUE_NUM=1234\nQUEUE_NUM6=1235\nFLOWS=64\nMARK=0x2f\nLOGMAX=4194304\nLOGKEEP=2097152\nLOG_EVERY=120\nTG_ENABLED=0\nTG_MODE=relay\nTG_PORT=1445\nCONTROL_SOCKET=/opt/d2k/run/d2kd.sock\nD2K_PPE_DEOFFLOAD=1\nUNKNOWN=$(touch SHOULD_NOT_RUN)\n";
     fs::write(&donor, donor_text).unwrap();
 
     let output = invoke(&[
@@ -194,6 +194,9 @@ fn first_config_initialization_imports_supported_settings_without_evaluating_don
     assert!(config.contains("QUEUE_NUM6=1235\n"));
     assert!(config.contains("R2O_FLOW_CAPACITY=64\n"));
     assert!(config.contains("MARK=0x2f\n"));
+    assert!(config.contains("LOGMAX=4194304\n"));
+    assert!(config.contains("LOGKEEP=2097152\n"));
+    assert!(config.contains("LOG_EVERY=120\n"));
     assert!(config.contains("TG_ENABLED=0\n"));
     assert!(config.contains("TG_MODE=local\n"));
     assert!(config.contains("TG_PORT=1445\n"));

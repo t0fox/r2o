@@ -141,14 +141,20 @@ fn cli_rejects_zero_port_instead_of_binding_an_ephemeral_port() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    thread::sleep(Duration::from_millis(300));
-    let exited = child.try_wait().unwrap().is_some();
-    if !exited {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("port 0 must fail validation instead of starting the panel");
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
     assert!(
-        exited,
+        !status.success(),
         "port 0 must fail validation instead of starting the panel"
     );
 }

@@ -19,6 +19,9 @@ const IMPORTABLE_KEYS: &[&str] = &[
     "IPV6_ENABLED",
     "MARK",
     "AUTOUPDATE",
+    "LOGMAX",
+    "LOGKEEP",
+    "LOG_EVERY",
     "FW_BACKEND",
     "PANEL_LISTEN",
     "TG_ENABLED",
@@ -317,6 +320,12 @@ fn validate_value(key: &str, value: &str, donor: bool) -> io::Result<()> {
         "QUEUE_NUM" | "QUEUE_NUM6" | "TG_PORT" => value.parse::<u16>().is_ok(),
         "R2O_FLOW_CAPACITY" => value.parse::<u32>().is_ok_and(|capacity| capacity > 0),
         "IPV6_ENABLED" | "AUTOUPDATE" | "TG_ENABLED" => matches!(value, "0" | "1"),
+        "LOGMAX" | "LOGKEEP" => value
+            .parse::<u32>()
+            .is_ok_and(|bytes| (1024..=67_108_864).contains(&bytes)),
+        "LOG_EVERY" => value
+            .parse::<u16>()
+            .is_ok_and(|seconds| (1..=3600).contains(&seconds)),
         "MARK" => valid_mark(value),
         "FW_BACKEND" => matches!(value, "auto" | "iptables" | "nft"),
         "PANEL_LISTEN" => valid_panel_listen(value),

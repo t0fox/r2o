@@ -110,6 +110,7 @@ jobs:
             scripts/test-router-update-scheduler.sh \
             scripts/test-router-update-auto.sh \
             scripts/test-router-clear-found.sh \
+            scripts/test-router-log-maintenance.sh \
             scripts/test-router-telegram-service.sh; do
             case "$test" in
               scripts/test-router-firewall.sh) sudo sh "$test" ;;
