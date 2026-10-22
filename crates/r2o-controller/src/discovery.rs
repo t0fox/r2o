@@ -489,6 +489,39 @@ pub fn add_measured_binding_with_input(
     now: i64,
     input: u8,
 ) -> Result<String, String> {
+    add_measured_binding_with_fingerprint(catalog, target, source_text, now, input, None)
+}
+
+/// Сохранить план и связать его с отпечатком, подтверждённым тем же замером.
+pub fn add_measured_binding_with_fingerprint(
+    catalog: &mut Catalog,
+    target: &DiscoveryTarget,
+    source_text: &str,
+    now: i64,
+    input: u8,
+    observed_fingerprint: Option<&crate::catalog::Fingerprint>,
+) -> Result<String, String> {
+    add_measured_binding_with_fingerprint_in_box(
+        catalog,
+        target,
+        source_text,
+        now,
+        input,
+        observed_fingerprint,
+        None,
+    )
+}
+
+/// Сохранить подтверждённый план в той же коробке, откуда он был взят.
+pub fn add_measured_binding_with_fingerprint_in_box(
+    catalog: &mut Catalog,
+    target: &DiscoveryTarget,
+    source_text: &str,
+    now: i64,
+    input: u8,
+    observed_fingerprint: Option<&crate::catalog::Fingerprint>,
+    preferred_box_id: Option<&str>,
+) -> Result<String, String> {
     if !matches!(target.family, 4 | 6)
         || !matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_HTTP)
         || !matches!(input, 1 | 2)
@@ -512,19 +545,68 @@ pub fn add_measured_binding_with_input(
         return Err("discovery timestamp must be nonnegative".into());
     }
     let canonical_text = canonical_plan_text(source_text)?;
-    let plan_id = catalog
-        .boxes
+    let compatible_boxes: Vec<usize> = observed_fingerprint
+        .map(|observed| {
+            catalog
+                .boxes
+                .iter()
+                .enumerate()
+                .filter_map(|(index, box_record)| {
+                    box_record
+                        .fingerprint
+                        .is_compatible_with(observed)
+                        .then_some(index)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let preferred_box_index = if let Some(box_id) = preferred_box_id {
+        let index = catalog
+            .boxes
+            .iter()
+            .position(|box_record| box_record.id == box_id)
+            .ok_or("known plan owner disappeared from the catalog")?;
+        if !observed_fingerprint.is_some_and(|observed| {
+            catalog.boxes[index]
+                .fingerprint
+                .is_compatible_with(observed)
+        }) {
+            return Err("known plan owner no longer matches the measured fingerprint".into());
+        }
+        Some(index)
+    } else {
+        None
+    };
+    let plan_search_boxes: Vec<usize> = if observed_fingerprint.is_some() {
+        if let Some(preferred) = preferred_box_index {
+            std::iter::once(preferred)
+                .chain(
+                    compatible_boxes
+                        .iter()
+                        .copied()
+                        .filter(|index| *index != preferred),
+                )
+                .collect()
+        } else {
+            compatible_boxes.clone()
+        }
+    } else {
+        (0..catalog.boxes.len()).collect()
+    };
+    let plan_id = plan_search_boxes
         .iter()
+        .filter_map(|index| catalog.boxes.get(*index))
         .find_map(|box_record| {
             box_record.plans.iter().find(|plan| {
                 plan.enabled
-                    && box_record.bindings.iter().any(|binding| {
-                        binding.enabled
-                            && binding.transport == 6
-                            && binding.family == target.family
-                            && binding.shape == target.shape
-                            && binding.plan_id == plan.id
-                    })
+                    && (observed_fingerprint.is_some()
+                        || box_record.bindings.iter().any(|binding| {
+                            binding.enabled
+                                && binding.transport == 6
+                                && binding.family == target.family
+                                && binding.shape == target.shape
+                                && binding.plan_id == plan.id
+                        }))
                     && canonical_plan_text(&plan.text).ok().as_deref() == Some(&canonical_text)
             })
         })
@@ -539,14 +621,48 @@ pub fn add_measured_binding_with_input(
     r2o_datapath::engine::validate_runtime_plan(&plan)
         .map_err(|error| format!("r2o-datapath runtime rejected measured plan: {error}"))?;
 
-    let box_index = if let Some(index) = catalog
-        .boxes
-        .iter()
-        .position(|box_record| box_record.plans.iter().any(|saved| saved.id == plan_id))
+    let matching_plan_box = plan_search_boxes.iter().copied().find(|index| {
+        catalog.boxes[*index]
+            .plans
+            .iter()
+            .any(|saved| saved.id == plan_id)
+    });
+    let box_index = if let Some(index) = preferred_box_index {
+        index
+    } else if let Some(index) = matching_plan_box {
+        index
+    } else if observed_fingerprint.is_some() && compatible_boxes.len() == 1 {
+        compatible_boxes[0]
+    } else if observed_fingerprint.is_none()
+        && let Some(index) = catalog
+            .boxes
+            .iter()
+            .position(|box_record| box_record.plans.iter().any(|saved| saved.id == plan_id))
     {
         index
     } else {
-        let id = format!("auto-{plan_id}");
+        let base_id = format!("auto-{plan_id}");
+        let id = if catalog
+            .boxes
+            .iter()
+            .all(|box_record| box_record.id != base_id)
+        {
+            base_id
+        } else {
+            let mut selected_id = None;
+            for salt in 0_u8..=u8::MAX {
+                let candidate = format!("auto-{}-{salt:02x}", &plan_id[..30]);
+                if catalog
+                    .boxes
+                    .iter()
+                    .all(|box_record| box_record.id != candidate)
+                {
+                    selected_id = Some(candidate);
+                    break;
+                }
+            }
+            selected_id.ok_or("could not allocate a catalog box id")?
+        };
         catalog.boxes.push(BoxRecord {
             id,
             created: now,
@@ -569,6 +685,9 @@ pub fn add_measured_binding_with_input(
     }
 
     let selected = &mut catalog.boxes[box_index];
+    if let Some(observed) = observed_fingerprint {
+        selected.fingerprint.merge_observed(observed);
+    }
     if let Some(saved) = selected.plans.iter_mut().find(|saved| saved.id == plan_id) {
         saved.text = plan_text;
         saved.proto = if target.shape == SHAPE_HTTP {
@@ -1059,6 +1178,186 @@ mod tests {
         assert!(super::has_usable_profile_binding(&catalog, &target));
         catalog.boxes[0].bindings[0].input = 1;
         assert!(!super::has_usable_profile_binding(&catalog, &target));
+    }
+
+    #[test]
+    fn measured_volume_plan_updates_only_its_unambiguous_compatible_box() {
+        use crate::catalog::{BoxRecord, Fingerprint, Signal};
+
+        let target = DiscoveryTarget {
+            host: "example.com".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: r2k_core::control::SHAPE_MODERN,
+        };
+        let observed = Fingerprint {
+            method: 2,
+            signals: vec![Signal {
+                kind: "rx-volume".into(),
+                volume: 19,
+                seen: 1,
+                packets: 22,
+                ..Signal::default()
+            }],
+        };
+        let mut catalog = crate::catalog::Catalog {
+            boxes: vec![BoxRecord {
+                id: "rx-volume-16kb".into(),
+                fingerprint: Fingerprint {
+                    method: 2,
+                    signals: vec![Signal {
+                        kind: "rx-volume".into(),
+                        volume: 16,
+                        seen: 3,
+                        packets: 30,
+                        ..Signal::default()
+                    }],
+                },
+                ..BoxRecord::default()
+            }],
+            ..crate::catalog::Catalog::default()
+        };
+        let text = "r2o-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit sni_middle +8\n";
+        super::add_measured_binding_with_fingerprint(
+            &mut catalog,
+            &target,
+            text,
+            100,
+            2,
+            Some(&observed),
+        )
+        .unwrap();
+
+        assert_eq!(catalog.boxes.len(), 1);
+        assert_eq!(catalog.boxes[0].id, "rx-volume-16kb");
+        let saved = &catalog.boxes[0].fingerprint.signals[0];
+        assert_eq!(saved.volume, 16);
+        assert_eq!(saved.seen, 4);
+        assert_eq!(saved.packets, 22);
+        assert_eq!(catalog.boxes[0].plans.len(), 1);
+
+        let mut ambiguous = catalog.clone();
+        ambiguous.boxes.push(BoxRecord {
+            id: "rx-volume-20kb".into(),
+            fingerprint: Fingerprint {
+                method: 2,
+                signals: vec![Signal {
+                    kind: "rx-volume".into(),
+                    volume: 20,
+                    seen: 1,
+                    packets: 18,
+                    ..Signal::default()
+                }],
+            },
+            ..BoxRecord::default()
+        });
+        let another_target = DiscoveryTarget {
+            host: "other.example.com".into(),
+            ..target
+        };
+        super::add_measured_binding_with_fingerprint(
+            &mut ambiguous,
+            &another_target,
+            "r2o-plan 1 11\nid 11111111111111111111111111111111\nproto tcp tls\nsplit sni_middle +9\n",
+            101,
+            2,
+            Some(&observed),
+        )
+        .unwrap();
+        assert_eq!(ambiguous.boxes.len(), 3);
+        assert_eq!(ambiguous.boxes[0].plans.len(), 1);
+        assert_eq!(ambiguous.boxes[1].plans.len(), 0);
+        assert_eq!(ambiguous.boxes[2].fingerprint.signals[0].volume, 19);
+        assert_eq!(ambiguous.boxes[2].plans.len(), 1);
+    }
+
+    #[test]
+    fn measured_known_plan_keeps_the_box_that_supplied_it() {
+        use crate::catalog::{BoxRecord, Fingerprint, Plan, Signal};
+
+        let target = DiscoveryTarget {
+            host: "example.com".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: r2k_core::control::SHAPE_MODERN,
+        };
+        let observed = Fingerprint {
+            method: 2,
+            signals: vec![Signal {
+                kind: "rx-volume".into(),
+                volume: 19,
+                seen: 1,
+                packets: 22,
+                ..Signal::default()
+            }],
+        };
+        let plan_a_id = "aa".repeat(16);
+        let plan_b_id = "bb".repeat(16);
+        let plan_text =
+            |id: &str| format!("r2o-plan 1 11\nid {id}\nproto tcp tls\nsplit sni_middle +8\n");
+        let mut catalog = crate::catalog::Catalog {
+            boxes: vec![
+                BoxRecord {
+                    id: "box-a".into(),
+                    fingerprint: Fingerprint {
+                        method: 2,
+                        signals: vec![Signal {
+                            kind: "rx-volume".into(),
+                            volume: 16,
+                            seen: 1,
+                            ..Signal::default()
+                        }],
+                    },
+                    plans: vec![Plan {
+                        id: plan_a_id.clone(),
+                        proto: "tls".into(),
+                        text: plan_text(&plan_a_id),
+                        enabled: true,
+                        ..Plan::default()
+                    }],
+                    ..BoxRecord::default()
+                },
+                BoxRecord {
+                    id: "box-b".into(),
+                    fingerprint: Fingerprint {
+                        method: 2,
+                        signals: vec![Signal {
+                            kind: "rx-volume".into(),
+                            volume: 20,
+                            seen: 1,
+                            ..Signal::default()
+                        }],
+                    },
+                    plans: vec![Plan {
+                        id: plan_b_id.clone(),
+                        proto: "tls".into(),
+                        text: plan_text(&plan_b_id),
+                        enabled: true,
+                        ..Plan::default()
+                    }],
+                    ..BoxRecord::default()
+                },
+            ],
+            ..crate::catalog::Catalog::default()
+        };
+
+        let saved_plan_id = super::add_measured_binding_with_fingerprint_in_box(
+            &mut catalog,
+            &target,
+            &plan_text(&plan_b_id),
+            100,
+            2,
+            Some(&observed),
+            Some("box-b"),
+        )
+        .unwrap();
+
+        assert_eq!(saved_plan_id, plan_b_id);
+        assert_eq!(catalog.boxes[0].bindings.len(), 0);
+        assert_eq!(catalog.boxes[1].bindings[0].target, target.host);
+        assert_eq!(catalog.boxes[1].bindings[0].plan_id, plan_b_id);
+        assert_eq!(catalog.boxes[0].fingerprint.signals[0].seen, 1);
+        assert_eq!(catalog.boxes[1].fingerprint.signals[0].seen, 2);
     }
 
     #[test]

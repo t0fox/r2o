@@ -1849,6 +1849,209 @@ fn r2o_discovery_resource_probe_paths(
 }
 
 #[cfg(unix)]
+fn r2o_discovery_volume_wire_len(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    client_hello: Option<&[u8]>,
+) -> Option<usize> {
+    client_hello
+        .map(<[u8]>::len)
+        .or_else(|| match target.shape {
+            SHAPE_MODERN => Trigger::tls13(&target.host)
+                .ok()
+                .map(|trigger| trigger.payload.len()),
+            SHAPE_LEGACY => Trigger::tls(&target.host)
+                .ok()
+                .map(|trigger| trigger.payload.len()),
+            _ => None,
+        })
+}
+
+#[cfg(unix)]
+fn r2o_discovery_volume_fetch_options(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    path: &str,
+    mark: Option<u32>,
+    wire_len: Option<usize>,
+) -> Result<r2o_controller::fetch::FetchOptions, String> {
+    let endpoint = target
+        .endpoint
+        .parse::<std::net::SocketAddr>()
+        .map_err(|error| format!("адрес объёмной пробы недопустим: {error}"))?;
+    let options = r2o_controller::fetch::FetchOptions {
+        name: target.host.clone(),
+        ip: Some(endpoint.ip()),
+        port: endpoint.port(),
+        path: path.into(),
+        deadline: std::time::Duration::from_secs(8),
+        tls12: target.shape == SHAPE_LEGACY,
+        wire_len,
+        mark,
+    };
+    options.validate()?;
+    Ok(options)
+}
+
+#[cfg(unix)]
+fn r2o_discovery_measure_volume(
+    options: &r2o_controller::fetch::FetchOptions,
+    alternate_path: Option<&str>,
+) -> (
+    Result<r2o_controller::fetch::R2oFetchVolumeTxResult, String>,
+    r2o_controller::fetch::R2oFetchVolumeRxResult,
+) {
+    let tx = r2o_controller::fetch::r2o_fetch_measure_tx_volume(options);
+    let rx = if options.port == 80
+        || tx
+            .as_ref()
+            .is_ok_and(|result| result.reason.starts_with("нет TCP к "))
+    {
+        r2o_controller::fetch::R2oFetchVolumeRxResult::default()
+    } else {
+        r2o_controller::fetch::r2o_fetch_measure_rx_volume_with_fallback_path(
+            options,
+            alternate_path,
+        )
+    };
+    (tx, rx)
+}
+
+#[cfg(unix)]
+fn r2o_discovery_volume_cut(
+    tx: &Result<r2o_controller::fetch::R2oFetchVolumeTxResult, String>,
+    rx: &r2o_controller::fetch::R2oFetchVolumeRxResult,
+) -> bool {
+    tx.as_ref()
+        .is_ok_and(|result| result.verdict == r2o_controller::fetch::R2oFetchVolumeTxVerdict::Cut)
+        || rx.evidence.is_some()
+}
+
+#[cfg(unix)]
+fn r2o_discovery_volume_fingerprint(
+    tx: &Result<r2o_controller::fetch::R2oFetchVolumeTxResult, String>,
+    rx: &r2o_controller::fetch::R2oFetchVolumeRxResult,
+) -> r2o_controller::catalog::Fingerprint {
+    let mut signals = Vec::with_capacity(2);
+    if let Ok(result) = tx
+        && result.verdict == r2o_controller::fetch::R2oFetchVolumeTxVerdict::Cut
+    {
+        signals.push(r2o_controller::catalog::Signal {
+            kind: "volume".into(),
+            volume: i32::try_from(result.at_kb).unwrap_or(i32::MAX),
+            seen: 1,
+            ..r2o_controller::catalog::Signal::default()
+        });
+    }
+    if let Some(evidence) = &rx.evidence {
+        signals.push(r2o_controller::catalog::Signal {
+            kind: match evidence.domain {
+                r2o_controller::r2o_volume::R2oVolumeRxDomain::TlsWire => "rx-volume-wire",
+                r2o_controller::r2o_volume::R2oVolumeRxDomain::HttpBody => "rx-volume",
+            }
+            .into(),
+            volume: i32::try_from(evidence.cut_kb).unwrap_or(i32::MAX),
+            seen: 1,
+            packets: i32::try_from(evidence.cut_packets).unwrap_or(i32::MAX),
+            ..r2o_controller::catalog::Signal::default()
+        });
+    }
+    r2o_controller::catalog::Fingerprint { method: 2, signals }
+}
+
+#[cfg(unix)]
+fn r2o_discovery_volume_bucket(volume_kb: i32) -> i32 {
+    if volume_kb <= 0 {
+        return 0;
+    }
+    (i32::BITS - volume_kb.leading_zeros()) as i32
+}
+
+#[cfg(unix)]
+fn r2o_discovery_volume_known_plans(
+    catalog: Option<&Catalog>,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    observed: &r2o_controller::catalog::Fingerprint,
+) -> Vec<(String, String)> {
+    let Some(catalog) = catalog else {
+        return Vec::new();
+    };
+    if !matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY) {
+        return Vec::new();
+    }
+    let observed_buckets: Vec<(&str, i32)> = observed
+        .signals
+        .iter()
+        .filter(|signal| {
+            matches!(
+                signal.kind.as_str(),
+                "volume" | "rx-volume" | "rx-volume-wire"
+            )
+        })
+        .map(|signal| {
+            (
+                signal.kind.as_str(),
+                r2o_discovery_volume_bucket(signal.volume),
+            )
+        })
+        .collect();
+    let mut candidates = Vec::new();
+    for box_record in &catalog.boxes {
+        if !box_record.fingerprint.is_compatible_with(observed) {
+            continue;
+        }
+        let same_bucket = box_record.fingerprint.signals.iter().any(|saved| {
+            observed_buckets.iter().any(|(kind, bucket)| {
+                *kind == saved.kind
+                    && *bucket > 0
+                    && *bucket == r2o_discovery_volume_bucket(saved.volume)
+            })
+        });
+        for plan in &box_record.plans {
+            if !plan.enabled || plan.proto != "tls" || plan.text.len() >= 4096 {
+                continue;
+            }
+            let Ok(bytes) = compile_text(&plan.text) else {
+                continue;
+            };
+            let Ok(runtime_plan) = Plan::parse(&bytes) else {
+                continue;
+            };
+            if runtime_plan.transport != 6
+                || runtime_plan.proto != 1
+                || r2o_datapath::engine::validate_runtime_plan(&runtime_plan).is_err()
+            {
+                continue;
+            }
+            candidates.push((
+                same_bucket,
+                plan.successes,
+                plan.text.clone(),
+                box_record.id.clone(),
+            ));
+        }
+    }
+    candidates.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
+    let mut plans: Vec<(String, String)> = Vec::new();
+    for (_, _, text, box_id) in candidates {
+        if !plans.iter().any(|(_, known_text)| known_text == &text) {
+            plans.push((box_id, text));
+        }
+    }
+    plans
+}
+
+#[cfg(unix)]
+fn r2o_discovery_existing_binding_blocks_outcome(
+    catalog: &Catalog,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    input: u8,
+    volume_recovery: bool,
+) -> bool {
+    r2o_controller::discovery::has_usable_binding(catalog, target)
+        && !(input == 1 && r2o_controller::discovery::has_usable_profile_binding(catalog, target))
+        && !volume_recovery
+}
+
+#[cfg(unix)]
 fn domain_member(name: &str, suffix: &str) -> bool {
     name == suffix
         || name
@@ -3612,6 +3815,9 @@ struct DiscoveryOutcome {
     detail: String,
     queue_expired: bool,
     direct_clear: bool,
+    volume_recovery: bool,
+    volume_fingerprint: Option<r2o_controller::catalog::Fingerprint>,
+    volume_box_id: Option<String>,
     retry_after: Option<std::time::Duration>,
 }
 
@@ -3641,6 +3847,10 @@ const R2O_ECH_RX_LADDER_BATCH: usize = 32;
 #[cfg(unix)]
 const R2O_DISCOVERY_FAILURE_RETRY: std::time::Duration = std::time::Duration::from_secs(120);
 #[cfg(unix)]
+const R2O_VOLUME_LADDER_BATCH: usize = 32;
+#[cfg(unix)]
+const R2O_VOLUME_SEARCH_CACHE_CAPACITY: usize = 256;
+#[cfg(unix)]
 const R2O_DISCOVERY_CLEAR_RETRY_FIRST: std::time::Duration =
     std::time::Duration::from_secs(10 * 60);
 #[cfg(unix)]
@@ -3650,6 +3860,79 @@ const R2O_DISCOVERY_CLEAR_RETRY_SECOND: std::time::Duration =
 const R2O_DISCOVERY_CLEAR_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 #[cfg(unix)]
 const R2O_DISCOVERY_INCOMPLETE_RETRY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+#[cfg(unix)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct R2oDiscoveryVolumeSearchKey {
+    wire_len: Option<usize>,
+    send_cap: usize,
+    probe_path: String,
+    alternate_path: Option<String>,
+    network_probe: bool,
+    white_name: String,
+}
+
+#[cfg(unix)]
+#[derive(Clone)]
+struct R2oDiscoveryVolumeSearch {
+    key: R2oDiscoveryVolumeSearchKey,
+    measured_at: std::time::Instant,
+    tx: Result<r2o_controller::fetch::R2oFetchVolumeTxResult, String>,
+    rx: r2o_controller::fetch::R2oFetchVolumeRxResult,
+    next_candidate: usize,
+    tried_plans: Vec<String>,
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct R2oDiscoveryVolumeSearchCache {
+    entries: VecDeque<(
+        r2o_controller::discovery::DiscoveryTarget,
+        R2oDiscoveryVolumeSearch,
+    )>,
+}
+
+#[cfg(unix)]
+impl R2oDiscoveryVolumeSearchCache {
+    fn get(
+        &mut self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        key: &R2oDiscoveryVolumeSearchKey,
+        now: std::time::Instant,
+    ) -> Option<R2oDiscoveryVolumeSearch> {
+        self.entries.retain(|(_, search)| {
+            now.saturating_duration_since(search.measured_at) < R2O_DISCOVERY_TASK_LIFETIME
+        });
+        let index = self
+            .entries
+            .iter()
+            .position(|(candidate, _)| candidate == target)?;
+        if self.entries[index].1.key != *key {
+            self.entries.remove(index);
+            return None;
+        }
+        let entry = self.entries.remove(index)?;
+        let search = entry.1.clone();
+        self.entries.push_back(entry);
+        Some(search)
+    }
+
+    fn insert(
+        &mut self,
+        target: r2o_controller::discovery::DiscoveryTarget,
+        search: R2oDiscoveryVolumeSearch,
+    ) {
+        self.entries.retain(|(candidate, _)| candidate != &target);
+        self.entries.push_back((target, search));
+        while self.entries.len() > R2O_VOLUME_SEARCH_CACHE_CAPACITY {
+            self.entries.pop_front();
+        }
+    }
+
+    fn remove(&mut self, target: &r2o_controller::discovery::DiscoveryTarget) {
+        self.entries.retain(|(candidate, _)| candidate != target);
+    }
+}
 
 #[cfg(unix)]
 const R2O_CLEAN_HANDSHAKE_CAPACITY: usize = 16;
@@ -4869,6 +5152,10 @@ impl DiscoveryWorker {
             r2o_controller::r2o_resource::R2oResourceMemory::default(),
         ));
         let runner_resource_memory = Arc::clone(&resource_memory);
+        let volume_searches = Arc::new(std::sync::Mutex::new(
+            R2oDiscoveryVolumeSearchCache::default(),
+        ));
+        let runner_volume_searches = Arc::clone(&volume_searches);
         let runner: Arc<R2oDiscoveryRunner> = Arc::new(move |target, cancel| {
             let runner_started = std::time::Instant::now();
             let client_hello = runner_client_hellos
@@ -4997,6 +5284,23 @@ impl DiscoveryWorker {
                 );
             }
             if cancel.load(Ordering::Relaxed) {
+                return outcome;
+            }
+            if r2o_discovery_volume_recovery(
+                &mut outcome,
+                &target,
+                client_hello.as_deref(),
+                mark,
+                &commands,
+                &catalog_path,
+                candidate_catalog.as_ref(),
+                white_name,
+                &runner_send_cap,
+                &runner_resource_memory,
+                &runner_volume_searches,
+                &cancel,
+                runner_started,
+            ) {
                 return outcome;
             }
             let Some(plan_text) = outcome.plan_text.as_deref() else {
@@ -5310,6 +5614,9 @@ impl DiscoveryWorker {
                                     detail: "подозрение устарело в очереди".into(),
                                     queue_expired: true,
                                     direct_clear: false,
+                                    volume_recovery: false,
+                                    volume_fingerprint: None,
+                                    volume_box_id: None,
                                     retry_after: None,
                                 })
                                 .is_err()
@@ -5336,6 +5643,9 @@ impl DiscoveryWorker {
                                 detail: "задача заменена свежим ClientHello".into(),
                                 queue_expired: false,
                                 direct_clear: false,
+                                volume_recovery: false,
+                                volume_fingerprint: None,
+                                volume_box_id: None,
                                 retry_after: None,
                             }
                         } else {
@@ -5995,6 +6305,386 @@ fn r2o_ech_rx_ladder_candidate(
 }
 
 #[cfg(unix)]
+fn r2o_discovery_volume_recovery(
+    outcome: &mut DiscoveryOutcome,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    client_hello: Option<&[u8]>,
+    mark: Option<u32>,
+    commands: &SyncSender<HttpSearchCommand>,
+    catalog_path: &Path,
+    candidate_catalog: Option<&Catalog>,
+    white_name: &str,
+    send_cap: &AtomicUsize,
+    resource_memory: &std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>,
+    searches: &std::sync::Mutex<R2oDiscoveryVolumeSearchCache>,
+    cancel: &AtomicBool,
+    started: std::time::Instant,
+) -> bool {
+    if !r2o_discovery_volume_recovery_eligible(outcome) {
+        return false;
+    }
+
+    let (probe_path, alternate_path) =
+        r2o_discovery_resource_probe_paths(target, candidate_catalog, resource_memory);
+    let network_probe = candidate_catalog.is_some_and(|catalog| {
+        catalog
+            .network_whitelist
+            .as_ref()
+            .is_none_or(|network| network.name.is_empty() && !network.searched)
+    });
+    let key = R2oDiscoveryVolumeSearchKey {
+        wire_len: r2o_discovery_volume_wire_len(target, client_hello),
+        send_cap: send_cap.load(Ordering::Relaxed),
+        probe_path,
+        alternate_path,
+        network_probe,
+        white_name: white_name.to_owned(),
+    };
+    let cached = searches
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(target, &key, std::time::Instant::now());
+    let mut search = if let Some(cached) = cached {
+        cached
+    } else {
+        let options =
+            match r2o_discovery_volume_fetch_options(target, &key.probe_path, mark, key.wire_len) {
+                Ok(options) => options,
+                Err(error) => {
+                    outcome
+                        .detail
+                        .push_str(&format!("; объёмная проба пропущена: {error}"));
+                    return false;
+                }
+            };
+        let (tx, rx) = r2o_discovery_measure_volume(&options, key.alternate_path.as_deref());
+        for fetch in [&rx.first, &rx.second, &rx.third, &rx.gzip]
+            .into_iter()
+            .flatten()
+        {
+            if r2o_controller::fetch::r2o_fetch_result_can_remember_resources(fetch) {
+                resource_memory
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remember_hints(&fetch.r2o_resources, std::time::Instant::now());
+            }
+        }
+        if rx.evidence.is_some()
+            && let Some(path) = rx.measured_path.as_deref()
+        {
+            resource_memory
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remember_proven_path(&target.host, path, std::time::Instant::now());
+        }
+        let search = R2oDiscoveryVolumeSearch {
+            key,
+            measured_at: std::time::Instant::now(),
+            tx,
+            rx,
+            next_candidate: 0,
+            tried_plans: Vec::new(),
+        };
+        searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(target.clone(), search.clone());
+        search
+    };
+
+    if !r2o_discovery_volume_cut(&search.tx, &search.rx) {
+        return false;
+    }
+
+    outcome.direct_clear = false;
+    outcome.volume_recovery = true;
+    let measured_candidate = outcome.plan_text.take();
+    let tx_reason = search
+        .tx
+        .as_ref()
+        .map_or_else(|error| error.as_str(), |result| result.reason.as_str());
+    let rx_reason = if search.rx.evidence.is_some() {
+        search.rx.reason.as_str()
+    } else {
+        "обрыв входящего ответа не подтверждён"
+    };
+    outcome.detail.push_str(&format!(
+        "; подтверждён объёмный обрыв: TX {tx_reason}; RX {rx_reason}"
+    ));
+
+    let observed_fingerprint = r2o_discovery_volume_fingerprint(&search.tx, &search.rx);
+    let candidate_probe_path = search
+        .rx
+        .measured_path
+        .as_deref()
+        .unwrap_or(&search.key.probe_path)
+        .to_owned();
+    let known_plans =
+        r2o_discovery_volume_known_plans(candidate_catalog, target, &observed_fingerprint);
+    let pending_known_plans: Vec<(String, String)> = known_plans
+        .iter()
+        .filter(|(_, candidate)| !search.tried_plans.contains(candidate))
+        .take(8)
+        .cloned()
+        .collect();
+    let mut known_probe_incomplete = false;
+    for (box_id, candidate) in &pending_known_plans {
+        if cancel.load(Ordering::Relaxed)
+            || R2O_DISCOVERY_TASK_LIFETIME.saturating_sub(started.elapsed())
+                < std::time::Duration::from_secs(9)
+        {
+            break;
+        }
+        let (result, applied) = r2o_run_discovery_candidate_trial(
+            target,
+            candidate,
+            &candidate_probe_path,
+            mark,
+            commands,
+            client_hello,
+            None,
+            resource_memory,
+        );
+        if r2o_family_recovery_decision(&result, applied) == R2oFamilyRecoveryDecision::Verified {
+            searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(target);
+            outcome.plan_text = Some(candidate.clone());
+            outcome.volume_recovery = true;
+            outcome.volume_fingerprint = Some(observed_fingerprint);
+            outcome.volume_box_id = Some(box_id.clone());
+            outcome.retry_after = None;
+            outcome.detail.push_str(
+                "; совместимый сохранённый TLS-план подтверждён точным APPLIED и полным HTTPS-ответом",
+            );
+            return true;
+        }
+        let Some(fetch) = result.as_ref().ok() else {
+            known_probe_incomplete = true;
+            outcome.detail.push_str(
+                "; проба сохранённого объёмно-совместимого плана не завершилась, повторю её",
+            );
+            break;
+        };
+        search.tried_plans.push(candidate.clone());
+        if !applied || fetch.cloudflare_challenge {
+            outcome.detail.push_str(
+                "; сохранённый объёмно-совместимый план не получил точное применение или встретил challenge",
+            );
+        }
+    }
+    let known_plans_remain = known_plans
+        .iter()
+        .any(|(_, candidate)| !search.tried_plans.contains(candidate));
+    if known_probe_incomplete || known_plans_remain {
+        searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(target.clone(), search);
+        outcome.retry_after = Some(if known_probe_incomplete {
+            R2O_DISCOVERY_FAILURE_RETRY
+        } else {
+            std::time::Duration::ZERO
+        });
+        if known_plans_remain {
+            outcome
+                .detail
+                .push_str("; оставшиеся планы коробок продолжатся следующей задачей");
+        }
+        return true;
+    }
+
+    if let Some(candidate) = measured_candidate
+        .as_deref()
+        .filter(|candidate| !search.tried_plans.iter().any(|tried| tried == candidate))
+    {
+        let (result, applied) = r2o_run_discovery_candidate_trial(
+            target,
+            candidate,
+            &candidate_probe_path,
+            mark,
+            commands,
+            client_hello,
+            None,
+            resource_memory,
+        );
+        if r2o_family_recovery_decision(&result, applied) == R2oFamilyRecoveryDecision::Verified {
+            searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(target);
+            outcome.plan_text = Some(candidate.to_owned());
+            outcome.volume_fingerprint = Some(observed_fingerprint.clone());
+            outcome.retry_after = None;
+            outcome.detail.push_str(
+                "; собственный измеренный план подтверждён после сохранённых планов коробок",
+            );
+            return true;
+        }
+        let Some(fetch) = result.as_ref().ok() else {
+            searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(target.clone(), search);
+            outcome.plan_text = None;
+            outcome.retry_after = Some(R2O_DISCOVERY_FAILURE_RETRY);
+            outcome
+                .detail
+                .push_str("; собственный измеренный план не завершил пробу, повторю его");
+            return true;
+        };
+        search.tried_plans.push(candidate.to_owned());
+        if !applied || fetch.cloudflare_challenge {
+            outcome.detail.push_str(
+                "; собственный измеренный план не получил точное применение или встретил challenge",
+            );
+        }
+    }
+
+    if target.shape != SHAPE_MODERN {
+        searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(target.clone(), search);
+        outcome.retry_after = Some(R2O_DISCOVERY_FAILURE_RETRY);
+        outcome.detail.push_str(
+            "; TLS 1.2 не поддерживает fake-SNI/RX-лестницу, сохранённые совместимые планы исчерпаны",
+        );
+        return true;
+    }
+
+    let candidate_count = r2o_ech_rx_ladder_candidate_count(network_probe);
+    let mut next_candidate = search.next_candidate;
+    let first_candidate = next_candidate;
+    let mut attempted = 0_usize;
+    while attempted < R2O_VOLUME_LADDER_BATCH
+        && !cancel.load(Ordering::Relaxed)
+        && R2O_DISCOVERY_TASK_LIFETIME.saturating_sub(started.elapsed())
+            >= std::time::Duration::from_secs(9)
+        && next_candidate < candidate_count
+    {
+        let index = next_candidate;
+        let (candidate, discovered_name) = match r2o_ech_rx_ladder_candidate(
+            index,
+            network_probe,
+            white_name,
+            send_cap.load(Ordering::Relaxed),
+        ) {
+            Ok(Some(candidate)) => candidate,
+            Ok(None) => break,
+            Err(error) => {
+                eprintln!("объёмная лестница пропустила план {index}: {error}");
+                next_candidate = index + 1;
+                attempted += 1;
+                continue;
+            }
+        };
+        if search.tried_plans.iter().any(|tried| tried == &candidate) {
+            next_candidate = index + 1;
+            continue;
+        }
+        attempted += 1;
+        let (result, applied) = r2o_run_discovery_candidate_trial(
+            target,
+            &candidate,
+            &candidate_probe_path,
+            mark,
+            commands,
+            client_hello,
+            None,
+            resource_memory,
+        );
+        if r2o_family_recovery_decision(&result, applied) == R2oFamilyRecoveryDecision::Verified {
+            if network_probe
+                && let (Some(catalog), Some(name)) = (candidate_catalog, discovered_name.as_deref())
+                && let Err(error) =
+                    r2o_discovery_record_network_whitelist(catalog_path, catalog, Some(name))
+            {
+                eprintln!("не удалось сохранить найденное белое имя сети: {error}");
+            }
+            searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(target);
+            outcome.plan_text = Some(candidate);
+            outcome.volume_recovery = true;
+            outcome.volume_fingerprint = Some(observed_fingerprint.clone());
+            outcome.retry_after = None;
+            outcome.detail.push_str(&format!(
+                "; объёмная лестница подтвердила план {index} точным APPLIED и полным HTTPS-ответом"
+            ));
+            return true;
+        }
+        let Some(fetch) = result.as_ref().ok() else {
+            outcome.detail.push_str(&format!(
+                "; проба объёмного плана {index} не завершилась и будет повторена"
+            ));
+            break;
+        };
+        if !applied || fetch.cloudflare_challenge {
+            outcome.detail.push_str(&format!(
+                "; проба объёмного плана {index} не получила точное применение или встретила challenge; повторю её"
+            ));
+            break;
+        }
+        next_candidate = index + 1;
+    }
+
+    search.next_candidate = next_candidate;
+    outcome.plan_text = None;
+    if network_probe && next_candidate >= candidate_count {
+        if let Some(catalog) = candidate_catalog
+            && let Err(error) = r2o_discovery_record_network_whitelist(catalog_path, catalog, None)
+        {
+            eprintln!("не удалось сохранить исчерпание поиска белого имени: {error}");
+        }
+        search.key.network_probe = false;
+        search.key.white_name = "hcaptcha.com".into();
+        search.next_candidate = 0;
+        outcome.retry_after = Some(std::time::Duration::ZERO);
+        outcome.detail.push_str(
+            "; перебор белых имён исчерпан, следующая задача начнёт пять разрезов hcaptcha.com",
+        );
+        searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(target.clone(), search);
+    } else if next_candidate >= candidate_count {
+        searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(target);
+        outcome.retry_after = Some(R2O_DISCOVERY_FAILURE_RETRY);
+        outcome
+            .detail
+            .push_str("; варианты объёмной лестницы исчерпаны без подтверждённого обхода");
+    } else {
+        searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(target.clone(), search);
+        outcome.retry_after = Some(if next_candidate == first_candidate {
+            R2O_DISCOVERY_FAILURE_RETRY
+        } else {
+            std::time::Duration::ZERO
+        });
+        outcome.detail.push_str(&format!(
+            "; объёмная лестница продолжится с плана {next_candidate}"
+        ));
+    }
+    true
+}
+
+#[cfg(unix)]
+fn r2o_discovery_volume_recovery_eligible(outcome: &DiscoveryOutcome) -> bool {
+    // The C worker runs the ordinary volume probe only after a CLEAR verdict.
+    !outcome.queue_expired
+        && outcome.direct_clear
+        && matches!(outcome.target.shape, SHAPE_MODERN | SHAPE_LEGACY)
+}
+
+#[cfg(unix)]
 fn r2o_ech_retry_challenged_witness<T>(
     target_name: &str,
     plan_text: &str,
@@ -6077,6 +6767,9 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech(
             detail: "не удалось собрать профиль целевого TLS".into(),
             queue_expired: false,
             direct_clear: false,
+            volume_recovery: false,
+            volume_fingerprint: None,
+            volume_box_id: None,
             retry_after: None,
         };
     };
@@ -6092,6 +6785,9 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech(
                 detail: format!("не удалось собрать контрольный TLS: {error}"),
                 queue_expired: false,
                 direct_clear: false,
+                volume_recovery: false,
+                volume_fingerprint: None,
+                volume_box_id: None,
                 retry_after: None,
             };
         }
@@ -6128,6 +6824,9 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech(
         detail,
         queue_expired: false,
         direct_clear: !timed_out && result.verdict == Verdict::Clear,
+        volume_recovery: false,
+        volume_fingerprint: None,
+        volume_box_id: None,
         retry_after,
     }
 }
@@ -9604,11 +10303,12 @@ impl ControlClient {
             );
             return Ok(());
         };
-        let remeasuring_profile = input == 1
-            && r2o_controller::discovery::has_usable_profile_binding(catalog, &outcome.target);
-        if r2o_controller::discovery::has_usable_binding(catalog, &outcome.target)
-            && !remeasuring_profile
-        {
+        if r2o_discovery_existing_binding_blocks_outcome(
+            catalog,
+            &outcome.target,
+            input,
+            outcome.volume_recovery,
+        ) {
             println!(
                 "автопоиск пропущен: каталог уже покрывает {}",
                 outcome.target.host
@@ -9617,11 +10317,12 @@ impl ControlClient {
         }
 
         let (_lock, previous) = locked_catalog(catalog_path, catalog)?;
-        let remeasuring_profile = input == 1
-            && r2o_controller::discovery::has_usable_profile_binding(&previous, &outcome.target);
-        if r2o_controller::discovery::has_usable_binding(&previous, &outcome.target)
-            && !remeasuring_profile
-        {
+        if r2o_discovery_existing_binding_blocks_outcome(
+            &previous,
+            &outcome.target,
+            input,
+            outcome.volume_recovery,
+        ) {
             *catalog = previous;
             println!(
                 "автопоиск пропущен: другой контроллер уже сохранил план для {}",
@@ -9634,12 +10335,14 @@ impl ControlClient {
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
         let mut updated = previous.clone();
-        let plan_id = r2o_controller::discovery::add_measured_binding_with_input(
+        let plan_id = r2o_controller::discovery::add_measured_binding_with_fingerprint_in_box(
             &mut updated,
             &outcome.target,
             &source_text,
             now,
             input,
+            outcome.volume_fingerprint.as_ref(),
+            outcome.volume_box_id.as_deref(),
         )
         .map_err(|error| format!("не удалось сохранить результат классификации: {error}"))?;
         let plan_text = updated
@@ -11014,6 +11717,9 @@ mod tests {
             detail: "измерение завершено без классификации".into(),
             queue_expired: false,
             direct_clear,
+            volume_recovery: false,
+            volume_fingerprint: None,
+            volume_box_id: None,
             retry_after: Some(retry_after),
         });
     }
@@ -11611,6 +12317,9 @@ mod tests {
             detail: "кандидат найден".into(),
             queue_expired: false,
             direct_clear: false,
+            volume_recovery: false,
+            volume_fingerprint: None,
+            volume_box_id: None,
             retry_after: None,
         };
 
@@ -11841,6 +12550,346 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         std::fs::remove_file(work.join("catalog.json.lock")).unwrap();
         std::fs::remove_dir(work).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn volume_поиск_сохраняет_замер_и_курсоры_только_для_того_же_входа() {
+        use r2o_controller::fetch::{R2oFetchVolumeTxResult, R2oFetchVolumeTxVerdict};
+
+        let target = DiscoveryTarget {
+            host: "media.example".into(),
+            endpoint: "192.0.2.31:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let now = std::time::Instant::now();
+        let key = super::R2oDiscoveryVolumeSearchKey {
+            wire_len: Some(812),
+            send_cap: 1492,
+            probe_path: "/asset.css".into(),
+            alternate_path: Some("/image.webp".into()),
+            network_probe: false,
+            white_name: "hcaptcha.com".into(),
+        };
+        let search = super::R2oDiscoveryVolumeSearch {
+            key: key.clone(),
+            measured_at: now,
+            tx: Ok(R2oFetchVolumeTxResult {
+                address: "192.0.2.31:443".parse().unwrap(),
+                verdict: R2oFetchVolumeTxVerdict::Cut,
+                at_kb: 16,
+                elapsed: std::time::Duration::from_secs(1),
+                reason: "обрыв на 16 КБ".into(),
+            }),
+            rx: Default::default(),
+            next_candidate: 7,
+            tried_plans: Vec::new(),
+        };
+        let mut cache = super::R2oDiscoveryVolumeSearchCache::default();
+        cache.insert(target.clone(), search);
+
+        let cached = cache.get(&target, &key, now).unwrap();
+        assert_eq!(cached.next_candidate, 7);
+        assert_eq!(cached.key.wire_len, Some(812));
+        assert!(
+            cache
+                .get(
+                    &target,
+                    &super::R2oDiscoveryVolumeSearchKey {
+                        probe_path: "/".into(),
+                        ..key.clone()
+                    },
+                    now,
+                )
+                .is_none()
+        );
+        assert!(cache.entries.is_empty());
+
+        cache.insert(
+            target.clone(),
+            super::R2oDiscoveryVolumeSearch {
+                key: key.clone(),
+                measured_at: now,
+                tx: Ok(R2oFetchVolumeTxResult {
+                    address: "192.0.2.31:443".parse().unwrap(),
+                    verdict: R2oFetchVolumeTxVerdict::Passed,
+                    at_kb: 64,
+                    elapsed: std::time::Duration::ZERO,
+                    reason: "лестница пройдена".into(),
+                }),
+                rx: Default::default(),
+                next_candidate: 0,
+                tried_plans: Vec::new(),
+            },
+        );
+        assert!(
+            cache
+                .get(
+                    &target,
+                    &key,
+                    now + super::R2O_DISCOVERY_TASK_LIFETIME + std::time::Duration::from_secs(1),
+                )
+                .is_none()
+        );
+        assert!(cache.entries.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn volume_проба_сохраняет_форму_профиля_и_распознаёт_оба_направления_обрыва() {
+        use r2o_controller::fetch::{
+            R2oFetchVolumeRxResult, R2oFetchVolumeTxResult, R2oFetchVolumeTxVerdict,
+        };
+        use r2o_controller::r2o_volume::{R2oVolumeRxDomain, R2oVolumeRxEvidence};
+
+        let mut target = DiscoveryTarget {
+            host: "media.example".into(),
+            endpoint: "[2001:db8::31]:443".into(),
+            family: 6,
+            shape: SHAPE_MODERN,
+        };
+        let client_hello = [1, 2, 3, 4, 5];
+        let options = super::r2o_discovery_volume_fetch_options(
+            &target,
+            "/asset.css",
+            Some(17),
+            super::r2o_discovery_volume_wire_len(&target, Some(&client_hello)),
+        )
+        .unwrap();
+        assert_eq!(options.ip.unwrap().to_string(), "2001:db8::31");
+        assert_eq!(options.port, 443);
+        assert_eq!(options.path, "/asset.css");
+        assert_eq!(options.wire_len, Some(5));
+        assert!(!options.tls12);
+        assert_eq!(options.mark, Some(17));
+
+        target.shape = r2k_core::control::SHAPE_LEGACY;
+        let options = super::r2o_discovery_volume_fetch_options(
+            &target,
+            "/",
+            None,
+            super::r2o_discovery_volume_wire_len(&target, None),
+        )
+        .unwrap();
+        assert!(options.tls12);
+        assert!(options.wire_len.is_some());
+
+        let tx_passed = Ok(R2oFetchVolumeTxResult {
+            address: "192.0.2.31:443".parse().unwrap(),
+            verdict: R2oFetchVolumeTxVerdict::Passed,
+            at_kb: 64,
+            elapsed: std::time::Duration::ZERO,
+            reason: String::new(),
+        });
+        assert!(!super::r2o_discovery_volume_cut(
+            &tx_passed,
+            &R2oFetchVolumeRxResult::default(),
+        ));
+        let rx_cut = R2oFetchVolumeRxResult {
+            evidence: Some(R2oVolumeRxEvidence {
+                domain: R2oVolumeRxDomain::HttpBody,
+                cut_kb: 16,
+                expected_kb: 32,
+                cut_packets: 18,
+                compressed_complete: true,
+                reason: "парный RX-обрыв".into(),
+            }),
+            ..Default::default()
+        };
+        assert!(super::r2o_discovery_volume_cut(&tx_passed, &rx_cut));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn volume_fingerprint_preserves_both_cut_domains_and_the_rx_packet_budget() {
+        use r2o_controller::fetch::{
+            R2oFetchVolumeRxResult, R2oFetchVolumeTxResult, R2oFetchVolumeTxVerdict,
+        };
+        use r2o_controller::r2o_volume::{R2oVolumeRxDomain, R2oVolumeRxEvidence};
+
+        let tx = Ok(R2oFetchVolumeTxResult {
+            address: "192.0.2.31:443".parse().unwrap(),
+            verdict: R2oFetchVolumeTxVerdict::Cut,
+            at_kb: 19,
+            elapsed: std::time::Duration::ZERO,
+            reason: "TX cut".into(),
+        });
+        let rx = R2oFetchVolumeRxResult {
+            evidence: Some(R2oVolumeRxEvidence {
+                domain: R2oVolumeRxDomain::TlsWire,
+                cut_kb: 64,
+                expected_kb: 96,
+                cut_packets: 27,
+                compressed_complete: true,
+                reason: "RX cut".into(),
+            }),
+            ..Default::default()
+        };
+        let fingerprint = super::r2o_discovery_volume_fingerprint(&tx, &rx);
+
+        assert_eq!(fingerprint.method, 2);
+        assert_eq!(fingerprint.signals.len(), 2);
+        assert_eq!(fingerprint.signals[0].kind, "volume");
+        assert_eq!(fingerprint.signals[0].volume, 19);
+        assert_eq!(fingerprint.signals[1].kind, "rx-volume-wire");
+        assert_eq!(fingerprint.signals[1].volume, 64);
+        assert_eq!(fingerprint.signals[1].packets, 27);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn volume_recovery_runs_only_after_clear_classification() {
+        let target = DiscoveryTarget {
+            host: "media.example".into(),
+            endpoint: "192.0.2.31:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let outcome = DiscoveryOutcome {
+            target: target.clone(),
+            plan_text: Some("measured plan".into()),
+            detail: String::new(),
+            queue_expired: false,
+            direct_clear: false,
+            volume_recovery: false,
+            volume_fingerprint: None,
+            volume_box_id: None,
+            retry_after: None,
+        };
+
+        assert!(!super::r2o_discovery_volume_recovery_eligible(&outcome));
+        let clear = DiscoveryOutcome {
+            direct_clear: true,
+            ..outcome
+        };
+        assert!(super::r2o_discovery_volume_recovery_eligible(&clear));
+        let expired = DiscoveryOutcome {
+            queue_expired: true,
+            ..clear
+        };
+        assert!(!super::r2o_discovery_volume_recovery_eligible(&expired));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn volume_known_plans_use_compatible_boxes_and_prioritize_the_same_bucket() {
+        fn saved_plan(id: u8, successes: i32, split: i32) -> r2o_controller::catalog::Plan {
+            let id = format!("{id:02x}").repeat(16);
+            r2o_controller::catalog::Plan {
+                id: id.clone(),
+                proto: "tls".into(),
+                text: format!("r2o-plan 1 11\nid {id}\nproto tcp tls\nsplit sni_middle +{split}\n"),
+                successes,
+                enabled: true,
+                ..Default::default()
+            }
+        }
+        fn volume_box(id: &str, volume: i32, plan: r2o_controller::catalog::Plan) -> BoxRecord {
+            BoxRecord {
+                id: id.into(),
+                fingerprint: Fingerprint {
+                    method: 2,
+                    signals: vec![Signal {
+                        kind: "volume".into(),
+                        volume,
+                        seen: 1,
+                        ..Signal::default()
+                    }],
+                },
+                plans: vec![plan],
+                ..Default::default()
+            }
+        }
+
+        let same_bucket = saved_plan(1, 1, 8);
+        let near_bucket = saved_plan(2, 100, 9);
+        let catalog = Catalog {
+            boxes: vec![
+                volume_box("near", 15, near_bucket.clone()),
+                volume_box("same", 20, same_bucket.clone()),
+                volume_box("outside-slack", 24, saved_plan(3, 1000, 10)),
+                {
+                    let mut record = volume_box("wrong-method", 20, saved_plan(4, 1000, 11));
+                    record.fingerprint.method = 1;
+                    record
+                },
+            ],
+            ..Catalog::default()
+        };
+        let target = DiscoveryTarget {
+            host: "media.example".into(),
+            endpoint: "192.0.2.31:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let observed = Fingerprint {
+            method: 2,
+            signals: vec![Signal {
+                kind: "volume".into(),
+                volume: 19,
+                seen: 1,
+                ..Signal::default()
+            }],
+        };
+
+        assert_eq!(
+            super::r2o_discovery_volume_known_plans(Some(&catalog), &target, &observed),
+            [
+                ("same".into(), same_bucket.text),
+                ("near".into(), near_bucket.text)
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn подтверждённый_volume_план_заменяет_уже_пригодную_привязку() {
+        let target = DiscoveryTarget {
+            host: "media.example".into(),
+            endpoint: "192.0.2.31:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let plan_id = "ab".repeat(16);
+        let mut catalog = Catalog::default();
+        catalog.boxes.push(BoxRecord {
+            id: "volume-source".into(),
+            fingerprint: Fingerprint::default(),
+            plans: vec![r2o_controller::catalog::Plan {
+                id: plan_id.clone(),
+                proto: "tls".into(),
+                text: r2o_controller::r2o_rx_volume::r2o_rx_volume_plan(0, "hcaptcha.com", 1492)
+                    .unwrap(),
+                added: 100,
+                enabled: true,
+                ..Default::default()
+            }],
+            bindings: vec![Binding {
+                kind: "name".into(),
+                target: target.host.clone(),
+                plan_id,
+                level: 3,
+                confirmed: 100,
+                enabled: true,
+                transport: 6,
+                family: 4,
+                shape: SHAPE_MODERN,
+                verified_by: 1,
+                input: 2,
+                ..Binding::default()
+            }],
+            ..BoxRecord::default()
+        });
+        assert!(r2o_controller::discovery::has_usable_binding(
+            &catalog, &target
+        ));
+        assert!(super::r2o_discovery_existing_binding_blocks_outcome(
+            &catalog, &target, 2, false
+        ));
+        assert!(!super::r2o_discovery_existing_binding_blocks_outcome(
+            &catalog, &target, 2, true
+        ));
     }
 
     #[cfg(unix)]
@@ -14345,6 +15394,9 @@ mod tests {
                     detail: "проверка завершена".into(),
                     queue_expired: false,
                     direct_clear: false,
+                    volume_recovery: false,
+                    volume_fingerprint: None,
+                    volume_box_id: None,
                     retry_after: None,
                 }
             },
@@ -14423,6 +15475,9 @@ mod tests {
                     detail: "проверка завершена".into(),
                     queue_expired: false,
                     direct_clear: false,
+                    volume_recovery: false,
+                    volume_fingerprint: None,
+                    volume_box_id: None,
                     retry_after: None,
                 }
             },
@@ -14466,6 +15521,9 @@ mod tests {
                     detail: "проверка завершена".into(),
                     queue_expired: false,
                     direct_clear: false,
+                    volume_recovery: false,
+                    volume_fingerprint: None,
+                    volume_box_id: None,
                     retry_after: None,
                 }
             },
@@ -14514,6 +15572,9 @@ mod tests {
                     detail: "проверка завершена".into(),
                     queue_expired: false,
                     direct_clear: false,
+                    volume_recovery: false,
+                    volume_fingerprint: None,
+                    volume_box_id: None,
                     retry_after: None,
                 }
             },
@@ -14569,6 +15630,9 @@ mod tests {
                     detail: "завершено".into(),
                     queue_expired: false,
                     direct_clear: false,
+                    volume_recovery: false,
+                    volume_fingerprint: None,
+                    volume_box_id: None,
                     retry_after: None,
                 }
             },
@@ -14671,6 +15735,9 @@ mod tests {
                     detail: "завершено".into(),
                     queue_expired: false,
                     direct_clear: false,
+                    volume_recovery: false,
+                    volume_fingerprint: None,
+                    volume_box_id: None,
                     retry_after: None,
                 }
             },
@@ -14763,6 +15830,9 @@ mod tests {
                     detail: "завершено".into(),
                     queue_expired: false,
                     direct_clear: false,
+                    volume_recovery: false,
+                    volume_fingerprint: None,
+                    volume_box_id: None,
                     retry_after: None,
                 }
             },
@@ -14837,6 +15907,9 @@ mod tests {
                     detail: "завершено".into(),
                     queue_expired: false,
                     direct_clear: false,
+                    volume_recovery: false,
+                    volume_fingerprint: None,
+                    volume_box_id: None,
                     retry_after: None,
                 }
             },
@@ -14985,6 +16058,9 @@ mod tests {
             detail: "целевая проверка завершена".into(),
             queue_expired: false,
             direct_clear: false,
+            volume_recovery: false,
+            volume_fingerprint: None,
+            volume_box_id: None,
             retry_after: None,
         };
         worker.r2o_complete_outcome(completed);
@@ -15026,6 +16102,9 @@ mod tests {
             detail: "ошибка поиска".into(),
             queue_expired: false,
             direct_clear: false,
+            volume_recovery: false,
+            volume_fingerprint: None,
+            volume_box_id: None,
             retry_after: None,
         });
         assert!(
@@ -15133,6 +16212,9 @@ mod tests {
             detail: "неубедительный прямой замер".into(),
             queue_expired: false,
             direct_clear: false,
+            volume_recovery: false,
+            volume_fingerprint: None,
+            volume_box_id: None,
             retry_after: Some(retry_after),
         });
         assert!(!worker.queue(target.clone()));
@@ -15175,6 +16257,9 @@ mod tests {
                 detail: "прямой CLEAR".into(),
                 queue_expired: false,
                 direct_clear: true,
+                volume_recovery: false,
+                volume_fingerprint: None,
+                volume_box_id: None,
                 retry_after: Some(Duration::from_secs(10 * 60)),
             });
             let expected = Duration::from_secs(minutes * 60);
@@ -15221,6 +16306,9 @@ mod tests {
             detail: "активный поиск превысил срок жизни".into(),
             queue_expired: false,
             direct_clear: false,
+            volume_recovery: false,
+            volume_fingerprint: None,
+            volume_box_id: None,
             retry_after: Some(super::R2O_DISCOVERY_TASK_LIFETIME),
         };
 
@@ -15375,6 +16463,9 @@ mod tests {
             detail: "цель напрямую проходит".into(),
             queue_expired: false,
             direct_clear: true,
+            volume_recovery: false,
+            volume_fingerprint: None,
+            volume_box_id: None,
             retry_after: None,
         };
 
@@ -15459,6 +16550,9 @@ mod tests {
             detail: "цель напрямую проходит".into(),
             queue_expired: false,
             direct_clear: true,
+            volume_recovery: false,
+            volume_fingerprint: None,
+            volume_box_id: None,
             retry_after: None,
         };
 
@@ -15574,6 +16668,9 @@ mod tests {
                 detail: "test".into(),
                 queue_expired: false,
                 direct_clear: false,
+                volume_recovery: false,
+                volume_fingerprint: None,
+                volume_box_id: None,
                 retry_after: None,
             };
             let outcome =

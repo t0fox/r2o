@@ -80,6 +80,33 @@ impl Fingerprint {
         }
         any_agreement
     }
+
+    /// Добавить наблюдённые признаки по тем же допускам, что и донорский каталог.
+    pub fn merge_observed(&mut self, observed: &Self) {
+        if self.signals.is_empty() {
+            self.method = observed.method;
+        } else if self.method != observed.method {
+            return;
+        }
+        for signal in &observed.signals {
+            if let Some(saved) = self
+                .signals
+                .iter_mut()
+                .find(|saved| saved.kind == signal.kind && same_signal(saved, signal))
+            {
+                saved.seen = saved.seen.saturating_add(signal.seen);
+                if matches!(
+                    signal.kind.as_str(),
+                    "volume" | "rx-volume" | "rx-volume-wire"
+                ) && signal.packets > 0
+                {
+                    saved.packets = signal.packets;
+                }
+            } else if self.signals.len() < MAX_SIGNALS {
+                self.signals.push(signal.clone());
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
