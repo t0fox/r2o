@@ -188,6 +188,27 @@ pub struct FetchResult {
     pub r2o_resources: Vec<crate::r2o_resource::R2oResourceHint>,
 }
 
+/// Проверяет завершённый HTTP-ответ для прямого RX-результата.
+pub fn r2o_fetch_result_is_direct_complete(result: &FetchResult) -> bool {
+    (200..300).contains(&result.status)
+        && result.complete
+        && result.application_verified
+        && !matches!(
+            result.http_outcome,
+            R2oFetchHttpOutcome::Blocked | R2oFetchHttpOutcome::LegalDenial
+        )
+}
+
+/// Проверяет, можно ли сохранить ресурсы ответа как подсказки планировщика.
+pub fn r2o_fetch_result_can_remember_resources(result: &FetchResult) -> bool {
+    (200..300).contains(&result.status)
+        && result.complete
+        && !matches!(
+            result.http_outcome,
+            R2oFetchHttpOutcome::Blocked | R2oFetchHttpOutcome::LegalDenial
+        )
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum R2oFetchHttpOutcome {
     #[default]
@@ -1053,7 +1074,7 @@ fn r2o_fetch_measure_rx_volume_once(
                 return r2o_result;
             }
         };
-    r2o_result.direct_complete = (200..300).contains(&r2o_first.status) && r2o_first.complete;
+    r2o_result.direct_complete = r2o_fetch_result_is_direct_complete(&r2o_first);
     let r2o_first_observation = r2o_first.r2o_volume_observation;
     if !crate::r2o_volume::r2o_volume_rx_partial(&r2o_first_observation) {
         r2o_result.rx_unmeasured = r2o_fetch_rx_probe_is_unmeasured(&r2o_first)
@@ -2065,6 +2086,60 @@ fn connect_socket(fd: libc::c_int, address: SocketAddr) -> io::Result<libc::c_in
 mod tests {
     use super::*;
     use crate::r2o_volume::R2oVolumeRxEncoding;
+
+    fn response_for_classification(
+        status: u16,
+        http_outcome: R2oFetchHttpOutcome,
+        complete: bool,
+        application_verified: bool,
+    ) -> FetchResult {
+        FetchResult {
+            address: "127.0.0.1:443".parse().unwrap(),
+            local_port: 0,
+            tls: Some("1.3"),
+            status,
+            http_outcome,
+            cloudflare_challenge: false,
+            body_bytes: 20 * 1024,
+            body_expected: Some(20 * 1024),
+            body_has_length: true,
+            location: String::new(),
+            chunked: false,
+            gzip: false,
+            complete,
+            application_verified,
+            elapsed: Duration::ZERO,
+            reason: None,
+            r2o_volume_observation: crate::r2o_volume::R2oVolumeObservation::default(),
+            r2o_resources: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn http_отказы_не_становятся_прямым_ответом_или_подсказками_ресурсов() {
+        let accepted = response_for_classification(200, R2oFetchHttpOutcome::Neutral, true, true);
+        assert!(r2o_fetch_result_is_direct_complete(&accepted));
+        assert!(r2o_fetch_result_can_remember_resources(&accepted));
+
+        for outcome in [
+            R2oFetchHttpOutcome::Blocked,
+            R2oFetchHttpOutcome::LegalDenial,
+        ] {
+            let refusal = response_for_classification(200, outcome, true, false);
+            assert!(!r2o_fetch_result_is_direct_complete(&refusal));
+            assert!(!r2o_fetch_result_can_remember_resources(&refusal));
+        }
+
+        let incomplete =
+            response_for_classification(200, R2oFetchHttpOutcome::Neutral, false, false);
+        assert!(!r2o_fetch_result_is_direct_complete(&incomplete));
+        assert!(!r2o_fetch_result_can_remember_resources(&incomplete));
+
+        let missing_page =
+            response_for_classification(404, R2oFetchHttpOutcome::Neutral, true, true);
+        assert!(!r2o_fetch_result_is_direct_complete(&missing_page));
+        assert!(!r2o_fetch_result_can_remember_resources(&missing_page));
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

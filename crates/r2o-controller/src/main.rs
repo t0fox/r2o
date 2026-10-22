@@ -2895,7 +2895,9 @@ fn r2o_run_discovery_candidate_trial(
         commands,
         ech_config,
     );
-    if let Ok(fetch) = &result {
+    if let Ok(fetch) = &result
+        && r2o_controller::fetch::r2o_fetch_result_can_remember_resources(fetch)
+    {
         resource_memory
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
