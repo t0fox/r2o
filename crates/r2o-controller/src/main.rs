@@ -4570,8 +4570,25 @@ struct R2oDiscoveryQueueEntry {
 }
 
 #[cfg(unix)]
-fn r2o_discovery_task_key(target: &r2o_controller::discovery::DiscoveryTarget) -> (String, u8) {
-    (target.host.clone(), target.family)
+type R2oDiscoveryTaskKey = (String, u8, u8);
+
+#[cfg(unix)]
+type R2oDiscoveryFailureKey = (String, u8, u8, String);
+
+#[cfg(unix)]
+fn r2o_discovery_transport(target: &r2o_controller::discovery::DiscoveryTarget) -> u8 {
+    if target.shape == SHAPE_QUIC { 17 } else { 6 }
+}
+
+#[cfg(unix)]
+fn r2o_discovery_task_key(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+) -> R2oDiscoveryTaskKey {
+    (
+        target.host.clone(),
+        r2o_discovery_transport(target),
+        target.family,
+    )
 }
 
 #[cfg(unix)]
@@ -4634,8 +4651,13 @@ fn r2o_client_shape_family_slot(family: u8) -> Option<usize> {
 #[cfg(unix)]
 fn r2o_discovery_failure_key(
     target: &r2o_controller::discovery::DiscoveryTarget,
-) -> (String, u8, String) {
-    (target.host.clone(), target.family, target.endpoint.clone())
+) -> R2oDiscoveryFailureKey {
+    (
+        target.host.clone(),
+        r2o_discovery_transport(target),
+        target.family,
+        target.endpoint.clone(),
+    )
 }
 
 #[cfg(unix)]
@@ -4771,25 +4793,26 @@ fn r2o_take_ready_quic_discovery(
 #[cfg(unix)]
 struct DiscoveryWorker {
     jobs: Arc<(std::sync::Mutex<R2oDiscoveryQueue>, std::sync::Condvar)>,
-    client_hellos: Arc<std::sync::Mutex<HashMap<(String, u8), Vec<u8>>>>,
+    client_hellos: Arc<std::sync::Mutex<HashMap<R2oDiscoveryTaskKey, Vec<u8>>>>,
     recent_client_shapes: R2oRecentClientShapeCache,
     resource_memory: Arc<std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>>,
-    active_cancels: Arc<std::sync::Mutex<HashMap<(String, u8), Arc<AtomicBool>>>>,
-    catalog_refreshes: Arc<std::sync::Mutex<HashSet<(String, u8)>>>,
+    active_cancels: Arc<std::sync::Mutex<HashMap<R2oDiscoveryTaskKey, Arc<AtomicBool>>>>,
+    catalog_refreshes: Arc<std::sync::Mutex<HashSet<R2oDiscoveryTaskKey>>>,
     outcomes: Receiver<R2oDiscoveryWorkOutcome>,
     cancel: Arc<AtomicBool>,
     seen: HashSet<r2o_controller::discovery::DiscoveryTarget>,
     seen_order: VecDeque<r2o_controller::discovery::DiscoveryTarget>,
-    failed_at: HashMap<(String, u8, String), std::time::Instant>,
-    failed_retry_after: HashMap<(String, u8, String), std::time::Duration>,
+    failed_at: HashMap<R2oDiscoveryFailureKey, std::time::Instant>,
+    failed_retry_after: HashMap<R2oDiscoveryFailureKey, std::time::Duration>,
     challenge_cooldowns: HashMap<(String, u8), std::time::Instant>,
-    ech_input_clearable_failures: HashSet<(String, u8, String)>,
+    ech_input_clearable_failures: HashSet<R2oDiscoveryFailureKey>,
     ech_input_names: VecDeque<(String, u8)>,
-    clear_streaks: HashMap<(String, u8, String), u8>,
+    clear_streaks: HashMap<R2oDiscoveryFailureKey, u8>,
     client_snapshot_targets: HashSet<r2o_controller::discovery::DiscoveryTarget>,
     pending_rechecks:
-        HashMap<(String, u8), (r2o_controller::discovery::DiscoveryTarget, Option<Vec<u8>>)>,
-    active: HashMap<(String, u8), r2o_controller::discovery::DiscoveryTarget>,
+        HashMap<R2oDiscoveryTaskKey, (r2o_controller::discovery::DiscoveryTarget, Option<Vec<u8>>)>,
+    active: HashMap<R2oDiscoveryTaskKey, r2o_controller::discovery::DiscoveryTarget>,
+    completed: HashSet<R2oDiscoveryTaskKey>,
     threads: Vec<JoinHandle<()>>,
 }
 
@@ -5969,7 +5992,7 @@ impl DiscoveryWorker {
     fn r2o_new_with_runner_and_client_hellos(
         measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
         runner: Arc<R2oDiscoveryRunner>,
-        client_hellos: Arc<std::sync::Mutex<HashMap<(String, u8), Vec<u8>>>>,
+        client_hellos: Arc<std::sync::Mutex<HashMap<R2oDiscoveryTaskKey, Vec<u8>>>>,
         resource_memory: Arc<std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>>,
     ) -> Self {
         let jobs = Arc::new((
@@ -6149,6 +6172,7 @@ impl DiscoveryWorker {
             client_snapshot_targets: HashSet::new(),
             pending_rechecks: HashMap::new(),
             active: HashMap::new(),
+            completed: HashSet::new(),
             threads,
         }
     }
@@ -6256,7 +6280,7 @@ impl DiscoveryWorker {
             .collect::<HashSet<_>>();
         for (failure_key, failed_at) in &self.failed_at {
             if now.saturating_duration_since(*failed_at) < R2O_DISCOVERY_TASK_REST {
-                task_keys.insert((failure_key.0.clone(), failure_key.1));
+                task_keys.insert((failure_key.0.clone(), failure_key.1, failure_key.2));
             }
         }
         task_keys.len()
@@ -6278,6 +6302,9 @@ impl DiscoveryWorker {
                 wake.notify_one();
             }
             return promoted;
+        }
+        if self.completed.contains(&task_key) {
+            return false;
         }
         // The donor's fixed task table contains both queued and running jobs.
         if self.r2o_outstanding_task_count(now) >= R2O_DISCOVERY_TASK_CAPACITY {
@@ -6302,6 +6329,14 @@ impl DiscoveryWorker {
             && let Some(expired) = self.seen_order.pop_front()
         {
             self.seen.remove(&expired);
+            let expired_task_key = r2o_discovery_task_key(&expired);
+            if !self
+                .seen_order
+                .iter()
+                .any(|seen| r2o_discovery_task_key(seen) == expired_task_key)
+            {
+                self.completed.remove(&expired_task_key);
+            }
             let expired_key = r2o_discovery_failure_key(&expired);
             if !self
                 .seen_order
@@ -6372,6 +6407,7 @@ impl DiscoveryWorker {
             self.r2o_clear_ech_profile_failures(&target.host, target.family);
         }
         let task_key = r2o_discovery_task_key(&target);
+        self.completed.remove(&task_key);
         if self.active.contains_key(&task_key) {
             self.catalog_refreshes
                 .lock()
@@ -6452,7 +6488,7 @@ impl DiscoveryWorker {
         let failures = self
             .ech_input_clearable_failures
             .iter()
-            .filter(|(failed_host, failed_family, _)| {
+            .filter(|(failed_host, _, failed_family, _)| {
                 failed_host == host && *failed_family == family
             })
             .cloned()
@@ -6478,6 +6514,7 @@ impl DiscoveryWorker {
         }
         self.seen.remove(&target);
         self.seen_order.retain(|seen| seen != &target);
+        self.completed.remove(&r2o_discovery_task_key(&target));
         let failure_key = r2o_discovery_failure_key(&target);
         self.failed_at.remove(&failure_key);
         self.failed_retry_after.remove(&failure_key);
@@ -6494,10 +6531,11 @@ impl DiscoveryWorker {
         }
         self.seen.remove(&target);
         self.seen_order.retain(|seen| seen != &target);
+        self.completed.remove(&r2o_discovery_task_key(&target));
         self.queue(target)
     }
 
-    fn r2o_clear_failed_endpoint(&mut self, failure_key: &(String, u8, String)) {
+    fn r2o_clear_failed_endpoint(&mut self, failure_key: &R2oDiscoveryFailureKey) {
         let matching: Vec<_> = self
             .seen_order
             .iter()
@@ -6622,7 +6660,7 @@ impl DiscoveryWorker {
                 .client_hellos
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(&task_key)
+                .get(&r2o_discovery_task_key(&outcome.target))
                 .cloned();
             self.pending_rechecks
                 .insert(task_key, (outcome.target, client_hello));
@@ -6643,11 +6681,13 @@ impl DiscoveryWorker {
             let Some((target, client_hello)) = self.pending_rechecks.remove(&task_key) else {
                 continue;
             };
+            let client_hello_key = r2o_discovery_task_key(&target);
+            self.completed.remove(&task_key);
             if self.r2o_discovery_challenge_active(&target, std::time::Instant::now()) {
                 self.client_hellos
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remove(&task_key);
+                    .remove(&client_hello_key);
                 self.client_snapshot_targets.remove(&target);
                 continue;
             }
@@ -6661,12 +6701,12 @@ impl DiscoveryWorker {
                 self.client_hellos
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(task_key.clone(), client_hello.clone());
+                    .insert(client_hello_key.clone(), client_hello.clone());
             } else {
                 self.client_hellos
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remove(&task_key);
+                    .remove(&client_hello_key);
                 self.client_snapshot_targets.remove(&target);
             }
             if self.queue(target.clone()) {
@@ -6678,7 +6718,7 @@ impl DiscoveryWorker {
                     self.client_hellos
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .remove(&task_key);
+                        .remove(&client_hello_key);
                 }
                 self.pending_rechecks
                     .insert(task_key, (target, client_hello));
@@ -6717,12 +6757,14 @@ impl DiscoveryWorker {
             self.clear_streaks.remove(&failure_key);
         }
         if outcome.queue_expired {
+            self.completed.remove(&task_key);
             self.seen.remove(&outcome.target);
             self.seen_order.retain(|seen| seen != &outcome.target);
             self.failed_at.remove(&failure_key);
             self.failed_retry_after.remove(&failure_key);
             self.ech_input_clearable_failures.remove(&failure_key);
         } else if outcome.plan_text.is_none() && self.seen.contains(&outcome.target) {
+            self.completed.remove(&task_key);
             self.failed_at
                 .insert(failure_key.clone(), std::time::Instant::now());
             if let Some(retry_after) = outcome.retry_after {
@@ -6731,6 +6773,9 @@ impl DiscoveryWorker {
                 self.failed_retry_after.remove(&failure_key);
             }
         } else {
+            if outcome.plan_text.is_some() {
+                self.completed.insert(task_key);
+            }
             self.failed_at.remove(&failure_key);
             self.failed_retry_after.remove(&failure_key);
             self.ech_input_clearable_failures.remove(&failure_key);
@@ -12929,6 +12974,7 @@ mod tests {
             client_snapshot_targets: std::collections::HashSet::new(),
             pending_rechecks: std::collections::HashMap::new(),
             active: std::collections::HashMap::new(),
+            completed: std::collections::HashSet::new(),
             threads: Vec::new(),
         }
     }
@@ -16894,6 +16940,67 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn r2o_discovery_keeps_tcp_and_quic_tasks_for_the_same_name_separate() {
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        let tcp = DiscoveryTarget {
+            host: "same.example".into(),
+            endpoint: "198.51.100.10:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let quic = DiscoveryTarget {
+            host: tcp.host.clone(),
+            endpoint: tcp.endpoint.clone(),
+            family: tcp.family,
+            shape: SHAPE_QUIC,
+        };
+
+        assert!(worker.queue(tcp));
+        assert!(worker.queue(quic));
+        assert_eq!(worker.active.len(), 2);
+        assert_eq!(worker.jobs.0.lock().unwrap().entries.len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_discovery_success_suppresses_other_endpoints_for_same_name_and_transport() {
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        let first = DiscoveryTarget {
+            host: "same.example".into(),
+            endpoint: "198.51.100.10:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let second = DiscoveryTarget {
+            endpoint: "198.51.100.11:443".into(),
+            shape: r2k_core::control::SHAPE_LEGACY,
+            ..first.clone()
+        };
+
+        assert!(worker.queue(first.clone()));
+        worker.jobs.0.lock().unwrap().pop(std::time::Instant::now());
+        worker.r2o_complete_outcome(DiscoveryOutcome {
+            target: first,
+            plan_text: Some("r2o-plan 1 1\\n".into()),
+            detail: "план подтверждён".into(),
+            queue_expired: false,
+            direct_clear: false,
+            volume_recovery: false,
+            volume_fingerprint: None,
+            volume_box_id: None,
+            retry_after: None,
+        });
+
+        assert!(!worker.queue(second.clone()));
+        assert_eq!(worker.active.len(), 0);
+        assert!(worker.jobs.0.lock().unwrap().entries.is_empty());
+        assert!(worker.queue_after_confirmed_failure(second));
+        assert_eq!(worker.active.len(), 1);
+        assert_eq!(worker.jobs.0.lock().unwrap().entries.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn r2o_discovery_queue_matches_donor_capacity() {
         let mut queue = super::R2oDiscoveryQueue::default();
         let now = std::time::Instant::now();
@@ -19805,6 +19912,7 @@ mod tests {
             ech_input_clearable_failures: std::collections::HashSet::new(),
             ech_input_names: std::collections::VecDeque::new(),
             clear_streaks: std::collections::HashMap::new(),
+            completed: std::collections::HashSet::new(),
             active: std::collections::HashMap::new(),
             threads: Vec::new(),
         };

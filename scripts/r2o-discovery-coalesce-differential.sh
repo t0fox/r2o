@@ -55,6 +55,14 @@ mkdir -p "$r2o_log_dir"
     r2o_run_timed 'слияние очереди Discovery Rust' cargo +1.98.0 test \
         -p r2o-controller --bin r2o-controller \
         r2o_discovery_сливает_endpoint_до_исхода_задачи_имени --locked --offline
+    printf '\nРаздельное ведение TCP- и QUIC-задач C/Rust\n'
+    r2o_run_timed 'разделение транспорта Discovery Rust' cargo +1.98.0 test \
+        -p r2o-controller --bin r2o-controller \
+        r2o_discovery_keeps_tcp_and_quic_tasks_for_the_same_name_separate --locked --offline
+    printf '\nУдержание подтверждённой задачи до повторного отказа\n'
+    r2o_run_timed 'повтор успешной задачи Discovery Rust' cargo +1.98.0 test \
+        -p r2o-controller --bin r2o-controller \
+        r2o_discovery_success_suppresses_other_endpoints_for_same_name_and_transport --locked --offline
     printf '\nПроверка ограничения повторов конечной точки в Rust\n'
     r2o_run_timed 'повтор конечной точки Discovery Rust' cargo +1.98.0 test \
         -p r2o-controller --bin r2o-controller \
@@ -64,6 +72,8 @@ mkdir -p "$r2o_log_dir"
 
 grep -q 'measurement admission: all checks passed' "$r2o_log"
 grep -q 'r2o_discovery_сливает_endpoint_до_исхода_задачи_имени .*ok' "$r2o_log"
+grep -q 'r2o_discovery_keeps_tcp_and_quic_tasks_for_the_same_name_separate .*ok' "$r2o_log"
+grep -q 'r2o_discovery_success_suppresses_other_endpoints_for_same_name_and_transport .*ok' "$r2o_log"
 grep -q 'r2o_discovery_failure_cooldown_ключует_endpoint_без_shape .*ok' "$r2o_log"
 printf 'Журнал проверки: %s\n' "$r2o_log"
 cat "$r2o_log"
