@@ -982,10 +982,31 @@ while time.monotonic() < deadline:
         continue
     if len(event) != 39 or event[0] != 4 or event[37] != 17 or event[38] != 1:
         raise SystemExit(f"ОШИБКА: неверный ключ или направление voice-события: {event!r}")
+    first_suspect = event
     print(f"ПРОЙДЕНО: NFQUEUE передала голосовое подозрение контроллеру по wire {wire_version}")
     break
 else:
     raise SystemExit("ОШИБКА: datapath не передал событие голосового подозрения")
+
+controller.close()
+time.sleep(0.2)
+controller = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+controller.settimeout(6)
+controller.connect(sys.argv[1])
+kind, greeting = read_frame(controller)
+if kind != 0x000A or len(greeting) < 40 or struct.unpack("!H", greeting[38:40])[0] != wire_version:
+    raise SystemExit(f"ОШИБКА: control reconnect отправил неверное приветствие: {kind:#x}, {greeting!r}")
+deadline = time.monotonic() + 5
+while time.monotonic() < deadline:
+    kind, event = read_frame(controller)
+    if kind != 0x000D:
+        continue
+    if event != first_suspect:
+        raise SystemExit(f"ОШИБКА: reconnect изменил поток голосового подозрения: {event!r}")
+    print("ПРОЙДЕНО: после control reconnect datapath повторно сообщил неразрешённый voice-поток")
+    break
+else:
+    raise SystemExit("ОШИБКА: после control reconnect datapath не повторил voice-подозрение")
 
 def send_command(command, body):
     payload = struct.pack("!H", command) + body
