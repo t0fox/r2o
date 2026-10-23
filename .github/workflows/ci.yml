@@ -306,11 +306,12 @@ jobs:
       - name: Установить кросс-компилятор и QEMU
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/r2o-apt-archives/partial"
+          sh scripts/ci-apt-cache.sh prepare "$RUNNER_TEMP/r2o-apt-archives"
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             -o Dir::Cache::archives="$RUNNER_TEMP/r2o-apt-archives" \
             gcc-mipsel-linux-gnu qemu-user binutils
+          sh scripts/ci-apt-cache.sh finalize "$RUNNER_TEMP/r2o-apt-archives"
       - name: Собрать и проверить выпуск MIPS
         run: sh scripts/build-mipsel.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # версия v7.0.2
@@ -523,11 +524,12 @@ jobs:
               ;;
             *) r2o_needs_aarch64=0 ;;
           esac
-          mkdir -p "$RUNNER_TEMP/r2o-apt-archives/partial"
+          sh scripts/ci-apt-cache.sh prepare "$RUNNER_TEMP/r2o-apt-archives"
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             -o Dir::Cache::archives="$RUNNER_TEMP/r2o-apt-archives" \
             "${packages[@]}"
+          sh scripts/ci-apt-cache.sh finalize "$RUNNER_TEMP/r2o-apt-archives"
           if [ "$r2o_needs_aarch64" -eq 1 ]; then
             test "$(aarch64-linux-gnu-gcc -dumpfullversion)" = 13.3.0
           fi

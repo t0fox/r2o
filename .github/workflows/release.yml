@@ -136,11 +136,12 @@ jobs:
         run: |
           set -euo pipefail
           read -r -a packages <<< "$PACKAGES"
-          mkdir -p "$RUNNER_TEMP/r2o-apt-archives/partial"
+          sh scripts/ci-apt-cache.sh prepare "$RUNNER_TEMP/r2o-apt-archives"
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             -o Dir::Cache::archives="$RUNNER_TEMP/r2o-apt-archives" \
             "${packages[@]}"
+          sh scripts/ci-apt-cache.sh finalize "$RUNNER_TEMP/r2o-apt-archives"
       - name: Собрать ABI и проверить программы под QEMU
         run: sh "$BUILD_SCRIPT"
       - name: Подготовить бинарники ABI для общей упаковки
