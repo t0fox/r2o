@@ -274,3 +274,33 @@ fn r2o_json_keeps_transmit_and_receive_ladder_results_separate() {
     assert!(value["measured_path"].is_string());
     assert_eq!(value["rx_reason"], "");
 }
+
+#[test]
+fn r2o_json_combines_ladder_and_quic_when_both_are_requested() {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port().to_string();
+    drop(listener);
+    let output = r2o_run_fetch(&[
+        "--name",
+        "stand.example",
+        "--ip",
+        "127.0.0.1",
+        "--port",
+        &port,
+        "--deadline",
+        "100",
+        "--ladder",
+        "--quic",
+        "--quic-budget",
+        "0",
+        "--json",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("combined --json must return one JSON result");
+    assert_eq!(value["shape"], "combined");
+    assert_eq!(value["ladder"]["shape"], "ladder");
+    assert_eq!(value["quic"]["shape"], "quic");
+    assert_eq!(value["quic"]["wire_requested"], 0);
+}

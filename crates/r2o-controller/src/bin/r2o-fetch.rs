@@ -205,6 +205,23 @@ fn run() -> Result<i32, String> {
         } else {
             r2o_fetch_measure_rx_volume(&options)
         };
+        let r2o_ladder_elapsed = r2o_started.elapsed();
+        let r2o_ladder_exit_code =
+            if r2o_tx.verdict == R2oFetchVolumeTxVerdict::Cut || r2o_rx.evidence.is_some() {
+                1
+            } else if r2o_tx.verdict == R2oFetchVolumeTxVerdict::Passed {
+                0
+            } else {
+                2
+            };
+        let r2o_quic_result = if r2o_quic {
+            Some(r2o_fetch_quic_with_budget(
+                &options,
+                r2o_quic_budget_packets,
+            )?)
+        } else {
+            None
+        };
         if r2o_json {
             let r2o_verdict = match r2o_tx.verdict {
                 R2oFetchVolumeTxVerdict::Unreachable => "unreachable",
@@ -229,40 +246,46 @@ fn run() -> Result<i32, String> {
                     )
                 })
                 .unwrap_or_else(|| r2o_tx.reason.clone());
-            println!(
-                "{}",
-                serde_json::json!({
-                    "schema": 2,
-                    "shape": "ladder",
-                    "mode": "ladder",
-                    "name": options.name,
-                    "ip": r2o_tx.address.ip().to_string(),
-                    "port": options.port,
-                    "verdict": r2o_verdict,
-                    "verdict_human": r2o_verdict_human,
-                    "tx_passed": r2o_tx.verdict == R2oFetchVolumeTxVerdict::Passed,
-                    "at_kb": r2o_tx.at_kb,
-                    "rx_cut": r2o_rx_cut,
-                    "rx_at_kb": r2o_rx.evidence.as_ref().map_or(0, |evidence| evidence.cut_kb),
-                    "elapsed_ms": r2o_started.elapsed().as_millis(),
-                    "reason": r2o_reason,
-                    "rx_short": r2o_rx.short_bytes.is_some(),
-                    "rx_unmeasured": r2o_rx.rx_unmeasured,
-                    "rx_direct_complete": r2o_rx.direct_complete,
-                    "rx_tls_unavailable": r2o_rx.rx_tls_unavailable,
-                    "measured_path": r2o_rx.measured_path.as_deref().unwrap_or(""),
-                    "rx_reason": r2o_rx.reason,
-                })
-            );
-            return Ok(
-                if r2o_tx.verdict == R2oFetchVolumeTxVerdict::Cut || r2o_rx_cut {
-                    1
-                } else if r2o_tx.verdict == R2oFetchVolumeTxVerdict::Passed {
-                    0
-                } else {
-                    2
-                },
-            );
+            let r2o_ladder_json = serde_json::json!({
+                "schema": 2,
+                "shape": "ladder",
+                "mode": "ladder",
+                "name": options.name,
+                "ip": r2o_tx.address.ip().to_string(),
+                "port": options.port,
+                "verdict": r2o_verdict,
+                "verdict_human": r2o_verdict_human,
+                "tx_passed": r2o_tx.verdict == R2oFetchVolumeTxVerdict::Passed,
+                "at_kb": r2o_tx.at_kb,
+                "rx_cut": r2o_rx_cut,
+                "rx_at_kb": r2o_rx.evidence.as_ref().map_or(0, |evidence| evidence.cut_kb),
+                "elapsed_ms": r2o_ladder_elapsed.as_millis(),
+                "reason": r2o_reason,
+                "rx_short": r2o_rx.short_bytes.is_some(),
+                "rx_unmeasured": r2o_rx.rx_unmeasured,
+                "rx_direct_complete": r2o_rx.direct_complete,
+                "rx_tls_unavailable": r2o_rx.rx_tls_unavailable,
+                "measured_path": r2o_rx.measured_path.as_deref().unwrap_or(""),
+                "rx_reason": r2o_rx.reason,
+            });
+            if let Some(r2o_quic_result) = &r2o_quic_result {
+                let r2o_quic_exit_code = r2o_quic_exit_code(r2o_quic_result);
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "schema": 2,
+                        "shape": "combined",
+                        "ladder": r2o_ladder_json,
+                        "quic": r2o_quic_json(&options, r2o_quic_result),
+                    })
+                );
+                return Ok(r2o_combine_exit_codes(
+                    r2o_ladder_exit_code,
+                    r2o_quic_exit_code,
+                ));
+            }
+            println!("{r2o_ladder_json}");
+            return Ok(r2o_ladder_exit_code);
         }
         println!(
             "цель:        {} ({}:{}), путь {}",
@@ -309,72 +332,31 @@ fn run() -> Result<i32, String> {
         } else if !r2o_rx.reason.is_empty() {
             println!("вход:        {}", r2o_rx.reason);
         }
-        println!("время:       {} мс", r2o_started.elapsed().as_millis());
+        println!("время:       {} мс", r2o_ladder_elapsed.as_millis());
         if r2o_tx.verdict != R2oFetchVolumeTxVerdict::Passed {
             println!("причина:     {}", r2o_tx.reason);
         }
         for failure in &r2o_rx.failures {
             println!("ошибка RX:   {failure}");
         }
-        return Ok(
-            if r2o_tx.verdict == R2oFetchVolumeTxVerdict::Cut || r2o_rx.evidence.is_some() {
-                1
-            } else if r2o_tx.verdict == R2oFetchVolumeTxVerdict::Passed {
-                0
-            } else {
-                2
-            },
-        );
+        if let Some(r2o_quic_result) = &r2o_quic_result {
+            println!("\nQUIC/HTTP3:");
+            r2o_print_quic_result(&options, r2o_quic_result, r2o_quic_budget_packets);
+            return Ok(r2o_combine_exit_codes(
+                r2o_ladder_exit_code,
+                r2o_quic_exit_code(r2o_quic_result),
+            ));
+        }
+        return Ok(r2o_ladder_exit_code);
     }
     if r2o_quic {
         let r2o_result = r2o_fetch_quic_with_budget(&options, r2o_quic_budget_packets)?;
         if r2o_json {
-            let r2o_status = r2o_result.data.status;
-            let r2o_handshake = r2o_result.data.handshake_confirmed;
-            println!(
-                "{}",
-                serde_json::json!({
-                    "schema": 2,
-                    "client": "d2k-own-profile",
-                    "name": options.name,
-                    "shape": "quic",
-                    "ip": r2o_result.address.ip().to_string(),
-                    "port": options.port,
-                    "path": options.path,
-                    "protocol": "quic",
-                    "body_bytes": null,
-                    "quic_stream_bytes": r2o_result.data.body_bytes,
-                    "body_expected": null,
-                    "body_has_length": null,
-                    "headers_inspected": false,
-                    "location": null,
-                    "cloudflare_challenge": null,
-                    "wire_requested": options.wire_len.unwrap_or(0),
-                    "mark": 0,
-                    "elapsed_ms": r2o_result.elapsed.as_millis(),
-                    "local_port": if r2o_handshake { r2o_result.local_port } else { 0 },
-                    "negotiated_tls": if r2o_handshake { 0x0304 } else { 0 },
-                    "http_status": r2o_status,
-                    "response_complete": r2o_result.data.complete,
-                    "level": if r2o_result.data.local_refusal { 0 } else if r2o_status > 0 { 3 } else if r2o_handshake { 2 } else { 0 },
-                    "local_refusal": r2o_result.data.local_refusal,
-                    "measured": !r2o_result.data.local_refusal,
-                    "name_ok": if r2o_handshake { 1 } else { -1 },
-                    "reason": r2o_result.data.error.as_deref().unwrap_or(""),
-                })
-            );
-            return Ok(if r2o_result.data.local_refusal {
-                2
-            } else {
-                i32::from(!(r2o_result.data.complete || r2o_result.data.budget_passed))
-            });
+            println!("{}", r2o_quic_json(&options, &r2o_result));
+            return Ok(r2o_quic_exit_code(&r2o_result));
         }
         r2o_print_quic_result(&options, &r2o_result, r2o_quic_budget_packets);
-        return Ok(if r2o_result.data.local_refusal {
-            2
-        } else {
-            i32::from(!(r2o_result.data.complete || r2o_result.data.budget_passed))
-        });
+        return Ok(r2o_quic_exit_code(&r2o_result));
     }
     let r2o_fetch_started = std::time::Instant::now();
     let result = match r2o_fetch_detailed(&options) {
@@ -531,6 +513,61 @@ fn r2o_print_dns_failed(name: &str) {
     );
 }
 
+fn r2o_quic_json(
+    options: &FetchOptions,
+    result: &r2o_controller::fetch::R2oQuicFetchResult,
+) -> serde_json::Value {
+    let status = result.data.status;
+    let handshake = result.data.handshake_confirmed;
+    serde_json::json!({
+        "schema": 2,
+        "client": "d2k-own-profile",
+        "name": options.name,
+        "shape": "quic",
+        "ip": result.address.ip().to_string(),
+        "port": options.port,
+        "path": options.path,
+        "protocol": "quic",
+        "body_bytes": null,
+        "quic_stream_bytes": result.data.body_bytes,
+        "body_expected": null,
+        "body_has_length": null,
+        "headers_inspected": false,
+        "location": null,
+        "cloudflare_challenge": null,
+        "wire_requested": options.wire_len.unwrap_or(0),
+        "mark": 0,
+        "elapsed_ms": result.elapsed.as_millis(),
+        "local_port": if handshake { result.local_port } else { 0 },
+        "negotiated_tls": if handshake { 0x0304 } else { 0 },
+        "http_status": status,
+        "response_complete": result.data.complete,
+        "level": if result.data.local_refusal { 0 } else if status > 0 { 3 } else if handshake { 2 } else { 0 },
+        "local_refusal": result.data.local_refusal,
+        "measured": !result.data.local_refusal,
+        "name_ok": if handshake { 1 } else { -1 },
+        "reason": result.data.error.as_deref().unwrap_or(""),
+    })
+}
+
+fn r2o_quic_exit_code(result: &r2o_controller::fetch::R2oQuicFetchResult) -> i32 {
+    if result.data.local_refusal {
+        2
+    } else {
+        i32::from(!(result.data.complete || result.data.budget_passed))
+    }
+}
+
+fn r2o_combine_exit_codes(first: i32, second: i32) -> i32 {
+    if first == 1 || second == 1 {
+        1
+    } else if first == 2 || second == 2 {
+        2
+    } else {
+        0
+    }
+}
+
 fn r2o_print_quic_result(
     options: &FetchOptions,
     result: &r2o_controller::fetch::R2oQuicFetchResult,
@@ -669,7 +706,7 @@ fn print_help() {
          --json      вывести результат в машиночитаемой схеме JSON\n\
          Для TCP длина включает пять байт заголовка TLS-записи; для QUIC — только handshake-сообщение.\n\
          Снимок выполняется до запроса и заменяет значение --wire.\n\
-         --ladder измеряет TCP/TLS даже при наличии --quic."
+         --ladder измеряет TCP/TLS; вместе с --quic дополнительно проверяет HTTP/3."
     );
 }
 
