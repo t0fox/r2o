@@ -1930,10 +1930,28 @@ fn r2o_discovery_volume_cut(
 }
 
 #[cfg(unix)]
-fn r2o_discovery_volume_rx_ladder_eligible(
+fn r2o_discovery_volume_ladder_eligible(
+    tx: &Result<r2o_controller::fetch::R2oFetchVolumeTxResult, String>,
     rx: &r2o_controller::fetch::R2oFetchVolumeRxResult,
 ) -> bool {
-    rx.evidence.is_some()
+    r2o_discovery_volume_cut(tx, rx)
+}
+
+#[cfg(unix)]
+fn r2o_discovery_volume_ladder_decision(
+    result: &Result<r2o_controller::fetch::FetchResult, String>,
+    applied: bool,
+    packet_budget_required: bool,
+) -> R2oFamilyRecoveryDecision {
+    if packet_budget_required
+        && !result.as_ref().is_ok_and(|fetch| {
+            fetch.r2o_volume_observation.packet_budget
+                == r2o_controller::r2o_volume::R2oVolumePacketBudget::Passed
+        })
+    {
+        return R2oFamilyRecoveryDecision::Reclassify;
+    }
+    r2o_family_recovery_decision(result, applied)
 }
 
 #[cfg(unix)]
@@ -3036,6 +3054,7 @@ fn r2o_family_recovery_sibling_trial_with_ech(
         mark,
         commands,
         ech,
+        None,
     );
     (result, applied)
 }
@@ -3048,6 +3067,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
     mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
     ech: Option<&r2o_controller::ech::R2oEchConfig>,
+    packet_budget: Option<u32>,
 ) -> (
     Result<r2o_controller::fetch::FetchResult, String>,
     bool,
@@ -3113,6 +3133,12 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
                 if let Some(ech) = ech {
                     let config = r2o_controller::ech::r2o_ech_tls_config(ech)?;
                     r2o_controller::fetch::r2o_fetch_ech_connected_stream(&options, stream, &config)
+                } else if packet_budget.is_some() {
+                    r2o_controller::fetch::r2o_fetch_connected_stream_with_packet_budget(
+                        &options,
+                        stream,
+                        packet_budget,
+                    )
                 } else {
                     r2o_controller::fetch::r2o_fetch_connected_stream(&options, stream)
                 }
@@ -3160,6 +3186,7 @@ fn r2o_run_discovery_candidate_trial(
     client_hello: Option<&[u8]>,
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
     resource_memory: &std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>,
+    packet_budget: Option<u32>,
 ) -> (
     Result<r2o_controller::fetch::FetchResult, String>,
     bool,
@@ -3175,6 +3202,7 @@ fn r2o_run_discovery_candidate_trial(
         ech_config,
         resource_memory,
         1 + usize::from(client_hello.is_some()),
+        packet_budget,
         || false,
     );
     (result, applied, attempts)
@@ -3191,6 +3219,7 @@ fn r2o_run_discovery_candidate_trial_with_retries(
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
     resource_memory: &std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>,
     probe_budget_remaining: usize,
+    packet_budget: Option<u32>,
     mut retry_budget_available: impl FnMut() -> bool,
 ) -> (
     Result<r2o_controller::fetch::FetchResult, String>,
@@ -3260,6 +3289,7 @@ fn r2o_run_discovery_candidate_trial_with_retries(
                 mark,
                 commands,
                 ech_config,
+                packet_budget,
             );
             if let Ok(fetch) = &trial.0
                 && r2o_controller::fetch::r2o_fetch_result_can_remember_resources(fetch)
@@ -4042,6 +4072,7 @@ const R2O_DISCOVERY_FAILURE_RETRY: std::time::Duration = std::time::Duration::fr
 const R2O_DISCOVERY_CHALLENGE_RETRY: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 #[cfg(unix)]
 const R2O_VOLUME_LADDER_BATCH: usize = 32;
+const R2O_VOLUME_TX_LADDER_PACKET_BUDGET: u32 = 50;
 #[cfg(unix)]
 const R2O_VOLUME_SEARCH_CACHE_CAPACITY: usize = 256;
 #[cfg(unix)]
@@ -5543,6 +5574,7 @@ impl DiscoveryWorker {
                     ech_config.as_ref(),
                     &runner_resource_memory,
                     probe_cap.saturating_sub(classify_probes),
+                    None,
                     || {
                         !cancel.load(Ordering::Relaxed)
                             && R2O_DISCOVERY_TASK_LIFETIME.saturating_sub(runner_started.elapsed())
@@ -5597,6 +5629,7 @@ impl DiscoveryWorker {
                             client_hello.as_deref(),
                             Some(config),
                             &runner_resource_memory,
+                            None,
                         );
                         probes_used = probes_used.saturating_add(attempts);
                         (result, applied)
@@ -5653,6 +5686,7 @@ impl DiscoveryWorker {
                         client_hello.as_deref(),
                         Some(&selected_config),
                         &runner_resource_memory,
+                        None,
                     );
                     probes_used = probes_used.saturating_add(trial.2);
                     result = trial.0;
@@ -6757,6 +6791,7 @@ fn r2o_discovery_volume_recovery(
             client_hello,
             None,
             resource_memory,
+            None,
         );
         probes_used = probes_used.saturating_add(attempts);
         if r2o_family_recovery_decision(&result, applied) == R2oFamilyRecoveryDecision::Verified {
@@ -6827,6 +6862,7 @@ fn r2o_discovery_volume_recovery(
             None,
             resource_memory,
             probe_cap.saturating_sub(probes_used),
+            None,
             || {
                 !cancel.load(Ordering::Relaxed)
                     && R2O_DISCOVERY_TASK_LIFETIME.saturating_sub(started.elapsed())
@@ -6867,17 +6903,27 @@ fn r2o_discovery_volume_recovery(
         }
     }
 
-    if !r2o_discovery_volume_rx_ladder_eligible(&search.rx) {
+    if !r2o_discovery_volume_ladder_eligible(&search.tx, &search.rx) {
         searches
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(target);
         outcome.plan_text = None;
         outcome.retry_after = Some(R2O_DISCOVERY_INCOMPLETE_RETRY);
-        outcome.detail.push_str(
-            "; подтверждён только исходящий TX-обрыв — RX fake-SNI-лестница не запускается",
-        );
+        outcome
+            .detail
+            .push_str("; объёмный обрыв не подтверждён — fake-SNI-лестница не запускается");
         return true;
+    }
+
+    if search.rx.evidence.is_none()
+        && search.tx.as_ref().is_ok_and(|result| {
+            result.verdict == r2o_controller::fetch::R2oFetchVolumeTxVerdict::Cut
+        })
+    {
+        outcome
+            .detail
+            .push_str("; исходящий TX-обрыв подтверждён — запускаю fake-SNI/split-лестницу");
     }
 
     if target.shape != SHAPE_MODERN {
@@ -6894,6 +6940,10 @@ fn r2o_discovery_volume_recovery(
     }
 
     let candidate_count = r2o_ech_rx_ladder_candidate_count(network_probe);
+    let tx_ladder_requires_packet_budget = search.rx.evidence.is_none()
+        && search.tx.as_ref().is_ok_and(|result| {
+            result.verdict == r2o_controller::fetch::R2oFetchVolumeTxVerdict::Cut
+        });
     let mut next_candidate = search.next_candidate;
     let first_candidate = next_candidate;
     let mut attempted = 0_usize;
@@ -6934,9 +6984,12 @@ fn r2o_discovery_volume_recovery(
             client_hello,
             None,
             resource_memory,
+            tx_ladder_requires_packet_budget.then_some(R2O_VOLUME_TX_LADDER_PACKET_BUDGET),
         );
         probes_used = probes_used.saturating_add(attempts);
-        if r2o_family_recovery_decision(&result, applied) == R2oFamilyRecoveryDecision::Verified {
+        if r2o_discovery_volume_ladder_decision(&result, applied, tx_ladder_requires_packet_budget)
+            == R2oFamilyRecoveryDecision::Verified
+        {
             if network_probe
                 && let (Some(catalog), Some(name)) = (candidate_catalog, discovered_name.as_deref())
                 && let Err(error) =
@@ -6972,6 +7025,24 @@ fn r2o_discovery_volume_recovery(
                 "; проба объёмного плана {index} не получила точное применение; повторю её"
             ));
             break;
+        }
+        if tx_ladder_requires_packet_budget
+            && matches!(
+                fetch.r2o_volume_observation.packet_budget,
+                r2o_controller::r2o_volume::R2oVolumePacketBudget::NotMeasured
+                    | r2o_controller::r2o_volume::R2oVolumePacketBudget::NotApplicable
+            )
+        {
+            searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(target);
+            outcome.plan_text = None;
+            outcome.retry_after = Some(R2O_DISCOVERY_INCOMPLETE_RETRY);
+            outcome.detail.push_str(
+                "; TCP_INFO не подтвердил бюджет потока для исходящей лестницы — белое имя не сохраняю",
+            );
+            return true;
         }
         next_candidate = index + 1;
     }
@@ -13434,9 +13505,31 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn tx_volume_cut_does_not_enable_the_rx_fake_sni_ladder() {
-        let tx_only = r2o_controller::fetch::R2oFetchVolumeRxResult::default();
-        assert!(!super::r2o_discovery_volume_rx_ladder_eligible(&tx_only));
+    fn tx_volume_cut_enables_the_fake_sni_ladder() {
+        use r2o_controller::fetch::{R2oFetchVolumeTxResult, R2oFetchVolumeTxVerdict};
+
+        let tx_cut = Ok(R2oFetchVolumeTxResult {
+            address: "192.0.2.31:443".parse().unwrap(),
+            verdict: R2oFetchVolumeTxVerdict::Cut,
+            at_kb: 19,
+            elapsed: std::time::Duration::ZERO,
+            reason: "TX cut".into(),
+        });
+        let no_rx_cut = r2o_controller::fetch::R2oFetchVolumeRxResult::default();
+        assert!(super::r2o_discovery_volume_ladder_eligible(
+            &tx_cut, &no_rx_cut
+        ));
+
+        let tx_passed = Ok(R2oFetchVolumeTxResult {
+            verdict: R2oFetchVolumeTxVerdict::Passed,
+            address: "192.0.2.31:443".parse().unwrap(),
+            at_kb: 64,
+            elapsed: std::time::Duration::ZERO,
+            reason: String::new(),
+        });
+        assert!(!super::r2o_discovery_volume_ladder_eligible(
+            &tx_passed, &no_rx_cut
+        ));
 
         let rx_cut = r2o_controller::fetch::R2oFetchVolumeRxResult {
             evidence: Some(r2o_controller::r2o_volume::R2oVolumeRxEvidence {
@@ -13449,7 +13542,38 @@ mod tests {
             }),
             ..Default::default()
         };
-        assert!(super::r2o_discovery_volume_rx_ladder_eligible(&rx_cut));
+        assert!(super::r2o_discovery_volume_ladder_eligible(
+            &tx_passed, &rx_cut
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn исходящая_fake_sni_лестница_требует_полного_бюджета_потока() {
+        let mut response = r2o_test_fetch_result();
+        response.status = 403;
+        response.http_outcome = r2o_controller::fetch::R2oFetchHttpOutcome::Neutral;
+        let without_budget = Ok(response.clone());
+        assert_eq!(
+            super::r2o_discovery_volume_ladder_decision(&without_budget, true, true),
+            super::R2oFamilyRecoveryDecision::Reclassify
+        );
+
+        response.r2o_volume_observation.packet_budget =
+            r2o_controller::r2o_volume::R2oVolumePacketBudget::Passed;
+        let with_budget = Ok(response);
+        assert_eq!(
+            super::r2o_discovery_volume_ladder_decision(&with_budget, true, true),
+            super::R2oFamilyRecoveryDecision::Verified
+        );
+        assert_eq!(
+            super::r2o_discovery_volume_ladder_decision(&with_budget, false, true),
+            super::R2oFamilyRecoveryDecision::Reclassify
+        );
+        assert_eq!(
+            super::r2o_discovery_volume_ladder_decision(&without_budget, true, false),
+            super::R2oFamilyRecoveryDecision::Verified
+        );
     }
 
     #[cfg(unix)]

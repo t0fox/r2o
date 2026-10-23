@@ -19,6 +19,15 @@ pub enum R2oVolumeRxEncoding {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum R2oVolumePacketBudget {
+    #[default]
+    NotMeasured,
+    NotApplicable,
+    Cut,
+    Passed,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct R2oVolumeObservation {
     pub stage: R2oVolumeProbeStage,
     pub name_valid: bool,
@@ -36,6 +45,7 @@ pub struct R2oVolumeObservation {
     pub rx_tls_wire_bytes: u64,
     pub rx_tls_record_missing: bool,
     pub data_packets: u32,
+    pub packet_budget: R2oVolumePacketBudget,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

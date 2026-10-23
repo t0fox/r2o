@@ -449,7 +449,19 @@ pub fn r2o_fetch_connected_stream(
     options: &FetchOptions,
     stream: TcpStream,
 ) -> Result<FetchResult, String> {
+    r2o_fetch_connected_stream_with_packet_budget(options, stream, None)
+}
+
+/// Выполнить GET по временному плану и проверить keep-alive поток до заданного бюджета TCP-пакетов.
+pub fn r2o_fetch_connected_stream_with_packet_budget(
+    options: &FetchOptions,
+    stream: TcpStream,
+    packet_budget: Option<u32>,
+) -> Result<FetchResult, String> {
     options.validate()?;
+    if packet_budget == Some(0) {
+        return Err("бюджет TCP-пакетов должен быть больше нуля".into());
+    }
     let address = resolve_target(options)?;
     let peer = stream
         .peer_addr()
@@ -469,6 +481,7 @@ pub fn r2o_fetch_connected_stream(
         R2oFetchEncoding::Identity,
         roots,
         None,
+        packet_budget,
     )
 }
 
@@ -498,6 +511,7 @@ pub fn r2o_fetch_ech_connected_stream(
         R2oFetchEncoding::Identity,
         roots,
         Some(ech),
+        None,
     )
 }
 
@@ -556,6 +570,7 @@ fn r2o_fetch_with_roots_and_encoding_detailed(
         r2o_encoding,
         roots,
         None,
+        None,
     )
     .map_err(Into::into)
 }
@@ -568,6 +583,31 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding(
     r2o_encoding: R2oFetchEncoding,
     roots: RootCertStore,
     ech: Option<&rustls::client::EchConfig>,
+    packet_budget: Option<u32>,
+) -> Result<FetchResult, String> {
+    r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
+        options,
+        socket,
+        address,
+        started,
+        r2o_encoding,
+        roots,
+        ech,
+        packet_budget,
+        |socket| r2o_tcp_counters(socket).data_packets,
+    )
+}
+
+fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
+    options: &FetchOptions,
+    socket: TcpStream,
+    address: SocketAddr,
+    started: Instant,
+    r2o_encoding: R2oFetchEncoding,
+    roots: RootCertStore,
+    ech: Option<&rustls::client::EchConfig>,
+    packet_budget: Option<u32>,
+    mut packet_counter: impl FnMut(&TcpStream) -> Option<u32>,
 ) -> Result<FetchResult, String> {
     let deadline = started
         .checked_add(options.deadline)
@@ -827,6 +867,23 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding(
         } else {
             Vec::new()
         };
+        let r2o_packet_budget = if let Some(need) = packet_budget {
+            if complete && parser.status() >= 100 && parser.headers_complete() {
+                r2o_measure_http_packet_budget(
+                    &mut stream,
+                    options,
+                    r2o_encoding,
+                    deadline,
+                    need,
+                    r2o_http_connection_closes(parser.headers()),
+                    &mut packet_counter,
+                )
+            } else {
+                crate::r2o_volume::R2oVolumePacketBudget::NotApplicable
+            }
+        } else {
+            crate::r2o_volume::R2oVolumePacketBudget::NotMeasured
+        };
         let r2o_tcp_after = r2o_tcp_counters(&stream.sock.socket);
         let r2o_tls_wire_bytes = stream.sock.r2o_wire_bytes;
         let r2o_data_packets = r2o_tcp_after.data_packets.unwrap_or(0);
@@ -856,6 +913,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding(
             rx_tls_wire_bytes: r2o_tls_wire_bytes,
             rx_tls_record_missing: stream.sock.r2o_record_missing(),
             data_packets: r2o_data_packets,
+            packet_budget: r2o_packet_budget,
             ..Default::default()
         };
 
@@ -1618,6 +1676,113 @@ fn r2o_tcp_counters(stream: &TcpStream) -> R2oTcpCounters {
                 .tcpi_data_segs_in
                 .saturating_add(r2o_info.tcpi_data_segs_out),
         ),
+    }
+}
+
+fn r2o_http_connection_closes(headers: &[u8]) -> bool {
+    headers
+        .split(|byte| *byte == b'\n')
+        .skip(1)
+        .filter_map(|line| {
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            let colon = line.iter().position(|byte| *byte == b':')?;
+            line[..colon]
+                .eq_ignore_ascii_case(b"connection")
+                .then_some(&line[colon + 1..])
+        })
+        .any(|value| {
+            value
+                .split(|byte| *byte == b',')
+                .any(|token| trim_ascii(token).eq_ignore_ascii_case(b"close"))
+        })
+}
+
+fn r2o_measure_http_packet_budget(
+    stream: &mut StreamOwned<rustls::ClientConnection, R2oTlsTcpStream>,
+    options: &FetchOptions,
+    encoding: R2oFetchEncoding,
+    deadline: Instant,
+    need: u32,
+    mut connection_close: bool,
+    packet_counter: &mut impl FnMut(&TcpStream) -> Option<u32>,
+) -> crate::r2o_volume::R2oVolumePacketBudget {
+    use crate::r2o_volume::R2oVolumePacketBudget as Budget;
+
+    let Some(mut packets) = packet_counter(&stream.sock.socket) else {
+        return Budget::NotApplicable;
+    };
+    let mut previous = None;
+    loop {
+        if packets >= need {
+            return Budget::Passed;
+        }
+        if connection_close || previous.is_some_and(|last| packets <= last) {
+            return Budget::NotApplicable;
+        }
+        previous = Some(packets);
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Budget::Cut;
+        }
+        if stream
+            .sock
+            .socket
+            .set_write_timeout(Some(remaining))
+            .is_err()
+        {
+            return Budget::NotApplicable;
+        }
+        let request = build_request(&options.name, &options.path, encoding);
+        if stream
+            .write_all(&request)
+            .and_then(|()| stream.flush())
+            .is_err()
+        {
+            return Budget::NotApplicable;
+        }
+        let mut parser = HttpResponseParser::new(false);
+        let mut buffer = [0_u8; 16 * 1024];
+        let mut eof = false;
+        while !parser.is_complete() && !parser.is_invalid() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Budget::Cut;
+            }
+            if stream
+                .sock
+                .socket
+                .set_read_timeout(Some(remaining))
+                .is_err()
+            {
+                return Budget::NotApplicable;
+            }
+            match stream.read(&mut buffer) {
+                Ok(0) => {
+                    eof = true;
+                    parser.feed(&[], true);
+                    break;
+                }
+                Ok(length) => parser.feed(&buffer[..length], false),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    return Budget::Cut;
+                }
+                Err(_) => return Budget::NotApplicable,
+            }
+        }
+        if parser.is_invalid() || !parser.is_complete() {
+            return Budget::NotApplicable;
+        }
+        connection_close = eof || r2o_http_connection_closes(parser.headers());
+        let Some(current) = packet_counter(&stream.sock.socket) else {
+            return Budget::NotApplicable;
+        };
+        packets = current;
     }
 }
 
@@ -2393,6 +2558,99 @@ mod tests {
         assert_eq!(result.http_outcome, R2oFetchHttpOutcome::Positive);
         assert!(result.complete);
         assert!(result.application_verified);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tx_packet_budget_repeats_complete_gets_on_the_same_tls_connection() {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use rustls::{ServerConfig, ServerConnection};
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::mpsc;
+        use std::thread;
+
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+            .expect("создать сертификат localhost");
+        let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
+        let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certificate.serialize_private_key_der(),
+        ));
+        let server_config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate_der.clone()], private_key)
+            .unwrap();
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate_der).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("открыть HTTPS-приёмник");
+        let address = listener.local_addr().unwrap();
+        let (request_sender, request_receiver) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (socket, _) = listener.accept().expect("принять HTTPS-соединение");
+            let connection = ServerConnection::new(Arc::new(server_config)).unwrap();
+            let mut stream = StreamOwned::new(connection, socket);
+            let large_body = vec![b'x'; 256 * 1024];
+            let mut requests = 0;
+            for body in [&b"denied"[..], &b"denied-again"[..], large_body.as_slice()] {
+                let mut request = Vec::new();
+                let mut byte = [0_u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream
+                        .read_exact(&mut byte)
+                        .expect("прочитать заголовки запроса");
+                    request.push(byte[0]);
+                }
+                requests += 1;
+                let headers = format!(
+                    "HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(headers.as_bytes()).unwrap();
+                stream.write_all(body).unwrap();
+                stream.flush().unwrap();
+            }
+            let mut extra = [0_u8; 1];
+            let third_request = stream.read(&mut extra).unwrap_or(0) != 0;
+            request_sender.send((requests, third_request)).unwrap();
+        });
+
+        let options = FetchOptions {
+            name: "localhost".into(),
+            port: address.port(),
+            ip: Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            path: "/denied".into(),
+            deadline: Duration::from_secs(5),
+            tls12: false,
+            wire_len: None,
+            mark: None,
+        };
+        let stream = TcpStream::connect(address).expect("подключить HTTPS-пробу");
+        let mut packet_counts = [4, 12, 51].into_iter();
+        let result = r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
+            &options,
+            stream,
+            address,
+            Instant::now(),
+            R2oFetchEncoding::Identity,
+            roots,
+            None,
+            Some(50),
+            |_| packet_counts.next(),
+        )
+        .expect("завершить HTTP-проверку бюджета TCP");
+        assert_eq!(result.status, 403);
+        assert!(result.complete);
+        assert!(result.application_verified);
+        assert_eq!(
+            result.r2o_volume_observation.packet_budget,
+            crate::r2o_volume::R2oVolumePacketBudget::Passed
+        );
+        assert_eq!(
+            request_receiver.recv().expect("получить число запросов"),
+            (3, false)
+        );
+        server.join().unwrap();
     }
 
     #[test]
