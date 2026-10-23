@@ -86,9 +86,15 @@ pub struct R2oVoiceSessions {
 struct PendingVoiceProof {
     client: Endpoint,
     server: Endpoint,
-    ssrc: [u8; 4],
+    proof: PendingVoiceProofKind,
     trial_id: [u8; 16],
     expires: Instant,
+}
+
+#[derive(Clone, Copy)]
+enum PendingVoiceProofKind {
+    DiscordDiscovery { ssrc: [u8; 4] },
+    StunBinding { transaction_id: [u8; 12] },
 }
 
 /// Ждёт валидный Discovery-ответ только для успешно исполненного временного плана.
@@ -137,9 +143,23 @@ impl R2oVoiceTrialProofs {
         let Some(payload) = packet.get(payload_range) else {
             return false;
         };
-        if !r2k_core::stun::is_discord_ip_discovery_request(payload) {
+        let proof = if r2k_core::stun::is_discord_ip_discovery_request(payload) {
+            PendingVoiceProofKind::DiscordDiscovery {
+                ssrc: payload[4..8]
+                    .try_into()
+                    .expect("SSRC Discovery имеет 4 байта"),
+            }
+        } else if r2k_core::stun::is_discord_voice_request(payload, destination.port)
+            && r2k_core::stun::is_binding_request(payload)
+        {
+            let Some(transaction_id) = payload.get(8..20).and_then(|bytes| bytes.try_into().ok())
+            else {
+                return false;
+            };
+            PendingVoiceProofKind::StunBinding { transaction_id }
+        } else {
             return false;
-        }
+        };
         let (key, _) = FlowKey::new(source, destination);
         if key.wire_key() != event.key {
             return false;
@@ -153,9 +173,7 @@ impl R2oVoiceTrialProofs {
             PendingVoiceProof {
                 client: source,
                 server: destination,
-                ssrc: payload[4..8]
-                    .try_into()
-                    .expect("SSRC Discovery имеет 4 байта"),
+                proof,
                 trial_id: event.trial_id,
                 expires: now + VOICE_TRIAL_TTL,
             },
@@ -192,20 +210,33 @@ impl R2oVoiceTrialProofs {
             return None;
         }
         let payload = packet.get(view.udp_payload_range(packet)?)?;
-        if !r2k_core::stun::is_discord_ip_discovery_response(payload, &pending.ssrc) {
-            return None;
-        }
-        let mapped_end = payload[8..72].iter().position(|byte| *byte == 0)? + 8;
-        let mapped_ip = std::str::from_utf8(&payload[8..mapped_end])
-            .ok()?
-            .parse::<std::net::Ipv4Addr>()
-            .ok()?;
-        let mapped_port = u16::from_be_bytes([payload[72], payload[73]]);
+        let proof = match pending.proof {
+            PendingVoiceProofKind::DiscordDiscovery { ssrc } => {
+                if !r2k_core::stun::is_discord_ip_discovery_response(payload, &ssrc) {
+                    return None;
+                }
+                let mapped_end = payload[8..72].iter().position(|byte| *byte == 0)? + 8;
+                let mapped_ip = std::str::from_utf8(&payload[8..mapped_end])
+                    .ok()?
+                    .parse::<std::net::Ipv4Addr>()
+                    .ok()?;
+                let mapped_port = u16::from_be_bytes([payload[72], payload[73]]);
+                r2k_core::control::R2oVoiceProofKind::DiscordDiscovery {
+                    mapped_ip,
+                    mapped_port,
+                }
+            }
+            PendingVoiceProofKind::StunBinding { transaction_id } => {
+                if !r2k_core::stun::is_binding_response_for(payload, &transaction_id) {
+                    return None;
+                }
+                r2k_core::control::R2oVoiceProofKind::StunBinding
+            }
+        };
         let event = r2k_core::control::R2oVoiceProofEvent {
             key: key.wire_key(),
             trial_id: pending.trial_id,
-            mapped_ip,
-            mapped_port,
+            proof,
         };
         self.pending.remove(&key);
         Some(event)
@@ -644,8 +675,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(proof.trial_id, [0x55; 16]);
-        assert_eq!(proof.mapped_ip, Ipv4Addr::new(203, 0, 113, 7));
-        assert_eq!(proof.mapped_port, 52_000);
+        assert_eq!(
+            proof.proof,
+            r2k_core::control::R2oVoiceProofKind::DiscordDiscovery {
+                mapped_ip: Ipv4Addr::new(203, 0, 113, 7),
+                mapped_port: 52_000,
+            }
+        );
         assert!(
             proofs
                 .observe_response(
@@ -657,19 +693,23 @@ mod tests {
     }
 
     #[test]
-    fn обычный_stun_и_постоянный_план_не_создают_trial_proof() {
+    fn stun_создаёт_trial_proof_только_на_медиапорту_и_для_временного_плана() {
         let start = Instant::now();
         let mut event = trial_applied();
         let mut proofs = R2oVoiceTrialProofs::default();
-        let mut request = vec![0; 20];
-        request[..8].copy_from_slice(&[0, 1, 0, 0, 0x21, 0x12, 0xa4, 0x42]);
+        let request = r2k_core::stun::binding_request([0x61; 12]);
         assert!(!proofs.note_applied(
+            &packet([192, 0, 2, 10], [198, 51, 100, 20], 50_000, 3478, &request),
+            &event,
+            start,
+        ));
+        assert!(proofs.note_applied(
             &packet(
                 [192, 0, 2, 10],
                 [198, 51, 100, 20],
                 50_000,
                 50_004,
-                &request
+                &request,
             ),
             &event,
             start,
@@ -686,6 +726,101 @@ mod tests {
             &event,
             start,
         ));
+    }
+
+    #[test]
+    fn stun_trial_подтверждается_только_ответом_своей_транзакции_и_пятёрки() {
+        let start = Instant::now();
+        let client = [192, 0, 2, 10];
+        let server = [198, 51, 100, 20];
+        let transaction_id = [0x72; 12];
+        let request = r2k_core::stun::binding_request(transaction_id);
+        let mut proofs = R2oVoiceTrialProofs::default();
+        assert!(proofs.note_applied(
+            &packet(client, server, 50_000, 50_004, &request),
+            &trial_applied(),
+            start,
+        ));
+
+        let response = |transaction_id: [u8; 12]| {
+            let mut response = [0; 20];
+            response[..2].copy_from_slice(&0x0101_u16.to_be_bytes());
+            response[4..8].copy_from_slice(&0x2112_a442_u32.to_be_bytes());
+            response[8..].copy_from_slice(&transaction_id);
+            response
+        };
+        let wrong_id = response([0x73; 12]);
+        assert!(
+            proofs
+                .observe_response(
+                    &packet(server, client, 50_004, 50_000, &wrong_id),
+                    start + Duration::from_millis(1),
+                )
+                .is_none()
+        );
+        let valid = response(transaction_id);
+        assert!(
+            proofs
+                .observe_response(
+                    &packet(server, client, 50_005, 50_000, &valid),
+                    start + Duration::from_millis(2),
+                )
+                .is_none()
+        );
+        assert!(
+            proofs
+                .observe_response(
+                    &packet(server, client, 50_004, 50_000, &valid[..19]),
+                    start + Duration::from_millis(3),
+                )
+                .is_none()
+        );
+        let proof = proofs
+            .observe_response(
+                &packet(server, client, 50_004, 50_000, &valid),
+                start + Duration::from_millis(4),
+            )
+            .unwrap();
+        assert_eq!(proof.trial_id, [0x55; 16]);
+        assert_eq!(
+            proof.proof,
+            r2k_core::control::R2oVoiceProofKind::StunBinding
+        );
+        assert!(
+            proofs
+                .observe_response(
+                    &packet(server, client, 50_004, 50_000, &valid),
+                    start + Duration::from_millis(5),
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn истёкший_stun_trial_не_подтверждается() {
+        let start = Instant::now();
+        let client = [192, 0, 2, 10];
+        let server = [198, 51, 100, 20];
+        let transaction_id = [0x74; 12];
+        let request = r2k_core::stun::binding_request(transaction_id);
+        let mut proofs = R2oVoiceTrialProofs::default();
+        assert!(proofs.note_applied(
+            &packet(client, server, 50_000, 50_004, &request),
+            &trial_applied(),
+            start,
+        ));
+        let mut response = [0; 20];
+        response[..2].copy_from_slice(&0x0101_u16.to_be_bytes());
+        response[4..8].copy_from_slice(&0x2112_a442_u32.to_be_bytes());
+        response[8..].copy_from_slice(&transaction_id);
+        assert!(
+            proofs
+                .observe_response(
+                    &packet(server, client, 50_004, 50_000, &response),
+                    start + Duration::from_secs(120),
+                )
+                .is_none()
+        );
     }
 
     #[test]

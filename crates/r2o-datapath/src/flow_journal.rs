@@ -5,11 +5,12 @@ use r2k_core::control::{
     EVENT_R2O_JOURNAL_ENTRY, EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT,
     EVENT_R2O_TCP_CLEAN_HANDSHAKE, EVENT_R2O_TCP_EARLY_RST, EVENT_R2O_TCP_FIN_RETRY,
     EVENT_R2O_TCP_REPEAT, EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_RST_CUT, EVENT_R2O_TCP_SILENT,
-    EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_SUSPECT, Frame, KEY_LEN,
-    decode_applied, decode_r2o_quic_stall, decode_r2o_quic_suspect, decode_r2o_tcp_clean_handshake,
-    decode_r2o_tcp_early_rst, decode_r2o_tcp_fin_retry, decode_r2o_tcp_repeat,
-    decode_r2o_tcp_rst_after_app, decode_r2o_tcp_rst_cut_signal, decode_r2o_tcp_silence,
-    decode_r2o_tcp_stall, decode_r2o_voice_proof, decode_r2o_voice_suspect,
+    EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_STUN_PROOF,
+    EVENT_R2O_VOICE_SUSPECT, Frame, KEY_LEN, decode_applied, decode_r2o_quic_stall,
+    decode_r2o_quic_suspect, decode_r2o_tcp_clean_handshake, decode_r2o_tcp_early_rst,
+    decode_r2o_tcp_fin_retry, decode_r2o_tcp_repeat, decode_r2o_tcp_rst_after_app,
+    decode_r2o_tcp_rst_cut_signal, decode_r2o_tcp_silence, decode_r2o_tcp_stall,
+    decode_r2o_voice_proof, decode_r2o_voice_suspect,
 };
 
 pub const R2O_JOURNAL_NAME_MAX: usize = 63;
@@ -841,18 +842,26 @@ impl R2oFlowJournal {
                     ..R2oFlowJournalEntry::default()
                 });
             }),
-            EVENT_R2O_VOICE_PROOF => decode_r2o_voice_proof(&frame).map(|event| {
-                self.push(R2oFlowJournalEntry {
-                    at_ns,
-                    key: event.key,
-                    kind: R2oFlowJournalKind::R2oVoiceProof,
-                    code: 1,
-                    trial_id: event.trial_id,
-                    mapped_ip: event.mapped_ip.octets(),
-                    mapped_port: event.mapped_port,
-                    ..R2oFlowJournalEntry::default()
-                });
-            }),
+            EVENT_R2O_VOICE_PROOF | EVENT_R2O_VOICE_STUN_PROOF => decode_r2o_voice_proof(&frame)
+                .map(|event| {
+                    let (code, mapped_ip, mapped_port) = match event.proof {
+                        r2k_core::control::R2oVoiceProofKind::DiscordDiscovery {
+                            mapped_ip,
+                            mapped_port,
+                        } => (1, mapped_ip.octets(), mapped_port),
+                        r2k_core::control::R2oVoiceProofKind::StunBinding => (2, [0; 4], 0),
+                    };
+                    self.push(R2oFlowJournalEntry {
+                        at_ns,
+                        key: event.key,
+                        kind: R2oFlowJournalKind::R2oVoiceProof,
+                        code,
+                        trial_id: event.trial_id,
+                        mapped_ip,
+                        mapped_port,
+                        ..R2oFlowJournalEntry::default()
+                    });
+                }),
             _ => return false,
         }
         .is_ok()

@@ -39,9 +39,16 @@ pub fn r2o_save_confirmed_voice_binding(
     r2o_server: std::net::Ipv4Addr,
     r2o_text: &str,
     r2o_now: i64,
+    r2o_verified_by: u8,
 ) -> Result<String, String> {
+    if !matches!(r2o_verified_by, 3 | 4) {
+        return Err(
+            "голосовую привязку можно сохранить только по проверенному STUN или Discord Discovery"
+                .into(),
+        );
+    }
     let Some(_r2o_prefix) = r2o_voice_discovery_prefix_from_plan_text(r2o_text) else {
-        return Err("постоянная голосовая привязка требует подтверждённый Discovery-план".into());
+        return Err("постоянная голосовая привязка требует проверенный STUN/Discovery-план".into());
     };
     let r2o_bytes = crate::plan_text::compile_text(r2o_text)?;
     let r2o_plan = r2k_core::plan::Plan::parse(&r2o_bytes).map_err(|error| error.to_string())?;
@@ -51,7 +58,7 @@ pub fn r2o_save_confirmed_voice_binding(
         .map(|byte| format!("{byte:02x}"))
         .collect();
     if r2o_plan_id.bytes().all(|byte| byte == b'0') {
-        return Err("идентификатор Discovery-плана не может быть нулевым".into());
+        return Err("идентификатор голосового плана не может быть нулевым".into());
     }
     let r2o_target = r2o_server.to_string();
     let r2o_box_index = if let Some(r2o_index) = r2o_catalog
@@ -78,7 +85,7 @@ pub fn r2o_save_confirmed_voice_binding(
                 && r2o_binding.transport == 17
                 && r2o_binding.family == 4
                 && r2o_binding.shape == r2k_core::control::SHAPE_VOICE
-                && r2o_binding.verified_by == 4
+                && matches!(r2o_binding.verified_by, 3 | 4)
             {
                 r2o_prior_successes = r2o_prior_successes.max(r2o_binding.successes);
             }
@@ -89,7 +96,7 @@ pub fn r2o_save_confirmed_voice_binding(
                 && r2o_binding.transport == 17
                 && r2o_binding.family == 4
                 && r2o_binding.shape == r2k_core::control::SHAPE_VOICE
-                && r2o_binding.verified_by == 4)
+                && matches!(r2o_binding.verified_by, 3 | 4))
         });
     }
 
@@ -126,7 +133,7 @@ pub fn r2o_save_confirmed_voice_binding(
         transport: 17,
         family: 4,
         shape: r2k_core::control::SHAPE_VOICE,
-        verified_by: 4,
+        verified_by: r2o_verified_by,
         input: 2,
         ..crate::catalog::Binding::default()
     });
@@ -985,6 +992,7 @@ mod tests {
             "198.51.100.20".parse().unwrap(),
             &r2o_text,
             1_800_000_000,
+            4,
         )
         .unwrap();
         assert!(!r2o_plan_id.bytes().all(|byte| byte == b'0'));

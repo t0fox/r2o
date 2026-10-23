@@ -4,9 +4,10 @@ use r2k_core::control::{
     COMMAND_SET_TCP_STALL_BUDGETS, COMMAND_SET_VOICE_ADDR, COMMAND_SET_VOICE_ADDR_PROBE,
     EVENT_APPLIED, EVENT_HELLO, EVENT_HTTP_RESPONSE, EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT,
     EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_SILENT,
-    EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_SUSPECT, Frame, HttpResponseEvent,
-    KEY_LEN, R2oQuicSuspectEvent, R2oTcpFinRetryEvent, R2oTcpRstAfterAppEvent, R2oTcpSilenceEvent,
-    R2oTcpStallEvent, R2oVoiceProofEvent, R2oVoiceSuspectEvent, SHAPE_ECH_TCP, SHAPE_HTTP,
+    EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_STUN_PROOF,
+    EVENT_R2O_VOICE_SUSPECT, Frame, HttpResponseEvent, KEY_LEN, R2oQuicSuspectEvent,
+    R2oTcpFinRetryEvent, R2oTcpRstAfterAppEvent, R2oTcpSilenceEvent, R2oTcpStallEvent,
+    R2oVoiceProofEvent, R2oVoiceProofKind, R2oVoiceSuspectEvent, SHAPE_ECH_TCP, SHAPE_HTTP,
     SHAPE_MODERN, SHAPE_QUIC, decode_ack, decode_applied, decode_hello, decode_http_response,
     decode_r2o_quic_stall, decode_r2o_quic_suspect, decode_r2o_tcp_fin_retry,
     decode_r2o_tcp_rst_after_app, decode_r2o_tcp_silence, decode_r2o_tcp_stall,
@@ -538,8 +539,10 @@ fn кодирует_только_подтверждение_с_валидным_
     let r2o_event = R2oVoiceProofEvent {
         key: r2o_key,
         trial_id: [0x33; 16],
-        mapped_ip: "203.0.113.8".parse().unwrap(),
-        mapped_port: 52_000,
+        proof: R2oVoiceProofKind::DiscordDiscovery {
+            mapped_ip: "203.0.113.8".parse().unwrap(),
+            mapped_port: 52_000,
+        },
     };
     let r2o_frame = Frame {
         kind: EVENT_R2O_VOICE_PROOF,
@@ -550,6 +553,20 @@ fn кодирует_только_подтверждение_с_валидным_
     let mut r2o_invalid = r2o_frame;
     r2o_invalid.body[KEY_LEN..KEY_LEN + 16].fill(0);
     assert!(decode_r2o_voice_proof(&r2o_invalid).is_err());
+
+    let r2o_stun_event = R2oVoiceProofEvent {
+        key: r2o_key,
+        trial_id: [0x34; 16],
+        proof: R2oVoiceProofKind::StunBinding,
+    };
+    let r2o_stun_frame = Frame {
+        kind: EVENT_R2O_VOICE_STUN_PROOF,
+        body: r2o_stun_event.event_body().unwrap(),
+    };
+    assert_eq!(
+        decode_r2o_voice_proof(&r2o_stun_frame).unwrap(),
+        r2o_stun_event
+    );
 }
 
 #[test]

@@ -29,6 +29,7 @@ pub const EVENT_R2O_TCP_EARLY_RST: u16 = 0x0019;
 pub const EVENT_R2O_TCP_REPEAT: u16 = 0x001a;
 pub const EVENT_R2O_TCP_RST_CUT: u16 = 0x001b;
 pub const EVENT_R2O_TCP_EXCHANGE: u16 = 0x001c;
+pub const EVENT_R2O_VOICE_STUN_PROOF: u16 = 0x001d;
 pub const EVENT_R2O_JOURNAL_ENTRY: u16 = 0x0014;
 pub const EVENT_R2O_JOURNAL_END: u16 = 0x0015;
 pub const COMMAND_SET_NAME: u16 = 0x0081;
@@ -456,31 +457,59 @@ impl R2oQuicSuspectEvent {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum R2oVoiceProofKind {
+    DiscordDiscovery {
+        mapped_ip: std::net::Ipv4Addr,
+        mapped_port: u16,
+    },
+    StunBinding,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct R2oVoiceProofEvent {
     pub key: [u8; KEY_LEN],
     pub trial_id: [u8; 16],
-    pub mapped_ip: std::net::Ipv4Addr,
-    pub mapped_port: u16,
+    pub proof: R2oVoiceProofKind,
 }
 
 impl R2oVoiceProofEvent {
+    pub fn event_type(&self) -> u16 {
+        match self.proof {
+            R2oVoiceProofKind::DiscordDiscovery { .. } => EVENT_R2O_VOICE_PROOF,
+            R2oVoiceProofKind::StunBinding => EVENT_R2O_VOICE_STUN_PROOF,
+        }
+    }
+
     pub fn event_body(&self) -> Option<Vec<u8>> {
         if !valid_flow_key(&self.key)
             || self.key[0] != 4
             || self.key[37] != 17
             || self.trial_id.iter().all(|byte| *byte == 0)
-            || self.mapped_ip.is_unspecified()
-            || self.mapped_ip.is_multicast()
-            || self.mapped_port == 0
         {
             return None;
         }
-        let mut r2o_body = Vec::with_capacity(KEY_LEN + 22);
+        let extra_len = match self.proof {
+            R2oVoiceProofKind::DiscordDiscovery {
+                mapped_ip,
+                mapped_port,
+            } if mapped_ip.is_unspecified() || mapped_ip.is_multicast() || mapped_port == 0 => {
+                return None;
+            }
+            R2oVoiceProofKind::DiscordDiscovery { .. } => 22,
+            R2oVoiceProofKind::StunBinding => 0,
+        };
+        let mut r2o_body = Vec::with_capacity(KEY_LEN + 16 + extra_len);
         r2o_body.extend_from_slice(&self.key);
         r2o_body.extend_from_slice(&self.trial_id);
-        r2o_body.extend_from_slice(&self.mapped_ip.octets());
-        r2o_body.extend_from_slice(&self.mapped_port.to_be_bytes());
+        if let R2oVoiceProofKind::DiscordDiscovery {
+            mapped_ip,
+            mapped_port,
+        } = self.proof
+        {
+            r2o_body.extend_from_slice(&mapped_ip.octets());
+            r2o_body.extend_from_slice(&mapped_port.to_be_bytes());
+        }
         Some(r2o_body)
     }
 }
@@ -1032,9 +1061,31 @@ fn valid_voice_plan_records(plan_records: &[u8]) -> bool {
 }
 
 pub fn decode_r2o_voice_proof(frame: &Frame) -> Result<R2oVoiceProofEvent, &'static str> {
-    if frame.kind != EVENT_R2O_VOICE_PROOF || frame.body.len() != KEY_LEN + 22 {
-        return Err("неверное событие подтверждения Discord Discovery");
-    }
+    let proof = match frame.kind {
+        EVENT_R2O_VOICE_PROOF if frame.body.len() == KEY_LEN + 22 => {
+            let mapped_ip = std::net::Ipv4Addr::from(
+                <[u8; 4]>::try_from(&frame.body[KEY_LEN + 16..KEY_LEN + 20])
+                    .map_err(|_| "неверный адрес ответа Discord Discovery")?,
+            );
+            let mapped_port = u16::from_be_bytes(
+                frame.body[KEY_LEN + 20..KEY_LEN + 22]
+                    .try_into()
+                    .map_err(|_| "неверный порт ответа Discord Discovery")?,
+            );
+            R2oVoiceProofKind::DiscordDiscovery {
+                mapped_ip,
+                mapped_port,
+            }
+        }
+        EVENT_R2O_VOICE_STUN_PROOF if frame.body.len() == KEY_LEN + 16 => {
+            R2oVoiceProofKind::StunBinding
+        }
+        EVENT_R2O_VOICE_PROOF => {
+            return Err("неверное событие подтверждения Discord Discovery");
+        }
+        EVENT_R2O_VOICE_STUN_PROOF => return Err("неверное событие подтверждения STUN"),
+        _ => return Err("неизвестный тип подтверждения голосового потока"),
+    };
     let key: [u8; KEY_LEN] = frame.body[..KEY_LEN]
         .try_into()
         .map_err(|_| "неверный ключ подтверждения Discord Discovery")?;
@@ -1044,20 +1095,10 @@ pub fn decode_r2o_voice_proof(frame: &Frame) -> Result<R2oVoiceProofEvent, &'sta
     let trial_id: [u8; 16] = frame.body[KEY_LEN..KEY_LEN + 16]
         .try_into()
         .map_err(|_| "неверный идентификатор опыта Discord Discovery")?;
-    let mapped_ip = std::net::Ipv4Addr::from(
-        <[u8; 4]>::try_from(&frame.body[KEY_LEN + 16..KEY_LEN + 20])
-            .map_err(|_| "неверный адрес ответа Discord Discovery")?,
-    );
-    let mapped_port = u16::from_be_bytes(
-        frame.body[KEY_LEN + 20..KEY_LEN + 22]
-            .try_into()
-            .map_err(|_| "неверный порт ответа Discord Discovery")?,
-    );
     let event = R2oVoiceProofEvent {
         key,
         trial_id,
-        mapped_ip,
-        mapped_port,
+        proof,
     };
     if event.event_body().is_none() {
         return Err("подтверждение Discord Discovery содержит пустую или недопустимую метку");

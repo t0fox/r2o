@@ -6,11 +6,10 @@ mod app {
         EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_CLEAN_HANDSHAKE, EVENT_R2O_TCP_EARLY_RST,
         EVENT_R2O_TCP_EXCHANGE, EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_REPEAT,
         EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_RST_CUT, EVENT_R2O_TCP_SILENT,
-        EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_SUSPECT, Frame,
-        HttpPortalEvent, HttpResponseEvent, PROTOCOL_VERSION, R2oTcpCleanHandshakeEvent,
-        R2oTcpEarlyRstEvent, R2oTcpExchangeEvent as R2oTcpExchangeControlEvent,
-        R2oTcpFinRetryEvent, R2oTcpRepeatEvent, R2oTcpRstCutSignalEvent, RELEASE_ID,
-        decode_set_tcp_stall_budgets,
+        EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_SUSPECT, Frame, HttpPortalEvent, HttpResponseEvent,
+        PROTOCOL_VERSION, R2oTcpCleanHandshakeEvent, R2oTcpEarlyRstEvent,
+        R2oTcpExchangeEvent as R2oTcpExchangeControlEvent, R2oTcpFinRetryEvent, R2oTcpRepeatEvent,
+        R2oTcpRstCutSignalEvent, RELEASE_ID, decode_set_tcp_stall_budgets,
     };
     use r2k_core::plan::{EmitKind, OriginalFate, PROTO_VOICE, Plan};
     use r2o_datapath::capture::{tcp_hello_from_packet, tcp_http_hello_from_packet};
@@ -2311,12 +2310,15 @@ mod app {
                 entry.trial_id,
                 entry.execution_id
             ),
-            R2oFlowJournalKind::R2oVoiceProof => format!(
-                " попытка={:02x?} внешний_адрес={}:{}",
+            R2oFlowJournalKind::R2oVoiceProof if entry.code == 1 => format!(
+                " Discovery попытка={:02x?} внешний_адрес={}:{}",
                 entry.trial_id,
                 Ipv4Addr::from(entry.mapped_ip),
                 entry.mapped_port
             ),
+            R2oFlowJournalKind::R2oVoiceProof => {
+                format!(" STUN Binding попытка={:02x?}", entry.trial_id)
+            }
             R2oFlowJournalKind::R2oTcpSilent => {
                 format!(
                     " {direction}, план={}, прошло={} мс",
@@ -2933,13 +2935,19 @@ mod app {
         let Some(body) = event.event_body() else {
             return;
         };
+        let description = match event.proof {
+            r2k_core::control::R2oVoiceProofKind::DiscordDiscovery { .. } => {
+                "подтверждение Discord Discovery"
+            }
+            r2k_core::control::R2oVoiceProofKind::StunBinding => "подтверждение STUN Binding",
+        };
         send_observed_control_event(
             control,
             flow_journal,
             journal_origin,
-            EVENT_R2O_VOICE_PROOF,
+            event.event_type(),
             &body,
-            "подтверждение Discord Discovery",
+            description,
         );
     }
 

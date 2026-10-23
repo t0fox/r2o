@@ -8,17 +8,17 @@ use r2k_core::control::{
     EVENT_R2O_TCP_CLEAN_HANDSHAKE, EVENT_R2O_TCP_EARLY_RST, EVENT_R2O_TCP_EXCHANGE,
     EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_REPEAT, EVENT_R2O_TCP_RST_AFTER_APP,
     EVENT_R2O_TCP_RST_CUT, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF,
-    EVENT_R2O_VOICE_SUSPECT, EVENT_REFUSED, Frame, HelloEvent, PROTOCOL_VERSION, RELEASE_ID,
-    SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE,
-    VOICE_ADDR_PROBE_LEASE_MAX_MS, decode_ack, decode_applied, decode_client_shape,
-    decode_greeting, decode_hello, decode_http_portal, decode_http_response, decode_r2o_quic_stall,
-    decode_r2o_quic_suspect, decode_r2o_tcp_clean_handshake, decode_r2o_tcp_early_rst,
-    decode_r2o_tcp_exchange, decode_r2o_tcp_fin_retry, decode_r2o_tcp_repeat,
-    decode_r2o_tcp_rst_after_app, decode_r2o_tcp_rst_cut_signal, decode_r2o_tcp_silence,
-    decode_r2o_tcp_stall, decode_r2o_voice_proof, decode_r2o_voice_suspect, decode_refused,
-    encode_arm_shape, encode_delete_addr, encode_delete_addr_probe, encode_delete_name,
-    encode_delete_name_probe, encode_delete_voice_addr_probe, encode_frame, encode_set_addr,
-    encode_set_addr_probe, encode_set_bypass, encode_set_https, encode_set_name,
+    EVENT_R2O_VOICE_STUN_PROOF, EVENT_R2O_VOICE_SUSPECT, EVENT_REFUSED, Frame, HelloEvent,
+    PROTOCOL_VERSION, RELEASE_ID, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN,
+    SHAPE_QUIC, SHAPE_VOICE, VOICE_ADDR_PROBE_LEASE_MAX_MS, decode_ack, decode_applied,
+    decode_client_shape, decode_greeting, decode_hello, decode_http_portal, decode_http_response,
+    decode_r2o_quic_stall, decode_r2o_quic_suspect, decode_r2o_tcp_clean_handshake,
+    decode_r2o_tcp_early_rst, decode_r2o_tcp_exchange, decode_r2o_tcp_fin_retry,
+    decode_r2o_tcp_repeat, decode_r2o_tcp_rst_after_app, decode_r2o_tcp_rst_cut_signal,
+    decode_r2o_tcp_silence, decode_r2o_tcp_stall, decode_r2o_voice_proof, decode_r2o_voice_suspect,
+    decode_refused, encode_arm_shape, encode_delete_addr, encode_delete_addr_probe,
+    encode_delete_name, encode_delete_name_probe, encode_delete_voice_addr_probe, encode_frame,
+    encode_set_addr, encode_set_addr_probe, encode_set_bypass, encode_set_https, encode_set_name,
     encode_set_name_probe, encode_set_suffix, encode_set_tcp_stall_budgets, encode_set_voice_addr,
     encode_set_voice_addr_probe, read_frame,
 };
@@ -1542,7 +1542,7 @@ fn catalog_commands(catalog: &Catalog) -> Result<CompiledCatalog, Box<dyn Error>
                 && binding.transport == 17
                 && binding.family == 4
                 && binding.shape == SHAPE_VOICE
-                && binding.verified_by == 4
+                && matches!(binding.verified_by, 3 | 4)
             {
                 let server = binding.target.parse::<std::net::Ipv4Addr>().map_err(|_| {
                     format!("адресная голосовая привязка неверна: {}", binding.target)
@@ -1568,7 +1568,7 @@ fn catalog_commands(catalog: &Catalog) -> Result<CompiledCatalog, Box<dyn Error>
                     .is_none()
                 {
                     return Err(format!(
-                        "адресная голосовая привязка {} не содержит точный Discovery-план",
+                        "адресная голосовая привязка {} не содержит точный STUN/Discovery-план",
                         binding.target
                     )
                     .into());
@@ -7917,8 +7917,12 @@ impl ControlClient {
     ) -> Result<(), Box<dyn Error>> {
         if proof.trial_id != trial.trial_id || !r2o_voice_proof_matches_target(proof, trial.target)
         {
-            return Err("Discovery-подтверждение не совпало с временным голосовым опытом".into());
+            return Err("голосовое подтверждение не совпало с временным опытом".into());
         }
+        let verified_by = match proof.proof {
+            r2k_core::control::R2oVoiceProofKind::DiscordDiscovery { .. } => 4,
+            r2k_core::control::R2oVoiceProofKind::StunBinding => 3,
+        };
         let (_lock, previous) = locked_catalog(catalog_path, catalog)?;
         let mut updated = previous.clone();
         let now = std::time::SystemTime::now()
@@ -7929,8 +7933,9 @@ impl ControlClient {
             *trial.target.server.ip(),
             &trial.plan_text,
             now,
+            verified_by,
         )
-        .map_err(|error| format!("не удалось сохранить Discovery-привязку: {error}"))?;
+        .map_err(|error| format!("не удалось сохранить голосовую привязку: {error}"))?;
         let plan_records = compile_text(&trial.plan_text)?;
         let command = encode_set_voice_addr(*trial.target.server.ip(), &plan_records)?;
         updated.save_atomic(catalog_path, now)?;
@@ -7950,12 +7955,19 @@ impl ControlClient {
         if let Err(error) = self.retire_r2o_voice_trial(&trial) {
             eprintln!("временный voice-план доживёт до конца аренды: {error}");
         }
-        println!(
-            "Discord Discovery подтверждён: адресный план {plan_id} сохранён для {}; передачу аудио отдельно не измеряли (ответ {}:{})",
-            trial.target.server.ip(),
-            proof.mapped_ip,
-            proof.mapped_port
-        );
+        match proof.proof {
+            r2k_core::control::R2oVoiceProofKind::DiscordDiscovery {
+                mapped_ip,
+                mapped_port,
+            } => println!(
+                "Discord Discovery подтверждён: адресный план {plan_id} сохранён для {}; передачу аудио отдельно не измеряли (ответ {mapped_ip}:{mapped_port})",
+                trial.target.server.ip(),
+            ),
+            r2k_core::control::R2oVoiceProofKind::StunBinding => println!(
+                "STUN Binding подтверждён: адресный план {plan_id} сохранён для {}; передачу аудио отдельно не измеряли",
+                trial.target.server.ip(),
+            ),
+        }
         Ok(())
     }
 
@@ -8676,11 +8688,22 @@ impl ControlClient {
                     }
                     continue;
                 }
-                if frame.kind == EVENT_R2O_VOICE_PROOF {
+                if matches!(
+                    frame.kind,
+                    EVENT_R2O_VOICE_PROOF | EVENT_R2O_VOICE_STUN_PROOF
+                ) {
                     let proof = decode_r2o_voice_proof(&frame)
-                        .map_err(|error| format!("подтверждение Discord Discovery: {error}"))?;
+                        .map_err(|error| format!("подтверждение голосового потока: {error}"))?;
+                    let proof_name = match proof.proof {
+                        r2k_core::control::R2oVoiceProofKind::DiscordDiscovery { .. } => {
+                            "Discord Discovery"
+                        }
+                        r2k_core::control::R2oVoiceProofKind::StunBinding => "STUN",
+                    };
                     let Some(trial) = r2o_voice_trials.get(&proof.trial_id).cloned() else {
-                        println!("Discovery-ответ не относится к активному временному voice-плану");
+                        println!(
+                            "{proof_name}-ответ не относится к активному временному voice-плану"
+                        );
                         std::io::stdout().flush()?;
                         continue;
                     };
@@ -8691,7 +8714,9 @@ impl ControlClient {
                                 "истёкший Discord-план удалится по аренде; досрочное снятие не удалось: {error}"
                             );
                         }
-                        println!("Discovery-ответ пришёл после истечения временного voice-плана");
+                        println!(
+                            "{proof_name}-ответ пришёл после истечения временного voice-плана"
+                        );
                         std::io::stdout().flush()?;
                         continue;
                     }
@@ -11319,6 +11344,8 @@ impl ControlClient {
                 | EVENT_R2O_TCP_RST_CUT
                 | EVENT_R2O_TCP_EXCHANGE
                 | EVENT_R2O_VOICE_SUSPECT
+                | EVENT_R2O_VOICE_PROOF
+                | EVENT_R2O_VOICE_STUN_PROOF
                 | EVENT_R2O_JOURNAL_ENTRY
                 | EVENT_R2O_JOURNAL_END
         ) {
@@ -18216,8 +18243,10 @@ mod tests {
         let mut proof = r2k_core::control::R2oVoiceProofEvent {
             key,
             trial_id: [0x44; 16],
-            mapped_ip: "203.0.113.9".parse().unwrap(),
-            mapped_port: 52_321,
+            proof: r2k_core::control::R2oVoiceProofKind::DiscordDiscovery {
+                mapped_ip: "203.0.113.9".parse().unwrap(),
+                mapped_port: 52_321,
+            },
         };
         assert!(r2o_voice_proof_matches_target(&proof, target));
 
@@ -18236,6 +18265,7 @@ mod tests {
             "198.51.100.21".parse().unwrap(),
             &text,
             1_800_000_001,
+            3,
         )
         .unwrap();
 
@@ -18738,8 +18768,7 @@ mod tests {
         let proof = r2k_core::control::R2oVoiceProofEvent {
             key,
             trial_id,
-            mapped_ip: "203.0.113.10".parse().unwrap(),
-            mapped_port: 52_322,
+            proof: r2k_core::control::R2oVoiceProofKind::StunBinding,
         };
         let mut client = ControlClient::connect(socket_path).unwrap();
         let mut catalog = Catalog::load(&catalog_path).unwrap();
@@ -18756,7 +18785,7 @@ mod tests {
         assert_eq!(&remove_body[8..10], &50_004_u16.to_be_bytes());
         assert_eq!(&remove_body[10..], &trial_id);
         let saved = Catalog::load(&catalog_path).unwrap();
-        assert_eq!(saved.boxes[0].bindings[0].verified_by, 4);
+        assert_eq!(saved.boxes[0].bindings[0].verified_by, 3);
         assert_eq!(saved.boxes[0].bindings[0].target, "198.51.100.20");
         std::fs::remove_dir_all(directory).unwrap();
     }
