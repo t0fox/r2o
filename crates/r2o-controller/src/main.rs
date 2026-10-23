@@ -3029,6 +3029,30 @@ fn r2o_family_recovery_sibling_trial_with_ech(
     commands: &SyncSender<HttpSearchCommand>,
     ech: Option<&r2o_controller::ech::R2oEchConfig>,
 ) -> (Result<r2o_controller::fetch::FetchResult, String>, bool) {
+    let (result, applied, _) = r2o_family_recovery_sibling_trial_with_ech_state(
+        target,
+        destination,
+        candidate,
+        mark,
+        commands,
+        ech,
+    );
+    (result, applied)
+}
+
+#[cfg(unix)]
+fn r2o_family_recovery_sibling_trial_with_ech_state(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    destination: std::net::SocketAddr,
+    candidate: &R2oFamilyRecoveryCandidate,
+    mark: Option<u32>,
+    commands: &SyncSender<HttpSearchCommand>,
+    ech: Option<&r2o_controller::ech::R2oEchConfig>,
+) -> (
+    Result<r2o_controller::fetch::FetchResult, String>,
+    bool,
+    bool,
+) {
     let result = (|| {
         let bound = BoundTcpProbe::open(target.family, mark)
             .map_err(|error| format!("не удалось открыть сокет семейной пробы: {error}"))?;
@@ -3070,8 +3094,10 @@ fn r2o_family_recovery_sibling_trial_with_ech(
         let connected = bound
             .connect(destination, std::time::Duration::from_secs(8))
             .map_err(|error| format!("не удалось подключить семейную пробу: {error}"));
+        let mut transport_established = false;
         let fetch_result = match connected {
             Ok((stream, _, connected_port, _)) if connected_port == local_port => {
+                transport_established = true;
                 let options = r2o_controller::fetch::FetchOptions {
                     name: ech
                         .map(|config| config.origin_name.clone())
@@ -3106,23 +3132,21 @@ fn r2o_family_recovery_sibling_trial_with_ech(
             trial_id,
             std::time::Duration::from_millis(500),
         )?;
-        let applied = fetch_result.as_ref().is_ok_and(|fetch| {
-            events.iter().any(|event| {
-                r2o_family_applied_flow_matches(
-                    event,
-                    target,
-                    fetch.local_port,
-                    candidate.plan_id,
-                    trial_id,
-                    true,
-                )
-            })
+        let applied = events.iter().any(|event| {
+            r2o_family_applied_flow_matches(
+                event,
+                target,
+                local_port,
+                candidate.plan_id,
+                trial_id,
+                true,
+            )
         });
-        fetch_result.map(|fetch| (fetch, applied))
+        Ok((fetch_result, applied, transport_established))
     })();
     match result {
-        Ok((fetch, applied)) => (Ok(fetch), applied),
-        Err(error) => (Err(error), false),
+        Ok((fetch, applied, transport_established)) => (fetch, applied, transport_established),
+        Err(error) => (Err(error), false, false),
     }
 }
 
@@ -3136,14 +3160,70 @@ fn r2o_run_discovery_candidate_trial(
     client_hello: Option<&[u8]>,
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
     resource_memory: &std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>,
-) -> (Result<r2o_controller::fetch::FetchResult, String>, bool) {
+) -> (
+    Result<r2o_controller::fetch::FetchResult, String>,
+    bool,
+    usize,
+) {
+    let (result, applied, attempts) = r2o_run_discovery_candidate_trial_with_retries(
+        target,
+        source_text,
+        probe_path,
+        mark,
+        commands,
+        client_hello,
+        ech_config,
+        resource_memory,
+        1 + usize::from(client_hello.is_some()),
+        || false,
+    );
+    (result, applied, attempts)
+}
+
+#[cfg(unix)]
+fn r2o_run_discovery_candidate_trial_with_retries(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    source_text: &str,
+    probe_path: &str,
+    mark: Option<u32>,
+    commands: &SyncSender<HttpSearchCommand>,
+    client_hello: Option<&[u8]>,
+    ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
+    resource_memory: &std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>,
+    probe_budget_remaining: usize,
+    mut retry_budget_available: impl FnMut() -> bool,
+) -> (
+    Result<r2o_controller::fetch::FetchResult, String>,
+    bool,
+    usize,
+) {
+    if probe_budget_remaining == 0 {
+        return (
+            Err("бюджет зондов Discovery исчерпан до проверки кандидата".into()),
+            false,
+            0,
+        );
+    }
+    let proof_probe_reserve = usize::from(client_hello.is_some());
+    let Some(max_retries) = r2o_discovery_candidate_retry_count(
+        probe_budget_remaining.saturating_sub(proof_probe_reserve),
+    ) else {
+        return (
+            Err(
+                "бюджета зондов Discovery недостаточно для проверки и подтверждения кандидата"
+                    .into(),
+            ),
+            false,
+            0,
+        );
+    };
     let plan_id = match random_id() {
         Ok(id) => id,
-        Err(error) => return (Err(error.to_string()), false),
+        Err(error) => return (Err(error.to_string()), false, 0),
     };
     let plan_text = match r2o_controller::discovery::plan_text_for_trial(source_text, plan_id) {
         Ok(text) => text,
-        Err(error) => return (Err(error), false),
+        Err(error) => return (Err(error), false, 0),
     };
     let destination = match target.endpoint.parse::<std::net::SocketAddr>() {
         Ok(destination) => destination,
@@ -3151,6 +3231,7 @@ fn r2o_run_discovery_candidate_trial(
             return (
                 Err(format!("адрес Discovery-пробы недопустим: {error}")),
                 false,
+                0,
             );
         }
     };
@@ -3164,38 +3245,102 @@ fn r2o_run_discovery_candidate_trial(
         return (
             Err("кандидат ECH нельзя подтвердить без совместимой TLS-конфигурации".into()),
             false,
+            0,
         );
     }
-    let (result, applied) = r2o_family_recovery_sibling_trial_with_ech(
-        target,
-        destination,
-        &candidate,
-        mark,
-        commands,
-        ech_config,
+    let mut attempts = 0;
+    let (result, applied, _) = r2o_repeat_candidate_trials(
+        max_retries,
+        || {
+            attempts += 1;
+            let trial = r2o_family_recovery_sibling_trial_with_ech_state(
+                target,
+                destination,
+                &candidate,
+                mark,
+                commands,
+                ech_config,
+            );
+            if let Ok(fetch) = &trial.0
+                && r2o_controller::fetch::r2o_fetch_result_can_remember_resources(fetch)
+            {
+                resource_memory
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remember_hints(&fetch.r2o_resources, std::time::Instant::now());
+            }
+            trial
+        },
+        |(result, applied, transport_established)| {
+            retry_budget_available()
+                && r2o_family_recovery_decision(result, *applied)
+                    != R2oFamilyRecoveryDecision::Verified
+                && r2o_discovery_candidate_retryable(result, *applied, *transport_established)
+        },
     );
-    if let Ok(fetch) = &result
-        && r2o_controller::fetch::r2o_fetch_result_can_remember_resources(fetch)
-    {
-        resource_memory
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remember_hints(&fetch.r2o_resources, std::time::Instant::now());
-    }
-    if client_hello.is_some()
-        && r2o_family_recovery_decision(&result, applied) == R2oFamilyRecoveryDecision::Verified
+    if r2o_family_recovery_decision(&result, applied) == R2oFamilyRecoveryDecision::Verified
+        && let Some(client_hello) = client_hello
     {
         let snapshot_applied = r2o_discovery_client_shape_trial(
             target,
             &candidate.plan_text,
-            client_hello.expect("снимок проверен выше"),
+            client_hello,
             mark,
             commands,
         )
         .unwrap_or(false);
-        return (result, applied && snapshot_applied);
+        attempts += 1;
+        return (result, applied && snapshot_applied, attempts);
     }
-    (result, applied)
+    (result, applied, attempts)
+}
+
+#[cfg(unix)]
+fn r2o_discovery_candidate_retry_count(probe_budget_remaining: usize) -> Option<u8> {
+    (probe_budget_remaining > 0).then(|| {
+        R2O_DISCOVERY_CANDIDATE_VERIFY_RETRIES.min(
+            probe_budget_remaining
+                .saturating_sub(1)
+                .min(u8::MAX as usize) as u8,
+        )
+    })
+}
+
+#[cfg(unix)]
+fn r2o_repeat_candidate_trials<T>(
+    max_retries: u8,
+    mut trial: impl FnMut() -> T,
+    mut should_retry: impl FnMut(&T) -> bool,
+) -> T {
+    for attempt in 0..=max_retries {
+        let result = trial();
+        if attempt == max_retries || !should_retry(&result) {
+            return result;
+        }
+    }
+    unreachable!("цикл повторов кандидата всегда возвращает исход")
+}
+
+#[cfg(unix)]
+fn r2o_discovery_candidate_retryable(
+    result: &Result<r2o_controller::fetch::FetchResult, String>,
+    applied: bool,
+    transport_established: bool,
+) -> bool {
+    if !applied {
+        return false;
+    }
+    let Ok(fetch) = result else {
+        return transport_established;
+    };
+    transport_established
+        && !fetch.r2o_volume_observation.local_limit
+        && !fetch.cloudflare_challenge
+        && !matches!(
+            fetch.http_outcome,
+            r2o_controller::fetch::R2oFetchHttpOutcome::Blocked
+                | r2o_controller::fetch::R2oFetchHttpOutcome::LegalDenial
+        )
 }
 
 #[cfg(unix)]
@@ -3911,6 +4056,11 @@ const R2O_DISCOVERY_CLEAR_RETRY_SECOND: std::time::Duration =
 const R2O_DISCOVERY_CLEAR_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 #[cfg(unix)]
 const R2O_DISCOVERY_INCOMPLETE_RETRY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+#[cfg(unix)]
+const R2O_DISCOVERY_CANDIDATE_VERIFY_RETRIES: u8 = 2;
+// 5 property questions + 8 queued plans + 5 RX variants + 49 fallback arms.
+#[cfg(unix)]
+const R2O_DISCOVERY_PROBE_CAP: usize = 67;
 
 #[cfg(unix)]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -5327,14 +5477,15 @@ impl DiscoveryWorker {
                 .map(|network| network.name.as_str())
                 .filter(|name| !name.is_empty())
                 .unwrap_or("hcaptcha.com");
-            let outcome = r2o_classify_discovery_target_with_client_hello_and_ech(
-                target.clone(),
-                client_hello.as_deref(),
-                Arc::clone(&cancel),
-                mark,
-                ech_config.as_ref(),
-                white_name,
-            );
+            let (outcome, classify_probes) =
+                r2o_classify_discovery_target_with_client_hello_and_ech(
+                    target.clone(),
+                    client_hello.as_deref(),
+                    Arc::clone(&cancel),
+                    mark,
+                    ech_config.as_ref(),
+                    white_name,
+                );
             let mut outcome = outcome;
             if ech_grease {
                 outcome.detail.push_str(
@@ -5358,6 +5509,7 @@ impl DiscoveryWorker {
                 &runner_volume_searches,
                 &cancel,
                 runner_started,
+                classify_probes,
             ) {
                 return outcome;
             }
@@ -5369,16 +5521,35 @@ impl DiscoveryWorker {
                 candidate_catalog.as_ref(),
                 &runner_resource_memory,
             );
-            let (result, applied) = r2o_run_discovery_candidate_trial(
-                &target,
-                plan_text,
-                &probe_path,
-                mark,
-                &commands,
-                client_hello.as_deref(),
-                ech_config.as_ref(),
-                &runner_resource_memory,
-            );
+            let network_probe = candidate_catalog.as_ref().is_some_and(|catalog| {
+                catalog
+                    .network_whitelist
+                    .as_ref()
+                    .is_none_or(|network| network.name.is_empty() && !network.searched)
+            });
+            let probe_cap = R2O_DISCOVERY_PROBE_CAP.saturating_add(if network_probe {
+                r2o_controller::r2o_rx_volume::r2o_rx_volume_name_count()
+            } else {
+                0
+            });
+            let (result, applied, candidate_attempts) =
+                r2o_run_discovery_candidate_trial_with_retries(
+                    &target,
+                    plan_text,
+                    &probe_path,
+                    mark,
+                    &commands,
+                    client_hello.as_deref(),
+                    ech_config.as_ref(),
+                    &runner_resource_memory,
+                    probe_cap.saturating_sub(classify_probes),
+                    || {
+                        !cancel.load(Ordering::Relaxed)
+                            && R2O_DISCOVERY_TASK_LIFETIME.saturating_sub(runner_started.elapsed())
+                                >= std::time::Duration::from_secs(9)
+                    },
+                );
+            let mut probes_used = classify_probes.saturating_add(candidate_attempts);
             let Some(primary_config) = ech_config.clone() else {
                 return r2o_confirm_discovery_outcome(outcome, result, applied);
             };
@@ -5407,7 +5578,17 @@ impl DiscoveryWorker {
                         .flatten()
                     },
                     |config, retry_plan| {
-                        r2o_run_discovery_candidate_trial(
+                        let proof_probe_reserve = usize::from(client_hello.is_some());
+                        if probe_cap.saturating_sub(probes_used) < 1 + proof_probe_reserve {
+                            return (
+                                Err(
+                                    "бюджет зондов Discovery исчерпан при проверке ECH-свидетеля"
+                                        .into(),
+                                ),
+                                false,
+                            );
+                        }
+                        let (result, applied, attempts) = r2o_run_discovery_candidate_trial(
                             &target,
                             retry_plan,
                             &probe_path,
@@ -5416,7 +5597,9 @@ impl DiscoveryWorker {
                             client_hello.as_deref(),
                             Some(config),
                             &runner_resource_memory,
-                        )
+                        );
+                        probes_used = probes_used.saturating_add(attempts);
+                        (result, applied)
                     },
                 );
             let mut rx_ladder_plan = None;
@@ -5425,12 +5608,6 @@ impl DiscoveryWorker {
                     r2o_ech_witness_rx_cut(&target, &selected_config, true, false, fetch)
                 })
             {
-                let network_probe = candidate_catalog.as_ref().is_some_and(|catalog| {
-                    catalog
-                        .network_whitelist
-                        .as_ref()
-                        .is_none_or(|network| network.name.is_empty() && !network.searched)
-                });
                 let mut discovered_network_name = None;
                 let mut next_index = *runner_ech_rx_cursor
                     .lock()
@@ -5440,6 +5617,8 @@ impl DiscoveryWorker {
                 let candidate_count = r2o_ech_rx_ladder_candidate_count(network_probe);
                 for _ in 0..R2O_ECH_RX_LADDER_BATCH {
                     if cancel.load(Ordering::Relaxed)
+                        || probe_cap.saturating_sub(probes_used)
+                            < 1 + usize::from(client_hello.is_some())
                         || R2O_DISCOVERY_TASK_LIFETIME.saturating_sub(runner_started.elapsed())
                             < std::time::Duration::from_secs(9)
                         || next_index >= candidate_count
@@ -5475,6 +5654,7 @@ impl DiscoveryWorker {
                         Some(&selected_config),
                         &runner_resource_memory,
                     );
+                    probes_used = probes_used.saturating_add(trial.2);
                     result = trial.0;
                     applied = trial.1;
                     if r2o_family_recovery_decision(&result, applied)
@@ -6210,12 +6390,21 @@ impl Drop for DiscoveryWorker {
 }
 
 #[cfg(unix)]
-fn r2o_discovery_retry_after(timed_out: bool, verdict: Verdict) -> Option<std::time::Duration> {
+fn r2o_discovery_retry_after(
+    timed_out: bool,
+    verdict: Verdict,
+    reason: &str,
+) -> Option<std::time::Duration> {
     if timed_out {
         Some(R2O_DISCOVERY_TASK_LIFETIME)
     } else if verdict == Verdict::Clear {
         Some(R2O_DISCOVERY_CLEAR_RETRY_FIRST)
-    } else if verdict == Verdict::Inconclusive {
+    } else if verdict == Verdict::Flaky && reason.contains("замер не состоялся") {
+        Some(std::time::Duration::ZERO)
+    } else if matches!(
+        verdict,
+        Verdict::Inconclusive | Verdict::Flaky | Verdict::Unreachable
+    ) {
         Some(R2O_DISCOVERY_INCOMPLETE_RETRY)
     } else {
         None
@@ -6257,6 +6446,7 @@ fn classify_discovery_target_with_client_hello(
         None,
         "hcaptcha.com",
     )
+    .0
 }
 
 #[cfg(unix)]
@@ -6425,6 +6615,7 @@ fn r2o_discovery_volume_recovery(
     searches: &std::sync::Mutex<R2oDiscoveryVolumeSearchCache>,
     cancel: &AtomicBool,
     started: std::time::Instant,
+    classify_probes: usize,
 ) -> bool {
     if !r2o_discovery_volume_recovery_eligible(outcome) {
         return false;
@@ -6438,6 +6629,12 @@ fn r2o_discovery_volume_recovery(
             .as_ref()
             .is_none_or(|network| network.name.is_empty() && !network.searched)
     });
+    let probe_cap = R2O_DISCOVERY_PROBE_CAP.saturating_add(if network_probe {
+        r2o_controller::r2o_rx_volume::r2o_rx_volume_name_count()
+    } else {
+        0
+    });
+    let mut probes_used = classify_probes;
     let key = R2oDiscoveryVolumeSearchKey {
         wire_len: r2o_discovery_volume_wire_len(target, client_hello),
         send_cap: send_cap.load(Ordering::Relaxed),
@@ -6545,12 +6742,13 @@ fn r2o_discovery_volume_recovery(
     let mut known_probe_incomplete = false;
     for (box_id, candidate) in &pending_known_plans {
         if cancel.load(Ordering::Relaxed)
+            || probes_used >= probe_cap
             || R2O_DISCOVERY_TASK_LIFETIME.saturating_sub(started.elapsed())
                 < std::time::Duration::from_secs(9)
         {
             break;
         }
-        let (result, applied) = r2o_run_discovery_candidate_trial(
+        let (result, applied, attempts) = r2o_run_discovery_candidate_trial(
             target,
             candidate,
             &candidate_probe_path,
@@ -6560,6 +6758,7 @@ fn r2o_discovery_volume_recovery(
             None,
             resource_memory,
         );
+        probes_used = probes_used.saturating_add(attempts);
         if r2o_family_recovery_decision(&result, applied) == R2oFamilyRecoveryDecision::Verified {
             searches
                 .lock()
@@ -6618,7 +6817,7 @@ fn r2o_discovery_volume_recovery(
         .as_deref()
         .filter(|candidate| !search.tried_plans.iter().any(|tried| tried == candidate))
     {
-        let (result, applied) = r2o_run_discovery_candidate_trial(
+        let (result, applied, attempts) = r2o_run_discovery_candidate_trial_with_retries(
             target,
             candidate,
             &candidate_probe_path,
@@ -6627,7 +6826,14 @@ fn r2o_discovery_volume_recovery(
             client_hello,
             None,
             resource_memory,
+            probe_cap.saturating_sub(probes_used),
+            || {
+                !cancel.load(Ordering::Relaxed)
+                    && R2O_DISCOVERY_TASK_LIFETIME.saturating_sub(started.elapsed())
+                        >= std::time::Duration::from_secs(9)
+            },
         );
+        probes_used = probes_used.saturating_add(attempts);
         if r2o_family_recovery_decision(&result, applied) == R2oFamilyRecoveryDecision::Verified {
             searches
                 .lock()
@@ -6641,19 +6847,10 @@ fn r2o_discovery_volume_recovery(
             );
             return true;
         }
-        let Some(fetch) = result.as_ref().ok() else {
-            searches
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(target.clone(), search);
-            outcome.plan_text = None;
-            outcome.retry_after = Some(R2O_DISCOVERY_FAILURE_RETRY);
-            outcome
-                .detail
-                .push_str("; собственный измеренный план не завершил пробу, повторю его");
-            return true;
-        };
-        if fetch.cloudflare_challenge {
+        if result
+            .as_ref()
+            .is_ok_and(|fetch| fetch.cloudflare_challenge)
+        {
             r2o_discovery_stop_volume_search_for_challenge(outcome, target, searches);
             return true;
         }
@@ -6662,6 +6859,11 @@ fn r2o_discovery_volume_recovery(
             outcome
                 .detail
                 .push_str("; собственный измеренный план не получил точное применение");
+        }
+        if result.is_err() {
+            outcome.detail.push_str(
+                "; собственный измеренный план исчерпал ограниченные повторы без полного ответа",
+            );
         }
     }
 
@@ -6696,6 +6898,7 @@ fn r2o_discovery_volume_recovery(
     let first_candidate = next_candidate;
     let mut attempted = 0_usize;
     while attempted < R2O_VOLUME_LADDER_BATCH
+        && probes_used < probe_cap
         && !cancel.load(Ordering::Relaxed)
         && R2O_DISCOVERY_TASK_LIFETIME.saturating_sub(started.elapsed())
             >= std::time::Duration::from_secs(9)
@@ -6722,7 +6925,7 @@ fn r2o_discovery_volume_recovery(
             continue;
         }
         attempted += 1;
-        let (result, applied) = r2o_run_discovery_candidate_trial(
+        let (result, applied, attempts) = r2o_run_discovery_candidate_trial(
             target,
             &candidate,
             &candidate_probe_path,
@@ -6732,6 +6935,7 @@ fn r2o_discovery_volume_recovery(
             None,
             resource_memory,
         );
+        probes_used = probes_used.saturating_add(attempts);
         if r2o_family_recovery_decision(&result, applied) == R2oFamilyRecoveryDecision::Verified {
             if network_probe
                 && let (Some(catalog), Some(name)) = (candidate_catalog, discovered_name.as_deref())
@@ -6907,7 +7111,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech(
     mark: Option<u32>,
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
     white_name: &str,
-) -> DiscoveryOutcome {
+) -> (DiscoveryOutcome, usize) {
     let trigger: Result<Trigger, String> = if let Some(client_hello) = client_hello {
         Trigger::tls_client_hello(&target.host, client_hello).map_err(str::to_owned)
     } else {
@@ -6931,17 +7135,20 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech(
         }
     };
     let Ok(trigger) = trigger else {
-        return DiscoveryOutcome {
-            target,
-            plan_text: None,
-            detail: "не удалось собрать профиль целевого TLS".into(),
-            queue_expired: false,
-            direct_clear: false,
-            volume_recovery: false,
-            volume_fingerprint: None,
-            volume_box_id: None,
-            retry_after: None,
-        };
+        return (
+            DiscoveryOutcome {
+                target,
+                plan_text: None,
+                detail: "не удалось собрать профиль целевого TLS".into(),
+                queue_expired: false,
+                direct_clear: false,
+                volume_recovery: false,
+                volume_fingerprint: None,
+                volume_box_id: None,
+                retry_after: None,
+            },
+            0,
+        );
     };
     let control = match Trigger::tls("disk.rzd.ru") {
         Ok(control) => Trigger {
@@ -6949,17 +7156,20 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech(
             ..control
         },
         Err(error) => {
-            return DiscoveryOutcome {
-                target,
-                plan_text: None,
-                detail: format!("не удалось собрать контрольный TLS: {error}"),
-                queue_expired: false,
-                direct_clear: false,
-                volume_recovery: false,
-                volume_fingerprint: None,
-                volume_box_id: None,
-                retry_after: None,
-            };
+            return (
+                DiscoveryOutcome {
+                    target,
+                    plan_text: None,
+                    detail: format!("не удалось собрать контрольный TLS: {error}"),
+                    queue_expired: false,
+                    direct_clear: false,
+                    volume_recovery: false,
+                    volume_fingerprint: None,
+                    volume_box_id: None,
+                    retry_after: None,
+                },
+                0,
+            );
         }
     };
     let white = r2o_discovery_white_trigger(white_name);
@@ -6977,7 +7187,8 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech(
                 },
             )
         });
-    let retry_after = r2o_discovery_retry_after(timed_out, result.verdict);
+    let retry_after = r2o_discovery_retry_after(timed_out, result.verdict, &result.reason);
+    let probes = result.probes;
     let plan_text = if timed_out {
         None
     } else {
@@ -6988,17 +7199,20 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech(
     } else {
         result.reason
     };
-    DiscoveryOutcome {
-        target,
-        plan_text,
-        detail,
-        queue_expired: false,
-        direct_clear: !timed_out && result.verdict == Verdict::Clear,
-        volume_recovery: false,
-        volume_fingerprint: None,
-        volume_box_id: None,
-        retry_after,
-    }
+    (
+        DiscoveryOutcome {
+            target,
+            plan_text,
+            detail,
+            queue_expired: false,
+            direct_clear: !timed_out && result.verdict == Verdict::Clear,
+            volume_recovery: false,
+            volume_fingerprint: None,
+            volume_box_id: None,
+            retry_after,
+        },
+        probes,
+    )
 }
 
 #[cfg(unix)]
@@ -12556,6 +12770,122 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn measured_candidate_retry_needs_exact_application_and_has_two_retries() {
+        assert_eq!(super::r2o_discovery_candidate_retry_count(0), None);
+        assert_eq!(super::r2o_discovery_candidate_retry_count(1), Some(0));
+        assert_eq!(super::r2o_discovery_candidate_retry_count(2), Some(1));
+        assert_eq!(super::r2o_discovery_candidate_retry_count(3), Some(2));
+        assert_eq!(super::r2o_discovery_candidate_retry_count(100), Some(2));
+
+        let mut incomplete = r2o_test_fetch_result();
+        incomplete.complete = false;
+        incomplete.application_verified = false;
+        assert!(super::r2o_discovery_candidate_retryable(
+            &Ok(incomplete.clone()),
+            true,
+            true
+        ));
+        assert!(!super::r2o_discovery_candidate_retryable(
+            &Ok(incomplete.clone()),
+            false,
+            true
+        ));
+        assert!(super::r2o_discovery_candidate_retryable(
+            &Err("network timeout".into()),
+            true,
+            true
+        ));
+        assert!(!super::r2o_discovery_candidate_retryable(
+            &Err("connect failed".into()),
+            true,
+            false
+        ));
+        let mut no_tls = incomplete.clone();
+        no_tls.tls = None;
+        assert!(super::r2o_discovery_candidate_retryable(
+            &Ok(no_tls.clone()),
+            true,
+            true
+        ));
+        assert!(!super::r2o_discovery_candidate_retryable(
+            &Ok(no_tls.clone()),
+            true,
+            false
+        ));
+
+        incomplete.r2o_volume_observation.local_limit = true;
+        assert!(!super::r2o_discovery_candidate_retryable(
+            &Ok(incomplete.clone()),
+            true,
+            true
+        ));
+        incomplete.r2o_volume_observation.local_limit = false;
+        incomplete.cloudflare_challenge = true;
+        assert!(!super::r2o_discovery_candidate_retryable(
+            &Ok(incomplete),
+            true,
+            true
+        ));
+        let mut blocked = r2o_test_fetch_result();
+        blocked.http_outcome = r2o_controller::fetch::R2oFetchHttpOutcome::Blocked;
+        assert!(!super::r2o_discovery_candidate_retryable(
+            &Ok(blocked),
+            true,
+            true
+        ));
+        let mut legal_denial = r2o_test_fetch_result();
+        legal_denial.http_outcome = r2o_controller::fetch::R2oFetchHttpOutcome::LegalDenial;
+        assert!(!super::r2o_discovery_candidate_retryable(
+            &Ok(legal_denial),
+            true,
+            true
+        ));
+
+        let mut attempts = 0;
+        let verified = super::r2o_repeat_candidate_trials(
+            2,
+            || {
+                attempts += 1;
+                let mut fetch = r2o_test_fetch_result();
+                if attempts < 3 {
+                    fetch.complete = false;
+                    fetch.application_verified = false;
+                }
+                (Ok(fetch), true, true)
+            },
+            |(result, applied, transport_established)| {
+                super::r2o_family_recovery_decision(result, *applied)
+                    != R2oFamilyRecoveryDecision::Verified
+                    && super::r2o_discovery_candidate_retryable(
+                        result,
+                        *applied,
+                        *transport_established,
+                    )
+            },
+        );
+        assert_eq!(
+            super::r2o_family_recovery_decision(&verified.0, verified.1),
+            R2oFamilyRecoveryDecision::Verified
+        );
+        assert_eq!(attempts, 3);
+
+        let mut unbound_attempts = 0;
+        let not_retried = super::r2o_repeat_candidate_trials(
+            2,
+            || {
+                unbound_attempts += 1;
+                (Err("connect failed".into()), true, false)
+            },
+            |(result, applied, transport_established)| {
+                super::r2o_discovery_candidate_retryable(result, *applied, *transport_established)
+            },
+        );
+        assert!(not_retried.0.is_err());
+        assert_eq!(unbound_attempts, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn автоклассификатор_не_сохраняет_кандидат_без_полного_https_и_applied() {
         let outcome = || DiscoveryOutcome {
             target: DiscoveryTarget {
@@ -16599,15 +16929,34 @@ mod tests {
         use r2o_controller::classify::Verdict;
         use std::time::Duration;
 
-        let retry_after = super::r2o_discovery_retry_after(false, Verdict::Inconclusive)
-            .expect("неубедительный результат должен задать отдельную паузу");
+        let retry_after =
+            super::r2o_discovery_retry_after(false, Verdict::Inconclusive, "частичный ответ")
+                .expect("неубедительный результат должен задать отдельную паузу");
         assert_eq!(retry_after, Duration::from_secs(10 * 60));
         assert_eq!(
-            super::r2o_discovery_retry_after(false, Verdict::Flaky),
-            None
+            super::r2o_discovery_retry_after(false, Verdict::Flaky, "база не воспроизводится"),
+            Some(Duration::from_secs(10 * 60))
         );
         assert_eq!(
-            super::r2o_discovery_retry_after(true, Verdict::Inconclusive),
+            super::r2o_discovery_retry_after(
+                false,
+                Verdict::Flaky,
+                "замер не состоялся: истёк срок подключения"
+            ),
+            Some(Duration::ZERO)
+        );
+        let immediate = std::time::Instant::now();
+        assert!(super::r2o_discovery_failure_retry_due_after(
+            immediate,
+            immediate,
+            Duration::ZERO
+        ));
+        assert_eq!(
+            super::r2o_discovery_retry_after(false, Verdict::Unreachable, "нет TCP до цели"),
+            Some(Duration::from_secs(10 * 60))
+        );
+        assert_eq!(
+            super::r2o_discovery_retry_after(true, Verdict::Inconclusive, "частичный ответ"),
             Some(super::R2O_DISCOVERY_TASK_LIFETIME)
         );
 
