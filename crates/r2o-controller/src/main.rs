@@ -1288,10 +1288,14 @@ fn serve_catalog(
     );
     std::io::stdout().flush()?;
     let https_cache_path = catalog_path.with_file_name("https-cache.json");
+    let active_groups = installed.installed_groups.into_iter().collect();
+    let live_catalog = Some((catalog.clone(), catalog_path.clone()));
     client.watch_events(
-        discover.then_some((catalog, catalog_path, mark)),
+        discover.then_some((catalog, catalog_path.clone(), mark)),
         Some(https_cache_path),
         mark,
+        live_catalog,
+        active_groups,
     )
 }
 
@@ -1401,6 +1405,7 @@ fn clear_catalog(path: PathBuf) -> Result<(), Box<dyn Error>> {
 #[cfg(unix)]
 struct CompiledCatalog {
     commands: Vec<(String, Vec<u8>)>,
+    group_commands: Vec<(usize, r2o_controller::live::LiveGroupKey)>,
     skipped: usize,
     tcp_stall_budgets: Vec<u16>,
 }
@@ -1482,6 +1487,7 @@ const DOMAIN_PLAN_FAILED: u8 = 4;
 #[cfg(unix)]
 fn catalog_commands(catalog: &Catalog) -> Result<CompiledCatalog, Box<dyn Error>> {
     let mut commands = Vec::new();
+    let mut group_commands = Vec::new();
     let mut skipped = 0_usize;
     for box_record in &catalog.boxes {
         for binding in &box_record.bindings {
@@ -1673,7 +1679,11 @@ fn catalog_commands(catalog: &Catalog) -> Result<CompiledCatalog, Box<dyn Error>
             let command =
                 encode_set_suffix(&group.suffix, group.key.shape, group.key.family, &bytes)
                     .map_err(|error| format!("SET_SUFFIX для {}: {error}", group.suffix))?;
-            suffix_commands.push((format!("суффикс {}", group.suffix), command));
+            suffix_commands.push((
+                format!("суффикс {}", group.suffix),
+                command,
+                r2o_controller::live::LiveGroupKey::from(group),
+            ));
         }
 
         let mut seen_bypasses = HashSet::new();
@@ -1709,10 +1719,14 @@ fn catalog_commands(catalog: &Catalog) -> Result<CompiledCatalog, Box<dyn Error>
             bypass_commands.push((format!("исключение {}", observation.name), command));
         }
         commands.extend(bypass_commands);
-        commands.extend(suffix_commands);
+        for (host, command, key) in suffix_commands {
+            group_commands.push((commands.len(), key));
+            commands.push((host, command));
+        }
     }
     Ok(CompiledCatalog {
         commands,
+        group_commands,
         skipped,
         tcp_stall_budgets: r2o_tcp_stall_budgets(catalog),
     })
@@ -2271,6 +2285,7 @@ struct CatalogInstallSummary {
     installed: usize,
     refused: usize,
     last_refusal: Option<&'static str>,
+    installed_groups: Vec<r2o_controller::live::LiveGroupKey>,
 }
 
 #[cfg(unix)]
@@ -2297,7 +2312,7 @@ fn install_catalog_with_policy(
 ) -> Result<CatalogInstallSummary, Box<dyn Error>> {
     client.send_clear()?;
     let mut summary = CatalogInstallSummary::default();
-    for (installed, (host, command)) in compiled.commands.iter().enumerate() {
+    for (command_index, (host, command)) in compiled.commands.iter().enumerate() {
         let expected = command
             .get(4..6)
             .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
@@ -2313,7 +2328,7 @@ fn install_catalog_with_policy(
                 Err(error) => {
                     return Err(rollback_catalog_install(
                         client,
-                        installed,
+                        command_index,
                         format!("{host}: {error}"),
                     ));
                 }
@@ -2326,9 +2341,16 @@ fn install_catalog_with_policy(
         } else if let Err(error) = client.send_command(command, expected) {
             return Err(rollback_catalog_install(
                 client,
-                installed,
+                command_index,
                 format!("{host}: {error}"),
             ));
+        }
+        if let Some((_, key)) = compiled
+            .group_commands
+            .iter()
+            .find(|(index, _)| *index == command_index)
+        {
+            summary.installed_groups.push(key.clone());
         }
         summary.installed += 1;
     }
@@ -3935,7 +3957,7 @@ impl Drop for R2oQuicDiscoveryWorker {
 
 #[cfg(unix)]
 fn watch(socket_path: PathBuf) -> Result<(), Box<dyn Error>> {
-    ControlClient::connect(socket_path)?.watch_events(None, None, None)
+    ControlClient::connect(socket_path)?.watch_events(None, None, None, None, HashSet::new())
 }
 
 #[cfg(unix)]
@@ -4041,6 +4063,21 @@ struct DiscoveryOutcome {
     volume_fingerprint: Option<r2o_controller::catalog::Fingerprint>,
     volume_box_id: Option<String>,
     retry_after: Option<std::time::Duration>,
+}
+
+#[cfg(unix)]
+struct R2oDiscoveryWorkOutcome {
+    outcome: DiscoveryOutcome,
+    catalog_generation: u64,
+}
+
+#[cfg(unix)]
+impl std::ops::Deref for R2oDiscoveryWorkOutcome {
+    type Target = DiscoveryOutcome;
+
+    fn deref(&self) -> &Self::Target {
+        &self.outcome
+    }
 }
 
 #[cfg(unix)]
@@ -4460,6 +4497,7 @@ impl R2oRecentTcpNameCache {
 struct R2oDiscoveryQueue {
     entries: Vec<R2oDiscoveryQueueEntry>,
     event_sequence: u64,
+    catalog_generation: u64,
     #[cfg(test)]
     waiting_for_slot: usize,
 }
@@ -4475,6 +4513,20 @@ struct R2oDiscoveryQueueEntry {
 #[cfg(unix)]
 fn r2o_discovery_task_key(target: &r2o_controller::discovery::DiscoveryTarget) -> (String, u8) {
     (target.host.clone(), target.family)
+}
+
+#[cfg(unix)]
+fn r2o_live_timestamp(seen: std::time::Instant, now: std::time::Instant) -> Option<String> {
+    let elapsed = now.saturating_duration_since(seen).as_secs();
+    let unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_secs()
+        .saturating_sub(elapsed);
+    time::OffsetDateTime::from_unix_timestamp(i64::try_from(unix).ok()?)
+        .ok()?
+        .format(&time::format_description::well_known::Rfc3339)
+        .ok()
 }
 
 #[cfg(unix)]
@@ -4664,7 +4716,8 @@ struct DiscoveryWorker {
     recent_client_shapes: R2oRecentClientShapeCache,
     resource_memory: Arc<std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>>,
     active_cancels: Arc<std::sync::Mutex<HashMap<(String, u8), Arc<AtomicBool>>>>,
-    outcomes: Receiver<DiscoveryOutcome>,
+    catalog_refreshes: Arc<std::sync::Mutex<HashSet<(String, u8)>>>,
+    outcomes: Receiver<R2oDiscoveryWorkOutcome>,
     cancel: Arc<AtomicBool>,
     seen: HashSet<r2o_controller::discovery::DiscoveryTarget>,
     seen_order: VecDeque<r2o_controller::discovery::DiscoveryTarget>,
@@ -4675,8 +4728,8 @@ struct DiscoveryWorker {
     ech_input_names: VecDeque<(String, u8)>,
     clear_streaks: HashMap<(String, u8, String), u8>,
     client_snapshot_targets: HashSet<r2o_controller::discovery::DiscoveryTarget>,
-    pending_client_snapshots:
-        HashMap<(String, u8), (r2o_controller::discovery::DiscoveryTarget, Vec<u8>)>,
+    pending_rechecks:
+        HashMap<(String, u8), (r2o_controller::discovery::DiscoveryTarget, Option<Vec<u8>>)>,
     active: HashMap<(String, u8), r2o_controller::discovery::DiscoveryTarget>,
     threads: Vec<JoinHandle<()>>,
 }
@@ -5400,7 +5453,8 @@ impl DiscoveryWorker {
             let client_hello = runner_client_hellos
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&r2o_discovery_task_key(&target));
+                .get(&r2o_discovery_task_key(&target))
+                .cloned();
             let candidate_catalog = match Catalog::load(&catalog_path) {
                 Ok(catalog) => Some(catalog),
                 Err(error) => {
@@ -5824,12 +5878,14 @@ impl DiscoveryWorker {
         let (outcome_sender, outcomes) = mpsc::sync_channel(8);
         let cancel = Arc::new(AtomicBool::new(false));
         let active_cancels = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let catalog_refreshes = Arc::new(std::sync::Mutex::new(HashSet::new()));
         let mut threads = Vec::with_capacity(R2O_DISCOVERY_WORKER_COUNT);
         for _ in 0..R2O_DISCOVERY_WORKER_COUNT {
             let worker_cancel = Arc::clone(&cancel);
             let worker_gate = measurement_gate.clone();
             let worker_jobs = Arc::clone(&jobs);
             let task_cancels = Arc::clone(&active_cancels);
+            let worker_catalog_refreshes = Arc::clone(&catalog_refreshes);
             let worker_outcomes = outcome_sender.clone();
             let worker_runner = Arc::clone(&runner);
             threads.push(std::thread::spawn(move || {
@@ -5860,7 +5916,7 @@ impl DiscoveryWorker {
                     }
                     let outcome = {
                         let permit = worker_gate.r2o_acquire(&worker_cancel);
-                        let (expired, target) = {
+                        let (expired, target, generation) = {
                             let (queue, _) = &*worker_jobs;
                             let mut queue = queue
                                 .lock()
@@ -5870,9 +5926,10 @@ impl DiscoveryWorker {
                                 queue.waiting_for_slot = queue.waiting_for_slot.saturating_sub(1);
                             }
                             if worker_cancel.load(Ordering::Relaxed) || permit.is_none() {
-                                (Vec::new(), None)
+                                (Vec::new(), None, queue.catalog_generation)
                             } else {
-                                queue.pop(std::time::Instant::now())
+                                let (expired, target) = queue.pop(std::time::Instant::now());
+                                (expired, target, queue.catalog_generation)
                             }
                         };
                         let Some(_permit) = permit else {
@@ -5880,16 +5937,19 @@ impl DiscoveryWorker {
                         };
                         for target in expired {
                             if worker_outcomes
-                                .send(DiscoveryOutcome {
-                                    target,
-                                    plan_text: None,
-                                    detail: "подозрение устарело в очереди".into(),
-                                    queue_expired: true,
-                                    direct_clear: false,
-                                    volume_recovery: false,
-                                    volume_fingerprint: None,
-                                    volume_box_id: None,
-                                    retry_after: None,
+                                .send(R2oDiscoveryWorkOutcome {
+                                    outcome: DiscoveryOutcome {
+                                        target,
+                                        plan_text: None,
+                                        detail: "подозрение устарело в очереди".into(),
+                                        queue_expired: true,
+                                        direct_clear: false,
+                                        volume_recovery: false,
+                                        volume_fingerprint: None,
+                                        volume_box_id: None,
+                                        retry_after: None,
+                                    },
+                                    catalog_generation: generation,
                                 })
                                 .is_err()
                             {
@@ -5908,21 +5968,54 @@ impl DiscoveryWorker {
                             .unwrap_or_else(|| {
                                 Arc::new(AtomicBool::new(worker_cancel.load(Ordering::Relaxed)))
                             });
-                        let outcome = if task_cancel.load(Ordering::Relaxed) {
-                            DiscoveryOutcome {
-                                target,
-                                plan_text: None,
-                                detail: "задача заменена свежим ClientHello".into(),
-                                queue_expired: false,
-                                direct_clear: false,
-                                volume_recovery: false,
-                                volume_fingerprint: None,
-                                volume_box_id: None,
-                                retry_after: None,
+                        let mut run_generation = generation;
+                        let outcome = loop {
+                            let outcome = if task_cancel.load(Ordering::Relaxed) {
+                                DiscoveryOutcome {
+                                    target: target.clone(),
+                                    plan_text: None,
+                                    detail: "задача заменена свежим ClientHello".into(),
+                                    queue_expired: false,
+                                    direct_clear: false,
+                                    volume_recovery: false,
+                                    volume_fingerprint: None,
+                                    volume_box_id: None,
+                                    retry_after: None,
+                                }
+                            } else {
+                                worker_runner(target.clone(), Arc::clone(&task_cancel))
+                            };
+                            let latest_generation = worker_jobs
+                                .0
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .catalog_generation;
+                            if latest_generation != run_generation
+                                && worker_catalog_refreshes
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .remove(&task_key)
+                                && !worker_cancel.load(Ordering::Relaxed)
+                            {
+                                task_cancel.store(false, Ordering::Relaxed);
+                                run_generation = latest_generation;
+                                continue;
                             }
-                        } else {
-                            worker_runner(target, Arc::clone(&task_cancel))
+                            if latest_generation == run_generation
+                                || task_cancel.load(Ordering::Relaxed)
+                                || worker_cancel.load(Ordering::Relaxed)
+                            {
+                                break R2oDiscoveryWorkOutcome {
+                                    outcome,
+                                    catalog_generation: run_generation,
+                                };
+                            }
+                            run_generation = latest_generation;
                         };
+                        worker_catalog_refreshes
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .remove(&task_key);
                         task_cancels
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -5941,6 +6034,7 @@ impl DiscoveryWorker {
             recent_client_shapes: R2oRecentClientShapeCache::default(),
             resource_memory,
             active_cancels,
+            catalog_refreshes,
             outcomes,
             cancel,
             seen: HashSet::new(),
@@ -5952,10 +6046,54 @@ impl DiscoveryWorker {
             ech_input_names: VecDeque::new(),
             clear_streaks: HashMap::new(),
             client_snapshot_targets: HashSet::new(),
-            pending_client_snapshots: HashMap::new(),
+            pending_rechecks: HashMap::new(),
             active: HashMap::new(),
             threads,
         }
+    }
+
+    fn r2o_live_searches(&self, now: std::time::Instant) -> Vec<serde_json::Value> {
+        let queue = self
+            .jobs
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.active
+            .values()
+            .map(|target| {
+                let queued_at = queue
+                    .entries
+                    .iter()
+                    .find(|entry| {
+                        r2o_discovery_task_key(&entry.target) == r2o_discovery_task_key(target)
+                    })
+                    .map(|entry| entry.queued_at);
+                let (ip, port) = target
+                    .endpoint
+                    .parse::<std::net::SocketAddr>()
+                    .map(|endpoint| (endpoint.ip().to_string(), endpoint.port()))
+                    .unwrap_or_default();
+                let mut search = serde_json::json!({
+                    "target": target.host,
+                    "family": target.family,
+                    "transport": 6,
+                    "shape": target.shape,
+                    "ip": ip,
+                    "port": port,
+                    "phase": if queued_at.is_some() {
+                        "ожидает безопасного слота замера"
+                    } else {
+                        "выполняется замер"
+                    },
+                });
+                if let Some(queued_at) = queued_at
+                    && let Some(since) = r2o_live_timestamp(queued_at, now)
+                {
+                    search["since"] = serde_json::Value::String(since);
+                }
+                search
+            })
+            .collect()
     }
 
     fn remember_proven_resource(&self, host: &str, path: &str, now: std::time::Instant) -> bool {
@@ -6114,8 +6252,12 @@ impl DiscoveryWorker {
         }
         let task_key = r2o_discovery_task_key(&target);
         if self.active.contains_key(&task_key) {
-            self.pending_client_snapshots
-                .insert(task_key.clone(), (target, client_hello));
+            self.catalog_refreshes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&task_key);
+            self.pending_rechecks
+                .insert(task_key.clone(), (target, Some(client_hello)));
             if let Some(cancel) = self
                 .active_cancels
                 .lock()
@@ -6284,11 +6426,42 @@ impl DiscoveryWorker {
         expired
     }
 
+    fn catalog_changed(&mut self) {
+        {
+            let (queue, _) = &*self.jobs;
+            let mut queue = queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            queue.catalog_generation = queue.catalog_generation.wrapping_add(1);
+        }
+        let pending = self
+            .pending_rechecks
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
+        let cancels = self
+            .active_cancels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut refreshes = self
+            .catalog_refreshes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (task_key, cancel) in cancels.iter() {
+            if !pending.contains(task_key) {
+                refreshes.insert(task_key.clone());
+                cancel.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
     fn try_outcome(&mut self) -> Option<DiscoveryOutcome> {
-        self.r2o_schedule_pending_client_snapshots();
-        let outcome = self.outcomes.try_recv().ok()?;
+        self.r2o_schedule_pending_rechecks();
+        let work = self.outcomes.try_recv().ok()?;
+        let catalog_generation = work.catalog_generation;
+        let outcome = work.outcome;
         let task_key = r2o_discovery_task_key(&outcome.target);
-        if self.pending_client_snapshots.contains_key(&task_key) {
+        if self.pending_rechecks.contains_key(&task_key) {
             if r2o_discovery_volume_challenge_outcome(&outcome) {
                 self.r2o_record_discovery_challenge(&outcome.target, std::time::Instant::now());
             }
@@ -6297,30 +6470,64 @@ impl DiscoveryWorker {
             }
             self.seen.remove(&outcome.target);
             self.seen_order.retain(|seen| seen != &outcome.target);
-            let failure_key =
-                r2o_discovery_failure_key(&self.pending_client_snapshots.get(&task_key)?.0);
+            let failure_key = r2o_discovery_failure_key(&self.pending_rechecks.get(&task_key)?.0);
             self.failed_at.remove(&failure_key);
             self.failed_retry_after.remove(&failure_key);
             self.ech_input_clearable_failures.remove(&failure_key);
-            self.r2o_schedule_pending_client_snapshots();
+            self.r2o_schedule_pending_rechecks();
+            return None;
+        }
+        let current_generation = self
+            .jobs
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .catalog_generation;
+        if catalog_generation != current_generation
+            && !outcome.queue_expired
+            && !outcome.direct_clear
+            && !r2o_discovery_volume_challenge_outcome(&outcome)
+        {
+            if self.active.get(&task_key) == Some(&outcome.target) {
+                self.active.remove(&task_key);
+            }
+            self.seen.remove(&outcome.target);
+            self.seen_order.retain(|seen| seen != &outcome.target);
+            let failure_key = r2o_discovery_failure_key(&outcome.target);
+            self.failed_at.remove(&failure_key);
+            self.failed_retry_after.remove(&failure_key);
+            self.ech_input_clearable_failures.remove(&failure_key);
+            let client_hello = self
+                .client_hellos
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&task_key)
+                .cloned();
+            self.pending_rechecks
+                .insert(task_key, (outcome.target, client_hello));
+            self.r2o_schedule_pending_rechecks();
             return None;
         }
         Some(self.r2o_complete_outcome(outcome))
     }
 
-    fn r2o_schedule_pending_client_snapshots(&mut self) {
+    fn r2o_schedule_pending_rechecks(&mut self) {
         let ready = self
-            .pending_client_snapshots
+            .pending_rechecks
             .keys()
             .filter(|task_key| !self.active.contains_key(*task_key))
             .cloned()
             .collect::<Vec<_>>();
         for task_key in ready {
-            let Some((target, client_hello)) = self.pending_client_snapshots.remove(&task_key)
-            else {
+            let Some((target, client_hello)) = self.pending_rechecks.remove(&task_key) else {
                 continue;
             };
             if self.r2o_discovery_challenge_active(&target, std::time::Instant::now()) {
+                self.client_hellos
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&task_key);
+                self.client_snapshot_targets.remove(&target);
                 continue;
             }
             self.seen.remove(&target);
@@ -6329,18 +6536,30 @@ impl DiscoveryWorker {
             self.failed_at.remove(&failure_key);
             self.failed_retry_after.remove(&failure_key);
             self.ech_input_clearable_failures.remove(&failure_key);
-            self.client_hellos
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(task_key.clone(), client_hello.clone());
-            if self.queue(target.clone()) {
-                self.client_snapshot_targets.insert(target);
+            if let Some(client_hello) = client_hello.as_ref() {
+                self.client_hellos
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(task_key.clone(), client_hello.clone());
             } else {
                 self.client_hellos
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&task_key);
-                self.pending_client_snapshots
+                self.client_snapshot_targets.remove(&target);
+            }
+            if self.queue(target.clone()) {
+                if client_hello.is_some() {
+                    self.client_snapshot_targets.insert(target);
+                }
+            } else {
+                if client_hello.is_none() {
+                    self.client_hellos
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(&task_key);
+                }
+                self.pending_rechecks
                     .insert(task_key, (target, client_hello));
             }
         }
@@ -7745,6 +7964,8 @@ impl ControlClient {
         discovery: Option<(Catalog, PathBuf, Option<u32>)>,
         https_cache_path: Option<PathBuf>,
         https_probe_mark: Option<u32>,
+        live_catalog: Option<(Catalog, PathBuf)>,
+        mut active_groups: HashSet<r2o_controller::live::LiveGroupKey>,
     ) -> Result<(), Box<dyn Error>> {
         use std::io::Write;
 
@@ -7838,6 +8059,10 @@ impl ControlClient {
         }
         let mut r2o_scheduler_tick_pending = false;
         let mut r2o_quic_command_first = false;
+        let live_path = live_catalog
+            .as_ref()
+            .map(|(_, path)| path.with_file_name("live.json"));
+        let mut live_written_at = None;
         let run_result = (|| -> Result<(), Box<dyn Error>> {
             loop {
                 if r2o_scheduler_tick_pending && self.pending_events.is_empty() {
@@ -7856,6 +8081,49 @@ impl ControlClient {
                     }
                 }
                 let r2o_now = std::time::Instant::now();
+                if live_written_at.is_none_or(|last: std::time::Instant| {
+                    r2o_now.saturating_duration_since(last) >= std::time::Duration::from_secs(5)
+                }) {
+                    let catalog_snapshot = discovery
+                        .as_ref()
+                        .map(|(_, catalog, _, _)| catalog)
+                        .or_else(|| live_catalog.as_ref().map(|(catalog, _)| catalog));
+                    if let (Some(catalog), Some(path)) = (catalog_snapshot, live_path.as_deref()) {
+                        let searches = discovery
+                            .as_ref()
+                            .map(|(worker, _, _, _)| worker.r2o_live_searches(r2o_now))
+                            .unwrap_or_default();
+                        let status = measurement_gate.r2o_live_snapshot();
+                        let measurements = serde_json::json!({
+                            "active": status.active,
+                            "limit": status.limit,
+                            "queued": status.queued,
+                            "cores": status.cores,
+                            "free_pct": status.free_pct,
+                            "mem_avail_mb": status.mem_avail_mb,
+                            "mem_total_mb": status.mem_total_mb,
+                            "conntrack_pct": status.conntrack_pct,
+                            "limited_by": status.limited_by,
+                        });
+                        if let Some((_, catalog_path)) = &live_catalog {
+                            match r2o_controller::live::snapshot(
+                                catalog,
+                                catalog_path,
+                                &active_groups,
+                                searches,
+                                measurements,
+                            )
+                            .and_then(|value| r2o_controller::live::write_snapshot(path, &value))
+                            {
+                                Ok(()) => live_written_at = Some(r2o_now),
+                                Err(error) => {
+                                    eprintln!("живое состояние панели не записано: {error}");
+                                    live_written_at = Some(r2o_now);
+                                }
+                            }
+                        }
+                    }
+                }
                 if let Some((worker, _, _, _)) = &mut discovery {
                     for target in worker.r2o_expire_queued(r2o_now) {
                         println!(
@@ -7923,12 +8191,18 @@ impl ControlClient {
                             outcome.target.host
                         );
                     } else {
-                        self.apply_discovery_outcome_with_input(
+                        let catalog_changed = outcome.plan_text.is_some() || outcome.direct_clear;
+                        if let Some(installed_groups) = self.apply_discovery_outcome_with_input(
                             outcome,
                             catalog,
                             path,
                             if client_input { 1 } else { 2 },
-                        )?;
+                        )? {
+                            active_groups = installed_groups.into_iter().collect();
+                        }
+                        if catalog_changed {
+                            worker.catalog_changed();
+                        }
                     }
                     std::io::stdout().flush()?;
                     continue;
@@ -10767,6 +11041,7 @@ impl ControlClient {
         catalog_path: &std::path::Path,
     ) -> Result<(), Box<dyn Error>> {
         self.apply_discovery_outcome_with_input(outcome, catalog, catalog_path, 2)
+            .map(|_| ())
     }
 
     fn apply_discovery_outcome_with_input(
@@ -10775,16 +11050,17 @@ impl ControlClient {
         catalog: &mut Catalog,
         catalog_path: &std::path::Path,
         input: u8,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<Option<Vec<r2o_controller::live::LiveGroupKey>>, Box<dyn Error>> {
         if outcome.direct_clear {
-            return self.apply_discovery_direct_clear(&outcome.target, catalog, catalog_path);
+            self.apply_discovery_direct_clear(&outcome.target, catalog, catalog_path)?;
+            return Ok(None);
         }
         let Some(source_text) = outcome.plan_text else {
             println!(
                 "автопоиск не дал применимого плана для {}: {}",
                 outcome.target.host, outcome.detail
             );
-            return Ok(());
+            return Ok(None);
         };
         if r2o_discovery_existing_binding_blocks_outcome(
             catalog,
@@ -10796,7 +11072,7 @@ impl ControlClient {
                 "автопоиск пропущен: каталог уже покрывает {}",
                 outcome.target.host
             );
-            return Ok(());
+            return Ok(None);
         }
 
         let (_lock, previous) = locked_catalog(catalog_path, catalog)?;
@@ -10811,7 +11087,7 @@ impl ControlClient {
                 "автопоиск пропущен: другой контроллер уже сохранил план для {}",
                 outcome.target.host
             );
-            return Ok(());
+            return Ok(None);
         }
 
         let now = std::time::SystemTime::now()
@@ -10842,24 +11118,27 @@ impl ControlClient {
 
         if let Err(error) = updated.save_atomic(catalog_path, now) {
             println!("каталог не записан; план не установлен: {error}");
-            return Ok(());
+            return Ok(None);
         }
-        if let Err(install_error) = install_catalog(self, &compiled) {
-            let file_rollback = previous.save_atomic(catalog_path, now);
-            let runtime_rollback = catalog_commands(&previous)
-                .and_then(|previous_compiled| install_catalog(self, &previous_compiled));
-            return Err(match (file_rollback, runtime_rollback) {
-                (Ok(()), Ok(_)) => format!(
-                    "r2o-datapath не подтвердил обновлённый каталог; восстановлены прежние каталог и планы: {install_error}"
-                ),
-                (file_result, runtime_result) => format!(
-                    "r2o-datapath не подтвердил обновлённый каталог ({install_error}); откат файла: {}; откат datapath: {}",
-                    file_result.err().map_or_else(|| "успешно".to_owned(), |error| error.to_string()),
-                    runtime_result.err().map_or_else(|| "успешно".to_owned(), |error| error.to_string()),
-                ),
+        let installed = match install_catalog(self, &compiled) {
+            Ok(installed) => installed,
+            Err(install_error) => {
+                let file_rollback = previous.save_atomic(catalog_path, now);
+                let runtime_rollback = catalog_commands(&previous)
+                    .and_then(|previous_compiled| install_catalog(self, &previous_compiled));
+                return Err(match (file_rollback, runtime_rollback) {
+                    (Ok(()), Ok(_)) => format!(
+                        "r2o-datapath не подтвердил обновлённый каталог; восстановлены прежние каталог и планы: {install_error}"
+                    ),
+                    (file_result, runtime_result) => format!(
+                        "r2o-datapath не подтвердил обновлённый каталог ({install_error}); откат файла: {}; откат datapath: {}",
+                        file_result.err().map_or_else(|| "успешно".to_owned(), |error| error.to_string()),
+                        runtime_result.err().map_or_else(|| "успешно".to_owned(), |error| error.to_string()),
+                    ),
+                }
+                .into());
             }
-            .into());
-        }
+        };
         *catalog = updated;
         println!(
             "автопоиск установил и сохранил план {} для {} ({shape})",
@@ -10871,7 +11150,7 @@ impl ControlClient {
                 "TLS 1.2"
             }
         );
-        Ok(())
+        Ok(Some(installed.installed_groups))
     }
 
     fn apply_discovery_direct_clear(
@@ -12094,19 +12373,34 @@ mod tests {
                 (false, r2k_core::control::ACK_NO_ROOM),
             ] {
                 let command = read_frame(&mut peer).unwrap();
-                assert_eq!(command.kind, COMMAND_SET_NAME);
+                assert_eq!(command.kind, r2k_core::control::COMMAND_SET_SUFFIX);
                 peer.write_all(&encode_ack(command.kind, ok, reason).unwrap())
                     .unwrap();
             }
         });
 
-        let command = encode_frame(COMMAND_SET_NAME, &[]).unwrap();
+        let plan = super::compile_text(
+            "r2o-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit sni_middle +0\n",
+        )
+        .unwrap();
+        let command =
+            |suffix: &str| super::encode_set_suffix(suffix, SHAPE_MODERN, 4, &plan).unwrap();
+        let group = r2o_controller::live::LiveGroupKey {
+            suffix: "installed.example".into(),
+            plan_id: "plan-1".into(),
+            transport: 6,
+            family: 4,
+            shape: SHAPE_MODERN,
+            probe_path: "/".into(),
+            ech_origin: String::new(),
+        };
         let compiled = CompiledCatalog {
             commands: vec![
-                ("bad-plan.example".into(), command.clone()),
-                ("installed.example".into(), command.clone()),
-                ("full-table.example".into(), command),
+                ("bad-plan.example".into(), command("bad-plan.example")),
+                ("installed.example".into(), command("installed.example")),
+                ("full-table.example".into(), command("full-table.example")),
             ],
+            group_commands: vec![(1, group.clone())],
             skipped: 0,
             tcp_stall_budgets: Vec::new(),
         };
@@ -12121,6 +12415,7 @@ mod tests {
                 installed: 1,
                 refused: 2,
                 last_refusal: Some("таблица планов заполнена"),
+                installed_groups: vec![group],
             }
         );
     }
@@ -12222,6 +12517,9 @@ mod tests {
             active_cancels: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            catalog_refreshes: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             outcomes,
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             seen: std::collections::HashSet::new(),
@@ -12233,7 +12531,7 @@ mod tests {
             ech_input_names: std::collections::VecDeque::new(),
             clear_streaks: std::collections::HashMap::new(),
             client_snapshot_targets: std::collections::HashSet::new(),
-            pending_client_snapshots: std::collections::HashMap::new(),
+            pending_rechecks: std::collections::HashMap::new(),
             active: std::collections::HashMap::new(),
             threads: Vec::new(),
         }
@@ -16334,6 +16632,98 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn r2o_discovery_перезапускает_активный_поиск_после_обновления_каталога() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex, mpsc};
+        use std::time::{Duration, Instant};
+
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "example.com".into(),
+            endpoint: "198.51.100.2:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let client_hello = r2o_controller::hello::modern_client_hello(&target.host).unwrap();
+        let key = super::r2o_discovery_task_key(&target);
+        let snapshots = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let runner_snapshots = Arc::clone(&snapshots);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let runner_attempts = Arc::clone(&attempts);
+        let (first_started_sender, first_started_receiver) = mpsc::channel();
+        let (second_started_sender, second_started_receiver) = mpsc::channel();
+        let runner = Arc::new(
+            move |target: r2o_controller::discovery::DiscoveryTarget, cancel: Arc<AtomicBool>| {
+                let attempt = runner_attempts.fetch_add(1, Ordering::Relaxed);
+                let captured = runner_snapshots.lock().unwrap().get(&key).cloned();
+                if attempt == 0 {
+                    first_started_sender.send(captured).unwrap();
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    while !cancel.load(Ordering::Relaxed) && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    assert!(cancel.load(Ordering::Relaxed));
+                } else {
+                    second_started_sender
+                        .send((captured, cancel.load(Ordering::Relaxed)))
+                        .unwrap();
+                }
+                super::DiscoveryOutcome {
+                    target,
+                    plan_text: (attempt != 0).then(|| "совместимый план".into()),
+                    detail: "проверка завершена".into(),
+                    queue_expired: false,
+                    direct_clear: false,
+                    volume_recovery: false,
+                    volume_fingerprint: None,
+                    volume_box_id: None,
+                    retry_after: None,
+                }
+            },
+        );
+        let mut worker = super::DiscoveryWorker::r2o_new_with_runner_and_client_hellos(
+            r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1),
+            runner,
+            snapshots,
+            Arc::new(Mutex::new(
+                r2o_controller::r2o_resource::R2oResourceMemory::default(),
+            )),
+        );
+
+        assert!(worker.queue_client_snapshot(target.clone(), client_hello.clone()));
+        assert_eq!(
+            first_started_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap(),
+            Some(client_hello.clone())
+        );
+        worker.catalog_changed();
+        let (refreshed_hello, cancelled) = second_started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("поиск должен перезапуститься с новым поколением каталога");
+        assert_eq!(refreshed_hello, Some(client_hello));
+        assert!(
+            !cancelled,
+            "перед повтором отмена каталога должна сбрасываться"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let outcome = loop {
+            if let Some(outcome) = worker.try_outcome() {
+                break outcome;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "повторный поиск должен вернуть исход"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(outcome.target, target);
+        assert_eq!(outcome.plan_text.as_deref(), Some("совместимый план"));
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn r2o_discovery_очередь_сохраняет_снятый_clienthello_до_старта_задачи() {
         use std::sync::Arc;
         use std::sync::atomic::AtomicBool;
@@ -16573,7 +16963,8 @@ mod tests {
                     .recv_timeout(Duration::from_secs(2))
                     .expect("обе задачи должны вернуть результат")
                     .target
-                    .host,
+                    .host
+                    .clone(),
             );
         }
         outcomes.sort();
@@ -18640,8 +19031,9 @@ mod tests {
                 r2o_controller::r2o_resource::R2oResourceMemory::default(),
             )),
             active_cancels: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            catalog_refreshes: Arc::new(Mutex::new(std::collections::HashSet::new())),
             client_snapshot_targets: std::collections::HashSet::new(),
-            pending_client_snapshots: std::collections::HashMap::new(),
+            pending_rechecks: std::collections::HashMap::new(),
             outcomes,
             cancel: Arc::new(AtomicBool::new(false)),
             seen: std::collections::HashSet::from([target.clone()]),

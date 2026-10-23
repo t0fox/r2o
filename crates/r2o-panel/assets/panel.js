@@ -1183,15 +1183,18 @@
       }
       if (m.linked) {
         var facts = el(doc, "span", "");
-        add(facts,
-          el(doc, "b", "", String(num(m.k.confirms) || 0)), " " + plural(num(m.k.confirms) || 0, "подтверждение", "подтверждения", "подтверждений") + ", ",
-          el(doc, "b", "", String(num(m.k.probes_used) || 0)), " " + plural(num(m.k.probes_used) || 0, "зонд", "зонда", "зондов") + " за работу движка");
+        var confirms = num(m.k.confirms), probes = num(m.k.probes_used);
+        if (confirms === null) add(facts, "Число подтверждённых привязок недоступно");
+        else add(facts, el(doc, "b", "", String(confirms)), " " + plural(confirms, "подтверждённая привязка", "подтверждённые привязки", "подтверждённых привязок"));
+        add(facts, "; ");
+        if (probes === null) add(facts, "общее число зондов не измеряется");
+        else add(facts, el(doc, "b", "", String(probes)), " " + plural(probes, "зонд", "зонда", "зондов") + " за работу движка");
         out.push(facts);
-        if (num(m.k.client_unfit)) {
+        if (num(m.k.client_unfit) !== null) {
           var unfit = el(doc, "span", "");
           add(unfit, tag(doc, "план не подошёл клиенту: " + m.k.client_unfit, "warn"));
           out.push(unfit);
-        }
+        } else add(facts, "; число клиентов без подходящего плана не измеряется");
       }
       return out;
     });
@@ -1227,10 +1230,20 @@
       return;
     }
     if (!m.searches.length) {
-      section(listNode, "none", function () {
+      var measurements = m.k.measurements || {};
+      var active = num(measurements.active), queued = num(measurements.queued);
+      section(listNode, JSON.stringify(["none", active, queued]), function () {
         var li = el(doc, "li", "quiet");
-        add(li, el(doc, "b", "", "Рабочий прямой трафик подбор не запускает"),
-          " — он начинается только после подтверждённой блокировки, а найденное решение сохраняется в каталоге ниже.");
+        if (active === null || queued === null) {
+          add(li, el(doc, "b", "", "Именованные поиски сейчас не переданы."),
+            " Состояние других автоматических замеров неизвестно.");
+        } else if (active || queued) {
+          add(li, el(doc, "b", "", "Автоматические замеры идут или ждут слота."),
+            " По общему лимитеру активно " + active + ", в очереди " + queued + "; их цели и этапы не переданы отдельными карточками.");
+        } else {
+          add(li, el(doc, "b", "", "Рабочий прямой трафик подбор не запускает"),
+            " — он начинается только после подтверждённой блокировки, а найденное решение сохраняется в каталоге ниже.");
+        }
         return [li];
       });
       return;
@@ -2197,7 +2210,9 @@
       fact("Каталог состояния", str(snap.state_dir) + " — " + str(snap.state_dir_note), null, true);
       if (m.k.catalog_at) fact("Файл каталога", str(m.k.catalog_at), null, true);
       if (num(snap.queue_num) !== null) fact("Очередь NFQUEUE", String(snap.queue_num), null, true);
-      if (num(m.k.client_unfit) !== null) fact("План не подошёл клиенту", String(m.k.client_unfit), m.k.client_unfit ? "warn" : null);
+      if (m.linked) fact("План не подошёл клиенту",
+        num(m.k.client_unfit) === null ? "не измеряется" : String(m.k.client_unfit),
+        num(m.k.client_unfit) === null ? "warn" : m.k.client_unfit ? "warn" : null);
       var unknown = list(snap.unknown_keys);
       if (unknown.length) fact("Непонятные ключи", unknown.join(", ") + " — эта сборка их не читает", "warn", true);
       right.appendChild(dl);

@@ -363,6 +363,19 @@ pub struct R2oMeasurementGate {
     shared: Arc<R2oGateShared>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct R2oMeasurementSnapshot {
+    pub active: usize,
+    pub limit: usize,
+    pub queued: usize,
+    pub cores: Option<u32>,
+    pub free_pct: Option<u64>,
+    pub mem_avail_mb: Option<u64>,
+    pub mem_total_mb: Option<u64>,
+    pub conntrack_pct: Option<u64>,
+    pub limited_by: Option<String>,
+}
+
 pub struct R2oMeasurementPermit {
     shared: Arc<R2oGateShared>,
     active: bool,
@@ -397,6 +410,32 @@ impl R2oMeasurementGate {
             state.last_started = Some(Instant::now());
         }
         self.shared.changed.notify_all();
+    }
+
+    pub fn r2o_live_snapshot(&self) -> R2oMeasurementSnapshot {
+        let state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let memory = state.adaptive.memory;
+        let limited_by = r2o_limiter_text(state.adaptive.limiter);
+        R2oMeasurementSnapshot {
+            active: state.active,
+            limit: state.adaptive.limit,
+            queued: state.waiters.len(),
+            cores: std::thread::available_parallelism()
+                .ok()
+                .and_then(|cores| u32::try_from(cores.get()).ok()),
+            free_pct: state
+                .adaptive
+                .cpu_free_u
+                .map(|free| (free.saturating_add(5_000) / 10_000).min(100)),
+            mem_avail_mb: memory.map(|memory| memory.available_kb / 1024),
+            mem_total_mb: memory.map(|memory| memory.total_kb / 1024),
+            conntrack_pct: state.adaptive.conntrack.map(r2o_conntrack_percent),
+            limited_by: (!limited_by.is_empty()).then_some(limited_by),
+        }
     }
 
     fn r2o_new(max_slots: usize, minimum_start_gap: Option<Duration>) -> Self {
@@ -698,6 +737,19 @@ mod tests {
         mpsc,
     };
     use std::time::Duration;
+
+    #[test]
+    fn r2o_live_snapshot_reports_actual_gate_occupancy() {
+        let gate = R2oMeasurementGate::new(3);
+        let initial = gate.r2o_live_snapshot();
+        assert_eq!((initial.active, initial.limit, initial.queued), (0, 2, 0));
+
+        let permit = gate.r2o_try_acquire().unwrap();
+        let active = gate.r2o_live_snapshot();
+        assert_eq!((active.active, active.limit, active.queued), (1, 2, 0));
+        drop(permit);
+        assert_eq!(gate.r2o_live_snapshot().active, 0);
+    }
 
     #[test]
     fn r2o_разбор_cpu_исключает_idle_и_iowait() {

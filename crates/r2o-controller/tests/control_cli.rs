@@ -396,6 +396,13 @@ fn serve_catalog_installs_plans_and_consumes_hello_on_the_same_connection() {
     assert!(stdout.contains("установлено 1"));
     assert!(stdout.contains("SNI=\"example.test\""));
     assert!(stdout.contains("форма=TLS 1.2"));
+    let live: serde_json::Value =
+        serde_json::from_slice(&fs::read(work.join("live.json")).unwrap()).unwrap();
+    assert_eq!(live["linked"], true);
+    assert_eq!(live["catalog_at"], catalog_path.to_string_lossy().as_ref());
+    assert_eq!(live["boxes"][0]["id"], "box-1");
+    assert_eq!(live["targets"], 1);
+    assert_eq!(live["measurements"]["active"], 0);
     let _ = fs::remove_dir_all(&work);
 }
 
