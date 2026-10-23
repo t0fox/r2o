@@ -489,7 +489,7 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false
-      max-parallel: 6
+      max-parallel: 7
       matrix: ${{ fromJSON(needs.donor-differential-plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
@@ -508,7 +508,7 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # версия v6.1.0
         with:
           path: ${{ runner.temp }}/r2o-apt-archives
-          key: r2o-apt-ubuntu-24.04-differential-${{ matrix.snapshot }}-${{ matrix.shard }}-gcc13-qemu8-v1
+          key: r2o-apt-ubuntu-24.04-differential-${{ matrix.snapshot }}-${{ matrix.cache_shard }}-gcc13-qemu8-v1
       - name: Установить инструменты differential-сценариев
         env:
           DONOR_SNAPSHOT: ${{ matrix.snapshot }}
@@ -517,7 +517,7 @@ jobs:
           set -euo pipefail
           packages=(clang-18 libssl-dev pkg-config zlib1g-dev binutils)
           case "$DONOR_SNAPSHOT:$DIFFERENTIAL_SHARD" in
-            baseline:tcp|upstream:tcp|upstream:quic-scheduler)
+            baseline:tcp|upstream:tcp|upstream:quic-control|upstream:scheduler)
               packages+=(qemu-user=1:8.2.2+ds-0ubuntu1.18 \
                 gcc-aarch64-linux-gnu=4:13.2.0-7ubuntu1 \
                 libc6-dev-arm64-cross libgcc-13-dev-arm64-cross)

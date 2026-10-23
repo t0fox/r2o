@@ -14,7 +14,7 @@ shards_for() {
         baseline)
             printf '%s\n' host tcp
             ;;
-        upstream) printf '%s\n' discovery quic-scheduler tcp rst-udp ;;
+        upstream) printf '%s\n' discovery quic-control rst-udp scheduler tcp ;;
         *) echo "ci-differential-shards: unknown snapshot: $1" >&2; return 2 ;;
     esac
 }
@@ -45,12 +45,14 @@ scripts_for() {
                 r2o-discovery-coalesce-differential.sh \
                 r2o-discovery-concurrency-check.sh
             ;;
-        upstream:quic-scheduler)
+        upstream:quic-control)
             printf '%s\n' \
                 r2o-discovery-quic-stop-differential.sh \
                 r2o-quic-hello-differential.sh \
-                r2o-quic-stun-watch-differential.sh \
-                r2o-scheduler-differential.sh
+                r2o-quic-stun-watch-differential.sh
+            ;;
+        upstream:scheduler)
+            printf '%s\n' r2o-scheduler-differential.sh
             ;;
         upstream:tcp)
             printf '%s\n' \
@@ -143,11 +145,15 @@ matrix() {
         # shellcheck disable=SC2046
         set -- $(shards_for "$snapshot")
         for shard do
+            case "$snapshot:$shard" in
+                upstream:quic-control|upstream:scheduler) cache_shard=quic-scheduler ;;
+                *) cache_shard=$shard ;;
+            esac
             if [ "$first" -eq 0 ]; then
                 entries="$entries,"
             fi
             first=0
-            entries="$entries{\"snapshot\":\"$snapshot\",\"donor_sha\":\"$donor_sha\",\"shard\":\"$shard\"}"
+            entries="$entries{\"snapshot\":\"$snapshot\",\"donor_sha\":\"$donor_sha\",\"shard\":\"$shard\",\"cache_shard\":\"$cache_shard\"}"
         done
     done
     printf '{"include":[%s]}\n' "$entries"
