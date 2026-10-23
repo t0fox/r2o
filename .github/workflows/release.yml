@@ -70,10 +70,12 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
-      - name: Установить инструменты сборки MIPS
-        run: sudo apt-get update && sudo apt-get install -y gcc-mipsel-linux-gnu qemu-user zstd binutils curl
+      - name: Установить инструменты сборки MIPS и ARMv5
+        run: sudo apt-get update && sudo apt-get install -y gcc-mipsel-linux-gnu gcc-arm-linux-gnueabi qemu-user zstd binutils curl
       - name: Собрать и проверить выпуск GNU MIPS
         run: sh scripts/build-mipsel.sh
+      - name: Собрать и проверить ARMv5 musleabi под QEMU
+        run: sh scripts/r2o-build-armv5-musleabi.sh
       - name: Собрать и проверить выпуск OpenWrt musl
         run: sh scripts/r2o-build-openwrt-mipsel-musl.sh
       - name: Собрать и проверить выпуск OpenWrt ARM64 musl
@@ -87,7 +89,7 @@ jobs:
           set -euo pipefail
           builds="$RUNNER_TEMP/builds"
           out="$RUNNER_TEMP/release"
-          mkdir -p "$builds/mipsel" "$builds/mipsel-openwrt-musl" "$builds/aarch64-openwrt-musl"
+          mkdir -p "$builds/mipsel" "$builds/mipsel-openwrt-musl" "$builds/aarch64-openwrt-musl" "$builds/armv5-musleabi"
           for component in r2o-datapath r2o-controller r2o-panel r2o-telegram r2o-manager r2o-fetch; do
             install -m 0755 "target/mipsel-unknown-linux-gnu/release/$component" \
               "$builds/mipsel/$component-linux-mipsel"
@@ -95,8 +97,10 @@ jobs:
               "$builds/mipsel-openwrt-musl/$component-linux-mipsel-openwrt-musl"
             install -m 0755 "target/aarch64-unknown-linux-musl/release/$component" \
               "$builds/aarch64-openwrt-musl/$component-linux-aarch64-openwrt-musl"
+            install -m 0755 "target/armv5te-unknown-linux-musleabi/release/$component" \
+              "$builds/armv5-musleabi/$component-linux-armv5-musleabi"
           done
-          sh scripts/package-release.sh "$builds" "$out" 'mipsel mipsel-openwrt-musl aarch64-openwrt-musl'
+          sh scripts/package-release.sh "$builds" "$out" 'mipsel mipsel-openwrt-musl aarch64-openwrt-musl armv5-musleabi'
       - uses: actions/upload-artifact@v4
         with:
           name: signed-release-inputs
@@ -163,5 +167,6 @@ jobs:
             --title "r2o $VERSION" --notes-file "$notes" \
             "$out/r2o-mipsel.tar.gz" "$out/r2o-mipsel-openwrt-musl.tar.gz" \
             "$out/r2o-aarch64-openwrt-musl.tar.gz" \
+            "$out/r2o-armv5-musleabi.tar.gz" \
             "$out/latest.json" "$out/latest.json.sig"
           gh release edit "$RELEASE_ID" --draft=false --latest

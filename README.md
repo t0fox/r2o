@@ -54,7 +54,8 @@ r2o-релизы до отдельной согласованной ротаци
 компонент строго из активного слота выпуска. Адаптеры Keenetic/OpenWrt и
 автономная начальная установка описаны в [`router/README.md`](router/README.md).
 Ручная публикация описана в `.github/workflows/release.yml`; она включает
-проверенные в QEMU архивы GNU `mipsel` и OpenWrt `mipsel-openwrt-musl`.
+проверенные в QEMU архивы GNU `mipsel`, OpenWrt `mipsel-openwrt-musl` и
+`aarch64-openwrt-musl`, а также статический ARMv5 `armv5-musleabi`.
 Сценарий требует успешного CI для точного коммита и секрет
 `R2O_ED25519_PRIVATE_KEY` в GitHub environment `r2o-signing`, соответствующий
 закреплённому публичному ключу.
