@@ -244,6 +244,52 @@ pub fn r2o_measure_voice(r2o_options: &R2oVoiceOptions) -> R2oVoiceMeasurement {
     }
 }
 
+pub fn r2o_measure_voice_for_flow(
+    r2o_options: &R2oVoiceOptions,
+    r2o_flow: R2oVoiceTarget,
+) -> R2oVoiceMeasurement {
+    let r2o_address = r2o_voice_target_address(&r2o_flow);
+    let r2o_control = r2o_resolve_voice_control(&r2o_options.control);
+    let r2o_current_targets = r2o_read_voice_targets(r2o_options.conntrack_path.as_deref());
+    let r2o_observation = r2o_voice_observation(r2o_address, Some(r2o_flow), &r2o_current_targets);
+    r2o_evaluate_voice(
+        r2o_options,
+        r2o_address,
+        r2o_observation,
+        r2o_control,
+        |r2o_server, r2o_wait, r2o_mark, r2o_arm| {
+            r2o_ask_voice_with_arm(r2o_server, r2o_wait, r2o_mark, r2o_arm)
+        },
+    )
+}
+
+pub fn r2o_measured_voice_arm_plan_text(r2o_arm: R2oVoiceArm) -> Result<String, String> {
+    if r2o_arm.bytes.is_empty()
+        || r2o_arm.bytes.len() > R2O_VOICE_ARM_MAX
+        || r2o_arm.copies == 0
+        || r2o_arm.copies > 32
+    {
+        return Err("измеренный голосовой arm выходит за пределы поддерживаемого плана".into());
+    }
+    let r2o_payload_hex: String = r2o_arm
+        .bytes
+        .iter()
+        .map(|r2o_byte| format!("{r2o_byte:02x}"))
+        .collect();
+    let r2o_id = crate::http_search::stable_id(&format!(
+        "r2o-voice-arm:{}:{}:{}",
+        r2o_arm.name, r2o_arm.copies, r2o_payload_hex
+    ));
+    let r2o_id_hex: String = r2o_id
+        .iter()
+        .map(|r2o_byte| format!("{r2o_byte:02x}"))
+        .collect();
+    Ok(format!(
+        "r2o-plan 1 1\nid {r2o_id_hex}\nproto udp voice\npayload 1 {r2o_payload_hex}\npoison 1\nfake payload=1 poison=1 repeats={} gap_us=0 place=before\norder forward\npace 15000\n",
+        r2o_arm.copies
+    ))
+}
+
 pub fn r2o_format_voice_measurement(r2o_result: &R2oVoiceMeasurement) -> String {
     let r2o_verdict = match r2o_result.verdict {
         R2oVoiceVerdict::Clear => "резать нечего",
@@ -776,7 +822,8 @@ mod tests {
     use super::{
         R2O_VOICE_REPEATS, R2oVoiceArm, R2oVoiceObservation, R2oVoiceOptions, R2oVoiceTally,
         R2oVoiceVerdict, r2o_ask_voice, r2o_ask_voice_with_arm, r2o_evaluate_voice,
-        r2o_parse_voice_options, r2o_select_voice_target, r2o_voice_observation,
+        r2o_measured_voice_arm_plan_text, r2o_parse_voice_options, r2o_select_voice_target,
+        r2o_voice_observation,
     };
     use crate::voice_targets::R2oVoiceTarget;
     use std::ffi::OsString;
@@ -807,6 +854,26 @@ mod tests {
             rtt_ms: (passed != 0).then_some(5),
             marked: true,
         }
+    }
+
+    #[test]
+    fn measured_voice_arm_plan_preserves_payload_copy_count_and_voice_shape() {
+        let r2o_arm = R2oVoiceArm {
+            name: "stun",
+            bytes: &[0x80, 0x01, 0x00, 0x00],
+            copies: 6,
+        };
+        let r2o_text = r2o_measured_voice_arm_plan_text(r2o_arm).unwrap();
+        let r2o_bytes = crate::plan_text::compile_text(&r2o_text).unwrap();
+        let r2o_plan = r2k_core::plan::Plan::parse(&r2o_bytes).unwrap();
+
+        assert_eq!(r2o_plan.transport, 17);
+        assert_eq!(r2o_plan.proto, r2k_core::plan::PROTO_VOICE);
+        assert_eq!(r2o_plan.payloads.len(), 1);
+        assert_eq!(r2o_plan.payloads[0].bytes, [0x80, 0x01, 0x00, 0x00]);
+        assert_eq!(r2o_plan.poisons.len(), 1);
+        assert_eq!(r2o_plan.fakes.len(), 1);
+        assert_eq!(r2o_plan.fakes[0].repeats, 6);
     }
 
     #[test]

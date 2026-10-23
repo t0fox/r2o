@@ -44,6 +44,10 @@ use r2o_controller::r2o_late_rx::{R2oLateRxCache, R2oLateRxInput};
 #[cfg(unix)]
 use r2o_controller::r2o_quic_deny::R2oQuicDenyCache;
 use r2o_controller::response::{ResponseOptions, ResponseVerdict, probe_response};
+#[cfg(unix)]
+use r2o_controller::voice_measure::{
+    R2oVoiceMeasurement, R2oVoiceOptions, R2oVoiceVerdict, r2o_measure_voice_for_flow,
+};
 use r2o_controller::voice_measure::{
     r2o_format_voice_measurement, r2o_measure_voice, r2o_parse_voice_options,
 };
@@ -4846,6 +4850,7 @@ fn r2o_run_with_deadline<T>(
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct R2oVoiceDiscoveryJob {
     target: r2o_controller::voice_discovery::R2oVoiceTarget,
+    flow: Option<r2o_controller::voice_targets::R2oVoiceTarget>,
     known_prefix: Option<[u8; 20]>,
     started_at: std::time::Instant,
 }
@@ -4912,6 +4917,25 @@ struct R2oVoiceDiscoveryOutcome {
     target: r2o_controller::voice_discovery::R2oVoiceTarget,
     started_at: std::time::Instant,
     result: r2o_controller::voice_discovery::R2oDiscoverySearchResult,
+    fallback: Option<R2oVoiceMeasurement>,
+}
+
+#[cfg(unix)]
+fn r2o_voice_fallback_after_discovery<F>(
+    r2o_result: &r2o_controller::voice_discovery::R2oDiscoverySearchResult,
+    r2o_flow: Option<r2o_controller::voice_targets::R2oVoiceTarget>,
+    r2o_fallback: F,
+) -> Option<R2oVoiceMeasurement>
+where
+    F: FnOnce(r2o_controller::voice_targets::R2oVoiceTarget) -> R2oVoiceMeasurement,
+{
+    if !matches!(
+        r2o_result.verdict,
+        r2o_controller::voice_discovery::R2oDiscoveryVerdict::Continue
+    ) {
+        return None;
+    }
+    Some(r2o_fallback(r2o_flow?))
 }
 
 #[cfg(unix)]
@@ -5055,16 +5079,33 @@ impl R2oVoiceDiscoveryWorker {
                 if r2o_worker_cancel.load(Ordering::Relaxed) {
                     break;
                 }
-                let r2o_result = {
+                let (r2o_result, r2o_fallback) = {
                     let Some(_permit) = r2o_worker_gate.r2o_acquire(&r2o_worker_cancel) else {
                         break;
                     };
-                    r2o_controller::voice_discovery::r2o_search_discovery_endpoint(
+                    let r2o_result = r2o_controller::voice_discovery::r2o_search_discovery_endpoint(
                         r2o_job.target.server,
                         r2o_job.known_prefix,
                         std::time::Duration::from_secs(3),
                         mark,
-                    )
+                    );
+                    let r2o_fallback =
+                        r2o_voice_fallback_after_discovery(&r2o_result, r2o_job.flow, |r2o_flow| {
+                            let r2o_options = R2oVoiceOptions {
+                                address: Some(std::net::SocketAddrV4::new(
+                                    r2o_flow.server_ip,
+                                    r2o_flow.server_port,
+                                )),
+                                control: r2o_controller::voice_measure::R2O_VOICE_DEFAULT_CONTROL
+                                    .into(),
+                                conntrack_path: None,
+                                wait: std::time::Duration::from_secs(3),
+                                mark,
+                                discovery: false,
+                            };
+                            r2o_measure_voice_for_flow(&r2o_options, r2o_flow)
+                        });
+                    (r2o_result, r2o_fallback)
                 };
                 let r2o_started_at = r2o_job.started_at;
                 if r2o_outcome_sender
@@ -5072,6 +5113,7 @@ impl R2oVoiceDiscoveryWorker {
                         target: r2o_job.target,
                         started_at: r2o_started_at,
                         result: r2o_result,
+                        fallback: r2o_fallback,
                     })
                     .is_err()
                 {
@@ -5089,10 +5131,11 @@ impl R2oVoiceDiscoveryWorker {
         }
     }
 
-    fn queue(
+    fn queue_with_flow(
         &mut self,
         target: r2o_controller::voice_discovery::R2oVoiceTarget,
         known_prefix: Option<[u8; 20]>,
+        flow: Option<r2o_controller::voice_targets::R2oVoiceTarget>,
         can_start: bool,
     ) -> bool {
         let r2o_now = std::time::Instant::now();
@@ -5112,6 +5155,7 @@ impl R2oVoiceDiscoveryWorker {
         }
         let r2o_job = R2oVoiceDiscoveryJob {
             target,
+            flow,
             known_prefix,
             started_at: r2o_now,
         };
@@ -5125,14 +5169,15 @@ impl R2oVoiceDiscoveryWorker {
         self.r2o_dispatch_voice_job(r2o_dispatch)
     }
 
-    fn queue_after_new_session(
+    fn queue_after_new_session_with_flow(
         &mut self,
         target: r2o_controller::voice_discovery::R2oVoiceTarget,
         known_prefix: Option<[u8; 20]>,
+        flow: Option<r2o_controller::voice_targets::R2oVoiceTarget>,
         can_start: bool,
     ) -> bool {
         self.r2o_seen.r2o_remove(&target);
-        self.queue(target, known_prefix, can_start)
+        self.queue_with_flow(target, known_prefix, flow, can_start)
     }
 
     fn r2o_dispatch_voice_job(&mut self, r2o_job: R2oVoiceDiscoveryJob) -> bool {
@@ -7830,12 +7875,11 @@ impl ControlClient {
     fn install_r2o_voice_trial(
         &mut self,
         target: r2o_controller::voice_discovery::R2oVoiceTarget,
-        prefix: [u8; 20],
+        plan_text: String,
         started_at: std::time::Instant,
     ) -> Result<R2oVoiceTrialInstallOutcome, Box<dyn Error>> {
         use std::io::Read;
 
-        let plan_text = r2o_controller::voice_discovery::r2o_voice_arm_plan_text(&prefix);
         let now = std::time::Instant::now();
         let expires_at = started_at + R2O_VOICE_TRIAL_TASK_LIFETIME;
         if expires_at <= now {
@@ -8348,7 +8392,7 @@ impl ControlClient {
                         {
                             let r2o_install = self.install_r2o_voice_trial(
                                 r2o_target,
-                                prefix,
+                                r2o_controller::voice_discovery::r2o_voice_arm_plan_text(&prefix),
                                 r2o_outcome.started_at,
                             )?;
                             if let Some(worker) = voice_discovery.as_mut() {
@@ -8383,6 +8427,100 @@ impl ControlClient {
                         } else {
                             println!(
                                 "поиск Discord Discovery {} -> {}:{}: план-кандидат измерен, но временная установка требует включённого поиска с ненулевой меткой",
+                                r2o_target.client,
+                                r2o_target.server.ip(),
+                                r2o_target.server.port()
+                            );
+                        }
+                        std::io::stdout().flush()?;
+                        continue;
+                    }
+                    if matches!(
+                        r2o_outcome.result.verdict,
+                        r2o_controller::voice_discovery::R2oDiscoveryVerdict::Continue
+                    ) {
+                        if let Some(r2o_fallback) = r2o_outcome.fallback.as_ref() {
+                            if r2o_fallback.verdict == R2oVoiceVerdict::Blocked {
+                                if let Some(r2o_arm) = r2o_fallback.arm {
+                                    if r2o_voice_trials
+                                        .values()
+                                        .any(|r2o_trial| r2o_trial.target == r2o_target)
+                                    {
+                                        println!(
+                                            "голосовой STUN fallback {} -> {}:{}: временный план для этой цели уже ждёт доказательство",
+                                            r2o_target.client,
+                                            r2o_target.server.ip(),
+                                            r2o_target.server.port()
+                                        );
+                                    } else if discovery.as_ref().is_some_and(|(_, _, _, mark)| {
+                                        mark.is_some_and(|mark| mark != 0)
+                                    }) {
+                                        let r2o_plan_text =
+                                            r2o_controller::voice_measure::r2o_measured_voice_arm_plan_text(
+                                                r2o_arm,
+                                            )
+                                            .map_err(|error| {
+                                                format!("не удалось собрать измеренный voice-plan: {error}")
+                                            })?;
+                                        let r2o_install = self.install_r2o_voice_trial(
+                                            r2o_target,
+                                            r2o_plan_text,
+                                            r2o_outcome.started_at,
+                                        )?;
+                                        if let Some(worker) = voice_discovery.as_mut() {
+                                            worker
+                                                .r2o_seen
+                                                .r2o_after_trial_install(&r2o_target, &r2o_install);
+                                        }
+                                        match r2o_install {
+                                            R2oVoiceTrialInstallOutcome::Installed(r2o_trial) => {
+                                                r2o_voice_trials
+                                                    .insert(r2o_trial.trial_id, r2o_trial);
+                                                println!(
+                                                    "Discord live-flow fallback подтвердил выбор arm {} ×{}; временный план поставлен для следующего потока {} -> {}:{}",
+                                                    r2o_arm.name,
+                                                    r2o_arm.copies,
+                                                    r2o_target.client,
+                                                    r2o_target.server.ip(),
+                                                    r2o_target.server.port()
+                                                );
+                                            }
+                                            R2oVoiceTrialInstallOutcome::LocalRefusal => eprintln!(
+                                                "Discord live-flow fallback {} -> {}:{}: датапат локально отверг временный план; цель не подтверждена",
+                                                r2o_target.client,
+                                                r2o_target.server.ip(),
+                                                r2o_target.server.port()
+                                            ),
+                                            R2oVoiceTrialInstallOutcome::NotInstalled => eprintln!(
+                                                "Discord live-flow fallback {} -> {}:{}: датапат не подтвердил временный план с его trial ID",
+                                                r2o_target.client,
+                                                r2o_target.server.ip(),
+                                                r2o_target.server.port()
+                                            ),
+                                        }
+                                    } else {
+                                        println!(
+                                            "Discord live-flow fallback нашёл arm {}, но временная установка требует ненулевую метку",
+                                            r2o_arm.name
+                                        );
+                                    }
+                                } else {
+                                    println!(
+                                        "Discord live-flow fallback: поток заблокирован, но ни один arm не получил полную серию STUN-ответов"
+                                    );
+                                }
+                            } else {
+                                println!(
+                                    "Discord live-flow fallback {} -> {}:{}: {}",
+                                    r2o_target.client,
+                                    r2o_target.server.ip(),
+                                    r2o_target.server.port(),
+                                    r2o_fallback.reason
+                                );
+                            }
+                        } else {
+                            println!(
+                                "Discord Discovery {} -> {}:{}: прямой зонд не дал блокировки, точный conntrack-поток уже завершился или не найден",
                                 r2o_target.client,
                                 r2o_target.server.ip(),
                                 r2o_target.server.port()
@@ -8848,9 +8986,14 @@ impl ControlClient {
                                     catalog,
                                     *r2o_target.server.ip(),
                                 );
-                                r2o_worker.queue_after_new_session(
+                                let r2o_flow =
+                                    r2o_controller::voice_discovery::r2o_voice_observed_flow_from_event(
+                                        &event,
+                                    );
+                                r2o_worker.queue_after_new_session_with_flow(
                                     r2o_target,
                                     r2o_known_prefix,
+                                    r2o_flow,
                                     r2o_voice_trials.is_empty(),
                                 )
                             } else {
@@ -8883,9 +9026,14 @@ impl ControlClient {
                         } else {
                             let r2o_known_prefix =
                                 r2o_known_voice_discovery_prefix(catalog, *r2o_target.server.ip());
-                            r2o_worker.queue_after_new_session(
+                            let r2o_flow =
+                                r2o_controller::voice_discovery::r2o_voice_observed_flow_from_event(
+                                    &event,
+                                );
+                            r2o_worker.queue_after_new_session_with_flow(
                                 r2o_target,
                                 r2o_known_prefix,
+                                r2o_flow,
                                 r2o_voice_trials.is_empty(),
                             )
                         }
@@ -18524,6 +18672,64 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn discord_voice_после_continue_запускает_live_flow_fallback() {
+        use r2o_controller::voice_discovery::{
+            R2oDiscoverySearchResult, R2oDiscoveryTrace, R2oDiscoveryVerdict,
+        };
+        use std::net::Ipv4Addr;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let flow = r2o_controller::voice_targets::R2oVoiceTarget {
+            server_ip: Ipv4Addr::new(198, 51, 100, 20),
+            server_port: 50_004,
+            client_ip: Ipv4Addr::new(192, 0, 2, 10),
+            client_port: 51_234,
+            packets: 12,
+            replied: false,
+        };
+        let mut discovery = R2oDiscoverySearchResult {
+            trace: R2oDiscoveryTrace {
+                known_prefix: None,
+                known_prefix_probe: None,
+                direct_probes: Vec::new(),
+                candidate_prefix: None,
+                candidate_probes: Vec::new(),
+            },
+            verdict: R2oDiscoveryVerdict::Continue,
+            error: None,
+        };
+        let calls = AtomicUsize::new(0);
+        let fallback = super::r2o_voice_fallback_after_discovery(&discovery, Some(flow), |_| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            r2o_controller::voice_measure::R2oVoiceMeasurement {
+                verdict: r2o_controller::voice_measure::R2oVoiceVerdict::Blocked,
+                reason: "target STUN silent; public control answers".into(),
+                address: Some("198.51.100.20:50004".parse().unwrap()),
+                probes: 6,
+                marked: true,
+                discovery_verified: false,
+                arm: None,
+            }
+        });
+        assert_eq!(
+            fallback.map(|result| result.verdict),
+            Some(r2o_controller::voice_measure::R2oVoiceVerdict::Blocked)
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        discovery.verdict = R2oDiscoveryVerdict::Clear;
+        assert!(
+            super::r2o_voice_fallback_after_discovery(&discovery, Some(flow), |_| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                unreachable!("CLEAR уже завершает измерение")
+            })
+            .is_none()
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn каталог_собирает_подтверждённую_адресную_voice_привязку() {
         let prefix = r2k_core::stun::binding_request([0x35; 12]);
         let text = r2o_controller::voice_discovery::r2o_voice_arm_plan_text(&prefix);
@@ -18595,7 +18801,9 @@ mod tests {
                 server: "198.51.100.20:50004".parse().unwrap(),
             };
             let prefix = r2k_core::stun::binding_request([0x36; 12]);
-            let result = client.install_r2o_voice_trial(target, prefix, std::time::Instant::now());
+            let plan_text = r2o_controller::voice_discovery::r2o_voice_arm_plan_text(&prefix);
+            let result =
+                client.install_r2o_voice_trial(target, plan_text, std::time::Instant::now());
             server.join().unwrap();
             result
         };
@@ -19176,7 +19384,7 @@ mod tests {
         let now = Instant::now();
         worker.r2o_seen.r2o_insert(target, now);
 
-        assert!(worker.queue_after_new_session(target, None, false));
+        assert!(worker.queue_after_new_session_with_flow(target, None, None, false));
         assert!(
             worker
                 .schedule
@@ -19202,6 +19410,7 @@ mod tests {
                 client: r2o_client,
                 server: SocketAddrV4::new(Ipv4Addr::new(198, 51, 100, 20), 50_004),
             },
+            flow: None,
             known_prefix: Some([1; 20]),
             started_at: std::time::Instant::now(),
         };
@@ -19210,6 +19419,7 @@ mod tests {
                 client: r2o_client,
                 server: SocketAddrV4::new(Ipv4Addr::new(198, 51, 100, 21), 50_005),
             },
+            flow: None,
             known_prefix: None,
             started_at: std::time::Instant::now(),
         };
@@ -19218,6 +19428,7 @@ mod tests {
                 client: r2o_client,
                 server: SocketAddrV4::new(Ipv4Addr::new(198, 51, 100, 22), 50_006),
             },
+            flow: None,
             known_prefix: Some([2; 20]),
             started_at: std::time::Instant::now(),
         };

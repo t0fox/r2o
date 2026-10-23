@@ -47,11 +47,16 @@ pub fn r2o_save_confirmed_voice_binding(
                 .into(),
         );
     }
-    let Some(_r2o_prefix) = r2o_voice_discovery_prefix_from_plan_text(r2o_text) else {
-        return Err("постоянная голосовая привязка требует проверенный STUN/Discovery-план".into());
-    };
     let r2o_bytes = crate::plan_text::compile_text(r2o_text)?;
     let r2o_plan = r2k_core::plan::Plan::parse(&r2o_bytes).map_err(|error| error.to_string())?;
+    if r2o_plan.transport != 17
+        || r2o_plan.proto != r2k_core::plan::PROTO_VOICE
+        || r2o_plan.payloads.len() != 1
+        || r2o_plan.poisons.len() != 1
+        || r2o_plan.fakes.len() != 1
+    {
+        return Err("постоянная голосовая привязка требует проверенный UDP voice-arm план".into());
+    }
     let r2o_plan_id: String = r2o_plan
         .id
         .iter()
@@ -226,6 +231,25 @@ pub fn r2o_voice_target_from_event(
     Some(R2oVoiceTarget {
         client: r2o_client,
         server: std::net::SocketAddrV4::new(r2o_server_ip, r2o_server_port),
+    })
+}
+
+pub fn r2o_voice_observed_flow_from_event(
+    r2o_event: &r2k_core::control::R2oVoiceSuspectEvent,
+) -> Option<crate::voice_targets::R2oVoiceTarget> {
+    let r2o_target = r2o_voice_target_from_event(r2o_event)?;
+    let r2o_client_port = if r2o_event.client_is_low {
+        u16::from_be_bytes([r2o_event.key[33], r2o_event.key[34]])
+    } else {
+        u16::from_be_bytes([r2o_event.key[35], r2o_event.key[36]])
+    };
+    Some(crate::voice_targets::R2oVoiceTarget {
+        server_ip: *r2o_target.server.ip(),
+        server_port: r2o_target.server.port(),
+        client_ip: r2o_target.client,
+        client_port: r2o_client_port,
+        packets: 0,
+        replied: false,
     })
 }
 
@@ -926,6 +950,32 @@ mod tests {
     }
 
     #[test]
+    fn r2o_событие_голоса_сохраняет_клиентский_порт_для_live_flow() {
+        let mut r2o_key = [0; r2k_core::control::KEY_LEN];
+        r2o_key[0] = 4;
+        r2o_key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+        r2o_key[17..21].copy_from_slice(&[198, 51, 100, 20]);
+        r2o_key[33..35].copy_from_slice(&51_234_u16.to_be_bytes());
+        r2o_key[35..37].copy_from_slice(&50_004_u16.to_be_bytes());
+        r2o_key[37] = 17;
+
+        let r2o_flow =
+            super::r2o_voice_observed_flow_from_event(&r2k_core::control::R2oVoiceSuspectEvent {
+                key: r2o_key,
+                client_is_low: true,
+            })
+            .unwrap();
+
+        assert_eq!(
+            r2o_flow.server_ip,
+            std::net::Ipv4Addr::new(198, 51, 100, 20)
+        );
+        assert_eq!(r2o_flow.server_port, 50_004);
+        assert_eq!(r2o_flow.client_ip, std::net::Ipv4Addr::new(192, 0, 2, 10));
+        assert_eq!(r2o_flow.client_port, 51_234);
+    }
+
+    #[test]
     fn r2o_план_ставит_один_stun_пакет_перед_discovery_с_выдержкой() {
         use r2k_core::packet::PacketView;
         use r2k_core::plan::EmitKind;
@@ -1010,6 +1060,40 @@ mod tests {
         assert_eq!(
             super::r2o_voice_discovery_prefix_from_plan_text(&r2o_reloaded.boxes[0].plans[0].text),
             Some(r2o_prefix)
+        );
+    }
+
+    #[test]
+    fn r2o_сохраняет_подтверждённый_измеренный_voice_arm_без_stun_prefix() {
+        let r2o_text = concat!(
+            "r2o-plan 1 1\n",
+            "id 11111111111111111111111111111111\n",
+            "proto udp voice\n",
+            "payload 1 01020304\n",
+            "poison 1\n",
+            "fake payload=1 poison=1 repeats=6 gap_us=0 place=before\n",
+            "order forward\n",
+            "pace 15000\n",
+        );
+        let mut r2o_catalog = crate::catalog::Catalog::default();
+
+        let r2o_plan_id = super::r2o_save_confirmed_voice_binding(
+            &mut r2o_catalog,
+            "198.51.100.20".parse().unwrap(),
+            r2o_text,
+            1_800_000_000,
+            4,
+        )
+        .unwrap();
+
+        assert!(!r2o_plan_id.bytes().all(|byte| byte == b'0'));
+        assert_eq!(r2o_catalog.boxes[0].plans[0].proto, "voice");
+        assert_eq!(r2o_catalog.boxes[0].plans[0].text, r2o_text);
+        assert_eq!(r2o_catalog.boxes[0].bindings[0].kind, "addr");
+        assert_eq!(r2o_catalog.boxes[0].bindings[0].verified_by, 4);
+        assert_eq!(
+            super::r2o_voice_discovery_prefix_from_plan_text(r2o_text),
+            None
         );
     }
 
