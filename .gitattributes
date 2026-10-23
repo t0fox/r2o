@@ -10,6 +10,7 @@ scripts/package-release.sh text eol=lf
 scripts/test-package-release.sh text eol=lf
 scripts/test-nfq-netns.sh text eol=lf
 scripts/r2o-quic-silence-netns.sh text eol=lf
+router/* text eol=lf
 crates/r2o-controller/tests/fixtures/r2o-rx-volume-hcaptcha-split2-c.txt text eol=lf
 crates/r2o-controller/tests/fixtures/r2o-rx-volume-hcaptcha-split5-c.txt text eol=lf
 crates/r2o-controller/tests/fixtures/r2o-rx-volume-longname-c.txt text eol=lf

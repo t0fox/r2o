@@ -4,6 +4,7 @@ set -eu
 
 ROOT=${R2O_DIR:-/opt/r2o}
 CONF=${R2O_CONFIG:-$ROOT/config}
+# shellcheck disable=SC1090 # the config path is selected by the runtime environment
 [ ! -r "$CONF" ] || . "$CONF"
 
 SET4=r2o_tg_dc
@@ -34,7 +35,7 @@ if [ -z "$FW" ]; then
 fi
 NFT_TABLE=r2o_tg
 
-case "$PORT" in ''|*[!0-9]*) echo "неверный TG_PORT" >&2; exit 2 ;; esac
+# shellcheck disable=SC2015 # reject values outside the inclusive port range
 [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || { echo "неверный TG_PORT" >&2; exit 2; }
 
 nft_list() { printf '%s' "$1" | sed 's/ /, /g'; }
@@ -344,6 +345,7 @@ nft_sync_dc_map() {
         [ -z "$pair4" ] || printf 'add element inet %s tg4_pairs { %s }\n' "$NFT_TABLE" "$pair4"
         [ -z "$pair6" ] || printf 'add element inet %s tg6_pairs { %s }\n' "$NFT_TABLE" "$pair6"
     } | nft -f - || { echo "nft отклонил обновление пар Telegram; прежние наборы сохранены" >&2; return 1; }
+    # shellcheck disable=SC2015 # both IPv4 and IPv6 sets must match
     nft_pair_set_matches 4 tg4_pairs && nft_pair_set_matches 6 tg6_pairs || {
         echo "nft не подтвердил обновлённые пары Telegram" >&2
         return 1

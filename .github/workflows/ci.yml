@@ -3,8 +3,13 @@ name: Проверки R2O
 on:
   push:
     branches: [main]
+    paths-ignore: ['**/*.md', 'docs/**', 'LICENSE']
   pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -14,8 +19,27 @@ defaults:
     shell: bash
 
 jobs:
+  lint:
+    name: Быстрые проверки — ShellCheck и формат Rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
+      - name: Установить ShellCheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      - name: Проверить shell-скрипты проекта
+        run: |
+          find scripts router -type f -name '*.sh' -print0 | xargs -0 -r shellcheck -s sh
+          shellcheck -s sh router/S99r2o router/S99r2o.shim router/openwrt-init
+      - name: Проверить форматирование Rust
+        run: cargo fmt --all --check
+
   panel:
     name: Панель — HTTP, CLI и безопасность
+    needs: lint
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -28,6 +52,7 @@ jobs:
 
   telegram:
     name: Telegram — тесты клиента
+    needs: lint
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -40,6 +65,7 @@ jobs:
 
   panel-browser:
     name: Chrome — раскладка и работа панели
+    needs: lint
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -79,18 +105,13 @@ jobs:
 
   shell:
     name: Сценарии и проверки установки
+    needs: lint
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
         with:
           persist-credentials: false
-      - name: Установить ShellCheck
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck
-      - name: Проверить все сценарии оболочки
-        run: find scripts -type f -name '*.sh' -print0 | xargs -0 -r shellcheck -s sh
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
       - name: Собрать бинарники для сценариев роутера
         run: cargo build --locked --release --package r2o-manager --bin r2o-manager --package r2o-controller --bin r2o-controller --package r2o-telegram --bin r2o-telegram
@@ -103,25 +124,38 @@ jobs:
       - name: Проверить сценарии обновления и службы роутера
         run: |
           set -euo pipefail
-          for test in \
-            scripts/test-router-firewall.sh \
-            scripts/test-router-tg-firewall.sh \
-            scripts/test-router-update-lifecycle.sh \
-            scripts/test-router-install-lifecycle.sh \
-            scripts/test-router-update-scheduler.sh \
-            scripts/test-router-update-auto.sh \
-            scripts/test-router-route-gate-config.sh \
-            scripts/test-router-clear-found.sh \
-            scripts/test-router-log-maintenance.sh \
-            scripts/test-router-telegram-service.sh; do
-            case "$test" in
-              scripts/test-router-firewall.sh) sudo sh "$test" ;;
-              *) sh "$test" ;;
-            esac
+          shopt -s nullglob
+          tests=(scripts/test-router-*.sh)
+          if [ "${#tests[@]}" -eq 0 ]; then
+            echo "::error::Не найдены сценарии проверки роутерных служб"
+            exit 1
+          fi
+          failed=()
+          for test in "${tests[@]}"; do
+            echo "::group::$test"
+            if [ "$test" = scripts/test-router-firewall.sh ]; then
+              if sudo sh "$test"; then
+                :
+              else
+                status=$?
+                failed+=("$test ($status)")
+              fi
+            elif sh "$test"; then
+              :
+            else
+              status=$?
+              failed+=("$test ($status)")
+            fi
+            echo "::endgroup::"
           done
+          if [ "${#failed[@]}" -gt 0 ]; then
+            printf '::error::Ошибки сценариев роутера: %s\n' "${failed[*]}"
+            exit 1
+          fi
 
   datapath:
     name: Датапат — тесты и переносимость
+    needs: lint
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -134,6 +168,7 @@ jobs:
 
   core:
     name: Ядро — тесты управляющего протокола
+    needs: lint
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -146,6 +181,7 @@ jobs:
 
   sanitizers:
     name: Датапат, ядро и панель под AddressSanitizer
+    needs: lint
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -168,6 +204,7 @@ jobs:
 
   rust-workspace:
     name: Рабочее пространство Rust — формат, тесты и сборка
+    needs: lint
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -175,8 +212,6 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
-      - name: Проверить форматирование
-        run: cargo fmt --all --check
       - name: Запустить все тесты рабочего пространства
         run: cargo test --workspace --locked
       - name: Проверить предупреждения компилятора
@@ -188,6 +223,7 @@ jobs:
 
   cross-check:
     name: Кросс-проверка — ${{ matrix.target }}
+    needs: lint
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -232,6 +268,7 @@ jobs:
 
   nfqueue-integration:
     name: Интеграция NFQUEUE в сетевом пространстве
+    needs: lint
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -258,6 +295,7 @@ jobs:
 
   mipsel-release:
     name: Выпуск GNU MIPS little-endian
+    needs: lint
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -285,6 +323,7 @@ jobs:
 
   openwrt-mipsel-musl:
     name: Выпуск OpenWrt MIPS little-endian musl
+    needs: lint
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -312,6 +351,7 @@ jobs:
 
   openwrt-aarch64-musl:
     name: Выпуск OpenWrt ARM64 musl
+    needs: lint
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -341,6 +381,7 @@ jobs:
 
   armv5-musleabi:
     name: Выпуск ARMv5 little-endian musleabi
+    needs: lint
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -370,6 +411,7 @@ jobs:
 
   openwrt-armv7-musl:
     name: Выпуск OpenWrt ARMv7 musl
+    needs: lint
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -399,6 +441,7 @@ jobs:
 
   donor-differential:
     name: C/Rust differential — ${{ matrix.snapshot }}
+    needs: lint
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
@@ -505,6 +548,7 @@ jobs:
     name: check
     if: always()
     needs:
+      - lint
       - panel
       - telegram
       - panel-browser
@@ -525,7 +569,7 @@ jobs:
     timeout-minutes: 2
     steps:
       - name: Завершиться ошибкой при пропуске или сбое проверки
-        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || needs.panel.result == 'skipped' || needs.telegram.result == 'skipped' || needs.panel-browser.result == 'skipped' || needs.shell.result == 'skipped' || needs.datapath.result == 'skipped' || needs.core.result == 'skipped' || needs.rust-workspace.result == 'skipped' || needs.cross-check.result == 'skipped' || needs.nfqueue-integration.result == 'skipped' || needs.mipsel-release.result == 'skipped' || needs.openwrt-mipsel-musl.result == 'skipped' || needs.openwrt-aarch64-musl.result == 'skipped' || needs.armv5-musleabi.result == 'skipped' || needs.openwrt-armv7-musl.result == 'skipped' || needs.donor-differential.result == 'skipped' || (github.event_name != 'pull_request' && needs.sanitizers.result == 'skipped') }}
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || needs.lint.result == 'skipped' || needs.panel.result == 'skipped' || needs.telegram.result == 'skipped' || needs.panel-browser.result == 'skipped' || needs.shell.result == 'skipped' || needs.datapath.result == 'skipped' || needs.core.result == 'skipped' || needs.rust-workspace.result == 'skipped' || needs.cross-check.result == 'skipped' || needs.nfqueue-integration.result == 'skipped' || needs.mipsel-release.result == 'skipped' || needs.openwrt-mipsel-musl.result == 'skipped' || needs.openwrt-aarch64-musl.result == 'skipped' || needs.armv5-musleabi.result == 'skipped' || needs.openwrt-armv7-musl.result == 'skipped' || needs.donor-differential.result == 'skipped' || (github.event_name != 'pull_request' && needs.sanitizers.result == 'skipped') }}
         run: exit 1
       - name: Все проверки завершились успешно
         run: echo "Все проверки R2O пройдены"

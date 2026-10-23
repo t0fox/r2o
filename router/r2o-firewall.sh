@@ -3,6 +3,7 @@ set -eu
 
 ROOT=${R2O_DIR:-/opt/r2o}
 CONF=${R2O_CONFIG:-$ROOT/config}
+# shellcheck disable=SC1090 # the config path is selected by the runtime environment
 [ ! -r "$CONF" ] || . "$CONF"
 
 QUEUE4=${QUEUE_NUM:-2000}
@@ -218,7 +219,6 @@ xt_family_up() {
                 -m connbytes --connbytes 9: --connbytes-dir "$count_direction" --connbytes-mode packets \
                 --tcp-flags "$flag" "$flag" -j NFQUEUE --queue-num "$queue" --queue-bypass
         done
-        keepalive_port=80
         xt "$tool" -t mangle -A "$chain" -p tcp -m multiport "$ports" "$HTTP_KEEPALIVE_PORTS" \
             -m conntrack --ctdir "$ct_direction" \
             -m connbytes --connbytes 9: --connbytes-dir "$count_direction" --connbytes-mode packets \

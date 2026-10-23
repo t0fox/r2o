@@ -3,11 +3,13 @@ set -eu
 
 ROOT=${R2O_DIR:-/opt/r2o}
 SLOTS=$ROOT/release-slots
+# shellcheck disable=SC2015 # fail unless the slot file is regular and not a symlink
 [ ! -L "$SLOTS" ] && [ -f "$SLOTS" ] || { echo "r2o: invalid release slot state" >&2; exit 1; }
 IFS= read -r header < "$SLOTS"
 release=$(sed -n '2p' "$SLOTS")
 [ "$header" = R2O-RELEASE-SLOTS-1 ] || { echo "r2o: invalid release slot state" >&2; exit 1; }
 case "$release" in ''|*[!A-Za-z0-9._-]*) echo "r2o: invalid active release id" >&2; exit 1 ;; esac
 adapter=$ROOT/releases/$release/router/S99r2o
+# shellcheck disable=SC2015 # fail unless the adapter is executable and not a symlink
 [ ! -L "$adapter" ] && [ -x "$adapter" ] || { echo "r2o: active router adapter is missing" >&2; exit 1; }
 exec "$adapter" "$@"

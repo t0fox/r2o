@@ -15,6 +15,7 @@ MARKER=$STATE_DIR/update-night
 LOG=$ROOT/log/update-scheduler.log
 
 case "$TICK" in ''|*[!0-9]*) echo "неверный интервал планировщика обновлений" >&2; exit 2 ;; esac
+# shellcheck disable=SC2015 # reject values outside the inclusive interval range
 [ "$TICK" -ge 1 ] && [ "$TICK" -le 3600 ] || { echo "неверный интервал планировщика обновлений" >&2; exit 2; }
 
 log() {
@@ -24,6 +25,7 @@ log() {
 
 auto_update_enabled() {
     AUTOUPDATE=1
+    # shellcheck disable=SC1090 # the config path is selected by the runtime environment
     [ ! -r "$CONF" ] || . "$CONF"
     case "${AUTOUPDATE:-1}" in
         1|yes) AUTOUPDATE=1 ;;

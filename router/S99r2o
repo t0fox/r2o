@@ -125,6 +125,7 @@ case "$MODE" in off|observe|apply) ;; *) die "неверный MODE" ;; esac
 case "$IPV6_ENABLED" in 0|1) ;; *) die "IPV6_ENABLED должен быть 0 или 1" ;; esac
 case "$AUTOUPDATE" in 1|yes) AUTOUPDATE=1 ;; 0|no) AUTOUPDATE=0 ;; *) die "AUTOUPDATE должен быть 0, 1, yes или no" ;; esac
 case "$TG_ENABLED" in 1|yes) TG_ENABLED=1 ;; 0|no) TG_ENABLED=0 ;; *) die "TG_ENABLED должен быть 0, 1, yes или no" ;; esac
+# shellcheck disable=SC2015 # fail unless the port is within range
 valid_number "$TG_PORT" 65535 && [ "$TG_PORT" -gt 0 ] || die "неверный TG_PORT"
 MARK=$(r2o_normalize_mark "$MARK") || die "неверный MARK"
 PROBE_MARK=$(r2o_normalize_mark "$PROBE_MARK") || die "неверный PROBE_MARK"
@@ -139,6 +140,7 @@ prepare_dirs() {
     if [ ! -e "$CATALOG" ]; then
         (umask 077; printf '{"schema":1,"boxes":[]}\n' > "$CATALOG") || die "не создать каталог решений"
     fi
+    # shellcheck disable=SC2015 # fail unless the catalog is a regular file
     [ ! -L "$CATALOG" ] && [ -f "$CATALOG" ] || die "catalog должен быть обычным файлом"
 }
 
@@ -187,6 +189,7 @@ spawn_component() {
     component_running "$component" "$pidfile" && return 0
     stop_component "$component" "$pidfile"
     [ -x "$MANAGER" ] || die "нет executable manager $MANAGER"
+    # shellcheck disable=SC2016 # this code is deliberately evaluated by the child shell
     start-stop-daemon -S -b -m -p "$pidfile" -x /bin/sh -- \
         -c 'log=$1; shift; exec "$@" >> "$log" 2>&1' r2o-spawn "$logfile" \
         "$MANAGER" exec --root "$ROOT" --component "$component" -- "$@" || return 1
@@ -325,6 +328,7 @@ update_scheduler_stop() {
             attempt=$((attempt + 1))
             sleep 0.1 2>/dev/null || sleep 1
         done
+        # shellcheck disable=SC2015 # killing an already exited updater is harmless
         kill -0 "$update_pid" 2>/dev/null && kill -KILL "$update_pid" 2>/dev/null || true
     fi
     rm -f "$UPD_PID"
@@ -452,7 +456,9 @@ export_telegram_config() {
         TG_TCP_FALLBACK_TIMEOUT TG_CF_CONNECT_TIMEOUT TG_CF_FAIL_COOLDOWN \
         TG_DEFAULT_DOMAINS; do
         eval "is_set=\${$variable+x}"
+        # shellcheck disable=SC2154 # eval above sets this indirectly
         if [ "$is_set" = x ]; then
+            # shellcheck disable=SC2163 # variable names come from this explicit allowlist
             export "$variable"
         fi
     done

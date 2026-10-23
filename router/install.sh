@@ -8,8 +8,11 @@ ROOT=${R2O_DIR:-/opt/r2o}
 INIT_DIR=${R2O_INIT_DIR:-/opt/etc/init.d}
 MANAGER=$BUNDLE/builds/r2o-manager-linux-$ARCH
 
+# shellcheck disable=SC2015 # fail unless both validations succeed
 [ -d "$BUNDLE" ] && [ ! -L "$BUNDLE" ] || { echo "каталог выпуска должен быть обычным каталогом" >&2; exit 2; }
+# shellcheck disable=SC2015 # fail unless both validations succeed
 [ -x "$MANAGER" ] && [ ! -L "$MANAGER" ] || { echo "в выпуске нет исполняемого менеджера для $ARCH" >&2; exit 2; }
+# shellcheck disable=SC2015 # fail unless both required files exist
 [ -f "$BUNDLE/router/S99r2o.shim" ] && [ -f "$BUNDLE/router/config.default" ] || {
     echo "в выпуске отсутствуют файлы адаптера роутера" >&2
     exit 2
