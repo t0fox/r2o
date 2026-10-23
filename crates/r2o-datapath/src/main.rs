@@ -943,10 +943,13 @@ mod app {
                     journal_seen = flow_journal.added();
                     journal_peer_connected = true;
                 } else if !control.is_connected() {
+                    if journal_peer_connected {
+                        voice_sessions.rearm_pending_suspicions();
+                    }
                     journal_seen = 0;
                     journal_peer_connected = false;
                     name_plans.clear_probes();
-                    voice_trial_proofs.clear();
+                    // Keep voice proofs for the bounded retry window after a short IPC reconnect.
                 }
             }
             if control.as_ref().is_some_and(ControlServer::is_connected) {

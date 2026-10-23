@@ -473,10 +473,6 @@ impl R2oVoiceTrialProofs {
             r2k_core::control::R2oVoiceProofKind::RtpMedia { .. }
         ) && self.acknowledge_proof_event(event)
     }
-
-    pub fn clear(&mut self) {
-        self.pending.clear();
-    }
 }
 
 impl R2oVoiceSessions {
@@ -628,6 +624,13 @@ impl R2oVoiceSessions {
         }
     }
 
+    /// Повторно выдавать неразрешённые потоки после возврата control-соединения.
+    pub fn rearm_pending_suspicions(&mut self) {
+        for flow in self.flows.values_mut() {
+            flow.suspected = false;
+        }
+    }
+
     pub fn expire(&mut self, now: Instant) -> usize {
         let before = self.flows.len();
         let idle_timeout = self.r2o_idle_timeout;
@@ -657,7 +660,7 @@ impl Default for R2oVoiceSessions {
 
 #[cfg(test)]
 mod tests {
-    use super::{R2oVoiceSessions, R2oVoiceTrialProofs, VOICE_SILENCE};
+    use super::{R2oVoiceSessions, R2oVoiceTrialProofs, VOICE_SILENCE, VOICE_TRIAL_TTL};
     use crate::flow_capacity::R2oFlowCapacity;
     use r2k_core::control::{BindingContext, decode_r2o_voice_suspect};
     use r2k_core::stun::is_discord_ip_discovery_request;
@@ -833,6 +836,46 @@ mod tests {
                 .sweep(start + VOICE_SILENCE + Duration::from_secs(1), true)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn переподключение_control_повторно_выдаёт_неразрешённое_подозрение() {
+        let start = Instant::now();
+        let client = [192, 0, 2, 10];
+        let server = [198, 51, 100, 20];
+        let mut sessions = R2oVoiceSessions::default();
+        sessions.observe_packet(
+            &packet(
+                client,
+                server,
+                50_000,
+                50_004,
+                &discovery_request([1, 2, 3, 4]),
+            ),
+            start,
+        );
+        sessions.observe_packet(
+            &packet(client, server, 50_000, 50_004, b"media"),
+            start + Duration::from_millis(100),
+        );
+        let first = sessions.sweep(start + VOICE_SILENCE, true);
+        assert_eq!(first.len(), 1);
+        sessions.mark_suspected(&first[0].key);
+        assert!(
+            sessions
+                .sweep(start + Duration::from_secs(3), true)
+                .is_empty()
+        );
+
+        sessions.rearm_pending_suspicions();
+        assert!(
+            sessions
+                .sweep(start + Duration::from_secs(3), false)
+                .is_empty()
+        );
+        let retried = sessions.sweep(start + Duration::from_secs(3), true);
+        assert_eq!(retried.len(), 1);
+        assert_eq!(retried[0].key, first[0].key);
     }
 
     #[test]
@@ -1113,6 +1156,47 @@ mod tests {
         assert!(
             proofs.pending_proof_events(Instant::now()).is_empty(),
             "просроченное proof событие нельзя повторно поставить в control outbox"
+        );
+    }
+
+    #[test]
+    fn разрыв_control_сокета_оставляет_свежее_proof_для_повтора() {
+        let start = Instant::now();
+        let client = [192, 0, 2, 10];
+        let server = [198, 51, 100, 20];
+        let mut proofs = R2oVoiceTrialProofs::default();
+        assert!(proofs.note_applied(
+            &packet(
+                client,
+                server,
+                50_000,
+                50_004,
+                &discovery_request([7, 8, 9, 10]),
+            ),
+            &trial_applied(),
+            start,
+        ));
+        let mut response = [0; 74];
+        response[..8].copy_from_slice(&[0, 2, 0, 70, 7, 8, 9, 10]);
+        response[8..19].copy_from_slice(b"203.0.113.7");
+        response[72..74].copy_from_slice(&52_000_u16.to_be_bytes());
+        let event = proofs
+            .observe_response(
+                &packet(server, client, 50_004, 50_000, &response),
+                start + Duration::from_millis(1),
+            )
+            .unwrap();
+
+        assert_eq!(
+            proofs.pending_proof_events(start + Duration::from_secs(5)),
+            vec![event],
+            "после переподключения контроллер должен получить то же proof событие"
+        );
+
+        assert!(
+            proofs
+                .pending_proof_events(start + VOICE_TRIAL_TTL)
+                .is_empty()
         );
     }
 
