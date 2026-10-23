@@ -2639,6 +2639,7 @@ struct R2oQuicDiscoveryTask {
     probe_path: String,
     r2o_mark: Option<u32>,
     permit: r2o_controller::r2o_resource_limit::R2oMeasurementPermit,
+    started_at: std::time::Instant,
     deny_recheck: bool,
     stall_cut: bool,
 }
@@ -3786,6 +3787,7 @@ impl R2oQuicDiscoveryWorker {
                 &task.probe_path,
                 &commands,
                 &cancel,
+                task.started_at,
                 &mut task.permit,
                 task.r2o_mark,
                 task.deny_recheck,
@@ -4150,6 +4152,28 @@ const R2O_DISCOVERY_TASK_REST: std::time::Duration = std::time::Duration::from_s
 const R2O_DISCOVERY_WORKER_COUNT: usize = R2O_AUTOMATED_MEASUREMENT_SLOTS;
 #[cfg(unix)]
 const R2O_DISCOVERY_TASK_LIFETIME: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+#[cfg(unix)]
+fn r2o_quic_trial_remaining_at(
+    started: std::time::Instant,
+    yielded: std::time::Duration,
+    now: std::time::Instant,
+) -> std::time::Duration {
+    R2O_DISCOVERY_TASK_LIFETIME.saturating_sub(
+        now.saturating_duration_since(started)
+            .saturating_sub(yielded),
+    )
+}
+#[cfg(unix)]
+fn r2o_quic_trial_remaining(
+    started: std::time::Instant,
+    permit: &r2o_controller::r2o_resource_limit::R2oMeasurementPermit,
+) -> std::time::Duration {
+    r2o_quic_trial_remaining_at(
+        started,
+        permit.r2o_yielded_duration(),
+        std::time::Instant::now(),
+    )
+}
 #[cfg(unix)]
 const R2O_DISCOVERY_ECH_INPUT_CAPACITY: usize = 8;
 #[cfg(unix)]
@@ -9011,6 +9035,7 @@ impl ControlClient {
                                 probe_path,
                                 r2o_mark: pending.r2o_mark,
                                 permit,
+                                started_at: std::time::Instant::now(),
                                 deny_recheck: pending.deny_recheck,
                                 stall_cut: false,
                             }) {
@@ -10741,6 +10766,7 @@ impl ControlClient {
         request_timeout: std::time::Duration,
         roots: &rustls::RootCertStore,
         retry_strategy: bool,
+        started_at: std::time::Instant,
         measurement_permit: &mut r2o_controller::r2o_resource_limit::R2oMeasurementPermit,
     ) -> Result<Option<QuicDiscoveryTrialOutcome>, Box<dyn Error>> {
         use r2o_controller::quic_replay::{
@@ -10804,8 +10830,14 @@ impl ControlClient {
                 applied: false,
             };
             for attempt in 0..attempts {
+                if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
+                    return Err("истёк срок QUIC-испытания".into());
+                }
                 if !measurement_permit.r2o_yield_if_contended_with_cancel(cancel) {
                     return Err("QUIC-испытание отменено во время ожидания слота".into());
+                }
+                if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
+                    return Err("истёк срок QUIC-испытания".into());
                 }
                 let filter = probe.r2o_quic_probe_filter(request_timeout, attempt);
                 let events = r2o_collect_controller_applied_events(
@@ -10818,6 +10850,9 @@ impl ControlClient {
                 });
                 outcome.filter = filter;
                 outcome.applied = applied;
+                if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
+                    return Err("истёк срок QUIC-испытания".into());
+                }
                 if filter.decision != R2oQuicFilterDecision::Pass {
                     outcome.decision = r2o_quic_strategy_attempt_decision(
                         filter.decision,
@@ -10834,8 +10869,8 @@ impl ControlClient {
                     return Ok(outcome);
                 }
 
-                let data =
-                    runtime.block_on(r2o_controller::r2o_quic_http3::r2o_quic_http3_measure(
+                let data = runtime.block_on(
+                    r2o_controller::r2o_quic_http3::r2o_quic_http3_measure_with_max_duration(
                         probe.try_clone_socket()?,
                         server,
                         sni,
@@ -10843,7 +10878,12 @@ impl ControlClient {
                         request_timeout,
                         roots.clone(),
                         r2o_controller::r2o_quic_http3::R2O_QUIC_HTTP3_DEFAULT_BUDGET_PACKETS,
-                    ));
+                        r2o_quic_trial_remaining(started_at, measurement_permit),
+                    ),
+                );
+                if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
+                    return Err("истёк срок QUIC-испытания".into());
+                }
                 let events = r2o_collect_controller_applied_events(
                     commands,
                     trial_id,
@@ -10852,6 +10892,9 @@ impl ControlClient {
                 applied |= events.iter().any(|event| {
                     applied_quic_trial_matches(event, trial_id, plan_id, local, server)
                 });
+                if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
+                    return Err("истёк срок QUIC-испытания".into());
+                }
                 let data_verdict = r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&data);
                 outcome.data = Some(data);
                 outcome.applied = applied;
@@ -10864,6 +10907,9 @@ impl ControlClient {
                     continue;
                 }
                 return Ok(outcome);
+            }
+            if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
+                return Err("истёк срок QUIC-испытания".into());
             }
             Ok(outcome)
         })();
@@ -10884,6 +10930,7 @@ impl ControlClient {
         probe_path: &str,
         commands: &SyncSender<HttpSearchCommand>,
         cancel: &AtomicBool,
+        started_at: std::time::Instant,
         measurement_permit: &mut r2o_controller::r2o_resource_limit::R2oMeasurementPermit,
         r2o_mark: Option<u32>,
         deny_recheck: bool,
@@ -10892,8 +10939,14 @@ impl ControlClient {
         use r2o_controller::quic_replay::QuicReplayProbe;
 
         if deny_recheck {
+            if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
+                return Ok(None);
+            }
             if !measurement_permit.r2o_yield_if_contended_with_cancel(cancel) {
                 return Err("перепроверка запрета QUIC отменена".into());
+            }
+            if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
+                return Ok(None);
             }
             let Some(server_name) = r2o_quic_snapshot_server_name(snapshot, server) else {
                 return Ok(None);
@@ -10919,19 +10972,25 @@ impl ControlClient {
             {
                 return Ok(None);
             }
+            if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
+                return Ok(None);
+            }
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
             let mut roots = rustls::RootCertStore::empty();
             roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            let result = runtime.block_on(r2o_controller::r2o_quic_http3::r2o_quic_http3_get(
-                probe.try_clone_socket()?,
-                server,
-                &server_name,
-                probe_path,
-                request_timeout,
-                roots,
-            ));
+            let result = runtime.block_on(
+                r2o_controller::r2o_quic_http3::r2o_quic_http3_get_with_max_duration(
+                    probe.try_clone_socket()?,
+                    server,
+                    &server_name,
+                    probe_path,
+                    request_timeout,
+                    roots,
+                    r2o_quic_trial_remaining(started_at, measurement_permit),
+                ),
+            );
             *stall_cut = r2o_quic_data_cut(&result);
             return Ok(None);
         }
@@ -10982,14 +11041,25 @@ impl ControlClient {
         let request_timeout = std::time::Duration::from_millis(u64::from(
             r2k_core::quic::r2k_quic_dynamic_wait_ms(0),
         ));
-        let baseline = runtime.block_on(r2o_controller::r2o_quic_http3::r2o_quic_http3_get(
-            probe.try_clone_socket()?,
-            server,
-            &server_name,
-            probe_path,
-            request_timeout,
-            roots.clone(),
-        ));
+        let remaining = r2o_quic_trial_remaining(started_at, measurement_permit);
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        let baseline = runtime.block_on(
+            r2o_controller::r2o_quic_http3::r2o_quic_http3_get_with_max_duration(
+                probe.try_clone_socket()?,
+                server,
+                &server_name,
+                probe_path,
+                request_timeout,
+                roots.clone(),
+                remaining,
+            ),
+        );
+        if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
+            println!("истёк срок QUIC-испытания во время исходного HTTP/3 GET");
+            return Ok(None);
+        }
         let baseline_verdict = r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&baseline);
         if baseline_verdict == r2k_core::quic::R2kQuicDataVerdict::Pass {
             println!("исходный HTTP/3 GET уже проходит; QUIC-план не устанавливаю");
@@ -11013,6 +11083,10 @@ impl ControlClient {
             if cancel.load(Ordering::Relaxed) {
                 return Err("QUIC-испытание отменено".into());
             }
+            if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
+                println!("истёк срок QUIC-испытания; оставшиеся кандидаты пропущены");
+                return Ok(None);
+            }
             let outcome = match Self::run_quic_discovery_candidate(
                 commands,
                 cancel,
@@ -11026,6 +11100,7 @@ impl ControlClient {
                 request_timeout,
                 &roots,
                 true,
+                started_at,
                 measurement_permit,
             ) {
                 Ok(Some(outcome)) => outcome,
@@ -11035,6 +11110,9 @@ impl ControlClient {
                         "испытание QUIC-кандидата «{}» не завершено: {error}",
                         candidate.name
                     );
+                    if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
+                        return Ok(None);
+                    }
                     continue;
                 }
             };
@@ -11111,6 +11189,10 @@ impl ControlClient {
                 if cancel.load(Ordering::Relaxed) {
                     return Err("QUIC-испытание отменено".into());
                 }
+                if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
+                    println!("истёк срок QUIC-испытания; оставшиеся кандидаты пропущены");
+                    return Ok(None);
+                }
                 let outcome = match Self::run_quic_discovery_candidate(
                     commands,
                     cancel,
@@ -11124,6 +11206,7 @@ impl ControlClient {
                     request_timeout,
                     &roots,
                     false,
+                    started_at,
                     measurement_permit,
                 ) {
                     Ok(Some(outcome)) => outcome,
@@ -11133,6 +11216,9 @@ impl ControlClient {
                             "испытание QUIC-кандидата «{}» не завершено: {error}",
                             candidate.name
                         );
+                        if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
+                            return Ok(None);
+                        }
                         continue;
                     }
                 };
@@ -11195,6 +11281,10 @@ impl ControlClient {
                 if cancel.load(Ordering::Relaxed) {
                     return Err("QUIC-испытание отменено".into());
                 }
+                if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
+                    println!("истёк срок QUIC-испытания; оставшиеся кандидаты пропущены");
+                    return Ok(None);
+                }
                 let outcome = match Self::run_quic_discovery_candidate(
                     commands,
                     cancel,
@@ -11208,6 +11298,7 @@ impl ControlClient {
                     request_timeout,
                     &roots,
                     false,
+                    started_at,
                     measurement_permit,
                 ) {
                     Ok(Some(outcome)) => outcome,
@@ -11217,6 +11308,9 @@ impl ControlClient {
                             "испытание QUIC-кандидата «{}» не завершено: {error}",
                             candidate.name
                         );
+                        if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
+                            return Ok(None);
+                        }
                         continue;
                     }
                 };
@@ -15128,6 +15222,28 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn r2o_quic_срок_задачи_не_считает_уступку_слота() {
+        let started = std::time::Instant::now();
+        assert_eq!(
+            super::r2o_quic_trial_remaining_at(
+                started,
+                std::time::Duration::from_secs(120),
+                started + std::time::Duration::from_secs(9 * 60),
+            ),
+            std::time::Duration::from_secs(3 * 60)
+        );
+        assert_eq!(
+            super::r2o_quic_trial_remaining_at(
+                started,
+                std::time::Duration::from_secs(120),
+                started + std::time::Duration::from_secs(12 * 60),
+            ),
+            std::time::Duration::ZERO
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn r2o_quic_discovery_задаёт_повтор_по_исходу_испытания() {
         assert_eq!(
             super::r2o_quic_discovery_cooldown(&Ok(Some((
@@ -15919,6 +16035,7 @@ mod tests {
             probe_path: "/".into(),
             r2o_mark: None,
             permit,
+            started_at: std::time::Instant::now(),
             deny_recheck: false,
             stall_cut: false,
         }));
@@ -16011,6 +16128,7 @@ mod tests {
             probe_path: "/".into(),
             r2o_mark: None,
             permit,
+            started_at: std::time::Instant::now(),
             deny_recheck: false,
             stall_cut: false,
         }));
@@ -16246,6 +16364,7 @@ mod tests {
             probe_path: "/".into(),
             r2o_mark: None,
             permit: gate.r2o_try_acquire().unwrap(),
+            started_at: std::time::Instant::now(),
             deny_recheck: false,
             stall_cut: false,
         };
@@ -16255,6 +16374,7 @@ mod tests {
             probe_path: "/".into(),
             r2o_mark: None,
             permit: gate.r2o_try_acquire().unwrap(),
+            started_at: std::time::Instant::now(),
             deny_recheck: false,
             stall_cut: false,
         };
@@ -16331,6 +16451,7 @@ mod tests {
             probe_path: "/".into(),
             r2o_mark: None,
             permit: gate.r2o_try_acquire().unwrap(),
+            started_at: std::time::Instant::now(),
             deny_recheck: false,
             stall_cut: false,
         };
@@ -16340,6 +16461,7 @@ mod tests {
             probe_path: "/".into(),
             r2o_mark: None,
             permit: gate.r2o_try_acquire().unwrap(),
+            started_at: std::time::Instant::now(),
             deny_recheck: false,
             stall_cut: false,
         };
@@ -16385,6 +16507,7 @@ mod tests {
             probe_path: "/".into(),
             r2o_mark: Some(77),
             permit: gate.r2o_try_acquire().unwrap(),
+            started_at: std::time::Instant::now(),
             deny_recheck: false,
             stall_cut: false,
         }));
@@ -16429,6 +16552,7 @@ mod tests {
             probe_path: "/static/app.css".into(),
             r2o_mark: None,
             permit: gate.r2o_try_acquire().unwrap(),
+            started_at: std::time::Instant::now(),
             deny_recheck: false,
             stall_cut: false,
         }));
@@ -16487,6 +16611,7 @@ mod tests {
             probe_path: "/".into(),
             r2o_mark: None,
             permit: gate.r2o_try_acquire().unwrap(),
+            started_at: std::time::Instant::now(),
             deny_recheck: false,
             stall_cut: false,
         }));

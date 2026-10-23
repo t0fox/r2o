@@ -11,6 +11,23 @@ use rustls::RootCertStore;
 pub const R2O_QUIC_HTTP3_DEFAULT_BUDGET_PACKETS: u32 = 25;
 const R2O_QUIC_HTTP3_MAX_BODY_BYTES: u64 = 16 * 1024 * 1024;
 
+fn r2o_quic_http3_bounded_timeout_at(
+    timeout: Duration,
+    deadline: Option<tokio::time::Instant>,
+    now: tokio::time::Instant,
+) -> Duration {
+    deadline.map_or(timeout, |deadline| {
+        timeout.min(deadline.saturating_duration_since(now))
+    })
+}
+
+fn r2o_quic_http3_bounded_timeout(
+    timeout: Duration,
+    deadline: Option<tokio::time::Instant>,
+) -> Duration {
+    r2o_quic_http3_bounded_timeout_at(timeout, deadline, tokio::time::Instant::now())
+}
+
 /// Создать привязанный UDP-сокет для QUIC до установки соединения.
 pub fn r2o_quic_http3_udp_socket(
     server: SocketAddr,
@@ -333,6 +350,54 @@ pub async fn r2o_quic_http3_measure(
     .await
 }
 
+/// Измерить HTTP/3-ответ в пределах оставшегося срока задачи.
+pub async fn r2o_quic_http3_measure_with_max_duration(
+    socket: UdpSocket,
+    server: SocketAddr,
+    server_name: &str,
+    path: &str,
+    timeout: Duration,
+    roots: RootCertStore,
+    budget_packets: u32,
+    max_duration: Duration,
+) -> R2oQuicHttp3Result {
+    r2o_quic_http3_measure_with_wire_len_and_max_duration(
+        socket,
+        server,
+        server_name,
+        path,
+        timeout,
+        roots,
+        budget_packets,
+        None,
+        Some(max_duration),
+    )
+    .await
+}
+
+/// Выполнить один HTTP/3 GET в пределах оставшегося срока задачи.
+pub async fn r2o_quic_http3_get_with_max_duration(
+    socket: UdpSocket,
+    server: SocketAddr,
+    server_name: &str,
+    path: &str,
+    timeout: Duration,
+    roots: RootCertStore,
+    max_duration: Duration,
+) -> R2oQuicHttp3Result {
+    r2o_quic_http3_measure_with_max_duration(
+        socket,
+        server,
+        server_name,
+        path,
+        timeout,
+        roots,
+        0,
+        max_duration,
+    )
+    .await
+}
+
 /// Выполнить HTTP/3-замер с бюджетом датаграмм и заданной длиной ClientHello.
 pub async fn r2o_quic_http3_measure_with_wire_len(
     socket: UdpSocket,
@@ -344,12 +409,41 @@ pub async fn r2o_quic_http3_measure_with_wire_len(
     budget_packets: u32,
     wire_len: Option<usize>,
 ) -> R2oQuicHttp3Result {
+    r2o_quic_http3_measure_with_wire_len_and_max_duration(
+        socket,
+        server,
+        server_name,
+        path,
+        timeout,
+        roots,
+        budget_packets,
+        wire_len,
+        None,
+    )
+    .await
+}
+
+async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
+    socket: UdpSocket,
+    server: SocketAddr,
+    server_name: &str,
+    path: &str,
+    timeout: Duration,
+    roots: RootCertStore,
+    budget_packets: u32,
+    wire_len: Option<usize>,
+    max_duration: Option<Duration>,
+) -> R2oQuicHttp3Result {
+    let deadline = max_duration.map(|duration| tokio::time::Instant::now() + duration);
     let repeated = budget_packets > 0;
     let result = Arc::new(Mutex::new(R2oQuicHttp3Result {
         budget_required: repeated,
         ..R2oQuicHttp3Result::default()
     }));
-    if server.port() == 0 || timeout.is_zero() {
+    if server.port() == 0
+        || timeout.is_zero()
+        || max_duration.is_some_and(|duration| duration.is_zero())
+    {
         let mut state = result.lock().unwrap();
         state.error = Some("адрес или срок ожидания HTTP/3 неверен".into());
         return state.clone();
@@ -405,7 +499,8 @@ pub async fn r2o_quic_http3_measure_with_wire_len(
             return result.lock().unwrap().clone();
         }
     };
-    let connection = match tokio::time::timeout(timeout, connecting).await {
+    let connection_timeout = r2o_quic_http3_bounded_timeout(timeout, deadline);
+    let connection = match tokio::time::timeout(connection_timeout, connecting).await {
         Ok(Ok(connection)) => connection,
         Ok(Err(error)) => {
             result.lock().unwrap().error = Some(format!("QUIC-рукопожатие не завершено: {error}"));
@@ -419,18 +514,22 @@ pub async fn r2o_quic_http3_measure_with_wire_len(
     result.lock().unwrap().handshake_confirmed = true;
 
     let h3_connection = h3_quinn::Connection::new(connection.clone());
-    let (mut driver, mut send_request) =
-        match tokio::time::timeout(timeout, h3::client::new(h3_connection)).await {
-            Ok(Ok(client)) => client,
-            Ok(Err(error)) => {
-                result.lock().unwrap().error = Some(format!("не запущен HTTP/3-клиент: {error}"));
-                return result.lock().unwrap().clone();
-            }
-            Err(_) => {
-                result.lock().unwrap().error = Some("истёк срок настройки HTTP/3".into());
-                return result.lock().unwrap().clone();
-            }
-        };
+    let (mut driver, mut send_request) = match tokio::time::timeout(
+        r2o_quic_http3_bounded_timeout(timeout, deadline),
+        h3::client::new(h3_connection),
+    )
+    .await
+    {
+        Ok(Ok(client)) => client,
+        Ok(Err(error)) => {
+            result.lock().unwrap().error = Some(format!("не запущен HTTP/3-клиент: {error}"));
+            return result.lock().unwrap().clone();
+        }
+        Err(_) => {
+            result.lock().unwrap().error = Some("истёк срок настройки HTTP/3".into());
+            return result.lock().unwrap().clone();
+        }
+    };
     let drive_task =
         tokio::spawn(async move { poll_fn(|context| driver.poll_close(context)).await });
 
@@ -471,6 +570,11 @@ pub async fn r2o_quic_http3_measure_with_wire_len(
     let mut stall_end = None;
 
     loop {
+        let request_timeout = r2o_quic_http3_bounded_timeout(request_timeout, deadline);
+        if request_timeout.is_zero() {
+            result.lock().unwrap().error = Some("истёк срок HTTP/3-пробы для задачи".into());
+            break;
+        }
         let request_result = tokio::time::timeout(request_timeout, async {
             status = 0;
             result.lock().unwrap().status = status;
@@ -710,11 +814,33 @@ async fn r2o_quic_http3_wait_with_stall<F: Future>(
 mod tests {
     use super::{
         R2oQuicHttp3Budget, R2oQuicHttp3Stall, R2oQuicHttp3StallAction as Action,
-        r2o_quic_http3_authority, r2o_quic_http3_udp_socket_with_mark_setter,
+        r2o_quic_http3_authority, r2o_quic_http3_bounded_timeout_at,
+        r2o_quic_http3_udp_socket_with_mark_setter,
     };
     use std::net::SocketAddr;
     use std::time::Duration;
     use tokio::time::Instant;
+
+    #[test]
+    fn http3_timeout_is_capped_by_the_task_deadline() {
+        let now = Instant::now();
+        assert_eq!(
+            r2o_quic_http3_bounded_timeout_at(
+                Duration::from_secs(10),
+                Some(now + Duration::from_secs(2)),
+                now,
+            ),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            r2o_quic_http3_bounded_timeout_at(Duration::from_secs(10), None, now),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            r2o_quic_http3_bounded_timeout_at(Duration::from_secs(10), Some(now), now),
+            Duration::ZERO
+        );
+    }
 
     #[test]
     fn нулевая_quic_метка_не_устанавливается() {

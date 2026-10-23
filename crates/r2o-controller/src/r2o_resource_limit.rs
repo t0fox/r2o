@@ -379,6 +379,7 @@ pub struct R2oMeasurementSnapshot {
 pub struct R2oMeasurementPermit {
     shared: Arc<R2oGateShared>,
     active: bool,
+    yielded_duration: Duration,
 }
 
 impl R2oMeasurementGate {
@@ -485,6 +486,7 @@ impl R2oMeasurementGate {
         Some(R2oMeasurementPermit {
             shared: Arc::clone(&self.shared),
             active: true,
+            yielded_duration: Duration::ZERO,
         })
     }
 
@@ -517,6 +519,7 @@ impl R2oMeasurementGate {
         Some(R2oMeasurementPermit {
             shared: Arc::clone(&self.shared),
             active: true,
+            yielded_duration: Duration::ZERO,
         })
     }
 
@@ -598,6 +601,7 @@ impl R2oMeasurementGate {
                 return Some(R2oMeasurementPermit {
                     shared: Arc::clone(&self.shared),
                     active: true,
+                    yielded_duration: Duration::ZERO,
                 });
             }
             let (state, _) = self
@@ -659,6 +663,10 @@ fn r2o_initial_queue_waits_for_tick(
 }
 
 impl R2oMeasurementPermit {
+    pub fn r2o_yielded_duration(&self) -> Duration {
+        self.yielded_duration
+    }
+
     pub fn r2o_yield_if_contended(&mut self) {
         let _ = self.r2o_yield_if_contended_with_cancel(&AtomicBool::new(false));
     }
@@ -682,6 +690,7 @@ impl R2oMeasurementPermit {
         if state.waiters.is_empty() {
             return true;
         }
+        let r2o_yield_started = Instant::now();
         self.active = false;
         let gate = R2oMeasurementGate {
             shared: Arc::clone(&shared),
@@ -694,6 +703,9 @@ impl R2oMeasurementPermit {
         let Some(mut replacement) = gate.r2o_wait_for_measurement_turn(waiter, cancel) else {
             return false;
         };
+        self.yielded_duration = self
+            .yielded_duration
+            .saturating_add(r2o_yield_started.elapsed());
         std::mem::swap(&mut self.active, &mut replacement.active);
         true
     }
@@ -1174,10 +1186,12 @@ mod tests {
             second_started_rx.try_recv(),
             Err(mpsc::TryRecvError::Empty)
         ));
+        std::thread::sleep(Duration::from_millis(20));
         release_first_tx.send(()).unwrap();
 
         let (resumed, quic) = resumed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(resumed);
+        assert!(quic.r2o_yielded_duration() >= Duration::from_millis(10));
         assert!(matches!(
             second_started_rx.try_recv(),
             Err(mpsc::TryRecvError::Empty)
