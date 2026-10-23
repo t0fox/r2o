@@ -7191,3 +7191,11 @@ name-binding `transport=17, SHAPE_QUIC`, измеренный/proven путь и
 обеих целях. Новая REA/Ghidra Evidence не создавалась: ветви донора однозначны
 и покрыты исполняемыми C/Rust проверками. Физический роутер не проверялся;
 проектный паритет за пределами этой scheduler-цепочки остаётся незавершённым.
+
+## Discovery: лимит таблицы задач — 23.10.2026
+
+Сверка с donor `86b05b96457fccdec6b7ddc0e8478508f80f0bab` выявила пропуск: Rust ограничивал только ожидающие записи, тогда как `SCHED_MAX_TASKS=64` в C охватывает всю таблицу, включая работающие задачи. Rust теперь считает уникальные цели из активных задач, отложенных перепроверок и отказов моложе `SCHED_REST_MS=120000`; истёкший отдых освобождает слот независимо от более длинного cooldown повтора. Добавлены регрессии на queued+running, deferred recheck и истечение отдыха.
+
+Полный `cargo +1.98.0 test --locked --workspace` и `cargo +1.98.0 fmt --all -- --check` прошли. Донорские `test_sched`, `test_sched_summary` и `test_catalog_sync` прошли с Clang 18 и `-Wall -Wextra -Werror`. `scripts/r2o-build-armv5-musleabi.sh` и `scripts/r2o-build-openwrt-mipsel-musl.sh` собрали релизные бинарники; QEMU smoke и проверка каталога прошли на обеих целях. SHA-256 donor `core/sched.c`: `67f5c245ddf1f9cd4361c256d36a93bc37060a699548169759823845c4da1312`; `core/test_sched.c`: `c811faca5ae143c3f0118d79c198bd2f70faa64bdf6d0e153ef48d97153a5921`.
+
+Этот блок закрывает именно учёт 64 task slots. Прочая полнота Discovery и функциональный паритет проекта остаются открытыми; физический маршрутизатор не проверялся.
