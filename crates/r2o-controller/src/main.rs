@@ -2781,8 +2781,8 @@ impl HttpSearchWindow {
 }
 
 #[cfg(unix)]
-fn http_search_key(target: &r2o_controller::discovery::DiscoveryTarget) -> (String, u8, String) {
-    (target.host.clone(), target.family, target.endpoint.clone())
+fn http_search_key(target: &r2o_controller::discovery::DiscoveryTarget) -> (String, u8) {
+    (target.host.clone(), target.family)
 }
 
 #[cfg(unix)]
@@ -7775,7 +7775,7 @@ struct ControlClient {
     send_cap: Arc<AtomicUsize>,
     pending_events: VecDeque<Frame>,
     pending_applied_events: VecDeque<r2k_core::control::AppliedEvent>,
-    http_search_started: HashMap<(String, u8, String), HttpSearchWindow>,
+    http_search_started: HashMap<(String, u8), HttpSearchWindow>,
     http_challenge_cooldowns: HashMap<(String, u8), std::time::Instant>,
     http_acknowledged_bindings:
         HashMap<(String, u8), ([u8; 16], r2k_core::control::BindingContext)>,
@@ -15317,7 +15317,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn http_search_window_blocks_active_work_and_uses_its_result_delay() {
+    fn http_search_window_shares_active_and_cooldown_state_across_endpoints() {
         use r2o_controller::discovery::DiscoveryTarget;
         use std::time::{Duration, Instant};
 
@@ -15360,6 +15360,9 @@ mod tests {
         );
         assert!(client.begin_http_search(&target, false));
         assert!(!client.begin_http_search(&target, false));
+        let mut other_endpoint = target.clone();
+        other_endpoint.endpoint = "192.0.2.2:80".into();
+        assert!(!client.begin_http_search(&other_endpoint, false));
 
         client.http_search_started.insert(
             key,
@@ -15371,9 +15374,7 @@ mod tests {
         );
         assert!(!client.begin_http_search(&target, false));
 
-        let mut other_endpoint = target.clone();
-        other_endpoint.endpoint = "192.0.2.2:80".into();
-        assert!(client.begin_http_search(&other_endpoint, false));
+        assert!(!client.begin_http_search(&other_endpoint, false));
         assert!(!client.begin_http_search(&target, false));
     }
 
