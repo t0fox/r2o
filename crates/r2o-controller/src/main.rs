@@ -7867,10 +7867,16 @@ impl ControlClient {
             match self.renew_r2o_voice_trial(&trial) {
                 Ok(None) => {}
                 Ok(Some(reason)) => {
-                    eprintln!(
-                        "датапат отклонил продление Discord-плана (причина {reason}); повторю через {} с, если цель ещё активна",
-                        R2O_VOICE_TRIAL_RENEW_INTERVAL.as_secs()
-                    );
+                    if let Some(retired) = trials.remove(&trial.trial_id) {
+                        if let Err(error) = self.retire_r2o_voice_trial(&retired) {
+                            eprintln!(
+                                "датапат отклонил продление Discord-плана (причина {reason}); временное правило истечёт по аренде, досрочное снятие не удалось: {error}"
+                            );
+                        }
+                        eprintln!(
+                            "датапат отклонил продление Discord-плана (причина {reason}); опыт снят, цель не признана и ожидающая цель может продолжить"
+                        );
+                    }
                 }
                 Err(error) => eprintln!(
                     "Discord-план не продлён; повторю через {} с, если цель ещё активна: {error}",
@@ -18403,7 +18409,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn r2o_voice_discovery_продлевает_пробу_тем_же_id_до_срока_задачи() {
+    fn r2o_voice_discovery_снимает_пробу_при_точном_nak_продления() {
         use super::{
             R2O_VOICE_TRIAL_RENEW_INTERVAL, R2O_VOICE_TRIAL_TASK_LIFETIME, R2oVoiceTrialContext,
             r2o_take_due_voice_trial_renewals, r2o_take_expired_voice_trials,
@@ -18498,6 +18504,14 @@ mod tests {
             )
             .unwrap();
             let expected = read_frame(&mut std::io::Cursor::new(expected.as_slice())).unwrap();
+            let expected_delete = super::encode_delete_voice_addr_probe(
+                r2o_target.client,
+                r2o_target.server,
+                r2o_trial_id,
+            )
+            .unwrap();
+            let expected_delete =
+                read_frame(&mut std::io::Cursor::new(expected_delete.as_slice())).unwrap();
             let server = std::thread::spawn(move || {
                 let command = read_frame(&mut server_stream).unwrap();
                 assert_eq!(command.kind, super::COMMAND_SET_VOICE_ADDR_PROBE);
@@ -18519,11 +18533,24 @@ mod tests {
                     .unwrap();
                 if !ack_ok && matching_trial_id {
                     server_stream
+                        .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                        .unwrap();
+                    let delete = read_frame(&mut server_stream).unwrap();
+                    assert_eq!(delete.kind, super::COMMAND_DEL_VOICE_ADDR_PROBE);
+                    assert_eq!(delete.body, expected_delete.body);
+                    server_stream
+                        .write_all(
+                            &encode_ack_for_trial(delete.kind, true, 0, Some(r2o_trial_id))
+                                .unwrap(),
+                        )
+                        .unwrap();
+                } else {
+                    server_stream
                         .set_read_timeout(Some(std::time::Duration::from_millis(50)))
                         .unwrap();
-                    let mut extra_command = [0; 1];
+                    let mut unexpected_command = [0; 1];
                     assert!(matches!(
-                        server_stream.read(&mut extra_command),
+                        server_stream.read(&mut unexpected_command),
                         Err(error)
                             if matches!(
                                 error.kind(),
@@ -18541,30 +18568,51 @@ mod tests {
                 http_search_started: Default::default(),
                 http_challenge_cooldowns: Default::default(),
             };
-            let mut trials = HashMap::from([(
-                r2o_trial_id,
-                R2oVoiceTrialContext {
-                    target: r2o_target,
-                    trial_id: r2o_trial_id,
-                    plan_text: r2o_plan_text.clone(),
-                    voice_flow_key: None,
-                    started_at: r2o_started_at,
-                    renew_at: r2o_started_at,
-                    expires_at: r2o_started_at + R2O_VOICE_TRIAL_TASK_LIFETIME,
-                },
-            )]);
             let r2o_now = r2o_started_at + R2O_VOICE_TRIAL_RENEW_INTERVAL;
+            let mut trials = HashMap::from([
+                (
+                    r2o_trial_id,
+                    R2oVoiceTrialContext {
+                        target: r2o_target,
+                        trial_id: r2o_trial_id,
+                        plan_text: r2o_plan_text.clone(),
+                        voice_flow_key: None,
+                        started_at: r2o_started_at,
+                        renew_at: r2o_started_at,
+                        expires_at: r2o_started_at + R2O_VOICE_TRIAL_TASK_LIFETIME,
+                    },
+                ),
+                (
+                    [0x43; 16],
+                    R2oVoiceTrialContext {
+                        target: r2o_other_target,
+                        trial_id: [0x43; 16],
+                        plan_text: r2o_plan_text.clone(),
+                        voice_flow_key: None,
+                        started_at: r2o_started_at,
+                        renew_at: r2o_started_at + R2O_VOICE_TRIAL_RENEW_INTERVAL * 2,
+                        expires_at: r2o_started_at + R2O_VOICE_TRIAL_TASK_LIFETIME,
+                    },
+                ),
+            ]);
 
             client.renew_due_r2o_voice_trials(&mut trials, r2o_now);
             server.join().unwrap();
             (trials, r2o_now)
         };
 
-        for (ack_ok, matching_trial_id, retained) in
-            [(true, true, true), (false, true, true), (true, false, true)]
-        {
+        for (ack_ok, matching_trial_id, retained) in [
+            (true, true, true),
+            (false, true, false),
+            (true, false, true),
+        ] {
             let (trials, r2o_now) = renew(ack_ok, matching_trial_id);
             assert_eq!(trials.contains_key(&r2o_trial_id), retained);
+            assert!(trials.contains_key(&[0x43; 16]), "соседняя проба сохранена");
+            assert_eq!(
+                super::r2o_voice_target_has_active_trial(&trials, &r2o_target),
+                retained
+            );
             if retained {
                 assert_eq!(
                     trials[&r2o_trial_id].renew_at,
