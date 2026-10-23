@@ -166,37 +166,6 @@
       </footer>
     </main>
   </div>
-
-
-
-  <dialog class="settings-dialog" id="r2o-settings" aria-labelledby="r2o-settings-title">
-    <header class="settings-head">
-      <div>
-        <span class="kicker">Движок</span>
-        <h2 id="r2o-settings-title">Настройки R2O</h2>
-        <p>Режим работы движка и номер очереди NFQUEUE. После сохранения службы перезапустятся.</p>
-      </div>
-      <button class="btn" type="button" data-settings-close>Закрыть</button>
-    </header>
-    <form class="r2o-settings" id="r2o-settings-form">
-      <label class="r2o-settings-field" for="r2o-settings-mode">
-        <span>Режим движка</span>
-        <select id="r2o-settings-mode" required>
-          <option value="off">Выключен</option>
-          <option value="observe">Только наблюдение</option>
-          <option value="apply">Применение обхода</option>
-        </select>
-      </label>
-      <label class="r2o-settings-field" for="r2o-settings-queue">
-        <span>Номер очереди NFQUEUE</span>
-        <input id="r2o-settings-queue" type="number" min="0" max="65535" step="1" required>
-      </label>
-      <div class="r2o-settings-actions">
-        <p id="r2o-settings-message" role="status" aria-live="polite"></p>
-        <button class="btn" data-variant="primary" type="submit" disabled>Сохранить и перезапустить</button>
-      </div>
-    </form>
-  </dialog>
 <dialog class="ask" id="ask" aria-labelledby="ask-title" aria-describedby="ask-text">
     <span class="ask-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg></span>
     <h2 id="ask-title"></h2>
