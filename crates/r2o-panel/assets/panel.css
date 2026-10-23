@@ -1093,3 +1093,32 @@ html.r2o-reveal-ready #boxes-body .crate[data-r2o-reveal] {
 @media (max-width: 640px) {
   .mast .mark { width: 30px; height: 30px; }
 }
+
+/* Native settings dialog keeps engine configuration available in the new layout. */
+.settings-dialog {
+  width: min(680px, calc(100vw - 28px)); max-height: min(84dvh, 760px); overflow: auto;
+  margin: auto; padding: clamp(20px, 4vw, 32px); border: 1px solid var(--line-2);
+  border-radius: 22px; color: var(--ink); background: var(--card-bg); box-shadow: var(--glow);
+}
+.settings-dialog::backdrop { background: rgba(8, 6, 12, .72); backdrop-filter: blur(8px); }
+.settings-dialog[open] { display: grid; gap: 24px; }
+.settings-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.settings-head > div { display: grid; gap: 6px; }
+.settings-head h2 { font-size: clamp(1.5rem, 4vw, 2rem); line-height: 1.15; letter-spacing: -.035em; }
+.settings-head p { max-width: 55ch; color: var(--ink-2); font-size: .9rem; }
+.settings-dialog .r2o-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; max-width: none; }
+.settings-dialog .r2o-settings-field { display: grid; gap: 7px; color: var(--ink-2); font-size: .84rem; }
+.settings-dialog .r2o-settings-field select,
+.settings-dialog .r2o-settings-field input {
+  width: 100%; min-width: 0; min-height: 44px; padding: 9px 12px; border: 1px solid var(--line-2);
+  border-radius: 10px; background: var(--bg-2); color: var(--ink); font: .9rem var(--mono);
+}
+.settings-dialog .r2o-settings-actions { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.settings-dialog #r2o-settings-message { min-height: 1.3em; margin: 0; color: var(--ink-2); font-size: .84rem; }
+.settings-dialog #r2o-settings-message[data-tone="bad"] { color: var(--bad); }
+.settings-dialog .r2o-settings-actions .btn:disabled { opacity: .5; cursor: not-allowed; }
+@media (max-width: 560px) {
+  .settings-head { align-items: flex-start; }
+  .settings-dialog .r2o-settings { grid-template-columns: 1fr; }
+  .settings-dialog .r2o-settings-actions { align-items: stretch; flex-direction: column; }
+}
