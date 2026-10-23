@@ -379,6 +379,30 @@ pub fn rollback(root: &Path) -> Result<InstallSlots, InstallError> {
     Ok(slots)
 }
 
+pub(crate) fn activate_previous_release(
+    root: &Path,
+    release_id: &str,
+    architecture: &str,
+) -> Result<Option<InstallSlots>, InstallError> {
+    fs::create_dir_all(root)?;
+    let _lock = ManagerLock::acquire(root)?;
+    let Some(current) = read_install_slots(root)? else {
+        return Ok(None);
+    };
+    if current.previous.as_deref() != Some(release_id) {
+        return Ok(None);
+    }
+    if read_release_architecture(root, release_id)? != architecture {
+        return Err(InstallError::InvalidArchitecture);
+    }
+    let slots = InstallSlots {
+        current: release_id.to_owned(),
+        previous: Some(current.current),
+    };
+    write_slots_atomically(root, &slots)?;
+    Ok(Some(slots))
+}
+
 pub fn read_install_slots(root: &Path) -> Result<Option<InstallSlots>, InstallError> {
     let path = root.join(SLOT_FILE);
     let metadata = match fs::symlink_metadata(&path) {
@@ -924,6 +948,31 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o7777, 0o755);
         }
+    }
+
+    #[test]
+    fn update_reactivates_an_installed_latest_release_after_rollback() {
+        let temp = TestDir::new();
+        let bundle_one = bundle(&temp.0, "one", "mipsel");
+        let bundle_two = bundle(&temp.0, "two", "mipsel");
+        let root = temp.0.join("install");
+        activate_bundle(&root, &bundle_one, "r2o-1", "mipsel").unwrap();
+        activate_bundle(&root, &bundle_two, "r2o-2", "mipsel").unwrap();
+        rollback(&root).unwrap();
+
+        assert!(
+            activate_previous_release(&root, "r2o-3", "mipsel")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(read_install_slots(&root).unwrap().unwrap().current, "r2o-1");
+        assert_eq!(
+            activate_previous_release(&root, "r2o-2", "mipsel").unwrap(),
+            Some(InstallSlots {
+                current: "r2o-2".into(),
+                previous: Some("r2o-1".into()),
+            })
+        );
     }
 
     #[test]

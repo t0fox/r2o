@@ -1,3 +1,4 @@
+use crate::install::activate_previous_release;
 use crate::{
     InstallSlots, VerifyError, decode_public_key, install_archive, read_install_slots,
     verify_manifest,
@@ -324,6 +325,20 @@ fn install_update_in(
         .is_some_and(|installed| installed.current == manifest.release_id)
     {
         return Ok((manifest, slots.expect("current release was checked"), false));
+    }
+    if slots.as_ref().is_some_and(|installed| {
+        installed.previous.as_deref() == Some(manifest.release_id.as_str())
+    }) {
+        if let Some(slots) = activate_previous_release(root, &manifest.release_id, architecture)? {
+            return Ok((manifest, slots, true));
+        }
+        let slots = read_install_slots(root)?;
+        if slots
+            .as_ref()
+            .is_some_and(|installed| installed.current == manifest.release_id)
+        {
+            return Ok((manifest, slots.expect("current release was checked"), false));
+        }
     }
     let url = format!(
         "{DOWNLOAD_URL}/{}/r2o-{architecture}.tar.gz",
