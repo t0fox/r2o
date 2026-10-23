@@ -55,5 +55,5 @@
 - [x] **Step 6: Add the CI job and required summary dependency**; upload all six binaries and `SHA256SUMS` as `r2o-openwrt-armv7-musl`.
 - [x] **Step 7: Document the ABI and local build command** in the root, router, and manager READMEs; record the QEMU result and remaining CI/hardware/release checks in `ПРОГРЕСС.md`.
 - [x] **Step 8: Run package-release tests, ShellCheck, format/status checks, and the full workspace**; expected result is a passing package test and clean local verification.
-- [ ] **Step 9: Commit the completed implementation on `codex/openwrt-armv7`** after local verification.
+- [x] **Step 9: Commit the completed implementation on `codex/openwrt-armv7`** after local verification.
 - [ ] **Step 10: Obtain the final review, fast-forward the verified commit to `main`, and inspect its exact CI run**; expected result is a successful ARMv7 job and required-check summary.
