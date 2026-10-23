@@ -1512,9 +1512,14 @@ impl ControlServer {
     }
 
     pub fn poll(&mut self) -> io::Result<Vec<Frame>> {
-        self.accept_peer();
         let mut frames = Vec::new();
-        if self.peer.is_some() && !self.read_peer(&mut frames) {
+        let peer_was_connected = self.peer.is_some();
+        if peer_was_connected && !self.read_peer(&mut frames) {
+            self.disconnect();
+            return Ok(frames);
+        }
+        self.accept_peer();
+        if !peer_was_connected && self.peer.is_some() && !self.read_peer(&mut frames) {
             self.disconnect();
         }
         self.flush()?;
@@ -1897,6 +1902,53 @@ mod tests {
         drop(server);
         assert_eq!(mode, 0o600, "control socket grants group/other access");
         assert!(!path.exists(), "server should remove its socket on drop");
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn control_server_accepts_reconnect_pending_after_previous_peer_closes() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "r2o-control-reconnect-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("control.sock");
+        let mut server = ControlServer::open(&path, u16::MAX as u32).unwrap();
+        let mut previous = UnixStream::connect(&path).unwrap();
+        previous
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        assert!(server.poll().unwrap().is_empty());
+        assert_eq!(
+            control::read_frame(&mut previous).unwrap().kind,
+            control::EVENT_PROTOCOL
+        );
+
+        drop(previous);
+        let mut reconnected = UnixStream::connect(&path).unwrap();
+        reconnected
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        assert!(server.poll().unwrap().is_empty());
+        assert!(
+            !server.is_connected(),
+            "the disconnect must be visible before accepting its reconnect"
+        );
+
+        assert!(server.poll().unwrap().is_empty());
+
+        assert!(server.is_connected(), "the queued reconnect was discarded");
+        assert_eq!(
+            control::read_frame(&mut reconnected).unwrap().kind,
+            control::EVENT_PROTOCOL
+        );
+
+        drop(reconnected);
+        drop(server);
         std::fs::remove_dir(&directory).unwrap();
     }
 

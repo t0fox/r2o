@@ -30,9 +30,14 @@ NS="r2o-nfq-test-$$"
 WORK=$(mktemp -d)
 
 cleanup() {
+    test_exit_status=$?
     if ip netns list | awk '{print $1}' | grep -Fxq "$NS"; then
         ip netns pids "$NS" | xargs -r kill 2>/dev/null || true
         ip netns del "$NS" 2>/dev/null || true
+    fi
+    if [ "$test_exit_status" -ne 0 ] && [ -f "$WORK/r2o-datapath-voice.log" ]; then
+        echo "журнал datapath voice перед отказом namespace-проверки:" >&2
+        tail -n 80 "$WORK/r2o-datapath-voice.log" >&2 || true
     fi
     if [ "${KEEP_TEST_WORK:-0}" = "1" ]; then
         echo "сохранены файлы проверки: $WORK" >&2
