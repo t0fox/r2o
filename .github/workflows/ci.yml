@@ -306,10 +306,11 @@ jobs:
       - name: Установить кросс-компилятор и QEMU
         run: |
           set -euo pipefail
-          sh scripts/ci-apt-cache.sh prepare "$RUNNER_TEMP/r2o-apt-archives"
+          sh scripts/ci-apt-cache.sh prepare "$RUNNER_TEMP/r2o-apt-archives" /tmp/r2o-apt-archives-partial
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             -o Dir::Cache::archives="$RUNNER_TEMP/r2o-apt-archives" \
+            -o Dir::Cache::archives::partial=/tmp/r2o-apt-archives-partial \
             gcc-mipsel-linux-gnu qemu-user binutils
           sh scripts/ci-apt-cache.sh finalize "$RUNNER_TEMP/r2o-apt-archives"
       - name: Собрать и проверить выпуск MIPS
@@ -524,10 +525,11 @@ jobs:
               ;;
             *) r2o_needs_aarch64=0 ;;
           esac
-          sh scripts/ci-apt-cache.sh prepare "$RUNNER_TEMP/r2o-apt-archives"
+          sh scripts/ci-apt-cache.sh prepare "$RUNNER_TEMP/r2o-apt-archives" /tmp/r2o-apt-archives-partial
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             -o Dir::Cache::archives="$RUNNER_TEMP/r2o-apt-archives" \
+            -o Dir::Cache::archives::partial=/tmp/r2o-apt-archives-partial \
             "${packages[@]}"
           sh scripts/ci-apt-cache.sh finalize "$RUNNER_TEMP/r2o-apt-archives"
           if [ "$r2o_needs_aarch64" -eq 1 ]; then

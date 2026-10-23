@@ -136,10 +136,11 @@ jobs:
         run: |
           set -euo pipefail
           read -r -a packages <<< "$PACKAGES"
-          sh scripts/ci-apt-cache.sh prepare "$RUNNER_TEMP/r2o-apt-archives"
+          sh scripts/ci-apt-cache.sh prepare "$RUNNER_TEMP/r2o-apt-archives" /tmp/r2o-apt-archives-partial
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             -o Dir::Cache::archives="$RUNNER_TEMP/r2o-apt-archives" \
+            -o Dir::Cache::archives::partial=/tmp/r2o-apt-archives-partial \
             "${packages[@]}"
           sh scripts/ci-apt-cache.sh finalize "$RUNNER_TEMP/r2o-apt-archives"
       - name: Собрать ABI и проверить программы под QEMU
