@@ -141,12 +141,12 @@ async function main() {
   assert.equal(await evaluate("document.title.includes('R2O')"), true, "заголовок страницы панели");
   assert.equal(await evaluate("document.querySelectorAll('#app > section').length"), 6, "все разделы панели отображаются");
   assert.equal(await evaluate("getComputedStyle(document.body).fontFamily.includes('Nunito')"), true, "оформление использует Nunito");
+  assert.equal(await evaluate("document.fonts.check('500 16px Nunito')"), true, "локальный шрифт Nunito загружен");
+  assert.equal(await evaluate("document.fonts.check('400 16px \\\"JetBrains Mono\\\"')"), true, "локальный JetBrains Mono загружен");
   assert.equal(await evaluate("document.querySelectorAll('script:not([src])').length"), 0, "встроенные скрипты макета не исполняются");
-  await waitFor(() => evaluate(`!!document.querySelector('[data-control="settings"]')`), "кнопка настроек R2O");
-  await evaluate(`document.querySelector('[data-control="settings"]').click()`);
-  assert.equal(await evaluate("document.querySelector('#r2o-settings').open"), true, "настройки открываются из шапки");
-  await evaluate("document.querySelector('[data-settings-close]').click()");
-  assert.equal(await evaluate("document.querySelector('#r2o-settings').open"), false, "настройки закрываются");
+  await waitFor(() => evaluate("document.querySelector('#now-title').textContent !== 'Получаем состояние…'"), "состояние из /api/status");
+  assert.equal(await evaluate("document.querySelector('#r2o-settings') === null"), true, "на экране нет элементов вне макета");
+  assert.equal(await evaluate("document.querySelector('[data-control=\\\"settings\\\"]') === null"), true, "шапка соответствует макету");
 
   for (const [name, width, height] of [
     ["телефон", 320, 740],

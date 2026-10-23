@@ -163,7 +163,7 @@ fn control_routes_reject_get() {
 }
 
 #[test]
-fn root_serves_existing_panel_html() {
+fn root_serves_panel_layout_without_extra_settings_screen() {
     let (status, content_type, body) = request(
         &Config::default(),
         "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
@@ -171,7 +171,9 @@ fn root_serves_existing_panel_html() {
     assert_eq!(status, 200);
     assert!(content_type.starts_with("text/html"));
     assert!(body.contains("<!doctype html") || body.contains("<!DOCTYPE html"));
-    assert!(body.contains("r2o-settings-form"));
+    assert!(body.contains(r#"<main id="app">"#));
+    assert!(body.contains("id=\"diagnostics\""));
+    assert!(!body.contains("id=\"r2o-settings\""));
 }
 
 #[test]
