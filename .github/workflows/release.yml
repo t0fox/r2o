@@ -22,6 +22,7 @@ jobs:
       sha: ${{ steps.plan.outputs.sha }}
       release_id: ${{ steps.plan.outputs.release_id }}
       version: ${{ steps.plan.outputs.version }}
+      title: ${{ steps.plan.outputs.title }}
       notes: ${{ steps.plan.outputs.notes }}
     steps:
       - uses: actions/checkout@v4
@@ -46,11 +47,13 @@ jobs:
           set -euo pipefail
           sha=$(git rev-parse "$GITHUB_SHA")
           short=$(git rev-parse --short=7 "$sha")
+          title="R2O $(date -u +%d.%m.%Y) ($short)"
           id="r2o-$(date -u +%Y%m%d-%H%M)-$short-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           {
             echo "sha=$sha"
             echo "release_id=$id"
             echo "version=$id"
+            echo "title=$title"
           } >> "$GITHUB_OUTPUT"
           delimiter="notes-$(openssl rand -hex 12)"
           {
@@ -127,6 +130,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       RELEASE_ID: ${{ needs.plan.outputs.release_id }}
       VERSION: ${{ needs.plan.outputs.version }}
+      TITLE: ${{ needs.plan.outputs.title }}
       SHA: ${{ needs.plan.outputs.sha }}
       NOTES: ${{ needs.plan.outputs.notes }}
     steps:
@@ -168,7 +172,7 @@ jobs:
           notes="$RUNNER_TEMP/notes.txt"
           printf '%s\n' "$NOTES" > "$notes"
           gh release create "$RELEASE_ID" --draft --target "$SHA" \
-            --title "r2o $VERSION" --notes-file "$notes" \
+            --title "$TITLE" --notes-file "$notes" \
             "$out/r2o-mipsel.tar.gz" "$out/r2o-mipsel-openwrt-musl.tar.gz" \
             "$out/r2o-aarch64-openwrt-musl.tar.gz" \
             "$out/r2o-armv5-musleabi.tar.gz" \

@@ -6306,10 +6306,6 @@ impl DiscoveryWorker {
         if self.completed.contains(&task_key) {
             return false;
         }
-        // The donor's fixed task table contains both queued and running jobs.
-        if self.r2o_outstanding_task_count(now) >= R2O_DISCOVERY_TASK_CAPACITY {
-            return false;
-        }
         let failure_key = r2o_discovery_failure_key(&target);
         if let Some(failed_at) = self.failed_at.get(&failure_key).copied() {
             let retry_after = self
@@ -6321,6 +6317,20 @@ impl DiscoveryWorker {
                 return false;
             }
             self.r2o_clear_failed_endpoint(&failure_key);
+        }
+        // A new endpoint replaces the donor's resting task for this name,
+        // so its occupied slot remains reusable when the table is full.
+        let replaces_resting_task = self.failed_at.iter().any(|(failed_key, failed_at)| {
+            failed_key.0 == task_key.0
+                && failed_key.1 == task_key.1
+                && failed_key.2 == task_key.2
+                && now.saturating_duration_since(*failed_at) < R2O_DISCOVERY_TASK_REST
+        });
+        // The donor's fixed task table contains both queued and running jobs.
+        if self.r2o_outstanding_task_count(now) >= R2O_DISCOVERY_TASK_CAPACITY
+            && !replaces_resting_task
+        {
+            return false;
         }
         if self.seen.contains(&target) {
             return false;
@@ -16997,6 +17007,42 @@ mod tests {
         assert!(worker.queue_after_confirmed_failure(second));
         assert_eq!(worker.active.len(), 1);
         assert_eq!(worker.jobs.0.lock().unwrap().entries.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_discovery_new_endpoint_reuses_resting_task_slot_at_capacity() {
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        let now = std::time::Instant::now();
+        for index in 0..super::R2O_DISCOVERY_TASK_CAPACITY {
+            let failure_key = (
+                format!("resting-{index}.example"),
+                6,
+                4,
+                format!("198.51.100.{}:443", index + 1),
+            );
+            worker.failed_at.insert(failure_key.clone(), now);
+            worker
+                .failed_retry_after
+                .insert(failure_key, super::R2O_DISCOVERY_FAILURE_RETRY);
+        }
+
+        let retry = DiscoveryTarget {
+            host: "resting-0.example".into(),
+            endpoint: "198.51.100.200:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+
+        assert!(worker.queue(retry.clone()));
+        assert_eq!(
+            worker.active.get(&super::r2o_discovery_task_key(&retry)),
+            Some(&retry)
+        );
+        assert_eq!(
+            worker.r2o_outstanding_task_count(now),
+            super::R2O_DISCOVERY_TASK_CAPACITY
+        );
     }
 
     #[cfg(unix)]
