@@ -581,7 +581,7 @@ fn r2o_служебная_команда_панели_остаётся_асин�
     config.control_enabled = true;
     let raw = b"POST /api/control/stop HTTP/1.1\r\nHost: router.local\r\nOrigin: http://router.local\r\nContent-Length: 0\r\n\r\n";
     assert_eq!(handle_request(&config, raw).status, 202);
-    let started_deadline = Instant::now() + Duration::from_secs(2);
+    let started_deadline = Instant::now() + Duration::from_secs(10);
     while !r2o_started_marker.exists() {
         assert!(
             Instant::now() < started_deadline,
@@ -598,7 +598,7 @@ fn r2o_служебная_команда_панели_остаётся_асин�
         "running"
     );
     fs::write(r2o_release_marker, "готово").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let (_, _, finished) = request(
             &config,

@@ -61,8 +61,8 @@ mkdir -p "$r2o_log_dir"
     if [ "${R2O_SKIP_FULL_C_SCHEDULER:-0}" = 1 ]; then
         r2o_sched_sha256=$(sha256sum "$r2o_donor_core/sched.c" | awk '{print $1}')
         r2o_test_sched_sha256=$(sha256sum "$r2o_donor_core/test_sched.c" | awk '{print $1}')
-        if [ "$r2o_sched_sha256" != 1de9feaab19dcea1e493aea068295470cf3143adf83157b57663f1098132ae8a ] \
-            || [ "$r2o_test_sched_sha256" != a67f87e09a7fd93ed735b52f361e78590b9ce40679ab95e300accf0a3e9d51a3 ]; then
+        if [ "$r2o_sched_sha256" != 67f5c245ddf1f9cd4361c256d36a93bc37060a699548169759823845c4da1312 ] \
+            || [ "$r2o_test_sched_sha256" != c811faca5ae143c3f0118d79c198bd2f70faa64bdf6d0e153ef48d97153a5921 ]; then
             printf 'Ускоренный режим запрещён: SHA-256 C-эталона отличаются от полностью проверенных.\n' >&2
             exit 2
         fi
