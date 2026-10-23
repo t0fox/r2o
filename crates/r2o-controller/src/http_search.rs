@@ -250,6 +250,16 @@ mod tests {
     }
 
     #[test]
+    fn repeatable_http_path_accepts_the_donor_1023_byte_limit() {
+        let mut maximum = vec![b'a'; 1023];
+        maximum[0] = b'/';
+        assert!(repeatable_path(&maximum));
+
+        maximum.push(b'a');
+        assert!(!repeatable_path(&maximum));
+    }
+
+    #[test]
     fn response_reader_consumes_chunk_trailers_before_the_next_response() {
         let bytes = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\none\r\n0\r\nX-End: yes\r\n\r\nHTTP/1.1 204 No Content\r\n\r\n";
         let mut reader = Cursor::new(bytes.as_slice());
@@ -291,7 +301,7 @@ pub struct HttpProbeResponse {
 /// Проверить, можно ли безопасно повторить наблюдённый путь HTTP.
 pub fn repeatable_path(path: &[u8]) -> bool {
     !path.is_empty()
-        && path.len() < 1023
+        && path.len() <= 1023
         && path.first() == Some(&b'/')
         && path.get(1) != Some(&b'/')
         && path
