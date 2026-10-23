@@ -4143,7 +4143,9 @@ type R2oDiscoveryRunner = dyn Fn(r2o_controller::discovery::DiscoveryTarget, Arc
     + Sync;
 
 #[cfg(unix)]
-const R2O_DISCOVERY_QUEUE_CAPACITY: usize = 64;
+const R2O_DISCOVERY_TASK_CAPACITY: usize = 64;
+// Matches SCHED_REST_MS: failed and direct-clear tasks keep a scheduler slot for two minutes.
+const R2O_DISCOVERY_TASK_REST: std::time::Duration = std::time::Duration::from_secs(120);
 #[cfg(unix)]
 const R2O_DISCOVERY_WORKER_COUNT: usize = R2O_AUTOMATED_MEASUREMENT_SLOTS;
 #[cfg(unix)]
@@ -4650,7 +4652,7 @@ impl R2oDiscoveryQueue {
         if self.promote(&target) {
             return true;
         }
-        if self.entries.len() >= R2O_DISCOVERY_QUEUE_CAPACITY {
+        if self.entries.len() >= R2O_DISCOVERY_TASK_CAPACITY {
             return false;
         }
         self.event_sequence = self.event_sequence.wrapping_add(1);
@@ -6243,8 +6245,25 @@ impl DiscoveryWorker {
             .insert(key, now + R2O_DISCOVERY_CHALLENGE_RETRY);
     }
 
+    fn r2o_outstanding_task_count(&self, now: std::time::Instant) -> usize {
+        // A canceled task may keep a deferred recheck until its outcome arrives.
+        let mut task_keys = self
+            .active
+            .keys()
+            .chain(self.pending_rechecks.keys())
+            .cloned()
+            .collect::<HashSet<_>>();
+        for (failure_key, failed_at) in &self.failed_at {
+            if now.saturating_duration_since(*failed_at) < R2O_DISCOVERY_TASK_REST {
+                task_keys.insert((failure_key.0.clone(), failure_key.1));
+            }
+        }
+        task_keys.len()
+    }
+
     fn queue(&mut self, target: r2o_controller::discovery::DiscoveryTarget) -> bool {
-        if self.r2o_discovery_challenge_active(&target, std::time::Instant::now()) {
+        let now = std::time::Instant::now();
+        if self.r2o_discovery_challenge_active(&target, now) {
             return false;
         }
         let task_key = r2o_discovery_task_key(&target);
@@ -6259,9 +6278,12 @@ impl DiscoveryWorker {
             }
             return promoted;
         }
+        // The donor's fixed task table contains both queued and running jobs.
+        if self.r2o_outstanding_task_count(now) >= R2O_DISCOVERY_TASK_CAPACITY {
+            return false;
+        }
         let failure_key = r2o_discovery_failure_key(&target);
         if let Some(failed_at) = self.failed_at.get(&failure_key).copied() {
-            let now = std::time::Instant::now();
             let retry_after = self
                 .failed_retry_after
                 .get(&failure_key)
@@ -6307,7 +6329,7 @@ impl DiscoveryWorker {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(task_key.clone(), client_hello.clone());
         }
-        let enqueued = queue.enqueue(target.clone(), std::time::Instant::now());
+        let enqueued = queue.enqueue(target.clone(), now);
         if enqueued {
             self.active_cancels
                 .lock()
@@ -16841,7 +16863,7 @@ mod tests {
     fn r2o_discovery_queue_matches_donor_capacity() {
         let mut queue = super::R2oDiscoveryQueue::default();
         let now = std::time::Instant::now();
-        for index in 0..super::R2O_DISCOVERY_QUEUE_CAPACITY {
+        for index in 0..super::R2O_DISCOVERY_TASK_CAPACITY {
             let target = r2o_controller::discovery::DiscoveryTarget {
                 host: format!("target-{index}.example"),
                 endpoint: "127.0.0.1:443".into(),
@@ -16858,7 +16880,112 @@ mod tests {
         };
 
         assert!(!queue.enqueue(extra, now));
-        assert_eq!(queue.entries.len(), 64);
+        assert_eq!(queue.entries.len(), super::R2O_DISCOVERY_TASK_CAPACITY);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_discovery_capacity_includes_running_and_queued_tasks() {
+        fn target(host: String) -> DiscoveryTarget {
+            DiscoveryTarget {
+                host,
+                endpoint: "127.0.0.1:443".into(),
+                family: 4,
+                shape: SHAPE_MODERN,
+            }
+        }
+
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        for index in 0..4 {
+            let target = target(format!("running-{index}.example"));
+            worker
+                .active
+                .insert(super::r2o_discovery_task_key(&target), target);
+        }
+        for index in 0..60 {
+            assert!(worker.queue(target(format!("queued-{index}.example"))));
+        }
+        assert_eq!(worker.active.len(), 64);
+        assert_eq!(
+            worker
+                .jobs
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entries
+                .len(),
+            60
+        );
+
+        assert!(!worker.queue(target("overflow.example".into())));
+        assert_eq!(worker.active.len(), 64);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_discovery_capacity_includes_deferred_rechecks() {
+        fn target(host: String) -> DiscoveryTarget {
+            DiscoveryTarget {
+                host,
+                endpoint: "127.0.0.1:443".into(),
+                family: 4,
+                shape: SHAPE_MODERN,
+            }
+        }
+
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        for index in 0..63 {
+            let target = target(format!("running-{index}.example"));
+            worker
+                .active
+                .insert(super::r2o_discovery_task_key(&target), target);
+        }
+        let deferred = target("deferred.example".into());
+        worker
+            .pending_rechecks
+            .insert(super::r2o_discovery_task_key(&deferred), (deferred, None));
+
+        assert!(!worker.queue(target("overflow.example".into())));
+        assert_eq!(worker.active.len(), 63);
+        assert_eq!(worker.pending_rechecks.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_discovery_capacity_respects_two_minute_task_rest() {
+        fn target(host: String) -> DiscoveryTarget {
+            DiscoveryTarget {
+                host,
+                endpoint: "127.0.0.1:443".into(),
+                family: 4,
+                shape: SHAPE_MODERN,
+            }
+        }
+
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        for index in 0..63 {
+            let target = target(format!("running-{index}.example"));
+            worker
+                .active
+                .insert(super::r2o_discovery_task_key(&target), target);
+        }
+        let failed = target("resting.example".into());
+        let failure_key = super::r2o_discovery_failure_key(&failed);
+        r2o_test_record_failed_discovery(
+            &mut worker,
+            failed,
+            std::time::Duration::from_secs(10 * 60),
+            true,
+        );
+
+        let overflow = target("overflow.example".into());
+        assert!(!worker.queue(overflow.clone()));
+        worker.failed_at.insert(
+            failure_key,
+            std::time::Instant::now() - super::R2O_DISCOVERY_TASK_REST,
+        );
+        assert!(worker.queue(overflow));
+        assert_eq!(worker.active.len(), 64);
     }
 
     #[cfg(unix)]
