@@ -1732,6 +1732,67 @@ mod tests {
     }
 
     #[test]
+    fn длительная_rtp_сессия_остаётся_активной_и_истекает_после_простоя() {
+        let start = Instant::now();
+        let client = [192, 0, 2, 10];
+        let server = [198, 51, 100, 20];
+        let client_ssrc = [7, 8, 9, 10];
+        let remote_ssrc = [1, 2, 3, 4];
+        let mut sessions = R2oVoiceSessions::default();
+
+        sessions.observe_packet(
+            &packet(
+                client,
+                server,
+                50_000,
+                50_004,
+                &discovery_request(client_ssrc),
+            ),
+            start,
+        );
+
+        for interval in 1..=20 {
+            let now = start + Duration::from_secs(interval * 30);
+            sessions.observe_packet(
+                &packet(
+                    client,
+                    server,
+                    50_000,
+                    50_004,
+                    &rtp_packet(client_ssrc, interval as u16),
+                ),
+                now,
+            );
+            sessions.observe_packet(
+                &packet(
+                    server,
+                    client,
+                    50_004,
+                    50_000,
+                    &rtp_packet(remote_ssrc, interval as u16),
+                ),
+                now,
+            );
+
+            assert!(
+                sessions.sweep(now, true).is_empty(),
+                "двусторонний RTP не должен выглядеть как односторонний обрыв"
+            );
+            assert_eq!(
+                sessions.len(),
+                1,
+                "поток активен на отметке {interval} × 30 с"
+            );
+        }
+
+        let last_packet = start + Duration::from_secs(600);
+        assert_eq!(sessions.expire(last_packet + Duration::from_secs(119)), 0);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions.expire(last_packet + Duration::from_secs(120)), 1);
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
     fn повторное_подключение_с_новым_клиентским_портом_создаёт_новый_поток() {
         let start = Instant::now();
         let client = [192, 0, 2, 10];
