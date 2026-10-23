@@ -47,7 +47,7 @@ jobs:
           set -euo pipefail
           sha=$(git rev-parse "$GITHUB_SHA")
           short=$(git rev-parse --short=7 "$sha")
-          title="R2O $(date -u +%d.%m.%Y) ($short)"
+          title="R2O $(TZ=Europe/Simferopol date +%d.%m.%Y) ($short)"
           id="r2o-$(date -u +%Y%m%d-%H%M)-$short-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           {
             echo "sha=$sha"
