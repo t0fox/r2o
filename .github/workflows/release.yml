@@ -80,6 +80,8 @@ jobs:
         run: sh scripts/r2o-build-openwrt-mipsel-musl.sh
       - name: Собрать и проверить выпуск OpenWrt ARM64 musl
         run: sh scripts/r2o-build-openwrt-aarch64-musl.sh
+      - name: Собрать и проверить выпуск OpenWrt ARMv7 musl
+        run: sh scripts/r2o-build-openwrt-armv7-musl.sh
       - name: Упаковать ABI и общий манифест
         env:
           RELEASE_ID: ${{ needs.plan.outputs.release_id }}
@@ -89,7 +91,7 @@ jobs:
           set -euo pipefail
           builds="$RUNNER_TEMP/builds"
           out="$RUNNER_TEMP/release"
-          mkdir -p "$builds/mipsel" "$builds/mipsel-openwrt-musl" "$builds/aarch64-openwrt-musl" "$builds/armv5-musleabi"
+          mkdir -p "$builds/mipsel" "$builds/mipsel-openwrt-musl" "$builds/aarch64-openwrt-musl" "$builds/armv5-musleabi" "$builds/armv7-openwrt-musl"
           for component in r2o-datapath r2o-controller r2o-panel r2o-telegram r2o-manager r2o-fetch; do
             install -m 0755 "target/mipsel-unknown-linux-gnu/release/$component" \
               "$builds/mipsel/$component-linux-mipsel"
@@ -99,8 +101,10 @@ jobs:
               "$builds/aarch64-openwrt-musl/$component-linux-aarch64-openwrt-musl"
             install -m 0755 "target/armv5te-unknown-linux-musleabi/release/$component" \
               "$builds/armv5-musleabi/$component-linux-armv5-musleabi"
+            install -m 0755 "target/armv7-unknown-linux-musleabihf/release/$component" \
+              "$builds/armv7-openwrt-musl/$component-linux-armv7-openwrt-musl"
           done
-          sh scripts/package-release.sh "$builds" "$out" 'mipsel mipsel-openwrt-musl aarch64-openwrt-musl armv5-musleabi'
+          sh scripts/package-release.sh "$builds" "$out" 'mipsel mipsel-openwrt-musl aarch64-openwrt-musl armv5-musleabi armv7-openwrt-musl'
       - uses: actions/upload-artifact@v4
         with:
           name: signed-release-inputs
@@ -168,5 +172,6 @@ jobs:
             "$out/r2o-mipsel.tar.gz" "$out/r2o-mipsel-openwrt-musl.tar.gz" \
             "$out/r2o-aarch64-openwrt-musl.tar.gz" \
             "$out/r2o-armv5-musleabi.tar.gz" \
+            "$out/r2o-armv7-openwrt-musl.tar.gz" \
             "$out/latest.json" "$out/latest.json.sig"
           gh release edit "$RELEASE_ID" --draft=false --latest

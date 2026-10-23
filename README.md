@@ -54,8 +54,9 @@ r2o-релизы до отдельной согласованной ротаци
 компонент строго из активного слота выпуска. Адаптеры Keenetic/OpenWrt и
 автономная начальная установка описаны в [`router/README.md`](router/README.md).
 Ручная публикация описана в `.github/workflows/release.yml`; она включает
-проверенные в QEMU архивы GNU `mipsel`, OpenWrt `mipsel-openwrt-musl` и
-`aarch64-openwrt-musl`, а также статический ARMv5 `armv5-musleabi`.
+проверенные в QEMU архивы GNU `mipsel`, OpenWrt `mipsel-openwrt-musl`,
+`aarch64-openwrt-musl` и `armv7-openwrt-musl`, а также статический ARMv5
+`armv5-musleabi`.
 Сценарий требует успешного CI для точного коммита и секрет
 `R2O_ED25519_PRIVATE_KEY` в GitHub environment `r2o-signing`, соответствующий
 закреплённому публичному ключу.
@@ -72,14 +73,19 @@ r2o-релизы до отдельной согласованной ротаци
 Выпуск GNU/Linux для MIPS32 little-endian собирается для проверки под QEMU
 командой `sh scripts/build-mipsel.sh`. Полный workspace для OpenWrt MIPS32r2
 little-endian musl собирается командой `sh scripts/r2o-build-openwrt-mipsel-musl.sh`;
-скрипт закрепляет SHA-256 SDK OpenWrt 25.12.5, проверяет ABI и запускает пять
+скрипт закрепляет SHA-256 SDK OpenWrt 25.12.5, проверяет ABI и запускает шесть
 программ с проверкой каталога под QEMU. На физическом Keenetic/OpenWrt роутере
 эту сборку ещё предстоит проверить. Короткая проверка MIPS включает
 `r2o-manager --version`.
 
 Полный OpenWrt ARM64 musl workspace собирается командой
 `sh scripts/r2o-build-openwrt-aarch64-musl.sh`; она проверяет AArch64 ELF,
-статическую связь с musl и запускает пять программ и операции каталога под QEMU.
+статическую связь с musl и запускает шесть программ и операции каталога под QEMU.
+
+Полный workspace для OpenWrt ARMv7 hard-float musl собирается командой
+`sh scripts/r2o-build-openwrt-armv7-musl.sh`; она проверяет little-endian EABI5,
+hard-float ABI, статическую связь с musl и запускает шесть программ и операции
+каталога под QEMU ARM.
 
 Полный workspace для ARMv5 little-endian musleabi собирается и проверяется под
 QEMU командой `sh scripts/r2o-build-armv5-musleabi.sh`. Сценарий проверяет шесть

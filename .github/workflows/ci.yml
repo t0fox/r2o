@@ -368,6 +368,35 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  openwrt-armv7-musl:
+    name: Выпуск OpenWrt ARMv7 musl
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
+        with:
+          target: armv7-unknown-linux-musleabihf
+      - name: Установить QEMU и распаковщик SDK
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user zstd binutils curl
+      - name: Собрать и проверить OpenWrt ARMv7 под QEMU
+        run: sh scripts/r2o-build-openwrt-armv7-musl.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # версия v7.0.2
+        with:
+          name: r2o-openwrt-armv7-musl
+          path: |
+            target/armv7-unknown-linux-musleabihf/release/r2o-datapath
+            target/armv7-unknown-linux-musleabihf/release/r2o-controller
+            target/armv7-unknown-linux-musleabihf/release/r2o-telegram
+            target/armv7-unknown-linux-musleabihf/release/r2o-panel
+            target/armv7-unknown-linux-musleabihf/release/r2o-manager
+            target/armv7-unknown-linux-musleabihf/release/r2o-fetch
+            target/armv7-unknown-linux-musleabihf/release/SHA256SUMS
+          retention-days: 7
+          if-no-files-found: error
+
   donor-differential:
     name: C/Rust differential — ${{ matrix.snapshot }}
     runs-on: ubuntu-24.04
@@ -490,12 +519,13 @@ jobs:
       - openwrt-mipsel-musl
       - openwrt-aarch64-musl
       - armv5-musleabi
+      - openwrt-armv7-musl
       - donor-differential
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - name: Завершиться ошибкой при пропуске или сбое проверки
-        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || needs.panel.result == 'skipped' || needs.telegram.result == 'skipped' || needs.panel-browser.result == 'skipped' || needs.shell.result == 'skipped' || needs.datapath.result == 'skipped' || needs.core.result == 'skipped' || needs.rust-workspace.result == 'skipped' || needs.cross-check.result == 'skipped' || needs.nfqueue-integration.result == 'skipped' || needs.mipsel-release.result == 'skipped' || needs.openwrt-mipsel-musl.result == 'skipped' || needs.openwrt-aarch64-musl.result == 'skipped' || needs.armv5-musleabi.result == 'skipped' || needs.donor-differential.result == 'skipped' || (github.event_name != 'pull_request' && needs.sanitizers.result == 'skipped') }}
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || needs.panel.result == 'skipped' || needs.telegram.result == 'skipped' || needs.panel-browser.result == 'skipped' || needs.shell.result == 'skipped' || needs.datapath.result == 'skipped' || needs.core.result == 'skipped' || needs.rust-workspace.result == 'skipped' || needs.cross-check.result == 'skipped' || needs.nfqueue-integration.result == 'skipped' || needs.mipsel-release.result == 'skipped' || needs.openwrt-mipsel-musl.result == 'skipped' || needs.openwrt-aarch64-musl.result == 'skipped' || needs.armv5-musleabi.result == 'skipped' || needs.openwrt-armv7-musl.result == 'skipped' || needs.donor-differential.result == 'skipped' || (github.event_name != 'pull_request' && needs.sanitizers.result == 'skipped') }}
         run: exit 1
       - name: Все проверки завершились успешно
         run: echo "Все проверки R2O пройдены"

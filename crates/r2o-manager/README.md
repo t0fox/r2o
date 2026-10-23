@@ -15,8 +15,12 @@ r2o-manager verify-release \
 ```
 
 Для OpenWrt MIPS32r2 с musl передайте `--architecture mipsel-openwrt-musl` и
-архив `r2o-mipsel-openwrt-musl.tar.gz`. Тот же ключ выпуска содержит оба ABI;
-менеджер проверяет соответствующую запись и имя бинарника.
+архив `r2o-mipsel-openwrt-musl.tar.gz`. Подписанный манифест содержит отдельную
+запись для каждого ABI; менеджер проверяет выбранную запись и имя бинарника.
+
+Для OpenWrt ARMv7 hard-float musl используйте `--architecture armv7-openwrt-musl`
+и архив `r2o-armv7-openwrt-musl.tar.gz`. Менеджер выбирает для проверки запись
+архитектуры из манифеста выпуска.
 
 При успехе выводится JSON с полями `verified`, идентификатором выпуска,
 версией, архитектурой и контрольной суммой архива. При ошибке команда
@@ -26,7 +30,7 @@ r2o-manager verify-release \
 Формат манифеста соответствует выпускам r2o:
 
 ```json
-{"release_id":"r2o-20261018","version":"0.1.0","notes":"","assets":{"mipsel":{"sha256":"<64 lowercase hex characters>"},"mipsel-openwrt-musl":{"sha256":"<64 lowercase hex characters>"}}}
+{"release_id":"r2o-20261018","version":"0.1.0","notes":"","assets":{"mipsel":{"sha256":"<64 lowercase hex characters>"},"mipsel-openwrt-musl":{"sha256":"<64 lowercase hex characters>"},"armv7-openwrt-musl":{"sha256":"<64 lowercase hex characters>"}}}
 ```
 
 Неизвестные и повторяющиеся поля, небезопасные идентификаторы, неверные

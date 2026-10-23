@@ -47,8 +47,9 @@ assert manifest["assets"]["mipsel"]["sha256"] == digest
 PY
 
 mkdir -p "$TEMP/multi-builds/mipsel" "$TEMP/multi-builds/mipsel-openwrt-musl" \
-    "$TEMP/multi-builds/aarch64-openwrt-musl" "$TEMP/multi-builds/armv5-musleabi" "$TEMP/multi-out"
-for architecture in mipsel mipsel-openwrt-musl aarch64-openwrt-musl armv5-musleabi; do
+    "$TEMP/multi-builds/aarch64-openwrt-musl" "$TEMP/multi-builds/armv5-musleabi" \
+    "$TEMP/multi-builds/armv7-openwrt-musl" "$TEMP/multi-out"
+for architecture in mipsel mipsel-openwrt-musl aarch64-openwrt-musl armv5-musleabi armv7-openwrt-musl; do
     for component in r2o-datapath r2o-controller r2o-panel r2o-telegram r2o-manager r2o-fetch; do
         printf '%s %s\n' "$component" "$architecture" \
             > "$TEMP/multi-builds/$architecture/$component-linux-$architecture"
@@ -56,7 +57,7 @@ for architecture in mipsel mipsel-openwrt-musl aarch64-openwrt-musl armv5-muslea
 done
 RELEASE_ID=r2o-test-multi VERSION=0.1.0 NOTES='fixture release' \
     sh "$ROOT/scripts/package-release.sh" "$TEMP/multi-builds" "$TEMP/multi-out" \
-    'mipsel mipsel-openwrt-musl aarch64-openwrt-musl armv5-musleabi'
+    'mipsel mipsel-openwrt-musl aarch64-openwrt-musl armv5-musleabi armv7-openwrt-musl'
 python3 - "$TEMP/multi-out/latest.json" "$TEMP/multi-out" <<'PY'
 import hashlib
 import json
@@ -66,7 +67,7 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as manifest_file:
     manifest = json.load(manifest_file)
 assert manifest["release_id"] == "r2o-test-multi"
-for architecture in ("mipsel", "mipsel-openwrt-musl", "aarch64-openwrt-musl", "armv5-musleabi"):
+for architecture in ("mipsel", "mipsel-openwrt-musl", "aarch64-openwrt-musl", "armv5-musleabi", "armv7-openwrt-musl"):
     archive = pathlib.Path(sys.argv[2]) / f"r2o-{architecture}.tar.gz"
     with archive.open("rb") as archive_file:
         digest = hashlib.sha256(archive_file.read()).hexdigest()
