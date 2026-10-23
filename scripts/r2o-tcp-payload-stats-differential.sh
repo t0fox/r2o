@@ -9,6 +9,14 @@ r2o_harness="$r2o_log_dir/r2o-tcp-payload-stats-donor.c"
 r2o_oracle="$r2o_log_dir/r2o-tcp-payload-stats-donor-arm64"
 mkdir -p "$r2o_log_dir"
 
+r2o_show_log_on_error() {
+    r2o_status=$?
+    if [ "$r2o_status" -ne 0 ] && [ -f "$r2o_log" ]; then
+        cat "$r2o_log"
+    fi
+}
+trap r2o_show_log_on_error EXIT
+
 if [ ! -d "$r2o_donor" ]; then
     printf 'Не найден каталог исходников донора: %s\n' "$r2o_donor" >&2
     exit 2
@@ -201,3 +209,4 @@ diff -u "$r2o_log_dir/r2o-tcp-payload-stats-c.normalized" \
     "$r2o_log_dir/r2o-tcp-payload-stats-rust.normalized" >>"$r2o_log"
 cat "$r2o_log_dir/r2o-tcp-payload-stats-c.normalized" >>"$r2o_log"
 printf 'C/Rust-счётчики совпали. Журнал: %s\n' "$r2o_log"
+trap - EXIT

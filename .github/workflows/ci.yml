@@ -506,17 +506,9 @@ jobs:
       - name: Установить Clang, sysroot AArch64, QEMU и библиотеки
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq clang-18 qemu-user libc6-dev-arm64-cross \
+          sudo apt-get install -y -qq clang-18 qemu-user \
+            gcc-aarch64-linux-gnu=4:13.2.0-7ubuntu1 libc6-dev-arm64-cross \
             libgcc-13-dev-arm64-cross libssl-dev pkg-config zlib1g-dev binutils
-      - name: Подготовить AArch64 GNU компилятор Clang
-        run: |
-          set -euo pipefail
-          bin="$RUNNER_TEMP/r2o-cross-bin"
-          mkdir -p "$bin"
-          ln -s "$GITHUB_WORKSPACE/scripts/ci-aarch64-linux-gnu-cc.sh" "$bin/aarch64-linux-gnu-gcc"
-          ln -s "$(command -v ar)" "$bin/aarch64-linux-gnu-ar"
-          ln -s "$(command -v ranlib)" "$bin/aarch64-linux-gnu-ranlib"
-          echo "$bin" >> "$GITHUB_PATH"
       - name: Проверить SHA снимка донора и подготовить C-эталон
         env:
           DONOR_SHA: ${{ matrix.donor_sha }}
@@ -564,6 +556,7 @@ jobs:
           path: .rea/*.log
           retention-days: 14
           if-no-files-found: warn
+          include-hidden-files: true
 
   check:
     name: check
