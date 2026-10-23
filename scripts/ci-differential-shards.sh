@@ -11,7 +11,9 @@ UPSTREAM_EXPECTED='r2o-discord-discovery-differential.sh r2o-discovery-active-li
 
 shards_for() {
     case "$1" in
-        baseline) printf '%s\n' all ;;
+        baseline)
+            printf '%s\n' host tcp
+            ;;
         upstream) printf '%s\n' discovery quic-scheduler tcp rst-udp ;;
         *) echo "ci-differential-shards: unknown snapshot: $1" >&2; return 2 ;;
     esac
@@ -21,8 +23,20 @@ scripts_for() {
     snapshot=$1
     shard=$2
     case "$snapshot:$shard" in
-        baseline:all)
-            printf '%s\n' "$BASELINE_EXPECTED" | tr ' ' '\n'
+        baseline:host)
+            printf '%s\n' \
+                r2o-discord-discovery-differential.sh \
+                r2o-discovery-active-lifetime-differential.sh \
+                r2o-discovery-coalesce-differential.sh \
+                r2o-quic-stun-watch-differential.sh \
+                r2o-tcp-exchange-differential.sh \
+                r2o-hold-differential.sh \
+                r2o-tcp-rst-cut-differential.sh \
+                r2o-tcp-rst-observation-differential.sh \
+                r2o-udp-exchange-differential.sh
+            ;;
+        baseline:tcp)
+            printf '%s\n' r2o-tcp-payload-stats-differential.sh
             ;;
         upstream:discovery)
             printf '%s\n' \

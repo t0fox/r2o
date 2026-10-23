@@ -25,7 +25,7 @@ env:
 jobs:
   lint:
     name: Быстрые проверки — ShellCheck и формат Rust
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
@@ -44,7 +44,7 @@ jobs:
   panel:
     name: Панель — HTTP, CLI и безопасность
     needs: lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
@@ -57,7 +57,7 @@ jobs:
   telegram:
     name: Telegram — тесты клиента
     needs: lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
@@ -70,7 +70,7 @@ jobs:
   panel-browser:
     name: Chrome — раскладка и работа панели
     needs: lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       R2O_CHROME_NO_SANDBOX: '1'
@@ -160,7 +160,7 @@ jobs:
   datapath:
     name: Датапат — тесты и переносимость
     needs: lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
@@ -173,7 +173,7 @@ jobs:
   core:
     name: Ядро — тесты управляющего протокола
     needs: lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
@@ -187,7 +187,7 @@ jobs:
     name: Датапат, ядро и панель под AddressSanitizer
     needs: lint
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
@@ -209,7 +209,7 @@ jobs:
   rust-workspace:
     name: Рабочее пространство Rust — формат, тесты и сборка
     needs: lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
@@ -228,7 +228,7 @@ jobs:
   cross-check:
     name: Кросс-проверка — ${{ matrix.target }}
     needs: lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -265,7 +265,7 @@ jobs:
   nfqueue-integration:
     name: Интеграция NFQUEUE в сетевом пространстве
     needs: lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
@@ -463,7 +463,7 @@ jobs:
   donor-differential-plan:
     name: Проверка полноты C/Rust шардов
     needs: lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 2
     permissions:
       contents: read
@@ -487,7 +487,7 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false
-      max-parallel: 5
+      max-parallel: 6
       matrix: ${{ fromJSON(needs.donor-differential-plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
@@ -503,12 +503,34 @@ jobs:
         with:
           toolchain: 1.98.0
           target: aarch64-unknown-linux-gnu
-      - name: Установить Clang, sysroot AArch64, QEMU и библиотеки
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # версия v6.1.0
+        with:
+          path: ${{ runner.temp }}/r2o-apt-archives
+          key: r2o-apt-ubuntu-24.04-differential-${{ matrix.snapshot }}-${{ matrix.shard }}-gcc13-qemu8-v1
+      - name: Установить инструменты differential-сценариев
+        env:
+          DONOR_SNAPSHOT: ${{ matrix.snapshot }}
+          DIFFERENTIAL_SHARD: ${{ matrix.shard }}
         run: |
+          set -euo pipefail
+          packages=(clang-18 libssl-dev pkg-config zlib1g-dev binutils)
+          case "$DONOR_SNAPSHOT:$DIFFERENTIAL_SHARD" in
+            baseline:tcp|upstream:tcp|upstream:quic-scheduler)
+              packages+=(qemu-user=1:8.2.2+ds-0ubuntu1.18 \
+                gcc-aarch64-linux-gnu=4:13.2.0-7ubuntu1 \
+                libc6-dev-arm64-cross libgcc-13-dev-arm64-cross)
+              r2o_needs_aarch64=1
+              ;;
+            *) r2o_needs_aarch64=0 ;;
+          esac
+          mkdir -p "$RUNNER_TEMP/r2o-apt-archives/partial"
           sudo apt-get update -qq
-          sudo apt-get install -y -qq clang-18 qemu-user \
-            gcc-aarch64-linux-gnu=4:13.2.0-7ubuntu1 libc6-dev-arm64-cross \
-            libgcc-13-dev-arm64-cross libssl-dev pkg-config zlib1g-dev binutils
+          sudo apt-get install -y -qq \
+            -o Dir::Cache::archives="$RUNNER_TEMP/r2o-apt-archives" \
+            "${packages[@]}"
+          if [ "$r2o_needs_aarch64" -eq 1 ]; then
+            test "$(aarch64-linux-gnu-gcc -dumpfullversion)" = 13.3.0
+          fi
       - name: Проверить SHA снимка донора и подготовить C-эталон
         env:
           DONOR_SHA: ${{ matrix.donor_sha }}
@@ -580,7 +602,7 @@ jobs:
       - armv5-musleabi
       - openwrt-armv7-musl
       - donor-differential
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
       - name: Завершиться ошибкой при пропуске или сбое проверки
