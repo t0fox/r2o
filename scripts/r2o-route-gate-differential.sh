@@ -8,6 +8,7 @@ r2o_session_test="$r2o_donor_datapath/test_session"
 r2o_log_dir="$r2o_script_dir/.rea"
 r2o_log="$r2o_log_dir/r2o-route-gate-differential-$(date +%Y%m%d-%H%M%S).log"
 r2o_started_at=$(date +%s)
+r2o_upstream_sha=86b05b96457fccdec6b7ddc0e8478508f80f0bab
 
 r2o_run_timed() {
     r2o_label=$1
@@ -30,6 +31,11 @@ r2o_show_log_on_error() {
     fi
 }
 trap r2o_show_log_on_error EXIT
+
+if [ "${R2O_EXPECTED_DONOR_SHA:-}" != "$r2o_upstream_sha" ]; then
+    printf 'Route-gate differential requires pinned upstream donor %s\n' "$r2o_upstream_sha" >&2
+    exit 2
+fi
 
 for r2o_test in "$r2o_route_test" "$r2o_session_test"; do
     if [ ! -x "$r2o_test" ]; then
@@ -67,14 +73,14 @@ mkdir -p "$r2o_log_dir"
         "$r2o_donor_datapath/session.c" \
         "$r2o_donor_datapath/test_session.c" \
         "$r2o_session_test")
-    printf '%s\n' "$r2o_hashes" | grep -q '53fdb658a6dadce23273ffda1d187a427cf5ae129c5284922c2d24584e6d398e'
-    printf '%s\n' "$r2o_hashes" | grep -q '03be99b80fa5f1fdff16af9cfef183a0c670e34c36113bdde0b0a397242b8eb2'
-    printf '%s\n' "$r2o_hashes" | grep -q '969b16e8f86da0fe651654d28a8ac627b46e9cae3e8b2a61f271f3d1ca9cf89a'
-    printf '%s\n' "$r2o_hashes" | grep -q '9e7e2ec357aaace34768991d736906e36ff8da64fdd8e72a1c8becdaf166aee8'
-    printf '%s\n' "$r2o_hashes" | grep -q '5a42f55a0712c30b22527d25737592fb897d4a77d092d74a1871f611e2a0d2d5'
-    printf '%s\n' "$r2o_hashes" | grep -q '39dada3d4fbdaf943bf7b2a788090ab3d16a71065a58c16d39901575247f7187'
-    printf '%s\n' "$r2o_hashes" | grep -q '972f5289824d45b32820e7a7d996b89c211b2da4a276ee308b6304eb8b56377e'
-    printf '%s\n' "$r2o_hashes" | grep -q 'd86288a7ecc71eed9ac511cbffd37968d5c8155338ad13700ed1540700c28199'
+    printf '%s\n' "$r2o_hashes" | grep -q '3e5f0ea6bf53e2b8a542446b30b8d0178453f61881755db547c088c3169e6845'
+    printf '%s\n' "$r2o_hashes" | grep -q '8695849a779e5e1a6f554ce5599900b146092eb8806e42df11f8e667a28ba8d6'
+    printf '%s\n' "$r2o_hashes" | grep -q 'fa46df3ecbb2b33777a447de17bbc5c7ae96d0993f39d0de79297288de3478b0'
+    printf '%s\n' "$r2o_hashes" | grep -q 'f2863fbf294fc185568a6b500286e3c36d18485d4302417403301cbeef69d45d'
+    printf '%s\n' "$r2o_hashes" | grep -q 'd6e987d1080a7a20492c0d6f721fea687eefcd7cc33e966221c22e1b1e33eb59'
+    printf '%s\n' "$r2o_hashes" | grep -q 'f3bc8c4ddd334a189c63dc1bbf868eff258c2fdff3199e285d4a098d2ad3fe1f'
+    printf '%s\n' "$r2o_hashes" | grep -q 'daf5b11d04ddc9ade28d7b5acde94fe1ec629bea2bbc49a2d98cf726ee8cbdd9'
+    printf '%s\n' "$r2o_hashes" | grep -q 'e1720cfc80b9d707a41363f145e7d0dcaea01013ea7470b972974bde3e43db27'
 
     printf '\nЗапуск готовых тестов C-донора без компиляции C\n'
     r2o_run_timed 'проверки шлюза маршрутизации донора' "$r2o_route_test"

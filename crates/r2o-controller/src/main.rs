@@ -8,19 +8,19 @@ use r2k_core::control::{
     EVENT_R2O_TCP_CLEAN_HANDSHAKE, EVENT_R2O_TCP_EARLY_RST, EVENT_R2O_TCP_EXCHANGE,
     EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_REPEAT, EVENT_R2O_TCP_RST_AFTER_APP,
     EVENT_R2O_TCP_RST_CUT, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF,
-    EVENT_R2O_VOICE_STUN_PROOF, EVENT_R2O_VOICE_SUSPECT, EVENT_REFUSED, Frame, HelloEvent,
-    PROTOCOL_VERSION, RELEASE_ID, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN,
-    SHAPE_QUIC, SHAPE_VOICE, VOICE_ADDR_PROBE_LEASE_MAX_MS, decode_ack, decode_applied,
-    decode_client_shape, decode_greeting, decode_hello, decode_http_portal, decode_http_response,
-    decode_r2o_quic_stall, decode_r2o_quic_suspect, decode_r2o_tcp_clean_handshake,
-    decode_r2o_tcp_early_rst, decode_r2o_tcp_exchange, decode_r2o_tcp_fin_retry,
-    decode_r2o_tcp_repeat, decode_r2o_tcp_rst_after_app, decode_r2o_tcp_rst_cut_signal,
-    decode_r2o_tcp_silence, decode_r2o_tcp_stall, decode_r2o_voice_proof, decode_r2o_voice_suspect,
-    decode_refused, encode_arm_shape, encode_delete_addr, encode_delete_addr_probe,
-    encode_delete_name, encode_delete_name_probe, encode_delete_voice_addr_probe, encode_frame,
-    encode_set_addr, encode_set_addr_probe, encode_set_bypass, encode_set_https, encode_set_name,
-    encode_set_name_probe, encode_set_suffix, encode_set_tcp_stall_budgets, encode_set_voice_addr,
-    encode_set_voice_addr_probe, read_frame,
+    EVENT_R2O_VOICE_RTP_PROOF, EVENT_R2O_VOICE_STUN_PROOF, EVENT_R2O_VOICE_SUSPECT, EVENT_REFUSED,
+    Frame, HelloEvent, PROTOCOL_VERSION, RELEASE_ID, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_LEGACY,
+    SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, VOICE_ADDR_PROBE_LEASE_MAX_MS, decode_ack,
+    decode_applied, decode_client_shape, decode_greeting, decode_hello, decode_http_portal,
+    decode_http_response, decode_r2o_quic_stall, decode_r2o_quic_suspect,
+    decode_r2o_tcp_clean_handshake, decode_r2o_tcp_early_rst, decode_r2o_tcp_exchange,
+    decode_r2o_tcp_fin_retry, decode_r2o_tcp_repeat, decode_r2o_tcp_rst_after_app,
+    decode_r2o_tcp_rst_cut_signal, decode_r2o_tcp_silence, decode_r2o_tcp_stall,
+    decode_r2o_voice_proof, decode_r2o_voice_suspect, decode_refused, encode_arm_shape,
+    encode_delete_addr, encode_delete_addr_probe, encode_delete_name, encode_delete_name_probe,
+    encode_delete_voice_addr_probe, encode_frame, encode_set_addr, encode_set_addr_probe,
+    encode_set_bypass, encode_set_https, encode_set_name, encode_set_name_probe, encode_set_suffix,
+    encode_set_tcp_stall_budgets, encode_set_voice_addr, encode_set_voice_addr_probe, read_frame,
 };
 use r2k_core::plan::{PROTO_HTTP, PROTO_VOICE, Plan};
 use r2o_controller::ask::{
@@ -1546,7 +1546,7 @@ fn catalog_commands(catalog: &Catalog) -> Result<CompiledCatalog, Box<dyn Error>
                 && binding.transport == 17
                 && binding.family == 4
                 && binding.shape == SHAPE_VOICE
-                && matches!(binding.verified_by, 3 | 4)
+                && binding.verified_by == 5
             {
                 let server = binding.target.parse::<std::net::Ipv4Addr>().map_err(|_| {
                     format!("адресная голосовая привязка неверна: {}", binding.target)
@@ -5026,6 +5026,7 @@ struct R2oVoiceTrialContext {
     started_at: std::time::Instant,
     renew_at: std::time::Instant,
     expires_at: std::time::Instant,
+    response_confirmed: bool,
 }
 
 #[cfg(unix)]
@@ -5374,7 +5375,7 @@ fn r2o_known_voice_discovery_prefix(
                 || binding.transport != 17
                 || binding.family != 4
                 || binding.shape != SHAPE_VOICE
-                || binding.verified_by != 4
+                || !matches!(binding.verified_by, 4 | 5)
             {
                 return None;
             }
@@ -7921,6 +7922,7 @@ impl ControlClient {
             started_at,
             renew_at: now + R2O_VOICE_TRIAL_RENEW_INTERVAL,
             expires_at,
+            response_confirmed: false,
         };
         let ack = self.set_r2o_voice_trial(&trial)?;
         if ack.trial_id != Some(trial_id) || !ack.ok {
@@ -8044,10 +8046,22 @@ impl ControlClient {
         {
             return Err("голосовое подтверждение не совпало с временным опытом".into());
         }
-        let verified_by = match proof.proof {
-            r2k_core::control::R2oVoiceProofKind::DiscordDiscovery { .. } => 4,
-            r2k_core::control::R2oVoiceProofKind::StunBinding => 3,
+        let (outbound_packets, inbound_packets) = match proof.proof {
+            r2k_core::control::R2oVoiceProofKind::RtpMedia {
+                outbound_packets,
+                inbound_packets,
+            } if outbound_packets >= r2k_core::control::VOICE_RTP_PROOF_MIN_PACKETS
+                && inbound_packets >= r2k_core::control::VOICE_RTP_PROOF_MIN_PACKETS =>
+            {
+                (outbound_packets, inbound_packets)
+            }
+            _ => {
+                return Err(
+                    "постоянную voice-привязку подтверждает только двусторонний RTP".into(),
+                );
+            }
         };
+        let verified_by = 5;
         let (_lock, previous) = locked_catalog(catalog_path, catalog)?;
         let mut updated = previous.clone();
         let now = std::time::SystemTime::now()
@@ -8080,19 +8094,10 @@ impl ControlClient {
         if let Err(error) = self.retire_r2o_voice_trial(&trial) {
             eprintln!("временный voice-план доживёт до конца аренды: {error}");
         }
-        match proof.proof {
-            r2k_core::control::R2oVoiceProofKind::DiscordDiscovery {
-                mapped_ip,
-                mapped_port,
-            } => println!(
-                "Discord Discovery подтверждён: адресный план {plan_id} сохранён для {}; передачу аудио отдельно не измеряли (ответ {mapped_ip}:{mapped_port})",
-                trial.target.server.ip(),
-            ),
-            r2k_core::control::R2oVoiceProofKind::StunBinding => println!(
-                "STUN Binding подтверждён: адресный план {plan_id} сохранён для {}; передачу аудио отдельно не измеряли",
-                trial.target.server.ip(),
-            ),
-        }
+        println!(
+            "Двусторонний RTP подтверждён: адресный план {plan_id} сохранён для {}; принято RTP-пакетов исход/вход={outbound_packets}/{inbound_packets}; качество и слышимость аудио отдельно не измерялись",
+            trial.target.server.ip(),
+        );
         Ok(())
     }
 
@@ -8924,7 +8929,7 @@ impl ControlClient {
                 }
                 if matches!(
                     frame.kind,
-                    EVENT_R2O_VOICE_PROOF | EVENT_R2O_VOICE_STUN_PROOF
+                    EVENT_R2O_VOICE_PROOF | EVENT_R2O_VOICE_STUN_PROOF | EVENT_R2O_VOICE_RTP_PROOF
                 ) {
                     let proof = decode_r2o_voice_proof(&frame)
                         .map_err(|error| format!("подтверждение голосового потока: {error}"))?;
@@ -8933,6 +8938,7 @@ impl ControlClient {
                             "Discord Discovery"
                         }
                         r2k_core::control::R2oVoiceProofKind::StunBinding => "STUN",
+                        r2k_core::control::R2oVoiceProofKind::RtpMedia { .. } => "RTP",
                     };
                     let Some(trial) = r2o_voice_trials.get(&proof.trial_id).cloned() else {
                         println!(
@@ -8956,21 +8962,45 @@ impl ControlClient {
                     }
                     if !r2o_voice_proof_matches_target(&proof, trial.target) {
                         println!(
-                            "Discovery-ответ пришёл по другому клиентскому или серверному адресу"
+                            "{proof_name}-доказательство пришло по другому клиентскому или серверному адресу"
                         );
                         std::io::stdout().flush()?;
                         continue;
                     }
-                    if let Some((_, catalog, path, _)) = &mut discovery {
-                        r2o_voice_trials.remove(&proof.trial_id);
-                        if let Err(error) =
-                            self.confirm_r2o_voice_trial(trial.clone(), &proof, catalog, path)
-                        {
-                            r2o_voice_trials.insert(trial.trial_id, trial);
-                            eprintln!("voice-план не подтверждён: {error}");
+                    match proof.proof {
+                        r2k_core::control::R2oVoiceProofKind::DiscordDiscovery { .. }
+                        | r2k_core::control::R2oVoiceProofKind::StunBinding => {
+                            if let Some(active_trial) = r2o_voice_trials.get_mut(&proof.trial_id) {
+                                active_trial.response_confirmed = true;
+                            }
+                            println!(
+                                "{proof_name}-ответ временного плана подтверждён для {}; ожидаются минимум {} принятых RTP-пакета в каждом направлении",
+                                trial.target.server,
+                                r2k_core::control::VOICE_RTP_PROOF_MIN_PACKETS
+                            );
                         }
-                    } else {
-                        println!("Discovery-ответ получен без активного каталога автопоиска");
+                        r2k_core::control::R2oVoiceProofKind::RtpMedia { .. } => {
+                            if !trial.response_confirmed {
+                                println!(
+                                    "RTP-доказательство проигнорировано: нет подтверждённого Discovery/STUN-ответа для попытки"
+                                );
+                            } else if let Some((_, catalog, path, _)) = &mut discovery {
+                                r2o_voice_trials.remove(&proof.trial_id);
+                                if let Err(error) = self.confirm_r2o_voice_trial(
+                                    trial.clone(),
+                                    &proof,
+                                    catalog,
+                                    path,
+                                ) {
+                                    r2o_voice_trials.insert(trial.trial_id, trial);
+                                    eprintln!("voice-план не подтверждён: {error}");
+                                }
+                            } else {
+                                println!(
+                                    "RTP-доказательство получено без активного каталога автопоиска"
+                                );
+                            }
+                        }
                     }
                     std::io::stdout().flush()?;
                     continue;
@@ -11638,6 +11668,7 @@ impl ControlClient {
                 | EVENT_R2O_TCP_EXCHANGE
                 | EVENT_R2O_VOICE_SUSPECT
                 | EVENT_R2O_VOICE_PROOF
+                | EVENT_R2O_VOICE_RTP_PROOF
                 | EVENT_R2O_VOICE_STUN_PROOF
                 | EVENT_R2O_JOURNAL_ENTRY
                 | EVENT_R2O_JOURNAL_END
@@ -18866,7 +18897,7 @@ mod tests {
             "198.51.100.21".parse().unwrap(),
             &text,
             1_800_000_001,
-            3,
+            5,
         )
         .unwrap();
 
@@ -18879,6 +18910,30 @@ mod tests {
         let plan = Plan::parse(&command.body[4..]).unwrap();
         assert_eq!(plan.transport, 17);
         assert_eq!(plan.proto, r2k_core::plan::PROTO_VOICE);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn каталог_не_устанавливает_старые_voice_привязки_без_rtp() {
+        let prefix = r2k_core::stun::binding_request([0x94; 12]);
+        let text = r2o_controller::voice_discovery::r2o_voice_arm_plan_text(&prefix);
+
+        for verified_by in [3, 4] {
+            let mut catalog = Catalog::default();
+            r2o_controller::voice_discovery::r2o_save_confirmed_voice_binding(
+                &mut catalog,
+                "198.51.100.21".parse().unwrap(),
+                &text,
+                1_800_000_001,
+                5,
+            )
+            .unwrap();
+            catalog.boxes[0].bindings[0].verified_by = verified_by;
+
+            let compiled = catalog_commands(&catalog).unwrap();
+            assert!(compiled.commands.is_empty());
+            assert_eq!(compiled.skipped, 1);
+        }
     }
 
     #[cfg(unix)]
@@ -18993,6 +19048,7 @@ mod tests {
                 started_at: std::time::Instant::now() - std::time::Duration::from_secs(599),
                 renew_at: std::time::Instant::now() + std::time::Duration::from_secs(60),
                 expires_at: std::time::Instant::now() + std::time::Duration::from_secs(1),
+                response_confirmed: false,
             };
             let result = client.retire_r2o_voice_trial(&trial);
             server.join().unwrap();
@@ -19032,6 +19088,7 @@ mod tests {
             started_at: r2o_started_at,
             renew_at: r2o_started_at + R2O_VOICE_TRIAL_RENEW_INTERVAL,
             expires_at: r2o_started_at + R2O_VOICE_TRIAL_TASK_LIFETIME,
+            response_confirmed: false,
         };
         assert!(super::r2o_voice_target_has_active_trial(
             &HashMap::from([(r2o_trial_id, r2o_trial.clone())]),
@@ -19177,6 +19234,7 @@ mod tests {
                         started_at: r2o_started_at,
                         renew_at: r2o_started_at,
                         expires_at: r2o_started_at + R2O_VOICE_TRIAL_TASK_LIFETIME,
+                        response_confirmed: false,
                     },
                 ),
                 (
@@ -19189,6 +19247,7 @@ mod tests {
                         started_at: r2o_started_at,
                         renew_at: r2o_started_at + R2O_VOICE_TRIAL_RENEW_INTERVAL * 2,
                         expires_at: r2o_started_at + R2O_VOICE_TRIAL_TASK_LIFETIME,
+                        response_confirmed: false,
                     },
                 ),
             ]);
@@ -19245,6 +19304,7 @@ mod tests {
             started_at: now,
             renew_at: now + Duration::from_secs(60),
             expires_at: now + R2O_VOICE_TRIAL_TASK_LIFETIME,
+            response_confirmed: false,
         };
         r2o_hold_voice_trial_until_expiry(&mut trial);
         let expires_at = trial.expires_at;
@@ -19292,6 +19352,7 @@ mod tests {
             started_at: now,
             renew_at: now + Duration::from_secs(60),
             expires_at: now + Duration::from_secs(600),
+            response_confirmed: false,
         };
         let mut key = [0; KEY_LEN];
         key[0] = 4;
@@ -19402,6 +19463,7 @@ mod tests {
             started_at: std::time::Instant::now(),
             renew_at: std::time::Instant::now() + std::time::Duration::from_secs(60),
             expires_at: std::time::Instant::now() + std::time::Duration::from_secs(600),
+            response_confirmed: true,
         };
         let mut key = [0; r2k_core::control::KEY_LEN];
         key[0] = 4;
@@ -19413,7 +19475,10 @@ mod tests {
         let proof = r2k_core::control::R2oVoiceProofEvent {
             key,
             trial_id,
-            proof: r2k_core::control::R2oVoiceProofKind::StunBinding,
+            proof: r2k_core::control::R2oVoiceProofKind::RtpMedia {
+                outbound_packets: 3,
+                inbound_packets: 3,
+            },
         };
         let mut client = ControlClient::connect(socket_path).unwrap();
         let mut catalog = Catalog::load(&catalog_path).unwrap();
@@ -19430,7 +19495,7 @@ mod tests {
         assert_eq!(&remove_body[8..10], &50_004_u16.to_be_bytes());
         assert_eq!(&remove_body[10..], &trial_id);
         let saved = Catalog::load(&catalog_path).unwrap();
-        assert_eq!(saved.boxes[0].bindings[0].verified_by, 3);
+        assert_eq!(saved.boxes[0].bindings[0].verified_by, 5);
         assert_eq!(saved.boxes[0].bindings[0].target, "198.51.100.20");
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -19600,6 +19665,7 @@ mod tests {
                     started_at: r2o_now - Duration::from_secs(601),
                     renew_at: r2o_now - Duration::from_secs(30),
                     expires_at: r2o_now - Duration::from_secs(1),
+                    response_confirmed: false,
                 },
             ),
             (
@@ -19612,6 +19678,7 @@ mod tests {
                     started_at: r2o_now - Duration::from_secs(599),
                     renew_at: r2o_now + Duration::from_secs(30),
                     expires_at: r2o_now + Duration::from_secs(1),
+                    response_confirmed: false,
                 },
             ),
         ]);
@@ -19651,6 +19718,7 @@ mod tests {
                 renew_at: r2o_started_at + Duration::from_secs(60),
                 expires_at: r2o_started_at + Duration::from_secs(600),
                 started_at: r2o_started_at,
+                response_confirmed: false,
             },
         )]);
 

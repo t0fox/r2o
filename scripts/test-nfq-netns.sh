@@ -922,7 +922,7 @@ if received != [b"FAKE", request]:
 print("ПРОЙДЕНО: контроллер установил @discord-voice, datapath отправил подделку перед исходным STUN-запросом")
 PY
 
-ip netns exec "$NS" python3 - "$WORK/r2o-datapath-voice.sock" "$R2O_CONTROL_WIRE" <<'PY'
+ip netns exec "$NS" python3 - "$WORK/r2o-datapath-voice.sock" "$R2O_CONTROL_WIRE" "$WORK/voice.r2op" <<'PY'
 import socket
 import struct
 import sys
@@ -961,7 +961,7 @@ received = []
 
 def receive_datagrams():
     for _ in range(3):
-        received.append(server.recvfrom(2048)[0])
+        received.append(server.recvfrom(2048))
 
 receiver = threading.Thread(target=receive_datagrams)
 receiver.start()
@@ -971,10 +971,8 @@ client.bind(("127.0.0.1", 40151))
 client.sendto(request, ("127.0.0.1", 50004))
 time.sleep(0.1)
 client.sendto(request, ("127.0.0.1", 50004))
-client.close()
 receiver.join(3)
-server.close()
-if receiver.is_alive() or received != [b"FAKE", request, request]:
+if receiver.is_alive() or [payload for payload, _ in received] != [b"FAKE", request, request]:
     raise SystemExit(f"ОШИБКА: voice-план повторно применён к одному UDP-потоку или изменил пакет: {received!r}")
 
 deadline = time.monotonic() + 5
@@ -989,6 +987,103 @@ while time.monotonic() < deadline:
 else:
     raise SystemExit("ОШИБКА: datapath не передал событие голосового подозрения")
 
+def send_command(command, body):
+    payload = struct.pack("!H", command) + body
+    controller.sendall(struct.pack("!I", len(payload)) + payload)
+
+def wait_ack(command, trial_id=None):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        kind, body = read_frame(controller)
+        if kind != 0x0008:
+            continue
+        if len(body) < 42 or struct.unpack("!H", body[38:40])[0] != command or body[40] != 1:
+            raise SystemExit(f"ОШИБКА: команда 0x{command:04x} не принята datapath: {body!r}")
+        if trial_id is not None and (len(body) != 58 or body[42:58] != trial_id):
+            raise SystemExit(f"ОШИБКА: ACK не подтвердил voice trial ID: {body!r}")
+        return
+    raise SystemExit(f"ОШИБКА: datapath не подтвердил команду 0x{command:04x}")
+
+send_command(0x0085, b"")
+wait_ack(0x0085)
+trial_id = bytes([0x55]) * 16
+with open(sys.argv[3], "rb") as plan_file:
+    voice_plan = plan_file.read()
+probe_body = (
+    socket.inet_aton("127.0.0.1")
+    + socket.inet_aton("127.0.0.1")
+    + struct.pack("!HI", 50004, 120_000)
+    + voice_plan
+    + trial_id
+)
+send_command(0x0092, probe_body)
+wait_ack(0x0092, trial_id)
+
+trial_request = b"\x00\x01\x00\x00\x21\x12\xa4\x42" + bytes(range(12, 24))
+trial_client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+trial_client.bind(("127.0.0.1", 40152))
+trial_client.sendto(trial_request, ("127.0.0.1", 50004))
+trial_datagrams = []
+for _ in range(2):
+    try:
+        trial_datagrams.append(server.recvfrom(2048))
+    except TimeoutError:
+        break
+if [payload for payload, _ in trial_datagrams] != [b"FAKE", trial_request]:
+    raise SystemExit(f"ОШИБКА: временный voice-план не применился к точному потоку: {trial_datagrams!r}")
+response = b"\x01\x01\x00\x00\x21\x12\xa4\x42" + trial_request[8:20]
+server.sendto(response, trial_datagrams[1][1])
+trial_client.settimeout(3)
+if trial_client.recvfrom(2048)[0] != response:
+    raise SystemExit("ОШИБКА: клиент не получил STUN Binding Response через NFQUEUE")
+
+deadline = time.monotonic() + 5
+while time.monotonic() < deadline:
+    kind, event = read_frame(controller)
+    if kind != 0x001D:
+        continue
+    if len(event) != 54 or event[0] != 4 or event[37] != 17 or event[38:54] == bytes(16):
+        raise SystemExit(f"ОШИБКА: неверное STUN-подтверждение voice-пробы: {event!r}")
+    if event[38:54] != trial_id:
+        raise SystemExit(f"ОШИБКА: STUN-подтверждение относится к другому trial: {event[38:54]!r}")
+    print("ПРОЙДЕНО: NFQUEUE передала STUN Binding proof временной voice-пробы")
+    break
+else:
+    raise SystemExit("ОШИБКА: datapath не подтвердил STUN Binding response")
+
+def rtp(sequence, ssrc):
+    return b"\x80\x60" + sequence.to_bytes(2, "big") + (sequence * 960).to_bytes(4, "big") + ssrc.to_bytes(4, "big") + b"\x00"
+
+for sequence in range(100, 103):
+    trial_client.sendto(rtp(sequence, 0x11223344), ("127.0.0.1", 50004))
+    payload, client_address = server.recvfrom(2048)
+    if payload != rtp(sequence, 0x11223344):
+        raise SystemExit(f"ОШИБКА: исходный RTP пакет изменён: {payload!r}")
+    server.sendto(rtp(sequence + 100, 0x55667788), client_address)
+    if trial_client.recvfrom(2048)[0] != rtp(sequence + 100, 0x55667788):
+        raise SystemExit("ОШИБКА: входящий RTP пакет не прошёл NFQUEUE без изменений")
+
+deadline = time.monotonic() + 5
+while time.monotonic() < deadline:
+    kind, event = read_frame(controller)
+    if kind != 0x001E:
+        continue
+    if (
+        len(event) != 56
+        or event[0] != 4
+        or event[37] != 17
+        or event[38:54] != trial_id
+        or event[54:56] != b"\x03\x03"
+    ):
+        raise SystemExit(f"ОШИБКА: неверное подтверждение двустороннего RTP: {event!r}")
+    print("ПРОЙДЕНО: NFQUEUE подтвердила три исходящих и три входящих RTP-пакета")
+    break
+else:
+    raise SystemExit("ОШИБКА: NFQUEUE не передала подтверждение двустороннего RTP")
+
+client.close()
+trial_client.close()
+server.close()
 controller.close()
 PY
 

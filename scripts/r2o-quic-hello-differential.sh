@@ -7,6 +7,12 @@ r2o_donor_test="$r2o_donor_datapath/test_quic_session"
 r2o_log_dir="$r2o_script_dir/.rea"
 r2o_log="$r2o_log_dir/r2o-quic-hello-differential-$(date +%Y%m%d-%H%M%S).log"
 r2o_started_at=$(date +%s)
+r2o_upstream_sha=86b05b96457fccdec6b7ddc0e8478508f80f0bab
+
+if [ "${R2O_EXPECTED_DONOR_SHA:-}" != "$r2o_upstream_sha" ]; then
+    printf 'QUIC differential requires pinned upstream donor %s\n' "$r2o_upstream_sha" >&2
+    exit 2
+fi
 
 r2o_show_log_on_error() {
     r2o_status=$?
@@ -57,11 +63,11 @@ mkdir -p "$r2o_log_dir"
     r2o_test_sha256=$(sha256sum "$r2o_donor_datapath/test_quic_session.c" | awk '{print $1}')
     r2o_test_binary_sha256=$(sha256sum "$r2o_donor_test" | awk '{print $1}')
     if [ "$r2o_session_sha256" != \
-        '39dada3d4fbdaf943bf7b2a788090ab3d16a71065a58c16d39901575247f7187' ] || \
+        'f3bc8c4ddd334a189c63dc1bbf868eff258c2fdff3199e285d4a098d2ad3fe1f' ] || \
         [ "$r2o_test_sha256" != \
-        'fbf47889b8d6d7c712b02f5643d37ae937723d004368e20d5f4e0c2e58493c0a' ] || \
+        'a9ab9fe07dae2ece70360942dfc559ce843479b11bdb6166faee9826ef9f91ca' ] || \
         [ "$r2o_test_binary_sha256" != \
-        'd1fc01f88f90710cf1bd541dcab68ff97ab2e384242ff3cf0e8a9dd843b3f1e8' ]; then
+        '53556457b4fbc1ac6413b42191afb4bf05d110547b36323123d2a3a2ff3f009d' ]; then
         printf 'Исходники или бинарник донора отличаются от проверенного снимка\n' >&2
         exit 1
     fi

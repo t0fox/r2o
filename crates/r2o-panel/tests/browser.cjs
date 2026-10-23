@@ -46,6 +46,7 @@ async function waitFor(read, description, attempts = 200) {
 async function main() {
   assert.equal(panelUi.voiceProofNote({ transport: 17, shape: 5, verified_by: 3 }), "STUN Binding подтверждён; RTP не проверен", "STUN не выдаётся за подтверждение RTP");
   assert.equal(panelUi.voiceProofNote({ transport: 17, shape: 5, verified_by: 4 }), "IP Discovery подтверждён; RTP не проверен", "Discovery не выдаётся за подтверждение RTP");
+  assert.equal(panelUi.voiceProofNote({ transport: 17, shape: 5, verified_by: 5 }), "Двусторонний RTP подтверждён; качество аудио не измерялось", "RTP-подтверждение не выдаётся за качество аудио");
   assert.equal(panelUi.voiceProofNote({ transport: 17, shape: 5, verified_by: 0 }), "RTP не проверен", "голосовая привязка без источника подтверждения не заявляет RTP");
   assert.equal(panelUi.voiceProofNote({ transport: 6, shape: 5, verified_by: 3 }), "", "заметка RTP не показывается для TCP");
   assert.ok(fs.existsSync(panelBinary), `Не найден исполняемый файл панели: ${panelBinary}`);

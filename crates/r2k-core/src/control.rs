@@ -4,7 +4,7 @@ use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-pub const PROTOCOL_VERSION: u16 = 43;
+pub const PROTOCOL_VERSION: u16 = 44;
 pub const FRAME_MAX: usize = 65_536;
 pub const KEY_LEN: usize = 38;
 pub const MAX_DNS_NAME_LEN: usize = 253;
@@ -30,6 +30,7 @@ pub const EVENT_R2O_TCP_REPEAT: u16 = 0x001a;
 pub const EVENT_R2O_TCP_RST_CUT: u16 = 0x001b;
 pub const EVENT_R2O_TCP_EXCHANGE: u16 = 0x001c;
 pub const EVENT_R2O_VOICE_STUN_PROOF: u16 = 0x001d;
+pub const EVENT_R2O_VOICE_RTP_PROOF: u16 = 0x001e;
 pub const EVENT_R2O_JOURNAL_ENTRY: u16 = 0x0014;
 pub const EVENT_R2O_JOURNAL_END: u16 = 0x0015;
 pub const COMMAND_SET_NAME: u16 = 0x0081;
@@ -54,6 +55,7 @@ pub const COMMAND_DEL_ADDR_PROBE: u16 = 0x0095;
 pub const COMMAND_SET_TCP_STALL_BUDGETS: u16 = 0x0096;
 pub const MAX_TCP_STALL_BUDGETS: usize = 8;
 pub const VOICE_ADDR_PROBE_LEASE_MAX_MS: u32 = 120_000;
+pub const VOICE_RTP_PROOF_MIN_PACKETS: u8 = 3;
 pub const ADDR_PROBE_LEASE_MAX_MS: u32 = 120_000;
 pub const MAX_HTTPS_TTL_SECONDS: u32 = 6 * 60 * 60;
 pub const ACK_OK: u8 = 0;
@@ -464,6 +466,10 @@ pub enum R2oVoiceProofKind {
         mapped_port: u16,
     },
     StunBinding,
+    RtpMedia {
+        outbound_packets: u8,
+        inbound_packets: u8,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -478,6 +484,7 @@ impl R2oVoiceProofEvent {
         match self.proof {
             R2oVoiceProofKind::DiscordDiscovery { .. } => EVENT_R2O_VOICE_PROOF,
             R2oVoiceProofKind::StunBinding => EVENT_R2O_VOICE_STUN_PROOF,
+            R2oVoiceProofKind::RtpMedia { .. } => EVENT_R2O_VOICE_RTP_PROOF,
         }
     }
 
@@ -498,6 +505,15 @@ impl R2oVoiceProofEvent {
             }
             R2oVoiceProofKind::DiscordDiscovery { .. } => 22,
             R2oVoiceProofKind::StunBinding => 0,
+            R2oVoiceProofKind::RtpMedia {
+                outbound_packets,
+                inbound_packets,
+            } if outbound_packets < VOICE_RTP_PROOF_MIN_PACKETS
+                || inbound_packets < VOICE_RTP_PROOF_MIN_PACKETS =>
+            {
+                return None;
+            }
+            R2oVoiceProofKind::RtpMedia { .. } => 2,
         };
         let mut r2o_body = Vec::with_capacity(KEY_LEN + 16 + extra_len);
         r2o_body.extend_from_slice(&self.key);
@@ -509,6 +525,13 @@ impl R2oVoiceProofEvent {
         {
             r2o_body.extend_from_slice(&mapped_ip.octets());
             r2o_body.extend_from_slice(&mapped_port.to_be_bytes());
+        }
+        if let R2oVoiceProofKind::RtpMedia {
+            outbound_packets,
+            inbound_packets,
+        } = self.proof
+        {
+            r2o_body.extend_from_slice(&[outbound_packets, inbound_packets]);
         }
         Some(r2o_body)
     }
@@ -1079,6 +1102,12 @@ pub fn decode_r2o_voice_proof(frame: &Frame) -> Result<R2oVoiceProofEvent, &'sta
         }
         EVENT_R2O_VOICE_STUN_PROOF if frame.body.len() == KEY_LEN + 16 => {
             R2oVoiceProofKind::StunBinding
+        }
+        EVENT_R2O_VOICE_RTP_PROOF if frame.body.len() == KEY_LEN + 18 => {
+            R2oVoiceProofKind::RtpMedia {
+                outbound_packets: frame.body[KEY_LEN + 16],
+                inbound_packets: frame.body[KEY_LEN + 17],
+            }
         }
         EVENT_R2O_VOICE_PROOF => {
             return Err("неверное событие подтверждения Discord Discovery");

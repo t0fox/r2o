@@ -54,6 +54,7 @@
     if (!binding || binding.transport !== 17 || binding.shape !== 5) return "";
     if (binding.verified_by === 3) return "STUN Binding подтверждён; RTP не проверен";
     if (binding.verified_by === 4) return "IP Discovery подтверждён; RTP не проверен";
+    if (binding.verified_by === 5) return "Двусторонний RTP подтверждён; качество аудио не измерялось";
     return "RTP не проверен";
   }
   function familyLabel(f) { return f === 6 ? "IPv6" : f === 4 ? "IPv4" : "IP?"; }

@@ -2,10 +2,11 @@ use r2k_core::control::{
     AppliedEvent, BindingContext, EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT,
     EVENT_R2O_TCP_CLEAN_HANDSHAKE, EVENT_R2O_TCP_EARLY_RST, EVENT_R2O_TCP_FIN_RETRY,
     EVENT_R2O_TCP_REPEAT, EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL,
-    EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_STUN_PROOF, EVENT_R2O_VOICE_SUSPECT, KEY_LEN,
-    R2oQuicSuspectEvent, R2oTcpCleanHandshakeEvent, R2oTcpEarlyRstEvent, R2oTcpFinRetryEvent,
-    R2oTcpRepeatEvent, R2oTcpRstAfterAppEvent, R2oTcpSilenceEvent, R2oTcpStallEvent,
-    R2oVoiceProofEvent, R2oVoiceProofKind, R2oVoiceSuspectEvent,
+    EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_RTP_PROOF, EVENT_R2O_VOICE_STUN_PROOF,
+    EVENT_R2O_VOICE_SUSPECT, KEY_LEN, R2oQuicSuspectEvent, R2oTcpCleanHandshakeEvent,
+    R2oTcpEarlyRstEvent, R2oTcpFinRetryEvent, R2oTcpRepeatEvent, R2oTcpRstAfterAppEvent,
+    R2oTcpSilenceEvent, R2oTcpStallEvent, R2oVoiceProofEvent, R2oVoiceProofKind,
+    R2oVoiceSuspectEvent,
 };
 use r2o_datapath::flow_journal::{
     R2oFlowJournal, R2oFlowJournalEntry, R2oFlowJournalKind, R2oFlowJournalSummary,
@@ -486,7 +487,7 @@ fn журнал_сохраняет_подтверждение_udp_обмена()
         },
     };
     let тело = событие.event_body().unwrap();
-    let mut журнал = R2oFlowJournal::with_capacity(2).unwrap();
+    let mut журнал = R2oFlowJournal::with_capacity(3).unwrap();
 
     assert!(журнал.record_control_event(987, EVENT_R2O_VOICE_PROOF, &тело));
 
@@ -512,6 +513,24 @@ fn журнал_сохраняет_подтверждение_udp_обмена()
     assert_eq!(запись.trial_id, [0x74; 16]);
     assert_eq!(запись.mapped_ip, [0; 4]);
     assert_eq!(запись.mapped_port, 0);
+
+    let событие = R2oVoiceProofEvent {
+        key,
+        trial_id: [0x75; 16],
+        proof: R2oVoiceProofKind::RtpMedia {
+            outbound_packets: 3,
+            inbound_packets: 4,
+        },
+    };
+    assert!(журнал.record_control_event(
+        989,
+        EVENT_R2O_VOICE_RTP_PROOF,
+        &событие.event_body().unwrap()
+    ));
+    let запись = журнал.get(2).unwrap();
+    assert_eq!(запись.code, 3);
+    assert_eq!(запись.num, 0x0304);
+    assert_eq!(запись.trial_id, [0x75; 16]);
 }
 
 #[test]

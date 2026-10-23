@@ -4,12 +4,12 @@ use r2k_core::control::{
     COMMAND_SET_TCP_STALL_BUDGETS, COMMAND_SET_VOICE_ADDR, COMMAND_SET_VOICE_ADDR_PROBE,
     EVENT_APPLIED, EVENT_HELLO, EVENT_HTTP_RESPONSE, EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT,
     EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_SILENT,
-    EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_STUN_PROOF,
-    EVENT_R2O_VOICE_SUSPECT, Frame, HttpResponseEvent, KEY_LEN, R2oQuicSuspectEvent,
-    R2oTcpFinRetryEvent, R2oTcpRstAfterAppEvent, R2oTcpSilenceEvent, R2oTcpStallEvent,
-    R2oVoiceProofEvent, R2oVoiceProofKind, R2oVoiceSuspectEvent, SHAPE_ECH_TCP, SHAPE_HTTP,
-    SHAPE_MODERN, SHAPE_QUIC, decode_ack, decode_applied, decode_hello, decode_http_response,
-    decode_r2o_quic_stall, decode_r2o_quic_suspect, decode_r2o_tcp_fin_retry,
+    EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_RTP_PROOF,
+    EVENT_R2O_VOICE_STUN_PROOF, EVENT_R2O_VOICE_SUSPECT, Frame, HttpResponseEvent, KEY_LEN,
+    R2oQuicSuspectEvent, R2oTcpFinRetryEvent, R2oTcpRstAfterAppEvent, R2oTcpSilenceEvent,
+    R2oTcpStallEvent, R2oVoiceProofEvent, R2oVoiceProofKind, R2oVoiceSuspectEvent, SHAPE_ECH_TCP,
+    SHAPE_HTTP, SHAPE_MODERN, SHAPE_QUIC, decode_ack, decode_applied, decode_hello,
+    decode_http_response, decode_r2o_quic_stall, decode_r2o_quic_suspect, decode_r2o_tcp_fin_retry,
     decode_r2o_tcp_rst_after_app, decode_r2o_tcp_silence, decode_r2o_tcp_stall,
     decode_r2o_voice_proof, decode_r2o_voice_suspect, decode_set_tcp_stall_budgets,
     encode_ack_for_trial, encode_delete_addr, encode_delete_addr_probe, encode_delete_name,
@@ -567,6 +567,51 @@ fn кодирует_только_подтверждение_с_валидным_
         decode_r2o_voice_proof(&r2o_stun_frame).unwrap(),
         r2o_stun_event
     );
+}
+
+#[test]
+fn r2o_voice_rtp_proof_round_trips_directional_packet_counts() {
+    let mut key = [0; KEY_LEN];
+    key[0] = 4;
+    key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+    key[17..21].copy_from_slice(&[198, 51, 100, 20]);
+    key[33..35].copy_from_slice(&50_000_u16.to_be_bytes());
+    key[35..37].copy_from_slice(&50_004_u16.to_be_bytes());
+    key[37] = 17;
+    let r2o_event = R2oVoiceProofEvent {
+        key,
+        trial_id: [0x31; 16],
+        proof: R2oVoiceProofKind::RtpMedia {
+            outbound_packets: 3,
+            inbound_packets: 3,
+        },
+    };
+    let r2o_frame = Frame {
+        kind: EVENT_R2O_VOICE_RTP_PROOF,
+        body: r2o_event.event_body().unwrap(),
+    };
+    assert_eq!(r2o_event.event_type(), EVENT_R2O_VOICE_RTP_PROOF);
+    assert_eq!(decode_r2o_voice_proof(&r2o_frame).unwrap(), r2o_event);
+}
+
+#[test]
+fn r2o_voice_rtp_proof_rejects_a_direction_without_sequence_progress() {
+    let mut key = [0; KEY_LEN];
+    key[0] = 4;
+    key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+    key[17..21].copy_from_slice(&[198, 51, 100, 20]);
+    key[33..35].copy_from_slice(&50_000_u16.to_be_bytes());
+    key[35..37].copy_from_slice(&50_004_u16.to_be_bytes());
+    key[37] = 17;
+    let r2o_event = R2oVoiceProofEvent {
+        key,
+        trial_id: [0x32; 16],
+        proof: R2oVoiceProofKind::RtpMedia {
+            outbound_packets: 3,
+            inbound_packets: 2,
+        },
+    };
+    assert!(r2o_event.event_body().is_none());
 }
 
 #[test]

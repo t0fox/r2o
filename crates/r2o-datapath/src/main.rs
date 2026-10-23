@@ -1568,6 +1568,19 @@ mod app {
                                     send_verdicts(&mut socket, ids, NF_ACCEPT, false)?;
                                     if options.mode == RuntimeMode::Apply
                                         && !controller_probe
+                                        && let Some(bytes) = original
+                                    {
+                                        observe_voice_trial_rtp_packet(
+                                            &mut voice_trial_proofs,
+                                            bytes,
+                                            now,
+                                            &mut control,
+                                            &mut flow_journal,
+                                            &journal_origin,
+                                        );
+                                    }
+                                    if options.mode == RuntimeMode::Apply
+                                        && !controller_probe
                                         && udp_replay.is_none()
                                         && let Some(bytes) = original
                                     {
@@ -1607,6 +1620,19 @@ mod app {
                                     });
                                 if !late_tail_handled {
                                     send_verdicts(&mut socket, ids, NF_ACCEPT, false)?;
+                                    if options.mode == RuntimeMode::Apply
+                                        && !controller_probe
+                                        && let Some(bytes) = original
+                                    {
+                                        observe_voice_trial_rtp_packet(
+                                            &mut voice_trial_proofs,
+                                            bytes,
+                                            now,
+                                            &mut control,
+                                            &mut flow_journal,
+                                            &journal_origin,
+                                        );
+                                    }
                                     if options.mode == RuntimeMode::Apply
                                         && !controller_probe
                                         && udp_replay.is_none()
@@ -2316,6 +2342,12 @@ mod app {
                 Ipv4Addr::from(entry.mapped_ip),
                 entry.mapped_port
             ),
+            R2oFlowJournalKind::R2oVoiceProof if entry.code == 3 => format!(
+                " двусторонний RTP попытка={:02x?}, принятых пакетов исход/вход={}/{}",
+                entry.trial_id,
+                (entry.num >> 8) & 0xff,
+                entry.num & 0xff
+            ),
             R2oFlowJournalKind::R2oVoiceProof => {
                 format!(" STUN Binding попытка={:02x?}", entry.trial_id)
             }
@@ -2940,6 +2972,9 @@ mod app {
                 "подтверждение Discord Discovery"
             }
             r2k_core::control::R2oVoiceProofKind::StunBinding => "подтверждение STUN Binding",
+            r2k_core::control::R2oVoiceProofKind::RtpMedia { .. } => {
+                "подтверждение двустороннего RTP"
+            }
         };
         send_observed_control_event(
             control,
@@ -2949,6 +2984,19 @@ mod app {
             &body,
             description,
         );
+    }
+
+    fn observe_voice_trial_rtp_packet(
+        proofs: &mut R2oVoiceTrialProofs,
+        packet: &[u8],
+        now: Instant,
+        control: &mut Option<ControlServer>,
+        flow_journal: &mut R2oFlowJournal,
+        journal_origin: &Instant,
+    ) {
+        if let Some(event) = proofs.observe_forwarded_rtp_packet(packet, now) {
+            send_voice_proof_event(control, flow_journal, journal_origin, &event);
+        }
     }
 
     fn send_applied_event(
