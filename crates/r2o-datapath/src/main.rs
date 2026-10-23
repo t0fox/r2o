@@ -949,6 +949,18 @@ mod app {
                     voice_trial_proofs.clear();
                 }
             }
+            if control.as_ref().is_some_and(ControlServer::is_connected) {
+                for proof in voice_trial_proofs.pending_proof_events(Instant::now()) {
+                    if send_voice_proof_event(
+                        &mut control,
+                        &mut flow_journal,
+                        &journal_origin,
+                        &proof,
+                    ) {
+                        voice_trial_proofs.acknowledge_proof_event(&proof);
+                    }
+                }
+            }
             send_pending_tcp_fin_retry(
                 &mut tcp_sessions,
                 &mut control,
@@ -1186,12 +1198,14 @@ mod app {
                                 if let Some(r2o_proof) =
                                     voice_trial_proofs.observe_response(bytes, now)
                                 {
-                                    send_voice_proof_event(
+                                    if send_voice_proof_event(
                                         &mut control,
                                         &mut flow_journal,
                                         &journal_origin,
                                         &r2o_proof,
-                                    );
+                                    ) {
+                                        voice_trial_proofs.acknowledge_proof_event(&r2o_proof);
+                                    }
                                 }
                             }
                         }
@@ -2963,9 +2977,9 @@ mod app {
         flow_journal: &mut R2oFlowJournal,
         journal_origin: &Instant,
         event: &r2k_core::control::R2oVoiceProofEvent,
-    ) {
+    ) -> bool {
         let Some(body) = event.event_body() else {
-            return;
+            return false;
         };
         let description = match event.proof {
             r2k_core::control::R2oVoiceProofKind::DiscordDiscovery { .. } => {
@@ -2976,14 +2990,24 @@ mod app {
                 "подтверждение двустороннего RTP"
             }
         };
-        send_observed_control_event(
-            control,
-            flow_journal,
-            journal_origin,
-            event.event_type(),
-            &body,
-            description,
-        );
+        let Some(control) = control.as_mut() else {
+            return false;
+        };
+        match control.try_send_event(event.event_type(), &body) {
+            Ok(true) => {
+                flow_journal.record_control_event(
+                    journal_timestamp(journal_origin),
+                    event.event_type(),
+                    &body,
+                );
+                true
+            }
+            Ok(false) => false,
+            Err(error) => {
+                eprintln!("r2o-datapath: событие {description} не отправлено: {error}");
+                false
+            }
+        }
     }
 
     fn observe_voice_trial_rtp_packet(
@@ -2995,7 +3019,9 @@ mod app {
         journal_origin: &Instant,
     ) {
         if let Some(event) = proofs.observe_forwarded_rtp_packet(packet, now) {
-            send_voice_proof_event(control, flow_journal, journal_origin, &event);
+            if send_voice_proof_event(control, flow_journal, journal_origin, &event) {
+                proofs.acknowledge_rtp_proof(&event);
+            }
         }
     }
 

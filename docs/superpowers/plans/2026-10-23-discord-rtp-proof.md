@@ -63,5 +63,5 @@
 **Files:** Update `ПРОГРЕСС.md` and the Discord section in `README.md` if needed.
 
 - [x] Run local formatting, workspace tests, warning checks, NFQUEUE integration, and record the synthetic RTP proof boundary.
-- [ ] Run pinned C/Rust differential CI and target QEMU smoke after pushing the reviewed commit.
-- [ ] Record that bidirectional RTP packet passage is confirmed while audio quality and physical-router acceptance remain field checks.
+- [x] Run pinned baseline/upstream C/Rust differential CI and target QEMU smoke after pushing the reviewed commit.
+- [x] Record that bidirectional RTP packet passage is confirmed while audio quality and physical-router acceptance remain field checks.

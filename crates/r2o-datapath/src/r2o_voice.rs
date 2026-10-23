@@ -91,6 +91,7 @@ struct PendingVoiceProof {
     trial_id: [u8; 16],
     expires: Instant,
     response_confirmed: bool,
+    response_event: Option<r2k_core::control::R2oVoiceProofEvent>,
     client_ssrc: Option<[u8; 4]>,
     outbound: RtpSequenceProgress,
     inbound: RtpSequenceProgress,
@@ -267,6 +268,7 @@ impl R2oVoiceTrialProofs {
                 trial_id: event.trial_id,
                 expires: now + VOICE_TRIAL_TTL,
                 response_confirmed: false,
+                response_event: None,
                 client_ssrc,
                 outbound: RtpSequenceProgress::default(),
                 inbound: RtpSequenceProgress::default(),
@@ -340,6 +342,7 @@ impl R2oVoiceTrialProofs {
             proof,
         };
         pending.response_confirmed = true;
+        pending.response_event = Some(event.clone());
         Some(event)
     }
 
@@ -394,19 +397,81 @@ impl R2oVoiceTrialProofs {
         }
         if pending.outbound.packets < VOICE_RTP_PROOF_PACKETS
             || pending.inbound.packets < VOICE_RTP_PROOF_PACKETS
+            || pending.response_event.is_some()
         {
             return None;
         }
-        let event = r2k_core::control::R2oVoiceProofEvent {
+        Some(r2k_core::control::R2oVoiceProofEvent {
             key: key.wire_key(),
             trial_id: pending.trial_id,
             proof: r2k_core::control::R2oVoiceProofKind::RtpMedia {
                 outbound_packets: pending.outbound.packets,
                 inbound_packets: pending.inbound.packets,
             },
+        })
+    }
+
+    /// Возвращает события, которые ещё не удалось поставить в управляющий канал.
+    pub fn pending_proof_events(
+        &mut self,
+        now: Instant,
+    ) -> Vec<r2k_core::control::R2oVoiceProofEvent> {
+        self.pending.retain(|_, pending| pending.expires > now);
+        self.pending
+            .iter()
+            .filter_map(|(key, pending)| {
+                if let Some(event) = &pending.response_event {
+                    return Some(event.clone());
+                }
+                (pending.response_confirmed
+                    && pending.outbound.packets >= VOICE_RTP_PROOF_PACKETS
+                    && pending.inbound.packets >= VOICE_RTP_PROOF_PACKETS)
+                    .then(|| r2k_core::control::R2oVoiceProofEvent {
+                        key: key.wire_key(),
+                        trial_id: pending.trial_id,
+                        proof: r2k_core::control::R2oVoiceProofKind::RtpMedia {
+                            outbound_packets: pending.outbound.packets,
+                            inbound_packets: pending.inbound.packets,
+                        },
+                    })
+            })
+            .collect()
+    }
+
+    /// Удалить или продвинуть доказательство только после постановки в управляющий канал.
+    pub fn acknowledge_proof_event(
+        &mut self,
+        event: &r2k_core::control::R2oVoiceProofEvent,
+    ) -> bool {
+        let Some(key) = self.pending.iter().find_map(|(key, pending)| {
+            (key.wire_key() == event.key && pending.trial_id == event.trial_id).then_some(*key)
+        }) else {
+            return false;
         };
-        self.pending.remove(&key);
-        Some(event)
+        match event.proof {
+            r2k_core::control::R2oVoiceProofKind::DiscordDiscovery { .. }
+            | r2k_core::control::R2oVoiceProofKind::StunBinding => {
+                let Some(pending) = self.pending.get_mut(&key) else {
+                    return false;
+                };
+                if pending.response_event.as_ref() != Some(event) {
+                    return false;
+                }
+                pending.response_event = None;
+                true
+            }
+            r2k_core::control::R2oVoiceProofKind::RtpMedia { .. } => {
+                self.pending.remove(&key).is_some()
+            }
+        }
+    }
+
+    /// Удалить RTP-доказательство после его постановки в управляющий канал.
+    pub fn acknowledge_rtp_proof(&mut self, event: &r2k_core::control::R2oVoiceProofEvent) -> bool {
+        matches!(
+            event.proof,
+            r2k_core::control::R2oVoiceProofKind::RtpMedia { .. }
+        ) && self.acknowledge_proof_event(event)
     }
 
     pub fn clear(&mut self) {
@@ -860,6 +925,7 @@ mod tests {
                 mapped_port: 52_000,
             }
         );
+        assert!(proofs.acknowledge_proof_event(&proof));
         assert!(
             proofs
                 .observe_response(
@@ -903,6 +969,24 @@ mod tests {
             discovery.proof,
             r2k_core::control::R2oVoiceProofKind::DiscordDiscovery { .. }
         ));
+        assert!(
+            proofs
+                .observe_response(
+                    &packet(server, client, 50_004, 50_000, &discovery_response),
+                    start + Duration::from_millis(2),
+                )
+                .is_none()
+        );
+        assert_eq!(
+            proofs.pending_proof_events(start + Duration::from_millis(2)),
+            vec![discovery.clone()]
+        );
+        assert!(proofs.acknowledge_proof_event(&discovery));
+        assert!(
+            proofs
+                .pending_proof_events(start + Duration::from_millis(3))
+                .is_empty()
+        );
 
         let remote_ssrc = [1, 2, 3, 4];
         for (index, sequence) in [u16::MAX - 1, u16::MAX, 0].into_iter().enumerate() {
@@ -963,13 +1047,72 @@ mod tests {
                 inbound_packets: 3,
             }
         );
+        assert_eq!(
+            proofs.pending_proof_events(start + Duration::from_millis(23)),
+            vec![rtp.clone()]
+        );
+        assert_eq!(
+            proofs.observe_forwarded_rtp_packet(
+                &packet(client, server, 50_000, 50_004, &rtp_packet(client_ssrc, 4),),
+                start + Duration::from_millis(23),
+            ),
+            Some(rtp.clone()),
+            "достигнутое RTP-доказательство должно остаться доступным для повтора доставки"
+        );
+        assert!(proofs.acknowledge_rtp_proof(&rtp));
+        assert!(
+            proofs
+                .pending_proof_events(start + Duration::from_millis(24))
+                .is_empty()
+        );
         assert!(
             proofs
                 .observe_forwarded_rtp_packet(
-                    &packet(client, server, 50_000, 50_004, &rtp_packet(client_ssrc, 4),),
-                    start + Duration::from_millis(23),
+                    &packet(client, server, 50_000, 50_004, &rtp_packet(client_ssrc, 5),),
+                    start + Duration::from_millis(24),
                 )
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn ожидающее_voice_proof_истекает_до_повторной_отправки() {
+        let start = Instant::now();
+        let client = [192, 0, 2, 10];
+        let server = [198, 51, 100, 20];
+        let mut proofs = R2oVoiceTrialProofs::default();
+        assert!(proofs.note_applied(
+            &packet(
+                client,
+                server,
+                50_000,
+                50_004,
+                &discovery_request([7, 8, 9, 10]),
+            ),
+            &trial_applied(),
+            start,
+        ));
+        let mut response = [0; 74];
+        response[..8].copy_from_slice(&[0, 2, 0, 70, 7, 8, 9, 10]);
+        response[8..19].copy_from_slice(b"203.0.113.7");
+        response[72..74].copy_from_slice(&52_000_u16.to_be_bytes());
+        let event = proofs
+            .observe_response(
+                &packet(server, client, 50_004, 50_000, &response),
+                start + Duration::from_millis(1),
+            )
+            .unwrap();
+        assert_eq!(
+            proofs.pending_proof_events(start + Duration::from_millis(1)),
+            vec![event]
+        );
+        for pending in proofs.pending.values_mut() {
+            pending.expires = start;
+        }
+
+        assert!(
+            proofs.pending_proof_events(Instant::now()).is_empty(),
+            "просроченное proof событие нельзя повторно поставить в control outbox"
         );
     }
 
@@ -1005,6 +1148,11 @@ mod tests {
                 )
                 .is_some()
         );
+        let response_event = proofs
+            .pending_proof_events(start + Duration::from_millis(2))
+            .pop()
+            .unwrap();
+        assert!(proofs.acknowledge_proof_event(&response_event));
 
         let valid = rtp_packet(client_ssrc, 100);
         let mut malformed = valid;
@@ -1203,14 +1351,13 @@ mod tests {
         response[..2].copy_from_slice(&0x0101_u16.to_be_bytes());
         response[4..8].copy_from_slice(&0x2112_a442_u32.to_be_bytes());
         response[8..].copy_from_slice(&transaction_id);
-        assert!(
-            proofs
-                .observe_response(
-                    &packet(server, client, 50_004, 50_000, &response),
-                    start + Duration::from_millis(1),
-                )
-                .is_some()
-        );
+        let response_event = proofs
+            .observe_response(
+                &packet(server, client, 50_004, 50_000, &response),
+                start + Duration::from_millis(1),
+            )
+            .unwrap();
+        assert!(proofs.acknowledge_proof_event(&response_event));
 
         assert!(
             proofs
@@ -1242,14 +1389,13 @@ mod tests {
         response[..2].copy_from_slice(&0x0101_u16.to_be_bytes());
         response[4..8].copy_from_slice(&0x2112_a442_u32.to_be_bytes());
         response[8..].copy_from_slice(&request[8..20]);
-        assert!(
-            proofs
-                .observe_response(
-                    &packet(server, client, 50_004, 50_000, &response),
-                    start + Duration::from_millis(1),
-                )
-                .is_some()
-        );
+        let response_event = proofs
+            .observe_response(
+                &packet(server, client, 50_004, 50_000, &response),
+                start + Duration::from_millis(1),
+            )
+            .unwrap();
+        assert!(proofs.acknowledge_proof_event(&response_event));
 
         assert!(proofs.note_applied(
             &applied_packet,
@@ -1398,6 +1544,7 @@ mod tests {
             proof.proof,
             r2k_core::control::R2oVoiceProofKind::StunBinding
         );
+        assert!(proofs.acknowledge_proof_event(&proof));
         assert!(
             proofs
                 .observe_response(

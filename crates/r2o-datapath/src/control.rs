@@ -1535,6 +1535,23 @@ impl ControlServer {
         self.flush()
     }
 
+    /// Queue an event only when it can be retained for the connected controller.
+    pub fn try_send_event(&mut self, kind: u16, body: &[u8]) -> io::Result<bool> {
+        let bytes = control::encode_frame(kind, body)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        if self.peer.is_none() {
+            return Ok(false);
+        }
+        if self.output_bytes.saturating_add(bytes.len()) > MAX_CONTROL_OUTPUT {
+            self.dropped_events = self.dropped_events.saturating_add(1);
+            return Ok(false);
+        }
+        self.output_bytes += bytes.len();
+        self.output.push_back(PendingWrite { bytes, offset: 0 });
+        self.flush()?;
+        Ok(self.peer.is_some())
+    }
+
     /// Объявляет новый общий предел отправки уже подключённому контроллеру.
     pub fn r2o_set_send_maxlen(&mut self, send_maxlen: u32) -> io::Result<()> {
         if self.send_maxlen == send_maxlen {
@@ -1911,6 +1928,51 @@ mod tests {
         let event = control::read_frame(&mut client).unwrap();
         assert_eq!(event.kind, EVENT_HELLO);
         assert_eq!(event.body, body);
+
+        drop(client);
+        drop(server);
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn try_send_event_reports_when_the_control_outbox_cannot_retain_an_event() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("r2o-control-retry-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("control.sock");
+        let mut server = ControlServer::open(&path, u16::MAX as u32).unwrap();
+        assert!(
+            !server
+                .try_send_event(control::EVENT_R2O_VOICE_RTP_PROOF, &[])
+                .unwrap()
+        );
+
+        let mut client = UnixStream::connect(&path).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        assert!(server.poll().unwrap().is_empty());
+        let _greeting = control::read_frame(&mut client).unwrap();
+        server.output_bytes = super::MAX_CONTROL_OUTPUT;
+        assert!(
+            !server
+                .try_send_event(control::EVENT_R2O_VOICE_RTP_PROOF, &[])
+                .unwrap(),
+            "полный outbox должен оставить доказательство на повтор"
+        );
+        assert_eq!(server.dropped_events(), 1);
+        server.output_bytes = 0;
+        assert!(
+            server
+                .try_send_event(control::EVENT_R2O_VOICE_RTP_PROOF, &[])
+                .unwrap()
+        );
+        let event = control::read_frame(&mut client).unwrap();
+        assert_eq!(event.kind, control::EVENT_R2O_VOICE_RTP_PROOF);
 
         drop(client);
         drop(server);
