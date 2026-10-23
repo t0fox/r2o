@@ -8042,6 +8042,9 @@ impl ControlClient {
         catalog: &mut Catalog,
         catalog_path: &std::path::Path,
     ) -> Result<(), Box<dyn Error>> {
+        if !trial.response_confirmed {
+            return Err("RTP не подтверждает voice-план без Discovery/STUN-ответа".into());
+        }
         if proof.trial_id != trial.trial_id || !r2o_voice_proof_matches_target(proof, trial.target)
         {
             return Err("голосовое подтверждение не совпало с временным опытом".into());
@@ -19482,6 +19485,16 @@ mod tests {
         };
         let mut client = ControlClient::connect(socket_path).unwrap();
         let mut catalog = Catalog::load(&catalog_path).unwrap();
+        let mut unconfirmed_trial = trial.clone();
+        unconfirmed_trial.response_confirmed = false;
+        assert!(
+            client
+                .confirm_r2o_voice_trial(unconfirmed_trial, &proof, &mut catalog, &catalog_path,)
+                .is_err()
+        );
+        assert!(catalog.boxes.is_empty());
+        assert!(Catalog::load(&catalog_path).unwrap().boxes.is_empty());
+
         client
             .confirm_r2o_voice_trial(trial, &proof, &mut catalog, &catalog_path)
             .unwrap();

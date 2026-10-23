@@ -905,7 +905,7 @@ mod tests {
         ));
 
         let remote_ssrc = [1, 2, 3, 4];
-        for sequence in 1..=3 {
+        for (index, sequence) in [u16::MAX - 1, u16::MAX, 0].into_iter().enumerate() {
             assert!(
                 proofs
                     .observe_forwarded_rtp_packet(
@@ -916,7 +916,7 @@ mod tests {
                             50_004,
                             &rtp_packet(client_ssrc, sequence),
                         ),
-                        start + Duration::from_millis(10 + u64::from(sequence)),
+                        start + Duration::from_millis(10 + index as u64),
                     )
                     .is_none()
             );
@@ -924,7 +924,13 @@ mod tests {
         assert!(
             proofs
                 .observe_forwarded_rtp_packet(
-                    &packet(server, client, 50_004, 50_000, &rtp_packet(remote_ssrc, 1),),
+                    &packet(
+                        server,
+                        client,
+                        50_004,
+                        50_000,
+                        &rtp_packet(remote_ssrc, u16::MAX - 1),
+                    ),
                     start + Duration::from_millis(20),
                 )
                 .is_none()
@@ -932,14 +938,20 @@ mod tests {
         assert!(
             proofs
                 .observe_forwarded_rtp_packet(
-                    &packet(server, client, 50_004, 50_000, &rtp_packet(remote_ssrc, 2),),
+                    &packet(
+                        server,
+                        client,
+                        50_004,
+                        50_000,
+                        &rtp_packet(remote_ssrc, u16::MAX),
+                    ),
                     start + Duration::from_millis(21),
                 )
                 .is_none()
         );
         let rtp = proofs
             .observe_forwarded_rtp_packet(
-                &packet(server, client, 50_004, 50_000, &rtp_packet(remote_ssrc, 3)),
+                &packet(server, client, 50_004, 50_000, &rtp_packet(remote_ssrc, 0)),
                 start + Duration::from_millis(22),
             )
             .unwrap();
@@ -1023,8 +1035,30 @@ mod tests {
                 )
                 .is_none()
         );
+        let mut truncated_csrc = valid[..15].to_vec();
+        truncated_csrc[0] |= 1;
+        assert!(
+            proofs
+                .observe_forwarded_rtp_packet(
+                    &packet(client, server, 50_000, 50_004, &truncated_csrc),
+                    start + Duration::from_millis(4),
+                )
+                .is_none()
+        );
+        let mut truncated_extension = valid;
+        truncated_extension[0] |= 0x10;
+        truncated_extension[14..16].copy_from_slice(&1_u16.to_be_bytes());
+        assert!(
+            proofs
+                .observe_forwarded_rtp_packet(
+                    &packet(client, server, 50_000, 50_004, &truncated_extension),
+                    start + Duration::from_millis(4),
+                )
+                .is_none()
+        );
         let mut zero_padding = valid;
         zero_padding[0] |= 0x20;
+        zero_padding[15] = 0;
         assert!(
             proofs
                 .observe_forwarded_rtp_packet(
@@ -1035,7 +1069,7 @@ mod tests {
         );
         let mut excessive_padding = valid;
         excessive_padding[0] |= 0x20;
-        excessive_padding[12] = 2;
+        excessive_padding[15] = 5;
         assert!(
             proofs
                 .observe_forwarded_rtp_packet(
