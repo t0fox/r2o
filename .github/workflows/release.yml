@@ -88,7 +88,7 @@ jobs:
           builds="$RUNNER_TEMP/builds"
           out="$RUNNER_TEMP/release"
           mkdir -p "$builds/mipsel" "$builds/mipsel-openwrt-musl" "$builds/aarch64-openwrt-musl"
-          for component in r2o-datapath r2o-controller r2o-panel r2o-telegram r2o-manager; do
+          for component in r2o-datapath r2o-controller r2o-panel r2o-telegram r2o-manager r2o-fetch; do
             install -m 0755 "target/mipsel-unknown-linux-gnu/release/$component" \
               "$builds/mipsel/$component-linux-mipsel"
             install -m 0755 "target/mipsel-unknown-linux-musl/release/$component" \

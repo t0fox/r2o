@@ -8,12 +8,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tar::Archive;
 
 const SLOT_FILE: &str = "release-slots";
-const MANAGER_COMPONENTS: [&str; 5] = [
+const MANAGER_COMPONENTS: [&str; 6] = [
     "r2o-datapath",
     "r2o-controller",
     "r2o-panel",
     "r2o-telegram",
     "r2o-manager",
+    "r2o-fetch",
 ];
 const ARCHIVE_MAX_BYTES: u64 = 256 * 1024 * 1024;
 const ARCHIVE_MAX_ENTRIES: usize = 4096;

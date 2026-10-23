@@ -45,7 +45,7 @@ for ARCH do
     fi
     STAGE="$WORK/$ARCH"
     mkdir -p "$STAGE/builds" "$STAGE/router"
-    for component in r2o-datapath r2o-controller r2o-panel r2o-telegram r2o-manager; do
+    for component in r2o-datapath r2o-controller r2o-panel r2o-telegram r2o-manager r2o-fetch; do
         source="$SOURCE_BUILDS/$component-linux-$ARCH"
         if ! test -f "$source" || ! test -s "$source"; then
             echo "не найден исполняемый файл выпуска: $source" >&2

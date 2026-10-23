@@ -25,6 +25,7 @@ if command -v qemu-mipsel >/dev/null 2>&1; then
     qemu-mipsel -L "$SYSROOT" "target/$TARGET/release/r2o-telegram" --version
     qemu-mipsel -L "$SYSROOT" "target/$TARGET/release/r2o-panel" --version
     qemu-mipsel -L "$SYSROOT" "target/$TARGET/release/r2o-manager" --version
+    qemu-mipsel -L "$SYSROOT" "target/$TARGET/release/r2o-fetch" --version
     MIPS_SMOKE_DIR=$(mktemp -d)
     trap 'rm -rf "$MIPS_SMOKE_DIR"' EXIT HUP INT TERM
     printf '{"schema":1,"boxes":[{"id":"smoke"}]}\n' > "$MIPS_SMOKE_DIR/catalog.json"
@@ -36,4 +37,4 @@ if command -v qemu-mipsel >/dev/null 2>&1; then
     trap - EXIT HUP INT TERM
 fi
 
-(cd "target/$TARGET/release" && sha256sum r2o-datapath r2o-controller r2o-telegram r2o-panel r2o-manager >SHA256SUMS)
+(cd "target/$TARGET/release" && sha256sum r2o-datapath r2o-controller r2o-telegram r2o-panel r2o-manager r2o-fetch >SHA256SUMS)

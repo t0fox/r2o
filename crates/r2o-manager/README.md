@@ -90,7 +90,7 @@ r2o-manager update-install --root /opt/r2o
 `install-local` копирует уже распакованный пакет в `ROOT/releases/RELEASE_ID`,
 атомарно обновляет `ROOT/release-slots` и заменяет стабильный исполняемый файл
 `ROOT/r2o-manager`. Пакет должен содержать исполняемые файлы
-`builds/{r2o-datapath,r2o-controller,r2o-panel,r2o-telegram,r2o-manager}-linux-ARCH`.
+`builds/{r2o-datapath,r2o-controller,r2o-panel,r2o-telegram,r2o-manager,r2o-fetch}-linux-ARCH`.
 Ссылки и специальные файлы отклоняются. Менеджер сериализует установку и откат
 межпроцессной блокировкой. Каталог `config` и другие файлы за пределами
 `releases/` не затрагиваются.

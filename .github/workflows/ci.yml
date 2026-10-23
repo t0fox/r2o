@@ -272,6 +272,7 @@ jobs:
             target/mipsel-unknown-linux-gnu/release/r2o-telegram
             target/mipsel-unknown-linux-gnu/release/r2o-panel
             target/mipsel-unknown-linux-gnu/release/r2o-manager
+            target/mipsel-unknown-linux-gnu/release/r2o-fetch
             target/mipsel-unknown-linux-gnu/release/SHA256SUMS
           retention-days: 7
           if-no-files-found: error
@@ -298,6 +299,7 @@ jobs:
             target/mipsel-unknown-linux-musl/release/r2o-telegram
             target/mipsel-unknown-linux-musl/release/r2o-panel
             target/mipsel-unknown-linux-musl/release/r2o-manager
+            target/mipsel-unknown-linux-musl/release/r2o-fetch
             target/mipsel-unknown-linux-musl/release/SHA256SUMS
           retention-days: 7
           if-no-files-found: error
@@ -326,6 +328,7 @@ jobs:
             target/aarch64-unknown-linux-musl/release/r2o-telegram
             target/aarch64-unknown-linux-musl/release/r2o-panel
             target/aarch64-unknown-linux-musl/release/r2o-manager
+            target/aarch64-unknown-linux-musl/release/r2o-fetch
             target/aarch64-unknown-linux-musl/release/SHA256SUMS
           retention-days: 7
           if-no-files-found: error

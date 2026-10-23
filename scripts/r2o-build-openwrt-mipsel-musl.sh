@@ -80,7 +80,7 @@ CARGO_PROFILE_RELEASE_PANIC=abort \
         --workspace --release --locked --target "$TARGET"
 
 BIN_DIR="$TARGET_DIR/$TARGET/release"
-for component in r2o-datapath r2o-controller r2o-telegram r2o-panel r2o-manager; do
+for component in r2o-datapath r2o-controller r2o-telegram r2o-panel r2o-manager r2o-fetch; do
     BINARY="$BIN_DIR/$component"
     [ -x "$BINARY" ] || {
         echo "сборка OpenWrt: не создан исполняемый файл $component" >&2
@@ -109,5 +109,5 @@ qemu-mipsel -L "$SDK" "$BIN_DIR/r2o-controller" --check-catalog "$SMOKE_DIR/cata
 rm -rf "$SMOKE_DIR"
 trap - EXIT HUP INT TERM
 
-(cd "$BIN_DIR" && sha256sum r2o-datapath r2o-controller r2o-telegram r2o-panel r2o-manager >SHA256SUMS)
+(cd "$BIN_DIR" && sha256sum r2o-datapath r2o-controller r2o-telegram r2o-panel r2o-manager r2o-fetch >SHA256SUMS)
 (cd "$BIN_DIR" && sha256sum -c SHA256SUMS)

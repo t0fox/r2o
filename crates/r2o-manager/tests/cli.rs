@@ -40,6 +40,7 @@ fn make_bundle(parent: &Path, name: &str) -> PathBuf {
         "r2o-panel",
         "r2o-telegram",
         "r2o-manager",
+        "r2o-fetch",
     ] {
         let path = builds.join(format!("{component}-linux-mipsel"));
         fs::write(&path, format!("{name}:{component}")).unwrap();
@@ -77,6 +78,7 @@ fn signed_archive() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
         "r2o-panel",
         "r2o-telegram",
         "r2o-manager",
+        "r2o-fetch",
     ] {
         let path = format!("builds/{component}-linux-mipsel");
         let content = format!("fixture:{component}");
@@ -320,6 +322,9 @@ fn stable_manager_exec_runs_only_a_component_from_the_active_slot() {
     let component = bundle.join("builds/r2o-datapath-linux-mipsel");
     fs::write(&component, "#!/bin/sh\nprintf 'active:%s\\n' \"$1\"\n").unwrap();
     fs::set_permissions(&component, fs::Permissions::from_mode(0o755)).unwrap();
+    let fetch = bundle.join("builds/r2o-fetch-linux-mipsel");
+    fs::write(&fetch, "#!/bin/sh\nprintf 'fetch:%s\\n' \"$1\"\n").unwrap();
+    fs::set_permissions(&fetch, fs::Permissions::from_mode(0o755)).unwrap();
     json_output(invoke(&[
         "install-local",
         "--root",
@@ -352,6 +357,28 @@ fn stable_manager_exec_runs_only_a_component_from_the_active_slot() {
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         "active:argument\n"
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_r2o-manager"))
+        .args([
+            "exec",
+            "--root",
+            root.to_str().unwrap(),
+            "--component",
+            "r2o-fetch",
+            "--",
+            "--version",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "exec fetch failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "fetch:--version\n"
     );
     assert_eq!(
         fs::read_to_string(root.join("r2o-manager")).unwrap(),
