@@ -57,12 +57,12 @@ mkdir -p "$r2o_log_dir"
         "$r2o_donor_core/sched.c" 2>/dev/null \
         | grep -E 'FunctionDecl.*(addr_probe_remove|candidate_retire|task_fail|launch_or_queue|d2k_sched_tick)'
     printf '\nТесты планировщика C-эталона\n'
-    r2o_run_timed 'планировщик C' make -C "$r2o_donor_core" test-sched-quic-yield CC=clang-18
+    r2o_run_timed 'планировщик C' make -B -C "$r2o_donor_core" test-sched-quic-yield CC=clang-18
     if [ "${R2O_SKIP_FULL_C_SCHEDULER:-0}" = 1 ]; then
         r2o_sched_sha256=$(sha256sum "$r2o_donor_core/sched.c" | awk '{print $1}')
         r2o_test_sched_sha256=$(sha256sum "$r2o_donor_core/test_sched.c" | awk '{print $1}')
-        if [ "$r2o_sched_sha256" != 67f5c245ddf1f9cd4361c256d36a93bc37060a699548169759823845c4da1312 ] \
-            || [ "$r2o_test_sched_sha256" != c811faca5ae143c3f0118d79c198bd2f70faa64bdf6d0e153ef48d97153a5921 ]; then
+        if [ "$r2o_sched_sha256" != cc533a9c39c364104ae12d281c10dfffaee1aa8948c523f0bf15603915f88a32 ] \
+            || [ "$r2o_test_sched_sha256" != 837b2d4e7d3a87ff7feb4e087613964376963d2e32c108da3551b6d2aedf99b3 ]; then
             printf 'Ускоренный режим запрещён: SHA-256 C-эталона отличаются от полностью проверенных.\n' >&2
             exit 2
         fi
@@ -86,7 +86,7 @@ mkdir -p "$r2o_log_dir"
         --locked r2o_quic_applied_collection -- --nocapture
     printf '\nСохранение подтверждённого QUIC-плана в R2O\n'
     r2o_run_timed 'сохранение QUIC-плана' cargo +1.98.0 test -p r2o-controller --bin r2o-controller \
-        --locked r2o_quic_подтверждение_из_worker -- --nocapture
+        --locked r2o_quic_ech_подтверждение_сохраняет_адресную_привязку -- --nocapture
     r2o_run_timed 'параллельные адресные опыты QUIC' cargo +1.98.0 test -p r2o-controller --bin r2o-controller \
         --locked r2o_quic_worker_одновременно_изолирует_два_адресных_опыта -- --nocapture
     printf '\nТесты QUIC-логики и уступки слота в R2O\n'
@@ -97,7 +97,7 @@ mkdir -p "$r2o_log_dir"
 grep -q 'QUIC question yield: 0 failures' "$r2o_log"
 grep -q 'r2o_quic_подбор_удаляет_все_пробы_без_двух_доказательств .*ok' "$r2o_log"
 grep -q 'r2o_quic_applied_collection_keeps_events_for_other_trials .*ok' "$r2o_log"
-grep -q 'r2o_quic_подтверждение_из_worker_сохраняет_и_устанавливает_план .*ok' "$r2o_log"
+grep -q 'r2o_quic_ech_подтверждение_сохраняет_адресную_привязку .*ok' "$r2o_log"
 grep -q 'r2o_quic_worker_одновременно_изолирует_два_адресных_опыта .*ok' "$r2o_log"
 printf 'Журнал проверки: %s\n' "$r2o_log"
 cat "$r2o_log"

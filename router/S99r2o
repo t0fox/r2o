@@ -284,6 +284,15 @@ engine_start() {
     say "datapath запущен: IPv4 очередь $QUEUE4, IPv6 $([ "$IPV6_ENABLED" = 1 ] && echo "$QUEUE6" || echo выключен), режим $MODE"
 }
 
+settings_restart() {
+    if [ "$MODE" = off ]; then
+        engine_stop || return 1
+    else
+        engine_stop && engine_start || return 1
+    fi
+    telegram_restart
+}
+
 update_scheduler_running() {
     [ -s "$UPD_PID" ] || return 1
     update_pid=$(cat "$UPD_PID" 2>/dev/null) || return 1
@@ -600,7 +609,7 @@ panel_start() {
 }
 
 start() {
-    [ "$MODE" = off ] && { say "MODE=off"; return 1; }
+    [ "$MODE" = off ] && { say "MODE=off — R2O остаётся остановленным"; return 0; }
     engine_start || return 1
     telegram_start || say "Telegram не запущен; см. $LOG/telegram.log и $TG_STATUS"
     panel_start || say "панель не запущена; datapath продолжает работу"
@@ -693,6 +702,7 @@ case "${1:-}" in
     engine-start) engine_start ;;
     engine-stop) engine_stop ;;
     engine-restart) engine_stop && engine_start ;;
+    settings-restart) settings_restart ;;
     reapply) component_running r2o-datapath "$DP4_PID" || die "r2o-datapath IPv4 не работает"; "$FIREWALL" up ;;
     telegram-enable) telegram_enable ;;
     telegram-disable) telegram_disable ;;
@@ -707,5 +717,5 @@ case "${1:-}" in
     heal) heal ;;
     tg-heal) telegram_reapply ;;
     tg-stop-rules) "$TG_FIREWALL" stop ;;
-    *) echo "usage: $0 {start|stop|restart|status|engine-start|engine-stop|engine-restart|reapply|heal|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-reapply|tg-heal|tg-stop-rules|update-check|update-install|update-auto-on|update-auto-off|log-tick}" >&2; exit 2 ;;
+    *) echo "usage: $0 {start|stop|restart|status|engine-start|engine-stop|engine-restart|settings-restart|reapply|heal|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-reapply|tg-heal|tg-stop-rules|update-check|update-install|update-auto-on|update-auto-off|log-tick}" >&2; exit 2 ;;
 esac

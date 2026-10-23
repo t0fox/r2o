@@ -57,9 +57,9 @@ mkdir -p "$r2o_log_dir"
     if [ "$r2o_session_sha256" != \
         '39dada3d4fbdaf943bf7b2a788090ab3d16a71065a58c16d39901575247f7187' ] || \
         [ "$r2o_test_sha256" != \
-        'd9f4bd539d35dc8bd7684b64959bd333769fd5a284ec9832247ef2fbf382736c' ] || \
+        '972f5289824d45b32820e7a7d996b89c211b2da4a276ee308b6304eb8b56377e' ] || \
         [ "$r2o_test_binary_sha256" != \
-        '34fbfe639cf712b27e5a4f50dc0240451081e8c393aa4dfcbcd57f6c3c433ff5' ]; then
+        'd86288a7ecc71eed9ac511cbffd37968d5c8155338ad13700ed1540700c28199' ]; then
         printf 'Исходники или тестовый бинарник донора отличаются от проверенного снимка\n' >&2
         exit 1
     fi

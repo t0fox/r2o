@@ -71,10 +71,10 @@ mkdir -p "$r2o_log_dir"
     printf '%s\n' "$r2o_hashes" | grep -q '03be99b80fa5f1fdff16af9cfef183a0c670e34c36113bdde0b0a397242b8eb2'
     printf '%s\n' "$r2o_hashes" | grep -q '969b16e8f86da0fe651654d28a8ac627b46e9cae3e8b2a61f271f3d1ca9cf89a'
     printf '%s\n' "$r2o_hashes" | grep -q '9e7e2ec357aaace34768991d736906e36ff8da64fdd8e72a1c8becdaf166aee8'
-    printf '%s\n' "$r2o_hashes" | grep -q '4936142dcc67c9fb14d6cfa4e87ffca2b20bdd97cd9f4018183de5561b7874ac'
+    printf '%s\n' "$r2o_hashes" | grep -q '5a42f55a0712c30b22527d25737592fb897d4a77d092d74a1871f611e2a0d2d5'
     printf '%s\n' "$r2o_hashes" | grep -q '39dada3d4fbdaf943bf7b2a788090ab3d16a71065a58c16d39901575247f7187'
-    printf '%s\n' "$r2o_hashes" | grep -q 'd9f4bd539d35dc8bd7684b64959bd333769fd5a284ec9832247ef2fbf382736c'
-    printf '%s\n' "$r2o_hashes" | grep -q '34fbfe639cf712b27e5a4f50dc0240451081e8c393aa4dfcbcd57f6c3c433ff5'
+    printf '%s\n' "$r2o_hashes" | grep -q '972f5289824d45b32820e7a7d996b89c211b2da4a276ee308b6304eb8b56377e'
+    printf '%s\n' "$r2o_hashes" | grep -q 'd86288a7ecc71eed9ac511cbffd37968d5c8155338ad13700ed1540700c28199'
 
     printf '\nЗапуск готовых тестов C-донора без компиляции C\n'
     r2o_run_timed 'проверки шлюза маршрутизации донора' "$r2o_route_test"

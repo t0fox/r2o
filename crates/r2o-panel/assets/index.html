@@ -52,6 +52,7 @@
       <a href="#boxes" data-nav="boxes"><span>Коробки</span><b id="nav-boxes"></b></a>
       <a href="#telegram" data-nav="telegram"><span>Telegram</span><b id="nav-telegram"></b></a>
       <a href="#updates" data-nav="updates"><span>Обновления</span><b id="nav-updates"></b></a>
+      <a href="#r2o-settings" data-nav="r2o-settings"><span>Настройки</span><b id="nav-settings"></b></a>
       <a href="#diagnostics" data-nav="diagnostics"><span>Диагностика</span><b id="nav-diagnostics"></b></a>
     </nav>
 
@@ -140,6 +141,109 @@
           </div>
           <p class="upd-meta update-result" id="update-result" hidden></p>
         </div>
+      </section>
+
+      <section class="sheet" id="r2o-settings" aria-labelledby="settings-title">
+        <header class="sheet-head">
+          <span class="kicker">Конфигурация</span>
+          <h2 id="settings-title">Настройки R2O</h2>
+          <p>Очереди, метки, firewall, журнал и порт локального Telegram-прокси. После сохранения службы применят изменения и обновят сетевые правила.</p>
+        </header>
+        <form class="settings-form" id="r2o-settings-form">
+          <div class="settings-grid">
+            <label class="settings-field" for="settings-mode">
+              <span>Режим работы</span>
+              <select id="settings-mode" name="mode" required disabled>
+                <option value="observe">Наблюдение — только измерять</option>
+                <option value="apply">Применение — обходить подтверждённые блокировки</option>
+                <option value="off">Выключен</option>
+              </select>
+            </label>
+            <label class="settings-field" for="settings-queue">
+              <span>Очередь NFQUEUE IPv4</span>
+              <input id="settings-queue" name="queue_num" type="number" inputmode="numeric" min="0" max="65535" step="1" required disabled>
+            </label>
+            <label class="settings-field" for="settings-queue6">
+              <span>Очередь NFQUEUE IPv6</span>
+              <input id="settings-queue6" name="queue_num6" type="number" inputmode="numeric" min="0" max="65535" step="1" required disabled>
+            </label>
+            <label class="settings-field" for="settings-ipv6">
+              <span>Обработка IPv6</span>
+              <select id="settings-ipv6" name="ipv6_enabled" required disabled>
+                <option value="true">Включена</option>
+                <option value="false">Выключена</option>
+              </select>
+            </label>
+            <label class="settings-field" for="settings-capacity">
+              <span>Ёмкость таблицы потоков</span>
+              <input id="settings-capacity" name="flow_capacity" type="number" inputmode="numeric" min="1" max="4294967295" step="1" required disabled>
+            </label>
+            <label class="settings-field" for="settings-mark">
+              <span>Метка маршрутизации</span>
+              <input id="settings-mark" name="mark" type="text" maxlength="10" required disabled>
+            </label>
+            <label class="settings-field" for="settings-probe-mark">
+              <span>Метка измерений</span>
+              <input id="settings-probe-mark" name="probe_mark" type="text" maxlength="10" required disabled>
+            </label>
+            <label class="settings-field" for="settings-only-mark">
+              <span>Обрабатывать только метку</span>
+              <input id="settings-only-mark" name="only_mark" type="text" maxlength="21" placeholder="пусто — без ограничения" disabled>
+            </label>
+            <label class="settings-field" for="settings-firewall">
+              <span>Firewall backend</span>
+              <select id="settings-firewall" name="firewall_backend" required disabled>
+                <option value="auto">Автоматический выбор</option>
+                <option value="nft">nftables</option>
+                <option value="iptables">iptables</option>
+              </select>
+            </label>
+            <label class="settings-field" for="settings-ports">
+              <span>Порты TCP/UDP</span>
+              <input id="settings-ports" name="ports" type="text" maxlength="96" required disabled>
+            </label>
+            <label class="settings-field" for="settings-connbytes">
+              <span>Окно TCP/UDP пакетов</span>
+              <input id="settings-connbytes" name="connbytes" type="text" maxlength="43" required disabled>
+            </label>
+            <label class="settings-field" for="settings-voice-ports">
+              <span>Голосовые UDP-порты</span>
+              <input id="settings-voice-ports" name="voice_ports" type="text" maxlength="96" required disabled>
+            </label>
+            <label class="settings-field" for="settings-voice-connbytes">
+              <span>Окно голосовых пакетов</span>
+              <input id="settings-voice-connbytes" name="voice_connbytes" type="text" maxlength="43" required disabled>
+            </label>
+            <label class="settings-field" for="settings-http-keepalive-ports">
+              <span>Порты поздних HTTP-пакетов</span>
+              <input id="settings-http-keepalive-ports" name="http_keepalive_ports" type="text" maxlength="96" required disabled>
+            </label>
+            <label class="settings-field" for="settings-dns-ports">
+              <span>Порты DNS, исключённые из очереди</span>
+              <input id="settings-dns-ports" name="dns_ports" type="text" maxlength="96" required disabled>
+            </label>
+            <label class="settings-field" for="settings-tg-port">
+              <span>Порт локального Telegram-прокси</span>
+              <input id="settings-tg-port" name="tg_port" type="number" inputmode="numeric" min="1" max="65535" step="1" required disabled>
+            </label>
+            <label class="settings-field" for="settings-log-max">
+              <span>Максимальный размер журнала, байт</span>
+              <input id="settings-log-max" name="log_max" type="number" inputmode="numeric" min="1024" max="67108864" step="1" required disabled>
+            </label>
+            <label class="settings-field" for="settings-log-keep">
+              <span>Оставлять в журнале, байт</span>
+              <input id="settings-log-keep" name="log_keep" type="number" inputmode="numeric" min="1024" max="67108864" step="1" required disabled>
+            </label>
+            <label class="settings-field" for="settings-log-every">
+              <span>Интервал записи журнала, секунд</span>
+              <input id="settings-log-every" name="log_every" type="number" inputmode="numeric" min="1" max="3600" step="1" required disabled>
+            </label>
+          </div>
+          <div class="settings-actions">
+            <button type="submit" class="btn" data-variant="primary" id="settings-save" disabled>Сохранить и перезапустить</button>
+            <p id="settings-status" class="settings-status" role="status" aria-live="polite">Загружаем настройки…</p>
+          </div>
+        </form>
       </section>
 
       <section class="sheet" id="diagnostics" aria-labelledby="diagnostics-title">

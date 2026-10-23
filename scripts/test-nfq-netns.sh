@@ -142,13 +142,19 @@ ip netns exec "$NS" nft add rule inet r2o output udp dport 4444 queue num 65528 
 ip netns exec "$NS" nft add rule inet r2o output ip daddr 127.0.0.1 udp dport 50004 meta mark != "$VOICE_MARK" queue num "$VOICE_QUEUE" bypass
 ip netns exec "$NS" nft add rule inet r2o input ip saddr 127.0.0.1 udp sport 50004 queue num "$VOICE_QUEUE" bypass
 ip netns exec "$NS" nft add rule inet r2o output ip daddr 127.0.0.1 tcp dport 4445 meta mark != "$TCP_MARK" queue num "$TCP_QUEUE" bypass
+ip netns exec "$NS" nft add rule inet r2o input ip saddr 127.0.0.1 tcp sport 4445 queue num "$TCP_QUEUE" bypass
 ip netns exec "$NS" nft add rule inet r2o output ip daddr 127.0.0.1 tcp dport 4447 meta mark != "$TCP_DELAY_MARK" queue num "$TCP_DELAY_QUEUE" bypass
+ip netns exec "$NS" nft add rule inet r2o input ip saddr 127.0.0.1 tcp sport 4447 queue num "$TCP_DELAY_QUEUE" bypass
 ip netns exec "$NS" nft add rule inet r2o output ip daddr 127.0.0.1 tcp dport 4449 meta mark != "$TCP_CONTROL_MARK" queue num "$TCP_CONTROL_QUEUE" bypass
+ip netns exec "$NS" nft add rule inet r2o input ip saddr 127.0.0.1 tcp sport 4449 queue num "$TCP_CONTROL_QUEUE" bypass
 ip netns exec "$NS" nft add rule inet r2o output ip daddr 127.0.0.1 tcp sport 40131 tcp dport 80 queue num "$OBSERVE_QUEUE" bypass
 ip netns exec "$NS" nft add rule inet r2o output ip daddr 127.0.0.1 tcp dport 80 queue num "$TCP_CONTROL_QUEUE" bypass
+ip netns exec "$NS" nft add rule inet r2o input ip saddr 127.0.0.1 tcp sport 80 tcp dport 40129 queue num "$TCP_CONTROL_QUEUE" bypass
 ip netns exec "$NS" nft add rule inet r2o input ip saddr 127.0.0.1 tcp sport 80 queue num "$OBSERVE_QUEUE" bypass
 ip netns exec "$NS" nft add rule inet r2o output ip daddr 127.0.0.1 tcp dport 4450 meta mark != "$TCP_HOLD_MARK" queue num "$TCP_HOLD_QUEUE" bypass
+ip netns exec "$NS" nft add rule inet r2o input ip saddr 127.0.0.1 tcp sport 4450 queue num "$TCP_HOLD_QUEUE" bypass
 ip netns exec "$NS" nft add rule inet r2o output ip6 daddr ::1 tcp dport 4446 meta mark != "$TCP6_MARK" queue num "$TCP6_QUEUE" bypass
+ip netns exec "$NS" nft add rule inet r2o input ip6 saddr ::1 tcp sport 4446 queue num "$TCP6_QUEUE" bypass
 ip netns exec "$NS" nft add rule inet r2o output ip daddr 127.0.0.1 udp dport 4451 queue num "$OBSERVE_QUEUE" bypass
 ip netns exec "$NS" nft add rule inet r2o output ip daddr 127.0.0.1 tcp dport 4452 queue num "$OBSERVE_QUEUE" bypass
 ip netns exec "$NS" nft add chain inet r2o quic_observe '{ type filter hook output priority 1; policy accept; }'
@@ -760,6 +766,7 @@ def accept_and_read():
             break
         data.extend(part)
     received["hello"] = bytes(data)
+    threading.Event().wait(0.25)
     connection.close()
 
 capture = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
@@ -842,6 +849,7 @@ def accept_and_read():
             break
         data.extend(part)
     received["hello"] = bytes(data)
+    time.sleep(0.25)
     connection.close()
 
 capture = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
@@ -1145,7 +1153,12 @@ split_offset = 61 + len(host) // 2
 if not any(size == split_offset and
            (sequence + split_offset, len(hello) - split_offset) in captured
            for sequence, size in captured):
-    raise SystemExit(f"ОШИБКА: план TCP-потока не разделил собранный ClientHello: {captured!r}")
+    with open("/proc/net/netfilter/nfnetlink_queue", encoding="ascii") as queues:
+        queue_stats = queues.read().strip()
+    raise SystemExit(
+        "ОШИБКА: план TCP-потока не разделил собранный ClientHello: "
+        f"пакеты={captured!r}, NFQUEUE={queue_stats!r}"
+    )
 print("ПРОЙДЕНО: NFQUEUE удержал разделённый ClientHello, применил TLS-план и выпустил исходные пакеты")
 PY
 

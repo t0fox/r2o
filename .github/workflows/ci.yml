@@ -93,7 +93,7 @@ jobs:
         run: find scripts -type f -name '*.sh' -print0 | xargs -0 -r shellcheck -s sh
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
       - name: Собрать бинарники для сценариев роутера
-        run: cargo build --locked --release --package r2o-controller --bin r2o-controller --package r2o-telegram --bin r2o-telegram
+        run: cargo build --locked --release --package r2o-manager --bin r2o-manager --package r2o-controller --bin r2o-controller --package r2o-telegram --bin r2o-telegram
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # версия v7.1.0
         with:
           node-version: '24'
@@ -107,8 +107,10 @@ jobs:
             scripts/test-router-firewall.sh \
             scripts/test-router-tg-firewall.sh \
             scripts/test-router-update-lifecycle.sh \
+            scripts/test-router-install-lifecycle.sh \
             scripts/test-router-update-scheduler.sh \
             scripts/test-router-update-auto.sh \
+            scripts/test-router-route-gate-config.sh \
             scripts/test-router-clear-found.sh \
             scripts/test-router-log-maintenance.sh \
             scripts/test-router-telegram-service.sh; do
@@ -366,6 +368,109 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  donor-differential:
+    name: C/Rust differential — ${{ matrix.snapshot }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - snapshot: baseline
+            donor_sha: eb848976ed9491791b7f2130b874867b61b2ca5d
+          - snapshot: upstream
+            donor_sha: 86b05b96457fccdec6b7ddc0e8478508f80f0bab
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
+        with:
+          repository: t0fox/d2o
+          ref: ${{ matrix.donor_sha }}
+          path: d2o
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
+        with:
+          toolchain: 1.98.0
+          target: aarch64-unknown-linux-gnu
+      - name: Установить Clang, OpenSSL, AArch64 и QEMU
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang-18 gcc-aarch64-linux-gnu qemu-user libssl-dev pkg-config zlib1g-dev
+      - name: Проверить SHA снимка донора и подготовить C-эталон
+        env:
+          DONOR_SHA: ${{ matrix.donor_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C d2o rev-parse HEAD)" = "$DONOR_SHA"
+          make -B -C d2o/datapath test_session test_quic_session test_stun_session test_routemark CC=clang-18
+          cargo +1.98.0 fetch --locked
+      - name: C/Rust сценарии
+        env:
+          DONOR_SNAPSHOT: ${{ matrix.snapshot }}
+          R2O_DONOR_CORE: ${{ github.workspace }}/d2o/core
+          R2O_DONOR_DATAPATH: ${{ github.workspace }}/d2o/datapath
+        run: |
+          set -uo pipefail
+          if [ "$DONOR_SNAPSHOT" = baseline ]; then
+            scripts=(
+              r2o-discord-discovery-differential.sh
+              r2o-discovery-active-lifetime-differential.sh
+              r2o-discovery-coalesce-differential.sh
+              r2o-quic-stun-watch-differential.sh
+              r2o-tcp-exchange-differential.sh
+              r2o-hold-differential.sh
+              r2o-tcp-payload-stats-differential.sh
+              r2o-tcp-rst-cut-differential.sh
+              r2o-tcp-rst-observation-differential.sh
+              r2o-udp-exchange-differential.sh
+            )
+          else
+            scripts=(
+              r2o-discord-discovery-differential.sh
+              r2o-discovery-active-lifetime-differential.sh
+              r2o-discovery-coalesce-differential.sh
+              r2o-discovery-concurrency-check.sh
+              r2o-discovery-quic-stop-differential.sh
+              r2o-quic-hello-differential.sh
+              r2o-quic-stun-watch-differential.sh
+              r2o-route-gate-differential.sh
+              r2o-scheduler-differential.sh
+              r2o-tcp-exchange-differential.sh
+              r2o-hold-differential.sh
+              r2o-tcp-payload-stats-differential.sh
+              r2o-tcp-reply-hidden-differential.sh
+              r2o-tcp-rst-cut-differential.sh
+              r2o-tcp-rst-observation-differential.sh
+              r2o-udp-exchange-differential.sh
+              r2o-udp-session-table-check.sh
+            )
+          fi
+          failed=()
+          for script in "${scripts[@]}"; do
+            echo "::group::$script"
+            if timeout 900s sh "scripts/$script"; then
+              echo "::endgroup::"
+            else
+              status=$?
+              failed+=("$script ($status)")
+              echo "::endgroup::"
+            fi
+          done
+          if [ "${#failed[@]}" -gt 0 ]; then
+            printf '::error::C/Rust differential failures: %s\n' "${failed[*]}"
+            exit 1
+          fi
+      - name: Сохранить журналы сравнения
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # версия v7.0.2
+        with:
+          name: r2o-differential-${{ matrix.snapshot }}
+          path: .rea/*.log
+          retention-days: 14
+          if-no-files-found: warn
+
   check:
     name: check
     if: always()
@@ -384,11 +489,12 @@ jobs:
       - openwrt-mipsel-musl
       - openwrt-aarch64-musl
       - armv5-musleabi
+      - donor-differential
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - name: Завершиться ошибкой при пропуске или сбое проверки
-        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || needs.panel.result == 'skipped' || needs.telegram.result == 'skipped' || needs.panel-browser.result == 'skipped' || needs.shell.result == 'skipped' || needs.datapath.result == 'skipped' || needs.core.result == 'skipped' || needs.rust-workspace.result == 'skipped' || needs.cross-check.result == 'skipped' || needs.nfqueue-integration.result == 'skipped' || needs.mipsel-release.result == 'skipped' || needs.openwrt-mipsel-musl.result == 'skipped' || needs.openwrt-aarch64-musl.result == 'skipped' || needs.armv5-musleabi.result == 'skipped' || (github.event_name != 'pull_request' && needs.sanitizers.result == 'skipped') }}
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || needs.panel.result == 'skipped' || needs.telegram.result == 'skipped' || needs.panel-browser.result == 'skipped' || needs.shell.result == 'skipped' || needs.datapath.result == 'skipped' || needs.core.result == 'skipped' || needs.rust-workspace.result == 'skipped' || needs.cross-check.result == 'skipped' || needs.nfqueue-integration.result == 'skipped' || needs.mipsel-release.result == 'skipped' || needs.openwrt-mipsel-musl.result == 'skipped' || needs.openwrt-aarch64-musl.result == 'skipped' || needs.armv5-musleabi.result == 'skipped' || needs.donor-differential.result == 'skipped' || (github.event_name != 'pull_request' && needs.sanitizers.result == 'skipped') }}
         run: exit 1
       - name: Все проверки завершились успешно
         run: echo "Все проверки R2O пройдены"

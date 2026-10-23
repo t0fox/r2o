@@ -169,10 +169,10 @@ fn first_config_initialization_imports_supported_settings_without_evaluating_don
     let donor = temp.0.join("donor-config");
     fs::write(
         &defaults,
-        "SCHEMA=1\nMODE=apply\nSTATE_DIR=/opt/r2o/state\nQUEUE_NUM=2000\nQUEUE_NUM6=2001\nR2O_FLOW_CAPACITY=2048\nIPV6_ENABLED=1\nMARK=45\nAUTOUPDATE=1\nLOGMAX=2097152\nLOGKEEP=1048576\nLOG_EVERY=60\nFW_BACKEND=auto\nPANEL_LISTEN=127.0.0.1:8090\nTG_ENABLED=1\nTG_MODE=local\n",
+        "SCHEMA=1\nMODE=apply\nSTATE_DIR=/opt/r2o/state\nQUEUE_NUM=2000\nQUEUE_NUM6=2001\nR2O_FLOW_CAPACITY=2048\nIPV6_ENABLED=1\nMARK=45\nAUTOUPDATE=1\nLOGMAX=2097152\nLOGKEEP=1048576\nLOG_EVERY=60\nFW_BACKEND=auto\nPORTS=0:65535\nCONNBYTES=0:8\nVOICE_PORTS=50000:50099,1400,3478:3481,5349,19294:19344\nVOICE_CONNBYTES=0:4\nHTTP_KEEPALIVE_PORTS=80\nDNS_PORTS=53,853\nPANEL_LISTEN=127.0.0.1:8090\nTG_ENABLED=1\nTG_MODE=local\nTG_PORT=1443\n",
     )
     .unwrap();
-    let donor_text = "SCHEMA=1\nMODE=observe\nSTATE_DIR=/opt/d2k/state\nQUEUE_NUM=1234\nQUEUE_NUM6=1235\nFLOWS=64\nMARK=0x2f\nLOGMAX=4194304\nLOGKEEP=2097152\nLOG_EVERY=120\nTG_ENABLED=0\nTG_MODE=relay\nTG_PORT=1445\nCONTROL_SOCKET=/opt/d2k/run/d2kd.sock\nD2K_PPE_DEOFFLOAD=1\nUNKNOWN=$(touch SHOULD_NOT_RUN)\n";
+    let donor_text = "SCHEMA=1\nMODE=observe\nSTATE_DIR=/opt/d2k/state\nQUEUE_NUM=1234\nQUEUE_NUM6=1235\nFLOWS=64\nMARK=0x2f\nLOGMAX=4194304\nLOGKEEP=2097152\nLOG_EVERY=120\nPORTS=80,443\nCONNBYTES=0:12\nVOICE_PORTS=3478:3481\nVOICE_CONNBYTES=0:6\nHTTP_KEEPALIVE_PORTS=8080\nDNS_PORTS=53,853,5353\nTG_ENABLED=0\nTG_MODE=relay\nTG_PORT=1445\nCONTROL_SOCKET=/opt/d2k/run/d2kd.sock\nD2K_PPE_DEOFFLOAD=1\nUNKNOWN=$(touch SHOULD_NOT_RUN)\n";
     fs::write(&donor, donor_text).unwrap();
 
     let output = invoke(&[
@@ -199,6 +199,12 @@ fn first_config_initialization_imports_supported_settings_without_evaluating_don
     assert!(config.contains("LOGMAX=4194304\n"));
     assert!(config.contains("LOGKEEP=2097152\n"));
     assert!(config.contains("LOG_EVERY=120\n"));
+    assert!(config.contains("PORTS=80,443\n"));
+    assert!(config.contains("CONNBYTES=0:12\n"));
+    assert!(config.contains("VOICE_PORTS=3478:3481\n"));
+    assert!(config.contains("VOICE_CONNBYTES=0:6\n"));
+    assert!(config.contains("HTTP_KEEPALIVE_PORTS=8080\n"));
+    assert!(config.contains("DNS_PORTS=53,853,5353\n"));
     assert!(config.contains("TG_ENABLED=0\n"));
     assert!(config.contains("TG_MODE=local\n"));
     assert!(config.contains("TG_PORT=1445\n"));
@@ -214,6 +220,93 @@ fn first_config_initialization_imports_supported_settings_without_evaluating_don
             .iter()
             .any(|key| key == "D2K_PPE_DEOFFLOAD")
     );
+}
+
+#[test]
+fn donor_firewall_settings_reject_invalid_port_lists_and_connbytes_windows() {
+    let defaults = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../router/config.default");
+    let temp = TestDir::new();
+    for (key, value) in [
+        ("PORTS", "80:80"),
+        ("PORTS", "443;$(touch SHOULD_NOT_RUN)"),
+        ("PORTS", "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16"),
+        ("CONNBYTES", "0:8:9"),
+        ("VOICE_PORTS", "0:65536"),
+        ("VOICE_CONNBYTES", "8:4"),
+        ("HTTP_KEEPALIVE_PORTS", "80,,443"),
+        ("DNS_PORTS", "53, 853"),
+        ("TG_PORT", "0"),
+        ("TG_PORT", "65536"),
+    ] {
+        let root = temp.0.join(format!("install-{key}"));
+        let donor = temp.0.join(format!("donor-{key}"));
+        fs::write(&donor, format!("{key}={value}\n")).unwrap();
+        let output = invoke(&[
+            "config-init",
+            "--root",
+            root.to_str().unwrap(),
+            "--defaults",
+            defaults.to_str().unwrap(),
+            "--donor-config",
+            donor.to_str().unwrap(),
+        ]);
+        assert!(
+            !output.status.success(),
+            "accepted unsafe donor setting {key}={value}"
+        );
+        assert!(!root.join("config").exists());
+    }
+    assert!(!temp.0.join("SHOULD_NOT_RUN").exists());
+}
+
+#[test]
+fn shipped_openwrt_defaults_initialize_without_rejecting_advanced_mark_options() {
+    let temp = TestDir::new();
+    let root = temp.0.join("install");
+    let defaults = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../router/config.default");
+
+    let output = invoke(&[
+        "config-init",
+        "--root",
+        root.to_str().unwrap(),
+        "--defaults",
+        defaults.to_str().unwrap(),
+    ]);
+    assert!(
+        output.status.success(),
+        "shipped defaults were rejected: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config = fs::read_to_string(root.join("config")).unwrap();
+    assert!(config.contains("PROBE_MARK=0\n"));
+    assert!(config.contains("ONLY_MARK=\n"));
+    assert!(config.contains("TG_PORT=1443\n"));
+}
+
+#[test]
+fn defaults_reject_invalid_probe_and_only_mark_values() {
+    let temp = TestDir::new();
+    let root = temp.0.join("install");
+    let defaults = temp.0.join("config.default");
+    for (probe_mark, only_mark) in [("4294967296", ""), ("0", "7/0"), ("0", "7/8/1")] {
+        fs::write(
+            &defaults,
+            format!("MODE=apply\nPROBE_MARK={probe_mark}\nONLY_MARK={only_mark}\n"),
+        )
+        .unwrap();
+        let output = invoke(&[
+            "config-init",
+            "--root",
+            root.to_str().unwrap(),
+            "--defaults",
+            defaults.to_str().unwrap(),
+        ]);
+        assert!(
+            !output.status.success(),
+            "accepted PROBE_MARK={probe_mark}, ONLY_MARK={only_mark}"
+        );
+        assert!(!root.join("config").exists());
+    }
 }
 
 #[test]

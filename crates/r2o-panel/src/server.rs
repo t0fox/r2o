@@ -43,6 +43,23 @@ pub struct Config {
     pub commit: String,
     pub built: String,
     pub queue_num: u16,
+    pub queue_num6: u16,
+    pub flow_capacity: u32,
+    pub ipv6_enabled: bool,
+    pub mark: String,
+    pub probe_mark: String,
+    pub only_mark: String,
+    pub firewall_backend: String,
+    pub ports: String,
+    pub connbytes: String,
+    pub voice_ports: String,
+    pub voice_connbytes: String,
+    pub http_keepalive_ports: String,
+    pub dns_ports: String,
+    pub tg_port: u16,
+    pub log_max: u32,
+    pub log_keep: u32,
+    pub log_every: u16,
     pub config_exists: bool,
     pub dirty: bool,
     pub control_enabled: bool,
@@ -75,6 +92,23 @@ impl Default for Config {
             commit: String::new(),
             built: String::new(),
             queue_num: 2000,
+            queue_num6: 2001,
+            flow_capacity: 2048,
+            ipv6_enabled: true,
+            mark: "45".into(),
+            probe_mark: "0".into(),
+            only_mark: String::new(),
+            firewall_backend: "auto".into(),
+            ports: "0:65535".into(),
+            connbytes: "0:8".into(),
+            voice_ports: "50000:50099,1400,3478:3481,5349,19294:19344".into(),
+            voice_connbytes: "0:4".into(),
+            http_keepalive_ports: "80".into(),
+            dns_ports: "53,853".into(),
+            tg_port: 1443,
+            log_max: 2_097_152,
+            log_keep: 1_048_576,
+            log_every: 60,
             config_exists: false,
             dirty: false,
             control_enabled: false,
@@ -571,7 +605,7 @@ fn api_status(config: &Config, query: &str) -> Response {
 
 fn unavailable_knowledge() -> (Value, Option<String>, bool) {
     (
-        json!({"linked":false,"link_note":"движок не отдаёт состояние","catalog_at":"","boxes":[],"searches":[],"targets":0,"confirms":0,"probes_used":0,"client_unfit":0}),
+        json!({"linked":false,"link_note":"движок не отдаёт состояние","catalog_at":"","boxes":[],"searches":[],"targets":null,"confirms":null,"probes_used":null,"client_unfit":null}),
         None,
         false,
     )
@@ -924,6 +958,23 @@ fn r2o_api_config(config: &Config, request: &Request<'_>) -> Response {
             &json!({
                 "mode":settings.mode,
                 "queue_num":settings.queue_num,
+                "queue_num6":settings.queue_num6,
+                "flow_capacity":settings.flow_capacity,
+                "ipv6_enabled":settings.ipv6_enabled,
+                "mark":settings.mark,
+                "probe_mark":settings.probe_mark,
+                "only_mark":settings.only_mark,
+                "firewall_backend":settings.firewall_backend,
+                "ports":settings.ports,
+                "connbytes":settings.connbytes,
+                "voice_ports":settings.voice_ports,
+                "voice_connbytes":settings.voice_connbytes,
+                "http_keepalive_ports":settings.http_keepalive_ports,
+                "dns_ports":settings.dns_ports,
+                "tg_port":settings.tg_port,
+                "log_max":settings.log_max,
+                "log_keep":settings.log_keep,
+                "log_every":settings.log_every,
                 "editable":settings.config_exists && config.control_enabled
             }),
         );
@@ -960,25 +1011,26 @@ fn r2o_api_config(config: &Config, request: &Request<'_>) -> Response {
             &json!({"ok":false,"message":"Проверьте режим и номер очереди NFQUEUE"}),
         );
     }
-    let (mode, queue_num) = match r2o_config_from_json(request.body) {
+    let settings = match r2o_config_from_json(request.body) {
         Ok(settings) => settings,
         Err(()) => {
             return json_response(
                 400,
-                &json!({"ok":false,"message":"Укажите режим и номер очереди от 0 до 65535"}),
+                &json!({"ok":false,"message":"Проверьте режим, очереди и параметры datapath"}),
             );
         }
     };
-    if r2o_write_settings_config(&config.config_path, &mode, queue_num).is_err() {
+    let action = "settings-restart";
+    if r2o_write_settings_config(&config.config_path, &settings).is_err() {
         return json_response(
             500,
             &json!({"ok":false,"message":"Не удалось сохранить настройки R2O"}),
         );
     }
-    match start_service_action(config, "engine-restart") {
+    match start_service_action(config, action) {
         Ok(()) => json_response(
             202,
-            &json!({"ok":true,"message":"Настройки сохранены, службы R2O перезапускаются"}),
+            &json!({"ok":true,"message":if action == "engine-stop" {"Настройки сохранены, движок останавливается"} else {"Настройки сохранены, службы R2O перезапускаются"}}),
         ),
         Err(ActionError::Busy) => json_response(
             409,
@@ -991,25 +1043,176 @@ fn r2o_api_config(config: &Config, request: &Request<'_>) -> Response {
     }
 }
 
-fn r2o_config_from_json(body: &[u8]) -> Result<(String, u16), ()> {
+#[derive(Clone, Debug)]
+struct EditableSettings {
+    mode: String,
+    queue_num: u16,
+    queue_num6: u16,
+    flow_capacity: u32,
+    ipv6_enabled: bool,
+    mark: String,
+    probe_mark: String,
+    only_mark: String,
+    firewall_backend: String,
+    ports: String,
+    connbytes: String,
+    voice_ports: String,
+    voice_connbytes: String,
+    http_keepalive_ports: String,
+    dns_ports: String,
+    tg_port: u16,
+    log_max: u32,
+    log_keep: u32,
+    log_every: u16,
+}
+
+fn r2o_config_from_json(body: &[u8]) -> Result<EditableSettings, ()> {
     if body.len() > CONFIG_BODY_MAX {
         return Err(());
     }
     let value: Value = serde_json::from_slice(body).map_err(|_| ())?;
     let object = value.as_object().ok_or(())?;
-    if object.len() != 2 || !object.contains_key("mode") || !object.contains_key("queue_num") {
+    const KEYS: [&str; 19] = [
+        "mode",
+        "queue_num",
+        "queue_num6",
+        "flow_capacity",
+        "ipv6_enabled",
+        "mark",
+        "probe_mark",
+        "only_mark",
+        "firewall_backend",
+        "ports",
+        "connbytes",
+        "voice_ports",
+        "voice_connbytes",
+        "http_keepalive_ports",
+        "dns_ports",
+        "tg_port",
+        "log_max",
+        "log_keep",
+        "log_every",
+    ];
+    if object.len() != KEYS.len() || object.keys().any(|key| !KEYS.contains(&key.as_str())) {
         return Err(());
     }
     let mode = object.get("mode").and_then(Value::as_str).ok_or(())?;
     if !matches!(mode, "off" | "observe" | "apply") {
         return Err(());
     }
-    let queue_num = object
-        .get("queue_num")
+    let queue_num = r2o_json_u16(object, "queue_num")?;
+    let queue_num6 = r2o_json_u16(object, "queue_num6")?;
+    if queue_num == queue_num6 {
+        return Err(());
+    }
+    let flow_capacity = object
+        .get("flow_capacity")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .ok_or(())?;
+    let ipv6_enabled = object
+        .get("ipv6_enabled")
+        .and_then(Value::as_bool)
+        .ok_or(())?;
+    let mark = r2o_json_mark(object, "mark", valid_mark)?;
+    let probe_mark = r2o_json_mark(object, "probe_mark", valid_mark)?;
+    if parse_mark(&probe_mark)
+        .is_some_and(|probe| probe != 0 && parse_mark(&mark).is_some_and(|route| route == probe))
+    {
+        return Err(());
+    }
+    let only_mark = r2o_json_mark(object, "only_mark", valid_only_mark)?;
+    let firewall_backend = object
+        .get("firewall_backend")
+        .and_then(Value::as_str)
+        .filter(|value| matches!(*value, "auto" | "iptables" | "nft"))
+        .ok_or(())?
+        .to_owned();
+    let ports = r2o_json_firewall_value(object, "ports", valid_port_list)?;
+    let connbytes = r2o_json_firewall_value(object, "connbytes", valid_connbytes_window)?;
+    let voice_ports = r2o_json_firewall_value(object, "voice_ports", valid_port_list)?;
+    let voice_connbytes =
+        r2o_json_firewall_value(object, "voice_connbytes", valid_connbytes_window)?;
+    let http_keepalive_ports =
+        r2o_json_firewall_value(object, "http_keepalive_ports", valid_port_list)?;
+    let dns_ports = r2o_json_firewall_value(object, "dns_ports", valid_port_list)?;
+    let tg_port = r2o_json_u16(object, "tg_port")?;
+    if tg_port == 0 {
+        return Err(());
+    }
+    let log_max = r2o_json_u32(object, "log_max")?;
+    let log_keep = r2o_json_u32(object, "log_keep")?;
+    let log_every = r2o_json_u16(object, "log_every")?;
+    if !(1024..=67_108_864).contains(&log_max)
+        || !(1024..=67_108_864).contains(&log_keep)
+        || !(1..=3600).contains(&log_every)
+    {
+        return Err(());
+    }
+    Ok(EditableSettings {
+        mode: mode.into(),
+        queue_num,
+        queue_num6,
+        flow_capacity,
+        ipv6_enabled,
+        mark,
+        probe_mark,
+        only_mark,
+        firewall_backend,
+        ports,
+        connbytes,
+        voice_ports,
+        voice_connbytes,
+        http_keepalive_ports,
+        dns_ports,
+        tg_port,
+        log_max,
+        log_keep,
+        log_every,
+    })
+}
+
+fn r2o_json_firewall_value(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+    valid: fn(&str) -> bool,
+) -> Result<String, ()> {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| valid(value))
+        .map(str::to_owned)
+        .ok_or(())
+}
+
+fn r2o_json_u16(object: &serde_json::Map<String, Value>, key: &str) -> Result<u16, ()> {
+    object
+        .get(key)
         .and_then(Value::as_u64)
         .and_then(|value| u16::try_from(value).ok())
-        .ok_or(())?;
-    Ok((mode.into(), queue_num))
+        .ok_or(())
+}
+
+fn r2o_json_u32(object: &serde_json::Map<String, Value>, key: &str) -> Result<u32, ()> {
+    object
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or(())
+}
+
+fn r2o_json_mark(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+    valid: fn(&str) -> bool,
+) -> Result<String, ()> {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| valid(value))
+        .map(str::to_owned)
+        .ok_or(())
 }
 
 fn api_workers(config: &Config, request: &Request<'_>) -> Response {
@@ -1269,7 +1472,7 @@ fn write_worker_config(path: &Path, domains: &[String]) -> std::io::Result<()> {
     r2o_write_config_atomically(path, &output, &metadata, "workers")
 }
 
-fn r2o_write_settings_config(path: &Path, mode: &str, queue_num: u16) -> std::io::Result<()> {
+fn r2o_write_settings_config(path: &Path, settings: &EditableSettings) -> std::io::Result<()> {
     let (source, metadata) = read_regular_file_with_metadata(path, BODY_MAX)?;
     if source.contains(&0) {
         return Err(std::io::Error::new(
@@ -1279,36 +1482,60 @@ fn r2o_write_settings_config(path: &Path, mode: &str, queue_num: u16) -> std::io
     }
     let text = String::from_utf8(source)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    let mut output = String::with_capacity(text.len().saturating_add(32));
-    let mut r2o_mode_comment = String::new();
-    let mut r2o_queue_comment = String::new();
+    let settings_pairs = [
+        ("MODE", settings.mode.clone()),
+        ("QUEUE_NUM", settings.queue_num.to_string()),
+        ("QUEUE_NUM6", settings.queue_num6.to_string()),
+        ("R2O_FLOW_CAPACITY", settings.flow_capacity.to_string()),
+        (
+            "IPV6_ENABLED",
+            if settings.ipv6_enabled { "1" } else { "0" }.into(),
+        ),
+        ("MARK", settings.mark.clone()),
+        ("PROBE_MARK", settings.probe_mark.clone()),
+        ("ONLY_MARK", settings.only_mark.clone()),
+        ("FW_BACKEND", settings.firewall_backend.clone()),
+        ("PORTS", settings.ports.clone()),
+        ("CONNBYTES", settings.connbytes.clone()),
+        ("VOICE_PORTS", settings.voice_ports.clone()),
+        ("VOICE_CONNBYTES", settings.voice_connbytes.clone()),
+        (
+            "HTTP_KEEPALIVE_PORTS",
+            settings.http_keepalive_ports.clone(),
+        ),
+        ("DNS_PORTS", settings.dns_ports.clone()),
+        ("TG_PORT", settings.tg_port.to_string()),
+        ("LOGMAX", settings.log_max.to_string()),
+        ("LOGKEEP", settings.log_keep.to_string()),
+        ("LOG_EVERY", settings.log_every.to_string()),
+    ];
+    let mut output = String::with_capacity(text.len().saturating_add(256));
+    let mut comments: Vec<(&str, String)> = Vec::new();
     for r2o_original_line in text.split_inclusive('\n') {
         let line = r2o_original_line.trim_end_matches(['\r', '\n']);
         let key = r2o_config_line_key(line);
-        if matches!(key, Some("MODE" | "QUEUE_NUM")) {
-            if let (Some(key), Some((_, value))) = (key, line.split_once('=')) {
-                if let Some(at) = value.find(" #") {
-                    let comment = &value[at..];
-                    if key == "MODE" {
-                        r2o_mode_comment = comment.into();
-                    } else {
-                        r2o_queue_comment = comment.into();
-                    }
-                }
+        if let Some(key) = key.filter(|key| settings_pairs.iter().any(|(name, _)| name == key)) {
+            let value = line
+                .split_once('=')
+                .map(|(_, value)| value)
+                .unwrap_or_default();
+            if let Some(at) = value.find(" #") {
+                comments.push((key, value[at..].into()));
             }
             continue;
         }
         output.push_str(r2o_original_line);
     }
-    let mut r2o_settings = String::with_capacity(32);
-    r2o_settings.push_str("MODE=");
-    r2o_settings.push_str(mode);
-    r2o_settings.push_str(&r2o_mode_comment);
-    r2o_settings.push('\n');
-    r2o_settings.push_str("QUEUE_NUM=");
-    r2o_settings.push_str(&queue_num.to_string());
-    r2o_settings.push_str(&r2o_queue_comment);
-    r2o_settings.push('\n');
+    let mut r2o_settings = String::with_capacity(256);
+    for (key, value) in &settings_pairs {
+        r2o_settings.push_str(key);
+        r2o_settings.push('=');
+        r2o_settings.push_str(value);
+        if let Some((_, comment)) = comments.iter().find(|(comment_key, _)| comment_key == key) {
+            r2o_settings.push_str(comment);
+        }
+        r2o_settings.push('\n');
+    }
     let r2o_separator_len = usize::from(!output.is_empty() && !output.ends_with('\n'));
     if output
         .len()
@@ -1855,16 +2082,21 @@ pub fn parse_config(
         "PANEL_LISTEN",
         "STATE_DIR",
         "QUEUE_NUM",
+        "QUEUE_NUM6",
+        "R2O_FLOW_CAPACITY",
+        "IPV6_ENABLED",
         "CONTROL_SOCKET",
         "DECOY_SNI",
         "MARK",
         "PROBE_MARK",
+        "ONLY_MARK",
         "FLOWS",
         "STATS_SEC",
         "HEAL_EVERY",
         "LOGMAX",
         "LOGKEEP",
         "LOG_EVERY",
+        "FW_BACKEND",
         "R2O_RUNTIME_DIR",
         "PORTS",
         "CONNBYTES",
@@ -1961,10 +2193,199 @@ pub fn parse_config(
                     config.queue_num = n;
                 }
             }
+            "QUEUE_NUM6" => {
+                config.queue_num6 = r2o_config_number(key, value)?;
+            }
+            "R2O_FLOW_CAPACITY" => {
+                let capacity: u32 = r2o_config_number(key, value)?;
+                if capacity == 0 {
+                    return Err(r2o_invalid_config(key));
+                }
+                config.flow_capacity = capacity;
+            }
+            "IPV6_ENABLED" => {
+                config.ipv6_enabled = match value {
+                    "0" => false,
+                    "1" => true,
+                    _ => return Err(r2o_invalid_config(key)),
+                };
+            }
+            "MARK" => {
+                if !valid_mark(value) {
+                    return Err(r2o_invalid_config(key));
+                }
+                config.mark = value.into();
+            }
+            "PROBE_MARK" => {
+                if !valid_mark(value) {
+                    return Err(r2o_invalid_config(key));
+                }
+                config.probe_mark = value.into();
+            }
+            "ONLY_MARK" => {
+                if !valid_only_mark(value) {
+                    return Err(r2o_invalid_config(key));
+                }
+                config.only_mark = value.into();
+            }
+            "FW_BACKEND" => {
+                if !matches!(value, "auto" | "iptables" | "nft") {
+                    return Err(r2o_invalid_config(key));
+                }
+                config.firewall_backend = value.into();
+            }
+            "PORTS" => {
+                if !valid_port_list(value) {
+                    return Err(r2o_invalid_config(key));
+                }
+                config.ports = value.into();
+            }
+            "CONNBYTES" => {
+                if !valid_connbytes_window(value) {
+                    return Err(r2o_invalid_config(key));
+                }
+                config.connbytes = value.into();
+            }
+            "VOICE_PORTS" => {
+                if !valid_port_list(value) {
+                    return Err(r2o_invalid_config(key));
+                }
+                config.voice_ports = value.into();
+            }
+            "VOICE_CONNBYTES" => {
+                if !valid_connbytes_window(value) {
+                    return Err(r2o_invalid_config(key));
+                }
+                config.voice_connbytes = value.into();
+            }
+            "HTTP_KEEPALIVE_PORTS" => {
+                if !valid_port_list(value) {
+                    return Err(r2o_invalid_config(key));
+                }
+                config.http_keepalive_ports = value.into();
+            }
+            "DNS_PORTS" => {
+                if !valid_port_list(value) {
+                    return Err(r2o_invalid_config(key));
+                }
+                config.dns_ports = value.into();
+            }
+            "TG_PORT" => {
+                let port: u16 = r2o_config_number(key, value)?;
+                if port == 0 {
+                    return Err(r2o_invalid_config(key));
+                }
+                config.tg_port = port;
+            }
+            "LOGMAX" => {
+                config.log_max = r2o_config_log_size(key, value)?;
+            }
+            "LOGKEEP" => {
+                config.log_keep = r2o_config_log_size(key, value)?;
+            }
+            "LOG_EVERY" => {
+                let seconds: u16 = r2o_config_number(key, value)?;
+                if !(1..=3600).contains(&seconds) {
+                    return Err(r2o_invalid_config(key));
+                }
+                config.log_every = seconds;
+            }
             _ => {}
         }
     }
+    if config.queue_num == config.queue_num6
+        || parse_mark(&config.probe_mark).is_some_and(|probe| {
+            probe != 0 && parse_mark(&config.mark).is_some_and(|route| route == probe)
+        })
+    {
+        return Err(r2o_invalid_config(
+            "QUEUE_NUM/QUEUE_NUM6 or PROBE_MARK/MARK",
+        ));
+    }
     Ok(())
+}
+
+fn r2o_invalid_config(key: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("invalid config value for {key}"),
+    )
+}
+
+fn r2o_config_number<T: std::str::FromStr>(key: &str, value: &str) -> std::io::Result<T> {
+    value.parse().map_err(|_| r2o_invalid_config(key))
+}
+
+fn r2o_config_log_size(key: &str, value: &str) -> std::io::Result<u32> {
+    let bytes: u32 = r2o_config_number(key, value)?;
+    if !(1024..=67_108_864).contains(&bytes) {
+        return Err(r2o_invalid_config(key));
+    }
+    Ok(bytes)
+}
+
+fn valid_port_list(value: &str) -> bool {
+    let mut slots = 0;
+    for item in value.split(',') {
+        let (start, end) = match item.split_once(':') {
+            Some((start, end)) if !end.contains(':') => (start, end),
+            Some(_) => return false,
+            None => (item, item),
+        };
+        let (Ok(start), Ok(end)) = (start.parse::<u16>(), end.parse::<u16>()) else {
+            return false;
+        };
+        if start > end || (item.contains(':') && start == end) {
+            return false;
+        }
+        slots += if item.contains(':') { 2 } else { 1 };
+        if slots > 15 {
+            return false;
+        }
+    }
+    slots > 0
+}
+
+fn valid_connbytes_window(value: &str) -> bool {
+    let Some((start, end)) = value.split_once(':') else {
+        return false;
+    };
+    if end.contains(':') {
+        return false;
+    }
+    let (Ok(start), Ok(end)) = (start.parse::<u64>(), end.parse::<u64>()) else {
+        return false;
+    };
+    start < end
+}
+
+fn parse_mark(value: &str) -> Option<u32> {
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        if hex.is_empty() || hex.len() > 8 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        u32::from_str_radix(hex, 16).ok()
+    } else {
+        value.parse::<u32>().ok()
+    }
+}
+
+fn valid_mark(value: &str) -> bool {
+    parse_mark(value).is_some()
+}
+
+fn valid_only_mark(value: &str) -> bool {
+    if value.is_empty() || value == "none" {
+        return true;
+    }
+    if let Some((mark, mask)) = value.split_once('/') {
+        !mask.contains('/') && valid_mark(mark) && parse_mark(mask).is_some_and(|mask| mask != 0)
+    } else {
+        valid_mark(value)
+    }
 }
 
 fn strip_shell_value(raw: &str) -> Option<&str> {

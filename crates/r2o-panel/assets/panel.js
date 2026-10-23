@@ -50,6 +50,12 @@
     if (transport === 6) return "TCP";
     return "протокол не указан";
   }
+  function voiceProofNote(binding) {
+    if (!binding || binding.transport !== 17 || binding.shape !== 5) return "";
+    if (binding.verified_by === 3) return "STUN Binding подтверждён; RTP не проверен";
+    if (binding.verified_by === 4) return "IP Discovery подтверждён; RTP не проверен";
+    return "RTP не проверен";
+  }
   function familyLabel(f) { return f === 6 ? "IPv6" : f === 4 ? "IPv4" : "IP?"; }
   function targetLabel(t) {
     if (t === "@discord-voice") return "Голос Discord";
@@ -340,6 +346,8 @@
     this.flash = null;
     this.workerDialog = null;
     this.workerDomains = [];
+    this.settingsEditable = false;
+    this.settingsSaving = false;
     this.$ = function (id) { return doc.getElementById(id); };
   }
 
@@ -392,6 +400,7 @@
     this.spy();
     this.navMotion();
     this.drawMark();
+    this.initSettings();
     this.poll();
     this.initUpdates();
     this.checkUpdates(false);
@@ -454,6 +463,174 @@
     });
     this.$("update-auto").addEventListener("change", function () {
       return self.updateCommand(self.$("update-auto").checked ? "auto-on" : "auto-off");
+    });
+  };
+
+  App.prototype.initSettings = function () {
+    var form = this.$("r2o-settings-form"), self = this;
+    if (!form || this.settingsInitialized) return;
+    this.settingsInitialized = true;
+    form.addEventListener("submit", function (event) {
+      event.preventDefault();
+      self.saveSettings();
+    });
+    this.loadSettings();
+  };
+
+  App.prototype.setSettingsEditable = function (editable) {
+    this.settingsEditable = !!editable;
+    var disabled = !this.settingsEditable || this.settingsSaving;
+    var form = this.$("r2o-settings-form");
+    Array.prototype.forEach.call(form.querySelectorAll("input, select"), function (field) {
+      field.disabled = disabled;
+    });
+    this.$("settings-save").disabled = disabled;
+  };
+
+  App.prototype.setSettingsStatus = function (message, tone) {
+    var status = this.$("settings-status");
+    if (!status) return;
+    status.textContent = message;
+    if (tone) status.setAttribute("data-tone", tone);
+    else status.removeAttribute("data-tone");
+  };
+
+  App.prototype.settingsRequest = function (method, body) {
+    var win = this.win, ctrl = typeof AbortController === "function" ? new AbortController() : null;
+    var timer = win.setTimeout(function () { if (ctrl) ctrl.abort(); }, 5000);
+    var headers = {};
+    var options = {
+      method: method, cache: "no-store", credentials: "same-origin",
+      signal: ctrl ? ctrl.signal : undefined
+    };
+    if (body !== undefined) {
+      headers["Content-Type"] = "application/json";
+      options.headers = headers;
+      options.body = JSON.stringify(body);
+    }
+    return win.fetch("/api/config", options).then(function (response) {
+      return response.json().then(function (data) {
+        return { ok: response.ok, status: response.status, data: data || {} };
+      }, function () { return { ok: false, status: response.status, data: {} }; });
+    }).finally(function () { win.clearTimeout(timer); });
+  };
+
+  App.prototype.loadSettings = function () {
+    var self = this;
+    this.setSettingsEditable(false);
+    this.setSettingsStatus("Загружаем настройки…", null);
+    this.settingsRequest("GET").then(function (result) {
+      if (!result.ok) throw new Error(str(result.data.message) || "Не удалось прочитать настройки R2O");
+      var data = result.data;
+      if (!["off", "observe", "apply"].includes(data.mode) ||
+          !Number.isInteger(data.queue_num) || data.queue_num < 0 || data.queue_num > 65535 ||
+          !Number.isInteger(data.queue_num6) || data.queue_num6 < 0 || data.queue_num6 > 65535 ||
+          !Number.isInteger(data.flow_capacity) || data.flow_capacity < 1 ||
+          typeof data.ipv6_enabled !== "boolean" || typeof data.mark !== "string" ||
+          typeof data.probe_mark !== "string" || typeof data.only_mark !== "string" ||
+          typeof data.ports !== "string" || typeof data.connbytes !== "string" ||
+          typeof data.voice_ports !== "string" || typeof data.voice_connbytes !== "string" ||
+          typeof data.http_keepalive_ports !== "string" || typeof data.dns_ports !== "string" ||
+          !Number.isInteger(data.tg_port) || data.tg_port < 1 || data.tg_port > 65535 ||
+          !["auto", "iptables", "nft"].includes(data.firewall_backend) ||
+          !Number.isInteger(data.log_max) || !Number.isInteger(data.log_keep) ||
+          !Number.isInteger(data.log_every)) {
+        throw new Error("Панель получила неверные значения настроек");
+      }
+      self.$("settings-mode").value = data.mode;
+      self.$("settings-queue").value = String(data.queue_num);
+      self.$("settings-queue6").value = String(data.queue_num6);
+      self.$("settings-capacity").value = String(data.flow_capacity);
+      self.$("settings-ipv6").value = String(data.ipv6_enabled);
+      self.$("settings-mark").value = data.mark;
+      self.$("settings-probe-mark").value = data.probe_mark;
+      self.$("settings-only-mark").value = data.only_mark;
+      self.$("settings-firewall").value = data.firewall_backend;
+      self.$("settings-ports").value = data.ports;
+      self.$("settings-connbytes").value = data.connbytes;
+      self.$("settings-voice-ports").value = data.voice_ports;
+      self.$("settings-voice-connbytes").value = data.voice_connbytes;
+      self.$("settings-http-keepalive-ports").value = data.http_keepalive_ports;
+      self.$("settings-dns-ports").value = data.dns_ports;
+      self.$("settings-tg-port").value = String(data.tg_port);
+      self.$("settings-log-max").value = String(data.log_max);
+      self.$("settings-log-keep").value = String(data.log_keep);
+      self.$("settings-log-every").value = String(data.log_every);
+      self.setSettingsEditable(data.editable === true);
+      self.setSettingsStatus(data.editable === true
+        ? "Настройки загружены. Изменения применятся перезапуском служб."
+        : "Настройки доступны только для чтения; файл конфигурации или управление отсутствуют.",
+      data.editable === true ? null : "warn");
+    }).catch(function (error) {
+      self.setSettingsEditable(false);
+      self.setSettingsStatus(error && error.message ? error.message : "Не удалось прочитать настройки R2O", "bad");
+    });
+  };
+
+  App.prototype.saveSettings = function () {
+    var self = this;
+    if (!this.settingsEditable || this.settingsSaving) return;
+    var form = this.$("r2o-settings-form");
+    if (form.reportValidity && !form.reportValidity()) return;
+    var settings = {
+      mode: this.$("settings-mode").value,
+      queue_num: Number(this.$("settings-queue").value),
+      queue_num6: Number(this.$("settings-queue6").value),
+      flow_capacity: Number(this.$("settings-capacity").value),
+      ipv6_enabled: this.$("settings-ipv6").value === "true",
+      mark: this.$("settings-mark").value.trim(),
+      probe_mark: this.$("settings-probe-mark").value.trim(),
+      only_mark: this.$("settings-only-mark").value.trim(),
+      firewall_backend: this.$("settings-firewall").value,
+      ports: this.$("settings-ports").value.trim(),
+      connbytes: this.$("settings-connbytes").value.trim(),
+      voice_ports: this.$("settings-voice-ports").value.trim(),
+      voice_connbytes: this.$("settings-voice-connbytes").value.trim(),
+      http_keepalive_ports: this.$("settings-http-keepalive-ports").value.trim(),
+      dns_ports: this.$("settings-dns-ports").value.trim(),
+      tg_port: Number(this.$("settings-tg-port").value),
+      log_max: Number(this.$("settings-log-max").value),
+      log_keep: Number(this.$("settings-log-keep").value),
+      log_every: Number(this.$("settings-log-every").value)
+    };
+    if (!["off", "observe", "apply"].includes(settings.mode)) {
+      this.setSettingsStatus("Выберите один из доступных режимов R2O.", "warn");
+      return;
+    }
+    this.settingsSaving = true;
+    this.setSettingsEditable(true);
+    this.setSettingsStatus("Сохраняем настройки и перезапускаем движок…", null);
+    this.settingsRequest("POST", settings).then(function (result) {
+      var message = str(result.data.message);
+      if (!result.ok) {
+        self.setSettingsStatus(message || "Не удалось сохранить настройки R2O", "bad");
+        return;
+      }
+      self.$("settings-mode").value = settings.mode;
+      self.$("settings-queue").value = String(settings.queue_num);
+      self.$("settings-queue6").value = String(settings.queue_num6);
+      self.$("settings-capacity").value = String(settings.flow_capacity);
+      self.$("settings-ipv6").value = String(settings.ipv6_enabled);
+      self.$("settings-mark").value = settings.mark;
+      self.$("settings-probe-mark").value = settings.probe_mark;
+      self.$("settings-only-mark").value = settings.only_mark;
+      self.$("settings-firewall").value = settings.firewall_backend;
+      self.$("settings-ports").value = settings.ports;
+      self.$("settings-connbytes").value = settings.connbytes;
+      self.$("settings-voice-ports").value = settings.voice_ports;
+      self.$("settings-voice-connbytes").value = settings.voice_connbytes;
+      self.$("settings-http-keepalive-ports").value = settings.http_keepalive_ports;
+      self.$("settings-dns-ports").value = settings.dns_ports;
+      self.$("settings-tg-port").value = String(settings.tg_port);
+      self.$("settings-log-max").value = String(settings.log_max);
+      self.$("settings-log-keep").value = String(settings.log_keep);
+      self.$("settings-log-every").value = String(settings.log_every);
+      self.setSettingsStatus(message || "Настройки сохранены.", "ok");
+    }).catch(function (error) {
+      self.setSettingsStatus(error && error.message ? error.message : "Не удалось сохранить настройки R2O", "bad");
+    }).finally(function () {
+      self.settingsSaving = false;
+      self.setSettingsEditable(self.settingsEditable);
     });
   };
 
@@ -1876,6 +2053,8 @@
         var proto = el(doc, "td", "n c-proto", shapeLabel(bd.shape, bd.transport) + " · " + familyLabel(bd.family));
         var lv = el(doc, "td", "c-level");
         add(lv, tag(doc, str(bd.level_name) || "не измерено", (bd.level || 0) >= 3 ? "ok" : (bd.level || 0) > 0 ? "warn" : "mute"));
+        var proofNote = voiceProofNote(bd);
+        if (proofNote) lv.appendChild(el(doc, "small", "proof-note", proofNote));
         if (bd.recheck) add(lv, " ", tag(doc, "перепроверяется", "live"));
         if (bd.enabled === false) add(lv, " ", tag(doc, "выключено", "mute"));
         var nw = num(bd.successes) || 0;
@@ -2164,6 +2343,7 @@
     set("nav-boxes", m.boxes.length ? String(m.boxes.length) : "");
     var tg = m.snap.telegram_status;
     set("nav-telegram", tg === "connected" ? "вкл" : tg === "local" ? "лок." : tg === "connecting" ? "…" : "выкл");
+    set("nav-settings", m.snap.config_exists ? "настройки" : "");
     var bad = list(m.snap.stages).filter(function (s) { return !s.built; }).length;
     set("nav-diagnostics", bad ? "!" + bad : "", bad ? "warn" : null);
   };
@@ -2244,7 +2424,7 @@
       }
       self.moveMarker();
     }, { rootMargin: "-20% 0px -55% 0px", threshold: [0, .1, .3, .6] });
-    ["now", "families", "boxes", "telegram", "updates", "diagnostics"].forEach(function (id) {
+    ["now", "families", "boxes", "telegram", "updates", "r2o-settings", "diagnostics"].forEach(function (id) {
       var s = doc.getElementById(id);
       if (s) io.observe(s);
     });
@@ -2252,6 +2432,7 @@
 
   var api = {
     model: model, coveredBy: coveredBy, slotsView: slotsView, trackFor: trackFor, shapeLabel: shapeLabel,
+    voiceProofNote: voiceProofNote,
     planGist: planGist, plural: plural, duration: duration,
     telegramRouteName: telegramRouteName,
     telegramFailureStage: telegramFailureStage,

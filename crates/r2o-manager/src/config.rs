@@ -9,6 +9,33 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 const CONFIG_MAX_BYTES: u64 = 64 * 1024;
 const CONFIG_LINE_MAX_BYTES: usize = 2046;
+const DEFAULT_CONFIG_KEYS: &[&str] = &[
+    "SCHEMA",
+    "MODE",
+    "STATE_DIR",
+    "QUEUE_NUM",
+    "QUEUE_NUM6",
+    "R2O_FLOW_CAPACITY",
+    "IPV6_ENABLED",
+    "MARK",
+    "PROBE_MARK",
+    "ONLY_MARK",
+    "AUTOUPDATE",
+    "LOGMAX",
+    "LOGKEEP",
+    "LOG_EVERY",
+    "FW_BACKEND",
+    "PORTS",
+    "CONNBYTES",
+    "VOICE_PORTS",
+    "VOICE_CONNBYTES",
+    "HTTP_KEEPALIVE_PORTS",
+    "DNS_PORTS",
+    "PANEL_LISTEN",
+    "TG_ENABLED",
+    "TG_MODE",
+    "TG_PORT",
+];
 const IMPORTABLE_KEYS: &[&str] = &[
     "SCHEMA",
     "MODE",
@@ -23,6 +50,12 @@ const IMPORTABLE_KEYS: &[&str] = &[
     "LOGKEEP",
     "LOG_EVERY",
     "FW_BACKEND",
+    "PORTS",
+    "CONNBYTES",
+    "VOICE_PORTS",
+    "VOICE_CONNBYTES",
+    "HTTP_KEEPALIVE_PORTS",
+    "DNS_PORTS",
     "PANEL_LISTEN",
     "TG_ENABLED",
     "TG_MODE",
@@ -208,7 +241,7 @@ fn parse_defaults(defaults: &str) -> io::Result<BTreeSet<String>> {
                 "в файле значений по умолчанию есть неверная строка",
             ));
         };
-        if !IMPORTABLE_KEYS.contains(&key) || !keys.insert(key.to_owned()) {
+        if !DEFAULT_CONFIG_KEYS.contains(&key) || !keys.insert(key.to_owned()) {
             return Err(invalid_config(
                 "в файле значений по умолчанию есть лишний или повторный ключ",
             ));
@@ -317,7 +350,8 @@ fn validate_value(key: &str, value: &str, donor: bool) -> io::Result<()> {
                     byte.is_ascii_alphanumeric() || b"/._-".contains(&byte)
                 })
         }
-        "QUEUE_NUM" | "QUEUE_NUM6" | "TG_PORT" => value.parse::<u16>().is_ok(),
+        "QUEUE_NUM" | "QUEUE_NUM6" => value.parse::<u16>().is_ok(),
+        "TG_PORT" => value.parse::<u16>().is_ok_and(|port| port > 0),
         "R2O_FLOW_CAPACITY" => value.parse::<u32>().is_ok_and(|capacity| capacity > 0),
         "IPV6_ENABLED" | "AUTOUPDATE" | "TG_ENABLED" => matches!(value, "0" | "1"),
         "LOGMAX" | "LOGKEEP" => value
@@ -326,7 +360,10 @@ fn validate_value(key: &str, value: &str, donor: bool) -> io::Result<()> {
         "LOG_EVERY" => value
             .parse::<u16>()
             .is_ok_and(|seconds| (1..=3600).contains(&seconds)),
-        "MARK" => valid_mark(value),
+        "PORTS" | "VOICE_PORTS" | "HTTP_KEEPALIVE_PORTS" | "DNS_PORTS" => valid_port_list(value),
+        "CONNBYTES" | "VOICE_CONNBYTES" => valid_connbytes_window(value),
+        "MARK" | "PROBE_MARK" => valid_mark(value),
+        "ONLY_MARK" => valid_only_mark(value),
         "FW_BACKEND" => matches!(value, "auto" | "iptables" | "nft"),
         "PANEL_LISTEN" => valid_panel_listen(value),
         "TG_MODE" => value == "local" || (donor && value == "relay"),
@@ -341,14 +378,67 @@ fn validate_value(key: &str, value: &str, donor: bool) -> io::Result<()> {
     }
 }
 
+fn valid_port_list(value: &str) -> bool {
+    let mut slots = 0;
+    for item in value.split(',') {
+        let (start, end) = match item.split_once(':') {
+            Some((start, end)) if !end.contains(':') => (start, end),
+            Some(_) => return false,
+            None => (item, item),
+        };
+        let (Ok(start), Ok(end)) = (start.parse::<u16>(), end.parse::<u16>()) else {
+            return false;
+        };
+        if start > end || (item.contains(':') && start == end) {
+            return false;
+        }
+        slots += if item.contains(':') { 2 } else { 1 };
+        if slots > 15 {
+            return false;
+        }
+    }
+    slots > 0
+}
+
+fn valid_connbytes_window(value: &str) -> bool {
+    let Some((start, end)) = value.split_once(':') else {
+        return false;
+    };
+    if end.contains(':') {
+        return false;
+    }
+    let (Ok(start), Ok(end)) = (start.parse::<u64>(), end.parse::<u64>()) else {
+        return false;
+    };
+    start < end
+}
+
 fn valid_mark(value: &str) -> bool {
+    parse_mark(value).is_some()
+}
+
+fn valid_only_mark(value: &str) -> bool {
+    if value.is_empty() || value == "none" {
+        return true;
+    }
+    if let Some((mark, mask)) = value.split_once('/') {
+        !mask.contains('/') && valid_mark(mark) && parse_mark(mask).is_some_and(|value| value != 0)
+    } else {
+        valid_mark(value)
+    }
+}
+
+fn parse_mark(value: &str) -> Option<u32> {
     if let Some(hex) = value
         .strip_prefix("0x")
         .or_else(|| value.strip_prefix("0X"))
     {
-        !hex.is_empty() && hex.len() <= 8 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+        if hex.is_empty() || hex.len() > 8 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        u32::from_str_radix(hex, 16).ok()
     } else {
-        value.parse::<u32>().is_ok()
+        value.parse::<u32>().ok()
     }
 }
 

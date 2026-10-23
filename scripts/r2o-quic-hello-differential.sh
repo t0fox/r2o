@@ -61,7 +61,7 @@ mkdir -p "$r2o_log_dir"
         [ "$r2o_test_sha256" != \
         'fbf47889b8d6d7c712b02f5643d37ae937723d004368e20d5f4e0c2e58493c0a' ] || \
         [ "$r2o_test_binary_sha256" != \
-        '0050b5b1f37db0071e638fed8ab71c0c4ca221f4de1f2c0a9690eb9ef8508436' ]; then
+        'd1fc01f88f90710cf1bd541dcab68ff97ab2e384242ff3cf0e8a9dd843b3f1e8' ]; then
         printf 'Исходники или бинарник донора отличаются от проверенного снимка\n' >&2
         exit 1
     fi
