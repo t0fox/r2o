@@ -7163,3 +7163,31 @@ Rust принимает Binding Response по точному transaction ID и �
 `cargo test --workspace --locked`. Release-сборки OpenWrt ARM64 и MIPS little-
 endian прошли QEMU smoke. Эти результаты дополняют проверку `session.c` и
 `sched.c`, не утверждая завершение всего проекта; реальный роутер не проверялся.
+
+## QUIC Discovery: путь большого ресурса — 2026-10-23
+
+Эталон — `t0fox/d2o` HEAD
+`eb848976ed9491791b7f2130b874867b61b2ca5d`; C snapshot находится в
+`target/parity-donor`. SHA-256 `core/sched.c` —
+`b8565801f020374c8c504c9530dd00a6053fd6d1c3b192a8917845bd4fb35973`,
+`core/test_sched.c` —
+`c17d3cbc8d75ae2c248dd22633a9a0133f81d389114f1ae556e7effa662c6a6a`.
+
+Сверка C/Rust закрыла выбор QUIC resource path на всём цикле: подтверждённая
+name-binding `transport=17, SHAPE_QUIC`, измеренный/proven путь и HTML hint
+попадают в baseline и HTTP/3-кандидаты; замена ClientHello в активном worker
+обновляет также путь. При подтверждении обычное SNI сохраняется как имя с
+`probe_path`; ECH и отсутствие SNI сохраняют адресную привязку. TLS parser
+получает QUIC ClientHello через корректный record header. C/Rust-тест проверяет
+измерение и verify на `/static/app.css`, а отдельный Rust тест — ECH внутри
+сырого QUIC ClientHello.
+
+Проверки на итоговом коде: полный C `make -B -C
+/tmp/r2o-donor-rawcap-86b05b9/core test-sched CC=clang-18` завершился строкой
+`планировщик: все проверки прошли`; полный `cargo test --workspace --locked`,
+`cargo fmt --all -- --check` и `git diff --check` прошли. Скрипты
+`r2o-build-armv5-musleabi.sh` и `r2o-build-openwrt-mipsel-musl.sh` собрали все
+целевые бинарники; версии компонентов и проверка каталога прошли под QEMU на
+обеих целях. Новая REA/Ghidra Evidence не создавалась: ветви донора однозначны
+и покрыты исполняемыми C/Rust проверками. Физический роутер не проверялся;
+проектный паритет за пределами этой scheduler-цепочки остаётся незавершённым.

@@ -765,6 +765,47 @@ pub fn add_confirmed_quic_address_binding(
         return Err("QUIC-привязка имеет недопустимый адрес или время".into());
     }
     let family = if address.is_ipv4() { 4 } else { 6 };
+    add_confirmed_quic_binding(
+        catalog,
+        "addr",
+        &address.to_string(),
+        family,
+        "",
+        source_text,
+        now,
+    )
+}
+
+pub fn add_confirmed_quic_name_binding(
+    catalog: &mut Catalog,
+    host: &str,
+    family: u8,
+    probe_path: &str,
+    source_text: &str,
+    now: i64,
+) -> Result<String, String> {
+    let host = crate::domain::normalize(host)
+        .map_err(|error| format!("имя QUIC-привязки недопустимо: {error}"))?;
+    if host.parse::<std::net::IpAddr>().is_ok()
+        || crate::domain::registrable_domain(&host).is_none()
+        || !matches!(family, 4 | 6)
+        || (!probe_path.is_empty() && !crate::r2o_resource::r2o_resource_path_ok(probe_path))
+        || now < 0
+    {
+        return Err("QUIC-привязка имени имеет недопустимые имя, путь или семейство".into());
+    }
+    add_confirmed_quic_binding(catalog, "name", &host, family, probe_path, source_text, now)
+}
+
+fn add_confirmed_quic_binding(
+    catalog: &mut Catalog,
+    kind: &str,
+    target: &str,
+    family: u8,
+    probe_path: &str,
+    source_text: &str,
+    now: i64,
+) -> Result<String, String> {
     let canonical = canonical_plan_text(source_text)?;
     let plan_id = stable_plan_id(family, SHAPE_QUIC, &canonical);
     let plan_text = text_with_id(&canonical, &plan_id)?;
@@ -776,7 +817,6 @@ pub fn add_confirmed_quic_address_binding(
     r2o_datapath::engine::validate_runtime_plan(&plan)
         .map_err(|error| format!("r2o-datapath отверг подтверждённый QUIC-план: {error}"))?;
 
-    let target = address.to_string();
     let box_index = if let Some(index) = catalog
         .boxes
         .iter()
@@ -793,16 +833,25 @@ pub fn add_confirmed_quic_address_binding(
         catalog.boxes.len() - 1
     };
 
+    let matches_binding = |binding: &Binding| {
+        if kind == "addr" {
+            quic_binding_key(binding, target, family)
+        } else {
+            binding.kind == kind
+                && binding.target == target
+                && binding.transport == 17
+                && (binding.family == family || binding.family == 0 && family == 4)
+                && binding.shape == SHAPE_QUIC
+        }
+    };
     let mut prior_successes = 0_i32;
     for record in &mut catalog.boxes {
         for binding in &record.bindings {
-            if quic_binding_key(binding, &target, family) {
+            if matches_binding(binding) {
                 prior_successes = prior_successes.max(binding.successes);
             }
         }
-        record
-            .bindings
-            .retain(|binding| !quic_binding_key(binding, &target, family));
+        record.bindings.retain(|binding| !matches_binding(binding));
     }
 
     let selected = &mut catalog.boxes[box_index];
@@ -824,8 +873,8 @@ pub fn add_confirmed_quic_address_binding(
     }
     selected.updated = now;
     selected.bindings.push(Binding {
-        kind: "addr".into(),
-        target,
+        kind: kind.into(),
+        target: target.into(),
         plan_id: plan_id.clone(),
         level: 3,
         confirmed: now,
@@ -836,6 +885,7 @@ pub fn add_confirmed_quic_address_binding(
         shape: SHAPE_QUIC,
         verified_by: 6,
         input: 1,
+        probe_path: probe_path.into(),
         ..Binding::default()
     });
     Ok(plan_id)
@@ -1398,6 +1448,28 @@ mod tests {
             &catalog,
             "198.51.100.24".parse().unwrap()
         ));
+    }
+
+    #[test]
+    fn сохраняет_quic_именную_привязку_с_путём_проверки() {
+        let mut catalog = crate::catalog::Catalog::default();
+        let plan_id = super::add_confirmed_quic_name_binding(
+            &mut catalog,
+            "media.example.net",
+            4,
+            "/static/app.css",
+            "r2o-plan 1 10\nid 00000000000000000000000000000000\nproto udp quic\nquicsplit 1\n",
+            125,
+        )
+        .unwrap();
+
+        let binding = &catalog.boxes[0].bindings[0];
+        assert_eq!(binding.kind, "name");
+        assert_eq!(binding.target, "media.example.net");
+        assert_eq!(binding.transport, 17);
+        assert_eq!(binding.shape, r2k_core::control::SHAPE_QUIC);
+        assert_eq!(binding.probe_path, "/static/app.css");
+        assert_eq!(binding.plan_id, plan_id);
     }
 
     #[test]

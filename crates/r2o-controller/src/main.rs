@@ -1867,6 +1867,24 @@ fn r2o_discovery_resource_probe_paths(
 }
 
 #[cfg(unix)]
+fn r2o_quic_discovery_probe_path(
+    snapshot: &[u8],
+    server: std::net::SocketAddr,
+    catalog: &Catalog,
+    resource_memory: &std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>,
+) -> String {
+    let host =
+        r2o_quic_snapshot_server_name(snapshot, server).unwrap_or_else(|| server.ip().to_string());
+    let target = r2o_controller::discovery::DiscoveryTarget {
+        host,
+        endpoint: server.to_string(),
+        family: if server.is_ipv4() { 4 } else { 6 },
+        shape: SHAPE_QUIC,
+    };
+    r2o_discovery_resource_probe_paths(&target, Some(catalog), resource_memory).0
+}
+
+#[cfg(unix)]
 fn r2o_discovery_volume_wire_len(
     target: &r2o_controller::discovery::DiscoveryTarget,
     client_hello: Option<&[u8]>,
@@ -2614,6 +2632,7 @@ struct HttpSearchOutcome {
 struct R2oQuicDiscoveryTask {
     server: std::net::SocketAddr,
     snapshot: Vec<u8>,
+    probe_path: String,
     r2o_mark: Option<u32>,
     permit: r2o_controller::r2o_resource_limit::R2oMeasurementPermit,
     deny_recheck: bool,
@@ -2625,6 +2644,7 @@ struct R2oQuicDiscoveryOutcome {
     server: std::net::SocketAddr,
     snapshot: Vec<u8>,
     host: String,
+    probe_path: String,
     deny_recheck: bool,
     stall_cut: bool,
     result: Result<Option<(String, String)>, String>,
@@ -2634,9 +2654,32 @@ struct R2oQuicDiscoveryOutcome {
 fn r2o_quic_snapshot_server_name(snapshot: &[u8], server: std::net::SocketAddr) -> Option<String> {
     let parsed = r2k_core::quic_snapshot::r2k_quic_snapshot_parse(snapshot)?;
     match r2k_core::quic::r2k_quic_initial_sni_result_from_datagrams(parsed.datagrams()).ok()? {
-        Some(host) => String::from_utf8(host).ok(),
+        Some(host) => {
+            let host = String::from_utf8(host).ok()?;
+            r2o_controller::domain::normalize(&host).ok()
+        }
         None => Some(server.ip().to_string()),
     }
+}
+
+#[cfg(unix)]
+fn r2o_quic_snapshot_has_ech(snapshot: &[u8]) -> bool {
+    let Some(parsed) = r2k_core::quic_snapshot::r2k_quic_snapshot_parse(snapshot) else {
+        return false;
+    };
+    let Some(client_hello) =
+        r2k_core::quic::r2k_quic_initial_client_hello_from_datagrams(parsed.datagrams())
+    else {
+        return false;
+    };
+    let Ok(record_length) = u16::try_from(client_hello.len()) else {
+        return false;
+    };
+    let mut record = Vec::with_capacity(5 + client_hello.len());
+    record.extend_from_slice(&[0x16, 0x03, 0x01]);
+    record.extend_from_slice(&record_length.to_be_bytes());
+    record.extend_from_slice(&client_hello);
+    r2k_core::tls::parse(&record).ech_offer
 }
 
 #[cfg(unix)]
@@ -3725,7 +3768,7 @@ struct R2oQuicDiscoveryWorker {
     outcomes: Receiver<R2oQuicDiscoveryOutcome>,
     cancel: Arc<AtomicBool>,
     active: HashMap<std::net::SocketAddr, R2oQuicActiveSnapshot>,
-    pending_snapshots: Arc<std::sync::Mutex<HashMap<std::net::SocketAddr, Vec<u8>>>>,
+    pending_snapshots: Arc<std::sync::Mutex<HashMap<std::net::SocketAddr, (Vec<u8>, String)>>>,
     threads: Vec<JoinHandle<()>>,
 }
 
@@ -3736,6 +3779,7 @@ impl R2oQuicDiscoveryWorker {
             ControlClient::r2o_run_quic_discovery_trial(
                 task.server,
                 &task.snapshot,
+                &task.probe_path,
                 &commands,
                 &cancel,
                 &mut task.permit,
@@ -3798,8 +3842,9 @@ impl R2oQuicDiscoveryWorker {
                         job.remeasured.store(true, Ordering::Relaxed);
                         replacement
                     };
-                    if let Some(snapshot) = replacement {
+                    if let Some((snapshot, probe_path)) = replacement {
                         job.task.snapshot = snapshot;
+                        job.task.probe_path = probe_path;
                         job.task.stall_cut = false;
                         result = worker_runner(
                             &mut job.task,
@@ -3817,6 +3862,7 @@ impl R2oQuicDiscoveryWorker {
                             snapshot: job.task.snapshot.clone(),
                             host: r2o_quic_snapshot_server_name(&job.task.snapshot, server)
                                 .unwrap_or_else(|| server.ip().to_string()),
+                            probe_path: job.task.probe_path.clone(),
                             deny_recheck,
                             stall_cut: job.task.stall_cut,
                             result,
@@ -3865,7 +3911,12 @@ impl R2oQuicDiscoveryWorker {
         true
     }
 
-    fn queue_client_snapshot(&self, hello: &r2k_core::control::HelloEvent) -> bool {
+    fn queue_client_snapshot(
+        &self,
+        hello: &r2k_core::control::HelloEvent,
+        catalog: &Catalog,
+        resource_memory: &std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>,
+    ) -> bool {
         if hello.key[37] != 17 || hello.shape != Some(SHAPE_QUIC) {
             return false;
         }
@@ -3901,7 +3952,9 @@ impl R2oQuicDiscoveryWorker {
             if active.remeasured.load(Ordering::Relaxed) {
                 return false;
             }
-            snapshots.insert(*server, snapshot.clone());
+            let probe_path =
+                r2o_quic_discovery_probe_path(snapshot, *server, catalog, resource_memory);
+            snapshots.insert(*server, (snapshot.clone(), probe_path));
             return true;
         }
         false
@@ -8431,6 +8484,9 @@ impl ControlClient {
                                 if let Some((_, catalog, path, _)) = &mut discovery {
                                     self.r2o_install_quic_candidate(
                                         outcome.server,
+                                        &outcome.host,
+                                        &outcome.snapshot,
+                                        &outcome.probe_path,
                                         &plan_text,
                                         &candidate_name,
                                         catalog,
@@ -8616,9 +8672,21 @@ impl ControlClient {
                             let pending_host =
                                 r2o_quic_snapshot_server_name(&pending.snapshot, pending.server);
                             let pending_family = if pending.server.is_ipv4() { 4 } else { 6 };
+                            let probe_path = discovery
+                                .as_ref()
+                                .map(|(worker, catalog, _, _)| {
+                                    r2o_quic_discovery_probe_path(
+                                        &pending.snapshot,
+                                        pending.server,
+                                        catalog,
+                                        &worker.resource_memory,
+                                    )
+                                })
+                                .unwrap_or_else(|| "/".into());
                             if !worker.queue(R2oQuicDiscoveryTask {
                                 server: pending.server,
                                 snapshot: pending.snapshot,
+                                probe_path,
                                 r2o_mark: pending.r2o_mark,
                                 permit,
                                 deny_recheck: pending.deny_recheck,
@@ -9589,9 +9657,14 @@ impl ControlClient {
                     }
                     quic_snapshots.insert(hello.key, (snapshot.clone(), now));
                 }
-                if quic_discovery
-                    .as_ref()
-                    .is_some_and(|worker| worker.queue_client_snapshot(&hello))
+                if let Some((discovery_worker, catalog, _, _)) = discovery.as_ref()
+                    && quic_discovery.as_ref().is_some_and(|worker| {
+                        worker.queue_client_snapshot(
+                            &hello,
+                            catalog,
+                            &discovery_worker.resource_memory,
+                        )
+                    })
                 {
                     println!(
                         "во время QUIC Discovery сохранён новейший Initial для одного повтора"
@@ -10273,6 +10346,7 @@ impl ControlClient {
         probe: &mut r2o_controller::quic_replay::QuicReplayProbe,
         candidate: &r2o_controller::quic_replay::R2oQuicDiscoveryCandidate,
         sni: &str,
+        probe_path: &str,
         runtime: &tokio::runtime::Runtime,
         request_timeout: std::time::Duration,
         roots: &rustls::RootCertStore,
@@ -10375,7 +10449,7 @@ impl ControlClient {
                         probe.try_clone_socket()?,
                         server,
                         sni,
-                        "/",
+                        probe_path,
                         request_timeout,
                         roots.clone(),
                         r2o_controller::r2o_quic_http3::R2O_QUIC_HTTP3_DEFAULT_BUDGET_PACKETS,
@@ -10417,6 +10491,7 @@ impl ControlClient {
     fn r2o_run_quic_discovery_trial(
         server: std::net::SocketAddr,
         snapshot: &[u8],
+        probe_path: &str,
         commands: &SyncSender<HttpSearchCommand>,
         cancel: &AtomicBool,
         measurement_permit: &mut r2o_controller::r2o_resource_limit::R2oMeasurementPermit,
@@ -10463,7 +10538,7 @@ impl ControlClient {
                 probe.try_clone_socket()?,
                 server,
                 &server_name,
-                "/",
+                probe_path,
                 request_timeout,
                 roots,
             ));
@@ -10521,7 +10596,7 @@ impl ControlClient {
             probe.try_clone_socket()?,
             server,
             &server_name,
-            "/",
+            probe_path,
             request_timeout,
             roots.clone(),
         ));
@@ -10556,6 +10631,7 @@ impl ControlClient {
                 &mut probe,
                 &candidate,
                 &server_name,
+                probe_path,
                 &runtime,
                 request_timeout,
                 &roots,
@@ -10653,6 +10729,7 @@ impl ControlClient {
                     &mut probe,
                     &candidate,
                     &server_name,
+                    probe_path,
                     &runtime,
                     request_timeout,
                     &roots,
@@ -10736,6 +10813,7 @@ impl ControlClient {
                     &mut probe,
                     &candidate,
                     &server_name,
+                    probe_path,
                     &runtime,
                     request_timeout,
                     &roots,
@@ -10935,13 +11013,20 @@ impl ControlClient {
     fn r2o_install_quic_candidate(
         &mut self,
         server: std::net::SocketAddr,
+        host: &str,
+        snapshot: &[u8],
+        probe_path: &str,
         plan_text: &str,
         candidate_name: &str,
         catalog: &mut Catalog,
         catalog_path: &std::path::Path,
     ) -> Result<(), Box<dyn Error>> {
+        let address_binding =
+            host.parse::<std::net::IpAddr>().is_ok() || r2o_quic_snapshot_has_ech(snapshot);
         let (_lock, previous) = locked_catalog(catalog_path, catalog)?;
-        if r2o_controller::discovery::has_usable_quic_address_binding(&previous, server.ip()) {
+        if address_binding
+            && r2o_controller::discovery::has_usable_quic_address_binding(&previous, server.ip())
+        {
             *catalog = previous;
             println!("QUIC-план не заменён: другой процесс уже сохранил адресную привязку");
             return Ok(());
@@ -10950,12 +11035,25 @@ impl ControlClient {
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
         let mut updated = previous.clone();
-        let saved_plan_id = r2o_controller::discovery::add_confirmed_quic_address_binding(
-            &mut updated,
-            server.ip(),
-            &plan_text,
-            now,
-        )
+        let family = if server.is_ipv4() { 4 } else { 6 };
+        let saved_probe_path = if probe_path == "/" { "" } else { probe_path };
+        let saved_plan_id = if address_binding {
+            r2o_controller::discovery::add_confirmed_quic_address_binding(
+                &mut updated,
+                server.ip(),
+                plan_text,
+                now,
+            )
+        } else {
+            r2o_controller::discovery::add_confirmed_quic_name_binding(
+                &mut updated,
+                host,
+                family,
+                saved_probe_path,
+                plan_text,
+                now,
+            )
+        }
         .map_err(|error| format!("не удалось подготовить подтверждённую QUIC-привязку: {error}"))?;
         let saved_plan = updated
             .boxes
@@ -10964,9 +11062,19 @@ impl ControlClient {
             .find(|saved| saved.id == saved_plan_id && saved.enabled)
             .ok_or("сохранённый QUIC-план исчез из каталога")?;
         let saved_records = compile_text(&saved_plan.text)?;
-        let command = encode_set_addr(server.ip(), SHAPE_QUIC, &saved_records)?;
+        let (command, command_kind) = if address_binding {
+            (
+                encode_set_addr(server.ip(), SHAPE_QUIC, &saved_records)?,
+                COMMAND_SET_ADDR,
+            )
+        } else {
+            (
+                encode_set_name(host, SHAPE_QUIC, family, &saved_records)?,
+                COMMAND_SET_NAME,
+            )
+        };
         updated.save_atomic(catalog_path, now)?;
-        if let Err(install_error) = self.send_command(&command, COMMAND_SET_ADDR) {
+        if let Err(install_error) = self.send_command(&command, command_kind) {
             return match previous.save_atomic(catalog_path, now) {
                 Ok(()) => Err(format!(
                     "datapath не подтвердил постоянный QUIC-план; каталог восстановлен: {install_error}"
@@ -10980,8 +11088,17 @@ impl ControlClient {
         }
         *catalog = updated;
         println!(
-            "HTTP/3 и точный APPLIED подтверждены кандидатом «{candidate_name}»; адресный план {saved_plan_id} сохранён для {}",
-            server.ip(),
+            "HTTP/3 и точный APPLIED подтверждены кандидатом «{candidate_name}»; QUIC-план {saved_plan_id} сохранён для {}{}",
+            if address_binding {
+                server.ip().to_string()
+            } else {
+                host.to_owned()
+            },
+            if address_binding {
+                " (адресная привязка)"
+            } else {
+                " (именная привязка)"
+            },
         );
         Ok(())
     }
@@ -12531,6 +12648,48 @@ mod tests {
         assert!(r2k_core::tls::parse(&record).ech_offer);
         assert!(super::Trigger::tls_client_hello("example.com", &record).is_ok());
         record
+    }
+
+    fn r2o_test_quic_ech_snapshot() -> Vec<u8> {
+        let profile =
+            r2o_controller::quic_replay::r2o_quic_profile_snapshot(Some("media.example.net"))
+                .unwrap();
+        let parsed = r2k_core::quic_snapshot::r2k_quic_snapshot_parse(&profile).unwrap();
+        let mut client_hello =
+            r2k_core::quic::r2k_quic_initial_client_hello_from_datagrams(parsed.datagrams())
+                .unwrap();
+        let mut offset = 4 + 2 + 32;
+        offset += 1 + usize::from(client_hello[offset]);
+        let cipher_suites = usize::from(u16::from_be_bytes([
+            client_hello[offset],
+            client_hello[offset + 1],
+        ]));
+        offset += 2 + cipher_suites;
+        offset += 1 + usize::from(client_hello[offset]);
+        let extensions_length_offset = offset;
+        let extensions_length = usize::from(u16::from_be_bytes([
+            client_hello[offset],
+            client_hello[offset + 1],
+        ]));
+        let insert_at = offset + 2 + extensions_length;
+        let ech_extension = [0xfe, 0x0d, 0, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0xaa, 0xbb];
+        client_hello.splice(insert_at..insert_at, ech_extension);
+        client_hello[extensions_length_offset..extensions_length_offset + 2]
+            .copy_from_slice(&((extensions_length + ech_extension.len()) as u16).to_be_bytes());
+        let handshake_length = (client_hello.len() - 4) as u32;
+        client_hello[1] = (handshake_length >> 16) as u8;
+        client_hello[2] = (handshake_length >> 8) as u8;
+        client_hello[3] = handshake_length as u8;
+
+        let initial = r2k_core::quic::r2k_quic_initial_build(&client_hello, &[7; 8], 1200).unwrap();
+        r2k_core::quic_snapshot::r2k_quic_snapshot_pack(&[&initial]).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_quic_snapshot_recognizes_ech_in_raw_client_hello() {
+        let snapshot = r2o_test_quic_ech_snapshot();
+        assert!(super::r2o_quic_snapshot_has_ech(&snapshot));
     }
 
     fn r2o_test_discovery_worker_without_threads() -> super::DiscoveryWorker {
@@ -14397,6 +14556,49 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn сохранённый_quic_путь_имени_используется_следующим_discovery() {
+        use r2o_controller::catalog::Catalog;
+        use r2o_controller::discovery::DiscoveryTarget;
+
+        let mut catalog = Catalog::default();
+        r2o_controller::discovery::add_confirmed_quic_name_binding(
+            &mut catalog,
+            "media.example.net",
+            4,
+            "/static/app.css",
+            "r2o-plan 1 10\nid 00000000000000000000000000000000\nproto udp quic\nquicsplit 1\n",
+            125,
+        )
+        .unwrap();
+        let snapshot =
+            r2o_controller::quic_replay::r2o_quic_profile_snapshot(Some("media.example.net"))
+                .unwrap();
+        let resource_memory =
+            std::sync::Mutex::new(r2o_controller::r2o_resource::R2oResourceMemory::default());
+        assert_eq!(
+            super::r2o_quic_discovery_probe_path(
+                &snapshot,
+                "198.51.100.20:443".parse().unwrap(),
+                &catalog,
+                &resource_memory,
+            ),
+            "/static/app.css"
+        );
+        let target = DiscoveryTarget {
+            host: "media.example.net".into(),
+            endpoint: "198.51.100.20:443".into(),
+            family: 4,
+            shape: SHAPE_QUIC,
+        };
+
+        assert_eq!(
+            super::r2o_target_confirmed_probe_path(&catalog, &target),
+            Some("/static/app.css".into())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn r2o_начальная_quic_очередь_сохраняет_допуск_через_первый_тик() {
         use r2o_controller::r2o_resource_limit::R2oMeasurementGate;
 
@@ -15220,6 +15422,7 @@ mod tests {
         assert!(worker.queue(R2oQuicDiscoveryTask {
             server: endpoint,
             snapshot,
+            probe_path: "/".into(),
             r2o_mark: None,
             permit,
             deny_recheck: false,
@@ -15311,6 +15514,7 @@ mod tests {
         assert!(worker.queue(R2oQuicDiscoveryTask {
             server,
             snapshot: first.clone(),
+            probe_path: "/".into(),
             r2o_mark: None,
             permit,
             deny_recheck: false,
@@ -15370,13 +15574,16 @@ mod tests {
             changed.notify_all();
         };
 
+        let catalog = Catalog::default();
+        let resource_memory =
+            std::sync::Mutex::new(r2o_controller::r2o_resource::R2oResourceMemory::default());
         wait_for_run(1);
-        assert!(worker.queue_client_snapshot(&hello(second.clone())));
-        assert!(worker.queue_client_snapshot(&hello(latest.clone())));
+        assert!(worker.queue_client_snapshot(&hello(second.clone()), &catalog, &resource_memory));
+        assert!(worker.queue_client_snapshot(&hello(latest.clone()), &catalog, &resource_memory));
         assert_eq!(observed.lock().unwrap()[0], first);
         release_run(1);
         wait_for_run(2);
-        assert!(!worker.queue_client_snapshot(&hello(ignored)));
+        assert!(!worker.queue_client_snapshot(&hello(ignored), &catalog, &resource_memory));
         assert_eq!(observed.lock().unwrap()[1], latest);
         release_run(2);
 
@@ -15541,6 +15748,7 @@ mod tests {
         let first = R2oQuicDiscoveryTask {
             server: "198.51.100.10:443".parse().unwrap(),
             snapshot: r2o_test_quic_initial_snapshot(),
+            probe_path: "/".into(),
             r2o_mark: None,
             permit: gate.r2o_try_acquire().unwrap(),
             deny_recheck: false,
@@ -15549,6 +15757,7 @@ mod tests {
         let second = R2oQuicDiscoveryTask {
             server: "198.51.100.20:443".parse().unwrap(),
             snapshot: r2o_test_quic_initial_snapshot(),
+            probe_path: "/".into(),
             r2o_mark: None,
             permit: gate.r2o_try_acquire().unwrap(),
             deny_recheck: false,
@@ -15624,6 +15833,7 @@ mod tests {
         let first = R2oQuicDiscoveryTask {
             server: "198.51.100.10:443".parse().unwrap(),
             snapshot: r2o_test_quic_initial_snapshot(),
+            probe_path: "/".into(),
             r2o_mark: None,
             permit: gate.r2o_try_acquire().unwrap(),
             deny_recheck: false,
@@ -15632,6 +15842,7 @@ mod tests {
         let second = R2oQuicDiscoveryTask {
             server: "198.51.100.20:443".parse().unwrap(),
             snapshot: r2o_test_quic_initial_snapshot(),
+            probe_path: "/".into(),
             r2o_mark: None,
             permit: gate.r2o_try_acquire().unwrap(),
             deny_recheck: false,
@@ -15676,6 +15887,7 @@ mod tests {
         assert!(worker.queue(R2oQuicDiscoveryTask {
             server: "198.51.100.77:443".parse().unwrap(),
             snapshot: r2o_test_quic_initial_snapshot(),
+            probe_path: "/".into(),
             r2o_mark: Some(77),
             permit: gate.r2o_try_acquire().unwrap(),
             deny_recheck: false,
@@ -15693,6 +15905,48 @@ mod tests {
             if let Some(outcome) = worker.try_outcome() {
                 assert_eq!(outcome.server, "198.51.100.77:443".parse().unwrap());
                 assert!(matches!(outcome.result, Ok(None)));
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(worker.has_capacity());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_quic_worker_передает_выбранный_путь_в_исполнитель() {
+        use super::{R2oQuicDiscoveryTask, R2oQuicDiscoveryWorker};
+        use std::sync::{Arc, mpsc};
+
+        let (path_sender, path_receiver) = mpsc::channel();
+        let mut worker =
+            R2oQuicDiscoveryWorker::r2o_new_with_runner(Arc::new(move |task, _, _| {
+                path_sender
+                    .send(task.probe_path.clone())
+                    .map_err(|error| error.to_string())?;
+                Ok(None)
+            }));
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
+        assert!(worker.queue(R2oQuicDiscoveryTask {
+            server: "198.51.100.77:443".parse().unwrap(),
+            snapshot: r2o_test_quic_initial_snapshot(),
+            probe_path: "/static/app.css".into(),
+            r2o_mark: None,
+            permit: gate.r2o_try_acquire().unwrap(),
+            deny_recheck: false,
+            stall_cut: false,
+        }));
+
+        assert_eq!(
+            path_receiver
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap(),
+            "/static/app.css"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if worker.try_outcome().is_some() {
                 break;
             }
             assert!(std::time::Instant::now() < deadline);
@@ -15735,6 +15989,7 @@ mod tests {
         assert!(worker.queue(R2oQuicDiscoveryTask {
             server,
             snapshot: r2o_test_quic_initial_snapshot(),
+            probe_path: "/".into(),
             r2o_mark: None,
             permit: gate.r2o_try_acquire().unwrap(),
             deny_recheck: false,
@@ -15775,7 +16030,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn r2o_quic_подтверждение_из_worker_сохраняет_и_устанавливает_план() {
+    fn r2o_quic_ech_подтверждение_сохраняет_адресную_привязку() {
         let work = std::env::temp_dir().join(format!(
             "r2o-quic-install-{}-{}",
             std::process::id(),
@@ -15810,6 +16065,9 @@ mod tests {
         client
             .r2o_install_quic_candidate(
                 "198.51.100.90:443".parse().unwrap(),
+                "media.example.net",
+                &r2o_test_quic_ech_snapshot(),
+                "/static/app.css",
                 "r2o-plan 1 10\nid 00000000000000000000000000000000\nproto udp quic\nquicsplit 1\n",
                 "разрез ClientHello по CRYPTO",
                 &mut catalog,
@@ -15823,6 +16081,10 @@ mod tests {
             &catalog,
             "198.51.100.90".parse().unwrap(),
         ));
+        let binding = &catalog.boxes[0].bindings[0];
+        assert_eq!(binding.kind, "addr");
+        assert_eq!(binding.target, "198.51.100.90");
+        assert!(binding.probe_path.is_empty());
         std::fs::remove_dir_all(work).unwrap();
     }
 
