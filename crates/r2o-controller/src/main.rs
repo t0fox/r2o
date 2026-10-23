@@ -9724,25 +9724,55 @@ impl ControlClient {
                 if frame.kind == EVENT_HTTP_RESPONSE {
                     let response = decode_http_response(&frame)
                         .map_err(|error| format!("событие HTTP_RESPONSE: {error}"))?;
-                    let outcome = match response.code {
-                        1 => "полный ответ",
-                        2 => "результат неизвестен",
-                        3 => "обнаружен портал",
-                        4 => "обрыв ответа",
-                        _ => unreachable!("декодер отвергает неизвестный исход HTTP_RESPONSE"),
-                    };
-                    println!(
-                        "наблюдение HTTP-ответа: IPv{}, Host={:?}, исход={}, статус={}, тело={} байт, путь={:?}, номер запроса={}, исполнение={}, привязка известна={}",
-                        response.key[0],
-                        String::from_utf8_lossy(&response.host),
-                        outcome,
-                        response.status,
-                        response.body_bytes,
-                        String::from_utf8_lossy(&response.path),
-                        response.request_no,
-                        response.execution_id,
-                        response.binding.is_known(),
-                    );
+                    let live_owner = discovery.as_ref().is_some_and(|(_, catalog, _, _)| {
+                        r2o_controller::discovery::matches_confirmed_http_catalog_owner(
+                            catalog, &response,
+                        )
+                    });
+                    if live_owner {
+                        let outcome = if response.code == 1 {
+                            "response-complete"
+                        } else {
+                            "unknown"
+                        };
+                        let plan_id: String = response
+                            .plan_id
+                            .iter()
+                            .map(|byte| format!("{byte:02x}"))
+                            .collect();
+                        println!(
+                            "HTTP live target={} IPv{} request={} execution={} plan={} generation={} outcome={} status={} body={}; scope=request, connection=pending",
+                            String::from_utf8_lossy(&response.host),
+                            response.key[0],
+                            response.request_no,
+                            response.execution_id,
+                            plan_id,
+                            response.binding.generation,
+                            outcome,
+                            response.status,
+                            response.body_bytes,
+                        );
+                    } else {
+                        let outcome = match response.code {
+                            1 => "полный ответ",
+                            2 => "результат неизвестен",
+                            3 => "обнаружен портал",
+                            4 => "обрыв ответа",
+                            _ => unreachable!("декодер отвергает неизвестный исход HTTP_RESPONSE"),
+                        };
+                        println!(
+                            "наблюдение HTTP-ответа: IPv{}, Host={:?}, исход={}, статус={}, тело={} байт, путь={:?}, номер запроса={}, исполнение={}, привязка известна={}",
+                            response.key[0],
+                            String::from_utf8_lossy(&response.host),
+                            outcome,
+                            response.status,
+                            response.body_bytes,
+                            String::from_utf8_lossy(&response.path),
+                            response.request_no,
+                            response.execution_id,
+                            response.binding.is_known(),
+                        );
+                    }
                     std::io::stdout().flush()?;
                     if let Some((host, address)) = target_from_http_response(&response) {
                         https_probe.submit(&host, address, std::time::Instant::now());

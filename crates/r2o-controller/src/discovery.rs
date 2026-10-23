@@ -239,6 +239,59 @@ pub fn r2o_ech_witness_candidates(
     candidates
 }
 
+/// Проверить, что live-ответ относится к действующему сохранённому HTTP-плану.
+pub fn matches_confirmed_http_catalog_owner(catalog: &Catalog, event: &HttpResponseEvent) -> bool {
+    let zero = [0; 16];
+    if !matches!(event.code, 1 | 2)
+        || event.key[37] != 6
+        || u16::from_be_bytes([event.key[35], event.key[36]]) != 80
+        || event.trial_id != zero
+        || event.execution_id == 0
+        || event.request_ms == 0
+        || event.request_no == 0
+        || !event.binding.is_known()
+        || event.binding.temporary
+        || event.binding.kind != 1
+        || event.binding.family != event.key[0]
+        || event.binding.shape != SHAPE_HTTP
+        || !matches!(event.key[0], 4 | 6)
+    {
+        return false;
+    }
+    let Ok(host) = std::str::from_utf8(&event.host) else {
+        return false;
+    };
+    let Some(host) = crate::domain::normalize(host).ok() else {
+        return false;
+    };
+    let plan_id: String = event
+        .plan_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    if plan_id.bytes().all(|byte| byte == b'0') {
+        return false;
+    }
+
+    catalog.boxes.iter().any(|box_record| {
+        box_record
+            .plans
+            .iter()
+            .any(|plan| plan.enabled && plan.id.eq_ignore_ascii_case(&plan_id))
+            && box_record.bindings.iter().any(|binding| {
+                binding.enabled
+                    && binding.recheck_since.is_none()
+                    && binding.level >= 3
+                    && binding.kind == "name"
+                    && crate::domain::normalize(&binding.target).is_ok_and(|target| target == host)
+                    && binding.plan_id.eq_ignore_ascii_case(&plan_id)
+                    && binding.transport == 6
+                    && binding.family == event.key[0]
+                    && binding.shape == SHAPE_HTTP
+            })
+    })
+}
+
 /// Отозвать HTTP-привязку только при совпадении сохранённого плана и живого события.
 pub fn revoke_http_response_binding(
     catalog: &mut Catalog,
@@ -1567,6 +1620,73 @@ mod tests {
             101
         ));
         assert!(unrelated.boxes[0].bindings[0].enabled);
+    }
+
+    #[test]
+    fn live_http_diagnostic_requires_a_confirmed_catalog_owner() {
+        use super::matches_confirmed_http_catalog_owner;
+        use crate::catalog::{Binding, BoxRecord, Catalog, Plan};
+        use r2k_core::control::BindingContext;
+
+        let mut event = response();
+        event.code = 1;
+        event.execution_id = 5;
+        event.request_ms = 10;
+        event.plan_id = [0x11; 16];
+        event.binding = BindingContext {
+            generation: 7,
+            kind: 1,
+            family: 4,
+            shape: SHAPE_HTTP,
+            temporary: false,
+            epoch: [3; 16],
+        };
+        let mut catalog = Catalog {
+            boxes: vec![BoxRecord {
+                plans: vec![Plan {
+                    id: "11".repeat(16),
+                    proto: "http".into(),
+                    enabled: true,
+                    ..Plan::default()
+                }],
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: "example.com".into(),
+                    plan_id: "11".repeat(16),
+                    level: 3,
+                    enabled: true,
+                    transport: 6,
+                    family: 4,
+                    shape: SHAPE_HTTP,
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+
+        assert!(matches_confirmed_http_catalog_owner(&catalog, &event));
+
+        event.code = 2;
+        assert!(matches_confirmed_http_catalog_owner(&catalog, &event));
+
+        let mut foreign_plan = event.clone();
+        foreign_plan.plan_id = [0x22; 16];
+        assert!(!matches_confirmed_http_catalog_owner(
+            &catalog,
+            &foreign_plan
+        ));
+
+        let mut probe = event.clone();
+        probe.trial_id = [1; 16];
+        assert!(!matches_confirmed_http_catalog_owner(&catalog, &probe));
+
+        let mut temporary = event.clone();
+        temporary.binding.temporary = true;
+        assert!(!matches_confirmed_http_catalog_owner(&catalog, &temporary));
+
+        catalog.boxes[0].bindings[0].recheck_since = Some(100);
+        assert!(!matches_confirmed_http_catalog_owner(&catalog, &event));
     }
 
     #[test]
