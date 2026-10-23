@@ -140,19 +140,12 @@ fn run() -> Result<i32, String> {
         );
     }
     if let Some(r2o_wait) = r2o_snapshot.filter(|wait| !wait.is_zero()) {
+        // C passes the captured shape length straight through as QUIC pad_to.
         wire_len = Some(r2o_fetch_snapshot_wire_len(
             &name,
             &r2o_control_path,
             r2o_wait,
         )?);
-        if r2o_quic {
-            wire_len = Some(
-                wire_len
-                    .and_then(|length| length.checked_sub(5))
-                    .filter(|length| *length != 0)
-                    .ok_or_else(|| "TCP-снимок короче заголовка TLS-записи".to_owned())?,
-            );
-        }
     }
     let ip = match ip_raw {
         Some(value) => match value.parse::<IpAddr>() {
@@ -357,7 +350,7 @@ fn run() -> Result<i32, String> {
                     "location": null,
                     "cloudflare_challenge": null,
                     "wire_requested": options.wire_len.unwrap_or(0),
-                    "mark": options.mark.unwrap_or(0),
+                    "mark": 0,
                     "elapsed_ms": r2o_result.elapsed.as_millis(),
                     "local_port": if r2o_handshake { r2o_result.local_port } else { 0 },
                     "negotiated_tls": if r2o_handshake { 0x0304 } else { 0 },
@@ -490,13 +483,7 @@ fn run() -> Result<i32, String> {
             "TLS 1.2/1.3"
         }
     );
-    println!(
-        "маршрут:     {}",
-        options
-            .mark
-            .map(|value| format!("SO_MARK 0x{value:x}"))
-            .unwrap_or_else(|| "без метки, через планы datapath".into())
-    );
+    println!("маршрут:     без метки, через планы datapath (--mark не действует для QUIC)");
     println!("TLS:         {}", result.tls.unwrap_or("рукопожатия нет"));
     println!("HTTP:        {}", result.status);
     if let Some(expected) = result.body_expected {
@@ -678,7 +665,7 @@ fn print_help() {
          --control   основной сокет datapath; используется соседний путь .snapshot\n\
                      по умолчанию R2O_CONTROL_SOCKET или /opt/r2o/run/r2o-datapath4.sock\n\
          --deadline  срок ожидания, по умолчанию 15000 мс\n\
-         --mark      установить SO_MARK до подключения; без метки действуют планы datapath\n\n\
+         --mark      установить SO_MARK для TCP; QUIC всегда идёт через планы datapath\n\n\
          --json      вывести результат в машиночитаемой схеме JSON\n\
          Для TCP длина включает пять байт заголовка TLS-записи; для QUIC — только handshake-сообщение.\n\
          Снимок выполняется до запроса и заменяет значение --wire.\n\

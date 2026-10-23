@@ -7,7 +7,9 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::classify::{ProbeError, ProbeTarget, Trigger, split_offsets, trigger_accepts};
+use crate::classify::{
+    ProbeError, ProbeOutcome, ProbeTarget, Trigger, split_offsets, trigger_accepts,
+};
 use crate::hello::legacy_client_hello;
 use serde::{Deserialize, Serialize};
 
@@ -33,6 +35,7 @@ pub struct ResponseResult {
     pub reason: String,
     pub target: i32,
     pub control: i32,
+    pub probes: usize,
 }
 
 /// Ограничения одного замера ответного направления для цели и контроля.
@@ -115,12 +118,13 @@ fn response_timeout(timeout: Duration) -> Duration {
     }
 }
 
-fn not_applicable(reason: String, target: i32, control: i32) -> ResponseResult {
+fn not_applicable(reason: String, target: i32, control: i32, probes: usize) -> ResponseResult {
     ResponseResult {
         verdict: ResponseVerdict::NotApplicable,
         reason,
         target,
         control,
+        probes,
     }
 }
 
@@ -578,7 +582,7 @@ pub(crate) fn probe_trigger(
     timeout: Duration,
     mark: Option<u32>,
     cancel: Option<&AtomicBool>,
-) -> Result<bool, ProbeError> {
+) -> Result<ProbeOutcome, ProbeError> {
     let (socket, _) = dial_probe_target(target, timeout, mark)?;
     let fd = socket.as_raw_fd();
     let deadline = Instant::now() + timeout;
@@ -610,7 +614,7 @@ pub(crate) fn probe_trigger(
                 if !poll_until(fd, libc::POLLOUT, deadline).map_err(|error| {
                     ProbeError::Local(format!("ошибка ожидания отправки: {error}"))
                 })? {
-                    return Ok(false);
+                    return Ok(ProbeOutcome::Rejected);
                 }
                 continue;
             }
@@ -632,14 +636,20 @@ pub(crate) fn probe_trigger(
     if !poll_until(fd, libc::POLLIN, deadline)
         .map_err(|error| ProbeError::Local(format!("ошибка ожидания ответа: {error}")))?
     {
-        return Ok(false);
+        return Ok(ProbeOutcome::Rejected);
     }
     let mut bytes = [0_u8; 4096];
     let received = unsafe { libc::recv(fd, bytes.as_mut_ptr().cast(), bytes.len(), 0) };
     if received <= 0 {
-        return Ok(false);
+        return Ok(ProbeOutcome::Rejected);
     }
-    Ok(trigger_accepts(trigger.accept, &bytes[..received as usize]))
+    Ok(
+        if trigger_accepts(trigger.accept, &bytes[..received as usize]) {
+            ProbeOutcome::Accepted
+        } else {
+            ProbeOutcome::Unproven
+        },
+    )
 }
 
 /// Подтвердить, что обычный байт данных TCP дошёл до стека TCP узла.
@@ -948,9 +958,11 @@ fn count_handshakes(
     sni: &str,
     options: ResponseOptions,
     unmeasured: &mut i32,
+    probes: &mut usize,
 ) -> Result<i32, String> {
     let mut done = 0;
     for _ in 0..options.repeats {
+        *probes = (*probes).saturating_add(1);
         match handshake(address, sni, options, HandshakeGoal::ServerHelloDone)? {
             Trial::Done => done += 1,
             Trial::Failed => {}
@@ -1009,18 +1021,20 @@ pub fn probe_response(
                 "число повторов TLS-зонда должно быть положительным и представимым".into(),
                 0,
                 0,
+                0,
             );
         }
     };
     if let Err(error) = legacy_client_hello(sni) {
-        return not_applicable(format!("недопустимое имя для TLS-зонда: {error}"), 0, 0);
+        return not_applicable(format!("недопустимое имя для TLS-зонда: {error}"), 0, 0, 0);
     }
     let address = match resolve_address(host, port) {
         Ok(address) => address,
-        Err(error) => return not_applicable(error, 0, 0),
+        Err(error) => return not_applicable(error, 0, 0, 0),
     };
     let mut options = options;
     options.timeout = response_timeout(options.timeout);
+    let mut probes = 1;
     match handshake(address, sni, options, HandshakeGoal::ServerHello) {
         Ok(Trial::Done) => {}
         Ok(Trial::Failed) => {
@@ -1028,6 +1042,7 @@ pub fn probe_response(
                 "целевой TLS 1.2 ClientHello не получил ServerHello; ответное направление не измерено".into(),
                 0,
                 0,
+                probes,
             );
         }
         Ok(Trial::Unmeasured) => {
@@ -1035,21 +1050,24 @@ pub fn probe_response(
                 "ответ на целевой ClientHello превысил локальный предел 64 КиБ; ответное направление не измерено".into(),
                 0,
                 0,
+                probes,
             );
         }
-        Err(error) => return not_applicable(error, 0, 0),
+        Err(error) => return not_applicable(error, 0, 0, probes),
     }
     let mut unmeasured = 0;
-    let target = match count_handshakes(address, sni, options, &mut unmeasured) {
+    let target = match count_handshakes(address, sni, options, &mut unmeasured, &mut probes) {
         Ok(count) => count,
-        Err(error) => return not_applicable(error, 0, 0),
+        Err(error) => return not_applicable(error, 0, 0, probes),
     };
     let neutral = neutral_sni();
-    let control = match count_handshakes(address, &neutral, options, &mut unmeasured) {
+    let control = match count_handshakes(address, &neutral, options, &mut unmeasured, &mut probes) {
         Ok(count) => count,
-        Err(error) => return not_applicable(error, target, 0),
+        Err(error) => return not_applicable(error, target, 0, probes),
     };
-    decide(target, control, unmeasured, repeats)
+    let mut result = decide(target, control, unmeasured, repeats);
+    result.probes = probes;
+    result
 }
 
 /// Найти ServerHelloDone TLS 1.2 или фатальное оповещение в полных записях TLS.
@@ -1144,6 +1162,7 @@ pub fn decide(target: i32, control: i32, unmeasured: i32, repeats: i32) -> Respo
         reason,
         target,
         control,
+        probes: 0,
     }
 }
 

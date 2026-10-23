@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use crate::response::{ResponseOptions, ResponseResult, ResponseVerdict, probe_response};
 
 const TRACE_MAX: usize = 512;
+const CLEAR_CONFIRM_REPEATS: usize = 2;
 
 /// Один непрерывный диапазон данных триггера, отправляемый пробой с разрезанием.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -584,10 +585,27 @@ pub struct ProbeRequest<'a> {
     pub cancel: Option<&'a AtomicBool>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProbeOutcome {
+    Accepted,
+    Rejected,
+    Unproven,
+}
+
 /// Интерфейс ввода-вывода классификатора. Рабочая реализация использует
 /// помеченные сокеты TCP; тестовые реализации проходят то же дерево решений.
 pub trait ProbeBackend {
     fn probe(&mut self, request: ProbeRequest<'_>) -> Result<bool, ProbeError>;
+
+    fn probe_outcome(&mut self, request: ProbeRequest<'_>) -> Result<ProbeOutcome, ProbeError> {
+        self.probe(request).map(|accepted| {
+            if accepted {
+                ProbeOutcome::Accepted
+            } else {
+                ProbeOutcome::Rejected
+            }
+        })
+    }
 
     fn neutral_ack(
         &mut self,
@@ -621,6 +639,11 @@ pub struct TcpProbeBackend;
 
 impl ProbeBackend for TcpProbeBackend {
     fn probe(&mut self, request: ProbeRequest<'_>) -> Result<bool, ProbeError> {
+        self.probe_outcome(request)
+            .map(|outcome| outcome == ProbeOutcome::Accepted)
+    }
+
+    fn probe_outcome(&mut self, request: ProbeRequest<'_>) -> Result<ProbeOutcome, ProbeError> {
         crate::response::probe_trigger(
             request.target,
             request.trigger,
@@ -704,6 +727,7 @@ pub struct SeedWhole {
     pub repeats: usize,
     pub pass: usize,
     pub fail: usize,
+    pub errors: usize,
     pub error: Option<String>,
 }
 
@@ -812,6 +836,8 @@ impl ClassifyResult {
 struct Tally {
     pass: usize,
     fail: usize,
+    unproven: usize,
+    errors: usize,
     error: Option<ProbeError>,
 }
 
@@ -819,7 +845,6 @@ struct MeasureSpec<'a> {
     name: &'a str,
     cuts: &'a [usize],
     gap: Duration,
-    until_pass: bool,
 }
 
 fn parse_target(target: &str) -> Result<ProbeTarget, &'static str> {
@@ -899,6 +924,8 @@ fn measure<B: ProbeBackend>(
         let tally = Tally {
             pass: seed.pass,
             fail: seed.fail,
+            unproven: 0,
+            errors: seed.errors,
             error: seed.error.clone().map(ProbeError::Transport),
         };
         let observation = &mut result.trace[index];
@@ -914,7 +941,7 @@ fn measure<B: ProbeBackend>(
             break;
         }
         result.probes += 1;
-        match backend.probe(ProbeRequest {
+        match backend.probe_outcome(ProbeRequest {
             target,
             trigger,
             cuts: spec.cuts,
@@ -923,15 +950,17 @@ fn measure<B: ProbeBackend>(
             mark: options.mark,
             cancel: options.cancel.as_deref(),
         }) {
-            Ok(true) => {
+            Ok(ProbeOutcome::Accepted) => {
                 tally.pass += 1;
-                if spec.until_pass {
-                    break;
-                }
             }
-            Ok(false) => tally.fail += 1,
+            Ok(ProbeOutcome::Rejected) => tally.fail += 1,
+            Ok(ProbeOutcome::Unproven) => {
+                tally.fail += 1;
+                tally.unproven += 1;
+            }
             Err(error) => {
                 tally.fail += 1;
+                tally.errors += 1;
                 if tally.error.is_none() {
                     tally.error = Some(error);
                 }
@@ -1010,11 +1039,13 @@ pub fn run_with_backend<B: ProbeBackend>(
             name: "whole",
             cuts: &[],
             gap: options.write_gap,
-            until_pass: false,
         },
     );
     let mut base = whole;
-    if base.pass == 0 && base.error.as_ref().is_some_and(ProbeError::is_dial_timeout) {
+    if base.pass == 0
+        && base.errors == options.repeats
+        && base.error.as_ref().is_some_and(ProbeError::is_dial_timeout)
+    {
         let mut slower = options.clone();
         slower.timeout = options.timeout.saturating_mul(2);
         slower.seed_whole = None;
@@ -1028,11 +1059,11 @@ pub fn run_with_backend<B: ProbeBackend>(
                 name: "whole",
                 cuts: &[],
                 gap: slower.write_gap,
-                until_pass: false,
             },
         );
     }
     if base.pass == 0
+        && base.errors == options.repeats
         && let Some(error) = &base.error
     {
         if error.is_dial_timeout() {
@@ -1050,8 +1081,65 @@ pub fn run_with_backend<B: ProbeBackend>(
         return result;
     }
     if base.pass == options.repeats {
+        let mut confirm_options = options.clone();
+        confirm_options.repeats = CLEAR_CONFIRM_REPEATS;
+        confirm_options.seed_whole = None;
+        let confirm = measure(
+            backend,
+            &target,
+            trigger,
+            &confirm_options,
+            &mut result,
+            MeasureSpec {
+                name: "whole-confirm",
+                cuts: &[],
+                gap: options.write_gap,
+            },
+        );
+        if stopped(&options) {
+            result.verdict = Verdict::Inconclusive;
+            result.reason = format!(
+                "подтверждение базы остановлено после {} зондов — clear не подтверждён",
+                result.probes
+            );
+            finish(&mut result, &options, start);
+            return result;
+        }
+        if let Some(error) = &confirm.error {
+            result.verdict = Verdict::Flaky;
+            result.reason = format!(
+                "подтверждение базы не состоялось: ошибка транспорта — {}",
+                error.message()
+            );
+            finish(&mut result, &options, start);
+            return result;
+        }
+        if confirm.pass != CLEAR_CONFIRM_REPEATS {
+            result.verdict = Verdict::Flaky;
+            result.reason = format!(
+                "база не подтвердилась: итого {} из {} — ложный clear дороже честного flaky",
+                base.pass + confirm.pass,
+                options.repeats + CLEAR_CONFIRM_REPEATS
+            );
+            finish(&mut result, &options, start);
+            return result;
+        }
+        if options.mark == Some(0) {
+            result.verdict = Verdict::Inconclusive;
+            result.reason = format!(
+                "триггер прошёл ({} из {}), но без подтверждённой метки SO_MARK — успех мог дать обход",
+                options.repeats + CLEAR_CONFIRM_REPEATS,
+                options.repeats + CLEAR_CONFIRM_REPEATS
+            );
+            finish(&mut result, &options, start);
+            return result;
+        }
         result.verdict = Verdict::Clear;
-        result.reason = "триггер проходит как есть — обходить нечего".into();
+        result.reason = format!(
+            "триггер проходит как есть, метка подтверждена ({} из {}) — обходить нечего",
+            options.repeats + CLEAR_CONFIRM_REPEATS,
+            options.repeats + CLEAR_CONFIRM_REPEATS
+        );
         let sni = trigger.name.strip_prefix("tls:").unwrap_or("");
         if !sni.is_empty() {
             let response = probe_response(
@@ -1064,7 +1152,7 @@ pub fn run_with_backend<B: ProbeBackend>(
                     mark: options.mark,
                 },
             );
-            result.probes += 2 * options.repeats;
+            result.probes = result.probes.saturating_add(response.probes);
             if response.verdict == ResponseVerdict::Blocked {
                 result.verdict = Verdict::Response;
                 result.reason = response.reason.clone();
@@ -1107,7 +1195,6 @@ pub fn run_with_backend<B: ProbeBackend>(
             name: "split",
             cuts: &[1],
             gap: options.write_gap,
-            until_pass: false,
         },
     );
     if let Some(error) = &one.error {
@@ -1128,10 +1215,47 @@ pub fn run_with_backend<B: ProbeBackend>(
                     name: "control",
                     cuts: &[],
                     gap: options.write_gap,
-                    until_pass: true,
                 },
             );
-            control_ok = measured.pass > 0;
+            if let Some(error) = &measured.error {
+                result.verdict = Verdict::Flaky;
+                result.reason = format!(
+                    "контроль другим именем: ошибка транспорта — {}",
+                    error.message()
+                );
+                finish(&mut result, &options, start);
+                return result;
+            }
+            if measured.pass > 0 && measured.pass < options.repeats {
+                result.verdict = Verdict::Flaky;
+                result.reason = format!(
+                    "контроль другим именем не воспроизводится: {} из {}",
+                    measured.pass, options.repeats
+                );
+                finish(&mut result, &options, start);
+                return result;
+            }
+            let unproven = measured.unproven;
+            if unproven > 0 && measured.pass == 0 {
+                result.verdict = Verdict::Inconclusive;
+                result.reason = format!(
+                    "контроль другим именем ответил не записью TLS ({} из {}) — это не проход и не молчание; вердикта нет",
+                    unproven, options.repeats
+                );
+                finish(&mut result, &options, start);
+                return result;
+            }
+            control_ok = measured.pass == options.repeats;
+        }
+        if base.unproven > 0 || one.unproven > 0 {
+            result.verdict = Verdict::Inconclusive;
+            result.reason = format!(
+                "на триггер ответили не доказательством прохода ({} из {}): ответ инжектируют и коробки, и серверы — вердикта нет",
+                base.unproven + one.unproven,
+                options.repeats.saturating_mul(2)
+            );
+            finish(&mut result, &options, start);
+            return result;
         }
         if !control_ok {
             let index = add_observation(&mut result, "neutral-ack", &[], Duration::ZERO);
@@ -1271,7 +1395,6 @@ pub fn run_with_backend<B: ProbeBackend>(
             name: "split-long",
             cuts: &[1],
             gap: options.long_gap,
-            until_pass: false,
         },
     );
     if let Some(error) = &long.error {
@@ -1293,7 +1416,6 @@ pub fn run_with_backend<B: ProbeBackend>(
             name: "split",
             cuts: &[hi],
             gap: options.write_gap,
-            until_pass: false,
         },
     );
     if let Some(error) = &last.error {
@@ -1323,7 +1445,6 @@ pub fn run_with_backend<B: ProbeBackend>(
                 name: "split",
                 cuts: &[mid],
                 gap: options.write_gap,
-                until_pass: false,
             },
         );
         if let Some(error) = &measured.error {

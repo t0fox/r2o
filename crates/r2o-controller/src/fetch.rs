@@ -336,7 +336,9 @@ pub fn r2o_fetch_quic_with_roots_and_budget(
     let address = resolve_target(options)?;
     let socket = match crate::r2o_quic_http3::r2o_quic_http3_udp_socket_detailed(
         address,
-        effective_mark(options.mark),
+        // C's QUIC probe always uses the datapath plan path; --mark only
+        // applies to TCP probes.
+        None,
     ) {
         Ok(socket) => socket,
         Err(error) if error.local_refusal => {

@@ -1,8 +1,8 @@
 use r2o_controller::classify::{
-    Accept, ClassifyOptions, DpiProps, Poison, ProbeBackend, ProbeError, ProbeRequest, ProbeTarget,
-    Span, TriState, Trigger, Verdict, note_props_hit, note_props_miss, plan_bytes_for_poison,
-    poison_has_fake, poison_supports_family, poisons, run, run_with_backend, split_offsets,
-    strategy_for_poison, trigger_accepts,
+    Accept, ClassifyOptions, DpiProps, Poison, ProbeBackend, ProbeError, ProbeOutcome,
+    ProbeRequest, ProbeTarget, Span, TriState, Trigger, Verdict, note_props_hit, note_props_miss,
+    plan_bytes_for_poison, poison_has_fake, poison_supports_family, poisons, run, run_with_backend,
+    split_offsets, strategy_for_poison, trigger_accepts,
 };
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -37,6 +37,81 @@ struct OpaqueMatcher;
 impl ProbeBackend for OpaqueMatcher {
     fn probe(&mut self, request: ProbeRequest<'_>) -> Result<bool, ProbeError> {
         Ok(request.trigger.name == "control")
+    }
+}
+
+struct MixedControl {
+    control_probes: usize,
+}
+
+struct UnprovenControl;
+
+impl ProbeBackend for UnprovenControl {
+    fn probe(&mut self, _request: ProbeRequest<'_>) -> Result<bool, ProbeError> {
+        Ok(false)
+    }
+
+    fn probe_outcome(&mut self, request: ProbeRequest<'_>) -> Result<ProbeOutcome, ProbeError> {
+        Ok(if request.trigger.name == "control" {
+            ProbeOutcome::Unproven
+        } else {
+            ProbeOutcome::Rejected
+        })
+    }
+
+    fn neutral_ack(
+        &mut self,
+        _target: &ProbeTarget,
+        _timeout: Duration,
+        _mark: Option<u32>,
+        _cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<bool, ProbeError> {
+        Ok(false)
+    }
+}
+
+struct UnprovenTrigger;
+
+impl ProbeBackend for UnprovenTrigger {
+    fn probe(&mut self, request: ProbeRequest<'_>) -> Result<bool, ProbeError> {
+        Ok(request.trigger.name == "control")
+    }
+
+    fn probe_outcome(&mut self, request: ProbeRequest<'_>) -> Result<ProbeOutcome, ProbeError> {
+        Ok(if request.trigger.name == "control" {
+            ProbeOutcome::Accepted
+        } else {
+            ProbeOutcome::Unproven
+        })
+    }
+}
+
+struct PartialBaseFailure {
+    trigger_probes: usize,
+}
+
+impl ProbeBackend for PartialBaseFailure {
+    fn probe(&mut self, request: ProbeRequest<'_>) -> Result<bool, ProbeError> {
+        if request.trigger.name == "control" {
+            return Ok(true);
+        }
+        self.trigger_probes += 1;
+        if self.trigger_probes == 1 {
+            Err(ProbeError::Transport("test connection failure".into()))
+        } else {
+            Ok(false)
+        }
+    }
+}
+
+impl ProbeBackend for MixedControl {
+    fn probe(&mut self, request: ProbeRequest<'_>) -> Result<bool, ProbeError> {
+        if request.trigger.name == "control" {
+            self.control_probes += 1;
+            Ok(self.control_probes == 1)
+        } else {
+            Ok(false)
+        }
     }
 }
 
@@ -128,6 +203,17 @@ struct AlwaysPass;
 impl ProbeBackend for AlwaysPass {
     fn probe(&mut self, _request: ProbeRequest<'_>) -> Result<bool, ProbeError> {
         Ok(true)
+    }
+}
+
+struct FailConfirmation {
+    probes: usize,
+}
+
+impl ProbeBackend for FailConfirmation {
+    fn probe(&mut self, _request: ProbeRequest<'_>) -> Result<bool, ProbeError> {
+        self.probes += 1;
+        Ok(self.probes <= 2)
     }
 }
 
@@ -251,6 +337,90 @@ fn an_answering_control_and_failed_split_produce_opaque_without_a_plan() {
 }
 
 #[test]
+fn mixed_control_repeats_are_flaky_instead_of_a_positive_control() {
+    let trigger = test_trigger();
+    let mut options = test_options();
+    options.control = Some(Trigger {
+        name: "control".into(),
+        payload: b"BENIGN-CONTROL-PAYLOAD".to_vec(),
+        accept: Default::default(),
+    });
+    let mut backend = MixedControl { control_probes: 0 };
+
+    let result = run_with_backend("192.0.2.10:443", &trigger, options, &mut backend);
+
+    assert_eq!(result.verdict, Verdict::Flaky);
+    assert!(result.reason.contains("контроль"));
+    let observation = result
+        .trace
+        .iter()
+        .find(|observation| observation.probe == "control")
+        .unwrap();
+    assert_eq!(observation.pass, 1);
+    assert_eq!(observation.fail, 1);
+    assert_eq!(backend.control_probes, 2);
+}
+
+#[test]
+fn unrecognized_control_replies_are_inconclusive_not_address_blocking() {
+    let trigger = test_trigger();
+    let mut options = test_options();
+    options.control = Some(Trigger {
+        name: "control".into(),
+        payload: b"BENIGN-CONTROL-PAYLOAD".to_vec(),
+        accept: Accept::TlsRecord,
+    });
+    let mut backend = UnprovenControl;
+
+    let result = run_with_backend("192.0.2.10:443", &trigger, options, &mut backend);
+
+    assert_eq!(result.verdict, Verdict::Inconclusive);
+    assert!(result.reason.contains("не записью TLS"));
+    assert!(
+        !result
+            .trace
+            .iter()
+            .any(|probe| probe.probe == "neutral-ack")
+    );
+}
+
+#[test]
+fn unrecognized_trigger_reply_prevents_an_opaque_verdict() {
+    let trigger = test_trigger();
+    let mut options = test_options();
+    options.control = Some(Trigger {
+        name: "control".into(),
+        payload: b"BENIGN-CONTROL-PAYLOAD".to_vec(),
+        accept: Accept::TlsRecord,
+    });
+    let mut backend = UnprovenTrigger;
+
+    let result = run_with_backend("192.0.2.10:443", &trigger, options, &mut backend);
+
+    assert_eq!(result.verdict, Verdict::Inconclusive);
+    assert!(result.reason.contains("на триггер ответили"));
+}
+
+#[test]
+fn partial_base_transport_errors_continue_to_the_split_measurement() {
+    let trigger = test_trigger();
+    let mut options = test_options();
+    options.control = Some(Trigger {
+        name: "control".into(),
+        payload: b"BENIGN-CONTROL-PAYLOAD".to_vec(),
+        accept: Default::default(),
+    });
+    let mut backend = PartialBaseFailure { trigger_probes: 0 };
+
+    let result = run_with_backend("192.0.2.10:443", &trigger, options, &mut backend);
+
+    assert_eq!(result.verdict, Verdict::Opaque);
+    assert_eq!(result.probes, 6);
+    assert!(result.trace[0].error.is_some());
+    assert_eq!(result.trace[1].probe, "split");
+}
+
+#[test]
 fn raw_selftest_failure_is_visible_and_does_not_claim_a_completed_sweep() {
     let trigger = test_trigger();
     let mut options = test_options();
@@ -333,21 +503,70 @@ fn no_tcp_ack_for_trigger_or_control_is_an_address_verdict() {
 }
 
 #[test]
-fn seeded_whole_measurement_is_reused_without_a_second_probe() {
+fn seeded_whole_measurement_is_reused_and_still_gets_confirmation() {
     let trigger = test_trigger();
     let mut options = test_options();
+    options.mark = Some(0x2d);
     options.seed_whole = Some(r2o_controller::classify::SeedWhole {
         repeats: options.repeats,
         pass: options.repeats,
         fail: 0,
+        errors: 0,
         error: None,
     });
     let mut backend = AlwaysPass;
     let result = run_with_backend("192.0.2.10:443", &trigger, options, &mut backend);
 
     assert_eq!(result.verdict, Verdict::Clear);
-    assert_eq!(result.probes, 0);
+    assert_eq!(result.probes, 2);
     assert_eq!(result.trace[0].pass, 2);
+    assert_eq!(result.trace[1].probe, "whole-confirm");
+    assert_eq!(result.trace[1].pass, 2);
+}
+
+#[test]
+fn clear_requires_two_more_successful_probes() {
+    let trigger = test_trigger();
+    let mut options = test_options();
+    options.mark = Some(0x2d);
+    let mut backend = AlwaysPass;
+
+    let result = run_with_backend("192.0.2.10:443", &trigger, options, &mut backend);
+
+    assert_eq!(result.verdict, Verdict::Clear);
+    assert_eq!(result.probes, 4);
+    assert_eq!(result.trace[1].probe, "whole-confirm");
+    assert_eq!(result.trace[1].pass, 2);
+}
+
+#[test]
+fn failed_clear_confirmation_is_flaky() {
+    let trigger = test_trigger();
+    let mut options = test_options();
+    options.mark = Some(0x2d);
+    let mut backend = FailConfirmation { probes: 0 };
+
+    let result = run_with_backend("192.0.2.10:443", &trigger, options, &mut backend);
+
+    assert_eq!(result.verdict, Verdict::Flaky);
+    assert!(result.reason.contains("подтвердилась"));
+    assert_eq!(result.probes, 4);
+    assert_eq!(result.trace[1].pass, 0);
+    assert_eq!(result.trace[1].fail, 2);
+}
+
+#[test]
+fn unmarked_baseline_cannot_be_reported_clear() {
+    let trigger = test_trigger();
+    let mut options = test_options();
+    options.mark = Some(0);
+    let mut backend = AlwaysPass;
+
+    let result = run_with_backend("192.0.2.10:443", &trigger, options, &mut backend);
+
+    assert_eq!(result.verdict, Verdict::Inconclusive);
+    assert!(result.reason.contains("метк"));
+    assert_eq!(result.probes, 4);
 }
 
 #[test]
@@ -512,13 +731,13 @@ fn tls_trigger_uses_the_captured_profile_and_serverhello_acceptance() {
 }
 
 #[test]
-fn live_tcp_backend_runs_the_clear_baseline_with_the_original_payload() {
+fn live_tcp_backend_runs_base_and_confirmation_with_the_original_payload() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let payload = b"baseline trigger".to_vec();
     let expected_payload = payload.clone();
     let server = thread::spawn(move || {
-        for _ in 0..2 {
+        for _ in 0..4 {
             let (mut stream, _) = listener.accept().unwrap();
             let mut received = vec![0; expected_payload.len()];
             stream.read_exact(&mut received).unwrap();
@@ -540,8 +759,8 @@ fn live_tcp_backend_runs_the_clear_baseline_with_the_original_payload() {
     let result = run(&format!("{address}"), &trigger, options);
     server.join().unwrap();
 
-    assert_eq!(result.verdict, Verdict::Clear);
-    assert_eq!(result.probes, 2);
+    assert_eq!(result.verdict, Verdict::Inconclusive);
+    assert_eq!(result.probes, 4);
 }
 
 #[test]
@@ -584,7 +803,7 @@ fn classify_cli_runs_the_tls_probe_and_reports_the_response_check() {
     listener.set_nonblocking(true).unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = thread::spawn(move || {
-        for index in 0..4 {
+        for index in 0..6 {
             let deadline = Instant::now() + Duration::from_secs(3);
             let (mut stream, _) = loop {
                 match listener.accept() {
@@ -603,14 +822,14 @@ fn classify_cli_runs_the_tls_probe_and_reports_the_response_check() {
             let length = usize::from(u16::from_be_bytes([header[3], header[4]]));
             let mut body = vec![0; length];
             stream.read_exact(&mut body).unwrap();
-            let response = if index < 2 {
+            let response = if index < 4 {
                 vec![0x16, 0x03, 0x03, 0, 1, 2]
             } else {
                 vec![0x16, 0x03, 0x03, 0, 4, 14, 0, 0, 0]
             };
             stream.write_all(&response).unwrap();
         }
-        4
+        6
     });
 
     let output = Command::new(env!("CARGO_BIN_EXE_r2o-controller"))
@@ -633,5 +852,6 @@ fn classify_cli_runs_the_tls_probe_and_reports_the_response_check() {
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("вердикт: clear"), "{stdout}");
+    assert!(stdout.contains("зонды: 6"), "{stdout}");
     assert!(stdout.contains("ответное направление"), "{stdout}");
 }

@@ -201,6 +201,7 @@ fn response_limit_is_unmeasured_instead_of_a_block_verdict() {
     );
     assert_eq!(result.verdict, ResponseVerdict::NotApplicable);
     assert_eq!((result.target, result.control), (0, 0));
+    assert_eq!(result.probes, 3);
     assert!(result.reason.contains("2 прогонах"));
 }
 
@@ -219,6 +220,7 @@ fn loopback_probe_uses_same_address_control_and_reports_clear() {
     );
     assert_eq!(result.verdict, ResponseVerdict::Clear);
     assert_eq!((result.target, result.control), (1, 1));
+    assert_eq!(result.probes, 3);
 }
 
 #[test]
@@ -236,6 +238,7 @@ fn loopback_probe_requires_target_failure_and_control_success_for_blocked() {
     );
     assert_eq!(result.verdict, ResponseVerdict::Blocked);
     assert_eq!((result.target, result.control), (0, 1));
+    assert_eq!(result.probes, 3);
 }
 
 #[test]
@@ -366,6 +369,7 @@ fn response_verdicts_keep_unmeasured_control_and_flaky_cases_distinct() {
                 target,
                 control,
                 reason: reason.into(),
+                probes: 0,
             }
         );
     }
