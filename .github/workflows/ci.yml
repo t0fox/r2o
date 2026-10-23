@@ -241,6 +241,10 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq iproute2 nftables python3
       - name: Собрать сетевой исполнитель
         run: cargo build --release --locked --package r2o-datapath --package r2o-controller
+      - name: Собрать регрессию предела raw-пакета по MTU
+        run: cargo test --no-run --locked --package r2o-datapath --test raw_egress_mtu
+      - name: Проверить MTU raw-посылки в отдельном сетевом пространстве
+        run: sudo sh scripts/test-raw-egress-mtu-netns.sh
       - name: Проверить NFQUEUE во временном пространстве имён
         run: >-
           sudo env
