@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 set -eu
 
 sysroot=$(rustc --print sysroot)
@@ -9,16 +9,21 @@ if [ ! -x "$linker_dir/ld.lld" ]; then
     exit 1
 fi
 
-args=()
-for arg in "$@"; do
-    if [ "$arg" = "-no-pie" ]; then
-        # Clang diagnoses -no-pie as unused for this cross target. Pass it to
-        # LLD directly so Rust still gets the same non-PIE executable.
-        args+=("-Wl,-no-pie")
-    else
-        args+=("$arg")
-    fi
-done
+exec python3 - "$linker_dir" "$@" <<'PY'
+import os
+import sys
 
-exec clang-18 --target=armv5te-unknown-linux-musleabi -mcpu=arm926ej-s \
-    -B"$linker_dir" -fuse-ld=lld "${args[@]}"
+linker_dir, *args = sys.argv[1:]
+args = ["-Wl,-no-pie" if arg == "-no-pie" else arg for arg in args]
+os.execvp(
+    "clang-18",
+    [
+        "clang-18",
+        "--target=armv5te-unknown-linux-musleabi",
+        "-mcpu=arm926ej-s",
+        f"-B{linker_dir}",
+        "-fuse-ld=lld",
+        *args,
+    ],
+)
+PY
