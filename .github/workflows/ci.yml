@@ -409,6 +409,7 @@ jobs:
       - name: C/Rust сценарии
         env:
           DONOR_SNAPSHOT: ${{ matrix.snapshot }}
+          R2O_EXPECTED_DONOR_SHA: ${{ matrix.donor_sha }}
           R2O_DONOR_CORE: ${{ github.workspace }}/d2o/core
           R2O_DONOR_DATAPATH: ${{ github.workspace }}/d2o/datapath
         run: |

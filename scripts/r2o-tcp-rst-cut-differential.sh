@@ -53,7 +53,7 @@ mkdir -p "$r2o_log_dir"
         -fsyntax-only -Xclang -ast-dump "$r2o_donor_datapath/session.c" 2>/dev/null \
         | grep -E 'FunctionDecl.*(session_packet|d2k_session_packet)'
     printf '\nПроверка сценария C\n'
-    r2o_run_timed 'сборка и тесты TCP-сессии C' make -C "$r2o_donor_datapath" \
+    r2o_run_timed 'сборка и тесты TCP-сессии C' make -B -C "$r2o_donor_datapath" \
         test-session CC=clang-18
     printf '\nПроверка состояния TCP Rust\n'
     r2o_run_timed 'детектор RST-CUT Rust' cargo +1.98.0 test \

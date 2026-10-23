@@ -48,10 +48,9 @@ mkdir -p "$r2o_log_dir"
         "$r2o_script_dir/crates/r2o-datapath/src/engine.rs" \
         "$r2o_script_dir/crates/r2o-datapath/src/flow_journal.rs" \
         "$r2o_script_dir/crates/r2o-datapath/src/main.rs"
-    r2o_session_sha256=$(sha256sum "$r2o_donor_datapath/session.c" | awk '{print $1}')
-    if [ "$r2o_session_sha256" != \
-        '39dada3d4fbdaf943bf7b2a788090ab3d16a71065a58c16d39901575247f7187' ]; then
-        printf 'Исходник session.c отличается от проверенного C-снимка\n' >&2
+    if [ -n "${R2O_EXPECTED_DONOR_SHA:-}" ] && \
+        [ "$(git -C "$r2o_donor_datapath" rev-parse HEAD)" != "$R2O_EXPECTED_DONOR_SHA" ]; then
+        printf 'Коммит донора отличается от закреплённого снимка\n' >&2
         exit 1
     fi
     printf '\nКонтрольные тесты исходников донора\n'

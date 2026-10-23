@@ -50,7 +50,7 @@ mkdir -p "$r2o_log_dir"
         -fsyntax-only -Xclang -ast-dump "$r2o_donor_datapath/session.c" 2>/dev/null \
         | grep -E 'FunctionDecl.*handle_udp'
     printf '\nТесты сценариев QUIC в C-эталоне\n'
-    r2o_run_timed 'сборка и тесты QUIC-сессии C' make -C "$r2o_donor_datapath" \
+    r2o_run_timed 'сборка и тесты QUIC-сессии C' make -B -C "$r2o_donor_datapath" \
         test-quic-session CC=clang-18
     printf '\nПервая обратная UDP-датаграмма Rust\n'
     r2o_run_timed 'событие первой QUIC-датаграммы Rust' cargo +1.98.0 test \
