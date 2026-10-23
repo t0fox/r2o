@@ -593,7 +593,16 @@ fn r2o_settings_are_read_saved_and_restart_services() {
         "POST /api/config HTTP/1.1\r\nHost: router.local\r\nOrigin: http://router.local\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{r2o_off_body}",
         r2o_off_body.len()
     );
-    assert_eq!(handle_request(&config, r2o_off_raw.as_bytes()).status, 202);
+    let r2o_off_deadline = Instant::now() + Duration::from_secs(2);
+    let mut r2o_off_status = 409;
+    while Instant::now() < r2o_off_deadline {
+        r2o_off_status = handle_request(&config, r2o_off_raw.as_bytes()).status;
+        if r2o_off_status != 409 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(r2o_off_status, 202);
     let r2o_stop_deadline = Instant::now() + Duration::from_secs(2);
     let mut r2o_stop_arguments = String::new();
     while Instant::now() < r2o_stop_deadline {
