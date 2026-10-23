@@ -1,9 +1,9 @@
 use r2k_core::control::{
     self, ADDR_PROBE_LEASE_MAX_MS, COMMAND_ARM_SHAPE, COMMAND_CLEAR, COMMAND_DEL_ADDR,
-    COMMAND_DEL_ADDR_PROBE, COMMAND_DEL_VOICE_ADDR_PROBE, COMMAND_SET_ADDR, COMMAND_SET_ADDR_PROBE,
-    COMMAND_SET_HTTPS, COMMAND_SET_NAME, COMMAND_SET_TCP_STALL_BUDGETS, COMMAND_SET_VOICE_ADDR,
-    COMMAND_SET_VOICE_ADDR_PROBE, EVENT_APPLIED, EVENT_CLIENT_SHAPE, EVENT_HELLO,
-    EVENT_HTTP_PORTAL, EVENT_HTTP_RESPONSE, EVENT_PROTOCOL, EVENT_R2O_JOURNAL_END,
+    COMMAND_DEL_ADDR_PROBE, COMMAND_DEL_NAME, COMMAND_DEL_VOICE_ADDR_PROBE, COMMAND_SET_ADDR,
+    COMMAND_SET_ADDR_PROBE, COMMAND_SET_HTTPS, COMMAND_SET_NAME, COMMAND_SET_TCP_STALL_BUDGETS,
+    COMMAND_SET_VOICE_ADDR, COMMAND_SET_VOICE_ADDR_PROBE, EVENT_APPLIED, EVENT_CLIENT_SHAPE,
+    EVENT_HELLO, EVENT_HTTP_PORTAL, EVENT_HTTP_RESPONSE, EVENT_PROTOCOL, EVENT_R2O_JOURNAL_END,
     EVENT_R2O_JOURNAL_ENTRY, EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT,
     EVENT_R2O_TCP_CLEAN_HANDSHAKE, EVENT_R2O_TCP_EARLY_RST, EVENT_R2O_TCP_EXCHANGE,
     EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_REPEAT, EVENT_R2O_TCP_RST_AFTER_APP,
@@ -7777,6 +7777,8 @@ struct ControlClient {
     pending_applied_events: VecDeque<r2k_core::control::AppliedEvent>,
     http_search_started: HashMap<(String, u8, String), HttpSearchWindow>,
     http_challenge_cooldowns: HashMap<(String, u8), std::time::Instant>,
+    http_acknowledged_bindings:
+        HashMap<(String, u8), ([u8; 16], r2k_core::control::BindingContext)>,
 }
 
 #[cfg(unix)]
@@ -7937,7 +7939,104 @@ impl ControlClient {
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
             http_challenge_cooldowns: std::collections::HashMap::new(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
         })
+    }
+
+    fn acknowledged_http_binding_for(
+        &self,
+        response: &r2k_core::control::HttpResponseEvent,
+    ) -> Option<r2k_core::control::BindingContext> {
+        let host = std::str::from_utf8(&response.host).ok()?;
+        let host = normalize(host).ok()?;
+        let (plan_id, binding) = self
+            .http_acknowledged_bindings
+            .get(&(host, response.key[0]))?;
+        (*plan_id == response.plan_id && *binding == response.binding).then_some(*binding)
+    }
+
+    fn record_http_binding_acknowledgement(
+        &mut self,
+        command: &[u8],
+        expected: u16,
+        ack: r2k_core::control::Ack,
+    ) {
+        let Ok(frame) = read_frame(&mut std::io::Cursor::new(command)) else {
+            return;
+        };
+        if frame.kind != expected {
+            return;
+        }
+        match expected {
+            COMMAND_CLEAR if ack.ok => self.http_acknowledged_bindings.clear(),
+            COMMAND_SET_NAME if ack.ok => {
+                let body = &frame.body;
+                let Some(name_len) = body.first().copied().map(usize::from) else {
+                    return;
+                };
+                let Some(fields_end) = 3_usize.checked_add(name_len) else {
+                    return;
+                };
+                if name_len == 0 || body.len() <= fields_end {
+                    return;
+                }
+                let shape = body[1 + name_len];
+                if shape != SHAPE_HTTP {
+                    return;
+                }
+                let family = body[2 + name_len];
+                let Ok(host) = std::str::from_utf8(&body[1..1 + name_len]) else {
+                    return;
+                };
+                let Ok(host) = normalize(host) else {
+                    return;
+                };
+                let key = (host, family);
+                let Some(binding) = ack.binding_context.filter(|binding| {
+                    binding.is_known()
+                        && !binding.temporary
+                        && binding.kind == 1
+                        && binding.family == family
+                        && binding.shape == SHAPE_HTTP
+                }) else {
+                    self.http_acknowledged_bindings.remove(&key);
+                    return;
+                };
+                let Ok(plan) = Plan::parse(&body[fields_end..]) else {
+                    self.http_acknowledged_bindings.remove(&key);
+                    return;
+                };
+                self.http_acknowledged_bindings
+                    .insert(key, (plan.id, binding));
+            }
+            COMMAND_DEL_NAME if ack.ok => {
+                let body = &frame.body;
+                let Some(name_len) = body.first().copied().map(usize::from) else {
+                    return;
+                };
+                let Some(fields_end) = 1_usize
+                    .checked_add(name_len)
+                    .and_then(|length| length.checked_add(3))
+                else {
+                    return;
+                };
+                if name_len == 0 || body.len() != fields_end {
+                    return;
+                }
+                let transport = body[1 + name_len];
+                let shape = body[2 + name_len];
+                let family = body[3 + name_len];
+                if transport != 6 || shape != SHAPE_HTTP {
+                    return;
+                }
+                if let Ok(host) = std::str::from_utf8(&body[1..1 + name_len])
+                    && let Ok(host) = normalize(host)
+                {
+                    self.http_acknowledged_bindings.remove(&(host, family));
+                }
+            }
+            _ => {}
+        }
     }
 
     fn send_set_name(&mut self, command: &[u8]) -> Result<(), Box<dyn Error>> {
@@ -9724,10 +9823,13 @@ impl ControlClient {
                 if frame.kind == EVENT_HTTP_RESPONSE {
                     let response = decode_http_response(&frame)
                         .map_err(|error| format!("событие HTTP_RESPONSE: {error}"))?;
-                    let live_owner = discovery.as_ref().is_some_and(|(_, catalog, _, _)| {
-                        r2o_controller::discovery::matches_confirmed_http_catalog_owner(
-                            catalog, &response,
-                        )
+                    let acked_binding = self.acknowledged_http_binding_for(&response);
+                    let live_owner = acked_binding.is_some_and(|binding| {
+                        discovery.as_ref().is_some_and(|(_, catalog, _, _)| {
+                            r2o_controller::discovery::matches_confirmed_http_catalog_owner(
+                                catalog, &response, binding,
+                            )
+                        })
                     });
                     if live_owner {
                         let outcome = if response.code == 1 {
@@ -11727,6 +11829,7 @@ impl ControlClient {
         if ack.command != expected {
             return Err(format!("датапат подтвердил чужую команду 0x{:04x}", ack.command).into());
         }
+        self.record_http_binding_acknowledgement(command, expected, ack);
         Ok(ack)
     }
 
@@ -11974,6 +12077,7 @@ mod r2o_ask_proof_tests {
             pending_applied_events: Default::default(),
             http_search_started: Default::default(),
             http_challenge_cooldowns: Default::default(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
         };
         let command = encode_frame(COMMAND_SET_NAME_PROBE, &[]).unwrap();
 
@@ -12759,15 +12863,15 @@ mod tests {
         HttpSearchCommand, HttpSearchDisposition, HttpSearchTask, HttpSearchWindow,
         HttpSearchWorker, R2oFamilyRecoveryDecision, R2oVoiceTrialContext, ServeCliOptions,
         advance_http_candidate, applied_quic_trial_matches, baseline_silence_starts_search,
-        binding_shape_transport, catalog_commands, failed_http_programs, flow_socket_addresses,
-        http_search_candidates, http_search_key, install_catalog_best_effort,
-        matching_domain_group, matching_domain_recovery_candidates, measured_http_candidate_keys,
-        normalize_plan_target, parse_classify_options, parse_serve_options, print_flow_journal,
-        r2o_discovery_failure_retry_due, r2o_family_applied_flow_matches,
-        r2o_family_recovery_decision, r2o_http_failed_disposition, r2o_http_live_cut_recheck,
-        r2o_quic_binding_blocks_retry, r2o_tcp_stall_budgets, r2o_tcp_stall_budgets_for_name,
-        r2o_tcp_stall_in_name_band, r2o_voice_proof_matches_target, save_plan_file,
-        shape_matches_plan,
+        binding_shape_transport, candidate_text, catalog_commands, compile_text, encode_set_name,
+        failed_http_programs, flow_socket_addresses, http_search_candidates, http_search_key,
+        install_catalog_best_effort, matching_domain_group, matching_domain_recovery_candidates,
+        measured_http_candidate_keys, normalize_plan_target, parse_classify_options,
+        parse_serve_options, print_flow_journal, r2o_discovery_failure_retry_due,
+        r2o_family_applied_flow_matches, r2o_family_recovery_decision, r2o_http_failed_disposition,
+        r2o_http_live_cut_recheck, r2o_quic_binding_blocks_retry, r2o_tcp_stall_budgets,
+        r2o_tcp_stall_budgets_for_name, r2o_tcp_stall_in_name_band, r2o_voice_proof_matches_target,
+        save_plan_file, shape_matches_plan,
     };
     use r2k_core::control::{
         BindingContext, COMMAND_DEL_NAME_PROBE, COMMAND_DEL_VOICE_ADDR_PROBE, COMMAND_SET_NAME,
@@ -12784,6 +12888,94 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn http_live_owner_requires_the_latest_acknowledged_runtime_generation() {
+        use super::encode_delete_name;
+        use std::os::unix::net::UnixStream;
+
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let mut client = ControlClient {
+            socket,
+            send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
+            pending_events: Default::default(),
+            pending_applied_events: Default::default(),
+            http_search_started: Default::default(),
+            http_challenge_cooldowns: Default::default(),
+            http_acknowledged_bindings: Default::default(),
+        };
+        let plan_id = [0x41; 16];
+        let plan_text = candidate_text("split", Some(&plan_id)).unwrap();
+        let plan_records = compile_text(&plan_text).unwrap();
+        let set = encode_set_name("example.com", SHAPE_HTTP, 4, &plan_records).unwrap();
+        let first_binding = BindingContext {
+            generation: 7,
+            kind: 1,
+            family: 4,
+            shape: SHAPE_HTTP,
+            temporary: false,
+            epoch: [3; 16],
+        };
+        client.record_http_binding_acknowledgement(
+            &set,
+            COMMAND_SET_NAME,
+            r2k_core::control::Ack {
+                command: COMMAND_SET_NAME,
+                ok: true,
+                reason: r2k_core::control::ACK_OK,
+                trial_id: None,
+                binding_context: Some(first_binding),
+            },
+        );
+
+        let mut response = r2o_http_response(1, b"/");
+        response.execution_id = 9;
+        response.plan_id = plan_id;
+        response.request_ms = 10;
+        response.binding = first_binding;
+        assert_eq!(
+            client.acknowledged_http_binding_for(&response),
+            Some(first_binding)
+        );
+
+        let second_binding = BindingContext {
+            generation: 8,
+            ..first_binding
+        };
+        client.record_http_binding_acknowledgement(
+            &set,
+            COMMAND_SET_NAME,
+            r2k_core::control::Ack {
+                command: COMMAND_SET_NAME,
+                ok: true,
+                reason: r2k_core::control::ACK_OK,
+                trial_id: None,
+                binding_context: Some(second_binding),
+            },
+        );
+        assert_eq!(client.acknowledged_http_binding_for(&response), None);
+        response.binding = second_binding;
+        assert_eq!(
+            client.acknowledged_http_binding_for(&response),
+            Some(second_binding)
+        );
+
+        let delete = encode_delete_name("example.com", 6, SHAPE_HTTP, 4).unwrap();
+        client.record_http_binding_acknowledgement(
+            &delete,
+            r2k_core::control::COMMAND_DEL_NAME,
+            r2k_core::control::Ack {
+                command: r2k_core::control::COMMAND_DEL_NAME,
+                ok: true,
+                reason: r2k_core::control::ACK_OK,
+                trial_id: None,
+                binding_context: None,
+            },
+        );
+        assert_eq!(client.acknowledged_http_binding_for(&response), None);
+    }
 
     #[cfg(unix)]
     #[test]
@@ -15084,6 +15276,7 @@ mod tests {
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
             http_challenge_cooldowns: std::collections::HashMap::new(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
         };
         let target = DiscoveryTarget {
             host: "example.com".into(),
@@ -15137,6 +15330,7 @@ mod tests {
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
             http_challenge_cooldowns: std::collections::HashMap::new(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
         };
         let target = DiscoveryTarget {
             host: "example.com".into(),
@@ -15198,6 +15392,7 @@ mod tests {
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
             http_challenge_cooldowns: std::collections::HashMap::new(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
         };
         let target = DiscoveryTarget {
             host: "example.com".into(),
@@ -15274,6 +15469,7 @@ mod tests {
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
             http_challenge_cooldowns: std::collections::HashMap::new(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
         };
         let applied = Frame {
             kind: EVENT_APPLIED,
@@ -15298,6 +15494,7 @@ mod tests {
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
             http_challenge_cooldowns: std::collections::HashMap::new(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
         };
         let bytes = r2k_core::control::encode_greeting(1500).unwrap();
         let mut encoded = std::io::Cursor::new(bytes);
@@ -15322,6 +15519,7 @@ mod tests {
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
             http_challenge_cooldowns: std::collections::HashMap::new(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
         };
         let event = Frame {
             kind: EVENT_R2O_TCP_SILENT,
@@ -15345,6 +15543,7 @@ mod tests {
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
             http_challenge_cooldowns: std::collections::HashMap::new(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
         };
         let event = Frame {
             kind: r2k_core::control::EVENT_R2O_TCP_REPEAT,
@@ -15368,6 +15567,7 @@ mod tests {
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
             http_challenge_cooldowns: std::collections::HashMap::new(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
         };
         let event = Frame {
             kind: r2k_core::control::EVENT_R2O_TCP_RST_CUT,
@@ -15391,6 +15591,7 @@ mod tests {
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
             http_challenge_cooldowns: std::collections::HashMap::new(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
         };
         let event = Frame {
             kind: EVENT_R2O_TCP_STALL,
@@ -15414,6 +15615,7 @@ mod tests {
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
             http_challenge_cooldowns: std::collections::HashMap::new(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
         };
         let mut journal_entry = r2o_datapath::flow_journal::R2oFlowJournalEntry::default();
         journal_entry.key[0] = 4;
@@ -15699,6 +15901,7 @@ mod tests {
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
             http_challenge_cooldowns: std::collections::HashMap::new(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
         };
         let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
         let permit = gate
@@ -16033,6 +16236,7 @@ mod tests {
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
             http_challenge_cooldowns: std::collections::HashMap::new(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
         };
         let mut catalog = Catalog::default();
         let first = R2oQuicDiscoveryTask {
@@ -16304,6 +16508,7 @@ mod tests {
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
             http_challenge_cooldowns: std::collections::HashMap::new(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
         };
         let mut catalog = Catalog::default();
 
@@ -16350,6 +16555,7 @@ mod tests {
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
             http_challenge_cooldowns: std::collections::HashMap::new(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
         };
         let mut catalog = Catalog::default();
         client
@@ -16521,6 +16727,7 @@ mod tests {
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
             http_challenge_cooldowns: std::collections::HashMap::new(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
         };
         let (reply, response) = mpsc::sync_channel(1);
         let mut catalog = Catalog::default();
@@ -16555,6 +16762,7 @@ mod tests {
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
             http_challenge_cooldowns: std::collections::HashMap::new(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
         };
         for execution_id in 1..=257 {
             client.remember_applied_event(r2k_core::control::AppliedEvent {
@@ -16596,6 +16804,7 @@ mod tests {
             pending_applied_events: VecDeque::new(),
             http_search_started: std::collections::HashMap::new(),
             http_challenge_cooldowns: std::collections::HashMap::new(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
         };
         for (trial_id, execution_id) in [([1; 16], 1), ([2; 16], 2)] {
             client.remember_applied_event(r2k_core::control::AppliedEvent {
@@ -18526,6 +18735,7 @@ mod tests {
             pending_applied_events: VecDeque::new(),
             http_search_started: Default::default(),
             http_challenge_cooldowns: Default::default(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
         };
         let outcome = DiscoveryOutcome {
             target: target.clone(),
@@ -18613,6 +18823,7 @@ mod tests {
             pending_applied_events: VecDeque::new(),
             http_search_started: Default::default(),
             http_challenge_cooldowns: Default::default(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
         };
         let outcome = DiscoveryOutcome {
             target: target.clone(),
@@ -19163,6 +19374,7 @@ mod tests {
                 pending_applied_events: VecDeque::new(),
                 http_search_started: Default::default(),
                 http_challenge_cooldowns: Default::default(),
+                http_acknowledged_bindings: std::collections::HashMap::new(),
             };
             let target = r2o_controller::voice_discovery::R2oVoiceTarget {
                 client: "192.0.2.10".parse().unwrap(),
@@ -19222,6 +19434,7 @@ mod tests {
                 pending_applied_events: VecDeque::new(),
                 http_search_started: Default::default(),
                 http_challenge_cooldowns: Default::default(),
+                http_acknowledged_bindings: std::collections::HashMap::new(),
             };
             let trial = R2oVoiceTrialContext {
                 target: r2o_controller::voice_discovery::R2oVoiceTarget {
@@ -19407,6 +19620,7 @@ mod tests {
                 pending_applied_events: VecDeque::new(),
                 http_search_started: Default::default(),
                 http_challenge_cooldowns: Default::default(),
+                http_acknowledged_bindings: std::collections::HashMap::new(),
             };
             let r2o_now = r2o_started_at + R2O_VOICE_TRIAL_RENEW_INTERVAL;
             let mut trials = HashMap::from([

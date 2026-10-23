@@ -240,7 +240,11 @@ pub fn r2o_ech_witness_candidates(
 }
 
 /// Проверить, что live-ответ относится к действующему сохранённому HTTP-плану.
-pub fn matches_confirmed_http_catalog_owner(catalog: &Catalog, event: &HttpResponseEvent) -> bool {
+pub fn matches_confirmed_http_catalog_owner(
+    catalog: &Catalog,
+    event: &HttpResponseEvent,
+    acknowledged_binding: r2k_core::control::BindingContext,
+) -> bool {
     let zero = [0; 16];
     if !matches!(event.code, 1 | 2)
         || event.key[37] != 6
@@ -254,6 +258,7 @@ pub fn matches_confirmed_http_catalog_owner(catalog: &Catalog, event: &HttpRespo
         || event.binding.kind != 1
         || event.binding.family != event.key[0]
         || event.binding.shape != SHAPE_HTTP
+        || event.binding != acknowledged_binding
         || !matches!(event.key[0], 4 | 6)
     {
         return false;
@@ -1665,28 +1670,58 @@ mod tests {
             ..Catalog::default()
         };
 
-        assert!(matches_confirmed_http_catalog_owner(&catalog, &event));
+        let acknowledged_binding = event.binding;
+        assert!(matches_confirmed_http_catalog_owner(
+            &catalog,
+            &event,
+            acknowledged_binding
+        ));
 
         event.code = 2;
-        assert!(matches_confirmed_http_catalog_owner(&catalog, &event));
+        assert!(matches_confirmed_http_catalog_owner(
+            &catalog,
+            &event,
+            acknowledged_binding
+        ));
+
+        let mut stale_generation = event.clone();
+        stale_generation.binding.generation += 1;
+        assert!(!matches_confirmed_http_catalog_owner(
+            &catalog,
+            &stale_generation,
+            acknowledged_binding
+        ));
 
         let mut foreign_plan = event.clone();
         foreign_plan.plan_id = [0x22; 16];
         assert!(!matches_confirmed_http_catalog_owner(
             &catalog,
-            &foreign_plan
+            &foreign_plan,
+            acknowledged_binding
         ));
 
         let mut probe = event.clone();
         probe.trial_id = [1; 16];
-        assert!(!matches_confirmed_http_catalog_owner(&catalog, &probe));
+        assert!(!matches_confirmed_http_catalog_owner(
+            &catalog,
+            &probe,
+            acknowledged_binding
+        ));
 
         let mut temporary = event.clone();
         temporary.binding.temporary = true;
-        assert!(!matches_confirmed_http_catalog_owner(&catalog, &temporary));
+        assert!(!matches_confirmed_http_catalog_owner(
+            &catalog,
+            &temporary,
+            acknowledged_binding
+        ));
 
         catalog.boxes[0].bindings[0].recheck_since = Some(100);
-        assert!(!matches_confirmed_http_catalog_owner(&catalog, &event));
+        assert!(!matches_confirmed_http_catalog_owner(
+            &catalog,
+            &event,
+            acknowledged_binding
+        ));
     }
 
     #[test]

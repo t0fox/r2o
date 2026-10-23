@@ -6,11 +6,13 @@ use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const PROTO_VERSION: u16 = r2k_core::control::PROTOCOL_VERSION;
 const KEY_LEN: usize = 38;
+static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
 fn plan_header(minexec: u16, records: u16) -> Vec<u8> {
     let mut bytes = PLAN_MAGIC.to_vec();
@@ -883,7 +885,37 @@ fn temporary_directory() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("r2o-control-{}-{nonce}", std::process::id()))
+    let sequence = NEXT_TEMP_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "r2o-control-{}-{nonce}-{sequence}",
+        std::process::id()
+    ))
+}
+
+#[test]
+fn temporary_directory_paths_are_unique_under_parallel_calls() {
+    use std::collections::HashSet;
+    use std::sync::{Arc, Barrier};
+
+    const CALLS: usize = 32;
+    let barrier = Arc::new(Barrier::new(CALLS));
+    let paths = thread::scope(|scope| {
+        let workers = (0..CALLS)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    temporary_directory()
+                })
+            })
+            .collect::<Vec<_>>();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    let unique = paths.iter().collect::<HashSet<_>>();
+    assert_eq!(unique.len(), CALLS);
 }
 
 fn frame(kind: u16, body: &[u8]) -> Vec<u8> {

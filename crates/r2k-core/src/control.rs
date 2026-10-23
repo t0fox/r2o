@@ -4,7 +4,7 @@ use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-pub const PROTOCOL_VERSION: u16 = 44;
+pub const PROTOCOL_VERSION: u16 = 45;
 pub const FRAME_MAX: usize = 65_536;
 pub const KEY_LEN: usize = 38;
 pub const MAX_DNS_NAME_LEN: usize = 253;
@@ -74,6 +74,8 @@ const HTTP_CONTEXT_HEADER_LEN: usize = 50;
 const HTTP_BINDING_LEN: usize = 28;
 const HTTP_RESPONSE_SUFFIX_LEN: usize = 18;
 const EXECUTION_CONTEXT_LEN: usize = 36;
+const ACK_BINDING_CONTEXT_MAGIC: &[u8; 4] = b"R2BC";
+const ACK_BINDING_CONTEXT_LEN: usize = 4 + HTTP_BINDING_LEN;
 
 pub const RELEASE_ID: &str = match option_env!("R2O_RELEASE_ID") {
     Some(value) => value,
@@ -113,6 +115,7 @@ pub struct Ack {
     pub ok: bool,
     pub reason: u8,
     pub trial_id: Option<[u8; 16]>,
+    pub binding_context: Option<BindingContext>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1284,6 +1287,16 @@ pub fn encode_ack_for_trial(
     reason: u8,
     trial_id: Option<[u8; 16]>,
 ) -> Result<Vec<u8>, &'static str> {
+    encode_ack_with_binding(command, ok, reason, trial_id, None)
+}
+
+pub fn encode_ack_with_binding(
+    command: u16,
+    ok: bool,
+    reason: u8,
+    trial_id: Option<[u8; 16]>,
+    binding_context: Option<BindingContext>,
+) -> Result<Vec<u8>, &'static str> {
     if trial_id.is_some()
         && !matches!(
             command,
@@ -1296,13 +1309,42 @@ pub fn encode_ack_for_trial(
     {
         return Err("trial ID ACK разрешён только для временной привязки");
     }
-    let mut body = vec![0; KEY_LEN + 4];
+    if let Some(binding) = binding_context
+        && (!ok
+            || trial_id.is_some()
+            || command != COMMAND_SET_NAME
+            || !binding.is_known()
+            || binding.kind != 1
+            || !matches!(binding.family, 4 | 6)
+            || binding.shape != SHAPE_HTTP
+            || binding.temporary)
+    {
+        return Err("контекст привязки ACK допустим только для постоянного HTTP-плана имени");
+    }
+    let mut body = Vec::with_capacity(
+        KEY_LEN
+            + 4
+            + trial_id.map_or(0, |_| 16)
+            + binding_context.map_or(0, |_| ACK_BINDING_CONTEXT_LEN),
+    );
+    body.resize(KEY_LEN + 4, 0);
     body[0] = 4;
     body[KEY_LEN..KEY_LEN + 2].copy_from_slice(&command.to_be_bytes());
     body[KEY_LEN + 2] = u8::from(ok);
     body[KEY_LEN + 3] = if ok { ACK_OK } else { reason };
     if let Some(trial_id) = trial_id {
         body.extend_from_slice(&trial_id);
+    }
+    if let Some(binding) = binding_context {
+        body.extend_from_slice(ACK_BINDING_CONTEXT_MAGIC);
+        body.extend_from_slice(&binding.generation.to_be_bytes());
+        body.extend_from_slice(&[
+            binding.kind,
+            binding.family,
+            binding.shape,
+            u8::from(binding.temporary),
+        ]);
+        body.extend_from_slice(&binding.epoch);
     }
     encode_frame(EVENT_ACK, &body)
 }
@@ -1322,33 +1364,131 @@ pub fn decode_ack(frame: &Frame) -> Result<Ack, &'static str> {
     if ok && reason != ACK_OK {
         return Err("успешное подтверждение содержит код отказа");
     }
-    let trial_id = match frame.body.len() {
-        length if length == KEY_LEN + 4 => None,
-        length
-            if length == KEY_LEN + 4 + 16
-                && matches!(
-                    command,
-                    COMMAND_SET_NAME_PROBE
-                        | COMMAND_SET_VOICE_ADDR_PROBE
-                        | COMMAND_DEL_VOICE_ADDR_PROBE
-                        | COMMAND_SET_ADDR_PROBE
-                        | COMMAND_DEL_ADDR_PROBE
-                ) =>
-        {
-            Some(
-                frame.body[KEY_LEN + 4..]
+    let supports_trial_id = matches!(
+        command,
+        COMMAND_SET_NAME_PROBE
+            | COMMAND_SET_VOICE_ADDR_PROBE
+            | COMMAND_DEL_VOICE_ADDR_PROBE
+            | COMMAND_SET_ADDR_PROBE
+            | COMMAND_DEL_ADDR_PROBE
+    );
+    let mut cursor = KEY_LEN + 4;
+    let remaining = frame.body.len() - cursor;
+    let trial_id = if remaining == 16 && supports_trial_id {
+        let trial_id = frame.body[cursor..]
+            .try_into()
+            .map_err(|_| "неверный trial ID в подтверждении")?;
+        cursor += 16;
+        Some(trial_id)
+    } else {
+        None
+    };
+    let binding_context = if cursor == frame.body.len() {
+        None
+    } else if command == COMMAND_SET_NAME
+        && frame.body.len() == cursor + ACK_BINDING_CONTEXT_LEN
+        && frame.body[cursor..cursor + 4] == *ACK_BINDING_CONTEXT_MAGIC
+    {
+        let context = &frame.body[cursor + 4..];
+        let binding = BindingContext {
+            generation: u64::from_be_bytes(
+                context[..8]
                     .try_into()
-                    .map_err(|_| "неверный trial ID в подтверждении")?,
-            )
+                    .map_err(|_| "неверное поколение привязки ACK")?,
+            ),
+            kind: context[8],
+            family: context[9],
+            shape: context[10],
+            temporary: match context[11] {
+                0 => false,
+                1 => true,
+                _ => return Err("неверный признак временной привязки ACK"),
+            },
+            epoch: context[12..28]
+                .try_into()
+                .map_err(|_| "неверная эпоха таблицы привязок ACK")?,
+        };
+        if !binding.is_known()
+            || binding.kind != 1
+            || !matches!(binding.family, 4 | 6)
+            || binding.shape != SHAPE_HTTP
+            || binding.temporary
+            || !ok
+        {
+            return Err("ACK содержит неверный HTTP-контекст привязки");
         }
-        _ => return Err("неверная длина подтверждения команды"),
+        Some(binding)
+    } else {
+        return Err("неверная длина подтверждения команды");
     };
     Ok(Ack {
         command,
         ok,
         reason,
         trial_id,
+        binding_context,
     })
+}
+
+#[cfg(test)]
+mod ack_binding_context_tests {
+    use super::{
+        BindingContext, COMMAND_SET_NAME, SHAPE_HTTP, decode_ack, encode_ack_for_trial,
+        encode_ack_with_binding, read_frame,
+    };
+    use std::io::Cursor;
+
+    #[test]
+    fn ack_round_trips_current_permanent_binding_context() {
+        let binding = BindingContext {
+            generation: 42,
+            kind: 1,
+            family: 4,
+            shape: SHAPE_HTTP,
+            temporary: false,
+            epoch: [7; 16],
+        };
+        let bytes = encode_ack_with_binding(COMMAND_SET_NAME, true, 0, None, Some(binding))
+            .expect("valid HTTP ACK context");
+        let frame = read_frame(&mut Cursor::new(bytes)).unwrap();
+        let ack = decode_ack(&frame).unwrap();
+        assert_eq!(ack.command, COMMAND_SET_NAME);
+        assert_eq!(ack.binding_context, Some(binding));
+    }
+
+    #[test]
+    fn legacy_ack_without_binding_context_remains_valid() {
+        let bytes =
+            encode_ack_for_trial(super::COMMAND_SET_NAME_PROBE, true, 0, Some([9; 16])).unwrap();
+        let frame = read_frame(&mut Cursor::new(bytes)).unwrap();
+        let ack = decode_ack(&frame).unwrap();
+        assert_eq!(ack.trial_id, Some([9; 16]));
+        assert_eq!(ack.binding_context, None);
+    }
+
+    #[test]
+    fn ack_rejects_malformed_runtime_binding_context() {
+        let binding = BindingContext {
+            generation: 42,
+            kind: 1,
+            family: 4,
+            shape: SHAPE_HTTP,
+            temporary: false,
+            epoch: [7; 16],
+        };
+        let bytes = encode_ack_with_binding(COMMAND_SET_NAME, true, 0, None, Some(binding))
+            .expect("valid HTTP ACK context");
+        let mut frame = read_frame(&mut Cursor::new(bytes)).unwrap();
+        let family_offset = super::KEY_LEN + 4 + 4 + 8 + 1;
+        frame.body[family_offset] = 0;
+        assert!(decode_ack(&frame).is_err());
+
+        let temporary = BindingContext {
+            temporary: true,
+            ..binding
+        };
+        assert!(encode_ack_with_binding(COMMAND_SET_NAME, true, 0, None, Some(temporary)).is_err());
+    }
 }
 
 pub fn decode_applied(frame: &Frame) -> Result<AppliedEvent, &'static str> {

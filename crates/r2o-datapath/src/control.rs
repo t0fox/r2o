@@ -222,7 +222,42 @@ impl NamePlans {
             ok,
             reason,
             trial_id,
+            binding_context: if ok && frame.kind == COMMAND_SET_NAME {
+                self.http_name_binding_context(body)
+            } else {
+                None
+            },
         }
+    }
+
+    fn http_name_binding_context(&self, body: &[u8]) -> Option<BindingContext> {
+        let name_len = usize::from(*body.first()?);
+        let fields_end = 3_usize.checked_add(name_len)?;
+        if body.len() <= fields_end || body.get(1 + name_len).copied()? != SHAPE_HTTP {
+            return None;
+        }
+        let family = body.get(2 + name_len).copied()?;
+        if !matches!(family, 4 | 6) {
+            return None;
+        }
+        let host = canonical_plan_name(&body[1..1 + name_len], SHAPE_HTTP)?;
+        let plan = Plan::parse(&body[fields_end..]).ok()?;
+        let installed = self.plans.get(&NamePlanKey {
+            host,
+            family,
+            shape: SHAPE_HTTP,
+        })?;
+        if installed.plan.id != plan.id {
+            return None;
+        }
+        Some(BindingContext {
+            generation: installed.generation,
+            kind: 1,
+            family,
+            shape: SHAPE_HTTP,
+            temporary: false,
+            epoch: self.epoch,
+        })
     }
 
     pub fn select(&self, packet: &[u8]) -> Option<&Plan> {
@@ -1527,8 +1562,14 @@ impl ControlServer {
     }
 
     pub fn send_ack(&mut self, ack: Ack) -> io::Result<()> {
-        let bytes = control::encode_ack_for_trial(ack.command, ack.ok, ack.reason, ack.trial_id)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let bytes = control::encode_ack_with_binding(
+            ack.command,
+            ack.ok,
+            ack.reason,
+            ack.trial_id,
+            ack.binding_context,
+        )
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         self.enqueue(bytes);
         self.flush()
     }
@@ -1589,6 +1630,7 @@ impl ControlServer {
                     ok: false,
                     reason: control::ACK_BAD_ARGS,
                     trial_id: None,
+                    binding_context: None,
                 },
                 None,
             );
@@ -1600,6 +1642,7 @@ impl ControlServer {
                     ok: false,
                     reason: control::ACK_BAD_ARGS,
                     trial_id: None,
+                    binding_context: None,
                 },
                 None,
             );
@@ -1614,6 +1657,7 @@ impl ControlServer {
                     ok: true,
                     reason: control::ACK_OK,
                     trial_id: None,
+                    binding_context: None,
                 },
                 Some(cached.event_body.clone()),
             );
@@ -1625,6 +1669,7 @@ impl ControlServer {
                 ok: true,
                 reason: control::ACK_OK,
                 trial_id: None,
+                binding_context: None,
             },
             None,
         )
@@ -2787,6 +2832,41 @@ mod tests {
                 .applied_event_for_packet(&http_tcp_packet(host, source_port + 1), 43)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn permanent_http_set_ack_reports_exact_runtime_generation_and_epoch() {
+        let host = b"example.test";
+        let plan_id = [0x41; 16];
+        let mut records = plan_header(11, 2);
+        records.extend_from_slice(&[0x00, 0x01, 0x00, 0x10]);
+        records.extend_from_slice(&plan_id);
+        records.extend_from_slice(&[0x00, 0x02, 0x00, 0x02, 0x06, r2k_core::plan::PROTO_HTTP]);
+        let mut body = vec![host.len() as u8];
+        body.extend_from_slice(host);
+        body.extend_from_slice(&[SHAPE_HTTP, 4]);
+        body.extend_from_slice(&records);
+
+        let mut plans = NamePlans::default();
+        let first = plans.handle(&Frame {
+            kind: COMMAND_SET_NAME,
+            body: body.clone(),
+        });
+        assert!(first.ok);
+        let first_binding = first.binding_context.expect("HTTP SET_NAME ACK context");
+        assert!(first_binding.is_known());
+        assert_eq!(first_binding.kind, 1);
+        assert_eq!(first_binding.family, 4);
+        assert_eq!(first_binding.shape, SHAPE_HTTP);
+        assert!(!first_binding.temporary);
+
+        let second = plans.handle(&Frame {
+            kind: COMMAND_SET_NAME,
+            body,
+        });
+        let second_binding = second.binding_context.expect("reinstalled ACK context");
+        assert!(second_binding.generation > first_binding.generation);
+        assert_eq!(second_binding.epoch, first_binding.epoch);
     }
 
     #[test]
