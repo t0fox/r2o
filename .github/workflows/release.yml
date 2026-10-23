@@ -25,7 +25,7 @@ jobs:
       title: ${{ steps.plan.outputs.title }}
       notes: ${{ steps.plan.outputs.notes }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -63,52 +63,132 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   build:
+    name: Сборка ABI — ${{ matrix.abi }}
     needs: plan
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        include:
+          - abi: mipsel
+            target: mipsel-unknown-linux-gnu
+            asset_suffix: mipsel
+            script: scripts/build-mipsel.sh
+            packages: gcc-mipsel-linux-gnu qemu-user binutils
+            sdk_archive: ''
+            sdk_sha256: ''
+          - abi: mipsel-openwrt-musl
+            target: mipsel-unknown-linux-musl
+            asset_suffix: mipsel-openwrt-musl
+            script: scripts/r2o-build-openwrt-mipsel-musl.sh
+            packages: qemu-user zstd binutils curl
+            sdk_archive: openwrt-mipsel-musl-toolchain-25.12.5.tar.zst
+            sdk_sha256: 5a02d679c1ff052745b419b564624380dd3e5f6218db64c65b8ec9df56e2c263
+          - abi: aarch64-openwrt-musl
+            target: aarch64-unknown-linux-musl
+            asset_suffix: aarch64-openwrt-musl
+            script: scripts/r2o-build-openwrt-aarch64-musl.sh
+            packages: qemu-user zstd binutils curl
+            sdk_archive: openwrt-aarch64-musl-toolchain-25.12.5.tar.zst
+            sdk_sha256: 37875a8a69b46c9dc2a8c8bfd34a14f5de03fbea775f7cf8569f7e709c93403b
+          - abi: armv5-musleabi
+            target: armv5te-unknown-linux-musleabi
+            asset_suffix: armv5-musleabi
+            script: scripts/r2o-build-armv5-musleabi.sh
+            packages: clang-18 qemu-user binutils
+            sdk_archive: ''
+            sdk_sha256: ''
+          - abi: armv7-openwrt-musl
+            target: armv7-unknown-linux-musleabihf
+            asset_suffix: armv7-openwrt-musl
+            script: scripts/r2o-build-openwrt-armv7-musl.sh
+            packages: qemu-user zstd binutils curl
+            sdk_archive: openwrt-armv7-musl-toolchain-25.12.5.tar.zst
+            sdk_sha256: 2284afb56cbeef040372b02b721f1657ce1eee8e1c024fb1a0188374b472ae51
+    env:
+      ABI: ${{ matrix.abi }}
+      TARGET: ${{ matrix.target }}
+      ASSET_SUFFIX: ${{ matrix.asset_suffix }}
+      BUILD_SCRIPT: ${{ matrix.script }}
+      PACKAGES: ${{ matrix.packages }}
+      R2O_ARMV5_LINKER: ${{ github.workspace }}/scripts/ci-armv5-clang-cc.sh
+      R2O_ARMV5_AR: ar
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
-      - name: Установить инструменты сборки MIPS и ARMv5
-        run: sudo apt-get update && sudo apt-get install -y gcc-mipsel-linux-gnu gcc-arm-linux-gnueabi qemu-user zstd binutils curl
-      - name: Собрать и проверить выпуск GNU MIPS
-        run: sh scripts/build-mipsel.sh
-      - name: Собрать и проверить ARMv5 musleabi под QEMU
-        run: sh scripts/r2o-build-armv5-musleabi.sh
-      - name: Собрать и проверить выпуск OpenWrt musl
-        run: sh scripts/r2o-build-openwrt-mipsel-musl.sh
-      - name: Собрать и проверить выпуск OpenWrt ARM64 musl
-        run: sh scripts/r2o-build-openwrt-aarch64-musl.sh
-      - name: Собрать и проверить выпуск OpenWrt ARMv7 musl
-        run: sh scripts/r2o-build-openwrt-armv7-musl.sh
-      - name: Упаковать ABI и общий манифест
-        env:
-          RELEASE_ID: ${{ needs.plan.outputs.release_id }}
-          VERSION: ${{ needs.plan.outputs.version }}
-          NOTES: ${{ needs.plan.outputs.notes }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ matrix.sdk_sha256 != '' }}
+        with:
+          path: ~/.cache/r2o/openwrt/${{ matrix.sdk_archive }}
+          key: r2o-openwrt-sdk-${{ runner.os }}-${{ matrix.abi }}-${{ matrix.sdk_sha256 }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ matrix.abi == 'mipsel' }}
+        with:
+          path: ${{ runner.temp }}/r2o-apt-archives
+          key: r2o-apt-ubuntu-24.04-${{ matrix.abi }}-cross-v1
+      - name: Установить инструменты ABI
         run: |
           set -euo pipefail
-          builds="$RUNNER_TEMP/builds"
-          out="$RUNNER_TEMP/release"
-          mkdir -p "$builds/mipsel" "$builds/mipsel-openwrt-musl" "$builds/aarch64-openwrt-musl" "$builds/armv5-musleabi" "$builds/armv7-openwrt-musl"
+          read -r -a packages <<< "$PACKAGES"
+          mkdir -p "$RUNNER_TEMP/r2o-apt-archives/partial"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            -o Dir::Cache::archives="$RUNNER_TEMP/r2o-apt-archives" \
+            "${packages[@]}"
+      - name: Собрать ABI и проверить программы под QEMU
+        run: sh "$BUILD_SCRIPT"
+      - name: Подготовить бинарники ABI для общей упаковки
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/builds/$ABI"
+          mkdir -p "$stage"
           for component in r2o-datapath r2o-controller r2o-panel r2o-telegram r2o-manager r2o-fetch; do
-            install -m 0755 "target/mipsel-unknown-linux-gnu/release/$component" \
-              "$builds/mipsel/$component-linux-mipsel"
-            install -m 0755 "target/mipsel-unknown-linux-musl/release/$component" \
-              "$builds/mipsel-openwrt-musl/$component-linux-mipsel-openwrt-musl"
-            install -m 0755 "target/aarch64-unknown-linux-musl/release/$component" \
-              "$builds/aarch64-openwrt-musl/$component-linux-aarch64-openwrt-musl"
-            install -m 0755 "target/armv5te-unknown-linux-musleabi/release/$component" \
-              "$builds/armv5-musleabi/$component-linux-armv5-musleabi"
-            install -m 0755 "target/armv7-unknown-linux-musleabihf/release/$component" \
-              "$builds/armv7-openwrt-musl/$component-linux-armv7-openwrt-musl"
+            install -m 0755 "target/$TARGET/release/$component" "$stage/$component-linux-$ASSET_SUFFIX"
           done
-          sh scripts/package-release.sh "$builds" "$out" 'mipsel mipsel-openwrt-musl aarch64-openwrt-musl armv5-musleabi armv7-openwrt-musl'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed-release-build-${{ matrix.abi }}
+          path: ${{ runner.temp }}/builds
+          if-no-files-found: error
+          retention-days: 1
+
+  package:
+    name: Упаковка общего выпуска
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      RELEASE_ID: ${{ needs.plan.outputs.release_id }}
+      VERSION: ${{ needs.plan.outputs.version }}
+      NOTES: ${{ needs.plan.outputs.notes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: signed-release-build-*
+          path: ${{ runner.temp }}/builds
+          merge-multiple: true
+      - name: Упаковать ABI и общий манифест
+        run: |
+          set -euo pipefail
+          sh scripts/package-release.sh "$RUNNER_TEMP/builds" "$RUNNER_TEMP/release" \
+            'mipsel mipsel-openwrt-musl aarch64-openwrt-musl armv5-musleabi armv7-openwrt-musl'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: signed-release-inputs
           path: ${{ runner.temp }}/release/*
@@ -116,7 +196,7 @@ jobs:
           retention-days: 1
 
   publish:
-    needs: [plan, build]
+    needs: [plan, package]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: r2o-signing
@@ -134,11 +214,11 @@ jobs:
       SHA: ${{ needs.plan.outputs.sha }}
       NOTES: ${{ needs.plan.outputs.notes }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: signed-release-inputs
           path: ${{ runner.temp }}/release

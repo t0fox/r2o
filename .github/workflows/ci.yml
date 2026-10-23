@@ -18,6 +18,10 @@ defaults:
   run:
     shell: bash
 
+env:
+  ZIG_VERSION: '0.16.0'
+  ZIG_SHA256: '70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00'
+
 jobs:
   lint:
     name: Быстрые проверки — ShellCheck и формат Rust
@@ -230,22 +234,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: aarch64-unknown-linux-musl
-            compiler_package: gcc-aarch64-linux-gnu
-            compiler_variable: CC_aarch64_unknown_linux_musl
-            compiler_command: aarch64-linux-gnu-gcc
-          - target: armv5te-unknown-linux-musleabi
-            compiler_package: gcc-arm-linux-gnueabi
-            compiler_variable: CC_armv5te_unknown_linux_musleabi
-            compiler_command: arm-linux-gnueabi-gcc
           - target: i686-unknown-linux-musl
-            compiler_package: gcc-i686-linux-gnu
             compiler_variable: CC_i686_unknown_linux_musl
-            compiler_command: i686-linux-gnu-gcc
+            zig_target: x86-linux-musl
           - target: riscv64gc-unknown-linux-musl
-            compiler_package: gcc-riscv64-linux-gnu
             compiler_variable: CC_riscv64gc_unknown_linux_musl
-            compiler_command: riscv64-linux-gnu-gcc
+            zig_target: riscv64-linux-musl
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
         with:
@@ -253,15 +247,17 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
         with:
           target: ${{ matrix.target }}
-      - name: Установить кросс-компилятор
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq "${{ matrix.compiler_package }}"
+      - uses: ./.github/actions/setup-zig
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          sha256: ${{ env.ZIG_SHA256 }}
       - name: Проверить сетевые пакеты для целевой архитектуры
         env:
           TARGET: ${{ matrix.target }}
           COMPILER_VARIABLE: ${{ matrix.compiler_variable }}
-          COMPILER_COMMAND: ${{ matrix.compiler_command }}
+          ZIG_TARGET: ${{ matrix.zig_target }}
         run: |
-          export "$COMPILER_VARIABLE=$COMPILER_COMMAND"
+          export "$COMPILER_VARIABLE=$GITHUB_WORKSPACE/scripts/ci-zig-cross-cc.sh"
           cargo check --locked --target "$TARGET" \
             --package r2k-core --package r2o-datapath \
             --package r2o-controller --package r2o-panel
@@ -303,8 +299,18 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/r2o-apt-archives
+          key: r2o-apt-ubuntu-24.04-mipsel-cross-v1
       - name: Установить кросс-компилятор и QEMU
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-mipsel-linux-gnu qemu-user binutils
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/r2o-apt-archives/partial"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            -o Dir::Cache::archives="$RUNNER_TEMP/r2o-apt-archives" \
+            gcc-mipsel-linux-gnu qemu-user binutils
       - name: Собрать и проверить выпуск MIPS
         run: sh scripts/build-mipsel.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # версия v7.0.2
@@ -330,6 +336,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/r2o/openwrt/openwrt-mipsel-musl-toolchain-25.12.5.tar.zst
+          key: r2o-openwrt-sdk-Linux-mipsel-openwrt-musl-5a02d679c1ff052745b419b564624380dd3e5f6218db64c65b8ec9df56e2c263
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
       - name: Установить QEMU и распаковщик SDK
         run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user zstd binutils curl
@@ -358,6 +368,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/r2o/openwrt/openwrt-aarch64-musl-toolchain-25.12.5.tar.zst
+          key: r2o-openwrt-sdk-Linux-aarch64-openwrt-musl-37875a8a69b46c9dc2a8c8bfd34a14f5de03fbea775f7cf8569f7e709c93403b
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
         with:
           target: aarch64-unknown-linux-musl
@@ -391,9 +405,12 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
         with:
           target: armv5te-unknown-linux-musleabi
-      - name: Установить ARM-компилятор и QEMU
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-arm-linux-gnueabi qemu-user binutils
+      - name: Установить Clang и QEMU
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq clang-18 qemu-user binutils
       - name: Собрать и проверить полный набор программ под QEMU
+        env:
+          R2O_ARMV5_LINKER: ${{ github.workspace }}/scripts/ci-armv5-clang-cc.sh
+          R2O_ARMV5_AR: ar
         run: sh scripts/r2o-build-armv5-musleabi.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # версия v7.0.2
         with:
@@ -418,6 +435,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/r2o/openwrt/openwrt-armv7-musl-toolchain-25.12.5.tar.zst
+          key: r2o-openwrt-sdk-Linux-armv7-openwrt-musl-2284afb56cbeef040372b02b721f1657ce1eee8e1c024fb1a0188374b472ae51
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
         with:
           target: armv7-unknown-linux-musleabihf
@@ -439,19 +460,35 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-  donor-differential:
-    name: C/Rust differential — ${{ matrix.snapshot }}
+  donor-differential-plan:
+    name: Проверка полноты C/Rust шардов
     needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
+        with:
+          persist-credentials: false
+      - id: plan
+        name: Проверить полное покрытие и построить матрицу
+        run: |
+          set -euo pipefail
+          sh scripts/ci-differential-shards.sh verify
+          printf 'matrix=%s\n' "$(sh scripts/ci-differential-shards.sh matrix)" >> "$GITHUB_OUTPUT"
+
+  donor-differential:
+    name: C/Rust differential — ${{ matrix.snapshot }} / ${{ matrix.shard }}
+    needs: [lint, donor-differential-plan]
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - snapshot: baseline
-            donor_sha: eb848976ed9491791b7f2130b874867b61b2ca5d
-          - snapshot: upstream
-            donor_sha: 86b05b96457fccdec6b7ddc0e8478508f80f0bab
+      max-parallel: 5
+      matrix: ${{ fromJSON(needs.donor-differential-plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
         with:
@@ -466,10 +503,20 @@ jobs:
         with:
           toolchain: 1.98.0
           target: aarch64-unknown-linux-gnu
-      - name: Установить Clang, OpenSSL, AArch64 и QEMU
+      - name: Установить Clang, sysroot AArch64, QEMU и библиотеки
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq clang-18 gcc-aarch64-linux-gnu qemu-user libssl-dev pkg-config zlib1g-dev
+          sudo apt-get install -y -qq clang-18 qemu-user libc6-dev-arm64-cross \
+            libgcc-13-dev-arm64-cross libssl-dev pkg-config zlib1g-dev binutils
+      - name: Подготовить AArch64 GNU компилятор Clang
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/r2o-cross-bin"
+          mkdir -p "$bin"
+          ln -s "$GITHUB_WORKSPACE/scripts/ci-aarch64-linux-gnu-cc.sh" "$bin/aarch64-linux-gnu-gcc"
+          ln -s "$(command -v ar)" "$bin/aarch64-linux-gnu-ar"
+          ln -s "$(command -v ranlib)" "$bin/aarch64-linux-gnu-ranlib"
+          echo "$bin" >> "$GITHUB_PATH"
       - name: Проверить SHA снимка донора и подготовить C-эталон
         env:
           DONOR_SHA: ${{ matrix.donor_sha }}
@@ -481,45 +528,19 @@ jobs:
       - name: C/Rust сценарии
         env:
           DONOR_SNAPSHOT: ${{ matrix.snapshot }}
+          DIFFERENTIAL_SHARD: ${{ matrix.shard }}
           R2O_EXPECTED_DONOR_SHA: ${{ matrix.donor_sha }}
           R2O_DONOR_CORE: ${{ github.workspace }}/d2o/core
           R2O_DONOR_DATAPATH: ${{ github.workspace }}/d2o/datapath
         run: |
-          set -uo pipefail
-          if [ "$DONOR_SNAPSHOT" = baseline ]; then
-            scripts=(
-              r2o-discord-discovery-differential.sh
-              r2o-discovery-active-lifetime-differential.sh
-              r2o-discovery-coalesce-differential.sh
-              r2o-quic-stun-watch-differential.sh
-              r2o-tcp-exchange-differential.sh
-              r2o-hold-differential.sh
-              r2o-tcp-payload-stats-differential.sh
-              r2o-tcp-rst-cut-differential.sh
-              r2o-tcp-rst-observation-differential.sh
-              r2o-udp-exchange-differential.sh
-            )
-          else
-            scripts=(
-              r2o-discord-discovery-differential.sh
-              r2o-discovery-active-lifetime-differential.sh
-              r2o-discovery-coalesce-differential.sh
-              r2o-discovery-concurrency-check.sh
-              r2o-discovery-quic-stop-differential.sh
-              r2o-quic-hello-differential.sh
-              r2o-quic-stun-watch-differential.sh
-              r2o-route-gate-differential.sh
-              r2o-scheduler-differential.sh
-              r2o-tcp-exchange-differential.sh
-              r2o-hold-differential.sh
-              r2o-tcp-payload-stats-differential.sh
-              r2o-tcp-reply-hidden-differential.sh
-              r2o-tcp-rst-cut-differential.sh
-              r2o-tcp-rst-observation-differential.sh
-              r2o-udp-exchange-differential.sh
-              r2o-udp-session-table-check.sh
-            )
+          set -euo pipefail
+          sh scripts/ci-differential-shards.sh verify
+          scenario_list=$(sh scripts/ci-differential-shards.sh list "$DONOR_SNAPSHOT" "$DIFFERENTIAL_SHARD")
+          if [ -z "$scenario_list" ]; then
+            echo "::error::C/Rust differential shard is empty"
+            exit 1
           fi
+          mapfile -t scripts <<< "$scenario_list"
           failed=()
           for script in "${scripts[@]}"; do
             echo "::group::$script"
@@ -539,7 +560,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # версия v7.0.2
         with:
-          name: r2o-differential-${{ matrix.snapshot }}
+          name: r2o-differential-${{ matrix.snapshot }}-${{ matrix.shard }}
           path: .rea/*.log
           retention-days: 14
           if-no-files-found: warn
@@ -558,6 +579,7 @@ jobs:
       - sanitizers
       - rust-workspace
       - cross-check
+      - donor-differential-plan
       - nfqueue-integration
       - mipsel-release
       - openwrt-mipsel-musl
@@ -569,7 +591,7 @@ jobs:
     timeout-minutes: 2
     steps:
       - name: Завершиться ошибкой при пропуске или сбое проверки
-        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || needs.lint.result == 'skipped' || needs.panel.result == 'skipped' || needs.telegram.result == 'skipped' || needs.panel-browser.result == 'skipped' || needs.shell.result == 'skipped' || needs.datapath.result == 'skipped' || needs.core.result == 'skipped' || needs.rust-workspace.result == 'skipped' || needs.cross-check.result == 'skipped' || needs.nfqueue-integration.result == 'skipped' || needs.mipsel-release.result == 'skipped' || needs.openwrt-mipsel-musl.result == 'skipped' || needs.openwrt-aarch64-musl.result == 'skipped' || needs.armv5-musleabi.result == 'skipped' || needs.openwrt-armv7-musl.result == 'skipped' || needs.donor-differential.result == 'skipped' || (github.event_name != 'pull_request' && needs.sanitizers.result == 'skipped') }}
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || needs.lint.result == 'skipped' || needs.panel.result == 'skipped' || needs.telegram.result == 'skipped' || needs.panel-browser.result == 'skipped' || needs.shell.result == 'skipped' || needs.datapath.result == 'skipped' || needs.core.result == 'skipped' || needs.rust-workspace.result == 'skipped' || needs.cross-check.result == 'skipped' || needs.donor-differential-plan.result == 'skipped' || needs.nfqueue-integration.result == 'skipped' || needs.mipsel-release.result == 'skipped' || needs.openwrt-mipsel-musl.result == 'skipped' || needs.openwrt-aarch64-musl.result == 'skipped' || needs.armv5-musleabi.result == 'skipped' || needs.openwrt-armv7-musl.result == 'skipped' || needs.donor-differential.result == 'skipped' || (github.event_name != 'pull_request' && needs.sanitizers.result == 'skipped') }}
         run: exit 1
       - name: Все проверки завершились успешно
         run: echo "Все проверки R2O пройдены"

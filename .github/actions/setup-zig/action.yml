@@ -1,0 +1,42 @@
+name: Set up pinned Zig cross compiler
+description: Download Zig from its official archive, verify SHA-256, and cache the archive.
+
+inputs:
+  version:
+    description: Zig release version.
+    required: true
+  sha256:
+    description: SHA-256 of the official Linux x86_64 archive.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Cache Zig archive
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/r2o-zig-${{ inputs.version }}.tar.xz
+        key: r2o-zig-${{ runner.os }}-${{ runner.arch }}-${{ inputs.version }}-${{ inputs.sha256 }}
+    - name: Verify archive, download if missing, and install Zig
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        SHA256: ${{ inputs.sha256 }}
+      run: |
+        set -euo pipefail
+        [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+        [[ "$SHA256" =~ ^[0-9a-f]{64}$ ]]
+        archive="$RUNNER_TEMP/r2o-zig-$VERSION.tar.xz"
+        if [ ! -f "$archive" ] || ! printf '%s  %s\n' "$SHA256" "$archive" | sha256sum --check --status; then
+          part="$archive.part"
+          rm -f "$part"
+          curl --fail --proto '=https' --tlsv1.2 --location --retry 3 --retry-all-errors --max-time 300 \
+            "https://ziglang.org/download/$VERSION/zig-x86_64-linux-$VERSION.tar.xz" -o "$part"
+          printf '%s  %s\n' "$SHA256" "$part" | sha256sum --check
+          mv "$part" "$archive"
+        fi
+        printf '%s  %s\n' "$SHA256" "$archive" | sha256sum --check
+        tar -xJf "$archive" -C "$RUNNER_TEMP"
+        zig="$RUNNER_TEMP/zig-x86_64-linux-$VERSION/zig"
+        test "$("$zig" version)" = "$VERSION"
+        echo "ZIG=$zig" >> "$GITHUB_ENV"

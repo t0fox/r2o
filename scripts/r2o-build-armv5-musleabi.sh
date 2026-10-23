@@ -5,8 +5,10 @@ SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
 TARGET=armv5te-unknown-linux-musleabi
 TARGET_DIR=${R2O_ARMV5_CARGO_TARGET_DIR:-"$ROOT/target"}
+LINKER=${R2O_ARMV5_LINKER:-arm-linux-gnueabi-gcc}
+ARCHIVER=${R2O_ARMV5_AR:-arm-linux-gnueabi-ar}
 
-for tool in cargo rustup arm-linux-gnueabi-gcc arm-linux-gnueabi-ar qemu-arm readelf sha256sum grep mktemp; do
+for tool in cargo rustup "$LINKER" "$ARCHIVER" qemu-arm readelf sha256sum grep mktemp; do
     command -v "$tool" >/dev/null 2>&1 || {
         echo "сборка ARMv5: не найден обязательный инструмент: $tool" >&2
         exit 1
@@ -19,9 +21,9 @@ if ! rustup target list --installed | grep -qx "$TARGET"; then
 fi
 
 CARGO_TARGET_DIR="$TARGET_DIR" \
-CARGO_TARGET_ARMV5TE_UNKNOWN_LINUX_MUSLEABI_LINKER=arm-linux-gnueabi-gcc \
-CC_armv5te_unknown_linux_musleabi=arm-linux-gnueabi-gcc \
-AR_armv5te_unknown_linux_musleabi=arm-linux-gnueabi-ar \
+CARGO_TARGET_ARMV5TE_UNKNOWN_LINUX_MUSLEABI_LINKER="$LINKER" \
+CC_armv5te_unknown_linux_musleabi="$LINKER" \
+AR_armv5te_unknown_linux_musleabi="$ARCHIVER" \
     cargo build --workspace --release --locked --target "$TARGET"
 
 BIN_DIR="$TARGET_DIR/$TARGET/release"
