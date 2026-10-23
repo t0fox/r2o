@@ -7085,3 +7085,32 @@ REA/Ghidra не запускались: ветви однозначно зада
 regression tests. Новое binary Evidence не заявляется. Физический роутер не
 проверялся; эта приёмка относится только к `session.c` и `sched.c`, не к
 полному функциональному паритету проекта.
+
+## Discord RTC: переподключение и безопасный повтор Discovery — 23.10.2026
+
+Эталон `t0fox/d2o`, commit `eb848976ed9491791b7f2130b874867b61b2ca5d`;
+`datapath/session.c` SHA-256
+`f3bc8c4ddd334a189c63dc1bbf868eff258c2fdff3199e285d4a098d2ad3fe1f`.
+Исходник и C-тесты взяты через `git archive` в
+`target/parity-donor`; грязный рабочий checkout донора не собирался и не
+изменялся.
+
+`R2oVoiceSessions` теперь отличает новое поколение на том же 5-tuple по SSRC
+валидного Discovery: старые таймеры и обратные пакеты не переносятся в новую
+сессию, а повтор того же SSRC остаётся дедуплицированным. Контроллер снимает
+120-секундный cooldown для нового события, сохраняя защиту текущей и ожидающей
+задачи. Если DEL временного правила не подтверждён, trial удерживается до
+срока аренды без продления и не позволяет установить перекрывающую пробу.
+
+Проверки: `.rea/r2o-discord-discovery-differential-20261023-031053.log` —
+Clang AST, C `test_voice_discovery`, C `test_sched --voice-only` и профильные
+Rust voice-наборы; `.rea/r2o-discord-session-differential-20261023.log` — C
+`test_session` и `test_quic_session` из того же donor snapshot. Все тесты
+`r2o-controller`, `r2o-datapath` и `cargo test --workspace --locked` прошли;
+`cargo fmt --all --check`, `git diff --check` и
+`RUSTFLAGS="-D warnings" cargo check --workspace --all-targets --locked`
+прошли. Release/QEMU smoke и проверка каталога прошли для ARMv5 musleabi,
+MIPS GNU, OpenWrt MIPS musl и OpenWrt AArch64 musl. Физический роутер и живой
+Discord-сценарий не проверялись; доступный Gateway-хост оказался Debian 13
+x86_64, а не роутером. REA/Ghidra не запускались: здесь поведение проверено
+исходниками и исполняемыми C/Rust регрессиями; нового binary Evidence нет.

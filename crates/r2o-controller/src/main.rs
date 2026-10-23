@@ -4701,16 +4701,6 @@ impl R2oVoiceDiscoverySeen {
         self.r2o_targets.remove(target);
         self.r2o_order.retain(|(queued, _)| queued != target);
     }
-
-    fn r2o_refresh(
-        &mut self,
-        target: r2o_controller::voice_discovery::R2oVoiceTarget,
-        now: std::time::Instant,
-    ) {
-        self.r2o_prune(now);
-        self.r2o_remove(&target);
-        self.r2o_insert(target, now);
-    }
 }
 
 #[cfg(unix)]
@@ -4723,6 +4713,12 @@ struct R2oVoiceTrialContext {
     started_at: std::time::Instant,
     renew_at: std::time::Instant,
     expires_at: std::time::Instant,
+}
+
+#[cfg(unix)]
+fn r2o_hold_voice_trial_until_expiry(trial: &mut R2oVoiceTrialContext) {
+    trial.voice_flow_key = None;
+    trial.renew_at = trial.expires_at;
 }
 
 #[cfg(unix)]
@@ -4840,6 +4836,16 @@ impl R2oVoiceDiscoveryWorker {
                 .is_some_and(|pending| pending.target == target);
         };
         self.r2o_dispatch_voice_job(r2o_dispatch)
+    }
+
+    fn queue_after_new_session(
+        &mut self,
+        target: r2o_controller::voice_discovery::R2oVoiceTarget,
+        known_prefix: Option<[u8; 20]>,
+        can_start: bool,
+    ) -> bool {
+        self.r2o_seen.r2o_remove(&target);
+        self.queue(target, known_prefix, can_start)
     }
 
     fn r2o_dispatch_voice_job(&mut self, r2o_job: R2oVoiceDiscoveryJob) -> bool {
@@ -8164,21 +8170,49 @@ impl ControlClient {
                     if let Some(r2o_trial) =
                         r2o_take_silent_voice_trial(&mut r2o_voice_trials, &event.key, &r2o_target)
                     {
-                        if let Some(r2o_worker) = voice_discovery.as_mut() {
-                            r2o_worker
-                                .r2o_seen
-                                .r2o_refresh(r2o_trial.target, std::time::Instant::now());
-                        }
-                        if let Err(error) = self.retire_r2o_voice_trial(&r2o_trial) {
-                            eprintln!(
-                                "голосовой приём не пробил; временное правило истечёт по аренде, досрочное снятие не удалось: {error}"
-                            );
-                        }
+                        let r2o_retired = match self.retire_r2o_voice_trial(&r2o_trial) {
+                            Ok(()) => true,
+                            Err(error) => {
+                                eprintln!(
+                                    "голосовой приём не пробил; временное правило истечёт по аренде, досрочное снятие не удалось: {error}"
+                                );
+                                let mut r2o_trial = r2o_trial;
+                                r2o_hold_voice_trial_until_expiry(&mut r2o_trial);
+                                r2o_voice_trials.insert(r2o_trial.trial_id, r2o_trial);
+                                false
+                            }
+                        };
+                        let r2o_queued = if r2o_retired {
+                            if let (Some(r2o_worker), Some((_, catalog, _, _))) =
+                                (&mut voice_discovery, &discovery)
+                            {
+                                let r2o_known_prefix = r2o_known_voice_discovery_prefix(
+                                    catalog,
+                                    *r2o_target.server.ip(),
+                                );
+                                r2o_worker.queue_after_new_session(
+                                    r2o_target,
+                                    r2o_known_prefix,
+                                    r2o_voice_trials.is_empty(),
+                                )
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
                         println!(
-                            "голосовой приём не пробил поток {} -> {}:{}; цель отложена на 120 секунд",
+                            "голосовой приём не пробил поток {} -> {}:{}; {}",
                             r2o_target.client,
                             r2o_target.server.ip(),
                             r2o_target.server.port(),
+                            if r2o_queued {
+                                "проверка для новой сессии поставлена в ограниченную очередь"
+                            } else if r2o_retired {
+                                "предыдущая проба снята; новая проверка ждёт свободного слота"
+                            } else {
+                                "предыдущее правило не снято и останется до срока аренды"
+                            }
                         );
                         std::io::stdout().flush()?;
                         continue;
@@ -8191,7 +8225,7 @@ impl ControlClient {
                         } else {
                             let r2o_known_prefix =
                                 r2o_known_voice_discovery_prefix(catalog, *r2o_target.server.ip());
-                            r2o_worker.queue(
+                            r2o_worker.queue_after_new_session(
                                 r2o_target,
                                 r2o_known_prefix,
                                 r2o_voice_trials.is_empty(),
@@ -17648,6 +17682,50 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn неснятая_voice_проба_остаётся_учтённой_до_арендного_срока_без_продления() {
+        use super::{
+            R2O_VOICE_TRIAL_TASK_LIFETIME, R2oVoiceTrialContext, r2o_hold_voice_trial_until_expiry,
+            r2o_take_due_voice_trial_renewals, r2o_take_expired_voice_trials,
+            r2o_voice_target_has_active_trial,
+        };
+        use r2k_core::control::KEY_LEN;
+        use std::collections::HashMap;
+        use std::time::{Duration, Instant};
+
+        let now = Instant::now();
+        let trial_id = [0x42; 16];
+        let target = r2o_controller::voice_discovery::R2oVoiceTarget {
+            client: "192.0.2.10".parse().unwrap(),
+            server: "198.51.100.20:50004".parse().unwrap(),
+        };
+        let mut trial = R2oVoiceTrialContext {
+            target,
+            trial_id,
+            plan_text: String::new(),
+            voice_flow_key: Some([0x55; KEY_LEN]),
+            started_at: now,
+            renew_at: now + Duration::from_secs(60),
+            expires_at: now + R2O_VOICE_TRIAL_TASK_LIFETIME,
+        };
+        r2o_hold_voice_trial_until_expiry(&mut trial);
+        let expires_at = trial.expires_at;
+        let mut trials = HashMap::from([(trial_id, trial)]);
+
+        assert!(r2o_voice_target_has_active_trial(&trials, &target));
+        assert!(trials[&trial_id].voice_flow_key.is_none());
+        assert!(
+            r2o_take_due_voice_trial_renewals(&mut trials, expires_at - Duration::from_nanos(1),)
+                .is_empty()
+        );
+        assert_eq!(
+            r2o_take_expired_voice_trials(&mut trials, expires_at).len(),
+            1
+        );
+        assert!(trials.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn r2o_voice_watch_связывает_applied_с_точным_потоком_пробы() {
         use super::{
             R2oVoiceTrialContext, r2o_take_silent_voice_trial, r2o_voice_applied_flow_matches,
@@ -17837,7 +17915,8 @@ mod tests {
 
         assert!(r2o_seen.r2o_contains(&r2o_target, r2o_now + Duration::from_secs(119)));
         let r2o_failure_at = r2o_now + Duration::from_secs(30);
-        r2o_seen.r2o_refresh(r2o_target, r2o_failure_at);
+        r2o_seen.r2o_remove(&r2o_target);
+        r2o_seen.r2o_insert(r2o_target, r2o_failure_at);
         assert!(r2o_seen.r2o_contains(&r2o_target, r2o_failure_at + Duration::from_secs(119)));
         assert!(!r2o_seen.r2o_contains(&r2o_target, r2o_failure_at + Duration::from_secs(120)));
     }
@@ -17867,6 +17946,44 @@ mod tests {
         assert!(
             seen.r2o_contains(&target, now),
             "отличный от NAK исход не должен снимать ограничение повтора"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn новая_voice_сессия_снимает_cooldown_и_ставится_за_текущей_проверкой() {
+        use super::{R2oVoiceDiscoveryOutcome, R2oVoiceDiscoveryWorker, R2oVoiceLatestQueue};
+        use std::net::{Ipv4Addr, SocketAddrV4};
+        use std::sync::mpsc;
+        use std::time::Instant;
+
+        let target = r2o_controller::voice_discovery::R2oVoiceTarget {
+            client: Ipv4Addr::new(192, 0, 2, 10),
+            server: SocketAddrV4::new(Ipv4Addr::new(198, 51, 100, 20), 50_004),
+        };
+        let (_outcome_sender, outcomes) = mpsc::sync_channel::<R2oVoiceDiscoveryOutcome>(1);
+        let mut worker = R2oVoiceDiscoveryWorker {
+            jobs: None,
+            outcomes,
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            r2o_seen: super::R2oVoiceDiscoverySeen::default(),
+            schedule: R2oVoiceLatestQueue::default(),
+            thread: None,
+        };
+        let now = Instant::now();
+        worker.r2o_seen.r2o_insert(target, now);
+
+        assert!(worker.queue_after_new_session(target, None, false));
+        assert!(
+            worker
+                .schedule
+                .pending
+                .as_ref()
+                .is_some_and(|job| job.target == target)
+        );
+        assert!(
+            !worker.r2o_seen.r2o_contains(&target, now),
+            "fresh voice session may retry before the old 120-second cooldown ends"
         );
     }
 

@@ -67,6 +67,7 @@ struct FlowState {
     client: Endpoint,
     server: Endpoint,
     client_is_low: bool,
+    voice_ssrc: Option<[u8; 4]>,
     hello: Instant,
     last_forward: Instant,
     last_reverse: Option<Instant>,
@@ -264,6 +265,11 @@ impl R2oVoiceSessions {
             return;
         };
         let (key, client_is_low) = FlowKey::new(source, destination);
+        let voice_ssrc = r2k_core::stun::is_discord_ip_discovery_request(payload).then(|| {
+            payload[4..8]
+                .try_into()
+                .expect("Discord Discovery SSRC состоит из четырёх байтов")
+        });
         let is_voice_request = r2k_core::stun::is_discord_voice_request(payload, destination.port);
 
         if is_voice_request {
@@ -275,6 +281,7 @@ impl R2oVoiceSessions {
                 client: source,
                 server: destination,
                 client_is_low,
+                voice_ssrc,
                 hello: now,
                 last_forward: now,
                 last_reverse: None,
@@ -283,6 +290,19 @@ impl R2oVoiceSessions {
                 suspected: false,
             });
             if source == flow.client && destination == flow.server {
+                if let Some(ssrc) = voice_ssrc {
+                    if flow.voice_ssrc.is_some_and(|current| current != ssrc) {
+                        flow.voice_ssrc = Some(ssrc);
+                        flow.hello = now;
+                        flow.last_forward = now;
+                        flow.last_reverse = None;
+                        flow.last_seen = now;
+                        flow.forward_after_hello = 0;
+                        flow.suspected = false;
+                        return;
+                    }
+                    flow.voice_ssrc = Some(ssrc);
+                }
                 if !first_request {
                     flow.forward_after_hello = flow.forward_after_hello.saturating_add(1);
                 }
@@ -763,5 +783,71 @@ mod tests {
         assert_eq!(reconnected.len(), 1);
         assert_ne!(reconnected[0].key, first[0].key);
         assert_eq!(&reconnected[0].key[33..35], &50_001_u16.to_be_bytes());
+    }
+
+    #[test]
+    fn повторное_подключение_с_новым_ssrc_обновляет_то_же_5_tuple() {
+        let start = Instant::now();
+        let client = [192, 0, 2, 10];
+        let server = [198, 51, 100, 20];
+        let mut sessions = R2oVoiceSessions::default();
+
+        sessions.observe_packet(
+            &packet(
+                client,
+                server,
+                50_000,
+                50_004,
+                &discovery_request([1, 2, 3, 4]),
+            ),
+            start,
+        );
+        sessions.observe_packet(
+            &packet(client, server, 50_000, 50_004, b"media"),
+            start + Duration::from_millis(100),
+        );
+        let first = sessions.sweep(start + VOICE_SILENCE, true);
+        assert_eq!(first.len(), 1);
+        sessions.mark_suspected(&first[0].key);
+
+        sessions.observe_packet(
+            &packet(
+                client,
+                server,
+                50_000,
+                50_004,
+                &discovery_request([1, 2, 3, 4]),
+            ),
+            start + Duration::from_secs(3),
+        );
+        sessions.observe_packet(
+            &packet(client, server, 50_000, 50_004, b"media"),
+            start + Duration::from_millis(3_100),
+        );
+        assert!(
+            sessions
+                .sweep(start + Duration::from_millis(5_100), true)
+                .is_empty(),
+            "повтор Discovery с тем же SSRC остаётся той же подозреваемой сессией"
+        );
+
+        sessions.observe_packet(
+            &packet(
+                client,
+                server,
+                50_000,
+                50_004,
+                &discovery_request([5, 6, 7, 8]),
+            ),
+            start + Duration::from_secs(6),
+        );
+        sessions.observe_packet(
+            &packet(client, server, 50_000, 50_004, b"media"),
+            start + Duration::from_millis(6_100),
+        );
+
+        let reconnected = sessions.sweep(start + Duration::from_millis(8_100), true);
+        assert_eq!(reconnected.len(), 1);
+        assert_eq!(reconnected[0].key, first[0].key);
     }
 }
