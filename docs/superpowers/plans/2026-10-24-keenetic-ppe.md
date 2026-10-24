@@ -48,10 +48,10 @@
 
 **Interfaces:** Helper commands are `ensure`, `remove`, and `status [IPv4-address]`; it reads `R2O_PPE_*`, `PORTS`, `VOICE_PORTS`, and `HTTP_KEEPALIVE_PORTS` from the service environment.
 
-- [ ] Write mock-iptables tests for rule count/shape, repeat ensure, owner-only remove, disabled mode, missing PPE target, IPv6 gating, and failure cleanup; confirm they fail because the helper is absent.
-- [ ] Implement the minimum POSIX-shell adapter using tag `r2o-ppe`, paired TCP/UDP rules, connskip 30, donor HTTP keep-alive window, and xtables-lock fallback.
-- [ ] Run `sh scripts/test-r2o-ppe-deoffload.sh`, `sh -n router/r2o-ppe-deoffload.sh`, and ShellCheck on both scripts.
-- [ ] Commit as `feat: add owned PPE deoffload adapter`.
+- [x] Write mock-iptables tests for rule count/shape, repeat ensure, owner-only remove, disabled mode, missing PPE target, IPv6 gating, and failure cleanup; confirm they fail because the helper is absent.
+- [x] Implement the minimum POSIX-shell adapter using tag `r2o-ppe`, paired TCP/UDP rules, connskip 30, donor HTTP keep-alive window, and xtables-lock fallback.
+- [x] Run `sh scripts/test-r2o-ppe-deoffload.sh`, `sh -n router/r2o-ppe-deoffload.sh`, and ShellCheck on both scripts.
+- [x] Commit as `feat: add owned PPE deoffload adapter`.
 
 ### Task 3: Wire PPE into service and release lifecycle
 
@@ -91,3 +91,4 @@
 - Ruling: Use a distinct `r2o-ppe` tag — D2O and R2O may share the same iptables table; owner-isolated cleanup is safer — cost if wrong: old `d2k-ppe` rules remain independently managed.
 - Ruling: Keep PPE insertion failure nonfatal to ordinary NFQUEUE startup — this matches donor behavior and preserves service availability — cost if wrong: discovery may have lower visibility while status reports the incomplete adapter.
 - Task 1: importer regression observed RED, manager CLI suite 11/11 and formatter passed GREEN.
+- Task 2: mock-iptables suite observed RED while the adapter was absent; helper passed idempotence, owner isolation, disable, no-target, IPv6, invalid-input, and partial-failure cases. `sh -n` and ShellCheck passed.
