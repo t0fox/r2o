@@ -1531,7 +1531,9 @@ mod ack_binding_context_tests {
 }
 
 pub fn decode_applied(frame: &Frame) -> Result<AppliedEvent, &'static str> {
-    if frame.kind != EVENT_APPLIED || frame.body.len() != KEY_LEN + 16 + 16 + EXECUTION_CONTEXT_LEN
+    let base_len = KEY_LEN + 16 + 16;
+    if frame.kind != EVENT_APPLIED
+        || (frame.body.len() != base_len && frame.body.len() != base_len + EXECUTION_CONTEXT_LEN)
     {
         return Err("неверный размер события APPLIED");
     }
@@ -1547,24 +1549,46 @@ pub fn decode_applied(frame: &Frame) -> Result<AppliedEvent, &'static str> {
     let trial_id = frame.body[KEY_LEN + 16..KEY_LEN + 32]
         .try_into()
         .map_err(|_| "неверный идентификатор испытания в событии APPLIED")?;
-    let context = &frame.body[KEY_LEN + 32..];
-    let binding = BindingContext {
-        generation: u64::from_be_bytes(
-            context[8..16]
+    let context = &frame.body[base_len..];
+    let (execution_id, binding) = if context.is_empty() {
+        // d2k_link_next accepts the pre-context APPLIED form; zeroes mean
+        // unknown, matching the zero-initialized C event.
+        (
+            0,
+            BindingContext {
+                generation: 0,
+                kind: 0,
+                family: 0,
+                shape: 0,
+                temporary: false,
+                epoch: [0; 16],
+            },
+        )
+    } else {
+        let binding = BindingContext {
+            generation: u64::from_be_bytes(
+                context[8..16]
+                    .try_into()
+                    .map_err(|_| "неверное поколение привязки APPLIED")?,
+            ),
+            kind: context[16],
+            family: context[17],
+            shape: context[18],
+            temporary: match context[19] {
+                0 => false,
+                1 => true,
+                _ => return Err("неверный признак временной привязки APPLIED"),
+            },
+            epoch: context[20..36]
                 .try_into()
-                .map_err(|_| "неверное поколение привязки APPLIED")?,
-        ),
-        kind: context[16],
-        family: context[17],
-        shape: context[18],
-        temporary: match context[19] {
-            0 => false,
-            1 => true,
-            _ => return Err("неверный признак временной привязки APPLIED"),
-        },
-        epoch: context[20..36]
-            .try_into()
-            .map_err(|_| "неверная эпоха таблицы привязок APPLIED")?,
+                .map_err(|_| "неверная эпоха таблицы привязок APPLIED")?,
+        };
+        let execution_id = u64::from_be_bytes(
+            context[..8]
+                .try_into()
+                .map_err(|_| "неверный идентификатор исполнения APPLIED")?,
+        );
+        (execution_id, binding)
     };
     if !valid_binding(&binding) {
         return Err("событие APPLIED содержит неверную привязку");
@@ -1573,11 +1597,7 @@ pub fn decode_applied(frame: &Frame) -> Result<AppliedEvent, &'static str> {
         key,
         plan_id,
         trial_id,
-        execution_id: u64::from_be_bytes(
-            context[..8]
-                .try_into()
-                .map_err(|_| "неверный идентификатор исполнения APPLIED")?,
-        ),
+        execution_id,
         binding,
     })
 }

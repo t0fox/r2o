@@ -504,8 +504,7 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
             );
             continue;
         }
-        let proof =
-            client.wait_for_ask_proof(trial_id, plan_id, expected_key, family, shape, ASK_WAIT);
+        let proof = client.wait_for_ask_proof(trial_id, plan_id, expected_key, ASK_WAIT);
         let proof = match proof {
             Ok(proof) => proof,
             Err(error) => {
@@ -3646,7 +3645,6 @@ fn r2o_family_recovery_run(
                         result.as_ref().map_or(0, |fetch| fetch.local_port),
                         candidate.plan_id,
                         [0; 16],
-                        false,
                     )
                 })
             });
@@ -3835,14 +3833,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
         let events = events?;
         delete_result?;
         let applied = events.iter().any(|event| {
-            r2o_family_applied_flow_matches(
-                event,
-                target,
-                local_port,
-                candidate.plan_id,
-                trial_id,
-                true,
-            )
+            r2o_family_applied_flow_matches(event, target, local_port, candidate.plan_id, trial_id)
         });
         Ok((fetch_result, applied, transport_established))
     })();
@@ -4215,9 +4206,9 @@ fn r2o_discovery_client_shape_trial(
     send_result?;
     delete_result?;
     let events = events?;
-    Ok(events.iter().any(|event| {
-        r2o_family_applied_flow_matches(event, target, local_port, plan.id, trial_id, true)
-    }))
+    Ok(events
+        .iter()
+        .any(|event| r2o_family_applied_flow_matches(event, target, local_port, plan.id, trial_id)))
 }
 
 #[cfg(unix)]
@@ -4227,7 +4218,6 @@ fn r2o_family_applied_flow_matches(
     local_port: u16,
     plan_id: [u8; 16],
     trial_id: [u8; 16],
-    temporary: bool,
 ) -> bool {
     let Ok(endpoint) = target.endpoint.parse::<std::net::SocketAddr>() else {
         return false;
@@ -4235,13 +4225,7 @@ fn r2o_family_applied_flow_matches(
     if event.key[0] != target.family
         || event.key[37] != 6
         || event.trial_id != trial_id
-        || event.execution_id == 0
         || event.plan_id != plan_id
-        || !event.binding.is_known()
-        || event.binding.kind != 1
-        || event.binding.family != target.family
-        || event.binding.shape != target.shape
-        || event.binding.temporary != temporary
     {
         return false;
     }
@@ -6398,16 +6382,7 @@ fn r2o_voice_applied_flow_matches(
     event: &r2k_core::control::AppliedEvent,
 ) -> bool {
     let key = &event.key;
-    if event.trial_id != trial.trial_id
-        || event.execution_id == 0
-        || !event.binding.is_known()
-        || event.binding.kind != 2
-        || event.binding.family != 4
-        || event.binding.shape != SHAPE_VOICE
-        || !event.binding.temporary
-        || key[0] != 4
-        || key[37] != 17
-    {
+    if event.trial_id != trial.trial_id || key[0] != 4 || key[37] != 17 {
         return false;
     }
     let Ok(plan_bytes) = compile_text(&trial.plan_text) else {
@@ -6554,12 +6529,6 @@ fn applied_quic_trial_matches(
     let key = &event.key;
     if event.trial_id != trial_id
         || event.plan_id != plan_id
-        || event.execution_id == 0
-        || !event.binding.is_known()
-        || event.binding.kind != 2
-        || event.binding.family != if server.is_ipv4() { 4 } else { 6 }
-        || event.binding.shape != SHAPE_QUIC
-        || !event.binding.temporary
         || key[37] != 17
         || key[0] != if server.is_ipv4() { 4 } else { 6 }
     {
@@ -9456,14 +9425,11 @@ impl R2oAskProof {
         expected_key: &[u8; r2k_core::control::KEY_LEN],
         plan_id: [u8; 16],
         trial_id: [u8; 16],
-        family: u8,
-        shape: u8,
     ) -> bool {
         if event.trial_id != trial_id {
             return false;
         }
-        self.applied |=
-            r2o_ask_applied_matches(event, expected_key, plan_id, trial_id, family, shape);
+        self.applied |= r2o_ask_applied_matches(event, expected_key, plan_id, trial_id);
         true
     }
 
@@ -12542,8 +12508,6 @@ impl ControlClient {
         trial_id: [u8; 16],
         plan_id: [u8; 16],
         expected_key: [u8; r2k_core::control::KEY_LEN],
-        family: u8,
-        shape: u8,
         timeout: std::time::Duration,
     ) -> Result<R2oAskProof, Box<dyn Error>> {
         let deadline = std::time::Instant::now()
@@ -12554,14 +12518,7 @@ impl ControlClient {
         let pending_applied = std::mem::take(&mut self.pending_applied_events);
         for event in pending_applied {
             if event.trial_id == trial_id {
-                proof.applied |= r2o_ask_applied_matches(
-                    &event,
-                    &expected_key,
-                    plan_id,
-                    trial_id,
-                    family,
-                    shape,
-                );
+                proof.applied |= r2o_ask_applied_matches(&event, &expected_key, plan_id, trial_id);
             } else {
                 self.remember_applied_event(event);
             }
@@ -12579,8 +12536,6 @@ impl ControlClient {
                     &expected_key,
                     plan_id,
                     trial_id,
-                    family,
-                    shape,
                 )? {
                     self.pending_events.push_back(frame);
                 }
@@ -12605,8 +12560,6 @@ impl ControlClient {
                 &expected_key,
                 plan_id,
                 trial_id,
-                family,
-                shape,
             )? {
                 self.queue_async_frame(frame)?;
             }
@@ -12623,13 +12576,11 @@ impl ControlClient {
         expected_key: &[u8; r2k_core::control::KEY_LEN],
         plan_id: [u8; 16],
         trial_id: [u8; 16],
-        family: u8,
-        shape: u8,
     ) -> Result<bool, Box<dyn Error>> {
         if frame.kind == EVENT_APPLIED {
             let event =
                 decode_applied(frame).map_err(|error| format!("событие APPLIED: {error}"))?;
-            if !proof.observe_applied(&event, expected_key, plan_id, trial_id, family, shape) {
+            if !proof.observe_applied(&event, expected_key, plan_id, trial_id) {
                 self.remember_applied_event(event);
             }
             return Ok(true);
@@ -14008,18 +13959,8 @@ fn r2o_ask_applied_matches(
     key: &[u8; r2k_core::control::KEY_LEN],
     plan_id: [u8; 16],
     trial_id: [u8; 16],
-    family: u8,
-    shape: u8,
 ) -> bool {
-    event.key == *key
-        && event.plan_id == plan_id
-        && event.trial_id == trial_id
-        && event.execution_id != 0
-        && event.binding.is_known()
-        && event.binding.kind == 1
-        && event.binding.family == family
-        && event.binding.shape == shape
-        && event.binding.temporary
+    event.key == *key && event.plan_id == plan_id && event.trial_id == trial_id
 }
 
 #[cfg(unix)]
@@ -14094,21 +14035,19 @@ mod r2o_ask_proof_tests {
                 key,
                 plan_id,
                 trial_id,
-                execution_id: 1,
+                execution_id: 0,
                 binding: BindingContext {
-                    generation: 1,
-                    kind: 1,
-                    family: 4,
-                    shape: SHAPE_LEGACY,
-                    temporary: true,
-                    epoch: [1; 16],
+                    generation: 0,
+                    kind: 0,
+                    family: 0,
+                    shape: 0,
+                    temporary: false,
+                    epoch: [0; 16],
                 },
             },
             &key,
             plan_id,
             trial_id,
-            4,
-            SHAPE_LEGACY,
         ));
         assert!(!proof.passed());
 
@@ -16520,7 +16459,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn семейный_план_требует_https_и_applied_точного_потока_включая_trial_и_temporary() {
+    fn семейный_план_требует_https_и_applied_точного_потока_и_trial() {
         let target = DiscoveryTarget {
             host: "media.example.com".into(),
             endpoint: "198.51.100.20:443".into(),
@@ -16550,13 +16489,27 @@ mod tests {
             },
         };
         assert!(r2o_family_applied_flow_matches(
-            &event, &target, 41_000, plan_id, [0; 16], false
+            &event, &target, 41_000, plan_id, [0; 16]
         ));
         assert!(!r2o_family_applied_flow_matches(
-            &event, &target, 41_001, plan_id, [0; 16], false
+            &event, &target, 41_001, plan_id, [0; 16]
         ));
         assert!(!r2o_family_applied_flow_matches(
-            &event, &target, 41_000, [0x56; 16], [0; 16], false
+            &event, &target, 41_000, [0x56; 16], [0; 16]
+        ));
+
+        let mut legacy = event.clone();
+        legacy.execution_id = 0;
+        legacy.binding = r2k_core::control::BindingContext {
+            generation: 0,
+            kind: 0,
+            family: 0,
+            shape: 0,
+            temporary: false,
+            epoch: [0; 16],
+        };
+        assert!(r2o_family_applied_flow_matches(
+            &legacy, &target, 41_000, plan_id, [0; 16]
         ));
 
         let trial_id = [0x44; 16];
@@ -16564,13 +16517,20 @@ mod tests {
         temporary.trial_id = trial_id;
         temporary.binding.temporary = true;
         assert!(r2o_family_applied_flow_matches(
-            &temporary, &target, 41_000, plan_id, trial_id, true
+            &temporary, &target, 41_000, plan_id, trial_id
         ));
         assert!(!r2o_family_applied_flow_matches(
-            &temporary, &target, 41_000, plan_id, [0x45; 16], true
+            &temporary, &target, 41_000, plan_id, [0x45; 16]
         ));
-        assert!(!r2o_family_applied_flow_matches(
-            &temporary, &target, 41_000, plan_id, trial_id, false
+        let mut legacy_temporary = temporary.clone();
+        legacy_temporary.execution_id = 0;
+        legacy_temporary.binding = legacy.binding;
+        assert!(r2o_family_applied_flow_matches(
+            &legacy_temporary,
+            &target,
+            41_000,
+            plan_id,
+            trial_id
         ));
 
         let fetch = FetchResult {
@@ -16655,6 +16615,36 @@ mod tests {
             r2o_family_recovery_decision(&Ok(r2o_test_fetch_result()), false),
             R2oFamilyRecoveryDecision::Reclassify
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn d2o_legacy_applied_frame_matches_donor_flow_proof() {
+        let line = include_str!("../../r2k-core/tests/fixtures/d2o_control_events.hex")
+            .lines()
+            .find(|line| line.starts_with("APPLIED "))
+            .unwrap();
+        let mut fields = line.split_whitespace();
+        let _kind = fields.next().unwrap();
+        let wire_hex = fields.next().unwrap();
+        let wire = (0..wire_hex.len())
+            .step_by(2)
+            .map(|offset| u8::from_str_radix(&wire_hex[offset..offset + 2], 16).unwrap())
+            .collect::<Vec<_>>();
+        let frame = read_frame(&mut std::io::Cursor::new(wire)).unwrap();
+        let event = r2k_core::control::decode_applied(&frame).unwrap();
+        let target = DiscoveryTarget {
+            host: "legacy.example".into(),
+            endpoint: "198.51.100.2:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let matches =
+            r2o_family_applied_flow_matches(&event, &target, 40_123, [0x11; 16], [0x22; 16]);
+        assert!(matches);
+        if let Ok(path) = std::env::var("R2O_CONTROL_PROOF_DIFF_OUTPUT") {
+            std::fs::write(path, format!("MATCH:{}\n", u8::from(matches))).unwrap();
+        }
     }
 
     #[cfg(unix)]
@@ -18727,7 +18717,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn applied_quic_trial_requires_exact_temporary_binding_and_flow() {
+    fn applied_quic_trial_requires_exact_plan_trial_and_flow() {
         let local: std::net::SocketAddr = "192.0.2.10:41000".parse().unwrap();
         let server: std::net::SocketAddr = "198.51.100.20:443".parse().unwrap();
         let mut key = [0; KEY_LEN];
@@ -18756,15 +18746,23 @@ mod tests {
         };
 
         assert!(matches(&event));
+        let mut legacy = event.clone();
+        legacy.execution_id = 0;
+        legacy.binding = r2k_core::control::BindingContext {
+            generation: 0,
+            kind: 0,
+            family: 0,
+            shape: 0,
+            temporary: false,
+            epoch: [0; 16],
+        };
+        assert!(matches(&legacy));
         event.trial_id = [0x44; 16];
         assert!(!matches(&event));
         event.trial_id = [0x11; 16];
         event.plan_id = [0x44; 16];
         assert!(!matches(&event));
         event.plan_id = [0x22; 16];
-        event.binding.temporary = false;
-        assert!(!matches(&event));
-        event.binding.temporary = true;
         event.key[35..37].copy_from_slice(&444_u16.to_be_bytes());
         assert!(!matches(&event));
     }
@@ -23332,7 +23330,7 @@ mod tests {
         use super::{
             R2oVoiceTrialContext, r2o_take_silent_voice_trial, r2o_voice_applied_flow_matches,
         };
-        use r2k_core::control::{AppliedEvent, BindingContext, KEY_LEN, SHAPE_VOICE};
+        use r2k_core::control::{AppliedEvent, BindingContext, KEY_LEN};
         use std::collections::HashMap;
         use std::time::{Duration, Instant};
 
@@ -23368,14 +23366,14 @@ mod tests {
             key,
             plan_id,
             trial_id,
-            execution_id: 7,
+            execution_id: 0,
             binding: BindingContext {
-                generation: 1,
-                kind: 2,
-                family: 4,
-                shape: SHAPE_VOICE,
-                temporary: true,
-                epoch: [1; 16],
+                generation: 0,
+                kind: 0,
+                family: 0,
+                shape: 0,
+                temporary: false,
+                epoch: [0; 16],
             },
         };
 
@@ -23388,7 +23386,7 @@ mod tests {
         assert!(!r2o_voice_applied_flow_matches(&trial, &wrong_server));
         let mut permanent = applied.clone();
         permanent.binding.temporary = false;
-        assert!(!r2o_voice_applied_flow_matches(&trial, &permanent));
+        assert!(r2o_voice_applied_flow_matches(&trial, &permanent));
 
         let trial = R2oVoiceTrialContext {
             voice_flow_key: Some(applied.key),

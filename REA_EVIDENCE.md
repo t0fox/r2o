@@ -7318,6 +7318,30 @@ Rust-аналог `r2o_parse_cpu_stat` ранее отвергал перепо�
 OpenWrt/QEMU smoke остаётся проверкой сборки и запуска, а не полевым
 подтверждением AIMD или полного поведенческого паритета.
 
+### APPLIED: старый формат события и критерий корреляции — 24.10.2026
+
+Эталон — неизменённый donor checkout `783aa75ce44dd6192cd1f4f1d98e4fe909ef3045`.
+Для этого сравнения SHA-256 `core/link.c` равен
+`58acde0cd6eab4fe57c139cdf21c2d680ea08cfb59f64a9bc6941b83a799a930`, а
+`core/sched.c` — `aee97d92aa37ca3b8b3f3ce47ca636a02cbea71fde989eb113376f35496df45c`.
+
+| Исходная C-функция | Rust-аналог и расхождение | Одинаковый вход и результат |
+|---|---|---|
+| `core/link.c::d2k_link_next`: принимает APPLIED с ключом, plan ID и trial ID без execution context; поля отсутствующего контекста остаются нулевыми. Частичный context отвергается. | `r2k-core::control::decode_applied` принимал только полный context. Теперь принимает ровно обе формы C (без context либо полный context), а частичный по-прежнему отвергает. | Общий fixture `crates/r2k-core/tests/fixtures/d2o_control_events.hex` прогнан через donor C parser и Rust decoder. До исправления Rust тест падал с `неверный размер события APPLIED`; после — нормализованные ACK/APPLIED поля совпали, включая нулевой context, а усечённое событие отвергнуто обеими сторонами. `scripts/r2o-control-events-differential.sh` завершился успешно. |
+| `core/sched.c::applied_trial_is_ours` и `applied_of_candidate`: сопоставляют APPLIED по plan/trial ID и ключу потока; execution binding сам по себе не является доказательством применения. | `r2o_family_applied_flow_matches` ранее требовал ненулевой execution ID и известные kind/family/shape/temporary поля. Сняты только эти дополнительные условия; точная корреляция plan/trial, семейства, транспорта, адреса, портов и последующие протокольные доказательства сохранены. Те же лишние binding-ограничения убраны в аналогичных голосовом, QUIC и Ask matcher-ах: `r2o_voice_applied_flow_matches`, `applied_quic_trial_matches`, `r2o_ask_applied_matches`. | Один и тот же legacy APPLIED frame с нулевым context подан в исходные C helper-ы и Rust family matcher: обе стороны вывели `MATCH:1`; до изменения Rust отклонял его из-за отсутствующего context. Контроллерный фильтр APPLIED прошёл 8/8 тестов, включая остальные matchers; core control suite — 32/32. Отдельные TLS/ServerHello/voice условия результата не ослаблялись. |
+
+На полном donor scheduler differential сценарии `scripts/r2o-scheduler-differential.sh`
+донорский `test_sched` прошёл все проверки; весь сценарий завершился с кодом 0
+(журнал `.rea/r2o-scheduler-differential-20261024-225100.log`). Ask differential
+также прошёл: C `d2kask` — все проверки, Rust Ask — 9/9.
+
+Для `d2k_link_next` REA function dossier в этой среде недоступен: локальный
+провайдер не поддерживает анализ этого ELF, Hopper для Windows не настроен,
+IDA не сконфигурирован. Поэтому конкретное сравнение здесь подтверждено
+исходником точного donor checkout и исполняемым C/Rust differential harness,
+а не REA-декомпиляцией. Новые сетевые подключения к роутеру не выполнялись;
+полевого подтверждения текущего кода нет, и полный паритет не объявляется.
+
 ### Ретроспективная сверка локальных полевых артефактов
 
 В существующем локальном `.audit/` найдены записи предыдущего запуска R2O на

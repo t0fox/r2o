@@ -44,6 +44,81 @@ fn r2o_quic_plan_records() -> Vec<u8> {
 }
 
 #[test]
+fn d2o_control_frames_match_donor_wire_decoding() {
+    let mut output = Vec::new();
+    for line in include_str!("fixtures/d2o_control_events.hex").lines() {
+        let mut fields = line.split_whitespace();
+        let event_kind = fields.next().unwrap();
+        let wire_hex = fields.next().unwrap();
+        let expected = fields.next().unwrap();
+        let wire = (0..wire_hex.len())
+            .step_by(2)
+            .map(|offset| u8::from_str_radix(&wire_hex[offset..offset + 2], 16).unwrap())
+            .collect::<Vec<_>>();
+        let frame = read_frame(&mut Cursor::new(wire)).unwrap();
+        if expected.starts_with("REJECT:") {
+            assert!(
+                decode_applied(&frame).is_err(),
+                "shared {event_kind} wire fixture should be rejected"
+            );
+            output.push(expected.to_owned());
+            continue;
+        }
+        let hex = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+
+        let actual = match event_kind {
+            "ACK" => {
+                let event = decode_ack(&frame).unwrap();
+                let trial_id = event
+                    .trial_id
+                    .map(|id| hex(&id))
+                    .unwrap_or_else(|| "-".to_owned());
+                format!(
+                    "ACK:{}:{}:{}:{}",
+                    event.command,
+                    u8::from(event.ok),
+                    event.reason,
+                    trial_id
+                )
+            }
+            "APPLIED" => {
+                let event = decode_applied(&frame).unwrap();
+                format!(
+                    "APPLIED:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                    event.key[0],
+                    hex(&event.key[1..17]),
+                    hex(&event.key[17..33]),
+                    u16::from_be_bytes([event.key[33], event.key[34]]),
+                    u16::from_be_bytes([event.key[35], event.key[36]]),
+                    event.key[37],
+                    hex(&event.plan_id),
+                    hex(&event.trial_id),
+                    event.execution_id,
+                    event.binding.generation,
+                    event.binding.kind,
+                    event.binding.family,
+                    event.binding.shape,
+                    u8::from(event.binding.temporary),
+                    hex(&event.binding.epoch)
+                )
+            }
+            other => panic!("unknown shared d2o control event {other}"),
+        };
+        assert_eq!(actual, expected, "shared {event_kind} wire fixture");
+        output.push(actual);
+    }
+
+    if let Ok(path) = std::env::var("R2O_CONTROL_DIFF_OUTPUT") {
+        std::fs::write(path, format!("{}\n", output.join("\n"))).unwrap();
+    }
+}
+
+#[test]
 fn кодирует_временную_quic_привязку_к_полному_udp_потоку() {
     use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
