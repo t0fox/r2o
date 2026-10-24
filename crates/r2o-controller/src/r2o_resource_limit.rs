@@ -355,6 +355,8 @@ fn r2o_limiter_text(limiter: u8) -> String {
 struct R2oGateState {
     adaptive: R2oAdaptiveLimit,
     active: usize,
+    pending_tcp_discovery: usize,
+    tcp_admission_sequence: u64,
     initial_start_limit: usize,
     initial_starts: usize,
     waiters: VecDeque<R2oMeasurementWaiter>,
@@ -368,6 +370,7 @@ struct R2oGateState {
 enum R2oMeasurementWaiterKind {
     Tcp,
     FamilyRecovery,
+    Discovery,
     Other,
     QuicYield,
 }
@@ -376,12 +379,20 @@ enum R2oMeasurementWaiterKind {
 struct R2oMeasurementWaiter {
     id: u64,
     kind: R2oMeasurementWaiterKind,
+    tcp_target: bool,
+    quic_tcp_turn: u64,
 }
 
-fn r2o_queue_measurement_waiter(state: &mut R2oGateState, kind: R2oMeasurementWaiterKind) -> u64 {
+fn r2o_queue_measurement_waiter(
+    state: &mut R2oGateState,
+    kind: R2oMeasurementWaiterKind,
+    tcp_target: bool,
+) -> u64 {
     let waiter = R2oMeasurementWaiter {
         id: state.next_waiter,
         kind,
+        tcp_target: tcp_target || kind == R2oMeasurementWaiterKind::Tcp,
+        quic_tcp_turn: state.tcp_admission_sequence,
     };
     state.next_waiter = state.next_waiter.wrapping_add(1);
     state.waiters.push_back(waiter);
@@ -389,26 +400,30 @@ fn r2o_queue_measurement_waiter(state: &mut R2oGateState, kind: R2oMeasurementWa
 }
 
 fn r2o_next_measurement_waiter(state: &R2oGateState) -> Option<u64> {
-    let tcp_waiting = state.waiters.iter().any(|waiter| {
-        matches!(
-            waiter.kind,
-            R2oMeasurementWaiterKind::Tcp | R2oMeasurementWaiterKind::FamilyRecovery
-        )
-    });
     let quic_parked = state
         .waiters
         .iter()
-        .any(|waiter| waiter.kind == R2oMeasurementWaiterKind::QuicYield);
-    if quic_parked && tcp_waiting {
+        .find(|waiter| waiter.kind == R2oMeasurementWaiterKind::QuicYield);
+    if let Some(quic) = quic_parked {
+        let tcp_waiting =
+            state.pending_tcp_discovery > 0 || state.waiters.iter().any(|waiter| waiter.tcp_target);
+        if quic.quic_tcp_turn != state.tcp_admission_sequence || !tcp_waiting {
+            return Some(quic.id);
+        }
+        if state.pending_tcp_discovery > 0 {
+            return state
+                .waiters
+                .iter()
+                .find(|waiter| {
+                    waiter.id != quic.id
+                        && (waiter.kind == R2oMeasurementWaiterKind::Discovery || waiter.tcp_target)
+                })
+                .map(|waiter| waiter.id);
+        }
         return state
             .waiters
             .iter()
-            .find(|waiter| {
-                matches!(
-                    waiter.kind,
-                    R2oMeasurementWaiterKind::Tcp | R2oMeasurementWaiterKind::FamilyRecovery
-                )
-            })
+            .find(|waiter| waiter.id != quic.id && waiter.tcp_target)
             .map(|waiter| waiter.id);
     }
     state
@@ -522,6 +537,8 @@ impl R2oMeasurementGate {
                 state: Mutex::new(R2oGateState {
                     adaptive: R2oAdaptiveLimit::new(max_slots),
                     active: 0,
+                    pending_tcp_discovery: 0,
+                    tcp_admission_sequence: 0,
                     initial_start_limit: R2O_DEFAULT_MEASUREMENT_LIMIT.min(max_slots.max(1)),
                     initial_starts: 0,
                     waiters: VecDeque::new(),
@@ -601,21 +618,65 @@ impl R2oMeasurementGate {
     }
 
     pub fn r2o_acquire(&self, cancel: &AtomicBool) -> Option<R2oMeasurementPermit> {
-        self.r2o_acquire_with_kind(cancel, R2oMeasurementWaiterKind::Other)
+        self.r2o_acquire_with_kind(cancel, R2oMeasurementWaiterKind::Other, false)
     }
 
     pub fn r2o_acquire_tcp(&self, cancel: &AtomicBool) -> Option<R2oMeasurementPermit> {
-        self.r2o_acquire_with_kind(cancel, R2oMeasurementWaiterKind::Tcp)
+        self.r2o_acquire_with_kind(cancel, R2oMeasurementWaiterKind::Tcp, true)
     }
 
-    pub fn r2o_acquire_family_recovery(&self, cancel: &AtomicBool) -> Option<R2oMeasurementPermit> {
-        self.r2o_acquire_with_kind(cancel, R2oMeasurementWaiterKind::FamilyRecovery)
+    pub fn r2o_acquire_family_recovery(
+        &self,
+        cancel: &AtomicBool,
+        tcp_target: bool,
+    ) -> Option<R2oMeasurementPermit> {
+        self.r2o_acquire_with_kind(cancel, R2oMeasurementWaiterKind::FamilyRecovery, tcp_target)
+    }
+
+    pub fn r2o_acquire_discovery(&self, cancel: &AtomicBool) -> Option<R2oMeasurementPermit> {
+        self.r2o_acquire_with_kind(cancel, R2oMeasurementWaiterKind::Discovery, false)
+    }
+
+    pub fn r2o_set_pending_tcp_discovery(&self, count: usize) {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.pending_tcp_discovery = count;
+        drop(state);
+        self.shared.changed.notify_all();
+    }
+
+    pub fn r2o_quic_yield_waiting_for_tcp(&self) -> bool {
+        let state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.pending_tcp_discovery > 0
+            && state.waiters.iter().any(|waiter| {
+                waiter.kind == R2oMeasurementWaiterKind::QuicYield
+                    && waiter.quic_tcp_turn == state.tcp_admission_sequence
+            })
+    }
+
+    pub fn r2o_mark_tcp_discovery_admitted(&self) {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.tcp_admission_sequence = state.tcp_admission_sequence.wrapping_add(1);
+        drop(state);
+        self.shared.changed.notify_all();
     }
 
     fn r2o_acquire_with_kind(
         &self,
         cancel: &AtomicBool,
         kind: R2oMeasurementWaiterKind,
+        tcp_target: bool,
     ) -> Option<R2oMeasurementPermit> {
         let waiter = {
             let mut state = self
@@ -623,7 +684,7 @@ impl R2oMeasurementGate {
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            r2o_queue_measurement_waiter(&mut state, kind)
+            r2o_queue_measurement_waiter(&mut state, kind, tcp_target)
         };
 
         self.r2o_wait_for_measurement_turn(waiter, cancel)
@@ -689,7 +750,10 @@ impl R2oMeasurementGate {
                     .iter()
                     .position(|queued| queued.id == waiter)
                     .expect("selected measurement waiter stays queued");
-                state.waiters.remove(position);
+                let selected = state.waiters.remove(position).unwrap();
+                if selected.tcp_target {
+                    state.tcp_admission_sequence = state.tcp_admission_sequence.wrapping_add(1);
+                }
                 state.active += 1;
                 if self.shared.minimum_start_gap.is_some() && !state.scheduler_tick_seen {
                     state.initial_starts = state.initial_starts.saturating_add(1);
@@ -787,12 +851,8 @@ impl R2oMeasurementPermit {
             shared.changed.notify_all();
             return false;
         }
-        let tcp_waiting = state.waiters.iter().any(|waiter| {
-            matches!(
-                waiter.kind,
-                R2oMeasurementWaiterKind::Tcp | R2oMeasurementWaiterKind::FamilyRecovery
-            )
-        });
+        let tcp_waiting =
+            state.waiters.iter().any(|waiter| waiter.tcp_target) || state.pending_tcp_discovery > 0;
         if !tcp_waiting || state.active < state.adaptive.limit() {
             return true;
         }
@@ -801,7 +861,8 @@ impl R2oMeasurementPermit {
         let gate = R2oMeasurementGate {
             shared: Arc::clone(&shared),
         };
-        let waiter = r2o_queue_measurement_waiter(&mut state, R2oMeasurementWaiterKind::QuicYield);
+        let waiter =
+            r2o_queue_measurement_waiter(&mut state, R2oMeasurementWaiterKind::QuicYield, false);
         state.active = state.active.saturating_sub(1);
         drop(state);
         shared.changed.notify_all();
@@ -1343,20 +1404,178 @@ mod tests {
     }
 
     #[test]
+    fn d2o_quic_does_not_yield_to_quic_only_discovery_queue() {
+        let line = include_str!("../tests/fixtures/d2o_worker_permit.tsv")
+            .lines()
+            .find(|line| line.starts_with("quic_only "))
+            .expect("shared donor QUIC-only queue case");
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        let slots = fields[1].parse::<usize>().unwrap();
+        assert!(fields[9..].iter().all(|entry| {
+            entry
+                .split('/')
+                .nth(1)
+                .and_then(|transport| transport.parse::<u8>().ok())
+                == Some(17)
+        }));
+
+        let gate = R2oMeasurementGate::new(slots);
+        gate.r2o_set_pending_tcp_discovery(0);
+        let mut quic = gate.r2o_try_acquire().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
+        let worker_gate = gate.clone();
+        let worker =
+            std::thread::spawn(move || worker_gate.r2o_acquire_discovery(&worker_cancel).is_some());
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while gate.r2o_live_snapshot().queued != 1 {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        assert!(quic.r2o_yield_if_contended_with_cancel(&AtomicBool::new(false)));
+        let yielded = quic.r2o_yielded_duration();
+        cancel.store(true, Ordering::Relaxed);
+        worker.join().unwrap();
+        drop(quic);
+        let output = format!(
+            "quic_only yield={} pick=- resume=no\n",
+            if yielded > Duration::ZERO {
+                "yes"
+            } else {
+                "no"
+            },
+        );
+        if let Ok(path) = std::env::var("R2O_WORKER_PERMIT_NO_TCP_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+        assert_eq!(
+            yielded,
+            Duration::ZERO,
+            "donor yields only for queued TCP work"
+        );
+    }
+
+    #[test]
+    fn d2o_parked_quic_resumes_after_one_tcp_admission() {
+        let line = include_str!("../tests/fixtures/d2o_worker_permit.tsv")
+            .lines()
+            .find(|line| line.starts_with("resume_after_one_tcp "))
+            .expect("shared donor one-TCP-turn case");
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        let slots = fields[1].parse::<usize>().unwrap();
+        let other_active = fields[2].parse::<usize>().unwrap();
+        let gate = R2oMeasurementGate::new(slots);
+        let mut quic = gate.r2o_try_acquire().unwrap();
+        let other = (0..other_active)
+            .map(|_| gate.r2o_try_acquire().unwrap())
+            .collect::<Vec<_>>();
+
+        let first_gate = gate.clone();
+        let (first_tx, first_rx) = mpsc::channel();
+        let first = std::thread::spawn(move || {
+            let permit = first_gate.r2o_acquire_tcp(&AtomicBool::new(false)).unwrap();
+            first_tx.send(permit).unwrap();
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while gate.r2o_live_snapshot().queued != 1 {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let quic_cancel = Arc::new(AtomicBool::new(false));
+        let quic_cancel_thread = Arc::clone(&quic_cancel);
+        let (quic_tx, quic_rx) = mpsc::channel();
+        let quic_thread = std::thread::spawn(move || {
+            let resumed = quic.r2o_yield_if_contended_with_cancel(&quic_cancel_thread);
+            quic_tx.send(resumed).unwrap();
+        });
+        let first_permit = first_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        first.join().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while gate.r2o_live_snapshot().queued != 1 {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let second_cancel = Arc::new(AtomicBool::new(false));
+        let second_cancel_thread = Arc::clone(&second_cancel);
+        let second_gate = gate.clone();
+        let (second_started_tx, second_started_rx) = mpsc::channel();
+        let (second_release_tx, second_release_rx) = mpsc::channel();
+        let second = std::thread::spawn(move || {
+            let permit = second_gate.r2o_acquire_tcp(&second_cancel_thread).unwrap();
+            second_started_tx.send(()).unwrap();
+            let _ = second_release_rx.recv_timeout(Duration::from_secs(2));
+            drop(permit);
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while gate.r2o_live_snapshot().queued != 2 {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        drop(first_permit);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let (mut quic_resumed_first, mut second_started_first) = (false, false);
+        while std::time::Instant::now() < deadline {
+            if quic_rx.try_recv().is_ok() {
+                quic_resumed_first = true;
+                break;
+            }
+            if second_started_rx.try_recv().is_ok() {
+                second_started_first = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        if second_started_first {
+            let _ = second_release_tx.send(());
+        } else {
+            second_cancel.store(true, Ordering::Relaxed);
+        }
+        second.join().unwrap();
+        if !quic_resumed_first {
+            quic_cancel.store(true, Ordering::Relaxed);
+        }
+        let _ = quic_rx.recv_timeout(Duration::from_secs(2));
+        quic_thread.join().unwrap();
+        drop(other);
+        let output = format!(
+            "resume_after_one_tcp yield=no pick=- resume={}\n",
+            if quic_resumed_first { "yes" } else { "no" },
+        );
+        if let Ok(path) = std::env::var("R2O_WORKER_PERMIT_TURN_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+        assert!(
+            quic_resumed_first && !second_started_first,
+            "a second TCP waiter must not extend the donor QUIC yield"
+        );
+    }
+
+    #[test]
     fn queued_turn_matches_family_recovery_and_quic_tcp_priority() {
         let gate = R2oMeasurementGate::new(1);
         let mut state = gate.shared.state.lock().unwrap();
-        let other = r2o_queue_measurement_waiter(&mut state, R2oMeasurementWaiterKind::Other);
-        let recovery =
-            r2o_queue_measurement_waiter(&mut state, R2oMeasurementWaiterKind::FamilyRecovery);
+        let other =
+            r2o_queue_measurement_waiter(&mut state, R2oMeasurementWaiterKind::Other, false);
+        let recovery = r2o_queue_measurement_waiter(
+            &mut state,
+            R2oMeasurementWaiterKind::FamilyRecovery,
+            true,
+        );
         assert_eq!(r2o_next_measurement_waiter(&state), Some(recovery));
 
-        let _quic = r2o_queue_measurement_waiter(&mut state, R2oMeasurementWaiterKind::QuicYield);
-        let tcp = r2o_queue_measurement_waiter(&mut state, R2oMeasurementWaiterKind::Tcp);
+        let quic =
+            r2o_queue_measurement_waiter(&mut state, R2oMeasurementWaiterKind::QuicYield, false);
+        let tcp = r2o_queue_measurement_waiter(&mut state, R2oMeasurementWaiterKind::Tcp, true);
         assert_eq!(r2o_next_measurement_waiter(&state), Some(recovery));
         state.waiters.retain(|waiter| waiter.id != recovery);
         assert_eq!(r2o_next_measurement_waiter(&state), Some(tcp));
         state.waiters.retain(|waiter| waiter.id != tcp);
+        assert_eq!(r2o_next_measurement_waiter(&state), Some(quic));
+        state.waiters.retain(|waiter| waiter.id != quic);
         assert_eq!(r2o_next_measurement_waiter(&state), Some(other));
     }
 
@@ -1379,6 +1598,8 @@ mod tests {
             let mut state = R2oGateState {
                 adaptive: R2oAdaptiveLimit::new(64),
                 active: 64,
+                pending_tcp_discovery: 0,
+                tcp_admission_sequence: 0,
                 initial_start_limit: 2,
                 initial_starts: 2,
                 waiters: std::collections::VecDeque::new(),
@@ -1407,11 +1628,15 @@ mod tests {
                     parked_names.push((*name, kind));
                     continue;
                 }
-                let waiter = r2o_queue_measurement_waiter(&mut state, kind);
+                let waiter = r2o_queue_measurement_waiter(
+                    &mut state,
+                    kind,
+                    kind == R2oMeasurementWaiterKind::Tcp,
+                );
                 waiter_names.push((waiter, *name));
             }
             for (name, kind) in parked_names {
-                let waiter = r2o_queue_measurement_waiter(&mut state, kind);
+                let waiter = r2o_queue_measurement_waiter(&mut state, kind, false);
                 waiter_names.push((waiter, name));
             }
             let selected = r2o_next_measurement_waiter(&state).unwrap();
@@ -1496,13 +1721,17 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
         release_first_tx.send(()).unwrap();
 
-        second_started_rx
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap();
         let (resumed, quic) = resumed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(resumed);
         assert!(quic.r2o_yielded_duration() >= Duration::from_millis(10));
+        assert!(matches!(
+            second_started_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
         drop(quic);
+        second_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
         first.join().unwrap();
         second.join().unwrap();
         resume.join().unwrap();

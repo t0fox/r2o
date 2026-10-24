@@ -7490,3 +7490,59 @@ dossier для `d2k_sched_tick` ранее был записан выше.
 покрытие CI diff-manifest подтвердило 12 baseline и 25 upstream сценариев.
 Проверка на роутере не выполнялась по просьбе пользователя; полевой паритет и
 полный поведенческий паритет не заявляются.
+
+### QUIC уступает только TCP и возвращается после одного admission — 25.10.2026
+
+Donor `t0fox/d2o` закреплён на `783aa75ce44dd6192cd1f4f1d98e4fe909ef3045`.
+В его `core/sched.c::quic_yield_tick` просьба QUIC уступить возникает, только
+если в `T_QUEUED` есть TCP и замеры уже занимают весь лимит. Припаркованный QUIC
+запоминает `tcp_admission_sequence`; `launch_task` увеличивает sequence при
+допуске TCP, после чего следующий `quic_yield_tick` может возобновить QUIC.
+`queued_pick` при наличии припаркованного QUIC сначала выбирает TCP через
+`queued_before` (сначала `hot_event`, затем `queued_event`, затем `queued_ms`),
+иначе сохраняет обычные приоритеты семейного восстановления и горячести/FIFO.
+
+Первый общий fixture обнаружил три production-расхождения. Rust Discovery
+запрашивал TCP permit и уступал слот даже для очереди только из QUIC; общий
+worker выбирал «горячий» QUIC впереди TCP, пока QUIC уже ожидал слот; и второй
+TCP waiter мог обойти уже припаркованный QUIC. До исправления дифф-тесты
+показывали соответственно `yield=yes` против C `yield=no`, выбор
+`quic-hot` против C `tcp-hot` и запуск второго TCP раньше QUIC.
+
+Rust теперь синхронизирует с gate фактическое число TCP в очереди Discovery,
+использует отдельный Discovery waiter, предпочитает TCP в `pop_with_tcp_preference`
+только пока QUIC ждёт свой ход и продвигает TCP admission sequence на одном
+допуске. QUIC waiter сохраняет свой sequence; после одного TCP admission он
+получает следующий ход, даже если другие TCP остаются в очереди. Для family
+recovery передаётся транспорт цели, так что приоритет учитывает настоящий TCP
+target.
+
+| Исходная C-функция | Rust-аналог | Одинаковые входы и результат |
+|---|---|---|
+| `core/sched.c::quic_yield_tick` проверяет наличие queued TCP и полный слот; запоминает `tcp_admission_sequence` у parked QUIC и возобновляет после изменения sequence или исчезновения TCP backlog. `launch_task` увеличивает sequence для TCP. | `r2o_resource_limit.rs::r2o_yield_if_contended_with_cancel`, `r2o_next_measurement_waiter`, `r2o_set_pending_tcp_discovery`, `r2o_mark_tcp_discovery_admitted`; `main.rs::DiscoveryWorker::run`. | `d2o_worker_permit.tsv`, случай `quic_only`: C и Rust — `yield=no pick=- resume=no`; очередь с одним QUIC не заставляет QUIC уступать. |
+| `core/sched.c::queued_pick` выбирает TCP по `queued_before`, пока QUIC припаркован; обычная очередь сохраняет `hot_event`/`queued_event`/`queued_ms`. | `main.rs::R2oDiscoveryQueue::pop_with_tcp_preference` и `DiscoveryWorker` синхронизация TCP backlog с gate. | Fixture `tcp_beats_hot_quic`: обе стороны — `yield=yes pick=tcp-hot resume=no`, даже когда `quic-hot` свежее. C harness вызывает `quic_yield_tick` и `queued_pick`; Rust запускает production queue selector и сверяет выбранную цель. |
+| `core/sched.c::launch_task` увеличивает admission sequence при одном TCP запуске; `quic_yield_tick` возвращает QUIC на следующем ходе. | `r2o_resource_limit.rs::r2o_mark_tcp_discovery_admitted` и `r2o_next_measurement_waiter`. | Fixture `resume_after_one_tcp`: C и Rust — `yield=no pick=- resume=yes`; отдельный конкурентный Rust тест подтверждает, что второй TCP не стартует перед parked QUIC. |
+
+После исправления `scripts/r2o-worker-permit-differential.sh` завершился с кодом
+0 на общем fixture: все три строки C/Rust совпали. REA Evidence для внешнего
+`d2k_sched_tick` сохранено как
+`ev_0b562f8ef31c3f52474e4d814abe50dde623b12964047aedcfa52b09d7a58bcc`.
+REA dossier для вложенных `quic_yield_tick`/`queued_pick` в текущем Windows
+окружении получить нельзя: доступный Ghidra не принимает ELF, Hopper на этой
+платформе не поддержан, IDA не настроен. Для этой вложенной логики вывод
+основан на точном donor source и harness, вызывающем C-функции напрямую; нового
+декомпиляционного Evidence для неё не заявляется. Это покрытие подтверждает
+указанные переходы worker/permit, а не весь полевой паритет. Маршрутизатор не
+использовался по просьбе пользователя.
+
+После этой правки `scripts/r2o-scheduler-differential.sh` завершился с кодом 0:
+C `test_sched` прошёл за 433 с, C QUIC-yield показал 0 failures; связанные
+Rust queue-expiry, worker, APPLIED и QUIC тесты прошли. Повторный
+`scripts/r2o-queue-order-differential.sh` сравнил expiry, family queue, hot/FIFO
+order и QUIC→TCP, все результаты совпали. `cargo +1.98.0 test --locked
+--workspace`, `cargo fmt --all -- --check`, shell syntax, diff-manifest (12
+baseline / 27 upstream) прошли. `scripts/r2o-build-openwrt-aarch64-musl.sh`
+завершился с кодом 0: шесть release-бинарников запустились в QEMU, очистка и
+проверка пустого каталога прошли. Остались предупреждения `libc::time_t` и
+`libc::suseconds_t` из `response.rs`. Физическую проверку не выполнял по просьбе
+пользователя; полевой и полный поведенческий паритет не заявляются.

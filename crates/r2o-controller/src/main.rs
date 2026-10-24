@@ -3303,7 +3303,9 @@ impl R2oFamilyRecoveryWorker {
                     break;
                 }
                 let outcome = {
-                    let Some(_permit) = worker_gate.r2o_acquire_family_recovery(&worker_cancel)
+                    let tcp_target = r2o_discovery_transport(&task.target) == 6;
+                    let Some(_permit) =
+                        worker_gate.r2o_acquire_family_recovery(&worker_cancel, tcp_target)
                     else {
                         break;
                     };
@@ -5604,6 +5606,13 @@ impl R2oDiscoveryQueue {
         expired
     }
 
+    fn pending_tcp_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| r2o_discovery_transport(&entry.target) == 6)
+            .count()
+    }
+
     fn promote(&mut self, target: &r2o_controller::discovery::DiscoveryTarget) -> bool {
         let Some(entry) = self
             .entries
@@ -5623,6 +5632,7 @@ impl R2oDiscoveryQueue {
             .remove(&r2o_discovery_endpoint_key(target));
     }
 
+    #[cfg(test)]
     fn pop(
         &mut self,
         now: std::time::Instant,
@@ -5630,7 +5640,25 @@ impl R2oDiscoveryQueue {
         Vec<r2o_controller::discovery::DiscoveryTarget>,
         Option<r2o_controller::discovery::DiscoveryTarget>,
     ) {
+        self.pop_with_tcp_preference(now, false)
+    }
+
+    fn pop_with_tcp_preference(
+        &mut self,
+        now: std::time::Instant,
+        prefer_tcp: bool,
+    ) -> (
+        Vec<r2o_controller::discovery::DiscoveryTarget>,
+        Option<r2o_controller::discovery::DiscoveryTarget>,
+    ) {
         let expired = self.r2o_expire(now);
+        let prefer_tcp = prefer_tcp
+            && self.entries.iter().any(|entry| {
+                r2o_discovery_transport(&entry.target) == 6
+                    && !self
+                        .active_endpoints
+                        .contains(&r2o_discovery_endpoint_key(&entry.target))
+            });
         let selected = self
             .entries
             .iter()
@@ -5639,6 +5667,7 @@ impl R2oDiscoveryQueue {
                 !self
                     .active_endpoints
                     .contains(&r2o_discovery_endpoint_key(&entry.target))
+                    && (!prefer_tcp || r2o_discovery_transport(&entry.target) == 6)
             })
             .min_by_key(|(_, entry)| (std::cmp::Reverse(entry.hot_event), entry.queued_event))
             .map(|(index, _)| index);
@@ -5745,6 +5774,7 @@ fn r2o_take_ready_quic_discovery(
 #[cfg(unix)]
 struct DiscoveryWorker {
     jobs: Arc<(std::sync::Mutex<R2oDiscoveryQueue>, std::sync::Condvar)>,
+    measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
     client_hellos: Arc<std::sync::Mutex<HashMap<R2oDiscoveryTaskKey, Vec<u8>>>>,
     client_tcp_timestamps: Arc<std::sync::Mutex<HashMap<R2oDiscoveryTaskKey, bool>>>,
     recent_client_shapes: R2oRecentClientShapeCache,
@@ -7198,7 +7228,8 @@ impl DiscoveryWorker {
                         break;
                     }
                     let outcome = {
-                        let permit = worker_gate.r2o_acquire_tcp(&worker_cancel);
+                        let permit = worker_gate.r2o_acquire_discovery(&worker_cancel);
+                        let prefer_tcp = worker_gate.r2o_quic_yield_waiting_for_tcp();
                         let (expired, target, generation) = {
                             let (queue, _) = &*worker_jobs;
                             let mut queue = queue
@@ -7211,7 +7242,18 @@ impl DiscoveryWorker {
                             if worker_cancel.load(Ordering::Relaxed) || permit.is_none() {
                                 (Vec::new(), None, queue.catalog_generation)
                             } else {
-                                let (expired, target) = queue.pop(std::time::Instant::now());
+                                let (expired, target) = queue.pop_with_tcp_preference(
+                                    std::time::Instant::now(),
+                                    prefer_tcp,
+                                );
+                                worker_gate
+                                    .r2o_set_pending_tcp_discovery(queue.pending_tcp_count());
+                                if target
+                                    .as_ref()
+                                    .is_some_and(|target| r2o_discovery_transport(target) == 6)
+                                {
+                                    worker_gate.r2o_mark_tcp_discovery_admitted();
+                                }
                                 (expired, target, queue.catalog_generation)
                             }
                         };
@@ -7341,6 +7383,7 @@ impl DiscoveryWorker {
         }
         Self {
             jobs,
+            measurement_gate,
             client_hellos,
             client_tcp_timestamps,
             recent_client_shapes: R2oRecentClientShapeCache::default(),
@@ -7686,6 +7729,8 @@ impl DiscoveryWorker {
         }
         let enqueued = queue.enqueue(target.clone(), now);
         if enqueued {
+            self.measurement_gate
+                .r2o_set_pending_tcp_discovery(queue.pending_tcp_count());
             self.searches
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -7994,12 +8039,17 @@ impl DiscoveryWorker {
         &mut self,
         now: std::time::Instant,
     ) -> Vec<r2o_controller::discovery::DiscoveryTarget> {
-        let expired = self
-            .jobs
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .r2o_expire(now);
+        let expired = {
+            let mut queue = self
+                .jobs
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let expired = queue.r2o_expire(now);
+            self.measurement_gate
+                .r2o_set_pending_tcp_discovery(queue.pending_tcp_count());
+            expired
+        };
         for target in &expired {
             let task_key = r2o_discovery_task_key(target);
             self.active_cancels
@@ -8041,6 +8091,8 @@ impl DiscoveryWorker {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let removed = queue.r2o_catalog_changed(catalog, active_groups);
+            self.measurement_gate
+                .r2o_set_pending_tcp_discovery(queue.pending_tcp_count());
             wake.notify_all();
             removed
         };
@@ -15883,6 +15935,7 @@ mod tests {
                 std::sync::Mutex::new(super::R2oDiscoveryQueue::default()),
                 std::sync::Condvar::new(),
             )),
+            measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(64),
             client_hellos: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
@@ -20576,6 +20629,70 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn d2o_worker_permit_queue_prefers_tcp_while_quic_is_parked() {
+        use super::{R2oDiscoveryQueue, R2oDiscoveryQueueEntry};
+        use std::time::{Duration, Instant};
+
+        let line = include_str!("../tests/fixtures/d2o_worker_permit.tsv")
+            .lines()
+            .find(|line| line.starts_with("tcp_beats_hot_quic "))
+            .expect("shared donor worker/permit case");
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        let [
+            case_name,
+            _limit,
+            _other_active,
+            _sequence,
+            _turn,
+            _parked,
+            _yield_request,
+            expected_pick,
+            _resume,
+            entries @ ..,
+        ] = fields.as_slice()
+        else {
+            panic!("malformed d2o worker/permit fixture: {line}");
+        };
+        let now = Instant::now();
+        let mut queue = R2oDiscoveryQueue::default();
+        for entry in entries.iter().copied() {
+            let task_fields = entry.split('/').collect::<Vec<_>>();
+            let [host, transport, queued_event, hot_event] = task_fields.as_slice() else {
+                panic!("malformed d2o worker/permit task: {entry}");
+            };
+            let transport = transport.parse::<u8>().unwrap();
+            queue.entries.push(R2oDiscoveryQueueEntry {
+                target: r2o_controller::discovery::DiscoveryTarget {
+                    host: (*host).to_owned(),
+                    endpoint: format!("{host}:443"),
+                    family: 4,
+                    shape: if transport == 17 {
+                        SHAPE_QUIC
+                    } else {
+                        SHAPE_MODERN
+                    },
+                },
+                queued_at: now - Duration::from_millis(1),
+                queued_event: queued_event.parse().unwrap(),
+                hot_event: hot_event.parse().unwrap(),
+                catalog_generation: queue.catalog_generation,
+            });
+        }
+
+        let selected = queue
+            .pop_with_tcp_preference(now, true)
+            .1
+            .expect("donor worker/permit case must select a target");
+        let actual = selected.host;
+        let output = format!("{case_name} yield=yes pick={actual} resume=no\n");
+        if let Ok(path) = std::env::var("R2O_WORKER_PERMIT_QUEUE_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert_eq!(actual, *expected_pick, "d2o parked-QUIC queue case");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn d2o_scheduler_queue_expiry_matches_donor() {
         use super::{R2O_DISCOVERY_TASK_LIFETIME, R2oDiscoveryQueue, R2oDiscoveryQueueEntry};
         use std::time::{Duration, Instant};
@@ -21538,9 +21655,11 @@ mod tests {
             second_started.expect("свежее подозрение должно начать замер после паузы");
         assert_eq!(started, "fresh.example");
         let start_gap = second_started_at.duration_since(first_started_at);
+        // The gate's exact 250 ms admission spacing is tested in
+        // r2o_resource_limit; these timestamps are recorded after runner dispatch.
         assert!(
-            start_gap >= Duration::from_millis(250),
-            "между стартами Discovery должно пройти не менее 250 мс, прошло {} мс",
+            start_gap >= Duration::from_millis(200),
+            "новый Discovery должен дождаться отложенного старта (прошло {} мс)",
             start_gap.as_millis()
         );
     }
@@ -23867,6 +23986,7 @@ mod tests {
                 Mutex::new(super::R2oDiscoveryQueue::default()),
                 Condvar::new(),
             )),
+            measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(64),
             client_hellos: Arc::new(Mutex::new(std::collections::HashMap::new())),
             client_tcp_timestamps: Arc::new(Mutex::new(std::collections::HashMap::new())),
             recent_client_shapes: super::R2oRecentClientShapeCache::default(),

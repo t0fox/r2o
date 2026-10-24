@@ -1,0 +1,4 @@
+# case limit other_active tcp_admission_sequence quic_tcp_turn already_parked yield_request pick_after_parked resume_after_turn task...
+quic_only 1 0 0 0 no no - no quic-queued/17/1/99
+tcp_beats_hot_quic 2 1 0 0 no yes tcp-hot no quic-hot/17/1/99 tcp-old/6/2/2 tcp-hot/6/3/10
+resume_after_one_tcp 2 1 1 0 yes no - yes tcp-next/6/2/10 tcp-later/6/3/99
