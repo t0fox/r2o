@@ -461,7 +461,17 @@ if [ "$CURRENT_RELEASE" = "$TARGET_RELEASE" ]; then
     active_arch=$(cat "$active_bundle/release-architecture")
     [ "$active_arch" = "$ARCH" ] || die "установлен ABI $active_arch, а устройство определено как $ARCH"
     say "уже установлен актуальный выпуск $TARGET_RELEASE; проверяю службы и интеграцию через router/install.sh"
-    run_router_install "$active_bundle" "$TARGET_RELEASE" || die 'не удалось восстановить текущую установку'
+    active_openwrt_service=$OPENWRT_INIT_DIR/r2o
+    active_openwrt_service_source=$active_bundle/router/openwrt-init
+    if [ "$PLATFORM" = openwrt ] \
+        && [ -f "$active_openwrt_service" ] && [ ! -L "$active_openwrt_service" ] \
+        && [ -f "$active_openwrt_service_source" ] && [ ! -L "$active_openwrt_service_source" ] \
+        && cmp -s "$active_openwrt_service" "$active_openwrt_service_source"; then
+        "$active_openwrt_service" enable || die 'не удалось включить службу текущего выпуска'
+        "$active_openwrt_service" start || die 'не удалось запустить службу текущего выпуска'
+    else
+        run_router_install "$active_bundle" "$TARGET_RELEASE" || die 'не удалось восстановить текущую установку'
+    fi
     exit 0
 fi
 
