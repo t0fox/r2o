@@ -34,6 +34,11 @@ r2o_capture_status() {
     printf '%s\n' "$r2o_status" >"$r2o_status_file"
 }
 
+r2o_run_c_fetch() (
+    cd "$1"
+    exec ./d2kfetch --name localhost --ip "" --port 1 --deadline 100 --quic
+)
+
 r2o_show_log_on_error() {
     r2o_status=$?
     if [ "$r2o_status" -ne 0 ] && [ -f "$r2o_log" ]; then
@@ -66,8 +71,7 @@ mkdir -p "$r2o_log_dir"
     r2o_run_timed 'запуск d2kfetch C' r2o_capture_status \
         "$r2o_temp_dir/c.stdout" "$r2o_temp_dir/c.stderr" \
         "$r2o_temp_dir/c.status" \
-        sh -c 'cd "$1" && exec ./d2kfetch --name localhost --ip "" --port 1 --deadline 100 --quic' \
-        sh "$r2o_donor_core"
+        r2o_run_c_fetch "$r2o_donor_core"
     r2o_run_timed 'запуск r2o-fetch Rust' r2o_capture_status \
         "$r2o_temp_dir/rust.stdout" "$r2o_temp_dir/rust.stderr" \
         "$r2o_temp_dir/rust.status" \
