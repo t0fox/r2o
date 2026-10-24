@@ -7,7 +7,7 @@ TEMP=$(mktemp -d)
 trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
 
 fail() {
-    echo "test-r2o-ppe-deoffload: $*" >&2
+    echo "test-router-ppe-deoffload: $*" >&2
     exit 1
 }
 
@@ -79,6 +79,27 @@ run_helper ensure
 run_helper ensure
 [ "$(grep -c 'r2o-ppe' "$CASE/rules")" -eq 8 ] || fail "ensure did not install exactly eight IPv4 rules once"
 run_helper status | grep -q 'PPE: включена' || fail "status did not report the installed rules"
+cat > "$CASE/binds" <<'BINDS'
+PPE0:
+IPv4_NAPT=802: 87.228.47.201:443 -> 192.0.2.7:443
+IPv4_NAPT=803: 187.228.47.201:443 -> 192.0.2.8:443
+BINDS
+printf 'r2o-datapath: ответ невидим очереди: 6 из 20 TCP-потоков с приветствием\n' > "$CASE/datapath.log"
+R2O_PPE_DPLOG="$CASE/datapath.log" run_helper status 87.228.47.201 \
+    | grep -q '87.228.47.201: в ускорителе' || fail "status did not match an exact accelerated IPv4 address"
+TARGET_STATUS=$(R2O_PPE_DPLOG="$CASE/datapath.log" run_helper status 7.228.47.201)
+printf '%s\n' "$TARGET_STATUS" | grep -q '7.228.47.201: в PPE binds не найден' || {
+    printf '%s\n' "$TARGET_STATUS" >&2
+    fail "status matched a substring of another accelerated address"
+}
+R2O_PPE_DPLOG="$CASE/datapath.log" run_helper status 87.228.47.201 \
+    | grep -q 'ответ невидим очереди: 6 из 20 (30%)' || fail "status omitted the datapath visibility counter"
+if run_helper status '87.228.47.201|.*'; then
+    fail "status accepted a non-IPv4 address"
+else
+    rc=$?
+fi
+[ "$rc" -eq 2 ] || fail "invalid status address returned $rc instead of 2"
 run_helper remove
 [ "$(grep -c 'r2o-ppe' "$CASE/rules" || true)" -eq 0 ] || fail "remove left R2O rules behind"
 grep -q 'other-owner' "$CASE/rules" || fail "remove deleted another owner's PPE rule"
@@ -131,4 +152,4 @@ run_helper remove
 [ "$(grep -c 'r2o-ppe' "$CASE/rules" || true)" -eq 0 ] || fail "partial installation could not be removed"
 grep -q 'other-owner' "$CASE/rules" || fail "partial cleanup removed another owner's rule"
 
-echo "test-r2o-ppe-deoffload: owner isolation, idempotence, disable, capability, and partial failure passed"
+echo "test-router-ppe-deoffload: owner isolation, idempotence, disable, capability, and partial failure passed"

@@ -6,6 +6,8 @@ RELEASE_ID=${2:?использование: install.sh КАТАЛОГ ИД_ВЫ�
 ARCH=${3:?использование: install.sh КАТАЛОГ ИД_ВЫПУСКА АРХИТЕКТУРА}
 ROOT=${R2O_DIR:-/opt/r2o}
 INIT_DIR=${R2O_INIT_DIR:-/opt/etc/init.d}
+NDM_DIR=${R2O_NDM_DIR:-/opt/etc/ndm/netfilter.d}
+NDM_HOOK=$NDM_DIR/001-r2o.sh
 MANAGER=$BUNDLE/builds/r2o-manager-linux-$ARCH
 
 # shellcheck disable=SC2015 # fail unless both validations succeed
@@ -17,6 +19,41 @@ MANAGER=$BUNDLE/builds/r2o-manager-linux-$ARCH
     echo "в выпуске отсутствуют файлы адаптера роутера" >&2
     exit 2
 }
+if [ -L "$BUNDLE/router/001-r2o.sh" ] || [ ! -f "$BUNDLE/router/001-r2o.sh" ] \
+    || [ -L "$BUNDLE/router/r2o-ppe-deoffload.sh" ] || [ ! -f "$BUNDLE/router/r2o-ppe-deoffload.sh" ]; then
+    echo "в выпуске отсутствует адаптер NDM или PPE" >&2
+    exit 2
+fi
+
+INSTALL_NDM_HOOK=0
+if [ -e "$NDM_DIR" ] || [ -L "$NDM_DIR" ]; then
+    if [ -L "$NDM_DIR" ] || [ ! -d "$NDM_DIR" ]; then
+        echo "каталог NDM должен быть обычным каталогом" >&2
+        exit 2
+    fi
+    if [ -e "$NDM_HOOK" ] || [ -L "$NDM_HOOK" ]; then
+        if [ -L "$NDM_HOOK" ] || [ ! -f "$NDM_HOOK" ]; then
+            echo "файл NDM hook уже занят небезопасным объектом: $NDM_HOOK" >&2
+            exit 2
+        fi
+        NDM_OWNED=0
+        if cmp -s "$NDM_HOOK" "$BUNDLE/router/001-r2o.sh"; then
+            NDM_OWNED=1
+        elif [ -d "$ROOT/releases" ]; then
+            for OLD_HOOK in "$ROOT"/releases/*/router/001-r2o.sh; do
+                if [ -f "$OLD_HOOK" ] && [ ! -L "$OLD_HOOK" ] && cmp -s "$NDM_HOOK" "$OLD_HOOK"; then
+                    NDM_OWNED=1
+                    break
+                fi
+            done
+        fi
+        [ "$NDM_OWNED" = 1 ] || {
+            echo "файл NDM hook уже принадлежит другому владельцу: $NDM_HOOK" >&2
+            exit 2
+        }
+    fi
+    INSTALL_NDM_HOOK=1
+fi
 
 "$MANAGER" install-local --root "$ROOT" --bundle "$BUNDLE" \
     --release-id "$RELEASE_ID" --architecture "$ARCH"
@@ -52,6 +89,14 @@ fi
 cp "$BUNDLE/router/S99r2o.shim" "$INIT_DIR/S99r2o.new.$$"
 chmod 0755 "$INIT_DIR/S99r2o.new.$$"
 mv -f "$INIT_DIR/S99r2o.new.$$" "$INIT_DIR/S99r2o"
+
+if [ "$INSTALL_NDM_HOOK" = 1 ]; then
+    NDM_TMP=$(mktemp "$NDM_DIR/.001-r2o.sh.XXXXXX")
+    cp "$BUNDLE/router/001-r2o.sh" "$NDM_TMP"
+    chmod 0755 "$NDM_TMP"
+    mv -f "$NDM_TMP" "$NDM_HOOK"
+    echo "r2o: установлен NDM hook в $NDM_HOOK"
+fi
 
 if [ -f /etc/openwrt_release ] || [ "${R2O_PLATFORM:-}" = openwrt ]; then
     cp "$BUNDLE/router/openwrt-init" /etc/init.d/r2o.new.$$

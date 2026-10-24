@@ -6,6 +6,7 @@ INIT_DIR=${R2O_INIT_DIR:-/opt/etc/init.d}
 OPENWRT_INIT_DIR=${R2O_OPENWRT_INIT_DIR:-/etc/init.d}
 OPENWRT_RELEASE=${R2O_OPENWRT_RELEASE:-/etc/openwrt_release}
 RUNTIME_DIR=${R2O_RUNTIME_DIR:-/tmp/r2o}
+NDM_DIR=${R2O_NDM_DIR:-/opt/etc/ndm/netfilter.d}
 YES=0
 
 usage() {
@@ -78,6 +79,7 @@ case "$ACTIVE" in
     ''|.|..|*[!A-Za-z0-9._-]*) fail "идентификатор активного выпуска повреждён" ;;
 esac
 ACTIVE_SCRIPT=$ROOT/releases/$ACTIVE/router/S99r2o
+ACTIVE_NDM_HOOK=$ROOT/releases/$ACTIVE/router/001-r2o.sh
 OWNED_SHIM=0
 if [ -e "$INIT_SCRIPT" ]; then
     [ ! -L "$INIT_SCRIPT" ] || fail "shim автозапуска изменён или является ссылкой"
@@ -107,6 +109,17 @@ fi
 
 if [ "$OWNED_SHIM" = 1 ]; then
     rm -f "$INIT_SCRIPT"
+fi
+
+NDM_HOOK=$NDM_DIR/001-r2o.sh
+if [ -e "$NDM_HOOK" ] || [ -L "$NDM_HOOK" ]; then
+    if [ ! -L "$NDM_HOOK" ] && [ -f "$NDM_HOOK" ] \
+        && [ ! -L "$ACTIVE_NDM_HOOK" ] && [ -f "$ACTIVE_NDM_HOOK" ] \
+        && cmp -s "$NDM_HOOK" "$ACTIVE_NDM_HOOK"; then
+        rm -f "$NDM_HOOK"
+    else
+        echo "r2o uninstall: изменённый или чужой NDM hook сохранён: $NDM_HOOK" >&2
+    fi
 fi
 
 case "$RUNTIME_DIR" in

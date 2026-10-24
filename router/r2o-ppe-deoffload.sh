@@ -13,6 +13,26 @@ R2O_PPE_HTTP_PORTS=${R2O_PPE_HTTP_PORTS:-${HTTP_KEEPALIVE_PORTS:-80}}
 R2O_PPE_PROC=${R2O_PPE_PROC:-/proc/net}
 R2O_PPE_CONFIG=${R2O_PPE_CONFIG:-${R2O_CONFIG:-/opt/r2o/config}}
 R2O_PPE_BINDS=${R2O_PPE_BINDS:-/proc/driver/hw_nat/foe/binds}
+R2O_PPE_DPLOG=${R2O_PPE_DPLOG:-${R2O_DIR:-/opt/r2o}/log/r2o-datapath4.log}
+R2O_PPE_DPLOG6=${R2O_PPE_DPLOG6:-${R2O_DIR:-/opt/r2o}/log/r2o-datapath6.log}
+
+r2o_ppe_valid_ipv4() (
+    case "$1" in ''|*[!0-9.]*) return 1 ;; esac
+    set -f
+    _r2o_ppe_saved_ifs=$IFS
+    IFS=.
+    # shellcheck disable=SC2086 # split only on dots after restricting the address to digits and dots
+    set -- $1
+    IFS=$_r2o_ppe_saved_ifs
+    [ "$#" -eq 4 ] || return 1
+    for _r2o_ppe_octet do
+        case "$_r2o_ppe_octet" in
+            0|[1-9]|[1-9][0-9]|[1-9][0-9][0-9]) ;;
+            *) return 1 ;;
+        esac
+        [ "$_r2o_ppe_octet" -le 255 ] || return 1
+    done
+)
 
 r2o_ppe_load_flag() {
     [ -n "$R2O_PPE_DEOFFLOAD" ] && return 0
@@ -163,6 +183,11 @@ r2o_ppe_ensure() {
 }
 
 r2o_ppe_status() {
+    _r2o_ppe_target_ip=${1:-}
+    if [ -n "$_r2o_ppe_target_ip" ] && ! r2o_ppe_valid_ipv4 "$_r2o_ppe_target_ip"; then
+        echo "r2o-ppe: ожидается IPv4-адрес" >&2
+        return 2
+    fi
     r2o_ppe_valid_config || { echo "  PPE: неверная конфигурация"; return 1; }
     if [ "$R2O_PPE_DEOFFLOAD" = 0 ]; then
         echo "  PPE: выключена настройкой R2O_PPE_DEOFFLOAD=0"
@@ -185,13 +210,51 @@ r2o_ppe_status() {
             echo "  PPE: установлена не полностью ($_r2o_ppe_line)"
         fi
         echo "  PPE: после окна connskip поток может снова уйти в аппаратный путь; существующие bindings не сбрасываются"
+        echo "  PPE HTTP: клиентские запросы к портам $R2O_PPE_HTTP_PORTS остаются в netfilter до $R2O_PPE_HTTP_CONNSKIP пакетов"
     fi
     if [ -r "$R2O_PPE_BINDS" ]; then
         _r2o_ppe_binds=$(grep -cv '^[[:space:]]*PPE[0-9]*:[[:space:]]*$' "$R2O_PPE_BINDS" 2>/dev/null || true)
         echo "  PPE binds: ${_r2o_ppe_binds:-0} записей в $R2O_PPE_BINDS"
+        if [ -n "$_r2o_ppe_target_ip" ]; then
+            _r2o_ppe_bind_re=$(printf '%s' "$_r2o_ppe_target_ip" | sed 's/\./\\./g')
+            if grep -Eq "(^|[^0-9.])$_r2o_ppe_bind_re(:|[^0-9]|\$)" "$R2O_PPE_BINDS" 2>/dev/null; then
+                echo "  $_r2o_ppe_target_ip: в ускорителе (поток привязан и обходит netfilter)"
+            else
+                echo "  $_r2o_ppe_target_ip: в PPE binds не найден"
+            fi
+        fi
     else
         echo "  PPE binds: нет ($R2O_PPE_BINDS не читается)"
+        [ -z "$_r2o_ppe_target_ip" ] || echo "  $_r2o_ppe_target_ip: состояние PPE bind недоступно"
     fi
+    for _r2o_ppe_log_spec in "IPv4:$R2O_PPE_DPLOG" "IPv6:$R2O_PPE_DPLOG6"; do
+        _r2o_ppe_family=${_r2o_ppe_log_spec%%:*}
+        _r2o_ppe_log=${_r2o_ppe_log_spec#*:}
+        if [ -r "$_r2o_ppe_log" ]; then
+            _r2o_ppe_last=$(tail -n 400 "$_r2o_ppe_log" 2>/dev/null \
+                | grep '^r2o-datapath: ответ невидим очереди: ' | tail -n 1)
+        else
+            _r2o_ppe_last=
+        fi
+        if [ -n "$_r2o_ppe_last" ]; then
+            _r2o_ppe_counts=$(printf '%s\n' "$_r2o_ppe_last" \
+                | sed -n 's/^r2o-datapath: ответ невидим очереди: \([0-9][0-9]*\) из \([0-9][0-9]*\) .*/\1 \2/p')
+            if [ -n "$_r2o_ppe_counts" ]; then
+                # shellcheck disable=SC2086 # the datapath emits exactly two decimal counters
+                set -- $_r2o_ppe_counts
+                _r2o_ppe_hidden=$1
+                _r2o_ppe_total=$2
+                _r2o_ppe_pct=0
+                [ "$_r2o_ppe_total" -gt 0 ] && _r2o_ppe_pct=$((_r2o_ppe_hidden * 100 / _r2o_ppe_total))
+                echo "  PPE диагностика $_r2o_ppe_family: ответ невидим очереди: $_r2o_ppe_hidden из $_r2o_ppe_total ($_r2o_ppe_pct%) TCP-потоков с приветствием"
+                if [ "$_r2o_ppe_hidden" -ge 5 ] && [ "$_r2o_ppe_pct" -ge 20 ]; then
+                    echo "  PPE диагностика $_r2o_ppe_family: вероятна потеря ответов; другие причины — переполнение NFQUEUE или перезапуск датапата"
+                fi
+            fi
+        else
+            echo "  PPE диагностика $_r2o_ppe_family: нет сохранённой сводки в $_r2o_ppe_log"
+        fi
+    done
 }
 
 case "${1:-}" in
@@ -200,7 +263,7 @@ case "${1:-}" in
     status)
         shift
         [ "$#" -le 1 ] || { echo "usage: $0 status [IPv4-address]" >&2; exit 2; }
-        r2o_ppe_status
+        r2o_ppe_status "${1:-}"
         ;;
     *) echo "usage: $0 {ensure|remove|status [IPv4-address]}" >&2; exit 2 ;;
 esac
