@@ -35,6 +35,7 @@ const DEFAULT_CONFIG_KEYS: &[&str] = &[
     "TG_ENABLED",
     "TG_MODE",
     "TG_PORT",
+    "R2O_PPE_DEOFFLOAD",
 ];
 const IMPORTABLE_KEYS: &[&str] = &[
     "SCHEMA",
@@ -60,6 +61,7 @@ const IMPORTABLE_KEYS: &[&str] = &[
     "TG_ENABLED",
     "TG_MODE",
     "TG_PORT",
+    "R2O_PPE_DEOFFLOAD",
 ];
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
@@ -276,7 +278,8 @@ fn import_donor_values(
         };
         let target_key = match key {
             "FLOWS" => "R2O_FLOW_CAPACITY",
-            "D2K_PPE_DEOFFLOAD" | "CONTROL_SOCKET" | "DECOY_SNI" => {
+            "D2K_PPE_DEOFFLOAD" => "R2O_PPE_DEOFFLOAD",
+            "CONTROL_SOCKET" | "DECOY_SNI" => {
                 unsupported.insert(key.to_owned());
                 continue;
             }
@@ -376,7 +379,9 @@ fn validate_value(key: &str, value: &str, donor: bool) -> io::Result<()> {
         "QUEUE_NUM" | "QUEUE_NUM6" => value.parse::<u16>().is_ok(),
         "TG_PORT" => value.parse::<u16>().is_ok_and(|port| port > 0),
         "R2O_FLOW_CAPACITY" => value.parse::<u32>().is_ok_and(|capacity| capacity > 0),
-        "IPV6_ENABLED" | "AUTOUPDATE" | "TG_ENABLED" => matches!(value, "0" | "1"),
+        "IPV6_ENABLED" | "AUTOUPDATE" | "TG_ENABLED" | "R2O_PPE_DEOFFLOAD" => {
+            matches!(value, "0" | "1")
+        }
         "LOGMAX" | "LOGKEEP" => value
             .parse::<u32>()
             .is_ok_and(|bytes| (1024..=67_108_864).contains(&bytes)),
