@@ -41,6 +41,8 @@ mkdir -p "$r2o_log_dir"
     printf '\nSHA-256 исходников C\n'
     sha256sum "$r2o_donor_core/sched.c" \
         "$r2o_donor_core/test_sched.c" \
+        "$r2o_donor_core/voice.c" \
+        "$r2o_donor_core/test_voice.c" \
         "$r2o_donor_core/voice_discovery.c" \
         "$r2o_donor_core/test_voice_discovery.c" \
         "$r2o_donor_core/stun.c"
@@ -60,8 +62,10 @@ mkdir -p "$r2o_log_dir"
         | grep -E 'FunctionDecl.*(voice_trial_send|voice_trial_same_context|voice_confirm|voice_pending_dispatch|on_applied|on_suspect|voice_fail|task_fail|d2k_sched_event|d2k_sched_tick)'
     printf '\nСборка тестов C\n'
     r2o_run_timed 'сборка тестов голоса C' make -C "$r2o_donor_core" \
-        test_voice_discovery test_sched CC=clang-18
+        test_voice test_voice_discovery test_sched CC=clang-18
     printf '\nФункциональные тесты C\n'
+    r2o_run_timed 'измерение голосового потока C' sh -c \
+        "cd \"\$1\" && ./test_voice" sh "$r2o_donor_core"
     r2o_run_timed 'тест Discord Discovery C' sh -c \
         "cd \"\$1\" && ./test_voice_discovery" sh "$r2o_donor_core"
     r2o_run_timed 'сценарии Discord в планировщике C' sh -c \
@@ -84,6 +88,8 @@ mkdir -p "$r2o_log_dir"
         r2o_voice_watch_связывает_applied_с_точным_потоком_пробы
     r2o_run_timed 'алгоритм Discord Discovery Rust' cargo +1.98.0 test \
         -p r2o-controller --lib --locked --offline voice_discovery
+    r2o_run_timed 'измерение голосового потока Rust' cargo +1.98.0 test \
+        -p r2o-controller --lib --locked --offline voice_measure
     r2o_run_timed 'fallback голоса после прямого Discovery Rust' cargo +1.98.0 test \
         -p r2o-controller --bin r2o-controller --locked --offline \
         discord_voice_после_continue_запускает_live_flow_fallback
@@ -95,7 +101,9 @@ mkdir -p "$r2o_log_dir"
 } >"$r2o_log" 2>&1
 
 grep -q 'voice scheduler: all checks passed' "$r2o_log"
+grep -q 'голосовой путь: все проверки прошли' "$r2o_log"
 grep -q 'r2o_установка_voice_опыта_проверяет_ack_и_trial_id .*ok' "$r2o_log"
+grep -q 'выбирает_самый_нагруженный_поток_кроме_контрольного_сервера .*ok' "$r2o_log"
 grep -q 'местный_voice_nak_не_блокирует_повтор_по_следующему_потоку .*ok' "$r2o_log"
 grep -q 'r2o_voice_discovery_снимает_пробу_при_точном_nak_продления .*ok' "$r2o_log"
 grep -q 'ожидающая_voice_цель_освобождается_через_две_минуты .*ok' "$r2o_log"
