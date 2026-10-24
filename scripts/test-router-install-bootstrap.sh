@@ -56,10 +56,30 @@ set -eu
 printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
 printf 'mock 200000 %s %s 1%% /mock\n' "$((200000 - R2O_TEST_FREE_KB))" "$R2O_TEST_FREE_KB"
 EOF
+cat > "$MOCK/apk" <<'EOF'
+#!/bin/sh
+set -eu
+case "${1:-}" in
+    update) printf 'update\n' >> "$R2O_TEST_PACKAGE_LOG" ;;
+    add) shift; printf '%s\n' "$*" >> "$R2O_TEST_PACKAGE_LOG" ;;
+    *) exit 2 ;;
+esac
+EOF
+cat > "$MOCK/modprobe" <<'EOF'
+#!/bin/sh
+set -eu
+module=${1:?}
+printf '%s\n' "$module" >> "$R2O_TEST_MODULE_LOG"
+mkdir -p "$R2O_SYS_MODULE_DIR/$module"
+if [ "$module" = nfnetlink_queue ]; then
+    : > "$R2O_NFQUEUE_STATUS_FILE"
+fi
+EOF
 for tool in start-stop-daemon ip nft; do
     printf '#!/bin/sh\nexit 0\n' > "$MOCK/$tool"
 done
-chmod 0755 "$MOCK/curl" "$MOCK/id" "$MOCK/uname" "$MOCK/df" "$MOCK/start-stop-daemon" "$MOCK/ip" "$MOCK/nft"
+chmod 0755 "$MOCK/curl" "$MOCK/id" "$MOCK/uname" "$MOCK/df" "$MOCK/apk" "$MOCK/modprobe" \
+    "$MOCK/start-stop-daemon" "$MOCK/ip" "$MOCK/nft"
 
 cat > "$FIXTURE/builds/r2o-manager-linux-mipsel-openwrt-musl" <<'EOF'
 #!/bin/sh
@@ -151,7 +171,8 @@ grep -Fqx "PUBLIC_KEY_B64='$PUBLIC_KEY_B64'" "$TEMP/install.sh" || fail 'test pu
 
 new_case() {
     CASE=$TEMP/$1
-    mkdir -p "$CASE/tmp" "$CASE/etc" "$CASE/opt/etc/init.d" "$CASE/opt/etc/ndm/netfilter.d" "$CASE/etc/init.d" "$CASE/fixtures"
+    mkdir -p "$CASE/tmp" "$CASE/etc" "$CASE/opt/etc/init.d" "$CASE/opt/etc/ndm/netfilter.d" \
+        "$CASE/etc/init.d" "$CASE/fixtures" "$CASE/proc/net/netfilter" "$CASE/sys/module"
     printf 'DISTRIB_ID="OpenWrt"\nDISTRIB_ARCH="mipsel_24kc"\n' > "$CASE/openwrt_release"
     printf 'MemTotal: 131072 kB\nMemAvailable: 131072 kB\nMemFree: 120000 kB\nBuffers: 1000 kB\nCached: 5000 kB\nShmem: 500 kB\n' > "$CASE/meminfo"
     cp -R "$FIXTURE/." "$CASE/fixtures/"
@@ -170,6 +191,10 @@ run_install() {
     R2O_TEST_FIXTURES="$CASE/fixtures" \
     R2O_TEST_FETCH_LOG="$CASE/fetch.log" \
     R2O_TEST_MANAGER_LOG="$CASE/manager.log" \
+    R2O_TEST_PACKAGE_LOG="$CASE/packages.log" \
+    R2O_TEST_MODULE_LOG="$CASE/modules.log" \
+    R2O_NFQUEUE_STATUS_FILE="$CASE/proc/net/netfilter/nfnetlink_queue" \
+    R2O_SYS_MODULE_DIR="$CASE/sys/module" \
     R2O_TEST_FREE_KB="${TEST_FREE_KB:-200000}" \
     TMPDIR="$CASE/tmp" PATH="$MOCK:$PATH" \
         sh "$TEMP/install.sh"
@@ -202,6 +227,14 @@ mv "$CASE/openwrt_release.new" "$CASE/openwrt_release"
 if run_install > "$CASE/out" 2>&1; then fail 'MIPS-I OpenWrt architecture was mapped to an incompatible MIPS32r2 ABI'; fi
 grep -q 'неподдерживаем' "$CASE/out" || fail 'unsupported MIPS-I ABI failure was not explained'
 [ ! -s "$CASE/fetch.log" ] || fail 'release network was touched for an unsupported MIPS-I ABI'
+
+new_case missing-nfqueue-modules
+run_install > "$CASE/out" 2>&1 || { cat "$CASE/out" >&2; fail 'NFQUEUE dependency install fixture failed'; }
+grep -q 'kmod-nft-queue' "$CASE/packages.log" || fail 'nft NFQUEUE package was not installed'
+grep -q 'kmod-nfnetlink-queue' "$CASE/packages.log" || fail 'NFQUEUE core package was not installed'
+grep -qx nfnetlink_queue "$CASE/modules.log" || fail 'nfnetlink_queue module was not loaded'
+grep -qx nft_queue "$CASE/modules.log" || fail 'nft_queue module was not loaded'
+[ -f "$CASE/proc/net/netfilter/nfnetlink_queue" ] || fail 'NFQUEUE status did not appear after module load'
 
 new_case unsupported-keenetic-softfloat
 cat > "$MOCK/opkg" <<'EOF'
@@ -265,6 +298,8 @@ fi
 [ ! -e "$CASE/opt/r2o" ] || fail 'incomplete first install left release files behind'
 [ ! -e "$CASE/opt/etc/init.d/S99r2o" ] || fail 'incomplete first install left its startup shim behind'
 [ ! -e "$CASE/etc/init.d/r2o" ] || fail 'incomplete first install left its OpenWrt service behind'
+grep -q 'kmod-nft-queue' "$CASE/packages.log" || fail 'failed install removed or skipped its system NFQUEUE dependency'
+grep -q 'kmod-nfnetlink-queue' "$CASE/packages.log" || fail 'failed install removed or skipped its NFQUEUE core package'
 
 new_case interrupted-install
 mkdir -p "$CASE/opt/r2o/releases/r2o-old/router" "$CASE/opt/etc/init.d"

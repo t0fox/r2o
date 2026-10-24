@@ -18,6 +18,8 @@ NDM_DIR=${R2O_NDM_DIR:-/opt/etc/ndm/netfilter.d}
 OPENWRT_INIT_DIR=${R2O_OPENWRT_INIT_DIR:-/etc/init.d}
 RUNTIME_DIR=${R2O_RUNTIME_DIR:-/tmp/r2o}
 TMP_BASE=${TMPDIR:-/tmp}
+NFQUEUE_STATUS_FILE=${R2O_NFQUEUE_STATUS_FILE:-/proc/net/netfilter/nfnetlink_queue}
+MODULE_DIR=${R2O_SYS_MODULE_DIR:-/sys/module}
 MAX_ARCHIVE_BYTES=67108864
 MAX_EXPANDED_KB=24576
 RAM_RESERVE_KB=16384
@@ -169,6 +171,21 @@ install_dependencies() {
         [ ! -s "$ca_file" ] || have_ca=1
     done
     [ "$have_ca" -eq 1 ] || missing="$missing ca-bundle"
+    nfqueue_module=
+    if [ "$PLATFORM" = openwrt ]; then
+        if { [ "$backend" = nft ] || { [ "$backend" = auto ] && command -v nft >/dev/null 2>&1; }; }; then
+            nfqueue_package='kmod-nfnetlink-queue kmod-nft-queue'
+            nfqueue_module=nft_queue
+        else
+            nfqueue_package='kmod-nfnetlink-queue kmod-ipt-nfqueue'
+            nfqueue_module=xt_NFQUEUE
+        fi
+        if [ ! -d "$MODULE_DIR/nfnetlink_queue" ] \
+            || [ ! -d "$MODULE_DIR/$nfqueue_module" ] \
+            || [ ! -e "$NFQUEUE_STATUS_FILE" ]; then
+            missing="$missing $nfqueue_package"
+        fi
+    fi
     [ -n "$missing" ] || return 0
     [ "$(free_kb "$STORAGE_PATH")" -ge "$((MAX_EXPANDED_KB + DEPENDENCY_RESERVE_KB))" ] ||
         die "для зависимостей и выпуска нужно не менее $((MAX_EXPANDED_KB + DEPENDENCY_RESERVE_KB)) КиБ свободной flash"
@@ -184,6 +201,12 @@ install_dependencies() {
         die "нет штатного менеджера пакетов для установки:$missing"
     fi
     command -v openssl >/dev/null 2>&1 || die 'openssl отсутствует после установки зависимостей'
+    if [ -n "$nfqueue_module" ]; then
+        command -v modprobe >/dev/null 2>&1 || die 'для загрузки модулей NFQUEUE нужна команда modprobe'
+        modprobe nfnetlink_queue || die 'не удалось загрузить модуль nfnetlink_queue после установки kmod-пакета'
+        modprobe "$nfqueue_module" || die "не удалось загрузить модуль $nfqueue_module после установки kmod-пакета"
+        [ -e "$NFQUEUE_STATUS_FILE" ] || die "после загрузки модулей NFQUEUE отсутствует $NFQUEUE_STATUS_FILE"
+    fi
 }
 
 check_runtime_dependencies() {
