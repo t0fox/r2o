@@ -94,10 +94,7 @@ detect_platform_and_arch() {
                 distribution_arch=$(uname -m 2>/dev/null || true)
             fi
         fi
-        map_openwrt_arch "$distribution_arch" || {
-            distribution_arch=$(uname -m 2>/dev/null || true)
-            map_openwrt_arch "$distribution_arch" || die "неподдерживаемая архитектура OpenWrt: ${distribution_arch:-не определена}"
-        }
+        map_openwrt_arch "$distribution_arch" || die "неподдерживаемая архитектура OpenWrt: ${distribution_arch:-не определена}"
     elif [ -d /opt/etc/ndm ] || [ -x /opt/bin/opkg ] || command -v opkg >/dev/null 2>&1; then
         PLATFORM=keenetic
         if [ -x /opt/bin/opkg ]; then
@@ -112,10 +109,7 @@ detect_platform_and_arch() {
         else
             distribution_arch=$(uname -m 2>/dev/null || true)
         fi
-        map_keenetic_arch "$distribution_arch" || {
-            distribution_arch=$(uname -m 2>/dev/null || true)
-            map_keenetic_arch "$distribution_arch" || die "неподдерживаемая архитектура Keenetic/Entware: ${package_arch:-$distribution_arch}"
-        }
+        map_keenetic_arch "$distribution_arch" || die "неподдерживаемая архитектура Keenetic/Entware: ${package_arch:-$distribution_arch}"
     else
         die 'система не распознана как OpenWrt или Keenetic с Entware; на Keenetic сначала установите Entware'
     fi

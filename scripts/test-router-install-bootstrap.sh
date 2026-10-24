@@ -45,6 +45,11 @@ cat > "$MOCK/id" <<'EOF'
 [ "${1:-}" = -u ] && { echo 0; exit 0; }
 exec /usr/bin/id "$@"
 EOF
+cat > "$MOCK/uname" <<'EOF'
+#!/bin/sh
+[ "${1:-}" = -m ] && { echo aarch64; exit 0; }
+exec /usr/bin/uname "$@"
+EOF
 cat > "$MOCK/df" <<'EOF'
 #!/bin/sh
 set -eu
@@ -54,7 +59,7 @@ EOF
 for tool in start-stop-daemon ip nft; do
     printf '#!/bin/sh\nexit 0\n' > "$MOCK/$tool"
 done
-chmod 0755 "$MOCK/curl" "$MOCK/id" "$MOCK/df" "$MOCK/start-stop-daemon" "$MOCK/ip" "$MOCK/nft"
+chmod 0755 "$MOCK/curl" "$MOCK/id" "$MOCK/uname" "$MOCK/df" "$MOCK/start-stop-daemon" "$MOCK/ip" "$MOCK/nft"
 
 cat > "$FIXTURE/builds/r2o-manager-linux-mipsel-openwrt-musl" <<'EOF'
 #!/bin/sh
