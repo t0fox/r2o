@@ -75,8 +75,16 @@ mkdir -p "$r2o_log_dir"
     r2o_run_timed 'запуск r2o-fetch Rust' r2o_capture_status \
         "$r2o_temp_dir/rust.stdout" "$r2o_temp_dir/rust.stderr" \
         "$r2o_temp_dir/rust.status" \
-        "$r2o_script_dir/../target/debug/r2o-fetch" \
+        "$r2o_script_dir/target/debug/r2o-fetch" \
         --name localhost --ip '' --port 1 --deadline 100 --quic --json
+    printf 'C exit status: '
+    cat "$r2o_temp_dir/c.status"
+    printf 'C stderr:\n'
+    cat "$r2o_temp_dir/c.stderr"
+    printf 'Rust exit status: '
+    cat "$r2o_temp_dir/rust.status"
+    printf 'Rust stderr:\n'
+    cat "$r2o_temp_dir/rust.stderr"
     python3 - "$r2o_temp_dir/c.stdout" "$r2o_temp_dir/rust.stdout" \
         "$r2o_temp_dir/c.status" "$r2o_temp_dir/rust.status" <<'PY'
 import ipaddress
