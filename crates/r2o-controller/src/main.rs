@@ -2799,6 +2799,55 @@ fn matching_domain_group<'a>(
 }
 
 #[cfg(unix)]
+fn r2o_installed_family_group(
+    catalog: &Catalog,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    active_groups: &HashSet<r2o_controller::live::LiveGroupKey>,
+) -> Option<r2o_controller::live::LiveGroupKey> {
+    if target.host.parse::<std::net::IpAddr>().is_ok() || target.shape == 0 {
+        return None;
+    }
+    let state = catalog.domain_state.as_ref()?;
+    let transport = r2o_discovery_transport(target);
+    let group = state.groups.iter().find(|group| {
+        let key = &group.key;
+        key.transport == transport
+            && key.family == target.family
+            && key.shape == target.shape
+            && state
+                .match_domain(&target.host, key)
+                .is_some_and(|matched| std::ptr::eq(matched, *group))
+            && active_groups.contains(&r2o_controller::live::LiveGroupKey::from(*group))
+    })?;
+    if catalog
+        .boxes
+        .iter()
+        .flat_map(|box_record| &box_record.bindings)
+        .any(|binding| {
+            binding.enabled
+                && binding.level >= 3
+                && binding.kind == "name"
+                && binding.target == target.host
+                && binding.recheck_since.is_none()
+                && (if binding.transport == 0 {
+                    6
+                } else {
+                    binding.transport
+                }) == transport
+                && (if binding.family == 0 {
+                    4
+                } else {
+                    binding.family
+                }) == target.family
+                && (binding.shape == 0 || binding.shape == target.shape)
+        })
+    {
+        return None;
+    }
+    Some(r2o_controller::live::LiveGroupKey::from(group))
+}
+
+#[cfg(unix)]
 fn matching_domain_recovery_candidates(
     catalog: &Catalog,
     target: &r2o_controller::discovery::DiscoveryTarget,
@@ -5254,6 +5303,7 @@ impl R2oRecentTcpNameCache {
 struct R2oDiscoveryQueue {
     entries: Vec<R2oDiscoveryQueueEntry>,
     active_endpoints: HashSet<(String, u8)>,
+    installed_group_generations: HashMap<r2o_controller::live::LiveGroupKey, u64>,
     event_sequence: u64,
     catalog_generation: u64,
     #[cfg(test)]
@@ -5266,6 +5316,7 @@ struct R2oDiscoveryQueueEntry {
     queued_at: std::time::Instant,
     queued_event: u64,
     hot_event: u64,
+    catalog_generation: u64,
 }
 
 #[cfg(unix)]
@@ -5662,13 +5713,60 @@ impl R2oDiscoveryQueue {
         }
         self.event_sequence = self.event_sequence.wrapping_add(1);
         let hot_event = self.event_sequence;
+        let catalog_generation = self.catalog_generation;
         self.entries.push(R2oDiscoveryQueueEntry {
             target,
             queued_at,
             queued_event: self.event_sequence,
             hot_event,
+            catalog_generation,
         });
         true
+    }
+
+    fn r2o_set_installed_groups(
+        &mut self,
+        active_groups: &HashSet<r2o_controller::live::LiveGroupKey>,
+    ) {
+        self.installed_group_generations = active_groups
+            .iter()
+            .cloned()
+            .map(|group| (group, self.catalog_generation))
+            .collect();
+    }
+
+    fn r2o_catalog_changed(
+        &mut self,
+        catalog: &Catalog,
+        active_groups: &HashSet<r2o_controller::live::LiveGroupKey>,
+    ) -> Vec<r2o_controller::discovery::DiscoveryTarget> {
+        self.catalog_generation = self.catalog_generation.wrapping_add(1);
+        let generation = self.catalog_generation;
+        self.installed_group_generations
+            .retain(|group, _| active_groups.contains(group));
+        for group in active_groups {
+            self.installed_group_generations
+                .entry(group.clone())
+                .or_insert(generation);
+        }
+        let installed_group_generations = &self.installed_group_generations;
+        let mut family_ready = Vec::new();
+        self.entries.retain(|entry| {
+            let Some(group) = r2o_installed_family_group(catalog, &entry.target, active_groups)
+            else {
+                return true;
+            };
+            let installed_after_queue = installed_group_generations
+                .get(&group)
+                .is_some_and(|installed_at| *installed_at > entry.catalog_generation);
+            if installed_after_queue {
+                family_ready.push(entry.target.clone());
+                false
+            } else {
+                true
+            }
+        });
+        family_ready
     }
 
     fn r2o_expire(
@@ -8102,13 +8200,54 @@ impl DiscoveryWorker {
         expired
     }
 
-    fn catalog_changed(&mut self) {
-        {
-            let (queue, _) = &*self.jobs;
+    fn r2o_set_installed_groups(
+        &mut self,
+        active_groups: &HashSet<r2o_controller::live::LiveGroupKey>,
+    ) {
+        let (queue, _) = &*self.jobs;
+        queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .r2o_set_installed_groups(active_groups);
+    }
+
+    fn catalog_changed(
+        &mut self,
+        catalog: &Catalog,
+        active_groups: &HashSet<r2o_controller::live::LiveGroupKey>,
+    ) {
+        let removed = {
+            let (queue, wake) = &*self.jobs;
             let mut queue = queue
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            queue.catalog_generation = queue.catalog_generation.wrapping_add(1);
+            let removed = queue.r2o_catalog_changed(catalog, active_groups);
+            wake.notify_all();
+            removed
+        };
+        for target in removed {
+            let task_key = r2o_discovery_task_key(&target);
+            self.active_cancels
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&task_key);
+            if self.active.get(&task_key) == Some(&target) {
+                self.active.remove(&task_key);
+            }
+            self.seen.remove(&target);
+            self.seen_order.retain(|seen| seen != &target);
+            self.suspect_fingerprints.remove(&target);
+            self.suspect_fingerprint_order
+                .retain(|seen| seen != &target);
+            self.client_snapshot_targets.remove(&target);
+            self.client_hellos
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&task_key);
+            self.client_tcp_timestamps
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&task_key);
         }
         let pending = self
             .pending_rechecks
@@ -9921,23 +10060,20 @@ impl ControlClient {
                     )
                 });
         let mut discovery = discovery.map(|(catalog, path, mark)| {
-            (
-                DiscoveryWorker::new_with_confirmation(
-                    mark,
-                    Arc::clone(&self.send_cap),
-                    measurement_gate.clone(),
-                    http_search
-                        .as_ref()
-                        .expect("HTTP worker существует при активном Discovery")
-                        .command_sender(),
-                    Arc::clone(&tcp_witness_names),
-                    Arc::clone(&network_whitelist_updates),
-                    Arc::clone(catalog_snapshot.as_ref().expect("каталог Discovery создан")),
-                ),
-                catalog,
-                path,
+            let mut worker = DiscoveryWorker::new_with_confirmation(
                 mark,
-            )
+                Arc::clone(&self.send_cap),
+                measurement_gate.clone(),
+                http_search
+                    .as_ref()
+                    .expect("HTTP worker существует при активном Discovery")
+                    .command_sender(),
+                Arc::clone(&tcp_witness_names),
+                Arc::clone(&network_whitelist_updates),
+                Arc::clone(catalog_snapshot.as_ref().expect("каталог Discovery создан")),
+            );
+            worker.r2o_set_installed_groups(&active_groups);
+            (worker, catalog, path, mark)
         });
         let mut family_recovery = discovery.as_ref().map(|_| {
             R2oFamilyRecoveryWorker::new(
@@ -10201,7 +10337,7 @@ impl ControlClient {
                             }
                         }
                         if catalog_changed {
-                            worker.catalog_changed();
+                            worker.catalog_changed(catalog, &active_groups);
                         }
                     }
                     std::io::stdout().flush()?;
@@ -20608,6 +20744,7 @@ mod tests {
                     queued_at: now - Duration::from_millis(queued_age_ms),
                     queued_event,
                     hot_event,
+                    catalog_generation: queue.catalog_generation,
                 });
             }
             let selected = queue
@@ -20651,6 +20788,7 @@ mod tests {
                 queued_at: now - Duration::from_millis(queued_age_ms),
                 queued_event: 0,
                 hot_event: 0,
+                catalog_generation: queue.catalog_generation,
             });
             let expired = queue.r2o_expire(now);
             let actual = if expired.is_empty() {
@@ -20666,6 +20804,104 @@ mod tests {
             output.push(format!("{case_name} {actual}"));
         }
         if let Ok(path) = std::env::var("R2O_SCHED_QUEUE_EXPIRY_DIFF_OUTPUT") {
+            std::fs::write(path, format!("{}\n", output.join("\n"))).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn d2o_scheduler_family_queue_matches_donor() {
+        use super::R2oDiscoveryQueue;
+        use r2o_controller::catalog::{DomainGroup, DomainState};
+        use std::time::Instant;
+
+        let mut output = Vec::new();
+        for line in include_str!("../tests/fixtures/d2o_scheduler_family_queue.tsv").lines() {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.is_empty() || fields[0].starts_with('#') {
+                continue;
+            }
+            let [
+                case_name,
+                expected,
+                queued_event,
+                confirmed_event,
+                exact_binding,
+            ] = fields.as_slice()
+            else {
+                panic!("malformed d2o scheduler family queue fixture: {line}");
+            };
+            let queued_event = queued_event.parse::<u64>().unwrap();
+            let confirmed_event = confirmed_event.parse::<u64>().unwrap();
+            assert!(matches!(*exact_binding, "yes" | "no"));
+            let now = Instant::now();
+            let target = r2o_controller::discovery::DiscoveryTarget {
+                host: "video.googlevideo.com".into(),
+                endpoint: "203.0.113.1:443".into(),
+                family: 4,
+                shape: SHAPE_MODERN,
+            };
+            let group = DomainGroup {
+                suffix: "googlevideo.com".into(),
+                plan_id: "plan-1".into(),
+                key: super::GroupKey {
+                    transport: 6,
+                    family: 4,
+                    shape: SHAPE_MODERN,
+                    probe_path: "/".into(),
+                    ..super::GroupKey::default()
+                },
+                evidence_count: 3,
+                ..DomainGroup::default()
+            };
+            let group_key = r2o_controller::live::LiveGroupKey::from(&group);
+            let mut catalog = Catalog {
+                domain_state: Some(DomainState {
+                    groups: vec![group],
+                    ..DomainState::default()
+                }),
+                ..Catalog::default()
+            };
+            if *exact_binding == "yes" {
+                catalog.boxes.push(BoxRecord {
+                    id: "box-1".into(),
+                    bindings: vec![Binding {
+                        kind: "name".into(),
+                        target: target.host.clone(),
+                        plan_id: "plan-1".into(),
+                        level: 3,
+                        enabled: true,
+                        transport: 6,
+                        family: 4,
+                        shape: SHAPE_MODERN,
+                        ..Binding::default()
+                    }],
+                    ..BoxRecord::default()
+                });
+            }
+            let installed_after_queue = confirmed_event > queued_event;
+            let mut active_groups = if installed_after_queue {
+                std::collections::HashSet::new()
+            } else {
+                std::collections::HashSet::from([group_key.clone()])
+            };
+            let mut queue = R2oDiscoveryQueue::default();
+            queue.r2o_set_installed_groups(&active_groups);
+            queue.event_sequence = queued_event.wrapping_sub(1);
+            assert!(queue.enqueue(target, now));
+            if installed_after_queue {
+                active_groups.insert(group_key);
+                queue.r2o_catalog_changed(&catalog, &active_groups);
+            }
+            let actual = if queue.entries.is_empty() {
+                "removed"
+            } else {
+                "queued"
+            };
+            assert_eq!(actual, *expected, "donor family queue case {case_name}");
+            output.push(format!("{case_name} {actual}"));
+        }
+        if let Ok(path) = std::env::var("R2O_SCHED_FAMILY_QUEUE_DIFF_OUTPUT") {
             std::fs::write(path, format!("{}\n", output.join("\n"))).unwrap();
         }
     }
@@ -21049,7 +21285,7 @@ mod tests {
                 .unwrap(),
             Some(client_hello.clone())
         );
-        worker.catalog_changed();
+        worker.catalog_changed(&Catalog::default(), &std::collections::HashSet::new());
         let (refreshed_hello, cancelled) = second_started_receiver
             .recv_timeout(Duration::from_secs(2))
             .expect("поиск должен перезапуститься с новым поколением каталога");

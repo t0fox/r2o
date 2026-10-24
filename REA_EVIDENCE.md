@@ -7421,3 +7421,41 @@ dossier именно для `queued_pick` в текущей Windows-среде �
 теста `cargo +1.98.0 test --locked --workspace` и
 `scripts/ci-differential-shards.sh verify` прошли; манифест проверяет 12 baseline
 и 25 upstream сценариев ровно по одному разу.
+
+### Снятие очереди после установки семейства — 25.10.2026
+
+Актуальный donor снова сверён с `t0fox/d2o`: `783aa75ce44dd6192cd1f4f1d98e4fe909ef3045`.
+В `core/sched.c::d2k_sched_tick` задача в `T_QUEUED` проходит через
+`queued_family_ready`; та вызывает `installed_family_ready` с `queued_event`.
+Эталон снимает неплановую очередь, если после её постановки уже подтверждена
+совместимая установленная область и нет точной активной name-привязки. Если
+область существовала раньше, задача остаётся в очереди. `installed_family_ready`
+также сверяет форму, транспорт, семейство и результат `d2k_group_match`, включая
+исключения direct-clear/plan-failed.
+
+Rust-аналог теперь состоит из `r2o_installed_family_group`,
+`R2oDiscoveryQueue::r2o_catalog_changed` и `DiscoveryWorker::catalog_changed`.
+Очередь записывает поколение каталога на enqueue, отслеживает поколения уже
+активных групп и снимает только ожидающую задачу, чья совместимая группа стала
+активной позже. Проверка группы вызывает `DomainState::match_domain`, учитывая
+нормализацию, выбор самого длинного суффикса и исключения наблюдений; точная
+подтверждённая привязка с отсутствующим `recheck_since` блокирует снятие, как в C.
+При удалении освобождаются worker-записи для очереди и связанное с ней временное
+состояние; обычная отмена уже запущенных замеров после изменения каталога остаётся.
+
+| Исходная C-функция | Rust-аналог | Одинаковый fixture и результат |
+|---|---|---|
+| `core/sched.c::d2k_sched_tick` → `queued_family_ready` → `installed_family_ready` | `r2o_installed_family_group` → `R2oDiscoveryQueue::r2o_catalog_changed` → `DiscoveryWorker::catalog_changed` | В первом RED-прогоне `family_installed_after_queue` дал C `removed`, Rust `queued`; два контрольных случая (семейство до постановки и точная привязка) совпали. После исправления C вызывает настоящий `d2k_sched_tick`, Rust обновляет реальную очередь через `r2o_catalog_changed`; три результата совпали: `removed`, `queued`, `queued`. `scripts/r2o-queue-order-differential.sh` завершился с кодом 0 вместе с диффами срока очереди, порядка и QUIC→TCP. |
+
+Эти сценарии подтверждают только перечисленные ветви очереди. REA Evidence для
+`d2k_sched_tick` сохранено как
+`ev_0b562f8ef31c3f52474e4d814abe50dde623b12964047aedcfa52b09d7a58bcc`; свежий
+декомпиляторский dossier для вложенных helper-ов в Windows-среде недоступен,
+поэтому сравнение подтверждено исходником точного donor и C/Rust harness.
+После диффа повторно прошёл `scripts/r2o-build-openwrt-aarch64-musl.sh`: шесть
+релизных бинарников запустились в QEMU, `--clear-catalog` и `--check-catalog`
+прошли; остались только предупреждения `libc::time_t` и
+`libc::suseconds_t` в `response.rs`. Весь workspace прошёл 1.98.0 tests, а
+покрытие CI diff-manifest подтвердило 12 baseline и 25 upstream сценариев.
+Проверка на роутере не выполнялась по просьбе пользователя; полевой паритет и
+полный поведенческий паритет не заявляются.

@@ -30,6 +30,9 @@ include $(DONOR_CORE)/Makefile
 
 $(R2O_TMP)/d2o-queue-expiry: $(R2O_REPO_ROOT)/crates/r2o-controller/tests/d2o_scheduler_queue_expiry_differential.c $(filter-out sched.o,$(SCHED_TEST_OBJ))
 	$(CC) $(CFLAGS) -I"$(DONOR_CORE)" -o "$@" "$<" $(filter-out sched.o,$(SCHED_TEST_OBJ)) $(TEST_LDFLAGS)
+
+$(R2O_TMP)/d2o-family-queue: $(R2O_REPO_ROOT)/crates/r2o-controller/tests/d2o_scheduler_family_queue_differential.c $(filter-out sched.o,$(SCHED_TEST_OBJ))
+	$(CC) $(CFLAGS) -I"$(DONOR_CORE)" -o "$@" "$<" $(filter-out sched.o,$(SCHED_TEST_OBJ)) $(TEST_LDFLAGS)
 MAKEFILE
 make -C "$donor_core" -f "$tmp_dir/QueueExpiry.mk" --no-print-directory \
     "DONOR_CORE=$donor_core" "R2O_REPO_ROOT=$repo_root" "R2O_TMP=$tmp_dir" \
@@ -41,6 +44,17 @@ R2O_SCHED_QUEUE_EXPIRY_DIFF_OUTPUT="$tmp_dir/rust-expiry.out" \
     cargo +1.98.0 test --locked -p r2o-controller --bin r2o-controller \
     d2o_scheduler_queue_expiry_matches_donor
 diff -u "$tmp_dir/c-expiry.out" "$tmp_dir/rust-expiry.out"
+
+make -C "$donor_core" -f "$tmp_dir/QueueExpiry.mk" --no-print-directory \
+    "DONOR_CORE=$donor_core" "R2O_REPO_ROOT=$repo_root" "R2O_TMP=$tmp_dir" \
+    "CC=${CC:-clang-18}" "$tmp_dir/d2o-family-queue"
+"$tmp_dir/d2o-family-queue" \
+    "$repo_root/crates/r2o-controller/tests/fixtures/d2o_scheduler_family_queue.tsv" \
+    >"$tmp_dir/c-family.out"
+R2O_SCHED_FAMILY_QUEUE_DIFF_OUTPUT="$tmp_dir/rust-family.out" \
+    cargo +1.98.0 test --locked -p r2o-controller --bin r2o-controller \
+    d2o_scheduler_family_queue_matches_donor
+diff -u "$tmp_dir/c-family.out" "$tmp_dir/rust-family.out"
 
 R2O_SCHED_QUEUE_DIFF_OUTPUT="$tmp_dir/rust.out" \
     cargo +1.98.0 test --locked -p r2o-controller --bin r2o-controller \

@@ -1,0 +1,4 @@
+# case expected queued_event confirmed_event exact_binding
+family_installed_after_queue removed 10 11 no
+family_installed_before_queue queued 10 10 no
+exact_binding_blocks_family_reuse queued 10 11 yes
