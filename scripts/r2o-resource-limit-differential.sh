@@ -27,9 +27,10 @@ donor_core="$donor_root/core"
 cat >"$tmp_dir/expected" <<'EOF'
 0 1 1
 0 0 0
+0 6 10
 EOF
 diff -u "$tmp_dir/expected" "$tmp_dir/c.out"
-printf 'C donor d2k_sched_cpu_parse: both wrapping vectors match\n'
+printf 'C donor d2k_sched_cpu_parse: all three vectors match\n'
 
 cargo +1.98.0 test --locked -p r2o-controller --lib \
     r2o_разбор_cpu_сохраняет_unsigned_арифметику_донора

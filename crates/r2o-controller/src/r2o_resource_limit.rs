@@ -46,11 +46,29 @@ struct R2oResourceReading {
 }
 
 fn r2o_parse_cpu_stat(line: &str) -> Option<R2oCpuCounters> {
-    let fields = line.strip_prefix("cpu ")?;
+    let bytes = line.as_bytes();
+    if !bytes.starts_with(b"cpu ") {
+        return None;
+    }
+    let mut position = 4;
     let mut values = [0_u64; 8];
     let mut count = 0;
-    for field in fields.split_whitespace().take(values.len()) {
-        values[count] = field.parse().ok()?;
+    while count < values.len() {
+        while bytes
+            .get(position)
+            .is_some_and(|byte| matches!(*byte, b' ' | b'\t'))
+        {
+            position += 1;
+        }
+        if !bytes.get(position).is_some_and(u8::is_ascii_digit) {
+            break;
+        }
+        let mut value = 0_u64;
+        while let Some(&byte) = bytes.get(position).filter(|byte| byte.is_ascii_digit()) {
+            value = value.checked_mul(10)?.checked_add(u64::from(byte - b'0'))?;
+            position += 1;
+        }
+        values[count] = value;
         count += 1;
     }
     if count < 4 {
@@ -897,6 +915,10 @@ mod tests {
         assert_eq!(
             r2o_parse_cpu_stat("cpu 0 0 0 18446744073709551615 1\n"),
             Some(R2oCpuCounters { busy: 0, total: 0 }),
+        );
+        assert_eq!(
+            r2o_parse_cpu_stat("cpu 1 2 3 4x\n"),
+            Some(R2oCpuCounters { busy: 6, total: 10 }),
         );
     }
 

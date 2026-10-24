@@ -7,6 +7,7 @@ int main(void) {
     const char *cases[] = {
         "cpu 18446744073709551615 1 1 0\n",
         "cpu 0 0 0 18446744073709551615 1\n",
+        "cpu 1 2 3 4x\n",
     };
 
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
