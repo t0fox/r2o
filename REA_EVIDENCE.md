@@ -7395,12 +7395,13 @@ Concurrency у donor начинается с `SCHED_DEFAULT_ACTIVE_MEASUREMENTS=
 
 | Исходная C-функция | Rust-аналог | Один fixture и результат |
 |---|---|---|
-| `core/sched.c::queued_pick`, comparator `queued_before` | `main.rs::R2oDiscoveryQueue::pop` | `d2o_scheduler_queue.tsv`: свежий event выбрал `newest.example`; высокий `hot_event` выбрал `promoted.example` при старом `queued_event`; при равной горячести FIFO выбрал `fifo-earlier.example`. C и Rust вывели одинаковые строки во всех трёх случаях; `scripts/r2o-queue-order-differential.sh` завершился с кодом 0 на donor `783aa75`. |
+| `core/sched.c::queued_pick`, comparator `queued_before` | `main.rs::R2oDiscoveryQueue::pop` | `d2o_scheduler_queue.tsv`: свежий event выбрал `newest.example`; высокий `hot_event` выбрал `promoted.example` при старом `queued_event`; при равной горячести FIFO выбрал `fifo-earlier.example`. C и Rust вывели одинаковые строки во всех трёх случаях. |
+| `core/sched.c::queued_pick`: когда QUIC уже припаркован, ожидающий TCP получает следующий слот даже при более «горячем» QUIC в очереди. | `r2o_resource_limit.rs::r2o_next_measurement_waiter`; `main.rs` worker берёт TCP permit до `R2oDiscoveryQueue::pop`, а активный QUIC уступает его через `r2o_yield_if_contended_with_cancel`. | Та же таблица подала parked QUIC, более свежий queued QUIC и queued TCP. Обе реализации выбрали `tcp-waiting.example`; отдельный Rust тест проверил selected permit ID. |
 
-Эти входы покрывают только обычный queued order: они не моделируют eligibility
-семейного восстановления, истечение задачи или уступку слота QUIC ожидающему
-TCP. Для этих ветвей остаются отдельные C scheduler и Rust worker/permit тесты;
-новый fixture сам по себе не подтверждает их полное соответствие. Свежий REA
+Эти входы покрывают обычный queued order и одну уступку QUIC→TCP: они не
+моделируют eligibility семейного восстановления или истечение задачи. Для
+этих ветвей остаются отдельные C scheduler и Rust worker тесты; fixture не
+подтверждает их полное соответствие. Свежий REA
 dossier именно для `queued_pick` в текущей Windows-среде получить нельзя:
 `list_documents` сообщает, что доступный Ghidra не принимает ELF, Hopper не
 поддержан на Windows, а IDA не сконфигурирован. Использованы donor-исходник и
@@ -7410,7 +7411,9 @@ dossier именно для `queued_pick` в текущей Windows-среде �
 После этого fixture `scripts/r2o-build-openwrt-aarch64-musl.sh` повторно
 завершился с кодом 0: все шесть release-бинарников запустились в QEMU, а
 `--clear-catalog` и `--check-catalog` прошли. Сборка вывела только существующие
-предупреждения `libc::time_t` и `libc::suseconds_t` в `response.rs`. После
-добавления теста `cargo +1.98.0 test --locked --workspace` и
+предупреждения `libc::time_t` и `libc::suseconds_t` в `response.rs`.
+`scripts/r2o-queue-order-differential.sh` сравнил C и два Rust test target по
+общей таблице из четырёх сценариев и завершился с кодом 0. После добавления
+теста `cargo +1.98.0 test --locked --workspace` и
 `scripts/ci-differential-shards.sh verify` прошли; манифест проверяет 12 baseline
 и 25 upstream сценариев ровно по одному разу.

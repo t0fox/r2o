@@ -846,7 +846,7 @@ impl Drop for R2oMeasurementPermit {
 #[cfg(test)]
 mod tests {
     use super::{
-        R2oAdaptiveLimit, R2oConntrackStats, R2oCpuCounters, R2oMeasurementGate,
+        R2oAdaptiveLimit, R2oConntrackStats, R2oCpuCounters, R2oGateState, R2oMeasurementGate,
         R2oMeasurementWaiterKind, R2oMemoryStats, R2oResourceReading, r2o_measurement_worker_cap,
         r2o_next_measurement_waiter, r2o_parse_cpu_stat, r2o_parse_meminfo,
         r2o_queue_measurement_waiter,
@@ -1358,6 +1358,73 @@ mod tests {
         assert_eq!(r2o_next_measurement_waiter(&state), Some(tcp));
         state.waiters.retain(|waiter| waiter.id != tcp);
         assert_eq!(r2o_next_measurement_waiter(&state), Some(other));
+    }
+
+    #[test]
+    fn d2o_scheduler_quic_yield_priority_matches_donor() {
+        let mut output = Vec::new();
+        for line in include_str!("../tests/fixtures/d2o_scheduler_queue.tsv").lines() {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.is_empty() || fields[0].starts_with('#') {
+                continue;
+            }
+            let [case_name, expected, mode, count, entries @ ..] = fields.as_slice() else {
+                panic!("malformed d2o scheduler queue fixture: {line}");
+            };
+            if *mode != "quic_yield" {
+                continue;
+            }
+            let count = count.parse::<usize>().unwrap();
+            assert_eq!(entries.len(), count, "fixture task count: {line}");
+            let mut state = R2oGateState {
+                adaptive: R2oAdaptiveLimit::new(64),
+                active: 64,
+                initial_start_limit: 2,
+                initial_starts: 2,
+                waiters: std::collections::VecDeque::new(),
+                next_waiter: 1,
+                last_sample: None,
+                last_started: None,
+                scheduler_tick_seen: true,
+            };
+            let mut waiter_names = Vec::new();
+            let mut parked_names = Vec::new();
+            for entry in entries.iter().copied() {
+                let parts = entry.split('/').collect::<Vec<_>>();
+                let [name, transport, _queued_event, _hot_event, _age, task_state] =
+                    parts.as_slice()
+                else {
+                    panic!("malformed d2o scheduler queue task: {entry}");
+                };
+                let transport = transport.parse::<u8>().unwrap();
+                let kind = match (*task_state, transport) {
+                    ("parked", 17) => R2oMeasurementWaiterKind::QuicYield,
+                    ("queued", 6) => R2oMeasurementWaiterKind::Tcp,
+                    ("queued", 17) => R2oMeasurementWaiterKind::Other,
+                    _ => panic!("invalid d2o scheduler queue state: {entry}"),
+                };
+                if kind == R2oMeasurementWaiterKind::QuicYield {
+                    parked_names.push((*name, kind));
+                    continue;
+                }
+                let waiter = r2o_queue_measurement_waiter(&mut state, kind);
+                waiter_names.push((waiter, *name));
+            }
+            for (name, kind) in parked_names {
+                let waiter = r2o_queue_measurement_waiter(&mut state, kind);
+                waiter_names.push((waiter, name));
+            }
+            let selected = r2o_next_measurement_waiter(&state).unwrap();
+            let selected_name = waiter_names
+                .iter()
+                .find_map(|(waiter, name)| (*waiter == selected).then_some(*name))
+                .unwrap();
+            assert_eq!(selected_name, *expected, "donor queue case {case_name}");
+            output.push(format!("{case_name} {selected_name}"));
+        }
+        if let Ok(path) = std::env::var("R2O_SCHED_YIELD_DIFF_OUTPUT") {
+            std::fs::write(path, format!("{}\n", output.join("\n"))).unwrap();
+        }
     }
 
     #[test]

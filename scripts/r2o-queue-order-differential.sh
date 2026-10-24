@@ -22,10 +22,16 @@ fixture="$repo_root/crates/r2o-controller/tests/fixtures/d2o_scheduler_queue.tsv
     "$repo_root/crates/r2o-controller/tests/d2o_scheduler_queue_differential.c" \
     -Wl,--gc-sections -o "$tmp_dir/d2o-queue"
 "$tmp_dir/d2o-queue" "$fixture" >"$tmp_dir/c.out"
+grep -v '^quic_yield_' "$tmp_dir/c.out" >"$tmp_dir/c-queue.out"
+grep '^quic_yield_' "$tmp_dir/c.out" >"$tmp_dir/c-yield.out"
 
 R2O_SCHED_QUEUE_DIFF_OUTPUT="$tmp_dir/rust.out" \
     cargo +1.98.0 test --locked -p r2o-controller --bin r2o-controller \
     d2o_scheduler_queue_order_matches_donor
-diff -u "$tmp_dir/c.out" "$tmp_dir/rust.out"
-printf 'C/Rust queue order (fresh suspicion and FIFO tie-break) matches d2o %s.\n' \
+diff -u "$tmp_dir/c-queue.out" "$tmp_dir/rust.out"
+R2O_SCHED_YIELD_DIFF_OUTPUT="$tmp_dir/rust-yield.out" \
+    cargo +1.98.0 test --locked -p r2o-controller --lib \
+    d2o_scheduler_quic_yield_priority_matches_donor
+diff -u "$tmp_dir/c-yield.out" "$tmp_dir/rust-yield.out"
+printf 'C/Rust queue order and QUIC-yield TCP priority match d2o %s.\n' \
     "$actual_donor_sha"

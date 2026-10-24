@@ -53,8 +53,10 @@ int main(int argc, char **argv)
         char *save = NULL;
         char *case_name = strtok_r(line, " \t\r\n", &save);
         char *expected = strtok_r(NULL, " \t\r\n", &save);
+        char *mode = strtok_r(NULL, " \t\r\n", &save);
         char *count_text = strtok_r(NULL, " \t\r\n", &save);
-        if (!case_name || !expected || !count_text) {
+        if (!case_name || !expected || !mode || !count_text ||
+            (strcmp(mode, "normal") && strcmp(mode, "quic_yield"))) {
             fclose(fixture);
             return 3;
         }
@@ -73,20 +75,29 @@ int main(int argc, char **argv)
         }
         for (unsigned long i = 0; i < count; i++) {
             char *entry = strtok_r(NULL, " \t\r\n", &save);
-            char name[256];
+            char name[256], task_state[16];
             unsigned transport;
             unsigned long long queued_event, hot_event;
             long long queued_age_ms;
-            if (!entry || sscanf(entry, "%255[^/]/%u/%llu/%llu/%lld", name,
+            if (!entry || sscanf(entry, "%255[^/]/%u/%llu/%llu/%lld/%15s", name,
                                  &transport, &queued_event, &hot_event,
-                                 &queued_age_ms) != 5 ||
+                                 &queued_age_ms, task_state) != 6 ||
                 (transport != 6 && transport != 17) || queued_age_ms < 0) {
                 free(scheduler);
                 fclose(fixture);
                 return 3;
             }
             task *queued = &scheduler->tasks[i];
-            queued->state = T_QUEUED;
+            if (!strcmp(task_state, "queued")) {
+                queued->state = T_QUEUED;
+            } else if (!strcmp(task_state, "parked") && transport == 17) {
+                queued->state = T_ASKING;
+                queued->quic_parked = 1;
+            } else {
+                free(scheduler);
+                fclose(fixture);
+                return 3;
+            }
             queued->transport = (uint8_t)transport;
             queued->queued_event = (uint64_t)queued_event;
             queued->hot_event = (uint64_t)hot_event;
@@ -112,5 +123,5 @@ int main(int argc, char **argv)
         cases++;
     }
     fclose(fixture);
-    return cases == 3 ? 0 : 5;
+    return cases == 4 ? 0 : 5;
 }

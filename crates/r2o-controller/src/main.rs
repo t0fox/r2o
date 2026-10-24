@@ -20564,20 +20564,31 @@ mod tests {
             if fields.is_empty() || fields[0].starts_with('#') {
                 continue;
             }
-            let [case_name, expected, count, entries @ ..] = fields.as_slice() else {
+            let [case_name, expected, mode, count, entries @ ..] = fields.as_slice() else {
                 panic!("malformed d2o scheduler queue fixture: {line}");
             };
             let count = count.parse::<usize>().unwrap();
             assert_eq!(entries.len(), count, "fixture task count: {line}");
+            if *mode != "normal" {
+                continue;
+            }
 
             let now = Instant::now();
             let mut queue = R2oDiscoveryQueue::default();
             for entry in entries.iter().copied() {
                 let parts = entry.split('/').collect::<Vec<_>>();
-                let [host, transport, queued_event, hot_event, queued_age_ms] = parts.as_slice()
+                let [
+                    host,
+                    transport,
+                    queued_event,
+                    hot_event,
+                    queued_age_ms,
+                    task_state,
+                ] = parts.as_slice()
                 else {
                     panic!("malformed d2o scheduler queue task: {entry}");
                 };
+                assert_eq!(*task_state, "queued", "normal queue row: {entry}");
                 let transport = transport.parse::<u8>().unwrap();
                 let queued_event = queued_event.parse::<u64>().unwrap();
                 let hot_event = hot_event.parse::<u64>().unwrap();
