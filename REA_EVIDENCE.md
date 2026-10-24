@@ -7238,3 +7238,31 @@ Finished создаёт только dev-feature; обычная сборка fe
 --offline --workspace`, `cargo +1.98.0 fmt --all -- --check`, `sh -n` скрипта и
 `git diff --check` прошли. Роутер не проверялся по просьбе пользователя; эта запись
 не утверждает полевой или полный проектный паритет.
+
+## REA-сверка остальных запрошенных модулей — donor `783aa75`, 24.10.2026
+
+Эталон — тот же чистый `t0fox/d2o` commit
+`783aa75ce44dd6192cd1f4f1d98e4fe909ef3045`; SHA-256 C-файлов:
+`core/sched.c` `aee97d92aa37ca3b8b3f3ce47ca636a02cbea71fde989eb113376f35496df45c`,
+`core/verify.c` `5cd17fd9948570a59c793579648a62d5e0c9efc75499a27d9a8d1c5956c047c7`,
+`core/meas.c` `d381f4705b813efbd320a22328bed1a0f59f963118eddb798e3f8b7236b5e814`,
+`detect/classify.c` `7df41b732a32bd1f388ae25ccef4e672c1313a58de8a6053bcd6e82a9ef34f7f`,
+`detect/raw.c` `afa718d954bc599a03324e342771970681d18f24d3b2a50e17aa4d03c7657e23`,
+`core/d2kc.c` `f8b7487fe4b8b38d350a5beba470f1e0bef0e8471338fb007c49fd2f617b56cb`.
+
+| Исходная C-функция / правило | Rust-аналог | C/Rust результат на общих сценариях |
+|---|---|---|
+| `core/sched.c::d2k_sched_tick`, `d2k_sched_sync_step`: очередь, сроки, повторы и последовательная установка каталога | `DiscoveryWorker` в `crates/r2o-controller/src/main.rs`; `install_catalog_with_policy` | `scripts/r2o-scheduler-differential.sh` прошёл на donor `783aa75`; C `test_sched` и Rust scheduler-сценарии прошли, включая worker/permit, ACK/APPLIED, deadline/retry и сохранение плана. C `test_catalog_sync` сохранил актуальный контекст, TLS-версии и семейства; Rust catalog install tests прошли. REA: `d2k_sched_tick` — `ev_0b562f8ef31c3f52474e4d814abe50dde623b12964047aedcfa52b09d7a58bcc`; `d2k_sched_sync_step` — `ev_b953c172f47d1049e056bc83ee45cc7833d3208df0a38c1736432143a994aee1`. |
+| `core/sched.c::d2k_sched_event` и `core/d2kc.c::main`: ACK/APPLIED, чтение событий и переход к персистентности | `ControlClient::watch_events`, `remember_applied_event`, `R2oCatalogPersistence` в `main.rs` | Тот же scheduler diff прошёл с проверкой соответствия ACK и APPLIED; `core/test_d2kc_proto`, Rust tests persistence и C/Rust catalog install tests прошли. REA подтвердило `main` в `core/d2kc` (`ev_afad50d421e4cf21b290faed66e920b98e2f4b02d4255bbef369d9a0bb4a3f24`, тело 9 132 байта). Запрос REA для `d2k_sched_event` завершился ошибкой Ghidra `Unable to find unique hash for varnode`; здесь поведенческое свидетельство — исходник и тесты, псевдокод не заявляется. |
+| `core/meas.c::d2k_meas_once`, `d2k_meas`: ошибки отправки, приём, tally и повторы | `classify.rs::measure` и `ProbeBackend::probe_outcome` | C `test_meas` прошёл; shared CLEAR-вектор проверил одинаковый вход C/Rust и дал `clear probes=3 repeats=3 mark=45`. REA: `d2k_meas_once` — `ev_a82a38d0babfbca5beb48d9489bf4785175a10c026faf619578d06353e968e73` (1 282 байта), `d2k_meas` — `ev_bccd7622199903be8ab6cf2733fbf4de13b97a35f87cab664a56e740c20e0dbb` (333 байта). |
+| `detect/classify.c::d2k_classify_run`: CLEAR после базовых замеров включает проверку ответного направления при пригодном SNI; блокированный ответ меняет результат на RESPONSE | `classify.rs::run_with_backend_progress` и `response::probe_response` | CLEAR-вектор и 13 C/Rust TLS-response векторов из общей таблицы прошли. Rust сохраняет результат response-проверки и учитывает её зонды. REA `d2k_classify_run` — `ev_6baa2755e1facb7b4994bf20add770c8cefe237ec65957c9ebb38fff1ca7737e` (9 316 байт). |
+| `core/d2kask.c::main`: пять вопросов в donor-порядке с соответствующими параметрами | `ask::question_plan`, `ask::record_question_passed` | `scripts/r2o-ask-differential.sh` прошёл: C `d2kask` и Rust тест сопоставили пять вопросов, порядок и параметры; Rust Ask: 9/9. |
+| `detect/raw.c::rst_rule_cmd_form`, `d2k_raw_probe_handshake_as`: nft tuple и raw SYN-зонд | `raw_probe::RstRule::install`, `RawConn::connect` | C/Rust fixture подтвердил `D2K_FW=nft` у донора и `R2O_FW=nft` у R2O, ту же таблицу `inet d2k_rst`, family/address/source-port/destination-port и 300-секундный timeout. `scripts/test-d2o-shared-fixtures.sh` прошёл. REA wrapper `d2k_raw_probe_handshake_as` — `ev_3b802585f09798d76029894be250d81702d733d323da01b9bf2abdca0385cffb` (94 байта; вызывает `raw_dial`). |
+
+Дополнительно `scripts/r2o-fetch-cli-differential.sh` прошёл на одинаковых локальных
+DNS/QUIC/mark-входах; C `test_verify`, `test_d2kc_proto`, `test_catalog_sync`,
+`test_sched_summary`, `test_meas` и `test_response`, а также полный Rust workspace
+на текущем commit прошли. Эти тесты подтверждают перечисленные ветви, но не все
+возможные внешние TLS/ECH endpoints и не полевой запуск. Пользователь попросил
+не подключаться к роутеру: OpenWrt-проверка не выполнялась, поэтому паритет в
+целом не объявляется.
