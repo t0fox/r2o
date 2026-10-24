@@ -30,7 +30,7 @@ use r2o_controller::ask::{
     hello_shape, hello_sni, parse_ask_options, question_plan, read_hex_file,
     record_question_passed, validate_hello,
 };
-use r2o_controller::catalog::{Catalog, DomainObservation, GroupKey};
+use r2o_controller::catalog::{BoxRecord, Catalog, DomainObservation, GroupKey};
 use r2o_controller::classify::{
     Accept, ClassifyOptions, Trigger, Verdict, run as classify_run,
     run_with_backend_progress as classify_run_with_progress,
@@ -1333,18 +1333,110 @@ struct CatalogLock(std::fs::File);
 const R2O_CATALOG_SAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[cfg(unix)]
+fn r2o_merge_catalog_value<T: Clone + PartialEq>(
+    base: Option<T>,
+    local: Option<T>,
+    external: Option<T>,
+    field: &str,
+) -> Result<Option<T>, Box<dyn Error>> {
+    if local == base {
+        return Ok(external);
+    }
+    if external == base || local == external {
+        return Ok(local);
+    }
+    Err(format!("параллельное изменение каталога конфликтует в {field}").into())
+}
+
+#[cfg(unix)]
+fn r2o_catalog_boxes_by_id(
+    catalog: &Catalog,
+    source: &str,
+) -> Result<HashMap<String, BoxRecord>, Box<dyn Error>> {
+    let mut boxes = HashMap::with_capacity(catalog.boxes.len());
+    for record in &catalog.boxes {
+        if boxes.insert(record.id.clone(), record.clone()).is_some() {
+            return Err(format!("каталог содержит повторный id коробки в {source}").into());
+        }
+    }
+    Ok(boxes)
+}
+
+#[cfg(unix)]
+fn r2o_merge_catalog(
+    base: &Catalog,
+    local: &Catalog,
+    external: &Catalog,
+) -> Result<Catalog, Box<dyn Error>> {
+    if external == base {
+        return Ok(local.clone());
+    }
+    if local == base {
+        return Ok(external.clone());
+    }
+    if local == external {
+        return Ok(local.clone());
+    }
+
+    let base_boxes = r2o_catalog_boxes_by_id(base, "исходном снимке")?;
+    let local_boxes = r2o_catalog_boxes_by_id(local, "локальном снимке")?;
+    let external_boxes = r2o_catalog_boxes_by_id(external, "текущем файле")?;
+    let mut ids = Vec::with_capacity(local.boxes.len() + external.boxes.len());
+    let mut seen = HashSet::with_capacity(ids.capacity());
+    for record in external.boxes.iter().chain(&local.boxes) {
+        if seen.insert(record.id.clone()) {
+            ids.push(record.id.clone());
+        }
+    }
+    let mut boxes = Vec::with_capacity(ids.len());
+    for id in ids {
+        let merged = r2o_merge_catalog_value(
+            base_boxes.get(&id).cloned(),
+            local_boxes.get(&id).cloned(),
+            external_boxes.get(&id).cloned(),
+            &format!("boxes[{id}]"),
+        )?;
+        if let Some(record) = merged {
+            boxes.push(record);
+        }
+    }
+
+    Ok(Catalog {
+        boxes,
+        domain_state: r2o_merge_catalog_value(
+            base.domain_state.clone(),
+            local.domain_state.clone(),
+            external.domain_state.clone(),
+            "domain_state",
+        )?,
+        network_whitelist: r2o_merge_catalog_value(
+            base.network_whitelist.clone(),
+            local.network_whitelist.clone(),
+            external.network_whitelist.clone(),
+            "network_whitelist",
+        )?,
+    })
+}
+
+#[cfg(unix)]
 struct R2oCatalogPersistence {
     last_save: std::time::Instant,
     dirty: bool,
+    last_persisted: Catalog,
     catalog_snapshot: Arc<std::sync::Mutex<Catalog>>,
 }
 
 #[cfg(unix)]
 impl R2oCatalogPersistence {
-    fn new(started: std::time::Instant, catalog_snapshot: Arc<std::sync::Mutex<Catalog>>) -> Self {
+    fn new(
+        started: std::time::Instant,
+        last_persisted: Catalog,
+        catalog_snapshot: Arc<std::sync::Mutex<Catalog>>,
+    ) -> Self {
         Self {
             last_save: started,
             dirty: false,
+            last_persisted,
             catalog_snapshot,
         }
     }
@@ -1355,7 +1447,7 @@ impl R2oCatalogPersistence {
 
     fn persist_due(
         &mut self,
-        catalog: &Catalog,
+        catalog: &mut Catalog,
         path: &Path,
         now: std::time::Instant,
         wall_now: i64,
@@ -1373,7 +1465,7 @@ impl R2oCatalogPersistence {
 
     fn persist_on_shutdown(
         &mut self,
-        catalog: &Catalog,
+        catalog: &mut Catalog,
         path: &Path,
         wall_now: i64,
     ) -> Result<bool, Box<dyn Error>> {
@@ -1386,12 +1478,19 @@ impl R2oCatalogPersistence {
 
     fn persist(
         &mut self,
-        catalog: &Catalog,
+        catalog: &mut Catalog,
         path: &Path,
         wall_now: i64,
     ) -> Result<(), Box<dyn Error>> {
-        let _lock = CatalogLock::acquire(path)?;
-        catalog.save_atomic(path, wall_now)?;
+        let (_lock, external) = locked_catalog(path, &self.last_persisted)?;
+        let merged = r2o_merge_catalog(&self.last_persisted, catalog, &external)?;
+        merged.save_atomic(path, wall_now)?;
+        self.last_persisted = merged.clone();
+        *catalog = merged.clone();
+        *self
+            .catalog_snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = merged;
         self.dirty = false;
         Ok(())
     }
@@ -9528,9 +9627,17 @@ impl ControlClient {
         let catalog_snapshot = discovery
             .as_ref()
             .map(|(catalog, _, _)| Arc::new(std::sync::Mutex::new(catalog.clone())));
-        let mut catalog_persistence = catalog_snapshot.as_ref().map(|snapshot| {
-            R2oCatalogPersistence::new(std::time::Instant::now(), Arc::clone(snapshot))
-        });
+        let mut catalog_persistence =
+            discovery
+                .as_ref()
+                .zip(catalog_snapshot.as_ref())
+                .map(|((catalog, _, _), snapshot)| {
+                    R2oCatalogPersistence::new(
+                        std::time::Instant::now(),
+                        catalog.clone(),
+                        Arc::clone(snapshot),
+                    )
+                });
         let mut discovery = discovery.map(|(catalog, path, mark)| {
             (
                 DiscoveryWorker::new_with_confirmation(
@@ -9652,7 +9759,7 @@ impl ControlClient {
                     }
                 }
                 if let (Some(persistence), Some((_, catalog, path, _))) =
-                    (catalog_persistence.as_mut(), discovery.as_ref())
+                    (catalog_persistence.as_mut(), discovery.as_mut())
                 {
                     let wall_now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -11543,7 +11650,7 @@ impl ControlClient {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs() as i64;
-                if let Err(error) = persistence.persist_on_shutdown(&catalog, &path, wall_now) {
+                if let Err(error) = persistence.persist_on_shutdown(&mut catalog, &path, wall_now) {
                     eprintln!("каталог не сохранён на выходе: {error}");
                 }
             }
@@ -21264,8 +21371,11 @@ mod tests {
                 super::r2o_confirm_discovery_outcome(outcome, Ok(r2o_test_fetch_result()), true);
             let save_started = std::time::Instant::now();
             let catalog_snapshot = std::sync::Arc::new(std::sync::Mutex::new(catalog.clone()));
-            let mut persistence =
-                super::R2oCatalogPersistence::new(save_started, Arc::clone(&catalog_snapshot));
+            let mut persistence = super::R2oCatalogPersistence::new(
+                save_started,
+                catalog.clone(),
+                Arc::clone(&catalog_snapshot),
+            );
             let result = client.apply_discovery_outcome_with_input_and_persistence(
                 outcome,
                 &mut catalog,
@@ -21283,7 +21393,7 @@ mod tests {
             assert!(
                 !persistence
                     .persist_due(
-                        &catalog,
+                        &mut catalog,
                         &catalog_path,
                         save_started + std::time::Duration::from_secs(59),
                         100,
@@ -21297,7 +21407,7 @@ mod tests {
             assert!(
                 persistence
                     .persist_due(
-                        &catalog,
+                        &mut catalog,
                         &catalog_path,
                         save_started + std::time::Duration::from_secs(60),
                         100,
@@ -21369,22 +21479,34 @@ mod tests {
         std::fs::create_dir(&work).unwrap();
         let path = work.join("catalog.json");
         Catalog::default().save_atomic(&path, 1).unwrap();
-        let mut catalog = Catalog::default();
+        let initial_catalog = Catalog::default();
+        let mut catalog = initial_catalog.clone();
         catalog.boxes.push(BoxRecord {
             id: "shutdown-persisted".into(),
             ..BoxRecord::default()
         });
-        let catalog_snapshot = std::sync::Arc::new(std::sync::Mutex::new(catalog.clone()));
-        let mut persistence =
-            super::R2oCatalogPersistence::new(std::time::Instant::now(), catalog_snapshot);
+        let catalog_snapshot = std::sync::Arc::new(std::sync::Mutex::new(initial_catalog.clone()));
+        let mut persistence = super::R2oCatalogPersistence::new(
+            std::time::Instant::now(),
+            initial_catalog,
+            catalog_snapshot,
+        );
         persistence.mark_dirty();
 
-        assert!(persistence.persist_on_shutdown(&catalog, &path, 2).unwrap());
+        assert!(
+            persistence
+                .persist_on_shutdown(&mut catalog, &path, 2)
+                .unwrap()
+        );
         assert_eq!(
             Catalog::load(&path).unwrap().boxes[0].id,
             "shutdown-persisted"
         );
-        assert!(!persistence.persist_on_shutdown(&catalog, &path, 3).unwrap());
+        assert!(
+            !persistence
+                .persist_on_shutdown(&mut catalog, &path, 3)
+                .unwrap()
+        );
         std::fs::remove_dir_all(work).unwrap();
     }
 
@@ -21405,8 +21527,11 @@ mod tests {
         let mut catalog = Catalog::default();
         let started = std::time::Instant::now();
         let catalog_snapshot = std::sync::Arc::new(std::sync::Mutex::new(catalog.clone()));
-        let mut persistence =
-            super::R2oCatalogPersistence::new(started, Arc::clone(&catalog_snapshot));
+        let mut persistence = super::R2oCatalogPersistence::new(
+            started,
+            catalog.clone(),
+            Arc::clone(&catalog_snapshot),
+        );
 
         super::r2o_apply_network_whitelist_update(
             &mut catalog,
@@ -21437,7 +21562,7 @@ mod tests {
         assert!(
             persistence
                 .persist_due(
-                    &catalog,
+                    &mut catalog,
                     &path,
                     started + std::time::Duration::from_secs(60),
                     62,
@@ -21452,6 +21577,108 @@ mod tests {
                 .name,
             "example.net"
         );
+        std::fs::remove_dir_all(work).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delayed_catalog_persist_preserves_concurrent_distinct_box_updates() {
+        let work = std::env::temp_dir().join(format!(
+            "r2o-catalog-interval-merge-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&work).unwrap();
+        let path = work.join("catalog.json");
+        Catalog::default().save_atomic(&path, 1).unwrap();
+        let mut catalog = Catalog::default();
+        catalog.boxes.push(BoxRecord {
+            id: "local-update".into(),
+            ..BoxRecord::default()
+        });
+        let started = std::time::Instant::now();
+        let snapshot = std::sync::Arc::new(std::sync::Mutex::new(Catalog::default()));
+        let mut persistence =
+            super::R2oCatalogPersistence::new(started, Catalog::default(), snapshot);
+        super::persist_catalog_update(&catalog, &path, 2, Some(&mut persistence)).unwrap();
+
+        let (lock, mut external) = locked_catalog(&path, &Catalog::default()).unwrap();
+        external.boxes.push(BoxRecord {
+            id: "external-update".into(),
+            ..BoxRecord::default()
+        });
+        external.save_atomic(&path, 3).unwrap();
+        drop(lock);
+
+        assert!(
+            persistence
+                .persist_due(
+                    &mut catalog,
+                    &path,
+                    started + std::time::Duration::from_secs(60),
+                    62,
+                )
+                .unwrap()
+        );
+        let saved = Catalog::load(&path).unwrap();
+        assert_eq!(
+            saved
+                .boxes
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<std::collections::HashSet<_>>(),
+            std::collections::HashSet::from(["local-update", "external-update"])
+        );
+        std::fs::remove_dir_all(work).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delayed_catalog_persist_does_not_choose_a_winner_for_same_box_conflict() {
+        let work = std::env::temp_dir().join(format!(
+            "r2o-catalog-interval-conflict-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&work).unwrap();
+        let path = work.join("catalog.json");
+        let mut base = Catalog::default();
+        base.boxes.push(BoxRecord {
+            id: "shared-box".into(),
+            updated: 1,
+            ..BoxRecord::default()
+        });
+        base.save_atomic(&path, 1).unwrap();
+        let mut local = base.clone();
+        local.boxes[0].updated = 2;
+        let started = std::time::Instant::now();
+        let snapshot = std::sync::Arc::new(std::sync::Mutex::new(base.clone()));
+        let mut persistence = super::R2oCatalogPersistence::new(started, base.clone(), snapshot);
+        super::persist_catalog_update(&local, &path, 2, Some(&mut persistence)).unwrap();
+
+        let (lock, mut external) = locked_catalog(&path, &base).unwrap();
+        external.boxes[0].updated = 3;
+        external.save_atomic(&path, 3).unwrap();
+        drop(lock);
+
+        assert!(
+            persistence
+                .persist_due(
+                    &mut local,
+                    &path,
+                    started + std::time::Duration::from_secs(60),
+                    62,
+                )
+                .is_err()
+        );
+        assert_eq!(Catalog::load(&path).unwrap().boxes[0].updated, 3);
+        assert!(persistence.dirty);
         std::fs::remove_dir_all(work).unwrap();
     }
 

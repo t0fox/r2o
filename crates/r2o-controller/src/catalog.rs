@@ -20,14 +20,14 @@ const VOLUME_SLACK: i64 = 4;
 pub const FINGERPRINT_METHOD: i32 = 2;
 static NEXT_DONOR_IMPORT: AtomicUsize = AtomicUsize::new(0);
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Catalog {
     pub boxes: Vec<BoxRecord>,
     pub domain_state: Option<DomainState>,
     pub network_whitelist: Option<NetworkWhitelist>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct BoxRecord {
     pub id: String,
@@ -42,7 +42,7 @@ pub struct BoxRecord {
     pub bindings: Vec<Binding>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct Fingerprint {
     pub method: i32,
@@ -110,7 +110,7 @@ impl Fingerprint {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct Signal {
     pub kind: String,
@@ -124,7 +124,7 @@ pub struct Signal {
     pub packets: i32,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct Plan {
     pub id: String,
@@ -136,7 +136,7 @@ pub struct Plan {
     pub enabled: bool,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct Binding {
     pub kind: String,
@@ -180,7 +180,7 @@ pub struct GroupKey {
     pub ech_origin: String,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct DomainObservation {
     pub name: String,
@@ -192,7 +192,7 @@ pub struct DomainObservation {
     pub at: i64,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct DomainGroup {
     pub suffix: String,
@@ -204,7 +204,7 @@ pub struct DomainGroup {
     pub at: i64,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct DomainState {
     /// Производный кеш; источником истины остаётся `domain_observations`.
     pub groups: Vec<DomainGroup>,
@@ -214,7 +214,7 @@ pub struct DomainState {
     pub disabled_at: Option<i64>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct NetworkWhitelist {
     pub name: String,
