@@ -15,6 +15,23 @@ trap 'rm -rf -- "$tmp_dir"' EXIT HUP INT TERM
 cc=${CC:-clang-18}
 donor_core="$donor_root/core"
 
+make -s -C "$donor_core" tcp1620_whitelist.inc
+"$cc" -std=gnu11 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+    -pthread -I"$donor_core/include" -I"$donor_root/datapath/include" \
+    -DD2K_RELEASE_ID='"dev"' \
+    -DD2O_SCHED_SOURCE='"'"$donor_core"'/sched.c"' \
+    "$repo_root/crates/r2o-controller/tests/d2o_probe_budget_differential.c" \
+    "$donor_core/compose.c" -Wl,--gc-sections -o "$tmp_dir/probe-budget"
+probe_budget_fixture="$repo_root/crates/r2o-controller/tests/fixtures/d2o_probe_budget.tsv"
+"$tmp_dir/probe-budget" "$probe_budget_fixture" >"$tmp_dir/c-probe-budget.out"
+R2O_PROBE_BUDGET_DIFF_C_OUTPUT="$tmp_dir/c-probe-budget.out" \
+    R2O_PROBE_BUDGET_DIFF_OUTPUT="$tmp_dir/rust-probe-budget.out" \
+    cargo +1.98.0 test --locked -p r2o-controller --bin r2o-controller \
+    d2o_probe_budget_matches_donor
+diff -u "$tmp_dir/c-probe-budget.out" "$tmp_dir/rust-probe-budget.out"
+cat "$tmp_dir/c-probe-budget.out"
+printf 'C/Rust donor probe budgets match, including network whitelist allowance\n'
+
 "$cc" -std=gnu11 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
     -pthread -I"$donor_core/include" -I"$donor_root/datapath/include" \
     -DD2K_RELEASE_ID='"dev"' -c "$donor_core/sched.c" -o "$tmp_dir/sched.o"

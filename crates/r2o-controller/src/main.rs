@@ -20693,6 +20693,44 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn d2o_probe_budget_matches_donor() {
+        let mut output = Vec::new();
+        for line in include_str!("../tests/fixtures/d2o_probe_budget.tsv").lines() {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.is_empty() || fields[0].starts_with('#') {
+                continue;
+            }
+            let [case_name, network_probe] = fields.as_slice() else {
+                panic!("malformed d2o probe budget fixture: {line}");
+            };
+            let network_probe = match *network_probe {
+                "0" => false,
+                "1" => true,
+                _ => panic!("invalid network probe flag: {network_probe}"),
+            };
+            let probe_cap = super::R2O_DISCOVERY_PROBE_CAP.saturating_add(if network_probe {
+                r2o_controller::r2o_rx_volume::r2o_rx_volume_name_count()
+            } else {
+                0
+            });
+            output.push(format!("{case_name} {probe_cap}"));
+        }
+
+        let output = format!("{}\n", output.join("\n"));
+        if let Ok(path) = std::env::var("R2O_PROBE_BUDGET_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        if let Ok(path) = std::env::var("R2O_PROBE_BUDGET_DIFF_C_OUTPUT") {
+            assert_eq!(
+                std::fs::read_to_string(path).unwrap(),
+                output,
+                "C/Rust d2o probe budgets differ"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn d2o_scheduler_queue_expiry_matches_donor() {
         use super::{R2O_DISCOVERY_TASK_LIFETIME, R2oDiscoveryQueue, R2oDiscoveryQueueEntry};
         use std::time::{Duration, Instant};

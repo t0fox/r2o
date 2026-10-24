@@ -7405,6 +7405,24 @@ C `d2kask` — все проверки, Rust Ask — 9/9. Повторный
 проверки за 428 секунд, Rust scheduler/worker/permit/APPLIED/QUIC сценарии без
 ошибок; журнал `.rea/r2o-scheduler-differential-20261024-214130.log`.
 
+Чтобы проверить именно формулу потолка одинаковым входом, добавлены fixture
+`crates/r2o-controller/tests/fixtures/d2o_probe_budget.tsv` и прямой C harness
+`crates/r2o-controller/tests/d2o_probe_budget_differential.c`. Он включает
+donor `core/sched.c` и вызывает исходную статическую
+`sched_probe_cap(const task *)`; Rust аналог проверяется тестом
+`tests::d2o_probe_budget_matches_donor`, использующим формулу из
+`r2o_discovery_volume_recovery` и `R2O_DISCOVERY_PROBE_CAP`. Запуск
+`R2O_DONOR_ROOT=/mnt/e/tmp/r2o-d2o-current scripts/r2o-resource-limit-differential.sh`
+завершился с кодом 0; C и Rust вывели одинаково:
+
+```text
+ordinary 67
+network_whitelist 333
+```
+
+Значение 333 — 67 базовых зондов плюс 266 имён donor whitelist. Это локальный
+одинаковый-input дифференциальный тест; он не заменяет полевую проверку.
+
 Concurrency у donor начинается с `SCHED_DEFAULT_ACTIVE_MEASUREMENTS=2`, а
 `SCHED_MEASURE_SLOTS` даёт ёмкость до 64; Rust сохраняет старт 2 и worker cap
 64 с AIMD. Дифференциальный набор проверил 11 одинаковых C/Rust ресурсных
