@@ -1330,6 +1330,107 @@ fn serve_catalog(
 struct CatalogLock(std::fs::File);
 
 #[cfg(unix)]
+const R2O_CATALOG_SAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+#[cfg(unix)]
+struct R2oCatalogPersistence {
+    last_save: std::time::Instant,
+    dirty: bool,
+    catalog_snapshot: Arc<std::sync::Mutex<Catalog>>,
+}
+
+#[cfg(unix)]
+impl R2oCatalogPersistence {
+    fn new(started: std::time::Instant, catalog_snapshot: Arc<std::sync::Mutex<Catalog>>) -> Self {
+        Self {
+            last_save: started,
+            dirty: false,
+            catalog_snapshot,
+        }
+    }
+
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    fn persist_due(
+        &mut self,
+        catalog: &Catalog,
+        path: &Path,
+        now: std::time::Instant,
+        wall_now: i64,
+    ) -> Result<bool, Box<dyn Error>> {
+        if now.saturating_duration_since(self.last_save) < R2O_CATALOG_SAVE_INTERVAL {
+            return Ok(false);
+        }
+        self.last_save = now;
+        if !self.dirty {
+            return Ok(false);
+        }
+        self.persist(catalog, path, wall_now)?;
+        Ok(true)
+    }
+
+    fn persist_on_shutdown(
+        &mut self,
+        catalog: &Catalog,
+        path: &Path,
+        wall_now: i64,
+    ) -> Result<bool, Box<dyn Error>> {
+        if !self.dirty {
+            return Ok(false);
+        }
+        self.persist(catalog, path, wall_now)?;
+        Ok(true)
+    }
+
+    fn persist(
+        &mut self,
+        catalog: &Catalog,
+        path: &Path,
+        wall_now: i64,
+    ) -> Result<(), Box<dyn Error>> {
+        let _lock = CatalogLock::acquire(path)?;
+        catalog.save_atomic(path, wall_now)?;
+        self.dirty = false;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn persist_catalog_update(
+    catalog: &Catalog,
+    path: &Path,
+    now: i64,
+    persistence: Option<&mut R2oCatalogPersistence>,
+) -> Result<(), Box<dyn Error>> {
+    if let Some(persistence) = persistence {
+        persistence.mark_dirty();
+        *persistence
+            .catalog_snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = catalog.clone();
+        Ok(())
+    } else {
+        catalog.save_atomic(path, now)?;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn locked_catalog_for_persistence(
+    path: &Path,
+    fallback: &Catalog,
+    persistence: Option<&R2oCatalogPersistence>,
+) -> Result<(CatalogLock, Catalog), Box<dyn Error>> {
+    if persistence.is_some_and(|persistence| persistence.dirty) {
+        Ok((CatalogLock::acquire(path)?, fallback.clone()))
+    } else {
+        locked_catalog(path, fallback)
+    }
+}
+
+#[cfg(unix)]
 impl CatalogLock {
     fn acquire(path: &Path) -> Result<Self, Box<dyn Error>> {
         use std::fs::OpenOptions;
@@ -1390,6 +1491,7 @@ fn locked_catalog(
 }
 
 #[cfg(unix)]
+#[cfg(test)]
 fn r2o_discovery_record_network_whitelist(
     path: &Path,
     fallback: &Catalog,
@@ -1416,6 +1518,34 @@ fn r2o_discovery_record_network_whitelist(
     catalog
         .save_atomic(path, now.max(1))
         .map_err(|error| format!("не удалось сохранить белое имя сети: {error}"))
+}
+
+#[cfg(unix)]
+fn r2o_apply_network_whitelist_update(
+    catalog: &mut Catalog,
+    path: &Path,
+    discovered_name: Option<&str>,
+    now: i64,
+    persistence: Option<&mut R2oCatalogPersistence>,
+) -> Result<(), Box<dyn Error>> {
+    let (_lock, previous) = locked_catalog_for_persistence(path, catalog, persistence.as_deref())?;
+    let mut updated = previous;
+    let network = updated
+        .network_whitelist
+        .get_or_insert_with(r2o_controller::catalog::NetworkWhitelist::default);
+    if let Some(name) = discovered_name {
+        if !network.name.is_empty() && network.name != name {
+            return Ok(());
+        }
+        network.name = name.to_owned();
+        network.searched = true;
+        network.confirmed_at = Some(now.max(1));
+    } else if network.name.is_empty() {
+        network.searched = true;
+    }
+    persist_catalog_update(&updated, path, now.max(1), persistence)?;
+    *catalog = updated;
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -5307,6 +5437,7 @@ struct DiscoveryWorker {
     catalog_refreshes: Arc<std::sync::Mutex<HashSet<R2oDiscoveryTaskKey>>>,
     searches: Arc<std::sync::Mutex<R2oDiscoverySearches>>,
     outcomes: Receiver<R2oDiscoveryWorkOutcome>,
+    network_whitelist_updates: Arc<std::sync::Mutex<VecDeque<Option<String>>>>,
     cancel: Arc<AtomicBool>,
     seen: HashSet<r2o_controller::discovery::DiscoveryTarget>,
     seen_order: VecDeque<r2o_controller::discovery::DiscoveryTarget>,
@@ -6074,8 +6205,9 @@ impl DiscoveryWorker {
         send_cap: Arc<AtomicUsize>,
         measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
         commands: SyncSender<HttpSearchCommand>,
-        catalog_path: PathBuf,
         recent_tcp_names: Arc<std::sync::Mutex<R2oRecentTcpNameCache>>,
+        network_whitelist_updates: Arc<std::sync::Mutex<VecDeque<Option<String>>>>,
+        catalog_snapshot: Arc<std::sync::Mutex<Catalog>>,
     ) -> Self {
         let searches = Arc::new(std::sync::Mutex::new(R2oDiscoverySearches::default()));
         let runner_searches = Arc::clone(&searches);
@@ -6106,6 +6238,8 @@ impl DiscoveryWorker {
             R2oDiscoveryVolumeSearchCache::default(),
         ));
         let runner_volume_searches = Arc::clone(&volume_searches);
+        let runner_network_whitelist_updates = Arc::clone(&network_whitelist_updates);
+        let runner_catalog_snapshot = Arc::clone(&catalog_snapshot);
         let runner: Arc<R2oDiscoveryRunner> = Arc::new(move |target, cancel| {
             let runner_started = std::time::Instant::now();
             runner_searches
@@ -6122,15 +6256,12 @@ impl DiscoveryWorker {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(&r2o_discovery_task_key(&target))
                 .copied();
-            let candidate_catalog = match Catalog::load(&catalog_path) {
-                Ok(catalog) => Some(catalog),
-                Err(error) => {
-                    if target.shape == SHAPE_ECH_TCP {
-                        eprintln!("ECH-свидетели не прочитаны из каталога: {error}");
-                    }
-                    None
-                }
-            };
+            let candidate_catalog = Some(
+                runner_catalog_snapshot
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
+            );
             let discovered_witness_candidates = if target.shape == SHAPE_ECH_TCP {
                 candidate_catalog
                     .as_ref()
@@ -6268,7 +6399,7 @@ impl DiscoveryWorker {
                 client_has_tcp_timestamps.unwrap_or(true),
                 mark,
                 &commands,
-                &catalog_path,
+                &runner_network_whitelist_updates,
                 candidate_catalog.as_ref(),
                 white_name,
                 &runner_send_cap,
@@ -6566,29 +6697,19 @@ impl DiscoveryWorker {
                         .insert(target.clone(), next_index);
                 }
                 if let Some(name) = discovered_network_name.as_deref() {
-                    if let Some(catalog) = candidate_catalog.as_ref() {
-                        if let Err(error) = r2o_discovery_record_network_whitelist(
-                            &catalog_path,
-                            catalog,
-                            Some(name),
-                        ) {
-                            eprintln!("не удалось сохранить найденное белое имя сети: {error}");
-                        }
-                    }
+                    runner_network_whitelist_updates
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push_back(Some(name.to_owned()));
                 } else if network_probe && next_index >= candidate_count {
                     runner_ech_rx_cursor
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .remove(&target);
-                    if let Some(catalog) = candidate_catalog.as_ref() {
-                        if let Err(error) =
-                            r2o_discovery_record_network_whitelist(&catalog_path, catalog, None)
-                        {
-                            eprintln!(
-                                "не удалось сохранить исчерпание поиска белого имени: {error}"
-                            );
-                        }
-                    }
+                    runner_network_whitelist_updates
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push_back(None);
                 } else if next_index >= candidate_count {
                     runner_ech_rx_cursor
                         .lock()
@@ -6682,6 +6803,7 @@ impl DiscoveryWorker {
             client_tcp_timestamps,
             resource_memory,
             searches,
+            network_whitelist_updates,
         )
     }
 
@@ -6697,6 +6819,7 @@ impl DiscoveryWorker {
             Arc::new(std::sync::Mutex::new(
                 r2o_controller::r2o_resource::R2oResourceMemory::default(),
             )),
+            Arc::new(std::sync::Mutex::new(VecDeque::new())),
         )
     }
 
@@ -6706,6 +6829,7 @@ impl DiscoveryWorker {
         runner: Arc<R2oDiscoveryRunner>,
         client_hellos: Arc<std::sync::Mutex<HashMap<R2oDiscoveryTaskKey, Vec<u8>>>>,
         resource_memory: Arc<std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>>,
+        network_whitelist_updates: Arc<std::sync::Mutex<VecDeque<Option<String>>>>,
     ) -> Self {
         Self::r2o_new_with_client_state(
             measurement_gate,
@@ -6714,6 +6838,7 @@ impl DiscoveryWorker {
             Arc::new(std::sync::Mutex::new(HashMap::new())),
             resource_memory,
             Arc::new(std::sync::Mutex::new(R2oDiscoverySearches::default())),
+            network_whitelist_updates,
         )
     }
 
@@ -6724,6 +6849,7 @@ impl DiscoveryWorker {
         client_tcp_timestamps: Arc<std::sync::Mutex<HashMap<R2oDiscoveryTaskKey, bool>>>,
         resource_memory: Arc<std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>>,
         searches: Arc<std::sync::Mutex<R2oDiscoverySearches>>,
+        network_whitelist_updates: Arc<std::sync::Mutex<VecDeque<Option<String>>>>,
     ) -> Self {
         let jobs = Arc::new((
             std::sync::Mutex::new(R2oDiscoveryQueue::default()),
@@ -6922,6 +7048,7 @@ impl DiscoveryWorker {
             catalog_refreshes,
             searches,
             outcomes,
+            network_whitelist_updates,
             cancel,
             seen: HashSet::new(),
             seen_order: VecDeque::new(),
@@ -7804,6 +7931,13 @@ impl DiscoveryWorker {
         }
         outcome
     }
+
+    fn try_network_whitelist_update(&self) -> Option<Option<String>> {
+        self.network_whitelist_updates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front()
+    }
 }
 
 #[cfg(unix)]
@@ -8060,7 +8194,7 @@ fn r2o_discovery_volume_recovery(
     client_has_tcp_timestamps: bool,
     mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
-    catalog_path: &Path,
+    network_whitelist_updates: &std::sync::Mutex<VecDeque<Option<String>>>,
     candidate_catalog: Option<&Catalog>,
     white_name: &str,
     send_cap: &AtomicUsize,
@@ -8469,12 +8603,11 @@ fn r2o_discovery_volume_recovery(
             &last_result,
         );
         if verified {
-            if network_probe
-                && let (Some(catalog), Some(name)) = (candidate_catalog, discovered_name.as_deref())
-                && let Err(error) =
-                    r2o_discovery_record_network_whitelist(catalog_path, catalog, Some(name))
-            {
-                eprintln!("не удалось сохранить найденное белое имя сети: {error}");
+            if network_probe && let Some(name) = discovered_name.as_deref() {
+                network_whitelist_updates
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push_back(Some(name.to_owned()));
             }
             searches
                 .lock()
@@ -8529,10 +8662,11 @@ fn r2o_discovery_volume_recovery(
     search.next_candidate = next_candidate;
     outcome.plan_text = None;
     if network_probe && next_candidate >= candidate_count {
-        if let Some(catalog) = candidate_catalog
-            && let Err(error) = r2o_discovery_record_network_whitelist(catalog_path, catalog, None)
-        {
-            eprintln!("не удалось сохранить исчерпание поиска белого имени: {error}");
+        if candidate_catalog.is_some() {
+            network_whitelist_updates
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push_back(None);
         }
         search.key.network_probe = false;
         search.key.white_name = "hcaptcha.com".into();
@@ -9297,6 +9431,7 @@ impl ControlClient {
         proof: &r2k_core::control::R2oVoiceProofEvent,
         catalog: &mut Catalog,
         catalog_path: &std::path::Path,
+        mut persistence: Option<&mut R2oCatalogPersistence>,
     ) -> Result<(), Box<dyn Error>> {
         if !trial.response_confirmed {
             return Err("RTP не подтверждает voice-план без Discovery/STUN-ответа".into());
@@ -9321,7 +9456,8 @@ impl ControlClient {
             }
         };
         let verified_by = 5;
-        let (_lock, previous) = locked_catalog(catalog_path, catalog)?;
+        let (_lock, previous) =
+            locked_catalog_for_persistence(catalog_path, catalog, persistence.as_deref())?;
         let mut updated = previous.clone();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -9336,9 +9472,14 @@ impl ControlClient {
         .map_err(|error| format!("не удалось сохранить голосовую привязку: {error}"))?;
         let plan_records = compile_text(&trial.plan_text)?;
         let command = encode_set_voice_addr(*trial.target.server.ip(), &plan_records)?;
-        updated.save_atomic(catalog_path, now)?;
+        persist_catalog_update(&updated, catalog_path, now, persistence.as_deref_mut())?;
         if let Err(install_error) = self.send_command(&command, COMMAND_SET_VOICE_ADDR) {
-            return match previous.save_atomic(catalog_path, now) {
+            return match persist_catalog_update(
+                &previous,
+                catalog_path,
+                now,
+                persistence.as_deref_mut(),
+            ) {
                 Ok(()) => Err(format!(
                     "датапат не подтвердил постоянный voice-план; каталог восстановлен: {install_error}"
                 )
@@ -9383,6 +9524,13 @@ impl ControlClient {
             .as_ref()
             .map(|_| HttpSearchWorker::new(measurement_gate.clone()));
         let tcp_witness_names = Arc::new(std::sync::Mutex::new(R2oRecentTcpNameCache::default()));
+        let network_whitelist_updates = Arc::new(std::sync::Mutex::new(VecDeque::new()));
+        let catalog_snapshot = discovery
+            .as_ref()
+            .map(|(catalog, _, _)| Arc::new(std::sync::Mutex::new(catalog.clone())));
+        let mut catalog_persistence = catalog_snapshot.as_ref().map(|snapshot| {
+            R2oCatalogPersistence::new(std::time::Instant::now(), Arc::clone(snapshot))
+        });
         let mut discovery = discovery.map(|(catalog, path, mark)| {
             (
                 DiscoveryWorker::new_with_confirmation(
@@ -9393,8 +9541,9 @@ impl ControlClient {
                         .as_ref()
                         .expect("HTTP worker существует при активном Discovery")
                         .command_sender(),
-                    path.clone(),
                     Arc::clone(&tcp_witness_names),
+                    Arc::clone(&network_whitelist_updates),
+                    Arc::clone(catalog_snapshot.as_ref().expect("каталог Discovery создан")),
                 ),
                 catalog,
                 path,
@@ -9485,6 +9634,36 @@ impl ControlClient {
                     }
                 }
                 let r2o_now = std::time::Instant::now();
+                if let Some((worker, catalog, path, _)) = discovery.as_mut() {
+                    while let Some(discovered_name) = worker.try_network_whitelist_update() {
+                        let wall_now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+                        if let Err(error) = r2o_apply_network_whitelist_update(
+                            catalog,
+                            path,
+                            discovered_name.as_deref(),
+                            wall_now,
+                            catalog_persistence.as_mut(),
+                        ) {
+                            eprintln!("не удалось обновить белое имя сети в каталоге: {error}");
+                        }
+                    }
+                }
+                if let (Some(persistence), Some((_, catalog, path, _))) =
+                    (catalog_persistence.as_mut(), discovery.as_ref())
+                {
+                    let wall_now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    match persistence.persist_due(catalog, path, r2o_now, wall_now) {
+                        Ok(true) => println!("каталог сохранён после изменения"),
+                        Ok(false) => {}
+                        Err(error) => eprintln!("каталог не сохранён: {error}"),
+                    }
+                }
                 if live_written_at.is_none_or(|last: std::time::Instant| {
                     r2o_now.saturating_duration_since(last) >= std::time::Duration::from_secs(5)
                 }) {
@@ -9609,11 +9788,12 @@ impl ControlClient {
                         );
                     } else {
                         let catalog_changed = outcome.plan_text.is_some() || outcome.direct_clear;
-                        match self.apply_discovery_outcome_with_input(
+                        match self.apply_discovery_outcome_with_input_and_persistence(
                             outcome,
                             catalog,
                             path,
                             if client_input { 1 } else { 2 },
+                            catalog_persistence.as_mut(),
                         ) {
                             Ok(Some(installed_groups)) => {
                                 active_groups = installed_groups.into_iter().collect();
@@ -9913,6 +10093,7 @@ impl ControlClient {
                                     catalog,
                                     path,
                                     &mut quic_deny,
+                                    catalog_persistence.as_mut(),
                                 ) {
                                     Ok(Some(_)) => {}
                                     Ok(None) => quic_deny.r2o_recheck_retry(&outcome.host, family),
@@ -9945,6 +10126,7 @@ impl ControlClient {
                                         &candidate_name,
                                         catalog,
                                         path,
+                                        catalog_persistence.as_mut(),
                                     )?;
                                 }
                             }
@@ -9962,6 +10144,7 @@ impl ControlClient {
                                         catalog,
                                         path,
                                         &mut quic_deny,
+                                        catalog_persistence.as_mut(),
                                     ) {
                                         eprintln!("временный запрет QUIC не установлен: {error}");
                                     }
@@ -10041,7 +10224,12 @@ impl ControlClient {
                     if let Some(command) = command
                         && let Some((_, catalog, path, _)) = &mut discovery
                     {
-                        self.service_http_search_command(command, catalog, path)?;
+                        self.service_http_search_command(
+                            command,
+                            catalog,
+                            path,
+                            catalog_persistence.as_mut(),
+                        )?;
                         continue;
                     }
                     let now = std::time::Instant::now();
@@ -10284,6 +10472,7 @@ impl ControlClient {
                                     &proof,
                                     catalog,
                                     path,
+                                    catalog_persistence.as_mut(),
                                 ) {
                                     r2o_voice_trials.insert(trial.trial_id, trial);
                                     eprintln!("voice-план не подтверждён: {error}");
@@ -11081,7 +11270,13 @@ impl ControlClient {
                             r2o_http_search_from_response(&response)
                             && (response.code != 3
                                 || !live
-                                || self.revoke_http_binding(&response, &target, catalog, path)?)
+                                || self.revoke_http_binding(
+                                    &response,
+                                    &target,
+                                    catalog,
+                                    path,
+                                    catalog_persistence.as_mut(),
+                                )?)
                         {
                             if live && response.code == 3 {
                                 self.http_search_started.remove(&http_search_key(&target));
@@ -11310,6 +11505,7 @@ impl ControlClient {
                 quic_discovery.as_ref(),
                 catalog,
                 path,
+                catalog_persistence.as_mut(),
             )
         } else {
             Ok(())
@@ -11317,10 +11513,41 @@ impl ControlClient {
         let shutdown_result = if let (Some(worker), Some((_, catalog, path, _))) =
             (quic_discovery.as_mut(), discovery.as_mut())
         {
-            self.r2o_stop_quic_discovery(worker, catalog, path)
+            self.r2o_stop_quic_discovery(worker, catalog, path, catalog_persistence.as_mut())
         } else {
             Ok(())
         };
+        if let Some((worker, mut catalog, path, _)) = discovery.take() {
+            drop(worker);
+            while let Some(discovered_name) = network_whitelist_updates
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front()
+            {
+                let wall_now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                if let Err(error) = r2o_apply_network_whitelist_update(
+                    &mut catalog,
+                    &path,
+                    discovered_name.as_deref(),
+                    wall_now,
+                    catalog_persistence.as_mut(),
+                ) {
+                    eprintln!("не удалось обновить белое имя сети на выходе: {error}");
+                }
+            }
+            if let Some(persistence) = catalog_persistence.as_mut() {
+                let wall_now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                if let Err(error) = persistence.persist_on_shutdown(&catalog, &path, wall_now) {
+                    eprintln!("каталог не сохранён на выходе: {error}");
+                }
+            }
+        }
         match (run_result, family_shutdown_result, shutdown_result) {
             (Ok(()), Ok(()), Ok(())) => Ok(()),
             (Err(error), Ok(()), Ok(()))
@@ -11343,6 +11570,7 @@ impl ControlClient {
         quic_worker: Option<&R2oQuicDiscoveryWorker>,
         catalog: &mut Catalog,
         catalog_path: &std::path::Path,
+        mut persistence: Option<&mut R2oCatalogPersistence>,
     ) -> Result<(), Box<dyn Error>> {
         worker.r2o_begin_shutdown();
         let mut cleanup_error = None;
@@ -11351,7 +11579,12 @@ impl ControlClient {
                 .and_then(HttpSearchWorker::try_command)
                 .or_else(|| quic_worker.and_then(R2oQuicDiscoveryWorker::try_command));
             if let Some(command) = command
-                && let Err(error) = self.service_http_search_command(command, catalog, catalog_path)
+                && let Err(error) = self.service_http_search_command(
+                    command,
+                    catalog,
+                    catalog_path,
+                    persistence.as_deref_mut(),
+                )
             {
                 cleanup_error.get_or_insert_with(|| error.to_string());
             }
@@ -11372,20 +11605,30 @@ impl ControlClient {
         worker: &mut R2oQuicDiscoveryWorker,
         catalog: &mut Catalog,
         catalog_path: &std::path::Path,
+        mut persistence: Option<&mut R2oCatalogPersistence>,
     ) -> Result<(), Box<dyn Error>> {
         worker.r2o_begin_shutdown();
         let mut cleanup_error = None;
         while !worker.r2o_all_finished() {
             while let Some(command) = worker.try_command() {
-                if let Err(error) = self.service_http_search_command(command, catalog, catalog_path)
-                {
+                if let Err(error) = self.service_http_search_command(
+                    command,
+                    catalog,
+                    catalog_path,
+                    persistence.as_deref_mut(),
+                ) {
                     cleanup_error.get_or_insert_with(|| error.to_string());
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         while let Some(command) = worker.try_command() {
-            if let Err(error) = self.service_http_search_command(command, catalog, catalog_path) {
+            if let Err(error) = self.service_http_search_command(
+                command,
+                catalog,
+                catalog_path,
+                persistence.as_deref_mut(),
+            ) {
                 cleanup_error.get_or_insert_with(|| error.to_string());
             }
         }
@@ -11501,6 +11744,7 @@ impl ControlClient {
         command: HttpSearchCommand,
         catalog: &mut Catalog,
         catalog_path: &std::path::Path,
+        mut persistence: Option<&mut R2oCatalogPersistence>,
     ) -> Result<(), Box<dyn Error>> {
         match command {
             HttpSearchCommand::InstallProbe {
@@ -11640,7 +11884,13 @@ impl ControlClient {
             }
             HttpSearchCommand::InstallCandidate { target, key, reply } => {
                 let result = self
-                    .install_http_candidate(&target, &key, catalog, catalog_path)
+                    .install_http_candidate(
+                        &target,
+                        &key,
+                        catalog,
+                        catalog_path,
+                        persistence.as_deref_mut(),
+                    )
                     .map_err(|error| error.to_string());
                 if let Err(error) = &result {
                     let _ = reply.send(Err(error.clone()));
@@ -12685,12 +12935,14 @@ impl ControlClient {
         catalog: &mut Catalog,
         catalog_path: &std::path::Path,
         cache: &mut R2oQuicDenyCache,
+        mut persistence: Option<&mut R2oCatalogPersistence>,
     ) -> Result<Option<std::time::Duration>, Box<dyn Error>> {
         let Some(delay) = cache.r2o_next_delay(host, family) else {
             println!("по {host} (QUIC) запрет не установлен: кольцо из 16 записей занято");
             return Ok(None);
         };
-        let (_lock, previous) = locked_catalog(catalog_path, catalog)?;
+        let (_lock, previous) =
+            locked_catalog_for_persistence(catalog_path, catalog, persistence.as_deref())?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
@@ -12736,7 +12988,8 @@ impl ControlClient {
         let command = encode_set_name(host, SHAPE_QUIC, family, &records)?;
         self.send_command(&command, COMMAND_SET_NAME)?;
         if marked > 0
-            && let Err(save_error) = updated.save_atomic(catalog_path, now)
+            && let Err(save_error) =
+                persist_catalog_update(&updated, catalog_path, now, persistence.as_deref_mut())
         {
             let delete = encode_delete_name(host, 17, SHAPE_QUIC, family)?;
             return match self.send_command(&delete, control::COMMAND_DEL_NAME) {
@@ -12796,10 +13049,12 @@ impl ControlClient {
         candidate_name: &str,
         catalog: &mut Catalog,
         catalog_path: &std::path::Path,
+        mut persistence: Option<&mut R2oCatalogPersistence>,
     ) -> Result<(), Box<dyn Error>> {
         let address_binding =
             host.parse::<std::net::IpAddr>().is_ok() || r2o_quic_snapshot_has_ech(snapshot);
-        let (_lock, previous) = locked_catalog(catalog_path, catalog)?;
+        let (_lock, previous) =
+            locked_catalog_for_persistence(catalog_path, catalog, persistence.as_deref())?;
         if address_binding
             && r2o_controller::discovery::has_usable_quic_address_binding(&previous, server.ip())
         {
@@ -12849,9 +13104,14 @@ impl ControlClient {
                 COMMAND_SET_NAME,
             )
         };
-        updated.save_atomic(catalog_path, now)?;
+        persist_catalog_update(&updated, catalog_path, now, persistence.as_deref_mut())?;
         if let Err(install_error) = self.send_command(&command, command_kind) {
-            return match previous.save_atomic(catalog_path, now) {
+            return match persist_catalog_update(
+                &previous,
+                catalog_path,
+                now,
+                persistence.as_deref_mut(),
+            ) {
                 Ok(()) => Err(format!(
                     "datapath не подтвердил постоянный QUIC-план; каталог восстановлен: {install_error}"
                 )
@@ -12885,8 +13145,10 @@ impl ControlClient {
         target: &r2o_controller::discovery::DiscoveryTarget,
         catalog: &mut Catalog,
         catalog_path: &std::path::Path,
+        mut persistence: Option<&mut R2oCatalogPersistence>,
     ) -> Result<bool, Box<dyn Error>> {
-        let (_lock, previous) = locked_catalog(catalog_path, catalog)?;
+        let (_lock, previous) =
+            locked_catalog_for_persistence(catalog_path, catalog, persistence.as_deref())?;
         let mut updated = previous.clone();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -12899,7 +13161,7 @@ impl ControlClient {
         ) {
             return Ok(false);
         }
-        updated.save_atomic(catalog_path, now)?;
+        persist_catalog_update(&updated, catalog_path, now, persistence.as_deref_mut())?;
         *catalog = updated;
         let command = encode_delete_name(&target.host, 6, SHAPE_HTTP, target.family)?;
         self.send_command(&command, control::COMMAND_DEL_NAME)?;
@@ -12916,11 +13178,13 @@ impl ControlClient {
         key: &str,
         catalog: &mut Catalog,
         catalog_path: &std::path::Path,
+        mut persistence: Option<&mut R2oCatalogPersistence>,
     ) -> Result<(), Box<dyn Error>> {
         let stable = stable_id(key);
         let text = candidate_text(key, Some(&stable))
             .ok_or_else(|| format!("неизвестный HTTP-кандидат: {key}"))?;
-        let (_lock, previous) = locked_catalog(catalog_path, catalog)?;
+        let (_lock, previous) =
+            locked_catalog_for_persistence(catalog_path, catalog, persistence.as_deref())?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
@@ -12939,9 +13203,14 @@ impl ControlClient {
         r2o_datapath::engine::validate_runtime_plan(&runtime_plan)
             .map_err(|error| format!("план HTTP не принят runtime r2o-datapath: {error}"))?;
         let command = encode_set_name(&target.host, SHAPE_HTTP, target.family, &bytes)?;
-        updated.save_atomic(catalog_path, now)?;
+        persist_catalog_update(&updated, catalog_path, now, persistence.as_deref_mut())?;
         if let Err(install_error) = self.send_set_name(&command) {
-            return match previous.save_atomic(catalog_path, now) {
+            return match persist_catalog_update(
+                &previous,
+                catalog_path,
+                now,
+                persistence.as_deref_mut(),
+            ) {
                 Ok(()) => Err(format!(
                     "r2o-datapath не подтвердил HTTP-план; каталог восстановлен: {install_error}"
                 )
@@ -12968,6 +13237,7 @@ impl ControlClient {
             .map(|_| ())
     }
 
+    #[cfg(test)]
     fn apply_discovery_outcome_with_input(
         &mut self,
         outcome: DiscoveryOutcome,
@@ -12975,8 +13245,25 @@ impl ControlClient {
         catalog_path: &std::path::Path,
         input: u8,
     ) -> Result<Option<Vec<r2o_controller::live::LiveGroupKey>>, Box<dyn Error>> {
+        self.apply_discovery_outcome_with_input_and_persistence(
+            outcome,
+            catalog,
+            catalog_path,
+            input,
+            None,
+        )
+    }
+
+    fn apply_discovery_outcome_with_input_and_persistence(
+        &mut self,
+        outcome: DiscoveryOutcome,
+        catalog: &mut Catalog,
+        catalog_path: &std::path::Path,
+        input: u8,
+        mut persistence: Option<&mut R2oCatalogPersistence>,
+    ) -> Result<Option<Vec<r2o_controller::live::LiveGroupKey>>, Box<dyn Error>> {
         if outcome.direct_clear {
-            self.apply_discovery_direct_clear(&outcome.target, catalog, catalog_path)?;
+            self.apply_discovery_direct_clear(&outcome.target, catalog, catalog_path, persistence)?;
             return Ok(None);
         }
         let Some(source_text) = outcome.plan_text else {
@@ -12999,7 +13286,8 @@ impl ControlClient {
             return Ok(None);
         }
 
-        let (_lock, previous) = locked_catalog(catalog_path, catalog)?;
+        let (_lock, previous) =
+            locked_catalog_for_persistence(catalog_path, catalog, persistence.as_deref())?;
         if r2o_discovery_existing_binding_blocks_outcome(
             &previous,
             &outcome.target,
@@ -13041,7 +13329,8 @@ impl ControlClient {
         let compiled = catalog_commands(&updated)?;
 
         let install_result = install_catalog_best_effort(self, &compiled);
-        let persist_result = updated.save_atomic(catalog_path, now);
+        let persist_result =
+            persist_catalog_update(&updated, catalog_path, now, persistence.take());
         *catalog = updated;
         let installed = match (install_result, persist_result) {
             (Ok(installed), Ok(())) => installed,
@@ -13090,8 +13379,10 @@ impl ControlClient {
         target: &r2o_controller::discovery::DiscoveryTarget,
         catalog: &mut Catalog,
         catalog_path: &std::path::Path,
+        persistence: Option<&mut R2oCatalogPersistence>,
     ) -> Result<(), Box<dyn Error>> {
-        let (_lock, previous) = locked_catalog(catalog_path, catalog)?;
+        let (_lock, previous) =
+            locked_catalog_for_persistence(catalog_path, catalog, persistence.as_deref())?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
@@ -13118,7 +13409,7 @@ impl ControlClient {
             return Ok(());
         }
 
-        updated.save_atomic(catalog_path, now)?;
+        persist_catalog_update(&updated, catalog_path, now, persistence)?;
         if result.delete_runtime {
             let command = encode_delete_name(&target.host, 6, target.shape, target.family)?;
             if let Err(delete_error) = self.send_command(&command, control::COMMAND_DEL_NAME) {
@@ -14825,6 +15116,9 @@ mod tests {
                 super::R2oDiscoverySearches::default(),
             )),
             outcomes,
+            network_whitelist_updates: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             seen: std::collections::HashSet::new(),
             seen_order: std::collections::VecDeque::new(),
@@ -17724,7 +18018,12 @@ mod tests {
             }
             if let Some(command) = worker.try_command() {
                 client
-                    .service_http_search_command(command, &mut catalog, &work.join("каталог.json"))
+                    .service_http_search_command(
+                        command,
+                        &mut catalog,
+                        &work.join("каталог.json"),
+                        None,
+                    )
                     .unwrap();
                 continue;
             }
@@ -18070,6 +18369,7 @@ mod tests {
                         command,
                         &mut catalog,
                         std::path::Path::new("параллельные-адресные-пробы.json"),
+                        None,
                     )
                     .unwrap();
                 continue;
@@ -18322,6 +18622,7 @@ mod tests {
                 &mut worker,
                 &mut catalog,
                 std::path::Path::new("каталог.json"),
+                None,
             )
             .unwrap();
         control_thread.join().unwrap();
@@ -18373,6 +18674,7 @@ mod tests {
                 "разрез ClientHello по CRYPTO",
                 &mut catalog,
                 &path,
+                None,
             )
             .unwrap();
 
@@ -18548,6 +18850,7 @@ mod tests {
             },
             &mut catalog,
             std::path::Path::new("unused"),
+            None,
         );
 
         assert!(result.is_ok());
@@ -19592,6 +19895,7 @@ mod tests {
             Arc::new(std::sync::Mutex::new(
                 r2o_controller::r2o_resource::R2oResourceMemory::default(),
             )),
+            Arc::new(std::sync::Mutex::new(VecDeque::new())),
         );
         let first_target = r2o_controller::discovery::DiscoveryTarget {
             host: "example.com".into(),
@@ -19700,6 +20004,7 @@ mod tests {
             Arc::new(Mutex::new(
                 r2o_controller::r2o_resource::R2oResourceMemory::default(),
             )),
+            Arc::new(Mutex::new(VecDeque::new())),
         );
 
         assert!(worker.queue_client_snapshot(target.clone(), client_hello.clone()));
@@ -19811,6 +20116,7 @@ mod tests {
             Arc::new(std::sync::Mutex::new(
                 r2o_controller::r2o_resource::R2oResourceMemory::default(),
             )),
+            Arc::new(std::sync::Mutex::new(VecDeque::new())),
         );
         let target = r2o_controller::discovery::DiscoveryTarget {
             host: "example.com".into(),
@@ -20942,6 +21248,7 @@ mod tests {
                 }],
                 ..Catalog::default()
             };
+            catalog.save_atomic(&catalog_path, 1).unwrap();
             let outcome = DiscoveryOutcome {
                 target: target.clone(),
                 plan_text: Some(plan_text),
@@ -20955,9 +21262,48 @@ mod tests {
             };
             let outcome =
                 super::r2o_confirm_discovery_outcome(outcome, Ok(r2o_test_fetch_result()), true);
-            let result = client.apply_discovery_outcome(outcome, &mut catalog, &catalog_path);
+            let save_started = std::time::Instant::now();
+            let catalog_snapshot = std::sync::Arc::new(std::sync::Mutex::new(catalog.clone()));
+            let mut persistence =
+                super::R2oCatalogPersistence::new(save_started, Arc::clone(&catalog_snapshot));
+            let result = client.apply_discovery_outcome_with_input_and_persistence(
+                outcome,
+                &mut catalog,
+                &catalog_path,
+                2,
+                Some(&mut persistence),
+            );
             let (kind, body) = server.join().unwrap();
             assert_eq!(kind, COMMAND_SET_NAME);
+            let before_deadline = Catalog::load(&catalog_path).unwrap();
+            assert!(
+                !r2o_controller::discovery::has_usable_binding(&before_deadline, &target),
+                "verified discovery result must wait for the donor catalog-save interval"
+            );
+            assert!(
+                !persistence
+                    .persist_due(
+                        &catalog,
+                        &catalog_path,
+                        save_started + std::time::Duration::from_secs(59),
+                        100,
+                    )
+                    .unwrap()
+            );
+            assert!(!r2o_controller::discovery::has_usable_binding(
+                &Catalog::load(&catalog_path).unwrap(),
+                &target
+            ));
+            assert!(
+                persistence
+                    .persist_due(
+                        &catalog,
+                        &catalog_path,
+                        save_started + std::time::Duration::from_secs(60),
+                        100,
+                    )
+                    .unwrap()
+            );
             let persisted = Catalog::load(&catalog_path).unwrap();
             std::fs::remove_dir_all(work).unwrap();
             (result.is_ok(), persisted, body)
@@ -21007,6 +21353,106 @@ mod tests {
                 shape: SHAPE_MODERN,
             }
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dirty_discovery_catalog_is_persisted_when_watch_shuts_down_before_interval() {
+        let work = std::env::temp_dir().join(format!(
+            "r2o-discovery-shutdown-save-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&work).unwrap();
+        let path = work.join("catalog.json");
+        Catalog::default().save_atomic(&path, 1).unwrap();
+        let mut catalog = Catalog::default();
+        catalog.boxes.push(BoxRecord {
+            id: "shutdown-persisted".into(),
+            ..BoxRecord::default()
+        });
+        let catalog_snapshot = std::sync::Arc::new(std::sync::Mutex::new(catalog.clone()));
+        let mut persistence =
+            super::R2oCatalogPersistence::new(std::time::Instant::now(), catalog_snapshot);
+        persistence.mark_dirty();
+
+        assert!(persistence.persist_on_shutdown(&catalog, &path, 2).unwrap());
+        assert_eq!(
+            Catalog::load(&path).unwrap().boxes[0].id,
+            "shutdown-persisted"
+        );
+        assert!(!persistence.persist_on_shutdown(&catalog, &path, 3).unwrap());
+        std::fs::remove_dir_all(work).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn network_whitelist_discovery_uses_catalog_persistence_interval() {
+        let work = std::env::temp_dir().join(format!(
+            "r2o-network-whitelist-persist-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&work).unwrap();
+        let path = work.join("catalog.json");
+        Catalog::default().save_atomic(&path, 1).unwrap();
+        let mut catalog = Catalog::default();
+        let started = std::time::Instant::now();
+        let catalog_snapshot = std::sync::Arc::new(std::sync::Mutex::new(catalog.clone()));
+        let mut persistence =
+            super::R2oCatalogPersistence::new(started, Arc::clone(&catalog_snapshot));
+
+        super::r2o_apply_network_whitelist_update(
+            &mut catalog,
+            &path,
+            Some("example.net"),
+            2,
+            Some(&mut persistence),
+        )
+        .unwrap();
+
+        assert_eq!(
+            catalog
+                .network_whitelist
+                .as_ref()
+                .map(|network| network.name.as_str()),
+            Some("example.net")
+        );
+        assert_eq!(
+            catalog_snapshot
+                .lock()
+                .unwrap()
+                .network_whitelist
+                .as_ref()
+                .map(|network| network.name.as_str()),
+            Some("example.net")
+        );
+        assert!(Catalog::load(&path).unwrap().network_whitelist.is_none());
+        assert!(
+            persistence
+                .persist_due(
+                    &catalog,
+                    &path,
+                    started + std::time::Duration::from_secs(60),
+                    62,
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            Catalog::load(&path)
+                .unwrap()
+                .network_whitelist
+                .unwrap()
+                .name,
+            "example.net"
+        );
+        std::fs::remove_dir_all(work).unwrap();
     }
 
     #[cfg(unix)]
@@ -21893,14 +22339,20 @@ mod tests {
         unconfirmed_trial.response_confirmed = false;
         assert!(
             client
-                .confirm_r2o_voice_trial(unconfirmed_trial, &proof, &mut catalog, &catalog_path,)
+                .confirm_r2o_voice_trial(
+                    unconfirmed_trial,
+                    &proof,
+                    &mut catalog,
+                    &catalog_path,
+                    None,
+                )
                 .is_err()
         );
         assert!(catalog.boxes.is_empty());
         assert!(Catalog::load(&catalog_path).unwrap().boxes.is_empty());
 
         client
-            .confirm_r2o_voice_trial(trial, &proof, &mut catalog, &catalog_path)
+            .confirm_r2o_voice_trial(trial, &proof, &mut catalog, &catalog_path, None)
             .unwrap();
 
         let (permanent_kind, permanent_body, remove_kind, remove_body) = server.join().unwrap();
@@ -22199,6 +22651,7 @@ mod tests {
             client_snapshot_targets: std::collections::HashSet::new(),
             pending_rechecks: std::collections::HashMap::new(),
             outcomes,
+            network_whitelist_updates: Arc::new(Mutex::new(VecDeque::new())),
             cancel: Arc::new(AtomicBool::new(false)),
             seen: std::collections::HashSet::from([target.clone()]),
             seen_order: VecDeque::from([target.clone()]),
