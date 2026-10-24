@@ -147,14 +147,21 @@ fn run() -> Result<i32, String> {
             r2o_wait,
         )?);
     }
-    let ip = ip_raw
-        .filter(|value| !value.is_empty())
-        .map(|value| {
-            value
-                .parse::<IpAddr>()
-                .map_err(|error| format!("неверный IP-адрес: {error}"))
-        })
-        .transpose()?;
+    let ip = match ip_raw {
+        Some(value) => match value.parse::<IpAddr>() {
+            Ok(address) => Some(address),
+            Err(_) if value.is_empty() => {
+                if r2o_json {
+                    r2o_print_dns_failed(&name);
+                } else {
+                    eprintln!("имя {} не разрешилось", name);
+                }
+                return Ok(2);
+            }
+            Err(error) => return Err(format!("неверный IP-адрес: {error}")),
+        },
+        None => None,
+    };
     let ip = match ip {
         Some(ip) => ip,
         None => match (name.as_str(), port).to_socket_addrs() {

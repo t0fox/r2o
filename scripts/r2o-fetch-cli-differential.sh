@@ -36,7 +36,12 @@ r2o_capture_status() {
 
 r2o_run_c_fetch() (
     cd "$1"
-    exec ./d2kfetch --name localhost --ip "" --port 1 --deadline 100 --quic
+    exec ./d2kfetch --name localhost --port 1 --deadline 100 --quic
+)
+
+r2o_run_c_empty_ip() (
+    cd "$1"
+    exec ./d2kfetch --name localhost --ip "" --port 1 --deadline 100 --quic --json
 )
 
 r2o_show_log_on_error() {
@@ -67,7 +72,7 @@ mkdir -p "$r2o_log_dir"
         d2kfetch CC=clang-18
     r2o_run_timed 'сборка r2o-fetch Rust' cargo +1.98.0 build \
         --locked --offline --package r2o-controller --bin r2o-fetch
-    printf '\nОдинаковый сценарий: пустой --ip, localhost, QUIC к закрытому loopback-порту\n'
+    printf '\nОбщий сценарий: localhost без --ip, QUIC к закрытому loopback-порту\n'
     r2o_run_timed 'запуск d2kfetch C' r2o_capture_status \
         "$r2o_temp_dir/c.stdout" "$r2o_temp_dir/c.stderr" \
         "$r2o_temp_dir/c.status" \
@@ -76,7 +81,7 @@ mkdir -p "$r2o_log_dir"
         "$r2o_temp_dir/rust.stdout" "$r2o_temp_dir/rust.stderr" \
         "$r2o_temp_dir/rust.status" \
         "$r2o_script_dir/target/debug/r2o-fetch" \
-        --name localhost --ip '' --port 1 --deadline 100 --quic --json
+        --name localhost --port 1 --deadline 100 --quic --json
     printf 'C exit status: '
     cat "$r2o_temp_dir/c.status"
     printf 'C stderr:\n'
@@ -99,25 +104,60 @@ c_status = int(pathlib.Path(sys.argv[3]).read_text())
 rust_status = int(pathlib.Path(sys.argv[4]).read_text())
 c_match = re.search(r"цель:\s+localhost \((.+):1\), путь", c_output)
 if not c_match:
-    raise SystemExit(f"d2kfetch did not resolve empty --ip:\n{c_output}")
+    raise SystemExit(f"d2kfetch did not resolve localhost:\n{c_output}")
 c_ip = ipaddress.ip_address(c_match.group(1))
 rust_result = json.loads(rust_output)
 if rust_result.get("shape") != "quic":
     raise SystemExit(f"r2o-fetch did not run the requested QUIC check: {rust_result}")
 rust_ip = ipaddress.ip_address(rust_result["ip"])
 if not c_ip.is_loopback or not rust_ip.is_loopback:
-    raise SystemExit(f"empty --ip did not resolve to loopback: C={c_ip}, Rust={rust_ip}")
+    raise SystemExit(f"localhost did not resolve to loopback: C={c_ip}, Rust={rust_ip}")
 if c_status not in (0, 1) or rust_status not in (0, 1):
     raise SystemExit(f"unexpected CLI status: C={c_status}, Rust={rust_status}")
-print(f"Fetch CLI parity: C resolved {c_ip}; Rust resolved {rust_ip}; both ran QUIC")
+print(f"Fetch CLI parity: omitted --ip resolved C={c_ip}, Rust={rust_ip}; both ran QUIC")
 PY
+    case "${DONOR_SNAPSHOT:-baseline}" in
+        upstream)
+            printf '\nUpstream-only contract: explicit empty --ip returns dns_failed JSON\n'
+            r2o_run_timed 'upstream C empty --ip' r2o_capture_status \
+                "$r2o_temp_dir/c-empty.stdout" "$r2o_temp_dir/c-empty.stderr" \
+                "$r2o_temp_dir/c-empty.status" \
+                r2o_run_c_empty_ip "$r2o_donor_core"
+            r2o_run_timed 'Rust empty --ip' r2o_capture_status \
+                "$r2o_temp_dir/rust-empty.stdout" "$r2o_temp_dir/rust-empty.stderr" \
+                "$r2o_temp_dir/rust-empty.status" \
+                "$r2o_script_dir/target/debug/r2o-fetch" \
+                --name localhost --ip '' --port 1 --deadline 100 --quic --json
+            python3 - "$r2o_temp_dir/c-empty.stdout" "$r2o_temp_dir/rust-empty.stdout" \
+                "$r2o_temp_dir/c-empty.status" "$r2o_temp_dir/rust-empty.status" <<'PY'
+import json
+import pathlib
+import sys
+
+c_result = json.loads(pathlib.Path(sys.argv[1]).read_text())
+rust_result = json.loads(pathlib.Path(sys.argv[2]).read_text())
+c_status = int(pathlib.Path(sys.argv[3]).read_text())
+rust_status = int(pathlib.Path(sys.argv[4]).read_text())
+if c_result != rust_result or c_result.get("shape") != "dns_failed":
+    raise SystemExit(f"upstream empty-IP contract differs: C={c_result}, Rust={rust_result}")
+if c_status != 2 or rust_status != 2:
+    raise SystemExit(f"upstream empty-IP status differs: C={c_status}, Rust={rust_status}")
+print("Fetch CLI parity: upstream explicit empty --ip returns matching dns_failed JSON")
+PY
+            ;;
+        baseline) ;;
+        *)
+            printf 'Unknown donor snapshot: %s\n' "$DONOR_SNAPSHOT" >&2
+            exit 2
+            ;;
+    esac
     printf 'C stdout:\n'
     cat "$r2o_temp_dir/c.stdout"
     printf '\nRust JSON:\n'
     cat "$r2o_temp_dir/rust.stdout"
 } >"$r2o_log" 2>&1
 
-grep -q 'Fetch CLI parity: C resolved .*; Rust resolved .*; both ran QUIC' "$r2o_log"
+grep -q 'Fetch CLI parity: omitted --ip resolved C=.*; Rust=.*; both ran QUIC' "$r2o_log"
 printf 'Журнал проверки: %s\n' "$r2o_log"
 cat "$r2o_log"
 trap - EXIT
