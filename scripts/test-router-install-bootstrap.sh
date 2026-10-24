@@ -187,7 +187,7 @@ new_case unsupported-abi
 sed 's/mipsel_24kc/mips_24kc/' "$CASE/openwrt_release" > "$CASE/openwrt_release.new"
 mv "$CASE/openwrt_release.new" "$CASE/openwrt_release"
 if run_install > "$CASE/out" 2>&1; then fail 'unsupported big-endian MIPS ABI was accepted'; fi
-grep -q 'неподдерживаем' "$CASE/out" || fail 'unsupported ABI failure was not explained'
+grep -q 'неподдерживаем' "$CASE/out" || { cat "$CASE/out" >&2; fail 'unsupported ABI failure was not explained'; }
 [ ! -s "$CASE/fetch.log" ] || fail 'release network was touched for an unsupported ABI'
 
 new_case unsupported-openwrt-mips1
