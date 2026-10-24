@@ -18,6 +18,8 @@ tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/r2o-d2o-fixtures.XXXXXX")
 trap 'rm -rf -- "$tmp_dir"' EXIT HUP INT TERM
 
 make -C "$donor_detect" d2k-detect
+make -C "$donor_detect" test_response
+"$donor_detect/test_response"
 
 cc -std=c99 -O2 -Wall -Wextra -Werror \
     -ffunction-sections -fdata-sections \
@@ -42,7 +44,23 @@ cc -std=c99 -O2 -Wall -Wextra -Werror \
     -o "$tmp_dir/d2o_clear_fixture"
 timeout 15s "$tmp_dir/d2o_clear_fixture" "$tests/fixtures/d2o_clear.txt"
 
+cc -std=c99 -O2 -Wall -Wextra -Werror \
+    -I"$donor_detect" -I"$donor_detect/include" -I"$donor_core/include" \
+    -I"$donor_datapath/include" \
+    "$tests/d2o_response_fixture.c" \
+    "$donor_detect/classify.o" "$donor_detect/poison.o" \
+    "$donor_detect/props.o" "$donor_detect/raw.o" \
+    "$donor_detect/trigger.o" "$donor_detect/response.o" \
+    "$donor_core/measured.o" "$donor_core/hello.o" \
+    "$donor_core/plantlv.o" "$donor_core/quic.o" \
+    "$donor_core/quicwire.o" "$donor_core/crypto.o" \
+    "$donor_datapath/plan_parse.o" "$donor_datapath/plan_apply.o" \
+    "$donor_datapath/wire.o" -lpthread \
+    -o "$tmp_dir/d2o_response_fixture"
+"$tmp_dir/d2o_response_fixture" "$tests/fixtures/d2o/tls-response-vectors.tsv"
+
 cargo test -p r2o-controller --locked --test d2o_parity \
     d2o_clear_vector_uses_only_the_base_series_and_ignores_disabled_mark
+cargo test -p r2o-controller --locked --test response d2o_shared_tls_response_vectors_match
 cargo test -p r2o-controller --locked --lib \
     nft_rst_rule_uses_r2o_table_and_exact_tuple_with_donor_timeout

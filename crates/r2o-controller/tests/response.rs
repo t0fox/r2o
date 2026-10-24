@@ -408,3 +408,78 @@ fn response_verdicts_keep_unmeasured_control_and_flaky_cases_distinct() {
         );
     }
 }
+
+#[test]
+fn d2o_shared_tls_response_vectors_match() {
+    let fixture = include_str!("fixtures/d2o/tls-response-vectors.tsv");
+    let mut cases = 0;
+    for line in fixture
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+    {
+        let fields: Vec<_> = line.split('\t').collect();
+        match fields.as_slice() {
+            [
+                "decide",
+                target,
+                control,
+                unmeasured,
+                repeats,
+                expected,
+                reason,
+            ] => {
+                let result = decide(
+                    target.parse().unwrap(),
+                    control.parse().unwrap(),
+                    unmeasured.parse().unwrap(),
+                    repeats.parse().unwrap(),
+                );
+                let verdict = match *expected {
+                    "not_applicable" => ResponseVerdict::NotApplicable,
+                    "clear" => ResponseVerdict::Clear,
+                    "blocked" => ResponseVerdict::Blocked,
+                    "flaky" => ResponseVerdict::Flaky,
+                    other => panic!("unknown fixture verdict: {other}"),
+                };
+                assert_eq!(result.verdict, verdict, "fixture: {line}");
+                assert_eq!(
+                    result.target,
+                    target.parse::<i32>().unwrap(),
+                    "fixture: {line}"
+                );
+                assert_eq!(
+                    result.control,
+                    control.parse::<i32>().unwrap(),
+                    "fixture: {line}"
+                );
+                assert_eq!(result.reason, *reason, "fixture: {line}");
+            }
+            ["scan", hex, expected] => {
+                let bytes: Vec<_> = hex
+                    .as_bytes()
+                    .chunks_exact(2)
+                    .map(|pair| {
+                        let digit = |byte: u8| match byte {
+                            b'0'..=b'9' => byte - b'0',
+                            b'a'..=b'f' => byte - b'a' + 10,
+                            b'A'..=b'F' => byte - b'A' + 10,
+                            _ => panic!("invalid hex byte in fixture: {line}"),
+                        };
+                        digit(pair[0]) * 16 + digit(pair[1])
+                    })
+                    .collect();
+                assert_eq!(hex.len() % 2, 0, "fixture has odd hex length: {line}");
+                let actual = match scan12(&bytes) {
+                    Scan12::NeedMore => "need_more",
+                    Scan12::ServerHelloDone => "done",
+                    Scan12::FatalAlert => "fatal_alert",
+                    Scan12::ServerHello => panic!("scan12 returned ServerHello"),
+                };
+                assert_eq!(actual, *expected, "fixture: {line}");
+            }
+            _ => panic!("malformed d2o TLS response fixture line: {line}"),
+        }
+        cases += 1;
+    }
+    assert_eq!(cases, 13);
+}

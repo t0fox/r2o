@@ -1,0 +1,16 @@
+# Shared by donor detect/response.c and r2o response.rs.
+# decide<TAB>target<TAB>control<TAB>unmeasured<TAB>repeats<TAB>verdict<TAB>reason
+decide	0	3	1	3	not_applicable	ответ сервера не поместился в локальный предел буфера (64 КБ) в 1 прогонах — про ответное направление вывода нет
+decide	0	3	0	3	blocked	запрос проходит, а рукопожатие не завершается: с нейтральным именем на тот же адрес оно завершается каждый раз. Значит режут ОТВЕТ — сертификат в TLS 1.2 идёт открытым текстом
+decide	3	0	3	3	not_applicable	ответ сервера не поместился в локальный предел буфера (64 КБ) в 3 прогонах — про ответное направление вывода нет
+decide	3	0	0	3	not_applicable	контрольное рукопожатие по TLS 1.2 не завершается — сервер его не поддерживает или мешает что-то ещё; про ответное направление вывода нет
+decide	3	3	0	3	clear	рукопожатие TLS 1.2 доходит до конца — сертификат не режут
+decide	2	3	0	3	flaky	рукопожатий дошло 2 из 3 — не воспроизводится
+# scan<TAB>complete TLS record stream as hex<TAB>need_more|done|fatal_alert
+scan	16030300040e000000	done
+scan	15030300020228	fatal_alert
+scan	16030300010e1603030003000000	done
+scan	16030300080b0000040e000000	need_more
+scan	16030300040e0000	need_more
+scan	17030300010e	need_more
+scan	16030300050b0000040e16030300070000000e000000	done
