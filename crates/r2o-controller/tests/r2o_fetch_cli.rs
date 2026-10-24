@@ -24,6 +24,7 @@ fn r2o_help_показывает_бюджет_quic_и_значение_по_ум
     assert!(help.contains("--quic-budget N"));
     assert!(help.contains("по умолчанию N=25"));
     assert!(help.contains("0 отключает бюджет"));
+    assert!(help.contains("SO_MARK для TCP и QUIC"));
     assert!(!help.contains("пока нет донорского пакетного бюджета"));
 }
 
@@ -194,8 +195,6 @@ fn r2o_json_keeps_quic_stream_bytes_separate_from_http_body_bytes() {
         "--quic",
         "--deadline",
         "100",
-        "--mark",
-        "0x2f",
         "--json",
     ]);
 
@@ -209,6 +208,35 @@ fn r2o_json_keeps_quic_stream_bytes_separate_from_http_body_bytes() {
     assert_eq!(value["local_port"], 0);
     assert_eq!(value["mark"], 0);
     assert_eq!(value["local_refusal"], false);
+}
+
+#[test]
+fn r2o_json_preserves_quic_mark_and_socket_setup_result() {
+    let output = r2o_run_fetch(&[
+        "--name",
+        "stand.example",
+        "--ip",
+        "127.0.0.1",
+        "--port",
+        "1",
+        "--quic",
+        "--deadline",
+        "100",
+        "--mark",
+        "0x2f",
+        "--json",
+    ]);
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("QUIC --json must return a result");
+    assert_eq!(value["mark"], 0x2f);
+    if value["local_refusal"] == true {
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(value["local_port"], 0);
+    } else {
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(value["local_port"], 0);
+    }
 }
 
 #[test]

@@ -7,7 +7,7 @@ r2o_donor_test="$r2o_donor_datapath/test_session"
 r2o_log_dir="$r2o_script_dir/.rea"
 r2o_log="$r2o_log_dir/r2o-tcp-reply-hidden-differential-$(date +%Y%m%d-%H%M%S).log"
 r2o_started_at=$(date +%s)
-r2o_upstream_sha=86b05b96457fccdec6b7ddc0e8478508f80f0bab
+r2o_upstream_sha=783aa75ce44dd6192cd1f4f1d98e4fe909ef3045
 
 r2o_show_log_on_error() {
     r2o_status=$?

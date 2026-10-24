@@ -465,7 +465,14 @@ fn run() -> Result<i32, String> {
             "TLS 1.2/1.3"
         }
     );
-    println!("маршрут:     без метки, через планы datapath (--mark не действует для QUIC)");
+    println!(
+        "маршрут:     {}",
+        options
+            .mark
+            .filter(|value| *value != 0)
+            .map(|value| format!("SO_MARK 0x{value:x}"))
+            .unwrap_or_else(|| "без метки, через планы datapath".into())
+    );
     println!("TLS:         {}", result.tls.unwrap_or("рукопожатия нет"));
     println!("HTTP:        {}", result.status);
     if let Some(expected) = result.body_expected {
@@ -536,7 +543,7 @@ fn r2o_quic_json(
         "location": null,
         "cloudflare_challenge": null,
         "wire_requested": options.wire_len.unwrap_or(0),
-        "mark": 0,
+        "mark": options.mark.unwrap_or(0),
         "elapsed_ms": result.elapsed.as_millis(),
         "local_port": if handshake { result.local_port } else { 0 },
         "negotiated_tls": if handshake { 0x0304 } else { 0 },
@@ -585,6 +592,7 @@ fn r2o_print_quic_result(
         "маршрут:     {}",
         options
             .mark
+            .filter(|value| *value != 0)
             .map(|value| format!("SO_MARK 0x{value:x}"))
             .unwrap_or_else(|| "без метки, через планы datapath".into())
     );
@@ -702,7 +710,7 @@ fn print_help() {
          --control   основной сокет datapath; используется соседний путь .snapshot\n\
                      по умолчанию R2O_CONTROL_SOCKET или /opt/r2o/run/r2o-datapath4.sock\n\
          --deadline  срок ожидания, по умолчанию 15000 мс\n\
-         --mark      установить SO_MARK для TCP; QUIC всегда идёт через планы datapath\n\n\
+         --mark      установить SO_MARK для TCP и QUIC; 0 — без метки\n\n\
          --json      вывести результат в машиночитаемой схеме JSON\n\
          Для TCP длина включает пять байт заголовка TLS-записи; для QUIC — только handshake-сообщение.\n\
          Снимок выполняется до запроса и заменяет значение --wire.\n\

@@ -44,6 +44,12 @@ r2o_run_c_empty_ip() (
     exec ./d2kfetch --name localhost --ip "" --port 1 --deadline 100 --quic --json
 )
 
+r2o_run_c_marked_quic() (
+    cd "$1"
+    exec ./d2kfetch --name localhost --ip 127.0.0.1 --port 1 \
+        --deadline 100 --quic --mark 0x2f --json
+)
+
 r2o_show_log_on_error() {
     r2o_status=$?
     if [ "$r2o_status" -ne 0 ] && [ -f "$r2o_log" ]; then
@@ -143,6 +149,40 @@ if c_result != rust_result or c_result.get("shape") != "dns_failed":
 if c_status != 2 or rust_status != 2:
     raise SystemExit(f"upstream empty-IP status differs: C={c_status}, Rust={rust_status}")
 print("Fetch CLI parity: upstream explicit empty --ip returns matching dns_failed JSON")
+PY
+            printf '\nUpstream-only contract: marked QUIC reports setup refusal consistently\n'
+            r2o_run_timed 'upstream C marked QUIC' r2o_capture_status \
+                "$r2o_temp_dir/c-mark.stdout" "$r2o_temp_dir/c-mark.stderr" \
+                "$r2o_temp_dir/c-mark.status" \
+                r2o_run_c_marked_quic "$r2o_donor_core"
+            r2o_run_timed 'Rust marked QUIC' r2o_capture_status \
+                "$r2o_temp_dir/rust-mark.stdout" "$r2o_temp_dir/rust-mark.stderr" \
+                "$r2o_temp_dir/rust-mark.status" \
+                "$r2o_script_dir/target/debug/r2o-fetch" \
+                --name localhost --ip 127.0.0.1 --port 1 --deadline 100 \
+                --quic --mark 0x2f --json
+            python3 - "$r2o_temp_dir/c-mark.stdout" "$r2o_temp_dir/rust-mark.stdout" \
+                "$r2o_temp_dir/c-mark.status" "$r2o_temp_dir/rust-mark.status" <<'PY'
+import json
+import pathlib
+import sys
+
+c_result = json.loads(pathlib.Path(sys.argv[1]).read_text())
+rust_result = json.loads(pathlib.Path(sys.argv[2]).read_text())
+c_status = int(pathlib.Path(sys.argv[3]).read_text())
+rust_status = int(pathlib.Path(sys.argv[4]).read_text())
+for result in (c_result, rust_result):
+    if result.get("shape") != "quic" or result.get("mark") != 0x2f:
+        raise SystemExit(f"marked QUIC result omitted its requested mark: {result}")
+    if result.get("negotiated_tls") == 0 and result.get("local_port") != 0:
+        raise SystemExit(f"unconfirmed QUIC handshake must not publish a local port: {result}")
+if c_result.get("local_refusal") != rust_result.get("local_refusal"):
+    raise SystemExit(
+        f"marked QUIC setup refusal differs: C={c_result}, Rust={rust_result}"
+    )
+if c_status != rust_status:
+    raise SystemExit(f"marked QUIC exit status differs: C={c_status}, Rust={rust_status}")
+print("Fetch CLI parity: upstream QUIC --mark uses SO_MARK and matches refusal semantics")
 PY
             ;;
         baseline) ;;
