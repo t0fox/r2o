@@ -1,0 +1,4 @@
+# case expected count name/transport/queued_event/hot_event/queued_age_ms...
+freshest newest.example 3 old.example/6/1/1/900 newer.example/17/2/2/500 newest.example/6/3/3/100
+promoted promoted.example 3 first.example/6/1/1/100 promoted.example/6/2/99/500 unrelated.example/17/3/3/50
+fifo fifo-earlier.example 3 fifo-later.example/6/3/9/1 fifo-earlier.example/17/2/9/10 fifo-newer-event.example/6/4/9/5

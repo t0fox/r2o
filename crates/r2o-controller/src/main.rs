@@ -20554,6 +20554,65 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn d2o_scheduler_queue_order_matches_donor() {
+        use super::{R2oDiscoveryQueue, R2oDiscoveryQueueEntry};
+        use std::time::{Duration, Instant};
+
+        let mut output = Vec::new();
+        for line in include_str!("../tests/fixtures/d2o_scheduler_queue.tsv").lines() {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.is_empty() || fields[0].starts_with('#') {
+                continue;
+            }
+            let [case_name, expected, count, entries @ ..] = fields.as_slice() else {
+                panic!("malformed d2o scheduler queue fixture: {line}");
+            };
+            let count = count.parse::<usize>().unwrap();
+            assert_eq!(entries.len(), count, "fixture task count: {line}");
+
+            let now = Instant::now();
+            let mut queue = R2oDiscoveryQueue::default();
+            for entry in entries.iter().copied() {
+                let parts = entry.split('/').collect::<Vec<_>>();
+                let [host, transport, queued_event, hot_event, queued_age_ms] = parts.as_slice()
+                else {
+                    panic!("malformed d2o scheduler queue task: {entry}");
+                };
+                let transport = transport.parse::<u8>().unwrap();
+                let queued_event = queued_event.parse::<u64>().unwrap();
+                let hot_event = hot_event.parse::<u64>().unwrap();
+                let queued_age_ms = queued_age_ms.parse::<u64>().unwrap();
+                let target = r2o_controller::discovery::DiscoveryTarget {
+                    host: (**host).to_owned(),
+                    endpoint: format!("{host}:443"),
+                    family: 4,
+                    shape: if transport == 17 {
+                        SHAPE_QUIC
+                    } else {
+                        SHAPE_MODERN
+                    },
+                };
+                queue.entries.push(R2oDiscoveryQueueEntry {
+                    target,
+                    queued_at: now - Duration::from_millis(queued_age_ms),
+                    queued_event,
+                    hot_event,
+                });
+            }
+            let selected = queue
+                .pop(now)
+                .1
+                .expect("donor queue fixture must select a task");
+            assert_eq!(selected.host, *expected, "donor queue case {case_name}");
+            output.push(format!("{case_name} {}", selected.host));
+        }
+        if let Ok(path) = std::env::var("R2O_SCHED_QUEUE_DIFF_OUTPUT") {
+            std::fs::write(path, format!("{}\n", output.join("\n"))).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn r2o_discovery_never_probes_the_same_endpoint_concurrently() {
         use std::sync::atomic::AtomicBool;
         use std::sync::{Arc, Condvar, Mutex, mpsc};

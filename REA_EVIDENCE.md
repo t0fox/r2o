@@ -7383,3 +7383,34 @@ Concurrency у donor начинается с `SCHED_DEFAULT_ACTIVE_MEASUREMENTS=
 64 с AIMD. Дифференциальный набор проверил 11 одинаковых C/Rust ресурсных
 входов, включая ограничение доступными слотами. Общего лимита в пять замеров
 в текущем C эталоне нет, поэтому он не добавлялся.
+
+### Порядок очереди на общих входах
+
+Для неизменённого donor `783aa75ce44dd6192cd1f4f1d98e4fe909ef3045`
+`core/sched.c` имеет SHA-256
+`aee97d92aa37ca3b8b3f3ce47ca636a02cbea71fde989eb113376f35496df45c`.
+`queued_pick` выбирает среди обычных ожидающих задач сначала большую
+`hot_event`, затем меньшую `queued_event`; Rust `R2oDiscoveryQueue::pop`
+использует те же ключи (`Reverse(hot_event)`, `queued_event`).
+
+| Исходная C-функция | Rust-аналог | Один fixture и результат |
+|---|---|---|
+| `core/sched.c::queued_pick`, comparator `queued_before` | `main.rs::R2oDiscoveryQueue::pop` | `d2o_scheduler_queue.tsv`: свежий event выбрал `newest.example`; высокий `hot_event` выбрал `promoted.example` при старом `queued_event`; при равной горячести FIFO выбрал `fifo-earlier.example`. C и Rust вывели одинаковые строки во всех трёх случаях; `scripts/r2o-queue-order-differential.sh` завершился с кодом 0 на donor `783aa75`. |
+
+Эти входы покрывают только обычный queued order: они не моделируют eligibility
+семейного восстановления, истечение задачи или уступку слота QUIC ожидающему
+TCP. Для этих ветвей остаются отдельные C scheduler и Rust worker/permit тесты;
+новый fixture сам по себе не подтверждает их полное соответствие. Свежий REA
+dossier именно для `queued_pick` в текущей Windows-среде получить нельзя:
+`list_documents` сообщает, что доступный Ghidra не принимает ELF, Hopper не
+поддержан на Windows, а IDA не сконфигурирован. Использованы donor-исходник и
+ранее сохранённое REA Evidence для scheduler; псевдокод `queued_pick` не
+заявляется.
+
+После этого fixture `scripts/r2o-build-openwrt-aarch64-musl.sh` повторно
+завершился с кодом 0: все шесть release-бинарников запустились в QEMU, а
+`--clear-catalog` и `--check-catalog` прошли. Сборка вывела только существующие
+предупреждения `libc::time_t` и `libc::suseconds_t` в `response.rs`. После
+добавления теста `cargo +1.98.0 test --locked --workspace` и
+`scripts/ci-differential-shards.sh verify` прошли; манифест проверяет 12 baseline
+и 25 upstream сценариев ровно по одному разу.
