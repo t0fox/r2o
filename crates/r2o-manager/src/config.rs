@@ -324,14 +324,37 @@ fn assignment_parts(line: &str) -> io::Result<Option<(&str, &str)>> {
 }
 
 fn strip_literal(raw: &str) -> io::Result<String> {
-    let value = if let Some(rest) = raw.strip_prefix('\'') {
-        rest.strip_suffix('\'')
-            .ok_or_else(|| invalid_config("одинарная кавычка не закрыта"))?
-    } else if let Some(rest) = raw.strip_prefix('"') {
-        rest.strip_suffix('"')
-            .ok_or_else(|| invalid_config("двойная кавычка не закрыта"))?
+    let raw = raw.trim();
+    let value = if let Some(quote) = raw
+        .as_bytes()
+        .first()
+        .copied()
+        .filter(|byte| *byte == b'\'' || *byte == b'"')
+    {
+        let quote = quote as char;
+        let close = raw[1..]
+            .find(quote)
+            .map(|offset| offset + 1)
+            .ok_or_else(|| invalid_config("кавычка не закрыта"))?;
+        let trailing = &raw[close + 1..];
+        let trimmed_trailing = trailing.trim();
+        if !trimmed_trailing.is_empty()
+            && (!trailing
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_whitespace)
+                || !trimmed_trailing.starts_with('#'))
+        {
+            return Err(invalid_config(
+                "после строкового значения есть лишние данные",
+            ));
+        }
+        &raw[1..close]
     } else {
-        raw
+        let bytes = raw.as_bytes();
+        let comment = (1..bytes.len())
+            .find(|&index| bytes[index] == b'#' && bytes[index - 1].is_ascii_whitespace());
+        raw[..comment.unwrap_or(raw.len())].trim_end()
     };
     if value.contains(['\'', '"']) {
         return Err(invalid_config("в значении есть кавычка внутри строки"));
