@@ -5,7 +5,55 @@
 инициализации системы передаёт управление сценарию из активного выпуска. При
 переключении выпуска обновляется и код служб роутера.
 
-Установите уже распакованный локальный пакет, которому вы доверяете:
+Для первой установки из опубликованного релиза сначала проверьте подпись
+манифеста и SHA-256 архива на доверенном Linux/macOS компьютере. Например,
+для OpenWrt MIPS32r2 с musl:
+
+```sh
+ARCH=mipsel-openwrt-musl
+ASSET="r2o-$ARCH.tar.gz"
+BASE=https://github.com/t0fox/r2o/releases/latest/download
+curl -fL "$BASE/latest.json" -o latest.json
+curl -fL "$BASE/latest.json.sig" -o latest.json.sig
+curl -fL "$BASE/$ASSET" -o "$ASSET"
+curl -fL https://raw.githubusercontent.com/t0fox/r2o/main/crates/r2o-manager/release-public.pem -o release-public.pem
+openssl pkeyutl -verify -pubin -inkey release-public.pem -rawin \
+  -in latest.json -sigfile latest.json.sig
+python3 - "$ARCH" "$ASSET" latest.json <<'PY'
+import hashlib
+import json
+import sys
+
+arch, archive, manifest_path = sys.argv[1:]
+manifest = json.load(open(manifest_path, encoding="utf-8"))
+expected = manifest["assets"][arch]["sha256"]
+actual = hashlib.sha256(open(archive, "rb").read()).hexdigest()
+if actual != expected:
+    raise SystemExit(f"SHA-256 не совпал для {archive}")
+print(manifest["release_id"])
+PY
+```
+
+Сохраните напечатанный `release_id`, распакуйте проверенный архив и скопируйте
+его содержимое на роутер. `install-local` ниже не проверяет подпись повторно,
+поэтому запускайте его только после успешных проверок выше или для собственного
+пакета, которому вы доверяете:
+
+```sh
+RELEASE_ID=$(python3 -c 'import json; print(json.load(open("latest.json"))["release_id"])')
+mkdir -p /tmp/r2o-bundle
+tar -xzf "$ASSET" -C /tmp/r2o-bundle
+ssh root@ROUTER_IP 'mkdir -p /tmp/r2o-release'
+scp -r /tmp/r2o-bundle/builds /tmp/r2o-bundle/router root@ROUTER_IP:/tmp/r2o-release/
+ssh root@ROUTER_IP "sh /tmp/r2o-release/router/install.sh /tmp/r2o-release $RELEASE_ID $ARCH"
+```
+
+Выберите ABI по платформе: `mipsel-openwrt-musl`, `aarch64-openwrt-musl`,
+`armv7-openwrt-musl` или `armv5-musleabi`. После проверки архива установщик
+сохраняет активный выпуск и настраивает службы.
+
+Для уже распакованного локального пакета, которому вы доверяете, установите его
+командой:
 
 ```sh
 router/install.sh /tmp/r2o-bundle r2o-20261018 mipsel
