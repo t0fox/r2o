@@ -12,8 +12,6 @@ use std::time::{Duration, Instant};
 use crate::response::{ResponseOptions, ResponseResult, ResponseVerdict, probe_response};
 
 const TRACE_MAX: usize = 512;
-const CLEAR_CONFIRM_REPEATS: usize = 2;
-
 /// Один непрерывный диапазон данных триггера, отправляемый пробой с разрезанием.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Span {
@@ -837,7 +835,9 @@ pub struct ClassifyResult {
     pub response: Option<ResponseResult>,
     pub hit: Option<PoisonHit>,
     pub raw_usable: bool,
+    pub rst_rule_failures: usize,
     pub trace: Vec<Observation>,
+    rst_rule_failure_base: u64,
 }
 
 impl ClassifyResult {
@@ -857,7 +857,9 @@ impl ClassifyResult {
             response: None,
             hit: None,
             raw_usable: false,
+            rst_rule_failures: 0,
             trace: Vec::new(),
+            rst_rule_failure_base: crate::raw_probe::rst_rule_failure_count(),
         }
     }
 }
@@ -875,6 +877,7 @@ struct MeasureSpec<'a> {
     name: &'a str,
     cuts: &'a [usize],
     gap: Duration,
+    until_pass: bool,
 }
 
 fn parse_target(target: &str) -> Result<ProbeTarget, &'static str> {
@@ -985,6 +988,9 @@ fn measure<B: ProbeBackend>(
         }) {
             Ok(ProbeOutcome::Accepted) => {
                 tally.pass += 1;
+                if spec.until_pass {
+                    break;
+                }
             }
             Ok(ProbeOutcome::Rejected) => tally.fail += 1,
             Ok(ProbeOutcome::Unproven) => {
@@ -1035,6 +1041,7 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
     backend: &mut B,
     progress: &mut dyn FnMut(&str, usize, usize, usize),
 ) -> ClassifyResult {
+    crate::raw_probe::flush_pending_rst_releases();
     if options.repeats == 0 {
         options.repeats = 3;
     }
@@ -1085,12 +1092,13 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
             name: "whole",
             cuts: &[],
             gap: options.write_gap,
+            until_pass: false,
         },
         progress,
     );
     let mut base = whole;
     if base.pass == 0
-        && base.errors == options.repeats
+        && base.errors > 0
         && base.error.as_ref().is_some_and(ProbeError::is_dial_timeout)
     {
         let mut slower = options.clone();
@@ -1106,12 +1114,13 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
                 name: "whole",
                 cuts: &[],
                 gap: slower.write_gap,
+                until_pass: false,
             },
             progress,
         );
     }
     if base.pass == 0
-        && base.errors == options.repeats
+        && base.errors > 0
         && let Some(error) = &base.error
     {
         if error.is_dial_timeout() {
@@ -1129,66 +1138,8 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
         return result;
     }
     if base.pass == options.repeats {
-        let mut confirm_options = options.clone();
-        confirm_options.repeats = CLEAR_CONFIRM_REPEATS;
-        confirm_options.seed_whole = None;
-        let confirm = measure(
-            backend,
-            &target,
-            trigger,
-            &confirm_options,
-            &mut result,
-            MeasureSpec {
-                name: "whole-confirm",
-                cuts: &[],
-                gap: options.write_gap,
-            },
-            progress,
-        );
-        if stopped(&options) {
-            result.verdict = Verdict::Inconclusive;
-            result.reason = format!(
-                "подтверждение базы остановлено после {} зондов — clear не подтверждён",
-                result.probes
-            );
-            finish(&mut result, &options, start);
-            return result;
-        }
-        if let Some(error) = &confirm.error {
-            result.verdict = Verdict::Flaky;
-            result.reason = format!(
-                "подтверждение базы не состоялось: ошибка транспорта — {}",
-                error.message()
-            );
-            finish(&mut result, &options, start);
-            return result;
-        }
-        if confirm.pass != CLEAR_CONFIRM_REPEATS {
-            result.verdict = Verdict::Flaky;
-            result.reason = format!(
-                "база не подтвердилась: итого {} из {} — ложный clear дороже честного flaky",
-                base.pass + confirm.pass,
-                options.repeats + CLEAR_CONFIRM_REPEATS
-            );
-            finish(&mut result, &options, start);
-            return result;
-        }
-        if options.mark == Some(0) {
-            result.verdict = Verdict::Inconclusive;
-            result.reason = format!(
-                "триггер прошёл ({} из {}), но без подтверждённой метки SO_MARK — успех мог дать обход",
-                options.repeats + CLEAR_CONFIRM_REPEATS,
-                options.repeats + CLEAR_CONFIRM_REPEATS
-            );
-            finish(&mut result, &options, start);
-            return result;
-        }
         result.verdict = Verdict::Clear;
-        result.reason = format!(
-            "триггер проходит как есть, метка подтверждена ({} из {}) — обходить нечего",
-            options.repeats + CLEAR_CONFIRM_REPEATS,
-            options.repeats + CLEAR_CONFIRM_REPEATS
-        );
+        result.reason = "триггер проходит как есть — обходить нечего".into();
         let sni = trigger.name.strip_prefix("tls:").unwrap_or("");
         if !sni.is_empty() {
             let response = probe_response(
@@ -1244,6 +1195,7 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
             name: "split",
             cuts: &[1],
             gap: options.write_gap,
+            until_pass: false,
         },
         progress,
     );
@@ -1265,38 +1217,11 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
                     name: "control",
                     cuts: &[],
                     gap: options.write_gap,
+                    until_pass: true,
                 },
                 progress,
             );
-            if let Some(error) = &measured.error {
-                result.verdict = Verdict::Flaky;
-                result.reason = format!(
-                    "контроль другим именем: ошибка транспорта — {}",
-                    error.message()
-                );
-                finish(&mut result, &options, start);
-                return result;
-            }
-            if measured.pass > 0 && measured.pass < options.repeats {
-                result.verdict = Verdict::Flaky;
-                result.reason = format!(
-                    "контроль другим именем не воспроизводится: {} из {}",
-                    measured.pass, options.repeats
-                );
-                finish(&mut result, &options, start);
-                return result;
-            }
-            let unproven = measured.unproven;
-            if unproven > 0 && measured.pass == 0 {
-                result.verdict = Verdict::Inconclusive;
-                result.reason = format!(
-                    "контроль другим именем ответил не записью TLS ({} из {}) — это не проход и не молчание; вердикта нет",
-                    unproven, options.repeats
-                );
-                finish(&mut result, &options, start);
-                return result;
-            }
-            control_ok = measured.pass == options.repeats;
+            control_ok = measured.pass > 0;
         }
         if base.unproven > 0 || one.unproven > 0 {
             result.verdict = Verdict::Inconclusive;
@@ -1459,6 +1384,7 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
             name: "split-long",
             cuts: &[1],
             gap: options.long_gap,
+            until_pass: false,
         },
         progress,
     );
@@ -1481,6 +1407,7 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
             name: "split",
             cuts: &[hi],
             gap: options.write_gap,
+            until_pass: false,
         },
         progress,
     );
@@ -1511,6 +1438,7 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
                 name: "split",
                 cuts: &[mid],
                 gap: options.write_gap,
+                until_pass: false,
             },
             progress,
         );
@@ -1562,4 +1490,8 @@ fn strategy_for(pos: usize) -> String {
 fn finish(result: &mut ClassifyResult, options: &ClassifyOptions, start: Instant) {
     result.stopped = stopped(options);
     result.duration = start.elapsed();
+    result.rst_rule_failures = usize::try_from(
+        crate::raw_probe::rst_rule_failure_count().saturating_sub(result.rst_rule_failure_base),
+    )
+    .unwrap_or(usize::MAX);
 }

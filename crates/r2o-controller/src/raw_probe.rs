@@ -1,9 +1,10 @@
+use std::cell::Cell;
 use std::io;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Mutex, Once, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -24,7 +25,19 @@ const MAX_TRACE: usize = 512;
 const MAX_RAW_RESPONSE: usize = 8192;
 const RST_TIMEOUT: Duration = Duration::from_secs(300);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+const RST_PENDING_MAX: usize = 64;
+const RST_RELEASE_ATTEMPTS: u8 = 5;
 static RAW_SELFTESTS: OnceLock<Mutex<[Option<Instant>; 2]>> = OnceLock::new();
+thread_local! {
+    static RST_RULE_FAILURES: Cell<u64> = const { Cell::new(0) };
+}
+static RST_COMMENT_SUPPORTED: AtomicBool = AtomicBool::new(true);
+static RST_STALE_RULE_SWEEP: Once = Once::new();
+static RST_ABANDON_REPORTED: Once = Once::new();
+
+pub(crate) fn rst_rule_failure_count() -> u64 {
+    RST_RULE_FAILURES.with(Cell::get)
+}
 
 /// Проверить, может ли текущий процесс открыть raw-сокет отправки IPv4.
 pub fn raw_supported() -> bool {
@@ -1163,8 +1176,11 @@ fn local_address_for(remote: SocketAddr) -> io::Result<IpAddr> {
 }
 
 static IPTABLES_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static RST_PENDING: OnceLock<Mutex<Vec<PendingRstRelease>>> = OnceLock::new();
+static RST_CLEANUP_REGISTERED: Once = Once::new();
 
-struct RstGuard {
+#[derive(Clone)]
+struct RstRule {
     source_port: u16,
     destination: IpAddr,
     destination_port: u16,
@@ -1172,16 +1188,34 @@ struct RstGuard {
     comment: bool,
 }
 
-impl RstGuard {
+struct PendingRstRelease {
+    rule: RstRule,
+    attempts: u8,
+}
+
+struct RstGuard {
+    rule: Option<RstRule>,
+}
+
+impl RstRule {
     fn install(source_port: u16, destination: SocketAddr) -> Result<Self, ProbeError> {
         let nft = std::env::var("R2O_FW").as_deref() == Ok("nft");
-        let guard = Self {
+        let mut guard = Self {
             source_port,
             destination: destination.ip(),
             destination_port: destination.port(),
             nft,
-            comment: true,
+            comment: RST_COMMENT_SUPPORTED.load(Ordering::Relaxed),
         };
+        if !nft {
+            RST_STALE_RULE_SWEEP.call_once(sweep_stale_iptables);
+        }
+        let _lock = IPTABLES_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        retry_pending_rst_releases_locked(false);
+        register_rst_cleanup();
         if nft {
             let args = guard.nft_args("add");
             let status = run_command("nft", &args)
@@ -1194,9 +1228,7 @@ impl RstGuard {
             return Ok(guard);
         }
 
-        sweep_stale_iptables();
-        let _lock = IPTABLES_LOCK.get_or_init(|| Mutex::new(())).lock().ok();
-        let args = guard.iptables_args(true, "-I");
+        let args = guard.iptables_args(guard.comment, "-I");
         let program = if destination.is_ipv6() {
             "ip6tables"
         } else {
@@ -1207,14 +1239,18 @@ impl RstGuard {
         if status.success() {
             return Ok(guard);
         }
+        if !guard.comment || !matches!(status.code(), Some(1 | 2)) {
+            return Err(ProbeError::Local(format!(
+                "classify: {program} не установил подавление ядерного RST"
+            )));
+        }
         let fallback = guard.iptables_args(false, "-I");
         let status = run_command(program, &fallback)
             .map_err(|error| ProbeError::Local(format!("classify: {error}")))?;
         if status.success() {
-            return Ok(Self {
-                comment: false,
-                ..guard
-            });
+            RST_COMMENT_SUPPORTED.store(false, Ordering::Relaxed);
+            guard.comment = false;
+            return Ok(guard);
         }
         Err(ProbeError::Local(format!(
             "classify: {program} не установил подавление ядерного RST"
@@ -1272,26 +1308,141 @@ impl RstGuard {
     }
 }
 
-impl Drop for RstGuard {
-    fn drop(&mut self) {
-        if self.nft {
-            let _ = run_command("nft", &self.nft_args("delete"));
-            return;
-        }
-        let _lock = IPTABLES_LOCK.get_or_init(|| Mutex::new(())).lock().ok();
-        let program = if self.destination.is_ipv6() {
-            "ip6tables"
-        } else {
-            "iptables"
-        };
-        let args = self.iptables_args(self.comment, "-D");
-        if run_command(program, &args).is_ok_and(|status| status.success()) {
-            return;
-        }
-        if self.comment {
-            let _ = run_command(program, &self.iptables_args(false, "-D"));
+impl RstGuard {
+    fn install(source_port: u16, destination: SocketAddr) -> Self {
+        RST_RULE_FAILURES.with(|failures| {
+            Self::from_install_result(RstRule::install(source_port, destination), failures)
+        })
+    }
+
+    fn from_install_result(result: Result<RstRule, ProbeError>, failures: &Cell<u64>) -> Self {
+        match result {
+            Ok(rule) => Self { rule: Some(rule) },
+            Err(_) => {
+                failures.set(failures.get().saturating_add(1));
+                Self { rule: None }
+            }
         }
     }
+}
+
+impl Drop for RstGuard {
+    fn drop(&mut self) {
+        if let Some(rule) = &self.rule {
+            rst_release(rule);
+        }
+    }
+}
+
+fn rst_delete_once_locked(rule: &RstRule) -> bool {
+    if rule.nft {
+        let deleted = run_command("nft", &rule.nft_args("delete"));
+        if deleted.as_ref().is_ok_and(|status| status.success()) {
+            return true;
+        }
+        return deleted
+            .as_ref()
+            .is_ok_and(|status| status.code() == Some(1))
+            && run_command("nft", &rule.nft_args("get"))
+                .is_ok_and(|status| status.code() == Some(1));
+    }
+
+    let program = if rule.destination.is_ipv6() {
+        "ip6tables"
+    } else {
+        "iptables"
+    };
+    let deleted = run_command(program, &rule.iptables_args(rule.comment, "-D"));
+    if deleted.as_ref().is_ok_and(|status| status.success()) {
+        return true;
+    }
+    deleted
+        .as_ref()
+        .is_ok_and(|status| status.code() == Some(1))
+        && run_command(program, &rule.iptables_args(rule.comment, "-C"))
+            .is_ok_and(|status| status.code() == Some(1))
+}
+
+fn rst_delete_once(rule: &RstRule) -> bool {
+    let _lock = IPTABLES_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    rst_delete_once_locked(rule)
+}
+
+fn rst_release(rule: &RstRule) {
+    for _ in 0..2 {
+        if rst_delete_once(rule) {
+            return;
+        }
+    }
+    let pending = RST_PENDING.get_or_init(|| Mutex::new(Vec::new()));
+    let mut pending = pending
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if pending.len() < RST_PENDING_MAX {
+        pending.push(PendingRstRelease {
+            rule: rule.clone(),
+            attempts: 2,
+        });
+    } else {
+        RST_ABANDON_REPORTED.call_once(|| {
+            eprintln!("r2o: достигнут предел отложенного снятия RST-правил (64)");
+        });
+    }
+}
+
+fn retry_pending_rst_releases_locked(final_attempt: bool) {
+    let Some(pending) = RST_PENDING.get() else {
+        return;
+    };
+    let mut pending = pending
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut index = 0;
+    while index < pending.len() {
+        if !final_attempt && pending[index].attempts >= RST_RELEASE_ATTEMPTS {
+            index += 1;
+            continue;
+        }
+        if rst_delete_once_locked(&pending[index].rule) {
+            pending.remove(index);
+            continue;
+        }
+        pending[index].attempts = pending[index].attempts.saturating_add(1);
+        if pending[index].attempts >= RST_RELEASE_ATTEMPTS && !final_attempt {
+            RST_ABANDON_REPORTED.call_once(|| {
+                eprintln!("r2o: правило подавления RST не снято за 5 попыток; повторю при выходе");
+            });
+        }
+        index += 1;
+    }
+}
+
+fn retry_pending_rst_releases(final_attempt: bool) {
+    if RST_PENDING.get().is_none() {
+        return;
+    }
+    let _lock = IPTABLES_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    retry_pending_rst_releases_locked(final_attempt);
+}
+
+extern "C" fn rst_cleanup_at_exit() {
+    retry_pending_rst_releases(true);
+}
+
+fn register_rst_cleanup() {
+    RST_CLEANUP_REGISTERED.call_once(|| unsafe {
+        libc::atexit(rst_cleanup_at_exit);
+    });
+}
+
+pub(crate) fn flush_pending_rst_releases() {
+    retry_pending_rst_releases(false);
 }
 
 fn sweep_stale_iptables() {
@@ -1470,7 +1621,7 @@ impl RawConn {
             }
         }
         let source_port = next_source_port();
-        let rst_guard = RstGuard::install(source_port, remote)?;
+        let rst_guard = RstGuard::install(source_port, remote);
         let mut connection = Self {
             sender,
             receiver,
@@ -1778,6 +1929,62 @@ mod tests {
     use super::*;
     use r2k_core::plan::Plan;
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn nft_rst_rule_uses_r2o_table_and_exact_tuple_with_donor_timeout() {
+        let rule = RstRule {
+            source_port: 31_337,
+            destination: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)),
+            destination_port: 443,
+            nft: true,
+            comment: true,
+        };
+
+        assert_eq!(
+            rule.nft_args("add"),
+            [
+                "add",
+                "element",
+                "inet",
+                "r2o_rst",
+                "rst4",
+                "{ 31337 . 198.51.100.7 . 443 timeout 300s }",
+            ]
+        );
+        assert_eq!(
+            rule.nft_args("delete"),
+            [
+                "delete",
+                "element",
+                "inet",
+                "r2o_rst",
+                "rst4",
+                "{ 31337 . 198.51.100.7 . 443 }",
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_rst_suppression_is_counted_without_aborting_the_raw_probe() {
+        let failures = Cell::new(0);
+        let guard = RstGuard::from_install_result(
+            Err(ProbeError::Local("nft rejected the element".into())),
+            &failures,
+        );
+
+        assert!(guard.rule.is_none());
+        assert_eq!(failures.get(), 1);
+        drop(guard);
+    }
+
+    #[test]
+    fn rst_rule_failure_counts_are_per_worker_thread() {
+        let before = rst_rule_failure_count();
+        thread::spawn(|| RST_RULE_FAILURES.with(|failures| failures.set(7)))
+            .join()
+            .unwrap();
+        assert_eq!(rst_rule_failure_count(), before);
+    }
 
     #[test]
     fn successful_poison_hit_carries_compiled_datapath_plan() {

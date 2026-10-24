@@ -13,6 +13,7 @@ use rustls::pki_types::ServerName;
 use rustls::{ProtocolVersion, RootCertStore, StreamOwned};
 
 const SO_MARK: libc::c_int = 36;
+pub const R2O_D2O_VERIFY_STEP_TIMEOUT: Duration = Duration::from_secs(5);
 const R2O_VOLUME_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 const R2O_VOLUME_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
 const R2O_VOLUME_TX_STEPS: usize = 10;
@@ -456,7 +457,25 @@ pub fn r2o_fetch_connected_stream_with_packet_budget(
     stream: TcpStream,
     packet_budget: Option<u32>,
 ) -> Result<FetchResult, String> {
+    r2o_fetch_connected_stream_with_packet_budget_and_phase_timeout(
+        options,
+        stream,
+        packet_budget,
+        None,
+    )
+}
+
+/// Выполнить временную пробу с отдельным донорским сроком на TLS и HTTP.
+pub fn r2o_fetch_connected_stream_with_packet_budget_and_phase_timeout(
+    options: &FetchOptions,
+    stream: TcpStream,
+    packet_budget: Option<u32>,
+    phase_timeout: Option<Duration>,
+) -> Result<FetchResult, String> {
     options.validate()?;
+    if phase_timeout.is_some_and(|timeout| timeout.is_zero()) {
+        return Err("срок шага должен быть больше нуля".into());
+    }
     if packet_budget == Some(0) {
         return Err("бюджет TCP-пакетов должен быть больше нуля".into());
     }
@@ -480,6 +499,7 @@ pub fn r2o_fetch_connected_stream_with_packet_budget(
         roots,
         None,
         packet_budget,
+        phase_timeout,
     )
 }
 
@@ -510,6 +530,42 @@ pub fn r2o_fetch_ech_connected_stream(
         roots,
         Some(ech),
         None,
+        None,
+    )
+}
+
+/// Выполнить ECH-проверку с отдельным донорским сроком на TLS и HTTP.
+pub fn r2o_fetch_ech_connected_stream_with_phase_timeout(
+    options: &FetchOptions,
+    stream: TcpStream,
+    ech: &rustls::client::EchConfig,
+    phase_timeout: Duration,
+) -> Result<FetchResult, String> {
+    options.validate()?;
+    if phase_timeout.is_zero() {
+        return Err("срок шага должен быть больше нуля".into());
+    }
+    let address = resolve_target(options)?;
+    let peer = stream
+        .peer_addr()
+        .map_err(|error| format!("не удалось проверить адрес ECH-зонда: {error}"))?;
+    if peer != address {
+        return Err(format!(
+            "TCP-сокет подключён к {peer}, ожидался HTTPS-адрес {address}"
+        ));
+    }
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    r2o_fetch_connected_stream_with_roots_and_encoding(
+        options,
+        stream,
+        address,
+        Instant::now(),
+        R2oFetchEncoding::Identity,
+        roots,
+        Some(ech),
+        None,
+        Some(phase_timeout),
     )
 }
 
@@ -544,11 +600,45 @@ fn r2o_fetch_with_roots_and_encoding_detailed(
     r2o_encoding: R2oFetchEncoding,
     roots: RootCertStore,
 ) -> Result<FetchResult, R2oFetchError> {
+    r2o_fetch_with_roots_and_encoding_detailed_with_phase_timeout(
+        options,
+        r2o_encoding,
+        roots,
+        None,
+    )
+}
+
+/// Выполнить HTTPS GET с отдельным донорским сроком на TCP, TLS и HTTP шаги.
+pub fn r2o_fetch_with_phase_timeout(
+    options: &FetchOptions,
+    phase_timeout: Duration,
+) -> Result<FetchResult, String> {
+    if phase_timeout.is_zero() {
+        return Err("срок шага должен быть больше нуля".into());
+    }
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    r2o_fetch_with_roots_and_encoding_detailed_with_phase_timeout(
+        options,
+        R2oFetchEncoding::Identity,
+        roots,
+        Some(phase_timeout),
+    )
+    .map_err(|error| error.message)
+}
+
+fn r2o_fetch_with_roots_and_encoding_detailed_with_phase_timeout(
+    options: &FetchOptions,
+    r2o_encoding: R2oFetchEncoding,
+    roots: RootCertStore,
+    phase_timeout: Option<Duration>,
+) -> Result<FetchResult, R2oFetchError> {
     options.validate()?;
     let address = resolve_target(options)?;
     let started = Instant::now();
+    let connect_timeout = phase_timeout.unwrap_or(options.deadline);
     let deadline = started
-        .checked_add(options.deadline)
+        .checked_add(connect_timeout)
         .ok_or_else(|| "срок ожидания слишком велик".to_owned())?;
     let socket = connect_target(address, options.mark, remaining(deadline)?).map_err(|error| {
         R2oFetchError {
@@ -569,6 +659,7 @@ fn r2o_fetch_with_roots_and_encoding_detailed(
         roots,
         None,
         None,
+        phase_timeout,
     )
     .map_err(Into::into)
 }
@@ -582,6 +673,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding(
     roots: RootCertStore,
     ech: Option<&rustls::client::EchConfig>,
     packet_budget: Option<u32>,
+    phase_timeout: Option<Duration>,
 ) -> Result<FetchResult, String> {
     r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
         options,
@@ -592,6 +684,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding(
         roots,
         ech,
         packet_budget,
+        phase_timeout,
         |socket| r2o_tcp_counters(socket).data_packets,
     )
 }
@@ -605,11 +698,14 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
     roots: RootCertStore,
     ech: Option<&rustls::client::EchConfig>,
     packet_budget: Option<u32>,
+    phase_timeout: Option<Duration>,
     mut packet_counter: impl FnMut(&TcpStream) -> Option<u32>,
 ) -> Result<FetchResult, String> {
-    let deadline = started
-        .checked_add(options.deadline)
-        .ok_or_else(|| "срок ожидания слишком велик".to_owned())?;
+    let deadline = match phase_timeout {
+        Some(timeout) => Instant::now().checked_add(timeout),
+        None => started.checked_add(options.deadline),
+    }
+    .ok_or_else(|| "срок ожидания слишком велик".to_owned())?;
     socket
         .set_nodelay(true)
         .map_err(|error| format!("не удалось настроить TCP-сокет: {error}"))?;
@@ -655,8 +751,14 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
     let root_probe = options.path == "/";
     let mut redirects = 0;
     loop {
+        let response_deadline = match phase_timeout {
+            Some(timeout) => Instant::now()
+                .checked_add(timeout)
+                .ok_or_else(|| "срок HTTP-шага слишком велик".to_owned())?,
+            None => deadline,
+        };
         let request = build_request(&options.name, &request_path, r2o_encoding);
-        set_deadline(&stream.sock.socket, deadline)?;
+        set_deadline(&stream.sock.socket, response_deadline)?;
         stream
             .write_all(&request)
             .and_then(|()| stream.flush())
@@ -676,7 +778,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             if parser.is_complete() || parser.is_invalid() {
                 break;
             }
-            if let Err(error) = set_deadline(&stream.sock.socket, deadline) {
+            if let Err(error) = set_deadline(&stream.sock.socket, response_deadline) {
                 reason = Some(error);
                 break;
             }
@@ -984,19 +1086,56 @@ pub fn r2o_fetch_measure_rx_volume_with_fallback_path(
     r2o_fetch_measure_rx_volume_with_fallback_path_and_roots(options, fallback_path, roots)
 }
 
+/// Выполнить RX-проверку с донорским сроком на TCP, TLS и HTTP шаги.
+pub fn r2o_fetch_measure_rx_volume_with_fallback_path_and_phase_timeout(
+    options: &FetchOptions,
+    fallback_path: Option<&str>,
+    phase_timeout: Duration,
+) -> R2oFetchVolumeRxResult {
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    r2o_fetch_measure_rx_volume_with_fallback_path_and_roots_and_phase_timeout(
+        options,
+        fallback_path,
+        roots,
+        Some(phase_timeout),
+    )
+}
+
 fn r2o_fetch_rx_probe(
     options: &FetchOptions,
     encoding: R2oFetchEncoding,
     roots: RootCertStore,
+    phase_timeout: Option<Duration>,
 ) -> Result<FetchResult, String> {
-    let first = r2o_fetch_with_roots_and_encoding(options, encoding, roots.clone())?;
+    let first = r2o_fetch_with_roots_and_encoding_with_phase_timeout(
+        options,
+        encoding,
+        roots.clone(),
+        phase_timeout,
+    )?;
     if !r2o_fetch_rx_probe_needs_repeat(&first) {
         return Ok(first);
     }
 
     drop(first);
     std::thread::sleep(R2O_VOLUME_RX_PROBE_GAP);
-    r2o_fetch_with_roots_and_encoding(options, encoding, roots)
+    r2o_fetch_with_roots_and_encoding_with_phase_timeout(options, encoding, roots, phase_timeout)
+}
+
+fn r2o_fetch_with_roots_and_encoding_with_phase_timeout(
+    options: &FetchOptions,
+    encoding: R2oFetchEncoding,
+    roots: RootCertStore,
+    phase_timeout: Option<Duration>,
+) -> Result<FetchResult, String> {
+    r2o_fetch_with_roots_and_encoding_detailed_with_phase_timeout(
+        options,
+        encoding,
+        roots,
+        phase_timeout,
+    )
+    .map_err(|error| error.message)
 }
 
 fn r2o_fetch_rx_probe_needs_repeat(result: &FetchResult) -> bool {
@@ -1020,7 +1159,25 @@ fn r2o_fetch_measure_rx_volume_with_fallback_path_and_roots(
     fallback_path: Option<&str>,
     roots: RootCertStore,
 ) -> R2oFetchVolumeRxResult {
-    let primary = r2o_fetch_measure_rx_volume_with_roots(options, roots.clone());
+    r2o_fetch_measure_rx_volume_with_fallback_path_and_roots_and_phase_timeout(
+        options,
+        fallback_path,
+        roots,
+        None,
+    )
+}
+
+fn r2o_fetch_measure_rx_volume_with_fallback_path_and_roots_and_phase_timeout(
+    options: &FetchOptions,
+    fallback_path: Option<&str>,
+    roots: RootCertStore,
+    phase_timeout: Option<Duration>,
+) -> R2oFetchVolumeRxResult {
+    let primary = r2o_fetch_measure_rx_volume_with_roots_and_phase_timeout(
+        options,
+        roots.clone(),
+        phase_timeout,
+    );
     let Some(short_bytes) = primary.short_bytes else {
         return primary;
     };
@@ -1035,7 +1192,11 @@ fn r2o_fetch_measure_rx_volume_with_fallback_path_and_roots(
     std::thread::sleep(R2O_VOLUME_RX_PROBE_GAP);
     let mut fallback_options = options.clone();
     fallback_options.path = path.into();
-    let fallback = r2o_fetch_measure_rx_volume_with_roots(&fallback_options, roots);
+    let fallback = r2o_fetch_measure_rx_volume_with_roots_and_phase_timeout(
+        &fallback_options,
+        roots,
+        phase_timeout,
+    );
     r2o_fetch_rx_fallback_result(primary, fallback, path, short_bytes)
 }
 
@@ -1069,7 +1230,15 @@ fn r2o_fetch_measure_rx_volume_with_roots(
     options: &FetchOptions,
     roots: RootCertStore,
 ) -> R2oFetchVolumeRxResult {
-    let r2o_result = r2o_fetch_measure_rx_volume_once(options, roots.clone());
+    r2o_fetch_measure_rx_volume_with_roots_and_phase_timeout(options, roots, None)
+}
+
+fn r2o_fetch_measure_rx_volume_with_roots_and_phase_timeout(
+    options: &FetchOptions,
+    roots: RootCertStore,
+    phase_timeout: Option<Duration>,
+) -> R2oFetchVolumeRxResult {
+    let r2o_result = r2o_fetch_measure_rx_volume_once(options, roots.clone(), phase_timeout);
     let Some(r2o_short_bytes) = r2o_result.short_bytes else {
         return r2o_result;
     };
@@ -1089,7 +1258,7 @@ fn r2o_fetch_measure_rx_volume_with_roots(
     std::thread::sleep(R2O_VOLUME_RX_PROBE_GAP);
     let mut r2o_retry_options = options.clone();
     r2o_retry_options.path = r2o_retry_path.clone();
-    let mut r2o_retry = r2o_fetch_measure_rx_volume_once(&r2o_retry_options, roots);
+    let mut r2o_retry = r2o_fetch_measure_rx_volume_once(&r2o_retry_options, roots, phase_timeout);
     r2o_retry.retry_path = Some(r2o_retry_path.clone());
     if r2o_retry.rx_tls_unavailable
         && r2o_retry.evidence.is_none()
@@ -1116,6 +1285,7 @@ fn r2o_fetch_measure_rx_volume_with_roots(
 fn r2o_fetch_measure_rx_volume_once(
     options: &FetchOptions,
     roots: RootCertStore,
+    phase_timeout: Option<Duration>,
 ) -> R2oFetchVolumeRxResult {
     let mut r2o_result = R2oFetchVolumeRxResult::default();
     if options.port == 80 {
@@ -1124,18 +1294,20 @@ fn r2o_fetch_measure_rx_volume_once(
     }
     let mut r2o_options = options.clone();
     r2o_options.deadline = R2O_VOLUME_RX_DEADLINE;
-    let r2o_first =
-        match r2o_fetch_rx_probe(&r2o_options, R2oFetchEncoding::Identity, roots.clone()) {
-            Ok(result) => result,
-            Err(error) => {
-                r2o_result.rx_tls_unavailable =
-                    error.starts_with("TLS-рукопожатие не завершилось:");
-                r2o_result.failures.push(error.clone());
-                r2o_result.reason =
-                    format!("первая identity-проверка не установила TLS/HTTP: {error}");
-                return r2o_result;
-            }
-        };
+    let r2o_first = match r2o_fetch_rx_probe(
+        &r2o_options,
+        R2oFetchEncoding::Identity,
+        roots.clone(),
+        phase_timeout,
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            r2o_result.rx_tls_unavailable = error.starts_with("TLS-рукопожатие не завершилось:");
+            r2o_result.failures.push(error.clone());
+            r2o_result.reason = format!("первая identity-проверка не установила TLS/HTTP: {error}");
+            return r2o_result;
+        }
+    };
     r2o_result.direct_complete = r2o_fetch_result_is_direct_complete(&r2o_first);
     let r2o_first_observation = r2o_first.r2o_volume_observation;
     if !crate::r2o_volume::r2o_volume_rx_partial(&r2o_first_observation) {
@@ -1165,15 +1337,19 @@ fn r2o_fetch_measure_rx_volume_once(
     }
     r2o_result.first = Some(r2o_first);
     std::thread::sleep(R2O_VOLUME_RX_PROBE_GAP);
-    let r2o_second =
-        match r2o_fetch_rx_probe(&r2o_options, R2oFetchEncoding::Identity, roots.clone()) {
-            Ok(result) => result,
-            Err(error) => {
-                r2o_result.failures.push(error.clone());
-                r2o_result.reason = format!("повтор identity не завершился: {error}");
-                return r2o_result;
-            }
-        };
+    let r2o_second = match r2o_fetch_rx_probe(
+        &r2o_options,
+        R2oFetchEncoding::Identity,
+        roots.clone(),
+        phase_timeout,
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            r2o_result.failures.push(error.clone());
+            r2o_result.reason = format!("повтор identity не завершился: {error}");
+            return r2o_result;
+        }
+    };
     let r2o_second_observation = r2o_second.r2o_volume_observation;
     let mut r2o_confirming_observation = r2o_second_observation;
     if !crate::r2o_volume::r2o_volume_rx_pair_agrees(
@@ -1193,15 +1369,19 @@ fn r2o_fetch_measure_rx_volume_once(
         }
         r2o_result.second = Some(r2o_second);
         std::thread::sleep(R2O_VOLUME_RX_PROBE_GAP);
-        let r2o_third =
-            match r2o_fetch_rx_probe(&r2o_options, R2oFetchEncoding::Identity, roots.clone()) {
-                Ok(result) => result,
-                Err(error) => {
-                    r2o_result.failures.push(error.clone());
-                    r2o_result.reason = format!("третий identity-замер не завершился: {error}");
-                    return r2o_result;
-                }
-            };
+        let r2o_third = match r2o_fetch_rx_probe(
+            &r2o_options,
+            R2oFetchEncoding::Identity,
+            roots.clone(),
+            phase_timeout,
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                r2o_result.failures.push(error.clone());
+                r2o_result.reason = format!("третий identity-замер не завершился: {error}");
+                return r2o_result;
+            }
+        };
         r2o_confirming_observation = r2o_third.r2o_volume_observation;
         if !crate::r2o_volume::r2o_volume_rx_pair_agrees(
             &r2o_first_observation,
@@ -1220,14 +1400,15 @@ fn r2o_fetch_measure_rx_volume_once(
     }
 
     std::thread::sleep(R2O_VOLUME_RX_PROBE_GAP);
-    let r2o_gzip = match r2o_fetch_rx_probe(&r2o_options, R2oFetchEncoding::Gzip, roots) {
-        Ok(result) => result,
-        Err(error) => {
-            r2o_result.failures.push(error.clone());
-            r2o_result.reason = format!("gzip-контроль не завершился: {error}");
-            return r2o_result;
-        }
-    };
+    let r2o_gzip =
+        match r2o_fetch_rx_probe(&r2o_options, R2oFetchEncoding::Gzip, roots, phase_timeout) {
+            Ok(result) => result,
+            Err(error) => {
+                r2o_result.failures.push(error.clone());
+                r2o_result.reason = format!("gzip-контроль не завершился: {error}");
+                return r2o_result;
+            }
+        };
     r2o_result.evidence = crate::r2o_volume::r2o_volume_rx_evidence(
         &r2o_first_observation,
         &r2o_confirming_observation,
@@ -2634,6 +2815,7 @@ mod tests {
             roots,
             None,
             Some(50),
+            None,
             |_| packet_counts.next(),
         )
         .expect("завершить HTTP-проверку бюджета TCP");
@@ -2894,7 +3076,7 @@ mod tests {
             wire_len: None,
             mark: None,
         };
-        let result = r2o_fetch_rx_probe(&options, R2oFetchEncoding::Identity, roots)
+        let result = r2o_fetch_rx_probe(&options, R2oFetchEncoding::Identity, roots, None)
             .expect("завершить повторный RX-запрос");
         let requests = request_receiver.try_iter().collect::<Vec<_>>();
         server.join().unwrap();

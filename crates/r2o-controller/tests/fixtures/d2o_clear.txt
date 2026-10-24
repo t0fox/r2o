@@ -1,0 +1,11 @@
+# C/Rust behavioral parity input; interpreted by the Rust test and the C harness.
+target=127.0.0.1:37229
+payload_hex=574106035349474e41545552452d414e442d5448454e2d534f4d452d5041594c4f41442d4259544553
+repeats=3
+timeout_ms=400
+write_gap_ms=2
+long_gap_ms=10
+allow_loopback=true
+mark=45
+accept=any
+outcomes=+++

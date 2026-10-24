@@ -368,7 +368,7 @@ fn an_answering_control_and_failed_split_produce_opaque_without_a_plan() {
 }
 
 #[test]
-fn mixed_control_repeats_are_flaky_instead_of_a_positive_control() {
+fn a_single_control_pass_is_positive_and_stops_the_series() {
     let trigger = test_trigger();
     let mut options = test_options();
     options.control = Some(Trigger {
@@ -380,20 +380,19 @@ fn mixed_control_repeats_are_flaky_instead_of_a_positive_control() {
 
     let result = run_with_backend("192.0.2.10:443", &trigger, options, &mut backend);
 
-    assert_eq!(result.verdict, Verdict::Flaky);
-    assert!(result.reason.contains("контроль"));
+    assert_eq!(result.verdict, Verdict::Opaque);
     let observation = result
         .trace
         .iter()
         .find(|observation| observation.probe == "control")
         .unwrap();
     assert_eq!(observation.pass, 1);
-    assert_eq!(observation.fail, 1);
-    assert_eq!(backend.control_probes, 2);
+    assert_eq!(observation.fail, 0);
+    assert_eq!(backend.control_probes, 1);
 }
 
 #[test]
-fn unrecognized_control_replies_are_inconclusive_not_address_blocking() {
+fn unrecognized_control_replies_do_not_count_as_passes_and_continue_diagnostics() {
     let trigger = test_trigger();
     let mut options = test_options();
     options.control = Some(Trigger {
@@ -405,10 +404,10 @@ fn unrecognized_control_replies_are_inconclusive_not_address_blocking() {
 
     let result = run_with_backend("192.0.2.10:443", &trigger, options, &mut backend);
 
-    assert_eq!(result.verdict, Verdict::Inconclusive);
-    assert!(result.reason.contains("не записью TLS"));
+    assert_eq!(result.verdict, Verdict::Address);
+    assert!(result.reason.contains("нейтрального байта"));
     assert!(
-        !result
+        result
             .trace
             .iter()
             .any(|probe| probe.probe == "neutral-ack")
@@ -433,7 +432,7 @@ fn unrecognized_trigger_reply_prevents_an_opaque_verdict() {
 }
 
 #[test]
-fn partial_base_transport_errors_continue_to_the_split_measurement() {
+fn partial_base_transport_error_stops_at_the_base_measurement_like_donor() {
     let trigger = test_trigger();
     let mut options = test_options();
     options.control = Some(Trigger {
@@ -445,10 +444,11 @@ fn partial_base_transport_errors_continue_to_the_split_measurement() {
 
     let result = run_with_backend("192.0.2.10:443", &trigger, options, &mut backend);
 
-    assert_eq!(result.verdict, Verdict::Opaque);
-    assert_eq!(result.probes, 6);
+    assert_eq!(result.verdict, Verdict::Unreachable);
+    assert_eq!(result.probes, 2);
     assert!(result.trace[0].error.is_some());
-    assert_eq!(result.trace[1].probe, "split");
+    assert_eq!(result.trace.len(), 1);
+    assert!(result.reason.contains("test connection failure"));
 }
 
 #[test]
@@ -534,7 +534,7 @@ fn no_tcp_ack_for_trigger_or_control_is_an_address_verdict() {
 }
 
 #[test]
-fn seeded_whole_measurement_is_reused_and_still_gets_confirmation() {
+fn seeded_whole_measurement_is_reused_without_an_extra_confirmation() {
     let trigger = test_trigger();
     let mut options = test_options();
     options.mark = Some(0x2d);
@@ -549,14 +549,13 @@ fn seeded_whole_measurement_is_reused_and_still_gets_confirmation() {
     let result = run_with_backend("192.0.2.10:443", &trigger, options, &mut backend);
 
     assert_eq!(result.verdict, Verdict::Clear);
-    assert_eq!(result.probes, 2);
+    assert_eq!(result.probes, 0);
+    assert_eq!(result.trace.len(), 1);
     assert_eq!(result.trace[0].pass, 2);
-    assert_eq!(result.trace[1].probe, "whole-confirm");
-    assert_eq!(result.trace[1].pass, 2);
 }
 
 #[test]
-fn clear_requires_two_more_successful_probes() {
+fn clear_uses_only_the_configured_base_series() {
     let trigger = test_trigger();
     let mut options = test_options();
     options.mark = Some(0x2d);
@@ -565,13 +564,13 @@ fn clear_requires_two_more_successful_probes() {
     let result = run_with_backend("192.0.2.10:443", &trigger, options, &mut backend);
 
     assert_eq!(result.verdict, Verdict::Clear);
-    assert_eq!(result.probes, 4);
-    assert_eq!(result.trace[1].probe, "whole-confirm");
-    assert_eq!(result.trace[1].pass, 2);
+    assert_eq!(result.probes, 2);
+    assert_eq!(result.trace.len(), 1);
+    assert_eq!(result.trace[0].pass, 2);
 }
 
 #[test]
-fn failed_clear_confirmation_is_flaky() {
+fn clear_is_unconditional_after_a_successful_base_series() {
     let trigger = test_trigger();
     let mut options = test_options();
     options.mark = Some(0x2d);
@@ -579,15 +578,12 @@ fn failed_clear_confirmation_is_flaky() {
 
     let result = run_with_backend("192.0.2.10:443", &trigger, options, &mut backend);
 
-    assert_eq!(result.verdict, Verdict::Flaky);
-    assert!(result.reason.contains("подтвердилась"));
-    assert_eq!(result.probes, 4);
-    assert_eq!(result.trace[1].pass, 0);
-    assert_eq!(result.trace[1].fail, 2);
+    assert_eq!(result.verdict, Verdict::Clear);
+    assert_eq!(result.probes, 2);
 }
 
 #[test]
-fn unmarked_baseline_cannot_be_reported_clear() {
+fn clear_does_not_depend_on_a_mark_confirmation() {
     let trigger = test_trigger();
     let mut options = test_options();
     options.mark = Some(0);
@@ -595,9 +591,9 @@ fn unmarked_baseline_cannot_be_reported_clear() {
 
     let result = run_with_backend("192.0.2.10:443", &trigger, options, &mut backend);
 
-    assert_eq!(result.verdict, Verdict::Inconclusive);
-    assert!(result.reason.contains("метк"));
-    assert_eq!(result.probes, 4);
+    assert_eq!(result.verdict, Verdict::Clear);
+    assert!(!result.reason.contains("метк"));
+    assert_eq!(result.probes, 2);
 }
 
 #[test]
@@ -762,13 +758,13 @@ fn tls_trigger_uses_the_captured_profile_and_serverhello_acceptance() {
 }
 
 #[test]
-fn live_tcp_backend_runs_base_and_confirmation_with_the_original_payload() {
+fn live_tcp_backend_runs_only_the_base_series_with_the_original_payload() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let payload = b"baseline trigger".to_vec();
     let expected_payload = payload.clone();
     let server = thread::spawn(move || {
-        for _ in 0..4 {
+        for _ in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
             let mut received = vec![0; expected_payload.len()];
             stream.read_exact(&mut received).unwrap();
@@ -790,8 +786,8 @@ fn live_tcp_backend_runs_base_and_confirmation_with_the_original_payload() {
     let result = run(&format!("{address}"), &trigger, options);
     server.join().unwrap();
 
-    assert_eq!(result.verdict, Verdict::Inconclusive);
-    assert_eq!(result.probes, 4);
+    assert_eq!(result.verdict, Verdict::Clear);
+    assert_eq!(result.probes, 2);
 }
 
 #[test]
@@ -834,7 +830,7 @@ fn classify_cli_runs_the_tls_probe_and_reports_the_response_check() {
     listener.set_nonblocking(true).unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = thread::spawn(move || {
-        for index in 0..6 {
+        for index in 0..3 {
             let deadline = Instant::now() + Duration::from_secs(1);
             let (mut stream, _) = loop {
                 match listener.accept() {
@@ -853,14 +849,14 @@ fn classify_cli_runs_the_tls_probe_and_reports_the_response_check() {
             let length = usize::from(u16::from_be_bytes([header[3], header[4]]));
             let mut body = vec![0; length];
             stream.read_exact(&mut body).unwrap();
-            let response = if index < 4 {
+            let response = if index == 0 {
                 vec![0x16, 0x03, 0x03, 0, 1, 2]
             } else {
                 vec![0x16, 0x03, 0x03, 0, 4, 14, 0, 0, 0]
             };
             stream.write_all(&response).unwrap();
         }
-        6
+        3
     });
 
     let output = Command::new(env!("CARGO_BIN_EXE_r2o-controller"))
@@ -884,8 +880,8 @@ fn classify_cli_runs_the_tls_probe_and_reports_the_response_check() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("вердикт: clear"), "{stdout}");
     assert!(
-        stdout.contains("зонды: 6") || (stdout.contains("зонды: 4") && stdout.contains("SO_MARK")),
-        "ожидались два ответа TLS-зонда или явный отказ SO_MARK в runner: {stdout}"
+        stdout.contains("зонды: 6") || stdout.contains("зонды: 3"),
+        "ожидались одна базовая и две TLS-проверки или явный отказ SO_MARK в runner: {stdout}"
     );
     assert!(stdout.contains("ответное направление"), "{stdout}");
 }

@@ -916,6 +916,12 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
             result.probes,
             result.duration.as_millis()
         );
+        if result.rst_rule_failures > 0 {
+            println!(
+                "отказов установки правила подавления RST: {}",
+                result.rst_rule_failures
+            );
+        }
         if let Some(boundary) = result.boundary {
             println!("граница: {boundary}");
         }
@@ -1964,9 +1970,10 @@ fn r2o_discovery_measure_volume(
     {
         r2o_controller::fetch::R2oFetchVolumeRxResult::default()
     } else {
-        r2o_controller::fetch::r2o_fetch_measure_rx_volume_with_fallback_path(
+        r2o_controller::fetch::r2o_fetch_measure_rx_volume_with_fallback_path_and_phase_timeout(
             options,
             alternate_path,
+            r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT,
         )
     };
     (tx, rx)
@@ -2358,14 +2365,6 @@ struct CatalogInstallSummary {
     refused: usize,
     last_refusal: Option<&'static str>,
     installed_groups: Vec<r2o_controller::live::LiveGroupKey>,
-}
-
-#[cfg(unix)]
-fn install_catalog(
-    client: &mut ControlClient,
-    compiled: &CompiledCatalog,
-) -> Result<CatalogInstallSummary, Box<dyn Error>> {
-    install_catalog_with_policy(client, compiled, false)
 }
 
 #[cfg(unix)]
@@ -2895,7 +2894,8 @@ impl R2oFamilyRecoveryWorker {
                     break;
                 }
                 let outcome = {
-                    let Some(_permit) = worker_gate.r2o_acquire(&worker_cancel) else {
+                    let Some(_permit) = worker_gate.r2o_acquire_family_recovery(&worker_cancel)
+                    else {
                         break;
                     };
                     r2o_family_recovery_run(task, &worker_commands, &worker_cancel)
@@ -3044,16 +3044,19 @@ fn r2o_family_recovery_fetch(
         .endpoint
         .parse::<std::net::SocketAddr>()
         .map_err(|error| format!("адрес семейной пробы недопустим: {error}"))?;
-    r2o_controller::fetch::fetch(&r2o_controller::fetch::FetchOptions {
-        name: target.host.clone(),
-        ip: Some(endpoint.ip()),
-        port: endpoint.port(),
-        path: probe_path.into(),
-        deadline: std::time::Duration::from_secs(8),
-        tls12: target.shape == SHAPE_LEGACY,
-        wire_len: None,
-        mark: r2o_candidate_confirmation_mark(mark),
-    })
+    r2o_controller::fetch::r2o_fetch_with_phase_timeout(
+        &r2o_controller::fetch::FetchOptions {
+            name: target.host.clone(),
+            ip: Some(endpoint.ip()),
+            port: endpoint.port(),
+            path: probe_path.into(),
+            deadline: std::time::Duration::from_secs(8),
+            tls12: target.shape == SHAPE_LEGACY,
+            wire_len: None,
+            mark: r2o_candidate_confirmation_mark(mark),
+        },
+        r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT,
+    )
     .map_err(|error| format!("проверка известного семейного плана не завершилась: {error}"))
 }
 
@@ -3088,7 +3091,7 @@ fn r2o_family_recovery_run(
             let applied = r2o_collect_controller_applied_events(
                 commands,
                 [0; 16],
-                std::time::Duration::from_millis(500),
+                std::time::Duration::from_secs(5),
             )
             .map(|events| {
                 events.iter().any(|event| {
@@ -3212,52 +3215,80 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
         }
 
         let connected = bound
-            .connect(destination, std::time::Duration::from_secs(8))
+            .connect(
+                destination,
+                r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT,
+            )
             .map_err(|error| format!("не удалось подключить семейную пробу: {error}"));
         let mut transport_established = false;
+        let mut socket_hold = None;
         let fetch_result = match connected {
             Ok((stream, _, connected_port, _)) if connected_port == local_port => {
                 transport_established = true;
-                let options = r2o_controller::fetch::FetchOptions {
-                    name: ech
-                        .map(|config| config.origin_name.clone())
-                        .unwrap_or_else(|| target.host.clone()),
-                    ip: Some(destination.ip()),
-                    port: destination.port(),
-                    path: candidate.probe_path.clone(),
-                    deadline: std::time::Duration::from_secs(8),
-                    tls12: target.shape == SHAPE_LEGACY,
-                    wire_len: None,
-                    mark: confirmation_mark,
-                };
-                if let Some(ech) = ech {
-                    let config = r2o_controller::ech::r2o_ech_tls_config(ech)?;
-                    r2o_controller::fetch::r2o_fetch_ech_connected_stream(&options, stream, &config)
-                } else if packet_budget.is_some() {
-                    r2o_controller::fetch::r2o_fetch_connected_stream_with_packet_budget(
-                        &options,
-                        stream,
-                        packet_budget,
-                    )
-                } else {
-                    r2o_controller::fetch::r2o_fetch_connected_stream(&options, stream)
+                match stream.try_clone() {
+                    Err(error) => Err(format!("не удалось удержать сокет до APPLIED: {error}")),
+                    Ok(held) => {
+                        socket_hold = Some(held);
+                        let options = r2o_controller::fetch::FetchOptions {
+                            name: ech
+                                .map(|config| config.origin_name.clone())
+                                .unwrap_or_else(|| target.host.clone()),
+                            ip: Some(destination.ip()),
+                            port: destination.port(),
+                            path: candidate.probe_path.clone(),
+                            deadline: std::time::Duration::from_secs(8),
+                            tls12: target.shape == SHAPE_LEGACY,
+                            wire_len: None,
+                            mark: confirmation_mark,
+                        };
+                        if let Some(ech) = ech {
+                            let config = r2o_controller::ech::r2o_ech_tls_config(ech)?;
+                            r2o_controller::fetch::r2o_fetch_ech_connected_stream_with_phase_timeout(
+                                &options,
+                                stream,
+                                &config,
+                                r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT,
+                            )
+                        } else if packet_budget.is_some() {
+                            r2o_controller::fetch::r2o_fetch_connected_stream_with_packet_budget_and_phase_timeout(
+                                &options,
+                                stream,
+                                packet_budget,
+                                Some(r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT),
+                            )
+                        } else {
+                            r2o_controller::fetch::r2o_fetch_connected_stream_with_packet_budget_and_phase_timeout(
+                                &options,
+                                stream,
+                                None,
+                                Some(r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT),
+                            )
+                        }
+                    }
                 }
             }
             Ok((_stream, _, _, _)) => Err("TCP-зонд получил неожиданный локальный порт".into()),
             Err(error) => Err(error),
         };
-        ask_http_controller(commands, |reply| HttpSearchCommand::DeleteProbe {
+        let events = r2o_collect_controller_applied_events(
+            commands,
+            trial_id,
+            if transport_established {
+                std::time::Duration::from_secs(5)
+            } else {
+                std::time::Duration::ZERO
+            },
+        );
+        let delete_result = ask_http_controller(commands, |reply| HttpSearchCommand::DeleteProbe {
             host: target.host.clone(),
             shape: target.shape,
             family: target.family,
             port: local_port,
             reply,
-        })?;
-        let events = r2o_collect_controller_applied_events(
-            commands,
-            trial_id,
-            std::time::Duration::from_millis(500),
-        )?;
+        });
+        drop(socket_hold);
+        let events = events?;
+        delete_result?;
         let applied = events.iter().any(|event| {
             r2o_family_applied_flow_matches(
                 event,
@@ -3600,14 +3631,34 @@ fn r2o_discovery_client_shape_trial(
         return Err("датапат отверг временный план снимка ClientHello".into());
     }
 
-    let send_result = match bound.connect(destination, std::time::Duration::from_secs(8)) {
+    let mut socket_hold = None;
+    let send_result = match bound.connect(
+        destination,
+        r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT,
+    ) {
         Ok((mut stream, _, connected_port, _)) if connected_port == local_port => {
-            std::io::Write::write_all(&mut stream, client_hello)
-                .map_err(|error| format!("не удалось отправить снимок ClientHello: {error}"))
+            match stream.try_clone() {
+                Ok(held) => {
+                    socket_hold = Some(held);
+                    std::io::Write::write_all(&mut stream, client_hello).map_err(|error| {
+                        format!("не удалось отправить снимок ClientHello: {error}")
+                    })
+                }
+                Err(error) => Err(format!("не удалось удержать сокет до APPLIED: {error}")),
+            }
         }
         Ok((_stream, _, _, _)) => Err("сокет снимка получил неожиданный локальный порт".into()),
         Err(error) => Err(format!("не удалось подключить снимок ClientHello: {error}")),
     };
+    let events = r2o_collect_controller_applied_events(
+        commands,
+        trial_id,
+        if send_result.is_ok() {
+            std::time::Duration::from_secs(5)
+        } else {
+            std::time::Duration::ZERO
+        },
+    );
     let delete_result = ask_http_controller(commands, |reply| HttpSearchCommand::DeleteProbe {
         host: target.host.clone(),
         shape: target.shape,
@@ -3615,11 +3666,7 @@ fn r2o_discovery_client_shape_trial(
         port: local_port,
         reply,
     });
-    let events = r2o_collect_controller_applied_events(
-        commands,
-        trial_id,
-        std::time::Duration::from_millis(500),
-    );
+    drop(socket_hold);
     send_result?;
     delete_result?;
     let events = events?;
@@ -3683,7 +3730,7 @@ impl R2oLateRxWorker {
                     break;
                 }
                 let result = {
-                    let Some(_permit) = worker_gate.r2o_acquire(&worker_cancel) else {
+                    let Some(_permit) = worker_gate.r2o_acquire_tcp(&worker_cancel) else {
                         break;
                     };
                     r2o_controller::fetch::r2o_fetch_measure_rx_volume_with_fallback_path(
@@ -3779,7 +3826,7 @@ impl HttpSearchWorker {
                 }
                 let target = task.target.clone();
                 let (result, disposition) = {
-                    let Some(_permit) = worker_gate.r2o_acquire(&worker_cancel) else {
+                    let Some(_permit) = worker_gate.r2o_acquire_tcp(&worker_cancel) else {
                         break;
                     };
                     match run_http_search_task(task, &worker_command_sender, &worker_cancel) {
@@ -6724,7 +6771,7 @@ impl DiscoveryWorker {
                         break;
                     }
                     let outcome = {
-                        let permit = worker_gate.r2o_acquire(&worker_cancel);
+                        let permit = worker_gate.r2o_acquire_tcp(&worker_cancel);
                         let (expired, target, generation) = {
                             let (queue, _) = &*worker_jobs;
                             let mut queue = queue
@@ -12001,7 +12048,7 @@ impl ControlClient {
 
         let is_fragment_control = candidate.kind == R2oQuicCandidateKind::FragmentControl;
         let attempts = if retry_strategy { 2 } else { 1 };
-        let trial_result = (|| {
+        let mut trial_result = (|| {
             let mut applied = false;
             let mut outcome = QuicDiscoveryTrialOutcome {
                 plan_text: plan_text.clone(),
@@ -12099,10 +12146,34 @@ impl ControlClient {
             Ok(outcome)
         })();
 
-        ask_http_controller(commands, |reply| HttpSearchCommand::R2oDeleteQuicProbe {
-            command: delete,
-            reply,
-        })?;
+        let delayed_applied = if let Ok(outcome) = &trial_result
+            && outcome.data.is_some()
+            && outcome.decision == R2oQuicFilterDecision::Pass
+            && !outcome.applied
+        {
+            Some(r2o_collect_controller_applied_events(
+                commands,
+                trial_id,
+                std::time::Duration::from_secs(5),
+            ))
+        } else {
+            None
+        };
+        if let (Ok(outcome), Some(Ok(events))) = (&mut trial_result, &delayed_applied) {
+            outcome.applied |= events
+                .iter()
+                .any(|event| applied_quic_trial_matches(event, trial_id, plan_id, local, server));
+        }
+
+        let delete_result =
+            ask_http_controller(commands, |reply| HttpSearchCommand::R2oDeleteQuicProbe {
+                command: delete,
+                reply,
+            });
+        delete_result?;
+        if let Some(Err(error)) = delayed_applied {
+            return Err(error.into());
+        }
         match trial_result {
             Ok(outcome) => Ok(Some(outcome)),
             Err(error) => Err(error),
@@ -12969,39 +13040,38 @@ impl ControlClient {
             .map_err(|error| format!("исполнитель r2o-datapath отверг план: {error}"))?;
         let compiled = catalog_commands(&updated)?;
 
-        updated.save_atomic(catalog_path, now)?;
-        let installed = match install_catalog(self, &compiled) {
-            Ok(installed) => installed,
-            Err(install_error) => {
-                let file_rollback = previous.save_atomic(catalog_path, now);
-                let candidate_rollback = encode_delete_name(
-                    &outcome.target.host,
-                    6,
-                    outcome.target.shape,
-                    outcome.target.family,
+        let install_result = install_catalog_best_effort(self, &compiled);
+        let persist_result = updated.save_atomic(catalog_path, now);
+        *catalog = updated;
+        let installed = match (install_result, persist_result) {
+            (Ok(installed), Ok(())) => installed,
+            (Err(install_error), Ok(())) => {
+                return Err(format!(
+                    "подтверждённый план сохранён после APPLIED, но runtime не подтвердил каталог: {install_error}"
                 )
-                .map_err(|error| format!("DEL_NAME при откате: {error}"))
-                .and_then(|command| {
-                    self.send_command(&command, control::COMMAND_DEL_NAME)
-                        .map_err(|error| error.to_string())
-                });
-                let runtime_rollback = catalog_commands(&previous)
-                    .and_then(|previous_compiled| install_catalog(self, &previous_compiled));
-                return Err(match (file_rollback, candidate_rollback, runtime_rollback) {
-                    (Ok(()), Ok(()), Ok(_)) => format!(
-                        "r2o-datapath не подтвердил обновлённый каталог; кандидат удалён, прежние планы восстановлены: {install_error}"
-                    ),
-                    (file_result, candidate_result, runtime_result) => format!(
-                        "r2o-datapath не подтвердил обновлённый каталог ({install_error}); откат файла: {}; удаление кандидата: {}; восстановление datapath: {}",
-                        file_result.err().map_or_else(|| "успешно".to_owned(), |error| error.to_string()),
-                        candidate_result.err().map_or_else(|| "успешно".to_owned(), |error| error.to_string()),
-                        runtime_result.err().map_or_else(|| "успешно".to_owned(), |error| error.to_string()),
-                    ),
-                }
+                .into());
+            }
+            (Ok(_), Err(persist_error)) => {
+                return Err(format!(
+                    "runtime подтвердил каталог после APPLIED, но каталог не сохранён: {persist_error}"
+                )
+                .into());
+            }
+            (Err(install_error), Err(persist_error)) => {
+                return Err(format!(
+                    "подтверждённый план остался в памяти после APPLIED; runtime не подтвердил каталог ({install_error}), сохранить каталог не удалось ({persist_error})"
+                )
                 .into());
             }
         };
-        *catalog = updated;
+        report_catalog_refusals(&installed);
+        if installed.refused > 0 {
+            return Err(format!(
+                "подтверждённый план сохранён после APPLIED, но runtime отказал в установке {} привязок",
+                installed.refused
+            )
+            .into());
+        }
         println!(
             "автопоиск установил и сохранил план {} для {} ({shape})",
             plan_id,
@@ -14039,19 +14109,33 @@ fn run_http_trial_task(
         });
     }
 
-    let result = run_http_trial_socket(bound, destination, &target.host, request_path);
-    ask_http_controller(commands, |reply| HttpSearchCommand::DeleteProbe {
+    let mut socket_hold = None;
+    let result = run_http_trial_socket(
+        bound,
+        destination,
+        &target.host,
+        request_path,
+        &mut socket_hold,
+    );
+    let events = r2o_collect_controller_applied_events(
+        commands,
+        trial_id,
+        if result.as_ref().is_ok_and(|result| result.requests_sent > 0) {
+            std::time::Duration::from_secs(5)
+        } else {
+            std::time::Duration::ZERO
+        },
+    );
+    let delete_result = ask_http_controller(commands, |reply| HttpSearchCommand::DeleteProbe {
         host: target.host.clone(),
         shape: SHAPE_HTTP,
         family: target.family,
         port,
         reply,
-    })?;
-    let events = r2o_collect_controller_applied_events(
-        commands,
-        trial_id,
-        std::time::Duration::from_millis(500),
-    )?;
+    });
+    drop(socket_hold);
+    let events = events?;
+    delete_result?;
     let result = match result {
         Ok(result) => Some(result),
         Err(error) => {
@@ -14161,10 +14245,16 @@ fn run_http_trial_socket(
     destination: std::net::SocketAddr,
     host: &str,
     request_path: &[u8],
+    socket_hold: &mut Option<std::net::TcpStream>,
 ) -> Result<HttpTrialSocketResult, String> {
     let (stream, client, _, rtt_us) = bound
         .connect(destination, std::time::Duration::from_secs(6))
         .map_err(|error| error.to_string())?;
+    *socket_hold = Some(
+        stream
+            .try_clone()
+            .map_err(|error| format!("не удалось удержать сокет до APPLIED: {error}"))?,
+    );
     r2o_run_http_trial_stream(stream, client, rtt_us, host, request_path)
 }
 
@@ -20793,7 +20883,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn discovery_persists_only_after_datapath_ack_and_rolls_back_on_rejection() {
+    fn discovery_keeps_verified_catalog_after_permanent_datapath_rejection() {
         fn run_case(accept: bool) -> (bool, Catalog, Vec<u8>) {
             let work = std::env::temp_dir().join(format!(
                 "r2o-discovery-{}-{}",
@@ -20814,27 +20904,12 @@ mod tests {
                 assert_eq!(command.kind, COMMAND_SET_NAME);
                 let ack = encode_ack(command.kind, accept, if accept { 0 } else { 1 }).unwrap();
                 stream.write_all(&ack).unwrap();
-                if accept {
-                    let budgets = read_frame(&mut stream).unwrap();
-                    assert_eq!(budgets.kind, COMMAND_SET_TCP_STALL_BUDGETS);
-                    assert_eq!(budgets.body, [2, 0, 25, 0, 32]);
-                    stream
-                        .write_all(&encode_ack(budgets.kind, true, 0).unwrap())
-                        .unwrap();
-                }
-                if !accept {
-                    let delete = read_frame(&mut stream).unwrap();
-                    assert_eq!(delete.kind, r2k_core::control::COMMAND_DEL_NAME);
-                    stream
-                        .write_all(&encode_ack(delete.kind, true, 0).unwrap())
-                        .unwrap();
-                    let budgets = read_frame(&mut stream).unwrap();
-                    assert_eq!(budgets.kind, COMMAND_SET_TCP_STALL_BUDGETS);
-                    assert_eq!(budgets.body, [2, 0, 25, 0, 32]);
-                    stream
-                        .write_all(&encode_ack(budgets.kind, true, 0).unwrap())
-                        .unwrap();
-                }
+                let budgets = read_frame(&mut stream).unwrap();
+                assert_eq!(budgets.kind, COMMAND_SET_TCP_STALL_BUDGETS);
+                assert_eq!(budgets.body, [2, 0, 25, 0, 32]);
+                stream
+                    .write_all(&encode_ack(budgets.kind, true, 0).unwrap())
+                    .unwrap();
                 (command.kind, command.body)
             });
 
@@ -20916,9 +20991,14 @@ mod tests {
 
         let (accepted, saved, _) = run_case(false);
         assert!(!accepted);
-        assert_eq!(saved.boxes.len(), 1);
-        assert_eq!(saved.boxes[0].fingerprint.signals[0].packets, 32);
-        assert!(!r2o_controller::discovery::has_usable_binding(
+        assert!(saved.boxes.iter().any(|box_record| {
+            box_record
+                .fingerprint
+                .signals
+                .iter()
+                .any(|signal| signal.packets == 32)
+        }));
+        assert!(r2o_controller::discovery::has_usable_binding(
             &saved,
             &r2o_controller::discovery::DiscoveryTarget {
                 host: "example.com".into(),

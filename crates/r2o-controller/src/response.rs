@@ -13,6 +13,10 @@ use crate::classify::{
 use crate::hello::legacy_client_hello;
 use serde::{Deserialize, Serialize};
 
+const PROBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+const PROBE_SEND_TIMEOUT: Duration = Duration::from_secs(8);
+const PROBE_WAIT_CEILING: Duration = Duration::from_secs(5);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Scan12 {
     NeedMore,
@@ -62,12 +66,6 @@ enum Trial {
     Done,
     Failed,
     Unmeasured,
-}
-
-#[derive(Clone, Copy)]
-enum HandshakeGoal {
-    ServerHello,
-    ServerHelloDone,
 }
 
 const RESPONSE_CAP: usize = 65_536;
@@ -581,11 +579,10 @@ pub(crate) fn probe_trigger(
     gap: Duration,
     timeout: Duration,
     mark: Option<u32>,
-    cancel: Option<&AtomicBool>,
+    _cancel: Option<&AtomicBool>,
 ) -> Result<ProbeOutcome, ProbeError> {
-    let (socket, _) = dial_probe_target(target, timeout, mark)?;
+    let (socket, _) = dial_probe_target(target, PROBE_CONNECT_TIMEOUT, mark)?;
     let fd = socket.as_raw_fd();
-    let deadline = Instant::now() + timeout;
     for span in split_offsets(cuts, trigger.payload.len(), 8) {
         let mut offset = span.from;
         while offset < span.to {
@@ -611,9 +608,9 @@ pub(crate) fn probe_trigger(
                 continue;
             }
             if would_block(&error) {
-                if !poll_until(fd, libc::POLLOUT, deadline).map_err(|error| {
-                    ProbeError::Local(format!("ошибка ожидания отправки: {error}"))
-                })? {
+                if !poll_until(fd, libc::POLLOUT, Instant::now() + PROBE_SEND_TIMEOUT).map_err(
+                    |error| ProbeError::Local(format!("ошибка ожидания отправки: {error}")),
+                )? {
                     return Ok(ProbeOutcome::Rejected);
                 }
                 continue;
@@ -621,24 +618,24 @@ pub(crate) fn probe_trigger(
             return Err(ProbeError::Transport(format!("write: {error}")));
         }
         if span.to < trigger.payload.len() {
-            if cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
-                return Err(ProbeError::Local("context canceled".into()));
-            }
-            if Instant::now() + gap > deadline {
-                return Err(ProbeError::Local("context deadline exceeded".into()));
-            }
             if !gap.is_zero() {
                 std::thread::sleep(gap);
             }
         }
     }
 
+    let wait = if timeout.is_zero() || timeout > PROBE_WAIT_CEILING {
+        PROBE_WAIT_CEILING
+    } else {
+        timeout
+    };
+    let deadline = Instant::now() + wait;
     if !poll_until(fd, libc::POLLIN, deadline)
         .map_err(|error| ProbeError::Local(format!("ошибка ожидания ответа: {error}")))?
     {
         return Ok(ProbeOutcome::Rejected);
     }
-    let mut bytes = [0_u8; 4096];
+    let mut bytes = [0_u8; 512];
     let received = unsafe { libc::recv(fd, bytes.as_mut_ptr().cast(), bytes.len(), 0) };
     if received <= 0 {
         return Ok(ProbeOutcome::Rejected);
@@ -771,32 +768,6 @@ fn poll_until(fd: libc::c_int, events: libc::c_short, deadline: Instant) -> io::
     }
 }
 
-fn network_socket_error(error: &io::Error) -> bool {
-    matches!(
-        error.raw_os_error(),
-        Some(
-            libc::ECONNREFUSED
-                | libc::ECONNRESET
-                | libc::ECONNABORTED
-                | libc::ETIMEDOUT
-                | libc::EHOSTUNREACH
-                | libc::ENETUNREACH
-                | libc::ENETDOWN
-                | libc::EHOSTDOWN
-                | libc::EPIPE
-                | libc::ENOTCONN
-        )
-    )
-}
-
-fn socket_failure(error: io::Error) -> Result<Trial, String> {
-    if network_socket_error(&error) {
-        Ok(Trial::Failed)
-    } else {
-        Err(format!("локальная ошибка TLS-зонда: {error}"))
-    }
-}
-
 fn would_block(error: &io::Error) -> bool {
     matches!(
         error.raw_os_error(),
@@ -804,12 +775,7 @@ fn would_block(error: &io::Error) -> bool {
     )
 }
 
-fn handshake(
-    address: SocketAddr,
-    sni: &str,
-    options: ResponseOptions,
-    goal: HandshakeGoal,
-) -> Result<Trial, String> {
+fn handshake(address: SocketAddr, sni: &str, options: ResponseOptions) -> Result<Trial, String> {
     let hello = legacy_client_hello(sni)
         .map_err(|error| format!("не удалось собрать TLS-зонд: {error}"))?;
     let domain = if address.is_ipv4() {
@@ -817,107 +783,58 @@ fn handshake(
     } else {
         libc::AF_INET6
     };
-    let raw_fd = unsafe {
-        libc::socket(
-            domain,
-            libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
-            0,
-        )
-    };
+    let raw_fd = unsafe { libc::socket(domain, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
     if raw_fd < 0 {
-        return Err(format!(
-            "не удалось создать сокет TLS-зонда: {}",
-            io::Error::last_os_error()
-        ));
+        return Ok(Trial::Failed);
     }
     let owned_fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
     let fd = owned_fd.as_raw_fd();
-    let mark = options.mark.unwrap_or(BYPASS_MARK) as libc::c_int;
+    let mark = options
+        .mark
+        .filter(|mark| *mark != 0)
+        .unwrap_or(BYPASS_MARK) as libc::c_int;
     if mark != 0 {
-        set_socket_option(fd, libc::SOL_SOCKET, SO_MARK, mark)
-            .map_err(|error| format!("не удалось установить SO_MARK для TLS-зонда: {error}"))?;
+        let _ = set_socket_option(fd, libc::SOL_SOCKET, SO_MARK, mark);
     }
-    set_socket_option(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, 1)
-        .map_err(|error| format!("не удалось установить TCP_NODELAY для TLS-зонда: {error}"))?;
+    let _ = set_socket_option(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, 1);
+    let timeout = response_timeout(options.timeout);
+    let timeout_ms = timeout.as_millis().min(i64::MAX as u128) as i64;
+    let socket_timeout = libc::timeval {
+        tv_sec: (timeout_ms / 1000) as libc::time_t,
+        tv_usec: ((timeout_ms % 1000) * 1000) as libc::suseconds_t,
+    };
+    unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDTIMEO,
+            (&socket_timeout as *const libc::timeval).cast(),
+            std::mem::size_of_val(&socket_timeout) as libc::socklen_t,
+        );
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVTIMEO,
+            (&socket_timeout as *const libc::timeval).cast(),
+            std::mem::size_of_val(&socket_timeout) as libc::socklen_t,
+        );
+    }
 
-    let connect = connect_socket(fd, address)
-        .map_err(|error| format!("ошибка connect TLS-зонда: {error}"))?;
+    let connect = connect_socket(fd, address).unwrap_or(-1);
     if connect != 0 {
-        let error = io::Error::last_os_error();
-        if !matches!(
-            error.raw_os_error(),
-            Some(libc::EINPROGRESS | libc::EALREADY | libc::EINTR)
-        ) {
-            return socket_failure(error);
-        }
-        let deadline = Instant::now() + response_timeout(options.timeout);
-        if !poll_until(fd, libc::POLLOUT, deadline)
-            .map_err(|error| format!("ошибка ожидания connect TLS-зонда: {error}"))?
-        {
-            return Ok(Trial::Failed);
-        }
-        let mut socket_error: libc::c_int = 0;
-        let mut length = std::mem::size_of_val(&socket_error) as libc::socklen_t;
-        let result = unsafe {
-            libc::getsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_ERROR,
-                (&mut socket_error as *mut libc::c_int).cast(),
-                &mut length,
-            )
-        };
-        if result != 0 {
-            return Err(format!(
-                "не удалось проверить connect TLS-зонда: {}",
-                io::Error::last_os_error()
-            ));
-        }
-        if socket_error != 0 {
-            return socket_failure(io::Error::from_raw_os_error(socket_error));
-        }
+        return Ok(Trial::Failed);
     }
 
-    let send_deadline = Instant::now() + response_timeout(options.timeout);
-    let mut sent = 0;
-    while sent < hello.len() {
-        let result = unsafe {
-            libc::send(
-                fd,
-                hello[sent..].as_ptr().cast(),
-                hello.len() - sent,
-                libc::MSG_NOSIGNAL,
-            )
-        };
-        if result > 0 {
-            sent += result as usize;
-            continue;
-        }
-        if result == 0 {
-            return Err("send TLS-зонда завершился без передачи данных".into());
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() == io::ErrorKind::Interrupted {
-            continue;
-        }
-        if would_block(&error) {
-            if !poll_until(fd, libc::POLLOUT, send_deadline)
-                .map_err(|error| format!("ошибка ожидания отправки TLS-зонда: {error}"))?
-            {
-                return Ok(Trial::Failed);
-            }
-            continue;
-        }
-        return socket_failure(error);
+    let sent = unsafe { libc::send(fd, hello.as_ptr().cast(), hello.len(), libc::MSG_NOSIGNAL) };
+    if sent != hello.len() as libc::ssize_t {
+        return Ok(Trial::Failed);
     }
 
-    let deadline = Instant::now() + response_timeout(options.timeout);
+    let deadline = Instant::now() + timeout;
     let mut bytes = vec![0_u8; RESPONSE_CAP];
     let mut have = 0;
     while Instant::now() < deadline {
-        if !poll_until(fd, libc::POLLIN, deadline)
-            .map_err(|error| format!("ошибка ожидания ответа TLS-зонда: {error}"))?
-        {
+        if !poll_until(fd, libc::POLLIN, deadline).unwrap_or(false) {
             break;
         }
         let result = unsafe {
@@ -932,22 +849,17 @@ fn handshake(
             break;
         }
         if result < 0 {
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::Interrupted || would_block(&error) {
-                continue;
-            }
-            return socket_failure(error);
+            break;
         }
         have += result as usize;
-        let scanned = match goal {
-            HandshakeGoal::ServerHello => scan_server_hello(&bytes[..have]),
-            HandshakeGoal::ServerHelloDone => scan12(&bytes[..have]),
-        };
+        let scanned = scan12(&bytes[..have]);
         match scanned {
-            Scan12::ServerHello | Scan12::ServerHelloDone => return Ok(Trial::Done),
+            Scan12::ServerHelloDone => return Ok(Trial::Done),
+            Scan12::ServerHello | Scan12::NeedMore => {}
             Scan12::FatalAlert => return Ok(Trial::Failed),
-            Scan12::NeedMore if have == RESPONSE_CAP => return Ok(Trial::Unmeasured),
-            Scan12::NeedMore => {}
+        }
+        if have == RESPONSE_CAP {
+            return Ok(Trial::Unmeasured);
         }
     }
     Ok(Trial::Failed)
@@ -963,7 +875,7 @@ fn count_handshakes(
     let mut done = 0;
     for _ in 0..options.repeats {
         *probes = (*probes).saturating_add(1);
-        match handshake(address, sni, options, HandshakeGoal::ServerHelloDone)? {
+        match handshake(address, sni, options)? {
             Trial::Done => done += 1,
             Trial::Failed => {}
             Trial::Unmeasured => *unmeasured += 1,
@@ -1034,27 +946,7 @@ pub fn probe_response(
     };
     let mut options = options;
     options.timeout = response_timeout(options.timeout);
-    let mut probes = 1;
-    match handshake(address, sni, options, HandshakeGoal::ServerHello) {
-        Ok(Trial::Done) => {}
-        Ok(Trial::Failed) => {
-            return not_applicable(
-                "целевой TLS 1.2 ClientHello не получил ServerHello; ответное направление не измерено".into(),
-                0,
-                0,
-                probes,
-            );
-        }
-        Ok(Trial::Unmeasured) => {
-            return not_applicable(
-                "ответ на целевой ClientHello превысил локальный предел 64 КиБ; ответное направление не измерено".into(),
-                0,
-                0,
-                probes,
-            );
-        }
-        Err(error) => return not_applicable(error, 0, 0, probes),
-    }
+    let mut probes = 0;
     let mut unmeasured = 0;
     let target = match count_handshakes(address, sni, options, &mut unmeasured, &mut probes) {
         Ok(count) => count,

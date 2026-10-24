@@ -154,12 +154,10 @@ fn serve_responses(mut server: impl FnMut(&[u8]) -> bool + Send + 'static) -> u1
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     thread::spawn(move || {
-        for index in 0..3 {
+        for _ in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
             let hello = read_client_hello(&mut stream);
-            if index == 0 {
-                stream.write_all(&record(22, &[2, 0, 0, 1, 0xaa])).unwrap();
-            } else if server(&hello) {
+            if server(&hello) {
                 stream
                     .write_all(&record(22, &[2, 0, 0, 1, 0xaa, 14, 0, 0, 0]))
                     .unwrap();
@@ -174,13 +172,9 @@ fn response_limit_is_unmeasured_instead_of_a_block_verdict() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     thread::spawn(move || {
-        for index in 0..3 {
+        for _ in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
             let _ = read_client_hello(&mut stream);
-            if index == 0 {
-                stream.write_all(&record(22, &[2, 0, 0, 1, 0xaa])).unwrap();
-                continue;
-            }
             let mut first = vec![0xaa; 32_768];
             first[..4].copy_from_slice(&[11, 0xff, 0xff, 0xff]);
             let second = vec![0xbb; 32_768];
@@ -201,7 +195,7 @@ fn response_limit_is_unmeasured_instead_of_a_block_verdict() {
     );
     assert_eq!(result.verdict, ResponseVerdict::NotApplicable);
     assert_eq!((result.target, result.control), (0, 0));
-    assert_eq!(result.probes, 3);
+    assert_eq!(result.probes, 2);
     assert!(result.reason.contains("2 прогонах"));
 }
 
@@ -220,7 +214,7 @@ fn loopback_probe_uses_same_address_control_and_reports_clear() {
     );
     assert_eq!(result.verdict, ResponseVerdict::Clear);
     assert_eq!((result.target, result.control), (1, 1));
-    assert_eq!(result.probes, 3);
+    assert_eq!(result.probes, 2);
 }
 
 #[test]
@@ -238,7 +232,40 @@ fn loopback_probe_requires_target_failure_and_control_success_for_blocked() {
     );
     assert_eq!(result.verdict, ResponseVerdict::Blocked);
     assert_eq!((result.target, result.control), (0, 1));
-    assert_eq!(result.probes, 3);
+    assert_eq!(result.probes, 2);
+}
+
+#[test]
+fn server_hello_without_server_hello_done_is_not_a_completed_response() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        for index in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_client_hello(&mut stream);
+            let response = if index == 0 {
+                record(22, &[2, 0, 0, 1, 0xaa])
+            } else {
+                record(22, &[2, 0, 0, 1, 0xaa, 14, 0, 0, 0])
+            };
+            stream.write_all(&response).unwrap();
+        }
+    });
+
+    let result = probe_response(
+        "127.0.0.1",
+        port,
+        "youtube.com",
+        ResponseOptions {
+            repeats: 1,
+            timeout: Duration::from_secs(1),
+            mark: Some(0),
+        },
+    );
+    server.join().unwrap();
+    assert_eq!(result.verdict, ResponseVerdict::Blocked);
+    assert_eq!((result.target, result.control), (0, 1));
+    assert_eq!(result.probes, 2);
 }
 
 #[test]
@@ -288,12 +315,19 @@ proptest::proptest! {
 }
 
 #[test]
-fn response_probe_is_not_applicable_without_a_target_server_hello() {
+fn missing_target_server_hello_is_blocked_when_the_same_address_control_completes() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let _ = read_client_hello(&mut stream);
+        for index in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let hello = read_client_hello(&mut stream);
+            if index == 1 || !hello.windows(11).any(|window| window == b"youtube.com") {
+                stream
+                    .write_all(&record(22, &[2, 0, 0, 1, 0xaa, 14, 0, 0, 0]))
+                    .unwrap();
+            }
+        }
     });
     let result = probe_response(
         "127.0.0.1",
@@ -305,8 +339,8 @@ fn response_probe_is_not_applicable_without_a_target_server_hello() {
             mark: Some(0),
         },
     );
-    assert_eq!(result.verdict, ResponseVerdict::NotApplicable);
-    assert!(result.reason.contains("целевой TLS 1.2 ClientHello"));
+    assert_eq!(result.verdict, ResponseVerdict::Blocked);
+    assert_eq!((result.target, result.control, result.probes), (0, 1, 2));
 }
 
 #[test]
