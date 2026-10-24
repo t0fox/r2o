@@ -332,7 +332,7 @@ fn https_certificate_der_is_parseable(der: &[u8]) -> bool {
     )
 }
 
-fn https_certificate_name_matches(der: &[u8], host: &str) -> Option<bool> {
+pub(crate) fn https_certificate_name_matches(der: &[u8], host: &str) -> Option<bool> {
     let (_, certificate) = x509_parser::parse_x509_certificate(der).ok()?;
     let alternative_names = certificate
         .tbs_certificate

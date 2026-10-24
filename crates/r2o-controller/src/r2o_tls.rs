@@ -1,13 +1,55 @@
 const R2O_TLS13_CLIENT_HELLO_MAX: usize = 4096;
 
-/// Создать проверяемое TLS-соединение с необязательной длиной ClientHello.
+/// d2o records the peer name separately and does not gate the TLS result on
+/// certificate trust or handshake-signature verification.
+#[derive(Debug)]
+struct R2oD2oServerCertVerifier {
+    algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
+}
+
+impl rustls::client::danger::ServerCertVerifier for R2oD2oServerCertVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _signature: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _signature: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.algorithms.supported_schemes()
+    }
+}
+
+/// Создать измерительное TLS-соединение с необязательной длиной ClientHello.
 ///
 /// Для TCP `wire_len` включает пятибайтовый заголовок записи; для QUIC — нет.
 pub fn r2o_tls_client_connection(
     name: &str,
     tls12: bool,
     wire_len: Option<usize>,
-    roots: rustls::RootCertStore,
+    _roots: rustls::RootCertStore,
 ) -> Result<rustls::ClientConnection, String> {
     let versions = if tls12 {
         &[&rustls::version::TLS12][..]
@@ -15,6 +57,9 @@ pub fn r2o_tls_client_connection(
         &[&rustls::version::TLS13, &rustls::version::TLS12][..]
     };
     let mut provider = rustls::crypto::ring::default_provider();
+    let verifier = R2oD2oServerCertVerifier {
+        algorithms: provider.signature_verification_algorithms.clone(),
+    };
     provider.cipher_suites = if tls12 {
         vec![
             rustls::crypto::ring::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
@@ -42,7 +87,8 @@ pub fn r2o_tls_client_connection(
     let mut config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(provider))
         .with_protocol_versions(versions)
         .map_err(|error| format!("не удалось настроить TLS-версии: {error}"))?
-        .with_root_certificates(roots)
+        .dangerous()
+        .with_custom_certificate_verifier(std::sync::Arc::new(verifier))
         .with_no_client_auth();
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     config.r2o_client_hello_wire_len = wire_len;
@@ -52,13 +98,16 @@ pub fn r2o_tls_client_connection(
         .map_err(|error| format!("не удалось начать TLS-рукопожатие: {error}"))
 }
 
-/// Создать TLS 1.3 соединение с ECH и корнями системно поддерживаемых серверов.
+/// Создать TLS 1.3 измерительное соединение с ECH по правилам d2o.
 pub fn r2o_tls_ech_client_connection(
     name: &str,
-    roots: rustls::RootCertStore,
+    _roots: rustls::RootCertStore,
     ech: rustls::client::EchConfig,
 ) -> Result<rustls::ClientConnection, String> {
     let mut provider = rustls::crypto::ring::default_provider();
+    let verifier = R2oD2oServerCertVerifier {
+        algorithms: provider.signature_verification_algorithms.clone(),
+    };
     provider.cipher_suites = vec![rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256];
     provider.kx_groups = vec![
         rustls::crypto::ring::kx_group::X25519,
@@ -67,7 +116,8 @@ pub fn r2o_tls_ech_client_connection(
     let mut config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(provider))
         .with_ech(rustls::client::EchMode::Enable(ech))
         .map_err(|error| format!("не удалось включить ECH: {error}"))?
-        .with_root_certificates(roots)
+        .dangerous()
+        .with_custom_certificate_verifier(std::sync::Arc::new(verifier))
         .with_no_client_auth();
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     let server_name = rustls::pki_types::ServerName::try_from(name.to_owned())

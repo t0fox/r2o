@@ -176,6 +176,8 @@ pub struct FetchResult {
     pub address: SocketAddr,
     pub local_port: u16,
     pub tls: Option<&'static str>,
+    pub peer_name_ok: Option<bool>,
+    pub ech_accepted: Option<bool>,
     pub status: u16,
     pub http_outcome: R2oFetchHttpOutcome,
     pub cloudflare_challenge: bool,
@@ -733,12 +735,19 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             connection.ech_status()
         ));
     }
+    let ech_accepted = ech.map(|_| true);
     r2o_socket.r2o_reset_after_handshake();
     let tls = match connection.protocol_version() {
         Some(ProtocolVersion::TLSv1_3) => Some("1.3"),
         Some(ProtocolVersion::TLSv1_2) => Some("1.2"),
         _ => None,
     };
+    let peer_name_ok = connection
+        .peer_certificates()
+        .and_then(|certificates| certificates.first())
+        .and_then(|certificate| {
+            crate::response::https_certificate_name_matches(certificate.as_ref(), &options.name)
+        });
 
     let mut stream = StreamOwned::new(connection, r2o_socket);
     let local_port = stream
@@ -1021,6 +1030,8 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             address,
             local_port,
             tls,
+            peer_name_ok,
+            ech_accepted,
             status: parser.status(),
             http_outcome,
             cloudflare_challenge,
@@ -2454,6 +2465,8 @@ mod tests {
             address: "127.0.0.1:443".parse().unwrap(),
             local_port: 0,
             tls: Some("1.3"),
+            peer_name_ok: None,
+            ech_accepted: None,
             status,
             http_outcome,
             cloudflare_challenge: false,

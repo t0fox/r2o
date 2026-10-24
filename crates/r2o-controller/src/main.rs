@@ -3302,6 +3302,9 @@ fn r2o_family_recovery_decision(
 ) -> R2oFamilyRecoveryDecision {
     let response_complete = result.as_ref().is_ok_and(|fetch| {
         fetch.tls.is_some()
+            && fetch
+                .ech_accepted
+                .is_none_or(|accepted| accepted && fetch.peer_name_ok == Some(true))
             && fetch.complete
             && fetch.application_verified
             && (200..600).contains(&fetch.status)
@@ -15871,6 +15874,8 @@ mod tests {
             address: "198.51.100.20:443".parse().unwrap(),
             local_port: 41_000,
             tls: Some("1.3"),
+            peer_name_ok: None,
+            ech_accepted: None,
             status: 200,
             http_outcome: r2o_controller::fetch::R2oFetchHttpOutcome::Positive,
             cloudflare_challenge: false,
@@ -15894,6 +15899,24 @@ mod tests {
         assert_eq!(
             r2o_family_recovery_decision(&Ok(fetch.clone()), true),
             R2oFamilyRecoveryDecision::Verified
+        );
+        let mut ech_result = fetch.clone();
+        ech_result.ech_accepted = Some(true);
+        ech_result.peer_name_ok = Some(true);
+        assert_eq!(
+            r2o_family_recovery_decision(&Ok(ech_result.clone()), true),
+            R2oFamilyRecoveryDecision::Verified
+        );
+        ech_result.peer_name_ok = Some(false);
+        assert_eq!(
+            r2o_family_recovery_decision(&Ok(ech_result.clone()), true),
+            R2oFamilyRecoveryDecision::Reclassify
+        );
+        ech_result.peer_name_ok = Some(true);
+        ech_result.ech_accepted = Some(false);
+        assert_eq!(
+            r2o_family_recovery_decision(&Ok(ech_result), true),
+            R2oFamilyRecoveryDecision::Reclassify
         );
         let mut unresolved_redirect = fetch.clone();
         unresolved_redirect.status = 302;
@@ -16134,6 +16157,8 @@ mod tests {
             address: "198.51.100.20:443".parse().unwrap(),
             local_port: 41_000,
             tls: Some("1.3"),
+            peer_name_ok: None,
+            ech_accepted: None,
             status: 200,
             http_outcome: r2o_controller::fetch::R2oFetchHttpOutcome::Positive,
             cloudflare_challenge: false,
