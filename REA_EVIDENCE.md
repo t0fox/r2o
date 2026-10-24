@@ -7590,3 +7590,50 @@ endpoint-ов. Новая попытка REA `list_documents` по активн�
 и точные исходники donor используются там, где указаны выше; свежая
 декомпиляция недоступных вложенных функций не заявляется. Полевая проверка
 остаётся невыполненной по просьбе пользователя.
+
+### ACK-кандидат и короткое окно ожидания — donor `783aa75`, 25.10.2026
+
+Повторная проверка добавила C/Rust сценарии ACK для адресных и именных
+кандидатов. Она нашла три расхождения в управлении временными пробами:
+
+| Исходная C-функция или правило | Rust-аналог | Общий вход и результат |
+|---|---|---|
+| `core/include/d2k_ctl.h::D2K_CMD_SET_ADDR_PROBE` / `D2K_CMD_DEL_ADDR_PROBE`; `core/link.c::d2k_link_set_addr_probe_family` / `d2k_link_del_addr_probe_family` | `control.rs::COMMAND_SET_ADDR_PROBE` / `COMMAND_DEL_ADDR_PROBE`; `encode_set_addr_probe` / `encode_delete_addr_probe` | Исходные wire IDs различались: C `0x0089`/`0x008a`, Rust `0x0094`/`0x0095`. Общий ACK fixture до исправления не мог закодировать trial ACK C-команды Rust-реализацией. Rust IDs выровнены с C; `d2o_ack_sequence.tsv` теперь сравнивает одинаковые `0x0089` события, и обе стороны принимают только ACK с точной командой и trial ID. |
+| `core/sched.c::candidate_trial_matches`, `d2k_sched_event` | `control_command_trial_id`, `ControlClient::wait_for_command_ack` | В fixture поданы чужая команда, тот же тип с чужим trial ID и точная пара. RED: Rust завершал обмен на первом чужом ACK. GREEN: C и Rust игнорируют первые два события и принимают третье для `SET_NAME_PROBE` (`0x0088`) и `SET_ADDR_PROBE` (`0x0089`). |
+| `core/sched.c::d2k_sched_tick`; `SCHED_TRIAL_SETTLE_MS` | `exchange_candidate_probe_with_settle`; `r2o_discovery_client_shape_trial`, `r2o_family_recovery_sibling_trial_with_ech_state` | При установке C начинает проверку после точного ACK или через 50 мс. Rust раньше ждал 3 секунды. Теперь scheduler-кандидаты ждут 50 мс и продолжают без ACK; общий C/Rust результат — `missing_ack settle_ms=50 candidate_ready=yes`. Переход в успешный результат по-прежнему требует точного `APPLIED` и проверки потока; HTTP-search ACK сохраняет свой 3-секундный срок. |
+
+`scripts/r2o-control-events-differential.sh` прошёл на чистом donor:
+совпали ACK/APPLIED wire-векторы, обе последовательности ACK и 50-мс
+поведение при потерянном ACK. `d2k_sched_tick` harness фиксирует попытку
+запуска worker ровно на границе 50 мс; Rust test подтверждает завершение окна и
+возврат `None` в вызывающий путь. Voice-команда `SET_VOICE_ADDR_PROBE`
+остаётся вне фильтра scheduler ACK, поскольку её C-аналога в этих ветках нет;
+`r2o_установка_voice_опыта_проверяет_ack_и_trial_id` прошёл после ограничения
+фильтра на две команды d2o.
+
+`core/sched.c::on_applied` / `applied_trial_is_ours` и
+`core/d2kc.c::main` сопоставляют испытание с `APPLIED`; Rust
+`r2o_family_applied_flow_matches` и `ControlClient::collect_applied_events`
+проверяют тот же путь доказательства. `r2o-control-events-differential.sh`
+сверяет wire-фреймы и matcher; отдельно
+`r2o-catalog-sync-differential.sh` подтвердил порядок синхронизации, а
+`r2o-catalog-persist-differential.sh` сравнил сохранённый снимок после внешнего
+обновления. Это отдельные C/Rust сценарии, а не один сквозной event-to-disk
+fixture.
+
+Свежий декомпиляторский dossier для этих локальных ELF в активном REA MCP
+окружении недоступен: Windows-провайдер отклоняет ELF, а текущий REA bundle
+пуст. Для новых ACK ветвей использованы donor source и harness, вызывающий C
+`d2k_sched_event` и `d2k_sched_tick`; прежние сохранённые REA dossier для
+`candidate_trial_matches`, `on_applied` и datapath остаются указаны в этом
+файле. Локальная OpenWrt/QEMU сборка проверяет целевые бинарники; физический
+роутер не использовался, поэтому полевой и полный поведенческий паритет не
+заявляются.
+
+После изменения wire IDs и ACK-сопоставления
+`cargo +1.98.0 test --locked --workspace` завершился с кодом 0;
+`scripts/r2o-control-events-differential.sh` и
+`scripts/r2o-build-openwrt-aarch64-musl.sh` тоже завершились успешно.
+Последняя запустила все шесть release-бинарников под QEMU; очистка каталога и
+проверка пустого снимка прошли. Остаются только два предупреждения musl-типа
+в `response.rs`. Это локальная эмуляция, не проверка на физическом OpenWrt.

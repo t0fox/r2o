@@ -109,6 +109,7 @@ const R2O_QUIC_DISCOVERY_FAILURE_COOLDOWN: std::time::Duration =
 
 #[cfg(unix)]
 const CONTROL_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+const D2O_TRIAL_SETTLE_MS: u64 = 50;
 
 #[derive(Debug, Eq, PartialEq)]
 struct ClassifyCliOptions {
@@ -3031,7 +3032,8 @@ enum HttpSearchCommand {
         port: u16,
         command: Vec<u8>,
         trial_id: [u8; 16],
-        reply: SyncSender<Result<r2k_core::control::Ack, String>>,
+        candidate_settle: bool,
+        reply: SyncSender<Result<Option<r2k_core::control::Ack>, String>>,
     },
     DeleteProbe {
         host: String,
@@ -3611,12 +3613,16 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
             port: local_port,
             command,
             trial_id,
+            candidate_settle: true,
             reply,
         })?;
-        if ack.trial_id != Some(trial_id) {
+        if ack
+            .as_ref()
+            .is_some_and(|ack| ack.trial_id != Some(trial_id))
+        {
             return Err("подтверждение семейной пробы содержит чужой trial ID".into());
         }
-        if !ack.ok {
+        if ack.as_ref().is_some_and(|ack| !ack.ok) {
             ask_http_controller(commands, |reply| HttpSearchCommand::DeleteProbe {
                 host: target.host.clone(),
                 shape: target.shape,
@@ -4014,9 +4020,13 @@ fn r2o_discovery_client_shape_trial(
         port: local_port,
         command,
         trial_id,
+        candidate_settle: true,
         reply,
     })?;
-    if ack.trial_id != Some(trial_id) {
+    if ack
+        .as_ref()
+        .is_some_and(|ack| ack.trial_id != Some(trial_id))
+    {
         let _ = ask_http_controller(commands, |reply| HttpSearchCommand::DeleteProbe {
             host: target.host.clone(),
             shape: target.shape,
@@ -4026,7 +4036,7 @@ fn r2o_discovery_client_shape_trial(
         });
         return Err("подтверждение пробы снимка содержит чужой trial ID".into());
     }
-    if !ack.ok {
+    if ack.as_ref().is_some_and(|ack| !ack.ok) {
         ask_http_controller(commands, |reply| HttpSearchCommand::DeleteProbe {
             host: target.host.clone(),
             shape: target.shape,
@@ -9418,6 +9428,25 @@ struct ControlClient {
 }
 
 #[cfg(unix)]
+fn control_command_trial_id(command: &[u8], expected: u16) -> Option<[u8; 16]> {
+    if command.len() < 6
+        || u32::from_be_bytes(command[..4].try_into().ok()?) as usize != command.len() - 4
+        || u16::from_be_bytes(command[4..6].try_into().ok()?) != expected
+    {
+        return None;
+    }
+    let body = &command[6..];
+    let trial = match expected {
+        control::COMMAND_SET_NAME_PROBE => body.get(body.len().checked_sub(16)?..)?,
+        COMMAND_SET_ADDR_PROBE => {
+            body.get(r2k_core::control::KEY_LEN..r2k_core::control::KEY_LEN + 16)?
+        }
+        _ => return None,
+    };
+    Some(trial.try_into().ok()?)
+}
+
+#[cfg(unix)]
 #[derive(Default)]
 struct R2oAskProof {
     applied: bool,
@@ -12146,9 +12175,19 @@ impl ControlClient {
                 port,
                 command,
                 trial_id,
+                candidate_settle,
                 reply,
             } => {
-                let ack = match self.exchange_command(&command, control::COMMAND_SET_NAME_PROBE) {
+                let ack_result = if candidate_settle {
+                    self.exchange_candidate_probe_with_settle(
+                        &command,
+                        control::COMMAND_SET_NAME_PROBE,
+                    )
+                } else {
+                    self.exchange_command(&command, control::COMMAND_SET_NAME_PROBE)
+                        .map(Some)
+                };
+                let ack = match ack_result {
                     Ok(ack) => ack,
                     Err(error) => {
                         match self.delete_name_probe(&host, shape, family, port) {
@@ -12168,6 +12207,10 @@ impl ControlClient {
                         return Ok(());
                     }
                 };
+                let Some(ack) = ack else {
+                    let _ = reply.send(Ok(None));
+                    return Ok(());
+                };
                 if ack.trial_id != Some(trial_id) {
                     match self.delete_name_probe(&host, shape, family, port) {
                         Ok(()) => {
@@ -12186,7 +12229,7 @@ impl ControlClient {
                     }
                     return Ok(());
                 }
-                let _ = reply.send(Ok(ack));
+                let _ = reply.send(Ok(Some(ack)));
             }
             HttpSearchCommand::DeleteProbe {
                 host,
@@ -13867,36 +13910,65 @@ impl ControlClient {
         expected: u16,
         timeout: std::time::Duration,
     ) -> Result<r2k_core::control::Ack, Box<dyn Error>> {
+        let Some(ack) = self.wait_for_command_ack(command, expected, timeout)? else {
+            let timeout_label = if timeout == CONTROL_ACK_TIMEOUT {
+                "3 секунды".to_owned()
+            } else {
+                format!("{} мс", timeout.as_millis())
+            };
+            return Err(
+                format!("датапат не подтвердил управляющую команду за {timeout_label}").into(),
+            );
+        };
+        self.record_http_binding_acknowledgement(command, expected, ack);
+        Ok(ack)
+    }
+
+    fn exchange_candidate_probe_with_settle(
+        &mut self,
+        command: &[u8],
+        expected: u16,
+    ) -> Result<Option<r2k_core::control::Ack>, Box<dyn Error>> {
+        let ack = self.wait_for_command_ack(
+            command,
+            expected,
+            std::time::Duration::from_millis(D2O_TRIAL_SETTLE_MS),
+        )?;
+        if let Some(ack) = ack {
+            self.record_http_binding_acknowledgement(command, expected, ack);
+        }
+        Ok(ack)
+    }
+
+    fn wait_for_command_ack(
+        &mut self,
+        command: &[u8],
+        expected: u16,
+        timeout: std::time::Duration,
+    ) -> Result<Option<r2k_core::control::Ack>, Box<dyn Error>> {
         use std::io::Write;
         self.socket.write_all(command)?;
+        let expected_trial_id = control_command_trial_id(command, expected);
         let deadline = std::time::Instant::now() + timeout;
-        let ack_frame = loop {
+        loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() || !wait_for_control_frame(&self.socket, remaining)? {
-                let timeout_label = if timeout == CONTROL_ACK_TIMEOUT {
-                    "3 секунды".to_owned()
-                } else {
-                    format!("{} мс", timeout.as_millis())
-                };
-                return Err(format!(
-                    "датапат не подтвердил управляющую команду за {timeout_label}"
-                )
-                .into());
+                return Ok(None);
             }
             let frame = read_optional_frame(&mut self.socket)?
                 .ok_or("соединение с датапатом закрыто до подтверждения команды")?;
             if frame.kind == control::EVENT_ACK {
-                break frame;
+                let ack = decode_ack(&frame)
+                    .map_err(|error| format!("подтверждение датапата: {error}"))?;
+                if ack.command != expected
+                    || expected_trial_id.is_some_and(|trial_id| ack.trial_id != Some(trial_id))
+                {
+                    continue;
+                }
+                return Ok(Some(ack));
             }
             self.queue_async_frame(frame)?;
-        };
-        let ack =
-            decode_ack(&ack_frame).map_err(|error| format!("подтверждение датапата: {error}"))?;
-        if ack.command != expected {
-            return Err(format!("датапат подтвердил чужую команду 0x{:04x}", ack.command).into());
         }
-        self.record_http_binding_acknowledgement(command, expected, ack);
-        Ok(ack)
     }
 
     fn queue_async_frame(&mut self, frame: Frame) -> Result<(), Box<dyn Error>> {
@@ -14751,8 +14823,10 @@ fn run_http_trial_task(
         port,
         command,
         trial_id,
+        candidate_settle: false,
         reply,
     })?;
+    let ack = ack.ok_or_else(|| "HTTP probe command ACK not received".to_owned())?;
     if ack.trial_id != Some(trial_id) {
         return Err("подтверждение HTTP-пробы содержит чужой trial ID".into());
     }
@@ -19767,6 +19841,7 @@ mod tests {
                 port: 0xa8c1,
                 command: encode_frame(COMMAND_SET_NAME_PROBE, &[]).unwrap(),
                 trial_id: [1; 16],
+                candidate_settle: false,
                 reply,
             },
             &mut catalog,
@@ -20689,6 +20764,201 @@ mod tests {
             std::fs::write(path, &output).unwrap();
         }
         assert_eq!(actual, *expected_pick, "d2o parked-QUIC queue case");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn d2o_ack_sequence_ignores_foreign_acks_until_trial_ack() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        fn parse_id(text: &str) -> [u8; 16] {
+            std::array::from_fn(|index| {
+                u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).unwrap()
+            })
+        }
+
+        let fixture = include_str!("../../r2k-core/tests/fixtures/d2o_ack_sequence.tsv");
+        let mut cases = Vec::<(&str, u16, [u8; 16], Vec<(u16, [u8; 16])>)>::new();
+        for line in fixture.lines() {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.is_empty() || fields[0].starts_with('#') {
+                continue;
+            }
+            let [
+                case_name,
+                expected_command,
+                expected_trial,
+                ack_command,
+                ack_trial,
+            ] = fields.as_slice()
+            else {
+                panic!("malformed d2o ACK sequence fixture: {line}");
+            };
+            let expected_command =
+                u16::from_str_radix(expected_command.trim_start_matches("0x"), 16).unwrap();
+            let expected_trial = parse_id(expected_trial);
+            let ack_command =
+                u16::from_str_radix(ack_command.trim_start_matches("0x"), 16).unwrap();
+            let ack_trial = parse_id(ack_trial);
+            if let Some((case_name_last, command_last, trial_last, events)) = cases.last_mut()
+                && *case_name_last == *case_name
+            {
+                assert_eq!(*command_last, expected_command);
+                assert_eq!(*trial_last, expected_trial);
+                events.push((ack_command, ack_trial));
+            } else {
+                cases.push((
+                    *case_name,
+                    expected_command,
+                    expected_trial,
+                    vec![(ack_command, ack_trial)],
+                ));
+            }
+        }
+        assert_eq!(cases.len(), 2, "fixture covers name and address candidates");
+        let mut output = String::new();
+        for (case_name, expected_command, expected_trial, events) in cases {
+            assert_eq!(
+                events.len(),
+                3,
+                "fixture covers foreign command, foreign trial, then match"
+            );
+            let mut wire = Vec::new();
+            for (ack_command, ack_trial) in events {
+                let ack_trial = (!ack_trial.iter().all(|byte| *byte == 0)).then_some(ack_trial);
+                wire.extend(
+                    r2k_core::control::encode_ack_for_trial(ack_command, true, 0, ack_trial)
+                        .unwrap(),
+                );
+            }
+            let (socket, mut peer) = UnixStream::pair().unwrap();
+            peer.write_all(&wire).unwrap();
+            let mut client = ControlClient {
+                socket,
+                send_maxlen: 0,
+                send_cap: Arc::new(AtomicUsize::new(0)),
+                pending_events: Default::default(),
+                pending_applied_events: Default::default(),
+                http_search_started: Default::default(),
+                http_challenge_cooldowns: Default::default(),
+                http_acknowledged_bindings: Default::default(),
+            };
+            let plan_id = [0x33; 16];
+            let plan_text = match expected_command {
+                r2k_core::control::COMMAND_SET_NAME_PROBE => {
+                    r2o_controller::http_search::candidate_text("split", Some(&plan_id))
+                        .expect("known donor probe candidate")
+                }
+                super::COMMAND_SET_ADDR_PROBE => {
+                    let plan_id = expected_trial
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>();
+                    format!("r2o-plan 1 10\nid {plan_id}\nproto udp quic\nquicsplit 1\n")
+                }
+                _ => panic!("unexpected d2o candidate command 0x{expected_command:04x}"),
+            };
+            let plan_records = compile_text(&plan_text).unwrap();
+            let command = match expected_command {
+                r2k_core::control::COMMAND_SET_NAME_PROBE => super::encode_set_name_probe(
+                    "example.com",
+                    SHAPE_HTTP,
+                    4,
+                    41_000,
+                    &plan_records,
+                    expected_trial,
+                )
+                .unwrap(),
+                super::COMMAND_SET_ADDR_PROBE => super::encode_set_addr_probe(
+                    "192.0.2.10:41000".parse().unwrap(),
+                    "198.51.100.20:443".parse().unwrap(),
+                    super::ADDR_PROBE_LEASE_MAX_MS,
+                    &plan_records,
+                    expected_trial,
+                )
+                .unwrap(),
+                _ => unreachable!(),
+            };
+            let ack = client
+                .exchange_command_with_timeout(
+                    &command,
+                    expected_command,
+                    std::time::Duration::from_millis(100),
+                )
+                .unwrap();
+            assert_eq!(ack.trial_id, Some(expected_trial));
+            output.push_str(&format!("{case_name} acked=yes\n"));
+        }
+        if let Ok(path) = std::env::var("R2O_ACK_SEQUENCE_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        if let Ok(path) = std::env::var("R2O_ACK_SEQUENCE_DIFF_C_OUTPUT") {
+            assert_eq!(
+                std::fs::read_to_string(path).unwrap(),
+                output,
+                "C/Rust candidate ACK sequence differs"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn d2o_missing_candidate_ack_expires_after_settle_window() {
+        use std::os::unix::net::UnixStream;
+
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        let peer_thread = std::thread::spawn(move || {
+            let command = read_frame(&mut peer).unwrap();
+            assert_eq!(command.kind, COMMAND_SET_NAME_PROBE);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        });
+        let mut client = ControlClient {
+            socket,
+            send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
+            pending_events: Default::default(),
+            pending_applied_events: Default::default(),
+            http_search_started: Default::default(),
+            http_challenge_cooldowns: Default::default(),
+            http_acknowledged_bindings: Default::default(),
+        };
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        let mut catalog = Catalog::default();
+        client
+            .service_http_search_command(
+                HttpSearchCommand::InstallProbe {
+                    host: "example.test".to_owned(),
+                    shape: SHAPE_HTTP,
+                    family: 4,
+                    port: 0xa8c1,
+                    command: encode_frame(COMMAND_SET_NAME_PROBE, &[]).unwrap(),
+                    trial_id: [1; 16],
+                    candidate_settle: true,
+                    reply,
+                },
+                &mut catalog,
+                std::path::Path::new("unused"),
+                None,
+            )
+            .unwrap();
+        assert!(response.recv().unwrap().unwrap().is_none());
+        peer_thread.join().unwrap();
+
+        let output = format!(
+            "missing_ack settle_ms={} candidate_ready=yes\n",
+            super::D2O_TRIAL_SETTLE_MS
+        );
+        if let Ok(path) = std::env::var("R2O_ACK_SETTLE_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        if let Ok(path) = std::env::var("R2O_ACK_SETTLE_DIFF_C_OUTPUT") {
+            assert_eq!(
+                std::fs::read_to_string(path).unwrap(),
+                output,
+                "C/Rust missing-ACK settle behavior differs"
+            );
+        }
     }
 
     #[cfg(unix)]

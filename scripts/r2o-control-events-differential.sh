@@ -33,4 +33,32 @@ R2O_CONTROL_PROOF_DIFF_OUTPUT="$tmp_dir/rust-match.out" \
     cargo +1.98.0 test -p r2o-controller --bin r2o-controller --locked \
     d2o_legacy_applied_frame_matches_donor_flow_proof
 diff -u "$tmp_dir/c-match.out" "$tmp_dir/rust-match.out"
+
+make -s -C "$donor_root/core" test_sched CC=clang-18
+donor_sched_objects=$(make -s -C "$donor_root/core" \
+    --eval='print-sched-test-objects:;@echo $(filter-out sched.o,$(SCHED_TEST_OBJ))' \
+    print-sched-test-objects)
+(
+    cd "$donor_root/core"
+    clang-18 -std=gnu11 -O2 -Wall -Wextra -Werror -pthread \
+        -I. -Iinclude -I"$donor_root/datapath/include" \
+        -DD2K_RELEASE_ID='"dev"' \
+        "$repo_root/crates/r2k-core/tests/d2o_ack_sequence_differential.c" \
+        $donor_sched_objects -o "$tmp_dir/d2o-ack-sequence"
+)
+ack_fixture="$repo_root/crates/r2k-core/tests/fixtures/d2o_ack_sequence.tsv"
+"$tmp_dir/d2o-ack-sequence" "$ack_fixture" >"$tmp_dir/c-ack-sequence.out"
+grep '^candidate_ack' "$tmp_dir/c-ack-sequence.out" >"$tmp_dir/c-ack-matching.out"
+grep '^missing_ack ' "$tmp_dir/c-ack-sequence.out" >"$tmp_dir/c-ack-settle.out"
+R2O_ACK_SEQUENCE_DIFF_C_OUTPUT="$tmp_dir/c-ack-matching.out" \
+    R2O_ACK_SEQUENCE_DIFF_OUTPUT="$tmp_dir/rust-ack-sequence.out" \
+    cargo +1.98.0 test -p r2o-controller --bin r2o-controller --locked \
+    d2o_ack_sequence_ignores_foreign_acks_until_trial_ack
+diff -u "$tmp_dir/c-ack-matching.out" "$tmp_dir/rust-ack-sequence.out"
+R2O_ACK_SETTLE_DIFF_C_OUTPUT="$tmp_dir/c-ack-settle.out" \
+    R2O_ACK_SETTLE_DIFF_OUTPUT="$tmp_dir/rust-ack-settle.out" \
+    cargo +1.98.0 test -p r2o-controller --bin r2o-controller --locked \
+    d2o_missing_candidate_ack_expires_after_settle_window
+diff -u "$tmp_dir/c-ack-settle.out" "$tmp_dir/rust-ack-settle.out"
+printf 'C/Rust candidate ACK matching and lost-ACK settle match d2o %s.\n' "$actual_donor_sha"
 printf 'C/Rust ACK and APPLIED wire frames match for d2o %s.\n' "$actual_donor_sha"
