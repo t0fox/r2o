@@ -86,7 +86,14 @@ r2o_ppe_valid_config() {
     [ "${#R2O_PPE_CONNSKIP}" -le 9 ] && [ "$R2O_PPE_CONNSKIP" -gt 0 ] || return 1
     [ "${#R2O_PPE_HTTP_CONNSKIP}" -le 9 ] && [ "$R2O_PPE_HTTP_CONNSKIP" -gt 0 ] || return 1
     r2o_ppe_valid_ports "$R2O_PPE_TCP_PORTS" || return 1
-    r2o_ppe_valid_ports "$R2O_PPE_UDP_PORTS" || return 1
+    if r2o_ppe_valid_ports "$R2O_PPE_UDP_PORTS"; then
+        _r2o_ppe_split_udp=0
+    elif [ "$R2O_PPE_UDP_PORTS" = "443,$R2O_PPE_VOICE_PORTS" ] \
+        && r2o_ppe_valid_ports "$R2O_PPE_VOICE_PORTS"; then
+        _r2o_ppe_split_udp=1
+    else
+        return 1
+    fi
     r2o_ppe_valid_ports "$R2O_PPE_HTTP_PORTS"
 }
 
@@ -105,14 +112,27 @@ r2o_ppe_available() {
     command -v "$1" >/dev/null 2>&1 && grep -qx "$R2O_PPE_TARGET" "$_r2o_ppe_targets" 2>/dev/null
 }
 
+_r2o_ppe_emit_proto_rules() {
+    printf 'PREROUTING|-p %s -m multiport --dports %s %s\n' "$_r2o_ppe_proto" "$_r2o_ppe_ports" "$_r2o_ppe_tail"
+    printf 'FORWARD|-p %s -m multiport --dports %s %s\n' "$_r2o_ppe_proto" "$_r2o_ppe_ports" "$_r2o_ppe_tail"
+    printf 'FORWARD|-p %s -m multiport --sports %s %s\n' "$_r2o_ppe_proto" "$_r2o_ppe_ports" "$_r2o_ppe_tail"
+}
+
 _r2o_ppe_rules() {
     _r2o_ppe_tail="-m connskip --connskip $R2O_PPE_CONNSKIP -m comment --comment $R2O_PPE_TAG -j $R2O_PPE_TARGET"
     for _r2o_ppe_proto in tcp udp; do
-        if [ "$_r2o_ppe_proto" = tcp ]; then _r2o_ppe_ports=$R2O_PPE_TCP_PORTS
-        else _r2o_ppe_ports=$R2O_PPE_UDP_PORTS; fi
-        printf 'PREROUTING|-p %s -m multiport --dports %s %s\n' "$_r2o_ppe_proto" "$_r2o_ppe_ports" "$_r2o_ppe_tail"
-        printf 'FORWARD|-p %s -m multiport --dports %s %s\n' "$_r2o_ppe_proto" "$_r2o_ppe_ports" "$_r2o_ppe_tail"
-        printf 'FORWARD|-p %s -m multiport --sports %s %s\n' "$_r2o_ppe_proto" "$_r2o_ppe_ports" "$_r2o_ppe_tail"
+        if [ "$_r2o_ppe_proto" = tcp ]; then
+            _r2o_ppe_ports=$R2O_PPE_TCP_PORTS
+            _r2o_ppe_emit_proto_rules
+        elif [ "$_r2o_ppe_split_udp" = 1 ]; then
+            _r2o_ppe_ports=443
+            _r2o_ppe_emit_proto_rules
+            _r2o_ppe_ports=$R2O_PPE_VOICE_PORTS
+            _r2o_ppe_emit_proto_rules
+        else
+            _r2o_ppe_ports=$R2O_PPE_UDP_PORTS
+            _r2o_ppe_emit_proto_rules
+        fi
     done
     _r2o_ppe_tail="-m connskip --connskip $R2O_PPE_HTTP_CONNSKIP -m comment --comment $R2O_PPE_TAG -j $R2O_PPE_TARGET"
     printf 'PREROUTING|-p tcp -m multiport --dports %s %s\n' "$R2O_PPE_HTTP_PORTS" "$_r2o_ppe_tail"
@@ -121,7 +141,8 @@ _r2o_ppe_rules() {
 
 _r2o_ppe_owned() {
     for _r2o_ppe_chain in PREROUTING FORWARD; do
-        _r2o_ppe_ipt "$1" -t mangle -S "$_r2o_ppe_chain" |
+        _r2o_ppe_listing=$(_r2o_ppe_ipt "$1" -t mangle -S "$_r2o_ppe_chain") || return 1
+        printf '%s\n' "$_r2o_ppe_listing" |
             awk -v chain="$_r2o_ppe_chain" -v tag="$R2O_PPE_TAG" '
                 $1 == "-A" && $2 == chain {
                     for (i = 3; i < NF; i++)
@@ -130,27 +151,54 @@ _r2o_ppe_owned() {
                             print chain "|" $0
                             break
                         }
-                }'
+                }' || return 1
     done
 }
 
 _r2o_ppe_remove_family() {
-    _r2o_ppe_owned "$1" | while IFS='|' read -r _r2o_ppe_chain _r2o_ppe_args; do
+    _r2o_ppe_family_rules=$(_r2o_ppe_owned "$1") || return 1
+    _r2o_ppe_remove_rc=0
+    while IFS='|' read -r _r2o_ppe_chain _r2o_ppe_args; do
         [ -n "$_r2o_ppe_chain" ] || continue
         # shellcheck disable=SC2086 # iptables -S returns shell-style rule words
-        _r2o_ppe_ipt "$1" -t mangle -D "$_r2o_ppe_chain" $_r2o_ppe_args || true
-    done
+        if ! _r2o_ppe_ipt "$1" -t mangle -D "$_r2o_ppe_chain" $_r2o_ppe_args; then
+            _r2o_ppe_remove_rc=1
+        fi
+    done <<RULES
+$_r2o_ppe_family_rules
+RULES
+    return "$_r2o_ppe_remove_rc"
 }
 
 r2o_ppe_remove() {
+    _r2o_ppe_remove_rc=0
     for _r2o_ppe_tool in iptables ip6tables; do
         command -v "$_r2o_ppe_tool" >/dev/null 2>&1 || continue
-        _r2o_ppe_remove_family "$_r2o_ppe_tool"
+        if ! _r2o_ppe_remove_family "$_r2o_ppe_tool"; then
+            _r2o_ppe_remove_rc=1
+        fi
     done
+    return "$_r2o_ppe_remove_rc"
 }
 
 _r2o_ppe_count() {
-    _r2o_ppe_owned "$1" | grep -c . || true
+    _r2o_ppe_rules_list=$(_r2o_ppe_owned "$1") || return 1
+    printf '%s\n' "$_r2o_ppe_rules_list" | awk 'NF { count++ } END { print count + 0 }'
+}
+
+_r2o_ppe_missing_count() {
+    _r2o_ppe_expected_rules=$(_r2o_ppe_rules)
+    _r2o_ppe_missing=0
+    while IFS='|' read -r _r2o_ppe_chain _r2o_ppe_args; do
+        [ -n "$_r2o_ppe_chain" ] || continue
+        # shellcheck disable=SC2086 # rule arguments were validated before status is rendered
+        if ! _r2o_ppe_ipt "$1" -t mangle -C "$_r2o_ppe_chain" $_r2o_ppe_args; then
+            _r2o_ppe_missing=$((_r2o_ppe_missing + 1))
+        fi
+    done <<RULES
+$_r2o_ppe_expected_rules
+RULES
+    printf '%s' "$_r2o_ppe_missing"
 }
 
 _r2o_ppe_ensure_family() {
@@ -171,8 +219,7 @@ RULES
 r2o_ppe_ensure() {
     r2o_ppe_valid_config || { echo "r2o-ppe: неверная конфигурация" >&2; return 1; }
     if [ "$R2O_PPE_DEOFFLOAD" = 0 ]; then
-        r2o_ppe_remove
-        return 3
+        if r2o_ppe_remove; then return 3; else return 1; fi
     fi
     r2o_ppe_available iptables || return 2
     _r2o_ppe_ensure_family iptables || return 1
@@ -195,14 +242,16 @@ r2o_ppe_status() {
         echo "  PPE: недоступна — в прошивке нет цели $R2O_PPE_TARGET"
     else
         _r2o_ppe_want=$(printf '%s\n' "$(_r2o_ppe_rules)" | grep -c .)
-        _r2o_ppe_n4=$(_r2o_ppe_count iptables)
-        _r2o_ppe_line="IPv4: $_r2o_ppe_n4 из $_r2o_ppe_want правил"
+        _r2o_ppe_n4=$(_r2o_ppe_count iptables) || { echo "  PPE: состояние правил IPv4 недоступно"; return 1; }
+        _r2o_ppe_missing4=$(_r2o_ppe_missing_count iptables)
+        _r2o_ppe_line="IPv4: $_r2o_ppe_n4 из $_r2o_ppe_want помеченных правил, отсутствует $_r2o_ppe_missing4 обязательных"
         _r2o_ppe_full=1
-        [ "$_r2o_ppe_n4" -ge "$_r2o_ppe_want" ] || _r2o_ppe_full=0
+        [ "$_r2o_ppe_missing4" -eq 0 ] || _r2o_ppe_full=0
         if r2o_ppe_available ip6tables; then
-            _r2o_ppe_n6=$(_r2o_ppe_count ip6tables)
-            _r2o_ppe_line="$_r2o_ppe_line, IPv6: $_r2o_ppe_n6 из $_r2o_ppe_want"
-            [ "$_r2o_ppe_n6" -ge "$_r2o_ppe_want" ] || _r2o_ppe_full=0
+            _r2o_ppe_n6=$(_r2o_ppe_count ip6tables) || { echo "  PPE: состояние правил IPv6 недоступно"; return 1; }
+            _r2o_ppe_missing6=$(_r2o_ppe_missing_count ip6tables)
+            _r2o_ppe_line="$_r2o_ppe_line, IPv6: $_r2o_ppe_n6 из $_r2o_ppe_want помеченных, отсутствует $_r2o_ppe_missing6 обязательных"
+            [ "$_r2o_ppe_missing6" -eq 0 ] || _r2o_ppe_full=0
         fi
         if [ "$_r2o_ppe_full" = 1 ]; then
             echo "  PPE: включена ($_r2o_ppe_line, первые $R2O_PPE_CONNSKIP пакетов)"

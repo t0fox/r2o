@@ -40,6 +40,7 @@ else
 fi
 case "$operation" in
     -S)
+        [ "${MOCK_FAIL_LIST:-0}" = 1 ] && exit 1
         awk -F'|' -v chain="$chain" '$1 == chain { printf "-A %s %s\n", $1, $2 }' "$rules"
         ;;
     -C)
@@ -52,6 +53,13 @@ case "$operation" in
         printf '%s\n' "$rule" >> "$rules"
         ;;
     -D)
+        case " $args " in
+            *" -m comment --comment r2o-ppe "*)
+                case " $args " in
+                    *" -p tcp "*) [ "${MOCK_FAIL_DELETE_TCP:-0}" = 1 ] && exit 1 ;;
+                esac
+                ;;
+        esac
         awk -v rule="$rule" '$0 != rule' "$rules" > "$rules.new"
         mv "$rules.new" "$rules"
         ;;
@@ -71,6 +79,8 @@ run_helper() {
         R2O_PPE_BINDS="$CASE/binds" \
         R2O_PPE_DEOFFLOAD="${TEST_PPE_ENABLED:-1}" \
         MOCK_FAIL_HTTP="${MOCK_FAIL_HTTP:-0}" \
+        MOCK_FAIL_DELETE_TCP="${MOCK_FAIL_DELETE_TCP:-0}" \
+        MOCK_FAIL_LIST="${MOCK_FAIL_LIST:-0}" \
         "$HELPER" "$@"
 }
 
@@ -109,6 +119,15 @@ run_helper ensure
 if TEST_PPE_ENABLED=0 run_helper ensure; then fail "disabled PPE setting was accepted as installed"; else rc=$?; fi
 [ "$rc" -eq 3 ] || fail "disabled PPE setting returned $rc instead of 3"
 [ "$(grep -c 'r2o-ppe' "$CASE/rules" || true)" -eq 0 ] || fail "disabled PPE setting left owned rules"
+
+make_case disabled_cleanup_failure
+run_helper ensure
+if TEST_PPE_ENABLED=0 MOCK_FAIL_DELETE_TCP=1 run_helper ensure; then
+    fail "disabled setting hid a failed owned-rule cleanup"
+else
+    rc=$?
+fi
+[ "$rc" -eq 1 ] || fail "disabled cleanup failure returned $rc instead of 1"
 
 make_case configured_disabled
 printf 'R2O_PPE_DEOFFLOAD="0"\n' > "$CASE/config"
@@ -151,5 +170,58 @@ if run_helper ensure; then fail "ensure ignored an injected insertion failure"; 
 run_helper remove
 [ "$(grep -c 'r2o-ppe' "$CASE/rules" || true)" -eq 0 ] || fail "partial installation could not be removed"
 grep -q 'other-owner' "$CASE/rules" || fail "partial cleanup removed another owner's rule"
+MOCK_FAIL_HTTP=0
+
+make_case cleanup_failure
+run_helper ensure
+if MOCK_FAIL_DELETE_TCP=1 run_helper remove; then
+    fail "remove hid a failed owned-rule deletion"
+else
+    rc=$?
+fi
+[ "$rc" -eq 1 ] || fail "failed cleanup returned $rc instead of 1"
+[ "$(grep -c 'r2o-ppe' "$CASE/rules" || true)" -eq 5 ] || fail "cleanup stopped early or lost failed rules"
+run_helper remove
+[ "$(grep -c 'r2o-ppe' "$CASE/rules" || true)" -eq 0 ] || fail "retry did not remove remaining owned rules"
+grep -q 'other-owner' "$CASE/rules" || fail "retry cleanup removed another owner's PPE rule"
+
+make_case listing_failure
+run_helper ensure
+if MOCK_FAIL_LIST=1 run_helper remove; then
+    fail "remove reported success after iptables rule discovery failed"
+else
+    rc=$?
+fi
+[ "$rc" -eq 1 ] || fail "rule discovery failure returned $rc instead of 1"
+[ "$(grep -c 'r2o-ppe' "$CASE/rules" || true)" -eq 8 ] || fail "cleanup modified rules after failed discovery"
+if TEST_PPE_ENABLED=0 MOCK_FAIL_LIST=1 run_helper ensure; then
+    fail "disabled PPE setting hid an iptables rule discovery failure"
+else
+    rc=$?
+fi
+[ "$rc" -eq 1 ] || fail "disabled cleanup discovery failure returned $rc instead of 1"
+
+make_case incomplete_status
+run_helper ensure
+_missing_rule=$(grep -F 'FORWARD|-p udp -m multiport --sports 443,50000:50099,1400,3478:3481,5349,19294:19344' "$CASE/rules")
+[ -n "$_missing_rule" ] || fail "could not find the fixture rule to remove"
+grep -Fvx -- "$_missing_rule" "$CASE/rules" > "$CASE/rules.new"
+mv "$CASE/rules.new" "$CASE/rules"
+_duplicate_rule=$(grep 'r2o-ppe' "$CASE/rules" | head -n 1)
+printf '%s\n' "$_duplicate_rule" >> "$CASE/rules"
+[ "$(grep -c 'r2o-ppe' "$CASE/rules")" -eq 8 ] || fail "status fixture does not have the expected duplicate count"
+_status=$(run_helper status)
+printf '%s\n' "$_status" | grep -q 'PPE: установлена не полностью' || fail "status treated a duplicate as a complete rule set"
+printf '%s\n' "$_status" | grep -q 'отсутствует 1' || fail "status did not report the missing required rule"
+
+make_case maximum_voice_ports
+if R2O_PPE_VOICE_PORTS=1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 run_helper ensure; then
+    :
+else
+    fail "valid 15-slot voice port list failed because of the added UDP 443 rule"
+fi
+[ "$(grep -c 'r2o-ppe' "$CASE/rules")" -eq 11 ] || fail "maximum voice-port list did not split into supported PPE rules"
+grep -Fq 'PREROUTING|-p udp -m multiport --dports 443 ' "$CASE/rules" || fail "split UDP rules omitted port 443"
+grep -Fq 'PREROUTING|-p udp -m multiport --dports 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 ' "$CASE/rules" || fail "split UDP rules omitted configured voice ports"
 
 echo "test-router-ppe-deoffload: owner isolation, idempotence, disable, capability, and partial failure passed"
