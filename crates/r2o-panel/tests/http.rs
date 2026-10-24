@@ -717,13 +717,26 @@ fn r2o_служебная_команда_панели_остаётся_асин�
     config.control_enabled = true;
     let raw = b"POST /api/control/stop HTTP/1.1\r\nHost: router.local\r\nOrigin: http://router.local\r\nContent-Length: 0\r\n\r\n";
     assert_eq!(handle_request(&config, raw).status, 202);
-    let started_deadline = Instant::now() + Duration::from_secs(10);
+    // The service starts on a background thread; allow a loaded CI worker to schedule it.
+    let started_deadline = Instant::now() + Duration::from_secs(30);
     while !r2o_started_marker.exists() {
+        let (_, _, current) = request(
+            &config,
+            "GET /api/status HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        let state = serde_json::from_str::<Value>(&current).unwrap()["snapshot"]["control_state"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            state, "running",
+            "service action stopped before its start marker"
+        );
         assert!(
             Instant::now() < started_deadline,
             "команда службы не запустилась"
         );
-        std::thread::sleep(Duration::from_millis(5));
+        std::thread::sleep(Duration::from_millis(10));
     }
     let (_, _, running) = request(
         &config,
