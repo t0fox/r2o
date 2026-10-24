@@ -99,11 +99,18 @@ fi
 
 if [ -f "$OPENWRT_RELEASE" ] || [ "${R2O_PLATFORM:-}" = openwrt ]; then
     OPENWRT_SERVICE=$OPENWRT_INIT_DIR/r2o
-    if [ -f "$OPENWRT_SERVICE" ] && grep -Fq 'OpenWrt host-side waiter' "$OPENWRT_SERVICE"; then
-        if [ -x "$OPENWRT_SERVICE" ]; then
-            "$OPENWRT_SERVICE" disable
+    if [ -e "$OPENWRT_SERVICE" ] || [ -L "$OPENWRT_SERVICE" ]; then
+        if [ ! -L "$OPENWRT_SERVICE" ] && [ -f "$OPENWRT_SERVICE" ] \
+            && [ ! -L "$ROOT/releases/$ACTIVE/router/openwrt-init" ] \
+            && [ -f "$ROOT/releases/$ACTIVE/router/openwrt-init" ] \
+            && cmp -s "$OPENWRT_SERVICE" "$ROOT/releases/$ACTIVE/router/openwrt-init"; then
+            if [ -x "$OPENWRT_SERVICE" ]; then
+                "$OPENWRT_SERVICE" disable
+            fi
+            rm -f "$OPENWRT_SERVICE"
+        else
+            echo "r2o uninstall: изменённая или чужая служба OpenWrt сохранена: $OPENWRT_SERVICE" >&2
         fi
-        rm -f "$OPENWRT_SERVICE"
     fi
 fi
 

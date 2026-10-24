@@ -5,65 +5,41 @@
 инициализации системы передаёт управление сценарию из активного выпуска. При
 переключении выпуска обновляется и код служб роутера.
 
-Для первой установки из опубликованного релиза сначала проверьте подпись
-манифеста и SHA-256 архива на доверенном Linux/macOS компьютере. Например,
-для OpenWrt MIPS32r2 с musl:
+## Установка через SSH
+
+Подключитесь к OpenWrt или Keenetic с установленным Entware как `root` и
+выполните:
 
 ```sh
-ARCH=mipsel-openwrt-musl
-ASSET="r2o-$ARCH.tar.gz"
-BASE=https://github.com/t0fox/r2o/releases/latest/download
-curl -fL "$BASE/latest.json" -o latest.json
-curl -fL "$BASE/latest.json.sig" -o latest.json.sig
-curl -fL "$BASE/$ASSET" -o "$ASSET"
-curl -fL https://raw.githubusercontent.com/t0fox/r2o/main/crates/r2o-manager/release-public.pem -o release-public.pem
-openssl pkeyutl -verify -pubin -inkey release-public.pem -rawin \
-  -in latest.json -sigfile latest.json.sig
-python3 - "$ARCH" "$ASSET" latest.json <<'PY'
-import hashlib
-import json
-import sys
-
-arch, archive, manifest_path = sys.argv[1:]
-manifest = json.load(open(manifest_path, encoding="utf-8"))
-expected = manifest["assets"][arch]["sha256"]
-actual = hashlib.sha256(open(archive, "rb").read()).hexdigest()
-if actual != expected:
-    raise SystemExit(f"SHA-256 не совпал для {archive}")
-print(manifest["release_id"])
-PY
+wget -qO- https://raw.githubusercontent.com/t0fox/r2o/main/scripts/install.sh | sh
 ```
 
-Сохраните напечатанный `release_id`, распакуйте проверенный архив и скопируйте
-его содержимое на роутер. `install-local` ниже не проверяет подпись повторно,
-поэтому запускайте его только после успешных проверок выше или для собственного
-пакета, которому вы доверяете:
+Если `curl` уже установлен:
 
 ```sh
-RELEASE_ID=$(python3 -c 'import json; print(json.load(open("latest.json"))["release_id"])')
-mkdir -p /tmp/r2o-bundle
-tar -xzf "$ASSET" -C /tmp/r2o-bundle
-ssh root@ROUTER_IP 'mkdir -p /tmp/r2o-release'
-scp -r /tmp/r2o-bundle/builds /tmp/r2o-bundle/router root@ROUTER_IP:/tmp/r2o-release/
-ssh root@ROUTER_IP "sh /tmp/r2o-release/router/install.sh /tmp/r2o-release $RELEASE_ID $ARCH"
+curl -fsSL https://raw.githubusercontent.com/t0fox/r2o/main/scripts/install.sh | sh
 ```
 
-Выберите ABI по платформе: `mipsel-openwrt-musl`, `aarch64-openwrt-musl`,
-`armv7-openwrt-musl` или `armv5-musleabi`. После проверки архива установщик
-сохраняет активный выпуск и настраивает службы.
-
-Для уже распакованного локального пакета, которому вы доверяете, установите его
-командой:
-
-```sh
-router/install.sh /tmp/r2o-bundle r2o-20261018 mipsel
-```
+Установщик распознаёт ABI OpenWrt `mipsel-openwrt-musl`,
+`aarch64-openwrt-musl`, `armv7-openwrt-musl`, `armv5-musleabi`, а также
+Keenetic/Entware `mipsel` и совместимые ARM ABI. Он проверяет Ed25519-подпись
+манифеста закреплённым ключом и SHA-256 архива до распаковки, оценивает RAM и
+место во flash и передаёт установку текущему `r2o-manager`. Отсутствующие
+`openssl-util` и корневые сертификаты он устанавливает через штатный
+`apk`/`opkg`. При нехватке ресурсов или конфликте с чужими файлами автозапуска
+или обязательных системных команд установка остановится до активации релиза.
 
 Статус и логи:
 
 ```sh
-sudo /opt/etc/init.d/S99r2o status
-sudo tail -n 100 /opt/r2o/log/r2o-datapath4.log /opt/r2o/log/r2o-controller4.log /opt/r2o/log/panel.log
+/opt/etc/init.d/S99r2o status
+tail -n 100 /opt/r2o/log/r2o-datapath4.log /opt/r2o/log/r2o-controller4.log /opt/r2o/log/panel.log
+```
+
+Установить обновление из последнего подписанного выпуска:
+
+```sh
+/opt/etc/init.d/S99r2o update-install
 ```
 
 На Keenetic с MediaTek PPE параметр `R2O_PPE_DEOFFLOAD=1` (по умолчанию)
@@ -77,7 +53,7 @@ sudo tail -n 100 /opt/r2o/log/r2o-datapath4.log /opt/r2o/log/r2o-controller4.log
 последнюю сохранённую сводку datapath. Чтобы проверить конкретный адрес:
 
 ```sh
-sudo /opt/etc/init.d/S99r2o status 87.228.47.201
+/opt/etc/init.d/S99r2o status 87.228.47.201
 ```
 
 Это диагностический снимок: он не доказывает прохождение голосового трафика.
@@ -87,11 +63,11 @@ sudo /opt/etc/init.d/S99r2o status 87.228.47.201
 firewall для событий `nat` и `mangle`; при удалении неизменённый hook снимается,
 а отредактированный сохраняется.
 
-Остановить службы можно командой `sudo /opt/etc/init.d/S99r2o stop`; команда
+Остановить службы можно командой `/opt/etc/init.d/S99r2o stop`; команда
 `restart` запускает их снова. Для полного удаления запустите:
 
 ```sh
-sudo sh /opt/r2o/releases/"$(sed -n '2p' /opt/r2o/release-slots)"/router/uninstall.sh
+release=$(sed -n '2p' /opt/r2o/release-slots); case "$release" in ''|*[!A-Za-z0-9._-]*) echo 'Повреждён идентификатор выпуска' >&2; exit 1 ;; esac; sh "/opt/r2o/releases/$release/router/uninstall.sh"
 ```
 
 Сценарий остановит службы, снимет правила R2O и Telegram, отключит службу

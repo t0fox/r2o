@@ -45,7 +45,9 @@ for component in r2o-datapath r2o-controller r2o-panel r2o-telegram r2o-manager 
     chmod 0755 "$destination"
 done
 cp -R "$ROOT/router/." "$BUNDLE/router/"
+cp "$OPENWRT_INIT_DIR/r2o" "$BUNDLE/router/openwrt-init"
 chmod 0755 "$BUNDLE/router/S99r2o" "$BUNDLE/router/S99r2o.shim"
+chmod 0755 "$BUNDLE/router/openwrt-init"
 
 install_release() {
     if ! R2O_DIR="$INSTALL_ROOT" \

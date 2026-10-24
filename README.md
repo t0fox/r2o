@@ -152,11 +152,31 @@ Telegram **не требует собственного VPS или WARP**. Го�
 
 ### Первая установка
 
-В r2o штатная первая установка строится вокруг **проверенного подписанного архива**, а не команды `curl | sh` из непроверенного источника.
+Подключитесь по SSH как `root` и выполните на OpenWrt или Keenetic с Entware:
 
-На доверенном Linux/macOS-компьютере нужно скачать `latest.json`, `latest.json.sig` и нужный архив из [релиза](https://github.com/t0fox/r2o/releases/latest), затем проверить метаданные ключом [`release-public.pem`](crates/r2o-manager/release-public.pem), сверить SHA-256 архива, распаковать его и передать на роутер по SSH.
+```sh
+wget -qO- https://raw.githubusercontent.com/t0fox/r2o/main/scripts/install.sh | sh
+```
 
-**[Полная инструкция с готовыми командами и проверкой Ed25519](router/README.md)** — для первого выпуска используйте именно её. Команда `install-local` доверяет уже подготовленному локальному архиву и сама **не повторяет проверку подписи**, поэтому пропускать предварительный этап нельзя.
+Если уже установлен `curl`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/t0fox/r2o/main/scripts/install.sh | sh
+```
+
+Bootstrap определяет платформу и ABI, проверяет закреплённую Ed25519-подпись
+манифеста и SHA-256 архива **до распаковки и запуска кода**, проверяет нужные
+команды и доступные RAM/flash. При нехватке места установщик выбирает безопасное
+staging в flash либо tmpfs с резервом памяти; если не помещается слот для
+отката, он завершится до активации. Установка, повторный запуск и откат идут
+через существующие `router/install.sh` и `r2o-manager`.
+
+Поддерживаемые ABI: OpenWrt `mipsel-openwrt-musl`, `aarch64-openwrt-musl`,
+`armv7-openwrt-musl`, `armv5-musleabi`; Keenetic/Entware `mipsel`, ARMv5 soft
+float и ARMv7 hard float. Неизвестные или несовместимые ABI отклоняются.
+**[Статус, обновление, диагностика и удаление](router/README.md).** Ручной
+`install-local` остаётся только для локального доверенного архива и не заменяет
+проверку подписи bootstrap-установщиком.
 
 Проверка после установки:
 
