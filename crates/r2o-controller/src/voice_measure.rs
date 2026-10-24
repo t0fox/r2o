@@ -516,7 +516,11 @@ fn r2o_select_voice_target(
     if let Some(r2o_requested) = r2o_requested {
         let r2o_flow = r2o_targets
             .iter()
-            .find(|r2o_target| r2o_voice_target_address(r2o_target) == r2o_requested)
+            .find(|r2o_target| {
+                r2o_voice_target_address(r2o_target) == r2o_requested
+                    && r2o_control
+                        .is_none_or(|r2o_control| r2o_target.server_ip != *r2o_control.ip())
+            })
             .copied();
         return Some((r2o_requested, r2o_flow));
     }
@@ -942,6 +946,25 @@ mod tests {
         let r2o_address = SocketAddrV4::new(Ipv4Addr::new(35, 217, 0, 67), 50_004);
         assert_eq!(
             r2o_select_voice_target(Some(r2o_address), &[], None),
+            Some((r2o_address, None))
+        );
+    }
+
+    #[test]
+    fn явная_цель_не_принимает_поток_к_контрольному_stun_ip_за_discord() {
+        let r2o_address = SocketAddrV4::new(Ipv4Addr::new(104, 16, 58, 100), 50_004);
+        let r2o_control = Some(SocketAddrV4::new(*r2o_address.ip(), 3478));
+        let r2o_control_flow = R2oVoiceTarget {
+            server_ip: *r2o_address.ip(),
+            server_port: r2o_address.port(),
+            client_ip: Ipv4Addr::new(192, 168, 1, 2),
+            client_port: 50_001,
+            packets: 50,
+            replied: true,
+        };
+
+        assert_eq!(
+            r2o_select_voice_target(Some(r2o_address), &[r2o_control_flow], r2o_control),
             Some((r2o_address, None))
         );
     }
