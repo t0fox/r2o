@@ -2372,6 +2372,55 @@ mod tests {
     }
 
     #[test]
+    fn tcp_timestamp_option_is_carried_with_captured_client_hello() {
+        let no_timestamp =
+            super::super::capture::tcp_hello_from_packet(&tcp_tls_packet("no-ts.example")).unwrap();
+        assert_eq!(no_timestamp.tcp_has_timestamp, Some(false));
+        let no_timestamp_frame = Frame {
+            kind: control::EVENT_HELLO,
+            body: no_timestamp.event_body(),
+        };
+        assert_eq!(
+            control::decode_hello(&no_timestamp_frame)
+                .unwrap()
+                .tcp_has_timestamp,
+            Some(false)
+        );
+
+        let mut with_timestamp = tcp_tls_packet("ts.example");
+        let payload = with_timestamp[40..].to_vec();
+        with_timestamp.truncate(40);
+        with_timestamp.extend_from_slice(&[1, 1, 8, 10, 0, 0, 0, 1, 0, 0, 0, 2]);
+        with_timestamp[32] = 8 << 4;
+        let total_len = with_timestamp.len() + payload.len();
+        with_timestamp[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        with_timestamp.extend_from_slice(&payload);
+
+        let with_timestamp = super::super::capture::tcp_hello_from_packet(&with_timestamp).unwrap();
+        assert_eq!(with_timestamp.tcp_has_timestamp, Some(true));
+        let hello_frame = Frame {
+            kind: control::EVENT_HELLO,
+            body: with_timestamp.event_body(),
+        };
+        assert_eq!(
+            control::decode_hello(&hello_frame)
+                .unwrap()
+                .tcp_has_timestamp,
+            Some(true)
+        );
+        let shape_frame = Frame {
+            kind: control::EVENT_CLIENT_SHAPE,
+            body: with_timestamp.shape_event_body().unwrap(),
+        };
+        assert_eq!(
+            control::decode_client_shape(&shape_frame)
+                .unwrap()
+                .tcp_has_timestamp,
+            Some(true)
+        );
+    }
+
+    #[test]
     fn исключение_снимает_suffix_только_для_точного_имени_и_удаляется() {
         let suffix = "googlevideo.com";
         let mut suffix_body = vec![suffix.len() as u8];

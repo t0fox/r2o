@@ -120,7 +120,7 @@ fn rejects_bad_header_lengths_records_and_unknown_versions() {
     bad_schema[5] = 2;
     assert!(Plan::parse(&bad_schema).is_err());
     let mut bad_version = valid.clone();
-    bad_version[7] = 13;
+    bad_version[7] = 14;
     assert!(Plan::parse(&bad_version).is_err());
     let mut bad_flags = valid.clone();
     bad_flags[9] = 1;

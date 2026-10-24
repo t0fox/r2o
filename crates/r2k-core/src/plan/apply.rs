@@ -34,6 +34,8 @@ pub struct PacketInput<'a> {
     pub sni_off: usize,
     pub sni_len: usize,
     pub segment_cap: usize,
+    /// TTL первого ответившего пакета обратного направления; ноль означает, что ответа не было.
+    pub reference_ttl: u8,
     pub own_after_fakes: bool,
     pub is_http: bool,
 }
@@ -48,6 +50,7 @@ impl<'a> PacketInput<'a> {
             sni_off: 0,
             sni_len: 0,
             segment_cap: 0,
+            reference_ttl: 0,
             own_after_fakes: false,
             is_http: false,
         }
@@ -371,7 +374,7 @@ impl Plan {
                 if index == 0
                     && let Some(overlay) = overlay
                 {
-                    self.apply_overlay(&mut emission, overlay)?;
+                    self.apply_overlay(&mut emission, overlay, input)?;
                 }
                 emits.push(emission);
                 start = end;
@@ -518,7 +521,7 @@ impl Plan {
             bytes,
         };
         if let Some(poison) = poison {
-            emission.ttl = poison.ttl;
+            emission.ttl = poison_ttl(poison, input.reference_ttl);
             emission.poison = poison.flags;
             emission.seq_shift = poison.seq_shift;
         }
@@ -603,6 +606,7 @@ impl Plan {
         &self,
         emission: &mut Emission,
         overlay: &SeqOverlay,
+        input: &PacketInput<'_>,
     ) -> Result<(), ApplyError> {
         let payload = self
             .payloads
@@ -622,7 +626,7 @@ impl Plan {
                 .iter()
                 .find(|poison| poison.id == overlay.poison_id)
         {
-            emission.ttl = poison.ttl;
+            emission.ttl = poison_ttl(poison, input.reference_ttl);
             emission.poison = poison.flags;
             emission.seq_shift = poison.seq_shift;
         }
@@ -755,6 +759,27 @@ impl Plan {
             body.min(self.segment_size as usize)
         }
     }
+}
+
+fn poison_ttl(poison: &Poison, reference_ttl: u8) -> u8 {
+    let Some(autottl) = poison.autottl else {
+        return poison.ttl;
+    };
+    if reference_ttl == 0 {
+        return poison.ttl;
+    }
+    let origin_ttl = [64_i16, 128, 255]
+        .into_iter()
+        .find(|candidate| i16::from(reference_ttl) <= *candidate);
+    let Some(origin_ttl) = origin_ttl else {
+        return poison.ttl;
+    };
+    let mut ttl = origin_ttl - i16::from(reference_ttl) + i16::from(autottl.delta);
+    if autottl.max != 0 {
+        ttl = ttl.min(i16::from(autottl.max));
+    }
+    ttl = ttl.max(i16::from(autottl.min)).clamp(1, i16::from(u8::MAX));
+    u8::try_from(ttl).unwrap_or(poison.ttl)
 }
 
 fn validate_tls_input(input: &PacketInput<'_>) -> Result<(), ApplyError> {

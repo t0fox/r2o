@@ -21,6 +21,7 @@ const REC_OOB: u16 = 0x010d;
 const REC_UDPLEN: u16 = 0x010e;
 const REC_QSPLIT: u16 = 0x010f;
 const REC_QDENY: u16 = 0x0110;
+const REC_AUTOTTL: u16 = 0x0111;
 
 const MAX_DIRECTIVES: usize = 8;
 const MAX_PLAN_BYTES: usize = 65_000;
@@ -40,6 +41,7 @@ struct ParsedPlan {
     proto: u8,
     payloads: Vec<(u16, Vec<u8>)>,
     poisons: Vec<Vec<u8>>,
+    autottls: Vec<Vec<u8>>,
     splits: Vec<Vec<u8>>,
     fakes: Vec<Vec<u8>>,
     seqovls: Vec<Vec<u8>>,
@@ -278,6 +280,7 @@ pub fn compile_text(text: &str) -> Result<Vec<u8>, String> {
                 let mut ttl = 0_u8;
                 let mut flags = 0_u8;
                 let mut seq_shift = 0_i32;
+                let mut autottl = None;
                 for field in &fields[2..] {
                     if *field == "badsum" {
                         flags |= 1;
@@ -287,6 +290,14 @@ pub fn compile_text(text: &str) -> Result<Vec<u8>, String> {
                         flags |= 4;
                     } else if *field == "md5" {
                         flags |= 8;
+                    } else if let Some(value) = field.strip_prefix("autottl=") {
+                        if autottl.is_some() {
+                            return Err(parse_error("autottl may be specified only once"));
+                        }
+                        autottl = Some(
+                            parse_autottl(value)
+                                .ok_or_else(|| parse_error("autottl must be delta,min-max"))?,
+                        );
                     } else if let Some(value) = field.strip_prefix("ttl=") {
                         ttl = number(value, u8::MAX as u64)
                             .map_err(|_| parse_error("ttl is out of range"))?
@@ -305,6 +316,12 @@ pub fn compile_text(text: &str) -> Result<Vec<u8>, String> {
                 value.push(flags);
                 push_u32(&mut value, seq_shift as u32);
                 plan.poisons.push(value);
+                if let Some([delta, min, max]) = autottl {
+                    let mut value = Vec::with_capacity(5);
+                    push_u16(&mut value, id);
+                    value.extend_from_slice(&[delta, min, max]);
+                    plan.autottls.push(value);
+                }
             }
             "split" => {
                 require_fields(
@@ -510,7 +527,21 @@ pub fn compile_text(text: &str) -> Result<Vec<u8>, String> {
         value.extend_from_slice(&bytes);
         (REC_PAYLOAD, value)
     }));
-    records.extend(plan.poisons.into_iter().map(|value| (REC_POISON, value)));
+    let mut autottls = plan.autottls;
+    for poison in plan.poisons {
+        let poison_id: [u8; 2] = poison
+            .get(..2)
+            .ok_or("invalid poison record")?
+            .try_into()
+            .map_err(|_| "invalid poison record")?;
+        records.push((REC_POISON, poison));
+        if let Some(index) = autottls
+            .iter()
+            .position(|autottl| autottl.get(..2) == Some(poison_id.as_slice()))
+        {
+            records.push((REC_AUTOTTL, autottls.remove(index)));
+        }
+    }
     records.extend(plan.splits.into_iter().map(|value| (REC_SPLIT, value)));
     records.extend(plan.fakes.into_iter().map(|value| (REC_FAKE, value)));
     records.extend(plan.seqovls.into_iter().map(|value| (REC_SEQOVL, value)));
@@ -595,6 +626,15 @@ fn number(value: &str, maximum: u64) -> Result<u64, ()> {
     }
     let parsed = value.parse::<u64>().map_err(|_| ())?;
     (parsed <= maximum).then_some(parsed).ok_or(())
+}
+
+fn parse_autottl(value: &str) -> Option<[u8; 3]> {
+    let (delta, range) = value.split_once(',')?;
+    let (min, max) = range.split_once('-')?;
+    let delta = delta.parse::<i8>().ok()? as u8;
+    let min = u8::try_from(number(min, u8::MAX.into()).ok()?).ok()?;
+    let max = u8::try_from(number(max, u8::MAX.into()).ok()?).ok()?;
+    (max == 0 || min <= max).then_some([delta, min, max])
 }
 
 fn kv_number(value: &str, key: &str, maximum: u64) -> Result<u64, ()> {

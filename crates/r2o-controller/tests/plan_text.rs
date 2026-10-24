@@ -47,6 +47,49 @@ fn compiles_every_supported_http_search_candidate() {
 }
 
 #[test]
+fn compiles_autottl_poison_for_the_no_timestamp_client_path() {
+    let text = "r2o-plan 1 13\nproto tcp tls\npayload 1 4869\npoison 1 autottl=1,2-12\nfake payload=1 poison=1 repeats=1 gap_us=0 place=before\n";
+    let compiled = compile_text(text).unwrap();
+    let compiled_hex: String = compiled.iter().map(|byte| format!("{byte:02x}")).collect();
+    assert_eq!(
+        compiled_hex,
+        "52324f500001000d000000070001001000000000000000000000000000000000000200020601001000040001486900110008000100000000000001110005000101020c0101000a000100010100000000000103000100"
+    );
+    let plan = Plan::parse(&compiled).unwrap();
+    assert_eq!(
+        plan.poisons[0].autottl,
+        Some(r2k_core::plan::AutoTtl {
+            delta: 1,
+            min: 2,
+            max: 12,
+        })
+    );
+
+    for (reference_ttl, expected_ttl) in [(57, 8), (120, 9), (250, 6), (34, 12), (64, 2), (0, 0)] {
+        let mut input = r2k_core::plan::PacketInput::new(b"trigger", 0);
+        input.reference_ttl = reference_ttl;
+        let actions = plan.apply(&input).unwrap();
+        assert_eq!(
+            actions.emits[0].ttl, expected_ttl,
+            "reference TTL {reference_ttl}"
+        );
+    }
+}
+
+#[test]
+fn rejects_autottl_below_minexec_or_with_an_invalid_range() {
+    for text in [
+        "r2o-plan 1 12\nproto tcp tls\npayload 1 4869\npoison 1 autottl=1,2-12\nfake payload=1 poison=1 repeats=1 gap_us=0 place=before\n",
+        "r2o-plan 1 13\nproto tcp tls\npayload 1 4869\npoison 1 autottl=1,20-2\nfake payload=1 poison=1 repeats=1 gap_us=0 place=before\n",
+    ] {
+        assert!(
+            compile_text(text).is_err(),
+            "accepted invalid autottl: {text}"
+        );
+    }
+}
+
+#[test]
 fn r2o_compiles_quic_ttl_probe_and_datapath_accepts_only_its_shape() {
     let payload = r2k_core::plan::R2K_QUIC_TTL_PROBE_PAYLOAD
         .iter()

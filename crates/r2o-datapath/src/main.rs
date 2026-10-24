@@ -1337,9 +1337,11 @@ mod app {
                             HoldOutcome::Drop => PacketDecision::Drop,
                             HoldOutcome::Ready { ids, packet } => {
                                 if !controller_probe
-                                    && let Some(hello) = tcp_hello_from_packet(&packet)
+                                    && let Some(mut hello) = tcp_hello_from_packet(&packet)
                                         .or_else(|| tcp_http_hello_from_packet(&packet))
                                 {
+                                    hello.tcp_has_timestamp = tcp_sessions
+                                        .r2o_client_offers_tcp_timestamps_for_packet(&packet);
                                     send_hello_event(
                                         &mut control,
                                         &mut r2o_snapshot_control,
@@ -1385,9 +1387,11 @@ mod app {
                                 synthetic = Some(packet);
                                 decision
                             }
-                            HoldOutcome::Observed { hello } => {
+                            HoldOutcome::Observed { mut hello } => {
                                 tcp_sessions.r2o_note_captured_client_shape(bytes, hello.shape);
                                 if !controller_probe {
+                                    hello.tcp_has_timestamp = tcp_sessions
+                                        .r2o_client_offers_tcp_timestamps_for_packet(bytes);
                                     send_hello_event(
                                         &mut control,
                                         &mut r2o_snapshot_control,
@@ -4590,6 +4594,7 @@ mod app {
                 host: b"__SNI__".to_vec(),
                 shape: r2k_core::control::SHAPE_MODERN,
                 client_hello: client_hello.clone(),
+                tcp_has_timestamp: Some(true),
             }
             .event_body()
             .unwrap();
@@ -5412,6 +5417,7 @@ mod app {
                     ttl: 3,
                     flags: 0,
                     seq_shift: 0,
+                    autottl: None,
                 }],
                 fakes: vec![r2k_core::plan::Fake {
                     payload_id: 1,

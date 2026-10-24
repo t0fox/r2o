@@ -4,7 +4,7 @@ use std::fmt;
 mod apply;
 pub use apply::{Actions, ApplyError, Cancellation, Emission, EmitKind, OriginalFate, PacketInput};
 
-pub const EXEC_VERSION: u16 = 12;
+pub const EXEC_VERSION: u16 = 13;
 pub const SCHEMA_MAX: u16 = 1;
 /// Максимальное число пакетов в результате обработки потока.
 pub const WIRE_BATCH_MAX: usize = 26;
@@ -46,6 +46,7 @@ const REC_OOB: u16 = 0x010d;
 const REC_UDPLEN: u16 = 0x010e;
 const REC_QSPLIT: u16 = 0x010f;
 const REC_QDENY: u16 = 0x0110;
+const REC_AUTOTTL: u16 = 0x0111;
 
 const ANCHOR_SNI_MIDDLE: u16 = 5;
 const PLACE_BEFORE: u8 = 0;
@@ -88,6 +89,14 @@ pub struct Poison {
     pub ttl: u8,
     pub flags: u8,
     pub seq_shift: i32,
+    pub autottl: Option<AutoTtl>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AutoTtl {
+    pub delta: i8,
+    pub min: u8,
+    pub max: u8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -181,6 +190,7 @@ impl Plan {
             seq_overlays: Vec::with_capacity(counts.seq_overlays),
             ..Self::default()
         };
+        let mut autottls = Vec::with_capacity(counts.autottls);
 
         let mut offset = HEADER_LEN;
         while let Some((kind, value)) = next_record(bytes, &mut offset)? {
@@ -214,7 +224,16 @@ impl Plan {
                     ttl: value[2],
                     flags: value[3],
                     seq_shift: read_u32(value, 4)? as i32,
+                    autottl: None,
                 }),
+                REC_AUTOTTL => autottls.push((
+                    read_u16(value, 0)?,
+                    AutoTtl {
+                        delta: value[2] as i8,
+                        min: value[3],
+                        max: value[4],
+                    },
+                )),
                 REC_SPLIT => plan.splits.push(Split {
                     anchor: read_u16(value, 0)?,
                     offset: read_u16(value, 2)? as i16,
@@ -245,6 +264,17 @@ impl Plan {
                 REC_SEGMENT => plan.segment_size = read_u32(value, 0)?,
                 REC_GUARD => plan.guards = value[0],
                 _ => return Err(PlanError::new("неизвестный тип записи")),
+            }
+        }
+
+        for (id, autottl) in autottls {
+            let poison = plan
+                .poisons
+                .iter_mut()
+                .find(|poison| poison.id == id)
+                .ok_or_else(|| PlanError::new("autottl ссылается на неизвестную порчу"))?;
+            if poison.autottl.replace(autottl).is_some() {
+                return Err(PlanError::new("повторная запись autottl"));
             }
         }
 
@@ -441,6 +471,13 @@ impl Plan {
                     "md5 требует minexec=12 и wire detect-tcp-v1 TCP",
                 ));
             }
+            if let Some(autottl) = poison.autottl
+                && (self.minexec < 13 || autottl.max != 0 && autottl.min > autottl.max)
+            {
+                return Err(PlanError::new(
+                    "autottl требует minexec=13 и допустимый диапазон",
+                ));
+            }
         }
 
         if self.ipfrag != 0
@@ -608,6 +645,7 @@ struct Counts {
     fakes: usize,
     seq_overlays: usize,
     oob: usize,
+    autottls: usize,
 }
 
 fn scan(bytes: &[u8], minexec: u16) -> Result<(Counts, usize), PlanError> {
@@ -632,6 +670,15 @@ fn scan(bytes: &[u8], minexec: u16) -> Result<(Counts, usize), PlanError> {
             }
             REC_QDENY if minexec < 11 || value.len() != 1 || value[0] != 1 => {
                 return Err(PlanError::new("quicdeny требует minexec=11 и форму 1"));
+            }
+            REC_AUTOTTL => {
+                if minexec < 13 || value.len() != 5 {
+                    return Err(PlanError::new("autottl требует minexec=13 и 5 байт"));
+                }
+                if value[4] != 0 && value[3] > value[4] {
+                    return Err(PlanError::new("autottl: min больше max"));
+                }
+                counts.autottls += 1;
             }
             REC_OOB => {
                 if minexec < 8 || value.len() != 3 || read_u16(value, 0)? > ANCHOR_SNI_MIDDLE {

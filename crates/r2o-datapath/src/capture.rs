@@ -67,6 +67,8 @@ pub struct TcpHello {
     pub shape: u8,
     pub r2o_wire_len: Option<usize>,
     pub client_hello: Option<Vec<u8>>,
+    /// Есть ли TCP timestamp option на сегменте ClientHello; runtime заменяет значение на опции SYN.
+    pub tcp_has_timestamp: Option<bool>,
 }
 
 impl TcpHello {
@@ -87,6 +89,10 @@ impl TcpHello {
             .filter(|length| (5..=4096).contains(length))
         {
             body.extend_from_slice(&(r2o_wire_len as u16).to_be_bytes());
+            if let Some(tcp_has_timestamp) = self.tcp_has_timestamp {
+                body.push(r2k_core::control::TCP_TIMESTAMP_METADATA_MARKER);
+                body.push(u8::from(tcp_has_timestamp));
+            }
         }
         body
     }
@@ -98,6 +104,7 @@ impl TcpHello {
             host: self.host.clone()?,
             shape: self.shape,
             client_hello: self.client_hello.clone()?,
+            tcp_has_timestamp: self.tcp_has_timestamp,
         };
         event.event_body()
     }
@@ -112,6 +119,7 @@ pub fn tcp_http_hello_from_bytes(key: TcpFlowKey, bytes: &[u8]) -> Option<TcpHel
         shape: r2k_core::control::SHAPE_HTTP,
         r2o_wire_len: None,
         client_hello: None,
+        tcp_has_timestamp: None,
     })
 }
 
@@ -155,6 +163,7 @@ pub fn tcp_hello_from_bytes(key: TcpFlowKey, bytes: &[u8]) -> Option<TcpHello> {
             .filter(|length| *length == bytes.len())
             .and_then(|length| bytes.get(..length))
             .map(<[u8]>::to_vec),
+        tcp_has_timestamp: None,
     })
 }
 
@@ -165,7 +174,33 @@ pub fn tcp_hello_from_packet(packet: &[u8]) -> Option<TcpHello> {
     }
     let tcp = view.tcp_segment(packet)?;
     let key = TcpFlowKey::from_packet(packet)?;
-    tcp_hello_from_bytes(key, packet.get(tcp.payload)?)
+    let mut hello = tcp_hello_from_bytes(key, packet.get(tcp.payload)?)?;
+    hello.tcp_has_timestamp = Some(tcp_timestamp_option_present(packet.get(tcp.options)?));
+    Some(hello)
+}
+
+/// Найти TCP timestamp option. Некорректный список опций считается отсутствующим.
+pub fn tcp_timestamp_option_present(options: &[u8]) -> bool {
+    let mut offset = 0;
+    while offset < options.len() {
+        match options[offset] {
+            0 => return false,
+            1 => offset += 1,
+            kind => {
+                let Some(length) = options.get(offset + 1).copied().map(usize::from) else {
+                    return false;
+                };
+                if length < 2 || offset.saturating_add(length) > options.len() {
+                    return false;
+                }
+                if kind == 8 && length == 10 {
+                    return true;
+                }
+                offset += length;
+            }
+        }
+    }
+    false
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

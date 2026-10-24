@@ -4819,6 +4819,7 @@ fn r2o_take_ready_quic_discovery(
 struct DiscoveryWorker {
     jobs: Arc<(std::sync::Mutex<R2oDiscoveryQueue>, std::sync::Condvar)>,
     client_hellos: Arc<std::sync::Mutex<HashMap<R2oDiscoveryTaskKey, Vec<u8>>>>,
+    client_tcp_timestamps: Arc<std::sync::Mutex<HashMap<R2oDiscoveryTaskKey, bool>>>,
     recent_client_shapes: R2oRecentClientShapeCache,
     resource_memory: Arc<std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>>,
     active_cancels: Arc<std::sync::Mutex<HashMap<R2oDiscoveryTaskKey, Arc<AtomicBool>>>>,
@@ -5574,6 +5575,8 @@ impl DiscoveryWorker {
     ) -> Self {
         let client_hellos = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let runner_client_hellos = Arc::clone(&client_hellos);
+        let client_tcp_timestamps = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let runner_client_tcp_timestamps = Arc::clone(&client_tcp_timestamps);
         let ech_challenges = Arc::new(std::sync::Mutex::new(
             HashMap::<String, std::time::Instant>::new(),
         ));
@@ -5604,6 +5607,11 @@ impl DiscoveryWorker {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(&r2o_discovery_task_key(&target))
                 .cloned();
+            let client_has_tcp_timestamps = runner_client_tcp_timestamps
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&r2o_discovery_task_key(&target))
+                .copied();
             let candidate_catalog = match Catalog::load(&catalog_path) {
                 Ok(catalog) => Some(catalog),
                 Err(error) => {
@@ -5733,6 +5741,7 @@ impl DiscoveryWorker {
                 &mut outcome,
                 &target,
                 client_hello.as_deref(),
+                client_has_tcp_timestamps.unwrap_or(true),
                 mark,
                 &commands,
                 &catalog_path,
@@ -5867,6 +5876,7 @@ impl DiscoveryWorker {
                         network_probe,
                         white_name,
                         runner_send_cap.load(Ordering::Relaxed),
+                        client_has_tcp_timestamps.unwrap_or(true),
                     ) {
                         Ok(Some(candidate)) => candidate,
                         Ok(None) => break,
@@ -5991,10 +6001,11 @@ impl DiscoveryWorker {
             }
             outcome
         });
-        Self::r2o_new_with_runner_and_client_hellos(
+        Self::r2o_new_with_client_state(
             measurement_gate,
             runner,
             client_hellos,
+            client_tcp_timestamps,
             resource_memory,
         )
     }
@@ -6014,10 +6025,27 @@ impl DiscoveryWorker {
         )
     }
 
+    #[cfg(test)]
     fn r2o_new_with_runner_and_client_hellos(
         measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
         runner: Arc<R2oDiscoveryRunner>,
         client_hellos: Arc<std::sync::Mutex<HashMap<R2oDiscoveryTaskKey, Vec<u8>>>>,
+        resource_memory: Arc<std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>>,
+    ) -> Self {
+        Self::r2o_new_with_client_state(
+            measurement_gate,
+            runner,
+            client_hellos,
+            Arc::new(std::sync::Mutex::new(HashMap::new())),
+            resource_memory,
+        )
+    }
+
+    fn r2o_new_with_client_state(
+        measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
+        runner: Arc<R2oDiscoveryRunner>,
+        client_hellos: Arc<std::sync::Mutex<HashMap<R2oDiscoveryTaskKey, Vec<u8>>>>,
+        client_tcp_timestamps: Arc<std::sync::Mutex<HashMap<R2oDiscoveryTaskKey, bool>>>,
         resource_memory: Arc<std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>>,
     ) -> Self {
         let jobs = Arc::new((
@@ -6180,6 +6208,7 @@ impl DiscoveryWorker {
         Self {
             jobs,
             client_hellos,
+            client_tcp_timestamps,
             recent_client_shapes: R2oRecentClientShapeCache::default(),
             resource_memory,
             active_cancels,
@@ -6427,10 +6456,47 @@ impl DiscoveryWorker {
         }
     }
 
+    fn queue_with_tcp_timestamp(
+        &mut self,
+        target: r2o_controller::discovery::DiscoveryTarget,
+        has_timestamp: Option<bool>,
+    ) -> bool {
+        let key = r2o_discovery_task_key(&target);
+        {
+            let mut client_tcp_timestamps = self
+                .client_tcp_timestamps
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(has_timestamp) = has_timestamp {
+                client_tcp_timestamps.insert(key.clone(), has_timestamp);
+            } else {
+                client_tcp_timestamps.remove(&key);
+            }
+        }
+        let queued = self.queue(target);
+        if !queued && !self.active.contains_key(&key) {
+            self.client_tcp_timestamps
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&key);
+        }
+        queued
+    }
+
+    #[cfg(test)]
     fn queue_client_snapshot(
         &mut self,
         target: r2o_controller::discovery::DiscoveryTarget,
         client_hello: Vec<u8>,
+    ) -> bool {
+        self.queue_client_snapshot_with_tcp_timestamp(target, client_hello, None)
+    }
+
+    fn queue_client_snapshot_with_tcp_timestamp(
+        &mut self,
+        target: r2o_controller::discovery::DiscoveryTarget,
+        client_hello: Vec<u8>,
+        tcp_has_timestamp: Option<bool>,
     ) -> bool {
         if self.r2o_discovery_challenge_active(&target, std::time::Instant::now()) {
             return false;
@@ -6442,6 +6508,17 @@ impl DiscoveryWorker {
             self.r2o_clear_ech_profile_failures(&target.host, target.family);
         }
         let task_key = r2o_discovery_task_key(&target);
+        {
+            let mut client_tcp_timestamps = self
+                .client_tcp_timestamps
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(tcp_has_timestamp) = tcp_has_timestamp {
+                client_tcp_timestamps.insert(task_key.clone(), tcp_has_timestamp);
+            } else {
+                client_tcp_timestamps.remove(&task_key);
+            }
+        }
         self.completed.remove(&task_key);
         if self.active.contains_key(&task_key) {
             self.catalog_refreshes
@@ -6466,7 +6543,7 @@ impl DiscoveryWorker {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(task_key, client_hello);
-        if !self.queue(target.clone()) {
+        if !self.queue_with_tcp_timestamp(target.clone(), tcp_has_timestamp) {
             self.client_hellos
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -6723,6 +6800,10 @@ impl DiscoveryWorker {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&client_hello_key);
+                self.client_tcp_timestamps
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&client_hello_key);
                 self.client_snapshot_targets.remove(&target);
                 continue;
             }
@@ -6781,6 +6862,12 @@ impl DiscoveryWorker {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&task_key);
+        if !self.pending_rechecks.contains_key(&task_key) {
+            self.client_tcp_timestamps
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&task_key);
+        }
         if self.active.get(&task_key) == Some(&outcome.target) {
             self.active.remove(&task_key);
         }
@@ -7039,16 +7126,27 @@ fn r2o_ech_rx_ladder_candidate(
     network_probe: bool,
     white_name: &str,
     send_cap: usize,
+    client_has_tcp_timestamps: bool,
 ) -> Result<Option<(String, Option<String>)>, String> {
     if network_probe {
         let Some(name) = r2o_controller::r2o_rx_volume::r2o_rx_volume_name(index) else {
             return Ok(None);
         };
-        let plan = r2o_controller::r2o_rx_volume::r2o_rx_volume_plan(0, name, send_cap)?;
+        let plan = r2o_controller::r2o_rx_volume::r2o_rx_volume_plan_for_client(
+            0,
+            name,
+            send_cap,
+            client_has_tcp_timestamps,
+        )?;
         Ok(Some((plan, Some(name.to_owned()))))
     } else if index < r2o_controller::r2o_rx_volume::r2o_rx_volume_plan_count() {
-        r2o_controller::r2o_rx_volume::r2o_rx_volume_plan(index, white_name, send_cap)
-            .map(|plan| Some((plan, None)))
+        r2o_controller::r2o_rx_volume::r2o_rx_volume_plan_for_client(
+            index,
+            white_name,
+            send_cap,
+            client_has_tcp_timestamps,
+        )
+        .map(|plan| Some((plan, None)))
     } else {
         Ok(None)
     }
@@ -7059,6 +7157,7 @@ fn r2o_discovery_volume_recovery(
     outcome: &mut DiscoveryOutcome,
     target: &r2o_controller::discovery::DiscoveryTarget,
     client_hello: Option<&[u8]>,
+    client_has_tcp_timestamps: bool,
     mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
     catalog_path: &Path,
@@ -7380,6 +7479,7 @@ fn r2o_discovery_volume_recovery(
             network_probe,
             white_name,
             send_cap.load(Ordering::Relaxed),
+            client_has_tcp_timestamps,
         ) {
             Ok(Some(candidate)) => candidate,
             Ok(None) => break,
@@ -9991,9 +10091,11 @@ impl ControlClient {
                                 r2o_controller::discovery::has_usable_profile_binding(
                                     catalog, &target,
                                 );
-                            if worker
-                                .queue_client_snapshot(target.clone(), shape.client_hello.clone())
-                            {
+                            if worker.queue_client_snapshot_with_tcp_timestamp(
+                                target.clone(),
+                                shape.client_hello.clone(),
+                                shape.tcp_has_timestamp,
+                            ) {
                                 if profile_only {
                                     println!(
                                         "привязка {} повторно измеряется по полному ClientHello клиента",
@@ -10133,16 +10235,19 @@ impl ControlClient {
                             "область {} уже применяет план {} к {} ({shape_name}); новый поиск не запускаю",
                             group.suffix, group.plan_id, target.host
                         );
-                    } else if worker.queue(target.clone()) {
-                        println!(
-                            "поставлен в очередь классификации: {} {}",
-                            target.endpoint, target.host
-                        );
                     } else {
-                        println!(
-                            "классификация уже в очереди или очередь заполнена: {}",
-                            target.host
-                        );
+                        if worker.queue_with_tcp_timestamp(target.clone(), hello.tcp_has_timestamp)
+                        {
+                            println!(
+                                "поставлен в очередь классификации: {} {}",
+                                target.endpoint, target.host
+                            );
+                        } else {
+                            println!(
+                                "классификация уже в очереди или очередь заполнена: {}",
+                                target.host
+                            );
+                        }
                     }
                 }
                 std::io::stdout().flush()?;
@@ -13352,6 +13457,9 @@ mod tests {
             client_hellos: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            client_tcp_timestamps: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             recent_client_shapes: super::R2oRecentClientShapeCache::default(),
             resource_memory: std::sync::Arc::new(std::sync::Mutex::new(
                 r2o_controller::r2o_resource::R2oResourceMemory::default(),
@@ -13539,6 +13647,7 @@ mod tests {
             shape: Some(SHAPE_MODERN),
             r2o_wire_len: Some(812),
             quic_snapshot: None,
+            tcp_has_timestamp: None,
         };
         let mut cache = super::R2oTcpHelloCache::default();
         cache.note(hello, now);
@@ -13591,6 +13700,7 @@ mod tests {
                 shape: Some(SHAPE_MODERN),
                 r2o_wire_len: None,
                 quic_snapshot: None,
+                tcp_has_timestamp: None,
             }
         };
         let mut cache = super::R2oRecentTcpNameCache::default();
@@ -14271,7 +14381,7 @@ mod tests {
         );
 
         let (candidate, discovered_name) =
-            super::r2o_ech_rx_ladder_candidate(0, true, "hcaptcha.com", 1492)
+            super::r2o_ech_rx_ladder_candidate(0, true, "hcaptcha.com", 1492, true)
                 .unwrap()
                 .unwrap();
         assert_eq!(discovered_name.as_deref(), Some("9gag.com"));
@@ -14280,13 +14390,13 @@ mod tests {
             r2o_controller::r2o_rx_volume::r2o_rx_volume_plan(0, "9gag.com", 1492).unwrap()
         );
         assert!(
-            super::r2o_ech_rx_ladder_candidate(266, true, "hcaptcha.com", 1492)
+            super::r2o_ech_rx_ladder_candidate(266, true, "hcaptcha.com", 1492, true)
                 .unwrap()
                 .is_none()
         );
 
         let (candidate, discovered_name) =
-            super::r2o_ech_rx_ladder_candidate(0, false, "media.example", 1492)
+            super::r2o_ech_rx_ladder_candidate(0, false, "media.example", 1492, true)
                 .unwrap()
                 .unwrap();
         assert_eq!(discovered_name, None);
@@ -14295,10 +14405,28 @@ mod tests {
             r2o_controller::r2o_rx_volume::r2o_rx_volume_plan(0, "media.example", 1492).unwrap()
         );
         assert!(
-            super::r2o_ech_rx_ladder_candidate(5, false, "media.example", 1492)
+            super::r2o_ech_rx_ladder_candidate(5, false, "media.example", 1492, true)
                 .unwrap()
                 .is_none()
         );
+
+        let (candidate, _) =
+            super::r2o_ech_rx_ladder_candidate(0, false, "media.example", 1492, false)
+                .unwrap()
+                .unwrap();
+        assert!(candidate.contains("r2o-plan 1 13\n"));
+        assert!(candidate.contains("poison 1 autottl=1,2-12\n"));
+        let plan = r2o_controller::plan_text::compile_text(&candidate).unwrap();
+        let plan = r2k_core::plan::Plan::parse(&plan).unwrap();
+        assert_eq!(
+            plan.poisons[0].autottl,
+            Some(r2k_core::plan::AutoTtl {
+                delta: 1,
+                min: 2,
+                max: 12,
+            })
+        );
+        r2o_datapath::engine::validate_runtime_plan(&plan).unwrap();
     }
 
     #[cfg(unix)]
@@ -16276,6 +16404,7 @@ mod tests {
             shape: Some(r2k_core::control::SHAPE_QUIC),
             r2o_wire_len: None,
             quic_snapshot: Some(snapshot),
+            tcp_has_timestamp: None,
         };
         let wait_for_run = |run| {
             let (state_lock, changed) = &*runner_state;
@@ -17587,6 +17716,60 @@ mod tests {
 
         assert!(!worker.queue(target("overflow.example".into())));
         assert_eq!(worker.active.len(), 64);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tcp_timestamp_metadata_is_scoped_to_admitted_discovery_tasks() {
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        let active = DiscoveryTarget {
+            host: "timestamp.example".into(),
+            endpoint: "198.51.100.1:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let active_key = super::r2o_discovery_task_key(&active);
+        assert!(worker.queue_with_tcp_timestamp(active.clone(), Some(false)));
+        assert_eq!(
+            worker
+                .client_tcp_timestamps
+                .lock()
+                .unwrap()
+                .get(&active_key),
+            Some(&false)
+        );
+        assert!(worker.queue_with_tcp_timestamp(active.clone(), None));
+        assert!(
+            !worker
+                .client_tcp_timestamps
+                .lock()
+                .unwrap()
+                .contains_key(&active_key)
+        );
+
+        for index in 0..super::R2O_DISCOVERY_TASK_CAPACITY - 1 {
+            assert!(worker.queue(DiscoveryTarget {
+                host: format!("queued-{index}.example"),
+                endpoint: "198.51.100.2:443".into(),
+                family: 4,
+                shape: SHAPE_MODERN,
+            }));
+        }
+        let overflow = DiscoveryTarget {
+            host: "overflow.example".into(),
+            endpoint: "198.51.100.3:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let overflow_key = super::r2o_discovery_task_key(&overflow);
+        assert!(!worker.queue_with_tcp_timestamp(overflow, Some(false)));
+        assert!(
+            !worker
+                .client_tcp_timestamps
+                .lock()
+                .unwrap()
+                .contains_key(&overflow_key)
+        );
     }
 
     #[cfg(unix)]
@@ -20423,6 +20606,7 @@ mod tests {
                 Condvar::new(),
             )),
             client_hellos: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            client_tcp_timestamps: Arc::new(Mutex::new(std::collections::HashMap::new())),
             recent_client_shapes: super::R2oRecentClientShapeCache::default(),
             resource_memory: Arc::new(Mutex::new(
                 r2o_controller::r2o_resource::R2oResourceMemory::default(),

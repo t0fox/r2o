@@ -103,6 +103,7 @@ struct TcpSession {
     r2o_http_requests: r2k_core::httpup::R2oHttpRequestSequence,
     metrics: R2oTcpFlowMetrics,
     reverse_ttl: Option<u8>,
+    client_offered_tcp_timestamps: Option<bool>,
     guards: u8,
     execution_id: u64,
     r2o_execution_pending: bool,
@@ -161,6 +162,7 @@ impl TcpSession {
             r2o_http_requests: r2k_core::httpup::R2oHttpRequestSequence::default(),
             metrics: R2oTcpFlowMetrics::default(),
             reverse_ttl: None,
+            client_offered_tcp_timestamps: None,
             guards: 0,
             execution_id: 0,
             r2o_execution_pending: false,
@@ -400,6 +402,15 @@ impl TcpSessions {
         self.flows.iter().find_map(|(flow_key, session)| {
             (flow_key.wire_key() == *key && !session.controller_probe).then_some(session.metrics)
         })
+    }
+
+    /// Вернуть признак TCP timestamp option из начального SYN клиентской стороны.
+    pub fn r2o_client_offers_tcp_timestamps_for_packet(&self, packet: &[u8]) -> Option<bool> {
+        let key = TcpFlowKey::from_packet(packet)?;
+        self.flows
+            .get(&key)
+            .filter(|session| !session.controller_probe)
+            .and_then(|session| session.client_offered_tcp_timestamps)
     }
 
     /// Обновить предварительную форму ClientHello после полной сборки захвата.
@@ -885,6 +896,10 @@ impl TcpSessions {
                 .map_or_else(R2oTcpFlowMetrics::default, |session| session.metrics);
             let mut session = TcpSession::new(source, true, Some(now), now);
             session.controller_probe = controller_probe;
+            session.client_offered_tcp_timestamps =
+                Some(crate::capture::tcp_timestamp_option_present(
+                    packet.get(tcp.options.clone()).unwrap_or_default(),
+                ));
             if destination.port == 80 {
                 session.r2o_http_requests =
                     r2k_core::httpup::R2oHttpRequestSequence::new(tcp.sequence.wrapping_add(1));
@@ -1335,7 +1350,7 @@ fn decide_with_session_mode(
         return if is_tcp && plan.guards & GUARD_RST_ALIEN != 0 {
             PacketDecision::Accept
         } else {
-            decide_packet_with_segment_cap(plan, packet, tcp_segment_cap)
+            decide_packet_with_segment_cap(plan, packet, tcp_segment_cap, 0)
         };
     };
     let key = tracked.key;
@@ -1452,7 +1467,14 @@ fn decide_with_session_mode(
     let decision = if !r2o_http_plan_allowed {
         PacketDecision::Accept
     } else {
-        decide_packet_with_segment_cap(plan, packet, tcp_segment_cap)
+        decide_packet_with_segment_cap(
+            plan,
+            packet,
+            tcp_segment_cap,
+            execution_state
+                .and_then(|session| session.reverse_ttl)
+                .unwrap_or(0),
+        )
     };
     let applied = matches!(
         &decision,
@@ -1485,7 +1507,7 @@ fn guard_plan_applies_without_emissions(
     let Some(view) = PacketView::parse(packet).filter(|view| view.protocol == 6) else {
         return false;
     };
-    let Some(input) = tcp_plan_input(plan, packet, &view, tcp_segment_cap) else {
+    let Some(input) = tcp_plan_input(plan, packet, &view, tcp_segment_cap, 0) else {
         return false;
     };
     plan.apply(&input)
@@ -1497,6 +1519,7 @@ fn tcp_plan_input<'a>(
     packet: &'a [u8],
     view: &PacketView,
     tcp_segment_cap: usize,
+    reference_ttl: u8,
 ) -> Option<PacketInput<'a>> {
     if plan.transport != 6 || !matches!(plan.proto, 1 | PROTO_HTTP) {
         return None;
@@ -1524,6 +1547,7 @@ fn tcp_plan_input<'a>(
         input.sni_len = range.len();
     }
     input.segment_cap = tcp_segment_cap;
+    input.reference_ttl = reference_ttl;
     input.is_http = is_http;
     Some(input)
 }
@@ -1555,19 +1579,20 @@ pub fn decide(plan: &Plan, packet: &[u8]) -> PacketDecision {
     if plan.guards & GUARD_RST_ALIEN != 0 {
         return PacketDecision::Accept;
     }
-    decide_packet_with_segment_cap(plan, packet, 0)
+    decide_packet_with_segment_cap(plan, packet, 0, 0)
 }
 
 fn decide_packet_with_segment_cap(
     plan: &Plan,
     packet: &[u8],
     tcp_segment_cap: usize,
+    reference_ttl: u8,
 ) -> PacketDecision {
     let Some(view) = PacketView::parse(packet) else {
         return PacketDecision::Accept;
     };
     if view.protocol == 6 {
-        return decide_tcp(plan, packet, &view, tcp_segment_cap);
+        return decide_tcp(plan, packet, &view, tcp_segment_cap, reference_ttl);
     }
     if view.protocol != 17 {
         return PacketDecision::Accept;
@@ -1718,8 +1743,9 @@ fn decide_tcp(
     packet: &[u8],
     view: &PacketView,
     tcp_segment_cap: usize,
+    reference_ttl: u8,
 ) -> PacketDecision {
-    let Some(input) = tcp_plan_input(plan, packet, view, tcp_segment_cap) else {
+    let Some(input) = tcp_plan_input(plan, packet, view, tcp_segment_cap, reference_ttl) else {
         return PacketDecision::Accept;
     };
 
@@ -1968,6 +1994,91 @@ mod tests {
 
     const V1_INITIAL: &[u8] = include_bytes!("../../r2k-core/tests/fixtures/quic_v1_initial.bin");
     const V2_INITIAL: &[u8] = include_bytes!("../../r2k-core/tests/fixtures/quic_v2_initial.bin");
+
+    #[test]
+    fn autottl_uses_the_observed_reverse_tcp_ttl_without_client_timestamps() {
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let plan = Plan {
+            minexec: 13,
+            transport: 6,
+            proto: 1,
+            payloads: vec![r2k_core::plan::Payload {
+                id: 1,
+                bytes: b"decoy".to_vec(),
+            }],
+            poisons: vec![r2k_core::plan::Poison {
+                id: 1,
+                ttl: 0,
+                flags: 0,
+                seq_shift: 0,
+                autottl: Some(r2k_core::plan::AutoTtl {
+                    delta: 1,
+                    min: 2,
+                    max: 12,
+                }),
+            }],
+            fakes: vec![r2k_core::plan::Fake {
+                payload_id: 1,
+                poison_id: 1,
+                repeats: 1,
+                placement: 0,
+                gap_us: 0,
+                tls_mod: 0,
+            }],
+            ..Plan::default()
+        };
+        let mut sessions = TcpSessions::default();
+        let syn = ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]);
+        let syn_ack = ipv4_tcp_packet(server, client, 0x12, 57, 900, &[]);
+        let hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello());
+        assert_eq!(
+            decide_with_session(&mut sessions, &plan, &syn),
+            PacketDecision::Accept
+        );
+        assert_eq!(
+            sessions.r2o_client_offers_tcp_timestamps_for_packet(&hello),
+            Some(false),
+            "возможность клиента берётся из SYN, а не из ClientHello сегмента",
+        );
+        assert_eq!(
+            decide_with_session(&mut sessions, &Plan::default(), &syn_ack),
+            PacketDecision::Accept
+        );
+
+        let PacketDecision::Transmit { packets, .. } =
+            decide_with_session(&mut sessions, &plan, &hello)
+        else {
+            panic!("autottl plan did not transmit for the client without TCP timestamps");
+        };
+        assert_eq!(PacketView::parse(&packets[0].packet).unwrap().hop_limit, 8);
+
+        let mut no_reply_sessions = TcpSessions::default();
+        decide_with_session(&mut no_reply_sessions, &Plan::default(), &syn);
+        let PacketDecision::Transmit { packets, .. } =
+            decide_with_session(&mut no_reply_sessions, &plan, &hello)
+        else {
+            panic!("autottl plan without a reverse response did not transmit");
+        };
+        assert_eq!(PacketView::parse(&packets[0].packet).unwrap().hop_limit, 64);
+
+        let timestamp_client = ([192, 0, 2, 11], 41001);
+        let mut timestamp_syn = ipv4_tcp_packet(timestamp_client, server, 0x02, 64, 800, &[]);
+        timestamp_syn.extend_from_slice(&[1, 1, 8, 10, 0, 0, 0, 1, 0, 0, 0, 2]);
+        let timestamp_syn_len = timestamp_syn.len() as u16;
+        timestamp_syn[2..4].copy_from_slice(&timestamp_syn_len.to_be_bytes());
+        timestamp_syn[32] = 8 << 4;
+        let timestamp_probe = ipv4_tcp_packet(timestamp_client, server, 0x18, 64, 801, &[]);
+        let mut timestamp_sessions = TcpSessions::default();
+        assert_eq!(
+            decide_with_session(&mut timestamp_sessions, &Plan::default(), &timestamp_syn),
+            PacketDecision::Accept
+        );
+        assert_eq!(
+            timestamp_sessions.r2o_client_offers_tcp_timestamps_for_packet(&timestamp_probe),
+            Some(true),
+        );
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

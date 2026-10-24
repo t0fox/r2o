@@ -84,6 +84,7 @@ impl DiscoveryTarget {
             shape: Some(event.shape),
             r2o_wire_len: Some(event.client_hello.len()),
             quic_snapshot: None,
+            tcp_has_timestamp: event.tcp_has_timestamp,
         })
     }
 

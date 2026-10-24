@@ -19,6 +19,16 @@ pub fn r2o_rx_volume_plan_count() -> usize {
 
 /// Построить один TCP-template план для приёма на объёмном RX-обрыве.
 pub fn r2o_rx_volume_plan(variant: usize, name: &str, send_cap: usize) -> Result<String, String> {
+    r2o_rx_volume_plan_for_client(variant, name, send_cap, true)
+}
+
+/// Построить RX-план с учётом timestamp option на захваченном клиентском потоке.
+pub fn r2o_rx_volume_plan_for_client(
+    variant: usize,
+    name: &str,
+    send_cap: usize,
+    client_has_tcp_timestamps: bool,
+) -> Result<String, String> {
     let split = *R2O_RX_VOLUME_SPLITS
         .get(variant)
         .ok_or_else(|| "вариант RX-плана вне диапазона".to_owned())?;
@@ -38,8 +48,13 @@ pub fn r2o_rx_volume_plan(variant: usize, name: &str, send_cap: usize) -> Result
         use std::fmt::Write as _;
         write!(payload, "{byte:02x}").expect("запись в строку не завершается ошибкой");
     }
+    let (minexec, poison) = if client_has_tcp_timestamps {
+        (8, "tcpts")
+    } else {
+        (13, "autottl=1,2-12")
+    };
     Ok(format!(
-        "r2o-plan 1 8\nid 00000000000000000000000000000000\nproto tcp tls\nwire tcp-template-v1\ninput tls-sni\nsegment {R2O_RX_VOLUME_SEGMENT}\npayload 1 {payload}\npoison 1 tcpts\nfake payload=1 poison=1 repeats=8 gap_us=0 place=before tlsmod=rnd,dupsid\nsplit payload_start +{split}\norder forward\n"
+        "r2o-plan 1 {minexec}\nid 00000000000000000000000000000000\nproto tcp tls\nwire tcp-template-v1\ninput tls-sni\nsegment {R2O_RX_VOLUME_SEGMENT}\npayload 1 {payload}\npoison 1 {poison}\nfake payload=1 poison=1 repeats=8 gap_us=0 place=before tlsmod=rnd,dupsid\nsplit payload_start +{split}\norder forward\n"
     ))
 }
 
@@ -62,7 +77,7 @@ mod tests {
 
     use super::{
         R2O_RX_VOLUME_NAMES, r2o_rx_volume_candidate, r2o_rx_volume_name, r2o_rx_volume_name_count,
-        r2o_rx_volume_plan,
+        r2o_rx_volume_plan, r2o_rx_volume_plan_for_client,
     };
 
     #[test]
@@ -89,6 +104,29 @@ mod tests {
             assert_eq!(plan.fakes[0].repeats, 8);
             assert_eq!(plan.fakes[0].tls_mod, 3);
             assert_eq!(plan.splits[0].offset, i16::try_from(split).unwrap());
+            r2o_datapath::engine::validate_runtime_plan(&plan).unwrap();
+        }
+    }
+
+    #[test]
+    fn клиенты_без_timestamp_получают_путь_autottl_со_всеми_пятью_разрезами() {
+        for (variant, split) in [2, 1, 3, 4, 5].into_iter().enumerate() {
+            let text = r2o_rx_volume_plan_for_client(variant, "hcaptcha.com", 1492, false).unwrap();
+            assert!(text.starts_with("r2o-plan 1 13\n"));
+            assert!(text.contains("poison 1 autottl=1,2-12\n"));
+            assert!(text.contains("repeats=8 gap_us=0 place=before tlsmod=rnd,dupsid\n"));
+            assert!(text.contains(&format!("split payload_start +{split}\norder forward\n")));
+            let plan = Plan::parse(&crate::plan_text::compile_text(&text).unwrap()).unwrap();
+            assert_eq!(plan.minexec, 13);
+            assert_eq!(
+                plan.poisons[0].autottl,
+                Some(r2k_core::plan::AutoTtl {
+                    delta: 1,
+                    min: 2,
+                    max: 12,
+                })
+            );
+            assert_eq!(plan.poisons[0].flags, 0);
             r2o_datapath::engine::validate_runtime_plan(&plan).unwrap();
         }
     }
