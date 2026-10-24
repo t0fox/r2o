@@ -11,8 +11,8 @@ use r2k_core::control::{
     EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_REPEAT, EVENT_R2O_TCP_RST_AFTER_APP,
     EVENT_R2O_TCP_RST_CUT, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF,
     EVENT_R2O_VOICE_RTP_PROOF, EVENT_R2O_VOICE_STUN_PROOF, EVENT_R2O_VOICE_SUSPECT, EVENT_REFUSED,
-    Frame, HelloEvent, PROTOCOL_VERSION, RELEASE_ID, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_LEGACY,
-    SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, VOICE_ADDR_PROBE_LEASE_MAX_MS, decode_ack,
+    Frame, HelloEvent, PROTOCOL_VERSION, RELEASE_ID, SHAPE_ECH_TCP, SHAPE_GRANDFATHER, SHAPE_HTTP,
+    SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, VOICE_ADDR_PROBE_LEASE_MAX_MS, decode_ack,
     decode_applied, decode_client_shape, decode_greeting, decode_hello, decode_http_portal,
     decode_http_response, decode_r2o_quic_stall, decode_r2o_quic_suspect,
     decode_r2o_tcp_clean_handshake, decode_r2o_tcp_early_rst, decode_r2o_tcp_exchange,
@@ -30,6 +30,8 @@ use r2o_controller::ask::{
     hello_shape, hello_sni, parse_ask_options, question_plan, read_hex_file,
     record_question_passed, validate_hello,
 };
+#[cfg(unix)]
+use r2o_controller::catalog::Binding;
 use r2o_controller::catalog::{BoxRecord, Catalog, DomainObservation, GroupKey};
 use r2o_controller::classify::{
     Accept, ClassifyOptions, Trigger, Verdict, run as classify_run,
@@ -1152,7 +1154,9 @@ fn normalize_plan_target(target: &str, shape: u8) -> Result<String, String> {
 fn shape_matches_plan(shape: u8, plan: &Plan) -> bool {
     match shape {
         SHAPE_HTTP => plan.transport == 6 && plan.proto == PROTO_HTTP,
-        SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP => plan.transport == 6 && plan.proto == 1,
+        SHAPE_MODERN | SHAPE_LEGACY | SHAPE_GRANDFATHER | SHAPE_ECH_TCP => {
+            plan.transport == 6 && plan.proto == 1
+        }
         SHAPE_QUIC => plan.r2k_is_quic_address_plan(),
         SHAPE_VOICE => plan.transport == 17 && plan.proto == PROTO_VOICE,
         _ => false,
@@ -1161,7 +1165,9 @@ fn shape_matches_plan(shape: u8, plan: &Plan) -> bool {
 
 fn binding_shape_transport(shape: u8, transport: u8) -> bool {
     match shape {
-        SHAPE_HTTP | SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP => transport == 6,
+        SHAPE_HTTP | SHAPE_MODERN | SHAPE_LEGACY | SHAPE_GRANDFATHER | SHAPE_ECH_TCP => {
+            transport == 6
+        }
         SHAPE_QUIC | SHAPE_VOICE => transport == 17,
         _ => false,
     }
@@ -1275,8 +1281,12 @@ fn set_name_bytes(
 #[cfg(unix)]
 fn apply_catalog(socket_path: PathBuf, catalog_path: PathBuf) -> Result<(), Box<dyn Error>> {
     let catalog = Catalog::load(&catalog_path)?;
-    let compiled = catalog_commands(&catalog)?;
     let mut client = ControlClient::connect(socket_path)?;
+    let (_catalog, compiled) = catalog_commands_for_runtime(
+        &catalog_path,
+        &catalog,
+        client.send_cap.load(Ordering::Relaxed),
+    )?;
     let installed = install_catalog_best_effort(&mut client, &compiled)?;
     report_catalog_refusals(&installed);
     println!(
@@ -1298,8 +1308,12 @@ fn serve_catalog(
     use std::io::Write;
 
     let catalog = Catalog::load(&catalog_path)?;
-    let compiled = catalog_commands(&catalog)?;
     let mut client = ControlClient::connect(socket_path)?;
+    let (catalog, compiled) = catalog_commands_for_runtime(
+        &catalog_path,
+        &catalog,
+        client.send_cap.load(Ordering::Relaxed),
+    )?;
     let installed = install_catalog_best_effort(&mut client, &compiled)?;
     report_catalog_refusals(&installed);
     println!(
@@ -1745,6 +1759,7 @@ fn clear_catalog(path: PathBuf) -> Result<(), Box<dyn Error>> {
 #[cfg(unix)]
 struct CompiledCatalog {
     commands: Vec<(String, Vec<u8>)>,
+    cleanup_commands: Vec<(String, Vec<u8>)>,
     group_commands: Vec<(usize, r2o_controller::live::LiveGroupKey)>,
     skipped: usize,
     tcp_stall_budgets: Vec<u16>,
@@ -1825,96 +1840,196 @@ const DOMAIN_DIRECT_CLEAR: u8 = 2;
 const DOMAIN_PLAN_FAILED: u8 = 4;
 
 #[cfg(unix)]
+const R2O_D2K_CAT_BUDGET_PASSED: u8 = 1;
+#[cfg(unix)]
+const R2O_D2K_CAT_BUDGET_CUT: u8 = 3;
+#[cfg(unix)]
+const R2O_D2K_VERBY_CLIENT: u8 = 2;
+#[cfg(unix)]
+const R2O_D2K_VERBY_PROBE: u8 = 1;
+#[cfg(unix)]
+const R2O_D2K_VERBY_STUN: u8 = 3;
+
+#[cfg(unix)]
+fn r2o_catalog_budget_rank(budget: u8) -> u8 {
+    // Match core/sched.c::budget_rank: proven pass, unchecked, then cut.
+    match budget {
+        R2O_D2K_CAT_BUDGET_PASSED => 2,
+        R2O_D2K_CAT_BUDGET_CUT => 0,
+        _ => 1,
+    }
+}
+
+#[cfg(unix)]
+fn r2o_catalog_binding_beats(left: &Binding, right: &Binding) -> bool {
+    let left_budget = r2o_catalog_budget_rank(left.budget);
+    let right_budget = r2o_catalog_budget_rank(right.budget);
+    left_budget > right_budget || left_budget == right_budget && left.confirmed > right.confirmed
+}
+
+#[cfg(unix)]
+fn r2o_catalog_binding_is_weak(binding: &Binding) -> bool {
+    binding.level > 0 && binding.level < 3
+}
+
+#[cfg(unix)]
+fn r2o_catalog_binding_transport(binding: &Binding) -> u8 {
+    if binding.transport == 0 {
+        6
+    } else {
+        binding.transport
+    }
+}
+
+#[cfg(unix)]
+fn r2o_catalog_binding_family(binding: &Binding) -> u8 {
+    if binding.family == 0 {
+        4
+    } else {
+        binding.family
+    }
+}
+
+#[cfg(unix)]
+fn r2o_catalog_addr_binding_shape(binding: &Binding) -> u8 {
+    match binding.shape {
+        SHAPE_QUIC | SHAPE_VOICE if binding.transport == 17 => binding.shape,
+        SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP if matches!(binding.transport, 0 | 6) => {
+            binding.shape
+        }
+        0 if binding.transport == 17 && binding.verified_by == R2O_D2K_VERBY_STUN => SHAPE_VOICE,
+        0 if binding.transport == 17 && binding.verified_by == R2O_D2K_VERBY_PROBE => SHAPE_QUIC,
+        _ => 0,
+    }
+}
+
+#[cfg(unix)]
+fn r2o_newer_name_binding(catalog: &Catalog, binding: &Binding) -> bool {
+    if binding.kind != "name" {
+        return false;
+    }
+    catalog.boxes.iter().any(|box_record| {
+        box_record.bindings.iter().any(|other| {
+            !std::ptr::eq(other, binding)
+                && other.enabled
+                && other
+                    .recheck_since
+                    .is_none_or(|recheck_since| recheck_since == 0)
+                && !r2o_catalog_binding_is_weak(other)
+                && r2o_catalog_binding_beats(other, binding)
+                && other.kind == "name"
+                && other.target == binding.target
+                && r2o_catalog_binding_transport(other) == r2o_catalog_binding_transport(binding)
+                && r2o_catalog_binding_family(other) == r2o_catalog_binding_family(binding)
+                && other.shape == binding.shape
+                && !(other.transport == 17 && other.verified_by == R2O_D2K_VERBY_CLIENT)
+                && box_record
+                    .plans
+                    .iter()
+                    .find(|plan| plan.id == other.plan_id)
+                    .is_some_and(|plan| plan.enabled)
+        })
+    })
+}
+
+#[cfg(unix)]
+#[cfg(test)]
 fn catalog_commands(catalog: &Catalog) -> Result<CompiledCatalog, Box<dyn Error>> {
+    let mut catalog = catalog.clone();
+    catalog_commands_with_send_cap(&mut catalog, 0, 0)
+}
+
+#[cfg(unix)]
+fn catalog_commands_for_runtime(
+    path: &std::path::Path,
+    fallback: &Catalog,
+    send_cap: usize,
+) -> Result<(Catalog, CompiledCatalog), Box<dyn Error>> {
+    let (_lock, mut catalog) = locked_catalog(path, fallback)?;
+    let before = catalog.clone();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs() as i64;
+    let compiled = catalog_commands_with_send_cap(&mut catalog, send_cap, now)?;
+    if catalog != before {
+        catalog.save_atomic(path, now.max(1))?;
+    }
+    Ok((catalog, compiled))
+}
+
+#[cfg(unix)]
+fn catalog_commands_with_send_cap(
+    catalog: &mut Catalog,
+    send_cap: usize,
+    now: i64,
+) -> Result<CompiledCatalog, Box<dyn Error>> {
     let mut commands = Vec::new();
+    let mut cleanup_commands = Vec::new();
     let mut group_commands = Vec::new();
     let mut skipped = 0_usize;
-    for box_record in &catalog.boxes {
-        for binding in &box_record.bindings {
-            if !binding.enabled || binding.recheck_since.is_some() {
+    let mut selection_catalog = catalog.clone();
+    for (box_index, box_record) in catalog.boxes.iter_mut().enumerate() {
+        for (binding_index, binding) in box_record.bindings.iter_mut().enumerate() {
+            let selection_binding = &selection_catalog.boxes[box_index].bindings[binding_index];
+            if !binding.enabled
+                || binding
+                    .recheck_since
+                    .is_some_and(|recheck_since| recheck_since != 0)
+            {
                 continue;
             }
-            if binding.kind == "addr"
-                && binding.transport == 17
-                && binding.shape == SHAPE_QUIC
-                && binding.verified_by == 6
-                && binding.input == 1
+            if r2o_catalog_binding_is_weak(binding)
+                || binding.transport == 17 && binding.verified_by == R2O_D2K_VERBY_CLIENT
             {
-                let address = binding.target.parse::<std::net::IpAddr>().map_err(|_| {
-                    format!("QUIC-привязка содержит неверный IP: {}", binding.target)
-                })?;
-                let family = if address.is_ipv4() { 4 } else { 6 };
-                if binding.family != family {
-                    return Err(format!(
-                        "QUIC-привязка {} не совпадает с семейством адреса",
-                        binding.target
-                    )
-                    .into());
+                skipped += 1;
+                continue;
+            }
+            if r2o_newer_name_binding(&selection_catalog, selection_binding) {
+                continue;
+            }
+            if binding.kind == "addr" {
+                let shape = r2o_catalog_addr_binding_shape(binding);
+                let family = r2o_catalog_binding_family(binding);
+                if shape == 0 || !matches!(family, 4 | 6) {
+                    skipped += 1;
+                    continue;
                 }
-                let saved_plan = box_record
+                let Ok(address) = binding.target.parse::<std::net::IpAddr>() else {
+                    skipped += 1;
+                    continue;
+                };
+                if address.is_ipv4() != (family == 4) {
+                    skipped += 1;
+                    continue;
+                }
+                let Some(saved_plan) = box_record
                     .plans
                     .iter()
                     .find(|plan| plan.id == binding.plan_id && plan.enabled)
-                    .ok_or_else(|| {
-                        format!(
-                            "QUIC-привязка {} ссылается на отсутствующий план {}",
-                            binding.target, binding.plan_id
-                        )
-                    })?;
-                let bytes = compile_text(&saved_plan.text)
-                    .map_err(|error| format!("QUIC-план {}: {error}", saved_plan.id))?;
-                let plan = Plan::parse(&bytes)?;
-                if saved_plan.proto != "quic" || !plan.r2k_is_quic_address_plan() {
-                    return Err(format!(
-                        "адресная QUIC-привязка {} не содержит проверенный план подбора",
-                        binding.target
-                    )
-                    .into());
+                else {
+                    skipped += 1;
+                    continue;
+                };
+                let Some((bytes, plan)) =
+                    r2o_catalog_compile_plan(&saved_plan.text, &saved_plan.id)
+                else {
+                    skipped += 1;
+                    continue;
+                };
+                if r2o_catalog_plan_exceeds_send_cap(&plan, send_cap) {
+                    r2o_catalog_mark_unfit(
+                        binding,
+                        &mut selection_catalog.boxes[box_index].bindings[binding_index],
+                        &mut box_record.updated,
+                        now,
+                    );
+                    skipped += 1;
+                    continue;
                 }
-                r2o_datapath::engine::validate_runtime_plan(&plan)
-                    .map_err(|error| format!("QUIC-план {}: {error}", saved_plan.id))?;
-                let command = encode_set_addr(address, SHAPE_QUIC, &bytes)
-                    .map_err(|error| format!("SET_ADDR для QUIC {}: {error}", binding.target))?;
-                commands.push((binding.target.clone(), command));
-                continue;
-            }
-            if binding.kind == "addr"
-                && binding.transport == 17
-                && binding.family == 4
-                && binding.shape == SHAPE_VOICE
-                && binding.verified_by == 5
-            {
-                let server = binding.target.parse::<std::net::Ipv4Addr>().map_err(|_| {
-                    format!("адресная голосовая привязка неверна: {}", binding.target)
-                })?;
-                let saved_plan = box_record
-                    .plans
-                    .iter()
-                    .find(|plan| plan.id == binding.plan_id && plan.enabled)
-                    .ok_or_else(|| {
-                        format!(
-                            "голосовая привязка {} ссылается на отсутствующий план {}",
-                            binding.target, binding.plan_id
-                        )
-                    })?;
-                let bytes = compile_text(&saved_plan.text)
-                    .map_err(|error| format!("voice-план {}: {error}", saved_plan.id))?;
-                let plan = Plan::parse(&bytes)?;
-                if plan.transport != 17
-                    || plan.proto != PROTO_VOICE
-                    || r2o_controller::voice_discovery::r2o_voice_discovery_prefix_from_plan_text(
-                        &saved_plan.text,
-                    )
-                    .is_none()
-                {
-                    return Err(format!(
-                        "адресная голосовая привязка {} не содержит точный STUN/Discovery-план",
-                        binding.target
-                    )
-                    .into());
-                }
-                let command = encode_set_voice_addr(server, &bytes)
-                    .map_err(|error| format!("SET_VOICE_ADDR для {}: {error}", binding.target))?;
+                let Ok(command) = r2o_catalog_encode_set_addr(address, shape, &bytes) else {
+                    skipped += 1;
+                    continue;
+                };
                 commands.push((binding.target.clone(), command));
                 continue;
             }
@@ -1930,35 +2045,58 @@ fn catalog_commands(catalog: &Catalog) -> Result<CompiledCatalog, Box<dyn Error>
                     continue;
                 }
             };
-            let shape = binding.shape;
-            if !binding_shape_transport(shape, binding.transport) {
+            let shape = if binding.shape == 0 {
+                SHAPE_GRANDFATHER
+            } else {
+                binding.shape
+            };
+            if !binding_shape_transport(shape, r2o_catalog_binding_transport(binding)) {
                 skipped += 1;
                 continue;
             }
-            let host = normalize_plan_target(&binding.target, shape)
-                .map_err(|error| format!("привязка {}: HOST: {error}", binding.target))?;
-            let saved_plan = box_record
+            let Ok(host) = normalize_plan_target(&binding.target, shape) else {
+                skipped += 1;
+                continue;
+            };
+            let Some(saved_plan) = box_record
                 .plans
                 .iter()
                 .find(|plan| plan.id == binding.plan_id && plan.enabled)
-                .ok_or_else(|| {
-                    format!(
-                        "привязка {} ссылается на отсутствующий или отключённый план {}",
-                        binding.target, binding.plan_id
-                    )
-                })?;
-            let bytes = compile_text(&saved_plan.text)
-                .map_err(|error| format!("план {}: {error}", saved_plan.id))?;
-            let plan = Plan::parse(&bytes)?;
-            if !shape_matches_plan(shape, &plan) {
-                return Err(format!(
-                    "форма {} привязки {} не соответствует транспорту или протоколу плана",
-                    shape, binding.target
-                )
-                .into());
+            else {
+                skipped += 1;
+                continue;
+            };
+            let Some((bytes, plan)) = r2o_catalog_compile_plan(&saved_plan.text, &saved_plan.id)
+            else {
+                skipped += 1;
+                continue;
+            };
+            if r2o_catalog_plan_exceeds_send_cap(&plan, send_cap) {
+                r2o_catalog_mark_unfit(
+                    binding,
+                    &mut selection_catalog.boxes[box_index].bindings[binding_index],
+                    &mut box_record.updated,
+                    now,
+                );
+                if let Ok(delete) = encode_delete_name(
+                    &binding.target,
+                    r2o_catalog_binding_transport(binding),
+                    if binding.shape == 0 {
+                        SHAPE_GRANDFATHER
+                    } else {
+                        binding.shape
+                    },
+                    r2o_catalog_binding_family(binding),
+                ) {
+                    cleanup_commands.push((binding.target.clone(), delete));
+                }
+                skipped += 1;
+                continue;
             }
-            let command = encode_set_name(&host, shape, family, &bytes)
-                .map_err(|error| format!("SET_NAME для {}: {error}", binding.target))?;
+            let Ok(command) = encode_set_name(&host, shape, family, &bytes) else {
+                skipped += 1;
+                continue;
+            };
             commands.push((binding.target.clone(), command));
         }
     }
@@ -2066,10 +2204,71 @@ fn catalog_commands(catalog: &Catalog) -> Result<CompiledCatalog, Box<dyn Error>
     }
     Ok(CompiledCatalog {
         commands,
+        cleanup_commands,
         group_commands,
         skipped,
         tcp_stall_budgets: r2o_tcp_stall_budgets(catalog),
     })
+}
+
+#[cfg(unix)]
+fn r2o_catalog_plan_exceeds_send_cap(plan: &Plan, send_cap: usize) -> bool {
+    send_cap > 0 && plan.max_emit() > send_cap
+}
+
+#[cfg(unix)]
+fn r2o_catalog_compile_plan(text: &str, plan_id: &str) -> Option<(Vec<u8>, Plan)> {
+    let bytes = match compile_text(text) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!("каталог: план {plan_id} не собирается: {error}");
+            return None;
+        }
+    };
+    match Plan::parse(&bytes) {
+        Ok(plan) => Some((bytes, plan)),
+        Err(error) => {
+            eprintln!("каталог: план {plan_id} не разбирается runtime: {error}");
+            None
+        }
+    }
+}
+
+#[cfg(unix)]
+fn r2o_catalog_encode_set_addr(
+    address: std::net::IpAddr,
+    shape: u8,
+    plan_records: &[u8],
+) -> Result<Vec<u8>, &'static str> {
+    let mut body = Vec::with_capacity(18 + plan_records.len());
+    match address {
+        std::net::IpAddr::V4(address) => {
+            body.push(4);
+            body.extend_from_slice(&address.octets());
+            body.extend_from_slice(&[0; 12]);
+        }
+        std::net::IpAddr::V6(address) => {
+            body.push(6);
+            body.extend_from_slice(&address.octets());
+        }
+    }
+    body.push(shape);
+    body.extend_from_slice(plan_records);
+    control::encode_frame(COMMAND_SET_ADDR, &body)
+}
+
+#[cfg(unix)]
+fn r2o_catalog_mark_unfit(
+    binding: &mut Binding,
+    selection_binding: &mut Binding,
+    box_updated: &mut i64,
+    now: i64,
+) {
+    let marked_at = now.max(1);
+    binding.recheck_since = Some(marked_at);
+    binding.recheck_mono = Some(std::time::Instant::now());
+    selection_binding.recheck_since = Some(marked_at);
+    *box_updated = marked_at;
 }
 
 #[cfg(unix)]
@@ -2695,6 +2894,11 @@ fn install_catalog_with_policy(
     continue_plan_refusals: bool,
 ) -> Result<CatalogInstallSummary, Box<dyn Error>> {
     let mut summary = CatalogInstallSummary::default();
+    for (host, command) in &compiled.cleanup_commands {
+        if let Err(error) = client.send_command(command, control::COMMAND_DEL_NAME) {
+            eprintln!("по {host} привязку невлезающего плана не удалось снять с провода: {error}");
+        }
+    }
     for (command_index, (host, command)) in compiled.commands.iter().enumerate() {
         let expected = command
             .get(4..6)
@@ -13520,7 +13724,11 @@ impl ControlClient {
         let runtime_plan = Plan::parse(&bytes)?;
         r2o_datapath::engine::validate_runtime_plan(&runtime_plan)
             .map_err(|error| format!("исполнитель r2o-datapath отверг план: {error}"))?;
-        let compiled = catalog_commands(&updated)?;
+        let compiled = catalog_commands_with_send_cap(
+            &mut updated,
+            self.send_cap.load(Ordering::Relaxed),
+            now,
+        )?;
 
         let install_result = install_catalog_best_effort(self, &compiled);
         let persist_result =
@@ -15066,6 +15274,378 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn catalog_sync_matches_donor_exact_context_winner_and_unusable_fallbacks() {
+        fn binding(plan_id: &str, shape: u8, family: u8, confirmed: i64) -> Binding {
+            Binding {
+                kind: "name".into(),
+                target: "same-context.test".into(),
+                plan_id: plan_id.into(),
+                level: 3,
+                confirmed,
+                enabled: true,
+                transport: 6,
+                family,
+                shape,
+                verified_by: 1,
+                ..Binding::default()
+            }
+        }
+
+        fn plan(id_byte: u8) -> r2o_controller::catalog::Plan {
+            let id = format!("{id_byte:02x}").repeat(16);
+            r2o_controller::catalog::Plan {
+                id: "plan-test".into(),
+                proto: "tls".into(),
+                text: format!("r2o-plan 1 11\nid {id}\nproto tcp tls\nsplit sni_middle +0\n"),
+                added: 1,
+                successes: 0,
+                enabled: true,
+            }
+        }
+
+        for unusable_newest in 0..5 {
+            let mut newest = binding("plan-test", SHAPE_MODERN, 4, 200);
+            match unusable_newest {
+                1 => newest.level = 2,
+                2 => newest.enabled = false,
+                3 => newest.plan_id = "missing".into(),
+                4 => newest.budget = 3,
+                _ => {}
+            }
+            let mut older_modern = binding("plan-test", SHAPE_MODERN, 4, 100);
+            if unusable_newest == 4 {
+                older_modern.budget = 1;
+            }
+            let catalog = Catalog {
+                boxes: vec![
+                    BoxRecord {
+                        id: "newer-box".into(),
+                        plans: vec![plan(1)],
+                        bindings: vec![newest],
+                        ..BoxRecord::default()
+                    },
+                    BoxRecord {
+                        id: "older-box".into(),
+                        plans: vec![plan(2)],
+                        bindings: vec![
+                            older_modern,
+                            binding("plan-test", r2k_core::control::SHAPE_LEGACY, 4, 100),
+                            binding("plan-test", SHAPE_MODERN, 6, 100),
+                        ],
+                        ..BoxRecord::default()
+                    },
+                ],
+                ..Catalog::default()
+            };
+
+            let compiled = catalog_commands(&catalog).unwrap_or_else(|error| {
+                panic!("unusable newer binding must not abort catalog sync: {error}")
+            });
+            assert_eq!(
+                compiled.commands.len(),
+                3,
+                "donor keeps one winner per exact name/transport/family/shape key; case={unusable_newest}"
+            );
+            let expected_plan_id = if unusable_newest == 0 {
+                [1; 16]
+            } else {
+                [2; 16]
+            };
+            let modern_ipv4_plan_ids = compiled
+                .commands
+                .iter()
+                .filter_map(|(_, bytes)| {
+                    let frame = read_frame(&mut std::io::Cursor::new(bytes)).unwrap();
+                    let name_len = usize::from(*frame.body.first()?);
+                    if frame.body.get(1..1 + name_len)? != b"same-context.test"
+                        || frame.body.get(1 + name_len).copied() != Some(SHAPE_MODERN)
+                        || frame.body.get(2 + name_len).copied() != Some(4)
+                    {
+                        return None;
+                    }
+                    Some(Plan::parse(&frame.body[3 + name_len..]).unwrap().id)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(modern_ipv4_plan_ids, [expected_plan_id]);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_sync_matches_donor_send_cap_recheck_and_delete() {
+        let oversized_plan = format!(
+            "r2o-plan 1 11\nid {}\nproto tcp tls\ninput tls-sni\npayload-pad 1 1400 15\npoison 1 badsum\nfake payload=1 poison=1 repeats=1 gap_us=0 place=before\nsegment 1400\nwire detect-tcp-v1\norder forward\n",
+            "00".repeat(16),
+        );
+        let plan_records = compile_text(&oversized_plan).unwrap();
+        assert_eq!(Plan::parse(&plan_records).unwrap().max_emit(), 1440);
+        let fixture = Catalog {
+            boxes: vec![BoxRecord {
+                id: "narrow-box".into(),
+                plans: vec![r2o_controller::catalog::Plan {
+                    id: "plan-1440".into(),
+                    proto: "tls".into(),
+                    text: oversized_plan,
+                    added: 1,
+                    successes: 0,
+                    enabled: true,
+                }],
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: "narrow.example".into(),
+                    plan_id: "plan-1440".into(),
+                    level: 3,
+                    confirmed: 1,
+                    enabled: true,
+                    transport: 6,
+                    family: 4,
+                    shape: SHAPE_MODERN,
+                    verified_by: 1,
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+
+        for (send_cap, should_fit) in [(1280, false), (1500, true), (0, true)] {
+            let mut catalog = fixture.clone();
+            let compiled =
+                super::catalog_commands_with_send_cap(&mut catalog, send_cap, 100).unwrap();
+            let binding = &catalog.boxes[0].bindings[0];
+            if should_fit {
+                assert_eq!(compiled.commands.len(), 1, "send_cap={send_cap}");
+                assert!(compiled.cleanup_commands.is_empty(), "send_cap={send_cap}");
+                assert_eq!(binding.recheck_since, None, "send_cap={send_cap}");
+            } else {
+                assert!(compiled.commands.is_empty());
+                assert_eq!(compiled.cleanup_commands.len(), 1);
+                assert_eq!(binding.recheck_since, Some(100));
+                assert_eq!(
+                    read_frame(&mut std::io::Cursor::new(&compiled.cleanup_commands[0].1))
+                        .unwrap()
+                        .kind,
+                    r2k_core::control::COMMAND_DEL_NAME
+                );
+            }
+        }
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "r2o-catalog-send-cap-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("catalog.json");
+        fixture.save_atomic(&path, 100).unwrap();
+        let (persisted, compiled) =
+            super::catalog_commands_for_runtime(&path, &fixture, 1280).unwrap();
+        assert_eq!(compiled.cleanup_commands.len(), 1);
+        assert!(
+            persisted.boxes[0].bindings[0]
+                .recheck_since
+                .is_some_and(|recheck_since| recheck_since > 0)
+        );
+        assert_eq!(
+            Catalog::load(&path).unwrap().boxes[0].bindings[0].recheck_since,
+            persisted.boxes[0].bindings[0].recheck_since
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_sync_skips_malformed_plan_and_continues() {
+        let catalog = Catalog {
+            boxes: vec![BoxRecord {
+                id: "box".into(),
+                plans: vec![
+                    r2o_controller::catalog::Plan {
+                        id: "broken".into(),
+                        proto: "tls".into(),
+                        text: "not a plan".into(),
+                        added: 1,
+                        successes: 0,
+                        enabled: true,
+                    },
+                    r2o_controller::catalog::Plan {
+                        id: "valid".into(),
+                        proto: "tls".into(),
+                        text: format!(
+                            "r2o-plan 1 11\nid {}\nproto tcp tls\nsplit sni_middle +0\n",
+                            "01".repeat(16)
+                        ),
+                        added: 1,
+                        successes: 0,
+                        enabled: true,
+                    },
+                ],
+                bindings: vec![
+                    Binding {
+                        kind: "name".into(),
+                        target: "broken.example".into(),
+                        plan_id: "broken".into(),
+                        level: 3,
+                        confirmed: 1,
+                        enabled: true,
+                        transport: 6,
+                        family: 4,
+                        shape: SHAPE_MODERN,
+                        verified_by: 1,
+                        ..Binding::default()
+                    },
+                    Binding {
+                        kind: "name".into(),
+                        target: "valid.example".into(),
+                        plan_id: "valid".into(),
+                        level: 3,
+                        confirmed: 1,
+                        enabled: true,
+                        transport: 6,
+                        family: 4,
+                        shape: SHAPE_MODERN,
+                        verified_by: 1,
+                        ..Binding::default()
+                    },
+                ],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        let compiled = catalog_commands(&catalog).unwrap();
+        assert_eq!(compiled.skipped, 1);
+        assert_eq!(compiled.commands.len(), 1);
+        let frame = read_frame(&mut std::io::Cursor::new(&compiled.commands[0].1)).unwrap();
+        let name_len = usize::from(frame.body[0]);
+        assert_eq!(&frame.body[1..1 + name_len], b"valid.example");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_sync_restores_explicit_quic_address_shape_as_donor() {
+        let catalog = Catalog {
+            boxes: vec![BoxRecord {
+                id: "quic-box".into(),
+                plans: vec![r2o_controller::catalog::Plan {
+                    id: "quic-plan".into(),
+                    proto: "quic".into(),
+                    text: format!(
+                        "r2o-plan 1 11\nid {}\nproto udp quic\ndelay 15000\n",
+                        "02".repeat(16)
+                    ),
+                    added: 1,
+                    successes: 1,
+                    enabled: true,
+                }],
+                bindings: vec![Binding {
+                    kind: "addr".into(),
+                    target: "198.51.100.8".into(),
+                    plan_id: "quic-plan".into(),
+                    level: 3,
+                    confirmed: 1,
+                    enabled: true,
+                    transport: 17,
+                    family: 4,
+                    shape: SHAPE_QUIC,
+                    verified_by: 4,
+                    input: 0,
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+
+        let compiled = catalog_commands(&catalog).unwrap();
+        assert_eq!(compiled.commands.len(), 1);
+        assert_eq!(compiled.skipped, 0);
+        let command = read_frame(&mut std::io::Cursor::new(&compiled.commands[0].1)).unwrap();
+        assert_eq!(command.kind, r2k_core::control::COMMAND_SET_ADDR);
+        assert_eq!(command.body[0], 4);
+        assert_eq!(&command.body[1..5], &[198, 51, 100, 8]);
+        assert_eq!(command.body[17], SHAPE_QUIC);
+        let plan = Plan::parse(&command.body[18..]).unwrap();
+        assert_eq!(plan.transport, 17);
+        assert_eq!(plan.proto, r2k_core::plan::PROTO_QUIC);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_sync_keeps_tcp_address_and_grandfather_name_bindings() {
+        let catalog = Catalog {
+            boxes: vec![BoxRecord {
+                id: "legacy-box".into(),
+                plans: vec![r2o_controller::catalog::Plan {
+                    id: "plan-test".into(),
+                    proto: "tls".into(),
+                    text: "r2o-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit sni_middle +0\n".into(),
+                    added: 1,
+                    successes: 1,
+                    enabled: true,
+                }],
+                bindings: vec![
+                    Binding {
+                        kind: "addr".into(),
+                        target: "198.51.100.7".into(),
+                        plan_id: "plan-test".into(),
+                        level: 3,
+                        confirmed: 1,
+                        enabled: true,
+                        transport: 6,
+                        family: 4,
+                        shape: SHAPE_MODERN,
+                        verified_by: 1,
+                        ..Binding::default()
+                    },
+                    Binding {
+                        kind: "name".into(),
+                        target: "old.example".into(),
+                        plan_id: "plan-test".into(),
+                        level: 3,
+                        confirmed: 1,
+                        enabled: true,
+                        transport: 0,
+                        family: 4,
+                        shape: 0,
+                        verified_by: 1,
+                        ..Binding::default()
+                    },
+                ],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        let compiled = catalog_commands(&catalog).unwrap();
+        assert_eq!(compiled.commands.len(), 2);
+        let mut saw_addr = false;
+        let mut saw_grandfather_name = false;
+        for (_, bytes) in &compiled.commands {
+            let frame = read_frame(&mut std::io::Cursor::new(bytes)).unwrap();
+            match frame.kind {
+                r2k_core::control::COMMAND_SET_ADDR => {
+                    assert_eq!(frame.body[0], 4);
+                    assert_eq!(&frame.body[1..5], &[198, 51, 100, 7]);
+                    assert_eq!(frame.body[17], SHAPE_MODERN);
+                    saw_addr = true;
+                }
+                r2k_core::control::COMMAND_SET_NAME => {
+                    let name_len = usize::from(frame.body[0]);
+                    assert_eq!(&frame.body[1..1 + name_len], b"old.example");
+                    assert_eq!(frame.body[1 + name_len], super::SHAPE_GRANDFATHER);
+                    saw_grandfather_name = true;
+                }
+                other => panic!("unexpected catalog command {other:#06x}"),
+            }
+        }
+        assert!(saw_addr);
+        assert!(saw_grandfather_name);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn sync_catalog_counts_refusals_and_keeps_installing_remaining_plans() {
         use std::io::Write;
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -15113,6 +15693,7 @@ mod tests {
                 ("installed.example".into(), command("installed.example")),
                 ("full-table.example".into(), command("full-table.example")),
             ],
+            cleanup_commands: Vec::new(),
             group_commands: vec![(1, group.clone())],
             skipped: 0,
             tcp_stall_budgets: Vec::new(),
@@ -22194,16 +22775,18 @@ mod tests {
         assert_eq!(compiled.skipped, 0);
         assert_eq!(compiled.commands.len(), 1);
         let command = read_frame(&mut std::io::Cursor::new(&compiled.commands[0].1)).unwrap();
-        assert_eq!(command.kind, COMMAND_SET_VOICE_ADDR);
-        assert_eq!(&command.body[..4], &[198, 51, 100, 21]);
-        let plan = Plan::parse(&command.body[4..]).unwrap();
+        assert_eq!(command.kind, r2k_core::control::COMMAND_SET_ADDR);
+        assert_eq!(command.body[0], 4);
+        assert_eq!(&command.body[1..5], &[198, 51, 100, 21]);
+        assert_eq!(command.body[17], SHAPE_VOICE);
+        let plan = Plan::parse(&command.body[18..]).unwrap();
         assert_eq!(plan.transport, 17);
         assert_eq!(plan.proto, r2k_core::plan::PROTO_VOICE);
     }
 
     #[cfg(unix)]
     #[test]
-    fn каталог_не_устанавливает_старые_voice_привязки_без_rtp() {
+    fn каталог_восстанавливает_явную_voice_форму_как_donor() {
         let prefix = r2k_core::stun::binding_request([0x94; 12]);
         let text = r2o_controller::voice_discovery::r2o_voice_arm_plan_text(&prefix);
 
@@ -22220,8 +22803,14 @@ mod tests {
             catalog.boxes[0].bindings[0].verified_by = verified_by;
 
             let compiled = catalog_commands(&catalog).unwrap();
-            assert!(compiled.commands.is_empty());
-            assert_eq!(compiled.skipped, 1);
+            assert_eq!(compiled.commands.len(), 1);
+            assert_eq!(compiled.skipped, 0);
+            let command = read_frame(&mut std::io::Cursor::new(&compiled.commands[0].1)).unwrap();
+            assert_eq!(command.kind, r2k_core::control::COMMAND_SET_ADDR);
+            assert_eq!(command.body[17], SHAPE_VOICE);
+            let plan = Plan::parse(&command.body[18..]).unwrap();
+            assert_eq!(plan.transport, 17);
+            assert_eq!(plan.proto, r2k_core::plan::PROTO_VOICE);
         }
     }
 

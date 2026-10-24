@@ -7264,5 +7264,31 @@ DNS/QUIC/mark-входах; C `test_verify`, `test_d2kc_proto`, `test_catalog_sy
 `test_sched_summary`, `test_meas` и `test_response`, а также полный Rust workspace
 на текущем commit прошли. Эти тесты подтверждают перечисленные ветви, но не все
 возможные внешние TLS/ECH endpoints и не полевой запуск. Пользователь попросил
-не подключаться к роутеру: OpenWrt-проверка не выполнялась, поэтому паритет в
-целом не объявляется.
+не подключаться к роутеру: физическая OpenWrt-проверка не выполнялась, поэтому
+паритет в целом не объявляется.
+
+## Catalog sync: дополнительные расхождения с donor 783aa75 — 24.10.2026
+
+Повторная сверка d2k_sched_sync_step с catalog_commands_with_send_cap нашла
+ещё четыре различия в выборе и передаче каталога. Проверки ниже используют один
+и тот же сценарий каталога и эквивалентный пригодный TLS-план в родном формате
+каждой реализации. Для C взят чистый checkout donor 783aa75.
+
+| C-источник / правило | Rust-аналог и исправление | Результат |
+|---|---|---|
+| core/sched.c::binding_beats, newer_name_binding, d2k_sched_sync_step: для точного ключа имени выбирается запись по бюджету и свежести; непригодная новая запись не скрывает старую, остальные семейства и формы остаются отдельными. | r2o_catalog_binding_beats, r2o_newer_name_binding, catalog_commands_with_send_cap: пропускают проигравшую запись и продолжают, не меняя приоритет выбора. | До исправления общий сценарий давал Rust 4 команды вместо C-ожидания 3: более старая запись могла затереть победителя. После исправления catalog_sync_matches_donor_exact_context_winner_and_unusable_fallbacks прошёл; donor make test-catalog-sync CC=clang-18 -j2 прошёл. |
+| core/sched.c::plan_text_max_emit, d2k_sched_sync_step: при send_cap > 0 и need > send_cap план не отправляется, name-запись помечается на перепроверку, каталог получает новую ревизию и на провод уходит DEL_NAME; предел 0 означает отсутствие лимита. | r2o_catalog_plan_exceeds_send_cap, r2o_catalog_mark_unfit, catalog_commands_with_send_cap и атомарное сохранение в catalog_commands_for_runtime: вычисляют тот же размер и сохраняют перепроверку вместе с очисткой провода. | Для плана max_emit=1440: одинаковые пороги C harness и Rust-тест дали 1280 → recheck + DEL_NAME, 1500 → SET_NAME, 0 → SET_NAME; Rust также проверил сохранение recheck_since. |
+| core/sched.c::addr_binding_shape, d2k_sched_sync_step: адресные привязки с явной TCP/QUIC/voice-формой ставятся через SET_ADDR; для QUIC/voice не требуется дополнительное поле verified_by/input сверх правил C. Неуказанная форма не получает общего адресного контекста. Name-запись старого каталога с shape=0 передаётся как D2K_LINK_SHAPE_GRANDFATHER. | r2o_catalog_addr_binding_shape, общая адресная ветвь catalog_commands_with_send_cap и r2o_catalog_encode_set_addr; SHAPE_GRANDFATHER поддержан в encode_set_name, datapath set_name/NamePlans::find и encode_delete_name. | C harness на donor выдал modern TCP SET_ADDR, QUIC SET_ADDR при verified_by=4/input=0 и voice SET_ADDR при verified_by=4, а также grandfather SET_NAME; битый план не остановил следующие команды. Rust catalog_sync_restores_explicit_quic_address_shape_as_donor, catalog_sync_keeps_tcp_address_and_grandfather_name_bindings, catalog_sync_skips_malformed_plan_and_continues и datapath дедушкина_именная_привязка_совпадает_с_любой_tls_формой прошли. До исправления Rust пропускал общий TCP addr, ограничивал QUIC/voice дополнительными условиями и не поддерживал старую name-запись. |
+| core/sched.c::d2k_sched_sync_step: ошибка разбора текста плана увеличивает счётчик пропусков и продолжает следующий binding. | r2o_catalog_compile_plan возвращает None; каждая ветвь синхронизации пропускает только эту запись и продолжает обход. | Сценарий с битым планом перед пригодными binding: C harness отправил следующие две команды; catalog_sync_skips_malformed_plan_and_continues пропустил одну запись и отправил следующую. |
+
+Также проверены donor test_catalog_sync и test_catalog_cap_parity-сценарий
+на одинаковых send_cap значениях. Эти проверки закрывают перечисленные ветви
+каталога, а не весь runtime. Локальная OpenWrt-кросс-сборка и QEMU smoke
+выполнены; физический роутер намеренно не затрагивался, поэтому полевое
+подтверждение и полный поведенческий паритет не заявляются.
+
+Отдельно исправлено ожидание старого Rust-теста для voice: явная SHAPE_VOICE
+с verified_by=3/4 восстанавливается donor как SET_ADDR; предыдущий тест требовал
+дополнительное RTP-условие, которого нет в d2k_sched_sync_step. C harness с
+verified_by=4 и обновлённый Rust тест каталог_восстанавливает_явную_voice_форму_как_donor
+прошли.

@@ -6,8 +6,8 @@ use r2k_core::control::{
     COMMAND_DEL_SUFFIX, COMMAND_DEL_VOICE_ADDR_PROBE, COMMAND_SET_ADDR, COMMAND_SET_ADDR_PROBE,
     COMMAND_SET_BYPASS, COMMAND_SET_HTTPS, COMMAND_SET_NAME, COMMAND_SET_NAME_PROBE,
     COMMAND_SET_SUFFIX, COMMAND_SET_VOICE_ADDR, COMMAND_SET_VOICE_ADDR_PROBE, Frame,
-    MAX_HTTPS_TTL_SECONDS, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC,
-    SHAPE_VOICE, decode_arm_shape, decode_client_shape,
+    MAX_HTTPS_TTL_SECONDS, SHAPE_ECH_TCP, SHAPE_GRANDFATHER, SHAPE_HTTP, SHAPE_LEGACY,
+    SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, decode_arm_shape, decode_client_shape,
 };
 use r2k_core::packet::PacketView;
 #[cfg(test)]
@@ -394,6 +394,7 @@ impl NamePlans {
                     .then(|| self.find(sni, view.family, SHAPE_MODERN))
                     .flatten()
             })
+            .or_else(|| self.find(sni, view.family, SHAPE_GRANDFATHER))
             .or_else(|| self.find_in_domain(sni, view.family, shape, 6))
             .or_else(|| {
                 (shape == SHAPE_ECH_TCP)
@@ -678,7 +679,9 @@ impl NamePlans {
         };
         let compatible = match shape {
             SHAPE_HTTP => plan.transport == 6 && plan.proto == PROTO_HTTP,
-            SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP => plan.transport == 6 && plan.proto == 1,
+            SHAPE_MODERN | SHAPE_LEGACY | SHAPE_GRANDFATHER | SHAPE_ECH_TCP => {
+                plan.transport == 6 && plan.proto == 1
+            }
             SHAPE_QUIC => valid_quic_plan(&plan),
             SHAPE_VOICE => plan.transport == 17 && plan.proto == PROTO_VOICE,
             _ => false,
@@ -900,7 +903,7 @@ impl NamePlans {
         };
         let family = body[2 + name_len];
         let source_port = u16::from_be_bytes([body[3 + name_len], body[4 + name_len]]);
-        if !valid_tcp_shape(shape) || !matches!(family, 4 | 6) || source_port == 0 {
+        if !valid_tcp_probe_shape(shape) || !matches!(family, 4 | 6) || source_port == 0 {
             return (false, control::ACK_BAD_ARGS);
         }
         let key = NameProbeKey {
@@ -1156,7 +1159,7 @@ impl NamePlans {
         };
         let family = body[2 + name_len];
         let source_port = u16::from_be_bytes([body[3 + name_len], body[4 + name_len]]);
-        if !valid_tcp_shape(shape) || !matches!(family, 4 | 6) || source_port == 0 {
+        if !valid_tcp_probe_shape(shape) || !matches!(family, 4 | 6) || source_port == 0 {
             return (false, control::ACK_BAD_ARGS);
         }
         self.probes.remove(&NameProbeKey {
@@ -1443,6 +1446,13 @@ fn canonical_plan_name(bytes: &[u8], shape: u8) -> Option<String> {
 }
 
 fn valid_tcp_shape(shape: u8) -> bool {
+    matches!(
+        shape,
+        SHAPE_MODERN | SHAPE_LEGACY | SHAPE_GRANDFATHER | SHAPE_ECH_TCP | SHAPE_HTTP
+    )
+}
+
+fn valid_tcp_probe_shape(shape: u8) -> bool {
     matches!(
         shape,
         SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP | SHAPE_HTTP
@@ -1924,8 +1934,8 @@ mod tests {
         self, COMMAND_CLEAR, COMMAND_DEL_ADDR, COMMAND_DEL_BYPASS, COMMAND_DEL_NAME,
         COMMAND_DEL_NAME_PROBE, COMMAND_DEL_SUFFIX, COMMAND_SET_ADDR, COMMAND_SET_BYPASS,
         COMMAND_SET_NAME, COMMAND_SET_NAME_PROBE, COMMAND_SET_SUFFIX, EVENT_HELLO, Frame,
-        SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, encode_delete_addr,
-        encode_set_addr, encode_set_voice_addr, encode_set_voice_addr_probe,
+        SHAPE_GRANDFATHER, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE,
+        encode_delete_addr, encode_set_addr, encode_set_voice_addr, encode_set_voice_addr_probe,
     };
     use std::net::{IpAddr, Ipv4Addr};
     use std::os::unix::fs::PermissionsExt;
@@ -2219,6 +2229,35 @@ mod tests {
         assert!(plans.handle(&mismatched_name).ok);
         assert!(plans.select(&tcp_tls_packet("example.test")).is_none());
         assert!(plans.select(&tcp_tls_packet("other.test")).is_some());
+    }
+
+    #[test]
+    fn дедушкина_именная_привязка_совпадает_с_любой_tls_формой() {
+        let mut plans = NamePlans::default();
+        let mut command = set_name("example.test");
+        command.body[1 + b"example.test".len()] = SHAPE_GRANDFATHER;
+        assert!(plans.handle(&command).ok);
+
+        let modern = tcp_tls_packet("example.test");
+        let mut legacy = modern.clone();
+        let versions = [0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04];
+        let versions_offset = legacy
+            .windows(versions.len())
+            .position(|window| window == versions)
+            .unwrap();
+        legacy[versions_offset + versions.len() - 1] = 0x03;
+        for packet in [modern.clone(), legacy] {
+            assert_eq!(plans.select(&packet).map(|plan| plan.id), Some([0; 16]));
+        }
+        let applied = plans.applied_event_for_packet(&modern, 57).unwrap();
+        assert_eq!(applied.binding.shape, SHAPE_GRANDFATHER);
+
+        let delete = control::read_frame(&mut std::io::Cursor::new(
+            r2k_core::control::encode_delete_name("example.test", 6, SHAPE_GRANDFATHER, 4).unwrap(),
+        ))
+        .unwrap();
+        assert!(plans.handle(&delete).ok);
+        assert!(plans.select(&modern).is_none());
     }
 
     #[test]

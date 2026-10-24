@@ -316,7 +316,7 @@ fn serve_catalog_installs_plans_and_consumes_hello_on_the_same_connection() {
     let catalog_path = work.join("catalog.json");
     fs::write(
         &catalog_path,
-        br#"{"boxes":[{"id":"box-1","created":"2026-10-18T00:00:00Z","updated":"2026-10-18T00:00:00Z","plans":[{"id":"plan-1","proto":"tls","text":"r2o-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit sni_middle +0\n","added":"2026-10-18T00:00:00Z","successes":1,"enabled":true}],"bindings":[{"kind":"name","target":"example.test","plan_id":"plan-1","level":1,"confirmed":"2026-10-18T00:00:00Z","successes":1,"enabled":true,"transport":6,"family":4,"shape":1}]}]}"#,
+        br#"{"boxes":[{"id":"box-1","created":"2026-10-18T00:00:00Z","updated":"2026-10-18T00:00:00Z","plans":[{"id":"plan-1","proto":"tls","text":"r2o-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit sni_middle +0\n","added":"2026-10-18T00:00:00Z","successes":1,"enabled":true}],"bindings":[{"kind":"name","target":"example.test","plan_id":"plan-1","level":3,"confirmed":"2026-10-18T00:00:00Z","successes":1,"enabled":true,"transport":6,"family":4,"shape":1}]}]}"#,
     )
     .unwrap();
 
@@ -543,7 +543,7 @@ fn apply_catalog_compiles_and_installs_tcp_and_discord_voice_name_bindings() {
     let catalog_path = work.join("catalog.json");
     fs::write(
         &catalog_path,
-        br#"{"boxes":[{"id":"box-1","created":"2026-10-18T00:00:00Z","updated":"2026-10-18T00:00:00Z","plans":[{"id":"plan-1","proto":"tls","text":"r2o-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit sni_middle +0\n","added":"2026-10-18T00:00:00Z","successes":1,"enabled":true},{"id":"voice-1","proto":"voice","text":"r2o-plan 1 1\nid 00000000000000000000000000000000\nproto udp voice\npayload 1 46414b45\npoison 1 ttl=2\nfake payload=1 poison=1 repeats=1 gap_us=0 place=before\n","added":"2026-10-18T00:00:00Z","successes":1,"enabled":true}],"bindings":[{"kind":"name","target":"example.test","plan_id":"plan-1","level":1,"confirmed":"2026-10-18T00:00:00Z","successes":1,"enabled":true,"transport":6,"family":4,"shape":1},{"kind":"name","target":"@discord-voice","plan_id":"voice-1","level":1,"confirmed":"2026-10-18T00:00:00Z","successes":1,"enabled":true,"transport":17,"family":4,"shape":5}]}]}"#,
+        br#"{"boxes":[{"id":"box-1","created":"2026-10-18T00:00:00Z","updated":"2026-10-18T00:00:00Z","plans":[{"id":"plan-1","proto":"tls","text":"r2o-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit sni_middle +0\n","added":"2026-10-18T00:00:00Z","successes":1,"enabled":true},{"id":"voice-1","proto":"voice","text":"r2o-plan 1 1\nid 00000000000000000000000000000000\nproto udp voice\npayload 1 46414b45\npoison 1 ttl=2\nfake payload=1 poison=1 repeats=1 gap_us=0 place=before\n","added":"2026-10-18T00:00:00Z","successes":1,"enabled":true}],"bindings":[{"kind":"name","target":"example.test","plan_id":"plan-1","level":3,"confirmed":"2026-10-18T00:00:00Z","successes":1,"enabled":true,"transport":6,"family":4,"shape":1},{"kind":"name","target":"@discord-voice","plan_id":"voice-1","level":3,"confirmed":"2026-10-18T00:00:00Z","successes":1,"enabled":true,"transport":17,"family":4,"shape":5}]}]}"#,
     )
     .unwrap();
 
@@ -757,7 +757,7 @@ fn apply_catalog_skips_refused_binding_and_installs_following_binding() {
     let catalog_path = work.join("catalog.json");
     fs::write(
         &catalog_path,
-        br#"{"boxes":[{"id":"box-1","created":"2026-10-18T00:00:00Z","updated":"2026-10-18T00:00:00Z","plans":[{"id":"plan-1","proto":"tls","text":"r2o-plan 1 11\nproto tcp tls\nsplit sni_middle +0\n","added":"2026-10-18T00:00:00Z","successes":1,"enabled":true},{"id":"plan-2","proto":"tls","text":"r2o-plan 1 11\nproto tcp tls\nsplit sni_middle +0\n","added":"2026-10-18T00:00:00Z","successes":1,"enabled":true}],"bindings":[{"kind":"name","target":"rejected.example.test","plan_id":"plan-1","level":1,"confirmed":"2026-10-18T00:00:00Z","successes":1,"enabled":true,"transport":6,"family":4,"shape":1},{"kind":"name","target":"accepted.example.test","plan_id":"plan-2","level":1,"confirmed":"2026-10-18T00:00:00Z","successes":1,"enabled":true,"transport":6,"family":4,"shape":1}]}]}"#,
+        br#"{"boxes":[{"id":"box-1","created":"2026-10-18T00:00:00Z","updated":"2026-10-18T00:00:00Z","plans":[{"id":"plan-1","proto":"tls","text":"r2o-plan 1 11\nproto tcp tls\nsplit sni_middle +0\n","added":"2026-10-18T00:00:00Z","successes":1,"enabled":true},{"id":"plan-2","proto":"tls","text":"r2o-plan 1 11\nproto tcp tls\nsplit sni_middle +0\n","added":"2026-10-18T00:00:00Z","successes":1,"enabled":true}],"bindings":[{"kind":"name","target":"rejected.example.test","plan_id":"plan-1","level":3,"confirmed":"2026-10-18T00:00:00Z","successes":1,"enabled":true,"transport":6,"family":4,"shape":1},{"kind":"name","target":"accepted.example.test","plan_id":"plan-2","level":3,"confirmed":"2026-10-18T00:00:00Z","successes":1,"enabled":true,"transport":6,"family":4,"shape":1}]}]}"#,
     )
     .unwrap();
 

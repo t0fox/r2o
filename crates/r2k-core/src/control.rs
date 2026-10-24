@@ -67,6 +67,8 @@ pub const ACK_BAD_ARGS: u8 = 3;
 pub const SHAPE_MODERN: u8 = 1;
 pub const SHAPE_LEGACY: u8 = 2;
 pub const SHAPE_QUIC: u8 = 3;
+/// Compatibility shape for persisted name bindings created before TLS form was recorded.
+pub const SHAPE_GRANDFATHER: u8 = 4;
 pub const SHAPE_VOICE: u8 = 5;
 pub const SHAPE_ECH_TCP: u8 = 6;
 pub const SHAPE_HTTP: u8 = 7;
@@ -801,7 +803,13 @@ pub fn encode_set_name(
     }
     if !matches!(
         shape,
-        SHAPE_MODERN | SHAPE_LEGACY | SHAPE_QUIC | SHAPE_VOICE | SHAPE_ECH_TCP | SHAPE_HTTP
+        SHAPE_MODERN
+            | SHAPE_LEGACY
+            | SHAPE_QUIC
+            | SHAPE_GRANDFATHER
+            | SHAPE_VOICE
+            | SHAPE_ECH_TCP
+            | SHAPE_HTTP
     ) {
         return Err("форма приветствия не поддерживается");
     }
@@ -1258,7 +1266,7 @@ pub fn encode_delete_name(
         || !(transport == 6
             && matches!(
                 shape,
-                SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP | SHAPE_HTTP
+                SHAPE_MODERN | SHAPE_LEGACY | SHAPE_GRANDFATHER | SHAPE_ECH_TCP | SHAPE_HTTP
             )
             || transport == 17 && matches!(shape, SHAPE_VOICE | SHAPE_QUIC))
     {
