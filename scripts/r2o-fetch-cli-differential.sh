@@ -157,7 +157,7 @@ PY
     cat "$r2o_temp_dir/rust.stdout"
 } >"$r2o_log" 2>&1
 
-grep -q 'Fetch CLI parity: omitted --ip resolved C=.*; Rust=.*; both ran QUIC' "$r2o_log"
+grep -q 'Fetch CLI parity: omitted --ip resolved C=.*, Rust=.*; both ran QUIC' "$r2o_log"
 printf 'Журнал проверки: %s\n' "$r2o_log"
 cat "$r2o_log"
 trap - EXIT
