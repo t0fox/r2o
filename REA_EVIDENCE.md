@@ -7353,6 +7353,33 @@ IDA не сконфигурирован. Поэтому конкретное с�
 а не REA-декомпиляцией. Новые сетевые подключения к роутеру не выполнялись;
 полевого подтверждения текущего кода нет, и полный паритет не объявляется.
 
+### PERSIST: отложенная запись каталога совпадает с donor snapshot — 25.10.2026
+
+Эталон — donor `783aa75ce44dd6192cd1f4f1d98e4fe909ef3045`; SHA-256
+`core/d2kc.c` — `f8b7487fe4b8b38d350a5beba470f1e0bef0e8471338fb007c49fd2f617b56cb`.
+`core/d2kc.c::main` помечает каталог dirty по `cat.revision` и раз в 60 секунд
+вызывает `save_atomic(&cat, ...)`; этот wrapper прямо вызывает
+`d2k_catalog_save_atomic` и не перечитывает/не объединяет внешний файл. Rust
+`R2oCatalogPersistence::persist_due` использует тот же интервал, но раньше
+`persist` перечитывал файл и выполнял `r2o_merge_catalog`: при внешнем изменении
+разных записей Rust сохранял их объединение, а при конфликте одной записи
+отказывал, тогда как C записывает свой текущий снимок целиком.
+
+| Исходная C-функция | Rust-аналог | Одинаковый вход и результат |
+|---|---|---|
+| `core/d2kc.c::main` → `save_atomic` → `d2k_catalog_save_atomic` | `R2oCatalogPersistence::persist_due` → `persist` → `Catalog::save_atomic` | `d2o_catalog_persist.tsv` подаёт обеим сторонам локальную запись `local-update` и внешний файл с `external-update`. Первый RED: C сохранил `local-update`, Rust — обе записи. После удаления merge/conflict-алгоритма `scripts/r2o-catalog-persist-differential.sh` сравнил реальные результаты C/Rust и завершился с кодом 0; прежний runtime-only `recheck_mono` остался в памяти и в snapshot. Полный Rust workspace прошёл. |
+
+Для `core/d2kc::main` REA dossier сейчас недоступен: активный ELF — x86_64 ELF,
+Windows Ghidra 12.1.4 сообщает `target_format_unsupported`, Hopper не работает на
+Windows, IDA не настроен. Поведенческий вывод подтверждают точный donor source,
+его `d2k_catalog_save_atomic` в C harness и та же Rust persistence-ветвь в
+дифференциальном тесте; псевдокод REA для `main` не заявляется. Это сравнение
+покрывает отложенную запись при внешнем изменении файла, а не полный полевой цикл.
+После исправления прошли `cargo +1.98.0 test --locked --workspace`, релизная
+сборка `scripts/r2o-build-openwrt-aarch64-musl.sh` и QEMU smoke всех шести
+бинарников с `--clear-catalog` / `--check-catalog`; известны только два
+deprecated-предупреждения `libc::time_t` и `libc::suseconds_t` в `response.rs`.
+
 ### Ретроспективная сверка локальных полевых артефактов
 
 В существующем локальном `.audit/` найдены записи предыдущего запуска R2O на

@@ -32,7 +32,7 @@ use r2o_controller::ask::{
 };
 #[cfg(unix)]
 use r2o_controller::catalog::Binding;
-use r2o_controller::catalog::{BoxRecord, Catalog, DomainObservation, GroupKey};
+use r2o_controller::catalog::{Catalog, DomainObservation, GroupKey};
 use r2o_controller::classify::{
     Accept, ClassifyOptions, Trigger, Verdict, run as classify_run,
     run_with_backend_progress as classify_run_with_progress,
@@ -1346,194 +1346,18 @@ struct CatalogLock(std::fs::File);
 const R2O_CATALOG_SAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[cfg(unix)]
-fn r2o_catalog_option_eq<T>(
-    left: &Option<T>,
-    right: &Option<T>,
-    persisted_eq: &impl Fn(&T, &T) -> Result<bool, Box<dyn Error>>,
-) -> Result<bool, Box<dyn Error>> {
-    match (left, right) {
-        (None, None) => Ok(true),
-        (Some(left), Some(right)) => persisted_eq(left, right),
-        _ => Ok(false),
-    }
-}
-
-#[cfg(unix)]
-fn r2o_merge_catalog_value<T: Clone>(
-    base: Option<T>,
-    local: Option<T>,
-    external: Option<T>,
-    field: &str,
-    persisted_eq: impl Fn(&T, &T) -> Result<bool, Box<dyn Error>>,
-) -> Result<Option<T>, Box<dyn Error>> {
-    if r2o_catalog_option_eq(&local, &base, &persisted_eq)? {
-        return Ok(external);
-    }
-    if r2o_catalog_option_eq(&external, &base, &persisted_eq)?
-        || r2o_catalog_option_eq(&local, &external, &persisted_eq)?
-    {
-        return Ok(local);
-    }
-    Err(format!("параллельное изменение каталога конфликтует в {field}").into())
-}
-
-#[cfg(unix)]
-fn r2o_serialized_persisted_eq<T: serde::Serialize>(
-    left: &T,
-    right: &T,
-) -> Result<bool, Box<dyn Error>> {
-    Ok(serde_json::to_vec(left)? == serde_json::to_vec(right)?)
-}
-
-#[cfg(unix)]
-fn r2o_domain_state_persisted_eq(
-    left: &r2o_controller::catalog::DomainState,
-    right: &r2o_controller::catalog::DomainState,
-) -> Result<bool, Box<dyn Error>> {
-    let left = Catalog {
-        domain_state: Some(left.clone()),
-        ..Catalog::default()
-    };
-    let right = Catalog {
-        domain_state: Some(right.clone()),
-        ..Catalog::default()
-    };
-    Ok(left.to_json_at(0)? == right.to_json_at(0)?)
-}
-
-#[cfg(unix)]
-fn r2o_catalog_persisted_eq(left: &Catalog, right: &Catalog) -> Result<bool, Box<dyn Error>> {
-    Ok(left.to_json_at(0)? == right.to_json_at(0)?)
-}
-
-#[cfg(unix)]
-fn r2o_persisted_network_whitelist(
-    network: Option<r2o_controller::catalog::NetworkWhitelist>,
-) -> Option<r2o_controller::catalog::NetworkWhitelist> {
-    network.filter(|network| network.searched || !network.name.is_empty())
-}
-
-#[cfg(unix)]
-fn r2o_preserve_runtime_catalog_state(
-    local: &Catalog,
-    merged: &mut Catalog,
-) -> Result<(), Box<dyn Error>> {
-    let local_boxes = r2o_catalog_boxes_by_id(local, "локальном снимке")?;
-    for merged_box in &mut merged.boxes {
-        let Some(local_box) = local_boxes.get(&merged_box.id) else {
-            continue;
-        };
-        let mut matched = vec![false; local_box.bindings.len()];
-        for merged_binding in &mut merged_box.bindings {
-            for (index, local_binding) in local_box.bindings.iter().enumerate() {
-                if matched[index] || !r2o_serialized_persisted_eq(merged_binding, local_binding)? {
-                    continue;
-                }
-                merged_binding.recheck_mono = local_binding.recheck_mono;
-                matched[index] = true;
-                break;
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn r2o_catalog_boxes_by_id(
-    catalog: &Catalog,
-    source: &str,
-) -> Result<HashMap<String, BoxRecord>, Box<dyn Error>> {
-    let mut boxes = HashMap::with_capacity(catalog.boxes.len());
-    for record in &catalog.boxes {
-        if boxes.insert(record.id.clone(), record.clone()).is_some() {
-            return Err(format!("каталог содержит повторный id коробки в {source}").into());
-        }
-    }
-    Ok(boxes)
-}
-
-#[cfg(unix)]
-fn r2o_merge_catalog(
-    base: &Catalog,
-    local: &Catalog,
-    external: &Catalog,
-) -> Result<Catalog, Box<dyn Error>> {
-    if r2o_catalog_persisted_eq(external, base)? {
-        return Ok(local.clone());
-    }
-    if r2o_catalog_persisted_eq(local, base)? {
-        let mut merged = external.clone();
-        r2o_preserve_runtime_catalog_state(local, &mut merged)?;
-        return Ok(merged);
-    }
-    if r2o_catalog_persisted_eq(local, external)? {
-        return Ok(local.clone());
-    }
-
-    let base_boxes = r2o_catalog_boxes_by_id(base, "исходном снимке")?;
-    let local_boxes = r2o_catalog_boxes_by_id(local, "локальном снимке")?;
-    let external_boxes = r2o_catalog_boxes_by_id(external, "текущем файле")?;
-    let mut ids = Vec::with_capacity(local.boxes.len() + external.boxes.len());
-    let mut seen = HashSet::with_capacity(ids.capacity());
-    for record in external.boxes.iter().chain(&local.boxes) {
-        if seen.insert(record.id.clone()) {
-            ids.push(record.id.clone());
-        }
-    }
-    let mut boxes = Vec::with_capacity(ids.len());
-    for id in ids {
-        let merged = r2o_merge_catalog_value(
-            base_boxes.get(&id).cloned(),
-            local_boxes.get(&id).cloned(),
-            external_boxes.get(&id).cloned(),
-            &format!("boxes[{id}]"),
-            r2o_serialized_persisted_eq,
-        )?;
-        if let Some(record) = merged {
-            boxes.push(record);
-        }
-    }
-
-    let mut merged = Catalog {
-        boxes,
-        domain_state: r2o_merge_catalog_value(
-            base.domain_state.clone(),
-            local.domain_state.clone(),
-            external.domain_state.clone(),
-            "domain_state",
-            r2o_domain_state_persisted_eq,
-        )?,
-        network_whitelist: r2o_merge_catalog_value(
-            r2o_persisted_network_whitelist(base.network_whitelist.clone()),
-            r2o_persisted_network_whitelist(local.network_whitelist.clone()),
-            r2o_persisted_network_whitelist(external.network_whitelist.clone()),
-            "network_whitelist",
-            r2o_serialized_persisted_eq,
-        )?,
-    };
-    r2o_preserve_runtime_catalog_state(local, &mut merged)?;
-    Ok(merged)
-}
-
-#[cfg(unix)]
 struct R2oCatalogPersistence {
     last_save: std::time::Instant,
     dirty: bool,
-    last_persisted: Catalog,
     catalog_snapshot: Arc<std::sync::Mutex<Catalog>>,
 }
 
 #[cfg(unix)]
 impl R2oCatalogPersistence {
-    fn new(
-        started: std::time::Instant,
-        last_persisted: Catalog,
-        catalog_snapshot: Arc<std::sync::Mutex<Catalog>>,
-    ) -> Self {
+    fn new(started: std::time::Instant, catalog_snapshot: Arc<std::sync::Mutex<Catalog>>) -> Self {
         Self {
             last_save: started,
             dirty: false,
-            last_persisted,
             catalog_snapshot,
         }
     }
@@ -1579,15 +1403,11 @@ impl R2oCatalogPersistence {
         path: &Path,
         wall_now: i64,
     ) -> Result<(), Box<dyn Error>> {
-        let (_lock, external) = locked_catalog(path, &self.last_persisted)?;
-        let merged = r2o_merge_catalog(&self.last_persisted, catalog, &external)?;
-        merged.save_atomic(path, wall_now)?;
-        self.last_persisted = merged.clone();
-        *catalog = merged.clone();
+        catalog.save_atomic(path, wall_now)?;
         *self
             .catalog_snapshot
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = merged;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = catalog.clone();
         self.dirty = false;
         Ok(())
     }
@@ -10051,12 +9871,8 @@ impl ControlClient {
             discovery
                 .as_ref()
                 .zip(catalog_snapshot.as_ref())
-                .map(|((catalog, _, _), snapshot)| {
-                    R2oCatalogPersistence::new(
-                        std::time::Instant::now(),
-                        catalog.clone(),
-                        Arc::clone(snapshot),
-                    )
+                .map(|(_, snapshot)| {
+                    R2oCatalogPersistence::new(std::time::Instant::now(), Arc::clone(snapshot))
                 });
         let mut discovery = discovery.map(|(catalog, path, mark)| {
             let mut worker = DiscoveryWorker::new_with_confirmation(
@@ -22538,11 +22354,8 @@ mod tests {
                 super::r2o_confirm_discovery_outcome(outcome, Ok(r2o_test_fetch_result()), true);
             let save_started = std::time::Instant::now();
             let catalog_snapshot = std::sync::Arc::new(std::sync::Mutex::new(catalog.clone()));
-            let mut persistence = super::R2oCatalogPersistence::new(
-                save_started,
-                catalog.clone(),
-                Arc::clone(&catalog_snapshot),
-            );
+            let mut persistence =
+                super::R2oCatalogPersistence::new(save_started, Arc::clone(&catalog_snapshot));
             let result = client.apply_discovery_outcome_with_input_and_persistence(
                 outcome,
                 &mut catalog,
@@ -22653,11 +22466,8 @@ mod tests {
             ..BoxRecord::default()
         });
         let catalog_snapshot = std::sync::Arc::new(std::sync::Mutex::new(initial_catalog.clone()));
-        let mut persistence = super::R2oCatalogPersistence::new(
-            std::time::Instant::now(),
-            initial_catalog,
-            catalog_snapshot,
-        );
+        let mut persistence =
+            super::R2oCatalogPersistence::new(std::time::Instant::now(), catalog_snapshot);
         persistence.mark_dirty();
 
         assert!(
@@ -22694,11 +22504,8 @@ mod tests {
         let mut catalog = Catalog::default();
         let started = std::time::Instant::now();
         let catalog_snapshot = std::sync::Arc::new(std::sync::Mutex::new(catalog.clone()));
-        let mut persistence = super::R2oCatalogPersistence::new(
-            started,
-            catalog.clone(),
-            Arc::clone(&catalog_snapshot),
-        );
+        let mut persistence =
+            super::R2oCatalogPersistence::new(started, Arc::clone(&catalog_snapshot));
 
         super::r2o_apply_network_whitelist_update(
             &mut catalog,
@@ -22749,9 +22556,17 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn delayed_catalog_persist_preserves_concurrent_distinct_box_updates() {
+    fn d2o_catalog_persist_overwrites_concurrent_external_update() {
+        let [local_id, external_id] = include_str!("../tests/fixtures/d2o_catalog_persist.tsv")
+            .lines()
+            .find(|line| !line.starts_with('#') && !line.trim().is_empty())
+            .unwrap()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
         let work = std::env::temp_dir().join(format!(
-            "r2o-catalog-interval-merge-{}-{}",
+            "r2o-catalog-persist-diff-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -22760,79 +22575,23 @@ mod tests {
         ));
         std::fs::create_dir(&work).unwrap();
         let path = work.join("catalog.json");
-        Catalog::default().save_atomic(&path, 1).unwrap();
-        let mut catalog = Catalog::default();
-        catalog.boxes.push(BoxRecord {
-            id: "local-update".into(),
-            ..BoxRecord::default()
-        });
-        let started = std::time::Instant::now();
-        let snapshot = std::sync::Arc::new(std::sync::Mutex::new(Catalog::default()));
-        let mut persistence =
-            super::R2oCatalogPersistence::new(started, Catalog::default(), snapshot);
-        super::persist_catalog_update(&catalog, &path, 2, Some(&mut persistence)).unwrap();
-
-        let (lock, mut external) = locked_catalog(&path, &Catalog::default()).unwrap();
-        external.boxes.push(BoxRecord {
-            id: "external-update".into(),
-            ..BoxRecord::default()
-        });
-        external.save_atomic(&path, 3).unwrap();
-        drop(lock);
-
-        assert!(
-            persistence
-                .persist_due(
-                    &mut catalog,
-                    &path,
-                    started + std::time::Duration::from_secs(60),
-                    62,
-                )
-                .unwrap()
-        );
-        let saved = Catalog::load(&path).unwrap();
-        assert_eq!(
-            saved
-                .boxes
-                .iter()
-                .map(|record| record.id.as_str())
-                .collect::<std::collections::HashSet<_>>(),
-            std::collections::HashSet::from(["local-update", "external-update"])
-        );
-        std::fs::remove_dir_all(work).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn delayed_catalog_persist_does_not_choose_a_winner_for_same_box_conflict() {
-        let work = std::env::temp_dir().join(format!(
-            "r2o-catalog-interval-conflict-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&work).unwrap();
-        let path = work.join("catalog.json");
-        let mut base = Catalog::default();
-        base.boxes.push(BoxRecord {
-            id: "shared-box".into(),
-            updated: 1,
-            ..BoxRecord::default()
-        });
+        let base = Catalog::default();
         base.save_atomic(&path, 1).unwrap();
         let mut local = base.clone();
-        local.boxes[0].updated = 2;
+        local.boxes.push(BoxRecord {
+            id: local_id.into(),
+            ..BoxRecord::default()
+        });
         let started = std::time::Instant::now();
         let snapshot = std::sync::Arc::new(std::sync::Mutex::new(base.clone()));
-        let mut persistence = super::R2oCatalogPersistence::new(started, base.clone(), snapshot);
+        let mut persistence = super::R2oCatalogPersistence::new(started, snapshot);
         super::persist_catalog_update(&local, &path, 2, Some(&mut persistence)).unwrap();
-
-        let (lock, mut external) = locked_catalog(&path, &base).unwrap();
-        external.boxes[0].updated = 3;
+        let mut external = base;
+        external.boxes.push(BoxRecord {
+            id: external_id.into(),
+            ..BoxRecord::default()
+        });
         external.save_atomic(&path, 3).unwrap();
-        drop(lock);
 
         assert!(
             persistence
@@ -22840,18 +22599,26 @@ mod tests {
                     &mut local,
                     &path,
                     started + std::time::Duration::from_secs(60),
-                    62,
+                    4,
                 )
-                .is_err()
+                .unwrap()
         );
-        assert_eq!(Catalog::load(&path).unwrap().boxes[0].updated, 3);
-        assert!(persistence.dirty);
+        let saved = Catalog::load(&path).unwrap();
+        let ids = saved
+            .boxes
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect::<Vec<_>>();
+        if let Ok(output) = std::env::var("R2O_CATALOG_PERSIST_DIFF_OUTPUT") {
+            std::fs::write(output, format!("{}\n", ids.join("\n"))).unwrap();
+        }
         std::fs::remove_dir_all(work).unwrap();
+        assert_eq!(ids, vec![local_id]);
     }
 
     #[cfg(unix)]
     #[test]
-    fn delayed_catalog_persist_ignores_runtime_only_binding_timestamp_for_conflicts() {
+    fn delayed_catalog_persist_keeps_runtime_timestamp_and_overwrites_external_update() {
         let work = std::env::temp_dir().join(format!(
             "r2o-catalog-runtime-merge-{}-{}",
             std::process::id(),
@@ -22881,7 +22648,7 @@ mod tests {
         let mut local = base.clone();
         local.boxes[0].bindings[0].recheck_mono = Some(started);
         let snapshot = std::sync::Arc::new(std::sync::Mutex::new(base.clone()));
-        let mut persistence = super::R2oCatalogPersistence::new(started, base.clone(), snapshot);
+        let mut persistence = super::R2oCatalogPersistence::new(started, snapshot);
         super::persist_catalog_update(&local, &path, 2, Some(&mut persistence)).unwrap();
 
         let (lock, mut external) = locked_catalog(&path, &base).unwrap();
@@ -22899,57 +22666,13 @@ mod tests {
                 )
                 .is_ok()
         );
-        assert_eq!(Catalog::load(&path).unwrap().boxes[0].updated, 3);
+        assert_eq!(Catalog::load(&path).unwrap().boxes[0].updated, 1);
         assert_eq!(local.boxes[0].bindings[0].recheck_mono, Some(started));
+        assert_eq!(
+            persistence.catalog_snapshot.lock().unwrap().boxes[0].bindings[0].recheck_mono,
+            Some(started)
+        );
         std::fs::remove_dir_all(work).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn catalog_merge_ignores_derived_domain_group_cache_for_conflicts() {
-        let base = Catalog {
-            domain_state: Some(r2o_controller::catalog::DomainState {
-                groups: vec![r2o_controller::catalog::DomainGroup {
-                    suffix: "example.com".into(),
-                    plan_id: "plan".into(),
-                    at: 1,
-                    ..r2o_controller::catalog::DomainGroup::default()
-                }],
-                ..r2o_controller::catalog::DomainState::default()
-            }),
-            ..Catalog::default()
-        };
-        let mut local = base.clone();
-        local.domain_state.as_mut().unwrap().groups[0].at = 2;
-        let mut external = base.clone();
-        external.domain_state.as_mut().unwrap().disabled = true;
-
-        let merged = super::r2o_merge_catalog(&base, &local, &external).unwrap();
-        assert!(merged.domain_state.unwrap().disabled);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn catalog_merge_ignores_an_unserialized_empty_network_whitelist() {
-        let mut base = Catalog::default();
-        base.boxes.push(BoxRecord {
-            id: "shared-box".into(),
-            updated: 1,
-            ..BoxRecord::default()
-        });
-        let mut local = base.clone();
-        local.boxes[0].updated = 2;
-        local.network_whitelist = Some(r2o_controller::catalog::NetworkWhitelist::default());
-        let mut external = base.clone();
-        external.network_whitelist = Some(r2o_controller::catalog::NetworkWhitelist {
-            name: "example.com".into(),
-            searched: true,
-            confirmed_at: Some(3),
-        });
-
-        let merged = super::r2o_merge_catalog(&base, &local, &external).unwrap();
-        assert_eq!(merged.boxes[0].updated, 2);
-        assert_eq!(merged.network_whitelist.unwrap().name, "example.com");
     }
 
     #[cfg(unix)]
