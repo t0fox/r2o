@@ -226,6 +226,11 @@
               <span>Порт локального Telegram-прокси</span>
               <input id="settings-tg-port" name="tg_port" type="number" inputmode="numeric" min="1" max="65535" step="1" required disabled>
             </label>
+            <label class="settings-field settings-check-field" for="settings-ppe-deoffload">
+              <input id="settings-ppe-deoffload" name="ppe_deoffload" type="checkbox" disabled>
+              <span>Разгрузка потоков через PPE Keenetic</span>
+              <small>Управляет только правилами R2O и не меняет общую настройку PPE.</small>
+            </label>
             <label class="settings-field" for="settings-log-max">
               <span>Максимальный размер журнала, байт</span>
               <input id="settings-log-max" name="log_max" type="number" inputmode="numeric" min="1024" max="67108864" step="1" required disabled>

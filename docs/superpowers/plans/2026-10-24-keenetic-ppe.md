@@ -44,26 +44,26 @@
 
 ### Task 2: Add the isolated PPE rule adapter
 
-**Files:** create `router/r2o-ppe-deoffload.sh` and `scripts/test-r2o-ppe-deoffload.sh`.
+**Files:** create `router/r2o-ppe-deoffload.sh` and `scripts/test-router-ppe-deoffload.sh`.
 
 **Interfaces:** Helper commands are `ensure`, `remove`, and `status [IPv4-address]`; it reads `R2O_PPE_*`, `PORTS`, `VOICE_PORTS`, and `HTTP_KEEPALIVE_PORTS` from the service environment.
 
 - [x] Write mock-iptables tests for rule count/shape, repeat ensure, owner-only remove, disabled mode, missing PPE target, IPv6 gating, and failure cleanup; confirm they fail because the helper is absent.
 - [x] Implement the minimum POSIX-shell adapter using tag `r2o-ppe`, paired TCP/UDP rules, connskip 30, donor HTTP keep-alive window, and xtables-lock fallback.
-- [x] Run `sh scripts/test-r2o-ppe-deoffload.sh`, `sh -n router/r2o-ppe-deoffload.sh`, and ShellCheck on both scripts.
+- [x] Run `sh scripts/test-router-ppe-deoffload.sh`, `sh -n router/r2o-ppe-deoffload.sh`, and ShellCheck on both scripts.
 - [x] Commit as `feat: add owned PPE deoffload adapter`.
 
 ### Task 3: Wire PPE into service and release lifecycle
 
-**Files:** `router/S99r2o`, create `router/001-r2o.sh`, `router/install.sh`, `router/uninstall.sh`, `scripts/package-release.sh`, `scripts/test-package-release.sh`, `scripts/test-router-firewall.sh`, create `scripts/test-router-ndm-hook.sh`, `.github/workflows/ci.yml`.
+**Files:** `router/S99r2o`, create `router/001-r2o.sh`, `router/install.sh`, `router/uninstall.sh`, `scripts/package-release.sh`, `scripts/test-package-release.sh`, create `scripts/test-router-ppe-service.sh` and `scripts/test-router-ndm-hook.sh`.
 
 **Interfaces:** Service start calls PPE `ensure` after firewall `up`; stop calls `remove`; reapply/heal restore owned rules; `status` prints adapter diagnostics. The installer adds the NDM hook only to an existing standard hook directory, and uninstall removes it only when its contents are still owned. The release archive includes both executable scripts.
 
-- [ ] Add lifecycle assertions proving `ensure` runs after firewall setup, `remove` runs on stop, and heal/reapply restore rules; confirm red against current service.
-- [ ] Add adapter path/config validation and nonfatal missing-target handling to `S99r2o`; ensure stop and uninstall remove R2O-owned rules.
-- [ ] Add the NDM hook and safe conditional installer/uninstaller handling; confirm `nat`/`mangle` heal and unrelated events are ignored.
-- [ ] Add both scripts to release packaging fixture expectations and run both PPE and NDM tests in existing mandatory router lifecycle CI.
-- [ ] Run `sh scripts/test-router-firewall.sh`, `sh scripts/test-package-release.sh`, all `scripts/test-router-*.sh`, ShellCheck, and `git diff --check`.
+- [x] Add lifecycle assertions proving `ensure` runs after firewall setup, `remove` runs on stop, and heal/reapply restore rules; confirm red against current service.
+- [x] Add adapter path/config validation and nonfatal missing-target handling to `S99r2o`; ensure stop and uninstall remove R2O-owned rules.
+- [x] Add the NDM hook and safe conditional installer/uninstaller handling; confirm `nat`/`mangle` heal and unrelated events are ignored.
+- [x] Add both scripts to release packaging fixture expectations and run both PPE and NDM tests in existing mandatory router lifecycle CI.
+- [x] Run `sh scripts/test-router-firewall.sh`, `sh scripts/test-package-release.sh`, all `scripts/test-router-*.sh`, ShellCheck, and CRLF-aware `git diff --check`.
 - [ ] Commit as `feat: wire PPE adapter into router lifecycle`.
 
 ### Task 4: Expose the setting in Lava
@@ -72,9 +72,9 @@
 
 **Interfaces:** `/api/config` reads/writes `ppe_deoffload` as a boolean backed by `R2O_PPE_DEOFFLOAD`; settings continue through the existing atomic save and `settings-restart` path.
 
-- [ ] Add API/browser regressions for reading enabled/disabled values, saving each value, and rejecting non-booleans; confirm they fail because the setting is absent.
-- [ ] Add the field to editable settings and a disabled-by-default-until-controls-enabled Lava checkbox labeled for router PPE visibility.
-- [ ] Run `cargo +1.98.0 test -p r2o-panel --locked`, headless Chrome panel tests, full workspace tests, and `cargo +1.98.0 fmt --all -- --check`.
+- [x] Add API/browser regressions for reading enabled/disabled values, saving each value, and rejecting non-booleans; confirm they fail because the setting is absent.
+- [x] Add the field to editable settings and a disabled-by-default-until-controls-enabled Lava checkbox labeled for router PPE visibility.
+- [x] Run `cargo +1.98.0 test -p r2o-panel --locked`, headless Chrome panel tests, full workspace tests, and `cargo +1.98.0 fmt --all -- --check`.
 - [ ] Commit as `feat: expose PPE visibility setting in Lava`.
 
 ### Task 5: Full acceptance and review
@@ -92,3 +92,5 @@
 - Ruling: Keep PPE insertion failure nonfatal to ordinary NFQUEUE startup — this matches donor behavior and preserves service availability — cost if wrong: discovery may have lower visibility while status reports the incomplete adapter.
 - Task 1: importer regression observed RED, manager CLI suite 11/11 and formatter passed GREEN.
 - Task 2: mock-iptables suite observed RED while the adapter was absent; helper passed idempotence, owner isolation, disable, no-target, IPv6, invalid-input, and partial-failure cases. `sh -n` and ShellCheck passed.
+- Task 3: the initial reapply service regression observed RED; the shell suite, NDM filtering, package fixture, clean install/update/rollback/uninstall, foreign-hook collision, and edited-hook preservation pass. The adapter status now reports exact IPv4 PPE binds and last IPv4/IPv6 datapath visibility summaries, matching donor diagnostics without claiming live RTP.
+- Task 4: API settings regression observed RED on missing `ppe_deoffload`; `/api/config` now reads, validates, and writes both boolean values, and the Lava checkbox saves through `settings-restart`. HTTP API tests pass 17/17, headless Chrome passes, full `cargo +1.98.0 test --workspace --locked` passes, and format checks pass.

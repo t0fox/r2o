@@ -823,6 +823,9 @@ main { min-width: 0; }
   color: var(--ink); font: 600 .9375rem var(--sans);
 }
 .settings-field input:focus, .settings-field select:focus { border-color: rgba(192, 132, 252, .6); box-shadow: 0 0 0 4px rgba(168, 85, 247, .15); outline: 0; }
+.settings-check-field { display: grid; grid-template-columns: 22px minmax(0, 1fr); align-items: center; align-content: center; column-gap: 10px; min-height: 46px; }
+.settings-check-field input[type=checkbox] { grid-row: span 2; width: 20px; min-height: 20px; padding: 0; accent-color: #a855f7; }
+.settings-check-field small { color: var(--ink-3); font-size: .75rem; font-weight: 500; }
 .settings-field :disabled { opacity: .55; cursor: not-allowed; }
 .settings-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line); }
 .settings-status { flex: 1 1 240px; min-height: 1.4em; color: var(--ink-3); font-size: .875rem; }

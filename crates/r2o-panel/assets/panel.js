@@ -532,6 +532,7 @@
           typeof data.ports !== "string" || typeof data.connbytes !== "string" ||
           typeof data.voice_ports !== "string" || typeof data.voice_connbytes !== "string" ||
           typeof data.http_keepalive_ports !== "string" || typeof data.dns_ports !== "string" ||
+          typeof data.ppe_deoffload !== "boolean" ||
           !Number.isInteger(data.tg_port) || data.tg_port < 1 || data.tg_port > 65535 ||
           !["auto", "iptables", "nft"].includes(data.firewall_backend) ||
           !Number.isInteger(data.log_max) || !Number.isInteger(data.log_keep) ||
@@ -554,6 +555,7 @@
       self.$("settings-http-keepalive-ports").value = data.http_keepalive_ports;
       self.$("settings-dns-ports").value = data.dns_ports;
       self.$("settings-tg-port").value = String(data.tg_port);
+      self.$("settings-ppe-deoffload").checked = data.ppe_deoffload;
       self.$("settings-log-max").value = String(data.log_max);
       self.$("settings-log-keep").value = String(data.log_keep);
       self.$("settings-log-every").value = String(data.log_every);
@@ -590,6 +592,7 @@
       http_keepalive_ports: this.$("settings-http-keepalive-ports").value.trim(),
       dns_ports: this.$("settings-dns-ports").value.trim(),
       tg_port: Number(this.$("settings-tg-port").value),
+      ppe_deoffload: this.$("settings-ppe-deoffload").checked,
       log_max: Number(this.$("settings-log-max").value),
       log_keep: Number(this.$("settings-log-keep").value),
       log_every: Number(this.$("settings-log-every").value)
@@ -623,6 +626,7 @@
       self.$("settings-http-keepalive-ports").value = settings.http_keepalive_ports;
       self.$("settings-dns-ports").value = settings.dns_ports;
       self.$("settings-tg-port").value = String(settings.tg_port);
+      self.$("settings-ppe-deoffload").checked = settings.ppe_deoffload;
       self.$("settings-log-max").value = String(settings.log_max);
       self.$("settings-log-keep").value = String(settings.log_keep);
       self.$("settings-log-every").value = String(settings.log_every);

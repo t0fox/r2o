@@ -56,7 +56,7 @@ async function main() {
   const configPath = path.join(work, "config");
   const serviceLog = path.join(work, "service.log");
   const servicePath = path.join(work, "service.sh");
-  fs.writeFileSync(configPath, `MODE=observe\nSTATE_DIR=${path.join(work, "state")}\nQUEUE_NUM=2000\nQUEUE_NUM6=2001\nR2O_FLOW_CAPACITY=2048\nIPV6_ENABLED=1\nMARK=45\nPROBE_MARK=0\nONLY_MARK=\nFW_BACKEND=auto\nPORTS=0:65535\nCONNBYTES=0:8\nVOICE_PORTS=50000:50099,1400,3478:3481,5349,19294:19344\nVOICE_CONNBYTES=0:4\nHTTP_KEEPALIVE_PORTS=80\nDNS_PORTS=53,853\nTG_PORT=1443\nLOGMAX=2097152\nLOGKEEP=1048576\nLOG_EVERY=60\n`);
+  fs.writeFileSync(configPath, `MODE=observe\nSTATE_DIR=${path.join(work, "state")}\nQUEUE_NUM=2000\nQUEUE_NUM6=2001\nR2O_FLOW_CAPACITY=2048\nIPV6_ENABLED=1\nMARK=45\nPROBE_MARK=0\nONLY_MARK=\nFW_BACKEND=auto\nPORTS=0:65535\nCONNBYTES=0:8\nVOICE_PORTS=50000:50099,1400,3478:3481,5349,19294:19344\nVOICE_CONNBYTES=0:4\nHTTP_KEEPALIVE_PORTS=80\nDNS_PORTS=53,853\nTG_PORT=1443\nR2O_PPE_DEOFFLOAD=1\nLOGMAX=2097152\nLOGKEEP=1048576\nLOG_EVERY=60\n`);
   fs.writeFileSync(servicePath, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${serviceLog}'\n`);
   fs.chmodSync(servicePath, 0o700);
   panel = spawn(panelBinary, [
@@ -160,8 +160,9 @@ async function main() {
   assert.equal(await evaluate("document.querySelectorAll('script:not([src])').length"), 0, "встроенные скрипты макета не исполняются");
   await waitFor(() => evaluate("document.querySelector('#now-title').textContent !== 'Получаем состояние…'"), "состояние из /api/status");
   assert.equal(await evaluate("document.querySelector('#r2o-settings') !== null"), true, "доступен раздел настроек");
-  assert.equal(await evaluate("document.querySelectorAll('#r2o-settings-form input, #r2o-settings-form select').length === 19"), true, "форма содержит параметры datapath, firewall и Telegram");
+  assert.equal(await evaluate("document.querySelectorAll('#r2o-settings-form input, #r2o-settings-form select').length === 20"), true, "форма содержит параметры datapath, firewall, PPE и Telegram");
   await waitFor(() => evaluate("document.querySelector('#settings-mode').value === 'observe' && document.querySelector('#settings-queue').value === '2000' && document.querySelector('#settings-queue6').value === '2001' && document.querySelector('#settings-firewall').value === 'auto'"), "загрузка текущих настроек");
+  assert.equal(await evaluate("document.querySelector('#settings-ppe-deoffload').checked"), true, "форма загружает настройку PPE");
   assert.equal(await evaluate("document.querySelector('[data-control=\\\"settings\\\"]') === null"), true, "шапка соответствует макету");
 
   for (const [name, width, height] of [
@@ -199,7 +200,7 @@ async function main() {
   assert.equal(await evaluate("location.hash"), "#telegram", "ссылка навигации открывает раздел Telegram");
   await evaluate(`document.querySelector('a[href="#r2o-settings"]').click()`);
   assert.equal(await evaluate("location.hash"), "#r2o-settings", "ссылка навигации открывает настройки");
-  await evaluate("document.querySelector('#settings-mode').value = 'apply'; document.querySelector('#settings-queue').value = '321'; document.querySelector('#settings-queue6').value = '322'; document.querySelector('#settings-capacity').value = '4096'; document.querySelector('#settings-ipv6').value = 'false'; document.querySelector('#settings-mark').value = '0x2d'; document.querySelector('#settings-probe-mark').value = '7'; document.querySelector('#settings-only-mark').value = '9/255'; document.querySelector('#settings-firewall').value = 'nft'; document.querySelector('#settings-ports').value = '80,443'; document.querySelector('#settings-connbytes').value = '0:12'; document.querySelector('#settings-voice-ports').value = '3478:3481'; document.querySelector('#settings-voice-connbytes').value = '0:6'; document.querySelector('#settings-http-keepalive-ports').value = '8080'; document.querySelector('#settings-dns-ports').value = '53,853,5353'; document.querySelector('#settings-tg-port').value = '1444'; document.querySelector('#settings-log-max').value = '4194304'; document.querySelector('#settings-log-keep').value = '2097152'; document.querySelector('#settings-log-every').value = '120'; document.querySelector('#r2o-settings-form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))");
+  await evaluate("document.querySelector('#settings-mode').value = 'apply'; document.querySelector('#settings-queue').value = '321'; document.querySelector('#settings-queue6').value = '322'; document.querySelector('#settings-capacity').value = '4096'; document.querySelector('#settings-ipv6').value = 'false'; document.querySelector('#settings-mark').value = '0x2d'; document.querySelector('#settings-probe-mark').value = '7'; document.querySelector('#settings-only-mark').value = '9/255'; document.querySelector('#settings-firewall').value = 'nft'; document.querySelector('#settings-ports').value = '80,443'; document.querySelector('#settings-connbytes').value = '0:12'; document.querySelector('#settings-voice-ports').value = '3478:3481'; document.querySelector('#settings-voice-connbytes').value = '0:6'; document.querySelector('#settings-http-keepalive-ports').value = '8080'; document.querySelector('#settings-dns-ports').value = '53,853,5353'; document.querySelector('#settings-tg-port').value = '1444'; document.querySelector('#settings-ppe-deoffload').checked = false; document.querySelector('#settings-log-max').value = '4194304'; document.querySelector('#settings-log-keep').value = '2097152'; document.querySelector('#settings-log-every').value = '120'; document.querySelector('#r2o-settings-form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))");
   await waitFor(async () => {
     const config = fs.readFileSync(configPath, "utf8");
     return config.includes("MODE=apply") && config.includes("QUEUE_NUM=321") &&
@@ -209,7 +210,7 @@ async function main() {
       config.includes("PORTS=80,443") && config.includes("CONNBYTES=0:12") &&
       config.includes("VOICE_PORTS=3478:3481") && config.includes("VOICE_CONNBYTES=0:6") &&
       config.includes("HTTP_KEEPALIVE_PORTS=8080") && config.includes("DNS_PORTS=53,853,5353") &&
-      config.includes("TG_PORT=1444") &&
+      config.includes("TG_PORT=1444") && config.includes("R2O_PPE_DEOFFLOAD=0") &&
       config.includes("LOGMAX=4194304") && config.includes("LOGKEEP=2097152") &&
       config.includes("LOG_EVERY=120");
   }, "сохранение настроек из панели");

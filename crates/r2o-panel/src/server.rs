@@ -57,6 +57,7 @@ pub struct Config {
     pub http_keepalive_ports: String,
     pub dns_ports: String,
     pub tg_port: u16,
+    pub ppe_deoffload: bool,
     pub log_max: u32,
     pub log_keep: u32,
     pub log_every: u16,
@@ -106,6 +107,7 @@ impl Default for Config {
             http_keepalive_ports: "80".into(),
             dns_ports: "53,853".into(),
             tg_port: 1443,
+            ppe_deoffload: true,
             log_max: 2_097_152,
             log_keep: 1_048_576,
             log_every: 60,
@@ -972,6 +974,7 @@ fn r2o_api_config(config: &Config, request: &Request<'_>) -> Response {
                 "http_keepalive_ports":settings.http_keepalive_ports,
                 "dns_ports":settings.dns_ports,
                 "tg_port":settings.tg_port,
+                "ppe_deoffload":settings.ppe_deoffload,
                 "log_max":settings.log_max,
                 "log_keep":settings.log_keep,
                 "log_every":settings.log_every,
@@ -1061,6 +1064,7 @@ struct EditableSettings {
     http_keepalive_ports: String,
     dns_ports: String,
     tg_port: u16,
+    ppe_deoffload: bool,
     log_max: u32,
     log_keep: u32,
     log_every: u16,
@@ -1072,7 +1076,7 @@ fn r2o_config_from_json(body: &[u8]) -> Result<EditableSettings, ()> {
     }
     let value: Value = serde_json::from_slice(body).map_err(|_| ())?;
     let object = value.as_object().ok_or(())?;
-    const KEYS: [&str; 19] = [
+    const KEYS: [&str; 20] = [
         "mode",
         "queue_num",
         "queue_num6",
@@ -1089,6 +1093,7 @@ fn r2o_config_from_json(body: &[u8]) -> Result<EditableSettings, ()> {
         "http_keepalive_ports",
         "dns_ports",
         "tg_port",
+        "ppe_deoffload",
         "log_max",
         "log_keep",
         "log_every",
@@ -1141,6 +1146,10 @@ fn r2o_config_from_json(body: &[u8]) -> Result<EditableSettings, ()> {
     if tg_port == 0 {
         return Err(());
     }
+    let ppe_deoffload = object
+        .get("ppe_deoffload")
+        .and_then(Value::as_bool)
+        .ok_or(())?;
     let log_max = r2o_json_u32(object, "log_max")?;
     let log_keep = r2o_json_u32(object, "log_keep")?;
     let log_every = r2o_json_u16(object, "log_every")?;
@@ -1167,6 +1176,7 @@ fn r2o_config_from_json(body: &[u8]) -> Result<EditableSettings, ()> {
         http_keepalive_ports,
         dns_ports,
         tg_port,
+        ppe_deoffload,
         log_max,
         log_keep,
         log_every,
@@ -1505,6 +1515,10 @@ fn r2o_write_settings_config(path: &Path, settings: &EditableSettings) -> std::i
         ),
         ("DNS_PORTS", settings.dns_ports.clone()),
         ("TG_PORT", settings.tg_port.to_string()),
+        (
+            "R2O_PPE_DEOFFLOAD",
+            (if settings.ppe_deoffload { "1" } else { "0" }).into(),
+        ),
         ("LOGMAX", settings.log_max.to_string()),
         ("LOGKEEP", settings.log_keep.to_string()),
         ("LOG_EVERY", settings.log_every.to_string()),
@@ -2276,6 +2290,13 @@ pub fn parse_config(
                     return Err(r2o_invalid_config(key));
                 }
                 config.tg_port = port;
+            }
+            "R2O_PPE_DEOFFLOAD" => {
+                config.ppe_deoffload = match value {
+                    "0" => false,
+                    "1" => true,
+                    _ => return Err(r2o_invalid_config(key)),
+                };
             }
             "LOGMAX" => {
                 config.log_max = r2o_config_log_size(key, value)?;

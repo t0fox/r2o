@@ -492,7 +492,7 @@ fn r2o_settings_are_read_saved_and_restart_services() {
     let service_log = temp.file("service-arguments");
     fs::write(
         &config_path,
-        "# Основные настройки\nMODE=observe # режим R2O\nQUEUE_NUM=2000 # очередь IPv4\nQUEUE_NUM6=2001\nR2O_FLOW_CAPACITY=2048\nIPV6_ENABLED=1\nMARK=45\nPROBE_MARK=0\nONLY_MARK=\nFW_BACKEND=auto\nPORTS=0:65535\nCONNBYTES=0:8\nVOICE_PORTS=50000:50099,1400,3478:3481,5349,19294:19344\nVOICE_CONNBYTES=0:4\nHTTP_KEEPALIVE_PORTS=80\nDNS_PORTS=53,853\nTG_PORT=1445\nLOGMAX=2097152\nLOGKEEP=1048576\nLOG_EVERY=60\nKEEP_ME=yes\n",
+        "# Основные настройки\nMODE=observe # режим R2O\nQUEUE_NUM=2000 # очередь IPv4\nQUEUE_NUM6=2001\nR2O_FLOW_CAPACITY=2048\nIPV6_ENABLED=1\nMARK=45\nPROBE_MARK=0\nONLY_MARK=\nFW_BACKEND=auto\nPORTS=0:65535\nCONNBYTES=0:8\nVOICE_PORTS=50000:50099,1400,3478:3481,5349,19294:19344\nVOICE_CONNBYTES=0:4\nHTTP_KEEPALIVE_PORTS=80\nDNS_PORTS=53,853\nTG_PORT=1445\nR2O_PPE_DEOFFLOAD=1\nLOGMAX=2097152\nLOGKEEP=1048576\nLOG_EVERY=60\nKEEP_ME=yes\n",
     )
     .unwrap();
     fs::write(
@@ -535,12 +535,13 @@ fn r2o_settings_are_read_saved_and_restart_services() {
     assert_eq!(r2o_settings["http_keepalive_ports"], "80");
     assert_eq!(r2o_settings["dns_ports"], "53,853");
     assert_eq!(r2o_settings["tg_port"], 1445);
+    assert_eq!(r2o_settings["ppe_deoffload"], true);
     assert_eq!(r2o_settings["log_max"], 2097152);
     assert_eq!(r2o_settings["log_keep"], 1048576);
     assert_eq!(r2o_settings["log_every"], 60);
     assert_eq!(r2o_settings["editable"], true);
 
-    let r2o_body = r#"{"mode":"apply","queue_num":321,"queue_num6":322,"flow_capacity":4096,"ipv6_enabled":false,"mark":"0x2d","probe_mark":"7","only_mark":"9/255","firewall_backend":"nft","ports":"80,443","connbytes":"0:12","voice_ports":"3478:3481","voice_connbytes":"0:6","http_keepalive_ports":"8080","dns_ports":"53,853,5353","tg_port":1444,"log_max":4194304,"log_keep":2097152,"log_every":120}"#;
+    let r2o_body = r#"{"mode":"apply","queue_num":321,"queue_num6":322,"flow_capacity":4096,"ipv6_enabled":false,"mark":"0x2d","probe_mark":"7","only_mark":"9/255","firewall_backend":"nft","ports":"80,443","connbytes":"0:12","voice_ports":"3478:3481","voice_connbytes":"0:6","http_keepalive_ports":"8080","dns_ports":"53,853,5353","tg_port":1444,"ppe_deoffload":false,"log_max":4194304,"log_keep":2097152,"log_every":120}"#;
     let r2o_raw = format!(
         "POST /api/config HTTP/1.1\r\nHost: router.local\r\nOrigin: http://router.local\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{r2o_body}",
         r2o_body.len()
@@ -548,7 +549,7 @@ fn r2o_settings_are_read_saved_and_restart_services() {
     let r2o_response = handle_request(&config, r2o_raw.as_bytes());
     assert_eq!(r2o_response.status, 202);
 
-    let r2o_saved = fs::read_to_string(config_path).unwrap();
+    let r2o_saved = fs::read_to_string(&config_path).unwrap();
     assert!(r2o_saved.contains("# Основные настройки\n"));
     assert!(r2o_saved.contains("KEEP_ME=yes\n"));
     assert_eq!(r2o_saved.matches("MODE=").count(), 1);
@@ -569,6 +570,7 @@ fn r2o_settings_are_read_saved_and_restart_services() {
     assert!(r2o_saved.contains("HTTP_KEEPALIVE_PORTS=8080\n"));
     assert!(r2o_saved.contains("DNS_PORTS=53,853,5353\n"));
     assert!(r2o_saved.contains("TG_PORT=1444\n"));
+    assert!(r2o_saved.contains("R2O_PPE_DEOFFLOAD=0\n"));
     assert!(r2o_saved.contains("LOGMAX=4194304\n"));
     assert!(r2o_saved.contains("LOGKEEP=2097152\n"));
     assert!(r2o_saved.contains("LOG_EVERY=120\n"));
@@ -585,9 +587,17 @@ fn r2o_settings_are_read_saved_and_restart_services() {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert_eq!(r2o_arguments, "settings-restart\n");
+    let (r2o_disabled_status, _, r2o_disabled_body) = request(
+        &config,
+        "GET /api/config HTTP/1.1\r\nHost: router.local\r\n\r\n",
+    );
+    assert_eq!(r2o_disabled_status, 200);
+    let r2o_disabled_settings: Value = serde_json::from_str(&r2o_disabled_body).unwrap();
+    assert_eq!(r2o_disabled_settings["ppe_deoffload"], false);
 
     let mut r2o_off_settings: Value = serde_json::from_str(r2o_body).unwrap();
     r2o_off_settings["mode"] = Value::String("off".into());
+    r2o_off_settings["ppe_deoffload"] = Value::Bool(true);
     let r2o_off_body = r2o_off_settings.to_string();
     let r2o_off_raw = format!(
         "POST /api/config HTTP/1.1\r\nHost: router.local\r\nOrigin: http://router.local\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{r2o_off_body}",
@@ -615,6 +625,18 @@ fn r2o_settings_are_read_saved_and_restart_services() {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert_eq!(r2o_stop_arguments, "settings-restart\n");
+    assert!(
+        fs::read_to_string(config_path)
+            .unwrap()
+            .contains("R2O_PPE_DEOFFLOAD=1\n")
+    );
+    let (r2o_enabled_status, _, r2o_enabled_body) = request(
+        &config,
+        "GET /api/config HTTP/1.1\r\nHost: router.local\r\n\r\n",
+    );
+    assert_eq!(r2o_enabled_status, 200);
+    let r2o_enabled_settings: Value = serde_json::from_str(&r2o_enabled_body).unwrap();
+    assert_eq!(r2o_enabled_settings["ppe_deoffload"], true);
 }
 
 #[test]
@@ -632,7 +654,8 @@ fn r2o_settings_reject_invalid_firewall_port_lists_and_connbytes_windows() {
         "firewall_backend":"auto", "ports":"0:65535", "connbytes":"0:8",
         "voice_ports":"50000:50099,1400,3478:3481,5349,19294:19344",
         "voice_connbytes":"0:4", "http_keepalive_ports":"80", "dns_ports":"53,853",
-        "tg_port":1443, "log_max":2097152, "log_keep":1048576, "log_every":60
+        "tg_port":1443, "ppe_deoffload":true,
+        "log_max":2097152, "log_keep":1048576, "log_every":60
     });
     for (key, value) in [
         ("ports", "80:80"),
@@ -659,6 +682,17 @@ fn r2o_settings_reject_invalid_firewall_port_lists_and_connbytes_windows() {
             "{key}={value}"
         );
     }
+    let mut invalid_ppe = valid.clone();
+    invalid_ppe["ppe_deoffload"] = Value::String("false".into());
+    let invalid_ppe = invalid_ppe.to_string();
+    let invalid_ppe_raw = format!(
+        "POST /api/config HTTP/1.1\r\nHost: router.local\r\nOrigin: http://router.local\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{invalid_ppe}",
+        invalid_ppe.len()
+    );
+    assert_eq!(
+        handle_request(&config, invalid_ppe_raw.as_bytes()).status,
+        400
+    );
     assert_eq!(fs::read_to_string(config_path).unwrap(), before);
 }
 
