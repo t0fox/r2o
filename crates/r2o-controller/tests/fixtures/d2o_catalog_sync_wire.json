@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "updated": "2026-10-24T00:00:00Z",
+  "boxes": [
+    {
+      "id": "wire-order-box",
+      "created": "2026-10-24T00:00:00Z",
+      "updated": "2026-10-24T00:00:00Z",
+      "fingerprint": { "method": 2, "signals": [] },
+      "plans": [
+        {
+          "id": "small-plan",
+          "proto": "tls",
+          "text": "d2k-plan 1 1\nid 00000000000000000000000000000000\nproto tcp tls\npayload 1 00\npoison 1 badsum\nfake payload=1 poison=1 repeats=1 gap_us=0 place=before\norder forward\n",
+          "added": "2026-10-24T00:00:00Z",
+          "successes": 1,
+          "enabled": true
+        },
+        {
+          "id": "large-plan",
+          "proto": "tls",
+          "text": "d2k-plan 1 5\nid 00000000000000000000000000000000\nproto tcp tls\ninput tls-sni\npayload-pad 1 1400 15\npoison 1 badsum\nfake payload=1 poison=1 repeats=1 gap_us=0 place=before\nsegment 1400\nwire detect-tcp-v1\norder forward\n",
+          "added": "2026-10-24T00:00:00Z",
+          "successes": 1,
+          "enabled": true
+        }
+      ],
+      "bindings": [
+        {
+          "kind": "name",
+          "target": "small.example",
+          "plan_id": "small-plan",
+          "level": 3,
+          "confirmed": "2026-10-24T00:00:00Z",
+          "successes": 1,
+          "enabled": true,
+          "transport": 6,
+          "family": 4,
+          "shape": 1,
+          "verified_by": 1
+        },
+        {
+          "kind": "name",
+          "target": "large.example",
+          "plan_id": "large-plan",
+          "level": 3,
+          "confirmed": "2026-10-24T00:00:00Z",
+          "successes": 1,
+          "enabled": true,
+          "transport": 6,
+          "family": 4,
+          "shape": 1,
+          "verified_by": 1
+        }
+      ]
+    }
+  ]
+}

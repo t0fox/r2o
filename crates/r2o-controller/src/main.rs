@@ -1757,9 +1757,15 @@ fn clear_catalog(path: PathBuf) -> Result<(), Box<dyn Error>> {
 }
 
 #[cfg(unix)]
+enum CatalogInstallOp {
+    Command(usize),
+    CleanupName { host: String, command: Vec<u8> },
+}
+
+#[cfg(unix)]
 struct CompiledCatalog {
     commands: Vec<(String, Vec<u8>)>,
-    cleanup_commands: Vec<(String, Vec<u8>)>,
+    install_order: Vec<CatalogInstallOp>,
     group_commands: Vec<(usize, r2o_controller::live::LiveGroupKey)>,
     skipped: usize,
     tcp_stall_budgets: Vec<u16>,
@@ -1964,7 +1970,7 @@ fn catalog_commands_with_send_cap(
     now: i64,
 ) -> Result<CompiledCatalog, Box<dyn Error>> {
     let mut commands = Vec::new();
-    let mut cleanup_commands = Vec::new();
+    let mut install_order = Vec::new();
     let mut group_commands = Vec::new();
     let mut skipped = 0_usize;
     let mut selection_catalog = catalog.clone();
@@ -2031,6 +2037,7 @@ fn catalog_commands_with_send_cap(
                     continue;
                 };
                 commands.push((binding.target.clone(), command));
+                install_order.push(CatalogInstallOp::Command(commands.len() - 1));
                 continue;
             }
             if binding.kind != "name" {
@@ -2088,7 +2095,10 @@ fn catalog_commands_with_send_cap(
                     },
                     r2o_catalog_binding_family(binding),
                 ) {
-                    cleanup_commands.push((binding.target.clone(), delete));
+                    install_order.push(CatalogInstallOp::CleanupName {
+                        host: binding.target.clone(),
+                        command: delete,
+                    });
                 }
                 skipped += 1;
                 continue;
@@ -2098,6 +2108,7 @@ fn catalog_commands_with_send_cap(
                 continue;
             };
             commands.push((binding.target.clone(), command));
+            install_order.push(CatalogInstallOp::Command(commands.len() - 1));
         }
     }
     if let Some(domain_state) = &catalog.domain_state {
@@ -2196,15 +2207,19 @@ fn catalog_commands_with_send_cap(
             .map_err(|error| format!("SET_BYPASS для {}: {error}", observation.name))?;
             bypass_commands.push((format!("исключение {}", observation.name), command));
         }
-        commands.extend(bypass_commands);
+        for (host, command) in bypass_commands {
+            commands.push((host, command));
+            install_order.push(CatalogInstallOp::Command(commands.len() - 1));
+        }
         for (host, command, key) in suffix_commands {
             group_commands.push((commands.len(), key));
             commands.push((host, command));
+            install_order.push(CatalogInstallOp::Command(commands.len() - 1));
         }
     }
     Ok(CompiledCatalog {
         commands,
-        cleanup_commands,
+        install_order,
         group_commands,
         skipped,
         tcp_stall_budgets: r2o_tcp_stall_budgets(catalog),
@@ -2894,12 +2909,22 @@ fn install_catalog_with_policy(
     continue_plan_refusals: bool,
 ) -> Result<CatalogInstallSummary, Box<dyn Error>> {
     let mut summary = CatalogInstallSummary::default();
-    for (host, command) in &compiled.cleanup_commands {
-        if let Err(error) = client.send_command(command, control::COMMAND_DEL_NAME) {
-            eprintln!("по {host} привязку невлезающего плана не удалось снять с провода: {error}");
-        }
-    }
-    for (command_index, (host, command)) in compiled.commands.iter().enumerate() {
+    for operation in &compiled.install_order {
+        let command_index = match operation {
+            CatalogInstallOp::Command(index) => index,
+            CatalogInstallOp::CleanupName { host, command } => {
+                if let Err(error) = client.send_command(command, control::COMMAND_DEL_NAME) {
+                    eprintln!(
+                        "по {host} привязку невлезающего плана не удалось снять с провода: {error}"
+                    );
+                }
+                continue;
+            }
+        };
+        let (host, command) = compiled
+            .commands
+            .get(*command_index)
+            .ok_or("индекс команды каталога вне собранного списка")?;
         let expected = command
             .get(4..6)
             .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
@@ -2933,7 +2958,7 @@ fn install_catalog_with_policy(
         if let Some((_, key)) = compiled
             .group_commands
             .iter()
-            .find(|(index, _)| *index == command_index)
+            .find(|(index, _)| index == command_index)
         {
             summary.installed_groups.push(key.clone());
         }
@@ -15274,6 +15299,78 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn catalog_sync_shared_donor_file_preserves_install_order() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("r2o-catalog-wire-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let donor = directory.join("donor.json");
+        let migrated = directory.join("r2o.json");
+        std::fs::write(
+            &donor,
+            include_bytes!("../tests/fixtures/d2o_catalog_sync_wire.json"),
+        )
+        .unwrap();
+        assert!(Catalog::import_donor_file(&donor, &migrated, 100).unwrap());
+        let mut catalog = Catalog::load(&migrated).unwrap();
+        let compiled = super::catalog_commands_with_send_cap(&mut catalog, 1280, 100).unwrap();
+        assert_eq!(compiled.commands.len(), 1);
+        assert_eq!(
+            compiled
+                .install_order
+                .iter()
+                .filter(|operation| matches!(
+                    operation,
+                    super::CatalogInstallOp::CleanupName { .. }
+                ))
+                .count(),
+            1
+        );
+
+        let socket_path = directory.join("control.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            peer.write_all(&encode_greeting(u16::MAX as u32).unwrap())
+                .unwrap();
+            let mut operations = Vec::new();
+            for _ in 0..2 {
+                let frame = read_frame(&mut peer).unwrap();
+                let name_len = usize::from(frame.body[0]);
+                let name = std::str::from_utf8(&frame.body[1..1 + name_len]).unwrap();
+                let command = match frame.kind {
+                    r2k_core::control::COMMAND_DEL_NAME => "DEL_NAME",
+                    COMMAND_SET_NAME => "SET_NAME",
+                    kind => panic!("unexpected command {kind:#06x}"),
+                };
+                operations.push(format!("D2O_CATALOG_OP={command}:{name}"));
+                peer.write_all(&encode_ack(frame.kind, true, r2k_core::control::ACK_OK).unwrap())
+                    .unwrap();
+            }
+            operations
+        });
+        let mut client = ControlClient::connect(socket_path).unwrap();
+        let summary = super::install_catalog_with_policy(&mut client, &compiled, true).unwrap();
+        assert_eq!(summary.installed, 1);
+        let operations = server.join().unwrap();
+        assert_eq!(
+            operations,
+            [
+                "D2O_CATALOG_OP=SET_NAME:small.example",
+                "D2O_CATALOG_OP=DEL_NAME:large.example"
+            ]
+        );
+        for command in operations {
+            println!("{command}");
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn catalog_sync_matches_donor_exact_context_winner_and_unusable_fallbacks() {
         fn binding(plan_id: &str, shape: u8, family: u8, confirmed: i64) -> Binding {
             Binding {
@@ -15415,16 +15512,27 @@ mod tests {
             let binding = &catalog.boxes[0].bindings[0];
             if should_fit {
                 assert_eq!(compiled.commands.len(), 1, "send_cap={send_cap}");
-                assert!(compiled.cleanup_commands.is_empty(), "send_cap={send_cap}");
+                assert!(
+                    !compiled.install_order.iter().any(|operation| matches!(
+                        operation,
+                        super::CatalogInstallOp::CleanupName { .. }
+                    )),
+                    "send_cap={send_cap}"
+                );
                 assert_eq!(binding.recheck_since, None, "send_cap={send_cap}");
             } else {
                 assert!(compiled.commands.is_empty());
-                assert_eq!(compiled.cleanup_commands.len(), 1);
+                let cleanup = compiled
+                    .install_order
+                    .iter()
+                    .find_map(|operation| match operation {
+                        super::CatalogInstallOp::CleanupName { command, .. } => Some(command),
+                        super::CatalogInstallOp::Command(_) => None,
+                    })
+                    .unwrap();
                 assert_eq!(binding.recheck_since, Some(100));
                 assert_eq!(
-                    read_frame(&mut std::io::Cursor::new(&compiled.cleanup_commands[0].1))
-                        .unwrap()
-                        .kind,
+                    read_frame(&mut std::io::Cursor::new(cleanup)).unwrap().kind,
                     r2k_core::control::COMMAND_DEL_NAME
                 );
             }
@@ -15443,7 +15551,17 @@ mod tests {
         fixture.save_atomic(&path, 100).unwrap();
         let (persisted, compiled) =
             super::catalog_commands_for_runtime(&path, &fixture, 1280).unwrap();
-        assert_eq!(compiled.cleanup_commands.len(), 1);
+        assert_eq!(
+            compiled
+                .install_order
+                .iter()
+                .filter(|operation| matches!(
+                    operation,
+                    super::CatalogInstallOp::CleanupName { .. }
+                ))
+                .count(),
+            1
+        );
         assert!(
             persisted.boxes[0].bindings[0]
                 .recheck_since
@@ -15693,7 +15811,11 @@ mod tests {
                 ("installed.example".into(), command("installed.example")),
                 ("full-table.example".into(), command("full-table.example")),
             ],
-            cleanup_commands: Vec::new(),
+            install_order: vec![
+                super::CatalogInstallOp::Command(0),
+                super::CatalogInstallOp::Command(1),
+                super::CatalogInstallOp::Command(2),
+            ],
             group_commands: vec![(1, group.clone())],
             skipped: 0,
             tcp_stall_budgets: Vec::new(),
