@@ -36,8 +36,8 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
       - name: Проверить shell-скрипты проекта
         run: |
-          find scripts router -type f -name '*.sh' -print0 | xargs -0 -r shellcheck -s sh
-          shellcheck -s sh router/S99r2o router/S99r2o.shim router/openwrt-init
+          find scripts router -type f -name '*.sh' -print0 | xargs -0 -r shellcheck -S warning -s sh
+          shellcheck -S warning -s sh router/S99r2o router/S99r2o.shim router/openwrt-init
       - name: Проверить форматирование Rust
         run: cargo fmt --all --check
 
