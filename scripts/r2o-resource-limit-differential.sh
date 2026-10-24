@@ -32,5 +32,18 @@ EOF
 diff -u "$tmp_dir/expected" "$tmp_dir/c.out"
 printf 'C donor d2k_sched_cpu_parse: all three vectors match\n'
 
+"$cc" -std=gnu11 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+    -pthread -I"$donor_core" -I"$donor_core/include" \
+    -I"$donor_root/datapath/include" -DD2K_RELEASE_ID='"dev"' \
+    "$repo_root/crates/r2o-controller/tests/d2o_aimd_differential.c" \
+    -Wl,--gc-sections -o "$tmp_dir/aimd"
+fixture="$repo_root/crates/r2o-controller/tests/fixtures/d2o_aimd.tsv"
+"$tmp_dir/aimd" "$fixture" >"$tmp_dir/c-aimd.out"
+R2O_AIMD_DIFF_OUTPUT="$tmp_dir/rust-aimd.out" \
+    cargo +1.98.0 test --locked -p r2o-controller --lib \
+    r2o_aimd_shared_inputs_match_d2o
+diff -u "$tmp_dir/c-aimd.out" "$tmp_dir/rust-aimd.out"
+printf 'C/Rust donor AIMD thresholds, backoff, resource loss, and slot ceiling match\n'
+
 cargo +1.98.0 test --locked -p r2o-controller --lib \
     r2o_разбор_cpu_сохраняет_unsigned_арифметику_донора

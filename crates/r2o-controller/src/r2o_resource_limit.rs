@@ -1561,4 +1561,75 @@ mod tests {
         drop(third);
         assert!(gate.r2o_try_acquire().is_none());
     }
+
+    #[test]
+    fn r2o_aimd_shared_inputs_match_d2o() {
+        let mut output = Vec::new();
+        for line in include_str!("../tests/fixtures/d2o_aimd.tsv").lines() {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.is_empty() || fields[0].starts_with('#') {
+                continue;
+            }
+            let [
+                name,
+                initial_limit,
+                cpu_free,
+                mem_available,
+                mem_total,
+                ct_count,
+                ct_max,
+                active,
+                queued,
+                max_slots,
+                expected_limit,
+                expected_limiter,
+            ] = fields.as_slice()
+            else {
+                panic!("bad d2o AIMD fixture row: {line}");
+            };
+            let parse = |value: &str| value.parse::<u64>().unwrap();
+            let cpu_free = (*cpu_free != "-1").then(|| parse(cpu_free));
+            let memory = (*mem_available != "-1").then(|| R2oMemoryStats {
+                available_kb: parse(mem_available),
+                total_kb: parse(mem_total),
+            });
+            let conntrack = (*ct_max != "-1").then(|| R2oConntrackStats {
+                count: parse(ct_count),
+                max: parse(ct_max),
+            });
+            let active = parse(active) as usize;
+            let queued = parse(queued) as usize;
+            let mut limit = R2oAdaptiveLimit::new(parse(max_slots) as usize);
+            limit.limit = parse(initial_limit) as usize;
+            limit.cpu_previous = cpu_free.map(|_| R2oCpuCounters { busy: 0, total: 1 });
+            limit.cpu_try_ms = Some(0);
+            limit.memory = memory;
+            limit.conntrack = conntrack;
+            limit.r2o_mark_started(active);
+            let cpu = cpu_free.map(|free| R2oCpuCounters {
+                busy: 1_000_000 - free,
+                total: 1_000_001,
+            });
+            limit.r2o_sample(
+                1000,
+                R2oResourceReading {
+                    cpu,
+                    memory,
+                    conntrack,
+                },
+                active,
+                queued,
+            );
+            let actual = format!("{name} {} {}", limit.limit, limit.limiter);
+            assert_eq!(
+                actual,
+                format!("{name} {expected_limit} {expected_limiter}"),
+                "shared d2o AIMD fixture"
+            );
+            output.push(actual);
+        }
+        if let Ok(path) = std::env::var("R2O_AIMD_DIFF_OUTPUT") {
+            std::fs::write(path, format!("{}\n", output.join("\n"))).unwrap();
+        }
+    }
 }

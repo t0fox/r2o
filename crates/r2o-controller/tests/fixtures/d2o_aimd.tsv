@@ -1,0 +1,12 @@
+# name initial_limit cpu_free_ppm mem_available_kb mem_total_kb ct_count ct_max active queued max_slots expected_limit expected_limiter
+grow 2 900000 400000 512000 10 100 2 1 64 3 0
+cpu_40_percent 2 400000 400000 512000 10 100 2 1 64 3 0
+cpu_hold 2 300000 400000 512000 10 100 2 1 64 2 1
+cpu_shrink_halves 4 200000 400000 512000 10 100 4 1 64 2 1
+memory_shrink 3 900000 100000 512000 10 100 3 1 64 1 2
+memory_reserve_boundary 3 900000 102400 512000 10 100 3 1 64 4 0
+conntrack_shrink 3 900000 400000 512000 60 100 3 1 64 1 4
+conntrack_missing 2 900000 400000 512000 -1 -1 2 1 64 3 0
+cpu_missing 4 -1 400000 512000 10 100 4 1 64 2 0
+memory_missing 4 900000 -1 -1 10 100 4 1 64 2 0
+slot_ceiling 2 900000 400000 512000 10 100 2 0 2 2 8
