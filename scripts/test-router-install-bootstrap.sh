@@ -82,6 +82,7 @@ case "$command_name" in
         previous=$(sed -n '2p' "$root/release-slots" 2>/dev/null || true)
         mkdir -p "$root/releases/$release"
         cp -R "$bundle/." "$root/releases/$release/"
+        [ "${R2O_TEST_FAIL_DURING_INSTALL:-0}" != 1 ] || exit 1
         printf '%s\n' "$architecture" > "$root/releases/$release/release-architecture"
         { printf 'R2O-RELEASE-SLOTS-1\n%s\n' "$release"; [ -z "$previous" ] || printf '%s\n' "$previous"; } > "$root/release-slots.new"
         mv -f "$root/release-slots.new" "$root/release-slots"
@@ -256,6 +257,14 @@ TEST_FREE_KB=200000 R2O_TEST_START_FAIL=1 run_install > "$CASE/out" 2>&1 && fail
 [ "$(sed -n '2p' "$CASE/opt/r2o/release-slots")" = r2o-old ] || fail 'failed activation did not restore the previous release'
 grep -q '^rollback r2o-bootstrap-test -> r2o-old$' "$CASE/manager.log" || fail 'manager rollback was not used'
 grep -qx 'owner=kept' "$CASE/opt/r2o/config" || fail 'rollback damaged the existing configuration'
+
+new_case failed-first-install
+if R2O_TEST_FAIL_DURING_INSTALL=1 run_install > "$CASE/out" 2>&1; then
+    fail 'incomplete first install was accepted'
+fi
+[ ! -e "$CASE/opt/r2o" ] || fail 'incomplete first install left release files behind'
+[ ! -e "$CASE/opt/etc/init.d/S99r2o" ] || fail 'incomplete first install left its startup shim behind'
+[ ! -e "$CASE/etc/init.d/r2o" ] || fail 'incomplete first install left its OpenWrt service behind'
 
 new_case interrupted-install
 mkdir -p "$CASE/opt/r2o/releases/r2o-old/router" "$CASE/opt/etc/init.d"

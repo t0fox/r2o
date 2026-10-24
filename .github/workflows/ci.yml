@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths-ignore: ['**/*.md', 'docs/**', 'LICENSE']
   pull_request:
+    paths-ignore: ['**/*.md', 'docs/**', 'LICENSE']
   workflow_dispatch:
 
 concurrency:
@@ -23,6 +24,7 @@ env:
   ZIG_SHA256: '70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00'
 
 jobs:
+  # Stage 1 mirrors d2o: cheap checks gate the independent full checks below.
   lint:
     name: Быстрые проверки — ShellCheck и формат Rust
     runs-on: ubuntu-24.04
@@ -289,176 +291,116 @@ jobs:
       - name: Проверить правила nftables без применения
         run: sudo sh scripts/test-router-firewall.sh
 
-  mipsel-release:
-    name: Выпуск GNU MIPS little-endian
+  release-build:
+    name: Выпуск ABI — ${{ matrix.abi }}
     needs: lint
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        include:
+          - abi: mipsel
+            target: mipsel-unknown-linux-gnu
+            script: scripts/build-mipsel.sh
+            artifact: r2o-mipsel-linux-gnu
+            packages: gcc-mipsel-linux-gnu qemu-user binutils
+            apt_cache_key: r2o-apt-ubuntu-24.04-mipsel-cross-v1
+            sdk_archive: ''
+            sdk_sha256: ''
+            rust_target: ''
+          - abi: mipsel-openwrt-musl
+            target: mipsel-unknown-linux-musl
+            script: scripts/r2o-build-openwrt-mipsel-musl.sh
+            artifact: r2o-openwrt-mipsel-musl
+            packages: qemu-user zstd binutils curl
+            apt_cache_key: ''
+            sdk_archive: openwrt-mipsel-musl-toolchain-25.12.5.tar.zst
+            sdk_sha256: 5a02d679c1ff052745b419b564624380dd3e5f6218db64c65b8ec9df56e2c263
+            rust_target: ''
+          - abi: aarch64-openwrt-musl
+            target: aarch64-unknown-linux-musl
+            script: scripts/r2o-build-openwrt-aarch64-musl.sh
+            artifact: r2o-openwrt-aarch64-musl
+            packages: qemu-user zstd binutils curl
+            apt_cache_key: ''
+            sdk_archive: openwrt-aarch64-musl-toolchain-25.12.5.tar.zst
+            sdk_sha256: 37875a8a69b46c9dc2a8c8bfd34a14f5de03fbea775f7cf8569f7e709c93403b
+            rust_target: aarch64-unknown-linux-musl
+          - abi: armv5-musleabi
+            target: armv5te-unknown-linux-musleabi
+            script: scripts/r2o-build-armv5-musleabi.sh
+            artifact: r2o-armv5-linux-musleabi
+            packages: clang-18 qemu-user binutils
+            apt_cache_key: ''
+            sdk_archive: ''
+            sdk_sha256: ''
+            rust_target: armv5te-unknown-linux-musleabi
+          - abi: armv7-openwrt-musl
+            target: armv7-unknown-linux-musleabihf
+            script: scripts/r2o-build-openwrt-armv7-musl.sh
+            artifact: r2o-openwrt-armv7-musl
+            packages: qemu-user zstd binutils curl
+            apt_cache_key: ''
+            sdk_archive: openwrt-armv7-musl-toolchain-25.12.5.tar.zst
+            sdk_sha256: 2284afb56cbeef040372b02b721f1657ce1eee8e1c024fb1a0188374b472ae51
+            rust_target: armv7-unknown-linux-musleabihf
+    env:
+      BUILD_SCRIPT: ${{ matrix.script }}
+      PACKAGES: ${{ matrix.packages }}
+      APT_CACHE_KEY: ${{ matrix.apt_cache_key }}
+      R2O_ARMV5_LINKER: ${{ github.workspace }}/scripts/ci-armv5-clang-cc.sh
+      R2O_ARMV5_AR: ar
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
         with:
           persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # версия v6.1.0
+        if: ${{ matrix.apt_cache_key != '' }}
         with:
           path: ${{ runner.temp }}/r2o-apt-archives
-          key: r2o-apt-ubuntu-24.04-mipsel-cross-v1
-      - name: Установить кросс-компилятор и QEMU
+          key: ${{ matrix.apt_cache_key }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # версия v6.1.0
+        if: ${{ matrix.sdk_sha256 != '' }}
+        with:
+          path: ~/.cache/r2o/openwrt/${{ matrix.sdk_archive }}
+          key: r2o-openwrt-sdk-Linux-${{ matrix.abi }}-${{ matrix.sdk_sha256 }}
+      - name: Установить системные инструменты ABI
         run: |
           set -euo pipefail
-          sh scripts/ci-apt-cache.sh prepare "$RUNNER_TEMP/r2o-apt-archives" /tmp/r2o-apt-archives-partial
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            -o Dir::Cache::archives="$RUNNER_TEMP/r2o-apt-archives" \
-            -o Dir::Cache::archives::partial=/tmp/r2o-apt-archives-partial \
-            gcc-mipsel-linux-gnu qemu-user binutils
-          sh scripts/ci-apt-cache.sh finalize "$RUNNER_TEMP/r2o-apt-archives"
-      - name: Собрать и проверить выпуск MIPS
-        run: sh scripts/build-mipsel.sh
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # версия v7.0.2
-        with:
-          name: r2o-mipsel-linux-gnu
-          path: |
-            target/mipsel-unknown-linux-gnu/release/r2o-datapath
-            target/mipsel-unknown-linux-gnu/release/r2o-controller
-            target/mipsel-unknown-linux-gnu/release/r2o-telegram
-            target/mipsel-unknown-linux-gnu/release/r2o-panel
-            target/mipsel-unknown-linux-gnu/release/r2o-manager
-            target/mipsel-unknown-linux-gnu/release/r2o-fetch
-            target/mipsel-unknown-linux-gnu/release/SHA256SUMS
-          retention-days: 7
-          if-no-files-found: error
-
-  openwrt-mipsel-musl:
-    name: Выпуск OpenWrt MIPS little-endian musl
-    needs: lint
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/r2o/openwrt/openwrt-mipsel-musl-toolchain-25.12.5.tar.zst
-          key: r2o-openwrt-sdk-Linux-mipsel-openwrt-musl-5a02d679c1ff052745b419b564624380dd3e5f6218db64c65b8ec9df56e2c263
+          read -r -a packages <<< "$PACKAGES"
+          if [ -n "$APT_CACHE_KEY" ]; then
+            sh scripts/ci-apt-cache.sh prepare "$RUNNER_TEMP/r2o-apt-archives" /tmp/r2o-apt-archives-partial
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq \
+              -o Dir::Cache::archives="$RUNNER_TEMP/r2o-apt-archives" \
+              -o Dir::Cache::archives::partial=/tmp/r2o-apt-archives-partial \
+              "${packages[@]}"
+            sh scripts/ci-apt-cache.sh finalize "$RUNNER_TEMP/r2o-apt-archives"
+          else
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq "${packages[@]}"
+          fi
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
-      - name: Установить QEMU и распаковщик SDK
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user zstd binutils curl
-      - name: Собрать и проверить OpenWrt MIPS под QEMU
-        run: sh scripts/r2o-build-openwrt-mipsel-musl.sh
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # версия v7.0.2
-        with:
-          name: r2o-openwrt-mipsel-musl
-          path: |
-            target/mipsel-unknown-linux-musl/release/r2o-datapath
-            target/mipsel-unknown-linux-musl/release/r2o-controller
-            target/mipsel-unknown-linux-musl/release/r2o-telegram
-            target/mipsel-unknown-linux-musl/release/r2o-panel
-            target/mipsel-unknown-linux-musl/release/r2o-manager
-            target/mipsel-unknown-linux-musl/release/r2o-fetch
-            target/mipsel-unknown-linux-musl/release/SHA256SUMS
-          retention-days: 7
-          if-no-files-found: error
-
-  openwrt-aarch64-musl:
-    name: Выпуск OpenWrt ARM64 musl
-    needs: lint
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/r2o/openwrt/openwrt-aarch64-musl-toolchain-25.12.5.tar.zst
-          key: r2o-openwrt-sdk-Linux-aarch64-openwrt-musl-37875a8a69b46c9dc2a8c8bfd34a14f5de03fbea775f7cf8569f7e709c93403b
+        if: ${{ matrix.rust_target == '' }}
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
+        if: ${{ matrix.rust_target != '' }}
         with:
-          target: aarch64-unknown-linux-musl
-      - name: Установить QEMU и распаковщик SDK
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user zstd binutils curl
-      - name: Собрать и проверить OpenWrt ARM64 под QEMU
-        run: sh scripts/r2o-build-openwrt-aarch64-musl.sh
+          target: ${{ matrix.rust_target }}
+      - name: Собрать ABI и проверить программы под QEMU
+        run: sh "$BUILD_SCRIPT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # версия v7.0.2
         with:
-          name: r2o-openwrt-aarch64-musl
+          name: ${{ matrix.artifact }}
           path: |
-            target/aarch64-unknown-linux-musl/release/r2o-datapath
-            target/aarch64-unknown-linux-musl/release/r2o-controller
-            target/aarch64-unknown-linux-musl/release/r2o-telegram
-            target/aarch64-unknown-linux-musl/release/r2o-panel
-            target/aarch64-unknown-linux-musl/release/r2o-manager
-            target/aarch64-unknown-linux-musl/release/r2o-fetch
-            target/aarch64-unknown-linux-musl/release/SHA256SUMS
-          retention-days: 7
-          if-no-files-found: error
-
-  armv5-musleabi:
-    name: Выпуск ARMv5 little-endian musleabi
-    needs: lint
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
-        with:
-          target: armv5te-unknown-linux-musleabi
-      - name: Установить Clang и QEMU
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq clang-18 qemu-user binutils
-      - name: Собрать и проверить полный набор программ под QEMU
-        env:
-          R2O_ARMV5_LINKER: ${{ github.workspace }}/scripts/ci-armv5-clang-cc.sh
-          R2O_ARMV5_AR: ar
-        run: sh scripts/r2o-build-armv5-musleabi.sh
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # версия v7.0.2
-        with:
-          name: r2o-armv5-linux-musleabi
-          path: |
-            target/armv5te-unknown-linux-musleabi/release/r2o-datapath
-            target/armv5te-unknown-linux-musleabi/release/r2o-controller
-            target/armv5te-unknown-linux-musleabi/release/r2o-telegram
-            target/armv5te-unknown-linux-musleabi/release/r2o-panel
-            target/armv5te-unknown-linux-musleabi/release/r2o-manager
-            target/armv5te-unknown-linux-musleabi/release/r2o-fetch
-            target/armv5te-unknown-linux-musleabi/release/SHA256SUMS
-          retention-days: 7
-          if-no-files-found: error
-
-  openwrt-armv7-musl:
-    name: Выпуск OpenWrt ARMv7 musl
-    needs: lint
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/r2o/openwrt/openwrt-armv7-musl-toolchain-25.12.5.tar.zst
-          key: r2o-openwrt-sdk-Linux-armv7-openwrt-musl-2284afb56cbeef040372b02b721f1657ce1eee8e1c024fb1a0188374b472ae51
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
-        with:
-          target: armv7-unknown-linux-musleabihf
-      - name: Установить QEMU и распаковщик SDK
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user zstd binutils curl
-      - name: Собрать и проверить OpenWrt ARMv7 под QEMU
-        run: sh scripts/r2o-build-openwrt-armv7-musl.sh
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # версия v7.0.2
-        with:
-          name: r2o-openwrt-armv7-musl
-          path: |
-            target/armv7-unknown-linux-musleabihf/release/r2o-datapath
-            target/armv7-unknown-linux-musleabihf/release/r2o-controller
-            target/armv7-unknown-linux-musleabihf/release/r2o-telegram
-            target/armv7-unknown-linux-musleabihf/release/r2o-panel
-            target/armv7-unknown-linux-musleabihf/release/r2o-manager
-            target/armv7-unknown-linux-musleabihf/release/r2o-fetch
-            target/armv7-unknown-linux-musleabihf/release/SHA256SUMS
+            target/${{ matrix.target }}/release/r2o-datapath
+            target/${{ matrix.target }}/release/r2o-controller
+            target/${{ matrix.target }}/release/r2o-telegram
+            target/${{ matrix.target }}/release/r2o-panel
+            target/${{ matrix.target }}/release/r2o-manager
+            target/${{ matrix.target }}/release/r2o-fetch
+            target/${{ matrix.target }}/release/SHA256SUMS
           retention-days: 7
           if-no-files-found: error
 
@@ -600,17 +542,13 @@ jobs:
       - cross-check
       - donor-differential-plan
       - nfqueue-integration
-      - mipsel-release
-      - openwrt-mipsel-musl
-      - openwrt-aarch64-musl
-      - armv5-musleabi
-      - openwrt-armv7-musl
+      - release-build
       - donor-differential
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
       - name: Завершиться ошибкой при пропуске или сбое проверки
-        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || needs.lint.result == 'skipped' || needs.panel.result == 'skipped' || needs.telegram.result == 'skipped' || needs.panel-browser.result == 'skipped' || needs.shell.result == 'skipped' || needs.datapath.result == 'skipped' || needs.core.result == 'skipped' || needs.rust-workspace.result == 'skipped' || needs.cross-check.result == 'skipped' || needs.donor-differential-plan.result == 'skipped' || needs.nfqueue-integration.result == 'skipped' || needs.mipsel-release.result == 'skipped' || needs.openwrt-mipsel-musl.result == 'skipped' || needs.openwrt-aarch64-musl.result == 'skipped' || needs.armv5-musleabi.result == 'skipped' || needs.openwrt-armv7-musl.result == 'skipped' || needs.donor-differential.result == 'skipped' || (github.event_name != 'pull_request' && needs.sanitizers.result == 'skipped') }}
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || needs.lint.result == 'skipped' || needs.panel.result == 'skipped' || needs.telegram.result == 'skipped' || needs.panel-browser.result == 'skipped' || needs.shell.result == 'skipped' || needs.datapath.result == 'skipped' || needs.core.result == 'skipped' || needs.rust-workspace.result == 'skipped' || needs.cross-check.result == 'skipped' || needs.donor-differential-plan.result == 'skipped' || needs.nfqueue-integration.result == 'skipped' || needs.release-build.result == 'skipped' || needs.donor-differential.result == 'skipped' || (github.event_name != 'pull_request' && needs.sanitizers.result == 'skipped') }}
         run: exit 1
       - name: Все проверки завершились успешно
         run: echo "Все проверки R2O пройдены"

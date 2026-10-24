@@ -57,7 +57,13 @@ mkdir -p "$r2o_log_dir"
         "$r2o_donor_core/sched.c" 2>/dev/null \
         | grep -E 'FunctionDecl.*(addr_probe_remove|candidate_retire|task_fail|launch_or_queue|d2k_sched_tick)'
     printf '\nТесты планировщика C-эталона\n'
-    r2o_run_timed 'планировщик C' make -B -C "$r2o_donor_core" test-sched-quic-yield CC=clang-18
+    if [ "${R2O_SKIP_FULL_C_SCHEDULER:-0}" = 1 ]; then
+        r2o_run_timed 'сборка теста уступки C' make -B -C "$r2o_donor_core" test_sched_quic_yield CC=clang-18
+    else
+        r2o_run_timed 'сборка тестов планировщика C' make -B -C "$r2o_donor_core" \
+            test_sched_quic_yield test_sched CC=clang-18
+    fi
+    r2o_run_timed 'тест уступки C' sh -c 'cd "$1" && ./test_sched_quic_yield' sh "$r2o_donor_core"
     if [ "${R2O_SKIP_FULL_C_SCHEDULER:-0}" = 1 ]; then
         r2o_sched_sha256=$(sha256sum "$r2o_donor_core/sched.c" | awk '{print $1}')
         r2o_test_sched_sha256=$(sha256sum "$r2o_donor_core/test_sched.c" | awk '{print $1}')
@@ -68,7 +74,6 @@ mkdir -p "$r2o_log_dir"
         fi
         printf 'Полный набор test_sched пропущен: оба SHA-256 совпали с полностью проверенным C-эталоном.\n'
     else
-        r2o_run_timed 'сборка планировщика C' make -B -C "$r2o_donor_core" test_sched CC=clang-18
         r2o_run_timed 'сценарии планировщика C' sh -c \
             "cd \"\$1\" && ./test_sched" sh "$r2o_donor_core"
         printf 'Полный test_sched включает lifecycle очереди и параллельные адресные пробы.\n'

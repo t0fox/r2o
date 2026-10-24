@@ -29,6 +29,7 @@ PREVIOUS_RELEASE=
 TARGET_RELEASE=
 OLD_RELEASE=
 INSTALL_STARTED=0
+ROOT_PREEXISTED=0
 TMP=
 DISK_TMP=
 BUNDLE=
@@ -310,7 +311,10 @@ rollback_failed_install() {
     if [ -f "$ROOT/release-slots" ] && [ ! -L "$ROOT/release-slots" ]; then
         active_now=$(sed -n '2p' "$ROOT/release-slots")
     fi
-    [ "$active_now" = "$TARGET_RELEASE" ] || return 0
+    if [ "$active_now" != "$TARGET_RELEASE" ]; then
+        cleanup_incomplete_first_install
+        return 0
+    fi
     if [ -n "$OLD_RELEASE" ]; then
         if "$ROOT/r2o-manager" rollback --root "$ROOT" >/dev/null 2>&1; then
             old_bundle=$ROOT/releases/$OLD_RELEASE
@@ -330,6 +334,34 @@ rollback_failed_install() {
                 say 'не удалось автоматически очистить неудачную первую установку'
         fi
     fi
+}
+
+cleanup_incomplete_first_install() {
+    [ -z "$OLD_RELEASE" ] && [ "$ROOT_PREEXISTED" -eq 0 ] || return 0
+    [ -d "$ROOT" ] && [ ! -L "$ROOT" ] || return 0
+    [ ! -e "$ROOT/release-slots" ] && [ ! -L "$ROOT/release-slots" ] || return 0
+
+    releases=$ROOT/releases
+    if [ -d "$releases" ] && [ ! -L "$releases" ]; then
+        failed_release=$releases/$TARGET_RELEASE
+        [ ! -d "$failed_release" ] || [ -L "$failed_release" ] || rm -rf "$failed_release"
+        for staging in "$releases"/.staging-"$TARGET_RELEASE"-*; do
+            [ -e "$staging" ] || [ -L "$staging" ] || continue
+            [ -d "$staging" ] && [ ! -L "$staging" ] || continue
+            rm -rf "$staging"
+        done
+        rmdir "$releases" 2>/dev/null || true
+    fi
+
+    if [ -f "$ROOT/r2o-manager" ] && [ ! -L "$ROOT/r2o-manager" ]; then
+        rm -f "$ROOT/r2o-manager"
+    fi
+    for partial in "$ROOT"/.manager.lock "$ROOT"/.r2o-manager-* "$ROOT"/.release-slots.*; do
+        [ -f "$partial" ] && [ ! -L "$partial" ] || continue
+        rm -f "$partial"
+    done
+    rmdir "$ROOT" 2>/dev/null || true
+    say 'удалены файлы незавершённой первой установки; зависимости системы сохранены'
 }
 
 on_exit() {
@@ -355,6 +387,7 @@ case "$ROOT" in *'/../'*|*/..|*'/./'*|*/.) die "небезопасный кат�
 storage_anchor
 detect_platform_and_arch
 release_from_slots
+if [ -e "$ROOT" ] || [ -L "$ROOT" ]; then ROOT_PREEXISTED=1; fi
 check_runtime_dependencies
 OLD_RELEASE=$CURRENT_RELEASE
 
