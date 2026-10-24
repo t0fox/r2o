@@ -64,7 +64,7 @@
 - [x] Add the NDM hook and safe conditional installer/uninstaller handling; confirm `nat`/`mangle` heal and unrelated events are ignored.
 - [x] Add both scripts to release packaging fixture expectations and run both PPE and NDM tests in existing mandatory router lifecycle CI.
 - [x] Run `sh scripts/test-router-firewall.sh`, `sh scripts/test-package-release.sh`, all `scripts/test-router-*.sh`, ShellCheck, and CRLF-aware `git diff --check`.
-- [ ] Commit as `feat: wire PPE adapter into router lifecycle`.
+- [x] Commit as `feat: wire PPE adapter into router lifecycle` (`9f04aca`).
 
 ### Task 4: Expose the setting in Lava
 
@@ -75,16 +75,16 @@
 - [x] Add API/browser regressions for reading enabled/disabled values, saving each value, and rejecting non-booleans; confirm they fail because the setting is absent.
 - [x] Add the field to editable settings and a disabled-by-default-until-controls-enabled Lava checkbox labeled for router PPE visibility.
 - [x] Run `cargo +1.98.0 test -p r2o-panel --locked`, headless Chrome panel tests, full workspace tests, and `cargo +1.98.0 fmt --all -- --check`.
-- [ ] Commit as `feat: expose PPE visibility setting in Lava`.
+- [x] Commit as `feat: expose PPE visibility setting in Lava` (`b469c90`).
 
 ### Task 5: Full acceptance and review
 
 **Files:** updated plan ledger and `ПРОГРЕСС.md`.
 
-- [ ] Run all local CI-equivalent checks, including shell, manager, panel, packaging, NFQUEUE namespace, and C/Rust differential tests.
-- [ ] Push `main`; wait for all mandatory jobs; record actual Actions result.
-- [ ] Request one independent review of the whole change and fix any Critical/Important finding with TDD.
-- [ ] Record acceptance and the physical Keenetic checks that remain in `ПРОГРЕСС.md`; confirm clean `main`.
+- [x] Run all local CI-equivalent checks, including shell, manager, panel, packaging, NFQUEUE namespace, and C/Rust differential tests.
+- [x] Push `main`; wait for all mandatory jobs; record actual Actions result: `f4a1967`, run [`40062494475`](https://github.com/t0fox/r2o/actions/runs/40062494475), 26/26 jobs passed in 9:40 wall time.
+- [x] Request independent review; resolve four Important cleanup/status findings with regression tests; follow-up review approved the final diff.
+- [x] Publish and verify signed release `R2O 24.10.2026 (f4a1967)` via [`40063206229`](https://github.com/t0fox/r2o/actions/runs/40063206229), including the manifest signature, all five ABI archive hashes, and isolated update/rollback acceptance; physical Keenetic checks remain in `ПРОГРЕСС.md`.
 
 ## Execution ledger
 
@@ -94,3 +94,6 @@
 - Task 2: mock-iptables suite observed RED while the adapter was absent; helper passed idempotence, owner isolation, disable, no-target, IPv6, invalid-input, and partial-failure cases. `sh -n` and ShellCheck passed.
 - Task 3: the initial reapply service regression observed RED; the shell suite, NDM filtering, package fixture, clean install/update/rollback/uninstall, foreign-hook collision, and edited-hook preservation pass. The adapter status now reports exact IPv4 PPE binds and last IPv4/IPv6 datapath visibility summaries, matching donor diagnostics without claiming live RTP.
 - Task 4: API settings regression observed RED on missing `ppe_deoffload`; `/api/config` now reads, validates, and writes both boolean values, and the Lava checkbox saves through `settings-restart`. HTTP API tests pass 17/17, headless Chrome passes, full `cargo +1.98.0 test --workspace --locked` passes, and format checks pass.
+- Review hardening: preserve `iptables -D` failures, compare each required rule during status, split UDP 443 from a full 15-slot voice-port list, and propagate `iptables -S` discovery failures. Added mock regressions; PPE test, every router test, package fixture, ShellCheck, and shell syntax pass. Reviewer follow-up approved the fixed diff.
+- CI `f4a1967`: 26/26 jobs success in 9:40 total wall time (9:38 first runner to final job); longest scheduler differential shard 8:39. ASan, NFQUEUE, five ABI/QEMU builds, C/Rust parity, and shard coverage all passed.
+- Signed release `R2O 24.10.2026 (f4a1967)`: workflow [`40063206229`](https://github.com/t0fox/r2o/actions/runs/40063206229) completed in 3:56. The host manager verified the manifest Ed25519 signature and SHA-256 for all five ABI archives. Isolated update-check/install, rollback, repeat install, and final no-update check passed.
