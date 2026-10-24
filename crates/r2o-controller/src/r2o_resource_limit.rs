@@ -58,8 +58,8 @@ fn r2o_parse_cpu_stat(line: &str) -> Option<R2oCpuCounters> {
     }
     let total = values[..count]
         .iter()
-        .try_fold(0_u64, |sum, value| sum.checked_add(*value))?;
-    let idle = values[3].checked_add(values.get(4).copied().unwrap_or_default())?;
+        .fold(0_u64, |sum, value| sum.wrapping_add(*value));
+    let idle = values[3].wrapping_add(values.get(4).copied().unwrap_or_default());
     Some(R2oCpuCounters {
         busy: total.checked_sub(idle)?,
         total,
@@ -885,6 +885,18 @@ mod tests {
         assert_eq!(
             r2o_parse_cpu_stat("cpu 1 2 3 4 18446744073709551616\n"),
             None
+        );
+    }
+
+    #[test]
+    fn r2o_разбор_cpu_сохраняет_unsigned_арифметику_донора() {
+        assert_eq!(
+            r2o_parse_cpu_stat("cpu 18446744073709551615 1 1 0\n"),
+            Some(R2oCpuCounters { busy: 1, total: 1 }),
+        );
+        assert_eq!(
+            r2o_parse_cpu_stat("cpu 0 0 0 18446744073709551615 1\n"),
+            Some(R2oCpuCounters { busy: 0, total: 0 }),
         );
     }
 
