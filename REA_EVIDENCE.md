@@ -7199,3 +7199,42 @@ name-binding `transport=17, SHAPE_QUIC`, измеренный/proven путь и
 Полный `cargo +1.98.0 test --locked --workspace` и `cargo +1.98.0 fmt --all -- --check` прошли. Донорские `test_sched`, `test_sched_summary` и `test_catalog_sync` прошли с Clang 18 и `-Wall -Wextra -Werror`. `scripts/r2o-build-armv5-musleabi.sh` и `scripts/r2o-build-openwrt-mipsel-musl.sh` собрали релизные бинарники; QEMU smoke и проверка каталога прошли на обеих целях. SHA-256 donor `core/sched.c`: `67f5c245ddf1f9cd4361c256d36a93bc37060a699548169759823845c4da1312`; `core/test_sched.c`: `c811faca5ae143c3f0118d79c198bd2f70faa64bdf6d0e153ef48d97153a5921`.
 
 Этот блок закрывает именно учёт 64 task slots. Прочая полнота Discovery и функциональный паритет проекта остаются открытыми; физический маршрутизатор не проверялся.
+
+## TLS probe: Server Finished и критерий результата — 24.10.2026
+
+Актуальный эталон повторно проверен напрямую: `https://github.com/t0fox/d2o.git`
+`main`/`HEAD` — `783aa75ce44dd6192cd1f4f1d98e4fe909ef3045`. Исходники импортированы
+REA из чистого checkout этого commit: manifest `hsm_a8013908afc152760f0f20b8f9ea8c8ec1a418829cac9b819712b18b5e0fb23a`,
+graph SHA-256 `53254c5ac85ccf3edf677663fe1ee6b7d032e6ba8535de22de596a1f0ecfb085`,
+root SHA-256 `cf98ced404ef119bdd1b8d413a424e2de1378cc5f05f9532a7569c2f902b542a`.
+SHA-256 donor: `core/verify.c` `5cd17fd9948570a59c793579648a62d5e0c9efc75499a27d9a8d1c5956c047c7`,
+`core/tls13.c` `df335f131547e7604ccca9d811db747e2d653a5ba85a04c9f9fc84a4c002c4e5`,
+`core/tls12.c` `0397f0a46e7adc2d0dd46f592220d062ec119ba1097e56fc421ef1e1cd5ce1f8`.
+
+REA/Ghidra 12.1.4 проанализировала ELF `core/test_verify` (SHA-256
+`c67ad725aca4e39e9692698b289673b8e45da1b5ffdbcbc15ee2301aaf9a8f12`):
+`verify_probe13_internal` — Evidence `ev_9069a57828af44fc7a6312031488d83015297b9d5bd45474d85163d05e27b6dc`,
+body 1 455 байт; `verify_probe12_internal` — `ev_bae1d302740585122a01e87154e2296f852d591c6fb4b546f65cd11789cbe2da`,
+1 367 байт; `tls_connect_internal` — `ev_59a22ced157b7d8fe4167087075c51b5ff92c5a7a8f7f43c03d3ff0523cfbd9e`,
+3 200 байт; `d2k_tls12_connect` — `ev_b60522c6fdf2109a8eb282188ecbeb3014ea037857d4d581945f7506882635d7`,
+1 100 байт. REA подтверждает функции и их тела; поведенческий вывод ниже опирается
+на соответствующие C-исходники и дифф-тест, а не на реконструкцию псевдокода.
+
+| C-функция и правило | Rust-аналог | Дифф-тест |
+|---|---|---|
+| `core/verify.c::verify_probe13_internal` → `core/tls13.c::tls_connect_internal`: обычный TLS принимает Server Finished после успешной расшифровки записи и не сравнивает `verify_data`; исключение — ECH, для которого Finished проверяется. | `r2o_fetch_connected_stream_with_roots_and_encoding_and_counter` → `r2o_tls_client_connection`; Rustls `ExpectFinished` теперь берёт эту политику из `ServerCertVerifier`. Обычный probe пропускает только сравнение Finished, ECH сохраняет проверку; проверка AEAD остаётся Rustls. | Валидно защищённый TLS 1.3 Finished с изменённым `verify_data`: до исправления C получил HTTP 200, Rust завершал handshake ошибкой `cannot decrypt peer's message`; после исправления обе стороны получили application success, HTTP 200 и полный body. |
+| `core/verify.c::verify_probe12_internal` → `core/tls12.c::d2k_tls12_connect`: Finished MAC не сверяется, но длина зашифрованного Finished должна быть ровно 16 байт вместе с handshake-заголовком (`verify_data` — 12 байт). | Тот же Rust fetch path с `tls12=true`; `client/tls12.rs::ExpectFinished` пропускает сравнение только для probe verifier, но безусловно отклоняет длину `verify_data`, отличную от 12. | Изменённый `verify_data` при длине 12: C/Rust оба завершили HTTP 200. Finished длиной 11: до проверки Rust доходил до HTTP, C отвергал; после проверки C вывел `0\t-1\t0\t0`, Rust вернул ошибку. |
+| `verify_probe13_internal` записывает несовпадение имени сертификата отдельно от результата TLS/HTTP. | `r2o_tls_client_connection` снимает `peer_name_ok` диагностически; оно не заменяет application proof. | Тот же TLS 1.3 сервер: `localhost` → имя совпало; `wrong.example` → не совпало; обе реализации сохранили HTTP 200 и полный body. |
+
+Исправление находится в `vendor/rustls`: для кастомного измерительного verifier добавлен
+default-strict метод `requires_server_finished_verification`; обычный R2O verifier
+отключает только сверку TLS Finished, ECH verifier оставляет её включённой. TLS 1.2
+проверка длины работает независимо от этой настройки. Тестовые ответы с неверным
+Finished создаёт только dev-feature; обычная сборка feature не включает.
+
+Проверки: `scripts/r2o-tls-verify-differential.sh` — 4/4 (TLS 1.3/1.2 неверный
+`verify_data`, короткий TLS 1.2 Finished и совпадающее/несовпадающее имя); полный
+`cargo +1.98.0 test --locked --offline --workspace`, `cargo +1.98.0 build --locked
+--offline --workspace`, `cargo +1.98.0 fmt --all -- --check`, `sh -n` скрипта и
+`git diff --check` прошли. Роутер не проверялся по просьбе пользователя; эта запись
+не утверждает полевой или полный проектный паритет.

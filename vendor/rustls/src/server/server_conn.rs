@@ -386,6 +386,16 @@ pub struct ServerConfig {
     /// handshake up to the `Finished` message.  This is the safest option.
     pub send_half_rtt_data: bool,
 
+    /// Make the test server emit a validly encrypted Finished with wrong verify_data.
+    #[cfg(feature = "r2o-test-invalid-finished")]
+    #[doc(hidden)]
+    pub r2o_test_invalid_finished: bool,
+
+    /// Make the test server emit a short TLS 1.2 Finished message.
+    #[cfg(feature = "r2o-test-invalid-finished")]
+    #[doc(hidden)]
+    pub r2o_test_short_server_finished: bool,
+
     /// How many TLS1.3 tickets to send immediately after a successful
     /// handshake.
     ///

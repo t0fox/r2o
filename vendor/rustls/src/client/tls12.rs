@@ -1239,6 +1239,13 @@ impl State<ClientConnectionData> for ExpectFinished {
         let finished =
             require_handshake_msg!(m, HandshakeType::Finished, HandshakePayload::Finished)?;
 
+        if finished.bytes().len() != 12 {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::DecodeError,
+                InvalidMessage::InvalidFinishedLength,
+            ));
+        }
+
         cx.common.check_aligned_handshake()?;
 
         // Work out what verify_data we expect.
@@ -1247,8 +1254,12 @@ impl State<ClientConnectionData> for ExpectFinished {
 
         // Constant-time verification of this is relatively unimportant: they only
         // get one chance.  But it can't hurt.
-        let _fin_verified =
-            match ConstantTimeEq::ct_eq(&expect_verify_data[..], finished.bytes()).into() {
+        let finished_valid = !st.config.verifier.requires_server_finished_verification()
+            || bool::from(ConstantTimeEq::ct_eq(
+                &expect_verify_data[..],
+                finished.bytes(),
+            ));
+        let _fin_verified = match finished_valid {
                 true => verify::FinishedMessageVerified::assertion(),
                 false => {
                     return Err(cx

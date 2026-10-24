@@ -67,6 +67,7 @@ brotli = [
     "std",
 ]
 custom-provider = []
+r2o-test-invalid-finished = []
 default = [
     "aws_lc_rs",
     "logging",

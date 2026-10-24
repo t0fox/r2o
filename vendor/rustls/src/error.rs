@@ -167,6 +167,8 @@ pub enum InvalidMessage {
     MessageTooLarge,
     /// Message is shorter than the expected length
     MessageTooShort,
+    /// A peer sent a TLS Finished message with the wrong verify_data length.
+    InvalidFinishedLength,
     /// Missing data for the named handshake payload value
     MissingData(&'static str),
     /// A peer did not advertise its supported key exchange groups.

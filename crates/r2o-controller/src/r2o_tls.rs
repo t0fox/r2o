@@ -5,6 +5,7 @@ const R2O_TLS13_CLIENT_HELLO_MAX: usize = 4096;
 #[derive(Debug)]
 struct R2oD2oServerCertVerifier {
     algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
+    verify_finished: bool,
 }
 
 impl rustls::client::danger::ServerCertVerifier for R2oD2oServerCertVerifier {
@@ -40,6 +41,10 @@ impl rustls::client::danger::ServerCertVerifier for R2oD2oServerCertVerifier {
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         self.algorithms.supported_schemes()
     }
+
+    fn requires_server_finished_verification(&self) -> bool {
+        self.verify_finished
+    }
 }
 
 /// Создать измерительное TLS-соединение с необязательной длиной ClientHello.
@@ -59,6 +64,7 @@ pub fn r2o_tls_client_connection(
     let mut provider = rustls::crypto::ring::default_provider();
     let verifier = R2oD2oServerCertVerifier {
         algorithms: provider.signature_verification_algorithms.clone(),
+        verify_finished: false,
     };
     provider.cipher_suites = if tls12 {
         vec![
@@ -107,6 +113,7 @@ pub fn r2o_tls_ech_client_connection(
     let mut provider = rustls::crypto::ring::default_provider();
     let verifier = R2oD2oServerCertVerifier {
         algorithms: provider.signature_verification_algorithms.clone(),
+        verify_finished: true,
     };
     provider.cipher_suites = vec![rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256];
     provider.kx_groups = vec![

@@ -830,6 +830,15 @@ mod client_hello {
     ) -> KeyScheduleTrafficWithClientFinishedPending {
         let handshake_hash = flight.transcript.current_hash();
         let verify_data = key_schedule.sign_server_finish(&handshake_hash);
+        #[cfg(feature = "r2o-test-invalid-finished")]
+        let verify_data_payload = if config.r2o_test_invalid_finished {
+            let mut bytes = verify_data.as_ref().to_vec();
+            bytes[0] ^= 1;
+            Payload::new(bytes)
+        } else {
+            Payload::new(verify_data.as_ref())
+        };
+        #[cfg(not(feature = "r2o-test-invalid-finished"))]
         let verify_data_payload = Payload::new(verify_data.as_ref());
 
         let fin = HandshakeMessagePayload(HandshakePayload::Finished(verify_data_payload));

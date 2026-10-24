@@ -120,6 +120,10 @@ impl ConfigBuilder<ServerConfig, WantsServerCert> {
             enable_secret_extraction: false,
             max_early_data_size: 0,
             send_half_rtt_data: false,
+            #[cfg(feature = "r2o-test-invalid-finished")]
+            r2o_test_invalid_finished: false,
+            #[cfg(feature = "r2o-test-invalid-finished")]
+            r2o_test_short_server_finished: false,
             send_tls13_tickets: 2,
             max_tls13_tickets: 0,
             #[cfg(feature = "tls12")]

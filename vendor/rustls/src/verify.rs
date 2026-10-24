@@ -138,6 +138,15 @@ pub trait ServerCertVerifier: Debug + Send + Sync {
     /// This should be in priority order, with the most preferred first.
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme>;
 
+    /// Whether to verify the peer's TLS Finished verify_data in addition to
+    /// authenticating the encrypted handshake record. Defaults to `true`.
+    ///
+    /// Returning `false` is suitable only for diagnostic probes that need to
+    /// match a peer's handshake classification without authenticating it.
+    fn requires_server_finished_verification(&self) -> bool {
+        true
+    }
+
     /// Returns whether this verifier requires raw public keys as defined
     /// in [RFC 7250](https://tools.ietf.org/html/rfc7250).
     fn requires_raw_public_keys(&self) -> bool {

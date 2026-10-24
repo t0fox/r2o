@@ -305,7 +305,21 @@ mod client_hello {
             cx.common
                 .record_layer
                 .start_encrypting();
-            emit_finished(&secrets, &mut self.transcript, cx.common);
+            #[cfg(feature = "r2o-test-invalid-finished")]
+            let invalid_finished = self.config.r2o_test_invalid_finished;
+            #[cfg(not(feature = "r2o-test-invalid-finished"))]
+            let invalid_finished = false;
+            #[cfg(feature = "r2o-test-invalid-finished")]
+            let short_finished = self.config.r2o_test_short_server_finished;
+            #[cfg(not(feature = "r2o-test-invalid-finished"))]
+            let short_finished = false;
+            emit_finished(
+                &secrets,
+                &mut self.transcript,
+                cx.common,
+                invalid_finished,
+                short_finished,
+            );
 
             Ok(Box::new(ExpectCcs {
                 config: self.config,
@@ -823,10 +837,29 @@ fn emit_finished(
     secrets: &ConnectionSecrets,
     transcript: &mut HandshakeHash,
     common: &mut CommonState,
+    _invalid_finished: bool,
+    short_finished: bool,
 ) {
     let vh = transcript.current_hash();
     let verify_data = secrets.server_verify_data(&vh);
-    let verify_data_payload = Payload::new(verify_data);
+    #[cfg(feature = "r2o-test-invalid-finished")]
+    let verify_data_payload = if _invalid_finished || short_finished {
+        let mut bytes = verify_data.to_vec();
+        if _invalid_finished {
+            bytes[0] ^= 1;
+        }
+        if short_finished {
+            bytes.pop();
+        }
+        Payload::new(bytes)
+    } else {
+        Payload::new(verify_data)
+    };
+    #[cfg(not(feature = "r2o-test-invalid-finished"))]
+    let verify_data_payload = {
+        let _ = short_finished;
+        Payload::new(verify_data)
+    };
 
     let f = Message {
         version: ProtocolVersion::TLSv1_2,
@@ -912,7 +945,21 @@ impl State<ServerConnectionData> for ExpectFinished {
             cx.common
                 .record_layer
                 .start_encrypting();
-            emit_finished(&self.secrets, &mut self.transcript, cx.common);
+            #[cfg(feature = "r2o-test-invalid-finished")]
+            let invalid_finished = self.config.r2o_test_invalid_finished;
+            #[cfg(not(feature = "r2o-test-invalid-finished"))]
+            let invalid_finished = false;
+            #[cfg(feature = "r2o-test-invalid-finished")]
+            let short_finished = self.config.r2o_test_short_server_finished;
+            #[cfg(not(feature = "r2o-test-invalid-finished"))]
+            let short_finished = false;
+            emit_finished(
+                &self.secrets,
+                &mut self.transcript,
+                cx.common,
+                invalid_finished,
+                short_finished,
+            );
         }
 
         cx.common
