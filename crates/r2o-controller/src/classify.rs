@@ -632,6 +632,17 @@ pub trait ProbeBackend {
     ) -> Result<Option<PoisonHit>, ProbeError> {
         Ok(None)
     }
+
+    fn sweep_poisons_with_progress(
+        &mut self,
+        target: &ProbeTarget,
+        trigger: &Trigger,
+        options: &ClassifyOptions,
+        result: &mut ClassifyResult,
+        _progress: &mut dyn FnMut(&str, usize, usize, usize),
+    ) -> Result<Option<PoisonHit>, ProbeError> {
+        self.sweep_poisons(target, trigger, options, result)
+    }
 }
 
 /// Рабочая реализация проб через сокеты и переносимого дерева решений TCP.
@@ -685,11 +696,30 @@ impl ProbeBackend for TcpProbeBackend {
     ) -> Result<Option<PoisonHit>, ProbeError> {
         #[cfg(target_os = "linux")]
         {
-            crate::raw_probe::sweep_poisons(target, trigger, options, result)
+            crate::raw_probe::sweep_poisons(target, trigger, options, result, &mut |_, _, _, _| {})
         }
         #[cfg(not(target_os = "linux"))]
         {
             let _ = (target, trigger, options, result);
+            Ok(None)
+        }
+    }
+
+    fn sweep_poisons_with_progress(
+        &mut self,
+        target: &ProbeTarget,
+        trigger: &Trigger,
+        options: &ClassifyOptions,
+        result: &mut ClassifyResult,
+        progress: &mut dyn FnMut(&str, usize, usize, usize),
+    ) -> Result<Option<PoisonHit>, ProbeError> {
+        #[cfg(target_os = "linux")]
+        {
+            crate::raw_probe::sweep_poisons(target, trigger, options, result, progress)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (target, trigger, options, result, progress);
             Ok(None)
         }
     }
@@ -913,6 +943,7 @@ fn measure<B: ProbeBackend>(
     options: &ClassifyOptions,
     result: &mut ClassifyResult,
     spec: MeasureSpec<'_>,
+    progress: &mut dyn FnMut(&str, usize, usize, usize),
 ) -> Tally {
     let index = add_observation(result, spec.name, spec.cuts, spec.gap);
     if spec.name == "whole"
@@ -932,10 +963,12 @@ fn measure<B: ProbeBackend>(
         observation.pass = tally.pass;
         observation.fail = tally.fail;
         observation.error = seed.error.clone();
+        progress(spec.name, result.probes, tally.pass, tally.fail);
         return tally;
     }
 
     let mut tally = Tally::default();
+    progress(spec.name, result.probes, tally.pass, tally.fail);
     for _ in 0..options.repeats {
         if stopped(options) {
             break;
@@ -966,6 +999,7 @@ fn measure<B: ProbeBackend>(
                 }
             }
         }
+        progress(spec.name, result.probes, tally.pass, tally.fail);
     }
     let observation = &mut result.trace[index];
     observation.pass = tally.pass;
@@ -986,8 +1020,20 @@ fn append_reason(reason: &mut String, tail: &str) {
 pub fn run_with_backend<B: ProbeBackend>(
     address: &str,
     trigger: &Trigger,
+    options: ClassifyOptions,
+    backend: &mut B,
+) -> ClassifyResult {
+    run_with_backend_progress(address, trigger, options, backend, &mut |_, _, _, _| {})
+}
+
+/// Run the classifier while reporting each active question and completed probe.
+/// The callback runs on the measuring worker so callers can publish live progress.
+pub fn run_with_backend_progress<B: ProbeBackend>(
+    address: &str,
+    trigger: &Trigger,
     mut options: ClassifyOptions,
     backend: &mut B,
+    progress: &mut dyn FnMut(&str, usize, usize, usize),
 ) -> ClassifyResult {
     if options.repeats == 0 {
         options.repeats = 3;
@@ -1040,6 +1086,7 @@ pub fn run_with_backend<B: ProbeBackend>(
             cuts: &[],
             gap: options.write_gap,
         },
+        progress,
     );
     let mut base = whole;
     if base.pass == 0
@@ -1060,6 +1107,7 @@ pub fn run_with_backend<B: ProbeBackend>(
                 cuts: &[],
                 gap: slower.write_gap,
             },
+            progress,
         );
     }
     if base.pass == 0
@@ -1095,6 +1143,7 @@ pub fn run_with_backend<B: ProbeBackend>(
                 cuts: &[],
                 gap: options.write_gap,
             },
+            progress,
         );
         if stopped(&options) {
             result.verdict = Verdict::Inconclusive;
@@ -1196,6 +1245,7 @@ pub fn run_with_backend<B: ProbeBackend>(
             cuts: &[1],
             gap: options.write_gap,
         },
+        progress,
     );
     if let Some(error) = &one.error {
         result.reason = format!("ошибка замера разреза: {}", error.message());
@@ -1216,6 +1266,7 @@ pub fn run_with_backend<B: ProbeBackend>(
                     cuts: &[],
                     gap: options.write_gap,
                 },
+                progress,
             );
             if let Some(error) = &measured.error {
                 result.verdict = Verdict::Flaky;
@@ -1260,6 +1311,7 @@ pub fn run_with_backend<B: ProbeBackend>(
         if !control_ok {
             let index = add_observation(&mut result, "neutral-ack", &[], Duration::ZERO);
             let mut observed = true;
+            progress("neutral-ack", result.probes, 0, 0);
             for _ in 0..options.repeats {
                 if stopped(&options) {
                     observed = false;
@@ -1290,6 +1342,12 @@ pub fn run_with_backend<B: ProbeBackend>(
                         break;
                     }
                 }
+                progress(
+                    "neutral-ack",
+                    result.probes,
+                    result.trace[index].pass,
+                    result.trace[index].fail,
+                );
             }
             let ack = &result.trace[index];
             if observed && ack.pass == 0 && ack.fail == options.repeats {
@@ -1306,7 +1364,13 @@ pub fn run_with_backend<B: ProbeBackend>(
         let raw_available = !options.no_raw && backend.raw_supported();
         result.raw_usable = raw_available;
         if result.raw_usable {
-            match backend.sweep_poisons(&target, trigger, &options, &mut result) {
+            match backend.sweep_poisons_with_progress(
+                &target,
+                trigger,
+                &options,
+                &mut result,
+                progress,
+            ) {
                 Ok(Some(hit)) => {
                     result.verdict = Verdict::Poisonable;
                     result.boundary = Some(0);
@@ -1396,6 +1460,7 @@ pub fn run_with_backend<B: ProbeBackend>(
             cuts: &[1],
             gap: options.long_gap,
         },
+        progress,
     );
     if let Some(error) = &long.error {
         result.reason = format!("ошибка замера разреза: {}", error.message());
@@ -1417,6 +1482,7 @@ pub fn run_with_backend<B: ProbeBackend>(
             cuts: &[hi],
             gap: options.write_gap,
         },
+        progress,
     );
     if let Some(error) = &last.error {
         result.reason = format!("ошибка замера разреза: {}", error.message());
@@ -1446,6 +1512,7 @@ pub fn run_with_backend<B: ProbeBackend>(
                 cuts: &[mid],
                 gap: options.write_gap,
             },
+            progress,
         );
         if let Some(error) = &measured.error {
             result.reason = format!("ошибка замера разреза: {}", error.message());

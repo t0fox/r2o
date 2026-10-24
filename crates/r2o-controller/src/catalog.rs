@@ -17,6 +17,7 @@ const MAX_DOMAIN_GROUPS: usize = 64;
 const MAX_DOMAIN_OBSERVATIONS: usize = 256;
 const TTL_SLACK: u8 = 2;
 const VOLUME_SLACK: i64 = 4;
+pub const FINGERPRINT_METHOD: i32 = 2;
 static NEXT_DONOR_IMPORT: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Debug, Default)]

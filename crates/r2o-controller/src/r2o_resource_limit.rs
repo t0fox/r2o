@@ -5,6 +5,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 const R2O_DEFAULT_MEASUREMENT_LIMIT: usize = 2;
+const R2O_MAX_MEASUREMENT_WORKERS: usize = 64;
+const R2O_MEMORY_PER_MEASUREMENT_WORKER_KB: u64 = 8 * 1024;
 const R2O_MEASUREMENT_START_GAP_MS: u64 = 260; // 10 мс покрывают передачу разрешения от планировщика рабочему потоку.
 const R2O_CPU_SAMPLE_INTERVAL_MS: u64 = 1000;
 const R2O_CPU_EWMA_INTERVAL_MS: u64 = 10_000;
@@ -112,6 +114,42 @@ impl R2oResourceReading {
             conntrack,
         }
     }
+}
+
+pub fn r2o_measurement_worker_cap(cores: Option<usize>, total_memory_kb: Option<u64>) -> usize {
+    let cpu_cap = cores
+        .map(|cores| {
+            cores
+                .saturating_mul(4)
+                .clamp(1, R2O_MAX_MEASUREMENT_WORKERS)
+        })
+        .unwrap_or(R2O_DEFAULT_MEASUREMENT_LIMIT);
+    let memory_cap = total_memory_kb
+        .filter(|total| *total > 0)
+        .map(|total| {
+            let reserve = R2O_MEMORY_RESERVE_MIN_KB.max(total * R2O_MEMORY_RESERVE_PERCENT / 100);
+            total
+                .saturating_sub(reserve)
+                .checked_div(R2O_MEMORY_PER_MEASUREMENT_WORKER_KB)
+                .unwrap_or_default()
+                .max(1) as usize
+        })
+        .unwrap_or(R2O_DEFAULT_MEASUREMENT_LIMIT);
+    cpu_cap
+        .min(memory_cap)
+        .min(R2O_MAX_MEASUREMENT_WORKERS)
+        .max(1)
+}
+
+pub fn r2o_system_measurement_worker_cap() -> usize {
+    let cores = std::thread::available_parallelism()
+        .ok()
+        .map(std::num::NonZeroUsize::get);
+    let total_memory = fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|text| r2o_parse_meminfo(&text))
+        .map(|memory| memory.total_kb);
+    r2o_measurement_worker_cap(cores, total_memory)
 }
 
 struct R2oAdaptiveLimit {
@@ -439,6 +477,15 @@ impl R2oMeasurementGate {
         }
     }
 
+    pub fn r2o_max_slots(&self) -> usize {
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .adaptive
+            .max_slots
+    }
+
     fn r2o_new(max_slots: usize, minimum_start_gap: Option<Duration>) -> Self {
         Self {
             shared: Arc::new(R2oGateShared {
@@ -741,7 +788,7 @@ impl Drop for R2oMeasurementPermit {
 mod tests {
     use super::{
         R2oAdaptiveLimit, R2oConntrackStats, R2oCpuCounters, R2oMeasurementGate, R2oMemoryStats,
-        R2oResourceReading, r2o_parse_cpu_stat, r2o_parse_meminfo,
+        R2oResourceReading, r2o_measurement_worker_cap, r2o_parse_cpu_stat, r2o_parse_meminfo,
     };
     use std::sync::{
         Arc,
@@ -749,6 +796,15 @@ mod tests {
         mpsc,
     };
     use std::time::Duration;
+
+    #[test]
+    fn worker_cap_adapts_to_cpu_memory_with_safe_unknown_and_weak_router_limits() {
+        assert_eq!(r2o_measurement_worker_cap(Some(4), Some(1_048_576)), 16);
+        assert_eq!(r2o_measurement_worker_cap(Some(1), Some(65_536)), 4);
+        assert_eq!(r2o_measurement_worker_cap(Some(8), None), 2);
+        assert_eq!(r2o_measurement_worker_cap(Some(128), Some(8_388_608)), 64);
+        assert_eq!(r2o_measurement_worker_cap(None, Some(32_768)), 1);
+    }
 
     #[test]
     fn r2o_live_snapshot_reports_actual_gate_occupancy() {

@@ -432,6 +432,10 @@ fn журнал_проверяет_события_раннего_rst_и_чист
         key,
         client_is_low: true,
         planned: false,
+        ttl: 127,
+        reference_ttl: 64,
+        traffic_class: 0x88,
+        ip_id: 54321,
     };
     let clean_handshake = R2oTcpCleanHandshakeEvent { key };
     let mut journal = R2oFlowJournal::with_capacity(2).unwrap();

@@ -4,7 +4,7 @@ use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-pub const PROTOCOL_VERSION: u16 = 46;
+pub const PROTOCOL_VERSION: u16 = 47;
 pub const FRAME_MAX: usize = 65_536;
 pub const KEY_LEN: usize = 38;
 pub const MAX_DNS_NAME_LEN: usize = 253;
@@ -299,6 +299,10 @@ pub struct R2oTcpEarlyRstEvent {
     pub key: [u8; KEY_LEN],
     pub client_is_low: bool,
     pub planned: bool,
+    pub ttl: u8,
+    pub reference_ttl: u8,
+    pub traffic_class: u8,
+    pub ip_id: u16,
 }
 
 /// TCP RST, снятый защитой до первого ответа на ClientHello.
@@ -306,6 +310,10 @@ pub struct R2oTcpEarlyRstEvent {
 pub struct R2oTcpRstCutSignalEvent {
     pub key: [u8; KEY_LEN],
     pub client_is_low: bool,
+    pub ttl: u8,
+    pub reference_ttl: u8,
+    pub traffic_class: u8,
+    pub ip_id: u16,
 }
 
 /// Полный ответный TLS-обмен одного TCP-потока, нужный для точечной проверки.
@@ -362,10 +370,14 @@ impl R2oTcpEarlyRstEvent {
         if !valid_flow_key(&self.key) || self.key[37] != 6 {
             return None;
         }
-        let mut body = Vec::with_capacity(KEY_LEN + 2);
+        let mut body = Vec::with_capacity(KEY_LEN + 7);
         body.extend_from_slice(&self.key);
         body.push(u8::from(self.client_is_low));
         body.push(u8::from(self.planned));
+        body.push(self.ttl);
+        body.push(self.reference_ttl);
+        body.push(self.traffic_class);
+        body.extend_from_slice(&self.ip_id.to_be_bytes());
         Some(body)
     }
 }
@@ -375,9 +387,13 @@ impl R2oTcpRstCutSignalEvent {
         if !valid_flow_key(&self.key) || self.key[37] != 6 {
             return None;
         }
-        let mut body = Vec::with_capacity(KEY_LEN + 1);
+        let mut body = Vec::with_capacity(KEY_LEN + 6);
         body.extend_from_slice(&self.key);
         body.push(u8::from(self.client_is_low));
+        body.push(self.ttl);
+        body.push(self.reference_ttl);
+        body.push(self.traffic_class);
+        body.extend_from_slice(&self.ip_id.to_be_bytes());
         Some(body)
     }
 }
@@ -2041,7 +2057,7 @@ pub fn decode_r2o_tcp_clean_handshake(
 }
 
 pub fn decode_r2o_tcp_early_rst(frame: &Frame) -> Result<R2oTcpEarlyRstEvent, &'static str> {
-    if frame.kind != EVENT_R2O_TCP_EARLY_RST || frame.body.len() != KEY_LEN + 2 {
+    if frame.kind != EVENT_R2O_TCP_EARLY_RST || frame.body.len() != KEY_LEN + 7 {
         return Err("неверная длина события раннего TCP RST");
     }
     let key: [u8; KEY_LEN] = frame.body[..KEY_LEN]
@@ -2056,6 +2072,10 @@ pub fn decode_r2o_tcp_early_rst(frame: &Frame) -> Result<R2oTcpEarlyRstEvent, &'
         key,
         client_is_low: client_is_low == 1,
         planned: planned == 1,
+        ttl: frame.body[KEY_LEN + 2],
+        reference_ttl: frame.body[KEY_LEN + 3],
+        traffic_class: frame.body[KEY_LEN + 4],
+        ip_id: u16::from_be_bytes([frame.body[KEY_LEN + 5], frame.body[KEY_LEN + 6]]),
     })
 }
 
@@ -2096,7 +2116,7 @@ pub fn decode_r2o_tcp_exchange(frame: &Frame) -> Result<R2oTcpExchangeEvent, &'s
 pub fn decode_r2o_tcp_rst_cut_signal(
     frame: &Frame,
 ) -> Result<R2oTcpRstCutSignalEvent, &'static str> {
-    if frame.kind != EVENT_R2O_TCP_RST_CUT || frame.body.len() != KEY_LEN + 1 {
+    if frame.kind != EVENT_R2O_TCP_RST_CUT || frame.body.len() != KEY_LEN + 6 {
         return Err("неверная длина события защитно снятого TCP RST");
     }
     let key: [u8; KEY_LEN] = frame.body[..KEY_LEN]
@@ -2108,6 +2128,10 @@ pub fn decode_r2o_tcp_rst_cut_signal(
     Ok(R2oTcpRstCutSignalEvent {
         key,
         client_is_low: frame.body[KEY_LEN] == 1,
+        ttl: frame.body[KEY_LEN + 1],
+        reference_ttl: frame.body[KEY_LEN + 2],
+        traffic_class: frame.body[KEY_LEN + 3],
+        ip_id: u16::from_be_bytes([frame.body[KEY_LEN + 4], frame.body[KEY_LEN + 5]]),
     })
 }
 
@@ -2447,6 +2471,10 @@ mod early_rst_event_tests {
             key,
             client_is_low: true,
             planned: false,
+            ttl: 127,
+            reference_ttl: 61,
+            traffic_class: 0x88,
+            ip_id: 54321,
         };
         let frame = Frame {
             kind: EVENT_R2O_TCP_EARLY_RST,
@@ -2544,6 +2572,10 @@ mod tcp_rst_cut_event_tests {
         let event = R2oTcpRstCutSignalEvent {
             key,
             client_is_low: true,
+            ttl: 126,
+            reference_ttl: 62,
+            traffic_class: 0x88,
+            ip_id: 12345,
         };
         let frame = Frame {
             kind: EVENT_R2O_TCP_RST_CUT,

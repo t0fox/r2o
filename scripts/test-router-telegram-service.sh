@@ -97,6 +97,8 @@ snapshot=$(env R2O_DIR="$TEMP/root" R2O_CONFIG="$TEMP/root/config" \
     "$TEMP/manager" exec --component r2o-telegram -- --stats \
         --stats-socket-path "$TEMP/root/state/telegram.stats.sock")
 printf '%s\n' "$snapshot" | grep -q '"listener_ready":true'
+printf '%s\n' "$snapshot" | grep -q '"cf_domain_pool":{"domains":\["' || \
+    fail "S99r2o не включил встроенный пул доменов Cloudflare для WSS fallback"
 grep -q '^start$' "$TEMP/firewall-calls"
 grep -q '^sync-dc-map$' "$TEMP/firewall-calls" || fail "служба не синхронизировала карту DC после запуска firewall"
 grep -qF "$TEMP/tg-firewall|$TEMP/root/state/telegram-dc-endpoints.tsv" "$TEMP/tg-env-capture" || fail "служба не передала прокси путь адаптера и манифеста"

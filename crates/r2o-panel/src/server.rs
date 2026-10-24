@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -23,6 +24,7 @@ static LAST_HEARTBEAT: Mutex<u64> = Mutex::new(0);
 #[derive(Clone, Debug)]
 pub struct Config {
     pub live_path: PathBuf,
+    pub live_extra_paths: Vec<PathBuf>,
     pub config_path: PathBuf,
     pub state_dir: PathBuf,
     pub asset_dir: PathBuf,
@@ -73,6 +75,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             live_path: "/opt/r2o/state/live.json".into(),
+            live_extra_paths: Vec::new(),
             config_path: "/opt/r2o/config".into(),
             state_dir: "/opt/r2o/state".into(),
             asset_dir: "/opt/r2o/panel".into(),
@@ -531,12 +534,36 @@ fn json_response(status: u16, value: &Value) -> Response {
 }
 
 fn api_status(config: &Config, query: &str) -> Response {
-    let live = read_json_object(&config.live_path, BODY_MAX);
+    let mut live = read_json_object(&config.live_path, BODY_MAX);
     let engine_pid = pid_path_running(&config.engine_pid_path);
     let controller_running = pid_path_running(&config.controller_pid_path).is_some();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs());
+    for path in &config.live_extra_paths {
+        let Some(extra) = read_json_object(path, BODY_MAX) else {
+            continue;
+        };
+        let extra_mtime = fs::metadata(path)
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map(|modified| modified.as_secs());
+        let extra_fresh = extra_mtime.is_some_and(|modified| {
+            let within_window = if modified > now {
+                modified - now <= 5
+            } else {
+                now - modified <= 15
+            };
+            let after_engine = engine_pid.is_none_or(|(_, started)| modified >= started);
+            within_window && after_engine
+        });
+        if extra_fresh && extra.get("linked").and_then(Value::as_bool) == Some(true) {
+            if let Some(live) = &mut live {
+                merge_live_snapshot(live, &extra);
+            }
+        }
+    }
     let live_mtime = live
         .as_ref()
         .and_then(|_| fs::metadata(&config.live_path).ok())
@@ -567,14 +594,14 @@ fn api_status(config: &Config, query: &str) -> Response {
         && controller_running;
     let (knowledge, revision, unchanged) = match live {
         Some(mut value) => {
+            let revision = catalog_revision(&value);
+            let unchanged = revision
+                .as_ref()
+                .is_some_and(|r| query.strip_prefix("catalog_revision=") == Some(r.as_str()));
             if let Some(object) = value.as_object_mut() {
                 if object.contains_key("linked") {
                     object.insert("linked".into(), Value::Bool(linked));
                 }
-                let revision = catalog_revision(&config.live_path);
-                let unchanged = revision
-                    .as_ref()
-                    .is_some_and(|r| query.strip_prefix("catalog_revision=") == Some(r.as_str()));
                 if unchanged {
                     for key in ["boxes", "groups"] {
                         if object.contains_key(key) {
@@ -603,6 +630,131 @@ fn api_status(config: &Config, query: &str) -> Response {
         result["catalog_unchanged"] = Value::Bool(unchanged);
     }
     json_response(200, &result)
+}
+
+fn merge_live_snapshot(primary: &mut Value, extra: &Value) {
+    let primary_has_searches = primary
+        .get("searches")
+        .and_then(Value::as_array)
+        .is_some_and(|searches| !searches.is_empty());
+    let extra_searches = extra.get("searches").and_then(Value::as_array);
+    let extra_has_searches = extra_searches.is_some_and(|searches| !searches.is_empty());
+    let primary_events = primary["autopick"]["datapath_events"].as_u64().unwrap_or(0);
+    let extra_events = extra["autopick"]["datapath_events"].as_u64().unwrap_or(0);
+    let primary_suspects = primary["autopick"]["suspect_events"].as_u64().unwrap_or(0);
+    let extra_suspects = extra["autopick"]["suspect_events"].as_u64().unwrap_or(0);
+    let take_extra_autopick = extra_has_searches && !primary_has_searches
+        || (extra_has_searches == primary_has_searches && extra_events > primary_events);
+
+    let mut seen = HashSet::new();
+    if let Some(searches) = primary.get("searches").and_then(Value::as_array) {
+        for search in searches {
+            seen.insert(live_search_key(search));
+        }
+    }
+    if let Some(searches) = primary.get_mut("searches").and_then(Value::as_array_mut) {
+        if let Some(extra_searches) = extra_searches {
+            for search in extra_searches {
+                if seen.insert(live_search_key(search)) {
+                    searches.push(search.clone());
+                }
+            }
+        }
+    }
+
+    for key in ["probes_used", "client_unfit"] {
+        add_live_counter(primary, extra, key);
+    }
+    if let Some(primary_autopick) = primary.get_mut("autopick").and_then(Value::as_object_mut) {
+        for key in ["datapath_events", "suspect_events"] {
+            let sum = primary_autopick
+                .get(key)
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .saturating_add(extra["autopick"][key].as_u64().unwrap_or(0));
+            primary_autopick.insert(key.into(), Value::from(sum));
+        }
+    }
+    if take_extra_autopick && let Some(autopick) = extra.get("autopick") {
+        primary["autopick"] = autopick.clone();
+        if let Some(primary_autopick) = primary.get_mut("autopick").and_then(Value::as_object_mut) {
+            primary_autopick.insert(
+                "datapath_events".into(),
+                Value::from(primary_events.saturating_add(extra_events)),
+            );
+            primary_autopick.insert(
+                "suspect_events".into(),
+                Value::from(primary_suspects.saturating_add(extra_suspects)),
+            );
+        }
+    }
+
+    if let Some(primary_measurements) = primary
+        .get_mut("measurements")
+        .and_then(Value::as_object_mut)
+    {
+        for key in ["active", "queued", "limit"] {
+            let sum = primary_measurements
+                .get(key)
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .saturating_add(extra["measurements"][key].as_u64().unwrap_or(0));
+            primary_measurements.insert(key.into(), Value::from(sum));
+        }
+        merge_live_min(primary_measurements, extra, "free_pct");
+        merge_live_min(primary_measurements, extra, "mem_avail_mb");
+        merge_live_max(primary_measurements, extra, "cores");
+        merge_live_max(primary_measurements, extra, "mem_total_mb");
+        merge_live_max(primary_measurements, extra, "conntrack_pct");
+        if primary_measurements
+            .get("limited_by")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+            && let Some(value) = extra["measurements"].get("limited_by")
+        {
+            primary_measurements.insert("limited_by".into(), value.clone());
+        }
+    }
+
+    let primary_confirms = primary["confirms"].as_u64().unwrap_or(0);
+    let extra_confirms = extra["confirms"].as_u64().unwrap_or(0);
+    let primary_targets = primary["targets"].as_u64().unwrap_or(0);
+    let extra_targets = extra["targets"].as_u64().unwrap_or(0);
+    if extra_confirms > primary_confirms || extra_targets > primary_targets {
+        for key in ["boxes", "groups", "targets", "confirms"] {
+            if let Some(value) = extra.get(key) {
+                primary[key] = value.clone();
+            }
+        }
+    }
+}
+
+fn live_search_key(search: &Value) -> String {
+    let identity = ["target", "family", "transport", "ip", "port"]
+        .map(|field| search.get(field).cloned().unwrap_or(Value::Null));
+    serde_json::to_string(&identity).unwrap_or_default()
+}
+
+fn add_live_counter(primary: &mut Value, extra: &Value, key: &str) {
+    let sum = primary[key]
+        .as_u64()
+        .unwrap_or(0)
+        .saturating_add(extra[key].as_u64().unwrap_or(0));
+    primary[key] = Value::from(sum);
+}
+
+fn merge_live_min(primary: &mut serde_json::Map<String, Value>, extra: &Value, key: &str) {
+    if let Some(value) = extra["measurements"][key].as_u64() {
+        let current = primary.get(key).and_then(Value::as_u64).unwrap_or(value);
+        primary.insert(key.into(), Value::from(current.min(value)));
+    }
+}
+
+fn merge_live_max(primary: &mut serde_json::Map<String, Value>, extra: &Value, key: &str) {
+    if let Some(value) = extra["measurements"][key].as_u64() {
+        let current = primary.get(key).and_then(Value::as_u64).unwrap_or(value);
+        primary.insert(key.into(), Value::from(current.max(value)));
+    }
 }
 
 fn unavailable_knowledge() -> (Value, Option<String>, bool) {
@@ -1742,20 +1894,18 @@ fn read_regular_file_with_metadata(
     Ok((bytes, metadata))
 }
 
-fn catalog_revision(path: &Path) -> Option<String> {
-    let raw = read_regular_file(path, BODY_MAX).ok()?;
-    let _ = serde_json::from_slice::<Value>(&raw).ok()?;
+fn catalog_revision(value: &Value) -> Option<String> {
     let mut hash = 14_695_981_039_346_656_037u64;
     let mut found = false;
     for (index, key) in ["boxes", "groups"].iter().enumerate() {
-        let raw_value = top_level_raw_value(&raw, key);
+        let raw_value = value.get(key).map(serde_json::to_vec).transpose().ok()?;
         hash ^= (index + 1) as u64;
         hash = hash.wrapping_mul(1_099_511_628_211);
-        hash ^= raw_value.map_or(0, |v| v.len()) as u64;
+        hash ^= raw_value.as_ref().map_or(0, Vec::len) as u64;
         hash = hash.wrapping_mul(1_099_511_628_211);
         if let Some(value) = raw_value {
             found = true;
-            for byte in value {
+            for byte in &value {
                 hash ^= u64::from(*byte);
                 hash = hash.wrapping_mul(1_099_511_628_211);
             }

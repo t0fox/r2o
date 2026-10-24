@@ -407,6 +407,57 @@ fn live_catalog_revision_reuses_only_catalog_arrays() {
 }
 
 #[test]
+fn status_merges_independent_controller_live_snapshots() {
+    let temp = TempDir::new();
+    let live4 = temp.file("live4.json");
+    let live6 = temp.file("live6.json");
+    let engine_pid = temp.file("engine.pid");
+    let controller_pid = temp.file("controller.pid");
+    fs::write(&engine_pid, format!("{}\n", std::process::id())).unwrap();
+    fs::write(&controller_pid, format!("{}\n", std::process::id())).unwrap();
+    fs::write(
+        &live4,
+        r#"{"linked":true,"catalog_at":"catalog.json","boxes":[],"groups":[],"searches":[{"target":"v4.example","family":4,"transport":6,"ip":"192.0.2.4","port":443,"phase":"проверка"}],"measurements":{"active":2,"queued":1,"limit":4,"cores":2,"free_pct":90},"autopick":{"datapath_events":12,"suspect_events":3,"target":"v4.example"},"targets":0,"confirms":0,"probes_used":7,"client_unfit":1}"#,
+    )
+    .unwrap();
+    fs::write(
+        &live6,
+        r#"{"linked":true,"catalog_at":"catalog.json","boxes":[{"id":"box6"}],"groups":[{"suffix":"ipv6.example"}],"searches":[{"target":"v6.example","family":6,"transport":6,"ip":"2001:db8::6","port":443,"phase":"кандидат"}],"measurements":{"active":1,"queued":0,"limit":2,"cores":2,"free_pct":88},"autopick":{"datapath_events":8,"suspect_events":2,"target":"v6.example"},"targets":1,"confirms":1,"probes_used":5,"client_unfit":2}"#,
+    )
+    .unwrap();
+    let mut config = Config::default();
+    config.live_path = live4;
+    config.live_extra_paths = vec![live6];
+    config.engine_pid_path = engine_pid;
+    config.controller_pid_path = controller_pid;
+
+    let (status, _, body) = request(
+        &config,
+        "GET /api/status HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    assert_eq!(status, 200);
+    let value: Value = serde_json::from_str(&body).unwrap();
+    let knowledge = &value["knowledge"];
+    assert_eq!(knowledge["searches"].as_array().unwrap().len(), 2);
+    assert_eq!(knowledge["measurements"]["active"], 3);
+    assert_eq!(knowledge["measurements"]["queued"], 1);
+    assert_eq!(knowledge["measurements"]["limit"], 6);
+    assert_eq!(knowledge["probes_used"], 12);
+    assert_eq!(knowledge["client_unfit"], 3);
+    assert_eq!(knowledge["autopick"]["datapath_events"], 20);
+    assert_eq!(knowledge["boxes"][0]["id"], "box6");
+    let revision = value["catalog_revision"].as_str().unwrap();
+    let (_, _, cached_body) = request(
+        &config,
+        &format!("GET /api/status?catalog_revision={revision} HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+    );
+    let cached: Value = serde_json::from_str(&cached_body).unwrap();
+    assert_eq!(cached["catalog_unchanged"], true);
+    assert_eq!(cached["knowledge"]["boxes"], Value::Null);
+    assert_eq!(cached["knowledge"]["searches"].as_array().unwrap().len(), 2);
+}
+
+#[test]
 fn static_assets_use_etag_and_return_not_modified() {
     let config = Config::default();
     let first = handle_request(

@@ -47,6 +47,7 @@ pub fn sweep_poisons(
     trigger: &Trigger,
     options: &ClassifyOptions,
     result: &mut ClassifyResult,
+    progress: &mut dyn FnMut(&str, usize, usize, usize),
 ) -> Result<Option<PoisonHit>, ProbeError> {
     let remote = resolve_target(target)?;
     let family = if remote.is_ipv4() { 4 } else { 6 };
@@ -98,15 +99,35 @@ pub fn sweep_poisons(
                 Ok(Some(connection)) => {
                     drop(connection);
                     observation.pass += 1;
+                    progress(
+                        "raw-selftest",
+                        result.probes,
+                        observation.pass,
+                        observation.fail,
+                    );
                     break;
                 }
-                Ok(None) => observation.fail += 1,
+                Ok(None) => {
+                    observation.fail += 1;
+                    progress(
+                        "raw-selftest",
+                        result.probes,
+                        observation.pass,
+                        observation.fail,
+                    );
+                }
                 Err(error) => {
                     observation.fail += 1;
                     if observation.error.is_none() {
                         observation.error = Some(format!("{error:?}"));
                     }
                     last_error = Some(error);
+                    progress(
+                        "raw-selftest",
+                        result.probes,
+                        observation.pass,
+                        observation.fail,
+                    );
                 }
             }
         }
@@ -184,9 +205,21 @@ pub fn sweep_poisons(
                     raw_errors += 1;
                     observation.fail += 1;
                     observation.error = Some(format!("{error:?}"));
+                    progress(
+                        &observation.probe,
+                        result.probes,
+                        observation.pass,
+                        observation.fail,
+                    );
                     break;
                 }
             }
+            progress(
+                &observation.probe,
+                result.probes,
+                observation.pass,
+                observation.fail,
+            );
             raw_ok += 1;
             if majority(observation.pass, options.repeats)
                 || !majority(
@@ -223,7 +256,7 @@ pub fn sweep_poisons(
         }
         add_observation(result, observation.clone());
         if should_recheck(cached_selftest, raw_ok, raw_errors) {
-            if !raw_recheck(remote, options, result)? {
+            if !raw_recheck(remote, options, result, progress)? {
                 result.raw_usable = false;
                 return Err(ProbeError::Local(
                     "classify: raw self-test failed after local probe errors".into(),
@@ -278,6 +311,12 @@ pub fn sweep_poisons(
                 Ok(false) => {
                     observation.fail += 1;
                     raw_ok += 1;
+                    progress(
+                        &observation.probe,
+                        result.probes,
+                        observation.pass,
+                        observation.fail,
+                    );
                     break;
                 }
                 Err(error) => {
@@ -285,9 +324,21 @@ pub fn sweep_poisons(
                     observation.error = Some(format!("{error:?}"));
                     raw_errors += 1;
                     local_error = true;
+                    progress(
+                        &observation.probe,
+                        result.probes,
+                        observation.pass,
+                        observation.fail,
+                    );
                     break;
                 }
             }
+            progress(
+                &observation.probe,
+                result.probes,
+                observation.pass,
+                observation.fail,
+            );
         }
         if !local_error && observation.pass == options.repeats {
             match make_poison_hit(&poison, trigger, decoy) {
@@ -303,7 +354,7 @@ pub fn sweep_poisons(
         }
         add_observation(result, observation.clone());
         if should_recheck(cached_selftest, raw_ok, raw_errors) {
-            if !raw_recheck(remote, options, result)? {
+            if !raw_recheck(remote, options, result, progress)? {
                 result.raw_usable = false;
                 return Err(ProbeError::Local(
                     "classify: raw self-test failed after local probe errors".into(),
@@ -370,9 +421,21 @@ pub fn sweep_poisons(
                     raw_errors += 1;
                     observation.error = Some(format!("{error:?}"));
                     local_error = true;
+                    progress(
+                        &observation.probe,
+                        result.probes,
+                        observation.pass,
+                        observation.fail,
+                    );
                     break;
                 }
             }
+            progress(
+                &observation.probe,
+                result.probes,
+                observation.pass,
+                observation.fail,
+            );
         }
         if !local_error && observation.pass == options.repeats {
             match make_poison_hit(poison, trigger, decoy) {
@@ -392,7 +455,7 @@ pub fn sweep_poisons(
         }
         add_observation(result, observation.clone());
         if should_recheck(cached_selftest, raw_ok, raw_errors) {
-            if !raw_recheck(remote, options, result)? {
+            if !raw_recheck(remote, options, result, progress)? {
                 result.raw_usable = false;
                 return Err(ProbeError::Local(
                     "classify: raw self-test failed after local probe errors".into(),
@@ -403,7 +466,7 @@ pub fn sweep_poisons(
             raw_errors = 0;
         }
         if should_recheck(cached_selftest, raw_ok, raw_errors) {
-            if !raw_recheck(remote, options, result)? {
+            if !raw_recheck(remote, options, result, progress)? {
                 result.raw_usable = false;
                 return Err(ProbeError::Local(
                     "classify: raw self-test failed after local probe errors".into(),
@@ -480,6 +543,7 @@ fn raw_recheck(
     remote: SocketAddr,
     options: &ClassifyOptions,
     result: &mut ClassifyResult,
+    progress: &mut dyn FnMut(&str, usize, usize, usize),
 ) -> Result<bool, ProbeError> {
     let mut observation = Observation {
         probe: "raw-selftest".into(),
@@ -505,14 +569,34 @@ fn raw_recheck(
             Ok(Some(connection)) => {
                 drop(connection);
                 observation.pass += 1;
+                progress(
+                    "raw-selftest",
+                    result.probes,
+                    observation.pass,
+                    observation.fail,
+                );
                 break;
             }
-            Ok(None) => observation.fail += 1,
+            Ok(None) => {
+                observation.fail += 1;
+                progress(
+                    "raw-selftest",
+                    result.probes,
+                    observation.pass,
+                    observation.fail,
+                );
+            }
             Err(error) => {
                 observation.fail += 1;
                 if observation.error.is_none() {
                     observation.error = Some(format!("{error:?}"));
                 }
+                progress(
+                    "raw-selftest",
+                    result.probes,
+                    observation.pass,
+                    observation.fail,
+                );
             }
         }
     }

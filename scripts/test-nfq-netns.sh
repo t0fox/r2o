@@ -348,6 +348,23 @@ with open(sys.argv[1], "w", encoding="utf-8") as output:
 PY
 ip netns exec "$NS" "$R2OC_BIN" --apply-catalog \
     "$WORK/r2o-datapath-control.sock" "$WORK/catalog.json"
+catalog_sha_before_restart=$(sha256sum "$WORK/catalog.json" | cut -d' ' -f1)
+kill -TERM "$R2OD_CONTROL_PID"
+wait "$R2OD_CONTROL_PID" 2>/dev/null || true
+ip netns exec "$NS" "$R2OD_BIN" \
+    --queue "$TCP_CONTROL_QUEUE" --family ipv4 --controller-only \
+    --mark "$TCP_CONTROL_MARK" --control "$WORK/r2o-datapath-control.sock" \
+    >"$WORK/r2o-datapath-control-restarted.log" 2>&1 &
+R2OD_CONTROL_PID=$!
+sleep 0.2
+if ! kill -0 "$R2OD_CONTROL_PID" 2>/dev/null; then
+    cat "$WORK/r2o-datapath-control-restarted.log" >&2
+    exit 1
+fi
+ip netns exec "$NS" "$R2OC_BIN" --apply-catalog \
+    "$WORK/r2o-datapath-control.sock" "$WORK/catalog.json"
+[ "$(sha256sum "$WORK/catalog.json" | cut -d' ' -f1)" = "$catalog_sha_before_restart" ]
+echo "ПРОЙДЕНО: после перезапуска datapath план повторно загружен из неизменённого каталога"
 
 ip netns exec "$NS" python3 - "$FIXTURE" <<'PY'
 import socket
@@ -1399,4 +1416,4 @@ if ! grep -Eq '^r2o-datapath: UDP-потоки [1-9][0-9]* из 2048, отказ
 fi
 echo "ПРОЙДЕНО: UDP-потоки из NFQUEUE сохранены и показаны в итоговой сводке"
 
-cat "$WORK/r2o-datapath.log" "$WORK/r2o-datapath-udplen.log" "$WORK/r2o-datapath-tcp.log" "$WORK/r2o-datapath-tcp6.log" "$WORK/r2o-datapath-tcp-delay.log" "$WORK/r2o-datapath-control.log" "$WORK/r2o-datapath-voice.log" "$WORK/r2o-datapath-observe.log" "$WORK/r2o-controller-observe.log" "$WORK/r2o-datapath-hold.log" "$WORK/r2o-datapath-ipv6.log"
+cat "$WORK/r2o-datapath.log" "$WORK/r2o-datapath-udplen.log" "$WORK/r2o-datapath-tcp.log" "$WORK/r2o-datapath-tcp6.log" "$WORK/r2o-datapath-tcp-delay.log" "$WORK/r2o-datapath-control.log" "$WORK/r2o-datapath-control-restarted.log" "$WORK/r2o-datapath-voice.log" "$WORK/r2o-datapath-observe.log" "$WORK/r2o-controller-observe.log" "$WORK/r2o-datapath-hold.log" "$WORK/r2o-datapath-ipv6.log"

@@ -136,17 +136,66 @@ table inet r2o {
     }
 }
 EOF
+    nft_rst_up || { rm -f "$rules"; return 1; }
     nft -f "$rules"
     rm -f "$rules"
 }
 
-nft_down() {
-    nft list table inet r2o >/dev/null 2>&1 || return 0
-    if ! nft list table inet r2o 2>/dev/null | grep -F -q 'comment "r2o-managed"'; then
-            echo "отказ: таблица nft inet r2o не принадлежит r2o" >&2
+nft_rst_up() {
+    rst_rules=${R2O_RUN_DIR:-$ROOT/run}/firewall-rst.nft.$$
+    mkdir -p "$(dirname "$rst_rules")"
+    umask 077
+    : > "$rst_rules"
+    if nft list table inet r2o_rst >/dev/null 2>&1; then
+        if ! nft list table inet r2o_rst 2>/dev/null | grep -F -q 'comment "r2o-managed"'; then
+            echo "отказ: таблица nft inet r2o_rst не принадлежит r2o" >&2
+            rm -f "$rst_rules"
+            return 1
+        fi
+    else
+        cat >> "$rst_rules" <<'EOF'
+add table inet r2o_rst { comment "r2o-managed"; }
+EOF
+    fi
+    if ! nft list set inet r2o_rst rst4 >/dev/null 2>&1; then
+        cat >> "$rst_rules" <<'EOF'
+add set inet r2o_rst rst4 { type inet_service . ipv4_addr . inet_service; flags timeout; timeout 30s; }
+EOF
+    fi
+    if ! nft list set inet r2o_rst rst6 >/dev/null 2>&1; then
+        cat >> "$rst_rules" <<'EOF'
+add set inet r2o_rst rst6 { type inet_service . ipv6_addr . inet_service; flags timeout; timeout 30s; }
+EOF
+    fi
+    if ! nft list chain inet r2o_rst output >/dev/null 2>&1; then
+        cat >> "$rst_rules" <<'EOF'
+add chain inet r2o_rst output { type filter hook output priority filter; policy accept; }
+add rule inet r2o_rst output tcp flags & rst == rst tcp sport . ip daddr . tcp dport @rst4 drop
+add rule inet r2o_rst output tcp flags & rst == rst tcp sport . ip6 daddr . tcp dport @rst6 drop
+EOF
+    fi
+    if [ -s "$rst_rules" ]; then nft -f "$rst_rules" || { rm -f "$rst_rules"; return 1; }; fi
+    rm -f "$rst_rules"
+}
+
+nft_rst_down() {
+    nft list table inet r2o_rst >/dev/null 2>&1 || return 0
+    if ! nft list table inet r2o_rst 2>/dev/null | grep -F -q 'comment "r2o-managed"'; then
+        echo "отказ: таблица nft inet r2o_rst не принадлежит r2o" >&2
         return 1
     fi
-    nft delete table inet r2o
+    nft delete table inet r2o_rst
+}
+
+nft_down() {
+    if nft list table inet r2o >/dev/null 2>&1; then
+        if ! nft list table inet r2o 2>/dev/null | grep -F -q 'comment "r2o-managed"'; then
+            echo "отказ: таблица nft inet r2o не принадлежит r2o" >&2
+            return 1
+        fi
+        nft delete table inet r2o || return 1
+    fi
+    nft_rst_down
 }
 
 xt() {
@@ -246,6 +295,9 @@ iptables_up() {
 }
 
 case "${1:-}" in
+    backend)
+        printf '%s\n' "$BACKEND"
+        ;;
     up)
         if [ "$BACKEND" = nft ]; then nft_up; else iptables_up; fi
         ;;
@@ -261,5 +313,5 @@ case "${1:-}" in
                 { [ "$IPV6_ENABLED" = 0 ] || xt ip6tables -t mangle -C POSTROUTING -j R2O_OUT; }
         fi
         ;;
-    *) echo "использование: $0 {up|down|status}" >&2; exit 2 ;;
+    *) echo "использование: $0 {backend|up|down|status}" >&2; exit 2 ;;
 esac

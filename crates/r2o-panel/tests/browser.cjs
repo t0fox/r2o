@@ -56,7 +56,99 @@ async function main() {
   const configPath = path.join(work, "config");
   const serviceLog = path.join(work, "service.log");
   const servicePath = path.join(work, "service.sh");
+  const livePath = path.join(work, "live.json");
+  const enginePidPath = path.join(work, "engine.pid");
+  const controllerPidPath = path.join(work, "controller.pid");
   fs.writeFileSync(configPath, `MODE=observe\nSTATE_DIR=${path.join(work, "state")}\nQUEUE_NUM=2000\nQUEUE_NUM6=2001\nR2O_FLOW_CAPACITY=2048\nIPV6_ENABLED=1\nMARK=45\nPROBE_MARK=0\nONLY_MARK=\nFW_BACKEND=auto\nPORTS=0:65535\nCONNBYTES=0:8\nVOICE_PORTS=50000:50099,1400,3478:3481,5349,19294:19344\nVOICE_CONNBYTES=0:4\nHTTP_KEEPALIVE_PORTS=80\nDNS_PORTS=53,853\nTG_PORT=1443\nR2O_PPE_DEOFFLOAD=1\nLOGMAX=2097152\nLOGKEEP=1048576\nLOG_EVERY=60\n`);
+  fs.writeFileSync(enginePidPath, String(process.pid));
+  fs.writeFileSync(controllerPidPath, String(process.pid));
+  fs.writeFileSync(livePath, JSON.stringify({
+    linked: true,
+    catalog_at: new Date().toISOString(),
+    boxes: [],
+    groups: [],
+    searches: [{
+      target: "blocked.example",
+      family: 4,
+      transport: 6,
+      ip: "192.0.2.4",
+      port: 443,
+      phase: "проверяем выведенный план",
+      since: new Date().toISOString(),
+      attempts: 1,
+      probes: 3,
+      question: "",
+      candidate: "план поставлен: split sni_middle +0",
+      source: "выведен из замера",
+      plan: "split sni_middle +0 · fake payload=1 poison=1…",
+      application: "точный APPLIED получен",
+      last_result: "план применён; получен полный HTTPS-ответ HTTP 200",
+      shape: 1,
+    }],
+    targets: 0,
+    confirms: 0,
+    probes_used: 3,
+    client_unfit: 0,
+    measurements: { active: 1, limit: 2, queued: 0, free_pct: 96, cores: 2 },
+  }));
+  const liveState = JSON.parse(fs.readFileSync(livePath, "utf8"));
+  liveState.searches.push(
+    {
+      target: "queued.example",
+      family: 4,
+      transport: 6,
+      ip: "192.0.2.5",
+      port: 443,
+      phase: "ожидает безопасного слота замера",
+      since: new Date().toISOString(),
+      attempts: 0,
+      probes: 0,
+      question: "",
+      candidate: "",
+      source: "",
+      plan: "",
+      application: "",
+      last_result: "",
+      shape: 1,
+    },
+    {
+      target: "classifying.example",
+      family: 4,
+      transport: 6,
+      ip: "192.0.2.6",
+      port: 443,
+      phase: "распознаём поведение",
+      since: new Date().toISOString(),
+      attempts: 0,
+      probes: 1,
+      question: "whole · проверок: 1, прошло: 0, отказов: 1",
+      candidate: "",
+      source: "",
+      plan: "",
+      application: "",
+      last_result: "",
+      shape: 1,
+    },
+    {
+      target: "failed.example",
+      family: 4,
+      transport: 6,
+      ip: "192.0.2.7",
+      port: 443,
+      phase: "проверяем выведенный план",
+      since: new Date().toISOString(),
+      attempts: 1,
+      probes: 3,
+      question: "",
+      candidate: "план поставлен: split sni_middle +0",
+      source: "выведен из замера",
+      plan: "",
+      application: "обход не подтверждён",
+      last_result: "TLS-рукопожатие не завершилось: Resource temporarily unavailable (os error 11)",
+      shape: 1,
+    }
+  );
+  fs.writeFileSync(livePath, JSON.stringify(liveState));
   fs.writeFileSync(servicePath, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${serviceLog}'\n`);
   fs.chmodSync(servicePath, 0o700);
   panel = spawn(panelBinary, [
@@ -66,7 +158,9 @@ async function main() {
     "--service", servicePath,
     "--assets", assets,
     "--state-dir", work,
-    "--live", path.join(work, "live.json"),
+    "--live", livePath,
+    "--engine-pid", enginePidPath,
+    "--controller-pid", controllerPidPath,
     "--health-file", path.join(work, "panel.health"),
   ], { stdio: ["ignore", "pipe", "pipe"] });
   let panelOutput = "";
@@ -159,6 +253,17 @@ async function main() {
   assert.equal(await evaluate("document.fonts.check('400 16px \\\"JetBrains Mono\\\"')"), true, "локальный JetBrains Mono загружен");
   assert.equal(await evaluate("document.querySelectorAll('script:not([src])').length"), 0, "встроенные скрипты макета не исполняются");
   await waitFor(() => evaluate("document.querySelector('#now-title').textContent !== 'Получаем состояние…'"), "состояние из /api/status");
+  await waitFor(() => evaluate("document.querySelector('.search-plan code')?.textContent === 'split sni_middle +0 · fake payload=1 poison=1…'"), "план текущей пробы в карточке Discovery");
+  assert.equal(await evaluate("document.querySelector('.search-plan-result').textContent.includes('точный APPLIED получен') && document.querySelector('.search-plan-result').textContent.includes('полный HTTPS-ответ HTTP 200')"), true, "карточка показывает APPLIED и последний результат проверки плана");
+  await waitFor(() => evaluate("[...document.querySelectorAll('.search-question')].some((row) => !row.hidden && row.textContent.includes('whole · проверок: 1'))"), "текущий вопрос классификатора в карточке Discovery");
+  assert.equal(await evaluate("document.querySelectorAll('#searches .search').length"), 4, "очередь и активные стадии представлены отдельными карточками");
+  assert.equal(await evaluate("[...document.querySelectorAll('.search')].some((row) => row.textContent.includes('TLS-рукопожатие не завершилось') && row.querySelector('.search-plan-result') && row.querySelector('.search-plan')?.hidden === true)"), true, "причина отказа видна и без найденного плана");
+  assert.equal(await evaluate("[...document.querySelectorAll('.search .track')].every((track) => track.querySelectorAll('.track-step').length === 7 && track.querySelector('.track-step:last-child').textContent === 'Подтверждено')"), true, "карточка использует исходные семь этапов d2o");
+  const liveSearch = liveState.searches.find((search) => search.target === "classifying.example");
+  liveSearch.probes = 2;
+  liveSearch.question = "split · проверок: 2, прошло: 1, отказов: 1";
+  fs.writeFileSync(livePath, JSON.stringify(liveState));
+  await waitFor(() => evaluate("[...document.querySelectorAll('.search-question')].some((row) => !row.hidden && row.textContent.includes('split · проверок: 2'))"), "автоматическое обновление вопроса и числа зондов");
   assert.equal(await evaluate("document.querySelector('#r2o-settings') !== null"), true, "доступен раздел настроек");
   assert.equal(await evaluate("document.querySelectorAll('#r2o-settings-form input, #r2o-settings-form select').length === 20"), true, "форма содержит параметры datapath, firewall, PPE и Telegram");
   await waitFor(() => evaluate("document.querySelector('#settings-mode').value === 'observe' && document.querySelector('#settings-queue').value === '2000' && document.querySelector('#settings-queue6').value === '2001' && document.querySelector('#settings-firewall').value === 'auto'"), "загрузка текущих настроек");

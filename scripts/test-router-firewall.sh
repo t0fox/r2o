@@ -15,7 +15,7 @@ if [ "\${1:-}" = list ]; then
     exit 1
 fi
 if [ "\${1:-}" = -f ]; then
-    [ -z "\${R2O_TEST_RULES:-}" ] || cp "\$2" "\$R2O_TEST_RULES"
+    [ -z "\${R2O_TEST_RULES:-}" ] || cat "\$2" >> "\$R2O_TEST_RULES"
     exec "$NFT" --check --file "\$2"
 fi
 exec "$NFT" "\$@"
@@ -38,6 +38,9 @@ QUEUE_NUM6=34001 \
 PATH="$TEMP/bin:$PATH" \
     sh "$ROOT/router/r2o-firewall.sh" up
 grep -qF 'meta mark 0x40000000 return' "$TEMP/main.nft"
+grep -qF 'table inet r2o_rst' "$TEMP/main.nft"
+grep -qF 'tcp sport . ip daddr . tcp dport @rst4 drop' "$TEMP/main.nft"
+grep -qF 'tcp sport . ip6 daddr . tcp dport @rst6 drop' "$TEMP/main.nft"
 
 R2O_DIR="$TEMP/root" \
 R2O_CONFIG=/dev/null \

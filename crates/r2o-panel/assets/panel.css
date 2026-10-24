@@ -342,6 +342,10 @@ main { min-width: 0; }
   content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%;
   background: var(--violet-2); box-shadow: 0 0 0 4px rgba(192, 132, 252, .16);
 }
+.search-plan, .search-plan-result { grid-column: 1 / -1; overflow-wrap: anywhere; }
+.search-plan { margin-top: 2px; color: var(--ink); font-size: .9rem; }
+.search-plan code { color: var(--violet-2); font: 600 .86rem "JetBrains Mono", monospace; }
+.search-plan-result { margin-top: -3px; color: var(--ink-3); font-size: .82rem; }
 .search-question { grid-column: 1 / -1; margin-top: 2px; font-size: .875rem; color: var(--ink-3); overflow-wrap: anywhere; }
 .search[data-done="true"] .search-phase::before { background: var(--ok); box-shadow: 0 0 0 4px var(--ok-wash); }
 

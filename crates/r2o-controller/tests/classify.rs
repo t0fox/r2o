@@ -2,7 +2,7 @@ use r2o_controller::classify::{
     Accept, ClassifyOptions, DpiProps, Poison, ProbeBackend, ProbeError, ProbeOutcome,
     ProbeRequest, ProbeTarget, Span, TriState, Trigger, Verdict, note_props_hit, note_props_miss,
     plan_bytes_for_poison, poison_has_fake, poison_supports_family, poisons, run, run_with_backend,
-    split_offsets, strategy_for_poison, trigger_accepts,
+    run_with_backend_progress, split_offsets, strategy_for_poison, trigger_accepts,
 };
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -293,6 +293,37 @@ fn prefix_matcher_finds_the_first_blocked_split_boundary() {
     assert_eq!(
         result.strategy.as_deref(),
         Some("--lua-desync=multisplit:payload=unknown:dir=out:pos=1")
+    );
+}
+
+#[test]
+fn classifier_reports_each_question_and_probe_as_it_runs() {
+    let trigger = test_trigger();
+    let mut backend = PrefixMatcher { signature_len: 4 };
+    let mut updates = Vec::new();
+    let result = run_with_backend_progress(
+        "192.0.2.10:443",
+        &trigger,
+        test_options(),
+        &mut backend,
+        &mut |question, probes, passed, failed| {
+            updates.push((question.to_owned(), probes, passed, failed));
+        },
+    );
+
+    assert_eq!(result.verdict, Verdict::Prefix);
+    assert!(
+        updates.len() > 6,
+        "прогресс должен приходить по ходу каждого этапа"
+    );
+    assert!(updates.windows(2).all(|pair| pair[0].1 <= pair[1].1));
+    assert!(updates.iter().any(|(question, probes, _, failed)| {
+        question == "whole" && *probes == 2 && *failed == 2
+    }));
+    assert!(
+        updates
+            .iter()
+            .any(|(question, _, _, _)| question == "split-long")
     );
 }
 

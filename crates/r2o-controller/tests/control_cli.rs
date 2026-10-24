@@ -347,14 +347,6 @@ fn serve_catalog_installs_plans_and_consumes_hello_on_the_same_connection() {
         stream.write_all(&frame(0x000a, &greeting)).unwrap();
 
         let (kind, body) = read_frame(&mut stream);
-        assert_eq!(kind, 0x0085);
-        assert!(body.is_empty());
-        let mut ack = vec![0; KEY_LEN];
-        ack[0] = 4;
-        ack.extend_from_slice(&[0x00, 0x85, 1, 0]);
-        stream.write_all(&frame(0x0008, &ack)).unwrap();
-
-        let (kind, body) = read_frame(&mut stream);
         assert_eq!(kind, 0x0081);
         assert!(
             body.windows(b"example.test".len())
@@ -409,7 +401,7 @@ fn serve_catalog_installs_plans_and_consumes_hello_on_the_same_connection() {
 }
 
 #[test]
-fn serve_discover_queues_a_shape_aware_local_hello_event() {
+fn serve_discover_remembers_hello_without_starting_a_search() {
     let work = temporary_directory();
     fs::create_dir(&work).unwrap();
     let socket_path = work.join("control.sock");
@@ -441,14 +433,6 @@ fn serve_discover_queues_a_shape_aware_local_hello_event() {
         greeting.extend_from_slice(&[3, b'd', b'e', b'v']);
         stream.write_all(&frame(0x000a, &greeting)).unwrap();
 
-        let (kind, body) = read_frame(&mut stream);
-        assert_eq!(kind, 0x0085);
-        assert!(body.is_empty());
-        let mut ack = vec![0; KEY_LEN];
-        ack[0] = 4;
-        ack.extend_from_slice(&[0x00, 0x85, 1, 0]);
-        stream.write_all(&frame(0x0008, &ack)).unwrap();
-
         let mut hello = vec![0; KEY_LEN];
         hello[0] = 4;
         hello[1..5].copy_from_slice(&[192, 0, 2, 1]);
@@ -460,6 +444,19 @@ fn serve_discover_queues_a_shape_aware_local_hello_event() {
         hello.extend_from_slice(b"example.com");
         hello.push(1);
         stream.write_all(&frame(0x0001, &hello)).unwrap();
+        let key: [u8; KEY_LEN] = hello[..KEY_LEN].try_into().unwrap();
+        let suspicion = r2k_core::control::R2oTcpSilenceEvent {
+            key,
+            client_is_low: true,
+            planned: false,
+            elapsed_ms: 1_200,
+        };
+        stream
+            .write_all(&frame(
+                r2k_core::control::EVENT_R2O_TCP_SILENT,
+                &suspicion.event_body().unwrap(),
+            ))
+            .unwrap();
         Ok(())
     });
 
@@ -479,8 +476,11 @@ fn serve_discover_queues_a_shape_aware_local_hello_event() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("поставлен в очередь классификации"));
+    assert!(!stdout.contains("поставлен в очередь классификации"));
     assert!(stdout.contains("форма=TLS 1.3"));
+    assert!(stdout.contains(
+        "молчание TCP без чистого рукопожатия поставило example.com в очередь классификации"
+    ));
     let _ = fs::remove_dir_all(&work);
 }
 
@@ -571,14 +571,6 @@ fn apply_catalog_compiles_and_installs_tcp_and_discord_voice_name_bindings() {
         stream.write_all(&frame(0x000a, &greeting)).unwrap();
 
         let (kind, body) = read_frame(&mut stream);
-        assert_eq!(kind, 0x0085);
-        assert!(body.is_empty());
-        let mut ack = vec![0; KEY_LEN];
-        ack[0] = 4;
-        ack.extend_from_slice(&[0x00, 0x85, 1, 0]);
-        stream.write_all(&frame(0x0008, &ack)).unwrap();
-
-        let (kind, body) = read_frame(&mut stream);
         assert_eq!(kind, 0x0081);
         let mut expected = vec!["example.test".len() as u8];
         expected.extend_from_slice(b"example.test");
@@ -663,14 +655,6 @@ fn apply_catalog_sends_failed_group_exception_before_suffix_plan() {
         stream.write_all(&frame(0x000a, &greeting)).unwrap();
 
         let (kind, body) = read_frame(&mut stream);
-        assert_eq!(kind, 0x0085);
-        assert!(body.is_empty());
-        let mut ack = vec![0; KEY_LEN];
-        ack[0] = 4;
-        ack.extend_from_slice(&[0x00, 0x85, 1, 0]);
-        stream.write_all(&frame(0x0008, &ack)).unwrap();
-
-        let (kind, body) = read_frame(&mut stream);
         assert_eq!(kind, 0x008e);
         let mut expected = vec![b"failed.googlevideo.com".len() as u8];
         expected.extend_from_slice(b"failed.googlevideo.com");
@@ -719,7 +703,7 @@ fn apply_catalog_sends_failed_group_exception_before_suffix_plan() {
 }
 
 #[test]
-fn apply_empty_catalog_clears_name_plans() {
+fn apply_empty_catalog_does_not_clear_existing_name_plans() {
     let work = temporary_directory();
     fs::create_dir(&work).unwrap();
     let socket_path = work.join("control.sock");
@@ -738,13 +722,12 @@ fn apply_empty_catalog_clears_name_plans() {
         greeting.extend_from_slice(&[3, b'd', b'e', b'v']);
         stream.write_all(&frame(0x000a, &greeting)).unwrap();
 
-        let (kind, body) = read_frame(&mut stream);
-        assert_eq!(kind, 0x0085);
-        assert!(body.is_empty());
-        let mut ack = vec![0; KEY_LEN];
-        ack[0] = 4;
-        ack.extend_from_slice(&[0x00, 0x85, 1, 0]);
-        stream.write_all(&frame(0x0008, &ack)).unwrap();
+        let mut byte = [0; 1];
+        assert_eq!(
+            stream.read(&mut byte).unwrap(),
+            0,
+            "empty catalog sent a datapath command"
+        );
         Ok(())
     });
 
@@ -789,14 +772,6 @@ fn apply_catalog_skips_refused_binding_and_installs_following_binding() {
         greeting.extend_from_slice(&65_535_u32.to_be_bytes());
         greeting.extend_from_slice(&[3, b'd', b'e', b'v']);
         stream.write_all(&frame(0x000a, &greeting)).unwrap();
-
-        let (kind, body) = read_frame(&mut stream);
-        assert_eq!(kind, 0x0085);
-        assert!(body.is_empty());
-        let mut ack = vec![0; KEY_LEN];
-        ack[0] = 4;
-        ack.extend_from_slice(&[0x00, 0x85, 1, 0]);
-        stream.write_all(&frame(0x0008, &ack)).unwrap();
 
         let (kind, _) = read_frame(&mut stream);
         assert_eq!(kind, 0x0081);

@@ -126,6 +126,11 @@ valid_positive_decimal() {
     [ -n "$r2o_positive_value" ]
 }
 
+R2O_FW=$(R2O_DIR="$ROOT" R2O_CONFIG="$CONF" "$SCRIPT_DIR/r2o-firewall.sh" backend) ||
+    die "не удалось определить FW_BACKEND для дочерних процессов"
+case "$R2O_FW" in nft|iptables) ;; *) die "адаптер вернул неизвестный FW_BACKEND: $R2O_FW" ;; esac
+export R2O_FW
+
 r2o_normalize_mark() {
     r2o_mark_value=$1
     case "$r2o_mark_value" in
@@ -313,12 +318,12 @@ engine_start() {
     "$FIREWALL" up || { engine_stop; die "не поставить правила NFQUEUE"; }
     ppe_ensure
     if ! spawn_component r2o-controller "$CT4_PID" "$LOG/r2o-controller4.log" \
-        --serve "$SOCK4" "$CATALOG" --discover --mark "$mark"; then
+        --serve "$SOCK4" "$CATALOG" --discover --mark "$mark" --live "$STATE/live4.json"; then
         engine_stop
         return 1
     fi
     if [ "$IPV6_ENABLED" = 1 ] && ! spawn_component r2o-controller "$CT6_PID" "$LOG/r2o-controller6.log" \
-        --serve "$SOCK6" "$CATALOG" --discover --mark "$mark"; then
+        --serve "$SOCK6" "$CATALOG" --discover --mark "$mark" --live "$STATE/live6.json"; then
         engine_stop
         return 1
     fi
@@ -545,7 +550,8 @@ telegram_start() {
     spawn_component r2o-telegram "$TG_PID" "$LOG/telegram.log" \
         --port "$TG_PORT" --stats-socket-path "$TG_STATS_SOCKET" \
         --dc-map-path "$STATE/telegram-dc-map.json" \
-        --dc-map-endpoints-path "$STATE/telegram-dc-endpoints.tsv" || {
+        --dc-map-endpoints-path "$STATE/telegram-dc-endpoints.tsv" \
+        --default-domains || {
         write_telegram_status error
         return 1
     }
@@ -645,7 +651,8 @@ panel_start() {
     rm -f "$RUNTIME/r2o-panel.health"
     spawn_component r2o-panel "$PN_PID" "$LOG/panel.log" serve \
         --health-file "$RUNTIME/r2o-panel.health" --config "$CONF" \
-        --live "$STATE/live.json" --assets "$ROOT/panel" --listen "$PANEL_LISTEN" \
+        --live "$STATE/live4.json" --live-extra "$STATE/live6.json" \
+        --assets "$ROOT/panel" --listen "$PANEL_LISTEN" \
         --state-dir "$STATE" --mode "$MODE" --queue "$QUEUE4" \
         --service "$INIT" --manager "$MANAGER" --manager-root "$ROOT" \
         --engine-pid "$DP4_PID" --controller-pid "$CT4_PID" \

@@ -9,6 +9,32 @@ const DOMAIN_BLOCKED: u8 = 1;
 const DOMAIN_DIRECT_CLEAR: u8 = 2;
 const DOMAIN_PLAN_FAILED: u8 = 4;
 
+#[derive(Clone, Debug)]
+pub struct DiscoveryStatus {
+    pub autopick: Value,
+    pub probes_used: u64,
+    pub client_unfit: u64,
+}
+
+impl Default for DiscoveryStatus {
+    fn default() -> Self {
+        Self {
+            autopick: json!({
+                "reason": "нет событий от datapath",
+                "target": "",
+                "plan_id": "",
+                "datapath_events": 0,
+                "suspect_events": 0,
+                "transport": 6,
+                "family": 4,
+                "cooldown_seconds_left": null,
+            }),
+            probes_used: 0,
+            client_unfit: 0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct LiveGroupKey {
     pub suffix: String,
@@ -40,6 +66,7 @@ pub fn snapshot(
     active_groups: &HashSet<LiveGroupKey>,
     searches: Vec<Value>,
     measurements: Value,
+    discovery_status: DiscoveryStatus,
 ) -> Result<Value, CatalogError> {
     let mut boxes = Vec::with_capacity(catalog.boxes.len());
     let mut targets = 0_u64;
@@ -161,10 +188,11 @@ pub fn snapshot(
         "groups": groups,
         "searches": searches,
         "measurements": measurements,
+        "autopick": discovery_status.autopick,
         "targets": targets,
         "confirms": confirms,
-        "probes_used": null,
-        "client_unfit": null,
+        "probes_used": discovery_status.probes_used,
+        "client_unfit": discovery_status.client_unfit,
     }))
 }
 
@@ -380,12 +408,31 @@ mod tests {
             ..Catalog::default()
         };
         let active = HashSet::from([LiveGroupKey::from(&group)]);
+        let search = json!({
+            "target": "a.example.com",
+            "family": 4,
+            "transport": 6,
+            "ip": "192.0.2.2",
+            "port": 443,
+            "phase": "проверяем выведенный план",
+            "since": "2026-10-24T00:00:00Z",
+            "attempts": 1,
+            "probes": 3,
+            "question": "",
+            "candidate": "план поставлен",
+            "source": "выведен из замера",
+            "plan": "split sni_middle +0 · fake payload=1 poison=1…",
+            "application": "точный APPLIED получен",
+            "last_result": "план применён; получен полный HTTPS-ответ HTTP 200",
+            "shape": 1,
+        });
         let live = snapshot(
             &catalog,
             Path::new("/state/catalog.json"),
             &active,
-            vec![],
+            vec![search],
             json!({"active": 0, "limit": 2, "queued": 0}),
+            DiscoveryStatus::default(),
         )
         .unwrap();
         assert_eq!(live["linked"], true);
@@ -403,7 +450,53 @@ mod tests {
         assert_eq!(live["groups"][0]["evidence"][0], "a.example.com");
         assert_eq!(live["groups"][0]["exceptions"].as_array().unwrap().len(), 1);
         assert_eq!(live["groups"][0]["exceptions"][0]["name"], "b.example.com");
-        assert!(live["probes_used"].is_null());
+        assert_eq!(live["searches"][0]["phase"], "проверяем выведенный план");
+        assert_eq!(live["searches"][0]["attempts"], 1);
+        assert_eq!(live["searches"][0]["probes"], 3);
+        assert_eq!(
+            live["searches"][0]["plan"],
+            "split sni_middle +0 · fake payload=1 poison=1…"
+        );
+        assert_eq!(live["searches"][0]["application"], "точный APPLIED получен");
+        assert_eq!(
+            live["searches"][0]["last_result"],
+            "план применён; получен полный HTTPS-ответ HTTP 200"
+        );
+        for field in [
+            "target",
+            "family",
+            "transport",
+            "ip",
+            "port",
+            "phase",
+            "since",
+            "attempts",
+            "probes",
+            "question",
+            "candidate",
+            "source",
+            "plan",
+            "application",
+            "last_result",
+        ] {
+            assert!(live["searches"][0].get(field).is_some(), "missing {field}");
+        }
+        for field in [
+            "reason",
+            "target",
+            "plan_id",
+            "datapath_events",
+            "suspect_events",
+            "transport",
+            "family",
+            "cooldown_seconds_left",
+        ] {
+            assert!(live["autopick"].get(field).is_some(), "missing {field}");
+        }
+        assert_eq!(live["probes_used"], 0);
+        assert_eq!(live["client_unfit"], 0);
+        assert_eq!(live["autopick"]["reason"], "нет событий от datapath");
+        assert_eq!(live["autopick"]["datapath_events"], 0);
     }
 
     #[test]

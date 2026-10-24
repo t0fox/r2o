@@ -186,12 +186,11 @@
     var engine = !!snap.engine_running;
     var searches = linked ? list(k.searches) : [];
     var QUEUED = "ожидает безопасного слота замера";
-    var active = searches.filter(function (s) { return s.phase !== "подтверждено, смотрим живой трафик"; });
     var m = {
       snap: snap, k: k, linked: linked, engine: engine,
       fresh: snap.live_fresh !== false,
-      searches: searches, hunting: active.length,
-      running: searches.filter(function (s) { return s.phase !== QUEUED; }),
+      searches: searches, hunting: searches.length,
+      running: searches,
       queued: searches.filter(function (s) { return s.phase === QUEUED; }),
       groups: list(k.groups), boxes: list(k.boxes),
       mode: str(snap.mode) || "observe"
@@ -1361,7 +1360,6 @@
     var stable = [];
     for (var si = 0; si < listNode.children.length; si++) if (!listNode.children[si].__leaving) stable.push(listNode.children[si]);
     var wantKeys = m.running.map(function (x) { return JSON.stringify([x.target, x.family, x.transport, x.ip, x.port]); });
-    if (m.queued.length) wantKeys.push("queue");
     var haveKeys = stable.map(function (r) { return r.__r2oKey; });
     var flipState = animate && stable.length && wantKeys.join("\n") !== haveKeys.join("\n") ? Motion.Flip.getState(stable) : null;
     if (flipState) stable.forEach(function (r) { r.__oldTop = r.getBoundingClientRect().top; });
@@ -1383,14 +1381,6 @@
       self.updateSearch(row, s);
       if (listNode.children[index] !== row) { listNode.insertBefore(row, listNode.children[index] || null); moved = true; }
     });
-    var queue = null;
-    for (var q = 0; q < listNode.children.length; q++) if (listNode.children[q].__r2oKey === "queue") queue = listNode.children[q];
-    if (m.queued.length) {
-      if (!queue) { queue = el(doc, "li", "queue"); queue.__r2oKey = "queue"; }
-      keep.queue = true;
-      this.updateQueue(queue, m.queued);
-      if (listNode.lastChild !== queue) { listNode.appendChild(queue); moved = true; }
-    }
     var leaving = [];
     for (var j = listNode.children.length - 1; j >= 0; j--) {
       var gone = listNode.children[j];
@@ -1427,31 +1417,6 @@
     }
   };
 
-  App.prototype.updateQueue = function (li, queued) {
-    var doc = this.doc, self = this;
-    var key = JSON.stringify(queued.map(function (s) { return [s.target, s.family, s.transport, s.ip, s.port, s.since]; }));
-    if (li.__r2oData !== key) {
-      li.__r2oData = key;
-      var head = el(doc, "p", "queue-head");
-      add(head, el(doc, "b", "", "Ждут свободного слота замера: " + queued.length),
-        " — замеры идут не больше, чем позволяет свободный процессор.");
-      var ul = el(doc, "ul", "queue-list");
-      queued.forEach(function (s) {
-        var row = el(doc, "li");
-        var wait = el(doc, "span", "queue-wait");
-        wait.__since = parseTime(s.since);
-        add(row, el(doc, "span", "queue-target", targetLabel(s.target)),
-          tag(doc, shapeLabel(s.shape, s.transport)), tag(doc, familyLabel(s.family)), wait);
-        ul.appendChild(row);
-      });
-      li.replaceChildren(head, ul);
-    }
-    var waits = li.querySelectorAll(".queue-wait");
-    var now = this.serverNow();
-    for (var i = 0; i < waits.length; i++) waits[i].textContent = waits[i].__since ? "ждёт " + clock(now - waits[i].__since) : "";
-    void self;
-  };
-
   App.prototype.searchRow = function (s) {
     var doc = this.doc;
     var li = el(doc, "li", "search");
@@ -1460,6 +1425,8 @@
       meta: el(doc, "div", "search-meta"),
       clock: el(doc, "div", "search-clock"),
       phase: el(doc, "p", "search-phase"),
+      plan: el(doc, "p", "search-plan"),
+      planResult: el(doc, "p", "search-plan-result"),
       question: el(doc, "p", "search-question"),
       track: el(doc, "div", "track")
     };
@@ -1467,7 +1434,10 @@
     li.__parts.fill = el(doc, "span", "track-fill");
     li.__parts.puck = el(doc, "span", "track-puck");
     li.__parts.question.hidden = true;
-    add(li, li.__parts.target, li.__parts.clock, li.__parts.meta, li.__parts.phase, li.__parts.question, li.__parts.track);
+    li.__parts.plan.hidden = true;
+    li.__parts.planResult.hidden = true;
+    add(li, li.__parts.target, li.__parts.clock, li.__parts.meta, li.__parts.phase,
+      li.__parts.plan, li.__parts.planResult, li.__parts.question, li.__parts.track);
     void s;
     return li;
   };
@@ -1486,14 +1456,15 @@
         addr ? el(doc, "span", "mono", addr) : null,
         s.source ? el(doc, "span", "", s.source) : null);
     }
+    var phase = str(s.phase) || "этап не указан";
     li.__since = parseTime(s.since);
     var counters = [];
     if (num(s.attempts)) counters.push(count(s.attempts, "план", "плана", "планов"));
     if (num(s.probes)) counters.push(count(s.probes, "зонд", "зонда", "зондов"));
+    if (phase === TRACK[0].phases[0]) counters.push("в очереди");
     li.__counters = counters.join(" · ");
     this.updateClock(li);
 
-    var phase = str(s.phase) || "этап не указан";
     var phaseText = phase.charAt(0).toUpperCase() + phase.slice(1) + (s.candidate ? " — " + s.candidate : "");
     if (p.phase.textContent !== phaseText) {
       if (p.phase.textContent && Motion.on()) {
@@ -1505,9 +1476,23 @@
         p.phase.textContent = phaseText;
       }
     }
-    var classifying = s.phase === TRACK[2].phases[0] && !!str(s.question);
-    p.question.hidden = !classifying;
-    var qText = classifying ? "Вопрос коробке: " + str(s.question) : "";
+    var planText = str(s.plan);
+    p.plan.hidden = !planText;
+    var planKey = JSON.stringify([planText]);
+    if (p.plan.__r2oKey !== planKey) {
+      p.plan.__r2oKey = planKey;
+      p.plan.replaceChildren();
+      if (planText) add(p.plan, el(doc, "b", "", "Способ обхода: "), el(doc, "code", "", planText));
+    }
+    var planResult = [
+      str(s.application) ? "Применение: " + str(s.application) : "",
+      str(s.last_result) ? "Последний результат: " + str(s.last_result) : ""
+    ].filter(Boolean).join(" · ");
+    p.planResult.hidden = !planResult;
+    if (p.planResult.textContent !== planResult) p.planResult.textContent = planResult;
+    var asking = (s.phase === TRACK[2].phases[0] || s.phase === TRACK[3].phases[0]) && !!str(s.question);
+    p.question.hidden = !asking;
+    var qText = asking ? "Вопрос коробке: " + str(s.question) : "";
     if (p.question.textContent !== qText) p.question.textContent = qText;
     var tr = trackFor(s.phase);
     li.setAttribute("data-done", String(!!tr && !tr.voice && tr.at === TRACK.length - 1));
@@ -1556,7 +1541,6 @@
     var rows = this.$("searches").children;
     for (var i = 0; i < rows.length; i++) {
       if (rows[i].__parts) this.updateClock(rows[i]);
-      else if (rows[i].__r2oKey === "queue") this.updateQueue(rows[i], this.m ? this.m.queued : []);
     }
     var staleBefore = bodyAttribute(this.doc, "data-stale");
     this.renderNotice();

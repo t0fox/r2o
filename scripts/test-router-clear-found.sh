@@ -31,7 +31,7 @@ mkdir -p "$TEMP/root/state" "$TEMP/root/run" "$TEMP/root/releases/test/builds" \
 cp /bin/sleep "$TEMP/root/releases/test/builds/r2o-datapath-linux-test"
 cp /bin/sleep "$TEMP/root/releases/test/builds/r2o-controller-linux-test"
 chmod 0755 "$TEMP/root/releases/test/builds/r2o-datapath-linux-test" "$TEMP/root/releases/test/builds/r2o-controller-linux-test"
-printf 'MODE=observe\nSTATE_DIR=%s\n' "$TEMP/root/state" > "$TEMP/root/config"
+printf 'MODE=observe\nSTATE_DIR=%s\nFW_BACKEND=nft\n' "$TEMP/root/state" > "$TEMP/root/config"
 printf '{"schema":1,"boxes":[{"id":"found"}]}\n' > "$TEMP/root/state/catalog.json"
 printf '2000 1 128\n2001 1 128\n' > "$TEMP/proc/net/netfilter/nfnetlink_queue"
 "$TEMP/root/releases/test/builds/r2o-datapath-linux-test" 30 &
@@ -41,6 +41,7 @@ printf '%s\n' "$initial_pid" > "$TEMP/root/run/r2o-datapath4.pid"
 cat > "$TEMP/manager" <<'EOF'
 #!/bin/sh
 printf 'manager:%s\n' "$*" >> "$EVENTS"
+printf 'manager-fw:%s\n' "${R2O_FW:-unset}" >> "$EVENTS"
 [ "${1:-}" = exec ] || exit 2
 shift
 component=
@@ -75,6 +76,7 @@ printf '%s\n' "$catalog_state" | grep -q '0 коробок'
 grep -q '^firewall:down$' "$TEMP/events"
 grep -q -- '--clear-catalog ' "$TEMP/events"
 grep -q '^firewall:up$' "$TEMP/events"
+grep -q '^manager-fw:nft$' "$TEMP/events"
 [ -s "$TEMP/root/run/r2o-datapath4.pid" ] && [ -s "$TEMP/root/run/r2o-controller4.pid" ]
 down_line=$(grep -n '^firewall:down$' "$TEMP/events" | head -n 1 | cut -d: -f1)
 clear_line=$(grep -n -- '--clear-catalog ' "$TEMP/events" | head -n 1 | cut -d: -f1)

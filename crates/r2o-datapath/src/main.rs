@@ -2815,6 +2815,10 @@ mod app {
                 key: event.key,
                 client_is_low: event.client_is_low,
                 planned: event.planned == R2oTcpExchangeEvent::PLANNED_YES,
+                ttl: event.ttl,
+                reference_ttl: event.reference_ttl,
+                traffic_class: event.traffic_class,
+                ip_id: event.ip_id,
             })
     }
 
@@ -2822,6 +2826,10 @@ mod app {
         R2oTcpRstCutSignalEvent {
             key: event.key,
             client_is_low: event.client_is_low,
+            ttl: event.ttl,
+            reference_ttl: event.reference_ttl,
+            traffic_class: event.traffic_class,
+            ip_id: event.ip_id,
         }
     }
 
@@ -3903,6 +3911,10 @@ mod app {
                     key,
                     client_is_low: true,
                     planned: false,
+                    ttl: 124,
+                    reference_ttl: 64,
+                    traffic_class: 0,
+                    ip_id: 0,
                 })
             );
             let mut unknown = event;
@@ -3941,6 +3953,10 @@ mod app {
                 Ok(R2oTcpRstCutSignalEvent {
                     key,
                     client_is_low: true,
+                    ttl: 127,
+                    reference_ttl: 64,
+                    traffic_class: 0x2e,
+                    ip_id: 1234,
                 })
             );
         }
@@ -5003,7 +5019,8 @@ mod app {
             ключ[37] = 6;
             sessions.mark_plan_done(&ключ);
 
-            let сброс = пакет_tcp(сервер, клиент, 0x14, 127, 900, &[]);
+            let mut сброс = пакет_tcp(сервер, клиент, 0x14, 127, 900, &[]);
+            сброс[4..6].copy_from_slice(&900_u16.to_be_bytes());
             assert_eq!(
                 super::decide_with_tcp_session(
                     &mut sessions,
@@ -5026,6 +5043,10 @@ mod app {
                 R2oTcpRstCutSignalEvent {
                     key: ключ,
                     client_is_low: true,
+                    ttl: 127,
+                    reference_ttl: 124,
+                    traffic_class: 0,
+                    ip_id: 900,
                 }
             );
             assert_eq!(journal.count(), 1);

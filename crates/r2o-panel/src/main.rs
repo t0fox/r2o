@@ -55,6 +55,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 config.live_path = PathBuf::from(value);
                 explicit_live = true;
             }
+            "--live-extra" => config.live_extra_paths.push(PathBuf::from(value)),
             "--assets" => config.asset_dir = PathBuf::from(value),
             "--health-file" => config.health_path = PathBuf::from(value),
             "--listen" => {
@@ -175,6 +176,6 @@ fn redirect_logs(path: &std::path::Path) -> std::io::Result<()> {
 
 fn usage() {
     println!(
-        "r2o-panel --version | serve [--config FILE] [--live FILE] [--assets DIR] [--listen HOST:PORT] [--state-dir DIR] [--mode MODE] [--queue N] [--service FILE] [--manager FILE] [--manager-root DIR] [--engine-pid FILE] [--controller-pid FILE] [--telegram-stats PATH] [--log FILE]"
+        "r2o-panel --version | serve [--config FILE] [--live FILE] [--live-extra FILE] [--assets DIR] [--listen HOST:PORT] [--state-dir DIR] [--mode MODE] [--queue N] [--service FILE] [--manager FILE] [--manager-root DIR] [--engine-pid FILE] [--controller-pid FILE] [--telegram-stats PATH] [--log FILE]"
     );
 }
