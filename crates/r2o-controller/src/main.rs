@@ -80,6 +80,7 @@ const MAX_PENDING_EVENTS: usize = 512;
 const HTTP_SEARCH_RETRY: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 const HTTP_SEARCH_INCONCLUSIVE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 const HTTP_SEARCH_RECHECK: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const HTTP_SEARCH_BASE_RETRIES: u8 = 1;
 const HTTP_SEARCH_CHALLENGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 #[cfg(unix)]
 const HTTP_SEARCH_TASK_CAPACITY: usize = 20;
@@ -12480,6 +12481,15 @@ enum HttpBaselineError {
 }
 
 #[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HttpBaselineFailureAction {
+    Retry,
+    Search,
+    Inconclusive,
+    Recheck,
+}
+
+#[cfg(unix)]
 fn baseline_silence_starts_search(
     expected: r2o_controller::http_search::Answer,
     kind: std::io::ErrorKind,
@@ -12489,6 +12499,42 @@ fn baseline_silence_starts_search(
             kind,
             std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
         )
+}
+
+#[cfg(unix)]
+fn http_baseline_failure_action(
+    expected: r2o_controller::http_search::Answer,
+    attempts: u8,
+    error: &HttpBaselineError,
+) -> HttpBaselineFailureAction {
+    use r2o_controller::http_search::Answer;
+    use std::io::ErrorKind;
+
+    match error {
+        HttpBaselineError::Connect(_) if attempts <= HTTP_SEARCH_BASE_RETRIES => {
+            HttpBaselineFailureAction::Retry
+        }
+        HttpBaselineError::Connect(_) => HttpBaselineFailureAction::Inconclusive,
+        HttpBaselineError::Response(error)
+            if expected == Answer::Cut
+                && matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock)
+                && attempts <= HTTP_SEARCH_BASE_RETRIES =>
+        {
+            HttpBaselineFailureAction::Retry
+        }
+        HttpBaselineError::Response(error)
+            if baseline_silence_starts_search(expected, error.kind()) =>
+        {
+            HttpBaselineFailureAction::Search
+        }
+        HttpBaselineError::Response(error)
+            if expected == Answer::Cut
+                && matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) =>
+        {
+            HttpBaselineFailureAction::Search
+        }
+        _ => HttpBaselineFailureAction::Recheck,
+    }
 }
 
 #[cfg(unix)]
@@ -12532,26 +12578,54 @@ fn run_http_search_task(
         .parse::<std::net::SocketAddr>()
         .map_err(|error| error.to_string())?;
     println!("HTTP {}: проверяю воспроизводимость ответа", target.host);
-    let baseline = match run_http_baseline(
-        &target.host,
-        destination,
-        target.family,
-        mark,
-        &request_path,
-    ) {
-        Ok(response) => Some(response),
-        Err(HttpBaselineError::Response(error))
-            if baseline_silence_starts_search(expected_baseline, error.kind()) =>
-        {
-            println!(
-                "HTTP {}: клиент получил заглушку, а базовый запрос роутера молчит; начинаю поиск кандидатов",
-                target.host
-            );
-            None
-        }
-        Err(error) => {
-            println!("HTTP {}: базовый зонд не завершился: {error}", target.host);
-            return Ok(HttpSearchDisposition::Recheck);
+    let mut baseline_attempts = 0;
+    let baseline = loop {
+        baseline_attempts += 1;
+        match run_http_baseline(
+            &target.host,
+            destination,
+            target.family,
+            mark,
+            &request_path,
+        ) {
+            Ok(response) => break Some(response),
+            Err(error) => {
+                match http_baseline_failure_action(expected_baseline, baseline_attempts, &error) {
+                    HttpBaselineFailureAction::Retry => {
+                        println!(
+                            "HTTP {}: базовый зонд не завершился ({error}); повторяю базу, попытка {} из {}",
+                            target.host,
+                            baseline_attempts + 1,
+                            HTTP_SEARCH_BASE_RETRIES + 1
+                        );
+                    }
+                    HttpBaselineFailureAction::Search => {
+                        if expected_baseline == r2o_controller::http_search::Answer::Cut {
+                            println!(
+                                "HTTP {}: базовый запрос молчит после {} попыток при живом обрыве; начинаю поиск кандидатов",
+                                target.host, baseline_attempts
+                            );
+                        } else {
+                            println!(
+                                "HTTP {}: клиент получил заглушку, а базовый запрос роутера молчит; начинаю поиск кандидатов",
+                                target.host
+                            );
+                        }
+                        break None;
+                    }
+                    HttpBaselineFailureAction::Inconclusive => {
+                        println!(
+                            "HTTP {}: базовый запрос не измерен — локальное соединение не установилось {} раза подряд; повтор не раньше чем через 5 мин",
+                            target.host, baseline_attempts
+                        );
+                        return Ok(HttpSearchDisposition::Inconclusive);
+                    }
+                    HttpBaselineFailureAction::Recheck => {
+                        println!("HTTP {}: базовый зонд не завершился: {error}", target.host);
+                        return Ok(HttpSearchDisposition::Recheck);
+                    }
+                }
+            }
         }
     };
     if baseline
@@ -12953,12 +13027,13 @@ mod tests {
     use super::saved_http_candidate_keys;
     use super::{
         CatalogInstallSummary, ClassifyCliOptions, CompiledCatalog, ControlClient,
-        DiscoveryOutcome, HttpCandidateHistory, HttpCandidateProgress, HttpLiveFailures,
-        HttpSearchCommand, HttpSearchDisposition, HttpSearchTask, HttpSearchWindow,
-        HttpSearchWorker, R2oFamilyRecoveryDecision, R2oVoiceTrialContext, ServeCliOptions,
-        advance_http_candidate, applied_quic_trial_matches, baseline_silence_starts_search,
-        binding_shape_transport, candidate_text, catalog_commands, compile_text, encode_set_name,
-        failed_http_programs, flow_socket_addresses, http_search_candidates, http_search_key,
+        DiscoveryOutcome, HttpBaselineError, HttpBaselineFailureAction, HttpCandidateHistory,
+        HttpCandidateProgress, HttpLiveFailures, HttpSearchCommand, HttpSearchDisposition,
+        HttpSearchTask, HttpSearchWindow, HttpSearchWorker, R2oFamilyRecoveryDecision,
+        R2oVoiceTrialContext, ServeCliOptions, advance_http_candidate, applied_quic_trial_matches,
+        baseline_silence_starts_search, binding_shape_transport, candidate_text, catalog_commands,
+        compile_text, encode_set_name, failed_http_programs, flow_socket_addresses,
+        http_baseline_failure_action, http_search_candidates, http_search_key,
         install_catalog_best_effort, matching_domain_group, matching_domain_recovery_candidates,
         measured_http_candidate_keys, normalize_plan_target, parse_classify_options,
         parse_serve_options, print_flow_journal, r2o_discovery_failure_retry_due,
@@ -15572,6 +15647,47 @@ mod tests {
             Answer::Injected,
             ErrorKind::ConnectionReset
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn baseline_local_failure_and_cut_silence_follow_donor_retry_rules() {
+        use r2o_controller::http_search::Answer;
+        use std::io::{Error, ErrorKind};
+
+        let connect = || HttpBaselineError::Connect(Error::from(ErrorKind::ConnectionRefused));
+        assert_eq!(
+            http_baseline_failure_action(Answer::Cut, 1, &connect()),
+            HttpBaselineFailureAction::Retry
+        );
+        assert_eq!(
+            http_baseline_failure_action(Answer::Injected, 1, &connect()),
+            HttpBaselineFailureAction::Retry
+        );
+        assert_eq!(
+            http_baseline_failure_action(Answer::Cut, 2, &connect()),
+            HttpBaselineFailureAction::Inconclusive
+        );
+
+        let silence = || HttpBaselineError::Response(Error::from(ErrorKind::TimedOut));
+        assert_eq!(
+            http_baseline_failure_action(Answer::Cut, 1, &silence()),
+            HttpBaselineFailureAction::Retry
+        );
+        assert_eq!(
+            http_baseline_failure_action(Answer::Cut, 2, &silence()),
+            HttpBaselineFailureAction::Search
+        );
+        assert_eq!(
+            http_baseline_failure_action(Answer::Injected, 1, &silence()),
+            HttpBaselineFailureAction::Search
+        );
+
+        let reset = HttpBaselineError::Response(Error::from(ErrorKind::ConnectionReset));
+        assert_eq!(
+            http_baseline_failure_action(Answer::Cut, 1, &reset),
+            HttpBaselineFailureAction::Recheck
+        );
     }
 
     #[cfg(unix)]
