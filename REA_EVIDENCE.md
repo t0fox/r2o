@@ -7386,7 +7386,10 @@ Concurrency у donor начинается с `SCHED_DEFAULT_ACTIVE_MEASUREMENTS=
 
 ### Порядок очереди на общих входах
 
-Для неизменённого donor `783aa75ce44dd6192cd1f4f1d98e4fe909ef3045`
+На 2026-10-25 live `git ls-remote origin HEAD refs/heads/main` у
+`https://github.com/t0fox/d2o.git` вернул для обоих указателей
+`783aa75ce44dd6192cd1f4f1d98e4fe909ef3045`; локальный donor checkout имеет тот
+же HEAD. Для этого donor
 `core/sched.c` имеет SHA-256
 `aee97d92aa37ca3b8b3f3ce47ca636a02cbea71fde989eb113376f35496df45c`.
 `queued_pick` выбирает среди обычных ожидающих задач сначала большую
@@ -7397,11 +7400,12 @@ Concurrency у donor начинается с `SCHED_DEFAULT_ACTIVE_MEASUREMENTS=
 |---|---|---|
 | `core/sched.c::queued_pick`, comparator `queued_before` | `main.rs::R2oDiscoveryQueue::pop` | `d2o_scheduler_queue.tsv`: свежий event выбрал `newest.example`; высокий `hot_event` выбрал `promoted.example` при старом `queued_event`; при равной горячести FIFO выбрал `fifo-earlier.example`. C и Rust вывели одинаковые строки во всех трёх случаях. |
 | `core/sched.c::queued_pick`: когда QUIC уже припаркован, ожидающий TCP получает следующий слот даже при более «горячем» QUIC в очереди. | `r2o_resource_limit.rs::r2o_next_measurement_waiter`; `main.rs` worker берёт TCP permit до `R2oDiscoveryQueue::pop`, а активный QUIC уступает его через `r2o_yield_if_contended_with_cancel`. | Та же таблица подала parked QUIC, более свежий queued QUIC и queued TCP. Обе реализации выбрали `tcp-waiting.example`; отдельный Rust тест проверил selected permit ID. |
+| `core/sched.c::d2k_sched_tick`: queued task снимается при `now_ms - queued_ms > SCHED_TASK_LIFE_MS`; сначала проверяется `queued_family_ready`. | `main.rs::R2oDiscoveryQueue::r2o_expire`: удаляет запись при `now.saturating_duration_since(queued_at) > R2O_DISCOVERY_TASK_LIFETIME`. | `d2o_scheduler_queue_expiry.tsv`: C harness вызывает donor `d2k_sched_tick` при возрасте 600000 и 600001 мс; Rust вызывает `r2o_expire` на тех же возрастах. Обе стороны оставляют задачу на границе и снимают её после границы. Сценарий не включает `queued_family_ready`, поэтому он подтверждает только срок и границу. |
 
-Эти входы покрывают обычный queued order и одну уступку QUIC→TCP: они не
-моделируют eligibility семейного восстановления или истечение задачи. Для
-этих ветвей остаются отдельные C scheduler и Rust worker тесты; fixture не
-подтверждает их полное соответствие. Свежий REA
+Эти входы покрывают обычный queued order, одну уступку QUIC→TCP и одну
+границу истечения очереди: они не моделируют eligibility семейного
+восстановления. Для этой ветви остаются отдельные C scheduler и Rust worker
+тесты; fixtures не подтверждают её полное соответствие. Свежий REA
 dossier именно для `queued_pick` в текущей Windows-среде получить нельзя:
 `list_documents` сообщает, что доступный Ghidra не принимает ELF, Hopper не
 поддержан на Windows, а IDA не сконфигурирован. Использованы donor-исходник и

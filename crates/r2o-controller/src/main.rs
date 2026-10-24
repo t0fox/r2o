@@ -20624,6 +20624,54 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn d2o_scheduler_queue_expiry_matches_donor() {
+        use super::{R2O_DISCOVERY_TASK_LIFETIME, R2oDiscoveryQueue, R2oDiscoveryQueueEntry};
+        use std::time::{Duration, Instant};
+
+        let mut output = Vec::new();
+        for line in include_str!("../tests/fixtures/d2o_scheduler_queue_expiry.tsv").lines() {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.is_empty() || fields[0].starts_with('#') {
+                continue;
+            }
+            let [case_name, expected, queued_age_ms, host] = fields.as_slice() else {
+                panic!("malformed d2o scheduler queue expiry fixture: {line}");
+            };
+            let queued_age_ms = queued_age_ms.parse::<u64>().unwrap();
+            let now = Instant::now();
+            let target = r2o_controller::discovery::DiscoveryTarget {
+                host: (*host).to_owned(),
+                endpoint: format!("{host}:443"),
+                family: 4,
+                shape: SHAPE_MODERN,
+            };
+            let mut queue = R2oDiscoveryQueue::default();
+            queue.entries.push(R2oDiscoveryQueueEntry {
+                target,
+                queued_at: now - Duration::from_millis(queued_age_ms),
+                queued_event: 0,
+                hot_event: 0,
+            });
+            let expired = queue.r2o_expire(now);
+            let actual = if expired.is_empty() {
+                "queued"
+            } else {
+                "expired"
+            };
+            assert_eq!(actual, *expected, "donor queue expiry case {case_name}");
+            assert_eq!(
+                actual == "expired",
+                queued_age_ms > R2O_DISCOVERY_TASK_LIFETIME.as_millis() as u64
+            );
+            output.push(format!("{case_name} {actual}"));
+        }
+        if let Ok(path) = std::env::var("R2O_SCHED_QUEUE_EXPIRY_DIFF_OUTPUT") {
+            std::fs::write(path, format!("{}\n", output.join("\n"))).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn r2o_discovery_never_probes_the_same_endpoint_concurrently() {
         use std::sync::atomic::AtomicBool;
         use std::sync::{Arc, Condvar, Mutex, mpsc};

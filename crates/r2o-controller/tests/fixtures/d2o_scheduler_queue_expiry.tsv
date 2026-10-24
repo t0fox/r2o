@@ -1,0 +1,3 @@
+# case expected queued_age_ms host
+at_lifetime queued 600000 deadline.example
+past_lifetime expired 600001 deadline.example
