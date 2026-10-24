@@ -49,17 +49,30 @@ fn r2o_budget_quic_принимает_целое_и_отклоняет_tls12_д�
 }
 
 #[test]
-fn r2o_json_reports_an_empty_address_without_falling_back_to_dns() {
-    let output = r2o_run_fetch(&["--name", "localhost", "--ip", "", "--quic", "--json"]);
+fn r2o_json_resolves_an_empty_ip_like_the_donor() {
+    let output = r2o_run_fetch(&[
+        "--name",
+        "localhost",
+        "--ip",
+        "",
+        "--port",
+        "1",
+        "--deadline",
+        "100",
+        "--quic",
+        "--json",
+    ]);
 
-    assert_eq!(output.status.code(), Some(2));
     let value: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("--json must return a JSON result");
+        serde_json::from_slice(&output.stdout).expect("--json must return a QUIC result");
     assert_eq!(value["schema"], 2);
-    assert_eq!(value["shape"], "dns_failed");
-    assert_eq!(value["measured"], false);
-    assert_eq!(value["name"], "localhost");
-    assert_eq!(value["ip"], serde_json::Value::Null);
+    assert_eq!(value["shape"], "quic");
+    assert!(
+        value["ip"]
+            .as_str()
+            .and_then(|address| address.parse::<std::net::IpAddr>().ok())
+            .is_some_and(|address| address.is_loopback())
+    );
 }
 
 #[cfg(unix)]
