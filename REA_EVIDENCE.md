@@ -7546,3 +7546,29 @@ baseline / 27 upstream) прошли. `scripts/r2o-build-openwrt-aarch64-musl.sh
 проверка пустого каталога прошли. Остались предупреждения `libc::time_t` и
 `libc::suseconds_t` из `response.rs`. Физическую проверку не выполнял по просьбе
 пользователя; полевой и полный поведенческий паритет не заявляются.
+
+### Повторная локальная приёмка запрошенных модулей — donor `783aa75`, 25.10.2026
+
+Upstream `HEAD` и `main` повторно подтверждены через `git ls-remote` на
+`783aa75ce44dd6192cd1f4f1d98e4fe909ef3045`; чистый reference checkout имеет
+тот же commit. На этом snapshot повторно запущены общие C/Rust fixtures и
+связанные C тесты:
+
+| C-функция / правило | Rust-аналог | Повторный результат |
+|---|---|---|
+| `detect/raw.c::rst_rule_cmd_form`, `d2k_raw_probe_handshake_as`; `detect/classify.c::d2k_classify_run` с успешной базой | `raw_probe::RstRule::install`, `RawConn::connect`; `classify::run_with_backend_progress` | `test-d2o-shared-fixtures.sh`: C и Rust подтвердили `D2K_FW=nft` / `R2O_FW=nft`, точный `inet d2k_rst` tuple и timeout; C classifier вывел `clear probes=3 repeats=3 mark=45`, Rust fixture принял тот же `d2o_clear.txt`; все 13 TLS-response векторов совпали, C `test_response` прошёл. Rust `tests/classify.rs` прошёл 31/31, включая безусловный CLEAR после успешной базовой серии без дополнительных confirmation probes. |
+| `core/d2kask.c::main` и пятиэлементный `D2K_PROPS_QUESTIONS` в `core/include/d2k_compose.h` | `ask::question_plan`, `ask::record_question_passed` | `r2o-ask-differential.sh`: C `d2kask` — все проверки, Rust Ask — 9/9; последовательность и параметры пяти вопросов совпали. Это не общий предел количества сетевых замеров: C `SCHED_MAX_PROBES` и Rust `R2O_DISCOVERY_PROBE_CAP` дают 67 probe arms плюс тот же сетевой список; лимит активных слотов — 64 с AIMD. |
+| `core/sched.c::d2k_sched_cpu_parse`, `measure_started`, `measure_limit_update` | `r2o_parse_cpu_stat`, `R2oAdaptiveLimit::r2o_mark_started`, `r2o_sample` | `r2o-resource-limit-differential.sh`: три одинаковых CPU parsing вектора и все 11 AIMD входов совпали, включая потолок доступных слотов; пороги AIMD не менялись. |
+| `core/meas.c::d2k_meas_once`, `d2k_meas`; `detect/classify.c::d2k_trigger_accepts` | `classify::measure`, `ProbeBackend::probe_outcome`, `classify::run_with_backend_progress` | C `make test-meas` вывел `оракул: все проверки прошли`; Rust classify suite — 31/31 и shared CLEAR fixture совпал по числу проб, payload и mark. |
+| `core/verify.c::d2k_verify_probe`, `d2k_verify_probe12_on` и TLS 1.2/1.3 результат `Server Finished`/сертификата | `fetch::r2o_fetch_with_phase_timeout`, `r2o_tls::r2o_tls_client_connection` | `r2o-tls-verify-differential.sh`: 4/4 общих случаев прошли; обе стороны одинаково принимают invalid Finished внутри корректно зашифрованной записи, отвергают короткий TLS 1.2 Finished и одинаково решают совпадающее/несовпадающее имя сертификата. |
+| `core/link.c::d2k_link_next`, `core/sched.c::applied_trial_is_ours`, `core/d2kc.c::main` | `control::decode_applied`, `r2o_family_applied_flow_matches`, `ControlClient::watch_events` | `r2o-control-events-differential.sh`: ACK/APPLIED wire fixture совпал, в том числе legacy APPLIED без execution context; direct Rust flow matcher прошёл. C `make test-d2kc-proto` подтвердил `wire=21` и self-check, Rust core control suite ранее и в workspace прошёл. |
+| `core/sched.c::d2k_sched_sync_step`, `binding_beats`, `newer_name_binding`; snapshot write in `core/catalog.c` | `catalog_commands_with_send_cap`, `install_catalog_with_policy`, `R2oCatalogPersistence::persist_due` | `r2o-catalog-sync-differential.sh`: одинаковый порядок `SET_NAME:small.example`, затем `DEL_NAME:large.example`; `r2o-catalog-persist-differential.sh`: сохранённый C/Rust snapshot совпал после внешнего обновления. |
+
+В этой повторной приёмке C/Rust расхождений в перечисленных входах не осталось.
+Она не эквивалентна полному перебору состояния этих функций или сетевых
+endpoint-ов. Новая попытка REA `list_documents` по активному ELF в Windows
+вернула `provider_unavailable`: встроенный Ghidra не поддерживает ELF на этой
+платформе, Hopper не поддержан, IDA не сконфигурирован. Сохранённые REA dossier
+и точные исходники donor используются там, где указаны выше; свежая
+декомпиляция недоступных вложенных функций не заявляется. Полевая проверка
+остаётся невыполненной по просьбе пользователя.
