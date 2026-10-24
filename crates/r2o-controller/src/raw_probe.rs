@@ -1942,13 +1942,14 @@ mod tests {
             .filter(|line| !line.is_empty() && !line.starts_with('#'))
             .map(|line| line.split_once('=').expect("fixture key=value"))
             .collect::<std::collections::HashMap<_, _>>();
-        assert!(r2o_rst_uses_nft(Some(fixture["firewall"])));
+        let nft = r2o_rst_uses_nft(Some(fixture["firewall"]));
+        assert!(nft);
         assert!(!r2o_rst_uses_nft(None));
         let rule = RstRule {
             source_port: fixture["source_port"].parse().unwrap(),
             destination: fixture["destination"].parse().unwrap(),
             destination_port: fixture["destination_port"].parse().unwrap(),
-            nft: true,
+            nft,
             comment: true,
         };
 
