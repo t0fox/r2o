@@ -7438,20 +7438,24 @@ Rust-аналог теперь состоит из `r2o_installed_family_group`,
 Очередь записывает поколение каталога на enqueue, отслеживает поколения уже
 активных групп и снимает только ожидающую задачу, чья совместимая группа стала
 активной позже. Проверка группы вызывает `DomainState::match_domain`, учитывая
-нормализацию, выбор самого длинного суффикса и исключения наблюдений; точная
-подтверждённая привязка с отсутствующим `recheck_since` блокирует снятие, как в C.
+нормализацию, выбор самого длинного суффикса и исключения наблюдений. C проверяет
+точную name-привязку по enabled/level/kind/name/transport/family/shape и не
+смотрит на `recheck_since`; Rust повторяет это правило, включая помеченную
+перепроверкой привязку.
 При удалении освобождаются worker-записи для очереди и связанное с ней временное
 состояние; обычная отмена уже запущенных замеров после изменения каталога остаётся.
 
 | Исходная C-функция | Rust-аналог | Одинаковый fixture и результат |
 |---|---|---|
-| `core/sched.c::d2k_sched_tick` → `queued_family_ready` → `installed_family_ready` | `r2o_installed_family_group` → `R2oDiscoveryQueue::r2o_catalog_changed` → `DiscoveryWorker::catalog_changed` | В первом RED-прогоне `family_installed_after_queue` дал C `removed`, Rust `queued`; два контрольных случая (семейство до постановки и точная привязка) совпали. После исправления C вызывает настоящий `d2k_sched_tick`, Rust обновляет реальную очередь через `r2o_catalog_changed`; три результата совпали: `removed`, `queued`, `queued`. `scripts/r2o-queue-order-differential.sh` завершился с кодом 0 вместе с диффами срока очереди, порядка и QUIC→TCP. |
+| `core/sched.c::d2k_sched_tick` → `queued_family_ready` → `installed_family_ready` | `r2o_installed_family_group` → `R2oDiscoveryQueue::r2o_catalog_changed` → `DiscoveryWorker::catalog_changed` | Первый fixture RED показал C `queued`, Rust `removed` при enabled точной привязке с `recheck_since=1730000000`; `installed_family_ready` блокирует снятие и не фильтрует по этой отметке. После исправления четыре общих случая совпали: новая группа снимает старую очередь (`removed`), прежняя группа и обе точные привязки (включая recheck) оставляют её (`queued`). C harness вызывает настоящий `d2k_sched_tick`, Rust — рабочий `r2o_catalog_changed`; дифф-скрипт также проверил срок, порядок и QUIC→TCP. |
 
 Эти сценарии подтверждают только перечисленные ветви очереди. REA Evidence для
 `d2k_sched_tick` сохранено как
 `ev_0b562f8ef31c3f52474e4d814abe50dde623b12964047aedcfa52b09d7a58bcc`; свежий
 декомпиляторский dossier для вложенных helper-ов в Windows-среде недоступен,
-поэтому сравнение подтверждено исходником точного donor и C/Rust harness.
+текущая REA-сессия не удерживает исторические Evidence ID, поэтому это новое
+условие подтверждено точным donor source SHA и C/Rust harness; исходный REA
+dossier для `d2k_sched_tick` ранее был записан выше.
 После диффа повторно прошёл `scripts/r2o-build-openwrt-aarch64-musl.sh`: шесть
 релизных бинарников запустились в QEMU, `--clear-catalog` и `--check-catalog`
 прошли; остались только предупреждения `libc::time_t` и

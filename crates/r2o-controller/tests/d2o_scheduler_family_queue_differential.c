@@ -26,8 +26,10 @@ int main(int argc, char **argv)
 
         char case_name[64], expected[16], exact_binding_text[8], extra;
         unsigned long long queued_event, confirmed_event;
-        if (sscanf(line, "%63s %15s %llu %llu %7s %c", case_name, expected,
-                   &queued_event, &confirmed_event, exact_binding_text, &extra) != 5 ||
+        long long binding_recheck_since;
+        if (sscanf(line, "%63s %15s %llu %llu %7s %lld %c", case_name, expected,
+                   &queued_event, &confirmed_event, exact_binding_text,
+                   &binding_recheck_since, &extra) != 6 ||
             (strcmp(expected, "queued") && strcmp(expected, "removed")) ||
             (strcmp(exact_binding_text, "yes") && strcmp(exact_binding_text, "no"))) {
             fclose(fixture);
@@ -60,6 +62,7 @@ int main(int argc, char **argv)
         binding.transport = 6;
         binding.family = 4;
         binding.shape = D2K_SHAPE_MODERN;
+        binding.recheck_since = (int64_t)binding_recheck_since;
 
         d2k_cat_box box = {0};
         strcpy(box.id, "box-1");
@@ -120,5 +123,5 @@ int main(int argc, char **argv)
         cases++;
     }
     fclose(fixture);
-    return cases == 3 ? 0 : 5;
+    return cases == 4 ? 0 : 5;
 }

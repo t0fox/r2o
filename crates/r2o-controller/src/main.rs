@@ -2828,7 +2828,6 @@ fn r2o_installed_family_group(
                 && binding.level >= 3
                 && binding.kind == "name"
                 && binding.target == target.host
-                && binding.recheck_since.is_none()
                 && (if binding.transport == 0 {
                     6
                 } else {
@@ -20827,12 +20826,14 @@ mod tests {
                 queued_event,
                 confirmed_event,
                 exact_binding,
+                binding_recheck_since,
             ] = fields.as_slice()
             else {
                 panic!("malformed d2o scheduler family queue fixture: {line}");
             };
             let queued_event = queued_event.parse::<u64>().unwrap();
             let confirmed_event = confirmed_event.parse::<u64>().unwrap();
+            let binding_recheck_since = binding_recheck_since.parse::<i64>().unwrap();
             assert!(matches!(*exact_binding, "yes" | "no"));
             let now = Instant::now();
             let target = r2o_controller::discovery::DiscoveryTarget {
@@ -20874,6 +20875,8 @@ mod tests {
                         transport: 6,
                         family: 4,
                         shape: SHAPE_MODERN,
+                        recheck_since: (binding_recheck_since != 0)
+                            .then_some(binding_recheck_since),
                         ..Binding::default()
                     }],
                     ..BoxRecord::default()
