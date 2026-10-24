@@ -6,8 +6,8 @@ SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 BASELINE_SHA=eb848976ed9491791b7f2130b874867b61b2ca5d
 UPSTREAM_SHA=86b05b96457fccdec6b7ddc0e8478508f80f0bab
 
-BASELINE_EXPECTED='r2o-discord-discovery-differential.sh r2o-discovery-active-lifetime-differential.sh r2o-discovery-coalesce-differential.sh r2o-quic-stun-watch-differential.sh r2o-tcp-exchange-differential.sh r2o-hold-differential.sh r2o-tcp-payload-stats-differential.sh r2o-tcp-rst-cut-differential.sh r2o-tcp-rst-observation-differential.sh r2o-udp-exchange-differential.sh'
-UPSTREAM_EXPECTED='r2o-discord-discovery-differential.sh r2o-discovery-active-lifetime-differential.sh r2o-discovery-coalesce-differential.sh r2o-discovery-concurrency-check.sh r2o-discovery-quic-stop-differential.sh r2o-quic-hello-differential.sh r2o-quic-stun-watch-differential.sh r2o-route-gate-differential.sh r2o-scheduler-differential.sh r2o-tcp-exchange-differential.sh r2o-hold-differential.sh r2o-tcp-payload-stats-differential.sh r2o-tcp-reply-hidden-differential.sh r2o-tcp-rst-cut-differential.sh r2o-tcp-rst-observation-differential.sh r2o-udp-exchange-differential.sh r2o-udp-session-table-check.sh'
+BASELINE_EXPECTED='r2o-ask-differential.sh r2o-discord-discovery-differential.sh r2o-discovery-active-lifetime-differential.sh r2o-discovery-coalesce-differential.sh r2o-quic-stun-watch-differential.sh r2o-tcp-exchange-differential.sh r2o-hold-differential.sh r2o-tcp-payload-stats-differential.sh r2o-tcp-rst-cut-differential.sh r2o-tcp-rst-observation-differential.sh r2o-udp-exchange-differential.sh'
+UPSTREAM_EXPECTED='r2o-ask-differential.sh r2o-discord-discovery-differential.sh r2o-discovery-active-lifetime-differential.sh r2o-discovery-coalesce-differential.sh r2o-discovery-concurrency-check.sh r2o-discovery-quic-stop-differential.sh r2o-quic-hello-differential.sh r2o-quic-stun-watch-differential.sh r2o-route-gate-differential.sh r2o-scheduler-differential.sh r2o-tcp-exchange-differential.sh r2o-hold-differential.sh r2o-tcp-payload-stats-differential.sh r2o-tcp-reply-hidden-differential.sh r2o-tcp-rst-cut-differential.sh r2o-tcp-rst-observation-differential.sh r2o-udp-exchange-differential.sh r2o-udp-session-table-check.sh'
 
 shards_for() {
     case "$1" in
@@ -25,6 +25,7 @@ scripts_for() {
     case "$snapshot:$shard" in
         baseline:host)
             printf '%s\n' \
+                r2o-ask-differential.sh \
                 r2o-discord-discovery-differential.sh \
                 r2o-discovery-active-lifetime-differential.sh \
                 r2o-discovery-coalesce-differential.sh \
@@ -40,6 +41,7 @@ scripts_for() {
             ;;
         upstream:discovery)
             printf '%s\n' \
+                r2o-ask-differential.sh \
                 r2o-discord-discovery-differential.sh \
                 r2o-discovery-active-lifetime-differential.sh \
                 r2o-discovery-coalesce-differential.sh \
