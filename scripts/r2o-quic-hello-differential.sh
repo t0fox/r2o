@@ -63,11 +63,11 @@ mkdir -p "$r2o_log_dir"
     r2o_test_sha256=$(sha256sum "$r2o_donor_datapath/test_quic_session.c" | awk '{print $1}')
     r2o_test_binary_sha256=$(sha256sum "$r2o_donor_test" | awk '{print $1}')
     if [ "$r2o_session_sha256" != \
-        'f3bc8c4ddd334a189c63dc1bbf868eff258c2fdff3199e285d4a098d2ad3fe1f' ] || \
+        'a7446b416481674b9a6332dad97430c903f6a3c7d53b45e8794a86eee2f127ea' ] || \
         [ "$r2o_test_sha256" != \
         'a9ab9fe07dae2ece70360942dfc559ce843479b11bdb6166faee9826ef9f91ca' ] || \
         [ "$r2o_test_binary_sha256" != \
-        '53556457b4fbc1ac6413b42191afb4bf05d110547b36323123d2a3a2ff3f009d' ]; then
+        'eaf091eb5d6490eaf7c1f06c2f2d5f8f1a21229e1cd93fc2e9513de6612d1b37' ]; then
         printf 'Исходники или бинарник донора отличаются от проверенного снимка\n' >&2
         exit 1
     fi
