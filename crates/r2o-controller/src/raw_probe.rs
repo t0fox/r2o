@@ -1197,9 +1197,14 @@ struct RstGuard {
     rule: Option<RstRule>,
 }
 
+fn r2o_rst_uses_nft(firewall: Option<&str>) -> bool {
+    firewall == Some("nft")
+}
+
 impl RstRule {
     fn install(source_port: u16, destination: SocketAddr) -> Result<Self, ProbeError> {
-        let nft = std::env::var("R2O_FW").as_deref() == Ok("nft");
+        let firewall = std::env::var("R2O_FW").ok();
+        let nft = r2o_rst_uses_nft(firewall.as_deref());
         let mut guard = Self {
             source_port,
             destination: destination.ip(),
@@ -1932,35 +1937,34 @@ mod tests {
 
     #[test]
     fn nft_rst_rule_uses_r2o_table_and_exact_tuple_with_donor_timeout() {
+        let fixture = include_str!("../tests/fixtures/d2o_nft_rst.txt")
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(|line| line.split_once('=').expect("fixture key=value"))
+            .collect::<std::collections::HashMap<_, _>>();
+        assert!(r2o_rst_uses_nft(Some(fixture["firewall"])));
+        assert!(!r2o_rst_uses_nft(None));
         let rule = RstRule {
-            source_port: 31_337,
-            destination: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)),
-            destination_port: 443,
+            source_port: fixture["source_port"].parse().unwrap(),
+            destination: fixture["destination"].parse().unwrap(),
+            destination_port: fixture["destination_port"].parse().unwrap(),
             nft: true,
             comment: true,
         };
 
         assert_eq!(
             rule.nft_args("add"),
-            [
-                "add",
-                "element",
-                "inet",
-                "r2o_rst",
-                "rst4",
-                "{ 31337 . 198.51.100.7 . 443 timeout 300s }",
-            ]
+            fixture["rust_add_args"]
+                .split('|')
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
         );
         assert_eq!(
             rule.nft_args("delete"),
-            [
-                "delete",
-                "element",
-                "inet",
-                "r2o_rst",
-                "rst4",
-                "{ 31337 . 198.51.100.7 . 443 }",
-            ]
+            fixture["rust_delete_args"]
+                .split('|')
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
         );
     }
 

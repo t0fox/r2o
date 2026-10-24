@@ -1,0 +1,10 @@
+# Shared C/Rust nft rule vector. The table names are namespaced per controller.
+firewall=nft
+source_port=31337
+destination=198.51.100.7
+destination_port=443
+timeout_seconds=300
+rust_add_args=add|element|inet|r2o_rst|rst4|{ 31337 . 198.51.100.7 . 443 timeout 300s }
+rust_delete_args=delete|element|inet|r2o_rst|rst4|{ 31337 . 198.51.100.7 . 443 }
+c_add=nft add element inet d2k_rst rst4 { 31337 . 198.51.100.7 . 443 timeout 300s }
+c_delete=nft delete element inet d2k_rst rst4 { 31337 . 198.51.100.7 . 443 }
