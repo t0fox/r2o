@@ -5,7 +5,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use r2o_controller::fetch::{FetchOptions, r2o_fetch_with_phase_timeout};
+use r2o_controller::fetch::{
+    FetchOptions, R2O_D2O_VERIFY_STEP_TIMEOUT, R2O_D2O_VOLUME_RX_TIMEOUT,
+    r2o_fetch_measure_rx_volume_with_fallback_path_and_timeouts, r2o_fetch_with_phase_timeout,
+};
 
 fn serve(config: Arc<rustls::ServerConfig>, listener: TcpListener, requests: usize) {
     for _ in 0..requests {
@@ -52,12 +55,23 @@ fn serve_with_response(
     requests: usize,
     response: Vec<u8>,
 ) {
+    serve_with_response_delay(config, listener, requests, response, Duration::ZERO);
+}
+
+fn serve_with_response_delay(
+    config: Arc<rustls::ServerConfig>,
+    listener: TcpListener,
+    requests: usize,
+    response: Vec<u8>,
+    delay: Duration,
+) {
     for _ in 0..requests {
         let Ok((mut socket, _)) = listener.accept() else {
             return;
         };
         let _ = socket.set_read_timeout(Some(Duration::from_secs(3)));
         let _ = socket.set_write_timeout(Some(Duration::from_secs(3)));
+        thread::sleep(delay);
         let Ok(mut connection) = rustls::ServerConnection::new(Arc::clone(&config)) else {
             continue;
         };
@@ -489,6 +503,64 @@ fn donor_and_r2o_tls_results_match_for_matching_and_mismatched_certificate_names
         assert!(rust_result.application_verified);
     }
     server.join().unwrap();
+}
+
+#[test]
+#[ignore = "run by scripts/r2o-tls-verify-differential.sh with the donor C verifier"]
+fn donor_and_r2o_rx_probe_accept_tls_response_before_six_second_deadline() {
+    let helper = std::env::var_os("R2O_D2O_VERIFY_HELPER")
+        .expect("differential script must provide the donor C verifier");
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        serve_with_response_delay(
+            server_config(false, false, false),
+            listener,
+            2,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_vec(),
+            Duration::from_millis(5400),
+        )
+    });
+    let port = address.port().to_string();
+    let c_result = Command::new(&helper)
+        .args(["127.0.0.1", port.as_str(), "localhost", "tls13-rx"])
+        .output()
+        .expect("run donor RX verifier");
+    let options = FetchOptions {
+        name: "localhost".into(),
+        ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        port: address.port(),
+        path: "/".into(),
+        deadline: Duration::from_secs(8),
+        tls12: false,
+        wire_len: None,
+        mark: None,
+    };
+    let rust_result = r2o_fetch_measure_rx_volume_with_fallback_path_and_timeouts(
+        &options,
+        None,
+        R2O_D2O_VERIFY_STEP_TIMEOUT,
+        R2O_D2O_VOLUME_RX_TIMEOUT,
+    );
+    server.join().unwrap();
+
+    assert!(
+        c_result.status.success(),
+        "donor verifier exited with {}: {}",
+        c_result.status,
+        String::from_utf8_lossy(&c_result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(c_result.stdout).unwrap().trim(),
+        "1\t1\t200\t1",
+        "d2o waits the full six-second RX TLS deadline"
+    );
+    let first = rust_result
+        .first
+        .as_ref()
+        .expect("r2o must complete TLS/HTTP");
+    assert_eq!(first.status, 200);
+    assert!(first.complete);
 }
 
 #[test]

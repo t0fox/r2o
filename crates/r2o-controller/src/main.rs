@@ -2325,10 +2325,11 @@ fn r2o_discovery_measure_volume(
     {
         r2o_controller::fetch::R2oFetchVolumeRxResult::default()
     } else {
-        r2o_controller::fetch::r2o_fetch_measure_rx_volume_with_fallback_path_and_phase_timeout(
+        r2o_controller::fetch::r2o_fetch_measure_rx_volume_with_fallback_path_and_timeouts(
             options,
             alternate_path,
             r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT,
+            r2o_controller::fetch::R2O_D2O_VOLUME_RX_TIMEOUT,
         )
     };
     (tx, rx)
@@ -6639,7 +6640,7 @@ fn r2o_known_voice_discovery_prefix(
                 || binding.transport != 17
                 || binding.family != 4
                 || binding.shape != SHAPE_VOICE
-                || !matches!(binding.verified_by, 4 | 5)
+                || !matches!(binding.verified_by, 3 | 4 | 5)
             {
                 return None;
             }
@@ -10912,28 +10913,22 @@ impl ControlClient {
         mut persistence: Option<&mut R2oCatalogPersistence>,
     ) -> Result<(), Box<dyn Error>> {
         if !trial.response_confirmed {
-            return Err("RTP не подтверждает voice-план без Discovery/STUN-ответа".into());
+            return Err("голосовой план не подтверждён без ответа Discovery/STUN".into());
         }
         if proof.trial_id != trial.trial_id || !r2o_voice_proof_matches_target(proof, trial.target)
         {
             return Err("голосовое подтверждение не совпало с временным опытом".into());
         }
-        let (outbound_packets, inbound_packets) = match proof.proof {
-            r2k_core::control::R2oVoiceProofKind::RtpMedia {
-                outbound_packets,
-                inbound_packets,
-            } if outbound_packets >= r2k_core::control::VOICE_RTP_PROOF_MIN_PACKETS
-                && inbound_packets >= r2k_core::control::VOICE_RTP_PROOF_MIN_PACKETS =>
-            {
-                (outbound_packets, inbound_packets)
-            }
+        let verified_by = match proof.proof {
+            r2k_core::control::R2oVoiceProofKind::StunBinding => 3,
+            r2k_core::control::R2oVoiceProofKind::DiscordDiscovery { .. } => 4,
             _ => {
                 return Err(
-                    "постоянную voice-привязку подтверждает только двусторонний RTP".into(),
+                    "постоянный voice-план подтверждает только ответ STUN или Discord Discovery"
+                        .into(),
                 );
             }
         };
-        let verified_by = 5;
         let (_lock, previous) =
             locked_catalog_for_persistence(catalog_path, catalog, persistence.as_deref())?;
         let mut updated = previous.clone();
@@ -10972,8 +10967,15 @@ impl ControlClient {
         if let Err(error) = self.retire_r2o_voice_trial(&trial) {
             eprintln!("временный voice-план доживёт до конца аренды: {error}");
         }
+        let proof_name = match proof.proof {
+            r2k_core::control::R2oVoiceProofKind::StunBinding => "STUN",
+            r2k_core::control::R2oVoiceProofKind::DiscordDiscovery { .. } => "Discord Discovery",
+            r2k_core::control::R2oVoiceProofKind::RtpMedia { .. } => {
+                unreachable!("RTP не подтверждает voice-план")
+            }
+        };
         println!(
-            "Двусторонний RTP подтверждён: адресный план {plan_id} сохранён для {}; принято RTP-пакетов исход/вход={outbound_packets}/{inbound_packets}; качество и слышимость аудио отдельно не измерялись",
+            "Ответ {proof_name} подтверждён: адресный план {plan_id} сохранён для {}; качество и слышимость аудио отдельно не измерялись",
             trial.target.server.ip(),
         );
         Ok(())
@@ -11934,38 +11936,37 @@ impl ControlClient {
                     match proof.proof {
                         r2k_core::control::R2oVoiceProofKind::DiscordDiscovery { .. }
                         | r2k_core::control::R2oVoiceProofKind::StunBinding => {
-                            if let Some(active_trial) = r2o_voice_trials.get_mut(&proof.trial_id) {
-                                active_trial.response_confirmed = true;
-                            }
-                            println!(
-                                "{proof_name}-ответ временного плана подтверждён для {}; ожидаются минимум {} принятых RTP-пакета в каждом направлении",
-                                trial.target.server,
-                                r2k_core::control::VOICE_RTP_PROOF_MIN_PACKETS
-                            );
-                        }
-                        r2k_core::control::R2oVoiceProofKind::RtpMedia { .. } => {
-                            if !trial.response_confirmed {
+                            let Some((_, catalog, path, _)) = &mut discovery else {
                                 println!(
-                                    "RTP-доказательство проигнорировано: нет подтверждённого Discovery/STUN-ответа для попытки"
+                                    "{proof_name}-ответ получен без активного каталога автопоиска"
                                 );
-                            } else if let Some((_, catalog, path, _)) = &mut discovery {
-                                r2o_voice_trials.remove(&proof.trial_id);
-                                if let Err(error) = self.confirm_r2o_voice_trial(
-                                    trial.clone(),
-                                    &proof,
-                                    catalog,
-                                    path,
-                                    catalog_persistence.as_mut(),
-                                ) {
-                                    r2o_voice_trials.insert(trial.trial_id, trial);
-                                    eprintln!("voice-план не подтверждён: {error}");
+                                std::io::stdout().flush()?;
+                                continue;
+                            };
+                            let mut confirmed_trial = trial.clone();
+                            confirmed_trial.response_confirmed = true;
+                            r2o_voice_trials.remove(&proof.trial_id);
+                            if let Err(error) = self.confirm_r2o_voice_trial(
+                                confirmed_trial.clone(),
+                                &proof,
+                                catalog,
+                                path,
+                                catalog_persistence.as_mut(),
+                            ) {
+                                eprintln!("voice-план не подтверждён: {error}");
+                                if let Err(retire_error) =
+                                    self.retire_r2o_voice_trial(&confirmed_trial)
+                                {
+                                    eprintln!(
+                                        "временный voice-план истечёт по аренде; досрочное снятие не удалось: {retire_error}"
+                                    );
                                 }
-                            } else {
-                                println!(
-                                    "RTP-доказательство получено без активного каталога автопоиска"
-                                );
                             }
                         }
+                        r2k_core::control::R2oVoiceProofKind::RtpMedia { .. } => println!(
+                            "RTP-наблюдение для {} не меняет критерий d2o: постоянный план подтверждается ответом STUN/Discovery",
+                            trial.target.server
+                        ),
                     }
                     std::io::stdout().flush()?;
                     continue;
@@ -25428,7 +25429,7 @@ mod tests {
             "198.51.100.21".parse().unwrap(),
             &text,
             1_800_000_001,
-            5,
+            4,
         )
         .unwrap();
 
@@ -25458,7 +25459,7 @@ mod tests {
                 "198.51.100.21".parse().unwrap(),
                 &text,
                 1_800_000_001,
-                5,
+                4,
             )
             .unwrap();
             catalog.boxes[0].bindings[0].verified_by = verified_by;
@@ -26020,9 +26021,9 @@ mod tests {
         let proof = r2k_core::control::R2oVoiceProofEvent {
             key,
             trial_id,
-            proof: r2k_core::control::R2oVoiceProofKind::RtpMedia {
-                outbound_packets: 3,
-                inbound_packets: 3,
+            proof: r2k_core::control::R2oVoiceProofKind::DiscordDiscovery {
+                mapped_ip: "203.0.113.8".parse().unwrap(),
+                mapped_port: 52_000,
             },
         };
         let mut client = ControlClient::connect(socket_path).unwrap();
@@ -26056,7 +26057,7 @@ mod tests {
         assert_eq!(&remove_body[8..10], &50_004_u16.to_be_bytes());
         assert_eq!(&remove_body[10..], &trial_id);
         let saved = Catalog::load(&catalog_path).unwrap();
-        assert_eq!(saved.boxes[0].bindings[0].verified_by, 5);
+        assert_eq!(saved.boxes[0].bindings[0].verified_by, 4);
         assert_eq!(saved.boxes[0].bindings[0].target, "198.51.100.20");
         std::fs::remove_dir_all(directory).unwrap();
     }

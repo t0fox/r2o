@@ -41,8 +41,11 @@ pub fn r2o_save_confirmed_voice_binding(
     r2o_now: i64,
     r2o_verified_by: u8,
 ) -> Result<String, String> {
-    if r2o_verified_by != 5 {
-        return Err("голосовую привязку можно сохранить только после двустороннего RTP".into());
+    if !matches!(r2o_verified_by, 3 | 4) {
+        return Err(
+            "голосовую привязку можно сохранить только после ответа STUN или Discord Discovery"
+                .into(),
+        );
     }
     let r2o_bytes = crate::plan_text::compile_text(r2o_text)?;
     let r2o_plan = r2k_core::plan::Plan::parse(&r2o_bytes).map_err(|error| error.to_string())?;
@@ -87,7 +90,7 @@ pub fn r2o_save_confirmed_voice_binding(
                 && r2o_binding.transport == 17
                 && r2o_binding.family == 4
                 && r2o_binding.shape == r2k_core::control::SHAPE_VOICE
-                && r2o_binding.verified_by == 5
+                && matches!(r2o_binding.verified_by, 3 | 4 | 5)
             {
                 r2o_prior_successes = r2o_prior_successes.max(r2o_binding.successes);
             }
@@ -1039,7 +1042,7 @@ mod tests {
             "198.51.100.20".parse().unwrap(),
             &r2o_text,
             1_800_000_000,
-            5,
+            4,
         )
         .unwrap();
         assert!(!r2o_plan_id.bytes().all(|byte| byte == b'0'));
@@ -1052,7 +1055,7 @@ mod tests {
         assert_eq!(r2o_binding.transport, 17);
         assert_eq!(r2o_binding.family, 4);
         assert_eq!(r2o_binding.shape, r2k_core::control::SHAPE_VOICE);
-        assert_eq!(r2o_binding.verified_by, 5);
+        assert_eq!(r2o_binding.verified_by, 4);
         assert_eq!(r2o_binding.plan_id, r2o_plan_id);
         assert_eq!(
             super::r2o_voice_discovery_prefix_from_plan_text(&r2o_reloaded.boxes[0].plans[0].text),
@@ -1079,7 +1082,7 @@ mod tests {
             "198.51.100.20".parse().unwrap(),
             r2o_text,
             1_800_000_000,
-            5,
+            4,
         )
         .unwrap();
 
@@ -1087,7 +1090,7 @@ mod tests {
         assert_eq!(r2o_catalog.boxes[0].plans[0].proto, "voice");
         assert_eq!(r2o_catalog.boxes[0].plans[0].text, r2o_text);
         assert_eq!(r2o_catalog.boxes[0].bindings[0].kind, "addr");
-        assert_eq!(r2o_catalog.boxes[0].bindings[0].verified_by, 5);
+        assert_eq!(r2o_catalog.boxes[0].bindings[0].verified_by, 4);
         assert_eq!(
             super::r2o_voice_discovery_prefix_from_plan_text(r2o_text),
             None
@@ -1095,23 +1098,24 @@ mod tests {
     }
 
     #[test]
-    fn r2o_не_сохраняет_stun_или_discovery_как_постоянную_voice_привязку() {
+    fn r2o_сохраняет_stun_или_discovery_по_донорским_критериям() {
         let r2o_prefix = r2k_core::stun::binding_request([0x93; 12]);
         let r2o_text = super::r2o_voice_arm_plan_text(&r2o_prefix);
 
         for r2o_verified_by in [3, 4] {
             let mut r2o_catalog = crate::catalog::Catalog::default();
-            assert!(
-                super::r2o_save_confirmed_voice_binding(
-                    &mut r2o_catalog,
-                    "198.51.100.20".parse().unwrap(),
-                    &r2o_text,
-                    1_800_000_000,
-                    r2o_verified_by,
-                )
-                .is_err()
+            super::r2o_save_confirmed_voice_binding(
+                &mut r2o_catalog,
+                "198.51.100.20".parse().unwrap(),
+                &r2o_text,
+                1_800_000_000,
+                r2o_verified_by,
+            )
+            .unwrap();
+            assert_eq!(
+                r2o_catalog.boxes[0].bindings[0].verified_by,
+                r2o_verified_by
             );
-            assert!(r2o_catalog.boxes.is_empty());
         }
     }
 
