@@ -7890,3 +7890,34 @@ AIMD остаётся в отдельных тестах. После этого 
 Остались предупреждения о deprecated `libc::time_t` и `libc::suseconds_t` в
 `response.rs`. По просьбе пользователя SSH к роутеру и deploy не выполнялись.
 Полевого подтверждения нет; полный поведенческий паритет не объявляется.
+
+Дополнительная проверка pinned donor `783aa75` от 2026-10-25: C/Rust TCP
+exchange прошёл (`test_session`; Rust 3 unit, 1 journal и 1 runtime тест),
+TCP hold — C ownership/bounds/release и Rust 17/17, TCP RST-CUT — C
+`test_session` и Rust state/runtime, ранний RST — одинаковая сводка
+`R2O_DIFF code=1 ttl=127 ref=124 tos=46 ipid=23063 planned=2 shape=2
+client_is_low=1`. UDP exchange прошёл C `test_quic_session` и Rust event,
+journal и runtime; UDP session table — C `test_track`/`test_quic_session`
+и Rust 5/5. ARM64/QEMU TCP payload stats совпал по сводке:
+`C=1 1 2 6 16 1`, Rust `1 1 2 6 16 1`. Соответствующие Rust QUIC ClientHello
+сценарии прошли 2/2, TCP invisible-reply тесты — 9/9 и runtime метка — 1/1.
+
+Два strict-hash скрипта не засчитаны как пройденные: `r2o-quic-hello` остановил
+проверенный бинарник `test_quic_session` на фактическом SHA
+`9376568b5b7d071d99e279e1161afe6ef72ba9d6a1e0d62147547502420b40a0` вместо
+закреплённого `eaf091eb5d6490eaf7c1f06c2f2d5f8f1a21229e1cd93fc2e9513de6612d1b37`;
+`r2o-tcp-reply-hidden` остановился на `test_session` SHA
+`28e623b32a9a5802a6f65f2676e2e4adb3d9f822bde6978d9577cb2b8bfe95de` вместо
+`10dec3a27f557c9973b7d2b2e060329702e222fa420a35095081959790b0aacb`. В обоих
+случаях donor source/test source SHA совпали с закреплёнными исходниками; C
+наборы были пересобраны из этого donor commit и прошли через другие матричные
+скрипты. Эти результаты не приравниваются к запуску strict-hash скриптов.
+Физический роутер не использовался, поэтому полевого подтверждения по-прежнему
+нет.
+
+После этих дифференциальных сценариев повторно запущен
+`scripts/r2o-build-openwrt-aarch64-musl.sh`: код 0, шесть статических ARM64/musl
+бинарников прошли локальный QEMU smoke, версии и `wire=47` совпали, атомарные
+проверки каталога прошли. Остались только предупреждения `libc::time_t` и
+`libc::suseconds_t`. Это сборочная и локальная QEMU проверка, не проверка на
+роутере.
