@@ -8366,3 +8366,58 @@ decompilation evidence.
 
 The physical router remains read-only. These local differential and QEMU checks
 do not establish field acceptance, so full behavioral parity is not claimed.
+
+### Current upstream d2o review (2026-10-26)
+
+The comparison target is the current `t0fox/d2o` main commit
+`304ba893dd37197128ac8799c0495b035f6a38c0`. `E:\d2o` itself remains on its
+older, dirty working tree; a separate clean WSL clone at the exact upstream
+commit was used for the C oracles. The donor's local edits were left untouched.
+
+Source comparison from the previously reviewed `783aa75` to `304ba893` found
+no changes in `core/verify.c`, `core/meas.c`, `detect/classify.c`, or
+`detect/raw.c`. `core/sched.c` and `core/d2kc.c` add optional diagnostics
+observation and reporting; the scheduler selection, admission, timing, retry,
+and proof paths are unchanged. The changed `core/httpsearch.c` code likewise
+adds diagnostic event recording and outcome labels; its question order,
+retry windows, acceptance threshold, and install path are unchanged. No
+algorithm change was needed in Rust for this d2o update.
+
+| Current donor C function | Rust analogue | Result against `304ba893` |
+|---|---|---|
+| `core/sched.c::known_plans` | `discovery::known_plans` | `r2o-known-plans-differential.sh` passed; byte-identical selection for compatibility, tried hashes, volume bucket, success order, stable ties, deduplication, and cap 8. |
+| `core/sched.c::next_rx_volume_plan`, `refill_from_fallback` | `r2o_ech_rx_ladder_candidate`, `R2oEchRxProgress`, owned fallback queue | `r2o-ech-rx-ladder-differential.sh` passed; two 8-plan refills, split variants, cursor, and RX-cut fallback suppression matched. |
+| `core/sched.c::launch_or_queue`, `d2k_sched_tick`, `task_fail`, `on_applied` | Discovery worker and controller event loop in `crates/r2o-controller/src/main.rs` | Scheduler shard passed, including full C `test_sched` (479 s), queue/deadline/retry, ACK/APPLIED/PERSIST, and worker/permit tests. |
+| `core/verify.c::d2k_verify_probe`, `d2k_verify_probe_quic` | TLS/HTTP response verification in `response.rs`, `http_search.rs`, and `r2o_tls.rs` | `r2o-tls-verify-differential.sh`: 10/10 shared C/Rust vectors passed, including matching and mismatched names, TLS 1.2/1.3 Finished handling, truncated SANs, and deadline behavior. |
+| `core/meas.c::d2k_meas_once`, `d2k_meas` | `classify.rs::measure` and the controller measurement result handling | `r2o-meas-differential.sh` passed the shared send-timeout case; the resource-limit shard also matched budget 67, whitelist allowance, AIMD/backoff, and slot ceiling. |
+| `detect/classify.c::d2k_classify_run` | `classify::run_with_backend` | `test-d2o-shared-fixtures.sh` passed the shared CLEAR vector: verdict, 3 probes, 3 repeats, mark 45. The same script passed C/Rust NFT output and 13 TLS response vectors. |
+| `detect/raw.c::raw_send_syn`; `detect/classify.c::self_ix`, `d2k_raw_note_rc` | `raw_probe::raw_syn_options`, `raw_profile_allows`, `raw_selftest_index`, `raw_selftest_age` | `r2o-raw-profile-differential.sh` passed the exact IPv4/IPv6 SYN-option and self-test cache invalidation vectors. |
+| `core/httpsearch.c::start`, `all_failed`, `confirmed`, `finish` | `run_http_search_task`, `http_search::read_probe_response` | After updating the test's source SHA guard to current d2o, `r2o-http-search-differential.sh` passed C `test_httpsearch` and Rust baseline retry behavior. |
+| `core/d2kc.c::main`, `diagnostic_tick` | Rust controller `main` event loop; no Rust counterpart for d2o's optional diagnostic writer | Component scenarios above pass. The diagnostic writer is telemetry, not an added search rule; a complete runtime-loop byte-equivalence test does not exist. |
+
+All 37 current-upstream differential scripts passed in isolated shard-equivalent
+build trees: discovery 12/12, HTTP search 1/1, QUIC control 3/3, RST/UDP 7/7,
+TCP 4/4, TLS 1/1, and scheduler 9/9. The CI coverage manifest check passed
+(12 baseline and 37 upstream scenarios covered exactly once), and
+`git diff --check` passed. During the local run, an initial combined run mixed
+ARM64 and host `.o` files in one donor tree and a Windows worktree's `.git`
+pointer was unreadable to WSL. Those were harness setup failures; affected
+scenarios were rerun from clean WSL clones per shard/architecture and passed.
+The HTTP test's only initial failure was its stale source-hash guard, which now
+pins the current C source hashes.
+
+The OpenWrt AArch64 musl build and user-mode QEMU smoke were rerun: all six
+release binaries started, report wire version 47, and controller catalog
+clear/check succeeded. This still is not a live YouTube/Discord field run.
+The router received only read-only HTTP GETs: panel root returned 200, while
+`/api/diagnostics?status` reported diagnostics disabled, so no current router
+events were available. No SSH command, file write, service action, or test
+traffic was sent to the router.
+
+REA still cannot provide native function dossiers for the donor's Linux ELF in
+this Windows session: the configured Ghidra provider does not support ELF and
+the native objdump provider returned `ERR_REA_WINDOWS_NATIVE`. This update is
+therefore supported by the pinned source diff and executable C/Rust tests, not
+by new REA decompilation evidence. Global parity and field acceptance remain
+unproven until the R2O build is exercised against the same live traffic; the
+router currently runs d2o and remains read-only.

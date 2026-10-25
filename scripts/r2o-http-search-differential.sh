@@ -5,7 +5,7 @@ r2o_script_dir=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 r2o_donor_core="${R2O_DONOR_CORE:-${r2o_script_dir%/*}/d2o/core}"
 r2o_log_dir="$r2o_script_dir/.rea"
 r2o_log="$r2o_log_dir/r2o-http-search-differential-$(date +%Y%m%d-%H%M%S).log"
-r2o_upstream_sha=783aa75ce44dd6192cd1f4f1d98e4fe909ef3045
+r2o_upstream_sha=304ba893dd37197128ac8799c0495b035f6a38c0
 
 if [ "${R2O_EXPECTED_DONOR_SHA:-}" != "$r2o_upstream_sha" ]; then
     printf 'HTTP-search differential requires pinned upstream donor %s\n' "$r2o_upstream_sha" >&2
@@ -48,9 +48,9 @@ mkdir -p "$r2o_log_dir"
     r2o_httpsearch_sha=$(sha256sum "$r2o_donor_core/httpsearch.c" | awk '{print $1}')
     r2o_test_sha=$(sha256sum "$r2o_donor_core/test_httpsearch.c" | awk '{print $1}')
     if [ "$r2o_httpsearch_sha" != \
-        'a28e008c1ef13073eeeee952e2ab7c27cfd98205403c392dc4a370db25635627' ] || \
+        '7075b74f1340b53c410422bfe2ac5f558d009b29c20a7085e674f49b0210fa3a' ] || \
         [ "$r2o_test_sha" != \
-        'bb207ca558c5a3c8cc2d971907562b97306a880cd8a1feab679a0497bf6e16d2' ]; then
+        '7a1f589858f8ab5bec6b419e64f2bd262da023008726984487f4efa1cdad8195' ]; then
         printf 'Исходники HTTP-search отличаются от проверенного снимка донора\n' >&2
         exit 1
     fi
