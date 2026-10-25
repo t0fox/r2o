@@ -713,7 +713,12 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
         .map_err(|error| format!("не удалось настроить TCP-сокет: {error}"))?;
 
     let mut connection = if let Some(ech) = ech {
-        crate::r2o_tls::r2o_tls_ech_client_connection(&options.name, roots, ech.clone())?
+        crate::r2o_tls::r2o_tls_ech_client_connection(
+            &options.name,
+            roots,
+            ech.clone(),
+            options.wire_len,
+        )?
     } else {
         crate::r2o_tls::r2o_tls_client_connection(
             &options.name,
@@ -858,8 +863,9 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
                     }
                     if parser.is_invalid() {
                         r2o_framing_valid = false;
-                        r2o_local_limit =
-                            !parser.headers_complete() && parser.headers().len() >= 8191;
+                        r2o_local_limit = !parser.headers_complete()
+                            && parser.headers().len()
+                                >= r2k_core::http_response::MAX_HTTP_RESPONSE_HEADER_BYTES;
                         reason = Some("HTTP-ответ содержит неверное обрамление".into());
                         break;
                     }

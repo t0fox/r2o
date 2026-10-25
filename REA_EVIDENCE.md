@@ -7948,3 +7948,362 @@ commit `783aa75`.
 `r2o-build-openwrt-aarch64-musl.sh`: код 0, все шесть ARM64/musl бинарников
 прошли локальный QEMU smoke и catalog checks. Это не меняет статус полевой
 проверки.
+
+## 2026-10-25: завершение Discovery после ECH GREASE
+
+Эталон: `E:\d2o`, HEAD `783aa75ce44dd6192cd1f4f1d98e4fe909ef3045`.
+Локальная правка `datapath/test_session.c` сохранена при fast-forward.
+
+В C `core/sched.c::worker_run` переводит ECH offer в GREASE внутри той же
+`task` (`ech_offer=0`, `ech_grease=1`, обновление `asked_shape`). Затем
+`d2k_sched_tick`, `task_fail`/`task_done` завершают эту же задачу независимо
+от изменения формы. В Rust runner менял `DiscoveryTarget.shape`, но
+`DiscoveryWorker::try_outcome`/`r2o_complete_outcome` сравнивали результат
+целиком с исходной целью в `active`. Завершённый результат не удалял
+исходную ECH-цель из `active` и не находил её в `seen` для учёта повтора.
+
+Регрессия `r2o_discovery_grease_result_releases_original_task` запускает
+настоящий DiscoveryWorker с runner, возвращающим результат после штатного
+`regrade_ech_grease`. До исправления: FAIL `completed GREASE task remains
+active`, хотя measurement permit уже освобождён. После исправления: PASS;
+полный набор бинарника контроллера — 178 PASS. Это Rust-регрессия по
+контракту C, не отдельный сетевой C/Rust differential.
+
+Исправление передаёт исходную цель вместе с результатом worker и переносит
+учёт на измеренную форму только при совпадении владельца активной задачи.
+Измеренная форма результата, критерии HTTPS/APPLIED, бюджеты и интервалы
+повтора не изменены. Существующие C/Rust differential worker/permit и
+ACK → APPLIED → persistence прошли на указанном donor commit.
+
+По разрешению пользователя заменён только бинарник контроллера текущей
+установки OpenWrt, SHA-256
+`bc60af67d2e65f7ad72ff24cd13f9932b3516f02e23b192043fb1149413c4413`.
+Оба запущенных контроллера проверены через `/proc/PID/exe`. Datapath,
+firewall и каталог при замене не перезапускались и не редактировались.
+Предыдущий бинарник сохранён на компьютере, копии на роутере не оставлены.
+
+До замены наблюдались незавершённые записи YouTube с 09:03:40 UTC при
+освобождённых measurement permit. Это согласуется с дефектом учёта, но
+не доказывает причину всех сетевых отказов. Проверки с SO_MARK 45, обходящие
+NFQUEUE, тоже не завершили TLS к YouTube и Discord. После замены начались
+новые поиски обоих имён. Успех сервисов и новые подтверждённые планы пока
+не доказаны; полевой паритет не объявляется.
+
+### Фактическая метка TCP-verifier
+
+Следующее подтверждённое расхождение: C `core/sched.c::install_next`
+помечает проверочный сокет `s->mark`, чтобы он попадал в NFQUEUE, а не
+использовал bypass-метку datapath. Rust
+`r2o_candidate_confirmation_mark` возвращал `None`, но
+`BoundTcpProbe::open` трактует `None` как bypass 45. При действующем
+`meta mark 0x2d return` проверка не могла получить APPLIED своего плана.
+Исправление — явный `Some(0)` для candidate proof, с сохранением дефолта
+остальных вызовов BoundTcpProbe. В установленных nft-правилах этот сокет
+проходит очередь. Это не утверждение равенства числовых меток всех
+конфигураций d2o и r2o.
+
+Существующий тест candidate confirmation заменён проверкой настоящего
+Linux-сокета через getsockopt(SO_MARK): до правки FAIL (`45 != 0`), после
+правки PASS. Полный Rust controller binary suite: 178 PASS. Полный C
+`core/test_sched` на актуальном donor: «планировщик: все проверки прошли».
+
+На роутере в той же установке заменён контроллер на сборку с обеими
+правками, SHA-256
+`29ccb8cfb8e912672475fffec68b77d9220b7aac7312b9cfb793ce5327a22274`.
+Оба процесса проверены через `/proc/PID/exe`. Сохранённых предыдущих
+версий и временных файлов передачи на роутере нет.
+
+Поле после замены: 2026-10-25 09:47:46 UTC (12:47:46 местного времени)
+контроллер сохранил план `c56514d24a2ea2ce39bfcc5dc2c89729` для
+`updates.discord.com`, IPv4/TLS 1.2. API: confirms=1, targets=1,
+одна коробка, binding level=3, enabled=true, recheck=false.
+Журнал содержит исполненные временные опыты на портах 50533/45559
+к 162.159.137.232:443 с разными trial ID. После сохранения есть
+нетемпоральное исполнение этого плана на LAN-потоке
+192.168.1.203:54523 → 162.159.137.232:443 (execution=121).
+Таким образом отсутствие APPLIED вследствие bypass-метки устранено на
+реальном роутере; цепочка до каталога и применения к LAN наблюдалась.
+Пользователь подтвердил восстановление YouTube и появление коробки.
+Работа всего приложения Discord пока не подтверждена: отдельно идёт
+Discovery gateway.discord.gg. Глобальный паритет с d2o не заявляется.
+
+### Запасной перебор: перенос в работе
+
+Поле после исправления метки: www.youtube.com испытывался планом oob
+`de0a5c839f566e652cec9a51df7b633b`. Журнал подтверждает три исполненных
+временных опыта (execution 147/152/156), но кандидат не дал подтверждения
+HTTPS. C `d2k_sched_tick` в этой ситуации разрешает `owned_fallback`
+(sched.c около 11330), затем `refill_from_fallback` вызывает
+`d2k_fallback_plan`. Rust non-ECH runner пока заканчивается на
+`r2o_confirm_discovery_outcome` после единственного измеренного плана.
+
+Добавлены `r2o_fallback.rs`, C oracle `d2o_fallback_differential.c` и
+`scripts/r2o-fallback-differential.sh`. Начальный тест упал на отсутствии
+первого кандидата. После переноса fb_arm_at/d2k_arm_plan полный текст
+совпал для 49 вариантов и выхода за конец списка, двух TLS-форм и пяти
+send caps (0/1492/1200/100/60). Сравниваются настоящие C-функции текущего
+donor; нормализуется только префикс r2o-plan/d2k-plan.
+Модуль пока НЕ подключён к runtime и НЕ залит на роутер.
+
+Следующая проверка: C ask_settle считает raw-зонды отдельно в ask_probes;
+sched_probe_cap ограничивает t->probes. Rust runner вычитает
+classify_probes из probe_cap перед первой проверкой кандидата. Нужно
+подтвердить и исправить раздельный учёт дифф-тестом вместе с подключением
+запасного перебора, сохранив порядок, условия допуска и дедлайн C.
+
+Раздельный бюджет подтверждён новым oracle
+`d2o_raw_budget_differential.c`: настоящие `ask_settle` и
+`sched_probe_cap` на 16 сочетаниях raw=0/5/67/100 и
+candidates=0/1/66/67. Rust-тест до правки падал (raw=5 оставлял 62 вместо
+67); после правки C/Rust output совпал. Основной TLS runner теперь
+использует `ProbeCounts.remaining` по кандидатам, сохраняя raw в total
+карточки. Путь volume recovery ещё использует прежний счётчик и требует
+той же проверки при подключении fallback. 178 тестов бинарника
+контроллера после изменения прошли.
+
+Обнаружено необходимое условие допуска fallback: C проверяет
+`s->dropped_seen == t->ver_dropped0`. `d2kd.c` раз в секунду присылает
+`D2K_EV_STATS`: после нулевого ключа идут два насыщенных u32 BE,
+dropped и sent; `core/link.c` разбирает dropped, `d2k_sched_event` сохраняет
+его в dropped_seen. Rust `ControlServer` считает dropped_events, но
+контроллеру этот счётчик не передаёт; COMMAND_STATS пока только объявлен.
+Перед включением fallback нужно восстановить этот канал доказательств,
+запоминать счётчик на установке кандидата и проверять неизменность к
+решению о следующем кандидате. Пропуск условия C не допускается.
+
+Последний снимок установленной сборки: confirms=11, targets=11,
+active=1, limit=18, queued=0; неподтверждённые локальные изменения этого
+раздела на роутер не устанавливались, пуша не было.
+
+### Проверка жалобы на 94 % свободного CPU (2026-10-25 10:11 UTC)
+
+Живой top: 95 % idle; API: active=4, limit=18, queued=0,
+free_pct=98 (сглаженное значение), cores=2, confirms=11.
+В этом снимке AIMD-предел не заполнен; очередь не ждёт разрешения.
+C core/sched.c::measure_limit_update / measure_started и Rust
+r2o_resource_limit.rs::R2oAdaptiveLimit::r2o_sample / r2o_mark_started
+увеличивают предел на один при спросе на пределе и достаточных ресурсах,
+а не для достижения заданного процента CPU. Сетевые ожидания сами по
+себе не загружают CPU. Добавлены общие C/Rust векторы
+router_idle_without_queue (18 остаётся 18) и
+router_idle_at_limit_with_queue (18 становится 19).
+
+Уточнение предыдущей записи о STATS: core/link.c::d2k_link_next до
+разбора типа проверяет семейство ключа (только 4/6), тогда как sender
+периодического STATS в d2kd.c заполняет ключ нулями. Поэтому одного
+чтения switch(STATS) недостаточно для утверждения о рабочем канале C.
+Экспериментальные незавершённые Rust codec-заглушки убраны; перед переносом
+канала нужен тест реального C parser на кадре реального C sender.
+Изменения AIMD и загрузка новых бинарников на роутер не выполнялись.
+
+Повторный scripts/r2o-resource-limit-differential.sh с обоими новыми векторами прошёл: C/Rust AIMD совпал; CPU parser и probe budget также прошли. C fixture ожидает 13 строк вместо прежних 11. Лог WSL: /tmp/r2o-cpu-resource-diff.log.
+
+### Раздельный бюджет volume, карточка проб и срок задачи (2026-10-25)
+
+| Расхождение | Эталон C | Rust | Результат |
+|---|---|---|---|
+| raw ошибочно съедает бюджет volume-кандидатов | sched.c::ask_settle, sched_probe_cap (ask_probes отдельно от probes) | main.rs::r2o_discovery_volume_recovery использует ProbeCounts | Регрессия runtime volume_raw_measurements_do_not_spend_candidate_budget: до правки при raw=67 InstallProbe=0, после для raw=0/5/67/100 InstallProbe=1. C/Rust oracle раздельного бюджета также прошёл. |
+| уменьшение числа проб при смене фазы и повторный подсчёт | sched.c: ask_probes + probes сохраняются в карточке | R2oDiscoverySearches::update, ECH/volume progress | discovery_plan_phase_keeps_total_raw_and_candidate_probes: до правки 67 вместо 68, после 68, общий счётчик после следующей пробы 69; новая очередь сбрасывает карточку в 0. |
+| собственный запрет проб в последние 9 секунд | sched.c::d2k_sched_tick: истечение только при now_ms-started_ms > SCHED_TASK_LIFE_MS | main.rs::r2o_discovery_trial_time_available во всех пяти местах допуска | До правки запрет на 591001 мс. После C/Rust совпали на 0/590999/591000/591001/599999/600000/600001 мс. C oracle вызывает настоящий tick с T_SHAPE_WAIT и проверяет общее истечение задачи. |
+
+Дифф срока добавлен в scripts/r2o-ack-applied-persist-differential.sh;
+цепочка ACK/APPLIED/PERSIST с ним тоже прошла. Полный прогон контроллера:
+lib 205 passed, 1 ignored (raw capability test); bin 181 passed.
+Логи WSL: /tmp/r2o-volume-raw-red.log, /tmp/r2o-volume-raw-green.log,
+/tmp/r2o-probe-card-red.log, /tmp/r2o-task-deadline-red.log,
+/tmp/r2o-deadline-chain-diff.log, /tmp/r2o-budget-deadline-all-tests.log.
+
+Новый d2o_stats_wire.c исполняет настоящий datapath/ctl.c::d2k_ctl_event
+через AF_UNIX и core/link.c::d2k_link_next. Подтверждён результат:
+family=0 result=-1 dropped=0 sent=0; family=4/6 result=0 dropped=7 sent=19.
+Нулевой ключ совпадает с конструктором периодического STATS в d2kd.c.
+Проверка включена в scripts/r2o-fallback-differential.sh (после C/Rust
+сравнений планов и бюджетов), общий прогон прошёл. Это подтверждённый
+дефект канала эталона, а не основание молча изобретать иной протокол Rust.
+Runtime fallback пока не подключён. Нужен перенос допуска с точными
+метаданными измерителя (owns_search, APPLIED, transport, local_limit и
+снимок реально принятого dropped), а также сохранение порядка готовых
+планов перед измеренными и запасными.
+
+Снимок роутера до замены: confirms=13, targets=13, active=9, limit=18,
+queued=0, CPU free=97 %. Контроллеры PID 9913/9916 исполняли SHA256
+29ccb8cfb8e912672475fffec68b77d9220b7aac7312b9cfb793ce5327a22274.
+Эта версия сохранена только локально в .audit/router-builds/r2o-controller-before-budget.
+
+### Замена контроллера и ограниченная полевая проверка (2026-10-25 10:27–10:29 UTC)
+
+После локальных дифф-тестов и полного прогона собран release ARM64 musl
+(nightly-2026-10-17, build-std, panic=abort). readelf: AArch64 EXEC,
+qemu --version: release=dev wire=47. SHA256 сборки:
+35c04bb8cc79f908091862667a445b86f8631bba4561150421af2449a9aad457.
+
+На роутере атомарно заменён один файл активного controller; перезапущены
+только процессы controller4/6. Datapath остались PID 3859/3871.
+Новые PID 15719/15721; /proc/PID/exe обоих совпал с SHA256 сборки.
+Временного .new после замены нет, резервной копии на роутере нет.
+Панель linked=true, confirms=13 targets=13 сохранились; журнал сообщает
+«каталог обработан: установлено 14, пропущено неподдерживаемых 0».
+
+Три HTTPS-пробы с mark=0 через действующий datapath:
+- updates.discord.com → 162.159.137.232:443, TLS1.2, порт 35482:
+  response_complete=true, level=3, HTTP404, body9/9, 98мс.
+  APPLIED execution=501, plan=c56514d24a2ea2ce39bfcc5dc2c89729,
+  generation=930, temporary=false. Это полный ответ на /, не доказательство
+  исправной загрузки обновления и не подтверждение Discord целиком.
+- example.com: TLS1.3, HTTP200, response_complete=true, 577 байт, 88мс.
+- www.youtube.com → 142.251.150.4:443: TLS1.3 не завершился за 8143мс,
+  level=1, response_complete=false. Дефект подтверждения остаётся открытым.
+
+На 10:29:30 UTC active=8 limit=11 queued=0 CPUfree=96%; оба NFQUEUE
+имеют queue_total=0, dropped=0. Поиск i.ytimg.com дошёл до кандидата,
+прочие YouTube/Discord-цели продолжают диагностику.
+Это проверка запуска, сохранения каталога и обмена по известному плану.
+Граничный volume raw=67 и срок 591001мс доказаны локальными тестами,
+но ещё не воспроизведены отдельным контролируемым опытом на OpenWrt.
+Runtime fallback по-прежнему не подключён; полный паритет НЕ объявлен.
+Пуша и коммита текущих изменений не было.
+
+### Runtime fallback после исполненного измеренного TLS-кандидата (2026-10-25)
+
+На установленном 35c04bb8… роутер подтвердил прежнюю последовательность
+для www.youtube.com и discord.com: raw находил disorder/oob, но после
+неподтверждённой HTTPS-пробы runner заканчивался без запасных кандидатов.
+Это не было исправлено предыдущими изменениями бюджета и срока.
+
+C/Rust доказательства нового переноса:
+- C d2k_sched_tick, блок установки owned_fallback: добавлен режим
+  --fallback-gate в d2o_ack_applied_persist_differential.c. Настоящий tick
+  выполняется до решения, затем say-hook завершает шаг через setjmp/longjmp
+  до следующей установки. 12 случаев: базовый отказ, UDP, чужой владелец,
+  уже открытый fallback, own_first=2, cached-план, отсутствующий/чужой
+  arm_hash, отсутствие APPLIED, local_limit, изменение dropped,
+  отсутствие транспорта. Rust MeasuredArmFailure::fallback_enabled совпал.
+  Начальный Rust-тест падал в режиме 0; после переноса прошёл.
+- C refill_from_fallback и fnv1a: --fallback-queue сравнивает полные тексты,
+  порядок, порции по 8 и low32-хеши tried при смене send_cap
+  1492 → 1200 → 100 во время выдачи, для TLS1.2/1.3. Rust FallbackQueue
+  совпал; отдельный diff всех 49 arm-форм и пяти caps тоже прошёл.
+- C d2k_link_next против decode_stats: нулевое семейство отвергается,
+  семейства 4/6 принимаются (dropped=7,sent=19), короткий legacy STATS
+  даёт нули. Controller обновляет общий dropped-счётчик сразу, в том числе
+  при чтении ACK/APPLIED. Некорректный нулевой sender C не переносился
+  в Rust datapath; периодической передачи STATS в нём по-прежнему нет.
+
+Rust r2o_run_discovery_candidate_trial_with_progress теперь сохраняет
+транспорт, local_limit и dropped до/после последней попытки. В non-ECH
+ветке DiscoveryWorker::new_with_confirmation после отрицательного
+исполненного arm запускается FallbackQueue; уже измеренный план внесён
+в tried. Каждая проба получает новый tuple/trial ID, ждёт APPLIED,
+и до успеха используется прежний r2o_family_recovery_decision.
+У fallback нет двух arm-повторов: они принадлежат измеренному кандидату.
+Однократный bare-повтор (TRANSPORT без APPLIED) выделен отдельно от двух
+arm-повторов; оба счётчика ограничены общим бюджетом кандидатов и сроком.
+Blocked HTTP не прекращает arm-повторы (в C это не CHALLENGE/DENIED);
+новая регрессия сначала упала, затем прошла. Challenge/451 прекращают
+новый перебор с донорской паузой 60 минут; исчерпание — 10 минут.
+
+Локальные итоги перед ARM64-сборкой: lib207 passed/1ignored,
+bin184 passed; ACK/APPLIED/PERSIST, deadline, gate, queue и worker/permit
+C/Rust прошли. Логи: /tmp/r2o-runtime-fallback-final-tests.log,
+/tmp/r2o-runtime-fallback-final-diff.log,
+/tmp/r2o-runtime-fallback-wire-diff.log,
+/tmp/r2o-runtime-fallback-permit-diff.log.
+
+Поправлен только наблюдатель теста d2o_parked_quic_resumes_after_one_tcp_admission:
+между чтением QUIC-канала и чтением TCP-канала мог прийти QUIC-ответ,
+после которого уже освобождался permit. Повторное чтение QUIC после
+уведомления TCP устраняет ложную инверсию; политика gate не менялась.
+
+Ограничения этого этапа: отдельный путь «owns_search, OPAQUE, нет
+выразимого arm» (verdict_to_plans), полный порядок известных коробочных
+планов и остаточная RX-лестница после fallback требуют отдельного переноса
+и проверки. Эта правка пока покрывает переход от уже найденного arm.
+Полевой успех YouTube/Discord и полный паритет не объявлены.
+
+### ClientHello ownership and shape recheck (2026-10-25)
+
+On the live f9 controller the search still has no persisted plan. A source
+comparison found that `core/sched.c::on_shape` leaves an already owned input
+untouched, and only stops a cold-profile `T_ASKING` task when
+`hello_fits_client` accepts the captured shape. Rust's
+`queue_client_snapshot_with_tcp_timestamp` previously canceled any active
+task without an owned buffer, even for a ClientHello shape incompatible with
+the trigger. It also had no completion-time counterpart for the donor's
+`d2k_sched_tick` one-time remeasurement when a compatible cached input differs
+from the owned input's `asked_shape`.
+
+Rust now keeps the current snapshot immutable, rejects immediate cancellation
+for a known incompatible trigger shape, retains the newest per-family,
+per-host snapshot and TCP timestamp, and schedules at most one recheck after
+the current outcome if the donor's `hello_fits_client` and shape-change
+conditions hold. Same-shape observations do not repeat a client-owned run;
+the cold-profile snapshot path retains its existing cancellation/recheck.
+The guard for GREASE's ECH-to-modern regrade remains intact.
+
+Evidence and test scope:
+- `on_shape` in the donor was exercised directly for eight combinations of
+  snapped/reasked state and modern/legacy incoming shape. The paired Rust test
+  compared the cancellation output: both sides cancel only the compatible,
+  unowned cold-profile case. C/Rust ACK/deadline/fallback/ownership differential
+  script passed against d2o 783aa75ce44dd6192cd1f4d1f98e4fe909ef3045.
+- Rust unit tests passed for one post-run recheck of a compatible shape change,
+  no second recheck, and rejection when a known modern trigger sees a legacy
+  snapshot. The donor recheck predicate was checked against `d2k_sched_tick`
+  source; this unit does not drive that donor tick through a completed network
+  worker result.
+- The cache now preserves the TCP timestamp with its ClientHello and transfers
+  both when queueing from an earlier shape event or scheduling the one recheck.
+
+After this entry, the source was built as static AArch64 musl binaries and
+started under system-mode OpenWrt 25.12.6 QEMU. The QEMU run confirmed the
+ClientHello ownership behavior and exercised HTTPS/TLS and QUIC discovery;
+its user-mode NAT returned ordinary successful site responses, so it did not
+reproduce the field block needed to select and persist a bypass. The physical
+router was not touched, and field acceptance remains pending.
+
+### User-provided d2o diagnostic benchmark (2026-10-25)
+
+Diagnostic `d2o-20261025-1240-a093cd6`, 16 one-minute samples, 64-event
+ring, 39 earlier events overwritten:
+
+| Evidence | d2o result | What it establishes |
+|---|---|---|
+| `www.youtube.com` event 87 | TCP `own-plan`, `probe-confirmed`, 23,889 ms elapsed, 0 ms queue, 4 probe units; base trigger failed 0/3 | A known-plan candidate was confirmed after a reproducible whole-ClientHello block. |
+| Catalog sample window | 2 boxes at first and last sample; plans 2→3; bindings 3→18; active peak 3; queue peak 6 | The successful YouTube event did not add a box during this window; catalog activity added one plan and bindings. |
+| Discord records retained in the event ring | `discord.com` QUIC inconclusive (2,244 ms, 6 probe units); `@discord-voice` entries are clear or inconclusive | This retained window does not show a confirmed Discord plan. Since 39 events were overwritten, it cannot establish that no earlier Discord event confirmed. |
+
+This is the selection/latency reference for the Rust own-plan path, not a claim
+that QEMU reproduced the same network. QEMU's NAT path had no reproducible
+whole-ClientHello block; under d2o's rules, that clear route must not create a
+box or plan. The diagnostic does not expose the confirmed plan text or box ID,
+so those cannot be compared from this export alone.
+
+### Newer d2o diagnostic snapshot supplied by the user (2026-10-25)
+
+The newer export is still release `d2o-20261025-1240-a093cd6`. It contains
+55 one-minute samples, the last 64 events, and reports 216 overwritten events.
+Across the samples, the catalog stayed at 2 boxes while plans changed 2→4,
+bindings 3→27, and observations 2→18; active tasks peaked at 7 and queued
+tasks at 6.
+
+| Target | d2o result | Interpretation |
+|---|---|---|
+| `www.youtube.com`, event 223 | TCP `own-plan`, `probe-confirmed`, 21,579 ms elapsed, 0 ms queue, 4 probe units; base trigger failed 0/3 | d2o selected a previously confirmed plan after the whole ClientHello baseline demonstrated blocking. The export does not include plan text or its owning box. |
+| `discord.com`, 3 retained events | QUIC, all `inconclusive`, 3,746–5,982 ms, 7 probe units each | These events do not support installing a bypass. The diagnostic may have lost earlier events. |
+| `updates.discord.com`, event 240 | TCP `inconclusive`, 15,145 ms elapsed, 3 ms queue, 3 probe units; base reproduced 1/3 | The baseline did not reproduce reliably enough to select a plan. |
+| `@discord-voice`, retained window | 30 UDP `probe-clear`, 14 `inconclusive` | No confirmed voice bypass appears in the retained events. |
+
+This newer snapshot replaces the earlier sample's YouTube latency as the
+benchmark for own-plan selection. The C/Rust fixture
+`scripts/r2o-own-first-differential.sh` passes against d2o
+`783aa75ce44dd6192cd1f4f1d98e4fe909ef3045`: candidate eligibility, shape
+tier, success/freshness ordering, text deduplication, and batches of 8 match.
+The local QEMU NAT still returns ordinary successful site responses and does
+not reproduce the field's whole-ClientHello block, so this diagnostic is not
+an end-to-end QEMU reproduction or field acceptance. It also does not justify
+forcing a Discord plan when d2o's retained measurements are inconclusive.
+
+The current source also rebuilt with the OpenWrt 25.12.5 AArch64 musl SDK.
+All six release binaries started under `qemu-aarch64`; controller catalog
+clear/check smoke passed. This is build/runtime evidence only; no live
+YouTube/Discord plan was confirmed in this QEMU run.

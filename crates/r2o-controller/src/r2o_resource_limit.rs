@@ -1528,7 +1528,10 @@ mod tests {
                 break;
             }
             if second_started_rx.try_recv().is_ok() {
-                second_started_first = true;
+                // The QUIC send can occur between the two channel reads above.
+                quic_resumed_first = quic_rx.try_recv().is_ok();
+                second_started_first = !quic_resumed_first;
+                let _ = second_release_tx.send(());
                 break;
             }
             std::thread::sleep(Duration::from_millis(1));

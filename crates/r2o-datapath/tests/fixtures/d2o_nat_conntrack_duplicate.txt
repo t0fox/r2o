@@ -1,0 +1,2 @@
+ipv4     2 tcp      6 11 CLOSE src=192.168.1.117 dst=157.240.205.35 sport=60639 dport=443 packets=4 bytes=872 src=157.240.205.35 dst=88.87.93.11 sport=443 dport=37741 packets=2 bytes=100 [ASSURED] mark=0 use=2
+ipv4     2 tcp      6 1198 ESTABLISHED src=192.168.1.117 dst=157.240.205.35 sport=60639 dport=443 packets=3 bytes=500 src=157.240.205.35 dst=88.87.93.11 sport=443 dport=60639 packets=2 bytes=120 [ASSURED] mark=0 use=2

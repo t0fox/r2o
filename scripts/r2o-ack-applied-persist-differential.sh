@@ -40,3 +40,27 @@ R2O_ACK_APPLIED_PERSIST_DIFF_OUTPUT="$tmp_dir/rust.out" \
     d2o_ack_applied_persist_chain_matches_donor
 diff -u "$tmp_dir/c.out" "$tmp_dir/rust.out"
 printf 'C/Rust ACK → APPLIED → catalog persistence chain matches d2o %s.\n' "$actual_donor_sha"
+"$tmp_dir/d2o-ack-applied-persist" --task-deadline >"$tmp_dir/c-deadline.out"
+R2O_TASK_DEADLINE_DIFF_OUTPUT="$tmp_dir/rust-deadline.out" \
+    cargo +1.98.0 test -p r2o-controller --bin r2o-controller --locked \
+    d2o_candidate_deadline_keeps_the_last_nine_seconds
+diff -u "$tmp_dir/c-deadline.out" "$tmp_dir/rust-deadline.out"
+printf 'C/Rust task deadline matches, including the last nine seconds and exact boundary.\n'
+"$tmp_dir/d2o-ack-applied-persist" --fallback-gate >"$tmp_dir/c-fallback-gate.out"
+R2O_FALLBACK_GATE_DIFF_OUTPUT="$tmp_dir/rust-fallback-gate.out" \
+    cargo +1.98.0 test -p r2o-controller --lib --locked \
+    measured_failure_fallback_gate_matches_donor
+diff -u "$tmp_dir/c-fallback-gate.out" "$tmp_dir/rust-fallback-gate.out"
+printf 'C/Rust measured-failure fallback gate matches on twelve transition cases.\n'
+"$tmp_dir/d2o-ack-applied-persist" --fallback-queue >"$tmp_dir/c-fallback-queue.out"
+R2O_FALLBACK_QUEUE_DIFF_OUTPUT="$tmp_dir/rust-fallback-queue.out" \
+    cargo +1.98.0 test -p r2o-controller --lib --locked \
+    fallback_queue_batches_and_tried_hashes_match_donor
+diff -u "$tmp_dir/c-fallback-queue.out" "$tmp_dir/rust-fallback-queue.out"
+printf 'C/Rust fallback queue order, batches, tried hashes and changing send caps match.\n'
+"$tmp_dir/d2o-ack-applied-persist" --snapshot-owner >"$tmp_dir/c-snapshot-owner.out"
+R2O_SNAPSHOT_OWNER_DIFF_OUTPUT="$tmp_dir/rust-snapshot-owner.out" \
+    cargo +1.98.0 test -p r2o-controller --bin r2o-controller --locked \
+    active_discovery_keeps_its_owned_client_snapshot_like_donor
+diff -u "$tmp_dir/c-snapshot-owner.out" "$tmp_dir/rust-snapshot-owner.out"
+printf 'C/Rust ClientHello ownership matches for compatible and incompatible shapes.\n'

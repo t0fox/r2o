@@ -10,6 +10,7 @@ pub const KEY_LEN: usize = 38;
 pub const MAX_DNS_NAME_LEN: usize = 253;
 pub const TCP_TIMESTAMP_METADATA_MARKER: u8 = 0xa5;
 pub const EVENT_HELLO: u16 = 0x0001;
+pub const EVENT_STATS: u16 = 0x0006;
 pub const EVENT_REFUSED: u16 = 0x0004;
 pub const EVENT_APPLIED: u16 = 0x0009;
 pub const EVENT_ACK: u16 = 0x0008;
@@ -96,6 +97,83 @@ pub fn r2k_snapshot_socket_path(control_path: &Path) -> PathBuf {
 pub struct Frame {
     pub kind: u16,
     pub body: Vec<u8>,
+}
+
+/// Counters accepted by core/link.c::d2k_link_next, including legacy short STATS.
+pub fn decode_stats(frame: &Frame) -> Result<(u32, u32), &'static str> {
+    if frame.kind != EVENT_STATS || frame.body.len() < KEY_LEN {
+        return Err("кадр STATS короче ключа или имеет другой тип");
+    }
+    let key = &frame.body[..KEY_LEN];
+    if !matches!(key[0], 4 | 6)
+        || key[0] == 4
+            && (key[5..17].iter().any(|byte| *byte != 0)
+                || key[21..33].iter().any(|byte| *byte != 0))
+    {
+        return Err("недопустимое семейство или хвост IPv4 ключа STATS");
+    }
+    let rest = &frame.body[KEY_LEN..];
+    if rest.len() < 8 {
+        return Ok((0, 0));
+    }
+    Ok((
+        u32::from_be_bytes(rest[..4].try_into().unwrap()),
+        u32::from_be_bytes(rest[4..8].try_into().unwrap()),
+    ))
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use super::*;
+
+    #[test]
+    fn stats_wire_matches_donor_parser() {
+        let mut output = String::new();
+        for family in [0, 4, 6] {
+            let mut body = vec![0; KEY_LEN + 8];
+            body[0] = family;
+            body[KEY_LEN + 3] = 7;
+            body[KEY_LEN + 7] = 19;
+            let frame = Frame {
+                kind: EVENT_STATS,
+                body,
+            };
+            let decoded = decode_stats(&frame);
+            assert_eq!(decoded.is_ok(), family != 0);
+            let (result, dropped, sent) = match decoded {
+                Ok((dropped, sent)) => (0, dropped, sent),
+                Err(_) => (-1, 0, 0),
+            };
+            output.push_str(&format!(
+                "family={family} result={result} dropped={dropped} sent={sent}\n"
+            ));
+            for length in [KEY_LEN, KEY_LEN + 7] {
+                let mut short = frame.clone();
+                short.body.truncate(length);
+                assert_eq!(decode_stats(&short).ok(), (family != 0).then_some((0, 0)));
+            }
+        }
+        assert!(
+            decode_stats(&Frame {
+                kind: EVENT_STATS,
+                body: vec![4; KEY_LEN - 1]
+            })
+            .is_err()
+        );
+        let mut invalid = vec![0; KEY_LEN];
+        invalid[0] = 4;
+        invalid[5] = 1;
+        assert!(
+            decode_stats(&Frame {
+                kind: EVENT_STATS,
+                body: invalid
+            })
+            .is_err()
+        );
+        if let Ok(path) = std::env::var("R2O_STATS_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

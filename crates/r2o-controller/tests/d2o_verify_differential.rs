@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use std::net::{IpAddr, Ipv4Addr, TcpListener};
+use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
 use std::process::Command;
 use std::sync::Arc;
 use std::thread;
@@ -43,6 +43,120 @@ fn serve(config: Arc<rustls::ServerConfig>, listener: TcpListener, requests: usi
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
             let _ = stream.flush();
         }
+    }
+}
+
+fn serve_with_response(
+    config: Arc<rustls::ServerConfig>,
+    listener: TcpListener,
+    requests: usize,
+    response: Vec<u8>,
+) {
+    for _ in 0..requests {
+        let Ok((mut socket, _)) = listener.accept() else {
+            return;
+        };
+        let _ = socket.set_read_timeout(Some(Duration::from_secs(3)));
+        let _ = socket.set_write_timeout(Some(Duration::from_secs(3)));
+        let Ok(mut connection) = rustls::ServerConnection::new(Arc::clone(&config)) else {
+            continue;
+        };
+        while connection.is_handshaking() {
+            if connection.complete_io(&mut socket).is_err() {
+                break;
+            }
+        }
+        if connection.is_handshaking() {
+            continue;
+        }
+
+        let mut stream = rustls::StreamOwned::new(connection, socket);
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let Ok(length) = stream.read(&mut buffer) else {
+                break;
+            };
+            if length == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..length]);
+        }
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let _ = stream.write_all(&response);
+            let _ = stream.flush();
+            stream.conn.send_close_notify();
+            let _ = stream.conn.complete_io(&mut stream.sock);
+        }
+    }
+}
+
+fn serve_with_hello_lengths(
+    config: Arc<rustls::ServerConfig>,
+    listener: TcpListener,
+    requests: usize,
+    hello_lengths: std::sync::mpsc::Sender<Vec<usize>>,
+) {
+    let mut lengths = Vec::with_capacity(requests);
+    for _ in 0..requests {
+        let Ok((mut socket, _)) = listener.accept() else {
+            return;
+        };
+        let _ = socket.set_read_timeout(Some(Duration::from_secs(3)));
+        let _ = socket.set_write_timeout(Some(Duration::from_secs(3)));
+        lengths.push(capture_client_hello_wire_len(&socket));
+        let Ok(mut connection) = rustls::ServerConnection::new(Arc::clone(&config)) else {
+            continue;
+        };
+        while connection.is_handshaking() {
+            if connection.complete_io(&mut socket).is_err() {
+                break;
+            }
+        }
+        if connection.is_handshaking() {
+            continue;
+        }
+
+        let mut stream = rustls::StreamOwned::new(connection, socket);
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let Ok(length) = stream.read(&mut buffer) else {
+                break;
+            };
+            if length == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..length]);
+        }
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+            let _ = stream.flush();
+        }
+    }
+    let _ = hello_lengths.send(lengths);
+}
+
+fn capture_client_hello_wire_len(socket: &TcpStream) -> usize {
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let mut header = [0_u8; 5];
+        match socket.peek(&mut header) {
+            Ok(0) => panic!("client closed before sending ClientHello"),
+            Ok(length) if length >= header.len() => {
+                assert_eq!(header[0], 0x16, "first TLS record is not handshake data");
+                return 5 + usize::from(u16::from_be_bytes([header[3], header[4]]));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => panic!("peek ClientHello record: {error}"),
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "ClientHello header timed out"
+        );
+        thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -203,6 +317,130 @@ fn assert_short_tls12_finished_is_rejected() {
     assert!(
         rust_result.is_err(),
         "r2o must reject the short Finished just as d2o does"
+    );
+}
+
+#[test]
+#[ignore = "run by scripts/r2o-tls-verify-differential.sh with the donor C verifier"]
+fn donor_and_r2o_accept_youtube_sized_response_headers() {
+    let helper = std::env::var_os("R2O_D2O_VERIFY_HELPER")
+        .expect("differential script must provide the donor C verifier");
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let long_value = "a".repeat(12_000);
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nX-YouTube-Response: {long_value}\r\nConnection: close\r\n\r\nok"
+    )
+    .into_bytes();
+    let server = thread::spawn(move || {
+        serve_with_response(server_config(false, false, false), listener, 2, response)
+    });
+    let port = address.port().to_string();
+
+    let c_result = Command::new(&helper)
+        .args(["127.0.0.1", port.as_str(), "localhost", "tls13"])
+        .output()
+        .expect("run donor C verifier with the large response header");
+    assert!(
+        c_result.status.success(),
+        "donor verifier exited with {}: {}",
+        c_result.status,
+        String::from_utf8_lossy(&c_result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(c_result.stdout).unwrap().trim(),
+        "1\t1\t200\t1",
+        "d2o accepts YouTube's large response header"
+    );
+
+    let options = FetchOptions {
+        name: "localhost".into(),
+        ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        port: address.port(),
+        path: "/".into(),
+        deadline: Duration::from_secs(3),
+        tls12: false,
+        wire_len: None,
+        mark: None,
+    };
+    let rust_result = r2o_fetch_with_phase_timeout(&options, Duration::from_secs(3))
+        .expect("r2o must complete the same HTTPS verification");
+    server.join().unwrap();
+
+    assert_eq!(rust_result.status, 200);
+    assert!(rust_result.complete, "r2o result: {rust_result:?}");
+    assert!(
+        rust_result.application_verified,
+        "r2o result: {rust_result:?}"
+    );
+}
+
+#[test]
+#[ignore = "run by scripts/r2o-tls-verify-differential.sh with the donor C verifier"]
+fn donor_and_r2o_candidate_probes_keep_the_client_hello_wire_length() {
+    let helper = std::env::var_os("R2O_D2O_VERIFY_HELPER")
+        .expect("differential script must provide the donor C verifier");
+    let wire_length = 900_usize;
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (length_sender, length_receiver) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || {
+        serve_with_hello_lengths(
+            server_config(false, false, false),
+            listener,
+            2,
+            length_sender,
+        )
+    });
+
+    let c_result = Command::new(&helper)
+        .args([
+            "127.0.0.1",
+            &address.port().to_string(),
+            "localhost",
+            "tls13-pad",
+            &wire_length.to_string(),
+        ])
+        .output()
+        .expect("run donor C verifier with the captured ClientHello length");
+    assert!(
+        c_result.status.success(),
+        "donor verifier exited with {}: {}",
+        c_result.status,
+        String::from_utf8_lossy(&c_result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(c_result.stdout).unwrap().trim(),
+        "1\t1\t200\t1"
+    );
+
+    let options = FetchOptions {
+        name: "localhost".into(),
+        ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        port: address.port(),
+        path: "/".into(),
+        deadline: Duration::from_secs(3),
+        tls12: false,
+        wire_len: Some(wire_length),
+        mark: None,
+    };
+    let rust_result = r2o_fetch_with_phase_timeout(&options, Duration::from_secs(3))
+        .expect("r2o must finish the same HTTPS verification");
+    assert_eq!(rust_result.status, 200);
+    assert!(rust_result.complete);
+    let lengths = length_receiver
+        .recv()
+        .expect("capture both ClientHello lengths");
+    server.join().unwrap();
+
+    assert_eq!(lengths.len(), 2);
+    assert_eq!(
+        lengths[0], wire_length,
+        "d2o pads to the supplied trigger length"
+    );
+    assert_eq!(
+        lengths[1], wire_length,
+        "r2o candidate TLS probe must match d2o's trigger wire length"
     );
 }
 

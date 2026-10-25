@@ -34,6 +34,147 @@ pub struct DirectClearBindingUpdate {
     pub delete_runtime: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnPlanCandidate {
+    pub box_id: String,
+    pub plan_id: String,
+    pub text: String,
+}
+
+#[derive(Clone)]
+struct RankedOwnPlan {
+    candidate: OwnPlanCandidate,
+    lead: bool,
+    tier: u8,
+    successes: i32,
+    confirmed: i64,
+}
+
+/// Select the next donor-sized batch of already-confirmed plans.
+pub fn own_first_plans(
+    catalog: &Catalog,
+    target: &DiscoveryTarget,
+    ech_replay: bool,
+    bound_plan_id: Option<&str>,
+    tried: &[u32],
+    seen: &[u32],
+) -> Vec<OwnPlanCandidate> {
+    const BATCH: usize = 8;
+    const SEEN_CAP: usize = 256;
+
+    if target.shape == SHAPE_ECH_TCP && !ech_replay
+        || !matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP)
+        || seen.len() >= SEEN_CAP
+    {
+        return Vec::new();
+    }
+    let want = if target.shape == SHAPE_LEGACY {
+        SHAPE_LEGACY
+    } else {
+        SHAPE_MODERN
+    };
+    let cross = if want == SHAPE_LEGACY {
+        Some(SHAPE_MODERN)
+    } else {
+        Some(SHAPE_LEGACY)
+    };
+    let mut ranked = Vec::<RankedOwnPlan>::new();
+    for box_record in &catalog.boxes {
+        for plan in &box_record.plans {
+            if !plan.enabled || plan.proto != "tls" || plan.text.len() >= 4096 {
+                continue;
+            }
+            let mut best_binding: Option<(u8, i64)> = None;
+            for binding in &box_record.bindings {
+                let transport = if binding.transport == 0 {
+                    6
+                } else {
+                    binding.transport
+                };
+                let family = if binding.family == 0 {
+                    4
+                } else {
+                    binding.family
+                };
+                let shape_matches = if ech_replay {
+                    binding.shape == want && binding.ech_origin.is_empty()
+                        || binding.shape == SHAPE_ECH_TCP
+                } else {
+                    (binding.shape == want || Some(binding.shape) == cross)
+                        && binding.ech_origin.is_empty()
+                };
+                if binding.plan_id != plan.id
+                    || !binding.enabled
+                    || binding.level < 3
+                    || binding.recheck_since.is_some()
+                    || binding.kind != "name"
+                    || transport != 6
+                    || family != target.family
+                    || !shape_matches
+                {
+                    continue;
+                }
+                let tier = u8::from(binding.shape != want);
+                if best_binding.is_none_or(|(best_tier, newest)| {
+                    tier < best_tier || tier == best_tier && binding.confirmed > newest
+                }) {
+                    best_binding = Some((tier, binding.confirmed));
+                }
+            }
+            let Some((tier, confirmed)) = best_binding else {
+                continue;
+            };
+            let hash = crate::r2o_fallback::tried_key(&plan.text);
+            if tried.contains(&hash) || seen.contains(&hash) {
+                continue;
+            }
+            let candidate = RankedOwnPlan {
+                candidate: OwnPlanCandidate {
+                    box_id: box_record.id.clone(),
+                    plan_id: plan.id.clone(),
+                    text: plan.text.clone(),
+                },
+                lead: bound_plan_id == Some(plan.id.as_str()),
+                tier,
+                successes: plan.successes,
+                confirmed,
+            };
+            if let Some(duplicate) = ranked
+                .iter_mut()
+                .find(|saved| saved.candidate.text == plan.text)
+            {
+                if own_rank_before(&candidate, duplicate) {
+                    *duplicate = candidate;
+                }
+            } else {
+                ranked.push(candidate);
+            }
+        }
+    }
+    ranked.sort_by(|left, right| {
+        right
+            .lead
+            .cmp(&left.lead)
+            .then_with(|| left.tier.cmp(&right.tier))
+            .then_with(|| right.successes.cmp(&left.successes))
+            .then_with(|| right.confirmed.cmp(&left.confirmed))
+    });
+    ranked
+        .into_iter()
+        .take(BATCH.min(SEEN_CAP - seen.len()))
+        .map(|ranked| ranked.candidate)
+        .collect()
+}
+
+fn own_rank_before(left: &RankedOwnPlan, right: &RankedOwnPlan) -> bool {
+    left.lead > right.lead
+        || left.lead == right.lead
+            && (left.tier < right.tier
+                || left.tier == right.tier
+                    && (left.successes > right.successes
+                        || left.successes == right.successes && left.confirmed > right.confirmed))
+}
+
 impl DiscoveryTarget {
     /// Выбирать только именованные потоки TLS на стандартном порту HTTPS.
     pub fn from_event(event: &HelloEvent) -> Option<Self> {
@@ -1066,11 +1207,91 @@ fn stable_plan_id(family: u8, shape: u8, text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{DiscoveryTarget, r2o_ech_witness_candidates};
+    use super::{DiscoveryTarget, own_first_plans, r2o_ech_witness_candidates};
     use r2k_core::control::{
         BindingContext, HttpResponseEvent, KEY_LEN, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_MODERN,
     };
     use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn own_first_plan_batches_match_donor_scheduler() {
+        use crate::catalog::{Binding, BoxRecord, Catalog, Plan};
+        use crate::r2o_fallback::tried_key;
+
+        let mut catalog = Catalog::default();
+        let mut tried = Vec::new();
+        for row in include_str!("../tests/fixtures/d2o_own_first.tsv").lines() {
+            if row.starts_with('#') || row.is_empty() {
+                continue;
+            }
+            let columns: Vec<_> = row.split('\t').collect();
+            assert_eq!(columns.len(), 14, "fixture row: {row}");
+            let box_index = catalog
+                .boxes
+                .iter()
+                .position(|box_record| box_record.id == columns[0])
+                .unwrap_or_else(|| {
+                    catalog.boxes.push(BoxRecord {
+                        id: columns[0].into(),
+                        ..BoxRecord::default()
+                    });
+                    catalog.boxes.len() - 1
+                });
+            let number = |index: usize| columns[index].parse::<i64>().unwrap();
+            let plan_id = columns[1].to_owned();
+            let text = columns[2].to_owned();
+            catalog.boxes[box_index].plans.push(Plan {
+                id: plan_id.clone(),
+                proto: "tls".into(),
+                text: text.clone(),
+                successes: number(3) as i32,
+                enabled: number(4) != 0,
+                ..Plan::default()
+            });
+            catalog.boxes[box_index].bindings.push(Binding {
+                kind: "name".into(),
+                target: "other.example".into(),
+                plan_id,
+                level: number(6) as i32,
+                confirmed: number(12),
+                enabled: number(5) != 0,
+                transport: number(7) as u8,
+                family: number(8) as u8,
+                shape: number(9) as u8,
+                recheck_since: (number(10) != 0).then_some(100),
+                ech_origin: columns[11].into(),
+                ..Binding::default()
+            });
+            if number(13) != 0 {
+                tried.push(tried_key(&text));
+            }
+        }
+        let target = DiscoveryTarget {
+            host: "target.example".into(),
+            endpoint: "192.0.2.1:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let mut seen = Vec::new();
+        let mut output = String::new();
+        loop {
+            let batch = own_first_plans(&catalog, &target, false, None, &tried, &seen);
+            if batch.is_empty() {
+                break;
+            }
+            for candidate in batch {
+                output.push_str(&format!("{}\t{}\n", candidate.box_id, candidate.text));
+                seen.push(tried_key(&candidate.text));
+            }
+        }
+        if let Ok(path) = std::env::var("R2O_OWN_FIRST_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+        assert!(
+            seen.len() >= 8,
+            "the fixture exercises multiple donor batches"
+        );
+    }
 
     #[test]
     fn r2o_ech_свидетели_сохраняют_приоритет_каталога_и_семейства() {

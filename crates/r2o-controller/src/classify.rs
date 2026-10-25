@@ -761,6 +761,14 @@ pub struct SeedWhole {
     pub error: Option<String>,
 }
 
+/// Result of the donor's standalone whole-ClientHello question.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BaseProbe {
+    pub seed_whole: Option<SeedWhole>,
+    pub blocked: bool,
+    pub probes: usize,
+}
+
 impl Default for ClassifyOptions {
     fn default() -> Self {
         Self {
@@ -1045,18 +1053,7 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
     progress: &mut dyn FnMut(&str, usize, usize, usize),
 ) -> ClassifyResult {
     crate::raw_probe::flush_pending_rst_releases();
-    if options.repeats == 0 {
-        options.repeats = 3;
-    }
-    if options.timeout.is_zero() {
-        options.timeout = Duration::from_secs(6);
-    }
-    if options.write_gap.is_zero() {
-        options.write_gap = Duration::from_millis(60);
-    }
-    if options.long_gap.is_zero() {
-        options.long_gap = Duration::from_millis(700);
-    }
+    options = configured_options(options);
     let start = Instant::now();
     let mut result = ClassifyResult::new(address, options.repeats);
 
@@ -1085,43 +1082,7 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
         return result;
     }
 
-    let whole = measure(
-        backend,
-        &target,
-        trigger,
-        &options,
-        &mut result,
-        MeasureSpec {
-            name: "whole",
-            cuts: &[],
-            gap: options.write_gap,
-            until_pass: false,
-        },
-        progress,
-    );
-    let mut base = whole;
-    if base.pass == 0
-        && base.errors > 0
-        && base.error.as_ref().is_some_and(ProbeError::is_dial_timeout)
-    {
-        let mut slower = options.clone();
-        slower.timeout = options.timeout.saturating_mul(2);
-        slower.seed_whole = None;
-        base = measure(
-            backend,
-            &target,
-            trigger,
-            &slower,
-            &mut result,
-            MeasureSpec {
-                name: "whole",
-                cuts: &[],
-                gap: slower.write_gap,
-                until_pass: false,
-            },
-            progress,
-        );
-    }
+    let base = measure_baseline(backend, &target, trigger, &options, &mut result, progress);
     if base.pass == 0
         && base.errors > 0
         && let Some(error) = &base.error
@@ -1479,6 +1440,115 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
     }
     finish(&mut result, &options, start);
     result
+}
+
+/// Run only the donor's whole-trigger question so confirmed catalog plans can
+/// be tried before the full classifier. A complete result can seed that later
+/// classifier without repeating these same probes.
+pub fn run_base_with_backend_progress<B: ProbeBackend>(
+    address: &str,
+    trigger: &Trigger,
+    mut options: ClassifyOptions,
+    backend: &mut B,
+    progress: &mut dyn FnMut(&str, usize, usize, usize),
+) -> BaseProbe {
+    crate::raw_probe::flush_pending_rst_releases();
+    options = configured_options(options);
+    options.seed_whole = None;
+    let target = match parse_target(address) {
+        Ok(target) => target,
+        Err(_) => return BaseProbe::default(),
+    };
+    if !options.allow_loopback
+        && target
+            .host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback() || address.is_unspecified())
+        || trigger.payload.len() < 2
+    {
+        return BaseProbe::default();
+    }
+    let mut result = ClassifyResult::new(address, options.repeats);
+    let base = measure_baseline(backend, &target, trigger, &options, &mut result, progress);
+    let complete = base.pass.saturating_add(base.fail) >= options.repeats
+        && !base.error.as_ref().is_some_and(ProbeError::is_dial_timeout);
+    let seed_whole = complete.then(|| SeedWhole {
+        repeats: options.repeats,
+        pass: base.pass,
+        fail: base.fail,
+        errors: base.errors,
+        error: base.error.as_ref().map(|error| error.message().to_owned()),
+    });
+    BaseProbe {
+        blocked: seed_whole
+            .as_ref()
+            .is_some_and(|seed| seed.pass == 0 && seed.fail == seed.repeats && seed.errors == 0),
+        seed_whole,
+        probes: result.probes,
+    }
+}
+
+fn configured_options(mut options: ClassifyOptions) -> ClassifyOptions {
+    if options.repeats == 0 {
+        options.repeats = 3;
+    }
+    if options.timeout.is_zero() {
+        options.timeout = Duration::from_secs(6);
+    }
+    if options.write_gap.is_zero() {
+        options.write_gap = Duration::from_millis(60);
+    }
+    if options.long_gap.is_zero() {
+        options.long_gap = Duration::from_millis(700);
+    }
+    options
+}
+
+fn measure_baseline<B: ProbeBackend>(
+    backend: &mut B,
+    target: &ProbeTarget,
+    trigger: &Trigger,
+    options: &ClassifyOptions,
+    result: &mut ClassifyResult,
+    progress: &mut dyn FnMut(&str, usize, usize, usize),
+) -> Tally {
+    let mut base = measure(
+        backend,
+        target,
+        trigger,
+        options,
+        result,
+        MeasureSpec {
+            name: "whole",
+            cuts: &[],
+            gap: options.write_gap,
+            until_pass: false,
+        },
+        progress,
+    );
+    if base.pass == 0
+        && base.errors > 0
+        && base.error.as_ref().is_some_and(ProbeError::is_dial_timeout)
+    {
+        let mut slower = options.clone();
+        slower.timeout = options.timeout.saturating_mul(2);
+        slower.seed_whole = None;
+        base = measure(
+            backend,
+            target,
+            trigger,
+            &slower,
+            result,
+            MeasureSpec {
+                name: "whole",
+                cuts: &[],
+                gap: slower.write_gap,
+                until_pass: false,
+            },
+            progress,
+        );
+    }
+    base
 }
 
 /// Запустить классификатор через помеченные TCP-сокеты узла.

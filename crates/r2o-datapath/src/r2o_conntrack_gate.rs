@@ -1,27 +1,33 @@
 //! Подтверждение conntrack перед исполнением сетевого плана.
 
-use crate::conntrack::{
-    R2oConntrackClient, R2oConntrackEntry, R2oConntrackNatSource, R2oConntrackTuple,
-    tuple_from_packet,
-};
+use crate::conntrack::{R2oConntrackNatSource, R2oConntrackTuple, tuple_from_packet};
 use crate::engine::{PacketDecision, WirePacket};
+use crate::proc_nat::R2oProcNatLookup;
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 const R2O_CONNTRACK_CACHE_IDLE: Duration = Duration::from_secs(120);
 const R2O_CONNTRACK_LOOKUP_ATTEMPTS: usize = 3;
+const D2O_CONNTRACK_PATH: &str = "/proc/net/nf_conntrack";
 
 #[derive(Clone, Copy)]
 struct CachedEntry {
-    entry: R2oConntrackEntry,
+    status: CachedStatus,
     seen: Instant,
+}
+
+#[derive(Clone, Copy)]
+enum CachedStatus {
+    Tracked,
+    NoConntrackTable,
 }
 
 /// Ограниченный кеш только подтверждённых записей conntrack.
 pub struct R2oConntrackGate {
     entries: HashMap<R2oConntrackTuple, CachedEntry>,
     capacity: usize,
-    no_conntrack_table: bool,
+    idle_timeout: Duration,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -29,20 +35,20 @@ enum Confirmation {
     FirstPacket,
     TcpSynAck,
     NoConntrackTable,
-    Entry(Option<R2oConntrackNatSource>),
+    Tracked,
     Missing,
 }
 
 impl R2oConntrackGate {
     pub fn with_capacity(capacity: usize) -> Self {
-        Self::with_table_state(capacity, false)
+        Self::with_idle_timeout(capacity, R2O_CONNTRACK_CACHE_IDLE)
     }
 
-    pub fn with_table_state(capacity: usize, no_conntrack_table: bool) -> Self {
+    pub fn with_idle_timeout(capacity: usize, idle_timeout: Duration) -> Self {
         Self {
             entries: HashMap::with_capacity(capacity),
             capacity,
-            no_conntrack_table,
+            idle_timeout,
         }
     }
 
@@ -51,71 +57,88 @@ impl R2oConntrackGate {
         tuple: R2oConntrackTuple,
         first_packet: bool,
         tcp_syn_ack_seen: bool,
-        mapping_required: bool,
         now: Instant,
-        mut query: impl FnMut(&R2oConntrackTuple) -> Option<R2oConntrackEntry>,
+        query: &mut impl FnMut(&R2oConntrackTuple) -> R2oProcNatLookup,
     ) -> Confirmation {
-        self.entries.retain(|_, cached| {
-            now.saturating_duration_since(cached.seen) < R2O_CONNTRACK_CACHE_IDLE
-        });
+        self.entries
+            .retain(|_, cached| now.saturating_duration_since(cached.seen) < self.idle_timeout);
         if let Some(cached) = self.entries.get_mut(&tuple) {
-            let mapped = cached
-                .entry
-                .nat_source
-                .is_some_and(|source| source.family == tuple.family && source.port != 0);
-            if !mapping_required || mapped {
-                cached.seen = now;
-                return Confirmation::Entry(cached.entry.nat_source);
-            }
+            cached.seen = now;
+            return match cached.status {
+                CachedStatus::Tracked => Confirmation::Tracked,
+                CachedStatus::NoConntrackTable => Confirmation::NoConntrackTable,
+            };
         }
-        if first_packet && !mapping_required {
+        if first_packet {
             return Confirmation::FirstPacket;
         }
-        if tuple.protocol == 6 && tcp_syn_ack_seen && !mapping_required {
+        if tuple.protocol == 6 && tcp_syn_ack_seen {
+            self.insert(tuple, CachedStatus::Tracked, now);
             return Confirmation::TcpSynAck;
-        }
-        if self.no_conntrack_table {
-            return Confirmation::NoConntrackTable;
         }
 
         for _ in 0..R2O_CONNTRACK_LOOKUP_ATTEMPTS {
-            let Some(entry) = query(&tuple) else {
-                continue;
-            };
-            let has_mapping = entry
-                .nat_source
-                .is_some_and(|source| source.family == tuple.family && source.port != 0);
-            if mapping_required && !has_mapping {
-                continue;
-            }
-            if self.capacity != 0 {
-                if self.entries.len() >= self.capacity && !self.entries.contains_key(&tuple) {
-                    if let Some(oldest) = self
-                        .entries
-                        .iter()
-                        .min_by_key(|(_, cached)| cached.seen)
-                        .map(|(key, _)| *key)
-                    {
-                        self.entries.remove(&oldest);
-                    }
+            match query(&tuple) {
+                R2oProcNatLookup::TableMissing => {
+                    self.insert(tuple, CachedStatus::NoConntrackTable, now);
+                    return Confirmation::NoConntrackTable;
                 }
-                self.entries.insert(tuple, CachedEntry { entry, seen: now });
+                R2oProcNatLookup::Missing => continue,
+                R2oProcNatLookup::Found(_) => {}
             }
-            return Confirmation::Entry(entry.nat_source);
+            self.insert(tuple, CachedStatus::Tracked, now);
+            return Confirmation::Tracked;
         }
         Confirmation::Missing
+    }
+
+    fn insert(&mut self, tuple: R2oConntrackTuple, status: CachedStatus, now: Instant) {
+        if self.capacity == 0 {
+            return;
+        }
+        if self.entries.len() >= self.capacity && !self.entries.contains_key(&tuple) {
+            if let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, cached)| cached.seen)
+                .map(|(key, _)| *key)
+            {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.entries
+            .insert(tuple, CachedEntry { status, seen: now });
     }
 }
 
 /// Не допускать применение плана к неподтверждённому потоку.
 pub fn guard_decision(
     gate: &mut R2oConntrackGate,
-    conntrack: &mut Option<R2oConntrackClient>,
     packet: &[u8],
     decision: PacketDecision,
     plan_id: [u8; 16],
     first_packet: bool,
     tcp_syn_ack_seen: bool,
+) -> PacketDecision {
+    guard_decision_with_lookup(
+        gate,
+        packet,
+        decision,
+        plan_id,
+        first_packet,
+        tcp_syn_ack_seen,
+        |tuple| crate::proc_nat::lookup(Path::new(D2O_CONNTRACK_PATH), tuple),
+    )
+}
+
+pub fn guard_decision_with_lookup(
+    gate: &mut R2oConntrackGate,
+    packet: &[u8],
+    decision: PacketDecision,
+    plan_id: [u8; 16],
+    first_packet: bool,
+    tcp_syn_ack_seen: bool,
+    lookup: impl FnMut(&R2oConntrackTuple) -> R2oProcNatLookup,
 ) -> PacketDecision {
     if !matches!(
         &decision,
@@ -127,42 +150,60 @@ pub fn guard_decision(
         return decision;
     };
     let mapping_required = tuple.protocol == 17 && decision_has_udp_fragments(&decision);
+    let mut lookup = lookup;
     let confirmation = gate.confirm(
         tuple,
         first_packet,
         tcp_syn_ack_seen,
-        mapping_required,
         Instant::now(),
-        |tuple| {
-            conntrack
-                .as_mut()
-                .and_then(|client| client.query_entry(tuple))
-        },
+        &mut lookup,
     );
     match confirmation {
-        Confirmation::FirstPacket | Confirmation::TcpSynAck => decision,
-        Confirmation::NoConntrackTable if !mapping_required => decision,
-        Confirmation::NoConntrackTable => PacketDecision::Refused { plan_id },
-        Confirmation::Entry(mapping) => {
-            if !mapping_required {
-                return decision;
-            }
-            let Some(mapping) = mapping else {
-                return PacketDecision::Refused { plan_id };
-            };
-            match decision {
-                PacketDecision::Transmit { mut packets, fate } => {
-                    if rewrite_fragment_group(&mut packets, mapping) {
-                        PacketDecision::Transmit { packets, fate }
-                    } else {
-                        PacketDecision::Refused { plan_id }
-                    }
-                }
-                _ => PacketDecision::Refused { plan_id },
-            }
+        Confirmation::FirstPacket if mapping_required => {
+            fragment_decision(decision, plan_id, true, first_packet, lookup(&tuple))
         }
+        Confirmation::FirstPacket => decision,
+        Confirmation::TcpSynAck => decision,
+        Confirmation::NoConntrackTable if mapping_required => PacketDecision::Refused { plan_id },
+        Confirmation::NoConntrackTable => decision,
+        Confirmation::Tracked if mapping_required => {
+            fragment_decision(decision, plan_id, true, first_packet, lookup(&tuple))
+        }
+        Confirmation::Tracked => decision,
         Confirmation::Missing if first_packet && mapping_required => PacketDecision::Accept,
         Confirmation::Missing => PacketDecision::Refused { plan_id },
+    }
+}
+
+fn fragment_decision(
+    decision: PacketDecision,
+    plan_id: [u8; 16],
+    mapping_required: bool,
+    first_packet: bool,
+    lookup: R2oProcNatLookup,
+) -> PacketDecision {
+    if !mapping_required {
+        return decision;
+    }
+    let mapping = match lookup {
+        R2oProcNatLookup::Found(mapping)
+            if mapping.port != 0
+                && (mapping.family == 6 || mapping.address[..4] != [0, 0, 0, 0]) =>
+        {
+            mapping
+        }
+        R2oProcNatLookup::Missing if first_packet => return PacketDecision::Accept,
+        _ => return PacketDecision::Refused { plan_id },
+    };
+    match decision {
+        PacketDecision::Transmit { mut packets, fate } => {
+            if rewrite_fragment_group(&mut packets, mapping) {
+                PacketDecision::Transmit { packets, fate }
+            } else {
+                PacketDecision::Refused { plan_id }
+            }
+        }
+        _ => PacketDecision::Refused { plan_id },
     }
 }
 
@@ -315,13 +356,12 @@ fn update_checksum(checksum: u16, old_words: &[u16], new_words: &[u16]) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Confirmation, R2oConntrackGate, guard_decision, internet_checksum, rewrite_fragment_group,
-        update_checksum,
+        Confirmation, R2oConntrackGate, guard_decision_with_lookup, internet_checksum,
+        rewrite_fragment_group, update_checksum,
     };
-    use crate::conntrack::{
-        R2oConntrackEntry, R2oConntrackInfo, R2oConntrackNatSource, R2oConntrackTuple,
-    };
+    use crate::conntrack::{R2oConntrackNatSource, R2oConntrackTuple};
     use crate::engine::{PacketDecision, WirePacket};
+    use crate::proc_nat::R2oProcNatLookup;
     use r2k_core::plan::EmitKind;
     use std::time::Instant;
 
@@ -336,36 +376,22 @@ mod tests {
         }
     }
 
-    fn entry() -> R2oConntrackEntry {
-        R2oConntrackEntry {
-            info: Some(R2oConntrackInfo {
-                original_packets: 1,
-                reply_packets: 0,
-                tcp_state: None,
-            }),
-            nat_source: None,
-        }
-    }
-
-    fn mapped_entry() -> R2oConntrackEntry {
-        R2oConntrackEntry {
-            nat_source: Some(R2oConntrackNatSource {
-                family: 4,
-                address: [203, 0, 113, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                port: 62000,
-            }),
-            ..entry()
+    fn mapped_source() -> R2oConntrackNatSource {
+        R2oConntrackNatSource {
+            family: 4,
+            address: [203, 0, 113, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            port: 62000,
         }
     }
 
     #[test]
-    fn пропускает_первый_пакет_без_чтения_таблицы() {
+    fn первый_пакет_потока_не_читает_таблицу() {
         let mut gate = R2oConntrackGate::with_capacity(4);
         let mut calls = 0;
         assert_eq!(
-            gate.confirm(tuple(17), true, false, false, Instant::now(), |_| {
+            gate.confirm(tuple(17), true, false, Instant::now(), &mut |_| {
                 calls += 1;
-                None
+                R2oProcNatLookup::Missing
             }),
             Confirmation::FirstPacket
         );
@@ -373,31 +399,64 @@ mod tests {
     }
 
     #[test]
-    fn пропускает_tcp_после_syn_ack_без_повторного_чтения() {
+    fn первый_обычный_пакет_проходит_без_nat_lookup() {
+        let mut gate = R2oConntrackGate::with_capacity(4);
+        let source = ipv4_udp_packet();
+        let decision = PacketDecision::Transmit {
+            packets: vec![WirePacket {
+                packet: source.clone(),
+                kind: EmitKind::Payload,
+                delay_us: 0,
+            }],
+            fate: r2k_core::plan::OriginalFate::Drop,
+        };
+        assert_eq!(
+            guard_decision_with_lookup(
+                &mut gate,
+                &source,
+                decision.clone(),
+                [5; 16],
+                true,
+                false,
+                |_| panic!("C flow_tracked пропускает первый обычный пакет без чтения таблицы"),
+            ),
+            decision
+        );
+    }
+
+    #[test]
+    fn tcp_syn_ack_кэширует_доказанную_запись_потока() {
         let mut gate = R2oConntrackGate::with_capacity(4);
         let mut calls = 0;
         assert_eq!(
-            gate.confirm(tuple(6), false, true, false, Instant::now(), |_| {
+            gate.confirm(tuple(6), false, true, Instant::now(), &mut |_| {
                 calls += 1;
-                None
+                R2oProcNatLookup::Missing
             }),
             Confirmation::TcpSynAck
+        );
+        assert_eq!(
+            gate.confirm(tuple(6), false, false, Instant::now(), &mut |_| {
+                calls += 1;
+                R2oProcNatLookup::Missing
+            }),
+            Confirmation::Tracked
         );
         assert_eq!(calls, 0);
     }
 
     #[test]
-    fn различает_отсутствие_таблицы_и_промах_потока() {
-        let mut gate = R2oConntrackGate::with_table_state(4, true);
+    fn отсутствие_таблицы_conntrack_кэшируется_как_в_d2o() {
+        let mut gate = R2oConntrackGate::with_capacity(4);
         assert_eq!(
-            gate.confirm(tuple(17), false, false, false, Instant::now(), |_| {
-                panic!("ctnetlink не должен опрашиваться без conntrack-таблицы")
+            gate.confirm(tuple(17), false, false, Instant::now(), &mut |_| {
+                R2oProcNatLookup::TableMissing
             }),
             Confirmation::NoConntrackTable
         );
         assert_eq!(
-            gate.confirm(tuple(17), true, false, true, Instant::now(), |_| {
-                panic!("фрагментация не должна запрашивать отсутствующую таблицу")
+            gate.confirm(tuple(17), false, false, Instant::now(), &mut |_| {
+                panic!("кэшированное состояние d2o не перечитывается")
             }),
             Confirmation::NoConntrackTable
         );
@@ -407,20 +466,23 @@ mod tests {
     fn не_кэширует_промахи_и_повторяет_поиск_до_трёх_раз() {
         let mut gate = R2oConntrackGate::with_capacity(4);
         let mut calls = 0;
-        let query = |_: &R2oConntrackTuple| {
-            calls += 1;
-            if calls == 2 { Some(entry()) } else { None }
-        };
         assert_eq!(
-            gate.confirm(tuple(17), false, false, false, Instant::now(), query),
-            Confirmation::Entry(None)
+            gate.confirm(tuple(17), false, false, Instant::now(), &mut |_| {
+                calls += 1;
+                if calls == 1 {
+                    R2oProcNatLookup::Missing
+                } else {
+                    R2oProcNatLookup::Found(mapped_source())
+                }
+            }),
+            Confirmation::Tracked
         );
         assert_eq!(calls, 2);
         let mut next_calls = 0;
         assert_eq!(
-            gate.confirm(tuple(17), false, false, true, Instant::now(), |_| {
+            gate.confirm(tuple(6), false, false, Instant::now(), &mut |_| {
                 next_calls += 1;
-                None
+                R2oProcNatLookup::Missing
             }),
             Confirmation::Missing
         );
@@ -428,31 +490,9 @@ mod tests {
     }
 
     #[test]
-    fn промах_первой_фрагментированной_датаграммы_не_мешает_повтору() {
+    fn первый_фрагментированный_initial_повторяется_после_подтверждения_conntrack() {
         let mut gate = R2oConntrackGate::with_capacity(4);
         let mut calls = 0;
-        assert_eq!(
-            gate.confirm(tuple(17), true, false, true, Instant::now(), |_| {
-                calls += 1;
-                None
-            }),
-            Confirmation::Missing
-        );
-        assert_eq!(calls, 3);
-        assert_eq!(
-            gate.confirm(tuple(17), false, false, true, Instant::now(), |_| {
-                calls += 1;
-                Some(mapped_entry())
-            }),
-            Confirmation::Entry(mapped_entry().nat_source)
-        );
-        assert_eq!(calls, 4);
-    }
-
-    #[test]
-    fn первый_udp_initial_откладывается_если_nat_mapping_ещё_нет() {
-        let mut gate = R2oConntrackGate::with_capacity(4);
-        let mut conntrack = None;
         let source = ipv4_udp_packet();
         let wires = fragment_fixture(4, 1);
         let decision = PacketDecision::Transmit {
@@ -460,27 +500,52 @@ mod tests {
             fate: r2k_core::plan::OriginalFate::Drop,
         };
         assert_eq!(
-            guard_decision(
+            guard_decision_with_lookup(
                 &mut gate,
-                &mut conntrack,
                 &source,
                 decision.clone(),
                 [4; 16],
                 true,
                 false,
+                |_| {
+                    calls += 1;
+                    R2oProcNatLookup::Missing
+                },
             ),
             PacketDecision::Accept
         );
+        assert_eq!(calls, 1);
+        calls = 0;
+        let result =
+            guard_decision_with_lookup(&mut gate, &source, decision, [4; 16], false, false, |_| {
+                calls += 1;
+                R2oProcNatLookup::Found(mapped_source())
+            });
+        let PacketDecision::Transmit { packets, .. } = result else {
+            panic!("подтверждённая IP-fragment проба должна быть передана")
+        };
+        assert_eq!(packets.len(), 2);
+        assert!(
+            packets
+                .iter()
+                .all(|packet| packet.packet[12..16] == [203, 0, 113, 9])
+        );
+        assert_eq!(calls, 2); // одна запись подтверждает поток, одна даёт IP-fragment NAT.
+    }
+
+    #[test]
+    fn отсутствие_таблицы_не_разрешает_ip_fragment_без_nat_mapping() {
+        let mut gate = R2oConntrackGate::with_capacity(4);
+        let source = ipv4_udp_packet();
+        let wires = fragment_fixture(4, 1);
+        let decision = PacketDecision::Transmit {
+            packets: wires.into_iter().skip(1).collect(),
+            fate: r2k_core::plan::OriginalFate::Drop,
+        };
         assert_eq!(
-            guard_decision(
-                &mut gate,
-                &mut conntrack,
-                &source,
-                decision,
-                [4; 16],
-                false,
-                false,
-            ),
+            guard_decision_with_lookup(&mut gate, &source, decision, [4; 16], false, false, |_| {
+                R2oProcNatLookup::TableMissing
+            },),
             PacketDecision::Refused { plan_id: [4; 16] }
         );
     }

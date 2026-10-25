@@ -109,6 +109,7 @@ pub fn r2o_tls_ech_client_connection(
     name: &str,
     _roots: rustls::RootCertStore,
     ech: rustls::client::EchConfig,
+    wire_len: Option<usize>,
 ) -> Result<rustls::ClientConnection, String> {
     let mut provider = rustls::crypto::ring::default_provider();
     let verifier = R2oD2oServerCertVerifier {
@@ -127,6 +128,7 @@ pub fn r2o_tls_ech_client_connection(
         .with_custom_certificate_verifier(std::sync::Arc::new(verifier))
         .with_no_client_auth();
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    config.r2o_client_hello_wire_len = wire_len;
     let server_name = rustls::pki_types::ServerName::try_from(name.to_owned())
         .map_err(|_| "имя цели недопустимо для внутреннего TLS SNI".to_owned())?;
     rustls::ClientConnection::new(std::sync::Arc::new(config), server_name)
@@ -140,7 +142,7 @@ pub fn r2o_tls_ech_client_hello(
 ) -> Result<Vec<u8>, String> {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let mut connection = r2o_tls_ech_client_connection(name, roots, ech)?;
+    let mut connection = r2o_tls_ech_client_connection(name, roots, ech, None)?;
     let mut hello = Vec::with_capacity(2048);
     connection
         .write_tls(&mut hello)

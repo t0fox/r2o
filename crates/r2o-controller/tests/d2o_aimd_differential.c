@@ -71,5 +71,5 @@ int main(int argc, char **argv) {
         rows++;
     }
     fclose(fixture);
-    return rows == 11 ? 0 : 5;
+    return rows == 13 ? 0 : 5;
 }

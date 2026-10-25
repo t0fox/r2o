@@ -12,6 +12,8 @@ pub mod netlink;
 #[cfg(target_os = "linux")]
 pub mod nfqueue;
 #[cfg(target_os = "linux")]
+pub mod proc_nat;
+#[cfg(target_os = "linux")]
 pub mod r2o_conntrack_gate;
 pub mod r2o_icmp_guard;
 pub mod r2o_quic;

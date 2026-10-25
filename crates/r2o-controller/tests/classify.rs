@@ -1,8 +1,9 @@
 use r2o_controller::classify::{
     Accept, ClassifyOptions, DpiProps, Poison, ProbeBackend, ProbeError, ProbeOutcome,
     ProbeRequest, ProbeTarget, Span, TriState, Trigger, Verdict, note_props_hit, note_props_miss,
-    plan_bytes_for_poison, poison_has_fake, poison_supports_family, poisons, run, run_with_backend,
-    run_with_backend_progress, split_offsets, strategy_for_poison, trigger_accepts,
+    plan_bytes_for_poison, poison_has_fake, poison_supports_family, poisons, run,
+    run_base_with_backend_progress, run_with_backend, run_with_backend_progress, split_offsets,
+    strategy_for_poison, trigger_accepts,
 };
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -30,6 +31,45 @@ impl ProbeBackend for WholePacketMatcher {
     fn probe(&mut self, request: ProbeRequest<'_>) -> Result<bool, ProbeError> {
         Ok(!request.cuts.is_empty())
     }
+}
+
+#[derive(Default)]
+struct CountBaseline {
+    probes: usize,
+}
+
+impl ProbeBackend for CountBaseline {
+    fn probe(&mut self, _request: ProbeRequest<'_>) -> Result<bool, ProbeError> {
+        self.probes += 1;
+        Ok(false)
+    }
+}
+
+#[test]
+fn standalone_base_probe_matches_the_classifier_whole_question() {
+    let trigger = Trigger::tls13("example.com").unwrap();
+    let mut backend = CountBaseline::default();
+    let base = run_base_with_backend_progress(
+        "example.com:443",
+        &trigger,
+        ClassifyOptions::default(),
+        &mut backend,
+        &mut |_, _, _, _| {},
+    );
+
+    assert_eq!(backend.probes, 3);
+    assert_eq!(base.probes, 3);
+    assert!(base.blocked);
+    assert_eq!(
+        base.seed_whole,
+        Some(r2o_controller::classify::SeedWhole {
+            repeats: 3,
+            pass: 0,
+            fail: 3,
+            errors: 0,
+            error: None,
+        })
+    );
 }
 
 struct OpaqueMatcher;

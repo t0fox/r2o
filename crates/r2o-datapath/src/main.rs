@@ -599,16 +599,18 @@ mod app {
         if conntrack.is_none() {
             if no_conntrack_table {
                 eprintln!(
-                    "r2o-datapath: таблица conntrack отсутствует; планы обычных пакетов используют исходный кортеж, UDP-фрагментация без NAT-контекста отклоняется"
+                    "r2o-datapath: таблица conntrack отсутствует; NAT-проверка планов использует исходный кортеж без трансляции"
                 );
             } else {
                 eprintln!(
-                    "r2o-datapath: ctnetlink недоступен; обнаружение зависания выключено, планы кроме первого пакета и TCP после SYN-ACK будут отклоняться"
+                    "r2o-datapath: ctnetlink недоступен; наблюдение счётчиков соединений выключено, NAT-проверка планов продолжает читать /proc/net/nf_conntrack"
                 );
             }
         }
-        let mut conntrack_gate =
-            R2oConntrackGate::with_table_state(options.flow_capacity.limit(), no_conntrack_table);
+        let mut conntrack_gate = R2oConntrackGate::with_idle_timeout(
+            options.flow_capacity.limit(),
+            options.r2o_idle_timeout,
+        );
         let mut voice_sessions = R2oVoiceSessions::try_with_capacity(options.flow_capacity)?;
         let mut voice_trial_proofs = R2oVoiceTrialProofs::default();
         let mut quic_sessions = R2oQuicSessions::try_with_capacity(options.flow_capacity)?;
@@ -1322,7 +1324,6 @@ mod app {
                                                 tcp_sessions.r2o_syn_ack_seen_for_packet(bytes);
                                             guard_decision(
                                                 &mut conntrack_gate,
-                                                &mut conntrack,
                                                 bytes,
                                                 decision,
                                                 selected_plan.id,
@@ -1375,7 +1376,6 @@ mod app {
                                         tcp_sessions.r2o_syn_ack_seen_for_packet(&packet);
                                     guard_decision(
                                         &mut conntrack_gate,
-                                        &mut conntrack,
                                         &packet,
                                         decision,
                                         selected.id,
@@ -1420,7 +1420,6 @@ mod app {
                                         tcp_sessions.r2o_syn_ack_seen_for_packet(bytes);
                                     guard_decision(
                                         &mut conntrack_gate,
-                                        &mut conntrack,
                                         bytes,
                                         decision,
                                         selected_plan.id,
