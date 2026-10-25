@@ -27,7 +27,7 @@ async function freePort() {
   const server = net.createServer();
   await new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
+    server.listen(0, "localhost", resolve);
   });
   const port = server.address().port;
   await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -153,7 +153,7 @@ async function main() {
   fs.chmodSync(servicePath, 0o700);
   panel = spawn(panelBinary, [
     "serve",
-    "--listen", `127.0.0.1:${port}`,
+    "--listen", `localhost:${port}`,
     "--config", configPath,
     "--service", servicePath,
     "--assets", assets,
@@ -170,7 +170,7 @@ async function main() {
   await waitFor(async () => {
     if (panel.exitCode !== null) throw new Error(`Панель завершилась с кодом ${await panelExit}: ${panelOutput}`);
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/`);
+      const response = await fetch(`http://localhost:${port}/`);
       return response.ok;
     } catch {
       return false;
@@ -198,7 +198,7 @@ async function main() {
       return null;
     }
   }, `запуск Chrome: ${chromeOutput}`);
-  const tab = await (await fetch(`http://127.0.0.1:${debugPort}/json/new?about:blank`, { method: "PUT" })).json();
+  const tab = await (await fetch(`http://localhost:${debugPort}/json/new?about:blank`, { method: "PUT" })).json();
 
   socket = new WebSocket(tab.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => {
@@ -242,7 +242,7 @@ async function main() {
 
   await call("Page.enable");
   await call("Runtime.enable");
-  await call("Page.navigate", { url: `http://127.0.0.1:${port}/` });
+  await call("Page.navigate", { url: `http://localhost:${port}/` });
   await waitFor(() => evaluate("document.readyState === 'complete' && !!document.querySelector('#app')"), "загрузка страницы R2O");
   await evaluate("document.fonts.ready.then(() => true)");
 

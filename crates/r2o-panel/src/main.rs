@@ -113,12 +113,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         redirect_logs(&path)?;
     }
     let listener = TcpListener::bind((listen_host, listen_port))?;
-    if !is_loopback(&config.panel_listen) {
-        eprintln!(
-            "внимание: панель слушает не на петле ({}) и не имеет аутентификации",
-            config.panel_listen
-        );
-    }
+    eprintln!("внимание: у панели нет аутентификации");
     config.started_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
     config.control_enabled = true;
     println!(
@@ -127,15 +122,6 @@ fn run() -> Result<(), Box<dyn Error>> {
     );
     serve(listener, config)?;
     Ok(())
-}
-
-fn is_loopback(listen: &str) -> bool {
-    let host = if listen.starts_with('[') {
-        listen.split_once(']').map(|(host, _)| &host[1..])
-    } else {
-        listen.rsplit_once(':').map(|(host, _)| host)
-    };
-    matches!(host, Some("localhost" | "127.0.0.1" | "::1"))
 }
 
 fn split_listen(listen: &str) -> Result<(&str, u16), Box<dyn Error>> {

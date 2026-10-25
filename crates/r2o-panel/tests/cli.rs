@@ -36,7 +36,7 @@ fn get(address: std::net::SocketAddr, path: &str) -> std::io::Result<(u16, Vec<u
     stream.set_read_timeout(Some(Duration::from_millis(300)))?;
     write!(
         stream,
-        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+        "GET {path} HTTP/1.1\r\nHost: localhost:{}\r\nConnection: close\r\n\r\n",
         address.port()
     )?;
     let mut response = Vec::new();
@@ -79,7 +79,7 @@ fn stop(child: &mut Child) {
 fn cli_starts_http_panel_writes_health_and_stops_cleanly() {
     let temp = TempDir::new();
     let health = temp.file("panel.health");
-    let port_probe = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port_probe = TcpListener::bind("localhost:0").unwrap();
     let address = port_probe.local_addr().unwrap();
     drop(port_probe);
     let mut child = Command::new(env!("CARGO_BIN_EXE_r2o-panel"))
@@ -133,7 +133,7 @@ fn cli_version_is_reported_without_starting_the_server() {
 fn cli_rejects_zero_port_instead_of_binding_an_ephemeral_port() {
     let temp = TempDir::new();
     let mut child = Command::new(env!("CARGO_BIN_EXE_r2o-panel"))
-        .args(["serve", "--listen", "127.0.0.1:0", "--config"])
+        .args(["serve", "--listen", "localhost:0", "--config"])
         .arg(temp.file("missing-config"))
         .arg("--health-file")
         .arg(temp.file("health"))

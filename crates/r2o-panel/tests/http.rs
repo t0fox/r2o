@@ -38,6 +38,11 @@ fn request(config: &Config, raw: &str) -> (u16, String, String) {
 }
 
 #[test]
+fn panel_default_listens_on_router_interfaces() {
+    assert_eq!(Config::default().panel_listen, "0.0.0.0:8090");
+}
+
+#[test]
 fn status_without_live_file_returns_the_panel_contract() {
     let mut config = Config::default();
     config.live_path =

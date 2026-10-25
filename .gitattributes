@@ -9,6 +9,7 @@ scripts/r2o-build-openwrt-armv7-musl.sh text eol=lf
 scripts/package-release.sh text eol=lf
 scripts/test-package-release.sh text eol=lf
 scripts/install.sh text eol=lf
+scripts/uninstall.sh text eol=lf
 scripts/test-router-install-bootstrap.sh text eol=lf
 scripts/test-router-install-lifecycle.sh text eol=lf
 scripts/test-nfq-netns.sh text eol=lf
