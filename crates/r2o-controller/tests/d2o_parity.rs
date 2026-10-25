@@ -101,4 +101,17 @@ fn d2o_clear_vector_uses_only_the_base_series_and_ignores_disabled_mark() {
     assert_eq!(result.verdict, Verdict::Clear);
     assert_eq!(result.probes, repeats);
     assert_eq!(backend.calls, repeats);
+    if let Some(path) = std::env::var_os("R2O_CLEAR_DIFF_OUTPUT") {
+        std::fs::write(
+            path,
+            format!(
+                "clear probes={} repeats={} mark={} target={}\n",
+                result.probes,
+                result.repeats,
+                backend.fixture.mark.unwrap_or_default(),
+                result.target
+            ),
+        )
+        .unwrap();
+    }
 }

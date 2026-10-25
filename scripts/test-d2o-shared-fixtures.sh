@@ -42,7 +42,13 @@ cc -std=c99 -O2 -Wall -Wextra -Werror \
     "$donor_datapath/plan_parse.o" "$donor_datapath/plan_apply.o" \
     "$donor_datapath/wire.o" -lpthread \
     -o "$tmp_dir/d2o_clear_fixture"
-timeout 15s "$tmp_dir/d2o_clear_fixture" "$tests/fixtures/d2o_clear.txt"
+timeout 15s "$tmp_dir/d2o_clear_fixture" "$tests/fixtures/d2o_clear.txt" \
+    >"$tmp_dir/classify-c.out"
+R2O_CLEAR_DIFF_OUTPUT="$tmp_dir/classify-rust.out" \
+    cargo test -p r2o-controller --locked --test d2o_parity \
+    d2o_clear_vector_uses_only_the_base_series_and_ignores_disabled_mark
+diff -u "$tmp_dir/classify-c.out" "$tmp_dir/classify-rust.out"
+printf 'C/Rust classify CLEAR output matches for the shared d2o fixture.\n'
 
 cc -std=c99 -O2 -Wall -Wextra -Werror \
     -I"$donor_detect" -I"$donor_detect/include" -I"$donor_core/include" \
@@ -59,8 +65,6 @@ cc -std=c99 -O2 -Wall -Wextra -Werror \
     -o "$tmp_dir/d2o_response_fixture"
 "$tmp_dir/d2o_response_fixture" "$tests/fixtures/d2o/tls-response-vectors.tsv"
 
-cargo test -p r2o-controller --locked --test d2o_parity \
-    d2o_clear_vector_uses_only_the_base_series_and_ignores_disabled_mark
 cargo test -p r2o-controller --locked --test response d2o_shared_tls_response_vectors_match
 cargo test -p r2o-controller --locked --lib \
     nft_rst_rule_uses_r2o_table_and_exact_tuple_with_donor_timeout

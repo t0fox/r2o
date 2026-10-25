@@ -8344,18 +8344,25 @@ Verification after the change:
 |---|---|---|
 | `core/sched.c::known_plans` selects compatible TLS/QUIC plans, skips tried hashes, ranks the same volume bucket before other compatible boxes and then by plan successes, deduplicates identical text, and fills at most `SCHED_MAX_PLANS` (8). `verdict_to_plans` and the measured-volume path call this selection. | `discovery::known_plans` now applies that selection to the passive suspect fingerprint before the measured candidate/fallback stages. The runner shares the fingerprint with the worker so signals received during classification are visible; volume recovery receives the same tried hashes and candidate count. | `scripts/r2o-known-plans-differential.sh` includes the actual donor `sched.c::known_plans` and byte-compares C/Rust output. Passed for transport/protocol, compatibility, tried hashes, bucket priority, success order, stable ties, duplicate text/owner selection, and the 8-plan cap against d2o `783aa75ce44dd6192cd1f4f1d98e4fe909ef3045`. |
 | `core/sched.c::next_rx_volume_plan` plus `refill_from_fallback` refill RX names or the five split variants in queue batches; when `vol.rx_cut` is set, the refill cap becomes the number of RX candidates, so generic fallback arms are not appended. | The ECH RX runner uses `r2o_ech_rx_ladder_candidate`, advances `R2oEchRxProgress` across refill batches, snapshots `send_cap` at each batch, carries tried hashes, and gates owned fallback through `r2o_discovery_owned_fallback_allowed`. | `scripts/r2o-ech-rx-ladder-differential.sh` calls the actual donor `refill_from_fallback` and byte-compares Rust: two batches of 8 whitelist-name plans, then all five split variants, with matching cursors and no fallback arms after RX-cut. Passed against the same d2o SHA. |
+| `detect/classify.c::d2k_classify_run` returns CLEAR after the successful whole-trigger base series, without entering split/poison questions. | `classify::run_with_backend` returns `Verdict::Clear` after the same base-series outcomes. | `scripts/test-d2o-shared-fixtures.sh` now runs the C local-TCP fixture and Rust backend on the shared `d2o_clear.txt`, then byte-compares their normalized verdict/probe/repeat/mark/target summaries. Passed: `clear`, 3 probes, 3 repeats, mark 45. |
 
 Verification completed against d2o `783aa75ce44dd6192cd1f4f1d98e4fe909ef3045`:
 
-- `scripts/ci-differential-shards.sh verify`: 12 baseline and 36 upstream
-  scenarios are covered exactly once. All 36 upstream scenarios passed in the
-  differential shard run, including the separate concurrency and QUIC-stop
-  checks.
+- `scripts/ci-differential-shards.sh verify`: 12 baseline and 37 upstream
+  scenarios are covered exactly once. The 36 existing upstream scenarios
+  passed in the full differential shard run; the newly added shared classifier
+  fixture also passed directly and is now assigned to the discovery shard.
 - `cargo +1.98.0 test --workspace --locked`: passed after formatting.
 - `cargo +1.98.0 fmt --all -- --check` and `git diff --check`: passed.
 - `scripts/r2o-build-openwrt-aarch64-musl.sh`: built the six release binaries
   for AArch64 musl; each started under user-mode `qemu-aarch64`, and controller
   catalog clear/check smoke passed.
+
+REA could not provide native function dossiers in this Windows session:
+Ghidra reports Linux ELF unsupported, and `inspect_with_objdump` returned
+`ERR_REA_WINDOWS_NATIVE` for the donor `test_sched` executable. The findings
+above therefore cite pinned C sources and direct C/Rust fixtures, not REA
+decompilation evidence.
 
 The physical router remains read-only. These local differential and QEMU checks
 do not establish field acceptance, so full behavioral parity is not claimed.
