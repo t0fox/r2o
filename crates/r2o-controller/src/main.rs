@@ -20904,6 +20904,218 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn d2o_ack_applied_persist_chain_matches_donor() {
+        use std::io::Write;
+        use std::os::unix::net::UnixListener;
+
+        fn decode_hex(text: &str) -> Vec<u8> {
+            text.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| {
+                    let byte = std::str::from_utf8(pair).unwrap();
+                    u8::from_str_radix(byte, 16).unwrap()
+                })
+                .collect()
+        }
+
+        let mut ack_wire = None;
+        let mut applied_wire = None;
+        let mut target_fields = None;
+        let mut save_interval_ms = None;
+        for line in include_str!("../../r2k-core/tests/fixtures/d2o_candidate_chain.tsv").lines() {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.is_empty() || fields[0].starts_with('#') {
+                continue;
+            }
+            match fields[0] {
+                "ACK" => ack_wire = Some(decode_hex(fields[1])),
+                "APPLIED" => applied_wire = Some(decode_hex(fields[1])),
+                "TARGET" => target_fields = Some(fields),
+                "SAVE_INTERVAL_MS" => save_interval_ms = Some(fields[1].parse::<u64>().unwrap()),
+                _ => panic!("unknown donor chain fixture row: {line}"),
+            }
+        }
+        let ack_wire = ack_wire.unwrap();
+        let applied_wire = applied_wire.unwrap();
+        let target_fields = target_fields.unwrap();
+        let save_interval_ms = save_interval_ms.unwrap();
+        assert_eq!(
+            super::R2O_CATALOG_SAVE_INTERVAL.as_millis(),
+            u128::from(save_interval_ms)
+        );
+        assert_eq!(target_fields.len(), 6);
+        let host = target_fields[1].to_owned();
+        let endpoint: std::net::SocketAddr = format!("{}:{}", target_fields[2], target_fields[4])
+            .parse()
+            .unwrap();
+        let local_port: u16 = target_fields[3].parse().unwrap();
+        let status: u16 = target_fields[5].parse().unwrap();
+
+        let ack = r2k_core::control::decode_ack(
+            &read_frame(&mut std::io::Cursor::new(&ack_wire)).unwrap(),
+        )
+        .unwrap();
+        let trial_id = ack.trial_id.unwrap();
+        let applied_fixture = r2k_core::control::decode_applied(
+            &read_frame(&mut std::io::Cursor::new(&applied_wire)).unwrap(),
+        )
+        .unwrap();
+        let work = std::env::temp_dir().join(format!(
+            "r2o-ack-applied-persist-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&work).unwrap();
+        let socket_path = work.join("control.sock");
+        let catalog_path = work.join("catalog.json");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let ack_for_server = ack_wire.clone();
+        let applied_for_server = applied_wire.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                .unwrap();
+            stream.write_all(&encode_greeting(65_535).unwrap()).unwrap();
+            let probe = read_frame(&mut stream).unwrap();
+            assert_eq!(probe.kind, COMMAND_SET_NAME_PROBE);
+            stream.write_all(&ack_for_server).unwrap();
+            stream.write_all(&applied_for_server).unwrap();
+
+            let command = read_frame(&mut stream).unwrap();
+            assert_eq!(command.kind, COMMAND_SET_NAME);
+            stream
+                .write_all(&encode_ack(command.kind, true, 0).unwrap())
+                .unwrap();
+            vec![command.kind]
+        });
+
+        let mut client = ControlClient::connect(socket_path).unwrap();
+        let trigger = r2o_controller::classify::Trigger::tls13(&host).unwrap();
+        let poison = r2o_controller::classify::Poison {
+            name: "badsum".into(),
+            badsum: true,
+            ..r2o_controller::classify::Poison::default()
+        };
+        let plan_text =
+            r2o_controller::classify::plan_text_for_poison(&poison, &trigger, None, 0).unwrap();
+        let plan_records = compile_text(&plan_text).unwrap();
+        let probe = super::encode_set_name_probe(
+            &host,
+            SHAPE_MODERN,
+            4,
+            local_port,
+            &plan_records,
+            trial_id,
+        )
+        .unwrap();
+        let accepted = client
+            .exchange_candidate_probe_with_settle(&probe, COMMAND_SET_NAME_PROBE)
+            .unwrap()
+            .is_some();
+        assert!(accepted);
+        let applied_events = client
+            .collect_applied_events(trial_id, std::time::Duration::from_millis(100))
+            .unwrap();
+        let applied = applied_events.iter().any(|event| {
+            r2o_family_applied_flow_matches(
+                event,
+                &DiscoveryTarget {
+                    host: host.clone(),
+                    endpoint: endpoint.to_string(),
+                    family: 4,
+                    shape: SHAPE_MODERN,
+                },
+                local_port,
+                applied_fixture.plan_id,
+                trial_id,
+            )
+        });
+        let target = DiscoveryTarget {
+            host: host.clone(),
+            endpoint: endpoint.to_string(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let mut fetch = r2o_test_fetch_result();
+        fetch.address = endpoint;
+        fetch.local_port = local_port;
+        fetch.status = status;
+        let outcome = DiscoveryOutcome {
+            target: target.clone(),
+            plan_text: Some(plan_text),
+            detail: "shared donor event fixture".into(),
+            queue_expired: false,
+            direct_clear: false,
+            volume_recovery: false,
+            volume_fingerprint: None,
+            volume_box_id: None,
+            retry_after: None,
+        };
+        let outcome = super::r2o_confirm_discovery_outcome(outcome, Ok(fetch), applied);
+        Catalog::default().save_atomic(&catalog_path, 1).unwrap();
+        let mut catalog = Catalog::load(&catalog_path).unwrap();
+        let save_started = std::time::Instant::now();
+        let catalog_snapshot = std::sync::Arc::new(std::sync::Mutex::new(catalog.clone()));
+        let mut persistence = super::R2oCatalogPersistence::new(save_started, catalog_snapshot);
+        client
+            .apply_discovery_outcome_with_input_and_persistence(
+                outcome,
+                &mut catalog,
+                &catalog_path,
+                2,
+                Some(&mut persistence),
+            )
+            .unwrap();
+        assert!(
+            !persistence
+                .persist_due(
+                    &mut catalog,
+                    &catalog_path,
+                    save_started + std::time::Duration::from_secs(59),
+                    100,
+                )
+                .unwrap()
+        );
+        assert!(
+            persistence
+                .persist_due(
+                    &mut catalog,
+                    &catalog_path,
+                    save_started + std::time::Duration::from_secs(60),
+                    100,
+                )
+                .unwrap()
+        );
+        let persisted = Catalog::load(&catalog_path).unwrap();
+        let binding = persisted
+            .boxes
+            .iter()
+            .flat_map(|box_record| &box_record.bindings)
+            .find(|binding| binding.kind == "name" && binding.target == host)
+            .unwrap();
+        let commands = server.join().unwrap();
+        assert!(commands.contains(&COMMAND_SET_NAME));
+        assert_eq!(binding.level, 3);
+        assert!(r2o_controller::discovery::has_usable_binding(
+            &persisted, &target
+        ));
+
+        let output = format!(
+            "candidate_chain ack=yes applied=yes catalog_binding={} level={} persisted=yes save_interval_ms={}\n",
+            host, binding.level, save_interval_ms
+        );
+        if let Ok(path) = std::env::var("R2O_ACK_APPLIED_PERSIST_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        std::fs::remove_dir_all(work).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn d2o_missing_candidate_ack_expires_after_settle_window() {
         use std::os::unix::net::UnixStream;
 

@@ -7611,15 +7611,35 @@ endpoint-ов. Новая попытка REA `list_documents` по активн�
 `r2o_установка_voice_опыта_проверяет_ack_и_trial_id` прошёл после ограничения
 фильтра на две команды d2o.
 
-`core/sched.c::on_applied` / `applied_trial_is_ours` и
-`core/d2kc.c::main` сопоставляют испытание с `APPLIED`; Rust
-`r2o_family_applied_flow_matches` и `ControlClient::collect_applied_events`
-проверяют тот же путь доказательства. `r2o-control-events-differential.sh`
-сверяет wire-фреймы и matcher; отдельно
-`r2o-catalog-sync-differential.sh` подтвердил порядок синхронизации, а
-`r2o-catalog-persist-differential.sh` сравнил сохранённый снимок после внешнего
-обновления. Это отдельные C/Rust сценарии, а не один сквозной event-to-disk
-fixture.
+### Сквозной ACK → APPLIED → PERSIST fixture — donor `783aa75`, 25.10.2026
+
+Добавлен общий вход `crates/r2k-core/tests/fixtures/d2o_candidate_chain.tsv`.
+Он содержит те же legacy ACK и APPLIED wire-кадры, TLS/HTTPS 200 для
+`example.com`, tuple `192.0.2.1:40123 → 198.51.100.2:443` и интервал записи
+60000 мс. `scripts/r2o-ack-applied-persist-differential.sh` передаёт fixture
+обеим реализациям и сравнивает нормализованный итог:
+`candidate_chain ack=yes applied=yes catalog_binding=example.com level=3
+persisted=yes save_interval_ms=60000`.
+
+| Исходная C-функция или путь | Rust-аналог | Общий вход и результат |
+|---|---|---|
+| `core/link.c::d2k_link_next` → `core/sched.c::d2k_sched_event` (ACK) → `on_applied` → `verify_confirm` → `core/catalog.c::d2k_catalog_save_atomic` | `ControlClient::wait_for_command_ack` → `collect_applied_events` → `r2o_family_applied_flow_matches` → `r2o_confirm_discovery_outcome` → `apply_discovery_outcome_with_input_and_persistence` → `R2oCatalogPersistence::persist_due` | Дифференциальный сценарий завершился успешно: обе стороны приняли точный trial ACK, подтвердили тот же plan/trial/flow, добавили привязку уровня 3 для `example.com` и сохранили её. Rust-проверка отдельно подтвердила отсутствие записи на 59-й секунде и запись на 60-й; скрипт сверил интервал с `core/d2kc.c::SAVE_EVERY_MS`, а исходник содержит revision-gated save loop. |
+
+C harness вызывает реальные parser, scheduler event handler, `verify_confirm` и
+атомарную запись каталога; результат TLS задаётся общей фикстурой, сетевой
+верификатор не запускается. Rust проходит production-фильтры ACK/APPLIED,
+критерий полного HTTPS-ответа, применение каталога и production persistence
+interval. Таймерный цикл `d2kc::main` проверен по исходнику и константе; его
+poll loop этим harness не исполняется. Отдельные
+`r2o-catalog-sync-differential.sh` и `r2o-catalog-persist-differential.sh`
+продолжают проверять порядок команд и overwrite внешнего snapshot.
+
+Сквозной сценарий и соседние ACK/APPLIED, каталог-sync и persist диффы прошли
+25.10.2026. Полный `cargo +1.98.0 test --locked --workspace` завершился с
+кодом 0 (controller: 177 тестов). `scripts/r2o-build-openwrt-aarch64-musl.sh`
+собрал шесть release-бинарников и запустил их под QEMU; все шесть вернули OK,
+каталог очистился атомарно и прочитался пустым. Это локальный target smoke,
+не подтверждение на физическом OpenWrt.
 
 Свежий декомпиляторский dossier для этих локальных ELF в активном REA MCP
 окружении недоступен: Windows-провайдер отклоняет ELF, а текущий REA bundle
