@@ -490,6 +490,7 @@ jobs:
           DONOR_SNAPSHOT: ${{ matrix.snapshot }}
           DIFFERENTIAL_SHARD: ${{ matrix.shard }}
           R2O_EXPECTED_DONOR_SHA: ${{ matrix.donor_sha }}
+          R2O_DONOR_ROOT: ${{ github.workspace }}/d2o
           R2O_DONOR_CORE: ${{ github.workspace }}/d2o/core
           R2O_DONOR_DATAPATH: ${{ github.workspace }}/d2o/datapath
         run: |

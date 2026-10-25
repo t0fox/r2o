@@ -912,8 +912,8 @@ fn handshake(address: SocketAddr, sni: &str, options: ResponseOptions) -> Result
     let timeout = response_timeout(options.timeout);
     let timeout_ms = timeout.as_millis().min(i64::MAX as u128) as i64;
     let socket_timeout = libc::timeval {
-        tv_sec: (timeout_ms / 1000) as libc::time_t,
-        tv_usec: ((timeout_ms % 1000) * 1000) as libc::suseconds_t,
+        tv_sec: (timeout_ms / 1000) as _,
+        tv_usec: ((timeout_ms % 1000) * 1000) as _,
     };
     unsafe {
         libc::setsockopt(
