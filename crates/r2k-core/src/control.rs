@@ -196,6 +196,7 @@ pub struct Ack {
     pub ok: bool,
     pub reason: u8,
     pub trial_id: Option<[u8; 16]>,
+    pub area_id: Option<[u8; 16]>,
     pub binding_context: Option<BindingContext>,
 }
 
@@ -1414,6 +1415,17 @@ pub fn encode_ack_with_binding(
     trial_id: Option<[u8; 16]>,
     binding_context: Option<BindingContext>,
 ) -> Result<Vec<u8>, &'static str> {
+    encode_ack_with_identifiers(command, ok, reason, trial_id, None, binding_context)
+}
+
+pub fn encode_ack_with_identifiers(
+    command: u16,
+    ok: bool,
+    reason: u8,
+    trial_id: Option<[u8; 16]>,
+    area_id: Option<[u8; 16]>,
+    binding_context: Option<BindingContext>,
+) -> Result<Vec<u8>, &'static str> {
     if trial_id.is_some()
         && !matches!(
             command,
@@ -1425,6 +1437,14 @@ pub fn encode_ack_with_binding(
         )
     {
         return Err("trial ID ACK разрешён только для временной привязки");
+    }
+    if area_id.is_some()
+        && !matches!(
+            command,
+            COMMAND_SET_SUFFIX | COMMAND_DEL_SUFFIX | COMMAND_SET_BYPASS | COMMAND_DEL_BYPASS
+        )
+    {
+        return Err("area ID ACK разрешён только для команды области");
     }
     if let Some(binding) = binding_context
         && (!ok
@@ -1442,6 +1462,7 @@ pub fn encode_ack_with_binding(
         KEY_LEN
             + 4
             + trial_id.map_or(0, |_| 16)
+            + area_id.map_or(0, |_| 16)
             + binding_context.map_or(0, |_| ACK_BINDING_CONTEXT_LEN),
     );
     body.resize(KEY_LEN + 4, 0);
@@ -1451,6 +1472,9 @@ pub fn encode_ack_with_binding(
     body[KEY_LEN + 3] = if ok { ACK_OK } else { reason };
     if let Some(trial_id) = trial_id {
         body.extend_from_slice(&trial_id);
+    }
+    if let Some(area_id) = area_id {
+        body.extend_from_slice(&area_id);
     }
     if let Some(binding) = binding_context {
         body.extend_from_slice(ACK_BINDING_CONTEXT_MAGIC);
@@ -1489,6 +1513,10 @@ pub fn decode_ack(frame: &Frame) -> Result<Ack, &'static str> {
             | COMMAND_SET_ADDR_PROBE
             | COMMAND_DEL_ADDR_PROBE
     );
+    let supports_area_id = matches!(
+        command,
+        COMMAND_SET_SUFFIX | COMMAND_DEL_SUFFIX | COMMAND_SET_BYPASS | COMMAND_DEL_BYPASS
+    );
     let mut cursor = KEY_LEN + 4;
     let remaining = frame.body.len() - cursor;
     let trial_id = if remaining == 16 && supports_trial_id {
@@ -1497,6 +1525,16 @@ pub fn decode_ack(frame: &Frame) -> Result<Ack, &'static str> {
             .map_err(|_| "неверный trial ID в подтверждении")?;
         cursor += 16;
         Some(trial_id)
+    } else {
+        None
+    };
+    let remaining = frame.body.len() - cursor;
+    let area_id = if remaining == 16 && supports_area_id {
+        let area_id = frame.body[cursor..]
+            .try_into()
+            .map_err(|_| "неверный area ID в подтверждении")?;
+        cursor += 16;
+        Some(area_id)
     } else {
         None
     };
@@ -1543,6 +1581,7 @@ pub fn decode_ack(frame: &Frame) -> Result<Ack, &'static str> {
         ok,
         reason,
         trial_id,
+        area_id,
         binding_context,
     })
 }
@@ -1550,8 +1589,8 @@ pub fn decode_ack(frame: &Frame) -> Result<Ack, &'static str> {
 #[cfg(test)]
 mod ack_binding_context_tests {
     use super::{
-        BindingContext, COMMAND_SET_NAME, SHAPE_HTTP, decode_ack, encode_ack_for_trial,
-        encode_ack_with_binding, read_frame,
+        BindingContext, COMMAND_SET_BYPASS, COMMAND_SET_NAME, SHAPE_HTTP, decode_ack,
+        encode_ack_for_trial, encode_ack_with_binding, encode_ack_with_identifiers, read_frame,
     };
     use std::io::Cursor;
 
@@ -1581,6 +1620,15 @@ mod ack_binding_context_tests {
         let ack = decode_ack(&frame).unwrap();
         assert_eq!(ack.trial_id, Some([9; 16]));
         assert_eq!(ack.binding_context, None);
+    }
+
+    #[test]
+    fn area_ack_round_trips_its_identifying_id() {
+        let bytes =
+            encode_ack_with_identifiers(COMMAND_SET_BYPASS, true, 0, None, Some([3; 16]), None)
+                .unwrap();
+        let frame = read_frame(&mut Cursor::new(bytes)).unwrap();
+        assert_eq!(decode_ack(&frame).unwrap().area_id, Some([3; 16]));
     }
 
     #[test]

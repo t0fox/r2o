@@ -8424,22 +8424,25 @@ router currently runs d2o and remains read-only.
 
 ## Catalog sync throughput review — d2o `304ba893`, 26.10.2026
 
-Confirmed one latency divergence on repeated catalog application:
+Confirmed and corrected two connected catalog-application divergences:
 
 | d2o C reference | Previous Rust behavior | R2O change and evidence |
 | --- | --- | --- |
-| `core/sched.c::d2k_sched_sync_step`, `SYNC_CHUNK = 8`: writes up to eight catalog commands per pass, then returns to `d2kc` to drain control events before the next pass. | `crates/r2o-controller/src/main.rs::install_catalog_with_policy` called `exchange_command` for every `SET_NAME`/`SET_ADDR`/`SET_SUFFIX`, waiting for its ACK before writing the next command. Discovery re-applies the compiled catalog after an accepted result, so this serialized the entire catalog on that path. | Rust now writes the same eight-command batch before collecting ACKs in order; it still records every ACK/refusal, updates installed groups only on ACK success, and queues intervening asynchronous events. `scripts/r2o-catalog-sync-differential.sh` passed on one shared nine-binding fixture: C and Rust emitted the same first eight names, and a Rust mock withheld every ACK until all eight commands arrived. The existing catalog wire-order comparison also matched. |
+| `core/sched.c::d2k_sched_sync_step`, with `SYNC_CHUNK = 8`, writes up to eight `SET_NAME`/`SET_ADDR` commands, then `core/d2kc.c::main` returns to poll and drains control events before the next batch. | `crates/r2o-controller/src/main.rs::install_catalog_best_effort`/`install_catalog_with_policy` waited for each name/address ACK before continuing, blocking the discovery event loop while reapplying the full catalog after an accepted result. | `CatalogSyncCursor::send_step` writes up to eight name/address commands without waiting for their ACKs. `ControlClient::watch_events` drains pending events between batches and polls without delay while sync remains active. The shared-fixture differential matched the complete catalog order and first eight-command batch; a mock withholding all ACKs still observed all eight writes. |
+| `core/sched.c::sync_area_send` attaches an incrementing 16-byte area ID; `d2k_sched_event` accepts only ACKs matching both command and ID. `datapath/ctlsrv.c::d2k_ctlsrv_command` strips the trailing ID and `ack` echoes it, including on refusal. | Rust sent area commands without the ID; its datapath parsed the suffix as command data and returned ACKs without an ID, so confirmed group/bypass synchronization could fail. | `control_frame_with_area_id`, `exchange_area_command_with_timeout`, `decode_ack`, `NamePlans::handle`, and `encode_ack_with_identifiers` now carry and match the same ID; one outstanding area ACK retains the donor's 5-second timeout and failure behavior. The C/Rust command-frame differential is byte-identical; Rust tests cover exact-ID matching, stale IDs, refusals, and ACK round trips. |
 
-Verification: all seven Rust `catalog_sync` tests passed; all 194 controller tests
-passed; the upstream C/Rust catalog-sync differential passed; Rust formatting and
-`git diff --check` passed. The OpenWrt AArch64 musl build and QEMU smoke passed:
-all six binaries reported wire version 47 and controller catalog clear/check
-succeeded.
+Verification: all 195 controller binary tests and 221 datapath library tests
+passed; the C/Rust catalog install-order, eight-command batch, and identified area
+wire differential passed. The ACK → APPLIED → persistence differential and the
+existing deadline, fallback-gate, fallback-queue, and snapshot-ownership
+differentials passed. `cargo fmt --all` and `git diff --check` passed. The OpenWrt
+AArch64 musl build and QEMU smoke passed: all six binaries ran, controller and
+datapath reported wire version 47, and catalog clear/check succeeded.
 
-This verifies batching semantics and the target build, not a wall-clock field
-speedup. No apply operation or test traffic was sent to the physical router; its
-read-only status showed d2o, not R2O. Overall parity and live-traffic acceptance
-remain unproven.
+This confirms source-level behavior, protocol bytes, and target execution; it does
+not measure apply time on hardware. No write or test traffic was sent to the
+physical router, which remains read-only and runs d2o. Field speed and full
+behavioral parity remain unconfirmed.
 
 ## TLS response poll interruption — d2o `304ba893`, 26.10.2026
 

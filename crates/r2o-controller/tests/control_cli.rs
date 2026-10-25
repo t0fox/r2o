@@ -387,7 +387,7 @@ fn serve_catalog_installs_plans_and_consumes_hello_on_the_same_connection() {
     );
     server_result.unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("установлено 1"));
+    assert!(stdout.contains("каталог синхронизирован: отправлено 1"));
     assert!(stdout.contains("SNI=\"example.test\""));
     assert!(stdout.contains("форма=TLS 1.2"));
     let live: serde_json::Value =
@@ -536,7 +536,7 @@ fn set_name_does_not_send_when_the_datapath_wire_version_is_mismatched() {
 }
 
 #[test]
-fn apply_catalog_compiles_and_installs_tcp_and_discord_voice_name_bindings() {
+fn apply_catalog_compiles_and_sends_tcp_and_discord_voice_name_bindings() {
     let work = temporary_directory();
     fs::create_dir(&work).unwrap();
     let socket_path = work.join("control.sock");
@@ -583,11 +583,6 @@ fn apply_catalog_compiles_and_installs_tcp_and_discord_voice_name_bindings() {
         expected.extend_from_slice(&[0x01, 0x03, 0x00, 0x01, 0x00]);
         assert_eq!(body, expected);
 
-        let mut ack = vec![0; KEY_LEN];
-        ack[0] = 4;
-        ack.extend_from_slice(&[0x00, 0x81, 1, 0]);
-        stream.write_all(&frame(0x0008, &ack)).unwrap();
-
         let (kind, body) = read_frame(&mut stream);
         assert_eq!(kind, 0x0081);
         let mut expected = vec![b"@discord-voice".len() as u8];
@@ -605,10 +600,6 @@ fn apply_catalog_compiles_and_installs_tcp_and_discord_voice_name_bindings() {
         expected.extend_from_slice(&[0x01, 0x03, 0x00, 0x01, 0x00]);
         assert_eq!(body, expected);
 
-        let mut ack = vec![0; KEY_LEN];
-        ack[0] = 4;
-        ack.extend_from_slice(&[0x00, 0x81, 1, 0]);
-        stream.write_all(&frame(0x0008, &ack)).unwrap();
         Ok(())
     });
 
@@ -627,7 +618,7 @@ fn apply_catalog_compiles_and_installs_tcp_and_discord_voice_name_bindings() {
     );
     server.join().unwrap().unwrap();
     let _ = fs::remove_dir_all(&work);
-    assert!(String::from_utf8_lossy(&output.stdout).contains("установлено 2"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("отправлено 2"));
 }
 
 #[test]
@@ -659,10 +650,13 @@ fn apply_catalog_sends_failed_group_exception_before_suffix_plan() {
         let mut expected = vec![b"failed.googlevideo.com".len() as u8];
         expected.extend_from_slice(b"failed.googlevideo.com");
         expected.extend_from_slice(&[6, 1, 4]);
+        let bypass_area_id = body[body.len() - 16..].to_vec();
+        expected.extend_from_slice(&bypass_area_id);
         assert_eq!(body, expected);
         let mut ack = vec![0; KEY_LEN];
         ack[0] = 4;
         ack.extend_from_slice(&[0x00, 0x8e, 1, 0]);
+        ack.extend_from_slice(&bypass_area_id);
         stream.write_all(&frame(0x0008, &ack)).unwrap();
 
         let (kind, body) = read_frame(&mut stream);
@@ -676,10 +670,13 @@ fn apply_catalog_sends_failed_group_exception_before_suffix_plan() {
         expected.extend_from_slice(&[0x00, 0x02, 0x00, 0x02, 0x06, 0x01]);
         expected.extend_from_slice(&[0x01, 0x00, 0x00, 0x04, 0x00, 0x05, 0x00, 0x00]);
         expected.extend_from_slice(&[0x01, 0x03, 0x00, 0x01, 0x00]);
+        let suffix_area_id = body[body.len() - 16..].to_vec();
+        expected.extend_from_slice(&suffix_area_id);
         assert_eq!(body, expected);
         let mut ack = vec![0; KEY_LEN];
         ack[0] = 4;
         ack.extend_from_slice(&[0x00, 0x8c, 1, 0]);
+        ack.extend_from_slice(&suffix_area_id);
         stream.write_all(&frame(0x0008, &ack)).unwrap();
         Ok(())
     });
@@ -699,7 +696,7 @@ fn apply_catalog_sends_failed_group_exception_before_suffix_plan() {
     );
     server.join().unwrap().unwrap();
     let _ = fs::remove_dir_all(&work);
-    assert!(String::from_utf8_lossy(&output.stdout).contains("установлено 2"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("отправлено 2"));
 }
 
 #[test]
@@ -746,11 +743,11 @@ fn apply_empty_catalog_does_not_clear_existing_name_plans() {
     );
     server.join().unwrap().unwrap();
     let _ = fs::remove_dir_all(&work);
-    assert!(String::from_utf8_lossy(&output.stdout).contains("установлено 0"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("отправлено 0"));
 }
 
 #[test]
-fn apply_catalog_skips_refused_binding_and_installs_following_binding() {
+fn apply_catalog_sends_name_bindings_without_waiting_for_acknowledgements() {
     let work = temporary_directory();
     fs::create_dir(&work).unwrap();
     let socket_path = work.join("control.sock");
@@ -773,19 +770,21 @@ fn apply_catalog_skips_refused_binding_and_installs_following_binding() {
         greeting.extend_from_slice(&[3, b'd', b'e', b'v']);
         stream.write_all(&frame(0x000a, &greeting)).unwrap();
 
-        let (kind, _) = read_frame(&mut stream);
+        let (kind, rejected) = read_frame(&mut stream);
         assert_eq!(kind, 0x0081);
-        let mut nack = vec![0; KEY_LEN];
-        nack[0] = 4;
-        nack.extend_from_slice(&[0x00, 0x81, 0, 2]);
-        stream.write_all(&frame(0x0008, &nack)).unwrap();
+        assert!(
+            rejected
+                .windows(b"rejected.example.test".len())
+                .any(|part| part == b"rejected.example.test")
+        );
 
-        let (kind, _) = read_frame(&mut stream);
+        let (kind, accepted) = read_frame(&mut stream);
         assert_eq!(kind, 0x0081);
-        let mut ack = vec![0; KEY_LEN];
-        ack[0] = 4;
-        ack.extend_from_slice(&[0x00, 0x81, 1, 0]);
-        stream.write_all(&frame(0x0008, &ack)).unwrap();
+        assert!(
+            accepted
+                .windows(b"accepted.example.test".len())
+                .any(|part| part == b"accepted.example.test")
+        );
         Ok(())
     });
 
@@ -803,8 +802,7 @@ fn apply_catalog_skips_refused_binding_and_installs_following_binding() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("датапат отверг планов с прошлой сводки: 1"));
-    assert!(stdout.contains("каталог обработан: установлено 1"));
+    assert!(stdout.contains("каталог обработан: отправлено 2"));
     server.join().unwrap().unwrap();
     let _ = fs::remove_dir_all(&work);
 }

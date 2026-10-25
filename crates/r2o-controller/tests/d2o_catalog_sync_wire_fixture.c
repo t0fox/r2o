@@ -8,9 +8,36 @@
 #include <unistd.h>
 
 #include "d2k_sched.h"
+#include "d2k_link.h"
+
+static int area_wire(void)
+{
+    int sockets[2];
+    uint8_t id[D2K_TRIAL_ID_LEN] = {1};
+    char error[160] = {0};
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0) return 2;
+    if (d2k_link_area_identified(sockets[0], D2K_CMD_SET_BYPASS,
+                                 "child.example", 6, D2K_SHAPE_MODERN, 4,
+                                 NULL, id, error, sizeof error) != 0) {
+        fprintf(stderr, "donor area command failed: %s\n", error);
+        close(sockets[0]);
+        close(sockets[1]);
+        return 2;
+    }
+    close(sockets[0]);
+    uint8_t bytes[256];
+    ssize_t length = read(sockets[1], bytes, sizeof bytes);
+    close(sockets[1]);
+    if (length <= 0) return 2;
+    printf("D2O_AREA_COMMAND=");
+    for (ssize_t i = 0; i < length; i++) printf("%02x", bytes[i]);
+    putchar('\n');
+    return 0;
+}
 
 int main(int argc, char **argv)
 {
+    if (argc == 2 && strcmp(argv[1], "--area-wire") == 0) return area_wire();
     int first_batch = argc == 4 && strcmp(argv[3], "--first-batch") == 0;
     if (argc != 3 && !first_batch) return 2;
     char *end = NULL;

@@ -3,9 +3,9 @@ use r2k_core::control::encode_frame;
 use r2k_core::control::{
     self, ADDR_PROBE_LEASE_MAX_MS, COMMAND_ARM_SHAPE, COMMAND_CLEAR, COMMAND_DEL_ADDR,
     COMMAND_DEL_ADDR_PROBE, COMMAND_DEL_NAME, COMMAND_DEL_VOICE_ADDR_PROBE, COMMAND_SET_ADDR,
-    COMMAND_SET_ADDR_PROBE, COMMAND_SET_HTTPS, COMMAND_SET_NAME, COMMAND_SET_TCP_STALL_BUDGETS,
-    COMMAND_SET_VOICE_ADDR, COMMAND_SET_VOICE_ADDR_PROBE, EVENT_APPLIED, EVENT_CLIENT_SHAPE,
-    EVENT_HELLO, EVENT_HTTP_PORTAL, EVENT_HTTP_RESPONSE, EVENT_PROTOCOL, EVENT_R2O_JOURNAL_END,
+    COMMAND_SET_ADDR_PROBE, COMMAND_SET_HTTPS, COMMAND_SET_NAME, COMMAND_SET_VOICE_ADDR,
+    COMMAND_SET_VOICE_ADDR_PROBE, EVENT_APPLIED, EVENT_CLIENT_SHAPE, EVENT_HELLO,
+    EVENT_HTTP_PORTAL, EVENT_HTTP_RESPONSE, EVENT_PROTOCOL, EVENT_R2O_JOURNAL_END,
     EVENT_R2O_JOURNAL_ENTRY, EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT,
     EVENT_R2O_TCP_CLEAN_HANDSHAKE, EVENT_R2O_TCP_EARLY_RST, EVENT_R2O_TCP_EXCHANGE,
     EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_REPEAT, EVENT_R2O_TCP_RST_AFTER_APP,
@@ -1287,12 +1287,13 @@ fn apply_catalog(socket_path: PathBuf, catalog_path: PathBuf) -> Result<(), Box<
         &catalog,
         client.send_cap.load(Ordering::Relaxed),
     )?;
-    let installed = install_catalog_best_effort(&mut client, &compiled)?;
-    report_catalog_refusals(&installed);
+    let mut area_sequence = 0;
+    let mut cursor = CatalogSyncCursor::from_compiled(compiled, &mut area_sequence)?;
+    let mut active_groups = HashSet::new();
+    while cursor.send_step(&mut client, &mut active_groups)? {}
     println!(
-        "каталог обработан: установлено {}, пропущено неподдерживаемых {skipped}",
-        installed.installed,
-        skipped = compiled.skipped
+        "каталог обработан: отправлено {}, пропущено неподдерживаемых {}",
+        cursor.sent, cursor.skipped
     );
     Ok(())
 }
@@ -1314,11 +1315,9 @@ fn serve_catalog(
         &catalog,
         client.send_cap.load(Ordering::Relaxed),
     )?;
-    let installed = install_catalog_best_effort(&mut client, &compiled)?;
-    report_catalog_refusals(&installed);
     println!(
-        "каталог обработан: установлено {}, пропущено неподдерживаемых {}; {}",
-        installed.installed,
+        "каталог загружен: команд {}, пропущено неподдерживаемых {}; применение идёт порциями; {}",
+        compiled.commands.len(),
         compiled.skipped,
         if discover {
             "наблюдение и автопоиск активны"
@@ -1328,7 +1327,7 @@ fn serve_catalog(
     );
     std::io::stdout().flush()?;
     let https_cache_path = catalog_path.with_file_name("https-cache.json");
-    let active_groups = installed.installed_groups.into_iter().collect();
+    let active_groups = HashSet::new();
     let live_catalog = Some((catalog.clone(), catalog_path.clone()));
     client.watch_events(
         discover.then_some((catalog, catalog_path.clone(), mark)),
@@ -1337,6 +1336,7 @@ fn serve_catalog(
         live_catalog,
         live_path,
         active_groups,
+        Some(compiled),
     )
 }
 
@@ -2798,163 +2798,195 @@ fn matching_domain_recovery_candidates(
 }
 
 #[cfg(unix)]
-#[derive(Debug, Default, Eq, PartialEq)]
-struct CatalogInstallSummary {
-    installed: usize,
-    refused: usize,
-    last_refusal: Option<&'static str>,
-    installed_groups: Vec<r2o_controller::live::LiveGroupKey>,
-}
-
-#[cfg(unix)]
 const CATALOG_SYNC_CHUNK: usize = 8;
 
 #[cfg(unix)]
-struct PendingCatalogInstall {
-    command_index: usize,
+struct PendingCatalogSyncCommand {
     host: String,
-    expected: u16,
+    command: Vec<u8>,
+    group: Option<r2o_controller::live::LiveGroupKey>,
+    expected_ack: Option<u16>,
+    expected_area_id: Option<[u8; 16]>,
+    counts_toward_chunk: bool,
 }
 
 #[cfg(unix)]
-fn flush_catalog_install_batch(
-    client: &mut ControlClient,
-    compiled: &CompiledCatalog,
-    pending: &mut Vec<PendingCatalogInstall>,
-    summary: &mut CatalogInstallSummary,
-) -> Result<(), Box<dyn Error>> {
-    for operation in pending.drain(..) {
-        let (_, command) = compiled
-            .commands
-            .get(operation.command_index)
-            .ok_or("индекс команды каталога вне собранного списка")?;
-        let ack = match client.wait_for_sent_command_ack(
-            command,
-            operation.expected,
-            CONTROL_ACK_TIMEOUT,
-        ) {
-            Ok(Some(ack)) => ack,
-            Ok(None) => {
-                return Err(format!(
-                    "установка остановлена после {} команд; {}: датапат не подтвердил управляющую команду за 3 секунды",
-                    operation.command_index, operation.host
-                )
-                .into());
-            }
-            Err(error) => {
-                return Err(format!(
-                    "установка остановлена после {} команд; {}: {error}",
-                    operation.command_index, operation.host
-                )
-                .into());
-            }
-        };
-        client.record_http_binding_acknowledgement(command, operation.expected, ack);
-        if !ack.ok {
-            summary.refused += 1;
-            summary.last_refusal = Some(ack_reason_text(ack.reason));
-            continue;
-        }
-        if let Some((_, key)) = compiled
-            .group_commands
-            .iter()
-            .find(|(index, _)| *index == operation.command_index)
-        {
-            summary.installed_groups.push(key.clone());
-        }
-        summary.installed += 1;
+struct CatalogSyncCursor {
+    pending: VecDeque<PendingCatalogSyncCommand>,
+    sent: usize,
+    skipped: usize,
+    areas_failed: bool,
+}
+
+#[cfg(unix)]
+fn control_frame_with_area_id(
+    command: &[u8],
+    area_id: [u8; 16],
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    let length = command.get(..4).ok_or("кадр команды каталога обрезан")?;
+    let length = u32::from_be_bytes(length.try_into().expect("four-byte frame length")) as usize;
+    if command.len() != length + 4 {
+        return Err("длина команды каталога не совпадает с кадром".into());
     }
-    Ok(())
+    let new_length = length
+        .checked_add(area_id.len())
+        .filter(|length| *length <= control::FRAME_MAX)
+        .ok_or("команда области каталога с area ID слишком длинная")?;
+    let mut identified = Vec::with_capacity(command.len() + area_id.len());
+    identified.extend_from_slice(&(new_length as u32).to_be_bytes());
+    identified.extend_from_slice(&command[4..]);
+    identified.extend_from_slice(&area_id);
+    Ok(identified)
 }
 
 #[cfg(unix)]
-fn install_catalog_best_effort(
-    client: &mut ControlClient,
-    compiled: &CompiledCatalog,
-) -> Result<CatalogInstallSummary, Box<dyn Error>> {
-    install_catalog_with_policy(client, compiled, true)
-}
-
-#[cfg(unix)]
-fn install_catalog_with_policy(
-    client: &mut ControlClient,
-    compiled: &CompiledCatalog,
-    continue_plan_refusals: bool,
-) -> Result<CatalogInstallSummary, Box<dyn Error>> {
-    let mut summary = CatalogInstallSummary::default();
-    let mut pending = Vec::with_capacity(CATALOG_SYNC_CHUNK);
-    for operation in &compiled.install_order {
-        let command_index = match operation {
-            CatalogInstallOp::Command(index) => index,
-            CatalogInstallOp::CleanupName { host, command } => {
-                flush_catalog_install_batch(client, compiled, &mut pending, &mut summary)?;
-                if let Err(error) = client.send_command(command, control::COMMAND_DEL_NAME) {
-                    eprintln!(
-                        "по {host} привязку невлезающего плана не удалось снять с провода: {error}"
-                    );
+impl CatalogSyncCursor {
+    fn from_compiled(
+        compiled: CompiledCatalog,
+        area_sequence: &mut u64,
+    ) -> Result<Self, Box<dyn Error>> {
+        let groups = compiled
+            .group_commands
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        let mut pending = VecDeque::new();
+        for operation in compiled.install_order {
+            match operation {
+                CatalogInstallOp::Command(index) => {
+                    let (host, command) = compiled
+                        .commands
+                        .get(index)
+                        .ok_or("индекс команды каталога вне собранного списка")?;
+                    let kind = command
+                        .get(4..6)
+                        .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]));
+                    let area_command = kind.is_some_and(|kind| {
+                        matches!(
+                            kind,
+                            control::COMMAND_SET_SUFFIX
+                                | control::COMMAND_DEL_SUFFIX
+                                | control::COMMAND_SET_BYPASS
+                                | control::COMMAND_DEL_BYPASS
+                        )
+                    });
+                    let (command, expected_area_id) = if area_command {
+                        *area_sequence = area_sequence.wrapping_add(1);
+                        let mut area_id = [0; 16];
+                        area_id[..8].copy_from_slice(&area_sequence.to_ne_bytes());
+                        (control_frame_with_area_id(command, area_id)?, Some(area_id))
+                    } else {
+                        (command.clone(), None)
+                    };
+                    pending.push_back(PendingCatalogSyncCommand {
+                        host: host.clone(),
+                        command,
+                        group: groups.get(&index).cloned(),
+                        expected_ack: area_command.then_some(kind.expect("area command kind")),
+                        expected_area_id,
+                        counts_toward_chunk: matches!(
+                            kind,
+                            Some(COMMAND_SET_NAME | COMMAND_SET_ADDR)
+                        ),
+                    });
                 }
+                CatalogInstallOp::CleanupName { host, command } => {
+                    pending.push_back(PendingCatalogSyncCommand {
+                        host,
+                        command,
+                        group: None,
+                        expected_ack: None,
+                        expected_area_id: None,
+                        counts_toward_chunk: false,
+                    });
+                }
+            }
+        }
+        if !compiled.tcp_stall_budgets.is_empty() {
+            pending.push_back(PendingCatalogSyncCommand {
+                host: "бюджеты потока TCP".into(),
+                command: encode_set_tcp_stall_budgets(&compiled.tcp_stall_budgets)
+                    .map_err(|error| format!("SET_TCP_STALL_BUDGETS: {error}"))?,
+                group: None,
+                expected_ack: None,
+                expected_area_id: None,
+                counts_toward_chunk: false,
+            });
+        }
+        Ok(Self {
+            pending,
+            sent: 0,
+            skipped: compiled.skipped,
+            areas_failed: false,
+        })
+    }
+
+    fn send_step(
+        &mut self,
+        client: &mut ControlClient,
+        active_groups: &mut HashSet<r2o_controller::live::LiveGroupKey>,
+    ) -> Result<bool, Box<dyn Error>> {
+        let mut sent_now = 0;
+        while sent_now < CATALOG_SYNC_CHUNK {
+            let Some(operation) = self.pending.pop_front() else {
+                break;
+            };
+            if let Some(expected) = operation.expected_ack {
+                if self.areas_failed {
+                    self.skipped += 1;
+                    continue;
+                }
+                let area_id = operation
+                    .expected_area_id
+                    .ok_or("команда области каталога не имеет area ID")?;
+                match client.exchange_area_command_with_timeout(
+                    &operation.command,
+                    expected,
+                    area_id,
+                    std::time::Duration::from_secs(5),
+                ) {
+                    Ok(ack) if ack.ok => {
+                        self.sent += 1;
+                        if let Some(group) = operation.group {
+                            active_groups.insert(group);
+                        }
+                    }
+                    Ok(ack) => {
+                        eprintln!(
+                            "каталог: команда для {} отвергнута датапатом (код {})",
+                            operation.host, ack.reason
+                        );
+                        self.skipped += 1;
+                        self.areas_failed = true;
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "каталог: команда для {} не подтверждена: {error}",
+                            operation.host
+                        );
+                        self.skipped += 1;
+                        self.areas_failed = true;
+                    }
+                }
+                break;
+            }
+            if let Err(error) = client.write_command(&operation.command) {
+                eprintln!(
+                    "каталог: команда для {} не отправилась: {error}",
+                    operation.host
+                );
+                self.skipped += 1;
                 continue;
             }
-        };
-        let (host, command) = compiled
-            .commands
-            .get(*command_index)
-            .ok_or("индекс команды каталога вне собранного списка")?;
-        let expected = command
-            .get(4..6)
-            .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
-            .ok_or("собранная команда каталога обрезана")?;
-        if continue_plan_refusals
-            && matches!(
-                expected,
-                COMMAND_SET_NAME | COMMAND_SET_ADDR | control::COMMAND_SET_SUFFIX
-            )
-        {
-            if let Err(error) = client.write_command(command) {
-                return Err(format!(
-                    "установка остановлена после {command_index} команд; {host}: {error}"
-                )
-                .into());
+            self.sent += 1;
+            if operation.counts_toward_chunk {
+                sent_now += 1;
             }
-            pending.push(PendingCatalogInstall {
-                command_index: *command_index,
-                host: host.clone(),
-                expected,
-            });
-            if pending.len() == CATALOG_SYNC_CHUNK {
-                flush_catalog_install_batch(client, compiled, &mut pending, &mut summary)?;
+            if let Some(group) = operation.group {
+                active_groups.insert(group);
             }
-        } else {
-            flush_catalog_install_batch(client, compiled, &mut pending, &mut summary)?;
-            if let Err(error) = client.send_command(command, expected) {
-                return Err(format!(
-                    "установка остановлена после {command_index} команд; {host}: {error}"
-                )
-                .into());
-            }
-            if let Some((_, key)) = compiled
-                .group_commands
-                .iter()
-                .find(|(index, _)| index == command_index)
-            {
-                summary.installed_groups.push(key.clone());
-            }
-            summary.installed += 1;
         }
+        Ok(!self.pending.is_empty())
     }
-    flush_catalog_install_batch(client, compiled, &mut pending, &mut summary)?;
-    if !compiled.tcp_stall_budgets.is_empty() {
-        let command = encode_set_tcp_stall_budgets(&compiled.tcp_stall_budgets)
-            .map_err(|error| format!("SET_TCP_STALL_BUDGETS: {error}"))?;
-        if let Err(error) = client.send_command(&command, COMMAND_SET_TCP_STALL_BUDGETS) {
-            return Err(format!(
-                "установка остановлена после {} привязок; бюджеты потока TCP: {error}",
-                summary.installed + summary.refused
-            )
-            .into());
-        }
-    }
-    Ok(summary)
 }
 
 #[cfg(unix)]
@@ -2986,6 +3018,7 @@ impl ControlClient {
                 if ack.command != expected
                     || expected_trial_id.is_some_and(|trial_id| ack.trial_id != Some(trial_id))
                 {
+                    self.queue_async_frame(frame)?;
                     continue;
                 }
                 return Ok(Some(ack));
@@ -3002,17 +3035,6 @@ fn ack_reason_text(reason: u8) -> &'static str {
         control::ACK_NO_ROOM => "таблица планов заполнена",
         control::ACK_BAD_ARGS => "датапат отверг аргументы",
         _ => "неизвестная причина",
-    }
-}
-
-#[cfg(unix)]
-fn report_catalog_refusals(summary: &CatalogInstallSummary) {
-    if summary.refused > 0 {
-        println!(
-            "каталог: датапат отверг планов с прошлой сводки: {} ({}) — обход по этим целям не исполняется, причина в журнале датапата",
-            summary.refused,
-            summary.last_refusal.unwrap_or("неизвестная причина")
-        );
     }
 }
 
@@ -4824,7 +4846,15 @@ impl Drop for R2oQuicDiscoveryWorker {
 
 #[cfg(unix)]
 fn watch(socket_path: PathBuf) -> Result<(), Box<dyn Error>> {
-    ControlClient::connect(socket_path)?.watch_events(None, None, None, None, None, HashSet::new())
+    ControlClient::connect(socket_path)?.watch_events(
+        None,
+        None,
+        None,
+        None,
+        None,
+        HashSet::new(),
+        None,
+    )
 }
 
 #[cfg(unix)]
@@ -11367,9 +11397,10 @@ impl ControlClient {
         discovery: Option<(Catalog, PathBuf, Option<u32>)>,
         https_cache_path: Option<PathBuf>,
         https_probe_mark: Option<u32>,
-        live_catalog: Option<(Catalog, PathBuf)>,
+        mut live_catalog: Option<(Catalog, PathBuf)>,
         explicit_live_path: Option<PathBuf>,
         mut active_groups: HashSet<r2o_controller::live::LiveGroupKey>,
+        initial_catalog_sync: Option<CompiledCatalog>,
     ) -> Result<(), Box<dyn Error>> {
         use std::io::Write;
 
@@ -11473,6 +11504,13 @@ impl ControlClient {
         }
         let mut r2o_scheduler_tick_pending = false;
         let mut r2o_quic_command_first = false;
+        let mut catalog_area_sequence = 0;
+        let mut catalog_sync = initial_catalog_sync
+            .map(|compiled| CatalogSyncCursor::from_compiled(compiled, &mut catalog_area_sequence))
+            .transpose()?;
+        let mut catalog_sync_dirty = false;
+        let mut catalog_sync_refusals = 0;
+        let mut catalog_sync_refusal_reason = control::ACK_OK;
         let live_path = explicit_live_path.or_else(|| {
             live_catalog
                 .as_ref()
@@ -11494,6 +11532,61 @@ impl ControlClient {
                     } else {
                         measurement_gate.r2o_scheduler_tick();
                         r2o_scheduler_tick_pending = false;
+                    }
+                }
+                if self.pending_events.is_empty() && catalog_sync.is_none() && catalog_sync_dirty {
+                    let wall_now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    let send_cap = self.send_cap.load(Ordering::Relaxed);
+                    let compiled = if let Some((_, catalog, path, _)) = discovery.as_mut() {
+                        let before = catalog.clone();
+                        let compiled = catalog_commands_with_send_cap(catalog, send_cap, wall_now)?;
+                        if *catalog != before {
+                            persist_catalog_update(
+                                catalog,
+                                path,
+                                wall_now,
+                                catalog_persistence.as_mut(),
+                            )?;
+                        }
+                        Some(compiled)
+                    } else if let Some((catalog, path)) = live_catalog.as_mut() {
+                        let before = catalog.clone();
+                        let compiled = catalog_commands_with_send_cap(catalog, send_cap, wall_now)?;
+                        if *catalog != before {
+                            catalog.save_atomic(path, wall_now.max(1))?;
+                        }
+                        Some(compiled)
+                    } else {
+                        None
+                    };
+                    catalog_sync = compiled
+                        .map(|compiled| {
+                            CatalogSyncCursor::from_compiled(compiled, &mut catalog_area_sequence)
+                        })
+                        .transpose()?;
+                    catalog_sync_dirty = false;
+                }
+                if self.pending_events.is_empty()
+                    && let Some(cursor) = catalog_sync.as_mut()
+                {
+                    if !cursor.send_step(self, &mut active_groups)? {
+                        println!(
+                            "каталог синхронизирован: отправлено {}, пропущено {}",
+                            cursor.sent, cursor.skipped
+                        );
+                        if catalog_sync_refusals != 0 {
+                            eprintln!(
+                                "каталог: датапат отверг планов с прошлой сводки: {} ({}); причина в журнале датапата",
+                                catalog_sync_refusals,
+                                ack_reason_text(catalog_sync_refusal_reason)
+                            );
+                            catalog_sync_refusals = 0;
+                            catalog_sync_refusal_reason = control::ACK_OK;
+                        }
+                        catalog_sync = None;
                     }
                 }
                 let r2o_now = std::time::Instant::now();
@@ -11675,6 +11768,7 @@ impl ControlClient {
                             }
                         }
                         if catalog_changed {
+                            catalog_sync_dirty = true;
                             worker.catalog_changed(catalog, &active_groups);
                         }
                     }
@@ -12213,8 +12307,12 @@ impl ControlClient {
                             continue;
                         }
                     }
-                    if !wait_for_control_frame(&self.socket, std::time::Duration::from_millis(100))?
-                    {
+                    let wait = if catalog_sync.is_some() || catalog_sync_dirty {
+                        std::time::Duration::ZERO
+                    } else {
+                        std::time::Duration::from_millis(100)
+                    };
+                    if !wait_for_control_frame(&self.socket, wait)? {
                         measurement_gate.r2o_scheduler_tick();
                         continue;
                     }
@@ -12239,6 +12337,19 @@ impl ControlClient {
                     continue;
                 } else if frame.kind == control::EVENT_STATS {
                     self.r2o_update_dropped_events(&frame)?;
+                    continue;
+                } else if frame.kind == control::EVENT_ACK {
+                    let ack = decode_ack(&frame)
+                        .map_err(|error| format!("подтверждение датапата: {error}"))?;
+                    if !ack.ok
+                        && matches!(
+                            ack.command,
+                            COMMAND_SET_NAME | COMMAND_SET_ADDR | control::COMMAND_SET_SUFFIX
+                        )
+                    {
+                        catalog_sync_refusals += 1;
+                        catalog_sync_refusal_reason = ack.reason;
+                    }
                     continue;
                 }
                 if frame.kind == EVENT_R2O_JOURNAL_ENTRY {
@@ -15212,41 +15323,15 @@ impl ControlClient {
             now,
         )?;
 
-        let install_result = install_catalog_best_effort(self, &compiled);
-        let persist_result =
-            persist_catalog_update(&updated, catalog_path, now, persistence.take());
+        let active_groups = compiled
+            .group_commands
+            .into_iter()
+            .map(|(_, key)| key)
+            .collect();
+        persist_catalog_update(&updated, catalog_path, now, persistence.take())?;
         *catalog = updated;
-        let installed = match (install_result, persist_result) {
-            (Ok(installed), Ok(())) => installed,
-            (Err(install_error), Ok(())) => {
-                return Err(format!(
-                    "подтверждённый план сохранён после APPLIED, но runtime не подтвердил каталог: {install_error}"
-                )
-                .into());
-            }
-            (Ok(_), Err(persist_error)) => {
-                return Err(format!(
-                    "runtime подтвердил каталог после APPLIED, но каталог не сохранён: {persist_error}"
-                )
-                .into());
-            }
-            (Err(install_error), Err(persist_error)) => {
-                return Err(format!(
-                    "подтверждённый план остался в памяти после APPLIED; runtime не подтвердил каталог ({install_error}), сохранить каталог не удалось ({persist_error})"
-                )
-                .into());
-            }
-        };
-        report_catalog_refusals(&installed);
-        if installed.refused > 0 {
-            return Err(format!(
-                "подтверждённый план сохранён после APPLIED, но runtime отказал в установке {} привязок",
-                installed.refused
-            )
-            .into());
-        }
         println!(
-            "автопоиск установил и сохранил план {} для {} ({shape})",
+            "автопоиск подтвердил и сохранил план {}; синхронизация каталога поставлена в очередь для {} ({shape})",
             plan_id,
             outcome.target.host,
             shape = if outcome.target.shape == SHAPE_MODERN {
@@ -15255,7 +15340,7 @@ impl ControlClient {
                 "TLS 1.2"
             }
         );
-        Ok(Some(installed.installed_groups))
+        Ok(Some(active_groups))
     }
 
     fn apply_discovery_direct_clear(
@@ -15384,6 +15469,42 @@ impl ControlClient {
         Ok(ack)
     }
 
+    fn exchange_area_command_with_timeout(
+        &mut self,
+        command: &[u8],
+        expected: u16,
+        area_id: [u8; 16],
+        timeout: std::time::Duration,
+    ) -> Result<r2k_core::control::Ack, Box<dyn Error>> {
+        self.write_command(command)?;
+        let deadline = std::time::Instant::now()
+            .checked_add(timeout)
+            .ok_or("срок подтверждения области слишком велик")?;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() || !wait_for_control_frame(&self.socket, remaining)? {
+                return Err(format!(
+                    "датапат не подтвердил команду области за {} мс",
+                    timeout.as_millis()
+                )
+                .into());
+            }
+            let Some(frame) = read_optional_frame(&mut self.socket)? else {
+                return Err("соединение с датапатом закрыто до подтверждения области".into());
+            };
+            if frame.kind == control::EVENT_ACK {
+                let ack = decode_ack(&frame)
+                    .map_err(|error| format!("подтверждение области датапата: {error}"))?;
+                if ack.command != expected || ack.area_id != Some(area_id) {
+                    self.queue_async_frame(frame)?;
+                    continue;
+                }
+                return Ok(ack);
+            }
+            self.queue_async_frame(frame)?;
+        }
+    }
+
     fn exchange_candidate_probe_with_settle(
         &mut self,
         command: &[u8],
@@ -15420,6 +15541,7 @@ impl ControlClient {
         if !matches!(
             frame.kind,
             EVENT_PROTOCOL
+                | control::EVENT_ACK
                 | EVENT_HELLO
                 | EVENT_APPLIED
                 | EVENT_REFUSED
@@ -16529,29 +16651,29 @@ mod tests {
     #[cfg(unix)]
     use super::saved_http_candidate_keys;
     use super::{
-        CatalogInstallSummary, ClassifyCliOptions, CompiledCatalog, ControlClient,
-        DiscoveryOutcome, HttpBaselineError, HttpBaselineFailureAction, HttpCandidateHistory,
-        HttpCandidateProgress, HttpLiveFailures, HttpSearchCommand, HttpSearchDisposition,
-        HttpSearchTask, HttpSearchWindow, HttpSearchWorker, R2oFamilyRecoveryDecision,
-        R2oVoiceTrialContext, ServeCliOptions, advance_http_candidate, applied_quic_trial_matches,
-        baseline_silence_starts_search, binding_shape_transport, candidate_text, catalog_commands,
-        compile_text, encode_set_name, failed_http_programs, flow_socket_addresses,
-        http_baseline_failure_action, http_search_candidates, http_search_key,
-        install_catalog_best_effort, matching_domain_group, matching_domain_recovery_candidates,
-        measured_http_candidate_keys, normalize_plan_target, parse_classify_options,
-        parse_serve_options, print_flow_journal, r2o_candidate_confirmation_mark,
-        r2o_discovery_failure_retry_due, r2o_family_applied_flow_matches,
-        r2o_family_recovery_decision, r2o_handle_client_shape_event, r2o_http_failed_disposition,
-        r2o_http_live_cut_recheck, r2o_quic_binding_blocks_retry, r2o_tcp_stall_budgets,
-        r2o_tcp_stall_budgets_for_name, r2o_tcp_stall_in_name_band, r2o_voice_proof_matches_target,
-        save_plan_file, shape_matches_plan,
+        ClassifyCliOptions, CompiledCatalog, ControlClient, DiscoveryOutcome, HttpBaselineError,
+        HttpBaselineFailureAction, HttpCandidateHistory, HttpCandidateProgress, HttpLiveFailures,
+        HttpSearchCommand, HttpSearchDisposition, HttpSearchTask, HttpSearchWindow,
+        HttpSearchWorker, R2oFamilyRecoveryDecision, R2oVoiceTrialContext, ServeCliOptions,
+        advance_http_candidate, applied_quic_trial_matches, baseline_silence_starts_search,
+        binding_shape_transport, candidate_text, catalog_commands, compile_text, encode_set_name,
+        failed_http_programs, flow_socket_addresses, http_baseline_failure_action,
+        http_search_candidates, http_search_key, matching_domain_group,
+        matching_domain_recovery_candidates, measured_http_candidate_keys, normalize_plan_target,
+        parse_classify_options, parse_serve_options, print_flow_journal,
+        r2o_candidate_confirmation_mark, r2o_discovery_failure_retry_due,
+        r2o_family_applied_flow_matches, r2o_family_recovery_decision,
+        r2o_handle_client_shape_event, r2o_http_failed_disposition, r2o_http_live_cut_recheck,
+        r2o_quic_binding_blocks_retry, r2o_tcp_stall_budgets, r2o_tcp_stall_budgets_for_name,
+        r2o_tcp_stall_in_name_band, r2o_voice_proof_matches_target, save_plan_file,
+        shape_matches_plan,
     };
     use r2k_core::control::{
         BindingContext, COMMAND_DEL_NAME_PROBE, COMMAND_DEL_VOICE_ADDR_PROBE, COMMAND_SET_NAME,
-        COMMAND_SET_NAME_PROBE, COMMAND_SET_TCP_STALL_BUDGETS, COMMAND_SET_VOICE_ADDR,
-        EVENT_APPLIED, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, Frame, HelloEvent,
-        HttpResponseEvent, KEY_LEN, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_MODERN, SHAPE_QUIC,
-        SHAPE_VOICE, encode_ack, encode_ack_for_trial, encode_frame, encode_greeting, read_frame,
+        COMMAND_SET_NAME_PROBE, COMMAND_SET_VOICE_ADDR, EVENT_APPLIED, EVENT_R2O_TCP_SILENT,
+        EVENT_R2O_TCP_STALL, Frame, HelloEvent, HttpResponseEvent, KEY_LEN, SHAPE_ECH_TCP,
+        SHAPE_HTTP, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, encode_ack, encode_ack_for_trial,
+        encode_frame, encode_greeting, read_frame,
     };
     use r2k_core::plan::{PLAN_MAGIC, Plan};
     use r2o_controller::catalog::{Binding, BoxRecord, Catalog, Fingerprint, Signal};
@@ -16899,6 +17021,7 @@ mod tests {
                 ok: true,
                 reason: r2k_core::control::ACK_OK,
                 trial_id: None,
+                area_id: None,
                 binding_context: Some(first_binding),
             },
         );
@@ -16925,6 +17048,7 @@ mod tests {
                 ok: true,
                 reason: r2k_core::control::ACK_OK,
                 trial_id: None,
+                area_id: None,
                 binding_context: Some(second_binding),
             },
         );
@@ -16944,10 +17068,27 @@ mod tests {
                 ok: true,
                 reason: r2k_core::control::ACK_OK,
                 trial_id: None,
+                area_id: None,
                 binding_context: None,
             },
         );
         assert_eq!(client.acknowledged_http_binding_for(&response), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_area_command_wire_matches_donor() {
+        let command = super::encode_set_bypass("child.example", 6, SHAPE_MODERN, 4).unwrap();
+        let mut area_id = [0; 16];
+        area_id[0] = 1;
+        let bytes = super::control_frame_with_area_id(&command, area_id).unwrap();
+        println!(
+            "D2O_AREA_COMMAND={}",
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
     }
 
     #[cfg(unix)]
@@ -17006,8 +17147,12 @@ mod tests {
             operations
         });
         let mut client = ControlClient::connect(socket_path).unwrap();
-        let summary = super::install_catalog_with_policy(&mut client, &compiled, true).unwrap();
-        assert_eq!(summary.installed, 1);
+        let mut area_sequence = 0;
+        let mut cursor =
+            super::CatalogSyncCursor::from_compiled(compiled, &mut area_sequence).unwrap();
+        let mut active_groups = std::collections::HashSet::new();
+        assert!(!cursor.send_step(&mut client, &mut active_groups).unwrap());
+        assert_eq!(cursor.sent, 2);
         let operations = server.join().unwrap();
         assert_eq!(
             operations,
@@ -17024,7 +17169,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn catalog_sync_batches_eight_commands_before_waiting_for_ack() {
+    fn catalog_sync_sends_eight_commands_without_waiting_for_ack() {
         use std::io::Write;
         use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -17065,20 +17210,19 @@ mod tests {
                 let name = std::str::from_utf8(&frame.body[1..1 + name_len]).unwrap();
                 first_batch.push(name.to_owned());
             }
-            for _ in 0..8 {
-                peer.write_all(&encode_ack(COMMAND_SET_NAME, true, 0).unwrap())
-                    .unwrap();
-            }
             let last = read_frame(&mut peer).unwrap();
             assert_eq!(last.kind, COMMAND_SET_NAME);
-            peer.write_all(&encode_ack(COMMAND_SET_NAME, true, 0).unwrap())
-                .unwrap();
             first_batch
         });
 
         let mut client = ControlClient::connect(socket_path.clone()).unwrap();
-        let summary = install_catalog_best_effort(&mut client, &compiled).unwrap();
-        assert_eq!(summary.installed, 9);
+        let mut area_sequence = 0;
+        let mut cursor =
+            super::CatalogSyncCursor::from_compiled(compiled, &mut area_sequence).unwrap();
+        let mut active_groups = std::collections::HashSet::new();
+        assert!(cursor.send_step(&mut client, &mut active_groups).unwrap());
+        assert!(!cursor.send_step(&mut client, &mut active_groups).unwrap());
+        assert_eq!(cursor.sent, 9);
         let first_batch = server.join().unwrap();
         std::fs::remove_file(socket_path).unwrap();
         std::fs::remove_dir_all(directory).unwrap();
@@ -17498,16 +17642,23 @@ mod tests {
             let (mut peer, _) = listener.accept().unwrap();
             peer.write_all(&encode_greeting(u16::MAX as u32).unwrap())
                 .unwrap();
-            for (ok, reason) in [
-                (false, r2k_core::control::ACK_BAD_PLAN),
-                (true, r2k_core::control::ACK_OK),
-                (false, r2k_core::control::ACK_NO_ROOM),
-            ] {
-                let command = read_frame(&mut peer).unwrap();
-                assert_eq!(command.kind, r2k_core::control::COMMAND_SET_SUFFIX);
-                peer.write_all(&encode_ack(command.kind, ok, reason).unwrap())
-                    .unwrap();
-            }
+            let command = read_frame(&mut peer).unwrap();
+            assert_eq!(command.kind, r2k_core::control::COMMAND_SET_SUFFIX);
+            let area_id: [u8; 16] = command.body[command.body.len() - 16..].try_into().unwrap();
+            let mut stale_id = area_id;
+            stale_id[0] ^= 0xff;
+            let area_ack = |id: [u8; 16]| {
+                let mut body = vec![0; r2k_core::control::KEY_LEN];
+                body[0] = 4;
+                body.extend_from_slice(&command.kind.to_be_bytes());
+                body.push(0);
+                body.push(r2k_core::control::ACK_BAD_PLAN);
+                body.extend_from_slice(&id);
+                encode_frame(r2k_core::control::EVENT_ACK, &body).unwrap()
+            };
+            peer.write_all(&area_ack(stale_id)).unwrap();
+            peer.write_all(&area_ack(area_id)).unwrap();
+            area_id
         });
 
         let plan = super::compile_text(
@@ -17541,19 +17692,19 @@ mod tests {
             tcp_stall_budgets: Vec::new(),
         };
         let mut client = ControlClient::connect(socket_path.clone()).unwrap();
-        let summary = install_catalog_best_effort(&mut client, &compiled).unwrap();
+        let mut area_sequence = 0;
+        let mut cursor =
+            super::CatalogSyncCursor::from_compiled(compiled, &mut area_sequence).unwrap();
+        let mut active_groups = std::collections::HashSet::new();
+        assert!(cursor.send_step(&mut client, &mut active_groups).unwrap());
+        assert!(!cursor.send_step(&mut client, &mut active_groups).unwrap());
+        assert_eq!(cursor.sent, 0);
+        assert_eq!(cursor.skipped, 3);
+        assert!(active_groups.is_empty());
 
-        server.join().unwrap();
+        let area_id = server.join().unwrap();
         std::fs::remove_file(socket_path).unwrap();
-        assert_eq!(
-            summary,
-            CatalogInstallSummary {
-                installed: 1,
-                refused: 2,
-                last_refusal: Some("таблица планов заполнена"),
-                installed_groups: vec![group],
-            }
-        );
+        assert_eq!(&area_id[..8], &1_u64.to_ne_bytes());
     }
     use r2o_controller::fetch::FetchResult;
     use std::{collections::VecDeque, ffi::OsString, io::Write, path::PathBuf};
@@ -23103,6 +23254,13 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(ack.trial_id, Some(expected_trial));
+            assert_eq!(client.pending_events.len(), 2);
+            assert!(
+                client
+                    .pending_events
+                    .iter()
+                    .all(|frame| frame.kind == r2k_core::control::EVENT_ACK)
+            );
             output.push_str(&format!("{case_name} acked=yes\n"));
         }
         if let Ok(path) = std::env::var("R2O_ACK_SEQUENCE_DIFF_OUTPUT") {
@@ -23120,7 +23278,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn d2o_ack_applied_persist_chain_matches_donor() {
-        use std::io::Write;
+        use std::io::{Read, Write};
         use std::os::unix::net::UnixListener;
 
         fn decode_hex(text: &str) -> Vec<u8> {
@@ -23199,13 +23357,7 @@ mod tests {
             assert_eq!(probe.kind, COMMAND_SET_NAME_PROBE);
             stream.write_all(&ack_for_server).unwrap();
             stream.write_all(&applied_for_server).unwrap();
-
-            let command = read_frame(&mut stream).unwrap();
-            assert_eq!(command.kind, COMMAND_SET_NAME);
             stream
-                .write_all(&encode_ack(command.kind, true, 0).unwrap())
-                .unwrap();
-            vec![command.kind]
         });
 
         let mut client = ControlClient::connect(socket_path).unwrap();
@@ -23312,8 +23464,14 @@ mod tests {
             .flat_map(|box_record| &box_record.bindings)
             .find(|binding| binding.kind == "name" && binding.target == host)
             .unwrap();
-        let commands = server.join().unwrap();
-        assert!(commands.contains(&COMMAND_SET_NAME));
+        let mut server_stream = server.join().unwrap();
+        server_stream.set_nonblocking(true).unwrap();
+        let mut pending = [0; 1];
+        assert_eq!(
+            server_stream.read(&mut pending).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "persistent catalog sync runs after the event loop turn, not in the APPLIED handler"
+        );
         assert_eq!(binding.level, 3);
         assert!(r2o_controller::discovery::has_usable_binding(
             &persisted, &target
@@ -25209,8 +25367,9 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn discovery_keeps_verified_catalog_after_permanent_datapath_rejection() {
-        fn run_case(accept: bool) -> (bool, Catalog, Vec<u8>) {
+    fn discovery_persists_verified_catalog_before_background_sync() {
+        use std::io::Read;
+        fn run_case() -> (bool, Catalog) {
             let work = std::env::temp_dir().join(format!(
                 "r2o-discovery-{}-{}",
                 std::process::id(),
@@ -25226,17 +25385,7 @@ mod tests {
             let server = std::thread::spawn(move || {
                 let (mut stream, _) = listener.accept().unwrap();
                 stream.write_all(&encode_greeting(65_535).unwrap()).unwrap();
-                let command = read_frame(&mut stream).unwrap();
-                assert_eq!(command.kind, COMMAND_SET_NAME);
-                let ack = encode_ack(command.kind, accept, if accept { 0 } else { 1 }).unwrap();
-                stream.write_all(&ack).unwrap();
-                let budgets = read_frame(&mut stream).unwrap();
-                assert_eq!(budgets.kind, COMMAND_SET_TCP_STALL_BUDGETS);
-                assert_eq!(budgets.body, [2, 0, 25, 0, 32]);
                 stream
-                    .write_all(&encode_ack(budgets.kind, true, 0).unwrap())
-                    .unwrap();
-                (command.kind, command.body)
             });
 
             let mut client = super::ControlClient::connect(socket_path).unwrap();
@@ -25293,8 +25442,14 @@ mod tests {
                 2,
                 Some(&mut persistence),
             );
-            let (kind, body) = server.join().unwrap();
-            assert_eq!(kind, COMMAND_SET_NAME);
+            let mut server_stream = server.join().unwrap();
+            server_stream.set_nonblocking(true).unwrap();
+            let mut pending = [0; 1];
+            assert_eq!(
+                server_stream.read(&mut pending).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock,
+                "the APPLIED handler must queue catalog sync instead of blocking on it"
+            );
             let before_deadline = Catalog::load(&catalog_path).unwrap();
             assert!(
                 !r2o_controller::discovery::has_usable_binding(&before_deadline, &target),
@@ -25326,10 +25481,10 @@ mod tests {
             );
             let persisted = Catalog::load(&catalog_path).unwrap();
             std::fs::remove_dir_all(work).unwrap();
-            (result.is_ok(), persisted, body)
+            (result.is_ok(), persisted)
         }
 
-        let (accepted, saved, body) = run_case(true);
+        let (accepted, saved) = run_case();
         assert!(accepted);
         assert!(r2o_controller::discovery::has_usable_binding(
             &saved,
@@ -25350,29 +25505,6 @@ mod tests {
                 .level,
             3
         );
-        let name_len = usize::from(body[0]);
-        assert_eq!(&body[1..1 + name_len], b"example.com");
-        assert_eq!(body[1 + name_len], SHAPE_MODERN);
-        assert_eq!(Plan::parse(&body[3 + name_len..]).unwrap().proto, 1);
-
-        let (accepted, saved, _) = run_case(false);
-        assert!(!accepted);
-        assert!(saved.boxes.iter().any(|box_record| {
-            box_record
-                .fingerprint
-                .signals
-                .iter()
-                .any(|signal| signal.packets == 32)
-        }));
-        assert!(r2o_controller::discovery::has_usable_binding(
-            &saved,
-            &r2o_controller::discovery::DiscoveryTarget {
-                host: "example.com".into(),
-                endpoint: "127.0.0.1:443".into(),
-                family: 4,
-                shape: SHAPE_MODERN,
-            }
-        ));
     }
 
     #[cfg(unix)]

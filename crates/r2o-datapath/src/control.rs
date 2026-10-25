@@ -161,6 +161,10 @@ impl NamePlans {
 
     pub fn handle(&mut self, frame: &Frame) -> Ack {
         let addr_probe = matches!(frame.kind, COMMAND_SET_ADDR_PROBE | COMMAND_DEL_ADDR_PROBE);
+        let area_command = matches!(
+            frame.kind,
+            COMMAND_SET_SUFFIX | COMMAND_DEL_SUFFIX | COMMAND_SET_BYPASS | COMMAND_DEL_BYPASS
+        );
         let trial_id = if addr_probe {
             frame
                 .body
@@ -175,44 +179,58 @@ impl NamePlans {
         } else {
             None
         };
+        let area_id = area_command.then(|| {
+            frame
+                .body
+                .get(frame.body.len().saturating_sub(16)..)
+                .filter(|_| frame.body.len() >= 16)
+                .and_then(|bytes| bytes.try_into().ok())
+                .unwrap_or([0; 16])
+        });
         let body = if addr_probe {
             &frame.body
+        } else if area_command && frame.body.len() >= 16 {
+            &frame.body[..frame.body.len() - 16]
         } else if trial_id.is_some() {
             &frame.body[..frame.body.len() - 16]
         } else {
             &frame.body
         };
-        let (ok, reason) = match frame.kind {
-            COMMAND_SET_NAME => self.set_name(body),
-            COMMAND_SET_ADDR => self.set_addr(body),
-            COMMAND_SET_SUFFIX => self.set_suffix(body),
-            COMMAND_DEL_SUFFIX => self.delete_domain_area(body, true),
-            COMMAND_SET_BYPASS => self.set_domain_bypass(body),
-            COMMAND_DEL_BYPASS => self.delete_domain_area(body, false),
-            COMMAND_SET_NAME_PROBE => self.set_name_probe(body, trial_id),
-            COMMAND_SET_VOICE_ADDR => self.set_voice_addr(body),
-            COMMAND_SET_VOICE_ADDR_PROBE => self.set_voice_addr_probe(body, trial_id),
-            COMMAND_DEL_VOICE_ADDR_PROBE => self.delete_voice_addr_probe(body, trial_id),
-            COMMAND_SET_ADDR_PROBE => self.set_addr_probe(body),
-            COMMAND_DEL_ADDR_PROBE => self.delete_addr_probe(body, trial_id),
-            COMMAND_DEL_NAME => self.delete_name(body),
-            COMMAND_DEL_ADDR => self.delete_addr(body),
-            COMMAND_DEL_NAME_PROBE => self.delete_name_probe(body),
-            COMMAND_SET_HTTPS => self.set_https(body),
-            COMMAND_CLEAR if frame.body.is_empty() => {
-                self.plans.clear();
-                self.addr_plans.clear();
-                self.suffix_plans.clear();
-                self.domain_bypasses.clear();
-                self.probes.clear();
-                self.voice_addr_plans.clear();
-                self.voice_addr_probes.clear();
-                self.addr_probes.clear();
-                self.https_names.clear();
-                (true, control::ACK_OK)
+        let (ok, reason) = if area_command && frame.body.len() < 16 {
+            (false, control::ACK_BAD_ARGS)
+        } else {
+            match frame.kind {
+                COMMAND_SET_NAME => self.set_name(body),
+                COMMAND_SET_ADDR => self.set_addr(body),
+                COMMAND_SET_SUFFIX => self.set_suffix(body),
+                COMMAND_DEL_SUFFIX => self.delete_domain_area(body, true),
+                COMMAND_SET_BYPASS => self.set_domain_bypass(body),
+                COMMAND_DEL_BYPASS => self.delete_domain_area(body, false),
+                COMMAND_SET_NAME_PROBE => self.set_name_probe(body, trial_id),
+                COMMAND_SET_VOICE_ADDR => self.set_voice_addr(body),
+                COMMAND_SET_VOICE_ADDR_PROBE => self.set_voice_addr_probe(body, trial_id),
+                COMMAND_DEL_VOICE_ADDR_PROBE => self.delete_voice_addr_probe(body, trial_id),
+                COMMAND_SET_ADDR_PROBE => self.set_addr_probe(body),
+                COMMAND_DEL_ADDR_PROBE => self.delete_addr_probe(body, trial_id),
+                COMMAND_DEL_NAME => self.delete_name(body),
+                COMMAND_DEL_ADDR => self.delete_addr(body),
+                COMMAND_DEL_NAME_PROBE => self.delete_name_probe(body),
+                COMMAND_SET_HTTPS => self.set_https(body),
+                COMMAND_CLEAR if frame.body.is_empty() => {
+                    self.plans.clear();
+                    self.addr_plans.clear();
+                    self.suffix_plans.clear();
+                    self.domain_bypasses.clear();
+                    self.probes.clear();
+                    self.voice_addr_plans.clear();
+                    self.voice_addr_probes.clear();
+                    self.addr_probes.clear();
+                    self.https_names.clear();
+                    (true, control::ACK_OK)
+                }
+                COMMAND_CLEAR => (false, control::ACK_BAD_ARGS),
+                _ => (false, control::ACK_BAD_ARGS),
             }
-            COMMAND_CLEAR => (false, control::ACK_BAD_ARGS),
-            _ => (false, control::ACK_BAD_ARGS),
         };
         if ok {
             self.revision = self.revision.wrapping_add(1);
@@ -222,6 +240,7 @@ impl NamePlans {
             ok,
             reason,
             trial_id,
+            area_id,
             binding_context: if ok && frame.kind == COMMAND_SET_NAME {
                 self.http_name_binding_context(body)
             } else {
@@ -1572,11 +1591,12 @@ impl ControlServer {
     }
 
     pub fn send_ack(&mut self, ack: Ack) -> io::Result<()> {
-        let bytes = control::encode_ack_with_binding(
+        let bytes = control::encode_ack_with_identifiers(
             ack.command,
             ack.ok,
             ack.reason,
             ack.trial_id,
+            ack.area_id,
             ack.binding_context,
         )
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
@@ -1640,6 +1660,7 @@ impl ControlServer {
                     ok: false,
                     reason: control::ACK_BAD_ARGS,
                     trial_id: None,
+                    area_id: None,
                     binding_context: None,
                 },
                 None,
@@ -1652,6 +1673,7 @@ impl ControlServer {
                     ok: false,
                     reason: control::ACK_BAD_ARGS,
                     trial_id: None,
+                    area_id: None,
                     binding_context: None,
                 },
                 None,
@@ -1667,6 +1689,7 @@ impl ControlServer {
                     ok: true,
                     reason: control::ACK_OK,
                     trial_id: None,
+                    area_id: None,
                     binding_context: None,
                 },
                 Some(cached.event_body.clone()),
@@ -1679,6 +1702,7 @@ impl ControlServer {
                 ok: true,
                 reason: control::ACK_OK,
                 trial_id: None,
+                area_id: None,
                 binding_context: None,
             },
             None,
@@ -2352,6 +2376,7 @@ mod tests {
         body.extend_from_slice(&[0x00, 0x01, 0x00, 0x10]);
         body.extend_from_slice(&[0x31; 16]);
         body.extend_from_slice(&[0x00, 0x02, 0x00, 0x02, 0x06, 0x01]);
+        body.extend_from_slice(&[0xA1; 16]);
 
         let mut plans = NamePlans::default();
         let ack = plans.handle(&Frame {
@@ -2359,6 +2384,7 @@ mod tests {
             body,
         });
         assert!(ack.ok, "SET_SUFFIX отвергнут: {}", ack.reason);
+        assert_eq!(ack.area_id, Some([0xA1; 16]));
 
         assert_eq!(
             super::super::capture::tcp_hello_from_packet(&tcp_tls_packet("rr-new.googlevideo.com"))
@@ -2385,6 +2411,7 @@ mod tests {
         nested.extend_from_slice(&[0x00, 0x01, 0x00, 0x10]);
         nested.extend_from_slice(&[0x42; 16]);
         nested.extend_from_slice(&[0x00, 0x02, 0x00, 0x02, 0x06, 0x01]);
+        nested.extend_from_slice(&[0xA2; 16]);
         assert!(
             plans
                 .handle(&Frame {
@@ -2469,6 +2496,7 @@ mod tests {
         suffix_body.extend_from_slice(&[0x00, 0x01, 0x00, 0x10]);
         suffix_body.extend_from_slice(&[0x31; 16]);
         suffix_body.extend_from_slice(&[0x00, 0x02, 0x00, 0x02, 0x06, 0x01]);
+        suffix_body.extend_from_slice(&[0xA3; 16]);
 
         let mut plans = NamePlans::default();
         assert!(
@@ -2483,6 +2511,7 @@ mod tests {
         let mut bypass_body = vec![name.len() as u8];
         bypass_body.extend_from_slice(name.as_bytes());
         bypass_body.extend_from_slice(&[6, SHAPE_MODERN, 4]);
+        bypass_body.extend_from_slice(&[0xA4; 16]);
         assert!(
             plans
                 .handle(&Frame {
@@ -2516,6 +2545,7 @@ mod tests {
         let mut suffix_key = vec![suffix.len() as u8];
         suffix_key.extend_from_slice(suffix.as_bytes());
         suffix_key.extend_from_slice(&[6, SHAPE_MODERN, 4]);
+        suffix_key.extend_from_slice(&[0xA5; 16]);
         assert!(
             plans
                 .handle(&Frame {
@@ -2525,6 +2555,17 @@ mod tests {
                 .ok
         );
         assert!(plans.select(&tcp_tls_packet(name)).is_none());
+    }
+
+    #[test]
+    fn identified_area_command_requires_its_id_like_d2o() {
+        let ack = NamePlans::default().handle(&Frame {
+            kind: COMMAND_SET_BYPASS,
+            body: Vec::new(),
+        });
+        assert!(!ack.ok);
+        assert_eq!(ack.reason, control::ACK_BAD_ARGS);
+        assert_eq!(ack.area_id, Some([0; 16]));
     }
 
     #[test]

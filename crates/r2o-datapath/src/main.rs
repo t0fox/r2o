@@ -68,6 +68,7 @@ mod app {
             ok: result.is_ok(),
             reason: if result.is_ok() { ACK_OK } else { ACK_BAD_ARGS },
             trial_id: None,
+            area_id: None,
             binding_context: None,
         }
     }
