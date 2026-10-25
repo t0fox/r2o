@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "updated": "2026-10-25T17:00:00Z",
+  "network_whitelist": {
+    "name": "learned-white.example",
+    "searched": false,
+    "tx_only": true,
+    "confirmed_utc": "2026-10-25T17:00:00Z"
+  }
+}

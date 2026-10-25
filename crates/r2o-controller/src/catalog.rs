@@ -219,6 +219,8 @@ pub struct DomainState {
 pub struct NetworkWhitelist {
     pub name: String,
     pub searched: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub tx_only: bool,
     #[serde(
         rename = "confirmed_utc",
         default,
@@ -226,6 +228,10 @@ pub struct NetworkWhitelist {
         skip_serializing_if = "option_is_zero"
     )]
     pub confirmed_at: Option<i64>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Debug)]

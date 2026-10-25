@@ -1513,6 +1513,7 @@ fn r2o_discovery_record_network_whitelist(
     path: &Path,
     fallback: &Catalog,
     discovered_name: Option<&str>,
+    rx_cut: bool,
 ) -> Result<(), String> {
     let (_lock, mut catalog) = locked_catalog(path, fallback).map_err(|error| error.to_string())?;
     let now = std::time::SystemTime::now()
@@ -1522,16 +1523,14 @@ fn r2o_discovery_record_network_whitelist(
     let network = catalog
         .network_whitelist
         .get_or_insert_with(r2o_controller::catalog::NetworkWhitelist::default);
-    if let Some(name) = discovered_name {
-        if !network.name.is_empty() && network.name != name {
-            return Ok(());
-        }
-        network.name = name.to_owned();
-        network.searched = true;
-        network.confirmed_at = Some(now.max(1));
-    } else if network.name.is_empty() {
-        network.searched = true;
-    }
+    r2o_update_network_whitelist(
+        network,
+        &R2oNetworkWhitelistUpdate {
+            name: discovered_name.map(str::to_owned),
+            rx_cut,
+        },
+        now.max(1),
+    );
     catalog
         .save_atomic(path, now.max(1))
         .map_err(|error| format!("не удалось сохранить белое имя сети: {error}"))
@@ -1541,7 +1540,7 @@ fn r2o_discovery_record_network_whitelist(
 fn r2o_apply_network_whitelist_update(
     catalog: &mut Catalog,
     path: &Path,
-    discovered_name: Option<&str>,
+    update: &R2oNetworkWhitelistUpdate,
     now: i64,
     persistence: Option<&mut R2oCatalogPersistence>,
 ) -> Result<(), Box<dyn Error>> {
@@ -1550,19 +1549,28 @@ fn r2o_apply_network_whitelist_update(
     let network = updated
         .network_whitelist
         .get_or_insert_with(r2o_controller::catalog::NetworkWhitelist::default);
-    if let Some(name) = discovered_name {
-        if !network.name.is_empty() && network.name != name {
-            return Ok(());
-        }
-        network.name = name.to_owned();
-        network.searched = true;
-        network.confirmed_at = Some(now.max(1));
-    } else if network.name.is_empty() {
-        network.searched = true;
-    }
+    r2o_update_network_whitelist(network, update, now.max(1));
     persist_catalog_update(&updated, path, now.max(1), persistence)?;
     *catalog = updated;
     Ok(())
+}
+
+#[cfg(unix)]
+fn r2o_update_network_whitelist(
+    network: &mut r2o_controller::catalog::NetworkWhitelist,
+    update: &R2oNetworkWhitelistUpdate,
+    now: i64,
+) {
+    if let Some(name) = &update.name {
+        network.name.clone_from(name);
+        network.searched = update.rx_cut;
+        network.tx_only = !update.rx_cut;
+        network.confirmed_at = Some(now.max(1));
+    } else if !network.searched {
+        network.name.clear();
+        network.searched = true;
+        network.confirmed_at = Some(now.max(1));
+    }
 }
 
 #[cfg(unix)]
@@ -2334,6 +2342,16 @@ fn r2o_discovery_volume_cut(
     tx.as_ref()
         .is_ok_and(|result| result.verdict == r2o_controller::fetch::R2oFetchVolumeTxVerdict::Cut)
         || rx.evidence.is_some()
+}
+
+#[cfg(unix)]
+fn r2o_discovery_network_whitelist_probe(catalog: Option<&Catalog>, rx_cut: bool) -> bool {
+    catalog.is_some_and(|catalog| {
+        catalog.network_whitelist.as_ref().is_none_or(|network| {
+            (!network.searched && network.name.is_empty())
+                || (rx_cut && !network.name.is_empty() && network.tx_only)
+        })
+    })
 }
 
 #[cfg(unix)]
@@ -4869,13 +4887,14 @@ const R2O_DISCOVERY_ECH_RR_POSITIVE_TTL: std::time::Duration =
 const R2O_DISCOVERY_ECH_RR_NEGATIVE_TTL: std::time::Duration =
     std::time::Duration::from_secs(30 * 60);
 #[cfg(unix)]
-const R2O_ECH_RX_LADDER_BATCH: usize = 32;
+const R2O_DISCOVERY_RX_LADDER_BATCH: usize = 8;
+const R2O_ECH_RX_LADDER_BATCH: usize = R2O_DISCOVERY_RX_LADDER_BATCH;
 #[cfg(unix)]
 const R2O_DISCOVERY_FAILURE_RETRY: std::time::Duration = std::time::Duration::from_secs(120);
 #[cfg(unix)]
 const R2O_DISCOVERY_CHALLENGE_RETRY: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 #[cfg(unix)]
-const R2O_VOLUME_LADDER_BATCH: usize = 32;
+const R2O_VOLUME_LADDER_BATCH: usize = R2O_DISCOVERY_RX_LADDER_BATCH;
 const R2O_VOLUME_TX_LADDER_PACKET_BUDGET: u32 = 50;
 #[cfg(unix)]
 const R2O_VOLUME_SEARCH_CACHE_CAPACITY: usize = 256;
@@ -4906,6 +4925,13 @@ struct R2oDiscoveryVolumeSearchKey {
     alternate_path: Option<String>,
     network_probe: bool,
     white_name: String,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct R2oNetworkWhitelistUpdate {
+    name: Option<String>,
+    rx_cut: bool,
 }
 
 #[cfg(unix)]
@@ -4943,7 +4969,9 @@ impl R2oDiscoveryVolumeSearchCache {
             .entries
             .iter()
             .position(|(candidate, _)| candidate == target)?;
-        if self.entries[index].1.key != *key {
+        let mut cached_key = self.entries[index].1.key.clone();
+        cached_key.network_probe = key.network_probe;
+        if cached_key != *key {
             self.entries.remove(index);
             return None;
         }
@@ -5991,7 +6019,7 @@ struct DiscoveryWorker {
     catalog_refreshes: Arc<std::sync::Mutex<HashSet<R2oDiscoveryTaskKey>>>,
     searches: Arc<std::sync::Mutex<R2oDiscoverySearches>>,
     outcomes: Receiver<R2oDiscoveryWorkOutcome>,
-    network_whitelist_updates: Arc<std::sync::Mutex<VecDeque<Option<String>>>>,
+    network_whitelist_updates: Arc<std::sync::Mutex<VecDeque<R2oNetworkWhitelistUpdate>>>,
     cancel: Arc<AtomicBool>,
     seen: HashSet<r2o_controller::discovery::DiscoveryTarget>,
     seen_order: VecDeque<r2o_controller::discovery::DiscoveryTarget>,
@@ -6754,7 +6782,7 @@ impl DiscoveryWorker {
         measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
         commands: SyncSender<HttpSearchCommand>,
         recent_tcp_names: Arc<std::sync::Mutex<R2oRecentTcpNameCache>>,
-        network_whitelist_updates: Arc<std::sync::Mutex<VecDeque<Option<String>>>>,
+        network_whitelist_updates: Arc<std::sync::Mutex<VecDeque<R2oNetworkWhitelistUpdate>>>,
         catalog_snapshot: Arc<std::sync::Mutex<Catalog>>,
     ) -> Self {
         let searches = Arc::new(std::sync::Mutex::new(R2oDiscoverySearches::default()));
@@ -6982,10 +7010,7 @@ impl DiscoveryWorker {
                         candidate_catalog.as_ref(),
                         &runner_resource_memory,
                     );
-                    let network_probe = catalog
-                        .network_whitelist
-                        .as_ref()
-                        .is_none_or(|network| network.name.is_empty() && !network.searched);
+                    let network_probe = r2o_discovery_network_whitelist_probe(Some(catalog), false);
                     let probe_cap = R2O_DISCOVERY_PROBE_CAP.saturating_add(if network_probe {
                         r2o_controller::r2o_rx_volume::r2o_rx_volume_name_count()
                     } else {
@@ -7242,13 +7267,9 @@ impl DiscoveryWorker {
                 candidate_catalog.as_ref(),
                 &runner_resource_memory,
             );
-            let network_probe = candidate_catalog.as_ref().is_some_and(|catalog| {
-                catalog
-                    .network_whitelist
-                    .as_ref()
-                    .is_none_or(|network| network.name.is_empty() && !network.searched)
-            });
-            let probe_cap = R2O_DISCOVERY_PROBE_CAP.saturating_add(if network_probe {
+            let mut network_probe =
+                r2o_discovery_network_whitelist_probe(candidate_catalog.as_ref(), false);
+            let mut probe_cap = R2O_DISCOVERY_PROBE_CAP.saturating_add(if network_probe {
                 r2o_controller::r2o_rx_volume::r2o_rx_volume_name_count()
             } else {
                 0
@@ -7541,6 +7562,13 @@ impl DiscoveryWorker {
                     r2o_ech_witness_rx_cut(&target, &selected_config, true, false, fetch)
                 })
             {
+                network_probe =
+                    r2o_discovery_network_whitelist_probe(candidate_catalog.as_ref(), true);
+                probe_cap = R2O_DISCOVERY_PROBE_CAP.saturating_add(if network_probe {
+                    r2o_controller::r2o_rx_volume::r2o_rx_volume_name_count()
+                } else {
+                    0
+                });
                 let mut discovered_network_name = None;
                 let mut next_index = *runner_ech_rx_cursor
                     .lock()
@@ -7654,7 +7682,10 @@ impl DiscoveryWorker {
                     runner_network_whitelist_updates
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .push_back(Some(name.to_owned()));
+                        .push_back(R2oNetworkWhitelistUpdate {
+                            name: Some(name.to_owned()),
+                            rx_cut: true,
+                        });
                 } else if network_probe && next_index >= candidate_count {
                     runner_ech_rx_cursor
                         .lock()
@@ -7663,7 +7694,10 @@ impl DiscoveryWorker {
                     runner_network_whitelist_updates
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .push_back(None);
+                        .push_back(R2oNetworkWhitelistUpdate {
+                            name: None,
+                            rx_cut: true,
+                        });
                 } else if next_index >= candidate_count {
                     runner_ech_rx_cursor
                         .lock()
@@ -7938,7 +7972,7 @@ impl DiscoveryWorker {
         runner: Arc<R2oDiscoveryRunner>,
         client_hellos: Arc<std::sync::Mutex<HashMap<R2oDiscoveryTaskKey, Vec<u8>>>>,
         resource_memory: Arc<std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>>,
-        network_whitelist_updates: Arc<std::sync::Mutex<VecDeque<Option<String>>>>,
+        network_whitelist_updates: Arc<std::sync::Mutex<VecDeque<R2oNetworkWhitelistUpdate>>>,
     ) -> Self {
         Self::r2o_new_with_client_state(
             measurement_gate,
@@ -7958,7 +7992,7 @@ impl DiscoveryWorker {
         client_tcp_timestamps: Arc<std::sync::Mutex<HashMap<R2oDiscoveryTaskKey, bool>>>,
         resource_memory: Arc<std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>>,
         searches: Arc<std::sync::Mutex<R2oDiscoverySearches>>,
-        network_whitelist_updates: Arc<std::sync::Mutex<VecDeque<Option<String>>>>,
+        network_whitelist_updates: Arc<std::sync::Mutex<VecDeque<R2oNetworkWhitelistUpdate>>>,
     ) -> Self {
         let jobs = Arc::new((
             std::sync::Mutex::new(R2oDiscoveryQueue::default()),
@@ -9298,7 +9332,7 @@ impl DiscoveryWorker {
         outcome
     }
 
-    fn try_network_whitelist_update(&self) -> Option<Option<String>> {
+    fn try_network_whitelist_update(&self) -> Option<R2oNetworkWhitelistUpdate> {
         self.network_whitelist_updates
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -9560,7 +9594,7 @@ fn r2o_discovery_volume_recovery(
     client_has_tcp_timestamps: bool,
     mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
-    network_whitelist_updates: &std::sync::Mutex<VecDeque<Option<String>>>,
+    network_whitelist_updates: &std::sync::Mutex<VecDeque<R2oNetworkWhitelistUpdate>>,
     candidate_catalog: Option<&Catalog>,
     white_name: &str,
     send_cap: &AtomicUsize,
@@ -9577,17 +9611,7 @@ fn r2o_discovery_volume_recovery(
 
     let (probe_path, alternate_path) =
         r2o_discovery_resource_probe_paths(target, candidate_catalog, resource_memory);
-    let network_probe = candidate_catalog.is_some_and(|catalog| {
-        catalog
-            .network_whitelist
-            .as_ref()
-            .is_none_or(|network| network.name.is_empty() && !network.searched)
-    });
-    let probe_cap = R2O_DISCOVERY_PROBE_CAP.saturating_add(if network_probe {
-        r2o_controller::r2o_rx_volume::r2o_rx_volume_name_count()
-    } else {
-        0
-    });
+    let initial_network_probe = r2o_discovery_network_whitelist_probe(candidate_catalog, false);
     let mut probe_counts = r2o_controller::r2o_fallback::ProbeCounts {
         raw: classify_probes,
         candidates: 0,
@@ -9597,7 +9621,7 @@ fn r2o_discovery_volume_recovery(
         send_cap: send_cap.load(Ordering::Relaxed),
         probe_path,
         alternate_path,
-        network_probe,
+        network_probe: initial_network_probe,
         white_name: white_name.to_owned(),
     };
     let cached = searches
@@ -9651,6 +9675,19 @@ fn r2o_discovery_volume_recovery(
             .insert(target.clone(), search.clone());
         search
     };
+
+    let network_probe =
+        r2o_discovery_network_whitelist_probe(candidate_catalog, search.rx.evidence.is_some());
+    if search.key.network_probe != network_probe {
+        search.key.network_probe = network_probe;
+        search.next_candidate = 0;
+        search.tried_plans.clear();
+    }
+    let probe_cap = R2O_DISCOVERY_PROBE_CAP.saturating_add(if network_probe {
+        r2o_controller::r2o_rx_volume::r2o_rx_volume_name_count()
+    } else {
+        0
+    });
 
     if !r2o_discovery_volume_cut(&search.tx, &search.rx) {
         if search.rx.evidence.is_none()
@@ -9985,7 +10022,10 @@ fn r2o_discovery_volume_recovery(
                 network_whitelist_updates
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push_back(Some(name.to_owned()));
+                    .push_back(R2oNetworkWhitelistUpdate {
+                        name: Some(name.to_owned()),
+                        rx_cut: search.rx.evidence.is_some(),
+                    });
             }
             searches
                 .lock()
@@ -10044,7 +10084,10 @@ fn r2o_discovery_volume_recovery(
             network_whitelist_updates
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push_back(None);
+                .push_back(R2oNetworkWhitelistUpdate {
+                    name: None,
+                    rx_cut: search.rx.evidence.is_some(),
+                });
         }
         search.key.network_probe = false;
         search.key.white_name = "hcaptcha.com".into();
@@ -11072,7 +11115,7 @@ impl ControlClient {
                 }
                 let r2o_now = std::time::Instant::now();
                 if let Some((worker, catalog, path, _)) = discovery.as_mut() {
-                    while let Some(discovered_name) = worker.try_network_whitelist_update() {
+                    while let Some(update) = worker.try_network_whitelist_update() {
                         let wall_now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
@@ -11080,7 +11123,7 @@ impl ControlClient {
                         if let Err(error) = r2o_apply_network_whitelist_update(
                             catalog,
                             path,
-                            discovered_name.as_deref(),
+                            &update,
                             wall_now,
                             catalog_persistence.as_mut(),
                         ) {
@@ -12966,7 +13009,7 @@ impl ControlClient {
         };
         if let Some((worker, mut catalog, path, _)) = discovery.take() {
             drop(worker);
-            while let Some(discovered_name) = network_whitelist_updates
+            while let Some(update) = network_whitelist_updates
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .pop_front()
@@ -12978,7 +13021,7 @@ impl ControlClient {
                 if let Err(error) = r2o_apply_network_whitelist_update(
                     &mut catalog,
                     &path,
-                    discovered_name.as_deref(),
+                    &update,
                     wall_now,
                     catalog_persistence.as_mut(),
                 ) {
@@ -16158,6 +16201,151 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
+    #[cfg(unix)]
+    #[test]
+    fn network_whitelist_probe_decisions_matches_d2o() {
+        let tx_only = Catalog::parse(
+            br#"{"schema":1,"network_whitelist":{"name":"learned-white.example","searched":false,"tx_only":true}}"#,
+        )
+        .unwrap();
+        let tx_only_round_trip =
+            Catalog::parse(tx_only.to_json_at(1_791_593_321).unwrap().as_bytes()).unwrap();
+        assert!(
+            tx_only_round_trip
+                .network_whitelist
+                .as_ref()
+                .unwrap()
+                .tx_only
+        );
+        let known_rx = Catalog::parse(
+            br#"{"schema":1,"network_whitelist":{"name":"learned-white.example","searched":true}}"#,
+        )
+        .unwrap();
+        assert!(
+            !known_rx
+                .to_json_at(1_791_593_321)
+                .unwrap()
+                .contains("\"tx_only\"")
+        );
+        let persisted: Catalog =
+            Catalog::parse(include_bytes!("../tests/fixtures/d2o_net_whitelist.json")).unwrap();
+        let persisted_network = persisted.network_whitelist.as_ref().unwrap();
+        if let Ok(path) = std::env::var("R2O_NET_WHITELIST_CATALOG_DIFF_OUTPUT") {
+            std::fs::write(
+                path,
+                format!(
+                    "{} {} {} {}\n",
+                    persisted_network.name,
+                    u8::from(persisted_network.searched),
+                    u8::from(persisted_network.tx_only),
+                    persisted_network.confirmed_at.unwrap_or_default()
+                ),
+            )
+            .unwrap();
+        }
+        let unresolved = Catalog::default();
+        let cases = [
+            ("unresolved", &unresolved, true),
+            ("known_rx", &known_rx, true),
+            ("tx_only_rx", &tx_only, true),
+            ("tx_only_tx", &tx_only, false),
+        ];
+        let mut output = String::new();
+        for (name, catalog, rx_cut) in cases {
+            let network_probe = super::r2o_discovery_network_whitelist_probe(Some(catalog), rx_cut);
+            output.push_str(&format!("{name} {}\n", u8::from(network_probe)));
+        }
+        if let Ok(path) = std::env::var("R2O_NET_WHITELIST_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rx_ladder_batch_matches_d2o() {
+        let output = format!(
+            "volume {}\nech {}\n",
+            super::R2O_VOLUME_LADDER_BATCH,
+            super::R2O_ECH_RX_LADDER_BATCH
+        );
+        if let Ok(path) = std::env::var("R2O_RX_LADDER_BATCH_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn network_whitelist_updates_keep_the_cut_direction_and_clear_exhausted_names() {
+        let mut catalog = Catalog::default();
+        let network = catalog
+            .network_whitelist
+            .get_or_insert_with(r2o_controller::catalog::NetworkWhitelist::default);
+        super::r2o_update_network_whitelist(
+            network,
+            &super::R2oNetworkWhitelistUpdate {
+                name: Some("tx-only.example".into()),
+                rx_cut: false,
+            },
+            1_791_593_321,
+        );
+        let network = catalog.network_whitelist.as_ref().unwrap();
+        assert!(!network.searched);
+        assert!(network.tx_only);
+        assert!(super::r2o_discovery_network_whitelist_probe(
+            Some(&catalog),
+            true
+        ));
+        assert!(!super::r2o_discovery_network_whitelist_probe(
+            Some(&catalog),
+            false
+        ));
+
+        let network = catalog.network_whitelist.as_mut().unwrap();
+        super::r2o_update_network_whitelist(
+            network,
+            &super::R2oNetworkWhitelistUpdate {
+                name: Some("rx-verified.example".into()),
+                rx_cut: true,
+            },
+            1_791_593_322,
+        );
+        let network = catalog.network_whitelist.as_ref().unwrap();
+        assert_eq!(network.name, "rx-verified.example");
+        assert!(network.searched);
+        assert!(!network.tx_only);
+        assert!(!super::r2o_discovery_network_whitelist_probe(
+            Some(&catalog),
+            true
+        ));
+
+        let network = catalog.network_whitelist.as_mut().unwrap();
+        super::r2o_update_network_whitelist(
+            network,
+            &super::R2oNetworkWhitelistUpdate {
+                name: Some("tx-only.example".into()),
+                rx_cut: false,
+            },
+            1_791_593_323,
+        );
+        let network = catalog.network_whitelist.as_mut().unwrap();
+        super::r2o_update_network_whitelist(
+            network,
+            &super::R2oNetworkWhitelistUpdate {
+                name: None,
+                rx_cut: true,
+            },
+            1_791_593_324,
+        );
+        let network = catalog.network_whitelist.as_ref().unwrap();
+        assert!(network.name.is_empty());
+        assert!(network.searched);
+        assert!(network.tx_only);
+        assert!(!super::r2o_discovery_network_whitelist_probe(
+            Some(&catalog),
+            true
+        ));
+    }
+
     #[test]
     fn candidate_confirmation_uses_datapath_mark_even_when_direct_probe_has_a_bypass_mark() {
         #[cfg(target_os = "linux")]
@@ -18297,28 +18485,31 @@ mod tests {
         let path = work.join("catalog.json");
         let fallback = Catalog::default();
 
-        super::r2o_discovery_record_network_whitelist(&path, &fallback, None).unwrap();
+        super::r2o_discovery_record_network_whitelist(&path, &fallback, None, true).unwrap();
         let searched = Catalog::load(&path).unwrap();
         let network = searched.network_whitelist.as_ref().unwrap();
         assert!(network.searched);
         assert!(network.name.is_empty());
-        assert_eq!(network.confirmed_at, None);
+        assert!(network.confirmed_at.is_some());
 
-        super::r2o_discovery_record_network_whitelist(&path, &fallback, Some("9gag.com")).unwrap();
+        super::r2o_discovery_record_network_whitelist(&path, &fallback, Some("9gag.com"), true)
+            .unwrap();
         let confirmed = Catalog::load(&path).unwrap();
         let network = confirmed.network_whitelist.as_ref().unwrap();
         assert!(network.searched);
+        assert!(!network.tx_only);
         assert_eq!(network.name, "9gag.com");
         assert!(network.confirmed_at.is_some());
 
-        super::r2o_discovery_record_network_whitelist(&path, &fallback, Some("zoho.com")).unwrap();
+        super::r2o_discovery_record_network_whitelist(&path, &fallback, Some("zoho.com"), true)
+            .unwrap();
         assert_eq!(
             Catalog::load(&path)
                 .unwrap()
                 .network_whitelist
                 .unwrap()
                 .name,
-            "9gag.com"
+            "zoho.com"
         );
 
         std::fs::remove_file(path).unwrap();
@@ -24777,7 +24968,10 @@ mod tests {
         super::r2o_apply_network_whitelist_update(
             &mut catalog,
             &path,
-            Some("example.net"),
+            &super::R2oNetworkWhitelistUpdate {
+                name: Some("example.net".into()),
+                rx_cut: true,
+            },
             2,
             Some(&mut persistence),
         )
