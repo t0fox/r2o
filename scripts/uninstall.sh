@@ -31,7 +31,7 @@ UNINSTALLER=$ROOT/releases/$ACTIVE/router/uninstall.sh
     exit 1
 }
 
-if [ ! -t 0 ] && { : </dev/tty; } 2>/dev/null; then
+if [ ! -t 0 ] && ( : </dev/tty ) 2>/dev/null; then
     exec sh "$UNINSTALLER" --root "$ROOT" "$@" </dev/tty
 fi
 exec sh "$UNINSTALLER" --root "$ROOT" "$@"

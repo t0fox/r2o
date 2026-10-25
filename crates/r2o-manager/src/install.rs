@@ -768,14 +768,20 @@ mod tests {
 
     impl TestDir {
         fn new() -> Self {
-            let sequence = NEXT_TEST.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "r2o-manager-install-{}-{sequence}",
-                std::process::id()
-            ));
-            let _ = fs::remove_dir_all(&path);
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
+            loop {
+                let sequence = NEXT_TEST.fetch_add(1, Ordering::Relaxed);
+                let path = std::env::temp_dir().join(format!(
+                    "r2o-manager-install-{}-{sequence}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&path) {
+                    Ok(()) => return Self(path),
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => {
+                        panic!("cannot create test directory {}: {error}", path.display())
+                    }
+                }
+            }
         }
     }
 
