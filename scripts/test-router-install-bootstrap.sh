@@ -365,13 +365,17 @@ sed '2a\
 set -x
 ' "$active_uninstaller" > "$active_uninstaller.trace"
 mv "$active_uninstaller.trace" "$active_uninstaller"
+bootstrap_uninstaller=$CASE/uninstall-bootstrap.sh
+sed '2a\
+set -x
+' "$ROOT/scripts/uninstall.sh" > "$bootstrap_uninstaller"
 R2O_OPENWRT_RELEASE="$CASE/openwrt_release" \
 R2O_DIR="$CASE/opt/r2o" \
 R2O_INIT_DIR="$CASE/opt/etc/init.d" \
 R2O_NDM_DIR="$CASE/opt/etc/ndm/netfilter.d" \
 R2O_OPENWRT_INIT_DIR="$CASE/etc/init.d" \
 R2O_RUNTIME_DIR="$CASE/tmp/r2o" R2O_PLATFORM=openwrt \
-    sh "$ROOT/scripts/uninstall.sh" --yes \
+    sh "$bootstrap_uninstaller" --yes \
     > "$CASE/uninstall.out" 2>&1 || {
         status=$?
         cat "$CASE/uninstall.out" >&2
