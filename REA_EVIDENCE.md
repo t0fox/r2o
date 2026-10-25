@@ -7704,3 +7704,34 @@ OpenWrt-target smoke, а не физическое полевое испытан
 пользователя роутер не подключался. Поэтому эти результаты подтверждают только
 перечисленные входы и сценарии; полный поведенческий паритет и полевая
 приёмка не объявляются.
+
+### Таймаут отправки в измерителе — RED/GREEN C/Rust, 25.10.2026
+
+Дополнительный одинаковый-input сценарий для `core/meas.c` обнаружил
+подтверждённое расхождение, не покрытое успешным CLEAR-вектором выше.
+`core/meas.c::d2k_meas_once` передаёт запись через `send_all`; ошибка записи
+возвращает `D2K_MEAS_ERR`, а `d2k_meas` сохраняет её в `t.err`. Rust-аналог
+`response::probe_trigger` уже считал syscall-ошибку `write` ошибкой, но
+истечение ожидания `POLLOUT` возвращал как `Ok(ProbeOutcome::Rejected)`, то
+есть как отрицательный результат замера.
+
+| Donor C-функция | Rust-аналог | Общий вход и RED/GREEN результат |
+|---|---|---|
+| `core/meas.c::send_all` → `d2k_meas_once` → `d2k_meas`: истечение `SO_SNDTIMEO` не превращается в молчание/отрицательный ответ, а учитывается как ошибка замера. | `response::probe_trigger` → `ProbeBackend::probe_outcome` → `classify::measure`: таймаут ожидания `POLLOUT` теперь возвращает `ProbeError::Transport`, как соседние ошибки `write`. | `crates/r2o-controller/tests/fixtures/d2o_meas_send_timeout.tsv` задаёт 16 MiB, send timeout 8000 мс, response timeout 1000 мс, непотребляющий loopback listener с receive buffer 4096 байт, удерживаемый 24000 мс, и mark 0. Скрипт вызывает точный donor `meas.c` и production Rust `TcpProbeBackend` на этих параметрах. RED: C `C_RESULT:ERROR`, Rust `RUST_RESULT:REJECTED`; GREEN после изменения только Rust timeout-ветви: `ERROR` / `ERROR`. `scripts/r2o-meas-differential.sh` завершился с кодом 0. |
+
+После исправления полный `cargo +1.98.0 test --locked --workspace` прошёл; новый
+интеграционный тест измерителя — 1/1. Повторный
+`scripts/r2o-scheduler-differential.sh` на чистом donor `783aa75` завершился с
+кодом 0 за 521 с, включая C `test_sched`, C QUIC-yield `0 failures` и Rust QUIC
+27/27. Это проверяет, что изменение статуса ошибки отправки не меняет
+очереди, worker/permit, дедлайны, повторы и критерии успеха scheduler. Новый
+измерительный дифференциал включён в обязательный upstream scheduler shard;
+`scripts/ci-differential-shards.sh verify` подтвердил 12 baseline и 29 upstream
+сценариев ровно по одному разу.
+
+Затем `scripts/r2o-build-openwrt-aarch64-musl.sh` завершился с кодом 0: все
+шесть release-бинарников запустились в QEMU, очистка и проверка пустого
+каталога прошли. Остались только предупреждения deprecated `libc::time_t` и
+`libc::suseconds_t` в `response.rs`. Это OpenWrt-target smoke; физический
+маршрутизатор не использовался по просьбе пользователя, полевое подтверждение
+по-прежнему отсутствует.

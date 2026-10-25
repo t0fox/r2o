@@ -611,7 +611,10 @@ pub(crate) fn probe_trigger(
                 if !poll_until(fd, libc::POLLOUT, Instant::now() + PROBE_SEND_TIMEOUT).map_err(
                     |error| ProbeError::Local(format!("ошибка ожидания отправки: {error}")),
                 )? {
-                    return Ok(ProbeOutcome::Rejected);
+                    return Err(ProbeError::Transport(format!(
+                        "write: {}",
+                        io::Error::new(io::ErrorKind::TimedOut, "operation timed out")
+                    )));
                 }
                 continue;
             }

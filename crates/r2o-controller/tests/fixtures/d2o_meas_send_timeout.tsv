@@ -1,0 +1,6 @@
+payload_bytes=16777216
+send_timeout_ms=8000
+response_timeout_ms=1000
+server_hold_ms=24000
+server_receive_buffer_bytes=4096
+mark=0
