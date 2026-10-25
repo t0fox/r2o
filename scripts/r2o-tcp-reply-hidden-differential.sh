@@ -23,6 +23,18 @@ if [ "${R2O_EXPECTED_DONOR_SHA:-}" != "$r2o_upstream_sha" ]; then
     exit 2
 fi
 
+r2o_actual_donor_sha=$(git -C "$r2o_donor_datapath" rev-parse HEAD)
+if [ "$r2o_actual_donor_sha" != "$r2o_upstream_sha" ]; then
+    printf 'TCP reply-visibility requires donor checkout %s, got %s\n' \
+        "$r2o_upstream_sha" "$r2o_actual_donor_sha" >&2
+    exit 2
+fi
+if ! git -C "$r2o_donor_datapath" diff --quiet HEAD -- || \
+    ! git -C "$r2o_donor_datapath" diff --cached --quiet HEAD --; then
+    printf 'Donor worktree has tracked changes; refusing unpinned C sources\n' >&2
+    exit 2
+fi
+
 r2o_run_timed() {
     r2o_label=$1
     shift
@@ -37,10 +49,6 @@ r2o_run_timed() {
     return "$r2o_status"
 }
 
-if [ ! -x "$r2o_donor_test" ]; then
-    printf 'Готовый контрольный тест донора не найден: %s\n' "$r2o_donor_test" >&2
-    exit 2
-fi
 if ! grep -q 'test_reply_hidden_by_accelerator' "$r2o_donor_datapath/test_session.c"; then
     printf 'В контрольном исходнике донора нет теста скрытого ответа\n' >&2
     exit 2
@@ -51,26 +59,26 @@ mkdir -p "$r2o_log_dir"
     printf 'Сверка видимости TCP-ответа: %s\n' \
         "$(date '+%Y-%m-%dT%H:%M:%S%z')"
     printf 'Исходники донора: %s\n' "$r2o_donor_datapath"
-    printf '\nSHA-256 C-эталона, теста, бинарника и Rust-реализации\n'
+    printf '\nSHA-256 закреплённых C-исходников и Rust-реализации\n'
     sha256sum \
         "$r2o_donor_datapath/session.c" \
         "$r2o_donor_datapath/test_session.c" \
-        "$r2o_donor_test" \
         "$r2o_script_dir/crates/r2o-datapath/src/engine.rs" \
         "$r2o_script_dir/crates/r2o-datapath/src/main.rs"
     r2o_session_sha256=$(sha256sum "$r2o_donor_datapath/session.c" | awk '{print $1}')
     r2o_test_sha256=$(sha256sum "$r2o_donor_datapath/test_session.c" | awk '{print $1}')
-    r2o_test_binary_sha256=$(sha256sum "$r2o_donor_test" | awk '{print $1}')
     if [ "$r2o_session_sha256" != \
         'a7446b416481674b9a6332dad97430c903f6a3c7d53b45e8794a86eee2f127ea' ] || \
         [ "$r2o_test_sha256" != \
-        '2fcad959cdb7086312ae1b8a7d2c0b168fe9c5cfd8038b2aa87f75a6c3ce3561' ] || \
-        [ "$r2o_test_binary_sha256" != \
-        '10dec3a27f557c9973b7d2b2e060329702e222fa420a35095081959790b0aacb' ]; then
-        printf 'Исходники или тестовый бинарник донора отличаются от проверенного снимка\n' >&2
+        '2fcad959cdb7086312ae1b8a7d2c0b168fe9c5cfd8038b2aa87f75a6c3ce3561' ]; then
+        printf 'Исходники донора отличаются от проверенного снимка\n' >&2
         exit 1
     fi
-    printf '\nПроверочный тест донора без пересборки C\n'
+    printf '\nСборка C-контроля из закреплённого donor commit\n'
+    r2o_run_timed 'сборка C test_session' make -B -C "$r2o_donor_datapath" \
+        test_session CC=clang-18
+    sha256sum "$r2o_donor_test"
+    printf '\nЗапуск C-контроля донора\n'
     if readelf -h "$r2o_donor_test" | grep -q 'Machine:.*AArch64'; then
         r2o_qemu_aarch64=${R2O_QEMU_AARCH64:-qemu-aarch64}
         r2o_aarch64_sysroot=${R2O_AARCH64_SYSROOT:-/usr/aarch64-linux-gnu}

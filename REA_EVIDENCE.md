@@ -7902,7 +7902,8 @@ journal и runtime; UDP session table — C `test_track`/`test_quic_session`
 `C=1 1 2 6 16 1`, Rust `1 1 2 6 16 1`. Соответствующие Rust QUIC ClientHello
 сценарии прошли 2/2, TCP invisible-reply тесты — 9/9 и runtime метка — 1/1.
 
-Два strict-hash скрипта не засчитаны как пройденные: `r2o-quic-hello` остановил
+Первый запуск двух strict-hash скриптов не засчитан как пройденный:
+`r2o-quic-hello` остановил
 проверенный бинарник `test_quic_session` на фактическом SHA
 `9376568b5b7d071d99e279e1161afe6ef72ba9d6a1e0d62147547502420b40a0` вместо
 закреплённого `eaf091eb5d6490eaf7c1f06c2f2d5f8f1a21229e1cd93fc2e9513de6612d1b37`;
@@ -7915,9 +7916,35 @@ journal и runtime; UDP session table — C `test_track`/`test_quic_session`
 Физический роутер не использовался, поэтому полевого подтверждения по-прежнему
 нет.
 
+После этого оба differential harness исправлены: они проверяют точный donor
+commit, отсутствие tracked изменений и закреплённые SHA исходников, затем
+пересобирают C-контроль с `clang-18` и записывают его фактический бинарный SHA.
+Повторный `r2o-quic-hello-differential.sh` прошёл: C `QUIC/UDP: все проверки
+прошли`, Rust ClientHello 2/2. Повторный `r2o-tcp-reply-hidden-differential.sh`
+прошёл: C `сессия: все проверки прошли`, Rust TCP 9/9 и runtime метка 1/1.
+Так проверяются источники из pinned commit без зависимости от заранее
+собранного бинарника; донорские алгоритмы не менялись.
+
 После этих дифференциальных сценариев повторно запущен
 `scripts/r2o-build-openwrt-aarch64-musl.sh`: код 0, шесть статических ARM64/musl
 бинарников прошли локальный QEMU smoke, версии и `wire=47` совпали, атомарные
 проверки каталога прошли. Остались только предупреждения `libc::time_t` и
 `libc::suseconds_t`. Это сборочная и локальная QEMU проверка, не проверка на
 роутере.
+
+После исправления двух harness повторно прошли `r2o-quic-hello` и
+`r2o-tcp-reply-hidden` на тех же закреплённых исходниках; затем ещё раз прошёл
+`r2o-build-openwrt-aarch64-musl.sh` (код 0, шесть ARM64/musl бинарников и
+локальный QEMU smoke). Роутер не использовался.
+
+Также `r2o-route-gate-differential.sh` теперь сверяет pinned commit и исходники,
+собирает `test_routemark`/`test_session` из C и проходит: C selector/matcher/
+refresh и session suites прошли, Rust route module — 12/12, runtime UDP-flow и
+CLI route-gate — по 1/1. Предварительно отсутствующий готовый
+`test_routemark` больше не нужен; бинарники собираются только из чистого donor
+commit `783aa75`.
+
+После route-gate differential ещё раз выполнен
+`r2o-build-openwrt-aarch64-musl.sh`: код 0, все шесть ARM64/musl бинарников
+прошли локальный QEMU smoke и catalog checks. Это не меняет статус полевой
+проверки.

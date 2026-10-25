@@ -14,6 +14,18 @@ if [ "${R2O_EXPECTED_DONOR_SHA:-}" != "$r2o_upstream_sha" ]; then
     exit 2
 fi
 
+r2o_actual_donor_sha=$(git -C "$r2o_donor_datapath" rev-parse HEAD)
+if [ "$r2o_actual_donor_sha" != "$r2o_upstream_sha" ]; then
+    printf 'QUIC differential requires donor checkout %s, got %s\n' \
+        "$r2o_upstream_sha" "$r2o_actual_donor_sha" >&2
+    exit 2
+fi
+if ! git -C "$r2o_donor_datapath" diff --quiet HEAD -- || \
+    ! git -C "$r2o_donor_datapath" diff --cached --quiet HEAD --; then
+    printf 'Donor worktree has tracked changes; refusing unpinned C sources\n' >&2
+    exit 2
+fi
+
 r2o_show_log_on_error() {
     r2o_status=$?
     if [ "$r2o_status" -ne 0 ] && [ -f "$r2o_log" ]; then
@@ -36,10 +48,6 @@ r2o_run_timed() {
     return "$r2o_status"
 }
 
-if [ ! -x "$r2o_donor_test" ]; then
-    printf 'Готовый QUIC-тест донора не найден: %s\n' "$r2o_donor_test" >&2
-    exit 2
-fi
 if ! grep -Fq 'first_hello = named && !fl->saw_hello' "$r2o_donor_datapath/session.c" || \
     ! grep -Fq 'test_quic_snapshot_is_every_initial' "$r2o_donor_datapath/test_quic_session.c"; then
     printf 'Исходник донора больше не содержит закреплённый сценарий QUIC\n' >&2
@@ -52,26 +60,26 @@ mkdir -p "$r2o_log_dir"
         "$(date '+%Y-%m-%dT%H:%M:%S%z')"
     printf 'Исходники донора: %s\n' "$r2o_donor_datapath"
     printf 'REA Evidence: ev_0fc0d328089313aa03f9c4a5b4c8eeb2fbedd01804194dbaba7a261d2c995e80, ev_7aafc101282414d722918c6de7cc77fd657416987daffe55d620b1822c25820c, ev_8dfd376f9d501c0515ba212806894f2c893049f76dfbfae5874b2a22a650bbc7\n'
-    printf '\nSHA-256 донорских исходников, готового контрольного бинарника и Rust-кода\n'
+    printf '\nSHA-256 закреплённых донорских исходников и Rust-кода\n'
     sha256sum \
         "$r2o_donor_datapath/session.c" \
         "$r2o_donor_datapath/test_quic_session.c" \
-        "$r2o_donor_test" \
         "$r2o_script_dir/crates/r2o-datapath/src/r2o_quic.rs" \
         "$r2o_script_dir/crates/r2o-datapath/src/main.rs"
     r2o_session_sha256=$(sha256sum "$r2o_donor_datapath/session.c" | awk '{print $1}')
     r2o_test_sha256=$(sha256sum "$r2o_donor_datapath/test_quic_session.c" | awk '{print $1}')
-    r2o_test_binary_sha256=$(sha256sum "$r2o_donor_test" | awk '{print $1}')
     if [ "$r2o_session_sha256" != \
         'a7446b416481674b9a6332dad97430c903f6a3c7d53b45e8794a86eee2f127ea' ] || \
         [ "$r2o_test_sha256" != \
-        'a9ab9fe07dae2ece70360942dfc559ce843479b11bdb6166faee9826ef9f91ca' ] || \
-        [ "$r2o_test_binary_sha256" != \
-        'eaf091eb5d6490eaf7c1f06c2f2d5f8f1a21229e1cd93fc2e9513de6612d1b37' ]; then
-        printf 'Исходники или бинарник донора отличаются от проверенного снимка\n' >&2
+        'a9ab9fe07dae2ece70360942dfc559ce843479b11bdb6166faee9826ef9f91ca' ]; then
+        printf 'Исходники донора отличаются от проверенного снимка\n' >&2
         exit 1
     fi
-    printf '\nЗапуск готового контроля донора без пересборки C\n'
+    printf '\nСборка C-контроля из закреплённого donor commit\n'
+    r2o_run_timed 'сборка C test_quic_session' make -B -C "$r2o_donor_datapath" \
+        test_quic_session CC=clang-18
+    sha256sum "$r2o_donor_test"
+    printf '\nЗапуск C-контроля донора\n'
     r2o_run_timed 'контрольный тест QUIC донора' "$r2o_donor_test"
     printf '\nПроверка повторного полного ClientHello и нового потока на Rust\n'
     r2o_run_timed 'повтор полного ClientHello и истечение кэша Rust' \

@@ -37,12 +37,17 @@ if [ "${R2O_EXPECTED_DONOR_SHA:-}" != "$r2o_upstream_sha" ]; then
     exit 2
 fi
 
-for r2o_test in "$r2o_route_test" "$r2o_session_test"; do
-    if [ ! -x "$r2o_test" ]; then
-        printf 'Готовый тест донора не найден: %s\n' "$r2o_test" >&2
-        exit 2
-    fi
-done
+r2o_actual_donor_sha=$(git -C "$r2o_donor_datapath" rev-parse HEAD)
+if [ "$r2o_actual_donor_sha" != "$r2o_upstream_sha" ]; then
+    printf 'Route-gate requires donor checkout %s, got %s\n' \
+        "$r2o_upstream_sha" "$r2o_actual_donor_sha" >&2
+    exit 2
+fi
+if ! git -C "$r2o_donor_datapath" diff --quiet HEAD -- || \
+    ! git -C "$r2o_donor_datapath" diff --cached --quiet HEAD --; then
+    printf 'Donor worktree has tracked changes; refusing unpinned C sources\n' >&2
+    exit 2
+fi
 
 mkdir -p "$r2o_log_dir"
 {
@@ -50,16 +55,14 @@ mkdir -p "$r2o_log_dir"
         "$(date '+%Y-%m-%dT%H:%M:%S%z')"
     printf 'Исходники-эталоны: %s\n' "$r2o_donor_datapath"
     printf 'REA Evidence: ev_397dbcdcc48e8067509367712bb6ff500528c41c90fb7f881dea3b8bf76cb4d1\n'
-    printf '\nSHA-256 C-эталона, его готовых тестов и Rust-реализации\n'
+    printf '\nSHA-256 закреплённых C-исходников и Rust-реализации\n'
     sha256sum \
         "$r2o_donor_datapath/routemark.c" \
         "$r2o_donor_datapath/routemark_nl.c" \
         "$r2o_donor_datapath/include/d2k_routemark.h" \
         "$r2o_donor_datapath/test_routemark.c" \
-        "$r2o_route_test" \
         "$r2o_donor_datapath/session.c" \
         "$r2o_donor_datapath/test_session.c" \
-        "$r2o_session_test" \
         "$r2o_script_dir/crates/r2o-datapath/src/r2o_route.rs" \
         "$r2o_script_dir/crates/r2o-datapath/src/main.rs" \
         "$r2o_script_dir/crates/r2o-datapath/src/nfqueue.rs" \
@@ -69,20 +72,21 @@ mkdir -p "$r2o_log_dir"
         "$r2o_donor_datapath/routemark_nl.c" \
         "$r2o_donor_datapath/include/d2k_routemark.h" \
         "$r2o_donor_datapath/test_routemark.c" \
-        "$r2o_route_test" \
         "$r2o_donor_datapath/session.c" \
-        "$r2o_donor_datapath/test_session.c" \
-        "$r2o_session_test")
+        "$r2o_donor_datapath/test_session.c")
     printf '%s\n' "$r2o_hashes" | grep -q '3e5f0ea6bf53e2b8a542446b30b8d0178453f61881755db547c088c3169e6845'
     printf '%s\n' "$r2o_hashes" | grep -q '8695849a779e5e1a6f554ce5599900b146092eb8806e42df11f8e667a28ba8d6'
     printf '%s\n' "$r2o_hashes" | grep -q 'fa46df3ecbb2b33777a447de17bbc5c7ae96d0993f39d0de79297288de3478b0'
     printf '%s\n' "$r2o_hashes" | grep -q 'f2863fbf294fc185568a6b500286e3c36d18485d4302417403301cbeef69d45d'
-    printf '%s\n' "$r2o_hashes" | grep -q 'd6e987d1080a7a20492c0d6f721fea687eefcd7cc33e966221c22e1b1e33eb59'
     printf '%s\n' "$r2o_hashes" | grep -q 'a7446b416481674b9a6332dad97430c903f6a3c7d53b45e8794a86eee2f127ea'
     printf '%s\n' "$r2o_hashes" | grep -q '2fcad959cdb7086312ae1b8a7d2c0b168fe9c5cfd8038b2aa87f75a6c3ce3561'
-    printf '%s\n' "$r2o_hashes" | grep -q '25104e83c9172d46b5e656b89f90d17ed68902174101e174cdb281d62217aa0f'
 
-    printf '\nЗапуск готовых тестов C-донора без компиляции C\n'
+    printf '\nСборка C-контролей из закреплённого donor commit\n'
+    r2o_run_timed 'сборка test_routemark и test_session' \
+        make -B -C "$r2o_donor_datapath" test_routemark test_session CC=clang-18
+    sha256sum "$r2o_route_test" "$r2o_session_test"
+
+    printf '\nЗапуск C-контролей донора\n'
     r2o_run_timed 'проверки шлюза маршрутизации донора' "$r2o_route_test"
     r2o_run_timed 'проверки сессий TCP/UDP донора' "$r2o_session_test"
 
