@@ -359,14 +359,13 @@ run_install > "$CASE/out" 2>&1 || { cat "$CASE/out" >&2; fail 'repeat install di
 [ "$(grep -c '^install-local ' "$CASE/manager.log")" -eq "$install_count" ] || fail 'repeat install reactivated an already current release'
 tail -n 2 "$CASE/services.log" | grep -qx enable || fail 'repeat install did not enable the current OpenWrt service'
 tail -n 1 "$CASE/services.log" | grep -qx start || fail 'repeat install did not start the current OpenWrt service'
-cat "$ROOT/scripts/uninstall.sh" | \
 R2O_OPENWRT_RELEASE="$CASE/openwrt_release" \
 R2O_DIR="$CASE/opt/r2o" \
 R2O_INIT_DIR="$CASE/opt/etc/init.d" \
 R2O_NDM_DIR="$CASE/opt/etc/ndm/netfilter.d" \
 R2O_OPENWRT_INIT_DIR="$CASE/etc/init.d" \
 R2O_RUNTIME_DIR="$CASE/tmp/r2o" R2O_PLATFORM=openwrt \
-    sh -s -- --yes \
+    sh "$ROOT/scripts/uninstall.sh" --yes \
     > "$CASE/uninstall.out" 2>&1 || { cat "$CASE/uninstall.out" >&2; fail 'owned installation did not uninstall'; }
 [ ! -e "$CASE/opt/r2o" ] || fail 'uninstall left the R2O release root behind'
 [ ! -e "$CASE/opt/etc/init.d/S99r2o" ] || fail 'uninstall left the R2O init shim behind'
