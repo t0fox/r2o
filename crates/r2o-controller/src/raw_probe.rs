@@ -27,13 +27,28 @@ const RST_TIMEOUT: Duration = Duration::from_secs(300);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const RST_PENDING_MAX: usize = 64;
 const RST_RELEASE_ATTEMPTS: u8 = 5;
-static RAW_SELFTESTS: OnceLock<Mutex<[Option<Instant>; 2]>> = OnceLock::new();
+static RAW_SELFTESTS: OnceLock<Mutex<RawSelftestState>> = OnceLock::new();
+static HOST_TCP_TIMESTAMPS: OnceLock<bool> = OnceLock::new();
 thread_local! {
     static RST_RULE_FAILURES: Cell<u64> = const { Cell::new(0) };
 }
 static RST_COMMENT_SUPPORTED: AtomicBool = AtomicBool::new(true);
 static RST_STALE_RULE_SWEEP: Once = Once::new();
 static RST_ABANDON_REPORTED: Once = Once::new();
+
+struct RawSelftestState {
+    checked_at: [Option<Instant>; 4],
+    error_streak: [usize; 4],
+}
+
+impl Default for RawSelftestState {
+    fn default() -> Self {
+        Self {
+            checked_at: std::array::from_fn(|_| None),
+            error_streak: [0; 4],
+        }
+    }
+}
 
 pub(crate) fn rst_rule_failure_count() -> u64 {
     RST_RULE_FAILURES.with(Cell::get)
@@ -64,13 +79,14 @@ pub fn sweep_poisons(
 ) -> Result<Option<PoisonHit>, ProbeError> {
     let remote = resolve_target(target)?;
     let family = if remote.is_ipv4() { 4 } else { 6 };
+    let offer_ts = raw_offer_timestamps(options.client_tcp_has_timestamps);
     let mut props = DpiProps::default();
     let mut answered = Vec::new();
     let mut raw_ok = 0usize;
     let mut raw_errors = 0usize;
     let mut cached_selftest = false;
 
-    if let Some(age) = raw_selftest_age(family) {
+    if let Some(age) = raw_selftest_age(family, offer_ts) {
         cached_selftest = true;
         add_observation(
             result,
@@ -108,6 +124,7 @@ pub fn sweep_poisons(
                 options.timeout,
                 effective_mark(options.mark),
                 options.cancel.as_deref(),
+                offer_ts,
             ) {
                 Ok(Some(connection)) => {
                     drop(connection);
@@ -146,7 +163,7 @@ pub fn sweep_poisons(
         }
         add_observation(result, observation.clone());
         let passed = observation.pass > 0;
-        store_raw_selftest(family, passed);
+        store_raw_selftest(family, offer_ts, passed);
         if !passed {
             return Err(last_error.unwrap_or_else(|| {
                 ProbeError::Transport("classify: SYN-ACK не пришёл при самопроверке raw".into())
@@ -161,6 +178,9 @@ pub fn sweep_poisons(
             break;
         }
         let mut poison = property.poison;
+        if !raw_profile_allows(&poison, offer_ts) {
+            continue;
+        }
         let mut decoy = None;
         match property.set {
             Property::OverlapSni => {
@@ -211,9 +231,16 @@ pub fn sweep_poisons(
             }
             result.probes += 1;
             match raw_probe_once(remote, trigger, &poison, decoy, options) {
-                Ok(true) => observation.pass += 1,
-                Ok(false) => observation.fail += 1,
+                Ok(true) => {
+                    note_raw_probe(family, false);
+                    observation.pass += 1;
+                }
+                Ok(false) => {
+                    note_raw_probe(family, false);
+                    observation.fail += 1;
+                }
                 Err(error) => {
+                    note_raw_probe(family, true);
                     local_error = true;
                     raw_errors += 1;
                     observation.fail += 1;
@@ -289,6 +316,9 @@ pub fn sweep_poisons(
             result.stopped = true;
             break;
         }
+        if !raw_profile_allows(&poison, offer_ts) {
+            continue;
+        }
         let decoy = poison
             .decoy_hello
             .then(|| {
@@ -318,10 +348,12 @@ pub fn sweep_poisons(
             result.probes += 1;
             match raw_probe_once(remote, trigger, &poison, decoy, options) {
                 Ok(true) => {
+                    note_raw_probe(family, false);
                     observation.pass += 1;
                     raw_ok += 1;
                 }
                 Ok(false) => {
+                    note_raw_probe(family, false);
                     observation.fail += 1;
                     raw_ok += 1;
                     progress(
@@ -333,6 +365,7 @@ pub fn sweep_poisons(
                     break;
                 }
                 Err(error) => {
+                    note_raw_probe(family, true);
                     observation.fail += 1;
                     observation.error = Some(format!("{error:?}"));
                     raw_errors += 1;
@@ -385,6 +418,7 @@ pub fn sweep_poisons(
             break;
         }
         if !poison_supports_family(poison, family)
+            || !raw_profile_allows(poison, offer_ts)
             || poison.disorder_pos > 0 && poison.disorder_pos as usize >= trigger.payload.len()
             || answered
                 .iter()
@@ -421,15 +455,18 @@ pub fn sweep_poisons(
             result.probes += 1;
             match raw_probe_once(remote, trigger, poison, decoy, options) {
                 Ok(true) => {
+                    note_raw_probe(family, false);
                     observation.pass += 1;
                     raw_ok += 1;
                 }
                 Ok(false) => {
+                    note_raw_probe(family, false);
                     observation.fail += 1;
                     raw_ok += 1;
                     break;
                 }
                 Err(error) => {
+                    note_raw_probe(family, true);
                     observation.fail += 1;
                     raw_errors += 1;
                     observation.error = Some(format!("{error:?}"));
@@ -527,28 +564,76 @@ fn should_recheck(cached: bool, successes: usize, errors: usize) -> bool {
     (cached && successes == 0 && errors >= 2) || errors >= 3
 }
 
-fn raw_selftest_age(family: u8) -> Option<Duration> {
+fn raw_offer_timestamps(client_profile: Option<bool>) -> bool {
+    client_profile.unwrap_or_else(|| {
+        *HOST_TCP_TIMESTAMPS.get_or_init(|| {
+            std::fs::read_to_string("/proc/sys/net/ipv4/tcp_timestamps")
+                .ok()
+                .and_then(|value| value.trim().parse::<i32>().ok())
+                .unwrap_or(1)
+                != 0
+        })
+    })
+}
+
+fn raw_selftest_age(family: u8, offer_ts: bool) -> Option<Duration> {
     let mut cache = RAW_SELFTESTS
-        .get_or_init(|| Mutex::new([None, None]))
+        .get_or_init(|| Mutex::new(RawSelftestState::default()))
         .lock()
         .ok()?;
-    let index = if family == 6 { 1 } else { 0 };
-    let at = cache[index]?;
+    let index = raw_selftest_index(family, offer_ts);
+    let at = cache.checked_at[index]?;
     let age = at.elapsed();
     if age < Duration::from_secs(600) {
         Some(age)
     } else {
-        cache[index] = None;
+        cache.checked_at[index] = None;
         None
     }
 }
 
-fn store_raw_selftest(family: u8, passed: bool) {
+fn note_raw_probe(family: u8, local_error: bool) {
+    let family_index = if family == 6 { 1 } else { 0 };
     if let Ok(mut cache) = RAW_SELFTESTS
-        .get_or_init(|| Mutex::new([None, None]))
+        .get_or_init(|| Mutex::new(RawSelftestState::default()))
         .lock()
     {
-        cache[if family == 6 { 1 } else { 0 }] = passed.then(Instant::now);
+        if local_error {
+            cache.error_streak[family_index] = cache.error_streak[family_index].saturating_add(1);
+            if cache.error_streak[family_index] >= 3 {
+                cache.checked_at[raw_selftest_index(family, true)] = None;
+                cache.checked_at[raw_selftest_index(family, false)] = None;
+            }
+        } else {
+            cache.error_streak[family_index] = 0;
+        }
+    }
+}
+
+fn raw_selftest_index(family: u8, offer_ts: bool) -> usize {
+    (if family == 6 { 1 } else { 0 }) + if offer_ts { 0 } else { 2 }
+}
+
+fn raw_syn_options(offer_ts: bool) -> &'static [u8] {
+    const WITH_TS: &[u8] = &[
+        2, 4, 0x05, 0xac, 4, 2, 8, 10, 0, 0, 0, 1, 0, 0, 0, 0, 1, 3, 3, 7,
+    ];
+    const WITHOUT_TS: &[u8] = &[2, 4, 0x05, 0xac, 1, 3, 3, 7, 1, 1, 4, 2];
+    if offer_ts { WITH_TS } else { WITHOUT_TS }
+}
+
+fn raw_profile_allows(poison: &Poison, offer_ts: bool) -> bool {
+    !poison.tcp_ts || offer_ts
+}
+
+fn store_raw_selftest(family: u8, offer_ts: bool, passed: bool) {
+    if let Ok(mut cache) = RAW_SELFTESTS
+        .get_or_init(|| Mutex::new(RawSelftestState::default()))
+        .lock()
+    {
+        let index = raw_selftest_index(family, offer_ts);
+        cache.checked_at[index] = passed.then(Instant::now);
+        cache.error_streak[index] = 0;
     }
 }
 
@@ -578,6 +663,7 @@ fn raw_recheck(
             options.timeout,
             effective_mark(options.mark),
             options.cancel.as_deref(),
+            raw_offer_timestamps(options.client_tcp_has_timestamps),
         ) {
             Ok(Some(connection)) => {
                 drop(connection);
@@ -615,7 +701,11 @@ fn raw_recheck(
     }
     add_observation(result, observation.clone());
     let passed = observation.pass > 0;
-    store_raw_selftest(if remote.is_ipv6() { 6 } else { 4 }, passed);
+    store_raw_selftest(
+        if remote.is_ipv6() { 6 } else { 4 },
+        raw_offer_timestamps(options.client_tcp_has_timestamps),
+        passed,
+    );
     Ok(passed)
 }
 
@@ -892,6 +982,7 @@ fn raw_probe_once(
         options.timeout,
         effective_mark(options.mark),
         options.cancel.as_deref(),
+        raw_offer_timestamps(options.client_tcp_has_timestamps),
     )?
     .ok_or_else(|| ProbeError::Transport("classify: SYN-ACK не пришёл".into()))?;
 
@@ -1547,6 +1638,7 @@ impl RawConn {
         timeout: Duration,
         mark: u32,
         cancel: Option<&std::sync::atomic::AtomicBool>,
+        offer_ts: bool,
     ) -> Result<Option<Self>, ProbeError> {
         let local = local_address_for(remote).map_err(|error| {
             ProbeError::Local(format!(
@@ -1640,9 +1732,7 @@ impl RawConn {
             template_options: None,
             recv_buffer: vec![0; u16::MAX as usize],
         };
-        let syn_options = [
-            2, 4, 0x05, 0xac, 4, 2, 8, 10, 0, 0, 0, 1, 0, 0, 0, 0, 1, 3, 3, 7,
-        ];
+        let syn_options = raw_syn_options(offer_ts);
         let mut rto = Duration::from_secs(1);
         let deadline = Instant::now() + timeout;
         let mut next_syn = Instant::now();
@@ -1662,7 +1752,7 @@ impl RawConn {
                     connection.sequence,
                     0,
                     TCP_SYN,
-                    &syn_options,
+                    syn_options,
                     &[],
                 )
                 .ok_or_else(|| ProbeError::Local("classify: SYN пакет не собран".into()))?;
@@ -1934,6 +2024,119 @@ mod tests {
     use super::*;
     use r2k_core::plan::Plan;
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn raw_syn_profile_matches_the_d2o_fixture() {
+        let inputs = include_str!("../tests/fixtures/d2o/raw-syn-profile.tsv")
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(|line| {
+                let fields = line
+                    .split_whitespace()
+                    .map(|field| field.split_once('=').expect("fixture key=value"))
+                    .collect::<std::collections::HashMap<_, _>>();
+                (
+                    fields["family"].parse::<u8>().unwrap(),
+                    fields["offer_ts"] == "1",
+                )
+            })
+            .collect::<Vec<_>>();
+        let profile_rows = inputs
+            .iter()
+            .map(|(family, offer_ts)| {
+                let offer_ts = raw_offer_timestamps(Some(*offer_ts));
+                let options = raw_syn_options(offer_ts)
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                let poison = Poison {
+                    tcp_ts: true,
+                    ..Poison::default()
+                };
+                format!(
+                    "RAW_SYN_PROFILE family={family} offer_ts={} options={options} allow_ts_poison={}",
+                    u8::from(offer_ts),
+                    u8::from(raw_profile_allows(&poison, offer_ts))
+                )
+            })
+            .collect::<Vec<_>>();
+        let cache_rows = inputs
+            .iter()
+            .map(|(family, offer_ts)| {
+                format!(
+                    "RAW_SELFTEST_KEY family={family} offer_ts={} cache_index={}",
+                    u8::from(*offer_ts),
+                    raw_selftest_index(*family, *offer_ts)
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut rows = profile_rows;
+        rows.extend(cache_rows);
+        *RAW_SELFTESTS
+            .get_or_init(|| Mutex::new(RawSelftestState::default()))
+            .lock()
+            .unwrap() = RawSelftestState::default();
+        for family in [4, 6] {
+            store_raw_selftest(family, true, true);
+            store_raw_selftest(family, false, true);
+        }
+        let mut error_streaks = [0usize; 2];
+        let invalidation_rows = include_str!("../tests/fixtures/d2o/raw-selftest-errors.tsv")
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(|line| {
+                let fields = line
+                    .split_whitespace()
+                    .map(|field| field.split_once('=').expect("fixture key=value"))
+                    .collect::<std::collections::HashMap<_, _>>();
+                let family = fields["family"].parse::<u8>().unwrap();
+                assert_eq!(fields["result"], "error");
+                let family_index = if family == 6 { 1 } else { 0 };
+                error_streaks[family_index] += 1;
+                note_raw_probe(family, true);
+                format!(
+                    "RAW_SELFTEST_INVALIDATION family={family} errors={} with_ts={} without_ts={}",
+                    error_streaks[family_index],
+                    u8::from(raw_selftest_age(family, true).is_some()),
+                    u8::from(raw_selftest_age(family, false).is_some())
+                )
+            })
+            .collect::<Vec<_>>();
+        rows.extend(invalidation_rows);
+        assert_eq!(
+            rows,
+            [
+                "RAW_SYN_PROFILE family=4 offer_ts=0 options=020405ac0103030701010402 allow_ts_poison=0",
+                "RAW_SYN_PROFILE family=4 offer_ts=1 options=020405ac0402080a000000010000000001030307 allow_ts_poison=1",
+                "RAW_SYN_PROFILE family=6 offer_ts=0 options=020405ac0103030701010402 allow_ts_poison=0",
+                "RAW_SYN_PROFILE family=6 offer_ts=1 options=020405ac0402080a000000010000000001030307 allow_ts_poison=1",
+                "RAW_SELFTEST_KEY family=4 offer_ts=0 cache_index=2",
+                "RAW_SELFTEST_KEY family=4 offer_ts=1 cache_index=0",
+                "RAW_SELFTEST_KEY family=6 offer_ts=0 cache_index=3",
+                "RAW_SELFTEST_KEY family=6 offer_ts=1 cache_index=1",
+                "RAW_SELFTEST_INVALIDATION family=4 errors=1 with_ts=1 without_ts=1",
+                "RAW_SELFTEST_INVALIDATION family=6 errors=1 with_ts=1 without_ts=1",
+                "RAW_SELFTEST_INVALIDATION family=4 errors=2 with_ts=1 without_ts=1",
+                "RAW_SELFTEST_INVALIDATION family=4 errors=3 with_ts=0 without_ts=0",
+                "RAW_SELFTEST_INVALIDATION family=6 errors=2 with_ts=1 without_ts=1",
+                "RAW_SELFTEST_INVALIDATION family=6 errors=3 with_ts=0 without_ts=0",
+            ]
+        );
+
+        println!("{}", rows.join("\n"));
+        if let Ok(c_output) = std::env::var("R2O_RAW_PROFILE_C_OUTPUT") {
+            let c_rows = std::fs::read_to_string(c_output)
+                .expect("read C differential output")
+                .lines()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let mut c_rows = c_rows;
+            let mut rust_rows = rows.clone();
+            c_rows.sort();
+            rust_rows.sort();
+            assert_eq!(rust_rows, c_rows, "C/Rust raw profile vectors differ");
+        }
+    }
 
     #[test]
     fn nft_rst_rule_uses_r2o_table_and_exact_tuple_with_donor_timeout() {

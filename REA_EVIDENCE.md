@@ -7735,3 +7735,40 @@ OpenWrt-target smoke, а не физическое полевое испытан
 `libc::suseconds_t` в `response.rs`. Это OpenWrt-target smoke; физический
 маршрутизатор не использовался по просьбе пользователя, полевое подтверждение
 по-прежнему отсутствует.
+
+### TCP timestamp profile raw probes — RED/GREEN C/Rust, 25.10.2026
+
+Сверка текущего donor `783aa75` выявила mismatch по профилю TCP SYN. В C
+`detect/trigger.c::d2k_trigger_offers_ts` выбирает профиль из TCP options
+клиентского триггера (при неизвестном профиле — из локального sysctl), а
+`d2k_trigger_allows_poison` запрещает timestamp poison клиенту без TS.
+`detect/raw.c::raw_dial` передаёт этот профиль в `raw_send_syn`. В
+`detect/classify.c::self_ix`, `selftest_cached_age`, `raw_selftest` и
+`raw_recheck` cache самопроверки раздельный для семейства и TS-профиля.
+
+Rust раньше безусловно использовал SYN с TS в `raw_probe::RawConn::connect`,
+пропускал TS-проверки независимо от клиентского профиля, а
+`raw_selftest_age`/`store_raw_selftest` имели только слоты IPv4/IPv6. Кроме
+того, discovery runner уже хранил `client_has_tcp_timestamps`, но не передавал
+его classifier. Исправление передаёт снимок через `ClassifyOptions`, сохраняет
+fallback d2o через `/proc/sys/net/ipv4/tcp_timestamps`, строит обе формы SYN,
+не задаёт TS-poison без TS и хранит self-test по четырём ключам.
+
+| Donor C-функции | Rust-аналог | Общий вход и RED/GREEN результат |
+|---|---|---|
+| `d2k_trigger_offers_ts`, `d2k_trigger_allows_poison`; `raw_dial` → `raw_send_syn`; `self_ix` → `selftest_cached_age`; `d2k_raw_note_rc` | discovery runner → `ClassifyOptions.client_tcp_has_timestamps`; `raw_offer_timestamps`, `raw_syn_options`, `raw_profile_allows`, `RawConn::connect`, `raw_selftest_index`, `note_raw_probe` / `RawSelftestState` | `scripts/r2o-raw-profile-differential.sh` запускает C-функции на тех же `raw-syn-profile.tsv` и `raw-selftest-errors.tsv`, что и Rust, для IPv4/IPv6, TS off/on и 1/2/3 локальных ошибок, перемежаемых по семействам. RED до профильного исправления: `offer_ts=0` — C опции `020405ac0103030701010402`, cache slot IPv4/IPv6 `2`/`3`, TS-poison запрещён; Rust опции с TS, slot `0`/`1`, TS-poison разрешён. Для streak-сценария C сбрасывает оба profile cache на третьей ошибке семейства; прежний Rust не имел межзапускового счётчика. GREEN: строки C/Rust совпали — SYN-профиль, cache slot (`IPv4 2/0`, `IPv6 3/1`), допуск poison и сброс обоих cache только на третьей последовательной ошибке соответствующего семейства. |
+
+После исправления прошли `cargo +1.98.0 fmt --all -- --check` и
+`scripts/r2o-raw-profile-differential.sh`. Полный
+`cargo +1.98.0 test --locked --workspace` завершился с одним сбоем в
+`r2o_resource_limit::tests::d2o_parked_quic_resumes_after_one_tcp_admission`
+(проверка сообщила, что второй TCP waiter продлил QUIC yield); остальные тесты
+этого запуска прошли (202 passed, 1 failed, 1 ignored). Этот тест отдельно
+прошёл 1/1 с одним test thread. Повторный workspace запуск с одним test thread,
+исключая только этот тест, завершился успешно. Дифференциальный manifest
+проверяет 12 baseline и 30 upstream сценариев ровно один раз. После этих
+дифф-тестов `scripts/r2o-build-openwrt-aarch64-musl.sh` собрала все шесть
+статически связанных ARM64 musl бинарников; все запустились локально под QEMU,
+atomic catalog clear/check прошли. На физический OpenWrt роутер не подключались
+по просьбе пользователя. Это не полевое подтверждение, поэтому полный паритет
+и field acceptance не заявляются.

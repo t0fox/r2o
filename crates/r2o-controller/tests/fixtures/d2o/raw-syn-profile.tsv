@@ -1,0 +1,5 @@
+# Same known client profiles passed to the d2o and Rust raw classifiers.
+family=4 offer_ts=0
+family=4 offer_ts=1
+family=6 offer_ts=0
+family=6 offer_ts=1

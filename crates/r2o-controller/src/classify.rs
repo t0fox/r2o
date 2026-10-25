@@ -744,6 +744,8 @@ pub struct ClassifyOptions {
     pub control: Option<Trigger>,
     pub white: Option<Trigger>,
     pub control_vouched: bool,
+    /// TCP timestamp profile captured with the client trigger; `None` uses the local stack profile.
+    pub client_tcp_has_timestamps: Option<bool>,
     /// `None` использует метку обхода r2o; `Some(0)` отключает маркировку.
     pub mark: Option<u32>,
     pub cancel: Option<Arc<AtomicBool>>,
@@ -771,6 +773,7 @@ impl Default for ClassifyOptions {
             control: None,
             white: None,
             control_vouched: false,
+            client_tcp_has_timestamps: None,
             mark: None,
             cancel: None,
             seed_whole: None,

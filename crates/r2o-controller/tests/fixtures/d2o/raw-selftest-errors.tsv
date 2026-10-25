@@ -1,0 +1,7 @@
+# Consecutive local raw probe errors, interleaved across address families.
+family=4 result=error
+family=6 result=error
+family=4 result=error
+family=4 result=error
+family=6 result=error
+family=6 result=error

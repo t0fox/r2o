@@ -6713,6 +6713,7 @@ impl DiscoveryWorker {
                 r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                     target.clone(),
                     client_hello.as_deref(),
+                    client_has_tcp_timestamps,
                     Arc::clone(&cancel),
                     mark,
                     ech_config.as_ref(),
@@ -9204,6 +9205,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech(
     r2o_classify_discovery_target_with_client_hello_and_ech_progress(
         target,
         client_hello,
+        None,
         cancel,
         mark,
         ech_config,
@@ -9216,6 +9218,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech(
 fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
     target: r2o_controller::discovery::DiscoveryTarget,
     client_hello: Option<&[u8]>,
+    client_tcp_has_timestamps: Option<bool>,
     cancel: Arc<AtomicBool>,
     mark: Option<u32>,
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
@@ -9290,6 +9293,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                 &trigger,
                 ClassifyOptions {
                     mark,
+                    client_tcp_has_timestamps,
                     control: Some(control),
                     white,
                     cancel: Some(task_cancel),
