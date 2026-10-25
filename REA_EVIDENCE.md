@@ -7772,3 +7772,32 @@ fallback d2o через `/proc/sys/net/ipv4/tcp_timestamps`, строит обе
 atomic catalog clear/check прошли. На физический OpenWrt роутер не подключались
 по просьбе пользователя. Это не полевое подтверждение, поэтому полный паритет
 и field acceptance не заявляются.
+
+### REA-инструкции `d2k_sched_event` и повтор scheduler-теста — 25.10.2026
+
+Проверен актуальный upstream указатель `t0fox/d2o` `main`: он всё ещё указывает
+на `783aa75ce44dd6192cd1f4f1d98e4fe909ef3045`. Чистый donor ELF
+`core/d2kc` имеет SHA-256
+`8c0f15288da8df355be113e2ba87dc04af91c836c480b5875f60ce3127d23099`.
+Повторный REA `analyze_function` для `d2k_sched_event` остановился на
+`Ghidra decompilation failed: Unable to find unique hash for varnode`.
+Отдельная REA-операция `instructions` завершилась: Evidence
+`ev_198d6fc1c4678ba4a1baae317e8805ca2dd6352494d5706c744ebd5ae3aa5545`
+зафиксировала функцию `0x114610`, две области тела `0x114610–0x11466e` и
+`0x11517b–0x11518f`, 116 байт машинных инструкций и jump-table dispatch по
+типу события. Это подтверждает вход и dispatch, не псевдокод обработчиков;
+семантика ACK/APPLIED остаётся подтверждена исходником и C harness, указанными
+в таблице выше.
+
+Разобран единичный сбой
+`r2o_resource_limit::tests::d2o_parked_quic_resumes_after_one_tcp_admission`.
+C `launch_task` увеличивает `tcp_admission_sequence`, а `quic_yield_tick`
+возобновляет припаркованный QUIC после изменения sequence, даже если TCP ещё
+стоит в очереди. Rust `r2o_wait_for_measurement_turn` увеличивает тот же счётчик
+при выдаче TCP permit, а `r2o_next_measurement_waiter` выбирает QUIC после этой
+выдачи. Исходник реализует тот же порядок. После прежнего единичного падения
+controller lib прошёл с `203 passed, 0 failed, 1 ignored`, а повторный полный
+`cargo +1.98.0 test --locked --offline --workspace` завершился с кодом 0 без
+пропуска теста. Поэтому сбой не воспроизведён; его первопричина остаётся
+неустановленной, scheduler код не менялся. Физическая проверка OpenWrt по
+указанию пользователя не выполнялась.
