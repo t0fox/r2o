@@ -359,6 +359,12 @@ run_install > "$CASE/out" 2>&1 || { cat "$CASE/out" >&2; fail 'repeat install di
 [ "$(grep -c '^install-local ' "$CASE/manager.log")" -eq "$install_count" ] || fail 'repeat install reactivated an already current release'
 tail -n 2 "$CASE/services.log" | grep -qx enable || fail 'repeat install did not enable the current OpenWrt service'
 tail -n 1 "$CASE/services.log" | grep -qx start || fail 'repeat install did not start the current OpenWrt service'
+active_release=$(sed -n '2p' "$CASE/opt/r2o/release-slots")
+active_uninstaller=$CASE/opt/r2o/releases/$active_release/router/uninstall.sh
+sed '2a\
+set -x
+' "$active_uninstaller" > "$active_uninstaller.trace"
+mv "$active_uninstaller.trace" "$active_uninstaller"
 R2O_OPENWRT_RELEASE="$CASE/openwrt_release" \
 R2O_DIR="$CASE/opt/r2o" \
 R2O_INIT_DIR="$CASE/opt/etc/init.d" \
