@@ -7858,6 +7858,17 @@ QEMU и прошёл атомарные `--clear-catalog` / `--check-catalog`; S
 поэтому физического полевого подтверждения нет и полный поведенческий паритет
 не заявляется.
 
+Дополнительно на чистом donor `783aa75` прогнаны проверки Ask и Discovery:
+`r2o-ask-differential.sh` — C `d2kask: все проверки прошли`, Rust 9/9, включая
+порядок пяти вопросов; C `test_sched --lifecycle-only` и Rust expiry/cancel/
+generation tests прошли; `test_sched --admission-only` и Rust coalesce,
+cooldown и транспортная изоляция прошли. `r2o-discovery-concurrency-check.sh`
+прошёл 1/1. `r2o-discovery-quic-stop-differential.sh` собрал C для ARM64 и
+Rust для AArch64 GNU; оба локальных QEMU lifecycle/`DEL_ADDR_PROBE` теста
+прошли. `r2o-http-search-differential.sh`: C `test_httpsearch` прошёл все
+проверки, Rust retry test прошёл 1/1. Это дополнительные локальные
+дифференциалы и QEMU, не полевой тест.
+
 Повторный полный workspace прогон до тестовой изоляции дважды падал в
 `d2o_parked_quic_resumes_after_one_tcp_admission`. При фиксированном donor
 fixture на два слота тест читал реальные `/proc` метрики; host memory pressure
