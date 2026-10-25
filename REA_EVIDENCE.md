@@ -7369,12 +7369,14 @@ IDA не сконфигурирован. Поэтому конкретное с�
 |---|---|---|
 | `core/d2kc.c::main` → `save_atomic` → `d2k_catalog_save_atomic` | `R2oCatalogPersistence::persist_due` → `persist` → `Catalog::save_atomic` | `d2o_catalog_persist.tsv` подаёт обеим сторонам локальную запись `local-update` и внешний файл с `external-update`. Первый RED: C сохранил `local-update`, Rust — обе записи. После удаления merge/conflict-алгоритма `scripts/r2o-catalog-persist-differential.sh` сравнил реальные результаты C/Rust и завершился с кодом 0; прежний runtime-only `recheck_mono` остался в памяти и в snapshot. Полный Rust workspace прошёл. |
 
-Для `core/d2kc::main` REA dossier сейчас недоступен: активный ELF — x86_64 ELF,
-Windows Ghidra 12.1.4 сообщает `target_format_unsupported`, Hopper не работает на
-Windows, IDA не настроен. Поведенческий вывод подтверждают точный donor source,
-его `d2k_catalog_save_atomic` в C harness и та же Rust persistence-ветвь в
-дифференциальном тесте; псевдокод REA для `main` не заявляется. Это сравнение
-покрывает отложенную запись при внешнем изменении файла, а не полный полевой цикл.
+На момент этой проверки Windows REA сообщал `target_format_unsupported` для
+x86_64 ELF, Hopper не работал на Windows, IDA не был настроен. Позднее тот же
+актуальный donor был открыт через WSL REA/Ghidra; новое Evidence для функций,
+которые удалось декомпилировать, и ограничение `d2k_sched_event` записаны в
+сводке повторной приёмки ниже. Поведенческий вывод этой persistence-проверки
+подтверждают точный donor source, его `d2k_catalog_save_atomic` в C harness и та
+же Rust persistence-ветвь в дифференциальном тесте. Это сравнение покрывает
+отложенную запись при внешнем изменении файла, а не полный полевой цикл.
 После исправления прошли `cargo +1.98.0 test --locked --workspace`, релизная
 сборка `scripts/r2o-build-openwrt-aarch64-musl.sh` и QEMU smoke всех шести
 бинарников с `--clear-catalog` / `--check-catalog`; известны только два
@@ -7641,14 +7643,15 @@ poll loop этим harness не исполняется. Отдельные
 каталог очистился атомарно и прочитался пустым. Это локальный target smoke,
 не подтверждение на физическом OpenWrt.
 
-Свежий декомпиляторский dossier для этих локальных ELF в активном REA MCP
-окружении недоступен: Windows-провайдер отклоняет ELF, а текущий REA bundle
-пуст. Для новых ACK ветвей использованы donor source и harness, вызывающий C
-`d2k_sched_event` и `d2k_sched_tick`; прежние сохранённые REA dossier для
-`candidate_trial_matches`, `on_applied` и datapath остаются указаны в этом
-файле. Локальная OpenWrt/QEMU сборка проверяет целевые бинарники; физический
-роутер не использовался, поэтому полевой и полный поведенческий паритет не
-заявляются.
+На момент этой проверки Windows REA-провайдер отклонял ELF, а его REA bundle
+был пуст. Позднее выполнен отдельный WSL REA/Ghidra анализ чисто собранного ELF;
+его Evidence и неудача декомпиляции `d2k_sched_event` из-за varnode-ограничения
+зафиксированы в сводке повторной приёмки ниже. Для ACK ветвей по-прежнему
+использованы donor source и harness, вызывающий C `d2k_sched_event` и
+`d2k_sched_tick`; прежние сохранённые REA dossier для `candidate_trial_matches`,
+`on_applied` и datapath остаются указаны в этом файле. Локальная OpenWrt/QEMU
+сборка проверяет целевые бинарники; физический роутер не использовался,
+поэтому полевой и полный поведенческий паритет не заявляются.
 
 После изменения wire IDs и ACK-сопоставления
 `cargo +1.98.0 test --locked --workspace` завершился с кодом 0;
@@ -7657,3 +7660,47 @@ poll loop этим harness не исполняется. Отдельные
 Последняя запустила все шесть release-бинарников под QEMU; очистка каталога и
 проверка пустого снимка прошли. Остаются только два предупреждения musl-типа
 в `response.rs`. Это локальная эмуляция, не проверка на физическом OpenWrt.
+
+### Повторная C/Rust приёмка на чистом текущем donor — 25.10.2026
+
+Источник сверки — `t0fox/d2o` `HEAD` и `main` на
+`783aa75ce44dd6192cd1f4f1d98e4fe909ef3045`. Donor-команда была собрана в чистом
+detached checkout этого commit; локальный старый checkout содержал устаревшие
+объекты сборки, поэтому C/Rust harness запускались с
+`R2O_DONOR_ROOT=/mnt/e/tmp/d2o-783aa75-clean` (а для scheduler-набора — с
+`R2O_DONOR_CORE` того же checkout). Свежий C ELF имеет SHA-256
+`8c0f15288da8df355be113e2ba87dc04af91c836c480b5875f60ce3127d23099`.
+REA/Ghidra 12.1.4 успешно исследовал этот ELF в WSL. Сохранены REA Evidence
+`ev_4e5683870a612bcd96ca249f6bdbe4b05a4e55ed3294145709db434f454366f9`
+(поиск), `ev_235eb663342ec8d87c602ce16ed5e0c029d3ef9552eb2b50402259b40e597690`
+(scheduler), `ev_6f06ae67208f28879e934a15c3d45f75af642b828a0d9788d78c71ce2a04382b`
+(verify/meas/classify/raw) и
+`ev_107d3346bd758ae6e8e9307ffb0a53fe100add28d514065e93424c465fd83027`
+(control/catalog). Декомпиляция `d2k_sched_event` не прошла: Ghidra вернул
+`Unable to find unique hash for varnode`; для этой функции вывод основан на
+исходнике и C harness, REA псевдокод не заявляется.
+
+| Donor C-функция или правило | Rust-аналог | Одинаковый вход и результат C/Rust |
+|---|---|---|
+| `detect/raw.c::rst_rule_cmd_form`, `d2k_raw_probe_handshake_as` | `raw_probe::RstRule::install`, `RawConn::connect` | `test-d2o-shared-fixtures.sh`: обе стороны выставили `D2K_FW=nft` / `R2O_FW=nft`; семейство, tuple и timeout совпали (`inet d2k_rst` и `inet r2o_rst` — разные namespace). |
+| `core/sched.c::sched_probe_cap`; пять вопросов `core/d2kask.c::main` / `D2K_PROPS_QUESTIONS` | `r2o_discovery_volume_recovery`, `R2O_DISCOVERY_PROBE_CAP`; `ask::question_plan` | `r2o-resource-limit-differential.sh`: C/Rust probe cap совпал: `ordinary 67`, `network_whitelist 333`; три CPU-вектора и 11 AIMD-входов совпали. `r2o-ask-differential.sh`: порядок/параметры пяти Ask-вопросов совпали (C все проверки, Rust 9/9). Пять — размер Ask-набора, не общий потолок замеров; лимит слотов и AIMD сохранены. |
+| `detect/classify.c::d2k_classify_run`, `core/meas.c::d2k_meas_once` | `classify::run_with_backend_progress`, `classify::measure`, `ProbeBackend::probe_outcome` | `test-d2o-shared-fixtures.sh`: исходная C classifier и Rust приняли общий безусловный CLEAR после базовой серии: `probes=3 repeats=3 mark=45`; дополнительные confirmation probes не добавлялись. C `test_response` завершился `ok`. |
+| `core/verify.c::d2k_verify_probe`, `d2k_verify_probe12_on` | `fetch::r2o_fetch_with_phase_timeout`, `r2o_tls::r2o_tls_client_connection` | `r2o-tls-verify-differential.sh`: 4/4 общих случаев совпали — invalid Finished внутри корректно зашифрованной записи принимается, короткий TLS 1.2 Finished отвергается, результат совпадающего и несовпадающего имени сертификата совпадает. |
+| `core/sched.c::quic_yield_tick`, `queued_pick`, `launch_task`, `d2k_sched_tick` | `r2o_yield_if_contended_with_cancel`, `r2o_next_measurement_waiter`, `r2o_mark_tcp_discovery_admitted`, `R2oDiscoveryQueue::pop` / `r2o_expire` | `r2o-worker-permit-differential.sh`: `quic_only yield=no`; `tcp_beats_hot_quic yield=yes pick=tcp-hot`; `resume_after_one_tcp resume=yes` совпали. `r2o-queue-order-differential.sh` совпал на expiry, family queue, hot/FIFO и QUIC-yield; `r2o-discovery-active-lifetime-differential.sh` прошёл сроки, отмену поколения и повтор. Полный `r2o-scheduler-differential.sh` завершился с кодом 0: C `test_sched` и Rust scheduler/worker/permit/APPLIED/QUIC сценарии прошли (486 с; QUIC 27/27). |
+| `core/link.c::d2k_link_next`, `core/sched.c::candidate_trial_matches`, `d2k_sched_event`, `applied_trial_is_ours`, `on_applied`, `verify_confirm`; `core/catalog.c::d2k_catalog_save_atomic`, `core/d2kc.c::main` | `control::decode_ack` / `decode_applied`, `ControlClient::wait_for_command_ack`, `collect_applied_events`, `r2o_family_applied_flow_matches`, `r2o_confirm_discovery_outcome`, `R2oCatalogPersistence::persist_due` | `r2o-control-events-differential.sh`: одинаковые ACK/APPLIED, включая legacy APPLIED без execution context; посторонние ACK игнорируются до точной пары command/trial. `r2o-ack-applied-persist-differential.sh`: общий fixture дал `ack=yes applied=yes catalog_binding=example.com level=3 persisted=yes save_interval_ms=60000`; Rust не сохраняет на 59-й секунде и сохраняет на 60-й, как C `SAVE_EVERY_MS`. TLS в цепочке задаётся fixture, поэтому сетевой verifier/poll loop не исполнялся. |
+| `core/sched.c::d2k_sched_sync_step`, `binding_beats`, `newer_name_binding`; snapshot через `d2k_catalog_save_atomic` | `catalog_commands_with_send_cap`, `install_catalog_with_policy`, `R2oCatalogPersistence::persist_due` | `r2o-catalog-sync-differential.sh`: обе стороны вывели `SET_NAME:small.example`, затем `DEL_NAME:large.example`. `r2o-catalog-persist-differential.sh` совпал по overwrite-семантике C при внешнем изменении snapshot. |
+
+Дополнительно прошли `r2o-fetch-cli-differential.sh` (оба клиента разрешили
+`localhost` в `127.0.0.1` на закрытом локальном порту) и
+`r2o-shared-fixtures` с 13 TLS response-векторами C/Rust. Сквозной
+ACK/APPLIED/PERSIST скрипт добавлен в обязательный upstream scheduler shard
+`scripts/ci-differential-shards.sh`, чтобы этот результат повторялся в том же
+порядке вместе с остальными scheduler-сверками.
+
+Только после C/Rust дифференциалов выполнен
+`scripts/r2o-build-openwrt-aarch64-musl.sh`: все шесть release-бинарников
+успешно запустились локально в QEMU; atomic clear/check каталога прошли. Это
+OpenWrt-target smoke, а не физическое полевое испытание. По прямому указанию
+пользователя роутер не подключался. Поэтому эти результаты подтверждают только
+перечисленные входы и сценарии; полный поведенческий паритет и полевая
+приёмка не объявляются.
