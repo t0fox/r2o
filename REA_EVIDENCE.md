@@ -8307,3 +8307,37 @@ The current source also rebuilt with the OpenWrt 25.12.5 AArch64 musl SDK.
 All six release binaries started under `qemu-aarch64`; controller catalog
 clear/check smoke passed. This is build/runtime evidence only; no live
 YouTube/Discord plan was confirmed in this QEMU run.
+
+### OPAQUE owned-search fallback (2026-10-25)
+
+The newer d2o export remains the latency/selection benchmark above: YouTube
+uses an already confirmed own plan after 21.6 s, while the retained Discord
+events do not support a confirmed plan. It does not justify forcing a Discord
+bypass.
+
+| Donor C source | Rust equivalent | C/Rust test result |
+|---|---|---|
+| `core/sched.c::verdict_to_plans` (line 5023) sets `owned_fallback` and calls `refill_from_fallback` when an owned TCP search ends OPAQUE without an expressible plan; `refill_from_fallback` starts the donor's tried-hash queue in batches of 8. The donor derives the plan shape from the actual ClientHello, so ECH/TLS 1.3 uses the modern profile. | `r2o_classify_discovery_target_with_client_hello_and_ech_progress` now preserves whether the run completed without timeout, had usable raw probes, returned OPAQUE, and had no measured plan. The runner creates `FallbackQueue::new_owned_search`, tries its first plan, then continues the same queue after a failed trial. ECH candidates use the modern plan shape and retain the existing witness check and RX-ladder ordering. | `scripts/r2o-fallback-differential.sh` directly includes donor `sched.c`, sends the OPAQUE/owned-search input through `verdict_to_plans`, and byte-compares the first 8 emitted plans with Rust. It passed, including plan order and exact text. The Rust runner predicate test passed for OPAQUE/raw/no-plan and rejected timeout, unavailable raw probes, other verdicts, and an existing plan; it also checks ECH→modern shape mapping. |
+
+The candidate still goes through the existing HTTPS plus exact APPLIED
+confirmation path. The own-search fallback does not receive measured-arm
+retries; following arms use the existing candidate budget, deadline, retry
+stop on challenge/legal denial, and donor cooldown. No new probe cap or
+selection rule was introduced.
+
+Verification after the change:
+- `sh scripts/r2o-fallback-differential.sh`: passed, including plan batches,
+  OPAQUE activation and first 8 arms, raw/candidate budget separation, and
+  control STATS parser comparison.
+- `cargo +1.98.0 test --workspace --locked`: exit 0; all workspace tests
+  passed (the pre-existing donor-oracle tests marked ignored remain delegated
+  to their differential scripts).
+- `sh scripts/r2o-build-openwrt-aarch64-musl.sh`: passed with the OpenWrt
+  25.12.5 AArch64 musl SDK. All six static release binaries started with
+  `qemu-aarch64`; controller catalog clear/check smoke passed. This is
+  user-mode OpenWrt runtime smoke, not a live YouTube/Discord scenario or
+  field acceptance.
+
+The physical router was not touched. Full parity remains unclaimed: known-plan
+priority beyond the own-first phase and the remaining RX ladder after fallback
+still require separate C/Rust transfer and differential evidence.

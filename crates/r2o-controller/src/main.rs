@@ -4092,6 +4092,25 @@ fn r2o_discovery_measured_fallback_allowed(
 }
 
 #[cfg(unix)]
+fn r2o_discovery_owned_fallback_needed(
+    timed_out: bool,
+    raw_usable: bool,
+    verdict: Verdict,
+    has_plan: bool,
+) -> bool {
+    !timed_out && raw_usable && verdict == Verdict::Opaque && !has_plan
+}
+
+#[cfg(unix)]
+fn r2o_discovery_plan_shape(shape: u8) -> u8 {
+    if shape == SHAPE_ECH_TCP {
+        SHAPE_MODERN
+    } else {
+        shape
+    }
+}
+
+#[cfg(unix)]
 fn r2o_discovery_client_shape_trial(
     target: &r2o_controller::discovery::DiscoveryTarget,
     source_text: &str,
@@ -7061,7 +7080,7 @@ impl DiscoveryWorker {
                 }
                 runner_started = std::time::Instant::now();
             }
-            let (outcome, classifier_probes) =
+            let (outcome, classifier_probes, owned_opaque_fallback) =
                 r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                     target.clone(),
                     client_hello.as_deref(),
@@ -7126,8 +7145,29 @@ impl DiscoveryWorker {
                 }
                 return outcome;
             }
+            let mut owned_fallback_queue = None;
+            let mut primary_from_owned_fallback = false;
+            if outcome.plan_text.is_none() && owned_opaque_fallback {
+                let mut queue = r2o_controller::r2o_fallback::FallbackQueue::new_owned_search();
+                if let Some(candidate) = queue.next(
+                    r2o_discovery_plan_shape(target.shape),
+                    runner_send_cap.load(Ordering::Relaxed),
+                ) {
+                    outcome.plan_text = Some(candidate);
+                    primary_from_owned_fallback = true;
+                    owned_fallback_queue = Some(queue);
+                    outcome.detail.push_str(
+                        "; замер владеет поиском без выразимого плана — продолжаю запасной перебор d2o",
+                    );
+                }
+            }
             let Some(plan_text) = outcome.plan_text.as_deref() else {
                 return outcome;
+            };
+            let primary_source = if primary_from_owned_fallback {
+                "запасной перебор d2o"
+            } else {
+                "выведен из замера"
             };
             let plan_candidate = r2o_discovery_plan_candidate(plan_text);
             let (probe_path, _) = r2o_discovery_resource_probe_paths(
@@ -7155,13 +7195,13 @@ impl DiscoveryWorker {
                     1,
                     classify_probes,
                     &plan_candidate,
-                    "выведен из замера",
+                    primary_source,
                 );
             r2o_discovery_record_plan_progress(
                 &runner_searches,
                 &target,
                 plan_text,
-                "выведен из замера",
+                primary_source,
                 "проверяется на пробном потоке",
                 "ожидается точное подтверждение datapath",
             );
@@ -7200,7 +7240,7 @@ impl DiscoveryWorker {
                         !cancel.load(Ordering::Relaxed)
                             && r2o_discovery_trial_time_available(runner_started.elapsed())
                     },
-                    true,
+                    !primary_from_owned_fallback,
                     Some(&dropped_events),
                     &mut candidate_progress,
                 );
@@ -7214,7 +7254,7 @@ impl DiscoveryWorker {
                 &runner_searches,
                 &target,
                 plan_text,
-                "выведен из замера",
+                primary_source,
                 &application,
                 &last_result,
             );
@@ -7227,25 +7267,43 @@ impl DiscoveryWorker {
                     1,
                     probe_counts.total(),
                     &plan_candidate,
-                    "выведен из замера",
+                    primary_source,
                 );
             let Some(primary_config) = ech_config.clone() else {
+                let challenge_or_denial = result.as_ref().is_ok_and(|fetch| {
+                    fetch.cloudflare_challenge
+                        || fetch.http_outcome
+                            == r2o_controller::fetch::R2oFetchHttpOutcome::LegalDenial
+                });
+                if challenge_or_denial {
+                    let mut outcome = r2o_confirm_discovery_outcome(outcome, result, applied);
+                    outcome.retry_after = Some(R2O_DISCOVERY_CHALLENGE_RETRY);
+                    return outcome;
+                }
                 if primary_verified
-                    || !r2o_discovery_measured_fallback_allowed(
-                        &result,
-                        applied,
-                        candidate_evidence,
-                    )
+                    || (!primary_from_owned_fallback
+                        && !r2o_discovery_measured_fallback_allowed(
+                            &result,
+                            applied,
+                            candidate_evidence,
+                        ))
                 {
                     return r2o_confirm_discovery_outcome(outcome, result, applied);
                 }
+                let fallback_reason = if primary_from_owned_fallback {
+                    "первый кандидат запасного списка не подтвердился на применённом потоке"
+                } else {
+                    "измеренный кандидат не подтвердился на применённом потоке"
+                };
                 eprintln!(
-                    "по {} измеренный кандидат не подтвердился на применённом потоке — продолжаю запасной перебор d2o",
+                    "по {} {fallback_reason} — продолжаю запасной перебор d2o",
                     target.host
                 );
-                outcome.detail.push_str("; измеренный кандидат не подтвердился на применённом потоке — запасной перебор d2o");
-                let mut fallback_queue =
-                    r2o_controller::r2o_fallback::FallbackQueue::new(plan_text);
+                outcome.detail.push_str(&format!(
+                    "; {fallback_reason} — продолжаю запасной перебор d2o"
+                ));
+                let mut fallback_queue = owned_fallback_queue
+                    .unwrap_or_else(|| r2o_controller::r2o_fallback::FallbackQueue::new(plan_text));
                 let mut last_trial = (result, applied);
                 let mut index = 0;
                 loop {
@@ -7358,7 +7416,7 @@ impl DiscoveryWorker {
                 return outcome;
             };
             let primary_origin = primary_config.origin_name.clone();
-            let (selected_config, (mut result, mut applied), mut rejected_witnesses) =
+            let (mut selected_config, (mut result, mut applied), mut rejected_witnesses) =
                 r2o_ech_retry_challenged_witness(
                     &target.host,
                     plan_text,
@@ -7543,6 +7601,136 @@ impl DiscoveryWorker {
                         .remove(&target);
                 }
             }
+            let mut owned_fallback_plan = None;
+            if primary_from_owned_fallback && rx_ladder_plan.is_none() {
+                let mut fallback_queue = owned_fallback_queue
+                    .take()
+                    .unwrap_or_else(r2o_controller::r2o_fallback::FallbackQueue::new_owned_search);
+                let mut index = 1;
+                loop {
+                    let challenge_or_denial = result.as_ref().is_ok_and(|fetch| {
+                        fetch.cloudflare_challenge
+                            || fetch.http_outcome
+                                == r2o_controller::fetch::R2oFetchHttpOutcome::LegalDenial
+                    });
+                    if challenge_or_denial
+                        || cancel.load(Ordering::Relaxed)
+                        || !r2o_discovery_trial_time_available(runner_started.elapsed())
+                        || probe_cap.saturating_sub(probes_used)
+                            < 1 + usize::from(client_hello.is_some())
+                    {
+                        break;
+                    }
+                    let Some(candidate) = fallback_queue.next(
+                        r2o_discovery_plan_shape(target.shape),
+                        runner_send_cap.load(Ordering::Relaxed),
+                    ) else {
+                        break;
+                    };
+                    index += 1;
+                    let plan_candidate = r2o_discovery_plan_candidate(&candidate);
+                    runner_searches
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .update(
+                            &target,
+                            "проверяем выведенный план",
+                            index,
+                            classify_probes.saturating_add(probes_used),
+                            &plan_candidate,
+                            "запасной перебор d2o",
+                        );
+                    r2o_discovery_record_plan_progress(
+                        &runner_searches,
+                        &target,
+                        &candidate,
+                        "запасной перебор d2o",
+                        "проверяется на пробном потоке",
+                        "ожидается точное подтверждение datapath",
+                    );
+                    let (first_result, first_applied, attempts) = r2o_run_discovery_candidate_trial(
+                        &target,
+                        &candidate,
+                        &probe_path,
+                        mark,
+                        &commands,
+                        client_hello.as_deref(),
+                        Some(&selected_config),
+                        &runner_resource_memory,
+                        None,
+                    );
+                    probes_used = probes_used.saturating_add(attempts);
+                    let (next_config, (candidate_result, candidate_applied), newly_rejected) =
+                        r2o_ech_retry_challenged_witness(
+                            &target.host,
+                            &candidate,
+                            &ech_witness_candidates,
+                            next_witness,
+                            selected_config.clone(),
+                            (first_result, first_applied),
+                            |config, (result, _)| {
+                                result.as_ref().is_ok_and(|fetch| {
+                                    r2o_ech_witness_transport_proof(&target, config, fetch)
+                                })
+                            },
+                            |witness| {
+                                r2o_discovery_ech_witness_config(
+                                    &target,
+                                    witness,
+                                    mark,
+                                    &runner_ech_witness_resolutions,
+                                )
+                                .ok()
+                                .flatten()
+                            },
+                            |config, retry_plan| {
+                                let proof_probe_reserve = usize::from(client_hello.is_some());
+                                if probe_cap.saturating_sub(probes_used) < 1 + proof_probe_reserve
+                                    || cancel.load(Ordering::Relaxed)
+                                    || !r2o_discovery_trial_time_available(runner_started.elapsed())
+                                {
+                                    return (
+                                        Err("бюджет зондов Discovery исчерпан при проверке ECH-свидетеля".into()),
+                                        false,
+                                    );
+                                }
+                                let (result, applied, attempts) = r2o_run_discovery_candidate_trial(
+                                    &target,
+                                    retry_plan,
+                                    &probe_path,
+                                    mark,
+                                    &commands,
+                                    client_hello.as_deref(),
+                                    Some(config),
+                                    &runner_resource_memory,
+                                    None,
+                                );
+                                probes_used = probes_used.saturating_add(attempts);
+                                (result, applied)
+                            },
+                        );
+                    selected_config = next_config;
+                    rejected_witnesses.extend(newly_rejected);
+                    result = candidate_result;
+                    applied = candidate_applied;
+                    let verified = r2o_family_recovery_decision(&result, applied)
+                        == R2oFamilyRecoveryDecision::Verified;
+                    let (application, last_result) =
+                        r2o_discovery_plan_result(&result, applied, verified);
+                    r2o_discovery_record_plan_progress(
+                        &runner_searches,
+                        &target,
+                        &candidate,
+                        "запасной перебор d2o",
+                        &application,
+                        &last_result,
+                    );
+                    if verified {
+                        owned_fallback_plan = Some(candidate);
+                        break;
+                    }
+                }
+            }
             if !rejected_witnesses.is_empty() {
                 let expires = std::time::Instant::now() + std::time::Duration::from_secs(30 * 60);
                 let mut cache = runner_ech_challenges
@@ -7557,7 +7745,24 @@ impl DiscoveryWorker {
             let (application, last_result) =
                 r2o_discovery_plan_result(&result, applied, final_verified);
             let selected_rx_ladder = rx_ladder_plan.is_some();
+            let challenge_or_denial = result.as_ref().is_ok_and(|fetch| {
+                fetch.cloudflare_challenge
+                    || fetch.http_outcome == r2o_controller::fetch::R2oFetchHttpOutcome::LegalDenial
+            });
             let mut outcome = r2o_confirm_discovery_outcome(outcome, result, applied);
+            if let Some(plan) = owned_fallback_plan {
+                outcome.plan_text = Some(plan);
+                outcome.retry_after = None;
+                outcome.detail.push_str(
+                    "; запасной кандидат подтверждён полным HTTPS-ответом и точным APPLIED",
+                );
+            } else if primary_from_owned_fallback && outcome.plan_text.is_none() {
+                outcome.retry_after = Some(if challenge_or_denial {
+                    R2O_DISCOVERY_CHALLENGE_RETRY
+                } else {
+                    R2O_DISCOVERY_INCOMPLETE_RETRY
+                });
+            }
             if let Some(plan) = rx_ladder_plan {
                 outcome.plan_text = Some(plan);
                 outcome
@@ -7590,6 +7795,8 @@ impl DiscoveryWorker {
                     plan,
                     if selected_rx_ladder {
                         "ECH RX-лестница"
+                    } else if primary_from_owned_fallback {
+                        "запасной перебор d2o"
                     } else {
                         "выведен из замера"
                     },
@@ -7615,7 +7822,11 @@ impl DiscoveryWorker {
                     } else if selected_rx_ladder {
                         "ECH RX-лестница"
                     } else if outcome.plan_text.is_some() {
-                        "выведен из замера"
+                        if primary_from_owned_fallback {
+                            "запасной перебор d2o"
+                        } else {
+                            "выведен из замера"
+                        }
                     } else {
                         ""
                     },
@@ -9814,7 +10025,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech(
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
     white_name: &str,
 ) -> (DiscoveryOutcome, usize) {
-    r2o_classify_discovery_target_with_client_hello_and_ech_progress(
+    let (outcome, probes, _) = r2o_classify_discovery_target_with_client_hello_and_ech_progress(
         target,
         client_hello,
         None,
@@ -9824,7 +10035,8 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech(
         white_name,
         None,
         &mut |_, _, _, _| {},
-    )
+    );
+    (outcome, probes)
 }
 
 #[cfg(unix)]
@@ -9883,7 +10095,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
     white_name: &str,
     seed_whole: Option<r2o_controller::classify::SeedWhole>,
     progress: &mut dyn FnMut(&str, usize, usize, usize),
-) -> (DiscoveryOutcome, usize) {
+) -> (DiscoveryOutcome, usize, bool) {
     let Ok(trigger) = r2o_discovery_trigger(&target, client_hello, ech_config) else {
         return (
             DiscoveryOutcome {
@@ -9898,6 +10110,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                 retry_after: None,
             },
             0,
+            false,
         );
     };
     let control = match Trigger::tls("disk.rzd.ru") {
@@ -9919,6 +10132,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                     retry_after: None,
                 },
                 0,
+                false,
             );
         }
     };
@@ -9948,6 +10162,12 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
     } else {
         result.hit.map(|hit| hit.plan_text)
     };
+    let owned_opaque_fallback = r2o_discovery_owned_fallback_needed(
+        timed_out,
+        result.raw_usable,
+        result.verdict,
+        plan_text.is_some(),
+    );
     let detail = if timed_out {
         "активный поиск превысил срок жизни 10 минут; частичный результат отброшен".into()
     } else {
@@ -9966,6 +10186,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
             retry_after,
         },
         probes,
+        owned_opaque_fallback,
     )
 }
 
@@ -17475,6 +17696,31 @@ mod tests {
             true,
             evidence
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_search_fallback_requires_raw_opaque_result_without_plan() {
+        assert_eq!(
+            super::r2o_discovery_plan_shape(super::SHAPE_ECH_TCP),
+            super::SHAPE_MODERN,
+        );
+        assert!(super::r2o_discovery_owned_fallback_needed(
+            false,
+            true,
+            super::Verdict::Opaque,
+            false,
+        ));
+        for (timed_out, raw_usable, verdict, has_plan) in [
+            (true, true, super::Verdict::Opaque, false),
+            (false, false, super::Verdict::Opaque, false),
+            (false, true, super::Verdict::Clear, false),
+            (false, true, super::Verdict::Opaque, true),
+        ] {
+            assert!(!super::r2o_discovery_owned_fallback_needed(
+                timed_out, raw_usable, verdict, has_plan,
+            ));
+        }
     }
 
     #[cfg(unix)]

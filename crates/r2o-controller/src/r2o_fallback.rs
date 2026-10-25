@@ -72,6 +72,14 @@ impl FallbackQueue {
         }
     }
 
+    pub fn new_owned_search() -> Self {
+        Self {
+            next: 0,
+            tried: Vec::new(),
+            pending: VecDeque::new(),
+        }
+    }
+
     pub fn next(&mut self, shape: u8, send_cap: usize) -> Option<String> {
         // refill_from_fallback snapshots send_cap for each SCHED_MAX_PLANS batch.
         if self.pending.is_empty() {
@@ -357,6 +365,21 @@ mod tests {
             }
         }
         if let Ok(path) = std::env::var("R2O_FALLBACK_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
+    #[test]
+    fn opaque_owned_search_starts_with_donor_fallback_queue() {
+        let mut queue = super::FallbackQueue::new_owned_search();
+        let mut output = String::new();
+        for _ in 0..8 {
+            let text = queue
+                .next(1, 1492)
+                .expect("donor fallback batch has eight arms");
+            output.push_str(&text.replace("r2o-plan", "d2k-plan"));
+        }
+        if let Ok(path) = std::env::var("R2O_OWNED_FALLBACK_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
         }
     }

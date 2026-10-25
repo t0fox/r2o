@@ -14,6 +14,29 @@ cd "$root"
 R2O_FALLBACK_DIFF_OUTPUT="$tmp/rust.out" cargo +1.98.0 test --locked -p r2o-controller --lib fallback_plans_match_donor
 diff -u "$tmp/c.out" "$tmp/rust.out"
 printf 'C/Rust fallback plans match for both TLS shapes and five send caps.\n'
+
+donor_core="$donor/core"
+make -s -C "$donor_core" test_sched CC=clang-18
+make -s -C "$donor_core" udpplan.o CC=clang-18
+donor_sched_objects=$(make -s -C "$donor_core" \
+    --eval='print-sched-test-objects:;@echo $(filter-out sched.o,$(SCHED_TEST_OBJ))' \
+    print-sched-test-objects)
+(
+    cd "$donor_core"
+    clang-18 -std=gnu11 -O2 -Wall -Wextra -Werror -pthread \
+        -ffunction-sections -fdata-sections \
+        -I. -Iinclude -I"$donor/datapath/include" \
+        -DD2K_RELEASE_ID='"dev"' \
+        "$root/crates/r2o-controller/tests/d2o_opaque_fallback_fixture.c" \
+        $donor_sched_objects udpplan.o -Wl,--gc-sections -lpthread \
+        -o "$tmp/opaque-fallback-c"
+)
+"$tmp/opaque-fallback-c" >"$tmp/opaque-c.out"
+R2O_OWNED_FALLBACK_DIFF_OUTPUT="$tmp/opaque-rust.out" \
+    cargo +1.98.0 test --locked -p r2o-controller --lib \
+    opaque_owned_search_starts_with_donor_fallback_queue
+diff -u "$tmp/opaque-c.out" "$tmp/opaque-rust.out"
+printf 'C/Rust OPAQUE owned-search fallback activation and first 8 arms match.\n'
 clang-18 -std=gnu11 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections -pthread \
     -I"$donor/core" -I"$donor/core/include" -I"$donor/datapath/include" \
     -DD2K_RELEASE_ID='"dev"' \
