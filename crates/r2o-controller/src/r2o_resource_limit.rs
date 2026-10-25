@@ -917,7 +917,7 @@ mod tests {
         atomic::{AtomicBool, Ordering},
         mpsc,
     };
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn worker_slots_match_the_d2o_scheduler_capacity() {
@@ -1466,6 +1466,10 @@ mod tests {
         let slots = fields[1].parse::<usize>().unwrap();
         let other_active = fields[2].parse::<usize>().unwrap();
         let gate = R2oMeasurementGate::new(slots);
+        // This fixture checks the donor's TCP/QUIC turn policy at a fixed
+        // capacity; live host memory pressure is covered by separate AIMD tests.
+        gate.shared.state.lock().unwrap().last_sample =
+            Some(Instant::now() + Duration::from_secs(60));
         let mut quic = gate.r2o_try_acquire().unwrap();
         let other = (0..other_active)
             .map(|_| gate.r2o_try_acquire().unwrap())

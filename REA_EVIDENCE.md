@@ -7801,3 +7801,39 @@ controller lib прошёл с `203 passed, 0 failed, 1 ignored`, а повто�
 пропуска теста. Поэтому сбой не воспроизведён; его первопричина остаётся
 неустановленной, scheduler код не менялся. Физическая проверка OpenWrt по
 указанию пользователя не выполнялась.
+
+### TLS SAN result mismatch и scheduler fixture — RED/GREEN C/Rust, 25.10.2026
+
+На актуальном donor `783aa75ce44dd6192cd1f4f1d98e4fe909ef3045` добавлен общий
+loopback-вход с TLS-сертификатом, где `dNSName` SAN содержит некорректный UTF-8.
+Он выявил ещё одно подтверждённое расхождение результата verifier:
+
+| Donor C-функция | Rust-аналог | Общий вход и RED/GREEN результат |
+|---|---|---|
+| `core/tls13core.c::cert_name_ok`, обёртка `d2k_t13_cert_name_ok`; результат проходит через `core/tls13.c` и `core/verify.c::d2k_verify_probe` | `response::https_certificate_name_matches` → `fetch::r2o_fetch_with_phase_timeout` | На одинаковом TLS 1.3/HTTP 200 ответе C учитывает любой `dNSName` SAN как имя, но некорректные байты не совпадают: RED C `level=1,name_ok=0,status=200,complete=1`, Rust `peer_name_ok=None`. Rust ранее игнорировал `GeneralName::Invalid(Tag(2), _)`. Теперь такой SAN считается присутствующим несовпадением; GREEN Rust `peer_name_ok=Some(false)` при том же TLS/status/complete. `scripts/r2o-tls-verify-differential.sh`: 5/5 сценариев совпали, включая valid/mismatch-name и TLS Finished случаи. |
+
+Изменение runtime ограничено переводом malformed dNSName в измеренный mismatch;
+доверие к цепочке сертификатов, транспортный результат и критерии HTTP-успеха
+не изменялись.
+
+Повторный полный workspace прогон до тестовой изоляции дважды падал в
+`d2o_parked_quic_resumes_after_one_tcp_admission`. При фиксированном donor
+fixture на два слота тест читал реальные `/proc` метрики; host memory pressure
+снижала adaptive limit до одного, оставляя второй permit занятым и заставляя
+2-секундный тестовый дедлайн истечь (`resume=no`). Это не C/Rust scheduler
+mismatch: `core/sched.c::launch_task` / `quic_yield_tick` и Rust
+`r2o_wait_for_measurement_turn` / `r2o_next_measurement_waiter` дали одинаковый
+общий fixture `resume_after_one_tcp yield=no pick=- resume=yes` в
+`scripts/r2o-worker-permit-differential.sh`. Scheduler production-код не
+менялся. Тест теперь сохраняет неизменным только свой resource snapshot; live
+AIMD остаётся в отдельных тестах. После этого точечный тест прошёл 1/1, полный
+`cargo +1.98.0 test --locked --offline --workspace` — с кодом 0.
+
+Также прошли `cargo +1.98.0 fmt --all -- --check` и
+`scripts/r2o-worker-permit-differential.sh` против того же donor (все три
+очередных сценария совпали). Затем `scripts/r2o-build-openwrt-aarch64-musl.sh`
+завершился с кодом 0: шесть ARM64 musl бинарников прошли локальную QEMU
+проверку; версии и `wire=47` совпали, atomic catalog clear/check прошёл.
+Остались предупреждения о deprecated `libc::time_t` и `libc::suseconds_t` в
+`response.rs`. По просьбе пользователя SSH к роутеру и deploy не выполнялись.
+Полевого подтверждения нет; полный поведенческий паритет не объявляется.

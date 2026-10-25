@@ -359,6 +359,10 @@ pub(crate) fn https_certificate_name_matches(der: &[u8], host: &str) -> Option<b
                     return Some(true);
                 }
             }
+            x509_parser::extensions::GeneralName::Invalid(tag, _) if tag.0 == 2 => {
+                // d2o treats an undecodable dNSName SAN as a present mismatch.
+                has_supported_name = true;
+            }
             _ => {}
         }
     }
