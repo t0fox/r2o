@@ -946,7 +946,15 @@ fn handshake(address: SocketAddr, sni: &str, options: ResponseOptions) -> Result
     let mut bytes = vec![0_u8; RESPONSE_CAP];
     let mut have = 0;
     while Instant::now() < deadline {
-        if !poll_until(fd, libc::POLLIN, deadline).unwrap_or(false) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let millis = remaining.as_millis().min(i32::MAX as u128) as i32;
+        let mut descriptor = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // d2o treats one interrupted poll as a failed TLS attempt.
+        if unsafe { libc::poll(&mut descriptor, 1, millis) } <= 0 {
             break;
         }
         let result = unsafe {

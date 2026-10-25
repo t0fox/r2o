@@ -8440,3 +8440,22 @@ This verifies batching semantics and the target build, not a wall-clock field
 speedup. No apply operation or test traffic was sent to the physical router; its
 read-only status showed d2o, not R2O. Overall parity and live-traffic acceptance
 remain unproven.
+
+## TLS response poll interruption — d2o `304ba893`, 26.10.2026
+
+Confirmed and fixed one TLS-result divergence:
+
+| d2o C reference | Previous Rust behavior | R2O change and evidence |
+| --- | --- | --- |
+| `detect/response.c::d2k_resp_handshake12` treats any `poll(...) <= 0`, including `EINTR`, as a failed handshake attempt. | `response.rs::handshake` called the shared `poll_until`, which retried after `EINTR`; a later ServerHelloDone could turn the same attempt into success. | TLS response handshake now performs one poll like C; other users of `poll_until` are unchanged. The shared loopback fixture first failed: C `verdict=flaky target=2 control=3`, Rust `verdict=clear target=3 control=3`. After the fix, `scripts/test-d2o-shared-fixtures.sh` compares identical output and passes. |
+
+`cargo test --locked -p r2o-controller` passed (194 library tests plus all
+controller integration tests, including 18 TLS response tests); formatting and
+the differential shard coverage check passed. The OpenWrt AArch64 musl build
+and QEMU smoke passed after the Rust change: all six binaries started, reported
+wire version 47 where applicable, and catalog clear/check succeeded.
+
+This is a source and simulated-network confirmation, not field acceptance. The
+router status endpoint returned `diagnostics enabled=false`; no test traffic or
+write was sent to the router, which remains on d2o. REA native decompilation of
+the donor ELF remains unavailable as recorded above.

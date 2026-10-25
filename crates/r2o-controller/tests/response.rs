@@ -483,3 +483,98 @@ fn d2o_shared_tls_response_vectors_match() {
     }
     assert_eq!(cases, 13);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn d2o_tls_response_poll_interruption_matches_c_failure() {
+    extern "C" fn ignore_sigusr1(_: libc::c_int) {}
+
+    let fixture: std::collections::HashMap<&'static str, &'static str> =
+        include_str!("fixtures/d2o_tls_response_eintr.tsv")
+            .lines()
+            .map(|line| {
+                let (key, value) = line.split_once('=').expect("fixture key=value");
+                (key, value)
+            })
+            .collect();
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = ignore_sigusr1 as *const () as usize;
+    action.sa_flags = 0;
+    unsafe { libc::sigemptyset(&mut action.sa_mask) };
+    let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe { libc::sigaction(libc::SIGUSR1, &action, &mut previous) },
+        0
+    );
+
+    struct RestoreSignal(libc::sigaction);
+    impl Drop for RestoreSignal {
+        fn drop(&mut self) {
+            unsafe { libc::sigaction(libc::SIGUSR1, &self.0, std::ptr::null_mut()) };
+        }
+    }
+    let _restore = RestoreSignal(previous);
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+    let address = listener.local_addr().unwrap();
+    let target_thread = unsafe { libc::pthread_self() };
+    let repeats = fixture["repeats"].parse::<usize>().unwrap();
+    let interrupt_delay_ms = fixture["interrupt_delay_ms"].parse::<u64>().unwrap();
+    let response_delay_ms = fixture["response_delay_ms"].parse::<u64>().unwrap();
+    let server = thread::spawn(move || {
+        for index in 0..repeats * 2 {
+            let (mut stream, _) = listener.accept().expect("accept TLS response probe");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let _hello = read_client_hello(&mut stream);
+            if index == 0 {
+                thread::sleep(Duration::from_millis(interrupt_delay_ms));
+                assert_eq!(
+                    unsafe { libc::pthread_kill(target_thread, libc::SIGUSR1) },
+                    0
+                );
+                thread::sleep(Duration::from_millis(
+                    response_delay_ms - interrupt_delay_ms,
+                ));
+            }
+            let sent = stream.write_all(&[0x16, 0x03, 0x03, 0x00, 0x04, 0x0e, 0x00, 0x00, 0x00]);
+            assert!(sent.is_ok() || index == 0, "send TLS response: {sent:?}");
+        }
+    });
+
+    let result = probe_response(
+        "127.0.0.1",
+        address.port(),
+        "eintr.example",
+        ResponseOptions {
+            repeats,
+            timeout: Duration::from_millis(fixture["timeout_ms"].parse().unwrap()),
+            mark: None,
+        },
+    );
+    server.join().unwrap();
+    println!(
+        "D2O_TLS_RESPONSE_EINTR_ACTUAL=verdict={:?} target={} control={}",
+        result.verdict, result.target, result.control
+    );
+    assert_eq!(result.verdict, ResponseVerdict::Flaky);
+    assert_eq!(
+        (result.target, result.control, result.probes),
+        (
+            fixture["target"].parse::<i32>().unwrap(),
+            fixture["control"].parse::<i32>().unwrap(),
+            6
+        )
+    );
+    if let Some(output_path) = std::env::var_os("R2O_TLS_RESPONSE_EINTR_OUTPUT") {
+        std::fs::write(
+            output_path,
+            format!(
+                "verdict=flaky target={} control={}\n",
+                result.target, result.control
+            ),
+        )
+        .expect("write normalized response result");
+    }
+}
