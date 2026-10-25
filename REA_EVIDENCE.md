@@ -8421,3 +8421,22 @@ therefore supported by the pinned source diff and executable C/Rust tests, not
 by new REA decompilation evidence. Global parity and field acceptance remain
 unproven until the R2O build is exercised against the same live traffic; the
 router currently runs d2o and remains read-only.
+
+## Catalog sync throughput review — d2o `304ba893`, 26.10.2026
+
+Confirmed one latency divergence on repeated catalog application:
+
+| d2o C reference | Previous Rust behavior | R2O change and evidence |
+| --- | --- | --- |
+| `core/sched.c::d2k_sched_sync_step`, `SYNC_CHUNK = 8`: writes up to eight catalog commands per pass, then returns to `d2kc` to drain control events before the next pass. | `crates/r2o-controller/src/main.rs::install_catalog_with_policy` called `exchange_command` for every `SET_NAME`/`SET_ADDR`/`SET_SUFFIX`, waiting for its ACK before writing the next command. Discovery re-applies the compiled catalog after an accepted result, so this serialized the entire catalog on that path. | Rust now writes the same eight-command batch before collecting ACKs in order; it still records every ACK/refusal, updates installed groups only on ACK success, and queues intervening asynchronous events. `scripts/r2o-catalog-sync-differential.sh` passed on one shared nine-binding fixture: C and Rust emitted the same first eight names, and a Rust mock withheld every ACK until all eight commands arrived. The existing catalog wire-order comparison also matched. |
+
+Verification: all seven Rust `catalog_sync` tests passed; all 194 controller tests
+passed; the upstream C/Rust catalog-sync differential passed; Rust formatting and
+`git diff --check` passed. The OpenWrt AArch64 musl build and QEMU smoke passed:
+all six binaries reported wire version 47 and controller catalog clear/check
+succeeded.
+
+This verifies batching semantics and the target build, not a wall-clock field
+speedup. No apply operation or test traffic was sent to the physical router; its
+read-only status showed d2o, not R2O. Overall parity and live-traffic acceptance
+remain unproven.

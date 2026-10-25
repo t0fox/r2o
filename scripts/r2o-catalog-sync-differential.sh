@@ -12,6 +12,7 @@ fi
 
 donor_core="$donor_root/core"
 fixture="$repo_root/crates/r2o-controller/tests/fixtures/d2o_catalog_sync_wire.json"
+batch_fixture="$repo_root/crates/r2o-controller/tests/fixtures/d2o_catalog_sync_batch.json"
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/r2o-catalog-sync.XXXXXX")
 trap 'rm -rf -- "$tmp_dir"' EXIT HUP INT TERM
 
@@ -34,5 +35,19 @@ if ! cargo +1.98.0 test --locked -p r2o-controller --bin r2o-controller \
 fi
 grep '^D2O_CATALOG_OP=' "$tmp_dir/rust.log" >"$tmp_dir/rust.out"
 diff -u "$tmp_dir/c.out" "$tmp_dir/rust.out"
+"$tmp_dir/donor-catalog-wire" "$batch_fixture" 1280 --first-batch >"$tmp_dir/c.batch"
+if ! cargo +1.98.0 test --locked -p r2o-controller --bin r2o-controller \
+    catalog_sync_batches_eight_commands_before_waiting_for_ack -- --nocapture \
+    >"$tmp_dir/rust.batch.log" 2>&1; then
+    cat "$tmp_dir/rust.batch.log" >&2
+    exit 1
+fi
+grep '^D2O_CATALOG_BATCH_OP=' "$tmp_dir/c.batch" >"$tmp_dir/c.batch.ops"
+grep '^D2O_CATALOG_BATCH_OP=' "$tmp_dir/rust.batch.log" >"$tmp_dir/rust.batch.ops"
+diff -u "$tmp_dir/c.batch.ops" "$tmp_dir/rust.batch.ops"
+grep -q '^D2O_CATALOG_BATCH_COUNT=8$' "$tmp_dir/c.batch"
+grep -q '^D2O_CATALOG_BATCH_COUNT=8$' "$tmp_dir/rust.batch.log"
 printf 'C d2k_sched_sync_step and Rust catalog install order match on shared fixture\n'
 cat "$tmp_dir/c.out"
+printf 'C/Rust first catalog batch: 8 commands before acknowledgements\n'
+cat "$tmp_dir/c.batch.ops"

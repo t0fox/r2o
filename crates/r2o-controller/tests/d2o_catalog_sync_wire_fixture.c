@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -10,7 +11,8 @@
 
 int main(int argc, char **argv)
 {
-    if (argc != 3) return 2;
+    int first_batch = argc == 4 && strcmp(argv[3], "--first-batch") == 0;
+    if (argc != 3 && !first_batch) return 2;
     char *end = NULL;
     unsigned long parsed_cap = strtoul(argv[2], &end, 10);
     if (!end || *end || parsed_cap > UINT32_MAX) return 2;
@@ -36,10 +38,14 @@ int main(int argc, char **argv)
     }
     d2k_sched_set_send_cap(scheduler, (uint32_t)parsed_cap);
     if (d2k_sched_sync(scheduler) != 0) return 2;
-    for (size_t steps = 0; d2k_sched_sync_pending(scheduler) && steps < 100; steps++) {
+    if (first_batch) {
         (void)d2k_sched_sync_step(scheduler);
+    } else {
+        for (size_t steps = 0; d2k_sched_sync_pending(scheduler) && steps < 100; steps++) {
+            (void)d2k_sched_sync_step(scheduler);
+        }
     }
-    if (d2k_sched_sync_pending(scheduler)) return 2;
+    if (!first_batch && d2k_sched_sync_pending(scheduler)) return 2;
 
     d2k_sched_free(scheduler);
     close(sockets[0]);
@@ -62,6 +68,7 @@ int main(int argc, char **argv)
     d2k_catalog_free(&catalog);
 
     size_t offset = 0;
+    size_t operations = 0;
     while (offset < length) {
         if (length - offset < 6) return 2;
         size_t payload_length = ((size_t)bytes[offset] << 24) |
@@ -75,10 +82,13 @@ int main(int argc, char **argv)
         size_t body_length = payload_length - 2;
         if (command != 0x0081 && command != 0x0083) return 2;
         if (body_length < 1 || body[0] == 0 || body_length < (size_t)body[0] + 1) return 2;
-        printf("D2O_CATALOG_OP=%s:%.*s\n",
+        printf("%s=%s:%.*s\n",
+               first_batch ? "D2O_CATALOG_BATCH_OP" : "D2O_CATALOG_OP",
                command == 0x0081 ? "SET_NAME" : "DEL_NAME",
                (int)body[0], body + 1);
+        operations++;
         offset += payload_length + 4;
     }
+    if (first_batch) printf("D2O_CATALOG_BATCH_COUNT=%zu\n", operations);
     return 0;
 }

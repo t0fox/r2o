@@ -2807,6 +2807,67 @@ struct CatalogInstallSummary {
 }
 
 #[cfg(unix)]
+const CATALOG_SYNC_CHUNK: usize = 8;
+
+#[cfg(unix)]
+struct PendingCatalogInstall {
+    command_index: usize,
+    host: String,
+    expected: u16,
+}
+
+#[cfg(unix)]
+fn flush_catalog_install_batch(
+    client: &mut ControlClient,
+    compiled: &CompiledCatalog,
+    pending: &mut Vec<PendingCatalogInstall>,
+    summary: &mut CatalogInstallSummary,
+) -> Result<(), Box<dyn Error>> {
+    for operation in pending.drain(..) {
+        let (_, command) = compiled
+            .commands
+            .get(operation.command_index)
+            .ok_or("индекс команды каталога вне собранного списка")?;
+        let ack = match client.wait_for_sent_command_ack(
+            command,
+            operation.expected,
+            CONTROL_ACK_TIMEOUT,
+        ) {
+            Ok(Some(ack)) => ack,
+            Ok(None) => {
+                return Err(format!(
+                    "установка остановлена после {} команд; {}: датапат не подтвердил управляющую команду за 3 секунды",
+                    operation.command_index, operation.host
+                )
+                .into());
+            }
+            Err(error) => {
+                return Err(format!(
+                    "установка остановлена после {} команд; {}: {error}",
+                    operation.command_index, operation.host
+                )
+                .into());
+            }
+        };
+        client.record_http_binding_acknowledgement(command, operation.expected, ack);
+        if !ack.ok {
+            summary.refused += 1;
+            summary.last_refusal = Some(ack_reason_text(ack.reason));
+            continue;
+        }
+        if let Some((_, key)) = compiled
+            .group_commands
+            .iter()
+            .find(|(index, _)| *index == operation.command_index)
+        {
+            summary.installed_groups.push(key.clone());
+        }
+        summary.installed += 1;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn install_catalog_best_effort(
     client: &mut ControlClient,
     compiled: &CompiledCatalog,
@@ -2821,10 +2882,12 @@ fn install_catalog_with_policy(
     continue_plan_refusals: bool,
 ) -> Result<CatalogInstallSummary, Box<dyn Error>> {
     let mut summary = CatalogInstallSummary::default();
+    let mut pending = Vec::with_capacity(CATALOG_SYNC_CHUNK);
     for operation in &compiled.install_order {
         let command_index = match operation {
             CatalogInstallOp::Command(index) => index,
             CatalogInstallOp::CleanupName { host, command } => {
+                flush_catalog_install_batch(client, compiled, &mut pending, &mut summary)?;
                 if let Err(error) = client.send_command(command, control::COMMAND_DEL_NAME) {
                     eprintln!(
                         "по {host} привязку невлезающего плана не удалось снять с провода: {error}"
@@ -2847,35 +2910,39 @@ fn install_catalog_with_policy(
                 COMMAND_SET_NAME | COMMAND_SET_ADDR | control::COMMAND_SET_SUFFIX
             )
         {
-            let ack = match client.exchange_command(command, expected) {
-                Ok(ack) => ack,
-                Err(error) => {
-                    return Err(format!(
-                        "установка остановлена после {command_index} команд; {host}: {error}"
-                    )
-                    .into());
-                }
-            };
-            if !ack.ok {
-                summary.refused += 1;
-                summary.last_refusal = Some(ack_reason_text(ack.reason));
-                continue;
+            if let Err(error) = client.write_command(command) {
+                return Err(format!(
+                    "установка остановлена после {command_index} команд; {host}: {error}"
+                )
+                .into());
             }
-        } else if let Err(error) = client.send_command(command, expected) {
-            return Err(format!(
-                "установка остановлена после {command_index} команд; {host}: {error}"
-            )
-            .into());
+            pending.push(PendingCatalogInstall {
+                command_index: *command_index,
+                host: host.clone(),
+                expected,
+            });
+            if pending.len() == CATALOG_SYNC_CHUNK {
+                flush_catalog_install_batch(client, compiled, &mut pending, &mut summary)?;
+            }
+        } else {
+            flush_catalog_install_batch(client, compiled, &mut pending, &mut summary)?;
+            if let Err(error) = client.send_command(command, expected) {
+                return Err(format!(
+                    "установка остановлена после {command_index} команд; {host}: {error}"
+                )
+                .into());
+            }
+            if let Some((_, key)) = compiled
+                .group_commands
+                .iter()
+                .find(|(index, _)| index == command_index)
+            {
+                summary.installed_groups.push(key.clone());
+            }
+            summary.installed += 1;
         }
-        if let Some((_, key)) = compiled
-            .group_commands
-            .iter()
-            .find(|(index, _)| index == command_index)
-        {
-            summary.installed_groups.push(key.clone());
-        }
-        summary.installed += 1;
     }
+    flush_catalog_install_batch(client, compiled, &mut pending, &mut summary)?;
     if !compiled.tcp_stall_budgets.is_empty() {
         let command = encode_set_tcp_stall_budgets(&compiled.tcp_stall_budgets)
             .map_err(|error| format!("SET_TCP_STALL_BUDGETS: {error}"))?;
@@ -2888,6 +2955,44 @@ fn install_catalog_with_policy(
         }
     }
     Ok(summary)
+}
+
+#[cfg(unix)]
+impl ControlClient {
+    fn write_command(&mut self, command: &[u8]) -> Result<(), Box<dyn Error>> {
+        use std::io::Write;
+        self.socket.write_all(command)?;
+        Ok(())
+    }
+
+    fn wait_for_sent_command_ack(
+        &mut self,
+        command: &[u8],
+        expected: u16,
+        timeout: std::time::Duration,
+    ) -> Result<Option<r2k_core::control::Ack>, Box<dyn Error>> {
+        let expected_trial_id = control_command_trial_id(command, expected);
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() || !wait_for_control_frame(&self.socket, remaining)? {
+                return Ok(None);
+            }
+            let frame = read_optional_frame(&mut self.socket)?
+                .ok_or("соединение с датапатом закрыто до подтверждения команды")?;
+            if frame.kind == control::EVENT_ACK {
+                let ack = decode_ack(&frame)
+                    .map_err(|error| format!("подтверждение датапата: {error}"))?;
+                if ack.command != expected
+                    || expected_trial_id.is_some_and(|trial_id| ack.trial_id != Some(trial_id))
+                {
+                    continue;
+                }
+                return Ok(Some(ack));
+            }
+            self.queue_async_frame(frame)?;
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -15301,29 +15406,8 @@ impl ControlClient {
         expected: u16,
         timeout: std::time::Duration,
     ) -> Result<Option<r2k_core::control::Ack>, Box<dyn Error>> {
-        use std::io::Write;
-        self.socket.write_all(command)?;
-        let expected_trial_id = control_command_trial_id(command, expected);
-        let deadline = std::time::Instant::now() + timeout;
-        loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() || !wait_for_control_frame(&self.socket, remaining)? {
-                return Ok(None);
-            }
-            let frame = read_optional_frame(&mut self.socket)?
-                .ok_or("соединение с датапатом закрыто до подтверждения команды")?;
-            if frame.kind == control::EVENT_ACK {
-                let ack = decode_ack(&frame)
-                    .map_err(|error| format!("подтверждение датапата: {error}"))?;
-                if ack.command != expected
-                    || expected_trial_id.is_some_and(|trial_id| ack.trial_id != Some(trial_id))
-                {
-                    continue;
-                }
-                return Ok(Some(ack));
-            }
-            self.queue_async_frame(frame)?;
-        }
+        self.write_command(command)?;
+        self.wait_for_sent_command_ack(command, expected, timeout)
     }
 
     fn queue_async_frame(&mut self, frame: Frame) -> Result<(), Box<dyn Error>> {
@@ -16936,6 +17020,73 @@ mod tests {
             println!("{command}");
         }
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_sync_batches_eight_commands_before_waiting_for_ack() {
+        use std::io::Write;
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("r2o-catalog-batch-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let donor = directory.join("donor.json");
+        let migrated = directory.join("r2o.json");
+        std::fs::write(
+            &donor,
+            include_bytes!("../tests/fixtures/d2o_catalog_sync_batch.json"),
+        )
+        .unwrap();
+        assert!(Catalog::import_donor_file(&donor, &migrated, 100).unwrap());
+        let mut catalog = Catalog::load(&migrated).unwrap();
+        let compiled = super::catalog_commands_with_send_cap(&mut catalog, 1280, 100).unwrap();
+        assert_eq!(compiled.commands.len(), 9);
+
+        let socket_path = std::env::temp_dir().join(format!(
+            "r2o-catalog-batch-socket-{}-{nonce}.sock",
+            std::process::id()
+        ));
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            peer.write_all(&encode_greeting(u16::MAX as u32).unwrap())
+                .unwrap();
+            let mut first_batch = Vec::new();
+            for _ in 0..8 {
+                let frame = read_frame(&mut peer).unwrap();
+                assert_eq!(frame.kind, COMMAND_SET_NAME);
+                let name_len = usize::from(frame.body[0]);
+                let name = std::str::from_utf8(&frame.body[1..1 + name_len]).unwrap();
+                first_batch.push(name.to_owned());
+            }
+            for _ in 0..8 {
+                peer.write_all(&encode_ack(COMMAND_SET_NAME, true, 0).unwrap())
+                    .unwrap();
+            }
+            let last = read_frame(&mut peer).unwrap();
+            assert_eq!(last.kind, COMMAND_SET_NAME);
+            peer.write_all(&encode_ack(COMMAND_SET_NAME, true, 0).unwrap())
+                .unwrap();
+            first_batch
+        });
+
+        let mut client = ControlClient::connect(socket_path.clone()).unwrap();
+        let summary = install_catalog_best_effort(&mut client, &compiled).unwrap();
+        assert_eq!(summary.installed, 9);
+        let first_batch = server.join().unwrap();
+        std::fs::remove_file(socket_path).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+        assert_eq!(first_batch.len(), 8);
+        println!("D2O_CATALOG_BATCH_COUNT={}", first_batch.len());
+        for name in first_batch {
+            println!("D2O_CATALOG_BATCH_OP=SET_NAME:{name}");
+        }
     }
 
     #[cfg(unix)]
