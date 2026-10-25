@@ -2515,6 +2515,7 @@ fn r2o_discovery_volume_known_plans(
     catalog: Option<&Catalog>,
     target: &r2o_controller::discovery::DiscoveryTarget,
     observed: &r2o_controller::catalog::Fingerprint,
+    tried: &[u32],
 ) -> Vec<(String, String)> {
     let Some(catalog) = catalog else {
         return Vec::new();
@@ -2552,6 +2553,9 @@ fn r2o_discovery_volume_known_plans(
         });
         for plan in &box_record.plans {
             if !plan.enabled || plan.proto != "tls" || plan.text.len() >= 4096 {
+                continue;
+            }
+            if tried.contains(&r2o_controller::r2o_fallback::tried_key(&plan.text)) {
                 continue;
             }
             let Ok(bytes) = compile_text(&plan.text) else {
@@ -4929,6 +4933,13 @@ struct R2oDiscoveryVolumeSearchKey {
 }
 
 #[cfg(unix)]
+#[derive(Clone, Default)]
+struct R2oEchRxProgress {
+    next_candidate: usize,
+    tried: Vec<u32>,
+}
+
+#[cfg(unix)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct R2oNetworkWhitelistUpdate {
     name: Option<String>,
@@ -6024,8 +6035,14 @@ struct DiscoveryWorker {
     cancel: Arc<AtomicBool>,
     seen: HashSet<r2o_controller::discovery::DiscoveryTarget>,
     seen_order: VecDeque<r2o_controller::discovery::DiscoveryTarget>,
-    suspect_fingerprints:
-        HashMap<r2o_controller::discovery::DiscoveryTarget, r2o_controller::catalog::Fingerprint>,
+    suspect_fingerprints: Arc<
+        std::sync::Mutex<
+            HashMap<
+                r2o_controller::discovery::DiscoveryTarget,
+                r2o_controller::catalog::Fingerprint,
+            >,
+        >,
+    >,
     suspect_fingerprint_order: VecDeque<r2o_controller::discovery::DiscoveryTarget>,
     failed_at: HashMap<R2oDiscoveryFailureKey, std::time::Instant>,
     failed_retry_after: HashMap<R2oDiscoveryFailureKey, std::time::Duration>,
@@ -6804,7 +6821,7 @@ impl DiscoveryWorker {
         let runner_ech_witness_resolutions = Arc::clone(&ech_witness_resolutions);
         let ech_rx_cursor = Arc::new(std::sync::Mutex::new(HashMap::<
             r2o_controller::discovery::DiscoveryTarget,
-            usize,
+            R2oEchRxProgress,
         >::new()));
         let runner_ech_rx_cursor = Arc::clone(&ech_rx_cursor);
         let resource_memory = Arc::new(std::sync::Mutex::new(
@@ -6817,6 +6834,11 @@ impl DiscoveryWorker {
         let runner_volume_searches = Arc::clone(&volume_searches);
         let runner_network_whitelist_updates = Arc::clone(&network_whitelist_updates);
         let runner_catalog_snapshot = Arc::clone(&catalog_snapshot);
+        let suspect_fingerprints = Arc::new(std::sync::Mutex::new(HashMap::<
+            r2o_controller::discovery::DiscoveryTarget,
+            r2o_controller::catalog::Fingerprint,
+        >::new()));
+        let runner_suspect_fingerprints = Arc::clone(&suspect_fingerprints);
         let runner: Arc<R2oDiscoveryRunner> = Arc::new(move |target, trigger_planned, cancel| {
             let mut runner_started = std::time::Instant::now();
             runner_searches
@@ -6931,6 +6953,12 @@ impl DiscoveryWorker {
             let mut target = target;
             let ech_grease =
                 ech_config.is_none() && r2o_controller::discovery::regrade_ech_grease(&mut target);
+            let persisted_ech_tried = runner_ech_rx_cursor
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&target)
+                .map(|progress| progress.tried.clone())
+                .unwrap_or_default();
             let white_name = candidate_catalog
                 .as_ref()
                 .and_then(|catalog| catalog.network_whitelist.as_ref())
@@ -6964,7 +6992,8 @@ impl DiscoveryWorker {
                 })
                 .flatten();
             let mut own_seen = Vec::new();
-            let mut own_tried = Vec::new();
+            let mut own_tried = persisted_ech_tried;
+            let mut own_probes = 0;
             if let Some(catalog) = candidate_catalog.as_ref()
                 && !r2o_controller::discovery::own_first_plans(
                     catalog,
@@ -7017,7 +7046,6 @@ impl DiscoveryWorker {
                     } else {
                         0
                     });
-                    let mut own_probes = 0;
                     loop {
                         if cancel.load(Ordering::Relaxed)
                             || own_probes >= probe_cap
@@ -7170,7 +7198,7 @@ impl DiscoveryWorker {
                 }
                 runner_started = std::time::Instant::now();
             }
-            let (outcome, classifier_probes, owned_opaque_fallback) =
+            let (outcome, classifier_probes, owned_opaque_fallback, known_plans_allowed) =
                 r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                     target.clone(),
                     client_hello.as_deref(),
@@ -7197,6 +7225,143 @@ impl DiscoveryWorker {
             if cancel.load(Ordering::Relaxed) {
                 return outcome;
             }
+            let suspect_fingerprint = runner_suspect_fingerprints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&target)
+                .cloned()
+                .unwrap_or_default();
+            let mut discovery_tried = own_tried.clone();
+            let mut discovery_candidate_probes = own_probes;
+            if known_plans_allowed && !suspect_fingerprint.signals.is_empty() {
+                let known = r2o_controller::discovery::known_plans(
+                    candidate_catalog
+                        .as_ref()
+                        .expect("catalog snapshot is present"),
+                    &target,
+                    &suspect_fingerprint,
+                    &discovery_tried,
+                );
+                discovery_tried.extend(
+                    known
+                        .iter()
+                        .map(|candidate| r2o_controller::r2o_fallback::tried_key(&candidate.text)),
+                );
+                let (known_probe_path, _) = r2o_discovery_resource_probe_paths(
+                    &target,
+                    candidate_catalog.as_ref(),
+                    &runner_resource_memory,
+                );
+                let known_network_probe =
+                    r2o_discovery_network_whitelist_probe(candidate_catalog.as_ref(), false);
+                let known_probe_cap =
+                    R2O_DISCOVERY_PROBE_CAP.saturating_add(if known_network_probe {
+                        r2o_controller::r2o_rx_volume::r2o_rx_volume_name_count()
+                    } else {
+                        0
+                    });
+                for candidate in known {
+                    if cancel.load(Ordering::Relaxed)
+                        || !r2o_discovery_trial_time_available(runner_started.elapsed())
+                        || known_probe_cap.saturating_sub(discovery_candidate_probes)
+                            < 1 + usize::from(client_hello.is_some())
+                    {
+                        break;
+                    }
+                    runner_searches
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .update(
+                            &target,
+                            "проверяем сохранённые планы коробок",
+                            0,
+                            classify_probes.saturating_add(discovery_candidate_probes),
+                            &r2o_discovery_plan_candidate(&candidate.text),
+                            &format!("узнанная коробка {}", candidate.box_id),
+                        );
+                    r2o_discovery_record_plan_progress(
+                        &runner_searches,
+                        &target,
+                        &candidate.text,
+                        "план узнанной коробки",
+                        "проверяется на пробном потоке",
+                        "ожидается точное подтверждение datapath",
+                    );
+                    let candidate_probe_base =
+                        classify_probes.saturating_add(discovery_candidate_probes);
+                    let candidate_searches = Arc::clone(&runner_searches);
+                    let candidate_target = target.clone();
+                    let mut candidate_progress =
+                        move |attempt: usize, total: usize, application: &str, result: &str| {
+                            candidate_searches
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .update_candidate_progress(
+                                    &candidate_target,
+                                    candidate_probe_base.saturating_add(attempt),
+                                    application,
+                                    &format!("проверка плана {attempt}/{total}: {result}"),
+                                );
+                        };
+                    let (result, applied, attempts, _) =
+                        r2o_run_discovery_candidate_trial_with_progress(
+                            &target,
+                            &candidate.text,
+                            &known_probe_path,
+                            mark,
+                            &commands,
+                            client_hello.as_deref(),
+                            ech_config.as_ref(),
+                            &runner_resource_memory,
+                            known_probe_cap.saturating_sub(discovery_candidate_probes),
+                            None,
+                            || {
+                                !cancel.load(Ordering::Relaxed)
+                                    && r2o_discovery_trial_time_available(runner_started.elapsed())
+                            },
+                            false,
+                            Some(&dropped_events),
+                            &mut candidate_progress,
+                        );
+                    discovery_candidate_probes =
+                        discovery_candidate_probes.saturating_add(attempts);
+                    let verified = r2o_family_recovery_decision(&result, applied)
+                        == R2oFamilyRecoveryDecision::Verified;
+                    let (application, last_result) =
+                        r2o_discovery_plan_result(&result, applied, verified);
+                    r2o_discovery_record_plan_progress(
+                        &runner_searches,
+                        &target,
+                        &candidate.text,
+                        "план узнанной коробки",
+                        &application,
+                        &last_result,
+                    );
+                    if verified {
+                        return DiscoveryOutcome {
+                            target: target.clone(),
+                            plan_text: Some(candidate.text),
+                            detail: format!(
+                                "подтверждён готовый план коробки {} по совместимой примете",
+                                candidate.box_id
+                            ),
+                            queue_expired: false,
+                            direct_clear: false,
+                            volume_recovery: false,
+                            volume_fingerprint: None,
+                            volume_box_id: Some(candidate.box_id),
+                            retry_after: None,
+                        };
+                    }
+                    if result.as_ref().is_ok_and(|fetch| {
+                        fetch.cloudflare_challenge
+                            || fetch.http_outcome
+                                == r2o_controller::fetch::R2oFetchHttpOutcome::LegalDenial
+                    }) {
+                        return r2o_confirm_discovery_outcome(outcome, result, applied);
+                    }
+                }
+            }
             if r2o_discovery_volume_recovery(
                 &mut outcome,
                 &target,
@@ -7206,6 +7371,9 @@ impl DiscoveryWorker {
                 &commands,
                 &runner_network_whitelist_updates,
                 candidate_catalog.as_ref(),
+                &suspect_fingerprint,
+                &discovery_tried,
+                discovery_candidate_probes,
                 white_name,
                 &runner_send_cap,
                 &runner_resource_memory,
@@ -7240,7 +7408,7 @@ impl DiscoveryWorker {
             if outcome.plan_text.is_none() && owned_opaque_fallback {
                 let mut queue =
                     r2o_controller::r2o_fallback::FallbackQueue::new_owned_search_with_tried(
-                        &own_tried,
+                        &discovery_tried,
                     );
                 if let Some(candidate) = queue.next(
                     r2o_discovery_plan_shape(target.shape),
@@ -7296,7 +7464,7 @@ impl DiscoveryWorker {
             );
             let candidate_progress_searches = Arc::clone(&runner_searches);
             let candidate_progress_target = target.clone();
-            let candidate_probe_base = classify_probes;
+            let candidate_probe_base = classify_probes.saturating_add(discovery_candidate_probes);
             let mut candidate_progress =
                 move |attempt: usize, total: usize, application: &str, result: &str| {
                     candidate_progress_searches
@@ -7311,7 +7479,7 @@ impl DiscoveryWorker {
                 };
             let mut probe_counts = r2o_controller::r2o_fallback::ProbeCounts {
                 raw: classify_probes,
-                candidates: 0,
+                candidates: discovery_candidate_probes,
             };
             let (result, applied, candidate_attempts, candidate_evidence) =
                 r2o_run_discovery_candidate_trial_with_progress(
@@ -7333,7 +7501,13 @@ impl DiscoveryWorker {
                     Some(&dropped_events),
                     &mut candidate_progress,
                 );
-            probe_counts.candidates = candidate_attempts;
+            if candidate_attempts > 0 {
+                let tried = r2o_controller::r2o_fallback::tried_key(plan_text);
+                if !discovery_tried.contains(&tried) {
+                    discovery_tried.push(tried);
+                }
+            }
+            probe_counts.candidates = probe_counts.candidates.saturating_add(candidate_attempts);
             let mut probes_used = probe_counts.candidates;
             let primary_verified = r2o_family_recovery_decision(&result, applied)
                 == R2oFamilyRecoveryDecision::Verified;
@@ -7393,7 +7567,8 @@ impl DiscoveryWorker {
                 ));
                 let mut fallback_queue = owned_fallback_queue.unwrap_or_else(|| {
                     r2o_controller::r2o_fallback::FallbackQueue::new_with_tried(
-                        plan_text, &own_tried,
+                        plan_text,
+                        &discovery_tried,
                     )
                 });
                 let mut last_trial = (result, applied);
@@ -7558,11 +7733,13 @@ impl DiscoveryWorker {
                     },
                 );
             let mut rx_ladder_plan = None;
+            let mut ech_rx_cut = false;
             if applied
                 && result.as_ref().is_ok_and(|fetch| {
                     r2o_ech_witness_rx_cut(&target, &selected_config, true, false, fetch)
                 })
             {
+                ech_rx_cut = true;
                 network_probe =
                     r2o_discovery_network_whitelist_probe(candidate_catalog.as_ref(), true);
                 probe_cap = R2O_DISCOVERY_PROBE_CAP.saturating_add(if network_probe {
@@ -7571,13 +7748,23 @@ impl DiscoveryWorker {
                     0
                 });
                 let mut discovered_network_name = None;
-                let mut next_index = *runner_ech_rx_cursor
+                let mut next_index = runner_ech_rx_cursor
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .get(&target)
-                    .unwrap_or(&0);
+                    .map_or(0, |progress| progress.next_candidate);
+                let mut cursor_tried = discovery_tried.clone();
                 let candidate_count = r2o_ech_rx_ladder_candidate_count(network_probe);
-                for _ in 0..R2O_ECH_RX_LADDER_BATCH {
+                let mut batch_slots = 0;
+                let mut batch_send_cap = runner_send_cap.load(Ordering::Relaxed);
+                let mut challenge_stopped = false;
+                loop {
+                    if batch_slots == R2O_ECH_RX_LADDER_BATCH {
+                        batch_slots = 0;
+                    }
+                    if batch_slots == 0 {
+                        batch_send_cap = runner_send_cap.load(Ordering::Relaxed);
+                    }
                     if cancel.load(Ordering::Relaxed)
                         || probe_cap.saturating_sub(probes_used)
                             < 1 + usize::from(client_hello.is_some())
@@ -7591,7 +7778,7 @@ impl DiscoveryWorker {
                         index,
                         network_probe,
                         white_name,
-                        runner_send_cap.load(Ordering::Relaxed),
+                        batch_send_cap,
                         client_has_tcp_timestamps.unwrap_or(true),
                     ) {
                         Ok(Some(candidate)) => candidate,
@@ -7599,14 +7786,17 @@ impl DiscoveryWorker {
                         Err(error) => {
                             eprintln!("RX-лестница ECH пропустила план {index}: {error}");
                             next_index = index + 1;
-                            runner_ech_rx_cursor
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .insert(target.clone(), next_index);
                             continue;
                         }
                     };
+                    let candidate_hash = r2o_controller::r2o_fallback::tried_key(&candidate);
+                    if discovery_tried.contains(&candidate_hash) {
+                        next_index = index + 1;
+                        continue;
+                    }
+                    discovery_tried.push(candidate_hash);
                     let plan_candidate = r2o_discovery_plan_candidate(&candidate);
+                    batch_slots += 1;
                     runner_searches
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -7664,20 +7854,35 @@ impl DiscoveryWorker {
                     let Some(fetch) = result.as_ref().ok() else {
                         break;
                     };
-                    if !applied {
-                        break;
-                    }
                     if fetch.cloudflare_challenge {
+                        challenge_stopped = true;
                         if !rejected_witnesses.contains(&selected_config.origin_name) {
                             rejected_witnesses.push(selected_config.origin_name.clone());
                         }
                         break;
                     }
+                    if !applied {
+                        break;
+                    }
                     next_index = index + 1;
+                    cursor_tried.push(candidate_hash);
+                }
+                if next_index < candidate_count && rx_ladder_plan.is_none() && !challenge_stopped {
                     runner_ech_rx_cursor
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .insert(target.clone(), next_index);
+                        .insert(
+                            target.clone(),
+                            R2oEchRxProgress {
+                                next_candidate: next_index,
+                                tried: cursor_tried,
+                            },
+                        );
+                } else if challenge_stopped {
+                    runner_ech_rx_cursor
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(&target);
                 }
                 if let Some(name) = discovered_network_name.as_deref() {
                     runner_network_whitelist_updates
@@ -7707,10 +7912,14 @@ impl DiscoveryWorker {
                 }
             }
             let mut owned_fallback_plan = None;
-            if primary_from_owned_fallback && rx_ladder_plan.is_none() {
+            if r2o_discovery_owned_fallback_allowed(
+                primary_from_owned_fallback,
+                rx_ladder_plan.is_some(),
+                ech_rx_cut,
+            ) {
                 let mut fallback_queue = owned_fallback_queue.take().unwrap_or_else(|| {
                     r2o_controller::r2o_fallback::FallbackQueue::new_owned_search_with_tried(
-                        &own_tried,
+                        &discovery_tried,
                     )
                 });
                 let mut index = 1;
@@ -7940,7 +8149,7 @@ impl DiscoveryWorker {
                 );
             outcome
         });
-        Self::r2o_new_with_client_state(
+        let mut worker = Self::r2o_new_with_client_state(
             measurement_gate,
             runner,
             client_hellos,
@@ -7948,7 +8157,9 @@ impl DiscoveryWorker {
             resource_memory,
             searches,
             network_whitelist_updates,
-        )
+        );
+        worker.suspect_fingerprints = suspect_fingerprints;
+        worker
     }
 
     #[cfg(test)]
@@ -8219,7 +8430,7 @@ impl DiscoveryWorker {
             cancel,
             seen: HashSet::new(),
             seen_order: VecDeque::new(),
-            suspect_fingerprints: HashMap::new(),
+            suspect_fingerprints: Arc::new(std::sync::Mutex::new(HashMap::new())),
             suspect_fingerprint_order: VecDeque::new(),
             failed_at: HashMap::new(),
             failed_retry_after: HashMap::new(),
@@ -8521,7 +8732,10 @@ impl DiscoveryWorker {
             && let Some(expired) = self.seen_order.pop_front()
         {
             self.seen.remove(&expired);
-            self.suspect_fingerprints.remove(&expired);
+            self.suspect_fingerprints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&expired);
             self.suspect_fingerprint_order
                 .retain(|target| target != &expired);
             let expired_task_key = r2o_discovery_task_key(&expired);
@@ -8610,24 +8824,44 @@ impl DiscoveryWorker {
     ) -> bool {
         let task_key = r2o_discovery_task_key(&target);
         let already_active = self.active.contains_key(&task_key);
+        let observed = r2o_controller::catalog::Fingerprint {
+            method: r2o_controller::catalog::FINGERPRINT_METHOD,
+            signals: vec![signal],
+        };
+        let previous = {
+            let mut fingerprints = self
+                .suspect_fingerprints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let previous = fingerprints.get(&target).cloned();
+            fingerprints
+                .entry(target.clone())
+                .or_default()
+                .merge_observed(&observed);
+            previous
+        };
         let queued = enqueue(self, target.clone());
         if queued || already_active {
-            let observed = r2o_controller::catalog::Fingerprint {
-                method: r2o_controller::catalog::FINGERPRINT_METHOD,
-                signals: vec![signal],
-            };
-            if let Some(saved) = self.suspect_fingerprints.get_mut(&target) {
-                saved.merge_observed(&observed);
-            } else {
-                self.suspect_fingerprints.insert(target.clone(), observed);
-            }
             self.suspect_fingerprint_order
                 .retain(|saved| saved != &target);
             self.suspect_fingerprint_order.push_back(target);
             while self.suspect_fingerprint_order.len() > 256 {
                 if let Some(expired) = self.suspect_fingerprint_order.pop_front() {
-                    self.suspect_fingerprints.remove(&expired);
+                    self.suspect_fingerprints
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(&expired);
                 }
+            }
+        } else {
+            let mut fingerprints = self
+                .suspect_fingerprints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(previous) = previous {
+                fingerprints.insert(target, previous);
+            } else {
+                fingerprints.remove(&target);
             }
         }
         queued
@@ -9025,7 +9259,10 @@ impl DiscoveryWorker {
             }
             self.seen.remove(&target);
             self.seen_order.retain(|seen| seen != &target);
-            self.suspect_fingerprints.remove(&target);
+            self.suspect_fingerprints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&target);
             self.suspect_fingerprint_order
                 .retain(|seen| seen != &target);
             self.client_snapshot_targets.remove(&target);
@@ -9264,11 +9501,17 @@ impl DiscoveryWorker {
     }
 
     fn r2o_complete_outcome(&mut self, mut outcome: DiscoveryOutcome) -> DiscoveryOutcome {
-        if let Some(suspect) = self.suspect_fingerprints.get(&outcome.target) {
+        let suspect = self
+            .suspect_fingerprints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&outcome.target)
+            .cloned();
+        if let Some(suspect) = suspect {
             outcome
                 .volume_fingerprint
                 .get_or_insert_with(r2o_controller::catalog::Fingerprint::default)
-                .merge_observed(suspect);
+                .merge_observed(&suspect);
         }
         if r2o_discovery_volume_challenge_outcome(&outcome) {
             self.r2o_record_discovery_challenge(&outcome.target, std::time::Instant::now());
@@ -9588,6 +9831,15 @@ fn r2o_ech_rx_ladder_candidate(
 }
 
 #[cfg(unix)]
+fn r2o_discovery_owned_fallback_allowed(
+    primary_from_owned_fallback: bool,
+    rx_ladder_plan_found: bool,
+    measured_rx_cut: bool,
+) -> bool {
+    primary_from_owned_fallback && !rx_ladder_plan_found && !measured_rx_cut
+}
+
+#[cfg(unix)]
 fn r2o_discovery_volume_recovery(
     outcome: &mut DiscoveryOutcome,
     target: &r2o_controller::discovery::DiscoveryTarget,
@@ -9597,6 +9849,9 @@ fn r2o_discovery_volume_recovery(
     commands: &SyncSender<HttpSearchCommand>,
     network_whitelist_updates: &std::sync::Mutex<VecDeque<R2oNetworkWhitelistUpdate>>,
     candidate_catalog: Option<&Catalog>,
+    suspect_fingerprint: &r2o_controller::catalog::Fingerprint,
+    tried_hashes: &[u32],
+    prior_candidate_probes: usize,
     white_name: &str,
     send_cap: &AtomicUsize,
     resource_memory: &std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>,
@@ -9615,7 +9870,7 @@ fn r2o_discovery_volume_recovery(
     let initial_network_probe = r2o_discovery_network_whitelist_probe(candidate_catalog, false);
     let mut probe_counts = r2o_controller::r2o_fallback::ProbeCounts {
         raw: classify_probes,
-        candidates: 0,
+        candidates: prior_candidate_probes,
     };
     let key = R2oDiscoveryVolumeSearchKey {
         wire_len: r2o_discovery_volume_wire_len(target, client_hello),
@@ -9719,15 +9974,20 @@ fn r2o_discovery_volume_recovery(
         "; подтверждён объёмный обрыв: TX {tx_reason}; RX {rx_reason}"
     ));
 
-    let observed_fingerprint = r2o_discovery_volume_fingerprint(&search.tx, &search.rx);
+    let mut observed_fingerprint = r2o_discovery_volume_fingerprint(&search.tx, &search.rx);
+    observed_fingerprint.merge_observed(suspect_fingerprint);
     let candidate_probe_path = search
         .rx
         .measured_path
         .as_deref()
         .unwrap_or(&search.key.probe_path)
         .to_owned();
-    let known_plans =
-        r2o_discovery_volume_known_plans(candidate_catalog, target, &observed_fingerprint);
+    let known_plans = r2o_discovery_volume_known_plans(
+        candidate_catalog,
+        target,
+        &observed_fingerprint,
+        tried_hashes,
+    );
     let pending_known_plans: Vec<(String, String)> = known_plans
         .iter()
         .filter(|(_, candidate)| !search.tried_plans.contains(candidate))
@@ -9979,6 +10239,10 @@ fn r2o_discovery_volume_recovery(
             next_candidate = index + 1;
             continue;
         }
+        if tried_hashes.contains(&r2o_controller::r2o_fallback::tried_key(&candidate)) {
+            next_candidate = index + 1;
+            continue;
+        }
         attempted += 1;
         r2o_discovery_record_plan_progress(
             live_searches,
@@ -10219,7 +10483,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech(
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
     white_name: &str,
 ) -> (DiscoveryOutcome, usize) {
-    let (outcome, probes, _) = r2o_classify_discovery_target_with_client_hello_and_ech_progress(
+    let (outcome, probes, _, _) = r2o_classify_discovery_target_with_client_hello_and_ech_progress(
         target,
         client_hello,
         None,
@@ -10289,7 +10553,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
     white_name: &str,
     seed_whole: Option<r2o_controller::classify::SeedWhole>,
     progress: &mut dyn FnMut(&str, usize, usize, usize),
-) -> (DiscoveryOutcome, usize, bool) {
+) -> (DiscoveryOutcome, usize, bool, bool) {
     let Ok(trigger) = r2o_discovery_trigger(&target, client_hello, ech_config) else {
         return (
             DiscoveryOutcome {
@@ -10304,6 +10568,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                 retry_after: None,
             },
             0,
+            false,
             false,
         );
     };
@@ -10326,6 +10591,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                     retry_after: None,
                 },
                 0,
+                false,
                 false,
             );
         }
@@ -10367,6 +10633,15 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
     } else {
         result.reason
     };
+    let known_plans_allowed = matches!(
+        result.verdict,
+        Verdict::Prefix
+            | Verdict::WholePacket
+            | Verdict::Opaque
+            | Verdict::Inconclusive
+            | Verdict::Poisonable
+            | Verdict::Flaky
+    );
     (
         DiscoveryOutcome {
             target,
@@ -10381,6 +10656,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
         },
         probes,
         owned_opaque_fallback,
+        known_plans_allowed,
     )
 }
 
@@ -17313,7 +17589,9 @@ mod tests {
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             seen: std::collections::HashSet::new(),
             seen_order: std::collections::VecDeque::new(),
-            suspect_fingerprints: std::collections::HashMap::new(),
+            suspect_fingerprints: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             suspect_fingerprint_order: std::collections::VecDeque::new(),
             failed_at: std::collections::HashMap::new(),
             failed_retry_after: std::collections::HashMap::new(),
@@ -18473,6 +18751,45 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn ech_rx_ladder_batches_match_donor_refill_without_fallback_arms() {
+        assert!(!super::r2o_discovery_owned_fallback_allowed(
+            true, false, true
+        ));
+        assert!(super::r2o_discovery_owned_fallback_allowed(
+            true, false, false
+        ));
+        assert!(!super::r2o_discovery_owned_fallback_allowed(
+            true, true, false
+        ));
+
+        let mut output = String::new();
+        for (label, network_probe, total) in [("names", true, 16usize), ("splits", false, 5)] {
+            let mut index = 0;
+            while index < total {
+                let batch_end = (index + super::R2O_ECH_RX_LADDER_BATCH).min(total);
+                while index < batch_end {
+                    let (candidate, _) = super::r2o_ech_rx_ladder_candidate(
+                        index,
+                        network_probe,
+                        "hcaptcha.com",
+                        1492,
+                        true,
+                    )
+                    .unwrap()
+                    .unwrap();
+                    output.push_str(&candidate.replace("r2o-plan", "d2k-plan"));
+                    index += 1;
+                }
+            }
+            output.push_str(&format!("{label} {total} {total} 0\n"));
+        }
+        if let Ok(path) = std::env::var("R2O_ECH_RX_LADDER_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn ech_rx_лестница_сохраняет_найденное_имя_и_исчерпание_поиска() {
         let work = std::env::temp_dir().join(format!(
             "r2o-network-whitelist-{}-{}",
@@ -18611,6 +18928,9 @@ mod tests {
                 &commands,
                 &Mutex::new(VecDeque::new()),
                 None,
+                &r2o_controller::catalog::Fingerprint::default(),
+                &[],
+                0,
                 "hcaptcha.com",
                 &AtomicUsize::new(1492),
                 &Mutex::new(Default::default()),
@@ -19226,7 +19546,7 @@ mod tests {
         };
 
         assert_eq!(
-            super::r2o_discovery_volume_known_plans(Some(&catalog), &target, &observed),
+            super::r2o_discovery_volume_known_plans(Some(&catalog), &target, &observed, &[]),
             [
                 ("same".into(), same_bucket.text),
                 ("near".into(), near_bucket.text)
@@ -26350,7 +26670,9 @@ mod tests {
             cancel: Arc::new(AtomicBool::new(false)),
             seen: std::collections::HashSet::from([target.clone()]),
             seen_order: VecDeque::from([target.clone()]),
-            suspect_fingerprints: std::collections::HashMap::new(),
+            suspect_fingerprints: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             suspect_fingerprint_order: VecDeque::new(),
             failed_at: std::collections::HashMap::from([(
                 failure_key.clone(),

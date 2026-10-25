@@ -41,6 +41,12 @@ pub struct OwnPlanCandidate {
     pub text: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KnownPlanCandidate {
+    pub box_id: String,
+    pub text: String,
+}
+
 /// Return the plan bound to the exact name/TCP/family/shape slot, using the
 /// same winner selection as `core/sched.c::bound_plan_here`.
 pub fn own_first_bound_plan_id(
@@ -238,6 +244,77 @@ pub fn own_first_plans(
         .take(BATCH.min(SEEN_CAP - seen.len()))
         .map(|ranked| ranked.candidate)
         .collect()
+}
+
+/// Select the same first batch as `core/sched.c::known_plans`.
+pub fn known_plans(
+    catalog: &Catalog,
+    target: &DiscoveryTarget,
+    observed: &crate::catalog::Fingerprint,
+    tried: &[u32],
+) -> Vec<KnownPlanCandidate> {
+    if observed.signals.is_empty() {
+        return Vec::new();
+    }
+    let proto = if target.shape == SHAPE_QUIC {
+        "quic"
+    } else {
+        "tls"
+    };
+    let mut ranked = Vec::new();
+    for box_record in &catalog.boxes {
+        if !box_record.fingerprint.is_compatible_with(observed) {
+            continue;
+        }
+        let same_volume_bucket = observed.signals.iter().any(|signal| {
+            matches!(
+                signal.kind.as_str(),
+                "volume" | "rx-volume" | "rx-volume-wire"
+            ) && volume_bucket(signal.volume) > 0
+                && box_record.fingerprint.signals.iter().any(|saved| {
+                    saved.kind == signal.kind
+                        && volume_bucket(saved.volume) == volume_bucket(signal.volume)
+                })
+        });
+        for plan in &box_record.plans {
+            if !plan.enabled
+                || plan.proto != proto
+                || plan.text.len() >= 4096
+                || tried.contains(&crate::r2o_fallback::tried_key(&plan.text))
+            {
+                continue;
+            }
+            ranked.push((
+                same_volume_bucket,
+                plan.successes,
+                KnownPlanCandidate {
+                    box_id: box_record.id.clone(),
+                    text: plan.text.clone(),
+                },
+            ));
+        }
+    }
+    ranked.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
+    let mut plans = Vec::new();
+    for (_, _, candidate) in ranked {
+        if !plans
+            .iter()
+            .any(|saved: &KnownPlanCandidate| saved.text == candidate.text)
+        {
+            plans.push(candidate);
+            if plans.len() == 8 {
+                break;
+            }
+        }
+    }
+    plans
+}
+
+fn volume_bucket(volume: i32) -> i32 {
+    if volume <= 0 {
+        return 0;
+    }
+    (i32::BITS - volume.leading_zeros()) as i32
 }
 
 fn own_rank_before(left: &RankedOwnPlan, right: &RankedOwnPlan) -> bool {
@@ -1282,7 +1359,8 @@ fn stable_plan_id(family: u8, shape: u8, text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        DiscoveryTarget, own_first_bound_plan_id, own_first_plans, r2o_ech_witness_candidates,
+        DiscoveryTarget, known_plans, own_first_bound_plan_id, own_first_plans,
+        r2o_ech_witness_candidates,
     };
     use r2k_core::control::{
         BindingContext, HttpResponseEvent, KEY_LEN, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_MODERN,
@@ -1378,6 +1456,152 @@ mod tests {
             seen.len() >= 8,
             "the fixture exercises multiple donor batches"
         );
+    }
+
+    #[test]
+    fn known_plan_candidates_match_donor_scheduler() {
+        use crate::catalog::{BoxRecord, Catalog, Fingerprint, Plan, Signal};
+        use crate::r2o_fallback::tried_key;
+
+        struct Case {
+            id: String,
+            catalog: Catalog,
+            observed: Fingerprint,
+            transport: u8,
+            tried: Vec<u32>,
+        }
+        let mut cases: Vec<Case> = Vec::new();
+        for row in include_str!("../tests/fixtures/d2o_known_plans.tsv").lines() {
+            if row.starts_with('#') || row.is_empty() {
+                continue;
+            }
+            let columns: Vec<_> = row.split('\t').collect();
+            assert_eq!(columns.len(), 21, "fixture row: {row}");
+            let number = |index: usize| columns[index].parse::<i32>().unwrap();
+            let index = cases
+                .iter()
+                .position(|case| case.id == columns[0])
+                .unwrap_or_else(|| {
+                    cases.push(Case {
+                        id: columns[0].into(),
+                        catalog: Catalog::default(),
+                        observed: Fingerprint {
+                            method: number(20),
+                            signals: Vec::new(),
+                        },
+                        transport: number(17) as u8,
+                        tried: Vec::new(),
+                    });
+                    cases.len() - 1
+                });
+            let case = &mut cases[index];
+            assert_eq!(
+                case.transport,
+                number(17) as u8,
+                "fixture case: {}",
+                case.id
+            );
+            assert_eq!(
+                case.observed.method,
+                number(20),
+                "fixture case: {}",
+                case.id
+            );
+            if columns[1].is_empty() {
+                continue;
+            }
+            let box_index = case
+                .catalog
+                .boxes
+                .iter()
+                .position(|box_record| box_record.id == columns[1])
+                .unwrap_or_else(|| {
+                    case.catalog.boxes.push(BoxRecord {
+                        id: columns[1].into(),
+                        fingerprint: Fingerprint {
+                            method: crate::catalog::FINGERPRINT_METHOD,
+                            signals: Vec::new(),
+                        },
+                        ..BoxRecord::default()
+                    });
+                    case.catalog.boxes.len() - 1
+                });
+            let box_record = &mut case.catalog.boxes[box_index];
+            box_record.fingerprint.method = number(19);
+            if !columns[2].is_empty() {
+                if !box_record.plans.iter().any(|plan| plan.id == columns[2]) {
+                    box_record.plans.push(Plan {
+                        id: columns[2].into(),
+                        proto: columns[3].into(),
+                        text: columns[4].into(),
+                        successes: number(5),
+                        enabled: number(6) != 0,
+                        ..Plan::default()
+                    });
+                }
+                if number(18) != 0 {
+                    case.tried.push(tried_key(columns[4]));
+                }
+            }
+            let signal = |kind: &str, ttl, tos, ipid, volume| {
+                (kind != "-").then(|| Signal {
+                    kind: kind.into(),
+                    ttl,
+                    tos,
+                    ipid,
+                    volume,
+                    seen: 1,
+                    ..Signal::default()
+                })
+            };
+            if let Some(signal) = signal(
+                columns[7],
+                number(8) as u8,
+                number(9) as u8,
+                number(10) as u16,
+                number(11),
+            ) {
+                box_record.fingerprint.signals.push(signal);
+            }
+            if let Some(signal) = signal(
+                columns[12],
+                number(13) as u8,
+                number(14) as u8,
+                number(15) as u16,
+                number(16),
+            ) {
+                case.observed.merge_observed(&Fingerprint {
+                    method: crate::catalog::FINGERPRINT_METHOD,
+                    signals: vec![signal],
+                });
+            }
+        }
+
+        let mut output = String::new();
+        for case in cases {
+            let target = DiscoveryTarget {
+                host: case.id.clone(),
+                endpoint: "192.0.2.1:443".into(),
+                family: 4,
+                shape: if case.transport == 17 {
+                    r2k_core::control::SHAPE_QUIC
+                } else {
+                    SHAPE_MODERN
+                },
+            };
+            for candidate in known_plans(&case.catalog, &target, &case.observed, &case.tried) {
+                output.push_str(&format!(
+                    "{}\t{}\t{}\n",
+                    case.id, candidate.box_id, candidate.text
+                ));
+            }
+            if case.id == "empty" {
+                assert!(case.observed.signals.is_empty());
+            }
+        }
+        if let Ok(path) = std::env::var("R2O_KNOWN_PLANS_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
     }
 
     #[test]
