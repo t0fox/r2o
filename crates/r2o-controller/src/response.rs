@@ -333,49 +333,154 @@ fn https_certificate_der_is_parseable(der: &[u8]) -> bool {
 }
 
 pub(crate) fn https_certificate_name_matches(der: &[u8], host: &str) -> Option<bool> {
-    let (_, certificate) = x509_parser::parse_x509_certificate(der).ok()?;
-    let alternative_names = certificate
-        .tbs_certificate
-        .subject_alternative_name()
-        .ok()??;
-    let address = host.parse::<IpAddr>().ok();
-    let mut has_supported_name = false;
-    for name in &alternative_names.value.general_names {
-        match name {
-            x509_parser::extensions::GeneralName::DNSName(pattern) => {
-                has_supported_name = true;
-                if address.is_none() && https_dns_name_matches(pattern, host) {
-                    return Some(true);
-                }
-            }
-            x509_parser::extensions::GeneralName::IPAddress(bytes) => {
-                has_supported_name = true;
-                let matches = match address {
-                    Some(IpAddr::V4(address)) => *bytes == address.octets(),
-                    Some(IpAddr::V6(address)) => *bytes == address.octets(),
-                    None => false,
-                };
-                if matches {
-                    return Some(true);
-                }
-            }
-            x509_parser::extensions::GeneralName::Invalid(tag, _) if tag.0 == 2 => {
-                // d2o treats an undecodable dNSName SAN as a present mismatch.
-                has_supported_name = true;
-            }
-            _ => {}
-        }
+    const SUBJECT_ALT_NAME_OID: [u8; 5] = [0x06, 0x03, 0x55, 0x1d, 0x11];
+    let host = host.split('\0').next().unwrap_or_default();
+    if host.is_empty() {
+        return None;
     }
-    has_supported_name.then_some(false)
+    let host_ip = match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(address)) => address.octets().to_vec(),
+        Ok(IpAddr::V6(address)) => address.octets().to_vec(),
+        Err(_) => Vec::new(),
+    };
+
+    for (offset, window) in der.windows(SUBJECT_ALT_NAME_OID.len()).enumerate() {
+        if window != SUBJECT_ALT_NAME_OID {
+            continue;
+        }
+        let Some(mut value_offset) = offset.checked_add(SUBJECT_ALT_NAME_OID.len()) else {
+            continue;
+        };
+        if value_offset
+            .checked_add(3)
+            .is_some_and(|end| end <= der.len())
+            && der[value_offset] == 0x01
+            && der[value_offset + 1] == 0x01
+        {
+            value_offset += 3;
+        }
+        if der.get(value_offset) != Some(&0x04) {
+            continue;
+        }
+        let (extension_len, extension_header) =
+            https_der_length(der.get(value_offset + 1..).unwrap_or_default());
+        if extension_len == 0 {
+            continue;
+        }
+        let Some(general_names_start) = value_offset
+            .checked_add(1)
+            .and_then(|offset| offset.checked_add(extension_header))
+        else {
+            continue;
+        };
+        let Some(general_names_end) = general_names_start.checked_add(extension_len) else {
+            continue;
+        };
+        let Some(general_names) = der.get(general_names_start..general_names_end) else {
+            continue;
+        };
+        if general_names.len() < 2 || general_names[0] != 0x30 {
+            continue;
+        }
+        let (names_len, names_header) =
+            https_der_length(general_names.get(1..).unwrap_or_default());
+        if names_len == 0 {
+            continue;
+        }
+        let Some(names_start) = 1_usize.checked_add(names_header) else {
+            continue;
+        };
+        let Some(names_end) = names_start.checked_add(names_len) else {
+            continue;
+        };
+        let Some(mut names) = general_names.get(names_start..names_end) else {
+            continue;
+        };
+        let (mut saw_dns, mut saw_ip) = (false, false);
+        while names.len() >= 2 {
+            let tag = names[0];
+            let (name_len, name_header) = https_der_length(&names[1..]);
+            let Some(entry_size) = 1_usize
+                .checked_add(name_header)
+                .and_then(|size| size.checked_add(name_len))
+            else {
+                break;
+            };
+            if entry_size > names.len() {
+                break;
+            }
+            let name = &names[1 + name_header..entry_size];
+            if tag == 0x82 {
+                saw_dns = true;
+                if host_ip.is_empty() && https_dns_name_bytes_match(name, host.as_bytes()) {
+                    return Some(true);
+                }
+            } else if tag == 0x87 {
+                saw_ip = true;
+                if name == host_ip.as_slice() {
+                    return Some(true);
+                }
+            }
+            names = &names[entry_size..];
+        }
+        return (saw_dns || saw_ip).then_some(false);
+    }
+    None
 }
 
-fn https_dns_name_matches(pattern: &str, host: &str) -> bool {
-    if let Some(suffix) = pattern.strip_prefix("*.") {
-        return host
-            .split_once('.')
-            .is_some_and(|(label, rest)| !label.is_empty() && rest.eq_ignore_ascii_case(suffix));
+fn https_der_length(bytes: &[u8]) -> (usize, usize) {
+    let Some(&first) = bytes.first() else {
+        return (0, 0);
+    };
+    if first < 0x80 {
+        return (usize::from(first), 1);
     }
-    pattern.eq_ignore_ascii_case(host)
+    let length_bytes = usize::from(first & 0x7f);
+    if length_bytes == 0 || length_bytes > 4 || bytes.len() < length_bytes + 1 {
+        return (0, 0);
+    }
+    let value = bytes[1..=length_bytes]
+        .iter()
+        .fold(0_usize, |value, byte| (value << 8) | usize::from(*byte));
+    (value, length_bytes + 1)
+}
+
+#[cfg(test)]
+fn https_dns_name_matches(pattern: &str, host: &str) -> bool {
+    https_dns_name_bytes_match(pattern.as_bytes(), host.as_bytes())
+}
+
+fn https_dns_name_bytes_match(pattern: &[u8], host: &[u8]) -> bool {
+    fn lower_ascii(byte: u8) -> u8 {
+        if byte.is_ascii_uppercase() {
+            byte + (b'a' - b'A')
+        } else {
+            byte
+        }
+    }
+
+    if pattern.is_empty() || host.is_empty() {
+        return false;
+    }
+    if pattern.len() > 2 && pattern.starts_with(b"*.") {
+        let Some(dot) = host.iter().position(|byte| *byte == b'.') else {
+            return false;
+        };
+        if dot == 0 {
+            return false;
+        }
+        let suffix = &host[dot + 1..];
+        return suffix.len() == pattern.len() - 2
+            && suffix
+                .iter()
+                .zip(&pattern[2..])
+                .all(|(host, pattern)| lower_ascii(*host) == lower_ascii(*pattern));
+    }
+    pattern.len() == host.len()
+        && host
+            .iter()
+            .zip(pattern)
+            .all(|(host, pattern)| lower_ascii(*host) == lower_ascii(*pattern))
 }
 
 fn https_socket(

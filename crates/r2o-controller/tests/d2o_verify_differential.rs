@@ -88,6 +88,43 @@ fn server_config_with_invalid_utf8_dns_san() -> Arc<rustls::ServerConfig> {
     Arc::new(config)
 }
 
+fn server_config_with_truncated_dns_san_trailer() -> Arc<rustls::ServerConfig> {
+    let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+    let mut certificate_der = certificate.serialize_der().unwrap();
+    let san_name = certificate_der
+        .windows(11)
+        .position(|window| window[0] == 0x82 && window[1] == 9 && &window[2..] == b"localhost")
+        .expect("DER contains the localhost dNSName SAN");
+    certificate_der[san_name + 1] = 0;
+    let certificate_der = rustls::pki_types::CertificateDer::from(certificate_der);
+    let private_key =
+        rustls::pki_types::PrivatePkcs8KeyDer::from(certificate.serialize_private_key_der());
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate_der], private_key.into())
+        .unwrap();
+    Arc::new(config)
+}
+
+fn server_config_with_zero_length_ip_san() -> Arc<rustls::ServerConfig> {
+    let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+    let mut certificate_der = certificate.serialize_der().unwrap();
+    let san_name = certificate_der
+        .windows(11)
+        .position(|window| window[0] == 0x82 && window[1] == 9 && &window[2..] == b"localhost")
+        .expect("DER contains the localhost dNSName SAN");
+    certificate_der[san_name] = 0x87;
+    certificate_der[san_name + 1] = 0;
+    let certificate_der = rustls::pki_types::CertificateDer::from(certificate_der);
+    let private_key =
+        rustls::pki_types::PrivatePkcs8KeyDer::from(certificate.serialize_private_key_der());
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate_der], private_key.into())
+        .unwrap();
+    Arc::new(config)
+}
+
 fn assert_invalid_finished_result(protocol: &str, tls12: bool) {
     let helper = std::env::var_os("R2O_D2O_VERIFY_HELPER")
         .expect("differential script must provide the donor C verifier");
@@ -258,6 +295,99 @@ fn donor_and_r2o_report_invalid_utf8_dns_san_as_a_name_mismatch() {
     let rust_result = rust_result.expect("r2o must accept the same TLS application response");
     assert_eq!(rust_result.tls, Some("1.3"));
     assert_eq!(rust_result.peer_name_ok, Some(false));
+    assert_eq!(rust_result.status, 200);
+    assert!(rust_result.complete);
+    assert!(rust_result.application_verified);
+}
+
+#[test]
+#[ignore = "run by scripts/r2o-tls-verify-differential.sh with the donor C verifier"]
+fn donor_and_r2o_keep_a_seen_dns_san_mismatch_when_its_trailer_is_truncated() {
+    let helper = std::env::var_os("R2O_D2O_VERIFY_HELPER")
+        .expect("differential script must provide the donor C verifier");
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server =
+        thread::spawn(move || serve(server_config_with_truncated_dns_san_trailer(), listener, 2));
+    let port = address.port().to_string();
+    let c_result = Command::new(helper)
+        .args(["127.0.0.1", port.as_str(), "localhost", "tls13"])
+        .output()
+        .expect("run donor C verifier");
+
+    let options = FetchOptions {
+        name: "localhost".into(),
+        ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        port: address.port(),
+        path: "/".into(),
+        deadline: Duration::from_secs(3),
+        tls12: false,
+        wire_len: None,
+        mark: None,
+    };
+    let rust_result = r2o_fetch_with_phase_timeout(&options, Duration::from_secs(3));
+    server.join().unwrap();
+
+    assert!(
+        c_result.status.success(),
+        "donor verifier exited with {}: {}",
+        c_result.status,
+        String::from_utf8_lossy(&c_result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(c_result.stdout).unwrap().trim(),
+        "1\t0\t200\t1",
+        "d2o keeps the seen dNSName as a mismatch when a later SAN entry is truncated"
+    );
+    let rust_result = rust_result.expect("r2o must accept the same TLS application response");
+    assert_eq!(rust_result.tls, Some("1.3"));
+    assert_eq!(rust_result.peer_name_ok, Some(false));
+    assert_eq!(rust_result.status, 200);
+    assert!(rust_result.complete);
+    assert!(rust_result.application_verified);
+}
+
+#[test]
+#[ignore = "run by scripts/r2o-tls-verify-differential.sh with the donor C verifier"]
+fn donor_and_r2o_preserve_zero_length_ip_san_match_for_a_dns_host() {
+    let helper = std::env::var_os("R2O_D2O_VERIFY_HELPER")
+        .expect("differential script must provide the donor C verifier");
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || serve(server_config_with_zero_length_ip_san(), listener, 2));
+    let port = address.port().to_string();
+    let c_result = Command::new(helper)
+        .args(["127.0.0.1", port.as_str(), "localhost", "tls13"])
+        .output()
+        .expect("run donor C verifier");
+
+    let options = FetchOptions {
+        name: "localhost".into(),
+        ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        port: address.port(),
+        path: "/".into(),
+        deadline: Duration::from_secs(3),
+        tls12: false,
+        wire_len: None,
+        mark: None,
+    };
+    let rust_result = r2o_fetch_with_phase_timeout(&options, Duration::from_secs(3));
+    server.join().unwrap();
+
+    assert!(
+        c_result.status.success(),
+        "donor verifier exited with {}: {}",
+        c_result.status,
+        String::from_utf8_lossy(&c_result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(c_result.stdout).unwrap().trim(),
+        "1\t1\t200\t1",
+        "d2o compares empty iPAddress data with the empty non-IP host-address buffer"
+    );
+    let rust_result = rust_result.expect("r2o must accept the same TLS application response");
+    assert_eq!(rust_result.tls, Some("1.3"));
+    assert_eq!(rust_result.peer_name_ok, Some(true));
     assert_eq!(rust_result.status, 200);
     assert!(rust_result.complete);
     assert!(rust_result.application_verified);

@@ -7798,8 +7798,10 @@ C `launch_task` увеличивает `tcp_admission_sequence`, а `quic_yield_
 выдачи. Исходник реализует тот же порядок. После прежнего единичного падения
 controller lib прошёл с `203 passed, 0 failed, 1 ignored`, а повторный полный
 `cargo +1.98.0 test --locked --offline --workspace` завершился с кодом 0 без
-пропуска теста. Поэтому сбой не воспроизведён; его первопричина остаётся
-неустановленной, scheduler код не менялся. Физическая проверка OpenWrt по
+пропуска теста. Позднее повторное воспроизведение установило причину: фиксированный
+двухслотовый fixture читал живую `/proc` память, из-за чего AIMD уменьшал лимит
+до одного и истекал двухсекундный тестовый дедлайн. Fixture изолирован от live
+метрик; scheduler production-код не менялся. Физическая проверка OpenWrt по
 указанию пользователя не выполнялась.
 
 ### TLS SAN result mismatch и scheduler fixture — RED/GREEN C/Rust, 25.10.2026
@@ -7815,6 +7817,46 @@ loopback-вход с TLS-сертификатом, где `dNSName` SAN соде
 Изменение runtime ограничено переводом malformed dNSName в измеренный mismatch;
 доверие к цепочке сертификатов, транспортный результат и критерии HTTP-успеха
 не изменялись.
+
+REA/Ghidra 12.1.4 на чистом donor ELF разобрал `core/tls13core.c::cert_name_ok`
+(`0x1611e0`, тело в двух диапазонах, 1202 байта; Evidence
+`ev_709f618558599f242a8a14d9ce6920a1289127415628de15ba282ee40e0cd676`).
+Pseudocode подтверждает байтовый поиск OID, частичный DER-обход SAN, отдельные
+`saw_dns`/`saw_ip` флаги и трёхзначный результат: после встреченного, но не
+совпавшего DNS/IP имени вернуть mismatch даже если поздняя запись обрезана.
+Полный X.509 парсер Rust в таком случае возвращал `None`, поэтому общий
+loopback-тест был RED: C `1\t0\t200\t1`, Rust `peer_name_ok=None`. Rust-аналог
+`response::https_certificate_name_matches` переведён на тот же ограниченный
+байтовый сканер; тест стал GREEN с `Some(false)` и теми же TLS 1.3, HTTP 200,
+`complete=1`, `application_verified=1`.
+
+Тот же C-сканер сравнивает пустой `iPAddress` с нулевым буфером hostname для
+не-IP имени, что даёт совпадение. Rust-порт сохраняет этот исходный крайовой
+результат, а не нормализует сертификат: общий loopback-тест получил C
+`1\t1\t200\t1` и Rust `peer_name_ok=Some(true)` при тех же TLS/HTTP/complete
+полях. `scripts/r2o-tls-verify-differential.sh` завершился `7 passed, 0 failed`;
+все семь общих C/Rust сценариев совпали. Эти тесты проверяют TLS verifier
+результат на локальном loopback, но не устанавливают полевой паритет.
+
+После последнего изменения повторён полный `scripts/r2o-tls-verify-differential.sh`
+на donor `783aa75`: 7/7 общих C/Rust TLS-сценариев прошли. На том же donor
+полный `scripts/r2o-scheduler-differential.sh` завершился с кодом 0 за 503 с;
+включал актуальный C-набор `core/test_sched.c`, QUIC-yield и Rust expiry,
+worker/permit, APPLIED и QUIC regressions. Диффы очереди, измерения, AIMD,
+worker/permit, control events, ACK/APPLIED/PERSIST, catalog sync/persist и raw
+profile прошли; общие response/CLEAR/nft fixtures подтвердили 13 TLS-векторов,
+`D2K_FW=nft`/`R2O_FW=nft` и безусловный CLEAR после трёх базовых проб.
+`ci-differential-shards.sh verify` подтвердил покрытие 12 baseline и 30
+upstream сценариев ровно один раз. Полный `cargo +1.98.0 test --locked --offline
+--workspace` и `cargo +1.98.0 fmt --all -- --check` завершились с кодом 0.
+
+Затем на итоговом исходнике `scripts/r2o-build-openwrt-aarch64-musl.sh`
+собрал шесть статических ARM64/musl бинарников, запустил версии под локальным
+QEMU и прошёл атомарные `--clear-catalog` / `--check-catalog`; SHA-256 проверка
+всех бинарников прошла. Остались предупреждения о deprecated `libc::time_t` и
+`libc::suseconds_t`. Роутер не использовался по прямой просьбе пользователя,
+поэтому физического полевого подтверждения нет и полный поведенческий паритет
+не заявляется.
 
 Повторный полный workspace прогон до тестовой изоляции дважды падал в
 `d2o_parked_quic_resumes_after_one_tcp_admission`. При фиксированном donor
