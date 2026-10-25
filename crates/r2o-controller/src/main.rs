@@ -4809,6 +4809,7 @@ struct R2oDiscoveryWorkOutcome {
     requested_target: r2o_controller::discovery::DiscoveryTarget,
     outcome: DiscoveryOutcome,
     catalog_generation: u64,
+    trigger_planned: bool,
 }
 
 #[cfg(unix)]
@@ -4821,7 +4822,7 @@ impl std::ops::Deref for R2oDiscoveryWorkOutcome {
 }
 
 #[cfg(unix)]
-type R2oDiscoveryRunner = dyn Fn(r2o_controller::discovery::DiscoveryTarget, Arc<AtomicBool>) -> DiscoveryOutcome
+type R2oDiscoveryRunner = dyn Fn(r2o_controller::discovery::DiscoveryTarget, bool, Arc<AtomicBool>) -> DiscoveryOutcome
     + Send
     + Sync;
 
@@ -5273,6 +5274,7 @@ struct R2oDiscoveryQueue {
 #[cfg(unix)]
 struct R2oDiscoveryQueueEntry {
     target: r2o_controller::discovery::DiscoveryTarget,
+    trigger_planned: bool,
     queued_at: std::time::Instant,
     queued_event: u64,
     hot_event: u64,
@@ -5692,12 +5694,22 @@ impl R2oDiscoveryQueue {
         })
     }
 
+    #[cfg(test)]
     fn enqueue(
         &mut self,
         target: r2o_controller::discovery::DiscoveryTarget,
         queued_at: std::time::Instant,
     ) -> bool {
-        if self.promote(&target) {
+        self.enqueue_with_planned(target, queued_at, false)
+    }
+
+    fn enqueue_with_planned(
+        &mut self,
+        target: r2o_controller::discovery::DiscoveryTarget,
+        queued_at: std::time::Instant,
+        trigger_planned: bool,
+    ) -> bool {
+        if self.promote_with_planned(&target, trigger_planned) {
             return true;
         }
         if self.entries.len() >= R2O_DISCOVERY_TASK_CAPACITY {
@@ -5708,6 +5720,7 @@ impl R2oDiscoveryQueue {
         let catalog_generation = self.catalog_generation;
         self.entries.push(R2oDiscoveryQueueEntry {
             target,
+            trigger_planned,
             queued_at,
             queued_event: self.event_sequence,
             hot_event,
@@ -5784,7 +5797,16 @@ impl R2oDiscoveryQueue {
             .count()
     }
 
+    #[cfg(test)]
     fn promote(&mut self, target: &r2o_controller::discovery::DiscoveryTarget) -> bool {
+        self.promote_with_planned(target, false)
+    }
+
+    fn promote_with_planned(
+        &mut self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        trigger_planned: bool,
+    ) -> bool {
         let Some(entry) = self
             .entries
             .iter_mut()
@@ -5794,6 +5816,7 @@ impl R2oDiscoveryQueue {
         };
         self.event_sequence = self.event_sequence.wrapping_add(1);
         entry.hot_event = self.event_sequence;
+        entry.trigger_planned |= trigger_planned;
         true
     }
 
@@ -5814,6 +5837,7 @@ impl R2oDiscoveryQueue {
         self.pop_with_tcp_preference(now, false)
     }
 
+    #[cfg(test)]
     fn pop_with_tcp_preference(
         &mut self,
         now: std::time::Instant,
@@ -5821,6 +5845,18 @@ impl R2oDiscoveryQueue {
     ) -> (
         Vec<r2o_controller::discovery::DiscoveryTarget>,
         Option<r2o_controller::discovery::DiscoveryTarget>,
+    ) {
+        let (expired, selected) = self.pop_with_tcp_preference_and_planned(now, prefer_tcp);
+        (expired, selected.map(|(target, _)| target))
+    }
+
+    fn pop_with_tcp_preference_and_planned(
+        &mut self,
+        now: std::time::Instant,
+        prefer_tcp: bool,
+    ) -> (
+        Vec<r2o_controller::discovery::DiscoveryTarget>,
+        Option<(r2o_controller::discovery::DiscoveryTarget, bool)>,
     ) {
         let expired = self.r2o_expire(now);
         let prefer_tcp = prefer_tcp
@@ -5845,10 +5881,11 @@ impl R2oDiscoveryQueue {
         let Some(selected) = selected else {
             return (expired, None);
         };
-        let target = self.entries.remove(selected).target;
+        let entry = self.entries.remove(selected);
+        let target = entry.target;
         self.active_endpoints
             .insert(r2o_discovery_endpoint_key(&target));
-        (expired, Some(target))
+        (expired, Some((target, entry.trigger_planned)))
     }
 }
 
@@ -5969,8 +6006,14 @@ struct DiscoveryWorker {
     clear_streaks: HashMap<R2oDiscoveryFailureKey, u8>,
     client_snapshot_targets: HashSet<r2o_controller::discovery::DiscoveryTarget>,
     client_snapshot_reasks: HashSet<R2oDiscoveryTaskKey>,
-    pending_rechecks:
-        HashMap<R2oDiscoveryTaskKey, (r2o_controller::discovery::DiscoveryTarget, Option<Vec<u8>>)>,
+    pending_rechecks: HashMap<
+        R2oDiscoveryTaskKey,
+        (
+            r2o_controller::discovery::DiscoveryTarget,
+            Option<Vec<u8>>,
+            bool,
+        ),
+    >,
     active: HashMap<R2oDiscoveryTaskKey, r2o_controller::discovery::DiscoveryTarget>,
     completed: HashSet<R2oDiscoveryTaskKey>,
     threads: Vec<JoinHandle<()>>,
@@ -6698,8 +6741,9 @@ impl DiscoveryWorker {
         mark: Option<u32>,
         measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
     ) -> Self {
-        let runner: Arc<R2oDiscoveryRunner> =
-            Arc::new(move |target, cancel| classify_discovery_target(target, cancel, mark));
+        let runner: Arc<R2oDiscoveryRunner> = Arc::new(move |target, _trigger_planned, cancel| {
+            classify_discovery_target(target, cancel, mark)
+        });
         Self::r2o_new_with_runner(measurement_gate, runner)
     }
 
@@ -6744,7 +6788,7 @@ impl DiscoveryWorker {
         let runner_volume_searches = Arc::clone(&volume_searches);
         let runner_network_whitelist_updates = Arc::clone(&network_whitelist_updates);
         let runner_catalog_snapshot = Arc::clone(&catalog_snapshot);
-        let runner: Arc<R2oDiscoveryRunner> = Arc::new(move |target, cancel| {
+        let runner: Arc<R2oDiscoveryRunner> = Arc::new(move |target, trigger_planned, cancel| {
             let mut runner_started = std::time::Instant::now();
             runner_searches
                 .lock()
@@ -6875,14 +6919,30 @@ impl DiscoveryWorker {
             let mut base_probes = 0;
             let mut seed_whole = None;
             let ech_replay = target.shape == SHAPE_ECH_TCP && ech_config.is_some();
+            let own_bound_plan_id = trigger_planned
+                .then(|| {
+                    candidate_catalog.as_ref().and_then(|catalog| {
+                        r2o_controller::discovery::own_first_bound_plan_id(
+                            catalog,
+                            &target,
+                            if ech_replay {
+                                SHAPE_ECH_TCP
+                            } else {
+                                target.shape
+                            },
+                        )
+                    })
+                })
+                .flatten();
             let mut own_seen = Vec::new();
+            let mut own_tried = Vec::new();
             if let Some(catalog) = candidate_catalog.as_ref()
                 && !r2o_controller::discovery::own_first_plans(
                     catalog,
                     &target,
                     ech_replay,
-                    None,
-                    &[],
+                    own_bound_plan_id.as_deref(),
+                    &own_tried,
                     &own_seen,
                 )
                 .is_empty()
@@ -6943,8 +7003,8 @@ impl DiscoveryWorker {
                             catalog,
                             &target,
                             ech_replay,
-                            None,
-                            &[],
+                            own_bound_plan_id.as_deref(),
+                            &own_tried,
                             &own_seen,
                         );
                         if batch.is_empty() {
@@ -7021,6 +7081,10 @@ impl DiscoveryWorker {
                                     &mut candidate_progress,
                                 );
                             own_probes = own_probes.saturating_add(attempts);
+                            if applied && attempts > 0 {
+                                own_tried
+                                    .push(r2o_controller::r2o_fallback::tried_key(&candidate.text));
+                            }
                             let verified = r2o_family_recovery_decision(&result, applied)
                                 == R2oFamilyRecoveryDecision::Verified;
                             let (application, last_result) =
@@ -7148,7 +7212,10 @@ impl DiscoveryWorker {
             let mut owned_fallback_queue = None;
             let mut primary_from_owned_fallback = false;
             if outcome.plan_text.is_none() && owned_opaque_fallback {
-                let mut queue = r2o_controller::r2o_fallback::FallbackQueue::new_owned_search();
+                let mut queue =
+                    r2o_controller::r2o_fallback::FallbackQueue::new_owned_search_with_tried(
+                        &own_tried,
+                    );
                 if let Some(candidate) = queue.next(
                     r2o_discovery_plan_shape(target.shape),
                     runner_send_cap.load(Ordering::Relaxed),
@@ -7302,8 +7369,11 @@ impl DiscoveryWorker {
                 outcome.detail.push_str(&format!(
                     "; {fallback_reason} — продолжаю запасной перебор d2o"
                 ));
-                let mut fallback_queue = owned_fallback_queue
-                    .unwrap_or_else(|| r2o_controller::r2o_fallback::FallbackQueue::new(plan_text));
+                let mut fallback_queue = owned_fallback_queue.unwrap_or_else(|| {
+                    r2o_controller::r2o_fallback::FallbackQueue::new_with_tried(
+                        plan_text, &own_tried,
+                    )
+                });
                 let mut last_trial = (result, applied);
                 let mut index = 0;
                 loop {
@@ -7603,9 +7673,11 @@ impl DiscoveryWorker {
             }
             let mut owned_fallback_plan = None;
             if primary_from_owned_fallback && rx_ladder_plan.is_none() {
-                let mut fallback_queue = owned_fallback_queue
-                    .take()
-                    .unwrap_or_else(r2o_controller::r2o_fallback::FallbackQueue::new_owned_search);
+                let mut fallback_queue = owned_fallback_queue.take().unwrap_or_else(|| {
+                    r2o_controller::r2o_fallback::FallbackQueue::new_owned_search_with_tried(
+                        &own_tried,
+                    )
+                });
                 let mut index = 1;
                 loop {
                     let challenge_or_denial = result.as_ref().is_ok_and(|fetch| {
@@ -7948,7 +8020,7 @@ impl DiscoveryWorker {
                             if worker_cancel.load(Ordering::Relaxed) || permit.is_none() {
                                 (Vec::new(), None, queue.catalog_generation)
                             } else {
-                                let (expired, target) = queue.pop_with_tcp_preference(
+                                let (expired, target) = queue.pop_with_tcp_preference_and_planned(
                                     std::time::Instant::now(),
                                     prefer_tcp,
                                 );
@@ -7956,7 +8028,9 @@ impl DiscoveryWorker {
                                     .r2o_set_pending_tcp_discovery(queue.pending_tcp_count());
                                 if target
                                     .as_ref()
-                                    .is_some_and(|target| r2o_discovery_transport(target) == 6)
+                                    .is_some_and(|(target, _)| {
+                                        r2o_discovery_transport(target) == 6
+                                    })
                                 {
                                     worker_gate.r2o_mark_tcp_discovery_admitted();
                                 }
@@ -7982,13 +8056,14 @@ impl DiscoveryWorker {
                                         retry_after: None,
                                     },
                                     catalog_generation: generation,
+                                    trigger_planned: false,
                                 })
                                 .is_err()
                             {
                                 return;
                             }
                         }
-                        let Some(target) = target else {
+                        let Some((target, trigger_planned)) = target else {
                             continue;
                         };
                         let endpoint_permit =
@@ -8022,7 +8097,11 @@ impl DiscoveryWorker {
                                 }
                             } else {
                                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    worker_runner(target.clone(), Arc::clone(&task_cancel))
+                                    worker_runner(
+                                        target.clone(),
+                                        trigger_planned,
+                                        Arc::clone(&task_cancel),
+                                    )
                                 })) {
                                     Ok(outcome) => outcome,
                                     Err(_) => {
@@ -8068,6 +8147,7 @@ impl DiscoveryWorker {
                                     requested_target: target.clone(),
                                     outcome,
                                     catalog_generation: run_generation,
+                                    trigger_planned,
                                 };
                             }
                             run_generation = latest_generation;
@@ -8340,7 +8420,16 @@ impl DiscoveryWorker {
         task_keys.len()
     }
 
+    #[cfg(test)]
     fn queue(&mut self, target: r2o_controller::discovery::DiscoveryTarget) -> bool {
+        self.queue_with_planned(target, false)
+    }
+
+    fn queue_with_planned(
+        &mut self,
+        target: r2o_controller::discovery::DiscoveryTarget,
+        trigger_planned: bool,
+    ) -> bool {
         let now = std::time::Instant::now();
         self.searches
             .lock()
@@ -8355,7 +8444,7 @@ impl DiscoveryWorker {
             let promoted = queue
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .promote(&active_target);
+                .promote_with_planned(&active_target, trigger_planned);
             if promoted {
                 wake.notify_one();
             }
@@ -8445,7 +8534,7 @@ impl DiscoveryWorker {
                 client_tcp_timestamps.remove(&task_key);
             }
         }
-        let enqueued = queue.enqueue(target.clone(), now);
+        let enqueued = queue.enqueue_with_planned(target.clone(), now, trigger_planned);
         if enqueued {
             self.measurement_gate
                 .r2o_set_pending_tcp_discovery(queue.pending_tcp_count());
@@ -8509,10 +8598,20 @@ impl DiscoveryWorker {
         queued
     }
 
+    #[cfg(test)]
     fn queue_with_tcp_timestamp(
         &mut self,
         target: r2o_controller::discovery::DiscoveryTarget,
         has_timestamp: Option<bool>,
+    ) -> bool {
+        self.queue_with_tcp_timestamp_and_planned(target, has_timestamp, false)
+    }
+
+    fn queue_with_tcp_timestamp_and_planned(
+        &mut self,
+        target: r2o_controller::discovery::DiscoveryTarget,
+        has_timestamp: Option<bool>,
+        trigger_planned: bool,
     ) -> bool {
         let key = r2o_discovery_task_key(&target);
         {
@@ -8526,7 +8625,7 @@ impl DiscoveryWorker {
                 client_tcp_timestamps.remove(&key);
             }
         }
-        let queued = self.queue(target);
+        let queued = self.queue_with_planned(target, trigger_planned);
         if !queued && !self.active.contains_key(&key) {
             self.client_tcp_timestamps
                 .lock()
@@ -8545,11 +8644,27 @@ impl DiscoveryWorker {
         self.queue_client_snapshot_with_tcp_timestamp(target, client_hello, None)
     }
 
+    #[cfg(test)]
     fn queue_client_snapshot_with_tcp_timestamp(
         &mut self,
         target: r2o_controller::discovery::DiscoveryTarget,
         client_hello: Vec<u8>,
         tcp_has_timestamp: Option<bool>,
+    ) -> bool {
+        self.queue_client_snapshot_with_tcp_timestamp_and_planned(
+            target,
+            client_hello,
+            tcp_has_timestamp,
+            false,
+        )
+    }
+
+    fn queue_client_snapshot_with_tcp_timestamp_and_planned(
+        &mut self,
+        target: r2o_controller::discovery::DiscoveryTarget,
+        client_hello: Vec<u8>,
+        tcp_has_timestamp: Option<bool>,
+        trigger_planned: bool,
     ) -> bool {
         if self.r2o_discovery_challenge_active(&target, std::time::Instant::now()) {
             return false;
@@ -8597,8 +8712,10 @@ impl DiscoveryWorker {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(&task_key);
-            self.pending_rechecks
-                .insert(task_key.clone(), (target, Some(client_hello)));
+            self.pending_rechecks.insert(
+                task_key.clone(),
+                (target, Some(client_hello), trigger_planned),
+            );
             if let Some(cancel) = self
                 .active_cancels
                 .lock()
@@ -8615,7 +8732,11 @@ impl DiscoveryWorker {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(task_key, client_hello);
-        if !self.queue_with_tcp_timestamp(target.clone(), tcp_has_timestamp) {
+        if !self.queue_with_tcp_timestamp_and_planned(
+            target.clone(),
+            tcp_has_timestamp,
+            trigger_planned,
+        ) {
             self.client_hellos
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -8630,11 +8751,12 @@ impl DiscoveryWorker {
         self.recent_client_shapes.get(target).is_some()
     }
 
-    fn queue_client_snapshot_after_confirmed_failure(
+    fn queue_client_snapshot_after_confirmed_failure_with_planned(
         &mut self,
         target: r2o_controller::discovery::DiscoveryTarget,
         client_hello: Vec<u8>,
         tcp_has_timestamp: Option<bool>,
+        trigger_planned: bool,
     ) -> bool {
         if !self.active.contains_key(&r2o_discovery_task_key(&target)) {
             let task_key = r2o_discovery_task_key(&target);
@@ -8645,7 +8767,12 @@ impl DiscoveryWorker {
             self.r2o_clear_failed_endpoint(&failure_key);
             self.failed_retry_after.remove(&failure_key);
         }
-        self.queue_client_snapshot_with_tcp_timestamp(target, client_hello, tcp_has_timestamp)
+        self.queue_client_snapshot_with_tcp_timestamp_and_planned(
+            target,
+            client_hello,
+            tcp_has_timestamp,
+            trigger_planned,
+        )
     }
 
     fn remember_client_snapshot(
@@ -8717,8 +8844,16 @@ impl DiscoveryWorker {
         &mut self,
         target: r2o_controller::discovery::DiscoveryTarget,
     ) -> bool {
+        self.queue_after_confirmed_failure_with_planned(target, false)
+    }
+
+    fn queue_after_confirmed_failure_with_planned(
+        &mut self,
+        target: r2o_controller::discovery::DiscoveryTarget,
+        trigger_planned: bool,
+    ) -> bool {
         if self.active.contains_key(&r2o_discovery_task_key(&target)) {
-            return self.queue(target);
+            return self.queue_with_planned(target, trigger_planned);
         }
         self.seen.remove(&target);
         self.seen_order.retain(|seen| seen != &target);
@@ -8727,20 +8862,29 @@ impl DiscoveryWorker {
         self.failed_at.remove(&failure_key);
         self.failed_retry_after.remove(&failure_key);
         self.ech_input_clearable_failures.remove(&failure_key);
-        self.queue(target)
+        self.queue_with_planned(target, trigger_planned)
     }
 
+    #[cfg(test)]
     fn queue_after_fresh_suspect(
         &mut self,
         target: r2o_controller::discovery::DiscoveryTarget,
     ) -> bool {
+        self.queue_after_fresh_suspect_with_planned(target, false)
+    }
+
+    fn queue_after_fresh_suspect_with_planned(
+        &mut self,
+        target: r2o_controller::discovery::DiscoveryTarget,
+        trigger_planned: bool,
+    ) -> bool {
         if self.active.contains_key(&r2o_discovery_task_key(&target)) {
-            return self.queue(target);
+            return self.queue_with_planned(target, trigger_planned);
         }
         self.seen.remove(&target);
         self.seen_order.retain(|seen| seen != &target);
         self.completed.remove(&r2o_discovery_task_key(&target));
-        self.queue(target)
+        self.queue_with_planned(target, trigger_planned)
     }
 
     fn r2o_clear_failed_endpoint(&mut self, failure_key: &R2oDiscoveryFailureKey) {
@@ -8943,8 +9087,10 @@ impl DiscoveryWorker {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(&r2o_discovery_task_key(&outcome.target))
                 .cloned();
-            self.pending_rechecks
-                .insert(task_key, (outcome.target.clone(), client_hello));
+            self.pending_rechecks.insert(
+                task_key,
+                (outcome.target.clone(), client_hello, work.trigger_planned),
+            );
             self.r2o_schedule_pending_rechecks();
             return None;
         }
@@ -9013,8 +9159,10 @@ impl DiscoveryWorker {
             }
         }
         self.client_snapshot_reasks.insert(task_key.clone());
-        self.pending_rechecks
-            .insert(task_key, (target, Some(latest_hello.to_vec())));
+        self.pending_rechecks.insert(
+            task_key,
+            (target, Some(latest_hello.to_vec()), work.trigger_planned),
+        );
         true
     }
 
@@ -9026,7 +9174,9 @@ impl DiscoveryWorker {
             .cloned()
             .collect::<Vec<_>>();
         for task_key in ready {
-            let Some((target, client_hello)) = self.pending_rechecks.remove(&task_key) else {
+            let Some((target, client_hello, trigger_planned)) =
+                self.pending_rechecks.remove(&task_key)
+            else {
                 continue;
             };
             let client_hello_key = r2o_discovery_task_key(&target);
@@ -9061,7 +9211,7 @@ impl DiscoveryWorker {
                     .remove(&client_hello_key);
                 self.client_snapshot_targets.remove(&target);
             }
-            if self.queue(target.clone()) {
+            if self.queue_with_planned(target.clone(), trigger_planned) {
                 if client_hello.is_some() {
                     self.client_snapshot_targets.insert(target);
                 }
@@ -9073,7 +9223,7 @@ impl DiscoveryWorker {
                         .remove(&client_hello_key);
                 }
                 self.pending_rechecks
-                    .insert(task_key, (target, client_hello));
+                    .insert(task_key, (target, client_hello, trigger_planned));
             }
         }
     }
@@ -12040,6 +12190,7 @@ impl ControlClient {
                                     target.clone(),
                                     r2o_discovery_suspect_signal(3, 0, 0, 0, 0),
                                     R2oSuspectQueueMode::ConfirmedFailure,
+                                    event.planned,
                                 );
                                 println!(
                                     "плановый отказ {}: {}",
@@ -12095,6 +12246,7 @@ impl ControlClient {
                                     target.clone(),
                                     r2o_discovery_suspect_signal(3, 0, 0, 0, 0),
                                     R2oSuspectQueueMode::Normal,
+                                    false,
                                 ) {
                                     println!(
                                         "молчание TCP без чистого рукопожатия поставило {} в очередь классификации",
@@ -12133,6 +12285,7 @@ impl ControlClient {
                                     event.ip_id,
                                 ),
                                 R2oSuspectQueueMode::Fresh,
+                                false,
                             );
                             println!(
                                 "снятый защитой RST поставил {} в очередь классификации: {}",
@@ -12200,6 +12353,7 @@ impl ControlClient {
                                     } else {
                                         R2oSuspectQueueMode::Normal
                                     },
+                                    event.planned,
                                 );
                                 println!(
                                     "ранний TCP RST поставил {} на повторную проверку плана: {}",
@@ -12226,6 +12380,7 @@ impl ControlClient {
                                     event.ip_id,
                                 ),
                                 R2oSuspectQueueMode::Normal,
+                                false,
                             ) {
                                 println!(
                                     "ранний TCP RST без чистого рукопожатия поставил {} в очередь классификации",
@@ -12283,6 +12438,7 @@ impl ControlClient {
                                     } else {
                                         R2oSuspectQueueMode::Normal
                                     },
+                                    event.planned,
                                 );
                                 println!(
                                     "повтор ClientHello под планом поставил {} на проверку: {}",
@@ -12303,6 +12459,7 @@ impl ControlClient {
                                 target.clone(),
                                 r2o_discovery_suspect_signal(2, 0, 0, 0, 0),
                                 R2oSuspectQueueMode::Normal,
+                                false,
                             ) {
                                 println!(
                                     "повтор ClientHello без плана поставил {} в очередь классификации",
@@ -13346,6 +13503,7 @@ impl ControlClient {
         target: r2o_controller::discovery::DiscoveryTarget,
         signal: r2o_controller::catalog::Signal,
         mode: R2oSuspectQueueMode,
+        trigger_planned: bool,
     ) -> bool {
         let (snapshot, capture_error) = if worker.has_recent_client_shape(&target) {
             (None, None)
@@ -13360,20 +13518,28 @@ impl ControlClient {
                 let client_hello = snapshot.client_hello;
                 let timestamp = snapshot.tcp_has_timestamp;
                 return if matches!(mode, R2oSuspectQueueMode::ConfirmedFailure) {
-                    worker.queue_client_snapshot_after_confirmed_failure(
+                    worker.queue_client_snapshot_after_confirmed_failure_with_planned(
                         target,
                         client_hello,
                         timestamp,
+                        trigger_planned,
                     )
                 } else {
-                    worker.queue_client_snapshot_with_tcp_timestamp(target, client_hello, timestamp)
+                    worker.queue_client_snapshot_with_tcp_timestamp_and_planned(
+                        target,
+                        client_hello,
+                        timestamp,
+                        trigger_planned,
+                    )
                 };
             }
             match mode {
-                R2oSuspectQueueMode::Normal => worker.queue(target),
-                R2oSuspectQueueMode::Fresh => worker.queue_after_fresh_suspect(target),
+                R2oSuspectQueueMode::Normal => worker.queue_with_planned(target, trigger_planned),
+                R2oSuspectQueueMode::Fresh => {
+                    worker.queue_after_fresh_suspect_with_planned(target, trigger_planned)
+                }
                 R2oSuspectQueueMode::ConfirmedFailure => {
-                    worker.queue_after_confirmed_failure(target)
+                    worker.queue_after_confirmed_failure_with_planned(target, trigger_planned)
                 }
             }
         });
@@ -21773,12 +21939,13 @@ mod tests {
                 retry_after: None,
             },
             catalog_generation: 0,
+            trigger_planned: true,
         };
 
         assert!(worker.r2o_recheck_changed_client_shape(&work));
         assert_eq!(
             worker.pending_rechecks.get(&key),
-            Some(&(latest_target, Some(latest)))
+            Some(&(latest_target, Some(latest), true))
         );
         assert!(!worker.r2o_recheck_changed_client_shape(&work));
 
@@ -21816,6 +21983,7 @@ mod tests {
                 retry_after: None,
             },
             catalog_generation: 0,
+            trigger_planned: false,
         };
         assert!(!worker.r2o_recheck_changed_client_shape(&strict_work));
         assert!(!worker.pending_rechecks.contains_key(&strict_key));
@@ -21895,9 +22063,10 @@ mod tests {
                 .insert(super::r2o_discovery_task_key(&target), target);
         }
         let deferred = target("deferred.example".into());
-        worker
-            .pending_rechecks
-            .insert(super::r2o_discovery_task_key(&deferred), (deferred, None));
+        worker.pending_rechecks.insert(
+            super::r2o_discovery_task_key(&deferred),
+            (deferred, None, false),
+        );
 
         assert!(!worker.queue(target("overflow.example".into())));
         assert_eq!(worker.active.len(), 63);
@@ -21973,6 +22142,26 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn r2o_discovery_queue_preserves_planned_trigger_when_promoted() {
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "planned.example".into(),
+            endpoint: "192.0.2.44:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let now = std::time::Instant::now();
+        let mut queue = super::R2oDiscoveryQueue::default();
+
+        assert!(queue.enqueue_with_planned(target.clone(), now, false));
+        assert!(queue.enqueue_with_planned(target.clone(), now, true));
+        assert!(queue.enqueue_with_planned(target.clone(), now, false));
+
+        let (_, selected) = queue.pop_with_tcp_preference_and_planned(now, false);
+        assert_eq!(selected, Some((target, true)));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn r2o_discovery_queue_runs_the_freshest_suspicion_first() {
         let now = std::time::Instant::now();
         let target = |host: &str| r2o_controller::discovery::DiscoveryTarget {
@@ -22044,6 +22233,7 @@ mod tests {
                 };
                 queue.entries.push(R2oDiscoveryQueueEntry {
                     target,
+                    trigger_planned: false,
                     queued_at: now - Duration::from_millis(queued_age_ms),
                     queued_event,
                     hot_event,
@@ -22107,6 +22297,7 @@ mod tests {
                         SHAPE_MODERN
                     },
                 },
+                trigger_planned: false,
                 queued_at: now - Duration::from_millis(1),
                 queued_event: queued_event.parse().unwrap(),
                 hot_event: hot_event.parse().unwrap(),
@@ -22599,6 +22790,7 @@ mod tests {
             let mut queue = R2oDiscoveryQueue::default();
             queue.entries.push(R2oDiscoveryQueueEntry {
                 target,
+                trigger_planned: false,
                 queued_at: now - Duration::from_millis(queued_age_ms),
                 queued_event: 0,
                 hot_event: 0,
@@ -22735,7 +22927,9 @@ mod tests {
         let release = Arc::new((Mutex::new(false), Condvar::new()));
         let runner_release = Arc::clone(&release);
         let runner = Arc::new(
-            move |target: r2o_controller::discovery::DiscoveryTarget, _cancel: Arc<AtomicBool>| {
+            move |target: r2o_controller::discovery::DiscoveryTarget,
+                  _trigger_planned: bool,
+                  _cancel: Arc<AtomicBool>| {
                 started_sender.send(target.host.clone()).unwrap();
                 let (released, wake) = &*runner_release;
                 let released = released
@@ -22800,7 +22994,9 @@ mod tests {
     #[test]
     fn r2o_discovery_grease_result_releases_original_task() {
         let runner = std::sync::Arc::new(
-            |mut target: r2o_controller::discovery::DiscoveryTarget, _cancel| {
+            |mut target: r2o_controller::discovery::DiscoveryTarget,
+             _trigger_planned: bool,
+             _cancel| {
                 assert!(r2o_controller::discovery::regrade_ech_grease(&mut target));
                 super::DiscoveryOutcome {
                     target,
@@ -22855,7 +23051,9 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let runner_calls = Arc::clone(&calls);
         let runner = Arc::new(
-            move |target: r2o_controller::discovery::DiscoveryTarget, _cancel: Arc<AtomicBool>| {
+            move |target: r2o_controller::discovery::DiscoveryTarget,
+                  _trigger_planned: bool,
+                  _cancel: Arc<AtomicBool>| {
                 if runner_calls.fetch_add(1, Ordering::Relaxed) == 0 {
                     panic!("simulated worker panic");
                 }
@@ -22996,7 +23194,9 @@ mod tests {
         let runner_release = Arc::clone(&release);
         let (started_sender, started_receiver) = mpsc::channel();
         let runner = Arc::new(
-            move |target: r2o_controller::discovery::DiscoveryTarget, cancel: Arc<AtomicBool>| {
+            move |target: r2o_controller::discovery::DiscoveryTarget,
+                  _trigger_planned: bool,
+                  cancel: Arc<AtomicBool>| {
                 let key = super::r2o_discovery_task_key(&target);
                 let hello = runner_snapshots.lock().unwrap().get(&key).cloned().unwrap();
                 started_sender
@@ -23106,7 +23306,9 @@ mod tests {
         let (first_started_sender, first_started_receiver) = mpsc::channel();
         let (second_started_sender, second_started_receiver) = mpsc::channel();
         let runner = Arc::new(
-            move |target: r2o_controller::discovery::DiscoveryTarget, cancel: Arc<AtomicBool>| {
+            move |target: r2o_controller::discovery::DiscoveryTarget,
+                  _trigger_planned: bool,
+                  cancel: Arc<AtomicBool>| {
                 let attempt = runner_attempts.fetch_add(1, Ordering::Relaxed);
                 let captured = runner_snapshots.lock().unwrap().get(&key).cloned();
                 if attempt == 0 {
@@ -23186,7 +23388,9 @@ mod tests {
         let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
         let held = gate.r2o_try_acquire().unwrap();
         let runner = Arc::new(
-            |target: r2o_controller::discovery::DiscoveryTarget, _cancel: Arc<AtomicBool>| {
+            |target: r2o_controller::discovery::DiscoveryTarget,
+             _trigger_planned: bool,
+             _cancel: Arc<AtomicBool>| {
                 super::DiscoveryOutcome {
                     target,
                     plan_text: None,
@@ -23232,7 +23436,9 @@ mod tests {
         let held = gate.r2o_try_acquire().unwrap();
         let snapshots = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let runner = Arc::new(
-            |target: r2o_controller::discovery::DiscoveryTarget, _cancel: Arc<AtomicBool>| {
+            |target: r2o_controller::discovery::DiscoveryTarget,
+             _trigger_planned: bool,
+             _cancel: Arc<AtomicBool>| {
                 super::DiscoveryOutcome {
                     target,
                     plan_text: None,
@@ -23284,7 +23490,9 @@ mod tests {
         let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
         let held = gate.r2o_try_acquire().unwrap();
         let runner = Arc::new(
-            |target: r2o_controller::discovery::DiscoveryTarget, _cancel: Arc<AtomicBool>| {
+            |target: r2o_controller::discovery::DiscoveryTarget,
+             _trigger_planned: bool,
+             _cancel: Arc<AtomicBool>| {
                 super::DiscoveryOutcome {
                     target,
                     plan_text: None,
@@ -23334,7 +23542,9 @@ mod tests {
         let runner_release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
         let worker_release = Arc::clone(&runner_release);
         let runner = Arc::new(
-            move |target: r2o_controller::discovery::DiscoveryTarget, _cancel: Arc<AtomicBool>| {
+            move |target: r2o_controller::discovery::DiscoveryTarget,
+                  _trigger_planned: bool,
+                  _cancel: Arc<AtomicBool>| {
                 started_sender.send(target.host.clone()).unwrap();
                 let (released, wake) = &*worker_release;
                 let released = released
@@ -23446,7 +23656,9 @@ mod tests {
         let release_receiver = Arc::new(Mutex::new(release_receiver));
         let runner_release = Arc::clone(&release_receiver);
         let runner = Arc::new(
-            move |target: r2o_controller::discovery::DiscoveryTarget, _cancel: Arc<AtomicBool>| {
+            move |target: r2o_controller::discovery::DiscoveryTarget,
+                  _trigger_planned: bool,
+                  _cancel: Arc<AtomicBool>| {
                 started_sender.send(target.host.clone()).unwrap();
                 runner_release
                     .lock()
@@ -23539,7 +23751,9 @@ mod tests {
         let release_receiver = Arc::new(Mutex::new(release_receiver));
         let runner_release = Arc::clone(&release_receiver);
         let runner = Arc::new(
-            move |target: r2o_controller::discovery::DiscoveryTarget, _cancel: Arc<AtomicBool>| {
+            move |target: r2o_controller::discovery::DiscoveryTarget,
+                  _trigger_planned: bool,
+                  _cancel: Arc<AtomicBool>| {
                 started_sender
                     .send((target.host.clone(), Instant::now()))
                     .unwrap();
@@ -23618,7 +23832,9 @@ mod tests {
         let (finished_sender, finished_receiver) = mpsc::channel();
         let runner_release = Arc::clone(&release_receiver);
         let runner = Arc::new(
-            move |target: r2o_controller::discovery::DiscoveryTarget, _cancel: Arc<AtomicBool>| {
+            move |target: r2o_controller::discovery::DiscoveryTarget,
+                  _trigger_planned: bool,
+                  _cancel: Arc<AtomicBool>| {
                 let host = target.host.clone();
                 started_sender.send(host.clone()).unwrap();
                 runner_release

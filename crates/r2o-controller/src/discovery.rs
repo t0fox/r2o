@@ -41,6 +41,80 @@ pub struct OwnPlanCandidate {
     pub text: String,
 }
 
+/// Return the plan bound to the exact name/TCP/family/shape slot, using the
+/// same winner selection as `core/sched.c::bound_plan_here`.
+pub fn own_first_bound_plan_id(
+    catalog: &Catalog,
+    target: &DiscoveryTarget,
+    shape: u8,
+) -> Option<String> {
+    for box_record in &catalog.boxes {
+        for binding in &box_record.bindings {
+            if !binding.enabled
+                || binding.recheck_since.is_some_and(|since| since != 0)
+                || binding.level > 0 && binding.level < 3
+                || binding.kind != "name"
+                || binding.target != target.host
+                || normalized_transport(binding.transport) != 6
+                || normalized_family(binding.family) != target.family
+                || binding.shape != shape
+                || newer_name_binding(catalog, binding)
+                || !box_record
+                    .plans
+                    .iter()
+                    .any(|plan| plan.id == binding.plan_id)
+            {
+                continue;
+            }
+            return Some(binding.plan_id.clone());
+        }
+    }
+    None
+}
+
+fn normalized_transport(transport: u8) -> u8 {
+    if transport == 0 { 6 } else { transport }
+}
+
+fn normalized_family(family: u8) -> u8 {
+    if family == 0 { 4 } else { family }
+}
+
+fn binding_budget_rank(budget: u8) -> u8 {
+    match budget {
+        1 => 2, // D2K_CAT_BUDGET_PASSED
+        3 => 0, // D2K_CAT_BUDGET_CUT
+        _ => 1,
+    }
+}
+
+fn binding_beats(left: &Binding, right: &Binding) -> bool {
+    let left_budget = binding_budget_rank(left.budget);
+    let right_budget = binding_budget_rank(right.budget);
+    left_budget > right_budget || left_budget == right_budget && left.confirmed > right.confirmed
+}
+
+fn newer_name_binding(catalog: &Catalog, binding: &Binding) -> bool {
+    if binding.kind != "name" {
+        return false;
+    }
+    catalog.boxes.iter().any(|box_record| {
+        box_record.bindings.iter().any(|other| {
+            !std::ptr::eq(other, binding)
+                && other.enabled
+                && other.recheck_since.is_none_or(|since| since == 0)
+                && !(other.level > 0 && other.level < 3)
+                && binding_beats(other, binding)
+                && other.kind == "name"
+                && other.target == binding.target
+                && normalized_transport(other.transport) == normalized_transport(binding.transport)
+                && normalized_family(other.family) == normalized_family(binding.family)
+                && other.shape == binding.shape
+                && box_record.plans.iter().any(|plan| plan.id == other.plan_id)
+        })
+    })
+}
+
 #[derive(Clone)]
 struct RankedOwnPlan {
     candidate: OwnPlanCandidate,
@@ -1207,7 +1281,9 @@ fn stable_plan_id(family: u8, shape: u8, text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{DiscoveryTarget, own_first_plans, r2o_ech_witness_candidates};
+    use super::{
+        DiscoveryTarget, own_first_bound_plan_id, own_first_plans, r2o_ech_witness_candidates,
+    };
     use r2k_core::control::{
         BindingContext, HttpResponseEvent, KEY_LEN, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_MODERN,
     };
@@ -1267,15 +1343,26 @@ mod tests {
             }
         }
         let target = DiscoveryTarget {
-            host: "target.example".into(),
+            host: "other.example".into(),
             endpoint: "192.0.2.1:443".into(),
             family: 4,
             shape: SHAPE_MODERN,
         };
+        let planned = std::env::var("R2O_OWN_FIRST_DIFF_PLANNED").is_ok_and(|value| value == "1");
+        let bound_plan = planned
+            .then(|| own_first_bound_plan_id(&catalog, &target, target.shape))
+            .flatten();
         let mut seen = Vec::new();
         let mut output = String::new();
         loop {
-            let batch = own_first_plans(&catalog, &target, false, None, &tried, &seen);
+            let batch = own_first_plans(
+                &catalog,
+                &target,
+                false,
+                bound_plan.as_deref(),
+                &tried,
+                &seen,
+            );
             if batch.is_empty() {
                 break;
             }

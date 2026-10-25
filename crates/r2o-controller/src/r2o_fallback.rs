@@ -65,17 +65,27 @@ pub struct FallbackQueue {
 
 impl FallbackQueue {
     pub fn new(measured: &str) -> Self {
+        Self::new_with_tried(measured, &[])
+    }
+
+    pub fn new_with_tried(measured: &str, tried: &[u32]) -> Self {
+        let mut tried = tried.to_vec();
+        tried.push(tried_key(measured));
         Self {
             next: 0,
-            tried: vec![tried_key(measured)],
+            tried,
             pending: VecDeque::new(),
         }
     }
 
     pub fn new_owned_search() -> Self {
+        Self::new_owned_search_with_tried(&[])
+    }
+
+    pub fn new_owned_search_with_tried(tried: &[u32]) -> Self {
         Self {
             next: 0,
-            tried: Vec::new(),
+            tried: tried.to_vec(),
             pending: VecDeque::new(),
         }
     }
@@ -293,6 +303,25 @@ mod tests {
         if let Ok(path) = std::env::var("R2O_FALLBACK_QUEUE_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
         }
+    }
+
+    #[test]
+    fn own_first_tried_plans_are_skipped_by_later_fallback_queues() {
+        let shape = 1;
+        let already_tried = super::plan(0, shape, 1492).unwrap();
+        let measured = super::plan(12, shape, 1492).unwrap();
+        let tried = [super::tried_key(&already_tried)];
+
+        let mut measured_queue = super::FallbackQueue::new_with_tried(&measured, &tried);
+        let mut owned_queue = super::FallbackQueue::new_owned_search_with_tried(&tried);
+        assert_ne!(
+            measured_queue.next(shape, 1492).as_deref(),
+            Some(already_tried.as_str())
+        );
+        assert_ne!(
+            owned_queue.next(shape, 1492).as_deref(),
+            Some(already_tried.as_str())
+        );
     }
 
     #[test]

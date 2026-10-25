@@ -33,4 +33,9 @@ R2O_OWN_FIRST_DIFF_OUTPUT="$tmp_dir/rust.out" \
     cargo +1.98.0 test -p r2o-controller --lib --locked \
     own_first_plan_batches_match_donor
 diff -u "$tmp_dir/c.out" "$tmp_dir/rust.out"
-printf 'C/Rust own-plan eligibility, tier/success/freshness order, deduplication and 8-plan batches match d2o %s.\n' "$actual_donor_sha"
+"$tmp_dir/d2o-own-first" "$fixture" planned >"$tmp_dir/c-planned.out"
+R2O_OWN_FIRST_DIFF_PLANNED=1 R2O_OWN_FIRST_DIFF_OUTPUT="$tmp_dir/rust-planned.out" \
+    cargo +1.98.0 test -p r2o-controller --lib --locked \
+    own_first_plan_batches_match_donor
+diff -u "$tmp_dir/c-planned.out" "$tmp_dir/rust-planned.out"
+printf 'C/Rust own-plan eligibility, bound-plan priority, tier/success/freshness order, deduplication and 8-plan batches match d2o %s.\n' "$actual_donor_sha"

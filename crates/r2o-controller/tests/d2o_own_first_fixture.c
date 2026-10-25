@@ -27,7 +27,7 @@ static size_t box_index(const char *id, size_t *count) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 2) return 2;
+    if (argc < 2 || argc > 3) return 2;
     FILE *input = fopen(argv[1], "r");
     if (!input) return 2;
     d2k_catalog catalog = {0};
@@ -91,7 +91,9 @@ int main(int argc, char **argv) {
     current->transport = 6;
     current->family = 4;
     current->trig_len = 2;
-    current->trigger_planned = D2K_LINK_PLANNED_NO;
+    snprintf(current->name, sizeof current->name, "other.example");
+    current->trigger_planned = argc == 3 && strcmp(argv[2], "planned") == 0
+        ? D2K_LINK_PLANNED_YES : D2K_LINK_PLANNED_NO;
 
     size_t count;
     while ((count = own_first_plans(sched, current, 1)) != 0) {
