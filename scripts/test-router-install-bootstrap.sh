@@ -366,7 +366,11 @@ R2O_NDM_DIR="$CASE/opt/etc/ndm/netfilter.d" \
 R2O_OPENWRT_INIT_DIR="$CASE/etc/init.d" \
 R2O_RUNTIME_DIR="$CASE/tmp/r2o" R2O_PLATFORM=openwrt \
     sh "$ROOT/scripts/uninstall.sh" --yes \
-    > "$CASE/uninstall.out" 2>&1 || { cat "$CASE/uninstall.out" >&2; fail 'owned installation did not uninstall'; }
+    > "$CASE/uninstall.out" 2>&1 || {
+        status=$?
+        cat "$CASE/uninstall.out" >&2
+        fail "owned installation did not uninstall (exit $status; release root $( [ -e "$CASE/opt/r2o" ] && echo present || echo absent ))"
+    }
 [ ! -e "$CASE/opt/r2o" ] || fail 'uninstall left the R2O release root behind'
 [ ! -e "$CASE/opt/etc/init.d/S99r2o" ] || fail 'uninstall left the R2O init shim behind'
 [ ! -e "$CASE/etc/init.d/r2o" ] || fail 'uninstall left the owned OpenWrt service behind'
