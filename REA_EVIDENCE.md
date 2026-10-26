@@ -8541,11 +8541,26 @@ or queued measurements, and 98% free CPU. The catalog includes confirmed
 YouTube and Discord bindings. `GET /api/diagnostics?status` reports
 `enabled=false`; therefore this snapshot contains no live event trace to replay.
 
-The router commit and the pinned current donor `304ba893` were compared as
-committed trees. `core/sched.c`, `core/verify.c`, `core/meas.c`,
-`detect/classify.c`, `detect/raw.c`, `core/d2kc.c`, `core/httpsearch.c`, and
-`datapath/ctlsrv.c` are byte-identical. The local `E:\d2o` checkout is dirty and
-was not modified.
+The router commit and pinned current donor `304ba893` were compared using their
+non-truncated GitHub Git trees (`a7ff33114a4910827352d44e71ed12ac84c732cb` and
+`a9e4340eedf6f094699c418cced68a2c28c610c6`). The blob SHA is identical for
+every reviewed C source file:
+
+| C source at router `a093cd6` and current donor `304ba893` | Git blob SHA (both trees) |
+| --- | --- |
+| `core/sched.c` | `a52d7987e993ff778e51ecd9d41b8c0e9bb36365` |
+| `core/verify.c` | `2e55b60c5ce893d58a7b37dc77b31e428ff6a5c6` |
+| `core/meas.c` | `4584f4d1a75e4e0e90dd2877c655305ac1bbc9ea` |
+| `detect/classify.c` | `53532af4d81a62056a0e608ab6bb503d49f13c59` |
+| `detect/raw.c` | `d10686fa170a31e03485bc3611f14faf1e2a1c05` |
+| `core/d2kc.c` | `b4936b4b284db6afbd87530b1afd4e3776ee07ce` |
+| `core/httpsearch.c` | `f27b3bd19aae6a2b8cd5483556a6f1eb053dc592` |
+| `datapath/ctlsrv.c` | `3ce6fa19d9aa5119462bc98afa87f9c8fc688386` |
+
+The WSL donor checkout is shallow and does not contain router commit `a093cd6`,
+so a local `git diff` cannot establish this comparison; the direct Git-tree blob
+comparison above is the evidence. The local `E:\d2o` checkout is dirty and was
+not modified.
 
 An earlier QEMU roundtrip passed the `knowledge` projection from this HTTP API
 to `--import-donor-catalog` and verified six boxes and 45 enabled bindings.
