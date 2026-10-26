@@ -722,13 +722,7 @@ fn r2o_ask_voice_with_arm(
                     r2o_timeout,
                 )
             };
-            if r2o_ready == 0 {
-                break;
-            }
-            if r2o_ready < 0 {
-                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
+            if r2o_ready <= 0 {
                 break;
             }
             for (r2o_poll_index, r2o_pollfd) in r2o_pollfds.iter().enumerate() {
@@ -832,7 +826,120 @@ mod tests {
     use crate::voice_targets::R2oVoiceTarget;
     use std::ffi::OsString;
     use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+    use std::sync::Mutex;
     use std::time::Duration;
+
+    static R2O_VOICE_SIGNAL_LOCK: Mutex<()> = Mutex::new(());
+
+    extern "C" fn r2o_ignore_sigusr1(_: libc::c_int) {}
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn voice_poll_interruption_matches_d2o_timeout() {
+        let _r2o_signal_lock = R2O_VOICE_SIGNAL_LOCK.lock().unwrap();
+        let r2o_fixture = include_str!("../tests/fixtures/d2o_voice_poll_eintr.tsv")
+            .lines()
+            .map(|r2o_line| {
+                let (r2o_key, r2o_value) = r2o_line.split_once('=').unwrap();
+                (r2o_key, r2o_value.parse::<u64>().unwrap())
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut r2o_action: libc::sigaction = unsafe { std::mem::zeroed() };
+        r2o_action.sa_sigaction = r2o_ignore_sigusr1 as *const () as usize;
+        r2o_action.sa_flags = 0;
+        unsafe { libc::sigemptyset(&mut r2o_action.sa_mask) };
+        let mut r2o_previous: libc::sigaction = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { libc::sigaction(libc::SIGUSR1, &r2o_action, &mut r2o_previous) },
+            0
+        );
+        struct R2oRestoreSignal(libc::sigaction);
+        impl Drop for R2oRestoreSignal {
+            fn drop(&mut self) {
+                unsafe { libc::sigaction(libc::SIGUSR1, &self.0, std::ptr::null_mut()) };
+            }
+        }
+        let _r2o_restore_signal = R2oRestoreSignal(r2o_previous);
+
+        let r2o_listener = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        r2o_listener
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let r2o_server = match r2o_listener.local_addr().unwrap() {
+            std::net::SocketAddr::V4(r2o_server) => r2o_server,
+            std::net::SocketAddr::V6(_) => panic!("голосовой fixture требует IPv4"),
+        };
+        let r2o_client_thread = unsafe { libc::pthread_self() };
+        let r2o_repeats = r2o_fixture["repeats"] as usize;
+        let r2o_interrupt_delay_ms = r2o_fixture["interrupt_delay_ms"];
+        let r2o_response_delay_ms = r2o_fixture["response_delay_ms"];
+        assert_eq!(r2o_repeats, usize::from(R2O_VOICE_REPEATS));
+        let r2o_server_thread = std::thread::spawn(move || {
+            let mut r2o_requests = Vec::with_capacity(r2o_repeats);
+            let mut r2o_peers = Vec::with_capacity(r2o_repeats);
+            for _ in 0..r2o_repeats {
+                let mut r2o_request = [0; 1500];
+                let (r2o_received, r2o_peer) = r2o_listener
+                    .recv_from(&mut r2o_request)
+                    .expect("получить голосовой STUN-запрос");
+                assert_eq!(r2o_received, 20);
+                r2o_requests.push(r2o_request[..r2o_received].to_vec());
+                r2o_peers.push(r2o_peer);
+            }
+            std::thread::sleep(Duration::from_millis(r2o_interrupt_delay_ms));
+            assert_eq!(
+                unsafe { libc::pthread_kill(r2o_client_thread, libc::SIGUSR1) },
+                0
+            );
+            std::thread::sleep(Duration::from_millis(
+                r2o_response_delay_ms - r2o_interrupt_delay_ms,
+            ));
+            for (r2o_request, r2o_peer) in r2o_requests.iter().zip(r2o_peers) {
+                let mut r2o_response = [0; 32];
+                let r2o_cookie = [0x21, 0x12, 0xa4, 0x42];
+                let r2o_address = [192, 0, 2, 1];
+                r2o_response[..4].copy_from_slice(&[1, 1, 0, 12]);
+                r2o_response[4..8].copy_from_slice(&r2o_cookie);
+                r2o_response[8..20].copy_from_slice(&r2o_request[8..20]);
+                r2o_response[20..24].copy_from_slice(&[0, 0x20, 0, 8]);
+                r2o_response[24..28].copy_from_slice(&[
+                    0,
+                    1,
+                    ((3478_u16 ^ 0x2112) >> 8) as u8,
+                    (3478_u16 ^ 0x2112) as u8,
+                ]);
+                for (r2o_index, r2o_byte) in r2o_address.iter().enumerate() {
+                    r2o_response[28 + r2o_index] = *r2o_byte ^ r2o_cookie[r2o_index];
+                }
+                r2o_listener
+                    .send_to(&r2o_response, r2o_peer)
+                    .expect("отправить STUN-ответ после сигнала");
+            }
+        });
+
+        let r2o_result = r2o_ask_voice_with_arm(
+            r2o_server,
+            Duration::from_millis(r2o_fixture["wait_ms"]),
+            None,
+            None,
+        );
+        r2o_server_thread.join().unwrap();
+        let r2o_normalized = format!(
+            "C_RESULT:pass={} fail={} errors={} marked={}\n",
+            r2o_result.passed,
+            r2o_repeats.saturating_sub(usize::from(r2o_result.passed)),
+            r2o_result.errors,
+            u8::from(r2o_result.marked)
+        );
+        if let Some(r2o_output) = std::env::var_os("R2O_VOICE_EINTR_OUTPUT") {
+            std::fs::write(r2o_output, &r2o_normalized).unwrap();
+        }
+        println!(
+            "RUST_RESULT:{}",
+            r2o_normalized.trim_start_matches("C_RESULT:")
+        );
+        assert_eq!(r2o_normalized, "C_RESULT:pass=0 fail=3 errors=0 marked=0\n");
+    }
 
     fn r2o_flow(
         server: [u8; 4],

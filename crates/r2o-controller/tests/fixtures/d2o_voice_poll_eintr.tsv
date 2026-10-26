@@ -1,0 +1,4 @@
+wait_ms=500
+repeats=3
+interrupt_delay_ms=30
+response_delay_ms=120

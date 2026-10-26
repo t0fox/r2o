@@ -8632,3 +8632,35 @@ correction; no QUIC production behavior changed.
 These are local differential and target-runtime results only. The router was
 read-only and continues to run d2o, so this does not establish R2O field parity
 or field apply latency.
+
+## Discord voice UDP poll interruption — d2o `304ba893`, 26.10.2026
+
+REA/Ghidra 12.1.4 analyzed `voice_ask` in the donor test binary
+`/tmp/r2o-parity-d2o-host/core/test_voice` (SHA-256
+`e8a4913aa13f0acad4fd9eceee142e4094e1136c2fcfcf08fdaedbcc9c4044ee`). Evidence
+`ev_0db048008477aa0bd5275cc00ec1bdd18b686bc95af8a1f997d24e013008256c` covers
+the complete, non-contiguous function body at `0x104f40–0x105430` (1,234 body
+bytes). Its pseudocode exits the receive loop when `poll(...) < 1`, including
+an interrupted poll. The donor source at `core/voice.c:259–260` states the same
+rule directly: `if (rc <= 0) { break; }`.
+
+The Rust analog is `r2o_ask_voice_with_arm` in
+`crates/r2o-controller/src/voice_measure.rs:718–726`. It previously retried
+`EINTR`, so responses arriving later in that same wait were counted. A shared
+loopback UDP fixture interrupts the wait at 30 ms and sends valid STUN replies
+at 120 ms, within the 500 ms timeout. Before the fix the exact results were C
+`pass=0 fail=3 errors=0 marked=0` and Rust
+`pass=3 fail=0 errors=0 marked=0`. Rust now exits on every `poll <= 0`, matching
+the donor; both sides report `pass=0 fail=3 errors=0 marked=0`.
+
+`scripts/r2o-discord-discovery-differential.sh` pins donor commit
+`304ba893dd37197128ac8799c0495b035f6a38c0`, runs and diffs this same-input C/Rust
+fixture, and then runs the Discord discovery, voice measurement, fallback,
+scheduler, and datapath checks. The full differential suite passed in 16 s.
+The OpenWrt 25.12.5 AArch64 musl release build passed; all six release binaries
+started under `qemu-aarch64`, and the controller catalog clear/check smoke
+passed. The new Rust interruption regression also passed under AArch64 GNU
+user-mode QEMU and returned the same normalized tally as C. The OpenWrt smoke
+does not run the unit suite under musl, and these local checks do not establish
+physical-router parity. The physical router was not contacted or changed; no
+field-parity claim is made.
