@@ -2,12 +2,13 @@ use crate::engine::validate_runtime_plan;
 use r2k_core::addr::Address;
 use r2k_core::control::{
     self, Ack, AppliedEvent, BindingContext, COMMAND_ARM_SHAPE, COMMAND_CLEAR, COMMAND_DEL_ADDR,
-    COMMAND_DEL_ADDR_PROBE, COMMAND_DEL_BYPASS, COMMAND_DEL_NAME, COMMAND_DEL_NAME_PROBE,
-    COMMAND_DEL_SUFFIX, COMMAND_DEL_VOICE_ADDR_PROBE, COMMAND_SET_ADDR, COMMAND_SET_ADDR_PROBE,
-    COMMAND_SET_BYPASS, COMMAND_SET_HTTPS, COMMAND_SET_NAME, COMMAND_SET_NAME_PROBE,
-    COMMAND_SET_SUFFIX, COMMAND_SET_VOICE_ADDR, COMMAND_SET_VOICE_ADDR_PROBE, Frame,
-    MAX_HTTPS_TTL_SECONDS, SHAPE_ECH_TCP, SHAPE_GRANDFATHER, SHAPE_HTTP, SHAPE_LEGACY,
-    SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, decode_arm_shape, decode_client_shape,
+    COMMAND_DEL_ADDR_PROBE, COMMAND_DEL_BYPASS, COMMAND_DEL_NAME, COMMAND_DEL_NAME_BOUND,
+    COMMAND_DEL_NAME_PROBE, COMMAND_DEL_SUFFIX, COMMAND_DEL_VOICE_ADDR_PROBE, COMMAND_SET_ADDR,
+    COMMAND_SET_ADDR_PROBE, COMMAND_SET_BYPASS, COMMAND_SET_HTTPS, COMMAND_SET_NAME,
+    COMMAND_SET_NAME_BOUND, COMMAND_SET_NAME_PROBE, COMMAND_SET_SUFFIX, COMMAND_SET_VOICE_ADDR,
+    COMMAND_SET_VOICE_ADDR_PROBE, Frame, MAX_HTTPS_TTL_SECONDS, SHAPE_ECH_TCP, SHAPE_GRANDFATHER,
+    SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, decode_arm_shape,
+    decode_client_shape,
 };
 use r2k_core::packet::PacketView;
 #[cfg(test)]
@@ -170,9 +171,21 @@ impl NamePlans {
                 .body
                 .get(control::KEY_LEN..control::KEY_LEN + 16)
                 .and_then(|bytes| bytes.try_into().ok())
+        } else if frame.kind == COMMAND_SET_NAME_BOUND {
+            Some(
+                frame
+                    .body
+                    .get(frame.body.len().saturating_sub(16)..)
+                    .filter(|_| frame.body.len() >= 16)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .unwrap_or([0; 16]),
+            )
         } else if matches!(
             frame.kind,
-            COMMAND_SET_NAME_PROBE | COMMAND_SET_VOICE_ADDR_PROBE | COMMAND_DEL_VOICE_ADDR_PROBE
+            COMMAND_SET_NAME_BOUND
+                | COMMAND_SET_NAME_PROBE
+                | COMMAND_SET_VOICE_ADDR_PROBE
+                | COMMAND_DEL_VOICE_ADDR_PROBE
         ) && frame.body.len() >= 16
         {
             frame.body[frame.body.len() - 16..].try_into().ok()
@@ -191,7 +204,7 @@ impl NamePlans {
             &frame.body
         } else if area_command && frame.body.len() >= 16 {
             &frame.body[..frame.body.len() - 16]
-        } else if trial_id.is_some() {
+        } else if trial_id.is_some() && frame.body.len() >= 16 {
             &frame.body[..frame.body.len() - 16]
         } else {
             &frame.body
@@ -201,6 +214,7 @@ impl NamePlans {
         } else {
             match frame.kind {
                 COMMAND_SET_NAME => self.set_name(body),
+                COMMAND_SET_NAME_BOUND => self.set_name_bound(body),
                 COMMAND_SET_ADDR => self.set_addr(body),
                 COMMAND_SET_SUFFIX => self.set_suffix(body),
                 COMMAND_DEL_SUFFIX => self.delete_domain_area(body, true),
@@ -213,6 +227,7 @@ impl NamePlans {
                 COMMAND_SET_ADDR_PROBE => self.set_addr_probe(body),
                 COMMAND_DEL_ADDR_PROBE => self.delete_addr_probe(body, trial_id),
                 COMMAND_DEL_NAME => self.delete_name(body),
+                COMMAND_DEL_NAME_BOUND => self.delete_name_bound(body),
                 COMMAND_DEL_ADDR => self.delete_addr(body),
                 COMMAND_DEL_NAME_PROBE => self.delete_name_probe(body),
                 COMMAND_SET_HTTPS => self.set_https(body),
@@ -232,7 +247,7 @@ impl NamePlans {
                 _ => (false, control::ACK_BAD_ARGS),
             }
         };
-        if ok {
+        if ok && frame.kind != COMMAND_DEL_NAME_BOUND {
             self.revision = self.revision.wrapping_add(1);
         }
         Ack {
@@ -241,12 +256,28 @@ impl NamePlans {
             reason,
             trial_id,
             area_id,
-            binding_context: if ok && frame.kind == COMMAND_SET_NAME {
+            binding_context: if frame.kind == COMMAND_SET_NAME_BOUND {
+                Some(if ok {
+                    self.http_name_binding_context(body).unwrap_or_default()
+                } else {
+                    Default::default()
+                })
+            } else if ok && frame.kind == COMMAND_SET_NAME {
                 self.http_name_binding_context(body)
             } else {
                 None
             },
         }
+    }
+
+    fn set_name_bound(&mut self, body: &[u8]) -> (bool, u8) {
+        let Some(name_len) = body.first().copied().map(usize::from) else {
+            return (false, control::ACK_BAD_ARGS);
+        };
+        if body.get(1 + name_len).copied() != Some(SHAPE_HTTP) {
+            return (false, control::ACK_BAD_ARGS);
+        }
+        self.set_name(body)
     }
 
     fn http_name_binding_context(&self, body: &[u8]) -> Option<BindingContext> {
@@ -1219,6 +1250,66 @@ impl NamePlans {
         (true, control::ACK_OK)
     }
 
+    fn delete_name_bound(&mut self, body: &[u8]) -> (bool, u8) {
+        let Some(name_len) = body.first().copied().map(usize::from) else {
+            return (false, control::ACK_BAD_ARGS);
+        };
+        let Some(context_start) = 2_usize.checked_add(name_len) else {
+            return (false, control::ACK_BAD_ARGS);
+        };
+        if name_len == 0
+            || body.len() != context_start + control::BINDING_CONTEXT_LEN
+            || !body
+                .get(1 + name_len)
+                .is_some_and(|transport| matches!(transport, 6 | 17))
+        {
+            return (false, control::ACK_BAD_ARGS);
+        }
+        let context = &body[context_start..];
+        let binding = BindingContext {
+            generation: u64::from_be_bytes(context[..8].try_into().expect("длина проверена")),
+            kind: context[8],
+            family: context[9],
+            shape: context[10],
+            temporary: match context[11] {
+                0 => false,
+                1 => true,
+                _ => return (false, control::ACK_BAD_ARGS),
+            },
+            epoch: context[12..28]
+                .try_into()
+                .expect("размер binding context проверен"),
+        };
+        if binding.kind > 4 || !matches!(binding.family, 0 | 4 | 6) || binding.shape > SHAPE_HTTP {
+            return (false, control::ACK_BAD_ARGS);
+        }
+        let Some(host) = canonical_plan_name(&body[1..1 + name_len], binding.shape) else {
+            return (true, control::ACK_OK);
+        };
+        if !binding.is_known()
+            || binding.kind != 1
+            || binding.temporary
+            || !matches!(binding.family, 4 | 6)
+        {
+            return (true, control::ACK_OK);
+        }
+        let transport = body[1 + name_len];
+        let key = NamePlanKey {
+            host,
+            family: binding.family,
+            shape: binding.shape,
+        };
+        if self.epoch == binding.epoch
+            && self.plans.get(&key).is_some_and(|installed| {
+                installed.generation == binding.generation && installed.plan.transport == transport
+            })
+        {
+            self.plans.remove(&key);
+            self.revision = self.revision.wrapping_add(1);
+        }
+        (true, control::ACK_OK)
+    }
+
     fn delete_addr(&mut self, body: &[u8]) -> (bool, u8) {
         if body.len() != 18 {
             return (false, control::ACK_BAD_ARGS);
@@ -1908,7 +1999,8 @@ fn canonical_name(bytes: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ControlServer, MAX_NAME_PLANS, NamePlans};
+    use super::{ControlServer, MAX_NAME_PLANS, NamePlanKey, NamePlans};
+    use r2k_core::control::BindingContext;
     use r2k_core::plan::Plan;
 
     fn plan_header(minexec: u16, records: u16) -> Vec<u8> {
@@ -1957,9 +2049,10 @@ mod tests {
     use r2k_core::control::{
         self, COMMAND_CLEAR, COMMAND_DEL_ADDR, COMMAND_DEL_BYPASS, COMMAND_DEL_NAME,
         COMMAND_DEL_NAME_PROBE, COMMAND_DEL_SUFFIX, COMMAND_SET_ADDR, COMMAND_SET_BYPASS,
-        COMMAND_SET_NAME, COMMAND_SET_NAME_PROBE, COMMAND_SET_SUFFIX, EVENT_HELLO, Frame,
-        SHAPE_GRANDFATHER, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE,
-        encode_delete_addr, encode_set_addr, encode_set_voice_addr, encode_set_voice_addr_probe,
+        COMMAND_SET_NAME, COMMAND_SET_NAME_BOUND, COMMAND_SET_NAME_PROBE, COMMAND_SET_SUFFIX,
+        EVENT_HELLO, Frame, SHAPE_GRANDFATHER, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC,
+        SHAPE_VOICE, encode_delete_addr, encode_set_addr, encode_set_voice_addr,
+        encode_set_voice_addr_probe,
     };
     use std::net::{IpAddr, Ipv4Addr};
     use std::os::unix::fs::PermissionsExt;
@@ -2175,6 +2268,72 @@ mod tests {
                 })
                 .ok
         );
+    }
+
+    #[test]
+    fn bound_http_set_returns_its_trial_id_and_installed_binding() {
+        let host = b"example.test";
+        let trial_id = [0xabu8; 16];
+        let mut plan = plan_header(11, 2);
+        plan.extend_from_slice(&[0x00, 0x01, 0x00, 0x10]);
+        plan.extend_from_slice(&[0x11; 16]);
+        plan.extend_from_slice(&[0x00, 0x02, 0x00, 0x02, 0x06, r2k_core::plan::PROTO_HTTP]);
+        let mut body = vec![host.len() as u8];
+        body.extend_from_slice(host);
+        body.extend_from_slice(&[SHAPE_HTTP, 4]);
+        body.extend_from_slice(&plan);
+        body.extend_from_slice(&trial_id);
+
+        let mut plans = NamePlans::default();
+        let ack = plans.handle(&Frame {
+            kind: COMMAND_SET_NAME_BOUND,
+            body,
+        });
+        assert!(ack.ok, "HTTP plan was rejected: {}", ack.reason);
+        assert_eq!(ack.trial_id, Some(trial_id));
+        let binding = ack
+            .binding_context
+            .expect("bound SET returns binding context");
+        assert!(binding.is_known());
+        assert_eq!(binding.family, 4);
+        assert_eq!(binding.shape, SHAPE_HTTP);
+
+        let wire = control::encode_ack_with_identifiers(
+            ack.command,
+            ack.ok,
+            ack.reason,
+            ack.trial_id,
+            ack.area_id,
+            ack.binding_context,
+        )
+        .unwrap();
+        let decoded =
+            control::decode_ack(&control::read_frame(&mut std::io::Cursor::new(wire)).unwrap())
+                .unwrap();
+        assert_eq!(decoded.trial_id, Some(trial_id));
+        assert_eq!(decoded.binding_context, Some(binding));
+
+        let failed = plans.handle(&Frame {
+            kind: COMMAND_SET_NAME_BOUND,
+            body: vec![0],
+        });
+        assert!(!failed.ok);
+        assert_eq!(failed.trial_id, Some([0; 16]));
+        assert_eq!(failed.binding_context, Some(Default::default()));
+        let wire = control::encode_ack_with_identifiers(
+            failed.command,
+            failed.ok,
+            failed.reason,
+            failed.trial_id,
+            failed.area_id,
+            failed.binding_context,
+        )
+        .unwrap();
+        let decoded =
+            control::decode_ack(&control::read_frame(&mut std::io::Cursor::new(wire)).unwrap())
+                .unwrap();
+        assert_eq!(decoded.trial_id, Some([0; 16]));
+        assert_eq!(decoded.binding_context, Some(Default::default()));
     }
 
     #[test]
@@ -2996,6 +3155,56 @@ mod tests {
         let second_binding = second.binding_context.expect("reinstalled ACK context");
         assert!(second_binding.generation > first_binding.generation);
         assert_eq!(second_binding.epoch, first_binding.epoch);
+    }
+
+    #[test]
+    fn conditional_http_delete_preserves_replacements_and_removes_only_its_binding() {
+        let host = "example.test";
+        let plan_id = [0x41; 16];
+        let mut records = plan_header(11, 2);
+        records.extend_from_slice(&[0x00, 0x01, 0x00, 0x10]);
+        records.extend_from_slice(&plan_id);
+        records.extend_from_slice(&[0x00, 0x02, 0x00, 0x02, 0x06, r2k_core::plan::PROTO_HTTP]);
+        let mut body = vec![host.len() as u8];
+        body.extend_from_slice(host.as_bytes());
+        body.extend_from_slice(&[SHAPE_HTTP, 4]);
+        body.extend_from_slice(&records);
+
+        let mut plans = NamePlans::default();
+        let set_ack = plans.handle(&Frame {
+            kind: COMMAND_SET_NAME,
+            body,
+        });
+        let binding = set_ack.binding_context.expect("HTTP binding context");
+        let installed_revision = plans.revision();
+        let key = NamePlanKey {
+            host: host.to_owned(),
+            family: 4,
+            shape: SHAPE_HTTP,
+        };
+        assert!(plans.plans.contains_key(&key));
+
+        let stale = BindingContext {
+            generation: binding.generation + 1,
+            ..binding
+        };
+        let stale_delete = control::read_frame(&mut std::io::Cursor::new(
+            control::encode_delete_name_bound(host, 6, stale).unwrap(),
+        ))
+        .unwrap();
+        let stale_ack = plans.handle(&stale_delete);
+        assert!(stale_ack.ok);
+        assert_eq!(plans.revision(), installed_revision);
+        assert!(plans.plans.contains_key(&key));
+
+        let current_delete = control::read_frame(&mut std::io::Cursor::new(
+            control::encode_delete_name_bound(host, 6, binding).unwrap(),
+        ))
+        .unwrap();
+        let current_ack = plans.handle(&current_delete);
+        assert!(current_ack.ok);
+        assert_eq!(plans.revision(), installed_revision + 1);
+        assert!(!plans.plans.contains_key(&key));
     }
 
     #[test]

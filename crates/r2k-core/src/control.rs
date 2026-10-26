@@ -4,7 +4,7 @@ use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-pub const PROTOCOL_VERSION: u16 = 47;
+pub const PROTOCOL_VERSION: u16 = 48;
 pub const FRAME_MAX: usize = 65_536;
 pub const KEY_LEN: usize = 38;
 pub const MAX_DNS_NAME_LEN: usize = 253;
@@ -49,12 +49,14 @@ pub const COMMAND_DEL_SUFFIX: u16 = 0x008d;
 pub const COMMAND_SET_BYPASS: u16 = 0x008e;
 pub const COMMAND_DEL_BYPASS: u16 = 0x008f;
 pub const COMMAND_SET_HTTPS: u16 = 0x0090;
-pub const COMMAND_SET_VOICE_ADDR: u16 = 0x0091;
-pub const COMMAND_SET_VOICE_ADDR_PROBE: u16 = 0x0092;
-pub const COMMAND_DEL_VOICE_ADDR_PROBE: u16 = 0x0093;
+pub const COMMAND_SET_TCP_STALL_BUDGETS: u16 = 0x0091;
+pub const COMMAND_SET_NAME_BOUND: u16 = 0x0092;
+pub const COMMAND_DEL_NAME_BOUND: u16 = 0x0093;
+pub const COMMAND_SET_VOICE_ADDR: u16 = 0x0094;
+pub const COMMAND_SET_VOICE_ADDR_PROBE: u16 = 0x0095;
+pub const COMMAND_DEL_VOICE_ADDR_PROBE: u16 = 0x0096;
 pub const COMMAND_SET_ADDR_PROBE: u16 = 0x0089;
 pub const COMMAND_DEL_ADDR_PROBE: u16 = 0x008a;
-pub const COMMAND_SET_TCP_STALL_BUDGETS: u16 = 0x0096;
 pub const MAX_TCP_STALL_BUDGETS: usize = 8;
 pub const VOICE_ADDR_PROBE_LEASE_MAX_MS: u32 = 120_000;
 pub const VOICE_RTP_PROOF_MIN_PACKETS: u8 = 3;
@@ -64,6 +66,7 @@ pub const ACK_OK: u8 = 0;
 pub const ACK_BAD_PLAN: u8 = 1;
 pub const ACK_NO_ROOM: u8 = 2;
 pub const ACK_BAD_ARGS: u8 = 3;
+pub const BINDING_CONTEXT_LEN: usize = 28;
 
 pub const SHAPE_MODERN: u8 = 1;
 pub const SHAPE_LEGACY: u8 = 2;
@@ -75,7 +78,7 @@ pub const SHAPE_ECH_TCP: u8 = 6;
 pub const SHAPE_HTTP: u8 = 7;
 
 const HTTP_CONTEXT_HEADER_LEN: usize = 50;
-const HTTP_BINDING_LEN: usize = 28;
+const HTTP_BINDING_LEN: usize = BINDING_CONTEXT_LEN;
 const HTTP_RESPONSE_SUFFIX_LEN: usize = 18;
 const EXECUTION_CONTEXT_LEN: usize = 36;
 const ACK_BINDING_CONTEXT_MAGIC: &[u8; 4] = b"R2BC";
@@ -200,7 +203,7 @@ pub struct Ack {
     pub binding_context: Option<BindingContext>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct BindingContext {
     pub generation: u64,
     pub kind: u8,
@@ -900,6 +903,32 @@ pub fn encode_set_name(
     encode_frame(COMMAND_SET_NAME, &body)
 }
 
+pub fn encode_set_name_bound(
+    name: &str,
+    shape: u8,
+    family: u8,
+    plan_records: &[u8],
+    trial_id: [u8; 16],
+) -> Result<Vec<u8>, &'static str> {
+    if shape != SHAPE_HTTP {
+        return Err("SET_NAME_BOUND предназначена для постоянного HTTP-плана");
+    }
+    if trial_id.iter().all(|byte| *byte == 0) {
+        return Err("идентификатор подтверждения SET_NAME не может быть нулевым");
+    }
+    let mut command = encode_set_name(name, shape, family, plan_records)?;
+    let new_length = command
+        .len()
+        .checked_add(trial_id.len())
+        .and_then(|length| length.checked_sub(4))
+        .filter(|length| *length <= FRAME_MAX)
+        .ok_or("SET_NAME_BOUND слишком длинная")?;
+    command[0..4].copy_from_slice(&(new_length as u32).to_be_bytes());
+    command[4..6].copy_from_slice(&COMMAND_SET_NAME_BOUND.to_be_bytes());
+    command.extend_from_slice(&trial_id);
+    Ok(command)
+}
+
 pub fn encode_set_addr(
     address: IpAddr,
     shape: u8,
@@ -1358,6 +1387,33 @@ pub fn encode_delete_name(
     encode_frame(COMMAND_DEL_NAME, &body)
 }
 
+pub fn encode_delete_name_bound(
+    name: &str,
+    transport: u8,
+    binding: BindingContext,
+) -> Result<Vec<u8>, &'static str> {
+    if name.is_empty() || name.len() > u8::MAX as usize {
+        return Err("имя должно занимать от 1 до 255 байт");
+    }
+    if !matches!(transport, 6 | 17) || !binding.is_known() || binding.kind != 1 || binding.temporary
+    {
+        return Err("DEL_NAME_BOUND требует известную постоянную привязку имени");
+    }
+    let mut body = Vec::with_capacity(2 + name.len() + BINDING_CONTEXT_LEN);
+    body.push(name.len() as u8);
+    body.extend_from_slice(name.as_bytes());
+    body.push(transport);
+    body.extend_from_slice(&binding.generation.to_be_bytes());
+    body.extend_from_slice(&[
+        binding.kind,
+        binding.family,
+        binding.shape,
+        u8::from(binding.temporary),
+    ]);
+    body.extend_from_slice(&binding.epoch);
+    encode_frame(COMMAND_DEL_NAME_BOUND, &body)
+}
+
 pub fn encode_delete_name_probe(
     name: &str,
     shape: u8,
@@ -1426,10 +1482,14 @@ pub fn encode_ack_with_identifiers(
     area_id: Option<[u8; 16]>,
     binding_context: Option<BindingContext>,
 ) -> Result<Vec<u8>, &'static str> {
+    if command == COMMAND_SET_NAME_BOUND && (trial_id.is_none() || binding_context.is_none()) {
+        return Err("SET_NAME_BOUND ACK требует trial ID и контекст привязки");
+    }
     if trial_id.is_some()
         && !matches!(
             command,
-            COMMAND_SET_NAME_PROBE
+            COMMAND_SET_NAME_BOUND
+                | COMMAND_SET_NAME_PROBE
                 | COMMAND_SET_VOICE_ADDR_PROBE
                 | COMMAND_DEL_VOICE_ADDR_PROBE
                 | COMMAND_SET_ADDR_PROBE
@@ -1446,17 +1506,19 @@ pub fn encode_ack_with_identifiers(
     {
         return Err("area ID ACK разрешён только для команды области");
     }
-    if let Some(binding) = binding_context
-        && (!ok
-            || trial_id.is_some()
-            || command != COMMAND_SET_NAME
-            || !binding.is_known()
-            || binding.kind != 1
-            || !matches!(binding.family, 4 | 6)
-            || binding.shape != SHAPE_HTTP
-            || binding.temporary)
-    {
-        return Err("контекст привязки ACK допустим только для постоянного HTTP-плана имени");
+    if let Some(binding) = binding_context {
+        let valid_http_binding = binding.is_known()
+            && binding.kind == 1
+            && matches!(binding.family, 4 | 6)
+            && binding.shape == SHAPE_HTTP
+            && !binding.temporary;
+        if command == COMMAND_SET_NAME_BOUND {
+            if ok && !valid_http_binding || !ok && binding != BindingContext::default() {
+                return Err("SET_NAME_BOUND ACK содержит неверный контекст привязки");
+            }
+        } else if !ok || trial_id.is_some() || command != COMMAND_SET_NAME || !valid_http_binding {
+            return Err("контекст привязки ACK допустим только для постоянного HTTP-плана имени");
+        }
     }
     let mut body = Vec::with_capacity(
         KEY_LEN
@@ -1507,7 +1569,8 @@ pub fn decode_ack(frame: &Frame) -> Result<Ack, &'static str> {
     }
     let supports_trial_id = matches!(
         command,
-        COMMAND_SET_NAME_PROBE
+        COMMAND_SET_NAME_BOUND
+            | COMMAND_SET_NAME_PROBE
             | COMMAND_SET_VOICE_ADDR_PROBE
             | COMMAND_DEL_VOICE_ADDR_PROBE
             | COMMAND_SET_ADDR_PROBE
@@ -1519,8 +1582,11 @@ pub fn decode_ack(frame: &Frame) -> Result<Ack, &'static str> {
     );
     let mut cursor = KEY_LEN + 4;
     let remaining = frame.body.len() - cursor;
-    let trial_id = if remaining == 16 && supports_trial_id {
-        let trial_id = frame.body[cursor..]
+    let trial_id = if supports_trial_id
+        && (remaining == 16
+            || command == COMMAND_SET_NAME_BOUND && remaining == 16 + ACK_BINDING_CONTEXT_LEN)
+    {
+        let trial_id = frame.body[cursor..cursor + 16]
             .try_into()
             .map_err(|_| "неверный trial ID в подтверждении")?;
         cursor += 16;
@@ -1540,7 +1606,7 @@ pub fn decode_ack(frame: &Frame) -> Result<Ack, &'static str> {
     };
     let binding_context = if cursor == frame.body.len() {
         None
-    } else if command == COMMAND_SET_NAME
+    } else if matches!(command, COMMAND_SET_NAME | COMMAND_SET_NAME_BOUND)
         && frame.body.len() == cursor + ACK_BINDING_CONTEXT_LEN
         && frame.body[cursor..cursor + 4] == *ACK_BINDING_CONTEXT_MAGIC
     {
@@ -1563,19 +1629,25 @@ pub fn decode_ack(frame: &Frame) -> Result<Ack, &'static str> {
                 .try_into()
                 .map_err(|_| "неверная эпоха таблицы привязок ACK")?,
         };
-        if !binding.is_known()
-            || binding.kind != 1
-            || !matches!(binding.family, 4 | 6)
-            || binding.shape != SHAPE_HTTP
-            || binding.temporary
-            || !ok
-        {
+        let valid_http_binding = binding.is_known()
+            && binding.kind == 1
+            && matches!(binding.family, 4 | 6)
+            && binding.shape == SHAPE_HTTP
+            && !binding.temporary;
+        if command == COMMAND_SET_NAME_BOUND {
+            if ok && !valid_http_binding || !ok && binding != BindingContext::default() {
+                return Err("ACK содержит неверный контекст SET_NAME_BOUND");
+            }
+        } else if !valid_http_binding || !ok {
             return Err("ACK содержит неверный HTTP-контекст привязки");
         }
         Some(binding)
     } else {
         return Err("неверная длина подтверждения команды");
     };
+    if command == COMMAND_SET_NAME_BOUND && (trial_id.is_none() || binding_context.is_none()) {
+        return Err("SET_NAME_BOUND ACK не содержит trial ID или контекст привязки");
+    }
     Ok(Ack {
         command,
         ok,
@@ -1589,8 +1661,10 @@ pub fn decode_ack(frame: &Frame) -> Result<Ack, &'static str> {
 #[cfg(test)]
 mod ack_binding_context_tests {
     use super::{
-        BindingContext, COMMAND_SET_BYPASS, COMMAND_SET_NAME, SHAPE_HTTP, decode_ack,
-        encode_ack_for_trial, encode_ack_with_binding, encode_ack_with_identifiers, read_frame,
+        BindingContext, COMMAND_DEL_NAME_BOUND, COMMAND_SET_BYPASS, COMMAND_SET_NAME,
+        COMMAND_SET_NAME_BOUND, SHAPE_HTTP, decode_ack, encode_ack_for_trial,
+        encode_ack_with_binding, encode_ack_with_identifiers, encode_delete_name_bound,
+        encode_set_name_bound, read_frame,
     };
     use std::io::Cursor;
 
@@ -1610,6 +1684,77 @@ mod ack_binding_context_tests {
         let ack = decode_ack(&frame).unwrap();
         assert_eq!(ack.command, COMMAND_SET_NAME);
         assert_eq!(ack.binding_context, Some(binding));
+    }
+
+    #[test]
+    fn bound_set_name_round_trips_command_and_ack_identity() {
+        let trial_id = [9; 16];
+        let command =
+            encode_set_name_bound("www.example.test", SHAPE_HTTP, 4, &[1, 2, 3], trial_id).unwrap();
+        let frame = read_frame(&mut Cursor::new(command.clone())).unwrap();
+        assert_eq!(frame.kind, COMMAND_SET_NAME_BOUND);
+        assert_eq!(&frame.body[frame.body.len() - 16..], &trial_id);
+        assert_eq!(
+            u32::from_be_bytes(command[..4].try_into().unwrap()) as usize,
+            command.len() - 4
+        );
+
+        let binding = BindingContext {
+            generation: 42,
+            kind: 1,
+            family: 4,
+            shape: SHAPE_HTTP,
+            temporary: false,
+            epoch: [7; 16],
+        };
+        let bytes = encode_ack_with_binding(
+            COMMAND_SET_NAME_BOUND,
+            true,
+            0,
+            Some(trial_id),
+            Some(binding),
+        )
+        .unwrap();
+        let ack = decode_ack(&read_frame(&mut Cursor::new(bytes)).unwrap()).unwrap();
+        assert_eq!(ack.trial_id, Some(trial_id));
+        assert_eq!(ack.binding_context, Some(binding));
+
+        let failed = encode_ack_with_binding(
+            COMMAND_SET_NAME_BOUND,
+            false,
+            1,
+            Some(trial_id),
+            Some(BindingContext::default()),
+        )
+        .unwrap();
+        let failed = decode_ack(&read_frame(&mut Cursor::new(failed)).unwrap()).unwrap();
+        assert!(!failed.ok);
+        assert_eq!(failed.trial_id, Some(trial_id));
+        assert_eq!(failed.binding_context, Some(BindingContext::default()));
+    }
+
+    #[test]
+    fn conditional_http_delete_serializes_the_exact_binding_identity() {
+        let binding = BindingContext {
+            generation: 42,
+            kind: 1,
+            family: 4,
+            shape: SHAPE_HTTP,
+            temporary: false,
+            epoch: [7; 16],
+        };
+        let bytes = encode_delete_name_bound("example.test", 6, binding).unwrap();
+        let frame = read_frame(&mut Cursor::new(bytes)).unwrap();
+        assert_eq!(frame.kind, COMMAND_DEL_NAME_BOUND);
+        assert_eq!(&frame.body[..14], b"\x0cexample.test\x06");
+        assert_eq!(
+            &frame.body[14..],
+            &[
+                0, 0, 0, 0, 0, 0, 0, 42, 1, 4, SHAPE_HTTP, 0, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+                7, 7, 7, 7
+            ]
+        );
+        assert!(encode_delete_name_bound("example.test", 6, BindingContext::default()).is_err());
     }
 
     #[test]

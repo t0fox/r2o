@@ -3,9 +3,9 @@ use r2k_core::control::encode_frame;
 use r2k_core::control::{
     self, ADDR_PROBE_LEASE_MAX_MS, COMMAND_ARM_SHAPE, COMMAND_CLEAR, COMMAND_DEL_ADDR,
     COMMAND_DEL_ADDR_PROBE, COMMAND_DEL_NAME, COMMAND_DEL_VOICE_ADDR_PROBE, COMMAND_SET_ADDR,
-    COMMAND_SET_ADDR_PROBE, COMMAND_SET_HTTPS, COMMAND_SET_NAME, COMMAND_SET_VOICE_ADDR,
-    COMMAND_SET_VOICE_ADDR_PROBE, EVENT_APPLIED, EVENT_CLIENT_SHAPE, EVENT_HELLO,
-    EVENT_HTTP_PORTAL, EVENT_HTTP_RESPONSE, EVENT_PROTOCOL, EVENT_R2O_JOURNAL_END,
+    COMMAND_SET_ADDR_PROBE, COMMAND_SET_HTTPS, COMMAND_SET_NAME, COMMAND_SET_NAME_BOUND,
+    COMMAND_SET_VOICE_ADDR, COMMAND_SET_VOICE_ADDR_PROBE, EVENT_APPLIED, EVENT_CLIENT_SHAPE,
+    EVENT_HELLO, EVENT_HTTP_PORTAL, EVENT_HTTP_RESPONSE, EVENT_PROTOCOL, EVENT_R2O_JOURNAL_END,
     EVENT_R2O_JOURNAL_ENTRY, EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT,
     EVENT_R2O_TCP_CLEAN_HANDSHAKE, EVENT_R2O_TCP_EARLY_RST, EVENT_R2O_TCP_EXCHANGE,
     EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_REPEAT, EVENT_R2O_TCP_RST_AFTER_APP,
@@ -19,10 +19,11 @@ use r2k_core::control::{
     decode_r2o_tcp_fin_retry, decode_r2o_tcp_repeat, decode_r2o_tcp_rst_after_app,
     decode_r2o_tcp_rst_cut_signal, decode_r2o_tcp_silence, decode_r2o_tcp_stall,
     decode_r2o_voice_proof, decode_r2o_voice_suspect, decode_refused, encode_arm_shape,
-    encode_delete_addr, encode_delete_addr_probe, encode_delete_name, encode_delete_name_probe,
-    encode_delete_voice_addr_probe, encode_set_addr, encode_set_addr_probe, encode_set_bypass,
-    encode_set_https, encode_set_name, encode_set_name_probe, encode_set_suffix,
-    encode_set_tcp_stall_budgets, encode_set_voice_addr, encode_set_voice_addr_probe, read_frame,
+    encode_delete_addr, encode_delete_addr_probe, encode_delete_name, encode_delete_name_bound,
+    encode_delete_name_probe, encode_delete_voice_addr_probe, encode_set_addr,
+    encode_set_addr_probe, encode_set_bypass, encode_set_https, encode_set_name,
+    encode_set_name_bound, encode_set_name_probe, encode_set_suffix, encode_set_tcp_stall_budgets,
+    encode_set_voice_addr, encode_set_voice_addr_probe, read_frame,
 };
 use r2k_core::plan::{PROTO_HTTP, PROTO_VOICE, Plan};
 use r2o_controller::ask::{
@@ -10904,6 +10905,20 @@ fn r2o_read_control_batch(
 }
 
 #[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HttpAcknowledgedBinding {
+    Confirmed {
+        plan_id: [u8; 16],
+        binding: r2k_core::control::BindingContext,
+    },
+    Pending {
+        plan_id: [u8; 16],
+        trial_id: [u8; 16],
+        previous: Option<([u8; 16], r2k_core::control::BindingContext)>,
+    },
+}
+
+#[cfg(unix)]
 struct ControlClient {
     socket: std::os::unix::net::UnixStream,
     send_maxlen: u32,
@@ -10913,8 +10928,7 @@ struct ControlClient {
     dropped_events: Arc<AtomicUsize>,
     http_search_started: HashMap<(String, u8), HttpSearchWindow>,
     http_challenge_cooldowns: HashMap<(String, u8), std::time::Instant>,
-    http_acknowledged_bindings:
-        HashMap<(String, u8), ([u8; 16], r2k_core::control::BindingContext)>,
+    http_acknowledged_bindings: HashMap<(String, u8), HttpAcknowledgedBinding>,
 }
 
 #[cfg(unix)]
@@ -10927,7 +10941,9 @@ fn control_command_trial_id(command: &[u8], expected: u16) -> Option<[u8; 16]> {
     }
     let body = &command[6..];
     let trial = match expected {
-        control::COMMAND_SET_NAME_PROBE => body.get(body.len().checked_sub(16)?..)?,
+        control::COMMAND_SET_NAME_BOUND | control::COMMAND_SET_NAME_PROBE => {
+            body.get(body.len().checked_sub(16)?..)?
+        }
         COMMAND_SET_ADDR_PROBE => {
             body.get(r2k_core::control::KEY_LEN..r2k_core::control::KEY_LEN + 16)?
         }
@@ -11102,10 +11118,108 @@ impl ControlClient {
     ) -> Option<r2k_core::control::BindingContext> {
         let host = std::str::from_utf8(&response.host).ok()?;
         let host = normalize(host).ok()?;
-        let (plan_id, binding) = self
+        match self
             .http_acknowledged_bindings
-            .get(&(host, response.key[0]))?;
-        (*plan_id == response.plan_id && *binding == response.binding).then_some(*binding)
+            .get(&(host, response.key[0]))?
+        {
+            HttpAcknowledgedBinding::Confirmed { plan_id, binding }
+                if *plan_id == response.plan_id && *binding == response.binding =>
+            {
+                Some(*binding)
+            }
+            _ => None,
+        }
+    }
+
+    fn write_http_candidate_install(
+        &mut self,
+        command: &[u8],
+        host: &str,
+        family: u8,
+        plan_id: [u8; 16],
+        trial_id: [u8; 16],
+    ) -> Result<(), Box<dyn Error>> {
+        let key = (normalize(host)?, family);
+        let previous = match self.http_acknowledged_bindings.remove(&key) {
+            Some(HttpAcknowledgedBinding::Confirmed { plan_id, binding }) => {
+                Some((plan_id, binding))
+            }
+            Some(HttpAcknowledgedBinding::Pending { .. }) | None => None,
+        };
+        self.http_acknowledged_bindings.insert(
+            key.clone(),
+            HttpAcknowledgedBinding::Pending {
+                plan_id,
+                trial_id,
+                previous,
+            },
+        );
+        if let Err(error) = self.write_command(command) {
+            match previous {
+                Some((plan_id, binding)) => {
+                    self.http_acknowledged_bindings
+                        .insert(key, HttpAcknowledgedBinding::Confirmed { plan_id, binding });
+                }
+                None => {
+                    self.http_acknowledged_bindings.remove(&key);
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn record_http_bound_binding_acknowledgement(&mut self, ack: r2k_core::control::Ack) {
+        if ack.command != COMMAND_SET_NAME_BOUND {
+            return;
+        }
+        let Some(trial_id) = ack.trial_id else {
+            return;
+        };
+        let Some((key, pending)) =
+            self.http_acknowledged_bindings
+                .iter()
+                .find_map(|(key, state)| match state {
+                    HttpAcknowledgedBinding::Pending {
+                        trial_id: pending_trial,
+                        ..
+                    } if *pending_trial == trial_id => Some((key.clone(), *state)),
+                    _ => None,
+                })
+        else {
+            return;
+        };
+        let HttpAcknowledgedBinding::Pending {
+            plan_id, previous, ..
+        } = pending
+        else {
+            unreachable!("pending HTTP binding was selected above")
+        };
+        let binding = ack.binding_context.filter(|binding| {
+            binding.is_known()
+                && !binding.temporary
+                && binding.kind == 1
+                && binding.family == key.1
+                && binding.shape == SHAPE_HTTP
+        });
+        match (ack.ok, binding) {
+            (true, Some(binding)) => {
+                self.http_acknowledged_bindings
+                    .insert(key, HttpAcknowledgedBinding::Confirmed { plan_id, binding });
+            }
+            (false, _) => match previous {
+                Some((plan_id, binding)) => {
+                    self.http_acknowledged_bindings
+                        .insert(key, HttpAcknowledgedBinding::Confirmed { plan_id, binding });
+                }
+                None => {
+                    self.http_acknowledged_bindings.remove(&key);
+                }
+            },
+            (true, None) => {
+                self.http_acknowledged_bindings.remove(&key);
+            }
+        }
     }
 
     fn record_http_binding_acknowledgement(
@@ -11159,8 +11273,13 @@ impl ControlClient {
                     self.http_acknowledged_bindings.remove(&key);
                     return;
                 };
-                self.http_acknowledged_bindings
-                    .insert(key, (plan.id, binding));
+                self.http_acknowledged_bindings.insert(
+                    key,
+                    HttpAcknowledgedBinding::Confirmed {
+                        plan_id: plan.id,
+                        binding,
+                    },
+                );
             }
             COMMAND_DEL_NAME if ack.ok => {
                 let body = &frame.body;
@@ -12362,10 +12481,14 @@ impl ControlClient {
                 } else if frame.kind == control::EVENT_ACK {
                     let ack = decode_ack(&frame)
                         .map_err(|error| format!("подтверждение датапата: {error}"))?;
+                    self.record_http_bound_binding_acknowledgement(ack);
                     if !ack.ok
                         && matches!(
                             ack.command,
-                            COMMAND_SET_NAME | COMMAND_SET_ADDR | control::COMMAND_SET_SUFFIX
+                            COMMAND_SET_NAME
+                                | COMMAND_SET_NAME_BOUND
+                                | COMMAND_SET_ADDR
+                                | control::COMMAND_SET_SUFFIX
                         )
                     {
                         catalog_sync_refusals += 1;
@@ -15176,10 +15299,32 @@ impl ControlClient {
         ) {
             return Ok(false);
         }
+        let key = (normalize(&target.host)?, target.family);
+        if matches!(
+            self.http_acknowledged_bindings.get(&key),
+            Some(HttpAcknowledgedBinding::Confirmed { plan_id, binding })
+                if *plan_id == response.plan_id && *binding == response.binding
+        ) {
+            self.http_acknowledged_bindings.remove(&key);
+        }
         persist_catalog_update(&updated, catalog_path, now, persistence.as_deref_mut())?;
         *catalog = updated;
-        let command = encode_delete_name(&target.host, 6, SHAPE_HTTP, target.family)?;
-        self.send_command(&command, control::COMMAND_DEL_NAME)?;
+        match encode_delete_name_bound(&target.host, 6, response.binding) {
+            Ok(command) => {
+                if let Err(error) = self.write_command(&command) {
+                    eprintln!(
+                        "HTTP {}: условное снятие привязки не отправлено: {error}",
+                        target.host
+                    );
+                }
+            }
+            Err(error) => {
+                eprintln!(
+                    "HTTP {}: условное снятие привязки не собрано: {error}",
+                    target.host
+                );
+            }
+        }
         println!(
             "HTTP {}: подтверждённая привязка отозвана после живого портала; запускаю повторную проверку",
             target.host
@@ -15217,9 +15362,17 @@ impl ControlClient {
         let runtime_plan = Plan::parse(&bytes)?;
         r2o_datapath::engine::validate_runtime_plan(&runtime_plan)
             .map_err(|error| format!("план HTTP не принят runtime r2o-datapath: {error}"))?;
-        let command = encode_set_name(&target.host, SHAPE_HTTP, target.family, &bytes)?;
+        let trial_id = random_id()?;
+        let command =
+            encode_set_name_bound(&target.host, SHAPE_HTTP, target.family, &bytes, trial_id)?;
         persist_catalog_update(&updated, catalog_path, now, persistence.as_deref_mut())?;
-        if let Err(install_error) = self.send_set_name(&command) {
+        if let Err(install_error) = self.write_http_candidate_install(
+            &command,
+            &target.host,
+            target.family,
+            runtime_plan.id,
+            trial_id,
+        ) {
             return match persist_catalog_update(
                 &previous,
                 catalog_path,
@@ -15237,7 +15390,9 @@ impl ControlClient {
             };
         }
         *catalog = updated;
-        println!("HTTP обход найден: «{key}»; план {plan_id} установлен и сохранён");
+        println!(
+            "HTTP обход найден: «{key}»; план {plan_id} отправлен датапату и сохранён, подтверждение установки ожидается"
+        );
         Ok(())
     }
 
@@ -16700,11 +16855,11 @@ mod tests {
         shape_matches_plan,
     };
     use r2k_core::control::{
-        BindingContext, COMMAND_DEL_NAME_PROBE, COMMAND_DEL_VOICE_ADDR_PROBE, COMMAND_SET_NAME,
-        COMMAND_SET_NAME_PROBE, COMMAND_SET_VOICE_ADDR, EVENT_APPLIED, EVENT_R2O_TCP_SILENT,
-        EVENT_R2O_TCP_STALL, Frame, HelloEvent, HttpResponseEvent, KEY_LEN, SHAPE_ECH_TCP,
-        SHAPE_HTTP, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, encode_ack, encode_ack_for_trial,
-        encode_frame, encode_greeting, read_frame,
+        Ack, BindingContext, COMMAND_DEL_NAME_PROBE, COMMAND_DEL_VOICE_ADDR_PROBE,
+        COMMAND_SET_NAME, COMMAND_SET_NAME_BOUND, COMMAND_SET_NAME_PROBE, COMMAND_SET_VOICE_ADDR,
+        EVENT_APPLIED, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, Frame, HelloEvent,
+        HttpResponseEvent, KEY_LEN, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_MODERN, SHAPE_QUIC,
+        SHAPE_VOICE, encode_ack, encode_ack_for_trial, encode_frame, encode_greeting, read_frame,
     };
     use r2k_core::plan::{PLAN_MAGIC, Plan};
     use r2o_controller::catalog::{Binding, BoxRecord, Catalog, Fingerprint, Signal};
@@ -16714,6 +16869,84 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn confirmed_http_install_returns_before_ack_and_records_exact_late_ack() {
+        use super::HttpAcknowledgedBinding;
+        use std::os::unix::net::UnixStream;
+        use std::time::{Duration, Instant};
+
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        let mut client = ControlClient {
+            socket,
+            send_maxlen: 1500,
+            send_cap: Arc::new(std::sync::atomic::AtomicUsize::new(1500)),
+            pending_events: Default::default(),
+            pending_applied_events: Default::default(),
+            dropped_events: Arc::new(AtomicUsize::new(0)),
+            http_search_started: Default::default(),
+            http_challenge_cooldowns: Default::default(),
+            http_acknowledged_bindings: Default::default(),
+        };
+        let trial_id = [0x55; 16];
+        let plan_id = [0x11; 16];
+        let text = candidate_text("split", Some(&plan_id)).unwrap();
+        let records = compile_text(&text).unwrap();
+        let command = r2k_core::control::encode_set_name_bound(
+            "example.test",
+            SHAPE_HTTP,
+            4,
+            &records,
+            trial_id,
+        )
+        .unwrap();
+        println!(
+            "D2O_HTTP_BOUND_SET={}",
+            command
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+
+        let started = Instant::now();
+        client
+            .write_http_candidate_install(&command, "example.test", 4, plan_id, trial_id)
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(100));
+        let sent = read_frame(&mut peer).unwrap();
+        assert_eq!(sent.kind, COMMAND_SET_NAME_BOUND);
+        assert!(matches!(
+            client.http_acknowledged_bindings.get(&("example.test".into(), 4)),
+            Some(HttpAcknowledgedBinding::Pending {
+                trial_id: pending_trial,
+                ..
+            }) if *pending_trial == trial_id
+        ));
+
+        let binding = BindingContext {
+            generation: 3,
+            kind: 1,
+            family: 4,
+            shape: SHAPE_HTTP,
+            temporary: false,
+            epoch: [8; 16],
+        };
+        client.record_http_bound_binding_acknowledgement(Ack {
+            command: COMMAND_SET_NAME_BOUND,
+            ok: true,
+            reason: 0,
+            trial_id: Some(trial_id),
+            area_id: None,
+            binding_context: Some(binding),
+        });
+        assert_eq!(
+            client
+                .http_acknowledged_bindings
+                .get(&("example.test".into(), 4)),
+            Some(&HttpAcknowledgedBinding::Confirmed { plan_id, binding })
+        );
+    }
 
     #[cfg(unix)]
     #[test]
@@ -17104,6 +17337,27 @@ mod tests {
             },
         );
         assert_eq!(client.acknowledged_http_binding_for(&response), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn http_bound_delete_wire_matches_donor() {
+        let binding = BindingContext {
+            generation: 42,
+            kind: 1,
+            family: 4,
+            shape: SHAPE_HTTP,
+            temporary: false,
+            epoch: [7; 16],
+        };
+        let command = super::encode_delete_name_bound("example.test", 6, binding).unwrap();
+        println!(
+            "D2O_HTTP_BOUND_DEL={}",
+            command
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
     }
 
     #[cfg(unix)]

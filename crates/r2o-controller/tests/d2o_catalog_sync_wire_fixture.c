@@ -9,6 +9,75 @@
 
 #include "d2k_sched.h"
 #include "d2k_link.h"
+#include "d2k_httpsearch.h"
+#include "d2k_plantlv.h"
+
+static int http_bound_set_wire(void)
+{
+    int sockets[2];
+    uint8_t plan_id[16];
+    uint8_t token[16];
+    char text[2048];
+    char hex[8192];
+    char error[160] = {0};
+    memset(plan_id, 0x11, sizeof plan_id);
+    memset(token, 0x55, sizeof token);
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0) return 2;
+    if (d2k_hs_candidate_text("split", plan_id, text, sizeof text) != 0 ||
+        d2k_plan_text_to_hex(text, hex, sizeof hex, error, sizeof error) != 0 ||
+        d2k_link_set_name_bound(sockets[0], "example.test", 6, hex,
+                                D2K_PLAN_SHAPE_HTTP, 4, token,
+                                error, sizeof error) != 0) {
+        fprintf(stderr, "donor HTTP bound set failed: %s\n", error);
+        close(sockets[0]);
+        close(sockets[1]);
+        return 2;
+    }
+    close(sockets[0]);
+    uint8_t bytes[4096];
+    ssize_t length = read(sockets[1], bytes, sizeof bytes);
+    close(sockets[1]);
+    if (length <= 0) return 2;
+    /* The controllers use different plan-envelope magics (D2KP versus R2OP);
+       normalize that four-byte codec tag before comparing the shared command. */
+    size_t plan_offset = 6u + 1u + strlen("example.test") + 2u;
+    if ((size_t)length < plan_offset + 4u ||
+        memcmp(bytes + plan_offset, "D2KP", 4) != 0) return 2;
+    memcpy(bytes + plan_offset, "R2OP", 4);
+    printf("D2O_HTTP_BOUND_SET=");
+    for (ssize_t i = 0; i < length; i++) printf("%02x", bytes[i]);
+    putchar('\n');
+    return 0;
+}
+
+static int http_bound_del_wire(void)
+{
+    int sockets[2];
+    d2k_binding_context binding = {0};
+    char error[160] = {0};
+    binding.generation = 42;
+    binding.kind = D2K_BIND_NAME;
+    binding.family = 4;
+    binding.shape = D2K_PLAN_SHAPE_HTTP;
+    memset(binding.epoch, 7, sizeof binding.epoch);
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0) return 2;
+    if (d2k_link_del_name_bound(sockets[0], "example.test", 6, &binding,
+                                error, sizeof error) != 0) {
+        fprintf(stderr, "donor HTTP bound delete failed: %s\n", error);
+        close(sockets[0]);
+        close(sockets[1]);
+        return 2;
+    }
+    close(sockets[0]);
+    uint8_t bytes[256];
+    ssize_t length = read(sockets[1], bytes, sizeof bytes);
+    close(sockets[1]);
+    if (length <= 0) return 2;
+    printf("D2O_HTTP_BOUND_DEL=");
+    for (ssize_t i = 0; i < length; i++) printf("%02x", bytes[i]);
+    putchar('\n');
+    return 0;
+}
 
 static int area_wire(void)
 {
@@ -37,6 +106,8 @@ static int area_wire(void)
 
 int main(int argc, char **argv)
 {
+    if (argc == 2 && strcmp(argv[1], "--http-bound-set") == 0) return http_bound_set_wire();
+    if (argc == 2 && strcmp(argv[1], "--http-bound-del") == 0) return http_bound_del_wire();
     if (argc == 2 && strcmp(argv[1], "--area-wire") == 0) return area_wire();
     int first_batch = argc == 4 && strcmp(argv[3], "--first-batch") == 0;
     if (argc != 3 && !first_batch) return 2;
