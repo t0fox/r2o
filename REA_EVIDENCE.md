@@ -8664,3 +8664,22 @@ user-mode QEMU and returned the same normalized tally as C. The OpenWrt smoke
 does not run the unit suite under musl, and these local checks do not establish
 physical-router parity. The physical router was not contacted or changed; no
 field-parity claim is made.
+
+## Live panel update interval — d2o `304ba893`, 26.10.2026
+
+The current donor `core/d2kc.c` defines `LIVE_EVERY_MS` as 2000 and calls
+`d2k_sched_write_live` on that cadence. Rust's equivalent is the live snapshot
+writer inside `ControlClient::watch_events` in
+`crates/r2o-controller/src/main.rs`; it used a 5-second interval. A same-source
+cadence check failed before the change (`d2o=2000ms`, `Rust=5000ms`) and passed
+after changing Rust to 2 seconds (`d2o=2000ms`, `Rust=2000ms`). The panel polls
+`/api/status` every 2 seconds (`crates/r2o-panel/assets/panel.js::POLL_MS`).
+
+`cargo +1.98.0 fmt --all -- --check` passed. The C/Rust catalog-sync
+differential passed for install order, the eight-command batch, and identified
+area-command wire data. `scripts/r2o-build-openwrt-aarch64-musl.sh` passed:
+the six release binaries started under `qemu-aarch64`, and the controller
+catalog clear/check smoke passed.
+
+The router was left untouched. These checks establish the source cadence and
+target build/startup; they do not measure panel latency on the physical router.

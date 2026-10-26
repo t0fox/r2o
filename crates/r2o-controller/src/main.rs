@@ -11642,7 +11642,7 @@ impl ControlClient {
                     }
                 }
                 if live_written_at.is_none_or(|last: std::time::Instant| {
-                    r2o_now.saturating_duration_since(last) >= std::time::Duration::from_secs(5)
+                    r2o_now.saturating_duration_since(last) >= std::time::Duration::from_secs(2)
                 }) {
                     let catalog_snapshot = discovery
                         .as_ref()
