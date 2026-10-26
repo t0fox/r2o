@@ -8811,3 +8811,31 @@ Hopper is unavailable on Windows and IDA is not configured. REA also rejects a
 standalone C source file as an unsupported binary format. This diagnostics
 slice therefore uses direct C/Rust source comparison and the donor C fixture,
 not REA pseudocode. Full field parity remains unverified.
+
+## Measured PREFIX/WHOLE_PACKET split candidate — d2o `304ba893`, 26.10.2026
+
+The reviewed donor is `t0fox/d2o` commit
+`304ba893dd37197128ac8799c0495b035f6a38c0`.
+
+| D2O C function | Previous R2O behavior / Rust analogue | Fix and test result |
+| --- | --- | --- |
+| `core/sched.c::verdict_to_plans` emits a forward split candidate for an owned `PREFIX` or `WHOLE_PACKET` result with no measured poison arm; `core/measured.c::d2k_tcp_split_plan` builds the exact plan from trigger length, measured split, gap, and send cap. | `r2o_classify_discovery_target_with_client_hello_and_ech_progress` copied only `ClassifyResult.hit`; that value is absent for split verdicts, so the measured split was dropped. The runner also used `!primary_from_owned_fallback` as the measured-arm flag, which would have enabled poison-arm retry behavior for a newly restored split candidate. | `r2o_discovery_measured_split_plan` now ports the C plan bytes, and the runner records `measured_arm_candidate` only when `result.hit` exists. `scripts/r2o-measured-split-differential.sh` compares the real C `d2k_tcp_split_plan` output with Rust for both verdicts, ordinary and narrow send caps, and invalid split positions; passed byte-for-byte after the expected `d2k-plan`→`r2o-plan` name change. Split candidates therefore do not enter measured-arm retries or the measured-arm fallback gate. |
+| `detect/bridge.c::d2k_detect_sched_tcp` clears `owns_search` when raw self-test failed, or when the raw run saw an unsuppressed kernel RST and found no hit. `core/sched.c::verdict_to_plans` uses this ownership before split and OPAQUE fallback. | Rust already recorded `raw_usable` and per-run `rst_rule_failures`, but its OPAQUE fallback predicate used only `raw_usable`; the RST-local-failure case could be treated as a completed owned search. | `r2o_discovery_search_owned` maps the two failure signals and preserves ownership for an actual measured hit. The donor `detect/test_bridge` test passed (`bridge: scheduler adapter contracts passed`); Rust `tests::discovery_search_ownership_matches_donor_local_failure_gates` passed, including the RST-failed/no-hit and measured-hit cases. |
+
+The focused C/Rust diff, measured-fallback gate, ACK→APPLIED→PERSIST sequence,
+deadline test, fallback queue differential, and CI scenario manifest all passed;
+the manifest reports 12 baseline and 38 upstream scenarios exactly once. The
+full `cargo +1.98.0 test --workspace --locked --offline` run passed. The final
+OpenWrt AArch64/musl build and local QEMU smoke passed: all six binaries ran,
+wire version 48 was reported, and controller catalog clear/check succeeded.
+
+REA opened donor `core/test_sched` (ELF x86_64, SHA-256
+`f2d64ddd0772bc4ecded3708269076d1d2450595b1de518dc26da2a09649a13d`) but
+`analyze_function(d2k_tcp_split_plan)` had no available provider: Windows
+Ghidra P0 rejects ELF, Hopper is unavailable on Windows, and IDA is not
+configured. This function comparison therefore rests on current pinned C
+source and the executable C/Rust differential, not new REA pseudocode.
+
+No router command or traffic was used. Local differential and QEMU evidence do
+not establish field acceptance or full behavioral parity; those remain
+unconfirmed.

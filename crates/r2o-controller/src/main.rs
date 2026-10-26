@@ -4311,11 +4311,24 @@ fn r2o_discovery_candidate_retryable(
 }
 
 #[cfg(unix)]
+fn r2o_discovery_search_owned(
+    raw_usable: bool,
+    rst_rule_failures: usize,
+    measured_arm: bool,
+) -> bool {
+    measured_arm || raw_usable && rst_rule_failures == 0
+}
+
+#[cfg(unix)]
 fn r2o_discovery_measured_fallback_allowed(
+    measured_arm: bool,
     result: &Result<r2o_controller::fetch::FetchResult, String>,
     applied: bool,
     evidence: R2oCandidateTrialEvidence,
 ) -> bool {
+    if !measured_arm {
+        return false;
+    }
     if result.as_ref().is_ok_and(|fetch| {
         fetch.cloudflare_challenge
             || fetch.http_outcome == r2o_controller::fetch::R2oFetchHttpOutcome::LegalDenial
@@ -4340,13 +4353,41 @@ fn r2o_discovery_measured_fallback_allowed(
 }
 
 #[cfg(unix)]
+fn r2o_discovery_measured_split_plan(
+    verdict: Verdict,
+    search_owned: bool,
+    split_pos: Option<usize>,
+    trigger_len: usize,
+    gap_us: u32,
+    send_cap: usize,
+) -> Option<String> {
+    if !search_owned || !matches!(verdict, Verdict::Prefix | Verdict::WholePacket) {
+        return None;
+    }
+    let split = split_pos?;
+    if trigger_len > 16_384 || split == 0 || split >= trigger_len {
+        return None;
+    }
+    let segment = if send_cap == 0 {
+        1400
+    } else {
+        send_cap.saturating_sub(72).min(1400)
+    };
+    (segment > 0).then(|| {
+        format!(
+            "r2o-plan 1 5\nid 00000000000000000000000000000000\nproto tcp tls\nwire detect-tcp-v1\nsegment {segment}\nsplit payload_start +{split}\norder forward\npace {gap_us}\n"
+        )
+    })
+}
+
+#[cfg(unix)]
 fn r2o_discovery_owned_fallback_needed(
     timed_out: bool,
-    raw_usable: bool,
+    search_owned: bool,
     verdict: Verdict,
     has_plan: bool,
 ) -> bool {
-    !timed_out && raw_usable && verdict == Verdict::Opaque && !has_plan
+    !timed_out && search_owned && verdict == Verdict::Opaque && !has_plan
 }
 
 #[cfg(unix)]
@@ -7469,18 +7510,24 @@ impl DiscoveryWorker {
                 }
                 runner_started = std::time::Instant::now();
             }
-            let (outcome, classifier_probes, owned_opaque_fallback, known_plans_allowed) =
-                r2o_classify_discovery_target_with_client_hello_and_ech_progress(
-                    target.clone(),
-                    client_hello.as_deref(),
-                    client_has_tcp_timestamps,
-                    Arc::clone(&cancel),
-                    mark,
-                    ech_config.as_ref(),
-                    white_name,
-                    seed_whole,
-                    &mut progress,
-                );
+            let (
+                outcome,
+                classifier_probes,
+                owned_opaque_fallback,
+                known_plans_allowed,
+                measured_arm_candidate,
+            ) = r2o_classify_discovery_target_with_client_hello_and_ech_progress(
+                target.clone(),
+                client_hello.as_deref(),
+                client_has_tcp_timestamps,
+                Arc::clone(&cancel),
+                mark,
+                ech_config.as_ref(),
+                white_name,
+                seed_whole,
+                runner_send_cap.load(Ordering::Relaxed),
+                &mut progress,
+            );
             let classify_probes = base_probes.saturating_add(classifier_probes);
             drop(progress);
             runner_searches
@@ -7768,7 +7815,7 @@ impl DiscoveryWorker {
                         !cancel.load(Ordering::Relaxed)
                             && r2o_discovery_trial_time_available(runner_started.elapsed())
                     },
-                    !primary_from_owned_fallback,
+                    measured_arm_candidate && !primary_from_owned_fallback,
                     Some(&dropped_events),
                     &mut candidate_progress,
                 );
@@ -7817,6 +7864,7 @@ impl DiscoveryWorker {
                 if primary_verified
                     || (!primary_from_owned_fallback
                         && !r2o_discovery_measured_fallback_allowed(
+                            measured_arm_candidate,
                             &result,
                             applied,
                             candidate_evidence,
@@ -10803,17 +10851,19 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech(
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
     white_name: &str,
 ) -> (DiscoveryOutcome, usize) {
-    let (outcome, probes, _, _) = r2o_classify_discovery_target_with_client_hello_and_ech_progress(
-        target,
-        client_hello,
-        None,
-        cancel,
-        mark,
-        ech_config,
-        white_name,
-        None,
-        &mut |_, _, _, _| {},
-    );
+    let (outcome, probes, _, _, _) =
+        r2o_classify_discovery_target_with_client_hello_and_ech_progress(
+            target,
+            client_hello,
+            None,
+            cancel,
+            mark,
+            ech_config,
+            white_name,
+            None,
+            0,
+            &mut |_, _, _, _| {},
+        );
     (outcome, probes)
 }
 
@@ -10872,8 +10922,9 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
     white_name: &str,
     seed_whole: Option<r2o_controller::classify::SeedWhole>,
+    send_cap: usize,
     progress: &mut dyn FnMut(&str, usize, usize, usize),
-) -> (DiscoveryOutcome, usize, bool, bool) {
+) -> (DiscoveryOutcome, usize, bool, bool, bool) {
     let Ok(trigger) = r2o_discovery_trigger(&target, client_hello, ech_config) else {
         return (
             DiscoveryOutcome {
@@ -10888,6 +10939,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                 retry_after: None,
             },
             0,
+            false,
             false,
             false,
         );
@@ -10911,6 +10963,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                     retry_after: None,
                 },
                 0,
+                false,
                 false,
                 false,
             );
@@ -10937,14 +10990,30 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
         });
     let retry_after = r2o_discovery_retry_after(timed_out, result.verdict, &result.reason);
     let probes = result.probes;
+    let measured_arm = !timed_out && result.hit.is_some();
+    let search_owned =
+        r2o_discovery_search_owned(result.raw_usable, result.rst_rule_failures, measured_arm);
     let plan_text = if timed_out {
         None
     } else {
-        result.hit.map(|hit| hit.plan_text)
+        result.hit.map(|hit| hit.plan_text).or_else(|| {
+            let gap_us = ClassifyOptions::default()
+                .write_gap
+                .as_micros()
+                .min(u32::MAX as u128) as u32;
+            r2o_discovery_measured_split_plan(
+                result.verdict,
+                search_owned,
+                result.split_pos,
+                trigger.payload.len(),
+                gap_us,
+                send_cap,
+            )
+        })
     };
     let owned_opaque_fallback = r2o_discovery_owned_fallback_needed(
         timed_out,
-        result.raw_usable,
+        search_owned,
         result.verdict,
         plan_text.is_some(),
     );
@@ -10977,6 +11046,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
         probes,
         owned_opaque_fallback,
         known_plans_allowed,
+        measured_arm,
     )
 }
 
@@ -19270,6 +19340,92 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn discovery_search_ownership_matches_donor_local_failure_gates() {
+        assert!(super::r2o_discovery_search_owned(true, 0, false));
+        assert!(!super::r2o_discovery_search_owned(false, 0, false));
+        assert!(!super::r2o_discovery_search_owned(true, 1, false));
+        assert!(super::r2o_discovery_search_owned(true, 1, true));
+        assert!(!super::r2o_discovery_owned_fallback_needed(
+            false,
+            super::r2o_discovery_search_owned(true, 1, false),
+            super::Verdict::Opaque,
+            false,
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn measured_split_plans_match_donor() {
+        use std::fmt::Write as _;
+
+        let cases = [
+            (1024, 1, 60_000, 0),
+            (1024, 1, 60_000, 1492),
+            (1024, 1, 60_000, 1280),
+            (1024, 1, 60_000, 100),
+            (1024, 1, 60_000, 72),
+            (1024, 0, 60_000, 1492),
+            (1024, 1024, 60_000, 1492),
+        ];
+        let mut output = String::new();
+        for verdict in [super::Verdict::Prefix, super::Verdict::WholePacket] {
+            let verdict_name = match verdict {
+                super::Verdict::Prefix => "prefix",
+                super::Verdict::WholePacket => "whole_packet",
+                _ => unreachable!(),
+            };
+            for (trigger_len, split, gap_us, send_cap) in cases {
+                let plan: Option<String> = super::r2o_discovery_measured_split_plan(
+                    verdict,
+                    true,
+                    Some(split),
+                    trigger_len,
+                    gap_us,
+                    send_cap,
+                );
+                writeln!(
+                    output,
+                    "{verdict_name} {trigger_len} {split} {gap_us} {send_cap} {}",
+                    if plan.is_some() { "plan" } else { "skip" }
+                )
+                .unwrap();
+                if let Some(plan) = plan {
+                    output.push_str(&plan);
+                    output.push('\n');
+                } else {
+                    output.push('\n');
+                }
+            }
+        }
+        assert!(
+            super::r2o_discovery_measured_split_plan(
+                super::Verdict::Prefix,
+                false,
+                Some(1),
+                1024,
+                60_000,
+                0,
+            )
+            .is_none()
+        );
+        assert!(
+            super::r2o_discovery_measured_split_plan(
+                super::Verdict::Opaque,
+                true,
+                Some(1),
+                1024,
+                60_000,
+                0,
+            )
+            .is_none()
+        );
+        if let Ok(path) = std::env::var("R2O_MEASURED_SPLIT_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn measured_fallback_keeps_transport_failure_and_rejects_missing_evidence() {
         let evidence = super::R2oCandidateTrialEvidence {
             transport_established: true,
@@ -19279,10 +19435,13 @@ mod tests {
         };
         let failed = Err("TLS-рукопожатие не завершилось".into());
         assert!(super::r2o_discovery_measured_fallback_allowed(
-            &failed, true, evidence
+            true, &failed, true, evidence
         ));
         assert!(!super::r2o_discovery_measured_fallback_allowed(
-            &failed, false, evidence
+            true, &failed, false, evidence
+        ));
+        assert!(!super::r2o_discovery_measured_fallback_allowed(
+            false, &failed, true, evidence
         ));
         for changed in [
             super::R2oCandidateTrialEvidence {
@@ -19299,12 +19458,13 @@ mod tests {
             },
         ] {
             assert!(!super::r2o_discovery_measured_fallback_allowed(
-                &failed, true, changed
+                true, &failed, true, changed
             ));
         }
         let mut challenge = r2o_test_fetch_result();
         challenge.cloudflare_challenge = true;
         assert!(!super::r2o_discovery_measured_fallback_allowed(
+            true,
             &Ok(challenge),
             true,
             evidence
@@ -19312,6 +19472,7 @@ mod tests {
         let mut denial = r2o_test_fetch_result();
         denial.http_outcome = r2o_controller::fetch::R2oFetchHttpOutcome::LegalDenial;
         assert!(!super::r2o_discovery_measured_fallback_allowed(
+            true,
             &Ok(denial),
             true,
             evidence
