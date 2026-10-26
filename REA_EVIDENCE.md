@@ -8477,6 +8477,15 @@ it is not an R2O result. No router file, process, service, or firewall was
 changed, and no test traffic was sent. SSH was not used because the presented
 host key differed from the saved key.
 
+The router release commit `a093cd6` was compared as a committed tree with the
+current donor reference `304ba893`. `git diff --quiet` found the requested
+`core/sched.c`, `core/verify.c`, `core/meas.c`, `detect/classify.c`,
+`detect/raw.c`, `core/d2kc.c`, plus `core/httpsearch.c` and
+`datapath/ctlsrv.c`, byte-identical between those commits. Thus the router's
+d2o runtime and the pinned differential C oracle use the same code for the
+reviewed mechanism. The local `E:\d2o` working tree is dirty and was left
+untouched; only its committed trees were read.
+
 To extend the host C/Rust differentials to the target architecture, the Rust
 fixtures were cross-built for AArch64 GNU and executed under WSL
 `qemu-aarch64 -L /usr/aarch64-linux-gnu`:
