@@ -8462,3 +8462,38 @@ This is a source and simulated-network confirmation, not field acceptance. The
 router status endpoint returned `diagnostics enabled=false`; no test traffic or
 write was sent to the router, which remains on d2o. REA native decompilation of
 the donor ELF remains unavailable as recorded above.
+
+## Read-only router snapshot and AArch64 QEMU parity probes — 2026-10-26
+
+The router was inspected only through HTTP GETs. `/` returned HTTP 200;
+`/api/diagnostics?status` returned `enabled=false`; `/api/status` returned a
+fresh d2o snapshot at `2026-10-25T23:56:33Z`, release `25.10.2026 (a093cd6)`,
+commit `a093cd600bd6d9c9d6676d7deccefdc887955ceb`. The snapshot reported the
+engine and controller running, six boxes, twelve plans, 45 bindings, one
+YouTube binding, two Discord bindings, 97 confirmations, and 886 probes used.
+At capture time the search was idle; the measurement manager reported 0 active,
+limit 11, 2 cores, and 98% free CPU. This is a d2o live-state benchmark only;
+it is not an R2O result. No router file, process, service, or firewall was
+changed, and no test traffic was sent. SSH was not used because the presented
+host key differed from the saved key.
+
+To extend the host C/Rust differentials to the target architecture, the Rust
+fixtures were cross-built for AArch64 GNU and executed under WSL
+`qemu-aarch64 -L /usr/aarch64-linux-gnu`:
+
+| Rust test / d2o behavior | AArch64 QEMU result |
+| --- | --- |
+| `d2o_clear_vector_uses_only_the_base_series_and_ignores_disabled_mark` | 1 passed; CLEAR uses the base series. |
+| `d2o_shared_tls_response_vectors_match` | 1 passed. |
+| `catalog_sync_sends_eight_commands_without_waiting_for_ack` | 1 passed; all eight first-batch commands emitted without ACKs. |
+| `d2o_parked_quic_resumes_after_one_tcp_admission` | 1 passed. |
+| `r2o_aimd_shared_inputs_match_d2o` | 1 passed. |
+
+The OpenWrt AArch64 musl build was also rerun under user-mode QEMU: all six
+release binaries started, wire version 47 was reported where applicable, and
+controller catalog clear/check passed. A first AArch64 test build used the host
+linker and failed with an architecture-link error; setting the AArch64 GNU
+linker corrected the harness, and the tests above then executed successfully.
+These checks confirm selected target-runtime scenarios, not an end-to-end
+R2O field run. The router still runs d2o, so full field parity and real apply
+latency remain unverified.
