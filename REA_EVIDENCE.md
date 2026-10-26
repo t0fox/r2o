@@ -8683,3 +8683,56 @@ catalog clear/check smoke passed.
 
 The router was left untouched. These checks establish the source cadence and
 target build/startup; they do not measure panel latency on the physical router.
+
+## Latest D2O catalog replay in local QEMU — 26.10.2026
+
+This section supersedes the earlier pending raw-catalog comparison above. A
+read-only SSH session (the router was running D2O `a093cd600bd6d9c9d6676d7deccefdc887955ceb`)
+read `/opt/d2k/state/catalog.json`; SHA-256
+`b1f320f837f11e2aca80ff0553afe183c2ae91dd7619f53c455eab6b15b7db8d`, 88,755
+bytes. No router files, services, firewall rules, or traffic were changed. The
+router remains outside further acceptance work.
+
+The raw catalog contained 11 boxes, 17 plans, 127 enabled bindings, 10 domain
+groups, and 96 observations. R2O `f50e947`'s AArch64 GNU controller imported
+that exact file in the isolated Debian 13 full-system QEMU VM. After normalizing
+only the generated top-level `updated` value and each plan's expected first
+non-comment `d2k-plan`/`r2o-plan` header line, a recursive JSON comparison
+reported
+`normalized_exact_match=true`, `difference_count=0`. R2O `--check-catalog`
+reported 11 boxes and 127 active bindings.
+
+The same current R2O controller then applied the imported catalog to its current
+R2O datapath over the local Unix control socket: 131 commands were sent, zero
+unsupported. The test datapath used NFQUEUE 2001, for which the VM had no queue
+rules; this exercised catalog/control handling, not packet traffic. All
+test-created QEMU files, processes, and the temporary SSH key were removed.
+
+For the scheduler source, REA/Ghidra 12.1.4 analyzed current donor
+`core/test_sched` (SHA-256
+`91c2fe734602c226801b90467c737cb2e01e79ac4c9d7b31b2eb03eec09b48b0`). Evidence
+`ev_9a4d555f892d9e008f11ca10bae66ca64d01c3ea64787fd7fde6d40c679a7b83` records
+`d2k_sched_sync_step` as an observed, complete non-contiguous body (5,416 bytes
+in eight ranges) with complete resolved relationship coverage. The artifact is
+an x86_64 C test executable; Ghidra pseudocode is decompiler output, not source.
+The direct C source remains `core/sched.c::d2k_sched_sync_step`; its Rust
+counterparts are `CatalogSyncCursor::from_compiled` and `send_step` in
+`crates/r2o-controller/src/main.rs`.
+
+Against D2O `304ba893`, all ten selected scripts with SHA-guarded donor paths
+passed: catalog sync and persistence; ACK/APPLIED/PERSIST and control events;
+measurement and TLS verification; resource limits and worker/permit; raw
+profile and shared CLEAR/NFT/TLS-response fixtures. The scheduler differential
+script was then rerun with `R2O_DONOR_CORE` pointed at that same pinned checkout
+and passed. Its full C scheduler test passed all modes (434 seconds;
+`sched.c` SHA-256 `e6f5c2e8f0e1c288888abdbfc5fe0b49ea652781d1bf5aed97468f2f20439a12`,
+`test_sched.c` SHA-256 `1af5fb41a3634417eea66736bdbc929799fbacc47e020af6f974d0736945834c`).
+R2O's scheduler/QUIC tests and probe-budget comparison passed
+(`ordinary=67`, `network_whitelist=333`), as did
+the 10 TLS verification vectors, worker/permit cases, NFT tuple/timeout, and
+unconditional CLEAR. `ci-differential-shards.sh verify` confirms 12 baseline
+and 37 current-upstream scenarios are assigned exactly once.
+
+These source, differential, and isolated-QEMU results do not establish live
+R2O behavior on the router or Internet traffic. The router is not being used
+for any more tests, so full field parity remains unverified.
