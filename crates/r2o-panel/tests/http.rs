@@ -260,7 +260,7 @@ fn control_routes_reject_get() {
 }
 
 #[test]
-fn root_serves_panel_layout_with_settings_screen() {
+fn root_serves_panel_layout_without_non_d2o_settings_controls() {
     let (status, content_type, body) = request(
         &Config::default(),
         "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
@@ -270,9 +270,17 @@ fn root_serves_panel_layout_with_settings_screen() {
     assert!(body.contains("<!doctype html") || body.contains("<!DOCTYPE html"));
     assert!(body.contains(r#"<main id="app">"#));
     assert!(body.contains("id=\"diagnostics\""));
-    assert!(body.contains("href=\"#r2o-settings\""));
-    assert!(body.contains("id=\"r2o-settings\""));
-    assert!(body.contains("id=\"r2o-settings-form\""));
+    assert!(!body.contains("href=\"#r2o-settings\""));
+    assert!(!body.contains("id=\"r2o-settings\""));
+    assert!(!body.contains("id=\"r2o-settings-form\""));
+    let (status, _, _) = request(
+        &Config::default(),
+        "GET /api/config HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    assert_eq!(
+        status, 404,
+        "панель не должна предоставлять API управления настройками"
+    );
 }
 
 #[test]
@@ -620,257 +628,6 @@ fn worker_domains_are_normalized_and_saved_without_losing_other_config() {
     assert!(saved.contains("KEEP_ME=yes"));
     assert_eq!(saved.matches("TG_CF_WORKER_DOMAIN=").count(), 1);
     assert!(saved.contains("TG_CF_WORKER_DOMAIN=new.workers.dev\n"));
-}
-
-#[cfg(unix)]
-#[test]
-fn r2o_settings_are_read_saved_and_restart_services() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let temp = TempDir::new();
-    let config_path = temp.file("config");
-    let service_path = temp.file("S99r2o");
-    let service_log = temp.file("service-arguments");
-    fs::write(
-        &config_path,
-        "# Основные настройки\nMODE=observe # режим R2O\nQUEUE_NUM=2000 # очередь IPv4\nQUEUE_NUM6=2001\nR2O_FLOW_CAPACITY=2048\nIPV6_ENABLED=1\nMARK=45\nPROBE_MARK=0\nONLY_MARK=\nFW_BACKEND=auto\nPORTS=0:65535\nCONNBYTES=0:8\nVOICE_PORTS=50000:50099,1400,3478:3481,5349,19294:19344\nVOICE_CONNBYTES=0:4\nHTTP_KEEPALIVE_PORTS=80\nDNS_PORTS=53,853\nTG_PORT=1445\nR2O_PPE_DEOFFLOAD=1\nLOGMAX=2097152\nLOGKEEP=1048576\nLOG_EVERY=60\nKEEP_ME=yes\n",
-    )
-    .unwrap();
-    fs::write(
-        &service_path,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
-            service_log.display()
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&service_path, fs::Permissions::from_mode(0o700)).unwrap();
-
-    let mut config = Config::default();
-    config.config_path = config_path.clone();
-    config.service_path = service_path;
-    config.control_enabled = true;
-
-    let (r2o_status, _, r2o_body) = request(
-        &config,
-        "GET /api/config HTTP/1.1\r\nHost: router.local\r\n\r\n",
-    );
-    assert_eq!(r2o_status, 200);
-    let r2o_settings: Value = serde_json::from_str(&r2o_body).unwrap();
-    assert_eq!(r2o_settings["mode"], "observe");
-    assert_eq!(r2o_settings["queue_num"], 2000);
-    assert_eq!(r2o_settings["queue_num6"], 2001);
-    assert_eq!(r2o_settings["flow_capacity"], 2048);
-    assert_eq!(r2o_settings["ipv6_enabled"], true);
-    assert_eq!(r2o_settings["mark"], "45");
-    assert_eq!(r2o_settings["probe_mark"], "0");
-    assert_eq!(r2o_settings["only_mark"], "");
-    assert_eq!(r2o_settings["firewall_backend"], "auto");
-    assert_eq!(r2o_settings["ports"], "0:65535");
-    assert_eq!(r2o_settings["connbytes"], "0:8");
-    assert_eq!(
-        r2o_settings["voice_ports"],
-        "50000:50099,1400,3478:3481,5349,19294:19344"
-    );
-    assert_eq!(r2o_settings["voice_connbytes"], "0:4");
-    assert_eq!(r2o_settings["http_keepalive_ports"], "80");
-    assert_eq!(r2o_settings["dns_ports"], "53,853");
-    assert_eq!(r2o_settings["tg_port"], 1445);
-    assert_eq!(r2o_settings["ppe_deoffload"], true);
-    assert_eq!(r2o_settings["log_max"], 2097152);
-    assert_eq!(r2o_settings["log_keep"], 1048576);
-    assert_eq!(r2o_settings["log_every"], 60);
-    assert_eq!(r2o_settings["editable"], true);
-
-    let r2o_body = r#"{"mode":"apply","queue_num":321,"queue_num6":322,"flow_capacity":4096,"ipv6_enabled":false,"mark":"0x2d","probe_mark":"7","only_mark":"9/255","firewall_backend":"nft","ports":"80,443","connbytes":"0:12","voice_ports":"3478:3481","voice_connbytes":"0:6","http_keepalive_ports":"8080","dns_ports":"53,853,5353","tg_port":1444,"ppe_deoffload":false,"log_max":4194304,"log_keep":2097152,"log_every":120}"#;
-    let r2o_raw = format!(
-        "POST /api/config HTTP/1.1\r\nHost: router.local\r\nOrigin: http://router.local\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{r2o_body}",
-        r2o_body.len()
-    );
-    let r2o_response = handle_request(&config, r2o_raw.as_bytes());
-    assert_eq!(r2o_response.status, 202);
-
-    let r2o_saved = fs::read_to_string(&config_path).unwrap();
-    assert!(r2o_saved.contains("# Основные настройки\n"));
-    assert!(r2o_saved.contains("KEEP_ME=yes\n"));
-    assert_eq!(r2o_saved.matches("MODE=").count(), 1);
-    assert_eq!(r2o_saved.matches("QUEUE_NUM=").count(), 1);
-    assert!(r2o_saved.contains("MODE=apply # режим R2O\n"));
-    assert!(r2o_saved.contains("QUEUE_NUM=321 # очередь IPv4\n"));
-    assert!(r2o_saved.contains("QUEUE_NUM6=322\n"));
-    assert!(r2o_saved.contains("R2O_FLOW_CAPACITY=4096\n"));
-    assert!(r2o_saved.contains("IPV6_ENABLED=0\n"));
-    assert!(r2o_saved.contains("MARK=0x2d\n"));
-    assert!(r2o_saved.contains("PROBE_MARK=7\n"));
-    assert!(r2o_saved.contains("ONLY_MARK=9/255\n"));
-    assert!(r2o_saved.contains("FW_BACKEND=nft\n"));
-    assert!(r2o_saved.contains("PORTS=80,443\n"));
-    assert!(r2o_saved.contains("CONNBYTES=0:12\n"));
-    assert!(r2o_saved.contains("VOICE_PORTS=3478:3481\n"));
-    assert!(r2o_saved.contains("VOICE_CONNBYTES=0:6\n"));
-    assert!(r2o_saved.contains("HTTP_KEEPALIVE_PORTS=8080\n"));
-    assert!(r2o_saved.contains("DNS_PORTS=53,853,5353\n"));
-    assert!(r2o_saved.contains("TG_PORT=1444\n"));
-    assert!(r2o_saved.contains("R2O_PPE_DEOFFLOAD=0\n"));
-    assert!(r2o_saved.contains("LOGMAX=4194304\n"));
-    assert!(r2o_saved.contains("LOGKEEP=2097152\n"));
-    assert!(r2o_saved.contains("LOG_EVERY=120\n"));
-
-    let r2o_deadline = Instant::now() + Duration::from_secs(2);
-    let mut r2o_arguments = String::new();
-    while Instant::now() < r2o_deadline {
-        if let Ok(arguments) = fs::read_to_string(&service_log) {
-            if arguments == "settings-restart\n" {
-                r2o_arguments = arguments;
-                break;
-            }
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert_eq!(r2o_arguments, "settings-restart\n");
-    let (r2o_disabled_status, _, r2o_disabled_body) = request(
-        &config,
-        "GET /api/config HTTP/1.1\r\nHost: router.local\r\n\r\n",
-    );
-    assert_eq!(r2o_disabled_status, 200);
-    let r2o_disabled_settings: Value = serde_json::from_str(&r2o_disabled_body).unwrap();
-    assert_eq!(r2o_disabled_settings["ppe_deoffload"], false);
-
-    let mut r2o_off_settings: Value = serde_json::from_str(r2o_body).unwrap();
-    r2o_off_settings["mode"] = Value::String("off".into());
-    r2o_off_settings["ppe_deoffload"] = Value::Bool(true);
-    let r2o_off_body = r2o_off_settings.to_string();
-    let r2o_off_raw = format!(
-        "POST /api/config HTTP/1.1\r\nHost: router.local\r\nOrigin: http://router.local\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{r2o_off_body}",
-        r2o_off_body.len()
-    );
-    let r2o_off_deadline = Instant::now() + Duration::from_secs(2);
-    let mut r2o_off_status = 409;
-    while Instant::now() < r2o_off_deadline {
-        r2o_off_status = handle_request(&config, r2o_off_raw.as_bytes()).status;
-        if r2o_off_status != 409 {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert_eq!(r2o_off_status, 202);
-    let r2o_stop_deadline = Instant::now() + Duration::from_secs(2);
-    let mut r2o_stop_arguments = String::new();
-    while Instant::now() < r2o_stop_deadline {
-        if let Ok(arguments) = fs::read_to_string(&service_log) {
-            if arguments == "settings-restart\n" {
-                r2o_stop_arguments = arguments;
-                break;
-            }
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert_eq!(r2o_stop_arguments, "settings-restart\n");
-    assert!(
-        fs::read_to_string(config_path)
-            .unwrap()
-            .contains("R2O_PPE_DEOFFLOAD=1\n")
-    );
-    let (r2o_enabled_status, _, r2o_enabled_body) = request(
-        &config,
-        "GET /api/config HTTP/1.1\r\nHost: router.local\r\n\r\n",
-    );
-    assert_eq!(r2o_enabled_status, 200);
-    let r2o_enabled_settings: Value = serde_json::from_str(&r2o_enabled_body).unwrap();
-    assert_eq!(r2o_enabled_settings["ppe_deoffload"], true);
-}
-
-#[test]
-fn r2o_settings_reject_invalid_firewall_port_lists_and_connbytes_windows() {
-    let temp = TempDir::new();
-    let config_path = temp.file("config");
-    fs::write(&config_path, "MODE=observe\nQUEUE_NUM=2000\nKEEP_ME=yes\n").unwrap();
-    let mut config = Config::default();
-    config.config_path = config_path.clone();
-    config.control_enabled = true;
-    let before = fs::read_to_string(&config_path).unwrap();
-    let valid = serde_json::json!({
-        "mode":"apply", "queue_num":321, "queue_num6":322, "flow_capacity":2048,
-        "ipv6_enabled":true, "mark":"1", "probe_mark":"0", "only_mark":"",
-        "firewall_backend":"auto", "ports":"0:65535", "connbytes":"0:8",
-        "voice_ports":"50000:50099,1400,3478:3481,5349,19294:19344",
-        "voice_connbytes":"0:4", "http_keepalive_ports":"80", "dns_ports":"53,853",
-        "tg_port":1443, "ppe_deoffload":true,
-        "log_max":2097152, "log_keep":1048576, "log_every":60
-    });
-    for (key, value) in [
-        ("ports", "80:80"),
-        ("ports", "443;$(touch /tmp/r2o-injected)"),
-        ("ports", "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16"),
-        ("connbytes", "0:8:9"),
-        ("voice_ports", "0:65536"),
-        ("voice_connbytes", "8:4"),
-        ("http_keepalive_ports", "80,,443"),
-        ("dns_ports", "53, 853"),
-        ("tg_port", "0"),
-        ("tg_port", "65536"),
-    ] {
-        let mut body = valid.clone();
-        body[key] = Value::String(value.into());
-        let body = body.to_string();
-        let raw = format!(
-            "POST /api/config HTTP/1.1\r\nHost: router.local\r\nOrigin: http://router.local\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-            body.len()
-        );
-        assert_eq!(
-            handle_request(&config, raw.as_bytes()).status,
-            400,
-            "{key}={value}"
-        );
-    }
-    let mut invalid_ppe = valid.clone();
-    invalid_ppe["ppe_deoffload"] = Value::String("false".into());
-    let invalid_ppe = invalid_ppe.to_string();
-    let invalid_ppe_raw = format!(
-        "POST /api/config HTTP/1.1\r\nHost: router.local\r\nOrigin: http://router.local\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{invalid_ppe}",
-        invalid_ppe.len()
-    );
-    assert_eq!(
-        handle_request(&config, invalid_ppe_raw.as_bytes()).status,
-        400
-    );
-    assert_eq!(fs::read_to_string(config_path).unwrap(), before);
-}
-
-#[test]
-fn r2o_settings_reject_invalid_values_and_cross_origin_writes() {
-    let temp = TempDir::new();
-    let config_path = temp.file("config");
-    fs::write(&config_path, "MODE=observe\nQUEUE_NUM=2000\nKEEP_ME=yes\n").unwrap();
-    let mut config = Config::default();
-    config.config_path = config_path.clone();
-    config.control_enabled = true;
-
-    let r2o_before = fs::read_to_string(&config_path).unwrap();
-    for r2o_body in [
-        r#"{"mode":"apply\nTG_ENABLED=0","queue_num":321}"#,
-        r#"{"mode":"apply","queue_num":65536}"#,
-        r#"{"mode":"apply","queue_num":321,"state_dir":"/tmp"}"#,
-        r#"{"mode":"apply","queue_num":321,"queue_num6":321,"flow_capacity":2048,"ipv6_enabled":true,"mark":"1","probe_mark":"0","only_mark":"","firewall_backend":"auto","ports":"0:65535","connbytes":"0:8","voice_ports":"50000:50099,1400,3478:3481,5349,19294:19344","voice_connbytes":"0:4","http_keepalive_ports":"80","dns_ports":"53,853","log_max":2097152,"log_keep":1048576,"log_every":60}"#,
-        r#"{"mode":"apply","queue_num":321,"queue_num6":321,"flow_capacity":2048,"ipv6_enabled":true,"mark":"1","probe_mark":"0","only_mark":"","firewall_backend":"auto","ports":"0:65535","connbytes":"0:8","voice_ports":"50000:50099,1400,3478:3481,5349,19294:19344","voice_connbytes":"0:4","http_keepalive_ports":"80","dns_ports":"53,853","tg_port":1443,"log_max":2097152,"log_keep":1048576,"log_every":60}"#,
-        r#"{"mode":"apply","queue_num":321,"queue_num6":322,"flow_capacity":2048,"ipv6_enabled":true,"mark":"0x2d","probe_mark":"45","only_mark":"","firewall_backend":"auto","ports":"0:65535","connbytes":"0:8","voice_ports":"50000:50099,1400,3478:3481,5349,19294:19344","voice_connbytes":"0:4","http_keepalive_ports":"80","dns_ports":"53,853","tg_port":1443,"log_max":2097152,"log_keep":1048576,"log_every":60}"#,
-        r#"{"mode":"apply","queue_num":321,"queue_num6":322,"flow_capacity":0,"ipv6_enabled":true,"mark":"1","probe_mark":"0","only_mark":"","firewall_backend":"auto","ports":"0:65535","connbytes":"0:8","voice_ports":"50000:50099,1400,3478:3481,5349,19294:19344","voice_connbytes":"0:4","http_keepalive_ports":"80","dns_ports":"53,853","tg_port":1443,"log_max":2097152,"log_keep":1048576,"log_every":60}"#,
-        r#"{"mode":"apply","queue_num":321,"queue_num6":322,"flow_capacity":2048,"ipv6_enabled":true,"mark":"1","probe_mark":"4294967296","only_mark":"","firewall_backend":"auto","ports":"0:65535","connbytes":"0:8","voice_ports":"50000:50099,1400,3478:3481,5349,19294:19344","voice_connbytes":"0:4","http_keepalive_ports":"80","dns_ports":"53,853","tg_port":1443,"log_max":2097152,"log_keep":1048576,"log_every":60}"#,
-        r#"{"mode":"apply","queue_num":321,"queue_num6":322,"flow_capacity":2048,"ipv6_enabled":true,"mark":"1","probe_mark":"0","only_mark":"8/0","firewall_backend":"auto","ports":"0:65535","connbytes":"0:8","voice_ports":"50000:50099,1400,3478:3481,5349,19294:19344","voice_connbytes":"0:4","http_keepalive_ports":"80","dns_ports":"53,853","tg_port":1443,"log_max":2097152,"log_keep":1048576,"log_every":0}"#,
-    ] {
-        let r2o_raw = format!(
-            "POST /api/config HTTP/1.1\r\nHost: router.local\r\nOrigin: http://router.local\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{r2o_body}",
-            r2o_body.len()
-        );
-        assert_eq!(handle_request(&config, r2o_raw.as_bytes()).status, 400);
-    }
-    let r2o_body = r#"{"mode":"apply","queue_num":321}"#;
-    let r2o_raw = format!(
-        "POST /api/config HTTP/1.1\r\nHost: router.local\r\nOrigin: http://attacker.local\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{r2o_body}",
-        r2o_body.len()
-    );
-    assert_eq!(handle_request(&config, r2o_raw.as_bytes()).status, 403);
-    assert_eq!(fs::read_to_string(config_path).unwrap(), r2o_before);
 }
 
 #[cfg(unix)]

@@ -50,6 +50,17 @@ async function main() {
   assert.equal(panelUi.voiceProofNote({ transport: 17, shape: 5, verified_by: 5 }), "Двусторонний RTP подтверждён; качество аудио не измерялось", "RTP-подтверждение не выдаётся за качество аудио");
   assert.equal(panelUi.voiceProofNote({ transport: 17, shape: 5, verified_by: 0 }), "RTP не проверен", "голосовая привязка без источника подтверждения не заявляет RTP");
   assert.equal(panelUi.voiceProofNote({ transport: 6, shape: 5, verified_by: 3 }), "", "заметка RTP не показывается для TCP");
+  const voiceStages = [
+    ["измеряем живой голосовой поток", 0],
+    ["приём голоса стоит, ждём разговора", 1],
+    ["приём применился к разговору, ждём ответа сервера", 2],
+  ];
+  for (const [phase, at] of voiceStages) {
+    const track = panelUi.trackFor(phase);
+    assert.equal(track?.voice, true, `голосовой статус «${phase}» использует дорожку d2o`);
+    assert.equal(track?.at, at, `голосовой статус «${phase}» отмечает правильный этап d2o`);
+    assert.deepEqual(track?.steps.map((step) => step.label), ["Замер голоса", "Приём стоит", "Ждём ответа"]);
+  }
   assert.equal(diagnosticsUi.summary({ samples: [{ at: 1, processes: [], bindings: 0, plans: 0 }], events: [{ outcome: "failed" }, { outcome: "queue-expired" }, { outcome: "plan-found" }] }).includes("без подтверждённого результата: 2"), true, "диагностика считает отказ и истёкшую очередь неподтверждёнными исходами");
   assert.ok(fs.existsSync(panelBinary), `Не найден исполняемый файл панели: ${panelBinary}`);
   fs.mkdirSync(chromeProfile, { recursive: true });
@@ -267,6 +278,7 @@ async function main() {
   await waitFor(() => evaluate("document.readyState === 'complete' && !!document.querySelector('#app')"), "загрузка страницы R2O");
   await evaluate("document.fonts.ready.then(() => true)");
   await waitFor(() => evaluate("!!document.querySelector('#diagnostic-toggle')"), "загрузка управления диагностикой");
+  assert.equal(await evaluate("(() => { const help = document.querySelector('#diagnostic-history-help'); return !!help && help.querySelector('summary')?.textContent.includes('Что сохраняется') && help.textContent.includes('120') && help.textContent.includes('64') && help.textContent.includes('домены и IP-адреса') && help.textContent.includes('никуда не отправляется'); })()"), true, "диагностика сообщает пределы истории и состав локального отчёта как d2o");
   await evaluate("document.querySelector('#diagnostic-toggle').click()");
   await waitFor(() => evaluate("document.querySelector('#diagnostic-state').dataset.enabled === 'true'"), "включение локальной диагностики");
   assert.equal(await evaluate("document.querySelector('#diagnostic-download').hidden"), true, "скачивание ждёт первого снимка контроллера");
@@ -274,7 +286,8 @@ async function main() {
   await waitFor(() => evaluate("document.querySelector('#diagnostic-state').dataset.enabled === 'false'"), "выключение диагностики с удалением истории");
 
   assert.equal(await evaluate("document.title.includes('R2O')"), true, "заголовок страницы панели");
-  assert.equal(await evaluate("document.querySelectorAll('#app > section').length"), 7, "все разделы панели отображаются");
+  assert.equal(await evaluate("document.querySelector('#r2o-settings') === null && ![...document.querySelectorAll('.index a')].some((link) => link.hash === '#r2o-settings')"), true, "в панели нет отдельного раздела настроек, которого нет в d2o");
+  assert.equal(await evaluate("document.querySelectorAll('#app > section').length"), 6, "все разделы панели отображаются");
   assert.equal(await evaluate("getComputedStyle(document.body).fontFamily.includes('Nunito')"), true, "оформление использует Nunito");
   assert.equal(await evaluate("document.fonts.check('500 16px Nunito')"), true, "локальный шрифт Nunito загружен");
   assert.equal(await evaluate("document.fonts.check('400 16px \\\"JetBrains Mono\\\"')"), true, "локальный JetBrains Mono загружен");
@@ -293,12 +306,6 @@ async function main() {
   liveSearch.question = "split · проверок: 2, прошло: 1, отказов: 1";
   fs.writeFileSync(livePath, JSON.stringify(liveState));
   await waitFor(() => evaluate("[...document.querySelectorAll('.search-question')].some((row) => !row.hidden && row.textContent.includes('split · проверок: 2'))"), "автоматическое обновление вопроса и числа зондов");
-  assert.equal(await evaluate("document.querySelector('#r2o-settings') !== null"), true, "доступен раздел настроек");
-  assert.equal(await evaluate("document.querySelectorAll('#r2o-settings-form input, #r2o-settings-form select').length === 20"), true, "форма содержит параметры datapath, firewall, PPE и Telegram");
-  await waitFor(() => evaluate("document.querySelector('#settings-mode').value === 'observe' && document.querySelector('#settings-queue').value === '2000' && document.querySelector('#settings-queue6').value === '2001' && document.querySelector('#settings-firewall').value === 'auto'"), "загрузка текущих настроек");
-  assert.equal(await evaluate("document.querySelector('#settings-ppe-deoffload').checked"), true, "форма загружает настройку PPE");
-  assert.equal(await evaluate("document.querySelector('[data-control=\\\"settings\\\"]') === null"), true, "шапка соответствует макету");
-
   for (const [name, width, height] of [
     ["телефон", 320, 740],
     ["широкий телефон", 390, 844],
@@ -332,23 +339,6 @@ async function main() {
 
   await evaluate(`document.querySelector('a[href="#telegram"]').click()`);
   assert.equal(await evaluate("location.hash"), "#telegram", "ссылка навигации открывает раздел Telegram");
-  await evaluate(`document.querySelector('a[href="#r2o-settings"]').click()`);
-  assert.equal(await evaluate("location.hash"), "#r2o-settings", "ссылка навигации открывает настройки");
-  await evaluate("document.querySelector('#settings-mode').value = 'apply'; document.querySelector('#settings-queue').value = '321'; document.querySelector('#settings-queue6').value = '322'; document.querySelector('#settings-capacity').value = '4096'; document.querySelector('#settings-ipv6').value = 'false'; document.querySelector('#settings-mark').value = '0x2d'; document.querySelector('#settings-probe-mark').value = '7'; document.querySelector('#settings-only-mark').value = '9/255'; document.querySelector('#settings-firewall').value = 'nft'; document.querySelector('#settings-ports').value = '80,443'; document.querySelector('#settings-connbytes').value = '0:12'; document.querySelector('#settings-voice-ports').value = '3478:3481'; document.querySelector('#settings-voice-connbytes').value = '0:6'; document.querySelector('#settings-http-keepalive-ports').value = '8080'; document.querySelector('#settings-dns-ports').value = '53,853,5353'; document.querySelector('#settings-tg-port').value = '1444'; document.querySelector('#settings-ppe-deoffload').checked = false; document.querySelector('#settings-log-max').value = '4194304'; document.querySelector('#settings-log-keep').value = '2097152'; document.querySelector('#settings-log-every').value = '120'; document.querySelector('#r2o-settings-form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))");
-  await waitFor(async () => {
-    const config = fs.readFileSync(configPath, "utf8");
-    return config.includes("MODE=apply") && config.includes("QUEUE_NUM=321") &&
-      config.includes("QUEUE_NUM6=322") && config.includes("R2O_FLOW_CAPACITY=4096") &&
-      config.includes("IPV6_ENABLED=0") && config.includes("MARK=0x2d") &&
-      config.includes("ONLY_MARK=9/255") && config.includes("FW_BACKEND=nft") &&
-      config.includes("PORTS=80,443") && config.includes("CONNBYTES=0:12") &&
-      config.includes("VOICE_PORTS=3478:3481") && config.includes("VOICE_CONNBYTES=0:6") &&
-      config.includes("HTTP_KEEPALIVE_PORTS=8080") && config.includes("DNS_PORTS=53,853,5353") &&
-      config.includes("TG_PORT=1444") && config.includes("R2O_PPE_DEOFFLOAD=0") &&
-      config.includes("LOGMAX=4194304") && config.includes("LOGKEEP=2097152") &&
-      config.includes("LOG_EVERY=120");
-  }, "сохранение настроек из панели");
-  await waitFor(() => fs.existsSync(serviceLog) && fs.readFileSync(serviceLog, "utf8").includes("settings-restart"), "перезапуск служб после сохранения настроек");
   await evaluate("document.querySelector('#filter').focus(); document.querySelector('#filter').value = 'example'; document.querySelector('#filter').dispatchEvent(new Event('input', { bubbles: true }))");
   assert.equal(await evaluate("document.querySelector('#filter').value"), "example", "поле поиска принимает ввод");
   await delay(100);
