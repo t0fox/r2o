@@ -35,3 +35,42 @@ printf '%s\n' "$rust_output"
 [ "$rust_status" -eq 0 ] || exit "$rust_status"
 printf '%s\n' "$rust_output" | grep -F 'RUST_RESULT:ERROR' >/dev/null
 printf 'C/Rust send-timeout measurement result matches donor %s\n' "$expected_donor_sha"
+
+eintr_fixture="$tests/fixtures/d2o_meas_eintr.tsv"
+cc -std=c99 -O2 -Wall -Wextra -Werror -pthread \
+    -I"$donor_root/core/include" \
+    "$tests/d2o_meas_eintr.c" "$donor_root/core/meas.c" \
+    -o "$tmp_dir/d2o_meas_eintr"
+c_eintr_output=$("$tmp_dir/d2o_meas_eintr" "$eintr_fixture")
+printf '%s\n' "$c_eintr_output"
+printf '%s\n' "$c_eintr_output" | grep -Fx 'C_RESULT:REJECTED' >/dev/null
+
+if rust_eintr_output=$(R2O_MEAS_EINTR_OUTPUT="$tmp_dir/rust-meas-eintr.out" \
+    cargo test -p r2o-controller --locked --test d2o_meas_eintr \
+    d2o_measurement_receive_interruption_matches_silence -- --nocapture 2>&1); then
+    rust_eintr_status=0
+else
+    rust_eintr_status=$?
+fi
+printf '%s\n' "$rust_eintr_output"
+[ "$rust_eintr_status" -eq 0 ] || exit "$rust_eintr_status"
+printf '%s\n' "$c_eintr_output" >"$tmp_dir/c-meas-eintr.out"
+diff -u "$tmp_dir/c-meas-eintr.out" "$tmp_dir/rust-meas-eintr.out"
+printf 'C/Rust receive-interruption measurement result matches donor %s\n' "$expected_donor_sha"
+
+send_eintr_fixture="$tests/fixtures/d2o_meas_send_eintr.tsv"
+c_send_eintr_output=$("$tmp_dir/d2o_meas_eintr" "$send_eintr_fixture")
+printf '%s\n' "$c_send_eintr_output"
+printf '%s\n' "$c_send_eintr_output" | grep -Fx 'C_RESULT:ERROR' >/dev/null
+if rust_send_eintr_output=$(R2O_MEAS_EINTR_OUTPUT="$tmp_dir/rust-send-meas-eintr.out" \
+    cargo test -p r2o-controller --locked --test d2o_meas_eintr \
+    d2o_measurement_send_interruption_matches_error -- --nocapture 2>&1); then
+    rust_send_eintr_status=0
+else
+    rust_send_eintr_status=$?
+fi
+printf '%s\n' "$rust_send_eintr_output"
+[ "$rust_send_eintr_status" -eq 0 ] || exit "$rust_send_eintr_status"
+printf '%s\n' "$c_send_eintr_output" >"$tmp_dir/c-send-meas-eintr.out"
+diff -u "$tmp_dir/c-send-meas-eintr.out" "$tmp_dir/rust-send-meas-eintr.out"
+printf 'C/Rust send-interruption measurement result matches donor %s\n' "$expected_donor_sha"

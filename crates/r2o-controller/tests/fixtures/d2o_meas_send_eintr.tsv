@@ -1,0 +1,7 @@
+payload_bytes=16777216
+send_phase=1
+timeout_ms=600
+interrupt_delay_ms=80
+signal_count=20
+signal_interval_ms=40
+response_delay_ms=1000

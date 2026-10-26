@@ -714,16 +714,20 @@ pub(crate) fn probe_trigger(
             }
             let error = io::Error::last_os_error();
             if error.kind() == io::ErrorKind::Interrupted {
-                continue;
+                return Err(ProbeError::Transport(format!("write: {error}")));
             }
             if would_block(&error) {
-                if !poll_until(fd, libc::POLLOUT, Instant::now() + PROBE_SEND_TIMEOUT).map_err(
-                    |error| ProbeError::Local(format!("ошибка ожидания отправки: {error}")),
-                )? {
-                    return Err(ProbeError::Transport(format!(
-                        "write: {}",
-                        io::Error::new(io::ErrorKind::TimedOut, "operation timed out")
-                    )));
+                match poll_once(fd, libc::POLLOUT, Instant::now() + PROBE_SEND_TIMEOUT) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Err(ProbeError::Transport(format!(
+                            "write: {}",
+                            io::Error::new(io::ErrorKind::TimedOut, "operation timed out")
+                        )));
+                    }
+                    Err(error) => {
+                        return Err(ProbeError::Transport(format!("write: {error}")));
+                    }
                 }
                 continue;
             }
@@ -742,10 +746,18 @@ pub(crate) fn probe_trigger(
         timeout
     };
     let deadline = Instant::now() + wait;
-    if !poll_until(fd, libc::POLLIN, deadline)
-        .map_err(|error| ProbeError::Local(format!("ошибка ожидания ответа: {error}")))?
-    {
-        return Ok(ProbeOutcome::Rejected);
+    match poll_once(fd, libc::POLLIN, deadline) {
+        Ok(true) => {}
+        Ok(false) => return Ok(ProbeOutcome::Rejected),
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+            // d2o's blocking recv returns silence when a signal interrupts it.
+            return Ok(ProbeOutcome::Rejected);
+        }
+        Err(error) => {
+            return Err(ProbeError::Local(format!(
+                "ошибка ожидания ответа: {error}"
+            )));
+        }
     }
     let mut bytes = [0_u8; 512];
     let received = unsafe { libc::recv(fd, bytes.as_mut_ptr().cast(), bytes.len(), 0) };
@@ -878,6 +890,33 @@ fn poll_until(fd: libc::c_int, events: libc::c_short, deadline: Instant) -> io::
         }
         return Ok(true);
     }
+}
+
+fn poll_once(fd: libc::c_int, events: libc::c_short, deadline: Instant) -> io::Result<bool> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Ok(false);
+    }
+    let millis = remaining
+        .as_millis()
+        .saturating_add(1)
+        .min(i32::MAX as u128) as i32;
+    let mut descriptor = libc::pollfd {
+        fd,
+        events,
+        revents: 0,
+    };
+    let result = unsafe { libc::poll(&mut descriptor, 1, millis) };
+    if result == 0 {
+        return Ok(false);
+    }
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if descriptor.revents & libc::POLLNVAL != 0 {
+        return Err(io::Error::other("poll reported an invalid socket"));
+    }
+    Ok(true)
 }
 
 fn would_block(error: &io::Error) -> bool {

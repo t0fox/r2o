@@ -8506,3 +8506,28 @@ linker corrected the harness, and the tests above then executed successfully.
 These checks confirm selected target-runtime scenarios, not an end-to-end
 R2O field run. The router still runs d2o, so full field parity and real apply
 latency remain unverified.
+
+## Measurement socket interruption — d2o `304ba893`, 26.10.2026
+
+The shared measurement differential exposed two more result mismatches in
+`core/meas.c::d2k_meas_once` versus
+`crates/r2o-controller/src/response.rs::probe_trigger`:
+
+| C behavior | Previous Rust behavior | Differential result and correction |
+| --- | --- | --- |
+| `d2k_meas_once` returns `D2K_MEAS_SILENT` when the final blocking `recv` is interrupted by a signal. | `probe_trigger` used `poll_until`, retried the interrupted wait, and accepted a later response. | Before correction, the receive interruption fixture reported C `REJECTED`, Rust `ACCEPTED`. `probe_trigger` now uses one poll for the response wait and maps `EINTR` to `Rejected`; the shared C/Rust fixture reports `REJECTED` on both sides. |
+| `d2k_meas_once` returns `D2K_MEAS_ERR` when `send_all` fails, including `EINTR` during a blocked write. | The Rust send loop retried interrupted writes and interrupted writable polls, eventually sending the whole payload. | Before correction, the send interruption fixture reported C `ERROR`, Rust `ACCEPTED`. Rust now returns a transport error for either interruption and the fixture reports `ERROR` on both sides. |
+
+`scripts/r2o-meas-differential.sh` runs both signal-driven comparisons against
+the pinned donor. Both pass after the change. The existing send-timeout
+comparison also passes. `scripts/test-d2o-shared-fixtures.sh` passes the 13
+shared response cases, CLEAR vector, nft tuple, and TLS response interruption
+fixture; `scripts/r2o-tls-verify-differential.sh` passes all 10 certificate,
+handshake, and timing comparisons. The full locked Cargo workspace suite passed
+(195 controller binary tests plus all workspace integration and datapath tests),
+and the two new interruption tests passed under AArch64 GNU user-mode QEMU.
+Afterward the OpenWrt AArch64 musl release build and QEMU smoke passed again.
+
+This is a deterministic local socket differential and target-architecture smoke,
+not physical-router evidence. The router remains read-only and runs d2o; full
+field parity is not claimed.
