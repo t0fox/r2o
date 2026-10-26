@@ -8736,3 +8736,38 @@ and 37 current-upstream scenarios are assigned exactly once.
 These source, differential, and isolated-QEMU results do not establish live
 R2O behavior on the router or Internet traffic. The router is not being used
 for any more tests, so full field parity remains unverified.
+
+## UDP planned datagram and held-tail parity — 26.10.2026
+
+Review slice: current local donor `t0fox/d2o` commit
+`304ba893dd37197128ac8799c0495b035f6a38c0`.
+
+| D2O C source | R2O Rust counterpart | Confirmed behavior and result |
+| --- | --- | --- |
+| `datapath/udp_path.c::d2k_udp_path_planned` (lines 90–97) | `r2o_udp_mark_planned` in `crates/r2o-datapath/src/main.rs` | An unheld, planned UDP DROP opens the follow window through the plan deadline. R2O previously omitted this mark. The new `плановый_udp_drop_открывает_окно_для_позднего_хвоста` test passes. |
+| `datapath/udp_release.c::d2k_udp_out_batch` and `release_batch` (lines 194–246, 442–472); `datapath/d2kd.c::out_send_at_owned` (699–709) | `r2o_release_udp_batch`, `r2o_release_delayed_udp_batch_with`, and `flush_scheduled` in `crates/r2o-datapath/src/main.rs` | For an owned delayed plan, D2O drops the held head immediately and queues neutral tails behind the final scheduled send; each tail is raw-sent before its DROP. R2O now follows that order. The new `отложенный_udp_план_сначала_отправляет_raw_хвост_и_затем_drop` test passes. Pass and failed-plan release paths retain their existing ACCEPT/fail-open handling. |
+| `datapath/udp_release.c::out_resend`, `d2k_udp_out_batch`, `d2k_udp_out_owned_emit` (388–420, 442–472); `datapath/d2kd.c` owned scheduled-send loop (2237–2265) | `r2o_release_batch_with` and `R2oUdpDeferredResends::r2o_flush` in `crates/r2o-datapath/src/r2o_udp_hold.rs`; immediate/delayed release in `main.rs` | D2O marks a flow failed after a permanent immediate raw resend refusal, keeps it eligible after `EAGAIN`/`ENOBUFS`, and does not close its follow window when a previously queued owned tail later fails. R2O previously missed the immediate permanent mark and incorrectly closed the window on delayed failures. The deferred failure regression first failed on that assertion, then passed after the change; `r2o_udp_постоянный_отказ_немедленного_raw_закрывает_follow` and `r2o_udp_busy_raw_отказ_не_закрывает_follow` also pass. |
+
+The donor C regression `make -C datapath test-udp-path CC=clang-18` passed at
+the same commit (`UDP path: one verdict per ID, tails behind the head, clash
+window passed`). Donor SHA-256 values: `udp_path.c`
+`1da3e39452923c7908f310406d8efa12261cdd370cae9e8f777f2b88466da8b3`,
+`udp_release.c` `ec3850be058dc3a39fecd20e0a94b4b9a3c9bdffc05dd0bfe66076ed54ae34ffc9`,
+`d2kd.c` `ff4138faa10d96e80d61cc870a46e9f715307d3398c7861fae038f8af0e0b7b0`,
+and `test_udp_path.c`
+`0eccc48661b3c8e0b40f1c2229d4f44b9a2546433fa9bcb11f2e00941bf363ee`.
+`cargo +1.98.0 test -p r2o-datapath --locked --offline` passed, including
+225 library tests and all datapath integration tests (21 UDP-hold tests).
+The complete workspace command `cargo +1.98.0 test --workspace --locked
+--offline` also passed, including all 21 UDP-hold tests. The final local
+OpenWrt AArch64 musl release build and QEMU smoke passed in 2m54s: all six
+executables ran `--version`, and controller catalog clear/check succeeded.
+The corresponding ignored logs are `.rea/r2o-udp-parity-workspace-20261026-final.log`,
+`.rea/r2o-udp-parity-datapath-final.log`, and
+`.rea/r2o-udp-parity-openwrt-aarch64-qemu-final.log`.
+
+REA recognized the donor Linux ELF test artifact, but its configured Windows
+Ghidra provider could not analyze this ELF; Hopper and IDA are unavailable in
+this environment. Therefore this slice uses the pinned C source and donor C
+regression, not newly generated REA pseudocode. No router access or field test
+was performed; field parity is not claimed.

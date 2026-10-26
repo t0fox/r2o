@@ -75,6 +75,7 @@ pub fn r2o_release_batch_with(
     can_resend: bool,
     mut is_neutral: impl FnMut(&R2oUdpHeldPacket) -> bool,
     mut resend: impl FnMut(&R2oUdpHeldPacket) -> std::io::Result<()>,
+    mut on_permanent_failure: impl FnMut(&R2oUdpHeldPacket),
     mut send_verdict: impl FnMut(u32, u32) -> std::io::Result<()>,
 ) -> R2oUdpReleaseStats {
     let mut stats = R2oUdpReleaseStats::default();
@@ -100,8 +101,11 @@ pub fn r2o_release_batch_with(
                     stats.resent += 1;
                     0
                 }
-                Err(_) => {
+                Err(error) => {
                     stats.resend_failed += 1;
+                    if !r2o_udp_send_busy(&error) {
+                        on_permanent_failure(tail);
+                    }
                     1
                 }
             }
@@ -661,7 +665,6 @@ impl R2oUdpDeferredResends {
         now: Instant,
         mut resend: impl FnMut(u32, &[u8]) -> std::io::Result<()>,
         mut send_verdict: impl FnMut(u32, u32) -> std::io::Result<()>,
-        mut on_permanent_failure: impl FnMut(&[u8]),
     ) -> R2oUdpDeferredResendStats {
         let mut stats = R2oUdpDeferredResendStats::default();
         loop {
@@ -681,11 +684,8 @@ impl R2oUdpDeferredResends {
             let entry = self.slots[index].take().expect("созревший хвост найден");
             let verdict = match resend(entry.id, &entry.packet) {
                 Ok(()) => 0,
-                Err(error) => {
+                Err(_) => {
                     stats.resend_failed += 1;
-                    if !r2o_udp_send_busy(&error) {
-                        on_permanent_failure(&entry.packet);
-                    }
                     1
                 }
             };

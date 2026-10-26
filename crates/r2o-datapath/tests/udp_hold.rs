@@ -228,6 +228,7 @@ fn r2o_udp_освобождает_голову_перед_raw_хвостом_и_
                 .push(format!("raw:{}", packet.packet[28] as char));
             Ok::<_, std::io::Error>(())
         },
+        |_| {},
         |id, verdict| {
             events.borrow_mut().push(format!("вердикт:{id}:{verdict}"));
             Ok::<_, std::io::Error>(())
@@ -261,6 +262,7 @@ fn r2o_udp_при_ошибке_вердикта_головы_не_обгоняе
             resent += 1;
             Ok::<_, std::io::Error>(())
         },
+        |_| {},
         |id, verdict| {
             verdicts.push((id, verdict));
             if id == 21 {
@@ -274,6 +276,64 @@ fn r2o_udp_при_ошибке_вердикта_головы_не_обгоняе
     assert_eq!(resent, 0);
     assert_eq!(stats.verdict_failures, 1);
     assert_eq!(verdicts, [(21, 1), (22, 1)]);
+}
+
+#[test]
+fn r2o_udp_постоянный_отказ_немедленного_raw_закрывает_follow() {
+    let now = Instant::now();
+    let mut table = R2oUdpHoldTable::new();
+    let head = r2o_udp_packet([192, 0, 2, 1], [198, 51, 100, 2], 50_000, 443, b"head");
+    let tail = r2o_udp_packet([192, 0, 2, 1], [198, 51, 100, 2], 50_000, 443, b"tail");
+    assert_eq!(table.r2o_feed(21, 0, &head, now), R2oUdpHoldFeed::Held);
+    assert_eq!(table.r2o_feed(22, 0, &tail, now), R2oUdpHoldFeed::Held);
+    let batch = table.r2o_take(&head).unwrap();
+    let mut follow = R2oUdpFollowTable::new();
+    assert!(follow.r2o_mark(&head, now, None, 7));
+
+    let stats = r2o_release_batch_with(
+        &batch,
+        1,
+        false,
+        true,
+        |_| true,
+        |_| Err(std::io::Error::other("permanent raw send failure")),
+        |packet| {
+            follow.r2o_mark_failed(&packet.packet);
+        },
+        |_, _| Ok(()),
+    );
+
+    assert_eq!(stats.resend_failed, 1);
+    assert!(follow.r2o_match(&tail, now, 7).unwrap().failed);
+}
+
+#[test]
+fn r2o_udp_busy_raw_отказ_не_закрывает_follow() {
+    let now = Instant::now();
+    let mut table = R2oUdpHoldTable::new();
+    let head = r2o_udp_packet([192, 0, 2, 1], [198, 51, 100, 2], 50_000, 443, b"head");
+    let tail = r2o_udp_packet([192, 0, 2, 1], [198, 51, 100, 2], 50_000, 443, b"tail");
+    assert_eq!(table.r2o_feed(31, 0, &head, now), R2oUdpHoldFeed::Held);
+    assert_eq!(table.r2o_feed(32, 0, &tail, now), R2oUdpHoldFeed::Held);
+    let batch = table.r2o_take(&head).unwrap();
+    let mut follow = R2oUdpFollowTable::new();
+    assert!(follow.r2o_mark(&head, now, None, 8));
+
+    let stats = r2o_release_batch_with(
+        &batch,
+        1,
+        false,
+        true,
+        |_| true,
+        |_| Err(std::io::Error::from_raw_os_error(libc::ENOBUFS)),
+        |packet| {
+            follow.r2o_mark_failed(&packet.packet);
+        },
+        |_, _| Ok(()),
+    );
+
+    assert_eq!(stats.resend_failed, 1);
+    assert!(!follow.r2o_match(&tail, now, 8).unwrap().failed);
 }
 
 #[test]
@@ -339,8 +399,7 @@ fn r2o_udp_отложенный_raw_хвост_получает_drop_тольк�
                 |id, verdict| {
                     events.borrow_mut().push((id, verdict));
                     Ok::<_, std::io::Error>(())
-                },
-                |_| {}
+                }
             )
             .flushed,
         0
@@ -355,10 +414,30 @@ fn r2o_udp_отложенный_raw_хвост_получает_drop_тольк�
             events.borrow_mut().push((id, 100 + verdict));
             Ok(())
         },
-        |_| {},
     );
     assert_eq!(stats.flushed, 1);
     assert_eq!(*events.borrow(), [(31, b't' as u32), (31, 100)]);
+}
+
+#[test]
+fn r2o_udp_отложенный_отказ_raw_не_закрывает_окно_следующих_хвостов() {
+    let now = Instant::now();
+    let due = now + Duration::from_millis(10);
+    let head = r2o_udp_packet([192, 0, 2, 1], [198, 51, 100, 2], 50_000, 443, b"head");
+    let tail = r2o_udp_packet([192, 0, 2, 1], [198, 51, 100, 2], 50_000, 443, b"tail");
+    let mut follow = R2oUdpFollowTable::new();
+    assert!(follow.r2o_mark(&head, now, Some(due), 9));
+    let mut deferred = R2oUdpDeferredResends::new();
+    assert!(deferred.r2o_enqueue(due, 31, &tail));
+
+    let stats = deferred.r2o_flush(
+        due,
+        |_, _| Err(std::io::Error::other("permanent raw send failure")),
+        |_, _| Ok(()),
+    );
+
+    assert_eq!(stats.resend_failed, 1);
+    assert!(!follow.r2o_match(&tail, due, 9).unwrap().failed);
 }
 
 #[test]
