@@ -8531,3 +8531,44 @@ Afterward the OpenWrt AArch64 musl release build and QEMU smoke passed again.
 This is a deterministic local socket differential and target-architecture smoke,
 not physical-router evidence. The router remains read-only and runs d2o; full
 field parity is not claimed.
+
+## Read-only d2o live catalog roundtrip in OpenWrt QEMU — 2026-10-26
+
+The router was read through `GET /api/status` only. Its fresh snapshot reports
+d2o release commit `a093cd600bd6d9c9d6676d7deccefdc887955ceb`, mode `apply`,
+both engine and controller running, and six boxes containing 12 plans and 45
+bindings. It reports 45 targets, 98 confirmations, 887 probes used, no active
+or queued measurements, and 98% free CPU. The catalog includes confirmed
+YouTube and Discord bindings. `GET /api/diagnostics?status` reports
+`enabled=false`; therefore this snapshot contains no live event trace to replay.
+
+The router commit and the pinned current donor `304ba893` were compared as
+committed trees. `core/sched.c`, `core/verify.c`, `core/meas.c`,
+`detect/classify.c`, `detect/raw.c`, `core/d2kc.c`, `core/httpsearch.c`, and
+`datapath/ctlsrv.c` are byte-identical. The local `E:\d2o` checkout is dirty and
+was not modified.
+
+For a same-state QEMU comparison, the `knowledge` object from that read-only
+HTTP response was written to a temporary WSL directory and passed to the
+released AArch64 OpenWrt-musl `r2o-controller` under `qemu-aarch64` using
+`--import-donor-catalog`, then `--check-catalog`. The temporary directory was
+removed after the run. A semantic comparison normalized only the donor plan
+header (`d2k-plan` to `r2o-plan`) and fields absent from the d2o JSON to their
+documented Rust defaults. Result: `normalized_box_state_equal=true`; both sides
+contain the same six boxes, 12 plans, and 45 bindings, and QEMU reports all 45
+bindings active. The imported R2O plan distribution is one QUIC, seven TLS, and
+four voice plans.
+
+REA's WSL `import-reference-source` records the donor at VCS HEAD
+`304ba893dd37197128ac8799c0495b035f6a38c0`, graph SHA-256
+`54c74f0472bc7bbd1491906f4d34a2184a0ed97186e61e71de0c67544d698d18`, with
+942 hashed files and zero parse failures; ignored build outputs are excluded.
+Native ELF function analysis remains unavailable in the configured Windows
+session (`ghidra` rejects ELF, Hopper does not support Windows, IDA is
+unconfigured, and objdump returns `ERR_REA_WINDOWS_NATIVE`).
+
+This is direct evidence that R2O preserves the router's current d2o catalog when
+loaded under target-architecture QEMU. It does not prove that the R2O scheduler
+would produce the same catalog from the router's past traffic: diagnostics are
+disabled, no matching event transcript is exposed, and the router still runs
+d2o. No router writes, service actions, or test traffic were sent.
