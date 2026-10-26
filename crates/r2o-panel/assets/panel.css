@@ -1104,6 +1104,32 @@ html.r2o-reveal-ready .sheet-head[data-r2o-reveal] { transition-property: opacit
 }
 
 
+/* Диагностика сохраняет компоненты нашей панели, повторяя управление и отчёт d2o. */
+.diagnostic-history { margin-top: 24px; padding: clamp(16px, 2.4vw, 24px); border: 1px solid var(--line); border-radius: 18px; background: var(--card-bg); }
+.diagnostic-history-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.diagnostic-history-head h3 { margin-top: 4px; font-size: 1.1rem; }
+.diagnostic-history-head > p { max-width: 440px; color: var(--ink-3); font-size: .875rem; }
+.diagnostic-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+.diagnostic-state { color: var(--ink-3); font-size: .875rem; }
+.diagnostic-state[data-enabled="true"] { color: var(--ok); }
+.diagnostic-status { margin-top: 12px; color: var(--ink-3); font-size: .875rem; }
+.diagnostic-data { margin-top: 18px; }
+.diagnostic-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.diagnostic-metrics > div { min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.025); }
+.diagnostic-metrics dt { color: var(--ink-3); font-size: .75rem; }
+.diagnostic-metrics dd { margin-top: 4px; font-weight: 800; }
+.diagnostic-table-wrap { margin-top: 14px; overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
+.diagnostic-processes { width: 100%; border-collapse: collapse; font-size: .875rem; }
+.diagnostic-processes caption { padding: 10px 14px; color: var(--ink-2); text-align: left; font-weight: 750; }
+.diagnostic-processes th, .diagnostic-processes td { padding: 9px 14px; border-top: 1px solid var(--line); text-align: left; white-space: nowrap; }
+.diagnostic-processes th { color: var(--ink-3); font-size: .75rem; font-weight: 700; }
+.diagnostic-processes td:first-child small { display: block; color: var(--ink-4); }
+@media (max-width: 700px) {
+  .diagnostic-history-head { display: block; }
+  .diagnostic-history-head > p { margin-top: 8px; }
+  .diagnostic-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 /* ─── Исправления ─── */
 
 /* 1. Появление при прокрутке. Правило с id (#now .search, #boxes-body .crate) перебивало

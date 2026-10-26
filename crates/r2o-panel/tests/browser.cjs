@@ -10,6 +10,7 @@ const { spawn } = require("node:child_process");
 const root = path.resolve(__dirname, "../../..");
 const assets = path.join(root, "crates/r2o-panel/assets");
 const panelUi = require(path.join(assets, "panel.js"));
+const diagnosticsUi = require(path.join(assets, "diagnostics.js"));
 const work = fs.mkdtempSync(path.join(os.tmpdir(), "r2o-panel-browser-"));
 const chromeProfile = path.join(work, "chrome");
 const panelBinary = process.env.R2O_PANEL_BIN || path.join(root, "target/debug/r2o-panel");
@@ -49,6 +50,7 @@ async function main() {
   assert.equal(panelUi.voiceProofNote({ transport: 17, shape: 5, verified_by: 5 }), "Двусторонний RTP подтверждён; качество аудио не измерялось", "RTP-подтверждение не выдаётся за качество аудио");
   assert.equal(panelUi.voiceProofNote({ transport: 17, shape: 5, verified_by: 0 }), "RTP не проверен", "голосовая привязка без источника подтверждения не заявляет RTP");
   assert.equal(panelUi.voiceProofNote({ transport: 6, shape: 5, verified_by: 3 }), "", "заметка RTP не показывается для TCP");
+  assert.equal(diagnosticsUi.summary({ samples: [{ at: 1, processes: [], bindings: 0, plans: 0 }], events: [{ outcome: "failed" }, { outcome: "queue-expired" }, { outcome: "plan-found" }] }).includes("без подтверждённого результата: 2"), true, "диагностика считает отказ и истёкшую очередь неподтверждёнными исходами");
   assert.ok(fs.existsSync(panelBinary), `Не найден исполняемый файл панели: ${panelBinary}`);
   fs.mkdirSync(chromeProfile, { recursive: true });
 
@@ -57,6 +59,7 @@ async function main() {
   const serviceLog = path.join(work, "service.log");
   const servicePath = path.join(work, "service.sh");
   const livePath = path.join(work, "live.json");
+  fs.mkdirSync(path.join(work, "state"), { recursive: true });
   const enginePidPath = path.join(work, "engine.pid");
   const controllerPidPath = path.join(work, "controller.pid");
   fs.writeFileSync(configPath, `MODE=observe\nSTATE_DIR=${path.join(work, "state")}\nQUEUE_NUM=2000\nQUEUE_NUM6=2001\nR2O_FLOW_CAPACITY=2048\nIPV6_ENABLED=1\nMARK=45\nPROBE_MARK=0\nONLY_MARK=\nFW_BACKEND=auto\nPORTS=0:65535\nCONNBYTES=0:8\nVOICE_PORTS=50000:50099,1400,3478:3481,5349,19294:19344\nVOICE_CONNBYTES=0:4\nHTTP_KEEPALIVE_PORTS=80\nDNS_PORTS=53,853\nTG_PORT=1443\nR2O_PPE_DEOFFLOAD=1\nLOGMAX=2097152\nLOGKEEP=1048576\nLOG_EVERY=60\n`);
@@ -145,6 +148,24 @@ async function main() {
       plan: "",
       application: "обход не подтверждён",
       last_result: "TLS-рукопожатие не завершилось: Resource temporarily unavailable (os error 11)",
+      shape: 1,
+    },
+    {
+      target: "starting.example",
+      family: 4,
+      transport: 6,
+      ip: "192.0.2.8",
+      port: 443,
+      phase: "заводим поиск",
+      since: new Date().toISOString(),
+      attempts: 0,
+      probes: 0,
+      question: "",
+      candidate: "",
+      source: "",
+      plan: "",
+      application: "",
+      last_result: "",
       shape: 1,
     }
   );
@@ -245,6 +266,12 @@ async function main() {
   await call("Page.navigate", { url: `http://localhost:${port}/` });
   await waitFor(() => evaluate("document.readyState === 'complete' && !!document.querySelector('#app')"), "загрузка страницы R2O");
   await evaluate("document.fonts.ready.then(() => true)");
+  await waitFor(() => evaluate("!!document.querySelector('#diagnostic-toggle')"), "загрузка управления диагностикой");
+  await evaluate("document.querySelector('#diagnostic-toggle').click()");
+  await waitFor(() => evaluate("document.querySelector('#diagnostic-state').dataset.enabled === 'true'"), "включение локальной диагностики");
+  assert.equal(await evaluate("document.querySelector('#diagnostic-download').hidden"), true, "скачивание ждёт первого снимка контроллера");
+  await evaluate("document.querySelector('#diagnostic-toggle').click()");
+  await waitFor(() => evaluate("document.querySelector('#diagnostic-state').dataset.enabled === 'false'"), "выключение диагностики с удалением истории");
 
   assert.equal(await evaluate("document.title.includes('R2O')"), true, "заголовок страницы панели");
   assert.equal(await evaluate("document.querySelectorAll('#app > section').length"), 7, "все разделы панели отображаются");
@@ -256,7 +283,9 @@ async function main() {
   await waitFor(() => evaluate("document.querySelector('.search-plan code')?.textContent === 'split sni_middle +0 · fake payload=1 poison=1…'"), "план текущей пробы в карточке Discovery");
   assert.equal(await evaluate("document.querySelector('.search-plan-result').textContent.includes('точный APPLIED получен') && document.querySelector('.search-plan-result').textContent.includes('полный HTTPS-ответ HTTP 200')"), true, "карточка показывает APPLIED и последний результат проверки плана");
   await waitFor(() => evaluate("[...document.querySelectorAll('.search-question')].some((row) => !row.hidden && row.textContent.includes('whole · проверок: 1'))"), "текущий вопрос классификатора в карточке Discovery");
-  assert.equal(await evaluate("document.querySelectorAll('#searches .search').length"), 4, "очередь и активные стадии представлены отдельными карточками");
+  assert.equal(await evaluate("document.querySelectorAll('#searches .search').length"), 4, "активные стадии представлены карточками, очередь выделена отдельно");
+  assert.equal(await evaluate("document.querySelectorAll('#searches .queue-list .queue-target').length"), 1, "ожидающие замера собраны в список D2O");
+  assert.equal(await evaluate("(() => { const row = [...document.querySelectorAll('#searches .search')].find((item) => item.querySelector('.search-target')?.textContent === 'starting.example'); return row?.querySelector('.search-phase')?.textContent === 'Заводим поиск' && row.querySelector('.search-clock').textContent.includes('идёт') && !row.querySelector('.search-clock').textContent.includes('в очереди'); })()"), true, "фаза запуска совпадает с D2O и не дублирует отдельную очередь");
   assert.equal(await evaluate("[...document.querySelectorAll('.search')].some((row) => row.textContent.includes('TLS-рукопожатие не завершилось') && row.querySelector('.search-plan-result') && row.querySelector('.search-plan')?.hidden === true)"), true, "причина отказа видна и без найденного плана");
   assert.equal(await evaluate("[...document.querySelectorAll('.search .track')].every((track) => track.querySelectorAll('.track-step').length === 7 && track.querySelector('.track-step:last-child').textContent === 'Подтверждено')"), true, "карточка использует исходные семь этапов d2o");
   const liveSearch = liveState.searches.find((search) => search.target === "classifying.example");

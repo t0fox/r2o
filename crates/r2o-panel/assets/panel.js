@@ -186,11 +186,12 @@
     var engine = !!snap.engine_running;
     var searches = linked ? list(k.searches) : [];
     var QUEUED = "ожидает безопасного слота замера";
+    var active = searches.filter(function (s) { return s.phase !== "подтверждено, смотрим живой трафик"; });
     var m = {
       snap: snap, k: k, linked: linked, engine: engine,
       fresh: snap.live_fresh !== false,
-      searches: searches, hunting: searches.length,
-      running: searches,
+      searches: searches, hunting: active.length,
+      running: searches.filter(function (s) { return s.phase !== QUEUED; }),
       queued: searches.filter(function (s) { return s.phase === QUEUED; }),
       groups: list(k.groups), boxes: list(k.boxes),
       mode: str(snap.mode) || "observe"
@@ -1360,6 +1361,7 @@
     var stable = [];
     for (var si = 0; si < listNode.children.length; si++) if (!listNode.children[si].__leaving) stable.push(listNode.children[si]);
     var wantKeys = m.running.map(function (x) { return JSON.stringify([x.target, x.family, x.transport, x.ip, x.port]); });
+    if (m.queued.length) wantKeys.push("queue");
     var haveKeys = stable.map(function (r) { return r.__r2oKey; });
     var flipState = animate && stable.length && wantKeys.join("\n") !== haveKeys.join("\n") ? Motion.Flip.getState(stable) : null;
     if (flipState) stable.forEach(function (r) { r.__oldTop = r.getBoundingClientRect().top; });
@@ -1381,6 +1383,14 @@
       self.updateSearch(row, s);
       if (listNode.children[index] !== row) { listNode.insertBefore(row, listNode.children[index] || null); moved = true; }
     });
+    var queue = null;
+    for (var q = 0; q < listNode.children.length; q++) if (listNode.children[q].__r2oKey === "queue") queue = listNode.children[q];
+    if (m.queued.length) {
+      if (!queue) { queue = el(doc, "li", "queue"); queue.__r2oKey = "queue"; }
+      keep.queue = true;
+      this.updateQueue(queue, m.queued);
+      if (listNode.lastChild !== queue) { listNode.appendChild(queue); moved = true; }
+    }
     var leaving = [];
     for (var j = listNode.children.length - 1; j >= 0; j--) {
       var gone = listNode.children[j];
@@ -1415,6 +1425,28 @@
     if (entered.length && !firstLive) {
       Motion.g.fromTo(entered, { y: 28, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.6, stagger: 0.08, ease: "power4.out", clearProps: "transform,opacity,visibility" });
     }
+  };
+
+  App.prototype.updateQueue = function (li, queued) {
+    var doc = this.doc;
+    var key = JSON.stringify(queued.map(function (s) { return [s.target, s.family, s.transport, s.ip, s.port, s.since]; }));
+    if (li.__r2oData !== key) {
+      li.__r2oData = key;
+      var head = el(doc, "p", "queue-head");
+      add(head, el(doc, "b", "", "Ждут свободного слота замера: " + queued.length),
+        " — замеры идут не больше, чем позволяет свободный процессор.");
+      var ul = el(doc, "ul", "queue-list");
+      queued.forEach(function (s) {
+        var row = el(doc, "li"), wait = el(doc, "span", "queue-wait");
+        wait.__since = parseTime(s.since);
+        add(row, el(doc, "span", "queue-target", targetLabel(s.target)),
+          tag(doc, shapeLabel(s.shape, s.transport)), tag(doc, familyLabel(s.family)), wait);
+        ul.appendChild(row);
+      });
+      li.replaceChildren(head, ul);
+    }
+    var waits = li.querySelectorAll(".queue-wait"), now = this.serverNow();
+    for (var i = 0; i < waits.length; i++) waits[i].textContent = waits[i].__since ? "ждёт " + clock(now - waits[i].__since) : "";
   };
 
   App.prototype.searchRow = function (s) {
@@ -1461,7 +1493,6 @@
     var counters = [];
     if (num(s.attempts)) counters.push(count(s.attempts, "план", "плана", "планов"));
     if (num(s.probes)) counters.push(count(s.probes, "зонд", "зонда", "зондов"));
-    if (phase === TRACK[0].phases[0]) counters.push("в очереди");
     li.__counters = counters.join(" · ");
     this.updateClock(li);
 
@@ -1490,7 +1521,7 @@
     ].filter(Boolean).join(" · ");
     p.planResult.hidden = !planResult;
     if (p.planResult.textContent !== planResult) p.planResult.textContent = planResult;
-    var asking = (s.phase === TRACK[2].phases[0] || s.phase === TRACK[3].phases[0]) && !!str(s.question);
+    var asking = s.phase === TRACK[2].phases[0] && !!str(s.question);
     p.question.hidden = !asking;
     var qText = asking ? "Вопрос коробке: " + str(s.question) : "";
     if (p.question.textContent !== qText) p.question.textContent = qText;
@@ -1541,6 +1572,7 @@
     var rows = this.$("searches").children;
     for (var i = 0; i < rows.length; i++) {
       if (rows[i].__parts) this.updateClock(rows[i]);
+      else if (rows[i].__r2oKey === "queue") this.updateQueue(rows[i], this.m ? this.m.queued : []);
     }
     var staleBefore = bodyAttribute(this.doc, "data-stale");
     this.renderNotice();

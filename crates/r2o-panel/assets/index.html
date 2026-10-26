@@ -15,6 +15,7 @@
   <script src="/assets/telegram-flow.js" defer></script>
   <script src="/assets/telegram-flow-prototype.js" defer></script>
   <script src="/assets/panel.js" defer></script>
+  <script src="/assets/diagnostics.js" defer></script>
   <script src="/assets/panel-motion.js" defer></script>
   <script src="/assets/panel-lava.js" defer></script>
 </head>
@@ -258,6 +259,33 @@
           <p>Что движок может подтвердить сам, чего не измеряет, и с какими настройками запущен.</p>
         </header>
         <div id="diagnostics-body"></div>
+        <section class="diagnostic-history" aria-labelledby="diagnostic-history-title">
+          <header class="diagnostic-history-head">
+            <div><span class="kicker">Локально на роутере</span><h3 id="diagnostic-history-title">Снимок и история поиска</h3></div>
+            <p>Сбор выключен по умолчанию. При включении данные остаются в закрытом каталоге и обновляются раз в минуту.</p>
+          </header>
+          <div class="diagnostic-controls">
+            <button type="button" class="btn" data-variant="primary" id="diagnostic-toggle">Включить сбор</button>
+            <a class="btn" id="diagnostic-download" href="/api/diagnostics?download" download="r2o-diagnostics.json" hidden>Скачать JSON</a>
+            <span id="diagnostic-state" class="diagnostic-state" data-enabled="false">Сбор выключен</span>
+          </div>
+          <p id="diagnostic-status" class="diagnostic-status" role="status" aria-live="polite">Загружаем состояние диагностики…</p>
+          <div id="diagnostic-data" class="diagnostic-data" hidden>
+            <dl class="diagnostic-metrics">
+              <div><dt>Исходы поиска</dt><dd id="diagnostic-events">0 / 64</dd></div>
+              <div><dt>Без результата</dt><dd id="diagnostic-unconfirmed">0</dd></div>
+              <div><dt>Каталог</dt><dd id="diagnostic-catalog">0 / 0</dd></div>
+              <div><dt>Снимки</dt><dd id="diagnostic-samples">0 / 120</dd></div>
+            </dl>
+            <div class="diagnostic-table-wrap">
+              <table class="diagnostic-processes">
+                <caption>Память процессов, МиБ</caption>
+                <thead><tr><th scope="col">Процесс</th><th scope="col">Сейчас</th><th scope="col">Изменение за историю PID</th></tr></thead>
+                <tbody id="diagnostic-processes"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
       </section>
 
       <footer class="foot">

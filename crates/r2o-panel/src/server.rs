@@ -261,6 +261,13 @@ pub fn handle_request(config: &Config, raw: &[u8]) -> Response {
         }
         return api_update(config);
     }
+    if request.path == "/api/diagnostics" {
+        if !matches!(request.method, "GET" | "POST") {
+            return Response::new(405, "text/plain; charset=utf-8", Vec::new())
+                .header("Cache-Control", "no-store");
+        }
+        return api_diagnostics(config, &request);
+    }
     if request.path.starts_with("/api/control/") {
         if request.method != "POST" {
             return text_response(405, "method not allowed\n");
@@ -287,6 +294,11 @@ pub fn handle_request(config: &Config, raw: &[u8]) -> Response {
         (
             "/assets/panel.js",
             "panel.js",
+            "application/javascript; charset=utf-8",
+        ),
+        (
+            "/assets/diagnostics.js",
+            "diagnostics.js",
             "application/javascript; charset=utf-8",
         ),
         (
@@ -531,6 +543,196 @@ fn json_response(status: u16, value: &Value) -> Response {
         "application/json; charset=utf-8",
         serde_json::to_vec(value).unwrap_or_else(|_| b"{}".to_vec()),
     )
+}
+
+const DIAGNOSTICS_REPORT_MAX: u64 = 256 * 1024;
+
+fn diagnostic_response(status: u16, body: impl Into<Vec<u8>>) -> Response {
+    Response::new(status, "application/json; charset=utf-8", body)
+        .header("Cache-Control", "no-store")
+}
+
+fn api_diagnostics(config: &Config, request: &Request<'_>) -> Response {
+    let dir = config.state_dir.join("diagnostics");
+    if request.method == "POST" {
+        if !config.control_enabled || !same_origin(request) {
+            return diagnostic_response(
+                403,
+                "{\"error\":\"требуется запрос с того же источника\"}"
+                    .as_bytes()
+                    .to_vec(),
+            );
+        }
+        if !matches!(request.query, "enable" | "disable") {
+            return diagnostic_response(400, b"{}".to_vec());
+        }
+        if diagnostics_toggle(&dir, request.query == "enable").is_err() {
+            return diagnostic_response(
+                500,
+                "{\"error\":\"не удалось изменить состояние диагностики\"}"
+                    .as_bytes()
+                    .to_vec(),
+            );
+        }
+        return diagnostic_response(
+            200,
+            if diagnostics_enabled(&dir) {
+                b"{\"enabled\":true}".to_vec()
+            } else {
+                b"{\"enabled\":false}".to_vec()
+            },
+        );
+    }
+    if !diagnostics_enabled(&dir) {
+        return diagnostic_response(200, b"{\"enabled\":false}".to_vec());
+    }
+    if request.query == "status" {
+        return diagnostic_response(200, b"{\"enabled\":true}".to_vec());
+    }
+    let path = dir.join("report.json");
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return diagnostic_response(503, b"{\"enabled\":true,\"pending\":true}".to_vec());
+            }
+            Err(_) => {
+                return Response::new(500, "text/plain; charset=utf-8", Vec::new())
+                    .header("Cache-Control", "no-store");
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return diagnostic_response(503, b"{\"enabled\":true,\"pending\":true}".to_vec());
+        }
+        Err(_) => {
+            return Response::new(500, "text/plain; charset=utf-8", Vec::new())
+                .header("Cache-Control", "no-store");
+        }
+    };
+    let Ok(metadata) = file.metadata() else {
+        return Response::new(500, "text/plain; charset=utf-8", Vec::new())
+            .header("Cache-Control", "no-store");
+    };
+    if !metadata.is_file() || metadata.len() > DIAGNOSTICS_REPORT_MAX {
+        return Response::new(500, "text/plain; charset=utf-8", Vec::new())
+            .header("Cache-Control", "no-store");
+    }
+    let mut body = Vec::with_capacity(metadata.len() as usize);
+    if file
+        .take(DIAGNOSTICS_REPORT_MAX + 1)
+        .read_to_end(&mut body)
+        .is_err()
+        || body.len() as u64 > DIAGNOSTICS_REPORT_MAX
+    {
+        return Response::new(503, "text/plain; charset=utf-8", Vec::new())
+            .header("Cache-Control", "no-store");
+    }
+    let response = Response::new(200, "application/json; charset=utf-8", body)
+        .header("Cache-Control", "no-store");
+    if request.query == "download" {
+        response.header(
+            "Content-Disposition",
+            "attachment; filename=\"r2o-diagnostics.json\"",
+        )
+    } else {
+        response
+    }
+}
+
+fn diagnostics_dir_valid(dir: &Path, create: bool) -> bool {
+    if create {
+        match fs::create_dir(dir) {
+            Ok(()) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).is_err() {
+                        return false;
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return false,
+        }
+    }
+    let Ok(metadata) = fs::symlink_metadata(dir) else {
+        return false;
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        metadata.uid() == unsafe { libc::geteuid() } && metadata.permissions().mode() & 0o077 == 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn diagnostics_enabled(dir: &Path) -> bool {
+    if !diagnostics_dir_valid(dir, false) {
+        return false;
+    }
+    let Ok(metadata) = fs::symlink_metadata(dir.join("enabled")) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        metadata.uid() == unsafe { libc::geteuid() } && metadata.permissions().mode() & 0o077 == 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn diagnostics_toggle(dir: &Path, enabled: bool) -> std::io::Result<()> {
+    if !diagnostics_dir_valid(dir, true) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "каталог диагностики небезопасен",
+        ));
+    }
+    let marker = dir.join("enabled");
+    if enabled {
+        if diagnostics_enabled(dir) {
+            return Ok(());
+        }
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(marker)?.sync_all()
+    } else {
+        for name in ["enabled", "report.json", "report.new"] {
+            match fs::remove_file(dir.join(name)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
 }
 
 fn api_status(config: &Config, query: &str) -> Response {

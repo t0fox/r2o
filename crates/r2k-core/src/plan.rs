@@ -452,7 +452,12 @@ impl Plan {
             && self.qdeny == 0
             && self.ipfrag == 0
             && self.udplen == 0
-            && self.poisons.is_empty()
+            && self.poisons.iter().all(|poison| {
+                poison.ttl == 0
+                    && poison.flags == 0
+                    && poison.seq_shift == 0
+                    && poison.autottl.is_none()
+            })
             && !self.fakes.is_empty()
     }
 

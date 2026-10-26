@@ -42,6 +42,91 @@ fn panel_default_listens_on_router_interfaces() {
     assert_eq!(Config::default().panel_listen, "0.0.0.0:8090");
 }
 
+#[cfg(unix)]
+#[test]
+fn diagnostics_api_matches_d2o_opt_in_download_and_same_origin_contract() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new();
+    let state = temp.file("state");
+    fs::create_dir(&state).unwrap();
+    let mut config = Config::default();
+    config.state_dir = state.clone();
+    config.control_enabled = true;
+
+    let disabled = handle_request(
+        &config,
+        b"GET /api/diagnostics?report HTTP/1.1\r\nHost: router.local\r\n\r\n",
+    );
+    assert_eq!(disabled.status, 200);
+    assert_eq!(disabled.body, br#"{"enabled":false}"#);
+    assert!(
+        disabled
+            .headers
+            .iter()
+            .any(|(name, value)| name == "Cache-Control" && value == "no-store")
+    );
+
+    let forged = handle_request(
+        &config,
+        b"POST /api/diagnostics?enable HTTP/1.1\r\nHost: router.local\r\nOrigin: http://attacker.local\r\nContent-Length: 0\r\n\r\n",
+    );
+    assert_eq!(forged.status, 403);
+
+    let enabled = handle_request(
+        &config,
+        b"POST /api/diagnostics?enable HTTP/1.1\r\nHost: router.local\r\nOrigin: http://router.local\r\nContent-Length: 0\r\n\r\n",
+    );
+    assert_eq!(enabled.status, 200);
+    let dir = state.join("diagnostics");
+    assert_eq!(
+        fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        fs::metadata(dir.join("enabled"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+
+    let pending = handle_request(
+        &config,
+        b"GET /api/diagnostics?report HTTP/1.1\r\nHost: router.local\r\n\r\n",
+    );
+    assert_eq!(pending.status, 503);
+    assert_eq!(pending.body, br#"{"enabled":true,"pending":true}"#);
+    fs::write(
+        dir.join("report.json"),
+        br#"{"schema":1,"events":[],"samples":[]}"#,
+    )
+    .unwrap();
+    let download = handle_request(
+        &config,
+        b"GET /api/diagnostics?download HTTP/1.1\r\nHost: router.local\r\n\r\n",
+    );
+    assert_eq!(download.status, 200);
+    assert!(download.headers.iter().any(
+        |(name, value)| name == "Content-Disposition" && value.contains("r2o-diagnostics.json")
+    ));
+    assert!(
+        download
+            .headers
+            .iter()
+            .any(|(name, value)| name == "Cache-Control" && value == "no-store")
+    );
+
+    let disabled = handle_request(
+        &config,
+        b"POST /api/diagnostics?disable HTTP/1.1\r\nHost: router.local\r\nOrigin: http://router.local\r\nContent-Length: 0\r\n\r\n",
+    );
+    assert_eq!(disabled.status, 200);
+    assert!(!dir.join("enabled").exists());
+    assert!(!dir.join("report.json").exists());
+}
+
 #[test]
 fn status_without_live_file_returns_the_panel_contract() {
     let mut config = Config::default();

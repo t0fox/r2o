@@ -2,6 +2,7 @@ pub mod ask;
 pub mod catalog;
 pub mod classify;
 mod classify_measured;
+pub mod diagnostics;
 pub mod discovery;
 pub mod domain;
 pub mod ech;

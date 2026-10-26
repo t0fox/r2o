@@ -8763,6 +8763,54 @@ impl DiscoveryWorker {
             .collect()
     }
 
+    fn r2o_diagnostic_event(
+        &self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+    ) -> serde_json::Value {
+        let now = std::time::Instant::now();
+        let searches = self
+            .searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = searches.entries.get(&r2o_discovery_task_key(target));
+        let endpoint = target.endpoint.parse::<std::net::SocketAddr>().ok();
+        let (elapsed_ms, queue_ms, probes, source) =
+            entry.map_or((None, None, None, String::new()), |entry| {
+                (
+                    entry
+                        .started_at
+                        .map(|started| now.saturating_duration_since(started).as_millis() as u64),
+                    entry.started_at.map(|started| {
+                        started
+                            .saturating_duration_since(entry.queued_at)
+                            .as_millis() as u64
+                    }),
+                    Some(entry.probes),
+                    entry.source.clone(),
+                )
+            });
+        let protocol = match target.shape {
+            SHAPE_HTTP => "http",
+            SHAPE_QUIC => "quic",
+            SHAPE_VOICE => "discovery",
+            _ => "tcp",
+        };
+        serde_json::json!({
+            "family": target.family,
+            "trigger": null,
+            "elapsed_ms": elapsed_ms,
+            "queue_ms": queue_ms,
+            "probe_units": probes,
+            "target": target.host,
+            "ip": endpoint.map(|address| address.ip().to_string()),
+            "path": source,
+            "kind": if target.host.parse::<std::net::IpAddr>().is_ok() { "addr" } else { "name" },
+            "shape": target.shape,
+            "protocol": protocol,
+            "reason_source": "last-classifier-context"
+        })
+    }
+
     fn r2o_live_status(
         &self,
         catalog: &Catalog,
@@ -11771,11 +11819,51 @@ impl ControlClient {
                 .as_ref()
                 .map(|(_, path)| path.with_file_name("live.json"))
         });
+        let mut diagnostics = live_path
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(|directory| {
+                r2o_controller::diagnostics::Recorder::new(directory.join("diagnostics"))
+            });
         let mut live_written_at = None;
         let run_result = (|| -> Result<(), Box<dyn Error>> {
             loop {
                 if R2O_CONTROLLER_STOP.load(Ordering::Relaxed) {
                     break Ok(());
+                }
+                if let Some(diagnostics) = diagnostics.as_mut() {
+                    diagnostics.tick(|| {
+                        let catalog = discovery
+                            .as_ref()
+                            .map(|(_, catalog, _, _)| catalog)
+                            .or_else(|| live_catalog.as_ref().map(|(catalog, _)| catalog));
+                        let measurements = measurement_gate.r2o_live_snapshot();
+                        let tasks = discovery
+                            .as_ref()
+                            .map(|(worker, _, _, _)| {
+                                worker.r2o_live_searches(std::time::Instant::now()).len()
+                            })
+                            .unwrap_or_default();
+                        r2o_controller::diagnostics::Counts {
+                            boxes: catalog.map_or(0, |catalog| catalog.boxes.len()),
+                            bindings: catalog.map_or(0, |catalog| {
+                                catalog
+                                    .boxes
+                                    .iter()
+                                    .map(|record| record.bindings.len())
+                                    .sum()
+                            }),
+                            plans: catalog.map_or(0, |catalog| {
+                                catalog.boxes.iter().map(|record| record.plans.len()).sum()
+                            }),
+                            observations: catalog
+                                .and_then(|catalog| catalog.domain_state.as_ref())
+                                .map_or(0, |state| state.observations.len()),
+                            active: measurements.active,
+                            queued: measurements.queued,
+                            tasks,
+                        }
+                    });
                 }
                 if r2o_scheduler_tick_pending && self.pending_events.is_empty() {
                     if wait_for_control_frame(&self.socket, std::time::Duration::ZERO)? {
@@ -11992,6 +12080,23 @@ impl ControlClient {
                     && let Some(outcome) = worker.try_outcome()
                 {
                     let target = outcome.target.clone();
+                    if let Some(diagnostics) = diagnostics.as_mut() {
+                        let mut diagnostic = worker.r2o_diagnostic_event(&target);
+                        diagnostic["outcome"] = serde_json::Value::String(
+                            if outcome.plan_text.is_some() {
+                                "plan-found"
+                            } else if outcome.direct_clear {
+                                "direct-clear"
+                            } else if outcome.queue_expired {
+                                "queue-expired"
+                            } else {
+                                "inconclusive"
+                            }
+                            .into(),
+                        );
+                        diagnostic["reason"] = serde_json::Value::String(outcome.detail.clone());
+                        diagnostics.record(diagnostic);
+                    }
                     let has_candidate = outcome.plan_text.is_some();
                     let client_input = worker.take_client_snapshot_provenance(&outcome.target)
                         && outcome.plan_text.is_some();
@@ -12272,6 +12377,24 @@ impl ControlClient {
                 }
                 if let Some(outcome) = http_search.as_ref().and_then(HttpSearchWorker::try_outcome)
                 {
+                    if let Some(diagnostics) = diagnostics.as_mut() {
+                        diagnostics.record(serde_json::json!({
+                            "family": outcome.target.family,
+                            "trigger": null,
+                            "elapsed_ms": null,
+                            "queue_ms": null,
+                            "probe_units": null,
+                            "target": outcome.target.host,
+                            "ip": outcome.target.endpoint.parse::<std::net::SocketAddr>().ok().map(|endpoint| endpoint.ip().to_string()),
+                            "path": "http-search",
+                            "kind": "name",
+                            "shape": outcome.target.shape,
+                            "protocol": "http",
+                            "outcome": format!("{:?}", outcome.disposition).to_ascii_lowercase(),
+                            "reason": outcome.result.as_ref().err().cloned().unwrap_or_default(),
+                            "reason_source": "http-search-result"
+                        }));
+                    }
                     self.complete_http_search(
                         &outcome.target,
                         outcome.disposition,

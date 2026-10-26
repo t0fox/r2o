@@ -3526,6 +3526,48 @@ mod tests {
     }
 
     #[test]
+    fn d2o_quic_fake_plans_allow_empty_poison_records_and_repeats() {
+        for (repeats, payload_len) in [(1, 16), (6, 1200), (11, 620)] {
+            let mut payload = vec![0, 1];
+            payload.extend(vec![0; payload_len]);
+            let plan = Plan::parse(&plan_bytes(
+                1,
+                &[
+                    tlv(0x0002, &[17, 2]),
+                    tlv(0x0010, &payload),
+                    tlv(0x0011, &[0, 1, 0, 0, 0, 0, 0, 0]),
+                    tlv(0x0101, &[0, 1, 0, 1, repeats, 0, 0, 0, 0, 0]),
+                ],
+            ))
+            .unwrap();
+
+            assert!(plan.r2k_is_quic_fake_probe());
+            assert!(plan.r2k_is_quic_address_plan());
+            assert!(validate_runtime_plan(&plan).is_ok());
+            let PacketDecision::Transmit { packets, fate } = decide(&plan, &ipv4_udp(V1_INITIAL))
+            else {
+                panic!("D2O QUIC fake план должен отправить свои повторы");
+            };
+            assert_eq!(fate, OriginalFate::Pass);
+            assert_eq!(packets.len(), usize::from(repeats));
+            for packet in packets {
+                assert_eq!(packet.kind, EmitKind::Fake);
+                assert_eq!(packet.delay_us, 0);
+                let view = PacketView::parse(&packet.packet).unwrap();
+                let range = view.udp_payload_range(&packet.packet).unwrap();
+                let emitted = &packet.packet[range];
+                assert_eq!(emitted.len(), payload_len);
+                assert!(emitted.iter().all(|byte| *byte == 0));
+                assert_udp_checksum_valid(&packet.packet);
+            }
+            assert_eq!(
+                decide(&plan, &ipv4_udp(b"ordinary UDP")),
+                PacketDecision::Accept
+            );
+        }
+    }
+
+    #[test]
     fn r2o_quic_ttl_probe_emits_two_exact_fakes_with_ttl_three() {
         let plan = r2o_quic_ttl_probe_plan();
         assert!(plan.r2k_is_quic_ttl_probe());
