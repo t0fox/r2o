@@ -2,6 +2,8 @@
 
 pub const R2O_DISCOVERY_EXCHANGES: u8 = 25;
 pub const R2O_DISCOVERY_REPEATS: usize = 3;
+const R2O_DISCOVERY_UNMARKED_REASON: &str =
+    "Discord IP Discovery: местная ошибка или неподтверждённая метка; кандидат не ставлю";
 
 pub fn r2o_voice_arm_plan_text(r2o_prefix: &[u8; 20]) -> String {
     let r2o_prefix_hex: String = r2o_prefix
@@ -285,7 +287,7 @@ where
             return R2oDiscoverySearchResult {
                 trace: r2o_trace,
                 verdict: R2oDiscoveryVerdict::Unmeasured,
-                error: None,
+                error: (!r2o_outcome.probe.marked).then(|| R2O_DISCOVERY_UNMARKED_REASON.into()),
             };
         }
         if r2o_outcome.probe.sent == R2O_DISCOVERY_EXCHANGES
@@ -313,7 +315,7 @@ where
             return R2oDiscoverySearchResult {
                 trace: r2o_trace,
                 verdict: R2oDiscoveryVerdict::Unmeasured,
-                error: None,
+                error: (!r2o_outcome.probe.marked).then(|| R2O_DISCOVERY_UNMARKED_REASON.into()),
             };
         }
         let r2o_is_first_direct_probe = r2o_trace.direct_probes.len() == 1;
@@ -395,7 +397,7 @@ where
             return R2oDiscoverySearchResult {
                 trace: r2o_trace,
                 verdict: R2oDiscoveryVerdict::Unmeasured,
-                error: None,
+                error: (!r2o_outcome.probe.marked).then(|| R2O_DISCOVERY_UNMARKED_REASON.into()),
             };
         }
         if r2o_outcome.probe.sent != R2O_DISCOVERY_EXCHANGES
@@ -432,19 +434,6 @@ pub fn r2o_search_discovery_endpoint(
     r2o_wait: std::time::Duration,
     r2o_mark: Option<u32>,
 ) -> R2oDiscoverySearchResult {
-    if r2o_mark.is_none_or(|r2o_mark| r2o_mark == 0) {
-        return R2oDiscoverySearchResult {
-            trace: R2oDiscoveryTrace {
-                known_prefix: r2o_known_prefix,
-                known_prefix_probe: None,
-                direct_probes: Vec::new(),
-                candidate_prefix: None,
-                candidate_probes: Vec::new(),
-            },
-            verdict: R2oDiscoveryVerdict::Unmeasured,
-            error: Some("автоматический поиск требует ненулевую метку маршрутизации".into()),
-        };
-    }
     r2o_search_discovery_with(
         r2o_known_prefix,
         || {
@@ -485,18 +474,12 @@ pub fn r2o_probe_discovery_endpoint(
         if r2o_prefix.is_some() && !r2o_probe.marked {
             return Err("кандидатный зонд требует подтверждённую ненулевую метку".into());
         }
-        if let Some(r2o_mark) = r2o_mark
-            && r2o_mark == 0
-        {
-            return Err("метка зонда должна быть ненулевой".into());
-        }
-
         let r2o_socket = UdpSocket::bind(std::net::SocketAddrV4::new(
             std::net::Ipv4Addr::UNSPECIFIED,
             0,
         ))
         .map_err(|error| format!("не открыть UDP-сокет Discovery: {error}"))?;
-        if let Some(r2o_mark) = r2o_mark {
+        if let Some(r2o_mark) = r2o_mark.filter(|r2o_mark| *r2o_mark != 0) {
             r2o_set_socket_mark(r2o_socket.as_raw_fd(), r2o_mark)
                 .map_err(|error| format!("не подтвердить метку UDP-сокета: {error}"))?;
         }
@@ -1173,6 +1156,54 @@ mod tests {
         assert_eq!(r2o_result.probe.sent, R2O_DISCOVERY_EXCHANGES);
         assert_eq!(r2o_result.probe.received, R2O_DISCOVERY_EXCHANGES);
         assert!(!r2o_result.probe.marked);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn r2o_непомеченный_поиск_делает_одну_прямую_пробу_как_донор() {
+        use super::{R2oDiscoveryVerdict, r2o_search_discovery_endpoint};
+        use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+        use std::thread;
+        use std::time::Duration;
+
+        let r2o_server = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        r2o_server
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let r2o_address = match r2o_server.local_addr().unwrap() {
+            std::net::SocketAddr::V4(address) => address,
+            _ => unreachable!(),
+        };
+        let r2o_server_thread = thread::spawn(move || {
+            let mut r2o_lengths = Vec::new();
+            let mut r2o_request = [0; 128];
+            for _ in 0..2 {
+                if let Ok((length, _)) = r2o_server.recv_from(&mut r2o_request) {
+                    r2o_lengths.push(length);
+                }
+            }
+            r2o_lengths
+        });
+
+        for r2o_mark in [None, Some(0)] {
+            let r2o_result = r2o_search_discovery_endpoint(
+                r2o_address,
+                None,
+                Duration::from_millis(25),
+                r2o_mark,
+            );
+            assert_eq!(r2o_result.verdict, R2oDiscoveryVerdict::Unmeasured);
+            assert_eq!(r2o_result.trace.direct_probes.len(), 1);
+            assert_eq!(r2o_result.trace.direct_probes[0].sent, 1);
+            assert_eq!(r2o_result.trace.direct_probes[0].received, 0);
+            assert!(!r2o_result.trace.direct_probes[0].marked);
+            assert_eq!(
+                r2o_result.error.as_deref(),
+                Some(super::R2O_DISCOVERY_UNMARKED_REASON)
+            );
+        }
+
+        assert_eq!(r2o_server_thread.join().unwrap(), [74, 74]);
     }
 
     #[cfg(target_os = "linux")]
