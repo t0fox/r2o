@@ -19,6 +19,7 @@ pub const R2O_JOURNAL_REFUSE_QUEUE: u8 = 2;
 pub const R2O_JOURNAL_REFUSE_TOO_LONG: u8 = 3;
 pub const R2O_JOURNAL_REFUSE_DAMAGED: u8 = 4;
 pub const R2O_JOURNAL_REFUSE_NOT_APPLIED: u8 = 5;
+pub const R2O_JOURNAL_REFUSE_FLOW_UNFIT: u8 = 6;
 const R2O_JOURNAL_WIRE_VERSION: u8 = 1;
 const R2O_JOURNAL_ENTRY_BODY_LEN: usize = 205;
 
@@ -605,12 +606,17 @@ impl R2oFlowJournal {
         &mut self,
         at_ns: u64,
         key: [u8; KEY_LEN],
+        code: u8,
         plan_id: [u8; 16],
         trial_id: [u8; 16],
         execution_id: u64,
         binding: Option<BindingContext>,
     ) -> bool {
         if !valid_journal_key(&key)
+            || !matches!(
+                code,
+                R2O_JOURNAL_REFUSE_NOT_APPLIED | R2O_JOURNAL_REFUSE_FLOW_UNFIT
+            )
             || binding.is_some_and(|binding| {
                 !binding.is_known()
                     || !matches!(binding.family, 4 | 6)
@@ -626,7 +632,7 @@ impl R2oFlowJournal {
             binding,
             key,
             kind: R2oFlowJournalKind::PlanRefused,
-            code: R2O_JOURNAL_REFUSE_NOT_APPLIED,
+            code,
             plan_id,
             trial_id,
             ..R2oFlowJournalEntry::default()

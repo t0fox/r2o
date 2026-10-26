@@ -1559,6 +1559,9 @@ pub enum PacketDecision {
     Refused {
         plan_id: [u8; 16],
     },
+    FlowUnfit {
+        plan_id: [u8; 16],
+    },
     Replace(Vec<u8>),
     Transmit {
         packets: Vec<WirePacket>,
@@ -1748,6 +1751,17 @@ fn decide_tcp(
     let Some(input) = tcp_plan_input(plan, packet, view, tcp_segment_cap, reference_ttl) else {
         return PacketDecision::Accept;
     };
+
+    if plan.wire_profile == r2k_core::plan::WIRE_TCP_TEMPLATE
+        && plan.poison_used() & r2k_core::plan::POISON_TCPTS_BACK != 0
+        && !input.is_http
+        && let Some(tcp) = view.tcp_segment(packet)
+        && !crate::capture::tcp_timestamp_option_present(
+            packet.get(tcp.options.clone()).unwrap_or_default(),
+        )
+    {
+        return PacketDecision::FlowUnfit { plan_id: plan.id };
+    }
 
     let Ok(actions) = plan.apply(&input) else {
         return PacketDecision::Refused { plan_id: plan.id };
@@ -1981,7 +1995,7 @@ pub fn validate_runtime_plan(plan: &Plan) -> Result<(), &'static str> {
 mod tests {
     use super::{
         KEY_LEN, PacketDecision, R2oTcpFlowMetrics, TcpFlowKey, TcpSessions, decide,
-        decide_with_session, decide_with_session_mtu, decide_with_session_probe,
+        decide_with_session, decide_with_session_mtu, decide_with_session_probe, tcp_plan_input,
         validate_runtime_plan,
     };
     #[cfg(target_os = "linux")]
@@ -1989,7 +2003,9 @@ mod tests {
     use crate::flow_capacity::R2oFlowCapacity;
     use proptest::prelude::*;
     use r2k_core::packet::PacketView;
-    use r2k_core::plan::{EmitKind, OriginalFate, Plan};
+    use r2k_core::plan::{
+        EmitKind, OriginalFate, POISON_TCPTS_BACK, PROTO_HTTP, Plan, WIRE_TCP_TEMPLATE,
+    };
     use std::time::{Duration, Instant};
 
     const V1_INITIAL: &[u8] = include_bytes!("../../r2k-core/tests/fixtures/quic_v1_initial.bin");
@@ -2078,6 +2094,116 @@ mod tests {
             timestamp_sessions.r2o_client_offers_tcp_timestamps_for_packet(&timestamp_probe),
             Some(true),
         );
+    }
+
+    #[test]
+    fn tcp_template_timestamp_requirement_matches_d2o_session_fixture() {
+        let client = ([192, 168, 1, 67], 41400);
+        let server = ([1, 2, 3, 4], 443);
+        let plan_id = [0x7a, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+        let hello = d2o_flow_unfit_client_hello();
+        let plan = Plan {
+            minexec: 8,
+            id: plan_id,
+            transport: 6,
+            proto: 1,
+            input_tls: true,
+            wire_profile: WIRE_TCP_TEMPLATE,
+            payloads: vec![r2k_core::plan::Payload {
+                id: 1,
+                bytes: hello.clone(),
+            }],
+            poisons: vec![r2k_core::plan::Poison {
+                id: 1,
+                ttl: 0,
+                flags: POISON_TCPTS_BACK,
+                seq_shift: 0,
+                autottl: None,
+            }],
+            fakes: vec![r2k_core::plan::Fake {
+                payload_id: 1,
+                poison_id: 1,
+                repeats: 1,
+                placement: 0,
+                gap_us: 0,
+                tls_mod: 3,
+            }],
+            ..Plan::default()
+        };
+
+        let mut no_timestamp = TcpSessions::default();
+        let syn = d2o_flow_unfit_client_packet(41400, 0x02, &[], false);
+        let syn_ack = d2o_flow_unfit_server_packet(41400, 0x12);
+        let hello_packet = d2o_flow_unfit_client_packet(41400, 0x18, &hello, false);
+        assert_eq!(
+            decide_with_session(&mut no_timestamp, &plan, &syn),
+            PacketDecision::Accept
+        );
+        assert_eq!(
+            decide_with_session(&mut no_timestamp, &Plan::default(), &syn_ack),
+            PacketDecision::Accept
+        );
+        assert_eq!(
+            decide_with_session(&mut no_timestamp, &plan, &hello_packet),
+            PacketDecision::FlowUnfit { plan_id },
+            "как datapath/test_session.c: поток без TCP timestamp должен получить FLOW_UNFIT",
+        );
+
+        let mut with_timestamp = TcpSessions::default();
+        let syn = d2o_flow_unfit_client_packet(41401, 0x02, &[], true);
+        let syn_ack = d2o_flow_unfit_server_packet(41401, 0x12);
+        let hello_packet = d2o_flow_unfit_client_packet(41401, 0x18, &hello, true);
+        assert_eq!(
+            decide_with_session(&mut with_timestamp, &plan, &syn),
+            PacketDecision::Accept
+        );
+        assert_eq!(
+            decide_with_session(&mut with_timestamp, &Plan::default(), &syn_ack),
+            PacketDecision::Accept
+        );
+        assert!(matches!(
+            decide_with_session(&mut with_timestamp, &plan, &hello_packet),
+            PacketDecision::Transmit { .. }
+        ));
+
+        let http = b"GET / HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        let http_plan = Plan {
+            minexec: 8,
+            id: plan_id,
+            transport: 6,
+            proto: PROTO_HTTP,
+            wire_profile: WIRE_TCP_TEMPLATE,
+            payloads: vec![r2k_core::plan::Payload {
+                id: 1,
+                bytes: http.to_vec(),
+            }],
+            poisons: vec![r2k_core::plan::Poison {
+                id: 1,
+                ttl: 0,
+                flags: POISON_TCPTS_BACK,
+                seq_shift: 0,
+                autottl: None,
+            }],
+            fakes: vec![r2k_core::plan::Fake {
+                payload_id: 1,
+                poison_id: 1,
+                repeats: 1,
+                placement: 0,
+                gap_us: 0,
+                tls_mod: 0,
+            }],
+            ..Plan::default()
+        };
+        let http_packet = ipv4_tcp_packet(client, server, 0x18, 64, 3001, http);
+        let http_view = PacketView::parse(&http_packet).unwrap();
+        assert!(
+            tcp_plan_input(&http_plan, &http_packet, &http_view, 0, 0)
+                .is_some_and(|input| input.is_http)
+        );
+        assert!(!matches!(
+            decide(&http_plan, &http_packet),
+            PacketDecision::FlowUnfit { .. }
+        ));
     }
 
     #[cfg(target_os = "linux")]
@@ -4904,6 +5030,99 @@ mod tests {
         hello.extend_from_slice(&[0; 32]);
         hello.extend_from_slice(&[0, 0, 2, 0x13, 1, 1, 0, 0, 0]);
         hello
+    }
+
+    fn d2o_flow_unfit_client_hello() -> Vec<u8> {
+        let host = b"hetzner.com";
+        let mut body = vec![0x03, 0x03];
+        body.extend(0_u8..32);
+        body.extend_from_slice(&[0, 0, 2, 0x13, 1, 1, 0]);
+        let mut extension = vec![
+            0,
+            0,
+            0,
+            (5 + host.len()) as u8,
+            0,
+            (3 + host.len()) as u8,
+            0,
+            0,
+            host.len() as u8,
+        ];
+        extension.extend_from_slice(host);
+        body.push(0);
+        body.push(extension.len() as u8);
+        body.extend_from_slice(&extension);
+
+        let mut handshake = vec![
+            1,
+            (body.len() >> 16) as u8,
+            (body.len() >> 8) as u8,
+            body.len() as u8,
+        ];
+        handshake.extend_from_slice(&body);
+        let mut record = vec![
+            0x16,
+            0x03,
+            0x01,
+            (handshake.len() >> 8) as u8,
+            handshake.len() as u8,
+        ];
+        record.extend_from_slice(&handshake);
+        record
+    }
+
+    // Byte layout mirrors donor datapath/test_session.c build_pkt/build_pkt_ts.
+    fn d2o_flow_unfit_client_packet(
+        source_port: u16,
+        flags: u8,
+        payload: &[u8],
+        timestamp: bool,
+    ) -> Vec<u8> {
+        let options: &[u8] = if timestamp {
+            &[1, 1, 8, 10, 0x00, 0x12, 0x34, 0x56, 0, 0, 0, 0]
+        } else {
+            &[]
+        };
+        let tcp_header_len = 20 + options.len();
+        let mut packet = vec![0; 20 + tcp_header_len + payload.len()];
+        packet[0] = 0x45;
+        let total_len = packet.len() as u16;
+        packet[2..4].copy_from_slice(&total_len.to_be_bytes());
+        packet[4..6].copy_from_slice(&0x1000_u16.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&[192, 168, 1, 67]);
+        packet[16..20].copy_from_slice(&[1, 2, 3, 4]);
+        packet[20..22].copy_from_slice(&source_port.to_be_bytes());
+        packet[22..24].copy_from_slice(&443_u16.to_be_bytes());
+        packet[24..28].copy_from_slice(&1000_u32.to_be_bytes());
+        packet[28..32].copy_from_slice(&0x1122_3344_u32.to_be_bytes());
+        packet[32] = ((tcp_header_len / 4) as u8) << 4;
+        packet[33] = flags;
+        packet[34..36].copy_from_slice(&64240_u16.to_be_bytes());
+        packet[40..40 + options.len()].copy_from_slice(options);
+        packet[40 + options.len()..].copy_from_slice(payload);
+        packet
+    }
+
+    // Byte layout mirrors donor datapath/test_session.c build_rev_pkt.
+    fn d2o_flow_unfit_server_packet(client_port: u16, flags: u8) -> Vec<u8> {
+        let mut packet = vec![0; 40];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&40_u16.to_be_bytes());
+        packet[4..6].copy_from_slice(&0x2000_u16.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&[1, 2, 3, 4]);
+        packet[16..20].copy_from_slice(&[192, 168, 1, 67]);
+        packet[20..22].copy_from_slice(&443_u16.to_be_bytes());
+        packet[22..24].copy_from_slice(&client_port.to_be_bytes());
+        packet[24..28].copy_from_slice(&5000_u32.to_be_bytes());
+        packet[28..32].copy_from_slice(&1001_u32.to_be_bytes());
+        packet[32] = 0x50;
+        packet[33] = flags;
+        packet[34..36].copy_from_slice(&64240_u16.to_be_bytes());
+        packet
     }
 
     fn client_hello_with_sni() -> Vec<u8> {

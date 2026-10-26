@@ -73,6 +73,31 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[cfg(unix)]
+static R2O_CONTROLLER_STOP: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn r2o_controller_request_stop(_signal: libc::c_int) {
+    R2O_CONTROLLER_STOP.store(true, Ordering::Relaxed);
+}
+
+#[cfg(unix)]
+fn install_r2o_controller_signal_handlers() -> std::io::Result<()> {
+    R2O_CONTROLLER_STOP.store(false, Ordering::Relaxed);
+    for signal in [libc::SIGINT, libc::SIGTERM] {
+        let previous = unsafe {
+            libc::signal(
+                signal,
+                r2o_controller_request_stop as *const () as libc::sighandler_t,
+            )
+        };
+        if previous == libc::SIG_ERR {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 
 #[cfg(unix)]
@@ -1309,6 +1334,7 @@ fn serve_catalog(
 ) -> Result<(), Box<dyn Error>> {
     use std::io::Write;
 
+    install_r2o_controller_signal_handlers()?;
     let catalog = Catalog::load(&catalog_path)?;
     let mut client = ControlClient::connect(socket_path)?;
     let (catalog, compiled) = catalog_commands_for_runtime(
@@ -2113,6 +2139,57 @@ fn r2o_catalog_mark_unfit(
     binding.recheck_mono = Some(std::time::Instant::now());
     selection_binding.recheck_since = Some(marked_at);
     *box_updated = marked_at;
+}
+
+#[cfg(unix)]
+fn r2o_catalog_mark_flow_unfit(
+    catalog: &mut Catalog,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    plan_id: &[u8; 16],
+    now: i64,
+) -> (usize, usize) {
+    let present = plan_id.iter().any(|byte| *byte != 0);
+    let marked_at = now.max(1);
+    let mut marked = 0;
+    let mut waiting = 0;
+    for box_record in &mut catalog.boxes {
+        for binding in &mut box_record.bindings {
+            if !binding.enabled
+                || binding.kind != "name"
+                || binding.target != target.host
+                || (if binding.transport == 0 {
+                    6
+                } else {
+                    binding.transport
+                }) != 6
+                || (if binding.family == 0 {
+                    4
+                } else {
+                    binding.family
+                }) != target.family
+            {
+                continue;
+            }
+            if present {
+                let mut id = [0; 16];
+                let bytes = binding.plan_id.as_bytes();
+                let length = bytes.len().min(id.len());
+                id[..length].copy_from_slice(&bytes[..length]);
+                if id != *plan_id {
+                    continue;
+                }
+            }
+            if binding.recheck_since.is_some_and(|since| since != 0) {
+                waiting += 1;
+                continue;
+            }
+            binding.recheck_since = Some(marked_at);
+            binding.recheck_mono = Some(std::time::Instant::now());
+            box_record.updated = marked_at;
+            marked += 1;
+        }
+    }
+    (marked, waiting)
 }
 
 #[cfg(unix)]
@@ -6219,7 +6296,44 @@ struct DiscoveryWorker {
     >,
     active: HashMap<R2oDiscoveryTaskKey, r2o_controller::discovery::DiscoveryTarget>,
     completed: HashSet<R2oDiscoveryTaskKey>,
+    flow_unfit_done: R2oFlowUnfitDone,
     threads: Vec<JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct R2oFlowUnfitDone(VecDeque<(String, u8, u8, [u8; 16])>);
+
+#[cfg(unix)]
+impl R2oFlowUnfitDone {
+    fn contains(
+        &self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        plan_id: &[u8; 16],
+    ) -> bool {
+        self.0.iter().any(|(host, transport, family, saved_plan)| {
+            host == &target.host
+                && *transport == 6
+                && *family == target.family
+                && saved_plan == plan_id
+        })
+    }
+
+    fn remember(
+        &mut self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        plan_id: [u8; 16],
+    ) -> bool {
+        if self.contains(target, &plan_id) {
+            return false;
+        }
+        if self.0.len() == 8 {
+            self.0.pop_front();
+        }
+        self.0
+            .push_back((target.host.clone(), 6, target.family, plan_id));
+        true
+    }
 }
 
 #[cfg(unix)]
@@ -8600,6 +8714,7 @@ impl DiscoveryWorker {
             pending_rechecks: HashMap::new(),
             active: HashMap::new(),
             completed: HashSet::new(),
+            flow_unfit_done: R2oFlowUnfitDone::default(),
             threads,
         }
     }
@@ -11659,6 +11774,9 @@ impl ControlClient {
         let mut live_written_at = None;
         let run_result = (|| -> Result<(), Box<dyn Error>> {
             loop {
+                if R2O_CONTROLLER_STOP.load(Ordering::Relaxed) {
+                    break Ok(());
+                }
                 if r2o_scheduler_tick_pending && self.pending_events.is_empty() {
                     if wait_for_control_frame(&self.socket, std::time::Duration::ZERO)? {
                         let Some(frame) = read_optional_frame(&mut self.socket)? else {
@@ -13459,6 +13577,82 @@ impl ControlClient {
                     ) && let Some((worker, _, _, _)) = discovery.as_ref()
                     {
                         worker.record_client_unfit();
+                    }
+                    if refused.code == r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_FLOW_UNFIT {
+                        let now = std::time::Instant::now();
+                        if let Some(target) = tcp_hello_names.target_for_tcp_flow(&refused.key, now)
+                        {
+                            if let Some((worker, catalog, catalog_path, _)) = &mut discovery {
+                                if worker.flow_unfit_done.contains(&target, &refused.plan_id) {
+                                    println!(
+                                        "повторная проверка {} по этому плану уже выполнена; повторный FLOW_UNFIT не запускает второй замер",
+                                        target.host
+                                    );
+                                } else {
+                                    let wall_now = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_secs()
+                                        as i64;
+                                    let (marked, waiting) = r2o_catalog_mark_flow_unfit(
+                                        catalog,
+                                        &target,
+                                        &refused.plan_id,
+                                        wall_now,
+                                    );
+                                    if marked > 0 {
+                                        persist_catalog_update(
+                                            catalog,
+                                            catalog_path,
+                                            wall_now,
+                                            catalog_persistence.as_mut(),
+                                        )?;
+                                    }
+                                    if waiting > 0 || worker.is_active(&target) {
+                                        println!(
+                                            "FLOW_UNFIT для {}: привязка уже ждёт повторной проверки или задача выполняется",
+                                            target.host
+                                        );
+                                    } else {
+                                        worker.flow_unfit_done.remember(&target, refused.plan_id);
+                                        if r2o_controller::discovery::has_covering_binding(
+                                            catalog, &target,
+                                        ) {
+                                            println!(
+                                                "FLOW_UNFIT для {}: другая подтверждённая привязка покрывает эту форму; каталог сохранён без нового замера",
+                                                target.host
+                                            );
+                                        } else {
+                                            let queued = self.r2o_queue_tcp_suspect(
+                                                worker,
+                                                target.clone(),
+                                                r2o_discovery_suspect_signal(2, 0, 0, 0, 0),
+                                                R2oSuspectQueueMode::Fresh,
+                                                false,
+                                            );
+                                            println!(
+                                                "FLOW_UNFIT для {}: привязка сохранена и помечена на перепроверку; цель {} в Discovery",
+                                                target.host,
+                                                if queued {
+                                                    "поставлена"
+                                                } else {
+                                                    "не поставлена (задача, отдых или очередь)"
+                                                }
+                                            );
+                                        }
+                                    }
+                                }
+                            } else {
+                                println!(
+                                    "FLOW_UNFIT для {}: Discovery не подключён, повторный замер невозможен",
+                                    target.host
+                                );
+                            }
+                        } else {
+                            println!(
+                                "FLOW_UNFIT: цель не определена по свежему ClientHello этого потока"
+                            );
+                        }
                     }
                     println!(
                         "датапат отказал в применении плана: код={}, execution={:?}",
@@ -16847,12 +17041,12 @@ mod tests {
         http_search_candidates, http_search_key, matching_domain_group,
         matching_domain_recovery_candidates, measured_http_candidate_keys, normalize_plan_target,
         parse_classify_options, parse_serve_options, print_flow_journal,
-        r2o_candidate_confirmation_mark, r2o_discovery_failure_retry_due,
-        r2o_family_applied_flow_matches, r2o_family_recovery_decision,
-        r2o_handle_client_shape_event, r2o_http_failed_disposition, r2o_http_live_cut_recheck,
-        r2o_quic_binding_blocks_retry, r2o_tcp_stall_budgets, r2o_tcp_stall_budgets_for_name,
-        r2o_tcp_stall_in_name_band, r2o_voice_proof_matches_target, save_plan_file,
-        shape_matches_plan,
+        r2o_candidate_confirmation_mark, r2o_catalog_mark_flow_unfit,
+        r2o_discovery_failure_retry_due, r2o_family_applied_flow_matches,
+        r2o_family_recovery_decision, r2o_handle_client_shape_event, r2o_http_failed_disposition,
+        r2o_http_live_cut_recheck, r2o_quic_binding_blocks_retry, r2o_tcp_stall_budgets,
+        r2o_tcp_stall_budgets_for_name, r2o_tcp_stall_in_name_band, r2o_voice_proof_matches_target,
+        save_plan_file, shape_matches_plan,
     };
     use r2k_core::control::{
         Ack, BindingContext, COMMAND_DEL_NAME_PROBE, COMMAND_DEL_VOICE_ADDR_PROBE,
@@ -16869,6 +17063,84 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn flow_unfit_rechecks_only_enabled_exact_plan_bindings_and_keeps_them() {
+        let target = DiscoveryTarget {
+            host: "discord.com".to_owned(),
+            endpoint: "203.0.113.8:443".to_owned(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let mut plan_id = [0; 16];
+        plan_id[..10].copy_from_slice(b"plan-match");
+        let binding = |plan_id: &str, enabled, family| Binding {
+            kind: "name".to_owned(),
+            target: target.host.clone(),
+            plan_id: plan_id.to_owned(),
+            level: 3,
+            enabled,
+            transport: 6,
+            family,
+            shape: SHAPE_MODERN,
+            ..Binding::default()
+        };
+        let mut catalog = Catalog {
+            boxes: vec![BoxRecord {
+                id: "box".to_owned(),
+                updated: 50,
+                bindings: vec![
+                    binding("plan-match", true, 4),
+                    binding("plan-other", true, 4),
+                    binding("plan-match", false, 4),
+                    binding("plan-match", true, 6),
+                ],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+
+        assert_eq!(
+            r2o_catalog_mark_flow_unfit(&mut catalog, &target, &plan_id, 123),
+            (1, 0)
+        );
+        let bindings = &catalog.boxes[0].bindings;
+        assert_eq!(bindings[0].recheck_since, Some(123));
+        assert_eq!(bindings[0].recheck_mono.is_some(), true);
+        assert!(bindings[0].enabled);
+        assert_eq!(bindings[0].plan_id, "plan-match");
+        assert_eq!(bindings[1].recheck_since, None);
+        assert_eq!(bindings[2].recheck_since, None);
+        assert_eq!(bindings[3].recheck_since, None);
+        assert_eq!(catalog.boxes[0].updated, 123);
+
+        assert_eq!(
+            r2o_catalog_mark_flow_unfit(&mut catalog, &target, &plan_id, 124),
+            (0, 1)
+        );
+        assert_eq!(catalog.boxes[0].bindings[0].recheck_since, Some(123));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn flow_unfit_deduplication_uses_the_d2o_eight_entry_ring() {
+        let target = DiscoveryTarget {
+            host: "discord.com".to_owned(),
+            endpoint: "203.0.113.8:443".to_owned(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let mut done = super::R2oFlowUnfitDone::default();
+        assert!(done.remember(&target, [1; 16]));
+        assert!(!done.remember(&target, [1; 16]));
+        for index in 0..8 {
+            let mut other = target.clone();
+            other.host = format!("site-{index}.example");
+            assert!(done.remember(&other, [index + 2; 16]));
+        }
+        assert!(!done.contains(&target, &[1; 16]));
+    }
 
     #[cfg(unix)]
     #[test]
@@ -18191,6 +18463,7 @@ mod tests {
             pending_rechecks: std::collections::HashMap::new(),
             active: std::collections::HashMap::new(),
             completed: std::collections::HashSet::new(),
+            flow_unfit_done: super::R2oFlowUnfitDone::default(),
             threads: Vec::new(),
         }
     }
@@ -27324,6 +27597,7 @@ mod tests {
             clear_streaks: std::collections::HashMap::new(),
             completed: std::collections::HashSet::new(),
             active: std::collections::HashMap::new(),
+            flow_unfit_done: super::R2oFlowUnfitDone::default(),
             threads: Vec::new(),
         };
 

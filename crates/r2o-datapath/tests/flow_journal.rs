@@ -369,7 +369,15 @@ fn отказ_исполнителя_сохраняет_код_плана_поп
     };
     let mut journal = R2oFlowJournal::with_capacity(2).unwrap();
 
-    assert!(journal.record_plan_refused(321, key, [0xa5; 16], [0x5a; 16], 77, Some(binding)));
+    assert!(journal.record_plan_refused(
+        321,
+        key,
+        r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_NOT_APPLIED,
+        [0xa5; 16],
+        [0x5a; 16],
+        77,
+        Some(binding),
+    ));
 
     let refused = journal.get(0).unwrap();
     assert_eq!(refused.kind, R2oFlowJournalKind::PlanRefused);
@@ -384,8 +392,17 @@ fn отказ_исполнителя_сохраняет_код_плана_поп
         *refused
     );
 
-    assert!(journal.record_plan_refused(322, key, [0xb6; 16], [0; 16], 0, None));
+    assert!(journal.record_plan_refused(
+        322,
+        key,
+        r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_FLOW_UNFIT,
+        [0xb6; 16],
+        [0; 16],
+        0,
+        None,
+    ));
     let refusal_without_binding = journal.get(1).unwrap();
+    assert_eq!(refusal_without_binding.code, 6);
     assert_eq!(refusal_without_binding.plan_id, [0xb6; 16]);
     assert_eq!(refusal_without_binding.binding, None);
     assert!(

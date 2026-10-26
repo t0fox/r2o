@@ -262,6 +262,48 @@ pub struct RefusedEvent {
     pub binding: Option<BindingContext>,
 }
 
+impl RefusedEvent {
+    pub fn event_body(&self) -> Option<Vec<u8>> {
+        if !valid_flow_key(&self.key) || self.client_shape.is_some_and(|shape| shape > SHAPE_HTTP) {
+            return None;
+        }
+        let execution_context = match (self.execution_id, self.binding) {
+            (Some(execution_id), Some(binding)) if valid_binding(&binding) => {
+                Some((execution_id, binding))
+            }
+            (None, None) => None,
+            _ => return None,
+        };
+        let mut body = Vec::with_capacity(
+            KEY_LEN
+                + 1
+                + 16
+                + 16
+                + usize::from(self.client_shape.is_some())
+                + execution_context.map_or(0, |_| EXECUTION_CONTEXT_LEN),
+        );
+        body.extend_from_slice(&self.key);
+        body.push(self.code);
+        body.extend_from_slice(&self.plan_id);
+        body.extend_from_slice(&self.trial_id);
+        if let Some(shape) = self.client_shape {
+            body.push(shape);
+        }
+        if let Some((execution_id, binding)) = execution_context {
+            body.extend_from_slice(&execution_id.to_be_bytes());
+            body.extend_from_slice(&binding.generation.to_be_bytes());
+            body.extend_from_slice(&[
+                binding.kind,
+                binding.family,
+                binding.shape,
+                u8::from(binding.temporary),
+            ]);
+            body.extend_from_slice(&binding.epoch);
+        }
+        Some(body)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HelloEvent {
     pub key: [u8; KEY_LEN],
@@ -1988,29 +2030,32 @@ mod refused_event_tests {
                 epoch: [11; 16],
             }),
         };
-        let mut body = Vec::new();
-        body.extend_from_slice(&expected.key);
-        body.push(expected.code);
-        body.extend_from_slice(&expected.plan_id);
-        body.extend_from_slice(&expected.trial_id);
-        body.push(expected.client_shape.unwrap());
-        body.extend_from_slice(&expected.execution_id.unwrap().to_be_bytes());
-        body.extend_from_slice(&expected.binding.unwrap().generation.to_be_bytes());
-        body.extend_from_slice(&[
-            expected.binding.unwrap().kind,
-            expected.binding.unwrap().family,
-            expected.binding.unwrap().shape,
-            u8::from(expected.binding.unwrap().temporary),
-        ]);
-        body.extend_from_slice(&expected.binding.unwrap().epoch);
-
         assert_eq!(
             decode_refused(&Frame {
                 kind: EVENT_REFUSED,
-                body,
+                body: expected.event_body().unwrap(),
             }),
             Ok(expected)
         );
+    }
+
+    #[test]
+    fn refused_encodes_flow_unfit_without_execution_proof() {
+        let expected = RefusedEvent {
+            key: key(),
+            code: 6,
+            plan_id: [7; 16],
+            trial_id: [8; 16],
+            client_shape: Some(SHAPE_LEGACY),
+            execution_id: None,
+            binding: None,
+        };
+        let frame = Frame {
+            kind: EVENT_REFUSED,
+            body: expected.event_body().unwrap(),
+        };
+        assert_eq!(frame.body.len(), KEY_LEN + 1 + 16 + 16 + 1);
+        assert_eq!(decode_refused(&frame), Ok(expected));
     }
 
     #[test]

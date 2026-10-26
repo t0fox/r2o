@@ -6,10 +6,10 @@ mod app {
         EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_CLEAN_HANDSHAKE, EVENT_R2O_TCP_EARLY_RST,
         EVENT_R2O_TCP_EXCHANGE, EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_REPEAT,
         EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_RST_CUT, EVENT_R2O_TCP_SILENT,
-        EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_SUSPECT, Frame, HttpPortalEvent, HttpResponseEvent,
-        PROTOCOL_VERSION, R2oTcpCleanHandshakeEvent, R2oTcpEarlyRstEvent,
+        EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_SUSPECT, EVENT_REFUSED, Frame, HttpPortalEvent,
+        HttpResponseEvent, PROTOCOL_VERSION, R2oTcpCleanHandshakeEvent, R2oTcpEarlyRstEvent,
         R2oTcpExchangeEvent as R2oTcpExchangeControlEvent, R2oTcpFinRetryEvent, R2oTcpRepeatEvent,
-        R2oTcpRstCutSignalEvent, RELEASE_ID, decode_set_tcp_stall_budgets,
+        R2oTcpRstCutSignalEvent, RELEASE_ID, RefusedEvent, decode_set_tcp_stall_budgets,
     };
     use r2k_core::plan::{EmitKind, OriginalFate, PROTO_VOICE, Plan};
     use r2o_datapath::capture::{tcp_hello_from_packet, tcp_http_hello_from_packet};
@@ -1469,28 +1469,41 @@ mod app {
                             .tcp_segment(packet)
                             .map(|segment| segment.sequence)
                     });
+                    let refused_plan = match &decision {
+                        PacketDecision::Refused { plan_id } => Some((
+                            *plan_id,
+                            r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_NOT_APPLIED,
+                        )),
+                        PacketDecision::FlowUnfit { plan_id } => Some((
+                            *plan_id,
+                            r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_FLOW_UNFIT,
+                        )),
+                        _ => None,
+                    };
                     if !controller_probe
-                        && let (PacketDecision::Refused { plan_id }, Some(packet)) =
-                            (&decision, tx_original)
+                        && let (Some((plan_id, code)), Some(packet)) = (refused_plan, tx_original)
                         && let Some(key) =
                             r2o_datapath::control::flow_journal_key_for_packet(packet)
+                        && key[37] == 6
                     {
-                        let event = name_plans
+                        let trial_id = name_plans
                             .applied_event_for_packet_at_hook(packet, next_execution_id, quic_hook)
-                            .filter(|event| event.plan_id == *plan_id);
-                        let (trial_id, execution_id, binding) = if let Some(event) = event {
-                            next_execution_id = next_execution_id.wrapping_add(1).max(1);
-                            (event.trial_id, event.execution_id, Some(event.binding))
-                        } else {
-                            ([0; 16], 0, None)
-                        };
-                        flow_journal.record_plan_refused(
-                            journal_timestamp(&journal_origin),
+                            .filter(|event| event.plan_id == plan_id)
+                            .map_or([0; 16], |event| event.trial_id);
+                        let refused = RefusedEvent {
                             key,
-                            *plan_id,
+                            code,
+                            plan_id,
                             trial_id,
-                            execution_id,
-                            binding,
+                            client_shape: tcp_hello_from_packet(packet).map(|hello| hello.shape),
+                            execution_id: None,
+                            binding: None,
+                        };
+                        send_refused_event(
+                            &mut control,
+                            &mut flow_journal,
+                            journal_timestamp(&journal_origin),
+                            &refused,
                         );
                     }
                     let decision_execution_id = if matches!(
@@ -1621,7 +1634,7 @@ mod app {
                                 }
                                 response_delivered = true;
                             }
-                            PacketDecision::Refused { .. } => {
+                            PacketDecision::Refused { .. } | PacketDecision::FlowUnfit { .. } => {
                                 let late_tail_handled = udp_replay.is_none()
                                     && original.is_some_and(|bytes| {
                                         r2o_udp_handle_late_tail(
@@ -2411,6 +2424,7 @@ mod app {
             3 => "срок отправки переполнен",
             4 => "поток повреждён недоисполнением",
             5 => "исполнитель отклонил план",
+            6 => "поток клиента не несёт требуемой TCP timestamp опции",
             _ => "неизвестная причина",
         }
     }
@@ -3060,6 +3074,31 @@ mod app {
         };
         if let Err(error) = control.send_event(EVENT_APPLIED, &body) {
             eprintln!("r2o-datapath: событие APPLIED не отправлено: {error}");
+        }
+    }
+
+    fn send_refused_event(
+        control: &mut Option<ControlServer>,
+        flow_journal: &mut R2oFlowJournal,
+        at_ns: u64,
+        event: &RefusedEvent,
+    ) {
+        let Some(body) = event.event_body() else {
+            return;
+        };
+        flow_journal.record_plan_refused(
+            at_ns,
+            event.key,
+            event.code,
+            event.plan_id,
+            event.trial_id,
+            event.execution_id.unwrap_or(0),
+            event.binding,
+        );
+        if let Some(control) = control.as_mut()
+            && let Err(error) = control.send_event(EVENT_REFUSED, &body)
+        {
+            eprintln!("r2o-datapath: событие REFUSED не отправлено: {error}");
         }
     }
 
