@@ -8771,3 +8771,43 @@ Ghidra provider could not analyze this ELF; Hopper and IDA are unavailable in
 this environment. Therefore this slice uses the pinned C source and donor C
 regression, not newly generated REA pseudocode. No router access or field test
 was performed; field parity is not claimed.
+
+## Diagnostics process identity parity — 26.10.2026
+
+Review target: current local `t0fox/d2o` checkout at
+`304ba893dd37197128ac8799c0495b035f6a38c0`.
+
+| D2O C source | R2O Rust counterpart | Confirmed difference and result |
+| --- | --- | --- |
+| `core/diagnostics.c::read_proc`, called by `d2k_diag_sample` | `crates/r2o-controller/src/diagnostics.rs::process_memory`, called by `Recorder::tick` | C resolves each process from its run-directory PID file and then verifies `/proc/PID/comm`. Rust previously scanned `/proc`, selected the first matching `comm`, and could miss the second controller/datapath instance. Rust now follows the five R2O PID files (`r2o-controller4/6`, `r2o-datapath4/6`, `r2o-panel`) and validates each command name. The Rust regression proves a matching unowned `/proc` entry is ignored and that both controller slots are separate. |
+| `core/diagnostics.c::read_detail`, first-snapshot replacement in `d2k_diag_sample` | `process_detail`, first-detail tracking in `Recorder::tick` | C replaces a process's first detail when PID changes or a readable `start_ticks` value changes. Rust previously compared PID only. Rust now uses both identity fields. The same proc metrics as D2O's fixture (RSS 1024→4096 KiB, `smaps` groups, missing FD/start fields) are covered, followed by start-time changes 12345→222 with the same PID; the recorded first snapshot resets on each new identity. |
+| `d2k_diag_write` process labels `d2kc`, `d2kd`, `d2kpanel` | `diagnostics.js` process-label map | R2O reports its IPv4 and IPv6 processes separately and labels them in the history table. The separate settings section remains absent; `root_serves_panel_layout_without_non_d2o_settings_controls` and the Chrome panel scenario pass. |
+
+D2O C oracle: `make -C core test-diagnostics` passed from the donor checkout,
+including `test_diagnostics_json.py` and detailed-memory checks. Donor source
+SHA-256: `core/diagnostics.c`
+`0cd8b84efa248f21e1a39b87ddcb0c2baa94ee46a584575f2be044b470078b51`;
+`core/test_diagnostics.c`
+`2254f07cd57d5c7af9cbd88041c353c11f80878d0cd67e226e67c19e22819f1a`.
+R2O source SHA-256: `diagnostics.rs`
+`61783b9e197fdbbb3f6533e7e66b547753c271e88c3b5c536b20bdce2371fb91`,
+`main.rs` `6b4c06205ccb015d96732d449f6349e839330eef67297a0a2cf2ef7c951d4dfc`,
+and panel `diagnostics.js`
+`3eab05b51ab1a789b7927419c2e4486b4384feeafaac53f2ff25b25d3f9c0861`.
+R2O `cargo +1.98.0 test -p r2o-controller --lib --locked --offline
+diagnostics::tests` passed (2 tests); `cargo +1.98.0 test -p r2o-panel
+--locked --offline` passed (17 HTTP tests); the Chrome browser scenario and
+`cargo +1.98.0 test --workspace --locked --offline` passed. The ignored full
+workspace log is `.rea/r2o-diagnostics-workspace-20261026.log`.
+
+The local OpenWrt AArch64/musl build and QEMU smoke passed: all six release
+executables ran `--version`; controller catalog clear/check passed. The panel
+test confirms the separate settings controls are absent. No router command or
+field test was performed.
+
+REA was attempted on the donor `core/test_diagnostics` ELF and on
+`core/diagnostics.c`. The configured Windows Ghidra provider rejects ELF;
+Hopper is unavailable on Windows and IDA is not configured. REA also rejects a
+standalone C source file as an unsupported binary format. This diagnostics
+slice therefore uses direct C/Rust source comparison and the donor C fixture,
+not REA pseudocode. Full field parity remains unverified.

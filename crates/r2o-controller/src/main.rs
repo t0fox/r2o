@@ -11822,8 +11822,12 @@ impl ControlClient {
         let mut diagnostics = live_path
             .as_ref()
             .and_then(|path| path.parent())
-            .map(|directory| {
-                r2o_controller::diagnostics::Recorder::new(directory.join("diagnostics"))
+            .map(|state_dir| {
+                let install_root = state_dir.parent().unwrap_or(state_dir);
+                let run_dir = std::env::var_os("R2O_RUN_DIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| install_root.join("run"));
+                r2o_controller::diagnostics::Recorder::new(state_dir.join("diagnostics"), run_dir)
             });
         let mut live_written_at = None;
         let run_result = (|| -> Result<(), Box<dyn Error>> {

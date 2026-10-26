@@ -43,7 +43,10 @@
       status.textContent = "Обновлено " + new Date(last.at * 1000).toLocaleTimeString() + " · снимок раз в минуту";
       var body = doc.getElementById("diagnostic-processes");
       body.replaceChildren();
-      var labels = { "r2o-controller": "Контроллер", "r2o-datapath": "Датапат", "r2o-panel": "Панель" };
+      var labels = {
+        "r2o-controller4": "Контроллер IPv4", "r2o-controller6": "Контроллер IPv6",
+        "r2o-datapath4": "Датапат IPv4", "r2o-datapath6": "Датапат IPv6", "r2o-panel": "Панель"
+      };
       (last.processes || []).forEach(function (process) {
         var first;
         samples.some(function (sample) {

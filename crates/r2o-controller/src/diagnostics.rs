@@ -11,6 +11,40 @@ const EVENT_CAPACITY: usize = 64;
 const SAMPLE_CAPACITY: usize = 120;
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
 const REPORT_MAX: usize = 256 * 1024;
+const PROCESS_SPECS: [ProcessSpec; 5] = [
+    ProcessSpec {
+        name: "r2o-controller4",
+        comm: "r2o-controller",
+        pidfile: "r2o-controller4.pid",
+    },
+    ProcessSpec {
+        name: "r2o-controller6",
+        comm: "r2o-controller",
+        pidfile: "r2o-controller6.pid",
+    },
+    ProcessSpec {
+        name: "r2o-datapath4",
+        comm: "r2o-datapath",
+        pidfile: "r2o-datapath4.pid",
+    },
+    ProcessSpec {
+        name: "r2o-datapath6",
+        comm: "r2o-datapath",
+        pidfile: "r2o-datapath6.pid",
+    },
+    ProcessSpec {
+        name: "r2o-panel",
+        comm: "r2o-panel",
+        pidfile: "r2o-panel.pid",
+    },
+];
+
+#[derive(Clone, Copy)]
+struct ProcessSpec {
+    name: &'static str,
+    comm: &'static str,
+    pidfile: &'static str,
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Counts {
@@ -25,6 +59,8 @@ pub struct Counts {
 
 pub struct Recorder {
     dir: PathBuf,
+    run_dir: PathBuf,
+    proc_dir: PathBuf,
     enabled: bool,
     started: Instant,
     checked: Option<Instant>,
@@ -37,9 +73,11 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    pub fn new(dir: PathBuf) -> Self {
+    pub fn new(dir: PathBuf, run_dir: PathBuf) -> Self {
         Self {
             dir,
+            run_dir,
+            proc_dir: PathBuf::from("/proc"),
             enabled: false,
             started: Instant::now(),
             checked: None,
@@ -122,14 +160,19 @@ impl Recorder {
         self.sample_total = self.sample_total.saturating_add(1);
         let at = unix_seconds();
         let mono_ms = self.started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-        let processes = process_memory();
+        let processes = process_memory(&self.proc_dir, &self.run_dir);
         let mut details = Vec::with_capacity(processes.len());
         for process in &processes {
             if process["pid"].as_u64().unwrap_or(0) != 0 {
                 let name = process["name"].as_str().unwrap_or_default();
-                let detail = process_detail(process, at, mono_ms);
+                let detail = process_detail(process, at, mono_ms, &self.proc_dir);
                 let previous = self.first_details.get(name);
-                if previous.is_none_or(|old| old["pid"] != detail["pid"]) {
+                if previous.is_none_or(|old| {
+                    old["pid"] != detail["pid"]
+                        || detail["start_ticks"]
+                            .as_u64()
+                            .is_some_and(|ticks| old["start_ticks"].as_u64() != Some(ticks))
+                }) {
                     self.first_details.insert(name.to_owned(), detail.clone());
                 }
                 details.push(json!({
@@ -144,9 +187,9 @@ impl Recorder {
         let sample = json!({
             "at": at,
             "mono_ms": mono_ms,
-            "mem_total_kib": meminfo("MemTotal:"),
-            "mem_available_kib": meminfo("MemAvailable:"),
-            "system_conntrack": read_number("/proc/sys/net/netfilter/nf_conntrack_count"),
+            "mem_total_kib": meminfo(&self.proc_dir, "MemTotal:"),
+            "mem_available_kib": meminfo(&self.proc_dir, "MemAvailable:"),
+            "system_conntrack": read_number(&self.proc_dir.join("sys/net/netfilter/nf_conntrack_count")),
             "datapath_flows": null,
             "http_records": null,
             "http_queued": null,
@@ -292,12 +335,12 @@ fn diagnostics_enabled(dir: &Path) -> bool {
     }
 }
 
-fn read_number(path: &str) -> Option<u64> {
+fn read_number(path: &Path) -> Option<u64> {
     fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
-fn meminfo(key: &str) -> Option<u64> {
-    fs::read_to_string("/proc/meminfo")
+fn meminfo(proc_dir: &Path, key: &str) -> Option<u64> {
+    fs::read_to_string(proc_dir.join("meminfo"))
         .ok()?
         .lines()
         .find_map(|line| {
@@ -308,48 +351,37 @@ fn meminfo(key: &str) -> Option<u64> {
         })
 }
 
-fn process_memory() -> Vec<Value> {
-    let wanted = ["r2o-controller", "r2o-datapath", "r2o-panel"];
-    let mut found = HashMap::<String, Value>::new();
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return wanted.iter().map(|name| empty_process(name)).collect();
-    };
-    for entry in entries.flatten() {
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|s| s.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        let base = entry.path();
-        let Ok(comm) = fs::read_to_string(base.join("comm")) else {
-            continue;
-        };
-        let name = comm.trim();
-        if !wanted.contains(&name) || found.contains_key(name) {
-            continue;
-        }
-        let status = fs::read_to_string(base.join("status")).unwrap_or_default();
-        let field = |key: &str| {
-            status.lines().find_map(|line| {
-                let (name, rest) = line.split_once(':')?;
-                (name == key)
-                    .then(|| rest.split_whitespace().next()?.parse::<u64>().ok())
-                    .flatten()
-            })
-        };
-        found.insert(
-            name.to_owned(),
-            json!({
-                "name":name,"pid":pid,"rss_kib":field("VmRSS"),"hwm_kib":field("VmHWM"),
-                "anon_kib":field("RssAnon"),"threads":field("Threads")
-            }),
-        );
-    }
-    wanted
+fn process_memory(proc_dir: &Path, run_dir: &Path) -> Vec<Value> {
+    PROCESS_SPECS
         .iter()
-        .map(|name| found.remove(*name).unwrap_or_else(|| empty_process(name)))
+        .map(|spec| {
+            let pid = fs::read_to_string(run_dir.join(spec.pidfile))
+                .ok()
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .filter(|pid| *pid > 0 && *pid <= i32::MAX as u64);
+            let Some(pid) = pid else {
+                return empty_process(spec.name);
+            };
+            let base = proc_dir.join(pid.to_string());
+            let comm_matches = fs::read_to_string(base.join("comm"))
+                .is_ok_and(|name| name.trim_end_matches(['\r', '\n']) == spec.comm);
+            if !comm_matches {
+                return empty_process(spec.name);
+            }
+            let status = fs::read_to_string(base.join("status")).unwrap_or_default();
+            let field = |key: &str| {
+                status.lines().find_map(|line| {
+                    let (name, rest) = line.split_once(':')?;
+                    (name == key)
+                        .then(|| rest.split_whitespace().next()?.parse::<u64>().ok())
+                        .flatten()
+                })
+            };
+            json!({
+                "name":spec.name,"pid":pid,"rss_kib":field("VmRSS"),"hwm_kib":field("VmHWM"),
+                "anon_kib":field("RssAnon"),"threads":field("Threads")
+            })
+        })
         .collect()
 }
 
@@ -357,10 +389,10 @@ fn empty_process(name: &str) -> Value {
     json!({"name":name,"pid":0,"rss_kib":null,"hwm_kib":null,"anon_kib":null,"threads":null})
 }
 
-fn process_detail(process: &Value, at: u64, mono_ms: u64) -> Value {
+fn process_detail(process: &Value, at: u64, mono_ms: u64, proc_dir: &Path) -> Value {
     let pid = process["pid"].as_u64().unwrap_or(0);
-    let status_path = format!("/proc/{pid}/status");
-    let status = fs::read_to_string(status_path).unwrap_or_default();
+    let base = proc_dir.join(pid.to_string());
+    let status = fs::read_to_string(base.join("status")).unwrap_or_default();
     let field = |key: &str| {
         status.lines().find_map(|line| {
             let (name, rest) = line.split_once(':')?;
@@ -369,25 +401,33 @@ fn process_detail(process: &Value, at: u64, mono_ms: u64) -> Value {
                 .flatten()
         })
     };
-    let start_ticks = fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()
-        .and_then(|stat| {
-            let close = stat.rfind(')')?;
-            stat[close + 1..]
-                .split_whitespace()
-                .nth(19)?
-                .parse::<u64>()
-                .ok()
-        });
-    let fd_count = fs::read_dir(format!("/proc/{pid}/fd"))
-        .ok()
-        .map(|fds| fds.count());
+    let start_ticks = fs::read_to_string(base.join("stat")).ok().and_then(|stat| {
+        let close = stat.rfind(')')?;
+        stat[close + 1..]
+            .split_whitespace()
+            .nth(19)?
+            .parse::<u64>()
+            .ok()
+    });
+    let fd_count = read_fd_count(&base.join("fd"));
     json!({
         "pid":pid,"at":at,"mono_ms":mono_ms,"rss_kib":process["rss_kib"],
         "start_ticks":start_ticks,"vm_size_kib":field("VmSize"),"vm_data_kib":field("VmData"),
         "vm_stack_kib":field("VmStk"),"vm_swap_kib":field("VmSwap"),"fd_count":fd_count,
-        "smaps":read_smaps(pid)
+        "smaps":read_smaps(proc_dir, pid)
     })
+}
+
+fn read_fd_count(path: &Path) -> Option<u64> {
+    let entries = fs::read_dir(path).ok()?;
+    let mut count = 0_u64;
+    for entry in entries {
+        let entry = entry.ok()?;
+        if !entry.file_name().to_string_lossy().starts_with('.') {
+            count = count.checked_add(1)?;
+        }
+    }
+    Some(count)
 }
 
 fn smaps_group(line: &str) -> Option<usize> {
@@ -407,8 +447,8 @@ fn smaps_group(line: &str) -> Option<usize> {
     })
 }
 
-fn read_smaps(pid: u64) -> Option<Value> {
-    let text = fs::read_to_string(format!("/proc/{pid}/smaps")).ok()?;
+fn read_smaps(proc_dir: &Path, pid: u64) -> Option<Value> {
+    let text = fs::read_to_string(proc_dir.join(pid.to_string()).join("smaps")).ok()?;
     let mut groups = [[0_u64; 5]; 4];
     let mut current = None;
     let mut maps = 0_u64;
@@ -471,7 +511,7 @@ mod tests {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         let dir = std::env::temp_dir().join(format!("r2o-diagnostics-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let mut recorder = Recorder::new(dir.clone());
+        let mut recorder = Recorder::new(dir.clone(), dir.join("run"));
         recorder.record(json!({"target":"ignored"}));
         fs::create_dir(&dir).unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
@@ -502,7 +542,7 @@ mod tests {
         assert_eq!(report["samples"][0]["bindings"], 3);
         assert_eq!(
             report["samples"][0]["processes"].as_array().unwrap().len(),
-            3
+            5
         );
         recorder.checked = Some(Instant::now() - Duration::from_secs(1));
         recorder.sampled = Some(Instant::now() - Duration::from_secs(60));
@@ -513,5 +553,166 @@ mod tests {
         assert_eq!(report["events_overwritten"], 1);
         assert_eq!(report["events"][63]["target"].as_str().unwrap().len(), 254);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_memory_follows_pidfiles_and_restarts_first_detail_on_pid_reuse() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let root =
+            std::env::temp_dir().join(format!("r2o-diagnostics-proc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let proc_dir = root.join("proc");
+        let run_dir = root.join("run");
+        let diag_dir = root.join("state/diagnostics");
+        fs::create_dir_all(proc_dir.join("sys/net/netfilter")).unwrap();
+        fs::create_dir_all(diag_dir.parent().unwrap()).unwrap();
+        fs::set_permissions(
+            diag_dir.parent().unwrap(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        fs::create_dir(&diag_dir).unwrap();
+        fs::set_permissions(&diag_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(diag_dir.join("enabled"))
+            .unwrap();
+        fs::create_dir_all(&run_dir).unwrap();
+        fs::create_dir_all(proc_dir.join("123")).unwrap();
+        fs::write(run_dir.join("r2o-controller4.pid"), "123\n").unwrap();
+        fs::write(run_dir.join("r2o-controller6.pid"), "125\n").unwrap();
+        fs::write(proc_dir.join("123/comm"), "r2o-controller\n").unwrap();
+        fs::write(
+            proc_dir.join("123/status"),
+            "VmRSS: 1024 kB\nVmHWM: 2048 kB\nRssAnon: 512 kB\nThreads: 3\n",
+        )
+        .unwrap();
+        fs::write(
+            proc_dir.join("123/smaps"),
+            "1000-2000 rw-p 00000000 00:00 0 [heap]\nSize: 16 kB\nRss: 8 kB\nAnonymous: 8 kB\nPrivate_Dirty: 8 kB\n2000-3000 rw-p 00000000 00:00 0\nSize: 32 kB\nRss: 24 kB\nAnonymous: 24 kB\nPrivate_Dirty: 24 kB\n3000-4000 r--p 00000000 00:00 1 /private/never-export-me\nSize: 4 kB\nRss: 4 kB\nAnonymous: 0 kB\nPrivate_Dirty: 0 kB\n",
+        )
+        .unwrap();
+        fs::create_dir_all(proc_dir.join("124")).unwrap();
+        fs::write(proc_dir.join("124/comm"), "r2o-controller\n").unwrap();
+        fs::write(proc_dir.join("124/status"), "VmRSS: 9999 kB\n").unwrap();
+        fs::create_dir_all(proc_dir.join("125")).unwrap();
+        fs::write(proc_dir.join("125/comm"), "r2o-controller\n").unwrap();
+        fs::write(proc_dir.join("125/status"), "VmRSS: 8192 kB\n").unwrap();
+        fs::write(
+            proc_dir.join("meminfo"),
+            "MemTotal: 65536 kB\nMemAvailable: 8192 kB\n",
+        )
+        .unwrap();
+
+        let mut recorder = Recorder::new(diag_dir.clone(), run_dir);
+        recorder.proc_dir = proc_dir.clone();
+        recorder.tick(Counts::default);
+        let read_report = || -> serde_json::Value {
+            serde_json::from_slice(&fs::read(diag_dir.join("report.json")).unwrap()).unwrap()
+        };
+        let first = read_report();
+        let process = first["samples"][0]["processes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|process| process["name"] == "r2o-controller4")
+            .unwrap();
+        assert_eq!(process["pid"], 123);
+        assert_eq!(process["rss_kib"], 1024);
+        let controller6 = first["samples"][0]["processes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|process| process["name"] == "r2o-controller6")
+            .unwrap();
+        assert_eq!(controller6["pid"], 125);
+        assert_eq!(controller6["rss_kib"], 8192);
+        assert!(
+            !first["samples"][0]["processes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|process| process["pid"] == 124)
+        );
+        assert_eq!(first["samples"][0]["mem_available_kib"], 8192);
+        assert_eq!(first["samples"][0]["mem_total_kib"], 65536);
+        assert_eq!(
+            first["samples"][0]["system_conntrack"],
+            serde_json::Value::Null
+        );
+        assert_eq!(first["memory_details"][0]["first"]["rss_kib"], 1024);
+        assert_eq!(
+            first["memory_details"][0]["first"]["fd_count"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            first["memory_details"][0]["first"]["smaps"]["heap"]["rss_kib"],
+            8
+        );
+        assert_eq!(
+            first["memory_details"][0]["first"]["smaps"]["anonymous"]["rss_kib"],
+            24
+        );
+        assert_eq!(
+            first["memory_details"][0]["first"]["smaps"]["other"]["rss_kib"],
+            4
+        );
+        assert!(!first.to_string().contains("never-export-me"));
+
+        recorder.checked = Some(Instant::now() - Duration::from_secs(1));
+        recorder.sampled = Some(Instant::now() - Duration::from_secs(60));
+        fs::write(
+            proc_dir.join("123/status"),
+            "VmRSS: 4096 kB\nVmHWM: 4096 kB\nVmSize: 8192 kB\nVmData: 4096 kB\nVmStk: 128 kB\nVmSwap: 0 kB\nRssAnon: 3072 kB\nThreads: 1\n",
+        )
+        .unwrap();
+        recorder.tick(Counts::default);
+        let second = read_report();
+        let detail = &second["memory_details"][0];
+        assert_eq!(detail["first"]["rss_kib"], 1024);
+        assert_eq!(detail["latest"]["rss_kib"], 4096);
+        assert_eq!(detail["latest"]["vm_size_kib"], 8192);
+        assert_eq!(detail["latest"]["fd_count"], serde_json::Value::Null);
+        assert_eq!(detail["latest"]["smaps"]["heap"]["rss_kib"], 8);
+
+        recorder.checked = Some(Instant::now() - Duration::from_secs(1));
+        recorder.sampled = Some(Instant::now() - Duration::from_secs(60));
+        fs::write(
+            proc_dir.join("123/stat"),
+            "123 (r2o-controller) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 12345 0\n",
+        )
+        .unwrap();
+        fs::create_dir_all(proc_dir.join("123/fd")).unwrap();
+        fs::write(proc_dir.join("123/fd/0"), "").unwrap();
+        fs::write(proc_dir.join("123/fd/1"), "").unwrap();
+        recorder.tick(Counts::default);
+        let identified = read_report();
+        assert_eq!(identified["memory_details"][0]["first"]["rss_kib"], 4096);
+        assert_eq!(
+            identified["memory_details"][0]["first"]["start_ticks"],
+            12345
+        );
+        assert_eq!(identified["memory_details"][0]["first"]["fd_count"], 2);
+
+        recorder.checked = Some(Instant::now() - Duration::from_secs(1));
+        recorder.sampled = Some(Instant::now() - Duration::from_secs(60));
+        fs::write(
+            proc_dir.join("123/stat"),
+            "123 (r2o-controller) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 222 0\n",
+        )
+        .unwrap();
+        fs::write(
+            proc_dir.join("123/status"),
+            "VmRSS: 5120 kB\nVmHWM: 5120 kB\nRssAnon: 512 kB\nThreads: 3\nVmSize: 4096 kB\nVmData: 1024 kB\nVmStk: 64 kB\nVmSwap: 0 kB\n",
+        )
+        .unwrap();
+        recorder.tick(Counts::default);
+        let reused = read_report();
+        assert_eq!(reused["memory_details"][0]["first"]["rss_kib"], 5120);
+        assert_eq!(reused["memory_details"][0]["first"]["start_ticks"], 222);
+        fs::remove_dir_all(root).unwrap();
     }
 }
