@@ -1059,8 +1059,8 @@ probe_body = (
     + voice_plan
     + trial_id
 )
-send_command(0x0092, probe_body)
-wait_ack(0x0092, trial_id)
+send_command(0x0095, probe_body)
+wait_ack(0x0095, trial_id)
 
 trial_request = b"\x00\x01\x00\x00\x21\x12\xa4\x42" + bytes(range(12, 24))
 trial_client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
