@@ -8465,17 +8465,16 @@ the donor ELF remains unavailable as recorded above.
 
 ## Read-only router snapshot and AArch64 QEMU parity probes — 2026-10-26
 
-The router was inspected only through HTTP GETs. `/` returned HTTP 200;
-`/api/diagnostics?status` returned `enabled=false`; `/api/status` returned a
-fresh d2o snapshot at `2026-10-25T23:56:33Z`, release `25.10.2026 (a093cd6)`,
-commit `a093cd600bd6d9c9d6676d7deccefdc887955ceb`. The snapshot reported the
-engine and controller running, six boxes, twelve plans, 45 bindings, one
-YouTube binding, two Discord bindings, 97 confirmations, and 886 probes used.
-At capture time the search was idle; the measurement manager reported 0 active,
-limit 11, 2 cores, and 98% free CPU. This is a d2o live-state benchmark only;
-it is not an R2O result. No router file, process, service, or firewall was
-changed, and no test traffic was sent. SSH was not used because the presented
-host key differed from the saved key.
+The router was inspected only through HTTP GETs. A fresh `/api/status` at
+`2026-10-26T01:41:16Z` reported d2o release `25.10.2026 (a093cd6)`, commit
+`a093cd600bd6d9c9d6676d7deccefdc887955ceb`, six boxes, twelve plans, 45
+bindings, 45 targets, 100 confirmations, and 889 probes used. Measurements
+were idle (0 active, 0 queued), with limit 11, 2 cores, and 98% free CPU. The
+projected knowledge included `www.youtube.com`, `googlevideo.com`, and Discord
+targets. `GET /api/diagnostics?status` returned `enabled=false`, so there is no
+current event trace for matching against an R2O run. This is a d2o live-state
+benchmark only; it is not an R2O result. No router file, process, service, or
+firewall was changed, and no test traffic was sent.
 
 The router release commit `a093cd6` was compared as a committed tree with the
 current donor reference `304ba893`. `git diff --quiet` found the requested
@@ -8548,16 +8547,27 @@ committed trees. `core/sched.c`, `core/verify.c`, `core/meas.c`,
 `datapath/ctlsrv.c` are byte-identical. The local `E:\d2o` checkout is dirty and
 was not modified.
 
-For a same-state QEMU comparison, the `knowledge` object from that read-only
-HTTP response was written to a temporary WSL directory and passed to the
-released AArch64 OpenWrt-musl `r2o-controller` under `qemu-aarch64` using
-`--import-donor-catalog`, then `--check-catalog`. The temporary directory was
-removed after the run. A semantic comparison normalized only the donor plan
-header (`d2k-plan` to `r2o-plan`) and fields absent from the d2o JSON to their
-documented Rust defaults. Result: `normalized_box_state_equal=true`; both sides
-contain the same six boxes, 12 plans, and 45 bindings, and QEMU reports all 45
-bindings active. The imported R2O plan distribution is one QUIC, seven TLS, and
-four voice plans.
+An earlier QEMU roundtrip passed the `knowledge` projection from this HTTP API
+to `--import-donor-catalog` and verified six boxes and 45 enabled bindings.
+That result did **not** prove semantic catalog equality and the earlier
+`normalized_box_state_equal=true` claim was incorrect. The status API is a
+summary projection, not the raw `/opt/d2k/state/catalog.json` file: its boxes
+have a top-level `signals` summary (`kind`, human-readable text, and `seen`),
+while the importer expects `fingerprint.signals` with the original numeric
+fields. Its plan projection omits `added`; its binding projection omits
+`plan_id`, `verified_by`, `input`, `probe_path`, `ech_origin`, and `budget`.
+Serde defaults those omitted fields and ignores the unrecognized summaries, so
+the imported catalog can pass `--check-catalog` while losing information.
+Consequently the six-box/45-binding counts are only a count check, not a
+same-state parity result. The earlier plan distribution and equality claim are
+withdrawn.
+
+The raw file is not exposed by the read-only status API. Diagnostics remain
+disabled, so there is no live event transcript to replay. Exact field-by-field
+comparison of the current catalog requires a trusted read of the raw donor
+file; the latest SSH host key does not match the previously confirmed
+fingerprint, so that comparison remains pending. No router writes, service
+actions, or test traffic were sent.
 
 REA's WSL `import-reference-source` records the donor at VCS HEAD
 `304ba893dd37197128ac8799c0495b035f6a38c0`, graph SHA-256
@@ -8567,11 +8577,10 @@ Native ELF function analysis remains unavailable in the configured Windows
 session (`ghidra` rejects ELF, Hopper does not support Windows, IDA is
 unconfigured, and objdump returns `ERR_REA_WINDOWS_NATIVE`).
 
-This is direct evidence that R2O preserves the router's current d2o catalog when
-loaded under target-architecture QEMU. It does not prove that the R2O scheduler
-would produce the same catalog from the router's past traffic: diagnostics are
-disabled, no matching event transcript is exposed, and the router still runs
-d2o. No router writes, service actions, or test traffic were sent.
+The router still runs d2o; this snapshot does not establish R2O field parity.
+The exact source tree comparison and selected target-runtime tests above remain
+valid, but the attempted live-catalog roundtrip is only a lossy projection
+check. No router writes, service actions, or test traffic were sent.
 
 ## Exact APPLIED wait and controller latency — d2o `304ba893`, 26.10.2026
 
