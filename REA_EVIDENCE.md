@@ -8572,3 +8572,39 @@ loaded under target-architecture QEMU. It does not prove that the R2O scheduler
 would produce the same catalog from the router's past traffic: diagnostics are
 disabled, no matching event transcript is exposed, and the router still runs
 d2o. No router writes, service actions, or test traffic were sent.
+
+## Exact APPLIED wait and controller latency — d2o `304ba893`, 26.10.2026
+
+The C reference `core/sched.c::on_applied` records an APPLIED only after
+`applied_trial_is_ours`, `applied_of_candidate`, and the exact flow match. In
+`T_VERIFY_WAIT`, an exact event sets `ver_ok` and wakes the scheduler; it does
+not keep waiting for the full verification deadline after proof is present.
+`d2k_sched_event` routes the frame to `on_applied`.
+
+The Rust caller is `r2o_collect_controller_applied_events` in
+`crates/r2o-controller/src/main.rs`. Before this change, its 20 ms polling loop
+always slept until the caller's deadline, including after the control client
+had already returned the exact APPLIED. Successful TCP and family trials could
+therefore add the full 5 seconds after the response; QUIC candidate checks
+could add 400 ms per phase. The regression test first reproduced 401 ms elapsed
+for an already-available event with a 400 ms deadline.
+
+The Rust collector now accepts the caller's exact matcher (trial ID, plan ID,
+and flow tuple) and returns when that proof arrives. A same-trial event for the
+wrong plan is retained but does not end the wait; no matching event still waits
+the original d2o verification interval. The regression test presents the wrong
+plan before the exact one and returns in 0.04 s on native Linux and 0.11 s under
+AArch64 GNU QEMU with a 5 s deadline. C/Rust `ACK → APPLIED → PERSIST`, task
+deadline, fallback gate/order, and ClientHello ownership differential scripts
+pass against the pinned donor.
+
+The QUIC QEMU harness now starts counting candidate traffic when the first
+temporary probe is installed. This removes an invalid assertion that the first
+candidate's newly allocated UDP socket must use a port different from the
+already-closed baseline socket; the OS may legally reuse that ephemeral port.
+The test still requires 16 distinct candidate UDP tuples. This is a test-only
+correction; no QUIC production behavior changed.
+
+These are local differential and target-runtime results only. The router was
+read-only and continues to run d2o, so this does not establish R2O field parity
+or field apply latency.

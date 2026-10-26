@@ -3675,10 +3675,21 @@ fn r2o_family_recovery_run(
         outcome.plan_id = candidate.plan_id;
         let trial = if candidate.group_plan {
             let result = r2o_family_recovery_fetch(&task.target, task.mark, &candidate.probe_path);
-            let applied = r2o_collect_controller_applied_events(
+            let applied = r2o_collect_controller_applied_events_until(
                 commands,
                 [0; 16],
                 std::time::Duration::from_secs(5),
+                |event| {
+                    result.as_ref().is_ok_and(|fetch| {
+                        r2o_family_applied_flow_matches(
+                            event,
+                            &task.target,
+                            fetch.local_port,
+                            candidate.plan_id,
+                            [0; 16],
+                        )
+                    })
+                },
             )
             .map(|events| {
                 events.iter().any(|event| {
@@ -3863,13 +3874,22 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
             Ok((_stream, _, _, _)) => Err("TCP-зонд получил неожиданный локальный порт".into()),
             Err(error) => Err(error),
         };
-        let events = r2o_collect_controller_applied_events(
+        let events = r2o_collect_controller_applied_events_until(
             commands,
             trial_id,
             if transport_established {
                 std::time::Duration::from_secs(5)
             } else {
                 std::time::Duration::ZERO
+            },
+            |event| {
+                r2o_family_applied_flow_matches(
+                    event,
+                    target,
+                    local_port,
+                    candidate.plan_id,
+                    trial_id,
+                )
             },
         );
         let delete_result = ask_http_controller(commands, |reply| HttpSearchCommand::DeleteProbe {
@@ -4340,7 +4360,7 @@ fn r2o_discovery_client_shape_trial(
         Ok((_stream, _, _, _)) => Err("сокет снимка получил неожиданный локальный порт".into()),
         Err(error) => Err(format!("не удалось подключить снимок ClientHello: {error}")),
     };
-    let events = r2o_collect_controller_applied_events(
+    let events = r2o_collect_controller_applied_events_until(
         commands,
         trial_id,
         if send_result.is_ok() {
@@ -4348,6 +4368,7 @@ fn r2o_discovery_client_shape_trial(
         } else {
             std::time::Duration::ZERO
         },
+        |event| r2o_family_applied_flow_matches(event, target, local_port, plan.id, trial_id),
     );
     let delete_result = ask_http_controller(commands, |reply| HttpSearchCommand::DeleteProbe {
         host: target.host.clone(),
@@ -14313,10 +14334,11 @@ impl ControlClient {
                     return Err("истёк срок QUIC-испытания".into());
                 }
                 let filter = probe.r2o_quic_probe_filter(request_timeout, attempt);
-                let events = r2o_collect_controller_applied_events(
+                let events = r2o_collect_controller_applied_events_until(
                     commands,
                     trial_id,
                     std::time::Duration::from_millis(400),
+                    |event| applied_quic_trial_matches(event, trial_id, plan_id, local, server),
                 )?;
                 applied |= events.iter().any(|event| {
                     applied_quic_trial_matches(event, trial_id, plan_id, local, server)
@@ -14357,10 +14379,11 @@ impl ControlClient {
                 if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
                     return Err("истёк срок QUIC-испытания".into());
                 }
-                let events = r2o_collect_controller_applied_events(
+                let events = r2o_collect_controller_applied_events_until(
                     commands,
                     trial_id,
                     std::time::Duration::from_millis(400),
+                    |event| applied_quic_trial_matches(event, trial_id, plan_id, local, server),
                 )?;
                 applied |= events.iter().any(|event| {
                     applied_quic_trial_matches(event, trial_id, plan_id, local, server)
@@ -14392,10 +14415,11 @@ impl ControlClient {
             && outcome.decision == R2oQuicFilterDecision::Pass
             && !outcome.applied
         {
-            Some(r2o_collect_controller_applied_events(
+            Some(r2o_collect_controller_applied_events_until(
                 commands,
                 trial_id,
                 std::time::Duration::from_secs(5),
+                |event| applied_quic_trial_matches(event, trial_id, plan_id, local, server),
             ))
         } else {
             None
@@ -16423,7 +16447,7 @@ fn run_http_trial_task(
         request_path,
         &mut socket_hold,
     );
-    let events = r2o_collect_controller_applied_events(
+    let events = r2o_collect_controller_applied_events_until(
         commands,
         trial_id,
         if result.as_ref().is_ok_and(|result| result.requests_sent > 0) {
@@ -16431,6 +16455,7 @@ fn run_http_trial_task(
         } else {
             std::time::Duration::ZERO
         },
+        |event| r2o_family_applied_flow_matches(event, target, port, plan_id, trial_id),
     );
     let delete_result = ask_http_controller(commands, |reply| HttpSearchCommand::DeleteProbe {
         host: target.host.clone(),
@@ -16493,21 +16518,27 @@ fn ask_http_controller<T: Send + 'static>(
 }
 
 #[cfg(unix)]
-fn r2o_collect_controller_applied_events(
+fn r2o_collect_controller_applied_events_until(
     commands: &SyncSender<HttpSearchCommand>,
     trial_id: [u8; 16],
     timeout: std::time::Duration,
+    is_exact_match: impl Fn(&r2k_core::control::AppliedEvent) -> bool,
 ) -> Result<Vec<r2k_core::control::AppliedEvent>, String> {
     let deadline = std::time::Instant::now() + timeout;
     let mut events = Vec::new();
     loop {
-        events.extend(ask_http_controller(commands, |reply| {
-            HttpSearchCommand::CollectApplied {
-                trial_id,
-                timeout: std::time::Duration::ZERO,
-                reply,
-            }
-        })?);
+        let batch = ask_http_controller(commands, |reply| HttpSearchCommand::CollectApplied {
+            trial_id,
+            timeout: std::time::Duration::ZERO,
+            reply,
+        })?;
+        let exact_applied_seen = batch
+            .iter()
+            .any(|event| event.trial_id == trial_id && is_exact_match(event));
+        events.extend(batch);
+        if exact_applied_seen {
+            return Ok(events);
+        }
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
             return Ok(events);
@@ -21042,15 +21073,21 @@ mod tests {
             .unwrap();
         let endpoint = udp_server.local_addr().unwrap();
         let (candidate_done_tx, candidate_done_rx) = std::sync::mpsc::channel();
+        let (candidate_started_tx, candidate_started_rx) = std::sync::mpsc::channel();
         let control_done = Arc::new(AtomicBool::new(false));
         let control_done_sender = Arc::clone(&control_done);
         let udp_thread = std::thread::spawn(move || {
             let mut peers = Vec::new();
+            let mut collecting_candidates = false;
             loop {
                 let mut packet = [0; 1500];
                 match udp_server.recv_from(&mut packet) {
                     Ok((length, peer)) => {
-                        if r2k_core::quic::r2k_quic_initial_flight_id(&packet[..length]).is_some() {
+                        collecting_candidates |= candidate_started_rx.try_recv().is_ok();
+                        if collecting_candidates
+                            && r2k_core::quic::r2k_quic_initial_flight_id(&packet[..length])
+                                .is_some()
+                        {
                             peers.push(peer);
                         }
                     }
@@ -21063,6 +21100,7 @@ mod tests {
                         if candidate_done_rx.try_recv().is_ok() {
                             break;
                         }
+                        collecting_candidates |= candidate_started_rx.try_recv().is_ok();
                     }
                     Err(error) => panic!("ошибка приёмника UDP: {error}"),
                 }
@@ -21074,6 +21112,9 @@ mod tests {
             for candidate_index in 0..16 {
                 let set = read_frame(&mut peer).unwrap();
                 assert_eq!(set.kind, super::COMMAND_SET_ADDR_PROBE);
+                if candidate_index == 0 {
+                    candidate_started_tx.send(()).unwrap();
+                }
                 let trial_id: [u8; 16] = set.body[KEY_LEN..KEY_LEN + 16].try_into().unwrap();
                 let plan = Plan::parse(&set.body[KEY_LEN + 20..]).unwrap();
                 match candidate_index {
@@ -21206,8 +21247,7 @@ mod tests {
         control_thread.join().unwrap();
         drop(worker);
         assert!(peers.len() >= 48);
-        assert_ne!(peers[0], peers[1]);
-        let candidate_peers: std::collections::HashSet<_> = peers[1..].iter().copied().collect();
+        let candidate_peers: std::collections::HashSet<_> = peers.iter().copied().collect();
         assert_eq!(
             candidate_peers.len(),
             16,
@@ -22115,6 +22155,68 @@ mod tests {
         assert_eq!(events[0].trial_id, [2; 16]);
         assert_eq!(client.pending_applied_events.len(), 1);
         assert_eq!(client.pending_applied_events[0].trial_id, [1; 16]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn applied_collection_returns_on_exact_event_without_waiting_for_timeout() {
+        let trial_id = [2; 16];
+        let event = r2k_core::control::AppliedEvent {
+            key: [0; KEY_LEN],
+            plan_id: [3; 16],
+            trial_id,
+            execution_id: 1,
+            binding: r2k_core::control::BindingContext {
+                generation: 0,
+                kind: 0,
+                family: 0,
+                shape: 0,
+                temporary: false,
+                epoch: [0; 16],
+            },
+        };
+        let wrong_plan = r2k_core::control::AppliedEvent {
+            plan_id: [4; 16],
+            ..event.clone()
+        };
+        let (commands, receiver) = std::sync::mpsc::sync_channel(1);
+        let controller = std::thread::spawn(move || {
+            let mut pending = VecDeque::from([wrong_plan, event]);
+            while let Ok(command) = receiver.recv() {
+                let HttpSearchCommand::CollectApplied {
+                    trial_id: requested,
+                    reply,
+                    ..
+                } = command
+                else {
+                    panic!("ожидалась команда сбора APPLIED");
+                };
+                assert_eq!(requested, trial_id);
+                reply
+                    .send(Ok(pending.pop_front().into_iter().collect()))
+                    .unwrap();
+            }
+        });
+
+        let started = std::time::Instant::now();
+        let events = super::r2o_collect_controller_applied_events_until(
+            &commands,
+            trial_id,
+            std::time::Duration::from_secs(5),
+            |event| event.trial_id == trial_id && event.plan_id == [3; 16],
+        )
+        .unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].plan_id, [4; 16]);
+        assert_eq!(events[1].plan_id, [3; 16]);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(200),
+            "exact APPLIED was available but collection took {} ms",
+            started.elapsed().as_millis()
+        );
+        drop(commands);
+        controller.join().unwrap();
     }
 
     #[cfg(unix)]
