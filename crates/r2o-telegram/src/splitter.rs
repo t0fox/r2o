@@ -54,6 +54,14 @@ impl MsgSplitter {
         }
 
         if self.disabled {
+            if plaintext.len() > MAX_PACKET_BYTES {
+                self.error = Some(format!(
+                    "MTProto-пакет {} байт превышает лимит {} байт",
+                    plaintext.len(),
+                    MAX_PACKET_BYTES
+                ));
+                return Vec::new();
+            }
             enc.apply_keystream(plaintext);
             return vec![plaintext.to_vec()];
         }
