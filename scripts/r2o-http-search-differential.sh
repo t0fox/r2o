@@ -45,8 +45,8 @@ mkdir -p "$r2o_log_dir"
     printf 'Исходники C: %s\n' "$r2o_donor_core"
     printf '\nSHA-256 исходников C-эталона\n'
     sha256sum "$r2o_donor_core/httpsearch.c" "$r2o_donor_core/test_httpsearch.c"
-    r2o_httpsearch_sha=$(sha256sum "$r2o_donor_core/httpsearch.c" | awk '{print $1}')
-    r2o_test_sha=$(sha256sum "$r2o_donor_core/test_httpsearch.c" | awk '{print $1}')
+    r2o_httpsearch_sha=$(sed 's/\r$//' "$r2o_donor_core/httpsearch.c" | sha256sum | awk '{print $1}')
+    r2o_test_sha=$(sed 's/\r$//' "$r2o_donor_core/test_httpsearch.c" | sha256sum | awk '{print $1}')
     if [ "$r2o_httpsearch_sha" != \
         '7075b74f1340b53c410422bfe2ac5f558d009b29c20a7085e674f49b0210fa3a' ] || \
         [ "$r2o_test_sha" != \
@@ -57,6 +57,152 @@ mkdir -p "$r2o_log_dir"
     printf '\nТесты C-эталона HTTP-search\n'
     r2o_run_timed 'test_httpsearch C-эталона' \
         make -B -C "$r2o_donor_core" test-httpsearch CC=clang-18
+    printf '\nСверка baseline и путей keep-alive C/Rust на локальном HTTP-сервере\n'
+    r2o_baseline_harness="$r2o_script_dir/crates/r2o-controller/tests/d2o_http_baseline_differential.c"
+    r2o_baseline_binary="$r2o_log_dir/http-baseline-differential-$$"
+    r2o_baseline_c="$r2o_log_dir/http-baseline-c-$$"
+    r2o_baseline_rust="$r2o_log_dir/http-baseline-rust-$$"
+    clang-18 -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+        -I"$r2o_donor_core/include" -I"$r2o_donor_core/../datapath/include" \
+        -o "$r2o_baseline_binary" "$r2o_baseline_harness" \
+        "$r2o_donor_core/httpsearch.c" "$r2o_donor_core/httpup_logic.c" \
+        "$r2o_donor_core/plantlv.o" "$r2o_donor_core/quic.o" \
+        "$r2o_donor_core/quicwire.o" "$r2o_donor_core/crypto.o" \
+        "$r2o_donor_core/../datapath/plan_parse.c" \
+        "$r2o_donor_core/../datapath/plan_apply.c" \
+        "$r2o_donor_core/../datapath/wire.c" \
+        "$r2o_donor_core/verify.o" "$r2o_donor_core/quicconn.o" \
+        "$r2o_donor_core/h3.o" "$r2o_donor_core/tls12.o" \
+        "$r2o_donor_core/p256.o" "$r2o_donor_core/compose.o" \
+        "$r2o_donor_core/measured.o" "$r2o_donor_core/hello.o" \
+        "$r2o_donor_core/meas.o" "$r2o_donor_core/link.o" \
+        "$r2o_donor_core/tls13.o" "$r2o_donor_core/tls13core.o" \
+        "$r2o_donor_core/x25519.o" -Wl,--gc-sections -pthread
+    "$r2o_baseline_binary" >"$r2o_baseline_c"
+    R2O_HTTP_BASELINE_DIFF_OUTPUT="$r2o_baseline_rust" \
+        cargo +1.98.0 test -p r2o-controller --bin r2o-controller \
+            http_baseline_replays_donor_keepalive_paths_on_one_socket \
+            --locked --offline -- --nocapture
+    diff -u "$r2o_baseline_c" "$r2o_baseline_rust"
+    printf 'C/Rust HTTP baseline: %s\n' "$(cat "$r2o_baseline_c")"
+    printf '\nСопоставление классификатора C/Rust на общей фикстуре\n'
+    r2o_judge_fixture="$r2o_script_dir/crates/r2o-controller/tests/fixtures/d2o_http_challenge_response.bin"
+    r2o_judge_harness="$r2o_script_dir/crates/r2o-controller/tests/d2o_http_judge_differential.c"
+    r2o_judge_binary="$r2o_log_dir/http-judge-differential-$$"
+    r2o_rust_answer="$r2o_log_dir/http-judge-rust-answer-$$"
+    clang-18 -std=c99 -O2 -Wall -Wextra -Werror \
+        -I"$r2o_donor_core/include" -I"$r2o_donor_core/../datapath/include" \
+        -o "$r2o_judge_binary" "$r2o_judge_harness" \
+        "$r2o_donor_core/httpsearch.c" "$r2o_donor_core/httpup_logic.c" \
+        "$r2o_donor_core/plantlv.o" "$r2o_donor_core/quic.o" \
+        "$r2o_donor_core/quicwire.o" "$r2o_donor_core/crypto.o" \
+        "$r2o_donor_core/../datapath/plan_parse.c" \
+        "$r2o_donor_core/../datapath/plan_apply.c" \
+        "$r2o_donor_core/../datapath/wire.c" \
+        "$r2o_donor_core/verify.o" "$r2o_donor_core/quicconn.o" \
+        "$r2o_donor_core/h3.o" "$r2o_donor_core/tls12.o" \
+        "$r2o_donor_core/p256.o" "$r2o_donor_core/compose.o" \
+        "$r2o_donor_core/measured.o" "$r2o_donor_core/hello.o" \
+        "$r2o_donor_core/meas.o" "$r2o_donor_core/link.o" \
+        "$r2o_donor_core/tls13.o" "$r2o_donor_core/tls13core.o" \
+        "$r2o_donor_core/x25519.o"
+    r2o_c_answer=$("$r2o_judge_binary" "$r2o_judge_fixture")
+    r2o_run_timed 'суждение HTTP-ответа в Rust' \
+        env R2O_HTTP_JUDGE_DIFF_OUTPUT="$r2o_rust_answer" \
+        cargo +1.98.0 test -p r2o-controller --lib \
+            cf_challenge_response_is_judged_like_donor --locked --offline -- --nocapture
+    r2o_rust_answer_value=$(cat "$r2o_rust_answer")
+    if [ "$r2o_c_answer" != "$r2o_rust_answer_value" ]; then
+        printf 'C/Rust HTTP-judge mismatch: C=%s Rust=%s\n' \
+            "$r2o_c_answer" "$r2o_rust_answer_value" >&2
+        exit 1
+    fi
+    printf 'C/Rust HTTP-judge: %s (REAL)\n' "$r2o_c_answer"
+    printf '\nСверка сохранённого CUT-контекста при последующем портале\n'
+    r2o_cut_context_harness="$r2o_script_dir/crates/r2o-controller/tests/d2o_http_cut_context_differential.c"
+    r2o_cut_context_binary="$r2o_log_dir/http-cut-context-differential-$$"
+    r2o_cut_context_c="$r2o_log_dir/http-cut-context-c-$$"
+    r2o_cut_context_rust="$r2o_log_dir/http-cut-context-rust-$$"
+    clang-18 -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+        -I"$r2o_donor_core/include" -I"$r2o_donor_core/../datapath/include" \
+        -o "$r2o_cut_context_binary" \
+        "$r2o_cut_context_harness" "$r2o_donor_core/httpsearch.c" \
+        "$r2o_donor_core/httpup_logic.c" "$r2o_donor_core/plantlv.o" \
+        "$r2o_donor_core/quic.o" "$r2o_donor_core/quicwire.o" \
+        "$r2o_donor_core/crypto.o" "$r2o_donor_core/../datapath/plan_parse.c" \
+        "$r2o_donor_core/../datapath/plan_apply.c" \
+        "$r2o_donor_core/../datapath/wire.c" "$r2o_donor_core/verify.o" \
+        "$r2o_donor_core/quicconn.o" "$r2o_donor_core/h3.o" \
+        "$r2o_donor_core/tls12.o" "$r2o_donor_core/p256.o" \
+        "$r2o_donor_core/compose.o" "$r2o_donor_core/measured.o" \
+        "$r2o_donor_core/hello.o" "$r2o_donor_core/meas.o" \
+        "$r2o_donor_core/link.o" "$r2o_donor_core/tls13.o" \
+        "$r2o_donor_core/tls13core.o" "$r2o_donor_core/x25519.o" \
+        -Wl,--gc-sections -pthread
+    "$r2o_cut_context_binary" >"$r2o_cut_context_c"
+    R2O_HTTP_CUT_CONTEXT_DIFF_OUTPUT="$r2o_cut_context_rust" \
+        cargo +1.98.0 test -p r2o-controller --bin r2o-controller \
+            r2o_http_cut_context_survives_a_later_portal \
+            --locked --offline -- --nocapture
+    diff -u "$r2o_cut_context_c" "$r2o_cut_context_rust"
+    printf 'C/Rust HTTP CUT context: %s' "$(cat "$r2o_cut_context_c")"
+    printf '\nСверка очереди HTTP на общей фикстуре\n'
+    r2o_queue_fixture="$r2o_script_dir/crates/r2o-controller/tests/fixtures/d2o_http_queue.tsv"
+    r2o_queue_harness="$r2o_script_dir/crates/r2o-controller/tests/d2o_http_queue_differential.c"
+    r2o_queue_binary="$r2o_log_dir/http-queue-differential-$$"
+    r2o_queue_rust="$r2o_log_dir/http-queue-rust-$$"
+    clang-18 -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+        -I"$r2o_donor_core/include" -I"$r2o_donor_core/../datapath/include" \
+        -o "$r2o_queue_binary" "$r2o_queue_harness" \
+        "$r2o_donor_core/httpsearch.c" "$r2o_donor_core/httpup_logic.c" \
+        "$r2o_donor_core/plantlv.o" "$r2o_donor_core/quic.o" \
+        "$r2o_donor_core/quicwire.o" "$r2o_donor_core/crypto.o" \
+        "$r2o_donor_core/../datapath/plan_parse.c" \
+        "$r2o_donor_core/../datapath/plan_apply.c" \
+        "$r2o_donor_core/../datapath/wire.c" \
+        "$r2o_donor_core/verify.o" "$r2o_donor_core/quicconn.o" \
+        "$r2o_donor_core/h3.o" "$r2o_donor_core/tls12.o" \
+        "$r2o_donor_core/p256.o" "$r2o_donor_core/compose.o" \
+        "$r2o_donor_core/measured.o" "$r2o_donor_core/hello.o" \
+        "$r2o_donor_core/meas.o" "$r2o_donor_core/link.o" \
+        "$r2o_donor_core/tls13.o" "$r2o_donor_core/tls13core.o" \
+        "$r2o_donor_core/x25519.o" -Wl,--gc-sections -pthread
+    r2o_queue_c=$("$r2o_queue_binary" "$r2o_queue_fixture")
+    r2o_run_timed 'очередь HTTP в Rust' \
+        env R2O_HTTP_QUEUE_DIFF_OUTPUT="$r2o_queue_rust" \
+        cargo +1.98.0 test -p r2o-controller --bin r2o-controller \
+            http_search_queue_matches_the_unbounded_donor_queue --locked --offline -- --nocapture
+    r2o_queue_rust_value=$(cat "$r2o_queue_rust")
+    if [ "$r2o_queue_c" != "$r2o_queue_rust_value" ]; then
+        printf 'C/Rust HTTP queue mismatch: C=%s Rust=%s\n' \
+            "$r2o_queue_c" "$r2o_queue_rust_value" >&2
+        exit 1
+    fi
+    printf 'C/Rust HTTP queued count: %s\n' "$r2o_queue_c"
+    printf '\nСверка повтора при отсутствии судимых проб HTTP\n'
+    r2o_no_exec_binary="$r2o_log_dir/http-no-executed-differential-$$"
+    r2o_no_exec_c="$r2o_log_dir/http-no-executed-c-$$"
+    r2o_no_exec_rust="$r2o_log_dir/http-no-executed-rust-$$"
+    clang-18 -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+        -I"$r2o_donor_core" -I"$r2o_donor_core/include" -I"$r2o_donor_core/../datapath/include" \
+        -o "$r2o_no_exec_binary" \
+        "$r2o_script_dir/crates/r2o-controller/tests/d2o_http_no_executed_differential.c" \
+        "$r2o_donor_core/httpup_logic.c" "$r2o_donor_core/plantlv.o" \
+        "$r2o_donor_core/quic.o" "$r2o_donor_core/quicwire.o" "$r2o_donor_core/crypto.o" \
+        "$r2o_donor_core/../datapath/plan_parse.c" \
+        "$r2o_donor_core/../datapath/plan_apply.c" \
+        "$r2o_donor_core/../datapath/wire.c" \
+        "$r2o_donor_core/verify.o" "$r2o_donor_core/quicconn.o" "$r2o_donor_core/h3.o" \
+        "$r2o_donor_core/tls12.o" "$r2o_donor_core/p256.o" "$r2o_donor_core/compose.o" \
+        "$r2o_donor_core/measured.o" "$r2o_donor_core/hello.o" "$r2o_donor_core/meas.o" \
+        "$r2o_donor_core/link.o" "$r2o_donor_core/tls13.o" "$r2o_donor_core/tls13core.o" \
+        "$r2o_donor_core/x25519.o" -Wl,--gc-sections -pthread
+    "$r2o_no_exec_binary" >"$r2o_no_exec_c"
+    R2O_HTTP_NO_EXECUTED_DIFF_OUTPUT="$r2o_no_exec_rust" \
+        cargo +1.98.0 test -p r2o-controller --bin r2o-controller --locked --offline \
+            http_no_executed_trial_matches_d2o
+    diff -u "$r2o_no_exec_c" "$r2o_no_exec_rust"
+    printf 'C/Rust HTTP no executed trial: %s\n' "$(cat "$r2o_no_exec_c")"
     printf '\nТест Rust повторов базового HTTP-зонда\n'
     r2o_run_timed 'повторы baseline в Rust' \
         cargo +1.98.0 test -p r2o-controller --bin r2o-controller \
@@ -65,6 +211,10 @@ mkdir -p "$r2o_log_dir"
 } >"$r2o_log" 2>&1
 
 grep -q 'test_httpsearch: все проверки прошли' "$r2o_log"
+grep -q 'C/Rust HTTP-judge: 1 (REAL)' "$r2o_log"
+grep -q 'C/Rust HTTP CUT context: request_path=/watch/first' "$r2o_log"
+grep -q 'C/Rust HTTP queued count: http_queued=32' "$r2o_log"
+grep -q 'C/Rust HTTP no executed trial: cooldown_ms=300000' "$r2o_log"
 grep -q 'baseline_local_failure_and_cut_silence_follow_donor_retry_rules .*ok' "$r2o_log"
 printf 'Журнал дифференциальной проверки: %s\n' "$r2o_log"
 cat "$r2o_log"

@@ -60,16 +60,12 @@ fn standalone_base_probe_matches_the_classifier_whole_question() {
     assert_eq!(backend.probes, 3);
     assert_eq!(base.probes, 3);
     assert!(base.blocked);
+    let seed = base.seed_whole.unwrap();
     assert_eq!(
-        base.seed_whole,
-        Some(r2o_controller::classify::SeedWhole {
-            repeats: 3,
-            pass: 0,
-            fail: 3,
-            errors: 0,
-            error: None,
-        })
+        (seed.repeats, seed.pass, seed.fail, seed.errors),
+        (3, 0, 3, 0)
     );
+    assert_eq!(seed.error, None);
 }
 
 struct OpaqueMatcher;
@@ -574,18 +570,56 @@ fn no_tcp_ack_for_trigger_or_control_is_an_address_verdict() {
 }
 
 #[test]
+fn base_seed_is_reused_only_for_same_client_hello_and_endpoint() {
+    let base_trigger = Trigger {
+        name: "test".into(),
+        payload: vec![1, 2, 3, 4],
+        accept: Accept::default(),
+    };
+    let mut output = String::new();
+    for mode in 0..4 {
+        let mut backend = AlwaysPass;
+        let mut options = test_options();
+        let base = run_base_with_backend_progress(
+            "192.0.2.10:443",
+            &base_trigger,
+            options.clone(),
+            &mut backend,
+            &mut |_, _, _, _| {},
+        );
+        let mut input = base_trigger.clone();
+        if mode == 1 {
+            input.payload[3] = 5;
+        }
+        let address = match mode {
+            2 => "192.0.2.11:443",
+            3 => "192.0.2.10:8443",
+            _ => "192.0.2.10:443",
+        };
+        options.seed_whole = base.seed_whole;
+        let result = run_with_backend(address, &input, options, &mut backend);
+        output.push_str(&format!("{mode} {}\n", u8::from(result.probes == 0)));
+    }
+    if let Ok(path) = std::env::var("R2O_SEED_INPUT_DIFF_OUTPUT") {
+        std::fs::write(path, &output).unwrap();
+    }
+    assert_eq!(output, "0 1\n1 0\n2 0\n3 0\n");
+}
+
+#[test]
 fn seeded_whole_measurement_is_reused_without_an_extra_confirmation() {
     let trigger = test_trigger();
     let mut options = test_options();
     options.mark = Some(0x2d);
-    options.seed_whole = Some(r2o_controller::classify::SeedWhole {
-        repeats: options.repeats,
-        pass: options.repeats,
-        fail: 0,
-        errors: 0,
-        error: None,
-    });
     let mut backend = AlwaysPass;
+    options.seed_whole = run_base_with_backend_progress(
+        "192.0.2.10:443",
+        &trigger,
+        options.clone(),
+        &mut backend,
+        &mut |_, _, _, _| {},
+    )
+    .seed_whole;
     let result = run_with_backend("192.0.2.10:443", &trigger, options, &mut backend);
 
     assert_eq!(result.verdict, Verdict::Clear);

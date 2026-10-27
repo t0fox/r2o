@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "updated": "2026-10-27T00:00:00Z",
+  "boxes": [],
+  "domain_observations": [
+    {
+      "name": "clean.example.com",
+      "plan_id": "",
+      "transport": 6,
+      "family": 4,
+      "shape": 1,
+      "probe_path": "/",
+      "ech_origin": "",
+      "evidence": 2,
+      "at": "2026-10-27T00:00:00Z"
+    }
+  ]
+}

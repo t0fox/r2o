@@ -5,6 +5,7 @@
 
   var POLL_MS = 2000;
   var IDLE_POLL_MS = 6000;
+  var UPDATE_IDLE_POLL_MS = 60000;
   var STALE_MS = 9000;
 
   /* ─── Словарь ─── */
@@ -336,6 +337,7 @@
     this.status = null;
     this.catalogRevision = null;
     this.lastPoll = 0;
+    this.lastUpdatePoll = null;
     this.received = 0;
     this.lastOk = 0;
     this.failed = false;
@@ -402,7 +404,7 @@
     this.initUpdates();
     this.checkUpdates(false);
     win.setInterval(function () { if (!doc.hidden) self.poll(true); }, POLL_MS);
-    win.setInterval(function () { if (!doc.hidden) self.pollUpdates(); }, POLL_MS);
+    win.setInterval(function () { if (!doc.hidden) self.pollUpdates(true); }, POLL_MS);
     win.setInterval(function () { self.tick(); }, 1000);
   };
 
@@ -512,17 +514,16 @@
     if (node) { node.textContent = text; node.hidden = !text; }
   };
 
-  App.prototype.pollUpdates = function () {
+  App.prototype.pollUpdates = function (scheduled) {
     var self = this;
     if (this.doc.hidden || this.updateInflight || !this.$("updates-body")) return Promise.resolve();
-    /* Без автообновления опрашивать раз в минуту, а не на каждом шаге панели. */
-    if (this.updaterAbsent && !this.updatePending && Date.now() - (this.updaterAbsentAt || 0) < 60000) return Promise.resolve();
+    var idle = !this.updatePending && !this.updateFailed && !(this.updateStatus && this.updateStatus.busy);
+    if (scheduled && idle && this.lastUpdatePoll !== null && Date.now() - this.lastUpdatePoll < UPDATE_IDLE_POLL_MS) return Promise.resolve();
+    this.lastUpdatePoll = Date.now();
     this.updateInflight = true;
     return this.updateRequest("/api/update").then(function (reply) {
       if (!reply.ok) throw new Error("HTTP " + reply.code);
       var s = reply.data, pending = self.updatePending;
-      self.updaterAbsent = !!s.absent;
-      if (self.updaterAbsent) self.updaterAbsentAt = Date.now();
       self.updateFailed = false;
       self.updateStatus = s;
       /* Команда завершена, когда служба снова свободна и состояние новее нажатия
@@ -1111,18 +1112,15 @@
       }
       if (m.linked) {
         var facts = el(doc, "span", "");
-        var confirms = num(m.k.confirms), probes = num(m.k.probes_used);
-        if (confirms === null) add(facts, "Число подтверждённых привязок недоступно");
-        else add(facts, el(doc, "b", "", String(confirms)), " " + plural(confirms, "подтверждённая привязка", "подтверждённые привязки", "подтверждённых привязок"));
-        add(facts, "; ");
-        if (probes === null) add(facts, "общее число зондов не измеряется");
-        else add(facts, el(doc, "b", "", String(probes)), " " + plural(probes, "зонд", "зонда", "зондов") + " за работу движка");
+        add(facts,
+          el(doc, "b", "", String(num(m.k.confirms) || 0)), " " + plural(num(m.k.confirms) || 0, "подтверждение", "подтверждения", "подтверждений") + ", ",
+          el(doc, "b", "", String(num(m.k.probes_used) || 0)), " " + plural(num(m.k.probes_used) || 0, "зонд", "зонда", "зондов") + " за работу движка");
         out.push(facts);
-        if (num(m.k.client_unfit) !== null) {
+        if (num(m.k.client_unfit)) {
           var unfit = el(doc, "span", "");
           add(unfit, tag(doc, "план не подошёл клиенту: " + m.k.client_unfit, "warn"));
           out.push(unfit);
-        } else add(facts, "; число клиентов без подходящего плана не измеряется");
+        }
       }
       return out;
     });
@@ -1281,8 +1279,6 @@
       meta: el(doc, "div", "search-meta"),
       clock: el(doc, "div", "search-clock"),
       phase: el(doc, "p", "search-phase"),
-      plan: el(doc, "p", "search-plan"),
-      planResult: el(doc, "p", "search-plan-result"),
       question: el(doc, "p", "search-question"),
       track: el(doc, "div", "track")
     };
@@ -1290,10 +1286,7 @@
     li.__parts.fill = el(doc, "span", "track-fill");
     li.__parts.puck = el(doc, "span", "track-puck");
     li.__parts.question.hidden = true;
-    li.__parts.plan.hidden = true;
-    li.__parts.planResult.hidden = true;
-    add(li, li.__parts.target, li.__parts.clock, li.__parts.meta, li.__parts.phase,
-      li.__parts.plan, li.__parts.planResult, li.__parts.question, li.__parts.track);
+    add(li, li.__parts.target, li.__parts.clock, li.__parts.meta, li.__parts.phase, li.__parts.question, li.__parts.track);
     void s;
     return li;
   };
@@ -1331,23 +1324,9 @@
         p.phase.textContent = phaseText;
       }
     }
-    var planText = str(s.plan);
-    p.plan.hidden = !planText;
-    var planKey = JSON.stringify([planText]);
-    if (p.plan.__r2oKey !== planKey) {
-      p.plan.__r2oKey = planKey;
-      p.plan.replaceChildren();
-      if (planText) add(p.plan, el(doc, "b", "", "Способ обхода: "), el(doc, "code", "", planText));
-    }
-    var planResult = [
-      str(s.application) ? "Применение: " + str(s.application) : "",
-      str(s.last_result) ? "Последний результат: " + str(s.last_result) : ""
-    ].filter(Boolean).join(" · ");
-    p.planResult.hidden = !planResult;
-    if (p.planResult.textContent !== planResult) p.planResult.textContent = planResult;
-    var asking = s.phase === TRACK[2].phases[0] && !!str(s.question);
-    p.question.hidden = !asking;
-    var qText = asking ? "Вопрос коробке: " + str(s.question) : "";
+    var classifying = s.phase === TRACK[2].phases[0] && !!str(s.question);
+    p.question.hidden = !classifying;
+    var qText = classifying ? "Вопрос коробке: " + str(s.question) : "";
     if (p.question.textContent !== qText) p.question.textContent = qText;
     var tr = trackFor(s.phase);
     li.setAttribute("data-done", String(!!tr && !tr.voice && tr.at === TRACK.length - 1));
@@ -2156,9 +2135,7 @@
       fact("Каталог состояния", str(snap.state_dir) + " — " + str(snap.state_dir_note), null, true);
       if (m.k.catalog_at) fact("Файл каталога", str(m.k.catalog_at), null, true);
       if (num(snap.queue_num) !== null) fact("Очередь NFQUEUE", String(snap.queue_num), null, true);
-      if (m.linked) fact("План не подошёл клиенту",
-        num(m.k.client_unfit) === null ? "не измеряется" : String(m.k.client_unfit),
-        num(m.k.client_unfit) === null ? "warn" : m.k.client_unfit ? "warn" : null);
+      if (num(m.k.client_unfit) !== null) fact("План не подошёл клиенту", String(m.k.client_unfit), m.k.client_unfit ? "warn" : null);
       var unknown = list(snap.unknown_keys);
       if (unknown.length) fact("Непонятные ключи", unknown.join(", ") + " — эта сборка их не читает", "warn", true);
       right.appendChild(dl);

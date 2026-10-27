@@ -5,7 +5,15 @@ r2o_script_dir=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 r2o_donor_core=${R2O_DONOR_CORE:-"${r2o_script_dir%/*}/d2o-main/core"}
 r2o_log_dir="$r2o_script_dir/.rea"
 r2o_log="$r2o_log_dir/r2o-discovery-quic-stop-$(date +%Y%m%d-%H%M%S).log"
+r2o_build_root=
 mkdir -p "$r2o_log_dir"
+
+r2o_cleanup() {
+    if [ -n "$r2o_build_root" ]; then
+        rm -rf -- "$r2o_build_root"
+    fi
+}
+trap r2o_cleanup EXIT
 
 r2o_run() {
     r2o_label=$1
@@ -51,9 +59,25 @@ r2o_run 'разбор AST планировщика C' sh -c \
     _ "$r2o_donor_core/sched.c" "$r2o_donor_core"
 
 printf '\nЭталон C: снятие временной пробы при жизненном цикле задачи\n' >>"$r2o_log"
-r2o_run 'сборка ARM64 C-теста планировщика' make -B -C "$r2o_donor_core" test_sched CC=aarch64-linux-gnu-gcc
+r2o_donor_artifacts_before=$(find "$r2o_donor_core" -maxdepth 1 -type f \
+    \( -name '*.o' -o -name '*.a' -o -name test_sched \) -print0 |
+    LC_ALL=C sort -z | xargs -0 -r sha256sum)
+r2o_donor_root=$(CDPATH='' cd -P "$r2o_donor_core/.." && pwd)
+r2o_build_root=$(mktemp -d "${TMPDIR:-/tmp}/r2o-quic-stop.XXXXXX")
+cp -a "$r2o_donor_core" "$r2o_build_root/"
+cp -a "$r2o_donor_root/datapath" "$r2o_build_root/"
+cp -a "$r2o_donor_root/runtime" "$r2o_build_root/"
+r2o_build_core="$r2o_build_root/core"
+r2o_run 'сборка ARM64 C-теста планировщика' make -B -C "$r2o_build_core" test_sched CC=aarch64-linux-gnu-gcc
+if [ "$r2o_donor_artifacts_before" != "$(find "$r2o_donor_core" -maxdepth 1 -type f \
+    \( -name '*.o' -o -name '*.a' -o -name test_sched \) -print0 |
+    LC_ALL=C sort -z | xargs -0 -r sha256sum)" ]; then
+    printf 'ARM64-сборка изменила артефакты исходного donor checkout.\n' | tee -a "$r2o_log" >&2
+    exit 1
+fi
 r2o_run 'ARM64/QEMU lifecycle-тест планировщика C' \
-    qemu-aarch64 -L /usr/aarch64-linux-gnu "$r2o_donor_core/test_sched" --lifecycle-only
+    qemu-aarch64 -L /usr/aarch64-linux-gnu "$r2o_build_core/test_sched" --lifecycle-only
+printf 'Артефакты исходного donor checkout не изменились.\n' >>"$r2o_log"
 
 printf '\nЦель Rust: остановка worker обслуживает DEL_ADDR_PROBE\n' >>"$r2o_log"
 r2o_run 'ARM64/QEMU-тест очистки QUIC-пробы' env \

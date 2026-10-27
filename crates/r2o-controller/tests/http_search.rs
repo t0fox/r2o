@@ -38,14 +38,14 @@ fn classifies_a_response_before_half_rtt_as_early() {
 }
 
 #[test]
-fn identifies_only_the_explicit_cloudflare_challenge_header() {
+fn treats_cloudflare_challenge_header_like_any_other_server_response() {
     let challenge =
         b"HTTP/1.1 403 Forbidden\r\ncf-mitigated: challenge\r\nContent-Length: 0\r\n\r\n";
     let ordinary_forbidden = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
 
     assert_eq!(
         judge(Some(b"rutracker.org"), challenge, 98_000, 99_000),
-        Answer::Challenge
+        Answer::Real
     );
     assert_eq!(
         judge(Some(b"rutracker.org"), ordinary_forbidden, 98_000, 99_000),
@@ -54,7 +54,7 @@ fn identifies_only_the_explicit_cloudflare_challenge_header() {
 }
 
 #[test]
-fn stops_reading_an_antibot_response_after_its_header() {
+fn reads_the_body_of_a_cloudflare_challenge_response_and_reports_cut() {
     let response_head =
         b"HTTP/1.1 403 Forbidden\r\ncf-mitigated: challenge\r\nContent-Length: 100\r\n\r\n";
     let response = [response_head.as_slice(), b"captcha"].concat();
@@ -62,10 +62,10 @@ fn stops_reading_an_antibot_response_after_its_header() {
     let result =
         read_probe_response(&mut reader, Some(b"rutracker.org"), 98_000, Instant::now()).unwrap();
 
-    assert_eq!(result.answer, Answer::Challenge);
+    assert_eq!(result.answer, Answer::Cut);
     assert!(!result.complete);
-    assert_eq!(result.body_bytes, 0);
-    assert_eq!(reader.position() as usize, response_head.len());
+    assert_eq!(result.body_bytes, 7);
+    assert_eq!(reader.position() as usize, response.len());
 }
 
 #[test]

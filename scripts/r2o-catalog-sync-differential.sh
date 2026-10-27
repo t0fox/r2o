@@ -13,6 +13,9 @@ fi
 donor_core="$donor_root/core"
 fixture="$repo_root/crates/r2o-controller/tests/fixtures/d2o_catalog_sync_wire.json"
 batch_fixture="$repo_root/crates/r2o-controller/tests/fixtures/d2o_catalog_sync_batch.json"
+area_pending_fixture="$repo_root/crates/r2o-controller/tests/fixtures/d2o_catalog_sync_area_pending.json"
+area_timeout_fixture="$repo_root/crates/r2o-controller/tests/fixtures/d2o_catalog_sync_area_timeout.json"
+area_delete_order_fixture="$repo_root/crates/r2o-controller/tests/fixtures/d2o_catalog_sync_area_delete_order.json"
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/r2o-catalog-sync.XXXXXX")
 trap 'rm -rf -- "$tmp_dir"' EXIT HUP INT TERM
 
@@ -55,6 +58,52 @@ if ! cargo +1.98.0 test --locked -p r2o-controller --bin r2o-controller \
 fi
 grep '^D2O_AREA_COMMAND=' "$tmp_dir/rust.area.log" >"$tmp_dir/rust.area"
 diff -u "$tmp_dir/c.area" "$tmp_dir/rust.area"
+"$tmp_dir/donor-catalog-wire" "$area_pending_fixture" 1280 --area-pending >"$tmp_dir/c.area-pending"
+if ! cargo +1.98.0 test --locked -p r2o-controller --bin r2o-controller \
+    catalog_sync_area_command_yields_pending_like_donor -- --nocapture \
+    >"$tmp_dir/rust.area-pending.log" 2>&1; then
+    cat "$tmp_dir/rust.area-pending.log" >&2
+    exit 1
+fi
+grep '^D2O_AREA_PENDING=' "$tmp_dir/c.area-pending" >"$tmp_dir/c.area-pending.state"
+grep '^D2O_AREA_PENDING=' "$tmp_dir/rust.area-pending.log" >"$tmp_dir/rust.area-pending.state"
+grep '^D2O_AREA_COMMAND=' "$tmp_dir/c.area-pending" >"$tmp_dir/c.area-pending.command"
+grep '^D2O_AREA_COMMAND=' "$tmp_dir/rust.area-pending.log" >"$tmp_dir/rust.area-pending.command"
+diff -u "$tmp_dir/c.area-pending.state" "$tmp_dir/rust.area-pending.state"
+diff -u "$tmp_dir/c.area-pending.command" "$tmp_dir/rust.area-pending.command"
+"$tmp_dir/donor-catalog-wire" "$area_pending_fixture" 1280 --area-timeout >"$tmp_dir/c.area-timeout"
+if ! cargo +1.98.0 test --locked -p r2o-controller --bin r2o-controller \
+    catalog_sync_area_ack_expires_at_five_seconds_like_donor -- --nocapture \
+    >"$tmp_dir/rust.area-timeout.log" 2>&1; then
+    cat "$tmp_dir/rust.area-timeout.log" >&2
+    exit 1
+fi
+grep '^D2O_AREA_TIMEOUT=' "$tmp_dir/c.area-timeout" >"$tmp_dir/c.area-timeout.state"
+grep '^D2O_AREA_TIMEOUT=' "$tmp_dir/rust.area-timeout.log" >"$tmp_dir/rust.area-timeout.state"
+diff -u "$tmp_dir/c.area-timeout.state" "$tmp_dir/rust.area-timeout.state"
+"$tmp_dir/donor-catalog-wire" "$area_timeout_fixture" 1280 --area-timeout-delete >"$tmp_dir/c.area-timeout-delete"
+if ! cargo +1.98.0 test --locked -p r2o-controller --bin r2o-controller \
+    catalog_sync_removes_area_after_lost_install_ack_like_donor -- --nocapture \
+    >"$tmp_dir/rust.area-timeout-delete.log" 2>&1; then
+    cat "$tmp_dir/rust.area-timeout-delete.log" >&2
+    exit 1
+fi
+grep '^D2O_AREA_TIMEOUT_DELETE=' "$tmp_dir/c.area-timeout-delete" >"$tmp_dir/c.area-timeout-delete.state"
+grep '^D2O_AREA_TIMEOUT_DELETE=' "$tmp_dir/rust.area-timeout-delete.log" >"$tmp_dir/rust.area-timeout-delete.state"
+grep '^D2O_AREA_DELETE_COMMAND=' "$tmp_dir/c.area-timeout-delete" >"$tmp_dir/c.area-timeout-delete.command"
+grep '^D2O_AREA_DELETE_COMMAND=' "$tmp_dir/rust.area-timeout-delete.log" >"$tmp_dir/rust.area-timeout-delete.command"
+diff -u "$tmp_dir/c.area-timeout-delete.state" "$tmp_dir/rust.area-timeout-delete.state"
+diff -u "$tmp_dir/c.area-timeout-delete.command" "$tmp_dir/rust.area-timeout-delete.command"
+"$tmp_dir/donor-catalog-wire" "$area_delete_order_fixture" 1280 --area-delete-order >"$tmp_dir/c.area-delete-order"
+if ! cargo +1.98.0 test --locked -p r2o-controller --bin r2o-controller \
+    catalog_sync_delete_ack_order_uses_donor_swap_remove -- --nocapture \
+    >"$tmp_dir/rust.area-delete-order.log" 2>&1; then
+    cat "$tmp_dir/rust.area-delete-order.log" >&2
+    exit 1
+fi
+grep '^D2O_AREA_DELETE_' "$tmp_dir/c.area-delete-order" >"$tmp_dir/c.area-delete-order.out"
+grep '^D2O_AREA_DELETE_' "$tmp_dir/rust.area-delete-order.log" >"$tmp_dir/rust.area-delete-order.out"
+diff -u "$tmp_dir/c.area-delete-order.out" "$tmp_dir/rust.area-delete-order.out"
 "$tmp_dir/donor-catalog-wire" --http-bound-set >"$tmp_dir/c.http-bound"
 if ! cargo +1.98.0 test --locked -p r2o-controller --bin r2o-controller \
     confirmed_http_install_returns_before_ack_and_records_exact_late_ack -- --nocapture \
@@ -78,6 +127,14 @@ printf 'C/Rust first catalog batch: 8 commands without waiting for acknowledgeme
 cat "$tmp_dir/c.batch.ops"
 printf 'C/Rust identified area command wire frame matches\n'
 cat "$tmp_dir/c.area"
+printf 'C/Rust area command remains pending and yields before its ACK\n'
+cat "$tmp_dir/c.area-pending"
+printf 'C/Rust area ACK deadline is five seconds with the same pending transition\n'
+cat "$tmp_dir/c.area-timeout"
+printf 'C/Rust uncertain area install is deleted after the catalog disables its group\n'
+cat "$tmp_dir/c.area-timeout-delete"
+printf 'C/Rust deletion ACKs keep the donor swap-with-last area order\n'
+cat "$tmp_dir/c.area-delete-order"
 printf 'C/Rust asynchronous HTTP bound-install command frame matches\n'
 cat "$tmp_dir/c.http-bound"
 printf 'C/Rust conditional HTTP bound-delete command frame matches\n'

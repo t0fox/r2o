@@ -2,8 +2,10 @@
 
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
+use std::ffi::{c_int, c_long};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -11,6 +13,7 @@ const EVENT_CAPACITY: usize = 64;
 const SAMPLE_CAPACITY: usize = 120;
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
 const REPORT_MAX: usize = 256 * 1024;
+const D2O_PROCESS_CAPACITY: usize = 3;
 const PROCESS_SPECS: [ProcessSpec; 5] = [
     ProcessSpec {
         name: "r2o-controller4",
@@ -39,6 +42,96 @@ const PROCESS_SPECS: [ProcessSpec; 5] = [
     },
 ];
 
+#[allow(dead_code)]
+#[repr(C)]
+struct D2oDiagnosticProcessMemory {
+    pid: c_long,
+    rss: i64,
+    hwm: i64,
+    anon: i64,
+    threads: i64,
+}
+
+#[allow(dead_code)]
+#[repr(C)]
+struct D2oDiagnosticMemoryDetail {
+    pid: c_long,
+    at: i64,
+    mono: i64,
+    rss: i64,
+    start_ticks: i64,
+    vm: [i64; 4],
+    fds: i64,
+    smaps_ok: c_int,
+    groups: [[i64; 5]; 4],
+}
+
+#[allow(dead_code)]
+#[repr(C)]
+struct D2oDiagnosticEvent {
+    id: u64,
+    at: i64,
+    elapsed: i64,
+    queued: i64,
+    units: i64,
+    family: u32,
+    trigger: u32,
+    shape: u32,
+    target: [u8; 256],
+    protocol: [u8; 16],
+    outcome: [u8; 32],
+    reason: [u8; 256],
+    ip: [u8; 48],
+    path: [u8; 16],
+    kind: [u8; 8],
+}
+
+#[allow(dead_code)]
+#[repr(C)]
+struct D2oDiagnosticCounts {
+    boxes: u64,
+    bindings: u64,
+    plans: u64,
+    observations: u64,
+    active: u64,
+    queued: u64,
+    tasks: u64,
+    snapshots: u64,
+    http_records: u64,
+    http_queued: u64,
+}
+
+#[allow(dead_code)]
+#[repr(C)]
+struct D2oDiagnosticSample {
+    at: i64,
+    mono: i64,
+    total: i64,
+    available: i64,
+    conntrack: i64,
+    counts: D2oDiagnosticCounts,
+    processes: [D2oDiagnosticProcessMemory; D2O_PROCESS_CAPACITY],
+}
+
+#[allow(dead_code)]
+#[repr(C)]
+struct D2oDiagnosticRing {
+    first: [D2oDiagnosticMemoryDetail; D2O_PROCESS_CAPACITY],
+    latest: [D2oDiagnosticMemoryDetail; D2O_PROCESS_CAPACITY],
+    events: [D2oDiagnosticEvent; EVENT_CAPACITY],
+    samples: [D2oDiagnosticSample; SAMPLE_CAPACITY],
+    event_count: usize,
+    sample_count: usize,
+    event_total: u64,
+    sample_total: u64,
+    last_ms: i64,
+    sampled: c_int,
+}
+
+fn d2o_ring_bytes() -> usize {
+    size_of::<D2oDiagnosticRing>()
+}
+
 #[derive(Clone, Copy)]
 struct ProcessSpec {
     name: &'static str,
@@ -55,6 +148,9 @@ pub struct Counts {
     pub active: usize,
     pub queued: usize,
     pub tasks: usize,
+    pub snapshots: usize,
+    pub http_records: usize,
+    pub http_queued: usize,
 }
 
 pub struct Recorder {
@@ -98,7 +194,9 @@ impl Recorder {
             return;
         };
         self.event_total = self.event_total.saturating_add(1);
-        object.insert("id".into(), json!(self.event_total));
+        if !object.get("id").is_some_and(Value::is_u64) {
+            object.insert("id".into(), json!(self.event_total));
+        }
         object.insert("at".into(), json!(unix_seconds()));
         for (key, limit) in [
             ("target", 255),
@@ -109,13 +207,12 @@ impl Recorder {
             ("path", 15),
             ("kind", 7),
         ] {
-            if let Some(value) = object
+            let value = object
                 .get_mut(key)
                 .and_then(|value| value.as_str())
                 .map(str::to_owned)
-            {
-                object.insert(key.into(), json!(truncate_utf8(value, limit)));
-            }
+                .unwrap_or_default();
+            object.insert(key.into(), json!(d2o_event_text(value, limit)));
         }
         if self.events.len() == EVENT_CAPACITY {
             self.events.pop_front();
@@ -181,7 +278,9 @@ impl Recorder {
                     "latest": detail,
                 }));
             } else {
-                details.push(json!({"name":process["name"],"first":null,"latest":null}));
+                let name = process["name"].as_str().unwrap_or_default();
+                details
+                    .push(json!({"name":name,"first":self.first_details.get(name),"latest":null}));
             }
         }
         let sample = json!({
@@ -191,8 +290,8 @@ impl Recorder {
             "mem_available_kib": meminfo(&self.proc_dir, "MemAvailable:"),
             "system_conntrack": read_number(&self.proc_dir.join("sys/net/netfilter/nf_conntrack_count")),
             "datapath_flows": null,
-            "http_records": null,
-            "http_queued": null,
+            "http_records": counts.http_records,
+            "http_queued": counts.http_queued,
             "boxes": counts.boxes,
             "bindings": counts.bindings,
             "plans": counts.plans,
@@ -200,7 +299,7 @@ impl Recorder {
             "active": counts.active,
             "queued": counts.queued,
             "tasks": counts.tasks,
-            "snapshots": null,
+            "snapshots": counts.snapshots,
             "processes": processes,
         });
         if self.samples.len() == SAMPLE_CAPACITY {
@@ -212,8 +311,7 @@ impl Recorder {
             "enabled": true,
             "controller_pid": std::process::id(),
             "release": option_env!("R2O_RELEASE_ID").unwrap_or("dev"),
-            "ring_bytes": self.events.iter().map(Value::to_string).map(|s| s.len()).sum::<usize>()
-                + self.samples.iter().map(Value::to_string).map(|s| s.len()).sum::<usize>(),
+            "ring_bytes": d2o_ring_bytes(),
             "event_capacity": EVENT_CAPACITY,
             "sample_capacity": SAMPLE_CAPACITY,
             "sample_interval_ms": SAMPLE_INTERVAL.as_millis(),
@@ -279,6 +377,23 @@ fn truncate_utf8(mut value: String, max_bytes: usize) -> String {
         value.truncate(end);
     }
     value
+}
+
+fn d2o_event_text(value: String, max_bytes: usize) -> String {
+    let value = value.split('\0').next().unwrap_or_default();
+    truncate_utf8(
+        value
+            .chars()
+            .map(|character| {
+                if character < ' ' && character != '\n' {
+                    '?'
+                } else {
+                    character
+                }
+            })
+            .collect(),
+        max_bytes,
+    )
 }
 
 fn ensure_diagnostics_dir(dir: &Path) -> bool {
@@ -500,7 +615,7 @@ fn read_smaps(proc_dir: &Path, pid: u64) -> Option<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Counts, Recorder};
+    use super::{Counts, Recorder, d2o_ring_bytes};
     use serde_json::json;
     use std::fs::{self, OpenOptions};
     use std::time::{Duration, Instant};
@@ -529,6 +644,9 @@ mod tests {
             active: 1,
             queued: 2,
             tasks: 3,
+            snapshots: 4,
+            http_records: 5,
+            http_queued: 6,
         });
         for id in 0..64 {
             recorder.record(json!({"target":format!("target-{id}"),"outcome":"inconclusive"}));
@@ -540,6 +658,9 @@ mod tests {
         assert_eq!(report["event_capacity"], 64);
         assert_eq!(report["sample_capacity"], 120);
         assert_eq!(report["samples"][0]["bindings"], 3);
+        assert_eq!(report["samples"][0]["snapshots"], 4);
+        assert_eq!(report["samples"][0]["http_records"], 5);
+        assert_eq!(report["samples"][0]["http_queued"], 6);
         assert_eq!(
             report["samples"][0]["processes"].as_array().unwrap().len(),
             5
@@ -553,6 +674,134 @@ mod tests {
         assert_eq!(report["events_overwritten"], 1);
         assert_eq!(report["events"][63]["target"].as_str().unwrap().len(), 254);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn diagnostics_id_and_counts_match_d2o() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let dir = std::env::temp_dir().join(format!("r2o-diagnostics-diff-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(dir.join("enabled"))
+            .unwrap();
+        let counts = Counts {
+            snapshots: 4,
+            http_records: 5,
+            http_queued: 6,
+            ..Counts::default()
+        };
+        let mut recorder = Recorder::new(dir.clone(), dir.join("run"));
+        recorder.tick(|| counts);
+        recorder.record(json!({
+            "id": 77,
+            "family": 4,
+            "trigger": 3,
+            "elapsed_ms": null,
+            "queue_ms": null,
+            "probe_units": null,
+            "target": "example.com",
+            "ip": null,
+            "path": "httpsearch",
+            "kind": "name",
+            "shape": 1,
+            "protocol": "http",
+            "outcome": "inconclusive",
+            "reason": "bad\t\u{1}line\n\0ignored",
+            "reason_source": "terminal-code"
+        }));
+        recorder.checked = Some(Instant::now() - Duration::from_secs(1));
+        recorder.sampled = Some(Instant::now() - Duration::from_secs(60));
+        recorder.tick(|| counts);
+        let report: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("report.json")).unwrap()).unwrap();
+        let mut event = report["events"][0].clone();
+        event.as_object_mut().unwrap().remove("at");
+        let sample = &report["samples"][0];
+        assert_eq!(report["ring_bytes"], d2o_ring_bytes());
+        assert_eq!(event["id"], 77);
+        assert_eq!(event["reason"], "bad??line\n");
+        assert_eq!(event["ip"], "");
+        assert_eq!(sample["snapshots"], 4);
+        assert_eq!(sample["http_records"], 5);
+        assert_eq!(sample["http_queued"], 6);
+        if let Ok(path) = std::env::var("R2O_DIAGNOSTICS_DIFF_OUTPUT") {
+            fs::write(
+                path,
+                format!(
+                    "ring_bytes={}\nevent_json={}\nevent_id={}\nreason_hex={}\nsnapshots={}\nhttp_records={}\nhttp_queued={}\n",
+                    report["ring_bytes"],
+                    serde_json::to_string(&event).unwrap(),
+                    event["id"],
+                    event["reason"]
+                        .as_str()
+                        .unwrap()
+                        .as_bytes()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>(),
+                    sample["snapshots"],
+                    sample["http_records"],
+                    sample["http_queued"]
+                ),
+            )
+            .unwrap();
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn first_process_detail_survives_process_exit_like_d2o() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let root = std::env::temp_dir().join(format!("r2o-diag-exit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let diag = root.join("diag");
+        let proc_dir = root.join("proc");
+        let run = root.join("run");
+        fs::create_dir_all(proc_dir.join("123")).unwrap();
+        fs::create_dir_all(&run).unwrap();
+        fs::create_dir(&diag).unwrap();
+        fs::set_permissions(&diag, fs::Permissions::from_mode(0o700)).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(diag.join("enabled"))
+            .unwrap();
+        fs::write(run.join("r2o-controller4.pid"), "123\n").unwrap();
+        fs::write(proc_dir.join("123/comm"), "r2o-controller\n").unwrap();
+        fs::write(proc_dir.join("123/status"), "VmRSS: 1024 kB\n").unwrap();
+        let mut recorder = Recorder::new(diag.clone(), run.clone());
+        recorder.proc_dir = proc_dir;
+        recorder.tick(Counts::default);
+        fs::remove_file(run.join("r2o-controller4.pid")).unwrap();
+        recorder.checked = Some(Instant::now() - Duration::from_secs(1));
+        recorder.sampled = Some(Instant::now() - Duration::from_secs(60));
+        recorder.tick(Counts::default);
+        let report: serde_json::Value =
+            serde_json::from_slice(&fs::read(diag.join("report.json")).unwrap()).unwrap();
+        let detail = &report["memory_details"][0];
+        if let Ok(path) = std::env::var("R2O_DIAG_EXIT_DIFF_OUTPUT") {
+            fs::write(
+                path,
+                format!(
+                    "first_pid={}\nlatest_null={}\n",
+                    detail["first"]["pid"],
+                    detail["latest"].is_null()
+                ),
+            )
+            .unwrap();
+        }
+        assert_eq!(detail["first"]["pid"], 123);
+        assert!(detail["latest"].is_null());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]

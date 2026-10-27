@@ -754,6 +754,7 @@ pub struct ClassifyOptions {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SeedWhole {
+    pub input: u64,
     pub repeats: usize,
     pub pass: usize,
     pub fail: usize,
@@ -950,6 +951,15 @@ fn add_observation(
     result.trace.len().saturating_sub(1)
 }
 
+fn seed_input(trigger: &Trigger, target: &ProbeTarget) -> u64 {
+    let mut hash = 1_469_598_103_934_665_603_u64;
+    for byte in trigger.payload.iter().chain(target.host.as_bytes()) {
+        hash = (hash ^ u64::from(*byte)).wrapping_mul(1_099_511_628_211);
+    }
+    hash = (hash ^ u64::from(target.port)).wrapping_mul(1_099_511_628_211);
+    hash ^ trigger.payload.len() as u64
+}
+
 fn measure<B: ProbeBackend>(
     backend: &mut B,
     target: &ProbeTarget,
@@ -963,6 +973,7 @@ fn measure<B: ProbeBackend>(
     if spec.name == "whole"
         && spec.cuts.is_empty()
         && let Some(seed) = &options.seed_whole
+        && seed.input == seed_input(trigger, target)
         && seed.repeats == options.repeats
         && !seed.error.as_deref().is_some_and(is_dial_timeout_text)
     {
@@ -1473,6 +1484,7 @@ pub fn run_base_with_backend_progress<B: ProbeBackend>(
     let complete = base.pass.saturating_add(base.fail) >= options.repeats
         && !base.error.as_ref().is_some_and(ProbeError::is_dial_timeout);
     let seed_whole = complete.then(|| SeedWhole {
+        input: seed_input(trigger, &target),
         repeats: options.repeats,
         pass: base.pass,
         fail: base.fail,

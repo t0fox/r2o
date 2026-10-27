@@ -422,7 +422,7 @@ impl DiscoveryTarget {
             || event.key[37] != 6
             || !matches!(event.key[0], 4 | 6)
             || event.trial_id.iter().any(|byte| *byte != 0)
-            || !crate::http_search::repeatable_path(&event.path)
+            || event.code == 4 && !crate::http_search::repeatable_path(&event.path)
         {
             return None;
         }

@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "updated": "2026-10-27T00:00:00Z",
+  "boxes": [
+    {
+      "id": "area-delete-order-box",
+      "created": "2026-10-27T00:00:00Z",
+      "updated": "2026-10-27T00:00:00Z",
+      "fingerprint": { "method": 2, "signals": [] },
+      "plans": [
+        {
+          "id": "area-plan",
+          "proto": "tls",
+          "text": "d2k-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit sni_middle +0\n",
+          "added": "2026-10-27T00:00:00Z",
+          "successes": 1,
+          "enabled": true
+        }
+      ],
+      "bindings": []
+    }
+  ],
+  "domain_observations": [
+    { "name": "rr-a.example.com", "plan_id": "area-plan", "transport": 6, "family": 4, "shape": 1, "probe_path": "/", "ech_origin": "", "evidence": 1, "at": "2026-10-27T00:00:00Z" },
+    { "name": "rr-b.example.com", "plan_id": "area-plan", "transport": 6, "family": 4, "shape": 1, "probe_path": "/", "ech_origin": "", "evidence": 1, "at": "2026-10-27T00:00:00Z" },
+    { "name": "rr-c.example.com", "plan_id": "area-plan", "transport": 6, "family": 4, "shape": 1, "probe_path": "/", "ech_origin": "", "evidence": 1, "at": "2026-10-27T00:00:00Z" },
+    { "name": "rr-a.example.net", "plan_id": "area-plan", "transport": 6, "family": 4, "shape": 1, "probe_path": "/", "ech_origin": "", "evidence": 1, "at": "2026-10-27T00:00:00Z" },
+    { "name": "rr-b.example.net", "plan_id": "area-plan", "transport": 6, "family": 4, "shape": 1, "probe_path": "/", "ech_origin": "", "evidence": 1, "at": "2026-10-27T00:00:00Z" },
+    { "name": "rr-c.example.net", "plan_id": "area-plan", "transport": 6, "family": 4, "shape": 1, "probe_path": "/", "ech_origin": "", "evidence": 1, "at": "2026-10-27T00:00:00Z" },
+    { "name": "rr-a.example.org", "plan_id": "area-plan", "transport": 6, "family": 4, "shape": 1, "probe_path": "/", "ech_origin": "", "evidence": 1, "at": "2026-10-27T00:00:00Z" },
+    { "name": "rr-b.example.org", "plan_id": "area-plan", "transport": 6, "family": 4, "shape": 1, "probe_path": "/", "ech_origin": "", "evidence": 1, "at": "2026-10-27T00:00:00Z" },
+    { "name": "rr-c.example.org", "plan_id": "area-plan", "transport": 6, "family": 4, "shape": 1, "probe_path": "/", "ech_origin": "", "evidence": 1, "at": "2026-10-27T00:00:00Z" }
+  ]
+}

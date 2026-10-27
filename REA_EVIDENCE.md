@@ -8839,3 +8839,154 @@ source and the executable C/Rust differential, not new REA pseudocode.
 No router command or traffic was used. Local differential and QEMU evidence do
 not establish field acceptance or full behavioral parity; those remain
 unconfirmed.
+
+## Диагностика и несудимые HTTP-пробы — 27.10.2026
+
+Проверка `git ls-remote origin HEAD` показала, что локальный `783aa75` отставал
+от опубликованного `304ba893` на 30 коммитов. Checkout d2o обновлён
+fast-forward до `304ba893dd37197128ac8799c0495b035f6a38c0`; существующее
+локальное изменение `datapath/test_session.c` и пользовательские каталоги
+сохранены. Предыдущее удаление истории диагностики было основано на старом
+срезе; панель, API и сбор отчёта восстановлены по текущему d2o.
+
+| C-эталон | Rust-аналог | Одинаковый вход и результат |
+|---|---|---|
+| `core/httpsearch.c::judge_trial`, `all_failed` | `r2o_http_trial_is_judged`, `r2o_http_failed_completion`, `run_http_search_task` | При отсутствии судимых опытов RED: C `300000` мс, Rust `3600000` мс. После исправления оба дают `300000` мс, `inconclusive`, `no-executed-trial`. Судимы только подтверждённые по исполнению портал, CUT и REAL с двумя полными ответами. |
+| `core/diagnostics.c::d2k_diag_record`, `d2k_diag_sample` | `diagnostics::Recorder::record`, `tick` | На одинаковых данных совпали `id=77`, `snapshots=4`, `http_records=5`, `http_queued=6`. |
+| `core/sched.c::d2k_sched_diagnostic_counts` | `R2oDiscoverySearches::diagnostic_snapshot_count` | Фикстура с активными TCP/QUIC, voice и ожидающим QUIC-снимком: C и Rust `snapshots=3`. |
+| `core/httpsearch.c::diagnostic_end` | `r2o_http_search_diagnostic_event` | На локальном отказе запуска C и Rust выдали одинаковые поля события, включая `local-abort` и `probe-start-failed`. |
+
+RED и GREEN записаны в `.rea/r2o-http-search-differential-20261027-014446.log`
+и `.rea/r2o-http-search-differential-20261027-014710.log`; повтор с проверкой
+диагностического исхода выполнен скриптом `scripts/r2o-http-search-differential.sh`.
+Прямая сверка отчёта выполняется через `scripts/r2o-diagnostics-differential.sh`.
+Сценарии для `783aa75` являются историческими и не подменяют актуальный эталон.
+
+REA открыл локальный ELF C-фикстуры, SHA-256
+`7d2ad7ebaee8950f19771e667de794ae8f77d6481bb9f7b760a4d13ef46010bb`,
+но `analyze_function(all_failed)` вернул `provider_unavailable`: Windows Ghidra
+не поддерживает ELF, Hopper недоступен, IDA не настроена. Поэтому вывод о новой
+ветке основан на C-исходнике и исполняемом дифф-тесте; нового REA-досье нет.
+Физический роутер не использовался, полевая приёмка и полный паритет остаются
+неподтверждёнными.
+
+## ClientHello во время поиска — 27.10.2026
+
+Эталон: d2o `304ba893dd37197128ac8799c0495b035f6a38c0`, `core/sched.c::on_shape`. В состоянии `T_ASKING` совместимый ClientHello останавливает профильный замер без собственного снимка и сохраняется для повторного запуска; снимок, принадлежащий задаче, и несовместимый профиль не заменяются.
+
+Rust: `r2o_handle_client_shape_event` сохраняет подходящий снимок и прерывает незавершённый сетевой вопрос без собственного ClientHello; `DiscoveryWorker::try_outcome` переносит признак `trigger_planned` в повторную задачу. Рабочее состояние вопроса хранится отдельно от ограниченной истории интерфейса.
+
+До исправления на первом из восьми одинаковых входов C выдал `1`, Rust `0` (остановка); после исправления восемь результатов совпали. Дополнительный тест сравнивает состояния очереди, вопроса, планирования и проверки, а также при двух событиях проверяет последний снимок. Rust-тест отдельно проверяет сохранение `trigger_planned` при повторном запуске. Команда: `R2O_DONOR_ROOT=<чистый checkout 304> sh scripts/r2o-ack-applied-persist-differential.sh`; журналы `/tmp/r2o-shape-red-current.log`, `/tmp/r2o-shape-state-final.log`.
+
+Эти тесты не доказывают все переходы `T_ASKING`: перенос доказанного обрыва входящего ответа через повтор ещё требует отдельной проверки. Переход со снимком после собственных планов проверен ниже. REA-анализ функции в этой среде недоступен из-за отсутствия поддерживаемого провайдера ELF; использованы исходник и исполняемый C-тест. Полевая проверка не проводилась.
+
+## Первый снимок памяти после завершения процесса — 27.10.2026
+
+В `core/diagnostics.c::d2k_diag_sample` d2o сохраняет первый снимок процесса, даже если следующий сбор не находит его PID; `d2k_diag_write` выводит этот первый снимок и `latest: null`. В Rust `Recorder::tick` раньше заменял оба значения на `null`.
+
+На одинаковом сценарии с PID 123, двумя сборами и удалением PID-файла C вывел `first_pid=123`, Rust до исправления — `first_pid=null`; после исправления оба вывели `first_pid=123` и `latest_null=true`. Дифференциальный тест — `scripts/r2o-diagnostics-differential.sh`; журналы `/tmp/r2o-diag-exit-red.log` и `/tmp/r2o-diag-exit-green.log`. Имена процессов в фикстуре соответствуют именам каждого проекта.
+
+## Повторное использование базового ответа — 27.10.2026
+
+В `core/sched.c::worker_run` d2o принимает `seed` только если `seed_input_of` совпадает с текущими байтами ClientHello, IP и портом. В Rust `classify::measure` прежде проверял число повторов и ошибки, но не вход; ответ другого запроса мог попасть в новый классификатор. Теперь `SeedWhole` хранит хэш входа по той же формуле, и `measure` сверяет его перед повторным использованием.
+
+Дифференциальный сценарий запускает фактический C `seed_input_of` и Rust-классификатор с одинаковыми данными: тот же вход, изменённый ClientHello, изменённый IP и изменённый порт. До исправления C: `1 0 0 0`, Rust: `1 1 1 1`; после исправления обе стороны: `1 0 0 0`. Журналы `/tmp/r2o-seed-input-red.log` и `/tmp/r2o-seed-input-final.log`.
+
+Отдельная C-фикстура `--own-snapshot` проверяет 16 сочетаний владения снимком, признака повторного вопроса, доказанного RX-обрыва и формы пришедшего ClientHello в `own_first_continue`. Сравнение Rust по входу и владению приведено ниже; перенос доказательства RX-обрыва между прогонами остаётся открытым.
+
+## Продолжение после собственных планов — 27.10.2026
+
+В `core/sched.c::own_first_continue` d2o после собственных планов выбирает последний снимок этого имени и семейства, если вход ещё не принадлежит клиенту и повтор ещё не был сделан. Прежний вход остаётся неизменным во время испытания. В Rust снимок раньше сохранялся только в недоступном worker кешe, а классификатор продолжал с входом, скопированным до испытания. Теперь worker и обработчик события используют общий кеш; при переходе к полному замеру снимок переносится в состояние задачи, а подготовка ECH повторяется для фактической формы. Базовый ответ повторно используется только при совпадении хэша входа.
+
+`--own-snapshot` и тест `own_first_late_snapshot_transition_matches_d2o` сравнивают восемь сочетаний формы, владения и повторного вопроса, передавая обоим реализациям одни и те же сгенерированные C байты ClientHello. Результаты совпали; журнал `/tmp/r2o-own-budget-green.log`. Этот тест не проверяет полный проход сетевого worker или перенос доказанного RX-обрыва.
+
+`own_first_continue` переносит старые `t->probes` в `ask_probes` и обнуляет бюджет кандидатов. Rust учитывал старые пробы как новые: при входе `ask=3`, `own=7` C дал `raw=10 candidates=0 remaining=67`, а Rust до исправления `raw=3 candidates=7 remaining=60`. `r2o_full_search_probe_counts` теперь даёт результат C; журналы `/tmp/r2o-own-budget-red.log` и `/tmp/r2o-own-budget-green.log`.
+
+Проверены diff-тест, весь workspace и локальный запуск ARM64/musl-бинарников в QEMU из изолированного каталога с теми же исходниками. Полевой паритет и сохранение RX-доказательства ещё не подтверждены; роутер не использовался.
+
+## Перенос доказанного RX-обрыва при повторе ClientHello — 27.10.2026
+
+Эта проверка уточняет предыдущий раздел «Продолжение после собственных планов» и закрывает указанное там открытое сравнение RX-доказательства.
+
+| Актуальный d2o C | R2O Rust | Одинаковый вход и результат |
+|---|---|---|
+| `core/sched.c::on_shape` (состояние `T_ASKING`, строки 8404–8427) сохраняет совместимый снимок в задаче и останавливает устаревший прогон. `d2k_sched_tick` (строки 10635–10682) повторяет поиск байтами клиента и при `t->vol.rx_cut` ставит `skip_volume_once`. `own_first_continue` (строки 9900–9945) сохраняет `t->vol` только для этого доказанного обрыва. | `r2o_handle_client_shape_event` и `DiscoveryWorker::try_outcome` отмечают повтор; `R2oDiscoveryVolumeSearchCache::carry_proven_rx_for_snapshot` переносит только запись с `rx.evidence`, сбрасывает очередь кандидатов и оставляет `tried_plans`; `get_for_run` забирает её по ключу задачи до обычного кэша, который требует совпадения длины провода. | RED на тех же байтах: C `0 0 / 1 1`, Rust `0 0 / 1 0`. После изменения `snapshot_reask_carries_only_proven_rx_like_d2o` сравнивает C-фикстуру `--own-snapshot` и Rust: доказанный RX переносится, недоказанный отбрасывается; все проверки совпали. `scripts/r2o-ack-applied-persist-differential.sh` также прошёл ACK/APPLIED/PERSIST, дедлайн, fallback, очередь и владение снимком. |
+
+Для конкретной проверки REA открыл `E:\d2o\core\test_sched` как ELF x86_64, SHA-256 `7ac15b0e1826394be0d1848ff4c3c58aed7ae9c023e747ab93db5e04fa0898bb`; `analyze_function(d2k_sched_tick)` вернул `provider_unavailable`. Диагностика: Windows Ghidra отклоняет ELF, Hopper не поддерживается на Windows, IDA не настроена. Поэтому новые строки выше сверены по pinned C-исходнику d2o `304ba893dd37197128ac8799c0495b035f6a38c0` и исполняемой C/Rust-фикстуре; нового REA-псевдокода нет.
+
+На том же d2o исходнике ARM64/QEMU прошли C `test_sched --lifecycle-only` (`probes after remeasure start = 0`) и Rust worker-тест `r2o_остановка_quic_worker_обслуживает_удаление_временной_пробы`. Скрипт собирал копию C-дерева во временном каталоге и подтвердил неизменность артефактов donor checkout. Журнал: `.rea/r2o-discovery-quic-stop-20261027-180812.log`. Это локальное поведенческое подтверждение; полевая приёмка на роутере не проводилась, полный паритет не заявляется.
+
+После дифф-тестов текущие исходники также прошли `scripts/r2o-build-openwrt-aarch64-musl.sh`: все шесть AArch64/musl бинарников запустились в QEMU, очистка и проверка каталога прошли. `cargo +1.98.0 test -p r2o-panel --locked --offline` прошёл (17 HTTP-тестов), а `R2O_CHROME_NO_SANDBOX=1 node crates/r2o-panel/tests/browser.cjs` прошёл Chrome-сценарий со статусами поиска, диагностикой и отсутствием отдельного раздела настроек. Первая попытка браузерного сценария без `R2O_CHROME_NO_SANDBOX=1` не запустила Chrome под root в WSL и завершилась таймаутом; ручная headless-проверка и повтор с разрешённым для этого тестового процесса no-sandbox прошли. На физическом роутере ничего не запускалось.
+
+## Полный upstream C/Rust дифференциальный набор — 27.10.2026
+
+`ci-differential-shards.sh verify` подтвердил покрытие 12 baseline и 39 upstream сценариями ровно по одному разу. Затем все 39 upstream сценариев запущены последовательно против изолированной копии d2o commit `304ba893dd37197128ac8799c0495b035f6a38c0` с SHA-проверкой. Все завершились успешно, включая discovery/ECH/fallback, HTTP search и диагностику, QUIC/RST/raw/UDP, весь scheduler (в том числе 431-секундный C `test_sched`), TCP datapath, TLS verification (10 векторов). Журнал: `/tmp/r2o-upstream-full-20261027.log`. Результат относится к перечисленным фикстурам и переходам; он не доказывает непроверенные входы или полевое поведение.
+
+## Неблокирующий ACK областей каталога — 27.10.2026
+
+| Актуальный d2o C | R2O Rust | Одинаковый вход и результат |
+|---|---|---|
+| `core/sched.c::sync_area_send` отправляет identified-команду, задаёт deadline `now_ms + 5000` и возвращается. `sync_areas` оставляет синхронизацию pending до ACK или дедлайна; `d2k_sched_event` принимает только ACK с той же командой и area ID. Цикл `core/d2kc.c` опрашивает события до следующего `d2k_sched_sync_step`. | `CatalogSyncCursor::send_step` теперь отправляет area-команду, сохраняет ожидаемые команду/ID и возвращает управление; `observe_area_ack` принимает точный ACK, `expire_area_ack` завершает ожидание на 5 секундах. `ControlClient::watch_events` обрабатывает ACK в обычной очереди событий. Одноразовый `apply_catalog` отдельно дожидается результата, продолжая помещать посторонние кадры в event queue. | На одном fixture с `DIRECT_CLEAR` исходный Rust ждал delayed ACK: C `pending=1`, Rust `pending=0` (RED). После изменения обе стороны дают `pending=1` до ACK и отправляют одинаковый `SET_BYPASS`: `00000027008e11636c65616e2e6578616d706c652e636f6d06010401000000000000000000000000000000`. Устаревший area ID не снимает ожидание. На временах `0/4999/5000 мс` обе стороны дают `1:1:0`; отрицательный ACK прекращает оставшиеся area-команды. `scripts/r2o-catalog-sync-differential.sh` прошёл; восемь тестов `cargo test ... catalog_sync` и отказной ACK-сценарий прошли. |
+
+REA повторно запросил `analyze_function(d2k_sched_sync_step)` для ELF `core/test_sched`; инструмент вернул `provider_unavailable`: Windows Ghidra P0 отклоняет ELF, Hopper на Windows недоступен, IDA не настроена. Поэтому сравнение этой функции основано на закреплённом исходнике d2o `304ba893dd37197128ac8799c0495b035f6a38c0` и исполняемой C/Rust-фикстуре, без нового REA-псевдокода.
+
+После последней правки `cargo +1.98.0 fmt --all -- --check` и полный `cargo +1.98.0 test --workspace --locked --offline -- --test-threads=1` прошли; журнал: `/tmp/r2o-workspace-final2-20261027.log`. Параллельный запуск workspace был остановлен после более чем двух минут на `r2o_discovery_ожидающая_задача_не_обходит_первый_тик`; этот тест отдельно прошёл за 0,49 с, последовательный workspace завершился успешно. Затем порядок C/Rust differential → OpenWrt smoke повторён на текущем дереве: `scripts/r2o-catalog-sync-differential.sh` прошёл, затем `scripts/r2o-build-openwrt-aarch64-musl.sh` собрал и запустил все шесть ARM64/musl бинарников в QEMU, очистил и проверил каталог, проверил SHA-256.
+
+Это закрывает конкретное расхождение планирования area ACK, но не доказывает полный паритет или поведение на физическом роутере. Роутер не использовался.
+
+## Диагностика результатов Discord voice Discovery — 27.10.2026
+
+| Актуальный d2o C | Rust-аналог | Результат сравнения |
+| --- | --- | --- |
+| `core/sched.c::voice_finish_measure` для `D2K_VOICE_CLEAR` вызывает `search_report` как `probe-clear/unknown` при проверенном префиксе и `probe-direct/direct` без него; прочие неуспешные терминальные вердикты — `inconclusive/none`. `search_report` выдаёт `protocol=udp`, форму `D2K_LINK_SHAPE_VOICE` (5), `probe_units=0`, `elapsed_ms` от допуска задачи, `queue_ms` от ожидания слота. В журнале пользователя реальные voice-подозрения имели trigger 3. | `R2oVoiceDiscoveryWorker` теперь регистрирует допуск voice-задачи в общем с Discovery счётчике, отмечает момент получения measurement permit и передаёт терминальные результаты в `Recorder`. `r2o_voice_search_diagnostic_event` повторяет исход/path и UDP поля C. Ключ события учитывает серверный IP:port, поскольку разные Discord voice endpoints имеют общий ярлык `@discord-voice`. | До изменения C/Rust фикстура на одинаковой задаче различалась: C `protocol=udp`, Rust `protocol=discovery`; после исправления совпали ID, family, trigger, elapsed, queue, probes, target, IP, path, kind, shape, protocol, outcome и reason. Дополнительный RED/GREEN тест доказал раздельные ID для двух одновременных voice endpoints. `scripts/r2o-diagnostics-differential.sh` прошёл. |
+
+В приложенном логе d2o 16 уникальных voice-отчётов за примерно 7 минут: 13 `probe-clear`, 3 `inconclusive`, максимальное ожидание очереди — около 9,4 секунды. C явно не трактует `probe-clear` как измерение качества аудио. Лог показывает двунаправленные UDP conntrack-счётчики, но не содержит RTCP, кадров screen share или привязки к моментам буферизации.
+
+После изменения прошёл `cargo +1.98.0 test -p r2o-controller --locked --offline -- --test-threads=1` (224 unit-теста; все включённые интеграционные наборы зелёные, отдельный capability test и 10 TLS C differential vectors помечены ignored и запускаются отдельными командами). `cargo +1.98.0 fmt --all -- --check` прошёл. Затем `scripts/r2o-build-openwrt-aarch64-musl.sh` собрал и запустил шесть OpenWrt 25.12.5 AArch64/musl бинарников в QEMU, проверил очистку каталога и SHA-256.
+
+REA не предоставил ELF-псевдокод на Windows (`provider_unavailable`); подтверждение основано на pinned d2o C `304ba893dd37197128ac8799c0495b035f6a38c0` и C/Rust исполняемом fixture. Это подтверждает только описанный диагностический путь; блокированный voice trial до последующего Discovery/STUN proof и физическая полевая приёмка здесь не подтверждены. Роутер не использовался.
+
+## Неопределённая установка области после потери ACK — 27.10.2026
+
+| Актуальный d2o C | R2O Rust | Одинаковый вход и результат |
+|---|---|---|
+| `core/sched.c::sync_areas` после пятисекундного timeout оставляет отправленную область в `s->areas` с `confirmed=0`. При следующей синхронизации `desired_has_key` сравнивает wire key и посылает `DEL_SUFFIX`/`DEL_BYPASS`, если группа уже не нужна. При положительном ACK `d2k_sched_event` обновляет подтверждённое состояние; отрицательный ACK его не меняет. При удалении C использует swap-with-last (`s->areas[i] = s->areas[--s->n_areas]`), что задаёт порядок следующего DEL. В `core/test_sched.c` это покрыто последовательностью: потерять ACK SET, отключить выученную группу, ожидать DEL. | `CatalogSyncCursor::expire_area_ack` сохраняет неопределённый wire key в `installed_areas`; `from_compiled` ставит stale delete после прямых привязок и до новых bypass/suffix команд, моделируя swap-with-last при построении очереди; `observe_area_ack` делает `swap_remove`, меняет ledger и `active_groups` только по совпавшему ACK. `watch_events` обновляет очередь Discovery после изменения установленной группы. | На одном `d2o_catalog_sync_area_timeout.json` C и Rust прошли `SET_SUFFIX → timeout → disable → DEL_SUFFIX`. Обе стороны оставили DELETE pending (`1:1`) и выдали один identified кадр: `00000021008d0b6578616d706c652e636f6d06010402000000000000000000000000000000`. На отдельном общем fixture с тремя группами C и Rust подтвердили `example.com → example.org → example.net` после ACK каждого удаления; все три полных identified кадра совпали, включая `area_id`. `scripts/r2o-catalog-sync-differential.sh` сравнил переходы и порядок без различий. До этого исправления Rust не хранил состояние областей между курсорами; после этого дополнительно устранено расхождение `Vec::remove` против donor swap-with-last. |
+
+Проверки после этой правки: `cargo +1.98.0 fmt --all -- --check`; полный `cargo +1.98.0 test --workspace --locked --offline -- --test-threads=1` завершился с 0 failures (оставшиеся ignored-тесты относятся к отдельным differential и capability harness); затем C/Rust catalog differential; затем `scripts/r2o-build-openwrt-aarch64-musl.sh` — сборка и запуск шести бинарников в QEMU, каталог очищен и проверен, SHA-256 совпал. REA-провайдер для ELF остался недоступен, поэтому это сравнение подкреплено pinned C-исходником и исполняемой C/Rust-фикстурой, без нового псевдокода. Физический роутер не использовался; полевая приёмка и полный паритет остаются неподтверждёнными.
+
+## Размер кольца в отчёте диагностики — 27.10.2026
+
+| Эталонный C | Rust-аналог | Одинаковый вход и результат |
+| --- | --- | --- |
+| `core/diagnostics.c::d2k_diag_write` пишет `ring_bytes=sizeof *d`; размер фиксирован независимо от числа текущих записей. | `diagnostics::Recorder::tick` раньше суммировал длины JSON-сериализации событий и снимков. | Добавлен `ring_bytes` в `scripts/r2o-diagnostics-differential.sh`. На том же событии и снимке RED: C `74368`, Rust `1604`; после фикса layout mirror `#[repr(C)] D2oDiagnosticRing` вычисляет донорский размер через `size_of`, GREEN: C/Rust `74368`. Остальные сравниваемые поля остались `event_id=77`, `snapshots=4`, `http_records=5`, `http_queued=6`. |
+| `core/diagnostics.c::copy` превращает NULL в пустую строку и прекращает строку на NUL; `js` заменяет управляющие байты ниже `0x20` на `?`, кроме LF. | `diagnostics::Recorder::record` раньше сохранял `ip:null`, управляющие байты и данные после NUL. | RED на `reason`: C hex `6261643f3f6c696e650a`, Rust `62616409016c696e650a0069676e6f726564`; после нормализации reason отдельное полное сравнение показало C `ip:""`, Rust `ip:null`. `d2o_event_text` теперь повторяет оба правила. GREEN: канонический полный `events[0]` (без времени `at`) совпал; общий C/Rust вывод `ring_bytes=74368`, `event_id=77`, `reason_hex=6261643f3f6c696e650a`. |
+
+Функции C сверены по актуальному d2o `304ba893dd37197128ac8799c0495b035f6a38c0`; Rust counterparts и fixture перечислены выше. `scripts/r2o-diagnostics-differential.sh` после изменений прошёл вместе с проверками сохранения первого снимка процесса, количества Discovery-снимков и HTTP diagnostic event. REA `list_documents` повторно вернул `provider_unavailable`: Windows Ghidra отклоняет ELF, Hopper и IDA недоступны; для этих функций нового REA pseudocode нет. Проверка локальная; роутер не использовался, полный паритет не заявляется.
+
+## Поля диагностического события планировщика — 27.10.2026
+
+| Актуальный d2o C | Rust-аналог | Результат проверки |
+| --- | --- | --- |
+| `core/sched.c::launch_or_queue` увеличивает `report_sequence` до проверки ограниченной очереди, в том числе для `queue-full`; `core/sched.c::search_report` передаёт `report_id`, исходный `trigger_code`, outcome, path и счётчики. | `DiscoveryWorker::queue_with_planned_and_trigger` вызывает `R2oDiscoverySearches::record_admission`; `r2o_diagnostic_event` сериализует ID/trigger. При полном scheduler queue worker готовит `queue-full` report и `try_diagnostic_report` передаёт его в основной цикл для записи через `Recorder`. |
+| RED: при полной очереди C выдавал report ID 1, Rust оставлял sequence 0. GREEN: C/Rust совпали на `id=1`, `trigger=3`, `outcome=queue-full`, `path=none`, `elapsed_ms=0`, `queue_ms=0`, `probe_units=0`. Второй RED: при общем времени 10 с и ожидании 6 с C выдавал `elapsed_ms=10000`, Rust — около 4000; после расчёта elapsed от допуска C/Rust совпали на `elapsed_ms=10000`, `queue_ms=6000`, `probe_units=8`. На обычном принятом поиске C/Rust также совпали по ID и исходному trigger. Проверки включены в `scripts/r2o-diagnostics-differential.sh`, fixtures `d2o_scheduler_queue_full_differential.c` и `d2o_scheduler_timing_differential.c`. |
+
+`scripts/r2o-diagnostics-differential.sh` прошёл с закреплённым d2o `304ba893dd37197128ac8799c0495b035f6a38c0`; вместе с scheduler report проверены ring layout/text, process detail, Discovery snapshot count и HTTP diagnostic event. Затем `cargo +1.98.0 test -p r2o-controller --locked --offline -- --test-threads=1` завершился без ошибок; `cargo +1.98.0 fmt --all -- --check` и `git -c core.whitespace=cr-at-eol diff --check` прошли. После C/Rust диффа OpenWrt ARM64/musl smoke собрал и запустил в QEMU все шесть бинарников; каталог проверен пустым и корректным. REA `analyze_function(search_report)` недоступен: Windows Ghidra отвергает ELF, Hopper не поддерживает Windows, IDA не настроена; использованы исходник закреплённого d2o и исполняемые C/Rust fixtures. Роутер не использовался, полный паритет и полевая приёмка не подтверждены.
+
+Дополнительный пользовательский `discord-router-20261027-202815.log` содержит 16 уникальных voice-отчётов за ~7 минут: 13 `probe-clear`, 3 `inconclusive`; очередь ожидала до 9,4 с. `probe-clear` подтверждает 25/25 Discovery/STUN-ответов, но сам d2o пишет, что качество аудио не измерено. В snapshots есть двусторонние UDP conntrack-счётчики, но нет кадров screen share, RTCP или корреляции с моментами зависания видео. Этот лог подтверждает активный UDP-трафик, но не качество voice/video.
+
+## Продолжение voice-диагностики после лога Discord — 27.10.2026
+
+| Актуальный d2o C | Rust-аналог | Результат на одинаковых входах |
+| --- | --- | --- |
+| `core/sched.c::voice_finish_measure` принимает итоговый `d2k_voice_res`: если Discovery возвращает продолжение и следующий STUN/live-flow замер даёт `CLEAR`, отчёт — `probe-clear` при известном префиксе или `probe-direct` без него; прочие неполные результаты — `inconclusive`. | `R2oVoiceDiscoveryWorker::diagnostic_event` раньше сериализовал только `R2oDiscoverySearchResult.verdict` и не учитывал `R2oVoiceDiscoveryOutcome::fallback`: при Discovery `Continue` raw helper давал `inconclusive` даже для fallback `Clear`, а fallback `Blocked` не должен закрывать поиск до пробы. `r2o_voice_outcome_diagnostic_event` теперь использует fallback verdict, когда Discovery даёт `Continue`, и оставляет `Blocked` без финальной записи. | `voice_fallback_diagnostic_uses_the_d2o_measurement_verdict` явно фиксирует расхождение raw helper (`inconclusive`) и окончательного результата fallback `Clear` (`probe-clear`), а скрипт сравнивает C/Rust для `probe-clear` и `inconclusive`; fallback `Blocked` проверяется на отсутствие преждевременного отчёта. Фикстура — `d2o_scheduler_voice_diagnostic_differential.c`. |
+| После повторяемого `Blocked` `voice_finish_measure` устанавливает измеренный временный Plan и сохраняет счётчик зондов, оставляя один отчёт открытым. `voice_confirm` закрывает его как `discovery-confirmed`/`stun-confirmed`; `voice_fail` — как `failed`; истечение срока задачи проходит через `task_done` и `cancelled`. | Rust раньше не переносил данные отчёта в `R2oVoiceTrialContext`; результат терялся до позднего ответа. Теперь `R2oVoiceDiagnosticContext` сохраняет ID, очередь, старт и счётчик, а обработчики подтверждения, молчания, отказа/ошибки установки и истечения закрывают отчёт в соответствующей точке. | `d2o_scheduler_voice_terminal_diagnostic_differential.c` запускает настоящий C `search_report`; Rust fixture сравнивает все перечисленные поля для Discovery, STUN, отказа и срока. `scripts/r2o-diagnostics-differential.sh` прошёл без различий. |
+
+После этих изменений прошли полный `cargo +1.98.0 test -p r2o-controller --locked --offline -- --test-threads=1` и `scripts/r2o-build-openwrt-aarch64-musl.sh`: все шесть бинарников собраны для OpenWrt AArch64/musl и запущены в локальном QEMU, каталог проверен пустым и исправным. Физический роутер не использовался. REA ELF provider по-прежнему недоступен, поэтому это подтверждение основано на pinned C `304ba893dd37197128ac8799c0495b035f6a38c0`, исходниках и исполняемых C/Rust fixtures; полевой паритет Discord voice/video и полный паритет не заявляются.
+
+## Интервал опроса обновлений панели — 27.10.2026
+
+| Эталон d2o | Rust-панель R2O | Результат на одинаковом времени |
+|---|---|---|
+| `internal/web/assets/panel.js::start` вызывает `pollUpdates(true)` по двухсекундному таймеру. `App.prototype.pollUpdates` пропускает scheduled GET `/api/update` в простое, пока не истекли 60 секунд с предыдущего опроса; ручной запрос, активная команда и восстановление после ошибки опрашиваются сразу. | R2O вызывал `pollUpdates()` без признака таймера и ограничивал частоту только для `absent` updater. При установленном updater endpoint опрашивался каждые две секунды. | Новая проверка `verifyUpdatePollingMatchesD2oIdleCadence` сначала упала: за минуту было 30 запросов вместо одного. После переноса donor-условия совпали границы 0/58/60 секунд; ручное обновление, busy и восстановление после ошибки остаются быстрыми, следующий idle-запрос снова ограничен минутой. |
+
+Проверки: `R2O_CHROME_NO_SANDBOX=1 node crates/r2o-panel/tests/browser.cjs` прошёл, включая этот RED/GREEN сценарий и Chrome-проверку статусов; `cargo +1.98.0 test -p r2o-panel --locked --offline` прошёл (20 интеграционных тестов); `ci-differential-shards.sh verify` подтвердил 12 baseline и 39 upstream сценариев ровно по одному разу; `git diff --check` прошёл. Изменение относится только к UI polling и не меняет частоту Discovery/замеров. Роутер не использовался.

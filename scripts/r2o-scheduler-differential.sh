@@ -55,7 +55,7 @@ mkdir -p "$r2o_log_dir"
         -DD2K_RELEASE_ID='"dev"' \
         -fsyntax-only -Xclang -ast-dump \
         "$r2o_donor_core/sched.c" 2>/dev/null \
-        | grep -E 'FunctionDecl.*(addr_probe_remove|candidate_retire|task_fail|launch_or_queue|d2k_sched_tick)'
+        | grep -E 'FunctionDecl.*(addr_probe_remove|candidate_retire|task_fail|task_watching_slot|launch_or_queue|d2k_sched_tick)'
     printf '\nТесты планировщика C-эталона\n'
     if [ "${R2O_SKIP_FULL_C_SCHEDULER:-0}" = 1 ]; then
         r2o_run_timed 'сборка теста уступки C' make -B -C "$r2o_donor_core" test_sched_quic_yield CC=clang-18
@@ -79,6 +79,10 @@ mkdir -p "$r2o_log_dir"
         printf 'Полный test_sched включает lifecycle очереди и параллельные адресные пробы.\n'
     fi
     printf '\nПроверка срока ожидания в R2O\n'
+    r2o_run_timed 'переиспользование первого watcher-слота' cargo +1.98.0 test -p r2o-controller --bin r2o-controller \
+        --locked r2o_discovery_reuses_the_first_watching_slot_when_the_task_table_is_full
+    r2o_run_timed 'истечение watcher по сроку d2o' cargo +1.98.0 test -p r2o-controller --bin r2o-controller \
+        --locked r2o_discovery_reaps_a_watching_task_after_the_donor_lifetime
     r2o_run_timed 'срок очереди R2O' cargo +1.98.0 test -p r2o-controller --bin r2o-controller \
         --locked r2o_discovery_queued_target_expires
     r2o_run_timed 'жизнь worker после очистки очереди' cargo +1.98.0 test -p r2o-controller --bin r2o-controller \
@@ -100,6 +104,8 @@ mkdir -p "$r2o_log_dir"
 } >"$r2o_log" 2>&1
 
 grep -q 'QUIC question yield: 0 failures' "$r2o_log"
+grep -q 'r2o_discovery_reuses_the_first_watching_slot_when_the_task_table_is_full .*ok' "$r2o_log"
+grep -q 'r2o_discovery_reaps_a_watching_task_after_the_donor_lifetime .*ok' "$r2o_log"
 grep -q 'r2o_quic_подбор_удаляет_все_пробы_без_двух_доказательств .*ok' "$r2o_log"
 grep -q 'r2o_quic_applied_collection_keeps_events_for_other_trials .*ok' "$r2o_log"
 grep -q 'r2o_quic_ech_подтверждение_сохраняет_адресную_привязку .*ok' "$r2o_log"

@@ -198,7 +198,127 @@ static int fallback_queue_cases(void) {
     return 0;
 }
 
+static task *own_snapshot_task;
+static const uint8_t *own_snapshot_expected;
+static size_t own_snapshot_expected_len;
+static int own_snapshot_got, own_snapshot_reasked, own_snapshot_rx_cut;
+static int own_budget_raw, own_budget_candidates, own_budget_remaining;
+static int capture_own_snapshot_spawn(void) {
+    own_snapshot_got = own_snapshot_task->trig_snapped &&
+        own_snapshot_task->trig_len == own_snapshot_expected_len &&
+        !memcmp(own_snapshot_task->trig, own_snapshot_expected, own_snapshot_expected_len);
+    own_snapshot_reasked = own_snapshot_task->reasked;
+    own_snapshot_rx_cut = own_snapshot_task->vol.rx_cut;
+    own_budget_raw = own_snapshot_task->ask_probes;
+    own_budget_candidates = own_snapshot_task->probes;
+    own_budget_remaining = sched_probe_cap(own_snapshot_task) - own_snapshot_task->probes;
+    return -1;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "--own-budget")) {
+        d2k_catalog catalog = {0};
+        d2k_sched *scheduler = d2k_sched_new(&catalog, -1, 0);
+        if (!scheduler) return 80;
+        task *candidate = &scheduler->tasks[0];
+        task_reset(scheduler, candidate);
+        candidate->state = T_PLANNING; candidate->transport = 6; candidate->family = 4;
+        candidate->trigger_shape = candidate->asked_shape = D2K_SHAPE_MODERN;
+        candidate->port = 443; snprintf(candidate->ip, sizeof candidate->ip, "198.51.100.2");
+        snprintf(candidate->name, sizeof candidate->name, "owner.example.com");
+        if (d2k_hello_from_profile(D2K_SHAPE_MODERN, candidate->name,
+            candidate->trig, sizeof candidate->trig, &candidate->trig_len)) return 81;
+        candidate->ask_probes = 3; candidate->probes = 7;
+        own_snapshot_task = candidate; own_snapshot_expected = candidate->trig;
+        own_snapshot_expected_len = candidate->trig_len;
+        d2k_sched_spawn_hook = capture_own_snapshot_spawn;
+        own_first_continue(scheduler, candidate);
+        d2k_sched_spawn_hook = NULL;
+        printf("raw=%d candidates=%d remaining=%d\n", own_budget_raw, own_budget_candidates, own_budget_remaining);
+        d2k_sched_free(scheduler); d2k_catalog_free(&catalog);
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--seed-input")) {
+        uint8_t base[] = {1, 2, 3, 4}, changed[] = {1, 2, 3, 5};
+        uint64_t seed = seed_input_of(base, sizeof base, "192.0.2.10", 443);
+        for (unsigned mode = 0; mode < 4; mode++) {
+            const uint8_t *input = mode == 1 ? changed : base;
+            const char *ip = mode == 2 ? "192.0.2.11" : "192.0.2.10";
+            uint16_t port = mode == 3 ? 8443 : 443;
+            printf("%u %d\n", mode, seed == seed_input_of(input, sizeof base, ip, port));
+        }
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--own-snapshot")) {
+        for (unsigned mode = 0; mode < 16; mode++) {
+            d2k_catalog catalog = {0};
+            d2k_sched *scheduler = d2k_sched_new(&catalog, -1, 0);
+            if (!scheduler) return 70;
+            task *candidate = &scheduler->tasks[0];
+            task_reset(scheduler, candidate);
+            candidate->state = T_PLANNING; candidate->transport = 6; candidate->family = 4;
+            candidate->trigger_shape = candidate->asked_shape = D2K_SHAPE_MODERN;
+            candidate->trig_snapped = (mode & 1) != 0; candidate->reasked = (mode & 2) != 0;
+            candidate->skip_volume_once = (mode & 4) != 0; candidate->vol.rx_cut = (mode & 4) != 0;
+            candidate->port = 443; snprintf(candidate->ip, sizeof candidate->ip, "198.51.100.2");
+            snprintf(candidate->name, sizeof candidate->name, "owner.example.com");
+            if (d2k_hello_from_profile(D2K_SHAPE_MODERN, candidate->name,
+                candidate->trig, sizeof candidate->trig, &candidate->trig_len)) return 71;
+            d2k_ev event = {0}; event.transport = 6; event.family = 4;
+            snprintf(event.name, sizeof event.name, "%s", candidate->name);
+            d2k_shape shape = mode & 8 ? D2K_SHAPE_LEGACY : D2K_SHAPE_MODERN;
+            if (d2k_hello_from_profile(shape, candidate->name,
+                event.shape, sizeof event.shape, &event.shape_len)) return 72;
+            event.shape[12] ^= 1;
+            if (mode == 0 || mode == 8) {
+                const char *path = getenv(mode == 0 ? "R2O_OWN_MODERN_HELLO" : "R2O_OWN_LEGACY_HELLO");
+                if (path) {
+                    FILE *file = fopen(path, "wb");
+                    if (!file || fwrite(event.shape, 1, event.shape_len, file) != event.shape_len || fclose(file)) return 74;
+                }
+            }
+            on_shape(scheduler, &event);
+            own_snapshot_task = candidate; own_snapshot_expected = event.shape;
+            own_snapshot_expected_len = event.shape_len;
+            own_snapshot_got = own_snapshot_reasked = own_snapshot_rx_cut = -1;
+            d2k_sched_spawn_hook = capture_own_snapshot_spawn;
+            own_first_continue(scheduler, candidate);
+            d2k_sched_spawn_hook = NULL;
+            if (own_snapshot_got != ((mode & 3) == 0) ||
+                own_snapshot_reasked != ((mode & 2) != 0 || (mode & 3) == 0) ||
+                own_snapshot_rx_cut != ((mode & 4) != 0)) return 73;
+            printf("%u %d %d %d\n", mode, own_snapshot_got, own_snapshot_reasked, own_snapshot_rx_cut);
+            d2k_sched_free(scheduler); d2k_catalog_free(&catalog);
+        }
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--snapshot-stage")) {
+        const int states[] = { T_QUEUED, T_ASKING, T_PLANNING, T_VERIFY };
+        for (unsigned i = 0; i < sizeof states / sizeof states[0]; i++) {
+            d2k_catalog catalog = {0};
+            d2k_sched *scheduler = d2k_sched_new(&catalog, -1, 0);
+            if (!scheduler) return 60;
+            task *candidate = &scheduler->tasks[0];
+            task_reset(scheduler, candidate);
+            candidate->state = states[i]; candidate->transport = 6; candidate->family = 4;
+            candidate->trigger_shape = candidate->asked_shape = D2K_SHAPE_MODERN;
+            snprintf(candidate->name, sizeof candidate->name, "owner.example.com");
+            if (d2k_hello_from_profile(D2K_SHAPE_MODERN, candidate->name,
+                candidate->trig, sizeof candidate->trig, &candidate->trig_len)) return 61;
+            d2k_ev event = {0}; event.transport = 6; event.family = 4;
+            snprintf(event.name, sizeof event.name, "%s", candidate->name);
+            if (d2k_hello_from_profile(D2K_SHAPE_MODERN, candidate->name,
+                event.shape, sizeof event.shape, &event.shape_len)) return 62;
+            on_shape(scheduler, &event);
+            event.shape[12] ^= 1;
+            on_shape(scheduler, &event);
+            int latest = i == 1 && candidate->snap_len == event.shape_len &&
+                memcmp(candidate->snap, event.shape, event.shape_len) == 0;
+            printf("%u %d %d\n", i, candidate->stop != 0, latest);
+            d2k_sched_free(scheduler); d2k_catalog_free(&catalog);
+        }
+        return 0;
+    }
     if (argc == 2 && !strcmp(argv[1], "--snapshot-owner")) {
         for (unsigned mode = 0; mode < 8; mode++) {
             d2k_catalog catalog = {0};
@@ -212,7 +332,7 @@ int main(int argc, char **argv) {
             candidate->trigger_shape = candidate->asked_shape = D2K_SHAPE_MODERN;
             candidate->trig_snapped = (mode & 1) != 0;
             candidate->reasked = (mode & 2) != 0;
-            snprintf(candidate->name, sizeof candidate->name, "owner.example");
+            snprintf(candidate->name, sizeof candidate->name, "owner.example.com");
             d2k_shape input_shape = (mode & 4) ? D2K_SHAPE_LEGACY : D2K_SHAPE_MODERN;
             if (d2k_hello_from_profile(D2K_SHAPE_MODERN, candidate->name,
                 candidate->trig, sizeof candidate->trig, &candidate->trig_len)) return 51;

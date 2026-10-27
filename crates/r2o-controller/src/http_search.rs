@@ -19,7 +19,6 @@ pub enum Answer {
     Early,
     Garbage,
     Decoy,
-    Challenge,
     Real,
     Cut,
 }
@@ -285,7 +284,6 @@ struct ParsedResponseHead {
     status: u16,
     body: BodyMode,
     connection_close: bool,
-    cloudflare_challenge: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -321,9 +319,6 @@ pub fn read_probe_response(
         let response = parse_response_head(&head).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "неверный заголовок HTTP-ответа")
         })?;
-        if response.cloudflare_challenge {
-            break (head, response, 0, false);
-        }
         if response.body == BodyMode::Empty {
             if !(100..200).contains(&response.status) || response.status == 101 {
                 break (head, response, 0, true);
@@ -337,9 +332,7 @@ pub fn read_probe_response(
         .map(|received| received.saturating_duration_since(request_sent).as_micros() as i64)
         .unwrap_or(-1);
     Ok(HttpProbeResponse {
-        answer: if response.cloudflare_challenge {
-            Answer::Challenge
-        } else if !complete {
+        answer: if !complete {
             Answer::Cut
         } else {
             judge(host, &head, rtt_us, reply_us)
@@ -531,7 +524,6 @@ fn parse_response_head(head: &[u8]) -> Option<ParsedResponseHead> {
     let mut chunked = false;
     let mut close = status_line[7] == b'0';
     let mut keep_alive = false;
-    let mut cloudflare_challenge = false;
     for raw_line in lines {
         if raw_line.is_empty() {
             break;
@@ -549,9 +541,6 @@ fn parse_response_head(head: &[u8]) -> Option<ParsedResponseHead> {
             .map(u8::to_ascii_lowercase)
             .collect::<Vec<_>>();
         match name.as_slice() {
-            b"cf-mitigated" => {
-                cloudflare_challenge |= value.eq_ignore_ascii_case(b"challenge");
-            }
             b"content-length" => {
                 if value.is_empty() || !value.iter().all(u8::is_ascii_digit) {
                     return None;
@@ -597,7 +586,6 @@ fn parse_response_head(head: &[u8]) -> Option<ParsedResponseHead> {
         status,
         body,
         connection_close: close,
-        cloudflare_challenge,
     })
 }
 
@@ -853,10 +841,6 @@ pub fn judge(host: Option<&[u8]>, head: &[u8], rtt_us: i64, reply_us: i64) -> An
         return Answer::Garbage;
     }
 
-    if parse_response_head(head).is_some_and(|response| response.cloudflare_challenge) {
-        return Answer::Challenge;
-    }
-
     if host.is_some_and(|host| portal_location(host, head).is_some()) {
         return Answer::Injected;
     }
@@ -876,6 +860,29 @@ pub fn judge(host: Option<&[u8]>, head: &[u8], rtt_us: i64, reply_us: i64) -> An
         return Answer::Early;
     }
     Answer::Real
+}
+
+#[cfg(test)]
+mod d2o_http_judge_differential {
+    use super::{Answer, judge};
+
+    #[test]
+    fn cf_challenge_response_is_judged_like_donor() {
+        let response = include_bytes!("../tests/fixtures/d2o_http_challenge_response.bin");
+        let response = &response[..response.len() - 1];
+        let answer = judge(None, response, 100_000, 100_000);
+        let code = if answer == Answer::Real { 1 } else { 2 };
+        if let Some(path) = std::env::var_os("R2O_HTTP_JUDGE_DIFF_OUTPUT") {
+            std::fs::write(path, format!("{code}\n")).unwrap();
+        }
+        assert_eq!(code, 1, "d2o d2k_hs_judge classifies this response as REAL");
+
+        let sent = std::time::Instant::now();
+        let mut reader = &response[..];
+        let probe = super::read_probe_response(&mut reader, None, 0, sent).unwrap();
+        assert_eq!(probe.answer, Answer::Real);
+        assert!(probe.complete);
+    }
 }
 
 #[cfg(test)]

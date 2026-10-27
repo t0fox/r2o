@@ -24,6 +24,60 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+async function verifyUpdatePollingMatchesD2oIdleCadence() {
+  const realNow = Date.now;
+  let clock = 100000;
+  let calls = 0;
+  let busy = "";
+  let fail = false;
+  Date.now = () => clock;
+  try {
+    const app = new panelUi.App({ hidden: false, getElementById: (id) => id === "updates-body" ? {} : null }, {
+      setTimeout,
+      clearTimeout,
+      fetch: async () => ({}),
+    });
+    app.updateRequest = async () => {
+      calls += 1;
+      if (fail) throw new Error("offline");
+      return { ok: true, data: { busy } };
+    };
+    app.renderUpdates = () => {};
+
+    await app.pollUpdates();
+    for (let i = 0; i < 29; i += 1) {
+      clock += 2000;
+      await app.pollUpdates(true);
+    }
+    assert.equal(calls, 1, "idle scheduled polling waits one minute, as in d2o");
+    clock += 2000;
+    await app.pollUpdates(true);
+    assert.equal(calls, 2, "idle polling refreshes at one minute");
+    await app.pollUpdates();
+    assert.equal(calls, 3, "manual refresh bypasses the idle interval");
+
+    busy = "checking";
+    await app.pollUpdates();
+    clock += 2000;
+    await app.pollUpdates(true);
+    assert.equal(calls, 5, "scheduled polling stays fast while updater is busy");
+
+    busy = "";
+    await app.pollUpdates();
+    fail = true;
+    await app.pollUpdates();
+    fail = false;
+    clock += 2000;
+    await app.pollUpdates(true);
+    assert.equal(calls, 8, "polling retries quickly after an error");
+    clock += 2000;
+    await app.pollUpdates(true);
+    assert.equal(calls, 8, "polling returns to the idle interval after recovery");
+  } finally {
+    Date.now = realNow;
+  }
+}
+
 async function freePort() {
   const server = net.createServer();
   await new Promise((resolve, reject) => {
@@ -45,6 +99,7 @@ async function waitFor(read, description, attempts = 200) {
 }
 
 async function main() {
+  await verifyUpdatePollingMatchesD2oIdleCadence();
   assert.equal(panelUi.voiceProofNote({ transport: 17, shape: 5, verified_by: 3 }), "STUN Binding подтверждён; RTP не проверен", "STUN не выдаётся за подтверждение RTP");
   assert.equal(panelUi.voiceProofNote({ transport: 17, shape: 5, verified_by: 4 }), "IP Discovery подтверждён; RTP не проверен", "Discovery не выдаётся за подтверждение RTP");
   assert.equal(panelUi.voiceProofNote({ transport: 17, shape: 5, verified_by: 5 }), "Двусторонний RTP подтверждён; качество аудио не измерялось", "RTP-подтверждение не выдаётся за качество аудио");
@@ -284,7 +339,6 @@ async function main() {
   assert.equal(await evaluate("document.querySelector('#diagnostic-download').hidden"), true, "скачивание ждёт первого снимка контроллера");
   await evaluate("document.querySelector('#diagnostic-toggle').click()");
   await waitFor(() => evaluate("document.querySelector('#diagnostic-state').dataset.enabled === 'false'"), "выключение диагностики с удалением истории");
-
   assert.equal(await evaluate("document.title.includes('R2O')"), true, "заголовок страницы панели");
   assert.equal(await evaluate("document.querySelector('#r2o-settings') === null && ![...document.querySelectorAll('.index a')].some((link) => link.hash === '#r2o-settings')"), true, "в панели нет отдельного раздела настроек, которого нет в d2o");
   assert.equal(await evaluate("document.querySelectorAll('#app > section').length"), 6, "все разделы панели отображаются");
@@ -293,13 +347,12 @@ async function main() {
   assert.equal(await evaluate("document.fonts.check('400 16px \\\"JetBrains Mono\\\"')"), true, "локальный JetBrains Mono загружен");
   assert.equal(await evaluate("document.querySelectorAll('script:not([src])').length"), 0, "встроенные скрипты макета не исполняются");
   await waitFor(() => evaluate("document.querySelector('#now-title').textContent !== 'Получаем состояние…'"), "состояние из /api/status");
-  await waitFor(() => evaluate("document.querySelector('.search-plan code')?.textContent === 'split sni_middle +0 · fake payload=1 poison=1…'"), "план текущей пробы в карточке Discovery");
-  assert.equal(await evaluate("document.querySelector('.search-plan-result').textContent.includes('точный APPLIED получен') && document.querySelector('.search-plan-result').textContent.includes('полный HTTPS-ответ HTTP 200')"), true, "карточка показывает APPLIED и последний результат проверки плана");
+  assert.equal(await evaluate("document.querySelector('.search-plan') === null && document.querySelector('.search-plan-result') === null"), true, "карточка Discovery показывает тот же набор статусов, что и d2o");
   await waitFor(() => evaluate("[...document.querySelectorAll('.search-question')].some((row) => !row.hidden && row.textContent.includes('whole · проверок: 1'))"), "текущий вопрос классификатора в карточке Discovery");
   assert.equal(await evaluate("document.querySelectorAll('#searches .search').length"), 4, "активные стадии представлены карточками, очередь выделена отдельно");
   assert.equal(await evaluate("document.querySelectorAll('#searches .queue-list .queue-target').length"), 1, "ожидающие замера собраны в список D2O");
   assert.equal(await evaluate("(() => { const row = [...document.querySelectorAll('#searches .search')].find((item) => item.querySelector('.search-target')?.textContent === 'starting.example'); return row?.querySelector('.search-phase')?.textContent === 'Заводим поиск' && row.querySelector('.search-clock').textContent.includes('идёт') && !row.querySelector('.search-clock').textContent.includes('в очереди'); })()"), true, "фаза запуска совпадает с D2O и не дублирует отдельную очередь");
-  assert.equal(await evaluate("[...document.querySelectorAll('.search')].some((row) => row.textContent.includes('TLS-рукопожатие не завершилось') && row.querySelector('.search-plan-result') && row.querySelector('.search-plan')?.hidden === true)"), true, "причина отказа видна и без найденного плана");
+  assert.equal(await evaluate("(() => { const row = [...document.querySelectorAll('.search')].find((item) => item.querySelector('.search-target')?.textContent === 'failed.example'); return row?.querySelector('.search-phase')?.textContent.startsWith('Проверяем выведенный план'); })()"), true, "отказный поиск отображает исходную фазу d2o без дополнительной строки результата");
   assert.equal(await evaluate("[...document.querySelectorAll('.search .track')].every((track) => track.querySelectorAll('.track-step').length === 7 && track.querySelector('.track-step:last-child').textContent === 'Подтверждено')"), true, "карточка использует исходные семь этапов d2o");
   const liveSearch = liveState.searches.find((search) => search.target === "classifying.example");
   liveSearch.probes = 2;
