@@ -18954,12 +18954,21 @@ fn run_http_baseline(
     request_path: &[u8],
     cut: bool,
 ) -> Result<HttpBaselineResult, HttpBaselineError> {
-    use std::io::Write;
-
     let bound = BoundTcpProbe::open(family, mark).map_err(HttpBaselineError::Connect)?;
     let (mut stream, _, _, rtt_us) = bound
         .connect(destination, std::time::Duration::from_secs(6))
         .map_err(HttpBaselineError::Connect)?;
+    run_http_baseline_on_stream(host, request_path, cut, &mut stream, rtt_us)
+}
+
+#[cfg(unix)]
+fn run_http_baseline_on_stream<S: std::io::Read + std::io::Write>(
+    host: &str,
+    request_path: &[u8],
+    cut: bool,
+    stream: &mut S,
+    rtt_us: i64,
+) -> Result<HttpBaselineResult, HttpBaselineError> {
     let mut result = HttpBaselineResult {
         answer: r2o_controller::http_search::Answer::Real,
         complete_responses: 0,
@@ -18972,7 +18981,7 @@ fn run_http_baseline(
             .write_all(&request)
             .map_err(HttpBaselineError::Send)?;
         let response = r2o_controller::http_search::read_probe_response(
-            &mut stream,
+            stream,
             Some(host.as_bytes()),
             rtt_us,
             sent,
@@ -25891,43 +25900,59 @@ mod tests {
     }
 
     #[cfg(unix)]
+    struct HttpBaselineFixture {
+        responses: std::io::Cursor<Vec<u8>>,
+        requests: Vec<u8>,
+    }
+
+    #[cfg(unix)]
+    impl std::io::Read for HttpBaselineFixture {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            std::io::Read::read(&mut self.responses, bytes)
+        }
+    }
+
+    #[cfg(unix)]
+    impl std::io::Write for HttpBaselineFixture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.requests.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    fn http_baseline_fixture() -> HttpBaselineFixture {
+        HttpBaselineFixture {
+            responses: std::io::Cursor::new(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+                    .to_vec(),
+            ),
+            requests: Vec::new(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn http_request_paths(requests: &[u8]) -> Vec<String> {
+        std::str::from_utf8(requests)
+            .unwrap()
+            .lines()
+            .filter(|line| line.starts_with("GET "))
+            .map(|line| line.split_whitespace().nth(1).unwrap().to_owned())
+            .collect()
+    }
+
+    #[cfg(unix)]
     #[test]
-    fn http_baseline_replays_donor_keepalive_paths_on_one_socket() {
-        use super::run_http_baseline;
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let destination = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut paths = Vec::new();
-            for _ in 0..2 {
-                let mut request = Vec::new();
-                let mut byte = [0; 1];
-                while !request.ends_with(b"\r\n\r\n") {
-                    if stream.read_exact(&mut byte).is_err() {
-                        return paths;
-                    }
-                    request.push(byte[0]);
-                }
-                let line_end = request
-                    .windows(2)
-                    .position(|bytes| bytes == b"\r\n")
-                    .unwrap();
-                let line = std::str::from_utf8(&request[..line_end]).unwrap();
-                paths.push(line.split_whitespace().nth(1).unwrap().to_owned());
-                std::thread::sleep(std::time::Duration::from_millis(5));
-                stream
-                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-                    .unwrap();
-            }
-            paths
-        });
-
+    fn http_baseline_replays_donor_keepalive_paths_on_one_stream() {
+        let mut stream = http_baseline_fixture();
         let response =
-            run_http_baseline("example.com", destination, 4, None, b"/watch/42", false).unwrap();
-        let paths = server.join().unwrap();
+            super::run_http_baseline_on_stream("example.com", b"/watch/42", false, &mut stream, 0)
+                .unwrap();
+        let paths = http_request_paths(&stream.requests);
 
         assert_eq!(response.answer, r2o_controller::http_search::Answer::Real);
         assert_eq!(response.complete_responses, 2);
@@ -25947,42 +25972,16 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn http_cut_baseline_replays_the_observed_path_for_both_requests() {
-        use super::run_http_baseline;
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let destination = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut paths = Vec::new();
-            for _ in 0..2 {
-                let mut request = Vec::new();
-                let mut byte = [0; 1];
-                while !request.ends_with(b"\r\n\r\n") {
-                    stream.read_exact(&mut byte).unwrap();
-                    request.push(byte[0]);
-                }
-                let line_end = request
-                    .windows(2)
-                    .position(|bytes| bytes == b"\r\n")
-                    .unwrap();
-                let line = std::str::from_utf8(&request[..line_end]).unwrap();
-                paths.push(line.split_whitespace().nth(1).unwrap().to_owned());
-                std::thread::sleep(std::time::Duration::from_millis(5));
-                stream
-                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-                    .unwrap();
-            }
-            paths
-        });
-
+        let mut stream = http_baseline_fixture();
         let response =
-            run_http_baseline("example.com", destination, 4, None, b"/watch/42", true).unwrap();
-        let paths = server.join().unwrap();
+            super::run_http_baseline_on_stream("example.com", b"/watch/42", true, &mut stream, 0)
+                .unwrap();
 
         assert_eq!(response.complete_responses, 2);
-        assert_eq!(paths, ["/watch/42", "/watch/42"]);
+        assert_eq!(
+            http_request_paths(&stream.requests),
+            ["/watch/42", "/watch/42"]
+        );
     }
 
     #[cfg(unix)]

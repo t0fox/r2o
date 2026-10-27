@@ -81,7 +81,7 @@ mkdir -p "$r2o_log_dir"
     "$r2o_baseline_binary" >"$r2o_baseline_c"
     R2O_HTTP_BASELINE_DIFF_OUTPUT="$r2o_baseline_rust" \
         cargo +1.98.0 test -p r2o-controller --bin r2o-controller \
-            http_baseline_replays_donor_keepalive_paths_on_one_socket \
+            http_baseline_replays_donor_keepalive_paths_on_one_stream \
             --locked --offline -- --nocapture
     diff -u "$r2o_baseline_c" "$r2o_baseline_rust"
     printf 'C/Rust HTTP baseline: %s\n' "$(cat "$r2o_baseline_c")"
