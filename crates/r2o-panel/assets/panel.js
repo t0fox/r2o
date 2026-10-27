@@ -1149,20 +1149,10 @@
       return;
     }
     if (!m.searches.length) {
-      var measurements = m.k.measurements || {};
-      var active = num(measurements.active), queued = num(measurements.queued);
-      section(listNode, JSON.stringify(["none", active, queued]), function () {
+      section(listNode, "none", function () {
         var li = el(doc, "li", "quiet");
-        if (active === null || queued === null) {
-          add(li, el(doc, "b", "", "Именованные поиски сейчас не переданы."),
-            " Состояние других автоматических замеров неизвестно.");
-        } else if (active || queued) {
-          add(li, el(doc, "b", "", "Автоматические замеры идут или ждут слота."),
-            " По общему лимитеру активно " + active + ", в очереди " + queued + "; их цели и этапы не переданы отдельными карточками.");
-        } else {
-          add(li, el(doc, "b", "", "Рабочий прямой трафик подбор не запускает"),
-            " — он начинается только после подтверждённой блокировки, а найденное решение сохраняется в каталоге ниже.");
-        }
+        add(li, el(doc, "b", "", "Рабочий прямой трафик подбор не запускает"),
+          " — он начинается только после подтверждённой блокировки, а найденное решение сохраняется в каталоге ниже.");
         return [li];
       });
       return;
@@ -1909,7 +1899,6 @@
     connecting: { word: "Подключается", lamp: "warn", note: "Служба запущена и проверяет доступные маршруты." },
     local: { word: "Локальный прокси", lamp: "warn", note: "Прокси запущен. Ответ Telegram появится после подтверждённого обмена." },
     unavailable: { word: "Маршрут недоступен", lamp: "bad", note: "Нет активного маршрута Telegram." },
-    error: { word: "Ошибка запуска", lamp: "bad", note: "Служба Telegram не запустилась. Проверьте конфигурацию и журнал." },
     stopped: { word: "Остановлен", lamp: "idle", note: "Служба не запущена." },
     not_configured: { word: "Не настроен", lamp: "idle", note: "Для C11 укажите TG_MODE=local в конфигурации." }
   };

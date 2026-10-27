@@ -121,9 +121,10 @@ async function main() {
   const servicePath = path.join(work, "service.sh");
   const livePath = path.join(work, "live.json");
   fs.mkdirSync(path.join(work, "state"), { recursive: true });
+  fs.writeFileSync(path.join(work, "telegram.status"), "error\n");
   const enginePidPath = path.join(work, "engine.pid");
   const controllerPidPath = path.join(work, "controller.pid");
-  fs.writeFileSync(configPath, `MODE=observe\nSTATE_DIR=${path.join(work, "state")}\nQUEUE_NUM=2000\nQUEUE_NUM6=2001\nR2O_FLOW_CAPACITY=2048\nIPV6_ENABLED=1\nMARK=45\nPROBE_MARK=0\nONLY_MARK=\nFW_BACKEND=auto\nPORTS=0:65535\nCONNBYTES=0:8\nVOICE_PORTS=50000:50099,1400,3478:3481,5349,19294:19344\nVOICE_CONNBYTES=0:4\nHTTP_KEEPALIVE_PORTS=80\nDNS_PORTS=53,853\nTG_PORT=1443\nR2O_PPE_DEOFFLOAD=1\nLOGMAX=2097152\nLOGKEEP=1048576\nLOG_EVERY=60\n`);
+  fs.writeFileSync(configPath, `MODE=observe\nSTATE_DIR=${path.join(work, "state")}\nQUEUE_NUM=2000\nQUEUE_NUM6=2001\nR2O_FLOW_CAPACITY=2048\nIPV6_ENABLED=1\nMARK=45\nPROBE_MARK=0\nONLY_MARK=\nFW_BACKEND=auto\nPORTS=0:65535\nCONNBYTES=0:8\nVOICE_PORTS=50000:50099,1400,3478:3481,5349,19294:19344\nVOICE_CONNBYTES=0:4\nHTTP_KEEPALIVE_PORTS=80\nDNS_PORTS=53,853\nTG_ENABLED=1\nTG_MODE=local\nTG_PORT=1443\nR2O_PPE_DEOFFLOAD=1\nLOGMAX=2097152\nLOGKEEP=1048576\nLOG_EVERY=60\n`);
   fs.writeFileSync(enginePidPath, String(process.pid));
   fs.writeFileSync(controllerPidPath, String(process.pid));
   fs.writeFileSync(livePath, JSON.stringify({
@@ -407,6 +408,13 @@ async function main() {
       fs.writeFileSync(path.join(captureDir, `r2o-panel-${width}.png`), Buffer.from(screenshot.data, "base64"));
     }
   }
+
+  liveState.searches = [];
+  fs.writeFileSync(livePath, JSON.stringify(liveState));
+  await waitFor(() => evaluate("document.querySelector('#searches .quiet') !== null"), "пустой список поисков");
+  assert.equal(await evaluate("document.querySelector('#searches .quiet').textContent.includes('Рабочий прямой трафик подбор не запускает')"), true, "пустой список поисков отображается как в d2o, независимо от счётчика замеров");
+  await waitFor(() => evaluate("!!document.querySelector('#telegram-body')?.dataset.state"), "обновление статуса Telegram");
+  assert.equal(await evaluate("document.querySelector('#telegram-body').dataset.state"), "stopped", "неизвестный Telegram status использует fallback d2o");
 
   await evaluate(`document.querySelector('a[href="#telegram"]').click()`);
   assert.equal(await evaluate("location.hash"), "#telegram", "ссылка навигации открывает раздел Telegram");
