@@ -306,6 +306,39 @@ mod tests {
     }
 
     #[test]
+    fn abridged_extended_header_matches_d2o() {
+        let fixture = d2o_wss_response_fixture(ProtoTag::Abridged);
+        let mut clear = fixture[..4].to_vec(); // d2o four-byte transport ACK
+        clear.extend_from_slice(&[0x7f, 10, 0, 0]); // extended count: 10 words
+        clear.extend_from_slice(&fixture[5..]);
+        let (init, bytes) = encrypted(&clear);
+        let mut observer = ResponseObserver::new(&init, ProtoTag::Abridged);
+        assert_eq!(observer.observe(&bytes), ResponseObservation::Confirmed);
+    }
+
+    #[test]
+    fn quick_ack_only_and_padded_quick_ack_do_not_confirm() {
+        let abridged = d2o_wss_response_fixture(ProtoTag::Abridged);
+        let (init, bytes) = encrypted(&abridged[..4]);
+        let mut observer = ResponseObserver::new(&init, ProtoTag::Abridged);
+        assert_eq!(observer.observe(&bytes), ResponseObservation::Pending);
+
+        let padded = d2o_wss_response_fixture(ProtoTag::PaddedIntermediate);
+        let (init, bytes) = encrypted(&padded[..12]); // d2o padded quick ACK
+        let mut observer = ResponseObserver::new(&init, ProtoTag::PaddedIntermediate);
+        assert_eq!(observer.observe(&bytes), ResponseObservation::Pending);
+    }
+
+    #[test]
+    fn malformed_packet_after_valid_one_invalidates_same_wss_payload_like_d2o() {
+        let mut clear = valid_intermediate_response();
+        clear.extend_from_slice(&[0, 0, 0, 0]); // invalid second frame in same payload
+        let (init, bytes) = encrypted(&clear);
+        let mut observer = ResponseObserver::new(&init, ProtoTag::Intermediate);
+        assert_eq!(observer.observe(&bytes), ResponseObservation::Invalid);
+    }
+
+    #[test]
     fn d2o_wss_response_fixtures_confirm_for_all_transport_tags() {
         for proto in [
             ProtoTag::Abridged,
@@ -319,6 +352,63 @@ mod tests {
                 ResponseObservation::Confirmed,
                 "transport fixture {proto:?}"
             );
+        }
+    }
+
+    #[test]
+    #[ignore = "run by scripts/r2o-telegram-response-differential.sh against pinned d2o C"]
+    fn response_observer_matches_d2o_for_shared_ciphertext_and_wss_chunks() {
+        let vectors = std::env::var("R2O_D2O_RESPONSE_VECTORS")
+            .expect("differential script must provide the C-generated response vectors");
+        for line in std::fs::read_to_string(vectors)
+            .expect("read C-generated response vectors")
+            .lines()
+        {
+            let fields: Vec<_> = line.split('\t').collect();
+            assert_eq!(fields.len(), 5, "malformed vector: {line}");
+            let proto = match fields[1] {
+                "1" => ProtoTag::Abridged,
+                "2" => ProtoTag::Intermediate,
+                "3" => ProtoTag::PaddedIntermediate,
+                other => panic!("unknown d2o transport tag {other}"),
+            };
+            let chunks: Vec<usize> = fields[2]
+                .split(',')
+                .map(|size| size.parse().expect("valid WSS chunk size"))
+                .collect();
+            let encrypted: Vec<u8> = fields[3]
+                .as_bytes()
+                .chunks_exact(2)
+                .map(|hex| {
+                    let hex = std::str::from_utf8(hex).expect("ASCII ciphertext hex");
+                    u8::from_str_radix(hex, 16).expect("valid ciphertext hex")
+                })
+                .collect();
+            assert!(fields[3].len().is_multiple_of(2), "odd ciphertext hex");
+            assert_eq!(
+                chunks.iter().sum::<usize>(),
+                encrypted.len(),
+                "{}",
+                fields[0]
+            );
+
+            let mut observer = ResponseObserver::new(&D2O_TEST_HANDSHAKE, proto);
+            let mut outcomes = Vec::new();
+            let mut offset = 0;
+            for size in chunks {
+                let observation = observer.observe(&encrypted[offset..offset + size]);
+                offset += size;
+                outcomes.push(match observation {
+                    ResponseObservation::Invalid => "I",
+                    ResponseObservation::Pending => "P",
+                    ResponseObservation::Confirmed => "C",
+                });
+                if observation == ResponseObservation::Invalid {
+                    break;
+                }
+            }
+            println!("R2O {}: {}", fields[0], outcomes.join(","));
+            assert_eq!(outcomes.join(","), fields[4], "scenario {}", fields[0]);
         }
     }
 }
