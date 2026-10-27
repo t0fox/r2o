@@ -15,7 +15,6 @@ use tracing::{info, warn};
 use tungstenite::Message;
 
 use crate::crypto::ProtoTag;
-use crate::response::{ResponseObservation, ResponseObserver};
 use crate::routing::{RouteFeedback, WsFraming};
 use crate::splitter::MsgSplitter;
 use crate::stats::ConnectionTelemetry;
@@ -221,7 +220,6 @@ pub(crate) async fn bridge_transparent_ws(
     let bytes_down = Arc::new(AtomicUsize::new(0));
     let activity = PayloadActivity::new();
     let response_state = Arc::new(AsyncMutex::new(MtprotoResponseState::NotSent));
-    let response_observer = ResponseObserver::new(&init, proto);
 
     let upload = {
         let ws_write = Arc::clone(&ws_write);
@@ -319,21 +317,12 @@ pub(crate) async fn bridge_transparent_ws(
         let feedback = feedback.clone();
         let telemetry = telemetry.clone();
         async move {
-            let mut response_observer = Some(response_observer);
             while let Some(message) = ws_read.next().await {
                 match message {
                     Ok(Message::Binary(data)) => {
                         let length = data.len();
                         telemetry.record_upstream_bytes(length as u64);
-                        let observation = response_observer
-                            .as_mut()
-                            .map(|observer| observer.observe(&data));
-                        if observation == Some(ResponseObservation::Invalid) {
-                            // d2o disables the observer after malformed framing, while still
-                            // forwarding the original WSS payload to the Telegram client.
-                            response_observer = None;
-                        }
-                        if observation == Some(ResponseObservation::Confirmed)
+                        if !data.is_empty()
                             && let Some(latency) =
                                 record_first_mtproto_response(&response_state).await
                         {

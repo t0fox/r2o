@@ -365,8 +365,8 @@ fn config_request() -> grammers_tl_types::functions::InvokeWithLayer<
         layer: grammers_tl_types::LAYER,
         query: grammers_tl_types::functions::InitConnection {
             api_id: TELEGRAM_CONFIG_API_ID,
-            device_model: "r2o".to_string(),
-            system_version: "Linux".to_string(),
+            device_model: "OpenWrt".to_string(),
+            system_version: "OpenWrt".to_string(),
             app_version: env!("CARGO_PKG_VERSION").to_string(),
             system_lang_code: "ru".to_string(),
             lang_pack: String::new(),
@@ -1021,8 +1021,8 @@ mod tests {
 
         assert_eq!(request.layer, tl::LAYER);
         assert_eq!(request.query.api_id, TELEGRAM_CONFIG_API_ID);
-        assert_eq!(request.query.device_model, "r2o");
-        assert_eq!(request.query.system_version, "Linux");
+        assert_eq!(request.query.device_model, "OpenWrt");
+        assert_eq!(request.query.system_version, "OpenWrt");
         assert_eq!(request.query.app_version, env!("CARGO_PKG_VERSION"));
         assert_eq!(request.query.system_lang_code, "ru");
         assert_eq!(request.query.lang_code, "ru");

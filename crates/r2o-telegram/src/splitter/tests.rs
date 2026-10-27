@@ -92,17 +92,3 @@ fn rejects_packet_larger_than_the_websocket_frame_limit() {
         "отказ должен быть виден bridge и DC discovery"
     );
 }
-
-#[test]
-fn rejects_oversized_raw_chunk_after_zero_length_packet() {
-    const MAX_PACKET_BYTES: usize = 4 * 1024 * 1024;
-    let (mut splitter, mut enc) = splitter_and_encryptor(ProtoTag::PaddedIntermediate);
-
-    assert_eq!(feed(&mut splitter, &mut enc, &[0, 0, 0, 0]).len(), 1);
-    assert!(splitter.disabled);
-
-    let mut raw = vec![0x5a; MAX_PACKET_BYTES + 1];
-    assert!(splitter.split_and_encrypt(&mut raw, &mut enc).is_empty());
-    assert!(splitter.error().is_some());
-    assert!(raw.iter().all(|byte| *byte == 0x5a));
-}

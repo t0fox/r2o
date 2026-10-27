@@ -195,16 +195,6 @@ pub fn make_cipher(key: &[u8], iv: &[u8]) -> AesCtr256 {
         .expect("ключ должен содержать 32 байта, вектор инициализации — 16 байт")
 }
 
-/// Создать серверный AES-256-CTR поток Obfuscated2 для ответа Telegram.
-/// Ключ и IV получаются разворотом исходных байтов `init[8..56]`, как в d2o.
-pub(crate) fn direct_server_stream_cipher(init: &[u8; HANDSHAKE_LEN]) -> AesCtr256 {
-    let mut reversed = [0u8; PREKEY_LEN + IV_LEN];
-    for (dst, src) in reversed.iter_mut().zip(init[8..56].iter().rev()) {
-        *dst = *src;
-    }
-    make_cipher(&reversed[..PREKEY_LEN], &reversed[PREKEY_LEN..])
-}
-
 /// Применить поток шифра к `data` на месте.
 ///
 /// Единая операция для вызывающих функций [`make_cipher`] и

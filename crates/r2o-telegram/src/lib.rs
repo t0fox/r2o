@@ -12,7 +12,6 @@ pub mod limits;
 pub mod meta_dns;
 pub mod meta_edge;
 pub mod outbound;
-mod response;
 pub mod routing;
 pub mod runtime;
 pub mod server;

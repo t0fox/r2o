@@ -71,7 +71,7 @@ async fn https_get_with_tls_config(
         .map_err(|e| format!("TLS handshake: {e}"))?;
 
     let mut request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nUser-Agent: r2o-telegram\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nUser-Agent: tg-ws-proxy\r\n"
     );
     for (name, value) in headers {
         request.push_str(name);
