@@ -100,11 +100,6 @@ async function waitFor(read, description, attempts = 200) {
 
 async function main() {
   await verifyUpdatePollingMatchesD2oIdleCadence();
-  assert.equal(panelUi.voiceProofNote({ transport: 17, shape: 5, verified_by: 3 }), "STUN Binding подтверждён; RTP не проверен", "STUN не выдаётся за подтверждение RTP");
-  assert.equal(panelUi.voiceProofNote({ transport: 17, shape: 5, verified_by: 4 }), "IP Discovery подтверждён; RTP не проверен", "Discovery не выдаётся за подтверждение RTP");
-  assert.equal(panelUi.voiceProofNote({ transport: 17, shape: 5, verified_by: 5 }), "Двусторонний RTP подтверждён; качество аудио не измерялось", "RTP-подтверждение не выдаётся за качество аудио");
-  assert.equal(panelUi.voiceProofNote({ transport: 17, shape: 5, verified_by: 0 }), "RTP не проверен", "голосовая привязка без источника подтверждения не заявляет RTP");
-  assert.equal(panelUi.voiceProofNote({ transport: 6, shape: 5, verified_by: 3 }), "", "заметка RTP не показывается для TCP");
   const voiceStages = [
     ["измеряем живой голосовой поток", 0],
     ["приём голоса стоит, ждём разговора", 1],
@@ -235,6 +230,27 @@ async function main() {
       shape: 1,
     }
   );
+  liveState.boxes.push({
+    id: "discord-voice",
+    created: new Date().toISOString(),
+    updated: new Date().toISOString(),
+    signals: [{ kind: "discord-voice", human: "Голос Discord" }],
+    plans: [],
+    bindings: [{
+      target: "@discord-voice",
+      kind: "name",
+      family: 4,
+      transport: 17,
+      shape: 5,
+      level: 3,
+      level_name: "подтверждено",
+      successes: 1,
+      confirmed: new Date().toISOString(),
+      enabled: true,
+      recheck: false,
+      verified_by: 3,
+    }],
+  });
   fs.writeFileSync(livePath, JSON.stringify(liveState));
   fs.writeFileSync(servicePath, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${serviceLog}'\n`);
   fs.chmodSync(servicePath, 0o700);
@@ -347,6 +363,8 @@ async function main() {
   assert.equal(await evaluate("document.fonts.check('400 16px \\\"JetBrains Mono\\\"')"), true, "локальный JetBrains Mono загружен");
   assert.equal(await evaluate("document.querySelectorAll('script:not([src])').length"), 0, "встроенные скрипты макета не исполняются");
   await waitFor(() => evaluate("document.querySelector('#now-title').textContent !== 'Получаем состояние…'"), "состояние из /api/status");
+  await waitFor(() => evaluate("document.querySelector('.bindings tr[data-enabled] .t')?.textContent === 'Голос Discord'"), "голосовая привязка в коробке");
+  assert.equal(await evaluate("document.querySelectorAll('.bindings .proof-note').length"), 0, "голосовая привязка не добавляет заметку о RTP, которой нет в d2o");
   assert.equal(await evaluate("document.querySelector('.search-plan') === null && document.querySelector('.search-plan-result') === null"), true, "карточка Discovery показывает тот же набор статусов, что и d2o");
   await waitFor(() => evaluate("[...document.querySelectorAll('.search-question')].some((row) => !row.hidden && row.textContent.includes('whole · проверок: 1'))"), "текущий вопрос классификатора в карточке Discovery");
   assert.equal(await evaluate("document.querySelectorAll('#searches .search').length"), 4, "активные стадии представлены карточками, очередь выделена отдельно");

@@ -51,13 +51,6 @@
     if (transport === 6) return "TCP";
     return "протокол не указан";
   }
-  function voiceProofNote(binding) {
-    if (!binding || binding.transport !== 17 || binding.shape !== 5) return "";
-    if (binding.verified_by === 3) return "STUN Binding подтверждён; RTP не проверен";
-    if (binding.verified_by === 4) return "IP Discovery подтверждён; RTP не проверен";
-    if (binding.verified_by === 5) return "Двусторонний RTP подтверждён; качество аудио не измерялось";
-    return "RTP не проверен";
-  }
   function familyLabel(f) { return f === 6 ? "IPv6" : f === 4 ? "IPv4" : "IP?"; }
   function targetLabel(t) {
     if (t === "@discord-voice") return "Голос Discord";
@@ -1877,8 +1870,6 @@
         var proto = el(doc, "td", "n c-proto", shapeLabel(bd.shape, bd.transport) + " · " + familyLabel(bd.family));
         var lv = el(doc, "td", "c-level");
         add(lv, tag(doc, str(bd.level_name) || "не измерено", (bd.level || 0) >= 3 ? "ok" : (bd.level || 0) > 0 ? "warn" : "mute"));
-        var proofNote = voiceProofNote(bd);
-        if (proofNote) lv.appendChild(el(doc, "small", "proof-note", proofNote));
         if (bd.recheck) add(lv, " ", tag(doc, "перепроверяется", "live"));
         if (bd.enabled === false) add(lv, " ", tag(doc, "выключено", "mute"));
         var nw = num(bd.successes) || 0;
@@ -2253,7 +2244,6 @@
 
   var api = {
     model: model, coveredBy: coveredBy, slotsView: slotsView, trackFor: trackFor, shapeLabel: shapeLabel,
-    voiceProofNote: voiceProofNote,
     planGist: planGist, plural: plural, duration: duration,
     telegramRouteName: telegramRouteName,
     telegramFailureStage: telegramFailureStage,

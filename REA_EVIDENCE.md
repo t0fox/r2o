@@ -8990,3 +8990,13 @@ REA не предоставил ELF-псевдокод на Windows (`provider_u
 | `internal/web/assets/panel.js::start` вызывает `pollUpdates(true)` по двухсекундному таймеру. `App.prototype.pollUpdates` пропускает scheduled GET `/api/update` в простое, пока не истекли 60 секунд с предыдущего опроса; ручной запрос, активная команда и восстановление после ошибки опрашиваются сразу. | R2O вызывал `pollUpdates()` без признака таймера и ограничивал частоту только для `absent` updater. При установленном updater endpoint опрашивался каждые две секунды. | Новая проверка `verifyUpdatePollingMatchesD2oIdleCadence` сначала упала: за минуту было 30 запросов вместо одного. После переноса donor-условия совпали границы 0/58/60 секунд; ручное обновление, busy и восстановление после ошибки остаются быстрыми, следующий idle-запрос снова ограничен минутой. |
 
 Проверки: `R2O_CHROME_NO_SANDBOX=1 node crates/r2o-panel/tests/browser.cjs` прошёл, включая этот RED/GREEN сценарий и Chrome-проверку статусов; `cargo +1.98.0 test -p r2o-panel --locked --offline` прошёл (20 интеграционных тестов); `ci-differential-shards.sh verify` подтвердил 12 baseline и 39 upstream сценариев ровно по одному разу; `git diff --check` прошёл. Изменение относится только к UI polling и не меняет частоту Discovery/замеров. Роутер не использовался.
+
+## Удаление лишней RTP-заметки из коробки — 27.10.2026
+
+| Актуальный d2o | Rust-панель R2O | Результат |
+|---|---|---|
+| `internal/web/assets/panel.js::App.prototype.boxNode` показывает уровень привязки и служебные теги; отдельной RTP-заметки нет. | `crates/r2o-panel/assets/panel.js::App.prototype.boxNode` добавлял `voiceProofNote` для UDP voice binding и показывал `.proof-note` под уровнем. У d2o аналога этой функции и строки нет. | Chrome-тест с живой коробкой и Discord voice binding сначала упал на `1 !== 0` заметок. После удаления helper, его экспорта и CSS тест прошёл с нулём `.proof-note`; сведения backend и уровень binding не изменялись. |
+
+REA повторно разобрал `panel.js` обоих каталогов как инертный JS: d2o Evidence `ev_2c138552825c263315cc3cf5426e0fc7039dbe2de7ab15737741fdf0fd0f1802`, R2O Evidence `ev_90c677cee722de18d2093665b44406cbfb0cce780956b93a5522e7a36f379904`. Графы частичные (анализировался только `panel.js`), сравнение REA вернуло 7 изменений и 20 неизвестных; поэтому этот результат не доказывает паритет всей панели. Конкретное расхождение подтверждено просмотром двух `boxNode`, наличием helper только в R2O и браузерным RED/GREEN тестом.
+
+Проверки: `R2O_CHROME_NO_SANDBOX=1 node crates/r2o-panel/tests/browser.cjs`, `cargo +1.98.0 test -p r2o-panel --locked --offline`, `cargo +1.98.0 fmt --all -- --check` и `git diff --check` прошли. Изменения только в отображении панели; роутер не использовался.

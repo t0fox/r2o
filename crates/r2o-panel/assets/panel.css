@@ -645,7 +645,6 @@ main { min-width: 0; }
 .bindings .t small { display: block; font-weight: 500; color: var(--ink-3); font-size: .78rem; }
 .bindings .n { white-space: nowrap; color: var(--ink-2); }
 .bindings td.c-proto { white-space: normal; color: var(--ink-2); }
-.bindings .proof-note { display: block; margin-top: 4px; color: var(--warn); font-size: .75rem; line-height: 1.3; white-space: normal; }
 .bindings tr[data-enabled="false"] .t { color: var(--ink-3); text-decoration: line-through; text-decoration-thickness: 1px; }
 .covered { margin-top: 10px; font-size: .875rem; color: var(--ink-2); }
 .covered summary { cursor: pointer; display: flex; align-items: center; min-height: 44px; width: fit-content; font-weight: 700; color: var(--violet-2); }
@@ -868,7 +867,6 @@ body[data-stale="true"] main { opacity: .55; filter: saturate(.4); transition: o
   .bindings td { display: block; border: 0; padding: 0; text-align: left !important; }
   .bindings td.t { flex: 1 0 100%; }
   .bindings td.c-level { order: 1; display: flex; flex-wrap: wrap; gap: 4px; }
-  .bindings td.c-level .proof-note { flex-basis: 100%; }
   .bindings td.c-proto { order: 2; font-size: .8125rem; color: var(--ink-3); white-space: nowrap; }
   .bindings td.c-proto::after { content: " · " attr(data-tail); }
   .bindings td.c-wins, .bindings td.c-when { display: none; }
