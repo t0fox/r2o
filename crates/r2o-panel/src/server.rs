@@ -14,6 +14,7 @@ const REQUEST_MAX: usize = 16 * 1024;
 const BODY_MAX: usize = 4 * 1024 * 1024;
 const WORKER_BODY_MAX: usize = 4096;
 const WORKER_MAX: usize = 8;
+const TELEGRAM_DIAGNOSTICS_MAX: usize = 256 * 1024;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(60);
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const UPDATE_INSTALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -67,6 +68,7 @@ pub struct Config {
     pub control_enabled: bool,
     pub started_epoch: i64,
     pub unknown_keys: Vec<String>,
+    telegram_check_running: Arc<AtomicBool>,
     action: Arc<Mutex<String>>,
 }
 
@@ -118,6 +120,7 @@ impl Default for Config {
             control_enabled: false,
             started_epoch: 0,
             unknown_keys: Vec::new(),
+            telegram_check_running: Arc::new(AtomicBool::new(false)),
             action: Arc::new(Mutex::new("idle".into())),
         }
     }
@@ -1062,7 +1065,7 @@ fn snapshot(
         "config_path":config.config_path,"config_exists":config.config_exists,"mode":config.mode,"panel_listen":config.panel_listen,
         "controls_enabled":config.control_enabled,"control_state":action,"catalog_available":have_catalog,"live_fresh":live_fresh,
         "engine_running":engine_running,"controller_running":controller_running,"telegram_enabled":tg_enabled,
-        "telegram_configured":tg_configured,"telegram_running":tg_running,"telegram_status":tg_status,"telegram_stats":read_telegram_stats(&config.telegram_stats_path),
+        "telegram_configured":tg_configured,"telegram_running":tg_running,"telegram_status":tg_status,"telegram_stats":read_telegram_stats(&config.telegram_stats_path),"telegram_diagnostics":telegram_diagnostics_snapshot(config),
         "state_dir":config.state_dir,"state_dir_note":state_dir_note(&config.state_dir),"queue_num":config.queue_num,
         "unknown_keys":config.unknown_keys,"started_at":started,"uptime_seconds":uptime,"stages":stages,"absent":absent
     })
@@ -1101,6 +1104,7 @@ fn api_control(config: &Config, request: &Request<'_>) -> Response {
         ("/api/control/clear-found", "clear-found"),
         ("/api/control/telegram-enable", "telegram-enable"),
         ("/api/control/telegram-disable", "telegram-disable"),
+        ("/api/control/telegram-check", "telegram-check"),
         ("/api/control/update-check", "update-check"),
         ("/api/control/update-install", "update-install"),
         ("/api/control/update-auto-on", "update-auto-on"),
@@ -1121,7 +1125,9 @@ fn api_control(config: &Config, request: &Request<'_>) -> Response {
             &json!({"ok":false,"message":"В config задан MODE=off; сначала измените режим движка"}),
         );
     }
-    if *command == "telegram-enable" && !telegram_config_flags(&config.config_path).1 {
+    if matches!(*command, "telegram-enable" | "telegram-check")
+        && !telegram_config_flags(&config.config_path).1
+    {
         return json_response(
             409,
             &json!({"ok":false,"message":"Укажите TG_MODE=local в конфигурации Telegram"}),
@@ -1133,7 +1139,9 @@ fn api_control(config: &Config, request: &Request<'_>) -> Response {
         return json_response(400, &json!({"ok":false,"message":"Тело запроса запрещено"}));
     }
     let manager_present = is_executable_file(&config.manager_path);
-    let result = if manager_present && *command == "update-check" {
+    let result = if *command == "telegram-check" {
+        start_telegram_check(config)
+    } else if manager_present && *command == "update-check" {
         start_manager_update(config, command)
     } else if manager_present && *command == "update-install" {
         if is_executable_file(&config.service_path) {
@@ -1205,6 +1213,32 @@ fn start_service_action(config: &Config, command: &str) -> Result<(), ActionErro
     start_action_command(config, child_command, CONTROL_TIMEOUT)
 }
 
+fn start_telegram_check(config: &Config) -> Result<(), ActionError> {
+    if config.service_path.as_os_str().is_empty() {
+        return Err(ActionError::Start);
+    }
+    if config
+        .telegram_check_running
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(ActionError::Busy);
+    }
+    let running = Arc::clone(&config.telegram_check_running);
+    let mut command = Command::new(config.service_path.clone());
+    command.arg("telegram-check");
+    let result =
+        start_action_command_with_completion(config, command, CONTROL_TIMEOUT, move || {
+            running.store(false, Ordering::Release)
+        });
+    if result.is_err() {
+        config
+            .telegram_check_running
+            .store(false, Ordering::Release);
+    }
+    result
+}
+
 fn start_manager_update(config: &Config, command: &str) -> Result<(), ActionError> {
     if !is_executable_file(&config.manager_path) {
         return Err(ActionError::Start);
@@ -1224,9 +1258,21 @@ fn start_manager_update(config: &Config, command: &str) -> Result<(), ActionErro
 
 fn start_action_command(
     config: &Config,
-    mut child_command: Command,
+    child_command: Command,
     timeout: Duration,
 ) -> Result<(), ActionError> {
+    start_action_command_with_completion(config, child_command, timeout, || {})
+}
+
+fn start_action_command_with_completion<F>(
+    config: &Config,
+    mut child_command: Command,
+    timeout: Duration,
+    on_complete: F,
+) -> Result<(), ActionError>
+where
+    F: FnOnce() + Send + 'static,
+{
     let mut state = config.action.lock().map_err(|_| ActionError::Start)?;
     if *state == "running" {
         return Err(ActionError::Busy);
@@ -1285,6 +1331,7 @@ fn start_action_command(
             if let Ok(mut state) = shared.lock() {
                 *state = if result { "done" } else { "failed" }.into();
             }
+            on_complete();
         })
         .map_err(|_| {
             *state = "failed".into();
@@ -1966,6 +2013,50 @@ fn read_telegram_stats(path: &Path) -> Option<Value> {
     {
         let _ = path;
         None
+    }
+}
+
+fn telegram_diagnostics_snapshot(config: &Config) -> Value {
+    if config.telegram_check_running.load(Ordering::Acquire) {
+        return json!({"state":"running"});
+    }
+    read_telegram_diagnostics(&config.state_dir.join("telegram-diagnostics.json"))
+        .unwrap_or_else(|| json!({"state":"never"}))
+}
+
+fn read_telegram_diagnostics(path: &Path) -> Option<Value> {
+    let report = read_json_object(path, TELEGRAM_DIAGNOSTICS_MAX)?;
+    valid_telegram_diagnostics(&report).then_some(report)
+}
+
+fn valid_telegram_diagnostics(report: &Value) -> bool {
+    match report.get("state").and_then(Value::as_str) {
+        Some("error") => report.get("message").and_then(Value::as_str).is_some(),
+        Some("healthy" | "partial" | "unavailable" | "unverified") => {
+            report.get("checked_at").and_then(Value::as_u64).is_some()
+                && report
+                    .get("data_centers")
+                    .and_then(Value::as_array)
+                    .is_some_and(|centers| {
+                        centers.len() == 5
+                            && centers.iter().enumerate().all(|(index, center)| {
+                                center.get("dc").and_then(Value::as_u64) == Some(index as u64 + 1)
+                                    && center.get("state").and_then(Value::as_str).is_some_and(
+                                        |state| {
+                                            matches!(
+                                                state,
+                                                "healthy"
+                                                    | "blocked"
+                                                    | "unavailable"
+                                                    | "unverified"
+                                            )
+                                        },
+                                    )
+                                    && center.get("routes").and_then(Value::as_array).is_some()
+                            })
+                    })
+        }
+        _ => false,
     }
 }
 

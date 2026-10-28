@@ -622,6 +622,41 @@ telegram_restart() {
     telegram_start
 }
 
+telegram_check() {
+    [ "$TG_MODE" = local ] || die "проверка Telegram требует TG_MODE=local"
+    [ -x "$MANAGER" ] || die "нет менеджера релизов $MANAGER"
+    prepare_dirs || return 1
+    export_telegram_config
+    tg_check_report=$STATE/telegram-diagnostics.json
+    tg_check_temporary=$tg_check_report.new.$$
+    rm -f "$tg_check_temporary"
+    if "$MANAGER" exec --root "$ROOT" --component r2o-telegram -- \
+        --check --dc-map-path "$STATE/telegram-dc-map.json" \
+        --dc-map-endpoints-path "$STATE/telegram-dc-endpoints.tsv" --default-domains \
+        >"$tg_check_temporary" 2>>"$LOG/telegram.log"; then
+        tg_check_result=0
+    else
+        tg_check_result=$?
+    fi
+    if { [ "$tg_check_result" -eq 0 ] || [ "$tg_check_result" -eq 2 ]; } && [ -s "$tg_check_temporary" ]; then
+        chmod 0600 "$tg_check_temporary" && mv -f "$tg_check_temporary" "$tg_check_report" || {
+            rm -f "$tg_check_temporary"
+            return 1
+        }
+        say "проверка Telegram DC сохранена: $tg_check_report"
+        return 0
+    fi
+    rm -f "$tg_check_temporary"
+    tg_check_temporary=$tg_check_report.new.$$
+    printf '%s\n' '{"state":"error","message":"Не удалось выполнить проверку маршрутов Telegram; подробности в журнале службы."}' >"$tg_check_temporary" || return 1
+    chmod 0600 "$tg_check_temporary" && mv -f "$tg_check_temporary" "$tg_check_report" || {
+        rm -f "$tg_check_temporary"
+        return 1
+    }
+    say "проверка Telegram не завершилась; см. $LOG/telegram.log"
+    return 1
+}
+
 telegram_reapply() {
     [ "$TG_ENABLED" = 1 ] || return 0
     if telegram_ready; then
@@ -776,6 +811,7 @@ case "${1:-}" in
     telegram-enable) telegram_enable ;;
     telegram-disable) telegram_disable ;;
     telegram-restart) telegram_restart ;;
+    telegram-check) telegram_check ;;
     telegram-reapply) telegram_reapply ;;
     update-check) "$MANAGER" update-check --root "$ROOT" ;;
     update-install) update_install ;;
@@ -786,5 +822,5 @@ case "${1:-}" in
     heal) heal ;;
     tg-heal) telegram_reapply ;;
     tg-stop-rules) "$TG_FIREWALL" stop ;;
-    *) echo "usage: $0 {start|stop|restart|status|engine-start|engine-stop|engine-restart|settings-restart|reapply|heal|ppe-ensure|ppe-remove|ppe-status|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-reapply|tg-heal|tg-stop-rules|update-check|update-install|update-auto-on|update-auto-off|log-tick}" >&2; exit 2 ;;
+    *) echo "usage: $0 {start|stop|restart|status|engine-start|engine-stop|engine-restart|settings-restart|reapply|heal|ppe-ensure|ppe-remove|ppe-status|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-check|telegram-reapply|tg-heal|tg-stop-rules|update-check|update-install|update-auto-on|update-auto-off|log-tick}" >&2; exit 2 ;;
 esac

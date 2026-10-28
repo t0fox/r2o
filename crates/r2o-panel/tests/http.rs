@@ -630,6 +630,117 @@ fn worker_domains_are_normalized_and_saved_without_losing_other_config() {
     assert!(saved.contains("TG_CF_WORKER_DOMAIN=new.workers.dev\n"));
 }
 
+#[test]
+fn status_accepts_only_complete_telegram_diagnostics() {
+    let temp = TempDir::new();
+    let state = temp.file("state");
+    fs::create_dir(&state).unwrap();
+    let report_path = state.join("telegram-diagnostics.json");
+    let report = serde_json::json!({
+        "checked_at": 1_800_000_000_u64,
+        "state": "partial",
+        "data_centers": [
+            {"dc":1,"state":"healthy","routes":[{"transport":"direct-wss","state":"healthy"}]},
+            {"dc":2,"state":"blocked","routes":[]},
+            {"dc":3,"state":"unavailable","routes":[]},
+            {"dc":4,"state":"unverified","routes":[]},
+            {"dc":5,"state":"healthy","routes":[]}
+        ]
+    });
+    fs::write(&report_path, serde_json::to_vec(&report).unwrap()).unwrap();
+    let mut config = Config::default();
+    config.state_dir = state;
+
+    let (_, _, body) = request(
+        &config,
+        "GET /api/status HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    let value: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(value["snapshot"]["telegram_diagnostics"], report);
+
+    fs::write(
+        &report_path,
+        br#"{"checked_at":1800000000,"state":"healthy","data_centers":[]}"#,
+    )
+    .unwrap();
+    let (_, _, body) = request(
+        &config,
+        "GET /api/status HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    let value: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(value["snapshot"]["telegram_diagnostics"]["state"], "never");
+}
+
+#[cfg(unix)]
+#[test]
+fn telegram_check_runs_as_an_authenticated_async_service_action() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new();
+    let config_path = temp.file("config");
+    let service = temp.file("service.sh");
+    let started = temp.file("started");
+    let release = temp.file("release");
+    fs::write(&config_path, "TG_ENABLED=0\nTG_MODE=local\n").unwrap();
+    fs::write(
+        &service,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = telegram-check ] || exit 8\nprintf started > '{}'\nwhile [ ! -e '{}' ]; do sleep 0.01; done\n",
+            started.display(),
+            release.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&service, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut config = Config::default();
+    config.config_path = config_path;
+    config.service_path = service;
+    config.state_dir = temp.file("state");
+    config.control_enabled = true;
+
+    let raw = b"POST /api/control/telegram-check HTTP/1.1\r\nHost: router.local\r\nOrigin: http://other.local\r\nContent-Length: 0\r\n\r\n";
+    assert_eq!(handle_request(&config, raw).status, 403);
+    let raw = b"POST /api/control/telegram-check HTTP/1.1\r\nHost: router.local\r\nOrigin: http://router.local\r\nContent-Length: 0\r\n\r\n";
+    assert_eq!(handle_request(&config, raw).status, 202);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !started.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "проверка Telegram не запустилась"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let (_, _, body) = request(
+        &config,
+        "GET /api/status HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    let value: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        value["snapshot"]["telegram_diagnostics"]["state"],
+        "running"
+    );
+    fs::write(&release, "done").unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (_, _, body) = request(
+            &config,
+            "GET /api/status HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        let value: Value = serde_json::from_str(&body).unwrap();
+        if value["snapshot"]["control_state"] == "done" {
+            assert_eq!(value["snapshot"]["telegram_diagnostics"]["state"], "never");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "проверка Telegram не завершилась"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn r2o_служебная_команда_панели_остаётся_асинхронной() {

@@ -122,6 +122,17 @@ async function main() {
   const livePath = path.join(work, "live.json");
   fs.mkdirSync(path.join(work, "state"), { recursive: true });
   fs.writeFileSync(path.join(work, "telegram.status"), "error\n");
+  fs.writeFileSync(path.join(work, "telegram-diagnostics.json"), JSON.stringify({
+    checked_at: 1_800_000_000,
+    state: "partial",
+    data_centers: [
+      { dc: 1, state: "healthy", routes: [{ transport: "direct-wss", state: "healthy", domain: "kws1.web.telegram.org", selected_ip: "203.0.113.1", http_status: null, dns_ms: 2, tcp_ms: null, tls_ms: 5, websocket_ms: 3, mtproto_ms: 4 }] },
+      { dc: 2, state: "blocked", routes: [] },
+      { dc: 3, state: "unavailable", routes: [] },
+      { dc: 4, state: "unverified", routes: [] },
+      { dc: 5, state: "healthy", routes: [] },
+    ],
+  }));
   const enginePidPath = path.join(work, "engine.pid");
   const controllerPidPath = path.join(work, "controller.pid");
   fs.writeFileSync(configPath, `MODE=observe\nSTATE_DIR=${path.join(work, "state")}\nQUEUE_NUM=2000\nQUEUE_NUM6=2001\nR2O_FLOW_CAPACITY=2048\nIPV6_ENABLED=1\nMARK=45\nPROBE_MARK=0\nONLY_MARK=\nFW_BACKEND=auto\nPORTS=0:65535\nCONNBYTES=0:8\nVOICE_PORTS=50000:50099,1400,3478:3481,5349,19294:19344\nVOICE_CONNBYTES=0:4\nHTTP_KEEPALIVE_PORTS=80\nDNS_PORTS=53,853\nTG_ENABLED=1\nTG_MODE=local\nTG_PORT=1443\nR2O_PPE_DEOFFLOAD=1\nLOGMAX=2097152\nLOGKEEP=1048576\nLOG_EVERY=60\n`);
@@ -418,6 +429,11 @@ async function main() {
 
   await evaluate(`document.querySelector('a[href="#telegram"]').click()`);
   assert.equal(await evaluate("location.hash"), "#telegram", "ссылка навигации открывает раздел Telegram");
+  await waitFor(() => evaluate("document.querySelector('.tg-check-details')?.textContent.includes('DC5')"), "диагностика маршрутов Telegram DC1–DC5");
+  assert.equal(await evaluate("document.querySelector('.tg-check-details').textContent.includes('Все пять DC')"), false, "частичный resPQ не отображается как успех для всех DC");
+  assert.equal(await evaluate("document.querySelector('.tg-check-details').textContent.includes('DC2 · маршруты заблокированы')"), true, "панель показывает заблокированный DC из отчёта");
+  assert.equal(await evaluate("document.querySelector('.tg-check-details').textContent.includes('HTTP 0')"), false, "отсутствующий HTTP status не превращается в ноль");
+  assert.equal(await evaluate("[...document.querySelectorAll('#telegram-body button')].some(button => button.textContent.includes('Проверить DC1–DC5'))"), true, "в Telegram-секции есть запуск активной проверки");
   await evaluate("document.querySelector('#filter').focus(); document.querySelector('#filter').value = 'example'; document.querySelector('#filter').dispatchEvent(new Event('input', { bubbles: true }))");
   assert.equal(await evaluate("document.querySelector('#filter').value"), "example", "поле поиска принимает ввод");
   await delay(100);

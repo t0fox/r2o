@@ -687,6 +687,15 @@ main { min-width: 0; }
 .tg-flow-metric b { color: #fff; font-size: 1.25rem; font-weight: 800; letter-spacing: -.01em; overflow-wrap: anywhere; }
 .tg-flow-metric [data-tg-confirmed-count] { color: var(--ok); }
 .tg-flow-metric [data-tg-traffic] { font-size: .9375rem; }
+.tg-check-details { margin-top: 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255, 255, 255, .025); }
+.tg-check-details > summary, .tg-check-dc > summary { cursor: pointer; color: var(--ink-1); font-weight: 700; }
+.tg-check-state { margin: 10px 0 0; color: var(--ink-2); font-size: .875rem; line-height: 1.5; }
+.tg-check-time { margin: 4px 0 0; color: var(--ink-3); font-size: .75rem; }
+.tg-check-centers { display: grid; gap: 8px; margin-top: 10px; }
+.tg-check-dc { padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px; background: rgba(255, 255, 255, .025); }
+.tg-check-routes { display: grid; gap: 7px; margin: 9px 0 0; padding-left: 18px; color: var(--ink-2); font-size: .8125rem; }
+.tg-check-route span, .tg-check-reason { display: block; overflow-wrap: anywhere; }
+.tg-check-reason { margin-top: 3px; color: var(--ink-3); }
 
 .tg-worker-dialog, .ask {
   border: 1px solid rgba(255, 255, 255, .12); border-radius: 18px;

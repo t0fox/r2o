@@ -733,7 +733,8 @@
 
   var ENDPOINTS = {
     start: "start", stop: "stop", restart: "restart", "clear-found": "clear-found",
-    "telegram-enable": "telegram-enable", "telegram-disable": "telegram-disable"
+    "telegram-enable": "telegram-enable", "telegram-disable": "telegram-disable",
+    "telegram-check": "telegram-check"
   };
 
   /* ОПЕРАЦИИ, КОТОРЫЕ СПРАШИВАЮТ ДИАЛОГОМ.
@@ -1940,7 +1941,18 @@
       metric.lastChild.setAttribute(item[1], "");
       metrics.appendChild(metric);
     });
-    root.append(top, stage, caption, metrics);
+    var diagnostics = el(doc, "details", "tg-check-details");
+    var diagnosticSummary = el(doc, "summary", "", "Проверка маршрутов DC1–DC5");
+    var diagnosticState = el(doc, "p", "tg-check-state", "Активная проверка ещё не запускалась.");
+    diagnosticState.setAttribute("data-tg-check-state", "");
+    diagnosticState.setAttribute("role", "status");
+    diagnosticState.setAttribute("aria-live", "polite");
+    var diagnosticTime = el(doc, "p", "tg-check-time", "");
+    diagnosticTime.setAttribute("data-tg-check-time", "");
+    var diagnosticCenters = el(doc, "div", "tg-check-centers");
+    diagnosticCenters.setAttribute("data-tg-check-centers", "");
+    diagnostics.append(diagnosticSummary, diagnosticState, diagnosticTime, diagnosticCenters);
+    root.append(top, stage, caption, metrics, diagnostics);
     if (global.R2oTelegramFlow && global.R2oTelegramFlow.mountTelegramFlow) {
       root.__flow = global.R2oTelegramFlow.mountTelegramFlow(canvas);
     }
@@ -1991,6 +2003,78 @@
     if (trafficNode && trafficNode.textContent !== traffic) trafficNode.textContent = traffic;
   }
 
+  function renderTelegramDiagnostics(root, report) {
+    if (!root) return;
+    report = report && typeof report === "object" ? report : { state: "never" };
+    var key = JSON.stringify(report);
+    if (root.__r2oKey === key) return;
+    root.__r2oKey = key;
+    var status = root.querySelector("[data-tg-check-state]");
+    var checked = root.querySelector("[data-tg-check-time]");
+    var centers = root.querySelector("[data-tg-check-centers]");
+    var states = {
+      healthy: "Все пять DC подтвердили обмен MTProto resPQ.",
+      partial: "resPQ подтверждён не для всех дата-центров.",
+      unavailable: "Маршрут с подтверждённым resPQ не найден.",
+      unverified: "Ответ resPQ не подтверждён ни для одного дата-центра.",
+      running: "Проверяются маршруты; успех засчитывается только после resPQ.",
+      never: "Активная проверка ещё не запускалась.",
+      error: str(report.message) || "Не удалось запустить проверку маршрутов."
+    };
+    if (status) status.textContent = states[report.state] || "Результат проверки не распознан.";
+    if (checked) {
+      checked.textContent = Number.isFinite(Number(report.checked_at)) && Number(report.checked_at) > 0
+        ? "Проверено: " + new Date(Number(report.checked_at) * 1000).toLocaleString("ru-RU") : "";
+    }
+    if (!centers) return;
+    centers.replaceChildren();
+    if (!Array.isArray(report.data_centers)) return;
+    var dcStates = {
+      healthy: "resPQ подтверждён", blocked: "маршруты заблокированы",
+      unavailable: "нет подтверждённого маршрута", unverified: "не подтверждено"
+    };
+    var routeStates = {
+      healthy: "resPQ подтверждён", blocked: "заблокирован",
+      unavailable: "не прошёл", unverified: "не подтверждено"
+    };
+    var transports = {
+      "direct-wss": "Прямой WSS", "cloudflare-worker": "Cloudflare Worker",
+      "cloudflare-proxy": "Прокси Cloudflare", "tcp-fallback": "Резервный TCP"
+    };
+    var timings = [["dns_ms", "DNS"], ["tcp_ms", "TCP"], ["tls_ms", "TLS"],
+      ["websocket_ms", "WebSocket"], ["mtproto_ms", "resPQ"]];
+    report.data_centers.forEach(function (dc) {
+      if (!dc || !Number.isInteger(Number(dc.dc)) || Number(dc.dc) < 1 || Number(dc.dc) > 5) return;
+      var details = el(root.ownerDocument, "details", "tg-check-dc");
+      var label = "DC" + Number(dc.dc) + " · " + (dcStates[dc.state] || "статус неизвестен");
+      details.appendChild(el(root.ownerDocument, "summary", "", label));
+      var list = el(root.ownerDocument, "ul", "tg-check-routes");
+      (Array.isArray(dc.routes) ? dc.routes : []).forEach(function (route) {
+        if (!route || typeof route !== "object") return;
+        var item = el(root.ownerDocument, "li", "tg-check-route");
+        var name = transports[route.transport] || str(route.transport) || "Маршрут";
+        var parts = [name, routeStates[route.state] || "статус неизвестен"];
+        if (route.domain) parts.push(str(route.domain));
+        if (route.selected_ip) parts.push(str(route.selected_ip));
+        if (route.failed_stage) parts.push("сбой: " + str(route.failed_stage));
+        if (route.http_status !== null && route.http_status !== undefined && Number.isFinite(Number(route.http_status))) {
+          parts.push("HTTP " + Number(route.http_status));
+        }
+        timings.forEach(function (timing) {
+          if (route[timing[0]] !== null && route[timing[0]] !== undefined && Number.isFinite(Number(route[timing[0]]))) {
+            parts.push(timing[1] + " " + telegramMilliseconds(route[timing[0]]));
+          }
+        });
+        item.appendChild(el(root.ownerDocument, "span", "", parts.join(" · ")));
+        if (route.reason) item.appendChild(el(root.ownerDocument, "small", "tg-check-reason", str(route.reason)));
+        list.appendChild(item);
+      });
+      if (!list.children.length) list.appendChild(el(root.ownerDocument, "li", "", "Маршруты не перечислены."));
+      details.appendChild(list);
+      centers.appendChild(details);
+    });
+  }
+
   App.prototype.renderTelegram = function (m, force) {
     if (!m) return;
     var doc = this.doc, snap = m.snap;
@@ -2003,7 +2087,7 @@
     var busy = snap.control_state === "running" || !!this.pending;
     var body = this.$("telegram-body");
     var stale = doc.body.getAttribute("data-stale") === "true";
-    var key = JSON.stringify([st, snap.telegram_enabled, snap.telegram_configured, stats,
+    var key = JSON.stringify([st, snap.telegram_enabled, snap.telegram_configured, stats, snap.telegram_diagnostics,
       snap.controls_enabled, busy, this.pending, stale]);
     if (!force && body.__r2oKey === key) return;
     var focused = doc.activeElement && body.contains(doc.activeElement)
@@ -2031,12 +2115,14 @@
       } else {
         buttons.push(this.button("telegram-enable", "Включить туннель", "send", "primary", busy || !snap.telegram_configured));
       }
+      buttons.push(this.button("telegram-check", "Проверить DC1–DC5", null, null, busy || !snap.telegram_configured));
     }
     buttons.push(this.button("telegram-workers", "Мои Workers", null, null, busy));
     ui.actions.replaceChildren.apply(ui.actions, buttons);
     body.setAttribute("data-state", st);
     if (ui.scene.__flow) ui.scene.__flow.update(stats, stale);
     updateTelegramMetrics(ui, stats);
+    renderTelegramDiagnostics(ui.scene.querySelector(".tg-check-details"), snap.telegram_diagnostics);
     if (focused) {
       var again = body.querySelector("button");
       if (again) again.focus();

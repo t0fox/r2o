@@ -46,6 +46,9 @@ case "${1:-}" in
         done
         [ "$component" = r2o-telegram ] || exit 2
         case "$*" in
+            *--check*)
+                printf '%s\n' '{"checked_at":1800000000,"state":"partial","data_centers":[{"dc":1,"state":"healthy","routes":[]},{"dc":2,"state":"healthy","routes":[]},{"dc":3,"state":"unavailable","routes":[]},{"dc":4,"state":"healthy","routes":[]},{"dc":5,"state":"healthy","routes":[]}]}'
+                exit 2 ;;
             *--stats*)
                 if [ -n "${R2O_TG_MANAGER_FAIL:-}" ] && [ -e "$R2O_TG_MANAGER_FAIL" ]; then exit 1; fi
                 ;;
@@ -85,6 +88,16 @@ grep -q '^TG_ENABLED=1$' "$TEMP/root/config"
 grep -q '^local$' "$TEMP/root/state/telegram.status"
 [ -s "$TEMP/root/run/r2o-telegram.pid" ]
 [ -s "$TEMP/root/run/r2o-telegram-watchdog.pid" ]
+run_service telegram-check
+python3 - "$TEMP/root/state/telegram-diagnostics.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as report_file:
+    report = json.load(report_file)
+assert report["state"] == "partial"
+assert [center["dc"] for center in report["data_centers"]] == [1, 2, 3, 4, 5]
+PY
 python3 - 30443 <<'PY'
 import socket
 import sys
