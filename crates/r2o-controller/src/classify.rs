@@ -880,7 +880,6 @@ impl ClassifyResult {
 struct Tally {
     pass: usize,
     fail: usize,
-    unproven: usize,
     errors: usize,
     error: Option<ProbeError>,
 }
@@ -980,7 +979,6 @@ fn measure<B: ProbeBackend>(
         let tally = Tally {
             pass: seed.pass,
             fail: seed.fail,
-            unproven: 0,
             errors: seed.errors,
             error: seed.error.clone().map(ProbeError::Transport),
         };
@@ -1015,10 +1013,7 @@ fn measure<B: ProbeBackend>(
                 }
             }
             Ok(ProbeOutcome::Rejected) => tally.fail += 1,
-            Ok(ProbeOutcome::Unproven) => {
-                tally.fail += 1;
-                tally.unproven += 1;
-            }
+            Ok(ProbeOutcome::Unproven) => tally.fail += 1,
             Err(error) => {
                 tally.fail += 1;
                 tally.errors += 1;
@@ -1197,16 +1192,6 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
                 progress,
             );
             control_ok = measured.pass > 0;
-        }
-        if base.unproven > 0 || one.unproven > 0 {
-            result.verdict = Verdict::Inconclusive;
-            result.reason = format!(
-                "на триггер ответили не доказательством прохода ({} из {}): ответ инжектируют и коробки, и серверы — вердикта нет",
-                base.unproven + one.unproven,
-                options.repeats.saturating_mul(2)
-            );
-            finish(&mut result, &options, start);
-            return result;
         }
         if !control_ok {
             let index = add_observation(&mut result, "neutral-ack", &[], Duration::ZERO);

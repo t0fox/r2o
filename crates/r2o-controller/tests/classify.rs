@@ -451,20 +451,36 @@ fn unrecognized_control_replies_do_not_count_as_passes_and_continue_diagnostics(
 }
 
 #[test]
-fn unrecognized_trigger_reply_prevents_an_opaque_verdict() {
-    let trigger = test_trigger();
+fn unrecognized_trigger_reply_matches_donor_opaque_verdict() {
+    let mut trigger = test_trigger();
+    trigger.accept = Accept::ServerHello;
     let mut options = test_options();
+    options.repeats = 1;
     options.control = Some(Trigger {
         name: "control".into(),
         payload: b"BENIGN-CONTROL-PAYLOAD".to_vec(),
-        accept: Accept::TlsRecord,
+        accept: Accept::Any,
     });
     let mut backend = UnprovenTrigger;
 
     let result = run_with_backend("192.0.2.10:443", &trigger, options, &mut backend);
 
-    assert_eq!(result.verdict, Verdict::Inconclusive);
-    assert!(result.reason.contains("на триггер ответили"));
+    let verdict = if result.verdict == Verdict::Opaque {
+        "opaque"
+    } else if result.verdict == Verdict::Inconclusive {
+        "inconclusive"
+    } else {
+        "other"
+    };
+    if let Ok(path) = std::env::var("R2O_CLASSIFY_UNPROVEN_DIFF_OUTPUT") {
+        std::fs::write(
+            path,
+            format!("verdict={verdict}\nprobes={}\n", result.probes),
+        )
+        .unwrap();
+    }
+    assert_eq!(result.verdict, Verdict::Opaque);
+    assert_eq!(result.probes, 3);
 }
 
 #[test]

@@ -53,6 +53,26 @@ printf 'C/Rust classify CLEAR output matches for the shared d2o fixture.\n'
 cc -std=c99 -O2 -Wall -Wextra -Werror \
     -I"$donor_detect" -I"$donor_detect/include" -I"$donor_core/include" \
     -I"$donor_datapath/include" \
+    "$tests/d2o_classify_unproven_differential.c" \
+    "$donor_detect/poison.o" "$donor_detect/props.o" \
+    "$donor_detect/raw.o" "$donor_detect/trigger.o" "$donor_detect/response.o" \
+    "$donor_core/measured.o" "$donor_core/hello.o" \
+    "$donor_core/plantlv.o" "$donor_core/quic.o" \
+    "$donor_core/quicwire.o" "$donor_core/crypto.o" \
+    "$donor_datapath/plan_parse.o" "$donor_datapath/plan_apply.o" \
+    "$donor_datapath/wire.o" -lpthread \
+    -o "$tmp_dir/d2o_classify_unproven_differential"
+timeout 15s "$tmp_dir/d2o_classify_unproven_differential" \
+    >"$tmp_dir/classify-unproven-c.out"
+R2O_CLASSIFY_UNPROVEN_DIFF_OUTPUT="$tmp_dir/classify-unproven-rust.out" \
+    cargo test -p r2o-controller --locked --test classify \
+    unrecognized_trigger_reply_matches_donor_opaque_verdict
+diff -u "$tmp_dir/classify-unproven-c.out" "$tmp_dir/classify-unproven-rust.out"
+printf 'C/Rust classify unrecognized-reply output matches.\n'
+
+cc -std=c99 -O2 -Wall -Wextra -Werror \
+    -I"$donor_detect" -I"$donor_detect/include" -I"$donor_core/include" \
+    -I"$donor_datapath/include" \
     "$tests/d2o_response_fixture.c" \
     "$donor_detect/classify.o" "$donor_detect/poison.o" \
     "$donor_detect/props.o" "$donor_detect/raw.o" \
