@@ -259,6 +259,16 @@ pub fn r2o_d2o_verification_encoding(path: &str) -> R2oFetchEncoding {
     }
 }
 
+/// Candidate checks after the volume probe use d2o's RX verifier only when
+/// the incoming cut was proved. A TX-only cut keeps the ordinary verifier.
+pub fn r2o_d2o_volume_candidate_encoding(path: &str, rx_cut: bool) -> R2oFetchEncoding {
+    if rx_cut {
+        R2oFetchEncoding::Identity
+    } else {
+        r2o_d2o_verification_encoding(path)
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct R2oFetchVolumeRxResult {
     pub first: Option<FetchResult>,
@@ -2647,6 +2657,22 @@ mod tests {
         );
         assert_eq!(
             r2o_d2o_verification_encoding("/css/site.css"),
+            R2oFetchEncoding::Identity
+        );
+    }
+
+    #[test]
+    fn verifier_объёмного_кандидата_выбирает_identity_только_при_rx_обрыве() {
+        assert_eq!(
+            r2o_d2o_volume_candidate_encoding("/", false),
+            R2oFetchEncoding::GzipDeflate
+        );
+        assert_eq!(
+            r2o_d2o_volume_candidate_encoding("/", true),
+            R2oFetchEncoding::Identity
+        );
+        assert_eq!(
+            r2o_d2o_volume_candidate_encoding("/css/site.css", false),
             R2oFetchEncoding::Identity
         );
     }

@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use r2o_controller::fetch::{
     FetchOptions, R2O_D2O_VERIFY_STEP_TIMEOUT, R2O_D2O_VOLUME_RX_TIMEOUT,
-    r2o_fetch_measure_rx_volume_with_fallback_path_and_timeouts, r2o_fetch_with_phase_timeout,
+    r2o_d2o_volume_candidate_encoding, r2o_fetch_measure_rx_volume_with_fallback_path_and_timeouts,
+    r2o_fetch_with_encoding, r2o_fetch_with_phase_timeout,
 };
 
 fn serve(config: Arc<rustls::ServerConfig>, listener: TcpListener, requests: usize) {
@@ -383,6 +384,53 @@ fn donor_and_r2o_send_the_same_default_verification_request() {
     assert_eq!(
         c_request, rust_request,
         "d2o and r2o must send the same GET / request for ordinary TLS verification"
+    );
+}
+
+#[test]
+#[ignore = "run by scripts/r2o-tls-verify-differential.sh with the donor C verifier"]
+fn donor_and_r2o_send_the_same_tx_only_volume_candidate_request() {
+    let helper = std::env::var_os("R2O_D2O_VERIFY_HELPER")
+        .expect("differential script must provide the donor C verifier");
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || {
+        serve_and_capture_requests(server_config(false, false, false), listener, sender)
+    });
+    let port = address.port().to_string();
+
+    let c_result = Command::new(&helper)
+        .args(["127.0.0.1", port.as_str(), "localhost", "tls13"])
+        .output()
+        .expect("run donor C verifier for TX-only volume candidate");
+    assert!(c_result.status.success());
+    assert_eq!(
+        String::from_utf8(c_result.stdout).unwrap().trim(),
+        "1\t1\t200\t1"
+    );
+    let c_request = receiver.recv().expect("capture d2o candidate request");
+
+    let options = FetchOptions {
+        name: "localhost".into(),
+        ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        port: address.port(),
+        path: "/".into(),
+        deadline: Duration::from_secs(3),
+        tls12: false,
+        wire_len: None,
+        mark: None,
+    };
+    let rust_result =
+        r2o_fetch_with_encoding(&options, r2o_d2o_volume_candidate_encoding("/", false))
+            .expect("complete the r2o volume-candidate request");
+    assert!(rust_result.application_verified);
+    let rust_request = receiver.recv().expect("capture r2o candidate request");
+    server.join().unwrap();
+
+    assert_eq!(
+        c_request, rust_request,
+        "a TX-only volume cut must keep the same default GET encoding in d2o and r2o"
     );
 }
 

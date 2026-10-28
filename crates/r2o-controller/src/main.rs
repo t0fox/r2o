@@ -4569,6 +4569,37 @@ fn r2o_run_discovery_candidate_trial(
     bool,
     usize,
 ) {
+    r2o_run_discovery_candidate_trial_with_encoding(
+        target,
+        source_text,
+        probe_path,
+        mark,
+        commands,
+        client_hello,
+        ech_config,
+        resource_memory,
+        packet_budget,
+        r2o_controller::fetch::R2oFetchEncoding::Identity,
+    )
+}
+
+#[cfg(unix)]
+fn r2o_run_discovery_candidate_trial_with_encoding(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    source_text: &str,
+    probe_path: &str,
+    mark: Option<u32>,
+    commands: &SyncSender<HttpSearchCommand>,
+    client_hello: Option<&[u8]>,
+    ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
+    resource_memory: &std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>,
+    packet_budget: Option<u32>,
+    request_encoding: r2o_controller::fetch::R2oFetchEncoding,
+) -> (
+    Result<r2o_controller::fetch::FetchResult, String>,
+    bool,
+    usize,
+) {
     let (result, applied, attempts) = r2o_run_discovery_candidate_trial_with_retries(
         target,
         source_text,
@@ -4580,6 +4611,7 @@ fn r2o_run_discovery_candidate_trial(
         resource_memory,
         1 + usize::from(client_hello.is_some()),
         packet_budget,
+        request_encoding,
         || false,
     );
     (result, applied, attempts)
@@ -4597,6 +4629,7 @@ fn r2o_run_discovery_candidate_trial_with_retries(
     resource_memory: &std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>,
     probe_budget_remaining: usize,
     packet_budget: Option<u32>,
+    request_encoding: r2o_controller::fetch::R2oFetchEncoding,
     retry_budget_available: impl FnMut() -> bool,
 ) -> (
     Result<r2o_controller::fetch::FetchResult, String>,
@@ -4614,7 +4647,7 @@ fn r2o_run_discovery_candidate_trial_with_retries(
         resource_memory,
         probe_budget_remaining,
         packet_budget,
-        r2o_controller::fetch::R2oFetchEncoding::Identity,
+        request_encoding,
         retry_budget_available,
         true,
         None,
@@ -11927,6 +11960,10 @@ fn r2o_discovery_volume_recovery(
         .as_deref()
         .unwrap_or(&search.key.probe_path)
         .to_owned();
+    let candidate_request_encoding = r2o_controller::fetch::r2o_d2o_volume_candidate_encoding(
+        &candidate_probe_path,
+        search.rx.evidence.is_some(),
+    );
     let known_plans = r2o_discovery_volume_known_plans(
         candidate_catalog,
         target,
@@ -11955,7 +11992,7 @@ fn r2o_discovery_volume_recovery(
             "проверяется на пробном потоке",
             "ожидается точное подтверждение datapath",
         );
-        let (result, applied, attempts) = r2o_run_discovery_candidate_trial(
+        let (result, applied, attempts) = r2o_run_discovery_candidate_trial_with_encoding(
             target,
             candidate,
             &candidate_probe_path,
@@ -11965,6 +12002,7 @@ fn r2o_discovery_volume_recovery(
             None,
             resource_memory,
             None,
+            candidate_request_encoding,
         );
         probe_counts.candidates = probe_counts.candidates.saturating_add(attempts);
         let verified =
@@ -12059,6 +12097,7 @@ fn r2o_discovery_volume_recovery(
             resource_memory,
             probe_counts.remaining(probe_cap),
             None,
+            candidate_request_encoding,
             || {
                 !cancel.load(Ordering::Relaxed)
                     && r2o_discovery_trial_time_available(started.elapsed())
@@ -12197,7 +12236,7 @@ fn r2o_discovery_volume_recovery(
             "проверяется на пробном потоке",
             "ожидается точное подтверждение datapath",
         );
-        let (result, applied, attempts) = r2o_run_discovery_candidate_trial(
+        let (result, applied, attempts) = r2o_run_discovery_candidate_trial_with_encoding(
             target,
             &candidate,
             &candidate_probe_path,
@@ -12207,6 +12246,7 @@ fn r2o_discovery_volume_recovery(
             None,
             resource_memory,
             tx_ladder_requires_packet_budget.then_some(R2O_VOLUME_TX_LADDER_PACKET_BUDGET),
+            candidate_request_encoding,
         );
         probe_counts.candidates = probe_counts.candidates.saturating_add(attempts);
         let verified = r2o_discovery_volume_ladder_decision(
