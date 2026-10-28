@@ -7622,7 +7622,7 @@ struct DiscoveryWorker {
     suspect_fingerprint_order: VecDeque<r2o_controller::discovery::DiscoveryTarget>,
     failed_at: HashMap<R2oDiscoveryFailureKey, std::time::Instant>,
     failed_retry_after: HashMap<R2oDiscoveryFailureKey, std::time::Duration>,
-    challenge_cooldowns: HashMap<(String, u8), std::time::Instant>,
+    challenge_cooldowns: HashMap<(String, u8, u8), std::time::Instant>,
     ech_input_clearable_failures: HashSet<R2oDiscoveryFailureKey>,
     ech_input_names: VecDeque<(String, u8)>,
     clear_streaks: HashMap<R2oDiscoveryFailureKey, u8>,
@@ -10561,7 +10561,11 @@ impl DiscoveryWorker {
     ) -> bool {
         self.challenge_cooldowns.retain(|_, until| *until > now);
         self.challenge_cooldowns
-            .get(&(target.host.clone(), target.family))
+            .get(&(
+                target.host.clone(),
+                r2o_discovery_transport(target),
+                target.family,
+            ))
             .is_some_and(|until| *until > now)
     }
 
@@ -10571,7 +10575,11 @@ impl DiscoveryWorker {
         now: std::time::Instant,
     ) {
         self.challenge_cooldowns.retain(|_, until| *until > now);
-        let key = (target.host.clone(), target.family);
+        let key = (
+            target.host.clone(),
+            r2o_discovery_transport(target),
+            target.family,
+        );
         if !self.challenge_cooldowns.contains_key(&key)
             && self.challenge_cooldowns.len() >= R2O_DISCOVERY_CHALLENGE_COOLDOWN_CAPACITY
             && let Some(oldest) = self
@@ -22283,6 +22291,41 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn d2o_scheduler_challenge_cooldown_matches_donor() {
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        let now = std::time::Instant::now();
+        let tcp4 = DiscoveryTarget {
+            host: "challenge.example".into(),
+            endpoint: "198.51.100.10:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let mut quic4 = tcp4.clone();
+        quic4.shape = SHAPE_QUIC;
+        let mut tcp6 = tcp4.clone();
+        tcp6.family = 6;
+        tcp6.endpoint = "[2001:db8::10]:443".into();
+
+        worker.r2o_record_discovery_challenge(&tcp4, now);
+        let output = format!(
+            "tcp4 {}\nquic4_after_tcp {}\ntcp6_after_tcp4 {}\n",
+            u8::from(worker.r2o_discovery_challenge_active(&tcp4, now)),
+            u8::from(worker.r2o_discovery_challenge_active(&quic4, now)),
+            u8::from(worker.r2o_discovery_challenge_active(&tcp6, now)),
+        );
+        worker.r2o_record_discovery_challenge(&quic4, now);
+        let output = format!(
+            "{output}quic4 {}\ntcp4_after_quic {}\n",
+            u8::from(worker.r2o_discovery_challenge_active(&quic4, now)),
+            u8::from(worker.r2o_discovery_challenge_active(&tcp4, now)),
+        );
+        if let Ok(path) = std::env::var("R2O_SCHED_COOLDOWN_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
     #[test]
     fn кэш_чистого_tcp_рукопожатия_сверяет_имя_семейство_срок_и_ёмкость() {
         let now = std::time::Instant::now();
@@ -24764,7 +24807,11 @@ mod tests {
         assert!(!worker.queue(other_address.clone()));
 
         worker.challenge_cooldowns.insert(
-            (target.host, target.family),
+            (
+                target.host.clone(),
+                super::r2o_discovery_transport(&target),
+                target.family,
+            ),
             std::time::Instant::now() - std::time::Duration::from_secs(1),
         );
         assert!(worker.queue(other_address));

@@ -45,7 +45,7 @@
 
 ### Task 4: Match scheduler cooldown and endpoint admission
 
-- [ ] Differentially test challenge cooldown separation by transport and family.
+- [x] Differentially test challenge cooldown separation by transport and family.
 - [ ] Differentially test signal-specific bypass for direct-CLEAR and late-RST-only cooldowns.
 - [ ] Differentially test concurrent tasks sharing an endpoint when measurement slots remain available.
 - [ ] Match the donor's 128-entry cooldown-ring eviction behavior under live-entry churn.
