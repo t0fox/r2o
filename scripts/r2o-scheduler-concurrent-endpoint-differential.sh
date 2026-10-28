@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
+donor_root=${R2O_DONOR_ROOT:-"${repo_root%/*}/d2o"}
+donor_core="$donor_root/core"
+expected_donor_sha=304ba893dd37197128ac8799c0495b035f6a38c0
+actual_donor_sha=$(git -C "$donor_root" rev-parse HEAD)
+if [ "$actual_donor_sha" != "$expected_donor_sha" ]; then
+    printf 'Expected d2o %s, got %s\n' "$expected_donor_sha" "$actual_donor_sha" >&2
+    exit 2
+fi
+
+tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/r2o-d2o-sched-concurrent.XXXXXX")
+trap 'rm -rf -- "$tmp_dir"' EXIT HUP INT TERM
+
+cat >"$tmp_dir/ConcurrentEndpoint.mk" <<'MAKEFILE'
+include $(DONOR_CORE)/Makefile
+
+$(R2O_TMP)/d2o-scheduler-concurrent: $(R2O_REPO_ROOT)/crates/r2o-controller/tests/d2o_scheduler_concurrent_endpoint_differential.c $(filter-out sched.o,$(SCHED_TEST_OBJ))
+	$(CC) $(CFLAGS) -I"$(DONOR_CORE)" -o "$@" "$<" $(filter-out sched.o,$(SCHED_TEST_OBJ)) $(TEST_LDFLAGS)
+MAKEFILE
+make -C "$donor_core" -f "$tmp_dir/ConcurrentEndpoint.mk" --no-print-directory \
+    "DONOR_CORE=$donor_core" "R2O_REPO_ROOT=$repo_root" "R2O_TMP=$tmp_dir" \
+    "CC=${CC:-clang-18}" "$tmp_dir/d2o-scheduler-concurrent"
+
+"$tmp_dir/d2o-scheduler-concurrent" >"$tmp_dir/c.out"
+R2O_SCHED_CONCURRENT_ENDPOINT_DIFF_OUTPUT="$tmp_dir/rust.out" \
+    cargo +1.98.0 test --locked -p r2o-controller --bin r2o-controller \
+    r2o_discovery_concurrently_probes_the_same_endpoint_when_slots_are_available
+diff -u "$tmp_dir/c.out" "$tmp_dir/rust.out"
+printf 'C/Rust same-endpoint concurrency matches d2o %s.\n' "$actual_donor_sha"

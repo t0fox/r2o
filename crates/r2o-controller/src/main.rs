@@ -6589,7 +6589,6 @@ impl R2oRecentTcpNameCache {
 #[derive(Default)]
 struct R2oDiscoveryQueue {
     entries: Vec<R2oDiscoveryQueueEntry>,
-    active_endpoints: HashSet<(String, u8)>,
     installed_group_generations: HashMap<r2o_controller::live::LiveGroupKey, u64>,
     event_sequence: u64,
     catalog_generation: u64,
@@ -7300,13 +7299,8 @@ impl R2oDiscoveryQueue {
         self.entries.is_empty()
     }
 
-    fn has_runnable(&self, now: std::time::Instant) -> bool {
-        self.entries.iter().any(|entry| {
-            now.saturating_duration_since(entry.queued_at) > R2O_DISCOVERY_TASK_LIFETIME
-                || !self
-                    .active_endpoints
-                    .contains(&r2o_discovery_endpoint_key(&entry.target))
-        })
+    fn has_runnable(&self, _now: std::time::Instant) -> bool {
+        !self.entries.is_empty()
     }
 
     #[cfg(test)]
@@ -7436,12 +7430,6 @@ impl R2oDiscoveryQueue {
     }
 
     #[cfg(test)]
-    fn release_endpoint(&mut self, target: &r2o_controller::discovery::DiscoveryTarget) {
-        self.active_endpoints
-            .remove(&r2o_discovery_endpoint_key(target));
-    }
-
-    #[cfg(test)]
     fn pop(
         &mut self,
         now: std::time::Instant,
@@ -7475,22 +7463,15 @@ impl R2oDiscoveryQueue {
     ) {
         let expired = self.r2o_expire(now);
         let prefer_tcp = prefer_tcp
-            && self.entries.iter().any(|entry| {
-                r2o_discovery_transport(&entry.target) == 6
-                    && !self
-                        .active_endpoints
-                        .contains(&r2o_discovery_endpoint_key(&entry.target))
-            });
+            && self
+                .entries
+                .iter()
+                .any(|entry| r2o_discovery_transport(&entry.target) == 6);
         let selected = self
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, entry)| {
-                !self
-                    .active_endpoints
-                    .contains(&r2o_discovery_endpoint_key(&entry.target))
-                    && (!prefer_tcp || r2o_discovery_transport(&entry.target) == 6)
-            })
+            .filter(|(_, entry)| !prefer_tcp || r2o_discovery_transport(&entry.target) == 6)
             .min_by_key(|(_, entry)| (std::cmp::Reverse(entry.hot_event), entry.queued_event))
             .map(|(index, _)| index);
         let Some(selected) = selected else {
@@ -7498,46 +7479,7 @@ impl R2oDiscoveryQueue {
         };
         let entry = self.entries.remove(selected);
         let target = entry.target;
-        self.active_endpoints
-            .insert(r2o_discovery_endpoint_key(&target));
         (expired, Some((target, entry.trigger_planned)))
-    }
-}
-
-#[cfg(unix)]
-fn r2o_discovery_endpoint_key(target: &r2o_controller::discovery::DiscoveryTarget) -> (String, u8) {
-    (target.endpoint.clone(), r2o_discovery_transport(target))
-}
-
-#[cfg(unix)]
-struct R2oDiscoveryEndpointPermit {
-    jobs: Arc<(std::sync::Mutex<R2oDiscoveryQueue>, std::sync::Condvar)>,
-    key: (String, u8),
-}
-
-#[cfg(unix)]
-impl R2oDiscoveryEndpointPermit {
-    fn new(
-        jobs: Arc<(std::sync::Mutex<R2oDiscoveryQueue>, std::sync::Condvar)>,
-        target: &r2o_controller::discovery::DiscoveryTarget,
-    ) -> Self {
-        Self {
-            jobs,
-            key: r2o_discovery_endpoint_key(target),
-        }
-    }
-}
-
-#[cfg(unix)]
-impl Drop for R2oDiscoveryEndpointPermit {
-    fn drop(&mut self) {
-        let (queue, wake) = &*self.jobs;
-        queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .active_endpoints
-            .remove(&self.key);
-        wake.notify_all();
     }
 }
 
@@ -10223,8 +10165,6 @@ impl DiscoveryWorker {
                         let Some((target, trigger_planned)) = target else {
                             continue;
                         };
-                        let endpoint_permit =
-                            R2oDiscoveryEndpointPermit::new(Arc::clone(&worker_jobs), &target);
                         {
                             let mut searches = worker_searches.lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -10314,7 +10254,6 @@ impl DiscoveryWorker {
                         worker_searches.lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .set_asking(&target, false);
-                        drop(endpoint_permit);
                         worker_catalog_refreshes
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -28228,7 +28167,6 @@ mod tests {
         assert!(worker.queue(first.clone()));
         let mut queue = worker.jobs.0.lock().unwrap();
         queue.pop(std::time::Instant::now());
-        queue.release_endpoint(&first);
         drop(queue);
         worker.r2o_complete_outcome(DiscoveryOutcome {
             target: first,
@@ -30022,7 +29960,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn r2o_discovery_never_probes_the_same_endpoint_concurrently() {
+    fn r2o_discovery_concurrently_probes_the_same_endpoint_when_slots_are_available() {
         use std::sync::atomic::AtomicBool;
         use std::sync::{Arc, Condvar, Mutex, mpsc};
         use std::time::Duration;
@@ -30069,20 +30007,20 @@ mod tests {
         let first_started = started_receiver
             .recv_timeout(Duration::from_secs(2))
             .unwrap();
-        assert!(
-            started_receiver
-                .recv_timeout(Duration::from_millis(100))
-                .is_err()
-        );
+        let second_started = started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert_ne!(first_started, second_started);
+        let active = gate.r2o_live_snapshot().active;
+        assert_eq!(active, 2);
+        if let Ok(path) = std::env::var("R2O_SCHED_CONCURRENT_ENDPOINT_DIFF_OUTPUT") {
+            std::fs::write(path, format!("same_endpoint_active {active}\n")).unwrap();
+        }
         *release
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
         release.1.notify_all();
-        let second_started = started_receiver
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap();
-        assert_ne!(first_started, second_started);
         worker
             .outcomes
             .recv_timeout(Duration::from_secs(2))
@@ -31098,7 +31036,6 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let selected = queue.pop(std::time::Instant::now()).1;
-            queue.release_endpoint(&first);
             selected
         };
         assert_eq!(selected, Some(first.clone()));
