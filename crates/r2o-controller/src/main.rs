@@ -3923,6 +3923,22 @@ fn r2o_quic_data_cut(result: &r2o_controller::r2o_quic_http3::R2oQuicHttp3Result
 }
 
 #[cfg(unix)]
+fn r2o_quic_short_control_path() -> Option<String> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut random = [0; 4];
+    rustls::crypto::ring::default_provider()
+        .secure_random
+        .fill(&mut random)
+        .ok()?;
+    let mut path = String::from("/d2k-");
+    for byte in random {
+        path.push(char::from(HEX[usize::from(byte >> 4)]));
+        path.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    Some(path)
+}
+
+#[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HttpSearchDisposition {
     Retry,
@@ -16981,21 +16997,49 @@ impl ControlClient {
                     &server_name,
                     probe_path,
                     request_timeout,
-                    roots,
+                    roots.clone(),
                     r2o_quic_trial_remaining(started_at, measurement_permit),
                 ),
             );
-            *stall_cut = r2o_quic_data_cut(&result);
+            let first_verdict = r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&result);
+            *stall_cut = false;
+            if r2o_controller::quic_replay::r2o_quic_direct_data_action(first_verdict, None)
+                == r2o_controller::quic_replay::R2oQuicDirectDataAction::Repeat
+            {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err("перепроверка запрета QUIC отменена перед повтором HTTP/3".into());
+                }
+                let repeat_remaining = r2o_quic_trial_remaining(started_at, measurement_permit);
+                if !repeat_remaining.is_zero() {
+                    if let Ok((repeat_socket, true)) =
+                        r2o_controller::r2o_quic_http3::r2o_quic_http3_udp_socket_fresh(
+                            server, r2o_mark,
+                        )
+                    {
+                        let repeated = runtime.block_on(
+                            r2o_controller::r2o_quic_http3::r2o_quic_http3_get_with_max_duration(
+                                repeat_socket,
+                                server,
+                                &server_name,
+                                probe_path,
+                                request_timeout,
+                                roots,
+                                repeat_remaining,
+                            ),
+                        );
+                        let repeated_verdict =
+                            r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&repeated);
+                        *stall_cut = r2o_controller::quic_replay::r2o_quic_direct_data_action(
+                            first_verdict,
+                            Some(repeated_verdict),
+                        )
+                            == r2o_controller::quic_replay::R2oQuicDirectDataAction::CutConfirmed;
+                    }
+                }
+            }
             return Ok(None);
         }
 
-        let probe = match QuicReplayProbe::prepare(server, snapshot, r2o_mark) {
-            Ok(probe) => probe,
-            Err(error) => {
-                eprintln!("QUIC replay не подготовлен: {error}");
-                return Ok(None);
-            }
-        };
         let parsed_snapshot = match r2k_core::quic_snapshot::r2k_quic_snapshot_parse(snapshot) {
             Some(parsed) => parsed,
             None => {
@@ -17023,46 +17067,339 @@ impl ControlClient {
                 return Ok(None);
             }
         };
+        #[cfg(not(test))]
+        use std::net::ToSocketAddrs;
+        #[cfg(not(test))]
+        let resolved_addresses = (server_name.as_str(), server.port())
+            .to_socket_addrs()
+            .map(|addresses| addresses.collect::<Vec<_>>())
+            .unwrap_or_default();
+        #[cfg(test)]
+        let resolved_addresses = Vec::new();
+        let address_pool =
+            r2o_controller::quic_replay::r2o_quic_address_pool(server, resolved_addresses);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
         let mut roots = rustls::RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        // Для снимка RTT ещё не измерен, поэтому используем нижнюю границу донора.
-        #[cfg(test)]
-        let request_timeout = std::time::Duration::from_millis(20);
-        #[cfg(not(test))]
-        let request_timeout = std::time::Duration::from_millis(u64::from(
-            r2k_core::quic::r2k_quic_dynamic_wait_ms(0),
-        ));
         let remaining = r2o_quic_trial_remaining(started_at, measurement_permit);
         if remaining.is_zero() {
             return Ok(None);
         }
-        let baseline = runtime.block_on(
-            r2o_controller::r2o_quic_http3::r2o_quic_http3_get_with_max_duration(
-                probe.try_clone_socket()?,
-                server,
-                &server_name,
-                probe_path,
-                request_timeout,
-                roots.clone(),
-                remaining,
-            ),
-        );
-        if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
-            println!("истёк срок QUIC-испытания во время исходного HTTP/3 GET");
+        if cancel.load(Ordering::Relaxed) {
+            return Err("QUIC-испытание отменено перед базовой проверкой".into());
+        }
+        let Some(control_snapshots) =
+            r2o_controller::quic_replay::r2o_quic_neutral_control_snapshots()
+        else {
+            eprintln!("QUIC базовая проверка пропущена: нейтральный Initial не собрался");
+            return Ok(None);
+        };
+        #[cfg(test)]
+        let control_timeout = std::time::Duration::from_millis(20);
+        #[cfg(not(test))]
+        let control_timeout = std::time::Duration::from_secs(3);
+        let control = runtime.block_on(r2o_controller::quic_replay::r2o_quic_ask_donor_parallel(
+            server,
+            &control_snapshots,
+            r2o_mark,
+            control_timeout,
+        ));
+        if control.pass == 0 {
+            if control.refused > 0 {
+                println!(
+                    "QUIC {server}: контрольный путь ответил сетевым отказом; исход d2o no_quic"
+                );
+                return Ok(None);
+            }
+            if control.err > 0 {
+                println!(
+                    "QUIC {server}: контроль не отправлен локально ({}/3); опыт нестабилен",
+                    control.err
+                );
+                return Ok(None);
+            }
+            if cancel.load(Ordering::Relaxed) {
+                return Err("QUIC испытание отменено перед Version Negotiation".into());
+            }
+            let version_negotiation = runtime.block_on(
+                r2o_controller::quic_replay::r2o_quic_ask_donor_version_negotiation(
+                    server,
+                    r2o_mark,
+                    control_timeout,
+                ),
+            );
+            if version_negotiation.err > 0 {
+                println!(
+                    "QUIC {server}: согласование версии не отправлено локально ({}/3); опыт нестабилен",
+                    version_negotiation.err
+                );
+            } else if version_negotiation.pass > 0 {
+                println!(
+                    "QUIC {server}: контроль молчит (0/3), путь жив по Version Negotiation ({}/3); исход d2o no_quic",
+                    version_negotiation.pass
+                );
+            } else {
+                println!(
+                    "QUIC {server}: молчит всё, включая Version Negotiation (0/3); исход d2o address"
+                );
+            }
             return Ok(None);
         }
-        let baseline_verdict = r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&baseline);
-        if baseline_verdict == r2k_core::quic::R2kQuicDataVerdict::Pass {
-            println!("исходный HTTP/3 GET уже проходит; QUIC-план не устанавливаю");
+        #[cfg(test)]
+        let request_timeout = std::time::Duration::from_millis(20);
+        #[cfg(not(test))]
+        let request_timeout = std::time::Duration::from_millis(u64::from(
+            r2k_core::quic::r2k_quic_dynamic_wait_ms(control.rtt_ms),
+        ));
+        if cancel.load(Ordering::Relaxed)
+            || r2o_quic_trial_remaining(started_at, measurement_permit).is_zero()
+        {
             return Ok(None);
+        }
+        let trigger_snapshots = vec![snapshot.to_vec(); 3];
+        let trigger_timeout = std::time::Duration::from_millis(u64::from(
+            r2k_core::quic::r2k_quic_dynamic_wait_ms(control.rtt_ms),
+        ));
+        let trigger = runtime.block_on(r2o_controller::quic_replay::r2o_quic_ask_donor_parallel(
+            server,
+            &trigger_snapshots,
+            r2o_mark,
+            trigger_timeout,
+        ));
+        let base = r2o_controller::quic_replay::r2o_quic_base_result(
+            control.pass,
+            control.sent,
+            Some((trigger.pass, trigger.err, trigger.sent)),
+            3,
+        )
+        .expect("ответ контроля задаёт прямой вопрос");
+        println!("QUIC {server}: {}", base.reason);
+        if !control.marked || !trigger.marked || trigger.err != 0 {
+            return Ok(None);
+        }
+        let mut residual_blocking = false;
+        let mut baseline = None;
+        match r2o_controller::quic_replay::r2o_quic_direct_action(trigger.pass, trigger.err, 3) {
+            r2o_controller::quic_replay::R2oQuicDirectAction::Stop => return Ok(None),
+            r2o_controller::quic_replay::R2oQuicDirectAction::Candidates => {
+                if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
+                    return Ok(None);
+                }
+                std::thread::sleep(r2o_controller::quic_replay::R2O_QUIC_RESIDUAL_GAP);
+                if cancel.load(Ordering::Relaxed)
+                    || r2o_quic_trial_remaining(started_at, measurement_permit).is_zero()
+                {
+                    return Ok(None);
+                }
+                let Some(residual_control_snapshots) =
+                    r2o_controller::quic_replay::r2o_quic_neutral_control_snapshots()
+                else {
+                    eprintln!(
+                        "QUIC проверка остаточной блокировки пропущена: контроль не собрался"
+                    );
+                    return Ok(None);
+                };
+                let residual_timeout = std::time::Duration::from_millis(u64::from(
+                    r2k_core::quic::r2k_quic_dynamic_wait_ms(control.rtt_ms),
+                ));
+                let residual_control =
+                    runtime.block_on(r2o_controller::quic_replay::r2o_quic_ask_donor_parallel(
+                        server,
+                        &residual_control_snapshots,
+                        r2o_mark,
+                        residual_timeout,
+                    ));
+                if !residual_control.marked {
+                    eprintln!(
+                        "QUIC проверка остаточной блокировки пропущена: SO_MARK не подтверждён"
+                    );
+                    return Ok(None);
+                }
+                residual_blocking = match r2o_controller::quic_replay::r2o_quic_residual_detected(
+                    residual_control.pass,
+                    residual_control.err,
+                ) {
+                    Some(residual) => residual,
+                    None => {
+                        println!(
+                            "QUIC {server}: остаточная проверка завершилась локальной ошибкой"
+                        );
+                        return Ok(None);
+                    }
+                };
+                println!(
+                    "QUIC {server}: остаточная блокировка {}",
+                    if residual_blocking { "да" } else { "нет" }
+                );
+            }
+            r2o_controller::quic_replay::R2oQuicDirectAction::Data => {
+                let data_remaining = r2o_quic_trial_remaining(started_at, measurement_permit);
+                if data_remaining.is_zero() {
+                    return Ok(None);
+                }
+                let (probe, probe_marked) =
+                    match QuicReplayProbe::prepare_fresh(server, snapshot, r2o_mark) {
+                        Ok(probe) => probe,
+                        Err(error) => {
+                            eprintln!("QUIC HTTP/3-проба не подготовлена: {error}");
+                            return Ok(None);
+                        }
+                    };
+                if !probe_marked {
+                    eprintln!("QUIC HTTP/3-проба пропущена: SO_MARK не подтверждён");
+                    return Ok(None);
+                }
+                let baseline_result = runtime.block_on(
+                    r2o_controller::r2o_quic_http3::r2o_quic_http3_get_with_max_duration(
+                        probe.try_clone_socket()?,
+                        server,
+                        &server_name,
+                        probe_path,
+                        request_timeout,
+                        roots.clone(),
+                        data_remaining,
+                    ),
+                );
+                let baseline_verdict =
+                    r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&baseline_result);
+                let repeated_baseline;
+                match r2o_controller::quic_replay::r2o_quic_direct_data_action(
+                    baseline_verdict,
+                    None,
+                ) {
+                    r2o_controller::quic_replay::R2oQuicDirectDataAction::Clear => {
+                        println!("прямой HTTP/3 GET проходит; QUIC-план не устанавливаю");
+                        return Ok(None);
+                    }
+                    r2o_controller::quic_replay::R2oQuicDirectDataAction::Repeat => {
+                        if cancel.load(Ordering::Relaxed) {
+                            return Err("QUIC-испытание отменено перед повтором HTTP/3".into());
+                        }
+                        let repeat_remaining =
+                            r2o_quic_trial_remaining(started_at, measurement_permit);
+                        if repeat_remaining.is_zero() {
+                            println!("срок QUIC-испытания истёк до повторного HTTP/3 GET");
+                            return Ok(None);
+                        }
+                        let (repeat_socket, repeat_marked) =
+                            match r2o_controller::r2o_quic_http3::r2o_quic_http3_udp_socket_fresh(
+                                server, r2o_mark,
+                            ) {
+                                Ok(result) => result,
+                                Err(error) => {
+                                    eprintln!(
+                                        "повторный прямой HTTP/3 GET не подготовлен: {error:?}"
+                                    );
+                                    return Ok(None);
+                                }
+                            };
+                        if !repeat_marked {
+                            eprintln!(
+                                "повторный прямой HTTP/3 GET пропущен: SO_MARK не подтверждён"
+                            );
+                            return Ok(None);
+                        }
+                        let repeated_result = runtime.block_on(
+                            r2o_controller::r2o_quic_http3::r2o_quic_http3_get_with_max_duration(
+                                repeat_socket,
+                                server,
+                                &server_name,
+                                probe_path,
+                                request_timeout,
+                                roots.clone(),
+                                repeat_remaining,
+                            ),
+                        );
+                        let repeated_verdict =
+                            r2o_controller::quic_replay::r2o_quic_trial_data_verdict(
+                                &repeated_result,
+                            );
+                        match r2o_controller::quic_replay::r2o_quic_direct_data_action(
+                            baseline_verdict,
+                            Some(repeated_verdict),
+                        ) {
+                            r2o_controller::quic_replay::R2oQuicDirectDataAction::CutConfirmed => {
+                                *stall_cut = true;
+                                repeated_baseline = Some(repeated_result);
+                                println!("прямой обрыв HTTP/3 воспроизведён на двух соединениях");
+                            }
+                            r2o_controller::quic_replay::R2oQuicDirectDataAction::Flaky => {
+                                println!("прямой обрыв HTTP/3 встал только один раз из двух");
+                                return Ok(None);
+                            }
+                            _ => {
+                                println!("повторный прямой HTTP/3 GET не подтвердил обрыв");
+                                return Ok(None);
+                            }
+                        }
+                    }
+                    _ => {
+                        println!("прямой HTTP/3 GET не дал повторяемого измерения");
+                        return Ok(None);
+                    }
+                }
+                if let Some(repeated_result) = repeated_baseline.as_ref()
+                    && !cancel.load(Ordering::Relaxed)
+                    && !r2o_quic_trial_remaining(started_at, measurement_permit).is_zero()
+                    && let Some(control_path) = r2o_quic_short_control_path()
+                {
+                    if let Ok((control_socket, true)) =
+                        r2o_controller::r2o_quic_http3::r2o_quic_http3_udp_socket_fresh(
+                            server, r2o_mark,
+                        )
+                    {
+                        let control_result = runtime.block_on(
+                            r2o_controller::r2o_quic_http3::r2o_quic_http3_get_with_max_duration(
+                                control_socket,
+                                server,
+                                &server_name,
+                                &control_path,
+                                request_timeout,
+                                roots.clone(),
+                                r2o_quic_trial_remaining(started_at, measurement_permit),
+                            ),
+                        );
+                        let control_verdict =
+                            r2o_controller::quic_replay::r2o_quic_trial_data_verdict(
+                                &control_result,
+                            );
+                        match control_verdict {
+                            r2k_core::quic::R2kQuicDataVerdict::Pass => {
+                                let byte_low =
+                                    baseline_result.app_bytes.min(repeated_result.app_bytes);
+                                let byte_high =
+                                    baseline_result.app_bytes.max(repeated_result.app_bytes);
+                                let packet_low =
+                                    baseline_result.datagrams.min(repeated_result.datagrams);
+                                let packet_high =
+                                    baseline_result.datagrams.max(repeated_result.datagrams);
+                                println!(
+                                    "короткий HTTP/3-контроль прошёл; прямой обрыв: {} и {} байт потока, {} и {} датаграмм; сошлись байты={}, пакеты={}; one-way={}",
+                                    baseline_result.app_bytes,
+                                    repeated_result.app_bytes,
+                                    baseline_result.datagrams,
+                                    repeated_result.datagrams,
+                                    byte_high - byte_low <= 4 * 1024,
+                                    packet_high - packet_low <= 3,
+                                    baseline_result.r2o_quic_one_way
+                                        && repeated_result.r2o_quic_one_way,
+                                );
+                            }
+                            r2k_core::quic::R2kQuicDataVerdict::Cut => {
+                                println!("короткий HTTP/3-контроль тоже встал");
+                            }
+                            _ => println!("короткий HTTP/3-контроль не дал измеримого ответа"),
+                        }
+                    }
+                }
+                baseline = Some(baseline_result);
+            }
         }
 
         // Raw baseline probes bypass NFQUEUE. Candidate confirmation uses a
         // fresh unmarked socket so the temporary plan can emit exact APPLIED.
-        drop(probe);
         let mut candidate_probes = Vec::new();
         let split_applicable = parsed_snapshot
             .datagrams()
@@ -17074,8 +17411,11 @@ impl ControlClient {
         let mut ttl_three_answered_no = false;
         let mut clearance_decision = r2o_controller::quic_replay::R2oQuicFilterDecision::Unknown;
         let mut split_decision = r2o_controller::quic_replay::R2oQuicFilterDecision::Unknown;
-        let mut strategy_candidates =
-            r2o_controller::quic_replay::r2o_quic_discovery_candidates(&baseline, split_applicable);
+        let mut next_candidate_address = 1;
+        let mut strategy_candidates = r2o_controller::quic_replay::r2o_quic_discovery_candidates(
+            baseline.as_ref(),
+            split_applicable,
+        );
         for candidate in strategy_candidates.drain(..) {
             if cancel.load(Ordering::Relaxed) {
                 return Err("QUIC-испытание отменено".into());
@@ -17084,21 +17424,36 @@ impl ControlClient {
                 println!("истёк срок QUIC-испытания; оставшиеся кандидаты пропущены");
                 return Ok(None);
             }
-            let candidate_probe =
-                match r2o_new_quic_candidate_probe(&mut candidate_probes, server, snapshot) {
-                    Ok(probe) => probe,
-                    Err(error) => {
-                        eprintln!(
-                            "QUIC-кандидат не подготовлен для datapath-подтверждения: {error}"
-                        );
-                        return Ok(None);
-                    }
-                };
+            let Some(candidate_server) =
+                r2o_controller::quic_replay::r2o_quic_next_question_address(
+                    server,
+                    &address_pool,
+                    &mut next_candidate_address,
+                    residual_blocking,
+                )
+            else {
+                println!(
+                    "QUIC-кандидат «{}» не задан: свежие адреса исчерпаны",
+                    candidate.name
+                );
+                continue;
+            };
+            let candidate_probe = match r2o_new_quic_candidate_probe(
+                &mut candidate_probes,
+                candidate_server,
+                snapshot,
+            ) {
+                Ok(probe) => probe,
+                Err(error) => {
+                    eprintln!("QUIC-кандидат не подготовлен для datapath-подтверждения: {error}");
+                    return Ok(None);
+                }
+            };
             let local = candidate_probe.local_endpoint();
             let outcome = match Self::run_quic_discovery_candidate(
                 commands,
                 cancel,
-                server,
+                candidate_server,
                 local,
                 candidate_probe,
                 &candidate,
@@ -17167,11 +17522,11 @@ impl ControlClient {
                 )
             {
                 println!(
-                    "QUIC-кандидат «{}» не подтверждён: рукопожатие={}, HTTP={}, байт тела={}, зависание={}, HTTP/3={data_verdict:?}, точный APPLIED={}",
+                    "QUIC-кандидат «{}» не подтверждён: рукопожатие={}, HTTP={}, байт потока={}, зависание={}, HTTP/3={data_verdict:?}, точный APPLIED={}",
                     candidate.name,
                     data.handshake_confirmed,
                     data.status,
-                    data.body_bytes,
+                    data.app_bytes,
                     data.r2o_quic_stalled,
                     outcome.applied,
                 );
@@ -17201,21 +17556,38 @@ impl ControlClient {
                     println!("истёк срок QUIC-испытания; оставшиеся кандидаты пропущены");
                     return Ok(None);
                 }
-                let candidate_probe =
-                    match r2o_new_quic_candidate_probe(&mut candidate_probes, server, snapshot) {
-                        Ok(probe) => probe,
-                        Err(error) => {
-                            eprintln!(
-                                "QUIC-кандидат не подготовлен для datapath-подтверждения: {error}"
-                            );
-                            return Ok(None);
-                        }
-                    };
+                let Some(candidate_server) =
+                    r2o_controller::quic_replay::r2o_quic_next_question_address(
+                        server,
+                        &address_pool,
+                        &mut next_candidate_address,
+                        residual_blocking,
+                    )
+                else {
+                    println!(
+                        "QUIC-кандидат «{}» не задан: свежие адреса исчерпаны",
+                        candidate.name
+                    );
+                    continue;
+                };
+                let candidate_probe = match r2o_new_quic_candidate_probe(
+                    &mut candidate_probes,
+                    candidate_server,
+                    snapshot,
+                ) {
+                    Ok(probe) => probe,
+                    Err(error) => {
+                        eprintln!(
+                            "QUIC-кандидат не подготовлен для datapath-подтверждения: {error}"
+                        );
+                        return Ok(None);
+                    }
+                };
                 let local = candidate_probe.local_endpoint();
                 let outcome = match Self::run_quic_discovery_candidate(
                     commands,
                     cancel,
-                    server,
+                    candidate_server,
                     local,
                     candidate_probe,
                     &candidate,
@@ -17304,21 +17676,38 @@ impl ControlClient {
                     println!("истёк срок QUIC-испытания; оставшиеся кандидаты пропущены");
                     return Ok(None);
                 }
-                let candidate_probe =
-                    match r2o_new_quic_candidate_probe(&mut candidate_probes, server, snapshot) {
-                        Ok(probe) => probe,
-                        Err(error) => {
-                            eprintln!(
-                                "QUIC-кандидат не подготовлен для datapath-подтверждения: {error}"
-                            );
-                            return Ok(None);
-                        }
-                    };
+                let Some(candidate_server) =
+                    r2o_controller::quic_replay::r2o_quic_next_question_address(
+                        server,
+                        &address_pool,
+                        &mut next_candidate_address,
+                        residual_blocking,
+                    )
+                else {
+                    println!(
+                        "QUIC-кандидат «{}» не задан: свежие адреса исчерпаны",
+                        candidate.name
+                    );
+                    continue;
+                };
+                let candidate_probe = match r2o_new_quic_candidate_probe(
+                    &mut candidate_probes,
+                    candidate_server,
+                    snapshot,
+                ) {
+                    Ok(probe) => probe,
+                    Err(error) => {
+                        eprintln!(
+                            "QUIC-кандидат не подготовлен для datapath-подтверждения: {error}"
+                        );
+                        return Ok(None);
+                    }
+                };
                 let local = candidate_probe.local_endpoint();
                 let outcome = match Self::run_quic_discovery_candidate(
                     commands,
                     cancel,
-                    server,
+                    candidate_server,
                     local,
                     candidate_probe,
                     &candidate,
@@ -21126,6 +21515,15 @@ mod tests {
                 ..Default::default()
             }
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn короткий_http3_контроль_использует_d2o_случайный_путь() {
+        let path = super::r2o_quic_short_control_path().unwrap();
+        assert_eq!(path.len(), 13);
+        assert!(path.starts_with("/d2k-"));
+        assert!(path[5..].bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
 
     fn r2o_test_tls_ech_client_hello() -> Vec<u8> {
@@ -25048,18 +25446,33 @@ mod tests {
         let control_done = Arc::new(AtomicBool::new(false));
         let control_done_sender = Arc::clone(&control_done);
         let udp_thread = std::thread::spawn(move || {
+            const VERSION_NEGOTIATION: [u8; 7] = [0x80, 0, 0, 0, 0, 0, 0];
             let mut peers = Vec::new();
             let mut collecting_candidates = false;
+            let mut control_initials = 0;
+            let mut target_initials = 0;
             loop {
                 let mut packet = [0; 1500];
                 match udp_server.recv_from(&mut packet) {
                     Ok((length, peer)) => {
                         collecting_candidates |= candidate_started_rx.try_recv().is_ok();
-                        if collecting_candidates
-                            && r2k_core::quic::r2k_quic_initial_flight_id(&packet[..length])
-                                .is_some()
-                        {
-                            peers.push(peer);
+                        if r2k_core::quic::r2k_quic_initial_flight_id(&packet[..length]).is_some() {
+                            if collecting_candidates {
+                                peers.push(peer);
+                            } else if r2k_core::quic::r2k_quic_initial_sni_result_from_datagrams(&[
+                                &packet[..length],
+                            ])
+                            .ok()
+                            .flatten()
+                            .and_then(|name| String::from_utf8(name).ok())
+                            .is_some_and(|name| {
+                                name.starts_with('z') && name.ends_with(".example.com")
+                            }) {
+                                control_initials += 1;
+                                let _ = udp_server.send_to(&VERSION_NEGOTIATION, peer);
+                            } else {
+                                target_initials += 1;
+                            }
                         }
                     }
                     Err(error)
@@ -25076,7 +25489,7 @@ mod tests {
                     Err(error) => panic!("ошибка приёмника UDP: {error}"),
                 }
             }
-            peers
+            (peers, control_initials, target_initials)
         });
         let (socket, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let control_thread = std::thread::spawn(move || {
@@ -25170,10 +25583,8 @@ mod tests {
         let permit = gate
             .r2o_acquire(&std::sync::atomic::AtomicBool::new(false))
             .unwrap();
-        let snapshot = r2k_core::quic_snapshot::r2k_quic_snapshot_pack(&[&include_bytes!(
-            "../../r2k-core/tests/fixtures/quic_v1_initial.bin"
-        )[..]])
-        .unwrap();
+        let snapshot =
+            r2o_controller::quic_replay::r2o_quic_profile_snapshot(Some("quic.invalid")).unwrap();
         let mut worker = R2oQuicDiscoveryWorker::new();
         assert!(worker.queue(R2oQuicDiscoveryTask {
             server: endpoint,
@@ -25213,9 +25624,17 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         };
 
-        let peers = udp_thread.join().unwrap();
+        let (peers, control_initials, target_initials) = udp_thread.join().unwrap();
         control_thread.join().unwrap();
         drop(worker);
+        assert_eq!(
+            control_initials, 6,
+            "d2o повторно проверяет остаточную блокировку нейтральным Initial перед кандидатами"
+        );
+        assert_eq!(
+            target_initials, 3,
+            "при молчащем Initial до кандидатов не должен идти обычный HTTP/3 baseline"
+        );
         assert!(peers.len() >= 48);
         let candidate_peers: std::collections::HashSet<_> = peers.iter().copied().collect();
         assert_eq!(

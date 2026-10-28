@@ -416,6 +416,61 @@ pub fn r2k_quic_initial_flight_id(input: &[u8]) -> Option<(u32, Vec<u8>)> {
     Some((header.version, dcid.to_vec()))
 }
 
+/// Verify a server response with the donor's `Answer` criterion.
+/// VN and same-version Retry count as answers; a same-version Initial must
+/// authenticate with the server keys derived from the client's DCID.
+pub fn r2k_quic_initial_verify_donor_response(client: &[u8], response: &[u8]) -> bool {
+    if response.len() > MAX_DATAGRAM || !is_authenticated_initial(client) {
+        return false;
+    }
+    let Some(client_header) = parse_initial_header(client) else {
+        return false;
+    };
+    let Some(client_long) = parse_long_header_ids(client) else {
+        return false;
+    };
+    let Some(original_dcid) =
+        client.get(client_long.dcid_offset..client_long.dcid_offset + client_long.dcid_len)
+    else {
+        return false;
+    };
+    r2k_quic_donor_response_matches(client_header.version, original_dcid, response)
+}
+
+/// Verify a donor `Answer` using a known QUIC version and destination CID.
+pub fn r2k_quic_donor_response_matches(version: u32, dcid: &[u8], response: &[u8]) -> bool {
+    if response.len() > MAX_DATAGRAM || dcid.len() > MAX_CID {
+        return false;
+    }
+    let Some(response_long) = parse_long_header_ids(response) else {
+        return false;
+    };
+    if response_long.version == 0 {
+        return true;
+    }
+    if response_long.version != version {
+        return false;
+    }
+    let (initial_type, retry_type) = match version {
+        QUIC_V1 => (0, 3),
+        QUIC_V2 => (1, 0),
+        _ => return false,
+    };
+    if response_long.packet_type == retry_type {
+        return true;
+    }
+    if response_long.packet_type != initial_type {
+        return false;
+    }
+    let Some(header) = parse_initial_header(response) else {
+        return false;
+    };
+    let Ok(keys) = derive_initial_keys_for_role(version, dcid, b"server in") else {
+        return false;
+    };
+    open_initial(response, header, keys).is_ok()
+}
+
 /// Проверить Initial или Retry сервера, адресованный SCID исходного Initial.
 pub(crate) fn r2k_quic_initial_verify_bound_response(client: &[u8], response: &[u8]) -> bool {
     if response.len() > MAX_DATAGRAM || !is_authenticated_initial(client) {
@@ -1053,7 +1108,78 @@ fn find_client_hello_sni(bytes: &[u8]) -> Option<(usize, usize)> {
     find_client_hello_sni_result(bytes).ok().flatten()
 }
 
+/// Replace or remove the host-name entry in a complete TLS ClientHello.
+/// Length fields are updated in place; all other handshake bytes are retained.
+pub fn r2k_quic_client_hello_rename_sni(
+    bytes: &[u8],
+    server_name: Option<&str>,
+) -> Option<Vec<u8>> {
+    let handshake_len = read_u24(bytes, 1)?;
+    if bytes.len() != handshake_len.checked_add(4)? {
+        return None;
+    }
+    let details = find_client_hello_sni_details(bytes).ok().flatten();
+    let Some(details) = details else {
+        return server_name.is_none().then(|| bytes.to_vec());
+    };
+
+    let mut output = bytes.to_vec();
+    let Some(server_name) = server_name else {
+        output.drain(details.extension_start..details.extension_end);
+        adjust_u16(
+            &mut output,
+            details.extensions_len_offset,
+            -isize::try_from(details.extension_end - details.extension_start).ok()?,
+        )?;
+        adjust_u24(
+            &mut output,
+            1,
+            -isize::try_from(details.extension_end - details.extension_start).ok()?,
+        )?;
+        return Some(output);
+    };
+
+    let replacement = server_name.as_bytes();
+    if replacement.is_empty() || replacement.len() > 253 || replacement.contains(&0) {
+        return None;
+    }
+    let delta =
+        isize::try_from(replacement.len()).ok()? - isize::try_from(details.name_len).ok()?;
+    let name_end = details.name_offset.checked_add(details.name_len)?;
+    output.splice(details.name_offset..name_end, replacement.iter().copied());
+    output
+        .get_mut(details.name_offset..details.name_offset + replacement.len())?
+        .copy_from_slice(replacement);
+    adjust_u16(&mut output, details.name_len_offset, delta)?;
+    adjust_u16(&mut output, details.server_name_list_len_offset, delta)?;
+    adjust_u16(&mut output, details.extension_len_offset, delta)?;
+    adjust_u16(&mut output, details.extensions_len_offset, delta)?;
+    adjust_u24(&mut output, 1, delta)?;
+    Some(output)
+}
+
 fn find_client_hello_sni_result(bytes: &[u8]) -> Result<Option<(usize, usize)>, &'static str> {
+    Ok(
+        find_client_hello_sni_details(bytes)?
+            .map(|details| (details.name_offset, details.name_len)),
+    )
+}
+
+#[derive(Clone, Copy)]
+struct ClientHelloSniDetails {
+    extensions_len_offset: usize,
+    extension_start: usize,
+    extension_end: usize,
+    extension_len_offset: usize,
+    server_name_list_len_offset: usize,
+    name_len_offset: usize,
+    name_offset: usize,
+    name_len: usize,
+}
+
+fn find_client_hello_sni_details(
+    bytes: &[u8],
+) -> Result<Option<ClientHelloSniDetails>, &'static str> {
     if bytes.len() < 4 || bytes[0] != 1 {
         return Err("неверный заголовок TLS ClientHello");
     }
@@ -1076,6 +1202,7 @@ fn find_client_hello_sni_result(bytes: &[u8]) -> Result<Option<(usize, usize)>, 
     {
         return Err("неверные векторы TLS ClientHello");
     }
+    let extensions_len_offset = offset;
     let extensions_len =
         read_u16(bytes, offset).ok_or("отсутствует длина расширений ClientHello")?;
     offset = offset
@@ -1094,6 +1221,7 @@ fn find_client_hello_sni_result(bytes: &[u8]) -> Result<Option<(usize, usize)>, 
         {
             return Err("обрезан заголовок расширения ClientHello");
         }
+        let extension_start = offset;
         let extension_type =
             read_u16(bytes, offset).ok_or("неверный тип расширения ClientHello")?;
         let extension_len =
@@ -1110,6 +1238,7 @@ fn find_client_hello_sni_result(bytes: &[u8]) -> Result<Option<(usize, usize)>, 
                 return Err("расширение SNI повторяется в ClientHello");
             }
             sni_seen = true;
+            let server_name_list_len_offset = offset;
             let mut cursor = offset;
             let list_len = read_u16(bytes, cursor).ok_or("неверная длина списка SNI")?;
             cursor = cursor.checked_add(2).ok_or("неверная длина списка SNI")?;
@@ -1122,6 +1251,7 @@ fn find_client_hello_sni_result(bytes: &[u8]) -> Result<Option<(usize, usize)>, 
                     return Err("обрезана запись имени в списке SNI");
                 }
                 let name_type = bytes[cursor];
+                let name_len_offset = cursor.checked_add(1).ok_or("неверная длина имени SNI")?;
                 let name_len = read_u16(bytes, cursor + 1).ok_or("неверная длина имени SNI")?;
                 cursor = cursor.checked_add(3).ok_or("неверная длина имени SNI")?;
                 let name_end = cursor
@@ -1132,7 +1262,17 @@ fn find_client_hello_sni_result(bytes: &[u8]) -> Result<Option<(usize, usize)>, 
                     if name_len == 0 {
                         return Err("пустое имя узла в списке SNI");
                     }
-                    if sni.replace((cursor, name_len)).is_some() {
+                    let details = ClientHelloSniDetails {
+                        extensions_len_offset,
+                        extension_start,
+                        extension_end,
+                        extension_len_offset: extension_start + 2,
+                        server_name_list_len_offset,
+                        name_len_offset,
+                        name_offset: cursor,
+                        name_len,
+                    };
+                    if sni.replace(details).is_some() {
                         return Err("имя узла SNI повторяется");
                     }
                 }
@@ -1142,6 +1282,28 @@ fn find_client_hello_sni_result(bytes: &[u8]) -> Result<Option<(usize, usize)>, 
         offset = extension_end;
     }
     Ok(sni)
+}
+
+fn adjust_u16(bytes: &mut [u8], offset: usize, delta: isize) -> Option<()> {
+    let old = i64::try_from(read_u16(bytes, offset)?).ok()?;
+    let next = u16::try_from(old.checked_add(i64::try_from(delta).ok()?)?).ok()?;
+    bytes
+        .get_mut(offset..offset.checked_add(2)?)?
+        .copy_from_slice(&next.to_be_bytes());
+    Some(())
+}
+
+fn adjust_u24(bytes: &mut [u8], offset: usize, delta: isize) -> Option<()> {
+    let old = i64::try_from(read_u24(bytes, offset)?).ok()?;
+    let next = u32::try_from(old.checked_add(i64::try_from(delta).ok()?)?).ok()?;
+    if next > 0x00ff_ffff {
+        return None;
+    }
+    let encoded = next.to_be_bytes();
+    bytes
+        .get_mut(offset..offset.checked_add(3)?)?
+        .copy_from_slice(&encoded[1..]);
+    Some(())
 }
 
 fn read_u16(bytes: &[u8], offset: usize) -> Option<usize> {
@@ -1227,6 +1389,66 @@ mod tests {
             None,
             "Initial разных версий не склеиваются"
         );
+    }
+
+    #[test]
+    fn переименовывает_или_удаляет_sni_с_пересчётом_длин_clienthello() {
+        let original = super::r2k_quic_initial_client_hello_from_datagrams(&[RFC_9001_INITIAL])
+            .expect("тестовый ClientHello расшифровывается");
+        let renamed = super::r2k_quic_client_hello_rename_sni(&original, Some("disk.rzd.ru"))
+            .expect("SNI заменяется");
+        assert_eq!(
+            super::find_client_hello_sni_result(&renamed)
+                .unwrap()
+                .map(|(start, len)| renamed[start..start + len].to_vec()),
+            Some(b"disk.rzd.ru".to_vec())
+        );
+        assert_eq!(
+            super::r2k_quic_client_hello_rename_sni(&renamed, Some("example.com")),
+            Some(original.clone()),
+            "возврат исходного SNI возвращает все длины и байты ClientHello"
+        );
+
+        let without_sni = super::r2k_quic_client_hello_rename_sni(&original, None)
+            .expect("расширение SNI удаляется");
+        assert_eq!(super::find_client_hello_sni_result(&without_sni), Ok(None));
+        assert_eq!(
+            super::r2k_quic_client_hello_rename_sni(&without_sni, None),
+            Some(without_sni.clone())
+        );
+        assert!(
+            super::r2k_quic_client_hello_rename_sni(&without_sni, Some("example.com")).is_none()
+        );
+    }
+
+    #[test]
+    fn критерий_ответа_quic_совпадает_с_donor_parse() {
+        let client = RFC_9001_INITIAL;
+        let vn = [0x80, 0, 0, 0, 0, 0, 0];
+        let retry_v1 = [0xf0, 0, 0, 0, 1, 0, 0];
+        let foreign_version = [0xc0, 0, 0, 0, 2, 0, 0];
+        let short_header = [0x40, 0, 0, 0, 1, 0, 0];
+        let (version, dcid) = super::r2k_quic_initial_flight_id(client).unwrap();
+        let answers = [
+            ("vn", &vn[..], true),
+            ("retry_v1", &retry_v1[..], true),
+            ("foreign", &foreign_version[..], false),
+            ("short", &short_header[..], false),
+        ];
+        let mut output = String::new();
+        for (name, response, expected) in answers {
+            let answered = super::r2k_quic_initial_verify_donor_response(client, response);
+            assert_eq!(answered, expected, "{name}");
+            assert_eq!(
+                super::r2k_quic_donor_response_matches(version, &dcid, response),
+                expected,
+                "generic donor verifier: {name}"
+            );
+            output.push_str(&format!("{name}={}\n", u8::from(answered)));
+        }
+        if let Ok(path) = std::env::var("R2O_QUIC_DONOR_VERIFY_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::{
 };
 
 use bytes::BufMut;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, error, trace};
 
 use super::{
@@ -72,6 +72,7 @@ pub struct StreamsState {
     pub(super) send: FxHashMap<StreamId, Option<Box<Send>>>,
     pub(super) recv: FxHashMap<StreamId, Option<StreamRecv>>,
     pub(super) free_recv: Vec<StreamRecv>,
+    tracked_recv_streams: FxHashSet<StreamId>,
     pub(super) next: [u64; 2],
     /// Maximum number of locally-initiated streams that may be opened over the lifetime of the
     /// connection so far, per direction
@@ -158,6 +159,7 @@ impl StreamsState {
             send: FxHashMap::default(),
             recv: FxHashMap::default(),
             free_recv: Vec::new(),
+            tracked_recv_streams: FxHashSet::default(),
             next: [0, 0],
             max: [0, 0],
             max_remote: [max_remote_bi.into(), max_remote_uni.into()],
@@ -195,6 +197,30 @@ impl StreamsState {
         }
 
         this
+    }
+
+    pub(crate) fn r2o_track_recv_stream_bytes(&mut self, id: StreamId) -> bool {
+        if id.dir() != Dir::Bi || id.initiator() != self.side || !self.send.contains_key(&id) {
+            return false;
+        }
+        self.tracked_recv_streams.insert(id);
+        if let Some(Some(recv)) = self.recv.get_mut(&id) {
+            match recv {
+                StreamRecv::Free(recv) | StreamRecv::Open(recv) => {
+                    recv.assembler.track_received_bytes();
+                }
+            }
+        }
+        true
+    }
+
+    pub(crate) fn r2o_recv_stream_bytes(&self, id: StreamId) -> Option<u64> {
+        match self.recv.get(&id).and_then(Option::as_ref) {
+            Some(StreamRecv::Free(recv) | StreamRecv::Open(recv)) => {
+                recv.assembler.unique_received_bytes()
+            }
+            _ => self.tracked_recv_streams.contains(&id).then_some(0),
+        }
     }
 
     pub(crate) fn set_params(&mut self, params: &TransportParameters) {
@@ -247,6 +273,7 @@ impl StreamsState {
         }
 
         self.pending.clear();
+        self.tracked_recv_streams.clear();
         self.send_streams = 0;
         self.data_sent = 0;
         self.buffered_data = 0;
@@ -278,6 +305,11 @@ impl StreamsState {
                 return Ok(ShouldTransmit(false));
             }
         };
+
+        if self.tracked_recv_streams.contains(&id) && rs.assembler.unique_received_bytes().is_none()
+        {
+            rs.assembler.track_received_bytes();
+        }
 
         if !rs.is_receiving() {
             trace!("dropping frame for finished stream");
@@ -1015,6 +1047,7 @@ impl StreamsState {
     }
 
     pub(super) fn stream_recv_freed(&mut self, id: StreamId, recv: StreamRecv) {
+        self.tracked_recv_streams.remove(&id);
         self.free_recv.push(recv.free(self.stream_receive_window));
         self.stream_freed(id, StreamHalf::Recv);
     }

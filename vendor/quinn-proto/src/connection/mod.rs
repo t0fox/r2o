@@ -1319,6 +1319,16 @@ impl Connection {
         self.spaces[SpaceId::Data].largest_acked_packet
     }
 
+    /// Track unique received application bytes for one stream.
+    pub fn r2o_track_recv_stream_bytes(&mut self, id: StreamId) -> bool {
+        self.streams.r2o_track_recv_stream_bytes(id)
+    }
+
+    /// Return the unique application bytes received for a tracked stream.
+    pub fn r2o_recv_stream_bytes(&self, id: StreamId) -> Option<u64> {
+        self.streams.r2o_recv_stream_bytes(id)
+    }
+
     /// Update traffic keys spontaneously
     ///
     /// This can be useful for testing key updates, as they otherwise only happen infrequently.

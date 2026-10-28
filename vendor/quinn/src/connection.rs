@@ -574,6 +574,24 @@ impl Connection {
             .r2o_largest_acked_packet_number()
     }
 
+    /// Track unique received application bytes for one stream.
+    pub fn r2o_track_recv_stream_bytes(&self, id: StreamId) -> bool {
+        self.0
+            .state
+            .lock("r2o_track_recv_stream_bytes")
+            .inner
+            .r2o_track_recv_stream_bytes(id)
+    }
+
+    /// Return unique application bytes received for a tracked stream.
+    pub fn r2o_recv_stream_bytes(&self, id: StreamId) -> Option<u64> {
+        self.0
+            .state
+            .lock("r2o_recv_stream_bytes")
+            .inner
+            .r2o_recv_stream_bytes(id)
+    }
+
     /// Current state of the congestion control algorithm, for debugging purposes
     pub fn congestion_state(&self) -> Box<dyn Controller> {
         self.0

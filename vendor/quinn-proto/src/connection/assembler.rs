@@ -21,6 +21,7 @@ pub(super) struct Assembler {
     /// length of the contiguous prefix of the stream which has been consumed by the application,
     /// aka the stream offset.
     bytes_read: u64,
+    tracked_received: Option<(RangeSet, u64)>,
     end: u64,
 }
 
@@ -54,6 +55,14 @@ impl Assembler {
             self.state = State::Unordered { recvd };
         }
         Ok(())
+    }
+
+    pub(super) fn track_received_bytes(&mut self) {
+        self.tracked_received = Some((RangeSet::new(), 0));
+    }
+
+    pub(super) fn unique_received_bytes(&self) -> Option<u64> {
+        self.tracked_received.as_ref().map(|(_, bytes)| *bytes)
     }
 
     /// Get the the next chunk
@@ -162,6 +171,14 @@ impl Assembler {
             allocation_size,
             bytes.len()
         );
+        if let Some((ranges, total)) = &mut self.tracked_received {
+            let length = bytes.len() as u64;
+            let end = offset.saturating_add(length);
+            let already_received = ranges
+                .replace(offset..end)
+                .fold(0_u64, |sum, range| sum.saturating_add(range.end - range.start));
+            *total = total.saturating_add(length.saturating_sub(already_received));
+        }
         self.end = self.end.max(offset + bytes.len() as u64);
         if let State::Unordered { ref mut recvd } = self.state {
             // Discard duplicate data
@@ -412,6 +429,25 @@ mod test {
         x.insert(0, Bytes::from_static(b"123"), 3).unwrap();
         assert_matches!(next(&mut x, 32), Some(ref y) if &y[..] == b"123");
         assert_matches!(next(&mut x, 32), None);
+    }
+
+    #[test]
+    fn tracked_bytes_count_unique_ranges_before_ordered_read() {
+        let mut x = Assembler::new();
+        x.track_received_bytes();
+        x.insert(4, Bytes::from_static(b"efgh"), 4).unwrap();
+        assert_eq!(x.unique_received_bytes(), Some(4));
+        x.insert(0, Bytes::from_static(b"abcd"), 4).unwrap();
+        assert_eq!(x.unique_received_bytes(), Some(8));
+        x.insert(2, Bytes::from_static(b"cdef"), 4).unwrap();
+        assert_eq!(x.unique_received_bytes(), Some(8));
+        x.insert(7, Bytes::from_static(b"hij"), 3).unwrap();
+        assert_eq!(x.unique_received_bytes(), Some(10));
+        let ordered_bytes = std::iter::from_fn(|| next(&mut x, 32))
+            .map(|bytes| bytes.len())
+            .sum::<usize>();
+        assert_eq!(ordered_bytes, 10);
+        assert_eq!(x.unique_received_bytes(), Some(10));
     }
 
     #[test]

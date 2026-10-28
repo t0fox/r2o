@@ -142,3 +142,117 @@ R2O_SCHED_VOICE_TERMINAL_DIAGNOSTIC_DIFF_OUTPUT="$tmp_dir/rust-scheduler-voice-t
         voice_trial_terminal_diagnostic_event_matches_d2o
 diff -u "$tmp_dir/c-scheduler-voice-terminal.out" "$tmp_dir/rust-scheduler-voice-terminal.out"
 printf 'C/Rust voice trial terminal diagnostic events match d2o %s.\n' "$donor_sha"
+
+clang-18 -std=c99 -O2 -Wall -Wextra -Werror -DD2K_RELEASE_ID='"dev"' \
+    -I"$donor_core/include" -I"$donor_root/datapath/include" -I"$donor_root/runtime" \
+    "$repo_root/crates/r2o-controller/tests/d2o_quic_base_differential.c" \
+    "$donor_core/props.c" "$donor_core/quicprobe.c" "$donor_core/quicsnap.c" \
+    "$donor_core/quicsnap_reseal.c" "$donor_core/quicarms.c" "$donor_core/ipfrag.c" \
+    "$donor_core/net4.c" "$donor_core/quichello.c" "$donor_core/hello.c" \
+    "$donor_core/tls13core.c" "$donor_core/x25519.c" "$donor_core/quic.c" \
+    "$donor_core/quicwire.c" "$donor_core/crypto.c" "$donor_core/meas.c" \
+    "$donor_core/quicconn.c" "$donor_core/h3.c" "$donor_core/udpplan.c" \
+    "$donor_core/udpruntime.c" "$donor_core/plantlv.c" \
+    "$donor_root/datapath/plan_parse.c" "$donor_root/datapath/plan_apply.c" \
+    "$donor_root/datapath/wire.c" "$donor_root/datapath/wire_udp.c" \
+    -pthread -o "$tmp_dir/d2o-quic-base"
+"$tmp_dir/d2o-quic-base" profile >"$tmp_dir/c-quic-profile.out"
+R2O_QUIC_PROFILE_DIFF_OUTPUT="$tmp_dir/rust-quic-profile.out" \
+    cargo +1.98.0 test -p r2o-controller --lib --locked --offline \
+        r2o_quic_profile_clienthello_matches_d2o_donor_shape
+diff -u "$tmp_dir/c-quic-profile.out" "$tmp_dir/rust-quic-profile.out"
+printf 'C/Rust QUIC donor ClientHello profile matches d2o %s.\n' "$donor_sha"
+
+"$tmp_dir/d2o-quic-base" verify >"$tmp_dir/c-quic-donor-verify.out"
+R2O_QUIC_DONOR_VERIFY_DIFF_OUTPUT="$tmp_dir/rust-quic-donor-verify.out" \
+    cargo +1.98.0 test -p r2k-core --lib --locked --offline \
+        критерий_ответа_quic_совпадает_с_donor_parse
+diff -u "$tmp_dir/c-quic-donor-verify.out" "$tmp_dir/rust-quic-donor-verify.out"
+printf 'C/Rust QUIC donor response criterion matches d2o %s.\n' "$donor_sha"
+
+"$tmp_dir/d2o-quic-base" parallel >"$tmp_dir/c-quic-parallel.out"
+R2O_QUIC_DONOR_PARALLEL_DIFF_OUTPUT="$tmp_dir/rust-quic-parallel.out" \
+    cargo +1.98.0 test -p r2o-controller --lib --locked --offline \
+        r2o_quic_donor_parallel_control_matches_d2o
+diff -u "$tmp_dir/c-quic-parallel.out" "$tmp_dir/rust-quic-parallel.out"
+printf 'C/Rust parallel QUIC control, fresh ports and donor answers match d2o %s.\n' "$donor_sha"
+
+"$tmp_dir/d2o-quic-base" vn >"$tmp_dir/c-quic-vn.out"
+R2O_QUIC_VN_DIFF_OUTPUT="$tmp_dir/rust-quic-vn.out" \
+    cargo +1.98.0 test -p r2o-controller --lib --locked --offline \
+        r2o_quic_version_negotiation_uses_donor_parallel_answers
+diff -u "$tmp_dir/c-quic-vn.out" "$tmp_dir/rust-quic-vn.out"
+printf 'C/Rust QUIC silent-control Version Negotiation branch matches d2o %s.\n' "$donor_sha"
+
+"$tmp_dir/d2o-quic-base" >"$tmp_dir/c-quic-base.out"
+R2O_QUIC_BASE_DIFF_OUTPUT="$tmp_dir/rust-quic-base.out" \
+    cargo +1.98.0 test -p r2o-controller --lib --locked --offline \
+        r2o_quic_base_result_matches_d2o
+diff -u "$tmp_dir/c-quic-base.out" "$tmp_dir/rust-quic-base.out"
+printf 'C/Rust QUIC base decision matches d2o %s.\n' "$donor_sha"
+
+"$tmp_dir/d2o-quic-base" decision >"$tmp_dir/c-quic-direct-action.out"
+R2O_QUIC_DIRECT_ACTION_DIFF_OUTPUT="$tmp_dir/rust-quic-direct-action.out" \
+    cargo +1.98.0 test -p r2o-controller --lib --locked --offline \
+        r2o_quic_direct_action_matches_d2o_classify_run
+diff -u "$tmp_dir/c-quic-direct-action.out" "$tmp_dir/rust-quic-direct-action.out"
+printf 'C/Rust QUIC direct Initial follow-up matches d2o %s.\n' "$donor_sha"
+
+"$tmp_dir/d2o-quic-base" data >"$tmp_dir/c-quic-direct-data.out"
+R2O_QUIC_DIRECT_HTTP3_DIFF_OUTPUT="$tmp_dir/rust-quic-direct-data.out" \
+    cargo +1.98.0 test -p r2o-controller --lib --locked --offline \
+        r2o_quic_direct_http3_repeat_gate_matches_d2o_classify_run
+diff -u "$tmp_dir/c-quic-direct-data.out" "$tmp_dir/rust-quic-direct-data.out"
+printf 'C/Rust QUIC direct HTTP/3 repeat gate matches d2o %s.\n' "$donor_sha"
+
+clang-18 -std=c99 -O2 -Wall -Wextra -Werror -I"$donor_core/include" \
+    "$repo_root/crates/r2o-controller/tests/d2o_quic_http3_differential.c" \
+    -o "$tmp_dir/d2o-quic-http3"
+"$tmp_dir/d2o-quic-http3" content-length >"$tmp_dir/c-quic-content-length.out"
+R2O_QUIC_HTTP3_CONTENT_LENGTH_DIFF_OUTPUT="$tmp_dir/rust-quic-content-length.out" \
+    cargo +1.98.0 test -p r2o-controller --test r2o_quic_http3 --locked --offline \
+        content_length -- --nocapture
+diff -u "$tmp_dir/c-quic-content-length.out" "$tmp_dir/rust-quic-content-length.out"
+printf 'C/Rust HTTP/3 complete response ignores Content-Length mismatch like d2o.\n'
+
+"$tmp_dir/d2o-quic-http3" large-body >"$tmp_dir/c-quic-large-body.out"
+R2O_QUIC_HTTP3_LARGE_BODY_DIFF_OUTPUT="$tmp_dir/rust-quic-large-body.out" \
+    cargo +1.98.0 test -p r2o-controller --test r2o_quic_http3 --locked --offline \
+        не_обрезает_ответ -- --nocapture
+diff -u "$tmp_dir/c-quic-large-body.out" "$tmp_dir/rust-quic-large-body.out"
+printf 'C/Rust HTTP/3 response beyond 16 MiB matches d2o.\n'
+
+"$tmp_dir/d2o-quic-http3" stream-bytes >"$tmp_dir/c-quic-stream-bytes.out"
+R2O_QUIC_HTTP3_STREAM_BYTES_DIFF_OUTPUT="$tmp_dir/rust-quic-stream-bytes.out" \
+    cargo +1.98.0 test -p r2o-controller --lib --locked --offline \
+        незавершённый_http3_порог_использует_байты_потока
+diff -u "$tmp_dir/c-quic-stream-bytes.out" "$tmp_dir/rust-quic-stream-bytes.out"
+printf 'C/Rust HTTP/3 incomplete-response threshold uses target stream bytes like d2o.\n'
+
+"$tmp_dir/d2o-quic-http3" budget-next-stream >"$tmp_dir/c-quic-budget-next-stream.out"
+R2O_QUIC_HTTP3_NEXT_STREAM_DIFF_OUTPUT="$tmp_dir/rust-quic-budget-next-stream.out" \
+    cargo +1.98.0 test -p r2o-controller --lib --locked --offline \
+        r2o_quic_бюджет_может_пройти_по_заголовкам_следующего_потока_как_d2o
+diff -u "$tmp_dir/c-quic-budget-next-stream.out" "$tmp_dir/rust-quic-budget-next-stream.out"
+printf 'C/Rust HTTP/3 budget can pass on growth in the next response stream like d2o.\n'
+
+"$tmp_dir/d2o-quic-base" residual >"$tmp_dir/c-quic-residual.out"
+R2O_QUIC_RESIDUAL_DIFF_OUTPUT="$tmp_dir/rust-quic-residual.out" \
+    cargo +1.98.0 test -p r2o-controller --lib --locked --offline \
+        r2o_quic_residual_control_and_address_pool_match_d2o
+diff -u "$tmp_dir/c-quic-residual.out" "$tmp_dir/rust-quic-residual.out"
+printf 'C/Rust QUIC residual control and address rotation match d2o %s.\n' "$donor_sha"
+
+diag_tick_dir="$tmp_dir/d2kc-diagnostics"
+clang-18 -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+    -DD2K_RELEASE_ID='"dev"' "-DD2K_DIAG_DIR=\"$diag_tick_dir\"" \
+    -I"$donor_core" -I"$donor_core/include" -I"$donor_root/runtime" \
+    -I"$donor_root/datapath/include" \
+    "$repo_root/crates/r2o-controller/tests/d2o_diagnostic_tick_differential.c" \
+    "$donor_core/diagnostics.c" -Wl,--gc-sections -o "$tmp_dir/d2o-diagnostic-tick"
+"$tmp_dir/d2o-diagnostic-tick" >"$tmp_dir/c-diagnostic-tick.out"
+R2O_DIAGNOSTIC_TICK_DIFF_OUTPUT="$tmp_dir/rust-diagnostic-tick.out" \
+    cargo +1.98.0 test -p r2o-controller --lib --locked --offline \
+        diagnostic_tick_lifecycle_matches_d2o -- --nocapture
+diff -u "$tmp_dir/c-diagnostic-tick.out" "$tmp_dir/rust-diagnostic-tick.out"
+printf 'C/Rust d2kc diagnostic tick lifecycle matches d2o %s.\n' "$donor_sha"

@@ -1,15 +1,23 @@
 //! HTTP/3-пробы QUIC по заранее привязанному UDP-сокету.
 
+use std::collections::VecDeque;
 use std::future::{Future, poll_fn};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
-use bytes::Buf;
+use bytes::{Buf, Bytes};
 use rustls::RootCertStore;
 
 pub const R2O_QUIC_HTTP3_DEFAULT_BUDGET_PACKETS: u32 = 25;
-const R2O_QUIC_HTTP3_MAX_BODY_BYTES: u64 = 16 * 1024 * 1024;
+const R2O_QUIC_RECENT_PORTS: usize = 4096;
+const R2O_QUIC_FRESH_PORT_TRIES: usize = 16;
+const R2O_QUIC_RESIDUAL_PORT_AGE: Duration = Duration::from_secs(480);
+
+static R2O_QUIC_RECENT_PORTS_STATE: OnceLock<Mutex<(VecDeque<(u16, Instant)>, usize)>> =
+    OnceLock::new();
 
 fn r2o_quic_http3_bounded_timeout_at(
     timeout: Duration,
@@ -49,6 +57,81 @@ pub fn r2o_quic_http3_udp_socket_detailed(
     mark: Option<u32>,
 ) -> Result<UdpSocket, R2oQuicUdpSocketError> {
     r2o_quic_http3_udp_socket_with_mark_setter(server, mark, r2o_quic_http3_set_socket_mark)
+}
+
+/// Создать новый raw-сокет QUIC, не используя порт из окна остаточной блокировки.
+/// Ошибка SO_MARK сохраняется в `marked`, но, как в d2o, сама отправка продолжается.
+pub fn r2o_quic_http3_udp_socket_fresh(
+    server: SocketAddr,
+    mark: Option<u32>,
+) -> Result<(UdpSocket, bool), R2oQuicUdpSocketError> {
+    let bind = SocketAddr::new(
+        match server.ip() {
+            IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        },
+        0,
+    );
+    let mut held = Vec::new();
+    for _ in 0..=R2O_QUIC_FRESH_PORT_TRIES {
+        let socket = UdpSocket::bind(bind).map_err(R2oQuicUdpSocketError::ordinary)?;
+        let mut marked = mark.is_none_or(|mark| mark == 0);
+        if let Some(mark) = mark.filter(|mark| *mark != 0) {
+            marked = r2o_quic_http3_set_socket_mark(&socket, mark).is_ok();
+        }
+        socket
+            .connect(server)
+            .map_err(R2oQuicUdpSocketError::ordinary)?;
+        let port = socket
+            .local_addr()
+            .map_err(R2oQuicUdpSocketError::ordinary)?
+            .port();
+        if port == 0 {
+            return Err(R2oQuicUdpSocketError::ordinary(std::io::Error::new(
+                std::io::ErrorKind::AddrNotAvailable,
+                "локальный UDP-порт не назначен",
+            )));
+        }
+        if r2o_quic_port_was_recently_claimed(port) {
+            if held.len() == R2O_QUIC_FRESH_PORT_TRIES {
+                return Err(R2oQuicUdpSocketError::ordinary(std::io::Error::new(
+                    std::io::ErrorKind::AddrNotAvailable,
+                    "не найден свежий локальный UDP-порт за 16 попыток",
+                )));
+            }
+            held.push(socket);
+            continue;
+        }
+        drop(held);
+        return Ok((socket, marked));
+    }
+    Err(R2oQuicUdpSocketError::ordinary(std::io::Error::new(
+        std::io::ErrorKind::AddrNotAvailable,
+        "не найден свежий локальный UDP-порт за 16 попыток",
+    )))
+}
+
+fn r2o_quic_port_was_recently_claimed(port: u16) -> bool {
+    let state = R2O_QUIC_RECENT_PORTS_STATE
+        .get_or_init(|| Mutex::new((VecDeque::with_capacity(R2O_QUIC_RECENT_PORTS), 0)));
+    let mut state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (ports, next) = &mut *state;
+    if ports
+        .iter()
+        .any(|(recent_port, at)| *recent_port == port && at.elapsed() < R2O_QUIC_RESIDUAL_PORT_AGE)
+    {
+        return true;
+    }
+    let entry = (port, Instant::now());
+    if ports.len() < R2O_QUIC_RECENT_PORTS {
+        ports.push_back(entry);
+    } else {
+        ports[*next] = entry;
+        *next = (*next + 1) % R2O_QUIC_RECENT_PORTS;
+    }
+    false
 }
 
 fn r2o_quic_http3_udp_socket_with_mark_setter(
@@ -123,6 +206,8 @@ pub struct R2oQuicHttp3Result {
     pub handshake_confirmed: bool,
     pub status: u16,
     pub body_bytes: u64,
+    /// Уникальные байты целевого HTTP/3 bidi-потока, включая HEADERS и framing.
+    pub app_bytes: u64,
     pub complete: bool,
     pub requests: u32,
     pub datagrams: u64,
@@ -133,6 +218,275 @@ pub struct R2oQuicHttp3Result {
     pub r2o_ping_probes: u32,
     pub r2o_ping_acks: u32,
     pub error: Option<String>,
+}
+
+struct R2oQuicHttp3CountedConnection {
+    inner: h3_quinn::Connection,
+    connection: quinn::Connection,
+    app_bytes: Arc<AtomicU64>,
+}
+
+struct R2oQuicHttp3CountedOpenStreams {
+    inner: h3_quinn::OpenStreams,
+    connection: quinn::Connection,
+    app_bytes: Arc<AtomicU64>,
+}
+
+struct R2oQuicHttp3CountedRecvStream {
+    inner: h3_quinn::RecvStream,
+    app_bytes: Arc<AtomicU64>,
+    connection: Option<quinn::Connection>,
+    stream_id: Option<quinn::StreamId>,
+    last_seen: u64,
+    count: bool,
+}
+
+struct R2oQuicHttp3CountedBidiStream {
+    send: h3_quinn::SendStream<Bytes>,
+    recv: R2oQuicHttp3CountedRecvStream,
+}
+
+fn r2o_quic_http3_count_app_bytes(app_bytes: &AtomicU64, count: u64) {
+    let _ = app_bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(count))
+    });
+}
+
+impl h3::quic::RecvStream for R2oQuicHttp3CountedRecvStream {
+    type Buf = Bytes;
+
+    fn poll_data(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<Self::Buf>, h3::quic::StreamErrorIncoming>> {
+        let result = h3::quic::RecvStream::poll_data(&mut self.inner, cx);
+        if self.count {
+            let received = self
+                .connection
+                .as_ref()
+                .zip(self.stream_id)
+                .and_then(|(connection, stream_id)| connection.r2o_recv_stream_bytes(stream_id));
+            if let Some(received) = received {
+                r2o_quic_http3_count_app_bytes(
+                    &self.app_bytes,
+                    received.saturating_sub(self.last_seen),
+                );
+                self.last_seen = self.last_seen.max(received);
+            } else if let Poll::Ready(Ok(Some(bytes))) = &result {
+                let received = self.last_seen.saturating_add(bytes.remaining() as u64);
+                r2o_quic_http3_count_app_bytes(
+                    &self.app_bytes,
+                    received.saturating_sub(self.last_seen),
+                );
+                self.last_seen = received;
+            }
+        }
+        result
+    }
+
+    fn stop_sending(&mut self, error_code: u64) {
+        h3::quic::RecvStream::stop_sending(&mut self.inner, error_code);
+    }
+
+    fn recv_id(&self) -> h3::quic::StreamId {
+        h3::quic::RecvStream::recv_id(&self.inner)
+    }
+}
+
+impl R2oQuicHttp3CountedBidiStream {
+    fn new(
+        inner: h3_quinn::BidiStream<Bytes>,
+        app_bytes: Arc<AtomicU64>,
+        count: bool,
+        connection: quinn::Connection,
+    ) -> Self {
+        let stream_id = quinn::StreamId::from(
+            quinn::VarInt::from_u64(h3::quic::RecvStream::recv_id(&inner).into_inner())
+                .expect("HTTP/3 stream ID is a QUIC variable integer"),
+        );
+        let tracked = !count || connection.r2o_track_recv_stream_bytes(stream_id);
+        debug_assert!(tracked, "opened HTTP/3 request stream must be tracked");
+        let (send, recv) = h3::quic::BidiStream::<Bytes>::split(inner);
+        Self {
+            send,
+            recv: R2oQuicHttp3CountedRecvStream {
+                inner: recv,
+                app_bytes,
+                connection: count.then_some(connection),
+                stream_id: count.then_some(stream_id),
+                last_seen: 0,
+                count: count && tracked,
+            },
+        }
+    }
+}
+
+impl h3::quic::RecvStream for R2oQuicHttp3CountedBidiStream {
+    type Buf = Bytes;
+
+    fn poll_data(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<Self::Buf>, h3::quic::StreamErrorIncoming>> {
+        h3::quic::RecvStream::poll_data(&mut self.recv, cx)
+    }
+
+    fn stop_sending(&mut self, error_code: u64) {
+        h3::quic::RecvStream::stop_sending(&mut self.recv, error_code);
+    }
+
+    fn recv_id(&self) -> h3::quic::StreamId {
+        h3::quic::RecvStream::recv_id(&self.recv)
+    }
+}
+
+impl h3::quic::SendStream<Bytes> for R2oQuicHttp3CountedBidiStream {
+    fn poll_ready(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), h3::quic::StreamErrorIncoming>> {
+        h3::quic::SendStream::poll_ready(&mut self.send, cx)
+    }
+
+    fn send_data<T: Into<h3::quic::WriteBuf<Bytes>>>(
+        &mut self,
+        data: T,
+    ) -> Result<(), h3::quic::StreamErrorIncoming> {
+        h3::quic::SendStream::send_data(&mut self.send, data)
+    }
+
+    fn poll_finish(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), h3::quic::StreamErrorIncoming>> {
+        h3::quic::SendStream::poll_finish(&mut self.send, cx)
+    }
+
+    fn reset(&mut self, reset_code: u64) {
+        h3::quic::SendStream::reset(&mut self.send, reset_code);
+    }
+
+    fn send_id(&self) -> h3::quic::StreamId {
+        h3::quic::SendStream::send_id(&self.send)
+    }
+}
+
+impl h3::quic::BidiStream<Bytes> for R2oQuicHttp3CountedBidiStream {
+    type SendStream = h3_quinn::SendStream<Bytes>;
+    type RecvStream = R2oQuicHttp3CountedRecvStream;
+
+    fn split(self) -> (Self::SendStream, Self::RecvStream) {
+        (self.send, self.recv)
+    }
+}
+
+impl h3::quic::OpenStreams<Bytes> for R2oQuicHttp3CountedOpenStreams {
+    type BidiStream = R2oQuicHttp3CountedBidiStream;
+    type SendStream = h3_quinn::SendStream<Bytes>;
+
+    fn poll_open_bidi(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Self::BidiStream, h3::quic::StreamErrorIncoming>> {
+        h3::quic::OpenStreams::poll_open_bidi(&mut self.inner, cx).map(|result| {
+            result.map(|inner| {
+                R2oQuicHttp3CountedBidiStream::new(
+                    inner,
+                    Arc::clone(&self.app_bytes),
+                    true,
+                    self.connection.clone(),
+                )
+            })
+        })
+    }
+
+    fn poll_open_send(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Self::SendStream, h3::quic::StreamErrorIncoming>> {
+        h3::quic::OpenStreams::poll_open_send(&mut self.inner, cx)
+    }
+
+    fn close(&mut self, code: h3::error::Code, reason: &[u8]) {
+        h3::quic::OpenStreams::<Bytes>::close(&mut self.inner, code, reason);
+    }
+}
+
+impl h3::quic::OpenStreams<Bytes> for R2oQuicHttp3CountedConnection {
+    type BidiStream = R2oQuicHttp3CountedBidiStream;
+    type SendStream = h3_quinn::SendStream<Bytes>;
+
+    fn poll_open_bidi(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Self::BidiStream, h3::quic::StreamErrorIncoming>> {
+        h3::quic::OpenStreams::<Bytes>::poll_open_bidi(&mut self.inner, cx).map(|result| {
+            result.map(|inner| {
+                R2oQuicHttp3CountedBidiStream::new(
+                    inner,
+                    Arc::clone(&self.app_bytes),
+                    true,
+                    self.connection.clone(),
+                )
+            })
+        })
+    }
+
+    fn poll_open_send(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Self::SendStream, h3::quic::StreamErrorIncoming>> {
+        h3::quic::OpenStreams::<Bytes>::poll_open_send(&mut self.inner, cx)
+    }
+
+    fn close(&mut self, code: h3::error::Code, reason: &[u8]) {
+        h3::quic::OpenStreams::<Bytes>::close(&mut self.inner, code, reason);
+    }
+}
+
+impl h3::quic::Connection<Bytes> for R2oQuicHttp3CountedConnection {
+    type RecvStream = R2oQuicHttp3CountedRecvStream;
+    type OpenStreams = R2oQuicHttp3CountedOpenStreams;
+
+    fn poll_accept_recv(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Self::RecvStream, h3::quic::ConnectionErrorIncoming>> {
+        h3::quic::Connection::<Bytes>::poll_accept_recv(&mut self.inner, cx).map(|result| {
+            result.map(|inner| R2oQuicHttp3CountedRecvStream {
+                inner,
+                app_bytes: Arc::clone(&self.app_bytes),
+                connection: None,
+                stream_id: None,
+                last_seen: 0,
+                count: false,
+            })
+        })
+    }
+
+    fn poll_accept_bidi(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Self::BidiStream, h3::quic::ConnectionErrorIncoming>> {
+        h3::quic::Connection::<Bytes>::poll_accept_bidi(&mut self.inner, cx).map(|result| {
+            result.map(|inner| {
+                R2oQuicHttp3CountedBidiStream::new(
+                    inner,
+                    Arc::clone(&self.app_bytes),
+                    false,
+                    self.connection.clone(),
+                )
+            })
+        })
+    }
+
+    fn opener(&self) -> Self::OpenStreams {
+        R2oQuicHttp3CountedOpenStreams {
+            inner: h3::quic::Connection::<Bytes>::opener(&self.inner),
+            connection: self.connection.clone(),
+            app_bytes: Arc::clone(&self.app_bytes),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -149,7 +503,7 @@ enum R2oQuicHttp3StallEnd {
     OneWay,
 }
 
-/// Хранит порог пакетов и рост тела, необходимый для подтверждения бюджета.
+/// Хранит порог пакетов и рост байтов целевого QUIC-потока для бюджета.
 struct R2oQuicHttp3Budget {
     need: u64,
     progress_mark: Option<u64>,
@@ -513,7 +867,12 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
     };
     result.lock().unwrap().handshake_confirmed = true;
 
-    let h3_connection = h3_quinn::Connection::new(connection.clone());
+    let app_bytes = Arc::new(AtomicU64::new(0));
+    let h3_connection = R2oQuicHttp3CountedConnection {
+        inner: h3_quinn::Connection::new(connection.clone()),
+        connection: connection.clone(),
+        app_bytes: Arc::clone(&app_bytes),
+    };
     let (mut driver, mut send_request) = match tokio::time::timeout(
         r2o_quic_http3_bounded_timeout(timeout, deadline),
         h3::client::new(h3_connection),
@@ -560,11 +919,12 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
     let mut requests = 0_u32;
     let mut last_response_complete = false;
     let mut last_progress_at = tokio::time::Instant::now();
+    let mut last_app_progress = app_bytes.load(Ordering::Relaxed);
     let mut budget = R2oQuicHttp3Budget::r2o_initialize(budget_packets);
     let mut budget_passed = false;
     let mut stall = R2oQuicHttp3Stall::r2o_initialize(
         connection.rtt(),
-        total_body_bytes,
+        last_app_progress,
         r2o_quic_http3_wire_bytes(&connection),
     );
     let mut stall_end = None;
@@ -603,7 +963,7 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                 &mut budget,
                 repeated,
                 datagrams_before,
-                total_body_bytes,
+                &app_bytes,
                 stream.recv_response(),
             )
             .await
@@ -624,12 +984,21 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
             if status == 451 {
                 return Ok::<bool, String>(false);
             }
-            let expected = response
-                .headers()
-                .get(http::header::CONTENT_LENGTH)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse::<u64>().ok());
-            let mut response_bytes = 0_u64;
+            let app_progress = app_bytes.load(Ordering::Relaxed);
+            let now = tokio::time::Instant::now();
+            if app_progress > last_app_progress {
+                last_app_progress = app_progress;
+                last_progress_at = now;
+            }
+            if repeated {
+                let packets =
+                    r2o_quic_http3_datagrams(&connection).saturating_sub(datagrams_before);
+                budget_passed =
+                    budget.r2o_step(packets, app_progress, status, now, last_progress_at, rto);
+                if budget_passed {
+                    return Ok::<bool, String>(false);
+                }
+            }
             loop {
                 let received = r2o_quic_http3_wait_with_stall(
                     &connection,
@@ -637,7 +1006,7 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                     &mut budget,
                     repeated,
                     datagrams_before,
-                    total_body_bytes,
+                    &app_bytes,
                     stream.recv_data(),
                 )
                 .await
@@ -656,22 +1025,20 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                 match received {
                     Ok(Some(chunk)) => {
                         let length = chunk.remaining() as u64;
-                        response_bytes = response_bytes.saturating_add(length);
                         total_body_bytes = total_body_bytes.saturating_add(length);
-                        if total_body_bytes > R2O_QUIC_HTTP3_MAX_BODY_BYTES {
-                            return Err("HTTP/3-ответы превысили предел 16 МиБ".into());
-                        }
 
                         let now = tokio::time::Instant::now();
+                        let app_progress = app_bytes.load(Ordering::Relaxed);
                         let packets =
                             r2o_quic_http3_datagrams(&connection).saturating_sub(datagrams_before);
-                        if length > 0 {
+                        if app_progress > last_app_progress {
+                            last_app_progress = app_progress;
                             last_progress_at = now;
                         }
                         if repeated {
                             budget_passed = budget.r2o_step(
                                 packets,
-                                total_body_bytes,
+                                app_progress,
                                 status,
                                 now,
                                 last_progress_at,
@@ -680,6 +1047,7 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                         }
                         let mut state = result.lock().unwrap();
                         state.body_bytes = total_body_bytes;
+                        state.app_bytes = app_progress;
                         state.datagrams = packets;
                         state.budget_passed = budget_passed;
                         if budget_passed {
@@ -687,8 +1055,32 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                         }
                     }
                     Ok(None) => {
-                        if expected.is_some_and(|length| length != response_bytes) {
-                            return Err("длина HTTP/3-тела не совпала с Content-Length".into());
+                        let now = tokio::time::Instant::now();
+                        let app_progress = app_bytes.load(Ordering::Relaxed);
+                        if app_progress > last_app_progress {
+                            last_app_progress = app_progress;
+                            last_progress_at = now;
+                        }
+                        if repeated {
+                            let packets = r2o_quic_http3_datagrams(&connection)
+                                .saturating_sub(datagrams_before);
+                            budget_passed = budget.r2o_step(
+                                packets,
+                                app_progress,
+                                status,
+                                now,
+                                last_progress_at,
+                                rto,
+                            );
+                        }
+                        if budget_passed {
+                            let mut state = result.lock().unwrap();
+                            state.body_bytes = total_body_bytes;
+                            state.app_bytes = app_progress;
+                            state.datagrams = r2o_quic_http3_datagrams(&connection)
+                                .saturating_sub(datagrams_before);
+                            state.budget_passed = true;
+                            return Ok(false);
                         }
                         return Ok(true);
                     }
@@ -725,6 +1117,7 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
     {
         let mut state = result.lock().unwrap();
         state.requests = requests;
+        state.app_bytes = app_bytes.load(Ordering::Relaxed);
         state.datagrams = datagrams;
         state.budget_passed = budget_passed;
         state.complete = !repeated && last_response_complete && !state.r2o_quic_stalled;
@@ -767,7 +1160,7 @@ async fn r2o_quic_http3_wait_with_stall<F: Future>(
     budget: &mut R2oQuicHttp3Budget,
     budget_active: bool,
     datagrams_before: u64,
-    progress: u64,
+    app_bytes: &AtomicU64,
     future: F,
 ) -> Result<F::Output, R2oQuicHttp3StallEnd> {
     tokio::pin!(future);
@@ -779,6 +1172,7 @@ async fn r2o_quic_http3_wait_with_stall<F: Future>(
             output = &mut future => return Ok(output),
             _ = interval.tick() => {
                 let now = tokio::time::Instant::now();
+                let progress = app_bytes.load(Ordering::Relaxed);
                 if budget_active {
                     budget.r2o_mark(
                         r2o_quic_http3_datagrams(connection).saturating_sub(datagrams_before),
@@ -915,7 +1309,7 @@ mod tests {
     }
 
     #[test]
-    fn r2o_quic_ping_ack_учитывается_при_одновременном_росте_тела() {
+    fn r2o_quic_ping_ack_учитывается_при_одновременном_росте_потока() {
         let mut stall = R2oQuicHttp3Stall::r2o_initialize(Duration::from_millis(40), 1000, 5000);
         let start = stall.last_progress_at;
 
@@ -1002,5 +1396,25 @@ mod tests {
             start + Duration::from_millis(300),
             Duration::from_secs(1)
         ));
+    }
+
+    #[test]
+    fn r2o_quic_бюджет_может_пройти_по_заголовкам_следующего_потока_как_d2o() {
+        let start = Instant::now() + Duration::from_millis(10);
+        let mut budget = R2oQuicHttp3Budget::r2o_initialize(1);
+
+        assert!(!budget.r2o_step(2, 100, 200, start, start, Duration::from_secs(1)));
+        assert_eq!(budget.progress_mark, Some(100));
+        assert!(budget.r2o_step(
+            2,
+            120,
+            200,
+            start + Duration::from_millis(100),
+            start + Duration::from_millis(100),
+            Duration::from_secs(1)
+        ));
+        if let Ok(path) = std::env::var("R2O_QUIC_HTTP3_NEXT_STREAM_DIFF_OUTPUT") {
+            std::fs::write(path, "budget-next-stream=Pass\n").unwrap();
+        }
     }
 }

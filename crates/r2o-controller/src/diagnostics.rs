@@ -237,6 +237,11 @@ impl Recorder {
                 self.event_total = 0;
                 self.sample_total = 0;
                 self.first_details.clear();
+                if ensure_diagnostics_dir(&self.dir, true) {
+                    for name in ["enabled", "report.json", "report.new"] {
+                        let _ = fs::remove_file(self.dir.join(name));
+                    }
+                }
             }
             self.enabled = false;
             self.sampled = None;
@@ -325,7 +330,7 @@ impl Recorder {
     }
 
     fn write_report(&self, report: &Value) {
-        if !ensure_diagnostics_dir(&self.dir) {
+        if !ensure_diagnostics_dir(&self.dir, true) {
             return;
         }
         let bytes = serde_json::to_vec(report).unwrap_or_default();
@@ -396,8 +401,8 @@ fn d2o_event_text(value: String, max_bytes: usize) -> String {
     )
 }
 
-fn ensure_diagnostics_dir(dir: &Path) -> bool {
-    if !dir.exists() {
+fn ensure_diagnostics_dir(dir: &Path, create: bool) -> bool {
+    if create && !dir.exists() {
         if let Err(error) = fs::create_dir(dir) {
             if error.kind() != std::io::ErrorKind::AlreadyExists {
                 return false;
@@ -429,7 +434,7 @@ fn ensure_diagnostics_dir(dir: &Path) -> bool {
 }
 
 fn diagnostics_enabled(dir: &Path) -> bool {
-    if !ensure_diagnostics_dir(dir) {
+    if !ensure_diagnostics_dir(dir, false) {
         return false;
     }
     let marker = dir.join("enabled");
@@ -674,6 +679,67 @@ mod tests {
         assert_eq!(report["events_overwritten"], 1);
         assert_eq!(report["events"][63]["target"].as_str().unwrap().len(), 254);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn diagnostic_tick_lifecycle_matches_d2o() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let root =
+            std::env::temp_dir().join(format!("r2o-diagnostics-tick-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let dir = root.join("diagnostics");
+        let mut recorder = Recorder::new(dir.clone(), root.join("run"));
+        recorder.tick(Counts::default);
+        let mut output = format!("disabled_start_dir={}\n", dir.exists() as u8);
+        assert!(!dir.exists());
+
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(dir.join("enabled"))
+            .unwrap();
+        recorder.checked = Some(Instant::now() - Duration::from_secs(1));
+        recorder.tick(Counts::default);
+        output.push_str(&format!(
+            "first={} report={}\n",
+            recorder.samples.len(),
+            dir.join("report.json").is_file() as u8
+        ));
+
+        recorder.checked = Some(Instant::now() - Duration::from_millis(500));
+        recorder.tick(Counts::default);
+        output.push_str(&format!("subsecond={}\n", recorder.samples.len()));
+
+        recorder.checked = Some(Instant::now() - Duration::from_secs(1));
+        recorder.sampled = Some(Instant::now() - Duration::from_secs(60));
+        recorder.tick(Counts::default);
+        output.push_str(&format!("minute={}\n", recorder.samples.len()));
+
+        fs::write(dir.join("report.new"), b"unfinished").unwrap();
+        fs::remove_file(dir.join("enabled")).unwrap();
+        recorder.checked = Some(Instant::now() - Duration::from_secs(1));
+        recorder.tick(Counts::default);
+        output.push_str(&format!(
+            "disabled={} report={} pending={}\n",
+            (!recorder.enabled) as u8,
+            dir.join("report.json").exists() as u8,
+            dir.join("report.new").exists() as u8
+        ));
+        assert!(!recorder.enabled);
+        assert!(!dir.join("enabled").exists());
+        assert!(!dir.join("report.json").exists());
+        assert!(!dir.join("report.new").exists());
+        if let Ok(path) = std::env::var("R2O_DIAGNOSTIC_TICK_DIFF_OUTPUT") {
+            fs::write(path, output).unwrap();
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
