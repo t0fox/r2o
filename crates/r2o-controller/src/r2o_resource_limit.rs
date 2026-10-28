@@ -1508,7 +1508,9 @@ mod tests {
         let (second_started_tx, second_started_rx) = mpsc::channel();
         let (second_release_tx, second_release_rx) = mpsc::channel();
         let second = std::thread::spawn(move || {
-            let permit = second_gate.r2o_acquire_tcp(&second_cancel_thread).unwrap();
+            let Some(permit) = second_gate.r2o_acquire_tcp(&second_cancel_thread) else {
+                return;
+            };
             second_started_tx.send(()).unwrap();
             let _ = second_release_rx.recv_timeout(Duration::from_secs(2));
             drop(permit);
@@ -1531,16 +1533,14 @@ mod tests {
                 // The QUIC send can occur between the two channel reads above.
                 quic_resumed_first = quic_rx.try_recv().is_ok();
                 second_started_first = !quic_resumed_first;
-                let _ = second_release_tx.send(());
                 break;
             }
             std::thread::sleep(Duration::from_millis(1));
         }
-        if second_started_first {
-            let _ = second_release_tx.send(());
-        } else {
+        if !second_started_first {
             second_cancel.store(true, Ordering::Relaxed);
         }
+        let _ = second_release_tx.send(());
         second.join().unwrap();
         if !quic_resumed_first {
             quic_cancel.store(true, Ordering::Relaxed);
