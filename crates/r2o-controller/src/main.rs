@@ -1869,13 +1869,13 @@ fn catalog_commands_with_send_cap(
             {
                 continue;
             }
+            if r2o_newer_name_binding(&selection_catalog, selection_binding) {
+                continue;
+            }
             if r2o_catalog_binding_is_weak(binding)
                 || binding.transport == 17 && binding.verified_by == R2O_D2K_VERBY_CLIENT
             {
                 skipped += 1;
-                continue;
-            }
-            if r2o_newer_name_binding(&selection_catalog, selection_binding) {
                 continue;
             }
             if binding.kind == "addr" {
@@ -20388,6 +20388,38 @@ mod tests {
         assert_eq!(deletes.len(), 3);
         assert!(installed_areas.is_empty());
         assert!(active_groups.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_sync_real_donor_skip_count_matches_d2o_ordering() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "r2o-catalog-real-sync-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let donor = directory.join("donor.json");
+        let migrated = directory.join("r2o.json");
+        std::fs::write(
+            &donor,
+            include_bytes!("../tests/fixtures/donor/catalog-real.json"),
+        )
+        .unwrap();
+        assert!(Catalog::import_donor_file(&donor, &migrated, 1).unwrap());
+        let mut catalog = Catalog::load(&migrated).unwrap();
+        let compiled =
+            super::catalog_commands_with_send_cap(&mut catalog, u16::MAX as usize, 1).unwrap();
+
+        // d2o core/sched.c::d2k_sched_sync_step sends 75 commands for this
+        // catalog and counts only the 111 weak plus 115 unshaped bindings.
+        // Seventeen stronger-context duplicates are intentionally not skips.
+        assert_eq!(compiled.commands.len(), 75);
+        assert_eq!(compiled.skipped, 226);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[cfg(unix)]
