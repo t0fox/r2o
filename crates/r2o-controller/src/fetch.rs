@@ -23,7 +23,7 @@ const R2O_VOLUME_TX_READ_MIN: Duration = Duration::from_millis(1500);
 const R2O_VOLUME_TX_READ_MAX: Duration = Duration::from_secs(12);
 const R2O_VOLUME_TX_CHUNK_GAP: Duration = Duration::from_millis(50);
 pub const R2O_D2O_VOLUME_RX_TIMEOUT: Duration = Duration::from_secs(6);
-const R2O_VOLUME_RX_PROBE_GAP: Duration = Duration::from_millis(500);
+pub const R2O_VOLUME_RX_PROBE_GAP: Duration = Duration::from_millis(500);
 
 /// Дождаться ClientHello TCP с заданным именем и вернуть длину его TLS-записи.
 pub fn r2o_fetch_snapshot_wire_len(
@@ -266,6 +266,14 @@ pub fn r2o_d2o_volume_candidate_encoding(path: &str, rx_cut: bool) -> R2oFetchEn
         R2oFetchEncoding::Identity
     } else {
         r2o_d2o_verification_encoding(path)
+    }
+}
+
+pub fn r2o_d2o_layered_rx_candidate_encoding(phase: usize) -> Option<R2oFetchEncoding> {
+    match phase {
+        0 | 1 => Some(R2oFetchEncoding::Identity),
+        2 => Some(R2oFetchEncoding::Gzip),
+        _ => None,
     }
 }
 
@@ -2675,6 +2683,65 @@ mod tests {
             r2o_d2o_volume_candidate_encoding("/css/site.css", false),
             R2oFetchEncoding::Identity
         );
+    }
+
+    #[test]
+    fn layered_rx_candidate_sequence_matches_d2o() {
+        use crate::r2o_volume::{
+            R2oVolumeObservation, R2oVolumeRxEncoding, r2o_volume_rx_evidence,
+            r2o_volume_rx_layered_repeat_agrees,
+        };
+
+        let observations = include_str!("../tests/fixtures/d2o_layered_rx.tsv")
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+            .map(|line| {
+                let fields = line
+                    .split_whitespace()
+                    .map(|field| field.parse::<u64>().expect("числовое поле fixture"))
+                    .collect::<Vec<_>>();
+                assert_eq!(fields.len(), 8);
+                R2oVolumeObservation {
+                    status: fields[0] as u16,
+                    body_complete: fields[1] != 0,
+                    body_encoding: match fields[2] {
+                        0 => R2oVolumeRxEncoding::Identity,
+                        1 => R2oVolumeRxEncoding::Gzip,
+                        _ => panic!("неизвестное кодирование fixture"),
+                    },
+                    body_framing_valid: fields[3] != 0,
+                    body_has_length: fields[4] != 0,
+                    body_chunked: fields[5] != 0,
+                    body_expected: fields[6],
+                    body_bytes: fields[7],
+                    ..R2oVolumeObservation::default()
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(observations.len(), 3);
+        assert!(r2o_volume_rx_layered_repeat_agrees(
+            &observations[0],
+            &observations[1]
+        ));
+        assert!(
+            r2o_volume_rx_evidence(&observations[0], &observations[1], &observations[2]).is_some()
+        );
+
+        let encodings = (0..3)
+            .map(|phase| {
+                r2o_d2o_layered_rx_candidate_encoding(phase).expect("d2o layered RX phase")
+            })
+            .map(|encoding| match encoding {
+                R2oFetchEncoding::Identity => "identity",
+                R2oFetchEncoding::Gzip => "gzip",
+                R2oFetchEncoding::GzipDeflate => panic!("неожиданное кодирование layered RX"),
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let output = format!("encodings={encodings};cut=1;phase-reset=1\n");
+        if let Ok(path) = std::env::var("R2O_LAYERED_RX_DIFF_OUTPUT") {
+            std::fs::write(path, output).expect("записать C/Rust differential output");
+        }
     }
 
     #[test]

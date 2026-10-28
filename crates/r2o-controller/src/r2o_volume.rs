@@ -96,6 +96,18 @@ pub fn r2o_volume_rx_pair_agrees(
     }
 }
 
+/// Повтор в layered candidate path использует body-поля в точности как d2o.
+pub fn r2o_volume_rx_layered_repeat_agrees(
+    first: &R2oVolumeObservation,
+    second: &R2oVolumeObservation,
+) -> bool {
+    r2o_volume_rx_partial(first)
+        && r2o_volume_rx_partial(second)
+        && first.body_has_length == second.body_has_length
+        && first.body_chunked == second.body_chunked
+        && first.body_bytes.abs_diff(second.body_bytes) <= R2O_VOLUME_BYTE_SLACK
+}
+
 /// Запрашивает третий identity-замер только при противоречии двух первых.
 pub fn r2o_volume_rx_needs_repeat(
     first: &R2oVolumeObservation,

@@ -4648,6 +4648,7 @@ fn r2o_run_discovery_candidate_trial_with_retries(
         probe_budget_remaining,
         packet_budget,
         request_encoding,
+        false,
         retry_budget_available,
         true,
         None,
@@ -4663,6 +4664,8 @@ struct R2oCandidateTrialEvidence {
     local_limit: bool,
     dropped_before: u32,
     dropped_after: u32,
+    layered_rx_handled: bool,
+    layered_rx_proven: bool,
 }
 
 #[cfg(unix)]
@@ -4678,7 +4681,8 @@ fn r2o_run_discovery_candidate_trial_with_progress(
     probe_budget_remaining: usize,
     packet_budget: Option<u32>,
     request_encoding: r2o_controller::fetch::R2oFetchEncoding,
-    mut retry_budget_available: impl FnMut() -> bool,
+    layered_rx: bool,
+    retry_budget_available: impl FnMut() -> bool,
     measured_arm: bool,
     dropped_events: Option<&AtomicUsize>,
     progress: &mut dyn FnMut(usize, usize, &str, &str),
@@ -4752,37 +4756,56 @@ fn r2o_run_discovery_candidate_trial_with_progress(
     let mut attempts = 0;
     let mut bare_retries = 0;
     let mut arm_retries = 0;
+    let wire_len = r2o_discovery_candidate_wire_len(target, client_hello, ech_config);
+    let retry_budget_available = std::cell::RefCell::new(retry_budget_available);
     let (result, applied, _, evidence) = r2o_repeat_candidate_trials(
         max_retries,
         || {
-            attempts += 1;
-            let dropped_before =
-                dropped_events.map_or(0, |counter| counter.load(Ordering::Relaxed) as u32);
-            let trial = r2o_family_recovery_sibling_trial_with_ech_state(
-                target,
-                destination,
-                &candidate,
-                mark,
-                commands,
-                ech_config,
-                r2o_discovery_candidate_wire_len(target, client_hello, ech_config),
-                packet_budget,
-                request_encoding,
-            );
-            if let Ok(fetch) = &trial.0
-                && r2o_controller::fetch::r2o_fetch_result_can_remember_resources(fetch)
-            {
-                resource_memory
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remember_hints(&fetch.r2o_resources, std::time::Instant::now());
-            }
-            let verified = r2o_family_recovery_decision(&trial.0, trial.1)
-                == R2oFamilyRecoveryDecision::Verified;
+            let sequence_budget = probe_budget_remaining.saturating_sub(attempts);
+            let (sequence, layered_rx_handled, _, layered_rx_evidence) =
+                r2o_discovery_layered_rx_candidate_trials(
+                    layered_rx,
+                    request_encoding,
+                    sequence_budget,
+                    || retry_budget_available.borrow_mut()(),
+                    || std::thread::sleep(r2o_controller::fetch::R2O_VOLUME_RX_PROBE_GAP),
+                    |encoding| {
+                        attempts += 1;
+                        let dropped_before = dropped_events
+                            .map_or(0, |counter| counter.load(Ordering::Relaxed) as u32);
+                        let trial = r2o_family_recovery_sibling_trial_with_ech_state(
+                            target,
+                            destination,
+                            &candidate,
+                            mark,
+                            commands,
+                            ech_config,
+                            wire_len,
+                            packet_budget,
+                            encoding,
+                        );
+                        if let Ok(fetch) = &trial.0
+                            && r2o_controller::fetch::r2o_fetch_result_can_remember_resources(fetch)
+                        {
+                            resource_memory
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .remember_hints(&fetch.r2o_resources, std::time::Instant::now());
+                        }
+                        let dropped_after = dropped_events
+                            .map_or(0, |counter| counter.load(Ordering::Relaxed) as u32);
+                        (trial, dropped_before, dropped_after)
+                    },
+                    |(trial, _, _)| r2o_discovery_layered_rx_observation(&trial.0, trial.1),
+                );
+            let (trial, dropped_before, dropped_after) = sequence;
+            let verified = !layered_rx_handled
+                && r2o_family_recovery_decision(&trial.0, trial.1)
+                    == R2oFamilyRecoveryDecision::Verified;
             let (application, result) = r2o_discovery_plan_result(&trial.0, trial.1, verified);
             progress(
                 attempts,
-                usize::from(max_retries) + 1,
+                (usize::from(max_retries) + 1).max(attempts),
                 &application,
                 &result,
             );
@@ -4793,13 +4816,15 @@ fn r2o_run_discovery_candidate_trial_with_progress(
                     .as_ref()
                     .is_ok_and(|fetch| fetch.r2o_volume_observation.local_limit),
                 dropped_before,
-                dropped_after: dropped_events
-                    .map_or(0, |counter| counter.load(Ordering::Relaxed) as u32),
+                dropped_after,
+                layered_rx_handled,
+                layered_rx_proven: layered_rx_evidence.is_some(),
             };
             (trial.0, trial.1, trial.2, evidence)
         },
         |(result, applied, transport_established, evidence)| {
-            if !retry_budget_available()
+            if evidence.layered_rx_handled
+                || !retry_budget_available.borrow_mut()()
                 || r2o_family_recovery_decision(result, *applied)
                     == R2oFamilyRecoveryDecision::Verified
             {
@@ -4821,7 +4846,8 @@ fn r2o_run_discovery_candidate_trial_with_progress(
             false
         },
     );
-    if r2o_family_recovery_decision(&result, applied) == R2oFamilyRecoveryDecision::Verified
+    if !evidence.layered_rx_handled
+        && r2o_family_recovery_decision(&result, applied) == R2oFamilyRecoveryDecision::Verified
         && let Some(client_hello) = client_hello
     {
         progress(
@@ -4891,6 +4917,73 @@ fn r2o_repeat_candidate_trials<T>(
 }
 
 #[cfg(unix)]
+fn r2o_discovery_layered_rx_candidate_trials<T>(
+    layered_rx: bool,
+    request_encoding: r2o_controller::fetch::R2oFetchEncoding,
+    probe_budget_remaining: usize,
+    mut retry_budget_available: impl FnMut() -> bool,
+    mut wait_before_next: impl FnMut(),
+    mut run_trial: impl FnMut(r2o_controller::fetch::R2oFetchEncoding) -> T,
+    mut observation: impl FnMut(&T) -> Option<r2o_controller::r2o_volume::R2oVolumeObservation>,
+) -> (
+    T,
+    bool,
+    usize,
+    Option<r2o_controller::r2o_volume::R2oVolumeRxEvidence>,
+) {
+    let first_encoding = if layered_rx {
+        r2o_controller::fetch::r2o_d2o_layered_rx_candidate_encoding(0)
+            .expect("d2o layered RX identity phase")
+    } else {
+        request_encoding
+    };
+    let mut trial = run_trial(first_encoding);
+    let mut attempts = 1;
+    let Some(first_observation) = layered_rx
+        .then(|| observation(&trial))
+        .flatten()
+        .filter(r2o_controller::r2o_volume::r2o_volume_rx_partial)
+    else {
+        return (trial, false, attempts, None);
+    };
+    if attempts >= probe_budget_remaining || !retry_budget_available() {
+        return (trial, true, attempts, None);
+    }
+
+    wait_before_next();
+    let identity = r2o_controller::fetch::r2o_d2o_layered_rx_candidate_encoding(1)
+        .expect("d2o layered RX repeat phase");
+    let second = run_trial(identity);
+    attempts += 1;
+    let second_observation = observation(&second);
+    let repeat_agrees = second_observation.is_some_and(|second| {
+        r2o_controller::r2o_volume::r2o_volume_rx_partial(&second)
+            && r2o_controller::r2o_volume::r2o_volume_rx_layered_repeat_agrees(
+                &first_observation,
+                &second,
+            )
+    });
+    trial = second;
+    if !repeat_agrees || attempts >= probe_budget_remaining || !retry_budget_available() {
+        return (trial, true, attempts, None);
+    }
+
+    wait_before_next();
+    let gzip = r2o_controller::fetch::r2o_d2o_layered_rx_candidate_encoding(2)
+        .expect("d2o layered RX gzip phase");
+    trial = run_trial(gzip);
+    attempts += 1;
+    let evidence = observation(&trial).and_then(|gzip| {
+        r2o_controller::r2o_volume::r2o_volume_rx_evidence(
+            &first_observation,
+            &second_observation.expect("agreed layered RX repeat"),
+            &gzip,
+        )
+    });
+    (trial, true, attempts, evidence)
+}
+
+#[cfg(unix)]
 fn r2o_discovery_candidate_retryable(
     result: &Result<r2o_controller::fetch::FetchResult, String>,
     applied: bool,
@@ -4906,6 +4999,24 @@ fn r2o_discovery_candidate_retryable(
         && !fetch.r2o_volume_observation.local_limit
         && !fetch.cloudflare_challenge
         && fetch.http_outcome != r2o_controller::fetch::R2oFetchHttpOutcome::LegalDenial
+}
+
+#[cfg(unix)]
+fn r2o_discovery_layered_rx_observation(
+    result: &Result<r2o_controller::fetch::FetchResult, String>,
+    applied: bool,
+) -> Option<r2o_controller::r2o_volume::R2oVolumeObservation> {
+    if !applied {
+        return None;
+    }
+    result.as_ref().ok().and_then(|fetch| {
+        (!matches!(
+            fetch.http_outcome,
+            r2o_controller::fetch::R2oFetchHttpOutcome::Blocked
+                | r2o_controller::fetch::R2oFetchHttpOutcome::LegalDenial
+        ))
+        .then_some(fetch.r2o_volume_observation)
+    })
 }
 
 #[cfg(unix)]
@@ -8633,7 +8744,7 @@ impl DiscoveryWorker {
                                             &format!("проверка плана {attempt}/{total}: {result}"),
                                         );
                                 };
-                            let (result, applied, attempts, _) =
+                            let (result, applied, attempts, candidate_evidence) =
                                 r2o_run_discovery_candidate_trial_with_progress(
                                     &target,
                                     &candidate.text,
@@ -8648,6 +8759,7 @@ impl DiscoveryWorker {
                                     r2o_controller::fetch::r2o_d2o_verification_encoding(
                                         &probe_path,
                                     ),
+                                    target.shape == SHAPE_MODERN && ech_config.is_none(),
                                     || {
                                         !cancel.load(Ordering::Relaxed)
                                             && r2o_discovery_trial_time_available(
@@ -8663,10 +8775,18 @@ impl DiscoveryWorker {
                                 own_tried
                                     .push(r2o_controller::r2o_fallback::tried_key(&candidate.text));
                             }
-                            let verified = r2o_family_recovery_decision(&result, applied)
-                                == R2oFamilyRecoveryDecision::Verified;
-                            let (application, last_result) =
+                            let verified = !candidate_evidence.layered_rx_handled
+                                && r2o_family_recovery_decision(&result, applied)
+                                    == R2oFamilyRecoveryDecision::Verified;
+                            let (application, mut last_result) =
                                 r2o_discovery_plan_result(&result, applied, verified);
+                            if candidate_evidence.layered_rx_handled {
+                                last_result.push_str(if candidate_evidence.layered_rx_proven {
+                                    "; два identity-обрыва и gzip подтвердили RX-ограничение; перенос плана не подтверждён"
+                                } else {
+                                    "; layered RX-проверка не подтвердила перенос плана"
+                                });
+                            }
                             r2o_discovery_record_plan_progress(
                                 &runner_searches,
                                 &target,
@@ -8878,6 +8998,7 @@ impl DiscoveryWorker {
                             known_probe_cap.saturating_sub(discovery_candidate_probes),
                             None,
                             r2o_controller::fetch::r2o_d2o_verification_encoding(&known_probe_path),
+                            false,
                             || {
                                 !cancel.load(Ordering::Relaxed)
                                     && r2o_discovery_trial_time_available(runner_started.elapsed())
@@ -9058,6 +9179,7 @@ impl DiscoveryWorker {
                     probe_counts.remaining(probe_cap),
                     None,
                     r2o_controller::fetch::r2o_d2o_verification_encoding(&probe_path),
+                    false,
                     || {
                         !cancel.load(Ordering::Relaxed)
                             && r2o_discovery_trial_time_available(runner_started.elapsed())
@@ -9186,6 +9308,7 @@ impl DiscoveryWorker {
                             probe_counts.remaining(probe_cap),
                             None,
                             r2o_controller::fetch::r2o_d2o_verification_encoding(&probe_path),
+                            false,
                             || {
                                 !cancel.load(Ordering::Relaxed)
                                     && r2o_discovery_trial_time_available(runner_started.elapsed())
@@ -19200,6 +19323,80 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn own_first_layered_rx_trial_sequence_matches_d2o() {
+        use r2o_controller::r2o_volume::{R2oVolumeObservation, R2oVolumeRxEncoding};
+
+        let observations = include_str!("../tests/fixtures/d2o_layered_rx.tsv")
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+            .map(|line| {
+                let fields = line
+                    .split_whitespace()
+                    .map(|field| field.parse::<u64>().expect("числовое поле fixture"))
+                    .collect::<Vec<_>>();
+                assert_eq!(fields.len(), 8);
+                R2oVolumeObservation {
+                    status: fields[0] as u16,
+                    body_complete: fields[1] != 0,
+                    body_encoding: match fields[2] {
+                        0 => R2oVolumeRxEncoding::Identity,
+                        1 => R2oVolumeRxEncoding::Gzip,
+                        _ => panic!("неизвестное кодирование fixture"),
+                    },
+                    body_framing_valid: fields[3] != 0,
+                    body_has_length: fields[4] != 0,
+                    body_chunked: fields[5] != 0,
+                    body_expected: fields[6],
+                    body_bytes: fields[7],
+                    ..R2oVolumeObservation::default()
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(observations.len(), 3);
+
+        let mut next = 0;
+        let mut waits = 0;
+        let mut encodings = Vec::new();
+        let (last, layered_rx_handled, attempts, evidence) =
+            super::r2o_discovery_layered_rx_candidate_trials(
+                true,
+                r2o_controller::fetch::R2oFetchEncoding::GzipDeflate,
+                observations.len(),
+                || true,
+                || waits += 1,
+                |encoding| {
+                    encodings.push(encoding);
+                    let observation = observations[next];
+                    next += 1;
+                    (observation, true)
+                },
+                |(observation, applied)| applied.then_some(*observation),
+            );
+        assert!(layered_rx_handled);
+        assert_eq!(attempts, 3);
+        assert_eq!(waits, 2);
+        assert_eq!(next, 3);
+        assert!(evidence.is_some());
+        assert_eq!(last.0, observations[2]);
+        let encodings = encodings
+            .into_iter()
+            .map(|encoding| match encoding {
+                r2o_controller::fetch::R2oFetchEncoding::Identity => "identity",
+                r2o_controller::fetch::R2oFetchEncoding::Gzip => "gzip",
+                r2o_controller::fetch::R2oFetchEncoding::GzipDeflate => {
+                    panic!("обычное кодирование в layered RX")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let output = format!("encodings={encodings};cut=1;handled=1\n");
+        if let Ok(path) = std::env::var("R2O_LAYERED_RX_DIFF_OUTPUT") {
+            std::fs::write(path, output).expect("записать C/Rust differential output");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn flow_unfit_rechecks_only_enabled_exact_plan_bindings_and_keeps_them() {
         let target = DiscoveryTarget {
             host: "discord.com".to_owned(),
@@ -21882,6 +22079,8 @@ mod tests {
             local_limit: false,
             dropped_before: 7,
             dropped_after: 7,
+            layered_rx_handled: false,
+            layered_rx_proven: false,
         };
         let failed = Err("TLS-рукопожатие не завершилось".into());
         assert!(super::r2o_discovery_measured_fallback_allowed(
