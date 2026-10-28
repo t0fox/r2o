@@ -4392,6 +4392,7 @@ fn r2o_family_recovery_sibling_trial_with_ech(
         ech,
         wire_len,
         None,
+        r2o_controller::fetch::r2o_d2o_verification_encoding(&candidate.probe_path),
     );
     (result, applied)
 }
@@ -4406,6 +4407,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
     ech: Option<&r2o_controller::ech::R2oEchConfig>,
     wire_len: Option<usize>,
     packet_budget: Option<u32>,
+    request_encoding: r2o_controller::fetch::R2oFetchEncoding,
 ) -> (
     Result<r2o_controller::fetch::FetchResult, String>,
     bool,
@@ -4490,18 +4492,20 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
                                 r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT,
                             )
                         } else if packet_budget.is_some() {
-                            r2o_controller::fetch::r2o_fetch_connected_stream_with_packet_budget_and_phase_timeout(
+                            r2o_controller::fetch::r2o_fetch_connected_stream_with_packet_budget_phase_timeout_and_encoding(
                                 &options,
                                 stream,
                                 packet_budget,
                                 Some(r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT),
+                                request_encoding,
                             )
                         } else {
-                            r2o_controller::fetch::r2o_fetch_connected_stream_with_packet_budget_and_phase_timeout(
+                            r2o_controller::fetch::r2o_fetch_connected_stream_with_packet_budget_phase_timeout_and_encoding(
                                 &options,
                                 stream,
                                 None,
                                 Some(r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT),
+                                request_encoding,
                             )
                         }
                     }
@@ -4610,6 +4614,7 @@ fn r2o_run_discovery_candidate_trial_with_retries(
         resource_memory,
         probe_budget_remaining,
         packet_budget,
+        r2o_controller::fetch::R2oFetchEncoding::Identity,
         retry_budget_available,
         true,
         None,
@@ -4639,6 +4644,7 @@ fn r2o_run_discovery_candidate_trial_with_progress(
     resource_memory: &std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>,
     probe_budget_remaining: usize,
     packet_budget: Option<u32>,
+    request_encoding: r2o_controller::fetch::R2oFetchEncoding,
     mut retry_budget_available: impl FnMut() -> bool,
     measured_arm: bool,
     dropped_events: Option<&AtomicUsize>,
@@ -4728,6 +4734,7 @@ fn r2o_run_discovery_candidate_trial_with_progress(
                 ech_config,
                 r2o_discovery_candidate_wire_len(target, client_hello, ech_config),
                 packet_budget,
+                request_encoding,
             );
             if let Ok(fetch) = &trial.0
                 && r2o_controller::fetch::r2o_fetch_result_can_remember_resources(fetch)
@@ -8605,6 +8612,9 @@ impl DiscoveryWorker {
                                     &runner_resource_memory,
                                     probe_cap.saturating_sub(own_probes),
                                     None,
+                                    r2o_controller::fetch::r2o_d2o_verification_encoding(
+                                        &probe_path,
+                                    ),
                                     || {
                                         !cancel.load(Ordering::Relaxed)
                                             && r2o_discovery_trial_time_available(
@@ -8834,6 +8844,7 @@ impl DiscoveryWorker {
                             &runner_resource_memory,
                             known_probe_cap.saturating_sub(discovery_candidate_probes),
                             None,
+                            r2o_controller::fetch::r2o_d2o_verification_encoding(&known_probe_path),
                             || {
                                 !cancel.load(Ordering::Relaxed)
                                     && r2o_discovery_trial_time_available(runner_started.elapsed())
@@ -9013,6 +9024,7 @@ impl DiscoveryWorker {
                     &runner_resource_memory,
                     probe_counts.remaining(probe_cap),
                     None,
+                    r2o_controller::fetch::r2o_d2o_verification_encoding(&probe_path),
                     || {
                         !cancel.load(Ordering::Relaxed)
                             && r2o_discovery_trial_time_available(runner_started.elapsed())
@@ -9140,6 +9152,7 @@ impl DiscoveryWorker {
                             &runner_resource_memory,
                             probe_counts.remaining(probe_cap),
                             None,
+                            r2o_controller::fetch::r2o_d2o_verification_encoding(&probe_path),
                             || {
                                 !cancel.load(Ordering::Relaxed)
                                     && r2o_discovery_trial_time_available(runner_started.elapsed())

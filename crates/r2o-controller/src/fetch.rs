@@ -245,6 +245,18 @@ impl From<String> for R2oFetchError {
 pub enum R2oFetchEncoding {
     Identity,
     Gzip,
+    GzipDeflate,
+}
+
+/// Обычный verifier d2o использует gzip, deflate без выбранного пути.
+/// В discovery отсутствие пути представлено корнем; явный ресурсный путь
+/// проверяется identity, как в `d2k_verify_probe_path_on(..., encoding=0)`.
+pub fn r2o_d2o_verification_encoding(path: &str) -> R2oFetchEncoding {
+    if path == "/" {
+        R2oFetchEncoding::GzipDeflate
+    } else {
+        R2oFetchEncoding::Identity
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -474,6 +486,25 @@ pub fn r2o_fetch_connected_stream_with_packet_budget_and_phase_timeout(
     packet_budget: Option<u32>,
     phase_timeout: Option<Duration>,
 ) -> Result<FetchResult, String> {
+    r2o_fetch_connected_stream_with_packet_budget_phase_timeout_and_encoding(
+        options,
+        stream,
+        packet_budget,
+        phase_timeout,
+        r2o_d2o_verification_encoding(&options.path),
+    )
+}
+
+/// Выполнить HTTPS-проверку по соединённому потоку с указанным режимом
+/// кодирования. Нужен для специальных d2o RX-фаз, которые выбирают identity
+/// или gzip независимо от стандартного verifier.
+pub fn r2o_fetch_connected_stream_with_packet_budget_phase_timeout_and_encoding(
+    options: &FetchOptions,
+    stream: TcpStream,
+    packet_budget: Option<u32>,
+    phase_timeout: Option<Duration>,
+    encoding: R2oFetchEncoding,
+) -> Result<FetchResult, String> {
     options.validate()?;
     if phase_timeout.is_some_and(|timeout| timeout.is_zero()) {
         return Err("срок шага должен быть больше нуля".into());
@@ -497,7 +528,7 @@ pub fn r2o_fetch_connected_stream_with_packet_budget_and_phase_timeout(
         stream,
         address,
         Instant::now(),
-        R2oFetchEncoding::Identity,
+        encoding,
         roots,
         None,
         packet_budget,
@@ -623,7 +654,7 @@ pub fn r2o_fetch_with_phase_timeout(
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     r2o_fetch_with_roots_and_encoding_detailed_with_timeouts(
         options,
-        R2oFetchEncoding::Identity,
+        r2o_d2o_verification_encoding(&options.path),
         roots,
         Some(phase_timeout),
         Some(phase_timeout),
@@ -1642,6 +1673,7 @@ fn build_request(name: &str, path: &str, encoding: R2oFetchEncoding) -> Vec<u8> 
     request.extend_from_slice(match encoding {
         R2oFetchEncoding::Identity => b"identity",
         R2oFetchEncoding::Gzip => b"gzip",
+        R2oFetchEncoding::GzipDeflate => b"gzip, deflate",
     });
     request.extend_from_slice(b"\r\nConnection: keep-alive\r\n\r\n");
     request
@@ -2589,6 +2621,7 @@ mod tests {
     fn запрос_проверки_передаёт_выбранное_кодирование() {
         let identity = build_request("example.com", "/", R2oFetchEncoding::Identity);
         let gzip = build_request("example.com", "/", R2oFetchEncoding::Gzip);
+        let gzip_deflate = build_request("example.com", "/", R2oFetchEncoding::GzipDeflate);
 
         assert!(
             identity
@@ -2598,6 +2631,23 @@ mod tests {
         assert!(
             gzip.windows(b"Accept-Encoding: gzip".len())
                 .any(|window| window == b"Accept-Encoding: gzip")
+        );
+        assert!(
+            gzip_deflate
+                .windows(b"Accept-Encoding: gzip, deflate".len())
+                .any(|window| window == b"Accept-Encoding: gzip, deflate")
+        );
+    }
+
+    #[test]
+    fn обычный_verifier_d2o_выбирает_кодирование_по_наличию_ресурсного_пути() {
+        assert_eq!(
+            r2o_d2o_verification_encoding("/"),
+            R2oFetchEncoding::GzipDeflate
+        );
+        assert_eq!(
+            r2o_d2o_verification_encoding("/css/site.css"),
+            R2oFetchEncoding::Identity
         );
     }
 

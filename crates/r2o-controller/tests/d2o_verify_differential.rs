@@ -297,6 +297,95 @@ fn assert_invalid_finished_result(protocol: &str, tls12: bool) {
     server.join().unwrap();
 }
 
+fn serve_and_capture_requests(
+    config: Arc<rustls::ServerConfig>,
+    listener: TcpListener,
+    sender: std::sync::mpsc::Sender<Vec<u8>>,
+) {
+    for _ in 0..2 {
+        let Ok((mut socket, _)) = listener.accept() else {
+            return;
+        };
+        let _ = socket.set_read_timeout(Some(Duration::from_secs(3)));
+        let _ = socket.set_write_timeout(Some(Duration::from_secs(3)));
+        let Ok(mut connection) = rustls::ServerConnection::new(Arc::clone(&config)) else {
+            continue;
+        };
+        while connection.is_handshaking() {
+            if connection.complete_io(&mut socket).is_err() {
+                break;
+            }
+        }
+        if connection.is_handshaking() {
+            continue;
+        }
+
+        let mut stream = rustls::StreamOwned::new(connection, socket);
+        let mut request = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !request.ends_with(b"\r\n\r\n") {
+            if stream.read_exact(&mut byte).is_err() {
+                break;
+            }
+            request.push(byte[0]);
+        }
+        if request.ends_with(b"\r\n\r\n") {
+            if sender.send(request).is_err() {
+                return;
+            }
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+            let _ = stream.flush();
+        }
+    }
+}
+
+#[test]
+#[ignore = "run by scripts/r2o-tls-verify-differential.sh with the donor C verifier"]
+fn donor_and_r2o_send_the_same_default_verification_request() {
+    let helper = std::env::var_os("R2O_D2O_VERIFY_HELPER")
+        .expect("differential script must provide the donor C verifier");
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || {
+        serve_and_capture_requests(server_config(false, false, false), listener, sender)
+    });
+    let port = address.port().to_string();
+
+    let c_result = Command::new(&helper)
+        .args(["127.0.0.1", port.as_str(), "localhost", "tls13"])
+        .output()
+        .expect("run donor C verifier");
+    assert!(c_result.status.success());
+    assert_eq!(
+        String::from_utf8(c_result.stdout).unwrap().trim(),
+        "1\t1\t200\t1"
+    );
+    let c_request = receiver.recv().expect("capture d2o verification request");
+
+    let options = FetchOptions {
+        name: "localhost".into(),
+        ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        port: address.port(),
+        path: "/".into(),
+        deadline: Duration::from_secs(3),
+        tls12: false,
+        wire_len: None,
+        mark: None,
+    };
+    let rust_result = r2o_fetch_with_phase_timeout(&options, Duration::from_secs(3))
+        .expect("r2o must complete the same verification request");
+    assert!(rust_result.application_verified);
+    let rust_request = receiver.recv().expect("capture r2o verification request");
+    server.join().unwrap();
+
+    assert_eq!(
+        c_request, rust_request,
+        "d2o and r2o must send the same GET / request for ordinary TLS verification"
+    );
+}
+
 fn assert_short_tls12_finished_is_rejected() {
     let helper = std::env::var_os("R2O_D2O_VERIFY_HELPER")
         .expect("differential script must provide the donor C verifier");
