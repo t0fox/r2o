@@ -26,4 +26,4 @@ R2O_SCHED_COOLDOWN_DIFF_OUTPUT="$tmp_dir/rust.out" \
     cargo +1.98.0 test --locked -p r2o-controller --bin r2o-controller \
     d2o_scheduler_challenge_cooldown_matches_donor
 diff -u "$tmp_dir/c.out" "$tmp_dir/rust.out"
-printf 'C/Rust challenge cooldown keys match d2o %s.\n' "$actual_donor_sha"
+printf 'C/Rust scheduler cooldown decisions match d2o %s.\n' "$actual_donor_sha"

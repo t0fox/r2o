@@ -7626,6 +7626,8 @@ struct DiscoveryWorker {
     ech_input_clearable_failures: HashSet<R2oDiscoveryFailureKey>,
     ech_input_names: VecDeque<(String, u8)>,
     clear_streaks: HashMap<R2oDiscoveryFailureKey, u8>,
+    clear_signal_codes: HashMap<R2oDiscoveryFailureKey, u8>,
+    clear_bypass_pending: HashSet<R2oDiscoveryFailureKey>,
     client_snapshot_targets:
         Arc<std::sync::Mutex<HashSet<r2o_controller::discovery::DiscoveryTarget>>>,
     client_snapshot_reasks: Arc<std::sync::Mutex<HashSet<R2oDiscoveryTaskKey>>>,
@@ -10353,6 +10355,8 @@ impl DiscoveryWorker {
             ech_input_clearable_failures: HashSet::new(),
             ech_input_names: VecDeque::new(),
             clear_streaks: HashMap::new(),
+            clear_signal_codes: HashMap::new(),
+            clear_bypass_pending: HashSet::new(),
             client_snapshot_targets,
             client_snapshot_reasks,
             pending_rechecks: HashMap::new(),
@@ -10778,6 +10782,12 @@ impl DiscoveryWorker {
         self.clear_streaks.retain(|failure_key, _| {
             (failure_key.0.clone(), failure_key.1, failure_key.2) != *task_key
         });
+        self.clear_signal_codes.retain(|failure_key, _| {
+            (failure_key.0.clone(), failure_key.1, failure_key.2) != *task_key
+        });
+        self.clear_bypass_pending.retain(|failure_key| {
+            (failure_key.0.clone(), failure_key.1, failure_key.2) != *task_key
+        });
     }
 
     #[cfg(test)]
@@ -10824,6 +10834,7 @@ impl DiscoveryWorker {
             return false;
         }
         let failure_key = r2o_discovery_failure_key(&target);
+        let mut bypass_direct_clear = false;
         if let Some(failed_at) = self.failed_at.get(&failure_key).copied() {
             let retry_after = self
                 .failed_retry_after
@@ -10831,52 +10842,27 @@ impl DiscoveryWorker {
                 .copied()
                 .unwrap_or(R2O_DISCOVERY_FAILURE_RETRY);
             if !r2o_discovery_failure_retry_due_after(failed_at, now, retry_after) {
-                return false;
+                bypass_direct_clear = self.clear_streaks.contains_key(&failure_key)
+                    && trigger_code.is_some_and(|signal_code| {
+                        self.clear_signal_codes.get(&failure_key) != Some(&signal_code)
+                    });
+                if !bypass_direct_clear {
+                    return false;
+                }
+            } else {
+                self.r2o_clear_failed_endpoint(&failure_key);
             }
-            self.r2o_clear_failed_endpoint(&failure_key);
         }
-        if self.seen.contains(&target) {
+        if self.seen.contains(&target) && !bypass_direct_clear {
             return false;
         }
         if self.r2o_reusable_task_slot(&task_key).is_none() {
             return false;
         }
-        if self.seen_order.len() == 256
-            && let Some(expired) = self.seen_order.pop_front()
-        {
-            self.seen.remove(&expired);
-            self.suspect_fingerprints
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&expired);
-            self.suspect_fingerprint_order
-                .retain(|target| target != &expired);
-            let expired_task_key = r2o_discovery_task_key(&expired);
-            if !self
-                .seen_order
-                .iter()
-                .any(|seen| r2o_discovery_task_key(seen) == expired_task_key)
-            {
-                self.completed.remove(&expired_task_key);
-            }
-            let expired_key = r2o_discovery_failure_key(&expired);
-            if !self
-                .seen_order
-                .iter()
-                .any(|seen| r2o_discovery_failure_key(seen) == expired_key)
-            {
-                self.failed_at.remove(&expired_key);
-                self.failed_retry_after.remove(&expired_key);
-                self.ech_input_clearable_failures.remove(&expired_key);
-                self.clear_streaks.remove(&expired_key);
-            }
-        }
         self.r2o_reconcile_task_slots(now);
         let Some((task_slot, evicted_watcher)) = self.r2o_reusable_task_slot(&task_key) else {
             return false;
         };
-        self.seen.insert(target.clone());
-        self.seen_order.push_back(target.clone());
         let jobs = Arc::clone(&self.jobs);
         let (queue, wake) = &*jobs;
         let mut queue = queue
@@ -10910,6 +10896,44 @@ impl DiscoveryWorker {
         let enqueued = queue.enqueue_with_planned(target.clone(), now, trigger_planned);
         let queue_full = !enqueued && queue.entries.len() >= R2O_DISCOVERY_TASK_CAPACITY;
         if enqueued {
+            if bypass_direct_clear {
+                self.r2o_clear_seen_endpoint(&failure_key);
+                self.clear_bypass_pending.insert(failure_key.clone());
+            }
+            if self.seen_order.len() >= 256
+                && let Some(expired) = self.seen_order.pop_front()
+            {
+                self.seen.remove(&expired);
+                self.suspect_fingerprints
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&expired);
+                self.suspect_fingerprint_order
+                    .retain(|target| target != &expired);
+                let expired_task_key = r2o_discovery_task_key(&expired);
+                if !self
+                    .seen_order
+                    .iter()
+                    .any(|seen| r2o_discovery_task_key(seen) == expired_task_key)
+                {
+                    self.completed.remove(&expired_task_key);
+                }
+                let expired_key = r2o_discovery_failure_key(&expired);
+                if !self
+                    .seen_order
+                    .iter()
+                    .any(|seen| r2o_discovery_failure_key(seen) == expired_key)
+                {
+                    self.failed_at.remove(&expired_key);
+                    self.failed_retry_after.remove(&expired_key);
+                    self.ech_input_clearable_failures.remove(&expired_key);
+                    self.clear_streaks.remove(&expired_key);
+                    self.clear_signal_codes.remove(&expired_key);
+                    self.clear_bypass_pending.remove(&expired_key);
+                }
+            }
+            self.seen.insert(target.clone());
+            self.seen_order.push_back(target.clone());
             self.measurement_gate
                 .r2o_set_pending_tcp_discovery(queue.pending_tcp_count());
             let mut searches = self
@@ -10939,11 +10963,13 @@ impl DiscoveryWorker {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&task_key);
             }
-            self.seen.remove(&target);
-            self.seen_order.retain(|seen| seen != &target);
-            self.failed_at.remove(&failure_key);
-            self.failed_retry_after.remove(&failure_key);
-            self.ech_input_clearable_failures.remove(&failure_key);
+            if !bypass_direct_clear {
+                self.seen.remove(&target);
+                self.seen_order.retain(|seen| seen != &target);
+                self.failed_at.remove(&failure_key);
+                self.failed_retry_after.remove(&failure_key);
+                self.ech_input_clearable_failures.remove(&failure_key);
+            }
             if queue_full {
                 let mut searches = self
                     .searches
@@ -11384,7 +11410,7 @@ impl DiscoveryWorker {
         self.queue_with_planned_and_trigger(target, trigger_planned, trigger_code)
     }
 
-    fn r2o_clear_failed_endpoint(&mut self, failure_key: &R2oDiscoveryFailureKey) {
+    fn r2o_clear_seen_endpoint(&mut self, failure_key: &R2oDiscoveryFailureKey) {
         let matching: Vec<_> = self
             .seen_order
             .iter()
@@ -11396,9 +11422,29 @@ impl DiscoveryWorker {
         }
         self.seen_order
             .retain(|seen| &r2o_discovery_failure_key(seen) != failure_key);
+    }
+
+    fn r2o_clear_failed_endpoint(&mut self, failure_key: &R2oDiscoveryFailureKey) {
+        self.r2o_clear_seen_endpoint(failure_key);
         self.failed_at.remove(failure_key);
         self.failed_retry_after.remove(failure_key);
+        self.clear_signal_codes.remove(failure_key);
+        self.clear_bypass_pending.remove(failure_key);
         self.ech_input_clearable_failures.remove(failure_key);
+    }
+
+    fn r2o_record_late_rst_only_cooldown(
+        &mut self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+    ) {
+        let task_key = r2o_discovery_task_key(target);
+        if self.active.contains_key(&task_key) {
+            return;
+        }
+        let failure_key = r2o_discovery_failure_key(target);
+        if self.clear_streaks.remove(&failure_key).is_some() {
+            self.r2o_clear_failed_endpoint(&failure_key);
+        }
     }
 
     fn is_active(&self, target: &r2o_controller::discovery::DiscoveryTarget) -> bool {
@@ -11442,9 +11488,13 @@ impl DiscoveryWorker {
             self.seen.remove(target);
             self.seen_order.retain(|seen| seen != target);
             let failure_key = r2o_discovery_failure_key(target);
-            self.failed_at.remove(&failure_key);
-            self.failed_retry_after.remove(&failure_key);
-            self.ech_input_clearable_failures.remove(&failure_key);
+            let preserve_direct_clear = self.clear_bypass_pending.remove(&failure_key);
+            if !preserve_direct_clear {
+                self.failed_at.remove(&failure_key);
+                self.failed_retry_after.remove(&failure_key);
+                self.clear_signal_codes.remove(&failure_key);
+                self.ech_input_clearable_failures.remove(&failure_key);
+            }
         }
         expired
     }
@@ -11801,6 +11851,18 @@ impl DiscoveryWorker {
         }
         let task_key = r2o_discovery_task_key(&outcome.target);
         let failure_key = r2o_discovery_failure_key(&outcome.target);
+        let admitted_signal_code = self
+            .searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .get(&task_key)
+            .map(|search| search.trigger_code);
+        let preserve_direct_clear =
+            outcome.queue_expired && self.clear_bypass_pending.remove(&failure_key);
+        if !outcome.queue_expired {
+            self.clear_bypass_pending.remove(&failure_key);
+        }
         let ech_input_clearable = !outcome.queue_expired
             && outcome.plan_text.is_none()
             && !outcome.direct_clear
@@ -11831,16 +11893,25 @@ impl DiscoveryWorker {
         if outcome.direct_clear {
             let streak = self.clear_streaks.entry(failure_key.clone()).or_default();
             *streak = streak.saturating_add(1);
+            self.clear_signal_codes.insert(
+                failure_key.clone(),
+                admitted_signal_code.unwrap_or_default(),
+            );
             outcome.retry_after = Some(r2o_discovery_clear_retry_after(*streak));
         } else if !outcome.queue_expired {
             self.clear_streaks.remove(&failure_key);
+            self.clear_signal_codes.remove(&failure_key);
+        } else if !preserve_direct_clear {
+            self.clear_signal_codes.remove(&failure_key);
         }
         if outcome.queue_expired {
             self.completed.remove(&task_key);
             self.seen.remove(&outcome.target);
             self.seen_order.retain(|seen| seen != &outcome.target);
-            self.failed_at.remove(&failure_key);
-            self.failed_retry_after.remove(&failure_key);
+            if !preserve_direct_clear {
+                self.failed_at.remove(&failure_key);
+                self.failed_retry_after.remove(&failure_key);
+            }
             self.ech_input_clearable_failures.remove(&failure_key);
         } else if outcome.plan_text.is_none() && self.seen.contains(&outcome.target) {
             self.completed.remove(&task_key);
@@ -14779,6 +14850,11 @@ impl ControlClient {
                             }
                         }
                     } else {
+                        if let Some(target) = discovery_target.as_ref()
+                            && let Some((worker, _, _, _)) = &mut discovery
+                        {
+                            worker.r2o_record_late_rst_only_cooldown(target);
+                        }
                         println!(
                             "парная RX-проверка {host}: обрыв не подтверждён — {}",
                             outcome.result.reason
@@ -22153,6 +22229,8 @@ mod tests {
             ech_input_clearable_failures: std::collections::HashSet::new(),
             ech_input_names: std::collections::VecDeque::new(),
             clear_streaks: std::collections::HashMap::new(),
+            clear_signal_codes: std::collections::HashMap::new(),
+            clear_bypass_pending: std::collections::HashSet::new(),
             client_snapshot_targets: Arc::new(std::sync::Mutex::new(
                 std::collections::HashSet::new(),
             )),
@@ -22320,6 +22398,152 @@ mod tests {
             "{output}quic4 {}\ntcp4_after_quic {}\n",
             u8::from(worker.r2o_discovery_challenge_active(&quic4, now)),
             u8::from(worker.r2o_discovery_challenge_active(&tcp4, now)),
+        );
+        let clear_target = DiscoveryTarget {
+            host: "clear.example".into(),
+            endpoint: "192.0.2.20:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        assert!(worker.queue_with_planned_and_trigger(clear_target.clone(), false, Some(1),));
+        worker
+            .jobs
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .clear();
+        worker.r2o_complete_outcome(DiscoveryOutcome {
+            target: clear_target.clone(),
+            plan_text: None,
+            detail: "прямой CLEAR".into(),
+            queue_expired: false,
+            direct_clear: true,
+            volume_recovery: false,
+            volume_fingerprint: None,
+            volume_box_id: None,
+            retry_after: Some(std::time::Duration::from_secs(600)),
+        });
+        let same_signal_blocked =
+            !worker.queue_with_planned_and_trigger(clear_target.clone(), false, Some(1));
+        {
+            let now = std::time::Instant::now();
+            let mut queue = worker
+                .jobs
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for index in 0..super::R2O_DISCOVERY_TASK_CAPACITY {
+                assert!(queue.enqueue_with_planned(
+                    DiscoveryTarget {
+                        host: format!("cooldown-full-{index}.example"),
+                        endpoint: format!("192.0.2.{}:443", index + 1),
+                        family: 4,
+                        shape: SHAPE_MODERN,
+                    },
+                    now,
+                    false,
+                ));
+            }
+        }
+        assert!(!worker.queue_with_planned_and_trigger(clear_target.clone(), false, Some(3),));
+        let clear_failure_key = super::r2o_discovery_failure_key(&clear_target);
+        assert_eq!(worker.clear_signal_codes.get(&clear_failure_key), Some(&1));
+        assert!(worker.failed_at.contains_key(&clear_failure_key));
+        worker
+            .jobs
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .clear();
+        worker.measurement_gate.r2o_set_pending_tcp_discovery(0);
+        let other_signal_blocked =
+            !worker.queue_with_planned_and_trigger(clear_target.clone(), false, Some(3));
+        assert!(same_signal_blocked);
+        assert!(!other_signal_blocked);
+        worker
+            .jobs
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .clear();
+        worker.measurement_gate.r2o_set_pending_tcp_discovery(0);
+        worker.r2o_complete_outcome(DiscoveryOutcome {
+            target: clear_target.clone(),
+            plan_text: None,
+            detail: "задача истекла до измерения".into(),
+            queue_expired: true,
+            direct_clear: false,
+            volume_recovery: false,
+            volume_fingerprint: None,
+            volume_box_id: None,
+            retry_after: None,
+        });
+        let same_signal_after_expiry_blocked =
+            !worker.queue_with_planned_and_trigger(clear_target.clone(), false, Some(1));
+        assert!(same_signal_after_expiry_blocked);
+        worker.r2o_record_late_rst_only_cooldown(&clear_target);
+        let late_only_ordinary_blocked =
+            !worker.queue_with_planned_and_trigger(clear_target.clone(), false, Some(1));
+        assert!(!late_only_ordinary_blocked);
+
+        let now = std::time::Instant::now();
+        let (late_jobs, _late_job_receiver) = std::sync::mpsc::sync_channel(1);
+        let (late_outcome_sender, late_outcomes) = std::sync::mpsc::sync_channel(1);
+        drop(late_outcome_sender);
+        let mut late_rx_worker = super::R2oLateRxWorker {
+            jobs: Some(late_jobs),
+            outcomes: late_outcomes,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cooldowns: std::collections::HashMap::from([("clear.example".into(), now)]),
+            thread: None,
+        };
+        let late_only_trigger_blocked = !late_rx_worker.queue(
+            super::R2oLateRxInput {
+                options: r2o_controller::fetch::FetchOptions {
+                    name: "clear.example".into(),
+                    ip: Some("192.0.2.20".parse().unwrap()),
+                    port: 443,
+                    path: "/".into(),
+                    deadline: std::time::Duration::from_secs(6),
+                    tls12: false,
+                    wire_len: Some(512),
+                    mark: None,
+                },
+                discovery_target: Some(clear_target),
+                alternate_path: None,
+            },
+            now,
+        );
+        assert!(late_only_trigger_blocked);
+
+        let mut exhausted_worker = r2o_test_discovery_worker_without_threads();
+        let exhausted_target = DiscoveryTarget {
+            host: "exhausted.example".into(),
+            endpoint: "192.0.2.21:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        r2o_test_record_failed_discovery(
+            &mut exhausted_worker,
+            exhausted_target.clone(),
+            super::R2O_DISCOVERY_INCOMPLETE_RETRY,
+            false,
+        );
+        exhausted_worker.r2o_record_late_rst_only_cooldown(&exhausted_target);
+        let late_only_preserves_exhausted =
+            !exhausted_worker.queue_with_planned_and_trigger(exhausted_target, false, Some(1));
+        assert!(late_only_preserves_exhausted);
+        let output = format!(
+            "{output}clear_same {}\nclear_other {}\nclear_same_after_expiry {}\nlate_only_ordinary {}\nlate_only_trigger {}\nlate_only_preserves_exhausted {}\n",
+            u8::from(same_signal_blocked),
+            u8::from(other_signal_blocked),
+            u8::from(same_signal_after_expiry_blocked),
+            u8::from(late_only_ordinary_blocked),
+            u8::from(late_only_trigger_blocked),
+            u8::from(late_only_preserves_exhausted),
         );
         if let Ok(path) = std::env::var("R2O_SCHED_COOLDOWN_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
@@ -33062,6 +33286,8 @@ mod tests {
             ech_input_clearable_failures: std::collections::HashSet::new(),
             ech_input_names: std::collections::VecDeque::new(),
             clear_streaks: std::collections::HashMap::new(),
+            clear_signal_codes: std::collections::HashMap::new(),
+            clear_bypass_pending: std::collections::HashSet::new(),
             completed: std::collections::HashSet::new(),
             completed_started_at: std::collections::HashMap::new(),
             active: std::collections::HashMap::new(),
