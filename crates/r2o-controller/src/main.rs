@@ -2454,6 +2454,37 @@ fn r2o_discovery_volume_cut(
 }
 
 #[cfg(unix)]
+fn r2o_discovery_cached_volume_cut(
+    searches: &std::sync::Mutex<R2oDiscoveryVolumeSearchCache>,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    client_hello: Option<&[u8]>,
+    candidate_catalog: Option<&Catalog>,
+    send_cap: &AtomicUsize,
+    resource_memory: &std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>,
+    white_name: &str,
+) -> bool {
+    let (probe_path, alternate_path) =
+        r2o_discovery_resource_probe_paths(target, candidate_catalog, resource_memory);
+    let key = R2oDiscoveryVolumeSearchKey {
+        wire_len: r2o_discovery_volume_wire_len(target, client_hello),
+        send_cap: send_cap.load(Ordering::Relaxed),
+        probe_path,
+        alternate_path,
+        network_probe: r2o_discovery_network_whitelist_probe(candidate_catalog, false),
+        white_name: white_name.to_owned(),
+    };
+    searches
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .has_volume_cut_for_run(
+            target,
+            &r2o_discovery_task_key(target),
+            &key,
+            std::time::Instant::now(),
+        )
+}
+
+#[cfg(unix)]
 fn r2o_discovery_network_whitelist_probe(catalog: Option<&Catalog>, rx_cut: bool) -> bool {
     catalog.is_some_and(|catalog| {
         catalog.network_whitelist.as_ref().is_none_or(|network| {
@@ -4264,19 +4295,20 @@ fn r2o_family_recovery_decision(
     applied: bool,
 ) -> R2oFamilyRecoveryDecision {
     let response_complete = result.as_ref().is_ok_and(|fetch| {
-        fetch.tls.is_some()
-            && fetch
-                .ech_accepted
-                .is_none_or(|accepted| accepted && fetch.peer_name_ok == Some(true))
-            && fetch.complete
-            && fetch.application_verified
-            && (200..600).contains(&fetch.status)
-            && !fetch.cloudflare_challenge
-            && !matches!(
-                fetch.http_outcome,
-                r2o_controller::fetch::R2oFetchHttpOutcome::Blocked
-                    | r2o_controller::fetch::R2oFetchHttpOutcome::LegalDenial
-            )
+        fetch.handshake_verified
+            || (fetch.tls.is_some()
+                && fetch
+                    .ech_accepted
+                    .is_none_or(|accepted| accepted && fetch.peer_name_ok == Some(true))
+                && fetch.complete
+                && fetch.application_verified
+                && (200..600).contains(&fetch.status)
+                && !fetch.cloudflare_challenge
+                && !matches!(
+                    fetch.http_outcome,
+                    r2o_controller::fetch::R2oFetchHttpOutcome::Blocked
+                        | r2o_controller::fetch::R2oFetchHttpOutcome::LegalDenial
+                ))
     });
     if response_complete && applied {
         R2oFamilyRecoveryDecision::Verified
@@ -4446,6 +4478,8 @@ fn r2o_family_recovery_sibling_trial_with_ech(
         mark,
         commands,
         ech,
+        None,
+        false,
         wire_len,
         None,
         r2o_controller::fetch::r2o_d2o_verification_encoding(&candidate.probe_path),
@@ -4461,6 +4495,8 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
     mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
     ech: Option<&r2o_controller::ech::R2oEchConfig>,
+    client_hello: Option<&[u8]>,
+    allow_non_http_alpn: bool,
     wire_len: Option<usize>,
     packet_budget: Option<u32>,
     request_encoding: r2o_controller::fetch::R2oFetchEncoding,
@@ -4520,6 +4556,14 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
             .map_err(|error| format!("не удалось подключить семейную пробу: {error}"));
         let mut transport_established = false;
         let mut socket_hold = None;
+        let captured_non_http_alpn = allow_non_http_alpn
+            .then(|| {
+                client_hello.and_then(r2o_controller::r2o_tls::r2o_tls_client_hello_non_http_alpn)
+            })
+            .flatten();
+        let ech_snapshot_replay = (target.shape == SHAPE_ECH_TCP && ech.is_none())
+            .then_some(client_hello)
+            .flatten();
         let fetch_result = match connected {
             Ok((stream, _, connected_port, _)) if connected_port == local_port => {
                 transport_established = true;
@@ -4539,7 +4583,21 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
                             wire_len,
                             mark: confirmation_mark,
                         };
-                        if let Some(ech) = ech {
+                        if let Some(client_hello) = ech_snapshot_replay {
+                            r2o_controller::fetch::r2o_verify_tls_replayed_client_hello(
+                                &options,
+                                stream,
+                                client_hello,
+                                r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT,
+                            )
+                        } else if let Some(alpn) = captured_non_http_alpn.as_deref() {
+                            r2o_controller::fetch::r2o_verify_tls_connected_stream_with_alpn(
+                                &options,
+                                stream,
+                                alpn,
+                                r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT,
+                            )
+                        } else if let Some(ech) = ech {
                             let config = r2o_controller::ech::r2o_ech_tls_config(ech)?;
                             r2o_controller::fetch::r2o_fetch_ech_connected_stream_with_phase_timeout(
                                 &options,
@@ -4699,6 +4757,7 @@ fn r2o_run_discovery_candidate_trial_with_retries(
         mark,
         commands,
         client_hello,
+        false,
         ech_config,
         resource_memory,
         probe_budget_remaining,
@@ -4732,6 +4791,7 @@ fn r2o_run_discovery_candidate_trial_with_progress(
     mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
     client_hello: Option<&[u8]>,
+    allow_non_http_alpn: bool,
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
     resource_memory: &std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>,
     probe_budget_remaining: usize,
@@ -4756,7 +4816,9 @@ fn r2o_run_discovery_candidate_trial_with_progress(
             Default::default(),
         );
     }
-    let proof_probe_reserve = usize::from(client_hello.is_some());
+    let ech_snapshot_is_trial_proof =
+        target.shape == SHAPE_ECH_TCP && ech_config.is_none() && client_hello.is_some();
+    let proof_probe_reserve = usize::from(client_hello.is_some() && !ech_snapshot_is_trial_proof);
     let Some(max_retries) = r2o_discovery_candidate_retry_count(
         probe_budget_remaining.saturating_sub(proof_probe_reserve),
     ) else {
@@ -4801,7 +4863,7 @@ fn r2o_run_discovery_candidate_trial_with_progress(
         group_plan: false,
         probe_path: probe_path.into(),
     };
-    if target.shape == SHAPE_ECH_TCP && ech_config.is_none() {
+    if target.shape == SHAPE_ECH_TCP && ech_config.is_none() && client_hello.is_none() {
         return (
             Err("кандидат ECH нельзя подтвердить без совместимой TLS-конфигурации".into()),
             false,
@@ -4836,6 +4898,8 @@ fn r2o_run_discovery_candidate_trial_with_progress(
                             mark,
                             commands,
                             ech_config,
+                            client_hello,
+                            allow_non_http_alpn,
                             wire_len,
                             packet_budget,
                             encoding,
@@ -4903,6 +4967,7 @@ fn r2o_run_discovery_candidate_trial_with_progress(
         },
     );
     if !evidence.layered_rx_handled
+        && !result.as_ref().is_ok_and(|fetch| fetch.handshake_verified)
         && r2o_family_recovery_decision(&result, applied) == R2oFamilyRecoveryDecision::Verified
         && let Some(client_hello) = client_hello
     {
@@ -5234,9 +5299,12 @@ fn r2o_discovery_client_shape_trial(
             match stream.try_clone() {
                 Ok(held) => {
                     socket_hold = Some(held);
-                    std::io::Write::write_all(&mut stream, client_hello).map_err(|error| {
-                        format!("не удалось отправить снимок ClientHello: {error}")
-                    })
+                    r2o_controller::r2o_tls::r2o_tls_replay_client_hello(
+                        &mut stream,
+                        client_hello,
+                        r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT,
+                    )
+                    .map_err(|error| format!("не удалось повторить снимок ClientHello: {error}"))
                 }
                 Err(error) => Err(format!("не удалось удержать сокет до APPLIED: {error}")),
             }
@@ -5247,7 +5315,7 @@ fn r2o_discovery_client_shape_trial(
     let events = r2o_collect_controller_applied_events_until(
         commands,
         trial_id,
-        if send_result.is_ok() {
+        if send_result.as_ref().is_ok_and(|proof| *proof) {
             std::time::Duration::from_secs(5)
         } else {
             std::time::Duration::ZERO
@@ -5262,12 +5330,13 @@ fn r2o_discovery_client_shape_trial(
         reply,
     });
     drop(socket_hold);
-    send_result?;
+    let server_hello = send_result?;
     delete_result?;
     let events = events?;
-    Ok(events
-        .iter()
-        .any(|event| r2o_family_applied_flow_matches(event, target, local_port, plan.id, trial_id)))
+    Ok(server_hello
+        && events.iter().any(|event| {
+            r2o_family_applied_flow_matches(event, target, local_port, plan.id, trial_id)
+        }))
 }
 
 #[cfg(unix)]
@@ -6177,6 +6246,33 @@ impl R2oDiscoveryVolumeSearchCache {
         self.carried_rx
             .remove(task_key)
             .or_else(|| self.get(target, key, now))
+    }
+
+    fn has_volume_cut_for_run(
+        &self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        task_key: &R2oDiscoveryTaskKey,
+        key: &R2oDiscoveryVolumeSearchKey,
+        now: std::time::Instant,
+    ) -> bool {
+        if self
+            .carried_rx
+            .get(task_key)
+            .is_some_and(|search| r2o_discovery_volume_cut(&search.tx, &search.rx))
+        {
+            return true;
+        }
+        self.entries.iter().any(|(candidate, search)| {
+            if candidate != target
+                || !r2o_discovery_volume_cut(&search.tx, &search.rx)
+                || now.saturating_duration_since(search.measured_at) >= R2O_DISCOVERY_TASK_LIFETIME
+            {
+                return false;
+            }
+            let mut cached_key = search.key.clone();
+            cached_key.network_probe = key.network_probe;
+            cached_key == *key
+        })
     }
 
     fn forget_carried_rx(&mut self, task_key: &R2oDiscoveryTaskKey) {
@@ -8544,7 +8640,8 @@ impl DiscoveryWorker {
                     .clone(),
             );
             let mut target = target;
-            let prepare_ech = |target: &mut r2o_controller::discovery::DiscoveryTarget| {
+            let prepare_ech = |target: &mut r2o_controller::discovery::DiscoveryTarget,
+                               has_client_hello: bool| {
                 let discovered_witness_candidates = if target.shape == SHAPE_ECH_TCP {
                     candidate_catalog
                         .as_ref()
@@ -8634,12 +8731,15 @@ impl DiscoveryWorker {
                     (Some(config), next)
                 });
                 let ech_config = witness_config.or(known_origin_config).or(direct_ech_config);
-                let ech_grease =
-                    ech_config.is_none() && r2o_controller::discovery::regrade_ech_grease(target);
+                let ech_grease = r2o_discovery_ech_grease_fallback(
+                    target,
+                    ech_config.is_some(),
+                    has_client_hello,
+                );
                 (ech_witness_candidates, next_witness, ech_config, ech_grease)
             };
             let (mut ech_witness_candidates, mut next_witness, mut ech_config, mut ech_grease) =
-                prepare_ech(&mut target);
+                prepare_ech(&mut target, client_hello.is_some());
             let persisted_ech_tried = runner_ech_rx_cursor
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -8662,7 +8762,11 @@ impl DiscoveryWorker {
             };
             let mut base_probes = 0;
             let mut seed_whole = None;
-            let ech_replay = target.shape == SHAPE_ECH_TCP && ech_config.is_some();
+            let ech_replay = r2o_discovery_ech_replay_required(
+                &target,
+                ech_config.is_some(),
+                client_hello.is_some(),
+            );
             let own_bound_plan_id = trigger_planned
                 .then(|| {
                     candidate_catalog.as_ref().and_then(|catalog| {
@@ -8723,6 +8827,15 @@ impl DiscoveryWorker {
                 base_probes = base.probes;
                 seed_whole = base.seed_whole;
                 if base.blocked {
+                    let own_cached_volume_cut = r2o_discovery_cached_volume_cut(
+                        &runner_volume_searches,
+                        &target,
+                        client_hello.as_deref(),
+                        candidate_catalog.as_ref(),
+                        &runner_send_cap,
+                        &runner_resource_memory,
+                        white_name,
+                    );
                     let (probe_path, _) = r2o_discovery_resource_probe_paths(
                         &target,
                         candidate_catalog.as_ref(),
@@ -8808,6 +8921,12 @@ impl DiscoveryWorker {
                                     mark,
                                     &commands,
                                     client_hello.as_deref(),
+                                    r2o_discovery_client_alpn_verification_allowed(
+                                        &target,
+                                        &probe_path,
+                                        base.blocked,
+                                        own_cached_volume_cut,
+                                    ),
                                     ech_config.as_ref(),
                                     &runner_resource_memory,
                                     probe_cap.saturating_sub(own_probes),
@@ -8913,7 +9032,7 @@ impl DiscoveryWorker {
             }
             if adopted_own_snapshot {
                 (ech_witness_candidates, next_witness, ech_config, ech_grease) =
-                    prepare_ech(&mut target);
+                    prepare_ech(&mut target, client_hello.is_some());
                 runner_client_snapshot_targets
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -8934,6 +9053,7 @@ impl DiscoveryWorker {
                 owned_opaque_fallback,
                 known_plans_allowed,
                 measured_arm_candidate,
+                client_alpn_handshake_blocked,
             ) = r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                 target.clone(),
                 client_hello.as_deref(),
@@ -8955,6 +9075,15 @@ impl DiscoveryWorker {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .update(&target, "выводим планы", 0, classify_probes, "", "");
             let mut outcome = outcome;
+            let cached_volume_cut = r2o_discovery_cached_volume_cut(
+                &runner_volume_searches,
+                &target,
+                client_hello.as_deref(),
+                candidate_catalog.as_ref(),
+                &runner_send_cap,
+                &runner_resource_memory,
+                white_name,
+            );
             if ech_grease {
                 outcome.detail.push_str(
                     "; ECH-конфигурация имени не подтверждена — веду ClientHello как TLS 1.3 GREASE",
@@ -9049,6 +9178,12 @@ impl DiscoveryWorker {
                             mark,
                             &commands,
                             client_hello.as_deref(),
+                            r2o_discovery_client_alpn_verification_allowed(
+                                &target,
+                                &known_probe_path,
+                                client_alpn_handshake_blocked,
+                                outcome.volume_recovery || cached_volume_cut,
+                            ),
                             ech_config.as_ref(),
                             &runner_resource_memory,
                             known_probe_cap.saturating_sub(discovery_candidate_probes),
@@ -9230,6 +9365,12 @@ impl DiscoveryWorker {
                     mark,
                     &commands,
                     client_hello.as_deref(),
+                    r2o_discovery_client_alpn_verification_allowed(
+                        &target,
+                        &probe_path,
+                        client_alpn_handshake_blocked,
+                        outcome.volume_recovery || cached_volume_cut,
+                    ),
                     ech_config.as_ref(),
                     &runner_resource_memory,
                     probe_counts.remaining(probe_cap),
@@ -9359,6 +9500,12 @@ impl DiscoveryWorker {
                             mark,
                             &commands,
                             client_hello.as_deref(),
+                            r2o_discovery_client_alpn_verification_allowed(
+                                &target,
+                                &probe_path,
+                                client_alpn_handshake_blocked,
+                                outcome.volume_recovery || cached_volume_cut,
+                            ),
                             None,
                             &runner_resource_memory,
                             probe_counts.remaining(probe_cap),
@@ -12647,7 +12794,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech(
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
     white_name: &str,
 ) -> (DiscoveryOutcome, usize) {
-    let (outcome, probes, _, _, _) =
+    let (outcome, probes, _, _, _, _) =
         r2o_classify_discovery_target_with_client_hello_and_ech_progress(
             target,
             client_hello,
@@ -12661,6 +12808,36 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech(
             &mut |_, _, _, _| {},
         );
     (outcome, probes)
+}
+
+#[cfg(unix)]
+fn r2o_discovery_ech_grease_fallback(
+    target: &mut r2o_controller::discovery::DiscoveryTarget,
+    ech_configuration_available: bool,
+    captured_client_hello: bool,
+) -> bool {
+    !ech_configuration_available
+        && !captured_client_hello
+        && r2o_controller::discovery::regrade_ech_grease(target)
+}
+
+#[cfg(unix)]
+fn r2o_discovery_ech_replay_required(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    ech_configuration_available: bool,
+    captured_client_hello: bool,
+) -> bool {
+    target.shape == SHAPE_ECH_TCP && (ech_configuration_available || captured_client_hello)
+}
+
+#[cfg(unix)]
+fn r2o_discovery_client_alpn_verification_allowed(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    probe_path: &str,
+    handshake_blocked: bool,
+    volume_cut: bool,
+) -> bool {
+    target.shape == SHAPE_MODERN && probe_path == "/" && handshake_blocked && !volume_cut
 }
 
 #[cfg(unix)]
@@ -12720,7 +12897,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
     seed_whole: Option<r2o_controller::classify::SeedWhole>,
     send_cap: usize,
     progress: &mut dyn FnMut(&str, usize, usize, usize),
-) -> (DiscoveryOutcome, usize, bool, bool, bool) {
+) -> (DiscoveryOutcome, usize, bool, bool, bool, bool) {
     let Ok(trigger) = r2o_discovery_trigger(&target, client_hello, ech_config) else {
         return (
             DiscoveryOutcome {
@@ -12735,6 +12912,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                 retry_after: None,
             },
             0,
+            false,
             false,
             false,
             false,
@@ -12762,6 +12940,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                 false,
                 false,
                 false,
+                false,
             );
         }
     };
@@ -12785,6 +12964,11 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
             )
         });
     let retry_after = r2o_discovery_retry_after(timed_out, result.verdict, &result.reason);
+    let client_alpn_handshake_blocked = !timed_out
+        && matches!(
+            result.verdict,
+            Verdict::Prefix | Verdict::WholePacket | Verdict::Opaque
+        );
     let probes = result.probes;
     let measured_arm = !timed_out && result.hit.is_some();
     let search_owned =
@@ -12843,6 +13027,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
         owned_opaque_fallback,
         known_plans_allowed,
         measured_arm,
+        client_alpn_handshake_blocked,
     )
 }
 
@@ -21826,6 +22011,65 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn captured_ech_without_configuration_uses_clienthello_replay() {
+        let mut captured = r2o_controller::discovery::DiscoveryTarget {
+            host: "ech.example".into(),
+            endpoint: "198.51.100.20:443".into(),
+            family: 4,
+            shape: SHAPE_ECH_TCP,
+        };
+        assert!(!super::r2o_discovery_ech_grease_fallback(
+            &mut captured,
+            false,
+            true,
+        ));
+        assert_eq!(captured.shape, SHAPE_ECH_TCP);
+        assert!(super::r2o_discovery_ech_replay_required(
+            &captured, false, true,
+        ));
+
+        let mut unobserved = captured.clone();
+        assert!(super::r2o_discovery_ech_grease_fallback(
+            &mut unobserved,
+            false,
+            false,
+        ));
+        assert_eq!(unobserved.shape, SHAPE_MODERN);
+        assert!(!super::r2o_discovery_ech_replay_required(
+            &unobserved,
+            false,
+            false,
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn captured_non_http_alpn_requires_handshake_block_and_no_volume_cut() {
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "mqtt.example".into(),
+            endpoint: "198.51.100.20:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        assert!(super::r2o_discovery_client_alpn_verification_allowed(
+            &target, "/", true, false
+        ));
+        assert!(!super::r2o_discovery_client_alpn_verification_allowed(
+            &target, "/", false, false
+        ));
+        assert!(!super::r2o_discovery_client_alpn_verification_allowed(
+            &target, "/", true, true
+        ));
+        assert!(!super::r2o_discovery_client_alpn_verification_allowed(
+            &target,
+            "/resource",
+            true,
+            false
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn client_shape_event_remembers_hello_without_starting_discovery() {
         let mut worker = r2o_test_discovery_worker_without_threads();
         let mut key = [0; KEY_LEN];
@@ -22536,6 +22780,7 @@ mod tests {
             gzip: false,
             complete: true,
             application_verified: true,
+            handshake_verified: false,
             elapsed: std::time::Duration::from_millis(30),
             reason: None,
             r2o_volume_observation: Default::default(),
@@ -22548,6 +22793,22 @@ mod tests {
         assert_eq!(
             r2o_family_recovery_decision(&Ok(fetch.clone()), true),
             R2oFamilyRecoveryDecision::Verified
+        );
+        let mut replay_proof = fetch.clone();
+        replay_proof.tls = None;
+        replay_proof.status = 0;
+        replay_proof.complete = false;
+        replay_proof.application_verified = false;
+        replay_proof.handshake_verified = true;
+        assert_eq!(
+            r2o_family_recovery_decision(&Ok(replay_proof.clone()), false),
+            R2oFamilyRecoveryDecision::Reclassify,
+            "ServerHello without the matching APPLIED event cannot verify a candidate"
+        );
+        assert_eq!(
+            r2o_family_recovery_decision(&Ok(replay_proof), true),
+            R2oFamilyRecoveryDecision::Verified,
+            "the captured ClientHello plus ServerHello and exact APPLIED is sufficient"
         );
         let mut ech_result = fetch.clone();
         ech_result.ech_accepted = Some(true);
@@ -23068,6 +23329,7 @@ mod tests {
             gzip: false,
             complete: true,
             application_verified: true,
+            handshake_verified: false,
             elapsed: std::time::Duration::from_millis(30),
             reason: None,
             r2o_volume_observation: Default::default(),
@@ -23474,6 +23736,136 @@ mod tests {
                 .is_none()
         );
         assert!(cache.entries.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cached_rx_cut_disables_client_alpn_handshake_verification() {
+        use r2o_controller::fetch::{
+            R2oFetchVolumeRxResult, R2oFetchVolumeTxResult, R2oFetchVolumeTxVerdict,
+        };
+        use r2o_controller::r2o_volume::{R2oVolumeRxDomain, R2oVolumeRxEvidence};
+        use std::sync::Mutex;
+
+        let target = DiscoveryTarget {
+            host: "mqtt.example".into(),
+            endpoint: "192.0.2.31:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let now = std::time::Instant::now();
+        let key = super::R2oDiscoveryVolumeSearchKey {
+            wire_len: super::r2o_discovery_volume_wire_len(&target, None),
+            send_cap: 1492,
+            probe_path: "/".into(),
+            alternate_path: None,
+            network_probe: false,
+            white_name: "hcaptcha.com".into(),
+        };
+        let mut cache = super::R2oDiscoveryVolumeSearchCache::default();
+        cache.insert(
+            target.clone(),
+            super::R2oDiscoveryVolumeSearch {
+                key,
+                measured_at: now,
+                tx: Ok(R2oFetchVolumeTxResult {
+                    address: target.endpoint.parse().unwrap(),
+                    verdict: R2oFetchVolumeTxVerdict::Passed,
+                    at_kb: 64,
+                    elapsed: std::time::Duration::ZERO,
+                    reason: "TX ladder passed".into(),
+                }),
+                rx: R2oFetchVolumeRxResult {
+                    evidence: Some(R2oVolumeRxEvidence {
+                        domain: R2oVolumeRxDomain::TlsWire,
+                        cut_kb: 16,
+                        expected_kb: 32,
+                        cut_packets: 18,
+                        compressed_complete: true,
+                        reason: "cached RX cut".into(),
+                    }),
+                    ..Default::default()
+                },
+                next_candidate: 0,
+                tried_plans: Vec::new(),
+            },
+        );
+        let searches = Mutex::new(cache);
+        let cached_rx_cut = super::r2o_discovery_cached_volume_cut(
+            &searches,
+            &target,
+            None,
+            None,
+            &AtomicUsize::new(1492),
+            &Mutex::new(Default::default()),
+            "hcaptcha.com",
+        );
+
+        assert!(cached_rx_cut);
+        assert!(!super::r2o_discovery_client_alpn_verification_allowed(
+            &target,
+            "/",
+            true,
+            cached_rx_cut,
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cached_tx_cut_disables_client_alpn_handshake_verification() {
+        use r2o_controller::fetch::{R2oFetchVolumeTxResult, R2oFetchVolumeTxVerdict};
+        use std::sync::Mutex;
+
+        let target = DiscoveryTarget {
+            host: "mqtt.example".into(),
+            endpoint: "192.0.2.31:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let now = std::time::Instant::now();
+        let key = super::R2oDiscoveryVolumeSearchKey {
+            wire_len: super::r2o_discovery_volume_wire_len(&target, None),
+            send_cap: 1492,
+            probe_path: "/".into(),
+            alternate_path: None,
+            network_probe: false,
+            white_name: "hcaptcha.com".into(),
+        };
+        let mut cache = super::R2oDiscoveryVolumeSearchCache::default();
+        cache.insert(
+            target.clone(),
+            super::R2oDiscoveryVolumeSearch {
+                key,
+                measured_at: now,
+                tx: Ok(R2oFetchVolumeTxResult {
+                    address: target.endpoint.parse().unwrap(),
+                    verdict: R2oFetchVolumeTxVerdict::Cut,
+                    at_kb: 16,
+                    elapsed: std::time::Duration::ZERO,
+                    reason: "cached TX cut".into(),
+                }),
+                rx: Default::default(),
+                next_candidate: 0,
+                tried_plans: Vec::new(),
+            },
+        );
+        let cached_volume_cut = super::r2o_discovery_cached_volume_cut(
+            &Mutex::new(cache),
+            &target,
+            None,
+            None,
+            &AtomicUsize::new(1492),
+            &Mutex::new(Default::default()),
+            "hcaptcha.com",
+        );
+
+        assert!(cached_volume_cut);
+        assert!(!super::r2o_discovery_client_alpn_verification_allowed(
+            &target,
+            "/",
+            true,
+            cached_volume_cut,
+        ));
     }
 
     #[cfg(unix)]

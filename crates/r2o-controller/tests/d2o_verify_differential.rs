@@ -199,6 +199,125 @@ fn server_config(
     Arc::new(config)
 }
 
+fn server_config_with_alpn(protocols: Vec<Vec<u8>>) -> Arc<rustls::ServerConfig> {
+    let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+    let certificate_der =
+        rustls::pki_types::CertificateDer::from(certificate.serialize_der().unwrap());
+    let private_key =
+        rustls::pki_types::PrivatePkcs8KeyDer::from(certificate.serialize_private_key_der());
+    let mut config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate_der], private_key.into())
+        .unwrap();
+    config.alpn_protocols = protocols;
+    Arc::new(config)
+}
+
+fn captured_tls13_client_hello(alpn: Option<&str>, ech: bool) -> Vec<u8> {
+    let ech_extension = [0xfe, 0x0d, 0, 2, 0, 0];
+    let handshake = r2o_controller::r2o_tls::r2o_tls13_client_hello(
+        &r2o_controller::r2o_tls::R2oTls13ClientHelloOptions {
+            server_name: Some("localhost"),
+            public_key: &[7; 32],
+            random: &[9; 32],
+            session_id_len: 0,
+            offer_tls12: false,
+            alpn,
+            alpn_wire: None,
+            extra_extensions: if ech { &ech_extension } else { &[] },
+            pad_to: 0,
+        },
+    )
+    .unwrap();
+    let length = u16::try_from(handshake.len()).unwrap();
+    let mut record = vec![0x16, 0x03, 0x01];
+    record.extend_from_slice(&length.to_be_bytes());
+    record.extend_from_slice(&handshake);
+    record
+}
+
+fn serve_alpn_handshakes(
+    config: Arc<rustls::ServerConfig>,
+    listener: TcpListener,
+    selected: std::sync::mpsc::Sender<Option<Vec<u8>>>,
+) {
+    for _ in 0..2 {
+        let Ok((mut socket, _)) = listener.accept() else {
+            return;
+        };
+        let _ = socket.set_read_timeout(Some(Duration::from_secs(3)));
+        let _ = socket.set_write_timeout(Some(Duration::from_secs(3)));
+        let Ok(mut connection) = rustls::ServerConnection::new(Arc::clone(&config)) else {
+            let _ = selected.send(None);
+            continue;
+        };
+        while connection.is_handshaking() {
+            if connection.complete_io(&mut socket).is_err() {
+                break;
+            }
+        }
+        let negotiated =
+            (!connection.is_handshaking()).then(|| connection.alpn_protocol().map(<[u8]>::to_vec));
+        let _ = selected.send(negotiated.flatten());
+    }
+}
+
+fn serve_replayed_client_hellos(
+    listener: TcpListener,
+    requests: usize,
+    response_type: u8,
+    captured: std::sync::mpsc::Sender<Vec<u8>>,
+) {
+    for _ in 0..requests {
+        let Ok((mut socket, _)) = listener.accept() else {
+            return;
+        };
+        let _ = socket.set_read_timeout(Some(Duration::from_secs(3)));
+        let mut header = [0; 5];
+        if socket.read_exact(&mut header).is_err() {
+            continue;
+        }
+        let length = usize::from(u16::from_be_bytes([header[3], header[4]]));
+        let mut hello = header.to_vec();
+        hello.resize(5 + length, 0);
+        if socket.read_exact(&mut hello[5..]).is_err() {
+            continue;
+        }
+        let _ = captured.send(hello);
+        let _ = socket.write_all(&[0x16, 0x03, 0x03, 0, 1, response_type]);
+    }
+}
+
+fn serve_slow_replayed_client_hellos(
+    listener: TcpListener,
+    requests: usize,
+    delay: Duration,
+    captured: std::sync::mpsc::Sender<Vec<u8>>,
+) {
+    for _ in 0..requests {
+        let Ok((mut socket, _)) = listener.accept() else {
+            return;
+        };
+        let _ = socket.set_read_timeout(Some(Duration::from_secs(3)));
+        let mut header = [0; 5];
+        if socket.read_exact(&mut header).is_err() {
+            continue;
+        }
+        let length = usize::from(u16::from_be_bytes([header[3], header[4]]));
+        let mut hello = header.to_vec();
+        hello.resize(5 + length, 0);
+        if socket.read_exact(&mut hello[5..]).is_err() {
+            continue;
+        }
+        let _ = captured.send(hello);
+        let _ = socket.write_all(&[0x16]);
+        thread::sleep(delay);
+        let _ = socket.write_all(&[0x03, 0x03, 0, 1]);
+        thread::sleep(delay);
+        let _ = socket.write_all(&[2]);
+    }
+}
+
 fn server_config_with_invalid_utf8_dns_san() -> Arc<rustls::ServerConfig> {
     let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
     let mut certificate_der = certificate.serialize_der().unwrap();
@@ -856,4 +975,177 @@ fn donor_and_r2o_ignore_tls12_server_finished_verify_data() {
 #[ignore = "run by scripts/r2o-tls-verify-differential.sh with the donor C verifier"]
 fn donor_and_r2o_reject_short_tls12_server_finished() {
     assert_short_tls12_finished_is_rejected();
+}
+
+#[test]
+#[ignore = "run by scripts/r2o-tls-verify-differential.sh with the donor C verifier"]
+fn donor_and_r2o_preserve_captured_mqtt_and_absent_alpn() {
+    let helper = std::env::var_os("R2O_D2O_VERIFY_HELPER")
+        .expect("differential script must provide the donor C verifier");
+    for (client_alpn, mode, expected_server_alpn) in [
+        (Some("mqtt"), "alpn-mqtt", Some(b"mqtt".to_vec())),
+        (None, "alpn-none", None),
+    ] {
+        let client_hello = captured_tls13_client_hello(client_alpn, false);
+        let offered = r2o_controller::r2o_tls::r2o_tls_client_hello_non_http_alpn(&client_hello)
+            .expect("the captured non-HTTP/no-ALPN shape must be replayable");
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (selected_sender, selected_receiver) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            serve_alpn_handshakes(
+                server_config_with_alpn(vec![b"mqtt".to_vec()]),
+                listener,
+                selected_sender,
+            )
+        });
+        let port = address.port().to_string();
+        let c_result = Command::new(&helper)
+            .args(["127.0.0.1", port.as_str(), "localhost", mode])
+            .output()
+            .expect("run donor C verifier with captured ALPN");
+        assert!(
+            c_result.status.success(),
+            "donor verifier exited with {}: {}",
+            c_result.status,
+            String::from_utf8_lossy(&c_result.stderr)
+        );
+        assert_eq!(String::from_utf8(c_result.stdout).unwrap().trim(), "1\t1");
+        assert_eq!(selected_receiver.recv().unwrap(), expected_server_alpn);
+
+        let options = FetchOptions {
+            name: "localhost".into(),
+            ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            port: address.port(),
+            path: "/".into(),
+            deadline: Duration::from_secs(3),
+            tls12: false,
+            wire_len: Some(client_hello.len()),
+            mark: None,
+        };
+        let stream = TcpStream::connect(address).unwrap();
+        let rust_result = r2o_controller::fetch::r2o_verify_tls_connected_stream_with_alpn(
+            &options,
+            stream,
+            &offered,
+            Duration::from_secs(3),
+        )
+        .expect("r2o must finish the same handshake-only verification");
+        assert!(rust_result.handshake_verified);
+        assert!(!rust_result.application_verified);
+        assert_eq!(selected_receiver.recv().unwrap(), expected_server_alpn);
+        server.join().unwrap();
+    }
+}
+
+#[test]
+#[ignore = "run by scripts/r2o-tls-verify-differential.sh with the donor C verifier"]
+fn donor_and_r2o_require_server_hello_when_replaying_captured_ech() {
+    let helper = std::env::var_os("R2O_D2O_VERIFY_HELPER")
+        .expect("differential script must provide the donor C verifier");
+    let client_hello = captured_tls13_client_hello(None, true);
+    assert!(r2o_controller::r2o_tls::r2o_tls_client_hello_non_http_alpn(&client_hello).is_none());
+    assert!(client_hello.windows(2).any(|window| window == [0xfe, 0x0d]));
+    let hex = client_hello
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    for (response_type, expected) in [(2_u8, true), (8_u8, false)] {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (captured_sender, captured_receiver) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            serve_replayed_client_hellos(listener, 2, response_type, captured_sender)
+        });
+        let port = address.port().to_string();
+        let c_result = Command::new(&helper)
+            .args(["127.0.0.1", port.as_str(), "localhost", "replay", &hex])
+            .output()
+            .expect("run donor C verifier with captured ECH ClientHello");
+        assert!(c_result.status.success());
+        assert_eq!(
+            String::from_utf8(c_result.stdout).unwrap().trim(),
+            if expected { "1\t1" } else { "0\t0" }
+        );
+        assert_eq!(captured_receiver.recv().unwrap(), client_hello);
+
+        let options = FetchOptions {
+            name: "localhost".into(),
+            ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            port: address.port(),
+            path: "/".into(),
+            deadline: Duration::from_secs(3),
+            tls12: false,
+            wire_len: Some(client_hello.len()),
+            mark: None,
+        };
+        let stream = TcpStream::connect(address).unwrap();
+        let rust_result = r2o_controller::fetch::r2o_verify_tls_replayed_client_hello(
+            &options,
+            stream,
+            &client_hello,
+            Duration::from_secs(3),
+        )
+        .unwrap();
+        assert_eq!(rust_result.handshake_verified, expected);
+        assert!(!rust_result.application_verified);
+        assert_eq!(captured_receiver.recv().unwrap(), client_hello);
+        server.join().unwrap();
+    }
+}
+
+#[test]
+#[ignore = "run by scripts/r2o-tls-verify-differential.sh with the donor C verifier"]
+fn donor_and_r2o_apply_an_absolute_deadline_to_replayed_client_hello() {
+    let helper = std::env::var_os("R2O_D2O_VERIFY_HELPER")
+        .expect("differential script must provide the donor C verifier");
+    let client_hello = captured_tls13_client_hello(None, true);
+    let hex = client_hello
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let deadline = Duration::from_millis(500);
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (captured_sender, captured_receiver) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || {
+        serve_slow_replayed_client_hellos(listener, 2, Duration::from_millis(300), captured_sender)
+    });
+    let port = address.port().to_string();
+    let c_result = Command::new(&helper)
+        .args([
+            "127.0.0.1",
+            port.as_str(),
+            "localhost",
+            "replay",
+            &hex,
+            "500",
+        ])
+        .output()
+        .expect("run donor C verifier with bounded replay deadline");
+    assert!(c_result.status.success());
+    assert_eq!(String::from_utf8(c_result.stdout).unwrap().trim(), "0\t0");
+    assert_eq!(captured_receiver.recv().unwrap(), client_hello);
+
+    let options = FetchOptions {
+        name: "localhost".into(),
+        ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        port: address.port(),
+        path: "/".into(),
+        deadline: Duration::from_secs(3),
+        tls12: false,
+        wire_len: Some(client_hello.len()),
+        mark: None,
+    };
+    let stream = TcpStream::connect(address).unwrap();
+    let rust_result = r2o_controller::fetch::r2o_verify_tls_replayed_client_hello(
+        &options,
+        stream,
+        &client_hello,
+        deadline,
+    )
+    .unwrap();
+    assert!(!rust_result.handshake_verified);
+    assert_eq!(captured_receiver.recv().unwrap(), client_hello);
+    server.join().unwrap();
 }

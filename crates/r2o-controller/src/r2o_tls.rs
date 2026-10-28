@@ -56,6 +56,17 @@ pub fn r2o_tls_client_connection(
     wire_len: Option<usize>,
     _roots: rustls::RootCertStore,
 ) -> Result<rustls::ClientConnection, String> {
+    r2o_tls_client_connection_with_alpn(name, tls12, wire_len, _roots, &[b"http/1.1".to_vec()])
+}
+
+/// Создать измерительное соединение с ALPN, снятым с клиентского приветствия.
+pub fn r2o_tls_client_connection_with_alpn(
+    name: &str,
+    tls12: bool,
+    wire_len: Option<usize>,
+    _roots: rustls::RootCertStore,
+    alpn_protocols: &[Vec<u8>],
+) -> Result<rustls::ClientConnection, String> {
     let versions = if tls12 {
         &[&rustls::version::TLS12][..]
     } else {
@@ -96,12 +107,167 @@ pub fn r2o_tls_client_connection(
         .dangerous()
         .with_custom_certificate_verifier(std::sync::Arc::new(verifier))
         .with_no_client_auth();
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    config.alpn_protocols = alpn_protocols.to_vec();
     config.r2o_client_hello_wire_len = wire_len;
     let server_name = rustls::pki_types::ServerName::try_from(name.to_owned())
         .map_err(|_| "имя цели недопустимо для TLS SNI".to_owned())?;
     rustls::ClientConnection::new(std::sync::Arc::new(config), server_name)
         .map_err(|error| format!("не удалось начать TLS-рукопожатие: {error}"))
+}
+
+/// Вернуть список клиента, если он отсутствует или не содержит HTTP поверх TLS.
+/// `Some([])` означает ClientHello без ALPN; ошибочная форма и HTTP-протоколы
+/// оставляют прежнюю HTTP-проверку.
+pub fn r2o_tls_client_hello_non_http_alpn(client_hello: &[u8]) -> Option<Vec<Vec<u8>>> {
+    if client_hello.len() < 9
+        || client_hello[0] != 22
+        || client_hello[1] != 3
+        || client_hello[5] != 1
+    {
+        return None;
+    }
+    let record_length = usize::from(u16::from_be_bytes([client_hello[3], client_hello[4]]));
+    let record_end = 5_usize.checked_add(record_length)?;
+    if record_end != client_hello.len() {
+        return None;
+    }
+    let handshake_length = (usize::from(client_hello[6]) << 16)
+        | (usize::from(client_hello[7]) << 8)
+        | usize::from(client_hello[8]);
+    if handshake_length.checked_add(9)? != record_end {
+        return None;
+    }
+    let end = record_end;
+    let mut offset = 9_usize.checked_add(2 + 32)?;
+    offset = r2o_tls_skip_vector(client_hello, offset, end, 1)?;
+    offset = r2o_tls_skip_vector(client_hello, offset, end, 2)?;
+    offset = r2o_tls_skip_vector(client_hello, offset, end, 1)?;
+    let (extensions_length, extensions_start) = r2o_tls_u16(client_hello, offset, end)?;
+    let extensions_end = extensions_start.checked_add(extensions_length)?;
+    if extensions_end != end {
+        return None;
+    }
+    let mut extension = extensions_start;
+    let mut alpn = None;
+    while extension < extensions_end {
+        let (kind, value) = r2o_tls_u16(client_hello, extension, extensions_end)?;
+        let (length, data) = r2o_tls_u16(client_hello, value, extensions_end)?;
+        let extension_end = data.checked_add(length)?;
+        if extension_end > extensions_end {
+            return None;
+        }
+        if kind == 0xfe0d {
+            return None;
+        }
+        if kind == 0x0010 {
+            let (list_length, mut protocol) = r2o_tls_u16(client_hello, data, extension_end)?;
+            let list_end = protocol.checked_add(list_length)?;
+            if list_end != extension_end {
+                return None;
+            }
+            let mut protocols = Vec::new();
+            while protocol < list_end {
+                let length = usize::from(*client_hello.get(protocol)?);
+                protocol += 1;
+                if length == 0 {
+                    return None;
+                }
+                let protocol_end = protocol.checked_add(length)?;
+                if protocol_end > list_end {
+                    return None;
+                }
+                let name = &client_hello[protocol..protocol_end];
+                if [b"http/1.1".as_slice(), b"http/1.0", b"h2"]
+                    .iter()
+                    .any(|http| name == *http)
+                {
+                    return None;
+                }
+                protocols.push(name.to_vec());
+                protocol = protocol_end;
+            }
+            if protocols.is_empty() {
+                return None;
+            }
+            alpn = Some(protocols);
+        }
+        extension = extension_end;
+    }
+    Some(alpn.unwrap_or_default())
+}
+
+/// Повторить сохранённый ClientHello и применить донорский критерий ServerHello.
+pub fn r2o_tls_replay_client_hello(
+    stream: &mut std::net::TcpStream,
+    client_hello: &[u8],
+    timeout: std::time::Duration,
+) -> std::io::Result<bool> {
+    use std::io::{Read, Write};
+
+    if client_hello.len() < 6 {
+        return Ok(false);
+    }
+    let timeout = if timeout.is_zero() {
+        std::time::Duration::from_secs(3)
+    } else {
+        timeout
+    };
+    stream.set_write_timeout(Some(timeout))?;
+    if stream.write_all(client_hello).is_err() {
+        return Ok(false);
+    }
+    let deadline = std::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "timeout overflow"))?;
+    let mut response = [0_u8; 7];
+    let mut have = 0;
+    while have < 7 && !(have >= 6 && response[0] == 22) {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        stream.set_read_timeout(Some(remaining))?;
+        match stream.read(&mut response[have..]) {
+            Ok(0) => break,
+            Ok(length) => have += length,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+    Ok(have >= 6 && response[0] == 22 && response[1] == 3 && response[5] == 2)
+}
+
+fn r2o_tls_u16(bytes: &[u8], offset: usize, end: usize) -> Option<(usize, usize)> {
+    let field_end = offset.checked_add(2)?;
+    if field_end > end {
+        return None;
+    }
+    Some((
+        usize::from(u16::from_be_bytes([bytes[offset], bytes[offset + 1]])),
+        field_end,
+    ))
+}
+
+fn r2o_tls_skip_vector(bytes: &[u8], offset: usize, end: usize, prefix: usize) -> Option<usize> {
+    let (length, data) = match prefix {
+        1 => (usize::from(*bytes.get(offset)?), offset.checked_add(1)?),
+        2 => r2o_tls_u16(bytes, offset, end)?,
+        _ => return None,
+    };
+    let vector_end = data.checked_add(length)?;
+    (vector_end <= end).then_some(vector_end)
 }
 
 /// Создать TLS 1.3 измерительное соединение с ECH по правилам d2o.

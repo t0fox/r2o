@@ -26,6 +26,13 @@ cc -std=c99 -O2 -Wall -Wextra -Werror \
     "$donor_core/tls13core.o" "$donor_core/x25519.o" "$donor_core/crypto.o" \
     -lpthread -o "$tmp_dir/d2o_verify_fixture"
 
+make -C "$donor_core" test_sched
+"$donor_core/test_sched" --measured-only
+
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/r2o-target}" \
+    cargo test -p r2o-controller --locked --bin r2o-controller \
+        captured_non_http_alpn_requires_handshake_block_and_no_volume_cut
+
 R2O_D2O_VERIFY_HELPER="$tmp_dir/d2o_verify_fixture" \
     CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/r2o-target}" \
     cargo test -p r2o-controller --locked --test d2o_verify_differential \

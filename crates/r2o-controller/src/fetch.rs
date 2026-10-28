@@ -189,10 +189,144 @@ pub struct FetchResult {
     pub gzip: bool,
     pub complete: bool,
     pub application_verified: bool,
+    pub handshake_verified: bool,
     pub elapsed: Duration,
     pub reason: Option<String>,
     pub r2o_volume_observation: crate::r2o_volume::R2oVolumeObservation,
     pub r2o_resources: Vec<crate::r2o_resource::R2oResourceHint>,
+}
+
+/// Подтвердить только TLS-рукопожатие с ALPN, предложенным исходным клиентом.
+/// Этот путь намеренно не отправляет HTTP-запрос для MQTT и прочих протоколов.
+pub fn r2o_verify_tls_connected_stream_with_alpn(
+    options: &FetchOptions,
+    mut socket: TcpStream,
+    alpn_protocols: &[Vec<u8>],
+    phase_timeout: Duration,
+) -> Result<FetchResult, String> {
+    options.validate()?;
+    if phase_timeout.is_zero() {
+        return Err("срок TLS-рукопожатия должен быть больше нуля".into());
+    }
+    let started = Instant::now();
+    let deadline = started
+        .checked_add(phase_timeout)
+        .ok_or_else(|| "срок TLS-рукопожатия слишком велик".to_owned())?;
+    socket
+        .set_nodelay(true)
+        .map_err(|error| format!("не удалось настроить TCP-сокет: {error}"))?;
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let mut connection = crate::r2o_tls::r2o_tls_client_connection_with_alpn(
+        &options.name,
+        options.tls12,
+        options.wire_len,
+        roots,
+        alpn_protocols,
+    )?;
+    while connection.is_handshaking() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("срок TLS-рукопожатия истёк".into());
+        }
+        socket
+            .set_read_timeout(Some(remaining))
+            .and_then(|()| socket.set_write_timeout(Some(remaining)))
+            .map_err(|error| format!("не удалось установить срок TLS-сокета: {error}"))?;
+        connection
+            .complete_io(&mut socket)
+            .map_err(|error| format!("TLS-рукопожатие с ALPN клиента не завершилось: {error}"))?;
+    }
+    let address = socket
+        .peer_addr()
+        .map_err(|error| format!("не удалось получить адрес TLS-сервера: {error}"))?;
+    let local_port = socket
+        .local_addr()
+        .map_err(|error| format!("не удалось получить местный порт TLS-сокета: {error}"))?
+        .port();
+    let tls = match connection.protocol_version() {
+        Some(ProtocolVersion::TLSv1_3) => Some("1.3"),
+        Some(ProtocolVersion::TLSv1_2) => Some("1.2"),
+        _ => None,
+    };
+    let peer_name_ok = connection
+        .peer_certificates()
+        .and_then(|certificates| certificates.first())
+        .and_then(|certificate| {
+            crate::response::https_certificate_name_matches(certificate.as_ref(), &options.name)
+        });
+    Ok(FetchResult {
+        address,
+        local_port,
+        tls,
+        peer_name_ok,
+        ech_accepted: None,
+        status: 0,
+        http_outcome: R2oFetchHttpOutcome::Neutral,
+        cloudflare_challenge: false,
+        body_bytes: 0,
+        body_expected: None,
+        body_has_length: false,
+        location: String::new(),
+        chunked: false,
+        gzip: false,
+        complete: false,
+        application_verified: false,
+        handshake_verified: true,
+        elapsed: started.elapsed(),
+        reason: Some("TLS-рукопожатие с ALPN клиента завершено; приложение не измерялось".into()),
+        r2o_volume_observation: crate::r2o_volume::R2oVolumeObservation::default(),
+        r2o_resources: Vec::new(),
+    })
+}
+
+/// Повторить сохранённый ClientHello и зафиксировать только донорский критерий
+/// ServerHello. Приложение и закрытый ключ клиента остаются неизмеренными.
+pub fn r2o_verify_tls_replayed_client_hello(
+    options: &FetchOptions,
+    mut socket: TcpStream,
+    client_hello: &[u8],
+    phase_timeout: Duration,
+) -> Result<FetchResult, String> {
+    options.validate()?;
+    let started = Instant::now();
+    let proof =
+        crate::r2o_tls::r2o_tls_replay_client_hello(&mut socket, client_hello, phase_timeout)
+            .map_err(|error| format!("не удалось повторить ClientHello: {error}"))?;
+    let address = socket
+        .peer_addr()
+        .map_err(|error| format!("не удалось получить адрес TLS-сервера: {error}"))?;
+    let local_port = socket
+        .local_addr()
+        .map_err(|error| format!("не удалось получить местный порт TLS-сокета: {error}"))?
+        .port();
+    Ok(FetchResult {
+        address,
+        local_port,
+        tls: None,
+        peer_name_ok: None,
+        ech_accepted: None,
+        status: 0,
+        http_outcome: R2oFetchHttpOutcome::Neutral,
+        cloudflare_challenge: false,
+        body_bytes: 0,
+        body_expected: None,
+        body_has_length: false,
+        location: String::new(),
+        chunked: false,
+        gzip: false,
+        complete: false,
+        application_verified: false,
+        handshake_verified: proof,
+        elapsed: started.elapsed(),
+        reason: Some(if proof {
+            "ServerHello получен на повтор ClientHello; приложение не измерялось".into()
+        } else {
+            "повтор ClientHello не получил ServerHello".into()
+        }),
+        r2o_volume_observation: crate::r2o_volume::R2oVolumeObservation::default(),
+        r2o_resources: Vec::new(),
+    })
 }
 
 /// Проверяет завершённый HTTP-ответ для прямого RX-результата.
@@ -1101,6 +1235,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             gzip,
             complete,
             application_verified,
+            handshake_verified: false,
             elapsed: started.elapsed(),
             reason,
             r2o_volume_observation,
@@ -2582,6 +2717,7 @@ mod tests {
             gzip: false,
             complete,
             application_verified,
+            handshake_verified: false,
             elapsed: Duration::ZERO,
             reason: None,
             r2o_volume_observation: crate::r2o_volume::R2oVolumeObservation::default(),

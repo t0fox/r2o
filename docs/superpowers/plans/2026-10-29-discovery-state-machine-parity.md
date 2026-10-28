@@ -38,10 +38,10 @@
 
 ### Task 3: Match TLS verification protocol and ECH fallback
 
-- [ ] Add a C/Rust differential for candidate verification against a TLS server that accepts only the captured non-HTTP ALPN or no ALPN.
-- [ ] Preserve the captured client's negotiated protocol when verifying candidates.
-- [ ] Add a C/Rust differential for replaying the captured ECH ClientHello when no compatible ECH configuration is available; require ServerHello proof.
-- [ ] Run `scripts/r2o-tls-verify-differential.sh` and focused ECH tests.
+- [x] Add a C/Rust differential for candidate verification against a TLS server that accepts only the captured non-HTTP ALPN or no ALPN.
+- [x] Preserve the captured client's negotiated protocol when verifying candidates.
+- [x] Add a C/Rust differential for replaying the captured ECH ClientHello when no compatible ECH configuration is available; require ServerHello proof.
+- [x] Run `scripts/r2o-tls-verify-differential.sh` and focused ECH tests.
 
 ### Task 4: Match scheduler cooldown and endpoint admission
 

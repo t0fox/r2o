@@ -108,6 +108,7 @@ fn клиентское_рукопожатие_предлагает_http11_alpn(
         0x00, 0x10, 0x00, 0x0b, 0x00, 0x09, 0x08, b'h', b't', b't', b'p', b'/', b'1', b'.', b'1',
     ];
     assert!(wire.windows(alpn.len()).any(|window| window == alpn));
+    assert!(r2o_controller::r2o_tls::r2o_tls_client_hello_non_http_alpn(&wire).is_none());
 }
 
 #[test]
