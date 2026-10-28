@@ -51,7 +51,7 @@ use r2o_controller::plan_text::compile_text;
 use r2o_controller::r2o_late_rx::{R2oLateRxCache, R2oLateRxInput};
 #[cfg(unix)]
 use r2o_controller::r2o_quic_deny::R2oQuicDenyCache;
-use r2o_controller::response::{ResponseOptions, ResponseVerdict, probe_response};
+use r2o_controller::response::{HttpsProbeState, ResponseOptions, ResponseVerdict, probe_response};
 #[cfg(unix)]
 use r2o_controller::voice_measure::{
     R2oVoiceMeasurement, R2oVoiceOptions, R2oVoiceVerdict, r2o_measure_voice_for_flow,
@@ -3714,6 +3714,46 @@ struct HttpSearchTask {
     candidates: Vec<String>,
     live_failures: HttpLiveFailures,
     mark: Option<u32>,
+}
+
+#[cfg(unix)]
+struct PendingHttpSearchAfterHttps {
+    target: r2o_controller::discovery::DiscoveryTarget,
+    request_path: Vec<u8>,
+    expected_baseline: r2o_controller::http_search::Answer,
+    live_bound_cut: bool,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HttpSearchHttpsAction {
+    Queue,
+    Wait,
+    Suppress,
+}
+
+#[cfg(unix)]
+fn r2o_http_search_https_action(
+    response_code: u8,
+    live_bound_failure: bool,
+    state: Option<HttpsProbeState>,
+    probe_pending: bool,
+) -> HttpSearchHttpsAction {
+    if response_code != 3 || live_bound_failure {
+        return HttpSearchHttpsAction::Queue;
+    }
+    if let Some(state) = state {
+        return if state.should_redirect() {
+            HttpSearchHttpsAction::Suppress
+        } else {
+            HttpSearchHttpsAction::Queue
+        };
+    }
+    if probe_pending {
+        HttpSearchHttpsAction::Wait
+    } else {
+        HttpSearchHttpsAction::Suppress
+    }
 }
 
 #[cfg(unix)]
@@ -13593,6 +13633,7 @@ impl ControlClient {
             .map(|_| R2oLateRxWorker::new(measurement_gate.clone()));
         let mut r2o_late_rx_hellos = R2oLateRxCache::default();
         let mut https_probe = HttpsProbeWorker::new(https_probe_mark);
+        let mut pending_http_searches = HashMap::<String, PendingHttpSearchAfterHttps>::new();
         let mut r2o_voice_trials = HashMap::<[u8; 16], R2oVoiceTrialContext>::new();
         let mut quic_snapshots =
             HashMap::<[u8; r2k_core::control::KEY_LEN], (Vec<u8>, std::time::Instant)>::new();
@@ -13927,6 +13968,37 @@ impl ControlClient {
                         result.host,
                         result.state.description()
                     );
+                    if let Some(pending) = pending_http_searches.remove(&result.host) {
+                        if r2o_http_search_https_action(3, false, Some(result.state), false)
+                            == HttpSearchHttpsAction::Queue
+                        {
+                            if let (Some(search_worker), Some((_, catalog, _, mark))) =
+                                (http_search.as_ref(), discovery.as_ref())
+                            {
+                                let queued = self.enqueue_http_search(
+                                    search_worker,
+                                    &pending.target,
+                                    &pending.request_path,
+                                    pending.expected_baseline,
+                                    catalog,
+                                    *mark,
+                                    pending.live_bound_cut,
+                                );
+                                if !queued {
+                                    println!(
+                                        "HTTP {}: цель уже проверялась или очередь занята",
+                                        pending.target.host
+                                    );
+                                }
+                            }
+                        } else {
+                            println!(
+                                "HTTP {}: поиск обхода не запущен — HTTPS: {}",
+                                pending.target.host,
+                                result.state.description()
+                            );
+                        }
+                    }
                     https_cache_changed = true;
                 }
                 if https_cache_changed && let Some(path) = &https_cache_path {
@@ -15664,8 +15736,16 @@ impl ControlClient {
                         );
                     }
                     std::io::stdout().flush()?;
-                    if let Some((host, address)) = target_from_http_response(&response) {
-                        https_probe.submit(&host, address, std::time::Instant::now());
+                    let https_target = target_from_http_response(&response);
+                    let mut https_state = None;
+                    let mut https_pending = false;
+                    if let Some((host, address)) = &https_target {
+                        let now = std::time::Instant::now();
+                        https_state = https_probe.cached_state(host, now);
+                        if https_state.is_none() {
+                            let _ = https_probe.submit(host, *address, now);
+                            https_pending = https_probe.is_pending(host);
+                        }
                     }
                     if let Some((_, catalog, path, mark)) = &mut discovery {
                         let live = response.binding.is_known()
@@ -15700,22 +15780,45 @@ impl ControlClient {
                                 if live && response.code == 3 {
                                     self.http_search_started.remove(&http_search_key(&target));
                                 }
-                                let queued = http_search.as_ref().is_some_and(|worker| {
-                                    self.enqueue_http_search(
-                                        worker,
-                                        &target,
-                                        request_path,
-                                        expected,
-                                        catalog,
-                                        *mark,
-                                        r2o_http_live_cut_recheck(response.code, live),
-                                    )
-                                });
-                                if !queued {
-                                    println!(
-                                        "HTTP {}: цель уже проверялась или очередь занята",
-                                        target.host
-                                    );
+                                let live_bound_cut = r2o_http_live_cut_recheck(response.code, live);
+                                match r2o_http_search_https_action(
+                                    response.code,
+                                    live,
+                                    https_state,
+                                    https_pending,
+                                ) {
+                                    HttpSearchHttpsAction::Wait => {
+                                        if let Some((host, _)) = &https_target {
+                                            pending_http_searches.entry(host.clone()).or_insert(
+                                                PendingHttpSearchAfterHttps {
+                                                    target: target.clone(),
+                                                    request_path: request_path.to_vec(),
+                                                    expected_baseline: expected,
+                                                    live_bound_cut,
+                                                },
+                                            );
+                                        }
+                                    }
+                                    HttpSearchHttpsAction::Suppress => {}
+                                    HttpSearchHttpsAction::Queue => {
+                                        let queued = http_search.as_ref().is_some_and(|worker| {
+                                            self.enqueue_http_search(
+                                                worker,
+                                                &target,
+                                                request_path,
+                                                expected,
+                                                catalog,
+                                                *mark,
+                                                live_bound_cut,
+                                            )
+                                        });
+                                        if !queued {
+                                            println!(
+                                                "HTTP {}: цель уже проверялась или очередь занята",
+                                                target.host
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -18129,6 +18232,9 @@ impl ControlClient {
             };
         }
         *catalog = updated;
+        if let Some(persistence) = persistence.as_deref_mut() {
+            persistence.persist(catalog, catalog_path, now)?;
+        }
         println!(
             "HTTP обход найден: «{key}»; план {plan_id} отправлен датапату и сохранён, подтверждение установки ожидается"
         );
@@ -19966,6 +20072,89 @@ mod tests {
                 .get(&("example.test".into(), 4)),
             Some(&HttpAcknowledgedBinding::Confirmed { plan_id, binding })
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confirmed_http_candidate_is_durable_before_catalog_flush_interval() {
+        use super::R2oCatalogPersistence;
+        use std::os::unix::net::UnixStream;
+        use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+        let work = std::env::temp_dir().join(format!(
+            "r2o-http-immediate-save-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&work).unwrap();
+        let catalog_path = work.join("catalog.json");
+        Catalog::default().save_atomic(&catalog_path, 1).unwrap();
+        let mut catalog = Catalog::load(&catalog_path).unwrap();
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "example.com".into(),
+            endpoint: "127.0.0.1:80".into(),
+            family: 4,
+            shape: SHAPE_HTTP,
+        };
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        let mut client = ControlClient {
+            socket,
+            send_maxlen: 1500,
+            send_cap: Arc::new(std::sync::atomic::AtomicUsize::new(1500)),
+            pending_events: Default::default(),
+            pending_applied_events: Default::default(),
+            dropped_events: Arc::new(AtomicUsize::new(0)),
+            http_search_started: Default::default(),
+            http_acknowledged_bindings: Default::default(),
+        };
+        let peer = std::thread::spawn(move || {
+            let frame = read_frame(&mut peer).unwrap();
+            assert_eq!(frame.kind, COMMAND_SET_NAME_BOUND);
+        });
+        let started = Instant::now();
+        let snapshot = Arc::new(std::sync::Mutex::new(catalog.clone()));
+        let mut persistence = R2oCatalogPersistence::new(started, snapshot);
+
+        client
+            .install_http_candidate(
+                &target,
+                "split",
+                &mut catalog,
+                &catalog_path,
+                Some(&mut persistence),
+            )
+            .unwrap();
+        peer.join().unwrap();
+
+        let saved = Catalog::load(&catalog_path).unwrap();
+        assert!(
+            saved
+                .boxes
+                .iter()
+                .flat_map(|record| &record.plans)
+                .any(|plan| { plan.enabled && plan.text.contains("proto tcp http") })
+        );
+        assert!(!persistence.dirty);
+        assert!(
+            !persistence
+                .persist_due(
+                    &mut catalog,
+                    &catalog_path,
+                    started + Duration::from_secs(59),
+                    2,
+                )
+                .unwrap()
+        );
+        assert!(r2o_controller::discovery::has_usable_binding(
+            &saved, &target
+        ));
+        if let Ok(path) = std::env::var("R2O_HTTP_DURABLE_DIFF_OUTPUT") {
+            std::fs::write(path, "persisted_before_flush=yes\n").unwrap();
+        }
+        std::fs::remove_dir_all(work).unwrap();
     }
 
     #[cfg(unix)]
@@ -24761,6 +24950,63 @@ mod tests {
         assert_eq!(batch[0].kind, 1);
         assert_eq!(batch[1].kind, 2);
         assert_eq!(batch[1].body, [0x22]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn http_search_https_caller_gate_matches_d2o_states() {
+        use r2o_controller::response::HttpsProbeState;
+
+        let cases = [
+            ("served", 3, false, Some(HttpsProbeState::Served), false),
+            (
+                "tls-blocked",
+                3,
+                false,
+                Some(HttpsProbeState::TlsBlocked),
+                false,
+            ),
+            ("closed", 3, false, Some(HttpsProbeState::Closed), false),
+            (
+                "other-name",
+                3,
+                false,
+                Some(HttpsProbeState::OtherName),
+                false,
+            ),
+            (
+                "unconfirmed",
+                3,
+                false,
+                Some(HttpsProbeState::Unconfirmed),
+                false,
+            ),
+            ("unknown", 3, false, None, false),
+            ("probing", 3, false, None, true),
+            ("live-served", 3, true, Some(HttpsProbeState::Served), false),
+            ("cut-served", 4, false, Some(HttpsProbeState::Served), false),
+        ];
+        let output = cases
+            .into_iter()
+            .map(|(name, code, live, state, pending)| {
+                let action = super::r2o_http_search_https_action(code, live, state, pending);
+                let value = match action {
+                    super::HttpSearchHttpsAction::Queue => "queue",
+                    super::HttpSearchHttpsAction::Wait => "wait",
+                    super::HttpSearchHttpsAction::Suppress => "skip",
+                };
+                format!("{name}={value}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        if let Ok(path) = std::env::var("R2O_HTTP_HTTPS_GATE_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert_eq!(
+            output,
+            "served=skip\ntls-blocked=skip\nclosed=queue\nother-name=queue\nunconfirmed=queue\nunknown=skip\nprobing=wait\nlive-served=queue\ncut-served=queue\n"
+        );
     }
 
     #[cfg(unix)]

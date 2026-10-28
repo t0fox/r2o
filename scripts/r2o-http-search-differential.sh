@@ -44,13 +44,20 @@ mkdir -p "$r2o_log_dir"
         "$(date '+%Y-%m-%dT%H:%M:%S%z')"
     printf 'Исходники C: %s\n' "$r2o_donor_core"
     printf '\nSHA-256 исходников C-эталона\n'
-    sha256sum "$r2o_donor_core/httpsearch.c" "$r2o_donor_core/test_httpsearch.c"
+    sha256sum "$r2o_donor_core/httpsearch.c" "$r2o_donor_core/test_httpsearch.c" \
+        "$r2o_donor_core/d2kc.c" "$r2o_donor_core/httpsprobe.c"
     r2o_httpsearch_sha=$(sed 's/\r$//' "$r2o_donor_core/httpsearch.c" | sha256sum | awk '{print $1}')
     r2o_test_sha=$(sed 's/\r$//' "$r2o_donor_core/test_httpsearch.c" | sha256sum | awk '{print $1}')
+    r2o_d2kc_sha=$(sed 's/\r$//' "$r2o_donor_core/d2kc.c" | sha256sum | awk '{print $1}')
+    r2o_httpsprobe_sha=$(sed 's/\r$//' "$r2o_donor_core/httpsprobe.c" | sha256sum | awk '{print $1}')
     if [ "$r2o_httpsearch_sha" != \
         '7075b74f1340b53c410422bfe2ac5f558d009b29c20a7085e674f49b0210fa3a' ] || \
         [ "$r2o_test_sha" != \
-        '7a1f589858f8ab5bec6b419e64f2bd262da023008726984487f4efa1cdad8195' ]; then
+        '7a1f589858f8ab5bec6b419e64f2bd262da023008726984487f4efa1cdad8195' ] || \
+        [ "$r2o_d2kc_sha" != \
+        'b6848021494bdf52e2850db671567a5b3d8f522cdcc933ca8bf9a9ec10efce46' ] || \
+        [ "$r2o_httpsprobe_sha" != \
+        '2a3f20b042d71f8565f4794fa474bc559cfb9a49045ad8c7d4d9400d4100968d' ]; then
         printf 'Исходники HTTP-search отличаются от проверенного снимка донора\n' >&2
         exit 1
     fi
@@ -117,6 +124,52 @@ mkdir -p "$r2o_log_dir"
     diff -u "$r2o_applied_c" "$r2o_applied_rust"
     printf 'C/Rust HTTP APPLIED window: %s' "$(cat "$r2o_applied_c")"
     rm -f -- "$r2o_applied_binary" "$r2o_applied_c" "$r2o_applied_rust"
+    printf '\nСверка HTTPS-gate вызывающей стороны C/Rust\n'
+    r2o_https_gate_binary="$r2o_log_dir/http-https-gate-differential-$$"
+    r2o_https_gate_c="$r2o_log_dir/http-https-gate-c-$$"
+    r2o_https_gate_rust="$r2o_log_dir/http-https-gate-rust-$$"
+    clang-18 -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+        -I"$r2o_donor_core/include" \
+        -o "$r2o_https_gate_binary" \
+        "$r2o_script_dir/crates/r2o-controller/tests/d2o_http_https_gate_differential.c" \
+        "$r2o_donor_core/httpsprobe.c" -Wl,--gc-sections -lpthread
+    "$r2o_https_gate_binary" >"$r2o_https_gate_c"
+    R2O_HTTP_HTTPS_GATE_DIFF_OUTPUT="$r2o_https_gate_rust" \
+        cargo +1.98.0 test -p r2o-controller --bin r2o-controller \
+            http_search_https_caller_gate_matches_d2o_states --locked --offline -- --nocapture
+    diff -u "$r2o_https_gate_c" "$r2o_https_gate_rust"
+    printf 'C/Rust HTTP HTTPS gate: %s' "$(cat "$r2o_https_gate_c")"
+    rm -f -- "$r2o_https_gate_binary" "$r2o_https_gate_c" "$r2o_https_gate_rust"
+    printf '\nСверка немедленной долговечности HTTP-плана C/Rust\n'
+    r2o_durable_binary="$r2o_log_dir/http-durable-differential-$$"
+    r2o_durable_c="$r2o_log_dir/http-durable-c-$$"
+    r2o_durable_rust="$r2o_log_dir/http-durable-rust-$$"
+    clang-18 -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+        -I"$r2o_donor_core" -I"$r2o_donor_core/include" \
+        -I"$r2o_donor_core/../datapath/include" \
+        -o "$r2o_durable_binary" \
+        "$r2o_script_dir/crates/r2o-controller/tests/d2o_http_durable_differential.c" \
+        "$r2o_donor_core/httpsearch.o" "$r2o_donor_core/httpup_logic.o" \
+        "$r2o_donor_core/plantlv.o" "$r2o_donor_core/quic.o" \
+        "$r2o_donor_core/quicwire.o" "$r2o_donor_core/crypto.o" \
+        "$r2o_donor_core/../datapath/plan_parse.c" \
+        "$r2o_donor_core/../datapath/plan_apply.c" \
+        "$r2o_donor_core/../datapath/wire.c" \
+        "$r2o_donor_core/verify.o" "$r2o_donor_core/quicconn.o" \
+        "$r2o_donor_core/h3.o" "$r2o_donor_core/tls12.o" \
+        "$r2o_donor_core/p256.o" "$r2o_donor_core/compose.o" \
+        "$r2o_donor_core/measured.o" "$r2o_donor_core/hello.o" \
+        "$r2o_donor_core/meas.o" "$r2o_donor_core/link.o" \
+        "$r2o_donor_core/tls13.o" "$r2o_donor_core/tls13core.o" \
+        "$r2o_donor_core/x25519.o" -Wl,--gc-sections -lpthread
+    "$r2o_durable_binary" >"$r2o_durable_c"
+    R2O_HTTP_DURABLE_DIFF_OUTPUT="$r2o_durable_rust" \
+        cargo +1.98.0 test -p r2o-controller --bin r2o-controller \
+            confirmed_http_candidate_is_durable_before_catalog_flush_interval \
+            --locked --offline -- --nocapture
+    diff -u "$r2o_durable_c" "$r2o_durable_rust"
+    printf 'C/Rust HTTP persistence: %s' "$(cat "$r2o_durable_c")"
+    rm -f -- "$r2o_durable_binary" "$r2o_durable_c" "$r2o_durable_rust"
     rm -f -- "$r2o_state_binary" "$r2o_state_c" "$r2o_state_rust"
     printf '\nСверка baseline и путей keep-alive C/Rust на локальном HTTP-сервере\n'
     r2o_baseline_harness="$r2o_script_dir/crates/r2o-controller/tests/d2o_http_baseline_differential.c"

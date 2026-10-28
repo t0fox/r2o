@@ -163,6 +163,16 @@ impl HttpsProbeWorker {
         }
     }
 
+    pub fn cached_state(&self, host: &str, now: Instant) -> Option<HttpsProbeState> {
+        let host = host.to_ascii_lowercase();
+        let entry = self.cache.get(&host)?;
+        (entry.expires > now).then_some(entry.state)
+    }
+
+    pub fn is_pending(&self, host: &str) -> bool {
+        self.pending.contains(&host.to_ascii_lowercase())
+    }
+
     pub fn try_result(&mut self) -> Option<HttpsProbeResult> {
         match self.results.try_recv() {
             Ok(result) => {
@@ -377,7 +387,32 @@ mod tests {
     use crate::response::HttpsProbeState;
     use r2k_core::control::{BindingContext, HttpPortalEvent, HttpResponseEvent, KEY_LEN};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn cached_state_and_pending_lookup_follow_host_and_expiry() {
+        let now = Instant::now();
+        let mut worker = HttpsProbeWorker::new(None);
+        worker.cache.insert(
+            "example.com".into(),
+            super::CachedResult {
+                expires: now + Duration::from_secs(30),
+                state: HttpsProbeState::Served,
+            },
+        );
+        worker.pending.insert("pending.example".into());
+
+        assert_eq!(
+            worker.cached_state("EXAMPLE.COM", now),
+            Some(HttpsProbeState::Served)
+        );
+        assert_eq!(
+            worker.cached_state("example.com", now + Duration::from_secs(30)),
+            None
+        );
+        assert!(worker.is_pending("PENDING.EXAMPLE"));
+        assert!(!worker.is_pending("missing.example"));
+    }
 
     #[test]
     fn portal_probe_uses_the_server_ip_and_exact_normalized_host() {

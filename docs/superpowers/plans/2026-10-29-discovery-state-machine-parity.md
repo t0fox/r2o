@@ -30,11 +30,11 @@
 
 ### Task 2: Match HTTP HTTPS-gating and durability
 
-- [ ] Add a C/Rust caller differential proving HTTPS-served and TLS-blocked states suppress HTTP search.
-- [ ] Apply the donor HTTPS gate before queuing an HTTP-search task.
-- [ ] Add a C/Rust durable-state differential after a confirmed HTTP plan and before the normal 60-second catalog flush.
-- [ ] Persist a confirmed HTTP plan at the donor confirmation boundary without changing unrelated catalog cadence.
-- [ ] Run `scripts/r2o-http-search-differential.sh` against the pinned donor.
+- [x] Add a C/Rust caller differential proving HTTPS-served and TLS-blocked states suppress HTTP search.
+- [x] Apply the donor HTTPS gate before queuing an HTTP-search task.
+- [x] Add a C/Rust durable-state differential after a confirmed HTTP plan and before the normal 60-second catalog flush.
+- [x] Persist a confirmed HTTP plan at the donor confirmation boundary without changing unrelated catalog cadence.
+- [x] Run `scripts/r2o-http-search-differential.sh` against the pinned donor.
 
 ### Task 3: Match TLS verification protocol and ECH fallback
 
