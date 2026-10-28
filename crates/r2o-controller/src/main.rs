@@ -19409,15 +19409,33 @@ fn run_http_trial_task(
         cut,
         &mut socket_hold,
     );
-    let events = r2o_collect_controller_applied_events_until(
+    let wait_identity =
+        result
+            .as_ref()
+            .ok()
+            .map(|result| r2o_controller::http_search::ProbeIdentity {
+                plan_id,
+                trial_id,
+                family: target.family,
+                client: result.client,
+                server: destination.ip(),
+                local_port: port,
+            });
+    let required_applied = result.as_ref().map_or(0, |result| result.requests_sent);
+    let events = r2o_collect_controller_applied_events_until_satisfied(
         commands,
         trial_id,
-        if result.as_ref().is_ok_and(|result| result.requests_sent > 0) {
-            std::time::Duration::from_secs(5)
+        if required_applied > 0 {
+            std::time::Duration::from_millis(500)
         } else {
             std::time::Duration::ZERO
         },
-        |event| r2o_family_applied_flow_matches(event, target, port, plan_id, trial_id),
+        |events| {
+            wait_identity.as_ref().is_some_and(|identity| {
+                r2o_controller::http_search::confirmed_applied(events, identity, required_applied)
+                    .is_some()
+            })
+        },
     );
     let delete_result = ask_http_controller(commands, |reply| HttpSearchCommand::DeleteProbe {
         host: target.host.clone(),
@@ -19487,6 +19505,20 @@ fn r2o_collect_controller_applied_events_until(
     timeout: std::time::Duration,
     is_exact_match: impl Fn(&r2k_core::control::AppliedEvent) -> bool,
 ) -> Result<Vec<r2k_core::control::AppliedEvent>, String> {
+    r2o_collect_controller_applied_events_until_satisfied(commands, trial_id, timeout, |events| {
+        events
+            .iter()
+            .any(|event| event.trial_id == trial_id && is_exact_match(event))
+    })
+}
+
+#[cfg(unix)]
+fn r2o_collect_controller_applied_events_until_satisfied(
+    commands: &SyncSender<HttpSearchCommand>,
+    trial_id: [u8; 16],
+    timeout: std::time::Duration,
+    requirement_met: impl Fn(&[r2k_core::control::AppliedEvent]) -> bool,
+) -> Result<Vec<r2k_core::control::AppliedEvent>, String> {
     let deadline = std::time::Instant::now() + timeout;
     let mut events = Vec::new();
     loop {
@@ -19495,11 +19527,8 @@ fn r2o_collect_controller_applied_events_until(
             timeout: std::time::Duration::ZERO,
             reply,
         })?;
-        let exact_applied_seen = batch
-            .iter()
-            .any(|event| event.trial_id == trial_id && is_exact_match(event));
         events.extend(batch);
-        if exact_applied_seen {
+        if requirement_met(&events) {
             return Ok(events);
         }
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -26598,6 +26627,149 @@ mod tests {
             "exact APPLIED was available but collection took {} ms",
             started.elapsed().as_millis()
         );
+        drop(commands);
+        controller.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn http_applied_collection_requires_each_unique_execution_within_donor_window() {
+        use r2k_core::control::{AppliedEvent, BindingContext, KEY_LEN, SHAPE_HTTP};
+        use r2o_controller::http_search::{ProbeIdentity, confirmed_applied};
+        use std::collections::HashSet;
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let trial_id = [2; 16];
+        let plan_id = [3; 16];
+        let identity = ProbeIdentity {
+            plan_id,
+            trial_id,
+            family: 4,
+            client: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            server: IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
+            local_port: 41_000,
+        };
+        let event = |execution_id| {
+            let mut key = [0; KEY_LEN];
+            key[0] = 4;
+            key[1..5].copy_from_slice(&[127, 0, 0, 1]);
+            key[17..21].copy_from_slice(&[1, 2, 3, 4]);
+            key[33..35].copy_from_slice(&41_000_u16.to_be_bytes());
+            key[35..37].copy_from_slice(&80_u16.to_be_bytes());
+            key[37] = 6;
+            AppliedEvent {
+                key,
+                plan_id,
+                trial_id,
+                execution_id,
+                binding: BindingContext {
+                    generation: 1,
+                    kind: 1,
+                    family: 4,
+                    shape: SHAPE_HTTP,
+                    temporary: true,
+                    epoch: [7; 16],
+                },
+            }
+        };
+        let exact = |event: &AppliedEvent| {
+            event.trial_id == trial_id && event.plan_id == plan_id && event.execution_id != 0
+        };
+        let exact_count = |events: &[AppliedEvent]| {
+            events
+                .iter()
+                .filter(|event| exact(event))
+                .map(|event| event.execution_id)
+                .collect::<HashSet<_>>()
+                .len()
+        };
+
+        let first = event(1);
+        let duplicate = first.clone();
+        let second = event(2);
+        let (commands, receiver) = std::sync::mpsc::sync_channel(1);
+        let controller = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let mut first_batch = true;
+            let mut second_sent = false;
+            while let Ok(command) = receiver.recv() {
+                let HttpSearchCommand::CollectApplied {
+                    trial_id: requested,
+                    reply,
+                    ..
+                } = command
+                else {
+                    panic!("ожидалась команда сбора APPLIED");
+                };
+                assert_eq!(requested, trial_id);
+                let batch = if first_batch {
+                    first_batch = false;
+                    vec![first.clone(), duplicate.clone()]
+                } else if !second_sent && started.elapsed() >= std::time::Duration::from_millis(80)
+                {
+                    second_sent = true;
+                    vec![second.clone()]
+                } else {
+                    Vec::new()
+                };
+                reply.send(Ok(batch)).unwrap();
+            }
+        });
+
+        let inside = super::r2o_collect_controller_applied_events_until_satisfied(
+            &commands,
+            trial_id,
+            std::time::Duration::from_millis(500),
+            |events| confirmed_applied(events, &identity, 2).is_some(),
+        )
+        .unwrap();
+        assert_eq!(exact_count(&inside), 2);
+        assert!(confirmed_applied(&inside, &identity, 2).is_some());
+        drop(commands);
+        controller.join().unwrap();
+
+        let first = event(1);
+        let second = event(2);
+        let (commands, receiver) = std::sync::mpsc::sync_channel(1);
+        let controller = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let mut first_sent = false;
+            let mut late_sent = false;
+            while let Ok(command) = receiver.recv() {
+                let HttpSearchCommand::CollectApplied {
+                    trial_id: requested,
+                    reply,
+                    ..
+                } = command
+                else {
+                    panic!("ожидалась команда сбора APPLIED");
+                };
+                assert_eq!(requested, trial_id);
+                let batch = if !first_sent {
+                    first_sent = true;
+                    vec![first.clone()]
+                } else if !late_sent && started.elapsed() >= std::time::Duration::from_millis(600) {
+                    late_sent = true;
+                    vec![second.clone()]
+                } else {
+                    Vec::new()
+                };
+                reply.send(Ok(batch)).unwrap();
+            }
+        });
+
+        let outside = super::r2o_collect_controller_applied_events_until_satisfied(
+            &commands,
+            trial_id,
+            std::time::Duration::from_millis(500),
+            |events| confirmed_applied(events, &identity, 2).is_some(),
+        )
+        .unwrap();
+        assert_eq!(exact_count(&outside), 1);
+        assert!(confirmed_applied(&outside, &identity, 2).is_none());
+        if let Ok(path) = std::env::var("R2O_HTTP_APPLIED_DIFF_OUTPUT") {
+            std::fs::write(path, "inside=2\noutside=1\n").unwrap();
+        }
         drop(commands);
         controller.join().unwrap();
     }

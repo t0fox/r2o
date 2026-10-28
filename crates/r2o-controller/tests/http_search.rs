@@ -2,12 +2,87 @@ use r2o_controller::http_search::{
     Answer, candidate_key_from_plan_text, candidate_keys, candidate_text, judge,
     read_probe_response, stable_id,
 };
-use std::io::Cursor;
+use std::io::{self, Cursor, Read};
 use std::time::Instant;
 
 const INJECTED: &[u8] = b"HTTP/1.1 302 Moved Temporarily\r\nLocation: http://lawfilter.ertelecom.ru\r\nConnection: close\r\nContent-Length: 13\r\n\r\nlawfilter.ru\n";
 const REAL: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
 const ID: [u8; 16] = [1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+struct TimeoutReader {
+    bytes: Cursor<Vec<u8>>,
+}
+
+impl TimeoutReader {
+    fn new(bytes: &[u8]) -> Self {
+        Self {
+            bytes: Cursor::new(bytes.to_vec()),
+        }
+    }
+}
+
+impl Read for TimeoutReader {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        let count = self.bytes.read(out)?;
+        if count == 0 {
+            Err(io::Error::new(io::ErrorKind::TimedOut, "fixture timeout"))
+        } else {
+            Ok(count)
+        }
+    }
+}
+
+fn answer_name(answer: Answer) -> &'static str {
+    match answer {
+        Answer::Injected => "injected",
+        Answer::Garbage => "garbage",
+        Answer::Cut => "cut",
+        Answer::Early => "early",
+        Answer::Decoy => "decoy",
+        Answer::Real => "real",
+    }
+}
+
+#[test]
+fn d2o_response_state_differential_preserves_portal_and_partial_head_outcomes() {
+    const PORTAL_TRUNCATED: &[u8] = b"HTTP/1.1 302 Moved Temporarily\r\nLocation: http://lawfilter.ertelecom.ru/\r\nContent-Length: 100\r\n\r\nshort";
+    const PARTIAL_HEAD: &[u8] =
+        b"HTTP/1.1 302 Moved Temporarily\r\nLocation: http://lawfilter.ertelecom.ru";
+
+    let mut portal_reader = TimeoutReader::new(PORTAL_TRUNCATED);
+    let portal = read_probe_response(
+        &mut portal_reader,
+        Some(b"rutracker.org"),
+        98_000,
+        Instant::now(),
+    )
+    .unwrap();
+    let mut partial_reader = TimeoutReader::new(PARTIAL_HEAD);
+    let partial = match read_probe_response(
+        &mut partial_reader,
+        Some(b"rutracker.org"),
+        98_000,
+        Instant::now(),
+    ) {
+        Ok(response) => answer_name(response.answer),
+        Err(error) if error.kind() == io::ErrorKind::TimedOut => "timeout",
+        Err(_) => "error",
+    };
+    let output = format!(
+        "portal_truncated={}\npartial_header_timeout={}\n",
+        answer_name(portal.answer),
+        partial
+    );
+    if let Ok(path) = std::env::var("R2O_HTTP_RESPONSE_DIFF_OUTPUT") {
+        std::fs::write(path, &output).unwrap();
+    }
+
+    assert_eq!(
+        output,
+        "portal_truncated=injected\npartial_header_timeout=garbage\n"
+    );
+    assert!(!portal.complete);
+}
 
 #[test]
 fn identifies_explicit_provider_portal_redirects_before_timing_rules() {

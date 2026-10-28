@@ -315,7 +315,23 @@ pub fn read_probe_response(
 ) -> io::Result<HttpProbeResponse> {
     let mut first_byte = None;
     let (head, response, body_bytes, complete) = loop {
-        let head = read_response_head(reader, &mut first_byte)?;
+        let mut head = Vec::with_capacity(1024);
+        if let Err(error) = read_response_head(reader, &mut first_byte, &mut head) {
+            if head.is_empty() {
+                return Err(error);
+            }
+            let reply_us = first_byte
+                .map(|received| received.saturating_duration_since(request_sent).as_micros() as i64)
+                .unwrap_or(-1);
+            return Ok(HttpProbeResponse {
+                answer: Answer::Garbage,
+                status: 0,
+                complete: false,
+                body_bytes: 0,
+                connection_close: false,
+                reply_us,
+            });
+        }
         let response = parse_response_head(&head).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "неверный заголовок HTTP-ответа")
         })?;
@@ -331,11 +347,14 @@ pub fn read_probe_response(
     let reply_us = first_byte
         .map(|received| received.saturating_duration_since(request_sent).as_micros() as i64)
         .unwrap_or(-1);
+    let judged = judge(host, &head, rtt_us, reply_us);
     Ok(HttpProbeResponse {
-        answer: if !complete {
+        answer: if judged == Answer::Injected {
+            Answer::Injected
+        } else if !complete {
             Answer::Cut
         } else {
-            judge(host, &head, rtt_us, reply_us)
+            judged
         },
         status: response.status,
         complete,
@@ -348,8 +367,8 @@ pub fn read_probe_response(
 fn read_response_head(
     reader: &mut impl Read,
     first_byte: &mut Option<Instant>,
-) -> io::Result<Vec<u8>> {
-    let mut head = Vec::with_capacity(1024);
+    head: &mut Vec<u8>,
+) -> io::Result<()> {
     let mut byte = [0; 1];
     loop {
         match reader.read(&mut byte) {
@@ -369,7 +388,7 @@ fn read_response_head(
                     ));
                 }
                 if head.ends_with(b"\r\n\r\n") {
-                    return Ok(head);
+                    return Ok(());
                 }
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
