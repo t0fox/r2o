@@ -195,6 +195,15 @@ pub fn make_cipher(key: &[u8], iv: &[u8]) -> AesCtr256 {
         .expect("ключ должен содержать 32 байта, вектор инициализации — 16 байт")
 }
 
+/// Создать обратный obfuscated2 CTR-поток для расшифровки данных Telegram.
+pub(crate) fn direct_server_stream_cipher(init: &[u8; HANDSHAKE_LEN]) -> AesCtr256 {
+    let mut reversed = [0_u8; PREKEY_LEN + IV_LEN];
+    for (to, from) in reversed.iter_mut().zip(init[SKIP_LEN..56].iter().rev()) {
+        *to = *from;
+    }
+    make_cipher(&reversed[..PREKEY_LEN], &reversed[PREKEY_LEN..])
+}
+
 /// Применить поток шифра к `data` на месте.
 ///
 /// Единая операция для вызывающих функций [`make_cipher`] и

@@ -15,6 +15,7 @@ use tracing::{info, warn};
 use tungstenite::Message;
 
 use crate::crypto::ProtoTag;
+use crate::response_observer::MtprotoResponseObserver;
 use crate::routing::{RouteFeedback, WsFraming};
 use crate::splitter::MsgSplitter;
 use crate::stats::ConnectionTelemetry;
@@ -79,6 +80,18 @@ async fn record_first_mtproto_response(
         Some(latency)
     } else {
         None
+    }
+}
+
+async fn observe_and_record_first_mtproto_response(
+    observer: &mut MtprotoResponseObserver,
+    payload: &[u8],
+    response_state: &Arc<AsyncMutex<MtprotoResponseState>>,
+) -> Result<Option<Duration>, ()> {
+    if observer.observe(payload)? {
+        Ok(record_first_mtproto_response(response_state).await)
+    } else {
+        Ok(None)
     }
 }
 
@@ -220,6 +233,7 @@ pub(crate) async fn bridge_transparent_ws(
     let bytes_down = Arc::new(AtomicUsize::new(0));
     let activity = PayloadActivity::new();
     let response_state = Arc::new(AsyncMutex::new(MtprotoResponseState::NotSent));
+    let response_observer = MtprotoResponseObserver::new(&init, proto);
 
     let upload = {
         let ws_write = Arc::clone(&ws_write);
@@ -316,26 +330,37 @@ pub(crate) async fn bridge_transparent_ws(
         let response_state = Arc::clone(&response_state);
         let feedback = feedback.clone();
         let telemetry = telemetry.clone();
+        let mut response_observer = response_observer;
         async move {
+            let mut response_observer_enabled = true;
             while let Some(message) = ws_read.next().await {
                 match message {
                     Ok(Message::Binary(data)) => {
                         let length = data.len();
                         telemetry.record_upstream_bytes(length as u64);
-                        if !data.is_empty()
-                            && let Some(latency) =
-                                record_first_mtproto_response(&response_state).await
-                        {
-                            telemetry.mark_first_wss_binary();
-                            info!(
-                                "[{}] первый MTProto ответ DC{}{} через {} получен за {} мс",
-                                label,
-                                dc,
-                                media_tag(is_media),
-                                route_type,
-                                latency.as_millis()
-                            );
-                            crate::routing::record_mtproto_response(&feedback, latency);
+                        if response_observer_enabled {
+                            match observe_and_record_first_mtproto_response(
+                                &mut response_observer,
+                                &data,
+                                &response_state,
+                            )
+                            .await
+                            {
+                                Ok(Some(latency)) => {
+                                    telemetry.mark_first_wss_binary();
+                                    info!(
+                                        "[{}] первый MTProto ответ DC{}{} через {} получен за {} мс",
+                                        label,
+                                        dc,
+                                        media_tag(is_media),
+                                        route_type,
+                                        latency.as_millis()
+                                    );
+                                    crate::routing::record_mtproto_response(&feedback, latency);
+                                }
+                                Ok(None) => {}
+                                Err(()) => response_observer_enabled = false,
+                            }
                         }
                         if let Err(error) = client_write.write_all(&data).await {
                             return format!("ошибка записи в TCP клиента: {error}");
@@ -442,9 +467,11 @@ pub(crate) async fn bridge_transparent_ws(
 #[cfg(test)]
 mod tests {
     use super::{
-        MtprotoResponseState, PayloadActivity, RelayCompletion, RelayDirection, race_directions,
-        record_first_mtproto_response, send_application_frame, supervise_directions,
+        MtprotoResponseState, PayloadActivity, RelayCompletion, RelayDirection,
+        observe_and_record_first_mtproto_response, race_directions, record_first_mtproto_response,
+        send_application_frame, supervise_directions,
     };
+    use cipher::StreamCipher;
     use std::future;
     use std::io;
     use std::pin::Pin;
@@ -455,6 +482,8 @@ mod tests {
     use tokio::sync::oneshot;
     use tungstenite::Message;
 
+    use crate::crypto::{HANDSHAKE_LEN, ProtoTag, direct_server_stream_cipher};
+    use crate::response_observer::MtprotoResponseObserver;
     use crate::routing::RouteFeedback;
 
     struct TestSink {
@@ -535,6 +564,67 @@ mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn непустая_некорректная_binary_рамка_не_подтверждает_маршрут() {
+        let response_state = Arc::new(tokio::sync::Mutex::new(MtprotoResponseState::NotSent));
+        let sink = Arc::new(tokio::sync::Mutex::new(TestSink { fail_send: false }));
+        let feedback = RouteFeedback::direct(996, false, "149.154.167.52", Duration::from_secs(1));
+        send_application_frame(&sink, &response_state, &feedback, vec![1, 2, 3])
+            .await
+            .unwrap();
+
+        let init = [0_u8; HANDSHAKE_LEN];
+        let mut encrypt = direct_server_stream_cipher(&init);
+        let mut observer = MtprotoResponseObserver::new(&init, ProtoTag::Intermediate);
+        let mut ack = [0_u8, 0, 0, 0x80];
+        encrypt.apply_keystream(&mut ack);
+        assert!(matches!(
+            observe_and_record_first_mtproto_response(&mut observer, &ack, &response_state,).await,
+            Ok(None)
+        ));
+
+        let mut invalid = [0_u8; 4];
+        encrypt.apply_keystream(&mut invalid);
+
+        assert!(
+            observe_and_record_first_mtproto_response(&mut observer, &invalid, &response_state,)
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            &*response_state.lock().await,
+            MtprotoResponseState::Awaiting(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn полный_валидный_mtproto_пакет_подтверждает_маршрут() {
+        let response_state = Arc::new(tokio::sync::Mutex::new(MtprotoResponseState::NotSent));
+        let sink = Arc::new(tokio::sync::Mutex::new(TestSink { fail_send: false }));
+        let feedback = RouteFeedback::direct(995, false, "149.154.167.53", Duration::from_secs(1));
+        send_application_frame(&sink, &response_state, &feedback, vec![1, 2, 3])
+            .await
+            .unwrap();
+
+        let init = [0_u8; HANDSHAKE_LEN];
+        let mut encrypt = direct_server_stream_cipher(&init);
+        let mut valid = vec![40, 0, 0, 0];
+        valid.extend(1_u8..=40);
+        encrypt.apply_keystream(&mut valid);
+        let mut observer = MtprotoResponseObserver::new(&init, ProtoTag::Intermediate);
+
+        assert!(
+            observe_and_record_first_mtproto_response(&mut observer, &valid, &response_state,)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(matches!(
+            &*response_state.lock().await,
+            MtprotoResponseState::Confirmed
+        ));
     }
 
     #[tokio::test]
