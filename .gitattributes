@@ -5,6 +5,7 @@ scripts/r2o-discovery-coalesce-differential.sh text eol=lf
 scripts/r2o-udp-session-table-check.sh text eol=lf
 scripts/r2o-discord-discovery-differential.sh text eol=lf
 scripts/r2o-tcp-reply-hidden-differential.sh text eol=lf
+scripts/r2o-raw-emission-cancel-differential.sh text eol=lf
 scripts/r2o-build-openwrt-armv7-musl.sh text eol=lf
 scripts/package-release.sh text eol=lf
 scripts/test-package-release.sh text eol=lf

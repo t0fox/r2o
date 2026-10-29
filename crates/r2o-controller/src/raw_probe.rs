@@ -1196,18 +1196,14 @@ fn raw_probe_once(
                 packets,
                 fate: OriginalFate::Drop,
             } => {
-                for packet in packets {
-                    if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-                        return Err(ProbeError::Local("context canceled".into()));
-                    }
-                    if packet.delay_us != 0 {
-                        cancellable_sleep(
-                            Duration::from_micros(u64::from(packet.delay_us)),
-                            cancel,
-                        )?;
-                    }
-                    connection.send_ip_packet(&packet.packet)?;
-                }
+                emit_plan_packets(
+                    packets
+                        .into_iter()
+                        .map(|packet| (packet.delay_us, packet.packet)),
+                    cancel,
+                    thread::sleep,
+                    |packet| connection.send_ip_packet(packet),
+                )?;
             }
             _ => {
                 return Err(ProbeError::Local(
@@ -1224,7 +1220,7 @@ fn raw_probe_once(
             && !poison.seqovl_exact
             && !poison.fake_between
         {
-            cancellable_sleep(Duration::from_millis(12), cancel)?;
+            thread::sleep(Duration::from_millis(12));
         }
     }
 
@@ -1234,16 +1230,20 @@ fn raw_probe_once(
     Ok(trigger_accepts(trigger.accept, &response))
 }
 
-fn cancellable_sleep(
-    duration: Duration,
+fn emit_plan_packets(
+    packets: impl IntoIterator<Item = (u32, Vec<u8>)>,
     cancel: Option<&std::sync::atomic::AtomicBool>,
+    mut sleep: impl FnMut(Duration),
+    mut send: impl FnMut(&[u8]) -> Result<(), ProbeError>,
 ) -> Result<(), ProbeError> {
-    let deadline = Instant::now() + duration;
-    while Instant::now() < deadline {
+    for (delay_us, packet) in packets {
         if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
             return Err(ProbeError::Local("context canceled".into()));
         }
-        thread::sleep((deadline - Instant::now()).min(Duration::from_millis(20)));
+        if delay_us != 0 {
+            sleep(Duration::from_micros(u64::from(delay_us)));
+        }
+        send(&packet)?;
     }
     Ok(())
 }
@@ -2508,6 +2508,76 @@ mod tests {
                 .find(|line| line.starts_with("RAW_SELFTEST_RECHECK "))
                 .expect("D2O raw self-test recheck result");
             assert_eq!(row, c_row, "C/Rust raw self-test recheck differs");
+        }
+        println!("{row}");
+    }
+
+    #[test]
+    fn measured_emission_finishes_an_started_gap_before_observing_cancellation() {
+        let trigger = Trigger::tls("probe.example").unwrap();
+        let poison = Poison {
+            name: "badsum-x3-g20".into(),
+            badsum: true,
+            repeats: 3,
+            gap_ms: 20,
+            ..Poison::default()
+        };
+        let plan = crate::classify::plan_for_poison(&poison, &trigger, None, 0).unwrap();
+        let input = build_control_packet(
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2)),
+            41_000,
+            443,
+            0x1234_5678,
+            0x90ab_cdef,
+            TCP_ACK | TCP_PSH,
+            &[],
+            &trigger.payload,
+        )
+        .unwrap();
+        let PacketDecision::Transmit { packets, .. } = decide(&plan, &input) else {
+            panic!("the donor's repeated badsum plan must produce emissions");
+        };
+        assert!(packets.len() >= 3);
+        assert_eq!(packets[0].delay_us, 0);
+        assert_eq!(packets[1].delay_us, 20_000);
+        assert_eq!(packets[2].delay_us, 20_000);
+
+        let cancelled = AtomicBool::new(false);
+        let mut sent = Vec::new();
+        let mut waited_ms = 0u128;
+        let result = emit_plan_packets(
+            packets
+                .into_iter()
+                .map(|packet| (packet.delay_us, packet.packet)),
+            Some(&cancelled),
+            |duration| {
+                waited_ms += duration.as_millis();
+                cancelled.store(true, Ordering::Relaxed);
+            },
+            |packet| {
+                sent.push(packet.to_vec());
+                Ok(())
+            },
+        );
+        let row = format!(
+            "RAW_EMISSION_CANCEL result=cancelled packets={} waited_ms={waited_ms}",
+            sent.len(),
+        );
+        assert!(matches!(result, Err(ProbeError::Local(error)) if error == "context canceled"));
+        assert_eq!(
+            sent.len(),
+            2,
+            "a started emission gap must finish its packet"
+        );
+        if let Ok(c_output) = std::env::var("R2O_RAW_EMISSION_C_OUTPUT") {
+            let c_rows =
+                std::fs::read_to_string(c_output).expect("read D2O emission cancellation output");
+            let c_row = c_rows
+                .lines()
+                .find(|line| line.starts_with("RAW_EMISSION_CANCEL "))
+                .expect("D2O emission cancellation result");
+            assert_eq!(row, c_row, "C/Rust raw emission cancellation differs");
         }
         println!("{row}");
     }
