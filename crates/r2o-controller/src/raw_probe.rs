@@ -588,6 +588,14 @@ fn resolve_target(target: &ProbeTarget) -> Result<SocketAddr, ProbeError> {
         .ok_or_else(|| ProbeError::Transport("classify: адрес цели не разрешился".into()))
 }
 
+fn resolve_split_target(target: &ProbeTarget) -> Result<SocketAddr, ProbeError> {
+    (target.host.as_str(), target.port)
+        .to_socket_addrs()
+        .map_err(|error| ProbeError::Transport(format!("dial tcp: {error}")))?
+        .next()
+        .ok_or_else(|| ProbeError::Transport("classify: адрес цели не разрешился".into()))
+}
+
 fn majority(pass: usize, total: usize) -> bool {
     total != 0 && pass > total / 2
 }
@@ -1015,7 +1023,7 @@ pub(crate) fn probe_tcp_split(
     if cuts.len() != 1 || cuts[0] == 0 || cuts[0] >= trigger.payload.len() {
         return Err(ProbeError::Local("split runtime: invalid cut".into()));
     }
-    let remote = resolve_target(target)?;
+    let remote = resolve_split_target(target)?;
     let mut split = Poison::default();
     split.name = "tcp-split".into();
     split.split_pos = cuts[0] as i32;
@@ -1046,8 +1054,16 @@ fn raw_probe_once(
     offer_ts: bool,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<bool, ProbeError> {
-    let mut connection = RawConn::connect(remote, timeout, effective_mark(mark), cancel, offer_ts)?
-        .ok_or_else(|| ProbeError::Transport("classify: SYN-ACK не пришёл".into()))?;
+    let mut connection =
+        match RawConn::connect(remote, timeout, effective_mark(mark), cancel, offer_ts)? {
+            Some(connection) => connection,
+            None => {
+                return Err(ProbeError::RawConnectTimeout {
+                    message: "classify: SYN-ACK не пришёл".into(),
+                    peer: remote,
+                });
+            }
+        };
 
     if poison.syn_data {
         let packet = build_control_packet(

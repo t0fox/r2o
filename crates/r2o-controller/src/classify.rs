@@ -2,7 +2,7 @@
 
 pub use crate::classify_measured::{plan_bytes_for_poison, plan_for_poison, plan_text_for_poison};
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{
     Arc, OnceLock,
     atomic::{AtomicBool, Ordering},
@@ -543,6 +543,7 @@ pub fn trigger_accepts(accept: Accept, bytes: &[u8]) -> bool {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProbeError {
     DialTimeout(String),
+    RawConnectTimeout { message: String, peer: SocketAddr },
     Transport(String),
     Local(String),
     Unsupported(String),
@@ -552,6 +553,7 @@ impl ProbeError {
     fn message(&self) -> &str {
         match self {
             Self::DialTimeout(message)
+            | Self::RawConnectTimeout { message, .. }
             | Self::Transport(message)
             | Self::Local(message)
             | Self::Unsupported(message) => message,
@@ -605,6 +607,17 @@ pub trait ProbeBackend {
                 ProbeOutcome::Rejected
             }
         })
+    }
+
+    fn tcp_control_peer(
+        &mut self,
+        _peer: SocketAddr,
+        _timeout: Duration,
+        _mark: Option<u32>,
+    ) -> Result<(), ProbeError> {
+        Err(ProbeError::Unsupported(
+            "TCP control fallback is unavailable in this probe backend".into(),
+        ))
     }
 
     fn neutral_ack(
@@ -676,6 +689,15 @@ impl ProbeBackend for TcpProbeBackend {
         cancel: Option<&AtomicBool>,
     ) -> Result<bool, ProbeError> {
         crate::response::probe_neutral_ack(target, timeout, mark, cancel)
+    }
+
+    fn tcp_control_peer(
+        &mut self,
+        peer: SocketAddr,
+        timeout: Duration,
+        mark: Option<u32>,
+    ) -> Result<(), ProbeError> {
+        crate::response::probe_tcp_control_peer(peer, timeout, mark)
     }
 
     fn raw_supported(&self) -> bool {
@@ -1005,7 +1027,7 @@ fn measure<B: ProbeBackend>(
             break;
         }
         result.probes += 1;
-        match backend.probe_outcome(ProbeRequest {
+        let mut outcome = backend.probe_outcome(ProbeRequest {
             target,
             trigger,
             cuts: spec.cuts,
@@ -1015,7 +1037,92 @@ fn measure<B: ProbeBackend>(
             no_raw: options.no_raw,
             client_tcp_has_timestamps: options.client_tcp_has_timestamps,
             cancel: options.cancel.as_deref(),
-        }) {
+        });
+        let raw_timeout = match &outcome {
+            Err(ProbeError::RawConnectTimeout { message, peer }) => Some((message.clone(), *peer)),
+            _ => None,
+        };
+        let mut terminal_transport_failure = false;
+        if let Some((message, peer)) = raw_timeout {
+            let raw_index = add_observation(result, "transport:raw-connect", &[], Duration::ZERO);
+            result.trace[raw_index].fail = 1;
+            result.trace[raw_index].error = Some(message.clone());
+            progress("transport:raw-connect", result.probes, 0, 1);
+
+            if stopped(options) {
+                terminal_transport_failure = true;
+            } else {
+                result.probes += 1;
+                let control = backend.tcp_control_peer(peer, options.timeout, options.mark);
+                let control_error = control
+                    .as_ref()
+                    .err()
+                    .map(|error| error.message().to_owned());
+                let control_pass = usize::from(control.is_ok());
+                let control_fail = usize::from(control.is_err());
+                let control_index =
+                    add_observation(result, "transport:tcp-control", &[], Duration::ZERO);
+                result.trace[control_index].pass = control_pass;
+                result.trace[control_index].fail = control_fail;
+                result.trace[control_index].error = control_error;
+                progress(
+                    "transport:tcp-control",
+                    result.probes,
+                    control_pass,
+                    control_fail,
+                );
+
+                match control {
+                    Err(error) => {
+                        outcome = Err(error);
+                        terminal_transport_failure = true;
+                    }
+                    Ok(()) if stopped(options) => {
+                        terminal_transport_failure = true;
+                    }
+                    Ok(()) => {
+                        let retry_target = ProbeTarget {
+                            host: peer.ip().to_string(),
+                            port: peer.port(),
+                        };
+                        result.probes += 1;
+                        outcome = backend.probe_outcome(ProbeRequest {
+                            target: &retry_target,
+                            trigger,
+                            cuts: spec.cuts,
+                            gap: spec.gap,
+                            timeout: options.timeout,
+                            mark: options.mark,
+                            no_raw: options.no_raw,
+                            client_tcp_has_timestamps: options.client_tcp_has_timestamps,
+                            cancel: options.cancel.as_deref(),
+                        });
+                        if let Err(ProbeError::RawConnectTimeout { message, .. }) = &outcome {
+                            let retry_index = add_observation(
+                                result,
+                                "transport:raw-connect-retry",
+                                &[],
+                                Duration::ZERO,
+                            );
+                            result.trace[retry_index].fail = 1;
+                            result.trace[retry_index].error = Some(message.clone());
+                            progress("transport:raw-connect-retry", result.probes, 0, 1);
+                            terminal_transport_failure = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if terminal_transport_failure {
+            tally.errors += 1;
+            if tally.error.is_none() {
+                tally.error = outcome.err();
+            }
+            break;
+        }
+
+        match outcome {
             Ok(ProbeOutcome::Accepted) => {
                 tally.pass += 1;
                 if spec.until_pass {
@@ -1585,5 +1692,299 @@ fn current_raw_dial_count() -> u64 {
     #[cfg(not(target_os = "linux"))]
     {
         0
+    }
+}
+
+#[cfg(test)]
+mod raw_connect_fallback_tests {
+    use super::{
+        ClassifyOptions, ClassifyResult, MeasureSpec, ProbeBackend, ProbeError, ProbeOutcome,
+        ProbeRequest, ProbeTarget, Tally, Trigger, measure,
+    };
+    use std::collections::VecDeque;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    struct ScriptedBackend {
+        outcomes: VecDeque<Result<ProbeOutcome, ProbeError>>,
+        control_results: VecDeque<Result<(), ProbeError>>,
+        targets: Vec<(String, u16)>,
+        controls: Vec<(SocketAddr, Duration, Option<u32>)>,
+    }
+
+    impl ProbeBackend for ScriptedBackend {
+        fn probe(&mut self, request: ProbeRequest<'_>) -> Result<bool, ProbeError> {
+            self.probe_outcome(request)
+                .map(|outcome| outcome == ProbeOutcome::Accepted)
+        }
+
+        fn probe_outcome(&mut self, request: ProbeRequest<'_>) -> Result<ProbeOutcome, ProbeError> {
+            self.targets
+                .push((request.target.host.clone(), request.target.port));
+            self.outcomes.pop_front().expect("scripted probe result")
+        }
+
+        fn tcp_control_peer(
+            &mut self,
+            peer: SocketAddr,
+            timeout: Duration,
+            mark: Option<u32>,
+        ) -> Result<(), ProbeError> {
+            self.controls.push((peer, timeout, mark));
+            self.control_results.pop_front().unwrap_or(Ok(()))
+        }
+    }
+
+    fn fixture(
+        outcomes: &[Result<ProbeOutcome, ProbeError>],
+        control_results: &[Result<(), ProbeError>],
+    ) -> (
+        ScriptedBackend,
+        ProbeTarget,
+        Trigger,
+        ClassifyOptions,
+        ClassifyResult,
+    ) {
+        let target = ProbeTarget {
+            host: "split.example".into(),
+            port: 443,
+        };
+        let trigger = Trigger {
+            name: "fixture".into(),
+            payload: b"ABCD".to_vec(),
+            accept: super::Accept::Any,
+        };
+        let options = ClassifyOptions {
+            repeats: 1,
+            timeout: Duration::from_millis(600),
+            mark: Some(0x2d),
+            ..ClassifyOptions::default()
+        };
+        let result = ClassifyResult::new("split.example:443", 1);
+        (
+            ScriptedBackend {
+                outcomes: outcomes.iter().cloned().collect(),
+                control_results: control_results.iter().cloned().collect(),
+                targets: Vec::new(),
+                controls: Vec::new(),
+            },
+            target,
+            trigger,
+            options,
+            result,
+        )
+    }
+
+    fn raw_timeout(peer: SocketAddr) -> Result<ProbeOutcome, ProbeError> {
+        Err(ProbeError::RawConnectTimeout {
+            message: "classify: SYN-ACK не пришёл".into(),
+            peer,
+        })
+    }
+
+    fn run_measure(
+        backend: &mut ScriptedBackend,
+        target: &ProbeTarget,
+        trigger: &Trigger,
+        options: &ClassifyOptions,
+        result: &mut ClassifyResult,
+    ) -> Tally {
+        run_measure_with_progress(
+            backend,
+            target,
+            trigger,
+            options,
+            result,
+            &mut |_, _, _, _| {},
+        )
+    }
+
+    fn run_measure_with_progress(
+        backend: &mut ScriptedBackend,
+        target: &ProbeTarget,
+        trigger: &Trigger,
+        options: &ClassifyOptions,
+        result: &mut ClassifyResult,
+        progress: &mut dyn FnMut(&str, usize, usize, usize),
+    ) -> Tally {
+        measure(
+            backend,
+            target,
+            trigger,
+            options,
+            result,
+            MeasureSpec {
+                name: "split",
+                cuts: &[2],
+                gap: Duration::ZERO,
+                until_pass: false,
+            },
+            progress,
+        )
+    }
+
+    #[test]
+    fn raw_connect_timeout_runs_control_then_retries_once_on_the_same_peer() {
+        let peer: SocketAddr = "192.0.2.44:443".parse().unwrap();
+        let (mut backend, target, trigger, options, mut result) =
+            fixture(&[raw_timeout(peer), Ok(ProbeOutcome::Accepted)], &[Ok(())]);
+
+        let tally = run_measure(&mut backend, &target, &trigger, &options, &mut result);
+
+        assert_eq!(tally.pass, 1);
+        assert_eq!(tally.fail, 0);
+        assert_eq!(tally.errors, 0);
+        assert_eq!(result.probes, 3);
+        assert_eq!(backend.targets[0], ("split.example".into(), 443));
+        assert_eq!(backend.targets[1], ("192.0.2.44".into(), 443));
+        assert_eq!(backend.controls, [(peer, options.timeout, options.mark)]);
+        assert_eq!(result.trace[1].probe, "transport:raw-connect");
+        assert_eq!(result.trace[1].fail, 1);
+        assert_eq!(result.trace[2].probe, "transport:tcp-control");
+        assert_eq!(result.trace[2].pass, 1);
+    }
+
+    #[test]
+    fn recovered_raw_connect_timeout_does_not_spend_an_extra_repeat() {
+        let peer: SocketAddr = "192.0.2.44:443".parse().unwrap();
+        let (mut backend, target, trigger, mut options, mut result) = fixture(
+            &[
+                raw_timeout(peer),
+                Ok(ProbeOutcome::Accepted),
+                Ok(ProbeOutcome::Accepted),
+                Ok(ProbeOutcome::Accepted),
+            ],
+            &[Ok(())],
+        );
+        options.repeats = 3;
+        result.repeats = 3;
+        let mut progress_events = Vec::new();
+        let mut progress = |probe: &str, _: usize, pass: usize, fail: usize| {
+            progress_events.push((probe.to_owned(), pass, fail));
+        };
+
+        let tally = run_measure_with_progress(
+            &mut backend,
+            &target,
+            &trigger,
+            &options,
+            &mut result,
+            &mut progress,
+        );
+
+        assert_eq!(tally.pass, 3);
+        assert_eq!(tally.fail, 0);
+        assert_eq!(result.probes, 5);
+        let transport_units = progress_events
+            .iter()
+            .filter(|(probe, _, _)| probe.starts_with("transport:"))
+            .map(|(_, pass, fail)| pass + fail)
+            .sum::<usize>();
+        let completed_question_units = progress_events
+            .iter()
+            .rev()
+            .find(|(probe, _, _)| probe == "split")
+            .map(|(_, pass, fail)| pass + fail)
+            .unwrap();
+        assert_eq!(transport_units + completed_question_units, 5);
+        assert_eq!(backend.targets.len(), 4);
+        assert_eq!(backend.controls.len(), 1);
+    }
+
+    #[test]
+    fn failed_tcp_control_stops_without_retry_or_negative_probe() {
+        let peer: SocketAddr = "192.0.2.44:443".parse().unwrap();
+        let control_error = ProbeError::DialTimeout("dial tcp 192.0.2.44:443: i/o timeout".into());
+        let (mut backend, target, trigger, options, mut result) = fixture(
+            &[raw_timeout(peer), Ok(ProbeOutcome::Accepted)],
+            &[Err(control_error.clone())],
+        );
+
+        let tally = run_measure(&mut backend, &target, &trigger, &options, &mut result);
+
+        assert_eq!(tally.pass, 0);
+        assert_eq!(tally.fail, 0);
+        assert_eq!(tally.errors, 1);
+        assert_eq!(tally.error, Some(control_error));
+        assert_eq!(result.probes, 2);
+        assert_eq!(backend.targets.len(), 1);
+        assert_eq!(result.trace[2].probe, "transport:tcp-control");
+        assert_eq!(result.trace[2].fail, 1);
+    }
+
+    #[test]
+    fn repeated_raw_connect_timeout_is_reported_after_the_diagnostic_pair() {
+        let peer: SocketAddr = "192.0.2.44:443".parse().unwrap();
+        let (mut backend, target, trigger, options, mut result) =
+            fixture(&[raw_timeout(peer), raw_timeout(peer)], &[Ok(())]);
+
+        let tally = run_measure(&mut backend, &target, &trigger, &options, &mut result);
+
+        assert_eq!(tally.pass, 0);
+        assert_eq!(tally.fail, 0);
+        assert_eq!(tally.errors, 1);
+        assert_eq!(result.probes, 3);
+        assert_eq!(backend.targets.len(), 2);
+        assert_eq!(result.trace[3].probe, "transport:raw-connect-retry");
+        assert_eq!(result.trace[3].fail, 1);
+    }
+
+    #[test]
+    fn cancellation_after_raw_connect_does_not_start_the_tcp_control() {
+        let peer: SocketAddr = "192.0.2.44:443".parse().unwrap();
+        let (mut backend, target, trigger, mut options, mut result) =
+            fixture(&[raw_timeout(peer), Ok(ProbeOutcome::Accepted)], &[Ok(())]);
+        let cancel = Arc::new(AtomicBool::new(false));
+        options.cancel = Some(Arc::clone(&cancel));
+        let mut progress = |probe: &str, _, _, _| {
+            if probe == "transport:raw-connect" {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        };
+
+        let tally = run_measure_with_progress(
+            &mut backend,
+            &target,
+            &trigger,
+            &options,
+            &mut result,
+            &mut progress,
+        );
+
+        assert_eq!(tally.errors, 1);
+        assert_eq!(tally.pass, 0);
+        assert_eq!(result.probes, 1);
+        assert!(backend.controls.is_empty());
+    }
+
+    #[test]
+    fn cancellation_after_tcp_control_does_not_start_the_raw_retry() {
+        let peer: SocketAddr = "192.0.2.44:443".parse().unwrap();
+        let (mut backend, target, trigger, mut options, mut result) =
+            fixture(&[raw_timeout(peer), Ok(ProbeOutcome::Accepted)], &[Ok(())]);
+        let cancel = Arc::new(AtomicBool::new(false));
+        options.cancel = Some(Arc::clone(&cancel));
+        let mut progress = |probe: &str, _, _, _| {
+            if probe == "transport:tcp-control" {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        };
+
+        let tally = run_measure_with_progress(
+            &mut backend,
+            &target,
+            &trigger,
+            &options,
+            &mut result,
+            &mut progress,
+        );
+
+        assert_eq!(tally.errors, 1);
+        assert_eq!(tally.pass, 0);
+        assert_eq!(result.probes, 2);
+        assert_eq!(backend.targets.len(), 1);
+        assert_eq!(backend.controls.len(), 1);
     }
 }

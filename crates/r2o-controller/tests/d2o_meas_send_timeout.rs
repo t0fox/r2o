@@ -68,7 +68,9 @@ fn d2o_send_timeout_is_an_experiment_error_not_a_negative_probe() {
         cancel: None,
     });
     let result_name = match &result {
-        Err(ProbeError::Transport(_)) | Err(ProbeError::Local(_)) => "ERROR",
+        Err(ProbeError::Transport(_))
+        | Err(ProbeError::RawConnectTimeout { .. })
+        | Err(ProbeError::Local(_)) => "ERROR",
         Ok(ProbeOutcome::Rejected) => "REJECTED",
         Ok(ProbeOutcome::Accepted) => "ACCEPTED",
         Ok(ProbeOutcome::Unproven) => "UNPROVEN",
@@ -79,7 +81,9 @@ fn d2o_send_timeout_is_an_experiment_error_not_a_negative_probe() {
     assert!(
         matches!(
             result,
-            Err(ProbeError::Transport(_)) | Err(ProbeError::Local(_))
+            Err(ProbeError::Transport(_))
+                | Err(ProbeError::RawConnectTimeout { .. })
+                | Err(ProbeError::Local(_))
         ),
         "d2o treats a timed-out write as an experiment error; Rust returned {result_name}"
     );

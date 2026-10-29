@@ -679,6 +679,19 @@ fn dial_probe_target(
     }
 }
 
+pub(crate) fn probe_tcp_control_peer(
+    peer: SocketAddr,
+    timeout: Duration,
+    mark: Option<u32>,
+) -> Result<(), ProbeError> {
+    let target = ProbeTarget {
+        host: peer.ip().to_string(),
+        port: peer.port(),
+    };
+    let _ = dial_probe_target(&target, effective_probe_timeout(timeout), mark)?;
+    Ok(())
+}
+
 /// Отправить один триггер по программе разрезания TCP и правилу принятия эталона.
 pub(crate) fn probe_trigger(
     target: &ProbeTarget,

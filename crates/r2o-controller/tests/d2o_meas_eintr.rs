@@ -133,7 +133,9 @@ fn run_fixture(fixture_text: &str) -> &'static str {
         Ok(ProbeOutcome::Rejected) => "REJECTED",
         Ok(ProbeOutcome::Accepted) => "ACCEPTED",
         Ok(ProbeOutcome::Unproven) => "UNPROVEN",
-        Err(ProbeError::Transport(_)) | Err(ProbeError::Local(_)) => "ERROR",
+        Err(ProbeError::Transport(_))
+        | Err(ProbeError::RawConnectTimeout { .. })
+        | Err(ProbeError::Local(_)) => "ERROR",
         Err(ProbeError::DialTimeout(_)) => "DIAL_TIMEOUT",
         Err(ProbeError::Unsupported(_)) => "UNSUPPORTED",
     };
