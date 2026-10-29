@@ -83,6 +83,8 @@ int main(void)
                                                        "192.0.2.20", 443, D2K_SUSPECT_RST));
     printf("late_only_trigger %d\n", target_blocks(scheduler, "clear.example", 6, 4,
                                                      "192.0.2.20", 443, D2K_SUSPECT_RST_AFTER_APP));
+    printf("late_only_other_endpoint %d\n", target_blocks(scheduler, "clear.example", 6, 4,
+                                                            "192.0.2.22", 443, D2K_SUSPECT_RST_AFTER_APP));
 
     task exhausted = {0};
     snprintf(exhausted.name, sizeof exhausted.name, "%s", "exhausted.example");
@@ -96,6 +98,9 @@ int main(void)
     cooldown_record(scheduler, &exhausted, 3);
     printf("late_only_preserves_exhausted %d\n", target_blocks(scheduler, "exhausted.example", 6, 4,
                                                                  "192.0.2.21", 443, D2K_SUSPECT_RST));
+    printf("late_only_preserves_exhausted_trigger %d\n",
+           target_blocks(scheduler, "exhausted.example", 6, 4,
+                         "192.0.2.21", 443, D2K_SUSPECT_RST_AFTER_APP));
     free(scheduler);
 
     d2k_sched *ring = calloc(1, sizeof *ring);
@@ -209,5 +214,27 @@ int main(void)
     printf("active_challenge_stays_recorded %d\n",
            cooldown_find_challenge(challenge_wins, "challenge-wins.example", 6, 4) != NULL);
     free(challenge_wins);
+
+    d2k_sched *ech_challenges = calloc(1, sizeof *ech_challenges);
+    if (!ech_challenges) return 11;
+    ech_challenges->now_ms = 1000;
+    for (unsigned index = 0; index < 8; index++) {
+        char name[64];
+        snprintf(name, sizeof name, "ech-witness-%03u.example", index);
+        ech_chal_add(ech_challenges, name);
+    }
+    /* Re-recording an active name does not advance the donor's ring cursor. */
+    ech_chal_add(ech_challenges, "ech-witness-000.example");
+    ech_chal_add(ech_challenges, "ech-witness-new.example");
+    printf("ech_ring_evicts_oldest %d\n",
+           !ech_chal_has(ech_challenges, "ech-witness-000.example"));
+    printf("ech_ring_keeps_next %d\n",
+           ech_chal_has(ech_challenges, "ech-witness-001.example"));
+    printf("ech_ring_keeps_new %d\n",
+           ech_chal_has(ech_challenges, "ech-witness-new.example"));
+    ech_challenges->now_ms += 1800000;
+    printf("ech_ring_expires_at_deadline %d\n",
+           ech_chal_has(ech_challenges, "ech-witness-new.example"));
+    free(ech_challenges);
     return 0;
 }

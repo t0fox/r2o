@@ -35,8 +35,8 @@ use r2o_controller::ask::{
 use r2o_controller::catalog::Binding;
 use r2o_controller::catalog::{Catalog, DomainObservation, GroupKey};
 use r2o_controller::classify::{
-    Accept, ClassifyOptions, Trigger, Verdict, run as classify_run,
-    run_with_backend_progress as classify_run_with_progress,
+    Accept, ClassifyOptions, ProbeBackend, ProbeTarget, TcpProbeBackend, Trigger, Verdict,
+    run as classify_run, run_with_backend_progress as classify_run_with_progress,
 };
 use r2o_controller::domain::normalize;
 use r2o_controller::http_search::{
@@ -116,8 +116,6 @@ const HTTP_SEARCH_RECHECK: std::time::Duration = std::time::Duration::from_secs(
 const HTTP_SEARCH_BASE_RETRIES: u8 = 1;
 #[cfg(unix)]
 const R2O_LATE_RX_TASK_CAPACITY: usize = 16;
-#[cfg(unix)]
-const R2O_LATE_RX_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 #[cfg(unix)]
 const R2O_QUIC_TRIAL_QUEUE_CAPACITY: usize = 8;
 #[cfg(unix)]
@@ -4130,8 +4128,24 @@ struct R2oLateRxWorker {
     jobs: Option<SyncSender<R2oLateRxInput>>,
     outcomes: Receiver<R2oLateRxOutcome>,
     cancel: Arc<AtomicBool>,
-    cooldowns: HashMap<String, std::time::Instant>,
+    active: HashSet<R2oDiscoveryFailureKey>,
     thread: Option<JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+fn r2o_late_rx_failure_key(input: &R2oLateRxInput) -> R2oDiscoveryFailureKey {
+    if let Some(target) = input.discovery_target.as_ref() {
+        return r2o_discovery_failure_key(target);
+    }
+    let family = input.options.ip.map_or(4, |ip| match ip {
+        std::net::IpAddr::V4(_) => 4,
+        std::net::IpAddr::V6(_) => 6,
+    });
+    let endpoint = input.options.ip.map_or_else(
+        || format!(":{}", input.options.port),
+        |ip| std::net::SocketAddr::new(ip, input.options.port).to_string(),
+    );
+    (input.options.name.clone(), 6, family, endpoint)
 }
 
 #[cfg(unix)]
@@ -5407,16 +5421,24 @@ impl R2oLateRxWorker {
             jobs: Some(jobs),
             outcomes,
             cancel,
-            cooldowns: HashMap::new(),
+            active: HashSet::new(),
             thread: Some(thread),
         }
     }
 
-    fn queue(&mut self, input: R2oLateRxInput, now: std::time::Instant) -> bool {
-        self.cooldowns
-            .retain(|_, started| now.saturating_duration_since(*started) < R2O_LATE_RX_COOLDOWN);
-        let host = input.options.name.clone();
-        if self.cooldowns.contains_key(&host) {
+    fn queue(
+        &mut self,
+        input: R2oLateRxInput,
+        now: std::time::Instant,
+        discovery: Option<&DiscoveryWorker>,
+    ) -> bool {
+        if input.discovery_target.as_ref().is_some_and(|target| {
+            discovery.is_some_and(|worker| worker.r2o_late_trigger_blocked(target, now))
+        }) {
+            return false;
+        }
+        let failure_key = r2o_late_rx_failure_key(&input);
+        if self.active.contains(&failure_key) {
             return false;
         }
         let Some(jobs) = self.jobs.as_ref() else {
@@ -5425,21 +5447,14 @@ impl R2oLateRxWorker {
         if jobs.try_send(input).is_err() {
             return false;
         }
-        if self.cooldowns.len() >= 128
-            && let Some(oldest) = self
-                .cooldowns
-                .iter()
-                .min_by_key(|(_, started)| *started)
-                .map(|(host, _)| host.clone())
-        {
-            self.cooldowns.remove(&oldest);
-        }
-        self.cooldowns.insert(host, now);
+        self.active.insert(failure_key);
         true
     }
 
-    fn try_outcome(&self) -> Option<R2oLateRxOutcome> {
-        self.outcomes.try_recv().ok()
+    fn try_outcome(&mut self) -> Option<R2oLateRxOutcome> {
+        let outcome = self.outcomes.try_recv().ok()?;
+        self.active.remove(&r2o_late_rx_failure_key(&outcome.input));
+        Some(outcome)
     }
 }
 
@@ -6041,6 +6056,9 @@ struct DiscoveryOutcome {
     plan_text: Option<String>,
     detail: String,
     queue_expired: bool,
+    address_failure: bool,
+    address_recheck_acknowledged: bool,
+    address_recheck_probes: usize,
     direct_clear: bool,
     volume_recovery: bool,
     volume_fingerprint: Option<r2o_controller::catalog::Fingerprint>,
@@ -6136,6 +6154,10 @@ const R2O_DISCOVERY_CLEAR_RETRY_SECOND: std::time::Duration =
 const R2O_DISCOVERY_CLEAR_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 #[cfg(unix)]
 const R2O_DISCOVERY_INCOMPLETE_RETRY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+#[cfg(unix)]
+fn r2o_discovery_late_trigger(signal_code: Option<u8>) -> bool {
+    matches!(signal_code, Some(5 | 6 | 8))
+}
 #[cfg(unix)]
 const R2O_DISCOVERY_CANDIDATE_VERIFY_RETRIES: u8 = 2;
 // 5 property questions + 8 queued plans + 5 RX variants + 49 fallback arms.
@@ -6318,6 +6340,57 @@ struct R2oEchWitnessResolution {
 struct R2oEchWitnessResolutionCache {
     entries: Vec<Option<R2oEchWitnessResolution>>,
     next: usize,
+}
+
+#[cfg(unix)]
+const R2O_DISCOVERY_ECH_CHALLENGE_CAPACITY: usize = 8;
+#[cfg(unix)]
+const R2O_DISCOVERY_ECH_CHALLENGE_TTL: std::time::Duration =
+    std::time::Duration::from_secs(30 * 60);
+
+#[cfg(unix)]
+struct R2oEchChallengeCache {
+    entries: Vec<Option<(String, std::time::Instant)>>,
+    next: usize,
+}
+
+#[cfg(unix)]
+impl Default for R2oEchChallengeCache {
+    fn default() -> Self {
+        Self {
+            entries: std::iter::repeat_with(|| None)
+                .take(R2O_DISCOVERY_ECH_CHALLENGE_CAPACITY)
+                .collect(),
+            next: 0,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl R2oEchChallengeCache {
+    fn contains(&self, name: &str, now: std::time::Instant) -> bool {
+        self.entries
+            .iter()
+            .flatten()
+            .any(|(cached, expires_at)| cached == name && *expires_at > now)
+    }
+
+    fn active_names(&self, now: std::time::Instant) -> HashSet<String> {
+        self.entries
+            .iter()
+            .flatten()
+            .filter(|(_, expires_at)| *expires_at > now)
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    fn record(&mut self, name: &str, expires_at: std::time::Instant, now: std::time::Instant) {
+        if self.contains(name, now) {
+            return;
+        }
+        self.entries[self.next] = Some((name.to_owned(), expires_at));
+        self.next = (self.next + 1) % self.entries.len();
+    }
 }
 
 #[cfg(unix)]
@@ -6939,6 +7012,192 @@ type R2oDiscoveryTaskKey = (String, u8, u8);
 type R2oDiscoveryFailureKey = (String, u8, u8, String);
 
 #[cfg(unix)]
+type R2oDeadAddressKey = (String, u8, u8, String);
+
+#[cfg(unix)]
+struct R2oDeadAddressEntry {
+    key: R2oDeadAddressKey,
+    streak: u8,
+    expires_at: std::time::Instant,
+}
+
+#[cfg(unix)]
+struct R2oDeadAddressCache {
+    slots: Vec<Option<R2oDeadAddressEntry>>,
+}
+
+#[cfg(unix)]
+impl Default for R2oDeadAddressCache {
+    fn default() -> Self {
+        Self {
+            slots: std::iter::repeat_with(|| None)
+                .take(R2O_DISCOVERY_COOLDOWN_CAPACITY)
+                .collect(),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn r2o_dead_address_key(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+) -> Option<R2oDeadAddressKey> {
+    let endpoint = target.endpoint.parse::<std::net::SocketAddr>().ok()?;
+    if endpoint.is_ipv4() != (target.family == 4) || !matches!(target.family, 4 | 6) {
+        return None;
+    }
+    Some((
+        target.host.clone(),
+        r2o_discovery_transport(target),
+        target.family,
+        endpoint.ip().to_string(),
+    ))
+}
+
+#[cfg(unix)]
+impl R2oDeadAddressCache {
+    fn is_blocked(
+        &self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        now: std::time::Instant,
+    ) -> bool {
+        let Some(key) = r2o_dead_address_key(target) else {
+            return false;
+        };
+        self.slots
+            .iter()
+            .flatten()
+            .find(|entry| entry.key == key)
+            .is_some_and(|entry| entry.expires_at > now)
+    }
+
+    fn requires_recheck(
+        &self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        now: std::time::Instant,
+    ) -> bool {
+        let Some(key) = r2o_dead_address_key(target) else {
+            return false;
+        };
+        self.slots
+            .iter()
+            .flatten()
+            .any(|entry| entry.key == key && entry.expires_at <= now)
+    }
+
+    fn step(
+        &mut self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        now: std::time::Instant,
+    ) -> Option<std::time::Duration> {
+        let key = r2o_dead_address_key(target)?;
+        let index = self
+            .slots
+            .iter()
+            .position(|entry| entry.as_ref().is_some_and(|entry| entry.key == key))
+            .or_else(|| self.slots.iter().position(Option::is_none))
+            .or_else(|| {
+                self.slots
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, entry)| {
+                        entry.as_ref().map(|entry| (index, entry.expires_at))
+                    })
+                    .min_by_key(|(_, expires_at)| *expires_at)
+                    .map(|(index, _)| index)
+            })?;
+        if self.slots[index]
+            .as_ref()
+            .is_none_or(|entry| entry.key != key)
+        {
+            self.slots[index] = Some(R2oDeadAddressEntry {
+                key,
+                streak: 0,
+                expires_at: now,
+            });
+        }
+        let entry = self.slots[index]
+            .as_mut()
+            .expect("выбранный слот мёртвого адреса заполнен");
+        entry.streak = entry.streak.saturating_add(1);
+        let retry_after = r2o_discovery_clear_retry_after(entry.streak);
+        entry.expires_at = now + retry_after;
+        Some(retry_after)
+    }
+
+    fn clear(&mut self, target: &r2o_controller::discovery::DiscoveryTarget) {
+        let Some(key) = r2o_dead_address_key(target) else {
+            return;
+        };
+        for entry in &mut self.slots {
+            if entry.as_ref().is_some_and(|entry| entry.key == key) {
+                *entry = None;
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum R2oSavedAddressRecheck {
+    NotRequired,
+    CoolingDown,
+    Accepted,
+    Silent,
+    Unmeasured,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum R2oSavedAddressAckError {
+    Unsupported,
+    NotAttempted,
+    Failed,
+}
+
+#[cfg(unix)]
+fn r2o_saved_address_recheck(
+    cache: &std::sync::Mutex<R2oDeadAddressCache>,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    now: std::time::Instant,
+    probes: &mut usize,
+    mut neutral_ack: impl FnMut() -> Result<bool, R2oSavedAddressAckError>,
+) -> R2oSavedAddressRecheck {
+    {
+        let cache = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !cache.requires_recheck(target, now) {
+            return if cache.is_blocked(target, now) {
+                R2oSavedAddressRecheck::CoolingDown
+            } else {
+                R2oSavedAddressRecheck::NotRequired
+            };
+        }
+    }
+    for _ in 0..3 {
+        let result = neutral_ack();
+        if !matches!(
+            result,
+            Err(R2oSavedAddressAckError::Unsupported | R2oSavedAddressAckError::NotAttempted)
+        ) {
+            *probes = (*probes).saturating_add(1);
+        }
+        match result {
+            Ok(true) => {
+                cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clear(target);
+                return R2oSavedAddressRecheck::Accepted;
+            }
+            Ok(false) => {}
+            Err(_) => return R2oSavedAddressRecheck::Unmeasured,
+        }
+    }
+    R2oSavedAddressRecheck::Silent
+}
+
+#[cfg(unix)]
 #[derive(Clone, Eq, PartialEq)]
 enum R2oDiscoveryCooldownKey {
     Endpoint(R2oDiscoveryFailureKey),
@@ -6956,6 +7215,7 @@ impl R2oDiscoveryCooldownKey {
 struct R2oDiscoveryCooldownEntry {
     key: R2oDiscoveryCooldownKey,
     expires_at: std::time::Instant,
+    late_rst_only: bool,
 }
 
 #[cfg(unix)]
@@ -6980,6 +7240,25 @@ impl R2oDiscoveryCooldownRing {
         expires_at: std::time::Instant,
         now: std::time::Instant,
     ) -> Option<R2oDiscoveryCooldownKey> {
+        self.record_with_late_rst_only(key, expires_at, now, false)
+    }
+
+    fn record_late_rst_only(
+        &mut self,
+        key: R2oDiscoveryCooldownKey,
+        expires_at: std::time::Instant,
+        now: std::time::Instant,
+    ) -> Option<R2oDiscoveryCooldownKey> {
+        self.record_with_late_rst_only(key, expires_at, now, true)
+    }
+
+    fn record_with_late_rst_only(
+        &mut self,
+        key: R2oDiscoveryCooldownKey,
+        expires_at: std::time::Instant,
+        now: std::time::Instant,
+        late_rst_only: bool,
+    ) -> Option<R2oDiscoveryCooldownKey> {
         if let Some(entry) = self
             .slots
             .iter_mut()
@@ -6987,10 +7266,15 @@ impl R2oDiscoveryCooldownRing {
             .find(|entry| entry.key == key)
         {
             entry.expires_at = expires_at;
+            entry.late_rst_only = late_rst_only;
             return None;
         }
         if let Some(slot) = self.slots.iter_mut().find(|slot| slot.is_none()) {
-            *slot = Some(R2oDiscoveryCooldownEntry { key, expires_at });
+            *slot = Some(R2oDiscoveryCooldownEntry {
+                key,
+                expires_at,
+                late_rst_only,
+            });
             return None;
         }
 
@@ -7012,8 +7296,25 @@ impl R2oDiscoveryCooldownRing {
         }
         let index = victim.expect("non-empty cooldown ring").0;
         self.slots[index]
-            .replace(R2oDiscoveryCooldownEntry { key, expires_at })
+            .replace(R2oDiscoveryCooldownEntry {
+                key,
+                expires_at,
+                late_rst_only,
+            })
             .map(|entry| entry.key)
+    }
+
+    fn endpoint_state(
+        &self,
+        failure_key: &R2oDiscoveryFailureKey,
+        now: std::time::Instant,
+    ) -> Option<(std::time::Instant, bool)> {
+        self.slots
+            .iter()
+            .flatten()
+            .find(|entry| entry.key == R2oDiscoveryCooldownKey::Endpoint(failure_key.clone()))
+            .filter(|entry| entry.expires_at > now)
+            .map(|entry| (entry.expires_at, entry.late_rst_only))
     }
 
     fn remove(&mut self, key: &R2oDiscoveryCooldownKey) {
@@ -7651,6 +7952,7 @@ struct DiscoveryWorker {
     suspect_fingerprint_order: VecDeque<r2o_controller::discovery::DiscoveryTarget>,
     failed_at: HashMap<R2oDiscoveryFailureKey, std::time::Instant>,
     failed_retry_after: HashMap<R2oDiscoveryFailureKey, std::time::Duration>,
+    dead_addresses: Arc<std::sync::Mutex<R2oDeadAddressCache>>,
     challenge_cooldowns: HashMap<(String, u8, u8), std::time::Instant>,
     cooldown_ring: R2oDiscoveryCooldownRing,
     ech_input_clearable_failures: HashSet<R2oDiscoveryFailureKey>,
@@ -7658,6 +7960,7 @@ struct DiscoveryWorker {
     clear_streaks: HashMap<R2oDiscoveryFailureKey, u8>,
     clear_signal_codes: HashMap<R2oDiscoveryFailureKey, u8>,
     clear_bypass_pending: HashSet<R2oDiscoveryFailureKey>,
+    late_rst_only_bypass_pending: HashSet<R2oDiscoveryFailureKey>,
     client_snapshot_targets:
         Arc<std::sync::Mutex<HashSet<r2o_controller::discovery::DiscoveryTarget>>>,
     client_snapshot_reasks: Arc<std::sync::Mutex<HashSet<R2oDiscoveryTaskKey>>>,
@@ -8607,6 +8910,7 @@ impl DiscoveryWorker {
         catalog_snapshot: Arc<std::sync::Mutex<Catalog>>,
     ) -> Self {
         let searches = Arc::new(std::sync::Mutex::new(R2oDiscoverySearches::default()));
+        let dead_addresses = Arc::new(std::sync::Mutex::new(R2oDeadAddressCache::default()));
         let runner_searches = Arc::clone(&searches);
         let client_hellos = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let runner_client_hellos = Arc::clone(&client_hellos);
@@ -8619,9 +8923,7 @@ impl DiscoveryWorker {
         let runner_client_snapshot_reasks = Arc::clone(&client_snapshot_reasks);
         let client_snapshot_targets = Arc::new(std::sync::Mutex::new(HashSet::new()));
         let runner_client_snapshot_targets = Arc::clone(&client_snapshot_targets);
-        let ech_challenges = Arc::new(std::sync::Mutex::new(
-            HashMap::<String, std::time::Instant>::new(),
-        ));
+        let ech_challenges = Arc::new(std::sync::Mutex::new(R2oEchChallengeCache::default()));
         let runner_ech_challenges = Arc::clone(&ech_challenges);
         let runner_recent_tcp_names = Arc::clone(&recent_tcp_names);
         let runner_send_cap = Arc::clone(&send_cap);
@@ -8707,11 +9009,10 @@ impl DiscoveryWorker {
                     &discovered_witness_candidates,
                 );
                 let challenged = {
-                    let mut cache = runner_ech_challenges
+                    let cache = runner_ech_challenges
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    cache.retain(|_, expires| *expires > now);
-                    cache.keys().cloned().collect::<HashSet<_>>()
+                    cache.active_names(now)
                 };
                 ech_witness_candidates.retain(|witness| !challenged.contains(witness));
                 let known_ech_origin = candidate_catalog.as_ref().and_then(|catalog| {
@@ -9021,6 +9322,9 @@ impl DiscoveryWorker {
                                         candidate.box_id
                                     ),
                                     queue_expired: false,
+                                    address_failure: false,
+                                    address_recheck_acknowledged: false,
+                                    address_recheck_probes: 0,
                                     direct_clear: false,
                                     volume_recovery: false,
                                     volume_fingerprint: None,
@@ -9037,6 +9341,9 @@ impl DiscoveryWorker {
                                     plan_text: None,
                                     detail: "свой план получил Cloudflare challenge; дальнейшая проверка остановлена".into(),
                                     queue_expired: false,
+                                    address_failure: false,
+                                    address_recheck_acknowledged: false,
+                                    address_recheck_probes: 0,
                                     direct_clear: false,
                                     volume_recovery: true,
                                     volume_fingerprint: None,
@@ -9253,6 +9560,9 @@ impl DiscoveryWorker {
                                 candidate.box_id
                             ),
                             queue_expired: false,
+                            address_failure: false,
+                            address_recheck_acknowledged: false,
+                            address_recheck_probes: 0,
                             direct_clear: false,
                             volume_recovery: false,
                             volume_fingerprint: None,
@@ -9973,12 +10283,13 @@ impl DiscoveryWorker {
                 }
             }
             if !rejected_witnesses.is_empty() {
-                let expires = std::time::Instant::now() + std::time::Duration::from_secs(30 * 60);
+                let now = std::time::Instant::now();
+                let expires = now + R2O_DISCOVERY_ECH_CHALLENGE_TTL;
                 let mut cache = runner_ech_challenges
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 for witness in &rejected_witnesses {
-                    cache.insert(witness.clone(), expires);
+                    cache.record(witness, expires, now);
                 }
             }
             let final_verified = r2o_family_recovery_decision(&result, applied)
@@ -10074,6 +10385,91 @@ impl DiscoveryWorker {
                 );
             outcome
         });
+        let runner_without_address_recheck = runner;
+        let runner_dead_addresses = Arc::clone(&dead_addresses);
+        let runner: Arc<R2oDiscoveryRunner> = Arc::new(move |target, trigger_planned, cancel| {
+            let address_recheck = if r2o_discovery_transport(&target) == 6 {
+                let now = std::time::Instant::now();
+                let mut address_recheck_probes = 0;
+                let address_recheck = match target.endpoint.parse::<std::net::SocketAddr>() {
+                    Ok(endpoint) => r2o_saved_address_recheck(
+                        &runner_dead_addresses,
+                        &target,
+                        now,
+                        &mut address_recheck_probes,
+                        || {
+                            if cancel.load(Ordering::Relaxed) {
+                                return Err(R2oSavedAddressAckError::NotAttempted);
+                            }
+                            let mut backend = TcpProbeBackend;
+                            backend
+                                .neutral_ack(
+                                    &ProbeTarget {
+                                        host: endpoint.ip().to_string(),
+                                        port: endpoint.port(),
+                                    },
+                                    ClassifyOptions::default().timeout,
+                                    mark,
+                                    Some(cancel.as_ref()),
+                                )
+                                .map_err(|error| {
+                                    if matches!(
+                                        error,
+                                        r2o_controller::classify::ProbeError::Unsupported(_)
+                                    ) {
+                                        R2oSavedAddressAckError::Unsupported
+                                    } else {
+                                        R2oSavedAddressAckError::Failed
+                                    }
+                                })
+                        },
+                    ),
+                    Err(_) => R2oSavedAddressRecheck::NotRequired,
+                };
+                (address_recheck, address_recheck_probes)
+            } else {
+                (R2oSavedAddressRecheck::NotRequired, 0)
+            };
+            if address_recheck.0 == R2oSavedAddressRecheck::Silent {
+                return DiscoveryOutcome {
+                    target,
+                    plan_text: None,
+                    detail: "перепроверка адреса: сервер снова не подтвердил нейтральные данные; триггерные пробы не запускались".into(),
+                    queue_expired: false,
+                    address_failure: true,
+                    address_recheck_acknowledged: false,
+                    address_recheck_probes: address_recheck.1,
+                    direct_clear: false,
+                    volume_recovery: false,
+                    volume_fingerprint: None,
+                    volume_box_id: None,
+                    retry_after: None,
+                };
+            }
+            if address_recheck.0 == R2oSavedAddressRecheck::CoolingDown {
+                return DiscoveryOutcome {
+                    target,
+                    plan_text: None,
+                    detail: "повторная проверка адреса ещё не должна запускаться; проба отложена без триггерных пакетов".into(),
+                    queue_expired: true,
+                    address_failure: false,
+                    address_recheck_acknowledged: false,
+                    address_recheck_probes: address_recheck.1,
+                    direct_clear: false,
+                    volume_recovery: false,
+                    volume_fingerprint: None,
+                    volume_box_id: None,
+                    retry_after: None,
+                };
+            }
+            let mut outcome = runner_without_address_recheck(target, trigger_planned, cancel);
+            outcome.address_recheck_probes = address_recheck.1;
+            if address_recheck.0 == R2oSavedAddressRecheck::Accepted && outcome.address_failure {
+                outcome.address_recheck_acknowledged = true;
+                outcome.retry_after = Some(R2O_DISCOVERY_INCOMPLETE_RETRY);
+            }
+            outcome
+        });
         let mut worker = Self::r2o_new_with_client_state(
             measurement_gate,
             runner,
@@ -10088,6 +10484,7 @@ impl DiscoveryWorker {
             network_whitelist_updates,
         );
         worker.suspect_fingerprints = suspect_fingerprints;
+        worker.dead_addresses = dead_addresses;
         worker
     }
 
@@ -10236,6 +10633,9 @@ impl DiscoveryWorker {
                                         plan_text: None,
                                         detail: "подозрение устарело в очереди".into(),
                                         queue_expired: true,
+                                        address_failure: false,
+                                        address_recheck_acknowledged: false,
+                                        address_recheck_probes: 0,
                                         direct_clear: false,
                                         volume_recovery: false,
                                         volume_fingerprint: None,
@@ -10276,6 +10676,9 @@ impl DiscoveryWorker {
                                     plan_text: None,
                                     detail: "задача заменена свежим ClientHello".into(),
                                     queue_expired: false,
+                                    address_failure: false,
+                                    address_recheck_acknowledged: false,
+                                    address_recheck_probes: 0,
                                     direct_clear: false,
                                     volume_recovery: false,
                                     volume_fingerprint: None,
@@ -10301,6 +10704,9 @@ impl DiscoveryWorker {
                                             plan_text: None,
                                             detail: "worker аварийно завершился; слот освобождён, задача будет повторена".into(),
                                             queue_expired: false,
+                                            address_failure: false,
+                                            address_recheck_acknowledged: false,
+                                            address_recheck_probes: 0,
                                             direct_clear: false,
                                             volume_recovery: false,
                                             volume_fingerprint: None,
@@ -10378,6 +10784,7 @@ impl DiscoveryWorker {
             suspect_fingerprint_order: VecDeque::new(),
             failed_at: HashMap::new(),
             failed_retry_after: HashMap::new(),
+            dead_addresses: Arc::new(std::sync::Mutex::new(R2oDeadAddressCache::default())),
             challenge_cooldowns: HashMap::new(),
             cooldown_ring: R2oDiscoveryCooldownRing::default(),
             ech_input_clearable_failures: HashSet::new(),
@@ -10385,6 +10792,7 @@ impl DiscoveryWorker {
             clear_streaks: HashMap::new(),
             clear_signal_codes: HashMap::new(),
             clear_bypass_pending: HashSet::new(),
+            late_rst_only_bypass_pending: HashSet::new(),
             client_snapshot_targets,
             client_snapshot_reasks,
             pending_rechecks: HashMap::new(),
@@ -10607,6 +11015,16 @@ impl DiscoveryWorker {
         expires_at: std::time::Instant,
         now: std::time::Instant,
     ) -> bool {
+        self.r2o_record_discovery_cooldown_state(key, expires_at, now, false)
+    }
+
+    fn r2o_record_discovery_cooldown_state(
+        &mut self,
+        key: R2oDiscoveryCooldownKey,
+        expires_at: std::time::Instant,
+        now: std::time::Instant,
+        late_rst_only: bool,
+    ) -> bool {
         if let R2oDiscoveryCooldownKey::Endpoint(failure_key) = &key {
             let challenge_key = (failure_key.0.clone(), failure_key.1, failure_key.2);
             if self
@@ -10617,7 +11035,13 @@ impl DiscoveryWorker {
                 return false;
             }
         }
-        if let Some(evicted) = self.cooldown_ring.record(key, expires_at, now) {
+        let evicted = if late_rst_only {
+            self.cooldown_ring
+                .record_late_rst_only(key, expires_at, now)
+        } else {
+            self.cooldown_ring.record(key, expires_at, now)
+        };
+        if let Some(evicted) = evicted {
             match evicted {
                 R2oDiscoveryCooldownKey::Endpoint(failure_key) => {
                     self.r2o_clear_seen_endpoint(&failure_key);
@@ -10627,6 +11051,7 @@ impl DiscoveryWorker {
                     self.clear_streaks.remove(&failure_key);
                     self.clear_signal_codes.remove(&failure_key);
                     self.clear_bypass_pending.remove(&failure_key);
+                    self.late_rst_only_bypass_pending.remove(&failure_key);
                 }
                 R2oDiscoveryCooldownKey::Challenge(task_key) => {
                     self.challenge_cooldowns.remove(&task_key);
@@ -10634,6 +11059,42 @@ impl DiscoveryWorker {
             }
         }
         true
+    }
+
+    fn r2o_late_trigger_blocked(
+        &self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        now: std::time::Instant,
+    ) -> bool {
+        let challenge_key = (
+            target.host.clone(),
+            r2o_discovery_transport(target),
+            target.family,
+        );
+        if self
+            .challenge_cooldowns
+            .get(&challenge_key)
+            .is_some_and(|until| *until > now)
+        {
+            return true;
+        }
+        let failure_key = r2o_discovery_failure_key(target);
+        let Some((_, late_rst_only)) = self.cooldown_ring.endpoint_state(&failure_key, now) else {
+            return false;
+        };
+        if late_rst_only {
+            return true;
+        }
+        self.failed_at.get(&failure_key).is_some_and(|failed_at| {
+            !r2o_discovery_failure_retry_due_after(
+                *failed_at,
+                now,
+                self.failed_retry_after
+                    .get(&failure_key)
+                    .copied()
+                    .unwrap_or(R2O_DISCOVERY_FAILURE_RETRY),
+            ) && !self.clear_streaks.contains_key(&failure_key)
+        })
     }
 
     fn r2o_record_discovery_challenge(
@@ -10846,6 +11307,9 @@ impl DiscoveryWorker {
         self.clear_bypass_pending.retain(|failure_key| {
             (failure_key.0.clone(), failure_key.1, failure_key.2) != *task_key
         });
+        self.late_rst_only_bypass_pending.retain(|failure_key| {
+            (failure_key.0.clone(), failure_key.1, failure_key.2) != *task_key
+        });
     }
 
     #[cfg(test)]
@@ -10873,7 +11337,19 @@ impl DiscoveryWorker {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .last_suspect = Some(target.clone());
+        if r2o_discovery_transport(&target) == 6
+            && self
+                .dead_addresses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_blocked(&target, now)
+        {
+            return false;
+        }
         if self.r2o_discovery_challenge_active(&target, now) {
+            return false;
+        }
+        if r2o_discovery_late_trigger(trigger_code) && self.r2o_late_trigger_blocked(&target, now) {
             return false;
         }
         let task_key = r2o_discovery_task_key(&target);
@@ -10893,6 +11369,11 @@ impl DiscoveryWorker {
         }
         let failure_key = r2o_discovery_failure_key(&target);
         let mut bypass_direct_clear = false;
+        let bypass_late_rst_only = self
+            .cooldown_ring
+            .endpoint_state(&failure_key, now)
+            .is_some_and(|(_, late_rst_only)| late_rst_only)
+            && !r2o_discovery_late_trigger(trigger_code);
         if let Some(failed_at) = self.failed_at.get(&failure_key).copied() {
             let retry_after = self
                 .failed_retry_after
@@ -10900,18 +11381,20 @@ impl DiscoveryWorker {
                 .copied()
                 .unwrap_or(R2O_DISCOVERY_FAILURE_RETRY);
             if !r2o_discovery_failure_retry_due_after(failed_at, now, retry_after) {
-                bypass_direct_clear = self.clear_streaks.contains_key(&failure_key)
-                    && trigger_code.is_some_and(|signal_code| {
-                        self.clear_signal_codes.get(&failure_key) != Some(&signal_code)
-                    });
-                if !bypass_direct_clear {
-                    return false;
+                if !bypass_late_rst_only {
+                    bypass_direct_clear = self.clear_streaks.contains_key(&failure_key)
+                        && trigger_code.is_some_and(|signal_code| {
+                            self.clear_signal_codes.get(&failure_key) != Some(&signal_code)
+                        });
+                    if !bypass_direct_clear {
+                        return false;
+                    }
                 }
             } else {
                 self.r2o_clear_failed_endpoint(&failure_key);
             }
         }
-        if self.seen.contains(&target) && !bypass_direct_clear {
+        if self.seen.contains(&target) && !bypass_direct_clear && !bypass_late_rst_only {
             return false;
         }
         if self.r2o_reusable_task_slot(&task_key).is_none() {
@@ -10958,6 +11441,10 @@ impl DiscoveryWorker {
                 self.r2o_clear_seen_endpoint(&failure_key);
                 self.clear_bypass_pending.insert(failure_key.clone());
             }
+            if bypass_late_rst_only {
+                self.late_rst_only_bypass_pending
+                    .insert(failure_key.clone());
+            }
             if self.seen_order.len() >= 256
                 && let Some(expired) = self.seen_order.pop_front()
             {
@@ -10988,6 +11475,7 @@ impl DiscoveryWorker {
                     self.clear_streaks.remove(&expired_key);
                     self.clear_signal_codes.remove(&expired_key);
                     self.clear_bypass_pending.remove(&expired_key);
+                    self.late_rst_only_bypass_pending.remove(&expired_key);
                 }
             }
             self.seen.insert(target.clone());
@@ -11490,6 +11978,7 @@ impl DiscoveryWorker {
         self.failed_retry_after.remove(failure_key);
         self.clear_signal_codes.remove(failure_key);
         self.clear_bypass_pending.remove(failure_key);
+        self.late_rst_only_bypass_pending.remove(failure_key);
         self.ech_input_clearable_failures.remove(failure_key);
     }
 
@@ -11502,8 +11991,28 @@ impl DiscoveryWorker {
             return;
         }
         let failure_key = r2o_discovery_failure_key(target);
-        if self.clear_streaks.remove(&failure_key).is_some() {
+        let now = std::time::Instant::now();
+        let active_state = self.cooldown_ring.endpoint_state(&failure_key, now);
+        let direct_clear = self.clear_streaks.contains_key(&failure_key);
+        if active_state.is_some_and(|(_, late_rst_only)| !late_rst_only) && !direct_clear {
+            return;
+        }
+        if self.r2o_discovery_challenge_active(target, now) {
+            return;
+        }
+        if direct_clear {
+            self.clear_streaks.remove(&failure_key);
             self.r2o_clear_failed_endpoint(&failure_key);
+        }
+        if self.r2o_record_discovery_cooldown_state(
+            R2oDiscoveryCooldownKey::Endpoint(failure_key.clone()),
+            now + R2O_DISCOVERY_INCOMPLETE_RETRY,
+            now,
+            true,
+        ) {
+            self.failed_at.insert(failure_key.clone(), now);
+            self.failed_retry_after
+                .insert(failure_key, R2O_DISCOVERY_INCOMPLETE_RETRY);
         }
     }
 
@@ -11555,7 +12064,8 @@ impl DiscoveryWorker {
             self.seen_order.retain(|seen| seen != target);
             let failure_key = r2o_discovery_failure_key(target);
             let preserve_direct_clear = self.clear_bypass_pending.remove(&failure_key);
-            if !preserve_direct_clear {
+            let preserve_late_rst_only = self.late_rst_only_bypass_pending.remove(&failure_key);
+            if !preserve_direct_clear && !preserve_late_rst_only {
                 self.failed_at.remove(&failure_key);
                 self.failed_retry_after.remove(&failure_key);
                 self.clear_signal_codes.remove(&failure_key);
@@ -11900,6 +12410,30 @@ impl DiscoveryWorker {
     }
 
     fn r2o_complete_outcome(&mut self, mut outcome: DiscoveryOutcome) -> DiscoveryOutcome {
+        if outcome.address_recheck_probes > 0 {
+            let mut searches = self
+                .searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let progress = searches
+                .entries
+                .get(&r2o_discovery_task_key(&outcome.target))
+                .map(|search| {
+                    (
+                        search.probes.saturating_add(outcome.address_recheck_probes),
+                        search.application.clone(),
+                        search.last_result.clone(),
+                    )
+                });
+            if let Some((probes, application, last_result)) = progress {
+                searches.update_candidate_progress(
+                    &outcome.target,
+                    probes,
+                    &application,
+                    &last_result,
+                );
+            }
+        }
         let suspect = self
             .suspect_fingerprints
             .lock()
@@ -11917,6 +12451,34 @@ impl DiscoveryWorker {
         }
         let task_key = r2o_discovery_task_key(&outcome.target);
         let failure_key = r2o_discovery_failure_key(&outcome.target);
+        let tcp_address_failure = outcome.address_failure
+            && r2o_discovery_transport(&outcome.target) == 6
+            && !outcome.queue_expired;
+        let post_ack_address_failure = tcp_address_failure && outcome.address_recheck_acknowledged;
+        if post_ack_address_failure {
+            outcome.retry_after = Some(R2O_DISCOVERY_INCOMPLETE_RETRY);
+        } else if tcp_address_failure {
+            self.dead_addresses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .step(&outcome.target, std::time::Instant::now());
+            self.completed.remove(&task_key);
+            self.r2o_clear_seen_endpoint(&failure_key);
+            self.failed_at.remove(&failure_key);
+            self.failed_retry_after.remove(&failure_key);
+            self.cooldown_ring
+                .remove(&R2oDiscoveryCooldownKey::Endpoint(failure_key.clone()));
+            self.ech_input_clearable_failures.remove(&failure_key);
+            self.clear_streaks.remove(&failure_key);
+            self.clear_signal_codes.remove(&failure_key);
+            self.clear_bypass_pending.remove(&failure_key);
+            self.late_rst_only_bypass_pending.remove(&failure_key);
+        } else if r2o_discovery_transport(&outcome.target) == 6 && !outcome.queue_expired {
+            self.dead_addresses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear(&outcome.target);
+        }
         let admitted_signal_code = self
             .searches
             .lock()
@@ -11926,8 +12488,11 @@ impl DiscoveryWorker {
             .map(|search| search.trigger_code);
         let preserve_direct_clear =
             outcome.queue_expired && self.clear_bypass_pending.remove(&failure_key);
+        let preserve_late_rst_only =
+            outcome.queue_expired && self.late_rst_only_bypass_pending.remove(&failure_key);
         if !outcome.queue_expired {
             self.clear_bypass_pending.remove(&failure_key);
+            self.late_rst_only_bypass_pending.remove(&failure_key);
         }
         let ech_input_clearable = !outcome.queue_expired
             && outcome.plan_text.is_none()
@@ -11974,12 +12539,15 @@ impl DiscoveryWorker {
             self.completed.remove(&task_key);
             self.seen.remove(&outcome.target);
             self.seen_order.retain(|seen| seen != &outcome.target);
-            if !preserve_direct_clear {
+            if !preserve_direct_clear && !preserve_late_rst_only {
                 self.failed_at.remove(&failure_key);
                 self.failed_retry_after.remove(&failure_key);
             }
             self.ech_input_clearable_failures.remove(&failure_key);
-        } else if outcome.plan_text.is_none() && self.seen.contains(&outcome.target) {
+        } else if outcome.plan_text.is_none()
+            && self.seen.contains(&outcome.target)
+            && (!tcp_address_failure || post_ack_address_failure)
+        {
             self.completed.remove(&task_key);
             if !r2o_discovery_volume_challenge_outcome(&outcome) {
                 let failed_at = std::time::Instant::now();
@@ -11990,7 +12558,8 @@ impl DiscoveryWorker {
                     failed_at,
                 ) {
                     self.failed_at.insert(failure_key.clone(), failed_at);
-                    self.failed_retry_after.insert(failure_key, retry_after);
+                    self.failed_retry_after
+                        .insert(failure_key.clone(), retry_after);
                 }
             }
         } else {
@@ -12011,11 +12580,17 @@ impl DiscoveryWorker {
             self.ech_input_clearable_failures.remove(&failure_key);
             if outcome.plan_text.is_some() {
                 self.cooldown_ring
-                    .remove(&R2oDiscoveryCooldownKey::Endpoint(failure_key));
+                    .remove(&R2oDiscoveryCooldownKey::Endpoint(failure_key.clone()));
             }
         }
         self.completed_started_at
             .retain(|task_key, _| self.completed.contains(task_key));
+        if tcp_address_failure && !post_ack_address_failure {
+            let rested_at = std::time::Instant::now();
+            self.failed_at.insert(failure_key.clone(), rested_at);
+            self.failed_retry_after
+                .insert(failure_key, R2O_DISCOVERY_TASK_REST);
+        }
         outcome
     }
 
@@ -13059,6 +13634,9 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                 plan_text: None,
                 detail: "не удалось собрать профиль целевого TLS".into(),
                 queue_expired: false,
+                address_failure: false,
+                address_recheck_acknowledged: false,
+                address_recheck_probes: 0,
                 direct_clear: false,
                 volume_recovery: false,
                 volume_fingerprint: None,
@@ -13084,6 +13662,9 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                     plan_text: None,
                     detail: format!("не удалось собрать контрольный TLS: {error}"),
                     queue_expired: false,
+                    address_failure: false,
+                    address_recheck_acknowledged: false,
+                    address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
                     volume_fingerprint: None,
@@ -13171,6 +13752,9 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
             plan_text,
             detail,
             queue_expired: false,
+            address_failure: !timed_out && result.verdict == Verdict::Address,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
             direct_clear: !timed_out && result.verdict == Verdict::Clear,
             volume_recovery: false,
             volume_fingerprint: None,
@@ -14890,7 +15474,7 @@ impl ControlClient {
                     std::io::stdout().flush()?;
                     continue;
                 }
-                if let Some(outcome) = r2o_late_rx.as_ref().and_then(R2oLateRxWorker::try_outcome) {
+                if let Some(outcome) = r2o_late_rx.as_mut().and_then(R2oLateRxWorker::try_outcome) {
                     let host = outcome.input.options.name.clone();
                     let discovery_target = outcome.input.discovery_target;
                     let measured_path = outcome.result.measured_path.clone();
@@ -15903,7 +16487,11 @@ impl ControlClient {
                                         "парная RX-проверка {host} не запущена: оценка {} пакетов вне измеренного бюджета коробки",
                                         event.estimated_packets
                                     );
-                                } else if worker.queue(input, now) {
+                                } else if worker.queue(
+                                    input,
+                                    now,
+                                    discovery.as_ref().map(|(worker, _, _, _)| worker),
+                                ) {
                                     println!(
                                         "зависание TCP поставило парную identity/gzip RX-проверку для {host}"
                                     );
@@ -15955,7 +16543,11 @@ impl ControlClient {
                                     discovery_worker
                                         .prepare_late_rx_resource_paths(&mut input, catalog);
                                 }
-                                if worker.queue(input, now) {
+                                if worker.queue(
+                                    input,
+                                    now,
+                                    discovery.as_ref().map(|(worker, _, _, _)| worker),
+                                ) {
                                     println!(
                                         "повтор FIN поставил парную identity/gzip RX-проверку для {client} -> {server}"
                                     );
@@ -16005,7 +16597,11 @@ impl ControlClient {
                                     discovery_worker
                                         .prepare_late_rx_resource_paths(&mut input, catalog);
                                 }
-                                if worker.queue(input, now) {
+                                if worker.queue(
+                                    input,
+                                    now,
+                                    discovery.as_ref().map(|(worker, _, _, _)| worker),
+                                ) {
                                     println!(
                                         "поставлена в очередь парная identity/gzip RX-проверка для {} -> {}",
                                         client, server
@@ -22300,6 +22896,7 @@ mod tests {
             suspect_fingerprint_order: std::collections::VecDeque::new(),
             failed_at: std::collections::HashMap::new(),
             failed_retry_after: std::collections::HashMap::new(),
+            dead_addresses: Arc::new(std::sync::Mutex::new(super::R2oDeadAddressCache::default())),
             challenge_cooldowns: std::collections::HashMap::new(),
             cooldown_ring: super::R2oDiscoveryCooldownRing::default(),
             ech_input_clearable_failures: std::collections::HashSet::new(),
@@ -22307,6 +22904,7 @@ mod tests {
             clear_streaks: std::collections::HashMap::new(),
             clear_signal_codes: std::collections::HashMap::new(),
             clear_bypass_pending: std::collections::HashSet::new(),
+            late_rst_only_bypass_pending: std::collections::HashSet::new(),
             client_snapshot_targets: Arc::new(std::sync::Mutex::new(
                 std::collections::HashSet::new(),
             )),
@@ -22336,6 +22934,9 @@ mod tests {
             plan_text: None,
             detail: "измерение завершено без классификации".into(),
             queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
             direct_clear,
             volume_recovery: false,
             volume_fingerprint: None,
@@ -22475,6 +23076,39 @@ mod tests {
             u8::from(worker.r2o_discovery_challenge_active(&quic4, now)),
             u8::from(worker.r2o_discovery_challenge_active(&tcp4, now)),
         );
+        let ech_now = std::time::Instant::now();
+        let ech_expiry = ech_now + super::R2O_DISCOVERY_ECH_CHALLENGE_TTL;
+        let mut ech_challenges = super::R2oEchChallengeCache::default();
+        for index in 0..8 {
+            ech_challenges.record(
+                &format!("ech-witness-{index:03}.example"),
+                ech_expiry,
+                ech_now,
+            );
+        }
+        ech_challenges.record("ech-witness-000.example", ech_expiry, ech_now);
+        ech_challenges.record("ech-witness-new.example", ech_expiry, ech_now);
+        let ech_ring_evicts_oldest = !ech_challenges.contains("ech-witness-000.example", ech_now);
+        let ech_ring_keeps_next = ech_challenges.contains("ech-witness-001.example", ech_now);
+        let ech_ring_keeps_new = ech_challenges.contains("ech-witness-new.example", ech_now);
+        let ech_ring_expires_at_deadline = ech_challenges.contains(
+            "ech-witness-new.example",
+            ech_now + super::R2O_DISCOVERY_ECH_CHALLENGE_TTL,
+        );
+        assert!(
+            ech_ring_evicts_oldest,
+            "ECH challenges must use the donor's 8-slot ring"
+        );
+        assert!(ech_ring_keeps_next);
+        assert!(ech_ring_keeps_new);
+        assert!(!ech_ring_expires_at_deadline);
+        let ech_output = format!(
+            "ech_ring_evicts_oldest {}\nech_ring_keeps_next {}\nech_ring_keeps_new {}\nech_ring_expires_at_deadline {}\n",
+            u8::from(ech_ring_evicts_oldest),
+            u8::from(ech_ring_keeps_next),
+            u8::from(ech_ring_keeps_new),
+            u8::from(ech_ring_expires_at_deadline),
+        );
         let clear_target = DiscoveryTarget {
             host: "clear.example".into(),
             endpoint: "192.0.2.20:443".into(),
@@ -22494,6 +23128,9 @@ mod tests {
             plan_text: None,
             detail: "прямой CLEAR".into(),
             queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
             direct_clear: true,
             volume_recovery: false,
             volume_fingerprint: None,
@@ -22551,6 +23188,9 @@ mod tests {
             plan_text: None,
             detail: "задача истекла до измерения".into(),
             queue_expired: true,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
             volume_fingerprint: None,
@@ -22564,36 +23204,25 @@ mod tests {
         let late_only_ordinary_blocked =
             !worker.queue_with_planned_and_trigger(clear_target.clone(), false, Some(1));
         assert!(!late_only_ordinary_blocked);
-
-        let now = std::time::Instant::now();
-        let (late_jobs, _late_job_receiver) = std::sync::mpsc::sync_channel(1);
-        let (late_outcome_sender, late_outcomes) = std::sync::mpsc::sync_channel(1);
-        drop(late_outcome_sender);
-        let mut late_rx_worker = super::R2oLateRxWorker {
-            jobs: Some(late_jobs),
-            outcomes: late_outcomes,
-            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            cooldowns: std::collections::HashMap::from([("clear.example".into(), now)]),
-            thread: None,
-        };
-        let late_only_trigger_blocked = !late_rx_worker.queue(
-            super::R2oLateRxInput {
-                options: r2o_controller::fetch::FetchOptions {
-                    name: "clear.example".into(),
-                    ip: Some("192.0.2.20".parse().unwrap()),
-                    port: 443,
-                    path: "/".into(),
-                    deadline: std::time::Duration::from_secs(6),
-                    tls12: false,
-                    wire_len: Some(512),
-                    mark: None,
-                },
-                discovery_target: Some(clear_target),
-                alternate_path: None,
-            },
-            now,
+        let mut late_trigger_worker = r2o_test_discovery_worker_without_threads();
+        late_trigger_worker.r2o_record_late_rst_only_cooldown(&clear_target);
+        let late_only_trigger_blocked = !late_trigger_worker.queue_with_planned_and_trigger(
+            clear_target.clone(),
+            false,
+            Some(5),
         );
         assert!(late_only_trigger_blocked);
+        let mut late_other_endpoint_worker = r2o_test_discovery_worker_without_threads();
+        late_other_endpoint_worker.r2o_record_late_rst_only_cooldown(&clear_target);
+        let other_endpoint_target = DiscoveryTarget {
+            host: clear_target.host.clone(),
+            endpoint: "192.0.2.22:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let late_only_other_endpoint_blocked = !late_other_endpoint_worker
+            .queue_with_planned_and_trigger(other_endpoint_target, false, Some(5));
+        assert!(!late_only_other_endpoint_blocked);
 
         let mut exhausted_worker = r2o_test_discovery_worker_without_threads();
         let exhausted_target = DiscoveryTarget {
@@ -22609,17 +23238,25 @@ mod tests {
             false,
         );
         exhausted_worker.r2o_record_late_rst_only_cooldown(&exhausted_target);
-        let late_only_preserves_exhausted =
-            !exhausted_worker.queue_with_planned_and_trigger(exhausted_target, false, Some(1));
+        let late_only_preserves_exhausted = !exhausted_worker.queue_with_planned_and_trigger(
+            exhausted_target.clone(),
+            false,
+            Some(1),
+        );
+        let late_only_preserves_exhausted_trigger =
+            !exhausted_worker.queue_with_planned_and_trigger(exhausted_target, false, Some(5));
         assert!(late_only_preserves_exhausted);
+        assert!(late_only_preserves_exhausted_trigger);
         let output = format!(
-            "{output}clear_same {}\nclear_other {}\nclear_same_after_expiry {}\nlate_only_ordinary {}\nlate_only_trigger {}\nlate_only_preserves_exhausted {}\n",
+            "{output}clear_same {}\nclear_other {}\nclear_same_after_expiry {}\nlate_only_ordinary {}\nlate_only_trigger {}\nlate_only_other_endpoint {}\nlate_only_preserves_exhausted {}\nlate_only_preserves_exhausted_trigger {}\n",
             u8::from(same_signal_blocked),
             u8::from(other_signal_blocked),
             u8::from(same_signal_after_expiry_blocked),
             u8::from(late_only_ordinary_blocked),
             u8::from(late_only_trigger_blocked),
+            u8::from(late_only_other_endpoint_blocked),
             u8::from(late_only_preserves_exhausted),
+            u8::from(late_only_preserves_exhausted_trigger),
         );
         let mut ring_worker = r2o_test_discovery_worker_without_threads();
         let mut ring_targets = Vec::with_capacity(128);
@@ -22790,6 +23427,9 @@ mod tests {
             plan_text: None,
             detail: "параллельный endpoint завершился после challenge".into(),
             queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
             volume_fingerprint: None,
@@ -22809,8 +23449,461 @@ mod tests {
             u8::from(active_challenge_stays_recorded),
         );
         if let Ok(path) = std::env::var("R2O_SCHED_COOLDOWN_DIFF_OUTPUT") {
+            std::fs::write(path, format!("{output}{ech_output}")).unwrap();
+        }
+    }
+
+    #[test]
+    fn d2o_scheduler_dead_address_matches_donor() {
+        let now = std::time::Instant::now();
+        let target = DiscoveryTarget {
+            host: "dead.example".into(),
+            endpoint: "192.0.2.10:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let mut cache = super::R2oDeadAddressCache::default();
+        let first = cache.step(&target, now).unwrap();
+        let second = cache.step(&target, now + first).unwrap();
+        let third = cache.step(&target, now + first + second).unwrap();
+        assert_eq!(
+            [first.as_secs(), second.as_secs(), third.as_secs()],
+            [600, 1800, 3600]
+        );
+        let expiry = now + first + second + third;
+        assert!(cache.is_blocked(&target, expiry - std::time::Duration::from_nanos(1)));
+        assert!(!cache.is_blocked(&target, expiry));
+        let recheck_retains_expired_record = cache.requires_recheck(&target, expiry);
+        assert!(recheck_retains_expired_record);
+
+        let same_address_other_port = DiscoveryTarget {
+            endpoint: "192.0.2.10:8443".into(),
+            ..target.clone()
+        };
+        let other_address = DiscoveryTarget {
+            endpoint: "192.0.2.11:443".into(),
+            ..target.clone()
+        };
+        let other_name = DiscoveryTarget {
+            host: "other.example".into(),
+            ..target.clone()
+        };
+        let other_transport = DiscoveryTarget {
+            shape: SHAPE_QUIC,
+            ..target.clone()
+        };
+        let other_family = DiscoveryTarget {
+            family: 6,
+            endpoint: "[2001:db8::10]:443".into(),
+            ..target.clone()
+        };
+        let other_address_allowed = !cache.is_blocked(&other_address, expiry);
+        let other_name_allowed = !cache.is_blocked(&other_name, expiry);
+        let other_transport_allowed = !cache.is_blocked(&other_transport, expiry);
+        let other_family_allowed = !cache.is_blocked(&other_family, expiry);
+        let same_address_other_port_blocked =
+            cache.requires_recheck(&same_address_other_port, expiry);
+        assert!(other_address_allowed);
+        assert!(other_name_allowed);
+        assert!(other_transport_allowed);
+        assert!(other_family_allowed);
+        assert!(same_address_other_port_blocked);
+        cache.clear(&target);
+        let clear_allows_address = !cache.requires_recheck(&target, expiry);
+        assert!(clear_allows_address);
+
+        let mut ring = super::R2oDeadAddressCache::default();
+        for index in 0..super::R2O_DISCOVERY_COOLDOWN_CAPACITY {
+            ring.step(
+                &DiscoveryTarget {
+                    host: format!("ring-{index:03}.example"),
+                    endpoint: format!("192.0.2.{}:443", index + 1),
+                    family: 4,
+                    shape: SHAPE_MODERN,
+                },
+                now + std::time::Duration::from_secs(index as u64),
+            );
+        }
+        let replacement = DiscoveryTarget {
+            host: "ring-new.example".into(),
+            endpoint: "198.51.100.1:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        ring.step(&replacement, now + std::time::Duration::from_secs(1000));
+        let ring_evicts_earliest = !ring.is_blocked(
+            &DiscoveryTarget {
+                host: "ring-000.example".into(),
+                endpoint: "192.0.2.1:443".into(),
+                family: 4,
+                shape: SHAPE_MODERN,
+            },
+            now,
+        );
+        let ring_keeps_next = ring.is_blocked(
+            &DiscoveryTarget {
+                host: "ring-001.example".into(),
+                endpoint: "192.0.2.2:443".into(),
+                family: 4,
+                shape: SHAPE_MODERN,
+            },
+            now,
+        );
+        let ring_keeps_new = ring.is_blocked(&replacement, now);
+        assert!(ring_evicts_earliest);
+        assert!(ring_keeps_next);
+        assert!(ring_keeps_new);
+
+        let output = format!(
+            "dead_retry_seconds {} {} {}\ndead_recheck_retains_expired_record {}\ndead_other_ip_allowed {}\ndead_other_name_allowed {}\ndead_other_transport_allowed {}\ndead_other_family_allowed {}\ndead_same_ip_other_port_blocked {}\ndead_clear_allows_address {}\ndead_ring_evicts_earliest {}\ndead_ring_keeps_next {}\ndead_ring_keeps_new {}\n",
+            first.as_secs(),
+            second.as_secs(),
+            third.as_secs(),
+            u8::from(recheck_retains_expired_record),
+            u8::from(other_address_allowed),
+            u8::from(other_name_allowed),
+            u8::from(other_transport_allowed),
+            u8::from(other_family_allowed),
+            u8::from(same_address_other_port_blocked),
+            u8::from(clear_allows_address),
+            u8::from(ring_evicts_earliest),
+            u8::from(ring_keeps_next),
+            u8::from(ring_keeps_new),
+        );
+        if let Ok(path) = std::env::var("R2O_SCHED_DEAD_ADDRESS_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
         }
+    }
+
+    #[test]
+    fn перепроверка_мёртвого_адреса_повторяет_ack_до_успеха_и_сохраняет_неизмеренное() {
+        let target = DiscoveryTarget {
+            host: "ack-dead.example".into(),
+            endpoint: "192.0.2.20:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let now = std::time::Instant::now();
+        let cache = std::sync::Mutex::new(super::R2oDeadAddressCache::default());
+        let first_delay = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .step(&target, now)
+            .unwrap();
+        let before_expiry_calls = std::cell::Cell::new(0);
+        let mut before_expiry_probes = 0;
+        assert_eq!(
+            super::r2o_saved_address_recheck(
+                &cache,
+                &target,
+                now + first_delay - std::time::Duration::from_nanos(1),
+                &mut before_expiry_probes,
+                || {
+                    before_expiry_calls.set(before_expiry_calls.get() + 1);
+                    Ok(false)
+                },
+            ),
+            super::R2oSavedAddressRecheck::CoolingDown
+        );
+        assert_eq!(before_expiry_calls.get(), 0);
+        assert_eq!(before_expiry_probes, 0);
+
+        let silent_calls = std::cell::Cell::new(0);
+        let mut silent_probes = 0;
+        assert_eq!(
+            super::r2o_saved_address_recheck(
+                &cache,
+                &target,
+                now + first_delay,
+                &mut silent_probes,
+                || {
+                    silent_calls.set(silent_calls.get() + 1);
+                    Ok(false)
+                }
+            ),
+            super::R2oSavedAddressRecheck::Silent
+        );
+        assert_eq!(silent_calls.get(), 3);
+        assert_eq!(silent_probes, 3);
+        assert!(
+            cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .requires_recheck(&target, now + first_delay)
+        );
+
+        let accepted_calls = std::cell::Cell::new(0);
+        let mut accepted_probes = 0;
+        assert_eq!(
+            super::r2o_saved_address_recheck(
+                &cache,
+                &target,
+                now + first_delay,
+                &mut accepted_probes,
+                || {
+                    accepted_calls.set(accepted_calls.get() + 1);
+                    Ok(accepted_calls.get() == 2)
+                }
+            ),
+            super::R2oSavedAddressRecheck::Accepted
+        );
+        assert_eq!(accepted_calls.get(), 2);
+        assert_eq!(accepted_probes, 2);
+        assert!(
+            !cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .requires_recheck(&target, now + first_delay)
+        );
+
+        let unmeasured = DiscoveryTarget {
+            host: "ack-unmeasured.example".into(),
+            endpoint: "192.0.2.21:443".into(),
+            ..target
+        };
+        let delay = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .step(&unmeasured, now)
+            .unwrap();
+        let error_calls = std::cell::Cell::new(0);
+        let mut error_probes = 0;
+        assert_eq!(
+            super::r2o_saved_address_recheck(
+                &cache,
+                &unmeasured,
+                now + delay,
+                &mut error_probes,
+                || {
+                    error_calls.set(error_calls.get() + 1);
+                    Err(super::R2oSavedAddressAckError::Failed)
+                }
+            ),
+            super::R2oSavedAddressRecheck::Unmeasured
+        );
+        assert_eq!(error_calls.get(), 1);
+        assert_eq!(error_probes, 1);
+        assert!(
+            cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .requires_recheck(&unmeasured, now + delay)
+        );
+        for error in [
+            super::R2oSavedAddressAckError::Unsupported,
+            super::R2oSavedAddressAckError::NotAttempted,
+        ] {
+            let mut uncounted_probes = 0;
+            assert_eq!(
+                super::r2o_saved_address_recheck(
+                    &cache,
+                    &unmeasured,
+                    now + delay,
+                    &mut uncounted_probes,
+                    || Err(error),
+                ),
+                super::R2oSavedAddressRecheck::Unmeasured
+            );
+            assert_eq!(uncounted_probes, 0);
+        }
+    }
+
+    #[test]
+    fn scheduler_address_failure_scopes_queue_and_post_ack_retry() {
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        let target = DiscoveryTarget {
+            host: "dead-outcome.example".into(),
+            endpoint: "192.0.2.30:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let failure_key = super::r2o_discovery_failure_key(&target);
+        for streak in 1..=3 {
+            if streak > 1 {
+                let mut cache = worker
+                    .dead_addresses
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let key = super::r2o_dead_address_key(&target).unwrap();
+                cache
+                    .slots
+                    .iter_mut()
+                    .flatten()
+                    .find(|entry| entry.key == key)
+                    .unwrap()
+                    .expires_at = std::time::Instant::now() - std::time::Duration::from_nanos(1);
+            }
+            worker.seen.insert(target.clone());
+            worker.seen_order.push_back(target.clone());
+            worker.r2o_complete_outcome(DiscoveryOutcome {
+                target: target.clone(),
+                plan_text: None,
+                detail: "адрес не принимает данные".into(),
+                queue_expired: false,
+                address_failure: true,
+                address_recheck_acknowledged: false,
+                address_recheck_probes: 0,
+                direct_clear: false,
+                volume_recovery: false,
+                volume_fingerprint: None,
+                volume_box_id: None,
+                retry_after: None,
+            });
+            let cache = worker
+                .dead_addresses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let key = super::r2o_dead_address_key(&target).unwrap();
+            let entry = cache
+                .slots
+                .iter()
+                .flatten()
+                .find(|entry| entry.key == key)
+                .unwrap();
+            assert_eq!(entry.streak, streak);
+            assert_eq!(
+                worker.failed_retry_after.get(&failure_key),
+                Some(&super::R2O_DISCOVERY_TASK_REST)
+            );
+            assert!(
+                worker
+                    .cooldown_ring
+                    .endpoint_state(&failure_key, std::time::Instant::now())
+                    .is_none()
+            );
+        }
+
+        assert!(!worker.queue(target.clone()));
+        let other_address = DiscoveryTarget {
+            endpoint: "192.0.2.31:443".into(),
+            ..target.clone()
+        };
+        assert!(worker.queue(other_address.clone()));
+        worker
+            .jobs
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .clear();
+        let task_key = super::r2o_discovery_task_key(&other_address);
+        worker.active.remove(&task_key);
+        worker
+            .active_cancels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&task_key);
+        worker.seen.remove(&other_address);
+        worker.seen_order.retain(|seen| seen != &other_address);
+
+        {
+            let mut cache = worker
+                .dead_addresses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let key = super::r2o_dead_address_key(&target).unwrap();
+            cache
+                .slots
+                .iter_mut()
+                .flatten()
+                .find(|entry| entry.key == key)
+                .unwrap()
+                .expires_at = std::time::Instant::now() - std::time::Duration::from_nanos(1);
+        }
+        assert!(!worker.queue(target.clone()));
+        worker.failed_at.insert(
+            failure_key.clone(),
+            std::time::Instant::now() - super::R2O_DISCOVERY_TASK_REST,
+        );
+        assert!(
+            !worker
+                .dead_addresses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_blocked(&target, std::time::Instant::now())
+        );
+        assert!(!worker.seen.contains(&target));
+        assert!(
+            !worker
+                .completed
+                .contains(&super::r2o_discovery_task_key(&target))
+        );
+        assert!(
+            !worker
+                .active
+                .contains_key(&super::r2o_discovery_task_key(&target))
+        );
+        assert!(
+            worker
+                .r2o_reusable_task_slot(&super::r2o_discovery_task_key(&target))
+                .is_some()
+        );
+        assert!(worker.queue(target.clone()));
+        worker
+            .jobs
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .clear();
+        worker.seen.remove(&target);
+        worker.seen_order.retain(|seen| seen != &target);
+
+        let mut accepted_probes = 0;
+        let accepted = super::r2o_saved_address_recheck(
+            &worker.dead_addresses,
+            &target,
+            std::time::Instant::now(),
+            &mut accepted_probes,
+            || Ok(true),
+        );
+        assert_eq!(accepted, super::R2oSavedAddressRecheck::Accepted);
+        worker
+            .searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .update(&target, "распознаём поведение", 0, 3, "", "");
+        worker.seen.insert(target.clone());
+        worker.seen_order.push_back(target.clone());
+        let post_ack = worker.r2o_complete_outcome(DiscoveryOutcome {
+            target: target.clone(),
+            plan_text: None,
+            detail: "ACK принят, последующий классификатор дал ADDRESS".into(),
+            queue_expired: false,
+            address_failure: true,
+            address_recheck_acknowledged: true,
+            address_recheck_probes: accepted_probes,
+            direct_clear: false,
+            volume_recovery: false,
+            volume_fingerprint: None,
+            volume_box_id: None,
+            retry_after: None,
+        });
+        assert_eq!(
+            post_ack.retry_after,
+            Some(super::R2O_DISCOVERY_INCOMPLETE_RETRY)
+        );
+        assert_eq!(
+            worker.failed_retry_after.get(&failure_key),
+            Some(&super::R2O_DISCOVERY_INCOMPLETE_RETRY)
+        );
+        let searches = worker
+            .searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            searches.entries[&super::r2o_discovery_task_key(&target)].probes,
+            4
+        );
+        assert_eq!(searches.probes_used, 4);
+        drop(searches);
+        assert!(
+            !worker
+                .dead_addresses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .requires_recheck(&target, std::time::Instant::now())
+        );
     }
 
     #[test]
@@ -23772,6 +24865,9 @@ mod tests {
             plan_text: Some("проверенный сырой пробой кандидат".into()),
             detail: "кандидат найден".into(),
             queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
             volume_fingerprint: None,
@@ -24132,6 +25228,9 @@ mod tests {
                 plan_text: None,
                 detail: String::new(),
                 queue_expired: false,
+                address_failure: false,
+                address_recheck_acknowledged: false,
+                address_recheck_probes: 0,
                 direct_clear: true,
                 volume_recovery: false,
                 volume_fingerprint: None,
@@ -25017,6 +26116,9 @@ mod tests {
             ),
             detail: "кандидат подтверждён".into(),
             queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
             volume_fingerprint: None,
@@ -25059,6 +26161,9 @@ mod tests {
             plan_text: Some("measured plan".into()),
             detail: String::new(),
             queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
             volume_fingerprint: None,
@@ -25074,6 +26179,9 @@ mod tests {
         assert!(super::r2o_discovery_volume_recovery_eligible(&clear));
         let expired = DiscoveryOutcome {
             queue_expired: true,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
             ..clear
         };
         assert!(!super::r2o_discovery_volume_recovery_eligible(&expired));
@@ -25097,6 +26205,9 @@ mod tests {
             plan_text: None,
             detail: "прямой замер завершился".into(),
             queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
             direct_clear: true,
             volume_recovery: false,
             volume_fingerprint: None,
@@ -25266,6 +26377,9 @@ mod tests {
             plan_text: Some("candidate".into()),
             detail: String::new(),
             queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
             direct_clear: true,
             volume_recovery: false,
             volume_fingerprint: Some(Default::default()),
@@ -28497,6 +29611,9 @@ mod tests {
             plan_text: Some("r2o-plan 1 1\\n".into()),
             detail: "план подтверждён".into(),
             queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
             volume_fingerprint: None,
@@ -28565,6 +29682,9 @@ mod tests {
             plan_text: Some("r2o-plan 1 1\\n".into()),
             detail: "план подтверждён".into(),
             queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
             volume_fingerprint: None,
@@ -28598,6 +29718,9 @@ mod tests {
             plan_text: Some("r2o-plan 1 1\\n".into()),
             detail: "план подтверждён".into(),
             queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
             volume_fingerprint: None,
@@ -28653,6 +29776,9 @@ mod tests {
             plan_text: Some("r2o-plan 1 1\\n".into()),
             detail: "план подтверждён".into(),
             queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
             volume_fingerprint: None,
@@ -28983,6 +30109,9 @@ mod tests {
                             plan_text: None,
                             detail: String::new(),
                             queue_expired: false,
+                            address_failure: false,
+                            address_recheck_acknowledged: false,
+                            address_recheck_probes: 0,
                             direct_clear: false,
                             volume_recovery: false,
                             volume_fingerprint: None,
@@ -29094,6 +30223,9 @@ mod tests {
                         plan_text: None,
                         detail: String::new(),
                         queue_expired: false,
+                        address_failure: false,
+                        address_recheck_acknowledged: false,
+                        address_recheck_probes: 0,
                         direct_clear: false,
                         volume_recovery: true,
                         volume_fingerprint: None,
@@ -29291,6 +30423,9 @@ mod tests {
                 plan_text: None,
                 detail: "замер завершён".into(),
                 queue_expired: false,
+                address_failure: false,
+                address_recheck_acknowledged: false,
+                address_recheck_probes: 0,
                 direct_clear: false,
                 volume_recovery: false,
                 volume_fingerprint: None,
@@ -29337,6 +30472,9 @@ mod tests {
                 plan_text: None,
                 detail: "замер завершён".into(),
                 queue_expired: false,
+                address_failure: false,
+                address_recheck_acknowledged: false,
+                address_recheck_probes: 0,
                 direct_clear: false,
                 volume_recovery: false,
                 volume_fingerprint: None,
@@ -29962,6 +31100,9 @@ mod tests {
             plan_text: Some(plan_text),
             detail: "shared donor event fixture".into(),
             queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
             volume_fingerprint: None,
@@ -30309,6 +31450,9 @@ mod tests {
                     plan_text: None,
                     detail: "test complete".into(),
                     queue_expired: false,
+                    address_failure: false,
+                    address_recheck_acknowledged: false,
+                    address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
                     volume_fingerprint: None,
@@ -30369,6 +31513,9 @@ mod tests {
                     plan_text: None,
                     detail: "GREASE measurement completed".into(),
                     queue_expired: false,
+                    address_failure: false,
+                    address_recheck_acknowledged: false,
+                    address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
                     volume_fingerprint: None,
@@ -30428,6 +31575,9 @@ mod tests {
                     plan_text: Some("plan".into()),
                     detail: "second probe completed".into(),
                     queue_expired: false,
+                    address_failure: false,
+                    address_recheck_acknowledged: false,
+                    address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
                     volume_fingerprint: None,
@@ -30588,6 +31738,9 @@ mod tests {
                     ),
                     detail: "проверка завершена".into(),
                     queue_expired: false,
+                    address_failure: false,
+                    address_recheck_acknowledged: false,
+                    address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
                     volume_fingerprint: None,
@@ -30698,6 +31851,9 @@ mod tests {
                     plan_text: (attempt != 0).then(|| "совместимый план".into()),
                     detail: "проверка завершена".into(),
                     queue_expired: false,
+                    address_failure: false,
+                    address_recheck_acknowledged: false,
+                    address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
                     volume_fingerprint: None,
@@ -30766,6 +31922,9 @@ mod tests {
                     plan_text: None,
                     detail: "проверка завершена".into(),
                     queue_expired: false,
+                    address_failure: false,
+                    address_recheck_acknowledged: false,
+                    address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
                     volume_fingerprint: None,
@@ -30814,6 +31973,9 @@ mod tests {
                     plan_text: None,
                     detail: "проверка завершена".into(),
                     queue_expired: false,
+                    address_failure: false,
+                    address_recheck_acknowledged: false,
+                    address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
                     volume_fingerprint: None,
@@ -30868,6 +32030,9 @@ mod tests {
                     plan_text: None,
                     detail: "проверка завершена".into(),
                     queue_expired: false,
+                    address_failure: false,
+                    address_recheck_acknowledged: false,
+                    address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
                     volume_fingerprint: None,
@@ -30928,6 +32093,9 @@ mod tests {
                     plan_text: Some("план".into()),
                     detail: "завершено".into(),
                     queue_expired: false,
+                    address_failure: false,
+                    address_recheck_acknowledged: false,
+                    address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
                     volume_fingerprint: None,
@@ -31040,6 +32208,9 @@ mod tests {
                     plan_text: Some("план".into()),
                     detail: "завершено".into(),
                     queue_expired: false,
+                    address_failure: false,
+                    address_recheck_acknowledged: false,
+                    address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
                     volume_fingerprint: None,
@@ -31137,6 +32308,9 @@ mod tests {
                     plan_text: Some("план".into()),
                     detail: "завершено".into(),
                     queue_expired: false,
+                    address_failure: false,
+                    address_recheck_acknowledged: false,
+                    address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
                     volume_fingerprint: None,
@@ -31218,6 +32392,9 @@ mod tests {
                     plan_text: Some("план".into()),
                     detail: "завершено".into(),
                     queue_expired: false,
+                    address_failure: false,
+                    address_recheck_acknowledged: false,
+                    address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
                     volume_fingerprint: None,
@@ -31371,6 +32548,9 @@ mod tests {
             plan_text: None,
             detail: "целевая проверка завершена".into(),
             queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
             volume_fingerprint: None,
@@ -31415,6 +32595,9 @@ mod tests {
             plan_text: None,
             detail: "ошибка поиска".into(),
             queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
             volume_fingerprint: None,
@@ -31544,6 +32727,9 @@ mod tests {
             plan_text: None,
             detail: "неубедительный прямой замер".into(),
             queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
             volume_fingerprint: None,
@@ -31589,6 +32775,9 @@ mod tests {
                 plan_text: None,
                 detail: "прямой CLEAR".into(),
                 queue_expired: false,
+                address_failure: false,
+                address_recheck_acknowledged: false,
+                address_recheck_probes: 0,
                 direct_clear: true,
                 volume_recovery: false,
                 volume_fingerprint: None,
@@ -31638,6 +32827,9 @@ mod tests {
             plan_text: None,
             detail: "активный поиск превысил срок жизни".into(),
             queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
             volume_fingerprint: None,
@@ -31796,6 +32988,9 @@ mod tests {
             plan_text: None,
             detail: "цель напрямую проходит".into(),
             queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
             direct_clear: true,
             volume_recovery: false,
             volume_fingerprint: None,
@@ -31884,6 +33079,9 @@ mod tests {
             plan_text: None,
             detail: "цель напрямую проходит".into(),
             queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
             direct_clear: true,
             volume_recovery: false,
             volume_fingerprint: None,
@@ -31969,6 +33167,9 @@ mod tests {
                 plan_text: Some(plan_text),
                 detail: "test".into(),
                 queue_expired: false,
+                address_failure: false,
+                address_recheck_acknowledged: false,
+                address_recheck_probes: 0,
                 direct_clear: false,
                 volume_recovery: false,
                 volume_fingerprint: None,
@@ -33543,6 +34744,7 @@ mod tests {
                 std::time::Instant::now(),
             )]),
             failed_retry_after: std::collections::HashMap::new(),
+            dead_addresses: Arc::new(std::sync::Mutex::new(super::R2oDeadAddressCache::default())),
             challenge_cooldowns: std::collections::HashMap::new(),
             cooldown_ring: super::R2oDiscoveryCooldownRing::default(),
             ech_input_clearable_failures: std::collections::HashSet::new(),
@@ -33550,6 +34752,7 @@ mod tests {
             clear_streaks: std::collections::HashMap::new(),
             clear_signal_codes: std::collections::HashMap::new(),
             clear_bypass_pending: std::collections::HashSet::new(),
+            late_rst_only_bypass_pending: std::collections::HashSet::new(),
             completed: std::collections::HashSet::new(),
             completed_started_at: std::collections::HashMap::new(),
             active: std::collections::HashMap::new(),
