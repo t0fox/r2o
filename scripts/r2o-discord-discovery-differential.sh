@@ -102,6 +102,8 @@ mkdir -p "$r2o_log_dir"
         "cd \"\$1\" && ./test_voice_discovery" sh "$r2o_donor_core"
     r2o_run_timed 'сценарии Discord в планировщике C' sh -c \
         "cd \"\$1\" && ./test_sched --voice-only" sh "$r2o_donor_core"
+    r2o_run_timed 'C/Rust endpoint A → B lifecycle differential' sh \
+        "$r2o_script_dir/scripts/r2o-discord-voice-lifecycle-differential.sh"
     r2o_voice_eintr_fixture="$r2o_script_dir/crates/r2o-controller/tests/fixtures/d2o_voice_poll_eintr.tsv"
     r2o_run_timed 'сборка voice poll EINTR fixture C' clang-18 -std=c99 -O2 \
         -Wall -Wextra -Werror -pthread -I"$r2o_donor_core/include" \
@@ -117,7 +119,10 @@ mkdir -p "$r2o_log_dir"
     printf '\nФункциональные тесты Rust\n'
     r2o_run_timed 'подтверждение адресного опыта Rust' cargo +1.98.0 test \
         -p r2o-controller --bin r2o-controller --locked --offline \
-        r2o_установка_voice_опыта_проверяет_ack_и_trial_id
+        r2o_установка_voice_опыта_не_ждёт_ack
+    r2o_run_timed 'точный NAK адресного voice-опыта Rust' cargo +1.98.0 test \
+        -p r2o-controller --bin r2o-controller --locked --offline \
+        r2o_voice_trial_игнорирует_success_ack_и_снимает_только_exact_nak
     r2o_run_timed 'повтор после локального NAK голосового опыта Rust' cargo +1.98.0 test \
         -p r2o-controller --bin r2o-controller --locked --offline \
         местный_voice_nak_не_блокирует_повтор_по_следующему_потоку
@@ -165,8 +170,10 @@ mkdir -p "$r2o_log_dir"
 
 grep -q 'voice scheduler: all checks passed' "$r2o_log"
 grep -q 'голосовой путь: все проверки прошли' "$r2o_log"
+grep -q 'C/Rust Discord endpoint lifecycle traces match d2o' "$r2o_log"
 grep -q 'C/Rust voice UDP poll EINTR result matches d2o' "$r2o_log"
-grep -q 'r2o_установка_voice_опыта_проверяет_ack_и_trial_id .*ok' "$r2o_log"
+grep -q 'r2o_установка_voice_опыта_не_ждёт_ack .*ok' "$r2o_log"
+grep -q 'r2o_voice_trial_игнорирует_success_ack_и_снимает_только_exact_nak .*ok' "$r2o_log"
 grep -q 'выбирает_самый_нагруженный_поток_кроме_контрольного_сервера .*ok' "$r2o_log"
 grep -q 'местный_voice_nak_не_блокирует_повтор_по_следующему_потоку .*ok' "$r2o_log"
 grep -q 'r2o_voice_discovery_снимает_пробу_при_точном_nak_продления .*ok' "$r2o_log"

@@ -8473,6 +8473,17 @@ struct R2oVoiceTrialContext {
 }
 
 #[cfg(unix)]
+fn r2o_take_voice_trial_on_nak(
+    trials: &mut HashMap<[u8; 16], R2oVoiceTrialContext>,
+    ack: r2k_core::control::Ack,
+) -> Option<R2oVoiceTrialContext> {
+    if ack.command != COMMAND_SET_VOICE_ADDR_PROBE || ack.ok {
+        return None;
+    }
+    trials.remove(&ack.trial_id?)
+}
+
+#[cfg(unix)]
 fn r2o_hold_voice_trial_until_expiry(trial: &mut R2oVoiceTrialContext) {
     trial.voice_flow_key = None;
     trial.renew_at = trial.expires_at;
@@ -14583,59 +14594,35 @@ impl ControlClient {
             response_confirmed: false,
             diagnostic: None,
         };
-        let ack = self.set_r2o_voice_trial(&trial)?;
-        if ack.trial_id != Some(trial_id) || !ack.ok {
-            let local_refusal = ack.trial_id == Some(trial_id) && !ack.ok;
-            let reason = if ack.trial_id != Some(trial_id) {
-                "подтверждение пришло с чужим trial ID".to_owned()
-            } else {
-                match ack.reason {
-                    control::ACK_BAD_PLAN => "план не подходит runtime".to_owned(),
-                    control::ACK_NO_ROOM => "таблица временных планов заполнена".to_owned(),
-                    control::ACK_BAD_ARGS => "датапат отверг аргументы".to_owned(),
-                    _ => "неизвестная причина отказа".to_owned(),
-                }
-            };
-            if let Err(error) = self.retire_r2o_voice_trial(&trial) {
-                eprintln!("не удалось удалить отклонённый временный voice-план: {error}");
-            }
-            eprintln!("SET_VOICE_ADDR_PROBE не принят: {reason}");
-            return Ok(if local_refusal {
-                R2oVoiceTrialInstallOutcome::LocalRefusal
-            } else {
-                R2oVoiceTrialInstallOutcome::NotInstalled
-            });
-        }
+        let command = self.encode_r2o_voice_trial(&trial)?;
+        self.write_command(&command)?;
         Ok(R2oVoiceTrialInstallOutcome::Installed(trial))
     }
 
-    fn set_r2o_voice_trial(
-        &mut self,
+    fn encode_r2o_voice_trial(
+        &self,
         trial: &R2oVoiceTrialContext,
-    ) -> Result<r2k_core::control::Ack, Box<dyn Error>> {
+    ) -> Result<Vec<u8>, Box<dyn Error>> {
         let plan_records = compile_text(&trial.plan_text)?;
         let plan = Plan::parse(&plan_records)?;
         r2o_datapath::engine::validate_runtime_plan(&plan)
             .map_err(|error| format!("исполнитель r2o-datapath отверг voice-план: {error}"))?;
-        let command = encode_set_voice_addr_probe(
+        Ok(encode_set_voice_addr_probe(
             trial.target.client,
             trial.target.server,
             VOICE_ADDR_PROBE_LEASE_MAX_MS,
             &plan_records,
             trial.trial_id,
-        )?;
-        self.exchange_command(&command, COMMAND_SET_VOICE_ADDR_PROBE)
+        )?)
     }
 
     fn renew_r2o_voice_trial(
         &mut self,
         trial: &R2oVoiceTrialContext,
     ) -> Result<Option<u8>, Box<dyn Error>> {
-        let ack = self.set_r2o_voice_trial(trial)?;
-        if ack.trial_id != Some(trial.trial_id) {
-            return Err("SET_VOICE_ADDR_PROBE продления получил чужой trial ID".into());
-        }
-        Ok((!ack.ok).then_some(ack.reason))
+        let command = self.encode_r2o_voice_trial(trial)?;
+        self.write_command(&command)?;
+        Ok(None)
     }
 
     fn renew_due_r2o_voice_trials(
@@ -16039,6 +16026,30 @@ impl ControlClient {
                         }
                     }
                     self.record_http_bound_binding_acknowledgement(ack);
+                    if let Some(trial) = r2o_take_voice_trial_on_nak(&mut r2o_voice_trials, ack) {
+                        if let Some(worker) = voice_discovery.as_mut() {
+                            worker.r2o_seen.r2o_after_trial_install(
+                                &trial.target,
+                                &R2oVoiceTrialInstallOutcome::LocalRefusal,
+                            );
+                        }
+                        let delete = encode_delete_voice_addr_probe(
+                            trial.target.client,
+                            trial.target.server,
+                            trial.trial_id,
+                        )
+                        .map_err(|error| format!("DEL_VOICE_ADDR_PROBE: {error}"))?;
+                        if let Err(error) = self.write_command(&delete) {
+                            eprintln!(
+                                "датапат отверг Discord-план (причина {}); временное правило истечёт по аренде, DEL_VOICE_ADDR_PROBE не отправлена: {error}",
+                                ack.reason
+                            );
+                        }
+                        eprintln!(
+                            "датапат отверг Discord-план (причина {}); опыт снят, цель не признана",
+                            ack.reason
+                        );
+                    }
                     if !ack.ok
                         && matches!(
                             ack.command,
@@ -35174,79 +35185,37 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn r2o_установка_voice_опыта_проверяет_ack_и_trial_id() {
+    fn r2o_установка_voice_опыта_не_ждёт_ack() {
         use std::os::unix::net::UnixStream;
 
-        let install = |ack_ok, ack_reason, mismatched_trial_id| {
-            let (client_stream, mut server_stream) = UnixStream::pair().unwrap();
-            let server = std::thread::spawn(move || {
-                let command = read_frame(&mut server_stream).unwrap();
-                assert_eq!(command.kind, super::COMMAND_SET_VOICE_ADDR_PROBE);
-                let trial_id: [u8; 16] =
-                    command.body[command.body.len() - 16..].try_into().unwrap();
-                let mut ack_trial_id = trial_id;
-                if mismatched_trial_id {
-                    ack_trial_id[0] ^= 1;
-                }
-                server_stream
-                    .write_all(
-                        &encode_ack_for_trial(command.kind, ack_ok, ack_reason, Some(ack_trial_id))
-                            .unwrap(),
-                    )
-                    .unwrap();
-                if !ack_ok || mismatched_trial_id {
-                    let delete = read_frame(&mut server_stream).unwrap();
-                    assert_eq!(delete.kind, COMMAND_DEL_VOICE_ADDR_PROBE);
-                    assert_eq!(&delete.body[delete.body.len() - 16..], &trial_id);
-                    server_stream
-                        .write_all(
-                            &encode_ack_for_trial(delete.kind, true, 0, Some(trial_id)).unwrap(),
-                        )
-                        .unwrap();
-                }
-            });
-            let mut client = ControlClient {
-                socket: client_stream,
-                send_maxlen: 0,
-                send_cap: Arc::new(AtomicUsize::new(0)),
-                pending_events: VecDeque::new(),
-                pending_applied_events: VecDeque::new(),
-                dropped_events: Default::default(),
-                http_search_started: Default::default(),
-                http_acknowledged_bindings: std::collections::HashMap::new(),
-            };
-            let target = r2o_controller::voice_discovery::R2oVoiceTarget {
-                client: "192.0.2.10".parse().unwrap(),
-                server: "198.51.100.20:50004".parse().unwrap(),
-            };
-            let prefix = r2k_core::stun::binding_request([0x36; 12]);
-            let plan_text = r2o_controller::voice_discovery::r2o_voice_arm_plan_text(&prefix);
-            let result =
-                client.install_r2o_voice_trial(target, plan_text, std::time::Instant::now());
-            server.join().unwrap();
-            result
+        let (client_stream, mut server_stream) = UnixStream::pair().unwrap();
+        let server = std::thread::spawn(move || -> [u8; 16] {
+            let command = read_frame(&mut server_stream).unwrap();
+            assert_eq!(command.kind, super::COMMAND_SET_VOICE_ADDR_PROBE);
+            command.body[command.body.len() - 16..].try_into().unwrap()
+        });
+        let mut client = ControlClient {
+            socket: client_stream,
+            send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
+            pending_events: VecDeque::new(),
+            pending_applied_events: VecDeque::new(),
+            dropped_events: Default::default(),
+            http_search_started: Default::default(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
         };
-
+        let target = r2o_controller::voice_discovery::R2oVoiceTarget {
+            client: "192.0.2.10".parse().unwrap(),
+            server: "198.51.100.20:50004".parse().unwrap(),
+        };
+        let prefix = r2k_core::stun::binding_request([0x36; 12]);
+        let plan_text = r2o_controller::voice_discovery::r2o_voice_arm_plan_text(&prefix);
+        let result = client.install_r2o_voice_trial(target, plan_text, std::time::Instant::now());
+        let sent_trial_id = server.join().unwrap();
         assert!(
-            matches!(
-                install(true, 0, true).unwrap(),
-                super::R2oVoiceTrialInstallOutcome::NotInstalled
-            ),
-            "чужой trial ID принят за подтверждение опыта"
-        );
-        assert!(
-            matches!(
-                install(false, r2k_core::control::ACK_NO_ROOM, false).unwrap(),
-                super::R2oVoiceTrialInstallOutcome::LocalRefusal
-            ),
-            "локальный отказ датапата превратился в установленный опыт"
-        );
-        assert!(
-            matches!(
-                install(true, 0, false).unwrap(),
-                super::R2oVoiceTrialInstallOutcome::Installed(_)
-            ),
-            "точное успешное подтверждение отклонено"
+            matches!(result, Ok(super::R2oVoiceTrialInstallOutcome::Installed(ref trial))
+                if trial.trial_id == sent_trial_id),
+            "matching APPLIED/proof must be able to complete even without a positive ACK"
         );
 
         for (ack_ok, matching_trial_id) in [(true, false), (false, true)] {
@@ -35297,6 +35266,67 @@ mod tests {
                 "удаление должно требовать успешный ACK с точным trial ID"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_voice_trial_игнорирует_success_ack_и_снимает_только_exact_nak() {
+        use super::{R2oVoiceTrialContext, r2o_take_voice_trial_on_nak};
+        use r2k_core::control::Ack;
+        use std::collections::HashMap;
+        use std::time::Instant;
+
+        let trial_id = [0x42; 16];
+        let trial = R2oVoiceTrialContext {
+            target: r2o_controller::voice_discovery::R2oVoiceTarget {
+                client: "192.0.2.10".parse().unwrap(),
+                server: "198.51.100.20:50004".parse().unwrap(),
+            },
+            trial_id,
+            plan_text: String::new(),
+            voice_flow_key: None,
+            started_at: Instant::now(),
+            renew_at: Instant::now(),
+            expires_at: Instant::now() + std::time::Duration::from_secs(60),
+            response_confirmed: false,
+            diagnostic: None,
+        };
+        let mut trials = HashMap::from([(trial_id, trial)]);
+        let ack = |command, ok, trial_id| Ack {
+            command,
+            ok,
+            reason: r2k_core::control::ACK_NO_ROOM,
+            trial_id: Some(trial_id),
+            area_id: None,
+            binding_context: None,
+        };
+
+        assert!(
+            r2o_take_voice_trial_on_nak(
+                &mut trials,
+                ack(super::COMMAND_SET_VOICE_ADDR_PROBE, true, trial_id)
+            )
+            .is_none()
+        );
+        assert_eq!(trials.len(), 1, "успешный ACK не завершает voice trial");
+        let mut foreign_id = trial_id;
+        foreign_id[0] ^= 1;
+        assert!(
+            r2o_take_voice_trial_on_nak(
+                &mut trials,
+                ack(super::COMMAND_SET_VOICE_ADDR_PROBE, false, foreign_id)
+            )
+            .is_none()
+        );
+        assert_eq!(trials.len(), 1, "чужой NAK не должен снимать trial");
+        assert!(
+            r2o_take_voice_trial_on_nak(
+                &mut trials,
+                ack(super::COMMAND_SET_VOICE_ADDR_PROBE, false, trial_id)
+            )
+            .is_some()
+        );
+        assert!(trials.is_empty(), "точный NAK снимает только свой trial");
     }
 
     #[cfg(unix)]
@@ -35496,6 +35526,17 @@ mod tests {
             ]);
 
             client.renew_due_r2o_voice_trials(&mut trials, r2o_now);
+            let ack_frame = read_frame(&mut client.socket).unwrap();
+            let ack = r2k_core::control::decode_ack(&ack_frame).unwrap();
+            if let Some(retired) = super::r2o_take_voice_trial_on_nak(&mut trials, ack) {
+                let delete = super::encode_delete_voice_addr_probe(
+                    retired.target.client,
+                    retired.target.server,
+                    retired.trial_id,
+                )
+                .unwrap();
+                client.write_command(&delete).unwrap();
+            }
             server.join().unwrap();
             (trials, r2o_now)
         };
@@ -35923,6 +35964,183 @@ mod tests {
             Some(r2o_latest.clone())
         );
         assert_eq!(r2o_queue.current.as_ref(), Some(&r2o_latest));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn voice_lifecycle_trace_matches_d2o_a_to_b_queue_lease_proof_and_persistence() {
+        use super::{
+            R2O_VOICE_PENDING_GRACE, R2O_VOICE_TRIAL_RENEW_INTERVAL, R2O_VOICE_TRIAL_TASK_LIFETIME,
+            R2oVoiceDiscoveryJob, R2oVoiceLatestQueue, R2oVoiceTrialContext,
+            r2o_take_due_voice_trial_renewals, r2o_take_stale_pending_voice_trials,
+            r2o_voice_applied_flow_matches, r2o_voice_proof_matches_target,
+        };
+        use r2k_core::control::{AppliedEvent, BindingContext, KEY_LEN};
+        use std::collections::HashMap;
+        use std::net::{Ipv4Addr, SocketAddrV4};
+        use std::time::Instant;
+
+        let client = Ipv4Addr::new(192, 168, 1, 67);
+        let target_a = r2o_controller::voice_discovery::R2oVoiceTarget {
+            client,
+            server: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 50_004),
+        };
+        let target_b = r2o_controller::voice_discovery::R2oVoiceTarget {
+            client,
+            server: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 50_008),
+        };
+        let now = Instant::now();
+        let diagnostic = || super::R2oVoiceDiagnosticContext {
+            report_id: None,
+            queued_at: now,
+            started_at: None,
+            probe_units: 0,
+        };
+        let job = |target| R2oVoiceDiscoveryJob {
+            target,
+            flow: None,
+            known_prefix: None,
+            started_at: now,
+            diagnostic: diagnostic(),
+        };
+        let mut trace = Vec::new();
+        let mut queue = R2oVoiceLatestQueue::default();
+        assert_eq!(queue.offer(job(target_a), true), Some(job(target_a)));
+        let trial_id_a = [0xa1; 16];
+        let plan_prefix = r2k_core::stun::binding_request([0x36; 12]);
+        let plan_text = r2o_controller::voice_discovery::r2o_voice_arm_plan_text(&plan_prefix);
+        let mut trials = HashMap::from([(
+            trial_id_a,
+            R2oVoiceTrialContext {
+                target: target_a,
+                trial_id: trial_id_a,
+                plan_text: plan_text.clone(),
+                voice_flow_key: None,
+                started_at: now,
+                renew_at: now + R2O_VOICE_TRIAL_RENEW_INTERVAL,
+                expires_at: now + R2O_VOICE_TRIAL_TASK_LIFETIME,
+                response_confirmed: false,
+                diagnostic: None,
+            },
+        )]);
+        trace.push("install A without waiting for success ACK");
+
+        let renewed =
+            r2o_take_due_voice_trial_renewals(&mut trials, now + R2O_VOICE_TRIAL_RENEW_INTERVAL);
+        assert_eq!(renewed.len(), 1);
+        assert_eq!(renewed[0].target, target_a);
+        assert_eq!(renewed[0].trial_id, trial_id_a);
+        trace.push("renew A same-trial");
+
+        assert_eq!(queue.offer(job(target_b), true), None);
+        assert_eq!(queue.offer(job(target_b), true), None);
+        assert_eq!(
+            queue.pending.as_ref().map(|pending| pending.target),
+            Some(target_b)
+        );
+        trace.push("queue B latest");
+
+        let stale =
+            r2o_take_stale_pending_voice_trials(&mut trials, now + R2O_VOICE_PENDING_GRACE, true);
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].trial_id, trial_id_a);
+        assert!(queue.complete(&target_a));
+        assert_eq!(queue.take_pending_if_idle(true), Some(job(target_b)));
+        let trial_id_b = [0xb2; 16];
+        assert_ne!(trial_id_a, trial_id_b);
+        trace.push("expire A; install B fresh-trial");
+
+        let plan_id = r2o_controller::voice_discovery::r2o_voice_arm_plan(&plan_prefix)
+            .unwrap()
+            .id;
+        let mut key = [0; KEY_LEN];
+        key[0] = 4;
+        key[1..5].copy_from_slice(&client.octets());
+        key[17..21].copy_from_slice(&target_b.server.ip().octets());
+        key[33..35].copy_from_slice(&52_043_u16.to_be_bytes());
+        key[35..37].copy_from_slice(&target_b.server.port().to_be_bytes());
+        key[37] = 17;
+        let applied = AppliedEvent {
+            key,
+            plan_id,
+            trial_id: trial_id_b,
+            execution_id: 0,
+            binding: BindingContext {
+                generation: 0,
+                kind: 0,
+                family: 0,
+                shape: 0,
+                temporary: true,
+                epoch: [0; 16],
+            },
+        };
+        let trial_b = R2oVoiceTrialContext {
+            target: target_b,
+            trial_id: trial_id_b,
+            plan_text: plan_text.clone(),
+            voice_flow_key: Some(key),
+            started_at: now,
+            renew_at: now + R2O_VOICE_TRIAL_RENEW_INTERVAL,
+            expires_at: now + R2O_VOICE_TRIAL_TASK_LIFETIME,
+            response_confirmed: true,
+            diagnostic: None,
+        };
+        assert!(r2o_voice_applied_flow_matches(&trial_b, &applied));
+        let proof = r2k_core::control::R2oVoiceProofEvent {
+            key,
+            trial_id: trial_id_b,
+            proof: r2k_core::control::R2oVoiceProofKind::DiscordDiscovery {
+                mapped_ip: Ipv4Addr::new(203, 0, 113, 8),
+                mapped_port: 52_000,
+            },
+        };
+        assert!(r2o_voice_proof_matches_target(&proof, target_b));
+        trace.push("applied B; discovery proof; persist B");
+
+        let directory = std::env::temp_dir().join(format!(
+            "r2o-voice-lifecycle-trace-{}-{}",
+            std::process::id(),
+            now.elapsed().as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let catalog_path = directory.join("catalog.json");
+        let mut catalog = Catalog::default();
+        let saved_plan = r2o_controller::voice_discovery::r2o_save_confirmed_voice_binding(
+            &mut catalog,
+            *target_b.server.ip(),
+            &plan_text,
+            1_800_000_000,
+            4,
+        )
+        .unwrap();
+        assert_eq!(
+            saved_plan,
+            plan_id
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        catalog.save_atomic(&catalog_path, 1_800_000_000).unwrap();
+        let restored = Catalog::load(&catalog_path).unwrap();
+        assert_eq!(restored.boxes[0].bindings[0].target, "127.0.0.1");
+        assert_eq!(restored.boxes[0].bindings[0].verified_by, 4);
+        let restored_plan = &restored.boxes[0].plans[0];
+        let reapplied = super::encode_set_voice_addr(
+            *target_b.server.ip(),
+            &r2o_controller::plan_text::compile_text(&restored_plan.text).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            u16::from_be_bytes([reapplied[4], reapplied[5]]),
+            super::COMMAND_SET_VOICE_ADDR
+        );
+        assert_eq!(&reapplied[6..10], &target_b.server.ip().octets());
+        trace.push("restart reapplies B");
+        std::fs::remove_dir_all(directory).unwrap();
+
+        if let Some(path) = std::env::var_os("R2O_VOICE_LIFECYCLE_TRACE_OUTPUT") {
+            std::fs::write(path, format!("{}\n", trace.join("\n"))).unwrap();
+        }
     }
 
     #[cfg(unix)]
