@@ -1696,6 +1696,10 @@ impl ControlServer {
     }
 
     pub fn send_event(&mut self, kind: u16, body: &[u8]) -> io::Result<()> {
+        if self.peer.is_none() {
+            self.dropped_events = self.dropped_events.saturating_add(1);
+            return Ok(());
+        }
         let bytes = control::encode_frame(kind, body)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         self.enqueue(bytes);
@@ -1704,11 +1708,12 @@ impl ControlServer {
 
     /// Queue an event only when it can be retained for the connected controller.
     pub fn try_send_event(&mut self, kind: u16, body: &[u8]) -> io::Result<bool> {
-        let bytes = control::encode_frame(kind, body)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         if self.peer.is_none() {
+            self.dropped_events = self.dropped_events.saturating_add(1);
             return Ok(false);
         }
+        let bytes = control::encode_frame(kind, body)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         if self.output_bytes.saturating_add(bytes.len()) > MAX_CONTROL_OUTPUT {
             self.dropped_events = self.dropped_events.saturating_add(1);
             return Ok(false);
@@ -2125,6 +2130,32 @@ mod tests {
     }
 
     #[test]
+    fn control_server_counts_each_event_without_connected_peer_as_dropped_like_d2o() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "r2o-control-disconnected-event-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("control.sock");
+        let mut server = ControlServer::open(&path, u16::MAX as u32).unwrap();
+        let body = [1, 2, 3, 4];
+
+        server.send_event(EVENT_HELLO, &body).unwrap();
+        assert!(!server.try_send_event(EVENT_HELLO, &body).unwrap());
+
+        assert_eq!(server.dropped_events(), 2);
+        if let Some(output) = std::env::var_os("R2O_CONTROL_DROPPED_DIFF_OUTPUT") {
+            std::fs::write(output, "control_dropped=2\n").unwrap();
+        }
+        drop(server);
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
     fn control_server_sends_a_tls_hello_event_to_connected_controller() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2174,6 +2205,7 @@ mod tests {
                 .try_send_event(control::EVENT_R2O_VOICE_RTP_PROOF, &[])
                 .unwrap()
         );
+        assert_eq!(server.dropped_events(), 1);
 
         let mut client = UnixStream::connect(&path).unwrap();
         client
@@ -2188,7 +2220,7 @@ mod tests {
                 .unwrap(),
             "полный outbox должен оставить доказательство на повтор"
         );
-        assert_eq!(server.dropped_events(), 1);
+        assert_eq!(server.dropped_events(), 2);
         server.output_bytes = 0;
         assert!(
             server
