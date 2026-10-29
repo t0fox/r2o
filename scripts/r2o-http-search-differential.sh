@@ -170,6 +170,35 @@ mkdir -p "$r2o_log_dir"
     diff -u "$r2o_durable_c" "$r2o_durable_rust"
     printf 'C/Rust HTTP persistence: %s' "$(cat "$r2o_durable_c")"
     rm -f -- "$r2o_durable_binary" "$r2o_durable_c" "$r2o_durable_rust"
+    printf '\nСверка отзыва сохранённой HTTP-привязки C/Rust\n'
+    r2o_rollback_binary="$r2o_log_dir/http-rollback-differential-$$"
+    r2o_rollback_c="$r2o_log_dir/http-rollback-c-$$"
+    r2o_rollback_rust="$r2o_log_dir/http-rollback-rust-$$"
+    clang-18 -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+        -I"$r2o_donor_core" -I"$r2o_donor_core/include" \
+        -I"$r2o_donor_core/../datapath/include" \
+        -o "$r2o_rollback_binary" \
+        "$r2o_script_dir/crates/r2o-controller/tests/d2o_http_rollback_differential.c" \
+        "$r2o_donor_core/httpsearch.o" "$r2o_donor_core/httpup_logic.o" \
+        "$r2o_donor_core/plantlv.o" "$r2o_donor_core/quic.o" \
+        "$r2o_donor_core/quicwire.o" "$r2o_donor_core/crypto.o" \
+        "$r2o_donor_core/../datapath/plan_parse.c" \
+        "$r2o_donor_core/../datapath/plan_apply.c" \
+        "$r2o_donor_core/../datapath/wire.c" \
+        "$r2o_donor_core/verify.o" "$r2o_donor_core/quicconn.o" \
+        "$r2o_donor_core/h3.o" "$r2o_donor_core/tls12.o" \
+        "$r2o_donor_core/p256.o" "$r2o_donor_core/compose.o" \
+        "$r2o_donor_core/measured.o" "$r2o_donor_core/hello.o" \
+        "$r2o_donor_core/meas.o" "$r2o_donor_core/link.o" \
+        "$r2o_donor_core/tls13.o" "$r2o_donor_core/tls13core.o" \
+        "$r2o_donor_core/x25519.o" -Wl,--gc-sections -lpthread
+    "$r2o_rollback_binary" >"$r2o_rollback_c"
+    R2O_HTTP_ROLLBACK_DIFF_OUTPUT="$r2o_rollback_rust" \
+        cargo +1.98.0 test -p r2o-controller --bin r2o-controller \
+            http_owned_plan_rollback_matches_d2o --locked --offline -- --nocapture
+    diff -u "$r2o_rollback_c" "$r2o_rollback_rust"
+    printf 'C/Rust HTTP rollback: %s' "$(cat "$r2o_rollback_c")"
+    rm -f -- "$r2o_rollback_binary" "$r2o_rollback_c" "$r2o_rollback_rust"
     rm -f -- "$r2o_state_binary" "$r2o_state_c" "$r2o_state_rust"
     printf '\nСверка baseline и путей keep-alive C/Rust на локальном HTTP-сервере\n'
     r2o_baseline_harness="$r2o_script_dir/crates/r2o-controller/tests/d2o_http_baseline_differential.c"

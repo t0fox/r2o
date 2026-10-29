@@ -676,6 +676,58 @@ pub fn revoke_http_response_binding(
     revoked
 }
 
+/// Отозвать текущую HTTP-привязку только для точного сохранённого plan ID.
+pub fn revoke_http_search_binding(
+    catalog: &mut Catalog,
+    target: &DiscoveryTarget,
+    plan_id: [u8; 16],
+    now: i64,
+) -> bool {
+    if now < 0 || target.shape != SHAPE_HTTP || !matches!(target.family, 4 | 6) {
+        return false;
+    }
+    let Ok(host) = crate::domain::normalize(&target.host) else {
+        return false;
+    };
+    if host != target.host || plan_id.iter().all(|byte| *byte == 0) {
+        return false;
+    }
+    let plan_id: String = plan_id.iter().map(|byte| format!("{byte:02x}")).collect();
+    let mut revoked = false;
+    for box_record in &mut catalog.boxes {
+        let owns_plan = box_record.plans.iter().any(|plan| {
+            plan.enabled
+                && plan.proto.eq_ignore_ascii_case("http")
+                && plan.id.eq_ignore_ascii_case(&plan_id)
+        });
+        if !owns_plan {
+            continue;
+        }
+        let previous_len = box_record.bindings.len();
+        box_record.bindings.retain(|binding| {
+            let owned = binding.enabled
+                && binding.recheck_since.is_none()
+                && binding.kind == "name"
+                && binding.target == host
+                && binding.plan_id.eq_ignore_ascii_case(&plan_id)
+                && binding.level >= 3
+                && binding.transport == 6
+                && binding.family == target.family
+                && binding.shape == SHAPE_HTTP
+                && binding.verified_by == 1
+                && binding.input == 2;
+            if owned {
+                revoked = true;
+            }
+            !owned
+        });
+        if box_record.bindings.len() != previous_len {
+            box_record.updated = box_record.updated.max(now.max(1));
+        }
+    }
+    revoked
+}
+
 /// Проверить, покрывает ли пригодная точная привязка это имя и форму TLS.
 pub fn has_usable_binding(catalog: &Catalog, target: &DiscoveryTarget) -> bool {
     has_usable_binding_with_input(catalog, target, None)

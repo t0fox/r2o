@@ -3748,6 +3748,34 @@ fn http_search_candidates(
 }
 
 #[cfg(unix)]
+fn catalog_has_http_search_owner(
+    catalog: &Catalog,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    plan_id: [u8; 16],
+) -> bool {
+    let plan_id: String = plan_id.iter().map(|byte| format!("{byte:02x}")).collect();
+    catalog.boxes.iter().any(|box_record| {
+        box_record.plans.iter().any(|plan| {
+            plan.enabled
+                && plan.proto.eq_ignore_ascii_case("http")
+                && plan.id.eq_ignore_ascii_case(&plan_id)
+        }) && box_record.bindings.iter().any(|binding| {
+            binding.enabled
+                && binding.recheck_since.is_none()
+                && binding.kind == "name"
+                && binding.target == target.host
+                && binding.plan_id.eq_ignore_ascii_case(&plan_id)
+                && binding.level >= 3
+                && binding.transport == 6
+                && binding.family == target.family
+                && binding.shape == SHAPE_HTTP
+                && binding.verified_by == 1
+                && binding.input == 2
+        })
+    })
+}
+
+#[cfg(unix)]
 struct HttpSearchTask {
     target: r2o_controller::discovery::DiscoveryTarget,
     request_path: Vec<u8>,
@@ -3755,6 +3783,20 @@ struct HttpSearchTask {
     candidates: Vec<String>,
     live_failures: HttpLiveFailures,
     mark: Option<u32>,
+    owned_binding: Option<HttpSearchOwnedBinding>,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HttpSearchOwnedBinding {
+    Confirmed {
+        plan_id: [u8; 16],
+        binding: r2k_core::control::BindingContext,
+    },
+    Pending {
+        plan_id: [u8; 16],
+        previous: Option<([u8; 16], r2k_core::control::BindingContext)>,
+    },
 }
 
 #[cfg(unix)]
@@ -3844,6 +3886,7 @@ struct HttpSearchOutcome {
     result: Result<(), String>,
     disposition: HttpSearchDisposition,
     diagnostic_event: Option<serde_json::Value>,
+    revoke_owned_binding: Option<HttpSearchOwnedBinding>,
 }
 
 #[cfg(unix)]
@@ -3858,6 +3901,7 @@ struct HttpSearchCompletion {
     disposition: HttpSearchDisposition,
     diagnostic: Option<HttpSearchDiagnosticTerminal>,
     creates_record: bool,
+    revoke_owned_binding: Option<HttpSearchOwnedBinding>,
 }
 
 #[cfg(unix)]
@@ -3871,6 +3915,7 @@ impl HttpSearchCompletion {
             disposition,
             diagnostic: Some(HttpSearchDiagnosticTerminal { outcome, reason }),
             creates_record: true,
+            revoke_owned_binding: None,
         }
     }
 
@@ -3879,6 +3924,7 @@ impl HttpSearchCompletion {
             disposition,
             diagnostic: None,
             creates_record: false,
+            revoke_owned_binding: None,
         }
     }
 }
@@ -5557,19 +5603,21 @@ impl HttpSearchWorker {
                 };
                 diagnostic_seq = diagnostic_seq.wrapping_add(1);
                 let diagnostic_started = std::time::Instant::now();
-                let (result, disposition, terminal, creates_record) = {
+                let (result, disposition, terminal, creates_record, revoke_owned_binding) = {
                     match run_http_search_task(task, &worker_command_sender, &worker_cancel) {
                         Ok(completion) => (
                             Ok(()),
                             completion.disposition,
                             completion.diagnostic,
                             completion.creates_record,
+                            completion.revoke_owned_binding,
                         ),
                         Err(failure) => (
                             Err(failure.message),
                             HttpSearchDisposition::Inconclusive,
                             Some(failure.diagnostic),
                             failure.creates_record,
+                            None,
                         ),
                     }
                 };
@@ -5597,6 +5645,7 @@ impl HttpSearchWorker {
                         result,
                         disposition,
                         diagnostic_event,
+                        revoke_owned_binding,
                     })
                     .is_err()
                 {
@@ -13971,6 +14020,7 @@ enum HttpAcknowledgedBinding {
         plan_id: [u8; 16],
         trial_id: [u8; 16],
         previous: Option<([u8; 16], r2k_core::control::BindingContext)>,
+        revoke_on_ack: bool,
     },
 }
 
@@ -14185,6 +14235,43 @@ impl ControlClient {
         }
     }
 
+    fn acknowledged_http_search_owner(
+        &self,
+        catalog: &Catalog,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+    ) -> Option<HttpSearchOwnedBinding> {
+        let key = (normalize(&target.host).ok()?, target.family);
+        let owner = match self.http_acknowledged_bindings.get(&key)? {
+            HttpAcknowledgedBinding::Confirmed { plan_id, binding }
+                if binding.is_known()
+                    && !binding.temporary
+                    && binding.kind == 1
+                    && binding.family == target.family
+                    && binding.shape == SHAPE_HTTP =>
+            {
+                HttpSearchOwnedBinding::Confirmed {
+                    plan_id: *plan_id,
+                    binding: *binding,
+                }
+            }
+            HttpAcknowledgedBinding::Pending {
+                plan_id,
+                trial_id: _,
+                previous,
+                revoke_on_ack: false,
+            } => HttpSearchOwnedBinding::Pending {
+                plan_id: *plan_id,
+                previous: *previous,
+            },
+            _ => return None,
+        };
+        let plan_id = match owner {
+            HttpSearchOwnedBinding::Confirmed { plan_id, .. }
+            | HttpSearchOwnedBinding::Pending { plan_id, .. } => plan_id,
+        };
+        catalog_has_http_search_owner(catalog, target, plan_id).then_some(owner)
+    }
+
     fn write_http_candidate_install(
         &mut self,
         command: &[u8],
@@ -14206,6 +14293,7 @@ impl ControlClient {
                 plan_id,
                 trial_id,
                 previous,
+                revoke_on_ack: false,
             },
         );
         if let Err(error) = self.write_command(command) {
@@ -14244,7 +14332,10 @@ impl ControlClient {
             return;
         };
         let HttpAcknowledgedBinding::Pending {
-            plan_id, previous, ..
+            plan_id,
+            previous,
+            revoke_on_ack,
+            ..
         } = pending
         else {
             unreachable!("pending HTTP binding was selected above")
@@ -14258,18 +14349,34 @@ impl ControlClient {
         });
         match (ack.ok, binding) {
             (true, Some(binding)) => {
-                self.http_acknowledged_bindings
-                    .insert(key, HttpAcknowledgedBinding::Confirmed { plan_id, binding });
-            }
-            (false, _) => match previous {
-                Some((plan_id, binding)) => {
+                if revoke_on_ack {
+                    self.http_acknowledged_bindings.remove(&key);
+                    self.send_http_owned_delete(&key.0, binding);
+                } else {
                     self.http_acknowledged_bindings
                         .insert(key, HttpAcknowledgedBinding::Confirmed { plan_id, binding });
                 }
-                None => {
+            }
+            (false, _) => {
+                if revoke_on_ack {
                     self.http_acknowledged_bindings.remove(&key);
+                    if let Some((_, binding)) = previous {
+                        self.send_http_owned_delete(&key.0, binding);
+                    }
+                } else {
+                    match previous {
+                        Some((plan_id, binding)) => {
+                            self.http_acknowledged_bindings.insert(
+                                key,
+                                HttpAcknowledgedBinding::Confirmed { plan_id, binding },
+                            );
+                        }
+                        None => {
+                            self.http_acknowledged_bindings.remove(&key);
+                        }
+                    }
                 }
-            },
+            }
             (true, None) => {
                 self.http_acknowledged_bindings.remove(&key);
             }
@@ -15477,6 +15584,22 @@ impl ControlClient {
                         (diagnostics.as_mut(), outcome.diagnostic_event)
                     {
                         diagnostics.record(event);
+                    }
+                    if let Some(owner) = outcome.revoke_owned_binding {
+                        if let Some((_, catalog, path, _)) = &mut discovery {
+                            if let Err(error) = self.revoke_http_search_owner(
+                                &outcome.target,
+                                owner,
+                                catalog,
+                                path,
+                                catalog_persistence.as_mut(),
+                            ) {
+                                eprintln!(
+                                    "HTTP {}: не удалось сохранить отзыв подтверждённой привязки: {error}",
+                                    outcome.target.host
+                                );
+                            }
+                        }
                     }
                     self.complete_http_search(
                         &outcome.target,
@@ -17354,6 +17477,7 @@ impl ControlClient {
             candidates,
             live_failures,
             mark,
+            owned_binding: self.acknowledged_http_search_owner(catalog, target),
         }) {
             true
         } else {
@@ -19173,6 +19297,125 @@ impl ControlClient {
         Ok(())
     }
 
+    fn send_http_owned_delete(&mut self, host: &str, binding: r2k_core::control::BindingContext) {
+        match encode_delete_name_bound(host, 6, binding) {
+            Ok(command) => {
+                if let Err(error) = self.write_command(&command) {
+                    eprintln!(
+                        "HTTP {host}: условный отзыв сохранённой привязки не отправлен: {error}"
+                    );
+                }
+            }
+            Err(error) => {
+                eprintln!("HTTP {host}: условный отзыв сохранённой привязки не собран: {error}");
+            }
+        }
+    }
+
+    fn revoke_http_search_owner(
+        &mut self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        owner: HttpSearchOwnedBinding,
+        catalog: &mut Catalog,
+        catalog_path: &std::path::Path,
+        mut persistence: Option<&mut R2oCatalogPersistence>,
+    ) -> Result<bool, Box<dyn Error>> {
+        let (_lock, previous) =
+            locked_catalog_for_persistence(catalog_path, catalog, persistence.as_deref())?;
+        let mut updated = previous.clone();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64;
+        let plan_id = match owner {
+            HttpSearchOwnedBinding::Confirmed { plan_id, .. }
+            | HttpSearchOwnedBinding::Pending { plan_id, .. } => plan_id,
+        };
+        if !r2o_controller::discovery::revoke_http_search_binding(
+            &mut updated,
+            target,
+            plan_id,
+            now,
+        ) {
+            return Ok(false);
+        }
+        persist_catalog_update(&updated, catalog_path, now, persistence.as_deref_mut())?;
+        *catalog = updated;
+        if let Some(persistence) = persistence.as_deref_mut() {
+            drop(_lock);
+            persistence.persist(catalog, catalog_path, now)?;
+        }
+
+        let key = (normalize(&target.host)?, target.family);
+        let current = self.http_acknowledged_bindings.get(&key).copied();
+        let (delete_binding, remove_state, mark_pending) = match (owner, current) {
+            (
+                HttpSearchOwnedBinding::Confirmed {
+                    plan_id: expected_plan,
+                    binding: expected_binding,
+                },
+                Some(HttpAcknowledgedBinding::Confirmed { plan_id, binding }),
+            ) if plan_id == expected_plan && binding == expected_binding => {
+                (Some(binding), true, false)
+            }
+            (
+                HttpSearchOwnedBinding::Confirmed {
+                    plan_id: expected_plan,
+                    binding: expected_binding,
+                },
+                Some(HttpAcknowledgedBinding::Pending {
+                    previous: Some((previous_plan, previous_binding)),
+                    ..
+                }),
+            ) if previous_plan == expected_plan && previous_binding == expected_binding => {
+                (Some(previous_binding), false, true)
+            }
+            (
+                HttpSearchOwnedBinding::Pending {
+                    previous: Some((previous_plan, previous_binding)),
+                    ..
+                },
+                Some(HttpAcknowledgedBinding::Confirmed { plan_id, binding }),
+            ) if plan_id == previous_plan && binding == previous_binding => {
+                (Some(binding), true, false)
+            }
+            (
+                HttpSearchOwnedBinding::Pending {
+                    plan_id: expected_plan,
+                    ..
+                },
+                Some(HttpAcknowledgedBinding::Confirmed { plan_id, binding }),
+            ) if plan_id == expected_plan => (Some(binding), true, false),
+            (
+                HttpSearchOwnedBinding::Pending {
+                    plan_id: expected_plan,
+                    ..
+                },
+                Some(HttpAcknowledgedBinding::Pending {
+                    plan_id, previous, ..
+                }),
+            ) if plan_id == expected_plan => (previous.map(|(_, binding)| binding), false, true),
+            _ => (None, false, false),
+        };
+        if mark_pending {
+            if let Some(HttpAcknowledgedBinding::Pending { revoke_on_ack, .. }) =
+                self.http_acknowledged_bindings.get_mut(&key)
+            {
+                *revoke_on_ack = true;
+            }
+        }
+        if remove_state {
+            self.http_acknowledged_bindings.remove(&key);
+        }
+        if let Some(binding) = delete_binding {
+            self.send_http_owned_delete(&target.host, binding);
+        }
+        println!(
+            "HTTP {}: исполненная перепроверка исчерпала кандидатов; сохранённая привязка отозвана",
+            target.host
+        );
+        Ok(true)
+    }
+
     fn revoke_http_binding(
         &mut self,
         response: &r2k_core::control::HttpResponseEvent,
@@ -20083,6 +20326,14 @@ fn r2o_http_trial_is_judged(
 }
 
 #[cfg(unix)]
+fn r2o_http_failed_revoke_action(
+    any_judged_trial: bool,
+    owned_binding: Option<HttpSearchOwnedBinding>,
+) -> Option<HttpSearchOwnedBinding> {
+    any_judged_trial.then_some(owned_binding).flatten()
+}
+
+#[cfg(unix)]
 #[derive(Default)]
 struct HttpCandidateHistory {
     confirmations: u8,
@@ -20240,6 +20491,7 @@ fn run_http_search_task(
         candidates,
         live_failures,
         mark,
+        owned_binding,
     } = task;
     if live_failures.evidence_lost {
         println!(
@@ -20457,11 +20709,14 @@ fn run_http_search_task(
             target.host,
         );
     }
-    Ok(r2o_http_failed_completion(
+    let mut completion = r2o_http_failed_completion(
         any_judged_trial,
         skipped_conflicts,
         any_complete_server_trial,
-    ))
+    );
+    completion.revoke_owned_binding =
+        r2o_http_failed_revoke_action(any_judged_trial, owned_binding);
+    Ok(completion)
 }
 
 #[cfg(unix)]
@@ -21210,6 +21465,236 @@ mod tests {
             std::fs::write(path, "persisted_before_flush=yes\n").unwrap();
         }
         std::fs::remove_dir_all(work).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn http_owned_plan_rollback_matches_d2o() {
+        use std::io::Cursor;
+        use std::os::unix::net::UnixStream;
+        use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+        fn expect_delete(peer: &mut UnixStream, host: &str, binding: BindingContext) {
+            let frame = read_frame(peer).unwrap();
+            let expected_bytes = super::encode_delete_name_bound(host, 6, binding).unwrap();
+            let expected = read_frame(&mut Cursor::new(expected_bytes)).unwrap();
+            assert_eq!(frame.kind, r2k_core::control::COMMAND_DEL_NAME_BOUND);
+            assert_eq!(frame.kind, expected.kind);
+            assert_eq!(frame.body, expected.body);
+        }
+
+        fn run_case(
+            label: &str,
+            judged: bool,
+            pending_reinstall: bool,
+            late_ack_ok: bool,
+        ) -> String {
+            let work = std::env::temp_dir().join(format!(
+                "r2o-http-rollback-{}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                label
+            ));
+            std::fs::create_dir(&work).unwrap();
+            let catalog_path = work.join("catalog.json");
+            Catalog::default().save_atomic(&catalog_path, 1).unwrap();
+            let mut catalog = Catalog::load(&catalog_path).unwrap();
+            let snapshot = Arc::new(std::sync::Mutex::new(catalog.clone()));
+            let mut persistence = super::R2oCatalogPersistence::new(Instant::now(), snapshot);
+            let target = DiscoveryTarget {
+                host: "rutracker.org".into(),
+                endpoint: "37.221.67.160:80".into(),
+                family: 4,
+                shape: SHAPE_HTTP,
+            };
+            let (socket, mut peer) = UnixStream::pair().unwrap();
+            let mut client = ControlClient {
+                socket,
+                send_maxlen: 1500,
+                send_cap: Arc::new(std::sync::atomic::AtomicUsize::new(1500)),
+                pending_events: Default::default(),
+                pending_applied_events: Default::default(),
+                dropped_events: Arc::new(AtomicUsize::new(0)),
+                http_search_started: Default::default(),
+                http_acknowledged_bindings: Default::default(),
+            };
+            client
+                .install_http_candidate(
+                    &target,
+                    "split",
+                    &mut catalog,
+                    &catalog_path,
+                    Some(&mut persistence),
+                )
+                .unwrap();
+            assert!(!persistence.dirty);
+            assert_eq!(read_frame(&mut peer).unwrap().kind, COMMAND_SET_NAME_BOUND);
+            let (plan_id, initial_trial) = match client
+                .http_acknowledged_bindings
+                .get(&(target.host.clone(), target.family))
+                .copied()
+                .unwrap()
+            {
+                super::HttpAcknowledgedBinding::Pending {
+                    plan_id, trial_id, ..
+                } => (plan_id, trial_id),
+                _ => panic!("HTTP SET must wait for its exact ACK"),
+            };
+            let initial_binding = BindingContext {
+                generation: 9,
+                kind: 1,
+                family: target.family,
+                shape: SHAPE_HTTP,
+                temporary: false,
+                epoch: [1; 16],
+            };
+            client.record_http_bound_binding_acknowledgement(Ack {
+                command: COMMAND_SET_NAME_BOUND,
+                ok: true,
+                reason: 0,
+                trial_id: Some(initial_trial),
+                area_id: None,
+                binding_context: Some(initial_binding),
+            });
+            assert!(super::catalog_has_http_search_owner(
+                &catalog, &target, plan_id
+            ));
+
+            let mut next_trial = None;
+            let mut late_binding = None;
+            if pending_reinstall {
+                let plan_id_text = catalog
+                    .boxes
+                    .iter()
+                    .flat_map(|box_record| &box_record.plans)
+                    .find(|plan| plan.enabled && plan.proto == "http")
+                    .unwrap()
+                    .id
+                    .clone();
+                let mut exact_plan_id = [0; 16];
+                for (index, pair) in plan_id_text.as_bytes().chunks_exact(2).enumerate() {
+                    exact_plan_id[index] =
+                        u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap();
+                }
+                assert_eq!(exact_plan_id, plan_id);
+                let text = candidate_text("split", Some(&exact_plan_id)).unwrap();
+                let records = compile_text(&text).unwrap();
+                let trial_id = [0x66; 16];
+                let command = super::encode_set_name_bound(
+                    &target.host,
+                    SHAPE_HTTP,
+                    target.family,
+                    &records,
+                    trial_id,
+                )
+                .unwrap();
+                client
+                    .write_http_candidate_install(
+                        &command,
+                        &target.host,
+                        target.family,
+                        exact_plan_id,
+                        trial_id,
+                    )
+                    .unwrap();
+                assert_eq!(read_frame(&mut peer).unwrap().kind, COMMAND_SET_NAME_BOUND);
+                next_trial = Some(trial_id);
+                late_binding = Some(BindingContext {
+                    generation: 10,
+                    kind: 1,
+                    family: target.family,
+                    shape: SHAPE_HTTP,
+                    temporary: false,
+                    epoch: [2; 16],
+                });
+            }
+
+            let owner = client
+                .acknowledged_http_search_owner(&catalog, &target)
+                .unwrap();
+            let action = super::r2o_http_failed_revoke_action(judged, Some(owner));
+            let mut deletes = 0;
+            let mut changes = 1;
+            if let Some(owner) = action {
+                assert!(
+                    client
+                        .revoke_http_search_owner(
+                            &target,
+                            owner,
+                            &mut catalog,
+                            &catalog_path,
+                            Some(&mut persistence),
+                        )
+                        .unwrap()
+                );
+                assert!(!persistence.dirty);
+                changes += 1;
+                match owner {
+                    super::HttpSearchOwnedBinding::Confirmed { binding, .. } => {
+                        expect_delete(&mut peer, &target.host, binding);
+                        deletes += 1;
+                    }
+                    super::HttpSearchOwnedBinding::Pending { previous, .. } => {
+                        if let Some((_, binding)) = previous {
+                            expect_delete(&mut peer, &target.host, binding);
+                            deletes += 1;
+                        }
+                    }
+                }
+            }
+
+            if let (Some(trial_id), Some(binding)) = (next_trial, late_binding) {
+                client.record_http_bound_binding_acknowledgement(Ack {
+                    command: COMMAND_SET_NAME_BOUND,
+                    ok: late_ack_ok,
+                    reason: if late_ack_ok { 0 } else { 1 },
+                    trial_id: Some(trial_id),
+                    area_id: None,
+                    binding_context: late_ack_ok.then_some(binding),
+                });
+                expect_delete(
+                    &mut peer,
+                    &target.host,
+                    if late_ack_ok {
+                        binding
+                    } else {
+                        initial_binding
+                    },
+                );
+                deletes += 1;
+            }
+
+            let saved = Catalog::load(&catalog_path).unwrap();
+            let plan_present = super::catalog_has_http_search_owner(&saved, &target, plan_id);
+            let unknown_delete = 0;
+            std::fs::remove_dir_all(work).unwrap();
+            format!(
+                "{label}:plan_present={},del_plan={deletes},changed={changes},unknown_delete={unknown_delete}\n",
+                u8::from(plan_present)
+            )
+        }
+
+        let output = format!(
+            "{}{}{}{}",
+            run_case("judged", true, false, true),
+            run_case("unjudged", false, false, true),
+            run_case("late_ack", true, true, true),
+            run_case("late_nack", true, true, false),
+        );
+        assert_eq!(
+            output,
+            "judged:plan_present=0,del_plan=1,changed=2,unknown_delete=0\n\
+             unjudged:plan_present=1,del_plan=0,changed=1,unknown_delete=0\n\
+             late_ack:plan_present=0,del_plan=2,changed=2,unknown_delete=0\n\
+             late_nack:plan_present=0,del_plan=2,changed=2,unknown_delete=0\n"
+                .replace("             ", "")
+        );
+        if let Ok(path) = std::env::var("R2O_HTTP_ROLLBACK_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
     }
 
     #[cfg(unix)]
@@ -29923,6 +30408,7 @@ mod tests {
             candidates: Vec::new(),
             live_failures: HttpLiveFailures::default(),
             mark: None,
+            owned_binding: None,
         }));
 
         let outcome = worker
@@ -29965,6 +30451,7 @@ mod tests {
                 candidates: Vec::new(),
                 live_failures: HttpLiveFailures::default(),
                 mark: None,
+                owned_binding: None,
             }));
             tasks += 1;
         }
