@@ -23812,8 +23812,199 @@ mod tests {
             u8::from(ring_keeps_next),
             u8::from(ring_keeps_new),
         );
+        let recheck_target = DiscoveryTarget {
+            host: "recheck.example".into(),
+            endpoint: "192.0.2.40:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let recheck_cache = std::sync::Mutex::new(super::R2oDeadAddressCache::default());
+        let recheck_start = std::time::Instant::now();
+        let initial_retry = recheck_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .step(&recheck_target, recheck_start)
+            .unwrap();
+        let silent_calls = std::cell::Cell::new(0);
+        let mut silent_probes = 0;
+        let silent = super::r2o_saved_address_recheck(
+            &recheck_cache,
+            &recheck_target,
+            recheck_start + initial_retry,
+            &mut silent_probes,
+            || {
+                silent_calls.set(silent_calls.get() + 1);
+                Ok(false)
+            },
+        );
+        assert_eq!(silent, super::R2oSavedAddressRecheck::Silent);
+        assert_eq!(silent_calls.get(), 3);
+        assert_eq!(silent_probes, 3);
+        let silent_retry = recheck_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .step(&recheck_target, recheck_start + initial_retry)
+            .unwrap();
+        assert_eq!(silent_retry, std::time::Duration::from_secs(1800));
+
+        let accepted_target = DiscoveryTarget {
+            host: "accepted-recheck.example".into(),
+            endpoint: "192.0.2.41:443".into(),
+            ..recheck_target.clone()
+        };
+        let accepted_cache = std::sync::Mutex::new(super::R2oDeadAddressCache::default());
+        let accepted_retry = accepted_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .step(&accepted_target, recheck_start)
+            .unwrap();
+        let accepted_calls = std::cell::Cell::new(0);
+        let mut accepted_probes = 0;
+        let accepted = super::r2o_saved_address_recheck(
+            &accepted_cache,
+            &accepted_target,
+            recheck_start + accepted_retry,
+            &mut accepted_probes,
+            || {
+                accepted_calls.set(accepted_calls.get() + 1);
+                Ok(true)
+            },
+        );
+        assert_eq!(accepted, super::R2oSavedAddressRecheck::Accepted);
+        assert_eq!(accepted_calls.get(), 1);
+        assert_eq!(accepted_probes, 1);
+        let accepted_trigger_delta =
+            usize::from(accepted == super::R2oSavedAddressRecheck::Accepted);
+        let mut next_ack_calls = 0;
+        let mut next_ack_probes = 0;
+        let next_recheck = super::r2o_saved_address_recheck(
+            &accepted_cache,
+            &accepted_target,
+            recheck_start + accepted_retry + std::time::Duration::from_secs(660),
+            &mut next_ack_probes,
+            || {
+                next_ack_calls += 1;
+                Ok(false)
+            },
+        );
+        assert_eq!(next_recheck, super::R2oSavedAddressRecheck::NotRequired);
+        assert_eq!(next_ack_calls, 0);
+        assert_eq!(next_ack_probes, 0);
+        let accepted_next_trigger_delta = usize::from(matches!(
+            next_recheck,
+            super::R2oSavedAddressRecheck::NotRequired
+                | super::R2oSavedAddressRecheck::Accepted
+                | super::R2oSavedAddressRecheck::Unmeasured
+        ));
+        let adapter_target = DiscoveryTarget {
+            host: "adapter-recheck.example".into(),
+            endpoint: "192.0.2.42:443".into(),
+            ..recheck_target.clone()
+        };
+        let adapter_cache = std::sync::Mutex::new(super::R2oDeadAddressCache::default());
+        let adapter_retry = adapter_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .step(&adapter_target, recheck_start)
+            .unwrap();
+        let mut adapter_silent_probes = 0;
+        assert_eq!(
+            super::r2o_saved_address_recheck(
+                &adapter_cache,
+                &adapter_target,
+                recheck_start + adapter_retry,
+                &mut adapter_silent_probes,
+                || Ok(false),
+            ),
+            super::R2oSavedAddressRecheck::Silent
+        );
+        assert_eq!(adapter_silent_probes, 3);
+        let mut adapter_accepted_calls = 0;
+        let mut adapter_accepted_probes = 0;
+        assert_eq!(
+            super::r2o_saved_address_recheck(
+                &adapter_cache,
+                &adapter_target,
+                recheck_start + adapter_retry,
+                &mut adapter_accepted_probes,
+                || {
+                    adapter_accepted_calls += 1;
+                    Ok(adapter_accepted_calls == 2)
+                },
+            ),
+            super::R2oSavedAddressRecheck::Accepted
+        );
+        assert_eq!(adapter_accepted_probes, 2);
+        let error_target = DiscoveryTarget {
+            host: "error-recheck.example".into(),
+            endpoint: "192.0.2.43:443".into(),
+            ..recheck_target.clone()
+        };
+        let error_cache = std::sync::Mutex::new(super::R2oDeadAddressCache::default());
+        let error_retry = error_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .step(&error_target, recheck_start)
+            .unwrap();
+        let mut failed_probes = 0;
+        assert_eq!(
+            super::r2o_saved_address_recheck(
+                &error_cache,
+                &error_target,
+                recheck_start + error_retry,
+                &mut failed_probes,
+                || Err(super::R2oSavedAddressAckError::Failed),
+            ),
+            super::R2oSavedAddressRecheck::Unmeasured
+        );
+        assert_eq!(failed_probes, 1);
+        let mut unsupported_probes = 0;
+        assert_eq!(
+            super::r2o_saved_address_recheck(
+                &error_cache,
+                &error_target,
+                recheck_start + error_retry,
+                &mut unsupported_probes,
+                || Err(super::R2oSavedAddressAckError::Unsupported),
+            ),
+            super::R2oSavedAddressRecheck::Unmeasured
+        );
+        assert_eq!(unsupported_probes, 0);
+        let mut stopped_probes = 0;
+        assert_eq!(
+            super::r2o_saved_address_recheck(
+                &error_cache,
+                &error_target,
+                recheck_start + error_retry,
+                &mut stopped_probes,
+                || Err(super::R2oSavedAddressAckError::NotAttempted),
+            ),
+            super::R2oSavedAddressRecheck::Unmeasured
+        );
+        assert_eq!(stopped_probes, 0);
+        let ack_adapter_output = format!(
+            "saved_ack_silent probes={} result=Silent\nsaved_ack_accepted probes={} result=Accepted\nsaved_ack_failed probes={} result=Unmeasured\nsaved_ack_unsupported probes={} result=Unmeasured\nsaved_ack_stopped probes={} result=Unmeasured\n",
+            adapter_silent_probes,
+            adapter_accepted_probes,
+            failed_probes,
+            unsupported_probes,
+            stopped_probes,
+        );
+        let recheck_output = format!(
+            "saved_recheck_silent probes={} trigger_delta=0 retry_30m={}\nsaved_recheck_accepted probes={} trigger_delta={}\nsaved_recheck_cleared next_ack_delta={} next_trigger_delta={}\n",
+            silent_probes,
+            u8::from(silent_retry == std::time::Duration::from_secs(1800)),
+            accepted_probes,
+            accepted_trigger_delta,
+            next_ack_calls,
+            accepted_next_trigger_delta,
+        );
         if let Ok(path) = std::env::var("R2O_SCHED_DEAD_ADDRESS_DIFF_OUTPUT") {
-            std::fs::write(path, output).unwrap();
+            std::fs::write(
+                path,
+                format!("{output}{recheck_output}{ack_adapter_output}"),
+            )
+            .unwrap();
         }
     }
 
