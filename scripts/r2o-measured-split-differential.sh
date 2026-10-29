@@ -21,6 +21,20 @@ R2O_MEASURED_SPLIT_DIFF_OUTPUT="$tmp/rust.out" \
 diff -u "$tmp/c.out" "$tmp/rust.out"
 printf 'C/Rust measured PREFIX/WHOLE_PACKET split plans match d2o %s.\n' "$expected_donor_sha"
 
+clang-18 -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+    -I"$donor/detect/include" -I"$donor/core/include" \
+    -I"$donor/datapath/include" \
+    "$root/crates/r2o-controller/tests/d2o_bridge_split_gate_differential.c" \
+    "$donor/detect/bridge.c" "$donor/core/hello.c" \
+    -Wl,--gc-sections -o "$tmp/bridge-split-gate"
+"$tmp/bridge-split-gate" >"$tmp/bridge-c.out"
+cd "$root"
+R2O_DISCOVERY_SPLIT_BRIDGE_DIFF_OUTPUT="$tmp/bridge-rust.out" \
+    cargo +1.98.0 test --locked --offline -p r2o-controller \
+    --bin r2o-controller discovery_bridge_rejects_socket_only_split_results
+diff -u "$tmp/bridge-c.out" "$tmp/bridge-rust.out"
+printf 'C/Rust bridge raw-split gate matches d2o %s.\n' "$expected_donor_sha"
+
 make -s -C "$donor/detect" test_bridge CC=clang-18
 "$donor/detect/test_bridge"
 cargo +1.98.0 test --locked -p r2o-controller --bin r2o-controller \

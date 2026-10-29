@@ -688,8 +688,24 @@ pub(crate) fn probe_trigger(
     gap: Duration,
     timeout: Duration,
     mark: Option<u32>,
-    _cancel: Option<&AtomicBool>,
+    no_raw: bool,
+    client_tcp_has_timestamps: Option<bool>,
+    cancel: Option<&AtomicBool>,
 ) -> Result<ProbeOutcome, ProbeError> {
+    #[cfg(target_os = "linux")]
+    if raw_split_enabled(cuts, no_raw, true) {
+        return crate::raw_probe::probe_tcp_split(
+            target,
+            trigger,
+            cuts,
+            gap,
+            timeout,
+            mark,
+            client_tcp_has_timestamps,
+            cancel,
+        );
+    }
+
     let (socket, _) = dial_probe_target(target, PROBE_CONNECT_TIMEOUT, mark)?;
     let fd = socket.as_raw_fd();
     for span in split_offsets(cuts, trigger.payload.len(), 8) {
@@ -734,6 +750,9 @@ pub(crate) fn probe_trigger(
             return Err(ProbeError::Transport(format!("write: {error}")));
         }
         if span.to < trigger.payload.len() {
+            if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+                return Err(ProbeError::Local("context canceled".into()));
+            }
             if !gap.is_zero() {
                 std::thread::sleep(gap);
             }
@@ -771,6 +790,10 @@ pub(crate) fn probe_trigger(
             ProbeOutcome::Unproven
         },
     )
+}
+
+fn raw_split_enabled(cuts: &[usize], no_raw: bool, raw_supported: bool) -> bool {
+    !cuts.is_empty() && !no_raw && raw_supported
 }
 
 /// Подтвердить, что обычный байт данных TCP дошёл до стека TCP узла.
@@ -1265,5 +1288,60 @@ mod x509_tests {
             https_certificate_name_matches(&der, "example.test"),
             Some(false)
         );
+    }
+}
+
+#[cfg(test)]
+mod tcp_split_transport_tests {
+    use super::{probe_trigger, raw_split_enabled};
+    use crate::classify::{Accept, ProbeError, ProbeTarget, Trigger};
+    use std::io::Read;
+    use std::net::TcpListener;
+    use std::sync::atomic::AtomicBool;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn split_probes_use_raw_packets_only_when_the_donor_executor_is_enabled() {
+        assert!(raw_split_enabled(&[1], false, true));
+        assert!(!raw_split_enabled(&[], false, true));
+        assert!(!raw_split_enabled(&[1], true, true));
+        assert!(!raw_split_enabled(&[1], false, false));
+    }
+
+    #[test]
+    fn socket_split_stops_before_the_next_segment_when_cancelled() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut received = Vec::new();
+            stream.read_to_end(&mut received).unwrap();
+            received
+        });
+        let target = ProbeTarget {
+            host: "127.0.0.1".into(),
+            port,
+        };
+        let trigger = Trigger {
+            name: "fixture".into(),
+            payload: b"ABCD".to_vec(),
+            accept: Accept::Any,
+        };
+        let cancelled = AtomicBool::new(true);
+        let result = probe_trigger(
+            &target,
+            &trigger,
+            &[2],
+            Duration::from_millis(1),
+            Duration::from_millis(100),
+            Some(0),
+            true,
+            None,
+            Some(&cancelled),
+        );
+
+        assert!(matches!(result, Err(ProbeError::Local(error)) if error == "context canceled"));
+        assert_eq!(server.join().unwrap(), b"AB");
     }
 }

@@ -31,6 +31,7 @@ static RAW_SELFTESTS: OnceLock<Mutex<RawSelftestState>> = OnceLock::new();
 static HOST_TCP_TIMESTAMPS: OnceLock<bool> = OnceLock::new();
 thread_local! {
     static RST_RULE_FAILURES: Cell<u64> = const { Cell::new(0) };
+    static RAW_DIALS: Cell<u64> = const { Cell::new(0) };
 }
 static RST_COMMENT_SUPPORTED: AtomicBool = AtomicBool::new(true);
 static RST_STALE_RULE_SWEEP: Once = Once::new();
@@ -52,6 +53,10 @@ impl Default for RawSelftestState {
 
 pub(crate) fn rst_rule_failure_count() -> u64 {
     RST_RULE_FAILURES.with(Cell::get)
+}
+
+pub(crate) fn raw_dial_count() -> u64 {
+    RAW_DIALS.with(Cell::get)
 }
 
 /// Проверить, может ли текущий процесс открыть raw-сокет отправки IPv4.
@@ -230,7 +235,16 @@ pub fn sweep_poisons(
                 break;
             }
             result.probes += 1;
-            match raw_probe_once(remote, trigger, &poison, decoy, options) {
+            match raw_probe_once(
+                remote,
+                trigger,
+                &poison,
+                decoy,
+                options.timeout,
+                options.mark,
+                raw_offer_timestamps(options.client_tcp_has_timestamps),
+                options.cancel.as_deref(),
+            ) {
                 Ok(true) => {
                     note_raw_probe(family, false);
                     observation.pass += 1;
@@ -346,7 +360,16 @@ pub fn sweep_poisons(
                 break;
             }
             result.probes += 1;
-            match raw_probe_once(remote, trigger, &poison, decoy, options) {
+            match raw_probe_once(
+                remote,
+                trigger,
+                &poison,
+                decoy,
+                options.timeout,
+                options.mark,
+                raw_offer_timestamps(options.client_tcp_has_timestamps),
+                options.cancel.as_deref(),
+            ) {
                 Ok(true) => {
                     note_raw_probe(family, false);
                     observation.pass += 1;
@@ -453,7 +476,16 @@ pub fn sweep_poisons(
                 break;
             }
             result.probes += 1;
-            match raw_probe_once(remote, trigger, poison, decoy, options) {
+            match raw_probe_once(
+                remote,
+                trigger,
+                poison,
+                decoy,
+                options.timeout,
+                options.mark,
+                raw_offer_timestamps(options.client_tcp_has_timestamps),
+                options.cancel.as_deref(),
+            ) {
                 Ok(true) => {
                     note_raw_probe(family, false);
                     observation.pass += 1;
@@ -970,21 +1002,52 @@ fn make_poison_hit(
     }))
 }
 
+pub(crate) fn probe_tcp_split(
+    target: &ProbeTarget,
+    trigger: &Trigger,
+    cuts: &[usize],
+    gap: Duration,
+    timeout: Duration,
+    mark: Option<u32>,
+    client_tcp_has_timestamps: Option<bool>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<crate::classify::ProbeOutcome, ProbeError> {
+    if cuts.len() != 1 || cuts[0] == 0 || cuts[0] >= trigger.payload.len() {
+        return Err(ProbeError::Local("split runtime: invalid cut".into()));
+    }
+    let remote = resolve_target(target)?;
+    let mut split = Poison::default();
+    split.name = "tcp-split".into();
+    split.split_pos = cuts[0] as i32;
+    split.gap_ms = gap.as_millis().min(i32::MAX as u128) as i32;
+    match raw_probe_once(
+        remote,
+        trigger,
+        &split,
+        None,
+        timeout,
+        mark,
+        raw_offer_timestamps(client_tcp_has_timestamps),
+        cancel,
+    ) {
+        Ok(true) => Ok(crate::classify::ProbeOutcome::Accepted),
+        Ok(false) => Ok(crate::classify::ProbeOutcome::Rejected),
+        Err(error) => Err(error),
+    }
+}
+
 fn raw_probe_once(
     remote: SocketAddr,
     trigger: &Trigger,
     poison: &Poison,
     decoy: Option<&[u8]>,
-    options: &ClassifyOptions,
+    timeout: Duration,
+    mark: Option<u32>,
+    offer_ts: bool,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<bool, ProbeError> {
-    let mut connection = RawConn::connect(
-        remote,
-        options.timeout,
-        effective_mark(options.mark),
-        options.cancel.as_deref(),
-        raw_offer_timestamps(options.client_tcp_has_timestamps),
-    )?
-    .ok_or_else(|| ProbeError::Transport("classify: SYN-ACK не пришёл".into()))?;
+    let mut connection = RawConn::connect(remote, timeout, effective_mark(mark), cancel, offer_ts)?
+        .ok_or_else(|| ProbeError::Transport("classify: SYN-ACK не пришёл".into()))?;
 
     if poison.syn_data {
         let packet = build_control_packet(
@@ -1025,13 +1088,13 @@ fn raw_probe_once(
                 fate: OriginalFate::Drop,
             } => {
                 for packet in packets {
-                    if is_cancelled(options) {
+                    if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
                         return Err(ProbeError::Local("context canceled".into()));
                     }
                     if packet.delay_us != 0 {
                         cancellable_sleep(
                             Duration::from_micros(u64::from(packet.delay_us)),
-                            options.cancel.as_deref(),
+                            cancel,
                         )?;
                     }
                     connection.send_ip_packet(&packet.packet)?;
@@ -1052,12 +1115,11 @@ fn raw_probe_once(
             && !poison.seqovl_exact
             && !poison.fake_between
         {
-            cancellable_sleep(Duration::from_millis(12), options.cancel.as_deref())?;
+            cancellable_sleep(Duration::from_millis(12), cancel)?;
         }
     }
 
-    let Some(response) = connection.read_payload(options.timeout, options.cancel.as_deref())?
-    else {
+    let Some(response) = connection.read_payload(timeout, cancel)? else {
         return Ok(false);
     };
     Ok(trigger_accepts(trigger.accept, &response))
@@ -1718,6 +1780,7 @@ impl RawConn {
             }
         }
         let source_port = next_source_port();
+        RAW_DIALS.with(|count| count.set(count.get().saturating_add(1)));
         let rst_guard = RstGuard::install(source_port, remote);
         let mut connection = Self {
             sender,

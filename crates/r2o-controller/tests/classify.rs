@@ -897,6 +897,7 @@ fn live_neutral_ack_confirms_delivery_even_when_control_is_silent() {
         write_gap: Duration::from_millis(1),
         long_gap: Duration::from_millis(2),
         allow_loopback: true,
+        no_raw: true,
         mark: Some(0),
         ..ClassifyOptions::default()
     };

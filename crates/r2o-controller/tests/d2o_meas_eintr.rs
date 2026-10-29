@@ -123,6 +123,8 @@ fn run_fixture(fixture_text: &str) -> &'static str {
         gap: Duration::ZERO,
         timeout: Duration::from_millis(fixture["timeout_ms"]),
         mark: Some(0),
+        no_raw: false,
+        client_tcp_has_timestamps: None,
         cancel: None,
     });
     server.join().unwrap();

@@ -580,6 +580,8 @@ pub struct ProbeRequest<'a> {
     pub gap: Duration,
     pub timeout: Duration,
     pub mark: Option<u32>,
+    pub no_raw: bool,
+    pub client_tcp_has_timestamps: Option<bool>,
     pub cancel: Option<&'a AtomicBool>,
 }
 
@@ -660,6 +662,8 @@ impl ProbeBackend for TcpProbeBackend {
             request.gap,
             request.timeout,
             request.mark,
+            request.no_raw,
+            request.client_tcp_has_timestamps,
             request.cancel,
         )
     }
@@ -848,8 +852,10 @@ pub struct ClassifyResult {
     pub hit: Option<PoisonHit>,
     pub raw_usable: bool,
     pub rst_rule_failures: usize,
+    pub raw_dials: u64,
     pub trace: Vec<Observation>,
     rst_rule_failure_base: u64,
+    raw_dial_base: u64,
 }
 
 impl ClassifyResult {
@@ -870,8 +876,10 @@ impl ClassifyResult {
             hit: None,
             raw_usable: false,
             rst_rule_failures: 0,
+            raw_dials: 0,
             trace: Vec::new(),
             rst_rule_failure_base: crate::raw_probe::rst_rule_failure_count(),
+            raw_dial_base: current_raw_dial_count(),
         }
     }
 }
@@ -1004,6 +1012,8 @@ fn measure<B: ProbeBackend>(
             gap: spec.gap,
             timeout: options.timeout,
             mark: options.mark,
+            no_raw: options.no_raw,
+            client_tcp_has_timestamps: options.client_tcp_has_timestamps,
             cancel: options.cancel.as_deref(),
         }) {
             Ok(ProbeOutcome::Accepted) => {
@@ -1559,9 +1569,21 @@ fn strategy_for(pos: usize) -> String {
 
 fn finish(result: &mut ClassifyResult, options: &ClassifyOptions, start: Instant) {
     result.stopped = stopped(options);
+    result.raw_dials = current_raw_dial_count().saturating_sub(result.raw_dial_base);
     result.duration = start.elapsed();
     result.rst_rule_failures = usize::try_from(
         crate::raw_probe::rst_rule_failure_count().saturating_sub(result.rst_rule_failure_base),
     )
     .unwrap_or(usize::MAX);
+}
+
+fn current_raw_dial_count() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        crate::raw_probe::raw_dial_count()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        0
+    }
 }

@@ -5163,6 +5163,43 @@ fn r2o_discovery_search_owned(
     measured_arm || raw_usable && rst_rule_failures == 0
 }
 
+fn r2o_discovery_split_needs_raw(verdict: Verdict) -> bool {
+    matches!(verdict, Verdict::Prefix | Verdict::WholePacket)
+}
+
+fn r2o_discovery_split_raw_executed(verdict: Verdict, raw_dials: u64) -> bool {
+    r2o_discovery_split_needs_raw(verdict) && raw_dials > 0
+}
+
+fn r2o_discovery_split_gate(
+    verdict: Verdict,
+    split_pos: Option<usize>,
+    raw_dials: u64,
+) -> (Verdict, Option<usize>, bool) {
+    let socket_only = r2o_discovery_split_needs_raw(verdict)
+        && !r2o_discovery_split_raw_executed(verdict, raw_dials);
+    if socket_only {
+        (Verdict::Flaky, None, true)
+    } else {
+        (verdict, split_pos, false)
+    }
+}
+
+fn r2o_discovery_bridge_search_owned(
+    socket_only_split: bool,
+    raw_usable: bool,
+    raw_split_executed: bool,
+    rst_rule_failures: usize,
+    measured_arm: bool,
+) -> bool {
+    socket_only_split
+        || r2o_discovery_search_owned(
+            raw_usable || raw_split_executed,
+            rst_rule_failures,
+            measured_arm,
+        )
+}
+
 #[cfg(unix)]
 fn r2o_discovery_measured_fallback_allowed(
     measured_arm: bool,
@@ -13680,7 +13717,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
         }
     };
     let white = r2o_discovery_white_trigger(white_name);
-    let (result, timed_out) =
+    let (mut result, timed_out) =
         r2o_run_with_deadline(cancel, R2O_DISCOVERY_TASK_LIFETIME, |task_cancel| {
             let mut options = r2o_discovery_classify_options(
                 mark,
@@ -13698,6 +13735,19 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                 progress,
             )
         });
+    let raw_split_executed = r2o_discovery_split_raw_executed(result.verdict, result.raw_dials);
+    let (verdict, split_pos, socket_only_split) =
+        r2o_discovery_split_gate(result.verdict, result.split_pos, result.raw_dials);
+    result.verdict = verdict;
+    result.split_pos = split_pos;
+    if socket_only_split {
+        result.verdict = Verdict::Flaky;
+        result.split_pos = None;
+        result.strategy = None;
+        result.reason =
+            "разрез проверен только записями сокета — общий пакетный исполнитель не участвовал"
+                .into();
+    }
     let retry_after = r2o_discovery_retry_after(timed_out, result.verdict, &result.reason);
     let client_alpn_handshake_blocked = !timed_out
         && matches!(
@@ -13706,8 +13756,13 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
         );
     let probes = result.probes;
     let measured_arm = !timed_out && result.hit.is_some();
-    let search_owned =
-        r2o_discovery_search_owned(result.raw_usable, result.rst_rule_failures, measured_arm);
+    let search_owned = r2o_discovery_bridge_search_owned(
+        socket_only_split,
+        result.raw_usable,
+        raw_split_executed,
+        result.rst_rule_failures,
+        measured_arm,
+    );
     let plan_text = if timed_out {
         None
     } else {
@@ -24530,6 +24585,71 @@ mod tests {
             super::Verdict::Opaque,
             false,
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_bridge_rejects_socket_only_split_results() {
+        use std::fmt::Write as _;
+
+        assert!(super::r2o_discovery_split_needs_raw(super::Verdict::Prefix));
+        assert!(super::r2o_discovery_split_needs_raw(
+            super::Verdict::WholePacket
+        ));
+        assert!(!super::r2o_discovery_split_needs_raw(
+            super::Verdict::Opaque
+        ));
+        assert!(super::r2o_discovery_split_raw_executed(
+            super::Verdict::Prefix,
+            1
+        ));
+        assert!(!super::r2o_discovery_split_raw_executed(
+            super::Verdict::Prefix,
+            0
+        ));
+        assert!(!super::r2o_discovery_split_raw_executed(
+            super::Verdict::WholePacket,
+            0
+        ));
+        assert!(!super::r2o_discovery_split_raw_executed(
+            super::Verdict::Opaque,
+            1
+        ));
+
+        let (socket_result, socket_pos, socket_only) =
+            super::r2o_discovery_split_gate(super::Verdict::Prefix, Some(5), 0);
+        let (raw_result, raw_pos, raw_socket_only) =
+            super::r2o_discovery_split_gate(super::Verdict::Prefix, Some(5), 1);
+        let socket_owned =
+            super::r2o_discovery_bridge_search_owned(socket_only, false, false, 0, false);
+        let raw_owned =
+            super::r2o_discovery_bridge_search_owned(raw_socket_only, false, true, 0, false);
+        assert_eq!(socket_result, super::Verdict::Flaky);
+        assert_eq!(socket_pos, None);
+        assert_eq!(raw_result, super::Verdict::Prefix);
+        assert_eq!(raw_pos, Some(5));
+        assert!(socket_owned && raw_owned);
+
+        if let Ok(path) = std::env::var("R2O_DISCOVERY_SPLIT_BRIDGE_DIFF_OUTPUT") {
+            let mut output = String::new();
+            writeln!(
+                output,
+                "socket-only={} split={} owns={}",
+                socket_result.as_str(),
+                socket_pos.unwrap_or(0),
+                u8::from(socket_owned)
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "raw-split={} split={} owns={}",
+                raw_result.as_str(),
+                raw_pos.unwrap_or(0),
+                u8::from(raw_owned)
+            )
+            .unwrap();
+            std::fs::write(path, output).unwrap();
+        }
     }
 
     #[cfg(unix)]

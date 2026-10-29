@@ -63,6 +63,8 @@ fn d2o_send_timeout_is_an_experiment_error_not_a_negative_probe() {
         gap: Duration::ZERO,
         timeout: Duration::from_millis(fixture["response_timeout_ms"]),
         mark: Some(fixture["mark"] as u32),
+        no_raw: false,
+        client_tcp_has_timestamps: None,
         cancel: None,
     });
     let result_name = match &result {
