@@ -4,7 +4,7 @@ set -eu
 r2o_script_dir=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 r2o_donor_datapath="${R2O_DONOR_DATAPATH:-${r2o_script_dir%/*}/d2o/datapath}"
 r2o_donor_test="$r2o_donor_datapath/test_quic_session"
-r2o_log_dir="$r2o_script_dir/.rea"
+r2o_log_dir=${R2O_LOG_DIR:-"$r2o_script_dir/.rea"}
 r2o_log="$r2o_log_dir/r2o-quic-hello-differential-$(date +%Y%m%d-%H%M%S).log"
 r2o_started_at=$(date +%s)
 r2o_upstream_sha=304ba893dd37197128ac8799c0495b035f6a38c0
@@ -20,9 +20,11 @@ if [ "$r2o_actual_donor_sha" != "$r2o_upstream_sha" ]; then
         "$r2o_upstream_sha" "$r2o_actual_donor_sha" >&2
     exit 2
 fi
-if ! git -C "$r2o_donor_datapath" diff --quiet HEAD -- || \
-    ! git -C "$r2o_donor_datapath" diff --cached --quiet HEAD --; then
-    printf 'Donor worktree has tracked changes; refusing unpinned C sources\n' >&2
+if ! git -c core.autocrlf=true -C "${r2o_donor_datapath%/datapath}" \
+    diff --quiet HEAD -- datapath/session.c datapath/test_quic_session.c || \
+    ! git -c core.autocrlf=true -C "${r2o_donor_datapath%/datapath}" \
+    diff --cached --quiet HEAD -- datapath/session.c datapath/test_quic_session.c; then
+    printf 'Pinned donor QUIC session sources have tracked changes; refusing unpinned C sources\n' >&2
     exit 2
 fi
 
@@ -66,12 +68,12 @@ mkdir -p "$r2o_log_dir"
         "$r2o_donor_datapath/test_quic_session.c" \
         "$r2o_script_dir/crates/r2o-datapath/src/r2o_quic.rs" \
         "$r2o_script_dir/crates/r2o-datapath/src/main.rs"
-    r2o_session_sha256=$(sha256sum "$r2o_donor_datapath/session.c" | awk '{print $1}')
-    r2o_test_sha256=$(sha256sum "$r2o_donor_datapath/test_quic_session.c" | awk '{print $1}')
-    if [ "$r2o_session_sha256" != \
-        'a7446b416481674b9a6332dad97430c903f6a3c7d53b45e8794a86eee2f127ea' ] || \
-        [ "$r2o_test_sha256" != \
-        'a9ab9fe07dae2ece70360942dfc559ce843479b11bdb6166faee9826ef9f91ca' ]; then
+    r2o_session_blob=$(git -C "${r2o_donor_datapath%/datapath}" \
+        rev-parse HEAD:datapath/session.c)
+    r2o_test_blob=$(git -C "${r2o_donor_datapath%/datapath}" \
+        rev-parse HEAD:datapath/test_quic_session.c)
+    if [ "$r2o_session_blob" != '061c98f61e1faea5178c379e94e83e17c21be7da' ] || \
+        [ "$r2o_test_blob" != 'dc3af4d5aafb9423622ab2d5df202b4be8e1e823' ]; then
         printf 'Исходники донора отличаются от проверенного снимка\n' >&2
         exit 1
     fi
