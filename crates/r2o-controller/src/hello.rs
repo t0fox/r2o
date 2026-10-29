@@ -131,6 +131,69 @@ pub fn sni_bounds(bytes: &[u8]) -> Option<(usize, usize)> {
     Some((layout.name, layout.name_len))
 }
 
+/// Клонировать полный TLS ClientHello, заменив только значение SNI и обновив длины.
+pub(crate) fn rename_sni(bytes: &[u8], name: &[u8]) -> Option<Vec<u8>> {
+    if name.is_empty() || name.contains(&0) || bytes.len() > TEMPLATE_MAX {
+        return None;
+    }
+    let layout = locate_sni_for_record(bytes)?;
+    let new_len = bytes
+        .len()
+        .checked_sub(layout.name_len)?
+        .checked_add(name.len())?;
+    if new_len > TEMPLATE_MAX {
+        return None;
+    }
+
+    let mut renamed = Vec::with_capacity(new_len);
+    renamed.extend_from_slice(&bytes[..layout.name]);
+    renamed.extend_from_slice(name);
+    renamed.extend_from_slice(&bytes[layout.name + layout.name_len..]);
+
+    let delta = name.len() as isize - layout.name_len as isize;
+    for (offset, width) in [
+        (layout.name_len_field, 2),
+        (layout.list_len_field, 2),
+        (layout.extension_len_field, 2),
+        (layout.extensions_len_field, 2),
+        (layout.handshake_len_field, 3),
+        (layout.record_len_field, 2),
+    ] {
+        let current = match width {
+            2 => u16_at(bytes, offset, bytes.len())?.0,
+            3 => u24_at(bytes, offset, bytes.len())?.0,
+            _ => return None,
+        };
+        let updated = current.checked_add_signed(delta)?;
+        write_len(&mut renamed, offset, width, updated)?;
+    }
+
+    let renamed_layout = locate_sni_for_record(&renamed)?;
+    (renamed.len() == new_len
+        && renamed.get(renamed_layout.name..renamed_layout.name + renamed_layout.name_len)
+            == Some(name))
+    .then_some(renamed)
+}
+
+fn locate_sni_for_record(bytes: &[u8]) -> Option<SniLayout> {
+    let (handshake_len, _) = u24_at(bytes, 6, bytes.len())?;
+    let handshake_end = 9usize.checked_add(handshake_len)?;
+    if handshake_end > bytes.len() {
+        return None;
+    }
+    if handshake_end == bytes.len() {
+        return locate_sni(bytes);
+    }
+
+    // D2O wraps trigger[5..] in a record whose length covers the entire
+    // trigger body, while its ClientHello parser stops at the handshake length.
+    // Parse the same handshake prefix and keep any following record bytes in
+    // the clone.
+    let mut handshake = bytes[..handshake_end].to_vec();
+    write_len(&mut handshake, 3, 2, handshake_end.checked_sub(5)?)?;
+    locate_sni(&handshake)
+}
+
 fn decode_profile(profile: &str) -> Option<Vec<u8>> {
     let mut hex = Vec::new();
     for line in profile.lines() {

@@ -13727,6 +13727,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                 task_cancel,
                 seed_whole,
             );
+            options.trigger_snapped = client_hello.is_some();
             options.control = Some(control);
             options.white = white;
             classify_run_with_progress(

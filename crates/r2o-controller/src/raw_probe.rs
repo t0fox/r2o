@@ -85,6 +85,14 @@ pub fn sweep_poisons(
     let remote = resolve_target(target)?;
     let family = if remote.is_ipv4() { 4 } else { 6 };
     let offer_ts = raw_offer_timestamps(options.client_tcp_has_timestamps);
+    let (selected_decoy, cloned_decoy) = select_bridge_decoy(
+        &trigger.payload,
+        options
+            .control
+            .as_ref()
+            .map(|control| control.payload.as_slice()),
+        options.trigger_snapped,
+    );
     let mut props = DpiProps::default();
     let mut answered = Vec::new();
     let mut raw_ok = 0usize;
@@ -207,20 +215,21 @@ pub fn sweep_poisons(
                 decoy = Some(white.payload.as_slice());
             }
             _ if poison.decoy_hello => {
-                let Some(control) = options
-                    .control
-                    .as_ref()
-                    .filter(|control| control.payload.len() >= 2)
-                else {
+                let Some(selected_decoy) = selected_decoy.as_deref() else {
                     continue;
                 };
-                decoy = Some(control.payload.as_slice());
+                decoy = Some(selected_decoy);
             }
             _ => {}
         }
 
         let mut observation = Observation {
-            probe: property_probe_label(property.label, property.set, &poison),
+            probe: property_probe_label(
+                property.label,
+                property.set,
+                &poison,
+                cloned_decoy && !matches!(property.set, Property::WhiteTimestamp),
+            ),
             cuts: Vec::new(),
             delay: Duration::from_millis(poison.gap_ms.max(0) as u64),
             pass: 0,
@@ -325,10 +334,7 @@ pub fn sweep_poisons(
         }
     }
 
-    for poison in compose_from_props(
-        &props,
-        options.control.as_ref().map(|c| c.payload.as_slice()),
-    ) {
+    for poison in compose_from_props(&props, selected_decoy.as_deref()) {
         if is_cancelled(options) {
             result.stopped = true;
             break;
@@ -338,12 +344,7 @@ pub fn sweep_poisons(
         }
         let decoy = poison
             .decoy_hello
-            .then(|| {
-                options
-                    .control
-                    .as_ref()
-                    .map(|control| control.payload.as_slice())
-            })
+            .then_some(selected_decoy.as_deref())
             .flatten();
         if poison.decoy_hello && decoy.is_none() {
             continue;
@@ -456,14 +457,10 @@ pub fn sweep_poisons(
             continue;
         }
         let decoy = if poison.decoy_hello {
-            let Some(control) = options
-                .control
-                .as_ref()
-                .filter(|control| control.payload.len() >= 2)
-            else {
+            let Some(selected_decoy) = selected_decoy.as_deref() else {
                 continue;
             };
-            Some(control.payload.as_slice())
+            Some(selected_decoy)
         } else {
             None
         };
@@ -566,6 +563,35 @@ pub fn sweep_poisons(
         }
     }
     Ok(None)
+}
+
+fn select_bridge_decoy(
+    trigger: &[u8],
+    control: Option<&[u8]>,
+    trigger_snapped: bool,
+) -> (Option<Vec<u8>>, bool) {
+    let fallback = control
+        .filter(|control| control.len() >= 2)
+        .map(<[u8]>::to_vec);
+    if !trigger_snapped || trigger.len() <= 5 || trigger[0] != 0x16 {
+        return (fallback, false);
+    }
+    let Some(control) = control.filter(|control| control.len() >= 2) else {
+        return (fallback, false);
+    };
+    let Some((offset, length)) = crate::hello::sni_bounds(control) else {
+        return (fallback, false);
+    };
+    let Some(name) = control.get(offset..offset.saturating_add(length)) else {
+        return (fallback, false);
+    };
+    if name.is_empty() || name.len() >= 256 || name.contains(&0) {
+        return (fallback, false);
+    }
+    let Some(clone) = crate::hello::rename_sni(trigger, name) else {
+        return (fallback, false);
+    };
+    (Some(clone), true)
 }
 
 fn add_observation(result: &mut ClassifyResult, observation: Observation) {
@@ -924,11 +950,21 @@ fn property_probe_poison(
     Some(poison)
 }
 
-fn property_probe_label(label: &str, property: Property, poison: &Poison) -> String {
-    if matches!(property, Property::WhiteTimestamp) && !poison.tcp_ts {
+fn property_probe_label(
+    label: &str,
+    property: Property,
+    poison: &Poison,
+    cloned_decoy: bool,
+) -> String {
+    let label = if matches!(property, Property::WhiteTimestamp) && !poison.tcp_ts {
         "свойство:ECH-приветствие под битой суммой".into()
     } else {
         format!("свойство:{label}")
+    };
+    if cloned_decoy && poison.decoy_hello {
+        format!("{label} (приманка — клон клиента)")
+    } else {
+        label
     }
 }
 
@@ -2162,6 +2198,119 @@ mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     #[test]
+    fn snapped_client_hello_is_the_decoy_and_control_sni_is_preserved() {
+        fn build_variant(variant: &str, control: bool) -> Vec<u8> {
+            match variant {
+                "none" => Vec::new(),
+                "short" => vec![0x16, 0x03],
+                "sni_255" | "sni_256" => {
+                    let length = if variant == "sni_255" { 255 } else { 256 };
+                    let name = "a".repeat(length);
+                    crate::hello::legacy_client_hello(&name).unwrap()
+                }
+                _ => {
+                    let mut hello = if control {
+                        crate::hello::legacy_client_hello("disk.rzd.ru").unwrap()
+                    } else {
+                        crate::hello::modern_client_hello("target.example").unwrap()
+                    };
+                    match variant {
+                        "truncated" => {
+                            hello.pop();
+                        }
+                        "padded" => {
+                            let record_len =
+                                usize::from(u16::from_be_bytes([hello[3], hello[4]])) + 4;
+                            hello.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+                            hello[3..5].copy_from_slice(&(record_len as u16).to_be_bytes());
+                        }
+                        "wrong_record_type" => hello[0] = 0x17,
+                        "without_sni" => {
+                            let (offset, _) = crate::hello::sni_bounds(&hello).unwrap();
+                            hello[offset - 3] = 1;
+                        }
+                        "nul_sni" => {
+                            let (offset, _) = crate::hello::sni_bounds(&hello).unwrap();
+                            hello[offset] = 0;
+                        }
+                        "valid" => {}
+                        other => panic!("unknown bridge-clone fixture variant {other}"),
+                    }
+                    hello
+                }
+            }
+        }
+
+        fn hex(bytes: &[u8]) -> String {
+            if bytes.is_empty() {
+                return "-".into();
+            }
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        }
+
+        let fixture = include_str!("../tests/fixtures/d2o_bridge_clone_decoy.tsv");
+        let mut rows = Vec::new();
+        for line in fixture
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            assert_eq!(fields.len(), 4, "invalid bridge clone fixture row: {line}");
+            let snapped = fields[1] == "1";
+            let trigger = build_variant(fields[2], false);
+            let control = build_variant(fields[3], true);
+            let (selected, cloned) = select_bridge_decoy(
+                &trigger,
+                (!control.is_empty()).then_some(control.as_slice()),
+                snapped,
+            );
+            let property = Poison {
+                decoy_hello: true,
+                ..Poison::default()
+            };
+            assert_eq!(
+                property_probe_label("parse-l7", Property::ParsesL7, &property, cloned)
+                    .ends_with(" (приманка — клон клиента)"),
+                cloned,
+                "the observation must identify when the captured client hello was cloned"
+            );
+            assert!(
+                !property_probe_label("checksum", Property::Checksum, &Poison::default(), true)
+                    .ends_with(" (приманка — клон клиента)")
+            );
+
+            match fields[0] {
+                "clone" => {
+                    assert!(cloned, "a captured ClientHello must be cloned");
+                    let selected = selected.as_deref().expect("cloned decoy");
+                    let (offset, length) = crate::hello::sni_bounds(selected).unwrap();
+                    assert_eq!(&selected[offset..offset + length], b"disk.rzd.ru");
+                    assert_eq!(&selected[..3], &trigger[..3]);
+                }
+                "trigger_padded" => assert!(
+                    cloned,
+                    "complete ClientHello records with trailing record bytes are cloneable"
+                ),
+                "control_sni_255" => assert!(cloned, "255-byte control SNI is accepted"),
+                "control_sni_256" => assert!(!cloned, "256-byte control SNI uses fallback"),
+                _ => assert!(!cloned, "{} must use the control fallback", fields[0]),
+            }
+            rows.push(format!(
+                "{}\t{}",
+                fields[0],
+                selected.as_deref().map_or_else(|| "-".into(), hex)
+            ));
+        }
+
+        assert!(rows.iter().any(|row| row.starts_with("clone\t")));
+        if let Ok(output_path) = std::env::var("R2O_BRIDGE_CLONE_DIFF_OUTPUT") {
+            std::fs::write(output_path, rows.join("\n") + "\n")
+                .expect("write Rust bridge clone differential output");
+        }
+        println!("{}", rows.join("\n"));
+    }
+
+    #[test]
     fn raw_syn_profile_matches_the_d2o_fixture() {
         let inputs = include_str!("../tests/fixtures/d2o/raw-syn-profile.tsv")
             .lines()
@@ -2283,7 +2432,7 @@ mod tests {
         let mut properties = DpiProps::default();
         let poison = property_probe_poison(&white, false, &properties)
             .expect("D2O keeps the white ECH composite without client timestamps");
-        let probe = property_probe_label(white.label, white.set, &poison);
+        let probe = property_probe_label(white.label, white.set, &poison, false);
 
         assert!(!poison.tcp_ts);
         assert!(poison.badsum);

@@ -776,6 +776,8 @@ pub struct ClassifyOptions {
     pub control: Option<Trigger>,
     pub white: Option<Trigger>,
     pub control_vouched: bool,
+    /// Снятый с клиентского потока профиль, а не созданный профиль-заготовка.
+    pub trigger_snapped: bool,
     /// TCP timestamp profile captured with the client trigger; `None` uses the local stack profile.
     pub client_tcp_has_timestamps: Option<bool>,
     /// `None` использует метку обхода r2o; `Some(0)` отключает маркировку.
@@ -814,6 +816,7 @@ impl Default for ClassifyOptions {
             control: None,
             white: None,
             control_vouched: false,
+            trigger_snapped: false,
             client_tcp_has_timestamps: None,
             mark: None,
             cancel: None,

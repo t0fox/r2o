@@ -1,0 +1,13 @@
+# case trigger_snapped trigger_variant control_variant
+clone 1 valid valid
+cold_start 0 valid valid
+trigger_padded 1 padded valid
+trigger_truncated 1 truncated valid
+trigger_wrong_record_type 1 wrong_record_type valid
+trigger_without_sni 1 without_sni valid
+control_short 1 valid short
+control_without_sni 1 valid without_sni
+control_nul_sni 1 valid nul_sni
+control_sni_255 1 valid sni_255
+control_sni_256 1 valid sni_256
+no_control 1 valid none
