@@ -4946,7 +4946,6 @@ fn r2o_run_discovery_candidate_trial_with_progress(
     let mut attempts = 0;
     let mut bare_retries = 0;
     let mut arm_retries = 0;
-    let wire_len = r2o_discovery_candidate_wire_len(target, client_hello, ech_config);
     let retry_budget_available = std::cell::RefCell::new(retry_budget_available);
     let (result, applied, _, evidence) = r2o_repeat_candidate_trials(
         max_retries,
@@ -4963,19 +4962,35 @@ fn r2o_run_discovery_candidate_trial_with_progress(
                         attempts += 1;
                         let dropped_before = dropped_events
                             .map_or(0, |counter| counter.load(Ordering::Relaxed) as u32);
-                        let trial = r2o_family_recovery_sibling_trial_with_ech_state(
+                        let trial_ech_config = r2o_discovery_refresh_ech_probe_config(
                             target,
-                            destination,
-                            &candidate,
-                            mark,
-                            commands,
                             ech_config,
-                            client_hello,
-                            allow_non_http_alpn,
-                            wire_len,
-                            packet_budget,
-                            encoding,
+                            mark,
+                            |origin, mark| r2o_controller::ech::resolve_ech_config(origin, mark),
                         );
+                        let trial = match trial_ech_config {
+                            Ok(trial_ech_config) => {
+                                let wire_len = r2o_discovery_candidate_wire_len(
+                                    target,
+                                    client_hello,
+                                    trial_ech_config.as_ref(),
+                                );
+                                r2o_family_recovery_sibling_trial_with_ech_state(
+                                    target,
+                                    destination,
+                                    &candidate,
+                                    mark,
+                                    commands,
+                                    trial_ech_config.as_ref(),
+                                    client_hello,
+                                    allow_non_http_alpn,
+                                    wire_len,
+                                    packet_budget,
+                                    encoding,
+                                )
+                            }
+                            Err(error) => (Err(error), false, false),
+                        };
                         if let Ok(fetch) = &trial.0
                             && r2o_controller::fetch::r2o_fetch_result_can_remember_resources(fetch)
                         {
@@ -9105,7 +9120,7 @@ impl DiscoveryWorker {
                 } else {
                     Vec::new()
                 };
-                let mut ech_witness_candidates = r2o_merge_ech_witness_candidates(
+                let ech_witness_candidates = r2o_merge_ech_witness_candidates(
                     &target.host,
                     &cached_witness_candidates,
                     &discovered_witness_candidates,
@@ -9114,26 +9129,33 @@ impl DiscoveryWorker {
                     let cache = runner_ech_challenges
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    cache.active_names(now)
+                    cache.active_names(now).into_iter().collect::<Vec<_>>()
                 };
-                ech_witness_candidates.retain(|witness| !challenged.contains(witness));
-                let known_ech_origin = candidate_catalog.as_ref().and_then(|catalog| {
-                    catalog
-                        .boxes
-                        .iter()
-                        .flat_map(|box_record| &box_record.bindings)
-                        .find(|binding| {
-                            binding.enabled
-                                && binding.level >= 3
-                                && binding.kind == "name"
-                                && binding.target == target.host
-                                && matches!(binding.transport, 0 | 6)
-                                && (binding.family == target.family
-                                    || binding.family == 0 && target.family == 4)
-                                && !binding.ech_origin.is_empty()
-                        })
-                        .map(|binding| binding.ech_origin.clone())
-                });
+                let ech_witness_candidates =
+                    r2o_controller::discovery::r2o_ech_witness_challenge_order(
+                        &ech_witness_candidates,
+                        &challenged,
+                    );
+                let known_ech_origin = candidate_catalog
+                    .as_ref()
+                    .and_then(|catalog| {
+                        catalog
+                            .boxes
+                            .iter()
+                            .flat_map(|box_record| &box_record.bindings)
+                            .find(|binding| {
+                                binding.enabled
+                                    && binding.level >= 3
+                                    && binding.kind == "name"
+                                    && binding.target == target.host
+                                    && matches!(binding.transport, 0 | 6)
+                                    && (binding.family == target.family
+                                        || binding.family == 0 && target.family == 4)
+                                    && !binding.ech_origin.is_empty()
+                            })
+                            .map(|binding| binding.ech_origin.clone())
+                    })
+                    .filter(|witness| !challenged.contains(witness));
                 let known_origin_config = known_ech_origin.as_deref().and_then(|witness| {
                     r2o_discovery_ech_witness_config(
                         &target,
@@ -9385,9 +9407,24 @@ impl DiscoveryWorker {
                                 own_tried
                                     .push(r2o_controller::r2o_fallback::tried_key(&candidate.text));
                             }
-                            let verified = !candidate_evidence.layered_rx_handled
+                            let candidate_verified = !candidate_evidence.layered_rx_handled
                                 && r2o_family_recovery_decision(&result, applied)
                                     == R2oFamilyRecoveryDecision::Verified;
+                            let cloudflare_challenge = result
+                                .as_ref()
+                                .is_ok_and(|fetch| fetch.cloudflare_challenge);
+                            let result_action = r2o_controller::discovery::own_first_result_action(
+                                r2o_discovery_trial_time_available(runner_started.elapsed()),
+                                candidate_verified,
+                                cloudflare_challenge,
+                            );
+                            if result_action
+                                == r2o_controller::discovery::OwnFirstResultAction::ContinueFullClassifier
+                            {
+                                break;
+                            }
+                            let verified = result_action
+                                == r2o_controller::discovery::OwnFirstResultAction::Accept;
                             let (application, mut last_result) =
                                 r2o_discovery_plan_result(&result, applied, verified);
                             if candidate_evidence.layered_rx_handled {
@@ -9434,9 +9471,8 @@ impl DiscoveryWorker {
                                     retry_after: None,
                                 };
                             }
-                            if result
-                                .as_ref()
-                                .is_ok_and(|fetch| fetch.cloudflare_challenge)
+                            if result_action
+                                == r2o_controller::discovery::OwnFirstResultAction::StopForChallenge
                             {
                                 return DiscoveryOutcome {
                                     target: target.clone(),
@@ -10034,11 +10070,11 @@ impl DiscoveryWorker {
                         })
                     },
                     |witness| {
-                        r2o_discovery_ech_witness_config(
-                            &target,
-                            witness,
-                            mark,
+                        r2o_discovery_resolve_ech_witness_cached(
                             &runner_ech_witness_resolutions,
+                            witness,
+                            &target.host,
+                            || r2o_controller::ech::resolve_ech_config(witness, mark),
                         )
                         .ok()
                         .flatten()
@@ -10327,11 +10363,11 @@ impl DiscoveryWorker {
                                 })
                             },
                             |witness| {
-                                r2o_discovery_ech_witness_config(
-                                    &target,
-                                    witness,
-                                    mark,
+                                r2o_discovery_resolve_ech_witness_cached(
                                     &runner_ech_witness_resolutions,
+                                    witness,
+                                    &target.host,
+                                    || r2o_controller::ech::resolve_ech_config(witness, mark),
                                 )
                                 .ok()
                                 .flatten()
@@ -12831,6 +12867,29 @@ fn r2o_discovery_ech_config(
 }
 
 #[cfg(unix)]
+fn r2o_discovery_refresh_ech_probe_config(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    current: Option<&r2o_controller::ech::R2oEchConfig>,
+    mark: Option<u32>,
+    resolve: impl FnOnce(&str, Option<u32>) -> Result<r2o_controller::ech::R2oEchConfig, String>,
+) -> Result<Option<r2o_controller::ech::R2oEchConfig>, String> {
+    let Some(current) = current else {
+        return Ok(None);
+    };
+    if target.shape != SHAPE_ECH_TCP {
+        return Ok(Some(current.clone()));
+    }
+    let config = resolve(&current.origin_name, mark)?;
+    if config.public_name != target.host {
+        return Err(format!(
+            "ECH public_name {} не совпадает с внешним именем {}",
+            config.public_name, target.host
+        ));
+    }
+    Ok(Some(config))
+}
+
+#[cfg(unix)]
 fn r2o_discovery_ech_witness_config(
     target: &r2o_controller::discovery::DiscoveryTarget,
     witness: &str,
@@ -12840,9 +12899,20 @@ fn r2o_discovery_ech_witness_config(
     if target.shape != SHAPE_ECH_TCP || witness == target.host {
         return Ok(None);
     }
-    r2o_discovery_resolve_ech_witness_cached(cache, witness, &target.host, || {
-        r2o_controller::ech::resolve_ech_config(witness, mark)
-    })
+    let result = r2o_controller::ech::resolve_ech_config(witness, mark);
+    cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .store(
+            witness,
+            result.as_ref().ok().cloned(),
+            std::time::Instant::now(),
+        );
+    match result {
+        Ok(config) if config.public_name == target.host => Ok(Some(config)),
+        Ok(_) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(unix)]
@@ -12887,7 +12957,14 @@ fn r2o_discovery_first_ech_witness(
     cache: &std::sync::Mutex<R2oEchWitnessResolutionCache>,
 ) -> Option<(r2o_controller::ech::R2oEchConfig, usize)> {
     for (index, witness) in candidates.iter().enumerate().skip(start) {
-        if let Ok(Some(config)) = r2o_discovery_ech_witness_config(target, witness, mark, cache) {
+        let matches_target =
+            r2o_discovery_resolve_ech_witness_cached(cache, witness, &target.host, || {
+                r2o_controller::ech::resolve_ech_config(witness, mark)
+            })
+            .is_ok_and(|config| config.is_some());
+        if matches_target
+            && let Ok(Some(config)) = r2o_discovery_ech_witness_config(target, witness, mark, cache)
+        {
             return Some((config, index + 1));
         }
     }
@@ -25086,6 +25163,75 @@ mod tests {
             Ok(Some(config))
         );
         assert_eq!(calls.get(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ech_probe_refreshes_config_for_each_candidate_attempt() {
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "public.example".into(),
+            endpoint: "198.51.100.20:443".into(),
+            family: 4,
+            shape: SHAPE_ECH_TCP,
+        };
+        let prior = r2o_controller::ech::R2oEchConfig {
+            public_name: "public.example".into(),
+            origin_name: "witness.example".into(),
+            config_list: vec![1],
+        };
+        let rotated = r2o_controller::ech::R2oEchConfig {
+            config_list: vec![4, 5, 6],
+            ..prior.clone()
+        };
+        let resolved = std::cell::RefCell::new(std::collections::VecDeque::from([
+            prior.clone(),
+            rotated.clone(),
+        ]));
+        let calls = std::cell::Cell::new(0);
+        let mut handed_to_trial = Vec::new();
+        let final_config = super::r2o_repeat_candidate_trials(
+            1,
+            || {
+                let fresh = super::r2o_discovery_refresh_ech_probe_config(
+                    &target,
+                    Some(&prior),
+                    Some(77),
+                    |origin, mark| {
+                        assert_eq!(origin, "witness.example");
+                        assert_eq!(mark, Some(77));
+                        calls.set(calls.get() + 1);
+                        Ok(resolved.borrow_mut().pop_front().unwrap())
+                    },
+                )
+                .unwrap()
+                .unwrap();
+                handed_to_trial.push(fresh.config_list.clone());
+                fresh.config_list
+            },
+            |_| true,
+        );
+
+        assert_eq!(calls.get(), 2);
+        assert_eq!(handed_to_trial, [vec![1], vec![4, 5, 6]]);
+        assert_eq!(final_config, rotated.config_list);
+        let output = handed_to_trial
+            .iter()
+            .enumerate()
+            .map(|(index, config)| {
+                format!(
+                    "attempt{}={}\n",
+                    index + 1,
+                    config
+                        .iter()
+                        .map(u8::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            })
+            .collect::<String>();
+        if let Ok(path) = std::env::var("R2O_ECH_CONFIG_ROTATION_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
     }
 
     #[cfg(unix)]

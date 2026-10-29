@@ -130,6 +130,30 @@ struct RankedOwnPlan {
     confirmed: i64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnFirstResultAction {
+    TryNext,
+    Accept,
+    StopForChallenge,
+    ContinueFullClassifier,
+}
+
+pub fn own_first_result_action(
+    phase_time_available: bool,
+    verified: bool,
+    cloudflare_challenge: bool,
+) -> OwnFirstResultAction {
+    if !phase_time_available {
+        OwnFirstResultAction::ContinueFullClassifier
+    } else if verified {
+        OwnFirstResultAction::Accept
+    } else if cloudflare_challenge {
+        OwnFirstResultAction::StopForChallenge
+    } else {
+        OwnFirstResultAction::TryNext
+    }
+}
+
 /// Select the next donor-sized batch of already-confirmed plans.
 pub fn own_first_plans(
     catalog: &Catalog,
@@ -530,6 +554,26 @@ pub fn r2o_ech_witness_candidates(
     }
 
     candidates
+}
+
+pub fn r2o_ech_witness_challenge_order(
+    candidates: &[String],
+    challenged: &[String],
+) -> Vec<String> {
+    candidates
+        .iter()
+        .filter(|candidate| {
+            !challenged
+                .iter()
+                .any(|name| name.as_str() == candidate.as_str())
+        })
+        .chain(candidates.iter().filter(|candidate| {
+            challenged
+                .iter()
+                .any(|name| name.as_str() == candidate.as_str())
+        }))
+        .cloned()
+        .collect()
 }
 
 /// Проверить, что live-ответ относится к действующему сохранённому HTTP-плану.
@@ -1411,8 +1455,9 @@ fn stable_plan_id(family: u8, shape: u8, text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        DiscoveryTarget, known_plans, own_first_bound_plan_id, own_first_plans,
-        r2o_ech_witness_candidates,
+        DiscoveryTarget, OwnFirstResultAction, known_plans, own_first_bound_plan_id,
+        own_first_plans, own_first_result_action, r2o_ech_witness_candidates,
+        r2o_ech_witness_challenge_order,
     };
     use r2k_core::control::{
         BindingContext, HttpResponseEvent, KEY_LEN, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_MODERN,
@@ -1508,6 +1553,62 @@ mod tests {
             seen.len() >= 8,
             "the fixture exercises multiple donor batches"
         );
+    }
+
+    #[test]
+    fn own_first_deadline_precedes_late_verified_and_challenge_results() {
+        let mut output = String::new();
+        for (label, elapsed_ms, verified, challenge) in [
+            ("on_time_verified", 600_000_u64, true, false),
+            ("late_verified", 600_001, true, false),
+            ("on_time_challenge", 600_000, false, true),
+            ("late_challenge", 600_001, false, true),
+        ] {
+            let phase_time_available = elapsed_ms <= 600_000;
+            let action = own_first_result_action(phase_time_available, verified, challenge);
+            let accepted = action == OwnFirstResultAction::Accept;
+            let continue_full = action == OwnFirstResultAction::ContinueFullClassifier;
+            output.push_str(&format!(
+                "{label}:accepted={},continue_full={}\n",
+                u8::from(accepted),
+                u8::from(continue_full)
+            ));
+        }
+        if let Ok(path) = std::env::var("R2O_OWN_FIRST_DEADLINE_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert_eq!(
+            output,
+            concat!(
+                "on_time_verified:accepted=1,continue_full=0\n",
+                "late_verified:accepted=0,continue_full=1\n",
+                "on_time_challenge:accepted=0,continue_full=0\n",
+                "late_challenge:accepted=0,continue_full=1\n",
+            )
+        );
+    }
+
+    #[test]
+    fn ech_witness_search_retries_challenged_names_after_unchallenged_names() {
+        let candidates = ["u1", "challenged-c1", "u2"].map(str::to_owned);
+        let challenged = ["challenged-c1".to_owned()];
+        let order = r2o_ech_witness_challenge_order(&candidates, &challenged);
+        let selected = order
+            .iter()
+            .find(|name| {
+                matches!(name.as_str(), "u1" | "u2")
+                    .then_some("other.example")
+                    .or_else(|| (name.as_str() == "challenged-c1").then_some("public.example"))
+                    == Some("public.example")
+            })
+            .map(String::as_str)
+            .unwrap_or("none");
+        let output = format!("witnesses:chosen={selected}\n");
+        if let Ok(path) = std::env::var("R2O_ECH_WITNESS_ORDER_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert_eq!(order, ["u1", "u2", "challenged-c1"]);
+        assert_eq!(output, "witnesses:chosen=challenged-c1\n");
     }
 
     #[test]

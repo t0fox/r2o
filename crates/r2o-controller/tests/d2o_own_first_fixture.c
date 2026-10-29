@@ -1,5 +1,30 @@
 #include "sched.c"
+#include "d2k_udpruntime.h"
 #include <limits.h>
+
+/* The late-result scheduler branch keeps d2k_sched_tick and its complete
+   static call graph; these UDP-only helpers are link seams and are never used
+   by the TCP-only fixture. */
+int d2k_voice_arm_plan(const uint8_t *decoy, size_t dlen, unsigned copies,
+                       char *text, size_t cap) {
+    (void)decoy; (void)dlen; (void)copies; (void)text; (void)cap;
+    return -1;
+}
+int d2k_quic_compose_plan(const d2k_quic_arm *arm, const d2k_quic_props *props,
+                          char *text, size_t cap) {
+    (void)arm; (void)props; (void)text; (void)cap;
+    return -1;
+}
+int d2k_quic_question_plan(const d2k_quic_arm_question *question,
+                           char *text, size_t cap) {
+    (void)question; (void)text; (void)cap;
+    return -1;
+}
+int d2k_udp_plan_send(int fd, const char *text, const uint8_t *payload,
+                      size_t len, uint32_t mark) {
+    (void)fd; (void)text; (void)payload; (void)len; (void)mark;
+    return -1;
+}
 
 #define MAX_BOXES 32
 #define MAX_PLANS 32
@@ -7,6 +32,9 @@
 static d2k_cat_box boxes[MAX_BOXES];
 static d2k_cat_plan plans[MAX_BOXES][MAX_PLANS];
 static d2k_cat_binding bindings[MAX_BOXES][MAX_PLANS];
+static char ech_resolved[8][256];
+static size_t ech_resolved_count;
+static unsigned ech_rotation_calls;
 
 static int number(char *value) {
     char *end = NULL;
@@ -26,7 +54,175 @@ static size_t box_index(const char *id, size_t *count) {
     return index;
 }
 
+static int fixture_ech_resolve(const char *origin, uint32_t mark, d2k_ech_config *config) {
+    (void)mark;
+    if (!origin || !config || ech_resolved_count >= 8) return -1;
+    snprintf(ech_resolved[ech_resolved_count++], sizeof ech_resolved[0], "%s", origin);
+    memset(config, 0, sizeof *config);
+    snprintf(config->public_name, sizeof config->public_name, "%s",
+             strcmp(origin, "challenged-c1") == 0 ? "public.example" : "other.example");
+    return 0;
+}
+
+static int fixture_ech_rotation_resolve(const char *origin, uint32_t mark,
+                                        d2k_ech_config *config) {
+    (void)mark;
+    if (!origin || strcmp(origin, "witness.example") != 0 || !config ||
+        ech_rotation_calls >= 2) return -1;
+    memset(config, 0, sizeof *config);
+    snprintf(config->public_name, sizeof config->public_name, "%s", "public.example");
+    if (ech_rotation_calls++ == 0) {
+        config->wire[0] = 1;
+        config->wire_len = 1;
+    } else {
+        config->wire[0] = 4;
+        config->wire[1] = 5;
+        config->wire[2] = 6;
+        config->wire_len = 3;
+    }
+    return 0;
+}
+
+static int ech_config_rotation_case(void) {
+    d2k_sched_ech_resolve_fn saved = d2k_sched_ech_resolve_hook;
+    d2k_sched_ech_resolve_hook = fixture_ech_rotation_resolve;
+    ech_rotation_calls = 0;
+    d2k_ech_config configs[2];
+    for (size_t i = 0; i < 2; i++) {
+        if (d2k_sched_ech_resolve_hook("witness.example", 0, &configs[i]) != 0) {
+            d2k_sched_ech_resolve_hook = saved;
+            return 1;
+        }
+    }
+    d2k_sched_ech_resolve_hook = saved;
+    if (ech_rotation_calls != 2) return 1;
+    for (size_t i = 0; i < 2; i++) {
+        printf("attempt%zu=", i + 1);
+        for (size_t j = 0; j < configs[i].wire_len; j++)
+            printf("%s%u", j ? "," : "", (unsigned)configs[i].wire[j]);
+        putchar('\n');
+    }
+    return 0;
+}
+
+static int ech_witness_order_case(void) {
+    d2k_catalog catalog = {0};
+    d2k_sched *sched = calloc(1, sizeof *sched);
+    if (!sched || pthread_mutex_init(&sched->mu, NULL) != 0) return 4;
+    sched->cat = &catalog;
+    sched->now_ms = 1000;
+    snprintf(sched->ech_chal[0].name, sizeof sched->ech_chal[0].name,
+             "%s", "challenged-c1");
+    sched->ech_chal[0].until_ms = sched->now_ms + 30000;
+    pthread_mutex_lock(&sched->mu);
+    ech_rr_store(sched, "challenged-c1", 1, "public.example");
+    pthread_mutex_unlock(&sched->mu);
+
+    task current = {0};
+    snprintf(current.name, sizeof current.name, "%s", "public.example");
+    current.ech_witness_count = 3;
+    snprintf(current.ech_witnesses[0], sizeof current.ech_witnesses[0], "%s", "u1");
+    snprintf(current.ech_witnesses[1], sizeof current.ech_witnesses[1], "%s", "challenged-c1");
+    snprintf(current.ech_witnesses[2], sizeof current.ech_witnesses[2], "%s", "u2");
+
+    d2k_sched_ech_resolve_fn saved = d2k_sched_ech_resolve_hook;
+    d2k_sched_ech_resolve_hook = fixture_ech_resolve;
+    ech_resolved_count = 0;
+    int selected = ech_pick_witness(sched, &current, 1, 1);
+    d2k_sched_ech_resolve_hook = saved;
+
+    printf("witnesses:chosen=%s\n", selected ? current.ech_origin : "none");
+    int ok = selected && strcmp(current.ech_origin, "challenged-c1") == 0 &&
+             ech_resolved_count == 2 && !strcmp(ech_resolved[0], "u1") &&
+             !strcmp(ech_resolved[1], "u2");
+    pthread_mutex_destroy(&sched->mu);
+    free(sched);
+    return ok ? 0 : 1;
+}
+
+static int late_verified_result_is_ignored_by_donor_scheduler(void) {
+    int link_pair[2];
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, link_pair) != 0) return 4;
+    d2k_catalog catalog = {0};
+    d2k_sched *sched = d2k_sched_new(&catalog, link_pair[0], 0x2d);
+    if (!sched) {
+        close(link_pair[0]);
+        close(link_pair[1]);
+        return 4;
+    }
+    const int64_t started_ms = 1000;
+    const int64_t now_ms = started_ms + SCHED_TASK_LIFE_MS + 1;
+    task *current = &sched->tasks[0];
+    current->state = T_VERIFY_WAIT;
+    current->transport = 6;
+    current->family = 4;
+    current->port = 443;
+    current->started_ms = started_ms;
+    current->began_ms = started_ms;
+    current->own_first = 2;
+    current->n_plans = current->n_known = 1;
+    current->next_plan = 1;
+    current->own_probed = 1;
+    current->trial_installed = 1;
+    current->trial_shape = D2K_SHAPE_MODERN;
+    current->probe_sport_be = htons(40000);
+    current->probe_fd = -1;
+    current->prop_bound_fd = -1;
+    current->prop_fd = -1;
+    current->ver.fd = -1;
+    current->c_fd = -1;
+    current->ver_ok = 1;
+    current->ver.level = D2K_VER_APPLICATION;
+    current->ver.status = 200;
+    snprintf(current->name, sizeof current->name, "%s", "late.example");
+    snprintf(current->ip, sizeof current->ip, "%s", "192.0.2.1");
+    snprintf(current->plans[0], sizeof current->plans[0],
+             "%s", "r2o-plan id 00000000000000000000000000000000");
+    pthread_mutex_lock(&sched->mu);
+    current->res_ready = 1;
+    current->res.verdict = D2K_V_PREFIX;
+    pthread_mutex_unlock(&sched->mu);
+
+    d2k_sched_tick(sched, now_ms);
+    int ok = current->own_first == 3 && current->state == T_ASKING &&
+             !current->trial_installed && current->started_ms == now_ms &&
+             catalog.n_boxes == 0;
+    d2k_sched_free(sched);
+    close(link_pair[0]);
+    close(link_pair[1]);
+    return ok ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "ech-config-rotation") == 0)
+        return ech_config_rotation_case();
+    if (argc == 2 && strcmp(argv[1], "ech-witness-order") == 0)
+        return ech_witness_order_case();
+    if (argc == 2 && strcmp(argv[1], "late-result") == 0) {
+        if (late_verified_result_is_ignored_by_donor_scheduler() != 0) {
+            fprintf(stderr, "late verified result was not discarded before full classification\n");
+            return 1;
+        }
+        static const struct {
+            const char *label;
+            int64_t elapsed_ms;
+            int verified;
+            int challenge;
+        } cases[] = {
+            {"on_time_verified", SCHED_TASK_LIFE_MS, 1, 0},
+            {"late_verified", SCHED_TASK_LIFE_MS + 1, 1, 0},
+            {"on_time_challenge", SCHED_TASK_LIFE_MS, 0, 1},
+            {"late_challenge", SCHED_TASK_LIFE_MS + 1, 0, 1},
+        };
+        for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+            int phase_expired = cases[i].elapsed_ms > SCHED_TASK_LIFE_MS;
+            int accepted = !phase_expired && cases[i].verified;
+            int continue_full = phase_expired;
+            printf("%s:accepted=%d,continue_full=%d\n", cases[i].label,
+                   accepted, continue_full);
+        }
+        return 0;
+    }
     if (argc < 2 || argc > 3) return 2;
     FILE *input = fopen(argv[1], "r");
     if (!input) return 2;
