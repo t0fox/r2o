@@ -6125,7 +6125,7 @@ const R2O_VOLUME_TX_LADDER_PACKET_BUDGET: u32 = 50;
 #[cfg(unix)]
 const R2O_VOLUME_SEARCH_CACHE_CAPACITY: usize = 256;
 #[cfg(unix)]
-const R2O_DISCOVERY_CHALLENGE_COOLDOWN_CAPACITY: usize = 128;
+const R2O_DISCOVERY_COOLDOWN_CAPACITY: usize = 128;
 #[cfg(unix)]
 const R2O_DISCOVERY_CLEAR_RETRY_FIRST: std::time::Duration =
     std::time::Duration::from_secs(10 * 60);
@@ -6939,6 +6939,93 @@ type R2oDiscoveryTaskKey = (String, u8, u8);
 type R2oDiscoveryFailureKey = (String, u8, u8, String);
 
 #[cfg(unix)]
+#[derive(Clone, Eq, PartialEq)]
+enum R2oDiscoveryCooldownKey {
+    Endpoint(R2oDiscoveryFailureKey),
+    Challenge(R2oDiscoveryTaskKey),
+}
+
+#[cfg(unix)]
+impl R2oDiscoveryCooldownKey {
+    fn is_challenge(&self) -> bool {
+        matches!(self, Self::Challenge(_))
+    }
+}
+
+#[cfg(unix)]
+struct R2oDiscoveryCooldownEntry {
+    key: R2oDiscoveryCooldownKey,
+    expires_at: std::time::Instant,
+}
+
+#[cfg(unix)]
+struct R2oDiscoveryCooldownRing {
+    slots: Vec<Option<R2oDiscoveryCooldownEntry>>,
+}
+
+#[cfg(unix)]
+impl Default for R2oDiscoveryCooldownRing {
+    fn default() -> Self {
+        Self {
+            slots: (0..R2O_DISCOVERY_COOLDOWN_CAPACITY).map(|_| None).collect(),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl R2oDiscoveryCooldownRing {
+    fn record(
+        &mut self,
+        key: R2oDiscoveryCooldownKey,
+        expires_at: std::time::Instant,
+        now: std::time::Instant,
+    ) -> Option<R2oDiscoveryCooldownKey> {
+        if let Some(entry) = self
+            .slots
+            .iter_mut()
+            .flatten()
+            .find(|entry| entry.key == key)
+        {
+            entry.expires_at = expires_at;
+            return None;
+        }
+        if let Some(slot) = self.slots.iter_mut().find(|slot| slot.is_none()) {
+            *slot = Some(R2oDiscoveryCooldownEntry { key, expires_at });
+            return None;
+        }
+
+        let mut victim: Option<(usize, u8, std::time::Instant)> = None;
+        for (index, entry) in self.slots.iter().enumerate() {
+            let entry = entry.as_ref().expect("full cooldown ring");
+            let rank = if now >= entry.expires_at {
+                0
+            } else if entry.key.is_challenge() {
+                2
+            } else {
+                1
+            };
+            if victim.is_none_or(|(_, best_rank, best_expiry)| {
+                rank < best_rank || (rank == best_rank && entry.expires_at < best_expiry)
+            }) {
+                victim = Some((index, rank, entry.expires_at));
+            }
+        }
+        let index = victim.expect("non-empty cooldown ring").0;
+        self.slots[index]
+            .replace(R2oDiscoveryCooldownEntry { key, expires_at })
+            .map(|entry| entry.key)
+    }
+
+    fn remove(&mut self, key: &R2oDiscoveryCooldownKey) {
+        for entry in &mut self.slots {
+            if entry.as_ref().is_some_and(|entry| &entry.key == key) {
+                *entry = None;
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
 fn r2o_discovery_transport(target: &r2o_controller::discovery::DiscoveryTarget) -> u8 {
     if matches!(target.shape, SHAPE_QUIC | SHAPE_VOICE) {
         17
@@ -7565,6 +7652,7 @@ struct DiscoveryWorker {
     failed_at: HashMap<R2oDiscoveryFailureKey, std::time::Instant>,
     failed_retry_after: HashMap<R2oDiscoveryFailureKey, std::time::Duration>,
     challenge_cooldowns: HashMap<(String, u8, u8), std::time::Instant>,
+    cooldown_ring: R2oDiscoveryCooldownRing,
     ech_input_clearable_failures: HashSet<R2oDiscoveryFailureKey>,
     ech_input_names: VecDeque<(String, u8)>,
     clear_streaks: HashMap<R2oDiscoveryFailureKey, u8>,
@@ -10291,6 +10379,7 @@ impl DiscoveryWorker {
             failed_at: HashMap::new(),
             failed_retry_after: HashMap::new(),
             challenge_cooldowns: HashMap::new(),
+            cooldown_ring: R2oDiscoveryCooldownRing::default(),
             ech_input_clearable_failures: HashSet::new(),
             ech_input_names: VecDeque::new(),
             clear_streaks: HashMap::new(),
@@ -10512,6 +10601,41 @@ impl DiscoveryWorker {
             .is_some_and(|until| *until > now)
     }
 
+    fn r2o_record_discovery_cooldown(
+        &mut self,
+        key: R2oDiscoveryCooldownKey,
+        expires_at: std::time::Instant,
+        now: std::time::Instant,
+    ) -> bool {
+        if let R2oDiscoveryCooldownKey::Endpoint(failure_key) = &key {
+            let challenge_key = (failure_key.0.clone(), failure_key.1, failure_key.2);
+            if self
+                .challenge_cooldowns
+                .get(&challenge_key)
+                .is_some_and(|until| *until > now)
+            {
+                return false;
+            }
+        }
+        if let Some(evicted) = self.cooldown_ring.record(key, expires_at, now) {
+            match evicted {
+                R2oDiscoveryCooldownKey::Endpoint(failure_key) => {
+                    self.r2o_clear_seen_endpoint(&failure_key);
+                    self.failed_at.remove(&failure_key);
+                    self.failed_retry_after.remove(&failure_key);
+                    self.ech_input_clearable_failures.remove(&failure_key);
+                    self.clear_streaks.remove(&failure_key);
+                    self.clear_signal_codes.remove(&failure_key);
+                    self.clear_bypass_pending.remove(&failure_key);
+                }
+                R2oDiscoveryCooldownKey::Challenge(task_key) => {
+                    self.challenge_cooldowns.remove(&task_key);
+                }
+            }
+        }
+        true
+    }
+
     fn r2o_record_discovery_challenge(
         &mut self,
         target: &r2o_controller::discovery::DiscoveryTarget,
@@ -10523,18 +10647,13 @@ impl DiscoveryWorker {
             r2o_discovery_transport(target),
             target.family,
         );
-        if !self.challenge_cooldowns.contains_key(&key)
-            && self.challenge_cooldowns.len() >= R2O_DISCOVERY_CHALLENGE_COOLDOWN_CAPACITY
-            && let Some(oldest) = self
-                .challenge_cooldowns
-                .iter()
-                .min_by_key(|(_, until)| **until)
-                .map(|(key, _)| key.clone())
-        {
-            self.challenge_cooldowns.remove(&oldest);
-        }
-        self.challenge_cooldowns
-            .insert(key, now + R2O_DISCOVERY_CHALLENGE_RETRY);
+        let expires_at = now + R2O_DISCOVERY_CHALLENGE_RETRY;
+        self.r2o_record_discovery_cooldown(
+            R2oDiscoveryCooldownKey::Challenge(key.clone()),
+            expires_at,
+            now,
+        );
+        self.challenge_cooldowns.insert(key, expires_at);
     }
 
     fn r2o_outstanding_task_count(&self, now: std::time::Instant) -> usize {
@@ -11270,6 +11389,8 @@ impl DiscoveryWorker {
             .collect::<Vec<_>>();
         for failure in failures {
             self.r2o_clear_failed_endpoint(&failure);
+            self.cooldown_ring
+                .remove(&R2oDiscoveryCooldownKey::Endpoint(failure));
         }
     }
 
@@ -11395,9 +11516,15 @@ impl DiscoveryWorker {
         let task_key = r2o_discovery_task_key(target);
         let failure_key = r2o_discovery_failure_key(target);
         self.completed.remove(&task_key);
-        self.failed_at.insert(failure_key.clone(), now);
-        self.failed_retry_after
-            .insert(failure_key, R2O_DISCOVERY_FAILURE_RETRY);
+        if self.r2o_record_discovery_cooldown(
+            R2oDiscoveryCooldownKey::Endpoint(failure_key.clone()),
+            now + R2O_DISCOVERY_FAILURE_RETRY,
+            now,
+        ) {
+            self.failed_at.insert(failure_key.clone(), now);
+            self.failed_retry_after
+                .insert(failure_key, R2O_DISCOVERY_FAILURE_RETRY);
+        }
     }
 
     fn r2o_expire_queued(
@@ -11854,12 +11981,17 @@ impl DiscoveryWorker {
             self.ech_input_clearable_failures.remove(&failure_key);
         } else if outcome.plan_text.is_none() && self.seen.contains(&outcome.target) {
             self.completed.remove(&task_key);
-            self.failed_at
-                .insert(failure_key.clone(), std::time::Instant::now());
-            if let Some(retry_after) = outcome.retry_after {
-                self.failed_retry_after.insert(failure_key, retry_after);
-            } else {
-                self.failed_retry_after.remove(&failure_key);
+            if !r2o_discovery_volume_challenge_outcome(&outcome) {
+                let failed_at = std::time::Instant::now();
+                let retry_after = outcome.retry_after.unwrap_or(R2O_DISCOVERY_FAILURE_RETRY);
+                if self.r2o_record_discovery_cooldown(
+                    R2oDiscoveryCooldownKey::Endpoint(failure_key.clone()),
+                    failed_at + retry_after,
+                    failed_at,
+                ) {
+                    self.failed_at.insert(failure_key.clone(), failed_at);
+                    self.failed_retry_after.insert(failure_key, retry_after);
+                }
             }
         } else {
             if outcome.plan_text.is_some() {
@@ -11877,6 +12009,10 @@ impl DiscoveryWorker {
             self.failed_at.remove(&failure_key);
             self.failed_retry_after.remove(&failure_key);
             self.ech_input_clearable_failures.remove(&failure_key);
+            if outcome.plan_text.is_some() {
+                self.cooldown_ring
+                    .remove(&R2oDiscoveryCooldownKey::Endpoint(failure_key));
+            }
         }
         self.completed_started_at
             .retain(|task_key, _| self.completed.contains(task_key));
@@ -22165,6 +22301,7 @@ mod tests {
             failed_at: std::collections::HashMap::new(),
             failed_retry_after: std::collections::HashMap::new(),
             challenge_cooldowns: std::collections::HashMap::new(),
+            cooldown_ring: super::R2oDiscoveryCooldownRing::default(),
             ech_input_clearable_failures: std::collections::HashSet::new(),
             ech_input_names: std::collections::VecDeque::new(),
             clear_streaks: std::collections::HashMap::new(),
@@ -22483,6 +22620,193 @@ mod tests {
             u8::from(late_only_ordinary_blocked),
             u8::from(late_only_trigger_blocked),
             u8::from(late_only_preserves_exhausted),
+        );
+        let mut ring_worker = r2o_test_discovery_worker_without_threads();
+        let mut ring_targets = Vec::with_capacity(128);
+        for index in 0..128 {
+            let target = DiscoveryTarget {
+                host: format!("ring-{index:03}.example"),
+                endpoint: format!("192.0.2.{}:443", index + 1),
+                family: 4,
+                shape: SHAPE_MODERN,
+            };
+            let failure_key = super::r2o_discovery_failure_key(&target);
+            let expiry = now
+                + super::R2O_DISCOVERY_INCOMPLETE_RETRY
+                + std::time::Duration::from_millis(index);
+            ring_worker.failed_at.insert(failure_key.clone(), now);
+            ring_worker
+                .failed_retry_after
+                .insert(failure_key.clone(), expiry.duration_since(now));
+            ring_worker.seen.insert(target.clone());
+            ring_worker.seen_order.push_back(target.clone());
+            ring_worker.r2o_record_discovery_cooldown(
+                super::R2oDiscoveryCooldownKey::Endpoint(failure_key),
+                expiry,
+                now,
+            );
+            ring_targets.push(target);
+        }
+        let ring_challenge = DiscoveryTarget {
+            host: "ring-challenge.example".into(),
+            endpoint: "192.0.2.200:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        ring_worker.r2o_record_discovery_challenge(&ring_challenge, now);
+        let ring_evicted_earliest_endpoint = !ring_worker
+            .failed_at
+            .contains_key(&super::r2o_discovery_failure_key(&ring_targets[0]));
+        let ring_kept_next_endpoint = ring_worker
+            .failed_at
+            .contains_key(&super::r2o_discovery_failure_key(&ring_targets[1]));
+        let ring_kept_challenge = ring_worker.r2o_discovery_challenge_active(&ring_challenge, now);
+        assert!(
+            ring_evicted_earliest_endpoint,
+            "a new challenge must evict the earliest active endpoint cooldown from the shared ring"
+        );
+        assert!(ring_kept_next_endpoint);
+        assert!(ring_kept_challenge);
+        let output = format!(
+            "{output}ring_evicted_earliest_endpoint {}\nring_kept_next_endpoint {}\nring_kept_challenge {}\n",
+            u8::from(ring_evicted_earliest_endpoint),
+            u8::from(ring_kept_next_endpoint),
+            u8::from(ring_kept_challenge),
+        );
+        let mut expired_ring_worker = r2o_test_discovery_worker_without_threads();
+        let expired_target = DiscoveryTarget {
+            host: "ring-expired.example".into(),
+            endpoint: "192.0.2.150:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let expired_key = super::r2o_discovery_failure_key(&expired_target);
+        let expired_at = now - std::time::Duration::from_secs(2);
+        expired_ring_worker
+            .failed_at
+            .insert(expired_key.clone(), expired_at);
+        expired_ring_worker
+            .failed_retry_after
+            .insert(expired_key.clone(), std::time::Duration::from_secs(1));
+        expired_ring_worker.seen.insert(expired_target.clone());
+        expired_ring_worker.seen_order.push_back(expired_target);
+        expired_ring_worker.r2o_record_discovery_cooldown(
+            super::R2oDiscoveryCooldownKey::Endpoint(expired_key.clone()),
+            now - std::time::Duration::from_secs(1),
+            now,
+        );
+        for index in 0..127 {
+            let target = DiscoveryTarget {
+                host: format!("ring-live-challenge-{index:03}.example"),
+                endpoint: "192.0.2.160:443".into(),
+                family: 4,
+                shape: SHAPE_MODERN,
+            };
+            expired_ring_worker.r2o_record_discovery_challenge(&target, now);
+        }
+        let replacement = DiscoveryTarget {
+            host: "ring-replacement.example".into(),
+            endpoint: "192.0.2.151:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let replacement_key = super::r2o_discovery_failure_key(&replacement);
+        expired_ring_worker.r2o_record_discovery_cooldown(
+            super::R2oDiscoveryCooldownKey::Endpoint(replacement_key),
+            now + super::R2O_DISCOVERY_INCOMPLETE_RETRY,
+            now,
+        );
+        let ring_prefers_expired = !expired_ring_worker.failed_at.contains_key(&expired_key);
+        let first_live_challenge = DiscoveryTarget {
+            host: "ring-live-challenge-000.example".into(),
+            endpoint: "192.0.2.160:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let ring_keeps_active_challenge =
+            expired_ring_worker.r2o_discovery_challenge_active(&first_live_challenge, now);
+        assert!(ring_prefers_expired);
+        assert!(ring_keeps_active_challenge);
+        let output = format!(
+            "{output}ring_prefers_expired_over_active_challenges {}\nring_keeps_active_challenge {}\n",
+            u8::from(ring_prefers_expired),
+            u8::from(ring_keeps_active_challenge),
+        );
+
+        let mut challenge_ring_worker = r2o_test_discovery_worker_without_threads();
+        for index in 0..128 {
+            let target = DiscoveryTarget {
+                host: format!("ring-challenge-only-{index:03}.example"),
+                endpoint: "192.0.2.170:443".into(),
+                family: 4,
+                shape: SHAPE_MODERN,
+            };
+            challenge_ring_worker.r2o_record_discovery_challenge(
+                &target,
+                now + std::time::Duration::from_millis(index),
+            );
+        }
+        let challenge_added = DiscoveryTarget {
+            host: "ring-challenge-only-new.example".into(),
+            endpoint: "192.0.2.171:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let insertion_time = now + std::time::Duration::from_secs(2);
+        challenge_ring_worker.r2o_record_discovery_challenge(&challenge_added, insertion_time);
+        let ring_all_challenges_evicts_earliest = !challenge_ring_worker
+            .challenge_cooldowns
+            .contains_key(&("ring-challenge-only-000.example".into(), 6, 4));
+        let ring_all_challenges_keeps_next = challenge_ring_worker
+            .challenge_cooldowns
+            .contains_key(&("ring-challenge-only-001.example".into(), 6, 4));
+        let ring_all_challenges_keeps_new =
+            challenge_ring_worker.r2o_discovery_challenge_active(&challenge_added, insertion_time);
+        assert!(ring_all_challenges_evicts_earliest);
+        assert!(ring_all_challenges_keeps_next);
+        assert!(ring_all_challenges_keeps_new);
+        let output = format!(
+            "{output}ring_all_challenges_evicts_earliest {}\nring_all_challenges_keeps_next {}\nring_all_challenges_keeps_new {}\n",
+            u8::from(ring_all_challenges_evicts_earliest),
+            u8::from(ring_all_challenges_keeps_next),
+            u8::from(ring_all_challenges_keeps_new),
+        );
+        let mut challenge_wins_worker = r2o_test_discovery_worker_without_threads();
+        let challenge_wins_target = DiscoveryTarget {
+            host: "challenge-wins.example".into(),
+            endpoint: "192.0.2.180:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        challenge_wins_worker.r2o_record_discovery_challenge(&challenge_wins_target, now);
+        challenge_wins_worker
+            .seen
+            .insert(challenge_wins_target.clone());
+        challenge_wins_worker
+            .seen_order
+            .push_back(challenge_wins_target.clone());
+        challenge_wins_worker.r2o_complete_outcome(DiscoveryOutcome {
+            target: challenge_wins_target.clone(),
+            plan_text: None,
+            detail: "параллельный endpoint завершился после challenge".into(),
+            queue_expired: false,
+            direct_clear: false,
+            volume_recovery: false,
+            volume_fingerprint: None,
+            volume_box_id: None,
+            retry_after: Some(super::R2O_DISCOVERY_INCOMPLETE_RETRY),
+        });
+        let failure_key = super::r2o_discovery_failure_key(&challenge_wins_target);
+        let active_challenge_suppresses_endpoint_cooldown =
+            !challenge_wins_worker.failed_at.contains_key(&failure_key);
+        let active_challenge_stays_recorded =
+            challenge_wins_worker.r2o_discovery_challenge_active(&challenge_wins_target, now);
+        assert!(active_challenge_suppresses_endpoint_cooldown);
+        assert!(active_challenge_stays_recorded);
+        let output = format!(
+            "{output}active_challenge_suppresses_endpoint_cooldown {}\nactive_challenge_stays_recorded {}\n",
+            u8::from(active_challenge_suppresses_endpoint_cooldown),
+            u8::from(active_challenge_stays_recorded),
         );
         if let Ok(path) = std::env::var("R2O_SCHED_COOLDOWN_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
@@ -33220,6 +33544,7 @@ mod tests {
             )]),
             failed_retry_after: std::collections::HashMap::new(),
             challenge_cooldowns: std::collections::HashMap::new(),
+            cooldown_ring: super::R2oDiscoveryCooldownRing::default(),
             ech_input_clearable_failures: std::collections::HashSet::new(),
             ech_input_names: std::collections::VecDeque::new(),
             clear_streaks: std::collections::HashMap::new(),

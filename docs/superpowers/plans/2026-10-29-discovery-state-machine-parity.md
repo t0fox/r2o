@@ -50,7 +50,7 @@
 - [x] Match the late-RST-only bypass after an inconclusive paired RX result while preserving an active generic exhausted cooldown.
 - [ ] Match ECH-witness exhaustion and the donor's endpoint-scoped late-only cooldown state.
 - [x] Differentially test concurrent tasks sharing an endpoint when measurement slots remain available.
-- [ ] Match the donor's 128-entry cooldown-ring eviction behavior under live-entry churn.
+- [x] Match the donor's 128-entry cooldown-ring eviction behavior under live-entry churn.
 - [ ] Differentially test the saved-address neutral-ACK recheck before any trigger is sent.
 - [x] Run the scheduler and queue-order differential suites against the pinned donor.
 
