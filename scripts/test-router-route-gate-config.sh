@@ -8,6 +8,7 @@ r2o_cleanup() {
     trap - EXIT HUP INT TERM
     env R2O_DIR="$r2o_temp/root" R2O_CONFIG="$r2o_temp/root/config" \
         R2O_MANAGER="$r2o_temp/manager" R2O_FIREWALL="$r2o_temp/firewall" \
+        R2O_PPE_ADAPTER="$r2o_temp/ppe" R2O_LOG_MAINTENANCE="$r2o_temp/no-log-worker" \
         R2O_PROC=/proc R2O_RUNTIME_DIR="$r2o_temp/runtime" \
         R2O_NFQUEUE_STATUS="$r2o_temp/proc/net/netfilter/nfnetlink_queue" \
         sh "$r2o_root/router/S99r2o" engine-stop >/dev/null 2>&1 || true
@@ -22,6 +23,7 @@ trap r2o_cleanup EXIT HUP INT TERM
 mkdir -p "$r2o_temp/root/releases/test/builds" "$r2o_temp/proc/net/netfilter"
 cp /bin/sleep "$r2o_temp/root/releases/test/builds/r2o-datapath-linux-test"
 cp /bin/sleep "$r2o_temp/root/releases/test/builds/r2o-controller-linux-test"
+cp /bin/sleep "$r2o_temp/root/releases/test/builds/r2o-panel-linux-test"
 chmod 0755 "$r2o_temp/root/releases/test/builds/"*
 cat >"$r2o_temp/root/config" <<EOF
 MODE=observe
@@ -56,14 +58,23 @@ cat >"$r2o_temp/firewall" <<'EOF'
 #!/bin/sh
 case "${1:-}" in up|down|status) exit 0 ;; *) exit 2 ;; esac
 EOF
-chmod 0755 "$r2o_temp/manager" "$r2o_temp/firewall"
+cat >"$r2o_temp/ppe" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod 0755 "$r2o_temp/manager" "$r2o_temp/firewall" "$r2o_temp/ppe"
 
-env R2O_DIR="$r2o_temp/root" R2O_CONFIG="$r2o_temp/root/config" \
-    R2O_MANAGER="$r2o_temp/manager" R2O_FIREWALL="$r2o_temp/firewall" \
-    R2O_PROC=/proc R2O_RUNTIME_DIR="$r2o_temp/runtime" \
-    R2O_NFQUEUE_STATUS="$r2o_temp/proc/net/netfilter/nfnetlink_queue" \
-    R2O_LAUNCHES="$r2o_temp/launches" \
-    sh "$r2o_root/router/S99r2o" engine-start
+r2o_run_service() {
+    env R2O_DIR="$r2o_temp/root" R2O_CONFIG="$r2o_temp/root/config" \
+        R2O_MANAGER="$r2o_temp/manager" R2O_FIREWALL="$r2o_temp/firewall" \
+        R2O_PPE_ADAPTER="$r2o_temp/ppe" R2O_LOG_MAINTENANCE="$r2o_temp/no-log-worker" \
+        R2O_PROC=/proc R2O_RUNTIME_DIR="$r2o_temp/runtime" \
+        R2O_NFQUEUE_STATUS="$r2o_temp/proc/net/netfilter/nfnetlink_queue" \
+        R2O_LAUNCHES="$r2o_temp/launches" \
+        sh "$r2o_root/router/S99r2o" "$@"
+}
+
+r2o_run_service engine-start
 
 r2o_mark=$(printf '%d' 0xffffaaa)
 r2o_mask=$(printf '%d' 0xffffff00)
@@ -78,4 +89,39 @@ grep -Fq '|--r2o-flow-capacity|64' "$r2o_temp/launches"
 [ -s "$r2o_temp/root/run/r2o-datapath4.pid" ]
 [ -s "$r2o_temp/root/run/r2o-datapath6.pid" ]
 
-echo "Проверена передача route-gate параметров из конфигурации в IPv4/IPv6 runtime"
+r2o_run_service engine-stop
+cat >"$r2o_temp/root/config" <<'EOF'
+MODE=observe
+IPV6_ENABLED=0
+PANEL_LISTEN=127.0.0.1:8090
+AUTOUPDATE=0
+TG_ENABLED=0
+EOF
+: >"$r2o_temp/launches"
+r2o_run_service engine-start
+[ "$(wc -l <"$r2o_temp/launches")" -eq 2 ] || {
+    echo "режим IPv4-only запустил неверное количество служб" >&2
+    exit 1
+}
+r2o_run_service engine-start
+[ "$(wc -l <"$r2o_temp/launches")" -eq 2 ] || {
+    cat "$r2o_temp/launches" >&2
+    echo "повторный engine-start перезапустил исправный IPv4-only datapath" >&2
+    exit 1
+}
+
+r2o_run_service stop
+: >"$r2o_temp/launches"
+r2o_run_service start
+grep -Fq 'r2o-panel|serve|' "$r2o_temp/launches" || {
+    echo "панель не запустилась в тестовой конфигурации" >&2
+    exit 1
+}
+grep -Fq '|--listen|127.0.0.1:8090' "$r2o_temp/launches" || {
+    cat "$r2o_temp/launches" >&2
+    echo "PANEL_LISTEN из конфигурации не передан панели" >&2
+    exit 1
+}
+r2o_run_service stop
+
+echo "Проверены route-gate, повторный IPv4-only запуск и адрес панели из конфигурации"
