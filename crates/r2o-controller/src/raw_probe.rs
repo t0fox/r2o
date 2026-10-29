@@ -182,10 +182,9 @@ pub fn sweep_poisons(
             result.stopped = true;
             break;
         }
-        let mut poison = property.poison;
-        if !raw_profile_allows(&poison, offer_ts) {
+        let Some(mut poison) = property_probe_poison(&property, offer_ts, &props) else {
             continue;
-        }
+        };
         let mut decoy = None;
         match property.set {
             Property::OverlapSni => {
@@ -221,7 +220,7 @@ pub fn sweep_poisons(
         }
 
         let mut observation = Observation {
-            probe: format!("свойство:{}", property.label),
+            probe: property_probe_label(property.label, property.set, &poison),
             cuts: Vec::new(),
             delay: Duration::from_millis(poison.gap_ms.max(0) as u64),
             pass: 0,
@@ -290,6 +289,7 @@ pub fn sweep_poisons(
                 &mut props,
                 property.set,
                 majority(observation.pass, options.repeats),
+                &poison,
             );
         }
         if !local_error && majority(observation.pass, options.repeats) {
@@ -898,7 +898,35 @@ fn property_probes() -> Vec<PropertyProbe> {
     probes
 }
 
-fn apply_property(props: &mut DpiProps, property: Property, passed: bool) {
+fn property_probe_poison(
+    property: &PropertyProbe,
+    offer_ts: bool,
+    props: &DpiProps,
+) -> Option<Poison> {
+    if raw_profile_allows(&property.poison, offer_ts) {
+        return Some(property.poison.clone());
+    }
+    if !matches!(property.set, Property::WhiteTimestamp)
+        || props.validates_checksum == TriState::True
+    {
+        return None;
+    }
+
+    let mut poison = property.poison.clone();
+    poison.tcp_ts = false;
+    poison.badsum = true;
+    Some(poison)
+}
+
+fn property_probe_label(label: &str, property: Property, poison: &Poison) -> String {
+    if matches!(property, Property::WhiteTimestamp) && !poison.tcp_ts {
+        "свойство:ECH-приветствие под битой суммой".into()
+    } else {
+        format!("свойство:{label}")
+    }
+}
+
+fn apply_property(props: &mut DpiProps, property: Property, passed: bool, poison: &Poison) {
     match property {
         Property::LeftOverlap => {
             props.tolerates_left_overlap = if passed {
@@ -927,8 +955,13 @@ fn apply_property(props: &mut DpiProps, property: Property, passed: bool) {
         Property::Timestamps if passed => props.validates_timestamps = TriState::False,
         Property::OverlapSni if passed => props.overlap_covers_sni = TriState::True,
         Property::WhiteTimestamp if passed => {
-            props.validates_timestamps = TriState::False;
             props.parses_l7 = TriState::True;
+            if poison.tcp_ts {
+                props.validates_timestamps = TriState::False;
+            }
+            if poison.badsum {
+                props.validates_checksum = TriState::False;
+            }
         }
         Property::Syn if passed => props.inspects_syn = TriState::False,
         _ => {}
@@ -2215,6 +2248,54 @@ mod tests {
             rust_rows.sort();
             assert_eq!(rust_rows, c_rows, "C/Rust raw profile vectors differ");
         }
+    }
+
+    #[test]
+    fn white_hello_ts_composite_is_not_filtered_for_a_client_without_timestamps() {
+        let white = property_probes()
+            .into_iter()
+            .find(|property| matches!(property.set, Property::WhiteTimestamp))
+            .expect("white ECH composite property");
+        let mut properties = DpiProps::default();
+        let poison = property_probe_poison(&white, false, &properties)
+            .expect("D2O keeps the white ECH composite without client timestamps");
+        let probe = property_probe_label(white.label, white.set, &poison);
+
+        assert!(!poison.tcp_ts);
+        assert!(poison.badsum);
+        assert!(poison.decoy_hello);
+        assert_eq!(poison.repeats, 8);
+        assert_eq!(poison.split_pos, 2);
+        assert_eq!(probe, "свойство:ECH-приветствие под битой суммой");
+
+        apply_property(&mut properties, white.set, true, &poison);
+        assert_eq!(properties.parses_l7, TriState::True);
+        assert_eq!(properties.validates_checksum, TriState::False);
+        assert_eq!(properties.validates_timestamps, TriState::Unset);
+
+        let mut known_checksum = DpiProps::default();
+        known_checksum.validates_checksum = TriState::True;
+        assert!(property_probe_poison(&white, false, &known_checksum).is_none());
+
+        let row = format!(
+            "WHITE_TS_NO_CLIENT_TIMESTAMPS name={} probe={} tcp_ts={} badsum={} decoy_hello={} repeats={} split_pos={} parses_l7={} validates_checksum_false={} validates_timestamps_unset={}",
+            poison.name,
+            probe,
+            u8::from(poison.tcp_ts),
+            u8::from(poison.badsum),
+            u8::from(poison.decoy_hello),
+            poison.repeats,
+            poison.split_pos,
+            u8::from(properties.parses_l7 == TriState::True),
+            u8::from(properties.validates_checksum == TriState::False),
+            u8::from(properties.validates_timestamps == TriState::Unset),
+        );
+        if let Ok(c_output) = std::env::var("R2O_WHITE_TS_C_OUTPUT") {
+            let c_row = std::fs::read_to_string(c_output)
+                .expect("read D2O white ECH composite differential output");
+            assert_eq!(row, c_row.trim_end(), "C/Rust white ECH composite differs");
+        }
+        println!("{row}");
     }
 
     #[test]
