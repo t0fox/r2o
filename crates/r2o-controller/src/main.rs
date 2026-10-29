@@ -1738,6 +1738,8 @@ const R2O_D2K_VERBY_CLIENT: u8 = 2;
 const R2O_D2K_VERBY_PROBE: u8 = 1;
 #[cfg(unix)]
 const R2O_D2K_VERBY_STUN: u8 = 3;
+#[cfg(unix)]
+const R2O_D2K_VERBY_VOICE_DISCOVERY: u8 = 4;
 
 #[cfg(unix)]
 fn r2o_catalog_budget_rank(budget: u8) -> u8 {
@@ -8800,7 +8802,7 @@ fn r2o_known_voice_discovery_prefix(
                 || binding.transport != 17
                 || binding.family != 4
                 || binding.shape != SHAPE_VOICE
-                || !matches!(binding.verified_by, 3 | 4 | 5)
+                || binding.verified_by != R2O_D2K_VERBY_VOICE_DISCOVERY
             {
                 return None;
             }
@@ -33943,6 +33945,38 @@ mod tests {
             let plan = Plan::parse(&command.body[18..]).unwrap();
             assert_eq!(plan.transport, 17);
             assert_eq!(plan.proto, r2k_core::plan::PROTO_VOICE);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn известный_voice_discovery_prefix_принимает_только_подтверждение_discovery() {
+        let prefix = r2k_core::stun::binding_request([0xa7; 12]);
+        let text = r2o_controller::voice_discovery::r2o_voice_arm_plan_text(&prefix);
+        let server = "198.51.100.22".parse().unwrap();
+        let mut catalog = Catalog::default();
+        r2o_controller::voice_discovery::r2o_save_confirmed_voice_binding(
+            &mut catalog,
+            server,
+            &text,
+            1_800_000_002,
+            4,
+        )
+        .unwrap();
+
+        let mut normalized = String::new();
+        for verified_by in [3, 4, 5] {
+            catalog.boxes[0].bindings[0].verified_by = verified_by;
+            let found = super::r2o_known_voice_discovery_prefix(&catalog, server).is_some();
+            normalized.push_str(&format!("{verified_by}={}\n", u8::from(found)));
+            assert_eq!(
+                found,
+                verified_by == 4,
+                "verified_by={verified_by} must match d2o's exact VOICE_DISCOVERY gate"
+            );
+        }
+        if let Some(path) = std::env::var_os("R2O_VOICE_KNOWN_PREFIX_DIFF_OUTPUT") {
+            std::fs::write(path, normalized).unwrap();
         }
     }
 

@@ -9,7 +9,7 @@ if [ "$r2o_actual_donor_sha" != "$r2o_expected_donor_sha" ]; then
     printf 'Expected d2o %s, got %s\n' "$r2o_expected_donor_sha" "$r2o_actual_donor_sha" >&2
     exit 2
 fi
-r2o_log_dir="$r2o_script_dir/.rea"
+r2o_log_dir="${R2O_LOG_DIR:-$r2o_script_dir/.rea}"
 r2o_log="$r2o_log_dir/r2o-discord-discovery-differential-$(date +%Y%m%d-%H%M%S).log"
 r2o_tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/r2o-discord-discovery.XXXXXX")
 r2o_started_at=$(date +%s)
@@ -74,6 +74,30 @@ mkdir -p "$r2o_log_dir"
     printf '\nФункциональные тесты C\n'
     r2o_run_timed 'измерение голосового потока C' sh -c \
         "cd \"\$1\" && ./test_voice" sh "$r2o_donor_core"
+    printf '\nТочное происхождение сохранённого Discord Discovery-префикса\n'
+    if ! grep -Eq 'b->verified_by[[:space:]]*!=[[:space:]]*D2K_VERBY_VOICE_DISCOVERY' \
+        "$r2o_donor_core/sched.c"; then
+        printf 'Проверка известного префикса в C scheduler изменилась; обновите дифференциальный fixture.\n' >&2
+        exit 2
+    fi
+    clang-18 -std=c99 -O2 -Wall -Wextra -Werror \
+        -I"$r2o_donor_core/include" \
+        "$r2o_script_dir/crates/r2o-controller/tests/d2o_voice_known_prefix_differential.c" \
+        -o "$r2o_tmp_dir/d2o-voice-known-prefix"
+    "$r2o_tmp_dir/d2o-voice-known-prefix" >"$r2o_tmp_dir/c-voice-known-prefix.out"
+    if R2O_VOICE_KNOWN_PREFIX_DIFF_OUTPUT="$r2o_tmp_dir/rust-voice-known-prefix.out" \
+        cargo +1.98.0 test -p r2o-controller --bin r2o-controller --locked --offline \
+            известный_voice_discovery_prefix_принимает_только_подтверждение_discovery \
+            >"$r2o_tmp_dir/rust-voice-known-prefix.log" 2>&1; then
+        cat "$r2o_tmp_dir/rust-voice-known-prefix.log"
+    else
+        cat "$r2o_tmp_dir/rust-voice-known-prefix.log"
+        exit 1
+    fi
+    diff -u "$r2o_tmp_dir/c-voice-known-prefix.out" \
+        "$r2o_tmp_dir/rust-voice-known-prefix.out"
+    printf 'C/Rust сохранённый Discord Discovery-префикс совпадает с d2o %s.\n' \
+        "$r2o_actual_donor_sha"
     r2o_run_timed 'тест Discord Discovery C' sh -c \
         "cd \"\$1\" && ./test_voice_discovery" sh "$r2o_donor_core"
     r2o_run_timed 'сценарии Discord в планировщике C' sh -c \
