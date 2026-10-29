@@ -601,7 +601,7 @@ fn majority(pass: usize, total: usize) -> bool {
 }
 
 fn should_recheck(cached: bool, successes: usize, errors: usize) -> bool {
-    (cached && successes == 0 && errors >= 2) || errors >= 3
+    cached && successes == 0 && errors >= 2
 }
 
 fn raw_offer_timestamps(client_profile: Option<bool>) -> bool {
@@ -2291,9 +2291,50 @@ mod tests {
             u8::from(properties.validates_timestamps == TriState::Unset),
         );
         if let Ok(c_output) = std::env::var("R2O_WHITE_TS_C_OUTPUT") {
-            let c_row = std::fs::read_to_string(c_output)
+            let c_rows = std::fs::read_to_string(c_output)
                 .expect("read D2O white ECH composite differential output");
-            assert_eq!(row, c_row.trim_end(), "C/Rust white ECH composite differs");
+            let c_row = c_rows
+                .lines()
+                .find(|line| line.starts_with("WHITE_TS_NO_CLIENT_TIMESTAMPS "))
+                .expect("D2O white ECH composite result");
+            assert_eq!(row, c_row, "C/Rust white ECH composite differs");
+        }
+        println!("{row}");
+    }
+
+    #[test]
+    fn raw_selftest_recheck_requires_a_cached_check_and_zero_successes() {
+        let cold_errors = should_recheck(false, 0, 3);
+        let cached_errors = should_recheck(true, 0, 2);
+        let cached_with_success = should_recheck(true, 1, 3);
+
+        assert!(
+            !cold_errors,
+            "a fresh self-test was repeated after local errors"
+        );
+        assert!(
+            cached_errors,
+            "a doubtful cached self-test was not rechecked"
+        );
+        assert!(
+            !cached_with_success,
+            "successful raw probes did not suppress recheck"
+        );
+
+        let row = format!(
+            "RAW_SELFTEST_RECHECK cold_three_errors={} cached_two_errors={} cached_with_success={}",
+            u8::from(cold_errors),
+            u8::from(cached_errors),
+            u8::from(cached_with_success),
+        );
+        if let Ok(c_output) = std::env::var("R2O_RAW_RECHECK_C_OUTPUT") {
+            let c_rows = std::fs::read_to_string(c_output)
+                .expect("read D2O raw self-test recheck differential output");
+            let c_row = c_rows
+                .lines()
+                .find(|line| line.starts_with("RAW_SELFTEST_RECHECK "))
+                .expect("D2O raw self-test recheck result");
+            assert_eq!(row, c_row, "C/Rust raw self-test recheck differs");
         }
         println!("{row}");
     }

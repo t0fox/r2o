@@ -35,5 +35,18 @@ int main(void) {
            result.props.parses_l7 == D2K_TRI_TRUE,
            result.props.validates_checksum == D2K_TRI_FALSE,
            result.props.validates_timestamps == D2K_TRI_UNSET);
+
+    d2k_result recheck_state = {0};
+    recheck_state.raw_probes_err = 3;
+    int cold_three_errors = raw_doubted(&recheck_state);
+    recheck_state.raw_selftest_cached = 1;
+    recheck_state.raw_probes_err = 2;
+    int cached_two_errors = raw_doubted(&recheck_state);
+    recheck_state.raw_probes_ok = 1;
+    recheck_state.raw_probes_err = 3;
+    int cached_with_success = raw_doubted(&recheck_state);
+    printf("RAW_SELFTEST_RECHECK cold_three_errors=%d cached_two_errors=%d "
+           "cached_with_success=%d\n",
+           cold_three_errors, cached_two_errors, cached_with_success);
     return 0;
 }

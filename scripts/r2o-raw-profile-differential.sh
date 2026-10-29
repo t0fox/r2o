@@ -80,3 +80,13 @@ R2O_WHITE_TS_C_OUTPUT="$tmp_dir/white-ts-c.out" \
         exit 1
     }
 cat "$tmp_dir/white-ts-c.out"
+
+R2O_RAW_RECHECK_C_OUTPUT="$tmp_dir/white-ts-c.out" \
+    CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/r2o-target}" \
+    cargo +1.98.0 test -p r2o-controller --locked --offline --lib \
+        raw_selftest_recheck_requires_a_cached_check_and_zero_successes \
+        -- --nocapture >"$tmp_dir/raw-recheck-rust.out" 2>&1 || {
+        cat "$tmp_dir/white-ts-c.out"
+        cat "$tmp_dir/raw-recheck-rust.out"
+        exit 1
+    }
