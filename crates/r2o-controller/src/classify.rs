@@ -759,6 +759,12 @@ pub struct PoisonHit {
     pub plan: Vec<u8>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnplannablePoison {
+    pub name: String,
+    pub reason: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct ClassifyOptions {
     pub repeats: usize,
@@ -872,6 +878,7 @@ pub struct ClassifyResult {
     pub strategy: Option<String>,
     pub response: Option<ResponseResult>,
     pub hit: Option<PoisonHit>,
+    pub unplannable: Vec<UnplannablePoison>,
     pub raw_usable: bool,
     pub rst_rule_failures: usize,
     pub raw_dials: u64,
@@ -896,6 +903,7 @@ impl ClassifyResult {
             strategy: None,
             response: None,
             hit: None,
+            unplannable: Vec::new(),
             raw_usable: false,
             rst_rule_failures: 0,
             raw_dials: 0,
@@ -1156,6 +1164,40 @@ fn append_reason(reason: &mut String, tail: &str) {
     reason.push_str(tail);
 }
 
+fn append_unplannable_reason(result: &mut ClassifyResult) {
+    let Some(first) = result.unplannable.first() else {
+        return;
+    };
+    if result.hit.is_none() {
+        result.verdict = Verdict::Opaque;
+        result.reason = format!(
+            "поток пересобирается, но буфер травится: коробка глотает «{}», сервер выбрасывает",
+            first.name
+        );
+    }
+    let others = result
+        .unplannable
+        .iter()
+        .skip(1)
+        .map(|poison| format!("«{}»", poison.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    append_reason(
+        &mut result.reason,
+        &format!(
+            "; приём «{}» сработал, но планом не задаётся: {}{}{}",
+            first.name,
+            first.reason,
+            if others.is_empty() {
+                ""
+            } else {
+                "; также "
+            },
+            others
+        ),
+    );
+}
+
 /// Выполнить эталонное дерево TCP: базовую пробу, разрезание, сборку и поиск границы префикса.
 pub fn run_with_backend<B: ProbeBackend>(
     address: &str,
@@ -1382,6 +1424,7 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
                         hit.name
                     );
                     result.hit = Some(hit);
+                    append_unplannable_reason(&mut result);
                     finish(&mut result, &options, start);
                     return result;
                 }
@@ -1405,6 +1448,11 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
                 "замер брошен по требованию остановки на {}-м зонде — о цели не сказано ничего",
                 result.probes
             );
+            finish(&mut result, &options, start);
+            return result;
+        }
+        if !result.unplannable.is_empty() {
+            append_unplannable_reason(&mut result);
             finish(&mut result, &options, start);
             return result;
         }

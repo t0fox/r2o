@@ -10,8 +10,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::classify::{
     ClassifyOptions, ClassifyResult, DpiProps, Observation, Poison, PoisonHit, ProbeError,
-    ProbeTarget, TriState, Trigger, note_props_hit, note_props_miss, poison_supports_family,
-    poisons, strategy_for_poison, trigger_accepts,
+    ProbeTarget, TriState, Trigger, UnplannablePoison, note_props_hit, note_props_miss,
+    poison_supports_family, poisons, strategy_for_poison, trigger_accepts,
 };
 use r2k_core::plan::{OriginalFate, Plan};
 use r2o_datapath::engine::{PacketDecision, decide};
@@ -293,15 +293,18 @@ pub fn sweep_poisons(
             );
         }
         if !local_error && majority(observation.pass, options.repeats) {
-            match make_poison_hit(&poison, trigger, decoy) {
-                Ok(Some(hit)) => {
+            match executable_poison_hit(&poison, trigger, decoy) {
+                Ok(hit) => {
                     add_observation(result, observation);
                     note_props_hit(&mut props, &poison);
                     return Ok(Some(hit));
                 }
-                Ok(None) => {}
-                Err(error) => {
-                    observation.error = Some(format!("найдено, но не исполняется: {error}"))
+                Err(unplannable) => {
+                    observation.error = Some(format!(
+                        "найдено, но не исполняется: {}",
+                        unplannable.reason
+                    ));
+                    result.unplannable.push(unplannable);
                 }
             }
         }
@@ -410,14 +413,17 @@ pub fn sweep_poisons(
             );
         }
         if !local_error && observation.pass == options.repeats {
-            match make_poison_hit(&poison, trigger, decoy) {
-                Ok(Some(hit)) => {
+            match executable_poison_hit(&poison, trigger, decoy) {
+                Ok(hit) => {
                     add_observation(result, observation);
                     return Ok(Some(hit));
                 }
-                Ok(None) => {}
-                Err(error) => {
-                    observation.error = Some(format!("найдено, но не исполняется: {error}"))
+                Err(unplannable) => {
+                    observation.error = Some(format!(
+                        "найдено, но не исполняется: {}",
+                        unplannable.reason
+                    ));
+                    result.unplannable.push(unplannable);
                 }
             }
         }
@@ -1041,6 +1047,24 @@ fn make_poison_hit(
         plan_text,
         plan,
     }))
+}
+
+fn executable_poison_hit(
+    poison: &Poison,
+    trigger: &Trigger,
+    decoy: Option<&[u8]>,
+) -> Result<PoisonHit, UnplannablePoison> {
+    match make_poison_hit(poison, trigger, decoy) {
+        Ok(Some(hit)) => Ok(hit),
+        Ok(None) => Err(UnplannablePoison {
+            name: poison.name.clone(),
+            reason: "для приёма нет исполняемого выражения плана".into(),
+        }),
+        Err(reason) => Err(UnplannablePoison {
+            name: poison.name.clone(),
+            reason,
+        }),
+    }
 }
 
 pub(crate) fn probe_tcp_split(
@@ -2417,6 +2441,22 @@ mod tests {
             plan,
             crate::classify::plan_for_poison(&poison, &trigger, None, 0).unwrap()
         );
+    }
+
+    #[test]
+    fn accepted_syn_data_poison_is_retained_with_its_plan_rejection_reason() {
+        let trigger = Trigger::tls("probe.example").unwrap();
+        let poison = Poison {
+            name: "syndata".into(),
+            syn_data: true,
+            ..Poison::default()
+        };
+
+        let unplannable = executable_poison_hit(&poison, &trigger, None).unwrap_err();
+
+        assert_eq!(unplannable.name, "syndata");
+        assert!(unplannable.reason.contains("SYN"));
+        assert!(unplannable.reason.contains("языком плана не выражаются"));
     }
 
     #[test]

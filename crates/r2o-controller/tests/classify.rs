@@ -1,7 +1,7 @@
 use r2o_controller::classify::{
-    Accept, ClassifyOptions, DpiProps, Poison, ProbeBackend, ProbeError, ProbeOutcome,
-    ProbeRequest, ProbeTarget, Span, TriState, Trigger, Verdict, note_props_hit, note_props_miss,
-    plan_bytes_for_poison, poison_has_fake, poison_supports_family, poisons, run,
+    Accept, ClassifyOptions, DpiProps, Observation, Poison, ProbeBackend, ProbeError, ProbeOutcome,
+    ProbeRequest, ProbeTarget, Span, TriState, Trigger, UnplannablePoison, Verdict, note_props_hit,
+    note_props_miss, plan_bytes_for_poison, poison_has_fake, poison_supports_family, poisons, run,
     run_base_with_backend_progress, run_with_backend, run_with_backend_progress, split_offsets,
     strategy_for_poison, trigger_accepts,
 };
@@ -231,6 +231,42 @@ impl ProbeBackend for MeasuredPoisonHit {
             plan_text,
             plan,
         }))
+    }
+}
+
+struct AcceptedUnplannablePoison;
+
+impl ProbeBackend for AcceptedUnplannablePoison {
+    fn probe(&mut self, _request: ProbeRequest<'_>) -> Result<bool, ProbeError> {
+        Ok(false)
+    }
+
+    fn raw_supported(&self) -> bool {
+        true
+    }
+
+    fn sweep_poisons(
+        &mut self,
+        _target: &ProbeTarget,
+        _trigger: &Trigger,
+        _options: &ClassifyOptions,
+        result: &mut r2o_controller::classify::ClassifyResult,
+    ) -> Result<Option<r2o_controller::classify::PoisonHit>, ProbeError> {
+        result.unplannable.push(UnplannablePoison {
+            name: "syndata".into(),
+            reason: "данные в SYN языком плана не выражаются".into(),
+        });
+        result.trace.push(Observation {
+            probe: "свойство:данные в SYN".into(),
+            cuts: Vec::new(),
+            delay: Duration::ZERO,
+            pass: 2,
+            fail: 0,
+            error: Some(
+                "найдено, но не исполняется: данные в SYN языком плана не выражаются".into(),
+            ),
+        });
+        Ok(None)
     }
 }
 
@@ -545,6 +581,46 @@ fn measured_poison_result_exposes_a_plan_accepted_by_the_datapath_parser() {
         r2o_controller::plan_text::compile_text(&hit.plan_text).unwrap(),
         hit.plan
     );
+}
+
+#[test]
+fn accepted_but_unplannable_poison_keeps_opaque_verdict_and_search_ownership() {
+    let trigger = test_trigger();
+    let mut options = test_options();
+    options.control = Some(Trigger {
+        name: "control".into(),
+        payload: b"BENIGN-CONTROL-PAYLOAD".to_vec(),
+        accept: Default::default(),
+    });
+    options.no_raw = false;
+    let mut backend = AcceptedUnplannablePoison;
+
+    let result = run_with_backend("192.0.2.10:443", &trigger, options, &mut backend);
+
+    let owns_search =
+        result.raw_usable && result.verdict == Verdict::Opaque && result.hit.is_none();
+    if let Ok(path) = std::env::var("R2O_BRIDGE_UNPLANNABLE_DIFF_OUTPUT") {
+        std::fs::write(
+            path,
+            format!(
+                "verdict={} plan={} owns_search={} content={} poison={} syn={}\n",
+                result.verdict.as_str(),
+                usize::from(result.hit.is_some()),
+                usize::from(owns_search),
+                usize::from(result.reason.contains("буфер травится")),
+                usize::from(result.reason.contains("syndata")),
+                usize::from(result.reason.contains("SYN")),
+            ),
+        )
+        .unwrap();
+    }
+    assert_eq!(result.verdict, Verdict::Opaque);
+    assert!(result.raw_usable);
+    assert!(result.hit.is_none());
+    assert!(owns_search);
+    assert!(result.reason.contains("буфер травится"));
+    assert!(result.reason.contains("syndata"));
+    assert!(result.reason.contains("SYN"));
 }
 
 #[test]

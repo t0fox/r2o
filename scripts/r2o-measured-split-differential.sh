@@ -21,6 +21,7 @@ R2O_MEASURED_SPLIT_DIFF_OUTPUT="$tmp/rust.out" \
 diff -u "$tmp/c.out" "$tmp/rust.out"
 printf 'C/Rust measured PREFIX/WHOLE_PACKET split plans match d2o %s.\n' "$expected_donor_sha"
 
+make -s -C "$donor/core" hello.o CC=clang-18
 clang-18 -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
     -I"$donor/detect/include" -I"$donor/core/include" \
     -I"$donor/datapath/include" \
@@ -36,6 +37,24 @@ diff -u "$tmp/bridge-c.out" "$tmp/bridge-rust.out"
 printf 'C/Rust bridge raw-split gate matches d2o %s.\n' "$expected_donor_sha"
 
 make -s -C "$donor/detect" test_bridge CC=clang-18
+clang-18 -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+    -I"$donor/detect" -I"$donor/detect/include" -I"$donor/core/include" \
+    -I"$donor/datapath/include" \
+    "$root/crates/r2o-controller/tests/d2o_bridge_unplannable_differential.c" \
+    "$donor/detect/bridge.o" "$donor/detect/poison.o" \
+    "$donor/core/measured.o" "$donor/core/hello.o" "$donor/core/plantlv.o" \
+    "$donor/core/quic.o" "$donor/core/quicwire.o" "$donor/core/crypto.o" \
+    "$donor/datapath/plan_parse.o" "$donor/datapath/plan_apply.o" \
+    "$donor/datapath/wire.o" -Wl,--gc-sections -lpthread \
+    -o "$tmp/bridge-unplannable"
+"$tmp/bridge-unplannable" >"$tmp/bridge-unplannable-c.out"
+cd "$root"
+R2O_BRIDGE_UNPLANNABLE_DIFF_OUTPUT="$tmp/bridge-unplannable-rust.out" \
+    cargo +1.98.0 test --locked --offline -p r2o-controller --test classify \
+    accepted_but_unplannable_poison_keeps_opaque_verdict_and_search_ownership -- --exact
+diff -u "$tmp/bridge-unplannable-c.out" "$tmp/bridge-unplannable-rust.out"
+printf 'C/Rust bridge unplannable-hit fallback matches d2o %s.\n' "$expected_donor_sha"
+
 "$donor/detect/test_bridge"
 cargo +1.98.0 test --locked -p r2o-controller --bin r2o-controller \
     discovery_search_ownership_matches_donor_local_failure_gates
