@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::future::Future;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
+use std::ptr;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -17,6 +19,13 @@ const CF_DNS_CACHE_TTL: Duration = Duration::from_secs(60);
 const MAX_CF_DNS_CACHE_ENTRIES: usize = 256;
 type CachedCfIpLists = HashMap<String, (Vec<IpAddr>, Instant)>;
 type CfDomainLocks = HashMap<String, Arc<AsyncMutex<()>>>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SystemDnsLookup {
+    Addresses(Vec<IpAddr>),
+    Negative,
+    Failed,
+}
 
 struct DohEndpoint {
     host: &'static str,
@@ -54,15 +63,9 @@ pub(crate) async fn resolve_cf_ips(
 ) -> Result<Vec<IpAddr>, String> {
     let system_domain = domain.to_string();
     let doh_domain = domain.to_string();
-    resolve_cf_ips_with(
+    resolve_cf_ips_with_status(
         domain,
-        move || async move {
-            let addresses = tokio::net::lookup_host((system_domain.as_str(), 443))
-                .await
-                .ok()?;
-            let values = addresses.map(|address| address.ip()).collect::<Vec<_>>();
-            (!values.is_empty()).then_some(values)
-        },
+        move || async move { system_dns_lookup(system_domain).await },
         || async move { resolve_doh_ips(&doh_domain, outbound).await },
     )
     .await
@@ -80,7 +83,31 @@ where
     D: FnOnce() -> DFut,
     DFut: Future<Output = Option<Vec<IpAddr>>>,
 {
-    resolve_cf_ips_with_timeouts(
+    resolve_cf_ips_with_status(
+        domain,
+        move || async move {
+            system_lookup()
+                .await
+                .map(SystemDnsLookup::Addresses)
+                .unwrap_or(SystemDnsLookup::Failed)
+        },
+        doh_lookup,
+    )
+    .await
+}
+
+async fn resolve_cf_ips_with_status<S, SFut, D, DFut>(
+    domain: &str,
+    system_lookup: S,
+    doh_lookup: D,
+) -> Option<Vec<IpAddr>>
+where
+    S: FnOnce() -> SFut,
+    SFut: Future<Output = SystemDnsLookup>,
+    D: FnOnce() -> DFut,
+    DFut: Future<Output = Option<Vec<IpAddr>>>,
+{
+    resolve_cf_ips_with_status_and_timeouts(
         domain,
         system_lookup,
         doh_lookup,
@@ -103,6 +130,34 @@ where
     D: FnOnce() -> DFut,
     DFut: Future<Output = Option<Vec<IpAddr>>>,
 {
+    resolve_cf_ips_with_status_and_timeouts(
+        domain,
+        move || async move {
+            system_lookup()
+                .await
+                .map(SystemDnsLookup::Addresses)
+                .unwrap_or(SystemDnsLookup::Failed)
+        },
+        doh_lookup,
+        system_timeout,
+        doh_timeout,
+    )
+    .await
+}
+
+async fn resolve_cf_ips_with_status_and_timeouts<S, SFut, D, DFut>(
+    domain: &str,
+    system_lookup: S,
+    doh_lookup: D,
+    system_timeout: Duration,
+    doh_timeout: Duration,
+) -> Option<Vec<IpAddr>>
+where
+    S: FnOnce() -> SFut,
+    SFut: Future<Output = SystemDnsLookup>,
+    D: FnOnce() -> DFut,
+    DFut: Future<Output = Option<Vec<IpAddr>>>,
+{
     if !valid_domain(domain) {
         return None;
     }
@@ -115,11 +170,11 @@ where
         return Some(ips);
     }
 
-    let mut ips = tokio::time::timeout(system_timeout, system_lookup())
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    let mut ips = match tokio::time::timeout(system_timeout, system_lookup()).await {
+        Ok(SystemDnsLookup::Addresses(addresses)) => addresses,
+        Ok(SystemDnsLookup::Negative) => return None,
+        Ok(SystemDnsLookup::Failed) | Err(_) => Vec::new(),
+    };
     ips.retain(is_usable_edge_ip);
     if ips.is_empty() {
         ips = tokio::time::timeout(doh_timeout, doh_lookup())
@@ -140,6 +195,63 @@ where
     }
     cache_cf_ips(domain, ips.clone(), CF_DNS_CACHE_TTL);
     Some(ips)
+}
+
+async fn system_dns_lookup(domain: String) -> SystemDnsLookup {
+    tokio::task::spawn_blocking(move || system_dns_lookup_blocking(&domain))
+        .await
+        .unwrap_or(SystemDnsLookup::Failed)
+}
+
+fn system_dns_lookup_blocking(domain: &str) -> SystemDnsLookup {
+    let Ok(domain) = CString::new(domain) else {
+        return SystemDnsLookup::Failed;
+    };
+    let service = c"443";
+    let mut hints: libc::addrinfo = unsafe { std::mem::zeroed() };
+    hints.ai_family = libc::AF_UNSPEC;
+    hints.ai_socktype = libc::SOCK_STREAM;
+    hints.ai_protocol = libc::IPPROTO_TCP;
+    let mut results = ptr::null_mut();
+    let status =
+        unsafe { libc::getaddrinfo(domain.as_ptr(), service.as_ptr(), &hints, &mut results) };
+    if status != 0 {
+        return system_dns_error_result(status);
+    }
+
+    let mut addresses = Vec::new();
+    let mut current = results;
+    while !current.is_null() {
+        let item = unsafe { &*current };
+        if !item.ai_addr.is_null() {
+            if item.ai_family == libc::AF_INET
+                && item.ai_addrlen >= std::mem::size_of::<libc::sockaddr_in>() as _
+            {
+                let address = unsafe { &*(item.ai_addr.cast::<libc::sockaddr_in>()) };
+                addresses.push(IpAddr::V4(Ipv4Addr::from(
+                    address.sin_addr.s_addr.to_ne_bytes(),
+                )));
+            } else if item.ai_family == libc::AF_INET6
+                && item.ai_addrlen >= std::mem::size_of::<libc::sockaddr_in6>() as _
+            {
+                let address = unsafe { &*(item.ai_addr.cast::<libc::sockaddr_in6>()) };
+                addresses.push(IpAddr::V6(std::net::Ipv6Addr::from(
+                    address.sin6_addr.s6_addr,
+                )));
+            }
+        }
+        current = item.ai_next;
+    }
+    unsafe { libc::freeaddrinfo(results) };
+    SystemDnsLookup::Addresses(addresses)
+}
+
+fn system_dns_error_result(status: libc::c_int) -> SystemDnsLookup {
+    if status == libc::EAI_NONAME || status == libc::EAI_NODATA {
+        SystemDnsLookup::Negative
+    } else {
+        SystemDnsLookup::Failed
+    }
 }
 
 fn domain_resolution_lock(domain: &str) -> Arc<AsyncMutex<()>> {
@@ -189,23 +301,39 @@ fn cache_cf_ips(domain: &str, ips: Vec<IpAddr>, ttl: Duration) {
 
 fn is_usable_edge_ip(ip: &IpAddr) -> bool {
     match ip {
-        IpAddr::V4(ip) => {
-            !ip.is_private()
-                && !ip.is_loopback()
-                && !ip.is_link_local()
-                && !ip.is_broadcast()
-                && !ip.is_unspecified()
-                && !ip.is_multicast()
-                && !((ip.octets()[0] == 100) && (64..=127).contains(&ip.octets()[1]))
-        }
+        IpAddr::V4(ip) => ipv4_public(ip),
         IpAddr::V6(ip) => {
-            !ip.is_loopback()
-                && !ip.is_unspecified()
-                && !ip.is_multicast()
-                && !ip.is_unicast_link_local()
-                && !((ip.segments()[0] & 0xfe00) == 0xfc00)
+            if let Some(mapped) = ip.to_ipv4_mapped() {
+                return ipv4_public(&mapped);
+            }
+            let octets = ip.octets();
+            (octets[0] & 0xe0) == 0x20
+                && !(octets[0] == 0x20 && octets[1] == 0x01 && octets[2] <= 0x01)
+                && !(octets[0] == 0x20 && octets[1] == 0x02)
+                && !(octets[0] == 0x20
+                    && octets[1] == 0x01
+                    && octets[2] == 0x0d
+                    && octets[3] == 0xb8)
         }
     }
+}
+
+fn ipv4_public(ip: &Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    a != 0
+        && a != 10
+        && a != 127
+        && a < 224
+        && !(a == 100 && (b & 0xc0) == 0x40)
+        && !(a == 169 && b == 254)
+        && !(a == 172 && (16..=31).contains(&b))
+        && !(a == 192 && b == 168)
+        && !(a == 192 && b == 0 && c == 0)
+        && !(a == 192 && b == 0 && c == 2)
+        && !(a == 192 && b == 88 && c == 99)
+        && !(a == 198 && (b == 18 || b == 19))
+        && !(a == 198 && b == 51 && c == 100)
+        && !(a == 203 && b == 0 && c == 113)
 }
 
 fn doh_answers(body: &[u8]) -> Vec<IpAddr> {
@@ -299,8 +427,9 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        CfDomainLocks, cache_cf_ips, cached_cf_ips, clear_cf_ip, doh_answers, resolve_cf_ips_with,
-        resolve_cf_ips_with_timeouts, retain_active_domain_locks,
+        CfDomainLocks, SystemDnsLookup, cache_cf_ips, cached_cf_ips, clear_cf_ip, doh_answers,
+        is_usable_edge_ip, resolve_cf_ips_with, resolve_cf_ips_with_status,
+        resolve_cf_ips_with_timeouts, retain_active_domain_locks, system_dns_error_result,
     };
 
     #[test]
@@ -314,6 +443,84 @@ mod tests {
             ["2606:4700:4700::1111", "104.21.75.42"]
         );
         assert!(doh_answers(br#"{"Status":2,"Answer":[]}"#).is_empty());
+    }
+
+    #[tokio::test]
+    async fn d2o_route_dns_public_ip_filter_matches_shared_vectors() {
+        let mut output = String::new();
+        for line in include_str!("../tests/fixtures/d2o_route_dns_public_ips.tsv").lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut fields = line.split_whitespace();
+            let name = fields.next().expect("имя fixture");
+            let address = fields
+                .next()
+                .expect("адрес fixture")
+                .parse::<IpAddr>()
+                .expect("IP fixture");
+            let expected = fields.next().expect("ожидание fixture") == "1";
+            assert!(fields.next().is_none(), "лишнее поле в fixture {name}");
+
+            let actual = is_usable_edge_ip(&address);
+            assert_eq!(actual, expected, "{name}: {address}");
+            use std::fmt::Write as _;
+            writeln!(&mut output, "{name}={}", u8::from(actual)).unwrap();
+        }
+
+        let negative_domain = "kws2.negative-system-dns.example";
+        clear_cf_ip(negative_domain);
+        assert_eq!(
+            system_dns_error_result(libc::EAI_NONAME),
+            SystemDnsLookup::Negative
+        );
+        assert_eq!(
+            system_dns_error_result(libc::EAI_NODATA),
+            SystemDnsLookup::Negative
+        );
+        let negative_doh_calls = Arc::new(AtomicUsize::new(0));
+        let negative_doh_calls_for_lookup = Arc::clone(&negative_doh_calls);
+        let negative = resolve_cf_ips_with_status(
+            negative_domain,
+            || async { system_dns_error_result(libc::EAI_NONAME) },
+            move || async move {
+                negative_doh_calls_for_lookup.fetch_add(1, Ordering::Relaxed);
+                Some(vec!["188.114.97.1".parse().unwrap()])
+            },
+        )
+        .await;
+        assert!(negative.is_none());
+        assert_eq!(negative_doh_calls.load(Ordering::Relaxed), 0);
+        output.push_str("system-negative=skip\n");
+
+        let transient_domain = "kws2.transient-system-dns.example";
+        clear_cf_ip(transient_domain);
+        assert_eq!(
+            system_dns_error_result(libc::EAI_AGAIN),
+            SystemDnsLookup::Failed
+        );
+        let transient_doh_calls = Arc::new(AtomicUsize::new(0));
+        let transient_doh_calls_for_lookup = Arc::clone(&transient_doh_calls);
+        let transient = resolve_cf_ips_with_status(
+            transient_domain,
+            || async { system_dns_error_result(libc::EAI_AGAIN) },
+            move || async move {
+                transient_doh_calls_for_lookup.fetch_add(1, Ordering::Relaxed);
+                Some(vec!["188.114.97.1".parse().unwrap()])
+            },
+        )
+        .await;
+        assert_eq!(
+            transient,
+            Some(vec!["188.114.97.1".parse::<IpAddr>().unwrap()])
+        );
+        assert_eq!(transient_doh_calls.load(Ordering::Relaxed), 1);
+        output.push_str("system-transient=fallback\n");
+
+        if let Some(path) = std::env::var_os("R2O_TELEGRAM_ROUTE_DNS_DIFF_OUTPUT") {
+            std::fs::write(path, output).expect("записать C/Rust route-DNS результат");
+        }
     }
 
     #[tokio::test]
