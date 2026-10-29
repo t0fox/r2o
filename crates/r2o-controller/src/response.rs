@@ -812,7 +812,9 @@ fn effective_probe_timeout(timeout: Duration) -> Duration {
 }
 
 fn raw_split_enabled(cuts: &[usize], no_raw: bool, raw_supported: impl FnOnce() -> bool) -> bool {
-    !cuts.is_empty() && !no_raw && raw_supported()
+    // On Linux d2o assumes raw support; a permission failure is a local probe
+    // error, not a reason to reinterpret the measured split as socket writes.
+    !cuts.is_empty() && !no_raw && (cfg!(target_os = "linux") || raw_supported())
 }
 
 /// Подтвердить, что обычный байт данных TCP дошёл до стека TCP узла.
@@ -1321,11 +1323,22 @@ mod tcp_split_transport_tests {
     use std::time::Duration;
 
     #[test]
-    fn split_probes_use_raw_packets_only_when_the_donor_executor_is_enabled() {
+    #[cfg(target_os = "linux")]
+    fn split_probes_follow_the_donor_linux_gate_without_cap_net_raw() {
         assert!(raw_split_enabled(&[1], false, || true));
         assert!(!raw_split_enabled(&[], false, || panic!("no cuts")));
         assert!(!raw_split_enabled(&[1], true, || panic!("raw disabled")));
-        assert!(!raw_split_enabled(&[1], false, || false));
+        assert!(raw_split_enabled(&[1], false, || false));
+        if let Ok(path) = std::env::var("R2O_RAW_SPLIT_SUPPORT_DIFF_OUTPUT") {
+            std::fs::write(
+                path,
+                format!(
+                    "raw_split={}\n",
+                    u8::from(raw_split_enabled(&[1], false, || false))
+                ),
+            )
+            .unwrap();
+        }
         assert_eq!(
             effective_probe_timeout(Duration::ZERO),
             Duration::from_secs(6)
