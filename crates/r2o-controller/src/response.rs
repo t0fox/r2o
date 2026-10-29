@@ -13,9 +13,8 @@ use crate::classify::{
 use crate::hello::legacy_client_hello;
 use serde::{Deserialize, Serialize};
 
-const PROBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(6);
 const PROBE_SEND_TIMEOUT: Duration = Duration::from_secs(8);
-const PROBE_WAIT_CEILING: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Scan12 {
@@ -692,8 +691,9 @@ pub(crate) fn probe_trigger(
     client_tcp_has_timestamps: Option<bool>,
     cancel: Option<&AtomicBool>,
 ) -> Result<ProbeOutcome, ProbeError> {
+    let timeout = effective_probe_timeout(timeout);
     #[cfg(target_os = "linux")]
-    if raw_split_enabled(cuts, no_raw, true) {
+    if raw_split_enabled(cuts, no_raw, crate::raw_probe::raw_supported) {
         return crate::raw_probe::probe_tcp_split(
             target,
             trigger,
@@ -706,7 +706,7 @@ pub(crate) fn probe_trigger(
         );
     }
 
-    let (socket, _) = dial_probe_target(target, PROBE_CONNECT_TIMEOUT, mark)?;
+    let (socket, _) = dial_probe_target(target, timeout, mark)?;
     let fd = socket.as_raw_fd();
     for span in split_offsets(cuts, trigger.payload.len(), 8) {
         let mut offset = span.from;
@@ -759,12 +759,7 @@ pub(crate) fn probe_trigger(
         }
     }
 
-    let wait = if timeout.is_zero() || timeout > PROBE_WAIT_CEILING {
-        PROBE_WAIT_CEILING
-    } else {
-        timeout
-    };
-    let deadline = Instant::now() + wait;
+    let deadline = Instant::now() + timeout;
     match poll_once(fd, libc::POLLIN, deadline) {
         Ok(true) => {}
         Ok(false) => return Ok(ProbeOutcome::Rejected),
@@ -792,8 +787,16 @@ pub(crate) fn probe_trigger(
     )
 }
 
-fn raw_split_enabled(cuts: &[usize], no_raw: bool, raw_supported: bool) -> bool {
-    !cuts.is_empty() && !no_raw && raw_supported
+fn effective_probe_timeout(timeout: Duration) -> Duration {
+    if timeout.is_zero() {
+        DEFAULT_PROBE_TIMEOUT
+    } else {
+        timeout
+    }
+}
+
+fn raw_split_enabled(cuts: &[usize], no_raw: bool, raw_supported: impl FnOnce() -> bool) -> bool {
+    !cuts.is_empty() && !no_raw && raw_supported()
 }
 
 /// Подтвердить, что обычный байт данных TCP дошёл до стека TCP узла.
@@ -1293,9 +1296,9 @@ mod x509_tests {
 
 #[cfg(test)]
 mod tcp_split_transport_tests {
-    use super::{probe_trigger, raw_split_enabled};
+    use super::{effective_probe_timeout, probe_trigger, raw_split_enabled};
     use crate::classify::{Accept, ProbeError, ProbeTarget, Trigger};
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::atomic::AtomicBool;
     use std::thread;
@@ -1303,10 +1306,18 @@ mod tcp_split_transport_tests {
 
     #[test]
     fn split_probes_use_raw_packets_only_when_the_donor_executor_is_enabled() {
-        assert!(raw_split_enabled(&[1], false, true));
-        assert!(!raw_split_enabled(&[], false, true));
-        assert!(!raw_split_enabled(&[1], true, true));
-        assert!(!raw_split_enabled(&[1], false, false));
+        assert!(raw_split_enabled(&[1], false, || true));
+        assert!(!raw_split_enabled(&[], false, || panic!("no cuts")));
+        assert!(!raw_split_enabled(&[1], true, || panic!("raw disabled")));
+        assert!(!raw_split_enabled(&[1], false, || false));
+        assert_eq!(
+            effective_probe_timeout(Duration::ZERO),
+            Duration::from_secs(6)
+        );
+        assert_eq!(
+            effective_probe_timeout(Duration::from_secs(7)),
+            Duration::from_secs(7)
+        );
     }
 
     #[test]
@@ -1343,5 +1354,42 @@ mod tcp_split_transport_tests {
 
         assert!(matches!(result, Err(ProbeError::Local(error)) if error == "context canceled"));
         assert_eq!(server.join().unwrap(), b"AB");
+    }
+
+    #[test]
+    fn socket_probe_waits_for_the_configured_response_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 4];
+            stream.read_exact(&mut request).unwrap();
+            thread::sleep(Duration::from_millis(5_500));
+            stream.write_all(b"x").unwrap();
+        });
+        let target = ProbeTarget {
+            host: "127.0.0.1".into(),
+            port,
+        };
+        let trigger = Trigger {
+            name: "fixture".into(),
+            payload: b"PING".to_vec(),
+            accept: Accept::Any,
+        };
+
+        let result = probe_trigger(
+            &target,
+            &trigger,
+            &[],
+            Duration::ZERO,
+            Duration::from_secs(6),
+            Some(0),
+            true,
+            None,
+            None,
+        );
+
+        assert_eq!(result.unwrap(), crate::classify::ProbeOutcome::Accepted);
+        server.join().unwrap();
     }
 }
