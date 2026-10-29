@@ -32,6 +32,22 @@ static int challenge_blocks(d2k_sched *scheduler, const char *name,
                          "192.0.2.10", 443, D2K_SUSPECT_SILENT);
 }
 
+static int ech_witness_proof(int status, d2k_ver_level level,
+                             int ech_accepted, int name_ok, int body_complete)
+{
+    task candidate = {0};
+    snprintf(candidate.name, sizeof candidate.name, "%s", "ech-exhausted.example");
+    snprintf(candidate.ech_origin, sizeof candidate.ech_origin, "%s", "witness.example");
+    candidate.transport = 6;
+    candidate.ech_offer = 1;
+    candidate.ver.ech_accepted = ech_accepted;
+    candidate.ver.name_ok = name_ok;
+    candidate.ver.body_complete = body_complete;
+    candidate.ver.status = status;
+    candidate.ver.level = level;
+    return ech_witness_transport_proof(&candidate);
+}
+
 int main(void)
 {
     d2k_sched *scheduler = calloc(1, sizeof *scheduler);
@@ -85,6 +101,30 @@ int main(void)
                                                      "192.0.2.20", 443, D2K_SUSPECT_RST_AFTER_APP));
     printf("late_only_other_endpoint %d\n", target_blocks(scheduler, "clear.example", 6, 4,
                                                             "192.0.2.22", 443, D2K_SUSPECT_RST_AFTER_APP));
+
+    task ech_witness_exhausted = {0};
+    snprintf(ech_witness_exhausted.name, sizeof ech_witness_exhausted.name,
+             "%s", "ech-exhausted.example");
+    snprintf(ech_witness_exhausted.ip, sizeof ech_witness_exhausted.ip,
+             "%s", "192.0.2.23");
+    ech_witness_exhausted.port = 443;
+    ech_witness_exhausted.transport = 6;
+    ech_witness_exhausted.family = 4;
+    ech_witness_exhausted.ech_offer = 1;
+    ech_witness_exhausted.trigger_code = D2K_SUSPECT_RST_AFTER_APP;
+    /* ECH witness exhaustion reaches cooldown_record(..., 3) in the donor. */
+    cooldown_record(scheduler, &ech_witness_exhausted, 3);
+    printf("ech_exhausted_ordinary %d\n", target_blocks(scheduler, "ech-exhausted.example", 6, 4,
+                                                          "192.0.2.23", 443, D2K_SUSPECT_RST));
+    printf("ech_exhausted_late %d\n", target_blocks(scheduler, "ech-exhausted.example", 6, 4,
+                                                      "192.0.2.23", 443, D2K_SUSPECT_RST_AFTER_APP));
+    printf("ech_witness_proof_accepted %d\n", ech_witness_proof(403, D2K_VER_CHALLENGE, 1, 1, 1));
+    printf("ech_witness_proof_rate_limit %d\n", ech_witness_proof(429, D2K_VER_CHALLENGE, 1, 1, 1));
+    printf("ech_witness_proof_rate_limit_blocked %d\n", ech_witness_proof(429, D2K_VER_BLOCKPAGE, 1, 1, 1));
+    printf("ech_witness_proof_rate_limit_denied %d\n", ech_witness_proof(429, D2K_VER_DENIED, 1, 1, 1));
+    printf("ech_witness_proof_missing_acceptance %d\n", ech_witness_proof(403, D2K_VER_CHALLENGE, 0, 1, 1));
+    printf("ech_witness_proof_wrong_name %d\n", ech_witness_proof(403, D2K_VER_CHALLENGE, 1, 0, 1));
+    printf("ech_witness_proof_incomplete %d\n", ech_witness_proof(403, D2K_VER_CHALLENGE, 1, 1, 0));
 
     task exhausted = {0};
     snprintf(exhausted.name, sizeof exhausted.name, "%s", "exhausted.example");

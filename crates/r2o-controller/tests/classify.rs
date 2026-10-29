@@ -245,6 +245,16 @@ impl ProbeBackend for AcceptedUnplannablePoison {
         true
     }
 
+    fn neutral_ack(
+        &mut self,
+        _target: &ProbeTarget,
+        _timeout: Duration,
+        _mark: Option<u32>,
+        _cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<bool, ProbeError> {
+        Ok(true)
+    }
+
     fn sweep_poisons(
         &mut self,
         _target: &ProbeTarget,
@@ -599,11 +609,24 @@ fn accepted_but_unplannable_poison_keeps_opaque_verdict_and_search_ownership() {
 
     let owns_search =
         result.raw_usable && result.verdict == Verdict::Opaque && result.hit.is_none();
+    let control_failed = result
+        .trace
+        .iter()
+        .find(|observation| observation.probe == "control")
+        .is_some_and(|observation| observation.pass == 0 && observation.fail > 0);
+    let neutral_ack_passed = result
+        .trace
+        .iter()
+        .find(|observation| observation.probe == "neutral-ack")
+        .is_some_and(|observation| observation.pass == 1);
     if let Ok(path) = std::env::var("R2O_BRIDGE_UNPLANNABLE_DIFF_OUTPUT") {
         std::fs::write(
             path,
             format!(
-                "verdict={} plan={} owns_search={} content={} poison={} syn={}\n",
+                "control={} ack={} raw_usable={} verdict={} plan={} owns_search={} content={} poison={} syn={}\n",
+                usize::from(control_failed),
+                usize::from(neutral_ack_passed),
+                usize::from(result.raw_usable),
                 result.verdict.as_str(),
                 usize::from(result.hit.is_some()),
                 usize::from(owns_search),
@@ -618,6 +641,11 @@ fn accepted_but_unplannable_poison_keeps_opaque_verdict_and_search_ownership() {
     assert!(result.raw_usable);
     assert!(result.hit.is_none());
     assert!(owns_search);
+    assert!(control_failed, "the control request must fail before ACK");
+    assert!(
+        neutral_ack_passed,
+        "the neutral data byte must be acknowledged"
+    );
     assert!(result.reason.contains("буфер травится"));
     assert!(result.reason.contains("syndata"));
     assert!(result.reason.contains("SYN"));

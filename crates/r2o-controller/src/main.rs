@@ -7994,6 +7994,8 @@ struct DiscoveryWorker {
     dead_addresses: Arc<std::sync::Mutex<R2oDeadAddressCache>>,
     challenge_cooldowns: HashMap<(String, u8, u8), std::time::Instant>,
     cooldown_ring: R2oDiscoveryCooldownRing,
+    ech_witness_exhaustions:
+        Arc<std::sync::Mutex<HashSet<r2o_controller::discovery::DiscoveryTarget>>>,
     ech_input_clearable_failures: HashSet<R2oDiscoveryFailureKey>,
     ech_input_names: VecDeque<(String, u8)>,
     clear_streaks: HashMap<R2oDiscoveryFailureKey, u8>,
@@ -8964,6 +8966,8 @@ impl DiscoveryWorker {
         let runner_client_snapshot_targets = Arc::clone(&client_snapshot_targets);
         let ech_challenges = Arc::new(std::sync::Mutex::new(R2oEchChallengeCache::default()));
         let runner_ech_challenges = Arc::clone(&ech_challenges);
+        let ech_witness_exhaustions = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let runner_ech_witness_exhaustions = Arc::clone(&ech_witness_exhaustions);
         let runner_recent_tcp_names = Arc::clone(&recent_tcp_names);
         let runner_send_cap = Arc::clone(&send_cap);
         let ech_witness_resolutions = Arc::new(std::sync::Mutex::new(
@@ -10340,6 +10344,12 @@ impl DiscoveryWorker {
                 fetch.cloudflare_challenge
                     || fetch.http_outcome == r2o_controller::fetch::R2oFetchHttpOutcome::LegalDenial
             });
+            let ech_witness_exhausted = !rejected_witnesses.is_empty()
+                && target.shape == SHAPE_ECH_TCP
+                && !ech_replay
+                && result.as_ref().is_ok_and(|fetch| {
+                    r2o_ech_witness_transport_proof(&target, &selected_config, fetch)
+                });
             let mut outcome = r2o_confirm_discovery_outcome(outcome, result, applied);
             if let Some(plan) = owned_fallback_plan {
                 outcome.plan_text = Some(plan);
@@ -10378,6 +10388,13 @@ impl DiscoveryWorker {
                 outcome
                     .detail
                     .push_str("; ECH-свидетели с challenge временно исключены на 30 минут");
+            }
+            if ech_witness_exhausted && outcome.plan_text.is_none() {
+                outcome.retry_after = Some(R2O_DISCOVERY_INCOMPLETE_RETRY);
+                runner_ech_witness_exhaustions
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(target.clone());
             }
             if let Some(plan) = outcome.plan_text.as_deref() {
                 r2o_discovery_record_plan_progress(
@@ -10523,6 +10540,7 @@ impl DiscoveryWorker {
             network_whitelist_updates,
         );
         worker.suspect_fingerprints = suspect_fingerprints;
+        worker.ech_witness_exhaustions = ech_witness_exhaustions;
         worker.dead_addresses = dead_addresses;
         worker
     }
@@ -10826,6 +10844,7 @@ impl DiscoveryWorker {
             dead_addresses: Arc::new(std::sync::Mutex::new(R2oDeadAddressCache::default())),
             challenge_cooldowns: HashMap::new(),
             cooldown_ring: R2oDiscoveryCooldownRing::default(),
+            ech_witness_exhaustions: Arc::new(std::sync::Mutex::new(HashSet::new())),
             ech_input_clearable_failures: HashSet::new(),
             ech_input_names: VecDeque::new(),
             clear_streaks: HashMap::new(),
@@ -12490,6 +12509,13 @@ impl DiscoveryWorker {
         }
         let task_key = r2o_discovery_task_key(&outcome.target);
         let failure_key = r2o_discovery_failure_key(&outcome.target);
+        let ech_witness_exhausted = self
+            .ech_witness_exhaustions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&outcome.target)
+            && !outcome.queue_expired
+            && outcome.plan_text.is_none();
         let tcp_address_failure = outcome.address_failure
             && r2o_discovery_transport(&outcome.target) == 6
             && !outcome.queue_expired;
@@ -12588,7 +12614,9 @@ impl DiscoveryWorker {
             && (!tcp_address_failure || post_ack_address_failure)
         {
             self.completed.remove(&task_key);
-            if !r2o_discovery_volume_challenge_outcome(&outcome) {
+            if ech_witness_exhausted {
+                self.r2o_record_late_rst_only_cooldown(&outcome.target);
+            } else if !r2o_discovery_volume_challenge_outcome(&outcome) {
                 let failed_at = std::time::Instant::now();
                 let retry_after = outcome.retry_after.unwrap_or(R2O_DISCOVERY_FAILURE_RETRY);
                 if self.r2o_record_discovery_cooldown(
@@ -12816,7 +12844,15 @@ fn r2o_ech_witness_transport_proof(
     target.shape == SHAPE_ECH_TCP
         && config.origin_name != target.host
         && fetch.tls.is_some()
-        && fetch.cloudflare_challenge
+        && fetch.ech_accepted == Some(true)
+        && fetch.peer_name_ok == Some(true)
+        && (fetch.cloudflare_challenge
+            || fetch.status == 429
+                && !matches!(
+                    fetch.http_outcome,
+                    r2o_controller::fetch::R2oFetchHttpOutcome::Blocked
+                        | r2o_controller::fetch::R2oFetchHttpOutcome::LegalDenial
+                ))
         && fetch.complete
         && (100..=599).contains(&fetch.status)
 }
@@ -22967,6 +23003,9 @@ mod tests {
             dead_addresses: Arc::new(std::sync::Mutex::new(super::R2oDeadAddressCache::default())),
             challenge_cooldowns: std::collections::HashMap::new(),
             cooldown_ring: super::R2oDiscoveryCooldownRing::default(),
+            ech_witness_exhaustions: Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             ech_input_clearable_failures: std::collections::HashSet::new(),
             ech_input_names: std::collections::VecDeque::new(),
             clear_streaks: std::collections::HashMap::new(),
@@ -23292,6 +23331,132 @@ mod tests {
             .queue_with_planned_and_trigger(other_endpoint_target, false, Some(5));
         assert!(!late_only_other_endpoint_blocked);
 
+        let mut ech_exhausted_worker = r2o_test_discovery_worker_without_threads();
+        let ech_exhausted_target = DiscoveryTarget {
+            host: "ech-exhausted.example".into(),
+            endpoint: "192.0.2.23:443".into(),
+            family: 4,
+            shape: SHAPE_ECH_TCP,
+        };
+        ech_exhausted_worker
+            .seen
+            .insert(ech_exhausted_target.clone());
+        ech_exhausted_worker
+            .seen_order
+            .push_back(ech_exhausted_target.clone());
+        ech_exhausted_worker
+            .ech_witness_exhaustions
+            .lock()
+            .unwrap()
+            .insert(ech_exhausted_target.clone());
+        ech_exhausted_worker.r2o_complete_outcome(DiscoveryOutcome {
+            target: ech_exhausted_target.clone(),
+            plan_text: None,
+            detail: "все ECH-свидетели исчерпаны".into(),
+            queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
+            direct_clear: false,
+            volume_recovery: false,
+            volume_fingerprint: None,
+            volume_box_id: None,
+            retry_after: Some(super::R2O_DISCOVERY_INCOMPLETE_RETRY),
+        });
+        let ech_exhausted_ordinary_blocked = !ech_exhausted_worker.queue_with_planned_and_trigger(
+            ech_exhausted_target.clone(),
+            false,
+            Some(1),
+        );
+        ech_exhausted_worker.jobs.0.lock().unwrap().entries.clear();
+        ech_exhausted_worker
+            .measurement_gate
+            .r2o_set_pending_tcp_discovery(0);
+        let ech_exhausted_late_blocked = !ech_exhausted_worker.queue_with_planned_and_trigger(
+            ech_exhausted_target.clone(),
+            false,
+            Some(5),
+        );
+        assert!(
+            !ech_exhausted_ordinary_blocked,
+            "ECH witness exhaustion must not cool down ordinary signals"
+        );
+        assert!(
+            ech_exhausted_late_blocked,
+            "ECH witness exhaustion must retain the donor's late-trigger cooldown"
+        );
+
+        let ech_proof_config = r2o_controller::ech::R2oEchConfig {
+            public_name: ech_exhausted_target.host.clone(),
+            origin_name: "witness.example".into(),
+            config_list: vec![1, 2, 3],
+        };
+        let mut ech_proof_fetch = r2o_test_fetch_result();
+        ech_proof_fetch.status = 403;
+        ech_proof_fetch.cloudflare_challenge = true;
+        ech_proof_fetch.ech_accepted = Some(true);
+        ech_proof_fetch.peer_name_ok = Some(true);
+        let ech_witness_proof_accepted = super::r2o_ech_witness_transport_proof(
+            &ech_exhausted_target,
+            &ech_proof_config,
+            &ech_proof_fetch,
+        );
+        let mut ech_rate_limit = ech_proof_fetch.clone();
+        ech_rate_limit.status = 429;
+        ech_rate_limit.cloudflare_challenge = false;
+        ech_rate_limit.http_outcome = r2o_controller::fetch::R2oFetchHttpOutcome::Neutral;
+        let ech_witness_proof_rate_limit = super::r2o_ech_witness_transport_proof(
+            &ech_exhausted_target,
+            &ech_proof_config,
+            &ech_rate_limit,
+        );
+        let mut ech_rate_limit_blocked = ech_rate_limit.clone();
+        ech_rate_limit_blocked.http_outcome = r2o_controller::fetch::R2oFetchHttpOutcome::Blocked;
+        let ech_witness_proof_rate_limit_blocked = super::r2o_ech_witness_transport_proof(
+            &ech_exhausted_target,
+            &ech_proof_config,
+            &ech_rate_limit_blocked,
+        );
+        let mut ech_rate_limit_denied = ech_rate_limit.clone();
+        ech_rate_limit_denied.http_outcome =
+            r2o_controller::fetch::R2oFetchHttpOutcome::LegalDenial;
+        let ech_witness_proof_rate_limit_denied = super::r2o_ech_witness_transport_proof(
+            &ech_exhausted_target,
+            &ech_proof_config,
+            &ech_rate_limit_denied,
+        );
+        let mut ech_missing_acceptance = ech_proof_fetch.clone();
+        ech_missing_acceptance.ech_accepted = Some(false);
+        let ech_witness_proof_missing_acceptance = super::r2o_ech_witness_transport_proof(
+            &ech_exhausted_target,
+            &ech_proof_config,
+            &ech_missing_acceptance,
+        );
+        let mut ech_wrong_name = ech_proof_fetch.clone();
+        ech_wrong_name.peer_name_ok = Some(false);
+        let ech_witness_proof_wrong_name = super::r2o_ech_witness_transport_proof(
+            &ech_exhausted_target,
+            &ech_proof_config,
+            &ech_wrong_name,
+        );
+        let mut ech_incomplete_body = ech_proof_fetch.clone();
+        ech_incomplete_body.complete = false;
+        let ech_witness_proof_incomplete = super::r2o_ech_witness_transport_proof(
+            &ech_exhausted_target,
+            &ech_proof_config,
+            &ech_incomplete_body,
+        );
+        assert!(ech_witness_proof_accepted);
+        assert!(
+            ech_witness_proof_rate_limit,
+            "ECH witness 429 rate limits must match the donor challenge classification"
+        );
+        assert!(!ech_witness_proof_rate_limit_blocked);
+        assert!(!ech_witness_proof_rate_limit_denied);
+        assert!(!ech_witness_proof_missing_acceptance);
+        assert!(!ech_witness_proof_wrong_name);
+        assert!(!ech_witness_proof_incomplete);
+
         let mut exhausted_worker = r2o_test_discovery_worker_without_threads();
         let exhausted_target = DiscoveryTarget {
             host: "exhausted.example".into(),
@@ -23316,13 +23481,22 @@ mod tests {
         assert!(late_only_preserves_exhausted);
         assert!(late_only_preserves_exhausted_trigger);
         let output = format!(
-            "{output}clear_same {}\nclear_other {}\nclear_same_after_expiry {}\nlate_only_ordinary {}\nlate_only_trigger {}\nlate_only_other_endpoint {}\nlate_only_preserves_exhausted {}\nlate_only_preserves_exhausted_trigger {}\n",
+            "{output}clear_same {}\nclear_other {}\nclear_same_after_expiry {}\nlate_only_ordinary {}\nlate_only_trigger {}\nlate_only_other_endpoint {}\nech_exhausted_ordinary {}\nech_exhausted_late {}\nech_witness_proof_accepted {}\nech_witness_proof_rate_limit {}\nech_witness_proof_rate_limit_blocked {}\nech_witness_proof_rate_limit_denied {}\nech_witness_proof_missing_acceptance {}\nech_witness_proof_wrong_name {}\nech_witness_proof_incomplete {}\nlate_only_preserves_exhausted {}\nlate_only_preserves_exhausted_trigger {}\n",
             u8::from(same_signal_blocked),
             u8::from(other_signal_blocked),
             u8::from(same_signal_after_expiry_blocked),
             u8::from(late_only_ordinary_blocked),
             u8::from(late_only_trigger_blocked),
             u8::from(late_only_other_endpoint_blocked),
+            u8::from(ech_exhausted_ordinary_blocked),
+            u8::from(ech_exhausted_late_blocked),
+            u8::from(ech_witness_proof_accepted),
+            u8::from(ech_witness_proof_rate_limit),
+            u8::from(ech_witness_proof_rate_limit_blocked),
+            u8::from(ech_witness_proof_rate_limit_denied),
+            u8::from(ech_witness_proof_missing_acceptance),
+            u8::from(ech_witness_proof_wrong_name),
+            u8::from(ech_witness_proof_incomplete),
             u8::from(late_only_preserves_exhausted),
             u8::from(late_only_preserves_exhausted_trigger),
         );
@@ -34912,6 +35086,9 @@ mod tests {
             dead_addresses: Arc::new(std::sync::Mutex::new(super::R2oDeadAddressCache::default())),
             challenge_cooldowns: std::collections::HashMap::new(),
             cooldown_ring: super::R2oDiscoveryCooldownRing::default(),
+            ech_witness_exhaustions: Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             ech_input_clearable_failures: std::collections::HashSet::new(),
             ech_input_names: std::collections::VecDeque::new(),
             clear_streaks: std::collections::HashMap::new(),
