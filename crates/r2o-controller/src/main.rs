@@ -1405,15 +1405,21 @@ const R2O_CATALOG_SAVE_INTERVAL: std::time::Duration = std::time::Duration::from
 struct R2oCatalogPersistence {
     last_save: std::time::Instant,
     dirty: bool,
+    base_catalog: Catalog,
     catalog_snapshot: Arc<std::sync::Mutex<Catalog>>,
 }
 
 #[cfg(unix)]
 impl R2oCatalogPersistence {
     fn new(started: std::time::Instant, catalog_snapshot: Arc<std::sync::Mutex<Catalog>>) -> Self {
+        let base_catalog = catalog_snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         Self {
             last_save: started,
             dirty: false,
+            base_catalog,
             catalog_snapshot,
         }
     }
@@ -1459,7 +1465,11 @@ impl R2oCatalogPersistence {
         path: &Path,
         wall_now: i64,
     ) -> Result<(), Box<dyn Error>> {
-        catalog.save_atomic(path, wall_now)?;
+        let (_lock, latest) = locked_catalog(path, catalog)?;
+        let merged = Catalog::merge_concurrent_changes(&self.base_catalog, catalog, &latest)?;
+        merged.save_atomic(path, wall_now)?;
+        *catalog = merged;
+        self.base_catalog = catalog.clone();
         *self
             .catalog_snapshot
             .lock()
@@ -19277,6 +19287,7 @@ impl ControlClient {
         }
         *catalog = updated;
         if let Some(persistence) = persistence.as_deref_mut() {
+            drop(_lock);
             persistence.persist(catalog, catalog_path, now)?;
         }
         println!(
@@ -33866,7 +33877,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn d2o_catalog_persist_overwrites_concurrent_external_update() {
+    fn d2o_catalog_save_atomic_overwrites_concurrent_external_update() {
         let [local_id, external_id] = include_str!("../tests/fixtures/d2o_catalog_persist.tsv")
             .lines()
             .find(|line| !line.starts_with('#') && !line.trim().is_empty())
@@ -33892,27 +33903,13 @@ mod tests {
             id: local_id.into(),
             ..BoxRecord::default()
         });
-        let started = std::time::Instant::now();
-        let snapshot = std::sync::Arc::new(std::sync::Mutex::new(base.clone()));
-        let mut persistence = super::R2oCatalogPersistence::new(started, snapshot);
-        super::persist_catalog_update(&local, &path, 2, Some(&mut persistence)).unwrap();
         let mut external = base;
         external.boxes.push(BoxRecord {
             id: external_id.into(),
             ..BoxRecord::default()
         });
         external.save_atomic(&path, 3).unwrap();
-
-        assert!(
-            persistence
-                .persist_due(
-                    &mut local,
-                    &path,
-                    started + std::time::Duration::from_secs(60),
-                    4,
-                )
-                .unwrap()
-        );
+        local.save_atomic(&path, 4).unwrap();
         let saved = Catalog::load(&path).unwrap();
         let ids = saved
             .boxes
@@ -33928,7 +33925,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn delayed_catalog_persist_keeps_runtime_timestamp_and_overwrites_external_update() {
+    fn delayed_catalog_persist_keeps_runtime_timestamp_and_merges_external_update() {
         let work = std::env::temp_dir().join(format!(
             "r2o-catalog-runtime-merge-{}-{}",
             std::process::id(),
@@ -33976,7 +33973,7 @@ mod tests {
                 )
                 .is_ok()
         );
-        assert_eq!(Catalog::load(&path).unwrap().boxes[0].updated, 1);
+        assert_eq!(Catalog::load(&path).unwrap().boxes[0].updated, 3);
         assert_eq!(local.boxes[0].bindings[0].recheck_mono, Some(started));
         assert_eq!(
             persistence.catalog_snapshot.lock().unwrap().boxes[0].bindings[0].recheck_mono,
@@ -34026,6 +34023,192 @@ mod tests {
                 .collect::<std::collections::HashSet<_>>(),
             std::collections::HashSet::from(["ipv4", "ipv6"])
         );
+        std::fs::remove_dir_all(work).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delayed_family_controller_flushes_preserve_disjoint_catalog_updates() {
+        let work = std::env::temp_dir().join(format!(
+            "r2o-family-catalog-flush-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&work).unwrap();
+        let path = work.join("catalog.json");
+        let mut base = Catalog::default();
+        base.boxes.push(BoxRecord {
+            id: "shared-device".into(),
+            plans: vec![
+                r2o_controller::catalog::Plan {
+                    id: "base-plan".into(),
+                    proto: "tls".into(),
+                    text: "base".into(),
+                    added: 1,
+                    successes: 1,
+                    enabled: true,
+                },
+                r2o_controller::catalog::Plan {
+                    id: "retired-plan".into(),
+                    proto: "tls".into(),
+                    text: "retired".into(),
+                    added: 1,
+                    successes: 1,
+                    enabled: true,
+                },
+            ],
+            bindings: vec![
+                r2o_controller::catalog::Binding {
+                    kind: "name".into(),
+                    target: "video.example".into(),
+                    plan_id: "base-plan".into(),
+                    confirmed: 1,
+                    successes: 1,
+                    family: 4,
+                    ..r2o_controller::catalog::Binding::default()
+                },
+                r2o_controller::catalog::Binding {
+                    kind: "name".into(),
+                    target: "retired.example".into(),
+                    plan_id: "retired-plan".into(),
+                    confirmed: 1,
+                    successes: 1,
+                    family: 4,
+                    ..r2o_controller::catalog::Binding::default()
+                },
+            ],
+            ..BoxRecord::default()
+        });
+        base.save_atomic(&path, 1).unwrap();
+        let started = std::time::Instant::now();
+        let mut ipv4 = base.clone();
+        let mut ipv6 = base.clone();
+        let mut ipv4_persistence = super::R2oCatalogPersistence::new(
+            started,
+            std::sync::Arc::new(std::sync::Mutex::new(base.clone())),
+        );
+        let mut ipv6_persistence = super::R2oCatalogPersistence::new(
+            started,
+            std::sync::Arc::new(std::sync::Mutex::new(base.clone())),
+        );
+
+        {
+            let (_lock, mut current) =
+                super::locked_catalog_for_persistence(&path, &ipv4, Some(&ipv4_persistence))
+                    .unwrap();
+            current.boxes.push(BoxRecord {
+                id: "ipv4-discovery".into(),
+                ..BoxRecord::default()
+            });
+            current.boxes[0]
+                .plans
+                .retain(|plan| plan.id != "retired-plan");
+            current.boxes[0]
+                .bindings
+                .retain(|binding| binding.plan_id != "retired-plan");
+            let shared = current
+                .boxes
+                .iter_mut()
+                .find(|record| record.id == "shared-device")
+                .unwrap();
+            shared.plans[0].successes += 1;
+            shared.bindings[0].successes += 1;
+            shared.plans.push(r2o_controller::catalog::Plan {
+                id: "ipv4-plan".into(),
+                proto: "tls".into(),
+                text: "ipv4".into(),
+                added: 2,
+                successes: 1,
+                enabled: true,
+            });
+            shared.bindings.push(r2o_controller::catalog::Binding {
+                kind: "name".into(),
+                target: "video.example".into(),
+                plan_id: "ipv4-plan".into(),
+                family: 4,
+                ..r2o_controller::catalog::Binding::default()
+            });
+            super::persist_catalog_update(&current, &path, 2, Some(&mut ipv4_persistence)).unwrap();
+            ipv4 = current;
+        }
+
+        {
+            let (_lock, mut current) =
+                super::locked_catalog_for_persistence(&path, &ipv6, Some(&ipv6_persistence))
+                    .unwrap();
+            current.boxes.push(BoxRecord {
+                id: "ipv6-discovery".into(),
+                ..BoxRecord::default()
+            });
+            let shared = current
+                .boxes
+                .iter_mut()
+                .find(|record| record.id == "shared-device")
+                .unwrap();
+            shared.plans[0].successes += 2;
+            shared.bindings[0].successes += 2;
+            shared.plans.push(r2o_controller::catalog::Plan {
+                id: "ipv6-plan".into(),
+                proto: "tls".into(),
+                text: "ipv6".into(),
+                added: 3,
+                successes: 1,
+                enabled: true,
+            });
+            shared.bindings.push(r2o_controller::catalog::Binding {
+                kind: "name".into(),
+                target: "video.example".into(),
+                plan_id: "ipv6-plan".into(),
+                family: 6,
+                ..r2o_controller::catalog::Binding::default()
+            });
+            super::persist_catalog_update(&current, &path, 3, Some(&mut ipv6_persistence)).unwrap();
+            ipv6 = current;
+        }
+
+        ipv4_persistence
+            .persist_on_shutdown(&mut ipv4, &path, 4)
+            .unwrap();
+        ipv6_persistence
+            .persist_on_shutdown(&mut ipv6, &path, 5)
+            .unwrap();
+
+        let saved = Catalog::load(&path).unwrap();
+        assert_eq!(
+            saved
+                .boxes
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<std::collections::HashSet<_>>(),
+            std::collections::HashSet::from(["ipv4-discovery", "ipv6-discovery", "shared-device"])
+        );
+        let shared = saved
+            .boxes
+            .iter()
+            .find(|record| record.id == "shared-device")
+            .unwrap();
+        assert_eq!(
+            shared
+                .plans
+                .iter()
+                .map(|plan| plan.id.as_str())
+                .collect::<std::collections::HashSet<_>>(),
+            std::collections::HashSet::from(["base-plan", "ipv4-plan", "ipv6-plan"])
+        );
+        assert_eq!(shared.plans[0].successes, 4);
+        assert_eq!(
+            shared
+                .bindings
+                .iter()
+                .filter(|binding| binding.plan_id != "base-plan")
+                .map(|binding| binding.family)
+                .collect::<std::collections::HashSet<_>>(),
+            std::collections::HashSet::from([4, 6])
+        );
+        assert_eq!(shared.bindings[0].successes, 4);
         std::fs::remove_dir_all(work).unwrap();
     }
 

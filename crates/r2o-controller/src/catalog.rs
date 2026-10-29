@@ -280,6 +280,44 @@ impl DomainState {
 }
 
 impl Catalog {
+    /// Combine the local changes made since `base` with a newer persisted snapshot.
+    ///
+    /// Catalog persistence is intentionally delayed. Family-specific controllers
+    /// can therefore hold stale in-memory snapshots at the same time; applying
+    /// only one full snapshot would discard the other controller's changes.
+    pub fn merge_concurrent_changes(
+        base: &Self,
+        local: &Self,
+        latest: &Self,
+    ) -> Result<Self, CatalogError> {
+        let mut merged = Self {
+            boxes: merge_entries(
+                &base.boxes,
+                &local.boxes,
+                &latest.boxes,
+                |record| record.id.clone(),
+                merge_box_record,
+            ),
+            domain_state: merge_optional(
+                base.domain_state.as_ref(),
+                local.domain_state.as_ref(),
+                latest.domain_state.as_ref(),
+                merge_domain_state,
+            ),
+            network_whitelist: merge_optional(
+                base.network_whitelist.as_ref(),
+                local.network_whitelist.as_ref(),
+                latest.network_whitelist.as_ref(),
+                merge_network_whitelist,
+            ),
+        };
+        if let Some(state) = &mut merged.domain_state {
+            state.restore()?;
+        }
+        merged.validate()?;
+        Ok(merged)
+    }
+
     pub fn parse(input: &[u8]) -> Result<Self, CatalogError> {
         if input.len() as u64 > MAX_CATALOG_BYTES {
             return Err(CatalogError::new("catalog file exceeds 64 MiB"));
@@ -628,6 +666,387 @@ fn write_new_catalog(path: &Path, content: &[u8]) -> Result<bool, CatalogError> 
     })();
     let _ = fs::remove_file(&temporary);
     result
+}
+
+fn merge_optional<T: Clone + PartialEq>(
+    base: Option<&T>,
+    local: Option<&T>,
+    latest: Option<&T>,
+    merge: impl Fn(Option<&T>, &T, &T) -> T,
+) -> Option<T> {
+    if local == base {
+        return latest.cloned();
+    }
+    if latest == base || local == latest {
+        return local.cloned();
+    }
+    match (local, latest) {
+        (Some(local), Some(latest)) => Some(merge(base, local, latest)),
+        // A deletion based on the shared baseline wins over a stale edit.
+        _ => None,
+    }
+}
+
+fn merge_entries<T, K>(
+    base: &[T],
+    local: &[T],
+    latest: &[T],
+    key: impl Fn(&T) -> K,
+    merge: impl Fn(Option<&T>, &T, &T) -> T,
+) -> Vec<T>
+where
+    T: Clone + PartialEq,
+    K: Clone + PartialEq,
+{
+    let mut keys = Vec::new();
+    for record in base.iter().chain(local).chain(latest) {
+        let record_key = key(record);
+        if !keys.contains(&record_key) {
+            keys.push(record_key);
+        }
+    }
+
+    let mut merged = Vec::with_capacity(keys.len());
+    for record_key in keys {
+        let base_record = base.iter().find(|record| key(record) == record_key);
+        let local_record = local.iter().find(|record| key(record) == record_key);
+        let latest_record = latest.iter().find(|record| key(record) == record_key);
+        let selected = match (base_record, local_record, latest_record) {
+            (None, None, None) => None,
+            (None, Some(local), Some(latest)) if local != latest => {
+                Some(merge(None, local, latest))
+            }
+            (None, Some(local), _) => Some(local.clone()),
+            (None, None, Some(latest)) => Some(latest.clone()),
+            (Some(_), None, None) => None,
+            (Some(base), None, Some(latest)) if base == latest => None,
+            (Some(_), None, Some(_)) => None,
+            (Some(base), Some(local), None) if base == local => None,
+            (Some(_), Some(_), None) => None,
+            (Some(base), Some(local), Some(latest)) if local == base => Some(latest.clone()),
+            (Some(base), Some(local), Some(latest)) if latest == base || local == latest => {
+                Some(local.clone())
+            }
+            (Some(base), Some(local), Some(latest)) => Some(merge(Some(base), local, latest)),
+        };
+        if let Some(record) = selected {
+            merged.push(record);
+        }
+    }
+    merged
+}
+
+fn merge_field<T: Clone + PartialEq>(base: Option<&T>, local: &T, latest: &T) -> T {
+    if base.is_some_and(|base| local == base) {
+        latest.clone()
+    } else {
+        local.clone()
+    }
+}
+
+fn merge_counter(base: Option<i32>, local: i32, latest: i32) -> i32 {
+    match base {
+        Some(base) if local == base => latest,
+        Some(base) if latest == base => local,
+        Some(base) => {
+            let merged = i64::from(base) + i64::from(local) - i64::from(base) + i64::from(latest)
+                - i64::from(base);
+            merged.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+        }
+        None => local.saturating_add(latest),
+    }
+}
+
+fn merge_box_record(base: Option<&BoxRecord>, local: &BoxRecord, latest: &BoxRecord) -> BoxRecord {
+    let base_fingerprint = base.map(|base| &base.fingerprint);
+    let base_fingerprint_default = Fingerprint::default();
+    let base_fingerprint = base_fingerprint.unwrap_or(&base_fingerprint_default);
+    let signals = merge_entries(
+        &base_fingerprint.signals,
+        &local.fingerprint.signals,
+        &latest.fingerprint.signals,
+        |signal| {
+            (
+                signal.kind.clone(),
+                signal.ttl,
+                signal.ttl_delta,
+                signal.tos,
+                signal.ipid,
+                signal.volume,
+            )
+        },
+        merge_signal,
+    );
+    let fingerprint = Fingerprint {
+        method: merge_field(
+            Some(&base_fingerprint.method),
+            &local.fingerprint.method,
+            &latest.fingerprint.method,
+        ),
+        signals,
+    };
+    let base_plans = base.map_or(&[][..], |base| base.plans.as_slice());
+    let plans = merge_entries(
+        base_plans,
+        &local.plans,
+        &latest.plans,
+        |plan| plan.id.clone(),
+        merge_plan,
+    );
+    let base_bindings = base.map_or(&[][..], |base| base.bindings.as_slice());
+    let bindings = merge_entries(
+        base_bindings,
+        &local.bindings,
+        &latest.bindings,
+        binding_merge_key,
+        merge_binding,
+    );
+
+    BoxRecord {
+        id: local.id.clone(),
+        created: local.created.min(latest.created),
+        updated: local.updated.max(latest.updated),
+        fingerprint,
+        plans,
+        bindings,
+    }
+}
+
+fn merge_signal(base: Option<&Signal>, local: &Signal, latest: &Signal) -> Signal {
+    Signal {
+        kind: merge_field(base.map(|base| &base.kind), &local.kind, &latest.kind),
+        ttl: merge_field(base.map(|base| &base.ttl), &local.ttl, &latest.ttl),
+        ttl_delta: merge_field(
+            base.map(|base| &base.ttl_delta),
+            &local.ttl_delta,
+            &latest.ttl_delta,
+        ),
+        tos: merge_field(base.map(|base| &base.tos), &local.tos, &latest.tos),
+        ipid: merge_field(base.map(|base| &base.ipid), &local.ipid, &latest.ipid),
+        volume: merge_field(base.map(|base| &base.volume), &local.volume, &latest.volume),
+        seen: merge_counter(base.map(|base| base.seen), local.seen, latest.seen),
+        packets: merge_field(
+            base.map(|base| &base.packets),
+            &local.packets,
+            &latest.packets,
+        ),
+    }
+}
+
+fn merge_plan(base: Option<&Plan>, local: &Plan, latest: &Plan) -> Plan {
+    Plan {
+        id: local.id.clone(),
+        proto: merge_field(base.map(|base| &base.proto), &local.proto, &latest.proto),
+        text: merge_field(base.map(|base| &base.text), &local.text, &latest.text),
+        added: local.added.max(latest.added),
+        successes: merge_counter(
+            base.map(|base| base.successes),
+            local.successes,
+            latest.successes,
+        ),
+        enabled: merge_field(
+            base.map(|base| &base.enabled),
+            &local.enabled,
+            &latest.enabled,
+        ),
+    }
+}
+
+fn binding_merge_key(binding: &Binding) -> (String, String, String, u8, u8, u8, String, String) {
+    (
+        binding.kind.clone(),
+        binding.target.clone(),
+        binding.plan_id.clone(),
+        binding.transport,
+        binding.family,
+        binding.shape,
+        binding.probe_path.clone(),
+        binding.ech_origin.clone(),
+    )
+}
+
+fn merge_binding(base: Option<&Binding>, local: &Binding, latest: &Binding) -> Binding {
+    Binding {
+        kind: local.kind.clone(),
+        target: local.target.clone(),
+        plan_id: local.plan_id.clone(),
+        level: merge_field(base.map(|base| &base.level), &local.level, &latest.level),
+        confirmed: local.confirmed.max(latest.confirmed),
+        successes: merge_counter(
+            base.map(|base| base.successes),
+            local.successes,
+            latest.successes,
+        ),
+        enabled: merge_field(
+            base.map(|base| &base.enabled),
+            &local.enabled,
+            &latest.enabled,
+        ),
+        transport: local.transport,
+        family: local.family,
+        shape: local.shape,
+        verified_by: merge_field(
+            base.map(|base| &base.verified_by),
+            &local.verified_by,
+            &latest.verified_by,
+        ),
+        input: merge_field(base.map(|base| &base.input), &local.input, &latest.input),
+        probe_path: local.probe_path.clone(),
+        ech_origin: local.ech_origin.clone(),
+        recheck_since: merge_optional_timestamp(
+            base.and_then(|base| base.recheck_since),
+            local.recheck_since,
+            latest.recheck_since,
+        ),
+        recheck_mono: merge_field(
+            base.map(|base| &base.recheck_mono),
+            &local.recheck_mono,
+            &latest.recheck_mono,
+        ),
+        budget: merge_field(base.map(|base| &base.budget), &local.budget, &latest.budget),
+    }
+}
+
+fn merge_optional_timestamp(
+    base: Option<i64>,
+    local: Option<i64>,
+    latest: Option<i64>,
+) -> Option<i64> {
+    match (base, local, latest) {
+        (Some(base), Some(local), Some(latest)) if local == base => Some(latest),
+        (Some(base), Some(local), Some(latest)) if latest == base => Some(local),
+        (_, Some(local), Some(latest)) => Some(local.max(latest)),
+        (_, local, latest) if local == latest => local,
+        (Some(base), None, latest) if latest == Some(base) => None,
+        (_, None, _) => None,
+        (_, local, _) => local,
+    }
+}
+
+fn domain_observation_key(observation: &DomainObservation) -> (String, String, GroupKey) {
+    (
+        observation.name.clone(),
+        observation.plan_id.clone(),
+        observation.key.clone(),
+    )
+}
+
+fn merge_domain_observation(
+    _base: Option<&DomainObservation>,
+    local: &DomainObservation,
+    latest: &DomainObservation,
+) -> DomainObservation {
+    if local.at > latest.at {
+        local.clone()
+    } else if latest.at > local.at {
+        latest.clone()
+    } else {
+        let mut merged = local.clone();
+        merged.evidence |= latest.evidence;
+        merged
+    }
+}
+
+fn merge_domain_state(
+    base: Option<&DomainState>,
+    local: &DomainState,
+    latest: &DomainState,
+) -> DomainState {
+    let base_observations = base.map_or(&[][..], |base| base.observations.as_slice());
+    let mut observations = merge_entries(
+        base_observations,
+        &local.observations,
+        &latest.observations,
+        domain_observation_key,
+        merge_domain_observation,
+    );
+
+    // A non-failure observation replaces another plan's non-failure observation
+    // for the same domain and group, matching DomainState::learn's bounded slots.
+    let mut normalized = Vec::with_capacity(observations.len());
+    for observation in observations.drain(..) {
+        if observation.evidence & 4 == 0
+            && let Some(slot) = normalized.iter().position(|previous: &DomainObservation| {
+                previous.name == observation.name
+                    && previous.key == observation.key
+                    && previous.evidence & 4 == 0
+            })
+        {
+            if observation.at >= normalized[slot].at {
+                normalized[slot] = observation;
+            }
+        } else {
+            normalized.push(observation);
+        }
+    }
+    if normalized.len() > 256 {
+        normalized.sort_by(|left, right| {
+            left.at
+                .cmp(&right.at)
+                .then_with(|| left.name.cmp(&right.name))
+                .then_with(|| left.plan_id.cmp(&right.plan_id))
+        });
+        normalized.drain(..normalized.len() - 256);
+    }
+
+    let base_disabled_at = base.and_then(|base| base.disabled_at);
+    let disabled_at = match (base_disabled_at, local.disabled_at, latest.disabled_at) {
+        (Some(base), local, latest) if local == Some(base) => latest,
+        (Some(base), local, latest) if latest == Some(base) => local,
+        (_, Some(local), Some(latest)) => Some(local.max(latest)),
+        (_, local, latest) if local == latest => local,
+        (_, Some(value), None) | (_, None, Some(value)) => Some(value),
+        _ => None,
+    };
+    DomainState {
+        groups: Vec::new(),
+        observations: normalized,
+        frozen: merge_field(base.map(|base| &base.frozen), &local.frozen, &latest.frozen),
+        disabled: merge_field(
+            base.map(|base| &base.disabled),
+            &local.disabled,
+            &latest.disabled,
+        ),
+        disabled_at,
+    }
+}
+
+fn merge_network_whitelist(
+    base: Option<&NetworkWhitelist>,
+    local: &NetworkWhitelist,
+    latest: &NetworkWhitelist,
+) -> NetworkWhitelist {
+    let local_confirmed = local.confirmed_at.unwrap_or_default();
+    let latest_confirmed = latest.confirmed_at.unwrap_or_default();
+    let name = if local_confirmed > latest_confirmed {
+        local.name.clone()
+    } else if latest_confirmed > local_confirmed {
+        latest.name.clone()
+    } else {
+        merge_field(base.map(|base| &base.name), &local.name, &latest.name)
+    };
+    let confirmed_at = match (
+        base.and_then(|base| base.confirmed_at),
+        local.confirmed_at,
+        latest.confirmed_at,
+    ) {
+        (Some(base), Some(local), latest) if local == base => latest,
+        (Some(base), local, Some(latest)) if latest == base => local,
+        (_, Some(local), Some(latest)) => Some(local.max(latest)),
+        (_, local, latest) if local == latest => local,
+        (_, Some(value), None) | (_, None, Some(value)) => Some(value),
+        _ => None,
+    };
+    NetworkWhitelist {
+        name,
+        searched: local.searched || latest.searched,
+        tx_only: merge_field(
+            base.map(|base| &base.tx_only),
+            &local.tx_only,
+            &latest.tx_only,
+        ),
+        confirmed_at,
+    }
 }
 
 fn same_signal(saved: &Signal, observed: &Signal) -> bool {

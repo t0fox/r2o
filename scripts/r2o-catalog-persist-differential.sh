@@ -25,6 +25,6 @@ cc=${CC:-clang-18}
 "$tmp_dir/d2o-catalog-persist" "$fixture" "$tmp_dir/catalog.json" >"$tmp_dir/c.out"
 R2O_CATALOG_PERSIST_DIFF_OUTPUT="$tmp_dir/rust.out" \
     cargo +1.98.0 test --locked -p r2o-controller --bin r2o-controller \
-    d2o_catalog_persist_overwrites_concurrent_external_update
+    d2o_catalog_save_atomic_overwrites_concurrent_external_update
 diff -u "$tmp_dir/c.out" "$tmp_dir/rust.out"
 printf 'C/Rust catalog persistence output matches d2o %s.\n' "$actual_donor_sha"
