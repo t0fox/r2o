@@ -19,6 +19,39 @@ pub const R2O_QUIC_MAX_ADDRS: usize = 8;
 pub const R2O_QUIC_RESIDUAL_GAP: Duration = Duration::from_millis(60);
 pub const R2O_QUIC_FRAGMENT_CONTROL_NAME: &str = "контроль прохождения IP-фрагментов, форма 1";
 
+/// Match d2o `d2k_ip4_private` / `d2k_ip6_private` for QUIC targets.
+pub fn r2o_quic_address_is_local(address: SocketAddr) -> bool {
+    fn ipv4_is_local(address: std::net::Ipv4Addr) -> bool {
+        let [a, b, _, _] = address.octets();
+        address.is_unspecified()
+            || a == 10
+            || a == 127
+            || (a == 172 && (16..=31).contains(&b))
+            || (a == 192 && b == 168)
+            || (a == 169 && b == 254)
+            || (a == 100 && (64..=127).contains(&b))
+    }
+
+    match address.ip() {
+        std::net::IpAddr::V4(address) => ipv4_is_local(address),
+        std::net::IpAddr::V6(address) => {
+            let octets = address.octets();
+            let mapped_v4 = octets[..10] == [0; 10] && octets[10..12] == [0xff, 0xff];
+            if mapped_v4 {
+                let mapped =
+                    std::net::Ipv4Addr::new(octets[12], octets[13], octets[14], octets[15]);
+                return ipv4_is_local(mapped);
+            }
+
+            address.is_unspecified()
+                || address.is_loopback()
+                || (octets[0] & 0xfe) == 0xfc
+                || (octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80)
+                || octets[0] == 0xff
+        }
+    }
+}
+
 /// Build the same-family, deduplicated address pool used by d2o `build_pool`.
 pub fn r2o_quic_address_pool(
     primary: SocketAddr,
@@ -966,7 +999,7 @@ mod tests {
         r2o_quic_strategy_attempt_decision, r2o_quic_trial_data_verdict,
     };
     use r2k_core::quic::R2kQuicDataVerdict;
-    use std::net::UdpSocket;
+    use std::net::{SocketAddr, UdpSocket};
     use std::time::Duration;
 
     #[test]
@@ -1149,6 +1182,29 @@ mod tests {
             output.push_str(&format!("same_pass={pass} err={err} next={action}\n"));
         }
         if let Ok(path) = std::env::var("R2O_QUIC_RESIDUAL_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
+    #[test]
+    fn r2o_quic_local_address_policy_matches_d2o() {
+        let fixture = include_str!("../tests/fixtures/d2o_quic_local_address.tsv");
+        let mut output = String::new();
+        for line in fixture.lines().filter(|line| !line.trim().is_empty()) {
+            let (name, address, expected) = {
+                let mut fields = line.split('\t');
+                (
+                    fields.next().unwrap(),
+                    fields.next().unwrap(),
+                    fields.next().unwrap().parse::<bool>().unwrap(),
+                )
+            };
+            let address = SocketAddr::new(address.parse().unwrap(), 443);
+            let actual = super::r2o_quic_address_is_local(address);
+            assert_eq!(actual, expected, "{name}: {address}");
+            output.push_str(&format!("{name}={}\n", u8::from(actual)));
+        }
+        if let Ok(path) = std::env::var("R2O_QUIC_LOCAL_ADDRESS_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
         }
     }

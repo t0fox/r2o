@@ -18046,7 +18046,17 @@ impl ControlClient {
         deny_recheck: bool,
         stall_cut: &mut bool,
     ) -> Result<Option<(String, String)>, Box<dyn Error>> {
-        use r2o_controller::quic_replay::QuicReplayProbe;
+        use r2o_controller::quic_replay::{QuicReplayProbe, r2o_quic_address_is_local};
+
+        // d2o's test harness explicitly enables local targets for loopback
+        // fixtures; production keeps its default `allow_local = false`.
+        if !cfg!(test) && r2o_quic_address_is_local(server) {
+            eprintln!(
+                "QUIC HTTP/3-проба пропущена: адрес {} локальный или не является публичной целью",
+                server.ip()
+            );
+            return Ok(None);
+        }
 
         if deny_recheck {
             if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
