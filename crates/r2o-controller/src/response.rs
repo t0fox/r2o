@@ -721,6 +721,7 @@ pub(crate) fn probe_trigger(
 
     let (socket, _) = dial_probe_target(target, timeout, mark)?;
     let fd = socket.as_raw_fd();
+    let deadline = Instant::now() + timeout;
     for span in split_offsets(cuts, trigger.payload.len(), 8) {
         let mut offset = span.from;
         while offset < span.to {
@@ -763,6 +764,9 @@ pub(crate) fn probe_trigger(
             return Err(ProbeError::Transport(format!("write: {error}")));
         }
         if span.to < trigger.payload.len() {
+            if Instant::now() + gap > deadline {
+                return Err(ProbeError::Transport("context deadline exceeded".into()));
+            }
             if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
                 return Err(ProbeError::Local("context canceled".into()));
             }
@@ -772,7 +776,6 @@ pub(crate) fn probe_trigger(
         }
     }
 
-    let deadline = Instant::now() + timeout;
     match poll_once(fd, libc::POLLIN, deadline) {
         Ok(true) => {}
         Ok(false) => return Ok(ProbeOutcome::Rejected),
@@ -1367,6 +1370,60 @@ mod tcp_split_transport_tests {
 
         assert!(matches!(result, Err(ProbeError::Local(error)) if error == "context canceled"));
         assert_eq!(server.join().unwrap(), b"AB");
+    }
+
+    #[test]
+    fn socket_split_gap_counts_against_the_donor_probe_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut received = Vec::new();
+            stream.read_to_end(&mut received).unwrap();
+            received
+        });
+        let target = ProbeTarget {
+            host: "127.0.0.1".into(),
+            port,
+        };
+        let trigger = Trigger {
+            name: "fixture".into(),
+            payload: b"ABCD".to_vec(),
+            accept: Accept::Any,
+        };
+        let result = probe_trigger(
+            &target,
+            &trigger,
+            &[2],
+            Duration::from_millis(250),
+            Duration::from_millis(100),
+            Some(0),
+            true,
+            None,
+            None,
+        );
+        let received = server.join().unwrap();
+        let bytes = received
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let row = format!("SOCKET_SPLIT_DEADLINE result=deadline bytes={bytes}");
+
+        assert!(matches!(
+            result,
+            Err(ProbeError::Transport(error)) if error == "context deadline exceeded"
+        ));
+        assert_eq!(received, b"AB");
+        if let Ok(c_output) = std::env::var("R2O_SOCKET_SPLIT_DEADLINE_C_OUTPUT") {
+            let c_rows =
+                std::fs::read_to_string(c_output).expect("read D2O socket split deadline output");
+            let c_row = c_rows
+                .lines()
+                .find(|line| line.starts_with("SOCKET_SPLIT_DEADLINE "))
+                .expect("D2O socket split deadline result");
+            assert_eq!(row, c_row, "C/Rust socket split deadline differs");
+        }
+        println!("{row}");
     }
 
     #[test]
