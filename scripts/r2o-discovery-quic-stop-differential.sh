@@ -2,7 +2,7 @@
 set -eu
 
 r2o_script_dir=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
-r2o_donor_core=${R2O_DONOR_CORE:-"${r2o_script_dir%/*}/d2o-main/core"}
+r2o_donor_core=${R2O_DONOR_CORE:-"${r2o_script_dir%/*}/d2o/core"}
 r2o_log_dir="$r2o_script_dir/.rea"
 r2o_log="$r2o_log_dir/r2o-discovery-quic-stop-$(date +%Y%m%d-%H%M%S).log"
 r2o_build_root=
