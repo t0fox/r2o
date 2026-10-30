@@ -433,9 +433,9 @@ xt_family_up() {
     fi
     xt "$tool" -t mangle -N R2O_IN || return 1
     for chain in R2O_OUT R2O_IN; do
-        xt "$tool" -t mangle -A "$chain" -s "$loopback" -j RETURN
-        xt "$tool" -t mangle -A "$chain" -d "$loopback" -j RETURN
-        xt "$tool" -t mangle -A "$chain" -m conntrack --ctstate DNAT -j RETURN
+        xt "$tool" -t mangle -A "$chain" -s "$loopback" -j RETURN || return 1
+        xt "$tool" -t mangle -A "$chain" -d "$loopback" -j RETURN || return 1
+        xt "$tool" -t mangle -A "$chain" -m conntrack --ctstate DNAT -j RETURN || return 1
     done
     if [ "$tool" = iptables ]; then
         xt_broadcast_return "$tool" || return 1
@@ -443,30 +443,30 @@ xt_family_up() {
     else
         xt "$tool" -t mangle -A R2O_OUT -d ff00::/8 -j RETURN || return 1
     fi
-    xt "$tool" -t mangle -A R2O_OUT -m mark --mark "$MARK" -j RETURN
-    xt "$tool" -t mangle -A R2O_OUT -m mark --mark "$TG_OUTBOUND_MARK" -j RETURN
+    xt "$tool" -t mangle -A R2O_OUT -m mark --mark "$MARK" -j RETURN || return 1
+    xt "$tool" -t mangle -A R2O_OUT -m mark --mark "$TG_OUTBOUND_MARK" -j RETURN || return 1
     for proto in tcp udp; do
-        xt "$tool" -t mangle -A R2O_OUT -p "$proto" -m multiport --dports 53,853 -j RETURN
-        xt "$tool" -t mangle -A R2O_IN -p "$proto" -m multiport --sports 53,853 -j RETURN
+        xt "$tool" -t mangle -A R2O_OUT -p "$proto" -m multiport --dports 53,853 -j RETURN || return 1
+        xt "$tool" -t mangle -A R2O_IN -p "$proto" -m multiport --sports 53,853 -j RETURN || return 1
     done
     voice_ports=$VOICE_PORTS
     for proto in tcp udp; do
         if [ "$proto" = udp ]; then
             xt "$tool" -t mangle -A R2O_OUT -p udp -m multiport --dports "$voice_ports" \
                 -m conntrack --ctdir ORIGINAL -m connbytes --connbytes "$VOICE_CONNBYTES" --connbytes-dir original --connbytes-mode packets \
-                -j NFQUEUE --queue-num "$queue" --queue-bypass
-            xt "$tool" -t mangle -A R2O_OUT -p udp -m multiport --dports "$voice_ports" -j RETURN
+                -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
+            xt "$tool" -t mangle -A R2O_OUT -p udp -m multiport --dports "$voice_ports" -j RETURN || return 1
             xt "$tool" -t mangle -A R2O_IN -p udp -m multiport --sports "$voice_ports" \
                 -m conntrack --ctdir REPLY -m connbytes --connbytes "$VOICE_CONNBYTES" --connbytes-dir reply --connbytes-mode packets \
-                -j NFQUEUE --queue-num "$queue" --queue-bypass
-            xt "$tool" -t mangle -A R2O_IN -p udp -m multiport --sports "$voice_ports" -j RETURN
+                -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
+            xt "$tool" -t mangle -A R2O_IN -p udp -m multiport --sports "$voice_ports" -j RETURN || return 1
         fi
         xt "$tool" -t mangle -A R2O_OUT -p "$proto" -m conntrack --ctdir ORIGINAL \
             -m connbytes --connbytes "$CONNBYTES" --connbytes-dir original --connbytes-mode packets \
-            -j NFQUEUE --queue-num "$queue" --queue-bypass
+            -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
         xt "$tool" -t mangle -A R2O_IN -p "$proto" -m conntrack --ctdir REPLY \
             -m connbytes --connbytes "$CONNBYTES" --connbytes-dir reply --connbytes-mode packets \
-            -j NFQUEUE --queue-num "$queue" --queue-bypass
+            -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
     done
     for direction in OUT IN; do
         chain=R2O_$direction
@@ -474,12 +474,12 @@ xt_family_up() {
         for flag in RST FIN; do
             xt "$tool" -t mangle -A "$chain" -p tcp -m conntrack --ctdir "$ct_direction" \
                 -m connbytes --connbytes 9: --connbytes-dir "$count_direction" --connbytes-mode packets \
-                --tcp-flags "$flag" "$flag" -j NFQUEUE --queue-num "$queue" --queue-bypass
+                --tcp-flags "$flag" "$flag" -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
         done
         xt "$tool" -t mangle -A "$chain" -p tcp -m multiport "$ports" "$HTTP_KEEPALIVE_PORTS" \
             -m conntrack --ctdir "$ct_direction" \
             -m connbytes --connbytes 9: --connbytes-dir "$count_direction" --connbytes-mode packets \
-            -j NFQUEUE --queue-num "$queue" --queue-bypass
+            -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
     done
     if [ "$tool" = iptables ]; then
         xt "$tool" -t mangle -A R2O_IN -p icmp --icmp-type 11/0 \
@@ -489,11 +489,11 @@ xt_family_up() {
             -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
     fi
     if [ "$tool" = iptables ]; then
-        xt "$tool" -t nat -A POSTROUTING -p udp -m mark --mark "$MARK" -j MASQUERADE
+        xt "$tool" -t nat -A POSTROUTING -p udp -m mark --mark "$MARK" -j MASQUERADE || return 1
     fi
-    xt "$tool" -t mangle -I POSTROUTING 1 -j R2O_OUT
-    xt "$tool" -t mangle -I FORWARD 1 -j R2O_IN
-    xt "$tool" -t mangle -I INPUT 1 -j R2O_IN
+    xt "$tool" -t mangle -I POSTROUTING 1 -j R2O_OUT || return 1
+    xt "$tool" -t mangle -I FORWARD 1 -j R2O_IN || return 1
+    xt "$tool" -t mangle -I INPUT 1 -j R2O_IN || return 1
 }
 
 iptables_up() {
