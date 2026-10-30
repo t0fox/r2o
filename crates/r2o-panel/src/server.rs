@@ -1537,7 +1537,7 @@ fn worker_domains_from_json(body: &[u8]) -> Result<Vec<String>, ()> {
 
 fn worker_domains_from_config(path: &Path) -> Result<Vec<String>, ()> {
     let raw = read_regular_file(path, BODY_MAX).map_err(|_| ())?;
-    let text = std::str::from_utf8(&raw).map_err(|_| ())?;
+    let text = String::from_utf8_lossy(&raw);
     let mut domains = Vec::new();
     for line in text.lines() {
         let line = line.trim_start_matches([' ', '\t']);

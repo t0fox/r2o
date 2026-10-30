@@ -534,7 +534,7 @@ fn d2o_worker_busy_response_does_not_persist_new_domains() {
 #[cfg(unix)]
 #[test]
 #[ignore = "run through scripts/test-panel-workers-config-differential.sh"]
-fn d2o_worker_config_read_accepts_utf8_comments() {
+fn d2o_worker_config_read_ignores_non_domain_bytes() {
     let config_path = std::env::var_os("R2O_PANEL_WORKER_CONFIG")
         .expect("test helper provides a config file")
         .into();
