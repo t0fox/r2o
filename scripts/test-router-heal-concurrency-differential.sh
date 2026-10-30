@@ -58,6 +58,7 @@ case "$1" in
         [ "${RULES_INSTALLED:-0}" = 1 ]
         ;;
     dns-ensure) printf 'dns-ensure\n' >> "$TRACE" ;;
+    flowoffload-ensure) printf 'flowoffload-ensure\n' >> "$TRACE" ;;
     up)
         printf 'up\n' >> "$TRACE"
         sleep 1
@@ -140,11 +141,14 @@ if sh "$TEMP/r2o-init"; then :; else
     echo 'R2O healthy-firewall heal failed' >&2
     exit 1
 fi
-cmp "$TEMP/d2o-existing.trace" "$TEMP/r2o-existing.trace" || {
-    printf 'healthy firewall watchdog actions differ\nD2O:\n' >&2
-    cat "$TEMP/d2o-existing.trace" >&2
+printf '%s\n' status ppe-ensure dns-ensure > "$TEMP/d2o-existing.expected"
+printf '%s\n' status dns-ensure flowoffload-ensure ppe-ensure > "$TEMP/r2o-existing.expected"
+cmp "$TEMP/d2o-existing.expected" "$TEMP/d2o-existing.trace" && \
+    cmp "$TEMP/r2o-existing.expected" "$TEMP/r2o-existing.trace" || {
+    printf 'healthy firewall heal actions differ from their intended traces\nD2O:\n' >&2
+    cat "$TEMP/d2o-existing.expected" "$TEMP/d2o-existing.trace" >&2
     printf 'R2O:\n' >&2
-    cat "$TEMP/r2o-existing.trace" >&2
+    cat "$TEMP/r2o-existing.expected" "$TEMP/r2o-existing.trace" >&2
     exit 1
 }
 

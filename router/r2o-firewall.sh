@@ -22,6 +22,12 @@ HTTP_KEEPALIVE_PORTS=${HTTP_KEEPALIVE_PORTS:-80}
 DNS_PORTS=${DNS_PORTS:-53,853}
 RUN_DIR=${R2O_RUN_DIR:-$ROOT/run}
 FW_LOCK=${R2O_FIREWALL_LOCK:-$RUN_DIR/firewall-operation.lock}
+FLOWOFFLOAD_MARK=0x80000000
+FLOWOFFLOAD_STATE=$RUN_DIR/flow-offloading.runtime
+FLOWOFFLOAD_GENERIC='meta l4proto { tcp, udp } flow offload @ft'
+FLOWOFFLOAD_COMMENT='comment "r2o-flowoffload"'
+FLOWOFFLOAD_SELECTIVE="meta l4proto { tcp, udp } ct mark & 0x80000000 == 0 flow offload @ft $FLOWOFFLOAD_COMMENT"
+FW4=${R2O_FW4:-fw4}
 PPE_ADAPTER=${R2O_PPE_ADAPTER:-$(dirname -- "$0")/r2o-ppe-deoffload.sh}
 PPE_DEOFFLOAD=${R2O_PPE_DEOFFLOAD:-1}
 FW_V4ONLY=$RUN_DIR/fw-ipv4-only
@@ -143,6 +149,14 @@ nft_up() {
     nft_dns=$(printf '%s' "$DNS_PORTS" | sed -e 's/:/-/g' -e 's/,/, /g')
     nft_window=$(printf '%s' "$CONNBYTES" | sed -e 's/^0:/1-/' -e 's/:/-/g')
     nft_voice_window=$(printf '%s' "$VOICE_CONNBYTES" | sed -e 's/^0:/1-/' -e 's/:/-/g')
+    nft_mark_window=0-${CONNBYTES#0:}
+    case "$VOICE_CONNBYTES" in
+        *:*) nft_voice_upper=${VOICE_CONNBYTES#*:} ;;
+        *) nft_voice_upper=$VOICE_CONNBYTES ;;
+    esac
+    number "$nft_voice_upper" 65535 || { echo "неверное окно голосового соединения" >&2; return 1; }
+    nft_voice_mark_window=0-$nft_voice_upper
+    nft_voice_late_window=$((nft_voice_upper + 1))-18446744073709551615
     mkdir -p "$(dirname "$rules")"
     umask 077
     if nft list table inet r2o >/dev/null 2>&1; then
@@ -157,6 +171,33 @@ nft_up() {
     cat >> "$rules" <<EOF
 table inet r2o {
     comment "r2o-managed"
+    chain mark_flow {
+        ip saddr 127.0.0.0/8 return
+        ip daddr 127.0.0.0/8 return
+        ip6 saddr ::1 return
+        ip6 daddr ::1 return
+        meta nfproto ipv4 fib daddr type broadcast return
+        ip daddr 224.0.0.0/4 return
+        ip6 daddr ff00::/8 return
+        meta l4proto { tcp, udp } th dport { $nft_dns } return
+        meta l4proto { tcp, udp } th sport { $nft_dns } return
+        ct status dnat return
+        ct mark & $FLOWOFFLOAD_MARK != 0 meta l4proto udp ct original packets $nft_voice_late_window ct reply packets $nft_voice_late_window th dport { $nft_voice } ct mark set ct mark & 0x7fffffff
+        ct mark & $FLOWOFFLOAD_MARK != 0 meta l4proto udp ct original packets $nft_voice_late_window ct reply packets $nft_voice_late_window th sport { $nft_voice } ct mark set ct mark & 0x7fffffff
+        ct mark & $FLOWOFFLOAD_MARK != 0 ct original packets $nft_late_window ct reply packets $nft_late_window ct mark set ct mark & 0x7fffffff
+        ct direction original meta l4proto tcp meta mark != $MARK meta mark != $TG_OUTBOUND_MARK th dport { $nft_ports } ct original packets $nft_mark_window ct mark set ct mark | $FLOWOFFLOAD_MARK
+        ct direction original meta l4proto udp meta mark != $MARK meta mark != $TG_OUTBOUND_MARK th dport { $nft_ports } th dport != { $nft_voice } ct original packets $nft_mark_window ct mark set ct mark | $FLOWOFFLOAD_MARK
+        ct direction original meta l4proto udp meta mark != $MARK meta mark != $TG_OUTBOUND_MARK th dport { $nft_voice } ct original packets $nft_voice_mark_window ct mark set ct mark | $FLOWOFFLOAD_MARK
+        ct direction original meta l4proto tcp meta mark != $MARK meta mark != $TG_OUTBOUND_MARK th dport { $nft_keepalive } ct original packets $nft_late_window ct mark set ct mark | $FLOWOFFLOAD_MARK
+        ct direction reply meta l4proto tcp th sport { $nft_ports } ct reply packets $nft_mark_window ct mark set ct mark | $FLOWOFFLOAD_MARK
+        ct direction reply meta l4proto udp th sport { $nft_ports } th sport != { $nft_voice } ct reply packets $nft_mark_window ct mark set ct mark | $FLOWOFFLOAD_MARK
+        ct direction reply meta l4proto udp th sport { $nft_voice } ct reply packets $nft_voice_mark_window ct mark set ct mark | $FLOWOFFLOAD_MARK
+        ct direction reply meta l4proto tcp th sport { $nft_keepalive } ct reply packets $nft_late_window ct mark set ct mark | $FLOWOFFLOAD_MARK
+        ct direction original meta l4proto tcp ct original packets $nft_late_window tcp flags & rst == rst ct mark set ct mark | $FLOWOFFLOAD_MARK
+        ct direction original meta l4proto tcp ct original packets $nft_late_window tcp flags & fin == fin ct mark set ct mark | $FLOWOFFLOAD_MARK
+        ct direction reply meta l4proto tcp ct reply packets $nft_late_window tcp flags & rst == rst ct mark set ct mark | $FLOWOFFLOAD_MARK
+        ct direction reply meta l4proto tcp ct reply packets $nft_late_window tcp flags & fin == fin ct mark set ct mark | $FLOWOFFLOAD_MARK
+    }
     chain out {
         type filter hook postrouting priority mangle; policy accept;
         ip saddr 127.0.0.0/8 return
@@ -211,6 +252,7 @@ table inet r2o {
     }
     chain forward {
         type filter hook forward priority mangle; policy accept;
+        jump mark_flow
         jump in_rules
     }
     chain input {
@@ -329,6 +371,188 @@ fw_lock_release() {
     [ "$(cat "$FW_LOCK/pid" 2>/dev/null)" = "$$" ] || return 1
     rm -f "$FW_LOCK/pid"
     rmdir "$FW_LOCK"
+}
+
+flowoffload_rule_info() {
+    nft -a list chain inet fw4 forward 2>/dev/null | awk '
+        function rule_handle(line, fields, count, i) {
+            count = split(line, fields, /[[:space:]]+/)
+            for (i = 1; i < count; i++) if (fields[i] == "handle") return fields[i + 1]
+            return ""
+        }
+        /flow offload @ft/ {
+            count++
+            if (count == 1) {
+                handle = rule_handle($0)
+                rule = $0
+                sub(/[[:space:]]+# handle [0-9]+.*$/, "", rule)
+            }
+            next
+        }
+        count == 1 && anchor == "" && /# handle [0-9]+/ { anchor = rule_handle($0) }
+        END {
+            if (count != 1 || handle !~ /^[0-9]+$/) exit 1
+            if (anchor !~ /^[0-9]+$/) anchor = ""
+            printf "%s|%s|%s\n", handle, anchor, rule
+        }
+    '
+}
+
+flowoffload_store_state() {
+    mkdir -p "$RUN_DIR" || return 1
+    state_tmp=$FLOWOFFLOAD_STATE.new.$$
+    (umask 077; printf '%s\n' "$1" > "$state_tmp") || return 1
+    mv -f "$state_tmp" "$FLOWOFFLOAD_STATE"
+}
+
+flowoffload_table_attrs() {
+    nft -a list flowtable inet fw4 ft 2>/dev/null | awk '
+        /^[[:space:]]*flowtable[[:space:]]+ft[[:space:]]*\{/ { inside = 1; next }
+        inside && /^[[:space:]]*}/ { exit }
+        inside { print }
+    '
+}
+
+flowoffload_selective_present() {
+    nft -a list chain inet fw4 forward 2>/dev/null | grep -F -q "$FLOWOFFLOAD_COMMENT"
+}
+
+flowoffload_rebuild_selective_unlocked() {
+    flow_info=$1
+    flow_handle=$(printf '%s\n' "$flow_info" | cut -d '|' -f 1)
+    flow_anchor=$(printf '%s\n' "$flow_info" | cut -d '|' -f 2)
+    flow_attrs=$RUN_DIR/flowtable-attrs.$$
+    flow_rules=$RUN_DIR/flowoffload.nft.$$
+    flowoffload_table_attrs > "$flow_attrs" || { rm -f "$flow_attrs"; return 1; }
+    [ -s "$flow_attrs" ] || { rm -f "$flow_attrs"; return 1; }
+    : > "$flow_rules" || { rm -f "$flow_attrs"; return 1; }
+    {
+        printf 'delete rule inet fw4 forward handle %s\n' "$flow_handle"
+        printf 'delete flowtable inet fw4 ft\n'
+        printf 'add flowtable inet fw4 ft {\n'
+        cat "$flow_attrs"
+        printf '}\n'
+        if [ -n "$flow_anchor" ]; then
+            printf 'insert rule inet fw4 forward position %s %s\n' "$flow_anchor" "$FLOWOFFLOAD_SELECTIVE"
+        else
+            printf 'add rule inet fw4 forward %s\n' "$FLOWOFFLOAD_SELECTIVE"
+        fi
+    } > "$flow_rules" || { rm -f "$flow_attrs" "$flow_rules"; return 1; }
+    rm -f "$flow_attrs"
+    flowoffload_store_state fallback || { rm -f "$flow_rules"; return 1; }
+    if ! nft -f "$flow_rules"; then rm -f "$flow_rules"; return 1; fi
+    rm -f "$flow_rules"
+    flowoffload_selective_present || return 1
+    nft list flowtable inet fw4 ft >/dev/null 2>&1 || return 1
+    flowoffload_store_state selective
+}
+
+flowoffload_remove_all_unlocked() {
+    flow_rules=$RUN_DIR/flowoffload.nft.$$
+    nft -a list table inet fw4 2>/dev/null | awk '
+        function rule_handle(line, fields, count, i) {
+            count = split(line, fields, /[[:space:]]+/)
+            for (i = 1; i < count; i++) if (fields[i] == "handle") return fields[i + 1]
+            return ""
+        }
+        /^[[:space:]]*chain[[:space:]]+/ {
+            chain = $2
+            sub(/\{$/, "", chain)
+        }
+        /^[[:space:]]*flowtable[[:space:]]+/ {
+            table = $2
+            sub(/\{$/, "", table)
+            if (table ~ /^[A-Za-z0-9_.-]+$/) tables[++table_count] = table
+        }
+        /flow offload @/ {
+            handle = rule_handle($0)
+            if (chain ~ /^[A-Za-z0-9_.-]+$/ && handle ~ /^[0-9]+$/) {
+                rules[++rule_count] = "delete rule inet fw4 " chain " handle " handle
+            }
+        }
+        END {
+            for (i = 1; i <= rule_count; i++) print rules[i]
+            for (i = 1; i <= table_count; i++) print "delete flowtable inet fw4 " tables[i]
+        }
+    ' > "$flow_rules" || { rm -f "$flow_rules"; return 1; }
+    if [ ! -s "$flow_rules" ]; then rm -f "$flow_rules"; return 1; fi
+    flowoffload_store_state fallback || { rm -f "$flow_rules"; return 1; }
+    if ! nft -f "$flow_rules"; then rm -f "$flow_rules"; return 1; fi
+    rm -f "$flow_rules"
+    flowoffload_store_state fallback
+}
+
+flowoffload_ensure_unlocked() {
+    force_reset=${1:-0}
+    nft list table inet r2o >/dev/null 2>&1 || return 0
+    nft list flowtable inet fw4 ft >/dev/null 2>&1 || return 0
+    fw4_rules=$(nft -a list table inet fw4 2>/dev/null || true)
+    case "$fw4_rules" in *'flow offload @'*) ;; *) return 0 ;; esac
+    flow_info=$(flowoffload_rule_info) || {
+        flowoffload_remove_all_unlocked
+        return $?
+    }
+    flow_expr=$(printf '%s\n' "$flow_info" | sed 's/^[^|]*|[^|]*|//')
+    case "$flow_expr" in
+        *'comment "r2o-flowoffload"')
+            flowoffload_selective_present || {
+                flowoffload_remove_all_unlocked
+                return $?
+            }
+            if [ "$force_reset" = 1 ]; then
+                flowoffload_rebuild_selective_unlocked "$flow_info" || {
+                    flowoffload_remove_all_unlocked
+                    return $?
+                }
+            else
+                flowoffload_store_state selective
+            fi
+            ;;
+        "$FLOWOFFLOAD_GENERIC")
+            flowoffload_rebuild_selective_unlocked "$flow_info" || {
+                flowoffload_remove_all_unlocked
+                return $?
+            }
+            ;;
+        *)
+            flowoffload_remove_all_unlocked
+            ;;
+    esac
+}
+
+flowoffload_restore_unlocked() {
+    state=$(cat "$FLOWOFFLOAD_STATE" 2>/dev/null || true)
+    case "$state" in
+        selective)
+            if flow_info=$(flowoffload_rule_info 2>/dev/null) && flowoffload_selective_present; then
+                flow_handle=$(printf '%s\n' "$flow_info" | cut -d '|' -f 1)
+                nft replace rule inet fw4 forward handle "$flow_handle" $FLOWOFFLOAD_GENERIC || {
+                    R2O_FLOWOFFLOAD_RESTORING=1 "$FW4" reload >/dev/null 2>&1 || \
+                    R2O_FLOWOFFLOAD_RESTORING=1 /etc/init.d/firewall reload >/dev/null 2>&1 || return 1
+                }
+            fi
+            ;;
+        fallback)
+            R2O_FLOWOFFLOAD_RESTORING=1 "$FW4" reload >/dev/null 2>&1 || \
+            R2O_FLOWOFFLOAD_RESTORING=1 /etc/init.d/firewall reload >/dev/null 2>&1 || return 1
+            ;;
+        *) return 0 ;;
+    esac
+    rm -f "$FLOWOFFLOAD_STATE"
+}
+
+flowoffload_ensure() {
+    fw_lock_acquire || return 1
+    if flowoffload_ensure_unlocked; then fw_rc=0; else fw_rc=$?; fi
+    fw_lock_release || return 1
+    return "$fw_rc"
+}
+
+flowoffload_restore() {
+    fw_lock_acquire || return 1
+    if flowoffload_restore_unlocked; then fw_rc=0; else fw_rc=$?; fi
+    fw_lock_release || return 1
+    return "$fw_rc"
 }
 
 ppe_call_unlocked() {
@@ -619,6 +843,7 @@ firewall_up() {
     fw_lock_acquire || return 1
     ppe_remove_unlocked
     if [ "$BACKEND" = nft ]; then
+        if nft list table inet r2o >/dev/null 2>&1; then fw_r2o_preexisting=1; else fw_r2o_preexisting=0; fi
         rm -f "$FW_V4ONLY" || true
         xt_family_down iptables
         xt_legacy_d2k_family_down iptables
@@ -628,7 +853,9 @@ firewall_up() {
         fi
         if nft list table inet r2o_rst >/dev/null 2>&1; then fw_rst_preexisting=1; else fw_rst_preexisting=0; fi
         if nft_up; then
-            fw_rc=0
+            if [ "$fw_r2o_preexisting" = 0 ]; then
+                if flowoffload_ensure_unlocked 1; then fw_rc=0; else fw_rc=$?; fi
+            elif flowoffload_ensure_unlocked; then fw_rc=0; else fw_rc=$?; fi
         else
             fw_rc=$?
             nft_main_down || echo "r2o: не удалось снять старую таблицу nft после отказа установки" >&2
@@ -689,6 +916,12 @@ case "${1:-}" in
     down)
         firewall_down
         ;;
+    flowoffload-ensure)
+        flowoffload_ensure
+        ;;
+    flowoffload-restore)
+        flowoffload_restore
+        ;;
     rst-down)
         firewall_rst_down
         ;;
@@ -706,5 +939,5 @@ case "${1:-}" in
     dns-ensure)
         dns_excl_sync
         ;;
-    *) echo "использование: $0 {backend|ipv6-enabled|up|down|ppe ensure|ppe remove|rst-down|status|dns-ensure}" >&2; exit 2 ;;
+    *) echo "использование: $0 {backend|ipv6-enabled|up|down|flowoffload-ensure|flowoffload-restore|ppe ensure|ppe remove|rst-down|status|dns-ensure}" >&2; exit 2 ;;
 esac

@@ -123,7 +123,8 @@ prepare_dirs() { mkdir -p "$RUN"; }
 say() { :; }
 ppe_remove() { :; }
 fastnat_restore() { :; }
-flowoffload_restore() { :; }
+flowoffload_hook_remove() { printf 'flowoffload-hook-remove\n' >> "$EVENTS"; }
+flowoffload_restore() { printf 'flowoffload-restore\n' >> "$EVENTS"; }
 stop_component() { :; }
 . "$TEST_FUNCTIONS"
 firewall_watchdog_stop() {
@@ -140,6 +141,11 @@ engine_stop
 [ ! -e "$FW_WD_PID" ] || { echo "остановка оставила PID watchdog" >&2; exit 1; }
 if kill -0 "$first_pid" 2>/dev/null; then
     echo "остановка оставила периодический worker запущенным" >&2
+    exit 1
+fi
+flowoffload_restore() { printf 'flowoffload-restore-failed\n' >> "$EVENTS"; return 1; }
+if engine_stop; then
+    echo "engine_stop hid a failed native flow-offload restore" >&2
     exit 1
 fi
 LIFECYCLE
@@ -180,12 +186,19 @@ D2OSTOP
 chmod 0700 "$TEMP/d2o-stop-lifecycle"
 sh "$TEMP/d2o-stop-lifecycle" "$TEMP/d2o-stop.events"
 head -n 2 "$TEMP/d2o-stop.events" > "$TEMP/d2o-stop-order"
-head -n 2 "$TEMP/r2o-stop.events" > "$TEMP/r2o-stop-order"
-cmp "$TEMP/d2o-stop-order" "$TEMP/r2o-stop-order" || {
-    echo "порядок watchdog/firewall stop отличается" >&2
-    cat "$TEMP/d2o-stop-order" "$TEMP/r2o-stop-order" >&2
+head -n 4 "$TEMP/r2o-stop.events" > "$TEMP/r2o-stop-order"
+printf '%s\n' 'watchdog-stopped' 'firewall-down' > "$TEMP/d2o-stop-expected"
+cmp "$TEMP/d2o-stop-expected" "$TEMP/d2o-stop-order" || {
+    echo "D2O watchdog/firewall stop order changed" >&2
+    cat "$TEMP/d2o-stop-expected" "$TEMP/d2o-stop-order" >&2
     exit 1
 }
+printf '%s\n' 'watchdog-stopped' 'flowoffload-hook-remove' 'firewall-down' 'flowoffload-restore' > "$TEMP/r2o-stop-expected"
+if ! cmp -s "$TEMP/r2o-stop-expected" "$TEMP/r2o-stop-order"; then
+    echo "R2O must remove the fw4 hook, stop packet marking, then restore native offload" >&2
+    cat "$TEMP/r2o-stop-expected" "$TEMP/r2o-stop-order" >&2
+    exit 1
+fi
 
 grep -q 'firewall_watchdog_start' "$ROOT/router/S99r2o" || { echo "S99r2o не запускает firewall watchdog" >&2; exit 1; }
 grep -q 'firewall_watchdog_running' "$ROOT/router/S99r2o" || { echo "S99r2o не проверяет watchdog при старте" >&2; exit 1; }

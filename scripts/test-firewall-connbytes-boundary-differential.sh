@@ -138,17 +138,19 @@ for trace in "$TEMP/d2o.nft" "$TEMP/r2o.nft"; do
         */d2o.nft) family_rules=3; flag_rules=1 ;;
         *) family_rules=6; flag_rules=2 ;;
     esac
-    check_count "$trace" 'ct original packets 4-18446744073709551615' "$family_rules" 'wrong count of dynamic nft original late rules'
-    check_count "$trace" 'ct reply packets 4-18446744073709551615' "$family_rules" 'wrong count of dynamic nft reply late rules'
+    actual=$(grep -F 'ct original packets 4-18446744073709551615' "$trace" | grep -Fc 'queue num' || true)
+    [ "$actual" = "$family_rules" ] || { echo "wrong count of dynamic nft original NFQUEUE late rules: expected $family_rules, got $actual in $trace" >&2; failures=$((failures + 1)); }
+    actual=$(grep -F 'ct reply packets 4-18446744073709551615' "$trace" | grep -Fc 'queue num' || true)
+    [ "$actual" = "$family_rules" ] || { echo "wrong count of dynamic nft reply NFQUEUE late rules: expected $family_rules, got $actual in $trace" >&2; failures=$((failures + 1)); }
     for direction in original reply; do
         for flag in rst fin; do
-            actual=$(grep -F "packets 4-18446744073709551615 tcp flags & $flag == $flag" "$trace" | grep -Fc "ct direction $direction" || true)
+            actual=$(grep -F "packets 4-18446744073709551615 tcp flags & $flag == $flag" "$trace" | grep -F "ct direction $direction" | grep -Fc 'queue num' || true)
             [ "$actual" = "$flag_rules" ] || { echo "wrong nft $direction $flag boundary: expected $flag_rules, got $actual in $trace" >&2; failures=$((failures + 1)); }
         done
     done
-    actual=$(grep -F 'packets 4-18446744073709551615' "$trace" | grep -Fc 'th dport { 80 }' || true)
+    actual=$(grep -F 'packets 4-18446744073709551615' "$trace" | grep -F 'th dport { 80 }' | grep -Fc 'queue num' || true)
     [ "$actual" = "$flag_rules" ] || { echo "wrong nft original HTTP keepalive boundary: expected $flag_rules, got $actual in $trace" >&2; failures=$((failures + 1)); }
-    actual=$(grep -F 'packets 4-18446744073709551615' "$trace" | grep -Fc 'th sport { 80 }' || true)
+    actual=$(grep -F 'packets 4-18446744073709551615' "$trace" | grep -F 'th sport { 80 }' | grep -Fc 'queue num' || true)
     [ "$actual" = "$flag_rules" ] || { echo "wrong nft reply HTTP keepalive boundary: expected $flag_rules, got $actual in $trace" >&2; failures=$((failures + 1)); }
 done
 

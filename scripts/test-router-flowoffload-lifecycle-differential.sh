@@ -26,17 +26,46 @@ case "${1:-}" in
     get)
         case "${2:-}" in
             *flow_offloading_hw) cat "$FLOW_HW_SETTING_FILE" ;;
-            *) cat "$FLOW_SETTING_FILE" ;;
+            *flow_offloading) cat "$FLOW_SETTING_FILE" ;;
+            firewall.r2o_flowoffload_hook)
+                [ -f "$UCI_HOOK_FILE" ] || exit 1
+                cat "$UCI_HOOK_FILE"
+                ;;
+            firewall.r2o_flowoffload_hook.*)
+                [ -f "$UCI_HOOK_FILE" ] || exit 1
+                key=${2##*.}
+                sed -n "s/^$key=//p" "$UCI_HOOK_FILE"
+                ;;
+            *) exit 1 ;;
         esac
         ;;
     set)
         [ "${FAIL_UCI_SET:-0}" = 0 ] || exit 1
         case "${2:-}" in
             *flow_offloading_hw=*) printf '%s\n' "${2#*=}" > "$FLOW_HW_SETTING_FILE" ;;
-            *) printf '%s\n' "${2#*=}" > "$FLOW_SETTING_FILE" ;;
+            *flow_offloading=*) printf '%s\n' "${2#*=}" > "$FLOW_SETTING_FILE" ;;
+            firewall.r2o_flowoffload_hook=include) printf 'section=include\n' > "$UCI_HOOK_FILE" ;;
+            firewall.r2o_flowoffload_hook.*=*)
+                key=${2#firewall.r2o_flowoffload_hook.}
+                key=${key%%=*}
+                value=${2#*=}
+                temporary=$UCI_HOOK_FILE.new.$$
+                if [ -f "$UCI_HOOK_FILE" ]; then awk -F= -v key="$key" '$1 != key' "$UCI_HOOK_FILE" > "$temporary"; fi
+                printf '%s=%s\n' "$key" "$value" >> "$temporary"
+                mv -f "$temporary" "$UCI_HOOK_FILE"
+                ;;
+            *) exit 2 ;;
         esac
         ;;
-    commit) : ;;
+    delete)
+        [ "${2:-}" = firewall.r2o_flowoffload_hook ] || exit 2
+        rm -f "$UCI_HOOK_FILE"
+        ;;
+    commit)
+        [ -n "${UCI_COMMIT_FILE:-}" ] || exit 0
+        printf '%s\n' "$(( $(cat "$UCI_COMMIT_FILE" 2>/dev/null || echo 0) + 1 ))" > "$UCI_COMMIT_FILE"
+        ;;
+    revert) rm -f "$UCI_HOOK_FILE" ;;
     *) exit 2 ;;
 esac
 UCI
@@ -45,6 +74,17 @@ cat > "$TEMP/bin/fw4" <<'FW4'
 printf '%s\n' "$*" >> "$FW_TRACE"
 FW4
 chmod 0755 "$TEMP/bin/uci" "$TEMP/bin/fw4"
+cat >"$TEMP/bin/r2o-firewall" <<'FIREWALL'
+#!/bin/sh
+if [ -n "${FIREWALL_TRACE:-}" ]; then printf '%s\n' "$1" >> "$FIREWALL_TRACE"; fi
+case "${1:-}" in
+    backend) echo nft ;;
+    ipv6-enabled) echo 1 ;;
+    status|flowoffload-ensure|flowoffload-restore) exit 0 ;;
+    *) exit 2 ;;
+esac
+FIREWALL
+chmod 0755 "$TEMP/bin/r2o-firewall"
 
 cat > "$TEMP/step.sh" <<'STEP'
 #!/bin/sh
@@ -59,6 +99,31 @@ case "$step" in
         ;;
     stop)
         if command -v flowoffload_restore >/dev/null 2>&1; then flowoffload_restore; fi
+        ;;
+    hook)
+        flowoffload_hook_install
+        flowoffload_hook_install
+        printf 'hook=%s type=%s path=%s compatible=%s enabled=%s commits=%s\n' \
+            "$(test -f "$UCI_HOOK_FILE" && echo present || echo absent)" \
+            "$(uci -q get firewall.r2o_flowoffload_hook.type 2>/dev/null || echo absent)" \
+            "$(uci -q get firewall.r2o_flowoffload_hook.path 2>/dev/null || echo absent)" \
+            "$(uci -q get firewall.r2o_flowoffload_hook.fw4_compatible 2>/dev/null || echo absent)" \
+            "$(uci -q get firewall.r2o_flowoffload_hook.enabled 2>/dev/null || echo absent)" \
+            "$(cat "$UCI_COMMIT_FILE" 2>/dev/null || echo 0)"
+        flowoffload_hook_remove
+        printf 'removed=%s commits=%s\n' \
+            "$(test -e "$UCI_HOOK_FILE" && echo yes || echo no)" \
+            "$(cat "$UCI_COMMIT_FILE" 2>/dev/null || echo 0)"
+        exit 0
+        ;;
+    hook-existing)
+        flowoffload_hook_install
+        flowoffload_hook_remove
+        printf 'present=%s marker=%s commits=%s\n' \
+            "$(test -f "$UCI_HOOK_FILE" && echo yes || echo no)" \
+            "$(test -f "$RUN/flowoffload-hook.created" && echo yes || echo no)" \
+            "$(cat "$UCI_COMMIT_FILE" 2>/dev/null || echo 0)"
+        exit 0
         ;;
 esac
 saved=absent
@@ -84,6 +149,7 @@ run_case() {
     for step in start restart stop; do
         RUN="$run" RUNTIME="$run" FW_BACKEND="$backend" R2O_FW="$backend" \
         FLOW_SETTING_FILE="$run/flow-setting" FLOW_HW_SETTING_FILE="$run/flow-hw-setting" FW_TRACE="$run/fw.trace" \
+        FIREWALL="$TEMP/bin/r2o-firewall" \
         PATH="$TEMP/bin:$PATH" sh "$TEMP/step.sh" "$functions" "$step"
     done > "$run/output"
     cat "$run/output"
@@ -113,6 +179,79 @@ fi
 run_case d2o 0 > "$TEMP/d2o-disabled.out"
 run_case r2o 0 > "$TEMP/r2o-disabled.out"
 run_case r2o 1 0 > "$TEMP/r2o-software-only.out"
+
+hook="$TEMP/r2o-hook"
+mkdir -p "$hook"
+printf '1\n' >"$hook/flow-setting"
+printf '1\n' >"$hook/flow-hw-setting"
+: >"$hook/fw.trace"
+: >"$hook/commits"
+RUN="$hook" RUNTIME="$hook" FLOW_SETTING_FILE="$hook/flow-setting" \
+FLOW_HW_SETTING_FILE="$hook/flow-hw-setting" FW_TRACE="$hook/fw.trace" \
+UCI_HOOK_FILE="$hook/include" UCI_COMMIT_FILE="$hook/commits" \
+INIT="$TEMP/bin/r2o-init" FIREWALL="$TEMP/bin/r2o-firewall" \
+PATH="$TEMP/bin:$PATH" sh "$TEMP/step.sh" "$TEMP/r2o.sh" hook >"$hook/output"
+{
+    printf 'hook=present type=script path=%s compatible=1 enabled=1 commits=1\n' "$TEMP/bin/r2o-init"
+    printf 'removed=no commits=2\n'
+} >"$hook/expected"
+if ! cmp -s "$hook/expected" "$hook/output"; then
+    echo "fw4 include hook lifecycle is not idempotent or reversible" >&2
+    diff -u "$hook/expected" "$hook/output" >&2 || true
+    exit 1
+fi
+existing="$TEMP/r2o-hook-existing"
+mkdir -p "$existing"
+printf '%s\n' type=script "path=$TEMP/bin/r2o-init" fw4_compatible=1 enabled=1 >"$existing/include"
+RUN="$existing" RUNTIME="$existing" UCI_HOOK_FILE="$existing/include" \
+UCI_COMMIT_FILE="$existing/commits" INIT="$TEMP/bin/r2o-init" \
+FIREWALL="$TEMP/bin/r2o-firewall" PATH="$TEMP/bin:$PATH" \
+    sh "$TEMP/step.sh" "$TEMP/r2o.sh" hook-existing >"$existing/output"
+printf '%s\n' 'present=yes marker=no commits=0' >"$existing/expected"
+if ! cmp -s "$existing/expected" "$existing/output"; then
+    echo "stopping R2O changed a pre-existing fw4 include" >&2
+    cat "$existing/expected" "$existing/output" "$existing/include" >&2
+    exit 1
+fi
+printf 'R2O_CONFIG=\n' >"$hook/config"
+: >"$hook/include-trace"
+if ! ACTION=includes R2O_DIR="$hook" R2O_CONFIG="$hook/config" \
+    R2O_INIT="$TEMP/bin/r2o-init" R2O_FIREWALL="$TEMP/bin/r2o-firewall" \
+    FIREWALL_TRACE="$hook/include-trace" PATH="$TEMP/bin:$PATH" \
+    sh "$ROOT/router/S99r2o" >"$hook/include-output" 2>&1; then
+    echo "fw4 script include handler failed" >&2
+    cat "$hook/include-output" >&2
+    exit 1
+fi
+printf '%s\n' status flowoffload-ensure >"$hook/include-expected"
+if ! cmp -s "$hook/include-expected" "$hook/include-trace"; then
+    echo "fw4 script include did not reapply selective flow offload" >&2
+    cat "$hook/include-expected" "$hook/include-trace" "$hook/include-output" >&2
+    exit 1
+fi
+: >"$hook/include-trace"
+ACTION=includes R2O_FLOWOFFLOAD_RESTORING=1 R2O_DIR="$hook" R2O_CONFIG="$hook/config" \
+R2O_INIT="$TEMP/bin/r2o-init" R2O_FIREWALL="$TEMP/bin/r2o-firewall" \
+FIREWALL_TRACE="$hook/include-trace" PATH="$TEMP/bin:$PATH" \
+    sh "$ROOT/router/S99r2o" >"$hook/restore-output" 2>&1
+: >"$hook/restore-expected"
+if ! cmp -s "$hook/restore-expected" "$hook/include-trace"; then
+    echo "fw4 restore recursively invoked flow-offload ensure while holding its lock" >&2
+    cat "$hook/restore-expected" "$hook/include-trace" "$hook/restore-output" >&2
+    exit 1
+fi
+
+stale="$TEMP/r2o-stale-legacy-marker"
+mkdir -p "$stale"
+printf '0\n' >"$stale/flow-setting"
+printf '0\n' >"$stale/flow-hw-setting"
+: >"$stale/fw.trace"
+: >"$stale/empty.sh"
+printf '1\n' >"$stale/flow-offloading.saved"
+RUN="$stale" RUNTIME="$stale" FLOW_SETTING_FILE="$stale/flow-setting" \
+FLOW_HW_SETTING_FILE="$stale/flow-hw-setting" FW_TRACE="$stale/fw.trace" \
+FIREWALL="$TEMP/bin/r2o-firewall" PATH="$TEMP/bin:$PATH" \
+    sh "$TEMP/step.sh" "$TEMP/r2o.sh" stop >"$stale/output"
 printf '%s\n' \
     'start setting=0 hw=1 saved=absent reloads=0' \
     'restart setting=0 hw=1 saved=absent reloads=0' \
@@ -141,7 +280,14 @@ if ! cmp -s "$TEMP/r2o-software-only.expected" "$TEMP/r2o-software-only.out"; th
     exit 1
 fi
 
-if grep -Eq 'flowoffload_off|uci set firewall\.@defaults\[0\]\.flow_offloading=0|uci set firewall\.@defaults\[0\]\.flow_offloading_hw=' "$ROOT/router/S99r2o"; then
+if [ "$(cat "$stale/flow-setting")" != 0 ] || [ "$(cat "$stale/flow-hw-setting")" != 0 ] \
+    || [ -f "$stale/flow-offloading.saved" ]; then
+    echo "R2O changed current UCI offload settings while cleaning a legacy marker" >&2
+    cat "$stale/output" >&2
+    exit 1
+fi
+
+if grep -Eq 'flowoffload_off|uci (set|delete) firewall\.@defaults\[0\]\.flow_offloading(_hw)?=' "$ROOT/router/S99r2o"; then
     echo "R2O must leave native fw4 flow-offload configuration untouched" >&2
     exit 1
 fi
