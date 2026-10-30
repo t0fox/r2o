@@ -32,7 +32,7 @@ MARK=${MARK:-45}
 PROBE_MARK=${PROBE_MARK:-0}
 ONLY_MARK=${ONLY_MARK:-}
 IPV6_ENABLED=${IPV6_ENABLED:-1}
-PANEL_LISTEN=${PANEL_LISTEN:-127.0.0.1:8090}
+PANEL_LISTEN=${PANEL_LISTEN-127.0.0.1:8090}
 TG_ENABLED=${TG_ENABLED:-0}
 TG_MODE=${TG_MODE:-local}
 TG_PORT=${TG_PORT:-1443}
@@ -61,7 +61,7 @@ MARK=${MARK:-45}
 PROBE_MARK=${PROBE_MARK:-0}
 ONLY_MARK=${ONLY_MARK:-}
 IPV6_ENABLED=${IPV6_ENABLED:-1}
-PANEL_LISTEN=${PANEL_LISTEN:-127.0.0.1:8090}
+PANEL_LISTEN=${PANEL_LISTEN-127.0.0.1:8090}
 TG_ENABLED=${TG_ENABLED:-0}
 TG_MODE=${TG_MODE:-local}
 TG_PORT=${TG_PORT:-1443}
@@ -873,6 +873,7 @@ panel_stop() { stop_component r2o-panel "$PN_PID"; }
 panel_start() {
     prepare_dirs
     log_maintenance_start || say "ротация журналов не запустилась"
+    [ -n "$PANEL_LISTEN" ] || return 0
     [ -x "$MANAGER" ] || return 1
     if component_running r2o-panel "$PN_PID"; then return 0; fi
     rm -f "$RUNTIME/r2o-panel.health"
@@ -908,7 +909,8 @@ wait_health() {
     attempt=0
     while [ "$attempt" -lt 100 ]; do
         if component_running r2o-datapath "$DP4_PID" && component_running r2o-controller "$CT4_PID" \
-            && queue_bound "$QUEUE4" && [ -s "$RUNTIME/r2o-panel.health" ]; then
+            && queue_bound "$QUEUE4" \
+            && { [ -z "$PANEL_LISTEN" ] || [ -s "$RUNTIME/r2o-panel.health" ]; }; then
             if [ "$IPV6_ENABLED" = 0 ] || \
                 { component_running r2o-datapath "$DP6_PID" && component_running r2o-controller "$CT6_PID" && queue_bound "$QUEUE6"; }; then
                 return 0
