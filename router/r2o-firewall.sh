@@ -271,8 +271,14 @@ nft_main_down() {
 }
 
 nft_down() {
-    nft_main_down || return 1
-    nft_rst_down
+    nft_main_down
+}
+
+firewall_rst_down() {
+    fw_lock_acquire || return 1
+    if nft_rst_down; then fw_rc=0; else fw_rc=$?; fi
+    fw_lock_release || return 1
+    return "$fw_rc"
 }
 
 xt() {
@@ -630,6 +636,9 @@ case "${1:-}" in
     down)
         firewall_down
         ;;
+    rst-down)
+        firewall_rst_down
+        ;;
     status)
         if [ "$BACKEND" = nft ]; then nft list table inet r2o; else
             xt iptables -t mangle -C POSTROUTING -j R2O_OUT &&
@@ -640,5 +649,5 @@ case "${1:-}" in
     dns-ensure)
         dns_excl_sync
         ;;
-    *) echo "использование: $0 {backend|ipv6-enabled|up|down|status|dns-ensure}" >&2; exit 2 ;;
+    *) echo "использование: $0 {backend|ipv6-enabled|up|down|rst-down|status|dns-ensure}" >&2; exit 2 ;;
 esac

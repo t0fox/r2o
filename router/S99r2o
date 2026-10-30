@@ -806,6 +806,7 @@ stop() {
     engine_stop
     panel_stop
     log_maintenance_stop
+    "$FIREWALL" rst-down || say "не удалось снять RST таблицу firewall"
 }
 
 wait_health() {
