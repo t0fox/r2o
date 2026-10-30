@@ -52,6 +52,28 @@ printf 'PANEL_LISTEN=192.168.1.1:8090\nQUEUE_NUM=2000\n' >> "$TEMP/tab.conf"
 "$TEMP/d2o-config-trace" "$TEMP/config" > "$TEMP/c.trace"
 "$TEMP/d2o-config-trace" "$TEMP/quoted.conf" > "$TEMP/quoted.c.trace"
 "$TEMP/d2o-config-trace" "$TEMP/tab.conf" > "$TEMP/tab.c.trace"
+cat > "$TEMP/ignored.conf" <<'CFG'
+MODE=apply
+PANEL_LISTEN=192.168.1.1:8090
+QUEUE_NUM=2000
+CONTROL_SOCKET='unterminated
+DECOY_SNI='unterminated
+FLOWS='unterminated
+STATS_SEC='unterminated
+HEAL_EVERY='unterminated
+TG_ENABLED='unterminated
+TG_MODE='unterminated
+TG_DC_MAP_PATH='unterminated
+TG_IDENTITY='unterminated
+TG_CA_BUNDLE='unterminated
+TG_STATUS='unterminated
+TG_STATS_SOCKET='unterminated
+TG_DIAGNOSTIC_DIRECT_TCP='unterminated
+TG_CF_WORKER_DOMAIN='unterminated
+CFG
+printf 'CONTROL_SOCKET=opaque value with byte ' >> "$TEMP/ignored.conf"
+printf '\377\n' >> "$TEMP/ignored.conf"
+"$TEMP/d2o-config-trace" "$TEMP/ignored.conf" > "$TEMP/ignored.c.trace"
 
 cat > "$TEMP/run-rust-test.ps1" <<PS
 \$env:CARGO_HOME = '$WIN_CARGO_HOME'
@@ -66,10 +88,12 @@ cat > "$TEMP/run-rust-test.ps1" <<PS
 \$env:R2O_PANEL_CONFIG_QUOTED_C_TRACE = '$(windows_path "$TEMP/quoted.c.trace")'
 \$env:R2O_PANEL_CONFIG_TAB_PATH = '$(windows_path "$TEMP/tab.conf")'
 \$env:R2O_PANEL_CONFIG_TAB_C_TRACE = '$(windows_path "$TEMP/tab.c.trace")'
+\$env:R2O_PANEL_CONFIG_IGNORED_PATH = '$(windows_path "$TEMP/ignored.conf")'
+\$env:R2O_PANEL_CONFIG_IGNORED_C_TRACE = '$(windows_path "$TEMP/ignored.c.trace")'
 & '$WIN_CARGO' +1.98.0-x86_64-pc-windows-gnu test -p r2o-panel --test http --locked --offline d2o_config_parser_matches_ -- --ignored --nocapture
 exit \$LASTEXITCODE
 PS
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass \
     -File "$(windows_path "$TEMP/run-rust-test.ps1")"
 
-echo "D2O/R2O config parsing matches for ignored non-UTF-8 bytes at $ACTUAL_D2O_SHA."
+echo "D2O/R2O config parsing matches for comments, ignored bytes, and ignored known values at $ACTUAL_D2O_SHA."

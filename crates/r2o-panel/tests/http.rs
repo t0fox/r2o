@@ -1232,6 +1232,15 @@ fn d2o_config_parser_matches_unquoted_tab_comments() {
     assert_d2o_config_trace("R2O_PANEL_CONFIG_TAB_PATH", "R2O_PANEL_CONFIG_TAB_C_TRACE");
 }
 
+#[test]
+#[ignore = "run through scripts/test-panel-config-comment-bytes-differential.sh"]
+fn d2o_config_parser_matches_ignored_known_values() {
+    assert_d2o_config_trace(
+        "R2O_PANEL_CONFIG_IGNORED_PATH",
+        "R2O_PANEL_CONFIG_IGNORED_C_TRACE",
+    );
+}
+
 fn assert_d2o_config_trace(config_path_env: &str, c_trace_env: &str) {
     let config_path =
         PathBuf::from(std::env::var_os(config_path_env).expect("test helper provides config"));

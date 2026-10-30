@@ -2372,11 +2372,28 @@ pub fn parse_config(
         "TG_CF_WORKER_DOMAIN",
         "R2O_PPE_DEOFFLOAD",
     ];
+    let ignored = [
+        "CONTROL_SOCKET",
+        "DECOY_SNI",
+        "FLOWS",
+        "STATS_SEC",
+        "HEAL_EVERY",
+        "R2O_RUNTIME_DIR",
+        "TG_ENABLED",
+        "TG_MODE",
+        "TG_DC_MAP_PATH",
+        "TG_IDENTITY",
+        "TG_CA_BUNDLE",
+        "TG_STATUS",
+        "TG_STATS_SOCKET",
+        "TG_DIAGNOSTIC_DIRECT_TCP",
+        "TG_CF_WORKER_DOMAIN",
+    ];
     let sanitized;
     let bytes = if std::str::from_utf8(&raw).is_ok() {
         raw.as_slice()
     } else {
-        sanitized = sanitize_config_bytes(&raw, &known)?;
+        sanitized = sanitize_config_bytes(&raw, &known, &ignored)?;
         sanitized.as_slice()
     };
     let text = std::str::from_utf8(bytes)
@@ -2403,6 +2420,9 @@ pub fn parse_config(
             {
                 config.unknown_keys.push(key.into());
             }
+            continue;
+        }
+        if ignored.contains(&key) {
             continue;
         }
         let value = strip_shell_value(raw_value.trim()).ok_or_else(|| {
@@ -2579,7 +2599,7 @@ pub fn parse_config(
     Ok(())
 }
 
-fn sanitize_config_bytes(raw: &[u8], known: &[&str]) -> std::io::Result<Vec<u8>> {
+fn sanitize_config_bytes(raw: &[u8], known: &[&str], ignored: &[&str]) -> std::io::Result<Vec<u8>> {
     let mut sanitized = raw.to_vec();
     let mut line_start = 0;
     while line_start < raw.len() {
@@ -2604,7 +2624,7 @@ fn sanitize_config_bytes(raw: &[u8], known: &[&str]) -> std::io::Result<Vec<u8>>
                     line_start = line_end.saturating_add(1);
                     continue;
                 };
-                if !known.contains(&key) {
+                if !known.contains(&key) || ignored.contains(&key) {
                     sanitized[line_start + equals + 1..line_end].fill(b' ');
                 } else if let Some(comment) = config_comment_offset(&line[equals + 1..]) {
                     let value_prefix = &line[equals + 1..equals + 1 + comment];
