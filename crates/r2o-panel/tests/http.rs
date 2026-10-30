@@ -1211,9 +1211,30 @@ fn config_parser_honors_overrides_and_keeps_unknown_keys_visible() {
 #[test]
 #[ignore = "run through scripts/test-panel-config-comment-bytes-differential.sh"]
 fn d2o_config_parser_matches_ignored_non_utf8_bytes() {
-    let config_path = PathBuf::from(
-        std::env::var_os("R2O_PANEL_CONFIG_PATH").expect("test helper provides config"),
+    assert_d2o_config_trace(
+        "R2O_PANEL_CONFIG_BYTES_PATH",
+        "R2O_PANEL_CONFIG_BYTES_C_TRACE",
     );
+}
+
+#[test]
+#[ignore = "run through scripts/test-panel-config-comment-bytes-differential.sh"]
+fn d2o_config_parser_matches_quoted_trailing_comments() {
+    assert_d2o_config_trace(
+        "R2O_PANEL_CONFIG_QUOTED_PATH",
+        "R2O_PANEL_CONFIG_QUOTED_C_TRACE",
+    );
+}
+
+#[test]
+#[ignore = "run through scripts/test-panel-config-comment-bytes-differential.sh"]
+fn d2o_config_parser_matches_unquoted_tab_comments() {
+    assert_d2o_config_trace("R2O_PANEL_CONFIG_TAB_PATH", "R2O_PANEL_CONFIG_TAB_C_TRACE");
+}
+
+fn assert_d2o_config_trace(config_path_env: &str, c_trace_env: &str) {
+    let config_path =
+        PathBuf::from(std::env::var_os(config_path_env).expect("test helper provides config"));
     let mut config = Config::default();
     config.config_path = config_path.clone();
     let result = parse_config(&config_path, &mut config, &[]);
@@ -1228,13 +1249,9 @@ fn d2o_config_parser_matches_ignored_non_utf8_bytes() {
         config.unknown_keys.len()
     );
     println!("{trace}");
-    if let Some(path) = std::env::var_os("R2O_PANEL_CONFIG_TRACE_OUTPUT") {
-        fs::write(path, &trace).unwrap();
-    }
-    let c_trace = fs::read_to_string(
-        std::env::var_os("R2O_PANEL_CONFIG_C_TRACE").expect("test helper provides D2O trace"),
-    )
-    .unwrap();
+    let c_trace =
+        fs::read_to_string(std::env::var_os(c_trace_env).expect("test helper provides D2O trace"))
+            .unwrap();
     assert_eq!(trace, c_trace);
     assert_eq!(result.unwrap(), ());
     assert_eq!(config.mode, "apply");

@@ -45,7 +45,13 @@ clang-18 -std=gnu11 -O2 -Wall -Wextra -Werror -pthread \
     printf '\377'
     printf '_WITH_INVALID_BYTE=value\n'
 } > "$TEMP/config"
+printf 'MODE="apply" # accepted trailing comment\n' > "$TEMP/quoted.conf"
+printf 'PANEL_LISTEN=192.168.1.1:8090\nQUEUE_NUM=2000\n' >> "$TEMP/quoted.conf"
+printf 'MODE=apply\t# accepted tab comment\n' > "$TEMP/tab.conf"
+printf 'PANEL_LISTEN=192.168.1.1:8090\nQUEUE_NUM=2000\n' >> "$TEMP/tab.conf"
 "$TEMP/d2o-config-trace" "$TEMP/config" > "$TEMP/c.trace"
+"$TEMP/d2o-config-trace" "$TEMP/quoted.conf" > "$TEMP/quoted.c.trace"
+"$TEMP/d2o-config-trace" "$TEMP/tab.conf" > "$TEMP/tab.c.trace"
 
 cat > "$TEMP/run-rust-test.ps1" <<PS
 \$env:CARGO_HOME = '$WIN_CARGO_HOME'
@@ -54,10 +60,13 @@ cat > "$TEMP/run-rust-test.ps1" <<PS
 \$env:TMP = '$WIN_TMP'
 \$env:TEMP = '$WIN_TMP'
 \$env:TMPDIR = '$WIN_TMP'
-\$env:R2O_PANEL_CONFIG_PATH = '$(windows_path "$TEMP/config")'
-\$env:R2O_PANEL_CONFIG_C_TRACE = '$(windows_path "$TEMP/c.trace")'
-\$env:R2O_PANEL_CONFIG_TRACE_OUTPUT = '$(windows_path "$TEMP/rust.trace")'
-& '$WIN_CARGO' +1.98.0-x86_64-pc-windows-gnu test -p r2o-panel --test http --locked --offline d2o_config_parser_matches_ignored_non_utf8_bytes -- --ignored --nocapture
+\$env:R2O_PANEL_CONFIG_BYTES_PATH = '$(windows_path "$TEMP/config")'
+\$env:R2O_PANEL_CONFIG_BYTES_C_TRACE = '$(windows_path "$TEMP/c.trace")'
+\$env:R2O_PANEL_CONFIG_QUOTED_PATH = '$(windows_path "$TEMP/quoted.conf")'
+\$env:R2O_PANEL_CONFIG_QUOTED_C_TRACE = '$(windows_path "$TEMP/quoted.c.trace")'
+\$env:R2O_PANEL_CONFIG_TAB_PATH = '$(windows_path "$TEMP/tab.conf")'
+\$env:R2O_PANEL_CONFIG_TAB_C_TRACE = '$(windows_path "$TEMP/tab.c.trace")'
+& '$WIN_CARGO' +1.98.0-x86_64-pc-windows-gnu test -p r2o-panel --test http --locked --offline d2o_config_parser_matches_ -- --ignored --nocapture
 exit \$LASTEXITCODE
 PS
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass \

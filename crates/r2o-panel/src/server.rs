@@ -2755,17 +2755,18 @@ fn strip_shell_value(raw: &str) -> Option<&str> {
     if raw.starts_with('"') || raw.starts_with('\'') {
         let quote = raw.as_bytes()[0] as char;
         let end = raw[1..].find(quote)? + 1;
-        if raw[end + 1..]
-            .trim()
-            .trim_start_matches('#')
-            .trim()
-            .is_empty()
-        {
-            Some(&raw[1..end])
-        } else {
-            None
+        let tail = &raw[end + 1..];
+        if !tail.is_empty() && !matches!(tail.as_bytes()[0], b' ' | b'\t') {
+            return None;
         }
+        let tail = tail.trim_matches([' ', '\t', '\r', '\n']);
+        (tail.is_empty() || tail.starts_with('#')).then_some(&raw[1..end])
     } else {
-        Some(raw.split_once(" #").map_or(raw, |(v, _)| v).trim())
+        let bytes = raw.as_bytes();
+        let comment = bytes.iter().enumerate().find_map(|(index, byte)| {
+            (*byte == b'#' && (index == 0 || matches!(bytes[index - 1], b' ' | b'\t')))
+                .then_some(index)
+        });
+        Some(raw[..comment.unwrap_or(raw.len())].trim_matches([' ', '\t', '\r', '\n']))
     }
 }
