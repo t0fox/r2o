@@ -1260,21 +1260,12 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
         finish_cancelled(&mut result, &options, start);
         return result;
     }
-    if base.pass == 0
-        && base.errors > 0
-        && let Some(error) = &base.error
-    {
-        if error.is_dial_timeout() {
-            result.reason = format!(
-                "наш срок на подключение {} мс истёк — замер не состоялся: {}",
-                options.timeout.as_millis(),
-                error.message()
-            );
-            result.verdict = Verdict::Flaky;
-        } else {
-            result.reason = format!("нет TCP до цели: {}", error.message());
-            result.verdict = Verdict::Unreachable;
-        }
+    if base.pass == 0 && base.errors == options.repeats {
+        result.reason = format!(
+            "нет TCP до цели: ни один из {} опытов не состоялся",
+            options.repeats
+        );
+        result.verdict = Verdict::Unreachable;
         finish(&mut result, &options, start);
         return result;
     }
@@ -1723,7 +1714,7 @@ fn measure_baseline<B: ProbeBackend>(
     result: &mut ClassifyResult,
     progress: &mut dyn FnMut(&str, usize, usize, usize),
 ) -> Tally {
-    let mut base = measure(
+    measure(
         backend,
         target,
         trigger,
@@ -1736,30 +1727,7 @@ fn measure_baseline<B: ProbeBackend>(
             until_pass: false,
         },
         progress,
-    );
-    if base.pass == 0
-        && base.errors > 0
-        && base.error.as_ref().is_some_and(ProbeError::is_dial_timeout)
-    {
-        let mut slower = options.clone();
-        slower.timeout = options.timeout.saturating_mul(2);
-        slower.seed_whole = None;
-        base = measure(
-            backend,
-            target,
-            trigger,
-            &slower,
-            result,
-            MeasureSpec {
-                name: "whole",
-                cuts: &[],
-                gap: slower.write_gap,
-                until_pass: false,
-            },
-            progress,
-        );
-    }
-    base
+    )
 }
 
 /// Запустить классификатор через помеченные TCP-сокеты узла.
@@ -2020,6 +1988,68 @@ mod raw_connect_fallback_tests {
         assert_eq!(result.probes, 3);
         assert!(result.stopped);
         assert_eq!(backend.targets.len(), 3);
+    }
+
+    #[test]
+    fn all_baseline_connect_failures_are_unreachable_without_extra_retries() {
+        let mut backend = ScriptedBackend {
+            outcomes: vec![Err(ProbeError::DialTimeout("dial timed out".into())); 6].into(),
+            control_results: VecDeque::new(),
+            targets: Vec::new(),
+            controls: Vec::new(),
+            cancel_after: None,
+        };
+        let trigger = Trigger {
+            name: "fixture".into(),
+            payload: b"ABCD".to_vec(),
+            accept: super::Accept::Any,
+        };
+        let options = ClassifyOptions {
+            repeats: 3,
+            allow_loopback: true,
+            ..ClassifyOptions::default()
+        };
+
+        let result = super::run_with_backend("127.0.0.1:443", &trigger, options, &mut backend);
+
+        assert_eq!(result.verdict, Verdict::Unreachable);
+        assert_eq!(result.probes, 3);
+        assert_eq!(backend.targets.len(), 3);
+    }
+
+    #[test]
+    fn partial_baseline_transport_errors_continue_to_the_split_question() {
+        let mut backend = ScriptedBackend {
+            outcomes: [
+                Ok(ProbeOutcome::Rejected),
+                Ok(ProbeOutcome::Rejected),
+                Err(ProbeError::Transport("connection refused".into())),
+                Err(ProbeError::Transport("connection refused".into())),
+                Err(ProbeError::Transport("connection refused".into())),
+                Err(ProbeError::Transport("connection refused".into())),
+            ]
+            .into(),
+            control_results: VecDeque::new(),
+            targets: Vec::new(),
+            controls: Vec::new(),
+            cancel_after: None,
+        };
+        let trigger = Trigger {
+            name: "fixture".into(),
+            payload: b"ABCD".to_vec(),
+            accept: super::Accept::Any,
+        };
+        let options = ClassifyOptions {
+            repeats: 3,
+            allow_loopback: true,
+            ..ClassifyOptions::default()
+        };
+
+        let result = super::run_with_backend("127.0.0.1:443", &trigger, options, &mut backend);
+
+        assert_eq!(result.verdict, Verdict::Flaky);
+        assert_eq!(result.probes, 6);
+        assert_eq!(backend.targets.len(), 6);
     }
 
     fn run_measure(

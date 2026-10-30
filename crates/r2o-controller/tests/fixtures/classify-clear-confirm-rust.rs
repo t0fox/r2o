@@ -61,6 +61,7 @@ fn verdict_name(verdict: Verdict) -> &'static str {
         Verdict::Clear => "Clear",
         Verdict::Flaky => "Flaky",
         Verdict::Inconclusive => "Inconclusive",
+        Verdict::Unreachable => "Unreachable",
         _ => "Other",
     }
 }
@@ -88,6 +89,21 @@ fn main() {
         None,
     );
     let cancel = run_case(vec![Ok(ProbeOutcome::Accepted); 3], Some(3));
+    let all_baseline_errors = run_case(
+        vec![Err(ProbeError::DialTimeout("dial timed out".into())); 6],
+        None,
+    );
+    let partial_base_error = run_case(
+        vec![
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Rejected),
+            Err(ProbeError::Transport("connection refused".into())),
+            Err(ProbeError::Transport("connection refused".into())),
+            Err(ProbeError::Transport("connection refused".into())),
+            Err(ProbeError::Transport("connection refused".into())),
+        ],
+        None,
+    );
 
     println!("clear={}/{}", verdict_name(clear.verdict), clear.probes);
     println!("silent={}/{}", verdict_name(silent.verdict), silent.probes);
@@ -97,6 +113,16 @@ fn main() {
         connect_error.probes
     );
     println!("cancel={}/{}", verdict_name(cancel.verdict), cancel.probes);
+    println!(
+        "all-baseline-errors={}/{}",
+        verdict_name(all_baseline_errors.verdict),
+        all_baseline_errors.probes
+    );
+    println!(
+        "partial-base-error={}/{}",
+        verdict_name(partial_base_error.verdict),
+        partial_base_error.probes
+    );
 
     assert_eq!(clear.verdict, Verdict::Clear);
     assert_eq!(clear.probes, 5);
@@ -106,4 +132,8 @@ fn main() {
     assert_eq!(connect_error.probes, 5);
     assert_eq!(cancel.verdict, Verdict::Inconclusive);
     assert_eq!(cancel.probes, 3);
+    assert_eq!(all_baseline_errors.verdict, Verdict::Unreachable);
+    assert_eq!(all_baseline_errors.probes, 3);
+    assert_eq!(partial_base_error.verdict, Verdict::Flaky);
+    assert_eq!(partial_base_error.probes, 6);
 }

@@ -97,6 +97,7 @@ static const char *verdict_name(d2k_verdict verdict) {
     case D2K_V_CLEAR: return "Clear";
     case D2K_V_FLAKY: return "Flaky";
     case D2K_V_INCONCLUSIVE: return "Inconclusive";
+    case D2K_V_UNREACHABLE: return "Unreachable";
     default: return "Other";
     }
 }
@@ -119,6 +120,10 @@ static int run_case(const char *name, int max_connections,
     if (start_server(&server, max_connections, send_through, cancel_after) < 0) {
         return 1;
     }
+    int server_joined = max_connections == 0;
+    if (server_joined) {
+        pthread_join(server.thread, NULL);
+    }
     memset(hello, 0xAA, sizeof hello);
     memcpy(hello, trigger_sig, sizeof trigger_sig);
     d2k_hello trigger = { hello, sizeof hello, NULL, 0, 0, 0 };
@@ -130,7 +135,9 @@ static int run_case(const char *name, int max_connections,
     d2k_hello control = { control_bytes, sizeof control_bytes, NULL, 0, 0, 0 };
     d2k_vres result = d2k_classify_cancelable(
         "127.0.0.1", server.port, trigger, control, 0, 3, 0, 50, &stop);
-    pthread_join(server.thread, NULL);
+    if (!server_joined) {
+        pthread_join(server.thread, NULL);
+    }
     active_stop = NULL;
     printf("%s=%s/%d\n", name, verdict_name(result.verdict), result.probes);
     return result.verdict == expected_verdict && (unsigned)result.probes == expected_probes ? 0 : 1;
@@ -142,5 +149,7 @@ int main(void) {
     failed |= run_case("silent", 5, 3, 0, D2K_V_FLAKY, 5);
     failed |= run_case("connect-error", 3, 3, 0, D2K_V_FLAKY, 5);
     failed |= run_case("cancel", 3, 3, 3, D2K_V_INCONCLUSIVE, 3);
+    failed |= run_case("all-baseline-errors", 0, 0, 0, D2K_V_UNREACHABLE, 3);
+    failed |= run_case("partial-base-error", 2, 0, 0, D2K_V_FLAKY, 6);
     return failed;
 }
