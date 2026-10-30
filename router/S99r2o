@@ -42,6 +42,8 @@ TG_FIREWALL=${R2O_TG_FIREWALL:-$SCRIPT_DIR/r2o-tg-firewall.sh}
 TG_PID=$RUN/r2o-telegram.pid
 TG_WATCHDOG=${R2O_TG_WATCHDOG:-$SCRIPT_DIR/r2o-telegram-watchdog.sh}
 TG_WD_PID=$RUN/r2o-telegram-watchdog.pid
+FW_WATCHDOG=${R2O_FIREWALL_WATCHDOG:-$SCRIPT_DIR/r2o-firewall-watchdog.sh}
+FW_WD_PID=$RUN/r2o-firewall-watchdog.pid
 AUTOUPDATE=1
 UPDATER=$SCRIPT_DIR/r2o-update-scheduler.sh
 UPD_PID=$RUN/update-scheduler.pid
@@ -69,6 +71,8 @@ TG_FIREWALL=${R2O_TG_FIREWALL:-$SCRIPT_DIR/r2o-tg-firewall.sh}
 TG_PID=$RUN/r2o-telegram.pid
 TG_WATCHDOG=${R2O_TG_WATCHDOG:-$SCRIPT_DIR/r2o-telegram-watchdog.sh}
 TG_WD_PID=$RUN/r2o-telegram-watchdog.pid
+FW_WATCHDOG=${R2O_FIREWALL_WATCHDOG:-$SCRIPT_DIR/r2o-firewall-watchdog.sh}
+FW_WD_PID=$RUN/r2o-firewall-watchdog.pid
 UPDATER=$SCRIPT_DIR/r2o-update-scheduler.sh
 UPD_PID=$RUN/update-scheduler.pid
 LOG_WORKER=${R2O_LOG_MAINTENANCE:-$SCRIPT_DIR/r2o-log-maintenance.sh}
@@ -282,6 +286,7 @@ wait_queue() {
 }
 
 engine_stop() {
+    firewall_watchdog_stop
     "$FIREWALL" down || say "не удалось полностью снять правила firewall"
     ppe_remove
     stop_component r2o-controller "$CT4_PID"
@@ -300,7 +305,8 @@ engine_start() {
     log_maintenance_start || say "ротация журналов не запустилась"
     if component_running r2o-datapath "$DP4_PID" \
         && component_running r2o-controller "$CT4_PID" && ipv6_components_running \
-        && "$FIREWALL" status >/dev/null 2>&1; then
+        && "$FIREWALL" status >/dev/null 2>&1 \
+        && { [ ! -x "$FW_WATCHDOG" ] || firewall_watchdog_running; }; then
         ppe_ensure
         say "datapath уже запущен"
         return 0
@@ -334,6 +340,7 @@ engine_start() {
         engine_stop
         return 1
     fi
+    firewall_watchdog_start || say "сторож правил не запустился — правила придётся возвращать вручную"
     say "datapath запущен: IPv4 очередь $QUEUE4, IPv6 $([ "$IPV6_ENABLED" = 1 ] && echo "$QUEUE6" || echo выключен), режим $MODE"
 }
 
@@ -421,6 +428,45 @@ log_maintenance_stop() {
         if kill -0 "$log_pid" 2>/dev/null; then kill -KILL "$log_pid" 2>/dev/null || true; fi
     fi
     rm -f "$LM_PID"
+}
+
+firewall_watchdog_running() {
+    [ -s "$FW_WD_PID" ] || return 1
+    fw_wd_pid=$(cat "$FW_WD_PID" 2>/dev/null) || return 1
+    case "$fw_wd_pid" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$fw_wd_pid" 2>/dev/null || return 1
+    fw_wd_cmdline=$(tr '\000' ' ' < "$PROC/$fw_wd_pid/cmdline" 2>/dev/null) || return 1
+    case "$fw_wd_cmdline" in *"$FW_WATCHDOG"*) return 0 ;; *) return 1 ;; esac
+}
+
+firewall_watchdog_start() {
+    [ -x "$FW_WATCHDOG" ] || return 0
+    firewall_watchdog_running && return 0
+    prepare_dirs || return 1
+    command -v start-stop-daemon >/dev/null 2>&1 || return 1
+    rm -f "$FW_WD_PID"
+    start-stop-daemon -S -b -m -p "$FW_WD_PID" -x "$FW_WATCHDOG" -- run || return 1
+    attempt=0
+    while [ "$attempt" -lt 20 ]; do
+        firewall_watchdog_running && return 0
+        attempt=$((attempt + 1))
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    return 1
+}
+
+firewall_watchdog_stop() {
+    if firewall_watchdog_running; then
+        fw_wd_pid=$(cat "$FW_WD_PID")
+        kill -TERM "$fw_wd_pid" 2>/dev/null || true
+        attempt=0
+        while kill -0 "$fw_wd_pid" 2>/dev/null && [ "$attempt" -lt 50 ]; do
+            attempt=$((attempt + 1))
+            sleep 0.1 2>/dev/null || sleep 1
+        done
+        if kill -0 "$fw_wd_pid" 2>/dev/null; then kill -KILL "$fw_wd_pid" 2>/dev/null || true; fi
+    fi
+    rm -f "$FW_WD_PID"
 }
 
 telegram_watchdog_running() {
@@ -700,11 +746,15 @@ telegram_reapply() {
     fi
 }
 
-heal() {
+firewall_heal() {
     if component_running r2o-datapath "$DP4_PID"; then
         if "$FIREWALL" status >/dev/null 2>&1; then ppe_ensure
         else heal_reapply || return 1; fi
     fi
+}
+
+heal() {
+    firewall_heal || return 1
     telegram_reapply
 }
 
@@ -807,6 +857,7 @@ status() {
     component_running r2o-panel "$PN_PID" && echo "  панель: работает" || echo "  панель: не работает"
     log_maintenance_running && echo "  ротация журналов: работает" || echo "  ротация журналов: не работает"
     update_scheduler_running && echo "  обновления: ночная проверка запланирована" || echo "  обновления: планировщик не работает"
+    firewall_watchdog_running && echo "  сторож правил: работает" || echo "  сторож правил: не работает"
     queue_bound "$QUEUE4" && echo "  очередь IPv4 $QUEUE4: привязана" || echo "  очередь IPv4 $QUEUE4: не привязана"
     if [ "$IPV6_ENABLED" = 1 ]; then
         queue_bound "$QUEUE6" && echo "  очередь IPv6 $QUEUE6: привязана" || echo "  очередь IPv6 $QUEUE6: не привязана"
@@ -849,8 +900,9 @@ case "${1:-}" in
     update-auto-off) set_update_auto 0 ;;
     clear-found) clear_found ;;
     log-tick) "$LOG_WORKER" tick ;;
+    firewall-heal) firewall_heal ;;
     heal) heal ;;
     tg-heal) telegram_reapply ;;
     tg-stop-rules) "$TG_FIREWALL" stop ;;
-    *) echo "usage: $0 {start|stop|restart|status|engine-start|engine-stop|engine-restart|settings-restart|reapply|heal|ppe-ensure|ppe-remove|ppe-status|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-check|telegram-reapply|tg-heal|tg-stop-rules|update-check|update-install|update-auto-on|update-auto-off|log-tick}" >&2; exit 2 ;;
+    *) echo "usage: $0 {start|stop|restart|status|engine-start|engine-stop|engine-restart|settings-restart|reapply|heal|firewall-heal|ppe-ensure|ppe-remove|ppe-status|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-check|telegram-reapply|tg-heal|tg-stop-rules|update-check|update-install|update-auto-on|update-auto-off|log-tick}" >&2; exit 2 ;;
 esac

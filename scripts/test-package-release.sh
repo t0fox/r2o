@@ -30,6 +30,7 @@ printf '%s\n' \
     router/r2o-update-scheduler.sh \
     router/r2o-log-maintenance.sh \
     router/r2o-telegram-watchdog.sh \
+    router/r2o-firewall-watchdog.sh \
     router/r2o-ppe-deoffload.sh \
     router/001-r2o.sh \
     router/select-panel-ip.sh | sort > "$TEMP/expected"

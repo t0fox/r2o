@@ -14,7 +14,7 @@ TEMP=$(mktemp -d "${TMPDIR:-/tmp}/r2o-heal-concurrency.XXXXXX")
 trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
 sed 's/\r$//' "$D2O_ROOT/files/d2k-fw-heal.sh" > "$TEMP/d2o-fw-heal.sh"
 sed 's/\r$//' "$D2O_ROOT/files/001-d2k.sh" > "$TEMP/d2o-hook.sh"
-sed -n '/^reapply() {/,/^}/p; /^heal_reapply() {/,/^}/p; /^heal() {/,/^}/p' "$ROOT/router/S99r2o" |
+sed -n '/^reapply() {/,/^}/p; /^heal_reapply() {/,/^}/p; /^firewall_heal() {/,/^}/p; /^heal() {/,/^}/p' "$ROOT/router/S99r2o" |
     sed 's/\r$//' > "$TEMP/r2o-functions.sh"
 
 cat > "$TEMP/d2o-service" <<'SERVICE'
