@@ -20,9 +20,35 @@ R2O_PANEL_DEFAULT=$(tr -d '\r' < "$R2O_INIT" | sed -n 's/^\(PANEL_LISTEN=.*\)$/\
 . "$TEMP/r2o-wait-health.sh"
 . "$TEMP/r2o-panel-start.sh"
 
-sleep() { :; }
-kill() { [ "${2:-}" = 101 ] || [ "${2:-}" = 102 ] || [ "${2:-}" = 103 ]; }
-component_running() { return 0; }
+HEALTH_FAIL_DURING_SLEEP=0
+HEALTH_FAIL_COMPONENT=datapath
+D2O_DATAPATH_ALIVE=1
+D2O_PANEL_ALIVE=1
+R2O_DATAPATH_ALIVE=1
+R2O_PANEL_ALIVE=1
+sleep() {
+    if [ "${1:-}" = 60 ] && [ "$HEALTH_FAIL_DURING_SLEEP" = 1 ]; then
+        case "$HEALTH_FAIL_COMPONENT" in
+            datapath) D2O_DATAPATH_ALIVE=0; R2O_DATAPATH_ALIVE=0 ;;
+            panel) D2O_PANEL_ALIVE=0; R2O_PANEL_ALIVE=0 ;;
+        esac
+    fi
+}
+kill() {
+    case "${2:-}" in
+        101) [ "$D2O_DATAPATH_ALIVE" = 1 ] ;;
+        102) return 0 ;;
+        103) [ "$D2O_PANEL_ALIVE" = 1 ] ;;
+        *) return 1 ;;
+    esac
+}
+component_running() {
+    case "${1:-}" in
+        r2o-datapath) [ "$R2O_DATAPATH_ALIVE" = 1 ] ;;
+        r2o-panel) [ "$R2O_PANEL_ALIVE" = 1 ] ;;
+        *) return 0 ;;
+    esac
+}
 queue_bound() { return 0; }
 prepare_dirs() { :; }
 log_maintenance_start() { :; }
@@ -40,6 +66,23 @@ if healthy; then fail "D2O should require the panel process when PANEL_LISTEN is
 printf '103\n' > "$DIR/run/d2k-panel.pid"
 healthy || fail "D2O rejected a configured, running panel"
 
+printf 'PANEL_LISTEN=\n' > "$DIR/config"
+HEALTH_WAIT=60
+HEALTH_FAIL_DURING_SLEEP=1
+D2O_DATAPATH_ALIVE=1
+if healthy; then fail "D2O accepted a datapath that died during the 60-second health window"; fi
+HEALTH_FAIL_DURING_SLEEP=0
+D2O_DATAPATH_ALIVE=1
+R2O_DATAPATH_ALIVE=1
+printf 'PANEL_LISTEN=127.0.0.1:8090\n' > "$DIR/config"
+HEALTH_FAIL_DURING_SLEEP=1
+HEALTH_FAIL_COMPONENT=panel
+D2O_PANEL_ALIVE=1
+if healthy; then fail "D2O accepted a panel that died during the 60-second health window"; fi
+HEALTH_FAIL_DURING_SLEEP=0
+D2O_PANEL_ALIVE=1
+R2O_PANEL_ALIVE=1
+
 # Evaluate the production default assignment after the sourced config.
 unset PANEL_LISTEN
 eval "$R2O_PANEL_DEFAULT"
@@ -51,17 +94,39 @@ component_running() { return 1; }
 spawn_component() { : > "$TEMP/panel-spawned"; }
 panel_start || fail "R2O treated a disabled panel as a service start failure"
 [ ! -e "$TEMP/panel-spawned" ] || fail "R2O attempted to spawn a disabled panel"
-component_running() { return 0; }
+component_running() {
+    case "${1:-}" in
+        r2o-datapath) [ "$R2O_DATAPATH_ALIVE" = 1 ] ;;
+        r2o-panel) [ "$R2O_PANEL_ALIVE" = 1 ] ;;
+        *) return 0 ;;
+    esac
+}
 RUNTIME=$TEMP/r2o/runtime
 QUEUE4=2000
 IPV6_ENABLED=0
 DP4_PID=$TEMP/r2o/dp.pid
 CT4_PID=$TEMP/r2o/ct.pid
+PN_PID=$TEMP/r2o/panel.pid
 wait_health || fail "R2O rejected a healthy datapath when PANEL_LISTEN is empty"
 
+HEALTH_FAIL_DURING_SLEEP=1
+HEALTH_FAIL_COMPONENT=datapath
+R2O_DATAPATH_ALIVE=1
+if wait_health; then fail "R2O accepted a datapath that died during the D2O 60-second health window"; fi
+HEALTH_FAIL_DURING_SLEEP=0
+R2O_DATAPATH_ALIVE=1
 PANEL_LISTEN=127.0.0.1:8090
 if wait_health; then fail "R2O accepted an enabled panel without panel health"; fi
 printf 'healthy\n' > "$RUNTIME/r2o-panel.health"
 wait_health || fail "R2O rejected a configured, healthy panel"
+HEALTH_FAIL_DURING_SLEEP=1
+HEALTH_FAIL_COMPONENT=panel
+R2O_PANEL_ALIVE=1
+if wait_health; then fail "R2O accepted a panel that died during the D2O health window"; fi
+HEALTH_FAIL_DURING_SLEEP=0
+R2O_PANEL_ALIVE=1
+R2O_PANEL_ALIVE=0
+if wait_health; then fail "R2O accepted a panel that died during the D2O health window"; fi
+R2O_PANEL_ALIVE=1
 
-echo "D2O и R2O одинаково трактуют выключенную панель при проверке health обновления"
+echo "D2O/R2O: настройка PANEL_LISTEN и 60-секундное окно health-check совпадают"
