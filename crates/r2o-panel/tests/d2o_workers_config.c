@@ -8,7 +8,8 @@
 
 int main(int argc, char **argv) {
     if (argc < 3 || argc > 4) return 2;
-    int post = strcmp(argv[1], "post") == 0;
+    int post = strcmp(argv[1], "post") == 0 ||
+        strcmp(argv[1], "post-ascii") == 0;
     if (!post && strcmp(argv[1], "get") != 0) return 2;
     if (post != (argc == 4)) return 2;
     d2k_panel_config config = {
@@ -18,8 +19,11 @@ int main(int argc, char **argv) {
     };
     static const char get_request[] =
         "GET /api/telegram/workers HTTP/1.1\r\nHost: localhost:8090\r\n\r\n";
-    static const char post_body[] =
+    static const char unicode_post_body[] =
         "{\"domains\":[\"New.Example\"],\"note\":\"Привет\"}";
+    static const char ascii_post_body[] = "{\"domains\":[\"New.Example\"]}";
+    const char *post_body = strcmp(argv[1], "post-ascii") == 0
+        ? ascii_post_body : unicode_post_body;
     char post_request[4096];
     int request_length = (int)(sizeof get_request - 1);
     const char *request = get_request;
@@ -72,9 +76,8 @@ int main(int argc, char **argv) {
     size_t length = fread(saved, 1, sizeof saved - 1, file);
     fclose(file);
     saved[length] = '\0';
-    for (size_t i = 0; i < length; ++i) {
-        if (saved[i] == '\n') saved[i] = '|';
-    }
-    printf("config:%s\n", saved);
+    printf("config:");
+    for (size_t i = 0; i < length; ++i) printf("%02x", (unsigned char)saved[i]);
+    putchar('\n');
     return 0;
 }

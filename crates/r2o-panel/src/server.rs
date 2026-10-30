@@ -1555,14 +1555,28 @@ fn worker_domains_from_config(path: &Path) -> Result<Vec<String>, ()> {
 }
 
 fn worker_line(line: &str) -> bool {
-    let line = line.trim_start_matches([' ', '\t']);
-    if line.is_empty() || line.starts_with('#') {
+    worker_line_bytes(line.as_bytes())
+}
+
+fn worker_line_bytes(line: &[u8]) -> bool {
+    let mut start = 0;
+    while line
+        .get(start)
+        .is_some_and(|byte| matches!(*byte, b' ' | b'\t'))
+    {
+        start += 1;
+    }
+    if start == line.len() || line[start] == b'#' {
         return false;
     }
-    let Some((key, _)) = line.split_once('=') else {
+    let Some(equal) = line[start..].iter().position(|byte| *byte == b'=') else {
         return false;
     };
-    key.trim_end_matches([' ', '\t']) == "TG_CF_WORKER_DOMAIN"
+    let mut end = start + equal;
+    while end > start && matches!(line[end - 1], b' ' | b'\t') {
+        end -= 1;
+    }
+    &line[start..end] == b"TG_CF_WORKER_DOMAIN"
 }
 
 fn strip_config_quotes(value: &str) -> Result<&str, ()> {
@@ -1650,28 +1664,46 @@ fn write_worker_config(path: &Path, domains: &[String]) -> std::io::Result<()> {
             "nul byte in config",
         ));
     }
-    let text = String::from_utf8(source)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let mut output = String::new();
-    for line in text.split_inclusive('\n') {
-        if !worker_line(line.trim_end_matches(['\r', '\n'])) {
-            output.push_str(line);
+    let mut output = Vec::with_capacity(source.len().saturating_add(64));
+    let mut offset = 0;
+    while offset < source.len() {
+        let end = source[offset..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(source.len(), |length| offset + length);
+        let mut line_end = end;
+        if line_end > offset && source[line_end - 1] == b'\r' {
+            line_end -= 1;
         }
+        if !worker_line_bytes(&source[offset..line_end]) {
+            let copy_end = if end < source.len() { end + 1 } else { end };
+            output.extend_from_slice(&source[offset..copy_end]);
+        }
+        offset = if end < source.len() {
+            end + 1
+        } else {
+            source.len()
+        };
     }
     if !domains.is_empty() {
-        if !output.is_empty() && !output.ends_with('\n') {
-            output.push('\n');
+        if !output.is_empty() && !output.ends_with(b"\n") {
+            output.push(b'\n');
         }
-        output.push_str("TG_CF_WORKER_DOMAIN=");
-        output.push_str(&domains.join(","));
-        output.push('\n');
+        output.extend_from_slice(b"TG_CF_WORKER_DOMAIN=");
+        for (index, domain) in domains.iter().enumerate() {
+            if index != 0 {
+                output.push(b',');
+            }
+            output.extend_from_slice(domain.as_bytes());
+        }
+        output.push(b'\n');
     }
     r2o_write_config_atomically(path, &output, &metadata, "workers")
 }
 
 fn r2o_write_config_atomically(
     path: &Path,
-    output: &str,
+    output: &[u8],
     metadata: &fs::Metadata,
     suffix: &str,
 ) -> std::io::Result<()> {
@@ -1696,7 +1728,7 @@ fn r2o_write_config_atomically(
         match options.open(&temporary) {
             Ok(mut file) => {
                 let result = (|| {
-                    file.write_all(output.as_bytes())?;
+                    file.write_all(output)?;
                     file.sync_all()?;
                     fs::rename(&temporary, path)?;
                     File::open(parent)?.sync_all()?;
