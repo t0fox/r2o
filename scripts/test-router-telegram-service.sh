@@ -161,10 +161,11 @@ sleep 2
     fail "сторож продолжал перезапуски после достижения лимита"
 
 touch "$TEMP/firewall-fail"
-if run_service telegram-disable; then
-    fail "отказ Telegram firewall неожиданно завершил disable успешно"
-fi
-grep -q '^TG_ENABLED=0$' "$TEMP/root/config" || fail "отказ очистки firewall потерял запрошенное выключение"
+run_service telegram-disable
+grep -q '^TG_ENABLED=0$' "$TEMP/root/config" || fail "ошибка firewall изменила сохранённое состояние отключения"
+[ ! -e "$TEMP/root/run/r2o-telegram.pid" ] || fail "ошибка firewall оставила Telegram listener запущенным"
+[ ! -e "$TEMP/root/run/r2o-telegram-watchdog.pid" ] || fail "ошибка firewall оставила сторож Telegram запущенным"
+grep -q '^stopped$' "$TEMP/root/state/telegram.status" || fail "ошибка firewall не завершила остановку Telegram"
 rm -f "$TEMP/firewall-fail"
 run_service telegram-disable
 grep -q '^TG_ENABLED=0$' "$TEMP/root/config"

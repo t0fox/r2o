@@ -516,10 +516,10 @@ export_telegram_config() {
 
 telegram_stop() {
     telegram_watchdog_stop
+    stop_component r2o-telegram "$TG_PID" || return 1
     if [ -x "$TG_FIREWALL" ]; then
-        "$TG_FIREWALL" stop || return 1
+        "$TG_FIREWALL" stop || true
     fi
-    stop_component r2o-telegram "$TG_PID"
     rm -f "$TG_STATS_SOCKET"
     write_telegram_status stopped
 }
