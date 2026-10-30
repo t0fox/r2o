@@ -78,8 +78,21 @@ RUSTFLAGS="${RUSTFLAGS:--Awarnings}" \
     CARGO_MAKEFLAGS= \
     "$CARGO" run --quiet --manifest-path "$rust_temp/rust/Cargo.toml" > "$TEMP/r2o.out"
 
-grep -qx 'first=1 reconnect=0 suspects=1' "$TEMP/d2o.out"
-grep -qx 'first=1 reconnect=1 suspects=2' "$TEMP/r2o.out"
-printf 'D2O %s: %s\n' "$ACTUAL_D2O_SHA" "$(cat "$TEMP/d2o.out")"
-printf 'R2O: %s\n' "$(cat "$TEMP/r2o.out")"
+grep -qx 'ssrc_reconnect first=1 reconnect=0 suspects=1' "$TEMP/d2o.out"
+grep -qx 'ssrc_reconnect first=1 reconnect=1 suspects=2' "$TEMP/r2o.out"
+tail -n +2 "$TEMP/d2o.out" > "$TEMP/d2o-lifecycle.out"
+tail -n +2 "$TEMP/r2o.out" > "$TEMP/r2o-lifecycle.out"
+grep -qx 'endpoint_change=1' "$TEMP/d2o-lifecycle.out"
+grep -qx 'endpoint_change=1' "$TEMP/r2o-lifecycle.out"
+grep -qx 'long_session=active600 events=0 expire=1' "$TEMP/d2o-lifecycle.out"
+grep -qx 'long_session=active600 events=0 expire=1' "$TEMP/r2o-lifecycle.out"
+if ! cmp -s "$TEMP/d2o-lifecycle.out" "$TEMP/r2o-lifecycle.out"; then
+    printf 'Discord lifecycle mismatch after the documented SSRC reconnect difference:\n' >&2
+    printf 'D2O: '; cat "$TEMP/d2o.out" >&2
+    printf 'R2O: '; cat "$TEMP/r2o.out" >&2
+    exit 1
+fi
+printf 'D2O %s:\n%s\n' "$ACTUAL_D2O_SHA" "$(cat "$TEMP/d2o.out")"
+printf 'R2O:\n%s\n' "$(cat "$TEMP/r2o.out")"
 printf '%s\n' 'D2O keeps the one-event 5-tuple latch; R2O re-arms on a new SSRC.'
+printf '%s\n' 'Endpoint change and 10-minute bidirectional session lifetimes match.'
