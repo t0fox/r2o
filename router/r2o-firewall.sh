@@ -11,7 +11,9 @@ QUEUE6=${QUEUE_NUM6:-2001}
 MARK=${MARK:-45}
 TG_OUTBOUND_MARK=0x40000000
 BACKEND=${FW_BACKEND:-auto}
-IPV6_ENABLED=${IPV6_ENABLED:-1}
+IPV6_ENABLED_CONFIG=${IPV6_ENABLED:-1}
+IPV6_ENABLED=$IPV6_ENABLED_CONFIG
+IPV6_ENABLED=${R2O_IPV6_ENABLED_RUNTIME:-$IPV6_ENABLED}
 PORTS=${PORTS:-0:65535}
 CONNBYTES=${CONNBYTES:-0:8}
 VOICE_PORTS=${VOICE_PORTS:-50000:50099,1400,3478:3481,5349,19294:19344}
@@ -20,6 +22,10 @@ HTTP_KEEPALIVE_PORTS=${HTTP_KEEPALIVE_PORTS:-80}
 DNS_PORTS=${DNS_PORTS:-53,853}
 RUN_DIR=${R2O_RUN_DIR:-$ROOT/run}
 FW_LOCK=${R2O_FIREWALL_LOCK:-$RUN_DIR/firewall-operation.lock}
+FW_V4ONLY=$RUN_DIR/fw-ipv4-only
+PROC_DIR=${R2O_PROC_DIR:-/proc}
+SYS_MODULE_DIR=${R2O_SYS_MODULE_DIR:-/sys/module}
+MODULES_DIR=${R2O_MODULES_DIR:-/lib/modules}
 
 number() {
     case "$1" in
@@ -31,7 +37,8 @@ number() {
 number "$QUEUE4" 65535 || { echo "неверный QUEUE_NUM" >&2; exit 2; }
 number "$QUEUE6" 65535 || { echo "неверный QUEUE_NUM6" >&2; exit 2; }
 [ "$QUEUE4" != "$QUEUE6" ] || { echo "номера очередей IPv4 и IPv6 должны различаться" >&2; exit 2; }
-case "$IPV6_ENABLED" in 0|1) ;; *) echo "IPV6_ENABLED должен быть равен 0 или 1" >&2; exit 2 ;; esac
+case "$IPV6_ENABLED_CONFIG" in 0|1) ;; *) echo "IPV6_ENABLED должен быть равен 0 или 1" >&2; exit 2 ;; esac
+case "$IPV6_ENABLED" in 0|1) ;; *) echo "R2O_IPV6_ENABLED_RUNTIME должен быть равен 0 или 1" >&2; exit 2 ;; esac
 for value in "$PORTS" "$VOICE_PORTS" "$HTTP_KEEPALIVE_PORTS" "$DNS_PORTS"; do
     case "$value" in ''|*[!0-9:,]*) echo "неверный список портов в конфигурации" >&2; exit 2 ;; esac
 done
@@ -54,6 +61,65 @@ case "$BACKEND" in
         ;;
     *) echo "FW_BACKEND должен быть auto, nft или iptables" >&2; exit 2 ;;
 esac
+
+ipv6_mangle_available() {
+    command -v ip6tables >/dev/null 2>&1 || return 1
+    if ip6tables -w -t mangle -n -L POSTROUTING >/dev/null 2>&1; then return 0; else ipv6_probe_rc=$?; fi
+    [ "$ipv6_probe_rc" = 2 ] || return 1
+    ip6tables -t mangle -n -L POSTROUTING >/dev/null 2>&1
+}
+
+ipv6_mangle_wait_probe() {
+    command -v ip6tables >/dev/null 2>&1 || return 1
+    ip6tables -w -t mangle -n -L POSTROUTING >/dev/null 2>&1
+}
+
+if [ "$BACKEND" = nft ]; then
+    R2O_MODULES='nfnetlink_queue nft_queue nf_conntrack_netlink'
+else
+    R2O_MODULES='nfnetlink_queue xt_NFQUEUE xt_conntrack xt_connbytes xt_multiport xt_mark xt_connmark xt_CONNMARK xt_addrtype xt_comment ip6table_mangle nf_conntrack_netlink'
+fi
+
+module_present() {
+    case "$1" in
+        xt_NFQUEUE|xt_CONNMARK)
+            grep -qw "${1#xt_}" "$PROC_DIR/net/ip_tables_targets" 2>/dev/null && return 0 ;;
+        nfnetlink_queue) [ -e "$PROC_DIR/net/netfilter/nfnetlink_queue" ] && return 0 ;;
+        ip6table_mangle) grep -qw mangle "$PROC_DIR/net/ip6_tables_names" 2>/dev/null && return 0 ;;
+        xt_*) grep -qw "${1#xt_}" "$PROC_DIR/net/ip_tables_matches" 2>/dev/null && return 0 ;;
+    esac
+    [ -d "$SYS_MODULE_DIR/$1" ] && return 0
+    lsmod 2>/dev/null | grep -q "^$1 "
+}
+
+load_modules() {
+    module_kver=$(uname -r 2>/dev/null)
+    for module_name in $R2O_MODULES; do
+        module_present "$module_name" && continue
+        modprobe "$module_name" 2>/dev/null && module_present "$module_name" && continue
+        module_ko=
+        for module_dir in "$MODULES_DIR/$module_kver" "$MODULES_DIR"; do
+            if [ -f "$module_dir/$module_name.ko" ]; then
+                module_ko=$module_dir/$module_name.ko
+                break
+            fi
+        done
+        if [ -z "$module_ko" ]; then
+            module_ko=$(find "$MODULES_DIR" -name "$module_name.ko" -type f 2>/dev/null | head -1)
+        fi
+        if [ -n "$module_ko" ] && insmod "$module_ko" 2>/dev/null; then
+            echo "r2o: загружен модуль ядра $module_name" >&2
+        fi
+    done
+}
+
+if [ "${1:-}" = up ]; then
+    load_modules
+fi
+
+if [ "$BACKEND" = iptables ] && [ "$IPV6_ENABLED" = 1 ] && ! ipv6_mangle_available; then
+    IPV6_ENABLED=0
+fi
 
 nft_up() {
     rules=${R2O_RUN_DIR:-$ROOT/run}/firewall.nft.$$
@@ -268,7 +334,12 @@ dns_upstreams() {
 
 dns_excl_rule() {
     dns_tool=iptables
-    case "$2" in *:*) dns_tool=ip6tables; [ "$IPV6_ENABLED" = 1 ] || return 0 ;; esac
+    case "$2" in
+        *:*)
+            dns_tool=ip6tables
+            [ "$IPV6_ENABLED" = 1 ] && [ ! -f "$FW_V4ONLY" ] || return 0
+            ;;
+    esac
     for dns_proto in tcp udp; do
         for dns_direction in out in; do
             if [ "$dns_direction" = out ]; then
@@ -356,8 +427,11 @@ xt_family_up() {
     queue=$2
     loopback=127.0.0.0/8
     [ "$tool" != ip6tables ] || loopback=::1/128
-    xt "$tool" -t mangle -N R2O_OUT
-    xt "$tool" -t mangle -N R2O_IN
+    if ! xt "$tool" -t mangle -N R2O_OUT; then
+        if [ "$tool" = ip6tables ] && ! ipv6_mangle_wait_probe; then return 3; fi
+        return 1
+    fi
+    xt "$tool" -t mangle -N R2O_IN || return 1
     for chain in R2O_OUT R2O_IN; do
         xt "$tool" -t mangle -A "$chain" -s "$loopback" -j RETURN
         xt "$tool" -t mangle -A "$chain" -d "$loopback" -j RETURN
@@ -424,20 +498,34 @@ xt_family_up() {
 
 iptables_up() {
     xt_family_down iptables
-    [ "$IPV6_ENABLED" = 0 ] || xt_family_down ip6tables
+    if command -v ip6tables >/dev/null 2>&1; then xt_family_down ip6tables; fi
+    rm -f "$FW_V4ONLY"
     xt_family_up iptables "$QUEUE4" || { xt_family_down iptables; return 1; }
-    if [ "$IPV6_ENABLED" = 1 ]; then
-        xt_family_up ip6tables "$QUEUE6" || {
-            xt_family_down ip6tables
-            xt_family_down iptables
-            return 1
-        }
+    if [ "$IPV6_ENABLED_CONFIG" = 1 ] && [ "$IPV6_ENABLED" = 0 ]; then
+        mkdir -p "$RUN_DIR" && : > "$FW_V4ONLY" || return 1
+        echo "r2o: ВНИМАНИЕ: ip6tables mangle недоступна (нет IPv6 в прошивке или модуля ip6table_mangle) — работает только IPv4" >&2
+    elif [ "$IPV6_ENABLED" = 1 ]; then
+        if xt_family_up ip6tables "$QUEUE6"; then
+            rm -f "$FW_V4ONLY"
+        else
+            ipv6_up_rc=$?
+            if [ "$ipv6_up_rc" = 3 ]; then
+                xt_family_down ip6tables
+                mkdir -p "$RUN_DIR" && : > "$FW_V4ONLY" || return 1
+                echo "r2o: ВНИМАНИЕ: ip6tables mangle недоступна (нет IPv6 в прошивке или модуля ip6table_mangle) — работает только IPv4" >&2
+            else
+                xt_family_down ip6tables
+                xt_family_down iptables
+                return 1
+            fi
+        fi
     fi
 }
 
 firewall_up() {
     fw_lock_acquire || return 1
     if [ "$BACKEND" = nft ]; then
+        rm -f "$FW_V4ONLY" || true
         if nft_up; then fw_rc=0; else fw_rc=$?; fi
     elif iptables_up; then
         fw_rc=0
@@ -455,8 +543,10 @@ firewall_down() {
         if nft_down; then fw_rc=0; else fw_rc=$?; fi
     else
         xt_family_down iptables
-        if [ "$IPV6_ENABLED" = 0 ] || xt_family_down ip6tables; then fw_rc=0; else fw_rc=$?; fi
+        if command -v ip6tables >/dev/null 2>&1; then xt_family_down ip6tables; fi
+        fw_rc=0
     fi
+    rm -f "$FW_V4ONLY" || true
     fw_lock_release || return 1
     return "$fw_rc"
 }
@@ -464,6 +554,13 @@ firewall_down() {
 case "${1:-}" in
     backend)
         printf '%s\n' "$BACKEND"
+        ;;
+    ipv6-enabled)
+        if [ "$BACKEND" = iptables ] && [ -f "$FW_V4ONLY" ]; then
+            printf '0\n'
+        else
+            printf '%s\n' "$IPV6_ENABLED"
+        fi
         ;;
     up)
         firewall_up
@@ -474,11 +571,12 @@ case "${1:-}" in
     status)
         if [ "$BACKEND" = nft ]; then nft list table inet r2o; else
             xt iptables -t mangle -C POSTROUTING -j R2O_OUT &&
-                { [ "$IPV6_ENABLED" = 0 ] || xt ip6tables -t mangle -C POSTROUTING -j R2O_OUT; }
+                { [ "$IPV6_ENABLED_CONFIG" = 0 ] || [ -f "$FW_V4ONLY" ] ||
+                    xt ip6tables -t mangle -C POSTROUTING -j R2O_OUT; }
         fi
         ;;
     dns-ensure)
         dns_excl_sync
         ;;
-    *) echo "использование: $0 {backend|up|down|status|dns-ensure}" >&2; exit 2 ;;
+    *) echo "использование: $0 {backend|ipv6-enabled|up|down|status|dns-ensure}" >&2; exit 2 ;;
 esac

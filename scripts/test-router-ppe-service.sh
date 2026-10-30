@@ -41,6 +41,7 @@ done
 printf '#!/bin/sh\nexit 0\n' > "$INSTALL_ROOT/r2o-manager"
 cat > "$TEMP/firewall" <<EOF
 #!/bin/sh
+if [ "\$1" = ipv6-enabled ]; then . "\$R2O_CONFIG"; printf '%s\\n' "\$IPV6_ENABLED"; exit 0; fi
 printf 'firewall:%s\\n' "\$1" >> "$EVENTS"
 EOF
 cat > "$TEMP/ppe" <<EOF

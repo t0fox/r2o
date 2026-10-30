@@ -135,6 +135,14 @@ R2O_FW=$(R2O_DIR="$ROOT" R2O_CONFIG="$CONF" "$SCRIPT_DIR/r2o-firewall.sh" backen
 case "$R2O_FW" in nft|iptables) ;; *) die "адаптер вернул неизвестный FW_BACKEND: $R2O_FW" ;; esac
 export R2O_FW
 
+configure_ipv6() {
+    IPV6_ENABLED_RUNTIME=$(R2O_DIR="$ROOT" R2O_CONFIG="$CONF" R2O_RUN_DIR="$RUN" \
+        R2O_IPV6_ENABLED_RUNTIME= "$FIREWALL" ipv6-enabled) || die "не определить поддержку IPv6 NFQUEUE"
+    R2O_IPV6_ENABLED_RUNTIME=$IPV6_ENABLED_RUNTIME
+    export R2O_IPV6_ENABLED_RUNTIME
+}
+configure_ipv6
+
 r2o_normalize_mark() {
     r2o_mark_value=$1
     case "$r2o_mark_value" in
@@ -268,10 +276,13 @@ queue_bound() {
 }
 
 ipv6_components_running() {
-    [ "$IPV6_ENABLED" = 0 ] || {
+    if [ "$IPV6_ENABLED" = 0 ]; then
+        ! component_running r2o-datapath "$DP6_PID" \
+            && ! component_running r2o-controller "$CT6_PID"
+    else
         component_running r2o-datapath "$DP6_PID" \
             && component_running r2o-controller "$CT6_PID"
-    }
+    fi
 }
 
 wait_queue() {
@@ -328,7 +339,7 @@ engine_start() {
     if [ "$IPV6_ENABLED" = 1 ]; then
         wait_queue "$QUEUE6" || { engine_stop; die "IPv6 NFQUEUE $QUEUE6 не привязалась"; }
     fi
-    "$FIREWALL" up || { engine_stop; die "не поставить правила NFQUEUE"; }
+    R2O_IPV6_ENABLED_RUNTIME= "$FIREWALL" up || { engine_stop; die "не поставить правила NFQUEUE"; }
     ppe_ensure
     if ! spawn_component r2o-controller "$CT4_PID" "$LOG/r2o-controller4.log" \
         --serve "$SOCK4" "$CATALOG" --discover --mark "$mark" --live "$STATE/live4.json"; then
@@ -712,7 +723,7 @@ telegram_check() {
 
 reapply() {
     component_running r2o-datapath "$DP4_PID" || die "r2o-datapath IPv4 не работает"
-    "$FIREWALL" up || die "не поставить полный набор правил"
+    R2O_IPV6_ENABLED_RUNTIME= "$FIREWALL" up || die "не поставить полный набор правил"
     ppe_ensure
 }
 
@@ -846,6 +857,9 @@ status() {
         component_running r2o-datapath "$DP6_PID" && echo "  r2o-datapath IPv6: работает" || echo "  r2o-datapath IPv6: не работает"
     else
         echo "  r2o-datapath IPv6: выключен конфигурацией"
+    fi
+    if [ "$IPV6_ENABLED" = 1 ] && [ "$IPV6_ENABLED_RUNTIME" = 0 ]; then
+        echo "  IPv6: не обслуживается — нет ip6tables mangle, работа только по IPv4"
     fi
     component_running r2o-controller "$CT4_PID" && echo "  r2o-controller IPv4: работает" || echo "  r2o-controller IPv4: не работает"
     if [ "$IPV6_ENABLED" = 1 ]; then

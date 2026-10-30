@@ -8,7 +8,11 @@ NFT=$(command -v nft) || {
 }
 TEMP=$(mktemp -d)
 trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
-mkdir -p "$TEMP/bin" "$TEMP/root/run"
+mkdir -p "$TEMP/bin" "$TEMP/root/run" "$TEMP/proc/net" "$TEMP/sys" "$TEMP/modules"
+printf '#!/bin/sh\nexit 1\n' > "$TEMP/bin/modprobe"
+printf '#!/bin/sh\nexit 0\n' > "$TEMP/bin/lsmod"
+printf '#!/bin/sh\nexit 1\n' > "$TEMP/bin/insmod"
+chmod 0755 "$TEMP/bin/modprobe" "$TEMP/bin/lsmod" "$TEMP/bin/insmod"
 cat > "$TEMP/bin/nft" <<EOF
 #!/bin/sh
 if [ "\${1:-}" = list ]; then
@@ -31,6 +35,7 @@ chmod 0755 "$TEMP/bin/conntrack"
 R2O_DIR="$TEMP/root" \
 R2O_CONFIG=/dev/null \
 R2O_RUN_DIR="$TEMP/root/run" \
+R2O_PROC_DIR="$TEMP/proc" R2O_SYS_MODULE_DIR="$TEMP/sys" R2O_MODULES_DIR="$TEMP/modules" \
 R2O_TEST_RULES="$TEMP/main.nft" \
 FW_BACKEND=nft \
 QUEUE_NUM=34000 \

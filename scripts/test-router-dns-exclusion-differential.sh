@@ -12,7 +12,12 @@ ACTUAL_D2O_SHA=$(git -C "$D2O_ROOT" rev-parse HEAD)
 
 TEMP=$(mktemp -d "${TMPDIR:-/tmp}/r2o-dns-exclusion.XXXXXX")
 trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
-mkdir -p "$TEMP/bin" "$TEMP/d2o-run" "$TEMP/r2o-run" "$TEMP/root"
+mkdir -p "$TEMP/bin" "$TEMP/d2o-run" "$TEMP/r2o-run" "$TEMP/root" \
+    "$TEMP/proc/net" "$TEMP/sys" "$TEMP/modules"
+printf '#!/bin/sh\nexit 1\n' > "$TEMP/bin/modprobe"
+printf '#!/bin/sh\nexit 0\n' > "$TEMP/bin/lsmod"
+printf '#!/bin/sh\nexit 1\n' > "$TEMP/bin/insmod"
+chmod 0755 "$TEMP/bin/modprobe" "$TEMP/bin/lsmod" "$TEMP/bin/insmod"
 
 sed 's/\r$//' "$D2O_ROOT/files/S99d2k" > "$TEMP/d2o-S99d2k"
 sed -n '/^fw_lock_acquire() {/,/^}/p; /^fw_lock_release() {/,/^}/p; /^dns_upstreams() {/,/^}/p; /^dns_excl_rule() {/,/^}/p; /^dns_excl_sync_unlocked() {/,/^}/p; /^dns_excl_sync() {/,/^}/p' \
@@ -104,6 +109,7 @@ d2o_sync() {
 }
 r2o_sync() {
     R2O_DIR=$TEMP/root R2O_CONFIG=/dev/null R2O_RUN_DIR=$TEMP/r2o-run \
+        R2O_PROC_DIR=$TEMP/proc R2O_SYS_MODULE_DIR=$TEMP/sys R2O_MODULES_DIR=$TEMP/modules \
         R2O_RUNTIME_DIR=$TEMP/runtime FW_BACKEND=iptables IPV6_ENABLED=1 \
         DNS_CONFIG=$DNS_CONFIG DNS_IPV4=$DNS_IPV4 DNS_IPV6=$DNS_IPV6 DNS_FAIL=$DNS_FAIL \
         FW_TRACE=$TEMP/r2o.trace FW_DB_DIR=$TEMP/r2o-db PATH="$TEMP/bin:$PATH" \
@@ -111,6 +117,7 @@ r2o_sync() {
 }
 r2o_up() {
     R2O_DIR=$TEMP/root R2O_CONFIG=/dev/null R2O_RUN_DIR=$TEMP/r2o-run \
+        R2O_PROC_DIR=$TEMP/proc R2O_SYS_MODULE_DIR=$TEMP/sys R2O_MODULES_DIR=$TEMP/modules \
         R2O_RUNTIME_DIR=$TEMP/runtime FW_BACKEND=iptables IPV6_ENABLED=1 \
         DNS_CONFIG=$DNS_CONFIG DNS_IPV4=$DNS_IPV4 DNS_IPV6=$DNS_IPV6 DNS_FAIL=$DNS_FAIL \
         FW_TRACE=$TEMP/r2o.trace FW_DB_DIR=$TEMP/r2o-db PATH="$TEMP/bin:$PATH" \

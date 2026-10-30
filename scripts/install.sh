@@ -242,8 +242,9 @@ check_runtime_dependencies() {
         return 0
     fi
     command -v iptables >/dev/null 2>&1 || die 'для NFQUEUE и Telegram нужен iptables или OpenWrt nft'
-    if [ "$ipv6_enabled" = 1 ]; then
-        command -v ip6tables >/dev/null 2>&1 || die 'для IPv6 NFQUEUE и Telegram нужен ip6tables'
+    if [ "$ipv6_enabled" = 1 ] && ! command -v ip6tables >/dev/null 2>&1; then
+        [ "$telegram_enabled" = 0 ] || die 'для Telegram и IPv6 требуется ip6tables'
+        say 'ip6tables недоступна; служба NFQUEUE будет работать в IPv4-only режиме'
     fi
     if [ "$telegram_enabled" = 1 ] \
         && { [ "$PLATFORM" != openwrt ] || ! command -v nft >/dev/null 2>&1; }; then

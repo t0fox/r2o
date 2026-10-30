@@ -60,6 +60,7 @@ exec "$R2O_DIR/releases/test/builds/$component-linux-test" 30
 EOF
 cat > "$TEMP/firewall" <<'EOF'
 #!/bin/sh
+if [ "${1:-}" = ipv6-enabled ]; then printf '1\n'; exit 0; fi
 printf 'firewall:%s\n' "$1" >> "$EVENTS"
 EOF
 chmod 0755 "$TEMP/manager" "$TEMP/firewall"

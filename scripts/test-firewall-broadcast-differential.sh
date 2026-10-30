@@ -12,7 +12,11 @@ fi
 
 TEMP=$(mktemp -d "${TMPDIR:-/tmp}/r2o-firewall-broadcast.XXXXXX")
 trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
-mkdir -p "$TEMP/bin" "$TEMP/root/run"
+mkdir -p "$TEMP/bin" "$TEMP/root/run" "$TEMP/proc/net" "$TEMP/sys" "$TEMP/modules"
+printf '#!/bin/sh\nexit 1\n' > "$TEMP/bin/modprobe"
+printf '#!/bin/sh\nexit 0\n' > "$TEMP/bin/lsmod"
+printf '#!/bin/sh\nexit 1\n' > "$TEMP/bin/insmod"
+chmod 0755 "$TEMP/bin/modprobe" "$TEMP/bin/lsmod" "$TEMP/bin/insmod"
 
 line_number() {
     grep -nF -- "$2" "$1" | sed -n '1s/:.*//p'
@@ -91,6 +95,7 @@ chmod 0755 "$TEMP/bin/nft"
 R2O_DIR="$TEMP/root" \
 R2O_CONFIG=/dev/null \
 R2O_RUN_DIR="$TEMP/root/run" \
+R2O_PROC_DIR="$TEMP/proc" R2O_SYS_MODULE_DIR="$TEMP/sys" R2O_MODULES_DIR="$TEMP/modules" \
 R2O_TEST_RULES="$TEMP/r2o.nft" \
 FW_BACKEND=nft \
 PATH="$TEMP/bin:$PATH" \
@@ -191,6 +196,7 @@ FW_TRACE="$TEMP/d2o-icmp.trace" PATH="$TEMP/bin:$PATH" \
 R2O_DIR="$TEMP/root" \
 R2O_CONFIG=/dev/null \
 R2O_RUN_DIR="$TEMP/root/run" \
+R2O_PROC_DIR="$TEMP/proc" R2O_SYS_MODULE_DIR="$TEMP/sys" R2O_MODULES_DIR="$TEMP/modules" \
 FW_BACKEND=iptables \
 IPV6_ENABLED=1 \
 FW_TRACE="$TEMP/r2o-iptables.trace" \
@@ -199,6 +205,7 @@ PATH="$TEMP/bin:$PATH" \
 R2O_DIR="$TEMP/root" \
 R2O_CONFIG=/dev/null \
 R2O_RUN_DIR="$TEMP/root/run" \
+R2O_PROC_DIR="$TEMP/proc" R2O_SYS_MODULE_DIR="$TEMP/sys" R2O_MODULES_DIR="$TEMP/modules" \
 FW_BACKEND=iptables \
 IPV6_ENABLED=1 \
 FW_NO_ADDRTYPE=1 \

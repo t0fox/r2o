@@ -32,6 +32,7 @@ ADDRS
 EOF
 cat > "$FIREWALL" <<EOF
 #!/bin/sh
+if [ "\$1" = ipv6-enabled ]; then . "\$R2O_CONFIG"; printf '%s\\n' "\${IPV6_ENABLED:-1}"; exit 0; fi
 printf 'firewall:%s\\n' "\$1" >> "$EVENTS"
 EOF
 cat > "$TG_FIREWALL" <<EOF

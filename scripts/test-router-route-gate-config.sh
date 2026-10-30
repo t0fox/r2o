@@ -20,7 +20,8 @@ r2o_cleanup() {
 }
 trap r2o_cleanup EXIT HUP INT TERM
 
-mkdir -p "$r2o_temp/root/releases/test/builds" "$r2o_temp/proc/net/netfilter"
+mkdir -p "$r2o_temp/root/releases/test/builds" "$r2o_temp/proc/net/netfilter" "$r2o_temp/mockbin"
+: >"$r2o_temp/up-runtime"
 cp /bin/sleep "$r2o_temp/root/releases/test/builds/r2o-datapath-linux-test"
 cp /bin/sleep "$r2o_temp/root/releases/test/builds/r2o-controller-linux-test"
 cp /bin/sleep "$r2o_temp/root/releases/test/builds/r2o-panel-linux-test"
@@ -56,13 +57,46 @@ exec "$root/releases/test/builds/$component-linux-test" 120
 EOF
 cat >"$r2o_temp/firewall" <<'EOF'
 #!/bin/sh
-case "${1:-}" in up|down|status) exit 0 ;; *) exit 2 ;; esac
+case "${1:-}" in
+    ipv6-enabled)
+        if [ -n "${R2O_IPV6_TEST_CAPABILITY:-}" ]; then
+            printf '%s\n' "$R2O_IPV6_TEST_CAPABILITY"
+        else
+            . "$R2O_CONFIG"
+            printf '%s\n' "$IPV6_ENABLED"
+        fi
+        ;;
+    up)
+        printf '<%s>\n' "${R2O_IPV6_ENABLED_RUNTIME-unset}" >>"$R2O_UP_RUNTIME_TRACE"
+        exit 0
+        ;;
+    down|status) exit 0 ;;
+    *) exit 2 ;;
+esac
 EOF
 cat >"$r2o_temp/ppe" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
-chmod 0755 "$r2o_temp/manager" "$r2o_temp/firewall" "$r2o_temp/ppe"
+cat >"$r2o_temp/mockbin/start-stop-daemon" <<'EOF'
+#!/bin/sh
+set -eu
+pidfile=
+program=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -p) pidfile=$2; shift 2 ;;
+        -x) program=$2; shift 2 ;;
+        --) shift; break ;;
+        *) shift ;;
+    esac
+done
+[ -n "$pidfile" ] && [ -n "$program" ] && [ "$#" -gt 0 ] || exit 2
+"$program" "$@" &
+printf '%s' "$!" >"$pidfile"
+EOF
+chmod 0755 "$r2o_temp/manager" "$r2o_temp/firewall" "$r2o_temp/ppe" \
+    "$r2o_temp/mockbin/start-stop-daemon"
 
 r2o_run_service() {
     env R2O_DIR="$r2o_temp/root" R2O_CONFIG="$r2o_temp/root/config" \
@@ -70,11 +104,27 @@ r2o_run_service() {
         R2O_PPE_ADAPTER="$r2o_temp/ppe" R2O_LOG_MAINTENANCE="$r2o_temp/no-log-worker" \
         R2O_PROC=/proc R2O_RUNTIME_DIR="$r2o_temp/runtime" \
         R2O_NFQUEUE_STATUS="$r2o_temp/proc/net/netfilter/nfnetlink_queue" \
+        R2O_IPV6_TEST_CAPABILITY="${R2O_IPV6_TEST_CAPABILITY:-}" \
+        R2O_UP_RUNTIME_TRACE="$r2o_temp/up-runtime" \
         R2O_LAUNCHES="$r2o_temp/launches" \
-        sh "$r2o_root/router/S99r2o" "$@"
+        sh "$r2o_temp/S99r2o" "$@"
 }
 
-r2o_run_service engine-start
+{
+    sed -n '1p' "$r2o_root/router/S99r2o"
+    printf 'SCRIPT_DIR=%s\n' "$r2o_root/router"
+    sed -n '3,4p' "$r2o_root/router/S99r2o"
+    printf 'PATH=%s:$PATH\n' "$r2o_temp/mockbin"
+    sed -n '5,$p' "$r2o_root/router/S99r2o"
+} >"$r2o_temp/S99r2o"
+
+R2O_IPV6_TEST_CAPABILITY=0 r2o_run_service engine-start
+grep -Fxq '<>' "$r2o_temp/up-runtime" || {
+    echo "engine-start passed a stale IPv4-only probe result to firewall up" >&2
+    exit 1
+}
+R2O_IPV6_TEST_CAPABILITY=0 r2o_run_service status >"$r2o_temp/status-fallback"
+grep -Fq 'IPv6: не обслуживается — нет ip6tables mangle, работа только по IPv4' "$r2o_temp/status-fallback"
 
 r2o_mark=$(printf '%d' 0xffffaaa)
 r2o_mask=$(printf '%d' 0xffffff00)
@@ -89,6 +139,12 @@ grep -Fq '|--r2o-flow-capacity|64' "$r2o_temp/launches"
 [ -s "$r2o_temp/root/run/r2o-datapath4.pid" ]
 [ -s "$r2o_temp/root/run/r2o-datapath6.pid" ]
 
+: >"$r2o_temp/up-runtime"
+R2O_IPV6_TEST_CAPABILITY=0 r2o_run_service reapply
+grep -Fxq '<>' "$r2o_temp/up-runtime" || {
+    echo "reapply passed a stale IPv4-only probe result to firewall up" >&2
+    exit 1
+}
 r2o_run_service engine-stop
 cat >"$r2o_temp/root/config" <<'EOF'
 MODE=observe
