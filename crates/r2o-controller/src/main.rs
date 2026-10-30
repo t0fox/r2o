@@ -8292,6 +8292,11 @@ struct R2oVoiceLatestQueue {
 
 #[cfg(unix)]
 impl R2oVoiceLatestQueue {
+    fn should_discard_new_endpoint_while_measuring(&self, has_active_trial: bool) -> bool {
+        // D2O drops other endpoints in T_VOICE_MEASURE; only an installed trial queues one.
+        self.current.is_some() && !has_active_trial
+    }
+
     fn offer(
         &mut self,
         job: R2oVoiceDiscoveryJob,
@@ -8640,6 +8645,12 @@ impl R2oVoiceDiscoveryWorker {
                 .pending
                 .as_ref()
                 .is_some_and(|pending| pending.target == target)
+        {
+            return false;
+        }
+        if self
+            .schedule
+            .should_discard_new_endpoint_while_measuring(!can_start)
         {
             return false;
         }
@@ -36008,6 +36019,10 @@ mod tests {
             client,
             server: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 50_008),
         };
+        let target_c = r2o_controller::voice_discovery::R2oVoiceTarget {
+            client,
+            server: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 50_012),
+        };
         let now = Instant::now();
         let diagnostic = || super::R2oVoiceDiagnosticContext {
             report_id: None,
@@ -36025,6 +36040,7 @@ mod tests {
         let mut trace = Vec::new();
         let mut queue = R2oVoiceLatestQueue::default();
         assert_eq!(queue.offer(job(target_a), true), Some(job(target_a)));
+        assert!(queue.complete(&target_a));
         let trial_id_a = [0xa1; 16];
         let plan_prefix = r2k_core::stun::binding_request([0x36; 12]);
         let plan_text = r2o_controller::voice_discovery::r2o_voice_arm_plan_text(&plan_prefix);
@@ -36051,23 +36067,22 @@ mod tests {
         assert_eq!(renewed[0].trial_id, trial_id_a);
         trace.push("renew A same-trial");
 
-        assert_eq!(queue.offer(job(target_b), true), None);
-        assert_eq!(queue.offer(job(target_b), true), None);
+        assert_eq!(queue.offer(job(target_b), false), None);
+        assert_eq!(queue.offer(job(target_c), false), None);
         assert_eq!(
             queue.pending.as_ref().map(|pending| pending.target),
-            Some(target_b)
+            Some(target_c)
         );
-        trace.push("queue B latest");
+        trace.push("queue C latest");
 
         let stale =
             r2o_take_stale_pending_voice_trials(&mut trials, now + R2O_VOICE_PENDING_GRACE, true);
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].trial_id, trial_id_a);
-        assert!(queue.complete(&target_a));
-        assert_eq!(queue.take_pending_if_idle(true), Some(job(target_b)));
-        let trial_id_b = [0xb2; 16];
-        assert_ne!(trial_id_a, trial_id_b);
-        trace.push("expire A; install B fresh-trial");
+        assert_eq!(queue.take_pending_if_idle(true), Some(job(target_c)));
+        let trial_id_c = [0xc3; 16];
+        assert_ne!(trial_id_a, trial_id_c);
+        trace.push("expire A; install C fresh-trial");
 
         let plan_id = r2o_controller::voice_discovery::r2o_voice_arm_plan(&plan_prefix)
             .unwrap()
@@ -36075,14 +36090,14 @@ mod tests {
         let mut key = [0; KEY_LEN];
         key[0] = 4;
         key[1..5].copy_from_slice(&client.octets());
-        key[17..21].copy_from_slice(&target_b.server.ip().octets());
+        key[17..21].copy_from_slice(&target_c.server.ip().octets());
         key[33..35].copy_from_slice(&52_043_u16.to_be_bytes());
-        key[35..37].copy_from_slice(&target_b.server.port().to_be_bytes());
+        key[35..37].copy_from_slice(&target_c.server.port().to_be_bytes());
         key[37] = 17;
         let applied = AppliedEvent {
             key,
             plan_id,
-            trial_id: trial_id_b,
+            trial_id: trial_id_c,
             execution_id: 0,
             binding: BindingContext {
                 generation: 0,
@@ -36093,9 +36108,9 @@ mod tests {
                 epoch: [0; 16],
             },
         };
-        let trial_b = R2oVoiceTrialContext {
-            target: target_b,
-            trial_id: trial_id_b,
+        let trial_c = R2oVoiceTrialContext {
+            target: target_c,
+            trial_id: trial_id_c,
             plan_text: plan_text.clone(),
             voice_flow_key: Some(key),
             started_at: now,
@@ -36104,17 +36119,17 @@ mod tests {
             response_confirmed: true,
             diagnostic: None,
         };
-        assert!(r2o_voice_applied_flow_matches(&trial_b, &applied));
+        assert!(r2o_voice_applied_flow_matches(&trial_c, &applied));
         let proof = r2k_core::control::R2oVoiceProofEvent {
             key,
-            trial_id: trial_id_b,
+            trial_id: trial_id_c,
             proof: r2k_core::control::R2oVoiceProofKind::DiscordDiscovery {
                 mapped_ip: Ipv4Addr::new(203, 0, 113, 8),
                 mapped_port: 52_000,
             },
         };
-        assert!(r2o_voice_proof_matches_target(&proof, target_b));
-        trace.push("applied B; discovery proof; persist B before ACK outcome");
+        assert!(r2o_voice_proof_matches_target(&proof, target_c));
+        trace.push("applied C; discovery proof; persist C before ACK outcome");
 
         let directory = std::env::temp_dir().join(format!(
             "r2o-voice-lifecycle-trace-{}-{}",
@@ -36126,7 +36141,7 @@ mod tests {
         let mut catalog = Catalog::default();
         let saved_plan = r2o_controller::voice_discovery::r2o_save_confirmed_voice_binding(
             &mut catalog,
-            *target_b.server.ip(),
+            *target_c.server.ip(),
             &plan_text,
             1_800_000_000,
             4,
@@ -36145,7 +36160,7 @@ mod tests {
         assert_eq!(restored.boxes[0].bindings[0].verified_by, 4);
         let restored_plan = &restored.boxes[0].plans[0];
         let reapplied = super::encode_set_voice_addr(
-            *target_b.server.ip(),
+            *target_c.server.ip(),
             &r2o_controller::plan_text::compile_text(&restored_plan.text).unwrap(),
         )
         .unwrap();
@@ -36153,7 +36168,7 @@ mod tests {
             u16::from_be_bytes([reapplied[4], reapplied[5]]),
             super::COMMAND_SET_VOICE_ADDR
         );
-        assert_eq!(&reapplied[6..10], &target_b.server.ip().octets());
+        assert_eq!(&reapplied[6..10], &target_c.server.ip().octets());
         std::fs::remove_dir_all(directory).unwrap();
 
         let nak_directory = std::env::temp_dir().join(format!(
@@ -36193,7 +36208,7 @@ mod tests {
         let mut nak_client = ControlClient::connect(nak_socket_path).unwrap();
         let mut nak_catalog = Catalog::load(&nak_catalog_path).unwrap();
         let confirm_result = nak_client.confirm_r2o_voice_trial(
-            trial_b.clone(),
+            trial_c.clone(),
             &proof,
             &mut nak_catalog,
             &nak_catalog_path,
@@ -36207,16 +36222,16 @@ mod tests {
             && !nak_catalog.boxes.is_empty()
             && !persisted_after_nak.boxes.is_empty();
         trace.push(if binding_retained {
-            "late SET_ADDR NAK retains B binding for retry"
+            "late SET_ADDR NAK retains C binding for retry"
         } else {
-            "late SET_ADDR NAK loses B binding and retry"
+            "late SET_ADDR NAK loses C binding and retry"
         });
 
         let mut reapply_succeeded = false;
         if binding_retained {
             let persisted_plan = &persisted_after_nak.boxes[0].plans[0];
             let reapply = super::encode_set_voice_addr(
-                *target_b.server.ip(),
+                *target_c.server.ip(),
                 &r2o_controller::plan_text::compile_text(&persisted_plan.text).unwrap(),
             )
             .unwrap();
@@ -36239,14 +36254,26 @@ mod tests {
             let (reapply_kind, reapply_body) = reapply_server.join().unwrap();
             reapply_succeeded = reapply_result.is_ok()
                 && reapply_kind == super::COMMAND_SET_VOICE_ADDR
-                && reapply_body[..4] == target_b.server.ip().octets();
+                && reapply_body[..4] == target_c.server.ip().octets();
         }
         trace.push(if reapply_succeeded {
-            "restart reapplies B"
+            "restart reapplies C"
         } else {
-            "restart has no B binding to reapply"
+            "restart has no C binding to reapply"
         });
         std::fs::remove_dir_all(nak_directory).unwrap();
+
+        let mut measuring_queue = R2oVoiceLatestQueue::default();
+        assert_eq!(
+            measuring_queue.offer(job(target_a), true),
+            Some(job(target_a))
+        );
+        trace.push("start A measurement");
+        assert!(measuring_queue.should_discard_new_endpoint_while_measuring(false));
+        assert!(measuring_queue.pending.is_none());
+        trace.push("discard B while A is measuring; no later retry");
+        assert!(measuring_queue.complete(&target_a));
+        assert_eq!(measuring_queue.take_pending_if_idle(true), None);
 
         if let Some(path) = std::env::var_os("R2O_VOICE_LIFECYCLE_TRACE_OUTPUT") {
             std::fs::write(path, format!("{}\n", trace.join("\n"))).unwrap();
@@ -36257,11 +36284,11 @@ mod tests {
         );
         assert!(
             binding_retained,
-            "SET_ADDR NAK rolled back B or left its trial installed"
+            "SET_ADDR NAK rolled back C or left its trial installed"
         );
         assert!(
             reapply_succeeded,
-            "the retained B binding was not reapplied after restart"
+            "the retained C binding was not reapplied after restart"
         );
     }
 
