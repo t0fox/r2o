@@ -2033,17 +2033,23 @@ fn telegram_config_flags(path: &Path) -> (bool, bool) {
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        let value = match strip_config_quotes(value) {
-            Ok(v) => v,
-            Err(()) => {
-                if key.trim() == "TG_MODE" {
+        let value = value.trim_matches([' ', '\t', '\r', '\n']);
+        let value = match value.chars().next() {
+            Some(quote @ ('\'' | '"')) => {
+                let Some(value) = value
+                    .strip_prefix(quote)
+                    .and_then(|value| value.strip_suffix(quote))
+                else {
                     return (false, false);
-                } else {
-                    continue;
+                };
+                if value.contains(quote) {
+                    return (false, false);
                 }
+                value
             }
+            _ => value,
         };
-        match key.trim() {
+        match key.trim_matches([' ', '\t', '\r', '\n']) {
             "TG_ENABLED" => enabled = matches!(value, "1" | "yes"),
             "TG_MODE" => {
                 if mode_seen {

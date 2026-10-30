@@ -470,6 +470,47 @@ fn d2o_control_action_response_trace() {
 
 #[cfg(unix)]
 #[test]
+#[ignore = "run through scripts/test-panel-telegram-config-gate-differential.sh"]
+fn d2o_telegram_config_gate_trace() {
+    let mut config = Config::default();
+    config.config_path = std::env::var_os("R2O_PANEL_TG_CONFIG_PATH")
+        .expect("test helper provides the config path")
+        .into();
+    config.service_path = std::env::var_os("R2O_PANEL_TG_CONFIG_SERVICE")
+        .expect("test helper provides the fake service")
+        .into();
+    config.control_enabled = true;
+
+    let response = request(
+        &config,
+        "POST /api/control/telegram-enable HTTP/1.1\r\nHost: localhost:8090\r\nOrigin: http://localhost:8090\r\nContent-Length: 0\r\n\r\n",
+    );
+    let trace = format!("{}\n{}\n", response.0, response.2);
+    println!("{trace}");
+    fs::write(
+        std::env::var_os("R2O_PANEL_TG_CONFIG_TRACE_OUTPUT")
+            .expect("test helper provides the Rust trace path"),
+        &trace,
+    )
+    .unwrap();
+    let c_trace = fs::read_to_string(
+        std::env::var_os("R2O_PANEL_TG_CONFIG_C_TRACE")
+            .expect("test helper provides the D2O C trace"),
+    )
+    .unwrap();
+    let parse_trace = |trace: &str| {
+        let mut lines = trace.lines();
+        let status = lines.next().unwrap().parse::<u16>().unwrap();
+        let body = serde_json::from_str::<Value>(lines.next().unwrap()).unwrap();
+        assert!(lines.next().is_none(), "config gate trace has two lines");
+        (status, body)
+    };
+    assert_eq!(parse_trace(&c_trace), parse_trace(&trace));
+    assert_eq!(response.0, 409);
+}
+
+#[cfg(unix)]
+#[test]
 #[ignore = "run through scripts/test-panel-workers-busy-differential.sh"]
 fn d2o_worker_busy_response_does_not_persist_new_domains() {
     let service = std::env::var_os("R2O_PANEL_WORKER_SERVICE")
