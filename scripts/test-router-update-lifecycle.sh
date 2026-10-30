@@ -11,6 +11,9 @@ printf 'MODE=off\nTG_ENABLED=0\n' > "$TEMP/config"
 cat > "$TEMP/manager" <<'EOF'
 #!/bin/sh
 printf 'manager:%s\n' "$1" >> "$EVENTS"
+case "$1" in
+    update-install-auto) printf '{"activated":true,"already_current":false}\n' ;;
+esac
 exit 0
 EOF
 cat > "$TEMP/init" <<'EOF'
@@ -54,8 +57,9 @@ first_start_line=$(line init:start)
 stop_failed_line=$(line init:stop)
 rollback_line=$(line manager:rollback)
 mark_bad_line=$(line manager:update-mark-bad-previous)
-[ "$tg_stop_line" -lt "$install_line" ] || fail "Telegram rules were stopped after activation"
-[ "$stop_line" -lt "$install_line" ] || fail "datapath was stopped after activation"
+[ "$install_line" -lt "$tg_stop_line" ] || fail "Telegram rules were stopped before update activation"
+[ "$install_line" -lt "$stop_line" ] || fail "datapath was stopped before update activation"
+[ "$tg_stop_line" -lt "$stop_line" ] || fail "Telegram rules were not stopped before datapath shutdown"
 [ "$install_line" -lt "$first_start_line" ] || fail "the new adapter was not started after activation"
 [ "$first_start_line" -lt "$stop_failed_line" ] || fail "the unhealthy adapter was not checked before stop"
 [ "$stop_failed_line" -lt "$rollback_line" ] || fail "rollback happened before the unhealthy adapter stopped"

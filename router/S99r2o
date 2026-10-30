@@ -931,27 +931,7 @@ wait_health() {
     return 1
 }
 
-update_install() {
-    update_mode=${1:-manual}
-    case "$update_mode" in
-        manual) manager_install_command=update-install ;;
-        auto) manager_install_command=update-install-auto ;;
-        *) return 2 ;;
-    esac
-    stop || return 1
-    if ! "$MANAGER" "$manager_install_command" --root "$ROOT"; then
-        if "$INIT" start && wait_health; then
-            say "установка обновления не удалась; текущий release снова запущен"
-        else
-            say "установка обновления не удалась; текущий release не прошёл runtime-проверку"
-        fi
-        return 1
-    fi
-    if "$INIT" start && wait_health; then
-        say "обновление запущено и прошло runtime-проверку"
-        return 0
-    fi
-    say "новый release не прошёл runtime-проверку; выполняю rollback"
+update_rollback() {
     "$INIT" stop || true
     "$MANAGER" rollback --root "$ROOT" || die "rollback не выполнен"
     "$MANAGER" update-mark-bad-previous --root "$ROOT" >/dev/null || \
@@ -961,6 +941,42 @@ update_install() {
     else
         die "предыдущий release восстановлен, но не прошёл runtime-проверку"
     fi
+}
+
+update_install() {
+    update_mode=${1:-manual}
+    case "$update_mode" in
+        manual) manager_install_command=update-install ;;
+        auto) manager_install_command=update-install-auto ;;
+        *) return 2 ;;
+    esac
+    update_result=$("$MANAGER" "$manager_install_command" --root "$ROOT") || {
+        say "установка обновления не удалась; работающий release оставлен без изменений"
+        return 1
+    }
+    printf '%s\n' "$update_result"
+    case "$update_result" in
+        *'"activated":true'*) ;;
+        *'"already_current":true'*)
+            say "текущий release уже установлен; работающий runtime оставлен без перезапуска"
+            return 0
+            ;;
+        *)
+            say "менеджер обновления не подтвердил активацию release"
+            return 1
+            ;;
+    esac
+    if ! stop; then
+        say "не удалось остановить runtime после активации; выполняю rollback"
+        update_rollback
+        return 1
+    fi
+    if "$INIT" start && wait_health; then
+        say "обновление запущено и прошло runtime-проверку"
+        return 0
+    fi
+    say "новый release не прошёл runtime-проверку; выполняю rollback"
+    update_rollback
     return 1
 }
 
