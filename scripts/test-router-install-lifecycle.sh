@@ -104,7 +104,7 @@ cmp "$BUNDLE/router/001-r2o.sh" "$NDM_DIR/001-r2o.sh" || {
     echo "не установлен NDM hook из выпуска" >&2
     exit 1
 }
-grep -qx 'PROBE_MARK=0' "$INSTALL_ROOT/config" || {
+grep -qx 'PROBE_MARK=46' "$INSTALL_ROOT/config" || {
     echo "конфигурация не приняла штатный PROBE_MARK" >&2
     exit 1
 }

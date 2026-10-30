@@ -14,6 +14,15 @@ grep -Fq -- '--mark "$PROBE_MARK"' "$d2o_service" || {
     echo "D2O controller startup no longer uses PROBE_MARK; update this differential case" >&2
     exit 2
 }
+d2o_default_probe_mark=$(awk -F= '$1 == "PROBE_MARK" { gsub(/\r/, "", $2); print $2; exit }' "$d2o_service")
+r2o_default_probe_mark=$(awk -F= '$1 == "PROBE_MARK" { gsub(/\r/, "", $2); print $2; exit }' "$r2o_root/router/config.default")
+d2o_default_probe_mark=$(printf '%d' "$d2o_default_probe_mark")
+r2o_default_probe_mark=$(printf '%d' "$r2o_default_probe_mark")
+[ "$r2o_default_probe_mark" = "$d2o_default_probe_mark" ] || {
+    printf 'D2O default PROBE_MARK is %s; R2O config.default uses %s\n' \
+        "$d2o_default_probe_mark" "$r2o_default_probe_mark" >&2
+    exit 1
+}
 r2o_temp=$(mktemp -d)
 r2o_cleanup() {
     r2o_status=$?
@@ -176,9 +185,14 @@ r2o_run_service engine-start
     echo "режим IPv4-only запустил неверное количество служб" >&2
     exit 1
 }
-grep -Fq '|--discover|--mark|45|--live|' "$r2o_temp/launches" || {
+grep -Fq '|--probe-mark|46|' "$r2o_temp/launches" || {
     cat "$r2o_temp/launches" >&2
-    echo "PROBE_MARK=0 должен сохранить штатную MARK-метку контроллера" >&2
+    echo "service startup without PROBE_MARK must use the D2O default 46" >&2
+    exit 1
+}
+grep -Fq '|--discover|--mark|46|--live|' "$r2o_temp/launches" || {
+    cat "$r2o_temp/launches" >&2
+    echo "service startup without PROBE_MARK did not pass the D2O default to controller" >&2
     exit 1
 }
 r2o_run_service engine-start
@@ -190,11 +204,22 @@ r2o_run_service engine-start
 
 r2o_run_service stop
 : >"$r2o_temp/launches"
+printf 'PROBE_MARK=0\n' >>"$r2o_temp/root/config"
 r2o_run_service start
 grep -Fq 'r2o-panel|serve|' "$r2o_temp/launches" || {
     echo "панель не запустилась в тестовой конфигурации" >&2
     exit 1
 }
+grep -Fq '|--discover|--mark|45|--live|' "$r2o_temp/launches" || {
+    cat "$r2o_temp/launches" >&2
+    echo "явный PROBE_MARK=0 должен сохранить MARK для controller probes" >&2
+    exit 1
+}
+if grep -Fq 'r2o-datapath|' "$r2o_temp/launches" && grep -Fq '|--probe-mark|' "$r2o_temp/launches"; then
+    cat "$r2o_temp/launches" >&2
+    echo "явный PROBE_MARK=0 не должен передаваться datapath как отдельная метка" >&2
+    exit 1
+fi
 grep -Fq '|--listen|127.0.0.1:8090' "$r2o_temp/launches" || {
     cat "$r2o_temp/launches" >&2
     echo "PANEL_LISTEN из конфигурации не передан панели" >&2

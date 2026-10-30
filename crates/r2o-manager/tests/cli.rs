@@ -326,7 +326,7 @@ fn shipped_openwrt_defaults_initialize_without_rejecting_advanced_mark_options()
         String::from_utf8_lossy(&output.stderr)
     );
     let config = fs::read_to_string(root.join("config")).unwrap();
-    assert!(config.contains("PROBE_MARK=0\n"));
+    assert!(config.contains("PROBE_MARK=46\n"));
     assert!(config.contains("ONLY_MARK=\n"));
     assert!(config.contains("TG_PORT=1443\n"));
 }
