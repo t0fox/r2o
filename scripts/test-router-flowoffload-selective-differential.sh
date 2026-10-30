@@ -222,6 +222,16 @@ unset NFT_FAIL_SELECTIVE
 firewall flowoffload-restore
 grep -Fq 'flow offload @ft' "$TEMP/nft/fw4-forward" || { echo "failed selective transaction was not restored from fw4" >&2; exit 1; }
 
+printf '%s\n' 'meta l4proto { tcp, udp } flow offload @ft comment "r2o-flowoffload" # handle 5' >"$TEMP/nft/fw4-forward"
+firewall flowoffload-ensure
+[ "$(cat "$TEMP/run/flow-offloading.runtime")" = fallback ] || {
+    echo "a stale R2O comment without the ct-mark predicate did not enter runtime fallback" >&2
+    exit 1
+}
+[ ! -e "$TEMP/nft/fw4-ft" ] || { echo "a stale R2O comment left flowtable entries active" >&2; exit 1; }
+firewall flowoffload-restore
+grep -Fq 'flow offload @ft' "$TEMP/nft/fw4-forward" || { echo "stale R2O rule was not restored from fw4" >&2; exit 1; }
+
 printf '%s\n' 'ct state established meta l4proto { tcp, udp } flow offload @ft # handle 12' >"$TEMP/nft/fw4-forward"
 firewall flowoffload-ensure
 [ "$(cat "$TEMP/run/flow-offloading.runtime")" = fallback ] || {

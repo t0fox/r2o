@@ -492,9 +492,9 @@ flowoffload_ensure_unlocked() {
         flowoffload_remove_all_unlocked
         return $?
     }
-    flow_expr=$(printf '%s\n' "$flow_info" | sed 's/^[^|]*|[^|]*|//')
+    flow_expr=$(printf '%s\n' "$flow_info" | sed 's/^[^|]*|[^|]*|[[:space:]]*//')
     case "$flow_expr" in
-        *'comment "r2o-flowoffload"')
+        "$FLOWOFFLOAD_SELECTIVE")
             flowoffload_selective_present || {
                 flowoffload_remove_all_unlocked
                 return $?
