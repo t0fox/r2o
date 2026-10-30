@@ -43,11 +43,64 @@ pub fn r2o_save_confirmed_voice_binding(
     r2o_now: i64,
     r2o_verified_by: u8,
 ) -> Result<String, String> {
+    r2o_save_confirmed_voice_binding_for_target(
+        r2o_catalog,
+        "addr",
+        &r2o_server.to_string(),
+        r2o_text,
+        r2o_now,
+        r2o_verified_by,
+    )
+}
+
+pub fn r2o_save_confirmed_voice_name_binding(
+    r2o_catalog: &mut crate::catalog::Catalog,
+    r2o_text: &str,
+    r2o_now: i64,
+    r2o_verified_by: u8,
+) -> Result<String, String> {
+    r2o_save_confirmed_voice_binding_for_target(
+        r2o_catalog,
+        "name",
+        "@discord-voice",
+        r2o_text,
+        r2o_now,
+        r2o_verified_by,
+    )
+}
+
+pub fn r2o_voice_binding_address_scoped(
+    r2o_verified_by: u8,
+    r2o_discovery_verified: bool,
+) -> Result<bool, String> {
+    match r2o_verified_by {
+        3 => Ok(true),
+        4 => Ok(r2o_discovery_verified),
+        _ => Err(
+            "голосовую привязку можно сохранить только после ответа STUN или Discord Discovery"
+                .into(),
+        ),
+    }
+}
+
+fn r2o_save_confirmed_voice_binding_for_target(
+    r2o_catalog: &mut crate::catalog::Catalog,
+    r2o_kind: &str,
+    r2o_target: &str,
+    r2o_text: &str,
+    r2o_now: i64,
+    r2o_verified_by: u8,
+) -> Result<String, String> {
     if !matches!(r2o_verified_by, 3 | 4) {
         return Err(
             "голосовую привязку можно сохранить только после ответа STUN или Discord Discovery"
                 .into(),
         );
+    }
+    if !((r2o_kind == "addr" && r2o_target.parse::<std::net::Ipv4Addr>().is_ok())
+        || (r2o_kind == "name" && r2o_target == "@discord-voice" && r2o_verified_by == 4))
+    {
+        return Err("недопустимая область постоянной голосовой привязки".into());
     }
     let r2o_bytes = crate::plan_text::compile_text(r2o_text)?;
     let r2o_plan = r2k_core::plan::Plan::parse(&r2o_bytes).map_err(|error| error.to_string())?;
@@ -67,7 +120,7 @@ pub fn r2o_save_confirmed_voice_binding(
     if r2o_plan_id.bytes().all(|byte| byte == b'0') {
         return Err("идентификатор голосового плана не может быть нулевым".into());
     }
-    let r2o_target = r2o_server.to_string();
+    let r2o_target = r2o_target.to_owned();
     let r2o_box_index = if let Some(r2o_index) = r2o_catalog
         .boxes
         .iter()
@@ -87,7 +140,7 @@ pub fn r2o_save_confirmed_voice_binding(
     let mut r2o_prior_successes = 0_i32;
     for r2o_box in &mut r2o_catalog.boxes {
         for r2o_binding in &r2o_box.bindings {
-            if r2o_binding.kind == "addr"
+            if r2o_binding.kind == r2o_kind
                 && r2o_binding.target == r2o_target
                 && r2o_binding.transport == 17
                 && r2o_binding.family == 4
@@ -98,7 +151,7 @@ pub fn r2o_save_confirmed_voice_binding(
             }
         }
         r2o_box.bindings.retain(|r2o_binding| {
-            !(r2o_binding.kind == "addr"
+            !(r2o_binding.kind == r2o_kind
                 && r2o_binding.target == r2o_target
                 && r2o_binding.transport == 17
                 && r2o_binding.family == 4
@@ -130,7 +183,7 @@ pub fn r2o_save_confirmed_voice_binding(
     }
     r2o_box.updated = r2o_now;
     r2o_box.bindings.push(crate::catalog::Binding {
-        kind: "addr".into(),
+        kind: r2o_kind.into(),
         target: r2o_target,
         plan_id: r2o_plan_id.clone(),
         level: 3,
@@ -1044,6 +1097,39 @@ mod tests {
             super::r2o_voice_discovery_prefix_from_plan_text(&r2o_reloaded.boxes[0].plans[0].text),
             Some(r2o_prefix)
         );
+    }
+
+    #[test]
+    fn r2o_выбирает_область_voice_привязки_по_d2o_критерию_discovery_verified() {
+        assert!(super::r2o_voice_binding_address_scoped(3, false).unwrap());
+        assert!(super::r2o_voice_binding_address_scoped(3, true).unwrap());
+        assert!(super::r2o_voice_binding_address_scoped(4, true).unwrap());
+        assert!(!super::r2o_voice_binding_address_scoped(4, false).unwrap());
+        assert!(super::r2o_voice_binding_address_scoped(5, true).is_err());
+    }
+
+    #[test]
+    fn r2o_сохраняет_fallback_voice_plan_как_глобальную_привязку_discord() {
+        let r2o_text = concat!(
+            "r2o-plan 1 1\n",
+            "id 11111111111111111111111111111111\n",
+            "proto udp voice\n",
+            "payload 1 a1b2c3d4\n",
+            "poison 1\n",
+            "fake payload=1 poison=1 repeats=6 gap_us=0 place=before\n",
+            "order forward\n",
+            "pace 15000\n",
+        );
+        let mut r2o_catalog = crate::catalog::Catalog::default();
+        super::r2o_save_confirmed_voice_name_binding(&mut r2o_catalog, r2o_text, 1_800_000_000, 4)
+            .unwrap();
+        let r2o_binding = &r2o_catalog.boxes[0].bindings[0];
+        assert_eq!(r2o_binding.kind, "name");
+        assert_eq!(r2o_binding.target, "@discord-voice");
+        assert_eq!(r2o_binding.transport, 17);
+        assert_eq!(r2o_binding.family, 4);
+        assert_eq!(r2o_binding.shape, r2k_core::control::SHAPE_VOICE);
+        assert_eq!(r2o_binding.verified_by, 4);
     }
 
     #[test]

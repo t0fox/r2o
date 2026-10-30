@@ -8469,6 +8469,7 @@ struct R2oVoiceTrialContext {
     target: r2o_controller::voice_discovery::R2oVoiceTarget,
     trial_id: [u8; 16],
     plan_text: String,
+    discovery_verified: bool,
     voice_flow_key: Option<[u8; r2k_core::control::KEY_LEN]>,
     started_at: std::time::Instant,
     renew_at: std::time::Instant,
@@ -14580,6 +14581,7 @@ impl ControlClient {
         target: r2o_controller::voice_discovery::R2oVoiceTarget,
         plan_text: String,
         started_at: std::time::Instant,
+        discovery_verified: bool,
     ) -> Result<R2oVoiceTrialInstallOutcome, Box<dyn Error>> {
         use std::io::Read;
 
@@ -14598,6 +14600,7 @@ impl ControlClient {
             target,
             trial_id,
             plan_text,
+            discovery_verified,
             voice_flow_key: None,
             started_at,
             renew_at: now + R2O_VOICE_TRIAL_RENEW_INTERVAL,
@@ -14723,16 +14726,40 @@ impl ControlClient {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
-        let plan_id = r2o_controller::voice_discovery::r2o_save_confirmed_voice_binding(
-            &mut updated,
-            *trial.target.server.ip(),
-            &trial.plan_text,
-            now,
+        let address_scoped = r2o_controller::voice_discovery::r2o_voice_binding_address_scoped(
             verified_by,
+            trial.discovery_verified,
         )
         .map_err(|error| format!("не удалось сохранить голосовую привязку: {error}"))?;
+        let plan_id = if address_scoped {
+            r2o_controller::voice_discovery::r2o_save_confirmed_voice_binding(
+                &mut updated,
+                *trial.target.server.ip(),
+                &trial.plan_text,
+                now,
+                verified_by,
+            )
+        } else {
+            r2o_controller::voice_discovery::r2o_save_confirmed_voice_name_binding(
+                &mut updated,
+                &trial.plan_text,
+                now,
+                verified_by,
+            )
+        }
+        .map_err(|error| format!("не удалось сохранить голосовую привязку: {error}"))?;
         let plan_records = compile_text(&trial.plan_text)?;
-        let command = encode_set_voice_addr(*trial.target.server.ip(), &plan_records)?;
+        let (command, command_kind) = if address_scoped {
+            (
+                encode_set_voice_addr(*trial.target.server.ip(), &plan_records)?,
+                COMMAND_SET_VOICE_ADDR,
+            )
+        } else {
+            (
+                encode_set_name("@discord-voice", SHAPE_VOICE, 4, &plan_records)?,
+                COMMAND_SET_NAME,
+            )
+        };
         persist_catalog_update(&updated, catalog_path, now, persistence.as_deref_mut())?;
         if let Err(install_error) = self.write_command(&command) {
             return match persist_catalog_update(
@@ -14752,10 +14779,9 @@ impl ControlClient {
             };
         }
         *catalog = updated;
-        match self.wait_for_sent_command_ack(&command, COMMAND_SET_VOICE_ADDR, CONTROL_ACK_TIMEOUT)
-        {
+        match self.wait_for_sent_command_ack(&command, command_kind, CONTROL_ACK_TIMEOUT) {
             Ok(Some(ack)) => {
-                self.record_http_binding_acknowledgement(&command, COMMAND_SET_VOICE_ADDR, ack);
+                self.record_http_binding_acknowledgement(&command, command_kind, ack);
                 if !ack.ok {
                     eprintln!(
                         "датапат отказал в постоянном voice-плане ({}); привязка сохранена для повтора",
@@ -14781,8 +14807,12 @@ impl ControlClient {
             }
         };
         println!(
-            "Ответ {proof_name} подтверждён: адресный план {plan_id} сохранён для {}; качество и слышимость аудио отдельно не измерялись",
-            trial.target.server.ip(),
+            "Ответ {proof_name} подтверждён: {} план {plan_id} сохранён; качество и слышимость аудио отдельно не измерялись",
+            if address_scoped {
+                format!("адресный для {}", trial.target.server.ip())
+            } else {
+                "общий @discord-voice".into()
+            },
         );
         Ok(())
     }
@@ -15388,6 +15418,7 @@ impl ControlClient {
                                 r2o_target,
                                 r2o_controller::voice_discovery::r2o_voice_arm_plan_text(&prefix),
                                 r2o_outcome.started_at,
+                                true,
                             ) {
                                 Ok(install) => install,
                                 Err(error) => {
@@ -15525,6 +15556,7 @@ impl ControlClient {
                                             r2o_target,
                                             r2o_plan_text,
                                             r2o_outcome.started_at,
+                                            false,
                                         ) {
                                             Ok(install) => install,
                                             Err(error) => {
@@ -35239,7 +35271,8 @@ mod tests {
         };
         let prefix = r2k_core::stun::binding_request([0x36; 12]);
         let plan_text = r2o_controller::voice_discovery::r2o_voice_arm_plan_text(&prefix);
-        let result = client.install_r2o_voice_trial(target, plan_text, std::time::Instant::now());
+        let result =
+            client.install_r2o_voice_trial(target, plan_text, std::time::Instant::now(), true);
         let sent_trial_id = server.join().unwrap();
         assert!(
             matches!(result, Ok(super::R2oVoiceTrialInstallOutcome::Installed(ref trial))
@@ -35284,6 +35317,7 @@ mod tests {
                 started_at: std::time::Instant::now() - std::time::Duration::from_secs(599),
                 renew_at: std::time::Instant::now() + std::time::Duration::from_secs(60),
                 expires_at: std::time::Instant::now() + std::time::Duration::from_secs(1),
+                discovery_verified: false,
                 response_confirmed: false,
                 diagnostic: None,
             };
@@ -35317,6 +35351,7 @@ mod tests {
             started_at: Instant::now(),
             renew_at: Instant::now(),
             expires_at: Instant::now() + std::time::Duration::from_secs(60),
+            discovery_verified: false,
             response_confirmed: false,
             diagnostic: None,
         };
@@ -35386,6 +35421,7 @@ mod tests {
             started_at: r2o_started_at,
             renew_at: r2o_started_at + R2O_VOICE_TRIAL_RENEW_INTERVAL,
             expires_at: r2o_started_at + R2O_VOICE_TRIAL_TASK_LIFETIME,
+            discovery_verified: false,
             response_confirmed: false,
             diagnostic: None,
         };
@@ -35534,6 +35570,7 @@ mod tests {
                         started_at: r2o_started_at,
                         renew_at: r2o_started_at,
                         expires_at: r2o_started_at + R2O_VOICE_TRIAL_TASK_LIFETIME,
+                        discovery_verified: false,
                         response_confirmed: false,
                         diagnostic: None,
                     },
@@ -35548,6 +35585,7 @@ mod tests {
                         started_at: r2o_started_at,
                         renew_at: r2o_started_at + R2O_VOICE_TRIAL_RENEW_INTERVAL * 2,
                         expires_at: r2o_started_at + R2O_VOICE_TRIAL_TASK_LIFETIME,
+                        discovery_verified: false,
                         response_confirmed: false,
                         diagnostic: None,
                     },
@@ -35617,6 +35655,7 @@ mod tests {
             started_at: now,
             renew_at: now + Duration::from_secs(60),
             expires_at: now + R2O_VOICE_TRIAL_TASK_LIFETIME,
+            discovery_verified: false,
             response_confirmed: false,
             diagnostic: None,
         };
@@ -35666,6 +35705,7 @@ mod tests {
             started_at: now,
             renew_at: now + Duration::from_secs(60),
             expires_at: now + Duration::from_secs(600),
+            discovery_verified: false,
             response_confirmed: false,
             diagnostic: None,
         };
@@ -35778,6 +35818,7 @@ mod tests {
             started_at: std::time::Instant::now(),
             renew_at: std::time::Instant::now() + std::time::Duration::from_secs(60),
             expires_at: std::time::Instant::now() + std::time::Duration::from_secs(600),
+            discovery_verified: true,
             response_confirmed: true,
             diagnostic: None,
         };
@@ -36054,6 +36095,7 @@ mod tests {
                 started_at: now,
                 renew_at: now + R2O_VOICE_TRIAL_RENEW_INTERVAL,
                 expires_at: now + R2O_VOICE_TRIAL_TASK_LIFETIME,
+                discovery_verified: false,
                 response_confirmed: false,
                 diagnostic: None,
             },
@@ -36116,6 +36158,7 @@ mod tests {
             started_at: now,
             renew_at: now + R2O_VOICE_TRIAL_RENEW_INTERVAL,
             expires_at: now + R2O_VOICE_TRIAL_TASK_LIFETIME,
+            discovery_verified: true,
             response_confirmed: true,
             diagnostic: None,
         };
@@ -36275,6 +36318,128 @@ mod tests {
         assert!(measuring_queue.complete(&target_a));
         assert_eq!(measuring_queue.take_pending_if_idle(true), None);
 
+        let fallback_directory = std::env::temp_dir().join(format!(
+            "r2o-voice-fallback-binding-{}-{}",
+            std::process::id(),
+            now.elapsed().as_nanos()
+        ));
+        std::fs::create_dir(&fallback_directory).unwrap();
+        let fallback_socket_path = fallback_directory.join("control.sock");
+        let fallback_catalog_path = fallback_directory.join("catalog.json");
+        Catalog::default()
+            .save_atomic(&fallback_catalog_path, 1_800_000_000)
+            .unwrap();
+        let fallback_listener = UnixListener::bind(&fallback_socket_path).unwrap();
+        let fallback_trial_id = [0xf4; 16];
+        let fallback_server = std::thread::spawn(move || {
+            let (mut stream, _) = fallback_listener.accept().unwrap();
+            stream
+                .write_all(&super::encode_greeting(u16::MAX as u32).unwrap())
+                .unwrap();
+            let permanent = super::read_frame(&mut stream).unwrap();
+            assert_eq!(permanent.kind, super::COMMAND_SET_NAME);
+            let name_len = permanent.body[0] as usize;
+            assert_eq!(&permanent.body[1..1 + name_len], b"@discord-voice");
+            assert_eq!(permanent.body[1 + name_len], super::SHAPE_VOICE);
+            assert_eq!(permanent.body[2 + name_len], 4);
+            stream
+                .write_all(&super::encode_ack(permanent.kind, true, 0).unwrap())
+                .unwrap();
+            let remove = super::read_frame(&mut stream).unwrap();
+            stream
+                .write_all(
+                    &super::encode_ack_for_trial(remove.kind, true, 0, Some(fallback_trial_id))
+                        .unwrap(),
+                )
+                .unwrap();
+            (permanent.kind, remove.kind)
+        });
+        let fallback_target = r2o_controller::voice_discovery::R2oVoiceTarget {
+            client,
+            server: SocketAddrV4::new(*target_c.server.ip(), 50_016),
+        };
+        let fallback_trial = R2oVoiceTrialContext {
+            target: fallback_target,
+            trial_id: fallback_trial_id,
+            plan_text: concat!(
+                "r2o-plan 1 1\n",
+                "id 11111111111111111111111111111111\n",
+                "proto udp voice\n",
+                "payload 1 a1b2c3d4\n",
+                "poison 1\n",
+                "fake payload=1 poison=1 repeats=6 gap_us=0 place=before\n",
+                "order forward\n",
+                "pace 15000\n",
+            )
+            .into(),
+            voice_flow_key: None,
+            started_at: now,
+            renew_at: now + R2O_VOICE_TRIAL_RENEW_INTERVAL,
+            expires_at: now + R2O_VOICE_TRIAL_TASK_LIFETIME,
+            discovery_verified: false,
+            response_confirmed: true,
+            diagnostic: None,
+        };
+        let mut fallback_key = [0; KEY_LEN];
+        fallback_key[0] = 4;
+        fallback_key[1..5].copy_from_slice(&client.octets());
+        fallback_key[17..21].copy_from_slice(&fallback_target.server.ip().octets());
+        fallback_key[33..35].copy_from_slice(&52_060_u16.to_be_bytes());
+        fallback_key[35..37].copy_from_slice(&fallback_target.server.port().to_be_bytes());
+        fallback_key[37] = 17;
+        let fallback_proof = r2k_core::control::R2oVoiceProofEvent {
+            key: fallback_key,
+            trial_id: fallback_trial_id,
+            proof: r2k_core::control::R2oVoiceProofKind::DiscordDiscovery {
+                mapped_ip: Ipv4Addr::new(203, 0, 113, 8),
+                mapped_port: 52_000,
+            },
+        };
+        let mut fallback_client = ControlClient::connect(fallback_socket_path).unwrap();
+        let mut fallback_catalog = Catalog::load(&fallback_catalog_path).unwrap();
+        fallback_client
+            .confirm_r2o_voice_trial(
+                fallback_trial,
+                &fallback_proof,
+                &mut fallback_catalog,
+                &fallback_catalog_path,
+                None,
+            )
+            .unwrap();
+        let (permanent_kind, remove_kind) = fallback_server.join().unwrap();
+        assert_eq!(permanent_kind, super::COMMAND_SET_NAME);
+        assert_eq!(remove_kind, super::COMMAND_DEL_VOICE_ADDR_PROBE);
+        let fallback_saved = Catalog::load(&fallback_catalog_path).unwrap();
+        let fallback_binding = &fallback_saved.boxes[0].bindings[0];
+        assert_eq!(fallback_binding.kind, "name");
+        assert_eq!(fallback_binding.target, "@discord-voice");
+        assert_eq!(fallback_binding.family, 4);
+        assert_eq!(fallback_binding.verified_by, 4);
+        let (_, fallback_compiled) = super::catalog_commands_for_runtime(
+            &fallback_catalog_path,
+            &fallback_saved,
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(fallback_compiled.skipped, 0);
+        assert_eq!(fallback_compiled.commands.len(), 1);
+        let fallback_reapplied =
+            super::read_frame(&mut std::io::Cursor::new(&fallback_compiled.commands[0].1)).unwrap();
+        assert_eq!(fallback_reapplied.kind, super::COMMAND_SET_NAME);
+        let reapply_name_len = fallback_reapplied.body[0] as usize;
+        assert_eq!(
+            &fallback_reapplied.body[1..1 + reapply_name_len],
+            b"@discord-voice"
+        );
+        assert_eq!(
+            fallback_reapplied.body[1 + reapply_name_len],
+            super::SHAPE_VOICE
+        );
+        assert_eq!(fallback_reapplied.body[2 + reapply_name_len], 4);
+        std::fs::remove_dir_all(fallback_directory).unwrap();
+        trace.push("unverified_discovery_binding=name:@discord-voice");
+        trace.push("restart_reapplies_fallback_voice=name:@discord-voice");
+
         if let Some(path) = std::env::var_os("R2O_VOICE_LIFECYCLE_TRACE_OUTPUT") {
             std::fs::write(path, format!("{}\n", trace.join("\n"))).unwrap();
         }
@@ -36315,6 +36480,7 @@ mod tests {
                     started_at: r2o_now - Duration::from_secs(601),
                     renew_at: r2o_now - Duration::from_secs(30),
                     expires_at: r2o_now - Duration::from_secs(1),
+                    discovery_verified: false,
                     response_confirmed: false,
                     diagnostic: None,
                 },
@@ -36329,6 +36495,7 @@ mod tests {
                     started_at: r2o_now - Duration::from_secs(599),
                     renew_at: r2o_now + Duration::from_secs(30),
                     expires_at: r2o_now + Duration::from_secs(1),
+                    discovery_verified: false,
                     response_confirmed: false,
                     diagnostic: None,
                 },
@@ -36370,6 +36537,7 @@ mod tests {
                 renew_at: r2o_started_at + Duration::from_secs(60),
                 expires_at: r2o_started_at + Duration::from_secs(600),
                 started_at: r2o_started_at,
+                discovery_verified: false,
                 response_confirmed: false,
                 diagnostic: None,
             },

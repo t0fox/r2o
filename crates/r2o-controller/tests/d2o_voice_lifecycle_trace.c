@@ -152,6 +152,68 @@ static void measure_busy_discards_new_endpoint(d2k_sched_voice_fn saved_voice) {
     g_server_port = 50004;
 }
 
+static void unverified_discovery_uses_voice_class_binding(void) {
+    int sv[2];
+    int64_t saved_now = g_now_ms;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+        trace_check(0, "fallback binding fixture socketpair failed");
+    }
+    drain_fd = sv[1];
+    int flags = fcntl(drain_fd, F_GETFL, 0);
+    trace_check(flags >= 0 && fcntl(drain_fd, F_SETFL, flags | O_NONBLOCK) == 0,
+                "fallback binding nonblocking drain setup failed");
+    forget_sent();
+    voice_calls = 0;
+    voice_discovery_fixture = 0;
+    d2k_sched_voice_hook = stub_voice;
+    g_server_port = 50016;
+
+    d2k_catalog cat = {0};
+    d2k_sched *sched = d2k_sched_new(&cat, sv[0], 0x2d);
+    trace_check(sched != NULL, "fallback binding scheduler creation failed");
+    d2k_sched_set_say(sched, collect_say, NULL);
+    d2k_ev hello = ev_hello(17, 52060, D2K_LINK_VOICE_CLASS);
+    d2k_sched_event(sched, &hello);
+    d2k_ev suspect = ev_suspect(17, 52060);
+    d2k_sched_event(sched, &suspect);
+    spin(sched, 30);
+    trace_check(voice_calls == 1 &&
+                sent_command_count(D2K_CMD_SET_ADDR_PROBE, NULL, 0) == 1,
+                "generic active-flow fallback did not install a temporary voice trial");
+
+    d2k_ev applied = ev_applied(17, 52060);
+    d2k_sched_event(sched, &applied);
+    d2k_ev exchange = ev_exchange(17, 52060, 0);
+    exchange.code = D2K_UDP_PROOF_VOICE_DISCOVERY;
+    d2k_sched_event(sched, &exchange);
+    spin(sched, 20);
+
+    const d2k_cat_binding *binding = binding_of(&cat, D2K_LINK_VOICE_CLASS, 17);
+    trace_check(binding && strcmp(binding->kind, "name") == 0 &&
+                binding->verified_by == D2K_VERBY_VOICE_DISCOVERY &&
+                sent_command_count(D2K_CMD_SET_NAME, NULL, 0) == 1 &&
+                sent_command_count(D2K_CMD_SET_ADDR, NULL, 0) == 0,
+                "unverified Discovery proof did not persist the global Discord voice binding");
+    printf("unverified_discovery_binding=name:@discord-voice\n");
+
+    d2k_sched_free(sched);
+    sched = d2k_sched_new(&cat, sv[0], 0x2d);
+    trace_check(sched != NULL, "fallback binding scheduler restart failed");
+    forget_sent();
+    trace_check(d2k_sched_sync(sched) >= 0, "fallback binding catalog sync failed");
+    sync_out(sched);
+    trace_check(sent_command_count(D2K_CMD_SET_NAME, NULL, 0) == 1 &&
+                sent_command_count(D2K_CMD_SET_ADDR, NULL, 0) == 0,
+                "persisted global Discord voice binding was not reapplied after restart");
+    printf("restart_reapplies_fallback_voice=name:@discord-voice\n");
+
+    d2k_sched_free(sched);
+    d2k_catalog_free(&cat);
+    close(sv[0]);
+    close(sv[1]);
+    g_now_ms = saved_now;
+}
+
 int main(void) {
     int sv[2];
     trace_check(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "socketpair failed");
@@ -264,5 +326,6 @@ int main(void) {
     close(sv[0]);
     close(sv[1]);
     measure_busy_discards_new_endpoint(saved_voice);
+    unverified_discovery_uses_voice_class_binding();
     return 0;
 }
