@@ -549,18 +549,10 @@ impl R2oVoiceSessions {
                 suspected: false,
             });
             if source == flow.client && destination == flow.server {
-                if let Some(ssrc) = voice_ssrc {
-                    if flow.voice_ssrc.is_some_and(|current| current != ssrc) {
-                        flow.voice_ssrc = Some(ssrc);
-                        flow.hello = now;
-                        flow.last_forward = now;
-                        flow.last_reverse = None;
-                        flow.last_seen = now;
-                        flow.forward_after_hello = 0;
-                        flow.suspected = false;
-                        return;
-                    }
-                    flow.voice_ssrc = Some(ssrc);
+                // Match D2O: the first Discovery SSRC and one-shot suspicion
+                // stay latched to this 5-tuple until the flow expires.
+                if flow.voice_ssrc.is_none() {
+                    flow.voice_ssrc = voice_ssrc;
                 }
                 if !first_request {
                     flow.forward_after_hello = flow.forward_after_hello.saturating_add(1);
@@ -1825,7 +1817,7 @@ mod tests {
     }
 
     #[test]
-    fn повторное_подключение_с_новым_ssrc_обновляет_то_же_5_tuple() {
+    fn новый_ssrc_не_сбрасывает_защёлку_подозрения_того_же_5_tuple() {
         let start = Instant::now();
         let client = [192, 0, 2, 10];
         let server = [198, 51, 100, 20];
@@ -1886,7 +1878,9 @@ mod tests {
         );
 
         let reconnected = sessions.sweep(start + Duration::from_millis(8_100), true);
-        assert_eq!(reconnected.len(), 1);
-        assert_eq!(reconnected[0].key, first[0].key);
+        assert!(
+            reconnected.is_empty(),
+            "new SSRC does not rearm a suspected D2O 5-tuple"
+        );
     }
 }

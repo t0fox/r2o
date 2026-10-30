@@ -71,6 +71,17 @@ fn main() {
 }
 EOF
 
+if ! CARGO_TARGET_DIR=$rust_target \
+RUSTFLAGS="${RUSTFLAGS:--Awarnings}" \
+CARGO_BUILD_TARGET=${CARGO_BUILD_TARGET:-$rust_host} \
+CARGO_MAKEFLAGS= \
+    "$CARGO" test --quiet --offline --manifest-path "$rust_temp/rust/Cargo.toml" \
+    > "$TEMP/r2o-unit.log" 2>&1; then
+    cat "$TEMP/r2o-unit.log" >&2
+    exit 1
+fi
+grep -q 'test result: ok\.' "$TEMP/r2o-unit.log"
+
 "$TEMP/d2o-trace" > "$TEMP/d2o.out"
 CARGO_TARGET_DIR=$rust_target \
 RUSTFLAGS="${RUSTFLAGS:--Awarnings}" \
@@ -79,7 +90,7 @@ RUSTFLAGS="${RUSTFLAGS:--Awarnings}" \
     "$CARGO" run --quiet --manifest-path "$rust_temp/rust/Cargo.toml" > "$TEMP/r2o.out"
 
 grep -qx 'ssrc_reconnect first=1 reconnect=0 suspects=1' "$TEMP/d2o.out"
-grep -qx 'ssrc_reconnect first=1 reconnect=1 suspects=2' "$TEMP/r2o.out"
+grep -qx 'ssrc_reconnect first=1 reconnect=0 suspects=1' "$TEMP/r2o.out"
 tail -n +2 "$TEMP/d2o.out" > "$TEMP/d2o-lifecycle.out"
 tail -n +2 "$TEMP/r2o.out" > "$TEMP/r2o-lifecycle.out"
 grep -qx 'endpoint_change=1' "$TEMP/d2o-lifecycle.out"
@@ -94,5 +105,5 @@ if ! cmp -s "$TEMP/d2o-lifecycle.out" "$TEMP/r2o-lifecycle.out"; then
 fi
 printf 'D2O %s:\n%s\n' "$ACTUAL_D2O_SHA" "$(cat "$TEMP/d2o.out")"
 printf 'R2O:\n%s\n' "$(cat "$TEMP/r2o.out")"
-printf '%s\n' 'D2O keeps the one-event 5-tuple latch; R2O re-arms on a new SSRC.'
-printf '%s\n' 'Endpoint change and 10-minute bidirectional session lifetimes match.'
+cat "$TEMP/r2o-unit.log"
+printf '%s\n' 'Discord SSRC reconnect, endpoint change, and 10-minute bidirectional session lifetimes match.'
