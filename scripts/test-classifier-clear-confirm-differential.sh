@@ -62,5 +62,5 @@ CARGO_MAKEFLAGS= \
     "$CARGO" run --quiet --manifest-path "$rust_temp/rust/Cargo.toml" > "$TEMP/r2o.out"
 cmp "$TEMP/d2o.out" "$TEMP/r2o.out"
 cat "$TEMP/d2o.out"
-printf 'D2O %s matches R2O for clear/base/control repeats, unproven responses, and cancellation.\n' \
+printf 'D2O %s matches R2O for clear/base/control repeats, mark confirmation, unproven responses, and cancellation.\n' \
     "$ACTUAL_D2O_SHA"

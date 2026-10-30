@@ -721,6 +721,9 @@ pub(crate) fn probe_trigger(
 
     let (socket, _) = dial_probe_target(target, timeout, mark)?;
     let fd = socket.as_raw_fd();
+    let expected_mark = mark.unwrap_or(BYPASS_MARK);
+    let marked =
+        expected_mark == 0 || get_socket_mark(fd).ok() == Some(expected_mark as libc::c_int);
     let deadline = Instant::now() + timeout;
     for span in split_offsets(cuts, trigger.payload.len(), 8) {
         let mut offset = span.from;
@@ -778,10 +781,12 @@ pub(crate) fn probe_trigger(
 
     match poll_once(fd, libc::POLLIN, deadline) {
         Ok(true) => {}
-        Ok(false) => return Ok(ProbeOutcome::Rejected),
+        Ok(false) => {
+            return Ok(ProbeOutcome::Rejected.with_mark_status(marked));
+        }
         Err(error) if error.kind() == io::ErrorKind::Interrupted => {
             // d2o's blocking recv returns silence when a signal interrupts it.
-            return Ok(ProbeOutcome::Rejected);
+            return Ok(ProbeOutcome::Rejected.with_mark_status(marked));
         }
         Err(error) => {
             return Err(ProbeError::Local(format!(
@@ -792,14 +797,15 @@ pub(crate) fn probe_trigger(
     let mut bytes = [0_u8; 512];
     let received = unsafe { libc::recv(fd, bytes.as_mut_ptr().cast(), bytes.len(), 0) };
     if received <= 0 {
-        return Ok(ProbeOutcome::Rejected);
+        return Ok(ProbeOutcome::Rejected.with_mark_status(marked));
     }
     Ok(
         if trigger_accepts(trigger.accept, &bytes[..received as usize]) {
             ProbeOutcome::Accepted
         } else {
             ProbeOutcome::Unproven
-        },
+        }
+        .with_mark_status(marked),
     )
 }
 

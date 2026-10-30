@@ -593,6 +593,34 @@ pub enum ProbeOutcome {
     Accepted,
     Rejected,
     Unproven,
+    AcceptedUnmarked,
+    RejectedUnmarked,
+    UnprovenUnmarked,
+}
+
+impl ProbeOutcome {
+    fn is_accepted(self) -> bool {
+        matches!(self, Self::Accepted | Self::AcceptedUnmarked)
+    }
+
+    fn is_unmarked(self) -> bool {
+        matches!(
+            self,
+            Self::AcceptedUnmarked | Self::RejectedUnmarked | Self::UnprovenUnmarked
+        )
+    }
+
+    pub(crate) fn with_mark_status(self, marked: bool) -> Self {
+        match (self, marked) {
+            (Self::Accepted, false) | (Self::AcceptedUnmarked, false) => Self::AcceptedUnmarked,
+            (Self::Rejected, false) | (Self::RejectedUnmarked, false) => Self::RejectedUnmarked,
+            (Self::Unproven, false) | (Self::UnprovenUnmarked, false) => Self::UnprovenUnmarked,
+            (Self::AcceptedUnmarked, true) => Self::Accepted,
+            (Self::RejectedUnmarked, true) => Self::Rejected,
+            (Self::UnprovenUnmarked, true) => Self::Unproven,
+            (outcome, true) => outcome,
+        }
+    }
 }
 
 /// Интерфейс ввода-вывода классификатора. Рабочая реализация использует
@@ -664,8 +692,7 @@ pub struct TcpProbeBackend;
 
 impl ProbeBackend for TcpProbeBackend {
     fn probe(&mut self, request: ProbeRequest<'_>) -> Result<bool, ProbeError> {
-        self.probe_outcome(request)
-            .map(|outcome| outcome == ProbeOutcome::Accepted)
+        self.probe_outcome(request).map(ProbeOutcome::is_accepted)
     }
 
     fn probe_outcome(&mut self, request: ProbeRequest<'_>) -> Result<ProbeOutcome, ProbeError> {
@@ -795,6 +822,7 @@ pub struct SeedWhole {
     pub fail: usize,
     pub errors: usize,
     pub unproven: usize,
+    pub marked: bool,
     pub error: Option<String>,
 }
 
@@ -925,6 +953,7 @@ struct Tally {
     fail: usize,
     errors: usize,
     unproven: usize,
+    unmarked: bool,
     error: Option<ProbeError>,
 }
 
@@ -1025,6 +1054,7 @@ fn measure<B: ProbeBackend>(
             fail: seed.fail,
             errors: seed.errors,
             unproven: seed.unproven,
+            unmarked: !seed.marked,
             error: seed.error.clone().map(ProbeError::Transport),
         };
         let observation = &mut result.trace[index];
@@ -1137,15 +1167,18 @@ fn measure<B: ProbeBackend>(
             break;
         }
 
+        if outcome.as_ref().is_ok_and(|outcome| outcome.is_unmarked()) {
+            tally.unmarked = true;
+        }
         match outcome {
-            Ok(ProbeOutcome::Accepted) => {
+            Ok(ProbeOutcome::Accepted | ProbeOutcome::AcceptedUnmarked) => {
                 tally.pass += 1;
                 if spec.until_pass {
                     break;
                 }
             }
-            Ok(ProbeOutcome::Rejected) => tally.fail += 1,
-            Ok(ProbeOutcome::Unproven) => {
+            Ok(ProbeOutcome::Rejected | ProbeOutcome::RejectedUnmarked) => tally.fail += 1,
+            Ok(ProbeOutcome::Unproven | ProbeOutcome::UnprovenUnmarked) => {
                 tally.fail += 1;
                 tally.unproven += 1;
             }
@@ -1313,6 +1346,14 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
             result.reason = format!(
                 "база не подтвердилась: итого {} из {} — ложный clear дороже честного flaky",
                 total_pass, total_repeats
+            );
+            finish(&mut result, &options, start);
+            return result;
+        }
+        if base.unmarked || confirm.unmarked {
+            result.verdict = Verdict::Inconclusive;
+            result.reason = format!(
+                "триггер прошёл ({total_pass}/{total_repeats}), но без подтверждённой метки SO_MARK — clear не принимается"
             );
             finish(&mut result, &options, start);
             return result;
@@ -1723,6 +1764,7 @@ pub fn run_base_with_backend_progress<B: ProbeBackend>(
         fail: base.fail,
         errors: base.errors,
         unproven: base.unproven,
+        marked: !base.unmarked,
         error: base.error.as_ref().map(|error| error.message().to_owned()),
     });
     BaseProbe {
@@ -1835,8 +1877,7 @@ mod raw_connect_fallback_tests {
 
     impl ProbeBackend for ScriptedBackend {
         fn probe(&mut self, request: ProbeRequest<'_>) -> Result<bool, ProbeError> {
-            self.probe_outcome(request)
-                .map(|outcome| outcome == ProbeOutcome::Accepted)
+            self.probe_outcome(request).map(ProbeOutcome::is_accepted)
         }
 
         fn probe_outcome(&mut self, request: ProbeRequest<'_>) -> Result<ProbeOutcome, ProbeError> {
@@ -1968,6 +2009,54 @@ mod raw_connect_fallback_tests {
         assert_eq!(result.verdict, Verdict::Clear);
         assert_eq!(result.probes, 5);
         assert_eq!(backend.targets.len(), 5);
+    }
+
+    #[test]
+    fn unmarked_success_is_inconclusive_after_confirmation_probes() {
+        let mut backend = ScriptedBackend {
+            outcomes: vec![Ok(ProbeOutcome::AcceptedUnmarked); 5].into(),
+            control_results: VecDeque::new(),
+            targets: Vec::new(),
+            controls: Vec::new(),
+            cancel_after: None,
+        };
+        let trigger = Trigger {
+            name: "fixture".into(),
+            payload: b"ABCD".to_vec(),
+            accept: super::Accept::Any,
+        };
+        let options = ClassifyOptions {
+            repeats: 3,
+            allow_loopback: true,
+            mark: Some(0x2d),
+            ..ClassifyOptions::default()
+        };
+
+        let result = super::run_with_backend("127.0.0.1:443", &trigger, options, &mut backend);
+
+        assert_eq!(result.verdict, Verdict::Inconclusive);
+        assert_eq!(result.probes, 5);
+        assert_eq!(backend.targets.len(), 5);
+    }
+
+    #[test]
+    fn probe_outcomes_retain_mark_failure_state() {
+        assert_eq!(
+            ProbeOutcome::Accepted.with_mark_status(false),
+            ProbeOutcome::AcceptedUnmarked
+        );
+        assert_eq!(
+            ProbeOutcome::Rejected.with_mark_status(false),
+            ProbeOutcome::RejectedUnmarked
+        );
+        assert_eq!(
+            ProbeOutcome::Unproven.with_mark_status(false),
+            ProbeOutcome::UnprovenUnmarked
+        );
+        assert_eq!(
+            ProbeOutcome::AcceptedUnmarked.with_mark_status(true),
+            ProbeOutcome::Accepted
+        );
     }
 
     #[test]

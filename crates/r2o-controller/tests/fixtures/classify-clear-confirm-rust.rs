@@ -16,8 +16,12 @@ struct ScriptedBackend {
 
 impl ProbeBackend for ScriptedBackend {
     fn probe(&mut self, request: ProbeRequest<'_>) -> Result<bool, ProbeError> {
-        self.probe_outcome(request)
-            .map(|outcome| outcome == ProbeOutcome::Accepted)
+        self.probe_outcome(request).map(|outcome| {
+            matches!(
+                outcome,
+                ProbeOutcome::Accepted | ProbeOutcome::AcceptedUnmarked
+            )
+        })
     }
 
     fn probe_outcome(&mut self, _: ProbeRequest<'_>) -> Result<ProbeOutcome, ProbeError> {
@@ -167,6 +171,7 @@ fn main() {
             accept: Accept::Any,
         }),
     );
+    let unmarked = run_case(vec![Ok(ProbeOutcome::AcceptedUnmarked); 5], None, None);
 
     println!("clear={}/{}", verdict_name(clear.verdict), clear.probes);
     println!("silent={}/{}", verdict_name(silent.verdict), silent.probes);
@@ -201,6 +206,11 @@ fn main() {
         verdict_name(control_error.verdict),
         control_error.probes
     );
+    println!(
+        "unmarked={}/{}",
+        verdict_name(unmarked.verdict),
+        unmarked.probes
+    );
 
     assert_eq!(clear.verdict, Verdict::Clear);
     assert_eq!(clear.probes, 5);
@@ -220,4 +230,6 @@ fn main() {
     assert_eq!(control_partial.probes, 9);
     assert_eq!(control_error.verdict, Verdict::Flaky);
     assert_eq!(control_error.probes, 9);
+    assert_eq!(unmarked.verdict, Verdict::Inconclusive);
+    assert_eq!(unmarked.probes, 5);
 }

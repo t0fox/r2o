@@ -20,6 +20,12 @@ static const uint8_t tls_alert[] = { 0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x28 };
 static const uint8_t trigger_sig[] = { 0x16, 0x03, 0x01, 0x00 };
 static volatile sig_atomic_t *active_stop;
 
+static int mark_never_ok(int fd, uint32_t mark) {
+    (void)fd;
+    (void)mark;
+    return -1;
+}
+
 struct server {
     int fd;
     uint16_t port;
@@ -114,7 +120,7 @@ static const char *verdict_name(d2k_verdict verdict) {
 
 static int run_case(const char *name, int max_connections,
                     int send_from, int send_through,
-                    int cancel_after, int alert,
+                    int cancel_after, int alert, int mark_failure,
                     d2k_verdict expected_verdict, unsigned expected_probes) {
     struct server server;
     volatile sig_atomic_t stop = 0;
@@ -145,8 +151,14 @@ static int run_case(const char *name, int max_connections,
     control_bytes[2] = 0x03;
     control_bytes[3] = 0x00;
     d2k_hello control = { control_bytes, sizeof control_bytes, NULL, 0, 0, 0 };
+    d2k_mark_fn saved_mark = d2k_mark_hook;
+    if (mark_failure) {
+        d2k_mark_hook = mark_never_ok;
+    }
     d2k_vres result = d2k_classify_cancelable(
-        "127.0.0.1", server.port, trigger, control, 0, 3, 0, 50, &stop);
+        "127.0.0.1", server.port, trigger, control,
+        mark_failure ? 0x2d : 0, 3, 0, 50, &stop);
+    d2k_mark_hook = saved_mark;
     if (!server_joined) {
         pthread_join(server.thread, NULL);
     }
@@ -157,14 +169,15 @@ static int run_case(const char *name, int max_connections,
 
 int main(void) {
     int failed = 0;
-    failed |= run_case("clear", 5, 1, 5, 0, 0, D2K_V_CLEAR, 5);
-    failed |= run_case("silent", 5, 1, 3, 0, 0, D2K_V_FLAKY, 5);
-    failed |= run_case("connect-error", 3, 1, 3, 0, 0, D2K_V_FLAKY, 5);
-    failed |= run_case("cancel", 3, 1, 3, 3, 0, D2K_V_INCONCLUSIVE, 3);
-    failed |= run_case("all-baseline-errors", 0, 1, 0, 0, 0, D2K_V_UNREACHABLE, 3);
-    failed |= run_case("partial-base-error", 2, 1, 0, 0, 0, D2K_V_FLAKY, 6);
-    failed |= run_case("unproven", 9, 1, 9, 0, 1, D2K_V_INCONCLUSIVE, 9);
-    failed |= run_case("control-partial", 9, 7, 7, 0, 1, D2K_V_FLAKY, 9);
-    failed |= run_case("control-error", 7, 7, 7, 0, 1, D2K_V_FLAKY, 9);
+    failed |= run_case("clear", 5, 1, 5, 0, 0, 0, D2K_V_CLEAR, 5);
+    failed |= run_case("silent", 5, 1, 3, 0, 0, 0, D2K_V_FLAKY, 5);
+    failed |= run_case("connect-error", 3, 1, 3, 0, 0, 0, D2K_V_FLAKY, 5);
+    failed |= run_case("cancel", 3, 1, 3, 3, 0, 0, D2K_V_INCONCLUSIVE, 3);
+    failed |= run_case("all-baseline-errors", 0, 1, 0, 0, 0, 0, D2K_V_UNREACHABLE, 3);
+    failed |= run_case("partial-base-error", 2, 1, 0, 0, 0, 0, D2K_V_FLAKY, 6);
+    failed |= run_case("unproven", 9, 1, 9, 0, 1, 0, D2K_V_INCONCLUSIVE, 9);
+    failed |= run_case("control-partial", 9, 7, 7, 0, 1, 0, D2K_V_FLAKY, 9);
+    failed |= run_case("control-error", 7, 7, 7, 0, 1, 0, D2K_V_FLAKY, 9);
+    failed |= run_case("unmarked", 5, 1, 5, 0, 0, 1, D2K_V_INCONCLUSIVE, 5);
     return failed;
 }

@@ -2,7 +2,7 @@
 
 Аудит среза `2026-10-30`. Эталон D2O: `t0fox/d2o` `304ba893dd37197128ac8799c0495b035f6a38c0` (`main`). Эталон R2O: `t0fox/r2o` `0bd1e1bee134425643a8a01f57a95afbde2c406a` (`origin/main`); локальная ветка основана на этом upstream-коммите и содержит parity fixes и audit evidence, перечисленные в текущем журнале.
 
-Это оценка **доказанного поведения**, а не доли Rust-кода или готовности релиза. Вес 3 означает критичный сетевой контракт или сохранение состояния, вес 2 — важный жизненный цикл/повтор/управление. Балл начисляется только строке со статусом «доказанно эквивалентно» и только за указанное покрытие. «Частично» и «не проверено» дают 0; наличие реализации само по себе балла не даёт. Каждая строка — отдельный проверяемый контракт, всего 78 баллов.
+Это оценка **доказанного поведения**, а не доли Rust-кода или готовности релиза. Вес 3 означает критичный сетевой контракт или сохранение состояния, вес 2 — важный жизненный цикл/повтор/управление. Балл начисляется только строке со статусом «доказанно эквивалентно» и только за указанное покрытие. «Частично» и «не проверено» дают 0; наличие реализации само по себе балла не даёт. Каждая строка — отдельный проверяемый контракт, всего 79 баллов.
 
 Статусы: **эквивалентно** — есть C/Rust differential-сценарий, подтверждающий перечисленную ветвь; **частично** — часть ветвей подтверждена, но остаётся значимый пробел/различие; **реализовано** — путь есть, прямое сопоставление с C недостаточно; **не проверено** — нет пригодного прогона для вывода.
 
@@ -17,6 +17,7 @@
 | IPv6/фрагментация в живом NFQUEUE, маркировка маршрута, fail-open и conntrack (3) | `d2kd`/`ipfrag`/NFQUEUE → `r2o-datapath` NFQUEUE и Linux socket paths | Частично | Планировочные/пакетные fixtures и исторические Linux прогоны есть; текущий Linux NFQUEUE/netns и полный IPv6/fragment runtime на этом аудите не запущены | 0 |
 | Ограничения таблиц потоков, память и вытеснение под нагрузкой (2) | UDP/TCP session caps и sweep в C → Rust session tables/resource limits | Частично | `r2o-resource-limit-differential.sh`, `r2o-udp-session-table-check.sh` покрывают отдельные лимиты; эквивалентность всех caps, пиков и 128-МБ роутера не доказана | 0 |
 | Подтверждение базового CLEAR и отмена (1) | `d2k_classify_cancelable` → `classify::run_with_backend_progress` | Эквивалентно | `test-classifier-clear-confirm-differential.sh` сравнивает 5/5 CLEAR, молчание и отказ соединения на подтверждении (FLAKY/5), отмену после базы (INCONCLUSIVE/3); Rust unit test отдельно проверяет транспортную ошибку подтверждения | 1 |
+| CLEAR только с подтверждённым SO_MARK (1) | `d2k_meas_once`/`d2k_classify_cancelable` → `response::probe_trigger`/`classify::run_with_backend_progress` | Частично | Новый C fixture подтверждает `INCONCLUSIVE/5` при отказе mark-hook; Rust differential проверяет тот же classifier outcome для 5 успешных, но немаркированных ответов. `getsockopt(SO_MARK)` production socket path пока не прогнан на Linux | 0 |
 | Базовые transport errors и переход к разрезу (1) | `d2k_classify_cancelable` → `classify::run_with_backend_progress` | Эквивалентно | Тот же differential сравнивает все ошибки базы → UNREACHABLE/3 без дополнительной серии, частичную ошибку базы с переходом к разрезу → FLAKY/6 | 1 |
 | Классификатор: poison/strategy tree, silent control, neutral ACK и тай-брейки (1) | `d2k_classify_cancelable` → `classify::run_with_backend[_progress]` | Частично | `test-classifier-clear-confirm-differential.sh` также сверяет alert/unproven, полный/частичный/ошибочный control; `r2o-ask-differential.sh`, `r2o-raw-profile-differential.sh`, shared fixtures; poison/strategy tree, silent control и neutral ACK ветви всё ещё не покрыты целиком | 0 |
 | TCP measurement и verifier outcomes/retry (2) | `d2k_meas_once`, `d2k_verify_probe*` → controller measurement и `response::{probe_response,scan_server_hello}` | Эквивалентно | `r2o-meas-differential.sh`, `r2o-tls-verify-differential.sh`, `r2o-measured-split-differential.sh`; покрыты входы/вердикты fixtures | 2 |
@@ -51,20 +52,22 @@
 | Область | Вес | Доказанные баллы |
 |---|---:|---:|
 | Control/datapath | 16 | 11 |
-| Классификатор, Discovery, scheduler и catalog | 20 | 16 |
+| Классификатор, Discovery, scheduler и catalog | 21 | 16 |
 | TLS, HTTP, ECH и QUIC | 17 | 14 |
 | Discord RTC | 8 | 3 |
 | Telegram, panel, install/update, ABI и ресурсы | 11 | 1 |
 | Firewall и router service | 6 | 4 |
-| **Всего** | **78** | **49** |
+| **Всего** | **79** | **49** |
 
-**Evidence-weighted parity: 49 / 78 = 62,82%.** Это доля требований матрицы с прямым подтверждением перечисленных C/Rust ветвей. Это не утверждение, что остальная функциональность отсутствует: частично реализованные или только исходниково сверенные ветви оставлены без баллов, пока нет подходящего дифференциала.
+**Evidence-weighted parity: 49 / 79 = 62,03%.** Это доля требований матрицы с прямым подтверждением перечисленных C/Rust ветвей. Это не утверждение, что остальная функциональность отсутствует: частично реализованные или только исходниково сверенные ветви оставлены без баллов, пока нет подходящего дифференциала.
 
 В оценку не включены C relay/enrollment серверы D2O и WARP/VPS/relay сценарии: они вне разрешённой целевой архитектуры R2O. Отдельная C11 реализация Telegram не переносится; сравниваются пользовательские функции, при этом Rust donor z2kOW остаётся целевой реализацией.
 
 ## Известные расхождения и тестовые ограничения
 
 **Classifier CLEAR confirmation mismatch исправлен.** D2O выполняет два дополнительных whole-trigger зонда после исходного 3/3 и возвращает FLAKY при молчании или транспортном отказе; Rust раньше сразу объявлял CLEAR. Rust теперь подтверждает базу, учитывает transport errors и прекращает классификацию как CLEAR после отмены. C/Rust differential сравнивает CLEAR/5, silent FLAKY/5, refused FLAKY/5 и cancellation INCONCLUSIVE/3. Полное дерево poison/strategy и control/neutral ACK остаётся частично проверенным.
+
+**Classifier SO_MARK confirmation mismatch исправлен, socket integration ещё не подтверждена.** D2O продолжает зонд после отказа установить mark, но запрещает CLEAR, если хоть один probe был unmarked. Rust теперь читает фактический `SO_MARK` normal TCP socket и передаёт unmarked-состояние классификатору, который возвращает INCONCLUSIVE после 5 успешных ответов. C/Rust differential воспроизводит отказ hook и подтверждает classifier outcome; production `getsockopt` path остаётся непроверенным без Linux build/run.
 
 **Classifier baseline transport handling исправлен.** C считает серию с ошибкой на каждом базовом подключении `UNREACHABLE` после ровно трёх зондов и продолжает к разрезу, если ошибка была только в части серии. Rust раньше удваивал базовые повторы при dial timeout и прекращал работу при любой ошибке базы. Differential сравнивает all-errors `UNREACHABLE/3` и partial-base-error → split `FLAKY/6`.
 
