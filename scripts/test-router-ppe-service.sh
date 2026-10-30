@@ -42,7 +42,21 @@ printf '#!/bin/sh\nexit 0\n' > "$INSTALL_ROOT/r2o-manager"
 cat > "$TEMP/firewall" <<EOF
 #!/bin/sh
 if [ "\$1" = ipv6-enabled ]; then . "\$R2O_CONFIG"; printf '%s\\n' "\$IPV6_ENABLED"; exit 0; fi
-printf 'firewall:%s\\n' "\$1" >> "$EVENTS"
+case "\$1" in
+    up)
+        printf 'firewall:up\\n' >> "$EVENTS"
+        "\$R2O_PPE_ADAPTER" ensure
+        ;;
+    down)
+        "\$R2O_PPE_ADAPTER" remove
+        printf 'firewall:down\\n' >> "$EVENTS"
+        ;;
+    ppe)
+        shift
+        "\$R2O_PPE_ADAPTER" "\$@"
+        ;;
+    *) printf 'firewall:%s\\n' "\$1" >> "$EVENTS" ;;
+esac
 EOF
 cat > "$TEMP/ppe" <<EOF
 #!/bin/sh
@@ -81,9 +95,9 @@ if [ -z "$FW_UP" ] || [ -z "$PPE_UP" ] || [ "$FW_UP" -ge "$PPE_UP" ]; then
     echo "PPE ensure did not follow firewall reapply" >&2
     exit 1
 fi
-if [ -z "$FW_DOWN" ] || [ -z "$PPE_DOWN" ] || [ "$FW_DOWN" -ge "$PPE_DOWN" ]; then
+if [ -z "$FW_DOWN" ] || [ -z "$PPE_DOWN" ] || [ "$PPE_DOWN" -ge "$FW_DOWN" ]; then
     cat "$EVENTS" >&2
-    echo "PPE cleanup did not follow firewall teardown" >&2
+    echo "PPE cleanup did not precede firewall teardown" >&2
     exit 1
 fi
 grep -qx 'ppe:status 87.228.47.201' "$EVENTS" || {

@@ -80,18 +80,28 @@ LM_PID=$RUN/r2o-log-maintenance.pid
 PPE_ADAPTER=${R2O_PPE_ADAPTER:-$SCRIPT_DIR/r2o-ppe-deoffload.sh}
 R2O_PPE_DEOFFLOAD=${R2O_PPE_DEOFFLOAD:-1}
 CATALOG=$STATE/catalog.json
-export R2O_DIR="$ROOT" R2O_CONFIG="$CONF" R2O_RUN_DIR="$RUN"
+export R2O_DIR="$ROOT" R2O_CONFIG="$CONF" R2O_RUN_DIR="$RUN" R2O_PPE_ADAPTER="$PPE_ADAPTER"
 
 say() { echo "r2o: $*"; }
 die() { say "$*" >&2; exit 1; }
 
 ppe_call() {
-    R2O_PPE_CONFIG="$CONF" \
-    R2O_PPE_DEOFFLOAD="$R2O_PPE_DEOFFLOAD" \
-    PORTS="${PORTS:-0:65535}" \
-    VOICE_PORTS="${VOICE_PORTS:-50000:50099,1400,3478:3481,5349,19294:19344}" \
-    HTTP_KEEPALIVE_PORTS="${HTTP_KEEPALIVE_PORTS:-80}" \
-        "$PPE_ADAPTER" "$@"
+    if [ "${1:-}" = status ]; then
+        R2O_PPE_CONFIG="$CONF" \
+        R2O_PPE_DEOFFLOAD="$R2O_PPE_DEOFFLOAD" \
+        PORTS="${PORTS:-0:65535}" \
+        VOICE_PORTS="${VOICE_PORTS:-50000:50099,1400,3478:3481,5349,19294:19344}" \
+        HTTP_KEEPALIVE_PORTS="${HTTP_KEEPALIVE_PORTS:-80}" \
+            "$PPE_ADAPTER" "$@"
+    else
+        R2O_PPE_ADAPTER="$PPE_ADAPTER" \
+        R2O_PPE_CONFIG="$CONF" \
+        R2O_PPE_DEOFFLOAD="$R2O_PPE_DEOFFLOAD" \
+        PORTS="${PORTS:-0:65535}" \
+        VOICE_PORTS="${VOICE_PORTS:-50000:50099,1400,3478:3481,5349,19294:19344}" \
+        HTTP_KEEPALIVE_PORTS="${HTTP_KEEPALIVE_PORTS:-80}" \
+            "$FIREWALL" ppe "$@"
+    fi
 }
 
 ppe_ensure() {
@@ -301,7 +311,6 @@ wait_queue() {
 engine_stop() {
     firewall_watchdog_stop
     "$FIREWALL" down || say "не удалось полностью снять правила firewall"
-    ppe_remove
     stop_component r2o-controller "$CT4_PID"
     stop_component r2o-controller "$CT6_PID"
     stop_component r2o-datapath "$DP4_PID"
@@ -342,7 +351,6 @@ engine_start() {
         wait_queue "$QUEUE6" || { engine_stop; die "IPv6 NFQUEUE $QUEUE6 не привязалась"; }
     fi
     R2O_IPV6_ENABLED_RUNTIME= "$FIREWALL" up || { engine_stop; die "не поставить правила NFQUEUE"; }
-    ppe_ensure
     if ! spawn_component r2o-controller "$CT4_PID" "$LOG/r2o-controller4.log" \
         --serve "$SOCK4" "$CATALOG" --discover --mark "$mark" --live "$STATE/live4.json"; then
         engine_stop
@@ -725,9 +733,7 @@ telegram_check() {
 
 reapply() {
     component_running r2o-datapath "$DP4_PID" || die "r2o-datapath IPv4 не работает"
-    ppe_remove
     R2O_IPV6_ENABLED_RUNTIME= "$FIREWALL" up || die "не поставить полный набор правил"
-    ppe_ensure
 }
 
 heal_reapply() {
@@ -763,11 +769,11 @@ telegram_reapply() {
 firewall_heal() {
     if component_running r2o-datapath "$DP4_PID"; then
         if "$FIREWALL" status >/dev/null 2>&1; then
-            ppe_ensure
             "$FIREWALL" dns-ensure >/dev/null 2>&1 || true
         else
             heal_reapply || return 1
         fi
+        ppe_ensure
     fi
 }
 

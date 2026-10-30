@@ -22,6 +22,8 @@ HTTP_KEEPALIVE_PORTS=${HTTP_KEEPALIVE_PORTS:-80}
 DNS_PORTS=${DNS_PORTS:-53,853}
 RUN_DIR=${R2O_RUN_DIR:-$ROOT/run}
 FW_LOCK=${R2O_FIREWALL_LOCK:-$RUN_DIR/firewall-operation.lock}
+PPE_ADAPTER=${R2O_PPE_ADAPTER:-$(dirname -- "$0")/r2o-ppe-deoffload.sh}
+PPE_DEOFFLOAD=${R2O_PPE_DEOFFLOAD:-1}
 FW_V4ONLY=$RUN_DIR/fw-ipv4-only
 PROC_DIR=${R2O_PROC_DIR:-/proc}
 SYS_MODULE_DIR=${R2O_SYS_MODULE_DIR:-/sys/module}
@@ -317,6 +319,40 @@ fw_lock_release() {
     rmdir "$FW_LOCK"
 }
 
+ppe_call_unlocked() {
+    [ -x "$PPE_ADAPTER" ] || return 0
+    R2O_PPE_CONFIG="$CONF" \
+    R2O_PPE_DEOFFLOAD="$PPE_DEOFFLOAD" \
+    PORTS="$PORTS" \
+    VOICE_PORTS="$VOICE_PORTS" \
+    HTTP_KEEPALIVE_PORTS="$HTTP_KEEPALIVE_PORTS" \
+        "$PPE_ADAPTER" "$@"
+}
+
+ppe_remove_unlocked() {
+    ppe_call_unlocked remove || echo "r2o: не удалось полностью снять правила PPE" >&2
+    return 0
+}
+
+ppe_ensure_unlocked() {
+    if ppe_call_unlocked ensure; then ppe_rc=0; else ppe_rc=$?; fi
+    case "$ppe_rc" in
+        0) ;;
+        2) echo "r2o: разгрузка PPE не ставится: в прошивке нет цели PPE" >&2 ;;
+        3) echo "r2o: разгрузка PPE выключена владельцем (R2O_PPE_DEOFFLOAD=0)" >&2 ;;
+        *) echo "r2o: разгрузка PPE не установлена полностью; NFQUEUE продолжает работать" >&2 ;;
+    esac
+    return 0
+}
+
+firewall_ppe() {
+    case "${1:-}" in ensure|remove) ;; *) return 2 ;; esac
+    fw_lock_acquire || return 1
+    if ppe_call_unlocked "$@"; then ppe_rc=0; else ppe_rc=$?; fi
+    fw_lock_release || return 1
+    return "$ppe_rc"
+}
+
 dns_upstreams() {
     command -v ndmc >/dev/null 2>&1 || return 0
     ndmc -c "show dns-proxy" 2>/dev/null | tr -d '\033\r' | awk '
@@ -567,6 +603,7 @@ iptables_up() {
 
 firewall_up() {
     fw_lock_acquire || return 1
+    ppe_remove_unlocked
     if [ "$BACKEND" = nft ]; then
         rm -f "$FW_V4ONLY" || true
         xt_family_down iptables
@@ -586,6 +623,7 @@ firewall_up() {
             fi
         fi
     elif iptables_up; then
+        ppe_ensure_unlocked
         fw_rc=0
         dns_excl_sync_unlocked fresh || echo "r2o: исключение DNS-upstream не встало полностью" >&2
     else
@@ -597,6 +635,7 @@ firewall_up() {
 
 firewall_down() {
     fw_lock_acquire || return 1
+    ppe_remove_unlocked
     if [ "$BACKEND" = nft ]; then
         xt_family_down iptables
         xt_legacy_d2k_family_down iptables
@@ -639,6 +678,10 @@ case "${1:-}" in
     rst-down)
         firewall_rst_down
         ;;
+    ppe)
+        shift
+        firewall_ppe "$@"
+        ;;
     status)
         if [ "$BACKEND" = nft ]; then nft list table inet r2o; else
             xt iptables -t mangle -C POSTROUTING -j R2O_OUT &&
@@ -649,5 +692,5 @@ case "${1:-}" in
     dns-ensure)
         dns_excl_sync
         ;;
-    *) echo "использование: $0 {backend|ipv6-enabled|up|down|rst-down|status|dns-ensure}" >&2; exit 2 ;;
+    *) echo "использование: $0 {backend|ipv6-enabled|up|down|ppe ensure|ppe remove|rst-down|status|dns-ensure}" >&2; exit 2 ;;
 esac

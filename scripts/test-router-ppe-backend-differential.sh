@@ -63,8 +63,17 @@ esac
 PPE
 cat >"$TEMP/firewall" <<'FIREWALL'
 #!/bin/sh
-[ "$1" = up ] || exit 2
-printf 'FIREWALL:up\n' >>"$EVENTS"
+case "$1" in
+    up)
+        "$R2O_PPE_ADAPTER" remove
+        printf 'FIREWALL:up\n' >>"$EVENTS"
+        ;;
+    ppe)
+        shift
+        "$R2O_PPE_ADAPTER" "$@"
+        ;;
+    *) exit 2 ;;
+esac
 FIREWALL
 cat >"$TEMP/run-r2o.sh" <<'R2O'
 #!/bin/sh
@@ -75,6 +84,7 @@ PPE_ADAPTER=$3
 FIREWALL=$4
 CONF=$5
 R2O_FW=nft
+R2O_PPE_ADAPTER=$PPE_ADAPTER
 R2O_PPE_DEOFFLOAD=1
 PORTS=0:65535
 VOICE_PORTS=50000:50099,1400,3478:3481,5349,19294:19344
@@ -84,7 +94,7 @@ DP4_PID=datapath.pid
 component_running() { return 0; }
 die() { echo "$*" >&2; exit 1; }
 say() { :; }
-export EVENTS PPE_STATE
+export EVENTS PPE_STATE R2O_PPE_ADAPTER
 . "$7"
 reapply
 if [ -f "$PPE_STATE/d2k-ppe" ] || [ -f "$PPE_STATE/r2o-ppe" ]; then
