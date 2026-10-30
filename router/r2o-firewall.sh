@@ -530,11 +530,15 @@ firewall_up() {
     fw_lock_acquire || return 1
     if [ "$BACKEND" = nft ]; then
         rm -f "$FW_V4ONLY" || true
+        if nft list table inet r2o_rst >/dev/null 2>&1; then fw_rst_preexisting=1; else fw_rst_preexisting=0; fi
         if nft_up; then
             fw_rc=0
         else
             fw_rc=$?
             nft_main_down || echo "r2o: не удалось снять старую таблицу nft после отказа установки" >&2
+            if [ "$fw_rst_preexisting" = 0 ]; then
+                nft_rst_down || echo "r2o: не удалось снять новую RST таблицу nft после отказа установки" >&2
+            fi
         fi
     elif iptables_up; then
         fw_rc=0
