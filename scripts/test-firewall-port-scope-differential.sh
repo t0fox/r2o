@@ -16,9 +16,14 @@ mkdir -p "$TEMP/bin"
 
 sed -n '/^fw_family_up() (/,/^)/p' "$D2O_ROOT/files/S99d2k" |
     tr -d '\r' > "$TEMP/d2o-function.sh"
+sed -n '/^number() {/,/^}/p' "$ROOT/router/r2o-firewall.sh" |
+    tr -d '\r' > "$TEMP/r2o-number-function.sh"
+sed -n '/^late_rst_from() {/,/^}/p' "$ROOT/router/r2o-firewall.sh" |
+    tr -d '\r' > "$TEMP/r2o-late-function.sh"
 sed -n '/^xt_family_up() {/,/^}/p' "$ROOT/router/r2o-firewall.sh" |
     tr -d '\r' > "$TEMP/r2o-function.sh"
-[ -s "$TEMP/d2o-function.sh" ] && [ -s "$TEMP/r2o-function.sh" ] || {
+[ -s "$TEMP/d2o-function.sh" ] && [ -s "$TEMP/r2o-number-function.sh" ] && \
+    [ -s "$TEMP/r2o-late-function.sh" ] && [ -s "$TEMP/r2o-function.sh" ] || {
     echo "could not extract the current D2O and R2O firewall family functions" >&2
     exit 1
 }
@@ -69,6 +74,8 @@ xt() { "$@"; }
 xt_broadcast_return() { :; }
 ipv6_mangle_wait_probe() { return 1; }
 . "$1"
+. "$2"
+. "$3"
 xt_family_up iptables "$QUEUE4"
 HARNESS
 
@@ -86,7 +93,7 @@ assert_rule() {
 FW_TRACE="$TEMP/d2o.trace" PATH="$TEMP/bin:$PATH" \
     sh "$TEMP/d2o-harness.sh" "$TEMP/d2o-function.sh"
 FW_TRACE="$TEMP/r2o.trace" PATH="$TEMP/bin:$PATH" \
-    sh "$TEMP/r2o-harness.sh" "$TEMP/r2o-function.sh"
+    sh "$TEMP/r2o-harness.sh" "$TEMP/r2o-number-function.sh" "$TEMP/r2o-late-function.sh" "$TEMP/r2o-function.sh"
 
 for implementation in d2o r2o; do
     trace="$TEMP/$implementation.trace"

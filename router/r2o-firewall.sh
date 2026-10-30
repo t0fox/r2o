@@ -36,6 +36,16 @@ number() {
     [ "$1" -le "$2" ]
 }
 
+late_rst_from() {
+    case "$CONNBYTES" in
+        0:*) ;;
+        *) return 1 ;;
+    esac
+    late_rst_upper=${CONNBYTES#0:}
+    number "$late_rst_upper" 65535 || return 1
+    echo $((late_rst_upper + 1))
+}
+
 number "$QUEUE4" 65535 || { echo "неверный QUEUE_NUM" >&2; exit 2; }
 number "$QUEUE6" 65535 || { echo "неверный QUEUE_NUM6" >&2; exit 2; }
 [ "$QUEUE4" != "$QUEUE6" ] || { echo "номера очередей IPv4 и IPv6 должны различаться" >&2; exit 2; }
@@ -125,6 +135,8 @@ fi
 
 nft_up() {
     rules=${R2O_RUN_DIR:-$ROOT/run}/firewall.nft.$$
+    late_from=$(late_rst_from) || return 1
+    nft_late_window=$late_from-18446744073709551615
     nft_ports=$(printf '%s' "$PORTS" | sed -e 's/:/-/g' -e 's/,/, /g')
     nft_voice=$(printf '%s' "$VOICE_PORTS" | sed -e 's/:/-/g' -e 's/,/, /g')
     nft_keepalive=$(printf '%s' "$HTTP_KEEPALIVE_PORTS" | sed -e 's/:/-/g' -e 's/,/, /g')
@@ -166,12 +178,12 @@ table inet r2o {
         meta nfproto ipv4 meta l4proto udp th dport { $nft_ports } ct direction original ct original packets $nft_window queue num $QUEUE4 bypass
         meta nfproto ipv6 meta l4proto tcp th dport { $nft_ports } ct direction original ct original packets $nft_window queue num $QUEUE6 bypass
         meta nfproto ipv6 meta l4proto udp th dport { $nft_ports } ct direction original ct original packets $nft_window queue num $QUEUE6 bypass
-        meta nfproto ipv4 meta l4proto tcp ct direction original ct original packets 9-18446744073709551615 tcp flags & rst == rst queue num $QUEUE4 bypass
-        meta nfproto ipv4 meta l4proto tcp ct direction original ct original packets 9-18446744073709551615 tcp flags & fin == fin queue num $QUEUE4 bypass
-        meta nfproto ipv4 meta l4proto tcp th dport { $nft_keepalive } ct direction original ct original packets 9-18446744073709551615 queue num $QUEUE4 bypass
-        meta nfproto ipv6 meta l4proto tcp ct direction original ct original packets 9-18446744073709551615 tcp flags & rst == rst queue num $QUEUE6 bypass
-        meta nfproto ipv6 meta l4proto tcp ct direction original ct original packets 9-18446744073709551615 tcp flags & fin == fin queue num $QUEUE6 bypass
-        meta nfproto ipv6 meta l4proto tcp th dport { $nft_keepalive } ct direction original ct original packets 9-18446744073709551615 queue num $QUEUE6 bypass
+        meta nfproto ipv4 meta l4proto tcp ct direction original ct original packets $nft_late_window tcp flags & rst == rst queue num $QUEUE4 bypass
+        meta nfproto ipv4 meta l4proto tcp ct direction original ct original packets $nft_late_window tcp flags & fin == fin queue num $QUEUE4 bypass
+        meta nfproto ipv4 meta l4proto tcp th dport { $nft_keepalive } ct direction original ct original packets $nft_late_window queue num $QUEUE4 bypass
+        meta nfproto ipv6 meta l4proto tcp ct direction original ct original packets $nft_late_window tcp flags & rst == rst queue num $QUEUE6 bypass
+        meta nfproto ipv6 meta l4proto tcp ct direction original ct original packets $nft_late_window tcp flags & fin == fin queue num $QUEUE6 bypass
+        meta nfproto ipv6 meta l4proto tcp th dport { $nft_keepalive } ct direction original ct original packets $nft_late_window queue num $QUEUE6 bypass
     }
     chain in_rules {
         ip saddr 127.0.0.0/8 return
@@ -188,12 +200,12 @@ table inet r2o {
         meta nfproto ipv4 meta l4proto udp th sport { $nft_ports } ct direction reply ct reply packets $nft_window queue num $QUEUE4 bypass
         meta nfproto ipv6 meta l4proto tcp th sport { $nft_ports } ct direction reply ct reply packets $nft_window queue num $QUEUE6 bypass
         meta nfproto ipv6 meta l4proto udp th sport { $nft_ports } ct direction reply ct reply packets $nft_window queue num $QUEUE6 bypass
-        meta nfproto ipv4 meta l4proto tcp ct direction reply ct reply packets 9-18446744073709551615 tcp flags & rst == rst queue num $QUEUE4 bypass
-        meta nfproto ipv4 meta l4proto tcp ct direction reply ct reply packets 9-18446744073709551615 tcp flags & fin == fin queue num $QUEUE4 bypass
-        meta nfproto ipv4 meta l4proto tcp th sport { $nft_keepalive } ct direction reply ct reply packets 9-18446744073709551615 queue num $QUEUE4 bypass
-        meta nfproto ipv6 meta l4proto tcp ct direction reply ct reply packets 9-18446744073709551615 tcp flags & rst == rst queue num $QUEUE6 bypass
-        meta nfproto ipv6 meta l4proto tcp ct direction reply ct reply packets 9-18446744073709551615 tcp flags & fin == fin queue num $QUEUE6 bypass
-        meta nfproto ipv6 meta l4proto tcp th sport { $nft_keepalive } ct direction reply ct reply packets 9-18446744073709551615 queue num $QUEUE6 bypass
+        meta nfproto ipv4 meta l4proto tcp ct direction reply ct reply packets $nft_late_window tcp flags & rst == rst queue num $QUEUE4 bypass
+        meta nfproto ipv4 meta l4proto tcp ct direction reply ct reply packets $nft_late_window tcp flags & fin == fin queue num $QUEUE4 bypass
+        meta nfproto ipv4 meta l4proto tcp th sport { $nft_keepalive } ct direction reply ct reply packets $nft_late_window queue num $QUEUE4 bypass
+        meta nfproto ipv6 meta l4proto tcp ct direction reply ct reply packets $nft_late_window tcp flags & rst == rst queue num $QUEUE6 bypass
+        meta nfproto ipv6 meta l4proto tcp ct direction reply ct reply packets $nft_late_window tcp flags & fin == fin queue num $QUEUE6 bypass
+        meta nfproto ipv6 meta l4proto tcp th sport { $nft_keepalive } ct direction reply ct reply packets $nft_late_window queue num $QUEUE6 bypass
         icmp type time-exceeded icmp code 0 queue num $QUEUE4 bypass
         icmpv6 type time-exceeded icmpv6 code 0 queue num $QUEUE6 bypass
     }
@@ -500,6 +512,7 @@ xt_legacy_d2k_family_down() {
 xt_family_up() {
     tool=$1
     queue=$2
+    late_from=$(late_rst_from) || return 1
     loopback=127.0.0.0/8
     [ "$tool" != ip6tables ] || loopback=::1/128
     if ! xt "$tool" -t mangle -N R2O_OUT; then
@@ -549,12 +562,12 @@ xt_family_up() {
         for flag in RST FIN; do
             xt "$tool" -t mangle -A "$chain" -p tcp -m conntrack --ctdir "$ct_direction" \
                 -m multiport "$ports" "$PORTS" \
-                -m connbytes --connbytes 9: --connbytes-dir "$count_direction" --connbytes-mode packets \
+                -m connbytes --connbytes "$late_from": --connbytes-dir "$count_direction" --connbytes-mode packets \
                 --tcp-flags "$flag" "$flag" -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
         done
         xt "$tool" -t mangle -A "$chain" -p tcp -m multiport "$ports" "$HTTP_KEEPALIVE_PORTS" \
             -m conntrack --ctdir "$ct_direction" \
-            -m connbytes --connbytes 9: --connbytes-dir "$count_direction" --connbytes-mode packets \
+            -m connbytes --connbytes "$late_from": --connbytes-dir "$count_direction" --connbytes-mode packets \
             -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
     done
     if [ "$tool" = iptables ]; then
