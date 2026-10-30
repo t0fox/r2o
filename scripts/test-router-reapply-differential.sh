@@ -18,7 +18,8 @@ sed -n '/^    heal)/,/^    dns-tick)/{ /^    dns-tick)/d; p; }' "$D2O_ROOT/files
     sed 's/\r$//' | sed 's/^    heal) //' | sed 's/^[[:space:]]*//' | sed 's/ ;;$//' > "$TEMP/d2o-heal-body.sh"
 sed -n '/^    reapply)/,/^    clear-found)/{ /^    clear-found)/d; p; }' "$D2O_ROOT/files/S99d2k" |
     sed 's/\r$//' > "$TEMP/d2o-reapply-case.sh"
-sed -n '/^reapply() {/,/^}/p' "$ROOT/router/S99r2o" | sed 's/\r$//' > "$TEMP/r2o-reapply.sh"
+sed -n '/^reapply() {/,/^}/p; /^heal_reapply() {/,/^}/p' "$ROOT/router/S99r2o" |
+    sed 's/\r$//' > "$TEMP/r2o-reapply.sh"
 sed -n '/^heal() {/,/^}/p' "$ROOT/router/S99r2o" | sed 's/\r$//' > "$TEMP/r2o-heal.sh"
 sed -n '/^    reapply)/,/^    ppe-ensure)/{ /^    ppe-ensure)/d; p; }' "$ROOT/router/S99r2o" |
     sed 's/\r$//' > "$TEMP/r2o-reapply-case.sh"
@@ -105,6 +106,7 @@ TRACE=$1
 SCENARIO=$2
 FIREWALL=$3
 DP4_PID=running
+RUNTIME=$TRACE.runtime
 FIREWALL_UP_RC=$4
 DATAPATH_RUNNING=$5
 export TRACE FIREWALL_UP_RC DATAPATH_RUNNING

@@ -670,6 +670,25 @@ reapply() {
     ppe_ensure
 }
 
+heal_reapply() {
+    heal_lock=$RUNTIME/firewall-heal.lock
+    heal_last=$RUNTIME/firewall-heal.last
+    heal_now=$(date +%s 2>/dev/null || echo 0)
+    heal_last_value=$(cat "$heal_last" 2>/dev/null || echo 0)
+    case "$heal_last_value" in ''|*[!0-9]*) heal_last_value=0 ;; esac
+    [ $((heal_now - heal_last_value)) -ge 15 ] || return 0
+    mkdir -p "$RUNTIME" || return 1
+    if ! mkdir "$heal_lock" 2>/dev/null; then
+        heal_lock_age=$((heal_now - $(date -r "$heal_lock" +%s 2>/dev/null || echo "$heal_now")))
+        [ "$heal_lock_age" -le 60 ] || rmdir "$heal_lock" 2>/dev/null
+        return 0
+    fi
+    printf '%s\n' "$heal_now" > "$heal_last" 2>/dev/null || true
+    if (reapply); then heal_rc=0; else heal_rc=$?; fi
+    rmdir "$heal_lock" 2>/dev/null || true
+    return "$heal_rc"
+}
+
 telegram_reapply() {
     [ "$TG_ENABLED" = 1 ] || return 0
     if telegram_ready; then
@@ -684,7 +703,7 @@ telegram_reapply() {
 heal() {
     if component_running r2o-datapath "$DP4_PID"; then
         if "$FIREWALL" status >/dev/null 2>&1; then ppe_ensure
-        else reapply || return 1; fi
+        else heal_reapply || return 1; fi
     fi
     telegram_reapply
 }
