@@ -748,8 +748,12 @@ telegram_reapply() {
 
 firewall_heal() {
     if component_running r2o-datapath "$DP4_PID"; then
-        if "$FIREWALL" status >/dev/null 2>&1; then ppe_ensure
-        else heal_reapply || return 1; fi
+        if "$FIREWALL" status >/dev/null 2>&1; then
+            ppe_ensure
+            "$FIREWALL" dns-ensure >/dev/null 2>&1 || true
+        else
+            heal_reapply || return 1
+        fi
     fi
 }
 

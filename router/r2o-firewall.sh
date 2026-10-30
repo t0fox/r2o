@@ -18,6 +18,8 @@ VOICE_PORTS=${VOICE_PORTS:-50000:50099,1400,3478:3481,5349,19294:19344}
 VOICE_CONNBYTES=${VOICE_CONNBYTES:-0:4}
 HTTP_KEEPALIVE_PORTS=${HTTP_KEEPALIVE_PORTS:-80}
 DNS_PORTS=${DNS_PORTS:-53,853}
+RUN_DIR=${R2O_RUN_DIR:-$ROOT/run}
+FW_LOCK=${R2O_FIREWALL_LOCK:-$RUN_DIR/firewall-operation.lock}
 
 number() {
     case "$1" in
@@ -212,6 +214,115 @@ xt() {
     "$tool" "$@"
 }
 
+fw_lock_acquire() {
+    mkdir -p "$(dirname "$FW_LOCK")" || return 1
+    fw_lock_attempt=0
+    while ! mkdir "$FW_LOCK" 2>/dev/null; do
+        fw_lock_owner=$(cat "$FW_LOCK/pid" 2>/dev/null)
+        case "$fw_lock_owner" in
+            ''|*[!0-9]*) ;;
+            *)
+                if ! kill -0 "$fw_lock_owner" 2>/dev/null; then
+                    rm -f "$FW_LOCK/pid" 2>/dev/null
+                    rmdir "$FW_LOCK" 2>/dev/null
+                    continue
+                fi ;;
+        esac
+        [ "$fw_lock_attempt" -lt 300 ] || return 1
+        fw_lock_attempt=$((fw_lock_attempt + 1))
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    printf '%s\n' "$$" > "$FW_LOCK/pid" || { rmdir "$FW_LOCK"; return 1; }
+}
+
+fw_lock_release() {
+    [ "$(cat "$FW_LOCK/pid" 2>/dev/null)" = "$$" ] || return 1
+    rm -f "$FW_LOCK/pid"
+    rmdir "$FW_LOCK"
+}
+
+dns_upstreams() {
+    command -v ndmc >/dev/null 2>&1 || return 0
+    ndmc -c "show dns-proxy" 2>/dev/null | tr -d '\033\r' | awk '
+        function emit(s, def,    host, port, t) {
+            host = s; port = def; t = s
+            if (s ~ /^\[/) {
+                sub(/^\[/, "", host); sub(/\].*/, "", host)
+                if (s ~ /\]:[0-9]+$/) { port = s; sub(/.*\]:/, "", port) }
+            } else if (gsub(/:/, ":", t) == 1) {
+                sub(/:.*/, "", host); port = s; sub(/.*:/, "", port)
+            }
+            if (host != "" && port ~ /^[0-9]+$/) print host, port
+        }
+        $1 == "dns_server" && $2 == "=" {
+            a = $3
+            if (a !~ /^127\./ && a !~ /^\[?::1\]?(:|$)/) emit(a, 53)
+            c = ""
+            for (i = 4; i < NF; i++) if ($i == "#") { c = $(i + 1); break }
+            if (c == "") next
+            sub(/@.*/, "", c)
+            if (c ~ /^https:\/\//) { sub(/^https:\/\//, "", c); sub(/\/.*/, "", c); emit(c, 443) }
+            else { sub(/^tls:\/\//, "", c); emit(c, 853) }
+        }'
+}
+
+dns_excl_rule() {
+    dns_tool=iptables
+    case "$2" in *:*) dns_tool=ip6tables; [ "$IPV6_ENABLED" = 1 ] || return 0 ;; esac
+    for dns_proto in tcp udp; do
+        for dns_direction in out in; do
+            if [ "$dns_direction" = out ]; then
+                set -- "$1" "$2" "$3" R2O_OUT -d --dport
+            else
+                set -- "$1" "$2" "$3" R2O_IN -s --sport
+            fi
+            if [ "$1" = -D ]; then
+                while xt "$dns_tool" -t mangle -C "$4" -p "$dns_proto" "$5" "$2" "$6" "$3" -j RETURN; do
+                    xt "$dns_tool" -t mangle -D "$4" -p "$dns_proto" "$5" "$2" "$6" "$3" -j RETURN || break
+                done
+            else
+                xt "$dns_tool" -t mangle -C "$4" -p "$dns_proto" "$5" "$2" "$6" "$3" -j RETURN ||
+                    xt "$dns_tool" -t mangle -I "$4" -p "$dns_proto" "$5" "$2" "$6" "$3" -j RETURN
+            fi
+        done
+    done
+}
+
+dns_excl_sync_unlocked() {
+    [ "$BACKEND" = iptables ] || return 0
+    mkdir -p "$RUN_DIR" || return 1
+    dns_state=$RUN_DIR/dns-excl
+    dns_new=$dns_state.new
+    dns_upstreams | while read -r dns_host dns_port; do
+        case "$dns_host" in
+            *:*|*[!0-9.]*) ;;
+            *) printf '%s %s %s\n' "$dns_host" "$dns_host" "$dns_port"; continue ;;
+        esac
+        case "$dns_host" in *:*) printf '%s %s %s\n' "$dns_host" "$dns_host" "$dns_port"; continue ;; esac
+        dns_ips=$(nslookup "$dns_host" 127.0.0.1 2>/dev/null |
+            awk '/^Name:/ { n = 1; next } n && /^Address/ { print $3 }')
+        if [ -n "$dns_ips" ]; then
+            for dns_ip in $dns_ips; do printf '%s %s %s\n' "$dns_host" "$dns_ip" "$dns_port"; done
+        elif [ -f "$dns_state" ]; then
+            awk -v h="$dns_host" '$1 == h' "$dns_state"
+        fi
+    done | sort -u > "$dns_new" || { rm -f "$dns_new"; return 1; }
+    if [ "${1:-}" != fresh ] && [ -f "$dns_state" ]; then
+        while read -r dns_host dns_ip dns_port; do
+            awk -v a="$dns_ip" -v p="$dns_port" '$2 == a && $3 == p { f = 1 } END { exit !f }' "$dns_new" ||
+                dns_excl_rule -D "$dns_ip" "$dns_port"
+        done < "$dns_state"
+    fi
+    while read -r dns_host dns_ip dns_port; do dns_excl_rule -A "$dns_ip" "$dns_port"; done < "$dns_new"
+    mv -f "$dns_new" "$dns_state"
+}
+
+dns_excl_sync() {
+    fw_lock_acquire || return 1
+    dns_excl_sync_unlocked || true
+    fw_lock_release
+}
+
 xt_broadcast_return() {
     tool=$1
     if xt "$tool" -t mangle -A R2O_OUT -m addrtype --dst-type BROADCAST -j RETURN; then
@@ -324,18 +435,41 @@ iptables_up() {
     fi
 }
 
+firewall_up() {
+    fw_lock_acquire || return 1
+    if [ "$BACKEND" = nft ]; then
+        if nft_up; then fw_rc=0; else fw_rc=$?; fi
+    elif iptables_up; then
+        fw_rc=0
+        dns_excl_sync_unlocked fresh || echo "r2o: исключение DNS-upstream не встало полностью" >&2
+    else
+        fw_rc=$?
+    fi
+    fw_lock_release || return 1
+    return "$fw_rc"
+}
+
+firewall_down() {
+    fw_lock_acquire || return 1
+    if [ "$BACKEND" = nft ]; then
+        if nft_down; then fw_rc=0; else fw_rc=$?; fi
+    else
+        xt_family_down iptables
+        if [ "$IPV6_ENABLED" = 0 ] || xt_family_down ip6tables; then fw_rc=0; else fw_rc=$?; fi
+    fi
+    fw_lock_release || return 1
+    return "$fw_rc"
+}
+
 case "${1:-}" in
     backend)
         printf '%s\n' "$BACKEND"
         ;;
     up)
-        if [ "$BACKEND" = nft ]; then nft_up; else iptables_up; fi
+        firewall_up
         ;;
     down)
-        if [ "$BACKEND" = nft ]; then nft_down; else
-            xt_family_down iptables
-            [ "$IPV6_ENABLED" = 0 ] || xt_family_down ip6tables
-        fi
+        firewall_down
         ;;
     status)
         if [ "$BACKEND" = nft ]; then nft list table inet r2o; else
@@ -343,5 +477,8 @@ case "${1:-}" in
                 { [ "$IPV6_ENABLED" = 0 ] || xt ip6tables -t mangle -C POSTROUTING -j R2O_OUT; }
         fi
         ;;
-    *) echo "использование: $0 {backend|up|down|status}" >&2; exit 2 ;;
+    dns-ensure)
+        dns_excl_sync
+        ;;
+    *) echo "использование: $0 {backend|up|down|status|dns-ensure}" >&2; exit 2 ;;
 esac

@@ -21,8 +21,13 @@ cat > "$TEMP/d2o-service" <<'SERVICE'
 #!/bin/sh
 case "$1" in
     status)
+        printf 'status\n' >> "$TRACE"
         printf '\320\264\320\260\321\202\320\260\320\277\320\260\321\202: \321\200\320\260\320\261\320\276\321\202\320\260\320\265\321\202\n'
+        if [ "${RULES_INSTALLED:-0}" = 1 ]; then
+            printf '\320\277\321\200\320\260\320\262\320\270\320\273\320\260: \321\201\321\202\320\276\321\217\321\202\n'
+        fi
         ;;
+    ppe-ensure|dns-ensure) printf '%s\n' "$1" >> "$TRACE" ;;
     reapply)
         printf 'up\n' >> "$TRACE"
         sleep 1
@@ -48,7 +53,11 @@ RUNNER
 cat > "$TEMP/r2o-firewall" <<'FIREWALL'
 #!/bin/sh
 case "$1" in
-    status) exit 1 ;;
+    status)
+        printf 'status\n' >> "$TRACE"
+        [ "${RULES_INSTALLED:-0}" = 1 ]
+        ;;
+    dns-ensure) printf 'dns-ensure\n' >> "$TRACE" ;;
     up)
         printf 'up\n' >> "$TRACE"
         sleep 1
@@ -64,7 +73,7 @@ FIREWALL=$R2O_FIREWALL
 DP4_PID=running
 RUNTIME=$R2O_RUNTIME
 component_running() { [ "$1" = r2o-datapath ]; }
-ppe_ensure() { :; }
+ppe_ensure() { printf 'ppe-ensure\n' >> "$TRACE"; }
 telegram_reapply() { :; }
 say() { :; }
 die() { exit 1; }
@@ -112,7 +121,35 @@ r2o_up=$(grep -c '^up$' "$TEMP/r2o.trace" || true)
     exit 1
 }
 
+# When the datapath and rules already exist, both watchdog paths should keep
+# the firewall intact, ensure PPE, and refresh dynamic DNS exclusions.
+TRACE=$TEMP/d2o-existing.trace
+RULES_INSTALLED=1
+INIT_SCRIPT=$D2O_INIT
+export TRACE RULES_INSTALLED INIT_SCRIPT
+if sh "$TEMP/d2o-fw-heal.sh"; then :; else
+    echo 'D2O healthy-firewall heal failed' >&2
+    exit 1
+fi
+
+TRACE=$TEMP/r2o-existing.trace
+R2O_RUNTIME=$TEMP/r2o-existing-runtime
+export TRACE R2O_RUNTIME
+mkdir -p "$R2O_RUNTIME"
+if sh "$TEMP/r2o-init"; then :; else
+    echo 'R2O healthy-firewall heal failed' >&2
+    exit 1
+fi
+cmp "$TEMP/d2o-existing.trace" "$TEMP/r2o-existing.trace" || {
+    printf 'healthy firewall watchdog actions differ\nD2O:\n' >&2
+    cat "$TEMP/d2o-existing.trace" >&2
+    printf 'R2O:\n' >&2
+    cat "$TEMP/r2o-existing.trace" >&2
+    exit 1
+}
+
 TRACE=$TEMP/d2o-fail.trace
+RULES_INSTALLED=0
 D2O_LOCK=$TEMP/d2o-fail.lock
 D2O_LAST=$TEMP/d2o-fail.last
 UP_RC=1
