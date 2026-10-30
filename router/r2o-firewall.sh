@@ -536,10 +536,10 @@ xt_family_up() {
                 -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
             xt "$tool" -t mangle -A R2O_IN -p udp -m multiport --sports "$voice_ports" -j RETURN || return 1
         fi
-        xt "$tool" -t mangle -A R2O_OUT -p "$proto" -m conntrack --ctdir ORIGINAL \
+        xt "$tool" -t mangle -A R2O_OUT -p "$proto" -m conntrack --ctdir ORIGINAL -m multiport --dports "$PORTS" \
             -m connbytes --connbytes "$CONNBYTES" --connbytes-dir original --connbytes-mode packets \
             -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
-        xt "$tool" -t mangle -A R2O_IN -p "$proto" -m conntrack --ctdir REPLY \
+        xt "$tool" -t mangle -A R2O_IN -p "$proto" -m conntrack --ctdir REPLY -m multiport --sports "$PORTS" \
             -m connbytes --connbytes "$CONNBYTES" --connbytes-dir reply --connbytes-mode packets \
             -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
     done
@@ -548,6 +548,7 @@ xt_family_up() {
         if [ "$direction" = OUT ]; then ct_direction=ORIGINAL; count_direction=original; ports=--dports; else ct_direction=REPLY; count_direction=reply; ports=--sports; fi
         for flag in RST FIN; do
             xt "$tool" -t mangle -A "$chain" -p tcp -m conntrack --ctdir "$ct_direction" \
+                -m multiport "$ports" "$PORTS" \
                 -m connbytes --connbytes 9: --connbytes-dir "$count_direction" --connbytes-mode packets \
                 --tcp-flags "$flag" "$flag" -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
         done
