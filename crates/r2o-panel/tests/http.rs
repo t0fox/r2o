@@ -416,6 +416,60 @@ fn installed_manager_exposes_update_state_and_drives_update_actions() {
 
 #[cfg(unix)]
 #[test]
+#[ignore = "run through scripts/test-panel-control-response-differential.sh"]
+fn d2o_control_action_response_trace() {
+    let service = std::env::var_os("R2O_PANEL_CONTROL_SERVICE")
+        .expect("test helper provides a fake service")
+        .into();
+    let mut config = Config::default();
+    config.service_path = service;
+    config.control_enabled = true;
+
+    let success = request(
+        &config,
+        "POST /api/control/stop HTTP/1.1\r\nHost: localhost:8090\r\nOrigin: http://localhost:8090\r\nContent-Length: 0\r\n\r\n",
+    );
+    let busy = request(
+        &config,
+        "POST /api/control/stop HTTP/1.1\r\nHost: localhost:8090\r\nOrigin: http://localhost:8090\r\nContent-Length: 0\r\n\r\n",
+    );
+    config.service_path.clear();
+    let start_error = request(
+        &config,
+        "POST /api/control/stop HTTP/1.1\r\nHost: localhost:8090\r\nOrigin: http://localhost:8090\r\nContent-Length: 0\r\n\r\n",
+    );
+    let trace = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n",
+        success.0, success.2, busy.0, busy.2, start_error.0, start_error.2
+    );
+    println!("{trace}");
+    let parse_trace = |trace: &str| {
+        let lines = trace.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 6, "control response trace has six lines");
+        lines
+            .chunks_exact(2)
+            .map(|pair| {
+                (
+                    pair[0].parse::<u16>().unwrap(),
+                    serde_json::from_str::<Value>(pair[1]).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    if let Some(path) = std::env::var_os("R2O_PANEL_CONTROL_TRACE_OUTPUT") {
+        fs::write(path, &trace).unwrap();
+    }
+    let c_path = std::env::var_os("R2O_PANEL_CONTROL_C_TRACE")
+        .expect("test helper provides the D2O C trace");
+    let c_trace = fs::read_to_string(c_path).unwrap();
+    assert_eq!(parse_trace(&c_trace), parse_trace(&trace));
+    assert_eq!(success.0, 202);
+    assert_eq!(busy.0, 409);
+    assert_eq!(start_error.0, 500);
+}
+
+#[cfg(unix)]
+#[test]
 fn router_actions_use_service_when_manager_is_installed() {
     use std::os::unix::fs::PermissionsExt;
 

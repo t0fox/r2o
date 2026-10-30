@@ -1097,20 +1097,57 @@ fn api_update(config: &Config) -> Response {
 
 fn api_control(config: &Config, request: &Request<'_>) -> Response {
     let actions = [
-        ("/api/control/start", "engine-start"),
-        ("/api/control/stop", "engine-stop"),
-        ("/api/control/restart", "engine-restart"),
-        ("/api/control/reapply", "reapply"),
-        ("/api/control/clear-found", "clear-found"),
-        ("/api/control/telegram-enable", "telegram-enable"),
-        ("/api/control/telegram-disable", "telegram-disable"),
-        ("/api/control/telegram-check", "telegram-check"),
-        ("/api/control/update-check", "update-check"),
-        ("/api/control/update-install", "update-install"),
-        ("/api/control/update-auto-on", "update-auto-on"),
-        ("/api/control/update-auto-off", "update-auto-off"),
+        ("/api/control/start", "engine-start", "Запуск движка"),
+        ("/api/control/stop", "engine-stop", "Остановка движка"),
+        (
+            "/api/control/restart",
+            "engine-restart",
+            "Перезапуск движка",
+        ),
+        ("/api/control/reapply", "reapply", "Восстановление правил"),
+        (
+            "/api/control/clear-found",
+            "clear-found",
+            "Очистка подобранного",
+        ),
+        (
+            "/api/control/telegram-enable",
+            "telegram-enable",
+            "Включение Telegram-туннеля",
+        ),
+        (
+            "/api/control/telegram-disable",
+            "telegram-disable",
+            "Отключение Telegram-туннеля",
+        ),
+        (
+            "/api/control/telegram-check",
+            "telegram-check",
+            "Проверка Telegram-туннеля",
+        ),
+        (
+            "/api/control/update-check",
+            "update-check",
+            "Проверка обновлений",
+        ),
+        (
+            "/api/control/update-install",
+            "update-install",
+            "Установка обновления",
+        ),
+        (
+            "/api/control/update-auto-on",
+            "update-auto-on",
+            "Включение автообновления",
+        ),
+        (
+            "/api/control/update-auto-off",
+            "update-auto-off",
+            "Выключение автообновления",
+        ),
     ];
-    let Some((_, command)) = actions.iter().find(|(path, _)| *path == request.path) else {
+    let Some((_, command, label)) = actions.iter().find(|(path, _, _)| *path == request.path)
+    else {
         return json_response(404, &json!({"ok":false,"message":"Неизвестная операция"}));
     };
     if !config.control_enabled || !same_origin(request) {
@@ -1158,15 +1195,15 @@ fn api_control(config: &Config, request: &Request<'_>) -> Response {
     match result {
         Ok(()) => json_response(
             202,
-            &json!({"ok":true,"message":"Команда службы выполняется"}),
+            &json!({"ok":true,"action":label,"message":"Команда запущена"}),
         ),
         Err(ActionError::Busy) => json_response(
             409,
-            &json!({"ok":false,"message":"Дождитесь завершения текущей команды"}),
+            &json!({"ok":false,"message":"Предыдущая команда ещё выполняется"}),
         ),
         Err(ActionError::Start) => json_response(
             500,
-            &json!({"ok":false,"message":"Не удалось запустить команду службы"}),
+            &json!({"ok":false,"message":"Команда службы завершилась ошибкой"}),
         ),
     }
 }
