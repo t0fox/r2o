@@ -2334,8 +2334,6 @@ pub fn parse_config(
         Err(e) => return Err(e),
     };
     config.config_exists = true;
-    let text = std::str::from_utf8(&raw)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let known = [
         "SCHEMA",
         "MODE",
@@ -2374,6 +2372,15 @@ pub fn parse_config(
         "TG_CF_WORKER_DOMAIN",
         "R2O_PPE_DEOFFLOAD",
     ];
+    let sanitized;
+    let bytes = if std::str::from_utf8(&raw).is_ok() {
+        raw.as_slice()
+    } else {
+        sanitized = sanitize_config_bytes(&raw, &known)?;
+        sanitized.as_slice()
+    };
+    let text = std::str::from_utf8(bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     for line in text.lines() {
         if line.len() >= 2047 {
             return Err(std::io::Error::new(
@@ -2570,6 +2577,95 @@ pub fn parse_config(
         ));
     }
     Ok(())
+}
+
+fn sanitize_config_bytes(raw: &[u8], known: &[&str]) -> std::io::Result<Vec<u8>> {
+    let mut sanitized = raw.to_vec();
+    let mut line_start = 0;
+    while line_start < raw.len() {
+        let line_end = raw[line_start..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(raw.len(), |offset| line_start + offset);
+        let line = &raw[line_start..line_end];
+        if std::str::from_utf8(line).is_err() {
+            let trimmed = trim_config_ascii(line);
+            if trimmed.is_empty() || trimmed[0] == b'#' {
+                sanitized[line_start..line_end].fill(b' ');
+            } else if let Some(equals) = line.iter().position(|byte| *byte == b'=') {
+                let key = trim_config_ascii(&line[..equals]);
+                let Ok(key) = std::str::from_utf8(key) else {
+                    for (offset, byte) in line[..equals].iter().enumerate() {
+                        if !byte.is_ascii() {
+                            sanitized[line_start + offset] = b'?';
+                        }
+                    }
+                    sanitized[line_start + equals + 1..line_end].fill(b' ');
+                    line_start = line_end.saturating_add(1);
+                    continue;
+                };
+                if !known.contains(&key) {
+                    sanitized[line_start + equals + 1..line_end].fill(b' ');
+                } else if let Some(comment) = config_comment_offset(&line[equals + 1..]) {
+                    let value_prefix = &line[equals + 1..equals + 1 + comment];
+                    if std::str::from_utf8(value_prefix).is_ok() {
+                        sanitized[line_start + equals + 1 + comment..line_end].fill(b' ');
+                    } else {
+                        return Err(invalid_config_encoding());
+                    }
+                } else {
+                    return Err(invalid_config_encoding());
+                }
+            } else {
+                sanitized[line_start..line_end].fill(b' ');
+            }
+        }
+        line_start = line_end.saturating_add(1);
+    }
+    std::str::from_utf8(&sanitized).map_err(|_| invalid_config_encoding())?;
+    Ok(sanitized)
+}
+
+fn invalid_config_encoding() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "invalid UTF-8 config value",
+    )
+}
+
+fn trim_config_ascii(mut bytes: &[u8]) -> &[u8] {
+    while matches!(bytes.first(), Some(b' ' | b'\t' | b'\r' | b'\n')) {
+        bytes = &bytes[1..];
+    }
+    while matches!(bytes.last(), Some(b' ' | b'\t' | b'\r' | b'\n')) {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
+}
+
+fn config_comment_offset(raw_value: &[u8]) -> Option<usize> {
+    let value = trim_config_ascii(raw_value);
+    let leading = raw_value
+        .len()
+        .saturating_sub(raw_value.trim_ascii_start().len());
+    if matches!(value.first(), Some(b'\'' | b'"')) {
+        let quote = value[0];
+        let close = value[1..].iter().position(|byte| *byte == quote)? + 1;
+        let after_quote = close + 1;
+        if after_quote == value.len() || !matches!(value[after_quote], b' ' | b'\t') {
+            return None;
+        }
+        let mut tail = after_quote;
+        while matches!(value.get(tail), Some(b' ' | b'\t')) {
+            tail += 1;
+        }
+        (value.get(tail) == Some(&b'#')).then_some(leading + tail)
+    } else {
+        value.iter().enumerate().find_map(|(index, byte)| {
+            (*byte == b'#' && (index == 0 || matches!(value[index - 1], b' ' | b'\t')))
+                .then_some(leading + index)
+        })
+    }
 }
 
 fn r2o_invalid_config(key: &str) -> std::io::Error {

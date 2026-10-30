@@ -1207,3 +1207,36 @@ fn config_parser_honors_overrides_and_keeps_unknown_keys_visible() {
     fs::write(&path, format!("FUTURE_KEY={}\n", "x".repeat(2040))).unwrap();
     assert!(parse_config(&path, &mut config, &[]).is_err());
 }
+
+#[test]
+#[ignore = "run through scripts/test-panel-config-comment-bytes-differential.sh"]
+fn d2o_config_parser_matches_ignored_non_utf8_bytes() {
+    let config_path = PathBuf::from(
+        std::env::var_os("R2O_PANEL_CONFIG_PATH").expect("test helper provides config"),
+    );
+    let mut config = Config::default();
+    config.config_path = config_path.clone();
+    let result = parse_config(&config_path, &mut config, &[]);
+    let trace = format!(
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+        if result.is_ok() { 0 } else { -1 },
+        config.mode,
+        config.panel_listen,
+        config.state_dir.display(),
+        config.queue_num,
+        u8::from(config.config_exists),
+        config.unknown_keys.len()
+    );
+    println!("{trace}");
+    if let Some(path) = std::env::var_os("R2O_PANEL_CONFIG_TRACE_OUTPUT") {
+        fs::write(path, &trace).unwrap();
+    }
+    let c_trace = fs::read_to_string(
+        std::env::var_os("R2O_PANEL_CONFIG_C_TRACE").expect("test helper provides D2O trace"),
+    )
+    .unwrap();
+    assert_eq!(trace, c_trace);
+    assert_eq!(result.unwrap(), ());
+    assert_eq!(config.mode, "apply");
+    assert_eq!(config.panel_listen, "192.168.1.1:8090");
+}
