@@ -81,6 +81,9 @@ table inet r2o {
         ip daddr 127.0.0.0/8 return
         ip6 saddr ::1 return
         ip6 daddr ::1 return
+        meta nfproto ipv4 fib daddr type broadcast return
+        ip daddr 224.0.0.0/4 return
+        ip6 daddr ff00::/8 return
         meta mark $MARK return
         meta mark $TG_OUTBOUND_MARK return
         meta l4proto { tcp, udp } th dport { $nft_dns } return
@@ -207,6 +210,18 @@ xt() {
     "$tool" "$@"
 }
 
+xt_broadcast_return() {
+    tool=$1
+    if xt "$tool" -t mangle -A R2O_OUT -m addrtype --dst-type BROADCAST -j RETURN; then
+        return 0
+    fi
+    echo "в прошивке нет xt_addrtype: широковещательные адреса исключаю явным списком" >&2
+    xt "$tool" -t mangle -A R2O_OUT -d 255.255.255.255 -j RETURN || return 1
+    for address in $(ip -4 addr show 2>/dev/null | awk '$1 == "inet" { for (i = 1; i < NF; i++) if ($i == "brd") print $(i + 1) }' | sort -u); do
+        xt "$tool" -t mangle -A R2O_OUT -d "$address" -j RETURN || return 1
+    done
+}
+
 xt_family_down() {
     tool=$1
     for hook in POSTROUTING FORWARD INPUT; do
@@ -235,6 +250,12 @@ xt_family_up() {
         xt "$tool" -t mangle -A "$chain" -d "$loopback" -j RETURN
         xt "$tool" -t mangle -A "$chain" -m conntrack --ctstate DNAT -j RETURN
     done
+    if [ "$tool" = iptables ]; then
+        xt_broadcast_return "$tool" || return 1
+        xt "$tool" -t mangle -A R2O_OUT -d 224.0.0.0/4 -j RETURN || return 1
+    else
+        xt "$tool" -t mangle -A R2O_OUT -d ff00::/8 -j RETURN || return 1
+    fi
     xt "$tool" -t mangle -A R2O_OUT -m mark --mark "$MARK" -j RETURN
     xt "$tool" -t mangle -A R2O_OUT -m mark --mark "$TG_OUTBOUND_MARK" -j RETURN
     for proto in tcp udp; do
