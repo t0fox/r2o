@@ -14,7 +14,7 @@ Preserve the donor's optional Keenetic PPE behavior so R2O can see the opening p
 
 ## Non-goals
 
-- Change proprietary Keenetic PPE settings globally or disable hardware acceleration outside the D2O-compatible fw4 `flow_offloading` lifecycle.
+- Change proprietary Keenetic PPE settings globally or alter router-wide offload settings outside D2O's temporary `nf_conntrack_fastnat` and fw4 `flow_offloading` lifecycles.
 - Promise visibility after the configured connskip window or for flows already bound before a rule is installed.
 - Claim real Keenetic acceptance; that still requires the target hardware.
 
@@ -30,7 +30,7 @@ The adapter uses the donor's paired TCP/UDP rules for PREROUTING and FORWARD plu
 
 The service invokes the adapter after firewall installation, during reapply/heal, on stop, and in status. The installer adds a small NDM hook only when the standard hook directory already exists; uninstall removes it only when its content still matches the R2O-owned hook. The same checked setting is editable in Lava and maps from the donor on first install. Releases include the adapter and hook. Mock tests exercise exact commands, idempotence, owner isolation, disabled mode, absence of PPE, and NDM event filtering; no command is run on a physical router.
 
-The service also mirrors D2O's separate OpenWrt `flow_offloading` lifecycle: when fw4 reports it enabled, R2O saves `1`, sets it to `0` while its nft/NFQUEUE rules are active, then restores `1` after firewall teardown. The PPE adapter remains per-flow and does not change the firmware's proprietary PPE setting. The service mock differential covers persistence across restart; fw4/kernel behavior is not claimed without a Linux router fixture.
+The service also mirrors D2O's separate offload lifecycles: it saves and temporarily disables writable `nf_conntrack_fastnat`, then restores it after firewall teardown; for OpenWrt, it saves `1` and sets fw4 `flow_offloading` to `0` only when that option is enabled, restoring `1` on stop. The PPE adapter remains per-flow and does not change the firmware's proprietary PPE setting. Service mock differentials cover persistence across restart; kernel behavior is not claimed without a router fixture.
 
 ## Review focus
 

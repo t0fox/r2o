@@ -311,6 +311,7 @@ wait_queue() {
 engine_stop() {
     firewall_watchdog_stop
     "$FIREWALL" down || say "не удалось полностью снять правила firewall"
+    fastnat_restore
     flowoffload_restore
     stop_component r2o-controller "$CT4_PID"
     stop_component r2o-controller "$CT6_PID"
@@ -318,6 +319,24 @@ engine_stop() {
     stop_component r2o-datapath "$DP6_PID"
     rm -f "$SOCK4" "$SOCK6"
     say "datapath остановлен"
+}
+
+FASTNAT=/proc/sys/net/netfilter/nf_conntrack_fastnat
+FASTNAT_SAVED=$RUN/fastnat.saved
+
+fastnat_off() {
+    [ -w "$FASTNAT" ] || return 0
+    cat "$FASTNAT" > "$FASTNAT_SAVED" 2>/dev/null
+    echo 0 > "$FASTNAT" 2>/dev/null
+    [ "$(cat "$FASTNAT" 2>/dev/null)" = 0 ] || \
+        say "не удалось выключить fastnat — транзитные потоки могут обходить NFQUEUE"
+}
+
+fastnat_restore() {
+    [ -w "$FASTNAT" ] || return 0
+    [ -f "$FASTNAT_SAVED" ] || return 0
+    cat "$FASTNAT_SAVED" > "$FASTNAT" 2>/dev/null
+    rm -f "$FASTNAT_SAVED"
 }
 
 flowoffload_saved() { echo "$RUN/flow-offloading.saved"; }
@@ -379,6 +398,7 @@ engine_start() {
         wait_queue "$QUEUE6" || { engine_stop; die "IPv6 NFQUEUE $QUEUE6 не привязалась"; }
     fi
     R2O_IPV6_ENABLED_RUNTIME= "$FIREWALL" up || { engine_stop; die "не поставить правила NFQUEUE"; }
+    fastnat_off
     flowoffload_off
     if ! spawn_component r2o-controller "$CT4_PID" "$LOG/r2o-controller4.log" \
         --serve "$SOCK4" "$CATALOG" --discover --mark "$mark" --live "$STATE/live4.json"; then
