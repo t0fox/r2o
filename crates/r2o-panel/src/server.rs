@@ -1205,6 +1205,10 @@ fn api_control(config: &Config, request: &Request<'_>) -> Response {
             500,
             &json!({"ok":false,"message":"Команда службы завершилась ошибкой"}),
         ),
+        Err(ActionError::ConfigWrite) => json_response(
+            500,
+            &json!({"ok":false,"message":"Команда службы завершилась ошибкой"}),
+        ),
     }
 }
 
@@ -1221,6 +1225,7 @@ fn same_origin(request: &Request<'_>) -> bool {
 enum ActionError {
     Busy,
     Start,
+    ConfigWrite,
 }
 
 fn is_executable_file(path: &Path) -> bool {
@@ -1303,18 +1308,37 @@ fn start_action_command(
 
 fn start_action_command_with_completion<F>(
     config: &Config,
-    mut child_command: Command,
+    child_command: Command,
     timeout: Duration,
     on_complete: F,
 ) -> Result<(), ActionError>
 where
     F: FnOnce() + Send + 'static,
 {
+    start_action_command_with_setup(config, child_command, timeout, || Ok(()), on_complete)
+}
+
+fn start_action_command_with_setup<F, S>(
+    config: &Config,
+    mut child_command: Command,
+    timeout: Duration,
+    setup: S,
+    on_complete: F,
+) -> Result<(), ActionError>
+where
+    F: FnOnce() + Send + 'static,
+    S: FnOnce() -> Result<(), ActionError>,
+{
     let mut state = config.action.lock().map_err(|_| ActionError::Start)?;
     if *state == "running" {
         return Err(ActionError::Busy);
     }
+    let previous_state = state.clone();
     *state = "running".into();
+    if let Err(error) = setup() {
+        *state = previous_state;
+        return Err(error);
+    }
     let shared = Arc::clone(&config.action);
     std::thread::Builder::new()
         .name("r2o-panel-action".into())
@@ -1428,24 +1452,38 @@ fn api_workers(config: &Config, request: &Request<'_>) -> Response {
             );
         }
     };
-    if write_worker_config(&config.config_path, &domains).is_err() {
-        return json_response(
-            500,
-            &json!({"ok":false,"message":"Не удалось сохранить настройки Workers"}),
-        );
-    }
-    match start_service_action(config, "telegram-restart") {
+    let config_path = config.config_path.clone();
+    let service_missing = config.service_path.as_os_str().is_empty();
+    let mut command = Command::new(config.service_path.clone());
+    command.arg("telegram-restart");
+    match start_action_command_with_setup(
+        config,
+        command,
+        CONTROL_TIMEOUT,
+        || {
+            write_worker_config(&config_path, &domains).map_err(|_| ActionError::ConfigWrite)?;
+            if service_missing {
+                return Err(ActionError::Start);
+            }
+            Ok(())
+        },
+        || {},
+    ) {
         Ok(()) => json_response(
             202,
             &json!({"ok":true,"message":"Настройки сохранены, C11 перезапускается"}),
         ),
         Err(ActionError::Busy) => json_response(
             409,
-            &json!({"ok":false,"message":"Настройки сохранены, дождитесь завершения текущей команды"}),
+            &json!({"ok":false,"message":"Дождитесь завершения текущей команды"}),
         ),
         Err(ActionError::Start) => json_response(
             500,
             &json!({"ok":false,"message":"Настройки сохранены, но C11 не удалось перезапустить"}),
+        ),
+        Err(ActionError::ConfigWrite) => json_response(
+            500,
+            &json!({"ok":false,"message":"Не удалось сохранить настройки Workers"}),
         ),
     }
 }

@@ -470,6 +470,69 @@ fn d2o_control_action_response_trace() {
 
 #[cfg(unix)]
 #[test]
+#[ignore = "run through scripts/test-panel-workers-busy-differential.sh"]
+fn d2o_worker_busy_response_does_not_persist_new_domains() {
+    let service = std::env::var_os("R2O_PANEL_WORKER_SERVICE")
+        .expect("test helper provides a fake service")
+        .into();
+    let config_path = std::env::var_os("R2O_PANEL_WORKER_CONFIG")
+        .expect("test helper provides a config file")
+        .into();
+    let mut config = Config::default();
+    config.service_path = service;
+    config.config_path = config_path;
+    config.control_enabled = true;
+
+    let stop = request(
+        &config,
+        "POST /api/control/stop HTTP/1.1\r\nHost: localhost:8090\r\nOrigin: http://localhost:8090\r\nContent-Length: 0\r\n\r\n",
+    );
+    let body = r#"{"domains":["new.example"]}"#;
+    let worker_request = format!(
+        "POST /api/telegram/workers HTTP/1.1\r\nHost: localhost:8090\r\nOrigin: http://localhost:8090\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let workers = request(&config, &worker_request);
+    let current_config = fs::read_to_string(&config.config_path).unwrap();
+    let normalized_config = current_config.replace('\n', "|");
+    let trace = format!(
+        "{}\n{}\n{}\n{}\nconfig:{}\n",
+        stop.0, stop.2, workers.0, workers.2, normalized_config
+    );
+    println!("{trace}");
+    if let Some(path) = std::env::var_os("R2O_PANEL_WORKER_TRACE_OUTPUT") {
+        fs::write(path, &trace).unwrap();
+    }
+    let c_trace = fs::read_to_string(
+        std::env::var_os("R2O_PANEL_WORKER_C_TRACE").expect("test helper provides the D2O C trace"),
+    )
+    .unwrap();
+    let parse_trace = |trace: &str| {
+        let lines = trace.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 5, "worker busy trace has five lines");
+        let responses = lines[..4]
+            .chunks_exact(2)
+            .map(|pair| {
+                (
+                    pair[0].parse::<u16>().unwrap(),
+                    serde_json::from_str::<Value>(pair[1]).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        (responses, lines[4].to_owned())
+    };
+    assert_eq!(parse_trace(&c_trace), parse_trace(&trace));
+    assert_eq!(stop.0, 202);
+    assert_eq!(workers.0, 409);
+    assert_eq!(
+        current_config,
+        "MODE=apply\nTG_CF_WORKER_DOMAIN=old.example\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn router_actions_use_service_when_manager_is_installed() {
     use std::os::unix::fs::PermissionsExt;
 
