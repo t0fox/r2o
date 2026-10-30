@@ -12,11 +12,11 @@
 
 ## Global Constraints
 
-- Compare current `t0fox/d2o/main` and `t0fox/r2o/main` before scoring; starting baseline is d2o `304ba893dd37197128ac8799c0495b035f6a38c0` and r2o `1d2fbdc05bef418def9dc3283d5837ac17e516c5`.
+- Compare current `t0fox/d2o/main` and `t0fox/r2o/main` before scoring; starting baseline is d2o `304ba893dd37197128ac8799c0495b035f6a38c0` and r2o `0bd1e1bee134425643a8a01f57a95afbde2c406a`.
 - Keep Telegram on its existing Rust z2kOW-derived implementation; do not replace or rewrite it.
 - Do not use a physical router, VPS, relay, or WARP; do not put C back into runtime.
 - Preserve the R2O architecture and OpenWrt 128 MB RAM target.
-- Keep user-owned `.audit/`, `captures/`, and the dirty D2O checkout untouched.
+- Keep user-owned `.audit/`, `captures/`, and the D2O oracle checkout untouched.
 - Do not rerun already-passed upstream differential scenarios unless an inspected code path exposes a concrete reason.
 
 ## Review Focus
@@ -36,11 +36,11 @@
 - [ ] Record current remote main SHAs and clean-source paths; preserve user-owned dirty D2O files.
 - [ ] Enumerate production C functions, Rust counterparts/callers, and tests; tag behavior branches, state transitions, timers, errors, and side effects.
 - [ ] Read existing 51-scenario upstream differential manifest as prior evidence without rerunning it wholesale.
-- [ ] Define the matrix denominator from unique observable C behavior branches; assign weight 3 to packet/plan safety and persistence branches, 2 to lifecycle/retry/measurement branches, and 1 to diagnostics/UI branches. No credit for code presence alone; partial/unverified rows score zero until proven.
+- [x] Define the matrix denominator from unique observable behavior contracts. The audit matrix uses weight 3 for packet/plan safety and persistence, weight 2 for lifecycle/retry/measurement and operator-facing panel/service contracts. No credit for code presence alone; partial/unverified rows score zero until proven. See `docs/functional-parity-matrix.md` for the current weighted result.
 
-### Task 2: Parallel independent source audits
+### Task 2: Sequential independent source audits
 
-Each Luna agent is read-only on the shared `main` checkout; no branch/worktree creation or file edits. Return C function → Rust function → branch coverage → exact existing test evidence, plus minimal reproductions for confirmed candidate mismatches.
+Follow the user's sequential workflow on the shared `main` checkout. Finish one subsystem's source trace, evidence and any required fix/commit before moving to the next. Return C function → Rust function → branch coverage → exact existing test evidence, plus bounded reproductions for candidate mismatches.
 
 - [ ] Datapath/NFQUEUE/conntrack/journal/raw packet execution and OpenWrt memory/ABI.
 - [ ] TCP/TLS/HTTP/ECH/classifier/verify and their C↔Rust call paths.
