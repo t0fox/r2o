@@ -19,26 +19,39 @@ cat >"$TEMP/bin/iptables" <<'IPTABLES'
 tool=${0##*/}
 printf '%s %s\n' "$tool" "$*" >>"$IPTABLES_TRACE"
 if [ "${1:-}" = -w ]; then shift; fi
-chain=${5:-}
-hook=${4:-}
-state=$IPTABLES_STATE/$tool.D2K_OUT
-if [ "${1:-}" = -t ] && [ "${2:-}" = mangle ]; then
-    case "${3:-}" in
-        -D)
-            if [ "$hook" = POSTROUTING ] && [ "${5:-}" = -j ] && [ "${6:-}" = D2K_OUT ] && [ -f "$state.hook" ]; then
-                rm -f "$state.hook"
-                exit 0
-            fi
-            ;;
-        -n)
-            if [ "${4:-}" = -L ] && [ "${5:-}" = D2K_OUT ] && [ -f "$state.chain" ]; then exit 0; fi
-            ;;
-        -F) exit 0 ;;
-        -X)
-            if [ "${4:-}" = D2K_OUT ]; then rm -f "$state.chain"; exit 0; fi
-            ;;
-    esac
-fi
+if [ "${1:-}" != -t ]; then exit 1; fi
+table=$2
+state=$IPTABLES_STATE/$tool
+case "$3" in
+    -D)
+        key=
+        if [ "$table" = nat ] && [ "$4" = PREROUTING ] && [ "$5" = -j ] && [ "$6" = D2K_HTTP ]; then
+            key=nat.D2K_HTTP.hook
+        elif [ "$table" = nat ] && [ "$4" = POSTROUTING ] && [ "$5" = -p ] && [ "$6" = udp ] \
+            && [ "$7" = -m ] && [ "$8" = mark ] && [ "$9" = --mark ] \
+            && { [ "${10}" = 0x2d ] || [ "${10}" = 45 ]; } && [ "${11}" = -j ] && [ "${12}" = MASQUERADE ]; then
+            key=nat.MASQUERADE
+        elif [ "$table" = mangle ] && [ "$4" = OUTPUT ] && [ "$5" = -m ] && [ "$6" = mark ] \
+            && [ "$7" = --mark ] && [ "$8" = 0x30 ] && [ "$9" = -j ] \
+            && [ "${10}" = CONNMARK ] && [ "${11}" = --save-mark ]; then
+            key=mangle.HTTPUP_MARK
+        elif [ "$table" = mangle ] && [ "$4" = OUTPUT ] && [ "$5" = -j ] && [ "$6" = D2K_HTTP_MARK ]; then
+            key=mangle.D2K_HTTP_MARK.OUTPUT
+        elif [ "$table" = mangle ] && [ "$5" = -j ] && { [ "$6" = D2K_OUT ] || [ "$6" = D2K_IN ]; }; then
+            key=mangle.$4.$6.hook
+        fi
+        if [ -n "$key" ] && [ -f "$state/$key" ]; then rm -f "$state/$key"; exit 0; fi
+        ;;
+    -n)
+        if [ "$4" = -L ] && [ -f "$state/$table.$5.chain" ]; then exit 0; fi
+        ;;
+    -F)
+        if [ -f "$state/$table.$4.chain" ]; then exit 0; fi
+        ;;
+    -X)
+        if [ -f "$state/$table.$4.chain" ]; then rm -f "$state/$table.$4.chain"; exit 0; fi
+        ;;
+esac
 exit 1
 IPTABLES
 cp "$TEMP/bin/iptables" "$TEMP/bin/ip6tables"
@@ -72,16 +85,8 @@ if [ "$6" = down ]; then
 else
     if fw_up; then echo UP:success; else echo UP:failed; fi
 fi
-if [ -f "$IPTABLES_STATE/iptables.D2K_OUT.hook" ] || [ -f "$IPTABLES_STATE/iptables.D2K_OUT.chain" ]; then
-    echo LEGACY_IPV4:present
-else
-    echo LEGACY_IPV4:absent
-fi
-if [ -f "$IPTABLES_STATE/ip6tables.D2K_OUT.hook" ] || [ -f "$IPTABLES_STATE/ip6tables.D2K_OUT.chain" ]; then
-    echo LEGACY_IPV6:present
-else
-    echo LEGACY_IPV6:absent
-fi
+echo "LEGACY_IPV4_RULES:$(find "$IPTABLES_STATE/iptables" -type f | wc -l | tr -d ' ')"
+echo "LEGACY_IPV6_RULES:$(find "$IPTABLES_STATE/ip6tables" -type f | wc -l | tr -d ' ')"
 D2O
 chmod 0755 "$TEMP/run-d2o.sh"
 
@@ -89,11 +94,22 @@ run_side() {
     side=$1
     action=$2
     base=$TEMP/$side-$action
-    mkdir -p "$base/bin" "$base/run" "$base/proc/net" "$base/sys" "$base/modules" "$base/iptables-state"
-    : >"$base/iptables-state/iptables.D2K_OUT.hook"
-    : >"$base/iptables-state/iptables.D2K_OUT.chain"
-    : >"$base/iptables-state/ip6tables.D2K_OUT.hook"
-    : >"$base/iptables-state/ip6tables.D2K_OUT.chain"
+    mkdir -p "$base/bin" "$base/run" "$base/proc/net" "$base/sys" "$base/modules" \
+        "$base/iptables-state/iptables" "$base/iptables-state/ip6tables"
+    for tool in iptables ip6tables; do
+        family=$base/iptables-state/$tool
+        : >"$family/nat.D2K_HTTP.hook"
+        : >"$family/nat.D2K_HTTP.chain"
+        : >"$family/mangle.HTTPUP_MARK"
+        : >"$family/mangle.D2K_HTTP_MARK.OUTPUT"
+        : >"$family/mangle.D2K_HTTP_MARK.chain"
+        : >"$family/mangle.D2K_OUT.chain"
+        : >"$family/mangle.D2K_IN.chain"
+        for hook in POSTROUTING FORWARD OUTPUT INPUT; do
+            for chain in D2K_OUT D2K_IN; do : >"$family/mangle.$hook.$chain.hook"; done
+        done
+    done
+    : >"$base/iptables-state/iptables/nat.MASQUERADE"
     if [ "$side" = d2o ]; then
         printf 'FW_BACKEND=nft\n' >"$base/config"
         if IPTABLES_STATE="$base/iptables-state" IPTABLES_TRACE="$base/iptables.trace" \
@@ -110,12 +126,8 @@ run_side() {
         else
             if [ "$action" = down ]; then echo DOWN:failed >"$base/out"; else echo UP:failed >"$base/out"; fi
         fi
-        if [ -f "$base/iptables-state/iptables.D2K_OUT.hook" ] || [ -f "$base/iptables-state/iptables.D2K_OUT.chain" ]; then
-            echo LEGACY_IPV4:present >>"$base/out"
-        else echo LEGACY_IPV4:absent >>"$base/out"; fi
-        if [ -f "$base/iptables-state/ip6tables.D2K_OUT.hook" ] || [ -f "$base/iptables-state/ip6tables.D2K_OUT.chain" ]; then
-            echo LEGACY_IPV6:present >>"$base/out"
-        else echo LEGACY_IPV6:absent >>"$base/out"; fi
+        echo "LEGACY_IPV4_RULES:$(find "$base/iptables-state/iptables" -type f | wc -l | tr -d ' ')" >>"$base/out"
+        echo "LEGACY_IPV6_RULES:$(find "$base/iptables-state/ip6tables" -type f | wc -l | tr -d ' ')" >>"$base/out"
     fi
 }
 
