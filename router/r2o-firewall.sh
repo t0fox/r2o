@@ -210,7 +210,7 @@ table inet r2o {
 }
 EOF
     nft_rst_up || { rm -f "$rules"; return 1; }
-    nft -f "$rules"
+    nft -f "$rules" || { rm -f "$rules"; return 1; }
     rm -f "$rules"
 }
 
@@ -260,7 +260,7 @@ nft_rst_down() {
     nft delete table inet r2o_rst
 }
 
-nft_down() {
+nft_main_down() {
     if nft list table inet r2o >/dev/null 2>&1; then
         if ! nft list table inet r2o 2>/dev/null | grep -F -q 'comment "r2o-managed"'; then
             echo "отказ: таблица nft inet r2o не принадлежит r2o" >&2
@@ -268,6 +268,10 @@ nft_down() {
         fi
         nft delete table inet r2o || return 1
     fi
+}
+
+nft_down() {
+    nft_main_down || return 1
     nft_rst_down
 }
 
@@ -526,7 +530,12 @@ firewall_up() {
     fw_lock_acquire || return 1
     if [ "$BACKEND" = nft ]; then
         rm -f "$FW_V4ONLY" || true
-        if nft_up; then fw_rc=0; else fw_rc=$?; fi
+        if nft_up; then
+            fw_rc=0
+        else
+            fw_rc=$?
+            nft_main_down || echo "r2o: не удалось снять старую таблицу nft после отказа установки" >&2
+        fi
     elif iptables_up; then
         fw_rc=0
         dns_excl_sync_unlocked fresh || echo "r2o: исключение DNS-upstream не встало полностью" >&2
