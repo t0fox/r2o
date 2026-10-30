@@ -95,7 +95,9 @@ ppe_call() {
 }
 
 ppe_ensure() {
+    [ "$R2O_FW" = iptables ] || return 0
     [ -x "$PPE_ADAPTER" ] || { say "нет PPE adapter $PPE_ADAPTER"; return 0; }
+    component_running r2o-datapath "$DP4_PID" || return 0
     if ppe_call ensure; then ppe_rc=0; else ppe_rc=$?; fi
     case "$ppe_rc" in
         0) ;;
@@ -723,6 +725,7 @@ telegram_check() {
 
 reapply() {
     component_running r2o-datapath "$DP4_PID" || die "r2o-datapath IPv4 не работает"
+    ppe_remove
     R2O_IPV6_ENABLED_RUNTIME= "$FIREWALL" up || die "не поставить полный набор правил"
     ppe_ensure
 }

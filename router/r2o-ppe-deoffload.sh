@@ -6,6 +6,7 @@ R2O_PPE_CONNSKIP=${R2O_PPE_CONNSKIP:-30}
 R2O_PPE_HTTP_CONNSKIP=${R2O_PPE_HTTP_CONNSKIP:-1000000}
 R2O_PPE_TARGET=${R2O_PPE_TARGET:-PPE}
 R2O_PPE_TAG=${R2O_PPE_TAG:-r2o-ppe}
+R2O_PPE_LEGACY_TAG=${R2O_PPE_LEGACY_TAG:-d2k-ppe}
 R2O_PPE_TCP_PORTS=${R2O_PPE_TCP_PORTS:-${PORTS:-0:65535}}
 R2O_PPE_VOICE_PORTS=${R2O_PPE_VOICE_PORTS:-${VOICE_PORTS:-50000:50099,1400,3478:3481,5349,19294:19344}}
 R2O_PPE_UDP_PORTS=${R2O_PPE_UDP_PORTS:-443,$R2O_PPE_VOICE_PORTS}
@@ -82,6 +83,7 @@ r2o_ppe_valid_config() {
     case "$R2O_PPE_DEOFFLOAD" in 0|1) ;; *) return 1 ;; esac
     case "$R2O_PPE_TARGET" in ''|*[!A-Za-z0-9_]*) return 1 ;; esac
     case "$R2O_PPE_TAG" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+    case "$R2O_PPE_LEGACY_TAG" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
     case "$R2O_PPE_CONNSKIP:$R2O_PPE_HTTP_CONNSKIP" in *[!0-9:]*) return 1 ;; esac
     [ "${#R2O_PPE_CONNSKIP}" -le 9 ] && [ "$R2O_PPE_CONNSKIP" -gt 0 ] || return 1
     [ "${#R2O_PPE_HTTP_CONNSKIP}" -le 9 ] && [ "$R2O_PPE_HTTP_CONNSKIP" -gt 0 ] || return 1
@@ -140,10 +142,11 @@ _r2o_ppe_rules() {
 }
 
 _r2o_ppe_owned() {
+    _r2o_ppe_tag=${2:-$R2O_PPE_TAG}
     for _r2o_ppe_chain in PREROUTING FORWARD; do
         _r2o_ppe_listing=$(_r2o_ppe_ipt "$1" -t mangle -S "$_r2o_ppe_chain") || return 1
         printf '%s\n' "$_r2o_ppe_listing" |
-            awk -v chain="$_r2o_ppe_chain" -v tag="$R2O_PPE_TAG" '
+            awk -v chain="$_r2o_ppe_chain" -v tag="$_r2o_ppe_tag" '
                 $1 == "-A" && $2 == chain {
                     for (i = 3; i < NF; i++)
                         if ($i == "--comment" && ($(i + 1) == tag || $(i + 1) == "\"" tag "\"")) {
@@ -156,17 +159,29 @@ _r2o_ppe_owned() {
 }
 
 _r2o_ppe_remove_family() {
-    _r2o_ppe_family_rules=$(_r2o_ppe_owned "$1") || return 1
-    _r2o_ppe_remove_rc=0
+    _r2o_ppe_family_rules=$(_r2o_ppe_owned "$1" "$2") || return 1
+    _r2o_ppe_family_remove_rc=0
     while IFS='|' read -r _r2o_ppe_chain _r2o_ppe_args; do
         [ -n "$_r2o_ppe_chain" ] || continue
         # shellcheck disable=SC2086 # iptables -S returns shell-style rule words
         if ! _r2o_ppe_ipt "$1" -t mangle -D "$_r2o_ppe_chain" $_r2o_ppe_args; then
-            _r2o_ppe_remove_rc=1
+            _r2o_ppe_family_remove_rc=1
         fi
     done <<RULES
 $_r2o_ppe_family_rules
 RULES
+    return "$_r2o_ppe_family_remove_rc"
+}
+
+r2o_ppe_remove_legacy() {
+    [ "$R2O_PPE_LEGACY_TAG" = "$R2O_PPE_TAG" ] && return 0
+    _r2o_ppe_remove_rc=0
+    for _r2o_ppe_tool in iptables ip6tables; do
+        command -v "$_r2o_ppe_tool" >/dev/null 2>&1 || continue
+        if ! _r2o_ppe_remove_family "$_r2o_ppe_tool" "$R2O_PPE_LEGACY_TAG"; then
+            _r2o_ppe_remove_rc=1
+        fi
+    done
     return "$_r2o_ppe_remove_rc"
 }
 
@@ -174,7 +189,11 @@ r2o_ppe_remove() {
     _r2o_ppe_remove_rc=0
     for _r2o_ppe_tool in iptables ip6tables; do
         command -v "$_r2o_ppe_tool" >/dev/null 2>&1 || continue
-        if ! _r2o_ppe_remove_family "$_r2o_ppe_tool"; then
+        if ! _r2o_ppe_remove_family "$_r2o_ppe_tool" "$R2O_PPE_TAG"; then
+            _r2o_ppe_remove_rc=1
+        fi
+        if [ "$R2O_PPE_LEGACY_TAG" != "$R2O_PPE_TAG" ] \
+            && ! _r2o_ppe_remove_family "$_r2o_ppe_tool" "$R2O_PPE_LEGACY_TAG"; then
             _r2o_ppe_remove_rc=1
         fi
     done
@@ -221,6 +240,7 @@ r2o_ppe_ensure() {
     if [ "$R2O_PPE_DEOFFLOAD" = 0 ]; then
         if r2o_ppe_remove; then return 3; else return 1; fi
     fi
+    r2o_ppe_remove_legacy || return 1
     r2o_ppe_available iptables || return 2
     _r2o_ppe_ensure_family iptables || return 1
     if r2o_ppe_available ip6tables; then

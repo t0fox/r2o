@@ -114,6 +114,15 @@ run_helper remove
 [ "$(grep -c 'r2o-ppe' "$CASE/rules" || true)" -eq 0 ] || fail "remove left R2O rules behind"
 grep -q 'other-owner' "$CASE/rules" || fail "remove deleted another owner's PPE rule"
 
+make_case legacy_cleanup
+printf 'PREROUTING|-p tcp -m comment --comment d2k-ppe -j PPE\nFORWARD|-p udp --dport 443 -m comment --comment d2k-ppe -j PPE\n' >> "$CASE/rules"
+run_helper ensure
+[ "$(grep -c 'd2k-ppe' "$CASE/rules" || true)" -eq 0 ] || fail "ensure left legacy D2O PPE rules behind"
+[ "$(grep -c 'r2o-ppe' "$CASE/rules")" -eq 8 ] || fail "ensure did not replace legacy D2O rules with R2O rules"
+run_helper remove
+[ "$(grep -c 'd2k-ppe\|r2o-ppe' "$CASE/rules" || true)" -eq 0 ] || fail "remove left legacy or current PPE rules behind"
+grep -q 'other-owner' "$CASE/rules" || fail "legacy cleanup removed another owner's PPE rule"
+
 make_case disabled
 run_helper ensure
 if TEST_PPE_ENABLED=0 run_helper ensure; then fail "disabled PPE setting was accepted as installed"; else rc=$?; fi
