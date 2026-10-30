@@ -341,21 +341,7 @@ fastnat_restore() {
 
 flowoffload_saved() { echo "$RUN/flow-offloading.saved"; }
 
-flowoffload_off() {
-    [ "$R2O_FW" = nft ] || return 0
-    command -v uci >/dev/null 2>&1 || return 0
-    [ "$(uci -q get firewall.@defaults[0].flow_offloading 2>/dev/null)" = 1 ] || return 0
-    mkdir -p "$RUN" || return 0
-    # Keep the owner's original value across a crash and later service restart.
-    [ -f "$(flowoffload_saved)" ] || echo 1 > "$(flowoffload_saved)"
-    if uci set firewall.@defaults[0].flow_offloading=0 && uci commit firewall; then
-        fw4 reload >/dev/null 2>&1 || /etc/init.d/firewall reload >/dev/null 2>&1
-        say "ускорение потоков fw4 выключено на время работы: иначе часть пакетов клиентов обходит NFQUEUE"
-    else
-        say "не выключить flow offloading fw4 — часть пакетов клиентов может обходить NFQUEUE"
-    fi
-}
-
+# Recover a setting saved by older R2O releases; current starts leave fw4 alone.
 flowoffload_restore() {
     [ -f "$(flowoffload_saved)" ] || return 0
     command -v uci >/dev/null 2>&1 || return 0
@@ -399,7 +385,6 @@ engine_start() {
     fi
     R2O_IPV6_ENABLED_RUNTIME= "$FIREWALL" up || { engine_stop; die "не поставить правила NFQUEUE"; }
     fastnat_off
-    flowoffload_off
     if ! spawn_component r2o-controller "$CT4_PID" "$LOG/r2o-controller4.log" \
         --serve "$SOCK4" "$CATALOG" --discover --mark "$mark" --live "$STATE/live4.json"; then
         engine_stop

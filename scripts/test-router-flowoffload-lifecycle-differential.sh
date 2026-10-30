@@ -23,10 +23,18 @@ cat > "$TEMP/bin/uci" <<'UCI'
 #!/bin/sh
 [ "${1:-}" = -q ] && shift
 case "${1:-}" in
-    get) cat "$FLOW_SETTING_FILE" ;;
+    get)
+        case "${2:-}" in
+            *flow_offloading_hw) cat "$FLOW_HW_SETTING_FILE" ;;
+            *) cat "$FLOW_SETTING_FILE" ;;
+        esac
+        ;;
     set)
         [ "${FAIL_UCI_SET:-0}" = 0 ] || exit 1
-        printf '%s\n' "${2#*=}" > "$FLOW_SETTING_FILE"
+        case "${2:-}" in
+            *flow_offloading_hw=*) printf '%s\n' "${2#*=}" > "$FLOW_HW_SETTING_FILE" ;;
+            *) printf '%s\n' "${2#*=}" > "$FLOW_SETTING_FILE" ;;
+        esac
         ;;
     commit) : ;;
     *) exit 2 ;;
@@ -56,24 +64,26 @@ esac
 saved=absent
 [ ! -f "$RUN/flow-offloading.saved" ] || saved=$(cat "$RUN/flow-offloading.saved")
 reloads=$(wc -l < "$FW_TRACE" | tr -d ' ')
-printf '%s setting=%s saved=%s reloads=%s\n' "$step" "$(cat "$FLOW_SETTING_FILE")" "$saved" "$reloads"
+printf '%s setting=%s hw=%s saved=%s reloads=%s\n' "$step" "$(cat "$FLOW_SETTING_FILE")" "$(cat "$FLOW_HW_SETTING_FILE")" "$saved" "$reloads"
 STEP
 chmod 0755 "$TEMP/step.sh"
 
 run_case() {
     implementation=$1
     initial=$2
-    backend=${3:-nft}
-    run="$TEMP/$implementation-$initial-$backend"
+    hw_initial=${3:-1}
+    backend=${4:-nft}
+    run="$TEMP/$implementation-$initial-$hw_initial-$backend"
     mkdir -p "$run"
     printf '%s\n' "$initial" > "$run/flow-setting"
+    printf '%s\n' "$hw_initial" > "$run/flow-hw-setting"
     : > "$run/fw.trace"
     : > "$run/empty.sh"
     functions=$TEMP/$implementation.sh
     [ "$implementation" != r2o ] || [ -s "$functions" ] || functions=$run/empty.sh
     for step in start restart stop; do
         RUN="$run" RUNTIME="$run" FW_BACKEND="$backend" R2O_FW="$backend" \
-        FLOW_SETTING_FILE="$run/flow-setting" FW_TRACE="$run/fw.trace" \
+        FLOW_SETTING_FILE="$run/flow-setting" FLOW_HW_SETTING_FILE="$run/flow-hw-setting" FW_TRACE="$run/fw.trace" \
         PATH="$TEMP/bin:$PATH" sh "$TEMP/step.sh" "$functions" "$step"
     done > "$run/output"
     cat "$run/output"
@@ -81,27 +91,59 @@ run_case() {
 
 run_case d2o 1 > "$TEMP/d2o-enabled.out"
 run_case r2o 1 > "$TEMP/r2o-enabled.out"
-if ! cmp -s "$TEMP/d2o-enabled.out" "$TEMP/r2o-enabled.out"; then
-    echo "D2O/R2O flow-offload lifecycle differs with fw4 acceleration enabled" >&2
-    diff -u "$TEMP/d2o-enabled.out" "$TEMP/r2o-enabled.out" >&2 || true
+printf '%s\n' \
+    'start setting=0 hw=1 saved=1 reloads=1' \
+    'restart setting=0 hw=1 saved=1 reloads=1' \
+    'stop setting=1 hw=1 saved=absent reloads=2' > "$TEMP/d2o-enabled.expected"
+if ! cmp -s "$TEMP/d2o-enabled.expected" "$TEMP/d2o-enabled.out"; then
+    echo "D2O flow-offload guard trace changed" >&2
+    diff -u "$TEMP/d2o-enabled.expected" "$TEMP/d2o-enabled.out" >&2 || true
+    exit 1
+fi
+printf '%s\n' \
+    'start setting=1 hw=1 saved=absent reloads=0' \
+    'restart setting=1 hw=1 saved=absent reloads=0' \
+    'stop setting=1 hw=1 saved=absent reloads=0' > "$TEMP/r2o-enabled.expected"
+if ! cmp -s "$TEMP/r2o-enabled.expected" "$TEMP/r2o-enabled.out"; then
+    echo "R2O changed the configured native fw4 flow-offload state" >&2
+    diff -u "$TEMP/r2o-enabled.expected" "$TEMP/r2o-enabled.out" >&2 || true
     exit 1
 fi
 
 run_case d2o 0 > "$TEMP/d2o-disabled.out"
 run_case r2o 0 > "$TEMP/r2o-disabled.out"
-if ! cmp -s "$TEMP/d2o-disabled.out" "$TEMP/r2o-disabled.out"; then
-    echo "D2O/R2O flow-offload lifecycle differs when fw4 acceleration is disabled" >&2
-    diff -u "$TEMP/d2o-disabled.out" "$TEMP/r2o-disabled.out" >&2 || true
+run_case r2o 1 0 > "$TEMP/r2o-software-only.out"
+printf '%s\n' \
+    'start setting=0 hw=1 saved=absent reloads=0' \
+    'restart setting=0 hw=1 saved=absent reloads=0' \
+    'stop setting=0 hw=1 saved=absent reloads=0' > "$TEMP/d2o-disabled.expected"
+if ! cmp -s "$TEMP/d2o-disabled.expected" "$TEMP/d2o-disabled.out"; then
+    echo "D2O disabled flow-offload trace changed" >&2
+    diff -u "$TEMP/d2o-disabled.expected" "$TEMP/d2o-disabled.out" >&2 || true
+    exit 1
+fi
+printf '%s\n' \
+    'start setting=0 hw=1 saved=absent reloads=0' \
+    'restart setting=0 hw=1 saved=absent reloads=0' \
+    'stop setting=0 hw=1 saved=absent reloads=0' > "$TEMP/r2o-disabled.expected"
+if ! cmp -s "$TEMP/r2o-disabled.expected" "$TEMP/r2o-disabled.out"; then
+    echo "R2O changed the disabled native fw4 flow-offload state" >&2
+    diff -u "$TEMP/r2o-disabled.expected" "$TEMP/r2o-disabled.out" >&2 || true
+    exit 1
+fi
+printf '%s\n' \
+    'start setting=1 hw=0 saved=absent reloads=0' \
+    'restart setting=1 hw=0 saved=absent reloads=0' \
+    'stop setting=1 hw=0 saved=absent reloads=0' > "$TEMP/r2o-software-only.expected"
+if ! cmp -s "$TEMP/r2o-software-only.expected" "$TEMP/r2o-software-only.out"; then
+    echo "R2O changed the native fw4 hardware flow-offload state" >&2
+    diff -u "$TEMP/r2o-software-only.expected" "$TEMP/r2o-software-only.out" >&2 || true
     exit 1
 fi
 
-grep -A 50 '^engine_start() {' "$ROOT/router/S99r2o" | grep -q 'flowoffload_off' || {
-    echo "R2O engine_start does not disable configured fw4 flow offloading" >&2
+if grep -Eq 'flowoffload_off|uci set firewall\.@defaults\[0\]\.flow_offloading=0|uci set firewall\.@defaults\[0\]\.flow_offloading_hw=' "$ROOT/router/S99r2o"; then
+    echo "R2O must leave native fw4 flow-offload configuration untouched" >&2
     exit 1
-}
-grep -A 12 '^engine_stop() {' "$ROOT/router/S99r2o" | grep -q 'flowoffload_restore' || {
-    echo "R2O engine_stop does not restore fw4 flow offloading" >&2
-    exit 1
-}
+fi
 
-echo "test-router-flowoffload-lifecycle-differential: start/restart/stop state matches D2O"
+echo "test-router-flowoffload-lifecycle-differential: R2O preserves native fw4 state across start/restart/stop (intentionally differs from D2O)"
