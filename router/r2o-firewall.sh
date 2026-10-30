@@ -426,6 +426,35 @@ xt_family_down() {
     return 0
 }
 
+xt_legacy_d2k_family_down() {
+    tool=$1
+    while xt "$tool" -t nat -D PREROUTING -j D2K_HTTP 2>/dev/null; do :; done
+    if xt "$tool" -t nat -n -L D2K_HTTP >/dev/null 2>&1; then
+        xt "$tool" -t nat -F D2K_HTTP 2>/dev/null || true
+        xt "$tool" -t nat -X D2K_HTTP 2>/dev/null || true
+    fi
+    while xt "$tool" -t nat -D POSTROUTING -p udp -m mark --mark "$MARK" \
+        -j MASQUERADE 2>/dev/null; do :; done
+    while xt "$tool" -t mangle -D OUTPUT -m mark --mark 0x30 \
+        -j CONNMARK --save-mark 2>/dev/null; do :; done
+    while xt "$tool" -t mangle -D OUTPUT -j D2K_HTTP_MARK 2>/dev/null; do :; done
+    if xt "$tool" -t mangle -n -L D2K_HTTP_MARK >/dev/null 2>&1; then
+        xt "$tool" -t mangle -F D2K_HTTP_MARK 2>/dev/null || true
+        xt "$tool" -t mangle -X D2K_HTTP_MARK 2>/dev/null || true
+    fi
+    for hook in POSTROUTING FORWARD OUTPUT INPUT; do
+        for chain in D2K_OUT D2K_IN; do
+            while xt "$tool" -t mangle -D "$hook" -j "$chain" 2>/dev/null; do :; done
+        done
+    done
+    for chain in D2K_OUT D2K_IN; do
+        if xt "$tool" -t mangle -n -L "$chain" >/dev/null 2>&1; then
+            xt "$tool" -t mangle -F "$chain" 2>/dev/null || true
+            xt "$tool" -t mangle -X "$chain" 2>/dev/null || true
+        fi
+    done
+}
+
 xt_family_up() {
     tool=$1
     queue=$2
@@ -502,7 +531,11 @@ xt_family_up() {
 
 iptables_up() {
     xt_family_down iptables
-    if command -v ip6tables >/dev/null 2>&1; then xt_family_down ip6tables; fi
+    xt_legacy_d2k_family_down iptables
+    if command -v ip6tables >/dev/null 2>&1; then
+        xt_family_down ip6tables
+        xt_legacy_d2k_family_down ip6tables
+    fi
     rm -f "$FW_V4ONLY"
     xt_family_up iptables "$QUEUE4" || { xt_family_down iptables; return 1; }
     if [ "$IPV6_ENABLED_CONFIG" = 1 ] && [ "$IPV6_ENABLED" = 0 ]; then
@@ -530,6 +563,12 @@ firewall_up() {
     fw_lock_acquire || return 1
     if [ "$BACKEND" = nft ]; then
         rm -f "$FW_V4ONLY" || true
+        xt_family_down iptables
+        xt_legacy_d2k_family_down iptables
+        if command -v ip6tables >/dev/null 2>&1; then
+            xt_family_down ip6tables
+            xt_legacy_d2k_family_down ip6tables
+        fi
         if nft list table inet r2o_rst >/dev/null 2>&1; then fw_rst_preexisting=1; else fw_rst_preexisting=0; fi
         if nft_up; then
             fw_rc=0
@@ -553,10 +592,20 @@ firewall_up() {
 firewall_down() {
     fw_lock_acquire || return 1
     if [ "$BACKEND" = nft ]; then
+        xt_family_down iptables
+        xt_legacy_d2k_family_down iptables
+        if command -v ip6tables >/dev/null 2>&1; then
+            xt_family_down ip6tables
+            xt_legacy_d2k_family_down ip6tables
+        fi
         if nft_down; then fw_rc=0; else fw_rc=$?; fi
     else
         xt_family_down iptables
-        if command -v ip6tables >/dev/null 2>&1; then xt_family_down ip6tables; fi
+        xt_legacy_d2k_family_down iptables
+        if command -v ip6tables >/dev/null 2>&1; then
+            xt_family_down ip6tables
+            xt_legacy_d2k_family_down ip6tables
+        fi
         fw_rc=0
     fi
     rm -f "$FW_V4ONLY" || true
