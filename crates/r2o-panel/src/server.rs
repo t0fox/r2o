@@ -2018,45 +2018,67 @@ fn telegram_config_flags(path: &Path) -> (bool, bool) {
     let Ok(raw) = read_regular_file(path, BODY_MAX) else {
         return (false, false);
     };
-    let Ok(text) = std::str::from_utf8(&raw) else {
-        return (false, false);
-    };
     let mut enabled = false;
     let mut mode_seen = false;
     let mut configured = true;
     let mut local = false;
-    for line in text.lines() {
-        let line = line.trim_start_matches([' ', '\t']);
-        if line.starts_with('#') {
+    for line in raw.split(|byte| *byte == b'\n') {
+        let line_end = line
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(line.len());
+        let mut line = &line[..line_end];
+        while line
+            .first()
+            .is_some_and(|byte| *byte == b' ' || *byte == b'\t')
+        {
+            line = &line[1..];
+        }
+        if line.first() == Some(&b'#') {
             continue;
         }
-        let Some((key, value)) = line.split_once('=') else {
+        let Some(equal) = line.iter().position(|byte| *byte == b'=') else {
             continue;
         };
-        let value = value.trim_matches([' ', '\t', '\r', '\n']);
-        let value = match value.chars().next() {
-            Some(quote @ ('\'' | '"')) => {
-                let Some(value) = value
-                    .strip_prefix(quote)
-                    .and_then(|value| value.strip_suffix(quote))
-                else {
-                    return (false, false);
-                };
-                if value.contains(quote) {
+        let mut key = &line[..equal];
+        while key
+            .last()
+            .is_some_and(|byte| matches!(*byte, b' ' | b'\t' | b'\r' | b'\n'))
+        {
+            key = &key[..key.len() - 1];
+        }
+        let mut value = &line[equal + 1..];
+        while value
+            .first()
+            .is_some_and(|byte| *byte == b' ' || *byte == b'\t')
+        {
+            value = &value[1..];
+        }
+        while value
+            .last()
+            .is_some_and(|byte| matches!(*byte, b' ' | b'\t' | b'\r' | b'\n'))
+        {
+            value = &value[..value.len() - 1];
+        }
+        if let Some(&quote) = value.first() {
+            if quote == b'\'' || quote == b'"' {
+                if value.len() < 2 || value.last() != Some(&quote) {
                     return (false, false);
                 }
-                value
+                value = &value[1..value.len() - 1];
+                if value.contains(&quote) {
+                    return (false, false);
+                }
             }
-            _ => value,
-        };
-        match key.trim_matches([' ', '\t', '\r', '\n']) {
-            "TG_ENABLED" => enabled = matches!(value, "1" | "yes"),
-            "TG_MODE" => {
+        }
+        match key {
+            b"TG_ENABLED" => enabled = value == b"1" || value == b"yes",
+            b"TG_MODE" => {
                 if mode_seen {
                     configured = false;
                 }
                 mode_seen = true;
-                local = value == "local";
+                local = value == b"local";
                 if !local {
                     configured = false;
                 }

@@ -473,31 +473,11 @@ fn d2o_control_action_response_trace() {
 #[ignore = "run through scripts/test-panel-telegram-config-gate-differential.sh"]
 fn d2o_telegram_config_gate_trace() {
     let mut config = Config::default();
-    config.config_path = std::env::var_os("R2O_PANEL_TG_CONFIG_PATH")
-        .expect("test helper provides the config path")
-        .into();
     config.service_path = std::env::var_os("R2O_PANEL_TG_CONFIG_SERVICE")
         .expect("test helper provides the fake service")
         .into();
     config.control_enabled = true;
 
-    let response = request(
-        &config,
-        "POST /api/control/telegram-enable HTTP/1.1\r\nHost: localhost:8090\r\nOrigin: http://localhost:8090\r\nContent-Length: 0\r\n\r\n",
-    );
-    let trace = format!("{}\n{}\n", response.0, response.2);
-    println!("{trace}");
-    fs::write(
-        std::env::var_os("R2O_PANEL_TG_CONFIG_TRACE_OUTPUT")
-            .expect("test helper provides the Rust trace path"),
-        &trace,
-    )
-    .unwrap();
-    let c_trace = fs::read_to_string(
-        std::env::var_os("R2O_PANEL_TG_CONFIG_C_TRACE")
-            .expect("test helper provides the D2O C trace"),
-    )
-    .unwrap();
     let parse_trace = |trace: &str| {
         let mut lines = trace.lines();
         let status = lines.next().unwrap().parse::<u16>().unwrap();
@@ -505,8 +485,59 @@ fn d2o_telegram_config_gate_trace() {
         assert!(lines.next().is_none(), "config gate trace has two lines");
         (status, body)
     };
-    assert_eq!(parse_trace(&c_trace), parse_trace(&trace));
-    assert_eq!(response.0, 409);
+    let cases = [
+        (
+            "malformed_quote",
+            "R2O_PANEL_TG_CONFIG_QUOTE_PATH",
+            "R2O_PANEL_TG_CONFIG_C_QUOTE_TRACE",
+            409,
+        ),
+        (
+            "non_utf8_unrelated_value",
+            "R2O_PANEL_TG_CONFIG_NONUTF8_PATH",
+            "R2O_PANEL_TG_CONFIG_C_NONUTF8_TRACE",
+            202,
+        ),
+    ];
+    let mut traces = Vec::new();
+    for &(name, config_var, _, _) in &cases {
+        config.config_path = std::env::var_os(config_var)
+            .unwrap_or_else(|| panic!("test helper provides {config_var}"))
+            .into();
+        let response = request(
+            &config,
+            "POST /api/control/telegram-enable HTTP/1.1\r\nHost: localhost:8090\r\nOrigin: http://localhost:8090\r\nContent-Length: 0\r\n\r\n",
+        );
+        let trace = format!("{}\n{}\n", response.0, response.2);
+        traces.push((name, response, trace));
+    }
+    let combined = traces
+        .iter()
+        .map(|(name, _, trace)| format!("{name}\n{trace}"))
+        .collect::<String>();
+    println!("{combined}");
+    fs::write(
+        std::env::var_os("R2O_PANEL_TG_CONFIG_TRACE_OUTPUT")
+            .expect("test helper provides the Rust trace path"),
+        &combined,
+    )
+    .unwrap();
+    for ((name, response, trace), (expected_name, _, c_trace_var, expected_status)) in
+        traces.iter().zip(cases)
+    {
+        assert_eq!(*name, expected_name);
+        let c_trace = fs::read_to_string(
+            std::env::var_os(c_trace_var)
+                .unwrap_or_else(|| panic!("test helper provides {c_trace_var}")),
+        )
+        .unwrap();
+        assert_eq!(
+            parse_trace(&c_trace),
+            parse_trace(trace),
+            "C/Rust config gate differs for {name}"
+        );
+        assert_eq!(response.0, expected_status, "unexpected status for {name}");
+    }
 }
 
 #[cfg(unix)]
