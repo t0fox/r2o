@@ -472,11 +472,9 @@ fn d2o_control_action_response_trace() {
 #[test]
 #[ignore = "run through scripts/test-panel-telegram-config-gate-differential.sh"]
 fn d2o_telegram_config_gate_trace() {
-    let mut config = Config::default();
-    config.service_path = std::env::var_os("R2O_PANEL_TG_CONFIG_SERVICE")
+    let service_path: PathBuf = std::env::var_os("R2O_PANEL_TG_CONFIG_SERVICE")
         .expect("test helper provides the fake service")
         .into();
-    config.control_enabled = true;
 
     let parse_trace = |trace: &str| {
         let mut lines = trace.lines();
@@ -493,6 +491,12 @@ fn d2o_telegram_config_gate_trace() {
             409,
         ),
         (
+            "long_physical_line",
+            "R2O_PANEL_TG_CONFIG_LONG_LINE_PATH",
+            "R2O_PANEL_TG_CONFIG_C_LONG_LINE_TRACE",
+            409,
+        ),
+        (
             "non_utf8_unrelated_value",
             "R2O_PANEL_TG_CONFIG_NONUTF8_PATH",
             "R2O_PANEL_TG_CONFIG_C_NONUTF8_TRACE",
@@ -501,9 +505,12 @@ fn d2o_telegram_config_gate_trace() {
     ];
     let mut traces = Vec::new();
     for &(name, config_var, _, _) in &cases {
+        let mut config = Config::default();
         config.config_path = std::env::var_os(config_var)
             .unwrap_or_else(|| panic!("test helper provides {config_var}"))
             .into();
+        config.service_path = service_path.clone();
+        config.control_enabled = true;
         let response = request(
             &config,
             "POST /api/control/telegram-enable HTTP/1.1\r\nHost: localhost:8090\r\nOrigin: http://localhost:8090\r\nContent-Length: 0\r\n\r\n",

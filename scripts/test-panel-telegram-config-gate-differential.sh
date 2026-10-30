@@ -18,6 +18,15 @@ TG_MODE=local
 UNRELATED="unterminated
 CONFIG
 printf 'TG_ENABLED=0\nTG_MODE=local\nUNRELATED=\377\n' > "$TEMP/config-nonutf8"
+{
+    printf 'TG_ENABLED=0\nTG_MODE='
+    spaces=0
+    while [ "$spaces" -lt 2050 ]; do
+        printf ' '
+        spaces=$((spaces + 1))
+    done
+    printf 'local\n'
+} > "$TEMP/config-long-line"
 cat > "$TEMP/service" <<'SERVICE'
 #!/bin/sh
 exit 0
@@ -30,12 +39,15 @@ clang-18 -std=gnu11 -O2 -Wall -Wextra -Werror -pthread \
     "$D2O_ROOT/panel/server.c" -o "$TEMP/d2o-panel-config-gate"
 "$TEMP/d2o-panel-config-gate" "$TEMP/config" "$TEMP/service" > "$TEMP/c-quote.trace"
 "$TEMP/d2o-panel-config-gate" "$TEMP/config-nonutf8" "$TEMP/service" > "$TEMP/c-nonutf8.trace"
+"$TEMP/d2o-panel-config-gate" "$TEMP/config-long-line" "$TEMP/service" > "$TEMP/c-long-line.trace"
 
 if R2O_PANEL_TG_CONFIG_QUOTE_PATH="$TEMP/config" \
     R2O_PANEL_TG_CONFIG_NONUTF8_PATH="$TEMP/config-nonutf8" \
+    R2O_PANEL_TG_CONFIG_LONG_LINE_PATH="$TEMP/config-long-line" \
     R2O_PANEL_TG_CONFIG_SERVICE="$TEMP/service" \
     R2O_PANEL_TG_CONFIG_C_QUOTE_TRACE="$TEMP/c-quote.trace" \
     R2O_PANEL_TG_CONFIG_C_NONUTF8_TRACE="$TEMP/c-nonutf8.trace" \
+    R2O_PANEL_TG_CONFIG_C_LONG_LINE_TRACE="$TEMP/c-long-line.trace" \
     R2O_PANEL_TG_CONFIG_TRACE_OUTPUT="$TEMP/rust.trace" \
     cargo test -p r2o-panel --test http --locked --offline \
         d2o_telegram_config_gate_trace -- --ignored --nocapture; then

@@ -2022,68 +2022,70 @@ fn telegram_config_flags(path: &Path) -> (bool, bool) {
     let mut mode_seen = false;
     let mut configured = true;
     let mut local = false;
-    for line in raw.split(|byte| *byte == b'\n') {
-        let line_end = line
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or(line.len());
-        let mut line = &line[..line_end];
-        while line
-            .first()
-            .is_some_and(|byte| *byte == b' ' || *byte == b'\t')
-        {
-            line = &line[1..];
-        }
-        if line.first() == Some(&b'#') {
-            continue;
-        }
-        let Some(equal) = line.iter().position(|byte| *byte == b'=') else {
-            continue;
-        };
-        let mut key = &line[..equal];
-        while key
-            .last()
-            .is_some_and(|byte| matches!(*byte, b' ' | b'\t' | b'\r' | b'\n'))
-        {
-            key = &key[..key.len() - 1];
-        }
-        let mut value = &line[equal + 1..];
-        while value
-            .first()
-            .is_some_and(|byte| *byte == b' ' || *byte == b'\t')
-        {
-            value = &value[1..];
-        }
-        while value
-            .last()
-            .is_some_and(|byte| matches!(*byte, b' ' | b'\t' | b'\r' | b'\n'))
-        {
-            value = &value[..value.len() - 1];
-        }
-        if let Some(&quote) = value.first() {
-            if quote == b'\'' || quote == b'"' {
-                if value.len() < 2 || value.last() != Some(&quote) {
-                    return (false, false);
-                }
-                value = &value[1..value.len() - 1];
-                if value.contains(&quote) {
-                    return (false, false);
+    for physical_line in raw.split(|byte| *byte == b'\n') {
+        for line in physical_line.chunks(2047) {
+            let line_end = line
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(line.len());
+            let mut line = &line[..line_end];
+            while line
+                .first()
+                .is_some_and(|byte| *byte == b' ' || *byte == b'\t')
+            {
+                line = &line[1..];
+            }
+            if line.first() == Some(&b'#') {
+                continue;
+            }
+            let Some(equal) = line.iter().position(|byte| *byte == b'=') else {
+                continue;
+            };
+            let mut key = &line[..equal];
+            while key
+                .last()
+                .is_some_and(|byte| matches!(*byte, b' ' | b'\t' | b'\r' | b'\n'))
+            {
+                key = &key[..key.len() - 1];
+            }
+            let mut value = &line[equal + 1..];
+            while value
+                .first()
+                .is_some_and(|byte| *byte == b' ' || *byte == b'\t')
+            {
+                value = &value[1..];
+            }
+            while value
+                .last()
+                .is_some_and(|byte| matches!(*byte, b' ' | b'\t' | b'\r' | b'\n'))
+            {
+                value = &value[..value.len() - 1];
+            }
+            if let Some(&quote) = value.first() {
+                if quote == b'\'' || quote == b'"' {
+                    if value.len() < 2 || value.last() != Some(&quote) {
+                        return (false, false);
+                    }
+                    value = &value[1..value.len() - 1];
+                    if value.contains(&quote) {
+                        return (false, false);
+                    }
                 }
             }
-        }
-        match key {
-            b"TG_ENABLED" => enabled = value == b"1" || value == b"yes",
-            b"TG_MODE" => {
-                if mode_seen {
-                    configured = false;
+            match key {
+                b"TG_ENABLED" => enabled = value == b"1" || value == b"yes",
+                b"TG_MODE" => {
+                    if mode_seen {
+                        configured = false;
+                    }
+                    mode_seen = true;
+                    local = value == b"local";
+                    if !local {
+                        configured = false;
+                    }
                 }
-                mode_seen = true;
-                local = value == b"local";
-                if !local {
-                    configured = false;
-                }
+                _ => {}
             }
-            _ => {}
         }
     }
     (enabled, configured && mode_seen && local)
