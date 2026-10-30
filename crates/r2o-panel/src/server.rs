@@ -1352,14 +1352,16 @@ where
                 use std::os::unix::process::CommandExt;
                 child_command.process_group(0);
             }
-            let result = child_command
+            let outcome = child_command
                 .spawn()
                 .ok()
                 .and_then(|mut child| {
                     let start = std::time::Instant::now();
                     loop {
                         match child.try_wait() {
-                            Ok(Some(status)) => return Some(status.success()),
+                            Ok(Some(status)) => {
+                                return Some(if status.success() { "done" } else { "failed" });
+                            }
                             Ok(None) if start.elapsed() < timeout => {
                                 std::thread::sleep(Duration::from_millis(20))
                             }
@@ -1382,15 +1384,15 @@ where
                                     let _ = child.kill();
                                 }
                                 let _ = child.wait();
-                                return Some(false);
+                                return Some("timeout");
                             }
-                            Err(_) => return Some(false),
+                            Err(_) => return Some("failed"),
                         }
                     }
                 })
-                .unwrap_or(false);
+                .unwrap_or("failed");
             if let Ok(mut state) = shared.lock() {
-                *state = if result { "done" } else { "failed" }.into();
+                *state = outcome.into();
             }
             on_complete();
         })
@@ -2117,6 +2119,51 @@ fn read_telegram_stats(path: &Path) -> Option<Value> {
     {
         let _ = path;
         None
+    }
+}
+
+#[cfg(test)]
+mod differential_tests {
+    use super::*;
+    use std::process::Command;
+    use std::time::Instant;
+
+    #[test]
+    #[ignore = "run through scripts/test-panel-control-timeout-differential.sh"]
+    fn d2o_control_timeout_state_trace() {
+        let service = PathBuf::from(
+            std::env::var_os("R2O_PANEL_TIMEOUT_SERVICE")
+                .expect("test helper provides a slow service"),
+        );
+        let config = Config::default();
+        let mut command = Command::new(service);
+        command.arg("engine-stop");
+        start_action_command(&config, command, Duration::from_millis(40)).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let state = loop {
+            let response = handle_request(
+                &config,
+                b"GET /api/status HTTP/1.1\r\nHost: localhost:8090\r\n\r\n",
+            );
+            let value: Value = serde_json::from_slice(&response.body).unwrap();
+            let state = value["snapshot"]["control_state"].as_str().unwrap();
+            if state != "running" || Instant::now() >= deadline {
+                break state.to_owned();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        println!("{state}");
+        if let Some(path) = std::env::var_os("R2O_PANEL_TIMEOUT_TRACE_OUTPUT") {
+            fs::write(path, format!("{state}\n")).unwrap();
+        }
+        let c_state = fs::read_to_string(
+            std::env::var_os("R2O_PANEL_TIMEOUT_C_TRACE")
+                .expect("test helper provides the D2O C trace"),
+        )
+        .unwrap();
+        assert_eq!(state.trim(), c_state.trim());
+        assert_eq!(state, "timeout");
     }
 }
 
