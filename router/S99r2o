@@ -664,6 +664,12 @@ telegram_check() {
     return 1
 }
 
+reapply() {
+    component_running r2o-datapath "$DP4_PID" || die "r2o-datapath IPv4 не работает"
+    "$FIREWALL" up || die "не поставить полный набор правил"
+    ppe_ensure
+}
+
 telegram_reapply() {
     [ "$TG_ENABLED" = 1 ] || return 0
     if telegram_ready; then
@@ -804,9 +810,7 @@ case "${1:-}" in
     engine-restart) engine_stop && engine_start ;;
     settings-restart) settings_restart ;;
     reapply)
-        component_running r2o-datapath "$DP4_PID" || die "r2o-datapath IPv4 не работает"
-        "$FIREWALL" up
-        ppe_ensure
+        reapply
         ;;
     ppe-ensure) ppe_ensure ;;
     ppe-remove) ppe_remove ;;
