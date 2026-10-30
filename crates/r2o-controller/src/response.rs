@@ -8,12 +8,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::classify::{
-    ProbeError, ProbeOutcome, ProbeTarget, Trigger, split_offsets, trigger_accepts,
+    ProbeError, ProbeOutcome, ProbeTarget, Trigger, effective_probe_timeout, split_offsets,
+    trigger_accepts,
 };
 use crate::hello::legacy_client_hello;
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(6);
 const PROBE_SEND_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -809,14 +809,6 @@ pub(crate) fn probe_trigger(
     )
 }
 
-fn effective_probe_timeout(timeout: Duration) -> Duration {
-    if timeout.is_zero() {
-        DEFAULT_PROBE_TIMEOUT
-    } else {
-        timeout
-    }
-}
-
 fn raw_split_enabled(cuts: &[usize], no_raw: bool, raw_supported: impl FnOnce() -> bool) -> bool {
     // On Linux d2o assumes raw support; a permission failure is a local probe
     // error, not a reason to reinterpret the measured split as socket writes.
@@ -1320,8 +1312,10 @@ mod x509_tests {
 
 #[cfg(test)]
 mod tcp_split_transport_tests {
-    use super::{effective_probe_timeout, probe_trigger, raw_split_enabled};
-    use crate::classify::{Accept, ProbeError, ProbeTarget, Trigger};
+    use super::{probe_trigger, raw_split_enabled};
+    use crate::classify::{
+        Accept, ProbeError, ProbeOutcome, ProbeTarget, Trigger, effective_probe_timeout,
+    };
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::atomic::AtomicBool;
@@ -1347,12 +1341,49 @@ mod tcp_split_transport_tests {
         }
         assert_eq!(
             effective_probe_timeout(Duration::ZERO),
-            Duration::from_secs(6)
+            Duration::from_secs(5)
         );
         assert_eq!(
             effective_probe_timeout(Duration::from_secs(7)),
-            Duration::from_secs(7)
+            Duration::from_secs(5)
         );
+    }
+
+    #[test]
+    fn socket_probe_respects_d2o_five_second_timeout_ceiling() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 4];
+            stream.read_exact(&mut request).unwrap();
+            thread::sleep(Duration::from_millis(5_500));
+            let _ = stream.write_all(b"x");
+        });
+        let target = ProbeTarget {
+            host: "127.0.0.1".into(),
+            port,
+        };
+        let trigger = Trigger {
+            name: "fixture".into(),
+            payload: b"PING".to_vec(),
+            accept: Accept::Any,
+        };
+
+        let result = probe_trigger(
+            &target,
+            &trigger,
+            &[],
+            Duration::ZERO,
+            Duration::from_secs(7),
+            Some(0),
+            true,
+            None,
+            None,
+        );
+
+        assert_eq!(result.unwrap(), ProbeOutcome::Rejected);
+        server.join().unwrap();
     }
 
     #[test]

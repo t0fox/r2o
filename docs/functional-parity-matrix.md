@@ -21,6 +21,7 @@
 | Базовые transport errors и переход к разрезу (1) | `d2k_classify_cancelable` → `classify::run_with_backend_progress` | Эквивалентно | Тот же differential сравнивает все ошибки базы → UNREACHABLE/3 без дополнительной серии, частичную ошибку базы с переходом к разрезу → FLAKY/6 | 1 |
 | Классификатор: poison/strategy tree, silent control, neutral ACK и тай-брейки (1) | `d2k_classify_cancelable` → `classify::run_with_backend[_progress]` | Частично | `test-classifier-clear-confirm-differential.sh` также сверяет alert/unproven, полный/частичный/ошибочный control; `r2o-ask-differential.sh`, `r2o-raw-profile-differential.sh`, shared fixtures; poison/strategy tree, silent control и neutral ACK ветви всё ещё не покрыты целиком | 0 |
 | TCP measurement и verifier outcomes/retry (2) | `d2k_meas_once`, `d2k_verify_probe*` → controller measurement и `response::{probe_response,scan_server_hello}` | Эквивалентно | `r2o-meas-differential.sh`, `r2o-tls-verify-differential.sh`, `r2o-measured-split-differential.sh`; покрыты входы/вердикты fixtures | 2 |
+| Потолок classifier probe timeout: 5 секунд (1) | `d2k_meas_once` (`WAIT_CEIL_MS`) → `classify::effective_probe_timeout` → `response::probe_trigger` | Частично | C/Rust differential сравнивает 5000 мс из `SO_RCVTIMEO` с фактическим classifier helper; response unit test дополнительно ждёт ответ 5,5 с и проверяет timeout на 5 с, но Unix controller target здесь не собирается | 0 |
 | Scheduler: cooldown, мёртвый адрес, повтор и параллельные endpoints (3) | `on_suspect`, `on_refused`, `d2k_sched_tick` → controller Discovery worker/queue | Эквивалентно | `r2o-scheduler-differential.sh`, `r2o-scheduler-cooldown-differential.sh`, `r2o-scheduler-dead-address-differential.sh`, `r2o-scheduler-concurrent-endpoint-differential.sh` | 3 |
 | Discovery: known-plan reuse, очередь, coalesce, приоритет и worker permits (3) | `on_suspect`/`d2k_sched_sync_step` → `discovery::{known_plans,has_usable_binding}`, controller queue/worker | Эквивалентно | `r2o-discovery-active-lifetime-differential.sh`, `r2o-discovery-coalesce-differential.sh`, `r2o-queue-order-differential.sh`, `r2o-worker-permit-differential.sh`, `r2o-own-first-differential.sh`; пользователь сообщил, что upstream suite прошёл | 3 |
 | ACK → точный APPLIED/proof → запись кандидата и reapply fixture (3) | `on_applied`/`d2k_sched_sync_step` → `remember_applied_event`, trial confirmation, catalog update | Эквивалентно | `r2o-ack-applied-persist-differential.sh`, `r2o-known-plans-differential.sh`; доказан fixture-путь команды и точного события, не аварийное восстановление процесса | 3 |
@@ -53,13 +54,13 @@
 |---|---:|---:|
 | Control/datapath | 16 | 11 |
 | Классификатор, Discovery, scheduler и catalog | 21 | 16 |
-| TLS, HTTP, ECH и QUIC | 17 | 14 |
+| TLS, HTTP, ECH и QUIC | 18 | 14 |
 | Discord RTC | 8 | 3 |
 | Telegram, panel, install/update, ABI и ресурсы | 11 | 1 |
 | Firewall и router service | 6 | 4 |
-| **Всего** | **79** | **49** |
+| **Всего** | **80** | **49** |
 
-**Evidence-weighted parity: 49 / 79 = 62,03%.** Это доля требований матрицы с прямым подтверждением перечисленных C/Rust ветвей. Это не утверждение, что остальная функциональность отсутствует: частично реализованные или только исходниково сверенные ветви оставлены без баллов, пока нет подходящего дифференциала.
+**Evidence-weighted parity: 49 / 80 = 61,25%.** Это доля требований матрицы с прямым подтверждением перечисленных C/Rust ветвей. Это не утверждение, что остальная функциональность отсутствует: частично реализованные или только исходниково сверенные ветви оставлены без баллов, пока нет подходящего дифференциала.
 
 В оценку не включены C relay/enrollment серверы D2O и WARP/VPS/relay сценарии: они вне разрешённой целевой архитектуры R2O. Отдельная C11 реализация Telegram не переносится; сравниваются пользовательские функции, при этом Rust donor z2kOW остаётся целевой реализацией.
 
@@ -68,6 +69,8 @@
 **Classifier CLEAR confirmation mismatch исправлен.** D2O выполняет два дополнительных whole-trigger зонда после исходного 3/3 и возвращает FLAKY при молчании или транспортном отказе; Rust раньше сразу объявлял CLEAR. Rust теперь подтверждает базу, учитывает transport errors и прекращает классификацию как CLEAR после отмены. C/Rust differential сравнивает CLEAR/5, silent FLAKY/5, refused FLAKY/5 и cancellation INCONCLUSIVE/3. Полное дерево poison/strategy и control/neutral ACK остаётся частично проверенным.
 
 **Classifier SO_MARK confirmation mismatch исправлен, socket integration ещё не подтверждена.** D2O продолжает зонд после отказа установить mark, но запрещает CLEAR, если хоть один probe был unmarked. Rust теперь читает фактический `SO_MARK` normal TCP socket и передаёт unmarked-состояние классификатору, который возвращает INCONCLUSIVE после 5 успешных ответов. C/Rust differential воспроизводит отказ hook и подтверждает classifier outcome; production `getsockopt` path остаётся непроверенным без Linux build/run.
+
+**Classifier timeout ceiling исправлен, delayed-response integration ещё не запущена.** D2O ограничивает `d2k_meas_once` пятью секундами; Rust передавал шесть секунд по умолчанию и не ограничивал пользовательское значение выше пяти. `classify::effective_probe_timeout` теперь подменяет ноль и ограничивает большие интервалы пятью секундами. C/Rust differential исполнил D2O `SO_RCVTIMEO=5000` и тот же Rust helper; отдельный Rust socket test проверяет ответ через 5,5 секунды, но для его запуска нужен Unix controller target.
 
 **Classifier baseline transport handling исправлен.** C считает серию с ошибкой на каждом базовом подключении `UNREACHABLE` после ровно трёх зондов и продолжает к разрезу, если ошибка была только в части серии. Rust раньше удваивал базовые повторы при dial timeout и прекращал работу при любой ошибке базы. Differential сравнивает all-errors `UNREACHABLE/3` и partial-base-error → split `FLAKY/6`.
 

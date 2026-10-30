@@ -13,6 +13,16 @@ use crate::response::{ResponseOptions, ResponseResult, ResponseVerdict, probe_re
 
 const TRACE_MAX: usize = 512;
 const CLEAR_CONFIRM_REPEATS: usize = 2;
+const PROBE_TIMEOUT_CEILING: Duration = Duration::from_secs(5);
+
+pub(crate) fn effective_probe_timeout(timeout: Duration) -> Duration {
+    if timeout.is_zero() || timeout > PROBE_TIMEOUT_CEILING {
+        PROBE_TIMEOUT_CEILING
+    } else {
+        timeout
+    }
+}
+
 /// Один непрерывный диапазон данных триггера, отправляемый пробой с разрезанием.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Span {
@@ -838,7 +848,7 @@ impl Default for ClassifyOptions {
     fn default() -> Self {
         Self {
             repeats: 3,
-            timeout: Duration::from_secs(6),
+            timeout: PROBE_TIMEOUT_CEILING,
             write_gap: Duration::from_millis(60),
             long_gap: Duration::from_millis(700),
             allow_loopback: false,
@@ -2057,6 +2067,21 @@ mod raw_connect_fallback_tests {
             ProbeOutcome::AcceptedUnmarked.with_mark_status(true),
             ProbeOutcome::Accepted
         );
+    }
+
+    #[test]
+    fn probe_timeout_ceiling_matches_d2o() {
+        assert_eq!(
+            super::effective_probe_timeout(Duration::ZERO),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            super::effective_probe_timeout(Duration::from_secs(3)),
+            Duration::from_secs(3)
+        );
+        let timeout = super::effective_probe_timeout(Duration::from_secs(7));
+        assert_eq!(timeout, Duration::from_secs(5));
+        assert_eq!(timeout.as_millis(), 5_000);
     }
 
     #[test]
