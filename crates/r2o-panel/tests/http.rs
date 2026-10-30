@@ -571,6 +571,56 @@ fn d2o_worker_config_read_accepts_utf8_comments() {
 
 #[cfg(unix)]
 #[test]
+#[ignore = "run through scripts/test-panel-workers-json-differential.sh"]
+fn d2o_worker_json_accepts_utf8_unknown_properties() {
+    let service = std::env::var_os("R2O_PANEL_WORKER_SERVICE")
+        .expect("test helper provides a fake service")
+        .into();
+    let config_path = std::env::var_os("R2O_PANEL_WORKER_CONFIG")
+        .expect("test helper provides a config file")
+        .into();
+    let mut config = Config::default();
+    config.service_path = service;
+    config.config_path = config_path;
+    config.control_enabled = true;
+
+    let body = r#"{"domains":["New.Example"],"note":"Привет"}"#;
+    let raw = format!(
+        "POST /api/telegram/workers HTTP/1.1\r\nHost: localhost:8090\r\nOrigin: http://localhost:8090\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let response = request(&config, &raw);
+    let saved = fs::read_to_string(&config.config_path).unwrap();
+    let trace = format!(
+        "{}\n{}\nconfig:{}\n",
+        response.0,
+        response.2,
+        saved.replace('\n', "|")
+    );
+    println!("{trace}");
+    if let Some(path) = std::env::var_os("R2O_PANEL_WORKER_TRACE_OUTPUT") {
+        fs::write(path, &trace).unwrap();
+    }
+    let c_trace = fs::read_to_string(
+        std::env::var_os("R2O_PANEL_WORKER_C_TRACE").expect("test helper provides the D2O C trace"),
+    )
+    .unwrap();
+    let parse = |trace: &str| {
+        let lines = trace.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 3, "worker JSON trace has three lines");
+        (
+            lines[0].parse::<u16>().unwrap(),
+            serde_json::from_str::<Value>(lines[1]).unwrap(),
+            lines[2].to_owned(),
+        )
+    };
+    assert_eq!(parse(&c_trace), parse(&trace));
+    assert_eq!(response.0, 202);
+    assert!(saved.contains("TG_CF_WORKER_DOMAIN=new.example\n"));
+}
+
+#[cfg(unix)]
+#[test]
 fn router_actions_use_service_when_manager_is_installed() {
     use std::os::unix::fs::PermissionsExt;
 

@@ -1489,7 +1489,7 @@ fn api_workers(config: &Config, request: &Request<'_>) -> Response {
 }
 
 fn worker_domains_from_json(body: &[u8]) -> Result<Vec<String>, ()> {
-    if body.len() > WORKER_BODY_MAX || !body.is_ascii() {
+    if body.len() > WORKER_BODY_MAX {
         return Err(());
     }
     let value: Value = serde_json::from_slice(body).map_err(|_| ())?;
