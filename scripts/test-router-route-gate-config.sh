@@ -2,6 +2,18 @@
 set -eu
 
 r2o_root=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
+d2o_root=${R2O_DONOR_ROOT:-${r2o_root%/*}/d2o}
+expected_d2o_sha=304ba893dd37197128ac8799c0495b035f6a38c0
+actual_d2o_sha=$(git -C "$d2o_root" rev-parse HEAD)
+[ "$actual_d2o_sha" = "$expected_d2o_sha" ] || {
+    printf 'Expected d2o %s, got %s\n' "$expected_d2o_sha" "$actual_d2o_sha" >&2
+    exit 2
+}
+d2o_service=$d2o_root/files/S99d2k
+grep -Fq -- '--mark "$PROBE_MARK"' "$d2o_service" || {
+    echo "D2O controller startup no longer uses PROBE_MARK; update this differential case" >&2
+    exit 2
+}
 r2o_temp=$(mktemp -d)
 r2o_cleanup() {
     r2o_status=$?
@@ -70,7 +82,7 @@ case "${1:-}" in
         printf '<%s>\n' "${R2O_IPV6_ENABLED_RUNTIME-unset}" >>"$R2O_UP_RUNTIME_TRACE"
         exit 0
         ;;
-    down|status) exit 0 ;;
+    down|status|flowoffload-ensure|flowoffload-restore) exit 0 ;;
     *) exit 2 ;;
 esac
 EOF
@@ -135,6 +147,11 @@ for r2o_family in ipv4 ipv6; do
 done
 [ "$(grep -c '^r2o-datapath|' "$r2o_temp/launches")" -eq 2 ]
 grep -Fq "|--probe-mark|46|--only-mark|$r2o_mark/$r2o_mask" "$r2o_temp/launches"
+grep -Fq '|--discover|--mark|46|--live|' "$r2o_temp/launches" || {
+    cat "$r2o_temp/launches" >&2
+    echo "R2O controller probe mark diverges from D2O PROBE_MARK" >&2
+    exit 1
+}
 grep -Fq '|--r2o-flow-capacity|64' "$r2o_temp/launches"
 [ -s "$r2o_temp/root/run/r2o-datapath4.pid" ]
 [ -s "$r2o_temp/root/run/r2o-datapath6.pid" ]
@@ -157,6 +174,11 @@ EOF
 r2o_run_service engine-start
 [ "$(wc -l <"$r2o_temp/launches")" -eq 2 ] || {
     echo "режим IPv4-only запустил неверное количество служб" >&2
+    exit 1
+}
+grep -Fq '|--discover|--mark|45|--live|' "$r2o_temp/launches" || {
+    cat "$r2o_temp/launches" >&2
+    echo "PROBE_MARK=0 должен сохранить штатную MARK-метку контроллера" >&2
     exit 1
 }
 r2o_run_service engine-start

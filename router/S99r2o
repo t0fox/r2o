@@ -436,13 +436,16 @@ engine_start() {
     fi
     R2O_IPV6_ENABLED_RUNTIME= "$FIREWALL" up || { engine_stop; die "не поставить правила NFQUEUE"; }
     fastnat_off
+    # Nonzero PROBE_MARK sends controller verifier traffic through NFQUEUE.
+    controller_mark=$mark
+    [ "$PROBE_MARK" = 0 ] || controller_mark=$PROBE_MARK
     if ! spawn_component r2o-controller "$CT4_PID" "$LOG/r2o-controller4.log" \
-        --serve "$SOCK4" "$CATALOG" --discover --mark "$mark" --live "$STATE/live4.json"; then
+        --serve "$SOCK4" "$CATALOG" --discover --mark "$controller_mark" --live "$STATE/live4.json"; then
         engine_stop
         return 1
     fi
     if [ "$IPV6_ENABLED" = 1 ] && ! spawn_component r2o-controller "$CT6_PID" "$LOG/r2o-controller6.log" \
-        --serve "$SOCK6" "$CATALOG" --discover --mark "$mark" --live "$STATE/live6.json"; then
+        --serve "$SOCK6" "$CATALOG" --discover --mark "$controller_mark" --live "$STATE/live6.json"; then
         engine_stop
         return 1
     fi
