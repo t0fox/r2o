@@ -112,7 +112,17 @@ int main(void) {
                 binding->verified_by == D2K_VERBY_VOICE_DISCOVERY &&
                 sent_command_count(D2K_CMD_SET_ADDR, NULL, 0) == 1,
                 "matching APPLIED plus Discovery proof did not persist B");
-    printf("applied B; discovery proof; persist B\n");
+    printf("applied B; discovery proof; persist B before ACK outcome\n");
+
+    d2k_ev late_nak = {0};
+    late_nak.kind = D2K_EV_ACK;
+    late_nak.code = D2K_CMD_SET_ADDR;
+    late_nak.num = 1;
+    d2k_sched_event(sched, &late_nak);
+    binding = binding_of(&cat, "127.0.0.1", 17);
+    trace_check(binding != NULL && strcmp(binding->kind, "addr") == 0,
+                "late permanent SET_ADDR NAK rolled back the confirmed binding");
+    printf("late SET_ADDR NAK retains B binding for retry\n");
 
     d2k_sched_free(sched);
     sched = d2k_sched_new(&cat, sv[0], 0x2d);

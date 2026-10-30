@@ -41,10 +41,19 @@ clang-18 -std=gnu11 -O2 -Wall -Wextra -Werror -pthread \
     -o "$r2o_tmp_dir/d2o-voice-lifecycle"
 
 "$r2o_tmp_dir/d2o-voice-lifecycle" >"$r2o_tmp_dir/c.trace"
-R2O_VOICE_LIFECYCLE_TRACE_OUTPUT="$r2o_tmp_dir/rust.trace" \
+if R2O_VOICE_LIFECYCLE_TRACE_OUTPUT="$r2o_tmp_dir/rust.trace" \
     cargo +1.98.0 test -p r2o-controller --bin r2o-controller --locked --offline \
         voice_lifecycle_trace_matches_d2o_a_to_b_queue_lease_proof_and_persistence \
-        -- --nocapture
+        -- --nocapture; then
+    r2o_rust_status=0
+else
+    r2o_rust_status=$?
+fi
+[ -f "$r2o_tmp_dir/rust.trace" ] || {
+    printf 'Rust voice lifecycle test produced no trace.\n' >&2
+    exit "$r2o_rust_status"
+}
 diff -u "$r2o_tmp_dir/c.trace" "$r2o_tmp_dir/rust.trace"
+[ "$r2o_rust_status" -eq 0 ] || exit "$r2o_rust_status"
 printf 'C/Rust Discord endpoint lifecycle traces match d2o %s.\n' \
     "$r2o_actual_donor_sha"

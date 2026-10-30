@@ -14723,7 +14723,7 @@ impl ControlClient {
         let plan_records = compile_text(&trial.plan_text)?;
         let command = encode_set_voice_addr(*trial.target.server.ip(), &plan_records)?;
         persist_catalog_update(&updated, catalog_path, now, persistence.as_deref_mut())?;
-        if let Err(install_error) = self.send_command(&command, COMMAND_SET_VOICE_ADDR) {
+        if let Err(install_error) = self.write_command(&command) {
             return match persist_catalog_update(
                 &previous,
                 catalog_path,
@@ -14741,6 +14741,24 @@ impl ControlClient {
             };
         }
         *catalog = updated;
+        match self.wait_for_sent_command_ack(&command, COMMAND_SET_VOICE_ADDR, CONTROL_ACK_TIMEOUT)
+        {
+            Ok(Some(ack)) => {
+                self.record_http_binding_acknowledgement(&command, COMMAND_SET_VOICE_ADDR, ack);
+                if !ack.ok {
+                    eprintln!(
+                        "датапат отказал в постоянном voice-плане ({}); привязка сохранена для повтора",
+                        ack_reason_text(ack.reason)
+                    );
+                }
+            }
+            Ok(None) => eprintln!(
+                "датапат не подтвердил постоянный voice-план; привязка сохранена для повтора"
+            ),
+            Err(error) => eprintln!(
+                "результат установки постоянного voice-плана неизвестен ({error}); привязка сохранена для повтора"
+            ),
+        }
         if let Err(error) = self.retire_r2o_voice_trial(&trial) {
             eprintln!("временный voice-план доживёт до конца аренды: {error}");
         }
@@ -35978,7 +35996,8 @@ mod tests {
         use r2k_core::control::{AppliedEvent, BindingContext, KEY_LEN};
         use std::collections::HashMap;
         use std::net::{Ipv4Addr, SocketAddrV4};
-        use std::time::Instant;
+        use std::time::{Duration, Instant};
+        use std::{io::Write, os::unix::net::UnixListener};
 
         let client = Ipv4Addr::new(192, 168, 1, 67);
         let target_a = r2o_controller::voice_discovery::R2oVoiceTarget {
@@ -36095,7 +36114,7 @@ mod tests {
             },
         };
         assert!(r2o_voice_proof_matches_target(&proof, target_b));
-        trace.push("applied B; discovery proof; persist B");
+        trace.push("applied B; discovery proof; persist B before ACK outcome");
 
         let directory = std::env::temp_dir().join(format!(
             "r2o-voice-lifecycle-trace-{}-{}",
@@ -36135,12 +36154,115 @@ mod tests {
             super::COMMAND_SET_VOICE_ADDR
         );
         assert_eq!(&reapplied[6..10], &target_b.server.ip().octets());
-        trace.push("restart reapplies B");
         std::fs::remove_dir_all(directory).unwrap();
+
+        let nak_directory = std::env::temp_dir().join(format!(
+            "r2o-voice-set-addr-nak-{}-{}",
+            std::process::id(),
+            now.elapsed().as_nanos()
+        ));
+        std::fs::create_dir(&nak_directory).unwrap();
+        let nak_socket_path = nak_directory.join("control.sock");
+        let nak_catalog_path = nak_directory.join("catalog.json");
+        Catalog::default()
+            .save_atomic(&nak_catalog_path, 1_800_000_000)
+            .unwrap();
+        let nak_listener = UnixListener::bind(&nak_socket_path).unwrap();
+        let nak_server = std::thread::spawn(move || {
+            let (mut stream, _) = nak_listener.accept().unwrap();
+            stream
+                .write_all(&encode_greeting(u16::MAX as u32).unwrap())
+                .unwrap();
+            let permanent = read_frame(&mut stream).unwrap();
+            stream
+                .write_all(&encode_ack(permanent.kind, false, 1).unwrap())
+                .unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .unwrap();
+            let remove = read_frame(&mut stream).ok();
+            if let Some(remove) = &remove {
+                stream
+                    .write_all(
+                        &encode_ack_for_trial(remove.kind, true, 0, Some(trial_id_b)).unwrap(),
+                    )
+                    .unwrap();
+            }
+            (permanent.kind, remove.map(|frame| frame.kind))
+        });
+        let mut nak_client = ControlClient::connect(nak_socket_path).unwrap();
+        let mut nak_catalog = Catalog::load(&nak_catalog_path).unwrap();
+        let confirm_result = nak_client.confirm_r2o_voice_trial(
+            trial_b.clone(),
+            &proof,
+            &mut nak_catalog,
+            &nak_catalog_path,
+            None,
+        );
+        let (permanent_kind, remove_kind) = nak_server.join().unwrap();
+        let persisted_after_nak = Catalog::load(&nak_catalog_path).unwrap();
+        let binding_retained = confirm_result.is_ok()
+            && permanent_kind == super::COMMAND_SET_VOICE_ADDR
+            && remove_kind == Some(super::COMMAND_DEL_VOICE_ADDR_PROBE)
+            && !nak_catalog.boxes.is_empty()
+            && !persisted_after_nak.boxes.is_empty();
+        trace.push(if binding_retained {
+            "late SET_ADDR NAK retains B binding for retry"
+        } else {
+            "late SET_ADDR NAK loses B binding and retry"
+        });
+
+        let mut reapply_succeeded = false;
+        if binding_retained {
+            let persisted_plan = &persisted_after_nak.boxes[0].plans[0];
+            let reapply = super::encode_set_voice_addr(
+                *target_b.server.ip(),
+                &r2o_controller::plan_text::compile_text(&persisted_plan.text).unwrap(),
+            )
+            .unwrap();
+            let reapply_socket_path = nak_directory.join("restart.sock");
+            let reapply_listener = UnixListener::bind(&reapply_socket_path).unwrap();
+            let reapply_server = std::thread::spawn(move || {
+                let (mut stream, _) = reapply_listener.accept().unwrap();
+                stream
+                    .write_all(&encode_greeting(u16::MAX as u32).unwrap())
+                    .unwrap();
+                let command = read_frame(&mut stream).unwrap();
+                stream
+                    .write_all(&encode_ack(command.kind, true, 0).unwrap())
+                    .unwrap();
+                (command.kind, command.body)
+            });
+            let mut restarted_client = ControlClient::connect(reapply_socket_path).unwrap();
+            let reapply_result =
+                restarted_client.send_command(&reapply, super::COMMAND_SET_VOICE_ADDR);
+            let (reapply_kind, reapply_body) = reapply_server.join().unwrap();
+            reapply_succeeded = reapply_result.is_ok()
+                && reapply_kind == super::COMMAND_SET_VOICE_ADDR
+                && reapply_body[..4] == target_b.server.ip().octets();
+        }
+        trace.push(if reapply_succeeded {
+            "restart reapplies B"
+        } else {
+            "restart has no B binding to reapply"
+        });
+        std::fs::remove_dir_all(nak_directory).unwrap();
 
         if let Some(path) = std::env::var_os("R2O_VOICE_LIFECYCLE_TRACE_OUTPUT") {
             std::fs::write(path, format!("{}\n", trace.join("\n"))).unwrap();
         }
+        assert!(
+            confirm_result.is_ok(),
+            "a SET_ADDR NAK after successful write must retain the confirmed catalog binding"
+        );
+        assert!(
+            binding_retained,
+            "SET_ADDR NAK rolled back B or left its trial installed"
+        );
+        assert!(
+            reapply_succeeded,
+            "the retained B binding was not reapplied after restart"
+        );
     }
 
     #[cfg(unix)]
