@@ -31,7 +31,8 @@ printf '%s\n' \
     router/r2o-log-maintenance.sh \
     router/r2o-telegram-watchdog.sh \
     router/r2o-ppe-deoffload.sh \
-    router/001-r2o.sh | sort > "$TEMP/expected"
+    router/001-r2o.sh \
+    router/select-panel-ip.sh | sort > "$TEMP/expected"
 printf '%s\n' router/uninstall.sh >> "$TEMP/expected"
 sort -o "$TEMP/expected" "$TEMP/expected"
 cmp "$TEMP/expected" "$TEMP/entries"

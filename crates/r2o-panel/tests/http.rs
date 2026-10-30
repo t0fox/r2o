@@ -38,8 +38,12 @@ fn request(config: &Config, raw: &str) -> (u16, String, String) {
 }
 
 #[test]
-fn panel_default_listens_on_router_interfaces() {
-    assert_eq!(Config::default().panel_listen, "0.0.0.0:8090");
+fn panel_default_bind_matches_d2o_config_and_server_fallback() {
+    let d2o_default = include_str!("fixtures/d2o-panel-listen-default.txt")
+        .lines()
+        .find_map(|line| line.strip_prefix("PANEL_LISTEN="))
+        .unwrap();
+    assert_eq!(Config::default().panel_listen, d2o_default);
 }
 
 #[cfg(unix)]

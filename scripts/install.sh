@@ -312,7 +312,7 @@ verify_archive_listing() {
             /*|../*|*/../*|*/..|*\\*) die "небезопасный путь в релизном архиве: $archive_path" ;;
         esac
     done < "$TMP/archive-paths"
-    for required in "builds/r2o-manager-linux-$ARCH" router/install.sh router/uninstall.sh router/config.default router/S99r2o.shim; do
+    for required in "builds/r2o-manager-linux-$ARCH" router/install.sh router/uninstall.sh router/config.default router/S99r2o.shim router/select-panel-ip.sh; do
         [ "$(grep -Fxc "$required" "$TMP/archive-paths")" -eq 1 ] || die "в подписанном архиве отсутствует единственный $required"
     done
     EXPANDED_KB=$(((expanded_bytes + 1023) / 1024))
@@ -532,7 +532,7 @@ for required_file in \
     "$BUNDLE/builds/r2o-manager-linux-$ARCH" "$BUNDLE/router/install.sh" \
     "$BUNDLE/router/uninstall.sh" "$BUNDLE/router/config.default" \
     "$BUNDLE/router/S99r2o.shim" "$BUNDLE/router/001-r2o.sh" \
-    "$BUNDLE/router/r2o-ppe-deoffload.sh"; do
+    "$BUNDLE/router/r2o-ppe-deoffload.sh" "$BUNDLE/router/select-panel-ip.sh"; do
     [ -f "$required_file" ] && [ ! -L "$required_file" ] || die "в подписанном выпуске отсутствует обычный файл $required_file"
 done
 [ -x "$BUNDLE/builds/r2o-manager-linux-$ARCH" ] || die "менеджер выпуска $ARCH не исполняемый"

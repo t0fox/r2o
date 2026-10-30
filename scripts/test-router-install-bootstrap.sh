@@ -142,6 +142,7 @@ EOF
 chmod 0755 "$FIXTURE/builds/r2o-manager-linux-mipsel-openwrt-musl"
 cp "$ROOT/router/install.sh" "$FIXTURE/router/install.sh"
 cp "$ROOT/router/uninstall.sh" "$FIXTURE/router/uninstall.sh"
+cp "$ROOT/router/select-panel-ip.sh" "$FIXTURE/router/select-panel-ip.sh"
 printf '#!/bin/sh\ncase "${1:-}" in start) [ "${R2O_TEST_START_FAIL:-0}" != 1 ] ;; *) exit 0 ;; esac\n' > "$FIXTURE/router/S99r2o.shim"
 printf '#!/bin/sh\nexit 0\n' > "$FIXTURE/router/S99r2o"
 printf '#!/bin/sh\nexit 0\n' > "$FIXTURE/router/001-r2o.sh"

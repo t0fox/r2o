@@ -92,7 +92,7 @@ impl Default for Config {
             telegram_status_path: "/opt/r2o/state/telegram.status".into(),
             telegram_stats_path: "/opt/r2o/state/telegram.stats.sock".into(),
             mode: "observe".into(),
-            panel_listen: "0.0.0.0:8090".into(),
+            panel_listen: "127.0.0.1:8090".into(),
             version: "dev".into(),
             commit: String::new(),
             built: String::new(),

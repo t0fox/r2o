@@ -162,13 +162,17 @@ fn manager_version_is_available_for_router_smoke_checks() {
 }
 
 #[test]
-fn router_config_default_exposes_panel_on_router_interfaces() {
+fn router_config_default_matches_d2o_panel_bind_default() {
     let defaults = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../router/config.default");
     let config = fs::read_to_string(defaults).unwrap();
+    let d2o_default = include_str!("../../r2o-panel/tests/fixtures/d2o-panel-listen-default.txt")
+        .lines()
+        .find_map(|line| line.strip_prefix("PANEL_LISTEN="))
+        .unwrap();
     assert!(
         config
             .lines()
-            .any(|line| line == "PANEL_LISTEN=0.0.0.0:8090")
+            .any(|line| line == format!("PANEL_LISTEN={d2o_default}"))
     );
 }
 
@@ -180,7 +184,7 @@ fn first_config_initialization_imports_supported_settings_without_evaluating_don
     let donor = temp.0.join("donor-config");
     fs::write(
         &defaults,
-        "SCHEMA=1\nMODE=apply\nSTATE_DIR=/opt/r2o/state\nQUEUE_NUM=2000\nQUEUE_NUM6=2001\nR2O_FLOW_CAPACITY=2048\nIPV6_ENABLED=1\nMARK=45\nAUTOUPDATE=1\nLOGMAX=2097152\nLOGKEEP=1048576\nLOG_EVERY=60\nFW_BACKEND=auto\nPORTS=0:65535\nCONNBYTES=0:8\nVOICE_PORTS=50000:50099,1400,3478:3481,5349,19294:19344\nVOICE_CONNBYTES=0:4\nHTTP_KEEPALIVE_PORTS=80\nDNS_PORTS=53,853\nPANEL_LISTEN=0.0.0.0:8090\nTG_ENABLED=1\nTG_MODE=local\nTG_PORT=1443\nR2O_PPE_DEOFFLOAD=1\n",
+        "SCHEMA=1\nMODE=apply\nSTATE_DIR=/opt/r2o/state\nQUEUE_NUM=2000\nQUEUE_NUM6=2001\nR2O_FLOW_CAPACITY=2048\nIPV6_ENABLED=1\nMARK=45\nAUTOUPDATE=1\nLOGMAX=2097152\nLOGKEEP=1048576\nLOG_EVERY=60\nFW_BACKEND=auto\nPORTS=0:65535\nCONNBYTES=0:8\nVOICE_PORTS=50000:50099,1400,3478:3481,5349,19294:19344\nVOICE_CONNBYTES=0:4\nHTTP_KEEPALIVE_PORTS=80\nDNS_PORTS=53,853\nPANEL_LISTEN=127.0.0.1:8090\nTG_ENABLED=1\nTG_MODE=local\nTG_PORT=1443\nR2O_PPE_DEOFFLOAD=1\n",
     )
     .unwrap();
     let donor_text = "SCHEMA=1\nMODE=observe # preserve a documented mode\nSTATE_DIR=/opt/d2k/state # migrate state path\nQUEUE_NUM=1234 # documented queue\nQUEUE_NUM6=1235\nFLOWS=64\nMARK=0x2f\nLOGMAX=4194304\nLOGKEEP=2097152\nLOG_EVERY=120\nPORTS=80,443\nCONNBYTES=0:12\nVOICE_PORTS=3478:3481\nVOICE_CONNBYTES=0:6\nHTTP_KEEPALIVE_PORTS=8080\nDNS_PORTS=53,853,5353\nPANEL_LISTEN=\"127.0.0.1:8091\" # quoted setting with comment\nTG_ENABLED=0\nTG_MODE=relay\nTG_PORT=1445\nCONTROL_SOCKET=/opt/d2k/run/d2kd.sock\nD2K_PPE_DEOFFLOAD=0\nUNKNOWN=$(touch SHOULD_NOT_RUN)\n";

@@ -57,14 +57,14 @@ for ARCH do
         fi
         install -m 0755 "$source" "$STAGE/builds/"
     done
-    for file in S99r2o S99r2o.shim r2o-firewall.sh r2o-tg-firewall.sh r2o-update-scheduler.sh r2o-log-maintenance.sh r2o-telegram-watchdog.sh r2o-ppe-deoffload.sh 001-r2o.sh openwrt-init config.default install.sh uninstall.sh; do
+    for file in S99r2o S99r2o.shim r2o-firewall.sh r2o-tg-firewall.sh r2o-update-scheduler.sh r2o-log-maintenance.sh r2o-telegram-watchdog.sh r2o-ppe-deoffload.sh 001-r2o.sh select-panel-ip.sh openwrt-init config.default install.sh uninstall.sh; do
         source="$ROOT/router/$file"
         if ! test -f "$source" || test -L "$source"; then
             echo "файл адаптера роутера отсутствует или небезопасен: $source" >&2
             exit 1
         fi
         mode=0644
-        case "$file" in S99r2o|S99r2o.shim|r2o-firewall.sh|r2o-tg-firewall.sh|r2o-update-scheduler.sh|r2o-log-maintenance.sh|r2o-telegram-watchdog.sh|r2o-ppe-deoffload.sh|001-r2o.sh|openwrt-init|install.sh|uninstall.sh) mode=0755 ;; esac
+        case "$file" in S99r2o|S99r2o.shim|r2o-firewall.sh|r2o-tg-firewall.sh|r2o-update-scheduler.sh|r2o-log-maintenance.sh|r2o-telegram-watchdog.sh|r2o-ppe-deoffload.sh|001-r2o.sh|select-panel-ip.sh|openwrt-init|install.sh|uninstall.sh) mode=0755 ;; esac
         install -m "$mode" "$source" "$STAGE/router/$file"
     done
 

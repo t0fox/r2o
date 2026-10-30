@@ -49,6 +49,10 @@ check_owned_file() {
     echo "в выпуске отсутствуют файлы адаптера роутера" >&2
     exit 2
 }
+[ -f "$BUNDLE/router/select-panel-ip.sh" ] && [ ! -L "$BUNDLE/router/select-panel-ip.sh" ] || {
+    echo "в выпуске отсутствует выбор безопасного LAN-адреса панели" >&2
+    exit 2
+}
 if [ -L "$BUNDLE/router/001-r2o.sh" ] || [ ! -f "$BUNDLE/router/001-r2o.sh" ] \
     || [ -L "$BUNDLE/router/r2o-ppe-deoffload.sh" ] || [ ! -f "$BUNDLE/router/r2o-ppe-deoffload.sh" ]; then
     echo "в выпуске отсутствует адаптер NDM или PPE" >&2
@@ -153,6 +157,31 @@ else
     CONFIG_INIT_RESULT=$("$MANAGER" config-init --root "$ROOT" --defaults "$BUNDLE/router/config.default")
 fi
 printf '%s\n' "$CONFIG_INIT_RESULT"
+
+# Match D2O's first-install behavior: convert only the loopback template to a
+# private router address. Explicit owner-managed PANEL_LISTEN values survive.
+PANEL_LISTEN_CURRENT=$(sed -n 's/^PANEL_LISTEN=//p' "$ROOT/config" | tail -n 1)
+if [ "$PANEL_LISTEN_CURRENT" = "127.0.0.1:8090" ]; then
+    PANEL_LAN_IP=$(ip -4 -o addr show scope global 2>/dev/null |
+        sh "$BUNDLE/router/select-panel-ip.sh") || {
+        echo "r2o: не удалось определить LAN-адрес панели" >&2
+        exit 1
+    }
+    [ -n "$PANEL_LAN_IP" ] || {
+        echo "r2o: не найден частный LAN IPv4-адрес; панель не будет выставлена в интернет" >&2
+        exit 1
+    }
+    PANEL_CONFIG_TMP=$(mktemp "$ROOT/.config.panel.XXXXXX")
+    if ! sed "s|^PANEL_LISTEN=.*|PANEL_LISTEN=$PANEL_LAN_IP:8090|" \
+        "$ROOT/config" > "$PANEL_CONFIG_TMP"; then
+        rm -f "$PANEL_CONFIG_TMP"
+        echo "r2o: не удалось подготовить LAN-адрес панели" >&2
+        exit 1
+    fi
+    chmod 0600 "$PANEL_CONFIG_TMP"
+    mv -f "$PANEL_CONFIG_TMP" "$ROOT/config"
+    echo "r2o: панель доступна в LAN: http://$PANEL_LAN_IP:8090/"
+fi
 
 STATE_DIR=$(printf '%s\n' "$CONFIG_INIT_RESULT" | sed -n 's/.*"state_dir":"\([^"]*\)".*/\1/p')
 DONOR_STATE_DIR=$(printf '%s\n' "$CONFIG_INIT_RESULT" | sed -n 's/.*"donor_state_dir":"\([^"]*\)".*/\1/p')
