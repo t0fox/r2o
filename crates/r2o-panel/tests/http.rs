@@ -132,6 +132,34 @@ fn diagnostics_api_matches_d2o_opt_in_download_and_same_origin_contract() {
 }
 
 #[test]
+#[ignore = "C/Rust differential fixture"]
+fn d2o_diagnostics_default_query_trace() {
+    let state = std::env::var_os("R2O_PANEL_DIAGNOSTICS_STATE_DIR")
+        .expect("test must provide the E: diagnostics state directory");
+    let c_trace = std::env::var_os("R2O_PANEL_DIAGNOSTICS_C_TRACE")
+        .expect("test must provide the C oracle trace");
+    let rust_trace = std::env::var_os("R2O_PANEL_DIAGNOSTICS_TRACE_OUTPUT")
+        .expect("test must provide the Rust trace output path");
+    let mut config = Config::default();
+    config.state_dir = PathBuf::from(state);
+    config.control_enabled = true;
+
+    let mut trace = String::new();
+    for target in ["/api/diagnostics", "/api/diagnostics?"] {
+        let (status, _, body) = request(
+            &config,
+            &format!("GET {target} HTTP/1.1\r\nHost: router.local\r\n\r\n"),
+        );
+        trace.push_str(&format!("{status}\n{body}\n"));
+    }
+    fs::write(rust_trace, &trace).unwrap();
+    let c_trace = PathBuf::from(c_trace);
+    let c_output = fs::read_to_string(&c_trace)
+        .unwrap_or_else(|error| panic!("cannot read C trace {:?}: {error}", c_trace));
+    assert_eq!(trace, c_output);
+}
+
+#[test]
 fn status_without_live_file_returns_the_panel_contract() {
     let mut config = Config::default();
     config.live_path =

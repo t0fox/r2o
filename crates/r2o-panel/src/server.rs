@@ -187,6 +187,7 @@ struct Request<'a> {
     method: &'a str,
     path: &'a str,
     query: &'a str,
+    query_present: bool,
     headers: Vec<(&'a str, &'a str)>,
     body: &'a [u8],
 }
@@ -221,11 +222,13 @@ impl<'a> Request<'a> {
             }
             headers.push((name, value.trim_matches([' ', '\t'])));
         }
+        let query_present = target.contains('?');
         let (path, query) = target.split_once('?').unwrap_or((target, ""));
         Ok(Self {
             method,
             path,
             query,
+            query_present,
             headers,
             body: &raw[end + 4..],
         })
@@ -582,7 +585,7 @@ fn api_diagnostics(config: &Config, request: &Request<'_>) -> Response {
     if !diagnostics_enabled(&dir) {
         return diagnostic_response(200, b"{\"enabled\":false}".to_vec());
     }
-    if request.query == "status" {
+    if !request.query_present || request.query == "status" {
         return diagnostic_response(200, b"{\"enabled\":true}".to_vec());
     }
     let path = dir.join("report.json");
