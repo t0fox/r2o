@@ -533,6 +533,44 @@ fn d2o_worker_busy_response_does_not_persist_new_domains() {
 
 #[cfg(unix)]
 #[test]
+#[ignore = "run through scripts/test-panel-workers-config-differential.sh"]
+fn d2o_worker_config_read_accepts_utf8_comments() {
+    let config_path = std::env::var_os("R2O_PANEL_WORKER_CONFIG")
+        .expect("test helper provides a config file")
+        .into();
+    let mut config = Config::default();
+    config.config_path = config_path;
+
+    let response = request(
+        &config,
+        "GET /api/telegram/workers HTTP/1.1\r\nHost: localhost:8090\r\n\r\n",
+    );
+    let trace = format!("{}\n{}\n", response.0, response.2);
+    println!("{trace}");
+    if let Some(path) = std::env::var_os("R2O_PANEL_WORKER_TRACE_OUTPUT") {
+        fs::write(path, &trace).unwrap();
+    }
+    let c_trace = fs::read_to_string(
+        std::env::var_os("R2O_PANEL_WORKER_C_TRACE").expect("test helper provides the D2O C trace"),
+    )
+    .unwrap();
+    let parse = |trace: &str| {
+        let mut lines = trace.lines();
+        let status = lines.next().unwrap().parse::<u16>().unwrap();
+        let body: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+        assert!(lines.next().is_none());
+        (status, body)
+    };
+    assert_eq!(parse(&c_trace), parse(&trace));
+    assert_eq!(response.0, 200);
+    assert_eq!(
+        serde_json::from_str::<Value>(&response.2).unwrap()["domains"],
+        serde_json::json!(["old.example"])
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn router_actions_use_service_when_manager_is_installed() {
     use std::os::unix::fs::PermissionsExt;
 
