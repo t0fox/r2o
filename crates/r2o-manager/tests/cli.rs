@@ -162,6 +162,36 @@ fn manager_version_is_available_for_router_smoke_checks() {
 }
 
 #[test]
+fn update_mark_bad_previous_cli_records_runtime_failure_after_rollback() {
+    let temp = TestDir::new();
+    let root = temp.0.join("install");
+    for release in ["r2o-good", "r2o-bad"] {
+        let path = root.join("releases").join(release);
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("release-architecture"), "mipsel").unwrap();
+    }
+    fs::write(
+        root.join("release-slots"),
+        "R2O-RELEASE-SLOTS-1\nr2o-good\nr2o-bad\n",
+    )
+    .unwrap();
+
+    let recorded = json_output(invoke(&[
+        "update-mark-bad-previous",
+        "--root",
+        root.to_str().unwrap(),
+    ]));
+    assert_eq!(recorded["current"], "r2o-good");
+    assert_eq!(recorded["bad_release"], "r2o-bad");
+    let state: Value =
+        serde_json::from_slice(&fs::read(root.join("state/update.json")).unwrap()).unwrap();
+    assert_eq!(state["current"], "r2o-good");
+    assert_eq!(state["bad_release"], "r2o-bad");
+    assert_eq!(state["last_ok"], false);
+    assert_eq!(state["last_release"], "r2o-bad");
+}
+
+#[test]
 fn router_config_default_matches_d2o_panel_bind_default() {
     let defaults = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../router/config.default");
     let config = fs::read_to_string(defaults).unwrap();

@@ -1,7 +1,8 @@
 use r2o_manager::{
     activate_bundle, active_component_path, check_update, config::initialize_config,
-    decode_public_key, install_archive, install_update, read_install_architecture, rollback,
-    set_auto_update, verify_release_archive,
+    decode_public_key, install_archive, install_update, install_update_auto,
+    mark_bad_previous_release, read_install_architecture, rollback, set_auto_update,
+    verify_release_archive,
 };
 use serde_json::json;
 use std::error::Error;
@@ -34,9 +35,11 @@ fn run() -> Result<(), Box<dyn Error>> {
     match command.to_str() {
         Some("verify-release") => verify_release_command(args),
         Some("install-archive") => install_archive_command(args),
-        Some("update-check") => update_command(args, false),
-        Some("update-install") => update_command(args, true),
+        Some("update-check") => update_command(args, false, false),
+        Some("update-install") => update_command(args, true, false),
+        Some("update-install-auto") => update_command(args, true, true),
         Some("update-auto") => update_auto_command(args),
+        Some("update-mark-bad-previous") => update_mark_bad_previous_command(args),
         Some("exec") => exec_command(args),
         Some("install-local") => install_local_command(args),
         Some("config-init") => config_init_command(args),
@@ -86,6 +89,7 @@ fn exec_command(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<()
 fn update_command(
     mut args: impl Iterator<Item = std::ffi::OsString>,
     install: bool,
+    automatic: bool,
 ) -> Result<(), Box<dyn Error>> {
     let mut root = None;
     let mut architecture: Option<String> = None;
@@ -111,7 +115,9 @@ fn update_command(
         None => read_install_architecture(&root)?
             .ok_or("missing --architecture and no active release records one")?,
     };
-    let result = if install {
+    let result = if install && automatic {
+        install_update_auto(&root, &architecture)?
+    } else if install {
         install_update(&root, &architecture)?
     } else {
         check_update(&root, &architecture)?
@@ -146,6 +152,25 @@ fn update_auto_command(
     let root = required(root, "--root")?;
     let enabled = enabled.ok_or("missing required option --enabled")?;
     let result = set_auto_update(&root, enabled)?;
+    println!("{}", serde_json::to_string(&result)?);
+    Ok(())
+}
+
+fn update_mark_bad_previous_command(
+    mut args: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<(), Box<dyn Error>> {
+    let mut root = None;
+    while let Some(option) = args.next() {
+        let value = args
+            .next()
+            .ok_or_else(|| format!("missing value for {}", option.to_string_lossy()))?;
+        match option.to_str() {
+            Some("--root") => set_once(&mut root, PathBuf::from(value), "--root")?,
+            _ => return Err(format!("unknown option: {}", option.to_string_lossy()).into()),
+        }
+    }
+    let root = required(root, "--root")?;
+    let result = mark_bad_previous_release(&root)?;
     println!("{}", serde_json::to_string(&result)?);
     Ok(())
 }
@@ -404,6 +429,8 @@ fn usage() {
     );
     println!("  update-check --root DIR [--architecture ARCH]");
     println!("  update-install --root DIR [--architecture ARCH]");
+    println!("  update-install-auto --root DIR [--architecture ARCH]");
+    println!("  update-mark-bad-previous --root DIR");
     println!("  update-auto --root DIR --enabled 0|1");
     println!("  exec --root DIR --component NAME [-- ARGS...]");
     println!("  install-local --root DIR --bundle DIR --release-id ID --architecture ARCH");

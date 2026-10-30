@@ -1,7 +1,7 @@
 use crate::install::activate_previous_release;
 use crate::{
-    InstallSlots, VerifyError, decode_public_key, install_archive, read_install_slots,
-    verify_manifest,
+    InstallSlots, VerifyError, decode_public_key, install_archive, read_install_architecture,
+    read_install_slots, verify_manifest,
 };
 use r2k_core::dns::{DNS_RESOLVERS, build_a_query, parse_a_reply};
 use serde_json::{Value, json};
@@ -40,6 +40,7 @@ pub enum UpdateError {
     Install(crate::InstallError),
     Download(String),
     InvalidArchitecture,
+    PreviouslyFailedRelease(String),
 }
 
 impl fmt::Display for UpdateError {
@@ -50,6 +51,12 @@ impl fmt::Display for UpdateError {
             Self::Install(error) => write!(f, "не удалось установить выпуск: {error}"),
             Self::Download(error) => write!(f, "не удалось скачать выпуск: {error}"),
             Self::InvalidArchitecture => write!(f, "недопустимое обозначение архитектуры"),
+            Self::PreviouslyFailedRelease(release) => {
+                write!(
+                    f,
+                    "автоматический повтор выпуска {release} пропущен после отказа runtime-проверки"
+                )
+            }
         }
     }
 }
@@ -107,6 +114,7 @@ pub fn check_update(root: &Path, architecture: &str) -> Result<Value, UpdateErro
                 .map(|value| value.current.as_str())
                 .unwrap_or("");
             let available = manifest.release_id != current;
+            let auto_retry_blocked = bad_release_matches(&state, &manifest.release_id);
             let latest = json!({
                 "release_id": manifest.release_id,
                 "version": manifest.version,
@@ -130,7 +138,7 @@ pub fn check_update(root: &Path, architecture: &str) -> Result<Value, UpdateErro
             }
             write_state(root, &state)?;
             Ok(
-                json!({"checked":true,"update_available":available,"current":current,"architecture":architecture,"latest":latest}),
+                json!({"checked":true,"update_available":available,"auto_retry_blocked":auto_retry_blocked,"current":current,"architecture":architecture,"latest":latest}),
             )
         }
         Err(error) => {
@@ -149,6 +157,19 @@ pub fn check_update(root: &Path, architecture: &str) -> Result<Value, UpdateErro
 
 /// Скачать проверенный выпуск и активировать его транзакционно.
 pub fn install_update(root: &Path, architecture: &str) -> Result<Value, UpdateError> {
+    install_update_with_policy(root, architecture, false)
+}
+
+/// Ночная установка не должна повторно активировать релиз, не прошедший health-check.
+pub fn install_update_auto(root: &Path, architecture: &str) -> Result<Value, UpdateError> {
+    install_update_with_policy(root, architecture, true)
+}
+
+fn install_update_with_policy(
+    root: &Path,
+    architecture: &str,
+    automatic: bool,
+) -> Result<Value, UpdateError> {
     validate_architecture(architecture)?;
     let _lock = UpdateLock::acquire(root)?;
     fs::create_dir_all(root)?;
@@ -159,7 +180,7 @@ pub fn install_update(root: &Path, architecture: &str) -> Result<Value, UpdateEr
 
     let result = (|| {
         let work = create_work_dir(root)?;
-        let result = install_update_in(&work, root, architecture);
+        let result = install_update_in(&work, root, architecture, automatic);
         let _ = fs::remove_dir_all(work);
         result
     })();
@@ -205,6 +226,29 @@ pub fn install_update(root: &Path, architecture: &str) -> Result<Value, UpdateEr
     }
 }
 
+/// Записать провалившийся текущий релиз после успешного возврата на previous slot.
+pub fn mark_bad_previous_release(root: &Path) -> Result<Value, UpdateError> {
+    let _lock = UpdateLock::acquire(root)?;
+    let slots = read_install_slots(root)?.ok_or(crate::InstallError::NoPreviousRelease)?;
+    let bad_release = slots
+        .previous
+        .clone()
+        .ok_or(crate::InstallError::NoPreviousRelease)?;
+    let architecture = read_install_architecture(root)?.unwrap_or_default();
+    let mut state = read_state(root);
+    state["busy"] = json!("");
+    state["current"] = json!(slots.current);
+    state["arch"] = json!(architecture);
+    state["bad_release"] = json!(bad_release);
+    state["last_utc"] = json!(now_epoch());
+    state["last_ok"] = json!(false);
+    state["last_release"] = json!(bad_release);
+    state["last_message"] =
+        json!("Релиз не прошёл runtime-проверку; предыдущая версия восстановлена");
+    write_state(root, &state)?;
+    Ok(json!({"current":slots.current,"bad_release":bad_release}))
+}
+
 /// Сохранить настройку автоустановки роутера, не сбрасывая историю обновлений.
 pub fn set_auto_update(root: &Path, enabled: bool) -> Result<Value, UpdateError> {
     let _lock = UpdateLock::acquire(root)?;
@@ -219,6 +263,14 @@ pub fn set_auto_update(root: &Path, enabled: bool) -> Result<Value, UpdateError>
 
 fn auto_update_enabled(state: &Value) -> bool {
     state.get("auto").and_then(Value::as_bool).unwrap_or(true)
+}
+
+fn bad_release_matches(state: &Value, release_id: &str) -> bool {
+    state.get("bad_release").and_then(Value::as_str) == Some(release_id)
+}
+
+fn should_skip_failed_release(automatic: bool, state: &Value, release_id: &str) -> bool {
+    automatic && bad_release_matches(state, release_id)
 }
 
 struct UpdateLock(File);
@@ -301,6 +353,7 @@ fn install_update_in(
     work: &Path,
     root: &Path,
     architecture: &str,
+    automatic: bool,
 ) -> Result<(crate::ReleaseManifest, InstallSlots, bool), UpdateError> {
     let manifest_path = work.join("latest.json");
     let signature_path = work.join("latest.json.sig");
@@ -325,6 +378,9 @@ fn install_update_in(
         .is_some_and(|installed| installed.current == manifest.release_id)
     {
         return Ok((manifest, slots.expect("current release was checked"), false));
+    }
+    if should_skip_failed_release(automatic, &read_state(root), &manifest.release_id) {
+        return Err(UpdateError::PreviouslyFailedRelease(manifest.release_id).into());
     }
     if slots.as_ref().is_some_and(|installed| {
         installed.previous.as_deref() == Some(manifest.release_id.as_str())
@@ -869,6 +925,44 @@ mod tests {
         let state = json!({"busy":"","check_ok":true,"latest":{"release_id":"r2o-1"}});
         write_state(&temp.0, &state).unwrap();
         assert_eq!(read_state(&temp.0), state);
+    }
+
+    #[test]
+    fn automatic_retry_is_blocked_only_for_the_recorded_bad_release() {
+        let state = json!({"bad_release":"r2o-bad"});
+        assert!(should_skip_failed_release(true, &state, "r2o-bad"));
+        assert!(!should_skip_failed_release(false, &state, "r2o-bad"));
+        assert!(!should_skip_failed_release(true, &state, "r2o-new"));
+        assert!(!should_skip_failed_release(
+            true,
+            &json!({"bad_release":""}),
+            "r2o-bad"
+        ));
+    }
+
+    #[test]
+    fn recording_bad_previous_release_updates_runtime_failure_state() {
+        let temp = TestDir::new();
+        let root = &temp.0;
+        for release in ["r2o-good", "r2o-bad"] {
+            let dir = root.join("releases").join(release);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("release-architecture"), "mipsel").unwrap();
+        }
+        fs::write(
+            root.join("release-slots"),
+            "R2O-RELEASE-SLOTS-1\nr2o-good\nr2o-bad\n",
+        )
+        .unwrap();
+
+        let result = mark_bad_previous_release(root).unwrap();
+        assert_eq!(result["current"], "r2o-good");
+        assert_eq!(result["bad_release"], "r2o-bad");
+        let state = read_state(root);
+        assert_eq!(state["current"], "r2o-good");
+        assert_eq!(state["bad_release"], "r2o-bad");
+        assert_eq!(state["last_ok"], false);
+        assert_eq!(state["last_release"], "r2o-bad");
     }
 
     #[test]

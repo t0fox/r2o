@@ -57,7 +57,10 @@ tick() {
     esac
     auto_update_enabled
     if [ "$AUTOUPDATE" = 1 ]; then
-        "$START_STOP_DAEMON" -S -b -x "$INIT" -- update-install >>"$LOG" 2>&1 ||
+        case "$result" in
+            *'"auto_retry_blocked":true'*) log "ночной повтор релиза после отказа runtime-проверки пропущен"; return 0 ;;
+        esac
+        "$START_STOP_DAEMON" -S -b -x "$INIT" -- update-install-auto >>"$LOG" 2>&1 ||
             log "не удалось запустить ночную установку обновления"
     else
         log "доступен новый релиз; ночная установка выключена"

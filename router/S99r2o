@@ -921,8 +921,14 @@ wait_health() {
 }
 
 update_install() {
+    update_mode=${1:-manual}
+    case "$update_mode" in
+        manual) manager_install_command=update-install ;;
+        auto) manager_install_command=update-install-auto ;;
+        *) return 2 ;;
+    esac
     stop || return 1
-    if ! "$MANAGER" update-install --root "$ROOT"; then
+    if ! "$MANAGER" "$manager_install_command" --root "$ROOT"; then
         if "$INIT" start && wait_health; then
             say "установка обновления не удалась; текущий release снова запущен"
         else
@@ -937,6 +943,8 @@ update_install() {
     say "новый release не прошёл runtime-проверку; выполняю rollback"
     "$INIT" stop || true
     "$MANAGER" rollback --root "$ROOT" || die "rollback не выполнен"
+    "$MANAGER" update-mark-bad-previous --root "$ROOT" >/dev/null || \
+        say "не удалось сохранить отказавший release для пропуска ночной повторной установки"
     if "$INIT" start && wait_health; then
         say "предыдущий release восстановлен"
     else
@@ -981,7 +989,7 @@ status() {
 }
 
 case "${1:-}" in
-    "") echo "usage: $0 {start|stop|restart|status|engine-start|engine-stop|engine-restart|settings-restart|reapply|heal|firewall-heal|flowoffload-ensure|flowoffload-restore|ppe-ensure|ppe-remove|ppe-status|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-check|telegram-reapply|tg-heal|tg-stop-rules|update-check|update-install|update-auto-on|update-auto-off|log-tick}" >&2; exit 2 ;;
+    "") echo "usage: $0 {start|stop|restart|status|engine-start|engine-stop|engine-restart|settings-restart|reapply|heal|firewall-heal|flowoffload-ensure|flowoffload-restore|ppe-ensure|ppe-remove|ppe-status|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-check|telegram-reapply|tg-heal|tg-stop-rules|update-check|update-install|update-install-auto|update-auto-on|update-auto-off|log-tick}" >&2; exit 2 ;;
     start) start ;;
     stop) stop ;;
     restart) stop && start ;;
@@ -1017,7 +1025,8 @@ case "${1:-}" in
     telegram-check) telegram_check ;;
     telegram-reapply) telegram_reapply ;;
     update-check) "$MANAGER" update-check --root "$ROOT" ;;
-    update-install) update_install ;;
+    update-install) update_install manual ;;
+    update-install-auto) update_install auto ;;
     update-auto-on) set_update_auto 1 ;;
     update-auto-off) set_update_auto 0 ;;
     clear-found) clear_found ;;
@@ -1026,5 +1035,5 @@ case "${1:-}" in
     heal) heal ;;
     tg-heal) telegram_reapply ;;
     tg-stop-rules) "$TG_FIREWALL" stop ;;
-    *) echo "usage: $0 {start|stop|restart|status|engine-start|engine-stop|engine-restart|settings-restart|reapply|heal|firewall-heal|flowoffload-ensure|flowoffload-restore|ppe-ensure|ppe-remove|ppe-status|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-check|telegram-reapply|tg-heal|tg-stop-rules|update-check|update-install|update-auto-on|update-auto-off|log-tick}" >&2; exit 2 ;;
+    *) echo "usage: $0 {start|stop|restart|status|engine-start|engine-stop|engine-restart|settings-restart|reapply|heal|firewall-heal|flowoffload-ensure|flowoffload-restore|ppe-ensure|ppe-remove|ppe-status|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-check|telegram-reapply|tg-heal|tg-stop-rules|update-check|update-install|update-install-auto|update-auto-on|update-auto-off|log-tick}" >&2; exit 2 ;;
 esac

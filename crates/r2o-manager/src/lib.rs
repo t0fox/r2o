@@ -248,7 +248,10 @@ pub use install::{
     InstallError, InstallSlots, activate_bundle, active_component_path, install_archive,
     read_install_architecture, read_install_slots, rollback,
 };
-pub use update::{UpdateError, check_update, install_update, set_auto_update};
+pub use update::{
+    UpdateError, check_update, install_update, install_update_auto, mark_bad_previous_release,
+    set_auto_update,
+};
 
 /// Принять сырые байты Ed25519, 64 шестнадцатеричных символа или PEM Ed25519 SPKI.
 pub fn decode_public_key(encoded: &[u8]) -> Result<[u8; PUBLIC_KEY_BYTES], VerifyError> {
