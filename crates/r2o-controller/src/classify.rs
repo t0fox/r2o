@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use crate::response::{ResponseOptions, ResponseResult, ResponseVerdict, probe_response};
 
 const TRACE_MAX: usize = 512;
+const CLEAR_CONFIRM_REPEATS: usize = 2;
 /// Один непрерывный диапазон данных триггера, отправляемый пробой с разрезанием.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Span {
@@ -1249,8 +1250,16 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
         result.duration = start.elapsed();
         return result;
     }
+    if stopped(&options) {
+        finish_cancelled(&mut result, &options, start);
+        return result;
+    }
 
     let base = measure_baseline(backend, &target, trigger, &options, &mut result, progress);
+    if stopped(&options) {
+        finish_cancelled(&mut result, &options, start);
+        return result;
+    }
     if base.pass == 0
         && base.errors > 0
         && let Some(error) = &base.error
@@ -1270,6 +1279,48 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
         return result;
     }
     if base.pass == options.repeats {
+        let mut confirm_options = options.clone();
+        confirm_options.repeats = CLEAR_CONFIRM_REPEATS;
+        confirm_options.seed_whole = None;
+        let confirm = measure(
+            backend,
+            &target,
+            trigger,
+            &confirm_options,
+            &mut result,
+            MeasureSpec {
+                name: "whole-confirm",
+                cuts: &[],
+                gap: options.write_gap,
+                until_pass: false,
+            },
+            progress,
+        );
+        if stopped(&options) {
+            finish_cancelled(&mut result, &options, start);
+            return result;
+        }
+        if confirm.errors > 0 {
+            result.verdict = Verdict::Flaky;
+            result.reason = format!(
+                "подтверждение базы: {} из {} опытов не состоялись — ошибка транспорта, а не решение коробки",
+                confirm.errors, CLEAR_CONFIRM_REPEATS
+            );
+            finish(&mut result, &options, start);
+            return result;
+        }
+        let total_pass = base.pass + confirm.pass;
+        let total_repeats = options.repeats + CLEAR_CONFIRM_REPEATS;
+        if total_pass != total_repeats {
+            result.verdict = Verdict::Flaky;
+            result.reason = format!(
+                "база не подтвердилась: итого {} из {} — ложный clear дороже честного flaky",
+                total_pass, total_repeats
+            );
+            finish(&mut result, &options, start);
+            return result;
+        }
+
         result.verdict = Verdict::Clear;
         result.reason = "триггер проходит как есть — обходить нечего".into();
         let sni = trigger.name.strip_prefix("tls:").unwrap_or("");
@@ -1446,12 +1497,7 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
             }
         }
         if result.stopped || stopped(&options) {
-            result.verdict = Verdict::Inconclusive;
-            result.reason = format!(
-                "замер брошен по требованию остановки на {}-м зонде — о цели не сказано ничего",
-                result.probes
-            );
-            finish(&mut result, &options, start);
+            finish_cancelled(&mut result, &options, start);
             return result;
         }
         if !result.unplannable.is_empty() {
@@ -1735,6 +1781,15 @@ fn finish(result: &mut ClassifyResult, options: &ClassifyOptions, start: Instant
     .unwrap_or(usize::MAX);
 }
 
+fn finish_cancelled(result: &mut ClassifyResult, options: &ClassifyOptions, start: Instant) {
+    result.verdict = Verdict::Inconclusive;
+    result.reason = format!(
+        "замер брошен по требованию остановки на {}-м зонде — о цели не сказано ничего",
+        result.probes
+    );
+    finish(result, options, start);
+}
+
 fn current_raw_dial_count() -> u64 {
     #[cfg(target_os = "linux")]
     {
@@ -1750,7 +1805,7 @@ fn current_raw_dial_count() -> u64 {
 mod raw_connect_fallback_tests {
     use super::{
         ClassifyOptions, ClassifyResult, MeasureSpec, ProbeBackend, ProbeError, ProbeOutcome,
-        ProbeRequest, ProbeTarget, Tally, Trigger, measure,
+        ProbeRequest, ProbeTarget, Tally, Trigger, Verdict, measure,
     };
     use std::collections::VecDeque;
     use std::net::SocketAddr;
@@ -1763,6 +1818,7 @@ mod raw_connect_fallback_tests {
         control_results: VecDeque<Result<(), ProbeError>>,
         targets: Vec<(String, u16)>,
         controls: Vec<(SocketAddr, Duration, Option<u32>)>,
+        cancel_after: Option<(Arc<AtomicBool>, usize)>,
     }
 
     impl ProbeBackend for ScriptedBackend {
@@ -1774,6 +1830,11 @@ mod raw_connect_fallback_tests {
         fn probe_outcome(&mut self, request: ProbeRequest<'_>) -> Result<ProbeOutcome, ProbeError> {
             self.targets
                 .push((request.target.host.clone(), request.target.port));
+            if let Some((cancel, after)) = &self.cancel_after
+                && self.targets.len() == *after
+            {
+                cancel.store(true, Ordering::Relaxed);
+            }
             self.outcomes.pop_front().expect("scripted probe result")
         }
 
@@ -1820,6 +1881,7 @@ mod raw_connect_fallback_tests {
                 control_results: control_results.iter().cloned().collect(),
                 targets: Vec::new(),
                 controls: Vec::new(),
+                cancel_after: None,
             },
             target,
             trigger,
@@ -1833,6 +1895,131 @@ mod raw_connect_fallback_tests {
             message: "classify: SYN-ACK не пришёл".into(),
             peer,
         })
+    }
+
+    #[test]
+    fn clear_requires_two_additional_confirmation_probes() {
+        let mut backend = ScriptedBackend {
+            outcomes: [
+                Ok(ProbeOutcome::Accepted),
+                Ok(ProbeOutcome::Accepted),
+                Ok(ProbeOutcome::Accepted),
+                Ok(ProbeOutcome::Rejected),
+                Ok(ProbeOutcome::Rejected),
+            ]
+            .into(),
+            control_results: VecDeque::new(),
+            targets: Vec::new(),
+            controls: Vec::new(),
+            cancel_after: None,
+        };
+        let trigger = Trigger {
+            name: "fixture".into(),
+            payload: b"ABCD".to_vec(),
+            accept: super::Accept::Any,
+        };
+        let options = ClassifyOptions {
+            repeats: 3,
+            allow_loopback: true,
+            ..ClassifyOptions::default()
+        };
+
+        let result = super::run_with_backend("127.0.0.1:443", &trigger, options, &mut backend);
+
+        assert_eq!(result.verdict, Verdict::Flaky);
+        assert_eq!(result.probes, 5);
+        assert_eq!(backend.targets.len(), 5);
+    }
+
+    #[test]
+    fn confirmed_clear_uses_five_successful_probes() {
+        let mut backend = ScriptedBackend {
+            outcomes: vec![Ok(ProbeOutcome::Accepted); 5].into(),
+            control_results: VecDeque::new(),
+            targets: Vec::new(),
+            controls: Vec::new(),
+            cancel_after: None,
+        };
+        let trigger = Trigger {
+            name: "fixture".into(),
+            payload: b"ABCD".to_vec(),
+            accept: super::Accept::Any,
+        };
+        let options = ClassifyOptions {
+            repeats: 3,
+            allow_loopback: true,
+            ..ClassifyOptions::default()
+        };
+
+        let result = super::run_with_backend("127.0.0.1:443", &trigger, options, &mut backend);
+
+        assert_eq!(result.verdict, Verdict::Clear);
+        assert_eq!(result.probes, 5);
+        assert_eq!(backend.targets.len(), 5);
+    }
+
+    #[test]
+    fn confirmation_transport_error_is_flaky() {
+        let mut backend = ScriptedBackend {
+            outcomes: [
+                Ok(ProbeOutcome::Accepted),
+                Ok(ProbeOutcome::Accepted),
+                Ok(ProbeOutcome::Accepted),
+                Err(ProbeError::DialTimeout("confirm timed out".into())),
+                Ok(ProbeOutcome::Accepted),
+            ]
+            .into(),
+            control_results: VecDeque::new(),
+            targets: Vec::new(),
+            controls: Vec::new(),
+            cancel_after: None,
+        };
+        let trigger = Trigger {
+            name: "fixture".into(),
+            payload: b"ABCD".to_vec(),
+            accept: super::Accept::Any,
+        };
+        let options = ClassifyOptions {
+            repeats: 3,
+            allow_loopback: true,
+            ..ClassifyOptions::default()
+        };
+
+        let result = super::run_with_backend("127.0.0.1:443", &trigger, options, &mut backend);
+
+        assert_eq!(result.verdict, Verdict::Flaky);
+        assert_eq!(result.probes, 5);
+        assert!(result.reason.contains("1 из 2 опытов не состоялись"));
+    }
+
+    #[test]
+    fn cancellation_after_baseline_prevents_clear_confirmation() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut backend = ScriptedBackend {
+            outcomes: vec![Ok(ProbeOutcome::Accepted); 3].into(),
+            control_results: VecDeque::new(),
+            targets: Vec::new(),
+            controls: Vec::new(),
+            cancel_after: Some((cancel.clone(), 3)),
+        };
+        let trigger = Trigger {
+            name: "fixture".into(),
+            payload: b"ABCD".to_vec(),
+            accept: super::Accept::Any,
+        };
+        let options = ClassifyOptions {
+            repeats: 3,
+            allow_loopback: true,
+            cancel: Some(cancel),
+            ..ClassifyOptions::default()
+        };
+
+        let result = super::run_with_backend("127.0.0.1:443", &trigger, options, &mut backend);
+
+        assert_eq!(result.verdict, Verdict::Inconclusive);
+        assert_eq!(result.probes, 3);
+        assert!(result.stopped);
+        assert_eq!(backend.targets.len(), 3);
     }
 
     fn run_measure(

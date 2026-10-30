@@ -16,7 +16,8 @@
 | Raw-профили, отправка, отмена, fallback и connect-fallback (3) | C classifier/compose/verify → `classify`, `raw_probe`, `response` | Эквивалентно | `r2o-raw-profile-differential.sh`, `r2o-raw-emission-cancel-differential.sh`, `r2o-raw-connect-fallback-differential.sh`, `r2o-fallback-differential.sh`, `r2o-raw-split-support-differential.sh`; подтверждены перечисленные профили и переходы | 3 |
 | IPv6/фрагментация в живом NFQUEUE, маркировка маршрута, fail-open и conntrack (3) | `d2kd`/`ipfrag`/NFQUEUE → `r2o-datapath` NFQUEUE и Linux socket paths | Частично | Планировочные/пакетные fixtures и исторические Linux прогоны есть; текущий Linux NFQUEUE/netns и полный IPv6/fragment runtime на этом аудите не запущены | 0 |
 | Ограничения таблиц потоков, память и вытеснение под нагрузкой (2) | UDP/TCP session caps и sweep в C → Rust session tables/resource limits | Частично | `r2o-resource-limit-differential.sh`, `r2o-udp-session-table-check.sh` покрывают отдельные лимиты; эквивалентность всех caps, пиков и 128-МБ роутера не доказана | 0 |
-| Классификатор: полный poison/strategy tree, тай-брейки и пропуски (3) | `d2k_classify_run` → `classify::run_with_backend[_progress]` | Частично | `r2o-ask-differential.sh`, `r2o-raw-profile-differential.sh`, shared fixtures; полного дифференциала всего дерева классификатора и сетевых ошибок нет | 0 |
+| Подтверждение базового CLEAR и отмена (1) | `d2k_classify_cancelable` → `classify::run_with_backend_progress` | Эквивалентно | `test-classifier-clear-confirm-differential.sh` сравнивает 5/5 CLEAR, молчание и отказ соединения на подтверждении (FLAKY/5), отмену после базы (INCONCLUSIVE/3); Rust unit test отдельно проверяет транспортную ошибку подтверждения | 1 |
+| Классификатор: poison/strategy tree, тай-брейки и пропуски (2) | `d2k_classify_cancelable` → `classify::run_with_backend[_progress]` | Частично | `r2o-ask-differential.sh`, `r2o-raw-profile-differential.sh`, shared fixtures; полного дифференциала дерева poison/strategy, control/neutral ACK и всех сетевых ошибок нет | 0 |
 | TCP measurement и verifier outcomes/retry (2) | `d2k_meas_once`, `d2k_verify_probe*` → controller measurement и `response::{probe_response,scan_server_hello}` | Эквивалентно | `r2o-meas-differential.sh`, `r2o-tls-verify-differential.sh`, `r2o-measured-split-differential.sh`; покрыты входы/вердикты fixtures | 2 |
 | Scheduler: cooldown, мёртвый адрес, повтор и параллельные endpoints (3) | `on_suspect`, `on_refused`, `d2k_sched_tick` → controller Discovery worker/queue | Эквивалентно | `r2o-scheduler-differential.sh`, `r2o-scheduler-cooldown-differential.sh`, `r2o-scheduler-dead-address-differential.sh`, `r2o-scheduler-concurrent-endpoint-differential.sh` | 3 |
 | Discovery: known-plan reuse, очередь, coalesce, приоритет и worker permits (3) | `on_suspect`/`d2k_sched_sync_step` → `discovery::{known_plans,has_usable_binding}`, controller queue/worker | Эквивалентно | `r2o-discovery-active-lifetime-differential.sh`, `r2o-discovery-coalesce-differential.sh`, `r2o-queue-order-differential.sh`, `r2o-worker-permit-differential.sh`, `r2o-own-first-differential.sh`; пользователь сообщил, что upstream suite прошёл | 3 |
@@ -49,18 +50,20 @@
 | Область | Вес | Доказанные баллы |
 |---|---:|---:|
 | Control/datapath | 16 | 11 |
-| Классификатор, Discovery, scheduler и catalog | 20 | 14 |
+| Классификатор, Discovery, scheduler и catalog | 20 | 15 |
 | TLS, HTTP, ECH и QUIC | 17 | 14 |
 | Discord RTC | 8 | 3 |
 | Telegram, panel, install/update, ABI и ресурсы | 11 | 1 |
 | Firewall и router service | 6 | 4 |
-| **Всего** | **78** | **47** |
+| **Всего** | **78** | **48** |
 
-**Evidence-weighted parity: 47 / 78 = 60,26%.** Это доля требований матрицы с прямым подтверждением перечисленных C/Rust ветвей. Это не утверждение, что остальная функциональность отсутствует: частично реализованные или только исходниково сверенные ветви оставлены без баллов, пока нет подходящего дифференциала.
+**Evidence-weighted parity: 48 / 78 = 61,54%.** Это доля требований матрицы с прямым подтверждением перечисленных C/Rust ветвей. Это не утверждение, что остальная функциональность отсутствует: частично реализованные или только исходниково сверенные ветви оставлены без баллов, пока нет подходящего дифференциала.
 
 В оценку не включены C relay/enrollment серверы D2O и WARP/VPS/relay сценарии: они вне разрешённой целевой архитектуры R2O. Отдельная C11 реализация Telegram не переносится; сравниваются пользовательские функции, при этом Rust donor z2kOW остаётся целевой реализацией.
 
 ## Известные расхождения и тестовые ограничения
+
+**Classifier CLEAR confirmation mismatch исправлен.** D2O выполняет два дополнительных whole-trigger зонда после исходного 3/3 и возвращает FLAKY при молчании или транспортном отказе; Rust раньше сразу объявлял CLEAR. Rust теперь подтверждает базу, учитывает transport errors и прекращает классификацию как CLEAR после отмены. C/Rust differential сравнивает CLEAR/5, silent FLAKY/5, refused FLAKY/5 и cancellation INCONCLUSIVE/3. Полное дерево poison/strategy и control/neutral ACK остаётся частично проверенным.
 
 1. **Discord endpoint B при измерении endpoint A.** Новый текущий D2O fixture блокирует voice worker в `T_VOICE_MEASURE`, подаёт B и после 120 секунд подтверждает, что проба B не запускалась. Rust теперь отбрасывает endpoint, если discovery worker занят и trial ещё не установлен; та же Rust trace проверяет этот gate. C fixture прошёл, Rust differential на доступном host не собран, поэтому mismatch ported, но не доказан эквивалентным.
 2. **Discord trial очередь и поздний отказ.** D2O C fixture подаёт B и затем C при установленном trial A; при истечении A запускается только последний endpoint C. Тот же trace подтверждает поздний NAK постоянного `SET_ADDR`: binding остаётся и scheduler restart повторно отправляет его. Оба Rust пути изменены и включены в fake-datapath trace, который не собран/не запущен на доступных Windows/Cygwin targets; балл не начислен.
