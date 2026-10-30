@@ -794,6 +794,7 @@ pub struct SeedWhole {
     pub pass: usize,
     pub fail: usize,
     pub errors: usize,
+    pub unproven: usize,
     pub error: Option<String>,
 }
 
@@ -923,6 +924,7 @@ struct Tally {
     pass: usize,
     fail: usize,
     errors: usize,
+    unproven: usize,
     error: Option<ProbeError>,
 }
 
@@ -1022,6 +1024,7 @@ fn measure<B: ProbeBackend>(
             pass: seed.pass,
             fail: seed.fail,
             errors: seed.errors,
+            unproven: seed.unproven,
             error: seed.error.clone().map(ProbeError::Transport),
         };
         let observation = &mut result.trace[index];
@@ -1142,7 +1145,10 @@ fn measure<B: ProbeBackend>(
                 }
             }
             Ok(ProbeOutcome::Rejected) => tally.fail += 1,
-            Ok(ProbeOutcome::Unproven) => tally.fail += 1,
+            Ok(ProbeOutcome::Unproven) => {
+                tally.fail += 1;
+                tally.unproven += 1;
+            }
             Err(error) => {
                 tally.fail += 1;
                 tally.errors += 1;
@@ -1379,7 +1385,7 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
         return result;
     }
     if one.pass == 0 {
-        let mut control_ok = true;
+        let mut control_ok = options.control.is_none();
         if let Some(control) = &options.control {
             let measured = measure(
                 backend,
@@ -1391,11 +1397,48 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
                     name: "control",
                     cuts: &[],
                     gap: options.write_gap,
-                    until_pass: true,
+                    until_pass: false,
                 },
                 progress,
             );
-            control_ok = measured.pass > 0;
+            if measured.errors > 0 {
+                result.verdict = Verdict::Flaky;
+                result.reason = format!(
+                    "контроль другим именем: {} из {} опытов не состоялись — ошибка транспорта, а не решение коробки",
+                    measured.errors, options.repeats
+                );
+                finish(&mut result, &options, start);
+                return result;
+            }
+            if measured.pass > 0 && measured.pass < options.repeats {
+                result.verdict = Verdict::Flaky;
+                result.reason = format!(
+                    "контроль другим именем не воспроизводится: {} из {}",
+                    measured.pass, options.repeats
+                );
+                finish(&mut result, &options, start);
+                return result;
+            }
+            control_ok = measured.pass == options.repeats;
+            if control_ok && base.unproven + one.unproven > 0 {
+                result.verdict = Verdict::Inconclusive;
+                result.reason = format!(
+                    "на триггер ответили не доказательством прохода ({} опытов из {}): алерт инжектируют и коробки, и серверы — вердикта нет",
+                    base.unproven + one.unproven,
+                    options.repeats * 2
+                );
+                finish(&mut result, &options, start);
+                return result;
+            }
+            if !control_ok && measured.unproven > 0 {
+                result.verdict = Verdict::Inconclusive;
+                result.reason = format!(
+                    "контроль другим именем ответил не записью TLS ({} из {}) — это не проход и не молчание; вердикта нет",
+                    measured.unproven, options.repeats
+                );
+                finish(&mut result, &options, start);
+                return result;
+            }
         }
         if !control_ok {
             let index = add_observation(&mut result, "neutral-ack", &[], Duration::ZERO);
@@ -1679,6 +1722,7 @@ pub fn run_base_with_backend_progress<B: ProbeBackend>(
         pass: base.pass,
         fail: base.fail,
         errors: base.errors,
+        unproven: base.unproven,
         error: base.error.as_ref().map(|error| error.message().to_owned()),
     });
     BaseProbe {
@@ -2050,6 +2094,152 @@ mod raw_connect_fallback_tests {
         assert_eq!(result.verdict, Verdict::Flaky);
         assert_eq!(result.probes, 6);
         assert_eq!(backend.targets.len(), 6);
+    }
+
+    #[test]
+    fn unproven_trigger_responses_keep_the_c_inconclusive_verdict() {
+        let (mut backend, _, trigger, mut options, _) = fixture(&[], &[]);
+        backend.outcomes = [
+            Ok(ProbeOutcome::Unproven),
+            Ok(ProbeOutcome::Unproven),
+            Ok(ProbeOutcome::Unproven),
+            Ok(ProbeOutcome::Unproven),
+            Ok(ProbeOutcome::Unproven),
+            Ok(ProbeOutcome::Unproven),
+            Ok(ProbeOutcome::Accepted),
+            Ok(ProbeOutcome::Accepted),
+            Ok(ProbeOutcome::Accepted),
+        ]
+        .into();
+        options.repeats = 3;
+        options.control = Some(Trigger {
+            name: "control".into(),
+            payload: b"WXYZ".to_vec(),
+            accept: super::Accept::Any,
+        });
+        options.allow_loopback = true;
+
+        let result = super::run_with_backend("127.0.0.1:443", &trigger, options, &mut backend);
+
+        assert_eq!(result.verdict, Verdict::Inconclusive);
+        assert_eq!(result.probes, 9);
+    }
+
+    #[test]
+    fn seeded_baseline_preserves_unproven_response_counts() {
+        let target = "192.0.2.44:443";
+        let trigger = Trigger {
+            name: "fixture".into(),
+            payload: b"ABCD".to_vec(),
+            accept: super::Accept::Any,
+        };
+        let mut base_backend = ScriptedBackend {
+            outcomes: vec![Ok(ProbeOutcome::Unproven); 3].into(),
+            control_results: VecDeque::new(),
+            targets: Vec::new(),
+            controls: Vec::new(),
+            cancel_after: None,
+        };
+        let base = super::run_base_with_backend_progress(
+            target,
+            &trigger,
+            ClassifyOptions {
+                repeats: 3,
+                ..ClassifyOptions::default()
+            },
+            &mut base_backend,
+            &mut |_, _, _, _| {},
+        );
+        assert_eq!(base.seed_whole.as_ref().map(|seed| seed.unproven), Some(3));
+
+        let mut classifier_backend = ScriptedBackend {
+            outcomes: vec![
+                Ok(ProbeOutcome::Unproven),
+                Ok(ProbeOutcome::Unproven),
+                Ok(ProbeOutcome::Unproven),
+                Ok(ProbeOutcome::Accepted),
+                Ok(ProbeOutcome::Accepted),
+                Ok(ProbeOutcome::Accepted),
+            ]
+            .into(),
+            control_results: VecDeque::new(),
+            targets: Vec::new(),
+            controls: Vec::new(),
+            cancel_after: None,
+        };
+        let options = ClassifyOptions {
+            repeats: 3,
+            control: Some(Trigger {
+                name: "control".into(),
+                payload: b"WXYZ".to_vec(),
+                accept: super::Accept::Any,
+            }),
+            seed_whole: base.seed_whole,
+            ..ClassifyOptions::default()
+        };
+
+        let result = super::run_with_backend(target, &trigger, options, &mut classifier_backend);
+
+        assert_eq!(result.verdict, Verdict::Inconclusive);
+        assert_eq!(classifier_backend.targets.len(), 6);
+    }
+
+    #[test]
+    fn partial_control_response_is_flaky_after_all_repeats() {
+        let (mut backend, _, trigger, mut options, _) = fixture(&[], &[]);
+        backend.outcomes = [
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Accepted),
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Rejected),
+        ]
+        .into();
+        options.repeats = 3;
+        options.control = Some(Trigger {
+            name: "control".into(),
+            payload: b"WXYZ".to_vec(),
+            accept: super::Accept::Any,
+        });
+        options.allow_loopback = true;
+
+        let result = super::run_with_backend("127.0.0.1:443", &trigger, options, &mut backend);
+
+        assert_eq!(result.verdict, Verdict::Flaky);
+        assert_eq!(result.probes, 9);
+    }
+
+    #[test]
+    fn control_transport_error_after_a_pass_is_flaky() {
+        let (mut backend, _, trigger, mut options, _) = fixture(&[], &[]);
+        backend.outcomes = [
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Accepted),
+            Err(ProbeError::Transport("connection refused".into())),
+            Err(ProbeError::Transport("connection refused".into())),
+        ]
+        .into();
+        options.repeats = 3;
+        options.control = Some(Trigger {
+            name: "control".into(),
+            payload: b"WXYZ".to_vec(),
+            accept: super::Accept::Any,
+        });
+        options.allow_loopback = true;
+
+        let result = super::run_with_backend("127.0.0.1:443", &trigger, options, &mut backend);
+
+        assert_eq!(result.verdict, Verdict::Flaky);
+        assert_eq!(result.probes, 9);
     }
 
     fn run_measure(

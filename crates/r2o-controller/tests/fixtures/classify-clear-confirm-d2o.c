@@ -16,6 +16,7 @@
 #include "d2k_verdict.h"
 
 static const uint8_t serverhello[] = { 0x16, 0x03, 0x03, 0x00, 0x02, 0x02, 0x00 };
+static const uint8_t tls_alert[] = { 0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x28 };
 static const uint8_t trigger_sig[] = { 0x16, 0x03, 0x01, 0x00 };
 static volatile sig_atomic_t *active_stop;
 
@@ -23,8 +24,10 @@ struct server {
     int fd;
     uint16_t port;
     int max_connections;
+    int send_from;
     int send_through;
     int cancel_after;
+    int alert;
     pthread_t caller;
     pthread_t thread;
 };
@@ -52,8 +55,12 @@ static void *serve(void *argument) {
         if (connection == server->cancel_after) {
             (void)pthread_kill(server->caller, SIGUSR1);
         }
-        if (connection <= server->send_through) {
-            (void)send(client, serverhello, sizeof serverhello, 0);
+        if (connection >= server->send_from && connection <= server->send_through) {
+            if (server->alert) {
+                (void)send(client, tls_alert, sizeof tls_alert, 0);
+            } else {
+                (void)send(client, serverhello, sizeof serverhello, 0);
+            }
         }
         close(client);
     }
@@ -62,7 +69,8 @@ static void *serve(void *argument) {
 }
 
 static int start_server(struct server *server, int max_connections,
-                        int send_through, int cancel_after) {
+                        int send_from, int send_through,
+                        int cancel_after, int alert) {
     struct sockaddr_in address;
     socklen_t address_length = sizeof address;
     memset(server, 0, sizeof *server);
@@ -82,8 +90,10 @@ static int start_server(struct server *server, int max_connections,
     }
     server->port = ntohs(address.sin_port);
     server->max_connections = max_connections;
+    server->send_from = send_from;
     server->send_through = send_through;
     server->cancel_after = cancel_after;
+    server->alert = alert;
     server->caller = pthread_self();
     if (pthread_create(&server->thread, NULL, serve, server) != 0) {
         close(server->fd);
@@ -103,7 +113,8 @@ static const char *verdict_name(d2k_verdict verdict) {
 }
 
 static int run_case(const char *name, int max_connections,
-                    int send_through, int cancel_after,
+                    int send_from, int send_through,
+                    int cancel_after, int alert,
                     d2k_verdict expected_verdict, unsigned expected_probes) {
     struct server server;
     volatile sig_atomic_t stop = 0;
@@ -117,7 +128,8 @@ static int run_case(const char *name, int max_connections,
         return 1;
     }
     active_stop = &stop;
-    if (start_server(&server, max_connections, send_through, cancel_after) < 0) {
+    if (start_server(&server, max_connections, send_from, send_through,
+                     cancel_after, alert) < 0) {
         return 1;
     }
     int server_joined = max_connections == 0;
@@ -145,11 +157,14 @@ static int run_case(const char *name, int max_connections,
 
 int main(void) {
     int failed = 0;
-    failed |= run_case("clear", 5, 5, 0, D2K_V_CLEAR, 5);
-    failed |= run_case("silent", 5, 3, 0, D2K_V_FLAKY, 5);
-    failed |= run_case("connect-error", 3, 3, 0, D2K_V_FLAKY, 5);
-    failed |= run_case("cancel", 3, 3, 3, D2K_V_INCONCLUSIVE, 3);
-    failed |= run_case("all-baseline-errors", 0, 0, 0, D2K_V_UNREACHABLE, 3);
-    failed |= run_case("partial-base-error", 2, 0, 0, D2K_V_FLAKY, 6);
+    failed |= run_case("clear", 5, 1, 5, 0, 0, D2K_V_CLEAR, 5);
+    failed |= run_case("silent", 5, 1, 3, 0, 0, D2K_V_FLAKY, 5);
+    failed |= run_case("connect-error", 3, 1, 3, 0, 0, D2K_V_FLAKY, 5);
+    failed |= run_case("cancel", 3, 1, 3, 3, 0, D2K_V_INCONCLUSIVE, 3);
+    failed |= run_case("all-baseline-errors", 0, 1, 0, 0, 0, D2K_V_UNREACHABLE, 3);
+    failed |= run_case("partial-base-error", 2, 1, 0, 0, 0, D2K_V_FLAKY, 6);
+    failed |= run_case("unproven", 9, 1, 9, 0, 1, D2K_V_INCONCLUSIVE, 9);
+    failed |= run_case("control-partial", 9, 7, 7, 0, 1, D2K_V_FLAKY, 9);
+    failed |= run_case("control-error", 7, 7, 7, 0, 1, D2K_V_FLAKY, 9);
     return failed;
 }

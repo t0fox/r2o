@@ -40,6 +40,7 @@ fn trigger() -> Trigger {
 fn run_case(
     outcomes: Vec<Result<ProbeOutcome, ProbeError>>,
     cancel_after: Option<usize>,
+    control: Option<Trigger>,
 ) -> ClassifyResult {
     let cancel = Arc::new(AtomicBool::new(false));
     let mut backend = ScriptedBackend {
@@ -51,6 +52,7 @@ fn run_case(
     let options = ClassifyOptions {
         repeats: 3,
         cancel: cancel_after.map(|_| cancel),
+        control,
         ..ClassifyOptions::default()
     };
     run_with_backend("192.0.2.44:443", &trigger(), options, &mut backend)
@@ -67,7 +69,7 @@ fn verdict_name(verdict: Verdict) -> &'static str {
 }
 
 fn main() {
-    let clear = run_case(vec![Ok(ProbeOutcome::Accepted); 5], None);
+    let clear = run_case(vec![Ok(ProbeOutcome::Accepted); 5], None, None);
     let silent = run_case(
         vec![
             Ok(ProbeOutcome::Accepted),
@@ -76,6 +78,7 @@ fn main() {
             Ok(ProbeOutcome::Rejected),
             Ok(ProbeOutcome::Rejected),
         ],
+        None,
         None,
     );
     let connect_error = run_case(
@@ -87,10 +90,12 @@ fn main() {
             Err(ProbeError::Transport("connection refused".into())),
         ],
         None,
+        None,
     );
-    let cancel = run_case(vec![Ok(ProbeOutcome::Accepted); 3], Some(3));
+    let cancel = run_case(vec![Ok(ProbeOutcome::Accepted); 3], Some(3), None);
     let all_baseline_errors = run_case(
         vec![Err(ProbeError::DialTimeout("dial timed out".into())); 6],
+        None,
         None,
     );
     let partial_base_error = run_case(
@@ -103,6 +108,64 @@ fn main() {
             Err(ProbeError::Transport("connection refused".into())),
         ],
         None,
+        None,
+    );
+    let unproven = run_case(
+        vec![
+            Ok(ProbeOutcome::Unproven),
+            Ok(ProbeOutcome::Unproven),
+            Ok(ProbeOutcome::Unproven),
+            Ok(ProbeOutcome::Unproven),
+            Ok(ProbeOutcome::Unproven),
+            Ok(ProbeOutcome::Unproven),
+            Ok(ProbeOutcome::Accepted),
+            Ok(ProbeOutcome::Accepted),
+            Ok(ProbeOutcome::Accepted),
+        ],
+        None,
+        Some(Trigger {
+            name: "control".into(),
+            payload: b"WXYZ".to_vec(),
+            accept: Accept::Any,
+        }),
+    );
+    let control_partial = run_case(
+        vec![
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Accepted),
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Rejected),
+        ],
+        None,
+        Some(Trigger {
+            name: "control".into(),
+            payload: b"WXYZ".to_vec(),
+            accept: Accept::Any,
+        }),
+    );
+    let control_error = run_case(
+        vec![
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Accepted),
+            Err(ProbeError::Transport("connection refused".into())),
+            Err(ProbeError::Transport("connection refused".into())),
+        ],
+        None,
+        Some(Trigger {
+            name: "control".into(),
+            payload: b"WXYZ".to_vec(),
+            accept: Accept::Any,
+        }),
     );
 
     println!("clear={}/{}", verdict_name(clear.verdict), clear.probes);
@@ -123,6 +186,21 @@ fn main() {
         verdict_name(partial_base_error.verdict),
         partial_base_error.probes
     );
+    println!(
+        "unproven={}/{}",
+        verdict_name(unproven.verdict),
+        unproven.probes
+    );
+    println!(
+        "control-partial={}/{}",
+        verdict_name(control_partial.verdict),
+        control_partial.probes
+    );
+    println!(
+        "control-error={}/{}",
+        verdict_name(control_error.verdict),
+        control_error.probes
+    );
 
     assert_eq!(clear.verdict, Verdict::Clear);
     assert_eq!(clear.probes, 5);
@@ -136,4 +214,10 @@ fn main() {
     assert_eq!(all_baseline_errors.probes, 3);
     assert_eq!(partial_base_error.verdict, Verdict::Flaky);
     assert_eq!(partial_base_error.probes, 6);
+    assert_eq!(unproven.verdict, Verdict::Inconclusive);
+    assert_eq!(unproven.probes, 9);
+    assert_eq!(control_partial.verdict, Verdict::Flaky);
+    assert_eq!(control_partial.probes, 9);
+    assert_eq!(control_error.verdict, Verdict::Flaky);
+    assert_eq!(control_error.probes, 9);
 }
