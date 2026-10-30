@@ -122,6 +122,7 @@ export RUN PROC FW_WATCHDOG FW_WD_PID FIREWALL EVENTS CT4_PID CT6_PID DP4_PID DP
 prepare_dirs() { mkdir -p "$RUN"; }
 say() { :; }
 ppe_remove() { :; }
+flowoffload_restore() { :; }
 stop_component() { :; }
 . "$TEST_FUNCTIONS"
 firewall_watchdog_stop() {
