@@ -124,6 +124,8 @@ table inet r2o {
         meta nfproto ipv6 meta l4proto tcp ct direction reply ct reply packets 9-18446744073709551615 tcp flags & rst == rst queue num $QUEUE6 bypass
         meta nfproto ipv6 meta l4proto tcp ct direction reply ct reply packets 9-18446744073709551615 tcp flags & fin == fin queue num $QUEUE6 bypass
         meta nfproto ipv6 meta l4proto tcp th sport { $nft_keepalive } ct direction reply ct reply packets 9-18446744073709551615 queue num $QUEUE6 bypass
+        icmp type time-exceeded icmp code 0 queue num $QUEUE4 bypass
+        icmpv6 type time-exceeded icmpv6 code 0 queue num $QUEUE6 bypass
     }
     chain forward {
         type filter hook forward priority mangle; policy accept;
@@ -294,6 +296,13 @@ xt_family_up() {
             -m connbytes --connbytes 9: --connbytes-dir "$count_direction" --connbytes-mode packets \
             -j NFQUEUE --queue-num "$queue" --queue-bypass
     done
+    if [ "$tool" = iptables ]; then
+        xt "$tool" -t mangle -A R2O_IN -p icmp --icmp-type 11/0 \
+            -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
+    else
+        xt "$tool" -t mangle -A R2O_IN -p ipv6-icmp --icmpv6-type 3/0 \
+            -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
+    fi
     if [ "$tool" = iptables ]; then
         xt "$tool" -t nat -A POSTROUTING -p udp -m mark --mark "$MARK" -j MASQUERADE
     fi

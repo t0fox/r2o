@@ -73,6 +73,12 @@ sed -n '/^fw_return_broadcast() {/,/^}/p' "$D2O_ROOT/files/S99d2k" |
     echo "could not extract the current D2O broadcast helper" >&2
     exit 1
 }
+sed -n '/^fw_icmp_te_rule() {/,/^}/p' "$D2O_ROOT/files/S99d2k" |
+    tr -d '\r' > "$TEMP/d2o-icmp-function.sh"
+[ -s "$TEMP/d2o-icmp-function.sh" ] || {
+    echo "could not extract the current D2O ICMP helper" >&2
+    exit 1
+}
 
 cat > "$TEMP/bin/nft" <<'NFT'
 #!/bin/sh
@@ -108,6 +114,22 @@ for rule in \
     }
     assert_before_queue "$TEMP/r2o.nft" "$rule"
 done
+grep -Fq 'icmp type time-exceeded icmp code 0 queue num 2000 bypass' "$TEMP/d2o.nft" || {
+    echo "D2O nft oracle omitted IPv4 time-exceeded queue" >&2
+    exit 1
+}
+grep -Fq 'icmpv6 type time-exceeded icmpv6 code 0 queue num 2000 bypass' "$TEMP/d2o.nft" || {
+    echo "D2O nft oracle omitted IPv6 time-exceeded queue" >&2
+    exit 1
+}
+grep -Fq 'icmp type time-exceeded icmp code 0 queue num 2000 bypass' "$TEMP/r2o.nft" || {
+    echo "R2O nft rules differ from D2O: missing IPv4 time-exceeded queue" >&2
+    exit 1
+}
+grep -Fq 'icmpv6 type time-exceeded icmpv6 code 0 queue num 2001 bypass' "$TEMP/r2o.nft" || {
+    echo "R2O nft rules differ from D2O: missing IPv6 time-exceeded queue" >&2
+    exit 1
+}
 
 for tool in iptables ip6tables; do
     cat > "$TEMP/bin/$tool" <<'XT'
@@ -150,10 +172,21 @@ say() { :; }
 . "$1"
 fw_return_broadcast iptables mangle D2K_OUT
 HARNESS
+cat > "$TEMP/d2o-icmp-harness.sh" <<'HARNESS'
+#!/bin/sh
+set -eu
+CHAIN_IN=D2K_IN
+QUEUE_NUM=2000
+. "$1"
+fw_icmp_te_rule iptables -A
+fw_icmp_te_rule ip6tables -A
+HARNESS
 FW_TRACE="$TEMP/d2o-iptables.trace" PATH="$TEMP/bin:$PATH" \
     sh "$TEMP/d2o-iptables-harness.sh" "$TEMP/d2o-broadcast-function.sh"
 FW_TRACE="$TEMP/d2o-iptables-fallback.trace" FW_NO_ADDRTYPE=1 PATH="$TEMP/bin:$PATH" \
     sh "$TEMP/d2o-iptables-harness.sh" "$TEMP/d2o-broadcast-function.sh"
+FW_TRACE="$TEMP/d2o-icmp.trace" PATH="$TEMP/bin:$PATH" \
+    sh "$TEMP/d2o-icmp-harness.sh" "$TEMP/d2o-icmp-function.sh"
 
 R2O_DIR="$TEMP/root" \
 R2O_CONFIG=/dev/null \
@@ -206,5 +239,21 @@ grep -Fq -- '-d ff00::/8 -j RETURN' "$TEMP/r2o-iptables.trace" || {
     echo "R2O ip6tables rules differ from D2O: missing IPv6 multicast exclusion" >&2
     exit 1
 }
+for rule in \
+    '-p icmp --icmp-type 11/0 -j NFQUEUE --queue-num 2000 --queue-bypass' \
+    '-p ipv6-icmp --icmpv6-type 3/0 -j NFQUEUE --queue-num 2000 --queue-bypass'; do
+    grep -Fq -- "$rule" "$TEMP/d2o-icmp.trace" || {
+        echo "D2O iptables oracle omitted expected ICMP rule: $rule" >&2
+        exit 1
+    }
+done
+grep -Fq -- '-p icmp --icmp-type 11/0 -j NFQUEUE --queue-num 2000 --queue-bypass' "$TEMP/r2o-iptables.trace" || {
+    echo "R2O iptables rules differ from D2O: missing IPv4 time-exceeded queue" >&2
+    exit 1
+}
+grep -Fq -- '-p ipv6-icmp --icmpv6-type 3/0 -j NFQUEUE --queue-num 2001 --queue-bypass' "$TEMP/r2o-iptables.trace" || {
+    echo "R2O ip6tables rules differ from D2O: missing IPv6 time-exceeded queue" >&2
+    exit 1
+}
 
-echo "D2O/R2O nft and iptables broadcast/multicast rules match d2o $ACTUAL_D2O_SHA."
+echo "D2O/R2O nft and iptables broadcast/multicast/ICMP rules match d2o $ACTUAL_D2O_SHA."
