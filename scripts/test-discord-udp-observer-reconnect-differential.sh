@@ -39,7 +39,12 @@ mkdir -p "$TEMP/rust/src"
 rust_root=$ROOT
 rust_temp=$TEMP
 rust_target=${CARGO_TARGET_DIR:-$TEMP/target}
-if command -v cygpath >/dev/null 2>&1; then
+rust_host=$($RUSTC -vV | sed -n 's/^host: //p')
+case "$rust_host" in
+    *-windows-*) use_windows_rust_paths=1 ;;
+    *) use_windows_rust_paths=0 ;;
+esac
+if [ "$use_windows_rust_paths" = 1 ] && command -v cygpath >/dev/null 2>&1; then
     rust_root=$(cygpath -am "$ROOT")
     rust_temp=$(cygpath -am "$TEMP")
     rust_target=$(cygpath -am "$rust_target")
@@ -69,7 +74,7 @@ EOF
 "$TEMP/d2o-trace" > "$TEMP/d2o.out"
 CARGO_TARGET_DIR=$rust_target \
 RUSTFLAGS="${RUSTFLAGS:--Awarnings}" \
-    CARGO_BUILD_TARGET=${CARGO_BUILD_TARGET:-$($RUSTC -vV | sed -n 's/^host: //p')} \
+    CARGO_BUILD_TARGET=${CARGO_BUILD_TARGET:-$rust_host} \
     CARGO_MAKEFLAGS= \
     "$CARGO" run --quiet --manifest-path "$rust_temp/rust/Cargo.toml" > "$TEMP/r2o.out"
 
