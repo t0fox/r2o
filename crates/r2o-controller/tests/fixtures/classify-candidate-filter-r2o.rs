@@ -20,6 +20,11 @@ fn print_selected(label: &str, options: &ClassifyOptions) {
 
 fn main() {
     let mut options = ClassifyOptions::default();
+    println!("classifier-repeats={}", options.repeats);
+    options.repeats = 5;
+    println!("classifier-custom-repeats={}", options.repeats);
+    options.repeats = ClassifyOptions::default().repeats;
+    println!("classifier-zero-repeats-default={}", options.repeats);
     println!("classifier-timeout-ms={}", options.timeout.as_millis());
     options.timeout = std::time::Duration::from_millis(2750);
     println!(

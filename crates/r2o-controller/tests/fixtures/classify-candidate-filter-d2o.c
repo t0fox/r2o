@@ -35,6 +35,12 @@ int main(void)
     d2k_opts options = {0};
 
     d2k_opts_defaults(&options);
+    printf("classifier-repeats=%d\n", options.repeats);
+    options.repeats = 5;
+    printf("classifier-custom-repeats=%d\n", options.repeats);
+    options.repeats = 0;
+    d2k_opts_defaults(&options);
+    printf("classifier-zero-repeats-default=%d\n", options.repeats);
     printf("classifier-timeout-ms=%d\n", options.timeout_ms);
     options.timeout_ms = 2750;
     printf("classifier-custom-timeout-ms=%d\n", options.timeout_ms);

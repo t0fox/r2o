@@ -1098,6 +1098,17 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
     let mut index = 0;
     while index < arguments.len() {
         match arguments[index].to_str() {
+            Some("--repeats") => {
+                index += 1;
+                let value = arguments
+                    .get(index)
+                    .and_then(|value| value.to_str())
+                    .ok_or("--repeats требует число повторов")?;
+                let parsed = value
+                    .parse::<i32>()
+                    .map_err(|_| "--repeats должен быть целым числом")?;
+                repeats = (parsed > 0).then_some(parsed as usize);
+            }
             Some("--allow-loopback") if !allow_loopback => allow_loopback = true,
             Some("--no-raw") => no_raw = true,
             Some("--timeout") => {
@@ -1369,6 +1380,7 @@ fn print_help() {
     println!("  classify: [--control-sni ИМЯ] задаёт подтверждённое контрольное имя");
     println!("  classify: [--control-raw HEX] задаёт байты TLS-записи контроля");
     println!("  classify: [--no-raw] пропускает проверки с raw-пакетами");
+    println!("  classify: [--repeats N] задаёт число единогласных повторов; default 3");
     println!("  classify: [--timeout MS] задаёт ожидание каждого зонда; по умолчанию 6000 мс");
     println!(
         "  classify: [--write-gap MS] задаёт паузу между частями ClientHello; по умолчанию 60 мс"
@@ -30939,6 +30951,29 @@ mod tests {
                 arm_socket_path: None,
                 modern: true,
             }
+        );
+    }
+
+    #[test]
+    fn classify_options_accept_repeats_flag_and_d2o_default_values() {
+        assert_eq!(parse_classify_options(&[]).unwrap().repeats, 3);
+        for value in ["0", "-1"] {
+            assert_eq!(
+                parse_classify_options(&[OsString::from("--repeats"), OsString::from(value)])
+                    .unwrap()
+                    .repeats,
+                3
+            );
+        }
+        assert_eq!(
+            parse_classify_options(&[OsString::from("--repeats"), OsString::from("5")])
+                .unwrap()
+                .repeats,
+            5
+        );
+        assert!(parse_classify_options(&[OsString::from("--repeats")]).is_err());
+        assert!(
+            parse_classify_options(&[OsString::from("--repeats"), OsString::from("many")]).is_err()
         );
     }
 
