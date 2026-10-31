@@ -609,7 +609,8 @@ fn r2o_print_quic_result(
     println!("запросы:     {}", result.data.requests);
     println!("датаграммы:  {}", result.data.datagrams);
     if result.data.budget_required {
-        let r2o_required_datagrams = budget_packets.saturating_mul(2);
+        let r2o_required_datagrams =
+            r2o_controller::r2o_quic_http3::r2o_quic_http3_budget_datagrams(budget_packets);
         println!(
             "бюджет:      {} из {} датаграмм — {}",
             result.data.datagrams,

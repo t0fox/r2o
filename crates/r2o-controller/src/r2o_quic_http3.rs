@@ -538,15 +538,19 @@ struct R2oQuicHttp3Budget {
     progress_mark: Option<u64>,
 }
 
+pub fn r2o_quic_http3_budget_datagrams(budget_packets: u32) -> u32 {
+    let packets = if budget_packets == 0 {
+        R2O_QUIC_HTTP3_DEFAULT_BUDGET_PACKETS
+    } else {
+        budget_packets
+    };
+    packets.wrapping_mul(2)
+}
+
 impl R2oQuicHttp3Budget {
     fn r2o_initialize(budget_packets: u32) -> Self {
-        let packets = if budget_packets == 0 {
-            R2O_QUIC_HTTP3_DEFAULT_BUDGET_PACKETS
-        } else {
-            budget_packets
-        };
         Self {
-            need: u64::from(packets).saturating_mul(2),
+            need: u64::from(r2o_quic_http3_budget_datagrams(budget_packets)),
             progress_mark: None,
         }
     }
@@ -1448,6 +1452,23 @@ mod tests {
             start + Duration::from_millis(300),
             Duration::from_secs(1)
         ));
+    }
+
+    #[test]
+    fn r2o_quic_budget_need_matches_d2o_unsigned_multiplication() {
+        for (r2o_packets, r2o_expected) in [
+            (0, 50),
+            (1, 2),
+            (25, 50),
+            (u32::MAX / 2, u32::MAX - 1),
+            (u32::MAX / 2 + 1, 0),
+            (u32::MAX, u32::MAX - 1),
+        ] {
+            assert_eq!(
+                R2oQuicHttp3Budget::r2o_initialize(r2o_packets).need,
+                u64::from(r2o_expected)
+            );
+        }
     }
 
     #[test]
