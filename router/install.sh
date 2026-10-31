@@ -10,6 +10,7 @@ NDM_DIR=${R2O_NDM_DIR:-/opt/etc/ndm/netfilter.d}
 OPENWRT_INIT_DIR=${R2O_OPENWRT_INIT_DIR:-/etc/init.d}
 NDM_HOOK=$NDM_DIR/001-r2o.sh
 INIT_SHIM=$INIT_DIR/S99r2o
+FW3_INCLUDE=$INIT_DIR/r2o-firewall-fw3-include.sh
 OPENWRT_SERVICE=$OPENWRT_INIT_DIR/r2o
 MANAGER=$BUNDLE/builds/r2o-manager-linux-$ARCH
 
@@ -45,7 +46,8 @@ check_owned_file() {
 # shellcheck disable=SC2015 # fail unless both validations succeed
 [ -x "$MANAGER" ] && [ ! -L "$MANAGER" ] || { echo "в выпуске нет исполняемого менеджера для $ARCH" >&2; exit 2; }
 # shellcheck disable=SC2015 # fail unless both required files exist
-[ -f "$BUNDLE/router/S99r2o.shim" ] && [ -f "$BUNDLE/router/config.default" ] || {
+[ -f "$BUNDLE/router/S99r2o.shim" ] && [ -f "$BUNDLE/router/r2o-firewall-fw3-include.sh" ] \
+    && [ -f "$BUNDLE/router/config.default" ] || {
     echo "в выпуске отсутствуют файлы адаптера роутера" >&2
     exit 2
 }
@@ -72,6 +74,7 @@ if [ -e "$INIT_DIR" ] || [ -L "$INIT_DIR" ]; then
     fi
 fi
 check_owned_file "$INIT_SHIM" "$BUNDLE/router/S99r2o.shim" S99r2o.shim
+check_owned_file "$FW3_INCLUDE" "$BUNDLE/router/r2o-firewall-fw3-include.sh" r2o-firewall-fw3-include.sh
 if [ -e "$ROOT/releases" ] || [ -L "$ROOT/releases" ]; then
     if [ -L "$ROOT/releases" ] || [ ! -d "$ROOT/releases" ]; then
         echo "каталог выпусков должен быть обычным каталогом: $ROOT/releases" >&2
@@ -204,6 +207,10 @@ SHIM_TMP=$INIT_DIR/.S99r2o.new.$$
 cp "$BUNDLE/router/S99r2o.shim" "$SHIM_TMP"
 chmod 0755 "$SHIM_TMP"
 mv -f "$SHIM_TMP" "$INIT_SHIM"
+FW3_INCLUDE_TMP=$INIT_DIR/.r2o-firewall-fw3-include.sh.new.$$
+cp "$BUNDLE/router/r2o-firewall-fw3-include.sh" "$FW3_INCLUDE_TMP"
+chmod 0755 "$FW3_INCLUDE_TMP"
+mv -f "$FW3_INCLUDE_TMP" "$FW3_INCLUDE"
 
 if [ "$INSTALL_NDM_HOOK" = 1 ]; then
     NDM_TMP=$(mktemp "$NDM_DIR/.001-r2o.sh.XXXXXX")

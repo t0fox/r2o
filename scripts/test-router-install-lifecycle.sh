@@ -93,6 +93,26 @@ grep -qx '# foreign NDM hook' "$NDM_DIR/001-r2o.sh" || {
     exit 1
 }
 rm "$NDM_DIR/001-r2o.sh"
+printf '# foreign firewall include launcher\n' > "$INIT_DIR/r2o-firewall-fw3-include.sh"
+if R2O_DIR="$INSTALL_ROOT" \
+    R2O_INIT_DIR="$INIT_DIR" \
+    R2O_NDM_DIR="$NDM_DIR" \
+    R2O_CONFIG="$OFF_CONFIG" \
+    R2O_PLATFORM=local \
+        sh "$ROOT/router/install.sh" "$BUNDLE" r2o-include-conflict testhost \
+        >"$TEMP/include-conflict.log" 2>&1; then
+    echo "установка перезаписала чужой fw3 include launcher" >&2
+    exit 1
+fi
+grep -qx '# foreign firewall include launcher' "$INIT_DIR/r2o-firewall-fw3-include.sh" || {
+    echo "проверка конфликта изменила чужой fw3 include launcher" >&2
+    exit 1
+}
+[ ! -e "$INSTALL_ROOT/release-slots" ] || {
+    echo "конфликт fw3 include обнаружен после изменения активного выпуска" >&2
+    exit 1
+}
+rm "$INIT_DIR/r2o-firewall-fw3-include.sh"
 
 install_release r2o-install-test1
 [ "$(sed -n '2p' "$INSTALL_ROOT/release-slots")" = r2o-install-test1 ] || {
@@ -100,6 +120,10 @@ install_release r2o-install-test1
     exit 1
 }
 [ -x "$INIT_DIR/S99r2o" ] || { echo "не установлен shim автозапуска" >&2; exit 1; }
+cmp "$BUNDLE/router/r2o-firewall-fw3-include.sh" "$INIT_DIR/r2o-firewall-fw3-include.sh" || {
+    echo "не установлен fw3 include launcher" >&2
+    exit 1
+}
 cmp "$BUNDLE/router/001-r2o.sh" "$NDM_DIR/001-r2o.sh" || {
     echo "не установлен NDM hook из выпуска" >&2
     exit 1
@@ -170,6 +194,7 @@ R2O_TG_FIREWALL="$TG_FIREWALL" \
     sh "$ROOT/router/uninstall.sh" --yes
 [ ! -e "$INSTALL_ROOT" ] || { echo "удаление оставило каталог выпуска" >&2; exit 1; }
 [ ! -e "$INIT_DIR/S99r2o" ] || { echo "удаление оставило shim автозапуска" >&2; exit 1; }
+[ ! -e "$INIT_DIR/r2o-firewall-fw3-include.sh" ] || { echo "удаление оставило fw3 include launcher" >&2; exit 1; }
 [ ! -e "$OPENWRT_INIT_DIR/r2o" ] || { echo "удаление оставило службу OpenWrt" >&2; exit 1; }
 [ ! -e "$NDM_DIR/001-r2o.sh" ] || { echo "удаление оставило NDM hook R2O" >&2; exit 1; }
 [ ! -e "$RUNTIME_DIR" ] || { echo "удаление оставило runtime-каталог" >&2; exit 1; }
@@ -179,6 +204,7 @@ grep -qx 'openwrt:disable' "$EVENTS" || { echo "удаление не отклю
 
 install_release r2o-install-test3
 printf '\n# owner customization\n' >> "$NDM_DIR/001-r2o.sh"
+printf '\n# owner customization\n' >> "$INIT_DIR/r2o-firewall-fw3-include.sh"
 R2O_DIR="$INSTALL_ROOT" \
 R2O_INIT_DIR="$INIT_DIR" \
 R2O_CONFIG="$OFF_CONFIG" \
@@ -191,6 +217,10 @@ R2O_TG_FIREWALL="$TG_FIREWALL" \
     sh "$ROOT/router/uninstall.sh" --yes
 grep -q '^# owner customization$' "$NDM_DIR/001-r2o.sh" || {
     echo "удаление затёрло изменённый NDM hook" >&2
+    exit 1
+}
+grep -q '^# owner customization$' "$INIT_DIR/r2o-firewall-fw3-include.sh" || {
+    echo "удаление затёрло изменённый fw3 include launcher" >&2
     exit 1
 }
 echo "Проверены чистая установка, обновление, откат и удаление с сохранением изменённого NDM hook"

@@ -74,6 +74,7 @@ if [ "$YES" -ne 1 ]; then
 fi
 
 INIT_SCRIPT=$INIT_DIR/S99r2o
+FW3_INCLUDE=$INIT_DIR/r2o-firewall-fw3-include.sh
 ACTIVE=$(sed -n '2p' "$ROOT/release-slots")
 case "$ACTIVE" in
     ''|.|..|*[!A-Za-z0-9._-]*) fail "идентификатор активного выпуска повреждён" ;;
@@ -116,6 +117,24 @@ fi
 
 if [ "$OWNED_SHIM" = 1 ]; then
     rm -f "$INIT_SCRIPT"
+fi
+
+if [ -e "$FW3_INCLUDE" ] || [ -L "$FW3_INCLUDE" ]; then
+    OWNED_FW3_INCLUDE=0
+    if [ ! -L "$FW3_INCLUDE" ] && [ -f "$FW3_INCLUDE" ]; then
+        for RELEASE_FW3_INCLUDE in "$ROOT"/releases/*/router/r2o-firewall-fw3-include.sh; do
+            if [ -f "$RELEASE_FW3_INCLUDE" ] && [ ! -L "$RELEASE_FW3_INCLUDE" ] \
+                && cmp -s "$FW3_INCLUDE" "$RELEASE_FW3_INCLUDE"; then
+                OWNED_FW3_INCLUDE=1
+                break
+            fi
+        done
+    fi
+    if [ "$OWNED_FW3_INCLUDE" = 1 ]; then
+        rm -f "$FW3_INCLUDE"
+    else
+        echo "r2o uninstall: изменённый или чужой fw3 include launcher сохранён: $FW3_INCLUDE" >&2
+    fi
 fi
 
 NDM_HOOK=$NDM_DIR/001-r2o.sh

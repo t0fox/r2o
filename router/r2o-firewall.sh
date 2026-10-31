@@ -28,6 +28,8 @@ FLOWOFFLOAD_GENERIC='meta l4proto { tcp, udp } flow offload @ft'
 FLOWOFFLOAD_COMMENT='comment "r2o-flowoffload"'
 FLOWOFFLOAD_SELECTIVE="meta l4proto { tcp, udp } ct mark & 0x80000000 == 0 flow offload @ft $FLOWOFFLOAD_COMMENT"
 FW4=${R2O_FW4:-fw4}
+FW3=${R2O_FW3:-fw3}
+FIREWALL_INIT=${R2O_FIREWALL_INIT:-/etc/init.d/firewall}
 PPE_ADAPTER=${R2O_PPE_ADAPTER:-$(dirname -- "$0")/r2o-ppe-deoffload.sh}
 PPE_DEOFFLOAD=${R2O_PPE_DEOFFLOAD:-1}
 FW_V4ONLY=$RUN_DIR/fw-ipv4-only
@@ -554,11 +556,79 @@ flowoffload_remove_all_unlocked() {
     flowoffload_store_state fallback
 }
 
+flowoffload_legacy_check_tool() {
+    flowoffload_legacy_tool=$1
+    flowoffload_legacy_rules=$(xt "$flowoffload_legacy_tool" -t filter -S FORWARD 2>/dev/null) || return 1
+    flowoffload_legacy_count=$(printf '%s\n' "$flowoffload_legacy_rules" | awk '
+        /^-A FORWARD / && /-j FLOWOFFLOAD([[:space:]]|$)/ {
+            line = $0
+            sub(/^-A FORWARD /, "", line)
+            proto = gsub(/(^|[[:space:]])-p all([[:space:]]|$)/, " ", line)
+            comment = gsub(/(^|[[:space:]])-m comment --comment "!fw3: Traffic offloading"([[:space:]]|$)/, " ", line)
+            conntrack = gsub(/(^|[[:space:]])-m conntrack --ctstate RELATED,ESTABLISHED([[:space:]]|$)/, " ", line)
+            target = gsub(/(^|[[:space:]])-j FLOWOFFLOAD( --hw)?$/, "", line)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+            if (proto <= 1 && comment <= 1 && conntrack == 1 && target == 1 && line == "") supported++
+            else unsupported++
+            next
+        }
+        /-j FLOWOFFLOAD([[:space:]]|$)/ { unsupported++ }
+        END { if (unsupported) exit 1; print supported + 0 }
+    ') || return 1
+}
+
+flowoffload_legacy_remove_tool() {
+    flowoffload_legacy_tool=$1
+    while :; do
+        flowoffload_legacy_line=$(xt "$flowoffload_legacy_tool" -t filter -L FORWARD \
+            --line-numbers -n 2>/dev/null | awk '$1 ~ /^[0-9]+$/ && $2 == "FLOWOFFLOAD" { print $1; exit }') || return 1
+        [ -n "$flowoffload_legacy_line" ] || break
+        xt "$flowoffload_legacy_tool" -t filter -D FORWARD "$flowoffload_legacy_line" || return 1
+    done
+    flowoffload_legacy_check_tool "$flowoffload_legacy_tool" || return 1
+    [ "$flowoffload_legacy_count" -eq 0 ]
+}
+
+flowoffload_legacy_ensure_unlocked() {
+    command -v "$FW3" >/dev/null 2>&1 || return 0
+    command -v iptables >/dev/null 2>&1 || return 0
+    flowoffload_legacy_check_tool iptables || return 1
+    flowoffload_legacy_v4=$flowoffload_legacy_count
+    flowoffload_legacy_v6=0
+    if [ "$IPV6_ENABLED_CONFIG" = 1 ] && command -v ip6tables >/dev/null 2>&1; then
+        flowoffload_legacy_check_tool ip6tables || return 1
+        flowoffload_legacy_v6=$flowoffload_legacy_count
+    fi
+    [ "$flowoffload_legacy_v4" -gt 0 ] || [ "$flowoffload_legacy_v6" -gt 0 ] || return 0
+    flowoffload_store_state legacy || return 1
+    [ "$flowoffload_legacy_v4" -eq 0 ] || flowoffload_legacy_remove_tool iptables || return 1
+    [ "$flowoffload_legacy_v6" -eq 0 ] || flowoffload_legacy_remove_tool ip6tables || return 1
+}
+
+flowoffload_firewall_reload() {
+    if [ -x "$FIREWALL_INIT" ]; then
+        R2O_FLOWOFFLOAD_RESTORING=1 "$FIREWALL_INIT" reload
+    elif command -v "$FW3" >/dev/null 2>&1; then
+        R2O_FLOWOFFLOAD_RESTORING=1 "$FW3" reload
+    else
+        return 1
+    fi
+}
+
 flowoffload_ensure_unlocked() {
     force_reset=${1:-0}
     if [ "$BACKEND" != nft ] || ! flowoffload_marking_available; then
         fw4_rules=$(nft -a list table inet fw4 2>/dev/null || true)
-        case "$fw4_rules" in *'flow offload @'*) flowoffload_remove_all_unlocked ;; *) return 0 ;; esac
+        case "$fw4_rules" in
+            *'flow offload @'*) flowoffload_remove_all_unlocked ;;
+            *)
+                if [ "$BACKEND" = iptables ] && ! command -v "$FW4" >/dev/null 2>&1; then
+                    flowoffload_legacy_ensure_unlocked
+                else
+                    return 0
+                fi
+                ;;
+        esac
         return $?
     fi
     fw4_rules=$(nft -a list table inet fw4 2>/dev/null || true)
@@ -619,6 +689,9 @@ flowoffload_restore_unlocked() {
         fallback)
             R2O_FLOWOFFLOAD_RESTORING=1 "$FW4" reload >/dev/null 2>&1 || \
             R2O_FLOWOFFLOAD_RESTORING=1 /etc/init.d/firewall reload >/dev/null 2>&1 || return 1
+            ;;
+        legacy)
+            flowoffload_firewall_reload || return 1
             ;;
         *) return 0 ;;
     esac

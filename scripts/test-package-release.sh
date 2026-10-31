@@ -28,6 +28,7 @@ printf '%s\n' \
     router/install.sh \
     router/openwrt-init \
     router/r2o-firewall.sh \
+    router/r2o-firewall-fw3-include.sh \
     router/r2o-tg-firewall.sh \
     router/r2o-update-scheduler.sh \
     router/r2o-log-maintenance.sh \
