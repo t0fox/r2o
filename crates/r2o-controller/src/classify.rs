@@ -870,7 +870,7 @@ impl Default for ClassifyOptions {
     fn default() -> Self {
         Self {
             repeats: 3,
-            timeout: PROBE_TIMEOUT_CEILING,
+            timeout: Duration::from_secs(6),
             write_gap: Duration::from_millis(60),
             long_gap: Duration::from_millis(700),
             allow_loopback: false,

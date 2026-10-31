@@ -34,6 +34,9 @@ int main(void)
 {
     d2k_opts options = {0};
 
+    d2k_opts_defaults(&options);
+    printf("classifier-timeout-ms=%d\n", options.timeout_ms);
+
     print_selected("all", &options);
 
     snprintf(options.only, sizeof(options.only), "%s", "seqovl-1");

@@ -20,6 +20,7 @@ fn print_selected(label: &str, options: &ClassifyOptions) {
 
 fn main() {
     let mut options = ClassifyOptions::default();
+    println!("classifier-timeout-ms={}", options.timeout.as_millis());
     print_selected("all", &options);
 
     options.only_poison = Some("seqovl-1".into());
