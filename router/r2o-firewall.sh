@@ -22,11 +22,13 @@ HTTP_KEEPALIVE_PORTS=${HTTP_KEEPALIVE_PORTS:-80}
 DNS_PORTS=${DNS_PORTS:-53,853}
 RUN_DIR=${R2O_RUN_DIR:-$ROOT/run}
 FW_LOCK=${R2O_FIREWALL_LOCK:-$RUN_DIR/firewall-operation.lock}
-FLOWOFFLOAD_MARK=0x80000000
+# Keep the flow bit outside the default OpenWrt pbr, mwan3, and shunt mark masks.
+FLOWOFFLOAD_MARK=0x80
+FLOWOFFLOAD_CLEAR_MASK=0xffffff7f
 FLOWOFFLOAD_STATE=$RUN_DIR/flow-offloading.runtime
 FLOWOFFLOAD_GENERIC='meta l4proto { tcp, udp } flow offload @ft'
 FLOWOFFLOAD_COMMENT='comment "r2o-flowoffload"'
-FLOWOFFLOAD_SELECTIVE="meta l4proto { tcp, udp } ct mark & 0x80000000 == 0 flow offload @ft $FLOWOFFLOAD_COMMENT"
+FLOWOFFLOAD_SELECTIVE="meta l4proto { tcp, udp } ct mark & $FLOWOFFLOAD_MARK == 0 flow offload @ft $FLOWOFFLOAD_COMMENT"
 FW4=${R2O_FW4:-fw4}
 FW3=${R2O_FW3:-fw3}
 FIREWALL_INIT=${R2O_FIREWALL_INIT:-/etc/init.d/firewall}
@@ -184,9 +186,9 @@ table inet r2o {
         meta l4proto { tcp, udp } th dport { $nft_dns } return
         meta l4proto { tcp, udp } th sport { $nft_dns } return
         ct status dnat return
-        ct mark & $FLOWOFFLOAD_MARK != 0 meta l4proto udp ct original packets $nft_voice_late_window ct reply packets $nft_voice_late_window th dport { $nft_voice } ct mark set ct mark & 0x7fffffff
-        ct mark & $FLOWOFFLOAD_MARK != 0 meta l4proto udp ct original packets $nft_voice_late_window ct reply packets $nft_voice_late_window th sport { $nft_voice } ct mark set ct mark & 0x7fffffff
-        ct mark & $FLOWOFFLOAD_MARK != 0 ct original packets $nft_late_window ct reply packets $nft_late_window ct mark set ct mark & 0x7fffffff
+        ct mark & $FLOWOFFLOAD_MARK != 0 meta l4proto udp ct original packets $nft_voice_late_window ct reply packets $nft_voice_late_window th dport { $nft_voice } ct mark set ct mark & $FLOWOFFLOAD_CLEAR_MASK
+        ct mark & $FLOWOFFLOAD_MARK != 0 meta l4proto udp ct original packets $nft_voice_late_window ct reply packets $nft_voice_late_window th sport { $nft_voice } ct mark set ct mark & $FLOWOFFLOAD_CLEAR_MASK
+        ct mark & $FLOWOFFLOAD_MARK != 0 ct original packets $nft_late_window ct reply packets $nft_late_window ct mark set ct mark & $FLOWOFFLOAD_CLEAR_MASK
         ct direction original meta l4proto tcp meta mark != $MARK meta mark != $TG_OUTBOUND_MARK th dport { $nft_ports } ct original packets $nft_mark_window ct mark set ct mark | $FLOWOFFLOAD_MARK
         ct direction original meta l4proto udp meta mark != $MARK meta mark != $TG_OUTBOUND_MARK th dport { $nft_ports } th dport != { $nft_voice } ct original packets $nft_mark_window ct mark set ct mark | $FLOWOFFLOAD_MARK
         ct direction original meta l4proto udp meta mark != $MARK meta mark != $TG_OUTBOUND_MARK th dport { $nft_voice } ct original packets $nft_voice_mark_window ct mark set ct mark | $FLOWOFFLOAD_MARK

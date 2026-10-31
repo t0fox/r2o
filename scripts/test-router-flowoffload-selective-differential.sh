@@ -62,7 +62,7 @@ case "$*" in
             *firewall.nft.*)
                 cp "$rules" "$NFT_STATE_DIR/r2o-rules"
                 : >"$NFT_STATE_DIR/r2o"
-                if grep -Fq 'ct mark set ct mark | 0x80000000' "$rules"; then : >"$NFT_STATE_DIR/r2o-mark-flow"; else rm -f "$NFT_STATE_DIR/r2o-mark-flow"; fi
+                if grep -Fq 'ct mark set ct mark | 0x80' "$rules"; then : >"$NFT_STATE_DIR/r2o-mark-flow"; else rm -f "$NFT_STATE_DIR/r2o-mark-flow"; fi
                 awk '/chain mark_flow \{/ { inside = 1 } inside { print } inside && /^    }/ { exit }' \
                     "$rules" > "$NFT_STATE_DIR/r2o-mark-flow-rules"
                 if grep -Fq 'jump mark_flow' "$rules"; then : >"$NFT_STATE_DIR/r2o-mark-flow-hook"; else rm -f "$NFT_STATE_DIR/r2o-mark-flow-hook"; fi
@@ -81,8 +81,8 @@ case "$*" in
                             | sed 's/^add flowtable inet fw4 ft /flowtable ft /' >"$NFT_STATE_DIR/fw4-ft"
                     fi
                     if grep -q 'flow offload @ft' "$rules"; then
-                        if grep -q 'ct mark & 0x80000000 == 0 flow offload @ft' "$rules"; then
-                            printf '%s\n' 'meta l4proto { tcp, udp } ct mark & 0x80000000 == 0 flow offload @ft comment "r2o-flowoffload" # handle 5' >"$NFT_STATE_DIR/fw4-forward"
+                        if grep -q 'ct mark & 0x80 == 0 flow offload @ft' "$rules"; then
+                            printf '%s\n' 'meta l4proto { tcp, udp } ct mark & 0x80 == 0 flow offload @ft comment "r2o-flowoffload" # handle 5' >"$NFT_STATE_DIR/fw4-forward"
                         else
                             printf '%s\n' 'meta l4proto { tcp, udp } flow offload @ft # handle 5' >"$NFT_STATE_DIR/fw4-forward"
                         fi
@@ -201,38 +201,53 @@ grep -Fq 'meta l4proto { tcp, udp } th dport { 53, 853 } return' "$rules" || { e
 grep -Fq 'ct status dnat return' "$rules" || { echo "DNAT exclusions changed" >&2; exit 1; }
 grep -Fq 'meta mark != 45 meta mark != 0x40000000' "$rules" || { echo "R2O/Telegram packet marks are not excluded" >&2; exit 1; }
 grep -Fq 'th dport != { 3478-3481, 50000-50099 }' "$rules" || { echo "generic UDP marking overlaps the shorter voice window" >&2; exit 1; }
-grep -Fq 'th dport { 443, 5222 } ct original packets 0-8 ct mark set ct mark | 0x80000000' "$rules" || {
+grep -Fq 'th dport { 443, 5222 } ct original packets 0-8 ct mark set ct mark | 0x80' "$rules" || {
     echo "original R2O flows are not marked from their first analysis packet" >&2
     exit 1
 }
-grep -Fq 'th sport { 443, 5222 } ct reply packets 0-8 ct mark set ct mark | 0x80000000' "$rules" || {
+grep -Fq 'th sport { 443, 5222 } ct reply packets 0-8 ct mark set ct mark | 0x80' "$rules" || {
     echo "reply R2O flows are not marked during their analysis window" >&2
     exit 1
 }
-grep -Fq 'th dport { 3478-3481, 50000-50099 } ct original packets 0-4 ct mark set ct mark | 0x80000000' "$rules" || {
+grep -Fq 'th dport { 3478-3481, 50000-50099 } ct original packets 0-4 ct mark set ct mark | 0x80' "$rules" || {
     echo "voice flows do not use their smaller analysis window" >&2
     exit 1
 }
-grep -Fq 'ct mark set ct mark & 0x7fffffff' "$rules" || {
+grep -Fq 'ct mark set ct mark & 0xffffff7f' "$rules" || {
     echo "completed analysis windows never release native offload" >&2
     exit 1
 }
-grep -Fq 'ct mark & 0x80000000 != 0 ct original packets 9-18446744073709551615 ct reply packets 9-18446744073709551615 ct mark set ct mark & 0x7fffffff' "$rules" || {
+grep -Fq 'ct mark & 0x80 != 0 ct original packets 9-18446744073709551615 ct reply packets 9-18446744073709551615 ct mark set ct mark & 0xffffff7f' "$rules" || {
     echo "marked flows are released before both analysis windows have completed" >&2
     exit 1
 }
-grep -Fq 'ct mark & 0x80000000 != 0 meta l4proto udp ct original packets 5-18446744073709551615 ct reply packets 5-18446744073709551615 th dport { 3478-3481, 50000-50099 } ct mark set ct mark & 0x7fffffff' "$rules" || {
+grep -Fq 'ct mark & 0x80 != 0 meta l4proto udp ct original packets 5-18446744073709551615 ct reply packets 5-18446744073709551615 th dport { 3478-3481, 50000-50099 } ct mark set ct mark & 0xffffff7f' "$rules" || {
     echo "voice flows do not release offload at their own analysis boundary" >&2
     exit 1
 }
-grep -Fq 'tcp flags & rst == rst ct mark set ct mark | 0x80000000' "$rules" || {
+grep -Fq 'tcp flags & rst == rst ct mark set ct mark | 0x80' "$rules" || {
     echo "late TCP resets are no longer visible to NFQUEUE" >&2
     exit 1
 }
-grep -Fq 'ct mark & 0x80000000 == 0 flow offload @ft' "$TEMP/nft/fw4-forward" || {
+grep -Fq 'ct mark & 0x80 == 0 flow offload @ft' "$TEMP/nft/fw4-forward" || {
     echo "fw4 flow offload rule still includes R2O-marked connections" >&2
     exit 1
 }
+if grep -Fq 'ct mark' "$TEMP/d2o-flowoffload.sh"; then
+    echo "D2O flow-offload baseline unexpectedly writes conntrack marks" >&2
+    exit 1
+fi
+if grep -Fq 'ct mark set ct mark & 0x7fffffff' "$rules"; then
+    echo "R2O clears bit 31 from conntrack marks owned by OpenWrt route policies" >&2
+    exit 1
+fi
+# Keep the R2O bit outside the default OpenWrt pbr, mwan3, and shunt mark masks.
+for route_mask in 0x00ff0000 0x3f00 0xff000000; do
+    [ $((0x80 & route_mask)) -eq 0 ] || {
+        echo "R2O flow mark overlaps a default OpenWrt route mark mask: $route_mask" >&2
+        exit 1
+    }
+done
 
 [ "$(cat "$TEMP/run/flow-offloading.runtime")" = selective ] || {
     echo "selective offload state was not saved" >&2
@@ -249,7 +264,7 @@ done
 awk '
     index($0, "ct direction original meta l4proto tcp") &&
     index($0, "th dport { 443, 5222 }") &&
-    index($0, "ct mark set ct mark | 0x80000000") { next }
+    index($0, "ct mark set ct mark | 0x80") { next }
     { print }
 ' "$TEMP/nft/r2o-mark-flow-rules" > "$TEMP/nft/r2o-mark-flow-rules.incomplete"
 mv -f "$TEMP/nft/r2o-mark-flow-rules.incomplete" "$TEMP/nft/r2o-mark-flow-rules"
@@ -304,7 +319,7 @@ firewall flowoffload-ensure
 }
 firewall flowoffload-restore
 firewall up
-grep -Fq 'ct mark & 0x80000000 == 0 flow offload @ft' "$TEMP/nft/fw4-forward" || {
+grep -Fq 'ct mark & 0x80 == 0 flow offload @ft' "$TEMP/nft/fw4-forward" || {
     echo "restoring the missing R2O mark table did not restore selective offload" >&2
     exit 1
 }
@@ -316,7 +331,7 @@ firewall up
     echo "reinstalling a missing R2O table did not flush flows created during the gap" >&2
     exit 1
 }
-grep -Fq 'ct mark & 0x80000000 == 0 flow offload @ft' "$TEMP/nft/fw4-forward" || {
+grep -Fq 'ct mark & 0x80 == 0 flow offload @ft' "$TEMP/nft/fw4-forward" || {
     echo "reinstalling R2O lost the selective flow rule" >&2
     exit 1
 }
@@ -330,7 +345,7 @@ firewall flowoffload-ensure
 
 NFT_STATE_DIR=$TEMP/nft "$TEMP/bin/fw4" reload
 firewall flowoffload-ensure
-grep -Fq 'ct mark & 0x80000000 == 0 flow offload @ft' "$TEMP/nft/fw4-forward" || {
+grep -Fq 'ct mark & 0x80 == 0 flow offload @ft' "$TEMP/nft/fw4-forward" || {
     echo "fw4 reload lost R2O's selective flow rule" >&2
     exit 1
 }
