@@ -1312,6 +1312,8 @@ mod x509_tests {
 
 #[cfg(test)]
 mod tcp_split_transport_tests {
+    #[cfg(target_os = "linux")]
+    use super::{get_socket_mark, probe_socket};
     use super::{probe_trigger, raw_split_enabled};
     use crate::classify::{
         Accept, ProbeError, ProbeOutcome, ProbeTarget, Trigger, effective_probe_timeout,
@@ -1511,5 +1513,60 @@ mod tcp_split_transport_tests {
 
         assert_eq!(result.unwrap(), crate::classify::ProbeOutcome::Accepted);
         server.join().unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn production_socket_probe_mark_matches_d2o_setsockopt_result() {
+        use std::os::fd::AsRawFd;
+
+        const MARK: u32 = 0x2d;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 4];
+            stream.read_exact(&mut request).unwrap();
+            stream.write_all(b"x").unwrap();
+        });
+        let target = ProbeTarget {
+            host: "127.0.0.1".into(),
+            port,
+        };
+        let trigger = Trigger {
+            name: "mark-fixture".into(),
+            payload: b"PING".to_vec(),
+            accept: Accept::Any,
+        };
+
+        let socket = probe_socket("127.0.0.1:0".parse().unwrap(), MARK).unwrap();
+        let socket_marked = get_socket_mark(socket.as_raw_fd()).ok() == Some(MARK as libc::c_int);
+        drop(socket);
+
+        let outcome = probe_trigger(
+            &target,
+            &trigger,
+            &[],
+            Duration::ZERO,
+            Duration::from_secs(1),
+            Some(MARK),
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        let marked = matches!(outcome, ProbeOutcome::Accepted);
+        assert!(matches!(
+            outcome,
+            ProbeOutcome::Accepted | ProbeOutcome::AcceptedUnmarked
+        ));
+        assert_eq!(marked, socket_marked);
+        server.join().unwrap();
+
+        let row = format!("marked={} accepted=1", u8::from(marked));
+        if let Ok(path) = std::env::var("R2O_RESPONSE_MARK_DIFF_OUTPUT") {
+            std::fs::write(path, format!("{row}\n")).unwrap();
+        }
+        println!("{row}");
     }
 }
