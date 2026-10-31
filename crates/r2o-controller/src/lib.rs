@@ -1,6 +1,7 @@
 pub mod ask;
 pub mod catalog;
 pub mod classify;
+pub mod classify_json;
 mod classify_measured;
 pub mod diagnostics;
 pub mod discovery;

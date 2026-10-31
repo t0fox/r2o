@@ -5,6 +5,10 @@
 #include "test_repeats.c"
 #undef main
 
+#define main d2o_cli_main
+#include "main.c"
+#undef main
+
 static int accepted_connections;
 static int close_after_connections = 6;
 static int force_connect_deadline;
@@ -162,7 +166,8 @@ int main(int argc, char **argv)
         force_first_connect_error = 1;
         g_ack_pat = "e";
     } else if (strcmp(argv[1], "baseline-clear") == 0 ||
-               strcmp(argv[1], "baseline-clear-progress") == 0) {
+               strcmp(argv[1], "baseline-clear-progress") == 0 ||
+               strcmp(argv[1], "baseline-clear-json") == 0) {
         close_after_connections = 0;
         respond_serverhello = 1;
         g_ack_pat = "e";
@@ -172,6 +177,18 @@ int main(int argc, char **argv)
     }
 
     srv_start();
+    if (strcmp(argv[1], "baseline-clear-json") == 0) {
+        char raw_hex[(sizeof(PAY) - 1) * 2 + 1];
+        char *cli_argv[] = {
+            "d2k-detect", "classify", g_addr, "--raw", raw_hex,
+            "--allow-loopback", "--no-raw", "--json",
+        };
+        size_t i;
+        for (i = 0; i < sizeof(PAY) - 1; i++) {
+            snprintf(raw_hex + i * 2, 3, "%02x", (unsigned char)PAY[i]);
+        }
+        return d2o_cli_main((int)(sizeof(cli_argv) / sizeof(cli_argv[0])), cli_argv);
+    }
     options.allow_loopback = 1;
     options.repeats = 3;
     options.timeout_ms = 400;

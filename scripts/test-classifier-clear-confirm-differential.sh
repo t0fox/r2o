@@ -52,6 +52,8 @@ cat >> "$TEMP/rust/src/main.rs" <<EOF
 pub mod hello;
 #[path = "$rust_root/crates/r2o-controller/src/plan_text.rs"]
 pub mod plan_text;
+#[path = "$rust_root/crates/r2o-controller/src/trigger.rs"]
+pub mod trigger;
 #[path = "$rust_root/crates/r2o-controller/src/classify_measured.rs"]
 mod classify_measured;
 #[path = "$rust_root/crates/r2o-controller/src/classify.rs"]

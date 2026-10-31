@@ -60,6 +60,7 @@ edition = "2024"
 
 [dependencies]
 r2k-core = { path = "$rust_root_dep/crates/r2k-core" }
+serde_json = "1"
 EOF
 cat "$ROOT/crates/r2o-controller/tests/fixtures/classify-probe-support.rs" > "$TEMP/rust/src/main.rs"
 cat >> "$TEMP/rust/src/main.rs" <<EOF
@@ -73,10 +74,14 @@ pub mod trigger;
 mod classify_measured;
 #[path = "$rust_root/crates/r2o-controller/src/classify.rs"]
 pub mod classify;
+#[path = "$rust_root/crates/r2o-controller/src/classify_json.rs"]
+pub mod classify_json;
 EOF
 cat "$ROOT/crates/r2o-controller/tests/fixtures/classify-full-tree-control-r2o.rs" >> "$TEMP/rust/src/main.rs"
 
-"$TEMP/d2o-classifier" transport-error > "$TEMP/d2o.out"
+"$TEMP/d2o-classifier" baseline-clear-json > "$TEMP/classifier-d2o.json"
+printf 'JSON|match\n' > "$TEMP/d2o.out"
+"$TEMP/d2o-classifier" transport-error >> "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" control-pass >> "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" control-pass-progress >> "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" neutral-ack-progress >> "$TEMP/d2o.out"
@@ -89,6 +94,7 @@ cat "$ROOT/crates/r2o-controller/tests/fixtures/classify-full-tree-control-r2o.r
 CARGO_TARGET_DIR=$rust_target \
 RUSTFLAGS="${RUSTFLAGS:--Awarnings}" \
 CARGO_MAKEFLAGS= \
+R2O_CLASSIFIER_JSON_FIXTURE=$(cygpath -am "$TEMP/classifier-d2o.json") \
     "$CARGO" run --quiet --target "$build_target" \
         --manifest-path "$rust_temp/rust/Cargo.toml" > "$TEMP/r2o.out"
 if ! cmp -s "$TEMP/d2o.out" "$TEMP/r2o.out"; then
@@ -96,4 +102,4 @@ if ! cmp -s "$TEMP/d2o.out" "$TEMP/r2o.out"; then
     exit 1
 fi
 cat "$TEMP/d2o.out"
-printf 'D2O %s full classifier baseline, control fallback, and progress branches match R2O.\n' "$ACTUAL_D2O_SHA"
+printf 'D2O %s full classifier baseline, control fallback, JSON, and progress branches match R2O.\n' "$ACTUAL_D2O_SHA"

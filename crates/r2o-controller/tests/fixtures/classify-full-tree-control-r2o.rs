@@ -88,6 +88,50 @@ fn run_case(
     )
 }
 
+fn run_json_case() -> (classify::ClassifyResult, usize) {
+    let payload = b"WA\x06\x03SIGNATURE-AND-THEN-SOME-PAYLOAD-BYTES";
+    let raw_hex = payload
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let trigger = Trigger::raw_hex(&raw_hex).unwrap();
+    let control = Trigger {
+        name: "control".into(),
+        payload: b"BENIGN-CONTROL-PAYLOAD".to_vec(),
+        accept: Accept::Any,
+    };
+    let options = ClassifyOptions {
+        repeats: 3,
+        timeout: Duration::from_millis(400),
+        write_gap: Duration::from_millis(60),
+        long_gap: Duration::from_millis(700),
+        allow_loopback: true,
+        no_raw: true,
+        full_detect_semantics: true,
+        confirm_clear: false,
+        control: Some(control),
+        ..ClassifyOptions::default()
+    };
+    let mut backend = Backend {
+        control_outcomes: VecDeque::new(),
+        ack_outcomes: VecDeque::new(),
+        target_outcome: ProbeOutcome::Accepted,
+        target_error: None,
+        target_error_at: None,
+        target_timeouts: Vec::new(),
+        target_calls: 0,
+        ack_calls: 0,
+    };
+    let result = run_with_backend_progress(
+        "192.0.2.44:443",
+        &trigger,
+        options,
+        &mut backend,
+        &mut |_, _, _, _| {},
+    );
+    (result, trigger.payload.len())
+}
+
 fn run_case_with_progress(
     control_outcomes: Vec<Result<ProbeOutcome, ProbeError>>,
     ack_outcomes: Vec<Result<bool, ProbeError>>,
@@ -149,6 +193,20 @@ fn run_case_with_progress(
 }
 
 fn main() {
+    if let Ok(path) = std::env::var("R2O_CLASSIFIER_JSON_FIXTURE") {
+        let expected: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).expect("read D2O classifier JSON"))
+                .expect("parse D2O classifier JSON");
+        let (mut result, trigger_len) = run_json_case();
+        result.target = expected["target"].as_str().unwrap().to_owned();
+        result.duration = Duration::ZERO;
+        let mut actual = classify_json::result_json_value(&result, trigger_len);
+        assert!(actual["duration"].as_str().unwrap().ends_with("ms"));
+        actual["duration"] = expected["duration"].clone();
+        assert_eq!(expected, actual, "R2O classifier JSON differs from D2O");
+        println!("JSON|match");
+    }
+
     let (transport_error, transport_ack_calls, _) = run_case(
         vec![Err(ProbeError::Transport("connection refused".into())); 3],
         vec![Err(ProbeError::Transport("connection refused".into()))],

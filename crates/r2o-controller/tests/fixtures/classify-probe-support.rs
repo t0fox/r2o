@@ -17,6 +17,8 @@ pub mod response {
     pub struct ResponseResult {
         pub verdict: ResponseVerdict,
         pub reason: String,
+        pub target: i32,
+        pub control: i32,
         pub probes: usize,
     }
 
@@ -31,6 +33,8 @@ pub mod response {
         ResponseResult {
             verdict: ResponseVerdict::NotApplicable,
             reason: "isolated differential fixture".into(),
+            target: 0,
+            control: 0,
             probes: 0,
         }
     }

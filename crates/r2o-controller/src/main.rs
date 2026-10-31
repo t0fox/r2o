@@ -38,6 +38,7 @@ use r2o_controller::classify::{
     Accept, ClassifyOptions, ProbeBackend, ProbeTarget, TcpProbeBackend, Trigger, Verdict,
     run_with_backend_progress as classify_run_with_progress,
 };
+use r2o_controller::classify_json::result_json_value as classify_result_json_value;
 use r2o_controller::domain::normalize;
 use r2o_controller::http_search::{
     candidate_key_from_plan_text, candidate_keys, candidate_program, candidate_text,
@@ -142,6 +143,7 @@ struct ClassifyCliOptions {
     long_gap: Option<std::time::Duration>,
     dump_trigger: bool,
     progress: bool,
+    json: bool,
     mark: Option<u32>,
     only_poison: Option<String>,
     skip_poisons: Vec<String>,
@@ -898,6 +900,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
             long_gap,
             dump_trigger,
             progress: progress_enabled,
+            json: json_output,
             mark,
             only_poison,
             skip_poisons,
@@ -981,7 +984,11 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
                 .as_ref()
                 .ok_or("классификатор не нашёл применимый poison-план")?;
             save_plan_file(&path, &hit.plan)?;
-            println!("план R2OP сохранён: {}", path.display());
+            if json_output {
+                eprintln!("план R2OP сохранён: {}", path.display());
+            } else {
+                println!("план R2OP сохранён: {}", path.display());
+            }
         }
         if let Some(socket_path) = arm_socket_path {
             if raw_trigger.is_some() {
@@ -1005,6 +1012,16 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
             return Err(
                 "установка в r2o-datapath через Unix-сокет поддерживается только на Unix".into(),
             );
+        }
+        if json_output {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&classify_result_json_value(
+                    &result,
+                    trigger.payload.len(),
+                ))?
+            );
+            return Ok(());
         }
         println!(
             "цель: {}\nвердикт: {}\nпричина: {}\nзонды: {}\nвремя: {} мс",
@@ -1117,6 +1134,7 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
     let mut long_gap = None;
     let mut dump_trigger = false;
     let mut progress_enabled = false;
+    let mut json_output = false;
     let mut mark = None;
     let mut only_poison = None;
     let mut skip_poisons = Vec::new();
@@ -1145,6 +1163,7 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
             Some("--no-raw") => no_raw = true,
             Some("--dump-trigger") => dump_trigger = true,
             Some("--progress") => progress_enabled = true,
+            Some("--json") => json_output = true,
             Some("--timeout") => {
                 index += 1;
                 let value = arguments
@@ -1291,6 +1310,7 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
         long_gap,
         dump_trigger,
         progress: progress_enabled,
+        json: json_output,
         mark,
         only_poison,
         skip_poisons,
@@ -1418,6 +1438,7 @@ fn print_help() {
     println!("  classify: [--no-raw] пропускает проверки с raw-пакетами");
     println!("  classify: [--dump-trigger] печатает hex триггера и завершает работу");
     println!("  classify: [--progress] печатает завершённые пробы в stderr");
+    println!("  classify: [--json] печатает результат в JSON");
     println!("  classify: [--repeats N] задаёт число единогласных повторов; default 3");
     println!("  classify: [--timeout MS] задаёт ожидание каждого зонда; по умолчанию 6000 мс");
     println!(
@@ -30980,6 +31001,7 @@ mod tests {
                 long_gap: None,
                 dump_trigger: false,
                 progress: false,
+                json: false,
                 mark: None,
                 only_poison: None,
                 skip_poisons: Vec::new(),
@@ -31030,6 +31052,12 @@ mod tests {
     }
 
     #[test]
+    fn classify_options_accept_json_output() {
+        let args = ["--json"].map(OsString::from);
+        assert!(parse_classify_options(&args).unwrap().json);
+    }
+
+    #[test]
     fn classify_options_accept_direct_arm_socket() {
         let args =
             ["--arm", "/run/r2o-datapath.sock", "--save-plan", "out.r2op"].map(OsString::from);
@@ -31044,6 +31072,7 @@ mod tests {
                 long_gap: None,
                 dump_trigger: false,
                 progress: false,
+                json: false,
                 mark: None,
                 only_poison: None,
                 skip_poisons: Vec::new(),
