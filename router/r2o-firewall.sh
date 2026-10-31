@@ -581,7 +581,7 @@ flowoffload_legacy_remove_tool() {
     flowoffload_legacy_tool=$1
     while :; do
         flowoffload_legacy_line=$(xt "$flowoffload_legacy_tool" -t filter -L FORWARD \
-            --line-numbers -n 2>/dev/null | awk '$1 ~ /^[0-9]+$/ && $2 == "FLOWOFFLOAD" { print $1; exit }') || return 1
+            --line-numbers -n 2>/dev/null | awk '$1 ~ /^[0-9]+$/ && $4 == "FLOWOFFLOAD" { print $1; exit }') || return 1
         [ -n "$flowoffload_legacy_line" ] || break
         xt "$flowoffload_legacy_tool" -t filter -D FORWARD "$flowoffload_legacy_line" || return 1
     done

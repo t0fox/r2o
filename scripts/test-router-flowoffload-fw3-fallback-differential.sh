@@ -33,7 +33,7 @@ esac
 case " $* " in
     *' -S FORWARD '*) cat "$RULE_FILE"; exit 0 ;;
     *' -L FORWARD --line-numbers -n '*)
-        awk '/^-A FORWARD/ { printf "%d FLOWOFFLOAD all -- 0.0.0.0\/0 0.0.0.0\/0\n", ++line }' "$RULE_FILE"
+        awk '/^-A FORWARD/ { printf "%d 0 0 FLOWOFFLOAD all -- * * 0.0.0.0/0 0.0.0.0/0 ctstate RELATED,ESTABLISHED\n", ++line }' "$RULE_FILE"
         exit 0
         ;;
     *' -D FORWARD '*)
