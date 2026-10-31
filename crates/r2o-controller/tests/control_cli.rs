@@ -6,13 +6,13 @@ use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const PROTO_VERSION: u16 = r2k_core::control::PROTOCOL_VERSION;
 const KEY_LEN: usize = 38;
-static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+static NEXT_TEMP_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
 
 fn plan_header(minexec: u16, records: u16) -> Vec<u8> {
     let mut bytes = PLAN_MAGIC.to_vec();

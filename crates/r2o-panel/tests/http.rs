@@ -2,10 +2,10 @@ use r2o_panel::server::{Config, handle_request, parse_config};
 use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
 struct TempDir(PathBuf);
 impl TempDir {

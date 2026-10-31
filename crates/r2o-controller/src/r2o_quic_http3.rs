@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 use std::future::{Future, poll_fn};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
+#[cfg(target_has_atomic = "64")]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
@@ -18,6 +19,11 @@ const R2O_QUIC_RESIDUAL_PORT_AGE: Duration = Duration::from_secs(480);
 
 static R2O_QUIC_RECENT_PORTS_STATE: OnceLock<Mutex<(VecDeque<(u16, Instant)>, usize)>> =
     OnceLock::new();
+
+#[cfg(target_has_atomic = "64")]
+type R2oQuicHttp3AppByteCounter = AtomicU64;
+#[cfg(not(target_has_atomic = "64"))]
+type R2oQuicHttp3AppByteCounter = Mutex<u64>;
 
 fn r2o_quic_http3_bounded_timeout_at(
     timeout: Duration,
@@ -223,18 +229,18 @@ pub struct R2oQuicHttp3Result {
 struct R2oQuicHttp3CountedConnection {
     inner: h3_quinn::Connection,
     connection: quinn::Connection,
-    app_bytes: Arc<AtomicU64>,
+    app_bytes: Arc<R2oQuicHttp3AppByteCounter>,
 }
 
 struct R2oQuicHttp3CountedOpenStreams {
     inner: h3_quinn::OpenStreams,
     connection: quinn::Connection,
-    app_bytes: Arc<AtomicU64>,
+    app_bytes: Arc<R2oQuicHttp3AppByteCounter>,
 }
 
 struct R2oQuicHttp3CountedRecvStream {
     inner: h3_quinn::RecvStream,
-    app_bytes: Arc<AtomicU64>,
+    app_bytes: Arc<R2oQuicHttp3AppByteCounter>,
     connection: Option<quinn::Connection>,
     stream_id: Option<quinn::StreamId>,
     last_seen: u64,
@@ -246,10 +252,33 @@ struct R2oQuicHttp3CountedBidiStream {
     recv: R2oQuicHttp3CountedRecvStream,
 }
 
-fn r2o_quic_http3_count_app_bytes(app_bytes: &AtomicU64, count: u64) {
-    let _ = app_bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-        Some(current.saturating_add(count))
-    });
+fn r2o_quic_http3_count_app_bytes(app_bytes: &R2oQuicHttp3AppByteCounter, count: u64) {
+    #[cfg(target_has_atomic = "64")]
+    {
+        let _ = app_bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            Some(current.saturating_add(count))
+        });
+    }
+    #[cfg(not(target_has_atomic = "64"))]
+    {
+        let mut current = app_bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *current = current.saturating_add(count);
+    }
+}
+
+fn r2o_quic_http3_app_bytes_load(app_bytes: &R2oQuicHttp3AppByteCounter) -> u64 {
+    #[cfg(target_has_atomic = "64")]
+    {
+        app_bytes.load(Ordering::Relaxed)
+    }
+    #[cfg(not(target_has_atomic = "64"))]
+    {
+        *app_bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 impl h3::quic::RecvStream for R2oQuicHttp3CountedRecvStream {
@@ -296,7 +325,7 @@ impl h3::quic::RecvStream for R2oQuicHttp3CountedRecvStream {
 impl R2oQuicHttp3CountedBidiStream {
     fn new(
         inner: h3_quinn::BidiStream<Bytes>,
-        app_bytes: Arc<AtomicU64>,
+        app_bytes: Arc<R2oQuicHttp3AppByteCounter>,
         count: bool,
         connection: quinn::Connection,
     ) -> Self {
@@ -867,7 +896,7 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
     };
     result.lock().unwrap().handshake_confirmed = true;
 
-    let app_bytes = Arc::new(AtomicU64::new(0));
+    let app_bytes = Arc::new(R2oQuicHttp3AppByteCounter::new(0));
     let h3_connection = R2oQuicHttp3CountedConnection {
         inner: h3_quinn::Connection::new(connection.clone()),
         connection: connection.clone(),
@@ -919,7 +948,7 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
     let mut requests = 0_u32;
     let mut last_response_complete = false;
     let mut last_progress_at = tokio::time::Instant::now();
-    let mut last_app_progress = app_bytes.load(Ordering::Relaxed);
+    let mut last_app_progress = r2o_quic_http3_app_bytes_load(&app_bytes);
     let mut budget = R2oQuicHttp3Budget::r2o_initialize(budget_packets);
     let mut budget_passed = false;
     let mut stall = R2oQuicHttp3Stall::r2o_initialize(
@@ -984,7 +1013,7 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
             if status == 451 {
                 return Ok::<bool, String>(false);
             }
-            let app_progress = app_bytes.load(Ordering::Relaxed);
+            let app_progress = r2o_quic_http3_app_bytes_load(&app_bytes);
             let now = tokio::time::Instant::now();
             if app_progress > last_app_progress {
                 last_app_progress = app_progress;
@@ -1028,7 +1057,7 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                         total_body_bytes = total_body_bytes.saturating_add(length);
 
                         let now = tokio::time::Instant::now();
-                        let app_progress = app_bytes.load(Ordering::Relaxed);
+                        let app_progress = r2o_quic_http3_app_bytes_load(&app_bytes);
                         let packets =
                             r2o_quic_http3_datagrams(&connection).saturating_sub(datagrams_before);
                         if app_progress > last_app_progress {
@@ -1056,7 +1085,7 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                     }
                     Ok(None) => {
                         let now = tokio::time::Instant::now();
-                        let app_progress = app_bytes.load(Ordering::Relaxed);
+                        let app_progress = r2o_quic_http3_app_bytes_load(&app_bytes);
                         if app_progress > last_app_progress {
                             last_app_progress = app_progress;
                             last_progress_at = now;
@@ -1117,7 +1146,7 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
     {
         let mut state = result.lock().unwrap();
         state.requests = requests;
-        state.app_bytes = app_bytes.load(Ordering::Relaxed);
+        state.app_bytes = r2o_quic_http3_app_bytes_load(&app_bytes);
         state.datagrams = datagrams;
         state.budget_passed = budget_passed;
         state.complete = !repeated && last_response_complete && !state.r2o_quic_stalled;
@@ -1160,7 +1189,7 @@ async fn r2o_quic_http3_wait_with_stall<F: Future>(
     budget: &mut R2oQuicHttp3Budget,
     budget_active: bool,
     datagrams_before: u64,
-    app_bytes: &AtomicU64,
+    app_bytes: &R2oQuicHttp3AppByteCounter,
     future: F,
 ) -> Result<F::Output, R2oQuicHttp3StallEnd> {
     tokio::pin!(future);
@@ -1172,7 +1201,7 @@ async fn r2o_quic_http3_wait_with_stall<F: Future>(
             output = &mut future => return Ok(output),
             _ = interval.tick() => {
                 let now = tokio::time::Instant::now();
-                let progress = app_bytes.load(Ordering::Relaxed);
+                let progress = r2o_quic_http3_app_bytes_load(app_bytes);
                 if budget_active {
                     budget.r2o_mark(
                         r2o_quic_http3_datagrams(connection).saturating_sub(datagrams_before),
@@ -1207,13 +1236,36 @@ async fn r2o_quic_http3_wait_with_stall<F: Future>(
 #[cfg(test)]
 mod tests {
     use super::{
-        R2oQuicHttp3Budget, R2oQuicHttp3Stall, R2oQuicHttp3StallAction as Action,
-        r2o_quic_http3_authority, r2o_quic_http3_bounded_timeout_at,
+        R2oQuicHttp3AppByteCounter, R2oQuicHttp3Budget, R2oQuicHttp3Stall,
+        R2oQuicHttp3StallAction as Action, r2o_quic_http3_app_bytes_load, r2o_quic_http3_authority,
+        r2o_quic_http3_bounded_timeout_at, r2o_quic_http3_count_app_bytes,
         r2o_quic_http3_udp_socket_with_mark_setter,
     };
     use std::net::SocketAddr;
     use std::time::Duration;
     use tokio::time::Instant;
+
+    #[test]
+    fn http3_app_byte_counter_matches_d2o_unique_range_totals() {
+        let app_bytes = R2oQuicHttp3AppByteCounter::new(0);
+        for (delta, expected) in [
+            (4, 4),
+            (6, 10),
+            (1_u64 << 32, (1_u64 << 32) + 10),
+            (1_u64 << 32, (2_u64 << 32) + 10),
+            (0, (2_u64 << 32) + 10),
+        ] {
+            r2o_quic_http3_count_app_bytes(&app_bytes, delta);
+            assert_eq!(r2o_quic_http3_app_bytes_load(&app_bytes), expected);
+        }
+    }
+
+    #[test]
+    fn http3_app_byte_counter_saturates_at_u64_max() {
+        let app_bytes = R2oQuicHttp3AppByteCounter::new(u64::MAX - 1);
+        r2o_quic_http3_count_app_bytes(&app_bytes, 3);
+        assert_eq!(r2o_quic_http3_app_bytes_load(&app_bytes), u64::MAX);
+    }
 
     #[test]
     fn http3_timeout_is_capped_by_the_task_deadline() {
