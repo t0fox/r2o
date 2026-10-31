@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::classify::{
     ClassifyOptions, ClassifyResult, DpiProps, Observation, Poison, PoisonHit, ProbeError,
     ProbeTarget, TriState, Trigger, UnplannablePoison, note_props_hit, note_props_miss,
-    poison_supports_family, poisons, strategy_for_poison, trigger_accepts,
+    poison_selected, poison_supports_family, poisons, strategy_for_poison, trigger_accepts,
 };
 use r2k_core::plan::{OriginalFate, Plan};
 use r2o_datapath::engine::{PacketDecision, decide};
@@ -185,7 +185,10 @@ pub fn sweep_poisons(
     }
     result.raw_usable = true;
 
-    for property in property_probes() {
+    for property in property_probes()
+        .into_iter()
+        .filter(|_| options.only_poison.is_none())
+    {
         if is_cancelled(options) {
             result.stopped = true;
             break;
@@ -193,6 +196,9 @@ pub fn sweep_poisons(
         let Some(mut poison) = property_probe_poison(&property, offer_ts, &props) else {
             continue;
         };
+        if !poison_selected(options, &poison.name) {
+            continue;
+        }
         let mut decoy = None;
         match property.set {
             Property::OverlapSni => {
@@ -334,7 +340,10 @@ pub fn sweep_poisons(
         }
     }
 
-    for poison in compose_from_props(&props, selected_decoy.as_deref()) {
+    for poison in compose_from_props(&props, selected_decoy.as_deref())
+        .into_iter()
+        .filter(|poison| options.only_poison.is_none() && poison_selected(options, &poison.name))
+    {
         if is_cancelled(options) {
             result.stopped = true;
             break;
@@ -442,7 +451,10 @@ pub fn sweep_poisons(
         }
     }
 
-    for poison in poisons() {
+    for poison in poisons()
+        .iter()
+        .filter(|poison| poison_selected(options, &poison.name))
+    {
         if is_cancelled(options) {
             result.stopped = true;
             break;

@@ -137,6 +137,8 @@ struct ClassifyCliOptions {
     repeats: usize,
     allow_loopback: bool,
     mark: Option<u32>,
+    only_poison: Option<String>,
+    skip_poisons: Vec<String>,
     save_plan_path: Option<PathBuf>,
     arm_socket_path: Option<PathBuf>,
     modern: bool,
@@ -875,6 +877,8 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
             repeats,
             allow_loopback,
             mark,
+            only_poison,
+            skip_poisons,
             save_plan_path,
             arm_socket_path,
             modern,
@@ -903,6 +907,8 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
                 mark,
                 full_detect_semantics: true,
                 confirm_clear: false,
+                only_poison,
+                skip_poisons,
                 control: Some(control),
                 ..ClassifyOptions::default()
             },
@@ -1039,6 +1045,8 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
     let mut repeats = None;
     let mut allow_loopback = false;
     let mut mark = None;
+    let mut only_poison = None;
+    let mut skip_poisons = Vec::new();
     let mut save_plan_path = None;
     let mut arm_socket_path = None;
     let mut modern = false;
@@ -1053,6 +1061,24 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
                     .and_then(|value| value.to_str())
                     .ok_or("--mark требует числовую метку")?;
                 mark = Some(parse_mark(value)?);
+            }
+            Some("--only") => {
+                index += 1;
+                let value = arguments
+                    .get(index)
+                    .and_then(|value| value.to_str())
+                    .ok_or("--only требует имя гипотезы")?;
+                only_poison = (!value.is_empty()).then(|| value.to_owned());
+            }
+            Some("--skip") => {
+                index += 1;
+                let value = arguments
+                    .get(index)
+                    .and_then(|value| value.to_str())
+                    .ok_or("--skip требует имя гипотезы")?;
+                if skip_poisons.len() < 32 {
+                    skip_poisons.push(value.to_owned());
+                }
             }
             Some("--save-plan") if save_plan_path.is_none() => {
                 index += 1;
@@ -1090,6 +1116,8 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
         repeats: repeats.unwrap_or(3),
         allow_loopback,
         mark,
+        only_poison,
+        skip_poisons,
         save_plan_path,
         arm_socket_path,
         modern,
@@ -1150,7 +1178,7 @@ fn save_plan_file(path: &std::path::Path, plan: &[u8]) -> std::io::Result<()> {
 
 fn print_help() {
     println!(
-        "r2o-controller — каталог и контроллер r2o\n\nИспользование:\n  r2o-controller --check-catalog ФАЙЛ\n  r2o-controller --clear-catalog ФАЙЛ\n  r2o-controller --classify HOST PORT SNI [REPEATS] [--modern] [--allow-loopback] [--mark N] [--save-plan ФАЙЛ] [--arm СОКЕТ]\n  r2o-controller --probe-response HOST PORT SNI [REPEATS]\n  r2o-controller --set-name СОКЕТ HOST FAMILY SHAPE ПЛАН.r2op\n  r2o-controller --set-addr СОКЕТ IP SHAPE ПЛАН.r2op\n  r2o-controller --del-addr СОКЕТ IP SHAPE\n  r2o-controller --apply-catalog СОКЕТ КАТАЛОГ.json\n  r2o-controller --serve СОКЕТ КАТАЛОГ.json [--discover] [--mark N]\n  r2o-controller --watch СОКЕТ\n  r2o-controller --journal СОКЕТ\n  r2o-controller --http-candidates\n  r2o-controller --version\n  r2o-controller --help\n\nFAMILY: ipv4 или ipv6. SHAPE: modern, legacy, ech, http, quic или voice; voice использует HOST @discord-voice. Адресная привязка принимает modern, legacy, ech, quic или voice. QUIC поддерживает планы quicsplit, quicdeny, четыре формы IP-фрагментации после контрольной пробы, удлинение UDP, нулевую 16-байтовую фальшивку и пару фальшивых quic5 с TTL 3 после подтверждённого рукопожатия и зависания; --modern использует сохранённый TLS 1.3 ClientHello; --discover ставит новые TCP SNI в ограниченную очередь классификации и ищет обход HTTP-портала, а для Discord voice запускает ограниченный IP Discovery поиск, требующий --mark; --mark задаёт SO_MARK управляющим зондам и raw-пакетам; --save-plan создаёт новый файл и не перезаписывает существующий; --arm передаёт найденный план работающему r2o-datapath для соответствующей формы."
+        "r2o-controller — каталог и контроллер r2o\n\nИспользование:\n  r2o-controller --check-catalog ФАЙЛ\n  r2o-controller --clear-catalog ФАЙЛ\n  r2o-controller --classify HOST PORT SNI [REPEATS] [--modern] [--allow-loopback] [--mark N] [--only ИМЯ] [--skip ИМЯ ...] [--save-plan ФАЙЛ] [--arm СОКЕТ]\n  r2o-controller --probe-response HOST PORT SNI [REPEATS]\n  r2o-controller --set-name СОКЕТ HOST FAMILY SHAPE ПЛАН.r2op\n  r2o-controller --set-addr СОКЕТ IP SHAPE ПЛАН.r2op\n  r2o-controller --del-addr СОКЕТ IP SHAPE\n  r2o-controller --apply-catalog СОКЕТ КАТАЛОГ.json\n  r2o-controller --serve СОКЕТ КАТАЛОГ.json [--discover] [--mark N]\n  r2o-controller --watch СОКЕТ\n  r2o-controller --journal СОКЕТ\n  r2o-controller --http-candidates\n  r2o-controller --version\n  r2o-controller --help\n\nFAMILY: ipv4 или ipv6. SHAPE: modern, legacy, ech, http, quic или voice; voice использует HOST @discord-voice. Адресная привязка принимает modern, legacy, ech, quic или voice. QUIC поддерживает планы quicsplit, quicdeny, четыре формы IP-фрагментации после контрольной пробы, удлинение UDP, нулевую 16-байтовую фальшивку и пару фальшивых quic5 с TTL 3 после подтверждённого рукопожатия и зависания; --modern использует сохранённый TLS 1.3 ClientHello; --discover ставит новые TCP SNI в ограниченную очередь классификации и ищет обход HTTP-портала, а для Discord voice запускает ограниченный IP Discovery поиск, требующий --mark; --mark задаёт SO_MARK управляющим зондам и raw-пакетам; --save-plan создаёт новый файл и не перезаписывает существующий; --arm передаёт найденный план работающему r2o-datapath для соответствующей формы."
     );
     println!(
         "  r2o-controller --ask --control СОКЕТ --ip IP --sni ИМЯ (--hello-hex ФАЙЛ | --arm-wait-ms МС)"
@@ -30699,6 +30727,8 @@ mod tests {
                 repeats: 4,
                 allow_loopback: true,
                 mark: None,
+                only_poison: None,
+                skip_poisons: Vec::new(),
                 save_plan_path: Some(PathBuf::from("out.r2op")),
                 arm_socket_path: None,
                 modern: false,
@@ -30716,6 +30746,8 @@ mod tests {
                 repeats: 3,
                 allow_loopback: false,
                 mark: None,
+                only_poison: None,
+                skip_poisons: Vec::new(),
                 save_plan_path: Some(PathBuf::from("out.r2op")),
                 arm_socket_path: Some(PathBuf::from("/run/r2o-datapath.sock")),
                 modern: false,
@@ -30727,6 +30759,17 @@ mod tests {
     fn classify_options_accept_modern_profile() {
         let args = ["--modern"].map(OsString::from);
         assert!(parse_classify_options(&args).unwrap().modern);
+    }
+
+    #[test]
+    fn classify_options_accept_only_and_repeated_skip_filters() {
+        let args = [
+            "--only", "seqovl-1", "--skip", "badsum", "--skip", "disorder",
+        ]
+        .map(OsString::from);
+        let options = parse_classify_options(&args).unwrap();
+        assert_eq!(options.only_poison.as_deref(), Some("seqovl-1"));
+        assert_eq!(options.skip_poisons, ["badsum", "disorder"]);
     }
 
     #[cfg(unix)]

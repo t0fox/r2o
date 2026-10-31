@@ -819,6 +819,10 @@ pub struct ClassifyOptions {
     pub full_detect_semantics: bool,
     /// Confirm a successful clear with two additional probes.
     pub confirm_clear: bool,
+    /// Limit the raw poison sweep to one hypothesis, as D2O `--only` does.
+    pub only_poison: Option<String>,
+    /// Skip these exact names in property, composed, and normal poison sweeps.
+    pub skip_poisons: Vec<String>,
     pub control: Option<Trigger>,
     pub white: Option<Trigger>,
     pub control_vouched: bool,
@@ -863,6 +867,8 @@ impl Default for ClassifyOptions {
             no_raw: false,
             full_detect_semantics: false,
             confirm_clear: true,
+            only_poison: None,
+            skip_poisons: Vec::new(),
             control: None,
             white: None,
             control_vouched: false,
@@ -873,6 +879,14 @@ impl Default for ClassifyOptions {
             seed_whole: None,
         }
     }
+}
+
+pub fn poison_selected(options: &ClassifyOptions, name: &str) -> bool {
+    options
+        .only_poison
+        .as_deref()
+        .is_none_or(|only| only == name)
+        && !options.skip_poisons.iter().any(|skip| skip == name)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
