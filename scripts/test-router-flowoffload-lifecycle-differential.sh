@@ -23,6 +23,10 @@ cat > "$TEMP/bin/uci" <<'UCI'
 #!/bin/sh
 [ "${1:-}" = -q ] && shift
 case "${1:-}" in
+    changes)
+        [ "${2:-}" = firewall ] || exit 2
+        [ -z "${UCI_PENDING_CHANGES_FILE:-}" ] || [ ! -s "$UCI_PENDING_CHANGES_FILE" ] || cat "$UCI_PENDING_CHANGES_FILE"
+        ;;
     get)
         case "${2:-}" in
             *flow_offloading_hw) cat "$FLOW_HW_SETTING_FILE" ;;
@@ -65,6 +69,16 @@ case "${1:-}" in
         ;;
     commit)
         [ -n "${UCI_COMMIT_FILE:-}" ] || exit 0
+        if [ -n "${UCI_PENDING_CHANGES_FILE:-}" ] && [ -s "$UCI_PENDING_CHANGES_FILE" ]; then
+            while IFS= read -r change; do
+                value=$(printf '%s\n' "$change" | sed "s/^[^=]*='//; s/'$//")
+                case "$change" in
+                    *flow_offloading_hw=*) printf '%s\n' "$value" > "$FLOW_HW_SETTING_FILE" ;;
+                    *flow_offloading=*) printf '%s\n' "$value" > "$FLOW_SETTING_FILE" ;;
+                esac
+            done < "$UCI_PENDING_CHANGES_FILE"
+            : > "$UCI_PENDING_CHANGES_FILE"
+        fi
         printf '%s\n' "$(( $(cat "$UCI_COMMIT_FILE" 2>/dev/null || echo 0) + 1 ))" > "$UCI_COMMIT_FILE"
         ;;
     revert)
@@ -156,6 +170,29 @@ case "$step" in
             "$(test -f "$UCI_HOOK_FILE" && echo present || echo absent)"
         exit 0
         ;;
+    hook-pending)
+        if flowoffload_hook_install; then pending_result=installed; else pending_result=refused; fi
+        printf 'result=%s flow=%s hw=%s pending=%s hook=%s commits=%s\n' \
+            "$pending_result" \
+            "$(cat "$FLOW_SETTING_FILE")" \
+            "$(cat "$FLOW_HW_SETTING_FILE")" \
+            "$(test -s "$UCI_PENDING_CHANGES_FILE" && echo yes || echo no)" \
+            "$(test -f "$UCI_HOOK_FILE" && echo present || echo absent)" \
+            "$(cat "$UCI_COMMIT_FILE" 2>/dev/null || echo 0)"
+        exit 0
+        ;;
+    hook-remove-pending)
+        if flowoffload_hook_remove; then pending_result=removed; else pending_result=refused; fi
+        printf 'result=%s flow=%s hw=%s pending=%s hook=%s marker=%s commits=%s\n' \
+            "$pending_result" \
+            "$(cat "$FLOW_SETTING_FILE")" \
+            "$(cat "$FLOW_HW_SETTING_FILE")" \
+            "$(test -s "$UCI_PENDING_CHANGES_FILE" && echo yes || echo no)" \
+            "$(test -f "$UCI_HOOK_FILE" && echo present || echo absent)" \
+            "$(test -f "$RUN/flowoffload-hook.created" && echo yes || echo no)" \
+            "$(cat "$UCI_COMMIT_FILE" 2>/dev/null || echo 0)"
+        exit 0
+        ;;
     skip-restore)
         flowoffload_restore
         printf 'saved=%s\n' "$(test -f "$RUN/flow-offloading.saved" && echo yes || echo no)"
@@ -234,6 +271,44 @@ PATH="$TEMP/bin:$PATH" sh "$TEMP/step.sh" "$TEMP/r2o.sh" hook >"$hook/output"
 if ! cmp -s "$hook/expected" "$hook/output"; then
     echo "fw4 include hook lifecycle is not idempotent or reversible" >&2
     diff -u "$hook/expected" "$hook/output" >&2 || true
+    exit 1
+fi
+hook_pending="$TEMP/r2o-hook-pending"
+mkdir -p "$hook_pending"
+printf '1\n' >"$hook_pending/flow-setting"
+printf '1\n' >"$hook_pending/flow-hw-setting"
+printf "set firewall.@defaults[0].flow_offloading='0'\n" >"$hook_pending/uci-changes"
+printf '0\n' >"$hook_pending/commits"
+RUN="$hook_pending" RUNTIME="$hook_pending" \
+FLOW_SETTING_FILE="$hook_pending/flow-setting" FLOW_HW_SETTING_FILE="$hook_pending/flow-hw-setting" \
+UCI_PENDING_CHANGES_FILE="$hook_pending/uci-changes" UCI_HOOK_FILE="$hook_pending/include" \
+UCI_COMMIT_FILE="$hook_pending/commits" INIT="$TEMP/bin/r2o-init" \
+FIREWALL="$TEMP/bin/r2o-firewall" PATH="$TEMP/bin:$PATH" \
+    sh "$TEMP/step.sh" "$TEMP/r2o.sh" hook-pending >"$hook_pending/output"
+printf '%s\n' 'result=refused flow=1 hw=1 pending=yes hook=absent commits=0' >"$hook_pending/expected"
+if ! cmp -s "$hook_pending/expected" "$hook_pending/output"; then
+    echo "fw4 hook commit persisted an unrelated staged flow_offloading change" >&2
+    diff -u "$hook_pending/expected" "$hook_pending/output" >&2 || true
+    exit 1
+fi
+hook_remove_pending="$TEMP/r2o-hook-remove-pending"
+mkdir -p "$hook_remove_pending"
+printf '1\n' >"$hook_remove_pending/flow-setting"
+printf '1\n' >"$hook_remove_pending/flow-hw-setting"
+printf "set firewall.@defaults[0].flow_offloading='0'\n" >"$hook_remove_pending/uci-changes"
+printf '%s\n' type=script "path=$TEMP/bin/r2o-init" fw4_compatible=1 enabled=1 >"$hook_remove_pending/include"
+printf 'created\n' >"$hook_remove_pending/flowoffload-hook.created"
+printf '0\n' >"$hook_remove_pending/commits"
+RUN="$hook_remove_pending" RUNTIME="$hook_remove_pending" \
+FLOW_SETTING_FILE="$hook_remove_pending/flow-setting" FLOW_HW_SETTING_FILE="$hook_remove_pending/flow-hw-setting" \
+UCI_PENDING_CHANGES_FILE="$hook_remove_pending/uci-changes" UCI_HOOK_FILE="$hook_remove_pending/include" \
+UCI_COMMIT_FILE="$hook_remove_pending/commits" INIT="$TEMP/bin/r2o-init" \
+FIREWALL="$TEMP/bin/r2o-firewall" PATH="$TEMP/bin:$PATH" \
+    sh "$TEMP/step.sh" "$TEMP/r2o.sh" hook-remove-pending >"$hook_remove_pending/output"
+printf '%s\n' 'result=refused flow=1 hw=1 pending=yes hook=present marker=yes commits=0' >"$hook_remove_pending/expected"
+if ! cmp -s "$hook_remove_pending/expected" "$hook_remove_pending/output"; then
+    echo "fw4 hook removal commit persisted an unrelated staged flow_offloading change" >&2
+    diff -u "$hook_remove_pending/expected" "$hook_remove_pending/output" >&2 || true
     exit 1
 fi
 hook_iptables="$TEMP/r2o-hook-iptables"

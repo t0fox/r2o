@@ -392,6 +392,11 @@ flowoffload_hook_install() {
         [ "$(uci -q get "$hook_section.enabled" 2>/dev/null || true)" = 1 ] || return 1
         return 0
     fi
+    hook_pending_changes=$(uci changes firewall 2>/dev/null) || return 1
+    [ -z "$hook_pending_changes" ] || {
+        say "есть неподтверждённые изменения firewall UCI; сначала сохраните их или отмените, hook flow offload не установлен"
+        return 1
+    }
     uci set "$hook_section=include" \
         && uci set "$hook_section.type=script" \
         && uci set "$hook_section.path=$flowoffload_hook_path" \
@@ -421,6 +426,11 @@ flowoffload_hook_remove() {
         if [ "$(uci -q get "$hook_section.type" 2>/dev/null || true)" = script ] \
             && { [ "$hook_path" = "$INIT" ] \
                 || [ "$hook_path" = "${INIT%/*}/r2o-firewall-fw3-include.sh" ]; }; then
+            hook_pending_changes=$(uci changes firewall 2>/dev/null) || return 1
+            [ -z "$hook_pending_changes" ] || {
+                say "есть неподтверждённые изменения firewall UCI; hook flow offload оставлен до следующего вызова"
+                return 1
+            }
             uci -q delete "$hook_section" && uci commit firewall || return 1
         fi
     fi
