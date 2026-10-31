@@ -429,6 +429,22 @@ pub fn r2o_quic_trial_data_verdict(
     )
 }
 
+/// Короткий контрольный ответ засчитывается только после получения FIN, как в D2O.
+pub fn r2o_quic_short_control_data_verdict(
+    result: &crate::r2o_quic_http3::R2oQuicHttp3Result,
+) -> R2kQuicDataVerdict {
+    r2k_quic_data_judge(
+        result.handshake_confirmed,
+        result.status,
+        result.app_bytes,
+        result.complete,
+        result.r2o_quic_stalled,
+        true,
+        false,
+        result.budget_passed,
+    )
+}
+
 /// Построить начальные QUIC-вопросы по порядку донорской стратегии.
 pub fn r2o_quic_discovery_candidates(
     baseline: Option<&crate::r2o_quic_http3::R2oQuicHttp3Result>,
@@ -1747,6 +1763,29 @@ mod tests {
         assert_eq!(
             r2o_quic_trial_data_verdict(&result),
             R2kQuicDataVerdict::NotRun
+        );
+    }
+
+    #[test]
+    fn короткий_контроль_требует_полный_ответ_как_d2o() {
+        let incomplete = crate::r2o_quic_http3::R2oQuicHttp3Result {
+            handshake_confirmed: true,
+            status: 200,
+            app_bytes: 32_768,
+            ..Default::default()
+        };
+        assert_eq!(
+            r2o_quic_short_control_data_verdict(&incomplete),
+            R2kQuicDataVerdict::NotRun
+        );
+
+        let complete = crate::r2o_quic_http3::R2oQuicHttp3Result {
+            complete: true,
+            ..incomplete
+        };
+        assert_eq!(
+            r2o_quic_short_control_data_verdict(&complete),
+            R2kQuicDataVerdict::Pass
         );
     }
 

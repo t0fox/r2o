@@ -19091,7 +19091,7 @@ impl ControlClient {
                             ),
                         );
                         let control_verdict =
-                            r2o_controller::quic_replay::r2o_quic_trial_data_verdict(
+                            r2o_controller::quic_replay::r2o_quic_short_control_data_verdict(
                                 &control_result,
                             );
                         match control_verdict {
