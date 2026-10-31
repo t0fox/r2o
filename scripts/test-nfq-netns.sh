@@ -1656,6 +1656,7 @@ else
     exit 1
 fi
 echo "ПРОЙДЕНО: proc conntrack переписал IPv6 fragment source до peer reassembly"
+R2OD_BIN="$R2OD_BIN" sh "$SCRIPT_DIR/test-nfq-ipv6-forward-netns.sh"
 
 cat >"$WORK/nfqueue-overflow-probe.py" <<'PY'
 import os
