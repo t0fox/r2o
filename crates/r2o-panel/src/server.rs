@@ -2106,9 +2106,6 @@ fn telegram_status(
     if !enabled {
         return "stopped";
     }
-    if !running {
-        return "stopped";
-    }
     let stored = read_regular_file(&config.telegram_status_path, 64)
         .ok()
         .and_then(|raw| {
@@ -2118,6 +2115,13 @@ fn telegram_status(
                     .to_owned()
             })
         });
+    if !running {
+        return match stored.as_deref() {
+            Some("error") => "error",
+            Some("not_configured") => "not_configured",
+            _ => "stopped",
+        };
+    }
     match stored.as_deref().unwrap_or("") {
         "connected" => "connected",
         "connecting" => "connecting",
