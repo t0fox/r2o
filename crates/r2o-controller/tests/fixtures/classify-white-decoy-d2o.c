@@ -51,5 +51,12 @@ int main(void)
     snprintf(control.name, sizeof(control.name), "control:example.com");
     control.accept = D2K_ACCEPT_TLSRECORD;
     print_trigger("CONTROL_CUSTOM", &control);
+    if (d2k_trigger_raw_hex("57 41:06-03", &control, error, sizeof(error)) != 0) {
+        fprintf(stderr, "D2O raw control failed: %s\n", error);
+        return 1;
+    }
+    snprintf(control.name, sizeof(control.name), "control");
+    control.accept = D2K_ACCEPT_TLSRECORD;
+    print_trigger("CONTROL_RAW", &control);
     return 0;
 }

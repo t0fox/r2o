@@ -1,5 +1,7 @@
 #[path = "../../src/hello.rs"]
 mod hello;
+#[path = "../../src/trigger.rs"]
+mod trigger;
 
 fn main() {
     for name in ["hcaptcha.com", "video.edge.example.net"] {
@@ -22,6 +24,13 @@ fn main() {
     let custom_control = hello::modern_client_hello("example.com").expect("custom control SNI");
     print!("CONTROL_CUSTOM name=control:example.com accept=tls-record bytes=");
     for byte in custom_control {
+        print!("{byte:02x}");
+    }
+    println!();
+
+    let raw_control = trigger::parse_raw_hex("57 41:06-03").expect("raw control hex");
+    print!("CONTROL_RAW name=control accept=tls-record bytes=");
+    for byte in raw_control {
         print!("{byte:02x}");
     }
     println!();

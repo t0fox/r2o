@@ -141,6 +141,7 @@ struct ClassifyCliOptions {
     skip_poisons: Vec<String>,
     white_name: Option<String>,
     control_sni: Option<String>,
+    control_raw: Option<String>,
     save_plan_path: Option<PathBuf>,
     arm_socket_path: Option<PathBuf>,
     modern: bool,
@@ -883,6 +884,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
             skip_poisons,
             white_name,
             control_sni,
+            control_raw,
             save_plan_path,
             arm_socket_path,
             modern,
@@ -898,7 +900,8 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
             Trigger::tls(sni)
         }
         .map_err(|error| format!("TLS-зонд: {error}"))?;
-        let (control, vouched_control_sni) = classify_control_trigger(control_sni.as_deref(), sni)?;
+        let (control, vouched_control_sni) =
+            classify_control_trigger(control_sni.as_deref(), control_raw.as_deref(), sni)?;
         let white = white_name
             .as_deref()
             .map(|name| {
@@ -1063,6 +1066,7 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
     let mut skip_poisons = Vec::new();
     let mut white_name = None;
     let mut control_sni = None;
+    let mut control_raw = None;
     let mut save_plan_path = None;
     let mut arm_socket_path = None;
     let mut modern = false;
@@ -1112,6 +1116,14 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
                     .ok_or("--control-sni требует имя SNI")?;
                 control_sni = Some(value.to_owned());
             }
+            Some("--control-raw") => {
+                index += 1;
+                let value = arguments
+                    .get(index)
+                    .and_then(|value| value.to_str())
+                    .ok_or("--control-raw требует шестнадцатеричные байты")?;
+                control_raw = Some(value.to_owned());
+            }
             Some("--save-plan") if save_plan_path.is_none() => {
                 index += 1;
                 let path = arguments
@@ -1152,6 +1164,7 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
         skip_poisons,
         white_name,
         control_sni,
+        control_raw,
         save_plan_path,
         arm_socket_path,
         modern,
@@ -1160,8 +1173,18 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
 
 fn classify_control_trigger(
     control_sni: Option<&str>,
+    control_raw: Option<&str>,
     target_sni: &str,
 ) -> Result<(Trigger, bool), String> {
+    if control_sni.is_some() && control_raw.is_some() {
+        return Err("--control-raw и --control-sni взаимоисключающие".into());
+    }
+    if let Some(hex) = control_raw {
+        let mut trigger = Trigger::raw_hex(hex).map_err(|error| format!("контроль: {error}"))?;
+        trigger.name = "control".into();
+        trigger.accept = Accept::TlsRecord;
+        return Ok((trigger, false));
+    }
     if control_sni == Some(target_sni) {
         return Err("--control-sni совпадает с целевым SNI; укажите другое имя".into());
     }
@@ -1237,6 +1260,7 @@ fn print_help() {
     );
     println!("  classify: [--white ИМЯ] задаёт ECH-приманку для гипотезы белого ClientHello");
     println!("  classify: [--control-sni ИМЯ] задаёт подтверждённое контрольное имя");
+    println!("  classify: [--control-raw HEX] задаёт байты TLS-записи контроля");
     println!(
         "  r2o-controller --ask --control СОКЕТ --ip IP --sni ИМЯ (--hello-hex ФАЙЛ | --arm-wait-ms МС)"
     );
@@ -30788,6 +30812,7 @@ mod tests {
                 skip_poisons: Vec::new(),
                 white_name: None,
                 control_sni: None,
+                control_raw: None,
                 save_plan_path: Some(PathBuf::from("out.r2op")),
                 arm_socket_path: None,
                 modern: false,
@@ -30809,6 +30834,7 @@ mod tests {
                 skip_poisons: Vec::new(),
                 white_name: None,
                 control_sni: None,
+                control_raw: None,
                 save_plan_path: Some(PathBuf::from("out.r2op")),
                 arm_socket_path: Some(PathBuf::from("/run/r2o-datapath.sock")),
                 modern: false,
@@ -30850,8 +30876,16 @@ mod tests {
     }
 
     #[test]
+    fn classify_options_accept_raw_control() {
+        let args = ["--control-raw", "57 41:06-03"].map(OsString::from);
+        let options = parse_classify_options(&args).unwrap();
+        assert_eq!(options.control_raw.as_deref(), Some("57 41:06-03"));
+        assert!(parse_classify_options(&[OsString::from("--control-raw")]).is_err());
+    }
+
+    #[test]
     fn classify_control_trigger_matches_d2o_default_and_vouched_sni() {
-        let (default, vouched) = classify_control_trigger(None, "target.example").unwrap();
+        let (default, vouched) = classify_control_trigger(None, None, "target.example").unwrap();
         assert_eq!(default.name, "control");
         assert_eq!(default.accept, Accept::TlsRecord);
         assert!(!vouched);
@@ -30862,11 +30896,21 @@ mod tests {
         );
 
         let (custom, vouched) =
-            classify_control_trigger(Some("example.net"), "target.example").unwrap();
+            classify_control_trigger(Some("example.net"), None, "target.example").unwrap();
         assert_eq!(custom.name, "control:example.net");
         assert_eq!(custom.accept, Accept::TlsRecord);
         assert!(vouched);
-        assert!(classify_control_trigger(Some("target.example"), "target.example").is_err());
+        let (raw, vouched) =
+            classify_control_trigger(None, Some("57 41:06-03"), "target.example").unwrap();
+        assert_eq!(raw.name, "control");
+        assert_eq!(raw.accept, Accept::TlsRecord);
+        assert_eq!(raw.payload, b"WA\x06\x03");
+        assert!(!vouched);
+        assert!(classify_control_trigger(Some("target.example"), None, "target.example").is_err());
+        assert!(
+            classify_control_trigger(Some("example.net"), Some("57 41:06-03"), "target.example")
+                .is_err()
+        );
     }
 
     #[cfg(unix)]

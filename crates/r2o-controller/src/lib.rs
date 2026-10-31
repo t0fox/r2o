@@ -26,6 +26,7 @@ pub mod r2o_volume;
 #[cfg(target_os = "linux")]
 mod raw_probe;
 pub mod response;
+pub mod trigger;
 pub mod voice_discovery;
 pub mod voice_measure;
 pub mod voice_targets;

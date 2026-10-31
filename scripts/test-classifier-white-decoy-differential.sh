@@ -49,4 +49,4 @@ if ! cmp -s "$TEMP/d2o.out" "$TEMP/r2o.out"; then
     diff -u "$TEMP/d2o.out" "$TEMP/r2o.out" || true
     exit 1
 fi
-printf 'D2O %s white decoy and default/custom control ClientHello bytes match R2O.\n' "$ACTUAL_D2O_SHA"
+printf 'D2O %s white decoy, default/custom controls, and raw control bytes match R2O.\n' "$ACTUAL_D2O_SHA"

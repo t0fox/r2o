@@ -82,6 +82,16 @@ pub struct Trigger {
 }
 
 impl Trigger {
+    /// Build the donor's arbitrary-byte trigger from its command-line hex form.
+    pub fn raw_hex(hex: &str) -> Result<Self, &'static str> {
+        let payload = crate::trigger::parse_raw_hex(hex)?;
+        Ok(Self {
+            name: format!("raw:{}B", payload.len()),
+            payload,
+            accept: Accept::Any,
+        })
+    }
+
     /// Собрать снятый триггер устаревшего TLS, используемый эталонным классификатором.
     pub fn tls(sni: &str) -> Result<Self, &'static str> {
         Ok(Self {
