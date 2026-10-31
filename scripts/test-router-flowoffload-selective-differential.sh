@@ -21,6 +21,7 @@ case "$*" in
     'list chain inet fw4 forward'|'-a list chain inet fw4 forward')
         [ -f "$NFT_STATE_DIR/fw4-forward" ] || exit 1
         cat "$NFT_STATE_DIR/fw4-forward"
+        [ ! -f "$NFT_STATE_DIR/fw4-extra-forward" ] || cat "$NFT_STATE_DIR/fw4-extra-forward"
         ;;
     'list flowtable inet fw4 ft'|'-a list flowtable inet fw4 ft')
         [ -f "$NFT_STATE_DIR/fw4-ft" ] || exit 1
@@ -32,6 +33,7 @@ case "$*" in
         [ ! -f "$NFT_STATE_DIR/fw4-alt-ft" ] || cat "$NFT_STATE_DIR/fw4-alt-ft"
         printf '\nchain forward {\n'
         cat "$NFT_STATE_DIR/fw4-forward"
+        [ ! -f "$NFT_STATE_DIR/fw4-extra-forward" ] || cat "$NFT_STATE_DIR/fw4-extra-forward"
         printf '}\n'
         ;;
     '-f '*)
@@ -45,6 +47,7 @@ case "$*" in
             *flowoffload.nft.*)
                 if [ "${NFT_FAIL_SELECTIVE:-0}" = 1 ] && grep -q 'flow offload @ft' "$rules"; then exit 1; fi
                 if grep -q 'delete rule inet fw4 forward handle' "$rules"; then
+                    if grep -q 'delete rule inet fw4 forward handle 18' "$rules"; then rm -f "$NFT_STATE_DIR/fw4-extra-forward"; fi
                     if grep -q 'delete flowtable inet fw4 ft' "$rules"; then
                         rm -f "$NFT_STATE_DIR/fw4-ft"
                         printf '%s\n' "$(( $(cat "$NFT_STATE_DIR/flowtable-resets" 2>/dev/null || echo 0) + 1 ))" >"$NFT_STATE_DIR/flowtable-resets"
@@ -60,8 +63,10 @@ case "$*" in
                         else
                             printf '%s\n' 'meta l4proto { tcp, udp } flow offload @ft # handle 5' >"$NFT_STATE_DIR/fw4-forward"
                         fi
+                        [ ! -f "$NFT_STATE_DIR/fw4-extra-forward" ] || cat "$NFT_STATE_DIR/fw4-extra-forward" >>"$NFT_STATE_DIR/fw4-forward"
                     else
                         : >"$NFT_STATE_DIR/fw4-forward"
+                        rm -f "$NFT_STATE_DIR/fw4-extra-forward"
                     fi
                 fi
                 ;;
@@ -90,6 +95,8 @@ case "${1:-}" in
     reload)
         cp "$NFT_STATE_DIR/fw4-forward.initial" "$NFT_STATE_DIR/fw4-forward"
         cp "$NFT_STATE_DIR/fw4-ft.initial" "$NFT_STATE_DIR/fw4-ft"
+        if [ -f "$NFT_STATE_DIR/fw4-extra-forward.initial" ]; then cp "$NFT_STATE_DIR/fw4-extra-forward.initial" "$NFT_STATE_DIR/fw4-extra-forward"; else rm -f "$NFT_STATE_DIR/fw4-extra-forward"; fi
+        if [ -f "$NFT_STATE_DIR/fw4-alt-ft.initial" ]; then cp "$NFT_STATE_DIR/fw4-alt-ft.initial" "$NFT_STATE_DIR/fw4-alt-ft"; else rm -f "$NFT_STATE_DIR/fw4-alt-ft"; fi
         printf '%s\n' "$(( $(cat "$NFT_STATE_DIR/fw4-reloads" 2>/dev/null || echo 0) + 1 ))" >"$NFT_STATE_DIR/fw4-reloads"
         ;;
     *) exit 2 ;;
@@ -262,6 +269,30 @@ firewall flowoffload-ensure
 firewall flowoffload-restore
 [ ! -e "$TEMP/run/flow-offloading.runtime" ] || { echo "nonstandard-flowtable state was not cleared on restore" >&2; exit 1; }
 grep -Fq 'flow offload @ft' "$TEMP/nft/fw4-forward" || { echo "fw4 restore did not reinstate the configured native offload rule" >&2; exit 1; }
+
+printf '%s\n' 'meta l4proto { tcp, udp } flow offload @altft # handle 18' >"$TEMP/nft/fw4-extra-forward"
+cp "$TEMP/nft/fw4-extra-forward" "$TEMP/nft/fw4-extra-forward.initial"
+cp "$TEMP/nft/fw4-ft.initial" "$TEMP/nft/fw4-ft"
+cat >"$TEMP/nft/fw4-alt-ft" <<'ALT_FLOWTABLE'
+flowtable altft {
+    hook ingress priority 0;
+    devices = { br-lan, eth0 };
+}
+ALT_FLOWTABLE
+cp "$TEMP/nft/fw4-alt-ft" "$TEMP/nft/fw4-alt-ft.initial"
+firewall flowoffload-ensure
+[ "$(cat "$TEMP/run/flow-offloading.runtime")" = fallback ] || {
+    echo "multiple fw4 offload rules did not enter runtime fallback" >&2
+    exit 1
+}
+[ ! -e "$TEMP/nft/fw4-ft" ] && [ ! -e "$TEMP/nft/fw4-alt-ft" ] && [ ! -e "$TEMP/nft/fw4-extra-forward" ] || {
+    echo "runtime fallback left another fw4 offload rule or flowtable active" >&2
+    exit 1
+}
+firewall flowoffload-restore
+grep -Fq 'flow offload @ft' "$TEMP/nft/fw4-forward" || { echo "fw4 reload did not restore the standard offload rule" >&2; exit 1; }
+grep -Fq 'flow offload @altft' "$TEMP/nft/fw4-extra-forward" || { echo "fw4 reload did not restore the custom offload rule" >&2; exit 1; }
+ [ -e "$TEMP/nft/fw4-ft" ] && [ -e "$TEMP/nft/fw4-alt-ft" ] || { echo "fw4 reload did not restore both configured flowtables" >&2; exit 1; }
 firewall down
 [ ! -e "$TEMP/nft/r2o" ] || { echo "R2O firewall table survived stop" >&2; exit 1; }
 

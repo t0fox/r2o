@@ -487,6 +487,11 @@ flowoffload_ensure_unlocked() {
     nft list table inet r2o >/dev/null 2>&1 || return 0
     fw4_rules=$(nft -a list table inet fw4 2>/dev/null || true)
     case "$fw4_rules" in *'flow offload @'*) ;; *) return 0 ;; esac
+    flowoffload_rule_count=$(printf '%s\n' "$fw4_rules" | awk '{ count += gsub(/flow offload @/, "") } END { print count + 0 }')
+    if [ "$flowoffload_rule_count" -ne 1 ]; then
+        flowoffload_remove_all_unlocked
+        return $?
+    fi
     if ! nft list flowtable inet fw4 ft >/dev/null 2>&1; then
         flowoffload_remove_all_unlocked
         return $?
