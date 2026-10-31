@@ -2,9 +2,19 @@
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+D2O_ROOT=${R2O_DONOR_ROOT:-${ROOT%/*}/d2o}
+EXPECTED_D2O_SHA=304ba893dd37197128ac8799c0495b035f6a38c0
+[ "$(git -C "$D2O_ROOT" rev-parse HEAD)" = "$EXPECTED_D2O_SHA" ] || {
+    echo "unexpected D2O revision" >&2
+    exit 2
+}
 TEMP=$(mktemp -d "${TMPDIR:-/tmp}/r2o-flowoffload-selective.XXXXXX")
 trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
 mkdir -p "$TEMP/bin" "$TEMP/run" "$TEMP/proc/net" "$TEMP/sys" "$TEMP/modules" "$TEMP/nft"
+
+sed -n '/^flowoffload_saved() {/,/^prepare_runtime() {/p' "$D2O_ROOT/files/S99d2k" |
+    sed '$d' | tr -d '\r' > "$TEMP/d2o-flowoffload.sh"
+[ -s "$TEMP/d2o-flowoffload.sh" ] || { echo "could not extract D2O flow-offload guard" >&2; exit 2; }
 
 cat >"$TEMP/bin/nft" <<'NFT'
 #!/bin/sh
@@ -12,6 +22,14 @@ case "$*" in
     'list table inet r2o'|'-a list table inet r2o')
         [ -f "$NFT_STATE_DIR/r2o" ] || exit 1
         echo 'table inet r2o { comment "r2o-managed"; }'
+        ;;
+    'list chain inet r2o mark_flow')
+        [ -f "$NFT_STATE_DIR/r2o" ] && [ -f "$NFT_STATE_DIR/r2o-mark-flow" ] || exit 1
+        printf 'chain mark_flow {\n    ct direction original meta l4proto tcp ct mark set ct mark | 0x80000000\n}\n'
+        ;;
+    'list chain inet r2o forward')
+        [ -f "$NFT_STATE_DIR/r2o" ] && [ -f "$NFT_STATE_DIR/r2o-mark-flow-hook" ] || exit 1
+        printf 'chain forward {\n    type filter hook forward priority mangle; policy accept;\n    jump mark_flow\n}\n'
         ;;
     'list table inet r2o_rst'|'-a list table inet r2o_rst'|\
     'list chain inet r2o_rst output'|'list set inet r2o_rst rst4'|'list set inet r2o_rst rst6')
@@ -43,6 +61,8 @@ case "$*" in
             *firewall.nft.*)
                 cp "$rules" "$NFT_STATE_DIR/r2o-rules"
                 : >"$NFT_STATE_DIR/r2o"
+                if grep -Fq 'ct mark set ct mark | 0x80000000' "$rules"; then : >"$NFT_STATE_DIR/r2o-mark-flow"; else rm -f "$NFT_STATE_DIR/r2o-mark-flow"; fi
+                if grep -Fq 'jump mark_flow' "$rules"; then : >"$NFT_STATE_DIR/r2o-mark-flow-hook"; else rm -f "$NFT_STATE_DIR/r2o-mark-flow-hook"; fi
                 ;;
             *flowoffload.nft.*)
                 if [ "${NFT_FAIL_SELECTIVE:-0}" = 1 ] && grep -q 'flow offload @ft' "$rules"; then exit 1; fi
@@ -81,7 +101,7 @@ case "$*" in
         case "$handle" in ''|*[!0-9]*) handle=5 ;; esac
         printf '%s # handle %s\n' "$expression" "$handle" >"$NFT_STATE_DIR/fw4-forward"
         ;;
-    delete\ table\ inet\ r2o) rm -f "$NFT_STATE_DIR/r2o" ;;
+    delete\ table\ inet\ r2o) rm -f "$NFT_STATE_DIR/r2o" "$NFT_STATE_DIR/r2o-mark-flow" "$NFT_STATE_DIR/r2o-mark-flow-hook" ;;
     delete\ table\ inet\ r2o_rst) rm -f "$NFT_STATE_DIR/r2o_rst" ;;
     *) echo "unexpected nft command: $*" >&2; exit 2 ;;
 esac
@@ -91,6 +111,10 @@ printf '#!/bin/sh\nexit 0\n' >"$TEMP/bin/lsmod"
 chmod 0755 "$TEMP/bin/nft" "$TEMP/bin/modprobe" "$TEMP/bin/insmod" "$TEMP/bin/lsmod"
 cat >"$TEMP/bin/fw4" <<'FW4'
 #!/bin/sh
+if [ "${FW4_REFERENCE_ONLY:-0}" = 1 ]; then
+    printf '%s\n' "$*" >> "$FW_TRACE"
+    exit 0
+fi
 case "${1:-}" in
     reload)
         cp "$NFT_STATE_DIR/fw4-forward.initial" "$NFT_STATE_DIR/fw4-forward"
@@ -103,6 +127,35 @@ case "${1:-}" in
 esac
 FW4
 chmod 0755 "$TEMP/bin/fw4"
+
+cat >"$TEMP/bin/uci" <<'UCI'
+#!/bin/sh
+[ "${1:-}" = -q ] && shift
+case "${1:-}" in
+    get) cat "$D2O_FLOW_SETTING_FILE" ;;
+    set) printf '%s\n' "${2#*=}" > "$D2O_FLOW_SETTING_FILE" ;;
+    commit) exit 0 ;;
+    *) exit 2 ;;
+esac
+UCI
+chmod 0755 "$TEMP/bin/uci"
+mkdir -p "$TEMP/d2o-run"
+printf '1\n' >"$TEMP/d2o-flow-setting"
+cat >"$TEMP/run-d2o-flowoffload.sh" <<'D2O_RUN'
+#!/bin/sh
+set -eu
+say() { :; }
+. "$D2O_FLOWOFFLOAD_FUNCTIONS"
+flowoffload_off
+printf '%s\n' "$(cat "$D2O_FLOW_SETTING_FILE")"
+D2O_RUN
+chmod 0755 "$TEMP/run-d2o-flowoffload.sh"
+d2o_flow_setting=$(RUN="$TEMP/d2o-run" FW_BACKEND=nft \
+    D2O_FLOW_SETTING_FILE="$TEMP/d2o-flow-setting" \
+    D2O_FLOWOFFLOAD_FUNCTIONS="$TEMP/d2o-flowoffload.sh" \
+    FW4_REFERENCE_ONLY=1 FW_TRACE="$TEMP/d2o-fw4.trace" \
+    PATH="$TEMP/bin:$PATH" sh "$TEMP/run-d2o-flowoffload.sh")
+[ "$d2o_flow_setting" = 0 ] || { echo "D2O no longer disables fw4 offload while datapath is active" >&2; exit 1; }
 
 cat >"$TEMP/config" <<'CONFIG'
 FW_BACKEND=nft
@@ -188,6 +241,31 @@ for attr in 'devices = { br-lan, eth0 };' 'counter;' 'flags offload;'; do
         exit 1
     }
 done
+
+# D2O globally disables fw4 offload while the datapath is active. R2O may keep
+# it only while the conntrack marking chain and its forward hook are present.
+rm -f "$TEMP/nft/r2o-mark-flow"
+firewall flowoffload-ensure
+[ "$(cat "$TEMP/run/flow-offloading.runtime")" = fallback ] || {
+    echo "a missing ct-mark chain left selective fw4 offload active" >&2
+    exit 1
+}
+[ ! -e "$TEMP/nft/fw4-ft" ] || { echo "missing ct-mark chain left fw4 flows offloaded" >&2; exit 1; }
+[ "$d2o_flow_setting" = 0 ] || { echo "D2O reference did not establish the offload-disabled safety baseline" >&2; exit 1; }
+firewall flowoffload-restore
+firewall down
+firewall up
+
+rm -f "$TEMP/nft/r2o-mark-flow-hook"
+firewall flowoffload-ensure
+[ "$(cat "$TEMP/run/flow-offloading.runtime")" = fallback ] || {
+    echo "an unreachable ct-mark chain left selective fw4 offload active" >&2
+    exit 1
+}
+[ ! -e "$TEMP/nft/fw4-ft" ] || { echo "unreachable ct-mark chain left fw4 flows offloaded" >&2; exit 1; }
+firewall flowoffload-restore
+firewall down
+firewall up
 
 NFT_STATE_DIR=$TEMP/nft "$TEMP/bin/fw4" reload
 rm -f "$TEMP/nft/r2o"

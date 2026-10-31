@@ -417,6 +417,18 @@ flowoffload_selective_present() {
     nft -a list chain inet fw4 forward 2>/dev/null | grep -F -q "$FLOWOFFLOAD_COMMENT"
 }
 
+flowoffload_marking_available() {
+    flowoffload_table=$(nft list table inet r2o 2>/dev/null) || return 1
+    printf '%s\n' "$flowoffload_table" | grep -F -q 'comment "r2o-managed"' || return 1
+    flowoffload_mark_chain=$(nft list chain inet r2o mark_flow 2>/dev/null) || return 1
+    printf '%s\n' "$flowoffload_mark_chain" |
+        grep -F -q "ct mark set ct mark | $FLOWOFFLOAD_MARK" || return 1
+    flowoffload_forward_chain=$(nft list chain inet r2o forward 2>/dev/null) || return 1
+    printf '%s\n' "$flowoffload_forward_chain" |
+        grep -F -q 'type filter hook forward priority mangle;' || return 1
+    printf '%s\n' "$flowoffload_forward_chain" | grep -F -q 'jump mark_flow'
+}
+
 flowoffload_rebuild_selective_unlocked() {
     flow_info=$1
     flow_handle=$(printf '%s\n' "$flow_info" | cut -d '|' -f 1)
@@ -484,7 +496,7 @@ flowoffload_remove_all_unlocked() {
 
 flowoffload_ensure_unlocked() {
     force_reset=${1:-0}
-    if [ "$BACKEND" != nft ] || ! nft list table inet r2o >/dev/null 2>&1; then
+    if [ "$BACKEND" != nft ] || ! flowoffload_marking_available; then
         fw4_rules=$(nft -a list table inet fw4 2>/dev/null || true)
         case "$fw4_rules" in *'flow offload @'*) flowoffload_remove_all_unlocked ;; *) return 0 ;; esac
         return $?
