@@ -319,6 +319,8 @@ fn test_options() -> ClassifyOptions {
         allow_loopback: true,
         no_raw: true,
         mark: Some(0),
+        full_detect_semantics: true,
+        confirm_clear: false,
         ..ClassifyOptions::default()
     }
 }
