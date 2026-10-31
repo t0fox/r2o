@@ -1012,7 +1012,8 @@ mod tests {
         r2o_quic_data_proof_confirmed, r2o_quic_direct_action, r2o_quic_discovery_candidates,
         r2o_quic_filter_round_decision, r2o_quic_fragment_control_succeeded,
         r2o_quic_neutral_control_snapshots, r2o_quic_original_fallback_candidates,
-        r2o_quic_strategy_attempt_decision, r2o_quic_trial_data_verdict,
+        r2o_quic_short_control_data_verdict, r2o_quic_strategy_attempt_decision,
+        r2o_quic_trial_data_verdict,
     };
     use r2k_core::quic::R2kQuicDataVerdict;
     use std::net::{SocketAddr, UdpSocket};

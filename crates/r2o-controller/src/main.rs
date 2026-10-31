@@ -930,7 +930,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
         let white = white_name
             .as_deref()
             .map(|name| {
-                Ok(Trigger {
+                Ok::<Trigger, String>(Trigger {
                     name: "white".into(),
                     payload: r2o_controller::hello::r2o_rx_fake_client_hello(name)
                         .map_err(|_| format!("--white {name}: приветствие не собралось"))?,
@@ -21688,12 +21688,13 @@ mod tests {
     #[cfg(unix)]
     use super::saved_http_candidate_keys;
     use super::{
-        ClassifyCliOptions, CompiledCatalog, ControlClient, DiscoveryOutcome, HttpBaselineError,
-        HttpBaselineFailureAction, HttpCandidateHistory, HttpCandidateProgress, HttpLiveFailures,
-        HttpSearchCommand, HttpSearchDisposition, HttpSearchTask, HttpSearchWindow,
-        HttpSearchWorker, R2oFamilyRecoveryDecision, R2oVoiceTrialContext, ServeCliOptions,
-        advance_http_candidate, applied_quic_trial_matches, baseline_silence_starts_search,
-        binding_shape_transport, candidate_text, catalog_commands, compile_text, encode_set_name,
+        Accept, ClassifyCliOptions, CompiledCatalog, ControlClient, DiscoveryOutcome,
+        HttpBaselineError, HttpBaselineFailureAction, HttpCandidateHistory, HttpCandidateProgress,
+        HttpLiveFailures, HttpSearchCommand, HttpSearchDisposition, HttpSearchTask,
+        HttpSearchWindow, HttpSearchWorker, R2oFamilyRecoveryDecision, R2oVoiceTrialContext,
+        ServeCliOptions, advance_http_candidate, applied_quic_trial_matches,
+        baseline_silence_starts_search, binding_shape_transport, candidate_text, catalog_commands,
+        classify_control_trigger, classify_target_trigger, compile_text, encode_set_name,
         failed_http_programs, flow_socket_addresses, http_baseline_failure_action,
         http_search_candidates, http_search_key, matching_domain_group,
         matching_domain_recovery_candidates, measured_http_candidate_keys, normalize_plan_target,
@@ -36960,7 +36961,7 @@ mod tests {
             if let Some(remove) = &remove {
                 stream
                     .write_all(
-                        &encode_ack_for_trial(remove.kind, true, 0, Some(trial_id_b)).unwrap(),
+                        &encode_ack_for_trial(remove.kind, true, 0, Some(trial_id_c)).unwrap(),
                     )
                     .unwrap();
             }
@@ -37052,7 +37053,7 @@ mod tests {
         let fallback_server = std::thread::spawn(move || {
             let (mut stream, _) = fallback_listener.accept().unwrap();
             stream
-                .write_all(&super::encode_greeting(u16::MAX as u32).unwrap())
+                .write_all(&encode_greeting(u16::MAX as u32).unwrap())
                 .unwrap();
             let permanent = super::read_frame(&mut stream).unwrap();
             assert_eq!(permanent.kind, super::COMMAND_SET_NAME);
@@ -37061,13 +37062,12 @@ mod tests {
             assert_eq!(permanent.body[1 + name_len], super::SHAPE_VOICE);
             assert_eq!(permanent.body[2 + name_len], 4);
             stream
-                .write_all(&super::encode_ack(permanent.kind, true, 0).unwrap())
+                .write_all(&encode_ack(permanent.kind, true, 0).unwrap())
                 .unwrap();
             let remove = super::read_frame(&mut stream).unwrap();
             stream
                 .write_all(
-                    &super::encode_ack_for_trial(remove.kind, true, 0, Some(fallback_trial_id))
-                        .unwrap(),
+                    &encode_ack_for_trial(remove.kind, true, 0, Some(fallback_trial_id)).unwrap(),
                 )
                 .unwrap();
             (permanent.kind, remove.kind)

@@ -71,9 +71,9 @@ fn d2o_send_timeout_is_an_experiment_error_not_a_negative_probe() {
         Err(ProbeError::Transport(_))
         | Err(ProbeError::RawConnectTimeout { .. })
         | Err(ProbeError::Local(_)) => "ERROR",
-        Ok(ProbeOutcome::Rejected) => "REJECTED",
-        Ok(ProbeOutcome::Accepted) => "ACCEPTED",
-        Ok(ProbeOutcome::Unproven) => "UNPROVEN",
+        Ok(ProbeOutcome::Rejected | ProbeOutcome::RejectedUnmarked) => "REJECTED",
+        Ok(ProbeOutcome::Accepted | ProbeOutcome::AcceptedUnmarked) => "ACCEPTED",
+        Ok(ProbeOutcome::Unproven | ProbeOutcome::UnprovenUnmarked) => "UNPROVEN",
         Err(ProbeError::DialTimeout(_)) => "DIAL_TIMEOUT",
         Err(ProbeError::Unsupported(_)) => "UNSUPPORTED",
     };

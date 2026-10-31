@@ -869,7 +869,7 @@ mod tests {
             std::net::SocketAddr::V4(r2o_server) => r2o_server,
             std::net::SocketAddr::V6(_) => panic!("голосовой fixture требует IPv4"),
         };
-        let r2o_client_thread = unsafe { libc::pthread_self() };
+        let r2o_client_thread = unsafe { libc::pthread_self() as usize };
         let r2o_repeats = r2o_fixture["repeats"] as usize;
         let r2o_interrupt_delay_ms = r2o_fixture["interrupt_delay_ms"];
         let r2o_response_delay_ms = r2o_fixture["response_delay_ms"];
@@ -888,7 +888,7 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(r2o_interrupt_delay_ms));
             assert_eq!(
-                unsafe { libc::pthread_kill(r2o_client_thread, libc::SIGUSR1) },
+                unsafe { libc::pthread_kill(r2o_client_thread as libc::pthread_t, libc::SIGUSR1) },
                 0
             );
             std::thread::sleep(Duration::from_millis(

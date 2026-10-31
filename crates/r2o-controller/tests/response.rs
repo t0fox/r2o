@@ -517,7 +517,7 @@ fn d2o_tls_response_poll_interruption_matches_c_failure() {
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
     let address = listener.local_addr().unwrap();
-    let target_thread = unsafe { libc::pthread_self() };
+    let target_thread = unsafe { libc::pthread_self() as usize };
     let repeats = fixture["repeats"].parse::<usize>().unwrap();
     let interrupt_delay_ms = fixture["interrupt_delay_ms"].parse::<u64>().unwrap();
     let response_delay_ms = fixture["response_delay_ms"].parse::<u64>().unwrap();
@@ -531,7 +531,7 @@ fn d2o_tls_response_poll_interruption_matches_c_failure() {
             if index == 0 {
                 thread::sleep(Duration::from_millis(interrupt_delay_ms));
                 assert_eq!(
-                    unsafe { libc::pthread_kill(target_thread, libc::SIGUSR1) },
+                    unsafe { libc::pthread_kill(target_thread as libc::pthread_t, libc::SIGUSR1) },
                     0
                 );
                 thread::sleep(Duration::from_millis(

@@ -70,7 +70,7 @@ fn run_fixture(fixture_text: &str) -> &'static str {
     let signal_count = fixture["signal_count"];
     let signal_interval_ms = fixture["signal_interval_ms"];
     let response_delay_ms = fixture["response_delay_ms"];
-    let target_thread = unsafe { libc::pthread_self() };
+    let target_thread = unsafe { libc::pthread_self() as usize };
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept measurement probe");
         if !send_phase {
@@ -82,7 +82,7 @@ fn run_fixture(fixture_text: &str) -> &'static str {
         thread::sleep(Duration::from_millis(interrupt_delay_ms));
         for index in 0..signal_count {
             assert_eq!(
-                unsafe { libc::pthread_kill(target_thread, libc::SIGUSR1) },
+                unsafe { libc::pthread_kill(target_thread as libc::pthread_t, libc::SIGUSR1) },
                 0
             );
             if index + 1 < signal_count {
@@ -130,9 +130,9 @@ fn run_fixture(fixture_text: &str) -> &'static str {
     server.join().unwrap();
 
     let normalized = match result {
-        Ok(ProbeOutcome::Rejected) => "REJECTED",
-        Ok(ProbeOutcome::Accepted) => "ACCEPTED",
-        Ok(ProbeOutcome::Unproven) => "UNPROVEN",
+        Ok(ProbeOutcome::Rejected | ProbeOutcome::RejectedUnmarked) => "REJECTED",
+        Ok(ProbeOutcome::Accepted | ProbeOutcome::AcceptedUnmarked) => "ACCEPTED",
+        Ok(ProbeOutcome::Unproven | ProbeOutcome::UnprovenUnmarked) => "UNPROVEN",
         Err(ProbeError::Transport(_))
         | Err(ProbeError::RawConnectTimeout { .. })
         | Err(ProbeError::Local(_)) => "ERROR",
