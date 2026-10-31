@@ -45,7 +45,7 @@ MARK=0x2d
 MEASURE_MARK=0x2f
 PORTS=443,8443
 CONNBYTES=0:8
-DNS_PORTS=53,853
+DNS_PORTS=5353,853
 VOICE_PORTS=50000:50099,1400,3478:3481,5349,19294:19344
 VOICE_CONNBYTES=0:4
 HTTP_KEEPALIVE_PORTS=80
@@ -66,7 +66,7 @@ MARK=0x2d
 TG_OUTBOUND_MARK=0x51
 PORTS=443,8443
 CONNBYTES=0:8
-DNS_PORTS=53,853
+DNS_PORTS=5353,853
 VOICE_PORTS=50000:50099,1400,3478:3481,5349,19294:19344
 VOICE_CONNBYTES=0:4
 HTTP_KEEPALIVE_PORTS=80
@@ -114,4 +114,11 @@ for implementation in d2o r2o; do
     done
 done
 
-echo "D2O/R2O iptables NFQUEUE rules honor configured TCP/UDP and late RST/FIN ports (d2o $ACTUAL_D2O_SHA)."
+for proto in tcp udp; do
+    assert_rule "$TEMP/d2o.trace" D2K_OUT "-p $proto -m multiport --dports 5353,853 -j RETURN"
+    assert_rule "$TEMP/d2o.trace" D2K_IN "-p $proto -m multiport --sports 5353,853 -j RETURN"
+    assert_rule "$TEMP/r2o.trace" R2O_OUT "-p $proto -m multiport --dports 5353,853 -j RETURN"
+    assert_rule "$TEMP/r2o.trace" R2O_IN "-p $proto -m multiport --sports 5353,853 -j RETURN"
+done
+
+echo "D2O/R2O iptables rules honor configured DNS exclusions, TCP/UDP and late RST/FIN ports (d2o $ACTUAL_D2O_SHA)."

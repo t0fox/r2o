@@ -782,8 +782,8 @@ xt_family_up() {
     xt "$tool" -t mangle -A R2O_OUT -m mark --mark "$MARK" -j RETURN || return 1
     xt "$tool" -t mangle -A R2O_OUT -m mark --mark "$TG_OUTBOUND_MARK" -j RETURN || return 1
     for proto in tcp udp; do
-        xt "$tool" -t mangle -A R2O_OUT -p "$proto" -m multiport --dports 53,853 -j RETURN || return 1
-        xt "$tool" -t mangle -A R2O_IN -p "$proto" -m multiport --sports 53,853 -j RETURN || return 1
+        xt "$tool" -t mangle -A R2O_OUT -p "$proto" -m multiport --dports "$DNS_PORTS" -j RETURN || return 1
+        xt "$tool" -t mangle -A R2O_IN -p "$proto" -m multiport --sports "$DNS_PORTS" -j RETURN || return 1
     done
     voice_ports=$VOICE_PORTS
     for proto in tcp udp; do
@@ -856,8 +856,8 @@ xt_family_installed() {
     xt "$fw_tool" -t mangle -C R2O_OUT -m mark --mark "$MARK" -j RETURN || return 1
     xt "$fw_tool" -t mangle -C R2O_OUT -m mark --mark "$TG_OUTBOUND_MARK" -j RETURN || return 1
     for proto in tcp udp; do
-        xt "$fw_tool" -t mangle -C R2O_OUT -p "$proto" -m multiport --dports 53,853 -j RETURN || return 1
-        xt "$fw_tool" -t mangle -C R2O_IN -p "$proto" -m multiport --sports 53,853 -j RETURN || return 1
+        xt "$fw_tool" -t mangle -C R2O_OUT -p "$proto" -m multiport --dports "$DNS_PORTS" -j RETURN || return 1
+        xt "$fw_tool" -t mangle -C R2O_IN -p "$proto" -m multiport --sports "$DNS_PORTS" -j RETURN || return 1
     done
     xt "$fw_tool" -t mangle -C POSTROUTING -j R2O_OUT || return 1
     xt "$fw_tool" -t mangle -C FORWARD -j R2O_IN || return 1
