@@ -88,7 +88,10 @@ if [ -n "${FIREWALL_TRACE:-}" ]; then printf '%s\n' "$1" >> "$FIREWALL_TRACE"; f
 case "${1:-}" in
     backend) echo "${R2O_TEST_BACKEND:-nft}" ;;
     ipv6-enabled) echo 1 ;;
-    status|flowoffload-ensure|flowoffload-restore) exit 0 ;;
+    status|flowoffload-restore) exit 0 ;;
+    flowoffload-ensure)
+        [ "${FAIL_FLOWOFFLOAD_ENSURE:-0}" = 0 ]
+        ;;
     *) exit 2 ;;
 esac
 FIREWALL
@@ -140,6 +143,11 @@ case "$step" in
             "$(cat "$FLOW_HW_SETTING_FILE")" \
             "$(cat "$FLOW_SETTING_PENDING_FILE" 2>/dev/null || echo absent)" \
             "$(test -f "$UCI_HOOK_FILE" && echo present || echo absent)"
+        exit 0
+        ;;
+    skip-restore)
+        flowoffload_restore
+        printf 'saved=%s\n' "$(test -f "$RUN/flow-offloading.saved" && echo yes || echo no)"
         exit 0
         ;;
 esac
@@ -294,6 +302,34 @@ FIREWALL_TRACE="$hook/include-trace" PATH="$TEMP/bin:$PATH" \
 if ! cmp -s "$hook/restore-expected" "$hook/include-trace"; then
     echo "fw4 restore recursively invoked flow-offload ensure while holding its lock" >&2
     cat "$hook/restore-expected" "$hook/include-trace" "$hook/restore-output" >&2
+    exit 1
+fi
+: >"$hook/failure-trace"
+if ACTION=includes FAIL_FLOWOFFLOAD_ENSURE=1 R2O_DIR="$hook" R2O_CONFIG="$hook/config" \
+    R2O_INIT="$ROOT/router/S99r2o" R2O_FIREWALL="$TEMP/bin/r2o-firewall" \
+    R2O_RUNTIME_DIR="$hook/runtime" R2O_PROC="$hook/proc" \
+    FIREWALL_TRACE="$hook/failure-trace" \
+    PATH="$TEMP/bin:$PATH" sh "$ROOT/router/S99r2o" >"$hook/failure-output" 2>&1; then
+    echo "fw4 include swallowed failed flow-offload enforcement" >&2
+    exit 1
+fi
+printf '%s\n' status flowoffload-ensure ipv6-enabled down >"$hook/failure-expected"
+if ! cmp -s "$hook/failure-expected" "$hook/failure-trace"; then
+    echo "failed fw4 enforcement did not stop R2O without a nested reload" >&2
+    cat "$hook/failure-expected" "$hook/failure-trace" "$hook/failure-output" >&2
+    exit 1
+fi
+skip_restore="$TEMP/r2o-skip-restore"
+mkdir -p "$skip_restore"
+: >"$skip_restore/fw.trace"
+: >"$skip_restore/flow-offloading.saved"
+R2O_FLOWOFFLOAD_SKIP_RESTORE=1 RUN="$skip_restore" FIREWALL_TRACE="$skip_restore/fw.trace" \
+FIREWALL="$TEMP/bin/r2o-firewall" PATH="$TEMP/bin:$PATH" \
+    sh "$TEMP/step.sh" "$TEMP/r2o.sh" skip-restore >"$skip_restore/output"
+printf '%s\n' saved=yes >"$skip_restore/expected"
+if ! cmp -s "$skip_restore/expected" "$skip_restore/output" || [ -s "$skip_restore/fw.trace" ]; then
+    echo "include failure stop attempted a nested fw4 reload" >&2
+    cat "$skip_restore/expected" "$skip_restore/output" "$skip_restore/fw.trace" >&2
     exit 1
 fi
 
