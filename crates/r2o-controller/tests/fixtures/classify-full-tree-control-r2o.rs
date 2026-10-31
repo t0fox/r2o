@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -8,7 +9,7 @@ use classify::{
 };
 
 struct Backend {
-    control_calls: usize,
+    control_outcomes: VecDeque<Result<ProbeOutcome, ProbeError>>,
     ack_calls: usize,
 }
 
@@ -24,8 +25,7 @@ impl ProbeBackend for Backend {
 
     fn probe_outcome(&mut self, request: ProbeRequest<'_>) -> Result<ProbeOutcome, ProbeError> {
         if request.trigger.name == "control" {
-            self.control_calls += 1;
-            Err(ProbeError::Transport("connection refused".into()))
+            self.control_outcomes.pop_front().expect("control outcome")
         } else {
             Ok(ProbeOutcome::Rejected)
         }
@@ -52,7 +52,9 @@ impl ProbeBackend for Backend {
     }
 }
 
-fn main() {
+fn run_case(
+    control_outcomes: Vec<Result<ProbeOutcome, ProbeError>>,
+) -> (classify::ClassifyResult, usize) {
     let trigger = Trigger {
         name: "fixture".into(),
         payload: b"WA\x06\x03SIGNATURE-AND-THEN-SOME-PAYLOAD-BYTES".to_vec(),
@@ -74,7 +76,7 @@ fn main() {
         ..ClassifyOptions::default()
     };
     let mut backend = Backend {
-        control_calls: 0,
+        control_outcomes: control_outcomes.into(),
         ack_calls: 0,
     };
     let result = run_with_backend_progress(
@@ -84,8 +86,27 @@ fn main() {
         &mut backend,
         &mut |_, _, _, _| {},
     );
+    (result, backend.ack_calls)
+}
+
+fn main() {
+    let (transport_error, transport_ack_calls) =
+        run_case(vec![
+            Err(ProbeError::Transport("connection refused".into()));
+            3
+        ]);
     println!(
         "{:?}|{}|{}",
-        result.verdict, result.probes, backend.ack_calls
+        transport_error.verdict, transport_error.probes, transport_ack_calls
+    );
+
+    let (control_pass, control_ack_calls) = run_case(vec![
+        Ok(ProbeOutcome::Rejected),
+        Ok(ProbeOutcome::Accepted),
+        Ok(ProbeOutcome::Accepted),
+    ]);
+    println!(
+        "{:?}|{}|{}",
+        control_pass.verdict, control_pass.probes, control_ack_calls
     );
 }

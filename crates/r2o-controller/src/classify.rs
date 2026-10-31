@@ -1448,23 +1448,13 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
                     name: "control",
                     cuts: &[],
                     gap: options.write_gap,
-                    until_pass: false,
+                    until_pass: true,
                 },
                 progress,
             );
-            // D2O uses the control pass count only. A control transport error
-            // says nothing about the target, so continue to neutral ACK and
-            // the remaining fallback checks.
-            if measured.pass > 0 && measured.pass < options.repeats {
-                result.verdict = Verdict::Flaky;
-                result.reason = format!(
-                    "контроль другим именем не воспроизводится: {} из {}",
-                    measured.pass, options.repeats
-                );
-                finish(&mut result, &options, start);
-                return result;
-            }
-            control_ok = measured.pass == options.repeats;
+            // D2O decides control by pass count only: errors do not abort the
+            // fallback, and one successful control probe is enough.
+            control_ok = measured.pass > 0;
             if control_ok && base.unproven + one.unproven > 0 {
                 result.verdict = Verdict::Inconclusive;
                 result.reason = format!(

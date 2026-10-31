@@ -73,7 +73,8 @@ pub mod classify;
 EOF
 cat "$ROOT/crates/r2o-controller/tests/fixtures/classify-full-tree-control-r2o.rs" >> "$TEMP/rust/src/main.rs"
 
-"$TEMP/d2o-classifier" > "$TEMP/d2o.out"
+"$TEMP/d2o-classifier" transport-error > "$TEMP/d2o.out"
+"$TEMP/d2o-classifier" control-pass >> "$TEMP/d2o.out"
 CARGO_TARGET_DIR=$rust_target \
 RUSTFLAGS="${RUSTFLAGS:--Awarnings}" \
 CARGO_MAKEFLAGS= \
@@ -84,4 +85,4 @@ if ! cmp -s "$TEMP/d2o.out" "$TEMP/r2o.out"; then
     exit 1
 fi
 cat "$TEMP/d2o.out"
-printf 'D2O %s full classifier control transport-error branch matches R2O.\n' "$ACTUAL_D2O_SHA"
+printf 'D2O %s full classifier control error and first-pass branches match R2O.\n' "$ACTUAL_D2O_SHA"
