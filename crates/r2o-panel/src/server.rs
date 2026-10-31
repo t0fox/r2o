@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-const REQUEST_MAX: usize = 16 * 1024;
+const REQUEST_MAX: usize = 32 * 1024;
 const BODY_MAX: usize = 4 * 1024 * 1024;
 const WORKER_BODY_MAX: usize = 4096;
 const WORKER_MAX: usize = 8;
@@ -2220,6 +2220,28 @@ mod differential_tests {
         assert_eq!(rust_trace, c_trace);
         fs::write(
             std::env::var_os("R2O_PANEL_WORKER_LENGTH_RUST_TRACE")
+                .expect("test helper provides the Rust output path"),
+            rust_trace,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[ignore = "run through scripts/test-panel-request-header-limit-differential.sh"]
+    fn d2o_request_header_limit_matches_rust_handler() {
+        let c_trace = fs::read_to_string(
+            std::env::var_os("R2O_PANEL_HEADER_LIMIT_C_TRACE")
+                .expect("test helper provides the D2O response"),
+        )
+        .unwrap();
+        let mut request = b"GET /unknown HTTP/1.1\r\nX-Padding: ".to_vec();
+        request.extend(std::iter::repeat_n(b'a', 20 * 1024));
+        request.extend_from_slice(b"\r\n\r\n");
+        let response = handle_request(&Config::default(), &request);
+        let rust_trace = format!("HTTP/1.1 {}\n", response.status);
+        assert_eq!(rust_trace, c_trace);
+        fs::write(
+            std::env::var_os("R2O_PANEL_HEADER_LIMIT_RUST_TRACE")
                 .expect("test helper provides the Rust output path"),
             rust_trace,
         )
