@@ -38,6 +38,9 @@ int main(void)
     printf("classifier-timeout-ms=%d\n", options.timeout_ms);
     options.timeout_ms = 2750;
     printf("classifier-custom-timeout-ms=%d\n", options.timeout_ms);
+    printf("classifier-write-gap-ms=%d\n", options.write_gap_ms);
+    options.write_gap_ms = 35;
+    printf("classifier-custom-write-gap-ms=%d\n", options.write_gap_ms);
 
     print_selected("all", &options);
 

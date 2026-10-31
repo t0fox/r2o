@@ -138,6 +138,7 @@ struct ClassifyCliOptions {
     allow_loopback: bool,
     no_raw: bool,
     timeout: Option<std::time::Duration>,
+    write_gap: Option<std::time::Duration>,
     mark: Option<u32>,
     only_poison: Option<String>,
     skip_poisons: Vec<String>,
@@ -890,6 +891,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
             allow_loopback,
             no_raw,
             timeout,
+            write_gap,
             mark,
             only_poison,
             skip_poisons,
@@ -928,6 +930,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
                 allow_loopback,
                 no_raw,
                 timeout: timeout.unwrap_or_else(|| std::time::Duration::from_secs(6)),
+                write_gap: write_gap.unwrap_or_else(|| std::time::Duration::from_millis(60)),
                 mark,
                 full_detect_semantics: true,
                 confirm_clear: false,
@@ -1077,6 +1080,7 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
     let mut allow_loopback = false;
     let mut no_raw = false;
     let mut timeout = None;
+    let mut write_gap = None;
     let mut mark = None;
     let mut only_poison = None;
     let mut skip_poisons = Vec::new();
@@ -1102,6 +1106,17 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
                     .parse::<i32>()
                     .map_err(|_| "--timeout должен быть целым числом миллисекунд")?;
                 timeout = (millis > 0).then(|| std::time::Duration::from_millis(millis as u64));
+            }
+            Some("--write-gap") => {
+                index += 1;
+                let value = arguments
+                    .get(index)
+                    .and_then(|value| value.to_str())
+                    .ok_or("--write-gap требует время в миллисекундах")?;
+                let millis = value
+                    .parse::<i32>()
+                    .map_err(|_| "--write-gap должен быть целым числом миллисекунд")?;
+                write_gap = (millis > 0).then(|| std::time::Duration::from_millis(millis as u64));
             }
             Some("--mark") if mark.is_none() => {
                 index += 1;
@@ -1212,6 +1227,7 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
         allow_loopback,
         no_raw,
         timeout,
+        write_gap,
         mark,
         only_poison,
         skip_poisons,
@@ -1338,6 +1354,9 @@ fn print_help() {
     println!("  classify: [--control-raw HEX] задаёт байты TLS-записи контроля");
     println!("  classify: [--no-raw] пропускает проверки с raw-пакетами");
     println!("  classify: [--timeout MS] задаёт ожидание каждого зонда; по умолчанию 6000 мс");
+    println!(
+        "  classify: [--write-gap MS] задаёт паузу между частями ClientHello; по умолчанию 60 мс"
+    );
     println!(
         "  classify: modern ClientHello — по умолчанию; --legacy или --hello legacy выбирают TLS 1.2"
     );
@@ -30890,6 +30909,7 @@ mod tests {
                 allow_loopback: true,
                 no_raw: false,
                 timeout: None,
+                write_gap: None,
                 mark: None,
                 only_poison: None,
                 skip_poisons: Vec::new(),
@@ -30915,6 +30935,7 @@ mod tests {
                 allow_loopback: false,
                 no_raw: false,
                 timeout: None,
+                write_gap: None,
                 mark: None,
                 only_poison: None,
                 skip_poisons: Vec::new(),
@@ -30976,6 +30997,28 @@ mod tests {
                 parse_classify_options(&[OsString::from("--timeout"), OsString::from(value)])
                     .unwrap()
                     .timeout,
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn classify_options_accept_write_gap_and_default_for_nonpositive_values() {
+        let args = ["--write-gap", "35"].map(OsString::from);
+        assert_eq!(
+            parse_classify_options(&args).unwrap().write_gap,
+            Some(std::time::Duration::from_millis(35))
+        );
+        assert!(parse_classify_options(&[OsString::from("--write-gap")]).is_err());
+        assert!(
+            parse_classify_options(&[OsString::from("--write-gap"), OsString::from("bad")])
+                .is_err()
+        );
+        for value in ["0", "-1"] {
+            assert_eq!(
+                parse_classify_options(&[OsString::from("--write-gap"), OsString::from(value)])
+                    .unwrap()
+                    .write_gap,
                 None
             );
         }

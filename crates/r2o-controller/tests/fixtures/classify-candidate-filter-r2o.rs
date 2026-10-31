@@ -27,6 +27,13 @@ fn main() {
         options.timeout.as_millis()
     );
     options.timeout = ClassifyOptions::default().timeout;
+    println!("classifier-write-gap-ms={}", options.write_gap.as_millis());
+    options.write_gap = std::time::Duration::from_millis(35);
+    println!(
+        "classifier-custom-write-gap-ms={}",
+        options.write_gap.as_millis()
+    );
+    options.write_gap = ClassifyOptions::default().write_gap;
     print_selected("all", &options);
 
     options.only_poison = Some("seqovl-1".into());
