@@ -17,6 +17,7 @@ TCP_QUEUE=65527
 TCP_MARK=21074
 TCP6_QUEUE=65526
 TCP6_MARK=21075
+IPV6_NAT_QUEUE=65517
 TCP_DELAY_QUEUE=65524
 TCP_DELAY_MARK=21076
 TCP_CONTROL_QUEUE=65522
@@ -80,6 +81,18 @@ R2OD_BIN="$R2OD_BIN" R2OC_BIN="$R2OC_BIN" sh "$SCRIPT_DIR/r2o-quic-silence-netns
 
 printf '\122\062\117\120\000\001\000\012\000\000\000\002\000\002\000\002\021\002\001\017\000\001\001' >"$WORK/quicsplit.r2op"
 printf '\122\062\117\120\000\001\000\013\000\000\000\002\000\002\000\002\021\002\001\020\000\001\001' >"$WORK/quicdeny.r2op"
+python3 - "$WORK/quic-ipfrag.r2op" <<'PY'
+import struct
+import sys
+
+def tlv(kind, value):
+    return struct.pack("!HH", kind, len(value)) + value
+
+records = [tlv(0x0002, b"\x11\x02"), tlv(0x010c, b"\x01")]
+header = b"R2OP" + struct.pack("!HHHH", 1, 7, 0, len(records))
+with open(sys.argv[1], "wb") as output:
+    output.write(header + b"".join(records))
+PY
 printf '\122\062\117\120\000\001\000\011\000\000\000\002\000\002\000\002\021\002\001\016\000\002\000\007' >"$WORK/udplen.r2op"
 printf '\122\062\117\120\000\001\000\002\000\000\000\002\000\002\000\002\006\001\001\000\000\004\000\005\000\000' >"$WORK/tcp-split.r2op"
 python3 - "$WORK/tcp-hold.r2op" <<'PY'
@@ -1496,6 +1509,135 @@ wait "$PEER_SERVER_PID"
 PEER_SERVER_PID=
 echo "ПРОЙДЕНО: marked IPv6 4-KiB request/reply прошёл policy route, fragment NFQUEUE и reassembly"
 
+kill -TERM "$R2OD_IPV6_PID"
+if wait "$R2OD_IPV6_PID"; then
+    R2OD_IPV6_PID=
+else
+    cat "$WORK/r2o-datapath-ipv6.log" >&2
+    echo "ОШИБКА: IPv6 route-gate datapath не завершился после SIGTERM" >&2
+    exit 1
+fi
+ip netns exec "$NS" ip -6 addr add 2001:db8:100::10/128 dev "$R2O_VETH_CLIENT" nodad
+ip netns exec "$NS" ip -6 route replace default dev "$R2O_VETH_CLIENT"
+ip netns exec "$NS" nft add table ip6 r2o_nat
+ip netns exec "$NS" nft 'add chain ip6 r2o_nat postrouting { type nat hook postrouting priority srcnat; policy accept; }'
+ip netns exec "$NS" nft add rule ip6 r2o_nat postrouting meta mark != 119 ip6 saddr 2001:db8:100::1 ip6 daddr 2001:db8:100::2 udp dport 4453 snat to 2001:db8:100::10
+ip netns exec "$NS" nft 'add chain inet r2o ipv6_nat_fragments { type filter hook output priority -450; policy accept; }'
+ip netns exec "$NS" nft add rule inet r2o ipv6_nat_fragments meta mark 119 ip6 saddr 2001:db8:100::10 ip6 nexthdr ipv6-frag counter
+ip netns exec "$NS" nft add rule inet r2o output meta mark != 119 ip6 daddr 2001:db8:100::2 udp dport 4453 counter queue num "$IPV6_NAT_QUEUE"
+ip netns exec "$NS" "$R2OD_BIN" --check --plan "$WORK/quic-ipfrag.r2op" >/dev/null
+ip netns exec "$NS" "$R2OD_BIN" \
+    --queue "$IPV6_NAT_QUEUE" --family ipv6 --plan "$WORK/quic-ipfrag.r2op" \
+    --mark 119 --queue-len 32 --stats 0 \
+    >"$WORK/r2o-datapath-ipv6-nat.log" 2>&1 &
+R2OD_IPV6_NAT_PID=$!
+sleep 0.2
+if ! kill -0 "$R2OD_IPV6_NAT_PID" 2>/dev/null; then
+    cat "$WORK/r2o-datapath-ipv6-nat.log" >&2
+    exit 1
+fi
+
+cat >"$WORK/ipv6-nat-capture.py" <<'PY'
+import socket
+import sys
+
+ready_path = sys.argv[1]
+udp = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+udp.bind(("2001:db8:100::2", 4453))
+udp.settimeout(3)
+with open(ready_path, "w", encoding="ascii") as ready:
+    ready.write("ready")
+first, peer = udp.recvfrom(4096)
+if peer[0] != "2001:db8:100::10":
+    raise SystemExit(f"ОШИБКА: conntrack NAT не перевёл source IPv6: {peer!r}")
+print("conntrack first packet source:", peer)
+udp.sendto(b"ack", peer)
+second, second_peer = udp.recvfrom(4096)
+if second != first or second_peer[0] != "2001:db8:100::10":
+    raise SystemExit("ОШИБКА: conntrack-mapped IPv6 fragments не собрал UDP-сервер")
+print("IPv6 UDP fragments reassembled with the conntrack-mapped source")
+PY
+ip netns exec "$PEER_NS" python3 "$WORK/ipv6-nat-capture.py" "$WORK/ipv6-nat-ready" \
+    >"$WORK/ipv6-nat-capture.log" 2>&1 &
+IPV6_NAT_CAPTURE_PID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -f "$WORK/ipv6-nat-ready" ] && break
+    kill -0 "$IPV6_NAT_CAPTURE_PID" 2>/dev/null || {
+        cat "$WORK/ipv6-nat-capture.log" >&2
+        exit 1
+    }
+    sleep 0.05
+done
+[ -f "$WORK/ipv6-nat-ready" ] || {
+    cat "$WORK/ipv6-nat-capture.log" >&2
+    echo "ОШИБКА: conntrack capture listener не запустился" >&2
+    exit 1
+}
+if ! ip netns exec "$NS" python3 - "$FIXTURE" <<'PY'
+import ipaddress
+import socket
+import sys
+import time
+
+client = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+client.bind(("2001:db8:100::1", 40100))
+client.settimeout(2)
+payload = open(sys.argv[1], "rb").read()
+destination = ("2001:db8:100::2", 4453)
+client.sendto(payload, destination)
+if client.recvfrom(128)[0] != b"ack":
+    raise SystemExit("ОШИБКА: первый IPv6 conntrack NAT flow не прошёл")
+translated = "2001:db8:100::10"
+with open("/proc/net/nf_conntrack", encoding="ascii") as table:
+    entries = []
+    for line in table:
+        fields = {}
+        for field in line.split():
+            if "=" in field:
+                key, value = field.split("=", 1)
+                fields.setdefault(key, []).append(value)
+        if (
+            fields.get("sport", [""])[0] == "40100"
+            and fields.get("dport", [""])[0] == "4453"
+            and len(fields.get("dst", [])) > 1
+            and ipaddress.IPv6Address(fields["dst"][1]) == ipaddress.IPv6Address(translated)
+        ):
+            entries.append(line)
+if not entries:
+    raise SystemExit("ОШИБКА: proc conntrack не содержит IPv6 SNAT mapping этого flow")
+print("proc conntrack подтвердил IPv6 SNAT mapping первого flow")
+time.sleep(0.05)
+client.sendto(payload, destination)
+PY
+then
+    cat "$WORK/ipv6-nat-capture.log" "$WORK/r2o-datapath-ipv6-nat.log" >&2
+    exit 1
+fi
+if ! ip netns exec "$NS" nft list chain inet r2o output | grep -Eq 'dport 4453 counter packets [1-9][0-9]* bytes'; then
+    ip netns exec "$NS" nft list chain inet r2o output >&2
+    echo "ОШИБКА: conntrack probe не дошёл до выделенного NFQUEUE правила" >&2
+    exit 1
+fi
+if ! wait "$IPV6_NAT_CAPTURE_PID"; then
+    cat "$WORK/ipv6-nat-capture.log" "$WORK/r2o-datapath-ipv6-nat.log" >&2
+    exit 1
+fi
+IPV6_NAT_CAPTURE_PID=
+if ! ip netns exec "$NS" nft list chain inet r2o ipv6_nat_fragments | grep -Eq 'counter packets [2-9][0-9]* bytes'; then
+    ip netns exec "$NS" nft list chain inet r2o ipv6_nat_fragments >&2
+    echo "ОШИБКА: локальный OUTPUT не увидел несколько conntrack-mapped IPv6 fragments" >&2
+    exit 1
+fi
+kill -TERM "$R2OD_IPV6_NAT_PID"
+if wait "$R2OD_IPV6_NAT_PID"; then
+    R2OD_IPV6_NAT_PID=
+else
+    cat "$WORK/r2o-datapath-ipv6-nat.log" >&2
+    echo "ОШИБКА: IPv6 conntrack datapath не завершился после SIGTERM" >&2
+    exit 1
+fi
+echo "ПРОЙДЕНО: proc conntrack переписал IPv6 fragment source до peer reassembly"
+
 kill -TERM "$R2OD_OBSERVE_PID"
 if wait "$R2OD_OBSERVE_PID"; then
     R2OD_OBSERVE_PID=
@@ -1512,4 +1654,4 @@ if ! grep -Eq '^r2o-datapath: TCP-потоки [0-9]+ из 2048 \(отказов
 fi
 echo "ПРОЙДЕНО: UDP-потоки из NFQUEUE сохранены и показаны в итоговой сводке"
 
-cat "$WORK/r2o-datapath.log" "$WORK/r2o-datapath-udplen.log" "$WORK/r2o-datapath-tcp.log" "$WORK/r2o-datapath-tcp6.log" "$WORK/r2o-datapath-tcp-delay.log" "$WORK/r2o-datapath-control.log" "$WORK/r2o-datapath-control-restarted.log" "$WORK/r2o-datapath-voice.log" "$WORK/r2o-datapath-observe.log" "$WORK/r2o-controller-observe.log" "$WORK/r2o-datapath-hold.log" "$WORK/r2o-datapath-ipv6.log"
+cat "$WORK/r2o-datapath.log" "$WORK/r2o-datapath-udplen.log" "$WORK/r2o-datapath-tcp.log" "$WORK/r2o-datapath-tcp6.log" "$WORK/r2o-datapath-tcp-delay.log" "$WORK/r2o-datapath-control.log" "$WORK/r2o-datapath-control-restarted.log" "$WORK/r2o-datapath-voice.log" "$WORK/r2o-datapath-observe.log" "$WORK/r2o-controller-observe.log" "$WORK/r2o-datapath-hold.log" "$WORK/r2o-datapath-ipv6.log" "$WORK/r2o-datapath-ipv6-nat.log"
