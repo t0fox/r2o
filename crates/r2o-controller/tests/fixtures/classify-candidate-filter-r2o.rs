@@ -21,6 +21,12 @@ fn print_selected(label: &str, options: &ClassifyOptions) {
 fn main() {
     let mut options = ClassifyOptions::default();
     println!("classifier-timeout-ms={}", options.timeout.as_millis());
+    options.timeout = std::time::Duration::from_millis(2750);
+    println!(
+        "classifier-custom-timeout-ms={}",
+        options.timeout.as_millis()
+    );
+    options.timeout = ClassifyOptions::default().timeout;
     print_selected("all", &options);
 
     options.only_poison = Some("seqovl-1".into());

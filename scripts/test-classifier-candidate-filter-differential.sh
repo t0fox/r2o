@@ -78,5 +78,5 @@ if ! cmp -s "$TEMP/d2o.out" "$TEMP/r2o.out"; then
     diff -u "$TEMP/d2o.out" "$TEMP/r2o.out" || true
     exit 1
 fi
-printf 'D2O %s poison filters, raw-probe gating, and the standalone classifier timeout default match R2O.\n' \
+printf 'D2O %s poison filters, raw-probe gating, and standalone classifier timeouts match R2O.\n' \
     "$ACTUAL_D2O_SHA"

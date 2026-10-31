@@ -137,6 +137,7 @@ struct ClassifyCliOptions {
     repeats: usize,
     allow_loopback: bool,
     no_raw: bool,
+    timeout: Option<std::time::Duration>,
     mark: Option<u32>,
     only_poison: Option<String>,
     skip_poisons: Vec<String>,
@@ -888,6 +889,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
             repeats,
             allow_loopback,
             no_raw,
+            timeout,
             mark,
             only_poison,
             skip_poisons,
@@ -925,6 +927,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
                 repeats,
                 allow_loopback,
                 no_raw,
+                timeout: timeout.unwrap_or_else(|| std::time::Duration::from_secs(6)),
                 mark,
                 full_detect_semantics: true,
                 confirm_clear: false,
@@ -1073,6 +1076,7 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
     let mut repeats = None;
     let mut allow_loopback = false;
     let mut no_raw = false;
+    let mut timeout = None;
     let mut mark = None;
     let mut only_poison = None;
     let mut skip_poisons = Vec::new();
@@ -1088,6 +1092,17 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
         match arguments[index].to_str() {
             Some("--allow-loopback") if !allow_loopback => allow_loopback = true,
             Some("--no-raw") => no_raw = true,
+            Some("--timeout") => {
+                index += 1;
+                let value = arguments
+                    .get(index)
+                    .and_then(|value| value.to_str())
+                    .ok_or("--timeout требует время в миллисекундах")?;
+                let millis = value
+                    .parse::<i32>()
+                    .map_err(|_| "--timeout должен быть целым числом миллисекунд")?;
+                timeout = (millis > 0).then(|| std::time::Duration::from_millis(millis as u64));
+            }
             Some("--mark") if mark.is_none() => {
                 index += 1;
                 let value = arguments
@@ -1196,6 +1211,7 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
         repeats: repeats.unwrap_or(3),
         allow_loopback,
         no_raw,
+        timeout,
         mark,
         only_poison,
         skip_poisons,
@@ -1321,6 +1337,7 @@ fn print_help() {
     println!("  classify: [--control-sni ИМЯ] задаёт подтверждённое контрольное имя");
     println!("  classify: [--control-raw HEX] задаёт байты TLS-записи контроля");
     println!("  classify: [--no-raw] пропускает проверки с raw-пакетами");
+    println!("  classify: [--timeout MS] задаёт ожидание каждого зонда; по умолчанию 6000 мс");
     println!(
         "  classify: modern ClientHello — по умолчанию; --legacy или --hello legacy выбирают TLS 1.2"
     );
@@ -30872,6 +30889,7 @@ mod tests {
                 repeats: 4,
                 allow_loopback: true,
                 no_raw: false,
+                timeout: None,
                 mark: None,
                 only_poison: None,
                 skip_poisons: Vec::new(),
@@ -30896,6 +30914,7 @@ mod tests {
                 repeats: 3,
                 allow_loopback: false,
                 no_raw: false,
+                timeout: None,
                 mark: None,
                 only_poison: None,
                 skip_poisons: Vec::new(),
@@ -30939,6 +30958,27 @@ mod tests {
     fn classify_options_disable_raw_probes() {
         let args = ["--no-raw"].map(OsString::from);
         assert!(parse_classify_options(&args).unwrap().no_raw);
+    }
+
+    #[test]
+    fn classify_options_accept_timeout_and_default_for_nonpositive_values() {
+        let args = ["--timeout", "2750"].map(OsString::from);
+        assert_eq!(
+            parse_classify_options(&args).unwrap().timeout,
+            Some(std::time::Duration::from_millis(2750))
+        );
+        assert!(parse_classify_options(&[OsString::from("--timeout")]).is_err());
+        assert!(
+            parse_classify_options(&[OsString::from("--timeout"), OsString::from("soon")]).is_err()
+        );
+        for value in ["0", "-1"] {
+            assert_eq!(
+                parse_classify_options(&[OsString::from("--timeout"), OsString::from(value)])
+                    .unwrap()
+                    .timeout,
+                None
+            );
+        }
     }
 
     #[test]
