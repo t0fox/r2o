@@ -29,6 +29,7 @@ build_target=${CARGO_BUILD_TARGET:-$($rustc_cmd -vV | sed -n 's/^host: //p')}
 
 "$CC" -std=c99 -O2 -Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-function \
     -pthread -Wl,--wrap=accept -Wl,--wrap=close -Wl,--wrap=recv \
+    -Wl,--wrap=connect -Wl,--wrap=poll \
     -I"$D2O_ROOT/detect" -I"$D2O_ROOT/detect/include" \
     -I"$D2O_ROOT/core/include" -I"$D2O_ROOT/datapath/include" \
     -o "$TEMP/d2o-classifier" \
@@ -77,6 +78,8 @@ cat "$ROOT/crates/r2o-controller/tests/fixtures/classify-full-tree-control-r2o.r
 "$TEMP/d2o-classifier" control-pass >> "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" control-unproven >> "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" target-unproven >> "$TEMP/d2o.out"
+"$TEMP/d2o-classifier" baseline-deadline >> "$TEMP/d2o.out"
+"$TEMP/d2o-classifier" baseline-mixed-error >> "$TEMP/d2o.out"
 CARGO_TARGET_DIR=$rust_target \
 RUSTFLAGS="${RUSTFLAGS:--Awarnings}" \
 CARGO_MAKEFLAGS= \
@@ -87,4 +90,4 @@ if ! cmp -s "$TEMP/d2o.out" "$TEMP/r2o.out"; then
     exit 1
 fi
 cat "$TEMP/d2o.out"
-printf 'D2O %s full classifier control and trigger unproven branches match R2O.\n' "$ACTUAL_D2O_SHA"
+printf 'D2O %s full classifier baseline and control fallback branches match R2O.\n' "$ACTUAL_D2O_SHA"

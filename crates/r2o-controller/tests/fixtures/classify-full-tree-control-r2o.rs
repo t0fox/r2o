@@ -12,6 +12,10 @@ struct Backend {
     control_outcomes: VecDeque<Result<ProbeOutcome, ProbeError>>,
     ack_outcomes: VecDeque<Result<bool, ProbeError>>,
     target_outcome: ProbeOutcome,
+    target_error: Option<ProbeError>,
+    target_error_at: Option<usize>,
+    target_timeouts: Vec<u128>,
+    target_calls: usize,
     ack_calls: usize,
 }
 
@@ -29,7 +33,17 @@ impl ProbeBackend for Backend {
         if request.trigger.name == "control" {
             self.control_outcomes.pop_front().expect("control outcome")
         } else {
-            Ok(self.target_outcome)
+            self.target_timeouts.push(request.timeout.as_millis());
+            let target_call = self.target_calls;
+            self.target_calls += 1;
+            if self.target_error_at == Some(target_call) {
+                return Err(ProbeError::Transport("connection refused".into()));
+            }
+            if let Some(error) = &self.target_error {
+                Err(error.clone())
+            } else {
+                Ok(self.target_outcome)
+            }
         }
     }
 
@@ -59,7 +73,9 @@ fn run_case(
     ack_outcomes: Vec<Result<bool, ProbeError>>,
     target_outcome: ProbeOutcome,
     control_accept: Accept,
-) -> (classify::ClassifyResult, usize) {
+    target_error: Option<ProbeError>,
+    target_error_at: Option<usize>,
+) -> (classify::ClassifyResult, usize, Vec<u128>) {
     let trigger = Trigger {
         name: "fixture".into(),
         payload: b"WA\x06\x03SIGNATURE-AND-THEN-SOME-PAYLOAD-BYTES".to_vec(),
@@ -84,6 +100,10 @@ fn run_case(
         control_outcomes: control_outcomes.into(),
         ack_outcomes: ack_outcomes.into(),
         target_outcome,
+        target_error,
+        target_error_at,
+        target_timeouts: Vec::new(),
+        target_calls: 0,
         ack_calls: 0,
     };
     let result = run_with_backend_progress(
@@ -93,22 +113,24 @@ fn run_case(
         &mut backend,
         &mut |_, _, _, _| {},
     );
-    (result, backend.ack_calls)
+    (result, backend.ack_calls, backend.target_timeouts)
 }
 
 fn main() {
-    let (transport_error, transport_ack_calls) = run_case(
+    let (transport_error, transport_ack_calls, _) = run_case(
         vec![Err(ProbeError::Transport("connection refused".into())); 3],
         vec![Err(ProbeError::Transport("connection refused".into()))],
         ProbeOutcome::Rejected,
         Accept::Any,
+        None,
+        None,
     );
     println!(
         "{:?}|{}|{}",
         transport_error.verdict, transport_error.probes, transport_ack_calls
     );
 
-    let (control_pass, control_ack_calls) = run_case(
+    let (control_pass, control_ack_calls, _) = run_case(
         vec![
             Ok(ProbeOutcome::Rejected),
             Ok(ProbeOutcome::Accepted),
@@ -117,31 +139,70 @@ fn main() {
         vec![],
         ProbeOutcome::Rejected,
         Accept::Any,
+        None,
+        None,
     );
     println!(
         "{:?}|{}|{}",
         control_pass.verdict, control_pass.probes, control_ack_calls
     );
 
-    let (control_unproven, control_ack_calls) = run_case(
+    let (control_unproven, control_ack_calls, _) = run_case(
         vec![Ok(ProbeOutcome::Unproven); 3],
         vec![Ok(false); 3],
         ProbeOutcome::Rejected,
         Accept::TlsRecord,
+        None,
+        None,
     );
     println!(
         "{:?}|{}|{}",
         control_unproven.verdict, control_unproven.probes, control_ack_calls
     );
 
-    let (target_unproven, target_ack_calls) = run_case(
+    let (target_unproven, target_ack_calls, _) = run_case(
         vec![Ok(ProbeOutcome::Accepted)],
         vec![],
         ProbeOutcome::Unproven,
         Accept::Any,
+        None,
+        None,
     );
     println!(
         "{:?}|{}|{}",
         target_unproven.verdict, target_unproven.probes, target_ack_calls
+    );
+
+    let (baseline_deadline, baseline_ack_calls, timeouts) = run_case(
+        vec![],
+        vec![],
+        ProbeOutcome::Rejected,
+        Accept::Any,
+        Some(ProbeError::DialTimeout(
+            "dial tcp 192.0.2.44:443: i/o timeout".into(),
+        )),
+        None,
+    );
+    let timeout_csv = timeouts
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    println!(
+        "{:?}|{}|{}|{}",
+        baseline_deadline.verdict, baseline_deadline.probes, baseline_ack_calls, timeout_csv
+    );
+
+    let (baseline_mixed_error, baseline_ack_calls, _) = run_case(
+        vec![],
+        vec![],
+        ProbeOutcome::Rejected,
+        Accept::Any,
+        None,
+        Some(0),
+    );
+    println!(
+        "{:?}|{}|{}",
+        baseline_mixed_error.verdict, baseline_mixed_error.probes, baseline_ack_calls
     );
 }

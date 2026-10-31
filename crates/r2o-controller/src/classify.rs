@@ -572,7 +572,11 @@ impl ProbeError {
     }
 
     fn is_dial_timeout(&self) -> bool {
-        matches!(self, Self::DialTimeout(_))
+        match self {
+            Self::DialTimeout(_) => true,
+            Self::Transport(message) => is_dial_timeout_text(message),
+            _ => false,
+        }
     }
 
     fn is_unsupported(&self) -> bool {
@@ -1304,17 +1308,51 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
         return result;
     }
 
-    let base = measure_baseline(backend, &target, trigger, &options, &mut result, progress);
+    let mut base = measure_baseline(backend, &target, trigger, &options, &mut result, progress);
     if stopped(&options) {
         finish_cancelled(&mut result, &options, start);
         return result;
     }
-    if base.pass == 0 && base.errors == options.repeats {
-        result.reason = format!(
-            "нет TCP до цели: ни один из {} опытов не состоялся",
-            options.repeats
+
+    if base.pass == 0 && base.error.as_ref().is_some_and(ProbeError::is_dial_timeout) {
+        let mut slow_options = options.clone();
+        slow_options.timeout = options.timeout.saturating_mul(2);
+        slow_options.seed_whole = None;
+        base = measure_baseline(
+            backend,
+            &target,
+            trigger,
+            &slow_options,
+            &mut result,
+            progress,
         );
-        result.verdict = Verdict::Unreachable;
+        if stopped(&options) {
+            finish_cancelled(&mut result, &options, start);
+            return result;
+        }
+    }
+
+    if base.pass == 0 && base.errors > 0 {
+        if base.error.as_ref().is_some_and(ProbeError::is_dial_timeout) {
+            result.verdict = Verdict::Flaky;
+            result.reason = format!(
+                "наш срок на подключение {} мс истёк — замер не состоялся: {}",
+                options.timeout.as_millis(),
+                base.error
+                    .as_ref()
+                    .expect("error count without error")
+                    .message()
+            );
+        } else {
+            result.verdict = Verdict::Unreachable;
+            result.reason = format!(
+                "нет TCP до цели: {}",
+                base.error
+                    .as_ref()
+                    .expect("error count without error")
+                    .message()
+            );
+        }
         finish(&mut result, &options, start);
         return result;
     }

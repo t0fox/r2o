@@ -7,7 +7,14 @@
 
 static int accepted_connections;
 static int close_after_connections = 6;
+static int force_connect_deadline;
+static int force_first_connect_error;
+static int connect_count;
+static int poll_timeout_count;
+static int poll_timeouts[16];
 extern int __real_accept(int, struct sockaddr *, socklen_t *);
+extern int __real_connect(int, const struct sockaddr *, socklen_t);
+extern int __real_poll(struct pollfd *, nfds_t, int);
 extern ssize_t __real_recv(int, void *, size_t, int);
 extern int __real_close(int);
 
@@ -40,6 +47,36 @@ int __wrap_accept(int fd, struct sockaddr *address, socklen_t *length)
         }
     }
     return client;
+}
+
+int __wrap_connect(int fd, const struct sockaddr *address, socklen_t length)
+{
+    if (force_first_connect_error && connect_count++ == 0) {
+        errno = ECONNREFUSED;
+        return -1;
+    }
+    if (force_connect_deadline) {
+        (void)fd;
+        (void)address;
+        (void)length;
+        errno = EINPROGRESS;
+        return -1;
+    }
+    return __real_connect(fd, address, length);
+}
+
+int __wrap_poll(struct pollfd *fds, nfds_t count, int timeout)
+{
+    if (force_connect_deadline) {
+        (void)fds;
+        (void)count;
+        if (poll_timeout_count < (int)(sizeof(poll_timeouts) / sizeof(poll_timeouts[0]))) {
+            poll_timeouts[poll_timeout_count] = timeout;
+        }
+        poll_timeout_count++;
+        return 0;
+    }
+    return __real_poll(fds, count, timeout);
 }
 
 ssize_t __wrap_recv(int fd, void *buffer, size_t length, int flags)
@@ -98,6 +135,14 @@ int main(int argc, char **argv)
         close_after_connections = 0;
         g_ctl_pat = "+";
         g_ack_pat = "e";
+    } else if (strcmp(argv[1], "baseline-deadline") == 0) {
+        close_after_connections = 0;
+        force_connect_deadline = 1;
+        g_ack_pat = "e";
+    } else if (strcmp(argv[1], "baseline-mixed-error") == 0) {
+        close_after_connections = 0;
+        force_first_connect_error = 1;
+        g_ack_pat = "e";
     } else {
         return 2;
     }
@@ -119,6 +164,25 @@ int main(int argc, char **argv)
     trigger.len = sizeof(PAY) - 1;
 
     d2k_classify_run(g_addr, &trigger, &options, &result);
+    if (strcmp(argv[1], "baseline-deadline") == 0) {
+        int valid = poll_timeout_count == 6;
+        int i;
+        for (i = 0; i < 6 && i < poll_timeout_count; i++) {
+            int expected = i < 3 ? 400 : 800;
+            if (poll_timeouts[i] != expected) valid = 0;
+        }
+        printf("Flaky|%d|0|", result.probes);
+        for (i = 0; i < poll_timeout_count && i < 6; i++) {
+            printf("%s%d", i == 0 ? "" : ",", poll_timeouts[i]);
+        }
+        printf("\n");
+        return valid && result.verdict == D2K_DV_FLAKY && result.probes == 6 ? 0 : 1;
+    }
+    if (strcmp(argv[1], "baseline-mixed-error") == 0) {
+        printf("Unreachable|%d|0\n", result.probes);
+        return result.verdict == D2K_DV_UNREACHABLE && result.probes == 3 &&
+               accepted_connections == 2 ? 0 : 1;
+    }
     if (strcmp(argv[1], "transport-error") == 0) {
         printf("Inconclusive|%d|%d\n", result.probes, g_ack_calls);
         return result.verdict == D2K_DV_INCONCLUSIVE && result.probes == 10 &&
