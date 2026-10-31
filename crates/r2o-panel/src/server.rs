@@ -1444,7 +1444,7 @@ fn api_workers(config: &Config, request: &Request<'_>) -> Response {
         );
     }
     let length = request.header("Content-Length").and_then(|s| {
-        (!s.is_empty() && s.bytes().all(|byte| byte.is_ascii_digit()))
+        (!s.is_empty() && s.len() <= 4 && s.bytes().all(|byte| byte.is_ascii_digit()))
             .then(|| s.parse::<usize>().ok())
             .flatten()
     });
@@ -2192,6 +2192,39 @@ mod differential_tests {
     use super::*;
     use std::process::Command;
     use std::time::Instant;
+
+    #[test]
+    #[ignore = "run through scripts/test-panel-worker-content-length-differential.sh"]
+    fn d2o_worker_content_length_matches_rust_handler() {
+        let config_path = PathBuf::from(
+            std::env::var_os("R2O_PANEL_WORKER_LENGTH_CONFIG")
+                .expect("test helper provides the config path"),
+        );
+        let c_trace = fs::read_to_string(
+            std::env::var_os("R2O_PANEL_WORKER_LENGTH_C_TRACE")
+                .expect("test helper provides the D2O response"),
+        )
+        .unwrap();
+        fs::write(&config_path, b"TG_WORKERS=old.example\n").unwrap();
+        let mut config = Config::default();
+        config.config_path = config_path.clone();
+        config.service_path = PathBuf::new();
+        config.control_enabled = true;
+        let request = b"POST /api/telegram/workers HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\nContent-Type: application/json\r\nContent-Length: 00021\r\n\r\n{\"domains\":[\"x.com\"]}";
+        let response = handle_request(&config, request);
+        let rust_trace = format!(
+            "HTTP/1.1 {}\n{}",
+            response.status,
+            fs::read_to_string(&config_path).unwrap()
+        );
+        assert_eq!(rust_trace, c_trace);
+        fs::write(
+            std::env::var_os("R2O_PANEL_WORKER_LENGTH_RUST_TRACE")
+                .expect("test helper provides the Rust output path"),
+            rust_trace,
+        )
+        .unwrap();
+    }
 
     #[test]
     #[ignore = "run through scripts/test-panel-static-etag-differential.sh"]
