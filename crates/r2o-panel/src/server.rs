@@ -1766,14 +1766,22 @@ fn static_asset(
     name: &str,
     content_type: &str,
 ) -> Response {
-    let bytes = match read_asset(config, name) {
+    let (bytes, metadata) = match read_asset(config, name) {
         Ok(data) => data,
         Err(_) => return text_response(404, "not found\n"),
     };
-    let hash = bytes.iter().fold(0xcbf29ce484222325u64, |h, b| {
-        (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
-    });
-    let etag = format!("\"{:x}-{:x}\"", bytes.len(), hash);
+    let etag = if let Some(metadata) = metadata {
+        format!(
+            "\"{:x}-{:x}\"",
+            metadata.len(),
+            asset_modified_time(&metadata)
+        )
+    } else {
+        let hash = bytes.iter().fold(0xcbf29ce484222325u64, |h, b| {
+            (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
+        });
+        format!("\"{:x}-{:x}\"", bytes.len(), hash)
+    };
     let mut response = Response::new(200, content_type, bytes);
     response = response
         .header("Cache-Control", "no-cache")
@@ -1785,12 +1793,12 @@ fn static_asset(
     response
 }
 
-fn read_asset(config: &Config, name: &str) -> std::io::Result<Vec<u8>> {
+fn read_asset(config: &Config, name: &str) -> std::io::Result<(Vec<u8>, Option<fs::Metadata>)> {
     let root_safe = fs::symlink_metadata(&config.asset_dir)
         .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink());
     if !root_safe {
         return embedded_asset(name)
-            .map(|bytes| bytes.to_vec())
+            .map(|bytes| (bytes.to_vec(), None))
             .ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "asset root unavailable")
             });
@@ -1800,17 +1808,33 @@ fn read_asset(config: &Config, name: &str) -> std::io::Result<Vec<u8>> {
             .is_ok_and(|m| !m.is_dir() || m.file_type().is_symlink())
     {
         return embedded_asset(name)
-            .map(|bytes| bytes.to_vec())
+            .map(|bytes| (bytes.to_vec(), None))
             .ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "asset directory unsafe")
             });
     }
     let path = config.asset_dir.join(name);
-    match read_regular_file(&path, BODY_MAX) {
-        Ok(bytes) => Ok(bytes),
+    match read_regular_file_with_metadata(&path, BODY_MAX) {
+        Ok((bytes, metadata)) => Ok((bytes, Some(metadata))),
         Err(_) => embedded_asset(name)
-            .map(|bytes| bytes.to_vec())
+            .map(|bytes| (bytes.to_vec(), None))
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "asset missing")),
+    }
+}
+
+fn asset_modified_time(metadata: &fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        metadata.mtime() as u64
+    }
+    #[cfg(not(unix))]
+    {
+        metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |duration| duration.as_secs())
     }
 }
 
@@ -2168,6 +2192,65 @@ mod differential_tests {
     use super::*;
     use std::process::Command;
     use std::time::Instant;
+
+    #[test]
+    #[ignore = "run through scripts/test-panel-static-etag-differential.sh"]
+    fn d2o_static_asset_etag_matches_rust_asset() {
+        let asset_dir = PathBuf::from(
+            std::env::var_os("R2O_PANEL_STATIC_ETAG_DIR")
+                .expect("test helper provides the shared asset directory"),
+        );
+        let c_trace = fs::read_to_string(
+            std::env::var_os("R2O_PANEL_STATIC_ETAG_C_TRACE")
+                .expect("test helper provides the D2O response"),
+        )
+        .unwrap();
+        let mut lines = c_trace.lines();
+        let c_status = lines.next().expect("D2O status line");
+        let c_etag = lines
+            .next()
+            .and_then(|line| line.strip_prefix("ETag: "))
+            .expect("D2O ETag header");
+        let asset = fs::OpenOptions::new()
+            .write(true)
+            .open(asset_dir.join("index.html"))
+            .unwrap();
+        asset
+            .set_times(
+                fs::FileTimes::new()
+                    .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_234_567_890)),
+            )
+            .unwrap();
+
+        let config = Config {
+            asset_dir,
+            ..Config::default()
+        };
+        let request = Request {
+            method: "GET",
+            path: "/",
+            query: "",
+            query_present: false,
+            headers: vec![("If-None-Match", c_etag)],
+            body: &[],
+        };
+        let response = static_asset(&config, &request, "index.html", "text/html; charset=utf-8");
+        let rust_status = format!("HTTP/1.1 {}", response.status);
+        let rust_etag = response
+            .headers
+            .iter()
+            .find(|(name, _)| name == "ETag")
+            .map(|(_, value)| value.as_str())
+            .expect("Rust ETag header");
+        assert_eq!(rust_status, c_status);
+        assert_eq!(rust_etag, c_etag);
+        fs::write(
+            std::env::var_os("R2O_PANEL_STATIC_ETAG_RUST_TRACE")
+                .expect("test helper provides the Rust output path"),
+            format!("{rust_status}\nETag: {rust_etag}\n"),
+        )
+        .unwrap();
+    }
 
     #[test]
     #[ignore = "run through scripts/test-panel-control-timeout-differential.sh"]
