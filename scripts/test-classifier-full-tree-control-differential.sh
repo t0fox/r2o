@@ -67,6 +67,8 @@ cat >> "$TEMP/rust/src/main.rs" <<EOF
 pub mod hello;
 #[path = "$rust_root/crates/r2o-controller/src/plan_text.rs"]
 pub mod plan_text;
+#[path = "$rust_root/crates/r2o-controller/src/trigger.rs"]
+pub mod trigger;
 #[path = "$rust_root/crates/r2o-controller/src/classify_measured.rs"]
 mod classify_measured;
 #[path = "$rust_root/crates/r2o-controller/src/classify.rs"]
@@ -76,11 +78,13 @@ cat "$ROOT/crates/r2o-controller/tests/fixtures/classify-full-tree-control-r2o.r
 
 "$TEMP/d2o-classifier" transport-error > "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" control-pass >> "$TEMP/d2o.out"
+"$TEMP/d2o-classifier" control-pass-progress >> "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" control-unproven >> "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" target-unproven >> "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" baseline-deadline >> "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" baseline-mixed-error >> "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" baseline-clear >> "$TEMP/d2o.out"
+"$TEMP/d2o-classifier" baseline-clear-progress >> "$TEMP/d2o.out"
 CARGO_TARGET_DIR=$rust_target \
 RUSTFLAGS="${RUSTFLAGS:--Awarnings}" \
 CARGO_MAKEFLAGS= \
@@ -91,4 +95,4 @@ if ! cmp -s "$TEMP/d2o.out" "$TEMP/r2o.out"; then
     exit 1
 fi
 cat "$TEMP/d2o.out"
-printf 'D2O %s full classifier baseline and control fallback branches match R2O.\n' "$ACTUAL_D2O_SHA"
+printf 'D2O %s full classifier baseline, control fallback, and progress branches match R2O.\n' "$ACTUAL_D2O_SHA"

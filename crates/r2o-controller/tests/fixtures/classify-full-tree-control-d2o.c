@@ -13,6 +13,7 @@ static int respond_serverhello;
 static int connect_count;
 static int poll_timeout_count;
 static int poll_timeouts[16];
+static int capture_progress_events;
 extern int __real_accept(int, struct sockaddr *, socklen_t *);
 extern int __real_connect(int, const struct sockaddr *, socklen_t);
 extern int __real_poll(struct pollfd *, nfds_t, int);
@@ -24,6 +25,12 @@ static struct {
     int active;
     int control;
 } server_clients[32];
+
+static void print_progress_event(void *ctx, const d2k_obs *observation)
+{
+    (void)ctx;
+    printf("PROGRESS|%s|%d|%d\n", observation->probe, observation->pass, observation->fail);
+}
 
 int __wrap_accept(int fd, struct sockaddr *address, socklen_t *length)
 {
@@ -127,10 +134,12 @@ int main(int argc, char **argv)
     if (strcmp(argv[1], "transport-error") == 0) {
         close_after_connections = 6;
         g_ack_pat = "e";
-    } else if (strcmp(argv[1], "control-pass") == 0) {
+    } else if (strcmp(argv[1], "control-pass") == 0 ||
+               strcmp(argv[1], "control-pass-progress") == 0) {
         close_after_connections = 0;
         g_ctl_pat = "-+";
         g_ack_pat = "e";
+        capture_progress_events = strcmp(argv[1], "control-pass-progress") == 0;
     } else if (strcmp(argv[1], "control-unproven") == 0) {
         close_after_connections = 0;
         g_ctl_pat = "+";
@@ -147,10 +156,12 @@ int main(int argc, char **argv)
         close_after_connections = 0;
         force_first_connect_error = 1;
         g_ack_pat = "e";
-    } else if (strcmp(argv[1], "baseline-clear") == 0) {
+    } else if (strcmp(argv[1], "baseline-clear") == 0 ||
+               strcmp(argv[1], "baseline-clear-progress") == 0) {
         close_after_connections = 0;
         respond_serverhello = 1;
         g_ack_pat = "e";
+        capture_progress_events = strcmp(argv[1], "baseline-clear-progress") == 0;
     } else {
         return 2;
     }
@@ -162,6 +173,9 @@ int main(int argc, char **argv)
     options.write_gap_ms = 2;
     options.long_gap_ms = 10;
     options.no_raw = 1;
+    if (capture_progress_events) {
+        options.on_obs = print_progress_event;
+    }
     options.control.accept = strcmp(argv[1], "control-unproven") == 0
         ? D2K_ACCEPT_TLSRECORD : D2K_ACCEPT_ANY;
     memcpy(options.control.name, "control", sizeof("control"));
@@ -191,17 +205,20 @@ int main(int argc, char **argv)
         return result.verdict == D2K_DV_UNREACHABLE && result.probes == 3 &&
                accepted_connections == 2 ? 0 : 1;
     }
-    if (strcmp(argv[1], "baseline-clear") == 0) {
+    if (strcmp(argv[1], "baseline-clear") == 0 ||
+        strcmp(argv[1], "baseline-clear-progress") == 0) {
+        int expected_probes = 3;
         printf("Clear|%d|0\n", result.probes);
-        return result.verdict == D2K_DV_CLEAR && result.probes == 3 &&
-               accepted_connections == 3 ? 0 : 1;
+        return result.verdict == D2K_DV_CLEAR && result.probes == expected_probes &&
+               accepted_connections == expected_probes ? 0 : 1;
     }
     if (strcmp(argv[1], "transport-error") == 0) {
         printf("Inconclusive|%d|%d\n", result.probes, g_ack_calls);
         return result.verdict == D2K_DV_INCONCLUSIVE && result.probes == 10 &&
                g_ack_calls == 1 && accepted_connections == 6 ? 0 : 1;
     }
-    if (strcmp(argv[1], "control-pass") == 0) {
+    if (strcmp(argv[1], "control-pass") == 0 ||
+        strcmp(argv[1], "control-pass-progress") == 0) {
         printf("Opaque|%d|%d\n", result.probes, g_ack_calls);
         return result.verdict == D2K_DV_OPAQUE && result.probes == 8 &&
                g_ack_calls == 0 && accepted_connections == 8 ? 0 : 1;

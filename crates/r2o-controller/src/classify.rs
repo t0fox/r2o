@@ -1218,6 +1218,7 @@ fn measure<B: ProbeBackend>(
             Ok(ProbeOutcome::Accepted | ProbeOutcome::AcceptedUnmarked) => {
                 tally.pass += 1;
                 if spec.until_pass {
+                    progress(spec.name, result.probes, tally.pass, tally.fail);
                     break;
                 }
             }

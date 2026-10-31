@@ -76,6 +76,28 @@ fn run_case(
     target_error: Option<ProbeError>,
     target_error_at: Option<usize>,
 ) -> (classify::ClassifyResult, usize, Vec<u128>) {
+    run_case_with_progress(
+        control_outcomes,
+        ack_outcomes,
+        target_outcome,
+        control_accept,
+        target_error,
+        target_error_at,
+        3,
+        false,
+    )
+}
+
+fn run_case_with_progress(
+    control_outcomes: Vec<Result<ProbeOutcome, ProbeError>>,
+    ack_outcomes: Vec<Result<bool, ProbeError>>,
+    target_outcome: ProbeOutcome,
+    control_accept: Accept,
+    target_error: Option<ProbeError>,
+    target_error_at: Option<usize>,
+    repeats: usize,
+    capture_progress: bool,
+) -> (classify::ClassifyResult, usize, Vec<u128>) {
     let trigger = Trigger {
         name: "fixture".into(),
         payload: b"WA\x06\x03SIGNATURE-AND-THEN-SOME-PAYLOAD-BYTES".to_vec(),
@@ -87,7 +109,7 @@ fn run_case(
         accept: control_accept,
     };
     let options = ClassifyOptions {
-        repeats: 3,
+        repeats,
         timeout: Duration::from_millis(400),
         write_gap: Duration::from_millis(2),
         long_gap: Duration::from_millis(10),
@@ -113,7 +135,15 @@ fn run_case(
         &trigger,
         options,
         &mut backend,
-        &mut |_, _, _, _| {},
+        &mut |probe, _, passed, failed| {
+            let completed = passed.saturating_add(failed);
+            let observation_complete = completed >= repeats
+                || (probe == "control" || probe == "neutral-ack") && passed > 0
+                || probe.starts_with("transport:");
+            if capture_progress && completed > 0 && observation_complete {
+                println!("PROGRESS|{probe}|{passed}|{failed}");
+            }
+        },
     );
     (result, backend.ack_calls, backend.target_timeouts)
 }
@@ -147,6 +177,25 @@ fn main() {
     println!(
         "{:?}|{}|{}",
         control_pass.verdict, control_pass.probes, control_ack_calls
+    );
+
+    let (progress_control_pass, progress_ack_calls, _) = run_case_with_progress(
+        vec![
+            Ok(ProbeOutcome::Rejected),
+            Ok(ProbeOutcome::Accepted),
+            Ok(ProbeOutcome::Accepted),
+        ],
+        vec![],
+        ProbeOutcome::Rejected,
+        Accept::Any,
+        None,
+        None,
+        3,
+        true,
+    );
+    println!(
+        "{:?}|{}|{}",
+        progress_control_pass.verdict, progress_control_pass.probes, progress_ack_calls
     );
 
     let (control_unproven, control_ack_calls, _) = run_case(
@@ -219,5 +268,20 @@ fn main() {
     println!(
         "{:?}|{}|{}",
         baseline_clear.verdict, baseline_clear.probes, baseline_ack_calls
+    );
+
+    let (progress_clear, progress_ack_calls, _) = run_case_with_progress(
+        vec![],
+        vec![],
+        ProbeOutcome::Accepted,
+        Accept::Any,
+        None,
+        None,
+        3,
+        true,
+    );
+    println!(
+        "{:?}|{}|{}",
+        progress_clear.verdict, progress_clear.probes, progress_ack_calls
     );
 }

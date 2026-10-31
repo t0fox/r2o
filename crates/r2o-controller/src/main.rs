@@ -36,7 +36,7 @@ use r2o_controller::catalog::Binding;
 use r2o_controller::catalog::{Catalog, DomainObservation, GroupKey};
 use r2o_controller::classify::{
     Accept, ClassifyOptions, ProbeBackend, ProbeTarget, TcpProbeBackend, Trigger, Verdict,
-    run as classify_run, run_with_backend_progress as classify_run_with_progress,
+    run_with_backend_progress as classify_run_with_progress,
 };
 use r2o_controller::domain::normalize;
 use r2o_controller::http_search::{
@@ -141,6 +141,7 @@ struct ClassifyCliOptions {
     write_gap: Option<std::time::Duration>,
     long_gap: Option<std::time::Duration>,
     dump_trigger: bool,
+    progress: bool,
     mark: Option<u32>,
     only_poison: Option<String>,
     skip_poisons: Vec<String>,
@@ -896,6 +897,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
             write_gap,
             long_gap,
             dump_trigger,
+            progress: progress_enabled,
             mark,
             only_poison,
             skip_poisons,
@@ -933,26 +935,45 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
                 })
             })
             .transpose()?;
-        let result = classify_run(
+        let options = ClassifyOptions {
+            repeats,
+            allow_loopback,
+            no_raw,
+            timeout: timeout.unwrap_or_else(|| std::time::Duration::from_secs(6)),
+            write_gap: write_gap.unwrap_or_else(|| std::time::Duration::from_millis(60)),
+            long_gap: long_gap.unwrap_or_else(|| std::time::Duration::from_millis(700)),
+            mark,
+            full_detect_semantics: true,
+            confirm_clear: false,
+            only_poison,
+            skip_poisons,
+            white,
+            control: Some(control),
+            control_vouched: vouched_control_sni,
+            ..ClassifyOptions::default()
+        };
+        let progress_started = std::time::Instant::now();
+        let mut report_progress = |probe: &str, _probes: usize, passed: usize, failed: usize| {
+            let completed = passed.saturating_add(failed);
+            let observation_complete = completed >= repeats
+                || (probe == "control" || probe == "neutral-ack") && passed > 0
+                || probe.starts_with("transport:");
+            if progress_enabled && completed > 0 && observation_complete {
+                eprintln!(
+                    "  [{:4} с] {:<28} прошло={} не прошло={}",
+                    progress_started.elapsed().as_secs(),
+                    probe,
+                    passed,
+                    failed
+                );
+            }
+        };
+        let result = classify_run_with_progress(
             &target,
             &trigger,
-            ClassifyOptions {
-                repeats,
-                allow_loopback,
-                no_raw,
-                timeout: timeout.unwrap_or_else(|| std::time::Duration::from_secs(6)),
-                write_gap: write_gap.unwrap_or_else(|| std::time::Duration::from_millis(60)),
-                long_gap: long_gap.unwrap_or_else(|| std::time::Duration::from_millis(700)),
-                mark,
-                full_detect_semantics: true,
-                confirm_clear: false,
-                only_poison,
-                skip_poisons,
-                white,
-                control: Some(control),
-                control_vouched: vouched_control_sni,
-                ..ClassifyOptions::default()
-            },
+            options,
+            &mut TcpProbeBackend,
+            &mut report_progress,
         );
         if let Some(path) = save_plan_path {
             let hit = result
@@ -1095,6 +1116,7 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
     let mut write_gap = None;
     let mut long_gap = None;
     let mut dump_trigger = false;
+    let mut progress_enabled = false;
     let mut mark = None;
     let mut only_poison = None;
     let mut skip_poisons = Vec::new();
@@ -1122,6 +1144,7 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
             Some("--allow-loopback") if !allow_loopback => allow_loopback = true,
             Some("--no-raw") => no_raw = true,
             Some("--dump-trigger") => dump_trigger = true,
+            Some("--progress") => progress_enabled = true,
             Some("--timeout") => {
                 index += 1;
                 let value = arguments
@@ -1267,6 +1290,7 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
         write_gap,
         long_gap,
         dump_trigger,
+        progress: progress_enabled,
         mark,
         only_poison,
         skip_poisons,
@@ -1393,6 +1417,7 @@ fn print_help() {
     println!("  classify: [--control-raw HEX] задаёт байты TLS-записи контроля");
     println!("  classify: [--no-raw] пропускает проверки с raw-пакетами");
     println!("  classify: [--dump-trigger] печатает hex триггера и завершает работу");
+    println!("  classify: [--progress] печатает завершённые пробы в stderr");
     println!("  classify: [--repeats N] задаёт число единогласных повторов; default 3");
     println!("  classify: [--timeout MS] задаёт ожидание каждого зонда; по умолчанию 6000 мс");
     println!(
@@ -30954,6 +30979,7 @@ mod tests {
                 write_gap: None,
                 long_gap: None,
                 dump_trigger: false,
+                progress: false,
                 mark: None,
                 only_poison: None,
                 skip_poisons: Vec::new(),
@@ -30998,6 +31024,12 @@ mod tests {
     }
 
     #[test]
+    fn classify_options_accept_progress() {
+        let args = ["--progress"].map(OsString::from);
+        assert!(parse_classify_options(&args).unwrap().progress);
+    }
+
+    #[test]
     fn classify_options_accept_direct_arm_socket() {
         let args =
             ["--arm", "/run/r2o-datapath.sock", "--save-plan", "out.r2op"].map(OsString::from);
@@ -31011,6 +31043,7 @@ mod tests {
                 write_gap: None,
                 long_gap: None,
                 dump_trigger: false,
+                progress: false,
                 mark: None,
                 only_poison: None,
                 skip_poisons: Vec::new(),
