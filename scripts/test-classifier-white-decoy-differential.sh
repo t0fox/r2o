@@ -34,10 +34,11 @@ cp "$D2O_ROOT/core/profiles/modern.hex" "$D2O_ROOT/core/profiles/legacy.hex" \
     "$TEMP/profiles/"
 make -s -C "$TEMP" -f "$D2O_ROOT/core/Makefile" hello_profiles.inc
 "$CC" -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+    -I"$D2O_ROOT/detect" -I"$D2O_ROOT/detect/include" \
     -I"$D2O_ROOT/core" -I"$D2O_ROOT/core/include" -I"$TEMP" \
     -o "$TEMP/d2o-white-decoy" \
     "$ROOT/crates/r2o-controller/tests/fixtures/classify-white-decoy-d2o.c" \
-    "$D2O_ROOT/core/measured.c" "$D2O_ROOT/core/hello.c" \
+    "$D2O_ROOT/detect/trigger.c" "$D2O_ROOT/core/measured.c" "$D2O_ROOT/core/hello.c" \
     -Wl,--gc-sections
 
 "$rustc_cmd" --edition 2024 -Awarnings \
@@ -48,4 +49,4 @@ if ! cmp -s "$TEMP/d2o.out" "$TEMP/r2o.out"; then
     diff -u "$TEMP/d2o.out" "$TEMP/r2o.out" || true
     exit 1
 fi
-printf 'D2O %s white ECH ClientHello bytes match R2O for both fixture names.\n' "$ACTUAL_D2O_SHA"
+printf 'D2O %s white decoy and default/custom control ClientHello bytes match R2O.\n' "$ACTUAL_D2O_SHA"

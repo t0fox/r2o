@@ -140,6 +140,7 @@ struct ClassifyCliOptions {
     only_poison: Option<String>,
     skip_poisons: Vec<String>,
     white_name: Option<String>,
+    control_sni: Option<String>,
     save_plan_path: Option<PathBuf>,
     arm_socket_path: Option<PathBuf>,
     modern: bool,
@@ -881,6 +882,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
             only_poison,
             skip_poisons,
             white_name,
+            control_sni,
             save_plan_path,
             arm_socket_path,
             modern,
@@ -896,10 +898,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
             Trigger::tls(sni)
         }
         .map_err(|error| format!("TLS-зонд: {error}"))?;
-        let control = Trigger {
-            accept: Accept::TlsRecord,
-            ..Trigger::tls("disk.rzd.ru").map_err(|error| format!("TLS-контроль: {error}"))?
-        };
+        let (control, vouched_control_sni) = classify_control_trigger(control_sni.as_deref(), sni)?;
         let white = white_name
             .as_deref()
             .map(|name| {
@@ -924,6 +923,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
                 skip_poisons,
                 white,
                 control: Some(control),
+                control_vouched: vouched_control_sni,
                 ..ClassifyOptions::default()
             },
         );
@@ -1062,6 +1062,7 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
     let mut only_poison = None;
     let mut skip_poisons = Vec::new();
     let mut white_name = None;
+    let mut control_sni = None;
     let mut save_plan_path = None;
     let mut arm_socket_path = None;
     let mut modern = false;
@@ -1103,6 +1104,14 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
                     .ok_or("--white требует имя SNI")?;
                 white_name = Some(value.to_owned());
             }
+            Some("--control-sni") => {
+                index += 1;
+                let value = arguments
+                    .get(index)
+                    .and_then(|value| value.to_str())
+                    .ok_or("--control-sni требует имя SNI")?;
+                control_sni = Some(value.to_owned());
+            }
             Some("--save-plan") if save_plan_path.is_none() => {
                 index += 1;
                 let path = arguments
@@ -1142,10 +1151,32 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
         only_poison,
         skip_poisons,
         white_name,
+        control_sni,
         save_plan_path,
         arm_socket_path,
         modern,
     })
+}
+
+fn classify_control_trigger(
+    control_sni: Option<&str>,
+    target_sni: &str,
+) -> Result<(Trigger, bool), String> {
+    if control_sni == Some(target_sni) {
+        return Err("--control-sni совпадает с целевым SNI; укажите другое имя".into());
+    }
+    let vouched = control_sni.is_some();
+    let name = control_sni.unwrap_or("probe-d2k.invalid-control.example");
+    let trigger = Trigger {
+        name: if vouched {
+            format!("control:{name}")
+        } else {
+            "control".into()
+        },
+        accept: Accept::TlsRecord,
+        ..Trigger::tls13(name).map_err(|error| format!("TLS-контроль: {error}"))?
+    };
+    Ok((trigger, vouched))
 }
 
 fn parse_serve_options(arguments: &[std::ffi::OsString]) -> Result<ServeCliOptions, String> {
@@ -1205,6 +1236,7 @@ fn print_help() {
         "r2o-controller — каталог и контроллер r2o\n\nИспользование:\n  r2o-controller --check-catalog ФАЙЛ\n  r2o-controller --clear-catalog ФАЙЛ\n  r2o-controller --classify HOST PORT SNI [REPEATS] [--modern] [--allow-loopback] [--mark N] [--only ИМЯ] [--skip ИМЯ ...] [--save-plan ФАЙЛ] [--arm СОКЕТ]\n  r2o-controller --probe-response HOST PORT SNI [REPEATS]\n  r2o-controller --set-name СОКЕТ HOST FAMILY SHAPE ПЛАН.r2op\n  r2o-controller --set-addr СОКЕТ IP SHAPE ПЛАН.r2op\n  r2o-controller --del-addr СОКЕТ IP SHAPE\n  r2o-controller --apply-catalog СОКЕТ КАТАЛОГ.json\n  r2o-controller --serve СОКЕТ КАТАЛОГ.json [--discover] [--mark N]\n  r2o-controller --watch СОКЕТ\n  r2o-controller --journal СОКЕТ\n  r2o-controller --http-candidates\n  r2o-controller --version\n  r2o-controller --help\n\nFAMILY: ipv4 или ipv6. SHAPE: modern, legacy, ech, http, quic или voice; voice использует HOST @discord-voice. Адресная привязка принимает modern, legacy, ech, quic или voice. QUIC поддерживает планы quicsplit, quicdeny, четыре формы IP-фрагментации после контрольной пробы, удлинение UDP, нулевую 16-байтовую фальшивку и пару фальшивых quic5 с TTL 3 после подтверждённого рукопожатия и зависания; --modern использует сохранённый TLS 1.3 ClientHello; --discover ставит новые TCP SNI в ограниченную очередь классификации и ищет обход HTTP-портала, а для Discord voice запускает ограниченный IP Discovery поиск, требующий --mark; --mark задаёт SO_MARK управляющим зондам и raw-пакетам; --save-plan создаёт новый файл и не перезаписывает существующий; --arm передаёт найденный план работающему r2o-datapath для соответствующей формы."
     );
     println!("  classify: [--white ИМЯ] задаёт ECH-приманку для гипотезы белого ClientHello");
+    println!("  classify: [--control-sni ИМЯ] задаёт подтверждённое контрольное имя");
     println!(
         "  r2o-controller --ask --control СОКЕТ --ip IP --sni ИМЯ (--hello-hex ФАЙЛ | --arm-wait-ms МС)"
     );
@@ -30755,6 +30787,7 @@ mod tests {
                 only_poison: None,
                 skip_poisons: Vec::new(),
                 white_name: None,
+                control_sni: None,
                 save_plan_path: Some(PathBuf::from("out.r2op")),
                 arm_socket_path: None,
                 modern: false,
@@ -30775,6 +30808,7 @@ mod tests {
                 only_poison: None,
                 skip_poisons: Vec::new(),
                 white_name: None,
+                control_sni: None,
                 save_plan_path: Some(PathBuf::from("out.r2op")),
                 arm_socket_path: Some(PathBuf::from("/run/r2o-datapath.sock")),
                 modern: false,
@@ -30805,6 +30839,34 @@ mod tests {
         let options = parse_classify_options(&args).unwrap();
         assert_eq!(options.white_name.as_deref(), Some("hcaptcha.com"));
         assert!(parse_classify_options(&[OsString::from("--white")]).is_err());
+    }
+
+    #[test]
+    fn classify_options_accept_custom_control_sni() {
+        let args = ["--control-sni", "example.net"].map(OsString::from);
+        let options = parse_classify_options(&args).unwrap();
+        assert_eq!(options.control_sni.as_deref(), Some("example.net"));
+        assert!(parse_classify_options(&[OsString::from("--control-sni")]).is_err());
+    }
+
+    #[test]
+    fn classify_control_trigger_matches_d2o_default_and_vouched_sni() {
+        let (default, vouched) = classify_control_trigger(None, "target.example").unwrap();
+        assert_eq!(default.name, "control");
+        assert_eq!(default.accept, Accept::TlsRecord);
+        assert!(!vouched);
+        assert_eq!(
+            default.payload,
+            r2o_controller::hello::modern_client_hello("probe-d2k.invalid-control.example")
+                .unwrap()
+        );
+
+        let (custom, vouched) =
+            classify_control_trigger(Some("example.net"), "target.example").unwrap();
+        assert_eq!(custom.name, "control:example.net");
+        assert_eq!(custom.accept, Accept::TlsRecord);
+        assert!(vouched);
+        assert!(classify_control_trigger(Some("target.example"), "target.example").is_err());
     }
 
     #[cfg(unix)]

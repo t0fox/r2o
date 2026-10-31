@@ -10,4 +10,19 @@ fn main() {
         }
         println!();
     }
+
+    let default_control = hello::modern_client_hello("probe-d2k.invalid-control.example")
+        .expect("D2O default CLI control");
+    print!("CONTROL_DEFAULT name=control accept=tls-record bytes=");
+    for byte in default_control {
+        print!("{byte:02x}");
+    }
+    println!();
+
+    let custom_control = hello::modern_client_hello("example.com").expect("custom control SNI");
+    print!("CONTROL_CUSTOM name=control:example.com accept=tls-record bytes=");
+    for byte in custom_control {
+        print!("{byte:02x}");
+    }
+    println!();
 }
