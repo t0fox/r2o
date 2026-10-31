@@ -138,3 +138,51 @@ print("D2O/R2O production raw path:", json.dumps(c_result, ensure_ascii=False))
 PY
 
 echo "PASSED: pinned D2O and R2O production classifiers matched raw selftest and badsum probe in an isolated network namespace"
+
+ip netns exec "$NS" env D2K_FW=nft "$D2K_BIN" classify "127.0.0.1:$PORT" \
+    --sni classifier.example --repeats 1 --timeout 200 \
+    --allow-loopback --mark 0 --json >"$TEMP/d2o-full.json" 2>"$TEMP/d2o-full.err"
+ip netns exec "$NS" env R2O_FW=nft "$R2O_BIN" \
+    --classify 127.0.0.1 "$PORT" classifier.example --repeats 1 \
+    --timeout 200 --allow-loopback --mark 0 --json \
+    >"$TEMP/r2o-full.json" 2>"$TEMP/r2o-full.err"
+
+python3 - "$TEMP/d2o-full.json" "$TEMP/r2o-full.json" <<'PY'
+import json
+import sys
+
+def summarize(path):
+    with open(path, encoding="utf-8") as source:
+        result = json.load(source)
+    trace = []
+    for item in result["trace"]:
+        trace.append({
+            "probe": item["probe"],
+            "pass": item.get("pass", 0),
+            "fail": item.get("fail", 0),
+            "delay_ms": item.get("delay_ms", 0),
+            "cuts": item.get("cuts", []),
+            "error": bool(item.get("err") or item.get("error")),
+        })
+    return {
+        "verdict": result["verdict"],
+        "reason": result["reason"],
+        "repeats": result["repeats"],
+        "probes": result["probes"],
+        "trigger_len": result["trigger_len"],
+        "props": result.get("props"),
+        "composed": result.get("composed", False),
+        "raw_usable": result.get("raw_usable", False),
+        "trace": trace,
+    }
+
+c_result = summarize(sys.argv[1])
+rust_result = summarize(sys.argv[2])
+if c_result != rust_result:
+    print("D2O full classifier:", json.dumps(c_result, ensure_ascii=False), file=sys.stderr)
+    print("R2O full classifier:", json.dumps(rust_result, ensure_ascii=False), file=sys.stderr)
+    raise SystemExit("full production classifier tree differs")
+print("D2O/R2O full production classifier:", json.dumps(c_result, ensure_ascii=False))
+PY
+
+echo "PASSED: pinned D2O and R2O production classifiers matched the unfiltered raw property/compose/poison path"
