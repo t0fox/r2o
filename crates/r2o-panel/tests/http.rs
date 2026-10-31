@@ -281,6 +281,58 @@ fn status_accepts_rust_telegram_stats_snapshot() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+#[ignore = "run through scripts/test-panel-telegram-stats-size-differential.sh"]
+fn d2o_telegram_stats_size_limit_matches_rust_route() {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+
+    for suffix in ["", "_LIMIT"] {
+        let socket_path: PathBuf =
+            std::env::var_os(format!("R2O_PANEL_TELEGRAM_STATS_SIZE{suffix}_SOCKET"))
+                .expect("test helper provides the stats socket path")
+                .into();
+        let stats_path = std::env::var_os(format!("R2O_PANEL_TELEGRAM_STATS_SIZE{suffix}_DATA"))
+            .expect("test helper provides the shared stats snapshot");
+        let encoded = fs::read(stats_path).unwrap();
+        assert!(encoded.len() > 8192 && encoded.len() <= 131_071);
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 32];
+            stream.read_exact(&mut request[..9]).unwrap();
+            assert_eq!(&request[..9], b"snapshot\n");
+            stream.write_all(&encoded).unwrap();
+        });
+        let mut config = Config::default();
+        config.telegram_stats_path = socket_path;
+        let (status, _, body) = request(
+            &config,
+            "GET /api/status HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        server.join().unwrap();
+        let rust_value: Value = serde_json::from_str(&body).unwrap();
+        let c_stats: Value = serde_json::from_slice(
+            &fs::read(
+                std::env::var_os(format!("R2O_PANEL_TELEGRAM_STATS_SIZE{suffix}_C_BODY"))
+                    .expect("test helper provides the D2O stats response"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(status, 200);
+        let rust_stats = &rust_value["snapshot"]["telegram_stats"];
+        assert!(
+            rust_stats == &c_stats,
+            "D2O stats length={}, Rust stats length={}, case={suffix:?}",
+            serde_json::to_vec(&c_stats).unwrap().len(),
+            serde_json::to_vec(rust_stats).unwrap().len()
+        );
+        assert_eq!(rust_stats.is_object(), suffix.is_empty());
+    }
+}
+
 #[test]
 fn control_requires_same_origin() {
     let mut config = Config::default();

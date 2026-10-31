@@ -18,6 +18,8 @@ const WORKER_CONFIG_MAX: usize = 1024 * 1024;
 const WORKER_BODY_MAX: usize = 4096;
 const WORKER_MAX: usize = 8;
 const TELEGRAM_DIAGNOSTICS_MAX: usize = 256 * 1024;
+// D2O reserves the last byte of its 131072-byte buffer and requires a separate EOF read.
+const TELEGRAM_STATS_MAX: usize = 131_071;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(60);
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const UPDATE_INSTALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -2190,7 +2192,13 @@ fn read_telegram_stats(path: &Path) -> Option<Value> {
         let _ = stream.set_write_timeout(timeout);
         stream.write_all(b"snapshot\n").ok()?;
         let mut raw = Vec::with_capacity(2048);
-        stream.take(8192).read_to_end(&mut raw).ok()?;
+        stream
+            .take(TELEGRAM_STATS_MAX as u64)
+            .read_to_end(&mut raw)
+            .ok()?;
+        if raw.len() >= TELEGRAM_STATS_MAX {
+            return None;
+        }
         let stats: Value = serde_json::from_slice(&raw).ok()?;
         if !valid_telegram_stats(&stats) {
             return None;
