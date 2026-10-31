@@ -8802,6 +8802,20 @@ fn r2o_hold_voice_trial_until_expiry(trial: &mut R2oVoiceTrialContext) {
 }
 
 #[cfg(unix)]
+fn r2o_finish_voice_trial_confirmation(
+    trials: &mut HashMap<[u8; 16], R2oVoiceTrialContext>,
+    mut trial: R2oVoiceTrialContext,
+    deletion_succeeded: bool,
+) {
+    if deletion_succeeded {
+        trials.remove(&trial.trial_id);
+    } else {
+        r2o_hold_voice_trial_until_expiry(&mut trial);
+        trials.insert(trial.trial_id, trial);
+    }
+}
+
+#[cfg(unix)]
 enum R2oVoiceTrialInstallOutcome {
     Installed(R2oVoiceTrialContext),
     LocalRefusal,
@@ -9171,7 +9185,14 @@ fn r2o_voice_target_has_active_trial(
     trials: &HashMap<[u8; 16], R2oVoiceTrialContext>,
     target: &r2o_controller::voice_discovery::R2oVoiceTarget,
 ) -> bool {
-    trials.values().any(|trial| &trial.target == target)
+    trials
+        .values()
+        .any(|trial| !trial.response_confirmed && &trial.target == target)
+}
+
+#[cfg(unix)]
+fn r2o_voice_trial_can_start_search(trials: &HashMap<[u8; 16], R2oVoiceTrialContext>) -> bool {
+    trials.values().all(|trial| trial.response_confirmed)
 }
 
 #[cfg(unix)]
@@ -15048,7 +15069,7 @@ impl ControlClient {
         catalog: &mut Catalog,
         catalog_path: &std::path::Path,
         mut persistence: Option<&mut R2oCatalogPersistence>,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<bool, Box<dyn Error>> {
         if !trial.response_confirmed {
             return Err("голосовой план не подтверждён без ответа Discovery/STUN".into());
         }
@@ -15142,9 +15163,13 @@ impl ControlClient {
                 "результат установки постоянного voice-плана неизвестен ({error}); привязка сохранена для повтора"
             ),
         }
-        if let Err(error) = self.retire_r2o_voice_trial(&trial) {
-            eprintln!("временный voice-план доживёт до конца аренды: {error}");
-        }
+        let deletion_succeeded = match self.retire_r2o_voice_trial(&trial) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("временный voice-план доживёт до конца аренды: {error}");
+                false
+            }
+        };
         let proof_name = match proof.proof {
             r2k_core::control::R2oVoiceProofKind::StunBinding => "STUN",
             r2k_core::control::R2oVoiceProofKind::DiscordDiscovery { .. } => "Discord Discovery",
@@ -15160,7 +15185,7 @@ impl ControlClient {
                 "общий @discord-voice".into()
             },
         );
-        Ok(())
+        Ok(deletion_succeeded)
     }
 
     fn watch_events(
@@ -16542,6 +16567,11 @@ impl ControlClient {
                         std::io::stdout().flush()?;
                         continue;
                     };
+                    if trial.response_confirmed {
+                        println!("{proof_name}-ответ для этого временного плана уже обработан");
+                        std::io::stdout().flush()?;
+                        continue;
+                    }
                     if trial.expires_at <= std::time::Instant::now() {
                         r2o_voice_trials.remove(&proof.trial_id);
                         if let Err(error) = self.retire_r2o_voice_trial(&trial) {
@@ -16574,7 +16604,6 @@ impl ControlClient {
                             };
                             let mut confirmed_trial = trial.clone();
                             confirmed_trial.response_confirmed = true;
-                            r2o_voice_trials.remove(&proof.trial_id);
                             let terminal_outcome = match self.confirm_r2o_voice_trial(
                                 confirmed_trial.clone(),
                                 &proof,
@@ -16582,26 +16611,42 @@ impl ControlClient {
                                 path,
                                 catalog_persistence.as_mut(),
                             ) {
-                                Ok(()) => match proof.proof {
-                                    r2k_core::control::R2oVoiceProofKind::StunBinding => {
-                                        "stun-confirmed"
+                                Ok(deletion_succeeded) => {
+                                    r2o_finish_voice_trial_confirmation(
+                                        &mut r2o_voice_trials,
+                                        confirmed_trial.clone(),
+                                        deletion_succeeded,
+                                    );
+                                    match proof.proof {
+                                        r2k_core::control::R2oVoiceProofKind::StunBinding => {
+                                            "stun-confirmed"
+                                        }
+                                        r2k_core::control::R2oVoiceProofKind::DiscordDiscovery {
+                                            ..
+                                        } => "discovery-confirmed",
+                                        r2k_core::control::R2oVoiceProofKind::RtpMedia { .. } => {
+                                            unreachable!("RTP не завершает voice-поиск")
+                                        }
                                     }
-                                    r2k_core::control::R2oVoiceProofKind::DiscordDiscovery {
-                                        ..
-                                    } => "discovery-confirmed",
-                                    r2k_core::control::R2oVoiceProofKind::RtpMedia { .. } => {
-                                        unreachable!("RTP не завершает voice-поиск")
-                                    }
-                                },
+                                }
                                 Err(error) => {
                                     eprintln!("voice-план не подтверждён: {error}");
-                                    if let Err(retire_error) =
-                                        self.retire_r2o_voice_trial(&confirmed_trial)
+                                    let deletion_succeeded = match self
+                                        .retire_r2o_voice_trial(&confirmed_trial)
                                     {
-                                        eprintln!(
-                                            "временный voice-план истечёт по аренде; досрочное снятие не удалось: {retire_error}"
-                                        );
-                                    }
+                                        Ok(()) => true,
+                                        Err(retire_error) => {
+                                            eprintln!(
+                                                "временный voice-план истечёт по аренде; досрочное снятие не удалось: {retire_error}"
+                                            );
+                                            false
+                                        }
+                                    };
+                                    r2o_finish_voice_trial_confirmation(
+                                        &mut r2o_voice_trials,
+                                        confirmed_trial.clone(),
+                                        deletion_succeeded,
+                                    );
                                     "failed"
                                 }
                             };
@@ -16671,7 +16716,7 @@ impl ControlClient {
                                     r2o_target,
                                     r2o_known_prefix,
                                     r2o_flow,
-                                    r2o_voice_trials.is_empty(),
+                                    r2o_voice_trial_can_start_search(&r2o_voice_trials),
                                 )
                             } else {
                                 false
@@ -16711,7 +16756,7 @@ impl ControlClient {
                                 r2o_target,
                                 r2o_known_prefix,
                                 r2o_flow,
-                                r2o_voice_trials.is_empty(),
+                                r2o_voice_trial_can_start_search(&r2o_voice_trials),
                             )
                         }
                     } else {
