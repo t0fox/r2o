@@ -4616,6 +4616,65 @@ mod app {
                 }),
                 R2O_ROUTE_OTHER_DEV
             );
+
+            gate.r2o_set_rules(R2oRouteFamily::Ipv6, Vec::new());
+            gate.r2o_set_default_ifindices(R2oRouteFamily::Ipv6, Some(vec![5]));
+            let client = [0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+            let server = [0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+            let other_server = [0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2];
+            let request6 = udp_packet_v6(client, server, 40_000, 443);
+            let reply6 = udp_packet_v6(server, client, 443, 40_000);
+            let unrelated_reply6 = udp_packet_v6(other_server, client, 443, 40_000);
+            let outbound6 = QueuePacket {
+                payload: Some(&request6),
+                hook: Some(R2O_NF_INET_POST_ROUTING),
+                output_device: Some(9),
+                ..Default::default()
+            };
+            assert!(r2o_packet_route_skip(
+                &mut gate,
+                &mut flows,
+                &outbound6,
+                outbound6.hook,
+                libc::AF_INET6 as u16,
+                0x2e,
+                0x2d,
+                now + Duration::from_millis(2),
+            ));
+
+            let inbound6 = QueuePacket {
+                payload: Some(&reply6),
+                hook: Some(R2O_NF_INET_FORWARD),
+                output_device: Some(2),
+                ..Default::default()
+            };
+            assert!(r2o_packet_route_skip(
+                &mut gate,
+                &mut flows,
+                &inbound6,
+                inbound6.hook,
+                libc::AF_INET6 as u16,
+                0x2e,
+                0x2d,
+                now + Duration::from_millis(3),
+            ));
+
+            let unrelated6 = QueuePacket {
+                payload: Some(&unrelated_reply6),
+                hook: Some(R2O_NF_INET_FORWARD),
+                output_device: Some(2),
+                ..Default::default()
+            };
+            assert!(!r2o_packet_route_skip(
+                &mut gate,
+                &mut flows,
+                &unrelated6,
+                unrelated6.hook,
+                libc::AF_INET6 as u16,
+                0x2e,
+                0x2d,
+                now + Duration::from_millis(4),
+            ));
         }
 
         fn udp_packet(
@@ -4634,6 +4693,25 @@ mod app {
             packet[20..22].copy_from_slice(&source_port.to_be_bytes());
             packet[22..24].copy_from_slice(&destination_port.to_be_bytes());
             packet[24..26].copy_from_slice(&8_u16.to_be_bytes());
+            packet
+        }
+
+        fn udp_packet_v6(
+            source: [u8; 16],
+            destination: [u8; 16],
+            source_port: u16,
+            destination_port: u16,
+        ) -> Vec<u8> {
+            let mut packet = vec![0; 48];
+            packet[0] = 0x60;
+            packet[4..6].copy_from_slice(&8_u16.to_be_bytes());
+            packet[6] = 17;
+            packet[7] = 64;
+            packet[8..24].copy_from_slice(&source);
+            packet[24..40].copy_from_slice(&destination);
+            packet[40..42].copy_from_slice(&source_port.to_be_bytes());
+            packet[42..44].copy_from_slice(&destination_port.to_be_bytes());
+            packet[44..46].copy_from_slice(&8_u16.to_be_bytes());
             packet
         }
 

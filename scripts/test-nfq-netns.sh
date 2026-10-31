@@ -1408,7 +1408,7 @@ else
     echo "ОШИБКА: режим наблюдения не завершился после SIGTERM" >&2
     exit 1
 fi
-if ! grep -Eq '^r2o-datapath: UDP-потоки [1-9][0-9]* из 2048, отказов 0$' \
+if ! grep -Eq '^r2o-datapath: TCP-потоки [0-9]+ из 2048 \(отказов [0-9]+\), UDP-потоки [1-9][0-9]* из 2048 \(отказов 0\)$' \
     "$WORK/r2o-datapath-observe.log"; then
     cat "$WORK/r2o-datapath-observe.log" >&2
     echo "ОШИБКА: runtime не сохранил UDP-потоки из NFQUEUE в итоговой сводке" >&2
