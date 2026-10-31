@@ -1465,15 +1465,6 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
                 finish(&mut result, &options, start);
                 return result;
             }
-            if !control_ok && measured.unproven > 0 {
-                result.verdict = Verdict::Inconclusive;
-                result.reason = format!(
-                    "контроль другим именем ответил не записью TLS ({} из {}) — это не проход и не молчание; вердикта нет",
-                    measured.unproven, options.repeats
-                );
-                finish(&mut result, &options, start);
-                return result;
-            }
         }
         if !control_ok {
             let index = add_observation(&mut result, "neutral-ack", &[], Duration::ZERO);

@@ -41,6 +41,10 @@ int main(int argc, char **argv)
         close_after_connections = 0;
         g_ctl_pat = "-+";
         g_ack_pat = "e";
+    } else if (strcmp(argv[1], "control-unproven") == 0) {
+        close_after_connections = 0;
+        g_ctl_pat = "+";
+        g_ack_pat = "---";
     } else {
         return 2;
     }
@@ -52,7 +56,8 @@ int main(int argc, char **argv)
     options.write_gap_ms = 2;
     options.long_gap_ms = 10;
     options.no_raw = 1;
-    options.control.accept = D2K_ACCEPT_ANY;
+    options.control.accept = strcmp(argv[1], "control-unproven") == 0
+        ? D2K_ACCEPT_TLSRECORD : D2K_ACCEPT_ANY;
     memcpy(options.control.name, "control", sizeof("control"));
     memcpy(options.control.payload, CTL, sizeof(CTL) - 1);
     options.control.len = sizeof(CTL) - 1;
@@ -66,7 +71,12 @@ int main(int argc, char **argv)
         return result.verdict == D2K_DV_INCONCLUSIVE && result.probes == 10 &&
                g_ack_calls == 1 && accepted_connections == 6 ? 0 : 1;
     }
-    printf("Opaque|%d|%d\n", result.probes, g_ack_calls);
-    return result.verdict == D2K_DV_OPAQUE && result.probes == 8 &&
-           g_ack_calls == 0 && accepted_connections == 8 ? 0 : 1;
+    if (strcmp(argv[1], "control-pass") == 0) {
+        printf("Opaque|%d|%d\n", result.probes, g_ack_calls);
+        return result.verdict == D2K_DV_OPAQUE && result.probes == 8 &&
+               g_ack_calls == 0 && accepted_connections == 8 ? 0 : 1;
+    }
+    printf("Address|%d|%d\n", result.probes, g_ack_calls);
+    return result.verdict == D2K_DV_ADDRESS && result.probes == 12 &&
+           g_ack_calls == 3 && accepted_connections == 9 ? 0 : 1;
 }
