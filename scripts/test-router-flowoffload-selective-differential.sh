@@ -189,6 +189,24 @@ for attr in 'devices = { br-lan, eth0 };' 'counter;' 'flags offload;'; do
     }
 done
 
+NFT_STATE_DIR=$TEMP/nft "$TEMP/bin/fw4" reload
+rm -f "$TEMP/nft/r2o"
+firewall flowoffload-ensure
+[ "$(cat "$TEMP/run/flow-offloading.runtime" 2>/dev/null || true)" = fallback ] || {
+    echo "missing R2O mark table left the native fw4 flowtable active" >&2
+    exit 1
+}
+[ ! -e "$TEMP/nft/fw4-ft" ] || {
+    echo "missing R2O mark table did not remove the native fw4 flowtable" >&2
+    exit 1
+}
+firewall flowoffload-restore
+firewall up
+grep -Fq 'ct mark & 0x80000000 == 0 flow offload @ft' "$TEMP/nft/fw4-forward" || {
+    echo "restoring the missing R2O mark table did not restore selective offload" >&2
+    exit 1
+}
+
 initial_resets=$(cat "$TEMP/nft/flowtable-resets")
 firewall down
 firewall up

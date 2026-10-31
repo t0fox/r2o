@@ -485,7 +485,6 @@ flowoffload_remove_all_unlocked() {
 flowoffload_ensure_unlocked() {
     force_reset=${1:-0}
     if [ "$BACKEND" != nft ] || ! nft list table inet r2o >/dev/null 2>&1; then
-        [ "$BACKEND" != nft ] || return 0
         fw4_rules=$(nft -a list table inet fw4 2>/dev/null || true)
         case "$fw4_rules" in *'flow offload @'*) flowoffload_remove_all_unlocked ;; *) return 0 ;; esac
         return $?
