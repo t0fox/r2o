@@ -621,6 +621,19 @@ impl R2oMeasurementGate {
         self.r2o_acquire_with_kind(cancel, R2oMeasurementWaiterKind::Other, false)
     }
 
+    pub fn r2o_acquire_until(
+        &self,
+        cancel: &AtomicBool,
+        deadline: Instant,
+    ) -> Option<R2oMeasurementPermit> {
+        self.r2o_acquire_with_kind_until(
+            cancel,
+            R2oMeasurementWaiterKind::Other,
+            false,
+            Some(deadline),
+        )
+    }
+
     pub fn r2o_acquire_tcp(&self, cancel: &AtomicBool) -> Option<R2oMeasurementPermit> {
         self.r2o_acquire_with_kind(cancel, R2oMeasurementWaiterKind::Tcp, true)
     }
@@ -678,6 +691,16 @@ impl R2oMeasurementGate {
         kind: R2oMeasurementWaiterKind,
         tcp_target: bool,
     ) -> Option<R2oMeasurementPermit> {
+        self.r2o_acquire_with_kind_until(cancel, kind, tcp_target, None)
+    }
+
+    fn r2o_acquire_with_kind_until(
+        &self,
+        cancel: &AtomicBool,
+        kind: R2oMeasurementWaiterKind,
+        tcp_target: bool,
+        deadline: Option<Instant>,
+    ) -> Option<R2oMeasurementPermit> {
         let waiter = {
             let mut state = self
                 .shared
@@ -687,16 +710,27 @@ impl R2oMeasurementGate {
             r2o_queue_measurement_waiter(&mut state, kind, tcp_target)
         };
 
-        self.r2o_wait_for_measurement_turn(waiter, cancel)
+        self.r2o_wait_for_measurement_turn(waiter, cancel, deadline)
     }
 
     fn r2o_wait_for_measurement_turn(
         &self,
         waiter: u64,
         cancel: &AtomicBool,
+        deadline: Option<Instant>,
     ) -> Option<R2oMeasurementPermit> {
         loop {
             if cancel.load(Ordering::Relaxed) {
+                let mut state = self
+                    .shared
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.waiters.retain(|queued| queued.id != waiter);
+                self.shared.changed.notify_all();
+                return None;
+            }
+            if r2o_measurement_deadline_expired(Instant::now(), deadline) {
                 let mut state = self
                     .shared
                     .state
@@ -713,6 +747,11 @@ impl R2oMeasurementGate {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if cancel.load(Ordering::Relaxed) {
+                state.waiters.retain(|queued| queued.id != waiter);
+                self.shared.changed.notify_all();
+                return None;
+            }
+            if r2o_measurement_deadline_expired(Instant::now(), deadline) {
                 state.waiters.retain(|queued| queued.id != waiter);
                 self.shared.changed.notify_all();
                 return None;
@@ -867,7 +906,7 @@ impl R2oMeasurementPermit {
         drop(state);
         shared.changed.notify_all();
 
-        let Some(mut replacement) = gate.r2o_wait_for_measurement_turn(waiter, cancel) else {
+        let Some(mut replacement) = gate.r2o_wait_for_measurement_turn(waiter, cancel, None) else {
             return false;
         };
         self.yielded_duration = self
@@ -889,6 +928,10 @@ fn r2o_start_gap_remaining(
     (elapsed < minimum_start_gap).then(|| minimum_start_gap - elapsed)
 }
 
+fn r2o_measurement_deadline_expired(now: Instant, deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|deadline| now > deadline)
+}
+
 impl Drop for R2oMeasurementPermit {
     fn drop(&mut self) {
         if !self.active {
@@ -908,9 +951,9 @@ impl Drop for R2oMeasurementPermit {
 mod tests {
     use super::{
         R2oAdaptiveLimit, R2oConntrackStats, R2oCpuCounters, R2oGateState, R2oMeasurementGate,
-        R2oMeasurementWaiterKind, R2oMemoryStats, R2oResourceReading, r2o_measurement_worker_cap,
-        r2o_next_measurement_waiter, r2o_parse_cpu_stat, r2o_parse_meminfo,
-        r2o_queue_measurement_waiter,
+        R2oMeasurementWaiterKind, R2oMemoryStats, R2oResourceReading,
+        r2o_measurement_deadline_expired, r2o_measurement_worker_cap, r2o_next_measurement_waiter,
+        r2o_parse_cpu_stat, r2o_parse_meminfo, r2o_queue_measurement_waiter,
     };
     use std::sync::{
         Arc,
@@ -948,6 +991,42 @@ mod tests {
         assert_eq!((active.active, active.limit, active.queued), (1, 2, 0));
         drop(permit);
         assert_eq!(gate.r2o_live_snapshot().active, 0);
+    }
+
+    #[test]
+    fn queued_measurement_releases_its_waiter_after_its_deadline() {
+        let gate = R2oMeasurementGate::new(1);
+        let held = gate.r2o_try_acquire().unwrap();
+        let worker_gate = gate.clone();
+        let (expired_tx, expired_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let permit = worker_gate.r2o_acquire_until(
+                &AtomicBool::new(false),
+                Instant::now() + Duration::from_millis(25),
+            );
+            expired_tx.send(permit.is_none()).unwrap();
+        });
+
+        assert!(expired_rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        worker.join().unwrap();
+        assert_eq!(gate.r2o_live_snapshot().queued, 0);
+        drop(held);
+        assert!(gate.r2o_try_acquire().is_some());
+    }
+
+    #[test]
+    fn queued_measurement_deadline_matches_the_d2o_strict_timeout() {
+        let queued_at = Instant::now();
+        let deadline = queued_at + Duration::from_secs(600);
+        assert!(!r2o_measurement_deadline_expired(deadline, Some(deadline)));
+        assert!(r2o_measurement_deadline_expired(
+            deadline + Duration::from_nanos(1),
+            Some(deadline)
+        ));
+        assert!(!r2o_measurement_deadline_expired(
+            deadline + Duration::from_secs(1),
+            None
+        ));
     }
 
     #[test]

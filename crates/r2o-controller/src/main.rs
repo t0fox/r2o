@@ -8578,7 +8578,7 @@ struct R2oVoiceDiscoveryJob {
     target: r2o_controller::voice_discovery::R2oVoiceTarget,
     flow: Option<r2o_controller::voice_targets::R2oVoiceTarget>,
     known_prefix: Option<[u8; 20]>,
-    started_at: std::time::Instant,
+    queued_at: std::time::Instant,
     diagnostic: R2oVoiceDiagnosticContext,
 }
 
@@ -8641,6 +8641,13 @@ impl R2oVoiceLatestQueue {
         let job = self.pending.take()?;
         self.current = Some(job.clone());
         Some(job)
+    }
+
+    fn expire_pending(&mut self, now: std::time::Instant) -> Option<R2oVoiceDiscoveryJob> {
+        let expired = self.pending.as_ref().is_some_and(|job| {
+            now.saturating_duration_since(job.queued_at) > R2O_VOICE_TRIAL_TASK_LIFETIME
+        });
+        expired.then(|| self.pending.take().expect("expired pending voice job"))
     }
 }
 
@@ -8819,6 +8826,7 @@ impl R2oVoiceDiscoverySeen {
 struct R2oVoiceDiscoveryWorker {
     jobs: Option<SyncSender<R2oVoiceDiscoveryJob>>,
     outcomes: Receiver<R2oVoiceDiscoveryOutcome>,
+    expired: Receiver<R2oVoiceDiscoveryJob>,
     cancel: Arc<AtomicBool>,
     searches: Arc<std::sync::Mutex<R2oDiscoverySearches>>,
     r2o_seen: R2oVoiceDiscoverySeen,
@@ -8835,6 +8843,7 @@ impl R2oVoiceDiscoveryWorker {
     ) -> Self {
         let (r2o_job_sender, r2o_job_receiver) = mpsc::sync_channel::<R2oVoiceDiscoveryJob>(1);
         let (r2o_outcome_sender, r2o_outcomes) = mpsc::sync_channel(8);
+        let (r2o_expired_sender, r2o_expired) = mpsc::channel();
         let r2o_cancel = Arc::new(AtomicBool::new(false));
         let r2o_worker_cancel = Arc::clone(&r2o_cancel);
         let r2o_worker_gate = measurement_gate.clone();
@@ -8846,8 +8855,17 @@ impl R2oVoiceDiscoveryWorker {
                 }
                 let r2o_diagnostic_target = r2o_voice_diagnostic_target(&r2o_job.target);
                 let (r2o_result, r2o_fallback, r2o_measure_started_at) = {
-                    let Some(_permit) = r2o_worker_gate.r2o_acquire(&r2o_worker_cancel) else {
-                        break;
+                    let r2o_queue_deadline = r2o_job.queued_at + R2O_VOICE_TRIAL_TASK_LIFETIME;
+                    let Some(_permit) =
+                        r2o_worker_gate.r2o_acquire_until(&r2o_worker_cancel, r2o_queue_deadline)
+                    else {
+                        if r2o_worker_cancel.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        if r2o_expired_sender.send(r2o_job).is_err() {
+                            break;
+                        }
+                        continue;
                     };
                     let r2o_measure_started_at = std::time::Instant::now();
                     if let Some(search) = r2o_worker_searches
@@ -8882,7 +8900,7 @@ impl R2oVoiceDiscoveryWorker {
                         });
                     (r2o_result, r2o_fallback, r2o_measure_started_at)
                 };
-                let r2o_started_at = r2o_job.started_at;
+                let r2o_started_at = r2o_measure_started_at;
                 let r2o_known_prefix = r2o_job.known_prefix.is_some();
                 let mut r2o_diagnostic = r2o_job.diagnostic;
                 r2o_diagnostic.started_at = Some(r2o_measure_started_at);
@@ -8918,6 +8936,7 @@ impl R2oVoiceDiscoveryWorker {
         Self {
             jobs: Some(r2o_job_sender),
             outcomes: r2o_outcomes,
+            expired: r2o_expired,
             cancel: r2o_cancel,
             searches,
             r2o_seen: R2oVoiceDiscoverySeen::default(),
@@ -8973,7 +8992,7 @@ impl R2oVoiceDiscoveryWorker {
             target,
             flow,
             known_prefix,
-            started_at: r2o_now,
+            queued_at: r2o_now,
             diagnostic: R2oVoiceDiagnosticContext {
                 report_id,
                 queued_at: r2o_now,
@@ -9034,6 +9053,19 @@ impl R2oVoiceDiscoveryWorker {
             return false;
         }
         self.r2o_dispatch_voice_job(r2o_job)
+    }
+
+    fn expire_pending(&mut self, now: std::time::Instant) -> Option<R2oVoiceDiscoveryJob> {
+        self.schedule.expire_pending(now)
+    }
+
+    fn try_expired(&mut self) -> Vec<R2oVoiceDiscoveryJob> {
+        let mut expired = Vec::new();
+        while let Ok(job) = self.expired.try_recv() {
+            self.schedule.complete(&job.target);
+            expired.push(job);
+        }
+        expired
     }
 
     fn try_outcome(&mut self) -> Option<R2oVoiceDiscoveryOutcome> {
@@ -15512,6 +15544,24 @@ impl ControlClient {
                 }
                 self.renew_due_r2o_voice_trials(&mut r2o_voice_trials, r2o_now);
                 if let Some(r2o_worker) = voice_discovery.as_mut() {
+                    let mut r2o_expired_voice_jobs = r2o_worker.try_expired();
+                    if let Some(job) = r2o_worker.expire_pending(r2o_now) {
+                        r2o_expired_voice_jobs.push(job);
+                    }
+                    for job in r2o_expired_voice_jobs {
+                        r2o_record_voice_terminal_diagnostic(
+                            &mut diagnostics,
+                            &job.target,
+                            Some(&job.diagnostic),
+                            "cancelled",
+                            "property",
+                            r2o_now,
+                        );
+                        println!(
+                            "подозрение Discord {} устарело в очереди; сетевой замер не запускался",
+                            job.target.server
+                        );
+                    }
                     r2o_worker.release_pending(r2o_voice_trials.is_empty());
                 }
                 let mut https_cache_changed = false;
@@ -36496,9 +36546,11 @@ mod tests {
             server: SocketAddrV4::new(Ipv4Addr::new(198, 51, 100, 20), 50_004),
         };
         let (_outcome_sender, outcomes) = mpsc::sync_channel::<R2oVoiceDiscoveryOutcome>(1);
+        let (_expired_sender, expired) = mpsc::channel();
         let mut worker = R2oVoiceDiscoveryWorker {
             jobs: None,
             outcomes,
+            expired,
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             searches: std::sync::Arc::new(std::sync::Mutex::new(
                 super::R2oDiscoverySearches::default(),
@@ -36538,7 +36590,7 @@ mod tests {
             },
             flow: None,
             known_prefix: Some([1; 20]),
-            started_at: std::time::Instant::now(),
+            queued_at: std::time::Instant::now(),
             diagnostic: super::R2oVoiceDiagnosticContext {
                 report_id: Some(1),
                 queued_at: std::time::Instant::now(),
@@ -36553,7 +36605,7 @@ mod tests {
             },
             flow: None,
             known_prefix: None,
-            started_at: std::time::Instant::now(),
+            queued_at: std::time::Instant::now(),
             diagnostic: super::R2oVoiceDiagnosticContext {
                 report_id: Some(2),
                 queued_at: std::time::Instant::now(),
@@ -36568,7 +36620,7 @@ mod tests {
             },
             flow: None,
             known_prefix: Some([2; 20]),
-            started_at: std::time::Instant::now(),
+            queued_at: std::time::Instant::now(),
             diagnostic: super::R2oVoiceDiagnosticContext {
                 report_id: Some(3),
                 queued_at: std::time::Instant::now(),
@@ -36592,6 +36644,46 @@ mod tests {
             Some(r2o_latest.clone())
         );
         assert_eq!(r2o_queue.current.as_ref(), Some(&r2o_latest));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn queued_voice_job_expires_only_after_ten_minutes() {
+        use super::{R2O_VOICE_TRIAL_TASK_LIFETIME, R2oVoiceDiscoveryJob, R2oVoiceLatestQueue};
+        use std::net::{Ipv4Addr, SocketAddrV4};
+        use std::time::{Duration, Instant};
+
+        let queued_at = Instant::now();
+        let target = r2o_controller::voice_discovery::R2oVoiceTarget {
+            client: Ipv4Addr::new(192, 0, 2, 10),
+            server: SocketAddrV4::new(Ipv4Addr::new(198, 51, 100, 20), 50_004),
+        };
+        let job = R2oVoiceDiscoveryJob {
+            target,
+            flow: None,
+            known_prefix: None,
+            queued_at,
+            diagnostic: super::R2oVoiceDiagnosticContext {
+                report_id: None,
+                queued_at,
+                started_at: None,
+                probe_units: 0,
+            },
+        };
+        let mut queue = R2oVoiceLatestQueue::default();
+
+        assert_eq!(queue.offer(job, false), None);
+        assert_eq!(
+            queue.expire_pending(queued_at + R2O_VOICE_TRIAL_TASK_LIFETIME),
+            None
+        );
+        assert_eq!(
+            queue
+                .expire_pending(queued_at + R2O_VOICE_TRIAL_TASK_LIFETIME + Duration::from_nanos(1))
+                .map(|expired| expired.target),
+            Some(target)
+        );
+        assert!(queue.pending.is_none());
     }
 
     #[cfg(unix)]
@@ -36633,7 +36725,7 @@ mod tests {
             target,
             flow: None,
             known_prefix: None,
-            started_at: now,
+            queued_at: now,
             diagnostic: diagnostic(),
         };
         let mut trace = Vec::new();
