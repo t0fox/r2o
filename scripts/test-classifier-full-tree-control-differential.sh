@@ -79,6 +79,7 @@ cat "$ROOT/crates/r2o-controller/tests/fixtures/classify-full-tree-control-r2o.r
 "$TEMP/d2o-classifier" transport-error > "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" control-pass >> "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" control-pass-progress >> "$TEMP/d2o.out"
+"$TEMP/d2o-classifier" neutral-ack-progress >> "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" control-unproven >> "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" target-unproven >> "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" baseline-deadline >> "$TEMP/d2o.out"

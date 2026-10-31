@@ -1605,6 +1605,12 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
                     Ok(true) => {
                         result.probes += 1;
                         result.trace[index].pass += 1;
+                        progress(
+                            "neutral-ack",
+                            result.probes,
+                            result.trace[index].pass,
+                            result.trace[index].fail,
+                        );
                         break;
                     }
                     Ok(false) => {

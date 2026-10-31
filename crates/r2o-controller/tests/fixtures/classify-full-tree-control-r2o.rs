@@ -198,6 +198,21 @@ fn main() {
         progress_control_pass.verdict, progress_control_pass.probes, progress_ack_calls
     );
 
+    let (neutral_ack_progress, neutral_ack_calls, _) = run_case_with_progress(
+        vec![Ok(ProbeOutcome::Rejected); 3],
+        vec![Ok(false), Ok(true)],
+        ProbeOutcome::Rejected,
+        Accept::Any,
+        None,
+        None,
+        3,
+        true,
+    );
+    println!(
+        "NeutralAck|{}|{}",
+        neutral_ack_progress.probes, neutral_ack_calls
+    );
+
     let (control_unproven, control_ack_calls, _) = run_case(
         vec![Ok(ProbeOutcome::Unproven); 3],
         vec![Ok(false); 3],

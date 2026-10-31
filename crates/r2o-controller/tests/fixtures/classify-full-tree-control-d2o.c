@@ -144,6 +144,11 @@ int main(int argc, char **argv)
         close_after_connections = 0;
         g_ctl_pat = "+";
         g_ack_pat = "---";
+    } else if (strcmp(argv[1], "neutral-ack-progress") == 0) {
+        close_after_connections = 0;
+        g_ctl_pat = "---";
+        g_ack_pat = "-+";
+        capture_progress_events = 1;
     } else if (strcmp(argv[1], "target-unproven") == 0) {
         close_after_connections = 0;
         g_ctl_pat = "+";
@@ -222,6 +227,10 @@ int main(int argc, char **argv)
         printf("Opaque|%d|%d\n", result.probes, g_ack_calls);
         return result.verdict == D2K_DV_OPAQUE && result.probes == 8 &&
                g_ack_calls == 0 && accepted_connections == 8 ? 0 : 1;
+    }
+    if (strcmp(argv[1], "neutral-ack-progress") == 0) {
+        printf("NeutralAck|%d|%d\n", result.probes, g_ack_calls);
+        return 0;
     }
     if (strcmp(argv[1], "target-unproven") == 0) {
         printf("Opaque|%d|%d\n", result.probes, g_ack_calls);
