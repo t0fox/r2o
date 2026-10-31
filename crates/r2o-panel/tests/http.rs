@@ -185,6 +185,38 @@ fn status_without_live_file_returns_the_panel_contract() {
     assert_eq!(value["snapshot"]["controls_enabled"], false);
 }
 
+#[test]
+#[ignore = "run through scripts/test-panel-live-status-size-differential.sh"]
+fn d2o_status_live_file_size_limit_matches_rust_route() {
+    let live_path: PathBuf = std::env::var_os("R2O_PANEL_LIVE_SIZE_PATH")
+        .expect("test helper provides an oversized live snapshot")
+        .into();
+    let mut config = Config::default();
+    config.live_path = live_path;
+    let (status, _, body) = request(
+        &config,
+        "GET /api/status HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    let rust_value: Value = serde_json::from_str(&body).unwrap();
+    let c_value: Value = serde_json::from_slice(
+        &fs::read(
+            std::env::var_os("R2O_PANEL_LIVE_SIZE_C_BODY")
+                .expect("test helper provides the D2O status body"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let rust_catalog_at = rust_value["knowledge"]["catalog_at"].clone();
+    let c_catalog_at = c_value["knowledge"]["catalog_at"].clone();
+    let trace = format!("{status}\n{rust_catalog_at}\n");
+    if let Some(path) = std::env::var_os("R2O_PANEL_LIVE_SIZE_TRACE_OUTPUT") {
+        fs::write(path, &trace).unwrap();
+    }
+    assert_eq!(status, 200);
+    assert_eq!(c_catalog_at, rust_catalog_at);
+    assert_eq!(c_catalog_at, "");
+}
+
 #[cfg(unix)]
 #[test]
 fn status_accepts_rust_telegram_stats_snapshot() {

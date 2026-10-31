@@ -12,6 +12,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 const REQUEST_MAX: usize = 32 * 1024;
 const BODY_MAX: usize = 4 * 1024 * 1024;
+const LIVE_STATUS_MAX: usize = 1024 * 1024;
 const STATIC_ASSET_MAX: usize = 1024 * 1024;
 const WORKER_CONFIG_MAX: usize = 1024 * 1024;
 const WORKER_BODY_MAX: usize = 4096;
@@ -743,7 +744,7 @@ fn diagnostics_toggle(dir: &Path, enabled: bool) -> std::io::Result<()> {
 }
 
 fn api_status(config: &Config, query: &str) -> Response {
-    let live_bytes = read_regular_file(&config.live_path, BODY_MAX).ok();
+    let live_bytes = read_regular_file(&config.live_path, LIVE_STATUS_MAX).ok();
     let live_revision = live_bytes.as_deref().and_then(catalog_revision);
     let mut live = live_bytes
         .as_deref()
