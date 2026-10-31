@@ -236,6 +236,20 @@ R2O_QUIC_HTTP3_NEXT_STREAM_DIFF_OUTPUT="$tmp_dir/rust-quic-budget-next-stream.ou
 diff -u "$tmp_dir/c-quic-budget-next-stream.out" "$tmp_dir/rust-quic-budget-next-stream.out"
 printf 'C/Rust HTTP/3 budget can pass on growth in the next response stream like d2o.\n'
 
+"$tmp_dir/d2o-quic-http3" transport-error >"$tmp_dir/c-quic-transport-error.out" || test "$?" -eq 1
+R2O_QUIC_HTTP3_TRANSPORT_ERROR_DIFF_OUTPUT="$tmp_dir/rust-quic-transport-error.out" \
+    cargo +1.98.0 test -p r2o-controller --test r2o_quic_http3 --locked --offline \
+        transport_close -- --nocapture
+diff -u "$tmp_dir/c-quic-transport-error.out" "$tmp_dir/rust-quic-transport-error.out"
+printf 'C/Rust HTTP/3 transport close remains a transport error, not a stall.\n'
+
+"$tmp_dir/d2o-quic-http3" stall >"$tmp_dir/c-quic-stall.out" || test "$?" -eq 1
+R2O_QUIC_HTTP3_STALL_DIFF_OUTPUT="$tmp_dir/rust-quic-stall.out" \
+    cargo +1.98.0 test -p r2o-controller --test r2o_quic_http3 --locked --offline \
+        udp_reply_drop -- --nocapture
+diff -u "$tmp_dir/c-quic-stall.out" "$tmp_dir/rust-quic-stall.out"
+printf 'C/Rust HTTP/3 dropped UDP replies with failed PING ACKs classify as a stall.\n'
+
 "$tmp_dir/d2o-quic-base" residual >"$tmp_dir/c-quic-residual.out"
 R2O_QUIC_RESIDUAL_DIFF_OUTPUT="$tmp_dir/rust-quic-residual.out" \
     cargo +1.98.0 test -p r2o-controller --lib --locked --offline \

@@ -17,6 +17,7 @@ int main(int argc, char **argv) {
     int status;
     int complete = 1;
     int need_complete = 1;
+    int stalled = 0;
     uint64_t bytes;
     const char *name;
     if (argc != 2) return 2;
@@ -36,6 +37,19 @@ int main(int argc, char **argv) {
         name = "large-body";
         status = 200;
         bytes = 16u * 1024u * 1024u + 1u;
+    } else if (strcmp(argv[1], "transport-error") == 0) {
+        name = "transport-error";
+        status = 0;
+        bytes = 0;
+        complete = 0;
+        need_complete = 0;
+    } else if (strcmp(argv[1], "stall") == 0) {
+        name = "stall";
+        status = 200;
+        bytes = 32;
+        complete = 0;
+        stalled = 1;
+        need_complete = 0;
     } else if (strcmp(argv[1], "stream-bytes") == 0) {
         name = "stream-bytes";
         status = 200;
@@ -47,7 +61,7 @@ int main(int argc, char **argv) {
     }
 
     d2k_quic_arm_data_verdict verdict = d2k_quic_arm_data_judge3(
-        1, status, bytes, complete, 0, need_complete, 0, 0);
+        1, status, bytes, complete, stalled, need_complete, 0, 0);
     printf("%s=%s\n", name, verdict_name(verdict));
     return verdict == D2K_QAD_PASS ? 0 : 1;
 }

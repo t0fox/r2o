@@ -1,5 +1,6 @@
 use std::net::UdpSocket;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 fn write_d2o_http3_differential(
@@ -93,6 +94,183 @@ async fn r2o_http3_соблюдает_оставшийся_срок_задачи
     server.abort();
 }
 
+#[tokio::test]
+async fn r2o_http3_transport_close_is_not_stall_and_matches_d2o() {
+    let certificate_params = rcgen::CertificateParams::new(vec!["localhost".to_owned()]);
+    let certificate = rcgen::Certificate::from_params(certificate_params).unwrap();
+    let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
+    let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+        certificate.serialize_private_key_der(),
+    ));
+    let mut tls = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate_der.clone()], private_key)
+        .unwrap();
+    tls.alpn_protocols = vec![b"h3".to_vec()];
+    let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap();
+    let server_config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
+    let server_endpoint =
+        quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let server_address = server_endpoint.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let incoming = server_endpoint.accept().await.unwrap();
+        let connection = incoming.await.unwrap();
+        let mut h3_connection = h3::server::builder()
+            .build::<_, bytes::Bytes>(h3_quinn::Connection::new(connection.clone()))
+            .await
+            .unwrap();
+        let resolver = h3_connection.accept().await.unwrap().unwrap();
+        let _ = resolver.resolve_request().await.unwrap();
+        connection.close(quinn::VarInt::from_u32(1), b"test transport close");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    });
+
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.connect(server_address).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(certificate_der).unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        r2o_quic_http3_get(
+            socket,
+            server_address,
+            "localhost",
+            "/",
+            Duration::from_secs(2),
+            roots,
+        ),
+    )
+    .await
+    .expect("HTTP/3 transport-close test timed out");
+
+    assert!(result.handshake_confirmed, "result: {result:?}");
+    assert_eq!(result.status, 0, "result: {result:?}");
+    assert!(result.error.is_some(), "result: {result:?}");
+    assert!(!result.r2o_quic_stalled, "result: {result:?}");
+    assert_eq!(
+        format!(
+            "{:?}",
+            r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&result)
+        ),
+        "NotRun"
+    );
+    write_d2o_http3_differential(
+        "R2O_QUIC_HTTP3_TRANSPORT_ERROR_DIFF_OUTPUT",
+        "transport-error",
+        &result,
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn r2o_http3_udp_reply_drop_is_a_stall_and_matches_d2o() {
+    let certificate_params = rcgen::CertificateParams::new(vec!["localhost".to_owned()]);
+    let certificate = rcgen::Certificate::from_params(certificate_params).unwrap();
+    let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
+    let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+        certificate.serialize_private_key_der(),
+    ));
+    let mut tls = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate_der.clone()], private_key)
+        .unwrap();
+    tls.alpn_protocols = vec![b"h3".to_vec()];
+    let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap();
+    let server_config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
+    let server_endpoint =
+        quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let server_address = server_endpoint.local_addr().unwrap();
+    let drop_replies = Arc::new(AtomicBool::new(false));
+    let drop_after_headers = Arc::clone(&drop_replies);
+    let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let incoming = server_endpoint.accept().await.unwrap();
+        let connection = incoming.await.unwrap();
+        let mut h3_connection = h3::server::builder()
+            .build::<_, bytes::Bytes>(h3_quinn::Connection::new(connection))
+            .await
+            .unwrap();
+        let resolver = h3_connection.accept().await.unwrap().unwrap();
+        let (_, mut stream) = resolver.resolve_request().await.unwrap();
+        stream
+            .send_response(
+                http::Response::builder()
+                    .status(200)
+                    .header(http::header::CONTENT_LENGTH, "16")
+                    .body(())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        drop_after_headers.store(true, Ordering::SeqCst);
+        let _ = shutdown_receiver.await;
+    });
+
+    let proxy_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let proxy_address = proxy_socket.local_addr().unwrap();
+    let proxy_drop_replies = Arc::clone(&drop_replies);
+    let (proxy_stop_sender, mut proxy_stop_receiver) = tokio::sync::oneshot::channel();
+    let proxy = tokio::spawn(async move {
+        let mut client_address = None;
+        let mut packet = vec![0_u8; 65_536];
+        loop {
+            tokio::select! {
+                _ = &mut proxy_stop_receiver => break,
+                received = proxy_socket.recv_from(&mut packet) => {
+                    let Ok((length, peer)) = received else { break };
+                    if peer == server_address {
+                        if !proxy_drop_replies.load(Ordering::SeqCst) {
+                            if let Some(client) = client_address {
+                                let _ = proxy_socket.send_to(&packet[..length], client).await;
+                            }
+                        }
+                    } else {
+                        client_address = Some(peer);
+                        let _ = proxy_socket.send_to(&packet[..length], server_address).await;
+                    }
+                }
+            }
+        }
+    });
+
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.connect(proxy_address).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(certificate_der).unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(8),
+        r2o_quic_http3_get_with_max_duration(
+            socket,
+            proxy_address,
+            "localhost",
+            "/",
+            Duration::from_secs(1),
+            roots,
+            Duration::from_secs(6),
+        ),
+    )
+    .await
+    .expect("HTTP/3 UDP-drop test timed out");
+
+    assert!(result.handshake_confirmed, "result: {result:?}");
+    assert_eq!(result.status, 200, "result: {result:?}");
+    assert!(result.r2o_quic_stalled, "result: {result:?}");
+    assert!(!result.r2o_quic_one_way, "result: {result:?}");
+    assert!(result.r2o_ping_probes >= 2, "result: {result:?}");
+    assert_eq!(
+        format!(
+            "{:?}",
+            r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&result)
+        ),
+        "Cut"
+    );
+    write_d2o_http3_differential("R2O_QUIC_HTTP3_STALL_DIFF_OUTPUT", "stall", &result);
+    let _ = shutdown_sender.send(());
+    let _ = proxy_stop_sender.send(());
+    server.abort();
+    proxy.abort();
+}
 #[tokio::test]
 async fn r2o_http3_не_проверяет_content_length_вне_правила_d2o() {
     let certificate_params = rcgen::CertificateParams::new(vec!["localhost".to_owned()]);
