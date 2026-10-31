@@ -92,6 +92,7 @@ fn d2o_clear_vector_uses_only_the_base_series_and_ignores_disabled_mark() {
             long_gap: Duration::from_millis(10),
             allow_loopback: backend.fixture.allow_loopback,
             no_raw: true,
+            confirm_clear: false,
             mark: backend.fixture.mark,
             ..ClassifyOptions::default()
         },
