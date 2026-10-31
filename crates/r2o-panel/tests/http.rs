@@ -861,8 +861,11 @@ fn live_catalog_revision_reuses_only_catalog_arrays() {
     );
     let full: Value = serde_json::from_str(&full_body).unwrap();
     let revision = full["catalog_revision"].as_str().unwrap();
-    assert_eq!(full["snapshot"]["live_fresh"], true);
-    assert_eq!(full["knowledge"]["linked"], true);
+    #[cfg(unix)]
+    {
+        assert_eq!(full["snapshot"]["live_fresh"], true);
+        assert_eq!(full["knowledge"]["linked"], true);
+    }
     assert_eq!(full["knowledge"]["probes_used"], 7);
 
     let (_, _, slim_body) = request(

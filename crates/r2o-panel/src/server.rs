@@ -735,7 +735,13 @@ fn diagnostics_toggle(dir: &Path, enabled: bool) -> std::io::Result<()> {
 }
 
 fn api_status(config: &Config, query: &str) -> Response {
-    let mut live = read_json_object(&config.live_path, BODY_MAX);
+    let live_bytes = read_regular_file(&config.live_path, BODY_MAX).ok();
+    let live_revision = live_bytes.as_deref().and_then(catalog_revision);
+    let mut live = live_bytes
+        .as_deref()
+        .and_then(|raw| serde_json::from_slice::<Value>(raw).ok())
+        .filter(Value::is_object);
+    drop(live_bytes);
     let engine_pid = pid_path_running(&config.engine_pid_path);
     let controller_running = pid_path_running(&config.controller_pid_path).is_some();
     let now = SystemTime::now()
@@ -795,7 +801,7 @@ fn api_status(config: &Config, query: &str) -> Response {
         && controller_running;
     let (knowledge, revision, unchanged) = match live {
         Some(mut value) => {
-            let revision = catalog_revision(&value);
+            let revision = live_revision;
             let unchanged = revision
                 .as_ref()
                 .is_some_and(|r| query.strip_prefix("catalog_revision=") == Some(r.as_str()));
@@ -1871,18 +1877,18 @@ fn read_regular_file_with_metadata(
     Ok((bytes, metadata))
 }
 
-fn catalog_revision(value: &Value) -> Option<String> {
+fn catalog_revision(raw: &[u8]) -> Option<String> {
     let mut hash = 14_695_981_039_346_656_037u64;
     let mut found = false;
     for (index, key) in ["boxes", "groups"].iter().enumerate() {
-        let raw_value = value.get(key).map(serde_json::to_vec).transpose().ok()?;
+        let raw_value = top_level_raw_value(raw, key);
         hash ^= (index + 1) as u64;
         hash = hash.wrapping_mul(1_099_511_628_211);
-        hash ^= raw_value.as_ref().map_or(0, Vec::len) as u64;
+        hash ^= raw_value.map_or(0, <[u8]>::len) as u64;
         hash = hash.wrapping_mul(1_099_511_628_211);
         if let Some(value) = raw_value {
             found = true;
-            for byte in &value {
+            for byte in value {
                 hash ^= u64::from(*byte);
                 hash = hash.wrapping_mul(1_099_511_628_211);
             }
