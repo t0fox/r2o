@@ -35,6 +35,7 @@ case "${1:-}" in
     set)
         case "${2:-}" in
             firewall.@defaults\[0\].flow_offloading=*)
+                [ "${FLOW_FAIL_SET:-0}" != 1 ] || exit 1
                 printf '%s\n' "${2#*=}" > "$FLOW_SETTING_FILE"
                 printf 'uci set %s\n' "${2#*=}" >> "$FLOW_TRACE"
                 ;;
@@ -84,6 +85,23 @@ cat "$FLOW_TRACE"
 RUN
 chmod 0755 "$TEMP/run-helper.sh"
 
+run_set_failure() {
+    kind=$1
+    run="$TEMP/nft-set-failure/$kind"
+    mkdir -p "$run"
+    printf '1\n' > "$run/flow"
+    printf '1\n' > "$run/hw"
+    : > "$run/trace"
+    if RUN="$run" FLOW_SETTING_FILE="$run/flow" FLOW_HW_SETTING_FILE="$run/hw" \
+        FLOW_TRACE="$run/trace" HELPER_BACKEND=nft FLOW_FAIL_SET=1 PATH="$TEMP/bin:$PATH" \
+        sh "$TEMP/run-helper.sh" "$TEMP/$kind.sh" "$kind" "$run" > "$run/output" 2>&1; then
+        run_rc=0
+    else
+        run_rc=$?
+    fi
+    printf '%s\n' "$run_rc" > "$run/rc"
+}
+
 for scenario in nft-on nft-off iptables-on; do
     case "$scenario" in
         nft-on) backend=nft; flow=1 ;;
@@ -109,9 +127,27 @@ for scenario in nft-on nft-off iptables-on; do
     fi
 done
 
+# A failed UCI write is an intentional safety divergence: D2O logs and keeps
+# starting, while R2O returns failure so S99r2o stops the datapath instead of
+# forwarding flows that bypass NFQUEUE visibility.
+run_set_failure d2o
+run_set_failure r2o
+[ "$(cat "$TEMP/nft-set-failure/d2o/rc")" = 0 ] || {
+    echo "D2O failure behavior changed; update the differential contract" >&2
+    exit 1
+}
+[ "$(cat "$TEMP/nft-set-failure/r2o/rc")" != 0 ] || {
+    echo "R2O no longer fails closed when fw4 offload cannot be disabled" >&2
+    exit 1
+}
+[ "$(cat "$TEMP/nft-set-failure/d2o/flow")" = 1 ] || exit 1
+[ "$(cat "$TEMP/nft-set-failure/r2o/flow")" = 1 ] || exit 1
+grep -q 'flowoffload-ensure' "$ROOT/router/S99r2o" || exit 1
+grep -q 'engine_stop' "$ROOT/router/S99r2o" || exit 1
+
 if grep -Eq 'ct mark|mark_flow|flow offload @' "$ROOT/router/r2o-firewall.sh"; then
     echo "R2O still selectively edits the native flowtable or conntrack marks" >&2
     exit 1
 fi
 
-echo "D2O/R2O global flow-offload lifecycle matches; HW setting and fw3/iptable backend stay untouched."
+echo "D2O/R2O success lifecycle matches; fw4 write failure is explicitly fail-closed in R2O; HW setting and fw3/iptable backend stay untouched."
