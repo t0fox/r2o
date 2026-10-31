@@ -36,6 +36,55 @@ static void print_progress_event(void *ctx, const d2k_obs *observation)
     printf("PROGRESS|%s|%d|%d\n", observation->probe, observation->pass, observation->fail);
 }
 
+static int accept_composed_only(const d2k_poison *poison, void *ctx)
+{
+    (void)ctx;
+    return strncmp(poison->name, "СОБРАНО: ", strlen("СОБРАНО: ")) == 0;
+}
+
+static const script_ent S_COMPOSE_JSON[] = {
+    {"badsum+hello", "+"}, {"СОБРАНО: всё сразу", "+"}, {NULL, NULL}};
+static const scenario SC_COMPOSE_JSON = {
+    "compose-json", S_COMPOSE_JSON, "-", "+", "+", 0, "+", 0, 0,
+};
+
+static void run_serverhello_scenario(const scenario *scenario, d2k_result *result)
+{
+    d2k_opts options = {0};
+    d2k_trigger trigger = {0};
+
+    options.allow_loopback = 1;
+    options.repeats = 3;
+    options.timeout_ms = 400;
+    options.write_gap_ms = 2;
+    options.long_gap_ms = 10;
+    options.control_vouched = scenario->vouched;
+    options.accept = g_accept;
+    memcpy(options.control.name, "control", sizeof("control"));
+    memcpy(options.control.payload, CTL, sizeof(CTL) - 1);
+    options.control.len = sizeof(CTL) - 1;
+    options.control.accept = D2K_ACCEPT_ANY;
+
+    trigger.client_tcp_known = scenario->no_ts;
+    snprintf(trigger.name, sizeof(trigger.name), "test");
+    memcpy(trigger.payload, PAY, sizeof(PAY) - 1);
+    trigger.len = sizeof(PAY) - 1;
+    trigger.accept = D2K_ACCEPT_SERVERHELLO;
+
+    g_script = scenario->script;
+    g_default = scenario->dflt ? scenario->dflt : "-";
+    g_selftest = scenario->selftest ? scenario->selftest : "+";
+    g_ctl_pat = scenario->ctl ? scenario->ctl : "+";
+    g_ctl_calls = 0;
+    g_ack_pat = scenario->ack ? scenario->ack : "+";
+    g_ack_calls = 0;
+    g_res = result;
+    g_ask = -1;
+    g_hs_calls = 0;
+    g_poison_calls = 0;
+    d2k_classify_run(g_addr, &trigger, &options, result);
+}
+
 int __wrap_accept(int fd, struct sockaddr *address, socklen_t *length)
 {
     if (close_after_connections > 0 && accepted_connections >= close_after_connections) {
@@ -172,11 +221,32 @@ int main(int argc, char **argv)
         respond_serverhello = 1;
         g_ack_pat = "e";
         capture_progress_events = strcmp(argv[1], "baseline-clear-progress") == 0;
+    } else if (strcmp(argv[1], "compose-json") == 0) {
+        close_after_connections = 0;
     } else {
         return 2;
     }
 
     srv_start();
+    if (strcmp(argv[1], "compose-json") == 0) {
+        g_accept = accept_composed_only;
+        run_serverhello_scenario(&SC_COMPOSE_JSON, &result);
+        if (result.verdict != D2K_DV_POISONABLE || !result.composed ||
+            strcmp(result.path, "собрано") != 0) {
+            int i;
+            fprintf(stderr, "compose-json: %s path=%s composed=%d reason=%s\n",
+                    d2k_verdict_name(result.verdict), result.path, result.composed, result.reason);
+            for (i = 0; i < result.ntrace; i++) {
+                fprintf(stderr, "  %s %d/%d %s\n", result.trace[i].probe,
+                        result.trace[i].pass, result.trace[i].fail, result.trace[i].err);
+            }
+        }
+        print_json(&result);
+        return result.verdict == D2K_DV_POISONABLE && result.composed &&
+                       strcmp(result.path, "собрано") == 0
+                   ? 0
+                   : 1;
+    }
     if (strcmp(argv[1], "baseline-clear-json") == 0) {
         char raw_hex[(sizeof(PAY) - 1) * 2 + 1];
         char *cli_argv[] = {

@@ -80,7 +80,8 @@ EOF
 cat "$ROOT/crates/r2o-controller/tests/fixtures/classify-full-tree-control-r2o.rs" >> "$TEMP/rust/src/main.rs"
 
 "$TEMP/d2o-classifier" baseline-clear-json > "$TEMP/classifier-d2o.json"
-printf 'JSON|match\n' > "$TEMP/d2o.out"
+"$TEMP/d2o-classifier" compose-json > "$TEMP/classifier-compose-d2o.json"
+printf 'JSON|match\nCOMPOSE_JSON|match\n' > "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" transport-error >> "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" control-pass >> "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" control-pass-progress >> "$TEMP/d2o.out"
@@ -95,6 +96,7 @@ CARGO_TARGET_DIR=$rust_target \
 RUSTFLAGS="${RUSTFLAGS:--Awarnings}" \
 CARGO_MAKEFLAGS= \
 R2O_CLASSIFIER_JSON_FIXTURE=$(cygpath -am "$TEMP/classifier-d2o.json") \
+R2O_CLASSIFIER_COMPOSE_JSON_FIXTURE=$(cygpath -am "$TEMP/classifier-compose-d2o.json") \
     "$CARGO" run --quiet --target "$build_target" \
         --manifest-path "$rust_temp/rust/Cargo.toml" > "$TEMP/r2o.out"
 if ! cmp -s "$TEMP/d2o.out" "$TEMP/r2o.out"; then

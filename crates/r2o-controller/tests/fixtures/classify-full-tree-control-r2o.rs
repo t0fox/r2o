@@ -4,8 +4,8 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use classify::{
-    Accept, ClassifyOptions, ProbeBackend, ProbeError, ProbeOutcome, ProbeRequest, ProbeTarget,
-    Trigger, run_with_backend_progress,
+    Accept, ClassifyOptions, DpiProps, PoisonHit, ProbeBackend, ProbeError, ProbeOutcome,
+    ProbeRequest, ProbeTarget, TriState, Trigger, run_with_backend_progress,
 };
 
 struct Backend {
@@ -17,6 +17,42 @@ struct Backend {
     target_timeouts: Vec<u128>,
     target_calls: usize,
     ack_calls: usize,
+}
+
+struct ComposeBackend;
+
+impl ProbeBackend for ComposeBackend {
+    fn probe(&mut self, request: ProbeRequest<'_>) -> Result<bool, ProbeError> {
+        Ok(request.trigger.name == "control")
+    }
+
+    fn raw_supported(&self) -> bool {
+        true
+    }
+
+    fn sweep_poisons(
+        &mut self,
+        _: &ProbeTarget,
+        _: &Trigger,
+        _: &ClassifyOptions,
+        result: &mut classify::ClassifyResult,
+    ) -> Result<Option<PoisonHit>, ProbeError> {
+        result.props = DpiProps {
+            parses_l7: TriState::True,
+            validates_checksum: TriState::False,
+            tolerates_reorder: TriState::True,
+            tolerates_left_overlap: TriState::True,
+            ..DpiProps::default()
+        };
+        result.path = Some("собрано".into());
+        result.composed = true;
+        Ok(Some(PoisonHit {
+            name: "СОБРАНО: всё сразу".into(),
+            strategy: "fixture".into(),
+            plan_text: String::new(),
+            plan: Vec::new(),
+        }))
+    }
 }
 
 impl ProbeBackend for Backend {
@@ -132,6 +168,36 @@ fn run_json_case() -> (classify::ClassifyResult, usize) {
     (result, trigger.payload.len())
 }
 
+fn run_composed_json_case() -> (classify::ClassifyResult, usize) {
+    let trigger = Trigger::raw_hex("574106035349474e4154555245").unwrap();
+    let control = Trigger {
+        name: "control".into(),
+        payload: b"BENIGN-CONTROL-PAYLOAD".to_vec(),
+        accept: Accept::Any,
+    };
+    let options = ClassifyOptions {
+        repeats: 3,
+        timeout: Duration::from_millis(400),
+        write_gap: Duration::from_millis(2),
+        long_gap: Duration::from_millis(10),
+        allow_loopback: true,
+        no_raw: false,
+        full_detect_semantics: true,
+        confirm_clear: false,
+        control: Some(control),
+        ..ClassifyOptions::default()
+    };
+    let mut backend = ComposeBackend;
+    let result = run_with_backend_progress(
+        "192.0.2.44:443",
+        &trigger,
+        options,
+        &mut backend,
+        &mut |_, _, _, _| {},
+    );
+    (result, trigger.payload.len())
+}
+
 fn run_case_with_progress(
     control_outcomes: Vec<Result<ProbeOutcome, ProbeError>>,
     ack_outcomes: Vec<Result<bool, ProbeError>>,
@@ -205,6 +271,19 @@ fn main() {
         actual["duration"] = expected["duration"].clone();
         assert_eq!(expected, actual, "R2O classifier JSON differs from D2O");
         println!("JSON|match");
+    }
+
+    if let Ok(path) = std::env::var("R2O_CLASSIFIER_COMPOSE_JSON_FIXTURE") {
+        let expected: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).expect("read D2O composed JSON"))
+                .expect("parse D2O composed JSON");
+        let (result, trigger_len) = run_composed_json_case();
+        let actual = classify_json::result_json_value(&result, trigger_len);
+        assert_eq!(result.verdict, classify::Verdict::Poisonable);
+        assert_eq!(expected["composed"], actual["composed"]);
+        assert_eq!(expected["path"], actual["path"]);
+        assert_eq!(expected["props"], actual["props"]);
+        println!("COMPOSE_JSON|match");
     }
 
     let (transport_error, transport_ack_calls, _) = run_case(

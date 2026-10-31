@@ -1,10 +1,47 @@
 use crate::classify::ClassifyResult;
+use crate::classify::TriState;
+
+fn insert_tri_state(
+    props: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    state: TriState,
+) {
+    let value = match state {
+        TriState::Unset => return,
+        TriState::False => false,
+        TriState::True => true,
+    };
+    props.insert(key.into(), serde_json::json!(value));
+}
 
 /// D2O's JSON report shape for fields represented by the Rust classifier.
 pub fn result_json_value(result: &ClassifyResult, trigger_len: usize) -> serde_json::Value {
     let mut props = serde_json::Map::new();
-    if let Some(reassembles) = result.reassembles {
-        props.insert("reassembles".into(), serde_json::json!(reassembles));
+    insert_tri_state(&mut props, "reassembles", result.props.reassembles);
+    insert_tri_state(&mut props, "parses_l7", result.props.parses_l7);
+    insert_tri_state(
+        &mut props,
+        "validates_checksum",
+        result.props.validates_checksum,
+    );
+    insert_tri_state(
+        &mut props,
+        "tolerates_reorder",
+        result.props.tolerates_reorder,
+    );
+    insert_tri_state(
+        &mut props,
+        "tolerates_left_overlap",
+        result.props.tolerates_left_overlap,
+    );
+    insert_tri_state(
+        &mut props,
+        "counts_duplicates",
+        result.props.counts_duplicates,
+    );
+    insert_tri_state(&mut props, "inspects_syn", result.props.inspects_syn);
+    if result.props.hop_ttl.is_some_and(|ttl| ttl > 0) {
+        props.insert("hop_ttl".into(), serde_json::json!(result.props.hop_ttl));
     }
     let trace = result
         .trace
@@ -40,7 +77,7 @@ pub fn result_json_value(result: &ClassifyResult, trigger_len: usize) -> serde_j
         "duration": format!("{}ms", result.duration.as_millis()),
         "trigger_len": trigger_len,
         "props": serde_json::Value::Object(props),
-        "composed": false,
+        "composed": result.composed,
         "raw_usable": result.raw_usable,
         "trace": trace,
     });
@@ -59,6 +96,9 @@ pub fn result_json_value(result: &ClassifyResult, trigger_len: usize) -> serde_j
         .filter(|strategy| !strategy.is_empty())
     {
         value["strategy"] = serde_json::json!(strategy);
+    }
+    if let Some(path) = result.path.as_deref().filter(|path| !path.is_empty()) {
+        value["path"] = serde_json::json!(path);
     }
     if let Some(response) = &result.response {
         let verdict = match response.verdict {

@@ -954,6 +954,9 @@ pub struct ClassifyResult {
     pub reassembles: Option<bool>,
     pub strategy: Option<String>,
     pub response: Option<ResponseResult>,
+    pub props: DpiProps,
+    pub path: Option<String>,
+    pub composed: bool,
     pub hit: Option<PoisonHit>,
     pub unplannable: Vec<UnplannablePoison>,
     pub raw_usable: bool,
@@ -979,6 +982,9 @@ impl ClassifyResult {
             reassembles: None,
             strategy: None,
             response: None,
+            props: DpiProps::default(),
+            path: None,
+            composed: false,
             hit: None,
             unplannable: Vec::new(),
             raw_usable: false,
@@ -1939,6 +1945,11 @@ fn strategy_for(pos: usize) -> String {
 
 fn finish(result: &mut ClassifyResult, options: &ClassifyOptions, start: Instant) {
     result.stopped = stopped(options);
+    result.props.reassembles = match result.reassembles {
+        Some(true) => TriState::True,
+        Some(false) => TriState::False,
+        None => TriState::Unset,
+    };
     result.raw_dials = current_raw_dial_count().saturating_sub(result.raw_dial_base);
     result.duration = start.elapsed();
     result.rst_rule_failures = usize::try_from(

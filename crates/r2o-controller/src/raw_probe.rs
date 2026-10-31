@@ -93,7 +93,8 @@ pub fn sweep_poisons(
             .map(|control| control.payload.as_slice()),
         options.trigger_snapped,
     );
-    let mut props = DpiProps::default();
+    let props0 = result.props.clone();
+    let mut props = props0.clone();
     let mut answered = Vec::new();
     let mut raw_ok = 0usize;
     let mut raw_errors = 0usize;
@@ -312,6 +313,8 @@ pub fn sweep_poisons(
                 Ok(hit) => {
                     add_observation(result, observation);
                     note_props_hit(&mut props, &poison);
+                    result.props = props.clone();
+                    result.path = Some("свойство".into());
                     return Ok(Some(hit));
                 }
                 Err(unplannable) => {
@@ -329,6 +332,7 @@ pub fn sweep_poisons(
         add_observation(result, observation.clone());
         if should_recheck(cached_selftest, raw_ok, raw_errors) {
             if !raw_recheck(remote, options, result, progress)? {
+                result.props = props0.clone();
                 result.raw_usable = false;
                 return Err(ProbeError::Local(
                     "classify: raw self-test failed after local probe errors".into(),
@@ -426,6 +430,9 @@ pub fn sweep_poisons(
             match executable_poison_hit(&poison, trigger, decoy) {
                 Ok(hit) => {
                     add_observation(result, observation);
+                    result.props = props.clone();
+                    result.composed = true;
+                    result.path = Some("собрано".into());
                     return Ok(Some(hit));
                 }
                 Err(unplannable) => {
@@ -440,6 +447,7 @@ pub fn sweep_poisons(
         add_observation(result, observation.clone());
         if should_recheck(cached_selftest, raw_ok, raw_errors) {
             if !raw_recheck(remote, options, result, progress)? {
+                result.props = props0.clone();
                 result.raw_usable = false;
                 return Err(ProbeError::Local(
                     "classify: raw self-test failed after local probe errors".into(),
@@ -451,6 +459,7 @@ pub fn sweep_poisons(
         }
     }
 
+    result.props = props.clone();
     for poison in poisons()
         .iter()
         .filter(|poison| poison_selected(options, &poison.name))
@@ -539,6 +548,10 @@ pub fn sweep_poisons(
                 Ok(Some(hit)) => {
                     add_observation(result, observation);
                     note_props_hit(&mut props, poison);
+                    result.props = props.clone();
+                    if result.path.is_none() {
+                        result.path = Some("перебор".into());
+                    }
                     return Ok(Some(hit));
                 }
                 Ok(None) => {}
@@ -553,6 +566,7 @@ pub fn sweep_poisons(
         add_observation(result, observation.clone());
         if should_recheck(cached_selftest, raw_ok, raw_errors) {
             if !raw_recheck(remote, options, result, progress)? {
+                result.props = props0.clone();
                 result.raw_usable = false;
                 return Err(ProbeError::Local(
                     "classify: raw self-test failed after local probe errors".into(),
@@ -564,6 +578,7 @@ pub fn sweep_poisons(
         }
         if should_recheck(cached_selftest, raw_ok, raw_errors) {
             if !raw_recheck(remote, options, result, progress)? {
+                result.props = props0.clone();
                 result.raw_usable = false;
                 return Err(ProbeError::Local(
                     "classify: raw self-test failed after local probe errors".into(),
@@ -574,6 +589,7 @@ pub fn sweep_poisons(
             raw_errors = 0;
         }
     }
+    result.props = props;
     Ok(None)
 }
 
