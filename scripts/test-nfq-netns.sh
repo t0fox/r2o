@@ -22,6 +22,10 @@ FAILOPEN_QUEUE=65516
 NO_FAIL_OPEN_QUEUE=65515
 FAILOPEN_PORT=4460
 NO_FAIL_OPEN_PORT=4461
+FAILOPEN6_QUEUE=65514
+NO_FAIL_OPEN6_QUEUE=65513
+FAILOPEN6_PORT=4462
+NO_FAIL_OPEN6_PORT=4463
 TCP_DELAY_QUEUE=65524
 TCP_DELAY_MARK=21076
 TCP_CONTROL_QUEUE=65522
@@ -175,8 +179,10 @@ ip netns exec "$NS" nft 'add chain inet r2o output { type filter hook output pri
 ip netns exec "$NS" nft 'add chain inet r2o input { type filter hook input priority 0; policy accept; }'
 ip netns exec "$NS" nft add rule inet r2o output udp dport 443 queue num "$QUEUE" bypass
 ip netns exec "$NS" nft add rule inet r2o output udp dport 4444 queue num 65528 bypass
-ip netns exec "$NS" nft add rule inet r2o output ip daddr 127.0.0.1 udp dport "$FAILOPEN_PORT" counter queue num "$FAILOPEN_QUEUE"
-ip netns exec "$NS" nft add rule inet r2o output ip daddr 127.0.0.1 udp dport "$NO_FAIL_OPEN_PORT" counter queue num "$NO_FAIL_OPEN_QUEUE"
+ip netns exec "$NS" nft add rule inet r2o output ip daddr 127.0.0.1 udp dport "$FAILOPEN_PORT" meta mark != 119 counter queue num "$FAILOPEN_QUEUE"
+ip netns exec "$NS" nft add rule inet r2o output ip daddr 127.0.0.1 udp dport "$NO_FAIL_OPEN_PORT" meta mark != 119 counter queue num "$NO_FAIL_OPEN_QUEUE"
+ip netns exec "$NS" nft add rule inet r2o output ip6 daddr ::1 udp dport "$FAILOPEN6_PORT" meta mark != 119 counter queue num "$FAILOPEN6_QUEUE"
+ip netns exec "$NS" nft add rule inet r2o output ip6 daddr ::1 udp dport "$NO_FAIL_OPEN6_PORT" meta mark != 119 counter queue num "$NO_FAIL_OPEN6_QUEUE"
 ip netns exec "$NS" nft add rule inet r2o output ip daddr 127.0.0.1 udp dport 50004 meta mark != "$VOICE_MARK" queue num "$VOICE_QUEUE" bypass
 ip netns exec "$NS" nft add rule inet r2o input ip saddr 127.0.0.1 udp sport 50004 queue num "$VOICE_QUEUE" bypass
 ip netns exec "$NS" nft add rule inet r2o output ip daddr 127.0.0.1 tcp dport 4445 meta mark != "$TCP_MARK" queue num "$TCP_QUEUE" bypass
@@ -1659,13 +1665,17 @@ import sys
 import time
 
 pid = int(sys.argv[1])
-port = int(sys.argv[2])
-expected = int(sys.argv[3])
-payload = open(sys.argv[4], "rb").read()
-server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-server.bind(("127.0.0.1", port))
+family = sys.argv[2]
+port = int(sys.argv[3])
+expected = int(sys.argv[4])
+payload = open(sys.argv[5], "rb").read()
+socket_family = socket.AF_INET6 if family == "ipv6" else socket.AF_INET
+address = "::1" if family == "ipv6" else "127.0.0.1"
+destination = (address, port, 0, 0) if family == "ipv6" else (address, port)
+server = socket.socket(socket_family, socket.SOCK_DGRAM)
+server.bind(destination)
 server.setblocking(False)
-client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+client = socket.socket(socket_family, socket.SOCK_DGRAM)
 
 def drain():
     received = 0
@@ -1687,7 +1697,7 @@ try:
     else:
         raise SystemExit("ОШИБКА: datapath не остановился перед переполнением NFQUEUE")
     for _ in range(8):
-        client.sendto(payload, ("127.0.0.1", port))
+        client.sendto(payload, destination)
     time.sleep(0.15)
     while_stopped = drain()
     if while_stopped != expected:
@@ -1699,33 +1709,39 @@ finally:
 
 time.sleep(0.2)
 after_resume = drain()
-if after_resume != 0:
-    raise SystemExit(f"ОШИБКА: после resume неожиданно принято {after_resume} пакетов")
+if after_resume != 1:
+    raise SystemExit(f"ОШИБКА: после resume ожидался один принятый queued-пакет, получено {after_resume}")
 print(f"stopped overflow accepted={while_stopped}, after resume={after_resume}")
 PY
 
 run_nfqueue_overflow_case() {
-    overflow_queue=$1
-    overflow_port=$2
-    expected_overflow=$3
-    no_fail_open=$4
+    overflow_family=$1
+    overflow_queue=$2
+    overflow_port=$3
+    expected_overflow=$4
+    no_fail_open=$5
+    if [ "$overflow_family" = "ipv6" ]; then
+        family_name=IPv6
+    else
+        family_name=IPv4
+    fi
     overflow_log="$WORK/r2o-datapath-overflow-$overflow_queue.log"
     if [ "$no_fail_open" -eq 1 ]; then
         ip netns exec "$NS" "$R2OD_BIN" \
-            --queue "$overflow_queue" --family ipv4 --plan "$WORK/quicdeny.r2op" \
-            --queue-len 1 --stats 0 --no-fail-open \
+            --queue "$overflow_queue" --family "$overflow_family" --plan "$WORK/tcp-empty.r2op" --plan "$WORK/tcp-empty.r2op" \
+            --mark 119 --queue-len 1 --stats 0 --no-fail-open \
             >"$overflow_log" 2>&1 &
         fail_open_setting=выключен
     else
         ip netns exec "$NS" "$R2OD_BIN" \
-            --queue "$overflow_queue" --family ipv4 --plan "$WORK/quicdeny.r2op" \
-            --queue-len 1 --stats 0 \
+            --queue "$overflow_queue" --family "$overflow_family" --plan "$WORK/tcp-empty.r2op" --plan "$WORK/tcp-empty.r2op" \
+            --mark 119 --queue-len 1 --stats 0 \
             >"$overflow_log" 2>&1 &
         fail_open_setting=включён
     fi
     R2OD_OVERFLOW_PID=$!
     for _ in 1 2 3 4 5 6 7 8 9 10; do
-        grep -Fq "r2o-datapath: очередь $overflow_queue, IPv4" "$overflow_log" && break
+        grep -Fq "r2o-datapath: очередь $overflow_queue, $family_name" "$overflow_log" && break
         kill -0 "$R2OD_OVERFLOW_PID" 2>/dev/null || {
             cat "$overflow_log" >&2
             exit 1
@@ -1738,12 +1754,12 @@ run_nfqueue_overflow_case() {
         exit 1
     fi
     if ! ip netns exec "$NS" python3 "$WORK/nfqueue-overflow-probe.py" \
-        "$R2OD_OVERFLOW_PID" "$overflow_port" "$expected_overflow" "$FIXTURE"; then
+        "$R2OD_OVERFLOW_PID" "$overflow_family" "$overflow_port" "$expected_overflow" "$FIXTURE"; then
         cat "$overflow_log" >&2
         exit 1
     fi
     if ! ip netns exec "$NS" nft list chain inet r2o output | \
-        grep -Eq "udp dport $overflow_port counter packets 8 bytes"; then
+        grep -Eq "udp dport $overflow_port .*counter packets 8 bytes"; then
         ip netns exec "$NS" nft list chain inet r2o output >&2
         echo "ОШИБКА: overflow probe не передал все датаграммы в NFQUEUE $overflow_queue" >&2
         exit 1
@@ -1756,11 +1772,13 @@ run_nfqueue_overflow_case() {
         echo "ОШИБКА: datapath NFQUEUE $overflow_queue не завершился после SIGTERM" >&2
         exit 1
     fi
-    echo "ПРОЙДЕНО: NFQUEUE queue-len=1 fail-open $fail_open_setting: overflow=$expected_overflow/7 пакетов"
+    echo "ПРОЙДЕНО: NFQUEUE $family_name queue-len=1 fail-open $fail_open_setting: overflow=$expected_overflow/7, queued=1 после resume"
 }
 
-run_nfqueue_overflow_case "$FAILOPEN_QUEUE" "$FAILOPEN_PORT" 7 0
-run_nfqueue_overflow_case "$NO_FAIL_OPEN_QUEUE" "$NO_FAIL_OPEN_PORT" 0 1
+run_nfqueue_overflow_case ipv4 "$FAILOPEN_QUEUE" "$FAILOPEN_PORT" 7 0
+run_nfqueue_overflow_case ipv4 "$NO_FAIL_OPEN_QUEUE" "$NO_FAIL_OPEN_PORT" 0 1
+run_nfqueue_overflow_case ipv6 "$FAILOPEN6_QUEUE" "$FAILOPEN6_PORT" 7 0
+run_nfqueue_overflow_case ipv6 "$NO_FAIL_OPEN6_QUEUE" "$NO_FAIL_OPEN6_PORT" 0 1
 
 kill -TERM "$R2OD_OBSERVE_PID"
 if wait "$R2OD_OBSERVE_PID"; then
@@ -1778,4 +1796,4 @@ if ! grep -Eq '^r2o-datapath: TCP-потоки [0-9]+ из 2048 \(отказов
 fi
 echo "ПРОЙДЕНО: UDP-потоки из NFQUEUE сохранены и показаны в итоговой сводке"
 
-cat "$WORK/r2o-datapath.log" "$WORK/r2o-datapath-udplen.log" "$WORK/r2o-datapath-tcp.log" "$WORK/r2o-datapath-tcp6.log" "$WORK/r2o-datapath-tcp-delay.log" "$WORK/r2o-datapath-control.log" "$WORK/r2o-datapath-control-restarted.log" "$WORK/r2o-datapath-voice.log" "$WORK/r2o-datapath-observe.log" "$WORK/r2o-controller-observe.log" "$WORK/r2o-datapath-hold.log" "$WORK/r2o-datapath-ipv6.log" "$WORK/r2o-datapath-ipv6-nat.log" "$WORK/r2o-datapath-overflow-$FAILOPEN_QUEUE.log" "$WORK/r2o-datapath-overflow-$NO_FAIL_OPEN_QUEUE.log"
+cat "$WORK/r2o-datapath.log" "$WORK/r2o-datapath-udplen.log" "$WORK/r2o-datapath-tcp.log" "$WORK/r2o-datapath-tcp6.log" "$WORK/r2o-datapath-tcp-delay.log" "$WORK/r2o-datapath-control.log" "$WORK/r2o-datapath-control-restarted.log" "$WORK/r2o-datapath-voice.log" "$WORK/r2o-datapath-observe.log" "$WORK/r2o-controller-observe.log" "$WORK/r2o-datapath-hold.log" "$WORK/r2o-datapath-ipv6.log" "$WORK/r2o-datapath-ipv6-nat.log" "$WORK/r2o-datapath-overflow-$FAILOPEN_QUEUE.log" "$WORK/r2o-datapath-overflow-$NO_FAIL_OPEN_QUEUE.log" "$WORK/r2o-datapath-overflow-$FAILOPEN6_QUEUE.log" "$WORK/r2o-datapath-overflow-$NO_FAIL_OPEN6_QUEUE.log"
