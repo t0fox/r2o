@@ -2258,6 +2258,61 @@ mod differential_tests {
     }
 
     #[test]
+    #[ignore = "run through scripts/test-panel-worker-content-length-differential.sh"]
+    fn d2o_worker_extra_body_matches_rust_reader() {
+        use std::io::Write;
+        use std::net::{TcpListener, TcpStream};
+
+        let config_path = PathBuf::from(
+            std::env::var_os("R2O_PANEL_WORKER_EXTRA_BODY_CONFIG")
+                .expect("test helper provides the config path"),
+        );
+        let c_trace = fs::read_to_string(
+            std::env::var_os("R2O_PANEL_WORKER_EXTRA_BODY_C_TRACE")
+                .expect("test helper provides the D2O response"),
+        )
+        .unwrap();
+        fs::write(&config_path, b"TG_WORKERS=old.example\n").unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let sender = std::thread::spawn(move || {
+            let mut client = TcpStream::connect(address).unwrap();
+            client
+                .write_all(
+                    b"POST /api/telegram/workers HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\nContent-Type: application/json\r\nContent-Length: 21\r\n\r\n{\"domains\":[\"x.com\"]} ",
+                )
+                .unwrap();
+            client.shutdown(std::net::Shutdown::Write).unwrap();
+        });
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let request = read_request(&mut stream).unwrap();
+        let mut config = Config::default();
+        config.config_path = config_path.clone();
+        config.service_path = PathBuf::new();
+        config.control_enabled = true;
+        let status = match request {
+            Ok(raw) => handle_request(&config, &raw).status,
+            Err(status) => status,
+        };
+        sender.join().unwrap();
+        let rust_trace = format!(
+            "HTTP/1.1 {status}\n{}",
+            fs::read_to_string(&config_path).unwrap()
+        );
+        assert_eq!(rust_trace, c_trace);
+        fs::write(
+            std::env::var_os("R2O_PANEL_WORKER_EXTRA_BODY_RUST_TRACE")
+                .expect("test helper provides the Rust output path"),
+            rust_trace,
+        )
+        .unwrap();
+    }
+
+    #[test]
     #[ignore = "run through scripts/test-panel-request-header-limit-differential.sh"]
     fn d2o_request_header_limit_matches_rust_handler() {
         let c_trace = fs::read_to_string(

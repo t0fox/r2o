@@ -27,6 +27,9 @@ CC=${CC:-cc}
 printf 'HTTP/1.1 400\nTG_WORKERS=old.example\n' > "$TEMP/d2o.expected"
 cmp "$TEMP/d2o.expected" "$TEMP/d2o.trace"
 
+"$TEMP/d2o-worker-content-length" "$TEMP/config" extra-body > "$TEMP/d2o-extra.trace"
+cmp "$TEMP/d2o.expected" "$TEMP/d2o-extra.trace"
+
 export R2O_PANEL_WORKER_LENGTH_CONFIG="$TEMP/config"
 export R2O_PANEL_WORKER_LENGTH_C_TRACE="$TEMP/d2o.trace"
 export R2O_PANEL_WORKER_LENGTH_RUST_TRACE="$TEMP/rust.trace"
@@ -35,4 +38,11 @@ CARGO=${CARGO:-cargo}
     d2o_worker_content_length_matches_rust_handler -- --ignored --nocapture
 cmp "$TEMP/d2o.trace" "$TEMP/rust.trace"
 cat "$TEMP/d2o.trace"
+export R2O_PANEL_WORKER_EXTRA_BODY_CONFIG="$TEMP/config"
+export R2O_PANEL_WORKER_EXTRA_BODY_C_TRACE="$TEMP/d2o-extra.trace"
+export R2O_PANEL_WORKER_EXTRA_BODY_RUST_TRACE="$TEMP/rust-extra.trace"
+"$CARGO" test --quiet --locked --offline -p r2o-panel --lib \
+    d2o_worker_extra_body_matches_rust_reader -- --ignored --nocapture
+cmp "$TEMP/d2o-extra.trace" "$TEMP/rust-extra.trace"
+cat "$TEMP/d2o-extra.trace"
 printf '%s\n' 'test-panel-worker-content-length-differential: D2O and R2O response/config match'

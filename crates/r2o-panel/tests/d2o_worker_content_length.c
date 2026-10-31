@@ -8,15 +8,24 @@
 #include <unistd.h>
 
 int main(int argc, char **argv) {
-    if (argc != 2) return 2;
+    if (argc < 2 || argc > 3) return 2;
     int sockets[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0) return 2;
-    static const char request[] =
+    static const char leading_zero_request[] =
         "POST /api/telegram/workers HTTP/1.1\r\n"
         "Host: localhost\r\nOrigin: http://localhost\r\n"
         "Content-Type: application/json\r\nContent-Length: 00021\r\n\r\n"
         "{\"domains\":[\"x.com\"]}";
-    if (write(sockets[0], request, sizeof request - 1) != (ssize_t)(sizeof request - 1)) return 2;
+    static const char extra_body_request[] =
+        "POST /api/telegram/workers HTTP/1.1\r\n"
+        "Host: localhost\r\nOrigin: http://localhost\r\n"
+        "Content-Type: application/json\r\nContent-Length: 21\r\n\r\n"
+        "{\"domains\":[\"x.com\"]} ";
+    const char *request = argc == 3 && strcmp(argv[2], "extra-body") == 0
+                              ? extra_body_request
+                              : leading_zero_request;
+    size_t request_len = strlen(request);
+    if (write(sockets[0], request, request_len) != (ssize_t)request_len) return 2;
     if (shutdown(sockets[0], SHUT_WR) != 0) return 2;
     d2k_panel_config config = {
         .config_path = argv[1],
