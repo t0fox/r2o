@@ -47,6 +47,7 @@ pub struct R2oVoiceMeasurement {
     pub probes: u32,
     pub marked: bool,
     pub discovery_verified: bool,
+    pub discovery_prefix: Option<[u8; 20]>,
     pub arm: Option<R2oVoiceArm>,
 }
 
@@ -150,6 +151,7 @@ pub fn r2o_measure_voice(r2o_options: &R2oVoiceOptions) -> R2oVoiceMeasurement {
             probes: 0,
             marked: r2o_options.mark.is_some_and(|r2o_mark| r2o_mark != 0),
             discovery_verified: false,
+            discovery_prefix: None,
             arm: None,
         };
     };
@@ -160,6 +162,7 @@ pub fn r2o_measure_voice(r2o_options: &R2oVoiceOptions) -> R2oVoiceMeasurement {
         probes: 0,
         marked: r2o_options.mark.is_some_and(|r2o_mark| r2o_mark != 0),
         discovery_verified: false,
+        discovery_prefix: None,
         arm: None,
     };
 
@@ -209,12 +212,12 @@ pub fn r2o_measure_voice(r2o_options: &R2oVoiceOptions) -> R2oVoiceMeasurement {
                     });
                     return r2o_result;
                 }
-                crate::voice_discovery::R2oDiscoveryVerdict::Blocked { cutoff, .. } => {
+                crate::voice_discovery::R2oDiscoveryVerdict::Blocked { cutoff, prefix } => {
                     r2o_result.verdict = R2oVoiceVerdict::Blocked;
                     r2o_result.reason = format!(
                         "Discord IP Discovery: прямой поток устойчиво обрывается после {cutoff} ответов; STUN-префикс трижды дал полную серию. Проверка медиасессии отдельно"
                     );
-                    r2o_result.discovery_verified = true;
+                    r2o_record_voice_discovery_arm(&mut r2o_result, prefix);
                     return r2o_result;
                 }
             }
@@ -319,7 +322,11 @@ pub fn r2o_format_voice_measurement(r2o_result: &R2oVoiceMeasurement) -> String 
             "ВНИМАНИЕ:  сокет не помечен — замер прошёл через наш же обход и недостоверен\n",
         );
     }
-    if r2o_result.discovery_verified {
+    if r2o_result.discovery_prefix.is_some() {
+        r2o_output.push_str(
+            "\nПриём:     stun-before-discovery ×1; серия Discovery проверена, звук проверяется в приложении\n",
+        );
+    } else if r2o_result.discovery_verified {
         r2o_output
             .push_str("\nПриём:     Discovery-серия подтверждена; звук проверяется в приложении\n");
     } else if let Some(r2o_arm) = r2o_result.arm {
@@ -335,6 +342,11 @@ pub fn r2o_format_voice_measurement(r2o_result: &R2oVoiceMeasurement) -> String 
         );
     }
     r2o_output
+}
+
+fn r2o_record_voice_discovery_arm(r2o_result: &mut R2oVoiceMeasurement, r2o_prefix: [u8; 20]) {
+    r2o_result.discovery_verified = true;
+    r2o_result.discovery_prefix = Some(r2o_prefix);
 }
 
 fn r2o_evaluate_voice<F>(
@@ -354,6 +366,7 @@ where
         probes: 0,
         marked: r2o_options.mark.is_some_and(|r2o_mark| r2o_mark != 0),
         discovery_verified: false,
+        discovery_prefix: None,
         arm: None,
     };
     match r2o_observation {
@@ -818,10 +831,10 @@ fn r2o_parse_voice_mark(r2o_value: &str) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        R2O_VOICE_REPEATS, R2oVoiceArm, R2oVoiceObservation, R2oVoiceOptions, R2oVoiceTally,
-        R2oVoiceVerdict, r2o_ask_voice, r2o_ask_voice_with_arm, r2o_evaluate_voice,
-        r2o_measured_voice_arm_plan_text, r2o_parse_voice_options, r2o_select_voice_target,
-        r2o_voice_observation,
+        R2O_VOICE_REPEATS, R2oVoiceArm, R2oVoiceMeasurement, R2oVoiceObservation, R2oVoiceOptions,
+        R2oVoiceTally, R2oVoiceVerdict, r2o_ask_voice, r2o_ask_voice_with_arm, r2o_evaluate_voice,
+        r2o_format_voice_measurement, r2o_measured_voice_arm_plan_text, r2o_parse_voice_options,
+        r2o_record_voice_discovery_arm, r2o_select_voice_target, r2o_voice_observation,
     };
     use crate::voice_targets::R2oVoiceTarget;
     use std::ffi::OsString;
@@ -832,6 +845,29 @@ mod tests {
     static R2O_VOICE_SIGNAL_LOCK: Mutex<()> = Mutex::new(());
 
     extern "C" fn r2o_ignore_sigusr1(_: libc::c_int) {}
+
+    #[test]
+    fn discovery_measurement_keeps_the_verified_prefix_arm() {
+        let r2o_prefix = [0x35; 20];
+        let mut r2o_result = R2oVoiceMeasurement {
+            verdict: R2oVoiceVerdict::Blocked,
+            reason: String::new(),
+            address: None,
+            probes: 0,
+            marked: true,
+            discovery_verified: false,
+            discovery_prefix: None,
+            arm: None,
+        };
+
+        r2o_record_voice_discovery_arm(&mut r2o_result, r2o_prefix);
+
+        assert!(r2o_result.discovery_verified);
+        assert_eq!(r2o_result.discovery_prefix, Some(r2o_prefix));
+        assert!(r2o_format_voice_measurement(&r2o_result).contains(
+            "Приём:     stun-before-discovery ×1; серия Discovery проверена, звук проверяется в приложении"
+        ));
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

@@ -27442,6 +27442,7 @@ mod tests {
             probes: 5,
             marked: true,
             discovery_verified: false,
+            discovery_prefix: None,
             arm: None,
         };
         let event = super::r2o_voice_outcome_diagnostic_event(
@@ -35811,6 +35812,7 @@ mod tests {
                 probes: 6,
                 marked: true,
                 discovery_verified: false,
+                discovery_prefix: None,
                 arm: None,
             }
         });
