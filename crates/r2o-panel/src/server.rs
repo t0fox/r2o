@@ -470,10 +470,16 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Result<Vec<u8>, u16>>
     let mut raw = Vec::with_capacity(2048);
     let mut chunk = [0u8; 2048];
     let header_end;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         if raw.len() >= REQUEST_MAX {
             return Ok(Err(431));
         }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(Err(408));
+        }
+        stream.set_read_timeout(Some(remaining))?;
         let available = chunk.len().min(REQUEST_MAX + 1 - raw.len());
         match stream.read(&mut chunk[..available]) {
             Ok(0) => return Ok(Err(400)),
@@ -2244,6 +2250,63 @@ mod differential_tests {
             std::env::var_os("R2O_PANEL_HEADER_LIMIT_RUST_TRACE")
                 .expect("test helper provides the Rust output path"),
             rust_trace,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[ignore = "run through scripts/test-panel-header-deadline-differential.sh"]
+    fn d2o_header_deadline_matches_rust_reader() {
+        use std::io::Write;
+        use std::net::{TcpListener, TcpStream};
+        use std::sync::atomic::AtomicBool;
+
+        let c_trace = fs::read_to_string(
+            std::env::var_os("R2O_PANEL_HEADER_DEADLINE_C_TRACE")
+                .expect("test helper provides the D2O timing trace"),
+        )
+        .unwrap();
+        let mut c_lines = c_trace.lines();
+        let c_status = c_lines.next().unwrap();
+        let c_elapsed: u128 = c_lines.next().unwrap().parse().unwrap();
+        assert_eq!(c_status, "HTTP/1.1 408");
+        assert!(c_elapsed < 7_000, "D2O header deadline took {c_elapsed} ms");
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+        let sender_done = Arc::clone(&done);
+        let sender = std::thread::spawn(move || {
+            let mut client = TcpStream::connect(address).unwrap();
+            client.write_all(b"GET / HTTP/1.1\r\n").unwrap();
+            std::thread::sleep(Duration::from_secs(3));
+            client.write_all(b"X: y\r\n").unwrap();
+            while !sender_done.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let started = Instant::now();
+        let outcome = read_request(&mut stream).unwrap();
+        let rust_elapsed = started.elapsed().as_millis();
+        done.store(true, Ordering::Release);
+        sender.join().unwrap();
+        let rust_status = match outcome {
+            Ok(_) => "complete".to_owned(),
+            Err(status) => format!("HTTP/1.1 {status}"),
+        };
+        assert_eq!(rust_status, c_status);
+        assert!(
+            rust_elapsed.abs_diff(c_elapsed) <= 1_500,
+            "D2O returned after {c_elapsed} ms, Rust after {rust_elapsed} ms"
+        );
+        fs::write(
+            std::env::var_os("R2O_PANEL_HEADER_DEADLINE_RUST_TRACE")
+                .expect("test helper provides the Rust timing trace"),
+            format!("{rust_status}\n{rust_elapsed}\n"),
         )
         .unwrap();
     }
