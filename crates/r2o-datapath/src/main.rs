@@ -496,6 +496,7 @@ mod app {
         queue_len: u32,
         journal_capacity: u32,
         flow_capacity: R2oFlowCapacity,
+        stats_interval: Option<Duration>,
         r2o_idle_timeout: Duration,
         receive_buffer: i32,
         control_path: Option<PathBuf>,
@@ -535,6 +536,19 @@ mod app {
                 }
             }
         }
+    }
+
+    fn r2o_log_flow_table_stats(tcp_sessions: &TcpSessions, udp_sessions: &R2oUdpSessions) {
+        let udp_stats = udp_sessions.stats();
+        eprintln!(
+            "r2o-datapath: TCP-потоки {} из {} (отказов {}), UDP-потоки {} из {} (отказов {})",
+            tcp_sessions.len(),
+            tcp_sessions.r2o_tcp_flow_capacity(),
+            tcp_sessions.r2o_tcp_flow_refusals(),
+            udp_stats.flows,
+            udp_stats.capacity,
+            udp_stats.refusals
+        );
     }
 
     pub fn run() -> Result<(), Box<dyn Error>> {
@@ -722,6 +736,9 @@ mod app {
         let mut icmp_guard = R2oIcmpGuard::default();
         let mut next_execution_id = 1_u64;
         let mut next_session_sweep = Instant::now();
+        let mut next_stats = options
+            .stats_interval
+            .map(|interval| Instant::now() + interval);
         let mut routed_flows = R2oRoutedFlows::default();
         let mut last_route_refresh = Instant::now();
         let mut next_route_refresh = last_route_refresh + R2O_ROUTE_REFRESH_INTERVAL;
@@ -788,11 +805,7 @@ mod app {
                     flow_journal.added(),
                     flow_journal.dropped()
                 );
-                let udp_stats = udp_sessions.stats();
-                eprintln!(
-                    "r2o-datapath: UDP-потоки {} из {}, отказов {}",
-                    udp_stats.flows, udp_stats.capacity, udp_stats.refusals
-                );
+                r2o_log_flow_table_stats(&tcp_sessions, &udp_sessions);
                 eprintln!(
                     "r2o-datapath: ответ невидим очереди: {} из {} TCP-потоков с приветствием",
                     tcp_sessions.r2o_reply_hidden(),
@@ -850,6 +863,10 @@ mod app {
             }
             name_plans.r2o_set_send_maxlen(raw.as_ref().map_or(send_maxlen, RawSocket::maxlen));
             let now = Instant::now();
+            if next_stats.is_some_and(|deadline| now >= deadline) {
+                r2o_log_flow_table_stats(&tcp_sessions, &udp_sessions);
+                next_stats = options.stats_interval.map(|interval| now + interval);
+            }
             if now >= next_session_sweep {
                 let reverse_queue_visible = options.reverse_queue_visible
                     && control.as_ref().is_some_and(ControlServer::is_connected);
@@ -940,6 +957,9 @@ mod app {
                 udp_sessions.expire(now);
                 next_session_sweep = now + Duration::from_secs(1);
             }
+            let stats_timeout = next_stats.map_or(200, |deadline| {
+                deadline.saturating_duration_since(now).as_millis().min(200) as i32
+            });
             let timeout = scheduled
                 .timeout_ms(now, 200)
                 .min(holding.timeout_ms(now, 200))
@@ -951,7 +971,8 @@ mod app {
                         .saturating_duration_since(now)
                         .as_millis()
                         .min(200) as i32,
-                );
+                )
+                .min(stats_timeout);
             let (received, route_ready) = match socket.receive_timeout_with_fd(
                 &mut batch,
                 timeout,
@@ -2273,6 +2294,7 @@ mod app {
             queue_len: 1024,
             journal_capacity: 256,
             flow_capacity: R2oFlowCapacity::default(),
+            stats_interval: Some(Duration::from_secs(10)),
             r2o_idle_timeout: Duration::from_secs(120),
             receive_buffer: 4 * 1024 * 1024,
             control_path: None,
@@ -2305,6 +2327,11 @@ mod app {
                     let requested: u32 = parse_value(arguments, &mut cursor, option)?;
                     options.flow_capacity = R2oFlowCapacity::from_requested(requested as usize)
                         .ok_or_else(|| invalid("--r2o-flow-capacity должен быть больше нуля"))?;
+                }
+                "--stats" => {
+                    let seconds: u32 = parse_value(arguments, &mut cursor, option)?;
+                    options.stats_interval =
+                        (seconds != 0).then(|| Duration::from_secs(u64::from(seconds)));
                 }
                 "--idle" => {
                     let seconds: u32 = parse_value(arguments, &mut cursor, option)?;
@@ -2444,6 +2471,7 @@ mod app {
   --queue N          номер очереди NFQUEUE
   --idle SEC         срок удаления молчащего состояния потока (по умолчанию 120; 0 — без ожидания)
   --r2o-flow-capacity N число слотов TCP/UDP (по умолчанию 2048)
+  --stats SEC        период печати сводки (по умолчанию 10; 0 — отключить периодическую сводку)
   --family ipv4|ipv6 протокол очереди (по умолчанию ipv4)
   --mode observe|apply пропускать пакеты или исполнять планы (по умолчанию apply)
   --mark N           ненулевая метка для raw-send и защиты от повторной обработки
@@ -4689,6 +4717,26 @@ mod app {
             assert_eq!(parse_options(&[]).unwrap().flow_capacity.limit(), 1536);
             assert!(parse_options(&["--r2o-flow-capacity".into(), "0".into(),]).is_err());
             assert!(parse_options(&["--r2o-flow-capacity".into(), "4294967296".into()]).is_err());
+        }
+
+        #[test]
+        fn r2o_интервал_сводки_повторяет_значения_донора() {
+            assert_eq!(
+                parse_options(&[]).unwrap().stats_interval,
+                Some(Duration::from_secs(10))
+            );
+            assert_eq!(
+                parse_options(&["--stats".into(), "900".into()])
+                    .unwrap()
+                    .stats_interval,
+                Some(Duration::from_secs(900))
+            );
+            assert_eq!(
+                parse_options(&["--stats".into(), "0".into()])
+                    .unwrap()
+                    .stats_interval,
+                None
+            );
         }
 
         #[test]

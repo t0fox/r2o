@@ -291,7 +291,7 @@ start_datapath() {
     r2o_dp_log=$4
     r2o_dp_control=$5
     set -- --queue "$r2o_dp_queue" --family "$r2o_dp_family" --mode "$MODE" --mark "$MARK" \
-        --r2o-flow-capacity "$R2O_FLOW_CAPACITY"
+        --r2o-flow-capacity "$R2O_FLOW_CAPACITY" --stats "${STATS_SEC:-900}"
     [ "$PROBE_MARK" = 0 ] || set -- "$@" --probe-mark "$PROBE_MARK"
     [ -z "$ONLY_MARK" ] || set -- "$@" --only-mark "$ONLY_MARK"
     set -- "$@" --controller-only --control "$r2o_dp_control" --r2o-udp-reverse-visible

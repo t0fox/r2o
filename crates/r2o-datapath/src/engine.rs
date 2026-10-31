@@ -323,6 +323,7 @@ struct TrackedTcpPacket {
 pub struct TcpSessions {
     flows: HashMap<TcpFlowKey, TcpSession>,
     flow_capacity: R2oFlowCapacity,
+    tcp_flow_refusals: u64,
     http_keepalive_stats: R2oHttpKeepAliveStats,
     tcp_payload_stats: R2oTcpPayloadStats,
     tcp_stall_budgets: Vec<u16>,
@@ -360,6 +361,7 @@ impl TcpSessions {
         Ok(Self {
             flows,
             flow_capacity,
+            tcp_flow_refusals: 0,
             http_keepalive_stats: R2oHttpKeepAliveStats::default(),
             tcp_payload_stats: R2oTcpPayloadStats::default(),
             tcp_stall_budgets: vec![TCP_STALL_PACKET_BUDGET as u16],
@@ -377,6 +379,14 @@ impl TcpSessions {
 
     pub fn len(&self) -> usize {
         self.flows.len()
+    }
+
+    pub fn r2o_tcp_flow_capacity(&self) -> usize {
+        self.flow_capacity.slots()
+    }
+
+    pub fn r2o_tcp_flow_refusals(&self) -> u64 {
+        self.tcp_flow_refusals
     }
 
     pub fn is_empty(&self) -> bool {
@@ -888,6 +898,7 @@ impl TcpSessions {
 
         if new_connection {
             if !self.flows.contains_key(&key) && self.flows.len() >= self.flow_capacity.limit() {
+                self.tcp_flow_refusals = self.tcp_flow_refusals.wrapping_add(1);
                 return None;
             }
             let metrics = self
@@ -908,6 +919,7 @@ impl TcpSessions {
             self.flows.insert(key, session);
         } else if !self.flows.contains_key(&key) {
             if self.flows.len() >= self.flow_capacity.limit() {
+                self.tcp_flow_refusals = self.tcp_flow_refusals.wrapping_add(1);
                 return None;
             }
             let initiator = if syn && ack { destination } else { source };
@@ -2597,6 +2609,100 @@ mod tests {
         );
         assert!(sessions.track_packet(&known, start).is_some());
         assert_eq!(sessions.len(), 48);
+    }
+
+    #[test]
+    fn tcp_table_capacity_differential_matches_d2o() {
+        let capacity64 = R2oFlowCapacity::from_requested(64).unwrap();
+        let capacity65 = R2oFlowCapacity::from_requested(65).unwrap();
+        let mut sessions = TcpSessions::try_with_capacity(capacity64).unwrap();
+        let start = Instant::now();
+
+        for index in 1..=48_u16 {
+            let packet = ipv4_tcp_packet(
+                ([10, 0, 0, index as u8], 10_000 + index),
+                ([203, 0, 113, 8], 443),
+                0x10,
+                64,
+                u32::from(index),
+                &[],
+            );
+            assert!(sessions.track_packet(&packet, start).is_some());
+        }
+
+        let refused_a = ipv4_tcp_packet(
+            ([10, 0, 0, 49], 10_049),
+            ([203, 0, 113, 8], 443),
+            0x10,
+            64,
+            49,
+            &[],
+        );
+        let refused_b = ipv4_tcp_packet(
+            ([10, 0, 0, 50], 10_050),
+            ([203, 0, 113, 8], 443),
+            0x10,
+            64,
+            50,
+            &[],
+        );
+        assert!(
+            sessions
+                .track_packet(&refused_a, start + Duration::from_nanos(100))
+                .is_none()
+        );
+        assert!(
+            sessions
+                .track_packet(&refused_b, start + Duration::from_nanos(101))
+                .is_none()
+        );
+
+        let reverse_known = ipv4_tcp_packet(
+            ([203, 0, 113, 8], 443),
+            ([10, 0, 0, 1], 10_001),
+            0x10,
+            64,
+            1,
+            &[],
+        );
+        assert!(
+            sessions
+                .track_packet(&reverse_known, start + Duration::from_nanos(202))
+                .is_some()
+        );
+
+        let refusals_at_limit = sessions.r2o_tcp_flow_refusals();
+        let count_at_limit = sessions.len();
+        let expired = sessions.expire(
+            start + Duration::from_nanos(60_202),
+            Duration::from_nanos(60_000),
+        );
+        let count_after_expiry = sessions.len();
+        let accepted_after_expiry = sessions
+            .track_packet(&refused_a, start + Duration::from_nanos(60_203))
+            .is_some();
+        let refusals_after_expiry = sessions.r2o_tcp_flow_refusals();
+        let count_after_reuse = sessions.len();
+
+        assert_eq!(refusals_at_limit, 2);
+        assert_eq!(count_at_limit, 48);
+        assert_eq!(expired, 48);
+        assert_eq!(count_after_expiry, 0);
+        assert!(accepted_after_expiry);
+        assert_eq!(refusals_after_expiry, 2);
+        assert_eq!(count_after_reuse, 1);
+
+        if let Ok(path) = std::env::var("R2O_TCP_TABLE_DIFF_OUTPUT") {
+            let output = format!(
+                "request64_slots={}_limit={}_inserted=48_refused=2_reverse_hit=1_count={count_at_limit}_refusals={refusals_at_limit}\nrequest65_slots={}_limit={}\nexpired={expired}_remaining={count_after_expiry}_accepted_after_expiry={}_refusals={refusals_after_expiry}_count={count_after_reuse}\n",
+                sessions.r2o_tcp_flow_capacity(),
+                capacity64.limit(),
+                capacity65.slots(),
+                capacity65.limit(),
+                u8::from(accepted_after_expiry),
+            );
+            std::fs::write(path, output).unwrap();
+        }
     }
 
     #[test]

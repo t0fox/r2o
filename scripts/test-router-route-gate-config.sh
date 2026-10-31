@@ -14,6 +14,10 @@ grep -Fq -- '--mark "$PROBE_MARK"' "$d2o_service" || {
     echo "D2O controller startup no longer uses PROBE_MARK; update this differential case" >&2
     exit 2
 }
+grep -Fq 'legacy_stats=${STATS_SEC:-900}' "$d2o_service" || {
+    echo "D2O datapath startup no longer uses its 900-second service stats default" >&2
+    exit 2
+}
 d2o_default_probe_mark=$(awk -F= '$1 == "PROBE_MARK" { gsub(/\r/, "", $2); print $2; exit }' "$d2o_service")
 r2o_default_probe_mark=$(awk -F= '$1 == "PROBE_MARK" { gsub(/\r/, "", $2); print $2; exit }' "$r2o_root/router/config.default")
 d2o_default_probe_mark=$(printf '%d' "$d2o_default_probe_mark")
@@ -162,6 +166,11 @@ grep -Fq '|--discover|--mark|46|--live|' "$r2o_temp/launches" || {
     exit 1
 }
 grep -Fq '|--r2o-flow-capacity|64' "$r2o_temp/launches"
+grep -Fq '|--stats|900' "$r2o_temp/launches" || {
+    cat "$r2o_temp/launches" >&2
+    echo "R2O datapath stats interval must match the D2O service default" >&2
+    exit 1
+}
 [ -s "$r2o_temp/root/run/r2o-datapath4.pid" ]
 [ -s "$r2o_temp/root/run/r2o-datapath6.pid" ]
 
