@@ -678,6 +678,88 @@ fn d2o_worker_config_read_ignores_non_domain_bytes() {
 
 #[cfg(unix)]
 #[test]
+#[ignore = "run through scripts/test-panel-workers-config-size-differential.sh"]
+fn d2o_worker_config_size_limit_matches_rust_route() {
+    let config_path = std::env::var_os("R2O_PANEL_WORKER_SIZE_CONFIG")
+        .expect("test helper provides an oversized config file")
+        .into();
+    let mut config = Config::default();
+    config.config_path = config_path;
+
+    let response = request(
+        &config,
+        "GET /api/telegram/workers HTTP/1.1\r\nHost: localhost:8090\r\n\r\n",
+    );
+    let trace = format!("{}\n{}\n", response.0, response.2);
+    println!("{trace}");
+    if let Some(path) = std::env::var_os("R2O_PANEL_WORKER_SIZE_TRACE_OUTPUT") {
+        fs::write(path, &trace).unwrap();
+    }
+    let c_trace = fs::read_to_string(
+        std::env::var_os("R2O_PANEL_WORKER_SIZE_C_TRACE")
+            .expect("test helper provides the D2O C response"),
+    )
+    .unwrap();
+    let parse = |trace: &str| {
+        let mut lines = trace.lines();
+        let status = lines.next().unwrap().parse::<u16>().unwrap();
+        let body: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+        assert!(lines.next().is_none());
+        (status, body)
+    };
+    assert_eq!(parse(&c_trace), parse(&trace));
+    assert_eq!(response.0, 500);
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "run through scripts/test-panel-workers-config-size-differential.sh"]
+fn d2o_worker_config_write_size_limit_matches_rust_route() {
+    let config_path: PathBuf = std::env::var_os("R2O_PANEL_WORKER_SIZE_WRITE_CONFIG")
+        .expect("test helper provides a copy of the oversized config")
+        .into();
+    let mut config = Config::default();
+    config.config_path = config_path.clone();
+    config.service_path = std::env::var_os("R2O_PANEL_WORKER_SIZE_WRITE_SERVICE")
+        .expect("test helper provides a missing service path")
+        .into();
+    config.control_enabled = true;
+
+    let body = r#"{"domains":["New.Example"],"note":"Привет"}"#;
+    let raw = format!(
+        "POST /api/telegram/workers HTTP/1.1\r\nHost: localhost:8090\r\nOrigin: http://localhost:8090\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let response = request(&config, &raw);
+    let saved = fs::read(config_path).unwrap();
+    let config_prefix = saved
+        .iter()
+        .take(4095)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let trace = format!("{}\n{}\nconfig:{config_prefix}\n", response.0, response.2);
+    if let Some(path) = std::env::var_os("R2O_PANEL_WORKER_SIZE_WRITE_TRACE_OUTPUT") {
+        fs::write(path, &trace).unwrap();
+    }
+    let c_trace = fs::read_to_string(
+        std::env::var_os("R2O_PANEL_WORKER_SIZE_WRITE_C_TRACE")
+            .expect("test helper provides the D2O C response and config prefix"),
+    )
+    .unwrap();
+    let parse = |trace: &str| {
+        let mut lines = trace.lines();
+        let status = lines.next().unwrap().parse::<u16>().unwrap();
+        let body: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+        let config_prefix = lines.next().unwrap().to_owned();
+        assert!(lines.next().is_none());
+        (status, body, config_prefix)
+    };
+    assert_eq!(parse(&trace), parse(&c_trace));
+    assert_eq!(response.0, 500);
+}
+
+#[cfg(unix)]
+#[test]
 #[ignore = "run through scripts/test-panel-workers-json-differential.sh"]
 fn d2o_worker_json_accepts_utf8_unknown_properties() {
     let service = std::env::var_os("R2O_PANEL_WORKER_SERVICE")

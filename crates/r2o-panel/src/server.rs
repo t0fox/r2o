@@ -13,6 +13,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 const REQUEST_MAX: usize = 32 * 1024;
 const BODY_MAX: usize = 4 * 1024 * 1024;
 const STATIC_ASSET_MAX: usize = 1024 * 1024;
+const WORKER_CONFIG_MAX: usize = 1024 * 1024;
 const WORKER_BODY_MAX: usize = 4096;
 const WORKER_MAX: usize = 8;
 const TELEGRAM_DIAGNOSTICS_MAX: usize = 256 * 1024;
@@ -1554,7 +1555,7 @@ fn worker_domains_from_json(body: &[u8]) -> Result<Vec<String>, ()> {
 }
 
 fn worker_domains_from_config(path: &Path) -> Result<Vec<String>, ()> {
-    let raw = read_regular_file(path, BODY_MAX).map_err(|_| ())?;
+    let raw = read_regular_file(path, WORKER_CONFIG_MAX).map_err(|_| ())?;
     let text = String::from_utf8_lossy(&raw);
     let mut domains = Vec::new();
     for line in text.lines() {
@@ -1675,7 +1676,7 @@ fn add_domain(domains: &mut Vec<String>, input: &str, allow_url: bool) -> Result
 }
 
 fn write_worker_config(path: &Path, domains: &[String]) -> std::io::Result<()> {
-    let (source, metadata) = read_regular_file_with_metadata(path, BODY_MAX)?;
+    let (source, metadata) = read_regular_file_with_metadata(path, WORKER_CONFIG_MAX)?;
     if source.contains(&0) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
