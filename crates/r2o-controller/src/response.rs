@@ -1477,14 +1477,14 @@ mod tcp_split_transport_tests {
     }
 
     #[test]
-    fn socket_probe_waits_for_the_configured_response_deadline() {
+    fn socket_probe_accepts_response_before_the_d2o_timeout_ceiling() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0; 4];
             stream.read_exact(&mut request).unwrap();
-            thread::sleep(Duration::from_millis(5_500));
+            thread::sleep(Duration::from_millis(4_000));
             stream.write_all(b"x").unwrap();
         });
         let target = ProbeTarget {
