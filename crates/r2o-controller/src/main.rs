@@ -9109,6 +9109,21 @@ fn r2o_take_expired_voice_trials(
 }
 
 #[cfg(unix)]
+fn r2o_cleanup_voice_trials_on_shutdown(
+    trials: &mut HashMap<[u8; 16], R2oVoiceTrialContext>,
+    mut retire: impl FnMut(&R2oVoiceTrialContext) -> Result<(), String>,
+) -> Vec<String> {
+    let pending = std::mem::take(trials);
+    let mut failures = Vec::new();
+    for trial in pending.values() {
+        if let Err(error) = retire(trial) {
+            failures.push(error);
+        }
+    }
+    failures
+}
+
+#[cfg(unix)]
 fn r2o_take_stale_pending_voice_trials(
     trials: &mut HashMap<[u8; 16], R2oVoiceTrialContext>,
     now: std::time::Instant,
@@ -17760,6 +17775,14 @@ impl ControlClient {
                 std::io::stdout().flush()?;
             }
         })();
+        for error in r2o_cleanup_voice_trials_on_shutdown(&mut r2o_voice_trials, |trial| {
+            self.retire_r2o_voice_trial(trial)
+                .map_err(|error| error.to_string())
+        }) {
+            eprintln!(
+                "не удалось снять временную Discord voice-пробу при остановке; lease очистит её по истечении: {error}"
+            );
+        }
         let family_shutdown_result = if let (Some(worker), Some((_, catalog, path, _))) =
             (family_recovery.as_mut(), discovery.as_mut())
         {
