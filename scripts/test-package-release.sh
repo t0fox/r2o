@@ -20,6 +20,8 @@ printf '%s\n' \
     builds/r2o-telegram-linux-mipsel \
     builds/r2o-fetch-linux-mipsel \
     router/ \
+    router/files/ \
+    router/files/meta-ranges.txt \
     router/S99r2o \
     router/S99r2o.shim \
     router/config.default \
@@ -37,6 +39,8 @@ printf '%s\n' \
 printf '%s\n' router/uninstall.sh >> "$TEMP/expected"
 sort -o "$TEMP/expected" "$TEMP/expected"
 cmp "$TEMP/expected" "$TEMP/entries"
+tar -xOzf "$TEMP/out/r2o-mipsel.tar.gz" router/files/meta-ranges.txt |
+    cmp - "$ROOT/router/files/meta-ranges.txt"
 python3 - "$TEMP/out/latest.json" "$TEMP/out/r2o-mipsel.tar.gz" <<'PY'
 import hashlib
 import json

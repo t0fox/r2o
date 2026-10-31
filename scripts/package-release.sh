@@ -44,7 +44,7 @@ for ARCH do
         SOURCE_BUILDS="$BUILDS/$ARCH"
     fi
     STAGE="$WORK/$ARCH"
-    mkdir -p "$STAGE/builds" "$STAGE/router"
+    mkdir -p "$STAGE/builds" "$STAGE/router/files"
     for component in r2o-datapath r2o-controller r2o-panel r2o-telegram r2o-manager r2o-fetch; do
         source="$SOURCE_BUILDS/$component-linux-$ARCH"
         if ! test -f "$source" || ! test -s "$source"; then
@@ -67,6 +67,7 @@ for ARCH do
         case "$file" in S99r2o|S99r2o.shim|r2o-firewall.sh|r2o-tg-firewall.sh|r2o-update-scheduler.sh|r2o-log-maintenance.sh|r2o-telegram-watchdog.sh|r2o-firewall-watchdog.sh|r2o-ppe-deoffload.sh|001-r2o.sh|select-panel-ip.sh|openwrt-init|install.sh|uninstall.sh) mode=0755 ;; esac
         install -m "$mode" "$source" "$STAGE/router/$file"
     done
+    install -m 0644 "$ROOT/router/files/meta-ranges.txt" "$STAGE/router/files/meta-ranges.txt"
 
     archive="$OUT/r2o-$ARCH.tar.gz"
     tar -czf "$archive" -C "$STAGE" builds router

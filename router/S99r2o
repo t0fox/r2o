@@ -14,6 +14,8 @@ RUN=$ROOT/run
 STATE=${STATE_DIR:-$ROOT/state}
 LOG=$ROOT/log
 RUNTIME=${R2O_RUNTIME_DIR:-/tmp/r2o}
+R2O_META_RANGES=${R2O_META_RANGES:-$SCRIPT_DIR/files/meta-ranges.txt}
+R2O_INSTAGRAM_SCHED_ATTEMPT=${R2O_INSTAGRAM_SCHED_ATTEMPT:-$RUNTIME/r2o-instagram-dns-last-attempt}
 SOCK4=$RUN/r2o-datapath4.sock
 SOCK6=$RUN/r2o-datapath6.sock
 CATALOG=$STATE/catalog.json
@@ -49,6 +51,7 @@ UPDATER=$SCRIPT_DIR/r2o-update-scheduler.sh
 UPD_PID=$RUN/update-scheduler.pid
 LOG_WORKER=${R2O_LOG_MAINTENANCE:-$SCRIPT_DIR/r2o-log-maintenance.sh}
 LM_PID=$RUN/r2o-log-maintenance.pid
+META_DNS_PID=$RUN/meta-dns-scheduler.pid
 
 # shellcheck disable=SC1090  # конфигурация owner-managed, путь задаётся выше
 [ ! -r "$CONF" ] || . "$CONF"
@@ -80,7 +83,8 @@ LM_PID=$RUN/r2o-log-maintenance.pid
 PPE_ADAPTER=${R2O_PPE_ADAPTER:-$SCRIPT_DIR/r2o-ppe-deoffload.sh}
 R2O_PPE_DEOFFLOAD=${R2O_PPE_DEOFFLOAD:-1}
 CATALOG=$STATE/catalog.json
-export R2O_DIR="$ROOT" R2O_CONFIG="$CONF" R2O_RUN_DIR="$RUN" R2O_PPE_ADAPTER="$PPE_ADAPTER"
+export R2O_DIR="$ROOT" R2O_CONFIG="$CONF" R2O_RUN_DIR="$RUN" R2O_PPE_ADAPTER="$PPE_ADAPTER" \
+    R2O_META_RANGES R2O_INSTAGRAM_SCHED_ATTEMPT
 
 if [ "${ACTION:-}" = includes ]; then
     [ "${R2O_FLOWOFFLOAD_RESTORING:-0}" != 1 ] || exit 0
@@ -511,6 +515,25 @@ update_scheduler_stop() {
     rm -f "$UPD_PID"
 }
 
+meta_dns_scheduler_running() {
+    component_running r2o-telegram "$META_DNS_PID"
+}
+
+meta_dns_scheduler_start() {
+    command -v ndmc >/dev/null 2>&1 || return 0
+    [ -r "$R2O_META_RANGES" ] || {
+        say "нет списка диапазонов Meta $R2O_META_RANGES; планировщик DNS пропущен"
+        return 0
+    }
+    meta_dns_scheduler_running && return 0
+    spawn_component r2o-telegram "$META_DNS_PID" "$LOG/instagram-dns-scheduler.log" \
+        --meta-dns-scheduler
+}
+
+meta_dns_scheduler_stop() {
+    stop_component r2o-telegram "$META_DNS_PID"
+}
+
 log_maintenance_running() {
     [ -s "$LM_PID" ] || return 1
     log_pid=$(cat "$LM_PID" 2>/dev/null) || return 1
@@ -911,10 +934,12 @@ start() {
     engine_start || return 1
     telegram_start || say "Telegram не запущен; см. $LOG/telegram.log и $TG_STATUS"
     panel_start || say "панель не запущена; datapath продолжает работу"
+    meta_dns_scheduler_start || say "планировщик Meta DNS не запустился"
     update_scheduler_start || say "ночная проверка обновлений не запустилась"
 }
 
 stop() {
+    meta_dns_scheduler_stop || say "не удалось остановить планировщик Meta DNS"
     update_scheduler_stop || say "не удалось остановить планировщик обновлений"
     telegram_stop || say "не удалось безопасно остановить Telegram"
     engine_stop
@@ -1021,6 +1046,9 @@ status() {
     else
         echo "  r2o-telegram: выключен конфигурацией"
     fi
+    if command -v ndmc >/dev/null 2>&1; then
+        meta_dns_scheduler_running && echo "  планировщик Meta DNS: работает" || echo "  планировщик Meta DNS: не работает"
+    fi
     component_running r2o-panel "$PN_PID" && echo "  панель: работает" || echo "  панель: не работает"
     log_maintenance_running && echo "  ротация журналов: работает" || echo "  ротация журналов: не работает"
     update_scheduler_running && echo "  обновления: ночная проверка запланирована" || echo "  обновления: планировщик не работает"
@@ -1034,7 +1062,7 @@ status() {
 }
 
 case "${1:-}" in
-    "") echo "usage: $0 {start|stop|restart|status|engine-start|engine-stop|engine-restart|settings-restart|reapply|heal|firewall-heal|flowoffload-ensure|flowoffload-restore|ppe-ensure|ppe-remove|ppe-status|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-check|telegram-reapply|tg-heal|tg-stop-rules|update-check|update-install|update-install-auto|update-auto-on|update-auto-off|log-tick}" >&2; exit 2 ;;
+    "") echo "usage: $0 {start|stop|restart|status|engine-start|engine-stop|engine-restart|settings-restart|reapply|heal|firewall-heal|flowoffload-ensure|flowoffload-restore|ppe-ensure|ppe-remove|ppe-status|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-check|telegram-reapply|meta-dns-refresh|meta-dns-remove|tg-heal|tg-stop-rules|update-check|update-install|update-install-auto|update-auto-on|update-auto-off|log-tick}" >&2; exit 2 ;;
     start) start ;;
     stop) stop ;;
     restart) stop && start ;;
@@ -1069,6 +1097,8 @@ case "${1:-}" in
     telegram-restart) telegram_restart ;;
     telegram-check) telegram_check ;;
     telegram-reapply) telegram_reapply ;;
+    meta-dns-refresh) "$MANAGER" exec --root "$ROOT" --component r2o-telegram -- --refresh-meta-dns ;;
+    meta-dns-remove) "$MANAGER" exec --root "$ROOT" --component r2o-telegram -- --remove-meta-dns ;;
     update-check) "$MANAGER" update-check --root "$ROOT" ;;
     update-install) update_install manual ;;
     update-install-auto) update_install auto ;;
@@ -1080,5 +1110,5 @@ case "${1:-}" in
     heal) heal ;;
     tg-heal) telegram_reapply ;;
     tg-stop-rules) "$TG_FIREWALL" stop ;;
-    *) echo "usage: $0 {start|stop|restart|status|engine-start|engine-stop|engine-restart|settings-restart|reapply|heal|firewall-heal|flowoffload-ensure|flowoffload-restore|ppe-ensure|ppe-remove|ppe-status|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-check|telegram-reapply|tg-heal|tg-stop-rules|update-check|update-install|update-install-auto|update-auto-on|update-auto-off|log-tick}" >&2; exit 2 ;;
+    *) echo "usage: $0 {start|stop|restart|status|engine-start|engine-stop|engine-restart|settings-restart|reapply|heal|firewall-heal|flowoffload-ensure|flowoffload-restore|ppe-ensure|ppe-remove|ppe-status|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-check|telegram-reapply|meta-dns-refresh|meta-dns-remove|tg-heal|tg-stop-rules|update-check|update-install|update-install-auto|update-auto-on|update-auto-off|log-tick}" >&2; exit 2 ;;
 esac
