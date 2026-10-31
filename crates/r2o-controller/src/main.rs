@@ -1082,7 +1082,7 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
     let mut raw_trigger = None;
     let mut save_plan_path = None;
     let mut arm_socket_path = None;
-    let mut modern = false;
+    let mut modern = true;
     let mut index = 0;
     while index < arguments.len() {
         match arguments[index].to_str() {
@@ -1160,7 +1160,21 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
                     .ok_or("--arm требует Unix-сокет r2o-datapath")?;
                 arm_socket_path = Some(PathBuf::from(path));
             }
-            Some("--modern") if !modern => modern = true,
+            Some("--modern") => modern = true,
+            Some("--legacy") => modern = false,
+            Some("--hello") => {
+                index += 1;
+                match arguments.get(index).and_then(|value| value.to_str()) {
+                    Some("modern") => modern = true,
+                    Some("legacy") => modern = false,
+                    Some(value) => {
+                        return Err(format!(
+                            "--hello должен быть modern или legacy, а не {value}"
+                        ));
+                    }
+                    None => return Err("--hello требует modern или legacy".into()),
+                }
+            }
             Some(option) if option.starts_with("--") => {
                 return Err(format!("неизвестный параметр classify: {option}"));
             }
@@ -1307,6 +1321,9 @@ fn print_help() {
     println!("  classify: [--control-sni ИМЯ] задаёт подтверждённое контрольное имя");
     println!("  classify: [--control-raw HEX] задаёт байты TLS-записи контроля");
     println!("  classify: [--no-raw] пропускает проверки с raw-пакетами");
+    println!(
+        "  classify: modern ClientHello — по умолчанию; --legacy или --hello legacy выбирают TLS 1.2"
+    );
     println!("  classify: [SNI] необязателен и берётся из HOST; --raw HEX задаёт байты триггера");
     println!(
         "  r2o-controller --ask --control СОКЕТ --ip IP --sni ИМЯ (--hello-hex ФАЙЛ | --arm-wait-ms МС)"
@@ -30864,7 +30881,7 @@ mod tests {
                 raw_trigger: None,
                 save_plan_path: Some(PathBuf::from("out.r2op")),
                 arm_socket_path: None,
-                modern: false,
+                modern: true,
             }
         );
     }
@@ -30888,7 +30905,7 @@ mod tests {
                 raw_trigger: None,
                 save_plan_path: Some(PathBuf::from("out.r2op")),
                 arm_socket_path: Some(PathBuf::from("/run/r2o-datapath.sock")),
-                modern: false,
+                modern: true,
             }
         );
     }
@@ -30897,6 +30914,25 @@ mod tests {
     fn classify_options_accept_modern_profile() {
         let args = ["--modern"].map(OsString::from);
         assert!(parse_classify_options(&args).unwrap().modern);
+    }
+
+    #[test]
+    fn classify_options_default_to_modern_profile_and_accept_legacy() {
+        assert!(parse_classify_options(&[]).unwrap().modern);
+        assert!(
+            !parse_classify_options(&[OsString::from("--legacy")])
+                .unwrap()
+                .modern
+        );
+        assert!(
+            !parse_classify_options(&[OsString::from("--hello"), OsString::from("legacy")])
+                .unwrap()
+                .modern
+        );
+        assert!(parse_classify_options(&[OsString::from("--hello")]).is_err());
+        assert!(
+            parse_classify_options(&[OsString::from("--hello"), OsString::from("both")]).is_err()
+        );
     }
 
     #[test]

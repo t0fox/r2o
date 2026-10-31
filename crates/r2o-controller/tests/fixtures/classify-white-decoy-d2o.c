@@ -48,6 +48,16 @@ int main(void)
     }
     print_trigger("CONTROL_DEFAULT", &control);
     if (d2k_trigger_tls("example.com", 0, &control, error, sizeof(error)) != 0) {
+        fprintf(stderr, "D2O default target failed: %s\n", error);
+        return 1;
+    }
+    print_trigger("TARGET_DEFAULT", &control);
+    if (d2k_trigger_tls("example.com", 1, &control, error, sizeof(error)) != 0) {
+        fprintf(stderr, "D2O legacy target failed: %s\n", error);
+        return 1;
+    }
+    print_trigger("TARGET_LEGACY", &control);
+    if (d2k_trigger_tls("example.com", 0, &control, error, sizeof(error)) != 0) {
         fprintf(stderr, "D2O custom control failed: %s\n", error);
         return 1;
     }
