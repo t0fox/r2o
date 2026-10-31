@@ -12,6 +12,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 const REQUEST_MAX: usize = 32 * 1024;
 const BODY_MAX: usize = 4 * 1024 * 1024;
+const STATIC_ASSET_MAX: usize = 1024 * 1024;
 const WORKER_BODY_MAX: usize = 4096;
 const WORKER_MAX: usize = 8;
 const TELEGRAM_DIAGNOSTICS_MAX: usize = 256 * 1024;
@@ -1820,7 +1821,15 @@ fn read_asset(config: &Config, name: &str) -> std::io::Result<(Vec<u8>, Option<f
             });
     }
     let path = config.asset_dir.join(name);
-    match read_regular_file_with_metadata(&path, BODY_MAX) {
+    if fs::symlink_metadata(&path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.len() > STATIC_ASSET_MAX as u64)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "asset exceeds D2O static file limit",
+        ));
+    }
+    match read_regular_file_with_metadata(&path, STATIC_ASSET_MAX) {
         Ok((bytes, metadata)) => Ok((bytes, Some(metadata))),
         Err(_) => embedded_asset(name)
             .map(|bytes| (bytes.to_vec(), None))
@@ -2366,6 +2375,33 @@ mod differential_tests {
             std::env::var_os("R2O_PANEL_STATIC_ETAG_RUST_TRACE")
                 .expect("test helper provides the Rust output path"),
             format!("{rust_status}\nETag: {rust_etag}\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[ignore = "run through scripts/test-panel-static-asset-size-differential.sh"]
+    fn d2o_static_asset_size_limit_matches_rust_handler() {
+        let asset_dir = PathBuf::from(
+            std::env::var_os("R2O_PANEL_STATIC_SIZE_DIR")
+                .expect("test helper provides the shared asset directory"),
+        );
+        let c_trace = fs::read_to_string(
+            std::env::var_os("R2O_PANEL_STATIC_SIZE_C_TRACE")
+                .expect("test helper provides the D2O response"),
+        )
+        .unwrap();
+        let config = Config {
+            asset_dir,
+            ..Config::default()
+        };
+        let response = handle_request(&config, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        let rust_trace = format!("HTTP/1.1 {}\n", response.status);
+        assert_eq!(rust_trace, c_trace);
+        fs::write(
+            std::env::var_os("R2O_PANEL_STATIC_SIZE_RUST_TRACE")
+                .expect("test helper provides the Rust output path"),
+            rust_trace,
         )
         .unwrap();
     }
