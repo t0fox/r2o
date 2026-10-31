@@ -7,7 +7,10 @@ int d2k_white_decoy_hello(const char *name, unsigned char *out, size_t cap, size
 
 static void print_trigger(const char *label, const d2k_trigger *trigger)
 {
-    printf("%s name=%s accept=tls-record bytes=", label, trigger->name);
+    const char *accept = trigger->accept == D2K_ACCEPT_ANY ? "any" :
+                         trigger->accept == D2K_ACCEPT_SERVERHELLO ? "server-hello" :
+                         "tls-record";
+    printf("%s name=%s accept=%s bytes=", label, trigger->name, accept);
     for (size_t i = 0; i < trigger->len; i++) {
         printf("%02x", trigger->payload[i]);
     }
@@ -55,6 +58,7 @@ int main(void)
         fprintf(stderr, "D2O raw control failed: %s\n", error);
         return 1;
     }
+    print_trigger("TARGET_RAW", &control);
     snprintf(control.name, sizeof(control.name), "control");
     control.accept = D2K_ACCEPT_TLSRECORD;
     print_trigger("CONTROL_RAW", &control);

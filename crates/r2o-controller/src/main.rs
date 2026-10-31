@@ -142,6 +142,7 @@ struct ClassifyCliOptions {
     white_name: Option<String>,
     control_sni: Option<String>,
     control_raw: Option<String>,
+    raw_trigger: Option<String>,
     save_plan_path: Option<PathBuf>,
     arm_socket_path: Option<PathBuf>,
     modern: bool,
@@ -869,13 +870,19 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
         }
         return Ok(());
     }
-    if arguments.len() >= 4 && arguments[0] == "--classify" {
+    if arguments.len() >= 3 && arguments[0] == "--classify" {
         let host = arguments[1].to_str().ok_or("HOST должен быть в UTF-8")?;
         let port = arguments[2]
             .to_str()
             .ok_or("PORT должен быть в UTF-8")?
             .parse::<u16>()?;
-        let sni = arguments[3].to_str().ok_or("SNI должен быть в UTF-8")?;
+        let explicit_sni = match arguments.get(3) {
+            Some(argument) if !argument.to_string_lossy().starts_with("--") => {
+                Some(argument.to_str().ok_or("SNI должен быть в UTF-8")?)
+            }
+            _ => None,
+        };
+        let options_start = 3 + usize::from(explicit_sni.is_some());
         let ClassifyCliOptions {
             repeats,
             allow_loopback,
@@ -885,23 +892,19 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
             white_name,
             control_sni,
             control_raw,
+            raw_trigger,
             save_plan_path,
             arm_socket_path,
             modern,
-        } = parse_classify_options(&arguments[4..])?;
+        } = parse_classify_options(&arguments[options_start..])?;
         let target = if host.contains(':') {
             format!("[{host}]:{port}")
         } else {
             format!("{host}:{port}")
         };
-        let trigger = if modern {
-            Trigger::tls13(sni)
-        } else {
-            Trigger::tls(sni)
-        }
-        .map_err(|error| format!("TLS-зонд: {error}"))?;
+        let trigger = classify_target_trigger(explicit_sni, raw_trigger.as_deref(), host, modern)?;
         let (control, vouched_control_sni) =
-            classify_control_trigger(control_sni.as_deref(), control_raw.as_deref(), sni)?;
+            classify_control_trigger(control_sni.as_deref(), control_raw.as_deref(), explicit_sni)?;
         let white = white_name
             .as_deref()
             .map(|name| {
@@ -939,6 +942,11 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
             println!("план R2OP сохранён: {}", path.display());
         }
         if let Some(socket_path) = arm_socket_path {
+            if raw_trigger.is_some() {
+                return Err(
+                    "--arm требует TLS-триггер с SNI; raw-триггер нельзя привязать по имени".into(),
+                );
+            }
             let hit = result
                 .hit
                 .as_ref()
@@ -946,7 +954,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
             #[cfg(unix)]
             set_name_bytes(
                 socket_path,
-                sni,
+                explicit_sni.unwrap_or(host),
                 if host.contains(':') { 6 } else { 4 },
                 if modern { SHAPE_MODERN } else { SHAPE_LEGACY },
                 &hit.plan,
@@ -1067,6 +1075,7 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
     let mut white_name = None;
     let mut control_sni = None;
     let mut control_raw = None;
+    let mut raw_trigger = None;
     let mut save_plan_path = None;
     let mut arm_socket_path = None;
     let mut modern = false;
@@ -1124,6 +1133,14 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
                     .ok_or("--control-raw требует шестнадцатеричные байты")?;
                 control_raw = Some(value.to_owned());
             }
+            Some("--raw") => {
+                index += 1;
+                let value = arguments
+                    .get(index)
+                    .and_then(|value| value.to_str())
+                    .ok_or("--raw требует шестнадцатеричные байты")?;
+                raw_trigger = Some(value.to_owned());
+            }
             Some("--save-plan") if save_plan_path.is_none() => {
                 index += 1;
                 let path = arguments
@@ -1165,6 +1182,7 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
         white_name,
         control_sni,
         control_raw,
+        raw_trigger,
         save_plan_path,
         arm_socket_path,
         modern,
@@ -1174,7 +1192,7 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
 fn classify_control_trigger(
     control_sni: Option<&str>,
     control_raw: Option<&str>,
-    target_sni: &str,
+    target_sni: Option<&str>,
 ) -> Result<(Trigger, bool), String> {
     if control_sni.is_some() && control_raw.is_some() {
         return Err("--control-raw и --control-sni взаимоисключающие".into());
@@ -1185,7 +1203,7 @@ fn classify_control_trigger(
         trigger.accept = Accept::TlsRecord;
         return Ok((trigger, false));
     }
-    if control_sni == Some(target_sni) {
+    if control_sni.is_some() && control_sni == target_sni {
         return Err("--control-sni совпадает с целевым SNI; укажите другое имя".into());
     }
     let vouched = control_sni.is_some();
@@ -1200,6 +1218,27 @@ fn classify_control_trigger(
         ..Trigger::tls13(name).map_err(|error| format!("TLS-контроль: {error}"))?
     };
     Ok((trigger, vouched))
+}
+
+fn classify_target_trigger(
+    target_sni: Option<&str>,
+    raw_hex: Option<&str>,
+    host: &str,
+    modern: bool,
+) -> Result<Trigger, String> {
+    if target_sni.is_some() && raw_hex.is_some() {
+        return Err("--sni и --raw взаимоисключающие".into());
+    }
+    if let Some(hex) = raw_hex {
+        return Trigger::raw_hex(hex).map_err(|error| format!("триггер: {error}"));
+    }
+    let sni = target_sni.unwrap_or(host);
+    if modern {
+        Trigger::tls13(sni)
+    } else {
+        Trigger::tls(sni)
+    }
+    .map_err(|error| format!("TLS-зонд: {error}"))
 }
 
 fn parse_serve_options(arguments: &[std::ffi::OsString]) -> Result<ServeCliOptions, String> {
@@ -1261,6 +1300,7 @@ fn print_help() {
     println!("  classify: [--white ИМЯ] задаёт ECH-приманку для гипотезы белого ClientHello");
     println!("  classify: [--control-sni ИМЯ] задаёт подтверждённое контрольное имя");
     println!("  classify: [--control-raw HEX] задаёт байты TLS-записи контроля");
+    println!("  classify: [SNI] необязателен и берётся из HOST; --raw HEX задаёт байты триггера");
     println!(
         "  r2o-controller --ask --control СОКЕТ --ip IP --sni ИМЯ (--hello-hex ФАЙЛ | --arm-wait-ms МС)"
     );
@@ -30813,6 +30853,7 @@ mod tests {
                 white_name: None,
                 control_sni: None,
                 control_raw: None,
+                raw_trigger: None,
                 save_plan_path: Some(PathBuf::from("out.r2op")),
                 arm_socket_path: None,
                 modern: false,
@@ -30835,6 +30876,7 @@ mod tests {
                 white_name: None,
                 control_sni: None,
                 control_raw: None,
+                raw_trigger: None,
                 save_plan_path: Some(PathBuf::from("out.r2op")),
                 arm_socket_path: Some(PathBuf::from("/run/r2o-datapath.sock")),
                 modern: false,
@@ -30884,8 +30926,16 @@ mod tests {
     }
 
     #[test]
+    fn classify_options_accept_raw_trigger() {
+        let args = ["--raw", "57 41:06-03"].map(OsString::from);
+        let options = parse_classify_options(&args).unwrap();
+        assert_eq!(options.raw_trigger.as_deref(), Some("57 41:06-03"));
+        assert!(parse_classify_options(&[OsString::from("--raw")]).is_err());
+    }
+
+    #[test]
     fn classify_control_trigger_matches_d2o_default_and_vouched_sni() {
-        let (default, vouched) = classify_control_trigger(None, None, "target.example").unwrap();
+        let (default, vouched) = classify_control_trigger(None, None, None).unwrap();
         assert_eq!(default.name, "control");
         assert_eq!(default.accept, Accept::TlsRecord);
         assert!(!vouched);
@@ -30896,20 +30946,50 @@ mod tests {
         );
 
         let (custom, vouched) =
-            classify_control_trigger(Some("example.net"), None, "target.example").unwrap();
+            classify_control_trigger(Some("example.net"), None, Some("target.example")).unwrap();
         assert_eq!(custom.name, "control:example.net");
         assert_eq!(custom.accept, Accept::TlsRecord);
         assert!(vouched);
-        let (raw, vouched) =
-            classify_control_trigger(None, Some("57 41:06-03"), "target.example").unwrap();
+        let (raw, vouched) = classify_control_trigger(None, Some("57 41:06-03"), None).unwrap();
         assert_eq!(raw.name, "control");
         assert_eq!(raw.accept, Accept::TlsRecord);
         assert_eq!(raw.payload, b"WA\x06\x03");
         assert!(!vouched);
-        assert!(classify_control_trigger(Some("target.example"), None, "target.example").is_err());
         assert!(
-            classify_control_trigger(Some("example.net"), Some("57 41:06-03"), "target.example")
-                .is_err()
+            classify_control_trigger(Some("target.example"), None, Some("target.example")).is_err()
+        );
+        assert!(
+            classify_control_trigger(
+                Some("example.net"),
+                Some("57 41:06-03"),
+                Some("target.example")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn classify_target_trigger_matches_raw_and_host_default() {
+        let raw =
+            classify_target_trigger(None, Some("57 41:06-03"), "unused.example", false).unwrap();
+        assert_eq!(raw.name, "raw:4B");
+        assert_eq!(raw.accept, Accept::Any);
+        assert_eq!(raw.payload, b"WA\x06\x03");
+        assert!(
+            classify_target_trigger(
+                Some("target.example"),
+                Some("57 41:06-03"),
+                "unused.example",
+                false
+            )
+            .is_err()
+        );
+
+        let inferred = classify_target_trigger(None, None, "target.example", true).unwrap();
+        assert_eq!(inferred.name, "tls:target.example");
+        assert_eq!(
+            inferred.payload,
+            r2o_controller::hello::modern_client_hello("target.example").unwrap()
         );
     }
 

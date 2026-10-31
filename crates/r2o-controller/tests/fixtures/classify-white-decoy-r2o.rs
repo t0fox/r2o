@@ -29,6 +29,12 @@ fn main() {
     println!();
 
     let raw_control = trigger::parse_raw_hex("57 41:06-03").expect("raw control hex");
+    print!("TARGET_RAW name=raw:{}B accept=any bytes=", raw_control.len());
+    for byte in &raw_control {
+        print!("{byte:02x}");
+    }
+    println!();
+
     print!("CONTROL_RAW name=control accept=tls-record bytes=");
     for byte in raw_control {
         print!("{byte:02x}");
