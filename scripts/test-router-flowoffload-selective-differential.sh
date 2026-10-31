@@ -24,8 +24,9 @@ case "$*" in
         echo 'table inet r2o { comment "r2o-managed"; }'
         ;;
     'list chain inet r2o mark_flow')
-        [ -f "$NFT_STATE_DIR/r2o" ] && [ -f "$NFT_STATE_DIR/r2o-mark-flow" ] || exit 1
-        printf 'chain mark_flow {\n    ct direction original meta l4proto tcp ct mark set ct mark | 0x80000000\n}\n'
+        [ -f "$NFT_STATE_DIR/r2o" ] && [ -f "$NFT_STATE_DIR/r2o-mark-flow" ] && \
+            [ -f "$NFT_STATE_DIR/r2o-mark-flow-rules" ] || exit 1
+        cat "$NFT_STATE_DIR/r2o-mark-flow-rules"
         ;;
     'list chain inet r2o forward')
         [ -f "$NFT_STATE_DIR/r2o" ] && [ -f "$NFT_STATE_DIR/r2o-mark-flow-hook" ] || exit 1
@@ -62,6 +63,8 @@ case "$*" in
                 cp "$rules" "$NFT_STATE_DIR/r2o-rules"
                 : >"$NFT_STATE_DIR/r2o"
                 if grep -Fq 'ct mark set ct mark | 0x80000000' "$rules"; then : >"$NFT_STATE_DIR/r2o-mark-flow"; else rm -f "$NFT_STATE_DIR/r2o-mark-flow"; fi
+                awk '/chain mark_flow \{/ { inside = 1 } inside { print } inside && /^    }/ { exit }' \
+                    "$rules" > "$NFT_STATE_DIR/r2o-mark-flow-rules"
                 if grep -Fq 'jump mark_flow' "$rules"; then : >"$NFT_STATE_DIR/r2o-mark-flow-hook"; else rm -f "$NFT_STATE_DIR/r2o-mark-flow-hook"; fi
                 ;;
             *flowoffload.nft.*)
@@ -101,7 +104,7 @@ case "$*" in
         case "$handle" in ''|*[!0-9]*) handle=5 ;; esac
         printf '%s # handle %s\n' "$expression" "$handle" >"$NFT_STATE_DIR/fw4-forward"
         ;;
-    delete\ table\ inet\ r2o) rm -f "$NFT_STATE_DIR/r2o" "$NFT_STATE_DIR/r2o-mark-flow" "$NFT_STATE_DIR/r2o-mark-flow-hook" ;;
+    delete\ table\ inet\ r2o) rm -f "$NFT_STATE_DIR/r2o" "$NFT_STATE_DIR/r2o-mark-flow" "$NFT_STATE_DIR/r2o-mark-flow-rules" "$NFT_STATE_DIR/r2o-mark-flow-hook" ;;
     delete\ table\ inet\ r2o_rst) rm -f "$NFT_STATE_DIR/r2o_rst" ;;
     *) echo "unexpected nft command: $*" >&2; exit 2 ;;
 esac
@@ -241,6 +244,27 @@ for attr in 'devices = { br-lan, eth0 };' 'counter;' 'flags offload;'; do
         exit 1
     }
 done
+
+# A single surviving ct-mark rule must not make an incomplete marking chain look safe.
+awk '
+    index($0, "ct direction original meta l4proto tcp") &&
+    index($0, "th dport { 443, 5222 }") &&
+    index($0, "ct mark set ct mark | 0x80000000") { next }
+    { print }
+' "$TEMP/nft/r2o-mark-flow-rules" > "$TEMP/nft/r2o-mark-flow-rules.incomplete"
+mv -f "$TEMP/nft/r2o-mark-flow-rules.incomplete" "$TEMP/nft/r2o-mark-flow-rules"
+firewall flowoffload-ensure
+[ "$(cat "$TEMP/run/flow-offloading.runtime")" = fallback ] || {
+    echo "a missing TCP ct-mark rule left selective fw4 offload active" >&2
+    exit 1
+}
+[ ! -e "$TEMP/nft/fw4-ft" ] || {
+    echo "a missing TCP ct-mark rule left fw4 flows offloaded" >&2
+    exit 1
+}
+firewall flowoffload-restore
+firewall down
+firewall up
 
 # D2O globally disables fw4 offload while the datapath is active. R2O may keep
 # it only while the conntrack marking chain and its forward hook are present.

@@ -423,6 +423,66 @@ flowoffload_marking_available() {
     flowoffload_mark_chain=$(nft list chain inet r2o mark_flow 2>/dev/null) || return 1
     printf '%s\n' "$flowoffload_mark_chain" |
         grep -F -q "ct mark set ct mark | $FLOWOFFLOAD_MARK" || return 1
+    flowoffload_mark_ports=$(printf '%s' "$PORTS" | sed -e 's/:/-/g' -e 's/,/, /g')
+    flowoffload_mark_voice=$(printf '%s' "$VOICE_PORTS" | sed -e 's/:/-/g' -e 's/,/, /g')
+    flowoffload_mark_keepalive=$(printf '%s' "$HTTP_KEEPALIVE_PORTS" | sed -e 's/:/-/g' -e 's/,/, /g')
+    flowoffload_mark_window=0-${CONNBYTES#*:}
+    flowoffload_voice_mark_window=0-${VOICE_CONNBYTES#*:}
+    flowoffload_late_from=$(late_rst_from) || return 1
+    flowoffload_late_window=$flowoffload_late_from-18446744073709551615
+    printf '%s\n' "$flowoffload_mark_chain" | awk \
+        -v mark="ct mark set ct mark | $FLOWOFFLOAD_MARK" \
+        -v ports="$flowoffload_mark_ports" \
+        -v voice="$flowoffload_mark_voice" \
+        -v keepalive="$flowoffload_mark_keepalive" \
+        -v mark_window="$flowoffload_mark_window" \
+        -v voice_window="$flowoffload_voice_mark_window" \
+        -v late_window="$flowoffload_late_window" '
+        index($0, mark) {
+            if (index($0, "ct direction original meta l4proto tcp") &&
+                index($0, "th dport { " ports " }") &&
+                index($0, "ct original packets " mark_window)) original_tcp++
+            if (index($0, "ct direction original meta l4proto tcp") &&
+                index($0, "th dport { " keepalive " }") &&
+                index($0, "ct original packets " late_window)) original_keepalive++
+            if (index($0, "ct direction original meta l4proto tcp") &&
+                index($0, "ct original packets " late_window) &&
+                index($0, "tcp flags & rst == rst")) original_rst++
+            if (index($0, "ct direction original meta l4proto tcp") &&
+                index($0, "ct original packets " late_window) &&
+                index($0, "tcp flags & fin == fin")) original_fin++
+            if (index($0, "ct direction reply meta l4proto tcp") &&
+                index($0, "th sport { " ports " }") &&
+                index($0, "ct reply packets " mark_window)) reply_tcp++
+            if (index($0, "ct direction reply meta l4proto tcp") &&
+                index($0, "th sport { " keepalive " }") &&
+                index($0, "ct reply packets " late_window)) reply_keepalive++
+            if (index($0, "ct direction reply meta l4proto tcp") &&
+                index($0, "ct reply packets " late_window) &&
+                index($0, "tcp flags & rst == rst")) reply_rst++
+            if (index($0, "ct direction reply meta l4proto tcp") &&
+                index($0, "ct reply packets " late_window) &&
+                index($0, "tcp flags & fin == fin")) reply_fin++
+            if (index($0, "ct direction original meta l4proto udp") &&
+                index($0, "th dport { " ports " }") &&
+                index($0, "th dport != { " voice " }") &&
+                index($0, "ct original packets " mark_window)) original_udp++
+            if (index($0, "ct direction original meta l4proto udp") &&
+                index($0, "th dport { " voice " }") &&
+                index($0, "ct original packets " voice_window)) original_voice++
+            if (index($0, "ct direction reply meta l4proto udp") &&
+                index($0, "th sport { " ports " }") &&
+                index($0, "th sport != { " voice " }") &&
+                index($0, "ct reply packets " mark_window)) reply_udp++
+            if (index($0, "ct direction reply meta l4proto udp") &&
+                index($0, "th sport { " voice " }") &&
+                index($0, "ct reply packets " voice_window)) reply_voice++
+        }
+        END {
+            if (original_tcp != 1 || original_keepalive != 1 || original_rst != 1 || original_fin != 1 ||
+                reply_tcp != 1 || reply_keepalive != 1 || reply_rst != 1 || reply_fin != 1 ||
+                original_udp != 1 || original_voice != 1 || reply_udp != 1 || reply_voice != 1) exit 1
+        }' || return 1
     flowoffload_forward_chain=$(nft list chain inet r2o forward 2>/dev/null) || return 1
     printf '%s\n' "$flowoffload_forward_chain" |
         grep -F -q 'type filter hook forward priority mangle;' || return 1
