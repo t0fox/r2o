@@ -84,7 +84,11 @@ export R2O_DIR="$ROOT" R2O_CONFIG="$CONF" R2O_RUN_DIR="$RUN" R2O_PPE_ADAPTER="$P
 
 if [ "${ACTION:-}" = includes ]; then
     [ "${R2O_FLOWOFFLOAD_RESTORING:-0}" != 1 ] || exit 0
-    "$FIREWALL" status >/dev/null 2>&1 || exit 0
+    if ! "$FIREWALL" status >/dev/null 2>&1; then
+        ACTION= R2O_FLOWOFFLOAD_RESTORING=1 R2O_FLOWOFFLOAD_SKIP_RESTORE=1 \
+            "$INIT" engine-stop >/dev/null 2>&1 || true
+        exit 1
+    fi
     if "$FIREWALL" flowoffload-ensure; then exit 0; fi
     ACTION= R2O_FLOWOFFLOAD_RESTORING=1 R2O_FLOWOFFLOAD_SKIP_RESTORE=1 \
         "$INIT" engine-stop >/dev/null 2>&1 || true
