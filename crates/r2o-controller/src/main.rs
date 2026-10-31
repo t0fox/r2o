@@ -140,6 +140,7 @@ struct ClassifyCliOptions {
     timeout: Option<std::time::Duration>,
     write_gap: Option<std::time::Duration>,
     long_gap: Option<std::time::Duration>,
+    dump_trigger: bool,
     mark: Option<u32>,
     only_poison: Option<String>,
     skip_poisons: Vec<String>,
@@ -894,6 +895,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
             timeout,
             write_gap,
             long_gap,
+            dump_trigger,
             mark,
             only_poison,
             skip_poisons,
@@ -911,6 +913,13 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
             format!("{host}:{port}")
         };
         let trigger = classify_target_trigger(explicit_sni, raw_trigger.as_deref(), host, modern)?;
+        if dump_trigger {
+            for byte in &trigger.payload {
+                print!("{byte:02x}");
+            }
+            println!();
+            return Ok(());
+        }
         let (control, vouched_control_sni) =
             classify_control_trigger(control_sni.as_deref(), control_raw.as_deref(), explicit_sni)?;
         let white = white_name
@@ -1085,6 +1094,7 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
     let mut timeout = None;
     let mut write_gap = None;
     let mut long_gap = None;
+    let mut dump_trigger = false;
     let mut mark = None;
     let mut only_poison = None;
     let mut skip_poisons = Vec::new();
@@ -1111,6 +1121,7 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
             }
             Some("--allow-loopback") if !allow_loopback => allow_loopback = true,
             Some("--no-raw") => no_raw = true,
+            Some("--dump-trigger") => dump_trigger = true,
             Some("--timeout") => {
                 index += 1;
                 let value = arguments
@@ -1255,6 +1266,7 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
         timeout,
         write_gap,
         long_gap,
+        dump_trigger,
         mark,
         only_poison,
         skip_poisons,
@@ -1380,6 +1392,7 @@ fn print_help() {
     println!("  classify: [--control-sni ИМЯ] задаёт подтверждённое контрольное имя");
     println!("  classify: [--control-raw HEX] задаёт байты TLS-записи контроля");
     println!("  classify: [--no-raw] пропускает проверки с raw-пакетами");
+    println!("  classify: [--dump-trigger] печатает hex триггера и завершает работу");
     println!("  classify: [--repeats N] задаёт число единогласных повторов; default 3");
     println!("  classify: [--timeout MS] задаёт ожидание каждого зонда; по умолчанию 6000 мс");
     println!(
@@ -30940,6 +30953,7 @@ mod tests {
                 timeout: None,
                 write_gap: None,
                 long_gap: None,
+                dump_trigger: false,
                 mark: None,
                 only_poison: None,
                 skip_poisons: Vec::new(),
@@ -30978,6 +30992,12 @@ mod tests {
     }
 
     #[test]
+    fn classify_options_accept_dump_trigger() {
+        let args = ["--dump-trigger"].map(OsString::from);
+        assert!(parse_classify_options(&args).unwrap().dump_trigger);
+    }
+
+    #[test]
     fn classify_options_accept_direct_arm_socket() {
         let args =
             ["--arm", "/run/r2o-datapath.sock", "--save-plan", "out.r2op"].map(OsString::from);
@@ -30990,6 +31010,7 @@ mod tests {
                 timeout: None,
                 write_gap: None,
                 long_gap: None,
+                dump_trigger: false,
                 mark: None,
                 only_poison: None,
                 skip_poisons: Vec::new(),

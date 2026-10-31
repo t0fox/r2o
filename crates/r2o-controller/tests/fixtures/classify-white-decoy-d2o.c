@@ -69,6 +69,10 @@ int main(void)
         return 1;
     }
     print_trigger("TARGET_RAW", &control);
+    for (size_t i = 0; i < control.len; i++) {
+        printf("%02x", control.payload[i]);
+    }
+    putchar('\n');
     snprintf(control.name, sizeof(control.name), "control");
     control.accept = D2K_ACCEPT_TLSRECORD;
     print_trigger("CONTROL_RAW", &control);

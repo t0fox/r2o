@@ -54,6 +54,10 @@ fn main() {
         print!("{byte:02x}");
     }
     println!();
+    for byte in &raw_control {
+        print!("{byte:02x}");
+    }
+    println!();
 
     print!("CONTROL_RAW name=control accept=tls-record bytes=");
     for byte in raw_control {
