@@ -9,6 +9,7 @@ static int accepted_connections;
 static int close_after_connections = 6;
 static int force_connect_deadline;
 static int force_first_connect_error;
+static int respond_serverhello;
 static int connect_count;
 static int poll_timeout_count;
 static int poll_timeouts[16];
@@ -98,12 +99,15 @@ ssize_t __wrap_recv(int fd, void *buffer, size_t length, int flags)
 int __wrap_close(int fd)
 {
     static const uint8_t alert[] = {0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x28};
+    static const uint8_t serverhello[] = {0x16, 0x03, 0x03, 0x00, 0x02, 0x02, 0x00};
     int i;
     for (i = 0; i < (int)(sizeof(server_clients) / sizeof(server_clients[0])); i++) {
         if (server_clients[i].active && server_clients[i].fd == fd) {
             server_clients[i].active = 0;
             if (!server_clients[i].control) {
-                (void)send(fd, alert, sizeof(alert), 0);
+                const uint8_t *reply = respond_serverhello ? serverhello : alert;
+                size_t reply_len = respond_serverhello ? sizeof(serverhello) : sizeof(alert);
+                (void)send(fd, reply, reply_len, 0);
             }
             break;
         }
@@ -142,6 +146,10 @@ int main(int argc, char **argv)
     } else if (strcmp(argv[1], "baseline-mixed-error") == 0) {
         close_after_connections = 0;
         force_first_connect_error = 1;
+        g_ack_pat = "e";
+    } else if (strcmp(argv[1], "baseline-clear") == 0) {
+        close_after_connections = 0;
+        respond_serverhello = 1;
         g_ack_pat = "e";
     } else {
         return 2;
@@ -182,6 +190,11 @@ int main(int argc, char **argv)
         printf("Unreachable|%d|0\n", result.probes);
         return result.verdict == D2K_DV_UNREACHABLE && result.probes == 3 &&
                accepted_connections == 2 ? 0 : 1;
+    }
+    if (strcmp(argv[1], "baseline-clear") == 0) {
+        printf("Clear|%d|0\n", result.probes);
+        return result.verdict == D2K_DV_CLEAR && result.probes == 3 &&
+               accepted_connections == 3 ? 0 : 1;
     }
     if (strcmp(argv[1], "transport-error") == 0) {
         printf("Inconclusive|%d|%d\n", result.probes, g_ack_calls);

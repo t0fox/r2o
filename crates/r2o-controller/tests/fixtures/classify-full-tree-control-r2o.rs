@@ -94,6 +94,7 @@ fn run_case(
         allow_loopback: true,
         no_raw: true,
         full_detect_semantics: true,
+        confirm_clear: false,
         control: Some(control),
         ..ClassifyOptions::default()
     };
@@ -205,5 +206,18 @@ fn main() {
     println!(
         "{:?}|{}|{}",
         baseline_mixed_error.verdict, baseline_mixed_error.probes, baseline_ack_calls
+    );
+
+    let (baseline_clear, baseline_ack_calls, _) = run_case(
+        vec![],
+        vec![],
+        ProbeOutcome::Accepted,
+        Accept::Any,
+        None,
+        None,
+    );
+    println!(
+        "{:?}|{}|{}",
+        baseline_clear.verdict, baseline_clear.probes, baseline_ack_calls
     );
 }

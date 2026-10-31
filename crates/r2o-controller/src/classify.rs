@@ -817,6 +817,8 @@ pub struct ClassifyOptions {
     pub no_raw: bool,
     /// Use `d2k_classify_run` semantics instead of the core cancelable path.
     pub full_detect_semantics: bool,
+    /// Confirm a successful clear with two additional probes.
+    pub confirm_clear: bool,
     pub control: Option<Trigger>,
     pub white: Option<Trigger>,
     pub control_vouched: bool,
@@ -860,6 +862,7 @@ impl Default for ClassifyOptions {
             allow_loopback: false,
             no_raw: false,
             full_detect_semantics: false,
+            confirm_clear: true,
             control: None,
             white: None,
             control_vouched: false,
@@ -1372,52 +1375,61 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
         return result;
     }
     if base.pass == options.repeats {
-        let mut confirm_options = options.clone();
-        confirm_options.repeats = CLEAR_CONFIRM_REPEATS;
-        confirm_options.seed_whole = None;
-        let confirm = measure(
-            backend,
-            &target,
-            trigger,
-            &confirm_options,
-            &mut result,
-            MeasureSpec {
-                name: "whole-confirm",
-                cuts: &[],
-                gap: options.write_gap,
-                until_pass: false,
-            },
-            progress,
-        );
-        if stopped(&options) {
-            finish_cancelled(&mut result, &options, start);
-            return result;
-        }
-        if confirm.errors > 0 {
-            result.verdict = Verdict::Flaky;
-            result.reason = format!(
-                "подтверждение базы: {} из {} опытов не состоялись — ошибка транспорта, а не решение коробки",
-                confirm.errors, CLEAR_CONFIRM_REPEATS
+        if options.confirm_clear {
+            let mut confirm_options = options.clone();
+            confirm_options.repeats = CLEAR_CONFIRM_REPEATS;
+            confirm_options.seed_whole = None;
+            let confirm = measure(
+                backend,
+                &target,
+                trigger,
+                &confirm_options,
+                &mut result,
+                MeasureSpec {
+                    name: "whole-confirm",
+                    cuts: &[],
+                    gap: options.write_gap,
+                    until_pass: false,
+                },
+                progress,
             );
-            finish(&mut result, &options, start);
-            return result;
+            if stopped(&options) {
+                finish_cancelled(&mut result, &options, start);
+                return result;
+            }
+            if confirm.errors > 0 {
+                result.verdict = Verdict::Flaky;
+                result.reason = format!(
+                    "подтверждение базы: {} из {} опытов не состоялись — ошибка транспорта, а не решение коробки",
+                    confirm.errors, CLEAR_CONFIRM_REPEATS
+                );
+                finish(&mut result, &options, start);
+                return result;
+            }
+            let total_pass = base.pass + confirm.pass;
+            let total_repeats = options.repeats + CLEAR_CONFIRM_REPEATS;
+            if total_pass != total_repeats {
+                result.verdict = Verdict::Flaky;
+                result.reason = format!(
+                    "база не подтвердилась: итого {} из {} — ложный clear дороже честного flaky",
+                    total_pass, total_repeats
+                );
+                finish(&mut result, &options, start);
+                return result;
+            }
+            if base.unmarked || confirm.unmarked {
+                result.verdict = Verdict::Inconclusive;
+                result.reason = format!(
+                    "триггер прошёл ({total_pass}/{total_repeats}), но без подтверждённой метки SO_MARK — clear не принимается"
+                );
+                finish(&mut result, &options, start);
+                return result;
+            }
         }
-        let total_pass = base.pass + confirm.pass;
-        let total_repeats = options.repeats + CLEAR_CONFIRM_REPEATS;
-        if total_pass != total_repeats {
-            result.verdict = Verdict::Flaky;
-            result.reason = format!(
-                "база не подтвердилась: итого {} из {} — ложный clear дороже честного flaky",
-                total_pass, total_repeats
-            );
-            finish(&mut result, &options, start);
-            return result;
-        }
-        if base.unmarked || confirm.unmarked {
+        if base.unmarked {
             result.verdict = Verdict::Inconclusive;
-            result.reason = format!(
-                "триггер прошёл ({total_pass}/{total_repeats}), но без подтверждённой метки SO_MARK — clear не принимается"
-            );
+            result.reason =
+                "триггер прошёл, но без подтверждённой метки SO_MARK — clear не принимается".into();
             finish(&mut result, &options, start);
             return result;
         }

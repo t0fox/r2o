@@ -80,6 +80,7 @@ cat "$ROOT/crates/r2o-controller/tests/fixtures/classify-full-tree-control-r2o.r
 "$TEMP/d2o-classifier" target-unproven >> "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" baseline-deadline >> "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" baseline-mixed-error >> "$TEMP/d2o.out"
+"$TEMP/d2o-classifier" baseline-clear >> "$TEMP/d2o.out"
 CARGO_TARGET_DIR=$rust_target \
 RUSTFLAGS="${RUSTFLAGS:--Awarnings}" \
 CARGO_MAKEFLAGS= \
