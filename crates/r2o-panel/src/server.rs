@@ -960,7 +960,7 @@ fn merge_live_max(primary: &mut serde_json::Map<String, Value>, extra: &Value, k
 
 fn unavailable_knowledge() -> (Value, Option<String>, bool) {
     (
-        json!({"linked":false,"link_note":"движок не отдаёт состояние","catalog_at":"","boxes":[],"searches":[],"targets":null,"confirms":null,"probes_used":null,"client_unfit":null}),
+        json!({"linked":false,"link_note":"движок не отдаёт состояние","catalog_at":"","boxes":[],"searches":[],"targets":0,"confirms":0,"probes_used":0,"client_unfit":0}),
         None,
         false,
     )
