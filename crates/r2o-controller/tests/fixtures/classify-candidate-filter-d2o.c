@@ -41,6 +41,9 @@ int main(void)
     printf("classifier-write-gap-ms=%d\n", options.write_gap_ms);
     options.write_gap_ms = 35;
     printf("classifier-custom-write-gap-ms=%d\n", options.write_gap_ms);
+    printf("classifier-long-gap-ms=%d\n", options.long_gap_ms);
+    options.long_gap_ms = 1250;
+    printf("classifier-custom-long-gap-ms=%d\n", options.long_gap_ms);
 
     print_selected("all", &options);
 

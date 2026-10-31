@@ -34,6 +34,13 @@ fn main() {
         options.write_gap.as_millis()
     );
     options.write_gap = ClassifyOptions::default().write_gap;
+    println!("classifier-long-gap-ms={}", options.long_gap.as_millis());
+    options.long_gap = std::time::Duration::from_millis(1250);
+    println!(
+        "classifier-custom-long-gap-ms={}",
+        options.long_gap.as_millis()
+    );
+    options.long_gap = ClassifyOptions::default().long_gap;
     print_selected("all", &options);
 
     options.only_poison = Some("seqovl-1".into());
