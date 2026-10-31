@@ -40,6 +40,8 @@ fn r2o_budget_quic_принимает_целое_и_отклоняет_tls12_д�
     let output = r2o_run_fetch(&[
         "--name",
         "example.com",
+        "--ip",
+        "192.0.2.10",
         "--quic",
         "--quic-budget",
         "1",
