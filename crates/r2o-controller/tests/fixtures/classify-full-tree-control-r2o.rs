@@ -11,6 +11,7 @@ use classify::{
 struct Backend {
     control_outcomes: VecDeque<Result<ProbeOutcome, ProbeError>>,
     ack_outcomes: VecDeque<Result<bool, ProbeError>>,
+    target_outcome: ProbeOutcome,
     ack_calls: usize,
 }
 
@@ -28,7 +29,7 @@ impl ProbeBackend for Backend {
         if request.trigger.name == "control" {
             self.control_outcomes.pop_front().expect("control outcome")
         } else {
-            Ok(ProbeOutcome::Rejected)
+            Ok(self.target_outcome)
         }
     }
 
@@ -56,16 +57,18 @@ impl ProbeBackend for Backend {
 fn run_case(
     control_outcomes: Vec<Result<ProbeOutcome, ProbeError>>,
     ack_outcomes: Vec<Result<bool, ProbeError>>,
+    target_outcome: ProbeOutcome,
+    control_accept: Accept,
 ) -> (classify::ClassifyResult, usize) {
     let trigger = Trigger {
         name: "fixture".into(),
         payload: b"WA\x06\x03SIGNATURE-AND-THEN-SOME-PAYLOAD-BYTES".to_vec(),
-        accept: Accept::Any,
+        accept: Accept::ServerHello,
     };
     let control = Trigger {
         name: "control".into(),
         payload: b"BENIGN-CONTROL-PAYLOAD".to_vec(),
-        accept: Accept::Any,
+        accept: control_accept,
     };
     let options = ClassifyOptions {
         repeats: 3,
@@ -80,6 +83,7 @@ fn run_case(
     let mut backend = Backend {
         control_outcomes: control_outcomes.into(),
         ack_outcomes: ack_outcomes.into(),
+        target_outcome,
         ack_calls: 0,
     };
     let result = run_with_backend_progress(
@@ -96,6 +100,8 @@ fn main() {
     let (transport_error, transport_ack_calls) = run_case(
         vec![Err(ProbeError::Transport("connection refused".into())); 3],
         vec![Err(ProbeError::Transport("connection refused".into()))],
+        ProbeOutcome::Rejected,
+        Accept::Any,
     );
     println!(
         "{:?}|{}|{}",
@@ -109,16 +115,33 @@ fn main() {
             Ok(ProbeOutcome::Accepted),
         ],
         vec![],
+        ProbeOutcome::Rejected,
+        Accept::Any,
     );
     println!(
         "{:?}|{}|{}",
         control_pass.verdict, control_pass.probes, control_ack_calls
     );
 
-    let (control_unproven, control_ack_calls) =
-        run_case(vec![Ok(ProbeOutcome::Unproven); 3], vec![Ok(false); 3]);
+    let (control_unproven, control_ack_calls) = run_case(
+        vec![Ok(ProbeOutcome::Unproven); 3],
+        vec![Ok(false); 3],
+        ProbeOutcome::Rejected,
+        Accept::TlsRecord,
+    );
     println!(
         "{:?}|{}|{}",
         control_unproven.verdict, control_unproven.probes, control_ack_calls
+    );
+
+    let (target_unproven, target_ack_calls) = run_case(
+        vec![Ok(ProbeOutcome::Accepted)],
+        vec![],
+        ProbeOutcome::Unproven,
+        Accept::Any,
+    );
+    println!(
+        "{:?}|{}|{}",
+        target_unproven.verdict, target_unproven.probes, target_ack_calls
     );
 }

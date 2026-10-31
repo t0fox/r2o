@@ -1455,16 +1455,6 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
             // D2O decides control by pass count only: errors do not abort the
             // fallback, and one successful control probe is enough.
             control_ok = measured.pass > 0;
-            if control_ok && base.unproven + one.unproven > 0 {
-                result.verdict = Verdict::Inconclusive;
-                result.reason = format!(
-                    "на триггер ответили не доказательством прохода ({} опытов из {}): алерт инжектируют и коробки, и серверы — вердикта нет",
-                    base.unproven + one.unproven,
-                    options.repeats * 2
-                );
-                finish(&mut result, &options, start);
-                return result;
-            }
         }
         if !control_ok {
             let index = add_observation(&mut result, "neutral-ack", &[], Duration::ZERO);
