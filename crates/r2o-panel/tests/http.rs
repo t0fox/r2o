@@ -178,8 +178,8 @@ fn status_without_live_file_returns_the_panel_contract() {
     for counter in ["targets", "confirms", "probes_used", "client_unfit"] {
         assert_eq!(
             value["knowledge"][counter],
-            Value::Null,
-            "{counter} is unknown without a live snapshot"
+            Value::from(0),
+            "{counter} uses D2O's unavailable-state sentinel"
         );
     }
     assert_eq!(value["snapshot"]["controls_enabled"], false);
