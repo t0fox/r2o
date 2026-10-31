@@ -1452,15 +1452,9 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
                 },
                 progress,
             );
-            if measured.errors > 0 {
-                result.verdict = Verdict::Flaky;
-                result.reason = format!(
-                    "контроль другим именем: {} из {} опытов не состоялись — ошибка транспорта, а не решение коробки",
-                    measured.errors, options.repeats
-                );
-                finish(&mut result, &options, start);
-                return result;
-            }
+            // D2O uses the control pass count only. A control transport error
+            // says nothing about the target, so continue to neutral ACK and
+            // the remaining fallback checks.
             if measured.pass > 0 && measured.pass < options.repeats {
                 result.verdict = Verdict::Flaky;
                 result.reason = format!(
