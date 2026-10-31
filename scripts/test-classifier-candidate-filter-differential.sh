@@ -57,6 +57,8 @@ cat "$ROOT/crates/r2o-controller/tests/fixtures/classify-probe-support.rs" > "$T
 cat >> "$TEMP/rust/src/main.rs" <<EOF
 #[path = "$rust_root/crates/r2o-controller/src/hello.rs"]
 pub mod hello;
+#[path = "$rust_root/crates/r2o-controller/src/trigger.rs"]
+pub mod trigger;
 #[path = "$rust_root/crates/r2o-controller/src/plan_text.rs"]
 pub mod plan_text;
 #[path = "$rust_root/crates/r2o-controller/src/classify_measured.rs"]
@@ -76,5 +78,5 @@ if ! cmp -s "$TEMP/d2o.out" "$TEMP/r2o.out"; then
     diff -u "$TEMP/d2o.out" "$TEMP/r2o.out" || true
     exit 1
 fi
-printf 'D2O %s poison list, --only/--skip filters, and property-probe gating match R2O.\n' \
+printf 'D2O %s poison list, --only/--skip filters, property-probe gating, and --no-raw match R2O.\n' \
     "$ACTUAL_D2O_SHA"

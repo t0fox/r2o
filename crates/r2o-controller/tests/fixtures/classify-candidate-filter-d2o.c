@@ -13,6 +13,7 @@ static void print_selected(const char *label, const d2k_opts *options)
     int printed = 0;
 
     printf("%s|properties=%d\n", label, options->only[0] == '\0');
+    printf("%s|raw=%d\n", label, !options->no_raw);
     poisons = d2k_poisons(&count);
     for (i = 0; i < count; i++) {
         if (options->only[0] != '\0' && strcmp(options->only, poisons[i].name) != 0) {
@@ -50,5 +51,9 @@ int main(void)
     snprintf(options.only, sizeof(options.only), "%s", "unknown-poison");
     options.nskip = 0;
     print_selected("only-unknown", &options);
+
+    options.only[0] = '\0';
+    options.no_raw = 1;
+    print_selected("no-raw", &options);
     return 0;
 }

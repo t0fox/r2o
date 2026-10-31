@@ -5,6 +5,7 @@ fn print_selected(label: &str, options: &ClassifyOptions) {
         "{label}|properties={}",
         u8::from(options.only_poison.is_none())
     );
+    println!("{label}|raw={}", u8::from(!options.no_raw));
     let mut printed = 0;
     for poison in poisons() {
         if poison_selected(options, &poison.name) {
@@ -34,4 +35,8 @@ fn main() {
     options.only_poison = Some("unknown-poison".into());
     options.skip_poisons.clear();
     print_selected("only-unknown", &options);
+
+    options.only_poison = None;
+    options.no_raw = true;
+    print_selected("no-raw", &options);
 }

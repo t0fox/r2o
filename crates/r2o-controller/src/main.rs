@@ -136,6 +136,7 @@ const D2O_TRIAL_SETTLE_MS: u64 = 50;
 struct ClassifyCliOptions {
     repeats: usize,
     allow_loopback: bool,
+    no_raw: bool,
     mark: Option<u32>,
     only_poison: Option<String>,
     skip_poisons: Vec<String>,
@@ -886,6 +887,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
         let ClassifyCliOptions {
             repeats,
             allow_loopback,
+            no_raw,
             mark,
             only_poison,
             skip_poisons,
@@ -922,6 +924,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
             ClassifyOptions {
                 repeats,
                 allow_loopback,
+                no_raw,
                 mark,
                 full_detect_semantics: true,
                 confirm_clear: false,
@@ -1069,6 +1072,7 @@ fn print_http_candidates() {
 fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCliOptions, String> {
     let mut repeats = None;
     let mut allow_loopback = false;
+    let mut no_raw = false;
     let mut mark = None;
     let mut only_poison = None;
     let mut skip_poisons = Vec::new();
@@ -1083,6 +1087,7 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
     while index < arguments.len() {
         match arguments[index].to_str() {
             Some("--allow-loopback") if !allow_loopback => allow_loopback = true,
+            Some("--no-raw") => no_raw = true,
             Some("--mark") if mark.is_none() => {
                 index += 1;
                 let value = arguments
@@ -1176,6 +1181,7 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
     Ok(ClassifyCliOptions {
         repeats: repeats.unwrap_or(3),
         allow_loopback,
+        no_raw,
         mark,
         only_poison,
         skip_poisons,
@@ -1300,6 +1306,7 @@ fn print_help() {
     println!("  classify: [--white ИМЯ] задаёт ECH-приманку для гипотезы белого ClientHello");
     println!("  classify: [--control-sni ИМЯ] задаёт подтверждённое контрольное имя");
     println!("  classify: [--control-raw HEX] задаёт байты TLS-записи контроля");
+    println!("  classify: [--no-raw] пропускает проверки с raw-пакетами");
     println!("  classify: [SNI] необязателен и берётся из HOST; --raw HEX задаёт байты триггера");
     println!(
         "  r2o-controller --ask --control СОКЕТ --ip IP --sni ИМЯ (--hello-hex ФАЙЛ | --arm-wait-ms МС)"
@@ -30847,6 +30854,7 @@ mod tests {
             ClassifyCliOptions {
                 repeats: 4,
                 allow_loopback: true,
+                no_raw: false,
                 mark: None,
                 only_poison: None,
                 skip_poisons: Vec::new(),
@@ -30870,6 +30878,7 @@ mod tests {
             ClassifyCliOptions {
                 repeats: 3,
                 allow_loopback: false,
+                no_raw: false,
                 mark: None,
                 only_poison: None,
                 skip_poisons: Vec::new(),
@@ -30888,6 +30897,12 @@ mod tests {
     fn classify_options_accept_modern_profile() {
         let args = ["--modern"].map(OsString::from);
         assert!(parse_classify_options(&args).unwrap().modern);
+    }
+
+    #[test]
+    fn classify_options_disable_raw_probes() {
+        let args = ["--no-raw"].map(OsString::from);
+        assert!(parse_classify_options(&args).unwrap().no_raw);
     }
 
     #[test]
