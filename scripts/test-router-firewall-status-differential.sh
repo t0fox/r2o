@@ -126,8 +126,6 @@ write_r2o_table() {
         cat <<'TABLE'
 table inet r2o {
     comment "r2o-managed"
-chain mark_flow {
-}
 chain out {
     type filter hook postrouting priority mangle; policy accept;
 TABLE
@@ -155,7 +153,6 @@ TABLE
 }
 chain forward {
     type filter hook forward priority mangle; policy accept;
-    jump mark_flow
     jump in_rules
 }
 chain input {

@@ -359,61 +359,9 @@ fastnat_restore() {
     rm -f "$FASTNAT_SAVED"
 }
 
-flowoffload_saved() { echo "$RUN/flow-offloading.saved"; }
-
 flowoffload_restore() {
     [ "${R2O_FLOWOFFLOAD_SKIP_RESTORE:-0}" != 1 ] || return 0
-    rm -f "$(flowoffload_saved)" || return 1
     [ ! -x "$FIREWALL" ] || "$FIREWALL" flowoffload-restore
-}
-
-flowoffload_hook_install() {
-    if command -v fw4 >/dev/null 2>&1; then
-        flowoffload_hook_backend=fw4
-        flowoffload_hook_path=$INIT
-    elif command -v fw3 >/dev/null 2>&1; then
-        flowoffload_hook_backend=fw3
-        flowoffload_hook_path=${INIT%/*}/r2o-firewall-fw3-include.sh
-        [ -r "$flowoffload_hook_path" ] || return 1
-    else
-        return 0
-    fi
-    command -v uci >/dev/null 2>&1 || return 1
-    hook_section=firewall.r2o_flowoffload_hook
-    hook_marker=$RUN/flowoffload-hook.created
-    if uci -q get "$hook_section" >/dev/null 2>&1; then
-        [ "$(uci -q get "$hook_section.type" 2>/dev/null || true)" = script ] || return 1
-        [ "$(uci -q get "$hook_section.path" 2>/dev/null || true)" = "$flowoffload_hook_path" ] || return 1
-        if [ "$flowoffload_hook_backend" = fw4 ]; then
-            [ "$(uci -q get "$hook_section.fw4_compatible" 2>/dev/null || true)" = 1 ] || return 1
-        else
-            [ "$(uci -q get "$hook_section.reload" 2>/dev/null || true)" = 1 ] || return 1
-        fi
-        [ "$(uci -q get "$hook_section.enabled" 2>/dev/null || true)" = 1 ] || return 1
-        return 0
-    fi
-    hook_pending_changes=$(uci changes firewall 2>/dev/null) || return 1
-    [ -z "$hook_pending_changes" ] || {
-        say "есть неподтверждённые изменения firewall UCI; сначала сохраните их или отмените, hook flow offload не установлен"
-        return 1
-    }
-    uci set "$hook_section=include" \
-        && uci set "$hook_section.type=script" \
-        && uci set "$hook_section.path=$flowoffload_hook_path" \
-        && { [ "$flowoffload_hook_backend" != fw4 ] || uci set "$hook_section.fw4_compatible=1"; } \
-        && { [ "$flowoffload_hook_backend" != fw3 ] || uci set "$hook_section.reload=1"; } \
-        && uci set "$hook_section.enabled=1" || { uci revert "$hook_section" >/dev/null 2>&1 || true; return 1; }
-    mkdir -p "$RUN" || { uci revert "$hook_section" >/dev/null 2>&1 || true; return 1; }
-    hook_marker_tmp=$hook_marker.new.$$
-    (umask 077; : > "$hook_marker_tmp") && mv -f "$hook_marker_tmp" "$hook_marker" || {
-        rm -f "$hook_marker_tmp"
-        uci revert "$hook_section" >/dev/null 2>&1 || true
-        return 1
-    }
-    if uci commit firewall; then return 0; fi
-    uci revert "$hook_section" >/dev/null 2>&1 || true
-    rm -f "$hook_marker"
-    return 1
 }
 
 flowoffload_hook_remove() {
@@ -452,13 +400,11 @@ engine_start() {
             engine_stop
             return 1
         fi
-        flowoffload_hook_install || { say "не установить hook firewall reload; останавливаю datapath, чтобы не потерять видимость трафика"; engine_stop; return 1; }
         ppe_ensure
         say "datapath уже запущен"
         return 0
     fi
     engine_stop
-    flowoffload_hook_install || { say "не удалось установить hook firewall reload для flow offload"; return 1; }
     mark=$MARK
     case "$mark" in 0x*|0X*) mark=$(printf '%d' "$mark") ;; esac
     if ! start_datapath "$QUEUE4" ipv4 "$DP4_PID" "$LOG/r2o-datapath4.log" "$SOCK4"; then
@@ -477,6 +423,11 @@ engine_start() {
     fi
     R2O_IPV6_ENABLED_RUNTIME= "$FIREWALL" up || { engine_stop; die "не поставить правила NFQUEUE"; }
     fastnat_off
+    if ! "$FIREWALL" flowoffload-ensure; then
+        say "не удалось отключить fw4 flow offloading; останавливаю datapath, чтобы сохранить видимость трафика"
+        engine_stop
+        return 1
+    fi
     # Nonzero PROBE_MARK sends controller verifier traffic through NFQUEUE.
     controller_mark=$mark
     [ "$PROBE_MARK" = 0 ] || controller_mark=$PROBE_MARK

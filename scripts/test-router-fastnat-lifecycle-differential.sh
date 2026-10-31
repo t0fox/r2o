@@ -15,7 +15,7 @@ trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
 sed -n '/^FASTNAT=/,/^policy_mark() {/p' "$D2O_ROOT/files/S99d2k" |
     tr -d '\r' |
     sed '$d; s|^FASTNAT=/proc/sys/net/netfilter/nf_conntrack_fastnat$|FASTNAT=$FASTNAT_PATH|' > "$TEMP/d2o.sh"
-sed -n '/^FASTNAT=/,/^flowoffload_saved() {/p' "$ROOT/router/S99r2o" |
+sed -n '/^FASTNAT=/,/^flowoffload_restore() {/p' "$ROOT/router/S99r2o" |
     tr -d '\r' |
     sed '$d; s|^FASTNAT=/proc/sys/net/netfilter/nf_conntrack_fastnat$|FASTNAT=$FASTNAT_PATH|' > "$TEMP/r2o.sh"
 [ -s "$TEMP/d2o.sh" ] || { echo "could not extract D2O fastnat lifecycle" >&2; exit 2; }
