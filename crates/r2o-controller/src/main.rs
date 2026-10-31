@@ -901,6 +901,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
                 repeats,
                 allow_loopback,
                 mark,
+                full_detect_semantics: true,
                 control: Some(control),
                 ..ClassifyOptions::default()
             },

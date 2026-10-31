@@ -93,6 +93,7 @@ fn run_case(
         long_gap: Duration::from_millis(10),
         allow_loopback: true,
         no_raw: true,
+        full_detect_semantics: true,
         control: Some(control),
         ..ClassifyOptions::default()
     };

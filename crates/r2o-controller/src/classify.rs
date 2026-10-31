@@ -815,6 +815,8 @@ pub struct ClassifyOptions {
     pub long_gap: Duration,
     pub allow_loopback: bool,
     pub no_raw: bool,
+    /// Use `d2k_classify_run` semantics instead of the core cancelable path.
+    pub full_detect_semantics: bool,
     pub control: Option<Trigger>,
     pub white: Option<Trigger>,
     pub control_vouched: bool,
@@ -857,6 +859,7 @@ impl Default for ClassifyOptions {
             long_gap: Duration::from_millis(700),
             allow_loopback: false,
             no_raw: false,
+            full_detect_semantics: false,
             control: None,
             white: None,
             control_vouched: false,
@@ -1314,7 +1317,10 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
         return result;
     }
 
-    if base.pass == 0 && base.error.as_ref().is_some_and(ProbeError::is_dial_timeout) {
+    if options.full_detect_semantics
+        && base.pass == 0
+        && base.error.as_ref().is_some_and(ProbeError::is_dial_timeout)
+    {
         let mut slow_options = options.clone();
         slow_options.timeout = options.timeout.saturating_mul(2);
         slow_options.seed_whole = None;
@@ -1332,7 +1338,7 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
         }
     }
 
-    if base.pass == 0 && base.errors > 0 {
+    if options.full_detect_semantics && base.pass == 0 && base.errors > 0 {
         if base.error.as_ref().is_some_and(ProbeError::is_dial_timeout) {
             result.verdict = Verdict::Flaky;
             result.reason = format!(
@@ -1353,6 +1359,15 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
                     .message()
             );
         }
+        finish(&mut result, &options, start);
+        return result;
+    }
+    if !options.full_detect_semantics && base.pass == 0 && base.errors == options.repeats {
+        result.reason = format!(
+            "нет TCP до цели: ни один из {} опытов не состоялся",
+            options.repeats
+        );
+        result.verdict = Verdict::Unreachable;
         finish(&mut result, &options, start);
         return result;
     }
@@ -1486,13 +1501,54 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
                     name: "control",
                     cuts: &[],
                     gap: options.write_gap,
-                    until_pass: true,
+                    until_pass: options.full_detect_semantics,
                 },
                 progress,
             );
-            // D2O decides control by pass count only: errors do not abort the
-            // fallback, and one successful control probe is enough.
-            control_ok = measured.pass > 0;
+            if !options.full_detect_semantics {
+                if measured.errors > 0 {
+                    result.verdict = Verdict::Flaky;
+                    result.reason = format!(
+                        "контроль другим именем: {} из {} опытов не состоялись — ошибка транспорта, а не решение коробки",
+                        measured.errors, options.repeats
+                    );
+                    finish(&mut result, &options, start);
+                    return result;
+                }
+                if measured.pass > 0 && measured.pass < options.repeats {
+                    result.verdict = Verdict::Flaky;
+                    result.reason = format!(
+                        "контроль другим именем не воспроизводится: {} из {}",
+                        measured.pass, options.repeats
+                    );
+                    finish(&mut result, &options, start);
+                    return result;
+                }
+            }
+            control_ok = if options.full_detect_semantics {
+                measured.pass > 0
+            } else {
+                measured.pass == options.repeats
+            };
+            if !options.full_detect_semantics && control_ok && base.unproven + one.unproven > 0 {
+                result.verdict = Verdict::Inconclusive;
+                result.reason = format!(
+                    "на триггер ответили не доказательством прохода ({} опытов из {}): алерт инжектируют и коробки, и серверы — вердикта нет",
+                    base.unproven + one.unproven,
+                    options.repeats * 2
+                );
+                finish(&mut result, &options, start);
+                return result;
+            }
+            if !options.full_detect_semantics && !control_ok && measured.unproven > 0 {
+                result.verdict = Verdict::Inconclusive;
+                result.reason = format!(
+                    "контроль другим именем ответил не записью TLS ({} из {}) — это не проход и не молчание; вердикта нет",
+                    measured.unproven, options.repeats
+                );
+                finish(&mut result, &options, start);
+                return result;
+            }
         }
         if !control_ok {
             let index = add_observation(&mut result, "neutral-ack", &[], Duration::ZERO);
