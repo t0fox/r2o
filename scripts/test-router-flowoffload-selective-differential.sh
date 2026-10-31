@@ -29,6 +29,7 @@ case "$*" in
     'list table inet fw4'|'-a list table inet fw4')
         printf 'table inet fw4 {\n'
         cat "$NFT_STATE_DIR/fw4-ft"
+        [ ! -f "$NFT_STATE_DIR/fw4-alt-ft" ] || cat "$NFT_STATE_DIR/fw4-alt-ft"
         printf '\nchain forward {\n'
         cat "$NFT_STATE_DIR/fw4-forward"
         printf '}\n'
@@ -48,6 +49,7 @@ case "$*" in
                         rm -f "$NFT_STATE_DIR/fw4-ft"
                         printf '%s\n' "$(( $(cat "$NFT_STATE_DIR/flowtable-resets" 2>/dev/null || echo 0) + 1 ))" >"$NFT_STATE_DIR/flowtable-resets"
                     fi
+                    if grep -q 'delete flowtable inet fw4 altft' "$rules"; then rm -f "$NFT_STATE_DIR/fw4-alt-ft"; fi
                     if grep -q 'add flowtable inet fw4 ft' "$rules"; then
                         sed -n '/^add flowtable inet fw4 ft {/,/^}/p' "$rules" \
                             | sed 's/^add flowtable inet fw4 ft /flowtable ft /' >"$NFT_STATE_DIR/fw4-ft"
@@ -242,6 +244,24 @@ firewall flowoffload-ensure
 firewall flowoffload-restore
 [ ! -e "$TEMP/run/flow-offloading.runtime" ] || { echo "flow-offload state was not cleared on restore" >&2; exit 1; }
 grep -Fq 'flow offload @ft' "$TEMP/nft/fw4-forward" || { echo "fw4 restore did not reinstate native offload" >&2; exit 1; }
+
+printf '%s\n' 'meta l4proto { tcp, udp } flow offload @altft # handle 17' >"$TEMP/nft/fw4-forward"
+rm -f "$TEMP/nft/fw4-ft"
+cat >"$TEMP/nft/fw4-alt-ft" <<'ALT_FLOWTABLE'
+flowtable altft {
+    hook ingress priority 0;
+    devices = { br-lan, eth0 };
+}
+ALT_FLOWTABLE
+firewall flowoffload-ensure
+[ "$(cat "$TEMP/run/flow-offloading.runtime")" = fallback ] || {
+    echo "an active fw4 offload rule with a nonstandard flowtable did not enter runtime fallback" >&2
+    exit 1
+}
+[ ! -e "$TEMP/nft/fw4-alt-ft" ] || { echo "runtime fallback left the nonstandard flowtable active" >&2; exit 1; }
+firewall flowoffload-restore
+[ ! -e "$TEMP/run/flow-offloading.runtime" ] || { echo "nonstandard-flowtable state was not cleared on restore" >&2; exit 1; }
+grep -Fq 'flow offload @ft' "$TEMP/nft/fw4-forward" || { echo "fw4 restore did not reinstate the configured native offload rule" >&2; exit 1; }
 firewall down
 [ ! -e "$TEMP/nft/r2o" ] || { echo "R2O firewall table survived stop" >&2; exit 1; }
 
