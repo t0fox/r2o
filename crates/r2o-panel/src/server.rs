@@ -2112,9 +2112,11 @@ fn telegram_status(
     let stored = read_regular_file(&config.telegram_status_path, 64)
         .ok()
         .and_then(|raw| {
-            std::str::from_utf8(&raw)
-                .ok()
-                .map(|value| value.trim().to_owned())
+            std::str::from_utf8(&raw).ok().map(|value| {
+                value
+                    .trim_end_matches(|byte| matches!(byte, '\r' | '\n' | ' ' | '\t'))
+                    .to_owned()
+            })
         });
     match stored.as_deref().unwrap_or("") {
         "connected" => "connected",

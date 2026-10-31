@@ -56,9 +56,11 @@ sed -n '/^fn telegram_status(/,/^}/p' "$ROOT/crates/r2o-panel/src/server.rs" \
 cat >> "$TEMP/main.rs" <<'EOF'
 
 fn main() {
-    let path = std::env::args_os().nth(1).expect("status path");
+    let mut args = std::env::args_os().skip(1);
+    let path = args.next().expect("status path");
+    let running = args.next().expect("running flag") == "1";
     let config = Config { telegram_status_path: PathBuf::from(path) };
-    println!("{}|0", telegram_status(&config, true, true, false));
+    println!("{}|{}", telegram_status(&config, true, true, running), u8::from(running));
 }
 EOF
 
@@ -73,13 +75,22 @@ fi
 
 for state in error not_configured; do
     printf '%s\n' "$state" > "$status_path"
-    c_result=$("$TEMP/d2o-status" "$pid_path" "$status_path")
-    r_result=$("$rust_binary" "$rust_status_path")
+    c_result=$("$TEMP/d2o-status" "$pid_path" "$status_path" 0)
+    r_result=$("$rust_binary" "$rust_status_path" 0)
     if [ "$c_result" != "$r_result" ]; then
-        printf 'RED state=%s C=%s Rust=%s\n' "$state" "$c_result" "$r_result" >&2
+        printf 'RED stopped_state=%s C=%s Rust=%s\n' "$state" "$c_result" "$r_result" >&2
         exit 1
     fi
-    printf 'STATUS|%s|%s\n' "$state" "$r_result"
+    printf 'STATUS|stopped|%s|%s\n' "$state" "$r_result"
 done
 
-printf 'C/Rust stopped Telegram status matches D2O %s.\n' "$ACTUAL_D2O_SHA"
+printf ' connected\n' > "$status_path"
+c_result=$("$TEMP/d2o-status" "$pid_path" "$status_path" 1)
+r_result=$("$rust_binary" "$rust_status_path" 1)
+if [ "$c_result" != "$r_result" ]; then
+    printf 'RED running_state=leading-space C=%s Rust=%s\n' "$c_result" "$r_result" >&2
+    exit 1
+fi
+printf 'STATUS|running|leading-space|%s\n' "$r_result"
+
+printf 'C/Rust Telegram status edge cases match D2O %s.\n' "$ACTUAL_D2O_SHA"
