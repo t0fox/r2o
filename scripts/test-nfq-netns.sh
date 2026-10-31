@@ -27,6 +27,9 @@ VOICE_QUEUE=65519
 VOICE_MARK=21081
 OBSERVE_QUEUE=65518
 NS="r2o-nfq-test-$$"
+PEER_NS="r2o-nfq-peer-$$"
+R2O_VETH_CLIENT="r2c$$"
+R2O_VETH_PEER="r2s$$"
 WORK=$(mktemp -d)
 
 cleanup() {
@@ -34,6 +37,10 @@ cleanup() {
     if ip netns list | awk '{print $1}' | grep -Fxq "$NS"; then
         ip netns pids "$NS" | xargs -r kill 2>/dev/null || true
         ip netns del "$NS" 2>/dev/null || true
+    fi
+    if ip netns list | awk '{print $1}' | grep -Fxq "$PEER_NS"; then
+        ip netns pids "$PEER_NS" | xargs -r kill 2>/dev/null || true
+        ip netns del "$PEER_NS" 2>/dev/null || true
     fi
     if [ "$test_exit_status" -ne 0 ] && [ -f "$WORK/r2o-datapath-voice.log" ]; then
         echo "журнал datapath voice перед отказом namespace-проверки:" >&2
@@ -1372,6 +1379,37 @@ else
 fi
 
 ip netns exec "$NS" nft add rule inet r2o output ip6 daddr ::1 udp dport 4443 queue num 65529 bypass
+ip netns add "$PEER_NS"
+ip link add "$R2O_VETH_CLIENT" type veth peer name "$R2O_VETH_PEER"
+ip link set "$R2O_VETH_CLIENT" netns "$NS"
+ip link set "$R2O_VETH_PEER" netns "$PEER_NS"
+ip netns exec "$NS" ip link set "$R2O_VETH_CLIENT" up
+ip netns exec "$NS" ip -6 addr add 2001:db8:100::1/64 dev "$R2O_VETH_CLIENT" noprefixroute
+ip netns exec "$PEER_NS" ip link set lo up
+ip netns exec "$PEER_NS" ip link set "$R2O_VETH_PEER" up
+ip netns exec "$PEER_NS" ip -6 addr add 2001:db8:100::2/64 dev "$R2O_VETH_PEER"
+r2o_ipv6_addresses_ready=0
+r2o_ipv6_address_wait=0
+while [ "$r2o_ipv6_address_wait" -lt 100 ]; do
+    if ! ip netns exec "$NS" ip -6 addr show dev "$R2O_VETH_CLIENT" | grep -q tentative && \
+        ! ip netns exec "$PEER_NS" ip -6 addr show dev "$R2O_VETH_PEER" | grep -q tentative; then
+        r2o_ipv6_addresses_ready=1
+        break
+    fi
+    sleep 0.02
+    r2o_ipv6_address_wait=$((r2o_ipv6_address_wait + 1))
+done
+[ "$r2o_ipv6_addresses_ready" -eq 1 ] || {
+    echo "ОШИБКА: IPv6 адреса veth не завершили DAD" >&2
+    exit 1
+}
+ip netns exec "$NS" ip -6 rule add priority 10000 fwmark 0x123/0xffffffff lookup 100
+ip netns exec "$NS" ip -6 route add 2001:db8:100::/64 dev "$R2O_VETH_CLIENT" table 100
+ip netns exec "$NS" nft add rule inet r2o output ip6 daddr 2001:db8:100::2 udp dport 4443 queue num 65529 bypass
+ip netns exec "$NS" nft add rule inet r2o input ip6 saddr 2001:db8:100::2 udp sport 4443 queue num 65529 bypass
+ip netns exec "$NS" nft 'add chain inet r2o ipv6_fragments { type filter hook prerouting priority -450; policy accept; }'
+ip netns exec "$NS" nft 'add rule inet r2o ipv6_fragments ip6 nexthdr ipv6-frag counter queue num 65529'
+ip netns exec "$NS" ip -6 route get 2001:db8:100::2 mark 0x123 | grep -F "dev $R2O_VETH_CLIENT" | grep -Fq 'table 100'
 ip netns exec "$NS" "$R2OD_BIN" \
     --queue 65529 --family ipv6 --plan "$WORK/quicdeny.r2op" \
     >"$WORK/r2o-datapath-ipv6.log" 2>&1 &
@@ -1399,6 +1437,64 @@ except socket.timeout:
 else:
     raise SystemExit("ОШИБКА: пакет qdeny дошёл до UDP-сервера")
 PY
+
+cat >"$WORK/ipv6-echo.py" <<'PY'
+import socket
+import sys
+
+server = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+server.bind(("2001:db8:100::2", 4443))
+with open(sys.argv[1], "w", encoding="ascii") as ready:
+    ready.write("ready")
+server.settimeout(3)
+payload, peer = server.recvfrom(4096)
+server.sendto(payload, peer)
+PY
+ip netns exec "$PEER_NS" python3 "$WORK/ipv6-echo.py" "$WORK/ipv6-peer-ready" \
+    >"$WORK/ipv6-peer.log" 2>&1 &
+PEER_SERVER_PID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -f "$WORK/ipv6-peer-ready" ] && break
+    kill -0 "$PEER_SERVER_PID" 2>/dev/null || {
+        cat "$WORK/ipv6-peer.log" >&2
+        exit 1
+    }
+    sleep 0.05
+done
+[ -f "$WORK/ipv6-peer-ready" ] || {
+    cat "$WORK/ipv6-peer.log" >&2
+    echo "ОШИБКА: IPv6 echo-сервер не запустился" >&2
+    exit 1
+}
+if ! ip netns exec "$NS" python3 - "$FIXTURE" <<'PY'
+import socket
+import sys
+
+client = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+client.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, 0x123)
+client.settimeout(2)
+initial = open(sys.argv[1], "rb").read()
+payload = initial + bytes(4096 - len(initial))
+client.sendto(payload, ("2001:db8:100::2", 4443))
+try:
+    reply, _ = client.recvfrom(4096)
+except socket.timeout:
+    raise SystemExit("ОШИБКА: route-mark IPv6 request/reply не прошёл через NFQUEUE")
+if reply != payload:
+    raise SystemExit("ОШИБКА: route-mark IPv6 echo отличается от исходного QUIC Initial")
+PY
+then
+    cat "$WORK/ipv6-peer.log" "$WORK/r2o-datapath-ipv6.log" >&2
+    exit 1
+fi
+if ! ip netns exec "$NS" nft list chain inet r2o ipv6_fragments | grep -Eq 'counter packets [2-9][0-9]* bytes'; then
+    ip netns exec "$NS" nft list chain inet r2o ipv6_fragments >&2
+    echo "ОШИБКА: IPv6 fragment queue не приняла несколько фрагментов" >&2
+    exit 1
+fi
+wait "$PEER_SERVER_PID"
+PEER_SERVER_PID=
+echo "ПРОЙДЕНО: marked IPv6 4-KiB request/reply прошёл policy route, fragment NFQUEUE и reassembly"
 
 kill -TERM "$R2OD_OBSERVE_PID"
 if wait "$R2OD_OBSERVE_PID"; then
