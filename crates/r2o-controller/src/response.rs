@@ -1384,8 +1384,22 @@ mod tcp_split_transport_tests {
             None,
         );
 
-        assert_eq!(result.unwrap(), ProbeOutcome::Rejected);
+        let outcome = result.unwrap();
+        assert_eq!(outcome, ProbeOutcome::Rejected);
         server.join().unwrap();
+
+        let row = format!(
+            "timeout_verdict={}",
+            if outcome == ProbeOutcome::Rejected {
+                "rejected"
+            } else {
+                "other"
+            }
+        );
+        if let Ok(path) = std::env::var("R2O_RESPONSE_TIMEOUT_DIFF_OUTPUT") {
+            std::fs::write(path, format!("{row}\n")).unwrap();
+        }
+        println!("{row}");
     }
 
     #[test]
