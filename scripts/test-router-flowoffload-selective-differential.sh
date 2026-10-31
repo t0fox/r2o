@@ -296,4 +296,46 @@ grep -Fq 'flow offload @altft' "$TEMP/nft/fw4-extra-forward" || { echo "fw4 relo
 firewall down
 [ ! -e "$TEMP/nft/r2o" ] || { echo "R2O firewall table survived stop" >&2; exit 1; }
 
-echo "test-router-flowoffload-selective-differential: marked R2O flows remain visible while fw4 keeps native offload for other flows"
+sed 's/^FW_BACKEND=nft$/FW_BACKEND=iptables/' "$TEMP/config" >"$TEMP/config.iptables"
+mv -f "$TEMP/config.iptables" "$TEMP/config"
+firewall flowoffload-ensure
+[ "$(cat "$TEMP/run/flow-offloading.runtime" 2>/dev/null || true)" = fallback ] || {
+    echo "iptables backend left fw4 flow offload active without selective conntrack marking" >&2
+    exit 1
+}
+[ ! -e "$TEMP/nft/fw4-ft" ] || {
+    echo "iptables backend fallback left the native fw4 flowtable active" >&2
+    exit 1
+}
+firewall flowoffload-restore
+grep -Fq 'flow offload @ft' "$TEMP/nft/fw4-forward" || {
+    echo "iptables backend stop did not restore the configured fw4 flow offload" >&2
+    exit 1
+}
+
+cat >"$TEMP/bin/iptables" <<'IPTABLES'
+#!/bin/sh
+case " $* " in
+    *' -D '*) exit 1 ;;
+    *' -C '*) exit 1 ;;
+    *) exit 0 ;;
+esac
+IPTABLES
+chmod 0755 "$TEMP/bin/iptables"
+firewall up
+[ "$(cat "$TEMP/run/flow-offloading.runtime" 2>/dev/null || true)" = fallback ] || {
+    echo "iptables firewall startup did not disable unsupported fw4 offload" >&2
+    exit 1
+}
+[ ! -e "$TEMP/nft/fw4-ft" ] || {
+    echo "iptables firewall startup left native fw4 offload active" >&2
+    exit 1
+}
+firewall down
+firewall flowoffload-restore
+grep -Fq 'flow offload @ft' "$TEMP/nft/fw4-forward" || {
+    echo "iptables firewall stop did not restore fw4 offload" >&2
+    exit 1
+}
+
+echo "test-router-flowoffload-selective-differential: selective marks preserve fw4 offload and unsupported backends restore it on stop"

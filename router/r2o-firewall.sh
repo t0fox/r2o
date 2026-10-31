@@ -484,7 +484,12 @@ flowoffload_remove_all_unlocked() {
 
 flowoffload_ensure_unlocked() {
     force_reset=${1:-0}
-    nft list table inet r2o >/dev/null 2>&1 || return 0
+    if [ "$BACKEND" != nft ] || ! nft list table inet r2o >/dev/null 2>&1; then
+        [ "$BACKEND" != nft ] || return 0
+        fw4_rules=$(nft -a list table inet fw4 2>/dev/null || true)
+        case "$fw4_rules" in *'flow offload @'*) flowoffload_remove_all_unlocked ;; *) return 0 ;; esac
+        return $?
+    fi
     fw4_rules=$(nft -a list table inet fw4 2>/dev/null || true)
     case "$fw4_rules" in *'flow offload @'*) ;; *) return 0 ;; esac
     flowoffload_rule_count=$(printf '%s\n' "$fw4_rules" | awk '{ count += gsub(/flow offload @/, "") } END { print count + 0 }')
@@ -875,6 +880,7 @@ firewall_up() {
         ppe_ensure_unlocked
         fw_rc=0
         dns_excl_sync_unlocked fresh || echo "r2o: исключение DNS-upstream не встало полностью" >&2
+        if flowoffload_ensure_unlocked; then :; else fw_rc=$?; fi
     else
         fw_rc=$?
     fi

@@ -356,7 +356,6 @@ flowoffload_restore() {
 }
 
 flowoffload_hook_install() {
-    [ "$("$FIREWALL" backend 2>/dev/null)" = nft ] || return 0
     command -v fw4 >/dev/null 2>&1 || return 0
     command -v uci >/dev/null 2>&1 || return 1
     hook_section=firewall.r2o_flowoffload_hook

@@ -78,7 +78,7 @@ cat >"$TEMP/bin/r2o-firewall" <<'FIREWALL'
 #!/bin/sh
 if [ -n "${FIREWALL_TRACE:-}" ]; then printf '%s\n' "$1" >> "$FIREWALL_TRACE"; fi
 case "${1:-}" in
-    backend) echo nft ;;
+    backend) echo "${R2O_TEST_BACKEND:-nft}" ;;
     ipv6-enabled) echo 1 ;;
     status|flowoffload-ensure|flowoffload-restore) exit 0 ;;
     *) exit 2 ;;
@@ -198,6 +198,26 @@ PATH="$TEMP/bin:$PATH" sh "$TEMP/step.sh" "$TEMP/r2o.sh" hook >"$hook/output"
 if ! cmp -s "$hook/expected" "$hook/output"; then
     echo "fw4 include hook lifecycle is not idempotent or reversible" >&2
     diff -u "$hook/expected" "$hook/output" >&2 || true
+    exit 1
+fi
+hook_iptables="$TEMP/r2o-hook-iptables"
+mkdir -p "$hook_iptables"
+printf '1\n' >"$hook_iptables/flow-setting"
+printf '1\n' >"$hook_iptables/flow-hw-setting"
+: >"$hook_iptables/fw.trace"
+: >"$hook_iptables/commits"
+RUN="$hook_iptables" RUNTIME="$hook_iptables" FLOW_SETTING_FILE="$hook_iptables/flow-setting" \
+FLOW_HW_SETTING_FILE="$hook_iptables/flow-hw-setting" FW_TRACE="$hook_iptables/fw.trace" \
+UCI_HOOK_FILE="$hook_iptables/include" UCI_COMMIT_FILE="$hook_iptables/commits" \
+INIT="$TEMP/bin/r2o-init" FIREWALL="$TEMP/bin/r2o-firewall" R2O_TEST_BACKEND=iptables \
+PATH="$TEMP/bin:$PATH" sh "$TEMP/step.sh" "$TEMP/r2o.sh" hook >"$hook_iptables/output"
+{
+    printf 'hook=present type=script path=%s compatible=1 enabled=1 commits=1\n' "$TEMP/bin/r2o-init"
+    printf 'removed=no commits=2\n'
+} >"$hook_iptables/expected"
+if ! cmp -s "$hook_iptables/expected" "$hook_iptables/output"; then
+    echo "fw4 hook was not installed for runtime fallback with the iptables datapath" >&2
+    diff -u "$hook_iptables/expected" "$hook_iptables/output" >&2 || true
     exit 1
 fi
 existing="$TEMP/r2o-hook-existing"
