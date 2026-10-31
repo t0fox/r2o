@@ -924,6 +924,39 @@ firewall_down() {
     return "$fw_rc"
 }
 
+firewall_status_nft() {
+    firewall_table=$(nft list table inet r2o 2>/dev/null) || return 1
+    printf '%s\n' "$firewall_table" | grep -F -q 'comment "r2o-managed"' || return 1
+    out_chain=$(nft list chain inet r2o out 2>/dev/null) || return 1
+    in_rules_chain=$(nft list chain inet r2o in_rules 2>/dev/null) || return 1
+    forward_chain=$(nft list chain inet r2o forward 2>/dev/null) || return 1
+    input_chain=$(nft list chain inet r2o input 2>/dev/null) || return 1
+    nat_post_chain=$(nft list chain inet r2o nat_post 2>/dev/null) || return 1
+    printf '%s\n' "$out_chain" | grep -F -q 'type filter hook postrouting priority mangle;' || return 1
+    printf '%s\n' "$forward_chain" | grep -F -q 'type filter hook forward priority mangle;' || return 1
+    printf '%s\n' "$forward_chain" | grep -F -q 'jump in_rules' || return 1
+    printf '%s\n' "$input_chain" | grep -F -q 'type filter hook input priority mangle;' || return 1
+    printf '%s\n' "$input_chain" | grep -F -q 'jump in_rules' || return 1
+    printf '%s\n' "$nat_post_chain" | grep -F -q 'type nat hook postrouting priority srcnat - 1;' || return 1
+    printf '%s\n' "$nat_post_chain" | grep -F -q masquerade || return 1
+    nft list table inet r2o_rst >/dev/null 2>&1 || return 1
+
+    out_queue_total=$(printf '%s\n' "$out_chain" | awk '/queue/ && /bypass/ { count++ } END { print count + 0 }')
+    [ "$out_queue_total" -eq 12 ] || return 1
+    in_queue_total=$(printf '%s\n' "$in_rules_chain" | awk '/queue/ && /bypass/ { count++ } END { print count + 0 }')
+    [ "$in_queue_total" -eq 14 ] || return 1
+    out_queue4=$(printf '%s\n' "$out_chain" | awk -v queue="$QUEUE4" \
+        '/queue/ && /bypass/ { for (i = 1; i <= NF; i++) if ($i == queue) { count++; break } } END { print count + 0 }')
+    out_queue6=$(printf '%s\n' "$out_chain" | awk -v queue="$QUEUE6" \
+        '/queue/ && /bypass/ { for (i = 1; i <= NF; i++) if ($i == queue) { count++; break } } END { print count + 0 }')
+    in_queue4=$(printf '%s\n' "$in_rules_chain" | awk -v queue="$QUEUE4" \
+        '/queue/ && /bypass/ { for (i = 1; i <= NF; i++) if ($i == queue) { count++; break } } END { print count + 0 }')
+    in_queue6=$(printf '%s\n' "$in_rules_chain" | awk -v queue="$QUEUE6" \
+        '/queue/ && /bypass/ { for (i = 1; i <= NF; i++) if ($i == queue) { count++; break } } END { print count + 0 }')
+    [ "$out_queue4" -eq 6 ] && [ "$out_queue6" -eq 6 ] &&
+        [ "$in_queue4" -eq 7 ] && [ "$in_queue6" -eq 7 ]
+}
+
 case "${1:-}" in
     backend)
         printf '%s\n' "$BACKEND"
@@ -955,7 +988,7 @@ case "${1:-}" in
         firewall_ppe "$@"
         ;;
     status)
-        if [ "$BACKEND" = nft ]; then nft list table inet r2o; else
+        if [ "$BACKEND" = nft ]; then firewall_status_nft; else
             xt iptables -t mangle -C POSTROUTING -j R2O_OUT &&
                 { [ "$IPV6_ENABLED_CONFIG" = 0 ] || [ -f "$FW_V4ONLY" ] ||
                     xt ip6tables -t mangle -C POSTROUTING -j R2O_OUT; }
