@@ -65,7 +65,15 @@ case "${1:-}" in
         [ -n "${UCI_COMMIT_FILE:-}" ] || exit 0
         printf '%s\n' "$(( $(cat "$UCI_COMMIT_FILE" 2>/dev/null || echo 0) + 1 ))" > "$UCI_COMMIT_FILE"
         ;;
-    revert) rm -f "$UCI_HOOK_FILE" ;;
+    revert)
+        case "${2:-}" in
+            firewall)
+                rm -f "$UCI_HOOK_FILE" "$FLOW_SETTING_PENDING_FILE" "$FLOW_HW_PENDING_FILE"
+                ;;
+            firewall.r2o_flowoffload_hook) rm -f "$UCI_HOOK_FILE" ;;
+            *) exit 2 ;;
+        esac
+        ;;
     *) exit 2 ;;
 esac
 UCI
@@ -123,6 +131,15 @@ case "$step" in
             "$(test -f "$UCI_HOOK_FILE" && echo yes || echo no)" \
             "$(test -f "$RUN/flowoffload-hook.created" && echo yes || echo no)" \
             "$(cat "$UCI_COMMIT_FILE" 2>/dev/null || echo 0)"
+        exit 0
+        ;;
+    hook-fail)
+        flowoffload_hook_install && exit 2
+        printf 'flow=%s hw=%s pending=%s hook=%s\n' \
+            "$(cat "$FLOW_SETTING_FILE")" \
+            "$(cat "$FLOW_HW_SETTING_FILE")" \
+            "$(cat "$FLOW_SETTING_PENDING_FILE" 2>/dev/null || echo absent)" \
+            "$(test -f "$UCI_HOOK_FILE" && echo present || echo absent)"
         exit 0
         ;;
 esac
@@ -218,6 +235,25 @@ PATH="$TEMP/bin:$PATH" sh "$TEMP/step.sh" "$TEMP/r2o.sh" hook >"$hook_iptables/o
 if ! cmp -s "$hook_iptables/expected" "$hook_iptables/output"; then
     echo "fw4 hook was not installed for runtime fallback with the iptables datapath" >&2
     diff -u "$hook_iptables/expected" "$hook_iptables/output" >&2 || true
+    exit 1
+fi
+hook_failure="$TEMP/r2o-hook-failure"
+mkdir -p "$hook_failure"
+printf '1\n' >"$hook_failure/flow-setting"
+printf '1\n' >"$hook_failure/flow-hw-setting"
+printf '0\n' >"$hook_failure/flow-setting-pending"
+: >"$hook_failure/commits"
+FAIL_UCI_SET=1 RUN="$hook_failure" RUNTIME="$hook_failure" \
+FLOW_SETTING_FILE="$hook_failure/flow-setting" FLOW_HW_SETTING_FILE="$hook_failure/flow-hw-setting" \
+FLOW_SETTING_PENDING_FILE="$hook_failure/flow-setting-pending" \
+FLOW_HW_PENDING_FILE="$hook_failure/flow-hw-setting-pending" \
+UCI_HOOK_FILE="$hook_failure/include" UCI_COMMIT_FILE="$hook_failure/commits" \
+INIT="$TEMP/bin/r2o-init" FIREWALL="$TEMP/bin/r2o-firewall" PATH="$TEMP/bin:$PATH" \
+    sh "$TEMP/step.sh" "$TEMP/r2o.sh" hook-fail >"$hook_failure/output"
+printf '%s\n' 'flow=1 hw=1 pending=0 hook=absent' >"$hook_failure/expected"
+if ! cmp -s "$hook_failure/expected" "$hook_failure/output"; then
+    echo "failed fw4 hook installation reverted unrelated pending offload settings" >&2
+    diff -u "$hook_failure/expected" "$hook_failure/output" >&2 || true
     exit 1
 fi
 existing="$TEMP/r2o-hook-existing"

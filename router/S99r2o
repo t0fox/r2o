@@ -371,16 +371,16 @@ flowoffload_hook_install() {
         && uci set "$hook_section.type=script" \
         && uci set "$hook_section.path=$INIT" \
         && uci set "$hook_section.fw4_compatible=1" \
-        && uci set "$hook_section.enabled=1" || { uci revert firewall >/dev/null 2>&1 || true; return 1; }
-    mkdir -p "$RUN" || { uci revert firewall >/dev/null 2>&1 || true; return 1; }
+        && uci set "$hook_section.enabled=1" || { uci revert "$hook_section" >/dev/null 2>&1 || true; return 1; }
+    mkdir -p "$RUN" || { uci revert "$hook_section" >/dev/null 2>&1 || true; return 1; }
     hook_marker_tmp=$hook_marker.new.$$
     (umask 077; : > "$hook_marker_tmp") && mv -f "$hook_marker_tmp" "$hook_marker" || {
         rm -f "$hook_marker_tmp"
-        uci revert firewall >/dev/null 2>&1 || true
+        uci revert "$hook_section" >/dev/null 2>&1 || true
         return 1
     }
     if uci commit firewall; then return 0; fi
-    uci revert firewall >/dev/null 2>&1 || true
+    uci revert "$hook_section" >/dev/null 2>&1 || true
     rm -f "$hook_marker"
     return 1
 }
