@@ -139,6 +139,7 @@ struct ClassifyCliOptions {
     mark: Option<u32>,
     only_poison: Option<String>,
     skip_poisons: Vec<String>,
+    white_name: Option<String>,
     save_plan_path: Option<PathBuf>,
     arm_socket_path: Option<PathBuf>,
     modern: bool,
@@ -879,6 +880,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
             mark,
             only_poison,
             skip_poisons,
+            white_name,
             save_plan_path,
             arm_socket_path,
             modern,
@@ -898,6 +900,17 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
             accept: Accept::TlsRecord,
             ..Trigger::tls("disk.rzd.ru").map_err(|error| format!("TLS-контроль: {error}"))?
         };
+        let white = white_name
+            .as_deref()
+            .map(|name| {
+                Ok(Trigger {
+                    name: "white".into(),
+                    payload: r2o_controller::hello::r2o_rx_fake_client_hello(name)
+                        .map_err(|_| format!("--white {name}: приветствие не собралось"))?,
+                    accept: Accept::TlsRecord,
+                })
+            })
+            .transpose()?;
         let result = classify_run(
             &target,
             &trigger,
@@ -909,6 +922,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
                 confirm_clear: false,
                 only_poison,
                 skip_poisons,
+                white,
                 control: Some(control),
                 ..ClassifyOptions::default()
             },
@@ -1047,6 +1061,7 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
     let mut mark = None;
     let mut only_poison = None;
     let mut skip_poisons = Vec::new();
+    let mut white_name = None;
     let mut save_plan_path = None;
     let mut arm_socket_path = None;
     let mut modern = false;
@@ -1079,6 +1094,14 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
                 if skip_poisons.len() < 32 {
                     skip_poisons.push(value.to_owned());
                 }
+            }
+            Some("--white") => {
+                index += 1;
+                let value = arguments
+                    .get(index)
+                    .and_then(|value| value.to_str())
+                    .ok_or("--white требует имя SNI")?;
+                white_name = Some(value.to_owned());
             }
             Some("--save-plan") if save_plan_path.is_none() => {
                 index += 1;
@@ -1118,6 +1141,7 @@ fn parse_classify_options(arguments: &[std::ffi::OsString]) -> Result<ClassifyCl
         mark,
         only_poison,
         skip_poisons,
+        white_name,
         save_plan_path,
         arm_socket_path,
         modern,
@@ -1180,6 +1204,7 @@ fn print_help() {
     println!(
         "r2o-controller — каталог и контроллер r2o\n\nИспользование:\n  r2o-controller --check-catalog ФАЙЛ\n  r2o-controller --clear-catalog ФАЙЛ\n  r2o-controller --classify HOST PORT SNI [REPEATS] [--modern] [--allow-loopback] [--mark N] [--only ИМЯ] [--skip ИМЯ ...] [--save-plan ФАЙЛ] [--arm СОКЕТ]\n  r2o-controller --probe-response HOST PORT SNI [REPEATS]\n  r2o-controller --set-name СОКЕТ HOST FAMILY SHAPE ПЛАН.r2op\n  r2o-controller --set-addr СОКЕТ IP SHAPE ПЛАН.r2op\n  r2o-controller --del-addr СОКЕТ IP SHAPE\n  r2o-controller --apply-catalog СОКЕТ КАТАЛОГ.json\n  r2o-controller --serve СОКЕТ КАТАЛОГ.json [--discover] [--mark N]\n  r2o-controller --watch СОКЕТ\n  r2o-controller --journal СОКЕТ\n  r2o-controller --http-candidates\n  r2o-controller --version\n  r2o-controller --help\n\nFAMILY: ipv4 или ipv6. SHAPE: modern, legacy, ech, http, quic или voice; voice использует HOST @discord-voice. Адресная привязка принимает modern, legacy, ech, quic или voice. QUIC поддерживает планы quicsplit, quicdeny, четыре формы IP-фрагментации после контрольной пробы, удлинение UDP, нулевую 16-байтовую фальшивку и пару фальшивых quic5 с TTL 3 после подтверждённого рукопожатия и зависания; --modern использует сохранённый TLS 1.3 ClientHello; --discover ставит новые TCP SNI в ограниченную очередь классификации и ищет обход HTTP-портала, а для Discord voice запускает ограниченный IP Discovery поиск, требующий --mark; --mark задаёт SO_MARK управляющим зондам и raw-пакетам; --save-plan создаёт новый файл и не перезаписывает существующий; --arm передаёт найденный план работающему r2o-datapath для соответствующей формы."
     );
+    println!("  classify: [--white ИМЯ] задаёт ECH-приманку для гипотезы белого ClientHello");
     println!(
         "  r2o-controller --ask --control СОКЕТ --ip IP --sni ИМЯ (--hello-hex ФАЙЛ | --arm-wait-ms МС)"
     );
@@ -30729,6 +30754,7 @@ mod tests {
                 mark: None,
                 only_poison: None,
                 skip_poisons: Vec::new(),
+                white_name: None,
                 save_plan_path: Some(PathBuf::from("out.r2op")),
                 arm_socket_path: None,
                 modern: false,
@@ -30748,6 +30774,7 @@ mod tests {
                 mark: None,
                 only_poison: None,
                 skip_poisons: Vec::new(),
+                white_name: None,
                 save_plan_path: Some(PathBuf::from("out.r2op")),
                 arm_socket_path: Some(PathBuf::from("/run/r2o-datapath.sock")),
                 modern: false,
@@ -30770,6 +30797,14 @@ mod tests {
         let options = parse_classify_options(&args).unwrap();
         assert_eq!(options.only_poison.as_deref(), Some("seqovl-1"));
         assert_eq!(options.skip_poisons, ["badsum", "disorder"]);
+    }
+
+    #[test]
+    fn classify_options_accept_white_decoy_name() {
+        let args = ["--white", "hcaptcha.com"].map(OsString::from);
+        let options = parse_classify_options(&args).unwrap();
+        assert_eq!(options.white_name.as_deref(), Some("hcaptcha.com"));
+        assert!(parse_classify_options(&[OsString::from("--white")]).is_err());
     }
 
     #[cfg(unix)]
