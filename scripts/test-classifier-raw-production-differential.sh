@@ -45,7 +45,7 @@ cleanup() {
         ip netns del "$NS" 2>/dev/null || true
     fi
     if [ "$test_exit_status" -ne 0 ]; then
-        for test_log in "$TEMP/d2o.err" "$TEMP/r2o.err" "$TEMP/server.log" "$TEMP/d2o-positive.err" "$TEMP/r2o-positive.err" "$TEMP/positive-d2o-server.log" "$TEMP/positive-r2o-server.log"; do
+        for test_log in "$TEMP/d2o.err" "$TEMP/r2o.err" "$TEMP/server.log" "$TEMP/d2o-positive.err" "$TEMP/r2o-positive.err" "$TEMP/positive-d2o-server.log" "$TEMP/positive-r2o-server.log" "$TEMP/d2o-compose.err" "$TEMP/r2o-compose.err" "$TEMP/compose-d2o-server.log" "$TEMP/compose-r2o-server.log"; do
             if [ -f "$test_log" ]; then cat "$test_log" >&2 || true; fi
         done
     fi
@@ -258,7 +258,7 @@ def answer(connection):
             data.extend(part)
             if control in data or target in data:
                 break
-        if control in data:
+        if control in data and not control_seen.is_set():
             control_seen.set()
             connection.sendall(alert)
             action = "control-alert"
@@ -388,3 +388,91 @@ print("D2O/R2O positive production property:", json.dumps(c_result, ensure_ascii
 PY
 
 echo "PASSED: actual D2O and R2O production classifiers matched a positive raw property hit"
+
+# Skip individual property probes so the fallback composer is exercised.
+COMPOSE_SKIPS="
+--skip seqovl-1 --skip disorder --skip badsum --skip badsum+hello
+--skip badsum-x2-g20 --skip md5 --skip seq-out-of-window --skip ts
+--skip seqovl-sni --skip badsum-x7 --skip white-hello-ts --skip syndata
+"
+
+kill "$SERVER_PID" 2>/dev/null || true
+wait "$SERVER_PID" 2>/dev/null || true
+SERVER_PID=
+
+start_positive_server "$TEMP/compose-d2o.ready" "$TEMP/compose-d2o-server.log"
+COMPOSE_PORT=$(cat "$TEMP/compose-d2o.ready")
+# shellcheck disable=SC2086
+ip netns exec "$NS" env D2K_FW=nft "$D2K_BIN" classify "127.0.0.1:$COMPOSE_PORT" \
+    --sni classifier.example --repeats 1 --timeout 350 \
+    --allow-loopback --mark 0 $COMPOSE_SKIPS --json \
+    >"$TEMP/d2o-compose.json" 2>"$TEMP/d2o-compose.err"
+wait_positive_response "$TEMP/compose-d2o-server.log"
+kill "$SERVER_PID" 2>/dev/null || true
+wait "$SERVER_PID" 2>/dev/null || true
+SERVER_PID=
+
+start_positive_server "$TEMP/compose-r2o.ready" "$TEMP/compose-r2o-server.log"
+COMPOSE_PORT=$(cat "$TEMP/compose-r2o.ready")
+# shellcheck disable=SC2086
+ip netns exec "$NS" env R2O_FW=nft "$R2O_BIN" \
+    --classify 127.0.0.1 "$COMPOSE_PORT" classifier.example --repeats 1 \
+    --timeout 350 --allow-loopback --mark 0 $COMPOSE_SKIPS --json \
+    >"$TEMP/r2o-compose.json" 2>"$TEMP/r2o-compose.err"
+wait_positive_response "$TEMP/compose-r2o-server.log"
+
+python3 - "$TEMP/d2o-compose.json" "$TEMP/r2o-compose.json" \
+    "$TEMP/compose-d2o-server.log" "$TEMP/compose-r2o-server.log" <<'PY'
+import json
+import sys
+
+def summarize(path):
+    with open(path, encoding="utf-8") as source:
+        result = json.load(source)
+    trace = [
+        (
+            item["probe"],
+            item.get("pass", 0),
+            item.get("fail", 0),
+            item.get("delay_ms", 0),
+            item.get("cuts", []),
+            bool(item.get("err") or item.get("error")),
+        )
+        for item in result["trace"]
+    ]
+    composed_hit = next(
+        (item for item in trace if item[0] == "СОБРАНО: всё сразу"),
+        None,
+    )
+    if (
+        result["verdict"] != "poisonable"
+        or result.get("path") != "собрано"
+        or not result.get("composed", False)
+        or not result.get("raw_usable")
+        or composed_hit is None
+        or composed_hit[1:3] != (1, 0)
+    ):
+        raise SystemExit(f"expected a positive production composed hit in {path}")
+    return (
+        result["verdict"],
+        result.get("path"),
+        result.get("composed", False),
+        result.get("raw_usable", False),
+        trace,
+    )
+
+c_result = summarize(sys.argv[1])
+rust_result = summarize(sys.argv[2])
+for path in sys.argv[3:]:
+    with open(path, encoding="utf-8") as source:
+        log = source.read()
+    if "control-alert" not in log or "post-control-serverhello" not in log:
+        raise SystemExit(f"composed server did not traverse both response states: {path}")
+if c_result != rust_result:
+    print("D2O positive composed:", json.dumps(c_result, ensure_ascii=False), file=sys.stderr)
+    print("R2O positive composed:", json.dumps(rust_result, ensure_ascii=False), file=sys.stderr)
+    raise SystemExit("positive production composed results differ")
+print("D2O/R2O positive production composed hit:", json.dumps(c_result, ensure_ascii=False))
+PY
+
+echo "PASSED: actual D2O and R2O production classifiers matched positive property and composed hits"
