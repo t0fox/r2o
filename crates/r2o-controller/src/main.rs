@@ -29440,7 +29440,9 @@ mod tests {
         let (socket, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let control_thread = std::thread::spawn(move || {
             for candidate_index in 0..16 {
-                let set = read_frame(&mut peer).unwrap();
+                let Ok(set) = read_frame(&mut peer) else {
+                    break;
+                };
                 assert_eq!(set.kind, super::COMMAND_SET_ADDR_PROBE);
                 if candidate_index == 0 {
                     candidate_started_tx.send(()).unwrap();
@@ -29507,7 +29509,9 @@ mod tests {
                 )
                 .unwrap();
 
-                let delete = read_frame(&mut peer).unwrap();
+                let Ok(delete) = read_frame(&mut peer) else {
+                    break;
+                };
                 assert_eq!(delete.kind, super::COMMAND_DEL_ADDR_PROBE);
                 peer.write_all(&encode_ack(delete.kind, true, 0).unwrap())
                     .unwrap();
@@ -29570,9 +29574,11 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         };
 
+        // Close both worker pipes before joins so an early outcome cannot strand fixture threads.
+        drop(client);
+        drop(worker);
         let (peers, control_initials, target_initials) = udp_thread.join().unwrap();
         control_thread.join().unwrap();
-        drop(worker);
         assert_eq!(
             control_initials, 6,
             "d2o повторно проверяет остаточную блокировку нейтральным Initial перед кандидатами"
