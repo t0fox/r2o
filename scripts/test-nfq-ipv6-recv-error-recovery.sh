@@ -52,7 +52,7 @@ for expected in \
     'tcp_reply=65536' \
     'IPv6 fail-open forwarded 33 packets' \
     'bulk_received=100' \
-    'conntrack содержит IPv6 original/reply tuples' \
+    'conntrack contains IPv6 original/reply tuples' \
     'ПРОЙДЕНО: IPv6 SO_MARK'; do
     if ! grep -Fq "$expected" "$LOG"; then
         echo "Expected IPv6 recv-error recovery evidence is missing: $expected" >&2
@@ -67,5 +67,5 @@ if [ "$(grep -Fc 'FAULT-INJECTED recv(EIO) on NFQUEUE socket' "$LOG")" -ne 1 ]; 
     exit 1
 fi
 
-grep -E 'FAULT-INJECTED|ошибка чтения NFQUEUE|reply=4096|tcp_reply=65536|fail-open forwarded|bulk_received=100|conntrack содержит|ПРОЙДЕНО: IPv6 SO_MARK' "$LOG"
+grep -E 'FAULT-INJECTED|ошибка чтения NFQUEUE|reply=4096|tcp_reply=65536|fail-open forwarded|bulk_received=100|conntrack contains|ПРОЙДЕНО: IPv6 SO_MARK' "$LOG"
 printf 'IPv6 NFQUEUE recv(EIO) recovery passed; log: %s\n' "$LOG"
