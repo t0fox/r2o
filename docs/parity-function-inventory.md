@@ -2,7 +2,7 @@
 
 ## Scope and source baseline
 
-This document records datapath/NFQUEUE plus first core HTTP/TLS/ECH/verification, QUIC/HTTP3, Discord voice/STUN, and catalog/Discovery/classification/diagnostics call-path slices from the parity plan; it is not the complete cross-repository inventory. The C oracle is clean D2O main 304ba893dd37197128ac8799c0495b035f6a38c0 at /mnt/e/r2o-tooling/d2o-clean-main. The Rust production source exercised by the current clean-source manifest is R2O main at 214f4a23067b2a74a6b93f944b1abc981427e495; the later d0c88c5 commit changed evidence documents only. The original /mnt/e/d2o checkout remains untouched.
+This document records datapath/NFQUEUE plus first core HTTP/TLS/ECH/verification, QUIC/HTTP3, Discord voice/STUN, catalog/Discovery/classification/diagnostics, and detect trigger/poison/raw-probe call-path slices from the parity plan; it is not the complete cross-repository inventory. The C oracle is clean D2O main 304ba893dd37197128ac8799c0495b035f6a38c0 at /mnt/e/r2o-tooling/d2o-clean-main. The Rust production source exercised by the current clean-source manifest is R2O main at 214f4a23067b2a74a6b93f944b1abc981427e495; the later d0c88c5 commit changed evidence documents only. The original /mnt/e/d2o checkout remains untouched.
 
 C functions are grouped by their source module/API family. Static helpers remain within the owning algorithm group; test harnesses, planlab, and ctlprobe are not production modules. This inventory records callers, branches, state, timers, errors, side effects, and tests at the module boundary. It does not imply that every listed branch has equal C/Rust proof.
 
@@ -71,6 +71,16 @@ Catalog and Discovery state spans the C store, event ingestion, matching and con
 | meas.c d2k_meas/d2k_meas_once; measured.c production measurement API; verdict.c d2k_classify/d2k_classify_cancelable; diagnostics.c d2k_diag_*; d2kc.c periodic/event consumers | Controller classify.rs run_with_backend* and result decisions; classify_measured.rs plan generation; response.rs probe/deadline handling; diagnostics.rs record/tick; main.rs scheduled collection and event emission | Target/control/unmeasured result combinations, repeat and deadline budgets, cancellation/EINTR, early stop and inconclusive branches, diagnostic sample/event retention, count snapshots and write errors; effects include network probes, bounded diagnostic state, files and control events | D2O core/test_meas.c, test_measured.c, test_verdict.c, test_diagnostics*.c and test_diagnostics_json.py; Rust tests/classify.rs, response.rs, d2o_meas_eintr.c/.rs, d2o_meas_send_timeout.c/.rs, d2o_meas_timeout_cap.c, d2o_measured_split_differential.c, d2o_diagnostics_differential.c, d2o_diagnostics_snapshot_differential.c and d2o_diagnostic_tick_differential.c |
 
 The core link transport/operator CLIs, remaining crypto/profile/volume functions, detect integration, Telegram integration, and service/config/firewall sources remain open under Task 1. Static helpers and per-function error/state branches also remain open.
+
+## Detection, trigger, poison and raw-probe slice
+
+The C detect program separates trigger recognition, poison/profile selection, repeat measurement and raw socket execution. R2O keeps those decisions in controller classifier/trigger modules and its raw-probe executor; kernel packet transformation remains covered by the datapath section.
+
+| D2O C production modules | R2O production owners/callers | Observable branches, state and effects | Existing test/evidence paths |
+|---|---|---|---|
+| detect/bridge.c, classify.c, poison.c, props.c, raw.c, response.c, trigger.c and main.c | Controller trigger.rs parse_raw_hex; classify.rs trigger acceptance, poison selection and backend run; classify_measured.rs plan generation; raw_probe.rs; response.rs; controller entrypoints | Trigger/packet-shape acceptance and refusal, poison/family support, repeat and cancellation outcomes, per-probe evidence and fallback, raw socket/mark capability, send/receive errors and deadlines; effects include raw network sends and generated plan text | D2O detect/test_bridge.c, test_port.c, test_tree.c, test_repeats.c, test_threads.c, test_raw.c, test_response.c, test_sni_cli.py; R2O tests/classify.rs, source unit tests and d2o_fallback_differential.c, d2o_marked_probe_differential.c, d2o_raw_profile_differential.c, d2o_raw_emission_cancel_fixture.c, d2o_raw_split_support_differential.c |
+
+This module-level slice does not enumerate static helpers or all trigger/poison error branches. The clean D2O detect suite passed on 2026-11-01; full function-level mapping remains open under Task 1.
 ## Current verification and limits
 
 - Clean D2O datapath suite: E-only runner ran make -B check in the clean D2O clone; passed in 71.5 s. The Makefile's TESTS list plus test_ctlprobe covers the C datapath test targets.
