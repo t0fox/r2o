@@ -53,6 +53,17 @@ mod app {
 
     static STOP: AtomicBool = AtomicBool::new(false);
 
+    fn receive_error_requires_flush(error: &ReceiveError) -> bool {
+        match error {
+            ReceiveError::Wait(_) => false,
+            ReceiveError::LostPackets => true,
+            ReceiveError::Io(error) => !matches!(
+                error.kind(),
+                io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+            ),
+        }
+    }
+
     fn handle_control_command(
         name_plans: &mut NamePlans,
         tcp_sessions: &mut TcpSessions,
@@ -1052,8 +1063,17 @@ mod app {
                 route_monitor.r2o_watch_fd(),
             ) {
                 Ok(ready) => ready,
-                Err(ReceiveError::LostPackets) => {
-                    eprintln!("r2o-datapath: ядро сообщило о потере NFQUEUE пакетов");
+                Err(error) if !receive_error_requires_flush(&error) => (false, false),
+                Err(error) => {
+                    match error {
+                        ReceiveError::LostPackets => {
+                            eprintln!("r2o-datapath: ядро сообщило о потере NFQUEUE пакетов");
+                        }
+                        ReceiveError::Io(error) => {
+                            eprintln!("r2o-datapath: ошибка чтения NFQUEUE: {error}");
+                        }
+                        ReceiveError::Wait(_) => unreachable!("poll errors do not flush packets"),
+                    }
                     let released = holding.flush(Instant::now(), name_plans.revision(), true);
                     r2o_report_incomplete_captures(&mut holding);
                     release_accepting(&mut socket, &released);
@@ -1071,10 +1091,6 @@ mod app {
                     release_accepting(&mut socket, &udp_deferred_resends.r2o_drain_accept());
                     (false, false)
                 }
-                Err(ReceiveError::Io(error)) if error.kind() == io::ErrorKind::Interrupted => {
-                    (false, false)
-                }
-                Err(ReceiveError::Io(error)) => return Err(error.into()),
             };
             if received {
                 udp_receive_seq = udp_receive_seq.wrapping_add(1).max(1);
@@ -3406,6 +3422,13 @@ mod app {
                     eprintln!("r2o-datapath: потеря пакетов при остановке очереди");
                     break;
                 }
+                Err(ReceiveError::Wait(error)) if error.kind() == io::ErrorKind::Interrupted => {
+                    continue;
+                }
+                Err(ReceiveError::Wait(error)) => {
+                    eprintln!("r2o-datapath: не удалось ожидать очередь при остановке: {error}");
+                    break;
+                }
                 Err(ReceiveError::Io(error)) if error.kind() == io::ErrorKind::Interrupted => {
                     continue;
                 }
@@ -3908,15 +3931,15 @@ mod app {
     mod tests {
         use super::{
             ControlServer, EmitKind, NF_ACCEPT, NF_DROP, OriginalFate, PacketDecision,
-            PendingApplied, Plan, R2oFlowJournal, R2oQuicSessions, R2oTcpExecution, RuntimeMode,
-            TcpSessions, WirePacket, decide_with_tcp_session_mode, format_journal_details,
-            format_journal_key, handle_control_command, load_plan, needs_raw_socket,
-            observe_quic_packet, observe_stun_packet, parse_options, r2o_clean_handshake_event,
-            r2o_datapath_payload, r2o_execution_is_damaged, r2o_fail_pending_applied,
-            r2o_finish_tcp_execution, r2o_first_oversized_emit, r2o_is_controller_probe,
-            r2o_packet_route_skip, r2o_release_delayed_udp_batch_with, r2o_tcp_early_rst_event,
-            r2o_tcp_rst_cut_signal_event, r2o_udp_decide_once, r2o_udp_mark_plain_pass,
-            r2o_udp_mark_planned, r2o_udp_packet_admitted_at_hook,
+            PendingApplied, Plan, R2oFlowJournal, R2oQuicSessions, R2oTcpExecution, ReceiveError,
+            RuntimeMode, TcpSessions, WirePacket, decide_with_tcp_session_mode,
+            format_journal_details, format_journal_key, handle_control_command, load_plan,
+            needs_raw_socket, observe_quic_packet, observe_stun_packet, parse_options,
+            r2o_clean_handshake_event, r2o_datapath_payload, r2o_execution_is_damaged,
+            r2o_fail_pending_applied, r2o_finish_tcp_execution, r2o_first_oversized_emit,
+            r2o_is_controller_probe, r2o_packet_route_skip, r2o_release_delayed_udp_batch_with,
+            r2o_tcp_early_rst_event, r2o_tcp_rst_cut_signal_event, r2o_udp_decide_once,
+            r2o_udp_mark_plain_pass, r2o_udp_mark_planned, r2o_udp_packet_admitted_at_hook,
             r2o_udp_packet_admitted_for_mode, release_many_with, release_with, send_applied_event,
             send_hello_event, send_journal_snapshot, send_journal_updates, udp_packet_admitted,
         };
@@ -3936,6 +3959,25 @@ mod app {
         use r2o_datapath::r2o_udp_hold::R2oUdpHeldPacket;
         use r2o_datapath::r2o_udp_sessions::R2oUdpSessions;
         use std::io;
+
+        #[test]
+        fn receive_error_policy_preserves_poll_and_empty_queue_cases() {
+            assert!(super::receive_error_requires_flush(
+                &ReceiveError::LostPackets
+            ));
+            assert!(!super::receive_error_requires_flush(&ReceiveError::Wait(
+                io::Error::other("poll failure"),
+            )));
+            assert!(super::receive_error_requires_flush(&ReceiveError::Io(
+                io::Error::other("receive failure",)
+            )));
+            assert!(!super::receive_error_requires_flush(&ReceiveError::Io(
+                io::Error::from(io::ErrorKind::Interrupted,)
+            )));
+            assert!(!super::receive_error_requires_flush(&ReceiveError::Io(
+                io::Error::from(io::ErrorKind::WouldBlock,)
+            )));
+        }
 
         #[test]
         fn process_cost_matches_d2o_proc_state_cursor_and_rss() {

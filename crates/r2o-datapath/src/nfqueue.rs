@@ -12,6 +12,7 @@ const RECEIVE_CAPACITY: usize = 1 << 17;
 
 #[derive(Debug)]
 pub enum ReceiveError {
+    Wait(io::Error),
     LostPackets,
     Io(io::Error),
 }
@@ -20,7 +21,7 @@ impl std::fmt::Display for ReceiveError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::LostPackets => formatter.write_str("ядро сообщило о потерянных пакетах"),
-            Self::Io(error) => error.fmt(formatter),
+            Self::Wait(error) | Self::Io(error) => error.fmt(formatter),
         }
     }
 }
@@ -161,7 +162,7 @@ impl QueueSocket {
         }
         if ready < 0 {
             let error = io::Error::last_os_error();
-            return Err(ReceiveError::Io(error));
+            return Err(ReceiveError::Wait(error));
         }
         let extra_ready = extra_fd.is_some()
             && descriptors[1].revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0;
@@ -169,7 +170,7 @@ impl QueueSocket {
             if descriptors[0].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) == 0 {
                 return Ok((false, extra_ready));
             }
-            return Err(ReceiveError::Io(io::Error::other(
+            return Err(ReceiveError::Wait(io::Error::other(
                 "NFQUEUE socket сообщил ошибку без готового пакета",
             )));
         }
