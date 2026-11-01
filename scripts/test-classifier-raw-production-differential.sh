@@ -141,14 +141,17 @@ echo "PASSED: pinned D2O and R2O production classifiers matched raw selftest and
 
 ip netns exec "$NS" env D2K_FW=nft "$D2K_BIN" classify "127.0.0.1:$PORT" \
     --sni classifier.example --repeats 1 --timeout 200 \
-    --allow-loopback --mark 0 --json >"$TEMP/d2o-full.json" 2>"$TEMP/d2o-full.err"
+    --allow-loopback --mark 0 --progress --json \
+    >"$TEMP/d2o-full.json" 2>"$TEMP/d2o-full.err"
 ip netns exec "$NS" env R2O_FW=nft "$R2O_BIN" \
     --classify 127.0.0.1 "$PORT" classifier.example --repeats 1 \
-    --timeout 200 --allow-loopback --mark 0 --json \
+    --timeout 200 --allow-loopback --mark 0 --progress --json \
     >"$TEMP/r2o-full.json" 2>"$TEMP/r2o-full.err"
 
-python3 - "$TEMP/d2o-full.json" "$TEMP/r2o-full.json" <<'PY'
+python3 - "$TEMP/d2o-full.json" "$TEMP/r2o-full.json" \
+    "$TEMP/d2o-full.err" "$TEMP/r2o-full.err" <<'PY'
 import json
+import re
 import sys
 
 def summarize(path):
@@ -183,6 +186,43 @@ if c_result != rust_result:
     print("R2O full classifier:", json.dumps(rust_result, ensure_ascii=False), file=sys.stderr)
     raise SystemExit("full production classifier tree differs")
 print("D2O/R2O full production classifier:", json.dumps(c_result, ensure_ascii=False))
+
+progress_pattern = re.compile(
+    r"^\s*\[\s*(\d+) с\]\s+(.+?)\s+прошло=(\d+) не прошло=(\d+)"
+)
+
+def summarize_progress(path):
+    events = []
+    seconds = []
+    with open(path, encoding="utf-8") as source:
+        for line in source:
+            match = progress_pattern.match(line)
+            if match is None:
+                continue
+            seconds.append(int(match.group(1)))
+            events.append((match.group(2).strip(), int(match.group(3)), int(match.group(4))))
+    if not events:
+        raise SystemExit(f"missing completed --progress observations in {path}")
+    if any(right < left for left, right in zip(seconds, seconds[1:])):
+        raise SystemExit(f"--progress elapsed seconds moved backwards in {path}")
+    return tuple(events), seconds[-1]
+
+c_progress, c_elapsed = summarize_progress(sys.argv[3])
+rust_progress, rust_elapsed = summarize_progress(sys.argv[4])
+if c_progress != rust_progress:
+    print(f"D2O --progress observations: {len(c_progress)}", file=sys.stderr)
+    print(f"R2O --progress observations: {len(rust_progress)}", file=sys.stderr)
+    for index in range(max(len(c_progress), len(rust_progress))):
+        c_event = c_progress[index] if index < len(c_progress) else None
+        rust_event = rust_progress[index] if index < len(rust_progress) else None
+        if c_event != rust_event:
+            print(f"first difference at {index}: D2O={c_event}, R2O={rust_event}", file=sys.stderr)
+            break
+    raise SystemExit("full production classifier progress events differ")
+print(
+    f"D2O/R2O completed --progress observations matched: {len(c_progress)}; "
+    f"elapsed_seconds={c_elapsed}/{rust_elapsed}"
+)
 PY
 
 echo "PASSED: pinned D2O and R2O production classifiers matched the unfiltered raw property/compose/poison path"

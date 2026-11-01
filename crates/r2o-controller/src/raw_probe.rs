@@ -519,6 +519,12 @@ pub fn sweep_poisons(
                     note_raw_probe(family, false);
                     observation.fail += 1;
                     raw_ok += 1;
+                    progress(
+                        &observation.probe,
+                        result.probes,
+                        observation.pass,
+                        observation.fail,
+                    );
                     break;
                 }
                 Err(error) => {
