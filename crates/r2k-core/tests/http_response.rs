@@ -34,6 +34,21 @@ fn parses_chunked_body_and_trailers_at_every_segment_boundary() {
 }
 
 #[test]
+fn rejects_chunk_size_line_beyond_d2o_buffer_limit() {
+    let mut bytes = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;".to_vec();
+    bytes.extend_from_slice(&[b'a'; 160]);
+    bytes.extend_from_slice(b"\r\nx\r\n0\r\n\r\n");
+
+    let mut response = HttpResponseParser::new(false);
+    response.feed(&bytes, false);
+
+    assert_eq!(response.status(), 200);
+    assert!(response.headers_complete());
+    assert!(response.is_invalid());
+    assert!(!response.is_complete());
+}
+
+#[test]
 fn rejects_malformed_or_ambiguous_response_framing() {
     let cases: [&[u8]; 13] = [
         b"HTTP/1.1 200 OK\r\nX: x\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n",

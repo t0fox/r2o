@@ -46,7 +46,7 @@ Follow the user's sequential workflow on the shared `main` checkout. Finish one 
 - [ ] Datapath/NFQUEUE/conntrack/journal/raw packet execution and OpenWrt memory/ABI.
   - Evidence slice: clean D2O datapath `make -B check` and Zig-backed `make cross` passed; R2O datapath crate passed 344/344 active tests (5 ignored). Official OpenWrt 25.12.5 release/QEMU scripts passed for aarch64, armv7 and mipsel; ARMv5 release link/QEMU and the 128-MiB sustained mixed-load/peak-RSS audit remain open. Function mapping and the IPv6-oracle/resource limits are in `docs/parity-function-inventory.md`.
 - [ ] TCP/TLS/HTTP/ECH/classifier/verify and their C↔Rust call paths.
-  - Evidence slice: clean D2O core tests for HTTP-search, HTTPS probe/response, ECH, TLS 1.2, H3, STUN/voice, and QUIC wire/Initial/Hello passed before test_quicprobe stopped make -B check; R2O workspace tests and formatting gates passed. The source map is partial and the full call-path audit remains open.
+  - Evidence slice: clean D2O core tests for HTTP-search, HTTPS probe/response, ECH, TLS 1.2, H3, STUN/voice, and QUIC wire/Initial/Hello passed before test_quicprobe stopped make -B check; R2O workspace tests and formatting gates passed. The HTTP response-reader audit fixed the chunk-line cap to match the C oracle, with 9/9 focused R2O parser tests passing; malformed extension/trailer and other call-path branches remain partial.
 - [ ] QUIC and Discord RTC/UDP lifecycle, endpoint changes, reconnects, expiry, and long sessions.
 
 ### Task 3: Root audit of Discovery, scheduler, catalog, services, and full apply cycle
