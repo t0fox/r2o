@@ -2852,6 +2852,183 @@ mod tests {
         );
     }
 
+    fn d2o_tcp_silence_packet(
+        port: u16,
+        reverse: bool,
+        flags: u8,
+        sequence: u32,
+        acknowledgment: u32,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let (source, destination, source_port, destination_port, ip_id) = if reverse {
+            ([1, 2, 3, 4], [192, 168, 1, 67], 443, port, 0x2000_u16)
+        } else {
+            ([192, 168, 1, 67], [1, 2, 3, 4], port, 443, 0x1000_u16)
+        };
+        let mut packet = vec![0; 40 + payload.len()];
+        packet[0] = 0x45;
+        let total_len = packet.len() as u16;
+        packet[2..4].copy_from_slice(&total_len.to_be_bytes());
+        packet[4..6].copy_from_slice(&ip_id.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&source);
+        packet[16..20].copy_from_slice(&destination);
+        packet[20..22].copy_from_slice(&source_port.to_be_bytes());
+        packet[22..24].copy_from_slice(&destination_port.to_be_bytes());
+        packet[24..28].copy_from_slice(&sequence.to_be_bytes());
+        packet[28..32].copy_from_slice(&acknowledgment.to_be_bytes());
+        packet[32] = 0x50;
+        packet[33] = flags;
+        packet[34..36].copy_from_slice(&64240_u16.to_be_bytes());
+        packet[40..].copy_from_slice(payload);
+        packet
+    }
+
+    fn d2o_tcp_silence_seed(
+        sessions: &mut TcpSessions,
+        port: u16,
+        start: Instant,
+        rtt: Duration,
+        server_empty_ack: bool,
+    ) -> (Instant, Vec<u8>) {
+        sessions.track_packet(
+            &d2o_tcp_silence_packet(port, false, 0x02, 999, 0, &[]),
+            start,
+        );
+        sessions.track_packet(
+            &d2o_tcp_silence_packet(port, true, 0x12, 4999, 1000, &[]),
+            start + rtt,
+        );
+        let hello = d2o_flow_unfit_client_hello();
+        let hello_at = start + rtt + Duration::from_millis(10);
+        sessions.track_packet(
+            &d2o_tcp_silence_packet(port, false, 0x18, 1000, 5000, &hello),
+            hello_at,
+        );
+        if server_empty_ack {
+            sessions.track_packet(
+                &d2o_tcp_silence_packet(port, true, 0x10, 5000, 1000 + hello.len() as u32, &[]),
+                hello_at + Duration::from_millis(10),
+            );
+        }
+        (hello_at, hello)
+    }
+
+    #[test]
+    fn tcp_silence_shared_lifecycle_matches_current_d2o() {
+        let mut sessions = TcpSessions::default();
+        let start = Instant::now();
+        let (hello_at, _) =
+            d2o_tcp_silence_seed(&mut sessions, 45101, start, Duration::from_millis(20), true);
+        let sweep_events = sessions.sweep_silent(hello_at + Duration::from_millis(1500), true);
+        let sweep = sweep_events.len() == 1;
+        let duplicate = sessions
+            .sweep_silent(hello_at + Duration::from_secs(3), true)
+            .is_empty();
+
+        let mut sessions = TcpSessions::default();
+        let start = Instant::now();
+        let (hello_at, _) =
+            d2o_tcp_silence_seed(&mut sessions, 45102, start, Duration::from_millis(20), true);
+        let mut expiry_events = Vec::new();
+        let expiry = sessions.expire_with_silent(
+            hello_at + Duration::from_secs(120) + Duration::from_millis(100),
+            Duration::from_secs(120),
+            |event| expiry_events.push(event),
+        ) == 1;
+        let expiry_silent = expiry_events.len() == 1;
+
+        let close_event = |port: u16, flags: u8, elapsed: Duration| {
+            let start = Instant::now() - elapsed - Duration::from_millis(30);
+            let mut sessions = TcpSessions::default();
+            let (_, hello) =
+                d2o_tcp_silence_seed(&mut sessions, port, start, Duration::from_millis(20), true);
+            let decision = decide_with_session(
+                &mut sessions,
+                &Plan::default(),
+                &d2o_tcp_silence_packet(port, false, flags, 1000 + hello.len() as u32, 5000, &[]),
+            );
+            assert_eq!(decision, PacketDecision::Accept);
+            let events = sessions.take_tcp_silence_events();
+            assert!(events.iter().all(|event| event.elapsed_ms > 0));
+            !events.is_empty()
+        };
+        let fin_early = close_event(45110, 0x11, Duration::from_millis(500));
+        let fin_late = close_event(45120, 0x11, Duration::from_millis(1500));
+        let rst_early = close_event(45111, 0x14, Duration::from_millis(500));
+        let rst_late = close_event(45121, 0x14, Duration::from_millis(1500));
+
+        let mut sessions = TcpSessions::default();
+        let start = Instant::now();
+        let (hello_at, hello) = d2o_tcp_silence_seed(
+            &mut sessions,
+            45130,
+            start,
+            Duration::from_millis(200),
+            false,
+        );
+        sessions.track_packet(
+            &d2o_tcp_silence_packet(45130, false, 0x18, 1000, 5000, &hello),
+            hello_at + Duration::from_millis(1100),
+        );
+        let retry_events = sessions.sweep_silent(hello_at + Duration::from_millis(1200), true);
+        let retry = retry_events.len() == 1;
+        let retry_silent = retry_events
+            .first()
+            .is_some_and(|event| event.elapsed_ms == 1200);
+
+        let mut sessions = TcpSessions::default();
+        let start = Instant::now();
+        sessions.track_packet(
+            &d2o_tcp_silence_packet(45140, false, 0x02, 999, 0, &[]),
+            start,
+        );
+        sessions.track_packet(
+            &d2o_tcp_silence_packet(45140, true, 0x12, 4999, 1000, &[]),
+            start + Duration::from_millis(20),
+        );
+        sessions.track_packet(
+            &d2o_tcp_silence_packet(45141, false, 0x02, 999, 0, &[]),
+            start + Duration::from_millis(30),
+        );
+        let hello = d2o_flow_unfit_client_hello();
+        let hello_at = start + Duration::from_millis(40);
+        sessions.track_packet(
+            &d2o_tcp_silence_packet(45141, false, 0x18, 1000, 5000, &hello),
+            hello_at,
+        );
+        let mut isolated_events = Vec::new();
+        sessions.expire_with_silent(
+            hello_at + Duration::from_secs(120) + Duration::from_millis(100),
+            Duration::from_secs(120),
+            |event| isolated_events.push(event),
+        );
+        let isolated = isolated_events.is_empty();
+
+        let output = format!(
+            "sweep={} duplicate={} expiry={} expiry_silent={} fin_early={} fin_late={} rst_early={} rst_late={} retry={} retry_silent={} isolated={}\n",
+            u8::from(sweep),
+            u8::from(duplicate),
+            u8::from(expiry),
+            u8::from(expiry_silent),
+            u8::from(fin_early),
+            u8::from(fin_late),
+            u8::from(rst_early),
+            u8::from(rst_late),
+            u8::from(retry),
+            u8::from(retry_silent),
+            u8::from(isolated),
+        );
+        assert_eq!(
+            output,
+            "sweep=1 duplicate=1 expiry=1 expiry_silent=1 fin_early=0 fin_late=1 rst_early=0 rst_late=1 retry=1 retry_silent=1 isolated=1\n"
+        );
+        if let Some(path) = std::env::var_os("R2O_TCP_SILENCE_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
     #[test]
     fn tcp_истечение_не_заимствует_обратную_видимость_у_другого_потока() {
         let start = Instant::now();

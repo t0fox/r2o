@@ -439,6 +439,34 @@ jobs:
           sh scripts/ci-differential-shards.sh verify
           printf 'matrix=%s\n' "$(sh scripts/ci-differential-shards.sh matrix)" >> "$GITHUB_OUTPUT"
 
+  tcp-silence-current-differential:
+    name: C/Rust differential — current D2O / TCP silence
+    needs: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
+        with:
+          repository: t0fox/d2o
+          ref: a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe
+          path: d2o
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
+        with:
+          toolchain: 1.98.0
+      - name: Загрузить зависимости Rust
+        run: cargo fetch --locked
+      - name: Сверить TCP silence с текущим D2O main
+        env:
+          R2O_DONOR_ROOT: ${{ github.workspace }}/d2o
+          TMPDIR: ${{ runner.temp }}
+        run: sh scripts/test-tcp-silence-current-differential.sh
+
   donor-differential:
     name: C/Rust differential — ${{ matrix.snapshot }} / ${{ matrix.shard }}
     needs: [lint, donor-differential-plan]
@@ -557,6 +585,7 @@ jobs:
       - rust-workspace
       - cross-check
       - donor-differential-plan
+      - tcp-silence-current-differential
       - nfqueue-integration
       - release-build
       - donor-differential
@@ -564,7 +593,7 @@ jobs:
     timeout-minutes: 2
     steps:
       - name: Завершиться ошибкой при пропуске или сбое проверки
-        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || needs.lint.result == 'skipped' || needs.panel.result == 'skipped' || needs.telegram.result == 'skipped' || needs.panel-browser.result == 'skipped' || needs.shell.result == 'skipped' || needs.datapath.result == 'skipped' || needs.core.result == 'skipped' || needs.rust-workspace.result == 'skipped' || needs.cross-check.result == 'skipped' || needs.donor-differential-plan.result == 'skipped' || needs.nfqueue-integration.result == 'skipped' || needs.release-build.result == 'skipped' || needs.donor-differential.result == 'skipped' || (github.event_name != 'pull_request' && needs.sanitizers.result == 'skipped') }}
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || needs.lint.result == 'skipped' || needs.panel.result == 'skipped' || needs.telegram.result == 'skipped' || needs.panel-browser.result == 'skipped' || needs.shell.result == 'skipped' || needs.datapath.result == 'skipped' || needs.core.result == 'skipped' || needs.rust-workspace.result == 'skipped' || needs.cross-check.result == 'skipped' || needs.donor-differential-plan.result == 'skipped' || needs.tcp-silence-current-differential.result == 'skipped' || needs.nfqueue-integration.result == 'skipped' || needs.release-build.result == 'skipped' || needs.donor-differential.result == 'skipped' || (github.event_name != 'pull_request' && needs.sanitizers.result == 'skipped') }}
         run: exit 1
       - name: Все проверки завершились успешно
         run: echo "Все проверки R2O пройдены"

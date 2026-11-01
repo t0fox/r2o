@@ -9311,11 +9311,11 @@ This closes only the post-HEADERS/pre-body reset case. Other transport errors, s
 
 ### Datapath TCP silence lifecycle — 2026-11-02
 
-Current comparison sources: D2O main a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe at /mnt/e/r2o-tooling/d2o-current-main; R2O main baseline 51c74db42e5c7dbf8771d768c0e1b0b2c0317980 at /mnt/e/r2o. The clean donor diff from 304ba893 to a63d964 touches only datapath/session.c and datapath/test_session.c; the original /mnt/e/d2o checkout remains untouched.
+Current comparison sources: D2O main a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe at /mnt/e/r2o-tooling/d2o-upstream-a63d964; R2O main baseline 575ee61d6519c7bf5e0517744f9064112b34cbcc at /mnt/e/r2o. The clean donor diff from 304ba893 to a63d964 touches only datapath/session.c and datapath/test_session.c; the original /mnt/e/d2o checkout remains untouched.
 
 D2O now uses one tcp_silence_observe predicate from sweep, idle expiry, and FIN/RST close. The current-source C command `make -B -C datapath test_session CC=cc && ./datapath/test_session` passed with “сессия: все проверки прошли”.
 
-R2O uses one tcp_silence_event predicate from sweep, expiry, and close before flow removal. Regressions cover per-flow reverse visibility, empty ACK versus response payload, first reverse RST, one ClientHello retransmission before the RTT deadline, repeat-suspicion suppression, duplicate suppression, recognized ClientHello gating, and late FIN/RST delivery.
+R2O uses one tcp_silence_event predicate from sweep, expiry, and close before flow removal. Regressions cover per-flow reverse visibility, empty ACK versus response payload, first reverse RST, one ClientHello retransmission before the RTT deadline, repeat-suspicion suppression, duplicate suppression, recognized ClientHello gating, and late FIN/RST delivery. The new `scripts/test-tcp-silence-current-differential.sh` compiles D2O current-main `test_session.c`, then compares the same IPv4/TCP fields and ClientHello bytes through sweep, expiry, FIN/RST close, retransmission and unrelated-flow visibility. The C and Rust outputs match; C `test_session` passed and `tcp_silence_shared_lifecycle_matches_current_d2o` passed 1/1. Sweep/expiry/retry use the same synthetic time deltas; FIN/RST close cases exercise the same early/late sides of the RTT deadline. A dedicated CI job pins D2O at a63d964.
 
 Commands, with CARGO_HOME, CARGO_TARGET_DIR, and TMPDIR on E:
 ```sh
@@ -9327,7 +9327,7 @@ cargo test --quiet -p r2o-datapath --locked --offline -- --skip control_server -
 
 Results: format check passed; silence tests 8/8; expiry tests 5/5; the filtered crate run passed 340 tests with 0 failures, 13 tests filtered, and 5 ignored. Socket/control tests filtered from this run had previously returned OS error 95 when Unix socket/temp operations used E: DrvFS.
 
-No QEMU run for this in-memory session-classifier slice: no ARM64 production datapath binary was rebuilt, so a guest boot would not exercise the changed code. Any applicable future QEMU run remains short, OpenWrt, ARM64 only. No same-trace C/Rust differential was added, so this evidence does not claim that edge as a newly proven weighted contract.
+No QEMU run for this in-memory session-classifier slice: no production datapath code changed, so a guest boot would not exercise the test-only trace. Any applicable future QEMU run remains short, OpenWrt, ARM64 only. This differential adds evidence for the listed synthetic lifecycle branches only; the weighted TCP contract and physical-router status are unchanged.
 
 
 ### HTTP response parser ignores buffered bytes after framing - 2026-11-02

@@ -24,7 +24,7 @@
           "statusLabel": "Эквивалентно",
           "group": "Datapath",
           "mapping": "`d2k_session_packet`, `d2k_session_sweep` → `r2o-datapath` engine/session/hold",
-          "evidence": "`r2o-hold-differential.sh`, `r2o-tcp-payload-stats-differential.sh`, `r2o-tcp-rst-cut-differential.sh`, `r2o-tcp-rst-observation-differential.sh`, `r2o-tcp-reply-hidden-differential.sh`, `r2o-tcp-exchange-differential.sh`; clean D2O source manifest passed 53/53; exact carry-forward scope is documented above. Additional unscored TCP-silence slice (2026-11-02): D2O current-main test_session passed; Rust tcp_silence 8/8 and tcp_истечение 5/5 passed, and the remaining datapath crate tests passed after filtering the E: DrvFS socket/control cases that returned OS 95. No same-trace C/Rust fixture was"
+          "evidence": "`r2o-hold-differential.sh`, `r2o-tcp-payload-stats-differential.sh`, `r2o-tcp-rst-cut-differential.sh`, `r2o-tcp-rst-observation-differential.sh`, `r2o-tcp-reply-hidden-differential.sh`, `r2o-tcp-exchange-differential.sh`; clean D2O source manifest passed 53/53; exact carry-forward scope is documented above. Additional unscored TCP-silence slice (2026-11-02): clean D2O main `a63d964` `test_session` passed; `scripts/test-tcp-silence-current-differential.sh` compares matching IPv4/TCP packet fields and timing regions across sweep/duplicate suppression, idle expiry, early/late FIN/RST, ClientHell"
         },
         {
           "id": 3,
@@ -592,7 +592,7 @@
       "statusLabel": "Эквивалентно",
       "group": "Datapath",
       "mapping": "`d2k_session_packet`, `d2k_session_sweep` → `r2o-datapath` engine/session/hold",
-      "evidence": "`r2o-hold-differential.sh`, `r2o-tcp-payload-stats-differential.sh`, `r2o-tcp-rst-cut-differential.sh`, `r2o-tcp-rst-observation-differential.sh`, `r2o-tcp-reply-hidden-differential.sh`, `r2o-tcp-exchange-differential.sh`; clean D2O source manifest passed 53/53; exact carry-forward scope is documented above. Additional unscored TCP-silence slice (2026-11-02): D2O current-main test_session passed; Rust tcp_silence 8/8 and tcp_истечение 5/5 passed, and the remaining datapath crate tests passed after filtering the E: DrvFS socket/control cases that returned OS 95. No same-trace C/Rust fixture was"
+      "evidence": "`r2o-hold-differential.sh`, `r2o-tcp-payload-stats-differential.sh`, `r2o-tcp-rst-cut-differential.sh`, `r2o-tcp-rst-observation-differential.sh`, `r2o-tcp-reply-hidden-differential.sh`, `r2o-tcp-exchange-differential.sh`; clean D2O source manifest passed 53/53; exact carry-forward scope is documented above. Additional unscored TCP-silence slice (2026-11-02): clean D2O main `a63d964` `test_session` passed; `scripts/test-tcp-silence-current-differential.sh` compares matching IPv4/TCP packet fields and timing regions across sweep/duplicate suppression, idle expiry, early/late FIN/RST, ClientHell"
     },
     {
       "id": 3,
