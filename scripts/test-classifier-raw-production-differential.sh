@@ -45,7 +45,7 @@ cleanup() {
         ip netns del "$NS" 2>/dev/null || true
     fi
     if [ "$test_exit_status" -ne 0 ]; then
-        for test_log in "$TEMP/d2o.err" "$TEMP/r2o.err" "$TEMP/server.log"; do
+        for test_log in "$TEMP/d2o.err" "$TEMP/r2o.err" "$TEMP/server.log" "$TEMP/d2o-positive.err" "$TEMP/r2o-positive.err" "$TEMP/positive-d2o-server.log" "$TEMP/positive-r2o-server.log"; do
             if [ -f "$test_log" ]; then cat "$test_log" >&2 || true; fi
         done
     fi
@@ -225,4 +225,166 @@ print(
 )
 PY
 
-echo "PASSED: pinned D2O and R2O production classifiers matched the unfiltered raw property/compose/poison path"
+cat >"$TEMP/positive-server.py" <<'PY'
+import socket
+import sys
+import threading
+import time
+
+ready_path = sys.argv[1]
+target = b"classifier.example"
+control = b"probe-d2k.invalid-control.example"
+alert = b"\x15\x03\x03\x00\x02\x02\x28"
+server_hello = b"\x16\x03\x03\x00\x02\x02\x00"
+control_seen = threading.Event()
+listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+listener.bind(("127.0.0.1", 0))
+listener.listen(64)
+with open(ready_path, "w", encoding="ascii") as ready:
+    ready.write(str(listener.getsockname()[1]))
+
+def answer(connection):
+    connection.settimeout(0.35)
+    data = bytearray()
+    try:
+        while len(data) < 8192:
+            try:
+                part = connection.recv(4096)
+            except socket.timeout:
+                break
+            if not part:
+                break
+            data.extend(part)
+            if control in data or target in data:
+                break
+        if control in data:
+            control_seen.set()
+            connection.sendall(alert)
+            action = "control-alert"
+        elif control_seen.is_set() and data:
+            connection.sendall(server_hello)
+            action = "post-control-serverhello"
+        else:
+            action = "ignore"
+        print(
+            f"action={action} bytes={len(data)} "
+            f"target={target in data} control={control in data}",
+            flush=True,
+        )
+        time.sleep(0.05)
+    except OSError as error:
+        print(f"connection error: {error}", flush=True)
+    finally:
+        connection.close()
+
+while True:
+    connection, _ = listener.accept()
+    threading.Thread(target=answer, args=(connection,), daemon=True).start()
+PY
+
+wait_positive_response() {
+    log_path=$1
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        if [ -f "$log_path" ] && grep -Fq "post-control-serverhello" "$log_path"; then
+            grep -Fq "control-alert" "$log_path" || return 1
+            return 0
+        fi
+        sleep 0.05
+    done
+    echo "positive server did not emit a ServerHello: $log_path" >&2
+    return 1
+}
+
+start_positive_server() {
+    ready_path=$1
+    log_path=$2
+    ip netns exec "$NS" python3 "$TEMP/positive-server.py" "$ready_path" >"$log_path" 2>&1 &
+    SERVER_PID=$!
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        [ -s "$ready_path" ] && break
+        kill -0 "$SERVER_PID" 2>/dev/null || { cat "$log_path" >&2; exit 1; }
+        sleep 0.05
+    done
+    [ -s "$ready_path" ] || { echo "positive loopback server did not start" >&2; exit 1; }
+}
+
+kill "$SERVER_PID" 2>/dev/null || true
+wait "$SERVER_PID" 2>/dev/null || true
+SERVER_PID=
+
+start_positive_server "$TEMP/positive-d2o.ready" "$TEMP/positive-d2o-server.log"
+POSITIVE_PORT=$(cat "$TEMP/positive-d2o.ready")
+ip netns exec "$NS" env D2K_FW=nft "$D2K_BIN" classify "127.0.0.1:$POSITIVE_PORT" \
+    --sni classifier.example --repeats 1 --timeout 350 \
+    --allow-loopback --mark 0 --json \
+    >"$TEMP/d2o-positive.json" 2>"$TEMP/d2o-positive.err"
+wait_positive_response "$TEMP/positive-d2o-server.log"
+kill "$SERVER_PID" 2>/dev/null || true
+wait "$SERVER_PID" 2>/dev/null || true
+SERVER_PID=
+
+start_positive_server "$TEMP/positive-r2o.ready" "$TEMP/positive-r2o-server.log"
+POSITIVE_PORT=$(cat "$TEMP/positive-r2o.ready")
+ip netns exec "$NS" env R2O_FW=nft "$R2O_BIN" \
+    --classify 127.0.0.1 "$POSITIVE_PORT" classifier.example --repeats 1 \
+    --timeout 350 --allow-loopback --mark 0 --json \
+    >"$TEMP/r2o-positive.json" 2>"$TEMP/r2o-positive.err"
+wait_positive_response "$TEMP/positive-r2o-server.log"
+
+python3 - "$TEMP/d2o-positive.json" "$TEMP/r2o-positive.json" \
+    "$TEMP/positive-d2o-server.log" "$TEMP/positive-r2o-server.log" <<'PY'
+import json
+import sys
+
+def summarize(path):
+    with open(path, encoding="utf-8") as source:
+        result = json.load(source)
+    trace = [
+        (
+            item["probe"],
+            item.get("pass", 0),
+            item.get("fail", 0),
+            item.get("delay_ms", 0),
+            item.get("cuts", []),
+            bool(item.get("err") or item.get("error")),
+        )
+        for item in result["trace"]
+    ]
+    property_hit = next(
+        (item for item in trace if item[0] == "свойство:перекрытие слева"),
+        None,
+    )
+    if (
+        result["verdict"] != "poisonable"
+        or result.get("path") != "свойство"
+        or result.get("composed", False)
+        or not result.get("raw_usable")
+        or property_hit is None
+        or property_hit[1:3] != (1, 0)
+    ):
+        raise SystemExit(f"expected a positive production property hit in {path}")
+    return (
+        result["verdict"],
+        result.get("path"),
+        result.get("composed", False),
+        result.get("raw_usable", False),
+        result.get("props"),
+        trace,
+    )
+
+c_result = summarize(sys.argv[1])
+rust_result = summarize(sys.argv[2])
+for path in sys.argv[3:]:
+    with open(path, encoding="utf-8") as source:
+        log = source.read()
+    if "control-alert" not in log or "post-control-serverhello" not in log:
+        raise SystemExit(f"positive server did not traverse both response states: {path}")
+if c_result != rust_result:
+    print("D2O positive property:", json.dumps(c_result, ensure_ascii=False), file=sys.stderr)
+    print("R2O positive property:", json.dumps(rust_result, ensure_ascii=False), file=sys.stderr)
+    raise SystemExit("positive production property results differ")
+print("D2O/R2O positive production property:", json.dumps(c_result, ensure_ascii=False))
+PY
+
+echo "PASSED: actual D2O and R2O production classifiers matched a positive raw property hit"
