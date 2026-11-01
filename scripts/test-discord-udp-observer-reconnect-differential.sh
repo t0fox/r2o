@@ -74,7 +74,7 @@ EOF
 if ! CARGO_TARGET_DIR=$rust_target \
 RUSTFLAGS="${RUSTFLAGS:--Awarnings}" \
 CARGO_BUILD_TARGET=${CARGO_BUILD_TARGET:-$rust_host} \
-CARGO_MAKEFLAGS= \
+CARGO_MAKEFLAGS='' \
     "$CARGO" test --quiet --offline --manifest-path "$rust_temp/rust/Cargo.toml" \
     > "$TEMP/r2o-unit.log" 2>&1; then
     cat "$TEMP/r2o-unit.log" >&2
@@ -86,7 +86,7 @@ grep -q 'test result: ok\.' "$TEMP/r2o-unit.log"
 CARGO_TARGET_DIR=$rust_target \
 RUSTFLAGS="${RUSTFLAGS:--Awarnings}" \
     CARGO_BUILD_TARGET=${CARGO_BUILD_TARGET:-$rust_host} \
-    CARGO_MAKEFLAGS= \
+    CARGO_MAKEFLAGS='' \
     "$CARGO" run --quiet --manifest-path "$rust_temp/rust/Cargo.toml" > "$TEMP/r2o.out"
 
 grep -qx 'ssrc_reconnect first=1 reconnect=0 suspects=1' "$TEMP/d2o.out"

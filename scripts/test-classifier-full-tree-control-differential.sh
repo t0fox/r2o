@@ -101,7 +101,7 @@ fi
 
 CARGO_TARGET_DIR=$rust_target \
 RUSTFLAGS="${RUSTFLAGS:--Awarnings}" \
-CARGO_MAKEFLAGS= \
+CARGO_MAKEFLAGS='' \
 R2O_CLASSIFIER_JSON_FIXTURE="$classifier_json" \
 R2O_CLASSIFIER_COMPOSE_JSON_FIXTURE="$classifier_compose_json" \
     "$CARGO" run --quiet --target "$build_target" \

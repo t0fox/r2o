@@ -82,6 +82,7 @@ MOCK_RULES=$TEMP/r2o
 export MOCK_RULES
 seed_rules
 set -- remove
+# shellcheck source=../router/r2o-ppe-deoffload.sh
 . "$R2O_PPE_LIB"
 summary >"$TEMP/r2o.out"
 

@@ -654,6 +654,7 @@ xt_family_up() {
 }
 
 xt_family_installed() {
+    # shellcheck disable=SC3043 # OpenWrt's BusyBox ash supports local
     local fw_tool queue loopback late_from chain proto direction ct_direction count_direction ports flag
     fw_tool=$1
     queue=$2

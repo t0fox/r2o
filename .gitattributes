@@ -17,6 +17,7 @@ scripts/test-router-install-bootstrap.sh text eol=lf
 scripts/test-router-install-lifecycle.sh text eol=lf
 scripts/test-nfq-netns.sh text eol=lf
 scripts/r2o-quic-silence-netns.sh text eol=lf
+scripts/*.sh text eol=lf
 router/* text eol=lf
 crates/r2o-controller/tests/fixtures/r2o-rx-volume-hcaptcha-split2-c.txt text eol=lf
 crates/r2o-controller/tests/fixtures/r2o-rx-volume-hcaptcha-split5-c.txt text eol=lf

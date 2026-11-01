@@ -38,7 +38,8 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
       - name: Проверить shell-скрипты проекта
         run: |
-          find scripts router -type f -name '*.sh' -print0 | xargs -0 -r shellcheck -S warning -s sh
+          find scripts router -type f -name '*.sh' ! -path 'scripts/test-router-openwrt-init.sh' -print0 | xargs -0 -r shellcheck -S warning -s sh
+          shellcheck -S warning -s bash scripts/test-router-openwrt-init.sh
           shellcheck -S warning -s sh router/S99r2o router/S99r2o.shim router/openwrt-init
       - name: Проверить форматирование Rust
         run: cargo fmt --all --check
@@ -146,11 +147,17 @@ jobs:
                 status=$?
                 failed+=("$test ($status)")
               fi
-            elif sh "$test"; then
-              :
             else
-              status=$?
-              failed+=("$test ($status)")
+              test_shell=sh
+              if [ "$test" = scripts/test-router-openwrt-init.sh ]; then
+                test_shell=bash
+              fi
+              if "$test_shell" "$test"; then
+                :
+              else
+                status=$?
+                failed+=("$test ($status)")
+              fi
             fi
             echo "::endgroup::"
           done

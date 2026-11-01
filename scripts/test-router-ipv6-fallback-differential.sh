@@ -457,7 +457,7 @@ TG_ENABLED=0
 CONFIG
 R2O_ROOT=$TEMP/root R2O_CONFIG=$TEMP/ipv6-config R2O_RUN_DIR=$TEMP/s99-run \
     R2O_FIREWALL=$ROOT/router/r2o-firewall.sh R2O_IPV6_FUNCTIONS=$TEMP/r2o-ipv6-functions.sh \
-    R2O_IPV6_ENABLED_RUNTIME= PATH=$TEMP/up-bin:/usr/bin:/bin \
+    R2O_IPV6_ENABLED_RUNTIME='' PATH=$TEMP/up-bin:/usr/bin:/bin \
     sh "$TEMP/r2o-ipv6-harness"
 
 cat > "$TEMP/up-bin/ip6tables" <<'IP6TABLES'
@@ -488,7 +488,7 @@ R2ORESTORE
 chmod 0700 "$TEMP/r2o-ipv6-restore-harness"
 R2O_ROOT=$TEMP/root R2O_CONFIG=$TEMP/ipv6-config R2O_RUN_DIR=$TEMP/s99-run \
     R2O_FIREWALL=$ROOT/router/r2o-firewall.sh R2O_IPV6_FUNCTIONS=$TEMP/r2o-ipv6-functions.sh \
-    R2O_IPV6_ENABLED_RUNTIME= PATH=$TEMP/up-bin:/usr/bin:/bin \
+    R2O_IPV6_ENABLED_RUNTIME='' PATH=$TEMP/up-bin:/usr/bin:/bin \
     sh "$TEMP/r2o-ipv6-restore-harness"
 : > "$TEMP/r2o-restored.trace"
 R2O_DIR=$TEMP/root R2O_CONFIG=/dev/null R2O_RUN_DIR=$TEMP/r2o-restored-run \

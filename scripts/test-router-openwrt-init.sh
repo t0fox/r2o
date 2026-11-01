@@ -30,6 +30,7 @@ procd_close_instance() { printf 'close\n' >> "$CALLS"; }
 procd_kill() { printf 'kill:%s/%s\n' "$1" "${2:-}" >> "$CALLS"; }
 fail() { printf 'openwrt-init: %s\n' "$*" >&2; exit 1; }
 
+# shellcheck source=../router/openwrt-init
 . "$TEST_INIT"
 case " $EXTRA_COMMANDS " in
     *" boot_wait "*) ;;

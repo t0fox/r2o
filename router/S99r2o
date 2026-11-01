@@ -89,12 +89,12 @@ export R2O_DIR="$ROOT" R2O_CONFIG="$CONF" R2O_RUN_DIR="$RUN" R2O_PPE_ADAPTER="$P
 if [ "${ACTION:-}" = includes ]; then
     [ "${R2O_FLOWOFFLOAD_RESTORING:-0}" != 1 ] || exit 0
     if ! "$FIREWALL" status >/dev/null 2>&1; then
-        ACTION= R2O_FLOWOFFLOAD_RESTORING=1 R2O_FLOWOFFLOAD_SKIP_RESTORE=1 \
+        ACTION='' R2O_FLOWOFFLOAD_RESTORING=1 R2O_FLOWOFFLOAD_SKIP_RESTORE=1 \
             "$INIT" engine-stop >/dev/null 2>&1 || true
         exit 1
     fi
     if "$FIREWALL" flowoffload-ensure; then exit 0; fi
-    ACTION= R2O_FLOWOFFLOAD_RESTORING=1 R2O_FLOWOFFLOAD_SKIP_RESTORE=1 \
+    ACTION='' R2O_FLOWOFFLOAD_RESTORING=1 R2O_FLOWOFFLOAD_SKIP_RESTORE=1 \
         "$INIT" engine-stop >/dev/null 2>&1 || true
     exit 1
 fi
@@ -166,7 +166,7 @@ export R2O_FW
 
 configure_ipv6() {
     IPV6_ENABLED_RUNTIME=$(R2O_DIR="$ROOT" R2O_CONFIG="$CONF" R2O_RUN_DIR="$RUN" \
-        R2O_IPV6_ENABLED_RUNTIME= "$FIREWALL" ipv6-enabled) || die "не определить поддержку IPv6 NFQUEUE"
+        R2O_IPV6_ENABLED_RUNTIME='' "$FIREWALL" ipv6-enabled) || die "не определить поддержку IPv6 NFQUEUE"
     R2O_IPV6_ENABLED_RUNTIME=$IPV6_ENABLED_RUNTIME
     export R2O_IPV6_ENABLED_RUNTIME
 }
@@ -421,7 +421,7 @@ engine_start() {
     if [ "$IPV6_ENABLED" = 1 ]; then
         wait_queue "$QUEUE6" || { engine_stop; die "IPv6 NFQUEUE $QUEUE6 не привязалась"; }
     fi
-    R2O_IPV6_ENABLED_RUNTIME= "$FIREWALL" up || { engine_stop; die "не поставить правила NFQUEUE"; }
+    R2O_IPV6_ENABLED_RUNTIME='' "$FIREWALL" up || { engine_stop; die "не поставить правила NFQUEUE"; }
     fastnat_off
     if ! "$FIREWALL" flowoffload-ensure; then
         say "не удалось отключить fw4 flow offloading; останавливаю datapath, чтобы сохранить видимость трафика"
@@ -832,7 +832,7 @@ telegram_check() {
 
 reapply() {
     component_running r2o-datapath "$DP4_PID" || die "r2o-datapath IPv4 не работает"
-    R2O_IPV6_ENABLED_RUNTIME= "$FIREWALL" up || die "не поставить полный набор правил"
+    R2O_IPV6_ENABLED_RUNTIME='' "$FIREWALL" up || die "не поставить полный набор правил"
 }
 
 heal_reapply() {

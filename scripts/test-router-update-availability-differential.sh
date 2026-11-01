@@ -23,12 +23,18 @@ D2O_RELEASE=new
 WORK=$TEMP/d2o-work
 ROOT_D2O=$TEMP/d2o-root
 ROOT=$ROOT_D2O
+# shellcheck disable=SC2034 # sourced updater functions consume this fixture variable
 DOWNLOAD=https://example.test/download
+# shellcheck disable=SC2034 # sourced updater functions consume this fixture variable
 LOG=$TEMP/d2o.log
 mkdir -p "$WORK" "$ROOT_D2O/bin"
 printf 'old release\n' > "$ROOT_D2O/bin/current"
 now() { printf '1\n'; }
-check() { check_error=; return 0; }
+check() {
+    # shellcheck disable=SC2034 # sourced updater functions consume this fixture variable
+    check_error=
+    return 0
+}
 latest_id() { printf '%s\n' "$D2O_RELEASE"; }
 arch() { printf 'testarch\n'; }
 current_id() { printf 'old\n'; }

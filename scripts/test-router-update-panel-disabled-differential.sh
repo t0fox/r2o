@@ -67,6 +67,7 @@ printf '103\n' > "$DIR/run/d2k-panel.pid"
 healthy || fail "D2O rejected a configured, running panel"
 
 printf 'PANEL_LISTEN=\n' > "$DIR/config"
+# shellcheck disable=SC2034 # sourced health functions consume this fixture variable
 HEALTH_WAIT=60
 HEALTH_FAIL_DURING_SLEEP=1
 D2O_DATAPATH_ALIVE=1
@@ -102,10 +103,15 @@ component_running() {
     esac
 }
 RUNTIME=$TEMP/r2o/runtime
+# shellcheck disable=SC2034 # sourced health functions consume these fixture variables
 QUEUE4=2000
+# shellcheck disable=SC2034 # sourced health functions consume these fixture variables
 IPV6_ENABLED=0
+# shellcheck disable=SC2034 # sourced health functions consume these fixture variables
 DP4_PID=$TEMP/r2o/dp.pid
+# shellcheck disable=SC2034 # sourced health functions consume these fixture variables
 CT4_PID=$TEMP/r2o/ct.pid
+# shellcheck disable=SC2034 # sourced health functions consume these fixture variables
 PN_PID=$TEMP/r2o/panel.pid
 wait_health || fail "R2O rejected a healthy datapath when PANEL_LISTEN is empty"
 

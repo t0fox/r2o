@@ -68,11 +68,12 @@ pub mod classify;
 EOF
 cat "$ROOT/crates/r2o-controller/tests/fixtures/classify-candidate-filter-r2o.rs" >> "$TEMP/rust/src/main.rs"
 
+rust_build_target=${CARGO_BUILD_TARGET:-$($RUSTC -vV | sed -n 's/^host: //p')}
 CARGO_TARGET_DIR=$rust_target \
 RUSTFLAGS="${RUSTFLAGS:--Awarnings}" \
-CARGO_BUILD_TARGET=${CARGO_BUILD_TARGET:-$($RUSTC -vV | sed -n 's/^host: //p')} \
-CARGO_MAKEFLAGS= \
-    "$CARGO" run --quiet --target "${CARGO_BUILD_TARGET:-$($RUSTC -vV | sed -n 's/^host: //p')}" \
+CARGO_BUILD_TARGET=$rust_build_target \
+CARGO_MAKEFLAGS='' \
+    "$CARGO" run --quiet --target "$rust_build_target" \
         --manifest-path "$rust_temp/rust/Cargo.toml" > "$TEMP/r2o.out"
 if ! cmp -s "$TEMP/d2o.out" "$TEMP/r2o.out"; then
     diff -u "$TEMP/d2o.out" "$TEMP/r2o.out" || true

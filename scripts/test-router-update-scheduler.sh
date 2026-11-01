@@ -20,12 +20,17 @@ tr -d '\r' < "$D2O_UPDATE" | sed -n '/^install_release() {/,$p' | sed '/^run() {
 grep -q '^install_release() {' "$TEMP/d2o-install.sh" || { echo "не удалось извлечь D2O update policy" >&2; exit 2; }
 (
     WORK=$TEMP/d2o-work
+    # shellcheck disable=SC2034 # sourced updater functions consume this fixture variable
     DOWNLOAD=https://example.test/download
     mkdir -p "$WORK"
     EVENTS=$TEMP/d2o-events
     : > "$EVENTS"
     now() { printf '1\n'; }
-    check() { check_error=; return 0; }
+    check() {
+        # shellcheck disable=SC2034 # sourced updater functions consume this fixture variable
+        check_error=
+        return 0
+    }
     latest_id() { printf 'r2o-bad\n'; }
     arch() { printf 'mipsel\n'; }
     current_id() { printf 'r2o-good\n'; }

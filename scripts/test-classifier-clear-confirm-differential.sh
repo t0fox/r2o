@@ -65,7 +65,7 @@ cat "$ROOT/crates/r2o-controller/tests/fixtures/classify-clear-confirm-rust.rs" 
 CARGO_TARGET_DIR=$rust_target \
 RUSTFLAGS="${RUSTFLAGS:--Awarnings}" \
 CARGO_BUILD_TARGET=${CARGO_BUILD_TARGET:-$($RUSTC -vV | sed -n 's/^host: //p')} \
-CARGO_MAKEFLAGS= \
+CARGO_MAKEFLAGS='' \
     "$CARGO" run --quiet --manifest-path "$rust_temp/rust/Cargo.toml" > "$TEMP/r2o.out"
 grep -v '^timeout-ceiling=' "$TEMP/r2o.out" > "$TEMP/r2o-classify.out"
 cmp "$TEMP/d2o.out" "$TEMP/r2o-classify.out"
