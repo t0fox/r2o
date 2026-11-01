@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include <inttypes.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,10 +18,13 @@ static const char *verdict_name(d2k_quic_arm_data_verdict verdict) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 5) return 2;
+    if (argc != 6) return 2;
     char *end = NULL;
     long port = strtol(argv[2], &end, 10);
     if (!end || *end || port < 1 || port > 65535) return 2;
+    char *budget_end = NULL;
+    unsigned long budget = strtoul(argv[5], &budget_end, 10);
+    if (!budget_end || *budget_end || budget > UINT_MAX) return 2;
 
     d2k_qc_opts options;
     memset(&options, 0, sizeof options);
@@ -38,7 +42,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     d2k_quic_arm_data data = {.verdict = D2K_QAD_NOT_RUN};
-    d2k_quic_data_stage(connection, argv[3], argv[4], 0, 0, 1000, &data);
+    d2k_quic_data_stage(connection, argv[3], argv[4], 0, (unsigned)budget, 1000, &data);
     d2k_qc_close(connection);
     printf("verdict=%s app_bytes=%" PRIu64 " requests=%u\n",
            verdict_name(data.verdict), data.app_bytes, data.requests);

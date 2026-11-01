@@ -679,7 +679,7 @@ async fn r2o_http3_повторяет_get_до_прохождения_пакет
 
 #[tokio::test]
 #[ignore = "requires the pinned D2O harness; run scripts/test-quic-http3-full-stage-differential.sh"]
-async fn r2o_http3_full_data_stage_matches_d2o_on_complete_response() {
+async fn r2o_http3_full_data_stage_matches_d2o_on_complete_and_budget_responses() {
     let d2o_binary = std::env::var("D2O_QUIC_DATA_STAGE_BIN")
         .expect("D2O_QUIC_DATA_STAGE_BIN must point to the pinned C data-stage harness");
     let mut certificate_params = rcgen::CertificateParams::new(vec!["localhost".to_owned()]);
@@ -750,13 +750,15 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_response() {
     });
 
     let c_address = server_address;
+    let c_binary = d2o_binary.clone();
     let c_output = tokio::task::spawn_blocking(move || {
-        std::process::Command::new(d2o_binary)
+        std::process::Command::new(c_binary)
             .args([
                 "127.0.0.1",
                 &c_address.port().to_string(),
                 "localhost",
                 "/stage",
+                "0",
             ])
             .output()
             .unwrap()
@@ -780,7 +782,7 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_response() {
     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
     socket.connect(server_address).unwrap();
     let mut roots = RootCertStore::empty();
-    roots.add(certificate_der).unwrap();
+    roots.add(certificate_der.clone()).unwrap();
     let rust_result = r2o_quic_http3_get(
         socket,
         server_address,
@@ -809,6 +811,88 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_response() {
         c_field("requests").parse::<u32>().unwrap(),
         rust_result.requests,
         "D2O={c_result} R2O={rust_result:?}"
+    );
+
+    let repeated_binary = d2o_binary.clone();
+    let repeated_address = server_address;
+    let repeated_c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(repeated_binary)
+            .args([
+                "127.0.0.1",
+                &repeated_address.port().to_string(),
+                "localhost",
+                "/stage",
+                "2",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        repeated_c_output.status.success(),
+        "D2O budget replay failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&repeated_c_output.stdout),
+        String::from_utf8_lossy(&repeated_c_output.stderr)
+    );
+    let repeated_c_result = String::from_utf8(repeated_c_output.stdout).unwrap();
+    let repeated_c_field = |name: &str| {
+        repeated_c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {repeated_c_result}"))
+    };
+
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.connect(server_address).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(certificate_der).unwrap();
+    let repeated_rust_result = r2o_quic_http3_measure(
+        socket,
+        server_address,
+        "localhost",
+        "/stage",
+        Duration::from_secs(5),
+        roots,
+        2,
+    )
+    .await;
+    let repeated_rust_verdict =
+        r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&repeated_rust_result);
+
+    assert!(
+        repeated_rust_result.handshake_confirmed,
+        "R2O={repeated_rust_result:?}"
+    );
+    assert_eq!(
+        repeated_rust_result.status, 200,
+        "R2O={repeated_rust_result:?}"
+    );
+    assert!(
+        repeated_rust_result.body_bytes > 0,
+        "R2O={repeated_rust_result:?}"
+    );
+    assert!(
+        repeated_rust_result.budget_passed,
+        "R2O={repeated_rust_result:?}"
+    );
+    assert_eq!(
+        repeated_c_field("verdict"),
+        format!("{repeated_rust_verdict:?}")
+    );
+    assert_eq!(
+        repeated_c_field("app_bytes").parse::<u64>().unwrap(),
+        repeated_rust_result.app_bytes,
+        "D2O={repeated_c_result} R2O={repeated_rust_result:?}"
+    );
+    assert_eq!(
+        repeated_c_field("requests").parse::<u32>().unwrap(),
+        repeated_rust_result.requests,
+        "D2O={repeated_c_result} R2O={repeated_rust_result:?}"
+    );
+    assert!(
+        repeated_rust_result.requests > 1,
+        "budget run did not repeat GET: {repeated_rust_result:?}"
     );
     server.abort();
 }
