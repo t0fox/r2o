@@ -9203,3 +9203,7 @@ git ls-remote confirmed D2O main at 304ba893dd37197128ac8799c0495b035f6a38c0 and
 The recent classifier production differential was rerun with R2O_DONOR_ROOT=/mnt/e/r2o-tooling/d2o-clean-main and a d2k-detect built inside that clone: the 93-probe tree/progress and positive property, compose, and seqovl-1 cases passed. The QUIC full-stage script now accepts R2O_DONOR_ROOT; against the clean clone it passed 8/8 HTTP/3 tests in 47.64 seconds. The process-stat differential was rerun with D2O_ROOT pointing at the clean clone and again matched CPU=0 ms and RSS=44 KiB.
 
 Earlier C/Rust results that read the dirty donor working tree are not final oracle evidence. The matrix remains provisional until its source-dependent scenarios are selectively rerun against this clean snapshot; no overall parity percentage is claimed.
+
+### Upstream differential manifest read-only inventory - 2026-11-01
+
+Read scripts/ci-differential-shards.sh and the matrix notes without executing the shard suite. The manifest pins the D2O upstream SHA 304ba893dd37197128ac8799c0495b035f6a38c0 and lists 53 current upstream entries; the matrix records the earlier 51-scenario report and says those scenarios were not rerun wholesale. The new clean-source classifier, QUIC, and process-stat differentials were run selectively; the remaining manifest stays prior evidence pending source-specific selection.
