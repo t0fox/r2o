@@ -763,7 +763,7 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                     }
                     let status = if matches!(
                         request.uri().path(),
-                        "/stage" | "/refuse" | "/slow" | "/budget-slow" | "/drop"
+                        "/stage" | "/growth" | "/refuse" | "/slow" | "/budget-slow" | "/drop"
                     ) {
                         if request.uri().path() == "/refuse" {
                             451
@@ -791,6 +791,25 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                     }
                     if request.uri().path() == "/budget-slow" {
                         tokio::time::sleep(Duration::from_secs(10)).await;
+                    }
+                    if request.uri().path() == "/growth" {
+                        if stream
+                            .send_data(bytes::Bytes::from_static(b"quic-"))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        if stream
+                            .send_data(bytes::Bytes::from_static(b"stage-ok"))
+                            .await
+                            .is_err()
+                            || stream.finish().await.is_err()
+                        {
+                            break;
+                        }
+                        continue;
                     }
                     if request.uri().path() == "/drop" {
                         if stream
@@ -962,6 +981,71 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
     assert!(
         repeated_rust_result.requests > 1,
         "budget run did not repeat GET: {repeated_rust_result:?}"
+    );
+
+    let growth_binary = d2o_binary.clone();
+    let growth_address = server_address;
+    let growth_c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(growth_binary)
+            .args([
+                "127.0.0.1",
+                &growth_address.port().to_string(),
+                "localhost",
+                "/growth",
+                "2",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        growth_c_output.status.success(),
+        "D2O growth replay failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&growth_c_output.stdout),
+        String::from_utf8_lossy(&growth_c_output.stderr)
+    );
+    let growth_c_result = String::from_utf8(growth_c_output.stdout).unwrap();
+    let growth_c_field = |name: &str| {
+        growth_c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {growth_c_result}"))
+    };
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.connect(server_address).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(certificate_der.clone()).unwrap();
+    let growth_rust_result = r2o_quic_http3_measure(
+        socket,
+        server_address,
+        "localhost",
+        "/growth",
+        Duration::from_secs(5),
+        roots,
+        2,
+    )
+    .await;
+    let growth_rust_verdict =
+        r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&growth_rust_result);
+    assert!(growth_rust_result.handshake_confirmed);
+    assert_eq!(growth_rust_result.status, 200);
+    assert_eq!(growth_rust_result.body_bytes, 13);
+    assert!(growth_rust_result.budget_passed);
+    assert_eq!(
+        growth_c_field("verdict"),
+        format!("{growth_rust_verdict:?}")
+    );
+    assert_eq!(growth_c_field("verdict"), "Pass");
+    assert_eq!(
+        growth_c_field("app_bytes").parse::<u64>().unwrap(),
+        growth_rust_result.app_bytes,
+        "D2O={growth_c_result} R2O={growth_rust_result:?}"
+    );
+    assert_eq!(
+        growth_c_field("requests").parse::<u32>().unwrap(),
+        growth_rust_result.requests,
+        "D2O={growth_c_result} R2O={growth_rust_result:?}"
     );
 
     let stalled_budget_binary = d2o_binary.clone();

@@ -9179,3 +9179,7 @@ Added periodic and shutdown process CPU/RSS output to the Rust datapath. The dif
 ### Debian WSL full-workspace verification - 2026-11-01
 
 The first full Cargo workspace run became stuck in the controller QUIC candidate fixture: the test process was waiting to join its local UDP receiver while the control thread blocked reading the next UnixStream frame. The fixture now closes the client and discovery worker before joining, and exits its candidate/delete loop on peer EOF; the isolated test passes. On Debian WSL, cargo test --workspace --all-targets --locked --offline passed across 74 test binaries (1504 passed, 0 failed, 45 ignored). cargo fmt --all -- --check and cargo check --workspace --all-targets --locked --offline also passed. The check reports two existing dead-code warnings in the Telegram crate.
+
+### QUIC HTTP/3 delayed response growth - 2026-11-01
+
+Extended the pinned D2O/R2O full-stage loopback differential with a budget=2 /growth route. The local H3 server sends a 5-byte body prefix, waits 250 ms, then sends the remaining 8 bytes. D2O d2k_quic_data_stage and the production Rust HTTP/3 measurement both return Pass and match app_bytes and request count; Rust confirms all 13 body bytes and budget_passed. scripts/test-quic-http3-full-stage-differential.sh passed all 8 included tests. Other budget/growth thresholds, deadline/error branches, and router runtime remain open.
