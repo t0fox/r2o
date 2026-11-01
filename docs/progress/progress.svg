@@ -1,19 +1,19 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O parity 70.11%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O parity 71.26%">
 <rect width="1100" height="790" rx="20" fill="#0c121e"/>
 <text x="36" y="48" fill="#edf7ff" font-family="Arial,sans-serif" font-size="29" font-weight="700">R2O / D2O · Functional parity</text>
-<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">70.11%</text>
-<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">61 / 87 verified points</text>
-<rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/><rect x="37" y="113" width="718.0" height="11" rx="5" fill="#36c989"/>
-<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">45 contracts · 31 verified · 13 partial · 1 implemented</text>
+<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">71.26%</text>
+<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">62 / 87 verified points</text>
+<rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/><rect x="37" y="113" width="729.7" height="11" rx="5" fill="#36c989"/>
+<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">45 contracts · 32 verified · 12 partial · 1 implemented</text>
 <rect x="35" y="163" width="510" height="100" rx="12" fill="#152030" stroke="#2c3a4d"/>
-<text x="52" y="188" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="17" font-weight="700">Datapath</text><text x="528" y="188" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="13">7/12</text>
+<text x="52" y="188" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="17" font-weight="700">Datapath</text><text x="528" y="188" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="13">8/12</text>
 <rect x="52" y="202" width="29" height="22" rx="5" fill="#36c989"><title>TCP datapath: поток, разрезы, удержание, RST и счётчики: Эквивалентно (3/3)</title></rect>
 <rect x="89" y="202" width="29" height="22" rx="5" fill="#36c989"><title>UDP exchange и QUIC/STUN наблюдение: Эквивалентно (2/2)</title></rect>
 <rect x="126" y="202" width="29" height="22" rx="5" fill="#e6b45d"><title>IPv6/фрагментация в живом NFQUEUE, маркировка маршрута, fail-open и conntrack: Частично (0/3)</title></rect>
 <rect x="163" y="202" width="29" height="22" rx="5" fill="#36c989"><title>TCP flow-table limit, refusal counter, reverse lookup и expiry/reuse: Доказанно эквивалентно (1/1)</title></rect>
 <rect x="200" y="202" width="29" height="22" rx="5" fill="#36c989"><title>Периодическая сводка TCP/UDP flow-table и интервал службы: Доказанно эквивалентно (1/1)</title></rect>
 <rect x="237" y="202" width="29" height="22" rx="5" fill="#e6b45d"><title>Остальные периодические метрики datapath и процесса: Частично (0/1)</title></rect>
-<rect x="274" y="202" width="29" height="22" rx="5" fill="#e6b45d"><title>Длительная смешанная нагрузка большого числа потоков и peak RSS: Частично (0/1)</title></rect>
+<rect x="274" y="202" width="29" height="22" rx="5" fill="#36c989"><title>Длительная смешанная нагрузка большого числа потоков и peak RSS: Эквивалентно (1/1)</title></rect>
 <text x="527" y="250" text-anchor="end" fill="#8298aa" font-family="Arial,sans-serif" font-size="12">7 contracts</text>
 <rect x="563" y="163" width="510" height="100" rx="12" fill="#152030" stroke="#2c3a4d"/>
 <text x="580" y="188" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="17" font-weight="700">Classifier / TLS</text><text x="1056" y="188" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="13">15/15</text>

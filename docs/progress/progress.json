@@ -2,12 +2,12 @@
   "source": "docs/functional-parity-matrix.md",
   "date": "2026-11-01",
   "weight": 87,
-  "points": 61,
-  "percent": 70.11,
+  "points": 62,
+  "percent": 71.26,
   "total": 45,
   "counts": {
-    "verified": 31,
-    "partial": 13,
+    "verified": 32,
+    "partial": 12,
     "implemented": 1,
     "unknown": 0
   },
@@ -85,16 +85,16 @@
           "id": 9,
           "name": "Длительная смешанная нагрузка большого числа потоков и peak RSS",
           "weight": 1,
-          "points": 0,
-          "status": "partial",
-          "statusLabel": "Частично",
+          "points": 1,
+          "status": "verified",
+          "statusLabel": "Эквивалентно",
           "group": "Datapath",
           "mapping": "D2O TCP/UDP tracking tables → Rust `TcpSessions`/`R2oUdpSessions` и связанные bounded tables",
-          "evidence": "`r2o-resource-limit-differential.sh` и `r2o-udp-session-table-check.sh` покрывают отдельные границы; WSL2 release IPv6 soak measured 1024 unique UDP peers for 300 s alongside TCP echo (VmHWM 3956 KiB; zero table refusals and kernel losses); the R2O-only run does not replace a C/Rust high-cardinality table differential, which remains open. Владелец снял ограничение профиля 128 МиБ; фактическую производительность под длительной нагрузкой это не подтверждает"
+          "evidence": "Pinned D2O `304ba893dd37197128ac8799c0495b035f6a38c0` and Rust release `03d29dc7516fdad50e8bbd6970c524979d3789d5`; `scripts/test-datapath-high-cardinality-differential.sh` in Debian 13 WSL2: 1536 UDP peers, 60 paced rounds over 60 s plus one registration round (93,696 replies), concurrent 64-KiB TCP echo 12 times (786,432 bytes). Both tables: TCP 1/2048, UDP 1536/2048, refusals 0; NFQUEUE losses 0. VmHWM C 7,624 KiB, Rust 3,924 KiB. Separate Rust IPv6 gateway soak: 300 s/1024 peers. Namespace tests do not calibrate physical-router performance"
         }
       ],
       "weight": 12,
-      "points": 7
+      "points": 8
     },
     {
       "name": "Classifier / TLS",
@@ -664,12 +664,12 @@
       "id": 9,
       "name": "Длительная смешанная нагрузка большого числа потоков и peak RSS",
       "weight": 1,
-      "points": 0,
-      "status": "partial",
-      "statusLabel": "Частично",
+      "points": 1,
+      "status": "verified",
+      "statusLabel": "Эквивалентно",
       "group": "Datapath",
       "mapping": "D2O TCP/UDP tracking tables → Rust `TcpSessions`/`R2oUdpSessions` и связанные bounded tables",
-      "evidence": "`r2o-resource-limit-differential.sh` и `r2o-udp-session-table-check.sh` покрывают отдельные границы; WSL2 release IPv6 soak measured 1024 unique UDP peers for 300 s alongside TCP echo (VmHWM 3956 KiB; zero table refusals and kernel losses); the R2O-only run does not replace a C/Rust high-cardinality table differential, which remains open. Владелец снял ограничение профиля 128 МиБ; фактическую производительность под длительной нагрузкой это не подтверждает"
+      "evidence": "Pinned D2O `304ba893dd37197128ac8799c0495b035f6a38c0` and Rust release `03d29dc7516fdad50e8bbd6970c524979d3789d5`; `scripts/test-datapath-high-cardinality-differential.sh` in Debian 13 WSL2: 1536 UDP peers, 60 paced rounds over 60 s plus one registration round (93,696 replies), concurrent 64-KiB TCP echo 12 times (786,432 bytes). Both tables: TCP 1/2048, UDP 1536/2048, refusals 0; NFQUEUE losses 0. VmHWM C 7,624 KiB, Rust 3,924 KiB. Separate Rust IPv6 gateway soak: 300 s/1024 peers. Namespace tests do not calibrate physical-router performance"
     },
     {
       "id": 10,

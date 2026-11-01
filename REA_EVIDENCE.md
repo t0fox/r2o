@@ -9229,3 +9229,11 @@ Extended the pinned D2O/R2O full-stage loopback differential with a response tha
 ### QUIC HTTP/3 mid-body RESET_STREAM - 2026-11-01
 
 Extended the clean pinned C/Rust full-stage differential with an HTTP 200 response, 7 body bytes, then H3_INTERNAL_ERROR RESET_STREAM. The fixture waits 250 ms after body delivery so the response is observed before reset; an immediate reset raced ahead of HEADERS in the first attempt. C and production Rust both return NotRun and match app_bytes and request count. Rust reports status=200, body_bytes=7, incomplete, explicit error, and no false stall. The Debian WSL2 full-stage script passed 8/8 in 61.80 seconds. No production code changed; the HTTP/3 matrix row remains partial while other transport errors, timing-sensitive stall, and lifecycle remain open.
+
+### C/Rust high-cardinality mixed-load differential — 2026-11-01
+
+The untracked test harness now uses separate Debian 13 WSL2 client/server network namespaces connected by veth, with a default route and live IPv4 NFQUEUE OUTPUT/INPUT rules. It runs pinned D2O main 304ba893dd37197128ac8799c0495b035f6a38c0 and R2O release 03d29dc7516fdad50e8bbd6970c524979d3789d5, rebuilding both from E: sources before each run. The client drives exactly 60 one-second rounds across 1536 distinct UDP peers over 60 seconds, plus one initial peer-registration round, while a TCP connection echoes 65,536-byte payloads 12 times.
+
+Both sides completed 93,696 UDP echo replies and 786,432 TCP echo bytes with all 1536 unique peers; runtime tables ended at TCP 1/2048 and UDP 1536/2048 with zero refusals. NFQUEUE kernel losses were zero. Sampled VmHWM was 7,624 KiB for D2O and 3,924 KiB for R2O. The first draft used loopback and produced zero Rust flow records because route-gate correctly skipped non-default traffic; the final veth fixture avoids the 192.0.2.1 test route-probe address and asserts the live table counts. A short 32-peer/3-second smoke passed first. The 60-second namespace comparison proves this mixed-load contract for these IPv4 paths; it is not physical-router calibration. The separate 300-second Rust IPv6 gateway soak remains additional R2O-only evidence.
+
+No production datapath code changed.
