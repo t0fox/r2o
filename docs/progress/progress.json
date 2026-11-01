@@ -331,7 +331,7 @@
           "statusLabel": "Частично",
           "group": "QUIC / HTTP3",
           "mapping": "`d2k_quic_data_stage`/`d2k_qc_app_progress` → Rust `r2o_quic_http3::{measure_with_wire_len,wait_with_stall}`",
-          "evidence": "Debian 13 WSL2: `scripts/test-quic-http3-full-stage-differential.sh` passed 10/10 against clean D2O `304ba893` and production R2O. Cases: repeated budget/growth (incl. >RTO), HTTP 451, slow/deadline, drop/close, Content-Length mismatch, both RESET_STREAM phases, one-way, and missing HTTP/3 SETTINGS (non-Pass verdict/app_bytes/requests match). `/budget-slow` had one C Cut/Rust NotRun; three later reruns passed, cause unknown. Other transport errors, stall variants and lifecycle remain open."
+          "evidence": "Debian 13 WSL2: `scripts/test-quic-http3-full-stage-differential.sh` passed 10/10 against clean D2O `304ba893` and production R2O. Cases: repeated budget/growth (incl. >RTO), HTTP 451, delayed response headers, slow/deadline, drop/close, Content-Length mismatch, both RESET_STREAM phases, one-way, and missing HTTP/3 SETTINGS (non-Pass verdict/app_bytes/requests match). `/budget-slow` had one C Cut/Rust NotRun; three later reruns passed, cause unknown. Other transport errors, stall variants and lifecycle remain open."
         }
       ],
       "weight": 9,
@@ -867,7 +867,7 @@
       "statusLabel": "Частично",
       "group": "QUIC / HTTP3",
       "mapping": "`d2k_quic_data_stage`/`d2k_qc_app_progress` → Rust `r2o_quic_http3::{measure_with_wire_len,wait_with_stall}`",
-      "evidence": "Debian 13 WSL2: `scripts/test-quic-http3-full-stage-differential.sh` passed 10/10 against clean D2O `304ba893` and production R2O. Cases: repeated budget/growth (incl. >RTO), HTTP 451, slow/deadline, drop/close, Content-Length mismatch, both RESET_STREAM phases, one-way, and missing HTTP/3 SETTINGS (non-Pass verdict/app_bytes/requests match). `/budget-slow` had one C Cut/Rust NotRun; three later reruns passed, cause unknown. Other transport errors, stall variants and lifecycle remain open."
+      "evidence": "Debian 13 WSL2: `scripts/test-quic-http3-full-stage-differential.sh` passed 10/10 against clean D2O `304ba893` and production R2O. Cases: repeated budget/growth (incl. >RTO), HTTP 451, delayed response headers, slow/deadline, drop/close, Content-Length mismatch, both RESET_STREAM phases, one-way, and missing HTTP/3 SETTINGS (non-Pass verdict/app_bytes/requests match). `/budget-slow` had one C Cut/Rust NotRun; three later reruns passed, cause unknown. Other transport errors, stall variants and lifecycle remain open."
     },
     {
       "id": 28,

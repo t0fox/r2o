@@ -1050,6 +1050,7 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                             | "/deadline"
                             | "/refuse"
                             | "/slow"
+                            | "/slow-headers"
                             | "/budget-slow"
                             | "/drop"
                             | "/body-close"
@@ -1064,6 +1065,9 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                     } else {
                         451
                     };
+                    if request.uri().path() == "/slow-headers" {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
                     if stream
                         .send_response(
                             http::Response::builder()
@@ -1829,6 +1833,87 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
         refusal_rust_result.requests,
         "D2O={refusal_c_result} R2O={refusal_rust_result:?}"
     );
+
+    let delayed_headers_binary = d2o_binary.clone();
+    let delayed_headers_address = server_address;
+    let delayed_headers_c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(delayed_headers_binary)
+            .args([
+                "127.0.0.1",
+                &delayed_headers_address.port().to_string(),
+                "localhost",
+                "/slow-headers",
+                "0",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        !delayed_headers_c_output.status.success(),
+        "D2O delayed-header replay unexpectedly passed: {}",
+        String::from_utf8_lossy(&delayed_headers_c_output.stdout)
+    );
+    let delayed_headers_c_result = String::from_utf8(delayed_headers_c_output.stdout).unwrap();
+    let delayed_headers_c_field = |name: &str| {
+        delayed_headers_c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {delayed_headers_c_result}"))
+    };
+
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.connect(server_address).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(certificate_der.clone()).unwrap();
+    let delayed_headers_rust_result = r2o_quic_http3_get(
+        socket,
+        server_address,
+        "localhost",
+        "/slow-headers",
+        Duration::from_secs(1),
+        roots,
+    )
+    .await;
+    let delayed_headers_rust_verdict =
+        r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&delayed_headers_rust_result);
+
+    assert!(
+        delayed_headers_rust_result.handshake_confirmed,
+        "R2O={delayed_headers_rust_result:?}"
+    );
+    assert_eq!(
+        delayed_headers_rust_result.status, 0,
+        "R2O={delayed_headers_rust_result:?}"
+    );
+    assert_eq!(delayed_headers_rust_result.body_bytes, 0);
+    assert!(!delayed_headers_rust_result.complete);
+    assert!(
+        delayed_headers_rust_result.error.is_some(),
+        "R2O={delayed_headers_rust_result:?}"
+    );
+    assert!(
+        !delayed_headers_rust_result.r2o_quic_stalled,
+        "live transport was classified as stalled: {delayed_headers_rust_result:?}"
+    );
+    assert_eq!(
+        delayed_headers_c_field("verdict"),
+        format!("{delayed_headers_rust_verdict:?}"),
+        "D2O={delayed_headers_c_result} R2O={delayed_headers_rust_result:?}"
+    );
+    assert_eq!(delayed_headers_c_field("verdict"), "NotRun");
+    assert_eq!(
+        delayed_headers_c_field("app_bytes").parse::<u64>().unwrap(),
+        delayed_headers_rust_result.app_bytes,
+        "D2O={delayed_headers_c_result} R2O={delayed_headers_rust_result:?}"
+    );
+    assert_eq!(
+        delayed_headers_c_field("requests").parse::<u32>().unwrap(),
+        delayed_headers_rust_result.requests,
+        "D2O={delayed_headers_c_result} R2O={delayed_headers_rust_result:?}"
+    );
+    assert_eq!(delayed_headers_rust_result.requests, 1);
 
     let slow_binary = d2o_binary.clone();
     let slow_address = server_address;

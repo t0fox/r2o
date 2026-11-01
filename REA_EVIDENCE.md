@@ -9289,3 +9289,9 @@ The pinned clean D2O `d2k_quic_data_stage` and production R2O HTTP/3 measurement
 Command: from `/mnt/e/r2o`, run `R2O_DONOR_ROOT=/mnt/e/r2o-tooling/d2o-clean-main bash scripts/test-quic-http3-full-stage-differential.sh` in Debian 13 WSL2. The script builds the pinned C harness and runs the Rust integration target. Result: 10 passed, 0 failed, 80.84 s.
 
 This adds one no-peer-SETTINGS transport/protocol case. No production code changed and the QUIC row remains partial at 0/2; other transport errors, stall variants, and lifecycle are open. The earlier `/budget-slow` C Cut/Rust NotRun mismatch occurred once and did not recur in three later replays; its cause is unknown.
+
+### QUIC HTTP/3 response headers delayed past the Rust deadline — 2026-11-01
+
+Added `/slow-headers` to the pinned D2O C/Rust full-stage fixture. The server waits 5 seconds before sending response headers. Against clean D2O `304ba893dd37197128ac8799c0495b035f6a38c0` and R2O `c39dd0b647234c9d0ad9279fd6a9803f407161e2`, both return `NotRun`, with matching application bytes and one request. Rust reports status 0, no body/completion, a transport error, and no false stall. The full differential script passed 10/10 in Debian WSL2 (88.21 s); `cargo +1.98.0 fmt --all -- --check` also passed. No production code changed.
+
+This closes only the delayed-before-headers case. Other transport errors, stall variants, and lifecycle remain open; the QUIC row remains partial at 0/2 and the weighted total remains 62/87 (71.26%).
