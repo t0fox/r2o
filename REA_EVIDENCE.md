@@ -9345,3 +9345,12 @@ The pinned D2O C data-stage harness and production Rust HTTP/3 measurement were 
 Check: D2O_QUIC_DATA_STAGE_BIN=/mnt/e/r2o-tooling/tests/d2o-quic-data-stage-oneway cargo test -p r2o-controller --test r2o_quic_http3 --locked --offline -- --include-ignored --exact r2o_http3_udp_port_unreachable_matches_d2o --test-threads=1 passed 1/1 in Debian WSL2; cargo fmt --all -- --check passed. Other transport errors, stall variants and lifecycle remain open, so the matrix contract remains partial at 0 points and weighted parity stays 62/87 (71.26%).
 
 No QEMU run: the same loopback endpoint exercised the C and production Rust branch directly. Applicable QEMU checks remain short, OpenWrt ARM64 only.
+
+
+### QUIC HTTP/3 reply-drop stall has a C/Rust differential - 2026-11-02
+
+The UDP reply-drop stall test previously asserted only the Rust result despite its name. It now runs the pinned D2O C data-stage harness and production Rust against equivalent local QUIC fixtures that send HTTP 200 headers and then drop server UDP replies. Both return Cut with matching app_bytes and request counts. Rust reports stalled=true, one_way=false, and at least two PING probes.
+
+Check: R2O_DONOR_ROOT=/mnt/e/r2o-tooling/d2o-clean-main sh scripts/test-quic-http3-full-stage-differential.sh passed 11/11 in Debian 13 WSL2 (97.80 s). This covers one reply-drop stall variant; other transport errors, stall variants, and lifecycle remain open. The QUIC matrix row stays partial at 0 points and weighted parity remains 62/87 (71.26%).
+
+No QEMU run: the paired loopback protocol test exercises the changed fixture directly. Applicable QEMU checks remain short, OpenWrt ARM64 only.

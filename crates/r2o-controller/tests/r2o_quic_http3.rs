@@ -298,8 +298,13 @@ async fn r2o_http3_without_peer_settings_matches_d2o() {
     );
     server.abort();
 }
-#[tokio::test]
-async fn r2o_http3_udp_reply_drop_is_a_stall_and_matches_d2o() {
+async fn spawn_quic_udp_reply_drop_fixture() -> (
+    SocketAddr,
+    CertificateDer<'static>,
+    Arc<AtomicBool>,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
     let certificate_params = rcgen::CertificateParams::new(vec!["localhost".to_owned()]);
     let certificate = rcgen::Certificate::from_params(certificate_params).unwrap();
     let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
@@ -317,7 +322,7 @@ async fn r2o_http3_udp_reply_drop_is_a_stall_and_matches_d2o() {
         quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
     let server_address = server_endpoint.local_addr().unwrap();
     let drop_replies = Arc::new(AtomicBool::new(false));
-    let drop_after_headers = Arc::clone(&drop_replies);
+    let server_drop_replies = Arc::clone(&drop_replies);
     let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let incoming = server_endpoint.accept().await.unwrap();
@@ -339,46 +344,75 @@ async fn r2o_http3_udp_reply_drop_is_a_stall_and_matches_d2o() {
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
-        drop_after_headers.store(true, Ordering::SeqCst);
+        server_drop_replies.store(true, Ordering::Release);
         let _ = shutdown_receiver.await;
     });
+    (
+        server_address,
+        certificate_der,
+        drop_replies,
+        shutdown_sender,
+        server,
+    )
+}
 
-    let proxy_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let proxy_address = proxy_socket.local_addr().unwrap();
-    let proxy_drop_replies = Arc::clone(&drop_replies);
-    let (proxy_stop_sender, mut proxy_stop_receiver) = tokio::sync::oneshot::channel();
-    let proxy = tokio::spawn(async move {
-        let mut client_address = None;
-        let mut packet = vec![0_u8; 65_536];
-        loop {
-            tokio::select! {
-                _ = &mut proxy_stop_receiver => break,
-                received = proxy_socket.recv_from(&mut packet) => {
-                    let Ok((length, peer)) = received else { break };
-                    if peer == server_address {
-                        if !proxy_drop_replies.load(Ordering::SeqCst) {
-                            if let Some(client) = client_address {
-                                let _ = proxy_socket.send_to(&packet[..length], client).await;
-                            }
-                        }
-                    } else {
-                        client_address = Some(peer);
-                        let _ = proxy_socket.send_to(&packet[..length], server_address).await;
-                    }
-                }
-            }
-        }
-    });
+#[tokio::test]
+async fn r2o_http3_udp_reply_drop_is_a_stall_and_matches_d2o() {
+    let d2o_binary = std::env::var("D2O_QUIC_DATA_STAGE_BIN")
+        .expect("D2O_QUIC_DATA_STAGE_BIN must point to the pinned C data-stage harness");
+    let (d2o_server_address, _, d2o_drop_replies, d2o_shutdown, d2o_server) =
+        spawn_quic_udp_reply_drop_fixture().await;
+    let (d2o_proxy_address, d2o_proxy) = spawn_quic_drop_proxy(
+        d2o_server_address,
+        Arc::new(AtomicBool::new(false)),
+        Arc::clone(&d2o_drop_replies),
+    )
+    .await;
+    let d2o_port = d2o_proxy_address.port().to_string();
+    let d2o_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(d2o_binary)
+            .args(["127.0.0.1", &d2o_port, "localhost", "/", "0"])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        !d2o_output.status.success(),
+        "D2O reply-drop case unexpectedly passed: stdout={} stderr={}",
+        String::from_utf8_lossy(&d2o_output.stdout),
+        String::from_utf8_lossy(&d2o_output.stderr)
+    );
+    let d2o_result = String::from_utf8(d2o_output.stdout).unwrap();
+    let d2o_field = |name: &str| {
+        d2o_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {d2o_result}"))
+    };
+    assert_eq!(d2o_field("verdict"), "Cut", "D2O={d2o_result}");
+    assert_eq!(d2o_field("oneway"), "0", "D2O={d2o_result}");
+    let _ = d2o_shutdown.send(());
+    d2o_proxy.abort();
+    d2o_server.abort();
 
+    let (rust_server_address, certificate_der, rust_drop_replies, rust_shutdown, rust_server) =
+        spawn_quic_udp_reply_drop_fixture().await;
+    let (rust_proxy_address, rust_proxy) = spawn_quic_drop_proxy(
+        rust_server_address,
+        Arc::new(AtomicBool::new(false)),
+        Arc::clone(&rust_drop_replies),
+    )
+    .await;
     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
-    socket.connect(proxy_address).unwrap();
+    socket.connect(rust_proxy_address).unwrap();
     let mut roots = RootCertStore::empty();
     roots.add(certificate_der).unwrap();
     let result = tokio::time::timeout(
         Duration::from_secs(8),
         r2o_quic_http3_get_with_max_duration(
             socket,
-            proxy_address,
+            rust_proxy_address,
             "localhost",
             "/",
             Duration::from_secs(1),
@@ -389,24 +423,33 @@ async fn r2o_http3_udp_reply_drop_is_a_stall_and_matches_d2o() {
     .await
     .expect("HTTP/3 UDP-drop test timed out");
 
-    assert!(result.handshake_confirmed, "result: {result:?}");
-    assert_eq!(result.status, 200, "result: {result:?}");
-    assert!(result.r2o_quic_stalled, "result: {result:?}");
-    assert!(!result.r2o_quic_one_way, "result: {result:?}");
-    assert!(result.r2o_ping_probes >= 2, "result: {result:?}");
+    assert!(result.handshake_confirmed, "R2O result: {result:?}");
+    assert_eq!(result.status, 200, "R2O result: {result:?}");
+    assert!(result.r2o_quic_stalled, "R2O result: {result:?}");
+    assert!(!result.r2o_quic_one_way, "R2O result: {result:?}");
+    assert!(result.r2o_ping_probes >= 2, "R2O result: {result:?}");
+    let verdict = r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&result);
     assert_eq!(
-        format!(
-            "{:?}",
-            r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&result)
-        ),
-        "Cut"
+        format!("{verdict:?}"),
+        d2o_field("verdict"),
+        "D2O={d2o_result} R2O={result:?}"
+    );
+    assert_eq!(
+        result.app_bytes,
+        d2o_field("app_bytes").parse::<u64>().unwrap(),
+        "D2O={d2o_result} R2O={result:?}"
+    );
+    assert_eq!(
+        result.requests,
+        d2o_field("requests").parse::<u32>().unwrap(),
+        "D2O={d2o_result} R2O={result:?}"
     );
     write_d2o_http3_differential("R2O_QUIC_HTTP3_STALL_DIFF_OUTPUT", "stall", &result);
-    let _ = shutdown_sender.send(());
-    let _ = proxy_stop_sender.send(());
-    server.abort();
-    proxy.abort();
+    let _ = rust_shutdown.send(());
+    rust_proxy.abort();
+    rust_server.abort();
 }
+
 async fn spawn_quic_one_way_fixture() -> (
     SocketAddr,
     CertificateDer<'static>,

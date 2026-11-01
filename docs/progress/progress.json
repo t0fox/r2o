@@ -331,7 +331,7 @@
           "statusLabel": "Частично",
           "group": "QUIC / HTTP3",
           "mapping": "`d2k_quic_data_stage`/`d2k_qc_app_progress` → Rust `r2o_quic_http3::{measure_with_wire_len,wait_with_stall}`",
-          "evidence": "Debian 13 WSL2: full-stage script passed 10/10 against clean D2O `304ba893` before the latest fixture extension; the updated main full-stage test then passed 1/1 (57.03 s), including RESET_STREAM after HTTP 200 HEADERS and before DATA. Cases: repeated budget/growth (incl. >RTO), HTTP 451, delayed response headers, slow/deadline, drop/close, Content-Length mismatch, RESET_STREAM before headers/after headers/between body chunks, one-way, and missing HTTP/3 SETTINGS (non-Pass verdict/app_bytes/requests match). `/budget-slow` had one C Cut/Rust NotRun; three later reruns passed, cause unknown. The"
+          "evidence": "Debian 13 WSL2: full-stage differential against clean D2O 304ba893 passed 11/11 (97.80 s), including RESET_STREAM after HTTP 200 HEADERS and before DATA, the C/Rust UDP reply-drop stall case, and the closed-port NoHandshake case. Cases: repeated budget/growth (incl. >RTO), HTTP 451, delayed response headers, slow/deadline, drop/close, Content-Length mismatch, RESET_STREAM before headers/after headers/between body chunks, one-way, and missing HTTP/3 SETTINGS (non-Pass verdict/app_bytes/requests match). `/budget-slow` had one C Cut/Rust NotRun; three later reruns passed, cause unknown. The UDP r"
         }
       ],
       "weight": 9,
@@ -867,7 +867,7 @@
       "statusLabel": "Частично",
       "group": "QUIC / HTTP3",
       "mapping": "`d2k_quic_data_stage`/`d2k_qc_app_progress` → Rust `r2o_quic_http3::{measure_with_wire_len,wait_with_stall}`",
-      "evidence": "Debian 13 WSL2: full-stage script passed 10/10 against clean D2O `304ba893` before the latest fixture extension; the updated main full-stage test then passed 1/1 (57.03 s), including RESET_STREAM after HTTP 200 HEADERS and before DATA. Cases: repeated budget/growth (incl. >RTO), HTTP 451, delayed response headers, slow/deadline, drop/close, Content-Length mismatch, RESET_STREAM before headers/after headers/between body chunks, one-way, and missing HTTP/3 SETTINGS (non-Pass verdict/app_bytes/requests match). `/budget-slow` had one C Cut/Rust NotRun; three later reruns passed, cause unknown. The"
+      "evidence": "Debian 13 WSL2: full-stage differential against clean D2O 304ba893 passed 11/11 (97.80 s), including RESET_STREAM after HTTP 200 HEADERS and before DATA, the C/Rust UDP reply-drop stall case, and the closed-port NoHandshake case. Cases: repeated budget/growth (incl. >RTO), HTTP 451, delayed response headers, slow/deadline, drop/close, Content-Length mismatch, RESET_STREAM before headers/after headers/between body chunks, one-way, and missing HTTP/3 SETTINGS (non-Pass verdict/app_bytes/requests match). `/budget-slow` had one C Cut/Rust NotRun; three later reruns passed, cause unknown. The UDP r"
     },
     {
       "id": 28,
