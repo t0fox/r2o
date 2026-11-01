@@ -748,6 +748,7 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                 else {
                     return;
                 };
+                let mut request_count = 0_u32;
                 loop {
                     let resolver = match h3_connection.accept().await {
                         Ok(Some(resolver)) => resolver,
@@ -756,6 +757,13 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                     let Ok((request, mut stream)) = resolver.resolve_request().await else {
                         break;
                     };
+                    request_count = request_count.saturating_add(1);
+                    if request.uri().path() == "/budget-close" && request_count > 1 {
+                        connection_for_close
+                            .close(quinn::VarInt::from_u32(3), b"budget second GET closed");
+                        break;
+                    }
+
                     if request.uri().path() == "/close" {
                         connection_for_close
                             .close(quinn::VarInt::from_u32(1), b"test transport close");
@@ -771,6 +779,7 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                             | "/budget-slow"
                             | "/drop"
                             | "/body-close"
+                            | "/budget-close"
                     ) {
                         if request.uri().path() == "/refuse" {
                             451
@@ -1552,6 +1561,89 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
         body_close_c_field("requests").parse::<u32>().unwrap(),
         body_close_rust_result.requests,
         "D2O={body_close_c_result} R2O={body_close_rust_result:?}"
+    );
+
+    let baseline_c_binary = d2o_binary.clone();
+    let baseline_c_address = server_address;
+    let baseline_c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(baseline_c_binary)
+            .args([
+                "127.0.0.1",
+                &baseline_c_address.port().to_string(),
+                "localhost",
+                "/budget-close",
+                "25",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        !baseline_c_output.status.success(),
+        "D2O repeated baseline unexpectedly passed: {}",
+        String::from_utf8_lossy(&baseline_c_output.stdout)
+    );
+    let baseline_c_result = String::from_utf8(baseline_c_output.stdout).unwrap();
+    let baseline_c_field = |name: &str| {
+        baseline_c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {baseline_c_result}"))
+    };
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.connect(server_address).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(certificate_der.clone()).unwrap();
+    let baseline_rust_result =
+        r2o_controller::r2o_quic_http3::r2o_quic_http3_measure_with_max_duration(
+            socket,
+            server_address,
+            "localhost",
+            "/budget-close",
+            Duration::from_secs(1),
+            roots,
+            r2o_controller::r2o_quic_http3::R2O_QUIC_HTTP3_DEFAULT_BUDGET_PACKETS,
+            Duration::from_secs(10),
+        )
+        .await;
+    let baseline_rust_verdict =
+        r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&baseline_rust_result);
+    assert!(
+        baseline_rust_result.handshake_confirmed,
+        "R2O={baseline_rust_result:?}"
+    );
+    assert!(
+        !baseline_rust_result.complete,
+        "R2O={baseline_rust_result:?}"
+    );
+    assert!(
+        baseline_rust_result.budget_required,
+        "R2O={baseline_rust_result:?}"
+    );
+    assert!(
+        !baseline_rust_result.budget_passed,
+        "R2O={baseline_rust_result:?}"
+    );
+    assert!(
+        baseline_rust_result.requests > 1,
+        "R2O={baseline_rust_result:?}"
+    );
+    assert_eq!(
+        baseline_c_field("verdict"),
+        format!("{baseline_rust_verdict:?}"),
+        "D2O={baseline_c_result} R2O={baseline_rust_result:?}"
+    );
+    assert_eq!(baseline_c_field("verdict"), "NotRun");
+    assert_eq!(
+        baseline_c_field("app_bytes").parse::<u64>().unwrap(),
+        baseline_rust_result.app_bytes,
+        "D2O={baseline_c_result} R2O={baseline_rust_result:?}"
+    );
+    assert_eq!(
+        baseline_c_field("requests").parse::<u32>().unwrap(),
+        baseline_rust_result.requests,
+        "D2O={baseline_c_result} R2O={baseline_rust_result:?}"
     );
 
     server.abort();

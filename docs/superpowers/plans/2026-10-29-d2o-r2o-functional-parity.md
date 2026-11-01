@@ -50,6 +50,7 @@ Follow the user's sequential workflow on the shared `main` checkout. Finish one 
   - Classifier slice completed 2026-11-01: full-tree/control, candidate-filter, clear-confirm, white-decoy, and raw-production C/Rust differentials passed. The unfiltered production path also matched after 11 property misses, compose miss, and one poison miss before disorder-pos2 succeeded; see the promoted matrix row. No live-DPI effectiveness is claimed.
 - [ ] QUIC and Discord RTC/UDP lifecycle, endpoint changes, reconnects, expiry, and long sessions.
   - Evidence 2026-11-01: the full-stage C/Rust replay closes the HTTP/3 transport after HTTP 200 headers and before DATA; both return NotRun with zero body bytes, no false stall, and matching app-byte/request counts. The focused harness passes 8/8; remaining QUIC errors/budget branches/deadline/lifecycle and Discord evidence stay open.
+  - Production RED/GREEN 2026-11-01: D2O direct baseline/recheck uses `need_complete=1` and the default budget of 25; R2O initially used one GET and could mark a short response Pass before D2O completed replay. All four R2O baseline/recheck call sites now use the default-budget measurement. A server closing on GET 2 produced C/Rust `NotRun` with matching request/app-byte counts; the full pinned harness passes 8/8. Remaining budget/growth branches, total deadline, other network errors, lifecycle, and Discord remain open.
 
 ### Task 3: Root audit of Discovery, scheduler, catalog, services, and full apply cycle
 

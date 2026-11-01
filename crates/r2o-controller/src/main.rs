@@ -18838,13 +18838,14 @@ impl ControlClient {
             let mut roots = rustls::RootCertStore::empty();
             roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
             let result = runtime.block_on(
-                r2o_controller::r2o_quic_http3::r2o_quic_http3_get_with_max_duration(
+                r2o_controller::r2o_quic_http3::r2o_quic_http3_measure_with_max_duration(
                     probe.try_clone_socket()?,
                     server,
                     &server_name,
                     probe_path,
                     request_timeout,
                     roots.clone(),
+                    r2o_controller::r2o_quic_http3::R2O_QUIC_HTTP3_DEFAULT_BUDGET_PACKETS,
                     r2o_quic_trial_remaining(started_at, measurement_permit),
                 ),
             );
@@ -18864,13 +18865,14 @@ impl ControlClient {
                         )
                     {
                         let repeated = runtime.block_on(
-                            r2o_controller::r2o_quic_http3::r2o_quic_http3_get_with_max_duration(
+                            r2o_controller::r2o_quic_http3::r2o_quic_http3_measure_with_max_duration(
                                 repeat_socket,
                                 server,
                                 &server_name,
                                 probe_path,
                                 request_timeout,
                                 roots,
+                                r2o_controller::r2o_quic_http3::R2O_QUIC_HTTP3_DEFAULT_BUDGET_PACKETS,
                                 repeat_remaining,
                             ),
                         );
@@ -19099,13 +19101,14 @@ impl ControlClient {
                     return Ok(None);
                 }
                 let baseline_result = runtime.block_on(
-                    r2o_controller::r2o_quic_http3::r2o_quic_http3_get_with_max_duration(
+                    r2o_controller::r2o_quic_http3::r2o_quic_http3_measure_with_max_duration(
                         probe.try_clone_socket()?,
                         server,
                         &server_name,
                         probe_path,
                         request_timeout,
                         roots.clone(),
+                        r2o_controller::r2o_quic_http3::R2O_QUIC_HTTP3_DEFAULT_BUDGET_PACKETS,
                         data_remaining,
                     ),
                 );
@@ -19149,13 +19152,14 @@ impl ControlClient {
                             return Ok(None);
                         }
                         let repeated_result = runtime.block_on(
-                            r2o_controller::r2o_quic_http3::r2o_quic_http3_get_with_max_duration(
+                            r2o_controller::r2o_quic_http3::r2o_quic_http3_measure_with_max_duration(
                                 repeat_socket,
                                 server,
                                 &server_name,
                                 probe_path,
                                 request_timeout,
                                 roots.clone(),
+                                r2o_controller::r2o_quic_http3::R2O_QUIC_HTTP3_DEFAULT_BUDGET_PACKETS,
                                 repeat_remaining,
                             ),
                         );
