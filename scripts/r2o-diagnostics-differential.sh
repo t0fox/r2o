@@ -246,7 +246,7 @@ printf 'C/Rust HTTP/3 transport close remains a transport error, not a stall.\n'
 "$tmp_dir/d2o-quic-http3" stall >"$tmp_dir/c-quic-stall.out" || test "$?" -eq 1
 R2O_QUIC_HTTP3_STALL_DIFF_OUTPUT="$tmp_dir/rust-quic-stall.out" \
     cargo +1.98.0 test -p r2o-controller --test r2o_quic_http3 --locked --offline \
-        udp_reply_drop -- --nocapture
+        udp_reply_drop -- --include-ignored --nocapture
 diff -u "$tmp_dir/c-quic-stall.out" "$tmp_dir/rust-quic-stall.out"
 printf 'C/Rust HTTP/3 dropped UDP replies with failed PING ACKs classify as a stall.\n'
 
