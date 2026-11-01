@@ -774,6 +774,7 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                         "/stage"
                             | "/growth"
                             | "/growth-rto"
+                            | "/deadline"
                             | "/refuse"
                             | "/slow"
                             | "/budget-slow"
@@ -824,6 +825,9 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                     }
                     if request.uri().path() == "/slow" {
                         tokio::time::sleep(Duration::from_secs(6)).await;
+                    }
+                    if request.uri().path() == "/deadline" {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
                     }
                     if request.uri().path() == "/budget-slow" {
                         tokio::time::sleep(Duration::from_secs(10)).await;
@@ -1744,5 +1748,79 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
         partial_close_rust_result.requests,
         "D2O={partial_close_c_result} R2O={partial_close_rust_result:?}"
     );
+
+    let deadline_binary = d2o_binary.clone();
+    let deadline_address = server_address;
+    let deadline_c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(deadline_binary)
+            .args([
+                "127.0.0.1",
+                &deadline_address.port().to_string(),
+                "localhost",
+                "/deadline",
+                "0",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        !deadline_c_output.status.success(),
+        "D2O deadline case should be NotRun: stdout={} stderr={}",
+        String::from_utf8_lossy(&deadline_c_output.stdout),
+        String::from_utf8_lossy(&deadline_c_output.stderr)
+    );
+    let deadline_c_result = String::from_utf8(deadline_c_output.stdout).unwrap();
+    let deadline_c_field = |name: &str| {
+        deadline_c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {deadline_c_result}"))
+    };
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.connect(server_address).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(certificate_der.clone()).unwrap();
+    let rust_deadline_result = r2o_quic_http3_get_with_max_duration(
+        socket,
+        server_address,
+        "localhost",
+        "/deadline",
+        Duration::from_secs(5),
+        roots,
+        Duration::from_secs(4),
+    )
+    .await;
+    let rust_deadline_verdict =
+        r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&rust_deadline_result);
+    assert_eq!(
+        deadline_c_field("verdict"),
+        format!("{rust_deadline_verdict:?}")
+    );
+    assert_eq!(deadline_c_field("verdict"), "NotRun");
+    assert_eq!(
+        rust_deadline_result.status, 200,
+        "R2O={rust_deadline_result:?}"
+    );
+    assert_eq!(
+        rust_deadline_result.body_bytes, 0,
+        "R2O={rust_deadline_result:?}"
+    );
+    assert!(
+        rust_deadline_result.error.is_some(),
+        "R2O={rust_deadline_result:?}"
+    );
+    assert_eq!(
+        deadline_c_field("app_bytes").parse::<u64>().unwrap(),
+        rust_deadline_result.app_bytes,
+        "D2O={deadline_c_result} R2O={rust_deadline_result:?}"
+    );
+    assert_eq!(
+        deadline_c_field("requests").parse::<u32>().unwrap(),
+        rust_deadline_result.requests,
+        "D2O={deadline_c_result} R2O={rust_deadline_result:?}"
+    );
+
     server.abort();
 }

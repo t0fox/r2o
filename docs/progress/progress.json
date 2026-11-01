@@ -331,7 +331,7 @@
           "statusLabel": "Частично",
           "group": "QUIC / HTTP3",
           "mapping": "`d2k_quic_data_stage`/`d2k_qc_app_progress` → `r2o_quic_http3::{measure_with_wire_len,wait_with_stall}`",
-          "evidence": "`scripts/r2o-diagnostics-differential.sh` сравнивает C `d2k_quic_arm_data_judge3` с production Rust HTTP/3: закрытие QUIC после GET остаётся transport error/`NotRun`, а потеря UDP-ответа после HTTP 200 блокирует PING ACK и приводит к stall/`Cut`. Отдельные векторы budget/growth и loopback-сценарий repeated GET проверяют эти helpers. `scripts/test-quic-http3-full-stage-differential.sh` теперь запускает настоящий D2O `d2k_quic_data_stage` и production HTTP/3-клиент R2O на одном локальном H3-сервере: оба классифицируют полный HTTP 200 как `Pass` и совпадают по байтам потока ответа и числу GET. Ус"
+          "evidence": "`scripts/r2o-diagnostics-differential.sh` verifies transport-close, dropped-reply stall, and C/Rust judge branches. The current `scripts/test-quic-http3-full-stage-differential.sh` passes 8/8 in Debian WSL2 against clean D2O (log: `/mnt/e/r2o-tooling/tests/r2o-quic-http3-full-stage-main-followup-2026-11-01.log`), covering complete/repeated budgets, growth/RTO growth, HTTP 451, delayed body, drop, and QUIC close. New `/deadline`: 5-second body delay with a 4-second cap; C and Rust both return NotRun after HTTP 200 headers, with matching app_bytes and requests. One earlier run transiently return"
         }
       ],
       "weight": 9,
@@ -867,7 +867,7 @@
       "statusLabel": "Частично",
       "group": "QUIC / HTTP3",
       "mapping": "`d2k_quic_data_stage`/`d2k_qc_app_progress` → `r2o_quic_http3::{measure_with_wire_len,wait_with_stall}`",
-      "evidence": "`scripts/r2o-diagnostics-differential.sh` сравнивает C `d2k_quic_arm_data_judge3` с production Rust HTTP/3: закрытие QUIC после GET остаётся transport error/`NotRun`, а потеря UDP-ответа после HTTP 200 блокирует PING ACK и приводит к stall/`Cut`. Отдельные векторы budget/growth и loopback-сценарий repeated GET проверяют эти helpers. `scripts/test-quic-http3-full-stage-differential.sh` теперь запускает настоящий D2O `d2k_quic_data_stage` и production HTTP/3-клиент R2O на одном локальном H3-сервере: оба классифицируют полный HTTP 200 как `Pass` и совпадают по байтам потока ответа и числу GET. Ус"
+      "evidence": "`scripts/r2o-diagnostics-differential.sh` verifies transport-close, dropped-reply stall, and C/Rust judge branches. The current `scripts/test-quic-http3-full-stage-differential.sh` passes 8/8 in Debian WSL2 against clean D2O (log: `/mnt/e/r2o-tooling/tests/r2o-quic-http3-full-stage-main-followup-2026-11-01.log`), covering complete/repeated budgets, growth/RTO growth, HTTP 451, delayed body, drop, and QUIC close. New `/deadline`: 5-second body delay with a 4-second cap; C and Rust both return NotRun after HTTP 200 headers, with matching app_bytes and requests. One earlier run transiently return"
     },
     {
       "id": 28,
