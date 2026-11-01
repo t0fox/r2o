@@ -72,6 +72,7 @@ pub(crate) async fn resolve_cf_ips(
     .ok_or_else(|| format!("не удалось разрешить CF-хост {domain} через системный DNS и DoH"))
 }
 
+#[cfg(test)]
 async fn resolve_cf_ips_with<S, SFut, D, DFut>(
     domain: &str,
     system_lookup: S,
@@ -117,6 +118,7 @@ where
     .await
 }
 
+#[cfg(test)]
 async fn resolve_cf_ips_with_timeouts<S, SFut, D, DFut>(
     domain: &str,
     system_lookup: S,
