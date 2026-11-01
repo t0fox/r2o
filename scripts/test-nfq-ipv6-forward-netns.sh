@@ -32,6 +32,7 @@ SERVER_IP=2001:db8:202::2
 WORK=$(mktemp -d)
 R2OD_PID=
 SERVER_PID=
+BULK_CLIENT_PID=
 KEEP_TEST_WORK_VALUE=$(printenv KEEP_TEST_WORK 2>/dev/null || true)
 
 cleanup() {
@@ -46,6 +47,11 @@ cleanup() {
         kill "$SERVER_PID" 2>/dev/null || true
         wait "$SERVER_PID" 2>/dev/null || true
         SERVER_PID=
+    fi
+    if [ -n "$BULK_CLIENT_PID" ]; then
+        kill "$BULK_CLIENT_PID" 2>/dev/null || true
+        wait "$BULK_CLIENT_PID" 2>/dev/null || true
+        BULK_CLIENT_PID=
     fi
     for test_ns in "$CLIENT_NS" "$GATEWAY_NS" "$SERVER_NS"; do
         if ip netns list | awk '{print $1}' | grep -Fxq "$test_ns"; then
@@ -94,8 +100,9 @@ address = sys.argv[1]
 port = int(sys.argv[2])
 client_address = sys.argv[3]
 ready_path = sys.argv[4]
+overflow_path = sys.argv[5]
 server = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
-server.settimeout(5)
+server.settimeout(15)
 server.bind((address, port))
 with open(ready_path, "w", encoding="ascii") as ready:
     ready.write("ready")
@@ -104,6 +111,20 @@ if len(payload) != 4096 or peer[0] != client_address:
     raise SystemExit(f"unexpected request length/source: {len(payload)}, {peer!r}")
 server.sendto(payload, peer)
 print(f"request=4096 from={peer[0]}; reply=4096")
+received = set()
+while len(received) < 100:
+    payload, peer = server.recvfrom(8192)
+    if not payload.startswith(b"bulk:") or peer[0] != client_address:
+        raise SystemExit(f"unexpected bulk packet: {payload!r}, {peer!r}")
+    index = int(payload[5:])
+    if index < 0 or index >= 100 or index in received:
+        raise SystemExit(f"invalid or duplicate bulk packet: {payload!r}")
+    received.add(index)
+    if len(received) == 33:
+        with open(overflow_path, "w", encoding="ascii") as overflow:
+            overflow.write("33")
+    server.sendto(payload, peer)
+print(f"bulk={len(received)}")
 PY
 
 cat >"$WORK/client.py" <<'PY'
@@ -124,6 +145,33 @@ reply, peer = client.recvfrom(8192)
 if reply != payload or peer[0] != server_address:
     raise SystemExit(f"unexpected reply/source: {len(reply)}, {peer!r}")
 print(f"reply=4096 from={peer[0]}; SO_MARK=0x123")
+PY
+
+cat >"$WORK/bulk-client.py" <<'PY'
+import socket
+import sys
+
+client_address, server_address, ready_path = sys.argv[1:4]
+port = int(sys.argv[4])
+client_port = int(sys.argv[5])
+client = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+client.bind((client_address, client_port))
+client.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_MARK", 36), 0x123)
+client.settimeout(15)
+for index in range(100):
+    client.sendto(f"bulk:{index}".encode(), (server_address, port))
+with open(ready_path, "w", encoding="ascii") as ready:
+    ready.write("sent")
+received = set()
+while len(received) < 100:
+    payload, peer = client.recvfrom(1024)
+    if peer[0] != server_address or not payload.startswith(b"bulk:"):
+        raise SystemExit(f"unexpected bulk reply: {payload!r}, {peer!r}")
+    index = int(payload[5:])
+    if index < 0 or index >= 100 or index in received:
+        raise SystemExit(f"invalid or duplicate bulk reply: {payload!r}")
+    received.add(index)
+print(f"bulk_received={len(received)}; SO_MARK=0x123")
 PY
 
 ip netns add "$CLIENT_NS"
@@ -192,7 +240,7 @@ grep -Fq "r2o-datapath: очередь $QUEUE, IPv6" "$WORK/r2o-datapath.log" ||
 }
 
 ip netns exec "$SERVER_NS" python3 "$WORK/server.py" \
-    "$SERVER_IP" "$PORT" "$CLIENT_IP" "$WORK/server.ready" \
+    "$SERVER_IP" "$PORT" "$CLIENT_IP" "$WORK/server.ready" "$WORK/bulk.overflow" \
     >"$WORK/server.log" 2>&1 &
 SERVER_PID=$!
 for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -211,12 +259,40 @@ done
 
 ip netns exec "$CLIENT_NS" python3 "$WORK/client.py" \
     "$CLIENT_IP" "$SERVER_IP" "$PORT" "$CLIENT_PORT"
+kill -STOP "$R2OD_PID"
+ip netns exec "$CLIENT_NS" python3 "$WORK/bulk-client.py" \
+    "$CLIENT_IP" "$SERVER_IP" "$WORK/bulk.ready" "$PORT" "$CLIENT_PORT" &
+BULK_CLIENT_PID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -f "$WORK/bulk.ready" ] && break
+    kill -0 "$BULK_CLIENT_PID" 2>/dev/null || {
+        echo "IPv6 queue-overflow client exited before sending all packets" >&2
+        exit 1
+    }
+    sleep 0.05
+done
+[ -f "$WORK/bulk.ready" ] || {
+    echo "IPv6 queue-overflow client did not send its packet batch" >&2
+    exit 1
+}
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -f "$WORK/bulk.overflow" ] && break
+    sleep 0.05
+done
+[ -f "$WORK/bulk.overflow" ] || {
+    echo "IPv6 fail-open did not forward 33 packets while datapath was stopped" >&2
+    exit 1
+}
+echo "IPv6 fail-open forwarded 33 packets while datapath was stopped"
+kill -CONT "$R2OD_PID"
+wait "$BULK_CLIENT_PID"
+BULK_CLIENT_PID=
 wait "$SERVER_PID"
 SERVER_PID=
 if ! ip netns exec "$GATEWAY_NS" nft list chain inet r2o forward | \
-    grep -Eq "udp dport $PORT .*counter packets 1 bytes" ||
+    grep -Eq "udp dport $PORT .*counter packets 101 bytes" ||
     ! ip netns exec "$GATEWAY_NS" nft list chain inet r2o forward | \
-    grep -Eq "udp sport $PORT .*counter packets 1 bytes"; then
+    grep -Eq "udp sport $PORT .*counter packets 101 bytes"; then
     ip netns exec "$GATEWAY_NS" nft list chain inet r2o forward >&2
     echo "ОШИБКА: IPv6 request/reply не прошли оба NFQUEUE forward rule" >&2
     exit 1
@@ -264,5 +340,5 @@ else
     echo "ОШИБКА: IPv6 gateway datapath не завершился после SIGTERM" >&2
     exit 1
 fi
-echo "ПРОЙДЕНО: marked IPv6 4-KiB request/reply прошёл через gateway FORWARD NFQUEUE, conntrack и reassembly"
+echo "ПРОЙДЕНО: IPv6 SO_MARK, request/reply NFQUEUE, 4-KiB reassembly, conntrack и fail-open переполнения 32-пакетной очереди (100/100)"
 cat "$WORK/r2o-datapath.log" "$WORK/server.log"
