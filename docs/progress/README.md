@@ -6,4 +6,6 @@ The only source of truth is [the functional parity matrix](../functional-parity-
 
 Run `node tools/progress.mjs` to regenerate the tracked SVG, badges, JSON and HTML. Run `node tools/progress.mjs --check` to validate freshness (PR gate). The Pages workflow calls `node tools/progress.mjs --pages` to additionally generate historical charts from first-parent git history. GitHub Pages must be configured with **GitHub Actions** as source.
 
+Before the pull request is merged, preview the [SVG map](progress.svg), [HTML source](index.html), and [JSON report](progress.json) directly in the branch. The public website URL will not resolve until the Pages workflow has successfully deployed the site. The history HTML is generated at deployment time and is not committed to this PR.
+
 The dashboard deliberately ignores old percentage claims in prose. Historical snapshots can have different denominators because the set of requirements changes over time. A green tile is not proof of physical-router acceptance.
