@@ -90,7 +90,7 @@
           "statusLabel": "Частично",
           "group": "Datapath",
           "mapping": "D2O TCP/UDP tracking tables → Rust `TcpSessions`/`R2oUdpSessions` и связанные bounded tables",
-          "evidence": "`r2o-resource-limit-differential.sh` и `r2o-udp-session-table-check.sh` покрывают отдельные границы; длительный high-cardinality workload и peak RSS не измерены. Владелец снял ограничение профиля 128 МиБ; фактическую производительность под длительной нагрузкой это не подтверждает"
+          "evidence": "`r2o-resource-limit-differential.sh` и `r2o-udp-session-table-check.sh` покрывают отдельные границы; WSL2 release IPv6 soak measured 1024 unique UDP peers for 300 s alongside TCP echo (VmHWM 3956 KiB; zero table refusals and kernel losses); the R2O-only run does not replace a C/Rust high-cardinality table differential, which remains open. Владелец снял ограничение профиля 128 МиБ; фактическую производительность под длительной нагрузкой это не подтверждает"
         }
       ],
       "weight": 12,
@@ -669,7 +669,7 @@
       "statusLabel": "Частично",
       "group": "Datapath",
       "mapping": "D2O TCP/UDP tracking tables → Rust `TcpSessions`/`R2oUdpSessions` и связанные bounded tables",
-      "evidence": "`r2o-resource-limit-differential.sh` и `r2o-udp-session-table-check.sh` покрывают отдельные границы; длительный high-cardinality workload и peak RSS не измерены. Владелец снял ограничение профиля 128 МиБ; фактическую производительность под длительной нагрузкой это не подтверждает"
+      "evidence": "`r2o-resource-limit-differential.sh` и `r2o-udp-session-table-check.sh` покрывают отдельные границы; WSL2 release IPv6 soak measured 1024 unique UDP peers for 300 s alongside TCP echo (VmHWM 3956 KiB; zero table refusals and kernel losses); the R2O-only run does not replace a C/Rust high-cardinality table differential, which remains open. Владелец снял ограничение профиля 128 МиБ; фактическую производительность под длительной нагрузкой это не подтверждает"
     },
     {
       "id": 10,
