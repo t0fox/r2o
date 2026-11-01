@@ -709,8 +709,8 @@ async fn r2o_http3_повторяет_get_до_прохождения_пакет
 
 #[tokio::test]
 #[ignore = "requires the pinned D2O harness; run scripts/test-quic-http3-full-stage-differential.sh"]
-async fn r2o_http3_full_data_stage_matches_d2o_on_complete_refusal_budget_slow_body_drop_and_close()
-{
+async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refusal_slow_body_drop_and_close()
+ {
     let d2o_binary = std::env::var("D2O_QUIC_DATA_STAGE_BIN")
         .expect("D2O_QUIC_DATA_STAGE_BIN must point to the pinned C data-stage harness");
     let mut certificate_params = rcgen::CertificateParams::new(vec!["localhost".to_owned()]);
@@ -763,7 +763,7 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_refusal_budget_slow_b
                     }
                     let status = if matches!(
                         request.uri().path(),
-                        "/stage" | "/refuse" | "/slow" | "/drop"
+                        "/stage" | "/refuse" | "/slow" | "/budget-slow" | "/drop"
                     ) {
                         if request.uri().path() == "/refuse" {
                             451
@@ -788,6 +788,9 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_refusal_budget_slow_b
                     }
                     if request.uri().path() == "/slow" {
                         tokio::time::sleep(Duration::from_secs(6)).await;
+                    }
+                    if request.uri().path() == "/budget-slow" {
+                        tokio::time::sleep(Duration::from_secs(10)).await;
                     }
                     if request.uri().path() == "/drop" {
                         if stream
@@ -959,6 +962,103 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_refusal_budget_slow_b
     assert!(
         repeated_rust_result.requests > 1,
         "budget run did not repeat GET: {repeated_rust_result:?}"
+    );
+
+    let stalled_budget_binary = d2o_binary.clone();
+    let stalled_budget_address = server_address;
+    let stalled_budget_c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(stalled_budget_binary)
+            .args([
+                "127.0.0.1",
+                &stalled_budget_address.port().to_string(),
+                "localhost",
+                "/budget-slow",
+                "2",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        !stalled_budget_c_output.status.success(),
+        "D2O no-growth budget replay unexpectedly passed: {}",
+        String::from_utf8_lossy(&stalled_budget_c_output.stdout)
+    );
+    let stalled_budget_c_result = String::from_utf8(stalled_budget_c_output.stdout).unwrap();
+    let stalled_budget_c_field = |name: &str| {
+        stalled_budget_c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {stalled_budget_c_result}"))
+    };
+    let packet_need = stalled_budget_c_field("need").parse::<u64>().unwrap();
+    let packets_seen = stalled_budget_c_field("packets").parse::<u64>().unwrap();
+    assert_eq!(packet_need, 4, "D2O={stalled_budget_c_result}");
+    assert!(
+        packets_seen >= packet_need,
+        "D2O budget threshold not reached: {stalled_budget_c_result}"
+    );
+
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.connect(server_address).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(certificate_der.clone()).unwrap();
+    let stalled_budget_rust_result = r2o_quic_http3_measure(
+        socket,
+        server_address,
+        "localhost",
+        "/budget-slow",
+        Duration::from_secs(1),
+        roots,
+        2,
+    )
+    .await;
+    let stalled_budget_rust_verdict =
+        r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&stalled_budget_rust_result);
+
+    assert!(
+        stalled_budget_rust_result.handshake_confirmed,
+        "R2O={stalled_budget_rust_result:?}"
+    );
+    assert_eq!(
+        stalled_budget_rust_result.status, 200,
+        "R2O={stalled_budget_rust_result:?}"
+    );
+    assert_eq!(
+        stalled_budget_rust_result.body_bytes, 0,
+        "R2O={stalled_budget_rust_result:?}"
+    );
+    assert!(
+        !stalled_budget_rust_result.complete,
+        "R2O={stalled_budget_rust_result:?}"
+    );
+    assert!(
+        stalled_budget_rust_result.budget_required,
+        "R2O={stalled_budget_rust_result:?}"
+    );
+    assert!(
+        !stalled_budget_rust_result.budget_passed,
+        "R2O={stalled_budget_rust_result:?}"
+    );
+    assert!(
+        !stalled_budget_rust_result.r2o_quic_stalled,
+        "live server was classified as stalled: {stalled_budget_rust_result:?}"
+    );
+    assert_eq!(
+        stalled_budget_c_field("verdict"),
+        format!("{stalled_budget_rust_verdict:?}")
+    );
+    assert_eq!(stalled_budget_c_field("verdict"), "NotRun");
+    assert_eq!(
+        stalled_budget_c_field("app_bytes").parse::<u64>().unwrap(),
+        stalled_budget_rust_result.app_bytes,
+        "D2O={stalled_budget_c_result} R2O={stalled_budget_rust_result:?}"
+    );
+    assert_eq!(
+        stalled_budget_c_field("requests").parse::<u32>().unwrap(),
+        stalled_budget_rust_result.requests,
+        "D2O={stalled_budget_c_result} R2O={stalled_budget_rust_result:?}"
     );
 
     let refusal_binary = d2o_binary.clone();
