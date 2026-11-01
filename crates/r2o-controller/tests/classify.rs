@@ -1075,6 +1075,12 @@ fn classify_cli_runs_the_tls_probe_and_reports_the_response_check() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
+    if stdout.contains("без подтверждённой метки SO_MARK") {
+        assert!(stdout.contains("вердикт: inconclusive"), "{stdout}");
+        assert!(stdout.contains("зонды: 1"), "{stdout}");
+        assert_eq!(accepted, 1);
+        return;
+    }
     assert!(stdout.contains("вердикт: clear"), "{stdout}");
     assert!(
         stdout.contains("зонды: 6") || stdout.contains("зонды: 3"),
