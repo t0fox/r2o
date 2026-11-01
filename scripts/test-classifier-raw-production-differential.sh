@@ -226,6 +226,7 @@ print(
 PY
 
 cat >"$TEMP/positive-server.py" <<'PY'
+import os
 import socket
 import sys
 import threading
@@ -237,6 +238,9 @@ control = b"probe-d2k.invalid-control.example"
 alert = b"\x15\x03\x03\x00\x02\x02\x28"
 server_hello = b"\x16\x03\x03\x00\x02\x02\x00"
 control_seen = threading.Event()
+positive_after = int(os.environ.get("R2O_CLASSIFIER_POSITIVE_AFTER", "1"))
+post_control_count = [0]
+post_control_lock = threading.Lock()
 listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 listener.bind(("127.0.0.1", 0))
@@ -263,8 +267,14 @@ def answer(connection):
             connection.sendall(alert)
             action = "control-alert"
         elif control_seen.is_set() and data:
-            connection.sendall(server_hello)
-            action = "post-control-serverhello"
+            with post_control_lock:
+                post_control_count[0] += 1
+                current_count = post_control_count[0]
+            if current_count >= positive_after:
+                connection.sendall(server_hello)
+                action = "post-control-serverhello"
+            else:
+                action = f"ignore-post-control-{current_count}"
         else:
             action = "ignore"
         print(
@@ -558,3 +568,59 @@ print("D2O/R2O positive production poison hit:", json.dumps(c_result, ensure_asc
 PY
 
 echo "PASSED: actual D2O and R2O production classifiers matched positive property, composed, and poison hits"
+
+# Exercise a late positive poison after all property and composed candidates miss.
+export R2O_CLASSIFIER_POSITIVE_AFTER=13
+start_positive_server "$TEMP/full-poison-d2o.ready" "$TEMP/full-poison-d2o-server.log"
+FULL_POISON_PORT=$(cat "$TEMP/full-poison-d2o.ready")
+ip netns exec "$NS" env D2K_FW=nft "$D2K_BIN" classify "127.0.0.1:$FULL_POISON_PORT" \
+    --sni classifier.example --repeats 1 --timeout 350 --allow-loopback --mark 0 --json \
+    >"$TEMP/full-poison-d2o.json" 2>"$TEMP/full-poison-d2o.err"
+wait_positive_response "$TEMP/full-poison-d2o-server.log"
+kill "$SERVER_PID" 2>/dev/null || true
+wait "$SERVER_PID" 2>/dev/null || true
+SERVER_PID=
+
+start_positive_server "$TEMP/full-poison-r2o.ready" "$TEMP/full-poison-r2o-server.log"
+FULL_POISON_PORT=$(cat "$TEMP/full-poison-r2o.ready")
+ip netns exec "$NS" env R2O_FW=nft "$R2O_BIN" \
+    --classify 127.0.0.1 "$FULL_POISON_PORT" classifier.example --repeats 1 \
+    --timeout 350 --allow-loopback --mark 0 --json \
+    >"$TEMP/full-poison-r2o.json" 2>"$TEMP/full-poison-r2o.err"
+wait_positive_response "$TEMP/full-poison-r2o-server.log"
+kill "$SERVER_PID" 2>/dev/null || true
+wait "$SERVER_PID" 2>/dev/null || true
+SERVER_PID=
+unset R2O_CLASSIFIER_POSITIVE_AFTER
+
+python3 - "$TEMP/full-poison-d2o.json" "$TEMP/full-poison-r2o.json" \
+    "$TEMP/full-poison-d2o-server.log" "$TEMP/full-poison-r2o-server.log" <<'PY'
+import json
+import sys
+
+def result(path):
+    with open(path, encoding="utf-8") as source:
+        data = json.load(source)
+    trace = [(item["probe"], item.get("pass", 0), item.get("fail", 0)) for item in data["trace"]]
+    properties = [item for item in trace if item[0].startswith("\u0441\u0432\u043e\u0439\u0441\u0442\u0432\u043e:")]
+    composed = [item for item in trace if item[0].startswith("\u0421\u041e\u0411\u0420\u0410\u041d\u041e:")]
+    poisons = [item for item in trace if item[0].startswith("poison:")]
+    if (
+        data["verdict"] != "poisonable" or data.get("path") != "\u043f\u0435\u0440\u0435\u0431\u043e\u0440"
+        or data.get("composed", False) or len(properties) != 11
+        or any(item[1:] != (0, 1) for item in properties)
+        or len(composed) != 1 or composed[0][1:] != (0, 1)
+        or len(poisons) != 2 or poisons != [("poison:badsum-x2-g80", 0, 1), ("poison:disorder-pos2", 1, 0)]
+    ):
+        raise SystemExit(f"expected a late poison hit after all earlier candidates miss: {path}")
+    return data["verdict"], data["path"], data.get("strategy"), data.get("props"), trace
+
+c_result, rust_result = result(sys.argv[1]), result(sys.argv[2])
+if c_result != rust_result:
+    raise SystemExit("D2O/R2O late poison results differ")
+for path in sys.argv[3:]:
+    with open(path, encoding="utf-8") as source:
+        if "ignore-post-control-12" not in source.read():
+            raise SystemExit(f"positive response arrived before the full sweep: {path}")
+print("D2O/R2O late poison hit after 11 property, compose, and first poison misses matched")
+PY

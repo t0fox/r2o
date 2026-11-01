@@ -92,11 +92,18 @@ printf 'JSON|match\nCOMPOSE_JSON|match\n' > "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" baseline-mixed-error >> "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" baseline-clear >> "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" baseline-clear-progress >> "$TEMP/d2o.out"
+classifier_json=$TEMP/classifier-d2o.json
+classifier_compose_json=$TEMP/classifier-compose-d2o.json
+if command -v cygpath >/dev/null 2>&1; then
+    classifier_json=$(cygpath -am "$classifier_json")
+    classifier_compose_json=$(cygpath -am "$classifier_compose_json")
+fi
+
 CARGO_TARGET_DIR=$rust_target \
 RUSTFLAGS="${RUSTFLAGS:--Awarnings}" \
 CARGO_MAKEFLAGS= \
-R2O_CLASSIFIER_JSON_FIXTURE=$(cygpath -am "$TEMP/classifier-d2o.json") \
-R2O_CLASSIFIER_COMPOSE_JSON_FIXTURE=$(cygpath -am "$TEMP/classifier-compose-d2o.json") \
+R2O_CLASSIFIER_JSON_FIXTURE="$classifier_json" \
+R2O_CLASSIFIER_COMPOSE_JSON_FIXTURE="$classifier_compose_json" \
     "$CARGO" run --quiet --target "$build_target" \
         --manifest-path "$rust_temp/rust/Cargo.toml" > "$TEMP/r2o.out"
 if ! cmp -s "$TEMP/d2o.out" "$TEMP/r2o.out"; then

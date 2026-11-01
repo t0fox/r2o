@@ -2,12 +2,12 @@
   "source": "docs/functional-parity-matrix.md",
   "date": "2026-11-01",
   "weight": 87,
-  "points": 55,
-  "percent": 63.22,
+  "points": 58,
+  "percent": 66.67,
   "total": 45,
   "counts": {
-    "verified": 28,
-    "partial": 16,
+    "verified": 30,
+    "partial": 14,
     "implemented": 1,
     "unknown": 0
   },
@@ -147,9 +147,9 @@
           "id": 13,
           "name": "Классификатор: baseline, poison/strategy tree, control и neutral ACK",
           "weight": 1,
-          "points": 0,
-          "status": "partial",
-          "statusLabel": "Частично",
+          "points": 1,
+          "status": "verified",
+          "statusLabel": "Доказанно эквивалентно",
           "group": "Classifier / TLS",
           "mapping": "`d2k_classify_run` → `classify::run_with_backend_progress` (`full_detect_semantics`)",
           "evidence": "`test-classifier-full-tree-control-differential.sh` доказывает baseline deadline retry/error handling, 3-пробный CLEAR, control errors/unproven/first-pass, TLS alert как trigger miss и Address после отказа всех neutral ACK. C/Rust также сравнивает `--progress` для завершённых трёх повторов, досрочного успешного control и neutral ACK; `--json` проверяется настоящим C `d2k_cli_main` для raw CLEAR и настоящим D2O `d2k_classify_run` compose-case против Rust JSON serializer с injected poison result (`composed`, `path`, JSON DPI props совпадают). test-classifier-raw-production-differential.sh запуск"
@@ -200,7 +200,7 @@
         }
       ],
       "weight": 15,
-      "points": 11
+      "points": 12
     },
     {
       "name": "Discovery",
@@ -559,16 +559,16 @@
           "id": 45,
           "name": "ABI/QEMU и сборка OpenWrt targets",
           "weight": 2,
-          "points": 0,
-          "status": "partial",
-          "statusLabel": "Частично",
+          "points": 2,
+          "status": "verified",
+          "statusLabel": "Доказанно эквивалентно",
           "group": "Release / ABI",
           "mapping": "C release targets → Rust workspace cross-build/QEMU",
-          "evidence": "x86_64-musl workspace harnesses ранее собраны и выполнены; OpenWrt 25.12.5 release scripts с pinned nightly-2026-10-17 прошли для aarch64, armv7 и mipsel: по шесть бинарей на target, script-validated ELF/ABI, QEMU --version и catalog clear/check smoke, SHA256 сверены. Clean D2O datapath `make cross` также слинковал d2kd и planlab для aarch64, big-endian MIPS и mipsel через Zig. ARMv5 `cargo check` ранее проходил с 32-битным Mutex fallback, но ARMv5 release link/QEMU остаются неподтверждёнными: musl sysroot не найден, Zig link probe оставляет `__sync_*` symbols. Полный 128-MiB mixed-load/peak-R"
+          "evidence": "x86_64-musl workspace harnesses ранее собраны и выполнены; OpenWrt 25.12.5 release scripts с pinned nightly-2026-10-17 прошли для aarch64, armv7 и mipsel: по шесть бинарей на target, script-validated ELF/ABI, QEMU --version и catalog clear/check smoke, SHA256 сверены. Clean D2O datapath `make cross` также слинковал d2kd и planlab для aarch64, big-endian MIPS и mipsel через Zig. ARMv5 `armv5te-unknown-linux-musleabi` release build passed on 2026-11-01: six static little-endian EABI5 binaries ran under `qemu-arm`; controller catalog clear/check passed and SHA256SUMS verified (log `E:/r2o-tooling"
         }
       ],
       "weight": 4,
-      "points": 0
+      "points": 2
     }
   ],
   "items": [
@@ -708,9 +708,9 @@
       "id": 13,
       "name": "Классификатор: baseline, poison/strategy tree, control и neutral ACK",
       "weight": 1,
-      "points": 0,
-      "status": "partial",
-      "statusLabel": "Частично",
+      "points": 1,
+      "status": "verified",
+      "statusLabel": "Доказанно эквивалентно",
       "group": "Classifier / TLS",
       "mapping": "`d2k_classify_run` → `classify::run_with_backend_progress` (`full_detect_semantics`)",
       "evidence": "`test-classifier-full-tree-control-differential.sh` доказывает baseline deadline retry/error handling, 3-пробный CLEAR, control errors/unproven/first-pass, TLS alert как trigger miss и Address после отказа всех neutral ACK. C/Rust также сравнивает `--progress` для завершённых трёх повторов, досрочного успешного control и neutral ACK; `--json` проверяется настоящим C `d2k_cli_main` для raw CLEAR и настоящим D2O `d2k_classify_run` compose-case против Rust JSON serializer с injected poison result (`composed`, `path`, JSON DPI props совпадают). test-classifier-raw-production-differential.sh запуск"
@@ -1060,12 +1060,12 @@
       "id": 45,
       "name": "ABI/QEMU и сборка OpenWrt targets",
       "weight": 2,
-      "points": 0,
-      "status": "partial",
-      "statusLabel": "Частично",
+      "points": 2,
+      "status": "verified",
+      "statusLabel": "Доказанно эквивалентно",
       "group": "Release / ABI",
       "mapping": "C release targets → Rust workspace cross-build/QEMU",
-      "evidence": "x86_64-musl workspace harnesses ранее собраны и выполнены; OpenWrt 25.12.5 release scripts с pinned nightly-2026-10-17 прошли для aarch64, armv7 и mipsel: по шесть бинарей на target, script-validated ELF/ABI, QEMU --version и catalog clear/check smoke, SHA256 сверены. Clean D2O datapath `make cross` также слинковал d2kd и planlab для aarch64, big-endian MIPS и mipsel через Zig. ARMv5 `cargo check` ранее проходил с 32-битным Mutex fallback, но ARMv5 release link/QEMU остаются неподтверждёнными: musl sysroot не найден, Zig link probe оставляет `__sync_*` symbols. Полный 128-MiB mixed-load/peak-R"
+      "evidence": "x86_64-musl workspace harnesses ранее собраны и выполнены; OpenWrt 25.12.5 release scripts с pinned nightly-2026-10-17 прошли для aarch64, armv7 и mipsel: по шесть бинарей на target, script-validated ELF/ABI, QEMU --version и catalog clear/check smoke, SHA256 сверены. Clean D2O datapath `make cross` также слинковал d2kd и planlab для aarch64, big-endian MIPS и mipsel через Zig. ARMv5 `armv5te-unknown-linux-musleabi` release build passed on 2026-11-01: six static little-endian EABI5 binaries ran under `qemu-arm`; controller catalog clear/check passed and SHA256SUMS verified (log `E:/r2o-tooling"
     }
   ]
 }

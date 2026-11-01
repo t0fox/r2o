@@ -20,13 +20,15 @@ CC=${CC:-cc}
 RUSTC=${RUSTC:-rustc}
 rustc_cmd=$RUSTC
 rust_fixture="$ROOT/crates/r2o-controller/tests/fixtures/classify-white-decoy-r2o.rs"
-rust_output="$TEMP/r2o-white-decoy.exe"
+rust_output="$TEMP/r2o-white-decoy"
+rust_run="$TEMP/r2o-white-decoy"
 if command -v cygpath >/dev/null 2>&1; then
     case $RUSTC in
         [A-Za-z]:\\*) rustc_cmd=$(cygpath -u "$RUSTC") ;;
     esac
     rust_fixture=$(cygpath -am "$rust_fixture")
-    rust_output=$(cygpath -am "$rust_output")
+    rust_output=$(cygpath -am "$TEMP/r2o-white-decoy.exe")
+    rust_run="$TEMP/r2o-white-decoy.exe"
 fi
 
 mkdir -p "$TEMP/profiles"
@@ -44,7 +46,7 @@ make -s -C "$TEMP" -f "$D2O_ROOT/core/Makefile" hello_profiles.inc
 "$rustc_cmd" --edition 2024 -Awarnings \
     "$rust_fixture" -o "$rust_output"
 "$TEMP/d2o-white-decoy" > "$TEMP/d2o.out"
-"$TEMP/r2o-white-decoy" > "$TEMP/r2o.out"
+"$rust_run" > "$TEMP/r2o.out"
 if ! cmp -s "$TEMP/d2o.out" "$TEMP/r2o.out"; then
     diff -u "$TEMP/d2o.out" "$TEMP/r2o.out" || true
     exit 1
