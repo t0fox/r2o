@@ -676,8 +676,7 @@ fn serve_discover_runs_discord_ip_discovery_in_process_and_closes_cleanly() {
             );
             assert_eq!(error, "received only 0 Discord Discovery requests");
             assert!(stdout.contains("поиск Discord Discovery"));
-            assert!(!stdout.contains("обнаружен Discord voice"));
-            assert!(!stdout.contains("зонд поставлен в ограниченную очередь"));
+            assert!(!stdout.contains("временный адресный план поставлен для следующего потока"));
             fs::remove_dir_all(work).unwrap();
             return;
         }

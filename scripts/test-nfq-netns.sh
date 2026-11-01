@@ -1592,7 +1592,7 @@ done
     echo "ОШИБКА: conntrack capture listener не запустился" >&2
     exit 1
 }
-if ! ip netns exec "$NS" python3 - "$FIXTURE" <<'PY'
+if ! ip netns exec "$NS" python3 - "$FIXTURE" "$WORK/proc-nf-conntrack-unavailable" <<'PY'
 import ipaddress
 import socket
 import sys
