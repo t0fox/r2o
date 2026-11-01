@@ -16,6 +16,18 @@ r2o — программное обеспечение для **локально�
 
 **Статус:** есть опубликованные подписанные выпуски, CI, Rust-тесты, C/Rust differential-проверки, Linux NFQUEUE и QEMU-проверки архитектур. **Зелёный CI не означает полной приёмки на физическом маршрутизаторе** и не доказывает 100% соответствия каждому сценарию d2o. Оставшиеся пункты фиксируются в [ПРОГРЕСС.md](ПРОГРЕСС.md).
 
+## Прогресс переноса D2O → R2O
+
+[![Доказанный паритет](docs/progress/badge-parity.svg)](docs/progress/progress.json) [![Контракты](docs/progress/badge-contracts.svg)](docs/progress/progress.json)
+
+[![Карта функционального паритета D2O → R2O](docs/progress/progress.svg)](docs/progress/index.html)
+
+[HTML-карта (исходник)](docs/progress/index.html) · [История изменений матрицы](https://github.com/t0fox/r2o/commits/main/docs/functional-parity-matrix.md) · [Матрица и доказательства](docs/functional-parity-matrix.md)
+
+<sub>Интерактивный сайт на GitHub Pages станет доступен после слияния PR и включения Pages → GitHub Actions. До публикации ссылки ведут на существующие файлы репозитория, а не на несуществующий сайт.</sub>
+
+<sub>Взвешенный процент **доказанного поведения**, не доля Rust-кода. Частичные контракты не приносят баллов; полевой паритет требует отдельной проверки.</sub>
+
 ---
 
 ## Возможности

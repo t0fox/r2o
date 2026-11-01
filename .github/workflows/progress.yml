@@ -1,0 +1,55 @@
+name: R2O parity progress
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/functional-parity-matrix.md'
+      - 'tools/progress.mjs'
+      - '.github/workflows/progress.yml'
+  pull_request:
+    paths:
+      - 'docs/functional-parity-matrix.md'
+      - 'docs/progress/**'
+      - 'tools/progress.mjs'
+      - '.github/workflows/progress.yml'
+      - 'README.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node tools/progress.mjs --check
+  publish:
+    if: github.event_name != 'pull_request'
+    needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node tools/progress.mjs --pages
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/progress
+      - id: deployment
+        uses: actions/deploy-pages@v4
