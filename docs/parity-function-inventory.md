@@ -2,7 +2,7 @@
 
 ## Scope and source baseline
 
-This document records datapath/NFQUEUE plus first core HTTP/TLS/ECH/verification, QUIC/HTTP3 and Discord voice/STUN call-path slices from the parity plan; it is not the complete cross-repository inventory. The C oracle is clean D2O main 304ba893dd37197128ac8799c0495b035f6a38c0 at /mnt/e/r2o-tooling/d2o-clean-main. The Rust production source exercised by the current clean-source manifest is R2O main at 214f4a23067b2a74a6b93f944b1abc981427e495; the later d0c88c5 commit changed evidence documents only. The original /mnt/e/d2o checkout remains untouched.
+This document records datapath/NFQUEUE plus first core HTTP/TLS/ECH/verification, QUIC/HTTP3, Discord voice/STUN, and catalog/Discovery/classification/diagnostics call-path slices from the parity plan; it is not the complete cross-repository inventory. The C oracle is clean D2O main 304ba893dd37197128ac8799c0495b035f6a38c0 at /mnt/e/r2o-tooling/d2o-clean-main. The Rust production source exercised by the current clean-source manifest is R2O main at 214f4a23067b2a74a6b93f944b1abc981427e495; the later d0c88c5 commit changed evidence documents only. The original /mnt/e/d2o checkout remains untouched.
 
 C functions are grouped by their source module/API family. Static helpers remain within the owning algorithm group; test harnesses, planlab, and ctlprobe are not production modules. This inventory records callers, branches, state, timers, errors, side effects, and tests at the module boundary. It does not imply that every listed branch has equal C/Rust proof.
 
@@ -60,6 +60,17 @@ This is a source/call-path inventory, not function-by-function proof. The C QUIC
 
 These groups do not close Task 1: static helpers, less common error paths, all controller state transitions and Discovery integration still need per-function review. The runtime audit for QUIC/voice also remains under Tasks 2-3.
 
+
+## Core catalog, Discovery, classification and diagnostics slice
+
+Catalog and Discovery state spans the C store, event ingestion, matching and controller scheduling. Classification and diagnostics add measurement budgets, outcomes and operator-visible records. This table maps module boundaries and primary owners; it does not enumerate every helper.
+
+| D2O C production API groups | R2O production owners/callers | Observable branches, state, timers and effects | Existing test/evidence paths |
+|---|---|---|---|
+| catalog.c d2k_catalog_{load,save,save_atomic,free}; groups.c d2k_group_*; domain.c d2k_domain_*; match.c d2k_catalog_match; d2kc.c event ingestion | Controller catalog.rs Catalog parse/load/restore/learn/merge/expire/match/save operations; domain.rs normalization and suffix membership; groups.rs GroupKey; discovery.rs known-plan and confirmed-binding helpers; main.rs sync/reconnect/persistence | Domain normalization/refusal, group key and transport/family matching, learn/merge/forget/expiry, donor import, corrupt or stale data, atomic save failure, confirmed owner/address binding and restoration; effects include catalog mutation, file writes and generated follow-up plans | D2O core/test_catalog.c, test_catalog_durable.c, test_domain.c, test_groups.c, test_match.c; Rust tests/catalog.rs, domain.rs, groups.rs, discovery.rs, d2o_catalog_persist_differential.c and d2o_catalog_sync_wire_fixture.c |
+| meas.c d2k_meas/d2k_meas_once; measured.c production measurement API; verdict.c d2k_classify/d2k_classify_cancelable; diagnostics.c d2k_diag_*; d2kc.c periodic/event consumers | Controller classify.rs run_with_backend* and result decisions; classify_measured.rs plan generation; response.rs probe/deadline handling; diagnostics.rs record/tick; main.rs scheduled collection and event emission | Target/control/unmeasured result combinations, repeat and deadline budgets, cancellation/EINTR, early stop and inconclusive branches, diagnostic sample/event retention, count snapshots and write errors; effects include network probes, bounded diagnostic state, files and control events | D2O core/test_meas.c, test_measured.c, test_verdict.c, test_diagnostics*.c and test_diagnostics_json.py; Rust tests/classify.rs, response.rs, d2o_meas_eintr.c/.rs, d2o_meas_send_timeout.c/.rs, d2o_meas_timeout_cap.c, d2o_measured_split_differential.c, d2o_diagnostics_differential.c, d2o_diagnostics_snapshot_differential.c and d2o_diagnostic_tick_differential.c |
+
+The core link transport/operator CLIs, remaining crypto/profile/volume functions, detect integration, Telegram integration, and service/config/firewall sources remain open under Task 1. Static helpers and per-function error/state branches also remain open.
 ## Current verification and limits
 
 - Clean D2O datapath suite: E-only runner ran make -B check in the clean D2O clone; passed in 71.5 s. The Makefile's TESTS list plus test_ctlprobe covers the C datapath test targets.
