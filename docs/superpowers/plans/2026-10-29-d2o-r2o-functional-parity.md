@@ -64,7 +64,7 @@ For each gap, before moving to the next:
 
 ### Task 5: Cross-system verification
 
-- [ ] Run the complete Cargo workspace tests and formatting/check gates.
+- [x] Run the complete Cargo workspace tests and formatting/check gates.
 - [ ] Run full applicable D2O C suites and all registered upstream differential scenarios affected by changes.
 - [ ] Run NFQUEUE/runtime integration, QEMU and required ABI builds, plus bounded resource/performance checks for the 128 MB target.
 - [ ] Do not claim hardware calibration or live-router behavior without physical hardware; state that limitation.
