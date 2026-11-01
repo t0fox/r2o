@@ -2,7 +2,7 @@
 
 ## Scope and source baseline
 
-This document records datapath/NFQUEUE plus first core HTTP/TLS/ECH/verification, QUIC/HTTP3, Discord voice/STUN, catalog/Discovery/classification/diagnostics, and detect trigger/poison/raw-probe call-path slices from the parity plan; it is not the complete cross-repository inventory. The C oracle is clean D2O main 304ba893dd37197128ac8799c0495b035f6a38c0 at /mnt/e/r2o-tooling/d2o-clean-main. The Rust production source exercised by the current clean-source manifest is R2O main at 214f4a23067b2a74a6b93f944b1abc981427e495; the later d0c88c5 commit changed evidence documents only. The original /mnt/e/d2o checkout remains untouched.
+This document records datapath/NFQUEUE plus first core HTTP/TLS/ECH/verification, QUIC/HTTP3, Discord voice/STUN, catalog/Discovery/classification/diagnostics, detect trigger/poison/raw-probe, and protected Telegram Rust-integration call-path slices from the parity plan; it is not the complete cross-repository inventory. The C oracle is clean D2O main 304ba893dd37197128ac8799c0495b035f6a38c0 at /mnt/e/r2o-tooling/d2o-clean-main. The Rust production source exercised by the current clean-source manifest is R2O main at 214f4a23067b2a74a6b93f944b1abc981427e495; the later d0c88c5 commit changed evidence documents only. The original /mnt/e/d2o checkout remains untouched.
 
 C functions are grouped by their source module/API family. Static helpers remain within the owning algorithm group; test harnesses, planlab, and ctlprobe are not production modules. This inventory records callers, branches, state, timers, errors, side effects, and tests at the module boundary. It does not imply that every listed branch has equal C/Rust proof.
 
@@ -81,6 +81,16 @@ The C detect program separates trigger recognition, poison/profile selection, re
 | detect/bridge.c, classify.c, poison.c, props.c, raw.c, response.c, trigger.c and main.c | Controller trigger.rs parse_raw_hex; classify.rs trigger acceptance, poison selection and backend run; classify_measured.rs plan generation; raw_probe.rs; response.rs; controller entrypoints | Trigger/packet-shape acceptance and refusal, poison/family support, repeat and cancellation outcomes, per-probe evidence and fallback, raw socket/mark capability, send/receive errors and deadlines; effects include raw network sends and generated plan text | D2O detect/test_bridge.c, test_port.c, test_tree.c, test_repeats.c, test_threads.c, test_raw.c, test_response.c, test_sni_cli.py; R2O tests/classify.rs, source unit tests and d2o_fallback_differential.c, d2o_marked_probe_differential.c, d2o_raw_profile_differential.c, d2o_raw_emission_cancel_fixture.c, d2o_raw_split_support_differential.c |
 
 This module-level slice does not enumerate static helpers or all trigger/poison error branches. The clean D2O detect suite passed on 2026-11-01; full function-level mapping remains open under Task 1.
+
+## Telegram protocol and Rust integration slice
+
+The clean D2O telegram tree is a read-only behavior oracle for the protected z2kOW-derived implementation. This slice maps Rust integration and existing evidence only; it authorizes no changes to D2O Telegram code.
+
+| D2O C production modules | R2O production owners/callers | Observable branches, state and effects | Existing test/evidence paths |
+|---|---|---|---|
+| telegram/src config, identity, DC map, MTProto auth/crypto/config/encrypted/splitter/probe, route DNS/plan, listener, transparent, TLS, WebSocket, stats, limits and memory budget; main.c | r2o-telegram config/identity/dc_discovery/dc_map/crypto/routing/outbound/splitter/response_observer/transparent/ws_client/stats/diagnostics/runtime/server; r2o-manager and router integration | Config validation and defaults, identity/DC map persistence, route and resolver outcomes, MTProto request/response parsing, TLS/WebSocket handoff, transparent listener lifecycle, memory/connection limits, cancellation/shutdown and diagnostics; effects include sockets, config/data files, route decisions and service events | D2O telegram test_config.c, test_identity.c, test_dc_map*.c, test_mtproto*.c, test_route_dns.c, test_route_plan.c, test_listener.c, test_transparent.c, test_tls.c, test_ws.c, test_limits.c, test_memory_budget.c; Rust crates/r2o-telegram/tests/*.rs, d2o_mtproto_response_observer_differential.c and d2o_route_dns_public_ip_differential.c; clean D2O telegram make test passed per E log |
+
+This is an integration map, not a complete Telegram function audit. Continue only on the Rust side for runtime/config/service integration; keep the D2O Telegram implementation unchanged.
 ## Current verification and limits
 
 - Clean D2O datapath suite: E-only runner ran make -B check in the clean D2O clone; passed in 71.5 s. The Makefile's TESTS list plus test_ctlprobe covers the C datapath test targets.
