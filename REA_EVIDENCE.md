@@ -9337,3 +9337,11 @@ The clean D2O d2k_http_read_response oracle and production Rust HttpResponsePars
 Checks: scripts/test-http-chunk-framing-differential.sh passed; the full r2k-core http_response integration target passed 10/10; Rust formatting check passed. The C parser is unchanged between the clean 304ba oracle and the current D2O source diff. This extends evidence for the existing TLS/HTTP verifier matrix contract; it adds no new weighted points.
 
 No QEMU run: the changed behavior is the shared byte-stream parser and the C/Rust differential directly exercises it; an OpenWrt boot would not add evidence for this branch. Applicable QEMU checks remain short, OpenWrt ARM64 only.
+
+### QUIC/HTTP3 unreachable UDP peer matches D2O - 2026-11-02
+
+The pinned D2O C data-stage harness and production Rust HTTP/3 measurement were sent to the same closed local UDP port. C returned NoHandshake, app_bytes=0, requests=0; Rust returned handshake_confirmed=false, status=0, verdict NoHandshake, with matching byte and request counts. This confirms one pre-handshake transport-error branch; no production code changed.
+
+Check: D2O_QUIC_DATA_STAGE_BIN=/mnt/e/r2o-tooling/tests/d2o-quic-data-stage-oneway cargo test -p r2o-controller --test r2o_quic_http3 --locked --offline -- --include-ignored --exact r2o_http3_udp_port_unreachable_matches_d2o --test-threads=1 passed 1/1 in Debian WSL2; cargo fmt --all -- --check passed. Other transport errors, stall variants and lifecycle remain open, so the matrix contract remains partial at 0 points and weighted parity stays 62/87 (71.26%).
+
+No QEMU run: the same loopback endpoint exercised the C and production Rust branch directly. Applicable QEMU checks remain short, OpenWrt ARM64 only.

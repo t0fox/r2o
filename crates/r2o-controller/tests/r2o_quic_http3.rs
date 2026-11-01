@@ -2556,3 +2556,75 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
 
     server.abort();
 }
+
+#[tokio::test]
+#[ignore = "requires the pinned D2O harness; run scripts/test-quic-http3-full-stage-differential.sh"]
+async fn r2o_http3_udp_port_unreachable_matches_d2o() {
+    let d2o_binary = std::env::var("D2O_QUIC_DATA_STAGE_BIN")
+        .expect("D2O_QUIC_DATA_STAGE_BIN must point to the pinned C data-stage harness");
+    let closed_port = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let address = closed_port.local_addr().unwrap();
+    drop(closed_port);
+    let port = address.port().to_string();
+    let c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(d2o_binary)
+            .args(["127.0.0.1", &port, "localhost", "/", "0"])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        !c_output.status.success(),
+        "D2O unexpectedly connected to closed UDP port: stdout={} stderr={}",
+        String::from_utf8_lossy(&c_output.stdout),
+        String::from_utf8_lossy(&c_output.stderr)
+    );
+    let c_result = String::from_utf8(c_output.stdout).unwrap();
+    let c_field = |name: &str| {
+        c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {c_result}"))
+    };
+    assert_eq!(c_field("verdict"), "NoHandshake", "D2O={c_result}");
+    assert_eq!(c_field("app_bytes"), "0", "D2O={c_result}");
+    assert_eq!(c_field("requests"), "0", "D2O={c_result}");
+
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.connect(address).unwrap();
+    let rust_result = tokio::time::timeout(
+        Duration::from_secs(4),
+        r2o_quic_http3_get(
+            socket,
+            address,
+            "localhost",
+            "/",
+            Duration::from_secs(2),
+            RootCertStore::empty(),
+        ),
+    )
+    .await
+    .expect("HTTP/3 closed-port test timed out");
+    assert!(!rust_result.handshake_confirmed, "R2O={rust_result:?}");
+    assert_eq!(rust_result.status, 0, "R2O={rust_result:?}");
+    let verdict = r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&rust_result);
+    assert_eq!(
+        format!("{verdict:?}"),
+        c_field("verdict"),
+        "D2O={c_result} R2O={rust_result:?}"
+    );
+    assert_eq!(
+        rust_result.app_bytes,
+        c_field("app_bytes").parse::<u64>().unwrap()
+    );
+    assert_eq!(
+        rust_result.requests,
+        c_field("requests").parse::<u32>().unwrap()
+    );
+    write_d2o_http3_differential(
+        "R2O_QUIC_HTTP3_PORT_UNREACHABLE_DIFF_OUTPUT",
+        "port-unreachable",
+        &rust_result,
+    );
+}
