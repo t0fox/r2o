@@ -185,7 +185,7 @@
           "statusLabel": "Частично",
           "group": "Classifier / TLS",
           "mapping": "`detect/response.c:{d2k_resp_scan12,d2k_resp_handshake12,d2k_resp_decide,d2k_probe_response}` → controller `response::{scan12,handshake,count_handshakes,decide,probe_response}` and CLEAR follow-up in `classify.rs`",
-          "evidence": "`test-d2o-shared-fixtures.sh` compares 13 C/Rust scan/decision vectors, poll-EINTR, and an end-to-end DNS-rotation probe (answers alternate between 127.0.0.1 and 127.0.0.2; both return blocked, target=0/control=1). R2O matches C's per-handshake resolution and failed-lookup accounting. Under DNS rotation, target and control may land on different IPs despite D2O's same-address rationale. Other full-probe verdict branches and the CLEAR follow-up remain unpaired"
+          "evidence": "test-d2o-shared-fixtures.sh pairs actual C d2k_probe_response with production Rust probe_response on loopback: CLEAR 3/3, BLOCKED target 0/control 3, FLAKY 1/3 vs 3/3, NOT_APPLICABLE target 3/control 0; six requests per side. Debian WSL2 run passed (log: /mnt/e/r2o-tooling/tests/r2o-tls-response-fullprobe-2026-11-01.log); existing EINTR and DNS-rotation pairs also pass. The C/Rust classify CLEAR-follow-up call path is not yet paired end-to-end. Row stays partial, 0 points."
         },
         {
           "id": 23,
@@ -801,7 +801,7 @@
       "statusLabel": "Частично",
       "group": "Classifier / TLS",
       "mapping": "`detect/response.c:{d2k_resp_scan12,d2k_resp_handshake12,d2k_resp_decide,d2k_probe_response}` → controller `response::{scan12,handshake,count_handshakes,decide,probe_response}` and CLEAR follow-up in `classify.rs`",
-      "evidence": "`test-d2o-shared-fixtures.sh` compares 13 C/Rust scan/decision vectors, poll-EINTR, and an end-to-end DNS-rotation probe (answers alternate between 127.0.0.1 and 127.0.0.2; both return blocked, target=0/control=1). R2O matches C's per-handshake resolution and failed-lookup accounting. Under DNS rotation, target and control may land on different IPs despite D2O's same-address rationale. Other full-probe verdict branches and the CLEAR follow-up remain unpaired"
+      "evidence": "test-d2o-shared-fixtures.sh pairs actual C d2k_probe_response with production Rust probe_response on loopback: CLEAR 3/3, BLOCKED target 0/control 3, FLAKY 1/3 vs 3/3, NOT_APPLICABLE target 3/control 0; six requests per side. Debian WSL2 run passed (log: /mnt/e/r2o-tooling/tests/r2o-tls-response-fullprobe-2026-11-01.log); existing EINTR and DNS-rotation pairs also pass. The C/Rust classify CLEAR-follow-up call path is not yet paired end-to-end. Row stays partial, 0 points."
     },
     {
       "id": 22,
