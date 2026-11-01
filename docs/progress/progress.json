@@ -331,7 +331,7 @@
           "statusLabel": "Частично",
           "group": "QUIC / HTTP3",
           "mapping": "`d2k_quic_data_stage`/`d2k_qc_app_progress` → Rust `r2o_quic_http3::{measure_with_wire_len,wait_with_stall}`",
-          "evidence": "`test-quic-http3-full-stage-differential.sh` passes 9/9 in Debian 13 WSL2 against pinned clean D2O. Covers repeated budgets, response growth before/past RTO, HTTP 451, delayed body/total deadline, reply drop/close, Content-Length=100 with 2 bytes+FIN (both Pass), and mid-body H3 RESET_STREAM after 7 bytes (both NotRun without false stall). Live one-way case drops client→server packets after HTTP 200 while server QUIC keepalive continues: both Cut, D2O oneway=1, one request and matching app_bytes; Rust marks one-way/stalled and records at least two PING probes. One /budget-slow replay differed "
+          "evidence": "`test-quic-http3-full-stage-differential.sh` passed 9/9 before this addition; updated main test passed 1/1. Covers repeated budget/growth, 451, delayed body/deadline, drop/close, Content-Length mismatch, both RESET_STREAM cases and one-way. Pre-header reset: both NotRun, matching app_bytes/requests, no Rust stall. One-way: both Cut, C oneway=1, matching app_bytes/requests; Rust confirms ≥2 PINGs. `/budget-slow` once differed (C Cut/Rust NotRun); three later runs passed, cause unknown. Other transport errors, stall variants and lifecycle remain open."
         }
       ],
       "weight": 9,
@@ -867,7 +867,7 @@
       "statusLabel": "Частично",
       "group": "QUIC / HTTP3",
       "mapping": "`d2k_quic_data_stage`/`d2k_qc_app_progress` → Rust `r2o_quic_http3::{measure_with_wire_len,wait_with_stall}`",
-      "evidence": "`test-quic-http3-full-stage-differential.sh` passes 9/9 in Debian 13 WSL2 against pinned clean D2O. Covers repeated budgets, response growth before/past RTO, HTTP 451, delayed body/total deadline, reply drop/close, Content-Length=100 with 2 bytes+FIN (both Pass), and mid-body H3 RESET_STREAM after 7 bytes (both NotRun without false stall). Live one-way case drops client→server packets after HTTP 200 while server QUIC keepalive continues: both Cut, D2O oneway=1, one request and matching app_bytes; Rust marks one-way/stalled and records at least two PING probes. One /budget-slow replay differed "
+      "evidence": "`test-quic-http3-full-stage-differential.sh` passed 9/9 before this addition; updated main test passed 1/1. Covers repeated budget/growth, 451, delayed body/deadline, drop/close, Content-Length mismatch, both RESET_STREAM cases and one-way. Pre-header reset: both NotRun, matching app_bytes/requests, no Rust stall. One-way: both Cut, C oneway=1, matching app_bytes/requests; Rust confirms ≥2 PINGs. `/budget-slow` once differed (C Cut/Rust NotRun); three later runs passed, cause unknown. Other transport errors, stall variants and lifecycle remain open."
     },
     {
       "id": 28,

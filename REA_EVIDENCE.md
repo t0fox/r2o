@@ -9255,3 +9255,11 @@ Added an ignored C/Rust differential test for the live `d2k_quic_data_stage` / p
 After `cargo fmt --all`, `R2O_DONOR_ROOT=/mnt/e/r2o-tooling/d2o-clean-main D2O_QUIC_DATA_STAGE_BIN=/mnt/e/r2o-tooling/tests/d2o-quic-data-stage-oneway sh scripts/test-quic-http3-full-stage-differential.sh` passed 9/9 in Debian 13 WSL2 (68.03 s), including the new case. `cargo +1.98.0 fmt --all -- --check` passed. A controller package run excluding `diagnostics::tests` finished with 252 passed and 12 failed; each failure reported OS error 95, “Operation not supported”, during temporary-file operations on the WSL E: DrvFS mount. This broader suite is not green; its log is `/mnt/e/r2o-tooling/tests/controller-no-diagnostics-2026-11-01.log`.
 
 The matrix contract remains partial and earns 0/2; the total remains 62/87 (71.26%). The `/budget-slow` mismatch has two passing reruns but no established cause. Additional transport errors, timing-sensitive stall cases and lifecycle remain open.
+
+### QUIC HTTP/3 pre-header RESET_STREAM and isolated budget replay — 2026-11-01
+
+Extended the existing full-stage fixture so the pinned clean D2O C client and production R2O client receive H3_INTERNAL_ERROR RESET_STREAM after the request but before response headers. Both return NotRun, match application bytes and request count, and R2O reports an explicit stream error without a false QUIC stall. The updated main full-stage integration test passed 1/1 in Debian 13 WSL2 (44.77 s); the other eight functions last passed in the preceding 9/9 harness run. This is test-fixture coverage only; no production code changed.
+
+The same updated test isolated the timing-sensitive `/budget-slow` scenario. This run returned NotRun on both sides: C reported app_bytes=9, requests=1, packets=32, need=4, oneway=0; Rust reported app_bytes=9, requests=1, 33 datagrams, budget_passed=false, seven PING probes and seven ACKs before the GET timeout. The prior single C Cut/Rust NotRun mismatch did not reproduce. Its cause remains unknown; the client stacks differ by one counted datagram in this replay, which did not change the verdict.
+
+The QUIC matrix row remains partial and earns 0/2. The total stays 62/87 (71.26%); additional transport errors, timing-sensitive stall and lifecycle remain open.

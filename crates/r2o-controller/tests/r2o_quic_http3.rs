@@ -921,6 +921,10 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                         break;
                     };
                     request_count = request_count.saturating_add(1);
+                    if request.uri().path() == "/stream-reset-before-headers" {
+                        stream.stop_stream(h3::error::Code::H3_INTERNAL_ERROR);
+                        continue;
+                    }
                     if request.uri().path() == "/budget-close" && request_count > 1 {
                         connection_for_close
                             .close(quinn::VarInt::from_u32(3), b"budget second GET closed");
@@ -1307,6 +1311,88 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
         "D2O={reset_c_result} R2O={reset_rust_result:?}"
     );
 
+    let headers_reset_binary = d2o_binary.clone();
+    let headers_reset_address = server_address;
+    let headers_reset_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(headers_reset_binary)
+            .args([
+                "127.0.0.1",
+                &headers_reset_address.port().to_string(),
+                "localhost",
+                "/stream-reset-before-headers",
+                "0",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        !headers_reset_output.status.success(),
+        "D2O header reset unexpectedly passed: stdout={} stderr={}",
+        String::from_utf8_lossy(&headers_reset_output.stdout),
+        String::from_utf8_lossy(&headers_reset_output.stderr)
+    );
+    let headers_reset_c_result = String::from_utf8(headers_reset_output.stdout).unwrap();
+    let headers_reset_c_field = |name: &str| {
+        headers_reset_c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {headers_reset_c_result}"))
+    };
+    assert_eq!(headers_reset_c_field("verdict"), "NotRun");
+    assert_eq!(headers_reset_c_field("requests"), "1");
+
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.connect(server_address).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(certificate_der.clone()).unwrap();
+    let headers_reset_result = tokio::time::timeout(
+        Duration::from_secs(8),
+        r2o_quic_http3_get(
+            socket,
+            server_address,
+            "localhost",
+            "/stream-reset-before-headers",
+            Duration::from_secs(2),
+            roots,
+        ),
+    )
+    .await
+    .expect("HTTP/3 stream reset before headers timed out");
+    let headers_reset_verdict =
+        r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&headers_reset_result);
+    assert!(
+        headers_reset_result.handshake_confirmed,
+        "R2O header reset: {headers_reset_result:?}"
+    );
+    assert_eq!(
+        headers_reset_result.status, 0,
+        "R2O header reset: {headers_reset_result:?}"
+    );
+    assert!(
+        headers_reset_result.error.is_some(),
+        "R2O header reset: {headers_reset_result:?}"
+    );
+    assert!(
+        !headers_reset_result.r2o_quic_stalled,
+        "H3 RESET_STREAM is not a QUIC transport stall: {headers_reset_result:?}"
+    );
+    assert_eq!(format!("{headers_reset_verdict:?}"), "NotRun");
+    assert_eq!(
+        headers_reset_c_field("verdict"),
+        format!("{headers_reset_verdict:?}")
+    );
+    assert_eq!(
+        headers_reset_c_field("app_bytes").parse::<u64>().unwrap(),
+        headers_reset_result.app_bytes,
+        "D2O={headers_reset_c_result} R2O={headers_reset_result:?}"
+    );
+    assert_eq!(
+        headers_reset_c_field("requests").parse::<u32>().unwrap(),
+        headers_reset_result.requests,
+        "D2O={headers_reset_c_result} R2O={headers_reset_result:?}"
+    );
     let repeated_binary = d2o_binary.clone();
     let repeated_address = server_address;
     let repeated_c_output = tokio::task::spawn_blocking(move || {
