@@ -679,7 +679,7 @@ async fn r2o_http3_повторяет_get_до_прохождения_пакет
 
 #[tokio::test]
 #[ignore = "requires the pinned D2O harness; run scripts/test-quic-http3-full-stage-differential.sh"]
-async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_slow_body_and_close() {
+async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_refusal_slow_body_and_close() {
     let d2o_binary = std::env::var("D2O_QUIC_DATA_STAGE_BIN")
         .expect("D2O_QUIC_DATA_STAGE_BIN must point to the pinned C data-stage harness");
     let mut certificate_params = rcgen::CertificateParams::new(vec!["localhost".to_owned()]);
@@ -905,6 +905,74 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_slow_body_and_
     assert!(
         repeated_rust_result.requests > 1,
         "budget run did not repeat GET: {repeated_rust_result:?}"
+    );
+
+    let refusal_binary = d2o_binary.clone();
+    let refusal_address = server_address;
+    let refusal_c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(refusal_binary)
+            .args([
+                "127.0.0.1",
+                &refusal_address.port().to_string(),
+                "localhost",
+                "/refuse",
+                "0",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        !refusal_c_output.status.success(),
+        "D2O HTTP 451 unexpectedly passed: {}",
+        String::from_utf8_lossy(&refusal_c_output.stdout)
+    );
+    let refusal_c_result = String::from_utf8(refusal_c_output.stdout).unwrap();
+    let refusal_c_field = |name: &str| {
+        refusal_c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {refusal_c_result}"))
+    };
+
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.connect(server_address).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(certificate_der.clone()).unwrap();
+    let refusal_rust_result = r2o_quic_http3_get(
+        socket,
+        server_address,
+        "localhost",
+        "/refuse",
+        Duration::from_secs(2),
+        roots,
+    )
+    .await;
+    let refusal_rust_verdict =
+        r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&refusal_rust_result);
+
+    assert!(
+        refusal_rust_result.handshake_confirmed,
+        "R2O={refusal_rust_result:?}"
+    );
+    assert_eq!(
+        refusal_rust_result.status, 451,
+        "R2O={refusal_rust_result:?}"
+    );
+    assert!(
+        !refusal_rust_result.r2o_quic_stalled,
+        "HTTP refusal was classified as a stall: {refusal_rust_result:?}"
+    );
+    assert_eq!(
+        refusal_c_field("verdict"),
+        format!("{refusal_rust_verdict:?}")
+    );
+    assert_eq!(refusal_c_field("verdict"), "Cut");
+    assert_eq!(
+        refusal_c_field("requests").parse::<u32>().unwrap(),
+        refusal_rust_result.requests,
+        "D2O={refusal_c_result} R2O={refusal_rust_result:?}"
     );
 
     let slow_binary = d2o_binary.clone();
