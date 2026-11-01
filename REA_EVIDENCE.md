@@ -9207,3 +9207,11 @@ Earlier C/Rust results that read the dirty donor working tree are not final orac
 ### Upstream differential manifest read-only inventory - 2026-11-01
 
 Read scripts/ci-differential-shards.sh and the matrix notes without executing the shard suite. The manifest pins the D2O upstream SHA 304ba893dd37197128ac8799c0495b035f6a38c0 and lists 53 current upstream entries; the matrix records the earlier 51-scenario report and says those scenarios were not rerun wholesale. Clean-source classifier, QUIC, process-stat, measurement, and TLS/verify differentials were run selectively; the remaining manifest stays prior evidence pending source-specific selection.
+
+### Clean-source upstream manifest and C-suite follow-up - 2026-11-01
+
+The current scripts/ci-differential-shards.sh manifest completed 53/53 against clean D2O main 304ba893dd37197128ac8799c0495b035f6a38c0 in /mnt/e/r2o-tooling/d2o-clean-main. Entries 1–24 and #49 carry forward from the prior clean-source receipts because the only intervening R2O change was the test-only fallback parser correction in commit 214f4a2; #25 was rerun after the parser correction; #26–48 and #50–53 ran at local R2O 214f4a23067b2a74a6b93f944b1abc981427e495. The working R2O tree is clean, and the user-owned /mnt/e/d2o checkout was not modified. No production code changed in this batch.
+
+Additional clean D2O C-suite results: datapath make -B check passed (71.5 s), detect make -B check passed (112.3 s), and telegram make -B BUILD_DIR=build test passed (60.6 s). The E-only runner's initial absolute Telegram build directory was incompatible with the upstream Makefile's ./$(BUILD_DIR) invocation; the rerun used the relative ignored build/ path.
+
+The full core make -B check stopped twice at test_quicprobe assertion “ServerHello пришёл ВТОРОЙ датаграммой...”. The exact built binary passed three direct retries and one strace run. The failure is therefore non-reproducible in isolation, but its cause is not established; the upstream fixture's detached UDP workers and shared descriptor are a possible timing sensitivity, not a proven diagnosis. ThreadSanitizer could not start under this WSL kernel because of an unexpected memory mapping. The full core C-suite gate remains open. The matrix score was not changed.

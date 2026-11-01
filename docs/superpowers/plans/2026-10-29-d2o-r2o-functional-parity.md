@@ -66,6 +66,7 @@ For each gap, before moving to the next:
 
 - [x] Run the complete Cargo workspace tests and formatting/check gates.
 - [ ] Run full applicable D2O C suites and all registered upstream differential scenarios affected by changes.
+  - Evidence 2026-11-01: clean-source upstream manifest 53/53 passed; datapath, detect, and telegram C suites passed. The full core suite failed twice at upstream test_quicprobe; the same binary passed three direct retries and one strace run, so the cause remains unresolved and this gate stays open.
 - [ ] Run NFQUEUE/runtime integration, QEMU and required ABI builds, plus bounded resource/performance checks for the 128 MB target.
 - [ ] Do not claim hardware calibration or live-router behavior without physical hardware; state that limitation.
 
