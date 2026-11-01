@@ -195,6 +195,110 @@ async fn r2o_http3_transport_close_is_not_stall_and_matches_d2o() {
 }
 
 #[tokio::test]
+#[ignore = "requires the pinned D2O harness; run scripts/test-quic-http3-full-stage-differential.sh"]
+async fn r2o_http3_without_peer_settings_matches_d2o() {
+    let d2o_binary = std::env::var("D2O_QUIC_DATA_STAGE_BIN")
+        .expect("D2O_QUIC_DATA_STAGE_BIN must point to the pinned C data-stage harness");
+    let params = rcgen::CertificateParams::new(vec!["localhost".to_owned()]);
+    let certificate = rcgen::Certificate::from_params(params).unwrap();
+    let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
+    let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+        certificate.serialize_private_key_der(),
+    ));
+    let mut tls = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate_der.clone()], private_key)
+        .unwrap();
+    tls.alpn_protocols = vec![b"h3".to_vec()];
+    let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap();
+    let endpoint = quinn::Endpoint::server(
+        quinn::ServerConfig::with_crypto(Arc::new(crypto)),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .unwrap();
+    let server_address = endpoint.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        while let Some(incoming) = endpoint.accept().await {
+            tokio::spawn(async move {
+                let Ok(connection) = incoming.await else {
+                    return;
+                };
+                tokio::time::sleep(Duration::from_secs(12)).await;
+                connection.close(quinn::VarInt::from_u32(1), b"no H3 settings");
+            });
+        }
+    });
+
+    let address = server_address;
+    let c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(d2o_binary)
+            .args([
+                "127.0.0.1",
+                &address.port().to_string(),
+                "localhost",
+                "/no-settings",
+                "0",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        !c_output.status.success(),
+        "D2O without peer SETTINGS unexpectedly passed: stdout={} stderr={}",
+        String::from_utf8_lossy(&c_output.stdout),
+        String::from_utf8_lossy(&c_output.stderr)
+    );
+    let c_result = String::from_utf8(c_output.stdout).unwrap();
+    let c_field = |name: &str| {
+        c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {c_result}"))
+    };
+    assert_ne!(c_field("verdict"), "Pass", "D2O={c_result}");
+
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.connect(server_address).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(certificate_der).unwrap();
+    let rust_result = tokio::time::timeout(
+        Duration::from_secs(9),
+        r2o_quic_http3_get(
+            socket,
+            server_address,
+            "localhost",
+            "/no-settings",
+            Duration::from_secs(1),
+            roots,
+        ),
+    )
+    .await
+    .expect("HTTP/3 missing peer SETTINGS test timed out");
+    let rust_verdict = r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&rust_result);
+
+    assert!(rust_result.handshake_confirmed, "R2O={rust_result:?}");
+    assert_eq!(rust_result.status, 0, "R2O={rust_result:?}");
+    assert_eq!(c_field("verdict"), format!("{rust_verdict:?}"));
+    assert_eq!(
+        c_field("app_bytes").parse::<u64>().unwrap(),
+        rust_result.app_bytes,
+        "D2O={c_result} R2O={rust_result:?}"
+    );
+    assert_eq!(
+        c_field("requests").parse::<u32>().unwrap(),
+        rust_result.requests,
+        "D2O={c_result} R2O={rust_result:?}"
+    );
+    write_d2o_http3_differential(
+        "R2O_QUIC_HTTP3_NO_SETTINGS_DIFF_OUTPUT",
+        "no-settings",
+        &rust_result,
+    );
+    server.abort();
+}
+#[tokio::test]
 async fn r2o_http3_udp_reply_drop_is_a_stall_and_matches_d2o() {
     let certificate_params = rcgen::CertificateParams::new(vec!["localhost".to_owned()]);
     let certificate = rcgen::Certificate::from_params(certificate_params).unwrap();

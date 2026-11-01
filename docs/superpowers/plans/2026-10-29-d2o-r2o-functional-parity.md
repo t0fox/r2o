@@ -15,6 +15,7 @@
 - Compare current `t0fox/d2o/main` and `t0fox/r2o/main` before scoring; starting baseline is d2o `304ba893dd37197128ac8799c0495b035f6a38c0` and r2o `0bd1e1bee134425643a8a01f57a95afbde2c406a`.
 - Keep Telegram on its existing Rust z2kOW-derived implementation; do not replace or rewrite it.
 - Do not use a physical router, VPS, relay, or WARP; do not put C back into runtime.
+- Keep QEMU runs short and use an OpenWrt ARM64 image only; do not run long QEMU soaks or other guest architectures.
 - Preserve the R2O architecture and OpenWrt 128 MB RAM target.
 - Keep user-owned `.audit/`, `captures/`, and the D2O oracle checkout untouched.
 - Do not rerun already-passed upstream differential scenarios unless an inspected code path exposes a concrete reason.
@@ -53,6 +54,7 @@ Follow the user's sequential workflow on the shared `main` checkout. Finish one 
   - The new C/Rust pre-header reset case returns NotRun on both sides, with matching app_bytes/requests; Rust reports an explicit error and no false stall. No production code changed.
   - The isolated `/budget-slow` replay returned NotRun on both sides (C app_bytes=9/requests=1/packets=32; Rust app_bytes=9/requests=1/33 datagrams, 7 PINGs sent and ACKed). The earlier single C Cut/Rust NotRun did not recur; its cause remains unproven.
   - Existing coverage includes repeated budgets, growth before/past RTO, HTTP 451, delayed body/total deadline, reply drop/close, Content-Length mismatch, mid-body RESET_STREAM, and live one-way activity. The row remains partial at 0/2; other transport errors, timing-sensitive stall and lifecycle remain open.
+  - Evidence 2026-11-01: a pinned C/Rust fixture with a live QUIC connection but no peer HTTP/3 SETTINGS passes in the full focused harness; verdict, app_bytes and request count match. `scripts/test-quic-http3-full-stage-differential.sh` passed 10/10 (80.84 s). Other transport-error branches, the `/budget-slow` cause and lifecycle remain open.
   - Discord C scheduler 2026-11-01: pinned D2O was rebuilt from an isolated archive in Debian 13 WSL2; `make -C core test_sched` and `test_sched --voice-only` passed. Process restart, automatic recovery, endpoint changes, and long RTC remain open (matrix entry #121).
 ### Task 3: Root audit of Discovery, scheduler, catalog, services, and full apply cycle
 

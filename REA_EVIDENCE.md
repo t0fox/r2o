@@ -9280,3 +9280,12 @@ python3 /mnt/e/r2o/scripts/test-router-procd-lifecycle-qemu.py
 ```
 
 Logs: `/mnt/e/r2o-tooling/openwrt-qemu-armv8/r2o-procd-differential-2026-11-01.log` and the accompanying `-qemu.log`. This verifies the procd waiter lifecycle when the `S99*` action is invoked in a QEMU guest; the `rc.d` calls in the test are manual, not automatic cold-boot dispatch. The `/opt` service targets are stubs, so this does not prove production daemon restart, real flash autostart or reboot-persisted reapply. The matrix row remains partial at 0/3; weighted total remains 62/87 (71.26%).
+
+
+### QUIC HTTP/3 peer omits SETTINGS — 2026-11-01
+
+The pinned clean D2O `d2k_quic_data_stage` and production R2O HTTP/3 measurement were compared over real QUIC/TLS. The fixture completes the QUIC handshake, keeps transport alive, but never creates an HTTP/3 server, so no peer control stream or SETTINGS arrives. The no-SETTINGS case asserts that neither implementation passes and compares verdict, `app_bytes`, and request count; R2O status remains 0.
+
+Command: from `/mnt/e/r2o`, run `R2O_DONOR_ROOT=/mnt/e/r2o-tooling/d2o-clean-main bash scripts/test-quic-http3-full-stage-differential.sh` in Debian 13 WSL2. The script builds the pinned C harness and runs the Rust integration target. Result: 10 passed, 0 failed, 80.84 s.
+
+This adds one no-peer-SETTINGS transport/protocol case. No production code changed and the QUIC row remains partial at 0/2; other transport errors, stall variants, and lifecycle are open. The earlier `/budget-slow` C Cut/Rust NotRun mismatch occurred once and did not recur in three later replays; its cause is unknown.
