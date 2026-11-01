@@ -43,7 +43,7 @@ fn matches_d2o_http_header_and_chunk_framing() {
     line_over_limit.extend_from_slice(&[b'a'; 126]);
     line_over_limit.extend_from_slice(b"\r\nx\r\n0\r\n\r\n");
 
-    let cases: [(&str, Vec<u8>, bool, u64); 5] = [
+    let cases: [(&str, Vec<u8>, bool, u64); 6] = [
         (
             "extension_suffix",
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;foo=\"unterminated\r\nx\r\n0\r\n\r\n".to_vec(),
@@ -61,6 +61,12 @@ fn matches_d2o_http_header_and_chunk_framing() {
             b"HTTP/1.1 200 OK\r\nMalformed Header\r\nContent-Length: 1\r\n\r\nx".to_vec(),
             true,
             1,
+        ),
+        (
+            "buffered_bytes_after_frame",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\nextra".to_vec(),
+            true,
+            0,
         ),
         ("chunk_line_at_limit", line_at_limit, true, 1),
         ("chunk_line_over_limit", line_over_limit, false, 0),
@@ -89,6 +95,7 @@ fn matches_d2o_http_header_and_chunk_framing() {
         "extension_suffix status=200 complete=1 body_bytes=1\n\
          trailer_without_colon status=200 complete=1 body_bytes=0\n\
          colonless_header status=200 complete=1 body_bytes=1\n\
+         buffered_bytes_after_frame status=200 complete=1 body_bytes=0\n\
          chunk_line_at_limit status=200 complete=1 body_bytes=1\n\
          chunk_line_over_limit status=200 complete=0 body_bytes=0\n"
     );
@@ -170,11 +177,12 @@ fn close_delimited_response_completes_only_on_fin() {
 }
 
 #[test]
-fn invalidates_extra_bytes_after_a_framed_response_is_complete() {
+fn ignores_extra_bytes_after_a_framed_response_is_complete() {
     let mut response = HttpResponseParser::new(false);
-    response.feed(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\nextra", false);
-    assert!(response.is_invalid());
-    assert!(!response.is_complete());
+    response.feed(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", false);
+    response.feed(b"extra", false);
+    assert!(response.is_complete());
+    assert!(!response.is_invalid());
 }
 
 #[test]

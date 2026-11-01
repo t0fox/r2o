@@ -9328,3 +9328,12 @@ cargo test --quiet -p r2o-datapath --locked --offline -- --skip control_server -
 Results: format check passed; silence tests 8/8; expiry tests 5/5; the filtered crate run passed 340 tests with 0 failures, 13 tests filtered, and 5 ignored. Socket/control tests filtered from this run had previously returned OS error 95 when Unix socket/temp operations used E: DrvFS.
 
 No QEMU run for this in-memory session-classifier slice: no ARM64 production datapath binary was rebuilt, so a guest boot would not exercise the changed code. Any applicable future QEMU run remains short, OpenWrt, ARM64 only. No same-trace C/Rust differential was added, so this evidence does not claim that edge as a newly proven weighted contract.
+
+
+### HTTP response parser ignores buffered bytes after framing - 2026-11-02
+
+The clean D2O d2k_http_read_response oracle and production Rust HttpResponseParser differed after a framed response completed: C returned status 200, complete=1, body_bytes=0 for Content-Length: 0 followed by buffered extra; Rust marked the response invalid. The new shared fixture reproduced RED. HttpResponseParser::feed now stops at completion, and a separate-feed regression confirms later bytes are ignored as well. The C/Rust differential passed with matching output.
+
+Checks: scripts/test-http-chunk-framing-differential.sh passed; the full r2k-core http_response integration target passed 10/10; Rust formatting check passed. The C parser is unchanged between the clean 304ba oracle and the current D2O source diff. This extends evidence for the existing TLS/HTTP verifier matrix contract; it adds no new weighted points.
+
+No QEMU run: the changed behavior is the shared byte-stream parser and the C/Rust differential directly exercises it; an OpenWrt boot would not add evidence for this branch. Applicable QEMU checks remain short, OpenWrt ARM64 only.

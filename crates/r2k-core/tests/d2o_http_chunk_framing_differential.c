@@ -60,10 +60,13 @@ int main(void)
         "0\r\nnot-a-field\r\n\r\n";
     static const uint8_t colonless_header[] =
         "HTTP/1.1 200 OK\r\nMalformed Header\r\nContent-Length: 1\r\n\r\nx";
+    static const uint8_t buffered_bytes_after_frame[] =
+        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\nextra";
     const test_case cases[] = {
         { "extension_suffix", extension, 1, 1 },
         { "trailer_without_colon", trailer, 1, 0 },
         { "colonless_header", colonless_header, 1, 1 },
+        { "buffered_bytes_after_frame", buffered_bytes_after_frame, 1, 0 },
         { "chunk_line_at_limit", line_at_limit, 1, 1 },
         { "chunk_line_over_limit", line_over_limit, 0, 0 },
     };

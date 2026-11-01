@@ -56,7 +56,6 @@ impl HttpResponseParser {
         }
         for &byte in bytes {
             if self.complete {
-                self.invalid = true;
                 break;
             }
             match self.state {

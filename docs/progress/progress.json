@@ -163,7 +163,7 @@
           "statusLabel": "Эквивалентно",
           "group": "Classifier / TLS",
           "mapping": "`core/meas.c:d2k_meas_once`, `core/verify.c:d2k_verify_probe*` → controller `classify::TcpProbeBackend`/`response::probe_trigger` and `fetch.rs` TLS/HTTP verifier",
-          "evidence": "`r2o-meas-differential.sh`, `r2o-tls-verify-differential.sh`, `r2o-measured-split-differential.sh`; measured inputs, transport errors and verifier outputs are covered by C/Rust fixtures"
+          "evidence": "`r2o-meas-differential.sh`, `r2o-tls-verify-differential.sh`, `r2o-measured-split-differential.sh`; measured inputs, transport errors and verifier outputs are covered by C/Rust fixtures; `test-http-chunk-framing-differential.sh` also confirms C/Rust agreement when bytes remain buffered after Content-Length completion"
         },
         {
           "id": 15,
@@ -724,7 +724,7 @@
       "statusLabel": "Эквивалентно",
       "group": "Classifier / TLS",
       "mapping": "`core/meas.c:d2k_meas_once`, `core/verify.c:d2k_verify_probe*` → controller `classify::TcpProbeBackend`/`response::probe_trigger` and `fetch.rs` TLS/HTTP verifier",
-      "evidence": "`r2o-meas-differential.sh`, `r2o-tls-verify-differential.sh`, `r2o-measured-split-differential.sh`; measured inputs, transport errors and verifier outputs are covered by C/Rust fixtures"
+      "evidence": "`r2o-meas-differential.sh`, `r2o-tls-verify-differential.sh`, `r2o-measured-split-differential.sh`; measured inputs, transport errors and verifier outputs are covered by C/Rust fixtures; `test-http-chunk-framing-differential.sh` also confirms C/Rust agreement when bytes remain buffered after Content-Length completion"
     },
     {
       "id": 15,
