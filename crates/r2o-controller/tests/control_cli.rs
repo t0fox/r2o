@@ -484,6 +484,166 @@ fn serve_discover_remembers_hello_without_starting_a_search() {
     let _ = fs::remove_dir_all(&work);
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn serve_discover_runs_discord_ip_discovery_in_process_and_closes_cleanly() {
+    let work = temporary_directory();
+    fs::create_dir(&work).unwrap();
+    let socket_path = work.join("control.sock");
+    let catalog_path = work.join("catalog.json");
+    fs::write(&catalog_path, br#"{"boxes":[]}"#).unwrap();
+
+    let udp = std::net::UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+    udp.set_read_timeout(Some(Duration::from_millis(250)))
+        .unwrap();
+    let server_port = udp.local_addr().unwrap().port();
+    let discovery = thread::spawn(move || -> Result<usize, String> {
+        let result = (|| {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            let mut received = 0;
+            let mut request = [0; 2048];
+            while received < usize::from(r2o_controller::voice_discovery::R2O_DISCOVERY_EXCHANGES) {
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "received only {received} Discord Discovery requests"
+                    ));
+                }
+                let (length, peer) = match udp.recv_from(&mut request) {
+                    Ok(packet) => packet,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        continue;
+                    }
+                    Err(error) => return Err(format!("UDP receive failed: {error}")),
+                };
+                if !r2k_core::stun::is_discord_ip_discovery_request(&request[..length]) {
+                    return Err(format!(
+                        "unexpected Discord Discovery request length {length}"
+                    ));
+                }
+                let mut response = [0; 74];
+                response[..4].copy_from_slice(&[0, 2, 0, 70]);
+                response[4..8].copy_from_slice(&request[4..8]);
+                let address = b"203.0.113.7";
+                response[8..8 + address.len()].copy_from_slice(address);
+                response[72..74].copy_from_slice(&50_000_u16.to_be_bytes());
+                udp.send_to(&response, peer)
+                    .map_err(|error| format!("UDP response failed: {error}"))?;
+                received += 1;
+            }
+            Ok(received)
+        })();
+        result
+    });
+
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (result_sender, result_receiver) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return Err("controller did not connect".to_owned());
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => return Err(format!("control accept failed: {error}")),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .map_err(|error| format!("set control timeout failed: {error}"))?;
+        let mut greeting = vec![0; KEY_LEN];
+        greeting[0] = 4;
+        greeting.extend_from_slice(&PROTO_VERSION.to_be_bytes());
+        greeting.extend_from_slice(&65_535_u32.to_be_bytes());
+        greeting.extend_from_slice(&[3, b'd', b'e', b'v']);
+        stream
+            .write_all(&frame(0x000a, &greeting))
+            .map_err(|error| format!("write datapath greeting failed: {error}"))?;
+
+        let mut key = [0; KEY_LEN];
+        key[0] = 4;
+        key[1..5].copy_from_slice(&[127, 0, 0, 1]);
+        key[17..21].copy_from_slice(&[192, 0, 2, 1]);
+        key[33..35].copy_from_slice(&server_port.to_be_bytes());
+        key[35..37].copy_from_slice(&50_000_u16.to_be_bytes());
+        key[37] = 17;
+        let event = r2k_core::control::R2oVoiceSuspectEvent {
+            key,
+            client_is_low: false,
+        };
+        stream
+            .write_all(&frame(
+                r2k_core::control::EVENT_R2O_VOICE_SUSPECT,
+                &event.event_body().unwrap(),
+            ))
+            .map_err(|error| format!("write voice event failed: {error}"))?;
+        result_receiver
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|error| format!("Discovery responder did not finish: {error}"))?;
+        Ok(())
+    });
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_r2o-controller"))
+        .args([
+            "--serve",
+            socket_path.to_str().unwrap(),
+            catalog_path.to_str().unwrap(),
+            "--discover",
+            "--mark",
+            "291",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let process_stdout = child.stdout.take().unwrap();
+    let output_reader = thread::spawn(move || -> std::io::Result<String> {
+        use std::io::BufRead;
+
+        let mut reader = std::io::BufReader::new(process_stdout);
+        let mut output = String::new();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader.read_line(&mut line)? == 0 {
+                break;
+            }
+            output.push_str(&line);
+            if line.contains("поиск Discord Discovery") {
+                let _ = result_sender.send(());
+            }
+        }
+        Ok(output)
+    });
+    let output = child.wait_with_output().unwrap();
+    let stdout = output_reader.join().unwrap().unwrap();
+    let discovery_result = discovery.join().unwrap();
+    let server_result = server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "r2o-controller Discord discovery failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        discovery_result.unwrap(),
+        usize::from(r2o_controller::voice_discovery::R2O_DISCOVERY_EXCHANGES)
+    );
+    server_result.unwrap();
+    assert!(stdout.contains("обнаружен Discord voice"));
+    assert!(stdout.contains("зонд поставлен в ограниченную очередь"));
+    assert!(stdout.contains("Discovery отвечает без кандидата на исправление"));
+    fs::remove_dir_all(work).unwrap();
+}
+
 #[test]
 fn set_name_does_not_send_when_the_datapath_wire_version_is_mismatched() {
     let work = temporary_directory();
