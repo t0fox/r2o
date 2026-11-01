@@ -875,6 +875,7 @@ mod app {
                     flow_journal.dropped()
                 );
                 r2o_log_process_stats(&journal_origin, Instant::now());
+                eprintln!("r2o-datapath: потеряно ядром {}", socket.lost_packets());
                 r2o_log_flow_table_stats(&tcp_sessions, &udp_sessions);
                 eprintln!(
                     "r2o-datapath: ответ невидим очереди: {} из {} TCP-потоков с приветствием",
@@ -935,6 +936,7 @@ mod app {
             let now = Instant::now();
             if next_stats.is_some_and(|deadline| now >= deadline) {
                 r2o_log_process_stats(&journal_origin, Instant::now());
+                eprintln!("r2o-datapath: потеряно ядром {}", socket.lost_packets());
                 r2o_log_flow_table_stats(&tcp_sessions, &udp_sessions);
                 next_stats = options.stats_interval.map(|interval| now + interval);
             }

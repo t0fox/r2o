@@ -2,6 +2,7 @@ use crate::netlink::{
     MessageIter, NF_ACCEPT, NFQNL_CFG_CMD_BIND, NFQNL_CFG_CMD_UNBIND, config_command,
     config_params, kernel_error, verdict, verdict_payload,
 };
+use std::cell::Cell;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
@@ -26,11 +27,16 @@ impl std::fmt::Display for ReceiveError {
 
 impl std::error::Error for ReceiveError {}
 
+fn record_lost_packet(counter: &Cell<u64>) {
+    counter.set(counter.get().saturating_add(1));
+}
+
 pub struct QueueSocket {
     fd: OwnedFd,
     queue: u16,
     protocol_family: u16,
     sequence: u32,
+    lost_packets: Cell<u64>,
 }
 
 impl QueueSocket {
@@ -88,6 +94,7 @@ impl QueueSocket {
             queue,
             protocol_family,
             sequence: 1,
+            lost_packets: Cell::new(0),
         };
         let bind = config_command(
             queue,
@@ -180,9 +187,16 @@ impl QueueSocket {
         }
         let error = io::Error::last_os_error();
         match error.raw_os_error() {
-            Some(libc::ENOBUFS) => Err(ReceiveError::LostPackets),
+            Some(libc::ENOBUFS) => {
+                record_lost_packet(&self.lost_packets);
+                Err(ReceiveError::LostPackets)
+            }
             _ => Err(ReceiveError::Io(error)),
         }
+    }
+
+    pub fn lost_packets(&self) -> u64 {
+        self.lost_packets.get()
     }
 
     pub fn send_verdict(&mut self, packet_id: u32, action: u32) -> io::Result<()> {
@@ -348,5 +362,13 @@ mod tests {
 
         assert_eq!(error.kind(), ErrorKind::TimedOut);
         assert_eq!(calls.get(), 1);
+    }
+    #[test]
+    fn record_lost_packet_counts_each_kernel_report() {
+        let count = Cell::new(0_u64);
+        super::record_lost_packet(&count);
+        super::record_lost_packet(&count);
+
+        assert_eq!(count.get(), 2);
     }
 }
