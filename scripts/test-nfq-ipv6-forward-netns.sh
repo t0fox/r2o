@@ -392,7 +392,7 @@ if ! ip netns exec "$GATEWAY_NS" nft list chain inet r2o forward | \
     echo "ОШИБКА: IPv6 request/reply не прошли оба NFQUEUE forward rule" >&2
     exit 1
 fi
-ip netns exec "$GATEWAY_NS" python3 - "$CLIENT_IP" "$SERVER_IP" "$CLIENT_PORT" "$PORT" <<'PY'
+ip netns exec "$GATEWAY_NS" python3 - "$CLIENT_IP" "$SERVER_IP" "$CLIENT_PORT" "$PORT" "$WORK/proc-nf-conntrack-unavailable" <<'PY'
 import ipaddress
 import sys
 
@@ -404,6 +404,7 @@ candidates = []
 try:
     table = open("/proc/net/nf_conntrack", encoding="ascii")
 except FileNotFoundError:
+    open(sys.argv[5], "w", encoding="ascii").close()
     print("proc conntrack table is unavailable; packets and nft counters verify IPv6 forwarding")
 else:
     with table:
@@ -440,5 +441,9 @@ else
     echo "ОШИБКА: IPv6 gateway datapath не завершился после SIGTERM" >&2
     exit 1
 fi
-echo "ПРОЙДЕНО: IPv6 SO_MARK, UDP/TCP request/reply NFQUEUE, 64-KiB TCP echo, conntrack и fail-open переполнения 32-пакетной очереди (100/100 UDP)"
+if [ -f "$WORK/proc-nf-conntrack-unavailable" ]; then
+    echo "ПРОЙДЕНО: IPv6 SO_MARK, UDP/TCP request/reply NFQUEUE, 64-KiB TCP echo и fail-open (proc conntrack tuple check unavailable)"
+else
+    echo "ПРОЙДЕНО: IPv6 SO_MARK, UDP/TCP request/reply NFQUEUE, 64-KiB TCP echo, conntrack и fail-open переполнения 32-пакетной очереди (100/100 UDP)"
+fi
 cat "$WORK/r2o-datapath.log" "$WORK/server.log"

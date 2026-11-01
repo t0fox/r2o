@@ -1498,7 +1498,7 @@ done
     echo "ОШИБКА: IPv6 echo-сервер не запустился" >&2
     exit 1
 }
-if ! ip netns exec "$NS" python3 - "$FIXTURE" <<'PY'
+if ! ip netns exec "$NS" python3 - "$FIXTURE" "$WORK/proc-nf-conntrack-unavailable" <<'PY'
 import socket
 import sys
 
@@ -1610,6 +1610,7 @@ translated = "2001:db8:100::10"
 try:
     table = open("/proc/net/nf_conntrack", encoding="ascii")
 except FileNotFoundError:
+    open(sys.argv[2], "w", encoding="ascii").close()
     print("proc conntrack table is unavailable; NAT is verified by the UDP peer")
 else:
     with table:
@@ -1647,10 +1648,14 @@ if ! wait "$IPV6_NAT_CAPTURE_PID"; then
     exit 1
 fi
 IPV6_NAT_CAPTURE_PID=
-if ! ip netns exec "$NS" nft list chain inet r2o ipv6_nat_fragments | grep -Eq 'counter packets [2-9][0-9]* bytes'; then
+if [ -f "$WORK/proc-nf-conntrack-unavailable" ]; then
+    echo "ПРОПУЩЕНО: conntrack-mapped IPv6 fragment counter недоступен без /proc/net/nf_conntrack"
+elif ! ip netns exec "$NS" nft list chain inet r2o ipv6_nat_fragments | grep -Eq 'counter packets [2-9][0-9]* bytes'; then
     ip netns exec "$NS" nft list chain inet r2o ipv6_nat_fragments >&2
     echo "ОШИБКА: локальный OUTPUT не увидел несколько conntrack-mapped IPv6 fragments" >&2
     exit 1
+else
+    echo "ПРОЙДЕНО: proc conntrack переписал IPv6 fragment source до peer reassembly"
 fi
 kill -TERM "$R2OD_IPV6_NAT_PID"
 if wait "$R2OD_IPV6_NAT_PID"; then
@@ -1660,7 +1665,6 @@ else
     echo "ОШИБКА: IPv6 conntrack datapath не завершился после SIGTERM" >&2
     exit 1
 fi
-echo "ПРОЙДЕНО: proc conntrack переписал IPv6 fragment source до peer reassembly"
 R2OD_BIN="$R2OD_BIN" sh "$SCRIPT_DIR/test-nfq-ipv6-forward-netns.sh"
 
 cat >"$WORK/nfqueue-overflow-probe.py" <<'PY'

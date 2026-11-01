@@ -485,8 +485,32 @@ fn serve_discover_remembers_hello_without_starting_a_search() {
 }
 
 #[cfg(target_os = "linux")]
+fn can_set_socket_mark(mark: u32) -> bool {
+    use std::os::fd::AsRawFd;
+
+    let Ok(socket) = std::net::UdpSocket::bind(("127.0.0.1", 0)) else {
+        return false;
+    };
+    unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_MARK,
+            (&mark as *const u32).cast(),
+            std::mem::size_of_val(&mark) as libc::socklen_t,
+        ) == 0
+    }
+}
+
+#[cfg(target_os = "linux")]
 #[test]
 fn serve_discover_runs_discord_ip_discovery_in_process_and_closes_cleanly() {
+    let mark_supported = can_set_socket_mark(291);
+    let discovery_timeout = if mark_supported {
+        Duration::from_secs(8)
+    } else {
+        Duration::from_millis(500)
+    };
     let work = temporary_directory();
     fs::create_dir(&work).unwrap();
     let socket_path = work.join("control.sock");
@@ -499,7 +523,7 @@ fn serve_discover_runs_discord_ip_discovery_in_process_and_closes_cleanly() {
     let server_port = udp.local_addr().unwrap().port();
     let discovery = thread::spawn(move || -> Result<usize, String> {
         let result = (|| {
-            let deadline = Instant::now() + Duration::from_secs(8);
+            let deadline = Instant::now() + discovery_timeout;
             let mut received = 0;
             let mut request = [0; 2048];
             while received < usize::from(r2o_controller::voice_discovery::R2O_DISCOVERY_EXCHANGES) {
@@ -635,17 +659,22 @@ fn serve_discover_runs_discord_ip_discovery_in_process_and_closes_cleanly() {
     );
     server_result.unwrap();
     match discovery_result {
-        Ok(received) => assert_eq!(
-            received,
-            usize::from(r2o_controller::voice_discovery::R2O_DISCOVERY_EXCHANGES)
-        ),
-        Err(error) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert_eq!(error, "received only 0 Discord Discovery requests");
+        Ok(received) => {
             assert!(
-                stderr.contains("не подтвердить метку UDP-сокета"),
-                "unexpected Discord Discovery failure: {stderr}"
+                mark_supported,
+                "Discord Discovery sent packets without a usable SO_MARK"
             );
+            assert_eq!(
+                received,
+                usize::from(r2o_controller::voice_discovery::R2O_DISCOVERY_EXCHANGES)
+            );
+        }
+        Err(error) => {
+            assert!(
+                !mark_supported,
+                "Discord Discovery failed despite a usable SO_MARK: {error}"
+            );
+            assert_eq!(error, "received only 0 Discord Discovery requests");
             assert!(stdout.contains("поиск Discord Discovery"));
             assert!(!stdout.contains("обнаружен Discord voice"));
             assert!(!stdout.contains("зонд поставлен в ограниченную очередь"));
