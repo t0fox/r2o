@@ -44,7 +44,7 @@
 Follow the user's sequential workflow on the shared `main` checkout. Finish one subsystem's source trace, evidence and any required fix/commit before moving to the next. Return C function → Rust function → branch coverage → exact existing test evidence, plus bounded reproductions for candidate mismatches.
 
 - [ ] Datapath/NFQUEUE/conntrack/journal/raw packet execution and OpenWrt memory/ABI.
-  - Evidence slice: clean D2O datapath make -B check passed; R2O datapath crate passed 344/344 active tests (5 ignored). Function mapping and IPv6-oracle/resource limits are recorded in docs/parity-function-inventory.md; full runtime/ABI and 128-MB load audit remains open.
+  - Evidence slice: clean D2O datapath `make -B check` and Zig-backed `make cross` passed; R2O datapath crate passed 344/344 active tests (5 ignored). Official OpenWrt 25.12.5 release/QEMU scripts passed for aarch64, armv7 and mipsel; ARMv5 release link/QEMU and the 128-MiB sustained mixed-load/peak-RSS audit remain open. Function mapping and the IPv6-oracle/resource limits are in `docs/parity-function-inventory.md`.
 - [ ] TCP/TLS/HTTP/ECH/classifier/verify and their C↔Rust call paths.
 - [ ] QUIC and Discord RTC/UDP lifecycle, endpoint changes, reconnects, expiry, and long sessions.
 
@@ -68,7 +68,7 @@ For each gap, before moving to the next:
 
 - [x] Run the complete Cargo workspace tests and formatting/check gates.
 - [ ] Run full applicable D2O C suites and all registered upstream differential scenarios affected by changes.
-  - Evidence 2026-11-01: clean-source upstream manifest 53/53 passed; datapath, detect, and telegram C suites passed. The full core suite failed twice at upstream test_quicprobe; the same binary passed three direct retries and one strace run, so the cause remains unresolved and this gate stays open.
+  - Evidence 2026-11-01: clean-source upstream manifest 53/53 passed; datapath, detect, and telegram C suites passed. The full core suite failed twice at upstream test_quicprobe; the same binary passed three direct retries and one strace run, so the cause remains unresolved and this gate stays open. D2O datapath `make cross` linked aarch64, big-endian MIPS and mipsel through Zig; R2O OpenWrt release/QEMU gates passed for aarch64, armv7 and mipsel. ARMv5 link/QEMU, the full-system 128-MiB load profile and physical-router calibration remain open.
 - [ ] Run NFQUEUE/runtime integration, QEMU and required ABI builds, plus bounded resource/performance checks for the 128 MB target.
 - [ ] Do not claim hardware calibration or live-router behavior without physical hardware; state that limitation.
 
