@@ -44,9 +44,9 @@ int main(int argc, char **argv) {
     d2k_quic_arm_data data = {.verdict = D2K_QAD_NOT_RUN};
     d2k_quic_data_stage(connection, argv[3], argv[4], 0, (unsigned)budget, 1000, &data);
     d2k_qc_close(connection);
-    printf("verdict=%s app_bytes=%" PRIu64 " requests=%u packets=%" PRIu64 " need=%u\n",
+    printf("verdict=%s app_bytes=%" PRIu64 " requests=%u packets=%" PRIu64 " need=%u oneway=%d\n",
            verdict_name(data.verdict), data.app_bytes, data.requests, data.packets,
-           data.need);
+           data.need, data.oneway);
     if (data.verdict != D2K_QAD_PASS) {
         fprintf(stderr, "D2O data stage: %s\n", data.reason);
     }

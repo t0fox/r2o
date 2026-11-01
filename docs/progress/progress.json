@@ -330,8 +330,8 @@
           "status": "partial",
           "statusLabel": "Частично",
           "group": "QUIC / HTTP3",
-          "mapping": "`d2k_quic_data_stage`/`d2k_qc_app_progress` → `r2o_quic_http3::{measure_with_wire_len,wait_with_stall}`",
-          "evidence": "`test-quic-http3-full-stage-differential.sh` passes 8/8 in Debian WSL2 against pinned clean D2O. Covers repeated budgets, growth before/past RTO, HTTP 451, delayed body/deadline, drop, and close. Content-Length=100 with 2 bytes+FIN: both Pass; R2O complete, 2 body bytes, matching app_bytes/requests. Mid-body H3 RESET_STREAM: both NotRun; 7 body bytes, no false stall, matching app_bytes/requests. One /budget-slow C Cut/Rust NotRun was transient (two reruns passed). Other transport errors, timing-sensitive stall, and lifecycle remain open."
+          "mapping": "`d2k_quic_data_stage`/`d2k_qc_app_progress` → Rust `r2o_quic_http3::{measure_with_wire_len,wait_with_stall}`",
+          "evidence": "`test-quic-http3-full-stage-differential.sh` passes 9/9 in Debian 13 WSL2 against pinned clean D2O. Covers repeated budgets, response growth before/past RTO, HTTP 451, delayed body/total deadline, reply drop/close, Content-Length=100 with 2 bytes+FIN (both Pass), and mid-body H3 RESET_STREAM after 7 bytes (both NotRun without false stall). Live one-way case drops client→server packets after HTTP 200 while server QUIC keepalive continues: both Cut, D2O oneway=1, one request and matching app_bytes; Rust marks one-way/stalled and records at least two PING probes. One /budget-slow replay differed "
         }
       ],
       "weight": 9,
@@ -866,8 +866,8 @@
       "status": "partial",
       "statusLabel": "Частично",
       "group": "QUIC / HTTP3",
-      "mapping": "`d2k_quic_data_stage`/`d2k_qc_app_progress` → `r2o_quic_http3::{measure_with_wire_len,wait_with_stall}`",
-      "evidence": "`test-quic-http3-full-stage-differential.sh` passes 8/8 in Debian WSL2 against pinned clean D2O. Covers repeated budgets, growth before/past RTO, HTTP 451, delayed body/deadline, drop, and close. Content-Length=100 with 2 bytes+FIN: both Pass; R2O complete, 2 body bytes, matching app_bytes/requests. Mid-body H3 RESET_STREAM: both NotRun; 7 body bytes, no false stall, matching app_bytes/requests. One /budget-slow C Cut/Rust NotRun was transient (two reruns passed). Other transport errors, timing-sensitive stall, and lifecycle remain open."
+      "mapping": "`d2k_quic_data_stage`/`d2k_qc_app_progress` → Rust `r2o_quic_http3::{measure_with_wire_len,wait_with_stall}`",
+      "evidence": "`test-quic-http3-full-stage-differential.sh` passes 9/9 in Debian 13 WSL2 against pinned clean D2O. Covers repeated budgets, response growth before/past RTO, HTTP 451, delayed body/total deadline, reply drop/close, Content-Length=100 with 2 bytes+FIN (both Pass), and mid-body H3 RESET_STREAM after 7 bytes (both NotRun without false stall). Live one-way case drops client→server packets after HTTP 200 while server QUIC keepalive continues: both Cut, D2O oneway=1, one request and matching app_bytes; Rust marks one-way/stalled and records at least two PING probes. One /budget-slow replay differed "
     },
     {
       "id": 28,
