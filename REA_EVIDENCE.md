@@ -9295,3 +9295,36 @@ This adds one no-peer-SETTINGS transport/protocol case. No production code chang
 Added `/slow-headers` to the pinned D2O C/Rust full-stage fixture. The server waits 5 seconds before sending response headers. Against clean D2O `304ba893dd37197128ac8799c0495b035f6a38c0` and R2O `c39dd0b647234c9d0ad9279fd6a9803f407161e2`, both return `NotRun`, with matching application bytes and one request. Rust reports status 0, no body/completion, a transport error, and no false stall. The full differential script passed 10/10 in Debian WSL2 (88.21 s); `cargo +1.98.0 fmt --all -- --check` also passed. No production code changed.
 
 This closes only the delayed-before-headers case. Other transport errors, stall variants, and lifecycle remain open; the QUIC row remains partial at 0/2 and the weighted total remains 62/87 (71.26%).
+
+### QUIC HTTP/3 RESET_STREAM after response headers and before body — 2026-11-01
+
+Added `/stream-reset-after-headers` to the pinned C/Rust full-stage fixture. The server sends HTTP 200 HEADERS, waits 250 ms, then resets the H3 stream before DATA. Clean D2O `304ba893dd37197128ac8799c0495b035f6a38c0` and production R2O both return `NotRun` with matching `app_bytes` and one request. Rust reports status 200, zero body bytes, incomplete response, an explicit stream error, and no false stall. The focused full-stage test passed 1/1 in Debian 13 WSL2 (57.03 s); no production code changed.
+
+Command (with `R2O_DONOR_ROOT=/mnt/e/r2o-tooling/d2o-clean-main` and `D2O_QUIC_DATA_STAGE_BIN=/mnt/e/r2o-tooling/tests/d2o-quic-data-stage-oneway`):
+
+```sh
+cargo +1.98.0 test -p r2o-controller --test r2o_quic_http3 r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refusal_slow_body_drop_and_close --locked --offline -- --include-ignored --exact --test-threads=1
+```
+
+This closes only the post-HEADERS/pre-body reset case. Other transport errors, stall variants, and lifecycle remain open; the QUIC row remains partial at 0/2 and the weighted total remains 62/87 (71.26%).
+
+
+### Datapath TCP silence lifecycle — 2026-11-02
+
+Current comparison sources: D2O main a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe at /mnt/e/r2o-tooling/d2o-current-main; R2O main baseline 51c74db42e5c7dbf8771d768c0e1b0b2c0317980 at /mnt/e/r2o. The clean donor diff from 304ba893 to a63d964 touches only datapath/session.c and datapath/test_session.c; the original /mnt/e/d2o checkout remains untouched.
+
+D2O now uses one tcp_silence_observe predicate from sweep, idle expiry, and FIN/RST close. The current-source C command `make -B -C datapath test_session CC=cc && ./datapath/test_session` passed with “сессия: все проверки прошли”.
+
+R2O uses one tcp_silence_event predicate from sweep, expiry, and close before flow removal. Regressions cover per-flow reverse visibility, empty ACK versus response payload, first reverse RST, one ClientHello retransmission before the RTT deadline, repeat-suspicion suppression, duplicate suppression, recognized ClientHello gating, and late FIN/RST delivery.
+
+Commands, with CARGO_HOME, CARGO_TARGET_DIR, and TMPDIR on E:
+```sh
+cargo fmt --all -- --check
+cargo test -p r2o-datapath --lib tcp_silence --locked --offline
+cargo test -p r2o-datapath --lib tcp_истечение --locked --offline
+cargo test --quiet -p r2o-datapath --locked --offline -- --skip control_server --skip control_socket_is_private_to_its_owner --skip try_send_event_reports_when_the_control_outbox_cannot_retain_an_event --skip r2o_передаёт_
+```
+
+Results: format check passed; silence tests 8/8; expiry tests 5/5; the filtered crate run passed 340 tests with 0 failures, 13 tests filtered, and 5 ignored. Socket/control tests filtered from this run had previously returned OS error 95 when Unix socket/temp operations used E: DrvFS.
+
+No QEMU run for this in-memory session-classifier slice: no ARM64 production datapath binary was rebuilt, so a guest boot would not exercise the changed code. Any applicable future QEMU run remains short, OpenWrt, ARM64 only. No same-trace C/Rust differential was added, so this evidence does not claim that edge as a newly proven weighted contract.

@@ -3065,6 +3065,11 @@ mod app {
                 );
             }
         }
+        for event in sessions.take_tcp_silence_events() {
+            if !controller_probe {
+                send_tcp_silent_event(control, flow_journal, journal_origin, &event);
+            }
+        }
         send_pending_tcp_fin_retry(sessions, control, flow_journal, journal_origin);
         decision
     }

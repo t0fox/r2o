@@ -1045,6 +1045,7 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                         "/stage"
                             | "/content-length"
                             | "/stream-reset"
+                            | "/stream-reset-after-headers"
                             | "/growth"
                             | "/growth-rto"
                             | "/deadline"
@@ -1087,6 +1088,11 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                         .is_err()
                     {
                         break;
+                    }
+                    if request.uri().path() == "/stream-reset-after-headers" {
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        stream.stop_stream(h3::error::Code::H3_INTERNAL_ERROR);
+                        continue;
                     }
                     if request.uri().path() == "/partial-close" {
                         if stream
@@ -1501,6 +1507,88 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
         headers_reset_result.requests,
         "D2O={headers_reset_c_result} R2O={headers_reset_result:?}"
     );
+
+    let response_reset_binary = d2o_binary.clone();
+    let response_reset_address = server_address;
+    let response_reset_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(response_reset_binary)
+            .args([
+                "127.0.0.1",
+                &response_reset_address.port().to_string(),
+                "localhost",
+                "/stream-reset-after-headers",
+                "0",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        !response_reset_output.status.success(),
+        "D2O response reset unexpectedly passed: stdout={} stderr={}",
+        String::from_utf8_lossy(&response_reset_output.stdout),
+        String::from_utf8_lossy(&response_reset_output.stderr)
+    );
+    let response_reset_c_result = String::from_utf8(response_reset_output.stdout).unwrap();
+    let response_reset_c_field = |name: &str| {
+        response_reset_c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {response_reset_c_result}"))
+    };
+    assert_eq!(response_reset_c_field("verdict"), "NotRun");
+    assert_eq!(response_reset_c_field("requests"), "1");
+
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.connect(server_address).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(certificate_der.clone()).unwrap();
+    let response_reset_result = r2o_quic_http3_get(
+        socket,
+        server_address,
+        "localhost",
+        "/stream-reset-after-headers",
+        Duration::from_secs(2),
+        roots,
+    )
+    .await;
+    let response_reset_verdict =
+        r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&response_reset_result);
+    assert!(
+        response_reset_result.handshake_confirmed,
+        "R2O response reset: {response_reset_result:?}"
+    );
+    assert_eq!(
+        response_reset_result.status, 200,
+        "R2O response reset: {response_reset_result:?}"
+    );
+    assert_eq!(response_reset_result.body_bytes, 0);
+    assert!(!response_reset_result.complete);
+    assert!(
+        response_reset_result.error.is_some(),
+        "R2O response reset: {response_reset_result:?}"
+    );
+    assert!(
+        !response_reset_result.r2o_quic_stalled,
+        "H3 RESET_STREAM after HEADERS is not a QUIC transport stall: {response_reset_result:?}"
+    );
+    assert_eq!(format!("{response_reset_verdict:?}"), "NotRun");
+    assert_eq!(
+        response_reset_c_field("verdict"),
+        format!("{response_reset_verdict:?}")
+    );
+    assert_eq!(
+        response_reset_c_field("app_bytes").parse::<u64>().unwrap(),
+        response_reset_result.app_bytes,
+        "D2O={response_reset_c_result} R2O={response_reset_result:?}"
+    );
+    assert_eq!(
+        response_reset_c_field("requests").parse::<u32>().unwrap(),
+        response_reset_result.requests,
+        "D2O={response_reset_c_result} R2O={response_reset_result:?}"
+    );
+
     let repeated_binary = d2o_binary.clone();
     let repeated_address = server_address;
     let repeated_c_output = tokio::task::spawn_blocking(move || {

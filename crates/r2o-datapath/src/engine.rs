@@ -129,6 +129,7 @@ struct TcpSession {
     appdata_told: bool,
     plan_done: bool,
     reverse_rst: bool,
+    saw_reverse_rst: bool,
     hello_has_sni: bool,
     forward_data_packets: u32,
     reverse_data_packets: u32,
@@ -188,6 +189,7 @@ impl TcpSession {
             appdata_told: false,
             plan_done: false,
             reverse_rst: false,
+            saw_reverse_rst: false,
             hello_has_sni: false,
             forward_data_packets: 0,
             reverse_data_packets: 0,
@@ -207,6 +209,37 @@ impl TcpSession {
             last_seen: now,
         }
     }
+}
+
+fn tcp_silence_event(
+    key: &TcpFlowKey,
+    session: &TcpSession,
+    now: Instant,
+) -> Option<R2oTcpSilenceEvent> {
+    let hello_at = session.hello_at?;
+    if session.controller_probe
+        || session.silence_reported
+        || session.repeat_reported
+        || !session.reverse_seen
+        || session.response_payload
+        || session.saw_reverse_rst
+    {
+        return None;
+    }
+    let elapsed = now.checked_duration_since(hello_at)?;
+    let deadline = session.rtt.map_or(Duration::from_secs(2), |rtt| {
+        rtt.saturating_mul(8)
+            .clamp(Duration::from_secs(1), Duration::from_secs(5))
+    });
+    if elapsed < deadline && session.hello_repeats == 0 {
+        return None;
+    }
+    Some(R2oTcpSilenceEvent {
+        key: key.wire_key(),
+        client_is_low: session.initiator == key.low,
+        planned: session.plan_done,
+        elapsed_ms: elapsed.as_millis().min(u128::from(u32::MAX)) as u32,
+    })
 }
 
 /// Уровень ответного TCP-обмена, собранный по пакетам одного потока.
@@ -327,7 +360,6 @@ pub struct TcpSessions {
     http_keepalive_stats: R2oHttpKeepAliveStats,
     tcp_payload_stats: R2oTcpPayloadStats,
     tcp_stall_budgets: Vec<u16>,
-    reverse_visible_by_family: [bool; 2],
     r2o_tcp_hello_flows: u64,
     r2o_reply_hidden: u64,
     tcp_exchange_events: VecDeque<R2oTcpExchangeEvent>,
@@ -336,6 +368,7 @@ pub struct TcpSessions {
     tcp_rst_cut_events: VecDeque<R2oTcpRstCutEvent>,
     fin_retry_events: VecDeque<R2oTcpFinRetryEvent>,
     rst_after_app_events: VecDeque<R2oTcpRstAfterAppEvent>,
+    tcp_silence_events: VecDeque<R2oTcpSilenceEvent>,
 }
 
 impl Default for TcpSessions {
@@ -358,6 +391,8 @@ impl TcpSessions {
         tcp_repeat_events.try_reserve(flow_capacity.slots())?;
         let mut tcp_rst_cut_events = VecDeque::new();
         tcp_rst_cut_events.try_reserve(flow_capacity.slots())?;
+        let mut tcp_silence_events = VecDeque::new();
+        tcp_silence_events.try_reserve(flow_capacity.slots())?;
         Ok(Self {
             flows,
             flow_capacity,
@@ -365,7 +400,6 @@ impl TcpSessions {
             http_keepalive_stats: R2oHttpKeepAliveStats::default(),
             tcp_payload_stats: R2oTcpPayloadStats::default(),
             tcp_stall_budgets: vec![TCP_STALL_PACKET_BUDGET as u16],
-            reverse_visible_by_family: [false; 2],
             r2o_tcp_hello_flows: 0,
             r2o_reply_hidden: 0,
             tcp_exchange_events,
@@ -374,6 +408,7 @@ impl TcpSessions {
             tcp_rst_cut_events,
             fin_retry_events: VecDeque::new(),
             rst_after_app_events: VecDeque::new(),
+            tcp_silence_events,
         })
     }
 
@@ -507,6 +542,10 @@ impl TcpSessions {
         self.tcp_rst_cut_events.drain(..).collect()
     }
 
+    pub fn take_tcp_silence_events(&mut self) -> Vec<R2oTcpSilenceEvent> {
+        self.tcp_silence_events.drain(..).collect()
+    }
+
     pub fn mark_plan_done(&mut self, key: &[u8; KEY_LEN]) {
         if let Some((_, session)) = self
             .flows
@@ -635,7 +674,6 @@ impl TcpSessions {
         idle: Duration,
         mut on_silent: impl FnMut(R2oTcpSilenceEvent),
     ) -> usize {
-        let reverse_visible_by_family = self.reverse_visible_by_family;
         let before = self.flows.len();
         self.flows.retain(|key, session| {
             let idle_expired = now.saturating_duration_since(session.last_seen) >= idle;
@@ -644,26 +682,12 @@ impl TcpSessions {
                     .is_some_and(|elapsed| elapsed >= fin_retry_window(session.rtt))
             });
 
-            if idle_expired && !fin_expired {
-                let family_index = match key.low.address.family() {
-                    4 => Some(0),
-                    6 => Some(1),
-                    _ => None,
-                };
-                if !session.controller_probe
-                    && family_index.is_some_and(|index| reverse_visible_by_family[index])
-                    && !session.silence_reported
-                    && session.reverse_packets_after_hello == 0
-                    && let Some(hello_at) = session.hello_at
-                {
-                    let elapsed = now.saturating_duration_since(hello_at);
-                    on_silent(R2oTcpSilenceEvent {
-                        key: key.wire_key(),
-                        client_is_low: session.initiator == key.low,
-                        planned: session.plan_done,
-                        elapsed_ms: elapsed.as_millis().min(u128::from(u32::MAX)) as u32,
-                    });
-                }
+            if idle_expired
+                && !fin_expired
+                && let Some(event) = tcp_silence_event(key, session, now)
+            {
+                session.silence_reported = true;
+                on_silent(event);
             }
 
             !idle_expired && !fin_expired
@@ -700,37 +724,15 @@ impl TcpSessions {
         now: Instant,
         reverse_queue_visible: bool,
     ) -> Vec<R2oTcpSilenceEvent> {
+        let mut events: Vec<_> = self.tcp_silence_events.drain(..).collect();
         if !reverse_queue_visible {
-            return Vec::new();
+            return events;
         }
-        let mut events = Vec::new();
         for (key, session) in &mut self.flows {
-            let Some(hello_at) = session.hello_at else {
-                continue;
-            };
-            if session.silence_reported
-                || session.controller_probe
-                || !session.reverse_seen
-                || session.response_payload
-                || session.reverse_rst
-                || now < hello_at
-            {
-                continue;
+            if let Some(event) = tcp_silence_event(key, session, now) {
+                session.silence_reported = true;
+                events.push(event);
             }
-            let elapsed = now.duration_since(hello_at);
-            let deadline = session.rtt.map_or(Duration::from_secs(2), |rtt| {
-                rtt.saturating_mul(8)
-                    .clamp(Duration::from_secs(1), Duration::from_secs(5))
-            });
-            if elapsed < deadline {
-                continue;
-            }
-            events.push(R2oTcpSilenceEvent {
-                key: key.wire_key(),
-                client_is_low: session.initiator == key.low,
-                planned: session.plan_done,
-                elapsed_ms: elapsed.as_millis().min(u128::from(u32::MAX)) as u32,
-            });
         }
         events
     }
@@ -927,14 +929,8 @@ impl TcpSessions {
                 .insert(key, TcpSession::new(initiator, syn && ack, None, now));
         }
 
-        let reverse_visible_by_family = &mut self.reverse_visible_by_family;
         let r2o_tcp_hello_flows = &mut self.r2o_tcp_hello_flows;
         let r2o_reply_hidden = &mut self.r2o_reply_hidden;
-        let family_index = match key.low.address.family() {
-            4 => Some(0),
-            6 => Some(1),
-            _ => None,
-        };
         let session = self.flows.get_mut(&key)?;
         if controller_probe {
             session.controller_probe = true;
@@ -993,12 +989,6 @@ impl TcpSessions {
                         &mut session.reverse_data_packets,
                     );
                     session.reverse_seen = session.metrics.reverse_packets != 0;
-                    if !controller_probe
-                        && session.reverse_seen
-                        && let Some(index) = family_index
-                    {
-                        reverse_visible_by_family[index] = true;
-                    }
                     session.reverse_ttl = None;
                     session.reverse_rst = false;
                 }
@@ -1032,9 +1022,6 @@ impl TcpSessions {
         let reverse = source != session.initiator;
         let packet_bytes = view.total_len as u64;
         if reverse {
-            if !controller_probe && let Some(index) = family_index {
-                reverse_visible_by_family[index] = true;
-            }
             session.metrics.reverse_packets = session.metrics.reverse_packets.saturating_add(1);
             session.metrics.reverse_bytes =
                 session.metrics.reverse_bytes.saturating_add(packet_bytes);
@@ -1100,6 +1087,9 @@ impl TcpSessions {
             }
             if tcp.flags & 0x04 != 0 {
                 session.reverse_rst = true;
+                // Match C: only a reset before any post-hello reverse packet blocks silence.
+                session.saw_reverse_rst |=
+                    session.hello_at.is_some() && reverse_packets_after_hello_before_packet == 0;
             }
         } else {
             if !payload.is_empty() {
@@ -1278,6 +1268,15 @@ impl TcpSessions {
         {
             self.tcp_rst_cut_events.push_back(event);
             session.rst_cut_reported = true;
+        }
+        if (rst || fin)
+            && !rst_dropped
+            && let Some(event) = tcp_silence_event(&key, session, now)
+        {
+            session.silence_reported = true;
+            if self.tcp_silence_events.len() < self.flow_capacity.slots() {
+                self.tcp_silence_events.push_back(event);
+            }
         }
         Some(TrackedTcpPacket {
             key,
@@ -2845,16 +2844,16 @@ mod tests {
         assert_eq!(events[0].elapsed_ms, 1000);
         assert_eq!(events[0].key[37], 6);
         assert!(events[0].planned);
-        sessions.mark_silent(&events[0].key);
         assert!(
             sessions
                 .sweep_silent(start + Duration::from_secs(10), true)
-                .is_empty()
+                .is_empty(),
+            "the silent event must set its duplicate guard when observed"
         );
     }
 
     #[test]
-    fn tcp_истечение_сообщает_о_clienthello_без_ответа_при_видимом_обратном_пути() {
+    fn tcp_истечение_не_заимствует_обратную_видимость_у_другого_потока() {
         let start = Instant::now();
         let mut sessions = TcpSessions::default();
         let witness_client = ([192, 0, 2, 10], 41000);
@@ -2886,11 +2885,10 @@ mod tests {
             |event| events.push(event),
         );
         assert_eq!(expired, 2);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].key[37], 6);
-        assert!(events[0].client_is_low);
-        assert!(!events[0].planned);
-        assert_eq!(events[0].elapsed_ms, 120_000);
+        assert!(
+            events.is_empty(),
+            "reverse visibility from another flow must not qualify this ClientHello"
+        );
     }
 
     #[test]
@@ -2932,7 +2930,50 @@ mod tests {
     }
 
     #[test]
-    fn tcp_истечение_не_сообщает_если_после_clienthello_уже_был_ответ() {
+    fn r2o_tcp_silence_requires_a_recognized_clienthello() {
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        sessions.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start);
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+            start + Duration::from_millis(50),
+        );
+        assert!(
+            sessions
+                .sweep_silent(start + Duration::from_secs(10), true)
+                .is_empty()
+        );
+
+        let malformed_hello = [0x16, 0x03, 0x03, 0x00, 0x40, 0x01, 0x00, 0x00, 0x40];
+        sessions.track_packet(
+            &ipv4_tcp_packet(client, server, 0x18, 64, 701, &malformed_hello),
+            start + Duration::from_millis(100),
+        );
+        assert!(
+            sessions
+                .flows
+                .values()
+                .all(|session| session.hello_at.is_none())
+        );
+        assert!(
+            sessions
+                .sweep_silent(start + Duration::from_secs(10), true)
+                .is_empty()
+        );
+
+        let mut events = Vec::new();
+        sessions.expire_with_silent(
+            start + Duration::from_secs(120) + Duration::from_millis(100),
+            Duration::from_secs(120),
+            |event| events.push(event),
+        );
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn tcp_истечение_не_сообщает_если_после_clienthello_была_полезная_нагрузка() {
         let start = Instant::now();
         let client = ([192, 0, 2, 10], 41000);
         let server = ([198, 51, 100, 20], 443);
@@ -2947,7 +2988,7 @@ mod tests {
             start + Duration::from_millis(100),
         );
         sessions.track_packet(
-            &ipv4_tcp_packet(server, client, 0x10, 124, 900, &[]),
+            &ipv4_tcp_packet(server, client, 0x18, 124, 900, b"response"),
             start + Duration::from_millis(200),
         );
 
@@ -3008,7 +3049,16 @@ mod tests {
                 .is_empty()
         );
 
-        let mut reset = r2o_tcp_hello_flow(start, client, server);
+        let mut reset = TcpSessions::default();
+        reset.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start);
+        reset.track_packet(
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+            start + Duration::from_millis(50),
+        );
+        reset.track_packet(
+            &ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello()),
+            start + Duration::from_millis(100),
+        );
         reset.track_packet(
             &ipv4_tcp_packet(server, client, 0x14, 124, 900, &[]),
             start + Duration::from_millis(250),
@@ -3018,6 +3068,120 @@ mod tests {
                 .sweep_silent(start + Duration::from_secs(5), true)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn tcp_истечение_считает_пустой_ack_видимостью_но_не_ответом() {
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = r2o_tcp_hello_flow(start, client, server);
+        let key = sessions.flows.keys().next().unwrap().wire_key();
+        let mut events = Vec::new();
+
+        assert_eq!(
+            sessions.expire_with_silent(
+                start + Duration::from_secs(120) + Duration::from_millis(200),
+                Duration::from_secs(120),
+                |event| events.push(event),
+            ),
+            1
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].key, key);
+        assert!(events[0].client_is_low);
+        assert_eq!(events[0].elapsed_ms, 120_100);
+    }
+
+    #[test]
+    fn r2o_tcp_silence_uses_one_client_hello_retransmission_before_deadline() {
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        sessions.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start);
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+            start + Duration::from_millis(50),
+        );
+        let hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello());
+        sessions.track_packet(&hello, start + Duration::from_millis(100));
+        sessions.track_packet(&hello, start + Duration::from_millis(500));
+
+        let events = sessions.sweep_silent(start + Duration::from_millis(700), true);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].elapsed_ms, 600);
+    }
+
+    #[test]
+    fn r2o_tcp_silence_is_suppressed_after_repeat_suspicion() {
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        sessions.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start);
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+            start + Duration::from_millis(50),
+        );
+        let hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello());
+        sessions.track_packet(&hello, start + Duration::from_millis(100));
+        sessions.track_packet(&hello, start + Duration::from_millis(500));
+        sessions.track_packet(&hello, start + Duration::from_millis(900));
+
+        assert_eq!(sessions.take_tcp_repeat_events().len(), 1);
+        assert!(
+            sessions
+                .sweep_silent(start + Duration::from_millis(1200), true)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn r2o_tcp_silence_survives_reset_after_an_empty_ack() {
+        let start = Instant::now() - Duration::from_secs(5);
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = r2o_tcp_hello_flow(start, client, server);
+        let rst = ipv4_tcp_packet(server, client, 0x14, 124, 900, &[]);
+
+        assert_eq!(
+            decide_with_session(&mut sessions, &Plan::default(), &rst),
+            PacketDecision::Accept
+        );
+        let events = sessions.sweep_silent(Instant::now(), false);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].key[37], 6);
+    }
+
+    #[test]
+    fn r2o_tcp_silence_is_reported_on_close_only_after_deadline() {
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let close_flags = [0x11, 0x14];
+        let close_sequence = 701 + client_hello().len() as u32;
+
+        for flags in close_flags {
+            let mut early =
+                r2o_tcp_hello_flow(Instant::now() - Duration::from_millis(400), client, server);
+            let close = ipv4_tcp_packet(client, server, flags, 64, close_sequence, &[]);
+            assert_eq!(
+                decide_with_session(&mut early, &Plan::default(), &close),
+                PacketDecision::Accept
+            );
+            assert!(early.sweep_silent(Instant::now(), false).is_empty());
+
+            let mut late =
+                r2o_tcp_hello_flow(Instant::now() - Duration::from_secs(5), client, server);
+            assert_eq!(
+                decide_with_session(&mut late, &Plan::default(), &close),
+                PacketDecision::Accept
+            );
+            assert!(late.is_empty());
+            let events = late.sweep_silent(Instant::now(), false);
+            assert_eq!(events.len(), 1, "close flags={flags:#04x}");
+            assert_eq!(events[0].key[37], 6);
+        }
     }
 
     #[test]
