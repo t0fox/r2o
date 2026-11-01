@@ -270,10 +270,13 @@ fn parse_headers(bytes: &[u8]) -> Option<(u16, Option<u64>, bool)> {
         let relative_end = find_crlf(&bytes[cursor..header_end])?;
         let line_end = cursor + relative_end;
         let line = &bytes[cursor..line_end];
-        if line.is_empty() || !valid_field(line) {
+        if line.is_empty() {
             return None;
         }
-        let colon = line.iter().position(|byte| *byte == b':')?;
+        let Some(colon) = line.iter().position(|byte| *byte == b':') else {
+            cursor = line_end + 2;
+            continue;
+        };
         let name = &line[..colon];
         let value = trim_ascii_whitespace(&line[colon + 1..]);
         if name.eq_ignore_ascii_case(b"Content-Length") {
@@ -345,21 +348,6 @@ fn parse_decimal(bytes: &[u8]) -> Option<u64> {
         }
         value.checked_mul(10)?.checked_add(u64::from(byte - b'0'))
     })
-}
-
-fn valid_field(line: &[u8]) -> bool {
-    let Some(colon) = line.iter().position(|byte| *byte == b':') else {
-        return false;
-    };
-    colon != 0
-        && line[..colon].iter().all(|byte| is_token(*byte))
-        && line[colon + 1..]
-            .iter()
-            .all(|byte| *byte == b'\t' || *byte >= 32 && *byte != 127)
-}
-
-fn is_token(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
 }
 
 fn parse_chunk_size(line: &[u8]) -> Option<u64> {

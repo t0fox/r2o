@@ -34,7 +34,7 @@ fn parses_chunked_body_and_trailers_at_every_segment_boundary() {
 }
 
 #[test]
-fn matches_d2o_chunk_extension_and_line_limit_framing() {
+fn matches_d2o_http_header_and_chunk_framing() {
     let mut line_at_limit = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;".to_vec();
     line_at_limit.extend_from_slice(&[b'a'; 125]);
     line_at_limit.extend_from_slice(b"\r\nx\r\n0\r\n\r\n");
@@ -43,7 +43,7 @@ fn matches_d2o_chunk_extension_and_line_limit_framing() {
     line_over_limit.extend_from_slice(&[b'a'; 126]);
     line_over_limit.extend_from_slice(b"\r\nx\r\n0\r\n\r\n");
 
-    let cases: [(&str, Vec<u8>, bool, u64); 4] = [
+    let cases: [(&str, Vec<u8>, bool, u64); 5] = [
         (
             "extension_suffix",
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;foo=\"unterminated\r\nx\r\n0\r\n\r\n".to_vec(),
@@ -55,6 +55,12 @@ fn matches_d2o_chunk_extension_and_line_limit_framing() {
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nnot-a-field\r\n\r\n".to_vec(),
             true,
             0,
+        ),
+        (
+            "colonless_header",
+            b"HTTP/1.1 200 OK\r\nMalformed Header\r\nContent-Length: 1\r\n\r\nx".to_vec(),
+            true,
+            1,
         ),
         ("chunk_line_at_limit", line_at_limit, true, 1),
         ("chunk_line_over_limit", line_over_limit, false, 0),
@@ -82,6 +88,7 @@ fn matches_d2o_chunk_extension_and_line_limit_framing() {
         output,
         "extension_suffix status=200 complete=1 body_bytes=1\n\
          trailer_without_colon status=200 complete=1 body_bytes=0\n\
+         colonless_header status=200 complete=1 body_bytes=1\n\
          chunk_line_at_limit status=200 complete=1 body_bytes=1\n\
          chunk_line_over_limit status=200 complete=0 body_bytes=0\n"
     );

@@ -58,9 +58,12 @@ int main(void)
     static const uint8_t trailer[] =
         "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
         "0\r\nnot-a-field\r\n\r\n";
+    static const uint8_t colonless_header[] =
+        "HTTP/1.1 200 OK\r\nMalformed Header\r\nContent-Length: 1\r\n\r\nx";
     const test_case cases[] = {
         { "extension_suffix", extension, 1, 1 },
         { "trailer_without_colon", trailer, 1, 0 },
+        { "colonless_header", colonless_header, 1, 1 },
         { "chunk_line_at_limit", line_at_limit, 1, 1 },
         { "chunk_line_over_limit", line_over_limit, 0, 0 },
     };

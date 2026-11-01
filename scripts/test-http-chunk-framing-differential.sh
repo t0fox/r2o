@@ -66,7 +66,7 @@ CARGO_TARGET_DIR="$r2o_script_dir/target" \
 R2O_HTTP_CHUNK_DIFF_OUTPUT="$r2o_rust_output" \
 "$r2o_cargo" test --locked --offline \
     -p r2k-core --test http_response \
-    matches_d2o_chunk_extension_and_line_limit_framing
+    matches_d2o_http_header_and_chunk_framing
 
 diff -u "$r2o_c_output" "$r2o_rust_output"
-printf 'C/Rust HTTP chunk extension/trailer framing matches.\n'
+printf 'C/Rust HTTP response header/chunk framing matches.\n'
