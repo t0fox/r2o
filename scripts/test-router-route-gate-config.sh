@@ -173,6 +173,39 @@ grep -Fq '|--stats|900' "$r2o_temp/launches" || {
 }
 [ -s "$r2o_temp/root/run/r2o-datapath4.pid" ]
 [ -s "$r2o_temp/root/run/r2o-datapath6.pid" ]
+[ -s "$r2o_temp/root/run/r2o-controller4.pid" ]
+[ -s "$r2o_temp/root/run/r2o-controller6.pid" ]
+
+old_dp4=$(cat "$r2o_temp/root/run/r2o-datapath4.pid")
+old_dp6=$(cat "$r2o_temp/root/run/r2o-datapath6.pid")
+old_ct4=$(cat "$r2o_temp/root/run/r2o-controller4.pid")
+old_ct6=$(cat "$r2o_temp/root/run/r2o-controller6.pid")
+kill -KILL "$old_ct4"
+attempt=0
+while [ -e "/proc/$old_ct4/exe" ] && [ "$attempt" -lt 50 ]; do
+    sleep 0.1
+    attempt=$((attempt + 1))
+done
+[ ! -e "/proc/$old_ct4/exe" ] || {
+    echo "controller process survived SIGKILL" >&2
+    exit 1
+}
+: >"$r2o_temp/up-runtime"
+r2o_run_service engine-start
+grep -Fxq '<>' "$r2o_temp/up-runtime" || {
+    echo "engine-start did not restore firewall rules after controller SIGKILL" >&2
+    exit 1
+}
+new_dp4=$(cat "$r2o_temp/root/run/r2o-datapath4.pid")
+new_dp6=$(cat "$r2o_temp/root/run/r2o-datapath6.pid")
+new_ct4=$(cat "$r2o_temp/root/run/r2o-controller4.pid")
+new_ct6=$(cat "$r2o_temp/root/run/r2o-controller6.pid")
+[ "$new_dp4" != "$old_dp4" ]
+[ "$new_dp6" != "$old_dp6" ]
+[ "$new_ct4" != "$old_ct4" ]
+[ "$new_ct6" != "$old_ct6" ]
+
+echo "engine-start recovered datapath and controllers after controller SIGKILL"
 
 : >"$r2o_temp/up-runtime"
 R2O_IPV6_TEST_CAPABILITY=0 r2o_run_service reapply
