@@ -3,7 +3,7 @@ set -eu
 
 ROOT=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 ROOT_PARENT=$(dirname "$ROOT")
-D2O_ROOT="$ROOT_PARENT/d2o"
+D2O_ROOT="${R2O_DONOR_ROOT:-$ROOT_PARENT/d2o}"
 EXPECTED_D2O_SHA=304ba893dd37197128ac8799c0495b035f6a38c0
 [ "$(git -C "$D2O_ROOT" rev-parse HEAD)" = "$EXPECTED_D2O_SHA" ] || {
     echo "pinned D2O checkout is missing or changed" >&2

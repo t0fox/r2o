@@ -9195,3 +9195,11 @@ One earlier attempt stopped in the pre-existing 93-probe sweep after transient l
 Extended the production full-stage loopback differential with /growth-rto at budget=2. The H3 server sends a 5-byte prefix, waits 1600 ms, then sends the remaining 8 bytes. D2O and R2O both return Pass and match app_bytes and request count; R2O records at least one stall PING and its acknowledgment before body completion. The exact ignored full-stage test passed in isolation. The integration script now runs its eight HTTP/3 tests serially; the full differential passed 8/8 in 47.48 seconds.
 
 The first parallel run returned Cut from C and NotRun from Rust in the existing /budget-slow case. That case passed in isolation and in the subsequent serialized run, so no production mismatch was reproduced; this is consistent with parallel-test timing interference. The longer growth scenario is still a loopback fixture. Overall deadline, additional network-error branches, and router lifecycle remain open.
+
+### Clean D2O oracle source provenance - 2026-11-01
+
+git ls-remote confirmed D2O main at 304ba893dd37197128ac8799c0495b035f6a38c0 and R2O origin/main at fb8fe95a1882d89f92e72a5665849ea1b3864b62. R2O local main is a421a0bfadff4240649ce396dcf1f5cd655f5aac. The user-owned /mnt/e/d2o checkout had 733 status entries, including modified tracked C sources used by the differential harnesses; it was not changed. A detached clone of the exact D2O main commit now lives at /mnt/e/r2o-tooling/d2o-clean-main, with source files at the remote commit and no tracked build changes.
+
+The recent classifier production differential was rerun with R2O_DONOR_ROOT=/mnt/e/r2o-tooling/d2o-clean-main and a d2k-detect built inside that clone: the 93-probe tree/progress and positive property, compose, and seqovl-1 cases passed. The QUIC full-stage script now accepts R2O_DONOR_ROOT; against the clean clone it passed 8/8 HTTP/3 tests in 47.64 seconds. The process-stat differential was rerun with D2O_ROOT pointing at the clean clone and again matched CPU=0 ms and RSS=44 KiB.
+
+Earlier C/Rust results that read the dirty donor working tree are not final oracle evidence. The matrix remains provisional until its source-dependent scenarios are selectively rerun against this clean snapshot; no overall parity percentage is claimed.

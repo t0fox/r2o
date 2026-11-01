@@ -33,7 +33,7 @@
 
 **Files:** inspect D2O `core/`, `detect/`, `datapath/`, `telegram/`, service/config/firewall sources and R2O `crates/`, `router/`, `scripts/`, `.github/`.
 
-- [ ] Record current remote main SHAs and clean-source paths; preserve user-owned dirty D2O files.
+- [x] Record current remote main SHAs and clean-source paths; preserve user-owned dirty D2O files.
 - [ ] Enumerate production C functions, Rust counterparts/callers, and tests; tag behavior branches, state transitions, timers, errors, and side effects.
 - [ ] Read existing 51-scenario upstream differential manifest as prior evidence without rerunning it wholesale.
 - [x] Define the matrix denominator from unique observable behavior contracts. The audit matrix uses weight 3 for packet/plan safety and persistence, weight 2 for lifecycle/retry/measurement and operator-facing panel/service contracts. No credit for code presence alone; partial/unverified rows score zero until proven. See `docs/functional-parity-matrix.md` for the current weighted result.
