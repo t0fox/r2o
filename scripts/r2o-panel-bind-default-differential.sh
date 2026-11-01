@@ -40,7 +40,7 @@ C_CONFIG=$(sed -n 's/^PANEL_LISTEN=//p' "$D2O_ROOT/files/config" | tail -n 1)
 C_FALLBACK=$(sed -n 's/.*panel_listen = cfg .* : "\([^"]*\)";.*/\1/p' \
     "$D2O_ROOT/panel/server.c" | tail -n 1)
 RUST_CONFIG=$(sed -n 's/^PANEL_LISTEN=//p' "$SCRIPT_DIR/router/config.default" | tail -n 1)
-RUST_FALLBACK=$(sed -n 's/^PANEL_LISTEN=${PANEL_LISTEN:-\([^}]*\)}/\1/p' \
+RUST_FALLBACK=$(sed -n 's/^PANEL_LISTEN=${PANEL_LISTEN-\([^}]*\)}/\1/p' \
     "$SCRIPT_DIR/router/S99r2o" | head -n 1)
 [ "$C_CONFIG" = "127.0.0.1:8090" ] &&
     [ "$C_FALLBACK" = "127.0.0.1:8090" ] &&
