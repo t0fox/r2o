@@ -1,6 +1,6 @@
 pub const MAX_HTTP_RESPONSE_HEADER_BYTES: usize = 65_536;
 const HEADER_CAPACITY: usize = MAX_HTTP_RESPONSE_HEADER_BYTES + 1;
-const LINE_CAPACITY: usize = 128;
+const LINE_CAPACITY: usize = 128; // Matches the C buffer, including its NUL slot.
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum State {
@@ -17,7 +17,7 @@ enum State {
 #[derive(Clone, Debug)]
 pub struct HttpResponseParser {
     header: [u8; HEADER_CAPACITY],
-    line: [u8; LINE_CAPACITY],
+    line: [u8; LINE_CAPACITY + 1],
     header_len: usize,
     line_len: usize,
     remaining: u64,
@@ -35,7 +35,7 @@ impl HttpResponseParser {
     pub fn new(head_only: bool) -> Self {
         Self {
             header: [0; HEADER_CAPACITY],
-            line: [0; LINE_CAPACITY],
+            line: [0; LINE_CAPACITY + 1],
             header_len: 0,
             line_len: 0,
             remaining: 0,
@@ -209,8 +209,12 @@ impl HttpResponseParser {
     }
 
     fn feed_line_byte(&mut self, byte: u8) {
+        let content_len = self.line_len.saturating_sub(usize::from(
+            self.line_len != 0 && self.line[self.line_len - 1] == b'\r',
+        ));
         if invalid_line_byte(byte)
-            || self.line_len + 1 >= self.line.len()
+            || self.line_len >= self.line.len()
+            || !matches!(byte, b'\r' | b'\n') && content_len >= LINE_CAPACITY - 1
             || byte == b'\n' && (self.line_len == 0 || self.line[self.line_len - 1] != b'\r')
             || self.line_len != 0 && self.line[self.line_len - 1] == b'\r' && byte != b'\n'
         {
@@ -230,16 +234,11 @@ impl HttpResponseParser {
         if self.state == State::Trailers {
             if line.is_empty() {
                 self.complete = true;
-            } else if !valid_field(line) {
-                return false;
             }
         } else {
-            let Some((size, extension_start)) = parse_chunk_size(line) else {
+            let Some(size) = parse_chunk_size(line) else {
                 return false;
             };
-            if !valid_chunk_extensions(&line[extension_start..]) {
-                return false;
-            }
             self.remaining = size;
             self.state = if size == 0 {
                 State::Trailers
@@ -363,15 +362,15 @@ fn is_token(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
 }
 
-fn parse_chunk_size(line: &[u8]) -> Option<(u64, usize)> {
+fn parse_chunk_size(line: &[u8]) -> Option<u64> {
     let digits = line
         .iter()
-        .position(|byte| matches!(byte, b';' | b' ' | b'\t'))
+        .position(|byte| *byte == b';')
         .unwrap_or(line.len());
     if digits == 0 {
         return None;
     }
-    let size = line[..digits].iter().try_fold(0_u64, |value, byte| {
+    line[..digits].iter().try_fold(0_u64, |value, byte| {
         let digit = match byte {
             b'0'..=b'9' => u64::from(byte - b'0'),
             b'a'..=b'f' => u64::from(byte - b'a' + 10),
@@ -379,72 +378,5 @@ fn parse_chunk_size(line: &[u8]) -> Option<(u64, usize)> {
             _ => return None,
         };
         value.checked_mul(16)?.checked_add(digit)
-    })?;
-    Some((size, digits))
-}
-
-fn valid_chunk_extensions(bytes: &[u8]) -> bool {
-    let mut cursor = 0;
-    while cursor < bytes.len() {
-        while cursor < bytes.len() && matches!(bytes[cursor], b' ' | b'\t') {
-            cursor += 1;
-        }
-        if cursor == bytes.len() || bytes[cursor] != b';' {
-            return false;
-        }
-        cursor += 1;
-        while cursor < bytes.len() && matches!(bytes[cursor], b' ' | b'\t') {
-            cursor += 1;
-        }
-        let start = cursor;
-        while cursor < bytes.len() && is_token(bytes[cursor]) {
-            cursor += 1;
-        }
-        if cursor == start {
-            return false;
-        }
-        while cursor < bytes.len() && matches!(bytes[cursor], b' ' | b'\t') {
-            cursor += 1;
-        }
-        if cursor < bytes.len() && bytes[cursor] == b'=' {
-            cursor += 1;
-            while cursor < bytes.len() && matches!(bytes[cursor], b' ' | b'\t') {
-                cursor += 1;
-            }
-            if cursor < bytes.len() && bytes[cursor] == b'"' {
-                cursor += 1;
-                let mut closed = false;
-                while cursor < bytes.len() {
-                    let mut byte = bytes[cursor];
-                    cursor += 1;
-                    if byte == b'"' {
-                        closed = true;
-                        break;
-                    }
-                    if byte == b'\\' {
-                        if cursor == bytes.len() {
-                            return false;
-                        }
-                        byte = bytes[cursor];
-                        cursor += 1;
-                    }
-                    if byte < 32 && byte != b'\t' || byte == 127 {
-                        return false;
-                    }
-                }
-                if !closed {
-                    return false;
-                }
-            } else {
-                let start = cursor;
-                while cursor < bytes.len() && is_token(bytes[cursor]) {
-                    cursor += 1;
-                }
-                if cursor == start {
-                    return false;
-                }
-            }
-        }
-    }
-    true
+    })
 }

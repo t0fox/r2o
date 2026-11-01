@@ -34,6 +34,60 @@ fn parses_chunked_body_and_trailers_at_every_segment_boundary() {
 }
 
 #[test]
+fn matches_d2o_chunk_extension_and_line_limit_framing() {
+    let mut line_at_limit = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;".to_vec();
+    line_at_limit.extend_from_slice(&[b'a'; 125]);
+    line_at_limit.extend_from_slice(b"\r\nx\r\n0\r\n\r\n");
+
+    let mut line_over_limit = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;".to_vec();
+    line_over_limit.extend_from_slice(&[b'a'; 126]);
+    line_over_limit.extend_from_slice(b"\r\nx\r\n0\r\n\r\n");
+
+    let cases: [(&str, Vec<u8>, bool, u64); 4] = [
+        (
+            "extension_suffix",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;foo=\"unterminated\r\nx\r\n0\r\n\r\n".to_vec(),
+            true,
+            1,
+        ),
+        (
+            "trailer_without_colon",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nnot-a-field\r\n\r\n".to_vec(),
+            true,
+            0,
+        ),
+        ("chunk_line_at_limit", line_at_limit, true, 1),
+        ("chunk_line_over_limit", line_over_limit, false, 0),
+    ];
+    let mut output = String::new();
+    for (name, bytes, expected_complete, expected_body_bytes) in cases {
+        let mut response = HttpResponseParser::new(false);
+        response.feed(&bytes, false);
+        assert_eq!(response.is_complete(), expected_complete, "{name}");
+        assert_eq!(response.is_invalid(), !expected_complete, "{name}");
+        assert_eq!(response.status(), 200, "{name}");
+        assert_eq!(response.body_bytes(), expected_body_bytes, "{name}");
+        output.push_str(&format!(
+            "{name} status={} complete={} body_bytes={}\n",
+            response.status(),
+            u8::from(response.is_complete()),
+            response.body_bytes()
+        ));
+    }
+
+    if let Ok(path) = std::env::var("R2O_HTTP_CHUNK_DIFF_OUTPUT") {
+        std::fs::write(path, &output).unwrap();
+    }
+    assert_eq!(
+        output,
+        "extension_suffix status=200 complete=1 body_bytes=1\n\
+         trailer_without_colon status=200 complete=1 body_bytes=0\n\
+         chunk_line_at_limit status=200 complete=1 body_bytes=1\n\
+         chunk_line_over_limit status=200 complete=0 body_bytes=0\n"
+    );
+}
+
+#[test]
 fn rejects_chunk_size_line_beyond_d2o_buffer_limit() {
     let mut bytes = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;".to_vec();
     bytes.extend_from_slice(&[b'a'; 160]);
@@ -50,14 +104,12 @@ fn rejects_chunk_size_line_beyond_d2o_buffer_limit() {
 
 #[test]
 fn rejects_malformed_or_ambiguous_response_framing() {
-    let cases: [&[u8]; 13] = [
+    let cases: [&[u8]; 11] = [
         b"HTTP/1.1 200 OK\r\nX: x\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n",
         b"HTTP/1.1 200\r\nContent-Length: 0\r\n\r\n",
         b"HTTP/1.1 000 Unknown\r\nContent-Length: 0\r\n\r\n",
         b"HTTP/1.1 600 Unknown\r\nContent-Length: 0\r\n\r\n",
         b"HTTP/1.1 200 O\rK\r\nContent-Length: 0\r\n\r\n",
-        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;foo=\"unterminated\r\nx\r\n",
-        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n:\r\n\r\n",
         b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nx",
         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n0\r\n\r\n",
         b"HTTP/1.1 200 OK\r\nContent-Length: 18446744073709551616\r\n\r\n",
