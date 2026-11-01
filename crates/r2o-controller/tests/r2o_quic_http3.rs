@@ -679,7 +679,7 @@ async fn r2o_http3_повторяет_get_до_прохождения_пакет
 
 #[tokio::test]
 #[ignore = "requires the pinned D2O harness; run scripts/test-quic-http3-full-stage-differential.sh"]
-async fn r2o_http3_full_data_stage_matches_d2o_on_complete_and_budget_responses() {
+async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_slow_body_and_close() {
     let d2o_binary = std::env::var("D2O_QUIC_DATA_STAGE_BIN")
         .expect("D2O_QUIC_DATA_STAGE_BIN must point to the pinned C data-stage harness");
     let mut certificate_params = rcgen::CertificateParams::new(vec!["localhost".to_owned()]);
@@ -707,6 +707,7 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_and_budget_responses(
                 let Ok(connection) = incoming.await else {
                     return;
                 };
+                let connection_for_close = connection.clone();
                 let Ok(mut h3_connection) = h3::server::builder()
                     .build::<_, bytes::Bytes>(h3_quinn::Connection::new(connection))
                     .await
@@ -721,7 +722,12 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_and_budget_responses(
                     let Ok((request, mut stream)) = resolver.resolve_request().await else {
                         break;
                     };
-                    let status = if request.uri().path() == "/stage" {
+                    if request.uri().path() == "/close" {
+                        connection_for_close
+                            .close(quinn::VarInt::from_u32(1), b"test transport close");
+                        break;
+                    }
+                    let status = if matches!(request.uri().path(), "/stage" | "/slow") {
                         200
                     } else {
                         451
@@ -736,10 +742,16 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_and_budget_responses(
                         )
                         .await
                         .is_err()
-                        || stream
-                            .send_data(bytes::Bytes::from_static(b"quic-stage-ok"))
-                            .await
-                            .is_err()
+                    {
+                        break;
+                    }
+                    if request.uri().path() == "/slow" {
+                        tokio::time::sleep(Duration::from_secs(6)).await;
+                    }
+                    if stream
+                        .send_data(bytes::Bytes::from_static(b"quic-stage-ok"))
+                        .await
+                        .is_err()
                         || stream.finish().await.is_err()
                     {
                         break;
@@ -846,7 +858,7 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_and_budget_responses(
     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
     socket.connect(server_address).unwrap();
     let mut roots = RootCertStore::empty();
-    roots.add(certificate_der).unwrap();
+    roots.add(certificate_der.clone()).unwrap();
     let repeated_rust_result = r2o_quic_http3_measure(
         socket,
         server_address,
@@ -893,6 +905,147 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_and_budget_responses(
     assert!(
         repeated_rust_result.requests > 1,
         "budget run did not repeat GET: {repeated_rust_result:?}"
+    );
+
+    let slow_binary = d2o_binary.clone();
+    let slow_address = server_address;
+    let slow_c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(slow_binary)
+            .args([
+                "127.0.0.1",
+                &slow_address.port().to_string(),
+                "localhost",
+                "/slow",
+                "0",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        !slow_c_output.status.success(),
+        "D2O delayed-body replay unexpectedly passed: {}",
+        String::from_utf8_lossy(&slow_c_output.stdout)
+    );
+    let slow_c_result = String::from_utf8(slow_c_output.stdout).unwrap();
+    let slow_c_field = |name: &str| {
+        slow_c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {slow_c_result}"))
+    };
+
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.connect(server_address).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(certificate_der.clone()).unwrap();
+    let slow_rust_result = r2o_quic_http3_get(
+        socket,
+        server_address,
+        "localhost",
+        "/slow",
+        Duration::from_secs(1),
+        roots,
+    )
+    .await;
+    let slow_rust_verdict =
+        r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&slow_rust_result);
+
+    assert!(
+        slow_rust_result.handshake_confirmed,
+        "R2O={slow_rust_result:?}"
+    );
+    assert_eq!(slow_rust_result.status, 200, "R2O={slow_rust_result:?}");
+    assert_eq!(slow_rust_result.body_bytes, 0, "R2O={slow_rust_result:?}");
+    assert!(!slow_rust_result.complete, "R2O={slow_rust_result:?}");
+    assert!(slow_rust_result.error.is_some(), "R2O={slow_rust_result:?}");
+    assert!(
+        !slow_rust_result.r2o_quic_stalled,
+        "live transport was classified as a stall: {slow_rust_result:?}"
+    );
+    assert_eq!(slow_c_field("verdict"), format!("{slow_rust_verdict:?}"));
+    assert_eq!(slow_c_field("verdict"), "NotRun");
+    assert_eq!(
+        slow_c_field("app_bytes").parse::<u64>().unwrap(),
+        slow_rust_result.app_bytes,
+        "D2O={slow_c_result} R2O={slow_rust_result:?}"
+    );
+    assert_eq!(
+        slow_c_field("requests").parse::<u32>().unwrap(),
+        slow_rust_result.requests,
+        "D2O={slow_c_result} R2O={slow_rust_result:?}"
+    );
+
+    let close_binary = d2o_binary.clone();
+    let close_address = server_address;
+    let close_c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(close_binary)
+            .args([
+                "127.0.0.1",
+                &close_address.port().to_string(),
+                "localhost",
+                "/close",
+                "0",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        !close_c_output.status.success(),
+        "D2O transport-close unexpectedly passed: {}",
+        String::from_utf8_lossy(&close_c_output.stdout)
+    );
+    let close_c_result = String::from_utf8(close_c_output.stdout).unwrap();
+    let close_c_field = |name: &str| {
+        close_c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {close_c_result}"))
+    };
+
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.connect(server_address).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(certificate_der).unwrap();
+    let close_rust_result = r2o_quic_http3_get(
+        socket,
+        server_address,
+        "localhost",
+        "/close",
+        Duration::from_secs(2),
+        roots,
+    )
+    .await;
+    let close_rust_verdict =
+        r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&close_rust_result);
+
+    assert!(
+        close_rust_result.handshake_confirmed,
+        "R2O={close_rust_result:?}"
+    );
+    assert_eq!(close_rust_result.status, 0, "R2O={close_rust_result:?}");
+    assert!(
+        close_rust_result.error.is_some(),
+        "R2O={close_rust_result:?}"
+    );
+    assert!(
+        !close_rust_result.r2o_quic_stalled,
+        "transport close was misclassified as stall: {close_rust_result:?}"
+    );
+    assert_eq!(close_c_field("verdict"), format!("{close_rust_verdict:?}"));
+    assert_eq!(close_c_field("verdict"), "NotRun");
+    assert_eq!(
+        close_c_field("app_bytes").parse::<u64>().unwrap(),
+        close_rust_result.app_bytes,
+        "D2O={close_c_result} R2O={close_rust_result:?}"
+    );
+    assert_eq!(
+        close_c_field("requests").parse::<u32>().unwrap(),
+        close_rust_result.requests,
+        "D2O={close_c_result} R2O={close_rust_result:?}"
     );
     server.abort();
 }
