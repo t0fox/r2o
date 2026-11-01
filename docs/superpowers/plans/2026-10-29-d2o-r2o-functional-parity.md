@@ -59,7 +59,7 @@ Follow the user's sequential workflow on the shared `main` checkout. Finish one 
 ### Task 3: Root audit of Discovery, scheduler, catalog, services, and full apply cycle
 
 - [ ] Trace packet → detection → classification → candidate search → verify → ACK → APPLIED → persistence → reapply after restart in both repos.
-  - Evidence 2026-11-01: the opt-in QEMU procd lifecycle differential now compares pinned D2O and production R2O waiters through rc.d links, delayed /opt, cancellation and stop/restart. It uses stub Entware service scripts; automatic flash boot, real daemon crash recovery and reboot-persisted reapply remain open, so this task stays unchecked.
+  - Evidence 2026-11-01: short OpenWrt 25.12.5 ARM64 QEMU cold boot starts both S99 procd waiters automatically; delayed /opt, cancellation and one start/stop remain covered with stub service targets. Persistent-rootfs autostart, real daemon crash recovery, reboot-persisted reapply and the full process-level ACK/APPLIED/catalog chain remain open, so this task stays unchecked.
 - [ ] Cover failures, interrupts, retries, concurrent targets, stale generations, service restarts, settings/firewall/panel control surfaces.
 - [ ] Protect the z2kOW-derived Telegram implementation and audit only its Rust integration and evidence.
 

@@ -9275,11 +9275,11 @@ Run command:
 ```sh
 R2O_OPENWRT_QEMU_KERNEL=/mnt/e/r2o-tooling/openwrt-qemu-armv8/kernel.bin \
 R2O_DONOR_ROOT=/mnt/e/r2o-tooling/d2o-clean-main \
-R2O_QEMU_ARTIFACT_DIR=/mnt/e/r2o-tooling/openwrt-qemu-armv8 \
+R2O_QEMU_ARTIFACT_DIR=/mnt/e/r2o-tooling/openwrt-qemu-armv8/autoboot-check-final-2026-11-01 \
 python3 /mnt/e/r2o/scripts/test-router-procd-lifecycle-qemu.py
 ```
 
-Logs: `/mnt/e/r2o-tooling/openwrt-qemu-armv8/r2o-procd-differential-2026-11-01.log` and the accompanying `-qemu.log`. This verifies the procd waiter lifecycle when the `S99*` action is invoked in a QEMU guest; the `rc.d` calls in the test are manual, not automatic cold-boot dispatch. The `/opt` service targets are stubs, so this does not prove production daemon restart, real flash autostart or reboot-persisted reapply. The matrix row remains partial at 0/3; weighted total remains 62/87 (71.26%).
+Updated short run: OpenWrt 25.12.5 ARM64 QEMU cold boot automatically starts both `/etc/rc.d/S99*` procd waiters before `/opt` is ready; repeated `rc.d start` adds no duplicate. Stop cancels both, a canceled waiter does not start late when `/opt` appears, and explicit restart invokes each stub exactly once. The test polls for the waiters because the serial console appears during preinit before procd dispatch. With the S99 links removed, the new assertion failed as expected; with links present, the run passed in 42 s. Command uses `R2O_QEMU_ARTIFACT_DIR=/mnt/e/r2o-tooling/openwrt-qemu-armv8/autoboot-check-final-2026-11-01`. Log: `/mnt/e/r2o-tooling/openwrt-qemu-armv8/autoboot-check-final-2026-11-01/r2o-procd-differential-2026-11-01.log` and the accompanying `-qemu.log`. This closes only cold-boot waiter dispatch in the test image; stub `/opt` targets do not prove persistent-flash installation, production daemon recovery or reboot-persisted reapply. The matrix row remains partial at 0/3; weighted total remains 62/87 (71.26%).
 
 
 ### QUIC HTTP/3 peer omits SETTINGS — 2026-11-01

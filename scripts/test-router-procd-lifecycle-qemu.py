@@ -74,10 +74,10 @@ class Guest:
             with self.log.open("ab") as output:
                 output.write(chunk)
 
-    def command(self, name: str, command: str) -> str:
+    def command(self, name: str, command: str, timeout: float = 20) -> str:
         self.drain()
         self.serial.sendall((command + "\n").encode())
-        result = self.read_until(b"~#", 20).decode("utf-8", "replace").replace("\r", "")
+        result = self.read_until(b"~#", timeout).decode("utf-8", "replace").replace("\r", "")
         print(f"--- {name} ---\n{result[-2600:]}")
         return result
 
@@ -157,6 +157,19 @@ def main() -> int:
             if b"OpenWrt 25.12.5" not in boot:
                 raise AssertionError("expected the pinned OpenWrt 25.12.5 initramfs image")
             print("OpenWrt 25.12.5 procd booted; D2O and R2O init scripts are installed.")
+            # The serial console appears during preinit, before procd starts rc.d services.
+            autostarted = guest.command(
+                "wait for cold-boot waiters",
+                "i=0; while [ \"$i\" -lt 35 ] && ! ps w | grep -q '[b]oot_wait'; "
+                "do i=$((i + 1)); sleep 1; done; "
+                "ps w | grep '[b]oot_wait' || echo NO_BOOT_WAITERS",
+                timeout=40,
+            )
+            if (
+                "/etc/init.d/r2o boot_wait" not in autostarted
+                or "/etc/init.d/d2k boot_wait" not in autostarted
+            ):
+                raise AssertionError("OpenWrt cold boot must start both rc.d waiters automatically")
 
             workers = guest.command(
                 "start waiters through rc.d links",

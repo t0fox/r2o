@@ -269,7 +269,7 @@
           "statusLabel": "Частично",
           "group": "Discovery",
           "mapping": "C scheduler/catalog/service lifecycle → Rust controller/manager/router init",
-          "evidence": "OpenWrt QEMU 25.12.5: controller SIGKILL + heal совпали с D2O; engine-start перезапустил datapath/controller и привязал NFQUEUE 2000, engine-stop снял очередь и восстановил flow_offloading. Live-procd C/Rust через rc.d S99: stop до /opt отменил оба waiter; поздний /opt дал каждой стороне ровно один S99 start и stop, без повтора (E:/r2o-tooling/openwrt-qemu-armv8/r2o-procd-differential-2026-11-01.log). Дифференциалы reapply/route-gate/heal и Discord lifecycle проходят; изолированный boot bridge проходит. Открыты auto boot, daemon recovery, reboot/reapply и полный ACK/APPLIED/persist chain."
+          "evidence": "OpenWrt 25.12.5 ARM64 QEMU cold boot (R2O 2f6f59e, D2O 304ba893) automatically starts both S99 procd waiters before manual commands; repeated start adds none and stop cancels both. Delayed /opt fixture gets one start/stop. Log: E:/r2o-tooling/openwrt-qemu-armv8/autoboot-check-final-2026-11-01/r2o-procd-differential-2026-11-01.log. Earlier controller SIGKILL/heal and engine start/stop match D2O. Persistent-rootfs boot, real daemon recovery, reboot/reapply and full ACK/APPLIED/persist remain open."
         },
         {
           "id": 22,
@@ -790,7 +790,7 @@
       "statusLabel": "Частично",
       "group": "Discovery",
       "mapping": "C scheduler/catalog/service lifecycle → Rust controller/manager/router init",
-      "evidence": "OpenWrt QEMU 25.12.5: controller SIGKILL + heal совпали с D2O; engine-start перезапустил datapath/controller и привязал NFQUEUE 2000, engine-stop снял очередь и восстановил flow_offloading. Live-procd C/Rust через rc.d S99: stop до /opt отменил оба waiter; поздний /opt дал каждой стороне ровно один S99 start и stop, без повтора (E:/r2o-tooling/openwrt-qemu-armv8/r2o-procd-differential-2026-11-01.log). Дифференциалы reapply/route-gate/heal и Discord lifecycle проходят; изолированный boot bridge проходит. Открыты auto boot, daemon recovery, reboot/reapply и полный ACK/APPLIED/persist chain."
+      "evidence": "OpenWrt 25.12.5 ARM64 QEMU cold boot (R2O 2f6f59e, D2O 304ba893) automatically starts both S99 procd waiters before manual commands; repeated start adds none and stop cancels both. Delayed /opt fixture gets one start/stop. Log: E:/r2o-tooling/openwrt-qemu-armv8/autoboot-check-final-2026-11-01/r2o-procd-differential-2026-11-01.log. Earlier controller SIGKILL/heal and engine start/stop match D2O. Persistent-rootfs boot, real daemon recovery, reboot/reapply and full ACK/APPLIED/persist remain open."
     },
     {
       "id": 21,
