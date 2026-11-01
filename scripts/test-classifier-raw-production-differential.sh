@@ -45,7 +45,7 @@ cleanup() {
         ip netns del "$NS" 2>/dev/null || true
     fi
     if [ "$test_exit_status" -ne 0 ]; then
-        for test_log in "$TEMP/d2o.err" "$TEMP/r2o.err" "$TEMP/server.log" "$TEMP/d2o-positive.err" "$TEMP/r2o-positive.err" "$TEMP/positive-d2o-server.log" "$TEMP/positive-r2o-server.log" "$TEMP/d2o-compose.err" "$TEMP/r2o-compose.err" "$TEMP/compose-d2o-server.log" "$TEMP/compose-r2o-server.log"; do
+        for test_log in "$TEMP/d2o.err" "$TEMP/r2o.err" "$TEMP/server.log" "$TEMP/d2o-positive.err" "$TEMP/r2o-positive.err" "$TEMP/positive-d2o-server.log" "$TEMP/positive-r2o-server.log" "$TEMP/d2o-compose.err" "$TEMP/r2o-compose.err" "$TEMP/compose-d2o-server.log" "$TEMP/compose-r2o-server.log" "$TEMP/d2o-poison.err" "$TEMP/r2o-poison.err" "$TEMP/poison-d2o-server.log" "$TEMP/poison-r2o-server.log"; do
             if [ -f "$test_log" ]; then cat "$test_log" >&2 || true; fi
         done
     fi
@@ -476,3 +476,85 @@ print("D2O/R2O positive production composed hit:", json.dumps(c_result, ensure_a
 PY
 
 echo "PASSED: actual D2O and R2O production classifiers matched positive property and composed hits"
+# Select one ordinary poison directly to exercise the success path after the
+# property and composition paths have been bypassed.
+kill "$SERVER_PID" 2>/dev/null || true
+wait "$SERVER_PID" 2>/dev/null || true
+SERVER_PID=
+
+start_positive_server "$TEMP/poison-d2o.ready" "$TEMP/poison-d2o-server.log"
+POISON_PORT=$(cat "$TEMP/poison-d2o.ready")
+ip netns exec "$NS" env D2K_FW=nft "$D2K_BIN" classify "127.0.0.1:$POISON_PORT" \
+    --sni classifier.example --repeats 1 --timeout 350 --only seqovl-1 \
+    --allow-loopback --mark 0 --json \
+    >"$TEMP/d2o-poison.json" 2>"$TEMP/d2o-poison.err"
+wait_positive_response "$TEMP/poison-d2o-server.log"
+kill "$SERVER_PID" 2>/dev/null || true
+wait "$SERVER_PID" 2>/dev/null || true
+SERVER_PID=
+
+start_positive_server "$TEMP/poison-r2o.ready" "$TEMP/poison-r2o-server.log"
+POISON_PORT=$(cat "$TEMP/poison-r2o.ready")
+ip netns exec "$NS" env R2O_FW=nft "$R2O_BIN" \
+    --classify 127.0.0.1 "$POISON_PORT" classifier.example --repeats 1 \
+    --timeout 350 --only seqovl-1 --allow-loopback --mark 0 --json \
+    >"$TEMP/r2o-poison.json" 2>"$TEMP/r2o-poison.err"
+wait_positive_response "$TEMP/poison-r2o-server.log"
+
+python3 - "$TEMP/d2o-poison.json" "$TEMP/r2o-poison.json" \
+    "$TEMP/poison-d2o-server.log" "$TEMP/poison-r2o-server.log" <<'PY'
+import json
+import sys
+
+def summarize(path):
+    with open(path, encoding="utf-8") as source:
+        result = json.load(source)
+    trace = [
+        (
+            item["probe"],
+            item.get("pass", 0),
+            item.get("fail", 0),
+            item.get("delay_ms", 0),
+            item.get("cuts", []),
+            bool(item.get("err") or item.get("error")),
+        )
+        for item in result["trace"]
+    ]
+    poison_hit = next(
+        (item for item in trace if item[0] == "poison:seqovl-1"),
+        None,
+    )
+    if (
+        result["verdict"] != "poisonable"
+        or result.get("path") != "\u043f\u0435\u0440\u0435\u0431\u043e\u0440"
+        or result.get("composed", False)
+        or not result.get("raw_usable")
+        or poison_hit is None
+        or poison_hit[1:3] != (1, 0)
+    ):
+        raise SystemExit(f"expected a positive production poison hit in {path}")
+    return (
+        result["verdict"],
+        result.get("path"),
+        result.get("composed", False),
+        result.get("raw_usable", False),
+        result.get("strategy"),
+        result.get("props"),
+        trace,
+    )
+
+c_result = summarize(sys.argv[1])
+rust_result = summarize(sys.argv[2])
+for path in sys.argv[3:]:
+    with open(path, encoding="utf-8") as source:
+        log = source.read()
+    if "control-alert" not in log or "post-control-serverhello" not in log:
+        raise SystemExit(f"poison server did not traverse both response states: {path}")
+if c_result != rust_result:
+    print("D2O positive poison:", json.dumps(c_result, ensure_ascii=False), file=sys.stderr)
+    print("R2O positive poison:", json.dumps(rust_result, ensure_ascii=False), file=sys.stderr)
+    raise SystemExit("positive production poison results differ")
+print("D2O/R2O positive production poison hit:", json.dumps(c_result, ensure_ascii=False))
+PY
+
+echo "PASSED: actual D2O and R2O production classifiers matched positive property, composed, and poison hits"

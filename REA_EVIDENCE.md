@@ -9183,3 +9183,9 @@ The first full Cargo workspace run became stuck in the controller QUIC candidate
 ### QUIC HTTP/3 delayed response growth - 2026-11-01
 
 Extended the pinned D2O/R2O full-stage loopback differential with a budget=2 /growth route. The local H3 server sends a 5-byte body prefix, waits 250 ms, then sends the remaining 8 bytes. D2O d2k_quic_data_stage and the production Rust HTTP/3 measurement both return Pass and match app_bytes and request count; Rust confirms all 13 body bytes and budget_passed. scripts/test-quic-http3-full-stage-differential.sh passed all 8 included tests. Other budget/growth thresholds, deadline/error branches, and router runtime remain open.
+
+### Classifier direct positive poison path - 2026-11-01
+
+Extended scripts/test-classifier-raw-production-differential.sh with a production C/Rust --only seqovl-1 scenario. The fixture returns a TLS alert for the control name and a minimal ServerHello after that, so the run bypasses property and compose probes and reaches the ordinary poison sweep. Both implementations returned poisonable, selected the direct sweep path, and matched strategy, properties, and the five-entry trace including poison:seqovl-1 pass=1/fail=0. The complete script also passed on rerun: the 93-probe unfiltered sweep had identical results and progress events, followed by positive property, compose, and poison cases.
+
+One earlier attempt stopped in the pre-existing 93-probe sweep after transient local-error flags differed on a few delayed raw probes; the identical rerun had no such differences. No production change is inferred from that non-reproducible result. These are synthetic loopback classifier checks, not evidence of real DPI evasion, and the full raw candidate tree remains open.
