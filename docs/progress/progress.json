@@ -331,7 +331,7 @@
           "statusLabel": "Частично",
           "group": "QUIC / HTTP3",
           "mapping": "`d2k_quic_data_stage`/`d2k_qc_app_progress` → `r2o_quic_http3::{measure_with_wire_len,wait_with_stall}`",
-          "evidence": "`scripts/r2o-diagnostics-differential.sh` verifies transport-close, dropped-reply stall, and C/Rust judge branches. The current `scripts/test-quic-http3-full-stage-differential.sh` passes 8/8 in Debian WSL2 against clean D2O (log: `/mnt/e/r2o-tooling/tests/r2o-quic-http3-full-stage-main-followup-2026-11-01.log`), covering complete/repeated budgets, growth/RTO growth, HTTP 451, delayed body, drop, and QUIC close. New `/deadline`: 5-second body delay with a 4-second cap; C and Rust both return NotRun after HTTP 200 headers, with matching app_bytes and requests. One earlier run transiently return"
+          "evidence": "`test-quic-http3-full-stage-differential.sh` passes 8/8 in Debian WSL2 against pinned clean D2O. Covers repeated budgets, growth before/past RTO, HTTP 451, delayed body/deadline, drop, and close. Content-Length=100 with 2 bytes+FIN: both Pass; R2O complete, 2 body bytes, matching app_bytes/requests. Mid-body H3 RESET_STREAM: both NotRun; 7 body bytes, no false stall, matching app_bytes/requests. One /budget-slow C Cut/Rust NotRun was transient (two reruns passed). Other transport errors, timing-sensitive stall, and lifecycle remain open."
         }
       ],
       "weight": 9,
@@ -867,7 +867,7 @@
       "statusLabel": "Частично",
       "group": "QUIC / HTTP3",
       "mapping": "`d2k_quic_data_stage`/`d2k_qc_app_progress` → `r2o_quic_http3::{measure_with_wire_len,wait_with_stall}`",
-      "evidence": "`scripts/r2o-diagnostics-differential.sh` verifies transport-close, dropped-reply stall, and C/Rust judge branches. The current `scripts/test-quic-http3-full-stage-differential.sh` passes 8/8 in Debian WSL2 against clean D2O (log: `/mnt/e/r2o-tooling/tests/r2o-quic-http3-full-stage-main-followup-2026-11-01.log`), covering complete/repeated budgets, growth/RTO growth, HTTP 451, delayed body, drop, and QUIC close. New `/deadline`: 5-second body delay with a 4-second cap; C and Rust both return NotRun after HTTP 200 headers, with matching app_bytes and requests. One earlier run transiently return"
+      "evidence": "`test-quic-http3-full-stage-differential.sh` passes 8/8 in Debian WSL2 against pinned clean D2O. Covers repeated budgets, growth before/past RTO, HTTP 451, delayed body/deadline, drop, and close. Content-Length=100 with 2 bytes+FIN: both Pass; R2O complete, 2 body bytes, matching app_bytes/requests. Mid-body H3 RESET_STREAM: both NotRun; 7 body bytes, no false stall, matching app_bytes/requests. One /budget-slow C Cut/Rust NotRun was transient (two reruns passed). Other transport errors, timing-sensitive stall, and lifecycle remain open."
     },
     {
       "id": 28,

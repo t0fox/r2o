@@ -772,6 +772,8 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                     let status = if matches!(
                         request.uri().path(),
                         "/stage"
+                            | "/content-length"
+                            | "/stream-reset"
                             | "/growth"
                             | "/growth-rto"
                             | "/deadline"
@@ -795,7 +797,14 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                         .send_response(
                             http::Response::builder()
                                 .status(status)
-                                .header(http::header::CONTENT_LENGTH, "13")
+                                .header(
+                                    http::header::CONTENT_LENGTH,
+                                    if request.uri().path() == "/content-length" {
+                                        "100"
+                                    } else {
+                                        "13"
+                                    },
+                                )
                                 .body(())
                                 .unwrap(),
                         )
@@ -868,6 +877,29 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                         drop_replies.store(true, Ordering::Release);
                         std::future::pending::<()>().await;
                         break;
+                    }
+                    if request.uri().path() == "/stream-reset" {
+                        if stream
+                            .send_data(bytes::Bytes::from_static(b"partial"))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        stream.stop_stream(h3::error::Code::H3_INTERNAL_ERROR);
+                        continue;
+                    }
+                    if request.uri().path() == "/content-length" {
+                        if stream
+                            .send_data(bytes::Bytes::from_static(b"ok"))
+                            .await
+                            .is_err()
+                            || stream.finish().await.is_err()
+                        {
+                            break;
+                        }
+                        continue;
                     }
                     if stream
                         .send_data(bytes::Bytes::from_static(b"quic-stage-ok"))
@@ -944,6 +976,172 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
         c_field("requests").parse::<u32>().unwrap(),
         rust_result.requests,
         "D2O={c_result} R2O={rust_result:?}"
+    );
+
+    let content_length_binary = d2o_binary.clone();
+    let content_length_address = server_address;
+    let content_length_c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(content_length_binary)
+            .args([
+                "127.0.0.1",
+                &content_length_address.port().to_string(),
+                "localhost",
+                "/content-length",
+                "0",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        content_length_c_output.status.success(),
+        "D2O Content-Length mismatch failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&content_length_c_output.stdout),
+        String::from_utf8_lossy(&content_length_c_output.stderr)
+    );
+    let content_length_c_result = String::from_utf8(content_length_c_output.stdout).unwrap();
+    let content_length_c_field = |name: &str| {
+        content_length_c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {content_length_c_result}"))
+    };
+
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.connect(server_address).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(certificate_der.clone()).unwrap();
+    let content_length_rust_result = r2o_quic_http3_get(
+        socket,
+        server_address,
+        "localhost",
+        "/content-length",
+        Duration::from_secs(5),
+        roots,
+    )
+    .await;
+    let content_length_rust_verdict =
+        r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&content_length_rust_result);
+    assert!(
+        content_length_rust_result.handshake_confirmed,
+        "R2O Content-Length mismatch: {content_length_rust_result:?}"
+    );
+    assert_eq!(
+        content_length_rust_result.status, 200,
+        "R2O Content-Length mismatch: {content_length_rust_result:?}"
+    );
+    assert_eq!(
+        content_length_rust_result.body_bytes, 2,
+        "R2O Content-Length mismatch: {content_length_rust_result:?}"
+    );
+    assert!(
+        content_length_rust_result.complete,
+        "R2O Content-Length mismatch: {content_length_rust_result:?}"
+    );
+    assert!(
+        content_length_rust_result.error.is_none(),
+        "R2O Content-Length mismatch: {content_length_rust_result:?}"
+    );
+    assert_eq!(
+        content_length_c_field("verdict"),
+        format!("{content_length_rust_verdict:?}"),
+        "D2O={content_length_c_result} R2O={content_length_rust_result:?}"
+    );
+    assert_eq!(
+        content_length_c_field("app_bytes").parse::<u64>().unwrap(),
+        content_length_rust_result.app_bytes,
+        "D2O={content_length_c_result} R2O={content_length_rust_result:?}"
+    );
+    assert_eq!(
+        content_length_c_field("requests").parse::<u32>().unwrap(),
+        content_length_rust_result.requests,
+        "D2O={content_length_c_result} R2O={content_length_rust_result:?}"
+    );
+
+    let reset_binary = d2o_binary.clone();
+    let reset_address = server_address;
+    let reset_c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(reset_binary)
+            .args([
+                "127.0.0.1",
+                &reset_address.port().to_string(),
+                "localhost",
+                "/stream-reset",
+                "0",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        !reset_c_output.status.success(),
+        "D2O stream reset unexpectedly passed: stdout={} stderr={}",
+        String::from_utf8_lossy(&reset_c_output.stdout),
+        String::from_utf8_lossy(&reset_c_output.stderr)
+    );
+    let reset_c_result = String::from_utf8(reset_c_output.stdout).unwrap();
+    let reset_c_field = |name: &str| {
+        reset_c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {reset_c_result}"))
+    };
+
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.connect(server_address).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(certificate_der.clone()).unwrap();
+    let reset_rust_result = r2o_quic_http3_get(
+        socket,
+        server_address,
+        "localhost",
+        "/stream-reset",
+        Duration::from_secs(5),
+        roots,
+    )
+    .await;
+    let reset_rust_verdict =
+        r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&reset_rust_result);
+    assert!(
+        reset_rust_result.handshake_confirmed,
+        "R2O stream reset: {reset_rust_result:?}"
+    );
+    assert_eq!(
+        reset_rust_result.status, 200,
+        "R2O stream reset: {reset_rust_result:?}"
+    );
+    assert_eq!(
+        reset_rust_result.body_bytes, 7,
+        "R2O stream reset: {reset_rust_result:?}"
+    );
+    assert!(
+        !reset_rust_result.complete,
+        "R2O stream reset: {reset_rust_result:?}"
+    );
+    assert!(
+        reset_rust_result.error.is_some(),
+        "R2O stream reset: {reset_rust_result:?}"
+    );
+    assert!(
+        !reset_rust_result.r2o_quic_stalled,
+        "R2O stream reset is an explicit stream error, not a stall: {reset_rust_result:?}"
+    );
+    assert_eq!(
+        reset_c_field("verdict"),
+        format!("{reset_rust_verdict:?}"),
+        "D2O={reset_c_result} R2O={reset_rust_result:?}"
+    );
+    assert_eq!(
+        reset_c_field("app_bytes").parse::<u64>().unwrap(),
+        reset_rust_result.app_bytes,
+        "D2O={reset_c_result} R2O={reset_rust_result:?}"
+    );
+    assert_eq!(
+        reset_c_field("requests").parse::<u32>().unwrap(),
+        reset_rust_result.requests,
+        "D2O={reset_c_result} R2O={reset_rust_result:?}"
     );
 
     let repeated_binary = d2o_binary.clone();
