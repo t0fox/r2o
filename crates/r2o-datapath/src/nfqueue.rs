@@ -214,25 +214,41 @@ impl QueueSocket {
     }
 
     fn await_ack(&self, sequence: u32) -> io::Result<()> {
-        for _ in 0..ACK_ATTEMPTS {
-            let mut descriptor = libc::pollfd {
-                fd: self.fd.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let ready = unsafe { libc::poll(&mut descriptor, 1, ACK_TIMEOUT_MS) };
-            if ready < 0 {
-                let error = io::Error::last_os_error();
-                if error.raw_os_error() == Some(libc::EINTR) {
-                    continue;
+        Self::await_ack_with(sequence, |bytes| {
+            loop {
+                let mut descriptor = libc::pollfd {
+                    fd: self.fd.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let ready = unsafe { libc::poll(&mut descriptor, 1, ACK_TIMEOUT_MS) };
+                if ready < 0 {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() == Some(libc::EINTR) {
+                        continue;
+                    }
+                    return Err(error);
                 }
-                return Err(error);
+                if ready == 0 {
+                    return Ok(None);
+                }
+                return recv_once(self.fd.as_raw_fd(), bytes).map(Some);
             }
-            if ready == 0 {
-                continue;
-            }
+        })
+    }
+
+    fn await_ack_with(
+        sequence: u32,
+        mut receive: impl FnMut(&mut [u8]) -> io::Result<Option<usize>>,
+    ) -> io::Result<()> {
+        for _ in 0..ACK_ATTEMPTS {
             let mut response = [0; 4096];
-            let received = recv_once(self.fd.as_raw_fd(), &mut response)?;
+            let Some(received) = receive(&mut response)? else {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "ядро не подтвердило настройку очереди за секунду",
+                ));
+            };
             for message in MessageIter::new(&response[..received]) {
                 if message.sequence != sequence {
                     continue;
@@ -248,7 +264,7 @@ impl QueueSocket {
         }
         Err(io::Error::new(
             io::ErrorKind::TimedOut,
-            "ядро не подтвердило настройку NFQUEUE за 8 секунд",
+            "подтверждение настройки очереди не пришло",
         ))
     }
 
@@ -312,5 +328,25 @@ fn recv_once(fd: libc::c_int, bytes: &mut [u8]) -> io::Result<usize> {
         if error.raw_os_error() != Some(libc::EINTR) {
             return Err(error);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::QueueSocket;
+    use std::cell::Cell;
+    use std::io::ErrorKind;
+
+    #[test]
+    fn await_ack_stops_after_first_timeout() {
+        let calls = Cell::new(0);
+        let error = QueueSocket::await_ack_with(7, |_| {
+            calls.set(calls.get() + 1);
+            Ok(None)
+        })
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::TimedOut);
+        assert_eq!(calls.get(), 1);
     }
 }
