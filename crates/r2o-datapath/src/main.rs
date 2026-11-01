@@ -538,6 +538,75 @@ mod app {
         }
     }
 
+    fn r2o_process_cost_from_proc(
+        stat: &str,
+        statm: &str,
+        clock_ticks: libc::c_long,
+        page_size: libc::c_long,
+    ) -> (u64, u64) {
+        let cpu_ticks = stat.rfind(')').and_then(|end| {
+            let mut fields = stat[end + 1..].split_ascii_whitespace();
+            // D2O's strtoul leaves the cursor on Linux's state letter; field counting
+            // continues there, so both CPU fields read as zero. Preserve that output.
+            fields.next()?.parse::<libc::c_ulong>().ok()?;
+            let user = fields.nth(10)?.parse::<libc::c_ulong>().ok()?;
+            let system = fields.next()?.parse::<libc::c_ulong>().ok()?;
+            Some(user.wrapping_add(system))
+        });
+        let cpu_ms = if clock_ticks > 0 {
+            cpu_ticks.map_or(0, |ticks| {
+                (ticks as u64).wrapping_mul(1000) / clock_ticks as u64
+            })
+        } else {
+            0
+        };
+        let rss_kb = if page_size > 0 {
+            statm
+                .split_ascii_whitespace()
+                .nth(1)
+                .and_then(|resident| resident.parse::<libc::c_ulong>().ok())
+                .map_or(0, |pages| {
+                    (pages as u64).wrapping_mul(page_size as u64) / 1024
+                })
+        } else {
+            0
+        };
+        (cpu_ms, rss_kb)
+    }
+
+    fn r2o_process_cost() -> (u64, u64) {
+        let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
+        let statm = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
+        // SAFETY: sysconf reads constant system values and takes no pointers.
+        let clock_ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        // SAFETY: sysconf reads constant system values and takes no pointers.
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        r2o_process_cost_from_proc(&stat, &statm, clock_ticks, page_size)
+    }
+
+    fn r2o_process_stats_line(pid: u32, elapsed: Duration, cpu_ms: u64, rss_kb: u64) -> String {
+        let elapsed_secs = elapsed.as_secs();
+        let cpu_percent_hundredths = if elapsed_secs == 0 {
+            0
+        } else {
+            cpu_ms.wrapping_mul(10) / elapsed_secs
+        };
+        format!(
+            "--- r2o-datapath[{pid}], {elapsed_secs} с; процессор {cpu_ms} мс ({},{} %), RSS {rss_kb} КиБ ---",
+            cpu_percent_hundredths / 100,
+            cpu_percent_hundredths % 100,
+        )
+    }
+
+    fn r2o_log_process_stats(process_origin: &Instant, now: Instant) {
+        let (cpu_ms, rss_kb) = r2o_process_cost();
+        let elapsed = now.saturating_duration_since(*process_origin);
+        eprintln!(
+            "{}",
+            r2o_process_stats_line(std::process::id(), elapsed, cpu_ms, rss_kb)
+        );
+    }
+
     fn r2o_log_flow_table_stats(tcp_sessions: &TcpSessions, udp_sessions: &R2oUdpSessions) {
         let udp_stats = udp_sessions.stats();
         eprintln!(
@@ -805,6 +874,7 @@ mod app {
                     flow_journal.added(),
                     flow_journal.dropped()
                 );
+                r2o_log_process_stats(&journal_origin, Instant::now());
                 r2o_log_flow_table_stats(&tcp_sessions, &udp_sessions);
                 eprintln!(
                     "r2o-datapath: ответ невидим очереди: {} из {} TCP-потоков с приветствием",
@@ -864,6 +934,7 @@ mod app {
             name_plans.r2o_set_send_maxlen(raw.as_ref().map_or(send_maxlen, RawSocket::maxlen));
             let now = Instant::now();
             if next_stats.is_some_and(|deadline| now >= deadline) {
+                r2o_log_process_stats(&journal_origin, Instant::now());
                 r2o_log_flow_table_stats(&tcp_sessions, &udp_sessions);
                 next_stats = options.stats_interval.map(|interval| now + interval);
             }
@@ -3863,6 +3934,29 @@ mod app {
         use r2o_datapath::r2o_udp_hold::R2oUdpHeldPacket;
         use r2o_datapath::r2o_udp_sessions::R2oUdpSessions;
         use std::io;
+
+        #[test]
+        fn process_cost_matches_d2o_proc_state_cursor_and_rss() {
+            let stat = "4242 (r2o worker (test)) S 0 0 0 0 0 0 0 0 0 0 123 45";
+            let statm = "500 11 0 0 0 0 0";
+            let cost = super::r2o_process_cost_from_proc(stat, statm, 100, 4096);
+            println!("R2O_PROCESS_COST={},{}", cost.0, cost.1);
+            assert_eq!(cost, (0, 44));
+        }
+
+        #[test]
+        fn process_stats_line_matches_d2o_uptime_cpu_and_rss_format() {
+            assert_eq!(
+                super::r2o_process_stats_line(4242, Duration::from_secs(2), 25, 44),
+                "--- r2o-datapath[4242], 2 с; процессор 25 мс (1,25 %), RSS 44 КиБ ---"
+            );
+        }
+
+        #[test]
+        fn process_cost_reads_current_proc_rss() {
+            let (_, rss_kb) = super::r2o_process_cost();
+            assert!(rss_kb > 0);
+        }
 
         const QUIC_INITIAL: &[u8] =
             include_bytes!("../../r2k-core/tests/fixtures/quic_v1_initial.bin");
