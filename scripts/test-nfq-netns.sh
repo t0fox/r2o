@@ -1607,24 +1607,29 @@ client.sendto(payload, destination)
 if client.recvfrom(128)[0] != b"ack":
     raise SystemExit("ОШИБКА: первый IPv6 conntrack NAT flow не прошёл")
 translated = "2001:db8:100::10"
-with open("/proc/net/nf_conntrack", encoding="ascii") as table:
-    entries = []
-    for line in table:
-        fields = {}
-        for field in line.split():
-            if "=" in field:
-                key, value = field.split("=", 1)
-                fields.setdefault(key, []).append(value)
-        if (
-            fields.get("sport", [""])[0] == "40100"
-            and fields.get("dport", [""])[0] == "4453"
-            and len(fields.get("dst", [])) > 1
-            and ipaddress.IPv6Address(fields["dst"][1]) == ipaddress.IPv6Address(translated)
-        ):
-            entries.append(line)
-if not entries:
-    raise SystemExit("ОШИБКА: proc conntrack не содержит IPv6 SNAT mapping этого flow")
-print("proc conntrack подтвердил IPv6 SNAT mapping первого flow")
+try:
+    table = open("/proc/net/nf_conntrack", encoding="ascii")
+except FileNotFoundError:
+    print("proc conntrack table is unavailable; NAT is verified by the UDP peer")
+else:
+    with table:
+        entries = []
+        for line in table:
+            fields = {}
+            for field in line.split():
+                if "=" in field:
+                    key, value = field.split("=", 1)
+                    fields.setdefault(key, []).append(value)
+            if (
+                fields.get("sport", [""])[0] == "40100"
+                and fields.get("dport", [""])[0] == "4453"
+                and len(fields.get("dst", [])) > 1
+                and ipaddress.IPv6Address(fields["dst"][1]) == ipaddress.IPv6Address(translated)
+            ):
+                entries.append(line)
+    if not entries:
+        raise SystemExit("proc conntrack does not contain this IPv6 SNAT mapping")
+    print("proc conntrack confirmed IPv6 SNAT mapping for the first flow")
 time.sleep(0.05)
 client.sendto(payload, destination)
 PY

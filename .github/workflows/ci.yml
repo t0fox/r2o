@@ -119,6 +119,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # version v7.0.1
+        with:
+          repository: t0fox/d2o
+          ref: 304ba893dd37197128ac8799c0495b035f6a38c0
+          path: d2o
+          persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
       - name: Собрать бинарники для сценариев роутера
         run: cargo build --locked --release --package r2o-manager --bin r2o-manager --package r2o-controller --bin r2o-controller --package r2o-telegram --bin r2o-telegram
@@ -129,6 +135,8 @@ jobs:
       - name: Проверить упаковку выпуска
         run: sh scripts/test-package-release.sh
       - name: Проверить сценарии обновления и службы роутера
+        env:
+          R2O_DONOR_ROOT: ${{ github.workspace }}/d2o
         run: |
           set -euo pipefail
           shopt -s nullglob

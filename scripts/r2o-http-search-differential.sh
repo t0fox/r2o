@@ -63,7 +63,7 @@ mkdir -p "$r2o_log_dir"
     fi
     printf '\nТесты C-эталона HTTP-search\n'
     r2o_run_timed 'test_httpsearch C-эталона' \
-        make -B -C "$r2o_donor_core" test-httpsearch CC=clang-18
+        make -B -C "$r2o_donor_core" test-httpsearch httpsearch.o httpup_logic.o CC=clang-18
     printf '\nСверка усечённого portal response и timeout внутри заголовка C/Rust\n'
     r2o_state_binary="$r2o_log_dir/http-response-state-$$"
     r2o_state_c="$r2o_log_dir/http-response-state-c-$$"

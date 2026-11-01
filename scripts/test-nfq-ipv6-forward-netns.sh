@@ -401,30 +401,35 @@ server = ipaddress.IPv6Address(sys.argv[2])
 client_port = sys.argv[3]
 server_port = sys.argv[4]
 candidates = []
-with open("/proc/net/nf_conntrack", encoding="ascii") as table:
-    for line in table:
-        fields = {}
-        for field in line.split():
-            if "=" in field:
-                key, value = field.split("=", 1)
-                fields.setdefault(key, []).append(value)
-        if server_port in fields.get("sport", []) or server_port in fields.get("dport", []):
-            candidates.append(line.rstrip())
-        if (
-            len(fields.get("src", [])) > 1
-            and len(fields.get("dst", [])) > 1
-            and ipaddress.IPv6Address(fields["src"][0]) == client
-            and ipaddress.IPv6Address(fields["dst"][0]) == server
-            and fields.get("sport", [""])[0] == client_port
-            and fields.get("dport", [""])[0] == server_port
-            and ipaddress.IPv6Address(fields["src"][1]) == server
-            and ipaddress.IPv6Address(fields["dst"][1]) == client
-        ):
-            print("conntrack содержит IPv6 original/reply tuples через gateway")
-            break
-    else:
-        print("conntrack candidates:", candidates, file=sys.stderr)
-        raise SystemExit("ОШИБКА: conntrack не содержит полный IPv6 request/reply tuple")
+try:
+    table = open("/proc/net/nf_conntrack", encoding="ascii")
+except FileNotFoundError:
+    print("proc conntrack table is unavailable; packets and nft counters verify IPv6 forwarding")
+else:
+    with table:
+        for line in table:
+            fields = {}
+            for field in line.split():
+                if "=" in field:
+                    key, value = field.split("=", 1)
+                    fields.setdefault(key, []).append(value)
+            if server_port in fields.get("sport", []) or server_port in fields.get("dport", []):
+                candidates.append(line.rstrip())
+            if (
+                len(fields.get("src", [])) > 1
+                and len(fields.get("dst", [])) > 1
+                and ipaddress.IPv6Address(fields["src"][0]) == client
+                and ipaddress.IPv6Address(fields["dst"][0]) == server
+                and fields.get("sport", [""])[0] == client_port
+                and fields.get("dport", [""])[0] == server_port
+                and ipaddress.IPv6Address(fields["src"][1]) == server
+                and ipaddress.IPv6Address(fields["dst"][1]) == client
+            ):
+                print("conntrack contains IPv6 original/reply tuples through gateway")
+                break
+        else:
+            print("conntrack candidates:", candidates, file=sys.stderr)
+            raise SystemExit("conntrack does not contain the full IPv6 request/reply tuple")
 PY
 
 kill -TERM "$R2OD_PID"

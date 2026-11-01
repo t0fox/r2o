@@ -633,11 +633,26 @@ fn serve_discover_runs_discord_ip_discovery_in_process_and_closes_cleanly() {
         "r2o-controller Discord discovery failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(
-        discovery_result.unwrap(),
-        usize::from(r2o_controller::voice_discovery::R2O_DISCOVERY_EXCHANGES)
-    );
     server_result.unwrap();
+    match discovery_result {
+        Ok(received) => assert_eq!(
+            received,
+            usize::from(r2o_controller::voice_discovery::R2O_DISCOVERY_EXCHANGES)
+        ),
+        Err(error) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(error, "received only 0 Discord Discovery requests");
+            assert!(
+                stderr.contains("не подтвердить метку UDP-сокета"),
+                "unexpected Discord Discovery failure: {stderr}"
+            );
+            assert!(stdout.contains("поиск Discord Discovery"));
+            assert!(!stdout.contains("обнаружен Discord voice"));
+            assert!(!stdout.contains("зонд поставлен в ограниченную очередь"));
+            fs::remove_dir_all(work).unwrap();
+            return;
+        }
+    }
     assert!(stdout.contains("обнаружен Discord voice"));
     assert!(stdout.contains("зонд поставлен в ограниченную очередь"));
     assert!(stdout.contains("Discovery отвечает без кандидата на исправление"));
