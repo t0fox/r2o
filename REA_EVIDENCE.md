@@ -9163,3 +9163,7 @@ Extended scripts/test-classifier-raw-production-differential.sh to run the pinne
 ### Production raw classifier positive paths - 2026-11-01
 
 Extended the same harness with synthetic positive paths against the actual pinned D2O and R2O classifier CLIs in fresh isolated Linux namespaces. The loopback server leaves target baseline/split unanswered, returns a TLS alert to the first control-SNI request, then returns a minimal ServerHello to a raw probe. The property case matched on poisonable, path=свойство, composed=false, and свойство:перекрытие слева pass=1/fail=0. The compose case skips the individual property probes so the fallback is attempted, then matched on poisonable, path=собрано, composed=true, and СОБРАНО: всё сразу pass=1/fail=0. These are synthetic loopback behavior checks, not evidence of real DPI evasion. No production classifier code change was needed.
+
+### Full QUIC HTTP/3 data-stage: complete response replay - 2026-11-01
+
+Added scripts/test-quic-http3-full-stage-differential.sh and a small C harness that calls the pinned donor d2k_qc_connect and d2k_quic_data_stage directly. One integration test runs that C client and the production Rust HTTP/3 client against the same local h3-quinn server, which returns HTTP 200 with a complete 13-byte body. Both report Pass and match the unique response-stream byte count and one GET. The test does not cover budget repeats, incomplete/stalled responses, transport-error parity across both clients, or router behavior; those branches remain open.
