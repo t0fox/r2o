@@ -779,6 +779,7 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                             | "/budget-slow"
                             | "/drop"
                             | "/body-close"
+                            | "/partial-close"
                             | "/budget-close"
                     ) {
                         if request.uri().path() == "/refuse" {
@@ -800,6 +801,19 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                         .await
                         .is_err()
                     {
+                        break;
+                    }
+                    if request.uri().path() == "/partial-close" {
+                        if stream
+                            .send_data(bytes::Bytes::from_static(b"partial"))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        connection_for_close
+                            .close(quinn::VarInt::from_u32(4), b"test close after partial body");
                         break;
                     }
                     if request.uri().path() == "/body-close" {
@@ -1646,5 +1660,89 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
         "D2O={baseline_c_result} R2O={baseline_rust_result:?}"
     );
 
+    let partial_close_binary = d2o_binary.clone();
+    let partial_close_address = server_address;
+    let partial_close_c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(partial_close_binary)
+            .args([
+                "127.0.0.1",
+                &partial_close_address.port().to_string(),
+                "localhost",
+                "/partial-close",
+                "0",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        !partial_close_c_output.status.success(),
+        "D2O partial-body close unexpectedly passed: {}",
+        String::from_utf8_lossy(&partial_close_c_output.stdout)
+    );
+    let partial_close_c_result = String::from_utf8(partial_close_c_output.stdout).unwrap();
+    let partial_close_c_field = |name: &str| {
+        partial_close_c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {partial_close_c_result}"))
+    };
+
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.connect(server_address).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(certificate_der.clone()).unwrap();
+    let partial_close_rust_result = r2o_quic_http3_get(
+        socket,
+        server_address,
+        "localhost",
+        "/partial-close",
+        Duration::from_secs(2),
+        roots,
+    )
+    .await;
+    let partial_close_rust_verdict =
+        r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&partial_close_rust_result);
+    assert!(
+        partial_close_rust_result.handshake_confirmed,
+        "R2O={partial_close_rust_result:?}"
+    );
+    assert_eq!(
+        partial_close_rust_result.status, 200,
+        "R2O={partial_close_rust_result:?}"
+    );
+    assert!(
+        partial_close_rust_result.body_bytes > 0,
+        "partial DATA was not observed: {partial_close_rust_result:?}"
+    );
+    assert!(
+        !partial_close_rust_result.complete,
+        "R2O={partial_close_rust_result:?}"
+    );
+    assert!(
+        partial_close_rust_result.error.is_some(),
+        "R2O={partial_close_rust_result:?}"
+    );
+    assert!(
+        !partial_close_rust_result.r2o_quic_stalled,
+        "CONNECTION_CLOSE after partial DATA was misclassified as stall: {partial_close_rust_result:?}"
+    );
+    assert_eq!(
+        partial_close_c_field("verdict"),
+        format!("{partial_close_rust_verdict:?}"),
+        "D2O={partial_close_c_result} R2O={partial_close_rust_result:?}"
+    );
+    assert_eq!(partial_close_c_field("verdict"), "NotRun");
+    assert_eq!(
+        partial_close_c_field("app_bytes").parse::<u64>().unwrap(),
+        partial_close_rust_result.app_bytes,
+        "D2O={partial_close_c_result} R2O={partial_close_rust_result:?}"
+    );
+    assert_eq!(
+        partial_close_c_field("requests").parse::<u32>().unwrap(),
+        partial_close_rust_result.requests,
+        "D2O={partial_close_c_result} R2O={partial_close_rust_result:?}"
+    );
     server.abort();
 }
