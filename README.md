@@ -18,11 +18,13 @@ r2o — программное обеспечение для **локально�
 
 ## Прогресс переноса D2O → R2O
 
-[![Доказанный паритет](docs/progress/badge-parity.svg)](https://t0fox.github.io/r2o/) [![Контракты](docs/progress/badge-contracts.svg)](https://t0fox.github.io/r2o/)
+[![Доказанный паритет](docs/progress/badge-parity.svg)](docs/progress/progress.json) [![Контракты](docs/progress/badge-contracts.svg)](docs/progress/progress.json)
 
-[![Карта функционального паритета D2O → R2O](docs/progress/progress.svg)](https://t0fox.github.io/r2o/)
+[![Карта функционального паритета D2O → R2O](docs/progress/progress.svg)](docs/progress/index.html)
 
-[Подробная карта](https://t0fox.github.io/r2o/) · [История прогресса](https://t0fox.github.io/r2o/history.html) · [Матрица и доказательства](docs/functional-parity-matrix.md)
+[HTML-карта (исходник)](docs/progress/index.html) · [История изменений матрицы](https://github.com/t0fox/r2o/commits/main/docs/functional-parity-matrix.md) · [Матрица и доказательства](docs/functional-parity-matrix.md)
+
+<sub>Интерактивный сайт на GitHub Pages станет доступен после слияния PR и включения Pages → GitHub Actions. До публикации ссылки ведут на существующие файлы репозитория, а не на несуществующий сайт.</sub>
 
 <sub>Взвешенный процент **доказанного поведения**, не доля Rust-кода. Частичные контракты не приносят баллов; полевой паритет требует отдельной проверки.</sub>
 
