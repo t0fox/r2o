@@ -9263,3 +9263,20 @@ Extended the existing full-stage fixture so the pinned clean D2O C client and pr
 The same updated test isolated the timing-sensitive `/budget-slow` scenario. This run returned NotRun on both sides: C reported app_bytes=9, requests=1, packets=32, need=4, oneway=0; Rust reported app_bytes=9, requests=1, 33 datagrams, budget_passed=false, seven PING probes and seven ACKs before the GET timeout. The prior single C Cut/Rust NotRun mismatch did not reproduce. Its cause remains unknown; the client stacks differ by one counted datagram in this replay, which did not change the verdict.
 
 The QUIC matrix row remains partial and earns 0/2. The total stays 62/87 (71.26%); additional transport errors, timing-sensitive stall and lifecycle remain open.
+
+### Live OpenWrt procd waiter lifecycle differential — 2026-11-01
+
+Added `scripts/test-router-procd-lifecycle-qemu.py`, an opt-in WSL2 integration test that keeps its kernel, overlay and logs on E:. It boots the cached OpenWrt 25.12.5 ARM64 initramfs image with QEMU, inserts the production R2O `router/openwrt-init` and clean D2O `files/d2k-openwrt-init` at pinned D2O revision `304ba893dd37197128ac8799c0495b035f6a38c0`, then drives both boot waiters through the real guest procd and their `/etc/rc.d/S99*` symlinks. R2O source was `2be55d32614fedc0b71f155a82dc1fa91ce89c68`.
+
+With `/opt` absent, both waiters were running; `stop` canceled each before the Entware fixture appeared. Once `/opt` fixtures were created, neither canceled waiter started late. Restarting the two `S99*` links called each fixture's `start` exactly once; stopping each service called `stop` exactly once, and the trace stayed unchanged through an additional 3-second wait. The test passes and prints `D2O/R2O procd lifecycle matches: delayed /opt, canceled waiter, one start/stop, no repeat.`
+
+Run command:
+
+```sh
+R2O_OPENWRT_QEMU_KERNEL=/mnt/e/r2o-tooling/openwrt-qemu-armv8/kernel.bin \
+R2O_DONOR_ROOT=/mnt/e/r2o-tooling/d2o-clean-main \
+R2O_QEMU_ARTIFACT_DIR=/mnt/e/r2o-tooling/openwrt-qemu-armv8 \
+python3 /mnt/e/r2o/scripts/test-router-procd-lifecycle-qemu.py
+```
+
+Logs: `/mnt/e/r2o-tooling/openwrt-qemu-armv8/r2o-procd-differential-2026-11-01.log` and the accompanying `-qemu.log`. This verifies the procd waiter lifecycle when the `S99*` action is invoked in a QEMU guest; the `rc.d` calls in the test are manual, not automatic cold-boot dispatch. The `/opt` service targets are stubs, so this does not prove production daemon restart, real flash autostart or reboot-persisted reapply. The matrix row remains partial at 0/3; weighted total remains 62/87 (71.26%).

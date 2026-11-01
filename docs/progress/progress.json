@@ -269,7 +269,7 @@
           "statusLabel": "Частично",
           "group": "Discovery",
           "mapping": "C scheduler/catalog/service lifecycle → Rust controller/manager/router init",
-          "evidence": "`test-router-reapply-differential.sh` подтверждает восстановление после missing firewall и возврат ошибки `up`; `test-router-route-gate-config.sh` после SIGKILL mock controller проверяет, что явный `engine-start` перезапускает оба datapath и controller и повторно вызывает firewall adapter; `test-router-openwrt-init.sh` проверяет production boot bridge: `boot_wait` зарегистрирован в `rc.common`, ждёт Entware-файлы, закрывает fd 1000, очищает `LD_PRELOAD` и корректно останавливается; RED воспроизводил отказ незарегистрированной команды; `test-router-heal-concurrency-differential.sh` подтверждает"
+          "evidence": "OpenWrt QEMU 25.12.5: controller SIGKILL + heal совпали с D2O; engine-start перезапустил datapath/controller и привязал NFQUEUE 2000, engine-stop снял очередь и восстановил flow_offloading. Live-procd C/Rust через rc.d S99: stop до /opt отменил оба waiter; поздний /opt дал каждой стороне ровно один S99 start и stop, без повтора (E:/r2o-tooling/openwrt-qemu-armv8/r2o-procd-differential-2026-11-01.log). Дифференциалы reapply/route-gate/heal и Discord lifecycle проходят; изолированный boot bridge проходит. Открыты auto boot, daemon recovery, reboot/reapply и полный ACK/APPLIED/persist chain."
         },
         {
           "id": 22,
@@ -790,7 +790,7 @@
       "statusLabel": "Частично",
       "group": "Discovery",
       "mapping": "C scheduler/catalog/service lifecycle → Rust controller/manager/router init",
-      "evidence": "`test-router-reapply-differential.sh` подтверждает восстановление после missing firewall и возврат ошибки `up`; `test-router-route-gate-config.sh` после SIGKILL mock controller проверяет, что явный `engine-start` перезапускает оба datapath и controller и повторно вызывает firewall adapter; `test-router-openwrt-init.sh` проверяет production boot bridge: `boot_wait` зарегистрирован в `rc.common`, ждёт Entware-файлы, закрывает fd 1000, очищает `LD_PRELOAD` и корректно останавливается; RED воспроизводил отказ незарегистрированной команды; `test-router-heal-concurrency-differential.sh` подтверждает"
+      "evidence": "OpenWrt QEMU 25.12.5: controller SIGKILL + heal совпали с D2O; engine-start перезапустил datapath/controller и привязал NFQUEUE 2000, engine-stop снял очередь и восстановил flow_offloading. Live-procd C/Rust через rc.d S99: stop до /opt отменил оба waiter; поздний /opt дал каждой стороне ровно один S99 start и stop, без повтора (E:/r2o-tooling/openwrt-qemu-armv8/r2o-procd-differential-2026-11-01.log). Дифференциалы reapply/route-gate/heal и Discord lifecycle проходят; изолированный boot bridge проходит. Открыты auto boot, daemon recovery, reboot/reapply и полный ACK/APPLIED/persist chain."
     },
     {
       "id": 21,
