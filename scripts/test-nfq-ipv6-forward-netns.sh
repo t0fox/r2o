@@ -24,6 +24,8 @@ QUEUE=65530
 MARK=0x123
 DATAPATH_MARK=119
 PORT=4454
+TCP_PORT=4455
+TCP_CLIENT_PORT=40121
 CLIENT_PORT=40120
 CLIENT_IP=2001:db8:201::2
 GATEWAY_CLIENT_IP=2001:db8:201::1
@@ -32,6 +34,7 @@ SERVER_IP=2001:db8:202::2
 WORK=$(mktemp -d)
 R2OD_PID=
 SERVER_PID=
+TCP_SERVER_PID=
 BULK_CLIENT_PID=
 KEEP_TEST_WORK_VALUE=$(printenv KEEP_TEST_WORK 2>/dev/null || true)
 
@@ -47,6 +50,11 @@ cleanup() {
         kill "$SERVER_PID" 2>/dev/null || true
         wait "$SERVER_PID" 2>/dev/null || true
         SERVER_PID=
+    fi
+    if [ -n "$TCP_SERVER_PID" ]; then
+        kill "$TCP_SERVER_PID" 2>/dev/null || true
+        wait "$TCP_SERVER_PID" 2>/dev/null || true
+        TCP_SERVER_PID=
     fi
     if [ -n "$BULK_CLIENT_PID" ]; then
         kill "$BULK_CLIENT_PID" 2>/dev/null || true
@@ -147,6 +155,62 @@ if reply != payload or peer[0] != server_address:
 print(f"reply=4096 from={peer[0]}; SO_MARK=0x123")
 PY
 
+cat >"$WORK/tcp-server.py" <<'PY'
+import socket
+import sys
+
+address, port, ready_path = sys.argv[1:]
+expected = bytes(range(256)) * 256
+listener = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+listener.settimeout(15)
+listener.bind((address, int(port)))
+listener.listen(1)
+with open(ready_path, "w", encoding="ascii") as ready:
+    ready.write("ready")
+connection, peer = listener.accept()
+connection.settimeout(15)
+received = bytearray()
+while True:
+    chunk = connection.recv(16384)
+    if not chunk:
+        break
+    received.extend(chunk)
+if bytes(received) != expected:
+    raise SystemExit(f"unexpected IPv6 TCP request: {len(received)} bytes from {peer!r}")
+connection.sendall(received)
+connection.shutdown(socket.SHUT_WR)
+print(f"tcp_request={len(received)} tcp_reply={len(received)} from={peer[0]}")
+connection.close()
+listener.close()
+PY
+
+cat >"$WORK/tcp-client.py" <<'PY'
+import socket
+import sys
+
+client_address, server_address = sys.argv[1:3]
+server_port = int(sys.argv[3])
+client_port = int(sys.argv[4])
+client = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+client.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_MARK", 36), 0x123)
+client.bind((client_address, client_port))
+client.settimeout(15)
+client.connect((server_address, server_port))
+payload = bytes(range(256)) * 256
+client.sendall(payload)
+client.shutdown(socket.SHUT_WR)
+received = bytearray()
+while True:
+    chunk = client.recv(16384)
+    if not chunk:
+        break
+    received.extend(chunk)
+if bytes(received) != payload:
+    raise SystemExit(f"unexpected IPv6 TCP reply: {len(received)} bytes from {server_address}")
+print(f"tcp_reply={len(received)} from={server_address}; SO_MARK=0x123")
+client.close()
+PY
 cat >"$WORK/bulk-client.py" <<'PY'
 import socket
 import sys
@@ -219,6 +283,12 @@ ip netns exec "$GATEWAY_NS" nft add rule inet r2o forward \
 ip netns exec "$GATEWAY_NS" nft add rule inet r2o forward \
     ip6 saddr "$SERVER_IP" ip6 daddr "$CLIENT_IP" udp sport "$PORT" \
     meta mark != "$DATAPATH_MARK" counter queue num "$QUEUE"
+ip netns exec "$GATEWAY_NS" nft add rule inet r2o forward \
+    ip6 saddr "$CLIENT_IP" ip6 daddr "$SERVER_IP" tcp dport "$TCP_PORT" \
+    meta mark != "$DATAPATH_MARK" counter queue num "$QUEUE"
+ip netns exec "$GATEWAY_NS" nft add rule inet r2o forward \
+    ip6 saddr "$SERVER_IP" ip6 daddr "$CLIENT_IP" tcp sport "$TCP_PORT" \
+    meta mark != "$DATAPATH_MARK" counter queue num "$QUEUE"
 
 ip netns exec "$GATEWAY_NS" "$R2OD_BIN" \
     --queue "$QUEUE" --family ipv6 --plan "$WORK/tcp-only.r2op" \
@@ -259,6 +329,27 @@ done
 
 ip netns exec "$CLIENT_NS" python3 "$WORK/client.py" \
     "$CLIENT_IP" "$SERVER_IP" "$PORT" "$CLIENT_PORT"
+ip netns exec "$SERVER_NS" python3 "$WORK/tcp-server.py" \
+    "$SERVER_IP" "$TCP_PORT" "$WORK/tcp-server.ready" \
+    >"$WORK/tcp-server.log" 2>&1 &
+TCP_SERVER_PID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -f "$WORK/tcp-server.ready" ] && break
+    kill -0 "$TCP_SERVER_PID" 2>/dev/null || {
+        cat "$WORK/tcp-server.log" >&2
+        exit 1
+    }
+    sleep 0.05
+done
+[ -f "$WORK/tcp-server.ready" ] || {
+    cat "$WORK/tcp-server.log" >&2
+    echo "IPv6 TCP echo listener did not start" >&2
+    exit 1
+}
+ip netns exec "$CLIENT_NS" python3 "$WORK/tcp-client.py" \
+    "$CLIENT_IP" "$SERVER_IP" "$TCP_PORT" "$TCP_CLIENT_PORT"
+wait "$TCP_SERVER_PID"
+TCP_SERVER_PID=
 kill -STOP "$R2OD_PID"
 ip netns exec "$CLIENT_NS" python3 "$WORK/bulk-client.py" \
     "$CLIENT_IP" "$SERVER_IP" "$WORK/bulk.ready" "$PORT" "$CLIENT_PORT" &
@@ -292,7 +383,11 @@ SERVER_PID=
 if ! ip netns exec "$GATEWAY_NS" nft list chain inet r2o forward | \
     grep -Eq "udp dport $PORT .*counter packets 101 bytes" ||
     ! ip netns exec "$GATEWAY_NS" nft list chain inet r2o forward | \
-    grep -Eq "udp sport $PORT .*counter packets 101 bytes"; then
+    grep -Eq "udp sport $PORT .*counter packets 101 bytes" ||
+    ! ip netns exec "$GATEWAY_NS" nft list chain inet r2o forward |
+    grep -Eq "tcp dport $TCP_PORT .*counter packets [1-9][0-9]* bytes" ||
+    ! ip netns exec "$GATEWAY_NS" nft list chain inet r2o forward |
+    grep -Eq "tcp sport $TCP_PORT .*counter packets [1-9][0-9]* bytes"; then
     ip netns exec "$GATEWAY_NS" nft list chain inet r2o forward >&2
     echo "ОШИБКА: IPv6 request/reply не прошли оба NFQUEUE forward rule" >&2
     exit 1
@@ -340,5 +435,5 @@ else
     echo "ОШИБКА: IPv6 gateway datapath не завершился после SIGTERM" >&2
     exit 1
 fi
-echo "ПРОЙДЕНО: IPv6 SO_MARK, request/reply NFQUEUE, 4-KiB reassembly, conntrack и fail-open переполнения 32-пакетной очереди (100/100)"
+echo "ПРОЙДЕНО: IPv6 SO_MARK, UDP/TCP request/reply NFQUEUE, 64-KiB TCP echo, conntrack и fail-open переполнения 32-пакетной очереди (100/100 UDP)"
 cat "$WORK/r2o-datapath.log" "$WORK/server.log"
