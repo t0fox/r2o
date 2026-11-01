@@ -35,6 +35,7 @@
 
 - [x] Record current remote main SHAs and clean-source paths; preserve user-owned dirty D2O files.
 - [ ] Enumerate production C functions, Rust counterparts/callers, and tests; tag behavior branches, state transitions, timers, errors, and side effects.
+  - Inventory started for datapath/NFQUEUE in docs/parity-function-inventory.md; the remaining production subsystems are still open.
 - [x] Read existing 51-scenario upstream differential manifest as prior evidence without rerunning it wholesale.
 - [x] Define the matrix denominator from unique observable behavior contracts. The audit matrix uses weight 3 for packet/plan safety and persistence, weight 2 for lifecycle/retry/measurement and operator-facing panel/service contracts. No credit for code presence alone; partial/unverified rows score zero until proven. See `docs/functional-parity-matrix.md` for the current weighted result.
 
@@ -43,6 +44,7 @@
 Follow the user's sequential workflow on the shared `main` checkout. Finish one subsystem's source trace, evidence and any required fix/commit before moving to the next. Return C function → Rust function → branch coverage → exact existing test evidence, plus bounded reproductions for candidate mismatches.
 
 - [ ] Datapath/NFQUEUE/conntrack/journal/raw packet execution and OpenWrt memory/ABI.
+  - Evidence slice: clean D2O datapath make -B check passed; R2O datapath crate passed 344/344 active tests (5 ignored). Function mapping and IPv6-oracle/resource limits are recorded in docs/parity-function-inventory.md; full runtime/ABI and 128-MB load audit remains open.
 - [ ] TCP/TLS/HTTP/ECH/classifier/verify and their C↔Rust call paths.
 - [ ] QUIC and Discord RTC/UDP lifecycle, endpoint changes, reconnects, expiry, and long sessions.
 
