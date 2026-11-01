@@ -42,4 +42,4 @@ DONOR_CORE="$D2O_ROOT/core"
 cd "$ROOT"
 D2O_QUIC_DATA_STAGE_BIN="$TEMP/d2o-quic-data-stage" \
     cargo +1.98.0 test -p r2o-controller --test r2o_quic_http3 \
-        --locked --offline -- --include-ignored
+        --locked --offline -- --include-ignored --test-threads=1
