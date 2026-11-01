@@ -357,6 +357,7 @@ async fn spawn_quic_udp_reply_drop_fixture() -> (
 }
 
 #[tokio::test]
+#[ignore = "requires the pinned D2O harness; run scripts/test-quic-http3-full-stage-differential.sh"]
 async fn r2o_http3_udp_reply_drop_is_a_stall_and_matches_d2o() {
     let d2o_binary = std::env::var("D2O_QUIC_DATA_STAGE_BIN")
         .expect("D2O_QUIC_DATA_STAGE_BIN must point to the pinned C data-stage harness");
