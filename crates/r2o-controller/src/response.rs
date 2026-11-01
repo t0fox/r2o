@@ -1067,7 +1067,8 @@ fn handshake(address: SocketAddr, sni: &str, options: ResponseOptions) -> Result
 }
 
 fn count_handshakes(
-    address: SocketAddr,
+    host: &str,
+    port: u16,
     sni: &str,
     options: ResponseOptions,
     unmeasured: &mut i32,
@@ -1076,6 +1077,10 @@ fn count_handshakes(
     let mut done = 0;
     for _ in 0..options.repeats {
         *probes = (*probes).saturating_add(1);
+        // D2O resolves every attempt and counts lookup failures as failed handshakes.
+        let Ok(address) = resolve_address(host, port) else {
+            continue;
+        };
         match handshake(address, sni, options)? {
             Trial::Done => done += 1,
             Trial::Failed => {}
@@ -1119,8 +1124,7 @@ fn neutral_sni() -> String {
     format!("z{suffix}.example.com")
 }
 
-/// Проверить видимость ответов TLS 1.2 для целевого и нейтрального SNI на одном
-/// разрешённом адресе сервера. Ошибки локальной настройки не считаются замером.
+/// Проверить видимость ответов TLS 1.2 для целевого и нейтрального SNI.
 pub fn probe_response(
     host: &str,
     port: u16,
@@ -1141,23 +1145,20 @@ pub fn probe_response(
     if let Err(error) = legacy_client_hello(sni) {
         return not_applicable(format!("недопустимое имя для TLS-зонда: {error}"), 0, 0, 0);
     }
-    let address = match resolve_address(host, port) {
-        Ok(address) => address,
-        Err(error) => return not_applicable(error, 0, 0, 0),
-    };
     let mut options = options;
     options.timeout = response_timeout(options.timeout);
     let mut probes = 0;
     let mut unmeasured = 0;
-    let target = match count_handshakes(address, sni, options, &mut unmeasured, &mut probes) {
+    let target = match count_handshakes(host, port, sni, options, &mut unmeasured, &mut probes) {
         Ok(count) => count,
         Err(error) => return not_applicable(error, 0, 0, probes),
     };
     let neutral = neutral_sni();
-    let control = match count_handshakes(address, &neutral, options, &mut unmeasured, &mut probes) {
-        Ok(count) => count,
-        Err(error) => return not_applicable(error, target, 0, probes),
-    };
+    let control =
+        match count_handshakes(host, port, &neutral, options, &mut unmeasured, &mut probes) {
+            Ok(count) => count,
+            Err(error) => return not_applicable(error, target, 0, probes),
+        };
     let mut result = decide(target, control, unmeasured, repeats);
     result.probes = probes;
     result

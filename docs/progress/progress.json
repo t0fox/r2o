@@ -185,7 +185,7 @@
           "statusLabel": "Частично",
           "group": "Classifier / TLS",
           "mapping": "`detect/response.c:{d2k_resp_scan12,d2k_resp_handshake12,d2k_resp_decide,d2k_probe_response}` → controller `response::{scan12,handshake,count_handshakes,decide,probe_response}` and CLEAR follow-up in `classify.rs`",
-          "evidence": "`test-d2o-shared-fixtures.sh` compares 13 C/Rust scan/decision vectors; D2O `detect/test_response.c` and R2O `tests/response.rs` cover socket/parser cases separately, plus a matching poll-EINTR fixture. Full probe output is not paired end-to-end; C resolves for each handshake while R2O resolves once and reuses the selected address"
+          "evidence": "`test-d2o-shared-fixtures.sh` compares 13 C/Rust scan/decision vectors, poll-EINTR, and an end-to-end DNS-rotation probe (answers alternate between 127.0.0.1 and 127.0.0.2; both return blocked, target=0/control=1). R2O now resolves per handshake and counts DNS lookup failures as failed attempts, matching C. Other full-probe verdict branches and the CLEAR follow-up remain unpaired"
         },
         {
           "id": 23,
@@ -801,7 +801,7 @@
       "statusLabel": "Частично",
       "group": "Classifier / TLS",
       "mapping": "`detect/response.c:{d2k_resp_scan12,d2k_resp_handshake12,d2k_resp_decide,d2k_probe_response}` → controller `response::{scan12,handshake,count_handshakes,decide,probe_response}` and CLEAR follow-up in `classify.rs`",
-      "evidence": "`test-d2o-shared-fixtures.sh` compares 13 C/Rust scan/decision vectors; D2O `detect/test_response.c` and R2O `tests/response.rs` cover socket/parser cases separately, plus a matching poll-EINTR fixture. Full probe output is not paired end-to-end; C resolves for each handshake while R2O resolves once and reuses the selected address"
+      "evidence": "`test-d2o-shared-fixtures.sh` compares 13 C/Rust scan/decision vectors, poll-EINTR, and an end-to-end DNS-rotation probe (answers alternate between 127.0.0.1 and 127.0.0.2; both return blocked, target=0/control=1). R2O now resolves per handshake and counts DNS lookup failures as failed attempts, matching C. Other full-probe verdict branches and the CLEAR follow-up remain unpaired"
     },
     {
       "id": 22,

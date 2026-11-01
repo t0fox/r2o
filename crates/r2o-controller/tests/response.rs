@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use r2o_controller::response::{
     HttpsProbeState, ResponseOptions, ResponseResult, ResponseVerdict, Scan12, decide,
@@ -233,6 +233,72 @@ fn loopback_probe_requires_target_failure_and_control_success_for_blocked() {
     assert_eq!(result.verdict, ResponseVerdict::Blocked);
     assert_eq!((result.target, result.control), (0, 1));
     assert_eq!(result.probes, 2);
+}
+
+#[test]
+#[ignore = "run by test-d2o-shared-fixtures.sh with the rotating getaddrinfo fixture"]
+fn d2o_tls_response_dns_rotation_matches_c_probe() {
+    use std::net::Ipv4Addr;
+
+    let listener = TcpListener::bind(("0.0.0.0", 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let mut accepted = 0;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while accepted < 2 && Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    accepted += 1;
+                    if stream.local_addr().unwrap().ip() == Ipv4Addr::new(127, 0, 0, 2) {
+                        stream
+                            .write_all(&record(22, &[2, 0, 0, 1, 0xaa, 14, 0, 0, 0]))
+                            .unwrap();
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("accept TLS response connection: {error}"),
+            }
+        }
+        accepted
+    });
+
+    let result = probe_response(
+        "r2o-response-rotate.test",
+        port,
+        "rotate.example",
+        ResponseOptions {
+            repeats: 1,
+            timeout: Duration::from_millis(250),
+            mark: None,
+        },
+    );
+    let accepted = server.join().unwrap();
+    let verdict = match result.verdict {
+        ResponseVerdict::NotApplicable => "not_applicable",
+        ResponseVerdict::Clear => "clear",
+        ResponseVerdict::Blocked => "blocked",
+        ResponseVerdict::Flaky => "flaky",
+    };
+    let output = format!(
+        "verdict={verdict} target={} control={}\n",
+        result.target, result.control
+    );
+    std::fs::write(
+        std::env::var_os("R2O_TLS_RESPONSE_DNS_ROTATION_OUTPUT")
+            .expect("set response comparison output path"),
+        output,
+    )
+    .unwrap();
+    println!(
+        "TLS_RESPONSE_DNS_ROTATION=verdict={verdict} target={} control={} accepted={accepted}",
+        result.target, result.control
+    );
+    assert_eq!(result.verdict, ResponseVerdict::Blocked);
+    assert_eq!(accepted, 2);
+    assert_eq!((result.target, result.control, result.probes), (0, 1, 2));
 }
 
 #[test]

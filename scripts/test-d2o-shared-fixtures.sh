@@ -109,6 +109,34 @@ R2O_TLS_RESPONSE_EINTR_OUTPUT="$tmp_dir/tls-response-rust.out" \
 diff -u "$tmp_dir/tls-response-c.out" "$tmp_dir/tls-response-rust.out"
 printf 'C/Rust TLS response probe result matches after poll interruption.\n'
 
+cc -std=c99 -O2 -Wall -Wextra -Werror -shared -fPIC \
+    "$tests/d2o_tls_response_dns_rotation_resolver.c" -ldl \
+    -o "$tmp_dir/d2o_tls_response_dns_rotation_resolver.so"
+cc -std=c99 -O2 -Wall -Wextra -Werror \
+    -I"$donor_detect" -I"$donor_detect/include" -I"$donor_core/include" \
+    -I"$donor_datapath/include" \
+    "$tests/d2o_tls_response_dns_rotation.c" \
+    "$donor_detect/classify.o" "$donor_detect/poison.o" \
+    "$donor_detect/props.o" "$donor_detect/raw.o" \
+    "$donor_detect/trigger.o" "$donor_detect/response.o" \
+    "$donor_core/measured.o" "$donor_core/hello.o" \
+    "$donor_core/plantlv.o" "$donor_core/quic.o" \
+    "$donor_core/quicwire.o" "$donor_core/crypto.o" \
+    "$donor_datapath/plan_parse.o" "$donor_datapath/plan_apply.o" \
+    "$donor_datapath/wire.o" -lpthread \
+    -o "$tmp_dir/d2o_tls_response_dns_rotation"
+LD_PRELOAD="$tmp_dir/d2o_tls_response_dns_rotation_resolver.so" \
+    timeout 10s "$tmp_dir/d2o_tls_response_dns_rotation" \
+    >"$tmp_dir/tls-response-dns-c.out"
+printf 'C/TLS DNS rotation reference: '
+cat "$tmp_dir/tls-response-dns-c.out"
+R2O_TLS_RESPONSE_DNS_ROTATION_OUTPUT="$tmp_dir/tls-response-dns-rust.out" \
+LD_PRELOAD="$tmp_dir/d2o_tls_response_dns_rotation_resolver.so" \
+    cargo test -p r2o-controller --locked --test response \
+    d2o_tls_response_dns_rotation_matches_c_probe -- --ignored --nocapture
+diff -u "$tmp_dir/tls-response-dns-c.out" "$tmp_dir/tls-response-dns-rust.out"
+printf 'C/Rust TLS response probe matches while DNS answers rotate between attempts.\n'
+
 cargo test -p r2o-controller --locked --test response d2o_shared_tls_response_vectors_match
 cargo test -p r2o-controller --locked --lib \
     nft_rst_rule_uses_r2o_table_and_exact_tuple_with_donor_timeout
