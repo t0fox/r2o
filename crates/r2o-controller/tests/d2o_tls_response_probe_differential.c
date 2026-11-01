@@ -110,14 +110,33 @@ static void *serve(void *opaque)
         context->served++;
         target = contains(hello, (size_t)length, "youtube.com");
         attempt = target ? target_attempts++ : control_attempts++;
-        complete = should_complete(context->scenario, target, attempt);
-        if (complete < 0 ||
-            send_all(client,
-                     complete ? server_hello_done : fatal_alert,
-                     complete ? sizeof(server_hello_done) : sizeof(fatal_alert)) != 0) {
-            context->failed = 1;
-            close(client);
-            return NULL;
+        if (strcmp(context->scenario, "unmeasured") == 0) {
+            unsigned char oversized[65540];
+            memset(oversized, 0x41, sizeof(oversized));
+            oversized[0] = 0x16;
+            oversized[1] = 0x03;
+            oversized[2] = 0x03;
+            oversized[3] = 0xff;
+            oversized[4] = 0xff;
+            oversized[5] = 0x0b;
+            oversized[6] = 0xff;
+            oversized[7] = 0xff;
+            oversized[8] = 0xff;
+            if (send_all(client, oversized, sizeof(oversized)) != 0) {
+                context->failed = 1;
+                close(client);
+                return NULL;
+            }
+        } else {
+            complete = should_complete(context->scenario, target, attempt);
+            if (complete < 0 ||
+                send_all(client,
+                         complete ? server_hello_done : fatal_alert,
+                         complete ? sizeof(server_hello_done) : sizeof(fatal_alert)) != 0) {
+                context->failed = 1;
+                close(client);
+                return NULL;
+            }
         }
         close(client);
     }
@@ -172,6 +191,11 @@ static int run_case(const char *scenario, d2k_resp_verdict expected,
         fprintf(stderr, "TLS response fixture server failed for %s\n", scenario);
         return 2;
     }
+    if (strcmp(scenario, "unmeasured") == 0 &&
+        strstr(result.reason, "не поместился") == NULL) {
+        fprintf(stderr, "unmeasured TLS response did not hit the 64-KiB cap\n");
+        return 1;
+    }
     if (result.verdict != expected || result.target != expected_target ||
         result.control != expected_control) {
         fprintf(stderr, "%s expected %s %d/%d; got %s %d/%d\n",
@@ -192,5 +216,6 @@ int main(void)
     failed |= run_case("blocked", D2K_RESP_BLOCKED, 0, 3);
     failed |= run_case("flaky", D2K_RESP_FLAKY, 1, 3);
     failed |= run_case("not_applicable", D2K_RESP_NOT_APPLICABLE, 3, 0);
+    failed |= run_case("unmeasured", D2K_RESP_NOT_APPLICABLE, 0, 0);
     return failed;
 }

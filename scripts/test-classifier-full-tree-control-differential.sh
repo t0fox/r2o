@@ -112,3 +112,11 @@ if ! cmp -s "$TEMP/d2o.out" "$TEMP/r2o.out"; then
 fi
 cat "$TEMP/d2o.out"
 printf 'D2O %s full classifier baseline, control fallback, JSON, and progress branches match R2O.\n' "$ACTUAL_D2O_SHA"
+for response_case in response-blocked response-flaky response-not-applicable response-clear; do
+    timeout 20s "$TEMP/d2o-classifier" "$response_case" >> "$TEMP/tls-response-classify-d2o.out"
+done
+R2O_TLS_RESPONSE_CLASSIFY_OUTPUT="$TEMP/tls-response-classify-r2o.out" \
+    "$CARGO" test -p r2o-controller --locked --test response \
+    d2o_tls_response_classifier_clear_follow_up_matches_c
+diff -u "$TEMP/tls-response-classify-d2o.out" "$TEMP/tls-response-classify-r2o.out"
+printf 'C/Rust classifier CLEAR follow-up response verdicts match.\n'

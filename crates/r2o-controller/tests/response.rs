@@ -652,6 +652,7 @@ fn d2o_tls_response_full_probe_verdicts_match_c() {
         ("blocked", ResponseVerdict::Blocked, 0, 3),
         ("flaky", ResponseVerdict::Flaky, 1, 3),
         ("not_applicable", ResponseVerdict::NotApplicable, 3, 0),
+        ("unmeasured", ResponseVerdict::NotApplicable, 0, 0),
     ];
     let mut output = String::new();
 
@@ -694,17 +695,23 @@ fn d2o_tls_response_full_probe_verdicts_match_c() {
                     control_attempts += 1;
                     attempt
                 };
-                let completes = match scenario_for_server.as_str() {
-                    "clear" => true,
-                    "blocked" => !target,
-                    "flaky" => !target || attempt == 0,
-                    "not_applicable" => target,
-                    _ => panic!("unknown TLS response fixture"),
-                };
-                let bytes = if completes {
-                    record(22, &[2, 0, 0, 1, 0xaa, 14, 0, 0, 0])
+                let bytes = if scenario_for_server == "unmeasured" {
+                    let mut oversized = vec![0x41; 65_535];
+                    oversized[..4].copy_from_slice(&[0x0b, 0xff, 0xff, 0xff]);
+                    record(22, &oversized)
                 } else {
-                    record(21, &[2, 40])
+                    let completes = match scenario_for_server.as_str() {
+                        "clear" => true,
+                        "blocked" => !target,
+                        "flaky" => !target || attempt == 0,
+                        "not_applicable" => target,
+                        _ => panic!("unknown TLS response fixture"),
+                    };
+                    if completes {
+                        record(22, &[2, 0, 0, 1, 0xaa, 14, 0, 0, 0])
+                    } else {
+                        record(21, &[2, 40])
+                    }
                 };
                 stream
                     .write_all(&bytes)
@@ -725,6 +732,13 @@ fn d2o_tls_response_full_probe_verdicts_match_c() {
             },
         );
         server.join().expect("TLS response fixture server");
+        if scenario == "unmeasured" {
+            assert!(
+                result.reason.contains("не поместился"),
+                "reason={}",
+                result.reason
+            );
+        }
         assert_eq!(result.verdict, expected_verdict, "scenario={scenario}");
         assert_eq!(
             (result.target, result.control, result.probes),
@@ -746,5 +760,188 @@ fn d2o_tls_response_full_probe_verdicts_match_c() {
 
     if let Some(output_path) = std::env::var_os("R2O_TLS_RESPONSE_PROBE_OUTPUT") {
         std::fs::write(output_path, output).expect("write normalized TLS response results");
+    }
+}
+struct AcceptAllClassifierBackend {
+    probes: usize,
+}
+
+impl r2o_controller::classify::ProbeBackend for AcceptAllClassifierBackend {
+    fn probe(
+        &mut self,
+        _request: r2o_controller::classify::ProbeRequest<'_>,
+    ) -> Result<bool, r2o_controller::classify::ProbeError> {
+        self.probes += 1;
+        Ok(true)
+    }
+}
+
+#[test]
+fn d2o_tls_response_classifier_clear_follow_up_matches_c() {
+    use r2o_controller::classify::{Accept, ClassifyOptions, Trigger, Verdict, run_with_backend};
+
+    let cases = [
+        (
+            "response-blocked",
+            "blocked",
+            Verdict::Response,
+            ResponseVerdict::Blocked,
+            0,
+            3,
+            true,
+        ),
+        (
+            "response-flaky",
+            "flaky",
+            Verdict::Clear,
+            ResponseVerdict::Flaky,
+            1,
+            3,
+            true,
+        ),
+        (
+            "response-not-applicable",
+            "not-applicable",
+            Verdict::Clear,
+            ResponseVerdict::NotApplicable,
+            3,
+            0,
+            true,
+        ),
+        (
+            "response-clear",
+            "clear",
+            Verdict::Clear,
+            ResponseVerdict::Clear,
+            3,
+            3,
+            false,
+        ),
+    ];
+    let mut output = String::new();
+
+    for (
+        case,
+        scenario,
+        expected_overall,
+        expected_response,
+        expected_target,
+        expected_control,
+        expected_reason_visible,
+    ) in cases
+    {
+        let listener =
+            TcpListener::bind(("127.0.0.1", 0)).expect("loopback classifier response listener");
+        listener
+            .set_nonblocking(true)
+            .expect("set classifier listener nonblocking");
+        let port = listener.local_addr().unwrap().port();
+        let scenario = scenario.to_owned();
+        let server = thread::spawn(move || {
+            let mut target_attempts = 0;
+            let mut control_attempts = 0;
+
+            for _ in 0..6 {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(connection) => break connection,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline =>
+                        {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("accept classifier response probe: {error}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("set classifier ClientHello timeout");
+                let hello = read_client_hello(&mut stream);
+                let target = hello.windows(11).any(|window| window == b"youtube.com");
+                let attempt = if target {
+                    let attempt = target_attempts;
+                    target_attempts += 1;
+                    attempt
+                } else {
+                    let attempt = control_attempts;
+                    control_attempts += 1;
+                    attempt
+                };
+                let completes = match scenario.as_str() {
+                    "clear" => true,
+                    "blocked" => !target,
+                    "flaky" => !target || attempt == 0,
+                    "not-applicable" => target,
+                    _ => panic!("unknown TLS response classifier fixture"),
+                };
+                let bytes = if completes {
+                    record(22, &[2, 0, 0, 1, 0xaa, 14, 0, 0, 0])
+                } else {
+                    record(21, &[2, 40])
+                };
+                stream
+                    .write_all(&bytes)
+                    .expect("write classifier TLS response");
+            }
+            assert_eq!((target_attempts, control_attempts), (3, 3));
+        });
+
+        let mut backend = AcceptAllClassifierBackend { probes: 0 };
+        let result = run_with_backend(
+            &format!("127.0.0.1:{port}"),
+            &Trigger {
+                name: "tls:youtube.com".into(),
+                payload: b"fixture TLS trigger".to_vec(),
+                accept: Accept::ServerHello,
+            },
+            ClassifyOptions {
+                repeats: 3,
+                timeout: Duration::from_millis(500),
+                allow_loopback: true,
+                no_raw: true,
+                confirm_clear: false,
+                mark: Some(0),
+                ..ClassifyOptions::default()
+            },
+            &mut backend,
+        );
+        server.join().expect("classifier response fixture server");
+
+        let response = result
+            .response
+            .expect("TLS CLEAR follow-up response result");
+        let reason_visible = result.reason.contains(&response.reason);
+        assert_eq!(backend.probes, 3, "case={case}");
+        assert_eq!(result.probes, 9, "case={case}");
+        assert_eq!(result.verdict, expected_overall, "case={case}");
+        assert_eq!(response.verdict, expected_response, "case={case}");
+        assert_eq!(
+            (response.target, response.control, response.probes),
+            (expected_target, expected_control, 6),
+            "case={case}"
+        );
+        assert_eq!(reason_visible, expected_reason_visible, "case={case}");
+
+        let response_name = match response.verdict {
+            ResponseVerdict::NotApplicable => "not_applicable",
+            ResponseVerdict::Clear => "clear",
+            ResponseVerdict::Blocked => "blocked",
+            ResponseVerdict::Flaky => "flaky",
+        };
+        output.push_str(&format!(
+            "{}|{}|{}|{}|{}|{}\n",
+            result.verdict.as_str(),
+            result.probes,
+            response_name,
+            response.target,
+            response.control,
+            u8::from(reason_visible)
+        ));
+    }
+
+    if let Some(output_path) = std::env::var_os("R2O_TLS_RESPONSE_CLASSIFY_OUTPUT") {
+        std::fs::write(output_path, output).expect("write classifier response results");
     }
 }

@@ -14,6 +14,10 @@ static int close_after_connections = 6;
 static int force_connect_deadline;
 static int force_first_connect_error;
 static int respond_serverhello;
+static const char *response_probe_scenario;
+static int response_probe_case;
+static int response_target_attempts;
+static int response_control_attempts;
 static int connect_count;
 static int poll_timeout_count;
 static int poll_timeouts[16];
@@ -28,7 +32,31 @@ static struct {
     int fd;
     int active;
     int control;
+    int response_probe;
+    int response_target;
 } server_clients[32];
+
+static int contains_bytes(const void *buffer, size_t length, const char *needle)
+{
+    const unsigned char *bytes = buffer;
+    size_t needle_len = strlen(needle), i;
+
+    if (needle_len > length) return 0;
+    for (i = 0; i <= length - needle_len; i++) {
+        if (memcmp(bytes + i, needle, needle_len) == 0) return 1;
+    }
+    return 0;
+}
+
+static int response_completes(int target, int attempt)
+{
+    if (!response_probe_scenario) return 0;
+    if (strcmp(response_probe_scenario, "clear") == 0) return 1;
+    if (strcmp(response_probe_scenario, "blocked") == 0) return !target;
+    if (strcmp(response_probe_scenario, "flaky") == 0) return !target || attempt == 0;
+    if (strcmp(response_probe_scenario, "not-applicable") == 0) return target;
+    return 0;
+}
 
 static void print_progress_event(void *ctx, const d2k_obs *observation)
 {
@@ -66,7 +94,8 @@ static void run_serverhello_scenario(const scenario *scenario, d2k_result *resul
     options.control.accept = D2K_ACCEPT_ANY;
 
     trigger.client_tcp_known = scenario->no_ts;
-    snprintf(trigger.name, sizeof(trigger.name), "test");
+    snprintf(trigger.name, sizeof(trigger.name), "%s",
+             response_probe_case ? "tls:youtube.com" : "test");
     memcpy(trigger.payload, PAY, sizeof(PAY) - 1);
     trigger.len = sizeof(PAY) - 1;
     trigger.accept = D2K_ACCEPT_SERVERHELLO;
@@ -99,6 +128,8 @@ int __wrap_accept(int fd, struct sockaddr *address, socklen_t *length)
                 server_clients[i].fd = client;
                 server_clients[i].active = 1;
                 server_clients[i].control = 0;
+                server_clients[i].response_probe = 0;
+                server_clients[i].response_target = 0;
                 break;
             }
         }
@@ -143,28 +174,44 @@ int __wrap_poll(struct pollfd *fds, nfds_t count, int timeout)
 ssize_t __wrap_recv(int fd, void *buffer, size_t length, int flags)
 {
     ssize_t received = __real_recv(fd, buffer, length, flags);
-    if (received == (ssize_t)(sizeof(CTL) - 1) &&
-        memcmp(buffer, CTL, sizeof(CTL) - 1) == 0) {
-        int i;
-        for (i = 0; i < (int)(sizeof(server_clients) / sizeof(server_clients[0])); i++) {
-            if (server_clients[i].active && server_clients[i].fd == fd) {
-                server_clients[i].control = 1;
-                break;
+    int i;
+    for (i = 0; received > 0 &&
+                i < (int)(sizeof(server_clients) / sizeof(server_clients[0])); i++) {
+        if (server_clients[i].active && server_clients[i].fd == fd) {
+            if (received >= 2 && ((const uint8_t *)buffer)[0] == 0x16 &&
+                ((const uint8_t *)buffer)[1] == 0x03) {
+                server_clients[i].response_probe = 1;
+                server_clients[i].response_target =
+                    contains_bytes(buffer, (size_t)received, "youtube.com");
             }
+            if (received == (ssize_t)(sizeof(CTL) - 1) &&
+                memcmp(buffer, CTL, sizeof(CTL) - 1) == 0) {
+                server_clients[i].control = 1;
+            }
+            break;
         }
     }
     return received;
 }
-
 int __wrap_close(int fd)
 {
     static const uint8_t alert[] = {0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x28};
     static const uint8_t serverhello[] = {0x16, 0x03, 0x03, 0x00, 0x02, 0x02, 0x00};
+    static const uint8_t server_hello_done[] = {
+        0x16, 0x03, 0x03, 0x00, 0x04, 0x0e, 0x00, 0x00, 0x00
+    };
     int i;
     for (i = 0; i < (int)(sizeof(server_clients) / sizeof(server_clients[0])); i++) {
         if (server_clients[i].active && server_clients[i].fd == fd) {
             server_clients[i].active = 0;
-            if (!server_clients[i].control) {
+            if (server_clients[i].response_probe) {
+                int attempt = server_clients[i].response_target
+                    ? response_target_attempts++ : response_control_attempts++;
+                int complete = response_completes(server_clients[i].response_target, attempt);
+                const uint8_t *reply = complete ? server_hello_done : alert;
+                size_t reply_len = complete ? sizeof(server_hello_done) : sizeof(alert);
+                (void)send(fd, reply, reply_len, 0);
+            } else if (!server_clients[i].control) {
                 const uint8_t *reply = respond_serverhello ? serverhello : alert;
                 size_t reply_len = respond_serverhello ? sizeof(serverhello) : sizeof(alert);
                 (void)send(fd, reply, reply_len, 0);
@@ -174,7 +221,6 @@ int __wrap_close(int fd)
     }
     return __real_close(fd);
 }
-
 int main(int argc, char **argv)
 {
     d2k_opts options = {0};
@@ -221,6 +267,18 @@ int main(int argc, char **argv)
         respond_serverhello = 1;
         g_ack_pat = "e";
         capture_progress_events = strcmp(argv[1], "baseline-clear-progress") == 0;
+    } else if (strncmp(argv[1], "response-", 9) == 0) {
+        response_probe_case = 1;
+        response_probe_scenario = argv[1] + 9;
+        if (strcmp(response_probe_scenario, "clear") != 0 &&
+            strcmp(response_probe_scenario, "blocked") != 0 &&
+            strcmp(response_probe_scenario, "flaky") != 0 &&
+            strcmp(response_probe_scenario, "not-applicable") != 0) {
+            return 2;
+        }
+        close_after_connections = 0;
+        respond_serverhello = 1;
+        g_ack_pat = "e";
     } else if (strcmp(argv[1], "compose-json") == 0) {
         close_after_connections = 0;
     } else {
@@ -273,11 +331,47 @@ int main(int argc, char **argv)
     memcpy(options.control.name, "control", sizeof("control"));
     memcpy(options.control.payload, CTL, sizeof(CTL) - 1);
     options.control.len = sizeof(CTL) - 1;
+    if (response_probe_case) {
+        snprintf(trigger.name, sizeof(trigger.name), "tls:youtube.com");
+    }
     trigger.accept = D2K_ACCEPT_SERVERHELLO;
     memcpy(trigger.payload, PAY, sizeof(PAY) - 1);
     trigger.len = sizeof(PAY) - 1;
 
     d2k_classify_run(g_addr, &trigger, &options, &result);
+    if (response_probe_case) {
+        d2k_verdict_t expected_overall =
+            strcmp(response_probe_scenario, "blocked") == 0
+                ? D2K_DV_RESPONSE : D2K_DV_CLEAR;
+        d2k_resp_verdict expected_response =
+            strcmp(response_probe_scenario, "blocked") == 0 ? D2K_RESP_BLOCKED :
+            strcmp(response_probe_scenario, "flaky") == 0 ? D2K_RESP_FLAKY :
+            strcmp(response_probe_scenario, "not-applicable") == 0
+                ? D2K_RESP_NOT_APPLICABLE : D2K_RESP_CLEAR;
+        int expected_target =
+            strcmp(response_probe_scenario, "blocked") == 0 ? 0 :
+            strcmp(response_probe_scenario, "flaky") == 0 ? 1 : 3;
+        int expected_control =
+            strcmp(response_probe_scenario, "not-applicable") == 0 ? 0 : 3;
+        int expected_visible = strcmp(response_probe_scenario, "clear") != 0;
+        int visible = result.has_response &&
+            strstr(result.reason, result.response.reason) != NULL;
+
+        printf("%s|%d|%s|%d|%d|%d\n",
+               d2k_verdict_name(result.verdict), result.probes,
+               d2k_resp_name(result.response.verdict),
+               result.response.target, result.response.control, visible);
+        return result.verdict == expected_overall &&
+               result.probes == 9 &&
+               result.has_response &&
+               result.response.verdict == expected_response &&
+               result.response.target == expected_target &&
+               result.response.control == expected_control &&
+               visible == expected_visible &&
+               accepted_connections == 9 &&
+               response_target_attempts == 3 &&
+               response_control_attempts == 3 ? 0 : 1;
+    }
     if (strcmp(argv[1], "baseline-deadline") == 0) {
         int valid = poll_timeout_count == 6;
         int i;
