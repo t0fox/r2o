@@ -41,7 +41,7 @@
 <text x="580" y="300" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="17" font-weight="700">QUIC / HTTP3</text><text x="1056" y="300" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="13">7/9</text>
 <rect x="580" y="314" width="29" height="22" rx="5" fill="#36c989"><title>QUIC Initial/QSN, local-address gate и stop/fallback Discovery: Эквивалентно (3/3)</title></rect>
 <rect x="617" y="314" width="29" height="22" rx="5" fill="#36c989"><title>QUIC стратегия: residual/VN, адресный пул, neutral controls и fallback-кандидаты: Эквивалентно (3/3)</title></rect>
-<rect x="654" y="314" width="29" height="22" rx="5" fill="#36c989"><title>QUIC short-control требует полного HTTP/3-ответа: Доказанно эквивалентно (1/1)</title></rect>
+<rect x="654" y="314" width="29" height="22" rx="5" fill="#36c989"><title>QUIC short-control: полный ответ или проход живого box budget: Доказанно эквивалентно (1/1)</title></rect>
 <rect x="691" y="314" width="29" height="22" rx="5" fill="#e6b45d"><title>Остальные QUIC HTTP/3 data-stage ветви: повторный бюджет, рост ответа, stall и общий срок: Частично (0/2)</title></rect>
 <text x="1055" y="362" text-anchor="end" fill="#8298aa" font-family="Arial,sans-serif" font-size="12">4 contracts</text>
 <rect x="35" y="387" width="510" height="100" rx="12" fill="#152030" stroke="#2c3a4d"/>
