@@ -289,8 +289,16 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
+        with:
+          repository: t0fox/d2o
+          ref: a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe
+          path: d2o
+          persist-credentials: false
       - name: Установить средства проверки сетевых пакетов
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq iproute2 nftables python3
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential iproute2 nftables python3
+      - name: Собрать эталонный C datapath
+        run: make -B -C d2o/datapath d2kd
       - name: Собрать сетевой исполнитель
         run: cargo build --release --locked --package r2o-datapath --package r2o-controller
       - name: Собрать регрессию предела raw-пакета по MTU
@@ -303,6 +311,16 @@ jobs:
           R2OD_BIN="$GITHUB_WORKSPACE/target/release/r2o-datapath"
           R2OC_BIN="$GITHUB_WORKSPACE/target/release/r2o-controller"
           sh scripts/test-nfq-netns.sh
+      - name: Сверить восстановление NFQUEUE recv(EIO) для IPv4
+        run: >-
+          sudo env
+          R2O_TOOL_HOME="$GITHUB_WORKSPACE/target/nfq-eio-tooling"
+          R2O_DONOR_ROOT="$GITHUB_WORKSPACE/d2o"
+          D2OD_BIN="$GITHUB_WORKSPACE/d2o/datapath/d2kd"
+          R2OD_BIN="$GITHUB_WORKSPACE/target/release/r2o-datapath"
+          R2O_TEST_TMP="$GITHUB_WORKSPACE/target/nfq-eio-tooling/tmp"
+          R2O_TEST_LOG="$GITHUB_WORKSPACE/target/nfq-eio-tooling/nfq-ipv4-eio.log"
+          sh scripts/test-nfq-ipv4-recv-error-differential.sh
       - name: Проверить правила nftables без применения
         run: sudo sh scripts/test-router-firewall.sh
 
