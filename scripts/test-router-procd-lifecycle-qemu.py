@@ -206,13 +206,29 @@ def main() -> int:
             guest.command("prepare /opt fixtures", "mkdir -p /opt/etc/init.d /opt/r2o /opt/d2k")
             guest.command(
                 "install R2O service fixture",
-                "printf '%s\\n' '#!/bin/sh' 'echo R2O:$1 >> /tmp/r2o-procd-trace' "
-                "> /opt/etc/init.d/S99r2o; chmod 755 /opt/etc/init.d/S99r2o",
+                "cat > /opt/etc/init.d/S99r2o <<'SH'\n"
+                "#!/bin/sh\n"
+                "case \"${1:-}\" in\n"
+                "  start|supervise)\n"
+                "    [ -e /tmp/r2o-procd-r2o-alive ] && exit 0\n"
+                "    : > /tmp/r2o-procd-r2o-alive\n"
+                "    echo R2O:start >> /tmp/r2o-procd-trace\n"
+                "    ;;\n"
+                "  stop) rm -f /tmp/r2o-procd-r2o-alive; echo R2O:stop >> /tmp/r2o-procd-trace ;;\n"
+                "  *) exit 2 ;;\n"
+                "esac\n"
+                "SH\nchmod 755 /opt/etc/init.d/S99r2o",
             )
             guest.command(
                 "install D2O service fixture",
-                "printf '%s\\n' '#!/bin/sh' 'echo D2O:$1 >> /tmp/d2o-procd-trace' "
-                "> /opt/etc/init.d/S99d2k; chmod 755 /opt/etc/init.d/S99d2k",
+                "cat > /opt/etc/init.d/S99d2k <<'SH'\n"
+                "#!/bin/sh\n"
+                "case \"${1:-}\" in\n"
+                "  start) : > /tmp/r2o-procd-d2o-alive; echo D2O:start >> /tmp/d2o-procd-trace ;;\n"
+                "  stop) rm -f /tmp/r2o-procd-d2o-alive; echo D2O:stop >> /tmp/d2o-procd-trace ;;\n"
+                "  *) exit 2 ;;\n"
+                "esac\n"
+                "SH\nchmod 755 /opt/etc/init.d/S99d2k",
             )
             guest.command(
                 "install manager and config",
@@ -243,7 +259,44 @@ def main() -> int:
             if trace_lines(stopped) != expected:
                 raise AssertionError(f"expected one start/stop per side: {trace_lines(stopped)}")
 
-            print("D2O/R2O procd lifecycle matches: delayed /opt, canceled waiter, one start/stop, no repeat.")
+            guest.command(
+                "prepare recovery traces",
+                ": > /tmp/r2o-procd-trace; : > /tmp/d2o-procd-trace; "
+                "rm -f /tmp/r2o-procd-r2o-alive /tmp/r2o-procd-d2o-alive",
+            )
+            recovery_start = guest.command(
+                "start short R2O recovery monitor",
+                "R2O_RECOVERY_INTERVAL=1 /etc/rc.d/S99r2o start; /etc/rc.d/S99d2k start; sleep 2; "
+                "cat /tmp/r2o-procd-trace /tmp/d2o-procd-trace",
+            )
+            if trace_lines(recovery_start) != ["R2O:start", "D2O:start"]:
+                raise AssertionError(f"service recovery setup unexpectedly repeated starts: {trace_lines(recovery_start)}")
+
+            recovery = guest.command(
+                "recover an R2O engine crash without restarting D2O",
+                "rm -f /tmp/r2o-procd-r2o-alive /tmp/r2o-procd-d2o-alive; "
+                "i=0; while [ \"$i\" -lt 8 ] && [ ! -e /tmp/r2o-procd-r2o-alive ]; "
+                "do sleep 1; i=$((i + 1)); done; "
+                "test -e /tmp/r2o-procd-r2o-alive && echo R2O_AUTO_RECOVERED; "
+                "test ! -e /tmp/r2o-procd-d2o-alive && echo D2O_ONE_SHOT; "
+                "cat /tmp/r2o-procd-trace /tmp/d2o-procd-trace",
+                timeout=15,
+            )
+            if "R2O_AUTO_RECOVERED" not in recovery or "D2O_ONE_SHOT" not in recovery:
+                raise AssertionError(f"procd did not automatically recover only R2O: {recovery[-1200:]}")
+            if trace_lines(recovery) != ["R2O:start", "R2O:start", "D2O:start"]:
+                raise AssertionError(f"unexpected automatic recovery trace: {trace_lines(recovery)}")
+
+            recovery_stopped = guest.command(
+                "stop the recovery worker",
+                "/etc/init.d/r2o stop; /etc/init.d/d2k stop; sleep 1; "
+                "cat /tmp/r2o-procd-trace /tmp/d2o-procd-trace",
+            )
+            expected = ["R2O:start", "R2O:start", "R2O:stop", "D2O:start", "D2O:stop"]
+            if trace_lines(recovery_stopped) != expected:
+                raise AssertionError(f"stop must cancel recovery before stopping each engine: {trace_lines(recovery_stopped)}")
+
+            print("OpenWrt ARM64 procd recovers an R2O crash after /opt start and keeps D2O's one-shot lifecycle unchanged.")
             print(f"D2O={donor_revision}; R2O=" + subprocess.check_output(
                 ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip())
             print(f"serial log: {serial_log}")

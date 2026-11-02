@@ -9368,4 +9368,42 @@ Extended the existing real-procd QEMU differential with an explicit detach case.
 
 The minimal R2O change registers the detach action and calls procd_kill r2o, matching D2O. GREEN: both waiters start on cold boot, detach cancels both, both can be started again, stop cancels both before /opt appears, and delayed /opt fixtures receive exactly one start and stop apiece. The final QEMU run passed and printed: D2O/R2O procd lifecycle matches: delayed /opt, canceled waiter, one start/stop, no repeat.
 
-The host-side router init bridge test also passed. QEMU serial log: E:/r2o-tooling/tests/r2o-procd-differential-2026-11-02.log; QEMU process log: E:/r2o-tooling/tests/r2o-procd-differential-2026-11-02-qemu.log. The guest test uses current R2O main plus the local detach change. This proves explicit waiter cancellation only; crash recovery, discovery/classification, exact APPLIED proof, and the complete automatic chain remain open. The matrix lifecycle contract remains partial at 0/3; weighted parity remains 62/87 (71.26%).\n
+The host-side router init bridge test also passed. QEMU serial log: E:/r2o-tooling/tests/r2o-procd-differential-2026-11-02.log; QEMU process log: E:/r2o-tooling/tests/r2o-procd-differential-2026-11-02-qemu.log. The guest test uses current R2O main plus the local detach change. This proves explicit waiter cancellation only; crash recovery, discovery/classification, exact APPLIED proof, and the complete automatic chain remain open. The matrix lifecycle contract remains partial at 0/3; weighted parity remains 62/87 (71.26%).
+
+### OpenWrt ARM64 procd crash recovery — 2026-11-02
+
+RED: the new init-worker assertions failed because the procd instance had no
+respawn/recovery loop, and engine-stop did not suppress a later recovery
+attempt. GREEN: scripts/test-router-openwrt-init.sh and
+scripts/test-router-process-supervisor.sh pass in Debian 13 WSL2. They verify
+respawn and bounded interval environment, delayed /opt, the initial start and
+supervise loop, retry while enabled, suppression after an explicit stop, and
+re-enable on explicit engine start.
+
+scripts/test-router-procd-lifecycle-qemu.py passed in OpenWrt 25.12.5 ARM64
+QEMU TCG with 128 MiB guest RAM and clean D2O a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe.
+After the R2O fixture's alive marker was removed, the production
+router/openwrt-init worker invoked supervise, restored the R2O fixture, and
+left the D2O one-shot fixture stopped. The recovery interval was 1 second for
+this bounded test. R2O source was 6cb20d3 plus the local recovery change.
+Serial log:
+E:/r2o-tooling/tests/procd-autorecovery-green-2026-11-02/r2o-procd-differential-2026-11-02.log;
+QEMU log is the adjacent -qemu.log.
+
+The existing production-release
+scripts/test-controller-process-reapply-qemu.py smoke also passed on OpenWrt
+25.12.5 ARM64 at 128 MiB, both first boot and reboot, with 2 catalog commands
+applied and 0 skipped each time. After controller SIGKILL that script explicitly
+calls engine-start; this validates process restart and persisted catalog
+reapply, not automatic procd recovery. It also verifies datapath shutdown stats.
+The firewall is a no-network test stub. Logs:
+E:/r2o-tooling/tests/autorecovery-impact-2026-11-02/r2o-process-reapply-20261102T052342Z/first-serial.log
+and reboot-serial.log.
+
+Automatic service recovery is an R2O extension; clean D2O's boot wrapper remains
+one-shot. The QEMU procd test uses an R2O service fixture, not release daemons;
+actual release-daemon recovery through procd and the full
+detect/classify/Discovery/candidate/verify/ACK/APPLIED/persist/reapply chain are
+still open. No parity score is added: the lifecycle contract remains partial
+at 0/3, and weighted total stays 62/87 (71.26%). The only QEMU architecture used
+was ARM64 with OpenWrt 25.12.5; no physical router was tested.

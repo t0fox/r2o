@@ -14,6 +14,7 @@ RUN=$ROOT/run
 STATE=${STATE_DIR:-$ROOT/state}
 LOG=$ROOT/log
 RUNTIME=${R2O_RUNTIME_DIR:-/tmp/r2o}
+SUPERVISOR_DISABLED=$RUNTIME/supervisor-disabled
 R2O_META_RANGES=${R2O_META_RANGES:-$SCRIPT_DIR/files/meta-ranges.txt}
 R2O_INSTAGRAM_SCHED_ATTEMPT=${R2O_INSTAGRAM_SCHED_ATTEMPT:-$RUNTIME/r2o-instagram-dns-last-attempt}
 SOCK4=$RUN/r2o-datapath4.sock
@@ -216,6 +217,7 @@ ONLY_MARK=$(r2o_normalize_only_mark "$ONLY_MARK") || die "неверный ONLY_
 prepare_dirs() {
     [ ! -L "$RUN" ] || die "каталог run не должен быть ссылкой"
     [ ! -L "$STATE" ] || die "каталог state не должен быть ссылкой"
+    [ ! -L "$RUNTIME" ] || die "каталог runtime не должен быть ссылкой"
     mkdir -p "$RUN" "$STATE" "$LOG" "$RUNTIME" || die "не создать рабочие каталоги"
     chmod 0700 "$RUN" "$RUNTIME" 2>/dev/null || die "не закрыть права рабочих каталогов"
     if [ ! -e "$CATALOG" ]; then
@@ -223,6 +225,23 @@ prepare_dirs() {
     fi
     # shellcheck disable=SC2015 # fail unless the catalog is a regular file
     [ ! -L "$CATALOG" ] && [ -f "$CATALOG" ] || die "catalog должен быть обычным файлом"
+}
+
+disable_supervisor() {
+    [ ! -L "$RUNTIME" ] || return 1
+    mkdir -p "$RUNTIME" && chmod 0700 "$RUNTIME" || return 1
+    [ ! -L "$SUPERVISOR_DISABLED" ] || return 1
+    (umask 077; : > "$SUPERVISOR_DISABLED")
+}
+
+enable_supervisor() {
+    [ ! -L "$RUNTIME" ] && [ ! -L "$SUPERVISOR_DISABLED" ] || return 1
+    rm -f "$SUPERVISOR_DISABLED"
+}
+
+supervise() {
+    [ ! -e "$SUPERVISOR_DISABLED" ] || return 0
+    start
 }
 
 process_path() {
@@ -388,6 +407,7 @@ flowoffload_hook_remove() {
 engine_start() {
     [ "$MODE" != off ] || { say "MODE=off — datapath не запускается"; return 1; }
     prepare_dirs
+    enable_supervisor || die "не снять ручную блокировку супервизора"
     [ -x "$FIREWALL" ] || die "нет firewall adapter $FIREWALL"
     [ -x "$MANAGER" ] || die "нет release manager $MANAGER"
     log_maintenance_start || say "ротация журналов не запустилась"
@@ -916,6 +936,7 @@ start() {
 }
 
 stop() {
+    disable_supervisor || say "не удалось отключить автоматическое восстановление"
     meta_dns_scheduler_stop || say "не удалось остановить планировщик Meta DNS"
     update_scheduler_stop || say "не удалось остановить планировщик обновлений"
     telegram_stop || say "не удалось безопасно остановить Telegram"
@@ -1039,17 +1060,18 @@ status() {
 }
 
 case "${1:-}" in
-    "") echo "usage: $0 {start|stop|restart|status|engine-start|engine-stop|engine-restart|settings-restart|reapply|heal|firewall-heal|flowoffload-ensure|flowoffload-restore|ppe-ensure|ppe-remove|ppe-status|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-check|telegram-reapply|meta-dns-refresh|meta-dns-remove|tg-heal|tg-stop-rules|update-check|update-install|update-install-auto|update-auto-on|update-auto-off|log-tick}" >&2; exit 2 ;;
+    "") echo "usage: $0 {start|stop|restart|supervise|status|engine-start|engine-stop|engine-restart|settings-restart|reapply|heal|firewall-heal|flowoffload-ensure|flowoffload-restore|ppe-ensure|ppe-remove|ppe-status|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-check|telegram-reapply|meta-dns-refresh|meta-dns-remove|tg-heal|tg-stop-rules|update-check|update-install|update-install-auto|update-auto-on|update-auto-off|log-tick}" >&2; exit 2 ;;
     start) start ;;
     stop) stop ;;
     restart) stop && start ;;
+    supervise) supervise ;;
     status)
         shift
         [ "$#" -le 1 ] || die "использование: $0 status [IPv4-address]"
         status "${1:-}"
         ;;
     engine-start) engine_start ;;
-    engine-stop) engine_stop ;;
+    engine-stop) disable_supervisor || die "не отключить автоматическое восстановление"; engine_stop ;;
     engine-restart) engine_stop && engine_start ;;
     settings-restart) settings_restart ;;
     reapply)
@@ -1087,5 +1109,5 @@ case "${1:-}" in
     heal) heal ;;
     tg-heal) telegram_reapply ;;
     tg-stop-rules) "$TG_FIREWALL" stop ;;
-    *) echo "usage: $0 {start|stop|restart|status|engine-start|engine-stop|engine-restart|settings-restart|reapply|heal|firewall-heal|flowoffload-ensure|flowoffload-restore|ppe-ensure|ppe-remove|ppe-status|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-check|telegram-reapply|meta-dns-refresh|meta-dns-remove|tg-heal|tg-stop-rules|update-check|update-install|update-install-auto|update-auto-on|update-auto-off|log-tick}" >&2; exit 2 ;;
+    *) echo "usage: $0 {start|stop|restart|supervise|status|engine-start|engine-stop|engine-restart|settings-restart|reapply|heal|firewall-heal|flowoffload-ensure|flowoffload-restore|ppe-ensure|ppe-remove|ppe-status|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-check|telegram-reapply|meta-dns-refresh|meta-dns-remove|tg-heal|tg-stop-rules|update-check|update-install|update-install-auto|update-auto-on|update-auto-off|log-tick}" >&2; exit 2 ;;
 esac
