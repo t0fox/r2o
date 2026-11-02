@@ -2374,7 +2374,7 @@ mod app {
             plan_path: PathBuf::from("/etc/r2o/plans/current.r2op"),
             queue: None,
             protocol_family: libc::AF_INET as u16,
-            mode: RuntimeMode::Apply,
+            mode: RuntimeMode::Observe, // D2O keeps traffic unchanged unless apply is requested.
             mark: 0,
             interface: None,
             probe_mark: 0,
@@ -2562,7 +2562,7 @@ mod app {
   --r2o-flow-capacity N число слотов TCP/UDP (по умолчанию 2048)
   --stats SEC        период печати сводки (по умолчанию 10; 0 — отключить периодическую сводку)
   --family ipv4|ipv6 протокол очереди (по умолчанию ipv4)
-  --mode observe|apply пропускать пакеты или исполнять планы (по умолчанию apply)
+  --mode observe|apply пропускать пакеты или исполнять планы (по умолчанию observe)
   --mark N           ненулевая метка для raw-send и защиты от повторной обработки
   --iface NAME       интерфейс, чей MTU ограничивает длину посылки
   --probe-mark N     метка зондов контроллера, исключаемая из route-gate
@@ -4859,7 +4859,7 @@ mod app {
         }
 
         #[test]
-        fn controller_only_mode_requires_control_and_keeps_the_legacy_plan_mode() {
+        fn controller_only_mode_requires_control_and_defaults_to_observe() {
             let args = [
                 "--controller-only",
                 "--control",
@@ -4876,7 +4876,7 @@ mod app {
             let options = parse_options(&args).unwrap();
             assert!(options.controller_only);
             assert!(options.reverse_queue_visible);
-            assert_eq!(options.mode, RuntimeMode::Apply);
+            assert_eq!(options.mode, RuntimeMode::Observe);
             assert_eq!(options.interface.as_deref(), Some("eth0"));
             assert_eq!(
                 options.control_path.as_deref(),
@@ -4887,10 +4887,28 @@ mod app {
 
             let old_options = parse_options(&["--queue".into(), "2000".into()]).unwrap();
             assert!(!old_options.controller_only);
+            assert_eq!(old_options.mode, RuntimeMode::Observe);
             assert_eq!(
                 old_options.plan_path,
                 std::path::Path::new("/etc/r2o/plans/current.r2op")
             );
+
+            let apply_options = parse_options(
+                &[
+                    "--controller-only",
+                    "--control",
+                    "/tmp/r2o-datapath.sock",
+                    "--queue",
+                    "2000",
+                    "--mark",
+                    "45",
+                    "--mode",
+                    "apply",
+                ]
+                .map(str::to_owned),
+            )
+            .unwrap();
+            assert_eq!(apply_options.mode, RuntimeMode::Apply);
         }
 
         #[test]

@@ -50,7 +50,7 @@ ip netns exec "$NS" nft 'add chain inet r2o input { type filter hook input prior
 ip netns exec "$NS" nft add rule inet r2o output udp dport 443 meta mark != "$MARK" queue num "$QUEUE" bypass
 ip netns exec "$NS" nft add rule inet r2o input udp sport 443 queue num "$QUEUE" bypass
 
-ip netns exec "$NS" "$R2OD_BIN" --queue "$QUEUE" --family ipv4 --controller-only \
+ip netns exec "$NS" "$R2OD_BIN" --mode apply --queue "$QUEUE" --family ipv4 --controller-only \
     --mark "$MARK" --control "$WORK/r2o-datapath.sock" --r2o-udp-reverse-visible \
     >"$WORK/r2o-datapath.log" 2>&1 &
 R2OD_PID=$!

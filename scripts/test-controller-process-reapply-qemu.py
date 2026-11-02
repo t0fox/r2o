@@ -40,7 +40,7 @@ if command -v nft >/dev/null 2>&1; then
     nft add chain inet r2o_reapply output '{ type filter hook output priority 0; policy accept; }'
     nft add rule inet r2o_reapply output ip daddr 127.0.0.1 tcp dport 65000 queue num "$QUEUE" bypass
 fi
-"$DP" --queue "$QUEUE" --family ipv4 --controller-only --control "$SOCK" --mark 291 --stats 0 >/etc/r2o-test/r2o-datapath.log 2>&1 &
+"$DP" --mode apply --queue "$QUEUE" --family ipv4 --controller-only --control "$SOCK" --mark 291 --stats 0 >/etc/r2o-test/r2o-datapath.log 2>&1 &
 DPID=$!
 i=0
 while [ ! -S "$SOCK" ]; do

@@ -207,7 +207,7 @@ ip netns exec "$NS" nft add chain inet r2o quic_control '{ type filter hook outp
 ip netns exec "$NS" nft add rule inet r2o quic_control ip daddr 127.0.0.1 udp dport 443 queue num "$TCP_CONTROL_QUEUE" bypass
 
 ip netns exec "$NS" "$R2OD_BIN" \
-    --queue "$QUEUE" --family ipv4 --plan "$WORK/quicsplit.r2op" \
+    --mode apply --queue "$QUEUE" --family ipv4 --plan "$WORK/quicsplit.r2op" \
     >"$WORK/r2o-datapath.log" 2>&1 &
 R2OD_PID=$!
 sleep 0.2
@@ -217,7 +217,7 @@ if ! kill -0 "$R2OD_PID" 2>/dev/null; then
 fi
 
 ip netns exec "$NS" "$R2OD_BIN" \
-    --queue 65528 --family ipv4 --plan "$WORK/udplen.r2op" \
+    --mode apply --queue 65528 --family ipv4 --plan "$WORK/udplen.r2op" \
     >"$WORK/r2o-datapath-udplen.log" 2>&1 &
 R2OD_UDPLEN_PID=$!
 sleep 0.2
@@ -227,7 +227,7 @@ if ! kill -0 "$R2OD_UDPLEN_PID" 2>/dev/null; then
 fi
 
 ip netns exec "$NS" "$R2OD_BIN" \
-    --queue "$TCP_QUEUE" --family ipv4 --plan "$WORK/tcp-split.r2op" --mark "$TCP_MARK" \
+    --mode apply --queue "$TCP_QUEUE" --family ipv4 --plan "$WORK/tcp-split.r2op" --mark "$TCP_MARK" \
     >"$WORK/r2o-datapath-tcp.log" 2>&1 &
 R2OD_TCP_PID=$!
 sleep 0.2
@@ -237,7 +237,7 @@ if ! kill -0 "$R2OD_TCP_PID" 2>/dev/null; then
 fi
 
 ip netns exec "$NS" "$R2OD_BIN" \
-    --queue "$TCP6_QUEUE" --family ipv6 --plan "$WORK/tcp-split.r2op" --mark "$TCP6_MARK" \
+    --mode apply --queue "$TCP6_QUEUE" --family ipv6 --plan "$WORK/tcp-split.r2op" --mark "$TCP6_MARK" \
     >"$WORK/r2o-datapath-tcp6.log" 2>&1 &
 R2OD_TCP6_PID=$!
 sleep 0.2
@@ -247,7 +247,7 @@ if ! kill -0 "$R2OD_TCP6_PID" 2>/dev/null; then
 fi
 
 ip netns exec "$NS" "$R2OD_BIN" \
-    --queue "$TCP_DELAY_QUEUE" --family ipv4 --plan "$WORK/tcp-delay.r2op" --mark "$TCP_DELAY_MARK" \
+    --mode apply --queue "$TCP_DELAY_QUEUE" --family ipv4 --plan "$WORK/tcp-delay.r2op" --mark "$TCP_DELAY_MARK" \
     >"$WORK/r2o-datapath-tcp-delay.log" 2>&1 &
 R2OD_TCP_DELAY_PID=$!
 sleep 0.2
@@ -257,7 +257,7 @@ if ! kill -0 "$R2OD_TCP_DELAY_PID" 2>/dev/null; then
 fi
 
 ip netns exec "$NS" "$R2OD_BIN" \
-    --queue "$TCP_CONTROL_QUEUE" --family ipv4 --controller-only \
+    --mode apply --queue "$TCP_CONTROL_QUEUE" --family ipv4 --controller-only \
     --mark "$TCP_CONTROL_MARK" --control "$WORK/r2o-datapath-control.sock" \
     >"$WORK/r2o-datapath-control.log" 2>&1 &
 R2OD_CONTROL_PID=$!
@@ -267,7 +267,7 @@ if ! kill -0 "$R2OD_CONTROL_PID" 2>/dev/null; then
     exit 1
 fi
 ip netns exec "$NS" "$R2OD_BIN" \
-    --queue "$VOICE_QUEUE" --family ipv4 --controller-only \
+    --mode apply --queue "$VOICE_QUEUE" --family ipv4 --controller-only \
     --mark "$VOICE_MARK" --control "$WORK/r2o-datapath-voice.sock" \
     --r2o-udp-reverse-visible \
     >"$WORK/r2o-datapath-voice.log" 2>&1 &
@@ -278,7 +278,7 @@ if ! kill -0 "$R2OD_VOICE_PID" 2>/dev/null; then
     exit 1
 fi
 ip netns exec "$NS" "$R2OD_BIN" \
-    --queue "$OBSERVE_QUEUE" --family ipv4 --mode observe --control "$WORK/r2o-datapath-observe.sock" \
+    --queue "$OBSERVE_QUEUE" --family ipv4 --control "$WORK/r2o-datapath-observe.sock" \
     >"$WORK/r2o-datapath-observe.log" 2>&1 &
 R2OD_OBSERVE_PID=$!
 sleep 0.2
@@ -302,7 +302,7 @@ done
 ip netns exec "$NS" "$R2OC_BIN" --set-name "$WORK/r2o-datapath-voice.sock" \
     @discord-voice ipv4 voice "$WORK/voice.r2op"
 ip netns exec "$NS" "$R2OD_BIN" \
-    --queue "$TCP_HOLD_QUEUE" --family ipv4 --plan "$WORK/tcp-hold.r2op" --mark "$TCP_HOLD_MARK" \
+    --mode apply --queue "$TCP_HOLD_QUEUE" --family ipv4 --plan "$WORK/tcp-hold.r2op" --mark "$TCP_HOLD_MARK" \
     >"$WORK/r2o-datapath-hold.log" 2>&1 &
 R2OD_HOLD_PID=$!
 sleep 0.2
@@ -391,7 +391,7 @@ catalog_sha_before_restart=$(sha256sum "$WORK/catalog.json" | cut -d' ' -f1)
 kill -TERM "$R2OD_CONTROL_PID"
 wait "$R2OD_CONTROL_PID" 2>/dev/null || true
 ip netns exec "$NS" "$R2OD_BIN" \
-    --queue "$TCP_CONTROL_QUEUE" --family ipv4 --controller-only \
+    --mode apply --queue "$TCP_CONTROL_QUEUE" --family ipv4 --controller-only \
     --mark "$TCP_CONTROL_MARK" --control "$WORK/r2o-datapath-control.sock" \
     >"$WORK/r2o-datapath-control-restarted.log" 2>&1 &
 R2OD_CONTROL_PID=$!
@@ -1443,7 +1443,7 @@ ip netns exec "$NS" nft 'add chain inet r2o ipv6_fragments { type filter hook pr
 ip netns exec "$NS" nft 'add rule inet r2o ipv6_fragments ip6 nexthdr ipv6-frag counter queue num 65529'
 ip netns exec "$NS" ip -6 route get 2001:db8:100::2 mark 0x123 | grep -F "dev $R2O_VETH_CLIENT" | grep -Fq 'table 100'
 ip netns exec "$NS" "$R2OD_BIN" \
-    --queue 65529 --family ipv6 --plan "$WORK/quicdeny.r2op" \
+    --mode apply --queue 65529 --family ipv6 --plan "$WORK/quicdeny.r2op" \
     >"$WORK/r2o-datapath-ipv6.log" 2>&1 &
 R2OD_IPV6_PID=$!
 sleep 0.2
@@ -1546,7 +1546,7 @@ ip netns exec "$NS" nft add rule inet r2o ipv6_nat_fragments meta mark 119 ip6 s
 ip netns exec "$NS" nft add rule inet r2o output meta mark != 119 ip6 daddr 2001:db8:100::2 udp dport 4453 counter queue num "$IPV6_NAT_QUEUE"
 ip netns exec "$NS" "$R2OD_BIN" --check --plan "$WORK/quic-ipfrag.r2op" >/dev/null
 ip netns exec "$NS" "$R2OD_BIN" \
-    --queue "$IPV6_NAT_QUEUE" --family ipv6 --plan "$WORK/quic-ipfrag.r2op" \
+    --mode apply --queue "$IPV6_NAT_QUEUE" --family ipv6 --plan "$WORK/quic-ipfrag.r2op" \
     --mark 119 --queue-len 32 --stats 0 \
     >"$WORK/r2o-datapath-ipv6-nat.log" 2>&1 &
 R2OD_IPV6_NAT_PID=$!
@@ -1738,13 +1738,13 @@ run_nfqueue_overflow_case() {
     overflow_log="$WORK/r2o-datapath-overflow-$overflow_queue.log"
     if [ "$no_fail_open" -eq 1 ]; then
         ip netns exec "$NS" "$R2OD_BIN" \
-            --queue "$overflow_queue" --family "$overflow_family" --plan "$WORK/tcp-empty.r2op" --plan "$WORK/tcp-empty.r2op" \
+            --mode apply --queue "$overflow_queue" --family "$overflow_family" --plan "$WORK/tcp-empty.r2op" --plan "$WORK/tcp-empty.r2op" \
             --mark 119 --queue-len 1 --stats 0 --no-fail-open \
             >"$overflow_log" 2>&1 &
         fail_open_setting=выключен
     else
         ip netns exec "$NS" "$R2OD_BIN" \
-            --queue "$overflow_queue" --family "$overflow_family" --plan "$WORK/tcp-empty.r2op" --plan "$WORK/tcp-empty.r2op" \
+            --mode apply --queue "$overflow_queue" --family "$overflow_family" --plan "$WORK/tcp-empty.r2op" --plan "$WORK/tcp-empty.r2op" \
             --mark 119 --queue-len 1 --stats 0 \
             >"$overflow_log" 2>&1 &
         fail_open_setting=включён

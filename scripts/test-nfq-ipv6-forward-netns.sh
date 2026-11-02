@@ -291,7 +291,7 @@ ip netns exec "$GATEWAY_NS" nft add rule inet r2o forward \
     meta mark != "$DATAPATH_MARK" counter queue num "$QUEUE"
 
 ip netns exec "$GATEWAY_NS" "$R2OD_BIN" \
-    --queue "$QUEUE" --family ipv6 --plan "$WORK/tcp-only.r2op" \
+    --mode apply --queue "$QUEUE" --family ipv6 --plan "$WORK/tcp-only.r2op" \
     --mark "$DATAPATH_MARK" --queue-len 32 --stats 0 \
     >"$WORK/r2o-datapath.log" 2>&1 &
 R2OD_PID=$!

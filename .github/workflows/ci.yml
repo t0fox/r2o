@@ -466,6 +466,11 @@ jobs:
           R2O_DONOR_ROOT: ${{ github.workspace }}/d2o
           TMPDIR: ${{ runner.temp }}
         run: sh scripts/test-tcp-silence-current-differential.sh
+      - name: Сверить безопасный режим datapath по умолчанию с текущим D2O main
+        env:
+          R2O_DONOR_ROOT: ${{ github.workspace }}/d2o
+          TMPDIR: ${{ runner.temp }}
+        run: sh scripts/test-datapath-default-mode-differential.sh
 
   donor-differential:
     name: C/Rust differential — ${{ matrix.snapshot }} / ${{ matrix.shard }}
