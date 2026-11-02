@@ -59,31 +59,43 @@ STATE_DIR=/mnt/r2o-persist/r2o-process-reapply
 
 GUEST_SCRIPT = r"""#!/bin/sh
 set -eu
-ROOT=/etc/r2o-test
+HARNESS=/etc/r2o-test
+ROOT=/opt/r2o
 CTRL=$ROOT/releases/qemu/builds/r2o-controller-linux-aarch64
-SERVICE=$ROOT/S99r2o
+SERVICE=/opt/etc/init.d/S99r2o
+OPENWRT_INIT=/etc/init.d/r2o
 CAT=/mnt/r2o-persist/r2o-process-reapply/catalog.json
 PHASE=$1
 mkdir -p /mnt/r2o-persist /mnt/r2o-persist/r2o-process-reapply
+mkdir -p /tmp/r2o-test
 mount -t ext4 /dev/vda /mnt/r2o-persist
 mkdir -p /mnt/r2o-persist/r2o-process-reapply
-if [ "$PHASE" = first ] && [ ! -s "$CAT" ]; then cp "$ROOT/catalog.json" "$CAT"; fi
+if [ "$PHASE" = first ] && [ ! -s "$CAT" ]; then cp "$HARNESS/catalog.json" "$CAT"; fi
+mkdir -p "$ROOT/releases/qemu/builds" /opt/etc/init.d
+cp "$HARNESS/S99r2o" /opt/etc/init.d/S99r2o
+cp "$HARNESS/r2o-manager" "$ROOT/r2o-manager"
+cp "$HARNESS/r2o-firewall.sh" /opt/etc/init.d/r2o-firewall.sh
+cp "$HARNESS/config" "$ROOT/config"
+cp "$HARNESS/releases/qemu/builds/r2o-controller-linux-aarch64" "$ROOT/releases/qemu/builds/r2o-controller-linux-aarch64"
+cp "$HARNESS/releases/qemu/builds/r2o-datapath-linux-aarch64" "$ROOT/releases/qemu/builds/r2o-datapath-linux-aarch64"
+cp "$HARNESS/catalog.json" "$ROOT/catalog.json"
 cmp "$ROOT/catalog.json" "$CAT"
 "$CTRL" --check-catalog "$CAT"
 if command -v apk >/dev/null 2>&1; then
-    if ! apk add --allow-untrusted --force-non-repository --no-network "$ROOT/kmod-nfnetlink-queue.apk" "$ROOT/kmod-nft-queue.apk" >/tmp/r2o-apk.log 2>&1; then cat /tmp/r2o-apk.log >&2; exit 1; fi
+    if ! apk add --allow-untrusted --force-non-repository --no-network "$HARNESS/kmod-nfnetlink-queue.apk" "$HARNESS/kmod-nft-queue.apk" >/tmp/r2o-apk.log 2>&1; then cat /tmp/r2o-apk.log >&2; exit 1; fi
 fi
 if command -v modprobe >/dev/null 2>&1; then
     modprobe nfnetlink_queue
     modprobe nft_queue
 fi
 export R2O_DIR="$ROOT" R2O_CONFIG="$ROOT/config" R2O_INIT="$SERVICE" R2O_MANAGER="$ROOT/r2o-manager"
-export R2O_FIREWALL="$ROOT/r2o-firewall.sh" R2O_LOG_MAINTENANCE="$ROOT/missing-log-worker"
+export R2O_FIREWALL=/opt/etc/init.d/r2o-firewall.sh R2O_LOG_MAINTENANCE="$ROOT/missing-log-worker"
 export R2O_FIREWALL_WATCHDOG="$ROOT/missing-firewall-watchdog" R2O_PPE_ADAPTER="$ROOT/missing-ppe"
-export R2O_RUNTIME_DIR=/tmp/r2o-test/runtime
+export R2O_RUNTIME_DIR=/tmp/r2o
 wait_for_sync() {
     label=$1
     expected=$2
+    allow_restart=${3:-0}
     log=$ROOT/log/r2o-controller4.log
     i=0
     while [ "$i" -lt 45 ]; do
@@ -91,7 +103,9 @@ wait_for_sync() {
         [ -n "$count" ] || count=0
         if [ "$count" -ge "$expected" ]; then break; fi
         pid=$(cat "$ROOT/run/r2o-controller4.pid" 2>/dev/null || true)
-        if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then cat "$ROOT/engine-$label.log" >&2; cat "$log" >&2; exit 1; fi
+        if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+            if [ "$allow_restart" != 1 ]; then cat "$ROOT/engine-$label.log" >&2; cat "$log" >&2; exit 1; fi
+        fi
         sleep 1
         i=$((i + 1))
     done
@@ -125,13 +139,39 @@ if [ "$PHASE" = first ]; then
     NEW_CPID=$(cat "$ROOT/run/r2o-controller4.pid")
     [ "$NEW_DPID" != "$DPID" ] || { echo "crash recovery did not restart datapath" >&2; exit 1; }
     [ "$NEW_CPID" != "$CPID" ] || { echo "crash recovery did not restart controller" >&2; exit 1; }
+
+    : > "$ROOT/engine-procd-start.log"
+    if ! R2O_RECOVERY_INTERVAL=1 "$OPENWRT_INIT" start >"$ROOT/engine-procd-start.log" 2>&1; then
+        cat "$ROOT/engine-procd-start.log" >&2
+        exit 1
+    fi
+    i=0
+    while [ "$i" -lt 10 ] && ! ps w | grep -q '[r]2o boot_wait'; do
+        sleep 1
+        i=$((i + 1))
+    done
+    ps w | grep -q '[r]2o boot_wait' || { cat "$ROOT/engine-procd-start.log" >&2; exit 1; }
+    sleep 2
+    DPID=$(cat "$ROOT/run/r2o-datapath4.pid")
+    CPID=$(cat "$ROOT/run/r2o-controller4.pid")
+    kill -KILL "$DPID"
+    wait_for_sync after-procd-crash 3 1
+    NEW_DPID=$(cat "$ROOT/run/r2o-datapath4.pid")
+    NEW_CPID=$(cat "$ROOT/run/r2o-controller4.pid")
+    [ "$NEW_DPID" != "$DPID" ] || { echo "procd recovery did not restart datapath" >&2; exit 1; }
+    [ "$NEW_CPID" != "$CPID" ] || { echo "procd recovery did not restart controller" >&2; exit 1; }
+    echo R2O_PROCD_AUTO_RECOVERY_OK=1
 elif [ "$PHASE" = reboot ]; then
     start_engine after-reboot 1
 else
     echo "unknown phase: $PHASE" >&2
     exit 2
 fi
-"$SERVICE" engine-stop >"$ROOT/engine-stop.log" 2>&1 || { cat "$ROOT/engine-stop.log" >&2; exit 1; }
+if [ "$PHASE" = first ]; then
+    "$OPENWRT_INIT" stop >"$ROOT/engine-stop.log" 2>&1 || { cat "$ROOT/engine-stop.log" >&2; exit 1; }
+else
+    "$SERVICE" engine-stop >"$ROOT/engine-stop.log" 2>&1 || { cat "$ROOT/engine-stop.log" >&2; exit 1; }
+fi
 grep -Fq 'процессор ' "$ROOT/log/r2o-datapath4.log"
 grep -Fq ' RSS ' "$ROOT/log/r2o-datapath4.log"
 grep -Fq 'TCP-потоки' "$ROOT/log/r2o-datapath4.log"
@@ -257,6 +297,8 @@ def boot_once(
         output = guest.command(f"persistent catalog {phase}", f"sh /etc/r2o-test/process-reapply.sh {phase}; echo QEMU_PHASE_EXIT=$?")
         if ("QEMU_PHASE_EXIT=0" not in output or f"R2O_REAPPLY_OK={phase}" not in output or "R2O_STATS_SHUTDOWN_OK=1" not in output or f"R2O_SERVICE_RESTART_OK={phase}" not in output):
             raise AssertionError(f"process reapply phase {phase} failed; see {serial_log}")
+        if phase == "first" and "R2O_PROCD_AUTO_RECOVERY_OK=1" not in output:
+            raise AssertionError(f"production procd recovery did not pass; see {serial_log}")
         print(f"OpenWrt ARM64 QEMU {phase}: persistent catalog reapply passed.")
     finally:
         serial.close()
@@ -312,6 +354,7 @@ def main() -> int:
         ("etc/r2o-test/process-reapply.sh", GUEST_SCRIPT.encode(), stat.S_IFREG | 0o755),
         ("etc/r2o-test/kmod-nfnetlink-queue.apk", apk_queue.read_bytes(), stat.S_IFREG | 0o644),
         ("etc/r2o-test/kmod-nft-queue.apk", apk_nft_queue.read_bytes(), stat.S_IFREG | 0o644),
+        ("etc/init.d/r2o", (repo / "router" / "openwrt-init").read_bytes(), stat.S_IFREG | 0o755),
     ]
     archive = b"".join(cpio_entry(name, data, mode, index + 1) for index, (name, data, mode) in enumerate(entries))
     overlay.write_bytes(archive + cpio_entry("TRAILER!!!", b"", 0, len(entries) + 1))
