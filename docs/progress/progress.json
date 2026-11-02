@@ -382,7 +382,7 @@
           "statusLabel": "Частично; source-backed C/Rust lifecycle trace пройден на OpenWrt QEMU; production-процесс проверен на bounded voice Discovery, полный lifecycle остаётся открытым",
           "group": "Discord RTC",
           "mapping": "C on_suspect/voice_confirm → Rust voice worker/confirm_r2o_voice_trial",
-          "evidence": "C trace подтверждает: B отбрасывается при A=T_VOICE_MEASURE; после trial A endpoint B ставится в очередь, C заменяет B; поздний NAK не удаляет binding; адресная запись переживает scheduler restart. Отдельный C trace воспроизвёл generic fallback без discovery_verified: D2O сохраняет name=@discord-voice и повторно ставит SET_NAME после scheduler restart. RED `test-discord-voice-trial-clock-differential.sh` подтвердил несовпадение срока после 9-минутной очереди; Rust теперь начинает trial clock после выдачи слота, а queued gate waiter истекает строго после 10 минут, как D2O. GREEN сравнивает actu"
+          "evidence": "2026-11-02 current-main retest: `r2o-discord-voice-lifecycle-helper.sh` passed 1/1 against clean D2O main `a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe`; rebuilt C dependencies with Clang 18, production Rust lifecycle trace matched. WSL used tmpfs only for transient Unix sockets; source and build artifacts stayed on E. C trace подтверждает: B отбрасывается при A=T_VOICE_MEASURE; после trial A endpoint B ставится в очередь, C заменяет B; поздний NAK не удаляет binding; адресная запись переживает scheduler restart. Отдельный C trace воспроизвёл generic fallback без discovery_verified: D2O сохраняет "
         }
       ],
       "weight": 9,
@@ -911,7 +911,7 @@
       "statusLabel": "Частично; source-backed C/Rust lifecycle trace пройден на OpenWrt QEMU; production-процесс проверен на bounded voice Discovery, полный lifecycle остаётся открытым",
       "group": "Discord RTC",
       "mapping": "C on_suspect/voice_confirm → Rust voice worker/confirm_r2o_voice_trial",
-      "evidence": "C trace подтверждает: B отбрасывается при A=T_VOICE_MEASURE; после trial A endpoint B ставится в очередь, C заменяет B; поздний NAK не удаляет binding; адресная запись переживает scheduler restart. Отдельный C trace воспроизвёл generic fallback без discovery_verified: D2O сохраняет name=@discord-voice и повторно ставит SET_NAME после scheduler restart. RED `test-discord-voice-trial-clock-differential.sh` подтвердил несовпадение срока после 9-минутной очереди; Rust теперь начинает trial clock после выдачи слота, а queued gate waiter истекает строго после 10 минут, как D2O. GREEN сравнивает actu"
+      "evidence": "2026-11-02 current-main retest: `r2o-discord-voice-lifecycle-helper.sh` passed 1/1 against clean D2O main `a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe`; rebuilt C dependencies with Clang 18, production Rust lifecycle trace matched. WSL used tmpfs only for transient Unix sockets; source and build artifacts stayed on E. C trace подтверждает: B отбрасывается при A=T_VOICE_MEASURE; после trial A endpoint B ставится в очередь, C заменяет B; поздний NAK не удаляет binding; адресная запись переживает scheduler restart. Отдельный C trace воспроизвёл generic fallback без discovery_verified: D2O сохраняет "
     },
     {
       "id": 32,
