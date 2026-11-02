@@ -9407,3 +9407,13 @@ detect/classify/Discovery/candidate/verify/ACK/APPLIED/persist/reapply chain are
 still open. No parity score is added: the lifecycle contract remains partial
 at 0/3, and weighted total stays 62/87 (71.26%). The only QEMU architecture used
 was ARM64 with OpenWrt 25.12.5; no physical router was tested.
+
+### QUIC HTTP/3 graceful GOAWAY request count — 2026-11-02
+
+The new loopback differential runs the production D2O data-stage against R2O with the same server behavior: it completes the first HTTP 200 response, sends HTTP/3 GOAWAY that allows stream 0, then rejects a new request stream while leaving QUIC open. Clean D2O main a63d964 returned NotRun, app_bytes=41, requests=2, packets=27, need=50. Before the fix, R2O returned NotRun and the same 41 application bytes but requests=1 because its H3 client rejects send_request after GOAWAY before opening a QUIC stream.
+
+The production Rust path now counts a refused GET attempt when HTTP/3 rejects it while the QUIC connection remains open, matching D2O's stream-send counter; a closed QUIC connection does not add the count. Commit 306aa4a includes the differential regression.
+
+RED was the D2O/R2O request-count mismatch above. GREEN: the focused r2o_http3_goaway_repeated_request_matches_d2o test passed 1/1 after the fix. The Debian 13 WSL2 full-stage command, R2O_DONOR_ROOT=/mnt/e/r2o-tooling/d2o-current-main sh scripts/test-quic-http3-full-stage-differential.sh, passed 13/13 in 99.75 seconds. cargo +1.98.0 fmt --all -- --check and git diff --check passed. Source and build artifacts stayed on E:. No QEMU was needed for this loopback contract.
+
+This closes only the graceful-GOAWAY request-count branch. Other QUIC transport-error/stall variants and lifecycle remain open, so the QUIC matrix row remains partial and earns 0/2; the weighted total remains 62/87 (71.26%).
