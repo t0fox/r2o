@@ -1473,13 +1473,14 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
     roots.add(certificate_der.clone()).unwrap();
     let incomplete_rust_result = tokio::time::timeout(
         Duration::from_secs(8),
-        r2o_quic_http3_get(
+        r2o_controller::r2o_quic_http3::r2o_quic_http3_short_control_get_with_max_duration(
             socket,
             server_address,
             "localhost",
             "/incomplete-over-threshold",
             Duration::from_secs(1),
             roots,
+            Duration::from_secs(8),
         ),
     )
     .await

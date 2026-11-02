@@ -19202,7 +19202,7 @@ impl ControlClient {
                         )
                     {
                         let control_result = runtime.block_on(
-                            r2o_controller::r2o_quic_http3::r2o_quic_http3_get_with_max_duration(
+                            r2o_controller::r2o_quic_http3::r2o_quic_http3_short_control_get_with_max_duration(
                                 control_socket,
                                 server,
                                 &server_name,
