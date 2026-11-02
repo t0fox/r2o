@@ -1661,11 +1661,9 @@ fn decide_packet_with_segment_cap(
             return PacketDecision::Accept;
         }
         let emission = &actions.emits[0];
-        let Some(fragments) = r2k_core::wire::build_udp_fragments_with_capacity(
-            packet,
-            emission,
-            D2O_OUT_BUF_BYTES,
-        ) else {
+        let Some(fragments) =
+            r2k_core::wire::build_udp_fragments_with_capacity(packet, emission, D2O_OUT_BUF_BYTES)
+        else {
             return PacketDecision::Accept;
         };
         let packets = fragments
@@ -2013,9 +2011,9 @@ pub fn validate_runtime_plan(plan: &Plan) -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        KEY_LEN, PacketDecision, R2oTcpFlowMetrics, TcpFlowKey, TcpSessions, D2O_QUIC_MAX_DGRAM, decide,
-        decide_with_session, decide_with_session_mtu, decide_with_session_probe, tcp_plan_input,
-        validate_runtime_plan,
+        D2O_QUIC_MAX_DGRAM, KEY_LEN, PacketDecision, R2oTcpFlowMetrics, TcpFlowKey, TcpSessions,
+        decide, decide_with_session, decide_with_session_mtu, decide_with_session_probe,
+        tcp_plan_input, validate_runtime_plan,
     };
     #[cfg(target_os = "linux")]
     use crate::conntrack::R2oConntrackInfo;
@@ -3903,8 +3901,7 @@ mod tests {
                         PacketDecision::Transmit { .. }
                     );
                     assert_eq!(
-                        actual_transmits,
-                        expected_transmits,
+                        actual_transmits, expected_transmits,
                         "IPv{family} payload {payload_len}, shape {shape}: D2O Initial limit"
                     );
                     if !expected_transmits {

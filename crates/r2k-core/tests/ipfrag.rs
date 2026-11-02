@@ -282,13 +282,12 @@ fn d2o_ipfrag_builder_matches_r2o_on_ipv4_ipv6_shapes() {
                 } else {
                     original_v6(payload_len)
                 };
-                let accepted =
-                    wire::build_udp_fragments_with_capacity(
-                        &input,
-                        &emission(payload_len, shape),
-                        26 * 1600,
-                    )
-                    .is_some();
+                let accepted = wire::build_udp_fragments_with_capacity(
+                    &input,
+                    &emission(payload_len, shape),
+                    26 * 1600,
+                )
+                .is_some();
                 assert_eq!(
                     accepted,
                     record[5] != 0,
