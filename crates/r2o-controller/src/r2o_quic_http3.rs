@@ -976,10 +976,17 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                 .uri(uri.clone())
                 .body(())
                 .map_err(|error| format!("не построен HTTP/3 GET: {error}"))?;
-            let mut stream = send_request
-                .send_request(request)
-                .await
-                .map_err(|error| format!("HTTP/3 GET не отправлен: {error}"))?;
+            let mut stream = match send_request.send_request(request).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    // D2O counts the request when HTTP/3 refuses it but QUIC stays open.
+                    if connection.close_reason().is_none() {
+                        requests = requests.saturating_add(1);
+                        result.lock().unwrap().requests = requests;
+                    }
+                    return Err(format!("HTTP/3 GET не отправлен: {error}"));
+                }
+            };
             stream
                 .finish()
                 .await

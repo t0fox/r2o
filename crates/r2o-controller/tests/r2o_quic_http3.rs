@@ -2708,6 +2708,137 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
 
 #[tokio::test]
 #[ignore = "requires the pinned D2O harness; run scripts/test-quic-http3-full-stage-differential.sh"]
+async fn r2o_http3_goaway_repeated_request_matches_d2o() {
+    let d2o_binary = std::env::var("D2O_QUIC_DATA_STAGE_BIN")
+        .expect("D2O_QUIC_DATA_STAGE_BIN must point to the pinned C data-stage harness");
+    let certificate_params = rcgen::CertificateParams::new(vec!["localhost".to_owned()]);
+    let certificate = rcgen::Certificate::from_params(certificate_params).unwrap();
+    let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
+    let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+        certificate.serialize_private_key_der(),
+    ));
+    let mut tls = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate_der.clone()], private_key)
+        .unwrap();
+    tls.alpn_protocols = vec![b"h3".to_vec()];
+    let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap();
+    let server_config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
+    let server_endpoint =
+        quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let server_address = server_endpoint.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        while let Some(incoming) = server_endpoint.accept().await {
+            tokio::spawn(async move {
+                let Ok(connection) = incoming.await else {
+                    return;
+                };
+                let Ok(mut h3_connection) = h3::server::builder()
+                    .build::<_, bytes::Bytes>(h3_quinn::Connection::new(connection))
+                    .await
+                else {
+                    return;
+                };
+                let Ok(Some(resolver)) = h3_connection.accept().await else {
+                    return;
+                };
+                let Ok((request, mut stream)) = resolver.resolve_request().await else {
+                    return;
+                };
+                if request.uri().path() != "/goaway" {
+                    return;
+                }
+                if stream
+                    .send_response(
+                        http::Response::builder()
+                            .status(200)
+                            .header(http::header::CONTENT_LENGTH, "15")
+                            .body(())
+                            .unwrap(),
+                    )
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                // Graceful shutdown allows stream 0 but rejects the next client stream.
+                if h3_connection.shutdown(0).await.is_err()
+                    || stream
+                        .send_data(bytes::Bytes::from_static(b"goaway-response"))
+                        .await
+                        .is_err()
+                    || stream.finish().await.is_err()
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            });
+        }
+    });
+
+    let c_address = server_address;
+    let c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(d2o_binary)
+            .args([
+                "127.0.0.1",
+                &c_address.port().to_string(),
+                "localhost",
+                "/goaway",
+                "25",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    let c_result = String::from_utf8(c_output.stdout).unwrap();
+    let c_field = |name: &str| {
+        c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {c_result}"))
+    };
+
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.connect(server_address).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(certificate_der).unwrap();
+    assert_eq!(c_field("verdict"), "NotRun");
+    assert_eq!(c_field("requests"), "2");
+
+    let rust_result = r2o_controller::r2o_quic_http3::r2o_quic_http3_measure_with_max_duration(
+        socket,
+        server_address,
+        "localhost",
+        "/goaway",
+        Duration::from_secs(1),
+        roots,
+        r2o_controller::r2o_quic_http3::R2O_QUIC_HTTP3_DEFAULT_BUDGET_PACKETS,
+        Duration::from_secs(10),
+    )
+    .await;
+    let rust_verdict = r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&rust_result);
+
+    assert_eq!(
+        c_field("verdict"),
+        format!("{rust_verdict:?}"),
+        "D2O={c_result} R2O={rust_result:?}"
+    );
+    assert_eq!(
+        c_field("app_bytes").parse::<u64>().unwrap(),
+        rust_result.app_bytes,
+        "D2O={c_result} R2O={rust_result:?}"
+    );
+    assert_eq!(
+        c_field("requests").parse::<u32>().unwrap(),
+        rust_result.requests,
+        "D2O={c_result} R2O={rust_result:?}"
+    );
+
+    server.abort();
+}
+#[tokio::test]
+#[ignore = "requires the pinned D2O harness; run scripts/test-quic-http3-full-stage-differential.sh"]
 async fn r2o_http3_udp_port_unreachable_matches_d2o() {
     let d2o_binary = std::env::var("D2O_QUIC_DATA_STAGE_BIN")
         .expect("D2O_QUIC_DATA_STAGE_BIN must point to the pinned C data-stage harness");
