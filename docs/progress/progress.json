@@ -319,8 +319,8 @@
           "status": "verified",
           "statusLabel": "Доказанно эквивалентно",
           "group": "QUIC / HTTP3",
-          "mapping": "C `d2k_quic_data_stage` (`need_complete=1`, `budget_pk=0`)/`d2k_quic_arm_data_judge3` → Rust `R2oQuicHttp3Budget`/`r2o_quic_short_control_data_verdict`",
-          "evidence": "`test-quic-short-control-differential.sh` покрывает полный ответ, обрыв, stall и HTTP 451. Новый случай в `test-quic-http3-full-stage-differential.sh`: C и Rust засчитывают неполный 64-КиБ ответ только после 50 датаграмм и свежего роста; stream остаётся без FIN."
+          "mapping": "C `d2k_quic_data_stage` (`need_complete=1`, `budget_pk=0`)/`d2k_quic_arm_data_judge3` → Rust `r2o_quic_http3_short_control_get_with_max_duration`/`R2oQuicHttp3Budget`/`r2o_quic_short_control_data_verdict`",
+          "evidence": "`test-quic-short-control-differential.sh` покрывает полный ответ, обрыв, stall и HTTP 451. Новый случай в `test-quic-http3-full-stage-differential.sh`: C и Rust засчитывают неполный 64-КиБ ответ только после 50 датаграмм и свежего роста; stream остаётся без FIN. Обычный одноразовый fetch дочитывает полное тело, включая 16 МиБ."
         },
         {
           "id": 27,
@@ -855,8 +855,8 @@
       "status": "verified",
       "statusLabel": "Доказанно эквивалентно",
       "group": "QUIC / HTTP3",
-      "mapping": "C `d2k_quic_data_stage` (`need_complete=1`, `budget_pk=0`)/`d2k_quic_arm_data_judge3` → Rust `R2oQuicHttp3Budget`/`r2o_quic_short_control_data_verdict`",
-      "evidence": "`test-quic-short-control-differential.sh` покрывает полный ответ, обрыв, stall и HTTP 451. Новый случай в `test-quic-http3-full-stage-differential.sh`: C и Rust засчитывают неполный 64-КиБ ответ только после 50 датаграмм и свежего роста; stream остаётся без FIN."
+      "mapping": "C `d2k_quic_data_stage` (`need_complete=1`, `budget_pk=0`)/`d2k_quic_arm_data_judge3` → Rust `r2o_quic_http3_short_control_get_with_max_duration`/`R2oQuicHttp3Budget`/`r2o_quic_short_control_data_verdict`",
+      "evidence": "`test-quic-short-control-differential.sh` покрывает полный ответ, обрыв, stall и HTTP 451. Новый случай в `test-quic-http3-full-stage-differential.sh`: C и Rust засчитывают неполный 64-КиБ ответ только после 50 датаграмм и свежего роста; stream остаётся без FIN. Обычный одноразовый fetch дочитывает полное тело, включая 16 МиБ."
     },
     {
       "id": 27,
