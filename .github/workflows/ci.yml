@@ -476,7 +476,7 @@ jobs:
           R2O_DONOR_ROOT: ${{ github.workspace }}/d2o
           TMPDIR: ${{ runner.temp }}
         run: sh scripts/test-icmp-guard-current-differential.sh
-      - name: Compare D2O and R2O UDP fragment builders
+      - name: Compare D2O and R2O fragment helpers and production session path
         env:
           R2O_DONOR_ROOT: ${{ github.workspace }}/d2o
           TMPDIR: ${{ runner.temp }}

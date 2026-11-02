@@ -3801,6 +3801,86 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "run through scripts/test-ipfrag-differential.sh"]
+    fn current_d2o_session_ipfrag_outputs_match_r2o_production_decisions() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        fn normalize(mut packet: Vec<u8>) -> Vec<u8> {
+            match packet[0] >> 4 {
+                4 => {
+                    packet[4..6].fill(0);
+                    packet[10..12].fill(0);
+                }
+                6 => packet[44..48].fill(0),
+                family => panic!("unexpected IP family {family}"),
+            }
+            packet
+        }
+
+        fn d2o(oracle: &std::ffi::OsStr, shape: u8, input: &[u8]) -> Vec<u8> {
+            let mut child = Command::new(oracle)
+                .arg(shape.to_string())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(input).unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "D2O session oracle failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output.stdout
+        }
+
+        let oracle = std::env::var_os("R2O_D2O_IPFRAG_SESSION_ORACLE")
+            .expect("script must provide the current D2O session oracle");
+        for (family, input) in [(4, ipv4_udp(V1_INITIAL)), (6, ipv6_udp(V1_INITIAL))] {
+            for shape in 1..=4 {
+                let decision = decide(&quic_ipfrag_plan(shape), &input);
+                let PacketDecision::Transmit { packets, fate } = decision else {
+                    panic!(
+                        "R2O must fragment authenticated IPv{family} QUIC Initial, shape {shape}"
+                    );
+                };
+                assert_eq!(fate, OriginalFate::Drop);
+                assert!(
+                    packets
+                        .iter()
+                        .all(|packet| packet.kind == EmitKind::Payload)
+                );
+                let mut expected = vec![1, 1, packets.len() as u8, 0];
+                for packet in packets {
+                    expected.extend_from_slice(&(packet.packet.len() as u32).to_be_bytes());
+                    expected.extend_from_slice(&packet.delay_us.to_be_bytes());
+                    expected.extend_from_slice(&normalize(packet.packet));
+                }
+                assert_eq!(
+                    d2o(oracle.as_os_str(), shape, &input),
+                    expected,
+                    "IPv{family} shape {shape}: session decision and wire output"
+                );
+            }
+        }
+
+        let plan = quic_ipfrag_plan(1);
+        for (family, input) in [
+            (4, ipv4_udp(b"ordinary UDP")),
+            (6, ipv6_udp(b"ordinary UDP")),
+        ] {
+            assert!(matches!(decide(&plan, &input), PacketDecision::Accept));
+            assert_eq!(
+                d2o(oracle.as_os_str(), 1, &input),
+                vec![0, 0, 0, u8::MAX],
+                "ordinary IPv{family} UDP stays untouched"
+            );
+        }
+    }
+
+    #[test]
     fn qdeny_only_drops_an_authenticated_quic_initial() {
         let plan =
             Plan::parse(&plan_bytes(11, &[tlv(0x0002, &[17, 2]), tlv(0x0110, &[1])])).unwrap();
