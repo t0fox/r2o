@@ -3,8 +3,8 @@ set -eu
 
 ROOT=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 ROOT_PARENT=$(dirname "$ROOT")
-D2O_ROOT="${R2O_DONOR_ROOT:-$ROOT_PARENT/d2o}"
-EXPECTED_D2O_SHA=304ba893dd37197128ac8799c0495b035f6a38c0
+D2O_ROOT="${R2O_DONOR_ROOT:-$ROOT_PARENT/r2o-tooling/d2o-current-main}"
+EXPECTED_D2O_SHA=a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe
 [ "$(git -C "$D2O_ROOT" rev-parse HEAD)" = "$EXPECTED_D2O_SHA" ] || {
     echo "pinned D2O checkout is missing or changed" >&2
     exit 2
@@ -27,6 +27,7 @@ TEMP=$(mktemp -d "$TMPDIR/r2o-quic-full-stage.XXXXXX")
 trap 'rm -rf -- "$TEMP"' EXIT HUP INT TERM
 
 DONOR_CORE="$D2O_ROOT/core"
+make -C "$DONOR_CORE" hello_profiles.inc
 "$CC" -std=c99 -O2 -Wall -Wextra -Werror \
     -ffunction-sections -fdata-sections \
     -I"$DONOR_CORE/include" -I"$D2O_ROOT/datapath/include" \
