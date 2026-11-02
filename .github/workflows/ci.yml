@@ -320,8 +320,8 @@ jobs:
             target: mipsel-unknown-linux-gnu
             script: scripts/build-mipsel.sh
             artifact: r2o-mipsel-linux-gnu
-            packages: gcc-mipsel-linux-gnu qemu-user binutils
-            apt_cache_key: r2o-apt-ubuntu-24.04-mipsel-cross-v1
+            packages: gcc-mipsel-linux-gnu binutils
+            apt_cache_key: r2o-apt-ubuntu-24.04-mipsel-cross-v2
             sdk_archive: ''
             sdk_sha256: ''
             rust_target: ''
@@ -329,7 +329,7 @@ jobs:
             target: mipsel-unknown-linux-musl
             script: scripts/r2o-build-openwrt-mipsel-musl.sh
             artifact: r2o-openwrt-mipsel-musl
-            packages: qemu-user zstd binutils curl
+            packages: zstd binutils curl
             apt_cache_key: ''
             sdk_archive: openwrt-mipsel-musl-toolchain-25.12.5.tar.zst
             sdk_sha256: 5a02d679c1ff052745b419b564624380dd3e5f6218db64c65b8ec9df56e2c263
@@ -347,7 +347,7 @@ jobs:
             target: armv5te-unknown-linux-musleabi
             script: scripts/r2o-build-armv5-musleabi.sh
             artifact: r2o-armv5-linux-musleabi
-            packages: clang-18 qemu-user binutils
+            packages: clang-18 binutils
             apt_cache_key: ''
             sdk_archive: ''
             sdk_sha256: ''
@@ -356,7 +356,7 @@ jobs:
             target: armv7-unknown-linux-musleabihf
             script: scripts/r2o-build-openwrt-armv7-musl.sh
             artifact: r2o-openwrt-armv7-musl
-            packages: qemu-user zstd binutils curl
+            packages: zstd binutils curl
             apt_cache_key: ''
             sdk_archive: openwrt-armv7-musl-toolchain-25.12.5.tar.zst
             sdk_sha256: 2284afb56cbeef040372b02b721f1657ce1eee8e1c024fb1a0188374b472ae51
@@ -403,7 +403,7 @@ jobs:
         if: ${{ matrix.rust_target != '' }}
         with:
           target: ${{ matrix.rust_target }}
-      - name: Собрать ABI и проверить программы под QEMU
+      - name: Собрать ABI и проверить ELF-артефакты
         run: sh "$BUILD_SCRIPT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # версия v7.0.2
         with:

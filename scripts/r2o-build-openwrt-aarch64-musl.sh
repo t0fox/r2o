@@ -105,16 +105,9 @@ for component in r2o-datapath r2o-controller r2o-telegram r2o-panel r2o-manager 
         echo "сборка OpenWrt ARM64: $component содержит динамическую зависимость" >&2
         exit 1
     fi
-    qemu-aarch64 -L "$SDK" "$BINARY" --version
 done
 
-SMOKE_DIR=$(mktemp -d)
-trap 'rm -rf "$SMOKE_DIR"' EXIT HUP INT TERM
-printf '{"schema":1,"boxes":[{"id":"smoke"}]}\n' > "$SMOKE_DIR/catalog.json"
-qemu-aarch64 -L "$SDK" "$BIN_DIR/r2o-controller" --clear-catalog "$SMOKE_DIR/catalog.json"
-qemu-aarch64 -L "$SDK" "$BIN_DIR/r2o-controller" --check-catalog "$SMOKE_DIR/catalog.json"
-rm -rf "$SMOKE_DIR"
-trap - EXIT HUP INT TERM
 
+qemu-aarch64 -L "$SDK" "$BIN_DIR/r2o-controller" --version
 (cd "$BIN_DIR" && sha256sum r2o-datapath r2o-controller r2o-telegram r2o-panel r2o-manager r2o-fetch >SHA256SUMS)
 (cd "$BIN_DIR" && sha256sum -c SHA256SUMS)

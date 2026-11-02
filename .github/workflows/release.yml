@@ -78,14 +78,14 @@ jobs:
             target: mipsel-unknown-linux-gnu
             asset_suffix: mipsel
             script: scripts/build-mipsel.sh
-            packages: gcc-mipsel-linux-gnu qemu-user binutils
+            packages: gcc-mipsel-linux-gnu binutils
             sdk_archive: ''
             sdk_sha256: ''
           - abi: mipsel-openwrt-musl
             target: mipsel-unknown-linux-musl
             asset_suffix: mipsel-openwrt-musl
             script: scripts/r2o-build-openwrt-mipsel-musl.sh
-            packages: qemu-user zstd binutils curl
+            packages: zstd binutils curl
             sdk_archive: openwrt-mipsel-musl-toolchain-25.12.5.tar.zst
             sdk_sha256: 5a02d679c1ff052745b419b564624380dd3e5f6218db64c65b8ec9df56e2c263
           - abi: aarch64-openwrt-musl
@@ -99,14 +99,14 @@ jobs:
             target: armv5te-unknown-linux-musleabi
             asset_suffix: armv5-musleabi
             script: scripts/r2o-build-armv5-musleabi.sh
-            packages: clang-18 qemu-user binutils
+            packages: clang-18 binutils
             sdk_archive: ''
             sdk_sha256: ''
           - abi: armv7-openwrt-musl
             target: armv7-unknown-linux-musleabihf
             asset_suffix: armv7-openwrt-musl
             script: scripts/r2o-build-openwrt-armv7-musl.sh
-            packages: qemu-user zstd binutils curl
+            packages: zstd binutils curl
             sdk_archive: openwrt-armv7-musl-toolchain-25.12.5.tar.zst
             sdk_sha256: 2284afb56cbeef040372b02b721f1657ce1eee8e1c024fb1a0188374b472ae51
     env:
@@ -143,7 +143,7 @@ jobs:
             -o Dir::Cache::archives::partial=/tmp/r2o-apt-archives-partial \
             "${packages[@]}"
           sh scripts/ci-apt-cache.sh finalize "$RUNNER_TEMP/r2o-apt-archives"
-      - name: Собрать ABI и проверить программы под QEMU
+      - name: Собрать ABI и проверить ELF-артефакты
         run: sh "$BUILD_SCRIPT"
       - name: Подготовить бинарники ABI для общей упаковки
         run: |

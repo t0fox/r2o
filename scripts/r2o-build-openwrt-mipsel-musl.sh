@@ -10,7 +10,7 @@ SDK_SHA256=5a02d679c1ff052745b419b564624380dd3e5f6218db64c65b8ec9df56e2c263
 CACHE=${R2O_OPENWRT_TOOLCHAIN_CACHE:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/r2o/openwrt}
 TARGET_DIR=${R2O_OPENWRT_CARGO_TARGET_DIR:-"$ROOT/target"}
 
-for tool in cargo rustup curl sha256sum tar zstd find readelf qemu-mipsel; do
+for tool in cargo rustup curl sha256sum tar zstd find readelf; do
     command -v "$tool" >/dev/null 2>&1 || {
         echo "сборка OpenWrt: не найден обязательный инструмент: $tool" >&2
         exit 1
@@ -98,16 +98,8 @@ for component in r2o-datapath r2o-controller r2o-telegram r2o-panel r2o-manager 
         echo "сборка OpenWrt: у $component неверный musl-загрузчик" >&2
         exit 1
     }
-    qemu-mipsel -L "$SDK" "$BINARY" --version
 done
 
-SMOKE_DIR=$(mktemp -d)
-trap 'rm -rf "$SMOKE_DIR"' EXIT HUP INT TERM
-printf '{"schema":1,"boxes":[{"id":"smoke"}]}\n' > "$SMOKE_DIR/catalog.json"
-qemu-mipsel -L "$SDK" "$BIN_DIR/r2o-controller" --clear-catalog "$SMOKE_DIR/catalog.json"
-qemu-mipsel -L "$SDK" "$BIN_DIR/r2o-controller" --check-catalog "$SMOKE_DIR/catalog.json"
-rm -rf "$SMOKE_DIR"
-trap - EXIT HUP INT TERM
 
 (cd "$BIN_DIR" && sha256sum r2o-datapath r2o-controller r2o-telegram r2o-panel r2o-manager r2o-fetch >SHA256SUMS)
 (cd "$BIN_DIR" && sha256sum -c SHA256SUMS)

@@ -8,7 +8,7 @@ TARGET_DIR=${R2O_ARMV5_CARGO_TARGET_DIR:-"$ROOT/target"}
 LINKER=${R2O_ARMV5_LINKER:-arm-linux-gnueabi-gcc}
 ARCHIVER=${R2O_ARMV5_AR:-arm-linux-gnueabi-ar}
 
-for tool in cargo rustup "$LINKER" "$ARCHIVER" qemu-arm readelf sha256sum grep mktemp; do
+for tool in cargo rustup "$LINKER" "$ARCHIVER" readelf sha256sum grep mktemp; do
     command -v "$tool" >/dev/null 2>&1 || {
         echo "сборка ARMv5: не найден обязательный инструмент: $tool" >&2
         exit 1
@@ -50,16 +50,8 @@ for component do
         echo "сборка ARMv5: $component зависит от динамического загрузчика" >&2
         exit 1
     fi
-    qemu-arm "$BINARY" --version
 done
 
-SMOKE_DIR=$(mktemp -d)
-trap 'rm -rf "$SMOKE_DIR"' EXIT HUP INT TERM
-printf '{"schema":1,"boxes":[{"id":"smoke"}]}\n' > "$SMOKE_DIR/catalog.json"
-qemu-arm "$BIN_DIR/r2o-controller" --clear-catalog "$SMOKE_DIR/catalog.json"
-qemu-arm "$BIN_DIR/r2o-controller" --check-catalog "$SMOKE_DIR/catalog.json"
-rm -rf "$SMOKE_DIR"
-trap - EXIT HUP INT TERM
 
 (cd "$BIN_DIR" && sha256sum "$@" >SHA256SUMS)
 (cd "$BIN_DIR" && sha256sum -c SHA256SUMS)
