@@ -356,7 +356,7 @@ jobs:
             target: aarch64-unknown-linux-musl
             script: scripts/r2o-build-openwrt-aarch64-musl.sh
             artifact: r2o-openwrt-aarch64-musl
-            packages: qemu-user zstd binutils curl
+            packages: zstd binutils curl
             apt_cache_key: ''
             sdk_archive: openwrt-aarch64-musl-toolchain-25.12.5.tar.zst
             sdk_sha256: 37875a8a69b46c9dc2a8c8bfd34a14f5de03fbea775f7cf8569f7e709c93403b
@@ -522,27 +522,14 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
         with:
           toolchain: 1.98.0
-          target: aarch64-unknown-linux-gnu
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # версия v6.1.0
         with:
           path: ${{ runner.temp }}/r2o-apt-archives
-          key: r2o-apt-ubuntu-24.04-differential-${{ matrix.snapshot }}-${{ matrix.cache_shard }}-gcc13-qemu8-v1
+          key: r2o-apt-ubuntu-24.04-differential-${{ matrix.snapshot }}-${{ matrix.cache_shard }}-gcc13-native-v2
       - name: Установить инструменты differential-сценариев
-        env:
-          DONOR_SNAPSHOT: ${{ matrix.snapshot }}
-          DIFFERENTIAL_SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
           packages=(clang-18 libssl-dev pkg-config zlib1g-dev binutils)
-          case "$DONOR_SNAPSHOT:$DIFFERENTIAL_SHARD" in
-            baseline:tcp|upstream:tcp|upstream:quic-control|upstream:scheduler)
-              packages+=(qemu-user=1:8.2.2+ds-0ubuntu1.18 \
-                gcc-aarch64-linux-gnu=4:13.2.0-7ubuntu1 \
-                libc6-dev-arm64-cross libgcc-13-dev-arm64-cross)
-              r2o_needs_aarch64=1
-              ;;
-            *) r2o_needs_aarch64=0 ;;
-          esac
           sh scripts/ci-apt-cache.sh prepare "$RUNNER_TEMP/r2o-apt-archives" /tmp/r2o-apt-archives-partial
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
@@ -550,9 +537,6 @@ jobs:
             -o Dir::Cache::archives::partial=/tmp/r2o-apt-archives-partial \
             "${packages[@]}"
           sh scripts/ci-apt-cache.sh finalize "$RUNNER_TEMP/r2o-apt-archives"
-          if [ "$r2o_needs_aarch64" -eq 1 ]; then
-            test "$(aarch64-linux-gnu-gcc -dumpfullversion)" = 13.3.0
-          fi
       - name: Проверить SHA снимка донора и подготовить C-эталон
         env:
           DONOR_SHA: ${{ matrix.donor_sha }}

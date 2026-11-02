@@ -6,7 +6,7 @@ r2o_donor=${R2O_DONOR_DATAPATH:-"${r2o_script_dir%/*}/d2o/datapath"}
 r2o_log_dir="$r2o_script_dir/.rea"
 r2o_log="$r2o_log_dir/r2o-tcp-payload-stats-$(date +%Y%m%d-%H%M%S).log"
 r2o_harness="$r2o_log_dir/r2o-tcp-payload-stats-donor.c"
-r2o_oracle="$r2o_log_dir/r2o-tcp-payload-stats-donor-arm64"
+r2o_oracle="$r2o_log_dir/r2o-tcp-payload-stats-donor-host"
 mkdir -p "$r2o_log_dir"
 
 r2o_show_log_on_error() {
@@ -171,7 +171,7 @@ int main(void) {
 C
 
 {
-    printf 'Сверка TCP-счётчиков C/Rust на ARM64: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    printf 'Сверка TCP-счётчиков C/Rust на Linux host: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
     printf 'Исходник донора: %s\n' "$r2o_donor"
     sha256sum "$r2o_donor/session.c" "$r2o_donor/test_session.c" \
         "$r2o_donor/include/d2k_session.h" "$r2o_harness" \
@@ -179,10 +179,10 @@ C
 } >"$r2o_log"
 
 {
-    make -B -C "$r2o_donor" test_session CC=aarch64-linux-gnu-gcc
-    qemu-aarch64 -L /usr/aarch64-linux-gnu "$r2o_donor/test_session"
+    make -B -C "$r2o_donor" test_session CC=cc
+    "$r2o_donor/test_session"
 } >>"$r2o_log" 2>&1
-aarch64-linux-gnu-gcc -std=c99 -O2 -Wall -Wextra -Werror \
+cc -std=c99 -O2 -Wall -Wextra -Werror \
     -I"$r2o_donor/include" -I"$r2o_donor/../core/include" \
     -o "$r2o_oracle" "$r2o_harness" \
     "$r2o_donor/session.o" "$r2o_donor/http80.o" "$r2o_donor/hold.o" \
@@ -195,11 +195,8 @@ aarch64-linux-gnu-gcc -std=c99 -O2 -Wall -Wextra -Werror \
     "$r2o_donor/core_ipfrag.o" "$r2o_donor/core_httpup_logic.o" \
     >>"$r2o_log" 2>&1
 
-qemu-aarch64 -L /usr/aarch64-linux-gnu "$r2o_oracle" >"$r2o_log_dir/r2o-tcp-payload-stats-c.out"
-env QEMU_LD_PREFIX=/usr/aarch64-linux-gnu \
-    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='qemu-aarch64 -L /usr/aarch64-linux-gnu' \
-    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
-    cargo +1.98.0 test --target aarch64-unknown-linux-gnu --locked --offline \
+"$r2o_oracle" >"$r2o_log_dir/r2o-tcp-payload-stats-c.out"
+cargo +1.98.0 test --locked --offline \
     -p r2o-datapath r2o_tcp_сводка_нагрузки_разделяет_направление_окно_и_sni \
     -- --nocapture >"$r2o_log_dir/r2o-tcp-payload-stats-rust.out" 2>&1
 

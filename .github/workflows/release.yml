@@ -92,7 +92,7 @@ jobs:
             target: aarch64-unknown-linux-musl
             asset_suffix: aarch64-openwrt-musl
             script: scripts/r2o-build-openwrt-aarch64-musl.sh
-            packages: qemu-user zstd binutils curl
+            packages: zstd binutils curl
             sdk_archive: openwrt-aarch64-musl-toolchain-25.12.5.tar.zst
             sdk_sha256: 37875a8a69b46c9dc2a8c8bfd34a14f5de03fbea775f7cf8569f7e709c93403b
           - abi: armv5-musleabi

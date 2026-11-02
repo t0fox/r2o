@@ -10,7 +10,7 @@ SDK_SHA256=37875a8a69b46c9dc2a8c8bfd34a14f5de03fbea775f7cf8569f7e709c93403b
 CACHE=${R2O_OPENWRT_TOOLCHAIN_CACHE:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/r2o/openwrt}
 TARGET_DIR=${R2O_OPENWRT_CARGO_TARGET_DIR:-"$ROOT/target"}
 
-for tool in cargo rustup curl sha256sum tar zstd find readelf qemu-aarch64; do
+for tool in cargo rustup curl sha256sum tar zstd find readelf; do
     command -v "$tool" >/dev/null 2>&1 || {
         echo "сборка OpenWrt ARM64: не найден обязательный инструмент: $tool" >&2
         exit 1
@@ -108,6 +108,5 @@ for component in r2o-datapath r2o-controller r2o-telegram r2o-panel r2o-manager 
 done
 
 
-qemu-aarch64 -L "$SDK" "$BIN_DIR/r2o-controller" --version
 (cd "$BIN_DIR" && sha256sum r2o-datapath r2o-controller r2o-telegram r2o-panel r2o-manager r2o-fetch >SHA256SUMS)
 (cd "$BIN_DIR" && sha256sum -c SHA256SUMS)

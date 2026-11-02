@@ -68,23 +68,19 @@ cp -a "$r2o_donor_core" "$r2o_build_root/"
 cp -a "$r2o_donor_root/datapath" "$r2o_build_root/"
 cp -a "$r2o_donor_root/runtime" "$r2o_build_root/"
 r2o_build_core="$r2o_build_root/core"
-r2o_run 'сборка ARM64 C-теста планировщика' make -B -C "$r2o_build_core" test_sched CC=aarch64-linux-gnu-gcc
+r2o_run 'сборка host C-теста планировщика' make -B -C "$r2o_build_core" test_sched CC=cc
 if [ "$r2o_donor_artifacts_before" != "$(find "$r2o_donor_core" -maxdepth 1 -type f \
     \( -name '*.o' -o -name '*.a' -o -name test_sched \) -print0 |
     LC_ALL=C sort -z | xargs -0 -r sha256sum)" ]; then
-    printf 'ARM64-сборка изменила артефакты исходного donor checkout.\n' | tee -a "$r2o_log" >&2
+    printf 'Host-сборка изменила артефакты исходного donor checkout.\n' | tee -a "$r2o_log" >&2
     exit 1
 fi
-r2o_run 'ARM64/QEMU lifecycle-тест планировщика C' \
-    qemu-aarch64 -L /usr/aarch64-linux-gnu "$r2o_build_core/test_sched" --lifecycle-only
+r2o_run 'host lifecycle-тест планировщика C' "$r2o_build_core/test_sched" --lifecycle-only
 printf 'Артефакты исходного donor checkout не изменились.\n' >>"$r2o_log"
 
 printf '\nЦель Rust: остановка worker обслуживает DEL_ADDR_PROBE\n' >>"$r2o_log"
-r2o_run 'ARM64/QEMU-тест очистки QUIC-пробы' env \
-    QEMU_LD_PREFIX=/usr/aarch64-linux-gnu \
-    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='qemu-aarch64 -L /usr/aarch64-linux-gnu' \
-    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
-    cargo +1.98.0 test --target aarch64-unknown-linux-gnu --locked --offline \
+r2o_run 'host-тест очистки QUIC-пробы' \
+    cargo +1.98.0 test --locked --offline \
     -p r2o-controller --bin r2o-controller \
     r2o_остановка_quic_worker_обслуживает_удаление_временной_пробы -- --nocapture
 

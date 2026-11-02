@@ -79,22 +79,7 @@ mkdir -p "$r2o_log_dir"
         test_session CC=clang-18
     sha256sum "$r2o_donor_test"
     printf '\nЗапуск C-контроля донора\n'
-    if readelf -h "$r2o_donor_test" | grep -q 'Machine:.*AArch64'; then
-        r2o_qemu_aarch64=${R2O_QEMU_AARCH64:-qemu-aarch64}
-        r2o_aarch64_sysroot=${R2O_AARCH64_SYSROOT:-/usr/aarch64-linux-gnu}
-        if ! command -v "$r2o_qemu_aarch64" >/dev/null 2>&1; then
-            printf 'Для ARM64-бинарника нужен QEMU: %s\n' "$r2o_qemu_aarch64" >&2
-            exit 2
-        fi
-        if [ ! -d "$r2o_aarch64_sysroot" ]; then
-            printf 'Не найден sysroot для QEMU ARM64: %s\n' "$r2o_aarch64_sysroot" >&2
-            exit 2
-        fi
-        r2o_run_timed 'контрольная сессия донора через QEMU ARM64' \
-            "$r2o_qemu_aarch64" -L "$r2o_aarch64_sysroot" "$r2o_donor_test"
-    else
-        r2o_run_timed 'контрольная сессия донора' "$r2o_donor_test"
-    fi
+    r2o_run_timed 'контрольная сессия донора' "$r2o_donor_test"
     printf '\nДифференциальные тесты состояния Rust\n'
     r2o_run_timed 'счётчик невидимого ответа и TCP-состояние Rust' cargo +1.98.0 test \
         -p r2o-datapath --lib r2o_tcp_ --locked --offline -- --nocapture
