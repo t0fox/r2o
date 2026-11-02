@@ -122,7 +122,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # version v7.0.1
         with:
           repository: t0fox/d2o
-          ref: 304ba893dd37197128ac8799c0495b035f6a38c0
+          ref: a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe
           path: d2o
           persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0

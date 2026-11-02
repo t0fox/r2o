@@ -38,6 +38,8 @@ make -B -C "$D2O_ROOT/datapath" test_session CC="$CC"
 R2O_TCP_SILENCE_DIFF_OUTPUT="$TEMP/rust.out" \
     cargo test -p r2o-datapath --lib \
         tcp_silence_shared_lifecycle_matches_current_d2o --locked --offline
+printf '%s\n' 'sweep=1 duplicate=1 expiry=1 expiry_silent=1 fin_early=0 fin_late=1 rst_early=0 rst_late=1 retry=1 retry_silent=1 isolated=1' >"$TEMP/c.expected"
+diff -u "$TEMP/c.expected" "$TEMP/c.out"
 diff -u "$TEMP/c.out" "$TEMP/rust.out"
 cat "$TEMP/c.out"
-printf 'D2O/R2O TCP silence sweep, expiry, close, retry and per-flow visibility match.\n'
+printf 'Current D2O/R2O TCP silence sweep, expiry, close, retry and per-flow visibility match.\n'

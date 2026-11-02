@@ -9417,3 +9417,28 @@ The production Rust path now counts a refused GET attempt when HTTP/3 rejects it
 RED was the D2O/R2O request-count mismatch above. GREEN: the focused r2o_http3_goaway_repeated_request_matches_d2o test passed 1/1 after the fix. The Debian 13 WSL2 full-stage command, R2O_DONOR_ROOT=/mnt/e/r2o-tooling/d2o-current-main sh scripts/test-quic-http3-full-stage-differential.sh, passed 13/13 in 99.75 seconds. cargo +1.98.0 fmt --all -- --check and git diff --check passed. Source and build artifacts stayed on E:. No QEMU was needed for this loopback contract.
 
 This closes only the graceful-GOAWAY request-count branch. Other QUIC transport-error/stall variants and lifecycle remain open, so the QUIC matrix row remains partial and earns 0/2; the weighted total remains 62/87 (71.26%).
+
+### TCP silence differential on D2O 304 snapshot — 2026-11-02
+
+This snapshot-specific check used clean D2O `304ba893dd37197128ac8799c0495b035f6a38c0` from `/mnt/e/r2o-tooling/d2o-current-main` while the live D2O remote main was already `a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe`; the mismatch below is historical, not current-main evidence. The dirty `/mnt/e/d2o` checkout remains untouched. R2O main under test was `d93b3a95a8ca64742ecdf402a4eee0d21b2f3293`.
+
+`make -B -C /mnt/e/r2o-tooling/d2o-current-main/datapath test_session CC=cc` passed. `scripts/test-tcp-silence-current-differential.sh` passed in Debian WSL with all source/build/cache paths on E; its Rust target passed 1/1. The C and Rust fixture outputs were:
+
+```text
+sweep=1 duplicate=1 expiry=1 expiry_silent=0 fin_early=0 fin_late=0 rst_early=0 rst_late=0 retry=0 retry_silent=0 isolated=0
+sweep=1 duplicate=1 expiry=1 expiry_silent=1 fin_early=0 fin_late=1 rst_early=0 rst_late=1 retry=1 retry_silent=1 isolated=1
+```
+
+This 304ba893 snapshot agrees on sweep/duplicate suppression and early FIN/RST, and differs on expiry after a reverse empty ACK, late FIN/RST, repeated ClientHello and reverse visibility borrowed across flows. The earlier fixture output records this snapshot comparison. The fixture seeds through production session APIs because the 304ba893 snapshot lacks the later test-only `tcp_silent_seed` helper. `scripts/test-datapath-default-mode-differential.sh` and `scripts/test-icmp-guard-current-differential.sh` also passed against `304ba893`; default mode is `observe`, and ICMP counters/summary match. The current matrix records the a63d964 match as unscored supporting evidence for the existing TCP row; the 304ba893 snapshot adds no current-main score or denominator change. No QEMU run was needed for these in-memory contracts; applicable QEMU checks remain short OpenWrt ARM64 only.
+
+### Current-main TCP silence differential — 2026-11-02
+
+Live `git ls-remote` confirmed D2O main `a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe` and R2O main `d93b3a95a8ca64742ecdf402a4eee0d21b2f3293`. The clean donor `/mnt/e/r2o-tooling/d2o-current-main` was refreshed to that D2O commit; the original dirty `/mnt/e/d2o` checkout remains untouched.
+
+`make -B -C /mnt/e/r2o-tooling/d2o-current-main/datapath test_session CC=cc` passed. `scripts/test-tcp-silence-current-differential.sh` passed in Debian WSL with source, build, cache and temp paths on E; the targeted Rust test passed 1/1. C and Rust emitted the same result:
+
+```text
+sweep=1 duplicate=1 expiry=1 expiry_silent=1 fin_early=0 fin_late=1 rst_early=0 rst_late=1 retry=1 retry_silent=1 isolated=1
+```
+
+The current differential matches sweep/duplicate suppression, expiry, early/late FIN/RST, one ClientHello retry and per-flow reverse visibility. The fixture seeds through production session APIs. `scripts/test-datapath-default-mode-differential.sh` and `scripts/test-icmp-guard-current-differential.sh` also passed after pinning current D2O main `a63d964`; the default mode is `observe` and the ICMP summary matches. The matrix remains 62/87 (71.26%). No QEMU run was needed for these in-memory checks; QEMU remains short OpenWrt ARM64 only.
