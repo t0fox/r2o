@@ -1027,46 +1027,56 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
             requests = requests.saturating_add(1);
             result.lock().unwrap().requests = requests;
 
-            let response = r2o_quic_http3_wait_with_stall(
-                &connection,
-                &mut stall,
-                &mut budget,
-                budget_active,
-                datagrams_before,
-                &app_bytes,
-                stream.recv_response(),
-            )
-            .await
-            .map_err(|end| {
-                stall_end = Some(end);
-                match end {
-                    R2oQuicHttp3StallEnd::Stalled => {
-                        "QUIC-ответ завис: PING не подтверждён".to_owned()
+            loop {
+                let response_status = r2o_quic_http3_wait_with_stall(
+                    &connection,
+                    &mut stall,
+                    &mut budget,
+                    budget_active,
+                    datagrams_before,
+                    &app_bytes,
+                    stream.recv_response(),
+                )
+                .await
+                .map_err(|end| {
+                    stall_end = Some(end);
+                    match end {
+                        R2oQuicHttp3StallEnd::Stalled => {
+                            "QUIC-ответ завис: PING не подтверждён".to_owned()
+                        }
+                        R2oQuicHttp3StallEnd::OneWay => {
+                            "QUIC-сервер продолжает передачу, но не подтверждает наши пакеты"
+                                .to_owned()
+                        }
                     }
-                    R2oQuicHttp3StallEnd::OneWay => {
-                        "QUIC-сервер продолжает передачу, но не подтверждает наши пакеты".to_owned()
+                })?
+                .map_err(|error| format!("заголовки HTTP/3-ответа не получены: {error}"))?
+                .status()
+                .as_u16();
+                if status == 0 {
+                    status = response_status;
+                    result.lock().unwrap().status = status;
+                }
+                if status == 451 {
+                    return Ok::<bool, String>(false);
+                }
+                let app_progress = r2o_quic_http3_app_bytes_load(&app_bytes);
+                let now = tokio::time::Instant::now();
+                if app_progress > last_app_progress {
+                    last_app_progress = app_progress;
+                    last_progress_at = now;
+                }
+                if budget_active {
+                    let packets =
+                        r2o_quic_http3_datagrams(&connection).saturating_sub(datagrams_before);
+                    budget_passed =
+                        budget.r2o_step(packets, app_progress, status, now, last_progress_at, rto);
+                    if budget_passed {
+                        return Ok::<bool, String>(false);
                     }
                 }
-            })?
-            .map_err(|error| format!("заголовки HTTP/3-ответа не получены: {error}"))?;
-            status = response.status().as_u16();
-            result.lock().unwrap().status = status;
-            if status == 451 {
-                return Ok::<bool, String>(false);
-            }
-            let app_progress = r2o_quic_http3_app_bytes_load(&app_bytes);
-            let now = tokio::time::Instant::now();
-            if app_progress > last_app_progress {
-                last_app_progress = app_progress;
-                last_progress_at = now;
-            }
-            if budget_active {
-                let packets =
-                    r2o_quic_http3_datagrams(&connection).saturating_sub(datagrams_before);
-                budget_passed =
-                    budget.r2o_step(packets, app_progress, status, now, last_progress_at, rto);
-                if budget_passed {
-                    return Ok::<bool, String>(false);
+                if response_status == 101 || !(100..200).contains(&response_status) {
+                    break;
                 }
             }
             loop {
@@ -1125,6 +1135,14 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                         }
                     }
                     Ok(None) => {
+                        if stream
+                            .recv_trailers()
+                            .await
+                            .map_err(|error| format!("ошибка чтения HTTP/3 trailers: {error}"))?
+                            .is_some()
+                        {
+                            continue;
+                        }
                         let now = tokio::time::Instant::now();
                         let app_progress = r2o_quic_http3_app_bytes_load(&app_bytes);
                         if app_progress > last_app_progress {

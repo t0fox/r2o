@@ -1211,6 +1211,7 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                             | "/no-content"
                             | "/early-refuse"
                             | "/trailers"
+                            | "/trailers-open"
                     ) {
                         if matches!(path, "/refuse" | "/early-refuse") {
                             451
@@ -1373,12 +1374,17 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                     {
                         break;
                     }
-                    if path == "/trailers" {
+                    if matches!(path, "/trailers" | "/trailers-open") {
                         let mut trailers = http::HeaderMap::new();
                         trailers.insert("x-r2o", "done".parse().unwrap());
-                        if stream.send_trailers(trailers).await.is_err()
-                            || stream.finish().await.is_err()
-                        {
+                        if stream.send_trailers(trailers).await.is_err() {
+                            break;
+                        }
+                        if path == "/trailers-open" {
+                            std::future::pending::<()>().await;
+                            break;
+                        }
+                        if stream.finish().await.is_err() {
                             break;
                         }
                         continue;
@@ -1594,6 +1600,77 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
         trailer_c_field("requests").parse::<u32>().unwrap(),
         trailer_rust_result.requests,
         "D2O={trailer_c_result} R2O={trailer_rust_result:?}"
+    );
+
+    let open_trailer_c_binary = d2o_binary.clone();
+    let open_trailer_c_address = server_address;
+    let open_trailer_c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(open_trailer_c_binary)
+            .args([
+                "127.0.0.1",
+                &open_trailer_c_address.port().to_string(),
+                "localhost",
+                "/trailers-open",
+                "0",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        !open_trailer_c_output.status.success(),
+        "D2O incomplete response trailers unexpectedly passed: stdout={} stderr={}",
+        String::from_utf8_lossy(&open_trailer_c_output.stdout),
+        String::from_utf8_lossy(&open_trailer_c_output.stderr)
+    );
+    let open_trailer_c_result = String::from_utf8(open_trailer_c_output.stdout).unwrap();
+    let open_trailer_c_field = |name: &str| {
+        open_trailer_c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {open_trailer_c_result}"))
+    };
+    assert_eq!(open_trailer_c_field("verdict"), "NotRun");
+    assert_eq!(open_trailer_c_field("complete"), "0");
+
+    let open_trailer_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    open_trailer_socket.connect(server_address).unwrap();
+    let mut open_trailer_roots = RootCertStore::empty();
+    open_trailer_roots.add(certificate_der.clone()).unwrap();
+    let open_trailer_rust_result = r2o_quic_http3_get(
+        open_trailer_socket,
+        server_address,
+        "localhost",
+        "/trailers-open",
+        Duration::from_secs(1),
+        open_trailer_roots,
+    )
+    .await;
+    let open_trailer_rust_verdict =
+        r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&open_trailer_rust_result);
+    assert_eq!(
+        open_trailer_rust_result.status, 200,
+        "R2O={open_trailer_rust_result:?}"
+    );
+    assert_eq!(
+        open_trailer_rust_result.body_bytes, 13,
+        "R2O={open_trailer_rust_result:?}"
+    );
+    assert!(
+        !open_trailer_rust_result.complete,
+        "R2O={open_trailer_rust_result:?}"
+    );
+    assert_eq!(format!("{open_trailer_rust_verdict:?}"), "NotRun");
+    assert_eq!(
+        open_trailer_c_field("app_bytes").parse::<u64>().unwrap(),
+        open_trailer_rust_result.app_bytes,
+        "D2O={open_trailer_c_result} R2O={open_trailer_rust_result:?}"
+    );
+    assert_eq!(
+        open_trailer_c_field("requests").parse::<u32>().unwrap(),
+        open_trailer_rust_result.requests,
+        "D2O={open_trailer_c_result} R2O={open_trailer_rust_result:?}"
     );
 
     let early_c_binary = d2o_binary.clone();
