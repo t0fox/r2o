@@ -30564,143 +30564,178 @@ mod tests {
         use r2k_core::control::{AppliedEvent, BindingContext, KEY_LEN, SHAPE_HTTP};
         use r2o_controller::http_search::{ProbeIdentity, confirmed_applied};
         use std::collections::HashSet;
-        use std::net::{IpAddr, Ipv4Addr};
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+        fn put_address(key: &mut [u8; KEY_LEN], offset: usize, address: IpAddr) {
+            match address {
+                IpAddr::V4(address) => {
+                    key[offset..offset + 4].copy_from_slice(&address.octets());
+                }
+                IpAddr::V6(address) => {
+                    key[offset..offset + 16].copy_from_slice(&address.octets());
+                }
+            }
+        }
 
         let trial_id = [2; 16];
         let plan_id = [3; 16];
-        let identity = ProbeIdentity {
-            plan_id,
-            trial_id,
-            family: 4,
-            client: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-            server: IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
-            local_port: 41_000,
-        };
-        let event = |execution_id| {
-            let mut key = [0; KEY_LEN];
-            key[0] = 4;
-            key[1..5].copy_from_slice(&[127, 0, 0, 1]);
-            key[17..21].copy_from_slice(&[1, 2, 3, 4]);
-            key[33..35].copy_from_slice(&41_000_u16.to_be_bytes());
-            key[35..37].copy_from_slice(&80_u16.to_be_bytes());
-            key[37] = 6;
-            AppliedEvent {
-                key,
+        let cases = [
+            (
+                4,
+                IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
+            ),
+            (
+                6,
+                IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+                IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 4)),
+            ),
+        ];
+        let mut differential_output = String::new();
+
+        for (family, client, server) in cases {
+            let identity = ProbeIdentity {
                 plan_id,
                 trial_id,
-                execution_id,
-                binding: BindingContext {
-                    generation: 1,
-                    kind: 1,
-                    family: 4,
-                    shape: SHAPE_HTTP,
-                    temporary: true,
-                    epoch: [7; 16],
-                },
-            }
-        };
-        let exact = |event: &AppliedEvent| {
-            event.trial_id == trial_id && event.plan_id == plan_id && event.execution_id != 0
-        };
-        let exact_count = |events: &[AppliedEvent]| {
-            events
-                .iter()
-                .filter(|event| exact(event))
-                .map(|event| event.execution_id)
-                .collect::<HashSet<_>>()
-                .len()
-        };
+                family,
+                client,
+                server,
+                local_port: 41_000,
+            };
+            let event = |execution_id| {
+                let mut key = [0; KEY_LEN];
+                key[0] = family;
+                put_address(&mut key, 1, client);
+                put_address(&mut key, 17, server);
+                key[33..35].copy_from_slice(&41_000_u16.to_be_bytes());
+                key[35..37].copy_from_slice(&80_u16.to_be_bytes());
+                key[37] = 6;
+                AppliedEvent {
+                    key,
+                    plan_id,
+                    trial_id,
+                    execution_id,
+                    binding: BindingContext {
+                        generation: 1,
+                        kind: 1,
+                        family,
+                        shape: SHAPE_HTTP,
+                        temporary: true,
+                        epoch: [7; 16],
+                    },
+                }
+            };
+            let exact = |event: &AppliedEvent| {
+                event.trial_id == trial_id && event.plan_id == plan_id && event.execution_id != 0
+            };
+            let exact_count = |events: &[AppliedEvent]| {
+                events
+                    .iter()
+                    .filter(|event| exact(event))
+                    .map(|event| event.execution_id)
+                    .collect::<HashSet<_>>()
+                    .len()
+            };
 
-        let first = event(1);
-        let duplicate = first.clone();
-        let second = event(2);
-        let (commands, receiver) = std::sync::mpsc::sync_channel(1);
-        let controller = std::thread::spawn(move || {
-            let started = std::time::Instant::now();
-            let mut first_batch = true;
-            let mut second_sent = false;
-            while let Ok(command) = receiver.recv() {
-                let HttpSearchCommand::CollectApplied {
-                    trial_id: requested,
-                    reply,
-                    ..
-                } = command
-                else {
-                    panic!("ожидалась команда сбора APPLIED");
-                };
-                assert_eq!(requested, trial_id);
-                let batch = if first_batch {
-                    first_batch = false;
-                    vec![first.clone(), duplicate.clone()]
-                } else if !second_sent && started.elapsed() >= std::time::Duration::from_millis(80)
-                {
-                    second_sent = true;
-                    vec![second.clone()]
-                } else {
-                    Vec::new()
-                };
-                reply.send(Ok(batch)).unwrap();
-            }
-        });
+            let first = event(1);
+            let duplicate = first.clone();
+            let second = event(2);
+            let (commands, receiver) = std::sync::mpsc::sync_channel(1);
+            let controller = std::thread::spawn(move || {
+                let started = std::time::Instant::now();
+                let mut first_batch = true;
+                let mut second_sent = false;
+                while let Ok(command) = receiver.recv() {
+                    let HttpSearchCommand::CollectApplied {
+                        trial_id: requested,
+                        reply,
+                        ..
+                    } = command
+                    else {
+                        panic!("ожидалась команда сбора APPLIED");
+                    };
+                    assert_eq!(requested, trial_id);
+                    let batch = if first_batch {
+                        first_batch = false;
+                        vec![first.clone(), duplicate.clone()]
+                    } else if !second_sent
+                        && started.elapsed() >= std::time::Duration::from_millis(80)
+                    {
+                        second_sent = true;
+                        vec![second.clone()]
+                    } else {
+                        Vec::new()
+                    };
+                    reply.send(Ok(batch)).unwrap();
+                }
+            });
 
-        let inside = super::r2o_collect_controller_applied_events_until_satisfied(
-            &commands,
-            trial_id,
-            std::time::Duration::from_millis(500),
-            |events| confirmed_applied(events, &identity, 2).is_some(),
-        )
-        .unwrap();
-        assert_eq!(exact_count(&inside), 2);
-        assert!(confirmed_applied(&inside, &identity, 2).is_some());
-        drop(commands);
-        controller.join().unwrap();
+            let inside = super::r2o_collect_controller_applied_events_until_satisfied(
+                &commands,
+                trial_id,
+                std::time::Duration::from_millis(500),
+                |events| confirmed_applied(events, &identity, 2).is_some(),
+            )
+            .unwrap();
+            assert_eq!(exact_count(&inside), 2);
+            assert!(confirmed_applied(&inside, &identity, 2).is_some());
+            drop(commands);
+            controller.join().unwrap();
 
-        let first = event(1);
-        let second = event(2);
-        let (commands, receiver) = std::sync::mpsc::sync_channel(1);
-        let controller = std::thread::spawn(move || {
-            let started = std::time::Instant::now();
-            let mut first_sent = false;
-            let mut late_sent = false;
-            while let Ok(command) = receiver.recv() {
-                let HttpSearchCommand::CollectApplied {
-                    trial_id: requested,
-                    reply,
-                    ..
-                } = command
-                else {
-                    panic!("ожидалась команда сбора APPLIED");
-                };
-                assert_eq!(requested, trial_id);
-                let batch = if !first_sent {
-                    first_sent = true;
-                    vec![first.clone()]
-                } else if !late_sent && started.elapsed() >= std::time::Duration::from_millis(600) {
-                    late_sent = true;
-                    vec![second.clone()]
-                } else {
-                    Vec::new()
-                };
-                reply.send(Ok(batch)).unwrap();
-            }
-        });
+            let first = event(1);
+            let second = event(2);
+            let (commands, receiver) = std::sync::mpsc::sync_channel(1);
+            let controller = std::thread::spawn(move || {
+                let started = std::time::Instant::now();
+                let mut first_sent = false;
+                let mut late_sent = false;
+                while let Ok(command) = receiver.recv() {
+                    let HttpSearchCommand::CollectApplied {
+                        trial_id: requested,
+                        reply,
+                        ..
+                    } = command
+                    else {
+                        panic!("ожидалась команда сбора APPLIED");
+                    };
+                    assert_eq!(requested, trial_id);
+                    let batch = if !first_sent {
+                        first_sent = true;
+                        vec![first.clone()]
+                    } else if !late_sent
+                        && started.elapsed() >= std::time::Duration::from_millis(600)
+                    {
+                        late_sent = true;
+                        vec![second.clone()]
+                    } else {
+                        Vec::new()
+                    };
+                    reply.send(Ok(batch)).unwrap();
+                }
+            });
 
-        let outside = super::r2o_collect_controller_applied_events_until_satisfied(
-            &commands,
-            trial_id,
-            std::time::Duration::from_millis(500),
-            |events| confirmed_applied(events, &identity, 2).is_some(),
-        )
-        .unwrap();
-        assert_eq!(exact_count(&outside), 1);
-        assert!(confirmed_applied(&outside, &identity, 2).is_none());
-        if let Ok(path) = std::env::var("R2O_HTTP_APPLIED_DIFF_OUTPUT") {
-            std::fs::write(path, "inside=2\noutside=1\n").unwrap();
+            let outside = super::r2o_collect_controller_applied_events_until_satisfied(
+                &commands,
+                trial_id,
+                std::time::Duration::from_millis(500),
+                |events| confirmed_applied(events, &identity, 2).is_some(),
+            )
+            .unwrap();
+            assert_eq!(exact_count(&outside), 1);
+            assert!(confirmed_applied(&outside, &identity, 2).is_none());
+            differential_output.push_str(&format!(
+                "ipv{family}_inside={}\nipv{family}_outside={}\n",
+                exact_count(&inside),
+                exact_count(&outside)
+            ));
+            drop(commands);
+            controller.join().unwrap();
         }
-        drop(commands);
-        controller.join().unwrap();
-    }
 
+        if let Ok(path) = std::env::var("R2O_HTTP_APPLIED_DIFF_OUTPUT") {
+            std::fs::write(path, differential_output).unwrap();
+        }
+    }
     #[cfg(unix)]
     struct HttpBaselineFixture {
         responses: std::io::Cursor<Vec<u8>>,

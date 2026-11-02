@@ -7,6 +7,8 @@
 typedef struct {
     int next_fd;
     unsigned open_count, set_probe_count;
+    uint8_t family;
+    uint8_t client[16], server[16];
     uint16_t sport_be;
     d2k_hs_job job;
     uint8_t plan_id[16], trial_id[16];
@@ -77,21 +79,30 @@ static int start_probe(void *ctx, const d2k_hs_job *job) {
 static void say(void *ctx, const char *line) { (void)ctx; (void)line; }
 static void changed(void *ctx) { (void)ctx; }
 
-static d2k_httpsearch *start_candidate(fixture *f) {
+static d2k_httpsearch *start_candidate(fixture *f, uint8_t family) {
+    f->family = family;
+    if (family == 6) {
+        if (inet_pton(AF_INET6, "2001:db8::1", f->client) != 1 ||
+            inet_pton(AF_INET6, "2001:db8::4", f->server) != 1) {
+            return NULL;
+        }
+    } else if (inet_pton(AF_INET, "127.0.0.1", f->client) != 1 ||
+               inet_pton(AF_INET, "37.221.67.160", f->server) != 1) {
+        return NULL;
+    }
+
     d2k_hs_ops ops = {open_port, close_port, set_probe, del_probe, set_plan, del_plan,
                       start_probe, say, changed, f};
     d2k_httpsearch *hs = d2k_httpsearch_new(&ops);
     if (!hs) { return NULL; }
-    static const uint8_t server[16] = {37, 221, 67, 160};
-    d2k_httpsearch_portal(hs, "rutracker.org", 4, server, 1);
+    d2k_httpsearch_portal(hs, "rutracker.org", family, f->server, 1);
 
     d2k_hs_result base = {0};
     base.answer = D2K_HS_INJECTED;
     base.seq = f->job.seq;
     base.fd = f->job.fd;
     base.requests_sent = 2;
-    base.local_ip[0] = 127;
-    base.local_ip[3] = 1;
+    memcpy(base.local_ip, f->client, sizeof base.local_ip);
     base.local_port = ntohs(f->sport_be);
     d2k_httpsearch_result(hs, &base, 2);
     if (f->set_probe_count != 1) { d2k_httpsearch_free(hs); return NULL; }
@@ -102,22 +113,19 @@ static d2k_httpsearch *start_candidate(fixture *f) {
     trial.seq = f->job.seq;
     trial.fd = f->job.fd;
     trial.requests_sent = 2;
-    trial.local_ip[0] = 127;
-    trial.local_ip[3] = 1;
+    memcpy(trial.local_ip, f->client, sizeof trial.local_ip);
     trial.local_port = ntohs(f->sport_be);
     d2k_httpsearch_result(hs, &trial, 100);
     return hs;
 }
 
 static d2k_ev applied_event(const fixture *f, uint64_t execution_id) {
-    static const uint8_t server[16] = {37, 221, 67, 160};
     d2k_ev event = {0};
     event.kind = D2K_EV_APPLIED;
-    event.family = 4;
+    event.family = f->family;
     event.transport = 6;
-    event.low_ip[0] = 127;
-    event.low_ip[3] = 1;
-    memcpy(event.high_ip, server, sizeof server);
+    memcpy(event.low_ip, f->client, sizeof event.low_ip);
+    memcpy(event.high_ip, f->server, sizeof event.high_ip);
     event.low_port = ntohs(f->sport_be);
     event.high_port = 80;
     memcpy(event.plan_id, f->plan_id, 16);
@@ -125,16 +133,16 @@ static d2k_ev applied_event(const fixture *f, uint64_t execution_id) {
     event.execution_id = execution_id;
     event.execution_binding.epoch[0] = 7;
     event.execution_binding.generation = 1;
-    event.execution_binding.family = 4;
+    event.execution_binding.family = f->family;
     event.execution_binding.kind = D2K_BIND_NAME;
     event.execution_binding.shape = D2K_PLAN_SHAPE_HTTP;
     event.execution_binding.temporary = 1;
     return event;
 }
 
-static unsigned in_window_count(void) {
+static unsigned in_window_count(uint8_t family) {
     fixture f = {0};
-    d2k_httpsearch *hs = start_candidate(&f);
+    d2k_httpsearch *hs = start_candidate(&f, family);
     if (!hs) { return 99; }
     d2k_ev first = applied_event(&f, 1);
     d2k_ev duplicate = first;
@@ -148,9 +156,9 @@ static unsigned in_window_count(void) {
     return accepted;
 }
 
-static unsigned outside_window_count(void) {
+static unsigned outside_window_count(uint8_t family) {
     fixture f = {0};
-    d2k_httpsearch *hs = start_candidate(&f);
+    d2k_httpsearch *hs = start_candidate(&f, family);
     if (!hs) { return 99; }
     d2k_ev first = applied_event(&f, 1);
     d2k_ev second = applied_event(&f, 2);
@@ -163,13 +171,17 @@ static unsigned outside_window_count(void) {
 
 int main(void) {
     d2k_hs_probe_ms = 100;
-    unsigned inside = in_window_count();
-    unsigned outside = outside_window_count();
-    if (inside != 2 || outside != 1) {
-        fprintf(stderr, "unexpected donor APPLIED counts: inside=%u outside=%u\n",
-                inside, outside);
+    unsigned inside4 = in_window_count(4);
+    unsigned outside4 = outside_window_count(4);
+    unsigned inside6 = in_window_count(6);
+    unsigned outside6 = outside_window_count(6);
+    if (inside4 != 2 || outside4 != 1 || inside6 != 2 || outside6 != 1) {
+        fprintf(stderr, "unexpected donor APPLIED counts: ipv4 inside=%u outside=%u; "
+                        "ipv6 inside=%u outside=%u\n",
+                inside4, outside4, inside6, outside6);
         return 1;
     }
-    printf("inside=%u\noutside=%u\n", inside, outside);
+    printf("ipv4_inside=%u\nipv4_outside=%u\nipv6_inside=%u\nipv6_outside=%u\n",
+           inside4, outside4, inside6, outside6);
     return 0;
 }
