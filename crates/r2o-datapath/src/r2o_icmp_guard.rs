@@ -149,6 +149,16 @@ impl R2oIcmpGuard {
     pub fn r2o_dropped(&self) -> u64 {
         self.dropped
     }
+
+    pub fn r2o_stats_line(&self) -> Option<String> {
+        if self.seen == 0 && self.noted == 0 {
+            return None;
+        }
+        Some(format!(
+            "ICMP time-exceeded: получено {}, снято на свои фальшивки {}; фальшивок с пониженным TTL запомнено {}",
+            self.seen, self.dropped, self.noted
+        ))
+    }
 }
 
 fn r2o_is_icmp_packet(packet: &[u8]) -> bool {

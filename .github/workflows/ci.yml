@@ -440,7 +440,7 @@ jobs:
           printf 'matrix=%s\n' "$(sh scripts/ci-differential-shards.sh matrix)" >> "$GITHUB_OUTPUT"
 
   tcp-silence-current-differential:
-    name: C/Rust differential — current D2O / TCP silence
+    name: C/Rust differential — current D2O / TCP silence and ICMP stats
     needs: lint
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -471,6 +471,11 @@ jobs:
           R2O_DONOR_ROOT: ${{ github.workspace }}/d2o
           TMPDIR: ${{ runner.temp }}
         run: sh scripts/test-datapath-default-mode-differential.sh
+      - name: Сверить периодические ICMP counters с текущим D2O main
+        env:
+          R2O_DONOR_ROOT: ${{ github.workspace }}/d2o
+          TMPDIR: ${{ runner.temp }}
+        run: sh scripts/test-icmp-guard-current-differential.sh
 
   donor-differential:
     name: C/Rust differential — ${{ matrix.snapshot }} / ${{ matrix.shard }}

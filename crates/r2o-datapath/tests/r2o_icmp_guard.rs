@@ -249,3 +249,27 @@ fn r2o_ошибки_с_обрезанной_цитатой_или_неверны
     assert!(!guard.r2o_check(&fake, 1));
     assert_eq!(guard.r2o_dropped(), 0);
 }
+
+#[test]
+fn r2o_periodic_icmp_summary_matches_d2o_fields() {
+    let mut guard = R2oIcmpGuard::default();
+    assert_eq!(guard.r2o_stats_line(), None);
+
+    let fake = r2o_ipv4_udp(3, 1, 55435, 1228);
+    assert!(guard.r2o_note(&fake, 63, 100_000_000_000));
+    for _ in 0..2 {
+        assert_eq!(
+            guard.r2o_handle_at_hook(&R2O_FIELD_ICMP, Some(R2O_NF_INET_FORWARD), 100_033_333_333,),
+            Some(true)
+        );
+    }
+    assert_eq!(
+        guard.r2o_stats_line().as_deref(),
+        Some(
+            "ICMP time-exceeded: получено 2, снято на свои фальшивки 2; фальшивок с пониженным TTL запомнено 1"
+        )
+    );
+    if let Ok(path) = std::env::var("R2O_ICMP_GUARD_DIFF_OUTPUT") {
+        std::fs::write(path, format!("{}\n", guard.r2o_stats_line().unwrap())).unwrap();
+    }
+}

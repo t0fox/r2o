@@ -921,13 +921,8 @@ mod app {
                     capture_stats.tls_expired,
                     capture_stats.tls_full
                 );
-                if icmp_guard.r2o_seen() != 0 || icmp_guard.r2o_noted() != 0 {
-                    eprintln!(
-                        "r2o-datapath: ICMP: пакетов {}, снято ответов на собственные фальшивки {}, фальшивок с пониженным TTL учтено {}",
-                        icmp_guard.r2o_seen(),
-                        icmp_guard.r2o_dropped(),
-                        icmp_guard.r2o_noted()
-                    );
+                if let Some(line) = icmp_guard.r2o_stats_line() {
+                    eprintln!("r2o-datapath: {line}");
                 }
                 for entry in flow_journal.iter() {
                     let name = String::from_utf8_lossy(&entry.name[..usize::from(entry.name_len)]);
@@ -949,6 +944,9 @@ mod app {
                 r2o_log_process_stats(&journal_origin, Instant::now());
                 eprintln!("r2o-datapath: потеряно ядром {}", socket.lost_packets());
                 r2o_log_flow_table_stats(&tcp_sessions, &udp_sessions);
+                if let Some(line) = icmp_guard.r2o_stats_line() {
+                    eprintln!("r2o-datapath: {line}");
+                }
                 next_stats = options.stats_interval.map(|interval| now + interval);
             }
             if now >= next_session_sweep {

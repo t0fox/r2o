@@ -9354,3 +9354,9 @@ The UDP reply-drop stall test previously asserted only the Rust result despite i
 Check: R2O_DONOR_ROOT=/mnt/e/r2o-tooling/d2o-clean-main sh scripts/test-quic-http3-full-stage-differential.sh passed 11/11 in Debian 13 WSL2 (97.80 s). This covers one reply-drop stall variant; other transport errors, stall variants, and lifecycle remain open. The QUIC matrix row stays partial at 0 points and weighted parity remains 62/87 (71.26%).
 
 No QEMU run: the paired loopback protocol test exercises the changed fixture directly. Applicable QEMU checks remain short, OpenWrt ARM64 only.
+
+### Periodic ICMP summary matches current D2O - 2026-11-02
+
+D2O `d2kd.c::print_stats` emits the received/dropped/noted ICMP time-exceeded counters on each stats tick. R2O previously emitted its equivalent only at shutdown. `R2oIcmpGuard::r2o_stats_line` now feeds both periodic `--stats` output and shutdown output. The current-main differential sends the same captured IPv4 ICMP quote twice through the D2O and Rust guards and compares the summary line; both report 2 received, 2 dropped, and 1 noted fake packet. Its RED run failed on the missing R2O stats formatter before the implementation.
+
+Checks: `scripts/test-icmp-guard-current-differential.sh` passed against clean D2O `a63d964`; the full `r2o-datapath` suite passed 355 tests with 0 failures and 5 ignored, Rust formatting, ShellCheck, and `node tools/progress.mjs --check` passed. Matrix score remains 62/87 (71.26%); hold, scheduler and session periodic diagnostics remain open. No QEMU run: this logging path is exercised by the C/Rust differential and does not need a guest boot. Any QEMU work remains short, OpenWrt ARM64 only.

@@ -79,7 +79,7 @@
           "statusLabel": "Частично",
           "group": "Datapath",
           "mapping": "C `print_stats`/`self_cost` → Rust runtime diagnostics",
-          "evidence": "D2O периодически печатает CPU/RSS и packet/byte, ICMP, hold, scheduler и session diagnostics. Rust `--stats` теперь периодически и при shutdown печатает CPU/RSS процесса и flow-table. В D2O курсор `strtoul` остаётся на Linux state token S; счётчик полей доходит до 14/15 с нулевым CPU. Rust сохраняет это значение по дифференциальной фикстуре. OpenWrt 25.12.5 ARM64 QEMU production-release smoke in `scripts/test-controller-process-reapply-qemu.py` asserts CPU/RSS, TCP/UDP flow table and TLS/TCP capture summary on datapath shutdown; periodic parity for ICMP, hold, scheduler and session metrics rem"
+          "evidence": "D2O периодически печатает CPU/RSS и packet/byte, ICMP, hold, scheduler и session diagnostics. Rust `--stats` теперь периодически и при shutdown печатает CPU/RSS процесса, flow-table и ICMP counters. `scripts/test-icmp-guard-current-differential.sh` на одинаковых ICMP пакетах сверяет C/Rust счётчики и строку сводки: получено 2, снято 2, фальшивка запомнена 1. В D2O курсор `strtoul` остаётся на Linux state token S; счётчик полей доходит до 14/15 с нулевым CPU. Rust сохраняет это значение по дифференциальной фикстуре. OpenWrt 25.12.5 ARM64 QEMU production-release smoke in `scripts/test-controller"
         },
         {
           "id": 9,
@@ -658,7 +658,7 @@
       "statusLabel": "Частично",
       "group": "Datapath",
       "mapping": "C `print_stats`/`self_cost` → Rust runtime diagnostics",
-      "evidence": "D2O периодически печатает CPU/RSS и packet/byte, ICMP, hold, scheduler и session diagnostics. Rust `--stats` теперь периодически и при shutdown печатает CPU/RSS процесса и flow-table. В D2O курсор `strtoul` остаётся на Linux state token S; счётчик полей доходит до 14/15 с нулевым CPU. Rust сохраняет это значение по дифференциальной фикстуре. OpenWrt 25.12.5 ARM64 QEMU production-release smoke in `scripts/test-controller-process-reapply-qemu.py` asserts CPU/RSS, TCP/UDP flow table and TLS/TCP capture summary on datapath shutdown; periodic parity for ICMP, hold, scheduler and session metrics rem"
+      "evidence": "D2O периодически печатает CPU/RSS и packet/byte, ICMP, hold, scheduler и session diagnostics. Rust `--stats` теперь периодически и при shutdown печатает CPU/RSS процесса, flow-table и ICMP counters. `scripts/test-icmp-guard-current-differential.sh` на одинаковых ICMP пакетах сверяет C/Rust счётчики и строку сводки: получено 2, снято 2, фальшивка запомнена 1. В D2O курсор `strtoul` остаётся на Linux state token S; счётчик полей доходит до 14/15 с нулевым CPU. Rust сохраняет это значение по дифференциальной фикстуре. OpenWrt 25.12.5 ARM64 QEMU production-release smoke in `scripts/test-controller"
     },
     {
       "id": 9,
