@@ -57,7 +57,8 @@ ssize_t recv(int fd, void *buffer, size_t length, int flags) {
     if (fd == atomic_load_explicit(&nfqueue_fd, memory_order_acquire) &&
         atomic_fetch_add_explicit(&nfqueue_receives, 1, memory_order_relaxed) == 2) {
         static const char message[] = "FAULT-INJECTED recv(EIO) on NFQUEUE socket\n";
-        (void)write(STDERR_FILENO, message, sizeof(message) - 1);
+        const ssize_t written = write(STDERR_FILENO, message, sizeof(message) - 1);
+        (void)written;
         errno = EIO;
         return -1;
     }
