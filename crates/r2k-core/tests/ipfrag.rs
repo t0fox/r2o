@@ -268,5 +268,34 @@ fn d2o_ipfrag_builder_matches_r2o_on_ipv4_ipv6_shapes() {
             assert_eq!(actual, expected, "family {family}, shape {shape}");
         }
     }
+    for payload_len in [40_000_usize, 41_500] {
+        for family in [4_u8, 6] {
+            for shape in 1..=4 {
+                let record = take_ipfrag_oracle_bytes(&mut oracle, 6);
+                assert_eq!(&record[..3], &[0xca, family, shape]);
+                assert_eq!(
+                    usize::from(u16::from_be_bytes([record[3], record[4]])),
+                    payload_len
+                );
+                let input = if family == 4 {
+                    original_v4(payload_len)
+                } else {
+                    original_v6(payload_len)
+                };
+                let accepted =
+                    wire::build_udp_fragments_with_capacity(
+                        &input,
+                        &emission(payload_len, shape),
+                        26 * 1600,
+                    )
+                    .is_some();
+                assert_eq!(
+                    accepted,
+                    record[5] != 0,
+                    "D2O capacity refusal: family {family}, shape {shape}, bytes {payload_len}"
+                );
+            }
+        }
+    }
     assert!(oracle.is_empty(), "unused bytes in D2O oracle output");
 }

@@ -285,6 +285,15 @@ pub fn build_udp_packet(input: &[u8], emission: &Emission, out: &mut [u8]) -> Op
 
 /// Собрать набор UDP-фрагментов IPv4 или IPv6 по одной из четырёх форм QUIC.
 pub fn build_udp_fragments(input: &[u8], emission: &Emission) -> Option<Vec<Vec<u8>>> {
+    build_udp_fragments_with_capacity(input, emission, usize::MAX)
+}
+
+/// Собрать набор UDP-фрагментов, если он помещается в общий выходной буфер.
+pub fn build_udp_fragments_with_capacity(
+    input: &[u8],
+    emission: &Emission,
+    capacity: usize,
+) -> Option<Vec<Vec<u8>>> {
     if !(1..=4).contains(&emission.ipfrag) {
         return None;
     }
@@ -307,6 +316,13 @@ pub fn build_udp_fragments(input: &[u8], emission: &Emission) -> Option<Vec<Vec<
     let datagram = whole_packet.get(ip_header_len..whole_len)?;
     let cuts = udp_fragment_cuts(datagram.len(), emission.ipfrag)?;
     let reverse = emission.ipfrag > 1;
+    let fragment_header_len: usize = if view.family == 4 { 20 } else { 48 };
+    let needed = datagram
+        .len()
+        .checked_add(fragment_header_len.checked_mul(cuts.len())?)?;
+    if needed > capacity {
+        return None;
+    }
 
     let mut random = [0; 4];
     getrandom::getrandom(&mut random).ok()?;
@@ -321,7 +337,6 @@ pub fn build_udp_fragments(input: &[u8], emission: &Emission) -> Option<Vec<Vec<
             output_index
         };
         let (offset, length) = cuts[logical_index];
-        let fragment_header_len: usize = if view.family == 4 { 20 } else { 48 };
         let fragment_len = fragment_header_len.checked_add(length)?;
         if fragment_len > usize::from(u16::MAX) {
             return None;

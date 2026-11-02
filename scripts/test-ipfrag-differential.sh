@@ -20,6 +20,7 @@ trap 'rm -rf -- "$TEMP"' EXIT HUP INT TERM
 
 "$CC" -std=c11 -O2 -I "$D2O_ROOT/core/include" \
     "$D2O_ROOT/core/ipfrag.c" \
+    -I "$D2O_ROOT/datapath/include" \
     "$ROOT/crates/r2k-core/tests/d2o_ipfrag_oracle.c" \
     -o "$TEMP/oracle"
 "$TEMP/oracle" > "$TEMP/oracle.bin"

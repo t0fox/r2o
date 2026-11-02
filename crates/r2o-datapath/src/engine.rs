@@ -20,6 +20,10 @@ const TCP_STALL_PACKET_BUDGET: u64 = 25;
 const TCP_STALL_PACKET_SLACK: u64 = 3;
 const TCP_STALL_BUDGETS_MAX: usize = 8;
 const TCP_HELLO_WINDOW: u32 = 8;
+// Matches D2O d2kd.c OUT_BUF = D2K_RESULT_MAX * MAX_PKT (26 * 1600).
+const D2O_OUT_BUF_BYTES: usize = 26 * 1600;
+// Matches D2O core/quic.c::D2K_QUIC_MAX_DGRAM.
+const D2O_QUIC_MAX_DGRAM: usize = 1500;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct TcpEndpoint {
@@ -1621,7 +1625,7 @@ fn decide_packet_with_segment_cap(
     }
 
     if plan.qdeny != 0 {
-        return if is_authenticated_initial(payload) {
+        return if payload.len() <= D2O_QUIC_MAX_DGRAM && is_authenticated_initial(payload) {
             PacketDecision::Drop
         } else {
             PacketDecision::Accept
@@ -1642,7 +1646,7 @@ fn decide_packet_with_segment_cap(
         return PacketDecision::Accept;
     }
     if (plan.qsplit != 0 || length_probe || clearance || ttl_probe || fragment_probe || fake_probe)
-        && !is_authenticated_initial(payload)
+        && (payload.len() > D2O_QUIC_MAX_DGRAM || !is_authenticated_initial(payload))
     {
         return PacketDecision::Accept;
     }
@@ -1657,7 +1661,11 @@ fn decide_packet_with_segment_cap(
             return PacketDecision::Accept;
         }
         let emission = &actions.emits[0];
-        let Some(fragments) = r2k_core::wire::build_udp_fragments(packet, emission) else {
+        let Some(fragments) = r2k_core::wire::build_udp_fragments_with_capacity(
+            packet,
+            emission,
+            D2O_OUT_BUF_BYTES,
+        ) else {
             return PacketDecision::Accept;
         };
         let packets = fragments
@@ -2005,7 +2013,7 @@ pub fn validate_runtime_plan(plan: &Plan) -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        KEY_LEN, PacketDecision, R2oTcpFlowMetrics, TcpFlowKey, TcpSessions, decide,
+        KEY_LEN, PacketDecision, R2oTcpFlowMetrics, TcpFlowKey, TcpSessions, D2O_QUIC_MAX_DGRAM, decide,
         decide_with_session, decide_with_session_mtu, decide_with_session_probe, tcp_plan_input,
         validate_runtime_plan,
     };
@@ -3878,6 +3886,33 @@ mod tests {
                 "ordinary IPv{family} UDP stays untouched"
             );
         }
+
+        for payload_len in [40_000_usize, 41_500] {
+            let mut padded_initial = V1_INITIAL.to_vec();
+            padded_initial.resize(payload_len, 0);
+            for (family, input) in [
+                (4, ipv4_udp(&padded_initial)),
+                (6, ipv6_udp(&padded_initial)),
+            ] {
+                for shape in 1..=4 {
+                    let expected = d2o(oracle.as_os_str(), shape, &input);
+                    assert!(expected.len() >= 4);
+                    let expected_transmits = expected[0] != 0;
+                    let actual_transmits = matches!(
+                        decide(&quic_ipfrag_plan(shape), &input),
+                        PacketDecision::Transmit { .. }
+                    );
+                    assert_eq!(
+                        actual_transmits,
+                        expected_transmits,
+                        "IPv{family} payload {payload_len}, shape {shape}: D2O Initial limit"
+                    );
+                    if !expected_transmits {
+                        assert_eq!(&expected[..4], &[0, 0, 0, u8::MAX]);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -3894,6 +3929,13 @@ mod tests {
         let mut corrupted = V1_INITIAL.to_vec();
         corrupted[600] ^= 1;
         assert_eq!(decide(&plan, &ipv4_udp(&corrupted)), PacketDecision::Accept);
+
+        let mut oversized_initial = V1_INITIAL.to_vec();
+        oversized_initial.resize(D2O_QUIC_MAX_DGRAM + 1, 0);
+        assert_eq!(
+            decide(&plan, &ipv4_udp(&oversized_initial)),
+            PacketDecision::Accept
+        );
     }
 
     #[test]

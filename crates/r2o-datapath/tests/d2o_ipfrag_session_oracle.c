@@ -39,7 +39,9 @@ int main(int argc, char **argv) {
     long shape = strtol(argv[1], &end, 10);
     if (!end || *end || shape < 1 || shape > 4) return 2;
 
-    uint8_t packet[65536], output[65536];
+    uint8_t packet[65536];
+    /* Match d2kd.c OUT_BUF (D2K_WIRE_BATCH_MAX * MAX_PKT). */
+    uint8_t output[D2K_WIRE_BATCH_MAX * 1600u];
     size_t packet_len = fread(packet, 1, sizeof packet, stdin);
     if (ferror(stdin) || packet_len < 20) return 3;
 
