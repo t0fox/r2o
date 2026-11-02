@@ -216,3 +216,57 @@ fn udp_fragment_builder_rejects_invalid_shape_and_inapplicable_emission() {
     invalid.poison = 1;
     assert!(wire::build_udp_fragments(&original, &invalid).is_none());
 }
+
+fn take_ipfrag_oracle_bytes<'a>(oracle: &mut &'a [u8], length: usize) -> &'a [u8] {
+    let (bytes, rest) = oracle.split_at(length);
+    *oracle = rest;
+    bytes
+}
+
+fn normalize_fragment_id(family: u8, fragment: &mut [u8]) {
+    match family {
+        4 => {
+            fragment[4..6].fill(0);
+            fragment[10..12].fill(0);
+        }
+        6 => fragment[44..48].fill(0),
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+#[ignore = "requires C oracle built from the pinned current D2O main"]
+fn d2o_ipfrag_builder_matches_r2o_on_ipv4_ipv6_shapes() {
+    let oracle_path =
+        std::env::var_os("D2O_IPFRAG_ORACLE").expect("run scripts/test-ipfrag-differential.sh");
+    let oracle_data = std::fs::read(oracle_path).expect("read D2O ipfrag oracle output");
+    let mut oracle = oracle_data.as_slice();
+
+    for (family, original) in [(4_u8, original_v4(1200)), (6_u8, original_v6(1200))] {
+        for shape in 1..=4 {
+            let record = take_ipfrag_oracle_bytes(&mut oracle, 3);
+            assert_eq!(&record[..2], &[family, shape]);
+            let count = usize::from(record[2]);
+            let mut expected = Vec::with_capacity(count);
+            for _ in 0..count {
+                let length = usize::from(u16::from_be_bytes(
+                    take_ipfrag_oracle_bytes(&mut oracle, 2).try_into().unwrap(),
+                ));
+                expected.push(take_ipfrag_oracle_bytes(&mut oracle, length).to_vec());
+            }
+
+            let emitted = emission(1200, shape);
+            let mut actual = wire::build_udp_fragments(&original, &emitted)
+                .expect("R2O fragment builder accepts matching D2O input");
+            for fragment in &mut expected {
+                normalize_fragment_id(family, fragment);
+            }
+            for fragment in &mut actual {
+                normalize_fragment_id(family, fragment);
+            }
+
+            assert_eq!(actual, expected, "family {family}, shape {shape}");
+        }
+    }
+    assert!(oracle.is_empty(), "unused bytes in D2O oracle output");
+}
