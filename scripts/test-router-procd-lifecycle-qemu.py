@@ -16,7 +16,7 @@ import subprocess
 import tempfile
 import time
 
-D2O_REVISION = "304ba893dd37197128ac8799c0495b035f6a38c0"
+D2O_REVISION = "a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe"
 
 
 def require_on_e(path: pathlib.Path, label: str) -> pathlib.Path:
@@ -116,7 +116,7 @@ def main() -> int:
         entries = [
             ("etc/init.d/r2o", r2o_script.read_bytes(), stat.S_IFREG | 0o755),
             ("etc/rc.d/S99r2o", b"../init.d/r2o", stat.S_IFLNK | 0o777),
-            ("etc/init.d/d2k", donor_script.read_bytes(), stat.S_IFREG | 0o755),
+            ("etc/init.d/d2k", donor_script.read_bytes().replace(b"\r\n", b"\n"), stat.S_IFREG | 0o755),
             ("etc/rc.d/S99d2k", b"../init.d/d2k", stat.S_IFLNK | 0o777),
         ]
         archive = b"".join(cpio_entry(name, data, mode, index + 1)
@@ -160,7 +160,7 @@ def main() -> int:
             # The serial console appears during preinit, before procd starts rc.d services.
             autostarted = guest.command(
                 "wait for cold-boot waiters",
-                "i=0; while [ \"$i\" -lt 35 ] && ! ps w | grep -q '[b]oot_wait'; "
+                "i=0; while [ \"$i\" -lt 35 ] && ! { ps w | grep -q '[r]2o boot_wait' && ps w | grep -q '[d]2k boot_wait'; }; "
                 "do i=$((i + 1)); sleep 1; done; "
                 "ps w | grep '[b]oot_wait' || echo NO_BOOT_WAITERS",
                 timeout=40,
@@ -177,8 +177,26 @@ def main() -> int:
             )
             if "/etc/init.d/r2o boot_wait" not in workers or "/etc/init.d/d2k boot_wait" not in workers:
                 raise AssertionError("both rc.d entries must start their procd waiters")
+            detached_waiters = guest.command(
+                "detach both waiters before /opt appears",
+                '/etc/init.d/r2o detach; echo R2O_DETACH_RC=$?; '
+                '/etc/init.d/d2k detach; echo D2O_DETACH_RC=$?; sleep 1; '
+                'ps w | grep "[b]oot_wait" || echo NO_BOOT_WORKERS',
+            )
+            if "R2O_DETACH_RC=0" not in detached_waiters or "D2O_DETACH_RC=0" not in detached_waiters:
+                raise AssertionError(f"detach must be exposed by both init scripts: {detached_waiters[-1000:]}")
+            if "NO_BOOT_WORKERS" not in detached_waiters:
+                raise AssertionError("detach must cancel both pending boot waiters")
+
+            restarted_waiters = guest.command(
+                "restart detached waiters",
+                '/etc/rc.d/S99r2o start; /etc/rc.d/S99d2k start; sleep 1; '
+                'ps w | grep "[b]oot_wait"',
+            )
+            if "/etc/init.d/r2o boot_wait" not in restarted_waiters or "/etc/init.d/d2k boot_wait" not in restarted_waiters:
+                raise AssertionError("detached waiters must be startable again")
             stopped_waiters = guest.command(
-                "cancel both waiters before /opt appears",
+                "stop restarted waiters before /opt appears",
                 '/etc/init.d/r2o stop; /etc/init.d/d2k stop; sleep 1; '
                 'ps w | grep "[b]oot_wait" || echo NO_BOOT_WORKERS',
             )

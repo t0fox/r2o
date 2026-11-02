@@ -1,0 +1,30 @@
+[
+  {
+    "sha": "260cab8177491ab355eab11cb6c8003c1a757bfd",
+    "date": "2026-10-30",
+    "points": 46,
+    "weight": 77,
+    "percent": 59.74
+  },
+  {
+    "sha": "fb8fe95a1882d89f92e72a5665849ea1b3864b62",
+    "date": "2026-10-31",
+    "points": 58,
+    "weight": 87,
+    "percent": 66.67
+  },
+  {
+    "sha": "51c74db42e5c7dbf8771d768c0e1b0b2c0317980",
+    "date": "2026-11-01",
+    "points": 62,
+    "weight": 87,
+    "percent": 71.26
+  },
+  {
+    "sha": "e1ae2ecbf996e282ab7d83d1dafffd80f626207f",
+    "date": "2026-11-02",
+    "points": 62,
+    "weight": 87,
+    "percent": 71.26
+  }
+]

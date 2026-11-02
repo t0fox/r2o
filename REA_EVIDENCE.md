@@ -9360,3 +9360,12 @@ No QEMU run: the paired loopback protocol test exercises the changed fixture dir
 D2O `d2kd.c::print_stats` emits the received/dropped/noted ICMP time-exceeded counters on each stats tick. R2O previously emitted its equivalent only at shutdown. `R2oIcmpGuard::r2o_stats_line` now feeds both periodic `--stats` output and shutdown output. The current-main differential sends the same captured IPv4 ICMP quote twice through the D2O and Rust guards and compares the summary line; both report 2 received, 2 dropped, and 1 noted fake packet. Its RED run failed on the missing R2O stats formatter before the implementation.
 
 Checks: `scripts/test-icmp-guard-current-differential.sh` passed against clean D2O `a63d964`; the full `r2o-datapath` suite passed 355 tests with 0 failures and 5 ignored, Rust formatting, ShellCheck, and `node tools/progress.mjs --check` passed. Matrix score remains 62/87 (71.26%); hold, scheduler and session periodic diagnostics remain open. No QEMU run: this logging path is exercised by the C/Rust differential and does not need a guest boot. Any QEMU work remains short, OpenWrt ARM64 only.
+
+
+### OpenWrt ARM64 procd detach parity - 2026-11-02
+
+Extended the existing real-procd QEMU differential with an explicit detach case. The guest is OpenWrt 25.12.5 on ARM64; the clean D2O source is pinned at a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe. A first RED run showed the D2O detach command removed its pending waiter while R2O left its waiter running. The test fixture normalizes the donor init script from Windows CRLF to Linux LF when creating the cpio overlay.
+
+The minimal R2O change registers the detach action and calls procd_kill r2o, matching D2O. GREEN: both waiters start on cold boot, detach cancels both, both can be started again, stop cancels both before /opt appears, and delayed /opt fixtures receive exactly one start and stop apiece. The final QEMU run passed and printed: D2O/R2O procd lifecycle matches: delayed /opt, canceled waiter, one start/stop, no repeat.
+
+The host-side router init bridge test also passed. QEMU serial log: E:/r2o-tooling/tests/r2o-procd-differential-2026-11-02.log; QEMU process log: E:/r2o-tooling/tests/r2o-procd-differential-2026-11-02-qemu.log. The guest test uses current R2O main plus the local detach change. This proves explicit waiter cancellation only; crash recovery, discovery/classification, exact APPLIED proof, and the complete automatic chain remain open. The matrix lifecycle contract remains partial at 0/3; weighted parity remains 62/87 (71.26%).\n

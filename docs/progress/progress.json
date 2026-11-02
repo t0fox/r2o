@@ -269,7 +269,7 @@
           "statusLabel": "Частично",
           "group": "Discovery",
           "mapping": "C scheduler/catalog/service lifecycle → Rust controller/manager/router init",
-          "evidence": "OpenWrt 25.12.5 ARM64 QEMU cold boot (R2O 2f6f59e, D2O 304ba893) automatically starts both S99 procd waiters before manual commands; repeated start adds none and stop cancels both. Delayed /opt fixture gets one start/stop. Log: E:/r2o-tooling/openwrt-qemu-armv8/autoboot-check-final-2026-11-01/r2o-procd-differential-2026-11-01.log. Earlier controller SIGKILL/heal and engine start/stop match D2O. The short production-release OpenWrt 25.12.5 ARM64 QEMU check in `scripts/test-controller-process-reapply-qemu.py` verifies the persisted catalog on the same qcow2 after a second guest boot and checks `"
+          "evidence": "Current OpenWrt 25.12.5 ARM64 procd QEMU run on 2026-11-02 (clean D2O a63d964; current R2O main plus the local detach patch): cold boot starts both waiters; detach cancels each, both restart, stop cancels them before /opt, and delayed /opt invokes each fixture start/stop once. Log: E:/r2o-tooling/tests/r2o-procd-differential-2026-11-02.log. This proves explicit waiter cancellation only; supervised crash recovery, discovery/classification, exact APPLIED proof, and the full automatic chain remain open. OpenWrt 25.12.5 ARM64 QEMU cold boot (R2O 2f6f59e, D2O 304ba893) automatically starts both S99"
         },
         {
           "id": 22,
@@ -790,7 +790,7 @@
       "statusLabel": "Частично",
       "group": "Discovery",
       "mapping": "C scheduler/catalog/service lifecycle → Rust controller/manager/router init",
-      "evidence": "OpenWrt 25.12.5 ARM64 QEMU cold boot (R2O 2f6f59e, D2O 304ba893) automatically starts both S99 procd waiters before manual commands; repeated start adds none and stop cancels both. Delayed /opt fixture gets one start/stop. Log: E:/r2o-tooling/openwrt-qemu-armv8/autoboot-check-final-2026-11-01/r2o-procd-differential-2026-11-01.log. Earlier controller SIGKILL/heal and engine start/stop match D2O. The short production-release OpenWrt 25.12.5 ARM64 QEMU check in `scripts/test-controller-process-reapply-qemu.py` verifies the persisted catalog on the same qcow2 after a second guest boot and checks `"
+      "evidence": "Current OpenWrt 25.12.5 ARM64 procd QEMU run on 2026-11-02 (clean D2O a63d964; current R2O main plus the local detach patch): cold boot starts both waiters; detach cancels each, both restart, stop cancels them before /opt, and delayed /opt invokes each fixture start/stop once. Log: E:/r2o-tooling/tests/r2o-procd-differential-2026-11-02.log. This proves explicit waiter cancellation only; supervised crash recovery, discovery/classification, exact APPLIED proof, and the full automatic chain remain open. OpenWrt 25.12.5 ARM64 QEMU cold boot (R2O 2f6f59e, D2O 304ba893) automatically starts both S99"
     },
     {
       "id": 21,
