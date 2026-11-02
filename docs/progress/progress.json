@@ -269,7 +269,7 @@
           "statusLabel": "Частично",
           "group": "Discovery",
           "mapping": "C scheduler/catalog/service lifecycle → Rust controller/manager/router init",
-          "evidence": "OpenWrt 25.12.5 ARM64 QEMU cold boot (R2O 2f6f59e, D2O 304ba893) automatically starts both S99 procd waiters before manual commands; repeated start adds none and stop cancels both. Delayed /opt fixture gets one start/stop. Log: E:/r2o-tooling/openwrt-qemu-armv8/autoboot-check-final-2026-11-01/r2o-procd-differential-2026-11-01.log. Earlier controller SIGKILL/heal and engine start/stop match D2O. Persistent-rootfs boot, real daemon recovery, reboot/reapply and full ACK/APPLIED/persist remain open."
+          "evidence": "OpenWrt 25.12.5 ARM64 QEMU cold boot (R2O 2f6f59e, D2O 304ba893) automatically starts both S99 procd waiters before manual commands; repeated start adds none and stop cancels both. Delayed /opt fixture gets one start/stop. Log: E:/r2o-tooling/openwrt-qemu-armv8/autoboot-check-final-2026-11-01/r2o-procd-differential-2026-11-01.log. Earlier controller SIGKILL/heal and engine start/stop match D2O. The short production-release OpenWrt 25.12.5 ARM64 QEMU check in `scripts/test-controller-process-reapply-qemu.py` verifies the persisted catalog on the same qcow2 after a second guest boot and checks `"
         },
         {
           "id": 22,
@@ -790,7 +790,7 @@
       "statusLabel": "Частично",
       "group": "Discovery",
       "mapping": "C scheduler/catalog/service lifecycle → Rust controller/manager/router init",
-      "evidence": "OpenWrt 25.12.5 ARM64 QEMU cold boot (R2O 2f6f59e, D2O 304ba893) automatically starts both S99 procd waiters before manual commands; repeated start adds none and stop cancels both. Delayed /opt fixture gets one start/stop. Log: E:/r2o-tooling/openwrt-qemu-armv8/autoboot-check-final-2026-11-01/r2o-procd-differential-2026-11-01.log. Earlier controller SIGKILL/heal and engine start/stop match D2O. Persistent-rootfs boot, real daemon recovery, reboot/reapply and full ACK/APPLIED/persist remain open."
+      "evidence": "OpenWrt 25.12.5 ARM64 QEMU cold boot (R2O 2f6f59e, D2O 304ba893) automatically starts both S99 procd waiters before manual commands; repeated start adds none and stop cancels both. Delayed /opt fixture gets one start/stop. Log: E:/r2o-tooling/openwrt-qemu-armv8/autoboot-check-final-2026-11-01/r2o-procd-differential-2026-11-01.log. Earlier controller SIGKILL/heal and engine start/stop match D2O. The short production-release OpenWrt 25.12.5 ARM64 QEMU check in `scripts/test-controller-process-reapply-qemu.py` verifies the persisted catalog on the same qcow2 after a second guest boot and checks `"
     },
     {
       "id": 21,
