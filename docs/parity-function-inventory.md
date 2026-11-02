@@ -6,6 +6,8 @@ This document records datapath/NFQUEUE plus first core HTTP/TLS/ECH/verification
 
 C functions are grouped by their source module/API family. Static helpers remain within the owning algorithm group; test harnesses, planlab, and ctlprobe are not production modules. This inventory records callers, branches, state, timers, errors, side effects, and tests at the module boundary. It does not imply that every listed branch has equal C/Rust proof.
 
+D2O also ships relay-enroll and relay-gate as separate VPS services with independent binaries, installers and systemd units. The R2O README describes a local router product without a mandatory VPS or remote relay, and its workspace has no counterparts for these services. Their server-side implementations are therefore unported and outside this router-runtime inventory; router-side Meta DNS and install/update paths remain covered by their matrix rows.
+
 ## Packet path and state
 
 D2O datapath/d2kd.c main opens/configures raw-send and NFQUEUE resources, optionally opens the control socket, polls queue/control descriptors, parses each netlink packet, selects the normal or controller-probe session entrypoint, applies an MTU-derived TCP segment cap when required, and issues accept/drop/replacement verdicts. The loop also flushes held TCP/UDP packets, emits due raw work, advances UDP receive sequencing, pumps control events, and periodically sweeps and expires session state.
