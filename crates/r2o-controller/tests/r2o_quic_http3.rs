@@ -1189,8 +1189,9 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                             .close(quinn::VarInt::from_u32(1), b"test transport close");
                         break;
                     }
+                    let path = request.uri().path();
                     let status = if matches!(
-                        request.uri().path(),
+                        path,
                         "/stage"
                             | "/content-length"
                             | "/incomplete-over-threshold"
@@ -1207,9 +1208,12 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                             | "/body-close"
                             | "/partial-close"
                             | "/budget-close"
+                            | "/no-content"
                     ) {
-                        if request.uri().path() == "/refuse" {
+                        if path == "/refuse" {
                             451
+                        } else if path == "/no-content" {
+                            204
                         } else {
                             200
                         }
@@ -1219,27 +1223,33 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                     if request.uri().path() == "/slow-headers" {
                         tokio::time::sleep(Duration::from_secs(5)).await;
                     }
-                    let content_length = if request.uri().path() == "/content-length" {
+                    let content_length = if path == "/content-length" {
                         "100"
-                    } else if request.uri().path() == "/incomplete-over-threshold" {
+                    } else if path == "/incomplete-over-threshold" {
                         "131072"
                     } else {
                         "13"
                     };
+                    let response = http::Response::builder().status(status);
+                    let response = if path == "/no-content" {
+                        response
+                    } else {
+                        response.header(http::header::CONTENT_LENGTH, content_length)
+                    };
                     if stream
-                        .send_response(
-                            http::Response::builder()
-                                .status(status)
-                                .header(http::header::CONTENT_LENGTH, content_length)
-                                .body(())
-                                .unwrap(),
-                        )
+                        .send_response(response.body(()).unwrap())
                         .await
                         .is_err()
                     {
                         break;
                     }
-                    if request.uri().path() == "/incomplete-over-threshold" {
+                    if path == "/no-content" {
+                        if stream.finish().await.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                    if path == "/incomplete-over-threshold" {
                         for _ in 0..8 {
                             if stream
                                 .send_data(bytes::Bytes::from(vec![b'x'; 8 * 1024]))
@@ -1421,6 +1431,72 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
         c_field("requests").parse::<u32>().unwrap(),
         rust_result.requests,
         "D2O={c_result} R2O={rust_result:?}"
+    );
+
+    let empty_c_binary = d2o_binary.clone();
+    let empty_c_address = server_address;
+    let empty_c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(empty_c_binary)
+            .args([
+                "127.0.0.1",
+                &empty_c_address.port().to_string(),
+                "localhost",
+                "/no-content",
+                "0",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        empty_c_output.status.success(),
+        "D2O 204 response failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&empty_c_output.stdout),
+        String::from_utf8_lossy(&empty_c_output.stderr)
+    );
+    let empty_c_result = String::from_utf8(empty_c_output.stdout).unwrap();
+    let empty_c_field = |name: &str| {
+        empty_c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {empty_c_result}"))
+    };
+
+    let empty_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    empty_socket.connect(server_address).unwrap();
+    let mut empty_roots = RootCertStore::empty();
+    empty_roots.add(certificate_der.clone()).unwrap();
+    let empty_rust_result = r2o_quic_http3_get(
+        empty_socket,
+        server_address,
+        "localhost",
+        "/no-content",
+        Duration::from_secs(5),
+        empty_roots,
+    )
+    .await;
+    let empty_rust_verdict =
+        r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&empty_rust_result);
+    assert_eq!(empty_rust_result.status, 204, "R2O={empty_rust_result:?}");
+    assert_eq!(empty_rust_result.body_bytes, 0, "R2O={empty_rust_result:?}");
+    assert!(empty_rust_result.complete, "R2O={empty_rust_result:?}");
+    assert_eq!(empty_c_field("verdict"), format!("{empty_rust_verdict:?}"));
+    assert_eq!(empty_c_field("verdict"), "Pass");
+    assert_eq!(
+        empty_c_field("complete"),
+        "1",
+        "D2O={empty_c_result} R2O={empty_rust_result:?}"
+    );
+    assert_eq!(
+        empty_c_field("app_bytes").parse::<u64>().unwrap(),
+        empty_rust_result.app_bytes,
+        "D2O={empty_c_result} R2O={empty_rust_result:?}"
+    );
+    assert_eq!(
+        empty_c_field("requests").parse::<u32>().unwrap(),
+        empty_rust_result.requests,
+        "D2O={empty_c_result} R2O={empty_rust_result:?}"
     );
 
     let incomplete_c_binary = d2o_binary.clone();
