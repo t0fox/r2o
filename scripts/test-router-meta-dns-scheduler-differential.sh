@@ -67,6 +67,7 @@ run_stop() {
     scheduler_pid=$4
     eval "$source"
     if [ "$implementation" = R2O ]; then eval "$r2o_dns_running"; eval "$r2o_dns_stop"; fi
+    disable_supervisor() { :; }
     stop_pidfile() {
         case "$1" in
             "$scheduler_pid") printf '%s:stop\n' "$implementation" >> "$events" ;;

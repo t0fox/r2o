@@ -43,7 +43,7 @@ run_init() {
     R2O_LOG_MAINTENANCE=$TEMP/missing-log \
     R2O_FIREWALL_WATCHDOG=$TEMP/missing-watchdog \
     R2O_PPE_ADAPTER=$TEMP/missing-ppe \
-        "$INIT" "$@"
+        sh "$INIT" "$@"
 }
 
 run_init engine-stop >"$TEMP/stop.log" 2>&1 || {
