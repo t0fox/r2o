@@ -86,6 +86,11 @@ kill -TERM "$CPID"
 wait "$CPID"
 kill -TERM "$DPID"
 wait "$DPID"
+grep -Fq 'процессор ' /etc/r2o-test/r2o-datapath.log
+grep -Fq ' RSS ' /etc/r2o-test/r2o-datapath.log
+grep -Fq 'TCP-потоки' /etc/r2o-test/r2o-datapath.log
+grep -Fq 'снимки TLS/TCP:' /etc/r2o-test/r2o-datapath.log
+echo R2O_STATS_SHUTDOWN_OK=1
 cmp /etc/r2o-test/catalog.json "$CAT"
 echo "R2O_REAPPLY_OK=$PHASE"
 sync
@@ -203,7 +208,7 @@ def boot_once(
         if b"OpenWrt 25.12.5" not in boot:
             raise AssertionError("expected OpenWrt 25.12.5 ARM64 guest")
         output = guest.command(f"persistent catalog {phase}", f"sh /etc/r2o-test/process-reapply.sh {phase}; echo QEMU_PHASE_EXIT=$?")
-        if "QEMU_PHASE_EXIT=0" not in output or f"R2O_REAPPLY_OK={phase}" not in output:
+        if ("QEMU_PHASE_EXIT=0" not in output or f"R2O_REAPPLY_OK={phase}" not in output or "R2O_STATS_SHUTDOWN_OK=1" not in output):
             raise AssertionError(f"process reapply phase {phase} failed; see {serial_log}")
         print(f"OpenWrt ARM64 QEMU {phase}: persistent catalog reapply passed.")
     finally:
