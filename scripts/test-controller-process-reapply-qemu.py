@@ -12,87 +12,134 @@ import stat
 import subprocess
 import time
 
+SERVICE_MANAGER_SCRIPT = r"""#!/bin/sh
+set -eu
+[ "${1:-}" = exec ] || exit 2
+shift
+root=
+component=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --root) root=$2; shift 2 ;;
+        --component) component=$2; shift 2 ;;
+        --) shift; break ;;
+        *) shift ;;
+    esac
+done
+case "$component" in
+    r2o-controller|r2o-datapath) exec "$root/releases/qemu/builds/$component-linux-aarch64" "$@" ;;
+    *) exit 2 ;;
+esac
+"""
+
+SERVICE_FIREWALL_SCRIPT = r"""#!/bin/sh
+set -eu
+case "${1:-}" in
+    backend) echo nft ;;
+    ipv6-enabled) echo 0 ;;
+    status) test -e /tmp/r2o-test/firewall-installed ;;
+    up) : > /tmp/r2o-test/firewall-installed ;;
+    down) rm -f /tmp/r2o-test/firewall-installed ;;
+    flowoffload-ensure|flowoffload-restore|dns-ensure) ;;
+    *) echo "unexpected firewall action: ${1:-}" >&2; exit 2 ;;
+esac
+"""
+
+SERVICE_CONFIG = r"""MODE=apply
+QUEUE_NUM=65440
+QUEUE_NUM6=65441
+MARK=291
+PROBE_MARK=0
+IPV6_ENABLED=0
+PANEL_LISTEN=
+TG_ENABLED=0
+R2O_PPE_DEOFFLOAD=0
+STATE_DIR=/mnt/r2o-persist/r2o-process-reapply
+"""
+
 GUEST_SCRIPT = r"""#!/bin/sh
 set -eu
-DP=/etc/r2o-test/r2o-datapath
-CTRL=/etc/r2o-test/r2o-controller
-SOCK=/tmp/r2o-process-reapply.sock
+ROOT=/etc/r2o-test
+CTRL=$ROOT/releases/qemu/builds/r2o-controller-linux-aarch64
+SERVICE=$ROOT/S99r2o
 CAT=/mnt/r2o-persist/r2o-process-reapply/catalog.json
-QUEUE=65440
 PHASE=$1
 mkdir -p /mnt/r2o-persist /mnt/r2o-persist/r2o-process-reapply
 mount -t ext4 /dev/vda /mnt/r2o-persist
 mkdir -p /mnt/r2o-persist/r2o-process-reapply
-if [ ! -s "$CAT" ]; then cp /etc/r2o-test/catalog.json "$CAT"; fi
-cmp /etc/r2o-test/catalog.json "$CAT"
+if [ "$PHASE" = first ] && [ ! -s "$CAT" ]; then cp "$ROOT/catalog.json" "$CAT"; fi
+cmp "$ROOT/catalog.json" "$CAT"
 "$CTRL" --check-catalog "$CAT"
 if command -v apk >/dev/null 2>&1; then
-    if ! apk add --allow-untrusted --force-non-repository --no-network /etc/r2o-test/kmod-nfnetlink-queue.apk /etc/r2o-test/kmod-nft-queue.apk >/tmp/r2o-apk.log 2>&1; then cat /tmp/r2o-apk.log >&2; exit 1; fi
+    if ! apk add --allow-untrusted --force-non-repository --no-network "$ROOT/kmod-nfnetlink-queue.apk" "$ROOT/kmod-nft-queue.apk" >/tmp/r2o-apk.log 2>&1; then cat /tmp/r2o-apk.log >&2; exit 1; fi
 fi
 if command -v modprobe >/dev/null 2>&1; then
     modprobe nfnetlink_queue
     modprobe nft_queue
 fi
-
-
-if command -v nft >/dev/null 2>&1; then
-    nft add table inet r2o_reapply
-    nft add chain inet r2o_reapply output '{ type filter hook output priority 0; policy accept; }'
-    nft add rule inet r2o_reapply output ip daddr 127.0.0.1 tcp dport 65000 queue num "$QUEUE" bypass
-fi
-"$DP" --mode apply --queue "$QUEUE" --family ipv4 --controller-only --control "$SOCK" --mark 291 --stats 0 >/etc/r2o-test/r2o-datapath.log 2>&1 &
-DPID=$!
-i=0
-while [ ! -S "$SOCK" ]; do
-    if ! kill -0 "$DPID" 2>/dev/null; then cat /etc/r2o-test/r2o-datapath.log >&2; exit 1; fi
-    sleep 1
-    i=$((i + 1))
-    if [ "$i" -ge 30 ]; then cat /etc/r2o-test/r2o-datapath.log >&2; exit 1; fi
-done
-start_controller() {
+export R2O_DIR="$ROOT" R2O_CONFIG="$ROOT/config" R2O_INIT="$SERVICE" R2O_MANAGER="$ROOT/r2o-manager"
+export R2O_FIREWALL="$ROOT/r2o-firewall.sh" R2O_LOG_MAINTENANCE="$ROOT/missing-log-worker"
+export R2O_FIREWALL_WATCHDOG="$ROOT/missing-firewall-watchdog" R2O_PPE_ADAPTER="$ROOT/missing-ppe"
+export R2O_RUNTIME_DIR=/tmp/r2o-test/runtime
+wait_for_sync() {
     label=$1
-    log=$2
-    "$CTRL" --serve "$SOCK" "$CAT" >"$log" 2>&1 &
-    CPID=$!
+    expected=$2
+    log=$ROOT/log/r2o-controller4.log
     i=0
-    while ! grep -Fq 'каталог синхронизирован:' "$log"; do
-        if ! kill -0 "$CPID" 2>/dev/null; then cat "$log" >&2; cat /etc/r2o-test/r2o-datapath.log >&2; return 1; fi
+    while [ "$i" -lt 45 ]; do
+        count=$(grep -Fc 'каталог синхронизирован:' "$log" 2>/dev/null || true)
+        [ -n "$count" ] || count=0
+        if [ "$count" -ge "$expected" ]; then break; fi
+        pid=$(cat "$ROOT/run/r2o-controller4.pid" 2>/dev/null || true)
+        if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then cat "$ROOT/engine-$label.log" >&2; cat "$log" >&2; exit 1; fi
         sleep 1
         i=$((i + 1))
-        if [ "$i" -ge 45 ]; then cat "$log" >&2; cat /etc/r2o-test/r2o-datapath.log >&2; return 1; fi
     done
+    count=$(grep -Fc 'каталог синхронизирован:' "$log" 2>/dev/null || true)
+    [ -n "$count" ] || count=0
+    if [ "$count" -lt "$expected" ]; then cat "$ROOT/engine-$label.log" >&2; cat "$log" >&2; exit 1; fi
     line=$(grep -F 'каталог синхронизирован:' "$log" | tail -n 1)
-    case "$line" in *'отправлено 0'*) echo "$label: no commands sent: $line" >&2; return 1;; esac
-    case "$line" in *'пропущено 0'*) ;; *) echo "$label: catalog entries skipped: $line" >&2; return 1;; esac
-    if grep -q 'датапат отверг' "$log"; then cat "$log" >&2; return 1; fi
-    sleep 1
-    if ! kill -0 "$CPID" 2>/dev/null; then cat "$log" >&2; return 1; fi
+    case "$line" in 'каталог синхронизирован: отправлено 2, пропущено 0') ;; *) echo "$label: unexpected catalog sync: $line" >&2; exit 1;; esac
+    if grep -q 'датапат отверг' "$log"; then cat "$log" >&2; exit 1; fi
+    pid=$(cat "$ROOT/run/r2o-controller4.pid" 2>/dev/null || true)
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then cat "$log" >&2; exit 1; fi
     echo "$label: $line"
 }
+start_engine() {
+    label=$1
+    expected=$2
+    if ! "$SERVICE" engine-start >"$ROOT/engine-$label.log" 2>&1; then cat "$ROOT/engine-$label.log" >&2; exit 1; fi
+    wait_for_sync "$label" "$expected"
+}
 if [ "$PHASE" = first ]; then
-    start_controller first-start /etc/r2o-test/r2o-controller-first.log
+    start_engine first-start 1
+    DPID=$(cat "$ROOT/run/r2o-datapath4.pid")
+    CPID=$(cat "$ROOT/run/r2o-controller4.pid")
+    if ! "$SERVICE" engine-start >"$ROOT/engine-idempotent.log" 2>&1; then cat "$ROOT/engine-idempotent.log" >&2; exit 1; fi
+    [ "$(cat "$ROOT/run/r2o-datapath4.pid")" = "$DPID" ] || { echo "idempotent engine-start replaced datapath" >&2; exit 1; }
+    [ "$(cat "$ROOT/run/r2o-controller4.pid")" = "$CPID" ] || { echo "idempotent engine-start replaced controller" >&2; exit 1; }
     kill -KILL "$CPID"
-    wait "$CPID" 2>/dev/null || true
-    CPID=
     sleep 1
-    start_controller after-crash /etc/r2o-test/r2o-controller-after-crash.log
+    start_engine after-crash 2
+    NEW_DPID=$(cat "$ROOT/run/r2o-datapath4.pid")
+    NEW_CPID=$(cat "$ROOT/run/r2o-controller4.pid")
+    [ "$NEW_DPID" != "$DPID" ] || { echo "crash recovery did not restart datapath" >&2; exit 1; }
+    [ "$NEW_CPID" != "$CPID" ] || { echo "crash recovery did not restart controller" >&2; exit 1; }
 elif [ "$PHASE" = reboot ]; then
-    start_controller after-reboot /etc/r2o-test/r2o-controller-after-reboot.log
+    start_engine after-reboot 1
 else
     echo "unknown phase: $PHASE" >&2
     exit 2
 fi
-kill -TERM "$CPID"
-wait "$CPID"
-kill -TERM "$DPID"
-wait "$DPID"
-grep -Fq 'процессор ' /etc/r2o-test/r2o-datapath.log
-grep -Fq ' RSS ' /etc/r2o-test/r2o-datapath.log
-grep -Fq 'TCP-потоки' /etc/r2o-test/r2o-datapath.log
-grep -Fq 'снимки TLS/TCP:' /etc/r2o-test/r2o-datapath.log
+"$SERVICE" engine-stop >"$ROOT/engine-stop.log" 2>&1 || { cat "$ROOT/engine-stop.log" >&2; exit 1; }
+grep -Fq 'процессор ' "$ROOT/log/r2o-datapath4.log"
+grep -Fq ' RSS ' "$ROOT/log/r2o-datapath4.log"
+grep -Fq 'TCP-потоки' "$ROOT/log/r2o-datapath4.log"
+grep -Fq 'снимки TLS/TCP:' "$ROOT/log/r2o-datapath4.log"
 echo R2O_STATS_SHUTDOWN_OK=1
-cmp /etc/r2o-test/catalog.json "$CAT"
+cmp "$ROOT/catalog.json" "$CAT"
 echo "R2O_REAPPLY_OK=$PHASE"
+echo "R2O_SERVICE_RESTART_OK=$PHASE"
 sync
 umount /mnt/r2o-persist
 """
@@ -208,7 +255,7 @@ def boot_once(
         if b"OpenWrt 25.12.5" not in boot:
             raise AssertionError("expected OpenWrt 25.12.5 ARM64 guest")
         output = guest.command(f"persistent catalog {phase}", f"sh /etc/r2o-test/process-reapply.sh {phase}; echo QEMU_PHASE_EXIT=$?")
-        if ("QEMU_PHASE_EXIT=0" not in output or f"R2O_REAPPLY_OK={phase}" not in output or "R2O_STATS_SHUTDOWN_OK=1" not in output):
+        if ("QEMU_PHASE_EXIT=0" not in output or f"R2O_REAPPLY_OK={phase}" not in output or "R2O_STATS_SHUTDOWN_OK=1" not in output or f"R2O_SERVICE_RESTART_OK={phase}" not in output):
             raise AssertionError(f"process reapply phase {phase} failed; see {serial_log}")
         print(f"OpenWrt ARM64 QEMU {phase}: persistent catalog reapply passed.")
     finally:
@@ -252,8 +299,15 @@ def main() -> int:
     seed_bytes = seed.read_bytes().replace(b"d2k-plan ", b"r2o-plan ")
     entries = [
         ("etc/r2o-test", b"", stat.S_IFDIR | 0o755),
-        ("etc/r2o-test/r2o-controller", controller.read_bytes(), stat.S_IFREG | 0o755),
-        ("etc/r2o-test/r2o-datapath", datapath.read_bytes(), stat.S_IFREG | 0o755),
+        ("etc/r2o-test/releases", b"", stat.S_IFDIR | 0o755),
+        ("etc/r2o-test/releases/qemu", b"", stat.S_IFDIR | 0o755),
+        ("etc/r2o-test/releases/qemu/builds", b"", stat.S_IFDIR | 0o755),
+        ("etc/r2o-test/S99r2o", (repo / "router" / "S99r2o").read_bytes(), stat.S_IFREG | 0o755),
+        ("etc/r2o-test/r2o-manager", SERVICE_MANAGER_SCRIPT.encode(), stat.S_IFREG | 0o755),
+        ("etc/r2o-test/r2o-firewall.sh", SERVICE_FIREWALL_SCRIPT.encode(), stat.S_IFREG | 0o755),
+        ("etc/r2o-test/config", SERVICE_CONFIG.encode(), stat.S_IFREG | 0o644),
+        ("etc/r2o-test/releases/qemu/builds/r2o-controller-linux-aarch64", controller.read_bytes(), stat.S_IFREG | 0o755),
+        ("etc/r2o-test/releases/qemu/builds/r2o-datapath-linux-aarch64", datapath.read_bytes(), stat.S_IFREG | 0o755),
         ("etc/r2o-test/catalog.json", seed_bytes, stat.S_IFREG | 0o644),
         ("etc/r2o-test/process-reapply.sh", GUEST_SCRIPT.encode(), stat.S_IFREG | 0o755),
         ("etc/r2o-test/kmod-nfnetlink-queue.apk", apk_queue.read_bytes(), stat.S_IFREG | 0o644),
