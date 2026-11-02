@@ -953,6 +953,7 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
     let mut last_response_complete = false;
     let mut last_progress_at = tokio::time::Instant::now();
     let mut last_app_progress = r2o_quic_http3_app_bytes_load(&app_bytes);
+    // One-shot controls still track the default box budget; `repeated` only adds GETs.
     let mut budget = R2oQuicHttp3Budget::r2o_initialize(budget_packets);
     let mut budget_passed = false;
     let mut stall = R2oQuicHttp3Stall::r2o_initialize(
@@ -1030,14 +1031,11 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                 last_app_progress = app_progress;
                 last_progress_at = now;
             }
-            if repeated {
-                let packets =
-                    r2o_quic_http3_datagrams(&connection).saturating_sub(datagrams_before);
-                budget_passed =
-                    budget.r2o_step(packets, app_progress, status, now, last_progress_at, rto);
-                if budget_passed {
-                    return Ok::<bool, String>(false);
-                }
+            let packets = r2o_quic_http3_datagrams(&connection).saturating_sub(datagrams_before);
+            budget_passed =
+                budget.r2o_step(packets, app_progress, status, now, last_progress_at, rto);
+            if budget_passed {
+                return Ok::<bool, String>(false);
             }
             loop {
                 let received = r2o_quic_http3_wait_with_stall(
@@ -1075,16 +1073,14 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                             last_app_progress = app_progress;
                             last_progress_at = now;
                         }
-                        if repeated {
-                            budget_passed = budget.r2o_step(
-                                packets,
-                                app_progress,
-                                status,
-                                now,
-                                last_progress_at,
-                                rto,
-                            );
-                        }
+                        budget_passed = budget.r2o_step(
+                            packets,
+                            app_progress,
+                            status,
+                            now,
+                            last_progress_at,
+                            rto,
+                        );
                         let mut state = result.lock().unwrap();
                         state.body_bytes = total_body_bytes;
                         state.app_bytes = app_progress;
@@ -1101,18 +1097,16 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                             last_app_progress = app_progress;
                             last_progress_at = now;
                         }
-                        if repeated {
-                            let packets = r2o_quic_http3_datagrams(&connection)
-                                .saturating_sub(datagrams_before);
-                            budget_passed = budget.r2o_step(
-                                packets,
-                                app_progress,
-                                status,
-                                now,
-                                last_progress_at,
-                                rto,
-                            );
-                        }
+                        let packets =
+                            r2o_quic_http3_datagrams(&connection).saturating_sub(datagrams_before);
+                        budget_passed = budget.r2o_step(
+                            packets,
+                            app_progress,
+                            status,
+                            now,
+                            last_progress_at,
+                            rto,
+                        );
                         if budget_passed {
                             let mut state = result.lock().unwrap();
                             state.body_bytes = total_body_bytes;

@@ -18,13 +18,18 @@ static const char *verdict_name(d2k_quic_arm_data_verdict verdict) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 6) return 2;
+    if (argc != 6 && argc != 7) return 2;
     char *end = NULL;
     long port = strtol(argv[2], &end, 10);
     if (!end || *end || port < 1 || port > 65535) return 2;
     char *budget_end = NULL;
     unsigned long budget = strtoul(argv[5], &budget_end, 10);
     if (!budget_end || *budget_end || budget > UINT_MAX) return 2;
+    int need_complete = 0;
+    if (argc == 7) {
+        if (strcmp(argv[6], "0") != 0 && strcmp(argv[6], "1") != 0) return 2;
+        need_complete = argv[6][0] == '1';
+    }
 
     d2k_qc_opts options;
     memset(&options, 0, sizeof options);
@@ -42,11 +47,13 @@ int main(int argc, char **argv) {
         return 1;
     }
     d2k_quic_arm_data data = {.verdict = D2K_QAD_NOT_RUN};
-    d2k_quic_data_stage(connection, argv[3], argv[4], 0, (unsigned)budget, 1000, &data);
+    d2k_quic_data_stage(connection, argv[3], argv[4], need_complete, (unsigned)budget, 1000, &data);
+    int received_complete = 0;
+    d2k_qc_app_progress(connection, NULL, &received_complete);
     d2k_qc_close(connection);
-    printf("verdict=%s app_bytes=%" PRIu64 " requests=%u packets=%" PRIu64 " need=%u oneway=%d\n",
+    printf("verdict=%s app_bytes=%" PRIu64 " requests=%u packets=%" PRIu64 " need=%u need_complete=%d complete=%d oneway=%d\n",
            verdict_name(data.verdict), data.app_bytes, data.requests, data.packets,
-           data.need, data.oneway);
+           data.need, need_complete, received_complete, data.oneway);
     if (data.verdict != D2K_QAD_PASS) {
         fprintf(stderr, "D2O data stage: %s\n", data.reason);
     }

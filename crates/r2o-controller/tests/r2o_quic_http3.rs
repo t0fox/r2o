@@ -1193,6 +1193,7 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                         request.uri().path(),
                         "/stage"
                             | "/content-length"
+                            | "/incomplete-over-threshold"
                             | "/stream-reset"
                             | "/stream-reset-after-headers"
                             | "/growth"
@@ -1218,24 +1219,38 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                     if request.uri().path() == "/slow-headers" {
                         tokio::time::sleep(Duration::from_secs(5)).await;
                     }
+                    let content_length = if request.uri().path() == "/content-length" {
+                        "100"
+                    } else if request.uri().path() == "/incomplete-over-threshold" {
+                        "131072"
+                    } else {
+                        "13"
+                    };
                     if stream
                         .send_response(
                             http::Response::builder()
                                 .status(status)
-                                .header(
-                                    http::header::CONTENT_LENGTH,
-                                    if request.uri().path() == "/content-length" {
-                                        "100"
-                                    } else {
-                                        "13"
-                                    },
-                                )
+                                .header(http::header::CONTENT_LENGTH, content_length)
                                 .body(())
                                 .unwrap(),
                         )
                         .await
                         .is_err()
                     {
+                        break;
+                    }
+                    if request.uri().path() == "/incomplete-over-threshold" {
+                        for _ in 0..8 {
+                            if stream
+                                .send_data(bytes::Bytes::from(vec![b'x'; 8 * 1024]))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(80)).await;
+                        }
+                        std::future::pending::<()>().await;
                         break;
                     }
                     if request.uri().path() == "/stream-reset-after-headers" {
@@ -1406,6 +1421,94 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
         c_field("requests").parse::<u32>().unwrap(),
         rust_result.requests,
         "D2O={c_result} R2O={rust_result:?}"
+    );
+
+    let incomplete_c_binary = d2o_binary.clone();
+    let incomplete_c_address = server_address;
+    let incomplete_c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(incomplete_c_binary)
+            .args([
+                "127.0.0.1",
+                &incomplete_c_address.port().to_string(),
+                "localhost",
+                "/incomplete-over-threshold",
+                "0",
+                "1",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        incomplete_c_output.status.success(),
+        "D2O failed to pass its live budget on an incomplete response: stdout={} stderr={}",
+        String::from_utf8_lossy(&incomplete_c_output.stdout),
+        String::from_utf8_lossy(&incomplete_c_output.stderr)
+    );
+    let incomplete_c_result = String::from_utf8(incomplete_c_output.stdout).unwrap();
+    let incomplete_c_field = |name: &str| {
+        incomplete_c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {incomplete_c_result}"))
+    };
+    assert_eq!(
+        incomplete_c_field("verdict"),
+        "Pass",
+        "D2O={incomplete_c_result}"
+    );
+    assert!(
+        incomplete_c_field("need_complete") == "1" && incomplete_c_field("complete") == "0",
+        "expected an incomplete response with need_complete set: {incomplete_c_result}"
+    );
+    assert!(
+        incomplete_c_field("packets").parse::<u64>().unwrap() >= 50,
+        "D2O={incomplete_c_result}"
+    );
+
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.connect(server_address).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(certificate_der.clone()).unwrap();
+    let incomplete_rust_result = tokio::time::timeout(
+        Duration::from_secs(8),
+        r2o_quic_http3_get(
+            socket,
+            server_address,
+            "localhost",
+            "/incomplete-over-threshold",
+            Duration::from_secs(1),
+            roots,
+        ),
+    )
+    .await
+    .expect("R2O incomplete response test timed out");
+    let incomplete_rust_verdict =
+        r2o_controller::quic_replay::r2o_quic_short_control_data_verdict(&incomplete_rust_result);
+    assert!(
+        incomplete_rust_result.handshake_confirmed,
+        "R2O={incomplete_rust_result:?}"
+    );
+    assert_eq!(incomplete_rust_result.status, 200);
+    assert!(
+        incomplete_rust_result.budget_passed,
+        "R2O={incomplete_rust_result:?}"
+    );
+    assert!(incomplete_rust_result.body_bytes > 32 * 1024);
+    assert!(incomplete_rust_result.body_bytes < 131_072);
+    assert!(
+        !incomplete_rust_result.complete,
+        "R2O={incomplete_rust_result:?}"
+    );
+    assert!(
+        !incomplete_rust_result.r2o_quic_stalled,
+        "R2O={incomplete_rust_result:?}"
+    );
+    assert_eq!(
+        incomplete_c_field("verdict"),
+        format!("{incomplete_rust_verdict:?}"),
+        "D2O={incomplete_c_result} R2O={incomplete_rust_result:?}"
     );
 
     let content_length_binary = d2o_binary.clone();
