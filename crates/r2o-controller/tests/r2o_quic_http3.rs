@@ -1209,8 +1209,9 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                             | "/partial-close"
                             | "/budget-close"
                             | "/no-content"
+                            | "/early-refuse"
                     ) {
-                        if path == "/refuse" {
+                        if matches!(path, "/refuse" | "/early-refuse") {
                             451
                         } else if path == "/no-content" {
                             204
@@ -1230,6 +1231,14 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                     } else {
                         "13"
                     };
+                    if path == "/early-refuse"
+                        && stream
+                            .send_response(http::Response::builder().status(103).body(()).unwrap())
+                            .await
+                            .is_err()
+                    {
+                        break;
+                    }
                     let response = http::Response::builder().status(status);
                     let response = if path == "/no-content" {
                         response
@@ -1497,6 +1506,66 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
         empty_c_field("requests").parse::<u32>().unwrap(),
         empty_rust_result.requests,
         "D2O={empty_c_result} R2O={empty_rust_result:?}"
+    );
+
+    let early_c_binary = d2o_binary.clone();
+    let early_c_address = server_address;
+    let early_c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(early_c_binary)
+            .args([
+                "127.0.0.1",
+                &early_c_address.port().to_string(),
+                "localhost",
+                "/early-refuse",
+                "0",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        early_c_output.status.success(),
+        "D2O early 103 + 451 failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&early_c_output.stdout),
+        String::from_utf8_lossy(&early_c_output.stderr)
+    );
+    let early_c_result = String::from_utf8(early_c_output.stdout).unwrap();
+    let early_c_field = |name: &str| {
+        early_c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {early_c_result}"))
+    };
+
+    let early_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    early_socket.connect(server_address).unwrap();
+    let mut early_roots = RootCertStore::empty();
+    early_roots.add(certificate_der.clone()).unwrap();
+    let early_rust_result = r2o_quic_http3_get(
+        early_socket,
+        server_address,
+        "localhost",
+        "/early-refuse",
+        Duration::from_secs(5),
+        early_roots,
+    )
+    .await;
+    let early_rust_verdict =
+        r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&early_rust_result);
+    assert_eq!(early_c_field("verdict"), "Pass");
+    assert_eq!(early_rust_result.status, 103, "R2O={early_rust_result:?}");
+    assert_eq!(format!("{early_rust_verdict:?}"), "Pass");
+    assert!(early_rust_result.complete, "R2O={early_rust_result:?}");
+    assert_eq!(
+        early_c_field("app_bytes").parse::<u64>().unwrap(),
+        early_rust_result.app_bytes,
+        "D2O={early_c_result} R2O={early_rust_result:?}"
+    );
+    assert_eq!(
+        early_c_field("requests").parse::<u32>().unwrap(),
+        early_rust_result.requests,
+        "D2O={early_c_result} R2O={early_rust_result:?}"
     );
 
     let incomplete_c_binary = d2o_binary.clone();
