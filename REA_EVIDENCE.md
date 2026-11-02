@@ -9460,3 +9460,11 @@ The first fix enabled the default one-shot budget for all GETs. CI #360 exposed 
 GREEN: on clean D2O main `a63d964` and R2O `e6e3ff9`, the targeted `r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refusal_slow_body_drop_and_close` test passed 1/1 in 57.59 seconds. C reports `need_complete=1`, `complete=0`, at least 50 datagrams, and `Pass`; the dedicated Rust short-control path reports `budget_passed=true`, an incomplete HTTP 200 body between 32 and 128 KiB, no stall, and the same `Pass` verdict. The non-control 16-MiB GET regression passed 1/1 in 13.19 seconds. QUIC budget unit tests passed 2/2 and the short-control verdict test passed 1/1; `cargo +1.98.0 fmt --all -- --check` passed.
 
 No QEMU was needed for this host loopback protocol check; QEMU runs remain short and OpenWrt ARM64 only. The QUIC matrix row remains equivalent; weighted parity stays 62/87 (71.26%).
+
+### IPv6 production raw-send differential — 2026-11-03
+
+The current-main D2O production raw sender and R2O RawSocket were exercised on the same Linux loopback flow. A pinned D2O helper built base IPv6 UDP plus all four IPv6 fragment shapes, sent them through D2O raw.c, and captured each outgoing frame with AF_PACKET. The R2O production sender then replayed those exact C-captured packets to the same UDP port. All 11 captured IPv6 packets matched byte-for-byte; the base packet and non-overlap shapes 1 and 2 reassembled at the UDP listener in both runs.
+
+Check: scripts/test-raw6-send-differential.sh passed 1/1 in Debian 13 WSL2 against D2O main a63d964. The C oracle compiles D2O datapath/raw.c, datapath/wire_udp.c and core/ipfrag.c; Rust uses RawSocket::send_packet. This closes production IPv6 raw-send delivery for the tested loopback path, not the AF_INET6 NFQUEUE path. The matrix row remains partial at 0/3 because D2O binds NFQUEUE only for AF_INET; no score change, total remains 62/87 (71.26%).
+
+No QEMU run: this Linux socket path is directly exercised on loopback. Any QEMU work remains short OpenWrt ARM64 only.
