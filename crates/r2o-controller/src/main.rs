@@ -25955,6 +25955,57 @@ mod tests {
             trial_id
         ));
 
+        let target6 = DiscoveryTarget {
+            host: "media6.example.com".into(),
+            endpoint: "[2001:db8::20]:443".into(),
+            family: 6,
+            shape: SHAPE_MODERN,
+        };
+        let client6 = std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x10);
+        let server6 = std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x20);
+        let mut key6 = [0; KEY_LEN];
+        key6[0] = 6;
+        key6[1..17].copy_from_slice(&client6.octets());
+        key6[17..33].copy_from_slice(&server6.octets());
+        key6[33..35].copy_from_slice(&41_000_u16.to_be_bytes());
+        key6[35..37].copy_from_slice(&443_u16.to_be_bytes());
+        key6[37] = 6;
+        let event6 = r2k_core::control::AppliedEvent {
+            key: key6,
+            plan_id,
+            trial_id: [0; 16],
+            execution_id: 7,
+            binding: r2k_core::control::BindingContext {
+                generation: 1,
+                kind: 1,
+                family: 6,
+                shape: SHAPE_MODERN,
+                temporary: false,
+                epoch: [1; 16],
+            },
+        };
+        assert!(r2o_family_applied_flow_matches(
+            &event6, &target6, 41_000, plan_id, [0; 16]
+        ));
+        let mut reverse6 = event6.clone();
+        reverse6.key[1..17].copy_from_slice(&server6.octets());
+        reverse6.key[17..33].copy_from_slice(&client6.octets());
+        reverse6.key[33..35].copy_from_slice(&443_u16.to_be_bytes());
+        reverse6.key[35..37].copy_from_slice(&41_000_u16.to_be_bytes());
+        assert!(r2o_family_applied_flow_matches(
+            &reverse6, &target6, 41_000, plan_id, [0; 16]
+        ));
+        let wrong_endpoint6 = DiscoveryTarget {
+            endpoint: "[2001:db8::21]:443".into(),
+            ..target6.clone()
+        };
+        assert!(!r2o_family_applied_flow_matches(
+            &event6,
+            &wrong_endpoint6,
+            41_000,
+            plan_id,
+            [0; 16]
+        ));
         let fetch = FetchResult {
             address: "198.51.100.20:443".parse().unwrap(),
             local_port: 41_000,

@@ -247,7 +247,7 @@
           "statusLabel": "Эквивалентно",
           "group": "Discovery",
           "mapping": "`on_applied`/`d2k_sched_sync_step` → `remember_applied_event`, trial confirmation, catalog update",
-          "evidence": "`r2o-ack-applied-persist-differential.sh`, `r2o-known-plans-differential.sh`; доказан fixture-путь команды и точного события, не аварийное восстановление процесса; 2026-11-03 C/Rust HTTP APPLIED differential covers IPv4 and IPv6 address matching, unique execution IDs and the donor confirmation window"
+          "evidence": "`r2o-ack-applied-persist-differential.sh`, `r2o-known-plans-differential.sh`; доказан fixture-путь команды и точного события, не аварийное восстановление процесса; 2026-11-03 C/Rust HTTP APPLIED differential covers IPv4 and IPv6 address matching, unique execution IDs and the donor confirmation window; family-plan HTTPS APPLIED checks exact full-width IPv6 endpoints in both flow directions"
         },
         {
           "id": 19,
@@ -768,7 +768,7 @@
       "statusLabel": "Эквивалентно",
       "group": "Discovery",
       "mapping": "`on_applied`/`d2k_sched_sync_step` → `remember_applied_event`, trial confirmation, catalog update",
-      "evidence": "`r2o-ack-applied-persist-differential.sh`, `r2o-known-plans-differential.sh`; доказан fixture-путь команды и точного события, не аварийное восстановление процесса; 2026-11-03 C/Rust HTTP APPLIED differential covers IPv4 and IPv6 address matching, unique execution IDs and the donor confirmation window"
+      "evidence": "`r2o-ack-applied-persist-differential.sh`, `r2o-known-plans-differential.sh`; доказан fixture-путь команды и точного события, не аварийное восстановление процесса; 2026-11-03 C/Rust HTTP APPLIED differential covers IPv4 and IPv6 address matching, unique execution IDs and the donor confirmation window; family-plan HTTPS APPLIED checks exact full-width IPv6 endpoints in both flow directions"
     },
     {
       "id": 19,
