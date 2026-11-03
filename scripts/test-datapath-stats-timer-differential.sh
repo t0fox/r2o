@@ -250,8 +250,9 @@ if [ "$c_queue_count" -ne "$c_traffic_stats_count" ] || [ "$r_queue_count" -ne "
     echo "NFQUEUE traffic counters must appear once per summary: C=$c_queue_count/$c_traffic_stats_count Rust=$r_queue_count/$r_traffic_stats_count" >&2
     exit 1
 fi
-c_queue_values=$(grep -E 'пакетов [0-9]+, байт [0-9]+, пропущено [0-9]+, снято [0-9]+' "$test_tmpdir/r2o-stats-traffic-d2o.log"  | sed -E 's/[^0-9]+/ /g' | sed '/^ *$/d')
-r_queue_values=$(grep -E 'пакетов [0-9]+, байт [0-9]+, пропущено [0-9]+, снято [0-9]+' "$test_tmpdir/r2o-stats-traffic-r2o.log"  | sed -E 's/^r2o-datapath: //' | sed -E 's/[^0-9]+/ /g' | sed '/^ *$/d')
+# Ignore an idle timer tick before the test sends packets.
+c_queue_values=$(grep -E 'пакетов [0-9]+, байт [0-9]+, пропущено [0-9]+, снято [0-9]+' "$test_tmpdir/r2o-stats-traffic-d2o.log"  | sed -E 's/[^0-9]+/ /g' | sed '/^ *$/d' | sed -E '/^ *0 +0 +0 +0 *$/d')
+r_queue_values=$(grep -E 'пакетов [0-9]+, байт [0-9]+, пропущено [0-9]+, снято [0-9]+' "$test_tmpdir/r2o-stats-traffic-r2o.log"  | sed -E 's/^r2o-datapath: //' | sed -E 's/[^0-9]+/ /g' | sed '/^ *$/d' | sed -E '/^ *0 +0 +0 +0 *$/d')
 c_periodic_nonzero=$(grep -E 'пакетов [0-9]+, байт [0-9]+, пропущено [0-9]+, снято [0-9]+' "$test_tmpdir/r2o-stats-traffic-d2o.log" | sed '$d' | grep -Fc 'пакетов 9, байт 396, пропущено 9, снято 0' || true)
 r_periodic_nonzero=$(grep -E 'пакетов [0-9]+, байт [0-9]+, пропущено [0-9]+, снято [0-9]+' "$test_tmpdir/r2o-stats-traffic-r2o.log" | sed '$d' | grep -Fc 'пакетов 9, байт 396, пропущено 9, снято 0' || true)
 if [ "$c_periodic_nonzero" -lt 1 ] || [ "$r_periodic_nonzero" -lt 1 ]; then

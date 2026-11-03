@@ -583,7 +583,7 @@ impl HoldTable {
                             tcp.sequence,
                             Some(anchor.sequence.wrapping_add(1)),
                             payload,
-                            !anchor.controller_probe,
+                            true,
                         )
                 {
                     self.syns[anchor_index].saw_hello = true;
@@ -741,7 +741,7 @@ impl HoldTable {
                 tcp.sequence,
                 Some(self.slots[index].anchor),
                 payload,
-                !anchor.controller_probe,
+                true,
             ),
             HoldKind::Http => self.capture.feed_http_with_visibility(
                 key,
@@ -2160,40 +2160,92 @@ mod tests {
     }
 
     #[test]
-    fn timeout_keeps_controller_probe_capture_out_of_diagnostics() {
+    fn controller_probe_capture_counts_like_d2o_without_incomplete_diagnostics() {
         let now = Instant::now();
-        let mut hold = HoldTable::default();
         let options = HoldOptions {
             revision: 0,
             allow_tls: true,
             ..HoldOptions::default()
         };
-        let hello = hello();
-        let _ = hold.feed_controller_probe(1, &tcp_packet(3000, 0x02, &[]), now, options);
+        let hello = client_hello(b"hetzner.com");
+
+        let mut timed_out = HoldTable::default();
+        let _ = timed_out.feed_controller_probe(1, &tcp_packet(3000, 0x02, &[]), now, options);
         assert_eq!(
-            hold.feed_controller_probe(2, &tcp_packet(3001, 0x18, &hello[..5]), now, options,)
+            timed_out
+                .feed_controller_probe(2, &tcp_packet(3001, 0x18, &hello[..5]), now, options)
                 .outcome,
             HoldOutcome::Waiting
         );
+        assert_eq!(timed_out.flush(now + HOLD_WAIT, 0, false), [2]);
+        assert!(timed_out.r2o_take_incomplete_diagnostics().is_empty());
 
-        assert_eq!(hold.flush(now + HOLD_WAIT, 0, false), [2]);
-        assert!(hold.r2o_take_incomplete_diagnostics().is_empty());
-
-        let mut complete = HoldTable::default();
-        let _ = complete.feed_controller_probe(3, &tcp_packet(4000, 0x02, &[]), now, options);
+        let mut held = HoldTable::default();
+        let _ = held.feed_controller_probe(3, &tcp_packet(4000, 0x02, &[]), now, options);
         assert_eq!(
-            complete
-                .feed_controller_probe(4, &tcp_packet(4001, 0x18, &hello[..5]), now, options,)
+            held.feed_controller_probe(4, &tcp_packet(4001, 0x18, &hello[..5]), now, options)
                 .outcome,
             HoldOutcome::Waiting
         );
         assert!(matches!(
-            complete
-                .feed_controller_probe(5, &tcp_packet(4006, 0x18, &hello[5..]), now, options,)
+            held.feed_controller_probe(5, &tcp_packet(4006, 0x18, &hello[5..]), now, options)
                 .outcome,
             HoldOutcome::Ready { .. }
         ));
-        assert_eq!(complete.r2o_capture_stats(), super::CaptureStats::default());
+        let stats = held.r2o_capture_stats();
+        assert_eq!(
+            (stats.completed, stats.rejected, stats.expired, stats.full),
+            (1, 0, 0, 0)
+        );
+        assert_eq!(
+            (
+                stats.tls_completed,
+                stats.tls_rejected,
+                stats.tls_expired,
+                stats.tls_full
+            ),
+            (1, 0, 0, 0)
+        );
+
+        let observed_options = HoldOptions {
+            observe_tls: true,
+            ..options
+        };
+        let mut observed = HoldTable::default();
+        let _ =
+            observed.feed_controller_probe(6, &tcp_packet(5000, 0x02, &[]), now, observed_options);
+        assert!(matches!(
+            observed
+                .feed_controller_probe(7, &tcp_packet(5001, 0x18, &hello), now, observed_options)
+                .outcome,
+            HoldOutcome::Observed { .. }
+        ));
+        let observed_stats = observed.r2o_capture_stats();
+        assert_eq!(observed_stats.tls_completed, 1);
+        assert_eq!(observed_stats.tls_rejected, 0);
+        assert_eq!(observed_stats.tls_expired, 0);
+        assert_eq!(observed_stats.tls_full, 0);
+
+        if let Some(output) = std::env::var_os("R2O_CAPTURE_PROBE_DIFF_OUTPUT") {
+            let hello_hash = hello
+                .iter()
+                .fold(14_695_981_039_346_656_037_u64, |hash, byte| {
+                    (hash ^ u64::from(*byte)).wrapping_mul(1_099_511_628_211)
+                });
+            let trace = format!(
+                "split hello={hello_hash:016x} complete={} rejected={} expired={} full={}\nsingle hello={hello_hash:016x} complete={} rejected={} expired={} full={}\n",
+                stats.tls_completed,
+                stats.tls_rejected,
+                stats.tls_expired,
+                stats.tls_full,
+                observed_stats.tls_completed,
+                observed_stats.tls_rejected,
+                observed_stats.tls_expired,
+                observed_stats.tls_full,
+            );
+            std::fs::write(output, trace)
+                .expect("write controller-probe capture differential trace");
+        }
     }
 
     #[test]
