@@ -3803,9 +3803,10 @@ async fn r2o_http3_goaway_repeated_request_matches_d2o() {
 }
 #[tokio::test]
 #[ignore = "requires the pinned D2O harness; run scripts/test-quic-http3-full-stage-differential.sh"]
-async fn r2o_http3_implicit_zero_bidi_stream_limit_counts_attempt_like_d2o() {
+async fn r2o_http3_bidi_stream_limits_count_attempt_like_d2o() {
     let d2o_binary = std::env::var("D2O_QUIC_DATA_STAGE_BIN")
         .expect("D2O_QUIC_DATA_STAGE_BIN must point to the pinned C data-stage harness");
+    let repeated_d2o_binary = d2o_binary.clone();
     let certificate_params = rcgen::CertificateParams::new(vec!["localhost".to_owned()]);
     let certificate = rcgen::Certificate::from_params(certificate_params).unwrap();
     let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
@@ -3872,7 +3873,7 @@ async fn r2o_http3_implicit_zero_bidi_stream_limit_counts_attempt_like_d2o() {
     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
     socket.connect(server_address).unwrap();
     let mut roots = RootCertStore::empty();
-    roots.add(certificate_der).unwrap();
+    roots.add(certificate_der.clone()).unwrap();
     let rust_result = tokio::time::timeout(
         Duration::from_secs(8),
         r2o_quic_http3_get(
@@ -3906,6 +3907,117 @@ async fn r2o_http3_implicit_zero_bidi_stream_limit_counts_attempt_like_d2o() {
     );
 
     server.abort();
+
+    let repeat_private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+        certificate.serialize_private_key_der(),
+    ));
+    let mut repeat_tls = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate_der.clone()], repeat_private_key)
+        .unwrap();
+    repeat_tls.alpn_protocols = vec![b"h3".to_vec()];
+    let repeat_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(repeat_tls).unwrap();
+    let mut repeat_config = quinn::ServerConfig::with_crypto(Arc::new(repeat_crypto));
+    let mut repeat_transport = quinn::TransportConfig::default();
+    repeat_transport.max_concurrent_bidi_streams(quinn::VarInt::from_u32(1));
+    repeat_config.transport_config(Arc::new(repeat_transport));
+    let repeat_endpoint =
+        quinn::Endpoint::server(repeat_config, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let repeat_address = repeat_endpoint.local_addr().unwrap();
+    let repeat_server = tokio::spawn(async move {
+        while let Some(incoming) = repeat_endpoint.accept().await {
+            tokio::spawn(async move {
+                let Ok(connection) = incoming.await else {
+                    return;
+                };
+                let Ok(mut h3_connection) = h3::server::builder()
+                    .build::<_, bytes::Bytes>(h3_quinn::Connection::new(connection))
+                    .await
+                else {
+                    return;
+                };
+                let Ok(Some(resolver)) = h3_connection.accept().await else {
+                    return;
+                };
+                let Ok((_request, mut stream)) = resolver.resolve_request().await else {
+                    return;
+                };
+                if stream
+                    .send_response(http::Response::builder().status(200).body(()).unwrap())
+                    .await
+                    .is_err()
+                    || stream
+                        .send_data(bytes::Bytes::from_static(b"ok"))
+                        .await
+                        .is_err()
+                    || stream.finish().await.is_err()
+                {
+                    return;
+                }
+                let _ = h3_connection.accept().await;
+            });
+        }
+    });
+
+    let repeat_c_address = repeat_address;
+    let repeat_c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(repeated_d2o_binary)
+            .args([
+                "127.0.0.1",
+                &repeat_c_address.port().to_string(),
+                "localhost",
+                "/repeat-stream-limit",
+                "25",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(!repeat_c_output.status.success());
+    let repeat_c_result = String::from_utf8(repeat_c_output.stdout).unwrap();
+    let repeat_c_field = |name: &str| {
+        repeat_c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {repeat_c_result}"))
+    };
+    assert_eq!(repeat_c_field("verdict"), "NotRun", "D2O={repeat_c_result}");
+    assert_eq!(repeat_c_field("requests"), "1", "D2O={repeat_c_result}");
+
+    let repeat_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    repeat_socket.connect(repeat_address).unwrap();
+    let mut repeat_roots = RootCertStore::empty();
+    repeat_roots.add(certificate_der).unwrap();
+    let repeat_rust_result = tokio::time::timeout(
+        Duration::from_secs(8),
+        r2o_quic_http3_measure(
+            repeat_socket,
+            repeat_address,
+            "localhost",
+            "/repeat-stream-limit",
+            Duration::from_secs(1),
+            repeat_roots,
+            25,
+        ),
+    )
+    .await
+    .expect("R2O repeated GET exceeded the bounded stream-credit timeout");
+    let repeat_rust_verdict =
+        r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&repeat_rust_result);
+    assert_eq!(
+        format!("{repeat_rust_verdict:?}"),
+        repeat_c_field("verdict")
+    );
+    // D2O double-counts the prior stream when its next raw send is rejected.
+    assert_eq!(repeat_rust_result.requests, 1, "R2O={repeat_rust_result:?}");
+    assert_eq!(
+        repeat_rust_result.requests.to_string(),
+        repeat_c_field("requests"),
+        "D2O={repeat_c_result} R2O={repeat_rust_result:?}"
+    );
+
+    repeat_server.abort();
 }
 
 async fn assert_quic_no_handshake_matches_d2o(

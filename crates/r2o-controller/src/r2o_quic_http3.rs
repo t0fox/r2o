@@ -1014,13 +1014,17 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                 .map_err(|error| format!("не построен HTTP/3 GET: {error}"))?;
             let first_request = requests == 0;
             let connection_open_before_send = connection.close_reason().is_none();
-            if connection_open_before_send {
+            if first_request && connection_open_before_send {
                 requests = requests.saturating_add(1);
                 result.lock().unwrap().requests = requests;
             }
             let mut stream = match send_request.send_request(request).await {
                 Ok(stream) => stream,
                 Err(error) => {
+                    if !first_request && connection_open_before_send {
+                        requests = requests.saturating_add(1);
+                        result.lock().unwrap().requests = requests;
+                    }
                     return Err(format!("HTTP/3 GET не отправлен: {error}"));
                 }
             };
@@ -1028,6 +1032,10 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                 .finish()
                 .await
                 .map_err(|error| format!("HTTP/3 GET не завершён: {error}"))?;
+            if !first_request && connection_open_before_send {
+                requests = requests.saturating_add(1);
+                result.lock().unwrap().requests = requests;
+            }
             if first_request {
                 datagrams_before = r2o_quic_http3_datagrams(&connection);
             }
