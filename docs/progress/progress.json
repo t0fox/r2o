@@ -79,7 +79,7 @@
           "statusLabel": "Частично",
           "group": "Datapath",
           "mapping": "C `print_stats`/`self_cost` → Rust runtime diagnostics",
-          "evidence": "Rust `--stats` now logs process CPU/RSS, flow-table, capture/payload, reply-visibility, and optional HTTP keep-alive counters on each interval and shutdown. D2O `print_stats` periodically reports packet/byte, ICMP, hold, scheduler, and session diagnostics. The 2026-11-03 Debian WSL2 `scripts/test-datapath-stats-timer-differential.sh` checks one capture, payload, next-segment, and reply-visibility line per summary; the first two zero-valued snapshots and TCP/UDP flow-table traces match. Log: `E:/r2o-tooling/tests/r2o-stats-timer-2026-11-03/`. `scripts/test-icmp-guard-current-differential.sh` co"
+          "evidence": "D2O `d2k_hold_flush` counts a timeout when `now >= deadline`, even if the plan revision changes in the same call. A pinned D2O a63d964 C fixture and Rust `timeout_diagnostic_survives_deadline_and_revision_change_together` confirm fail-open release plus the incomplete TLS diagnostic (C timed_out=1, plan_changed=0; Rust captured 5 bytes). `scripts/test-datapath-stats-timer-differential.sh` passed in Debian WSL2: every summary contains one capture, payload, next-segment, and reply-visibility line; the first two zero-valued snapshots and TCP/UDP flow-table traces match. Rust `--stats` now includes"
         },
         {
           "id": 9,
@@ -658,7 +658,7 @@
       "statusLabel": "Частично",
       "group": "Datapath",
       "mapping": "C `print_stats`/`self_cost` → Rust runtime diagnostics",
-      "evidence": "Rust `--stats` now logs process CPU/RSS, flow-table, capture/payload, reply-visibility, and optional HTTP keep-alive counters on each interval and shutdown. D2O `print_stats` periodically reports packet/byte, ICMP, hold, scheduler, and session diagnostics. The 2026-11-03 Debian WSL2 `scripts/test-datapath-stats-timer-differential.sh` checks one capture, payload, next-segment, and reply-visibility line per summary; the first two zero-valued snapshots and TCP/UDP flow-table traces match. Log: `E:/r2o-tooling/tests/r2o-stats-timer-2026-11-03/`. `scripts/test-icmp-guard-current-differential.sh` co"
+      "evidence": "D2O `d2k_hold_flush` counts a timeout when `now >= deadline`, even if the plan revision changes in the same call. A pinned D2O a63d964 C fixture and Rust `timeout_diagnostic_survives_deadline_and_revision_change_together` confirm fail-open release plus the incomplete TLS diagnostic (C timed_out=1, plan_changed=0; Rust captured 5 bytes). `scripts/test-datapath-stats-timer-differential.sh` passed in Debian WSL2: every summary contains one capture, payload, next-segment, and reply-visibility line; the first two zero-valued snapshots and TCP/UDP flow-table traces match. Rust `--stats` now includes"
     },
     {
       "id": 9,
