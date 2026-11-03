@@ -161,6 +161,16 @@ if [ "$PHASE" = first ]; then
     [ "$NEW_DPID" != "$DPID" ] || { echo "procd recovery did not restart datapath" >&2; exit 1; }
     [ "$NEW_CPID" != "$CPID" ] || { echo "procd recovery did not restart controller" >&2; exit 1; }
     echo R2O_PROCD_AUTO_RECOVERY_OK=1
+
+    DPID=$NEW_DPID
+    CPID=$NEW_CPID
+    kill -KILL "$CPID"
+    wait_for_sync after-procd-controller-crash 4 1
+    NEW_DPID=$(cat "$ROOT/run/r2o-datapath4.pid")
+    NEW_CPID=$(cat "$ROOT/run/r2o-controller4.pid")
+    [ "$NEW_DPID" != "$DPID" ] || { echo "controller crash recovery did not restart datapath" >&2; exit 1; }
+    [ "$NEW_CPID" != "$CPID" ] || { echo "controller crash recovery did not restart controller" >&2; exit 1; }
+    echo R2O_PROCD_CONTROLLER_RECOVERY_OK=1
 elif [ "$PHASE" = reboot ]; then
     start_engine after-reboot 1
 else
@@ -299,6 +309,8 @@ def boot_once(
             raise AssertionError(f"process reapply phase {phase} failed; see {serial_log}")
         if phase == "first" and "R2O_PROCD_AUTO_RECOVERY_OK=1" not in output:
             raise AssertionError(f"production procd recovery did not pass; see {serial_log}")
+        if phase == "first" and "R2O_PROCD_CONTROLLER_RECOVERY_OK=1" not in output:
+            raise AssertionError(f"production controller crash recovery did not pass; see {serial_log}")
         print(f"OpenWrt ARM64 QEMU {phase}: persistent catalog reapply passed.")
     finally:
         serial.close()
