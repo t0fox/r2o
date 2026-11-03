@@ -4010,6 +4010,11 @@ async fn r2o_http3_bidi_stream_limits_count_attempt_like_d2o() {
         repeat_c_field("verdict")
     );
     // D2O double-counts the prior stream when its next raw send is rejected.
+    assert_eq!(
+        repeat_rust_result.app_bytes,
+        repeat_c_field("app_bytes").parse::<u64>().unwrap(),
+        "D2O={repeat_c_result} R2O={repeat_rust_result:?}"
+    );
     assert_eq!(repeat_rust_result.requests, 1, "R2O={repeat_rust_result:?}");
     assert_eq!(
         repeat_rust_result.requests.to_string(),

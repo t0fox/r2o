@@ -986,6 +986,8 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
     let mut status = 0_u16;
     let mut requests = 0_u32;
     let mut last_response_complete = false;
+    let mut last_complete_response_app_bytes = 0_u64;
+    let mut failed_repeat_app_bytes = 0_u64;
     let mut last_progress_at = tokio::time::Instant::now();
     let mut last_app_progress = r2o_quic_http3_app_bytes_load(&app_bytes);
     // A one-shot default-budget check is reserved for the short-control probe.
@@ -1004,6 +1006,8 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
             result.lock().unwrap().error = Some("истёк срок HTTP/3-пробы для задачи".into());
             break;
         }
+        let requests_before_attempt = requests;
+        let request_app_bytes_start = r2o_quic_http3_app_bytes_load(&app_bytes);
         let request_result = tokio::time::timeout(request_timeout, async {
             status = 0;
             result.lock().unwrap().status = status;
@@ -1192,8 +1196,17 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
         .await;
 
         match request_result {
-            Ok(Ok(complete)) => last_response_complete = complete,
+            Ok(Ok(complete)) => {
+                last_response_complete = complete;
+                if complete {
+                    last_complete_response_app_bytes = r2o_quic_http3_app_bytes_load(&app_bytes)
+                        .saturating_sub(request_app_bytes_start);
+                }
+            }
             Ok(Err(error)) => {
+                if repeated && last_response_complete && requests == requests_before_attempt {
+                    failed_repeat_app_bytes = last_complete_response_app_bytes;
+                }
                 let mut state = result.lock().unwrap();
                 state.error = Some(error);
                 if let Some(end) = stall_end {
@@ -1203,6 +1216,9 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                 break;
             }
             Err(_) => {
+                if repeated && last_response_complete && requests == requests_before_attempt {
+                    failed_repeat_app_bytes = last_complete_response_app_bytes;
+                }
                 result.lock().unwrap().error = Some("истёк срок HTTP/3 GET".into());
                 break;
             }
@@ -1218,7 +1234,8 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
     {
         let mut state = result.lock().unwrap();
         state.requests = requests;
-        state.app_bytes = r2o_quic_http3_app_bytes_load(&app_bytes);
+        state.app_bytes =
+            r2o_quic_http3_app_bytes_load(&app_bytes).saturating_add(failed_repeat_app_bytes);
         state.datagrams = datagrams;
         state.budget_passed = budget_passed;
         state.complete = !repeated && last_response_complete && !state.r2o_quic_stalled;
