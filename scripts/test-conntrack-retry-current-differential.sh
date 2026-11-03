@@ -54,6 +54,9 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
+: > "$r2o_tmp/d2o.trace"
+: > "$r2o_tmp/r2o.trace"
+
 wait_for() {
     file=$1
     pattern=$2
