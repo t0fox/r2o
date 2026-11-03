@@ -1279,6 +1279,7 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                         path,
                         "/stage"
                             | "/content-length"
+                            | "/content-length-open"
                             | "/incomplete-over-threshold"
                             | "/stream-reset"
                             | "/stream-reset-no-error"
@@ -1314,6 +1315,8 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                     }
                     let content_length = if path == "/content-length" {
                         "100"
+                    } else if path == "/content-length-open" {
+                        "2"
                     } else if path == "/incomplete-over-threshold" {
                         "131072"
                     } else {
@@ -1450,13 +1453,22 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                         stream.stop_stream(code);
                         continue;
                     }
-                    if request.uri().path() == "/content-length" {
+                    if matches!(
+                        request.uri().path(),
+                        "/content-length" | "/content-length-open"
+                    ) {
                         if stream
                             .send_data(bytes::Bytes::from_static(b"ok"))
                             .await
                             .is_err()
-                            || stream.finish().await.is_err()
                         {
+                            break;
+                        }
+                        if request.uri().path() == "/content-length-open" {
+                            std::future::pending::<()>().await;
+                            break;
+                        }
+                        if stream.finish().await.is_err() {
                             break;
                         }
                         continue;
@@ -1995,6 +2007,78 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
         content_length_c_field("requests").parse::<u32>().unwrap(),
         content_length_rust_result.requests,
         "D2O={content_length_c_result} R2O={content_length_rust_result:?}"
+    );
+
+    let content_length_open_c_binary = d2o_binary.clone();
+    let content_length_open_c_address = server_address;
+    let content_length_open_c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(content_length_open_c_binary)
+            .args([
+                "127.0.0.1",
+                &content_length_open_c_address.port().to_string(),
+                "localhost",
+                "/content-length-open",
+                "0",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        !content_length_open_c_output.status.success(),
+        "D2O open Content-Length response unexpectedly passed: stdout={} stderr={}",
+        String::from_utf8_lossy(&content_length_open_c_output.stdout),
+        String::from_utf8_lossy(&content_length_open_c_output.stderr)
+    );
+    let content_length_open_c_result =
+        String::from_utf8(content_length_open_c_output.stdout).unwrap();
+    let content_length_open_c_field = |name: &str| {
+        content_length_open_c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| {
+                panic!("missing {name} in D2O result: {content_length_open_c_result}")
+            })
+    };
+    assert_eq!(content_length_open_c_field("verdict"), "NotRun");
+    assert_eq!(content_length_open_c_field("complete"), "0");
+
+    let content_length_open_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    content_length_open_socket.connect(server_address).unwrap();
+    let mut content_length_open_roots = RootCertStore::empty();
+    content_length_open_roots
+        .add(certificate_der.clone())
+        .unwrap();
+    let content_length_open_rust_result = r2o_quic_http3_get(
+        content_length_open_socket,
+        server_address,
+        "localhost",
+        "/content-length-open",
+        Duration::from_secs(1),
+        content_length_open_roots,
+    )
+    .await;
+    let content_length_open_rust_verdict =
+        r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&content_length_open_rust_result);
+    assert_eq!(content_length_open_rust_result.status, 200);
+    assert_eq!(content_length_open_rust_result.body_bytes, 2);
+    assert!(!content_length_open_rust_result.complete);
+    assert!(!content_length_open_rust_result.r2o_quic_stalled);
+    assert_eq!(format!("{content_length_open_rust_verdict:?}"), "NotRun");
+    assert_eq!(
+        content_length_open_c_field("app_bytes")
+            .parse::<u64>()
+            .unwrap(),
+        content_length_open_rust_result.app_bytes,
+        "D2O={content_length_open_c_result} R2O={content_length_open_rust_result:?}"
+    );
+    assert_eq!(
+        content_length_open_c_field("requests")
+            .parse::<u32>()
+            .unwrap(),
+        content_length_open_rust_result.requests,
+        "D2O={content_length_open_c_result} R2O={content_length_open_rust_result:?}"
     );
 
     let reset_binary = d2o_binary.clone();
