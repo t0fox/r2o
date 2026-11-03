@@ -323,6 +323,108 @@ async fn r2o_http3_connection_close_after_partial_body_matches_d2o() {
     server.await.unwrap();
 }
 
+#[tokio::test]
+#[ignore = "requires the pinned D2O harness; run scripts/test-quic-http3-full-stage-differential.sh"]
+async fn r2o_http3_alpn_refusal_matches_d2o() {
+    let d2o_binary = std::env::var("D2O_QUIC_DATA_STAGE_BIN")
+        .expect("D2O_QUIC_DATA_STAGE_BIN must point to the pinned C data-stage harness");
+    let certificate = rcgen::Certificate::from_params(rcgen::CertificateParams::new(vec![
+        "localhost".to_owned(),
+    ]))
+    .unwrap();
+    let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
+    let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+        certificate.serialize_private_key_der(),
+    ));
+    let mut tls = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate_der.clone()], private_key)
+        .unwrap();
+    tls.alpn_protocols = vec![b"h2".to_vec()];
+    let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap();
+    let server_config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
+    let endpoint = quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let address = endpoint.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let Some(incoming) = endpoint.accept().await else {
+                return;
+            };
+            let _ = incoming.await;
+        }
+    });
+
+    let c_address = address;
+    let c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(d2o_binary)
+            .args([
+                "127.0.0.1",
+                &c_address.port().to_string(),
+                "localhost",
+                "/alpn-refused",
+                "0",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        !c_output.status.success(),
+        "D2O unexpectedly accepted a server without HTTP/3 ALPN: stdout={} stderr={}",
+        String::from_utf8_lossy(&c_output.stdout),
+        String::from_utf8_lossy(&c_output.stderr)
+    );
+    let c_result = String::from_utf8(c_output.stdout).unwrap();
+    let c_field = |name: &str| {
+        c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {c_result}"))
+    };
+
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.connect(address).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(certificate_der).unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(6),
+        r2o_quic_http3_get(
+            socket,
+            address,
+            "localhost",
+            "/alpn-refused",
+            Duration::from_secs(2),
+            roots,
+        ),
+    )
+    .await
+    .expect("HTTP/3 ALPN-refusal test timed out");
+    let verdict = r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&result);
+
+    assert!(!result.handshake_confirmed, "R2O={result:?}");
+    assert_eq!(result.status, 0, "R2O={result:?}");
+    assert!(result.error.is_some(), "R2O={result:?}");
+    assert_eq!(c_field("verdict"), "NoHandshake", "D2O={c_result}");
+    assert_eq!(
+        format!("{verdict:?}"),
+        c_field("verdict"),
+        "D2O={c_result} R2O={result:?}"
+    );
+    assert_eq!(
+        result.app_bytes,
+        c_field("app_bytes").parse::<u64>().unwrap()
+    );
+    assert_eq!(result.requests, c_field("requests").parse::<u32>().unwrap());
+    assert_eq!(result.requests, 0, "R2O={result:?}");
+    write_d2o_http3_differential(
+        "R2O_QUIC_HTTP3_ALPN_REFUSAL_DIFF_OUTPUT",
+        "alpn-refusal",
+        &result,
+    );
+    server.await.unwrap();
+}
+
 async fn spawn_quic_peer_without_settings(
     close_after_handshake: bool,
     max_concurrent_uni_streams: Option<u32>,

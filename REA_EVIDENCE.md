@@ -9534,3 +9534,7 @@ This is R2O production-path evidence for local IPv4 UDP NFQUEUE → QUIC suspici
 ### QUIC HTTP/3 CONNECTION_CLOSE после частичного ответа — 2026-11-03
 
 На D2O main `a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe` и R2O main `4491c82` peer завершил QUIC handshake, отправил HTTP 200, 7 байт из `Content-Length: 4096`, затем CONNECTION_CLOSE. Новый `r2o_http3_connection_close_after_partial_body_matches_d2o` прошёл 1/1 в Debian 13 WSL2 с C harness, пересобранным из pinned D2O. Обе стороны вернули `NotRun` с одинаковыми `app_bytes` и `requests`; Rust оставил ответ неполным и не назвал закрытие зависанием. `cargo +1.98.0 fmt --all -- --check` прошёл. Production code не менялся; QUIC остаётся partial, общий счёт — 62/87 (71.26%).
+
+### QUIC HTTP/3 отказ ALPN — 2026-11-03
+
+The pinned D2O `a63d964` and R2O test differential runs against a server that offers only `h2` and rejects the client's `h3` ALPN. `r2o_http3_alpn_refusal_matches_d2o` passed 1/1 in Debian 13 WSL2; both sides return `NoHandshake`, zero application bytes and zero requests. The Rust result also preserves the handshake error. Only test coverage and evidence changed; no QEMU was needed, and the QUIC row stays partial at 0/2 (62/87, 71.26%).
