@@ -371,7 +371,7 @@
           "statusLabel": "Эквивалентно",
           "group": "Discord RTC",
           "mapping": "`on_suspect`/`voice_trial_send`/`voice_confirm` → `R2oVoiceDiscoveryWorker`, `confirm_r2o_voice_trial`",
-          "evidence": "`r2o-discord-discovery-differential.sh` вызывает `r2o-discord-voice-lifecycle-helper.sh`; C fixture и Rust `voice_lifecycle_trace_matches_d2o_a_to_b_queue_lease_proof_and_persistence` сверяют указанные transitions"
+          "evidence": "`r2o-discord-discovery-differential.sh` вызывает `r2o-discord-voice-lifecycle-helper.sh`; C fixture и Rust `voice_lifecycle_trace_matches_d2o_a_to_b_queue_lease_proof_and_persistence` сверяют указанные transitions; `scripts/test-discord-scheduled-udp-differential.sh` сравнил production D2O `d2k_sched_push_serial`/`pop_due_serial` из a63d964 с Rust `ScheduledQueue`: одинаковые 28 байт UDP при сроке 15 мс, C очередь оставалась pending на 1 и 14.999999 мс, Rust также проверил сохранение после reverse-flow наблюдения на 1 мс"
         },
         {
           "id": 31,
@@ -900,7 +900,7 @@
       "statusLabel": "Эквивалентно",
       "group": "Discord RTC",
       "mapping": "`on_suspect`/`voice_trial_send`/`voice_confirm` → `R2oVoiceDiscoveryWorker`, `confirm_r2o_voice_trial`",
-      "evidence": "`r2o-discord-discovery-differential.sh` вызывает `r2o-discord-voice-lifecycle-helper.sh`; C fixture и Rust `voice_lifecycle_trace_matches_d2o_a_to_b_queue_lease_proof_and_persistence` сверяют указанные transitions"
+      "evidence": "`r2o-discord-discovery-differential.sh` вызывает `r2o-discord-voice-lifecycle-helper.sh`; C fixture и Rust `voice_lifecycle_trace_matches_d2o_a_to_b_queue_lease_proof_and_persistence` сверяют указанные transitions; `scripts/test-discord-scheduled-udp-differential.sh` сравнил production D2O `d2k_sched_push_serial`/`pop_due_serial` из a63d964 с Rust `ScheduledQueue`: одинаковые 28 байт UDP при сроке 15 мс, C очередь оставалась pending на 1 и 14.999999 мс, Rust также проверил сохранение после reverse-flow наблюдения на 1 мс"
     },
     {
       "id": 31,

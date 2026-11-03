@@ -317,6 +317,10 @@ jobs:
           R2OD_BIN="$GITHUB_WORKSPACE/target/release/r2o-datapath"
           R2OC_BIN="$GITHUB_WORKSPACE/target/release/r2o-controller"
           sh scripts/test-discord-discovery-nfq.sh
+      - name: Compare paced UDP scheduler with D2O C
+        run: >-
+          D2O_ROOT="$GITHUB_WORKSPACE/d2o"
+          sh scripts/test-discord-scheduled-udp-differential.sh
       - name: Сверить восстановление NFQUEUE recv(EIO) для IPv4
         run: >-
           sudo env

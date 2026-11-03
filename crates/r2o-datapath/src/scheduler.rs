@@ -378,7 +378,7 @@ mod tests {
             .reserve(&request, 1)
             .expect("a voice plan must reserve its paced UDP payload");
         let delayed_payload = WirePacket {
-            packet: vec![1, 2, 3],
+            packet: request.clone(),
             kind: EmitKind::Payload,
             delay_us: 0,
         };
@@ -396,6 +396,12 @@ mod tests {
             .pop_due(now + Duration::from_millis(16))
             .expect("paced UDP payload should become due");
         assert_eq!(released_ticket, ticket);
-        assert_eq!(emitted.packet, [1, 2, 3]);
+        assert_eq!(emitted.packet, request);
+        let hex = emitted
+            .packet
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        println!("RESULT delay_us=15000 packet={hex}");
     }
 }
