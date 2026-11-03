@@ -13,6 +13,7 @@ CONTROLLER_MARK=291
 SERVER_PORT=50005
 CLIENT_PORT=40155
 TRIAL_CLIENT_PORT=40156
+VERIFY_CLIENT_PORT=40157
 NS="r2o-discovery-$$"
 SOCKET_ROOT="/dev/shm/r2o-discovery-$$"
 DATAPATH_PID=
@@ -89,7 +90,7 @@ ip netns exec "$NS" nft add rule inet r2o_discovery output ip daddr 127.0.0.1 ud
 ip netns exec "$NS" nft add rule inet r2o_discovery output ip saddr 127.0.0.1 udp sport "$SERVER_PORT" udp dport "$TRIAL_CLIENT_PORT" counter meta mark != "$VOICE_MARK" meta mark != "$CONTROLLER_MARK" queue num "$QUEUE" bypass
 ip netns exec "$NS" nft add rule inet r2o_discovery input ip saddr 127.0.0.1 udp sport "$SERVER_PORT" counter meta mark != "$VOICE_MARK" meta mark != "$CONTROLLER_MARK" queue num "$QUEUE" bypass
 
-ip netns exec "$NS" python3 -u - "$SERVER_PORT" "$CLIENT_PORT" >"$WORK/discovery-server.log" 2>&1 <<'PY' &
+ip netns exec "$NS" python3 -u - "$SERVER_PORT" "$CLIENT_PORT" "$VERIFY_CLIENT_PORT" >"$WORK/discovery-server.log" 2>&1 <<'PY' &
 import signal
 import socket
 import struct
@@ -100,6 +101,7 @@ from collections import defaultdict
 
 port = int(sys.argv[1])
 client_port = int(sys.argv[2])
+verify_client_port = int(sys.argv[3])
 stopping = threading.Event()
 direct_counts = defaultdict(int)
 direct_times = defaultdict(float)
@@ -131,6 +133,14 @@ while not stopping.is_set():
     if peer[1] == client_port:
         if len(request) == 74 and request[:4] == b"\x00\x01\x00\x46":
             server.sendto(discovery_response(request), peer)
+        continue
+    if (
+        peer[1] == verify_client_port
+        and peer not in candidate_peers
+        and len(request) == 74
+        and request[:4] == b"\x00\x01\x00\x46"
+        and not any(request[8:72])
+    ):
         continue
     if len(request) == 20 and request[:8] == b"\x00\x01\x00\x00\x21\x12\xa4\x42":
         candidate_peers.add(peer)
@@ -282,4 +292,57 @@ if not any(
 ):
     raise SystemExit("catalog lacks the Discovery-confirmed UDP voice binding")
 print("ПРОЙДЕНО: controller сохранил Discovery-confirmed voice binding")
+PY
+
+# Restart the production datapath so the next check can only pass if the
+# confirmed catalog entry is replayed into a fresh runtime.
+kill -TERM "$DATAPATH_PID"
+if wait "$DATAPATH_PID"; then
+    DATAPATH_PID=
+else
+    echo "r2o-datapath did not shut down cleanly before catalog reapply" >&2
+    exit 1
+fi
+
+RESTARTED_SOCKET="$SOCKET_ROOT/datapath-restarted.sock"
+ip netns exec "$NS" "$R2OD_BIN" \
+    --mode apply --queue "$QUEUE" --family ipv4 --controller-only \
+    --mark "$VOICE_MARK" --control "$RESTARTED_SOCKET" \
+    --r2o-udp-reverse-visible >"$WORK/datapath-restarted.log" 2>&1 &
+DATAPATH_PID=$!
+datapath_attempt=0
+while [ ! -S "$RESTARTED_SOCKET" ]; do
+    if ! kill -0 "$DATAPATH_PID" 2>/dev/null || [ "$datapath_attempt" -ge 100 ]; then
+        echo "restarted r2o-datapath did not open its control socket" >&2
+        exit 1
+    fi
+    sleep 0.05
+    datapath_attempt=$((datapath_attempt + 1))
+done
+
+"$R2OC_BIN" --apply-catalog "$RESTARTED_SOCKET" "$WORK/catalog.json" >"$WORK/reapply.log" 2>&1 || {
+    echo "r2o-controller did not reapply the saved voice binding" >&2
+    exit 1
+}
+if ! grep -Fq "отправлено 1, пропущено неподдерживаемых 0" "$WORK/reapply.log"; then
+    echo "r2o-controller did not apply exactly one saved voice binding" >&2
+    exit 1
+fi
+
+ip netns exec "$NS" python3 - "$SERVER_PORT" "$VERIFY_CLIENT_PORT" <<'PY'
+import socket
+import sys
+
+server_port = int(sys.argv[1])
+client_port = int(sys.argv[2])
+request = b"\x00\x01\x00\x46\x21\x12\xa4\x42" + bytes(66)
+client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+client.bind(("127.0.0.1", client_port))
+client.settimeout(5)
+client.sendto(request, ("127.0.0.1", server_port))
+response, _ = client.recvfrom(2048)
+client.close()
+if len(response) != 74 or response[:4] != b"\x00\x02\x00\x46" or response[4:8] != request[4:8]:
+    raise SystemExit(f"wrong response after restart/reapply: {response.hex()}")
+print("ПРОЙДЕНО: сохранённый voice-план работает через production NFQUEUE после перезапуска datapath")
 PY
