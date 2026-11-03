@@ -3403,7 +3403,7 @@ async fn r2o_http3_goaway_repeated_request_matches_d2o() {
 }
 #[tokio::test]
 #[ignore = "requires the pinned D2O harness; run scripts/test-quic-http3-full-stage-differential.sh"]
-async fn r2o_http3_implicit_zero_bidi_stream_limit_documents_d2o_divergence() {
+async fn r2o_http3_implicit_zero_bidi_stream_limit_counts_attempt_like_d2o() {
     let d2o_binary = std::env::var("D2O_QUIC_DATA_STAGE_BIN")
         .expect("D2O_QUIC_DATA_STAGE_BIN must point to the pinned C data-stage harness");
     let certificate_params = rcgen::CertificateParams::new(vec!["localhost".to_owned()]);
@@ -3497,9 +3497,13 @@ async fn r2o_http3_implicit_zero_bidi_stream_limit_documents_d2o_divergence() {
         c_field("app_bytes").parse::<u64>().unwrap()
     );
     // Quinn treats a missing initial_max_streams_bidi as zero and waits for
-    // stream credit; D2O leaves the absent limit unset and sends stream 0.
-    assert_eq!(rust_result.requests, 0, "R2O={rust_result:?}");
-    assert_eq!(c_field("requests"), "1", "D2O={c_result}");
+    // stream credit; still count the attempted GET without opening stream 0.
+    assert_eq!(rust_result.requests, 1, "R2O={rust_result:?}");
+    assert_eq!(
+        c_field("requests"),
+        rust_result.requests.to_string(),
+        "D2O={c_result} R2O={rust_result:?}"
+    );
 
     server.abort();
 }
