@@ -206,8 +206,10 @@ cat >"$TEMP/tcp-hold-server.py" <<'PY'
 import socket
 import sys
 import time
+import os
 
 first_path, capture_path, port = sys.argv[1], sys.argv[2], int(sys.argv[3])
+first_tmp_path = first_path + ".tmp"
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("198.18.78.2", port))
@@ -221,8 +223,9 @@ while True:
     if not part:
         break
     if not received:
-        with open(first_path, "w", encoding="ascii") as first:
+        with open(first_tmp_path, "w", encoding="ascii") as first:
             first.write(f"{time.monotonic():.9f}\n")
+        os.replace(first_tmp_path, first_path)
     received.extend(part)
 with open(capture_path, "wb") as capture:
     capture.write(received)
