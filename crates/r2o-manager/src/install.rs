@@ -701,6 +701,31 @@ fn sync_directory(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
 }
 
+#[cfg(all(test, unix))]
+fn log_test_manager_debug_line(line: &str) {
+    let _ = unsafe { libc::write(libc::STDERR_FILENO, line.as_ptr().cast(), line.len()) };
+}
+
+#[cfg(all(test, unix))]
+fn log_test_manager_lock(status: &str, root: &Path, file: &File) {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = file.metadata().ok();
+    let inode = metadata.as_ref().map_or(0, MetadataExt::ino);
+    let device = metadata.as_ref().map_or(0, MetadataExt::dev);
+    let lock_table = fs::read_to_string("/proc/locks").unwrap_or_default();
+    let locks = lock_table
+        .lines()
+        .filter(|line| line.contains(&format!(" {inode} ")))
+        .collect::<Vec<_>>();
+    log_test_manager_debug_line(&format!(
+        "manager-lock-test status={status} pid={} thread={} root={} dev={device:x} ino={inode} locks={locks:?}\n",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("?"),
+        root.display()
+    ));
+}
+
 #[cfg(unix)]
 struct ManagerLock {
     _file: File,
@@ -728,10 +753,14 @@ impl ManagerLock {
                 .raw_os_error()
                 .is_some_and(|code| code == libc::EWOULDBLOCK || code == libc::EAGAIN)
             {
+                #[cfg(test)]
+                log_test_manager_lock("busy", root, &file);
                 return Err(InstallError::Busy);
             }
             return Err(error.into());
         }
+        #[cfg(test)]
+        log_test_manager_lock("acquired", root, &file);
         Ok(Self { _file: file })
     }
 }
@@ -775,7 +804,16 @@ mod tests {
                     std::process::id()
                 ));
                 match fs::create_dir(&path) {
-                    Ok(()) => return Self(path),
+                    Ok(()) => {
+                        #[cfg(unix)]
+                        super::log_test_manager_debug_line(&format!(
+                            "manager-test-dir pid={} thread={} path={}\n",
+                            std::process::id(),
+                            std::thread::current().name().unwrap_or("?"),
+                            path.display()
+                        ));
+                        return Self(path);
+                    }
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                     Err(error) => {
                         panic!("cannot create test directory {}: {error}", path.display())
