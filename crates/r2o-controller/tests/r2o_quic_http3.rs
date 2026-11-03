@@ -3229,7 +3229,8 @@ async fn r2o_http3_goaway_repeated_request_matches_d2o() {
                 let Ok((request, mut stream)) = resolver.resolve_request().await else {
                     return;
                 };
-                if request.uri().path() != "/goaway" {
+                let path = request.uri().path();
+                if !matches!(path, "/goaway" | "/reset-second-stream") {
                     return;
                 }
                 if stream
@@ -3246,7 +3247,7 @@ async fn r2o_http3_goaway_repeated_request_matches_d2o() {
                     return;
                 }
                 // Graceful shutdown allows stream 0 but rejects the next client stream.
-                if h3_connection.shutdown(0).await.is_err()
+                if (path == "/goaway" && h3_connection.shutdown(0).await.is_err())
                     || stream
                         .send_data(bytes::Bytes::from_static(b"goaway-response"))
                         .await
@@ -3255,14 +3256,27 @@ async fn r2o_http3_goaway_repeated_request_matches_d2o() {
                 {
                     return;
                 }
+                if path == "/reset-second-stream" {
+                    let Ok(Some(resolver)) = h3_connection.accept().await else {
+                        return;
+                    };
+                    let Ok((request, mut stream)) = resolver.resolve_request().await else {
+                        return;
+                    };
+                    if request.uri().path() != path {
+                        return;
+                    }
+                    stream.stop_stream(h3::error::Code::H3_INTERNAL_ERROR);
+                }
                 tokio::time::sleep(Duration::from_secs(2)).await;
             });
         }
     });
 
     let c_address = server_address;
+    let c_binary = d2o_binary.clone();
     let c_output = tokio::task::spawn_blocking(move || {
-        std::process::Command::new(d2o_binary)
+        std::process::Command::new(c_binary)
             .args([
                 "127.0.0.1",
                 &c_address.port().to_string(),
@@ -3286,7 +3300,7 @@ async fn r2o_http3_goaway_repeated_request_matches_d2o() {
     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
     socket.connect(server_address).unwrap();
     let mut roots = RootCertStore::empty();
-    roots.add(certificate_der).unwrap();
+    roots.add(certificate_der.clone()).unwrap();
     assert_eq!(c_field("verdict"), "NotRun");
     assert_eq!(c_field("requests"), "2");
 
@@ -3317,6 +3331,72 @@ async fn r2o_http3_goaway_repeated_request_matches_d2o() {
         c_field("requests").parse::<u32>().unwrap(),
         rust_result.requests,
         "D2O={c_result} R2O={rust_result:?}"
+    );
+
+    let reset_c_binary = d2o_binary.clone();
+    let reset_c_address = server_address;
+    let reset_c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(reset_c_binary)
+            .args([
+                "127.0.0.1",
+                &reset_c_address.port().to_string(),
+                "localhost",
+                "/reset-second-stream",
+                "25",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    let reset_c_result = String::from_utf8(reset_c_output.stdout).unwrap();
+    let reset_c_field = |name: &str| {
+        reset_c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {reset_c_result}"))
+    };
+    assert_eq!(reset_c_field("verdict"), "NotRun", "D2O={reset_c_result}");
+    assert_eq!(reset_c_field("requests"), "2", "D2O={reset_c_result}");
+
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.connect(server_address).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(certificate_der.clone()).unwrap();
+    let reset_rust_result =
+        r2o_controller::r2o_quic_http3::r2o_quic_http3_measure_with_max_duration(
+            socket,
+            server_address,
+            "localhost",
+            "/reset-second-stream",
+            Duration::from_secs(1),
+            roots,
+            r2o_controller::r2o_quic_http3::R2O_QUIC_HTTP3_DEFAULT_BUDGET_PACKETS,
+            Duration::from_secs(10),
+        )
+        .await;
+    let reset_rust_verdict =
+        r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&reset_rust_result);
+    assert!(
+        reset_rust_result.handshake_confirmed,
+        "R2O={reset_rust_result:?}"
+    );
+    assert_eq!(reset_rust_result.status, 0, "R2O={reset_rust_result:?}");
+    assert!(!reset_rust_result.complete, "R2O={reset_rust_result:?}");
+    assert_eq!(
+        reset_c_field("verdict"),
+        format!("{reset_rust_verdict:?}"),
+        "D2O={reset_c_result} R2O={reset_rust_result:?}"
+    );
+    assert_eq!(
+        reset_c_field("app_bytes").parse::<u64>().unwrap(),
+        reset_rust_result.app_bytes,
+        "D2O={reset_c_result} R2O={reset_rust_result:?}"
+    );
+    assert_eq!(
+        reset_c_field("requests").parse::<u32>().unwrap(),
+        reset_rust_result.requests,
+        "D2O={reset_c_result} R2O={reset_rust_result:?}"
     );
 
     server.abort();
