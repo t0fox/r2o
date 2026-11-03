@@ -38,6 +38,8 @@ pub struct QueueStats {
     pub bytes: u64,
     pub accepted: u64,
     pub dropped: u64,
+    pub truncated: u64,
+    pub no_payload: u64,
 }
 
 pub struct QueueSocket {
@@ -214,10 +216,18 @@ impl QueueSocket {
         self.stats.get()
     }
 
-    pub fn record_received_packet(&self, payload_bytes: usize) {
+    pub fn record_received_packet(&self, payload_bytes: Option<usize>, truncated: bool) {
         let mut stats = self.stats.get();
         stats.packets = stats.packets.saturating_add(1);
-        stats.bytes = stats.bytes.saturating_add(payload_bytes as u64);
+        match payload_bytes {
+            Some(payload_bytes) => {
+                stats.bytes = stats.bytes.saturating_add(payload_bytes as u64);
+                if truncated {
+                    stats.truncated = stats.truncated.saturating_add(1);
+                }
+            }
+            None => stats.no_payload = stats.no_payload.saturating_add(1),
+        }
         self.stats.set(stats);
     }
 

@@ -33,7 +33,7 @@ ip netns exec "$namespace" nft 'add chain inet stats output { type filter hook o
 ip netns exec "$namespace" nft add rule inet stats output ip daddr 127.0.0.1 udp dport "$traffic_port" queue num "$queue"
 
 send_traffic() {
-    ip netns exec "$namespace" python3 -c 'import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); [s.sendto(bytes([i])*(i+1),("127.0.0.1",39992)) for i in range(1,9)]'
+    ip netns exec "$namespace" python3 -c 'import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); [s.sendto(bytes([i])*(i+1),("127.0.0.1",39992)) for i in range(1,9)]; s.sendto(b"x"*512,("127.0.0.1",39992))'
 }
 
 run_case() {
@@ -59,7 +59,7 @@ run_traffic_case() {
     pattern=$3
     log="$test_tmpdir/r2o-stats-traffic-$name.log"
     rm -f "$log"
-    ip netns exec "$namespace" "$binary" --queue "$queue" --mode observe --stats 1 >"$log" 2>&1 &
+    ip netns exec "$namespace" "$binary" --queue "$queue" --mode observe --copy-range 128 --stats 1 >"$log" 2>&1 &
     running_pid=$!
     sleep 1
     if ! kill -0 "$running_pid" 2>/dev/null; then cat "$log"; exit 1; fi
@@ -186,8 +186,8 @@ if [ "$c_queue_count" -ne "$c_traffic_stats_count" ] || [ "$r_queue_count" -ne "
 fi
 c_queue_values=$(grep -E 'пакетов [0-9]+, байт [0-9]+, пропущено [0-9]+, снято [0-9]+' "$test_tmpdir/r2o-stats-traffic-d2o.log"  | sed -E 's/[^0-9]+/ /g' | sed '/^ *$/d')
 r_queue_values=$(grep -E 'пакетов [0-9]+, байт [0-9]+, пропущено [0-9]+, снято [0-9]+' "$test_tmpdir/r2o-stats-traffic-r2o.log"  | sed -E 's/^r2o-datapath: //' | sed -E 's/[^0-9]+/ /g' | sed '/^ *$/d')
-c_periodic_nonzero=$(grep -E 'пакетов [0-9]+, байт [0-9]+, пропущено [0-9]+, снято [0-9]+' "$test_tmpdir/r2o-stats-traffic-d2o.log" | sed '$d' | grep -Fc 'пакетов 8, байт 268, пропущено 8, снято 0' || true)
-r_periodic_nonzero=$(grep -E 'пакетов [0-9]+, байт [0-9]+, пропущено [0-9]+, снято [0-9]+' "$test_tmpdir/r2o-stats-traffic-r2o.log" | sed '$d' | grep -Fc 'пакетов 8, байт 268, пропущено 8, снято 0' || true)
+c_periodic_nonzero=$(grep -E 'пакетов [0-9]+, байт [0-9]+, пропущено [0-9]+, снято [0-9]+' "$test_tmpdir/r2o-stats-traffic-d2o.log" | sed '$d' | grep -Fc 'пакетов 9, байт 396, пропущено 9, снято 0' || true)
+r_periodic_nonzero=$(grep -E 'пакетов [0-9]+, байт [0-9]+, пропущено [0-9]+, снято [0-9]+' "$test_tmpdir/r2o-stats-traffic-r2o.log" | sed '$d' | grep -Fc 'пакетов 9, байт 396, пропущено 9, снято 0' || true)
 if [ "$c_periodic_nonzero" -lt 1 ] || [ "$r_periodic_nonzero" -lt 1 ]; then
     echo "expected nonzero periodic traffic totals: C=$c_periodic_nonzero Rust=$r_periodic_nonzero" >&2
     exit 1
@@ -197,8 +197,33 @@ if [ "$c_queue_values" != "$r_queue_values" ]; then
     printf 'C:\n%s\nRust:\n%s\n' "$c_queue_values" "$r_queue_values" >&2
     exit 1
 fi
-if ! printf '%s\n' "$c_queue_values" | grep -Eq '^ 8 268 8 0$'; then
-    echo "NFQUEUE test did not account for the eight sent packets: $c_queue_values" >&2
+if ! printf '%s\n' "$c_queue_values" | grep -Eq '^ 9 396 9 0$'; then
+    echo "NFQUEUE test did not account for the nine sent packets including one truncated packet: $c_queue_values" >&2
     exit 1
 fi
-echo 'nfqueue_traffic_stats_numeric_trace=identical (8 packets, 268 bytes, 8 accepted)'
+echo 'nfqueue_traffic_stats_numeric_trace=identical (9 packets, 396 bytes, 9 accepted)'
+
+c_truncated_count=$(grep -Ec 'обрезано [0-9]+, без нагрузки [0-9]+, без заголовка [0-9]+' "$test_tmpdir/r2o-stats-traffic-d2o.log" || true)
+r_truncated_count=$(grep -Ec 'r2o-datapath: обрезано [0-9]+, без нагрузки [0-9]+' "$test_tmpdir/r2o-stats-traffic-r2o.log" || true)
+if [ "$c_truncated_count" -ne "$c_traffic_stats_count" ] || [ "$r_truncated_count" -ne "$r_traffic_stats_count" ]; then
+    echo "copy-range counters must appear once per summary: C=$c_truncated_count/$c_traffic_stats_count Rust=$r_truncated_count/$r_traffic_stats_count" >&2
+    exit 1
+fi
+c_truncated_values=$(grep -E 'обрезано [0-9]+, без нагрузки [0-9]+, без заголовка [0-9]+' "$test_tmpdir/r2o-stats-traffic-d2o.log" | sed -E 's/, без заголовка [0-9]+//' | sed -E 's/[^0-9]+/ /g' | sed '/^ *$/d')
+r_truncated_values=$(grep -E 'r2o-datapath: обрезано [0-9]+, без нагрузки [0-9]+' "$test_tmpdir/r2o-stats-traffic-r2o.log" | sed -E 's/^r2o-datapath: //' | sed -E 's/[^0-9]+/ /g' | sed '/^ *$/d')
+if [ "$c_truncated_values" != "$r_truncated_values" ]; then
+    echo "D2O NFQUEUE copy-range statistics differ from R2O" >&2
+    printf 'C:\n%s\nRust:\n%s\n' "$c_truncated_values" "$r_truncated_values" >&2
+    exit 1
+fi
+if ! printf '%s\n' "$c_truncated_values" | grep -Eq '^ 1 0$'; then
+    echo "expected one truncated packet and no missing payloads: $c_truncated_values" >&2
+    exit 1
+fi
+c_truncated_periodic=$(grep -E 'обрезано [0-9]+, без нагрузки [0-9]+' "$test_tmpdir/r2o-stats-traffic-d2o.log" | sed '$d' | grep -Fc 'обрезано 1, без нагрузки 0' || true)
+r_truncated_periodic=$(grep -E 'r2o-datapath: обрезано [0-9]+, без нагрузки [0-9]+' "$test_tmpdir/r2o-stats-traffic-r2o.log" | sed '$d' | grep -Fc 'обрезано 1, без нагрузки 0' || true)
+if [ "$c_truncated_periodic" -lt 1 ] || [ "$r_truncated_periodic" -lt 1 ]; then
+    echo "expected nonzero periodic copy-range counters: C=$c_truncated_periodic Rust=$r_truncated_periodic" >&2
+    exit 1
+fi
+echo 'nfqueue_copy_stats_trace=identical (one truncated packet)'

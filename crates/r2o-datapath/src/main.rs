@@ -624,6 +624,10 @@ mod app {
             "r2o-datapath: пакетов {}, байт {}, пропущено {}, снято {}",
             stats.packets, stats.bytes, stats.accepted, stats.dropped
         );
+        eprintln!(
+            "r2o-datapath: обрезано {}, без нагрузки {}",
+            stats.truncated, stats.no_payload
+        );
     }
 
     fn r2o_log_flow_table_stats(tcp_sessions: &TcpSessions, udp_sessions: &R2oUdpSessions) {
@@ -1282,7 +1286,10 @@ mod app {
                     let Some(mut packet_id) = packet.id else {
                         return Err(invalid("NFQUEUE пакет без id; закрываю очередь fail-open"));
                     };
-                    socket.record_received_packet(packet.payload.map_or(0, |bytes| bytes.len()));
+                    socket.record_received_packet(
+                        packet.payload.map(|bytes| bytes.len()),
+                        packet.truncated,
+                    );
                     let queue_hook = packet.hook;
                     if let Some(bytes) = packet.payload
                         && let Some(drop) = icmp_guard.r2o_handle_at_hook(

@@ -79,7 +79,7 @@
           "statusLabel": "Частично",
           "group": "Datapath",
           "mapping": "C print_stats/self_cost → Rust QueueSocket counters/runtime diagnostics",
-          "evidence": "Pinned D2O a63d964 hold fixture confirms simultaneous timeout+revision: fail-open, C timed_out=1/plan_changed=0, Rust incomplete-TLS capture 5 bytes. scripts/test-datapath-stats-timer-differential.sh matches idle flow-table/scheduler/capture/payload/reply-visibility/hold traces and all 4 C/Rust summaries with traffic: 8 packets, 268 bytes, 8 accepted, 0 dropped. Production scheduler refusal matches (queue=1/refusals=1); ICMP matches (2 received/2 dropped/1 fake). CPU/RSS and Linux self_cost token match; short OpenWrt AArch64 service smoke covers CPU/RSS, flow table and capture. Other hold bran"
+          "evidence": "D2O a63d964 C/Rust hold fixture: timeout+revision matches fail-open (timed_out=1, plan_changed=0; Rust incomplete TLS capture 5 B). Timer differential matches idle flow/scheduler/capture/payload/reply/hold traces and all 4 IPv4 NFQUEUE traffic summaries: 9 packets, 396 copied bytes, 9 accepted, 0 dropped; 540-B datagram at copy-range 128 yields truncated=1/no_payload=0 on both. Scheduler refusal (queue=1/refusals=1), ICMP (2 received/2 dropped/1 fake), CPU/RSS and Linux self_cost token match. Short OpenWrt AArch64 smoke passed. Remaining: no-header, other hold/session branches."
         },
         {
           "id": 9,
@@ -658,7 +658,7 @@
       "statusLabel": "Частично",
       "group": "Datapath",
       "mapping": "C print_stats/self_cost → Rust QueueSocket counters/runtime diagnostics",
-      "evidence": "Pinned D2O a63d964 hold fixture confirms simultaneous timeout+revision: fail-open, C timed_out=1/plan_changed=0, Rust incomplete-TLS capture 5 bytes. scripts/test-datapath-stats-timer-differential.sh matches idle flow-table/scheduler/capture/payload/reply-visibility/hold traces and all 4 C/Rust summaries with traffic: 8 packets, 268 bytes, 8 accepted, 0 dropped. Production scheduler refusal matches (queue=1/refusals=1); ICMP matches (2 received/2 dropped/1 fake). CPU/RSS and Linux self_cost token match; short OpenWrt AArch64 service smoke covers CPU/RSS, flow table and capture. Other hold bran"
+      "evidence": "D2O a63d964 C/Rust hold fixture: timeout+revision matches fail-open (timed_out=1, plan_changed=0; Rust incomplete TLS capture 5 B). Timer differential matches idle flow/scheduler/capture/payload/reply/hold traces and all 4 IPv4 NFQUEUE traffic summaries: 9 packets, 396 copied bytes, 9 accepted, 0 dropped; 540-B datagram at copy-range 128 yields truncated=1/no_payload=0 on both. Scheduler refusal (queue=1/refusals=1), ICMP (2 received/2 dropped/1 fake), CPU/RSS and Linux self_cost token match. Short OpenWrt AArch64 smoke passed. Remaining: no-header, other hold/session branches."
     },
     {
       "id": 9,
