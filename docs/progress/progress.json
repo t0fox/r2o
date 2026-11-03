@@ -79,7 +79,7 @@
           "statusLabel": "Частично",
           "group": "Datapath",
           "mapping": "C `print_stats`/`self_cost` → Rust runtime diagnostics",
-          "evidence": "D2O `d2k_hold_flush` counts a timeout when `now >= deadline`, even if the plan revision changes in the same call. A pinned D2O a63d964 C fixture and Rust `timeout_diagnostic_survives_deadline_and_revision_change_together` confirm fail-open release plus the incomplete TLS diagnostic (C timed_out=1, plan_changed=0; Rust captured 5 bytes). `scripts/test-datapath-stats-timer-differential.sh` passed in Debian WSL2: every summary contains one capture, payload, next-segment, reply-visibility, and hold-counter line; the first two zero-valued snapshots and TCP/UDP flow-table traces match, including ide"
+          "evidence": "D2O `d2k_hold_flush` counts a timeout when `now >= deadline`, even if the plan revision changes in the same call. A pinned D2O a63d964 C fixture and Rust `timeout_diagnostic_survives_deadline_and_revision_change_together` confirm fail-open release plus the incomplete TLS diagnostic (C timed_out=1, plan_changed=0; Rust captured 5 bytes). `scripts/test-datapath-stats-timer-differential.sh` passed in Debian WSL2: every summary includes one scheduled-queue line, and D2O/R2O queue count/refusal traces match; the D2O C/Rust scheduler differential also matches a capacity refusal (`queue=1, refusals=1"
         },
         {
           "id": 9,
@@ -658,7 +658,7 @@
       "statusLabel": "Частично",
       "group": "Datapath",
       "mapping": "C `print_stats`/`self_cost` → Rust runtime diagnostics",
-      "evidence": "D2O `d2k_hold_flush` counts a timeout when `now >= deadline`, even if the plan revision changes in the same call. A pinned D2O a63d964 C fixture and Rust `timeout_diagnostic_survives_deadline_and_revision_change_together` confirm fail-open release plus the incomplete TLS diagnostic (C timed_out=1, plan_changed=0; Rust captured 5 bytes). `scripts/test-datapath-stats-timer-differential.sh` passed in Debian WSL2: every summary contains one capture, payload, next-segment, reply-visibility, and hold-counter line; the first two zero-valued snapshots and TCP/UDP flow-table traces match, including ide"
+      "evidence": "D2O `d2k_hold_flush` counts a timeout when `now >= deadline`, even if the plan revision changes in the same call. A pinned D2O a63d964 C fixture and Rust `timeout_diagnostic_survives_deadline_and_revision_change_together` confirm fail-open release plus the incomplete TLS diagnostic (C timed_out=1, plan_changed=0; Rust captured 5 bytes). `scripts/test-datapath-stats-timer-differential.sh` passed in Debian WSL2: every summary includes one scheduled-queue line, and D2O/R2O queue count/refusal traces match; the D2O C/Rust scheduler differential also matches a capacity refusal (`queue=1, refusals=1"
     },
     {
       "id": 9,

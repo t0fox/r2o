@@ -631,6 +631,14 @@ mod app {
         );
     }
 
+    fn r2o_log_scheduler_stats(scheduled: &ScheduledQueue) {
+        eprintln!(
+            "r2o-datapath: в очереди отправки {}, отказов расписания {}",
+            scheduled.len(),
+            scheduled.refusals()
+        );
+    }
+
     fn r2o_log_capture_stats(holding: &HoldTable) {
         let capture_stats = holding.r2o_capture_stats();
         eprintln!(
@@ -949,6 +957,7 @@ mod app {
                 r2o_log_process_stats(&journal_origin, Instant::now());
                 eprintln!("r2o-datapath: потеряно ядром {}", socket.lost_packets());
                 r2o_log_flow_table_stats(&tcp_sessions, &udp_sessions);
+                r2o_log_scheduler_stats(&scheduled);
                 r2o_log_session_stats(&tcp_sessions);
                 r2o_log_payload_stats(&tcp_sessions);
                 r2o_log_capture_stats(&holding);
@@ -976,6 +985,7 @@ mod app {
                 r2o_log_process_stats(&journal_origin, Instant::now());
                 eprintln!("r2o-datapath: потеряно ядром {}", socket.lost_packets());
                 r2o_log_flow_table_stats(&tcp_sessions, &udp_sessions);
+                r2o_log_scheduler_stats(&scheduled);
                 r2o_log_session_stats(&tcp_sessions);
                 r2o_log_capture_stats(&holding);
                 r2o_log_payload_stats(&tcp_sessions);

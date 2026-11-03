@@ -41,7 +41,14 @@ cc -std=c99 -O2 -Wall -Wextra -Werror \
     -I"$D2O_ROOT/datapath/include" -I"$D2O_ROOT/core/include" \
     "$SCRIPT_DIR/fixtures/d2o-scheduled-udp-fixture.c" \
     "$D2O_ROOT/datapath/sched.c" -o "$WORK/d2o-scheduler"
-C_RESULT=$("$WORK/d2o-scheduler")
+C_OUTPUT=$("$WORK/d2o-scheduler")
+C_RESULT=$(printf '%s\n' "$C_OUTPUT" | grep -E '^RESULT delay_us=15000 packet=[0-9a-f]+$' | tail -n 1)
+C_METRICS=$(printf '%s\n' "$C_OUTPUT" | grep -E '^METRICS queue=[0-9]+ refusals=[0-9]+$' | tail -n 1)
+if [ -z "$C_RESULT" ] || [ -z "$C_METRICS" ]; then
+    printf '%s\n' "$C_OUTPUT" >&2
+    echo "D2O scheduler fixture did not emit normalized results" >&2
+    exit 1
+fi
 if ! cargo test --locked --offline -p r2o-datapath --lib \
     delayed_udp_emit_survives_observing_the_reverse_packet -- --nocapture \
     >"$WORK/rust.log" 2>&1; then
@@ -58,5 +65,22 @@ if [ "$C_RESULT" != "$RUST_RESULT" ]; then
     printf 'D2O: %s\nR2O: %s\n' "$C_RESULT" "$RUST_RESULT" >&2
     exit 1
 fi
+if ! cargo test --locked --offline -p r2o-datapath --lib \
+    scheduled_queue_statistics_count_capacity_refusal -- --nocapture \
+    >"$WORK/rust-metrics.log" 2>&1; then
+    cat "$WORK/rust-metrics.log" >&2
+    exit 1
+fi
+RUST_METRICS=$(grep -E '^METRICS queue=[0-9]+ refusals=[0-9]+' "$WORK/rust-metrics.log" | tail -n 1)
+if [ -z "$RUST_METRICS" ]; then
+    cat "$WORK/rust-metrics.log" >&2
+    echo "Rust scheduler test did not emit normalized metrics" >&2
+    exit 1
+fi
+if [ "$C_METRICS" != "$RUST_METRICS" ]; then
+    printf 'D2O: %s\nR2O: %s\n' "$C_METRICS" "$RUST_METRICS" >&2
+    exit 1
+fi
 printf 'D2O: %s\nR2O: %s\n' "$C_RESULT" "$RUST_RESULT"
-echo "ПРОЙДЕНО: C и Rust сохранили один UDP emit после обратного пакета"
+printf 'D2O: %s\nR2O: %s\n' "$C_METRICS" "$RUST_METRICS"
+echo "ПРОЙДЕНО: C/Rust UDP emission и scheduler refusal metrics совпали"

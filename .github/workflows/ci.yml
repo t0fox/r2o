@@ -301,6 +301,13 @@ jobs:
         run: make -B -C d2o/datapath d2kd
       - name: Собрать сетевой исполнитель
         run: cargo build --release --locked --package r2o-datapath --package r2o-controller
+      - name: Сверить периодические метрики datapath с D2O C
+        run: >-
+          sudo env
+          D2O_DATAPATH="$GITHUB_WORKSPACE/d2o/datapath/d2kd"
+          R2O_DATAPATH="$GITHUB_WORKSPACE/target/release/r2o-datapath"
+          R2O_TEST_TMPDIR="$RUNNER_TEMP/r2o-stats-timer"
+          sh scripts/test-datapath-stats-timer-differential.sh
       - name: Собрать регрессию предела raw-пакета по MTU
         run: cargo test --no-run --locked --package r2o-datapath --test raw_egress_mtu
       - name: Проверить MTU raw-посылки в отдельном сетевом пространстве

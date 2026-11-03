@@ -52,6 +52,7 @@ pub struct ScheduledQueue {
     reserved_packets: usize,
     next_order: u64,
     next_batch: u64,
+    refusals: u64,
 }
 
 impl ScheduledQueue {
@@ -70,6 +71,7 @@ impl ScheduledQueue {
             reserved_packets: 0,
             next_order: 0,
             next_batch: 1,
+            refusals: 0,
         })
     }
 
@@ -84,14 +86,24 @@ impl ScheduledQueue {
             self.cancel_flow(key);
         }
         let used = self.entries.len().checked_add(self.reserved_packets)?;
-        if count == 0 || count > self.capacity.saturating_sub(used) {
+        if count == 0 {
+            return None;
+        }
+        let available = self.capacity.saturating_sub(used);
+        if count > available {
+            self.refusals = self
+                .refusals
+                .saturating_add(count.saturating_sub(available) as u64);
             return None;
         }
         if self
             .flows
             .get(&key)
             .is_some_and(|flow| flow.fin_mask & direction != 0)
-            || (!self.flows.contains_key(&key) && self.flows.len() >= self.capacity)
+        {
+            return None;
+        }
+        if (!self.flows.contains_key(&key) && self.flows.len() >= self.capacity)
             || self.entries.try_reserve(count).is_err()
             || self.reservations.try_reserve(1).is_err()
             || (!self.flows.contains_key(&key) && self.flows.try_reserve(1).is_err())
@@ -227,6 +239,10 @@ impl ScheduledQueue {
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    pub fn refusals(&self) -> u64 {
+        self.refusals
     }
 
     pub fn is_empty(&self) -> bool {
@@ -403,5 +419,37 @@ mod tests {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         println!("RESULT delay_us=15000 packet={hex}");
+    }
+
+    #[test]
+    fn scheduled_queue_statistics_count_capacity_refusal() {
+        let request = udp_packet(40156, 50005, false);
+        let now = Instant::now();
+        let mut scheduled = ScheduledQueue::with_capacity(1).expect("capacity is nonzero");
+        let ticket = scheduled
+            .reserve(&request, 1)
+            .expect("first slot is available");
+        assert!(
+            scheduled
+                .push_reserved(
+                    ticket,
+                    now + Duration::from_millis(15),
+                    WirePacket {
+                        packet: request.clone(),
+                        kind: EmitKind::Payload,
+                        delay_us: 0,
+                    },
+                )
+                .is_ok()
+        );
+
+        assert!(scheduled.reserve(&request, 1).is_none());
+        assert_eq!(scheduled.len(), 1);
+        assert_eq!(scheduled.refusals(), 1);
+        println!(
+            "METRICS queue={} refusals={}",
+            scheduled.len(),
+            scheduled.refusals()
+        );
     }
 }

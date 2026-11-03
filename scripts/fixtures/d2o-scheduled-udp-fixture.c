@@ -31,6 +31,8 @@ int main(void) {
     uint8_t request[28], response[28], out[28];
     d2k_key key = {0};
     d2k_sched *scheduled = d2k_sched_new(2, sizeof request);
+    d2k_sched *pressure = NULL;
+    int refused;
     size_t out_len = 0;
     uint64_t execution = 0;
     int popped;
@@ -73,6 +75,24 @@ int main(void) {
     printf("RESULT delay_us=15000 packet=");
     for (size_t i = 0; i < out_len; i++) printf("%02x", out[i]);
     putchar('\n');
+
+    pressure = d2k_sched_new(1, sizeof request);
+    if (!pressure ||
+        d2k_sched_push_serial(pressure, 15000000, request, sizeof request, &key, 1) != 0) {
+        d2k_sched_free(pressure);
+        d2k_sched_free(scheduled);
+        return 2;
+    }
+    refused = d2k_sched_push_serial(pressure, 16000000, request, sizeof request, &key, 2);
+    if (refused != -1 || d2k_sched_count(pressure) != 1 ||
+        d2k_sched_refusals(pressure) != 1) {
+        d2k_sched_free(pressure);
+        d2k_sched_free(scheduled);
+        return 1;
+    }
+    printf("METRICS queue=%zu refusals=%llu\n", d2k_sched_count(pressure),
+           (unsigned long long)d2k_sched_refusals(pressure));
+    d2k_sched_free(pressure);
     d2k_sched_free(scheduled);
     return 0;
 }
