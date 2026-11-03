@@ -3504,14 +3504,13 @@ async fn r2o_http3_implicit_zero_bidi_stream_limit_documents_d2o_divergence() {
     server.abort();
 }
 
-#[tokio::test]
-#[ignore = "requires the pinned D2O harness; run scripts/test-quic-http3-full-stage-differential.sh"]
-async fn r2o_http3_udp_port_unreachable_matches_d2o() {
+async fn assert_quic_no_handshake_matches_d2o(
+    address: SocketAddr,
+    peer_description: &str,
+    diff_output: &str,
+) {
     let d2o_binary = std::env::var("D2O_QUIC_DATA_STAGE_BIN")
         .expect("D2O_QUIC_DATA_STAGE_BIN must point to the pinned C data-stage harness");
-    let closed_port = UdpSocket::bind("127.0.0.1:0").unwrap();
-    let address = closed_port.local_addr().unwrap();
-    drop(closed_port);
     let port = address.port().to_string();
     let c_output = tokio::task::spawn_blocking(move || {
         std::process::Command::new(d2o_binary)
@@ -3523,7 +3522,7 @@ async fn r2o_http3_udp_port_unreachable_matches_d2o() {
     .unwrap();
     assert!(
         !c_output.status.success(),
-        "D2O unexpectedly connected to closed UDP port: stdout={} stderr={}",
+        "D2O unexpectedly completed a handshake with {peer_description}: stdout={} stderr={}",
         String::from_utf8_lossy(&c_output.stdout),
         String::from_utf8_lossy(&c_output.stderr)
     );
@@ -3552,7 +3551,7 @@ async fn r2o_http3_udp_port_unreachable_matches_d2o() {
         ),
     )
     .await
-    .expect("HTTP/3 closed-port test timed out");
+    .unwrap_or_else(|_| panic!("HTTP/3 {peer_description} test timed out"));
     assert!(!rust_result.handshake_confirmed, "R2O={rust_result:?}");
     assert_eq!(rust_result.status, 0, "R2O={rust_result:?}");
     let verdict = r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&rust_result);
@@ -3569,9 +3568,33 @@ async fn r2o_http3_udp_port_unreachable_matches_d2o() {
         rust_result.requests,
         c_field("requests").parse::<u32>().unwrap()
     );
-    write_d2o_http3_differential(
-        "R2O_QUIC_HTTP3_PORT_UNREACHABLE_DIFF_OUTPUT",
+    write_d2o_http3_differential(diff_output, peer_description, &rust_result);
+}
+
+#[tokio::test]
+#[ignore = "requires the pinned D2O harness; run scripts/test-quic-http3-full-stage-differential.sh"]
+async fn r2o_http3_udp_port_unreachable_matches_d2o() {
+    let closed_port = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let address = closed_port.local_addr().unwrap();
+    drop(closed_port);
+    assert_quic_no_handshake_matches_d2o(
+        address,
         "port-unreachable",
-        &rust_result,
-    );
+        "R2O_QUIC_HTTP3_PORT_UNREACHABLE_DIFF_OUTPUT",
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires the pinned D2O harness; run scripts/test-quic-http3-full-stage-differential.sh"]
+async fn r2o_http3_silent_udp_peer_timeout_matches_d2o() {
+    let silent_peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let address = silent_peer.local_addr().unwrap();
+    assert_quic_no_handshake_matches_d2o(
+        address,
+        "silent-peer-timeout",
+        "R2O_QUIC_HTTP3_SILENT_PEER_DIFF_OUTPUT",
+    )
+    .await;
+    drop(silent_peer);
 }
