@@ -2,12 +2,12 @@
 set -eu
 
 r2o_script_dir=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
-r2o_donor_root=/mnt/e/r2o-tooling/d2o-clean-main
+r2o_donor_root=${R2O_DONOR_ROOT:-$(dirname "$r2o_script_dir")/r2o-tooling/d2o-current-main}
 r2o_donor_core="$r2o_donor_root/core"
 r2o_clang=/mnt/e/r2o-tooling/clang18-root/usr/bin/clang-18
 r2o_cargo=/mnt/e/r2o-tooling/linux-rustup/toolchains/1.98.0-x86_64-unknown-linux-gnu/bin/cargo
 r2o_rustc=/mnt/e/r2o-tooling/linux-rustup/toolchains/1.98.0-x86_64-unknown-linux-gnu/bin/rustc
-r2o_expected_donor_sha=304ba893dd37197128ac8799c0495b035f6a38c0
+r2o_expected_donor_sha=a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe
 r2o_artifacts="$r2o_script_dir/.rea/http-chunk-framing-$$"
 r2o_binary="$r2o_artifacts-c"
 r2o_c_output="$r2o_artifacts-c.txt"

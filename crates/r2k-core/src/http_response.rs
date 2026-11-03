@@ -211,7 +211,9 @@ impl HttpResponseParser {
         let content_len = self.line_len.saturating_sub(usize::from(
             self.line_len != 0 && self.line[self.line_len - 1] == b'\r',
         ));
-        if invalid_line_byte(byte)
+        let ignored_chunk_extension =
+            self.state == State::ChunkSize && self.line[..self.line_len].contains(&b';');
+        if invalid_line_byte(byte) && !ignored_chunk_extension
             || self.line_len >= self.line.len()
             || !matches!(byte, b'\r' | b'\n') && content_len >= LINE_CAPACITY - 1
             || byte == b'\n' && (self.line_len == 0 || self.line[self.line_len - 1] != b'\r')
