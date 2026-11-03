@@ -9557,3 +9557,7 @@ On Debian 13 WSL2, the extended scripts/test-discord-discovery-nfq.sh passed wit
 ### QUIC HTTP/3 close before response DATA - 2026-11-03
 
 The current-main full-stage fixture's /body-close endpoint sends HTTP 200 HEADERS, then closes QUIC 500 ms later before sending DATA. Against D2O a63d964 and R2O production source 394b994, both sides returned NotRun with matching app_bytes and request counts. Rust observed zero body bytes, an incomplete response, a transport error, and no false stall. scripts/test-quic-http3-full-stage-differential.sh passed 18/18 in Debian 13 WSL2 in 137.26 seconds. This covers the close-before-body branch only; QUIC transport errors, stall variants and lifecycle remain open. Weighted parity remains 62/87 (71.26%).
+
+### HTTP/3 response framing and stream termination — 2026-11-03
+
+The current-main C/Rust full-stage harness passed 18/18 on Debian 13 WSL2 (D2O `a63d964`; R2O test source `17d5ea9`, production path unchanged since `394b994`). The independently scored response contract covers 204 with an empty body, 103 followed by 451, Content-Length mismatch/open stream, trailers and QUIC FIN, RESET_STREAM around response headers/body, and CONNECTION_CLOSE before DATA/after partial DATA. Verdict, `app_bytes` and requests match; Rust also reports the incomplete/error state without a false stall. The 70-KiB response-HEADERS `app_bytes` difference stays in the adjacent partial budget/transport contract. Matrix total is now 63/87 (72.41%); total weight remains 87.
