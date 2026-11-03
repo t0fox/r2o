@@ -290,14 +290,31 @@ impl Default for ScheduledQueue {
 
 fn flow_identity(packet: &[u8]) -> Option<(FlowKey, u8, u8)> {
     let view = PacketView::parse(packet)?;
-    let tcp = view.tcp_segment(packet)?;
+    let (source_port, destination_port, flags) = match view.protocol {
+        6 => {
+            let tcp = view.tcp_segment(packet)?;
+            (tcp.source_port, tcp.destination_port, tcp.flags)
+        }
+        17 => {
+            let udp = packet.get(view.l4_offset..view.total_len)?;
+            if udp.len() < 8 {
+                return None;
+            }
+            (
+                u16::from_be_bytes([udp[0], udp[1]]),
+                u16::from_be_bytes([udp[2], udp[3]]),
+                0,
+            )
+        }
+        _ => return None,
+    };
     let source = Endpoint {
         address: view.src.as_ip_addr(),
-        port: tcp.source_port,
+        port: source_port,
     };
     let destination = Endpoint {
         address: view.dst.as_ip_addr(),
-        port: tcp.destination_port,
+        port: destination_port,
     };
     if source <= destination {
         Some((
@@ -306,7 +323,7 @@ fn flow_identity(packet: &[u8]) -> Option<(FlowKey, u8, u8)> {
                 second: destination,
             },
             0x01,
-            tcp.flags,
+            flags,
         ))
     } else {
         Some((
@@ -315,7 +332,70 @@ fn flow_identity(packet: &[u8]) -> Option<(FlowKey, u8, u8)> {
                 second: source,
             },
             0x02,
-            tcp.flags,
+            flags,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ScheduledQueue;
+    use crate::engine::WirePacket;
+    use r2k_core::plan::EmitKind;
+    use std::time::{Duration, Instant};
+
+    fn udp_packet(source_port: u16, destination_port: u16, reverse: bool) -> Vec<u8> {
+        let (source, destination) = if reverse {
+            ([198, 51, 100, 2], [192, 0, 2, 1])
+        } else {
+            ([192, 0, 2, 1], [198, 51, 100, 2])
+        };
+        let (source_port, destination_port) = if reverse {
+            (destination_port, source_port)
+        } else {
+            (source_port, destination_port)
+        };
+        let mut packet = vec![0; 28];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&28_u16.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 17;
+        packet[12..16].copy_from_slice(&source);
+        packet[16..20].copy_from_slice(&destination);
+        packet[20..22].copy_from_slice(&source_port.to_be_bytes());
+        packet[22..24].copy_from_slice(&destination_port.to_be_bytes());
+        packet[24..26].copy_from_slice(&8_u16.to_be_bytes());
+        packet
+    }
+
+    #[test]
+    fn delayed_udp_emit_survives_observing_the_reverse_packet() {
+        let request = udp_packet(40156, 50005, false);
+        let response = udp_packet(40156, 50005, true);
+        let now = Instant::now();
+        let mut scheduled = ScheduledQueue::default();
+        let ticket = scheduled
+            .reserve(&request, 1)
+            .expect("a voice plan must reserve its paced UDP payload");
+        let delayed_payload = WirePacket {
+            packet: vec![1, 2, 3],
+            kind: EmitKind::Payload,
+            delay_us: 0,
+        };
+        assert!(
+            scheduled
+                .push_reserved(ticket, now + Duration::from_millis(15), delayed_payload)
+                .is_ok()
+        );
+
+        scheduled.observe(&response, now + Duration::from_millis(1));
+
+        assert!(scheduled.has_pending(ticket));
+        assert!(scheduled.pop_due(now + Duration::from_millis(14)).is_none());
+        let (emitted, released_ticket) = scheduled
+            .pop_due(now + Duration::from_millis(16))
+            .expect("paced UDP payload should become due");
+        assert_eq!(released_ticket, ticket);
+        assert_eq!(emitted.packet, [1, 2, 3]);
     }
 }
