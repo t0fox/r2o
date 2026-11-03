@@ -986,6 +986,116 @@ mod tests {
     }
 
     #[test]
+    fn capture_lifecycle_traces_match_d2o() {
+        let hello = hello(32);
+        let hash = hello
+            .iter()
+            .fold(14_695_981_039_346_656_037_u64, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(1_099_511_628_211)
+            });
+        let status = |result: &CaptureResult| match result {
+            CaptureResult::Ignored | CaptureResult::Incomplete => 0,
+            CaptureResult::Complete { .. } => 1,
+            CaptureResult::Rejected => -1,
+            CaptureResult::Full => -2,
+        };
+        let start = Instant::now();
+        let mut capture = CaptureTable::default();
+        let first = capture.feed(key(1234), 1, start, 116, Some(100), &hello[16..]);
+        let overlap = capture.feed(
+            key(1234),
+            1,
+            start + Duration::from_millis(1),
+            116,
+            Some(100),
+            &hello[16..24],
+        );
+        let final_segment = capture.feed(
+            key(1234),
+            1,
+            start + Duration::from_millis(2),
+            100,
+            Some(100),
+            &hello[..16],
+        );
+        complete(final_segment, 100, &hello);
+        let stats = capture.stats();
+        assert_eq!(
+            (stats.completed, stats.rejected, stats.expired, stats.full),
+            (1, 0, 0, 0)
+        );
+        println!(
+            "TRACE reorder hash={hash:016x} first={} overlap={} final=1 seq=100 len=32 completed={} rejected={} expired={} full={}",
+            status(&first),
+            status(&overlap),
+            stats.completed,
+            stats.rejected,
+            stats.expired,
+            stats.full
+        );
+
+        let mut capture = CaptureTable::default();
+        let first = capture.feed(key(1234), 1, start, 100, None, &hello[..1]);
+        let retry = capture.feed(
+            key(1234),
+            1,
+            start + CAPTURE_TTL - Duration::from_nanos(1),
+            100,
+            None,
+            &hello[..1],
+        );
+        let tail = capture.feed(key(1234), 1, start + CAPTURE_TTL, 101, None, &hello[1..]);
+        let stats = capture.stats();
+        assert_eq!(
+            (stats.completed, stats.rejected, stats.expired, stats.full),
+            (0, 0, 1, 0)
+        );
+        println!(
+            "TRACE ttl hash={hash:016x} first={} retry={} tail={} completed={} rejected={} expired={} full={}",
+            status(&first),
+            status(&retry),
+            status(&tail),
+            stats.completed,
+            stats.rejected,
+            stats.expired,
+            stats.full
+        );
+
+        let mut capture = CaptureTable::default();
+        for port in 0..CAPTURE_SLOTS {
+            assert_eq!(
+                capture.feed(key(1000 + port as u16), 1, start, 100, None, &hello[..1]),
+                CaptureResult::Incomplete
+            );
+        }
+        let refused = capture.feed(key(2000), 1, start, 100, None, &hello);
+        assert_eq!(refused, CaptureResult::Full);
+        let active = capture.feed(
+            key(1000),
+            1,
+            start + Duration::from_nanos(2),
+            101,
+            None,
+            &hello[1..],
+        );
+        complete(active, 100, &hello);
+        let reused = capture.feed(key(2000), 1, start + CAPTURE_TTL, 100, None, &hello);
+        complete(reused, 100, &hello);
+        let stats = capture.stats();
+        assert_eq!(
+            (stats.completed, stats.rejected, stats.expired, stats.full),
+            (2, 0, 63, 1)
+        );
+        println!(
+            "TRACE full hash={hash:016x} refused={} active=1 reused=1 completed={} rejected={} expired={} full={}",
+            status(&refused),
+            stats.completed,
+            stats.rejected,
+            stats.expired,
+            stats.full
+        );
+    }
+    #[test]
     fn absolute_ttl_expires_a_capture_despite_retransmissions() {
         let hello = hello(32);
         let start = Instant::now();
