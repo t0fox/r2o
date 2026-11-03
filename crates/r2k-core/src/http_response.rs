@@ -223,7 +223,8 @@ impl HttpResponseParser {
         ));
         let ignored_chunk_extension =
             self.state == State::ChunkSize && self.line[..self.line_len].contains(&b';');
-        if invalid_line_byte(byte) && !ignored_chunk_extension
+        let opaque_trailer_byte = self.state == State::Trailers;
+        if invalid_line_byte(byte) && !ignored_chunk_extension && !opaque_trailer_byte
             || self.line_len >= self.line.len()
             || !matches!(byte, b'\r' | b'\n') && content_len >= LINE_CAPACITY - 1
             || byte == b'\n' && (self.line_len == 0 || self.line[self.line_len - 1] != b'\r')
@@ -243,7 +244,8 @@ impl HttpResponseParser {
         let line_len = self.line_len - 2;
         let line = &self.line[..line_len];
         if self.state == State::Trailers {
-            if line.is_empty() {
+            // D2O's C-string loop also treats a leading NUL as an empty line.
+            if line.is_empty() || line[0] == 0 {
                 self.complete = true;
             }
         } else {

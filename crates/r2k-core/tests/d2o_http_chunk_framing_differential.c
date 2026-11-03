@@ -15,6 +15,7 @@ typedef struct {
 typedef struct {
     const char *name;
     const uint8_t *input;
+    size_t input_len;
     int expected_complete;
     uint64_t expected_body_bytes;
 } test_case;
@@ -70,22 +71,31 @@ int main(void)
         "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\nextra";
     static const uint8_t control_header_value[] =
         "HTTP/1.1 200 OK\r\nX: foo\001bar\r\nContent-Length: 0\r\n\r\n";
+    static const uint8_t control_trailer[] =
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+        "0\r\nX: foo\001bar\r\n\r\n";
+    static const uint8_t nul_first_trailer[] =
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+        "0\r\n\000ignored\r\n";
     const test_case cases[] = {
-        { "extension_suffix", extension, 1, 1 },
-        { "trailer_without_colon", trailer, 1, 0 },
-        { "colonless_header", colonless_header, 1, 1 },
-        { "control_extension", control_extension, 1, 1 },
-        { "control_chunk_size", control_chunk_size, 0, 0 },
-        { "buffered_bytes_after_frame", buffered_bytes_after_frame, 1, 0 },
-        { "control_header_value", control_header_value, 1, 0 },
-        { "chunk_line_at_limit", line_at_limit, 1, 1 },
-        { "chunk_line_over_limit", line_over_limit, 0, 0 },
+        { "extension_suffix", extension, sizeof(extension) - 1, 1, 1 },
+        { "trailer_without_colon", trailer, sizeof(trailer) - 1, 1, 0 },
+        { "colonless_header", colonless_header, sizeof(colonless_header) - 1, 1, 1 },
+        { "control_extension", control_extension, sizeof(control_extension) - 1, 1, 1 },
+        { "control_chunk_size", control_chunk_size, sizeof(control_chunk_size) - 1, 0, 0 },
+        { "buffered_bytes_after_frame", buffered_bytes_after_frame,
+          sizeof(buffered_bytes_after_frame) - 1, 1, 0 },
+        { "control_header_value", control_header_value, sizeof(control_header_value) - 1, 1, 0 },
+        { "control_trailer", control_trailer, sizeof(control_trailer) - 1, 1, 0 },
+        { "nul_first_trailer", nul_first_trailer, sizeof(nul_first_trailer) - 1, 1, 0 },
+        { "chunk_line_at_limit", line_at_limit, prefix_len + 125 + suffix_len, 1, 1 },
+        { "chunk_line_over_limit", line_over_limit, prefix_len + 126 + suffix_len, 0, 0 },
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         fixture_reader reader = {
             .input = cases[i].input,
-            .input_len = strlen((const char *)cases[i].input),
+            .input_len = cases[i].input_len,
         };
         d2k_http_read_result response;
         char err[160] = "";

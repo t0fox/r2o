@@ -43,7 +43,7 @@ fn matches_d2o_http_header_and_chunk_framing() {
     line_over_limit.extend_from_slice(&[b'a'; 126]);
     line_over_limit.extend_from_slice(b"\r\nx\r\n0\r\n\r\n");
 
-    let cases: [(&str, Vec<u8>, bool, u64); 9] = [
+    let cases: [(&str, Vec<u8>, bool, u64); 11] = [
         (
             "extension_suffix",
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;foo=\"unterminated\r\nx\r\n0\r\n\r\n".to_vec(),
@@ -86,6 +86,18 @@ fn matches_d2o_http_header_and_chunk_framing() {
             true,
             0,
         ),
+        (
+            "control_trailer",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX: foo\x01bar\r\n\r\n".to_vec(),
+            true,
+            0,
+        ),
+        (
+            "nul_first_trailer",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\0ignored\r\n".to_vec(),
+            true,
+            0,
+        ),
         ("chunk_line_at_limit", line_at_limit, true, 1),
         ("chunk_line_over_limit", line_over_limit, false, 0),
     ];
@@ -117,6 +129,8 @@ fn matches_d2o_http_header_and_chunk_framing() {
          control_chunk_size status=200 complete=0 body_bytes=0\n\
          buffered_bytes_after_frame status=200 complete=1 body_bytes=0\n\
          control_header_value status=200 complete=1 body_bytes=0\n\
+         control_trailer status=200 complete=1 body_bytes=0\n\
+         nul_first_trailer status=200 complete=1 body_bytes=0\n\
          chunk_line_at_limit status=200 complete=1 body_bytes=1\n\
          chunk_line_over_limit status=200 complete=0 body_bytes=0\n"
     );
