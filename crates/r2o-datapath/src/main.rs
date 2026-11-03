@@ -651,8 +651,8 @@ mod app {
         );
     }
 
-    fn r2o_log_capture_stats(holding: &HoldTable) {
-        let capture_stats = holding.r2o_capture_stats();
+    fn r2o_log_capture_stats(tcp_sessions: &TcpSessions) {
+        let capture_stats = tcp_sessions.r2o_tcp_capture_stats();
         eprintln!(
             "r2o-datapath: снимки TLS/TCP: завершено {}, отклонено {}, истекло {}, отказов ёмкости {}",
             capture_stats.tls_completed,
@@ -991,7 +991,7 @@ mod app {
                 r2o_log_scheduler_stats(&scheduled);
                 r2o_log_session_stats(&tcp_sessions, &udp_sessions);
                 r2o_log_payload_stats(&tcp_sessions);
-                r2o_log_capture_stats(&holding);
+                r2o_log_capture_stats(&tcp_sessions);
                 r2o_log_hold_stats(&holding);
                 if let Some(line) = icmp_guard.r2o_stats_line() {
                     eprintln!("r2o-datapath: {line}");
@@ -1019,7 +1019,7 @@ mod app {
                 r2o_log_flow_table_stats(&tcp_sessions, &udp_sessions);
                 r2o_log_scheduler_stats(&scheduled);
                 r2o_log_session_stats(&tcp_sessions, &udp_sessions);
-                r2o_log_capture_stats(&holding);
+                r2o_log_capture_stats(&tcp_sessions);
                 r2o_log_payload_stats(&tcp_sessions);
                 r2o_log_hold_stats(&holding);
                 if let Some(line) = icmp_guard.r2o_stats_line() {

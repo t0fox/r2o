@@ -1,4 +1,4 @@
-use crate::capture::{CaptureResult, CaptureTable};
+use crate::capture::{CaptureResult, CaptureStats, CaptureTable, CAPTURE_WINDOW};
 use r2k_core::control::{
     KEY_LEN, R2oTcpFinRetryEvent, R2oTcpRstAfterAppEvent, R2oTcpSilenceEvent, R2oTcpStallEvent,
 };
@@ -114,6 +114,7 @@ struct TcpSession {
     r2o_execution_pending: bool,
     damaged: bool,
     first_syn: Option<Instant>,
+    capture_anchor: Option<u32>,
     rtt: Option<Duration>,
     hello_at: Option<Instant>,
     hello_seq: Option<u32>,
@@ -151,7 +152,7 @@ struct TcpSession {
     rst_cut_reported: bool,
     r2o_reply_hidden_reported: bool,
     client_shape: u8,
-    hello_capture_pending: bool,
+    hello_capture_done: bool,
     last_seen: Instant,
 }
 
@@ -175,6 +176,7 @@ impl TcpSession {
             r2o_execution_pending: false,
             damaged: false,
             first_syn,
+            capture_anchor: None,
             rtt: None,
             hello_at: None,
             hello_seq: None,
@@ -212,7 +214,7 @@ impl TcpSession {
             rst_cut_reported: false,
             r2o_reply_hidden_reported: false,
             client_shape: 0,
-            hello_capture_pending: false,
+            hello_capture_done: false,
             last_seen: now,
         }
     }
@@ -435,6 +437,10 @@ impl TcpSessions {
 
     pub fn r2o_tcp_flow_refusals(&self) -> u64 {
         self.tcp_flow_refusals
+    }
+
+    pub fn r2o_tcp_capture_stats(&self) -> CaptureStats {
+        self.tcp_hello_capture.stats()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -696,6 +702,7 @@ impl TcpSessions {
         mut on_silent: impl FnMut(R2oTcpSilenceEvent),
     ) -> usize {
         let before = self.flows.len();
+        let capture = &mut self.tcp_hello_capture;
         self.flows.retain(|key, session| {
             let idle_expired = now.saturating_duration_since(session.last_seen) >= idle;
             let fin_expired = session.pending_fin_at.is_some_and(|started| {
@@ -711,7 +718,16 @@ impl TcpSessions {
                 on_silent(event);
             }
 
-            !idle_expired && !fin_expired
+            let keep = !idle_expired && !fin_expired;
+            if !keep {
+                capture.forget(&crate::capture::TcpFlowKey {
+                    low_address: key.low.address,
+                    high_address: key.high.address,
+                    low_port: key.low.port,
+                    high_port: key.high.port,
+                });
+            }
+            keep
         });
         before - self.flows.len()
     }
@@ -931,6 +947,7 @@ impl TcpSessions {
                 .get(&key)
                 .map_or_else(R2oTcpFlowMetrics::default, |session| session.metrics);
             let mut session = TcpSession::new(source, true, Some(now), now);
+            session.capture_anchor = Some(tcp.sequence.wrapping_add(1));
             session.controller_probe = controller_probe;
             session.client_offered_tcp_timestamps =
                 Some(crate::capture::tcp_timestamp_option_present(
@@ -1029,7 +1046,6 @@ impl TcpSessions {
                     *r2o_tcp_hellos_with_sni = (*r2o_tcp_hellos_with_sni).wrapping_add(1);
                 }
             }
-            session.hello_capture_pending = hello.sni_range.is_none() && hello.record_end.is_none();
             session.hello_ack = ack.then_some(tcp.acknowledgment);
             session.hello_has_sni = hello.sni_range.is_some();
             session.client_shape = if session.hello_has_sni {
@@ -1048,20 +1064,27 @@ impl TcpSessions {
                 0
             };
         }
-        if session.hello_capture_pending
-            && source == session.initiator
+        let reverse = source != session.initiator;
+        if fin || rst {
+            let capture_key = crate::capture::TcpFlowKey::from_packet(packet)?;
+            tcp_hello_capture.forget(&capture_key);
+            session.hello_capture_done = true;
+        } else if !reverse
+            && !session.hello_capture_done
+            && session.metrics.forward_packets < CAPTURE_WINDOW as u32
+            && view.fragment & 0x3fff == 0
             && !payload.is_empty()
-            && let Some(hello_sequence) = session.hello_seq
         {
             let capture_key = crate::capture::TcpFlowKey::from_packet(packet)?;
+            let generation = u64::from(session.capture_anchor.unwrap_or_default());
             let capture_result = tcp_hello_capture.feed_with_visibility(
                 capture_key,
-                u64::from(hello_sequence),
+                generation,
                 now,
                 tcp.sequence,
-                Some(hello_sequence),
+                session.capture_anchor,
                 payload,
-                false,
+                !controller_probe,
             );
             match capture_result {
                 CaptureResult::Complete { bytes, .. } => {
@@ -1075,18 +1098,17 @@ impl TcpSessions {
                             *r2o_tcp_hellos_with_sni = (*r2o_tcp_hellos_with_sni).wrapping_add(1);
                         }
                     }
-                    session.hello_capture_pending = false;
+                    session.hello_capture_done = true;
                     tcp_hello_capture.forget(&capture_key);
                 }
-                CaptureResult::Rejected | CaptureResult::Full => {
-                    session.hello_capture_pending = false;
+                CaptureResult::Rejected => {
+                    session.hello_capture_done = true;
                     tcp_hello_capture.forget(&capture_key);
                 }
-                CaptureResult::Ignored | CaptureResult::Incomplete => {}
+                CaptureResult::Ignored | CaptureResult::Incomplete | CaptureResult::Full => {}
             }
         }
         session.last_seen = now;
-        let reverse = source != session.initiator;
         let packet_bytes = view.total_len as u64;
         if reverse {
             session.metrics.reverse_packets = session.metrics.reverse_packets.saturating_add(1);
@@ -2475,6 +2497,38 @@ mod tests {
                 forward_bytes: 127,
                 reverse_bytes: 86,
             })
+        );
+    }
+
+    #[test]
+    fn tcp_capture_metrics_count_an_expired_incomplete_record() {
+        let mut sessions = TcpSessions::default();
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+
+        sessions.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 100, &[]), start);
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+            start + Duration::from_millis(10),
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(client, server, 0x10, 64, 101, &[]),
+            start + Duration::from_millis(20),
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(client, server, 0x18, 64, 101, &[0x16, 0x03, 0x01, 0, 32]),
+            start + Duration::from_millis(30),
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(client, server, 0x18, 64, 106, &[1]),
+            start + Duration::from_secs(5) + Duration::from_millis(31),
+        );
+
+        let stats = sessions.r2o_tcp_capture_stats();
+        assert_eq!(
+            (stats.tls_completed, stats.tls_rejected, stats.tls_expired, stats.tls_full),
+            (0, 0, 1, 0)
         );
     }
 
