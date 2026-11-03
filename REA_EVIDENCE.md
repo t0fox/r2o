@@ -9514,3 +9514,9 @@ The pinned D2O a63d964 / R2O 8f409f6 full-stage differential passed 15/15 in 122
 A rare differential run showed D2O `up=1` and R2O `up=0`, although the R2O heal timestamp existed, its lock had been released, and later flowoffload/PPE events were recorded. This points to a lost concurrent append in the test trace on E: DrvFS. The fixture now serializes trace writes through a shared mkdir lock; production code was unchanged.
 
 `scripts/test-router-heal-concurrency-differential.sh` passed 10 consecutive runs in Debian 13 WSL2 against pinned D2O `a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe` and current R2O main. `sh -n`, ShellCheck at warning level, and `git diff --check` passed. Per-run logs are `E:/r2o-tooling/tests/heal-concurrency-repeat-1.log` through `heal-concurrency-repeat-10.log`. The firewall recovery row remains partial while real NFQUEUE/offload crash cases are open; weighted parity stays 62/87 (71.26%). QEMU was not needed.
+
+### QUIC HTTP/3 control-stream credit and request counter — 2026-11-03
+
+RED: with the server advertising zero client unidirectional-stream credit, both implementations completed the QUIC handshake but could not finish HTTP/3 setup. Pinned D2O `a63d964` returned `NotRun`, `app_bytes=0`, `requests=1`; R2O `411f197` returned `NotRun`, `app_bytes=0`, `requests=0` after the HTTP/3 setup timeout.
+
+R2O `012f47d05226d1332eaff4451102112f06a01194` now records the first GET attempt when H3 setup times out while the QUIC connection remains open. Quinn still enforces peer stream credit; no request is forced onto an unavailable stream. `r2o_http3_zero_peer_uni_credit_matches_d2o` passed 1/1, and `scripts/test-quic-http3-full-stage-differential.sh` passed 16/16 in 123.84 seconds in Debian 13 WSL2. The C harness and Cargo target stayed under E:; QEMU was not needed. The QUIC row remains partial at 0/2 because other transport errors, stall variants, and lifecycle branches remain open. Weighted parity stays 62/87 (71.26%).
