@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import shutil
@@ -113,7 +114,7 @@ wait_for_sync() {
     [ -n "$count" ] || count=0
     if [ "$count" -lt "$expected" ]; then cat "$ROOT/engine-$label.log" >&2; cat "$log" >&2; exit 1; fi
     line=$(grep -F 'каталог синхронизирован:' "$log" | tail -n 1)
-    case "$line" in 'каталог синхронизирован: отправлено 2, пропущено 0') ;; *) echo "$label: unexpected catalog sync: $line" >&2; exit 1;; esac
+    case "$line" in 'каталог синхронизирован: отправлено 3, пропущено 0') ;; *) echo "$label: unexpected catalog sync: $line" >&2; exit 1;; esac
     if grep -q 'датапат отверг' "$log"; then cat "$log" >&2; exit 1; fi
     pid=$(cat "$ROOT/run/r2o-controller4.pid" 2>/dev/null || true)
     if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then cat "$log" >&2; exit 1; fi
@@ -350,7 +351,42 @@ def main() -> int:
     overlay = artifacts / "overlay.cpio"
     disk = artifacts / "persistent-rootfs.qcow2"
     # Match the production donor import: the fixture's first plan directive changes from D2K to R2O.
-    seed_bytes = seed.read_bytes().replace(b"d2k-plan ", b"r2o-plan ")
+    catalog = json.loads(seed.read_text(encoding="utf-8"))
+    box = catalog["boxes"][0]
+    box["plans"].append(
+        {
+            "id": "voice-plan",
+            "proto": "voice",
+            "text": (
+                "r2o-plan 1 1\n"
+                "id 00000000000000000000000000000000\n"
+                "proto udp voice\n"
+                "payload 1 46414b45\n"
+                "poison 1 ttl=2\n"
+                "fake payload=1 poison=1 repeats=1 gap_us=0 place=before\n"
+            ),
+            "added": "2026-10-24T00:00:00Z",
+            "successes": 1,
+            "enabled": True,
+        }
+    )
+    box["bindings"].append(
+        {
+            "kind": "name",
+            "target": "@discord-voice",
+            "plan_id": "voice-plan",
+            "level": 3,
+            "confirmed": "2026-10-24T00:00:00Z",
+            "successes": 1,
+            "enabled": True,
+            "transport": 17,
+            "family": 4,
+            "shape": 5,
+        }
+    )
+    seed_bytes = json.dumps(catalog, ensure_ascii=False).encode("utf-8").replace(
+        b"d2k-plan ", b"r2o-plan "
+    )
     entries = [
         ("etc/r2o-test", b"", stat.S_IFDIR | 0o755),
         ("etc/r2o-test/releases", b"", stat.S_IFDIR | 0o755),
