@@ -1,6 +1,6 @@
 {
   "source": "docs/functional-parity-matrix.md",
-  "date": "",
+  "date": "2026-11-03",
   "weight": 87,
   "points": 62,
   "percent": 71.26,
@@ -379,7 +379,7 @@
           "weight": 3,
           "points": 0,
           "status": "partial",
-          "statusLabel": "Частично; source-backed C/Rust lifecycle trace пройден на OpenWrt QEMU; production-процесс проверен на bounded voice Discovery, полный lifecycle остаётся открытым",
+          "statusLabel": "Частично; source-backed C/Rust lifecycle trace пройден на OpenWrt QEMU; production controller проверен на bounded voice Discovery и ручной restart/reload каталога, полный lifecycle остаётся открытым",
           "group": "Discord RTC",
           "mapping": "C on_suspect/voice_confirm → Rust voice worker/confirm_r2o_voice_trial",
           "evidence": "2026-11-02 retest: `r2o-discord-voice-lifecycle-helper.sh` passed 1/1 against D2O snapshot `a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe`; rebuilt C dependencies with Clang 18, production Rust lifecycle trace matched. WSL used tmpfs only for transient Unix sockets; source and build artifacts stayed on E. C trace подтверждает: B отбрасывается при A=T_VOICE_MEASURE; после trial A endpoint B ставится в очередь, C заменяет B; поздний NAK не удаляет binding; адресная запись переживает scheduler restart. Отдельный C trace воспроизвёл generic fallback без discovery_verified: D2O сохраняет name=@discord-v"
@@ -908,7 +908,7 @@
       "weight": 3,
       "points": 0,
       "status": "partial",
-      "statusLabel": "Частично; source-backed C/Rust lifecycle trace пройден на OpenWrt QEMU; production-процесс проверен на bounded voice Discovery, полный lifecycle остаётся открытым",
+      "statusLabel": "Частично; source-backed C/Rust lifecycle trace пройден на OpenWrt QEMU; production controller проверен на bounded voice Discovery и ручной restart/reload каталога, полный lifecycle остаётся открытым",
       "group": "Discord RTC",
       "mapping": "C on_suspect/voice_confirm → Rust voice worker/confirm_r2o_voice_trial",
       "evidence": "2026-11-02 retest: `r2o-discord-voice-lifecycle-helper.sh` passed 1/1 against D2O snapshot `a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe`; rebuilt C dependencies with Clang 18, production Rust lifecycle trace matched. WSL used tmpfs only for transient Unix sockets; source and build artifacts stayed on E. C trace подтверждает: B отбрасывается при A=T_VOICE_MEASURE; после trial A endpoint B ставится в очередь, C заменяет B; поздний NAK не удаляет binding; адресная запись переживает scheduler restart. Отдельный C trace воспроизвёл generic fallback без discovery_verified: D2O сохраняет name=@discord-v"

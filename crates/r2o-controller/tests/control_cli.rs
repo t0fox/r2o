@@ -401,6 +401,97 @@ fn serve_catalog_installs_plans_and_consumes_hello_on_the_same_connection() {
 }
 
 #[test]
+fn serve_restart_reapplies_saved_discord_voice_binding() {
+    let work = temporary_directory();
+    fs::create_dir(&work).unwrap();
+    let catalog_path = work.join("catalog.json");
+    fs::write(
+        &catalog_path,
+        br#"{"boxes":[{"id":"box-1","created":"2026-10-18T00:00:00Z","updated":"2026-10-18T00:00:00Z","plans":[{"id":"voice-1","proto":"voice","text":"r2o-plan 1 1\nid 00000000000000000000000000000000\nproto udp voice\npayload 1 46414b45\npoison 1 ttl=2\nfake payload=1 poison=1 repeats=1 gap_us=0 place=before\n","added":"2026-10-18T00:00:00Z","successes":1,"enabled":true}],"bindings":[{"kind":"name","target":"@discord-voice","plan_id":"voice-1","level":3,"confirmed":"2026-10-18T00:00:00Z","successes":1,"enabled":true,"transport":17,"family":4,"shape":5}]}]}"#,
+    )
+    .unwrap();
+
+    let mut expected = vec![b"@discord-voice".len() as u8];
+    expected.extend_from_slice(b"@discord-voice");
+    expected.extend_from_slice(&[5, 4]);
+    expected.extend_from_slice(&plan_header(1, 6));
+    expected.extend_from_slice(&[0x00, 0x01, 0x00, 0x10]);
+    expected.extend_from_slice(&[0; 16]);
+    expected.extend_from_slice(&[0x00, 0x02, 0x00, 0x02, 0x11, 0x03]);
+    expected.extend_from_slice(&[0x00, 0x10, 0x00, 0x06, 0x00, 0x01, b'F', b'A', b'K', b'E']);
+    expected.extend_from_slice(&[0x00, 0x11, 0x00, 0x08, 0x00, 0x01, 0x02, 0, 0, 0, 0, 0]);
+    expected.extend_from_slice(&[
+        0x01, 0x01, 0x00, 0x0a, 0x00, 0x01, 0x00, 0x01, 0x01, 0, 0, 0, 0, 0,
+    ]);
+    expected.extend_from_slice(&[0x01, 0x03, 0x00, 0x01, 0x00]);
+
+    for restart in 0..2 {
+        let socket_path = work.join(format!("control-{restart}.sock"));
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (binding_sender, binding_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || -> Result<(), String> {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            return Err("controller did not reconnect".to_owned());
+                        }
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => return Err(format!("control accept failed: {error}")),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .map_err(|error| format!("set control timeout failed: {error}"))?;
+            let mut greeting = vec![0; KEY_LEN];
+            greeting[0] = 4;
+            greeting.extend_from_slice(&PROTO_VERSION.to_be_bytes());
+            greeting.extend_from_slice(&65_535_u32.to_be_bytes());
+            greeting.extend_from_slice(&[3, b'd', b'e', b'v']);
+            stream
+                .write_all(&frame(0x000a, &greeting))
+                .map_err(|error| format!("write datapath greeting failed: {error}"))?;
+            let applied = read_frame(&mut stream);
+            binding_sender
+                .send(applied)
+                .map_err(|error| format!("report voice binding failed: {error}"))?;
+            release_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|error| format!("release datapath fixture failed: {error}"))?;
+            Ok(())
+        });
+
+        let mut child = Command::new(env!("CARGO_BIN_EXE_r2o-controller"))
+            .args([
+                "--serve",
+                socket_path.to_str().unwrap(),
+                catalog_path.to_str().unwrap(),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let applied = binding_receiver
+            .recv_timeout(Duration::from_secs(3))
+            .expect("controller did not apply the saved voice binding");
+        assert!(child.try_wait().unwrap().is_none());
+        assert_eq!(applied.0, 0x0081);
+        assert_eq!(applied.1, expected, "restart {restart}");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        release_sender.send(()).unwrap();
+        server.join().unwrap().unwrap();
+    }
+
+    let _ = fs::remove_dir_all(work);
+}
+
+#[test]
 fn serve_discover_remembers_hello_without_starting_a_search() {
     let work = temporary_directory();
     fs::create_dir(&work).unwrap();
