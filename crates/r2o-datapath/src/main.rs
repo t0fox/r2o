@@ -631,6 +631,17 @@ mod app {
         );
     }
 
+    fn r2o_log_capture_stats(holding: &HoldTable) {
+        let capture_stats = holding.r2o_capture_stats();
+        eprintln!(
+            "r2o-datapath: снимки TLS/TCP: завершено {}, отклонено {}, истекло {}, отказов ёмкости {}",
+            capture_stats.tls_completed,
+            capture_stats.tls_rejected,
+            capture_stats.tls_expired,
+            capture_stats.tls_full
+        );
+    }
+
     pub fn run() -> Result<(), Box<dyn Error>> {
         let arguments: Vec<String> = std::env::args().skip(1).collect();
         if arguments
@@ -913,14 +924,7 @@ mod app {
                         http_stats.later, http_stats.unaligned, http_stats.open_end
                     );
                 }
-                let capture_stats = holding.r2o_capture_stats();
-                eprintln!(
-                    "r2o-datapath: снимки TLS/TCP: завершено {}, отклонено {}, истекло {}, отказов ёмкости {}",
-                    capture_stats.tls_completed,
-                    capture_stats.tls_rejected,
-                    capture_stats.tls_expired,
-                    capture_stats.tls_full
-                );
+                r2o_log_capture_stats(&holding);
                 if let Some(line) = icmp_guard.r2o_stats_line() {
                     eprintln!("r2o-datapath: {line}");
                 }
@@ -944,6 +948,7 @@ mod app {
                 r2o_log_process_stats(&journal_origin, Instant::now());
                 eprintln!("r2o-datapath: потеряно ядром {}", socket.lost_packets());
                 r2o_log_flow_table_stats(&tcp_sessions, &udp_sessions);
+                r2o_log_capture_stats(&holding);
                 if let Some(line) = icmp_guard.r2o_stats_line() {
                     eprintln!("r2o-datapath: {line}");
                 }
