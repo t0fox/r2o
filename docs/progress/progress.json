@@ -331,7 +331,7 @@
           "statusLabel": "Частично",
           "group": "QUIC / HTTP3",
           "mapping": "`d2k_quic_data_stage`/`d2k_qc_app_progress` → Rust `r2o_quic_http3::{measure_with_wire_len,wait_with_stall}`",
-          "evidence": "Debian 13 WSL2 current-main differential (D2O a63d964 / R2O a4af79c): `/content-length-open` advertises Content-Length 2, sends exactly 2 body bytes, then keeps the QUIC stream open. Both return NotRun/complete=0 with matching app_bytes and requests; focused full-stage C/Rust passes 1/1 (78.25 s). Test-only evidence, no score change. Earlier clean-D2O full-stage differential passed 11/11 (97.80 s), including RESET_STREAM after HTTP 200 HEADERS and before DATA, the C/Rust UDP reply-drop stall case, and the closed-port NoHandshake case. Cases: repeated budget/growth (incl. >RTO), HTTP 451, delay"
+          "evidence": "Current-main (D2O a63d964 / R2O 4491c82): `r2o_http3_connection_close_after_partial_body_matches_d2o` passed 1/1; HTTP 200, 7/4096 body bytes, then CONNECTION_CLOSE matched as NotRun with equal app_bytes/requests, Rust incomplete/no false stall. Debian 13 WSL2 current-main differential (D2O a63d964 / R2O a4af79c): `/content-length-open` advertises Content-Length 2, sends exactly 2 body bytes, then keeps the QUIC stream open. Both return NotRun/complete=0 with matching app_bytes and requests; focused full-stage C/Rust passes 1/1 (78.25 s). Test-only evidence, no score change. Earlier clean-D2O "
         }
       ],
       "weight": 9,
@@ -867,7 +867,7 @@
       "statusLabel": "Частично",
       "group": "QUIC / HTTP3",
       "mapping": "`d2k_quic_data_stage`/`d2k_qc_app_progress` → Rust `r2o_quic_http3::{measure_with_wire_len,wait_with_stall}`",
-      "evidence": "Debian 13 WSL2 current-main differential (D2O a63d964 / R2O a4af79c): `/content-length-open` advertises Content-Length 2, sends exactly 2 body bytes, then keeps the QUIC stream open. Both return NotRun/complete=0 with matching app_bytes and requests; focused full-stage C/Rust passes 1/1 (78.25 s). Test-only evidence, no score change. Earlier clean-D2O full-stage differential passed 11/11 (97.80 s), including RESET_STREAM after HTTP 200 HEADERS and before DATA, the C/Rust UDP reply-drop stall case, and the closed-port NoHandshake case. Cases: repeated budget/growth (incl. >RTO), HTTP 451, delay"
+      "evidence": "Current-main (D2O a63d964 / R2O 4491c82): `r2o_http3_connection_close_after_partial_body_matches_d2o` passed 1/1; HTTP 200, 7/4096 body bytes, then CONNECTION_CLOSE matched as NotRun with equal app_bytes/requests, Rust incomplete/no false stall. Debian 13 WSL2 current-main differential (D2O a63d964 / R2O a4af79c): `/content-length-open` advertises Content-Length 2, sends exactly 2 body bytes, then keeps the QUIC stream open. Both return NotRun/complete=0 with matching app_bytes and requests; focused full-stage C/Rust passes 1/1 (78.25 s). Test-only evidence, no score change. Earlier clean-D2O "
     },
     {
       "id": 28,

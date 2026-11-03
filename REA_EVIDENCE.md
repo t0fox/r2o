@@ -9530,3 +9530,7 @@ This is R2O production-path evidence for local IPv4 UDP NFQUEUE → QUIC suspici
 ### QUIC HTTP/3: Content-Length совпал, транспортный FIN отсутствует — 2026-11-03
 
 На pinned D2O main `a63d964` и R2O main `a4af79c` focused full-stage C/Rust differential прошёл 1/1 за 78.25 с в Debian 13 WSL2. Peer объявил `Content-Length: 2`, отправил ровно 2 байта и оставил QUIC stream открытым. Обе реализации вернули `NotRun`, `complete=0`, одинаковые `app_bytes` и `requests`; R2O получил HTTP 200 и 2 байта тела, но не принял длину за FIN. Изменился только differential fixture; production code не затронут. QUIC остаётся partial, баллы не меняются (62/87, 71.26%).
+
+### QUIC HTTP/3 CONNECTION_CLOSE после частичного ответа — 2026-11-03
+
+На D2O main `a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe` и R2O main `4491c82` peer завершил QUIC handshake, отправил HTTP 200, 7 байт из `Content-Length: 4096`, затем CONNECTION_CLOSE. Новый `r2o_http3_connection_close_after_partial_body_matches_d2o` прошёл 1/1 в Debian 13 WSL2 с C harness, пересобранным из pinned D2O. Обе стороны вернули `NotRun` с одинаковыми `app_bytes` и `requests`; Rust оставил ответ неполным и не назвал закрытие зависанием. `cargo +1.98.0 fmt --all -- --check` прошёл. Production code не менялся; QUIC остаётся partial, общий счёт — 62/87 (71.26%).

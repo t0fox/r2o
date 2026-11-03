@@ -194,6 +194,135 @@ async fn r2o_http3_transport_close_is_not_stall_and_matches_d2o() {
     server.abort();
 }
 
+#[tokio::test]
+#[ignore = "requires the pinned D2O harness; run scripts/test-quic-http3-full-stage-differential.sh"]
+async fn r2o_http3_connection_close_after_partial_body_matches_d2o() {
+    let d2o_binary = std::env::var("D2O_QUIC_DATA_STAGE_BIN")
+        .expect("D2O_QUIC_DATA_STAGE_BIN must point to the pinned C data-stage harness");
+    let certificate = rcgen::Certificate::from_params(rcgen::CertificateParams::new(vec![
+        "localhost".to_owned(),
+    ]))
+    .unwrap();
+    let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
+    let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+        certificate.serialize_private_key_der(),
+    ));
+    let mut tls = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate_der.clone()], private_key)
+        .unwrap();
+    tls.alpn_protocols = vec![b"h3".to_vec()];
+    let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap();
+    let server_config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
+    let endpoint = quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let address = endpoint.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let incoming = endpoint.accept().await.unwrap();
+            let connection = incoming.await.unwrap();
+            let mut h3_connection = h3::server::builder()
+                .build::<_, bytes::Bytes>(h3_quinn::Connection::new(connection.clone()))
+                .await
+                .unwrap();
+            let resolver = h3_connection.accept().await.unwrap().unwrap();
+            let (_, mut stream) = resolver.resolve_request().await.unwrap();
+            stream
+                .send_response(
+                    http::Response::builder()
+                        .status(200)
+                        .header(http::header::CONTENT_LENGTH, "4096")
+                        .body(())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            stream
+                .send_data(bytes::Bytes::from_static(b"partial"))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            connection.close(quinn::VarInt::from_u32(1), b"test close after partial body");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    });
+
+    let c_address = address;
+    let c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(d2o_binary)
+            .args([
+                "127.0.0.1",
+                &c_address.port().to_string(),
+                "localhost",
+                "/close-after-partial-body",
+                "0",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        !c_output.status.success(),
+        "D2O unexpectedly passed after an incomplete response: stdout={} stderr={}",
+        String::from_utf8_lossy(&c_output.stdout),
+        String::from_utf8_lossy(&c_output.stderr)
+    );
+    let c_result = String::from_utf8(c_output.stdout).unwrap();
+    let c_field = |name: &str| {
+        c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {c_result}"))
+    };
+
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.connect(address).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(certificate_der).unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(6),
+        r2o_quic_http3_get(
+            socket,
+            address,
+            "localhost",
+            "/close-after-partial-body",
+            Duration::from_secs(2),
+            roots,
+        ),
+    )
+    .await
+    .expect("HTTP/3 connection-close test timed out");
+    let verdict = r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&result);
+
+    assert!(result.handshake_confirmed, "R2O={result:?}");
+    assert_eq!(result.status, 200, "R2O={result:?}");
+    assert!(!result.complete, "R2O={result:?}");
+    assert!(result.error.is_some(), "R2O={result:?}");
+    assert!(!result.r2o_quic_stalled, "R2O={result:?}");
+    assert_eq!(c_field("verdict"), "NotRun", "D2O={c_result}");
+    assert_eq!(
+        format!("{verdict:?}"),
+        c_field("verdict"),
+        "D2O={c_result} R2O={result:?}"
+    );
+    assert!(
+        result.app_bytes > 0,
+        "R2O did not observe the partial response: {result:?}"
+    );
+    assert_eq!(
+        result.app_bytes,
+        c_field("app_bytes").parse::<u64>().unwrap()
+    );
+    assert_eq!(result.requests, 1);
+    assert_eq!(result.requests, c_field("requests").parse::<u32>().unwrap());
+    write_d2o_http3_differential(
+        "R2O_QUIC_HTTP3_CONNECTION_CLOSE_DIFF_OUTPUT",
+        "connection-close-after-partial-body",
+        &result,
+    );
+    server.await.unwrap();
+}
+
 async fn spawn_quic_peer_without_settings(
     close_after_handshake: bool,
     max_concurrent_uni_streams: Option<u32>,
