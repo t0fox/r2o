@@ -327,6 +327,7 @@ jobs:
       - name: Compare paced UDP scheduler with D2O C
         run: >-
           D2O_ROOT="$GITHUB_WORKSPACE/d2o"
+          R2O_TEST_WORK_ROOT="$RUNNER_TEMP/r2o-scheduler-test-work"
           sh scripts/test-discord-scheduled-udp-differential.sh
       - name: Сверить восстановление NFQUEUE recv(EIO) для IPv4
         run: >-
