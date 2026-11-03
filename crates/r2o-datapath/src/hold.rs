@@ -797,7 +797,7 @@ impl HoldTable {
                 )
             };
             if all || now >= deadline || revision != slot_revision {
-                let timed_out = !all && now >= deadline && revision == slot_revision;
+                let timed_out = !all && now >= deadline;
                 if timed_out && self.incomplete_diagnostics.len() < HOLD_SLOTS {
                     let should_report = self
                         .syns
@@ -2033,6 +2033,24 @@ mod tests {
             hold.flush(now + Duration::from_millis(1), 5, false)
                 .contains(&4)
         );
+    }
+
+    #[test]
+    fn timeout_diagnostic_survives_deadline_and_revision_change_together() {
+        let now = Instant::now();
+        let mut hold = HoldTable::default();
+        let _ = hold.feed(1, &tcp_packet(3000, 0x02, &[]), now, 4, true, false);
+        let partial = tcp_packet(3001, 0x18, &hello()[..5]);
+        assert_eq!(
+            hold.feed(2, &partial, now, 4, true, false).outcome,
+            HoldOutcome::Waiting
+        );
+
+        assert_eq!(hold.flush(now + HOLD_WAIT, 5, false), [2]);
+        let diagnostics = hold.r2o_take_incomplete_diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].kind, super::R2oIncompleteCaptureKind::Tls);
+        assert_eq!(diagnostics[0].captured_bytes, 5);
     }
 
     #[test]
