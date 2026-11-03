@@ -24444,6 +24444,12 @@ mod tests {
             false,
             Some(5),
         );
+        let ech_exhausted_other_endpoint = DiscoveryTarget {
+            endpoint: "192.0.2.24:443".into(),
+            ..ech_exhausted_target.clone()
+        };
+        let ech_exhausted_other_endpoint_blocked =
+            ech_exhausted_worker.r2o_late_trigger_blocked(&ech_exhausted_other_endpoint, now);
         assert!(
             !ech_exhausted_ordinary_blocked,
             "ECH witness exhaustion must not cool down ordinary signals"
@@ -24451,6 +24457,10 @@ mod tests {
         assert!(
             ech_exhausted_late_blocked,
             "ECH witness exhaustion must retain the donor's late-trigger cooldown"
+        );
+        assert!(
+            !ech_exhausted_other_endpoint_blocked,
+            "ECH witness exhaustion must scope its late-trigger cooldown to the endpoint"
         );
 
         let ech_proof_config = r2o_controller::ech::R2oEchConfig {
@@ -24548,7 +24558,7 @@ mod tests {
         assert!(late_only_preserves_exhausted);
         assert!(late_only_preserves_exhausted_trigger);
         let output = format!(
-            "{output}clear_same {}\nclear_other {}\nclear_same_after_expiry {}\nlate_only_ordinary {}\nlate_only_trigger {}\nlate_only_other_endpoint {}\nech_exhausted_ordinary {}\nech_exhausted_late {}\nech_witness_proof_accepted {}\nech_witness_proof_rate_limit {}\nech_witness_proof_rate_limit_blocked {}\nech_witness_proof_rate_limit_denied {}\nech_witness_proof_missing_acceptance {}\nech_witness_proof_wrong_name {}\nech_witness_proof_incomplete {}\nlate_only_preserves_exhausted {}\nlate_only_preserves_exhausted_trigger {}\n",
+            "{output}clear_same {}\nclear_other {}\nclear_same_after_expiry {}\nlate_only_ordinary {}\nlate_only_trigger {}\nlate_only_other_endpoint {}\nech_exhausted_ordinary {}\nech_exhausted_late {}\nech_exhausted_other_endpoint {}\nech_witness_proof_accepted {}\nech_witness_proof_rate_limit {}\nech_witness_proof_rate_limit_blocked {}\nech_witness_proof_rate_limit_denied {}\nech_witness_proof_missing_acceptance {}\nech_witness_proof_wrong_name {}\nech_witness_proof_incomplete {}\nlate_only_preserves_exhausted {}\nlate_only_preserves_exhausted_trigger {}\n",
             u8::from(same_signal_blocked),
             u8::from(other_signal_blocked),
             u8::from(same_signal_after_expiry_blocked),
@@ -24557,6 +24567,7 @@ mod tests {
             u8::from(late_only_other_endpoint_blocked),
             u8::from(ech_exhausted_ordinary_blocked),
             u8::from(ech_exhausted_late_blocked),
+            u8::from(ech_exhausted_other_endpoint_blocked),
             u8::from(ech_witness_proof_accepted),
             u8::from(ech_witness_proof_rate_limit),
             u8::from(ech_witness_proof_rate_limit_blocked),

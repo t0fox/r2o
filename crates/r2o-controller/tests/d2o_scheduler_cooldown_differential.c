@@ -118,6 +118,9 @@ int main(void)
                                                           "192.0.2.23", 443, D2K_SUSPECT_RST));
     printf("ech_exhausted_late %d\n", target_blocks(scheduler, "ech-exhausted.example", 6, 4,
                                                       "192.0.2.23", 443, D2K_SUSPECT_RST_AFTER_APP));
+    printf("ech_exhausted_other_endpoint %d\n",
+           target_blocks(scheduler, "ech-exhausted.example", 6, 4,
+                         "192.0.2.24", 443, D2K_SUSPECT_RST_AFTER_APP));
     printf("ech_witness_proof_accepted %d\n", ech_witness_proof(403, D2K_VER_CHALLENGE, 1, 1, 1));
     printf("ech_witness_proof_rate_limit %d\n", ech_witness_proof(429, D2K_VER_CHALLENGE, 1, 1, 1));
     printf("ech_witness_proof_rate_limit_blocked %d\n", ech_witness_proof(429, D2K_VER_BLOCKPAGE, 1, 1, 1));

@@ -225,7 +225,7 @@
           "statusLabel": "Эквивалентно",
           "group": "Discovery",
           "mapping": "`on_suspect`, `on_refused`, `d2k_sched_tick` → controller Discovery worker/queue",
-          "evidence": "`r2o-scheduler-differential.sh`, `r2o-scheduler-cooldown-differential.sh`, `r2o-scheduler-dead-address-differential.sh`, `r2o-scheduler-concurrent-endpoint-differential.sh`"
+          "evidence": "On pinned D2O `304ba893dd37197128ac8799c0495b035f6a38c0`, `r2o-scheduler-cooldown-differential.sh` compares ECH-witness exhaustion: ordinary signals remain eligible, the late trigger is blocked only for the recorded endpoint, and active generic exhaustion is preserved. `r2o-scheduler-dead-address-differential.sh` compares the saved-address task path: three silent neutral ACKs send no trigger and retain the 30-minute retry; a successful ACK clears the address pause before normal probing resumes. The same scripts also cover transport/family separation, dead-address backoff, ring eviction, and br"
         },
         {
           "id": 17,
@@ -746,7 +746,7 @@
       "statusLabel": "Эквивалентно",
       "group": "Discovery",
       "mapping": "`on_suspect`, `on_refused`, `d2k_sched_tick` → controller Discovery worker/queue",
-      "evidence": "`r2o-scheduler-differential.sh`, `r2o-scheduler-cooldown-differential.sh`, `r2o-scheduler-dead-address-differential.sh`, `r2o-scheduler-concurrent-endpoint-differential.sh`"
+      "evidence": "On pinned D2O `304ba893dd37197128ac8799c0495b035f6a38c0`, `r2o-scheduler-cooldown-differential.sh` compares ECH-witness exhaustion: ordinary signals remain eligible, the late trigger is blocked only for the recorded endpoint, and active generic exhaustion is preserved. `r2o-scheduler-dead-address-differential.sh` compares the saved-address task path: three silent neutral ACKs send no trigger and retain the 30-minute retry; a successful ACK clears the address pause before normal probing resumes. The same scripts also cover transport/family separation, dead-address backoff, ring eviction, and br"
     },
     {
       "id": 17,
