@@ -23,9 +23,8 @@ int socket(int domain, int type, int protocol) {
         if (trace) {
             int fd = open(trace, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
             if (fd >= 0) {
-                char line[64];
-                int length = snprintf(line, sizeof line, "ctnetlink socket attempt %u\n", attempt);
-                if (length > 0) (void)write(fd, line, (size_t)length);
+                if (dprintf(fd, "ctnetlink socket attempt %u\n", attempt) < 0)
+                    perror("ct-retry trace");
                 (void)close(fd);
             }
         }
