@@ -658,6 +658,21 @@ mod app {
         );
     }
 
+    fn r2o_log_session_stats(tcp_sessions: &TcpSessions) {
+        eprintln!(
+            "r2o-datapath: ответ невидим очереди: {} из {} TCP-потоков с приветствием",
+            tcp_sessions.r2o_reply_hidden(),
+            tcp_sessions.r2o_tcp_hello_flows()
+        );
+        let http_stats = tcp_sessions.r2o_http_keepalive_stats();
+        if http_stats.later != 0 || http_stats.unaligned != 0 || http_stats.open_end != 0 {
+            eprintln!(
+                "r2o-datapath: HTTP с постоянным соединением: следующих запросов распознано {}, границ потеряно или пересечено {}, концов запроса неизвестно {}",
+                http_stats.later, http_stats.unaligned, http_stats.open_end
+            );
+        }
+    }
+
     pub fn run() -> Result<(), Box<dyn Error>> {
         let arguments: Vec<String> = std::env::args().skip(1).collect();
         if arguments
@@ -915,19 +930,8 @@ mod app {
                 r2o_log_process_stats(&journal_origin, Instant::now());
                 eprintln!("r2o-datapath: потеряно ядром {}", socket.lost_packets());
                 r2o_log_flow_table_stats(&tcp_sessions, &udp_sessions);
-                eprintln!(
-                    "r2o-datapath: ответ невидим очереди: {} из {} TCP-потоков с приветствием",
-                    tcp_sessions.r2o_reply_hidden(),
-                    tcp_sessions.r2o_tcp_hello_flows()
-                );
+                r2o_log_session_stats(&tcp_sessions);
                 r2o_log_payload_stats(&tcp_sessions);
-                let http_stats = tcp_sessions.r2o_http_keepalive_stats();
-                if http_stats.later != 0 || http_stats.unaligned != 0 || http_stats.open_end != 0 {
-                    eprintln!(
-                        "r2o-datapath: HTTP с постоянным соединением: следующих запросов распознано {}, границ потеряно или пересечено {}, концов запроса неизвестно {}",
-                        http_stats.later, http_stats.unaligned, http_stats.open_end
-                    );
-                }
                 r2o_log_capture_stats(&holding);
                 if let Some(line) = icmp_guard.r2o_stats_line() {
                     eprintln!("r2o-datapath: {line}");
@@ -952,6 +956,7 @@ mod app {
                 r2o_log_process_stats(&journal_origin, Instant::now());
                 eprintln!("r2o-datapath: потеряно ядром {}", socket.lost_packets());
                 r2o_log_flow_table_stats(&tcp_sessions, &udp_sessions);
+                r2o_log_session_stats(&tcp_sessions);
                 r2o_log_capture_stats(&holding);
                 r2o_log_payload_stats(&tcp_sessions);
                 if let Some(line) = icmp_guard.r2o_stats_line() {
