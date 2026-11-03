@@ -78,8 +78,8 @@
           "status": "partial",
           "statusLabel": "Частично",
           "group": "Datapath",
-          "mapping": "C `print_stats`/`self_cost` → Rust runtime diagnostics",
-          "evidence": "D2O `d2k_hold_flush` counts a timeout when `now >= deadline`, even if the plan revision changes in the same call. A pinned D2O a63d964 C fixture and Rust `timeout_diagnostic_survives_deadline_and_revision_change_together` confirm fail-open release plus the incomplete TLS diagnostic (C timed_out=1, plan_changed=0; Rust captured 5 bytes). `scripts/test-datapath-stats-timer-differential.sh` passed in Debian WSL2: every summary includes one scheduled-queue line, and D2O/R2O queue count/refusal traces match; the D2O C/Rust scheduler differential also matches a capacity refusal (`queue=1, refusals=1"
+          "mapping": "C print_stats/self_cost → Rust QueueSocket counters/runtime diagnostics",
+          "evidence": "Pinned D2O a63d964 hold fixture confirms simultaneous timeout+revision: fail-open, C timed_out=1/plan_changed=0, Rust incomplete-TLS capture 5 bytes. scripts/test-datapath-stats-timer-differential.sh matches idle flow-table/scheduler/capture/payload/reply-visibility/hold traces and all 4 C/Rust summaries with traffic: 8 packets, 268 bytes, 8 accepted, 0 dropped. Production scheduler refusal matches (queue=1/refusals=1); ICMP matches (2 received/2 dropped/1 fake). CPU/RSS and Linux self_cost token match; short OpenWrt AArch64 service smoke covers CPU/RSS, flow table and capture. Other hold bran"
         },
         {
           "id": 9,
@@ -657,8 +657,8 @@
       "status": "partial",
       "statusLabel": "Частично",
       "group": "Datapath",
-      "mapping": "C `print_stats`/`self_cost` → Rust runtime diagnostics",
-      "evidence": "D2O `d2k_hold_flush` counts a timeout when `now >= deadline`, even if the plan revision changes in the same call. A pinned D2O a63d964 C fixture and Rust `timeout_diagnostic_survives_deadline_and_revision_change_together` confirm fail-open release plus the incomplete TLS diagnostic (C timed_out=1, plan_changed=0; Rust captured 5 bytes). `scripts/test-datapath-stats-timer-differential.sh` passed in Debian WSL2: every summary includes one scheduled-queue line, and D2O/R2O queue count/refusal traces match; the D2O C/Rust scheduler differential also matches a capacity refusal (`queue=1, refusals=1"
+      "mapping": "C print_stats/self_cost → Rust QueueSocket counters/runtime diagnostics",
+      "evidence": "Pinned D2O a63d964 hold fixture confirms simultaneous timeout+revision: fail-open, C timed_out=1/plan_changed=0, Rust incomplete-TLS capture 5 bytes. scripts/test-datapath-stats-timer-differential.sh matches idle flow-table/scheduler/capture/payload/reply-visibility/hold traces and all 4 C/Rust summaries with traffic: 8 packets, 268 bytes, 8 accepted, 0 dropped. Production scheduler refusal matches (queue=1/refusals=1); ICMP matches (2 received/2 dropped/1 fake). CPU/RSS and Linux self_cost token match; short OpenWrt AArch64 service smoke covers CPU/RSS, flow table and capture. Other hold bran"
     },
     {
       "id": 9,

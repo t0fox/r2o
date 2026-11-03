@@ -1,5 +1,5 @@
 use crate::netlink::{
-    MessageIter, NF_ACCEPT, NFQNL_CFG_CMD_BIND, NFQNL_CFG_CMD_UNBIND, config_command,
+    MessageIter, NF_ACCEPT, NF_DROP, NFQNL_CFG_CMD_BIND, NFQNL_CFG_CMD_UNBIND, config_command,
     config_params, kernel_error, verdict, verdict_payload,
 };
 use std::cell::Cell;
@@ -32,12 +32,21 @@ fn record_lost_packet(counter: &Cell<u64>) {
     counter.set(counter.get().saturating_add(1));
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct QueueStats {
+    pub packets: u64,
+    pub bytes: u64,
+    pub accepted: u64,
+    pub dropped: u64,
+}
+
 pub struct QueueSocket {
     fd: OwnedFd,
     queue: u16,
     protocol_family: u16,
     sequence: u32,
     lost_packets: Cell<u64>,
+    stats: Cell<QueueStats>,
 }
 
 impl QueueSocket {
@@ -96,6 +105,7 @@ impl QueueSocket {
             protocol_family,
             sequence: 1,
             lost_packets: Cell::new(0),
+            stats: Cell::new(QueueStats::default()),
         };
         let bind = config_command(
             queue,
@@ -200,9 +210,32 @@ impl QueueSocket {
         self.lost_packets.get()
     }
 
+    pub fn stats(&self) -> QueueStats {
+        self.stats.get()
+    }
+
+    pub fn record_received_packet(&self, payload_bytes: usize) {
+        let mut stats = self.stats.get();
+        stats.packets = stats.packets.saturating_add(1);
+        stats.bytes = stats.bytes.saturating_add(payload_bytes as u64);
+        self.stats.set(stats);
+    }
+
+    fn record_verdict(&self, action: u32) {
+        let mut stats = self.stats.get();
+        if action == NF_DROP {
+            stats.dropped = stats.dropped.saturating_add(1);
+        } else {
+            stats.accepted = stats.accepted.saturating_add(1);
+        }
+        self.stats.set(stats);
+    }
+
     pub fn send_verdict(&mut self, packet_id: u32, action: u32) -> io::Result<()> {
         let bytes = verdict(self.queue, self.next_sequence(), packet_id, action);
-        send_to_kernel(self.fd.as_raw_fd(), &bytes)
+        send_to_kernel(self.fd.as_raw_fd(), &bytes)?;
+        self.record_verdict(action);
+        Ok(())
     }
 
     pub fn send_replacement(&mut self, packet_id: u32, packet: &[u8]) -> io::Result<()> {
@@ -219,7 +252,9 @@ impl QueueSocket {
                 "замена не помещается в netlink",
             )
         })?;
-        send_to_kernel(self.fd.as_raw_fd(), &bytes)
+        send_to_kernel(self.fd.as_raw_fd(), &bytes)?;
+        self.record_verdict(NF_ACCEPT);
+        Ok(())
     }
 
     fn configure(&mut self, message: &[u8]) -> io::Result<()> {

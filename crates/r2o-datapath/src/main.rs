@@ -618,6 +618,14 @@ mod app {
         );
     }
 
+    fn r2o_log_queue_stats(socket: &QueueSocket) {
+        let stats = socket.stats();
+        eprintln!(
+            "r2o-datapath: пакетов {}, байт {}, пропущено {}, снято {}",
+            stats.packets, stats.bytes, stats.accepted, stats.dropped
+        );
+    }
+
     fn r2o_log_flow_table_stats(tcp_sessions: &TcpSessions, udp_sessions: &R2oUdpSessions) {
         let udp_stats = udp_sessions.stats();
         eprintln!(
@@ -956,6 +964,7 @@ mod app {
                 );
                 r2o_log_process_stats(&journal_origin, Instant::now());
                 eprintln!("r2o-datapath: потеряно ядром {}", socket.lost_packets());
+                r2o_log_queue_stats(&socket);
                 r2o_log_flow_table_stats(&tcp_sessions, &udp_sessions);
                 r2o_log_scheduler_stats(&scheduled);
                 r2o_log_session_stats(&tcp_sessions);
@@ -984,6 +993,7 @@ mod app {
             if next_stats.is_some_and(|deadline| now >= deadline) {
                 r2o_log_process_stats(&journal_origin, Instant::now());
                 eprintln!("r2o-datapath: потеряно ядром {}", socket.lost_packets());
+                r2o_log_queue_stats(&socket);
                 r2o_log_flow_table_stats(&tcp_sessions, &udp_sessions);
                 r2o_log_scheduler_stats(&scheduled);
                 r2o_log_session_stats(&tcp_sessions);
@@ -1272,6 +1282,7 @@ mod app {
                     let Some(mut packet_id) = packet.id else {
                         return Err(invalid("NFQUEUE пакет без id; закрываю очередь fail-open"));
                     };
+                    socket.record_received_packet(packet.payload.map_or(0, |bytes| bytes.len()));
                     let queue_hook = packet.hook;
                     if let Some(bytes) = packet.payload
                         && let Some(drop) = icmp_guard.r2o_handle_at_hook(
