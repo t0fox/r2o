@@ -2127,7 +2127,7 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
     assert!(oversized_rust_result.error.is_some());
     assert!(!oversized_rust_result.r2o_quic_stalled);
     assert_eq!(format!("{oversized_rust_verdict:?}"), "NotRun");
-    // D2O stops at its raw 64 KiB buffer; h3 consumes and rejects the field section before the byte counter observes it.
+    // R2O advertises its decoded field-section limit; this server declines that response, so only C receives bytes to count.
     assert_eq!(
         oversized_c_field("requests").parse::<u32>().unwrap(),
         oversized_rust_result.requests,
