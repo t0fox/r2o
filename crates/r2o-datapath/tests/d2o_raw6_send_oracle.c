@@ -65,6 +65,16 @@ static int receive_body(int fd, const uint8_t body[64]) {
     return len == 64 && memcmp(got, body, 64) == 0 ? 0 : -1;
 }
 
+static int expect_no_body(int fd) {
+    struct pollfd ready = {.fd=fd, .events=POLLIN};
+    int result;
+    do {
+        result = poll(&ready, 1, 1000);
+    } while (result < 0 && errno == EINTR);
+    if (result > 0) errno = EPROTO;
+    return result == 0 ? 0 : -1;
+}
+
 static int send_capture(d2k_raw *raw, int capture, const char *label,
                         const uint8_t *packet, size_t packet_len) {
     char error[256] = {0};
@@ -179,6 +189,13 @@ int main(void) {
                 d2k_raw_close(raw); close(capture); close(receive); return 1;
             }
             printf("DELIVERED shape%d\n", shape);
+        } else {
+            if (expect_no_body(receive) != 0) {
+                fprintf(stderr, "D2O IPv6 shape %d unexpectedly delivered: %s\n",
+                        shape, strerror(errno));
+                d2k_raw_close(raw); close(capture); close(receive); return 1;
+            }
+            printf("NOT_DELIVERED shape%d\n", shape);
         }
     }
 

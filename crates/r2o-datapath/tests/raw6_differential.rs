@@ -153,6 +153,16 @@ fn receive_udp_body(receiver: &OwnedFd, body: &[u8]) {
     assert_eq!(&received[..body.len()], body);
 }
 
+fn assert_no_udp_delivery(receiver: &OwnedFd, fragment: &str) {
+    let mut ready = libc::pollfd {
+        fd: receiver.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let result = unsafe { libc::poll(&mut ready, 1, 1000) };
+    assert_eq!(result, 0, "unexpected IPv6 UDP delivery after {fragment}");
+}
+
 #[test]
 #[ignore = "requires Linux CAP_NET_RAW/CAP_NET_ADMIN and the pinned D2O raw sender"]
 fn ipv6_raw_send_matches_d2o_on_live_loopback() {
@@ -169,6 +179,7 @@ fn ipv6_raw_send_matches_d2o_on_live_loopback() {
     let mut port = None;
     let mut c_packets = Vec::new();
     let mut c_deliveries = Vec::new();
+    let mut c_non_deliveries = Vec::new();
     for line in String::from_utf8(output.stdout).unwrap().lines() {
         let mut fields = line.split_whitespace();
         match fields.next() {
@@ -179,6 +190,7 @@ fn ipv6_raw_send_matches_d2o_on_live_loopback() {
                 c_packets.push((name, bytes));
             }
             Some("DELIVERED") => c_deliveries.push(fields.next().unwrap().to_owned()),
+            Some("NOT_DELIVERED") => c_non_deliveries.push(fields.next().unwrap().to_owned()),
             other => panic!("unexpected D2O raw-send output line: {other:?}: {line}"),
         }
     }
@@ -193,6 +205,7 @@ fn ipv6_raw_send_matches_d2o_on_live_loopback() {
         expected_labels.iter().collect::<Vec<_>>()
     );
     assert_eq!(c_deliveries, ["base", "shape1", "shape2"]);
+    assert_eq!(c_non_deliveries, ["shape3", "shape4"]);
 
     let receiver = open_ipv6_udp_receiver(port.expect("D2O raw sender omitted port"));
     let capture = open_loopback_packet_capture();
@@ -211,6 +224,8 @@ fn ipv6_raw_send_matches_d2o_on_live_loopback() {
         );
         if name == "base" || name == "shape1_1" || name == "shape2_1" {
             receive_udp_body(&receiver, &body);
+        } else if name == "shape3_2" || name == "shape4_2" {
+            assert_no_udp_delivery(&receiver, name);
         }
     }
 

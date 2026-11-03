@@ -9463,9 +9463,9 @@ No QEMU was needed for this host loopback protocol check; QEMU runs remain short
 
 ### IPv6 production raw-send differential — 2026-11-03
 
-The current-main D2O production raw sender and R2O RawSocket were exercised on the same Linux loopback flow. A pinned D2O helper built base IPv6 UDP plus all four IPv6 fragment shapes, sent them through D2O raw.c, and captured each outgoing frame with AF_PACKET. The R2O production sender then replayed those exact C-captured packets to the same UDP port. All 11 captured IPv6 packets matched byte-for-byte; the base packet and non-overlap shapes 1 and 2 reassembled at the UDP listener in both runs.
+The current-main D2O production raw sender and R2O RawSocket were exercised on the same Linux loopback flow. A pinned D2O helper built base IPv6 UDP plus all four IPv6 fragment shapes, sent them through D2O raw.c, and captured each outgoing frame with AF_PACKET. The R2O production sender then replayed those exact C-captured packets to the same UDP port. All 11 captured IPv6 packets matched byte-for-byte; the base packet and non-overlap shapes 1 and 2 reassembled at the UDP listener in both runs. Shapes 3 and 4 produced no UDP delivery within 1 s in either the C run or the Rust replay; the test waits on the real listener and asserts that absence.
 
-Check: scripts/test-raw6-send-differential.sh passed 1/1 in Debian 13 WSL2 against D2O main a63d964. The C oracle compiles D2O datapath/raw.c, datapath/wire_udp.c and core/ipfrag.c; Rust uses RawSocket::send_packet. This closes production IPv6 raw-send delivery for the tested loopback path, not the AF_INET6 NFQUEUE path. The matrix row remains partial at 0/3 because D2O binds NFQUEUE only for AF_INET; no score change, total remains 62/87 (71.26%).
+Check: scripts/test-raw6-send-differential.sh passed 1/1 in Debian 13 WSL2 against D2O main a63d964 and R2O production source b9d4bc2. The C oracle compiles D2O datapath/raw.c, datapath/wire_udp.c and core/ipfrag.c; Rust uses RawSocket::send_packet. This closes production IPv6 raw-send delivery for the tested loopback path, not the AF_INET6 NFQUEUE path. The matrix row remains partial at 0/3 because D2O binds NFQUEUE only for AF_INET; no score change, total remains 62/87 (71.26%).
 
 No QEMU run: this Linux socket path is directly exercised on loopback. Any QEMU work remains short OpenWrt ARM64 only.
 
