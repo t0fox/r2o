@@ -703,6 +703,11 @@ mod app {
             tcp_sessions.r2o_reply_hidden(),
             tcp_sessions.r2o_tcp_hello_flows()
         );
+        eprintln!(
+            "r2o-datapath: распознано TCP ClientHello {}, из них с именем {}",
+            tcp_sessions.r2o_tcp_hello_flows(),
+            tcp_sessions.r2o_tcp_hellos_with_sni()
+        );
         let http_stats = tcp_sessions.r2o_http_keepalive_stats();
         if http_stats.later != 0 || http_stats.unaligned != 0 || http_stats.open_end != 0 {
             eprintln!(

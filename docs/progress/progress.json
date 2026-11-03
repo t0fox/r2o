@@ -79,7 +79,7 @@
           "statusLabel": "Частично",
           "group": "Datapath",
           "mapping": "C print_stats/self_cost → Rust QueueSocket counters/runtime diagnostics",
-          "evidence": "D2O a63d964/R2O current main: timer differential matches idle flow, scheduler, capture, payload, reply, hold and all 4 IPv4 NFQUEUE summaries: 9 packets/396 bytes/9 accepted/0 dropped; copy-range 128 gives truncated=1/no_payload=0/no_header=0 on both. Rust unit checks a headerless event increments only its counter; runtime malformed-message injection remains open. Scheduler refusal, ICMP, CPU/RSS and Linux self_cost token also match. Other hold/session branches and nonzero periodic metrics remain open."
+          "evidence": "D2O a63d964/R2O current main: timer differential matches idle flow, scheduler, capture, payload, reply, hold and all 4 IPv4 NFQUEUE summaries: 9 packets/396 bytes/9 accepted/0 dropped; copy-range 128 gives truncated=1/no_payload=0/no_header=0 on both. Rust unit checks a headerless event increments only its counter; runtime malformed-message injection remains open. Additional isolated TCP slice: production C/Rust IPv4 NFQUEUE processes exchange one TLS 1.2 ClientHello with SNI example.com; all 4 periodic/shutdown summaries match hello/SNI counts (1/1), and the periodic count is 1/1. This fixtur"
         },
         {
           "id": 9,
@@ -658,7 +658,7 @@
       "statusLabel": "Частично",
       "group": "Datapath",
       "mapping": "C print_stats/self_cost → Rust QueueSocket counters/runtime diagnostics",
-      "evidence": "D2O a63d964/R2O current main: timer differential matches idle flow, scheduler, capture, payload, reply, hold and all 4 IPv4 NFQUEUE summaries: 9 packets/396 bytes/9 accepted/0 dropped; copy-range 128 gives truncated=1/no_payload=0/no_header=0 on both. Rust unit checks a headerless event increments only its counter; runtime malformed-message injection remains open. Scheduler refusal, ICMP, CPU/RSS and Linux self_cost token also match. Other hold/session branches and nonzero periodic metrics remain open."
+      "evidence": "D2O a63d964/R2O current main: timer differential matches idle flow, scheduler, capture, payload, reply, hold and all 4 IPv4 NFQUEUE summaries: 9 packets/396 bytes/9 accepted/0 dropped; copy-range 128 gives truncated=1/no_payload=0/no_header=0 on both. Rust unit checks a headerless event increments only its counter; runtime malformed-message injection remains open. Additional isolated TCP slice: production C/Rust IPv4 NFQUEUE processes exchange one TLS 1.2 ClientHello with SNI example.com; all 4 periodic/shutdown summaries match hello/SNI counts (1/1), and the periodic count is 1/1. This fixtur"
     },
     {
       "id": 9,

@@ -365,6 +365,7 @@ pub struct TcpSessions {
     tcp_payload_stats: R2oTcpPayloadStats,
     tcp_stall_budgets: Vec<u16>,
     r2o_tcp_hello_flows: u64,
+    r2o_tcp_hellos_with_sni: u64,
     r2o_reply_hidden: u64,
     tcp_exchange_events: VecDeque<R2oTcpExchangeEvent>,
     tcp_rst_events: VecDeque<R2oTcpRstEvent>,
@@ -405,6 +406,7 @@ impl TcpSessions {
             tcp_payload_stats: R2oTcpPayloadStats::default(),
             tcp_stall_budgets: vec![TCP_STALL_PACKET_BUDGET as u16],
             r2o_tcp_hello_flows: 0,
+            r2o_tcp_hellos_with_sni: 0,
             r2o_reply_hidden: 0,
             tcp_exchange_events,
             tcp_rst_events,
@@ -523,6 +525,10 @@ impl TcpSessions {
     /// Число распознанных пользовательских TCP-потоков с ClientHello.
     pub fn r2o_tcp_hello_flows(&self) -> u64 {
         self.r2o_tcp_hello_flows
+    }
+
+    pub fn r2o_tcp_hellos_with_sni(&self) -> u64 {
+        self.r2o_tcp_hellos_with_sni
     }
 
     /// Число потоков, где ACK указал на невидимый очереди ответ сервера.
@@ -934,6 +940,7 @@ impl TcpSessions {
         }
 
         let r2o_tcp_hello_flows = &mut self.r2o_tcp_hello_flows;
+        let r2o_tcp_hellos_with_sni = &mut self.r2o_tcp_hellos_with_sni;
         let r2o_reply_hidden = &mut self.r2o_reply_hidden;
         let session = self.flows.get_mut(&key)?;
         if controller_probe {
@@ -1003,6 +1010,9 @@ impl TcpSessions {
             session.hello_seq = Some(tcp.sequence);
             if !controller_probe {
                 *r2o_tcp_hello_flows = (*r2o_tcp_hello_flows).wrapping_add(1);
+                if hello.sni_range.is_some() {
+                    *r2o_tcp_hellos_with_sni = (*r2o_tcp_hellos_with_sni).wrapping_add(1);
+                }
             }
             session.hello_ack = ack.then_some(tcp.acknowledgment);
             session.hello_has_sni = hello.sni_range.is_some();
@@ -2434,6 +2444,21 @@ mod tests {
         ack[28..32].copy_from_slice(&1200_u32.to_be_bytes());
         decide_with_session(&mut sessions, &Plan::default(), &ack);
         assert_eq!(sessions.r2o_reply_hidden(), 1);
+    }
+
+    #[test]
+    fn r2o_tcp_counts_sni_hello_once_even_on_retransmission() {
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello_with_sni());
+        let mut sessions = TcpSessions::default();
+
+        sessions.track_packet(&hello, start);
+        sessions.track_packet(&hello, start + Duration::from_millis(50));
+
+        assert_eq!(sessions.r2o_tcp_hello_flows(), 1);
+        assert_eq!(sessions.r2o_tcp_hellos_with_sni(), 1);
     }
 
     #[test]

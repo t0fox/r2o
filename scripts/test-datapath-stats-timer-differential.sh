@@ -6,8 +6,13 @@ r2o_datapath=${R2O_DATAPATH:-/tmp/r2o-datapath}
 queue=${R2O_TEST_QUEUE:-2002}
 test_tmpdir=${R2O_TEST_TMPDIR:-${TMPDIR:-/tmp}}
 namespace="r2o-stats-diff-$$"
+peer_namespace="r2o-stats-peer-$$"
+client_if="rsc$$"
+peer_if="rsp$$"
+peer_address=198.51.100.2
 traffic_port=39992
 running_pid=
+server_pid=
 
 mkdir -p "$test_tmpdir"
 
@@ -16,8 +21,15 @@ cleanup() {
         kill -TERM "$running_pid" 2>/dev/null || true
         wait "$running_pid" 2>/dev/null || true
     fi
+    if [ -n "$server_pid" ]; then
+        kill -TERM "$server_pid" 2>/dev/null || true
+        wait "$server_pid" 2>/dev/null || true
+    fi
     if ip netns list | awk '{print $1}' | grep -Fxq "$namespace"; then
         ip netns del "$namespace" 2>/dev/null || true
+    fi
+    if ip netns list | awk '{print $1}' | grep -Fxq "$peer_namespace"; then
+        ip netns del "$peer_namespace" 2>/dev/null || true
     fi
 }
 trap cleanup EXIT HUP INT TERM
@@ -28,12 +40,60 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 ip netns add "$namespace"
 ip netns exec "$namespace" ip link set lo up
+ip netns add "$peer_namespace"
+ip link add "$client_if" type veth peer name "$peer_if"
+ip link set "$client_if" netns "$namespace"
+ip link set "$peer_if" netns "$peer_namespace"
+ip netns exec "$namespace" ip addr add 198.51.100.1/30 dev "$client_if"
+ip netns exec "$peer_namespace" ip addr add "$peer_address/30" dev "$peer_if"
+ip netns exec "$namespace" ip link set "$client_if" up
+ip netns exec "$peer_namespace" ip link set lo up
+ip netns exec "$peer_namespace" ip link set "$peer_if" up
+ip netns exec "$namespace" ip route add default via "$peer_address" dev "$client_if"
 ip netns exec "$namespace" nft add table inet stats
 ip netns exec "$namespace" nft 'add chain inet stats output { type filter hook output priority filter; policy accept; }'
 ip netns exec "$namespace" nft add rule inet stats output ip daddr 127.0.0.1 udp dport "$traffic_port" queue num "$queue"
+ip netns exec "$namespace" nft add rule inet stats output oifname "$client_if" ip daddr "$peer_address" tcp dport 443 queue num "$queue"
 
 send_traffic() {
     ip netns exec "$namespace" python3 -c 'import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); [s.sendto(bytes([i])*(i+1),("127.0.0.1",39992)) for i in range(1,9)]; s.sendto(b"x"*512,("127.0.0.1",39992))'
+}
+
+run_hello_case() {
+    name=$1
+    binary=$2
+    pattern=$3
+    log="$test_tmpdir/r2o-stats-hello-$name.log"
+    server_log="$test_tmpdir/r2o-stats-hello-server-$name.log"
+    ready="$test_tmpdir/r2o-stats-hello-$name.ready"
+    rm -f "$log" "$server_log" "$ready"
+    ip netns exec "$peer_namespace" python3 -c 'import socket,sys; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(("198.51.100.2",443)); s.listen(1); open(sys.argv[1],"w").close(); c,_=s.accept(); c.settimeout(3); c.recv(8192); c.close(); s.close()' "$ready" >"$server_log" 2>&1 &
+    server_pid=$!
+    attempt=0
+    while [ ! -e "$ready" ]; do
+        if ! kill -0 "$server_pid" 2>/dev/null; then cat "$server_log"; exit 1; fi
+        attempt=$((attempt + 1))
+        if [ "$attempt" -ge 50 ]; then
+            echo "TLS test server did not become ready" >&2
+            cat "$server_log" >&2
+            exit 1
+        fi
+        sleep 0.1
+    done
+    ip netns exec "$namespace" "$binary" --queue "$queue" --mode observe --copy-range 1600 --stats 1 >"$log" 2>&1 &
+    running_pid=$!
+    sleep 1
+    if ! kill -0 "$running_pid" 2>/dev/null; then cat "$log"; exit 1; fi
+    ip netns exec "$namespace" python3 -c 'import socket,ssl,sys; s=socket.create_connection((sys.argv[1],443),timeout=3); c=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT); c.check_hostname=False; c.maximum_version=ssl.TLSVersion.TLSv1_2; c.verify_mode=ssl.CERT_NONE; t=c.wrap_socket(s,server_hostname="example.com",do_handshake_on_connect=False); exec("try:\n t.do_handshake()\nexcept (ssl.SSLError,OSError,TimeoutError):\n pass"); t.close()' "$peer_address"
+    sleep 2
+    kill -TERM "$running_pid"
+    wait "$running_pid"
+    running_pid=
+    wait "$server_pid" 2>/dev/null || true
+    server_pid=
+    count=$(grep -Fc -e "$pattern" "$log" || true)
+    echo "$name hello_summary_lines=$count"
+    if [ "$count" -lt 2 ]; then cat "$log"; cat "$server_log"; exit 1; fi
 }
 
 run_case() {
@@ -227,3 +287,29 @@ if [ "$c_truncated_periodic" -lt 1 ] || [ "$r_truncated_periodic" -lt 1 ]; then
     exit 1
 fi
 echo 'nfqueue_copy_stats_trace=identical (one truncated packet)'
+
+run_hello_case d2o "$d2o_datapath" '--- d2kd['
+run_hello_case r2o "$r2o_datapath" 'r2o-datapath: TCP-потоки'
+
+c_hello_stats_count=$(grep -Fc -- '--- d2kd[' "$test_tmpdir/r2o-stats-hello-d2o.log" || true)
+r_hello_stats_count=$(grep -Fc 'r2o-datapath: TCP-потоки' "$test_tmpdir/r2o-stats-hello-r2o.log" || true)
+c_hello_count=$(grep -Fc 'узнано приветствий ' "$test_tmpdir/r2o-stats-hello-d2o.log" || true)
+r_hello_count=$(grep -Fc 'r2o-datapath: распознано TCP ClientHello ' "$test_tmpdir/r2o-stats-hello-r2o.log" || true)
+if [ "$c_hello_count" -ne "$c_hello_stats_count" ] || [ "$r_hello_count" -ne "$r_hello_stats_count" ]; then
+    echo "TCP ClientHello totals must appear once per summary: C=$c_hello_count/$c_hello_stats_count Rust=$r_hello_count/$r_hello_stats_count" >&2
+    exit 1
+fi
+c_hello_values=$(grep 'узнано приветствий ' "$test_tmpdir/r2o-stats-hello-d2o.log" | sed -E 's/.*узнано приветствий ([0-9]+), из них с именем ([0-9]+).*/\1 \2/')
+r_hello_values=$(grep 'r2o-datapath: распознано TCP ClientHello ' "$test_tmpdir/r2o-stats-hello-r2o.log" | sed -E 's/.*распознано TCP ClientHello ([0-9]+), из них с именем ([0-9]+).*/\1 \2/')
+if [ "$c_hello_values" != "$r_hello_values" ]; then
+    echo "D2O TCP ClientHello statistics differ from R2O" >&2
+    printf 'C:\n%s\nRust:\n%s\n' "$c_hello_values" "$r_hello_values" >&2
+    exit 1
+fi
+c_hello_periodic=$(grep 'узнано приветствий ' "$test_tmpdir/r2o-stats-hello-d2o.log" | sed '$d' | grep -Fc 'узнано приветствий 1, из них с именем 1' || true)
+r_hello_periodic=$(grep 'распознано TCP ClientHello ' "$test_tmpdir/r2o-stats-hello-r2o.log" | sed '$d' | grep -Fc 'распознано TCP ClientHello 1, из них с именем 1' || true)
+if [ "$c_hello_periodic" -lt 1 ] || [ "$r_hello_periodic" -lt 1 ]; then
+    echo "expected one periodic TCP ClientHello with SNI: C=$c_hello_periodic Rust=$r_hello_periodic" >&2
+    exit 1
+fi
+echo 'tcp_clienthello_stats_trace=identical (one TLS ClientHello with SNI)'
