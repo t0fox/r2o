@@ -64,11 +64,11 @@ while [ ! -S "$WORK/r2o-datapath.sock" ]; do
     sleep 0.05
     attempt=$((attempt + 1))
 done
-ip netns exec "$NS" "$R2OC_BIN" --serve "$WORK/r2o-datapath.sock" "$WORK/catalog.json" \
+ip netns exec "$NS" "$R2OC_BIN" --serve "$WORK/r2o-datapath.sock" "$WORK/catalog.json" --discover \
     >"$WORK/r2o-controller.log" 2>&1 &
 
 attempt=0
-while ! grep -Fq "наблюдение активно" "$WORK/r2o-controller.log"; do
+while ! grep -Fq "наблюдение и автопоиск активны" "$WORK/r2o-controller.log"; do
     if [ "$attempt" -ge 100 ]; then
         cat "$WORK/r2o-datapath.log" "$WORK/r2o-controller.log" >&2
         echo "ОШИБКА: контроллер не подключился к datapath" >&2
@@ -117,4 +117,19 @@ if ! grep -Fq "127.0.0.1:40152 -> 127.0.0.1:443" "$WORK/r2o-controller.log"; the
     echo "ОШИБКА: событие QUIC указало неверное направление клиента" >&2
     exit 1
 fi
-echo "ПРОЙДЕНО: NFQUEUE и контроллер передали QUIC-подозрение после повтора и 2 с молчания"
+if ! grep -Fq "QUIC-проба 127.0.0.1:443 поставлена в общую очередь замеров" "$WORK/r2o-controller.log"; then
+    cat "$WORK/r2o-controller.log" >&2
+    echo "ОШИБКА: контроллер получил QUIC-подозрение, но не поставил Discovery-пробу в очередь" >&2
+    exit 1
+fi
+attempt=0
+while ! grep -Fq "QUIC HTTP/3-проба пропущена: адрес 127.0.0.1 локальный или не является публичной целью" "$WORK/r2o-controller.log"; do
+    if [ "$attempt" -ge 100 ]; then
+        cat "$WORK/r2o-controller.log" >&2
+        echo "ОШИБКА: Discovery поставил пробу в очередь, но worker не обработал её" >&2
+        exit 1
+    fi
+    sleep 0.05
+    attempt=$((attempt + 1))
+done
+echo "ПРОЙДЕНО: NFQUEUE → QUIC-подозрение → очередь Discovery → worker; loopback цель безопасно отклонена"
