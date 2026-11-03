@@ -79,7 +79,7 @@
           "statusLabel": "Частично",
           "group": "Datapath",
           "mapping": "C print_stats/self_cost → Rust QueueSocket counters/runtime diagnostics",
-          "evidence": "D2O a63d964/R2O main: idle timer traces match flow/scheduler/capture/payload/reply/hold; 4 IPv4 NFQUEUE summaries match 9 packets/396 bytes/9 accepted/0 dropped; copy-range 128: truncated=1/no_payload=0/no_header=0. Headerless unit; runtime case open. TLS1.2 SNI one/split traces match; second-segment counters=0,1,1,1. QUIC v1 Initial summaries match 1/1; Rust counts once across late SNI/repeats. Alien-RST summaries match at 0; unit covers repeats. Other non-TCP/session/hold, capture limit/expiry/reorder and nonzero periodic metrics open. Scheduler refusal, ICMP, CPU/RSS, self_cost match."
+          "evidence": "D2O a63d964/R2O main: idle timer traces match flow/scheduler/capture/payload/reply/hold; 4 IPv4 NFQUEUE summaries match 9 packets/396 bytes/9 accepted/0 dropped; copy-range 128: truncated=1/no_payload=0/no_header=0. Headerless unit; runtime case open. TLS1.2 SNI one/split traces match; second-segment counters=0,1,1,1. QUIC v1 Initial summaries match 1/1; Rust counts once across late SNI/repeats. Alien-RST summaries match at 0; unit covers repeats. The live held-packet timeout trace now matches with started=1, released=1, timed_out=1, timed_out_packets=1 and pending=0; the incomplete 7-byte TLS"
         },
         {
           "id": 9,
@@ -669,7 +669,7 @@
       "statusLabel": "Частично",
       "group": "Datapath",
       "mapping": "C print_stats/self_cost → Rust QueueSocket counters/runtime diagnostics",
-      "evidence": "D2O a63d964/R2O main: idle timer traces match flow/scheduler/capture/payload/reply/hold; 4 IPv4 NFQUEUE summaries match 9 packets/396 bytes/9 accepted/0 dropped; copy-range 128: truncated=1/no_payload=0/no_header=0. Headerless unit; runtime case open. TLS1.2 SNI one/split traces match; second-segment counters=0,1,1,1. QUIC v1 Initial summaries match 1/1; Rust counts once across late SNI/repeats. Alien-RST summaries match at 0; unit covers repeats. Other non-TCP/session/hold, capture limit/expiry/reorder and nonzero periodic metrics open. Scheduler refusal, ICMP, CPU/RSS, self_cost match."
+      "evidence": "D2O a63d964/R2O main: idle timer traces match flow/scheduler/capture/payload/reply/hold; 4 IPv4 NFQUEUE summaries match 9 packets/396 bytes/9 accepted/0 dropped; copy-range 128: truncated=1/no_payload=0/no_header=0. Headerless unit; runtime case open. TLS1.2 SNI one/split traces match; second-segment counters=0,1,1,1. QUIC v1 Initial summaries match 1/1; Rust counts once across late SNI/repeats. Alien-RST summaries match at 0; unit covers repeats. The live held-packet timeout trace now matches with started=1, released=1, timed_out=1, timed_out_packets=1 and pending=0; the incomplete 7-byte TLS"
     },
     {
       "id": 9,

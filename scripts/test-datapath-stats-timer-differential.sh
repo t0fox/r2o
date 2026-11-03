@@ -448,3 +448,97 @@ if [ -z "$c_quic_hello_values" ] || [ "$c_quic_hello_values" != "$r_quic_hello_v
     exit 1
 fi
 echo 'quic_clienthello_stats_trace=identical (one named QUIC Initial)'
+
+# Compare a live held-packet timeout in production D2O and R2O processes.
+hold_plan_r2o="$test_tmpdir/r2o-stats-hold.r2op"
+hold_plan_d2o="$test_tmpdir/r2o-stats-hold.d2kp"
+python3 - "$hold_plan_r2o" "$hold_plan_d2o" <<'PY'
+import struct
+import sys
+
+def tlv(kind, value):
+    return struct.pack("!HH", kind, len(value)) + value
+
+records = [
+    tlv(0x0002, b"\x06\x01"),
+    tlv(0x0100, b"\x00\x05\x00\x00"),
+    tlv(0x0109, b"\x01"),
+    tlv(0x010a, b""),
+]
+for magic, path in ((b"R2OP", sys.argv[1]), (b"D2KP", sys.argv[2])):
+    header = magic + struct.pack("!HHHH", 1, 5, 0, len(records))
+    with open(path, "wb") as output:
+        output.write(header + b"".join(records))
+PY
+
+run_hold_timeout_case() {
+    name=$1
+    binary=$2
+    plan=$3
+    log="$test_tmpdir/r2o-stats-hold-$name.log"
+    server_log="$test_tmpdir/r2o-stats-hold-server-$name.log"
+    ready="$test_tmpdir/r2o-stats-hold-$name.ready"
+    server_capture="$test_tmpdir/r2o-stats-hold-$name.payload"
+    rm -f "$log" "$server_log" "$ready" "$server_capture"
+    ip netns exec "$peer_namespace" python3 -c 'import socket,sys; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(("198.51.100.2",443)); s.listen(1); open(sys.argv[1],"w").close(); c,_=s.accept(); payload=c.recv(128); open(sys.argv[2],"wb").write(payload); c.close(); s.close()' "$ready" "$server_capture" >"$server_log" 2>&1 &
+    server_pid=$!
+    attempt=0
+    while [ ! -e "$ready" ]; do
+        if ! kill -0 "$server_pid" 2>/dev/null || [ "$attempt" -ge 50 ]; then cat "$server_log" >&2; exit 1; fi
+        attempt=$((attempt + 1))
+        sleep 0.05
+    done
+    if [ "$name" = d2o ]; then
+        ip netns exec "$namespace" "$binary" --queue "$queue" --mode apply --mark 180001 --plan "$plan" --stats 1 >"$log" 2>&1 &
+    else
+        ip netns exec "$namespace" "$binary" --queue "$queue" --family ipv4 --mode apply --mark 180001 --plan "$plan" --stats 1 >"$log" 2>&1 &
+    fi
+    running_pid=$!
+    sleep 0.3
+    if ! kill -0 "$running_pid" 2>/dev/null; then cat "$log" >&2; exit 1; fi
+    ip netns exec "$namespace" python3 -c 'import socket,sys,time; s=socket.create_connection((sys.argv[1],443),timeout=3); s.sendall(bytes.fromhex("16030300200100")); time.sleep(0.7); s.close()' "$peer_address" &
+    client_pid=$!
+    sleep 0.03
+    if [ -s "$server_capture" ]; then
+        cat "$log" >&2
+        echo "$name released an incomplete ClientHello before the hold timeout" >&2
+        exit 1
+    fi
+    wait "$client_pid"
+    client_pid=
+    sleep 0.5
+    kill -TERM "$running_pid"
+    wait "$running_pid"
+    running_pid=
+    wait "$server_pid" 2>/dev/null || true
+    server_pid=
+    python3 - "$server_capture" <<'PY'
+from pathlib import Path
+import sys
+actual = Path(sys.argv[1]).read_bytes()
+expected = bytes.fromhex("16030300200100")
+if actual != expected:
+    raise SystemExit(f"held packet was not released intact: {actual.hex()}")
+PY
+    count=$(grep -Fc 'составной вход:' "$log" || true)
+    if [ "$count" -lt 2 ]; then cat "$log" >&2; echo "$name missing periodic and shutdown hold summaries" >&2; exit 1; fi
+    hold_line=$(grep 'составной вход:' "$log" | tail -n 1 | sed -E 's/^.*составной вход: //')
+    hold_values=$(printf '%s\n' "$hold_line" | sed -E 's/[^0-9]+/ /g; s/^ +//; s/ +$//')
+    expected_hold_values='1 0 1 1 1 0 0 0 0 0 0 0'
+    if [ "$hold_values" != "$expected_hold_values" ]; then
+        cat "$log" >&2
+        echo "$name hold counters differ: expected=$expected_hold_values actual=$hold_values" >&2
+        exit 1
+    fi
+    printf '%s hold_timeout_stats=%s\n' "$name" "$hold_values"
+}
+
+run_hold_timeout_case d2o "$d2o_datapath" "$hold_plan_d2o"
+run_hold_timeout_case r2o "$r2o_datapath" "$hold_plan_r2o"
+c_hold_values=$(grep 'составной вход:' "$test_tmpdir/r2o-stats-hold-d2o.log" | tail -n 1 | sed -E 's/^.*составной вход: //' | sed -E 's/[^0-9]+/ /g; s/^ +//; s/ +$//')
+r_hold_values=$(grep 'составной вход:' "$test_tmpdir/r2o-stats-hold-r2o.log" | tail -n 1 | sed -E 's/^.*составной вход: //' | sed -E 's/[^0-9]+/ /g; s/^ +//; s/ +$//')
+if [ "$c_hold_values" != "$r_hold_values" ]; then
+    echo "D2O and R2O held-packet timeout statistics differ: C=$c_hold_values Rust=$r_hold_values" >&2
+    exit 1
+fi
+echo 'held_packet_timeout_stats_trace=identical (production IPv4 NFQUEUE processes)'
