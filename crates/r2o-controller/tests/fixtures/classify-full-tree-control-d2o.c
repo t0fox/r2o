@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include <sys/socket.h>
+#include <time.h>
 
 #define main donor_test_repeats_main
 #include "test_repeats.c"
@@ -14,6 +15,7 @@ static int close_after_connections = 6;
 static int force_connect_deadline;
 static int force_first_connect_error;
 static int respond_serverhello;
+static int slow_reply_ms;
 static const char *response_probe_scenario;
 static int response_probe_case;
 static int response_target_attempts;
@@ -214,6 +216,13 @@ int __wrap_close(int fd)
             } else if (!server_clients[i].control) {
                 const uint8_t *reply = respond_serverhello ? serverhello : alert;
                 size_t reply_len = respond_serverhello ? sizeof(serverhello) : sizeof(alert);
+                if (slow_reply_ms > 0) {
+                    struct timespec delay = {
+                        .tv_sec = slow_reply_ms / 1000,
+                        .tv_nsec = (long)(slow_reply_ms % 1000) * 1000000L,
+                    };
+                    (void)nanosleep(&delay, NULL);
+                }
                 (void)send(fd, reply, reply_len, 0);
             }
             break;
@@ -259,6 +268,11 @@ int main(int argc, char **argv)
     } else if (strcmp(argv[1], "baseline-mixed-error") == 0) {
         close_after_connections = 0;
         force_first_connect_error = 1;
+        g_ack_pat = "e";
+    } else if (strcmp(argv[1], "slow-response") == 0) {
+        close_after_connections = 0;
+        respond_serverhello = 1;
+        slow_reply_ms = 5500;
         g_ack_pat = "e";
     } else if (strcmp(argv[1], "baseline-clear") == 0 ||
                strcmp(argv[1], "baseline-clear-progress") == 0 ||
@@ -318,8 +332,8 @@ int main(int argc, char **argv)
         return d2o_cli_main((int)(sizeof(cli_argv) / sizeof(cli_argv[0])), cli_argv);
     }
     options.allow_loopback = 1;
-    options.repeats = 3;
-    options.timeout_ms = 400;
+    options.repeats = strcmp(argv[1], "slow-response") == 0 ? 1 : 3;
+    options.timeout_ms = strcmp(argv[1], "slow-response") == 0 ? 7000 : 400;
     options.write_gap_ms = 2;
     options.long_gap_ms = 10;
     options.no_raw = 1;
@@ -339,6 +353,14 @@ int main(int argc, char **argv)
     trigger.len = sizeof(PAY) - 1;
 
     d2k_classify_run(g_addr, &trigger, &options, &result);
+    if (strcmp(argv[1], "slow-response") == 0) {
+        const char *verdict = result.verdict == D2K_DV_CLEAR ? "accepted" : "rejected";
+        printf("probe_verdict=%s\n", verdict);
+        return result.verdict == D2K_DV_CLEAR && result.probes == 1 &&
+                       accepted_connections == 1
+                   ? 0
+                   : 1;
+    }
     if (response_probe_case) {
         d2k_verdict_t expected_overall =
             strcmp(response_probe_scenario, "blocked") == 0

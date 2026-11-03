@@ -2547,6 +2547,109 @@ mod tests {
     }
 
     #[test]
+    fn measured_tcp_split_wire_packets_match_donor() {
+        let trigger = Trigger {
+            name: "fixture".into(),
+            payload: vec![
+                0x16, 0x03, 0x01, 0x00, 0x08, 0x01, 0x00, 0x00, 0x04, 0x03, 0x03, 0x00, 0x00,
+            ],
+            accept: crate::classify::Accept::Any,
+        };
+        let poison = Poison {
+            name: "tcp-split".into(),
+            split_pos: 5,
+            gap_ms: 20,
+            ..Poison::default()
+        };
+        let plan = crate::classify::plan_for_poison(&poison, &trigger, None, 0).unwrap();
+        let input = build_control_packet(
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2)),
+            41_000,
+            443,
+            0x1234_5678,
+            0x90ab_cdef,
+            TCP_ACK | TCP_PSH,
+            &[],
+            &trigger.payload,
+        )
+        .unwrap();
+        let PacketDecision::Transmit { packets, fate } = decide(&plan, &input) else {
+            panic!("the donor tcp-split plan must produce packets");
+        };
+        assert_eq!(fate, OriginalFate::Drop);
+        assert_eq!(packets.len(), 2);
+        assert_eq!(packets[0].delay_us, 0);
+        assert_eq!(packets[1].delay_us, 20_000);
+        let packet_emissions = packets
+            .iter()
+            .map(|packet| (packet.delay_us, packet.packet.clone()))
+            .collect::<Vec<_>>();
+
+        let mut rows = Vec::new();
+        for packet in packets {
+            let mut bytes = packet.packet;
+            if bytes.len() >= 20 && bytes[0] >> 4 == 4 {
+                bytes[4..6].fill(0);
+                bytes[10..12].fill(0);
+            }
+            let hex = bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            rows.push(format!("RAW_SPLIT_PACKET|{hex}"));
+        }
+        if let Ok(c_output) = std::env::var("R2O_RAW_SPLIT_C_OUTPUT") {
+            let c_rows = std::fs::read_to_string(c_output)
+                .expect("read D2O raw split packet output")
+                .lines()
+                .filter(|line| line.starts_with("RAW_SPLIT_PACKET|"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            assert_eq!(rows, c_rows, "C/Rust production raw split packets differ");
+        }
+        for row in rows {
+            println!("{row}");
+        }
+
+        let cancelled = AtomicBool::new(false);
+        let mut sent = Vec::new();
+        let mut waited_ms = 0u128;
+        let result = emit_plan_packets(
+            packet_emissions,
+            Some(&cancelled),
+            |duration| waited_ms += duration.as_millis(),
+            |packet| {
+                sent.push(packet.to_vec());
+                if sent.len() == 1 {
+                    cancelled.store(true, Ordering::Relaxed);
+                }
+                Ok(())
+            },
+        );
+        let cancel_row = format!(
+            "RAW_SPLIT_CANCEL result=cancelled packets={} waited_ms={waited_ms}",
+            sent.len(),
+        );
+        assert!(matches!(result, Err(ProbeError::Local(error)) if error == "context canceled"));
+        assert_eq!(sent.len(), 1);
+        assert_eq!(waited_ms, 0);
+        if let Ok(c_output) = std::env::var("R2O_RAW_SPLIT_C_OUTPUT") {
+            let c_row = std::fs::read_to_string(c_output)
+                .expect("read D2O between-span cancellation output")
+                .lines()
+                .find(|line| line.starts_with("RAW_SPLIT_CANCEL "))
+                .expect("D2O between-span cancellation result")
+                .to_owned();
+            assert_eq!(
+                cancel_row, c_row,
+                "C/Rust between-span cancellation differs"
+            );
+        }
+        println!("{cancel_row}");
+    }
+
+    #[test]
     fn measured_emission_finishes_an_started_gap_before_observing_cancellation() {
         let trigger = Trigger::tls("probe.example").unwrap();
         let poison = Poison {

@@ -29,6 +29,22 @@ trap 'rm -rf -- "$tmp_dir"' EXIT HUP INT TERM
     "$donor_datapath/wire.c" -Wl,--gc-sections -lpthread
 "$tmp_dir/d2o_raw_emission_cancel_fixture" >"$tmp_dir/c.out"
 
+R2O_RAW_SPLIT_C_OUTPUT="$tmp_dir/c.out" \
+    CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/r2o-target}" \
+    cargo +1.98.0 test -p r2o-controller --locked --offline --lib \
+        measured_tcp_split_wire_packets_match_donor \
+        -- --nocapture >"$tmp_dir/rust-split.out" 2>&1 || {
+        cat "$tmp_dir/c.out"
+        cat "$tmp_dir/rust-split.out"
+        exit 1
+    }
+grep '^RAW_SPLIT_PACKET|' "$tmp_dir/c.out" >"$tmp_dir/c-packets.out"
+grep '^RAW_SPLIT_PACKET|' "$tmp_dir/rust-split.out" >"$tmp_dir/rust-packets.out"
+diff -u "$tmp_dir/c-packets.out" "$tmp_dir/rust-packets.out"
+grep '^RAW_SPLIT_CANCEL ' "$tmp_dir/c.out" >"$tmp_dir/c-split-cancel.out"
+grep '^RAW_SPLIT_CANCEL ' "$tmp_dir/rust-split.out" >"$tmp_dir/rust-split-cancel.out"
+diff -u "$tmp_dir/c-split-cancel.out" "$tmp_dir/rust-split-cancel.out"
+
 R2O_RAW_EMISSION_C_OUTPUT="$tmp_dir/c.out" \
     CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/r2o-target}" \
     cargo +1.98.0 test -p r2o-controller --locked --offline --lib \
@@ -45,4 +61,5 @@ if [ "$c_row" != "$rust_row" ]; then
     printf 'C: %s\nRust: %s\n' "$c_row" "$rust_row" >&2
     exit 1
 fi
+printf 'C/Rust production tcp-split packets match after normalizing IPv4 ID/checksum.\n'
 printf '%s\nC/Rust raw emission cancellation matches d2o %s.\n' "$c_row" "$expected_donor_sha"

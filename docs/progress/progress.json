@@ -91,10 +91,21 @@
           "group": "Datapath",
           "mapping": "D2O TCP/UDP tracking tables → Rust `TcpSessions`/`R2oUdpSessions` и связанные bounded tables",
           "evidence": "Pinned D2O `304ba893dd37197128ac8799c0495b035f6a38c0` and Rust release `03d29dc7516fdad50e8bbd6970c524979d3789d5`; `scripts/test-datapath-high-cardinality-differential.sh` in Debian 13 WSL2: 1536 UDP peers, 60 paced rounds over 60 s plus one registration round (93,696 replies), concurrent 64-KiB TCP echo 12 times (786,432 bytes). Both tables: TCP 1/2048, UDP 1536/2048, refusals 0; NFQUEUE losses 0. VmHWM C 7,624 KiB, Rust 3,924 KiB. Separate Rust IPv6 gateway soak: 300 s/1024 peers. Namespace tests do not calibrate physical-router performance"
+        },
+        {
+          "id": 15,
+          "name": "Connect/read timeout classifier и единственный удвоенный baseline retry",
+          "weight": 1,
+          "points": 1,
+          "status": "verified",
+          "statusLabel": "Эквивалентно",
+          "group": "Datapath",
+          "mapping": "D2O `detect/classify.c::{once_probe,dial_marked,d2k_classify_run}` → R2O `response::{probe_trigger,dial_probe_target}` + `classify::run_with_backend_progress`",
+          "evidence": "`test-classifier-full-tree-control-differential.sh` сверяет connect deadlines C/Rust 400→800 мс и production loopback probes: TLS ServerHello через 5,5 с принимается при настроенном сроке 7 с. R2O передаёт срок classifier напрямую; 5-секундный `core/meas.c::WAIT_CEIL_MS` относится к отдельному `d2k_meas_once`, не к `d2k_classify_run`"
         }
       ],
-      "weight": 12,
-      "points": 8
+      "weight": 13,
+      "points": 9
     },
     {
       "name": "Classifier / TLS",
@@ -108,7 +119,7 @@
           "statusLabel": "Эквивалентно",
           "group": "Classifier / TLS",
           "mapping": "C classifier/compose/verify → `classify`, `raw_probe`, `response`",
-          "evidence": "`r2o-raw-profile-differential.sh`, `r2o-raw-emission-cancel-differential.sh`, `r2o-raw-connect-fallback-differential.sh`, `r2o-fallback-differential.sh`, `r2o-raw-split-support-differential.sh`; подтверждены перечисленные профили и переходы"
+          "evidence": "On pinned D2O `304ba893dd37197128ac8799c0495b035f6a38c0`, `r2o-raw-profile-differential.sh` compares family/ECH SYN options, self-test cache invalidation/recheck, and `white-hello-ts` without client TCP timestamps (`tcp_ts=0`, badsum+ECH decoy, 8 repeats, split=2, matching properties). `r2o-raw-emission-cancel-differential.sh` byte-compares pinned D2O `detect/raw.c::raw_send_plan` tcp-split packets with the R2O production packet builder/emitter; only random IPv4 ID and dependent header checksum are normalized. It also matches cancellation between spans and cancellation during an already-starte"
         },
         {
           "id": 10,
@@ -166,17 +177,6 @@
           "evidence": "`r2o-meas-differential.sh`, `r2o-tls-verify-differential.sh`, `r2o-measured-split-differential.sh`; measured inputs, transport errors and verifier outputs are covered by C/Rust fixtures; `test-http-chunk-framing-differential.sh` also confirms C/Rust agreement when bytes remain buffered after Content-Length completion"
         },
         {
-          "id": 15,
-          "name": "Потолок classifier probe timeout: 5 секунд",
-          "weight": 1,
-          "points": 1,
-          "status": "verified",
-          "statusLabel": "Эквивалентно",
-          "group": "Classifier / TLS",
-          "mapping": "`d2k_meas_once` (`WAIT_CEIL_MS`) → `classify::effective_probe_timeout` → `response::probe_trigger`",
-          "evidence": "`test-classifier-probe-timeout-differential.sh` сравнивает настоящий D2O `d2k_meas` и production Rust `probe_trigger` с ответом через 5,5 с при запросе таймаута 7 с: обе стороны возвращают отклонённую пробу из-за общего потолка 5 с. Выбранный Rust test прошёл на OpenWrt 25.12 QEMU; точное wall-clock совпадение за scheduler jitter не заявляется"
-        },
-        {
           "id": 21,
           "name": "TLS 1.2 reverse-direction response probe and verdicts",
           "weight": 3,
@@ -199,8 +199,8 @@
           "evidence": "`r2o-ech-rx-ladder-differential.sh`, `r2o-layered-rx-differential.sh`; подтверждены сценарии ladder, не все реальные ECH-конфигурации провайдеров"
         }
       ],
-      "weight": 15,
-      "points": 15
+      "weight": 14,
+      "points": 14
     },
     {
       "name": "Discovery",
@@ -614,7 +614,7 @@
       "statusLabel": "Эквивалентно",
       "group": "Classifier / TLS",
       "mapping": "C classifier/compose/verify → `classify`, `raw_probe`, `response`",
-      "evidence": "`r2o-raw-profile-differential.sh`, `r2o-raw-emission-cancel-differential.sh`, `r2o-raw-connect-fallback-differential.sh`, `r2o-fallback-differential.sh`, `r2o-raw-split-support-differential.sh`; подтверждены перечисленные профили и переходы"
+      "evidence": "On pinned D2O `304ba893dd37197128ac8799c0495b035f6a38c0`, `r2o-raw-profile-differential.sh` compares family/ECH SYN options, self-test cache invalidation/recheck, and `white-hello-ts` without client TCP timestamps (`tcp_ts=0`, badsum+ECH decoy, 8 repeats, split=2, matching properties). `r2o-raw-emission-cancel-differential.sh` byte-compares pinned D2O `detect/raw.c::raw_send_plan` tcp-split packets with the R2O production packet builder/emitter; only random IPv4 ID and dependent header checksum are normalized. It also matches cancellation between spans and cancellation during an already-starte"
     },
     {
       "id": 5,
@@ -728,14 +728,14 @@
     },
     {
       "id": 15,
-      "name": "Потолок classifier probe timeout: 5 секунд",
+      "name": "Connect/read timeout classifier и единственный удвоенный baseline retry",
       "weight": 1,
       "points": 1,
       "status": "verified",
       "statusLabel": "Эквивалентно",
-      "group": "Classifier / TLS",
-      "mapping": "`d2k_meas_once` (`WAIT_CEIL_MS`) → `classify::effective_probe_timeout` → `response::probe_trigger`",
-      "evidence": "`test-classifier-probe-timeout-differential.sh` сравнивает настоящий D2O `d2k_meas` и production Rust `probe_trigger` с ответом через 5,5 с при запросе таймаута 7 с: обе стороны возвращают отклонённую пробу из-за общего потолка 5 с. Выбранный Rust test прошёл на OpenWrt 25.12 QEMU; точное wall-clock совпадение за scheduler jitter не заявляется"
+      "group": "Datapath",
+      "mapping": "D2O `detect/classify.c::{once_probe,dial_marked,d2k_classify_run}` → R2O `response::{probe_trigger,dial_probe_target}` + `classify::run_with_backend_progress`",
+      "evidence": "`test-classifier-full-tree-control-differential.sh` сверяет connect deadlines C/Rust 400→800 мс и production loopback probes: TLS ServerHello через 5,5 с принимается при настроенном сроке 7 с. R2O передаёт срок classifier напрямую; 5-секундный `core/meas.c::WAIT_CEIL_MS` относится к отдельному `d2k_meas_once`, не к `d2k_classify_run`"
     },
     {
       "id": 16,

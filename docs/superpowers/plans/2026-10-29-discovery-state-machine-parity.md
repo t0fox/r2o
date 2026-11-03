@@ -56,16 +56,18 @@
 
 ### Task 5: Match classifier and bridge probe branches
 
-- [ ] Differentially test an unplannable accepted poison with failed control and successful neutral ACK; preserve donor Opaque ownership and fallback eligibility.
-- [ ] Differentially test the `white-hello-ts` composite for a ClientHello without TCP timestamps.
-- [ ] Make production connect/read deadlines follow the configured donor timeout, including its one doubled baseline retry.
-- [ ] Make cancellation observable between split spans and while waiting through a split gap.
-- [ ] Match donor raw self-test cache/recheck conditions after local probe errors.
-- [ ] Compare donor raw packet splits with R2O's supported production split path and record an explicit ruling if preserving R2O architecture prevents exact transport parity.
-- [ ] Run classifier, raw-profile, measured-split, and fallback differential suites.
+- [x] Differentially test an unplannable accepted poison with failed control and successful neutral ACK; preserve donor Opaque ownership and fallback eligibility.
+- [x] Differentially test the `white-hello-ts` composite for a ClientHello without TCP timestamps.
+- [x] Make production connect/read deadlines follow the configured donor timeout, including its one doubled baseline retry.
+- [x] Match donor cancellation checkpoints between split spans and across an already-started split gap.
+- [x] Match donor raw self-test cache/recheck conditions after local probe errors.
+- [x] Compare donor raw packet splits with R2O's supported production split path; record whether R2O architecture prevents exact transport parity.
+- [x] Run classifier, raw-profile, measured-split, and fallback differential suites.
 
 ### Task 6: Close out Discovery before other detectors
 
-- [ ] Re-run the full Rust workspace suite, format check, and relevant C/Rust differential scripts.
+- [x] Re-run the full Rust workspace suite, format check, and relevant C/Rust differential scripts.
 - [ ] Review and commit each verified task; push each commit to `origin/main`.
-- [ ] Record remaining findings before moving to network detectors, QUIC, Discord RTC, Telegram, and other services.
+- [x] Record remaining findings before moving to network detectors, QUIC, Discord RTC, Telegram, and other services.
+
+Handoff (2026-11-03): The first P0 matrix row, IPv6 NFQUEUE/fragmentation/route-mark/fail-open/conntrack, remains partial because pinned D2O `datapath/nfq.c` binds only AF_INET and provides no live IPv6 NFQUEUE oracle. Existing Linux netns, OpenWrt ARM64 QEMU, and raw-send evidence cover R2O paths but do not justify a C/Rust IPv6 NFQUEUE equivalence score. The next actionable P0 differential is QUIC/HTTP3 data-stage (matrix row 43): transport-error variants, stall variants, and lifecycle remain open.

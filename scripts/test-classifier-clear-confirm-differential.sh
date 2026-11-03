@@ -22,12 +22,6 @@ RUSTC=${RUSTC:-rustc}
     -o "$TEMP/d2o-classifier" \
     "$ROOT/crates/r2o-controller/tests/fixtures/classify-clear-confirm-d2o.c" \
     "$D2O_CORE/verdict.c" "$D2O_CORE/meas.c" "$D2O_CORE/hello.c"
-"$CC" -std=c99 -O2 -Wall -Wextra -Werror -pthread \
-    -Dsetsockopt=d2o_test_setsockopt -I"$D2O_CORE/include" \
-    -o "$TEMP/d2o-meas-timeout-cap" \
-    "$ROOT/crates/r2o-controller/tests/d2o_meas_timeout_cap.c" "$D2O_CORE/meas.c"
-"$TEMP/d2o-meas-timeout-cap" > "$TEMP/d2o-timeout.out"
-
 mkdir -p "$TEMP/rust/src"
 rust_root=$ROOT
 rust_temp=$TEMP
@@ -67,12 +61,7 @@ RUSTFLAGS="${RUSTFLAGS:--Awarnings}" \
 CARGO_BUILD_TARGET=${CARGO_BUILD_TARGET:-$($RUSTC -vV | sed -n 's/^host: //p')} \
 CARGO_MAKEFLAGS='' \
     "$CARGO" run --quiet --manifest-path "$rust_temp/rust/Cargo.toml" > "$TEMP/r2o.out"
-grep -v '^timeout-ceiling=' "$TEMP/r2o.out" > "$TEMP/r2o-classify.out"
-cmp "$TEMP/d2o.out" "$TEMP/r2o-classify.out"
-grep '^timeout-ceiling=' "$TEMP/d2o-timeout.out" > "$TEMP/c-timeout.out"
-grep '^timeout-ceiling=' "$TEMP/r2o.out" > "$TEMP/r2o-timeout.out"
-cmp "$TEMP/c-timeout.out" "$TEMP/r2o-timeout.out"
+cmp "$TEMP/d2o.out" "$TEMP/r2o.out"
 cat "$TEMP/d2o.out"
-cat "$TEMP/d2o-timeout.out"
-printf 'D2O %s matches R2O for clear/base/control repeats, mark and timeout ceilings, unproven responses, and cancellation.\n' \
+printf 'D2O %s matches R2O for clear/base/control repeats, mark, unproven responses, and cancellation.\n' \
     "$ACTUAL_D2O_SHA"

@@ -73,7 +73,6 @@ fn verdict_name(verdict: Verdict) -> &'static str {
 }
 
 fn main() {
-    let timeout_ceiling = classify::effective_probe_timeout(std::time::Duration::from_secs(7));
     let clear = run_case(vec![Ok(ProbeOutcome::Accepted); 5], None, None);
     let silent = run_case(
         vec![
@@ -212,8 +211,6 @@ fn main() {
         verdict_name(unmarked.verdict),
         unmarked.probes
     );
-    println!("timeout-ceiling={}", timeout_ceiling.as_millis());
-
     assert_eq!(clear.verdict, Verdict::Clear);
     assert_eq!(clear.probes, 5);
     assert_eq!(silent.verdict, Verdict::Flaky);
@@ -234,5 +231,4 @@ fn main() {
     assert_eq!(control_error.probes, 9);
     assert_eq!(unmarked.verdict, Verdict::Inconclusive);
     assert_eq!(unmarked.probes, 5);
-    assert_eq!(timeout_ceiling.as_millis(), 5_000);
 }

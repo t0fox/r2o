@@ -92,6 +92,7 @@ printf 'JSON|match\nCOMPOSE_JSON|match\n' > "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" baseline-mixed-error >> "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" baseline-clear >> "$TEMP/d2o.out"
 "$TEMP/d2o-classifier" baseline-clear-progress >> "$TEMP/d2o.out"
+timeout 15s "$TEMP/d2o-classifier" slow-response > "$TEMP/d2o-probe-timeout.out"
 classifier_json=$TEMP/classifier-d2o.json
 classifier_compose_json=$TEMP/classifier-compose-d2o.json
 if command -v cygpath >/dev/null 2>&1; then
@@ -120,3 +121,14 @@ R2O_TLS_RESPONSE_CLASSIFY_OUTPUT="$TEMP/tls-response-classify-r2o.out" \
     d2o_tls_response_classifier_clear_follow_up_matches_c
 diff -u "$TEMP/tls-response-classify-d2o.out" "$TEMP/tls-response-classify-r2o.out"
 printf 'C/Rust classifier CLEAR follow-up response verdicts match.\n'
+timeout_output=$TEMP/r2o-probe-timeout.out
+if command -v cygpath >/dev/null 2>&1; then
+    timeout_output=$(cygpath -am "$timeout_output")
+fi
+R2O_RESPONSE_TIMEOUT_DIFF_OUTPUT="$timeout_output" \
+    CARGO_TARGET_DIR=$rust_target \
+    "$CARGO" test --manifest-path "$ROOT/Cargo.toml" -p r2o-controller --lib \
+        --locked --offline --target "$build_target" \
+        socket_probe_honors_configured_timeout_beyond_five_seconds -- --nocapture
+diff -u "$TEMP/d2o-probe-timeout.out" "$TEMP/r2o-probe-timeout.out"
+printf 'D2O and R2O production probes both accept a reply within the configured 7-second timeout.\n'
