@@ -778,6 +778,322 @@ fn serve_discover_runs_discord_ip_discovery_in_process_and_closes_cleanly() {
     fs::remove_dir_all(work).unwrap();
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn serve_discover_applies_confirms_persists_and_reapplies_voice_candidate() {
+    use r2k_core::control::{
+        AppliedEvent, BindingContext, COMMAND_DEL_VOICE_ADDR_PROBE, COMMAND_SET_ADDR,
+        COMMAND_SET_VOICE_ADDR, COMMAND_SET_VOICE_ADDR_PROBE, EVENT_APPLIED, EVENT_R2O_VOICE_PROOF,
+        R2oVoiceProofEvent, R2oVoiceProofKind, SHAPE_VOICE,
+    };
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    const MARK: u32 = 291;
+    if !can_set_socket_mark(MARK)
+        || r2o_datapath::raw::RawSocket::open(libc::AF_INET, MARK, None).is_err()
+    {
+        eprintln!("skipping Discovery candidate flow: SO_MARK or CAP_NET_RAW is unavailable");
+        return;
+    }
+
+    let work = temporary_directory();
+    fs::create_dir(&work).unwrap();
+    // WSL DrvFS cannot host AF_UNIX sockets; keep only the ephemeral socket in tmpfs.
+    let socket_root = PathBuf::from("/dev/shm").join(work.file_name().unwrap());
+    fs::create_dir(&socket_root).unwrap();
+    let socket_path = socket_root.join("control.sock");
+    let catalog_path = work.join("catalog.json");
+    fs::write(&catalog_path, br#"{"boxes":[]}"#).unwrap();
+
+    let udp = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    udp.set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    let server_port = udp.local_addr().unwrap().port();
+    let (discovery_done_sender, discovery_done_receiver) = std::sync::mpsc::channel();
+    let discovery = thread::spawn(move || -> Result<(usize, usize), String> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut direct = std::collections::HashMap::<SocketAddr, (usize, Instant)>::new();
+        let mut candidates = std::collections::HashSet::<SocketAddr>::new();
+        let mut request = [0; 2048];
+        loop {
+            if discovery_done_receiver.try_recv().is_ok() {
+                return Ok((direct.len(), candidates.len()));
+            }
+            if Instant::now() >= deadline {
+                return Err("controller did not install a Discovery candidate".into());
+            }
+            let (length, peer) = match udp.recv_from(&mut request) {
+                Ok(packet) => packet,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(format!("UDP receive failed: {error}")),
+            };
+            if length == 20 && r2k_core::stun::is_binding_request(&request[..length]) {
+                candidates.insert(peer);
+                continue;
+            }
+            let candidate_request = length == 74 && request[8..72].iter().any(|byte| *byte != 0);
+            if candidate_request {
+                candidates.insert(peer);
+            }
+            if length != 74
+                || (!r2k_core::stun::is_discord_ip_discovery_request(&request[..length])
+                    && !candidate_request
+                    && !candidates.contains(&peer))
+            {
+                return Err(format!(
+                    "unexpected Discord Discovery request length {length}"
+                ));
+            }
+
+            let answer = if candidates.contains(&peer) {
+                true
+            } else {
+                let entry = direct.entry(peer).or_insert((0, Instant::now()));
+                if entry.1.elapsed() >= Duration::from_millis(500) {
+                    entry.0 = 0;
+                }
+                entry.1 = Instant::now();
+                if entry.0 < 24 {
+                    entry.0 += 1;
+                    true
+                } else {
+                    false
+                }
+            };
+            if answer {
+                let mut response = [0; 74];
+                response[..4].copy_from_slice(&[0, 2, 0, 70]);
+                response[4..8].copy_from_slice(&request[4..8]);
+                let address = b"203.0.113.7";
+                response[8..8 + address.len()].copy_from_slice(address);
+                response[72..74].copy_from_slice(&50_000_u16.to_be_bytes());
+                udp.send_to(&response, peer)
+                    .map_err(|error| format!("UDP response failed: {error}"))?;
+            }
+        }
+    });
+
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let mut flow_key = [0; KEY_LEN];
+    flow_key[0] = 4;
+    flow_key[1..5].copy_from_slice(&[127, 0, 0, 1]);
+    flow_key[17..21].copy_from_slice(&[192, 0, 2, 1]);
+    flow_key[33..35].copy_from_slice(&server_port.to_be_bytes());
+    flow_key[35..37].copy_from_slice(&50_000_u16.to_be_bytes());
+    flow_key[37] = 17;
+    let server = thread::spawn(move || -> Result<[u8; 16], String> {
+        let (mut stream, _) = listener
+            .accept()
+            .map_err(|error| format!("control accept failed: {error}"))?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .map_err(|error| format!("set control timeout failed: {error}"))?;
+        let mut greeting = vec![0; KEY_LEN];
+        greeting[0] = 4;
+        greeting.extend_from_slice(&PROTO_VERSION.to_be_bytes());
+        greeting.extend_from_slice(&65_535_u32.to_be_bytes());
+        greeting.extend_from_slice(&[3, b'd', b'e', b'v']);
+        stream
+            .write_all(&frame(0x000a, &greeting))
+            .map_err(|error| format!("write datapath greeting failed: {error}"))?;
+        let event = r2k_core::control::R2oVoiceSuspectEvent {
+            key: flow_key,
+            client_is_low: false,
+        };
+        stream
+            .write_all(&frame(
+                r2k_core::control::EVENT_R2O_VOICE_SUSPECT,
+                &event.event_body().unwrap(),
+            ))
+            .map_err(|error| format!("write voice event failed: {error}"))?;
+
+        let (kind, body) = read_frame_io(&mut stream)
+            .map_err(|error| format!("wait for Discovery candidate command: {error}"))?;
+        if kind != COMMAND_SET_VOICE_ADDR_PROBE || body.len() < 30 {
+            return Err(format!("expected voice trial command, got {kind:#06x}"));
+        }
+        if body[..4] != [192, 0, 2, 1]
+            || body[4..8] != [127, 0, 0, 1]
+            || u16::from_be_bytes([body[8], body[9]]) != server_port
+        {
+            return Err("voice trial command changed its Discovery target".into());
+        }
+        let plan_records = &body[14..body.len() - 16];
+        let plan = r2k_core::plan::Plan::parse(plan_records)
+            .map_err(|error| format!("invalid voice trial plan: {error}"))?;
+        if plan.transport != 17 || plan.proto != r2k_core::plan::PROTO_VOICE {
+            return Err("Discovery candidate was not installed as a UDP voice plan".into());
+        }
+        let trial_id: [u8; 16] = body[body.len() - 16..]
+            .try_into()
+            .map_err(|_| "invalid trial ID")?;
+        discovery_done_sender
+            .send(())
+            .map_err(|error| format!("stop Discovery fixture: {error}"))?;
+
+        let applied = AppliedEvent {
+            key: flow_key,
+            plan_id: plan.id,
+            trial_id,
+            execution_id: 1,
+            binding: BindingContext {
+                generation: 1,
+                kind: 2,
+                family: 4,
+                shape: SHAPE_VOICE,
+                temporary: true,
+                epoch: [1; 16],
+            },
+        };
+        stream
+            .write_all(&frame(EVENT_APPLIED, &applied.event_body().unwrap()))
+            .map_err(|error| format!("write exact APPLIED event failed: {error}"))?;
+        let proof = R2oVoiceProofEvent {
+            key: flow_key,
+            trial_id,
+            proof: R2oVoiceProofKind::DiscordDiscovery {
+                mapped_ip: Ipv4Addr::new(203, 0, 113, 7),
+                mapped_port: 50_000,
+            },
+        };
+        stream
+            .write_all(&frame(EVENT_R2O_VOICE_PROOF, &proof.event_body().unwrap()))
+            .map_err(|error| format!("write Discovery proof event failed: {error}"))?;
+
+        let (kind, body) = read_frame(&mut stream);
+        if kind != COMMAND_SET_VOICE_ADDR || body[..4] != [127, 0, 0, 1] {
+            return Err(format!("expected permanent voice command, got {kind:#06x}"));
+        }
+        let permanent_plan = r2k_core::plan::Plan::parse(&body[4..])
+            .map_err(|error| format!("invalid permanent voice plan: {error}"))?;
+        if permanent_plan.id != plan.id {
+            return Err("permanent plan ID differs from the tested candidate".into());
+        }
+        stream
+            .write_all(&r2k_core::control::encode_ack(COMMAND_SET_VOICE_ADDR, true, 0).unwrap())
+            .map_err(|error| format!("ack permanent voice plan failed: {error}"))?;
+
+        let (kind, body) = read_frame(&mut stream);
+        if kind != COMMAND_DEL_VOICE_ADDR_PROBE || body.len() < 26 {
+            return Err(format!("expected trial removal command, got {kind:#06x}"));
+        }
+        if body[4..8] != [127, 0, 0, 1] || body[8..10] != server_port.to_be_bytes() {
+            return Err("trial removal command changed its target".into());
+        }
+        stream
+            .write_all(
+                &r2k_core::control::encode_ack_for_trial(
+                    COMMAND_DEL_VOICE_ADDR_PROBE,
+                    true,
+                    0,
+                    Some(trial_id),
+                )
+                .unwrap(),
+            )
+            .map_err(|error| format!("ack trial removal failed: {error}"))?;
+        Ok(plan.id)
+    });
+
+    let output = Command::new(env!("CARGO_BIN_EXE_r2o-controller"))
+        .args([
+            "--serve",
+            socket_path.to_str().unwrap(),
+            catalog_path.to_str().unwrap(),
+            "--discover",
+            "--mark",
+            "291",
+        ])
+        .output()
+        .unwrap();
+    let server_result = server.join().unwrap();
+    let discovery_result = discovery.join().unwrap();
+    assert!(
+        output.status.success(),
+        "r2o-controller voice Discovery failed; stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let applied_plan_id = server_result.unwrap_or_else(|error| {
+        panic!(
+            "Discovery control fixture failed: {error}; stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    let (direct_flows, candidate_flows) = discovery_result.unwrap_or_else(|error| {
+        panic!(
+            "Discovery UDP fixture failed: {error}; stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    assert_eq!(direct_flows, 3, "all three direct cutoffs must be measured");
+    assert_eq!(
+        candidate_flows, 3,
+        "all three candidate repeats must be sent"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("Ответ Discord Discovery подтверждён"),
+        "controller did not report confirmation: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let persisted = fs::read_to_string(&catalog_path).unwrap();
+    let plan_id_hex: String = applied_plan_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert!(persisted.contains(&plan_id_hex));
+    assert!(persisted.contains("127.0.0.1"));
+
+    let reapply_socket = socket_root.join("reapply.sock");
+    let reapply_listener = UnixListener::bind(&reapply_socket).unwrap();
+    let reapply_server = thread::spawn(move || {
+        let (mut stream, _) = reapply_listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut greeting = vec![0; KEY_LEN];
+        greeting[0] = 4;
+        greeting.extend_from_slice(&PROTO_VERSION.to_be_bytes());
+        greeting.extend_from_slice(&65_535_u32.to_be_bytes());
+        greeting.extend_from_slice(&[3, b'd', b'e', b'v']);
+        stream.write_all(&frame(0x000a, &greeting)).unwrap();
+        let (kind, body) = read_frame(&mut stream);
+        assert_eq!(kind, COMMAND_SET_ADDR);
+        assert_eq!(body[0], 4);
+        assert_eq!(body[1..5], [127, 0, 0, 1]);
+        assert_eq!(body[17], SHAPE_VOICE);
+        let plan = r2k_core::plan::Plan::parse(&body[18..]).unwrap();
+        assert_eq!(plan.id, applied_plan_id);
+        stream
+            .write_all(&r2k_core::control::encode_ack(COMMAND_SET_ADDR, true, 0).unwrap())
+            .unwrap();
+    });
+    let reapply = Command::new(env!("CARGO_BIN_EXE_r2o-controller"))
+        .args([
+            "--apply-catalog",
+            reapply_socket.to_str().unwrap(),
+            catalog_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        reapply.status.success(),
+        "r2o-controller catalog reapply failed: {}",
+        String::from_utf8_lossy(&reapply.stderr)
+    );
+    reapply_server.join().unwrap();
+    fs::remove_dir_all(socket_root).unwrap();
+    fs::remove_dir_all(work).unwrap();
+}
+
 #[test]
 fn set_name_does_not_send_when_the_datapath_wire_version_is_mismatched() {
     let work = temporary_directory();
@@ -1188,6 +1504,22 @@ fn temporary_directory_paths_are_unique_under_parallel_calls() {
 fn frame(kind: u16, body: &[u8]) -> Vec<u8> {
     let length = u32::try_from(body.len() + 2).unwrap();
     [length.to_be_bytes().as_slice(), &kind.to_be_bytes(), body].concat()
+}
+
+fn read_frame_io(stream: &mut UnixStream) -> std::io::Result<(u16, Vec<u8>)> {
+    let mut header = [0; 6];
+    stream.read_exact(&mut header)?;
+    let length = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
+    if !(2..=65_536).contains(&length) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid control frame length",
+        ));
+    }
+    let kind = u16::from_be_bytes(header[4..6].try_into().unwrap());
+    let mut body = vec![0; length - 2];
+    stream.read_exact(&mut body)?;
+    Ok((kind, body))
 }
 
 fn read_frame(stream: &mut UnixStream) -> (u16, Vec<u8>) {
