@@ -9502,3 +9502,8 @@ D2O was built from pinned main a63d964. The R2O production release binary on E: 
 CI run #387 (41571954724) exposed a race in the test fixture: the TCP server created the first-payload marker before flushing its timestamp, so the client occasionally read an empty file. The helper now writes a sibling temporary file and publishes it with `os.replace`, making marker visibility atomic; production datapath behavior was unchanged.
 
 Shell syntax and ShellCheck passed. The complete Debian 13 WSL2 C/Rust production-process scenario passed four times after the change, including the held 40-byte TLS prefix, EIO recovery, 32 SNAT echoes per daemon, and matching 33/33 queue counter deltas. Logs are under `/mnt/e/r2o-tooling/tests/r2o-nfq-ipv4-eio-nat-racefix-2026-11-03*.log`. CI confirmation for the fix is pending. No parity points changed (62/87, 71.26%).
+
+
+### QUIC HTTP/3 data-stage revalidation on current main — 2026-11-03
+
+The pinned D2O a63d964 / R2O 8f409f6 full-stage differential passed 15/15 in 122.72 seconds in Debian 13 WSL2. This includes the task deadline, repeated GET budget, response growth, >16 MiB body, stream reset, close, silent peer, UDP port unreachable, dropped replies, GOAWAY, and the zero-bidi-credit request counter. The current matrix row remains partial because other transport-error, stall-variant, and lifecycle cases are still open; no points changed.
