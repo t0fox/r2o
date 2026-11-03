@@ -1,4 +1,4 @@
-use crate::capture::{CaptureResult, CaptureStats, CaptureTable, CAPTURE_WINDOW};
+use crate::capture::{CAPTURE_WINDOW, CaptureResult, CaptureStats, CaptureTable};
 use r2k_core::control::{
     KEY_LEN, R2oTcpFinRetryEvent, R2oTcpRstAfterAppEvent, R2oTcpSilenceEvent, R2oTcpStallEvent,
 };
@@ -2527,7 +2527,12 @@ mod tests {
 
         let stats = sessions.r2o_tcp_capture_stats();
         assert_eq!(
-            (stats.tls_completed, stats.tls_rejected, stats.tls_expired, stats.tls_full),
+            (
+                stats.tls_completed,
+                stats.tls_rejected,
+                stats.tls_expired,
+                stats.tls_full
+            ),
             (0, 0, 1, 0)
         );
     }
