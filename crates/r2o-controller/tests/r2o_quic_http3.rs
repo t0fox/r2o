@@ -1512,6 +1512,7 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                             | "/content-length"
                             | "/content-length-open"
                             | "/incomplete-over-threshold"
+                            | "/oversized-headers"
                             | "/stream-reset"
                             | "/stream-reset-no-error"
                             | "/stream-reset-after-headers"
@@ -1562,7 +1563,12 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                         break;
                     }
                     let response = http::Response::builder().status(status);
-                    let response = if path == "/no-content" {
+                    let response = if path == "/oversized-headers" {
+                        response.header(
+                            "x-large-header",
+                            http::HeaderValue::from_bytes(&vec![b'~'; 70 * 1024]).unwrap(),
+                        )
+                    } else if path == "/no-content" {
                         response
                     } else {
                         response.header(http::header::CONTENT_LENGTH, content_length)
@@ -2068,6 +2074,70 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
         early_c_field("requests").parse::<u32>().unwrap(),
         early_rust_result.requests,
         "D2O={early_c_result} R2O={early_rust_result:?}"
+    );
+
+    let oversized_c_binary = d2o_binary.clone();
+    let oversized_c_address = server_address;
+    let oversized_c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(oversized_c_binary)
+            .args([
+                "127.0.0.1",
+                &oversized_c_address.port().to_string(),
+                "localhost",
+                "/oversized-headers",
+                "0",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    let oversized_c_result = String::from_utf8(oversized_c_output.stdout).unwrap();
+    let oversized_c_field = |name: &str| {
+        oversized_c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {oversized_c_result}"))
+    };
+    assert_eq!(
+        oversized_c_field("verdict"),
+        "NotRun",
+        "D2O={oversized_c_result}"
+    );
+
+    let oversized_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    oversized_socket.connect(server_address).unwrap();
+    let mut oversized_roots = RootCertStore::empty();
+    oversized_roots.add(certificate_der.clone()).unwrap();
+    let oversized_rust_result = r2o_quic_http3_get(
+        oversized_socket,
+        server_address,
+        "localhost",
+        "/oversized-headers",
+        Duration::from_secs(5),
+        oversized_roots,
+    )
+    .await;
+    let oversized_rust_verdict =
+        r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&oversized_rust_result);
+    assert_eq!(
+        oversized_rust_result.status, 0,
+        "R2O accepted an oversized HTTP/3 field section: {oversized_rust_result:?}"
+    );
+    assert!(oversized_rust_result.error.is_some());
+    assert!(!oversized_rust_result.r2o_quic_stalled);
+    assert_eq!(format!("{oversized_rust_verdict:?}"), "NotRun");
+    // D2O stops at its raw 64 KiB buffer; h3 consumes and rejects the field section before the byte counter observes it.
+    assert_eq!(
+        oversized_c_field("requests").parse::<u32>().unwrap(),
+        oversized_rust_result.requests,
+        "D2O={oversized_c_result} R2O={oversized_rust_result:?}"
+    );
+    assert_eq!(oversized_rust_result.requests, 1);
+    assert_ne!(
+        oversized_c_field("app_bytes").parse::<u64>().unwrap(),
+        oversized_rust_result.app_bytes,
+        "the over-limit app_bytes gap is documented, not claimed as parity"
     );
 
     let incomplete_c_binary = d2o_binary.clone();

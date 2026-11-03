@@ -14,6 +14,7 @@ use rustls::RootCertStore;
 
 pub const R2O_QUIC_HTTP3_DEFAULT_BUDGET_PACKETS: u32 = 25;
 const R2O_QUIC_RECENT_PORTS: usize = 4096;
+const R2O_QUIC_HTTP3_HEADER_LIMIT: u64 = 65_536;
 const R2O_QUIC_FRESH_PORT_TRIES: usize = 16;
 const R2O_QUIC_RESIDUAL_PORT_AGE: Duration = Duration::from_secs(480);
 
@@ -935,9 +936,11 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
         connection: connection.clone(),
         app_bytes: Arc::clone(&app_bytes),
     };
+    let mut h3_client = h3::client::builder();
+    h3_client.max_field_section_size(R2O_QUIC_HTTP3_HEADER_LIMIT);
     let (mut driver, mut send_request) = match tokio::time::timeout(
         r2o_quic_http3_bounded_timeout(timeout, deadline),
-        h3::client::new(h3_connection),
+        h3_client.build(h3_connection),
     )
     .await
     {
