@@ -43,71 +43,94 @@ fn matches_d2o_http_header_and_chunk_framing() {
     line_over_limit.extend_from_slice(&[b'a'; 126]);
     line_over_limit.extend_from_slice(b"\r\nx\r\n0\r\n\r\n");
 
-    let cases: [(&str, Vec<u8>, bool, u64); 11] = [
+    let cases: [(&str, u16, Vec<u8>, bool, u64); 13] = [
         (
             "extension_suffix",
+            200,
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;foo=\"unterminated\r\nx\r\n0\r\n\r\n".to_vec(),
             true,
             1,
         ),
         (
             "trailer_without_colon",
+            200,
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nnot-a-field\r\n\r\n".to_vec(),
             true,
             0,
         ),
         (
             "colonless_header",
+            200,
             b"HTTP/1.1 200 OK\r\nMalformed Header\r\nContent-Length: 1\r\n\r\nx".to_vec(),
             true,
             1,
         ),
         (
             "control_extension",
+            200,
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;foo=\x01\r\nx\r\n0\r\n\r\n".to_vec(),
             true,
             1,
         ),
         (
             "control_chunk_size",
+            200,
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\x01\r\nx\r\n0\r\n\r\n".to_vec(),
             false,
             0,
         ),
         (
             "buffered_bytes_after_frame",
+            200,
             b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\nextra".to_vec(),
             true,
             0,
         ),
         (
             "control_header_value",
+            200,
             b"HTTP/1.1 200 OK\r\nX: foo\x01bar\r\nContent-Length: 0\r\n\r\n".to_vec(),
             true,
             0,
         ),
         (
             "control_trailer",
+            200,
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX: foo\x01bar\r\n\r\n".to_vec(),
             true,
             0,
         ),
         (
             "nul_first_trailer",
+            200,
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\0ignored\r\n".to_vec(),
             true,
             0,
         ),
-        ("chunk_line_at_limit", line_at_limit, true, 1),
-        ("chunk_line_over_limit", line_over_limit, false, 0),
+        (
+            "bodyless_204_buffered",
+            204,
+            b"HTTP/1.1 204 No Content\r\nContent-Length: 4\r\n\r\nbody".to_vec(),
+            true,
+            0,
+        ),
+        (
+            "bodyless_304_buffered",
+            304,
+            b"HTTP/1.1 304 Not Modified\r\nTransfer-Encoding: chunked\r\n\r\nnot-a-chunk".to_vec(),
+            true,
+            0,
+        ),
+        ("chunk_line_at_limit", 200, line_at_limit, true, 1),
+        ("chunk_line_over_limit", 200, line_over_limit, false, 0),
     ];
     let mut output = String::new();
-    for (name, bytes, expected_complete, expected_body_bytes) in cases {
+    for (name, expected_status, bytes, expected_complete, expected_body_bytes) in cases {
         let mut response = HttpResponseParser::new(false);
         response.feed(&bytes, false);
         assert_eq!(response.is_complete(), expected_complete, "{name}");
         assert_eq!(response.is_invalid(), !expected_complete, "{name}");
-        assert_eq!(response.status(), 200, "{name}");
+        assert_eq!(response.status(), expected_status, "{name}");
         assert_eq!(response.body_bytes(), expected_body_bytes, "{name}");
         output.push_str(&format!(
             "{name} status={} complete={} body_bytes={}\n",
@@ -131,6 +154,8 @@ fn matches_d2o_http_header_and_chunk_framing() {
          control_header_value status=200 complete=1 body_bytes=0\n\
          control_trailer status=200 complete=1 body_bytes=0\n\
          nul_first_trailer status=200 complete=1 body_bytes=0\n\
+         bodyless_204_buffered status=204 complete=1 body_bytes=0\n\
+         bodyless_304_buffered status=304 complete=1 body_bytes=0\n\
          chunk_line_at_limit status=200 complete=1 body_bytes=1\n\
          chunk_line_over_limit status=200 complete=0 body_bytes=0\n"
     );

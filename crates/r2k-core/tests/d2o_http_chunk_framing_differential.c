@@ -16,6 +16,7 @@ typedef struct {
     const char *name;
     const uint8_t *input;
     size_t input_len;
+    int expected_status;
     int expected_complete;
     uint64_t expected_body_bytes;
 } test_case;
@@ -77,19 +78,28 @@ int main(void)
     static const uint8_t nul_first_trailer[] =
         "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
         "0\r\n\000ignored\r\n";
+    static const uint8_t bodyless_204_buffered[] =
+        "HTTP/1.1 204 No Content\r\nContent-Length: 4\r\n\r\nbody";
+    static const uint8_t bodyless_304_buffered[] =
+        "HTTP/1.1 304 Not Modified\r\nTransfer-Encoding: chunked\r\n\r\nnot-a-chunk";
     const test_case cases[] = {
-        { "extension_suffix", extension, sizeof(extension) - 1, 1, 1 },
-        { "trailer_without_colon", trailer, sizeof(trailer) - 1, 1, 0 },
-        { "colonless_header", colonless_header, sizeof(colonless_header) - 1, 1, 1 },
-        { "control_extension", control_extension, sizeof(control_extension) - 1, 1, 1 },
-        { "control_chunk_size", control_chunk_size, sizeof(control_chunk_size) - 1, 0, 0 },
+        { "extension_suffix", extension, sizeof(extension) - 1, 200, 1, 1 },
+        { "trailer_without_colon", trailer, sizeof(trailer) - 1, 200, 1, 0 },
+        { "colonless_header", colonless_header, sizeof(colonless_header) - 1, 200, 1, 1 },
+        { "control_extension", control_extension, sizeof(control_extension) - 1, 200, 1, 1 },
+        { "control_chunk_size", control_chunk_size, sizeof(control_chunk_size) - 1, 200, 0, 0 },
         { "buffered_bytes_after_frame", buffered_bytes_after_frame,
-          sizeof(buffered_bytes_after_frame) - 1, 1, 0 },
-        { "control_header_value", control_header_value, sizeof(control_header_value) - 1, 1, 0 },
-        { "control_trailer", control_trailer, sizeof(control_trailer) - 1, 1, 0 },
-        { "nul_first_trailer", nul_first_trailer, sizeof(nul_first_trailer) - 1, 1, 0 },
-        { "chunk_line_at_limit", line_at_limit, prefix_len + 125 + suffix_len, 1, 1 },
-        { "chunk_line_over_limit", line_over_limit, prefix_len + 126 + suffix_len, 0, 0 },
+          sizeof(buffered_bytes_after_frame) - 1, 200, 1, 0 },
+        { "control_header_value", control_header_value, sizeof(control_header_value) - 1,
+          200, 1, 0 },
+        { "control_trailer", control_trailer, sizeof(control_trailer) - 1, 200, 1, 0 },
+        { "nul_first_trailer", nul_first_trailer, sizeof(nul_first_trailer) - 1, 200, 1, 0 },
+        { "bodyless_204_buffered", bodyless_204_buffered,
+          sizeof(bodyless_204_buffered) - 1, 204, 1, 0 },
+        { "bodyless_304_buffered", bodyless_304_buffered,
+          sizeof(bodyless_304_buffered) - 1, 304, 1, 0 },
+        { "chunk_line_at_limit", line_at_limit, prefix_len + 125 + suffix_len, 200, 1, 1 },
+        { "chunk_line_over_limit", line_over_limit, prefix_len + 126 + suffix_len, 200, 0, 0 },
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -103,7 +113,8 @@ int main(void)
         printf("%s status=%d complete=%d body_bytes=%llu\n", cases[i].name,
                response.status, response.complete,
                (unsigned long long)response.body_bytes);
-        if (response.status != 200 || response.complete != cases[i].expected_complete ||
+        if (response.status != cases[i].expected_status ||
+            response.complete != cases[i].expected_complete ||
             response.body_bytes != cases[i].expected_body_bytes) {
             fprintf(stderr, "%s differs in C fixture: %s\n", cases[i].name, err);
             return 1;
