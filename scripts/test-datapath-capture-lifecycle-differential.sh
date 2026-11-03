@@ -23,10 +23,10 @@ trap 'rm -rf -- "$r2o_capture_tmp"' EXIT HUP INT TERM
     "$D2O_ROOT/datapath/capture.c"
 "$r2o_capture_tmp/d2o-capture-lifecycle" >"$r2o_capture_tmp/c.out"
 
-cargo +1.98.0 test --locked -p r2o-datapath --lib \
-    capture::tests::capture_lifecycle_traces_match_d2o -- --exact --nocapture \
+RUST_TEST_THREADS=1 cargo +1.98.0 test --locked -p r2o-datapath --lib \
+    capture::tests::capture_ -- --nocapture \
     >"$r2o_capture_tmp/rust.log"
 sed -n 's/^TRACE //p' "$r2o_capture_tmp/rust.log" >"$r2o_capture_tmp/rust.out"
 diff -u "$r2o_capture_tmp/c.out" "$r2o_capture_tmp/rust.out"
 cat "$r2o_capture_tmp/c.out"
-printf '%s\n' 'D2O/R2O capture lifecycle traces match for reordered reassembly, absolute TTL and full-table reuse.'
+printf '%s\n' 'D2O/R2O capture lifecycle traces match for reordered reassembly, absolute TTL, full-table reuse and size boundary.'

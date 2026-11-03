@@ -27,17 +27,17 @@ static d2k_key key(uint16_t port) {
     return flow;
 }
 
-static void hello(uint8_t bytes[32]) {
-    for (size_t i = 0; i < 32; i++) { bytes[i] = (uint8_t)i; }
+static void hello(uint8_t *bytes, size_t len) {
+    for (size_t i = 0; i < len; i++) { bytes[i] = (uint8_t)i; }
     bytes[0] = 22;
     bytes[1] = 3;
     bytes[2] = 1;
-    bytes[3] = 0;
-    bytes[4] = 27;
+    bytes[3] = (uint8_t)((len - 5) >> 8);
+    bytes[4] = (uint8_t)(len - 5);
     bytes[5] = 1;
     bytes[6] = 0;
-    bytes[7] = 0;
-    bytes[8] = 23;
+    bytes[7] = (uint8_t)((len - 9) >> 8);
+    bytes[8] = (uint8_t)(len - 9);
 }
 
 static uint64_t hash_bytes(const uint8_t *bytes, size_t len) {
@@ -63,7 +63,7 @@ static void reordered(void) {
     const uint8_t *result = NULL;
     size_t result_len = 0;
     uint32_t result_seq = 0;
-    hello(bytes);
+    hello(bytes, sizeof bytes);
 
     int first = feed(&capture, &flow, 1, 116, 100, 1, bytes + 16, 16,
                      &result, &result_len, &result_seq);
@@ -91,7 +91,7 @@ static void expires_at_absolute_ttl(void) {
     const uint8_t *result = NULL;
     size_t result_len = 0;
     uint32_t result_seq = 0;
-    hello(bytes);
+    hello(bytes, sizeof bytes);
 
     int first = feed(&capture, &flow, 1, 100, 0, 0, bytes, 1,
                      &result, &result_len, &result_seq);
@@ -114,7 +114,7 @@ static void refuses_without_evicting_and_reuses_expired_slot(void) {
     const uint8_t *result = NULL;
     size_t result_len = 0;
     uint32_t result_seq = 0;
-    hello(bytes);
+    hello(bytes, sizeof bytes);
 
     for (size_t i = 0; i < D2K_CAPTURE_SLOTS; i++) {
         d2k_key flow = key((uint16_t)(1000 + i));
@@ -143,9 +143,42 @@ static void refuses_without_evicting_and_reuses_expired_slot(void) {
            capture.completed, capture.rejected, capture.expired, capture.full);
 }
 
+
+static void size_limit(void) {
+    d2k_capture capture = {0};
+    d2k_key flow = key(1234);
+    uint8_t bytes[D2K_CAPTURE_BYTES + 1];
+    const uint8_t *result = NULL;
+    size_t result_len = 0;
+    uint32_t result_seq = 0;
+    hello(bytes, D2K_CAPTURE_BYTES);
+
+    int max_result = feed(&capture, &flow, 1, 100, 0, 0, bytes,
+                          D2K_CAPTURE_BYTES, &result, &result_len, &result_seq);
+    CHECK(max_result == 1 && result && result_seq == 100);
+    CHECK(result_len == D2K_CAPTURE_BYTES);
+    CHECK(memcmp(result, bytes, result_len) == 0);
+    CHECK(capture.completed == 1 && capture.rejected == 0);
+    printf("limit max hash=%016" PRIx64 " result=%d len=%zu completed=%" PRIu64
+           " rejected=%" PRIu64 "\n",
+           hash_bytes(bytes, D2K_CAPTURE_BYTES), max_result, result_len,
+           capture.completed, capture.rejected);
+
+    memset(&capture, 0, sizeof capture);
+    hello(bytes, sizeof bytes);
+    int over_result = feed(&capture, &flow, 1, 100, 0, 0, bytes, sizeof bytes,
+                           &result, &result_len, &result_seq);
+    CHECK(over_result == -1 && capture.completed == 0 && capture.rejected == 1);
+    printf("limit over hash=%016" PRIx64 " result=%d len=%zu completed=%" PRIu64
+           " rejected=%" PRIu64 "\n",
+           hash_bytes(bytes, sizeof bytes), over_result, sizeof bytes,
+           capture.completed, capture.rejected);
+}
+
 int main(void) {
     reordered();
     expires_at_absolute_ttl();
     refuses_without_evicting_and_reuses_expired_slot();
+    size_limit();
     return 0;
 }

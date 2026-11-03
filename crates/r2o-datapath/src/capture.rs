@@ -1096,6 +1096,53 @@ mod tests {
         );
     }
     #[test]
+    fn capture_size_limit_traces_match_d2o() {
+        let hash = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .fold(14_695_981_039_346_656_037_u64, |hash, byte| {
+                    (hash ^ u64::from(*byte)).wrapping_mul(1_099_511_628_211)
+                })
+        };
+        let start = Instant::now();
+        let max_hello = hello(CAPTURE_BYTES);
+        let mut capture = CaptureTable::default();
+        let max_result = capture.feed(key(1234), 1, start, 100, None, &max_hello);
+        let status = |result: &CaptureResult| match result {
+            CaptureResult::Ignored | CaptureResult::Incomplete => 0,
+            CaptureResult::Complete { .. } => 1,
+            CaptureResult::Rejected => -1,
+            CaptureResult::Full => -2,
+        };
+        let max_status = status(&max_result);
+        complete(max_result, 100, &max_hello);
+        let stats = capture.stats();
+        assert_eq!((stats.completed, stats.rejected), (1, 0));
+        println!(
+            "TRACE limit max hash={:016x} result={} len={} completed={} rejected={}",
+            hash(&max_hello),
+            max_status,
+            max_hello.len(),
+            stats.completed,
+            stats.rejected
+        );
+
+        let over_hello = hello(CAPTURE_BYTES + 1);
+        let mut capture = CaptureTable::default();
+        let over_result = capture.feed(key(1234), 1, start, 100, None, &over_hello);
+        assert_eq!(over_result, CaptureResult::Rejected);
+        let stats = capture.stats();
+        assert_eq!((stats.completed, stats.rejected), (0, 1));
+        println!(
+            "TRACE limit over hash={:016x} result={} len={} completed={} rejected={}",
+            hash(&over_hello),
+            status(&over_result),
+            over_hello.len(),
+            stats.completed,
+            stats.rejected
+        );
+    }
+    #[test]
     fn absolute_ttl_expires_a_capture_despite_retransmissions() {
         let hello = hello(32);
         let start = Instant::now();
