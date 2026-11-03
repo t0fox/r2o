@@ -139,6 +139,60 @@ run_traffic_case() {
     if [ "$count" -lt 2 ]; then cat "$log"; exit 1; fi
 }
 
+run_capture_expiry_case() {
+    name=$1
+    binary=$2
+    log="$test_tmpdir/r2o-stats-capture-expiry-$name.log"
+    server_log="$test_tmpdir/r2o-stats-capture-expiry-server-$name.log"
+    ready="$test_tmpdir/r2o-stats-capture-expiry-$name.ready"
+    server_capture="$test_tmpdir/r2o-stats-capture-expiry-$name.payload"
+    rm -f "$log" "$server_log" "$ready" "$server_capture"
+    ip netns exec "$peer_namespace" python3 -c 'import socket,sys; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(("198.51.100.2",443)); s.listen(1); open(sys.argv[1],"w").close(); c,_=s.accept(); payload=bytearray();
+while True:
+ chunk=c.recv(128)
+ if not chunk: break
+ payload.extend(chunk)
+open(sys.argv[2],"wb").write(payload); c.close(); s.close()' "$ready" "$server_capture" >"$server_log" 2>&1 &
+    server_pid=$!
+    attempt=0
+    while [ ! -e "$ready" ]; do
+        if ! kill -0 "$server_pid" 2>/dev/null || [ "$attempt" -ge 50 ]; then cat "$server_log" >&2; exit 1; fi
+        attempt=$((attempt + 1))
+        sleep 0.05
+    done
+    ip netns exec "$namespace" "$binary" --queue "$queue" --mode observe --stats 1 >"$log" 2>&1 &
+    running_pid=$!
+    sleep 0.3
+    if ! kill -0 "$running_pid" 2>/dev/null; then cat "$log" >&2; exit 1; fi
+    ip netns exec "$namespace" python3 -c 'import socket,sys,time; s=socket.create_connection((sys.argv[1],443),timeout=3); s.setsockopt(socket.IPPROTO_TCP,socket.TCP_NODELAY,1); s.sendall(bytes.fromhex("1603010020")); time.sleep(5.2); s.sendall(b"\x01"); s.close()' "$peer_address"
+    wait "$server_pid"
+    server_pid=
+    python3 - "$server_capture" <<'PY'
+from pathlib import Path
+import sys
+actual = Path(sys.argv[1]).read_bytes()
+expected = bytes.fromhex("160301002001")
+if actual != expected:
+    raise SystemExit(f"incomplete TLS record did not reach the peer intact: {actual.hex()}")
+PY
+    sleep 0.2
+    kill -TERM "$running_pid"
+    wait "$running_pid"
+    running_pid=
+    c_values=$(grep 'снимки TCP:' "$log" | tail -n 1 | sed -E 's/.*полных=([0-9]+) отвергнутых=([0-9]+) истекших=([0-9]+) отказов ёмкости=([0-9]+).*/\1 \2 \3 \4/')
+    r_values=$(grep 'снимки TLS/TCP:' "$log" | tail -n 1 | sed -E 's/.*завершено ([0-9]+), отклонено ([0-9]+), истекло ([0-9]+), отказов ёмкости ([0-9]+).*/\1 \2 \3 \4/')
+    if [ "$c_values" != '0 0 1 0' ] || [ "$r_values" != '0 0 1 0' ]; then
+        cat "$log" >&2
+        echo "$name capture expiry counters differ: C=$c_values Rust=$r_values" >&2
+        exit 1
+    fi
+    printf '%s capture_expiry_stats=%s\n' "$name" "$c_values"
+}
+
+run_capture_expiry_case d2o "$d2o_datapath"
+run_capture_expiry_case r2o "$r2o_datapath"
+echo 'tcp_capture_expiry_periodic_stats_trace=identical (production IPv4 NFQUEUE processes)'
+
 run_case d2o "$d2o_datapath" '--- d2kd['
 run_case r2o "$r2o_datapath" 'r2o-datapath: TCP'
 
