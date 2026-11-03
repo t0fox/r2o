@@ -72,6 +72,8 @@ SERVER_IF=es$$
 DAEMON_PID=
 SERVER_PID=
 TCP_SERVER_PID=
+D2O_NAT_QUEUE_COUNTS=
+R2O_NAT_QUEUE_COUNTS=
 
 cleanup() {
     STATUS=$?
@@ -148,12 +150,17 @@ import sys
 
 capture_path, port = sys.argv[1], int(sys.argv[2])
 bind_host = sys.argv[3] if len(sys.argv) > 3 else "198.18.77.1"
+expected_peer = sys.argv[4] if len(sys.argv) > 4 else None
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.bind((bind_host, port))
 with open(capture_path, "w", encoding="ascii", buffering=1) as capture:
     while True:
         payload, peer = sock.recvfrom(2048)
+        if expected_peer and peer[0] != expected_peer:
+            raise RuntimeError(f"unexpected NAT source: {peer[0]}")
         if payload != b"ready":
+            if expected_peer:
+                capture.write(f"{peer[0]}:")
             capture.write(payload.decode("ascii") + chr(10))
         sock.sendto(payload, peer)
 PY
@@ -316,6 +323,11 @@ ip netns exec "$GATEWAY_NS" nft add rule inet eio input ip protocol udp udp dpor
 ip netns exec "$GATEWAY_NS" nft 'add chain inet eio forward { type filter hook forward priority 0; policy accept; }'
 ip netns exec "$GATEWAY_NS" nft add rule inet eio forward ip saddr 198.18.77.2 ip daddr 198.18.78.2 tcp dport 4450 meta mark != 180001 queue num "$QUEUE" bypass
 ip netns exec "$GATEWAY_NS" nft add rule inet eio forward ip saddr 198.18.78.2 ip daddr 198.18.77.2 tcp sport 4450 queue num "$QUEUE" bypass
+ip netns exec "$GATEWAY_NS" nft add rule inet eio forward ip saddr 198.18.77.2 ip daddr 198.18.78.2 udp dport 19002 counter queue num "$QUEUE"
+ip netns exec "$GATEWAY_NS" nft add rule inet eio forward ip saddr 198.18.78.2 ip daddr 198.18.77.2 udp sport 19002 counter queue num "$QUEUE"
+ip netns exec "$GATEWAY_NS" nft add table ip eio_nat
+ip netns exec "$GATEWAY_NS" nft 'add chain ip eio_nat postrouting { type nat hook postrouting priority srcnat; policy accept; }'
+ip netns exec "$GATEWAY_NS" nft add rule ip eio_nat postrouting ip saddr 198.18.77.2 ip daddr 198.18.78.2 udp dport 19002 snat to 198.18.78.1
 run_case() {
     CASE_NAME=$1
     CASE_LOG=$TEMP/$CASE_NAME.log
@@ -374,6 +386,120 @@ run_case() {
         return 1
     fi
     echo "$CASE_NAME: injected=1 echo=64 recovery=ok"
+}
+
+nat_rule_packets() {
+    ip netns exec "$GATEWAY_NS" nft list chain inet eio forward |
+        awk -v needle="$1" 'index($0, needle) { for (i = 1; i <= NF; i++) if ($i == "packets") { print $(i + 1); found = 1; exit } } END { if (!found) print 0 }'
+}
+
+run_nat_case() {
+    CASE_NAME=$1
+    CASE_LOG=$TEMP/$CASE_NAME-nat.log
+    CASE_CAPTURE=$TEMP/$CASE_NAME-nat.capture
+    SERVER_LOG=$TEMP/$CASE_NAME-nat-server.log
+    CLIENT_LOG=$TEMP/$CASE_NAME-nat-client.log
+    SOURCE_PORT=40132
+    if [ "$CASE_NAME" = "R2O" ]; then
+        SOURCE_PORT=40133
+    fi
+    : >"$CASE_CAPTURE"
+    OUTBOUND_QUEUE_BEFORE=$(nat_rule_packets 'udp dport 19002')
+    REPLY_QUEUE_BEFORE=$(nat_rule_packets 'udp sport 19002')
+    ip netns exec "$SERVER_NS" python3 "$TEMP/echo.py" \
+        "$CASE_CAPTURE" 19002 198.18.78.2 198.18.78.1 >"$SERVER_LOG" 2>&1 &
+    SERVER_PID=$!
+    sleep 0.1
+
+    case "$CASE_NAME" in
+        D2O)
+            ip netns exec "$GATEWAY_NS" "$D2OD_BIN" \
+                --queue "$QUEUE" --mode observe --stats 0 >"$CASE_LOG" 2>&1 &
+            ;;
+        R2O)
+            ip netns exec "$GATEWAY_NS" "$R2OD_BIN" \
+                --queue "$QUEUE" --family ipv4 --mode observe --stats 0 >"$CASE_LOG" 2>&1 &
+            ;;
+        *)
+            echo "unknown daemon: $CASE_NAME" >&2
+            return 2
+            ;;
+    esac
+    DAEMON_PID=$!
+    sleep 0.1
+    kill -0 "$DAEMON_PID" 2>/dev/null || {
+        cat "$CASE_LOG" "$SERVER_LOG" >&2
+        echo "$CASE_NAME NAT daemon exited during startup" >&2
+        return 1
+    }
+
+    if ! ip netns exec "$CLIENT_NS" python3 - "$SOURCE_PORT" >"$CLIENT_LOG" 2>&1 <<'PY'
+import socket
+import sys
+import time
+
+source_port = int(sys.argv[1])
+destination = ("198.18.78.2", 19002)
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("198.18.77.2", source_port))
+sock.settimeout(0.1)
+for _ in range(40):
+    sock.sendto(b"ready", destination)
+    try:
+        reply, peer = sock.recvfrom(2048)
+    except socket.timeout:
+        time.sleep(0.025)
+        continue
+    if reply == b"ready" and peer == destination:
+        break
+else:
+    raise RuntimeError("UDP server did not answer through SNAT")
+
+for index in range(32):
+    payload = f"nat-probe-{index:04d}".encode("ascii")
+    sock.sendto(payload, destination)
+    reply, peer = sock.recvfrom(2048)
+    if reply != payload or peer != destination:
+        raise RuntimeError(f"NAT reply mismatch: {reply!r} from {peer!r}")
+sock.close()
+print(f"snat=198.18.78.1 reverse_nat=ok echoes={index + 1}")
+PY
+    then
+        cat "$CASE_LOG" "$SERVER_LOG" "$CLIENT_LOG" >&2
+        return 1
+    fi
+    kill -0 "$DAEMON_PID" 2>/dev/null || {
+        cat "$CASE_LOG" >&2
+        echo "$CASE_NAME NAT daemon exited after the exchange" >&2
+        return 1
+    }
+    kill -TERM "$DAEMON_PID" 2>/dev/null || true
+    wait "$DAEMON_PID" 2>/dev/null || true
+    DAEMON_PID=
+    kill -TERM "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+    SERVER_PID=
+
+    CAPTURE_COUNT=$(wc -l <"$CASE_CAPTURE")
+    SOURCE_COUNT=$(grep -Fc '198.18.78.1:nat-probe-' "$CASE_CAPTURE" || true)
+    OUTBOUND_QUEUE_CURRENT=$(nat_rule_packets 'udp dport 19002')
+    REPLY_QUEUE_CURRENT=$(nat_rule_packets 'udp sport 19002')
+    OUTBOUND_QUEUE_COUNT=$((OUTBOUND_QUEUE_CURRENT - OUTBOUND_QUEUE_BEFORE))
+    REPLY_QUEUE_COUNT=$((REPLY_QUEUE_CURRENT - REPLY_QUEUE_BEFORE))
+    if [ "$CAPTURE_COUNT" -ne 32 ] || [ "$SOURCE_COUNT" -ne 32 ] \
+        || [ "${OUTBOUND_QUEUE_COUNT:-0}" -lt 32 ] || [ "${REPLY_QUEUE_COUNT:-0}" -lt 32 ]; then
+        cat "$CASE_LOG" "$SERVER_LOG" "$CLIENT_LOG" >&2
+        printf '%s SNAT: translated_sources=%s captures=%s queued_forward=%s queued_reply=%s\n' \
+            "$CASE_NAME" "$SOURCE_COUNT" "$CAPTURE_COUNT" \
+            "${OUTBOUND_QUEUE_COUNT:-missing}" "${REPLY_QUEUE_COUNT:-missing}" >&2
+        return 1
+    fi
+    if [ "$CASE_NAME" = "D2O" ]; then
+        D2O_NAT_QUEUE_COUNTS=$OUTBOUND_QUEUE_COUNT/$REPLY_QUEUE_COUNT
+    else
+        R2O_NAT_QUEUE_COUNTS=$OUTBOUND_QUEUE_COUNT/$REPLY_QUEUE_COUNT
+    fi
+    echo "$CASE_NAME: SNAT=198.18.78.1 reverse_nat=ok echoes=32 queued=$OUTBOUND_QUEUE_COUNT/$REPLY_QUEUE_COUNT"
 }
 
 run_held_tcp_case() {
@@ -463,15 +589,23 @@ cmp "$TEMP/D2O.capture" "$TEMP/R2O.capture"
 run_held_tcp_case D2O
 run_held_tcp_case R2O
 cmp "$TEMP/D2O-held-tcp.capture" "$TEMP/R2O-held-tcp.capture"
+run_nat_case D2O
+run_nat_case R2O
+cmp "$TEMP/D2O-nat.capture" "$TEMP/R2O-nat.capture"
 
 {
     echo "D2O source: $ACTUAL_D2O_SHA"
-    echo "R2O source: $(git -c safe.directory="$ROOT" -C "$ROOT" rev-parse HEAD)"
+    echo "R2O repository revision: $(git -c safe.directory="$ROOT" -C "$ROOT" rev-parse HEAD)"
+    echo "R2O binary: $("$R2OD_BIN" --version)"
     grep -E 'FAULT-INJECTED|recv из очереди: Input/output error' "$TEMP/D2O.log"
     grep -E 'FAULT-INJECTED|ошибка чтения NFQUEUE: Input/output error' "$TEMP/R2O.log"
     cat "$TEMP/D2O-client.log" "$TEMP/R2O-client.log"
     cat "$TEMP/D2O-held-tcp-client.log" "$TEMP/R2O-held-tcp-client.log"
+    cat "$TEMP/D2O-nat-client.log" "$TEMP/R2O-nat-client.log"
+    echo "D2O NAT queue counter deltas (forward/reply): $D2O_NAT_QUEUE_COUNTS"
+    echo "R2O NAT queue counter deltas (forward/reply): $R2O_NAT_QUEUE_COUNTS"
     echo "Identical IPv4 NFQUEUE inputs and 64 echo replies matched for D2O and R2O."
     echo "Held TCP originals were flushed after recv(EIO); both production daemons delivered identical TLS bytes."
+    echo "Both production daemons preserved IPv4 SNAT and reverse conntrack for 32 UDP exchanges."
 } >"$LOG"
 cat "$LOG"
