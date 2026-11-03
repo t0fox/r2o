@@ -1491,7 +1491,7 @@ async fn r2o_http3_full_data_stage_matches_d2o_on_complete_budget_no_growth_refu
                     };
                     request_count = request_count.saturating_add(1);
                     if request.uri().path() == "/stream-reset-before-headers" {
-                        stream.stop_stream(h3::error::Code::H3_INTERNAL_ERROR);
+                        stream.stop_stream(h3::error::Code::H3_REQUEST_REJECTED);
                         continue;
                     }
                     if request.uri().path() == "/budget-close" && request_count > 1 {
