@@ -625,8 +625,8 @@ mod app {
             stats.packets, stats.bytes, stats.accepted, stats.dropped
         );
         eprintln!(
-            "r2o-datapath: обрезано {}, без нагрузки {}",
-            stats.truncated, stats.no_payload
+            "r2o-datapath: обрезано {}, без нагрузки {}, без заголовка {}",
+            stats.truncated, stats.no_payload, stats.no_header
         );
     }
 
@@ -1279,12 +1279,12 @@ mod app {
                         continue;
                     }
                     let Some(packet) = QueuePacket::parse(&message) else {
-                        return Err(invalid(
-                            "повреждённое NFQUEUE сообщение без разбора атрибутов",
-                        ));
+                        socket.record_missing_header();
+                        continue;
                     };
                     let Some(mut packet_id) = packet.id else {
-                        return Err(invalid("NFQUEUE пакет без id; закрываю очередь fail-open"));
+                        socket.record_missing_header();
+                        continue;
                     };
                     socket.record_received_packet(
                         packet.payload.map(|bytes| bytes.len()),

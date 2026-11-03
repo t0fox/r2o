@@ -40,6 +40,7 @@ pub struct QueueStats {
     pub dropped: u64,
     pub truncated: u64,
     pub no_payload: u64,
+    pub no_header: u64,
 }
 
 pub struct QueueSocket {
@@ -231,6 +232,12 @@ impl QueueSocket {
         self.stats.set(stats);
     }
 
+    pub fn record_missing_header(&self) {
+        let mut stats = self.stats.get();
+        stats.no_header = stats.no_header.saturating_add(1);
+        self.stats.set(stats);
+    }
+
     fn record_verdict(&self, action: u32) {
         let mut stats = self.stats.get();
         if action == NF_DROP {
@@ -396,6 +403,19 @@ mod tests {
     use super::QueueSocket;
     use std::cell::Cell;
     use std::io::ErrorKind;
+    use std::os::fd::OwnedFd;
+
+    fn test_socket() -> QueueSocket {
+        let fd: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        QueueSocket {
+            fd,
+            queue: 0,
+            protocol_family: libc::AF_INET as u16,
+            sequence: 1,
+            lost_packets: Cell::new(0),
+            stats: Cell::new(Default::default()),
+        }
+    }
 
     #[test]
     fn await_ack_stops_after_first_timeout() {
@@ -416,5 +436,16 @@ mod tests {
         super::record_lost_packet(&count);
 
         assert_eq!(count.get(), 2);
+    }
+
+    #[test]
+    fn record_missing_header_does_not_count_a_verdict_packet() {
+        let socket = test_socket();
+        socket.record_missing_header();
+
+        assert_eq!(socket.stats().no_header, 1);
+        assert_eq!(socket.stats().packets, 0);
+        assert_eq!(socket.stats().accepted, 0);
+        assert_eq!(socket.stats().dropped, 0);
     }
 }

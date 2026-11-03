@@ -79,7 +79,7 @@
           "statusLabel": "Частично",
           "group": "Datapath",
           "mapping": "C print_stats/self_cost → Rust QueueSocket counters/runtime diagnostics",
-          "evidence": "D2O a63d964 C/Rust hold fixture: timeout+revision matches fail-open (timed_out=1, plan_changed=0; Rust incomplete TLS capture 5 B). Timer differential matches idle flow/scheduler/capture/payload/reply/hold traces and all 4 IPv4 NFQUEUE traffic summaries: 9 packets, 396 copied bytes, 9 accepted, 0 dropped; 540-B datagram at copy-range 128 yields truncated=1/no_payload=0 on both. Scheduler refusal (queue=1/refusals=1), ICMP (2 received/2 dropped/1 fake), CPU/RSS and Linux self_cost token match. Short OpenWrt AArch64 smoke passed. Remaining: no-header, other hold/session branches."
+          "evidence": "D2O a63d964/R2O current main: timer differential matches idle flow, scheduler, capture, payload, reply, hold and all 4 IPv4 NFQUEUE summaries: 9 packets/396 bytes/9 accepted/0 dropped; copy-range 128 gives truncated=1/no_payload=0/no_header=0 on both. Rust unit checks a headerless event increments only its counter; runtime malformed-message injection remains open. Scheduler refusal, ICMP, CPU/RSS and Linux self_cost token also match. Other hold/session branches and nonzero periodic metrics remain open."
         },
         {
           "id": 9,
@@ -658,7 +658,7 @@
       "statusLabel": "Частично",
       "group": "Datapath",
       "mapping": "C print_stats/self_cost → Rust QueueSocket counters/runtime diagnostics",
-      "evidence": "D2O a63d964 C/Rust hold fixture: timeout+revision matches fail-open (timed_out=1, plan_changed=0; Rust incomplete TLS capture 5 B). Timer differential matches idle flow/scheduler/capture/payload/reply/hold traces and all 4 IPv4 NFQUEUE traffic summaries: 9 packets, 396 copied bytes, 9 accepted, 0 dropped; 540-B datagram at copy-range 128 yields truncated=1/no_payload=0 on both. Scheduler refusal (queue=1/refusals=1), ICMP (2 received/2 dropped/1 fake), CPU/RSS and Linux self_cost token match. Short OpenWrt AArch64 smoke passed. Remaining: no-header, other hold/session branches."
+      "evidence": "D2O a63d964/R2O current main: timer differential matches idle flow, scheduler, capture, payload, reply, hold and all 4 IPv4 NFQUEUE summaries: 9 packets/396 bytes/9 accepted/0 dropped; copy-range 128 gives truncated=1/no_payload=0/no_header=0 on both. Rust unit checks a headerless event increments only its counter; runtime malformed-message injection remains open. Scheduler refusal, ICMP, CPU/RSS and Linux self_cost token also match. Other hold/session branches and nonzero periodic metrics remain open."
     },
     {
       "id": 9,

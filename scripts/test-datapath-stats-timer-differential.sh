@@ -204,20 +204,20 @@ fi
 echo 'nfqueue_traffic_stats_numeric_trace=identical (9 packets, 396 bytes, 9 accepted)'
 
 c_truncated_count=$(grep -Ec 'обрезано [0-9]+, без нагрузки [0-9]+, без заголовка [0-9]+' "$test_tmpdir/r2o-stats-traffic-d2o.log" || true)
-r_truncated_count=$(grep -Ec 'r2o-datapath: обрезано [0-9]+, без нагрузки [0-9]+' "$test_tmpdir/r2o-stats-traffic-r2o.log" || true)
+r_truncated_count=$(grep -Ec 'r2o-datapath: обрезано [0-9]+, без нагрузки [0-9]+, без заголовка [0-9]+' "$test_tmpdir/r2o-stats-traffic-r2o.log" || true)
 if [ "$c_truncated_count" -ne "$c_traffic_stats_count" ] || [ "$r_truncated_count" -ne "$r_traffic_stats_count" ]; then
     echo "copy-range counters must appear once per summary: C=$c_truncated_count/$c_traffic_stats_count Rust=$r_truncated_count/$r_traffic_stats_count" >&2
     exit 1
 fi
-c_truncated_values=$(grep -E 'обрезано [0-9]+, без нагрузки [0-9]+, без заголовка [0-9]+' "$test_tmpdir/r2o-stats-traffic-d2o.log" | sed -E 's/, без заголовка [0-9]+//' | sed -E 's/[^0-9]+/ /g' | sed '/^ *$/d')
-r_truncated_values=$(grep -E 'r2o-datapath: обрезано [0-9]+, без нагрузки [0-9]+' "$test_tmpdir/r2o-stats-traffic-r2o.log" | sed -E 's/^r2o-datapath: //' | sed -E 's/[^0-9]+/ /g' | sed '/^ *$/d')
+c_truncated_values=$(grep -E 'обрезано [0-9]+, без нагрузки [0-9]+, без заголовка [0-9]+' "$test_tmpdir/r2o-stats-traffic-d2o.log" | sed -E 's/[^0-9]+/ /g' | sed '/^ *$/d')
+r_truncated_values=$(grep -E 'r2o-datapath: обрезано [0-9]+, без нагрузки [0-9]+, без заголовка [0-9]+' "$test_tmpdir/r2o-stats-traffic-r2o.log" | sed -E 's/^r2o-datapath: //' | sed -E 's/[^0-9]+/ /g' | sed '/^ *$/d')
 if [ "$c_truncated_values" != "$r_truncated_values" ]; then
     echo "D2O NFQUEUE copy-range statistics differ from R2O" >&2
     printf 'C:\n%s\nRust:\n%s\n' "$c_truncated_values" "$r_truncated_values" >&2
     exit 1
 fi
-if ! printf '%s\n' "$c_truncated_values" | grep -Eq '^ 1 0$'; then
-    echo "expected one truncated packet and no missing payloads: $c_truncated_values" >&2
+if ! printf '%s\n' "$c_truncated_values" | grep -Eq '^ 1 0 0$'; then
+    echo "expected one truncated packet, no missing payloads, and no headerless packets: $c_truncated_values" >&2
     exit 1
 fi
 c_truncated_periodic=$(grep -E 'обрезано [0-9]+, без нагрузки [0-9]+' "$test_tmpdir/r2o-stats-traffic-d2o.log" | sed '$d' | grep -Fc 'обрезано 1, без нагрузки 0' || true)
