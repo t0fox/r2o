@@ -371,6 +371,7 @@ pub struct TcpSessions {
     r2o_tcp_hellos_with_sni: u64,
     tcp_hello_capture: CaptureTable,
     r2o_reply_hidden: u64,
+    r2o_tcp_rst_dropped: u64,
     tcp_exchange_events: VecDeque<R2oTcpExchangeEvent>,
     tcp_rst_events: VecDeque<R2oTcpRstEvent>,
     tcp_repeat_events: VecDeque<R2oTcpRepeatEvent>,
@@ -413,6 +414,7 @@ impl TcpSessions {
             r2o_tcp_hellos_with_sni: 0,
             tcp_hello_capture: CaptureTable::default(),
             r2o_reply_hidden: 0,
+            r2o_tcp_rst_dropped: 0,
             tcp_exchange_events,
             tcp_rst_events,
             tcp_repeat_events,
@@ -539,6 +541,10 @@ impl TcpSessions {
     /// Число потоков, где ACK указал на невидимый очереди ответ сервера.
     pub fn r2o_reply_hidden(&self) -> u64 {
         self.r2o_reply_hidden
+    }
+
+    pub fn r2o_tcp_rst_dropped(&self) -> u64 {
+        self.r2o_tcp_rst_dropped
     }
 
     pub fn take_tcp_exchange_events(&mut self) -> Vec<R2oTcpExchangeEvent> {
@@ -950,6 +956,7 @@ impl TcpSessions {
         let r2o_tcp_hellos_with_sni = &mut self.r2o_tcp_hellos_with_sni;
         let tcp_hello_capture = &mut self.tcp_hello_capture;
         let r2o_reply_hidden = &mut self.r2o_reply_hidden;
+        let r2o_tcp_rst_dropped = &mut self.r2o_tcp_rst_dropped;
         let session = self.flows.get_mut(&key)?;
         if controller_probe {
             session.controller_probe = true;
@@ -1203,6 +1210,9 @@ impl TcpSessions {
             && reverse
             && session.guards & GUARD_RST_ALIEN != 0
             && reverse_ttl_before_packet.is_some_and(|reference| reference != view.hop_limit);
+        if rst_dropped {
+            *r2o_tcp_rst_dropped = (*r2o_tcp_rst_dropped).wrapping_add(1);
+        }
         if !controller_probe
             && rst
             && reverse
@@ -4771,6 +4781,7 @@ mod tests {
         );
         let events = sessions.take_tcp_rst_cut_events();
         assert_eq!(events.len(), 1);
+        assert_eq!(sessions.r2o_tcp_rst_dropped(), 1);
         assert!(events[0].client_is_low);
         assert_eq!(events[0].ttl, 127);
         assert_eq!(events[0].reference_ttl, 124);
@@ -4787,6 +4798,7 @@ mod tests {
             PacketDecision::Drop,
         );
         assert!(sessions.take_tcp_rst_cut_events().is_empty());
+        assert_eq!(sessions.r2o_tcp_rst_dropped(), 2);
         assert_eq!(sessions.len(), 1, "снятый чужой RST не закрывает поток");
     }
 

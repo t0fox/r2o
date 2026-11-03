@@ -717,6 +717,10 @@ mod app {
                 .r2o_tcp_hellos_with_sni()
                 .wrapping_add(udp_sessions.r2o_quic_hellos_with_sni())
         );
+        eprintln!(
+            "r2o-datapath: снято чужих сбросов {}",
+            tcp_sessions.r2o_tcp_rst_dropped()
+        );
         let http_stats = tcp_sessions.r2o_http_keepalive_stats();
         if http_stats.later != 0 || http_stats.unaligned != 0 || http_stats.open_end != 0 {
             eprintln!(

@@ -336,6 +336,21 @@ if [ "$c_hello_periodic" -lt 1 ] || [ "$r_hello_periodic" -lt 1 ]; then
     echo "expected one periodic TCP ClientHello with SNI: C=$c_hello_periodic Rust=$r_hello_periodic" >&2
     exit 1
 fi
+c_rst_metric_lines=$(grep -Fc 'снято чужих сбросов ' "$test_tmpdir/r2o-stats-hello-d2o.log" || true)
+r_rst_metric_lines=$(grep -Fc 'r2o-datapath: снято чужих сбросов ' "$test_tmpdir/r2o-stats-hello-r2o.log" || true)
+if [ "$c_rst_metric_lines" -ne "$c_hello_stats_count" ] || [ "$r_rst_metric_lines" -ne "$r_hello_stats_count" ]; then
+    echo "alien-RST drop metric must appear once per hello summary: C=$c_rst_metric_lines/$c_hello_stats_count Rust=$r_rst_metric_lines/$r_hello_stats_count" >&2
+    exit 1
+fi
+c_rst_values=$(grep 'узнано приветствий ' "$test_tmpdir/r2o-stats-hello-d2o.log" | grep -oE 'снято чужих сбросов [0-9]+' | grep -oE '[0-9]+$')
+r_rst_values=$(grep 'r2o-datapath: снято чужих сбросов ' "$test_tmpdir/r2o-stats-hello-r2o.log" | grep -oE '[0-9]+$')
+if [ "$c_rst_values" != "$r_rst_values" ]; then
+    echo "D2O and R2O alien-RST drop totals differ" >&2
+    echo "C: $c_rst_values Rust: $r_rst_values" >&2
+    exit 1
+fi
+echo 'tcp_alien_rst_drop_stats_trace=identical'
+
 echo 'tcp_clienthello_stats_trace=identical (one TLS ClientHello with SNI)'
 
 
