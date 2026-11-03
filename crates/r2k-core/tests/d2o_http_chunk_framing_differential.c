@@ -68,6 +68,8 @@ int main(void)
         "1\001\r\nx\r\n0\r\n\r\n";
     static const uint8_t buffered_bytes_after_frame[] =
         "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\nextra";
+    static const uint8_t control_header_value[] =
+        "HTTP/1.1 200 OK\r\nX: foo\001bar\r\nContent-Length: 0\r\n\r\n";
     const test_case cases[] = {
         { "extension_suffix", extension, 1, 1 },
         { "trailer_without_colon", trailer, 1, 0 },
@@ -75,6 +77,7 @@ int main(void)
         { "control_extension", control_extension, 1, 1 },
         { "control_chunk_size", control_chunk_size, 0, 0 },
         { "buffered_bytes_after_frame", buffered_bytes_after_frame, 1, 0 },
+        { "control_header_value", control_header_value, 1, 0 },
         { "chunk_line_at_limit", line_at_limit, 1, 1 },
         { "chunk_line_over_limit", line_over_limit, 0, 0 },
     };

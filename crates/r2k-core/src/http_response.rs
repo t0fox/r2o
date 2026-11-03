@@ -24,6 +24,7 @@ pub struct HttpResponseParser {
     body_bytes: u64,
     status: u16,
     state: State,
+    status_line_complete: bool,
     head_only: bool,
     headers_complete: bool,
     complete: bool,
@@ -42,6 +43,7 @@ impl HttpResponseParser {
             body_bytes: 0,
             status: 0,
             state: State::Header,
+            status_line_complete: false,
             head_only,
             headers_complete: false,
             complete: false,
@@ -156,7 +158,8 @@ impl HttpResponseParser {
     }
 
     fn feed_header_byte(&mut self, byte: u8) {
-        if invalid_header_byte(byte)
+        if byte == 0
+            || !self.status_line_complete && invalid_header_byte(byte)
             || self.header_len + 1 >= self.header.len()
             || byte == b'\n' && (self.header_len == 0 || self.header[self.header_len - 1] != b'\r')
             || self.header_len != 0 && self.header[self.header_len - 1] == b'\r' && byte != b'\n'
@@ -166,6 +169,12 @@ impl HttpResponseParser {
         }
         self.header[self.header_len] = byte;
         self.header_len += 1;
+        if !self.status_line_complete
+            && self.header_len >= 2
+            && self.header[self.header_len - 2..self.header_len] == *b"\r\n"
+        {
+            self.status_line_complete = true;
+        }
         if self.header_len >= 4 && self.header[self.header_len - 4..self.header_len] == *b"\r\n\r\n"
         {
             self.finish_headers();
@@ -190,6 +199,7 @@ impl HttpResponseParser {
             self.interim = true;
             self.header_len = 0;
             self.header[0] = 0;
+            self.status_line_complete = false;
             return;
         }
 
