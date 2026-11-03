@@ -196,6 +196,7 @@ async fn r2o_http3_transport_close_is_not_stall_and_matches_d2o() {
 
 async fn spawn_quic_peer_without_settings(
     close_after_handshake: bool,
+    max_concurrent_uni_streams: Option<u32>,
 ) -> (
     SocketAddr,
     CertificateDer<'static>,
@@ -213,11 +214,13 @@ async fn spawn_quic_peer_without_settings(
         .unwrap();
     tls.alpn_protocols = vec![b"h3".to_vec()];
     let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap();
-    let endpoint = quinn::Endpoint::server(
-        quinn::ServerConfig::with_crypto(Arc::new(crypto)),
-        "127.0.0.1:0".parse().unwrap(),
-    )
-    .unwrap();
+    let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
+    if let Some(max_concurrent_uni_streams) = max_concurrent_uni_streams {
+        let mut transport = quinn::TransportConfig::default();
+        transport.max_concurrent_uni_streams(quinn::VarInt::from_u32(max_concurrent_uni_streams));
+        server_config.transport_config(Arc::new(transport));
+    }
+    let endpoint = quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
     let server_address = endpoint.local_addr().unwrap();
     let server = tokio::spawn(async move {
         while let Some(incoming) = endpoint.accept().await {
@@ -243,7 +246,8 @@ async fn spawn_quic_peer_without_settings(
 async fn r2o_http3_without_peer_settings_matches_d2o() {
     let d2o_binary = std::env::var("D2O_QUIC_DATA_STAGE_BIN")
         .expect("D2O_QUIC_DATA_STAGE_BIN must point to the pinned C data-stage harness");
-    let (server_address, certificate_der, server) = spawn_quic_peer_without_settings(false).await;
+    let (server_address, certificate_der, server) =
+        spawn_quic_peer_without_settings(false, None).await;
 
     let address = server_address;
     let c_output = tokio::task::spawn_blocking(move || {
@@ -317,10 +321,91 @@ async fn r2o_http3_without_peer_settings_matches_d2o() {
 
 #[tokio::test]
 #[ignore = "requires the pinned D2O harness; run scripts/test-quic-http3-full-stage-differential.sh"]
+async fn r2o_http3_zero_peer_uni_credit_matches_d2o() {
+    let d2o_binary = std::env::var("D2O_QUIC_DATA_STAGE_BIN")
+        .expect("D2O_QUIC_DATA_STAGE_BIN must point to the pinned C data-stage harness");
+    let (server_address, certificate_der, server) =
+        spawn_quic_peer_without_settings(false, Some(0)).await;
+
+    let c_address = server_address;
+    let c_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(d2o_binary)
+            .args([
+                "127.0.0.1",
+                &c_address.port().to_string(),
+                "localhost",
+                "/zero-peer-uni-credit",
+                "0",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        !c_output.status.success(),
+        "D2O without peer unidirectional stream credit unexpectedly passed: stdout={} stderr={}",
+        String::from_utf8_lossy(&c_output.stdout),
+        String::from_utf8_lossy(&c_output.stderr)
+    );
+    let c_result = String::from_utf8(c_output.stdout).unwrap();
+    let c_field = |name: &str| {
+        c_result
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing {name} in D2O result: {c_result}"))
+    };
+    assert_eq!(c_field("verdict"), "NotRun", "D2O={c_result}");
+    assert_eq!(c_field("app_bytes"), "0", "D2O={c_result}");
+    assert_eq!(c_field("requests"), "1", "D2O={c_result}");
+
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.connect(server_address).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(certificate_der).unwrap();
+    let rust_result = tokio::time::timeout(
+        Duration::from_secs(9),
+        r2o_quic_http3_get(
+            socket,
+            server_address,
+            "localhost",
+            "/zero-peer-uni-credit",
+            Duration::from_secs(1),
+            roots,
+        ),
+    )
+    .await
+    .expect("HTTP/3 peer unidirectional stream-credit test timed out");
+    let rust_verdict = r2o_controller::quic_replay::r2o_quic_trial_data_verdict(&rust_result);
+    assert!(rust_result.handshake_confirmed, "R2O={rust_result:?}");
+    assert_eq!(rust_result.status, 0, "R2O={rust_result:?}");
+    assert!(rust_result.error.is_some(), "R2O={rust_result:?}");
+    assert_eq!(
+        format!("{rust_verdict:?}"),
+        c_field("verdict"),
+        "R2O={rust_result:?}"
+    );
+    assert_eq!(rust_result.app_bytes, 0, "R2O={rust_result:?}");
+    assert_eq!(
+        rust_result.requests,
+        c_field("requests").parse::<u32>().unwrap(),
+        "D2O={c_result} R2O={rust_result:?}"
+    );
+    write_d2o_http3_differential(
+        "R2O_QUIC_HTTP3_ZERO_PEER_UNI_CREDIT_DIFF_OUTPUT",
+        "zero-peer-uni-credit",
+        &rust_result,
+    );
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires the pinned D2O harness; run scripts/test-quic-http3-full-stage-differential.sh"]
 async fn r2o_http3_connection_close_before_settings_matches_d2o() {
     let d2o_binary = std::env::var("D2O_QUIC_DATA_STAGE_BIN")
         .expect("D2O_QUIC_DATA_STAGE_BIN must point to the pinned C data-stage harness");
-    let (server_address, certificate_der, server) = spawn_quic_peer_without_settings(true).await;
+    let (server_address, certificate_der, server) =
+        spawn_quic_peer_without_settings(true, None).await;
 
     let address = server_address;
     let c_output = tokio::task::spawn_blocking(move || {

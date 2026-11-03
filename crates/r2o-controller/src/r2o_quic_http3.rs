@@ -947,8 +947,14 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
             return result.lock().unwrap().clone();
         }
         Err(_) => {
-            result.lock().unwrap().error = Some("истёк срок настройки HTTP/3".into());
-            return result.lock().unwrap().clone();
+            let mut state = result.lock().unwrap();
+            state.error = Some("истёк срок настройки HTTP/3".into());
+            // D2O counts the first GET attempt after QUIC connects even when
+            // H3 setup cannot obtain its control stream; keep Quinn's stream limit.
+            if connection.close_reason().is_none() {
+                state.requests = 1;
+            }
+            return state.clone();
         }
     };
     let drive_task =
