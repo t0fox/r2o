@@ -499,6 +499,12 @@ jobs:
           R2O_DONOR_ROOT: ${{ github.workspace }}/d2o
           TMPDIR: ${{ runner.temp }}
         run: sh scripts/test-ipfrag-differential.sh
+      - name: Compare ctnetlink retry after startup failure
+        env:
+          R2O_DONOR_ROOT: ${{ github.workspace }}/d2o
+          R2O_DONOR_DATAPATH: ${{ github.workspace }}/d2o/datapath
+          TMPDIR: ${{ runner.temp }}
+        run: sh scripts/test-conntrack-retry-current-differential.sh
 
   donor-differential:
     name: C/Rust differential — ${{ matrix.snapshot }} / ${{ matrix.shard }}

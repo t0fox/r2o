@@ -1126,6 +1126,14 @@ mod app {
                         maxlen
                     );
                 }
+                if conntrack.is_none() {
+                    conntrack = R2oConntrackClient::open();
+                    if conntrack.is_some() {
+                        eprintln!(
+                            "r2o-datapath: ctnetlink восстановлен; наблюдение счётчиков включено"
+                        );
+                    }
+                }
                 last_route_refresh = Instant::now();
                 next_route_refresh = last_route_refresh + R2O_ROUTE_REFRESH_INTERVAL;
             }

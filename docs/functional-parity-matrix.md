@@ -83,6 +83,8 @@ Scope boundary: the 87-point matrix scores the router runtime. D2O relay-enroll 
 
 **Evidence-weighted parity: 62 / 87 = 71,26%.** Это доля требований матрицы с прямым подтверждением перечисленных C/Rust ветвей. Частично реализованные или только исходниково сверенные ветви оставлены без баллов, пока нет подходящего дифференциала.
 
+Дополнительное доказательство datapath (2026-11-03): `scripts/test-conntrack-retry-current-differential.sh` запустил production `d2kd` из D2O main `a63d964` и production `r2o-datapath` на R2O main `67a191f` с изменением retry из этого follow-up. В изолированном network namespace shim отклонил только второй `NETLINK_NETFILTER` socket (ctnetlink после NFQUEUE); после изменения `ip rule` оба процесса открыли ctnetlink повторно и сообщили о восстановлении на route/rules refresh. Прогон Debian 13 WSL2 прошёл. Это доказывает ветвь восстановления conntrack; IPv6 NFQUEUE C-oracle и остальные ветви строки остаются открыты, поэтому статус строки и итог 62/87 не меняются.
+
 В оценку не включены C relay/enrollment серверы D2O и WARP/VPS/relay сценарии: они вне разрешённой целевой архитектуры R2O. Отдельная C11 реализация Telegram не переносится; сравниваются пользовательские функции, при этом Rust donor z2kOW остаётся целевой реализацией.
 
 ## Известные расхождения и тестовые ограничения
