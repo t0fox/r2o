@@ -269,7 +269,60 @@ fn r2o_periodic_icmp_summary_matches_d2o_fields() {
             "ICMP time-exceeded: получено 2, снято на свои фальшивки 2; фальшивок с пониженным TTL запомнено 1"
         )
     );
+
+    let mut guard_v6 = R2oIcmpGuard::default();
+    let fake_v6 = r2o_ipv6(17, 3, 55435, 443);
+    let icmp_v6 = r2o_icmpv6(3, 0, &fake_v6[..48], 48);
+    assert!(guard_v6.r2o_note(&fake_v6, 64, 100_000_000_000));
+    for _ in 0..2 {
+        assert_eq!(
+            guard_v6.r2o_handle_at_hook(&icmp_v6, Some(R2O_NF_INET_FORWARD), 100_033_333_333,),
+            Some(true)
+        );
+    }
+
+    let packet_too_big = r2o_icmpv6(2, 0, &fake_v6[..48], 48);
+    assert_eq!(
+        guard_v6.r2o_handle_at_hook(&packet_too_big, Some(R2O_NF_INET_FORWARD), 100_033_333_333,),
+        Some(false)
+    );
+    let mut changed_port_quote = fake_v6.clone();
+    changed_port_quote[43] ^= 1;
+    let changed_port = r2o_icmpv6(3, 0, &changed_port_quote, 48);
+    assert_eq!(
+        guard_v6.r2o_handle_at_hook(&changed_port, Some(R2O_NF_INET_FORWARD), 100_033_333_333,),
+        Some(false)
+    );
+    let mut raised_hop_limit_quote = fake_v6.clone();
+    raised_hop_limit_quote[7] = 4;
+    let raised_hop_limit = r2o_icmpv6(3, 0, &raised_hop_limit_quote, 48);
+    assert_eq!(
+        guard_v6.r2o_handle_at_hook(
+            &raised_hop_limit,
+            Some(R2O_NF_INET_FORWARD),
+            100_033_333_333,
+        ),
+        Some(false)
+    );
+    assert_eq!(
+        guard_v6.r2o_handle_at_hook(&icmp_v6, Some(R2O_NF_INET_FORWARD), 105_000_000_001,),
+        Some(false)
+    );
+    let icmp_v6_line = format!(
+        "ICMPv6: получено {}, снято на свои фальшивки {}; фальшивок с пониженным TTL запомнено {}",
+        guard_v6.r2o_seen(),
+        guard_v6.r2o_dropped(),
+        guard_v6.r2o_noted()
+    );
+    assert_eq!(guard_v6.r2o_seen(), 6);
+    assert_eq!(guard_v6.r2o_dropped(), 2);
+    assert_eq!(guard_v6.r2o_noted(), 1);
+
     if let Ok(path) = std::env::var("R2O_ICMP_GUARD_DIFF_OUTPUT") {
-        std::fs::write(path, format!("{}\n", guard.r2o_stats_line().unwrap())).unwrap();
+        std::fs::write(
+            path,
+            format!("{}\n{}\n", guard.r2o_stats_line().unwrap(), icmp_v6_line),
+        )
+        .unwrap();
     }
 }
