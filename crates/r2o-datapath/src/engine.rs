@@ -1,3 +1,4 @@
+use crate::capture::{CaptureResult, CaptureTable};
 use r2k_core::control::{
     KEY_LEN, R2oTcpFinRetryEvent, R2oTcpRstAfterAppEvent, R2oTcpSilenceEvent, R2oTcpStallEvent,
 };
@@ -150,6 +151,7 @@ struct TcpSession {
     rst_cut_reported: bool,
     r2o_reply_hidden_reported: bool,
     client_shape: u8,
+    hello_capture_pending: bool,
     last_seen: Instant,
 }
 
@@ -210,6 +212,7 @@ impl TcpSession {
             rst_cut_reported: false,
             r2o_reply_hidden_reported: false,
             client_shape: 0,
+            hello_capture_pending: false,
             last_seen: now,
         }
     }
@@ -366,6 +369,7 @@ pub struct TcpSessions {
     tcp_stall_budgets: Vec<u16>,
     r2o_tcp_hello_flows: u64,
     r2o_tcp_hellos_with_sni: u64,
+    tcp_hello_capture: CaptureTable,
     r2o_reply_hidden: u64,
     tcp_exchange_events: VecDeque<R2oTcpExchangeEvent>,
     tcp_rst_events: VecDeque<R2oTcpRstEvent>,
@@ -407,6 +411,7 @@ impl TcpSessions {
             tcp_stall_budgets: vec![TCP_STALL_PACKET_BUDGET as u16],
             r2o_tcp_hello_flows: 0,
             r2o_tcp_hellos_with_sni: 0,
+            tcp_hello_capture: CaptureTable::default(),
             r2o_reply_hidden: 0,
             tcp_exchange_events,
             tcp_rst_events,
@@ -909,6 +914,8 @@ impl TcpSessions {
         let payload = packet.get(tcp.payload.clone()).unwrap_or_default();
 
         if new_connection {
+            let capture_key = crate::capture::TcpFlowKey::from_packet(packet)?;
+            self.tcp_hello_capture.forget(&capture_key);
             if !self.flows.contains_key(&key) && self.flows.len() >= self.flow_capacity.limit() {
                 self.tcp_flow_refusals = self.tcp_flow_refusals.wrapping_add(1);
                 return None;
@@ -941,6 +948,7 @@ impl TcpSessions {
 
         let r2o_tcp_hello_flows = &mut self.r2o_tcp_hello_flows;
         let r2o_tcp_hellos_with_sni = &mut self.r2o_tcp_hellos_with_sni;
+        let tcp_hello_capture = &mut self.tcp_hello_capture;
         let r2o_reply_hidden = &mut self.r2o_reply_hidden;
         let session = self.flows.get_mut(&key)?;
         if controller_probe {
@@ -1014,6 +1022,7 @@ impl TcpSessions {
                     *r2o_tcp_hellos_with_sni = (*r2o_tcp_hellos_with_sni).wrapping_add(1);
                 }
             }
+            session.hello_capture_pending = hello.sni_range.is_none() && hello.record_end.is_none();
             session.hello_ack = ack.then_some(tcp.acknowledgment);
             session.hello_has_sni = hello.sni_range.is_some();
             session.client_shape = if session.hello_has_sni {
@@ -1031,6 +1040,43 @@ impl TcpSessions {
             } else {
                 0
             };
+        }
+        if session.hello_capture_pending
+            && source == session.initiator
+            && !payload.is_empty()
+            && let Some(hello_sequence) = session.hello_seq
+        {
+            let capture_key = crate::capture::TcpFlowKey::from_packet(packet)?;
+            let capture_result = tcp_hello_capture.feed_with_visibility(
+                capture_key,
+                u64::from(hello_sequence),
+                now,
+                tcp.sequence,
+                Some(hello_sequence),
+                payload,
+                false,
+            );
+            match capture_result {
+                CaptureResult::Complete { bytes, .. } => {
+                    let complete_hello = r2k_core::tls::parse(&bytes);
+                    if complete_hello.is_client_hello
+                        && complete_hello.sni_range.is_some()
+                        && !session.hello_has_sni
+                    {
+                        session.hello_has_sni = true;
+                        if !controller_probe {
+                            *r2o_tcp_hellos_with_sni = (*r2o_tcp_hellos_with_sni).wrapping_add(1);
+                        }
+                    }
+                    session.hello_capture_pending = false;
+                    tcp_hello_capture.forget(&capture_key);
+                }
+                CaptureResult::Rejected | CaptureResult::Full => {
+                    session.hello_capture_pending = false;
+                    tcp_hello_capture.forget(&capture_key);
+                }
+                CaptureResult::Ignored | CaptureResult::Incomplete => {}
+            }
         }
         session.last_seen = now;
         let reverse = source != session.initiator;
@@ -2456,6 +2502,34 @@ mod tests {
 
         sessions.track_packet(&hello, start);
         sessions.track_packet(&hello, start + Duration::from_millis(50));
+
+        assert_eq!(sessions.r2o_tcp_hello_flows(), 1);
+        assert_eq!(sessions.r2o_tcp_hellos_with_sni(), 1);
+    }
+
+    #[test]
+    fn r2o_tcp_counts_sni_when_it_arrives_in_a_later_segment() {
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let hello = client_hello_with_sni();
+        let split_at = 58;
+        let first = ipv4_tcp_packet(client, server, 0x18, 64, 701, &hello[..split_at]);
+        let second = ipv4_tcp_packet(
+            client,
+            server,
+            0x18,
+            64,
+            701 + split_at as u32,
+            &hello[split_at..],
+        );
+        let mut sessions = TcpSessions::default();
+
+        sessions.track_packet(&first, start);
+        assert_eq!(sessions.r2o_tcp_hello_flows(), 1);
+        assert_eq!(sessions.r2o_tcp_hellos_with_sni(), 0);
+
+        sessions.track_packet(&second, start + Duration::from_millis(50));
 
         assert_eq!(sessions.r2o_tcp_hello_flows(), 1);
         assert_eq!(sessions.r2o_tcp_hellos_with_sni(), 1);

@@ -63,6 +63,7 @@ run_hello_case() {
     name=$1
     binary=$2
     pattern=$3
+    mss=${4:-0}
     log="$test_tmpdir/r2o-stats-hello-$name.log"
     server_log="$test_tmpdir/r2o-stats-hello-server-$name.log"
     ready="$test_tmpdir/r2o-stats-hello-$name.ready"
@@ -84,7 +85,7 @@ run_hello_case() {
     running_pid=$!
     sleep 1
     if ! kill -0 "$running_pid" 2>/dev/null; then cat "$log"; exit 1; fi
-    ip netns exec "$namespace" python3 -c 'import socket,ssl,sys; s=socket.create_connection((sys.argv[1],443),timeout=3); c=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT); c.check_hostname=False; c.maximum_version=ssl.TLSVersion.TLSv1_2; c.verify_mode=ssl.CERT_NONE; t=c.wrap_socket(s,server_hostname="example.com",do_handshake_on_connect=False); exec("try:\n t.do_handshake()\nexcept (ssl.SSLError,OSError,TimeoutError):\n pass"); t.close()' "$peer_address"
+    ip netns exec "$namespace" python3 -c 'import socket,ssl,sys; s=socket.socket(); mss=int(sys.argv[2]); mss and s.setsockopt(socket.IPPROTO_TCP,socket.TCP_MAXSEG,mss); s.settimeout(3); s.connect((sys.argv[1],443)); c=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT); c.check_hostname=False; c.maximum_version=ssl.TLSVersion.TLSv1_2; c.verify_mode=ssl.CERT_NONE; t=c.wrap_socket(s,server_hostname="example.com",do_handshake_on_connect=False); exec("try:\n t.do_handshake()\nexcept (ssl.SSLError,OSError,TimeoutError):\n pass"); t.close()' "$peer_address" "$mss"
     sleep 2
     kill -TERM "$running_pid"
     wait "$running_pid"
@@ -290,6 +291,24 @@ echo 'nfqueue_copy_stats_trace=identical (one truncated packet)'
 
 run_hello_case d2o "$d2o_datapath" '--- d2kd['
 run_hello_case r2o "$r2o_datapath" 'r2o-datapath: TCP-потоки'
+run_hello_case d2o-split "$d2o_datapath" '--- d2kd[' 128
+run_hello_case r2o-split "$r2o_datapath" 'r2o-datapath: TCP-потоки' 128
+
+c_split_hello_values=$(grep 'узнано приветствий ' "$test_tmpdir/r2o-stats-hello-d2o-split.log" | sed -E 's/.*узнано приветствий ([0-9]+), из них с именем ([0-9]+).*/\1 \2/')
+r_split_hello_values=$(grep 'r2o-datapath: распознано TCP ClientHello ' "$test_tmpdir/r2o-stats-hello-r2o-split.log" | sed -E 's/.*распознано TCP ClientHello ([0-9]+), из них с именем ([0-9]+).*/\1 \2/')
+if [ "$c_split_hello_values" != "$r_split_hello_values" ]; then
+    echo "D2O and R2O hello/SNI totals differ when SNI arrives in a later TCP segment" >&2
+    printf 'C:\n%s\nRust:\n%s\n' "$c_split_hello_values" "$r_split_hello_values" >&2
+    exit 1
+fi
+c_split_next_values=$(grep 'имя уехало во второй сегмент:' "$test_tmpdir/r2o-stats-hello-d2o-split.log" | sed -E 's/^.*: *//')
+r_split_next_values=$(grep 'имя ClientHello в следующем сегменте:' "$test_tmpdir/r2o-stats-hello-r2o-split.log" | sed -E 's/^.*: *//')
+if [ "$c_split_next_values" != "$r_split_next_values" ] ||
+    ! printf '%s\n' "$c_split_next_values" | sed '$d' | grep -Fxq '1'; then
+    echo "split-SNI fixture must trigger the matching second-segment counter: C=$c_split_next_values Rust=$r_split_next_values" >&2
+    exit 1
+fi
+echo 'tcp_clienthello_split_sni_stats_trace=identical (SNI arrives in a later TCP segment)'
 
 c_hello_stats_count=$(grep -Fc -- '--- d2kd[' "$test_tmpdir/r2o-stats-hello-d2o.log" || true)
 r_hello_stats_count=$(grep -Fc 'r2o-datapath: TCP-потоки' "$test_tmpdir/r2o-stats-hello-r2o.log" || true)
