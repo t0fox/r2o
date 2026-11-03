@@ -17,19 +17,36 @@ sed 's/\r$//' "$D2O_ROOT/files/001-d2k.sh" > "$TEMP/d2o-hook.sh"
 sed -n '/^reapply() {/,/^}/p; /^heal_reapply() {/,/^}/p; /^firewall_heal() {/,/^}/p; /^heal() {/,/^}/p' "$ROOT/router/S99r2o" |
     sed 's/\r$//' > "$TEMP/r2o-functions.sh"
 
+cat > "$TEMP/trace-event.sh" <<'TRACE'
+trace_event() {
+    trace_lock=$TRACE.lock
+    trace_attempt=0
+    while ! mkdir "$trace_lock" 2>/dev/null; do
+        trace_attempt=$((trace_attempt + 1))
+        [ "$trace_attempt" -lt 1000 ] || return 1
+        sleep 0.001
+    done
+    printf '%s\n' "$1" >> "$TRACE"
+    rmdir "$trace_lock"
+}
+TRACE
+TRACE_HELPER=$TEMP/trace-event.sh
+export TRACE_HELPER
+
 cat > "$TEMP/d2o-service" <<'SERVICE'
 #!/bin/sh
+. "$TRACE_HELPER"
 case "$1" in
     status)
-        printf 'status\n' >> "$TRACE"
+        trace_event status
         printf '\320\264\320\260\321\202\320\260\320\277\320\260\321\202: \321\200\320\260\320\261\320\276\321\202\320\260\320\265\321\202\n'
         if [ "${RULES_INSTALLED:-0}" = 1 ]; then
             printf '\320\277\321\200\320\260\320\262\320\270\320\273\320\260: \321\201\321\202\320\276\321\217\321\202\n'
         fi
         ;;
-    ppe-ensure|dns-ensure) printf '%s\n' "$1" >> "$TRACE" ;;
+    ppe-ensure|dns-ensure) trace_event "$1" ;;
     reapply)
-        printf 'up\n' >> "$TRACE"
+        trace_event up
         sleep 1
         exit "${UP_RC:-0}"
         ;;
@@ -52,15 +69,16 @@ RUNNER
 
 cat > "$TEMP/r2o-firewall" <<'FIREWALL'
 #!/bin/sh
+. "$TRACE_HELPER"
 case "$1" in
     status)
-        printf 'status\n' >> "$TRACE"
+        trace_event status
         [ "${RULES_INSTALLED:-0}" = 1 ]
         ;;
-    dns-ensure) printf 'dns-ensure\n' >> "$TRACE" ;;
-    flowoffload-ensure) printf 'flowoffload-ensure\n' >> "$TRACE" ;;
+    dns-ensure) trace_event dns-ensure ;;
+    flowoffload-ensure) trace_event flowoffload-ensure ;;
     up)
-        printf 'up\n' >> "$TRACE"
+        trace_event up
         sleep 1
         exit "${UP_RC:-0}"
         ;;
@@ -74,7 +92,8 @@ FIREWALL=$R2O_FIREWALL
 DP4_PID=running
 RUNTIME=$R2O_RUNTIME
 component_running() { [ "$1" = r2o-datapath ]; }
-ppe_ensure() { printf 'ppe-ensure\n' >> "$TRACE"; }
+. "$TRACE_HELPER"
+ppe_ensure() { trace_event ppe-ensure; }
 telegram_reapply() { :; }
 say() { :; }
 die() { exit 1; }

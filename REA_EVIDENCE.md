@@ -9507,3 +9507,10 @@ Shell syntax and ShellCheck passed. The complete Debian 13 WSL2 C/Rust productio
 ### QUIC HTTP/3 data-stage revalidation on current main — 2026-11-03
 
 The pinned D2O a63d964 / R2O 8f409f6 full-stage differential passed 15/15 in 122.72 seconds in Debian 13 WSL2. This includes the task deadline, repeated GET budget, response growth, >16 MiB body, stream reset, close, silent peer, UDP port unreachable, dropped replies, GOAWAY, and the zero-bidi-credit request counter. The current matrix row remains partial because other transport-error, stall-variant, and lifecycle cases are still open; no points changed.
+
+
+### NDM heal concurrency trace fixture — 2026-11-03
+
+A rare differential run showed D2O `up=1` and R2O `up=0`, although the R2O heal timestamp existed, its lock had been released, and later flowoffload/PPE events were recorded. This points to a lost concurrent append in the test trace on E: DrvFS. The fixture now serializes trace writes through a shared mkdir lock; production code was unchanged.
+
+`scripts/test-router-heal-concurrency-differential.sh` passed 10 consecutive runs in Debian 13 WSL2 against pinned D2O `a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe` and current R2O main. `sh -n`, ShellCheck at warning level, and `git diff --check` passed. Per-run logs are `E:/r2o-tooling/tests/heal-concurrency-repeat-1.log` through `heal-concurrency-repeat-10.log`. The firewall recovery row remains partial while real NFQUEUE/offload crash cases are open; weighted parity stays 62/87 (71.26%). QEMU was not needed.
