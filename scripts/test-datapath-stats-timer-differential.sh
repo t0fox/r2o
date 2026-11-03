@@ -179,18 +179,27 @@ PY
     kill -TERM "$running_pid"
     wait "$running_pid"
     running_pid=
-    c_values=$(grep 'снимки TCP:' "$log" | tail -n 1 | sed -E 's/.*полных=([0-9]+) отвергнутых=([0-9]+) истекших=([0-9]+) отказов ёмкости=([0-9]+).*/\1 \2 \3 \4/')
-    r_values=$(grep 'снимки TLS/TCP:' "$log" | tail -n 1 | sed -E 's/.*завершено ([0-9]+), отклонено ([0-9]+), истекло ([0-9]+), отказов ёмкости ([0-9]+).*/\1 \2 \3 \4/')
-    if [ "$c_values" != '0 0 1 0' ] || [ "$r_values" != '0 0 1 0' ]; then
+    if [ "$name" = d2o ]; then
+        values=$(grep 'снимки TCP:' "$log" | tail -n 1 | sed -E 's/.*полных=([0-9]+) отвергнутых=([0-9]+) истекших=([0-9]+) отказов ёмкости=([0-9]+).*/\1 \2 \3 \4/')
+    else
+        values=$(grep 'снимки TLS/TCP:' "$log" | tail -n 1 | sed -E 's/.*завершено ([0-9]+), отклонено ([0-9]+), истекло ([0-9]+), отказов ёмкости ([0-9]+).*/\1 \2 \3 \4/')
+    fi
+    if [ "$values" != '0 0 1 0' ]; then
         cat "$log" >&2
-        echo "$name capture expiry counters differ: C=$c_values Rust=$r_values" >&2
+        echo "$name capture expiry counters differ: expected=0 0 1 0 actual=$values" >&2
         exit 1
     fi
-    printf '%s capture_expiry_stats=%s\n' "$name" "$c_values"
+    printf '%s capture_expiry_stats=%s\n' "$name" "$values"
 }
 
 run_capture_expiry_case d2o "$d2o_datapath"
 run_capture_expiry_case r2o "$r2o_datapath"
+c_capture_values=$(grep 'снимки TCP:' "$test_tmpdir/r2o-stats-capture-expiry-d2o.log" | tail -n 1 | sed -E 's/.*полных=([0-9]+) отвергнутых=([0-9]+) истекших=([0-9]+) отказов ёмкости=([0-9]+).*/\1 \2 \3 \4/')
+r_capture_values=$(grep 'снимки TLS/TCP:' "$test_tmpdir/r2o-stats-capture-expiry-r2o.log" | tail -n 1 | sed -E 's/.*завершено ([0-9]+), отклонено ([0-9]+), истекло ([0-9]+), отказов ёмкости ([0-9]+).*/\1 \2 \3 \4/')
+if [ "$c_capture_values" != "$r_capture_values" ]; then
+    echo "D2O and R2O periodic capture expiry counters differ: C=$c_capture_values Rust=$r_capture_values" >&2
+    exit 1
+fi
 echo 'tcp_capture_expiry_periodic_stats_trace=identical (production IPv4 NFQUEUE processes)'
 
 run_case d2o "$d2o_datapath" '--- d2kd['
