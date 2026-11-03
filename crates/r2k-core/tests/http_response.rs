@@ -43,7 +43,7 @@ fn matches_d2o_http_header_and_chunk_framing() {
     line_over_limit.extend_from_slice(&[b'a'; 126]);
     line_over_limit.extend_from_slice(b"\r\nx\r\n0\r\n\r\n");
 
-    let cases: [(&str, u16, Vec<u8>, bool, u64); 13] = [
+    let cases: [(&str, u16, Vec<u8>, bool, u64); 16] = [
         (
             "extension_suffix",
             200,
@@ -90,6 +90,27 @@ fn matches_d2o_http_header_and_chunk_framing() {
             "control_header_value",
             200,
             b"HTTP/1.1 200 OK\r\nX: foo\x01bar\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            true,
+            0,
+        ),
+        (
+            "bare_lf_header_value",
+            200,
+            b"HTTP/1.1 200 OK\r\nX: foo\nbar\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            true,
+            0,
+        ),
+        (
+            "bare_cr_header_value",
+            200,
+            b"HTTP/1.1 200 OK\r\nX: foo\rbar\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            true,
+            0,
+        ),
+        (
+            "bare_lf_swallows_next_header",
+            200,
+            b"HTTP/1.1 200 OK\r\nX: x\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n".to_vec(),
             true,
             0,
         ),
@@ -152,6 +173,9 @@ fn matches_d2o_http_header_and_chunk_framing() {
          control_chunk_size status=200 complete=0 body_bytes=0\n\
          buffered_bytes_after_frame status=200 complete=1 body_bytes=0\n\
          control_header_value status=200 complete=1 body_bytes=0\n\
+         bare_lf_header_value status=200 complete=1 body_bytes=0\n\
+         bare_cr_header_value status=200 complete=1 body_bytes=0\n\
+         bare_lf_swallows_next_header status=200 complete=1 body_bytes=0\n\
          control_trailer status=200 complete=1 body_bytes=0\n\
          nul_first_trailer status=200 complete=1 body_bytes=0\n\
          bodyless_204_buffered status=204 complete=1 body_bytes=0\n\
@@ -178,8 +202,7 @@ fn rejects_chunk_size_line_beyond_d2o_buffer_limit() {
 
 #[test]
 fn rejects_malformed_or_ambiguous_response_framing() {
-    let cases: [&[u8]; 11] = [
-        b"HTTP/1.1 200 OK\r\nX: x\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n",
+    let cases: [&[u8]; 10] = [
         b"HTTP/1.1 200\r\nContent-Length: 0\r\n\r\n",
         b"HTTP/1.1 000 Unknown\r\nContent-Length: 0\r\n\r\n",
         b"HTTP/1.1 600 Unknown\r\nContent-Length: 0\r\n\r\n",

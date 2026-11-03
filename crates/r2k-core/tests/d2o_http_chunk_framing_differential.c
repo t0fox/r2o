@@ -72,6 +72,13 @@ int main(void)
         "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\nextra";
     static const uint8_t control_header_value[] =
         "HTTP/1.1 200 OK\r\nX: foo\001bar\r\nContent-Length: 0\r\n\r\n";
+    static const uint8_t bare_lf_header_value[] =
+        "HTTP/1.1 200 OK\r\nX: foo\nbar\r\nContent-Length: 0\r\n\r\n";
+    static const uint8_t bare_cr_header_value[] =
+        "HTTP/1.1 200 OK\r\nX: foo\rbar\r\nContent-Length: 0\r\n\r\n";
+    static const uint8_t bare_lf_swallows_next_header[] =
+        "HTTP/1.1 200 OK\r\nX: x\nTransfer-Encoding: chunked\r\n"
+        "Content-Length: 0\r\n\r\n";
     static const uint8_t control_trailer[] =
         "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
         "0\r\nX: foo\001bar\r\n\r\n";
@@ -92,6 +99,12 @@ int main(void)
           sizeof(buffered_bytes_after_frame) - 1, 200, 1, 0 },
         { "control_header_value", control_header_value, sizeof(control_header_value) - 1,
           200, 1, 0 },
+        { "bare_lf_header_value", bare_lf_header_value, sizeof(bare_lf_header_value) - 1,
+          200, 1, 0 },
+        { "bare_cr_header_value", bare_cr_header_value, sizeof(bare_cr_header_value) - 1,
+          200, 1, 0 },
+        { "bare_lf_swallows_next_header", bare_lf_swallows_next_header,
+          sizeof(bare_lf_swallows_next_header) - 1, 200, 1, 0 },
         { "control_trailer", control_trailer, sizeof(control_trailer) - 1, 200, 1, 0 },
         { "nul_first_trailer", nul_first_trailer, sizeof(nul_first_trailer) - 1, 200, 1, 0 },
         { "bodyless_204_buffered", bodyless_204_buffered,

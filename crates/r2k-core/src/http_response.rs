@@ -158,11 +158,17 @@ impl HttpResponseParser {
     }
 
     fn feed_header_byte(&mut self, byte: u8) {
+        // D2O find_eol recognizes only CRLF, so lone CR/LF in fields remain data.
         if byte == 0
             || !self.status_line_complete && invalid_header_byte(byte)
             || self.header_len + 1 >= self.header.len()
-            || byte == b'\n' && (self.header_len == 0 || self.header[self.header_len - 1] != b'\r')
-            || self.header_len != 0 && self.header[self.header_len - 1] == b'\r' && byte != b'\n'
+            || !self.status_line_complete
+                && byte == b'\n'
+                && (self.header_len == 0 || self.header[self.header_len - 1] != b'\r')
+            || !self.status_line_complete
+                && self.header_len != 0
+                && self.header[self.header_len - 1] == b'\r'
+                && byte != b'\n'
         {
             self.invalid = true;
             return;
