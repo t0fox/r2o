@@ -66,3 +66,24 @@ if [ "$c_capture_values" != "$r_capture_values" ]; then
     exit 1
 fi
 echo 'capture_stats_numeric_trace=identical'
+
+c_payload_count=$(grep -Fc 'нагрузка мимо приветствия:' "$test_tmpdir/r2o-stats-diff-d2o.log" || true)
+r_payload_count=$(grep -Fc 'нагрузка мимо приветствия:' "$test_tmpdir/r2o-stats-diff-r2o.log" || true)
+c_next_segment_count=$(grep -Fc 'имя уехало во второй сегмент:' "$test_tmpdir/r2o-stats-diff-d2o.log" || true)
+r_next_segment_count=$(grep -Fc 'имя ClientHello в следующем сегменте:' "$test_tmpdir/r2o-stats-diff-r2o.log" || true)
+if [ "$c_payload_count" -ne "$c_stats_count" ] || [ "$r_payload_count" -ne "$r_stats_count" ] \
+    || [ "$c_next_segment_count" -ne "$c_stats_count" ] || [ "$r_next_segment_count" -ne "$r_stats_count" ]; then
+    echo "payload/session counters must appear once per full stats summary: payload C=$c_payload_count/$c_stats_count Rust=$r_payload_count/$r_stats_count, next-segment C=$c_next_segment_count/$c_stats_count Rust=$r_next_segment_count/$r_stats_count" >&2
+    exit 1
+fi
+c_payload_values=$(grep 'нагрузка мимо приветствия:' "$test_tmpdir/r2o-stats-diff-d2o.log" | head -n 2 | sed -E 's/ \(первый байт.*$//' | sed -E 's/^.*: *//' | sed -E 's/[^0-9]+/ /g')
+r_payload_values=$(grep 'нагрузка мимо приветствия:' "$test_tmpdir/r2o-stats-diff-r2o.log" | head -n 2 | sed -E 's/ \(первый байт.*$//' | sed -E 's/^.*: *//' | sed -E 's/[^0-9]+/ /g')
+c_next_segment_values=$(grep 'имя уехало во второй сегмент:' "$test_tmpdir/r2o-stats-diff-d2o.log" | head -n 2 | sed -E 's/^.*: *//' | sed -E 's/[^0-9]+/ /g')
+r_next_segment_values=$(grep 'имя ClientHello в следующем сегменте:' "$test_tmpdir/r2o-stats-diff-r2o.log" | head -n 2 | sed -E 's/^.*: *//' | sed -E 's/[^0-9]+/ /g')
+if [ "$c_payload_values" != "$r_payload_values" ] || [ "$c_next_segment_values" != "$r_next_segment_values" ]; then
+    echo "D2O payload/session counters differ from R2O" >&2
+    printf 'C payload:\n%s\nRust payload:\n%s\nC second-segment:\n%s\nRust second-segment:\n%s\n' \
+        "$c_payload_values" "$r_payload_values" "$c_next_segment_values" "$r_next_segment_values" >&2
+    exit 1
+fi
+echo 'payload_session_stats_numeric_trace=identical'
