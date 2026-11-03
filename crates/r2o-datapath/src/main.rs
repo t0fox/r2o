@@ -697,7 +697,7 @@ mod app {
         );
     }
 
-    fn r2o_log_session_stats(tcp_sessions: &TcpSessions) {
+    fn r2o_log_session_stats(tcp_sessions: &TcpSessions, udp_sessions: &R2oUdpSessions) {
         eprintln!(
             "r2o-datapath: ответ невидим очереди: {} из {} TCP-потоков с приветствием",
             tcp_sessions.r2o_reply_hidden(),
@@ -707,6 +707,15 @@ mod app {
             "r2o-datapath: распознано TCP ClientHello {}, из них с именем {}",
             tcp_sessions.r2o_tcp_hello_flows(),
             tcp_sessions.r2o_tcp_hellos_with_sni()
+        );
+        eprintln!(
+            "r2o-datapath: узнано приветствий {}, из них с именем {}",
+            tcp_sessions
+                .r2o_tcp_hello_flows()
+                .wrapping_add(udp_sessions.r2o_quic_hello_flows()),
+            tcp_sessions
+                .r2o_tcp_hellos_with_sni()
+                .wrapping_add(udp_sessions.r2o_quic_hellos_with_sni())
         );
         let http_stats = tcp_sessions.r2o_http_keepalive_stats();
         if http_stats.later != 0 || http_stats.unaligned != 0 || http_stats.open_end != 0 {
@@ -976,7 +985,7 @@ mod app {
                 r2o_log_queue_stats(&socket);
                 r2o_log_flow_table_stats(&tcp_sessions, &udp_sessions);
                 r2o_log_scheduler_stats(&scheduled);
-                r2o_log_session_stats(&tcp_sessions);
+                r2o_log_session_stats(&tcp_sessions, &udp_sessions);
                 r2o_log_payload_stats(&tcp_sessions);
                 r2o_log_capture_stats(&holding);
                 r2o_log_hold_stats(&holding);
@@ -1005,7 +1014,7 @@ mod app {
                 r2o_log_queue_stats(&socket);
                 r2o_log_flow_table_stats(&tcp_sessions, &udp_sessions);
                 r2o_log_scheduler_stats(&scheduled);
-                r2o_log_session_stats(&tcp_sessions);
+                r2o_log_session_stats(&tcp_sessions, &udp_sessions);
                 r2o_log_capture_stats(&holding);
                 r2o_log_payload_stats(&tcp_sessions);
                 r2o_log_hold_stats(&holding);
@@ -1401,7 +1410,12 @@ mod app {
                                     if prefetched_quic_hello.is_none() {
                                         continue;
                                     }
-                                    udp_sessions.r2o_mark_hello_seen(bytes);
+                                    udp_sessions.r2o_mark_hello_seen(
+                                        bytes,
+                                        prefetched_quic_hello
+                                            .as_ref()
+                                            .is_some_and(|hello| !hello.host.is_empty()),
+                                    );
                                     let Some(batch) = udp_holds.r2o_take(bytes) else {
                                         continue;
                                     };
@@ -1529,8 +1543,8 @@ mod app {
                                 .then(|| quic_sessions.capture_hello_at_hook(bytes, queue_hook))
                                 .flatten()
                         });
-                        if quic_hello.is_some() {
-                            udp_sessions.r2o_mark_hello_seen(bytes);
+                        if let Some(hello) = quic_hello.as_ref() {
+                            udp_sessions.r2o_mark_hello_seen(bytes, !hello.host.is_empty());
                         }
                         let selected_plan = name_plans
                             .select_with_quic_host_at_hook(

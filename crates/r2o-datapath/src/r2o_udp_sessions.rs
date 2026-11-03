@@ -72,6 +72,7 @@ struct FlowState {
     last_seen: Instant,
     plan_applied: bool,
     hello_seen: bool,
+    quic_hello_counted: bool,
     controller_probe: bool,
     hold_attempts: u8,
     hold_replay_first: bool,
@@ -111,6 +112,8 @@ pub struct R2oUdpSessions {
     udp_exchange_events: VecDeque<R2oUdpExchangeEvent>,
     flow_capacity: R2oFlowCapacity,
     refusals: u64,
+    r2o_quic_hello_flows: u64,
+    r2o_quic_hellos_with_sni: u64,
     r2o_idle_timeout: Duration,
 }
 
@@ -130,6 +133,8 @@ impl R2oUdpSessions {
             udp_exchange_events,
             flow_capacity,
             refusals: 0,
+            r2o_quic_hello_flows: 0,
+            r2o_quic_hellos_with_sni: 0,
             r2o_idle_timeout: UDP_IDLE,
         })
     }
@@ -203,6 +208,7 @@ impl R2oUdpSessions {
                 last_seen: now,
                 plan_applied: false,
                 hello_seen: false,
+                quic_hello_counted: false,
                 controller_probe,
                 hold_attempts: 0,
                 hold_replay_first: false,
@@ -418,12 +424,32 @@ impl R2oUdpSessions {
     }
 
     /// Запретить повторное удержание после сборки ClientHello.
-    pub fn r2o_mark_hello_seen(&mut self, packet: &[u8]) -> bool {
-        let Some(flow) = flow_key_from_packet(packet).and_then(|key| self.flows.get_mut(&key))
-        else {
-            return false;
+    pub fn r2o_mark_hello_seen(&mut self, packet: &[u8], has_sni: bool) -> bool {
+        let (first_hello, count_named_hello) = {
+            let Some(flow) = flow_key_from_packet(packet).and_then(|key| self.flows.get_mut(&key))
+            else {
+                return false;
+            };
+            let first_hello = !std::mem::replace(&mut flow.hello_seen, true);
+            let count_named_hello = has_sni && !flow.quic_hello_counted;
+            if count_named_hello {
+                flow.quic_hello_counted = true;
+            }
+            (first_hello, count_named_hello)
         };
-        !std::mem::replace(&mut flow.hello_seen, true)
+        if count_named_hello {
+            self.r2o_quic_hello_flows = self.r2o_quic_hello_flows.wrapping_add(1);
+            self.r2o_quic_hellos_with_sni = self.r2o_quic_hellos_with_sni.wrapping_add(1);
+        }
+        first_hello
+    }
+
+    pub fn r2o_quic_hello_flows(&self) -> u64 {
+        self.r2o_quic_hello_flows
+    }
+
+    pub fn r2o_quic_hellos_with_sni(&self) -> u64 {
+        self.r2o_quic_hellos_with_sni
     }
 
     /// Удалить записи, не обновлявшиеся в течение заданного срока.
@@ -562,6 +588,26 @@ mod tests {
         assert_eq!(sessions.stats().flows, 48);
         assert_eq!(sessions.stats().capacity, 64);
         assert_eq!(sessions.stats().refusals, 1);
+    }
+
+    #[test]
+    fn r2o_udp_counts_named_quic_hello_once_when_sni_arrives_later() {
+        let mut sessions = R2oUdpSessions::new().unwrap();
+        let packet = r2o_udp_packet(44_321);
+        let now = Instant::now();
+        assert!(sessions.observe_packet(&packet, now));
+
+        assert!(sessions.r2o_mark_hello_seen(&packet, false));
+        assert_eq!(sessions.r2o_quic_hello_flows(), 0);
+        assert_eq!(sessions.r2o_quic_hellos_with_sni(), 0);
+
+        assert!(!sessions.r2o_mark_hello_seen(&packet, true));
+        assert_eq!(sessions.r2o_quic_hello_flows(), 1);
+        assert_eq!(sessions.r2o_quic_hellos_with_sni(), 1);
+
+        assert!(!sessions.r2o_mark_hello_seen(&packet, true));
+        assert_eq!(sessions.r2o_quic_hello_flows(), 1);
+        assert_eq!(sessions.r2o_quic_hellos_with_sni(), 1);
     }
 
     #[test]

@@ -105,7 +105,7 @@ fn r2o_udp_sessions_после_собранного_hello_не_открывае�
     let mut sessions = R2oUdpSessions::new().unwrap();
     assert!(sessions.observe_packet(&packet, Instant::now()));
     assert!(sessions.r2o_begin_hold(&packet));
-    assert!(sessions.r2o_mark_hello_seen(&packet));
+    assert!(sessions.r2o_mark_hello_seen(&packet, true));
     assert!(!sessions.r2o_begin_hold(&packet));
 }
 

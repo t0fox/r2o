@@ -5,6 +5,7 @@ d2o_datapath=${D2O_DATAPATH:-/tmp/d2kd-stats-c}
 r2o_datapath=${R2O_DATAPATH:-/tmp/r2o-datapath}
 queue=${R2O_TEST_QUEUE:-2002}
 test_tmpdir=${R2O_TEST_TMPDIR:-${TMPDIR:-/tmp}}
+test_control_tmpdir=${R2O_TEST_CONTROL_TMPDIR:-$test_tmpdir}
 namespace="r2o-stats-diff-$$"
 peer_namespace="r2o-stats-peer-$$"
 client_if="rsc$$"
@@ -13,8 +14,11 @@ peer_address=198.51.100.2
 traffic_port=39992
 running_pid=
 server_pid=
+control=
+ready=
 
 mkdir -p "$test_tmpdir"
+mkdir -p "$test_control_tmpdir"
 
 cleanup() {
     if [ -n "$running_pid" ]; then
@@ -25,6 +29,7 @@ cleanup() {
         kill -TERM "$server_pid" 2>/dev/null || true
         wait "$server_pid" 2>/dev/null || true
     fi
+    rm -f "" "" 2>/dev/null || true
     if ip netns list | awk '{print $1}' | grep -Fxq "$namespace"; then
         ip netns del "$namespace" 2>/dev/null || true
     fi
@@ -332,3 +337,99 @@ if [ "$c_hello_periodic" -lt 1 ] || [ "$r_hello_periodic" -lt 1 ]; then
     exit 1
 fi
 echo 'tcp_clienthello_stats_trace=identical (one TLS ClientHello with SNI)'
+
+
+# Reuse the pinned RFC 9001 Initial fixture from the C session tests.
+quic_initial="$test_tmpdir/r2o-stats-quic-v1-initial.bin"
+python3 - "$d2o_datapath" "$quic_initial" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+source = Path(sys.argv[1]).resolve().with_name("test_quic_session.c")
+match = re.search(
+    r"static const uint8_t v1_initial\[1200\]\s*=\s*\{(.*?)\};",
+    source.read_text(),
+    re.S,
+)
+if not match:
+    raise SystemExit(f"missing RFC 9001 v1_initial fixture in {source}")
+payload = bytes(int(value, 16) for value in re.findall(r"0x([0-9a-fA-F]{1,2})", match.group(1)))
+if len(payload) != 1200:
+    raise SystemExit(f"expected 1200-byte Initial, found {len(payload)}")
+Path(sys.argv[2]).write_bytes(payload)
+PY
+ip netns exec "$namespace" nft add rule inet stats output oifname "$client_if" ip daddr "$peer_address" udp dport 443 queue num "$queue"
+
+run_quic_hello_case() {
+    name=$1
+    binary=$2
+    controller_only=$3
+    pattern=$4
+    log="$test_tmpdir/r2o-stats-quic-$name.log"
+    control="$test_control_tmpdir/quic-$name-control.sock"
+    ready="$control.ready"
+    rm -f "$log" "$control" "$ready"
+    if [ "$controller_only" = yes ]; then
+        ip netns exec "$namespace" "$binary" --queue "$queue" --mode observe --stats 1 --controller-only --control "$control" >"$log" 2>&1 &
+    else
+        ip netns exec "$namespace" "$binary" --queue "$queue" --mode observe --stats 1 --control "$control" >"$log" 2>&1 &
+    fi
+    running_pid=$!
+    attempt=0
+    while [ ! -S "$control" ]; do
+        if ! kill -0 "$running_pid" 2>/dev/null; then cat "$log"; exit 1; fi
+        attempt=$((attempt + 1))
+        if [ "$attempt" -ge 50 ]; then
+            echo "QUIC stats test control socket did not become ready" >&2
+            cat "$log" >&2
+            exit 1
+        fi
+        sleep 0.1
+    done
+    python3 -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); end=time.monotonic()+5
+while True:
+ try:
+  s.connect(sys.argv[1]); break
+ except OSError:
+  if time.monotonic()>=end: raise
+  time.sleep(0.1)
+open(sys.argv[2],"w").close()
+while True: time.sleep(1)' "$control" "$ready" >"$test_tmpdir/quic-$name-control.log" 2>&1 &
+    server_pid=$!
+    attempt=0
+    while [ ! -e "$ready" ]; do
+        if ! kill -0 "$server_pid" 2>/dev/null; then cat "$test_tmpdir/quic-$name-control.log"; exit 1; fi
+        attempt=$((attempt + 1))
+        if [ "$attempt" -ge 50 ]; then
+            echo "QUIC stats test controller did not connect" >&2
+            cat "$test_tmpdir/quic-$name-control.log" >&2
+            exit 1
+        fi
+        sleep 0.1
+    done
+    sleep 0.3
+    ip netns exec "$namespace" python3 -c 'import socket,sys; packet=open(sys.argv[1],"rb").read(); s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.sendto(packet,(sys.argv[2],443))' "$quic_initial" "$peer_address"
+    sleep 2
+    kill -TERM "$running_pid"
+    wait "$running_pid"
+    running_pid=
+    kill -TERM "$server_pid" 2>/dev/null || true
+    wait "$server_pid" 2>/dev/null || true
+    server_pid=
+    count=$(grep -Fc -e "$pattern" "$log" || true)
+    echo "$name quic_summary_lines=$count"
+    if [ "$count" -lt 2 ]; then cat "$log"; exit 1; fi
+}
+
+run_quic_hello_case d2o "$d2o_datapath" no '--- d2kd['
+run_quic_hello_case r2o "$r2o_datapath" yes 'r2o-datapath: TCP'
+c_quic_hello_values=$(grep 'узнано приветствий ' "$test_tmpdir/r2o-stats-quic-d2o.log" | sed -E 's/.*узнано приветствий ([0-9]+), из них с именем ([0-9]+).*/\1 \2/')
+r_quic_hello_values=$(grep 'узнано приветствий ' "$test_tmpdir/r2o-stats-quic-r2o.log" | sed -E 's/.*узнано приветствий ([0-9]+), из них с именем ([0-9]+).*/\1 \2/')
+if [ -z "$c_quic_hello_values" ] || [ "$c_quic_hello_values" != "$r_quic_hello_values" ] ||
+    ! printf '%s\n' "$c_quic_hello_values" | grep -Fxq '1 1'; then
+    echo "D2O and R2O aggregate hello/SNI totals differ for one QUIC Initial" >&2
+    printf 'C:\n%s\nRust:\n%s\n' "$c_quic_hello_values" "$r_quic_hello_values" >&2
+    exit 1
+fi
+echo 'quic_clienthello_stats_trace=identical (one named QUIC Initial)'
