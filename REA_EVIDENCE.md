@@ -9538,3 +9538,7 @@ This is R2O production-path evidence for local IPv4 UDP NFQUEUE → QUIC suspici
 ### QUIC HTTP/3 отказ ALPN — 2026-11-03
 
 The pinned D2O `a63d964` and R2O test differential runs against a server that offers only `h2` and rejects the client's `h3` ALPN. `r2o_http3_alpn_refusal_matches_d2o` passed 1/1 in Debian 13 WSL2; both sides return `NoHandshake`, zero application bytes and zero requests. The Rust result also preserves the handshake error. Only test coverage and evidence changed; no QEMU was needed, and the QUIC row stays partial at 0/2 (62/87, 71.26%).
+
+### Discord endpoint lifecycle trace on current D2O main — 2026-11-03
+
+`scripts/r2o-discord-voice-lifecycle-helper.sh` passed in Debian 13 WSL2 against pinned D2O `a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe`. Clang 18 rebuilt the C trace fixture from current donor objects, and Rust `voice_lifecycle_trace_matches_d2o_a_to_b_queue_lease_proof_and_persistence` matched it. The trace covers dropping endpoint B while A is being measured, keeping only the latest endpoint queued during trial A, retaining an address binding after a late SET_ADDR NAK, persisting and reapplying it after scheduler restart, and preserving fallback name-binding provenance. The ephemeral Unix sockets and short-lived fixture files used `/dev/shm` because E: DrvFS rejects AF_UNIX; source, Cargo target, and persistent artifacts remain on E:. This is helper/process-boundary evidence, not automatic service recovery or a long RTC session; Discord lifecycle stays partial, and weighted parity remains 62/87 (71.26%).
