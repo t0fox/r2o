@@ -82,6 +82,21 @@ if [ "$c_visibility_values" != "$r_visibility_values" ]; then
 fi
 echo 'reply_visibility_stats_numeric_trace=identical'
 
+c_hold_count=$(grep -Fc 'составной вход:' "$test_tmpdir/r2o-stats-diff-d2o.log" || true)
+r_hold_count=$(grep -Fc 'составной вход:' "$test_tmpdir/r2o-stats-diff-r2o.log" || true)
+if [ "$c_hold_count" -ne "$c_stats_count" ] || [ "$r_hold_count" -ne "$r_stats_count" ]; then
+    echo "hold counters must appear once per full stats summary: C=$c_hold_count/$c_stats_count Rust=$r_hold_count/$r_stats_count" >&2
+    exit 1
+fi
+c_hold_values=$(grep 'составной вход:' "$test_tmpdir/r2o-stats-diff-d2o.log" | head -n 2 | sed -E 's/^.*: *//' | sed -E 's/[^0-9]+/ /g')
+r_hold_values=$(grep 'составной вход:' "$test_tmpdir/r2o-stats-diff-r2o.log" | head -n 2 | sed -E 's/^r2o-datapath: составной вход: //' | sed -E 's/[^0-9]+/ /g')
+if [ "$c_hold_values" != "$r_hold_values" ]; then
+    echo "D2O hold statistics differ from R2O" >&2
+    printf 'C:\n%s\nRust:\n%s\n' "$c_hold_values" "$r_hold_values" >&2
+    exit 1
+fi
+echo 'hold_stats_numeric_trace=identical'
+
 c_payload_count=$(grep -Fc 'нагрузка мимо приветствия:' "$test_tmpdir/r2o-stats-diff-d2o.log" || true)
 r_payload_count=$(grep -Fc 'нагрузка мимо приветствия:' "$test_tmpdir/r2o-stats-diff-r2o.log" || true)
 c_next_segment_count=$(grep -Fc 'имя уехало во второй сегмент:' "$test_tmpdir/r2o-stats-diff-d2o.log" || true)

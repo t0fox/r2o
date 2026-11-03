@@ -642,6 +642,25 @@ mod app {
         );
     }
 
+    fn r2o_log_hold_stats(holding: &HoldTable) {
+        let stats = holding.r2o_hold_stats();
+        eprintln!(
+            "r2o-datapath: составной вход: начато={} собрано={} отпущено={} таймаутов={} (пакетов в них={}) по смене плана={} по сбросу={} добавлено к голове={} несовместимых={} с другой стороны={} отказов ёмкости={} ожидающих пакетов={}",
+            stats.started,
+            stats.ready,
+            stats.released,
+            stats.timed_out,
+            stats.timed_out_packets,
+            stats.plan_changed,
+            stats.dropped_all,
+            stats.joined,
+            stats.mismatched,
+            stats.sided,
+            stats.full,
+            stats.pending
+        );
+    }
+
     fn r2o_log_payload_stats(tcp_sessions: &TcpSessions) {
         let payload_stats = tcp_sessions.r2o_tcp_payload_stats();
         eprintln!(
@@ -933,6 +952,7 @@ mod app {
                 r2o_log_session_stats(&tcp_sessions);
                 r2o_log_payload_stats(&tcp_sessions);
                 r2o_log_capture_stats(&holding);
+                r2o_log_hold_stats(&holding);
                 if let Some(line) = icmp_guard.r2o_stats_line() {
                     eprintln!("r2o-datapath: {line}");
                 }
@@ -959,6 +979,7 @@ mod app {
                 r2o_log_session_stats(&tcp_sessions);
                 r2o_log_capture_stats(&holding);
                 r2o_log_payload_stats(&tcp_sessions);
+                r2o_log_hold_stats(&holding);
                 if let Some(line) = icmp_guard.r2o_stats_line() {
                     eprintln!("r2o-datapath: {line}");
                 }

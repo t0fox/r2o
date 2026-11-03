@@ -68,6 +68,23 @@ pub struct HoldOptions {
     pub observe_http: bool,
 }
 
+/// Счётчики владения TCP-пакетами, соответствующие d2k_hold_stats в D2O.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct R2oHoldStats {
+    pub started: u64,
+    pub ready: u64,
+    pub released: u64,
+    pub full: u64,
+    pub timed_out: u64,
+    pub timed_out_packets: u64,
+    pub plan_changed: u64,
+    pub dropped_all: u64,
+    pub joined: u64,
+    pub mismatched: u64,
+    pub sided: u64,
+    pub pending: usize,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct Endpoint {
     address: Address,
@@ -159,12 +176,17 @@ pub struct HoldTable {
     capture: CaptureTable,
     incomplete_diagnostics: VecDeque<R2oIncompleteCaptureDiagnostic>,
     next_generation: u64,
+    stats: R2oHoldStats,
 }
 
 impl HoldTable {
     /// Возвращает накопленные счётчики сборки TCP-приветствий и HTTP-запросов.
     pub fn r2o_capture_stats(&self) -> CaptureStats {
         self.capture.stats()
+    }
+
+    pub fn r2o_hold_stats(&self) -> R2oHoldStats {
+        self.stats
     }
 
     pub fn note_http_execution(&mut self, sequence: u32, event: &AppliedEvent) {
@@ -364,8 +386,11 @@ impl HoldTable {
         }
         let slot_index = self.slot_index(&key);
         if let Some(index) = slot_index {
-            let slot = &self.slots[index];
-            if tcp.flags & 0x07 != 0 || (source != slot.client && !tcp.payload.is_empty()) {
+            let opposite_side = source != self.slots[index].client;
+            if tcp.flags & 0x07 != 0 || (opposite_side && !tcp.payload.is_empty()) {
+                if opposite_side {
+                    self.stats.sided = self.stats.sided.saturating_add(1);
+                }
                 released.extend(self.remove_slot(index));
                 self.capture.forget(&key);
                 return FeedResult {
@@ -389,6 +414,9 @@ impl HoldTable {
             );
         }
         if payload.is_empty() && tcp.flags & 0x05 == 0 {
+            if slot_index.is_some_and(|index| self.slots[index].client != source) {
+                self.stats.sided = self.stats.sided.saturating_add(1);
+            }
             return FeedResult {
                 released,
                 outcome: HoldOutcome::Pass,
@@ -624,6 +652,7 @@ impl HoldTable {
                 self.syns[anchor_index].attempted = true;
             }
             if self.slots.len() == HOLD_SLOTS {
+                self.stats.full = self.stats.full.saturating_add(1);
                 return FeedResult {
                     released,
                     outcome: HoldOutcome::Pass,
@@ -655,21 +684,28 @@ impl HoldTable {
                 kind,
                 packets: Vec::with_capacity(HOLD_PACKETS),
             });
+            self.stats.started = self.stats.started.saturating_add(1);
             self.slots.len() - 1
         };
 
         let slot = &self.slots[index];
-        if slot.generation != anchor.generation
+        let slot_full = slot.packets.len() >= HOLD_PACKETS;
+        let mismatched = slot.generation != anchor.generation
             || slot.revision != revision
             || slot.client != source
             || slot.acknowledgment != tcp.acknowledgment
             || tcp.flags & !0x18 != 0
             || tcp.flags & 0x10 == 0
             || view.total_len > HOLD_PACKET_BYTES
-            || slot.packets.len() >= HOLD_PACKETS
-        {
+            || slot_full;
+        if mismatched {
+            if slot_full {
+                self.stats.full = self.stats.full.saturating_add(1);
+            }
+            self.stats.mismatched = self.stats.mismatched.saturating_add(1);
             released.extend(self.remove_slot(index));
             released.push(id);
+            self.stats.released = self.stats.released.saturating_add(1);
             self.capture.forget(&key);
             return FeedResult {
                 released,
@@ -680,17 +716,22 @@ impl HoldTable {
         if self.slots[index].packets.try_reserve(1).is_err() {
             released.extend(self.remove_slot(index));
             released.push(id);
+            self.stats.released = self.stats.released.saturating_add(1);
             self.capture.forget(&key);
             return FeedResult {
                 released,
                 outcome: HoldOutcome::Waiting,
             };
         }
+        if !self.slots[index].packets.is_empty() {
+            self.stats.joined = self.stats.joined.saturating_add(1);
+        }
         self.slots[index].packets.push(HeldPacket {
             id,
             sequence: tcp.sequence,
             bytes: packet[..view.total_len].to_vec(),
         });
+        self.stats.pending = self.stats.pending.saturating_add(1);
 
         let capture = match self.slots[index].kind {
             HoldKind::Tls => self.capture.feed_with_visibility(
@@ -737,6 +778,7 @@ impl HoldTable {
                 }
                 self.syns[anchor_index].saw_hello = true;
                 let held = self.slots.remove(index);
+                self.stats.pending = self.stats.pending.saturating_sub(held.packets.len());
                 self.capture.forget(&key);
                 let head = held
                     .packets
@@ -744,6 +786,10 @@ impl HoldTable {
                     .find(|held_packet| held_packet.sequence == sequence)
                     .and_then(|held_packet| synthetic_packet(&held_packet.bytes, &bytes));
                 let Some(packet) = head else {
+                    self.stats.released = self
+                        .stats
+                        .released
+                        .saturating_add(held.packets.len() as u64);
                     released.extend(held.packets.into_iter().map(|held_packet| held_packet.id));
                     return FeedResult {
                         released,
@@ -755,6 +801,7 @@ impl HoldTable {
                         .r2o_http_requests
                         .observe(sequence, &bytes);
                 }
+                self.stats.ready = self.stats.ready.saturating_add(1);
                 FeedResult {
                     released,
                     outcome: HoldOutcome::Ready {
@@ -797,6 +844,19 @@ impl HoldTable {
                 )
             };
             if all || now >= deadline || revision != slot_revision {
+                let pending_packets = self.slots[index].packets.len();
+                if all {
+                    self.stats.dropped_all = self.stats.dropped_all.saturating_add(1);
+                } else if now < deadline {
+                    self.stats.plan_changed = self.stats.plan_changed.saturating_add(1);
+                }
+                if now >= deadline {
+                    self.stats.timed_out = self.stats.timed_out.saturating_add(1);
+                    self.stats.timed_out_packets = self
+                        .stats
+                        .timed_out_packets
+                        .saturating_add(pending_packets as u64);
+                }
                 let timed_out = !all && now >= deadline;
                 if timed_out && self.incomplete_diagnostics.len() < HOLD_SLOTS {
                     let should_report = self
@@ -1111,12 +1171,10 @@ impl HoldTable {
     }
 
     fn remove_slot(&mut self, index: usize) -> Vec<u32> {
-        self.slots
-            .remove(index)
-            .packets
-            .into_iter()
-            .map(|packet| packet.id)
-            .collect()
+        let packets = self.slots.remove(index).packets;
+        self.stats.pending = self.stats.pending.saturating_sub(packets.len());
+        self.stats.released = self.stats.released.saturating_add(packets.len() as u64);
+        packets.into_iter().map(|packet| packet.id).collect()
     }
 }
 
@@ -1357,6 +1415,11 @@ mod tests {
         );
         assert_eq!(hold.r2o_capture_stats().completed, 1);
         assert_eq!(hold.r2o_capture_stats().tls_completed, 1);
+        let stats = hold.r2o_hold_stats();
+        assert_eq!(stats.started, 1);
+        assert_eq!(stats.ready, 1);
+        assert_eq!(stats.joined, 1);
+        assert_eq!(stats.pending, 0);
     }
 
     #[test]
@@ -2033,6 +2096,13 @@ mod tests {
             hold.flush(now + Duration::from_millis(1), 5, false)
                 .contains(&4)
         );
+        let stats = hold.r2o_hold_stats();
+        assert_eq!(stats.started, 2);
+        assert_eq!(stats.released, 2);
+        assert_eq!(stats.timed_out, 1);
+        assert_eq!(stats.timed_out_packets, 1);
+        assert_eq!(stats.plan_changed, 1);
+        assert_eq!(stats.pending, 0);
     }
 
     #[test]
