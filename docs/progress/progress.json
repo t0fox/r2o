@@ -590,7 +590,7 @@
           "statusLabel": "Частично",
           "group": "Firewall / PPE",
           "mapping": "C `ppe_up`/`ppe_down`/`ppe_ensure`, `d2k_ppe_{ensure,remove}` → R2O `S99r2o::{ppe_ensure,ppe_remove,reapply}`, `r2o-firewall.sh::{firewall_up,firewall_down,firewall_ppe}`, `r2o_ppe_{ensure,remove}`",
-          "evidence": "`test-router-ppe-rule-generation-differential.sh` сравнивает production C `d2k-ppe-deoffload.sh::_d2k_ppe_rules` и R2O `_r2o_ppe_rules`: default и custom `PORTS`/voice/HTTP inputs дают одинаковые 8 правил и тот же порядок на D2O main `8e2c981` (2026-11-06). `test-router-ppe-backend-differential.sh` сверяет nft reapply; `test-router-ppe-ensure-running-differential.sh` — gate активного datapath; `test-router-ppe-legacy-cleanup-differential.sh` — IPv4/IPv6 удаление старого `d2k-ppe` с сохранением чужих правил; `test-router-ppe-firewall-lock-differential.sh` — ожидание общего firewall lock. Полные"
+          "evidence": "`test-router-ppe-rule-generation-differential.sh` сравнивает production C `d2k-ppe-deoffload.sh::_d2k_ppe_rules` и R2O `_r2o_ppe_rules`: default и custom `PORTS`/voice/HTTP inputs дают одинаковые 8 правил и тот же порядок на D2O main `8e2c981` (2026-11-06). `test-router-ppe-backend-differential.sh` сверяет nft reapply; `test-router-ppe-ensure-running-differential.sh` — gate активного datapath; `test-router-ppe-legacy-cleanup-differential.sh` — IPv4/IPv6 удаление старого `d2k-ppe` с сохранением чужих правил; `test-router-ppe-firewall-lock-differential.sh` — ожидание общего firewall lock. `test-"
         },
         {
           "id": 49,
@@ -1208,7 +1208,7 @@
       "statusLabel": "Частично",
       "group": "Firewall / PPE",
       "mapping": "C `ppe_up`/`ppe_down`/`ppe_ensure`, `d2k_ppe_{ensure,remove}` → R2O `S99r2o::{ppe_ensure,ppe_remove,reapply}`, `r2o-firewall.sh::{firewall_up,firewall_down,firewall_ppe}`, `r2o_ppe_{ensure,remove}`",
-      "evidence": "`test-router-ppe-rule-generation-differential.sh` сравнивает production C `d2k-ppe-deoffload.sh::_d2k_ppe_rules` и R2O `_r2o_ppe_rules`: default и custom `PORTS`/voice/HTTP inputs дают одинаковые 8 правил и тот же порядок на D2O main `8e2c981` (2026-11-06). `test-router-ppe-backend-differential.sh` сверяет nft reapply; `test-router-ppe-ensure-running-differential.sh` — gate активного datapath; `test-router-ppe-legacy-cleanup-differential.sh` — IPv4/IPv6 удаление старого `d2k-ppe` с сохранением чужих правил; `test-router-ppe-firewall-lock-differential.sh` — ожидание общего firewall lock. Полные"
+      "evidence": "`test-router-ppe-rule-generation-differential.sh` сравнивает production C `d2k-ppe-deoffload.sh::_d2k_ppe_rules` и R2O `_r2o_ppe_rules`: default и custom `PORTS`/voice/HTTP inputs дают одинаковые 8 правил и тот же порядок на D2O main `8e2c981` (2026-11-06). `test-router-ppe-backend-differential.sh` сверяет nft reapply; `test-router-ppe-ensure-running-differential.sh` — gate активного datapath; `test-router-ppe-legacy-cleanup-differential.sh` — IPv4/IPv6 удаление старого `d2k-ppe` с сохранением чужих правил; `test-router-ppe-firewall-lock-differential.sh` — ожидание общего firewall lock. `test-"
     },
     {
       "id": 49,

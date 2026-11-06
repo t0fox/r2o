@@ -186,18 +186,14 @@ r2o_ppe_remove_legacy() {
 }
 
 r2o_ppe_remove() {
-    _r2o_ppe_remove_rc=0
     for _r2o_ppe_tool in iptables ip6tables; do
         command -v "$_r2o_ppe_tool" >/dev/null 2>&1 || continue
-        if ! _r2o_ppe_remove_family "$_r2o_ppe_tool" "$R2O_PPE_TAG"; then
-            _r2o_ppe_remove_rc=1
-        fi
-        if [ "$R2O_PPE_LEGACY_TAG" != "$R2O_PPE_TAG" ] \
-            && ! _r2o_ppe_remove_family "$_r2o_ppe_tool" "$R2O_PPE_LEGACY_TAG"; then
-            _r2o_ppe_remove_rc=1
+        _r2o_ppe_remove_family "$_r2o_ppe_tool" "$R2O_PPE_TAG" || :
+        if [ "$R2O_PPE_LEGACY_TAG" != "$R2O_PPE_TAG" ]; then
+            _r2o_ppe_remove_family "$_r2o_ppe_tool" "$R2O_PPE_LEGACY_TAG" || :
         fi
     done
-    return "$_r2o_ppe_remove_rc"
+    return 0
 }
 
 _r2o_ppe_count() {
@@ -238,7 +234,8 @@ RULES
 r2o_ppe_ensure() {
     r2o_ppe_valid_config || { echo "r2o-ppe: неверная конфигурация" >&2; return 1; }
     if [ "$R2O_PPE_DEOFFLOAD" = 0 ]; then
-        if r2o_ppe_remove; then return 3; else return 1; fi
+        r2o_ppe_remove
+        return 3
     fi
     r2o_ppe_remove_legacy || return 1
     r2o_ppe_available iptables || return 2

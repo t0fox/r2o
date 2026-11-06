@@ -3,6 +3,7 @@
 use crate::meta_edge::{META_HOSTS, check_meta_edge};
 use r2k_core::dns::{DNS_RESOLVERS, DnsResolver, build_a_query, parse_a_reply};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::future::Future;
 use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -172,12 +173,21 @@ fn append_address(addresses: &mut Vec<Ipv4Addr>, address: Ipv4Addr) {
     }
 }
 
-#[derive(Default)]
-pub struct SystemNdm;
+pub struct SystemNdm {
+    executable: OsString,
+}
+
+impl Default for SystemNdm {
+    fn default() -> Self {
+        Self {
+            executable: OsString::from("ndmc"),
+        }
+    }
+}
 
 impl Ndm for SystemNdm {
     fn running_config(&mut self) -> Result<String, String> {
-        let output = ndmc("show running-config")?;
+        let output = self.ndmc("show running-config")?;
         let config = String::from_utf8(output.stdout)
             .map_err(|_| "ndmc вернул конфигурацию в неподдерживаемой кодировке".to_string())?;
         if !output.status.success() || config.trim().is_empty() {
@@ -187,19 +197,29 @@ impl Ndm for SystemNdm {
     }
 
     fn add(&mut self, host: &str, address: Ipv4Addr) -> Result<(), String> {
-        ndmc(&format!("ip host {host} {address}"))
+        self.ndmc(&format!("ip host {host} {address}"))
             .and_then(command_success("ndmc отклонил добавление DNS-записи"))
     }
 
     fn remove(&mut self, host: &str, address: Ipv4Addr) -> Result<(), String> {
-        ndmc(&format!("no ip host {host} {address}"))
+        self.ndmc(&format!("no ip host {host} {address}"))
             .and_then(command_success("ndmc отклонил удаление DNS-записи"))
     }
 
     fn save(&mut self) -> Result<(), String> {
-        ndmc("system configuration save").and_then(command_success(
+        self.ndmc("system configuration save").and_then(command_success(
             "ndmc не смог сохранить конфигурацию роутера",
         ))
+    }
+}
+
+impl SystemNdm {
+    fn ndmc(&self, command: &str) -> Result<std::process::Output, String> {
+        Command::new(&self.executable)
+            .env("LD_LIBRARY_PATH", "")
+            .args(["-c", command])
+            .output()
+            .map_err(|error| format!("не удалось запустить ndmc: {error}"))
     }
 }
 
@@ -216,14 +236,6 @@ fn command_success(
             ))
         }
     }
-}
-
-fn ndmc(command: &str) -> Result<std::process::Output, String> {
-    Command::new("ndmc")
-        .env("LD_LIBRARY_PATH", "")
-        .args(["-c", command])
-        .output()
-        .map_err(|error| format!("не удалось запустить ndmc: {error}"))
 }
 
 #[derive(Clone, Debug)]
@@ -816,13 +828,13 @@ pub async fn refresh_from_env() -> Result<(), String> {
     let paths = MetaDnsPaths::from_env();
     let ca_bundle = resolve_ca_bundle()?;
     let network = DirectMetaNetwork::new(Some(ca_bundle));
-    let mut manager = MetaDnsManager::new(network, SystemNdm, paths);
+    let mut manager = MetaDnsManager::new(network, SystemNdm::default(), paths);
     manager.refresh().await
 }
 
 pub fn remove_from_env() -> Result<(), String> {
     let paths = MetaDnsPaths::from_env();
-    let mut manager = MetaDnsManager::new(DirectMetaNetwork::new(None), SystemNdm, paths);
+    let mut manager = MetaDnsManager::new(DirectMetaNetwork::new(None), SystemNdm::default(), paths);
     manager.remove_owned()
 }
 
@@ -1461,6 +1473,50 @@ mod tests {
             log: root.join("log/meta.log"),
             success_mark: root.join("state/success"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_ndm_uses_the_expected_cli_and_reports_command_failures() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let paths = paths("system-ndmc");
+        let executable = paths.r2o_dir.join("ndmc");
+        std::fs::write(
+            &executable,
+            r##"#!/bin/sh
+printf '%s\n' "$*" >> "${0%/*}/commands"
+case "$*" in
+    '-c show running-config') printf 'system name test-router\n' ;;
+    '-c ip host reject.test 203.0.113.9') exit 7 ;;
+esac
+"##,
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let mut ndm = SystemNdm {
+            executable: executable.into_os_string(),
+        };
+        assert_eq!(ndm.running_config().unwrap(), "system name test-router\n");
+        let address = "157.240.9.174".parse().unwrap();
+        ndm.add("instagram.com", address).unwrap();
+        ndm.remove("instagram.com", address).unwrap();
+        ndm.save().unwrap();
+        let failure = ndm.add("reject.test", "203.0.113.9".parse().unwrap());
+        assert!(failure.unwrap_err().contains("exit 7"));
+
+        assert_eq!(
+            std::fs::read_to_string(paths.r2o_dir.join("commands")).unwrap(),
+            concat!(
+                "-c show running-config\n",
+                "-c ip host instagram.com 157.240.9.174\n",
+                "-c no ip host instagram.com 157.240.9.174\n",
+                "-c system configuration save\n",
+                "-c ip host reject.test 203.0.113.9\n",
+            )
+        );
+        let _ = std::fs::remove_dir_all(paths.r2o_dir);
     }
 
     fn manager(
