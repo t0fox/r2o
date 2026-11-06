@@ -345,6 +345,23 @@ if ! printf '%s\n' "$c_queue_values" | grep -Eq '^ 9 396 9 0$'; then
 fi
 echo 'nfqueue_traffic_stats_numeric_trace=identical (9 packets, 396 bytes, 9 accepted)'
 
+# Exercise nonzero UDP session occupancy, then compare both periodic samples
+# and the shutdown summary from the production C and Rust NFQUEUE processes.
+c_udp_flow_values=$(grep -E 'TCP.*UDP' "$test_tmpdir/r2o-stats-traffic-d2o.log" | sed -E 's/[^0-9]+/ /g' | sed '/^ *$/d')
+r_udp_flow_values=$(grep -E 'TCP.*UDP' "$test_tmpdir/r2o-stats-traffic-r2o.log" | sed -E 's/[^0-9]+/ /g' | sed '/^ *$/d')
+if [ "$c_udp_flow_values" != "$r_udp_flow_values" ]; then
+    echo "D2O and R2O nonzero UDP flow-table statistics differ" >&2
+    printf 'C:\n%s\nRust:\n%s\n' "$c_udp_flow_values" "$r_udp_flow_values" >&2
+    exit 1
+fi
+if ! grep -E 'TCP.*UDP' "$test_tmpdir/r2o-stats-traffic-d2o.log" | sed '$d' | grep -Eq 'UDP [1-9][0-9]* из' \
+    || ! grep -E 'TCP.*UDP' "$test_tmpdir/r2o-stats-traffic-r2o.log" | sed '$d' | grep -Eq 'UDP-потоки [1-9][0-9]* из'; then
+    cat "$test_tmpdir/r2o-stats-traffic-d2o.log" "$test_tmpdir/r2o-stats-traffic-r2o.log" >&2
+    echo "the traffic fixture did not produce a nonzero periodic UDP flow count on both daemons" >&2
+    exit 1
+fi
+echo 'udp_flow_stats_trace=identical (nonzero periodic occupancy)'
+
 c_truncated_count=$(grep -Ec 'обрезано [0-9]+, без нагрузки [0-9]+, без заголовка [0-9]+' "$test_tmpdir/r2o-stats-traffic-d2o.log" || true)
 r_truncated_count=$(grep -Ec 'r2o-datapath: обрезано [0-9]+, без нагрузки [0-9]+, без заголовка [0-9]+' "$test_tmpdir/r2o-stats-traffic-r2o.log" || true)
 if [ "$c_truncated_count" -ne "$c_traffic_stats_count" ] || [ "$r_truncated_count" -ne "$r_traffic_stats_count" ]; then

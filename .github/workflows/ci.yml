@@ -340,6 +340,11 @@ jobs:
           D2O_ROOT="$GITHUB_WORKSPACE/d2o"
           R2O_TEST_TMPDIR="$RUNNER_TEMP/r2o-capture-lifecycle"
           sh scripts/test-datapath-capture-lifecycle-differential.sh
+      - name: Сверить CPU/RSS статистику процесса D2O C/Rust
+        run: >-
+          D2O_ROOT="$GITHUB_WORKSPACE/d2o"
+          R2O_TEST_TMPDIR="$RUNNER_TEMP/r2o-process-stats"
+          sh scripts/test-datapath-process-stats-differential.sh
       - name: Собрать регрессию предела raw-пакета по MTU
         run: cargo test --no-run --locked --package r2o-datapath --test raw_egress_mtu
       - name: Проверить MTU raw-посылки в отдельном сетевом пространстве
