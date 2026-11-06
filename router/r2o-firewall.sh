@@ -229,14 +229,12 @@ table inet r2o {
         meta l4proto { tcp, udp } th dport { $nft_dns } return
         ct status dnat return
         $nft_gate_out
-        meta nfproto ipv4 meta l4proto udp th dport { $nft_voice } ct direction original ct original packets $nft_voice_window queue num $QUEUE4 bypass
-        meta nfproto ipv4 meta l4proto udp th dport { $nft_voice } return
-        meta nfproto ipv6 meta l4proto udp th dport { $nft_voice } ct direction original ct original packets $nft_voice_window queue num $QUEUE6 bypass
-        meta nfproto ipv6 meta l4proto udp th dport { $nft_voice } return
         meta nfproto ipv4 meta l4proto tcp th dport { $nft_ports } ct direction original ct original packets $nft_window queue num $QUEUE4 bypass
         meta nfproto ipv4 meta l4proto udp th dport { $nft_ports } ct direction original ct original packets $nft_window queue num $QUEUE4 bypass
         meta nfproto ipv6 meta l4proto tcp th dport { $nft_ports } ct direction original ct original packets $nft_window queue num $QUEUE6 bypass
         meta nfproto ipv6 meta l4proto udp th dport { $nft_ports } ct direction original ct original packets $nft_window queue num $QUEUE6 bypass
+        meta nfproto ipv4 meta l4proto udp th dport { $nft_voice } ct direction original ct original packets $nft_voice_window queue num $QUEUE4 bypass
+        meta nfproto ipv6 meta l4proto udp th dport { $nft_voice } ct direction original ct original packets $nft_voice_window queue num $QUEUE6 bypass
         meta nfproto ipv4 meta l4proto tcp ct direction original ct original packets $nft_late_window tcp flags & rst == rst queue num $QUEUE4 bypass
         meta nfproto ipv4 meta l4proto tcp ct direction original ct original packets $nft_late_window tcp flags & fin == fin queue num $QUEUE4 bypass
         meta nfproto ipv4 meta l4proto tcp th dport { $nft_keepalive } ct direction original ct original packets $nft_late_window queue num $QUEUE4 bypass
@@ -252,14 +250,12 @@ table inet r2o {
         meta l4proto { tcp, udp } th sport { $nft_dns } return
         ct status dnat return
         $nft_gate_in
-        meta nfproto ipv4 meta l4proto udp th sport { $nft_voice } ct direction reply ct reply packets $nft_voice_window queue num $QUEUE4 bypass
-        meta nfproto ipv4 meta l4proto udp th sport { $nft_voice } return
-        meta nfproto ipv6 meta l4proto udp th sport { $nft_voice } ct direction reply ct reply packets $nft_voice_window queue num $QUEUE6 bypass
-        meta nfproto ipv6 meta l4proto udp th sport { $nft_voice } return
         meta nfproto ipv4 meta l4proto tcp th sport { $nft_ports } ct direction reply ct reply packets $nft_window queue num $QUEUE4 bypass
         meta nfproto ipv4 meta l4proto udp th sport { $nft_ports } ct direction reply ct reply packets $nft_window queue num $QUEUE4 bypass
         meta nfproto ipv6 meta l4proto tcp th sport { $nft_ports } ct direction reply ct reply packets $nft_window queue num $QUEUE6 bypass
         meta nfproto ipv6 meta l4proto udp th sport { $nft_ports } ct direction reply ct reply packets $nft_window queue num $QUEUE6 bypass
+        meta nfproto ipv4 meta l4proto udp th sport { $nft_voice } ct direction reply ct reply packets $nft_voice_window queue num $QUEUE4 bypass
+        meta nfproto ipv6 meta l4proto udp th sport { $nft_voice } ct direction reply ct reply packets $nft_voice_window queue num $QUEUE6 bypass
         meta nfproto ipv4 meta l4proto tcp ct direction reply ct reply packets $nft_late_window tcp flags & rst == rst queue num $QUEUE4 bypass
         meta nfproto ipv4 meta l4proto tcp ct direction reply ct reply packets $nft_late_window tcp flags & fin == fin queue num $QUEUE4 bypass
         meta nfproto ipv4 meta l4proto tcp th sport { $nft_keepalive } ct direction reply ct reply packets $nft_late_window queue num $QUEUE4 bypass
@@ -664,22 +660,20 @@ xt_family_up() {
     done
     voice_ports=$VOICE_PORTS
     for proto in tcp udp; do
-        if [ "$proto" = udp ]; then
-            xt "$tool" -t mangle -A R2O_OUT -p udp -m multiport --dports "$voice_ports" \
-                -m conntrack --ctdir ORIGINAL -m connbytes --connbytes "$VOICE_CONNBYTES" --connbytes-dir original --connbytes-mode packets \
-                -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
-            xt "$tool" -t mangle -A R2O_OUT -p udp -m multiport --dports "$voice_ports" -j RETURN || return 1
-            xt "$tool" -t mangle -A R2O_IN -p udp -m multiport --sports "$voice_ports" \
-                -m conntrack --ctdir REPLY -m connbytes --connbytes "$VOICE_CONNBYTES" --connbytes-dir reply --connbytes-mode packets \
-                -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
-            xt "$tool" -t mangle -A R2O_IN -p udp -m multiport --sports "$voice_ports" -j RETURN || return 1
-        fi
         xt "$tool" -t mangle -A R2O_OUT -p "$proto" -m conntrack --ctdir ORIGINAL -m multiport --dports "$PORTS" \
             -m connbytes --connbytes "$CONNBYTES" --connbytes-dir original --connbytes-mode packets \
             -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
         xt "$tool" -t mangle -A R2O_IN -p "$proto" -m conntrack --ctdir REPLY -m multiport --sports "$PORTS" \
             -m connbytes --connbytes "$CONNBYTES" --connbytes-dir reply --connbytes-mode packets \
             -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
+        if [ "$proto" = udp ]; then
+            xt "$tool" -t mangle -A R2O_OUT -p udp -m multiport --dports "$voice_ports" \
+                -m conntrack --ctdir ORIGINAL -m connbytes --connbytes "$VOICE_CONNBYTES" --connbytes-dir original --connbytes-mode packets \
+                -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
+            xt "$tool" -t mangle -A R2O_IN -p udp -m multiport --sports "$voice_ports" \
+                -m conntrack --ctdir REPLY -m connbytes --connbytes "$VOICE_CONNBYTES" --connbytes-dir reply --connbytes-mode packets \
+                -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
+        fi
     done
     for direction in OUT IN; do
         chain=R2O_$direction

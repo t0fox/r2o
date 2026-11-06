@@ -43,7 +43,7 @@ CHAIN_IN=D2K_IN
 QUEUE_NUM=2000
 MARK=0x2d
 MEASURE_MARK=0x2f
-PORTS=443,8443
+PORTS=443,8443,50000:50099
 CONNBYTES=0:8
 DNS_PORTS=5353,853
 VOICE_PORTS=50000:50099,1400,3478:3481,5349,19294:19344
@@ -65,7 +65,7 @@ QUEUE4=2000
 MARK=0x2d
 MEASURE_MARK=0x2f
 TG_OUTBOUND_MARK=0x51
-PORTS=443,8443
+PORTS=443,8443,50000:50099
 CONNBYTES=0:8
 DNS_PORTS=5353,853
 VOICE_PORTS=50000:50099,1400,3478:3481,5349,19294:19344
@@ -92,6 +92,23 @@ assert_rule() {
         exit 1
     fi
 }
+assert_before_rule() {
+    trace=$1
+    chain=$2
+    first_ports=$3
+    first_window=$4
+    second_ports=$5
+    second_window=$6
+    first_line=$(awk -v prefix="-A $chain " -v ports="$first_ports" -v window="$first_window" \
+        'index($0, prefix) && index($0, ports) && index($0, window) { print NR; exit }' "$trace")
+    second_line=$(awk -v prefix="-A $chain " -v ports="$second_ports" -v window="$second_window" \
+        'index($0, prefix) && index($0, ports) && index($0, window) { print NR; exit }' "$trace")
+    [ -n "$first_line" ] && [ -n "$second_line" ] && [ "$first_line" -lt "$second_line" ] || {
+        echo "UDP rule order differs in $chain: $first must precede $second" >&2
+        grep -F -- "-A $chain -p udp" "$trace" >&2 || true
+        exit 1
+    }
+}
 
 FW_TRACE="$TEMP/d2o.trace" PATH="$TEMP/bin:$PATH" \
     sh "$TEMP/d2o-harness.sh" "$TEMP/d2o-function.sh"
@@ -110,10 +127,16 @@ for implementation in d2o r2o; do
             echo "R2O iptables generation omitted MEASURE_MARK bypass" >&2; exit 1;
         }
     fi
-    assert_rule "$trace" "$out" '-p tcp -m conntrack --ctdir ORIGINAL -m multiport --dports 443,8443 -m connbytes --connbytes 0:8 --connbytes-dir original --connbytes-mode packets -j NFQUEUE --queue-num 2000 --queue-bypass'
-    assert_rule "$trace" "$in" '-p tcp -m conntrack --ctdir REPLY -m multiport --sports 443,8443 -m connbytes --connbytes 0:8 --connbytes-dir reply --connbytes-mode packets -j NFQUEUE --queue-num 2000 --queue-bypass'
-    assert_rule "$trace" "$out" '-p udp -m conntrack --ctdir ORIGINAL -m multiport --dports 443,8443 -m connbytes --connbytes 0:8 --connbytes-dir original --connbytes-mode packets -j NFQUEUE --queue-num 2000 --queue-bypass'
-    assert_rule "$trace" "$in" '-p udp -m conntrack --ctdir REPLY -m multiport --sports 443,8443 -m connbytes --connbytes 0:8 --connbytes-dir reply --connbytes-mode packets -j NFQUEUE --queue-num 2000 --queue-bypass'
+    assert_rule "$trace" "$out" '-p tcp -m conntrack --ctdir ORIGINAL -m multiport --dports 443,8443,50000:50099 -m connbytes --connbytes 0:8 --connbytes-dir original --connbytes-mode packets -j NFQUEUE --queue-num 2000 --queue-bypass'
+    assert_rule "$trace" "$in" '-p tcp -m conntrack --ctdir REPLY -m multiport --sports 443,8443,50000:50099 -m connbytes --connbytes 0:8 --connbytes-dir reply --connbytes-mode packets -j NFQUEUE --queue-num 2000 --queue-bypass'
+    assert_rule "$trace" "$out" '-p udp -m conntrack --ctdir ORIGINAL -m multiport --dports 443,8443,50000:50099 -m connbytes --connbytes 0:8 --connbytes-dir original --connbytes-mode packets -j NFQUEUE --queue-num 2000 --queue-bypass'
+    assert_rule "$trace" "$in" '-p udp -m conntrack --ctdir REPLY -m multiport --sports 443,8443,50000:50099 -m connbytes --connbytes 0:8 --connbytes-dir reply --connbytes-mode packets -j NFQUEUE --queue-num 2000 --queue-bypass'
+    assert_before_rule "$trace" "$out" \
+        '--dports 443,8443,50000:50099' '--connbytes 0:8' \
+        '--dports 50000:50099,1400,3478:3481,5349,19294:19344' '--connbytes 0:4'
+    assert_before_rule "$trace" "$in" \
+        '--sports 443,8443,50000:50099' '--connbytes 0:8' \
+        '--sports 50000:50099,1400,3478:3481,5349,19294:19344' '--connbytes 0:4'
     for direction in "$out:ORIGINAL:original:dports" "$in:REPLY:reply:sports"; do
         old_ifs=$IFS
         IFS=:
@@ -121,7 +144,7 @@ for implementation in d2o r2o; do
         IFS=$old_ifs
         chain=$1 ct_direction=$2 count_direction=$3 port_direction=$4
         for flag in RST FIN; do
-            assert_rule "$trace" "$chain" "-p tcp -m conntrack --ctdir $ct_direction -m multiport --$port_direction 443,8443 -m connbytes --connbytes 9: --connbytes-dir $count_direction --connbytes-mode packets --tcp-flags $flag $flag -j NFQUEUE --queue-num 2000 --queue-bypass"
+            assert_rule "$trace" "$chain" "-p tcp -m conntrack --ctdir $ct_direction -m multiport --$port_direction 443,8443,50000:50099 -m connbytes --connbytes 9: --connbytes-dir $count_direction --connbytes-mode packets --tcp-flags $flag $flag -j NFQUEUE --queue-num 2000 --queue-bypass"
         done
     done
 done

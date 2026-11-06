@@ -51,6 +51,20 @@ assert_nft_chain_before_queue() {
         END { exit !(gate && queue && gate < queue) }
     ' "$1" || { echo "nft rule is missing or appears after queue in $2: $3" >&2; exit 1; }
 }
+assert_nft_rule_order() {
+    awk -v chain="$2" -v first_rule="$3" -v first_count="$4" \
+        -v second_rule="$5" -v second_count="$6" '
+        index($0, chain) { in_chain = 1; next }
+        in_chain && /^    chain / { exit }
+        in_chain && !first && index($0, first_rule) && index($0, first_count) { first = NR }
+        in_chain && !second && index($0, second_rule) && index($0, second_count) { second = NR }
+        END { exit !(first && second && first < second) }
+    ' "$1" || {
+        echo "UDP rules are out of D2O order in $2: common port queue must precede voice queue" >&2
+        sed -n '/chain out {/,/chain in_rules {/p; /chain in_rules {/,/chain in_forward {/p' "$1" >&2
+        exit 1
+    }
+}
 
 sed -n '/^nft_ruleset() (/,$p' "$D2O_ROOT/files/S99d2k" |
     tr -d '\r' | sed -n '1,/^)/p' > "$TEMP/d2o-nft-function.sh"
@@ -154,6 +168,18 @@ for rules in "$TEMP/d2o.nft" "$TEMP/r2o.nft"; do
 done
 assert_before_queue "$TEMP/r2o.nft" 'ip daddr 203.0.113.9 tcp dport 8443 return'
 assert_nft_chain_before_queue "$TEMP/r2o.nft" 'chain in_rules {' 'ip saddr 203.0.113.9 tcp sport 8443 return'
+for rules in "$TEMP/d2o.nft" "$TEMP/r2o.nft"; do
+    assert_nft_rule_order "$rules" 'chain out {' \
+        'meta l4proto udp' 'ct original packets 1-8' \
+        'meta l4proto udp' 'ct original packets 1-4'
+    assert_nft_rule_order "$rules" 'chain in_rules {' \
+        'meta l4proto udp' 'ct reply packets 1-8' \
+        'meta l4proto udp' 'ct reply packets 1-4'
+done
+if grep -Eq 'th dport \{[^}]*50000-50099[^}]*\} return|th sport \{[^}]*50000-50099[^}]*\} return' "$TEMP/r2o.nft"; then
+    echo "R2O prematurely returns from overlapping voice UDP ports" >&2
+    exit 1
+fi
 grep -Fq 'icmp type time-exceeded icmp code 0 queue num 2000 bypass' "$TEMP/d2o.nft" || {
     echo "D2O nft oracle omitted IPv4 time-exceeded queue" >&2
     exit 1
