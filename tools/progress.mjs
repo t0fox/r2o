@@ -12,9 +12,9 @@ function groupFor(t){
  if(/^(Telegram|Keenetic Meta DNS)/.test(t))return "Telegram";
  if(/^Панель/.test(t))return "WebPanel";
  if(/^(Firewall|Аппаратное ускорение PPE)/.test(t))return "Firewall / PPE";
- if(/^(Install\/update|ABI\/QEMU)/.test(t))return "Release / ABI";
+ if(/^(Install\/update|Release availability|Release guard|Update guard|Update activation ordering|Signed end-to-end install|ABI\/QEMU)/.test(t))return "Release / ABI";
  if(/^(QUIC|Остальные QUIC)/.test(t))return "QUIC / HTTP3";
- if(/^(Scheduler|Discovery|ACK →|JSON catalog|Полный автоматический цикл|Кадр управления|HTTP search)/.test(t))return "Discovery";
+ if(/^(Scheduler|Discovery|ACK →|JSON catalog|Полный автоматический цикл|S99\/procd|Production daemon crash\/restart|Automatic refusal →|Кадр управления|HTTP search)/.test(t))return "Discovery";
  if(/^(Raw-|Подтверждение базового CLEAR|CLEAR|Базовые transport|Классификатор|TCP measurement|Потолок classifier|TLS|ECH)/.test(t))return "Classifier / TLS";
  return "Datapath";
 }

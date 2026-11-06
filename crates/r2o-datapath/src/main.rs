@@ -36,9 +36,10 @@ mod app {
         R2oRouteMonitor, R2oRoutePacket, R2oRoutePolicy, R2oRoutedFlows,
     };
     use r2o_datapath::r2o_udp_hold::{
-        R2oUdpDeferredResends, R2oUdpDeferredVerdicts, R2oUdpFollowTable, R2oUdpHeldPacket,
-        R2oUdpHoldBatch, R2oUdpHoldFeed, R2oUdpHoldTable, r2o_release_batch_with,
-        r2o_udp_hold_candidate, r2o_udp_send_busy,
+        R2oUdpDeferredEnqueueError, R2oUdpDeferredResends, R2oUdpDeferredVerdicts,
+        R2oUdpFollowTable, R2oUdpHeldPacket, R2oUdpHoldBatch, R2oUdpHoldFeed,
+        R2oUdpHoldTable, r2o_release_batch_with, r2o_udp_hold_candidate,
+        r2o_udp_send_busy,
     };
     use r2o_datapath::r2o_udp_sessions::R2oUdpSessions;
     use r2o_datapath::r2o_voice::{R2oVoiceSessions, R2oVoiceTrialProofs};
@@ -178,6 +179,7 @@ mod app {
             },
             |id, verdict| queue.send_verdict(id, verdict),
         );
+        follow.r2o_note_busy(stats.resend_busy);
         if head_neutral && let Some(head) = head {
             follow.r2o_mark(&head.packet, now, None, receive_seq);
         }
@@ -244,8 +246,17 @@ mod app {
         }
         let neutral = r2o_udp_packet_is_neutral(route_gate, probe_mark, mark, packet);
         if let Some(due) = matched.at {
-            if neutral && raw.is_some() && deferred_resends.r2o_enqueue(due, id, packet) {
-                return true;
+            if neutral && raw.is_some() {
+                match deferred_resends.r2o_enqueue_with_error(due, id, packet) {
+                    Ok(()) => return true,
+                    Err(R2oUdpDeferredEnqueueError::Full) => {
+                        follow.r2o_note_queue_full();
+                    }
+                    Err(R2oUdpDeferredEnqueueError::NoMemory) => {
+                        follow.r2o_mark_failed(packet);
+                    }
+                    Err(R2oUdpDeferredEnqueueError::InvalidPacket) => {}
+                }
             }
             if deferred_verdicts.r2o_enqueue(due, &[id], &[NF_ACCEPT], Some(packet)) {
                 return true;
@@ -268,7 +279,9 @@ mod app {
                 }
             }
             Err(error) => {
-                if !r2o_udp_send_busy(&error) {
+                if r2o_udp_send_busy(&error) {
+                    follow.r2o_note_busy(1);
+                } else {
                     follow.r2o_mark_failed(packet);
                 }
                 eprintln!("r2o-datapath: поздний UDP-хвост принят ядром: {error}");
@@ -630,6 +643,24 @@ mod app {
         );
     }
 
+    fn r2o_log_raw_stats(raw: Option<&RawSocket>) {
+        if let Some(raw) = raw {
+            let stats = raw.send_stats();
+            eprintln!(
+                "r2o-datapath: сырым сокетом отправлено {}, ошибок {} (из них сокет полон {})",
+                stats.sent, stats.errors, stats.busy
+            );
+        }
+    }
+
+    fn r2o_log_udp_follow_stats(follow: &R2oUdpFollowTable, route_notifications: u64) {
+        let stats = follow.r2o_stats();
+        eprintln!(
+            "r2o-datapath: UDP переиздание: отказано потоков {}, сокет полон {} раз, очередь отложенных полна {} раз; уведомлений о правилах/маршрутах {}",
+            stats.refused, stats.busy, stats.queue_full, route_notifications
+        );
+    }
+
     fn r2o_log_flow_table_stats(tcp_sessions: &TcpSessions, udp_sessions: &R2oUdpSessions) {
         let udp_stats = udp_sessions.stats();
         eprintln!(
@@ -811,6 +842,7 @@ mod app {
             }
         }
         let mut route_monitor = R2oRouteMonitor::default();
+        let mut route_watch_notifications = 0_u64;
         if let Err(error) = route_monitor.r2o_open_watch() {
             eprintln!(
                 "r2o-datapath: уведомления rtnetlink недоступны ({error}); оставляю опрос раз в 30 секунд"
@@ -993,6 +1025,10 @@ mod app {
                 r2o_log_payload_stats(&tcp_sessions);
                 r2o_log_capture_stats(&tcp_sessions);
                 r2o_log_hold_stats(&holding);
+                r2o_log_raw_stats(raw.as_ref());
+                if raw.is_some() {
+                    r2o_log_udp_follow_stats(&udp_follow, route_watch_notifications);
+                }
                 if let Some(line) = icmp_guard.r2o_stats_line() {
                     eprintln!("r2o-datapath: {line}");
                 }
@@ -1022,6 +1058,10 @@ mod app {
                 r2o_log_capture_stats(&tcp_sessions);
                 r2o_log_payload_stats(&tcp_sessions);
                 r2o_log_hold_stats(&holding);
+                r2o_log_raw_stats(raw.as_ref());
+                if raw.is_some() {
+                    r2o_log_udp_follow_stats(&udp_follow, route_watch_notifications);
+                }
                 if let Some(line) = icmp_guard.r2o_stats_line() {
                     eprintln!("r2o-datapath: {line}");
                 }
@@ -1176,6 +1216,8 @@ mod app {
             if route_ready {
                 match route_monitor.r2o_drain_watch() {
                     Ok(true) => {
+                        route_watch_notifications =
+                            route_watch_notifications.saturating_add(1);
                         let settled =
                             (last_route_refresh + R2O_ROUTE_SETTLE_INTERVAL).max(Instant::now());
                         next_route_refresh = next_route_refresh.min(settled);
@@ -2381,14 +2423,22 @@ mod app {
             let deferred_resend_stats = udp_deferred_resends.r2o_flush(
                 Instant::now(),
                 |_id, packet| {
-                    raw.as_ref()
+                    let result = raw
+                        .as_ref()
                         .ok_or_else(|| {
                             io::Error::new(io::ErrorKind::NotConnected, "raw-сокет недоступен")
                         })?
-                        .send_packet(packet)
+                        .send_packet(packet);
+                    if let Err(error) = &result
+                        && !r2o_udp_send_busy(error)
+                    {
+                        udp_follow.r2o_mark_failed(packet);
+                    }
+                    result
                 },
                 |id, verdict| socket.send_verdict(id, verdict),
             );
+            udp_follow.r2o_note_busy(deferred_resend_stats.resend_busy);
             if deferred_resend_stats.resend_failed != 0 {
                 eprintln!(
                     "r2o-datapath: {} отложенных UDP-хвостов не отправлены raw и приняты ядром",

@@ -175,7 +175,9 @@ expected = bytes.fromhex("160301002001")
 if actual != expected:
     raise SystemExit(f"incomplete TLS record did not reach the peer intact: {actual.hex()}")
 PY
-    sleep 0.2
+    # Leave the process alive for another timer tick after the capture expires;
+    # otherwise only the shutdown summary can observe the nonzero counter.
+    sleep 1.2
     kill -TERM "$running_pid"
     wait "$running_pid"
     running_pid=
@@ -196,6 +198,16 @@ run_capture_expiry_case d2o "$d2o_datapath"
 run_capture_expiry_case r2o "$r2o_datapath"
 c_capture_values=$(grep 'снимки TCP:' "$test_tmpdir/r2o-stats-capture-expiry-d2o.log" | tail -n 1 | sed -E 's/.*полных=([0-9]+) отвергнутых=([0-9]+) истекших=([0-9]+) отказов ёмкости=([0-9]+).*/\1 \2 \3 \4/')
 r_capture_values=$(grep 'снимки TLS/TCP:' "$test_tmpdir/r2o-stats-capture-expiry-r2o.log" | tail -n 1 | sed -E 's/.*завершено ([0-9]+), отклонено ([0-9]+), истекло ([0-9]+), отказов ёмкости ([0-9]+).*/\1 \2 \3 \4/')
+if [ "$(grep 'снимки TCP:' "$test_tmpdir/r2o-stats-capture-expiry-d2o.log" | sed '$d' | grep -Fc 'истекших=1' || true)" -lt 1 ]; then
+    cat "$test_tmpdir/r2o-stats-capture-expiry-d2o.log" >&2
+    echo 'D2O capture expiry must appear in a periodic sample before shutdown' >&2
+    exit 1
+fi
+if [ "$(grep 'снимки TLS/TCP:' "$test_tmpdir/r2o-stats-capture-expiry-r2o.log" | sed '$d' | grep -Fc 'истекло 1' || true)" -lt 1 ]; then
+    cat "$test_tmpdir/r2o-stats-capture-expiry-r2o.log" >&2
+    echo 'R2O capture expiry must appear in a periodic sample before shutdown' >&2
+    exit 1
+fi
 if [ "$c_capture_values" != "$r_capture_values" ]; then
     echo "D2O and R2O periodic capture expiry counters differ: C=$c_capture_values Rust=$r_capture_values" >&2
     exit 1

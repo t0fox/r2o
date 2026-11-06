@@ -3,7 +3,7 @@ set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 D2O_ROOT=${R2O_DONOR_ROOT:-${ROOT%/*}/d2o}
-EXPECTED_D2O_SHA=a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe
+EXPECTED_D2O_SHA=8e2c98146cf0b712dc967fbec558c7b904666e87
 [ "$(git -C "$D2O_ROOT" rev-parse HEAD)" = "$EXPECTED_D2O_SHA" ] || {
     echo "unexpected D2O revision" >&2
     exit 2
@@ -37,7 +37,12 @@ case "$STATUS_STATE:$*" in
     missing-forward:*'-C FORWARD -j'*) exit 1 ;;
     missing-input:*'-C INPUT -j'*) exit 1 ;;
 esac
-if [ "$STATUS_IMPL" = d2o ]; then exit 0; fi
+if [ "$STATUS_IMPL" = d2o ]; then
+    case "$STATUS_STATE:$*" in
+        missing-measure-mark:*'--mark 0x2f -j RETURN'*) exit 1 ;;
+    esac
+    exit 0
+fi
 case " $* " in
     *' -C '*)
         expected=$(printf '%s\n' "$*" | sed 's/ -C / -A /')
@@ -58,12 +63,12 @@ QUEUE_NUM=2000
 CHAIN_OUT=D2K_OUT
 CHAIN_IN=D2K_IN
 MARK=45
-MEASURE_MARK=12
+MEASURE_MARK=0x2f
 PORTS=443,8443
 CONNBYTES=0:8
 DNS_PORTS=5353,853
-GATE_IP=
-GATE_PORT=443
+GATE_IP=203.0.113.9
+GATE_PORT=8443
 HTTP_KEEPALIVE_PORTS=80
 . "$D2O_FAMILY_STATUS"
 fw_family_installed iptables
@@ -75,6 +80,8 @@ cat >"$TEMP/r2o-seed.sh" <<'R2O'
 set -eu
 QUEUE4=2000
 MARK=45
+MEASURE_MARK=0x2f
+PROBE_MARK=46
 TG_OUTBOUND_MARK=0x40000000
 PORTS=443,8443
 CONNBYTES=0:8
@@ -82,6 +89,8 @@ VOICE_PORTS=50000:50099,1400,3478:3481,5349,19294:19344
 VOICE_CONNBYTES=0:4
 HTTP_KEEPALIVE_PORTS=80
 DNS_PORTS=5353,853
+GATE_IP=203.0.113.9
+GATE_PORT=8443
 ipv6_mangle_wait_probe() { return 1; }
 . "$R2O_FAMILY_FUNCTIONS"
 xt_family_up iptables "$QUEUE4"
@@ -100,6 +109,7 @@ VOICE_PORTS=50000:50099,1400,3478:3481,5349,19294:19344
 VOICE_CONNBYTES=0:4
 HTTP_KEEPALIVE_PORTS=80
 DNS_PORTS=5353,853
+D2K_GATE=http://203.0.113.9:8443/update
 CONFIG
 
 check_d2o() {
@@ -112,11 +122,15 @@ check_r2o() {
     STATUS_IMPL=r2o STATUS_STATE=seed STATE_FILE="$TEMP/r2o-state" \
     R2O_FAMILY_FUNCTIONS="$TEMP/r2o-family-functions.sh" PATH="$TEMP/bin:$PATH" \
         sh "$TEMP/r2o-seed.sh"
+    if [ "$2" = missing-measure-mark ]; then
+        grep -vF -- '-A R2O_OUT -m mark --mark 0x2f -j RETURN' "$TEMP/r2o-state" > "$TEMP/r2o-state.tmp"
+        mv "$TEMP/r2o-state.tmp" "$TEMP/r2o-state"
+    fi
     STATUS_IMPL=r2o STATUS_STATE=$2 STATE_FILE="$TEMP/r2o-state" R2O_CONFIG=$TEMP/config R2O_RUN_DIR=$TEMP/run \
         PATH="$TEMP/bin:$PATH" sh "$ROOT/router/r2o-firewall.sh" status
 }
 
-for state in complete missing-queues missing-forward missing-input; do
+for state in complete missing-queues missing-forward missing-input missing-measure-mark; do
     d2o_status=healthy
     r2o_status=healthy
     check_d2o "$TEMP" "$state" || d2o_status=unhealthy

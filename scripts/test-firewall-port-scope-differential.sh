@@ -3,7 +3,7 @@ set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 D2O_ROOT=${R2O_DONOR_ROOT:-${ROOT%/*}/d2o}
-EXPECTED_D2O_SHA=304ba893dd37197128ac8799c0495b035f6a38c0
+EXPECTED_D2O_SHA=8e2c98146cf0b712dc967fbec558c7b904666e87
 ACTUAL_D2O_SHA=$(git -C "$D2O_ROOT" rev-parse HEAD)
 if [ "$ACTUAL_D2O_SHA" != "$EXPECTED_D2O_SHA" ]; then
     printf 'Expected d2o %s, got %s\n' "$EXPECTED_D2O_SHA" "$ACTUAL_D2O_SHA" >&2
@@ -49,8 +49,8 @@ DNS_PORTS=5353,853
 VOICE_PORTS=50000:50099,1400,3478:3481,5349,19294:19344
 VOICE_CONNBYTES=0:4
 HTTP_KEEPALIVE_PORTS=80
-GATE_IP=
-GATE_PORT=443
+GATE_IP=203.0.113.9
+GATE_PORT=8443
 late_rst_from() { printf '%s\n' 9; }
 fw_return_broadcast() { :; }
 fw_icmp_te_rule() { :; }
@@ -63,6 +63,7 @@ cat > "$TEMP/r2o-harness.sh" <<'HARNESS'
 set -eu
 QUEUE4=2000
 MARK=0x2d
+MEASURE_MARK=0x2f
 TG_OUTBOUND_MARK=0x51
 PORTS=443,8443
 CONNBYTES=0:8
@@ -70,6 +71,8 @@ DNS_PORTS=5353,853
 VOICE_PORTS=50000:50099,1400,3478:3481,5349,19294:19344
 VOICE_CONNBYTES=0:4
 HTTP_KEEPALIVE_PORTS=80
+GATE_IP=203.0.113.9
+GATE_PORT=8443
 xt() { "$@"; }
 xt_broadcast_return() { :; }
 ipv6_mangle_wait_probe() { return 1; }
@@ -98,6 +101,15 @@ FW_TRACE="$TEMP/r2o.trace" PATH="$TEMP/bin:$PATH" \
 for implementation in d2o r2o; do
     trace="$TEMP/$implementation.trace"
     if [ "$implementation" = d2o ]; then out=D2K_OUT; in=D2K_IN; else out=R2O_OUT; in=R2O_IN; fi
+    if [ "$implementation" = d2o ]; then
+        grep -Fq -- '-A D2K_OUT -m mark --mark 0x2f -j RETURN' "$trace" || {
+            echo "D2O iptables generation omitted MEASURE_MARK bypass" >&2; exit 1;
+        }
+    else
+        grep -Fq -- '-A R2O_OUT -m mark --mark 0x2f -j RETURN' "$trace" || {
+            echo "R2O iptables generation omitted MEASURE_MARK bypass" >&2; exit 1;
+        }
+    fi
     assert_rule "$trace" "$out" '-p tcp -m conntrack --ctdir ORIGINAL -m multiport --dports 443,8443 -m connbytes --connbytes 0:8 --connbytes-dir original --connbytes-mode packets -j NFQUEUE --queue-num 2000 --queue-bypass'
     assert_rule "$trace" "$in" '-p tcp -m conntrack --ctdir REPLY -m multiport --sports 443,8443 -m connbytes --connbytes 0:8 --connbytes-dir reply --connbytes-mode packets -j NFQUEUE --queue-num 2000 --queue-bypass'
     assert_rule "$trace" "$out" '-p udp -m conntrack --ctdir ORIGINAL -m multiport --dports 443,8443 -m connbytes --connbytes 0:8 --connbytes-dir original --connbytes-mode packets -j NFQUEUE --queue-num 2000 --queue-bypass'
@@ -114,6 +126,13 @@ for implementation in d2o r2o; do
     done
 done
 
+for implementation in d2o r2o; do
+    trace="$TEMP/$implementation.trace"
+    if [ "$implementation" = d2o ]; then out=D2K_OUT; in=D2K_IN; else out=R2O_OUT; in=R2O_IN; fi
+    assert_rule "$trace" "$out" '-p tcp -d 203.0.113.9 --dport 8443 -j RETURN'
+    assert_rule "$trace" "$in" '-p tcp -s 203.0.113.9 --sport 8443 -j RETURN'
+done
+
 for proto in tcp udp; do
     assert_rule "$TEMP/d2o.trace" D2K_OUT "-p $proto -m multiport --dports 5353,853 -j RETURN"
     assert_rule "$TEMP/d2o.trace" D2K_IN "-p $proto -m multiport --sports 5353,853 -j RETURN"
@@ -121,4 +140,4 @@ for proto in tcp udp; do
     assert_rule "$TEMP/r2o.trace" R2O_IN "-p $proto -m multiport --sports 5353,853 -j RETURN"
 done
 
-echo "D2O/R2O iptables rules honor configured DNS exclusions, TCP/UDP and late RST/FIN ports (d2o $ACTUAL_D2O_SHA)."
+echo "D2O/R2O iptables rules honor configured DNS/gate exclusions, TCP/UDP and late RST/FIN ports (d2o $ACTUAL_D2O_SHA)."

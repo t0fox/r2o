@@ -63,6 +63,7 @@ pub struct R2oUdpHoldBatch {
 pub struct R2oUdpReleaseStats {
     pub resent: usize,
     pub resend_failed: usize,
+    pub resend_busy: usize,
     pub verdict_failures: usize,
     pub head_succeeded: bool,
 }
@@ -103,7 +104,9 @@ pub fn r2o_release_batch_with(
                 }
                 Err(error) => {
                     stats.resend_failed += 1;
-                    if !r2o_udp_send_busy(&error) {
+                    if r2o_udp_send_busy(&error) {
+                        stats.resend_busy += 1;
+                    } else {
                         on_permanent_failure(tail);
                     }
                     1
@@ -456,10 +459,21 @@ pub struct R2oUdpFollowMatch {
     pub failed: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct R2oUdpFollowStats {
+    pub live: usize,
+    pub busy: u64,
+    pub queue_full: u64,
+    pub refused: u64,
+}
+
 /// Ограниченное окно сопоставления поздних копий уже выпущенной UDP-головы.
 pub struct R2oUdpFollowTable {
     slots: [Option<R2oUdpFollowEntry>; R2O_UDP_FOLLOW_SLOTS],
     live: usize,
+    busy: u64,
+    queue_full: u64,
+    refused: u64,
 }
 
 impl R2oUdpFollowTable {
@@ -467,7 +481,27 @@ impl R2oUdpFollowTable {
         Self {
             slots: std::array::from_fn(|_| None),
             live: 0,
+            busy: 0,
+            queue_full: 0,
+            refused: 0,
         }
+    }
+
+    pub fn r2o_stats(&self) -> R2oUdpFollowStats {
+        R2oUdpFollowStats {
+            live: self.live,
+            busy: self.busy,
+            queue_full: self.queue_full,
+            refused: self.refused,
+        }
+    }
+
+    pub fn r2o_note_busy(&mut self, count: usize) {
+        self.busy = self.busy.saturating_add(count as u64);
+    }
+
+    pub fn r2o_note_queue_full(&mut self) {
+        self.queue_full = self.queue_full.saturating_add(1);
     }
 
     /// Запомнить направленный клиентский кортеж после выпуска его головы.
@@ -557,7 +591,10 @@ impl R2oUdpFollowTable {
         else {
             return false;
         };
-        entry.failed = true;
+        if !entry.failed {
+            entry.failed = true;
+            self.refused = self.refused.saturating_add(1);
+        }
         true
     }
 
@@ -600,7 +637,15 @@ struct R2oUdpDeferredResend {
 pub struct R2oUdpDeferredResendStats {
     pub flushed: usize,
     pub resend_failed: usize,
+    pub resend_busy: usize,
     pub verdict_failed: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum R2oUdpDeferredEnqueueError {
+    InvalidPacket,
+    Full,
+    NoMemory,
 }
 
 /// Ограниченное хранение позднего хвоста до завершения отложенной головы.
@@ -619,16 +664,26 @@ impl R2oUdpDeferredResends {
 
     /// Принять ID и копию сырого хвоста до его срока повторной отправки.
     pub fn r2o_enqueue(&mut self, due: Instant, id: u32, packet: &[u8]) -> bool {
-        let Some(flow_key) = R2oUdpFollowKey::from_packet(packet) else {
-            return false;
-        };
-        let Some(index) = self.slots.iter().position(Option::is_none) else {
-            return false;
-        };
+        self.r2o_enqueue_with_error(due, id, packet).is_ok()
+    }
+
+    pub fn r2o_enqueue_with_error(
+        &mut self,
+        due: Instant,
+        id: u32,
+        packet: &[u8],
+    ) -> Result<(), R2oUdpDeferredEnqueueError> {
+        let flow_key = R2oUdpFollowKey::from_packet(packet)
+            .ok_or(R2oUdpDeferredEnqueueError::InvalidPacket)?;
+        let index = self
+            .slots
+            .iter()
+            .position(Option::is_none)
+            .ok_or(R2oUdpDeferredEnqueueError::Full)?;
         let mut stored = Vec::new();
-        if stored.try_reserve_exact(packet.len()).is_err() {
-            return false;
-        }
+        stored
+            .try_reserve_exact(packet.len())
+            .map_err(|_| R2oUdpDeferredEnqueueError::NoMemory)?;
         stored.extend_from_slice(packet);
         self.slots[index] = Some(R2oUdpDeferredResend {
             due,
@@ -638,7 +693,7 @@ impl R2oUdpDeferredResends {
             packet: stored,
         });
         self.next_order = self.next_order.wrapping_add(1);
-        true
+        Ok(())
     }
 
     /// Отменить поздние raw-повторы потока, чей отложенный emit не завершился.
@@ -684,8 +739,11 @@ impl R2oUdpDeferredResends {
             let entry = self.slots[index].take().expect("созревший хвост найден");
             let verdict = match resend(entry.id, &entry.packet) {
                 Ok(()) => 0,
-                Err(_) => {
+                Err(error) => {
                     stats.resend_failed += 1;
+                    if r2o_udp_send_busy(&error) {
+                        stats.resend_busy += 1;
+                    }
                     1
                 }
             };
@@ -743,4 +801,115 @@ pub fn r2o_udp_send_busy(error: &std::io::Error) -> bool {
         error.raw_os_error(),
         Some(libc::EAGAIN) | Some(libc::ENOBUFS)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        R2O_UDP_RELEASE_SLOTS, R2oUdpDeferredEnqueueError, R2oUdpDeferredResends,
+        R2oUdpFollowTable, R2oUdpHeldPacket, R2oUdpHoldBatch, r2o_release_batch_with,
+    };
+    use crate::r2o_udp_sessions::flow_key_from_packet;
+    use std::io;
+    use std::time::{Duration, Instant};
+
+    fn udp_packet() -> Vec<u8> {
+        let mut packet = vec![0; 28];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&28_u16.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 17;
+        packet[12..16].copy_from_slice(&[192, 0, 2, 1]);
+        packet[16..20].copy_from_slice(&[198, 51, 100, 2]);
+        packet[20..22].copy_from_slice(&53000_u16.to_be_bytes());
+        packet[22..24].copy_from_slice(&443_u16.to_be_bytes());
+        packet[24..26].copy_from_slice(&8_u16.to_be_bytes());
+        packet
+    }
+
+    #[test]
+    fn follow_stats_count_busy_and_only_the_first_permanent_refusal() {
+        let packet = udp_packet();
+        let mut follow = R2oUdpFollowTable::new();
+        assert!(follow.r2o_mark(&packet, Instant::now(), None, 1));
+        assert!(follow.r2o_mark_failed(&packet));
+        assert!(follow.r2o_mark_failed(&packet));
+        follow.r2o_note_busy(2);
+        follow.r2o_note_queue_full();
+
+        assert_eq!(
+            follow.r2o_stats(),
+            super::R2oUdpFollowStats {
+                live: 1,
+                busy: 2,
+                queue_full: 1,
+                refused: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn follow_stats_distinguish_busy_from_permanent_resend_failure() {
+        let packet = udp_packet();
+        let batch = R2oUdpHoldBatch {
+            key: flow_key_from_packet(&packet).unwrap(),
+            packets: vec![
+                R2oUdpHeldPacket {
+                    id: 1,
+                    mark: 0,
+                    packet: packet.clone(),
+                },
+                R2oUdpHeldPacket {
+                    id: 2,
+                    mark: 0,
+                    packet,
+                },
+            ],
+        };
+        let stats = r2o_release_batch_with(
+            &batch,
+            1,
+            false,
+            true,
+            |_| true,
+            |_| Err(io::Error::from_raw_os_error(libc::ENOBUFS)),
+            |_| panic!("busy raw-send errors are retryable"),
+            |_, _| Ok(()),
+        );
+
+        assert_eq!(stats.resend_failed, 1);
+        assert_eq!(stats.resend_busy, 1);
+    }
+
+    #[test]
+    fn deferred_resend_stats_count_busy_errors_and_expose_queue_capacity() {
+        let now = Instant::now();
+        let packet = udp_packet();
+        let mut deferred = R2oUdpDeferredResends::new();
+        for id in 0..R2O_UDP_RELEASE_SLOTS {
+            assert!(deferred.r2o_enqueue(now, id as u32, &packet));
+        }
+        assert_eq!(
+            deferred.r2o_enqueue_with_error(now, 999, &packet),
+            Err(R2oUdpDeferredEnqueueError::Full)
+        );
+
+        let stats = deferred.r2o_flush(
+            now + Duration::from_millis(1),
+            |_id, _packet| Err(io::Error::from_raw_os_error(libc::EAGAIN)),
+            |_id, _verdict| Ok(()),
+        );
+        assert_eq!(stats.flushed, R2O_UDP_RELEASE_SLOTS);
+        assert_eq!(stats.resend_failed, R2O_UDP_RELEASE_SLOTS);
+        assert_eq!(stats.resend_busy, R2O_UDP_RELEASE_SLOTS);
+    }
+
+    #[test]
+    fn deferred_resend_enqueue_distinguishes_invalid_packets() {
+        let mut deferred = R2oUdpDeferredResends::new();
+        assert_eq!(
+            deferred.r2o_enqueue_with_error(Instant::now(), 1, &[0; 28]),
+            Err(R2oUdpDeferredEnqueueError::InvalidPacket)
+        );
+    }
 }

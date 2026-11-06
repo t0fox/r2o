@@ -3,7 +3,7 @@ set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 D2O_ROOT=${R2O_DONOR_ROOT:-${ROOT%/*}/d2o}
-EXPECTED_D2O_SHA=304ba893dd37197128ac8799c0495b035f6a38c0
+EXPECTED_D2O_SHA=8e2c98146cf0b712dc967fbec558c7b904666e87
 ACTUAL_D2O_SHA=$(git -C "$D2O_ROOT" rev-parse HEAD)
 if [ "$ACTUAL_D2O_SHA" != "$EXPECTED_D2O_SHA" ]; then
     printf 'Expected d2o %s, got %s\n' "$EXPECTED_D2O_SHA" "$ACTUAL_D2O_SHA" >&2
@@ -117,7 +117,9 @@ set -eu
 EVENTS=$1
 FIREWALL=$2
 export EVENTS FIREWALL
+disable_supervisor() { :; }
 update_scheduler_stop() { :; }
+meta_dns_scheduler_stop() { :; }
 telegram_stop() { :; }
 engine_stop() { printf 'engine-stop\n' >>"$EVENTS"; }
 panel_stop() { :; }
