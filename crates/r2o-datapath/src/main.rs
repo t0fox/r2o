@@ -1746,7 +1746,11 @@ mod app {
                                 synthetic = Some(packet);
                                 decision
                             }
-                            HoldOutcome::OwnedReady { ids, packet, originals } => {
+                            HoldOutcome::OwnedReady {
+                                ids,
+                                packet,
+                                originals,
+                            } => {
                                 socket.send_verdict(packet_id, NF_DROP)?;
                                 if !controller_probe
                                     && let Some(mut hello) = tcp_hello_from_packet(&packet)
@@ -1861,7 +1865,11 @@ mod app {
                     } else {
                         batch_ids.as_slice()
                     };
-                    let delivery_ids: &[u32] = if batch_owned_originals.is_some() { &[] } else { ids };
+                    let delivery_ids: &[u32] = if batch_owned_originals.is_some() {
+                        &[]
+                    } else {
+                        ids
+                    };
                     let redirect_packets = if options.mode == RuntimeMode::Apply
                         && raw.is_some()
                         && let (Some(redirect), Some(event), Some(packet)) = (
@@ -1988,9 +1996,6 @@ mod app {
                             response_delivered = true;
                         } else {
                             send_verdicts(&mut socket, delivery_ids, NF_ACCEPT, false)?;
-                                    if let Some(originals) = batch_owned_originals.as_ref() {
-                                        r2o_resend_owned_originals(raw.as_ref(), originals);
-                                    }
                             response_delivered = true;
                         }
                     } else {
@@ -2127,7 +2132,9 @@ mod app {
                                 if let Some(originals) = batch_owned_originals.as_ref() {
                                     if let Some(raw) = raw.as_ref() {
                                         if let Err(error) = raw.send_packet(&replacement) {
-                                            eprintln!("r2o-datapath: не отправлен raw replacement удержанного TLS: {error}");
+                                            eprintln!(
+                                                "r2o-datapath: не отправлен raw replacement удержанного TLS: {error}"
+                                            );
                                             r2o_resend_owned_originals(Some(raw), originals);
                                         } else {
                                             execution_succeeded = true;
@@ -2212,7 +2219,11 @@ mod app {
                                     raw.as_ref(),
                                     &mut scheduled,
                                     &mut icmp_guard,
-                                    if udp_replay.is_some() { &[] } else { delivery_ids },
+                                    if udp_replay.is_some() {
+                                        &[]
+                                    } else {
+                                        delivery_ids
+                                    },
                                     tx_original,
                                     packets,
                                     fate,
@@ -4130,7 +4141,12 @@ mod app {
                     r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_QUEUE,
                 );
                 if damaged {
-                    r2o_release_damaged_tcp_hold(queue, raw, holding, pending.r2o_tcp_packet.as_deref());
+                    r2o_release_damaged_tcp_hold(
+                        queue,
+                        raw,
+                        holding,
+                        pending.r2o_tcp_packet.as_deref(),
+                    );
                 }
                 if let Some(packet) = pending.r2o_udp_packet.as_deref() {
                     udp_sessions.r2o_note_execution_failure(

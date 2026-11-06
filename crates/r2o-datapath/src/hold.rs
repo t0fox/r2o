@@ -733,7 +733,11 @@ impl HoldTable {
             self.capture.forget(&key);
             return FeedResult {
                 released,
-                outcome: if current_owned { HoldOutcome::OwnedWaiting } else { HoldOutcome::Waiting },
+                outcome: if current_owned {
+                    HoldOutcome::OwnedWaiting
+                } else {
+                    HoldOutcome::Waiting
+                },
             };
         }
 
@@ -818,7 +822,11 @@ impl HoldTable {
                     released.extend(self.release_held_packets(held.packets));
                     return FeedResult {
                         released,
-                        outcome: if current_owned { HoldOutcome::OwnedWaiting } else { HoldOutcome::Waiting },
+                        outcome: if current_owned {
+                    HoldOutcome::OwnedWaiting
+                } else {
+                    HoldOutcome::Waiting
+                },
                     };
                 };
                 if held.kind == HoldKind::Http {
@@ -827,15 +835,23 @@ impl HoldTable {
                         .observe(sequence, &bytes);
                 }
                 self.stats.ready = self.stats.ready.saturating_add(1);
-                let ids = held.packets.iter().map(|held_packet| held_packet.id).collect();
+                let ids = held
+                    .packets
+                    .iter()
+                    .map(|held_packet| held_packet.id)
+                    .collect();
                 let all_owned = held.packets.iter().all(|held_packet| held_packet.owned);
                 let outcome = if all_owned {
                     let mut originals = held.packets;
-                    originals.sort_by_key(|held_packet| held_packet.sequence.wrapping_sub(sequence));
+                    originals
+                        .sort_by_key(|held_packet| held_packet.sequence.wrapping_sub(sequence));
                     HoldOutcome::OwnedReady {
                         ids,
                         packet,
-                        originals: originals.into_iter().map(|held_packet| held_packet.bytes).collect(),
+                        originals: originals
+                            .into_iter()
+                            .map(|held_packet| held_packet.bytes)
+                            .collect(),
                     }
                 } else {
                     HoldOutcome::Ready { ids, packet }
@@ -847,12 +863,20 @@ impl HoldTable {
                 self.capture.forget(&key);
                 FeedResult {
                     released,
-                    outcome: if current_owned { HoldOutcome::OwnedWaiting } else { HoldOutcome::Waiting },
+                    outcome: if current_owned {
+                    HoldOutcome::OwnedWaiting
+                } else {
+                    HoldOutcome::Waiting
+                },
                 }
             }
             CaptureResult::Ignored | CaptureResult::Incomplete => FeedResult {
                 released,
-                outcome: if current_owned { HoldOutcome::OwnedWaiting } else { HoldOutcome::Waiting },
+                outcome: if current_owned {
+                    HoldOutcome::OwnedWaiting
+                } else {
+                    HoldOutcome::Waiting
+                },
             },
         }
     }
@@ -2154,7 +2178,12 @@ mod tests {
             HoldOutcome::OwnedWaiting
         );
         let result = hold.feed_observing(3, &second, now, options);
-        let HoldOutcome::OwnedReady { ids, packet, originals } = result.outcome else {
+        let HoldOutcome::OwnedReady {
+            ids,
+            packet,
+            originals,
+        } = result.outcome
+        else {
             panic!("complete owned ClientHello should return its raw originals");
         };
         assert_eq!(ids, [2, 3]);
