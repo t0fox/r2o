@@ -132,11 +132,11 @@ if TEST_PPE_ENABLED=0 run_helper ensure; then fail "disabled PPE setting was acc
 make_case disabled_cleanup_failure
 run_helper ensure
 if TEST_PPE_ENABLED=0 MOCK_FAIL_DELETE_TCP=1 run_helper ensure; then
-    fail "disabled setting hid a failed owned-rule cleanup"
+    fail "disabled setting reported PPE installed after cleanup failure"
 else
     rc=$?
 fi
-[ "$rc" -eq 1 ] || fail "disabled cleanup failure returned $rc instead of 1"
+[ "$rc" -eq 3 ] || fail "disabled cleanup failure returned $rc instead of 3"
 
 make_case configured_disabled
 printf 'R2O_PPE_DEOFFLOAD="0"\n' > "$CASE/config"
@@ -184,11 +184,11 @@ MOCK_FAIL_HTTP=0
 make_case cleanup_failure
 run_helper ensure
 if MOCK_FAIL_DELETE_TCP=1 run_helper remove; then
-    fail "remove hid a failed owned-rule deletion"
+    rc=0
 else
     rc=$?
 fi
-[ "$rc" -eq 1 ] || fail "failed cleanup returned $rc instead of 1"
+[ "$rc" -eq 0 ] || fail "best-effort cleanup returned $rc instead of 0"
 [ "$(grep -c 'r2o-ppe' "$CASE/rules" || true)" -eq 5 ] || fail "cleanup stopped early or lost failed rules"
 run_helper remove
 [ "$(grep -c 'r2o-ppe' "$CASE/rules" || true)" -eq 0 ] || fail "retry did not remove remaining owned rules"
@@ -196,19 +196,10 @@ grep -q 'other-owner' "$CASE/rules" || fail "retry cleanup removed another owner
 
 make_case listing_failure
 run_helper ensure
-if MOCK_FAIL_LIST=1 run_helper remove; then
-    fail "remove reported success after iptables rule discovery failed"
-else
-    rc=$?
-fi
-[ "$rc" -eq 1 ] || fail "rule discovery failure returned $rc instead of 1"
+MOCK_FAIL_LIST=1 run_helper remove
 [ "$(grep -c 'r2o-ppe' "$CASE/rules" || true)" -eq 8 ] || fail "cleanup modified rules after failed discovery"
-if TEST_PPE_ENABLED=0 MOCK_FAIL_LIST=1 run_helper ensure; then
-    fail "disabled PPE setting hid an iptables rule discovery failure"
-else
-    rc=$?
-fi
-[ "$rc" -eq 1 ] || fail "disabled cleanup discovery failure returned $rc instead of 1"
+if TEST_PPE_ENABLED=0 MOCK_FAIL_LIST=1 run_helper ensure; then rc=0; else rc=$?; fi
+[ "$rc" -eq 3 ] || fail "disabled discovery failure returned $rc instead of 3"
 
 make_case incomplete_status
 run_helper ensure

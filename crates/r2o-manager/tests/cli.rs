@@ -329,6 +329,58 @@ fn shipped_openwrt_defaults_initialize_without_rejecting_advanced_mark_options()
     assert!(config.contains("PROBE_MARK=46\n"));
     assert!(config.contains("ONLY_MARK=\n"));
     assert!(config.contains("TG_PORT=1443\n"));
+    assert!(config.contains("D2K_GATE=\n"));
+}
+
+#[test]
+fn config_init_preserves_only_a_safe_d2k_gate_endpoint() {
+    let temp = TestDir::new();
+    let defaults = temp.0.join("config.default");
+    fs::write(&defaults, "SCHEMA=1\nD2K_GATE=\n").unwrap();
+    let donor = temp.0.join("donor");
+    fs::write(&donor, "D2K_GATE=http://203.0.113.9:8443/update\n").unwrap();
+    let root = temp.0.join("valid");
+    let output = invoke(&[
+        "config-init",
+        "--root",
+        root.to_str().unwrap(),
+        "--defaults",
+        defaults.to_str().unwrap(),
+        "--donor-config",
+        donor.to_str().unwrap(),
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("config")).unwrap(),
+        "SCHEMA=1\nD2K_GATE=http://203.0.113.9:8443/update\n"
+    );
+
+    for (index, invalid) in [
+        "http://203.0.113.9:8443;touch x",
+        "http://256.0.0.1:8443",
+        "http://203.0.113.9:65536",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        fs::write(&donor, format!("D2K_GATE={invalid}\n")).unwrap();
+        let root = temp.0.join(format!("invalid-{index}"));
+        let output = invoke(&[
+            "config-init",
+            "--root",
+            root.to_str().unwrap(),
+            "--defaults",
+            defaults.to_str().unwrap(),
+            "--donor-config",
+            donor.to_str().unwrap(),
+        ]);
+        assert!(!output.status.success(), "accepted unsafe gate {invalid}");
+        assert!(!root.join("config").exists());
+    }
 }
 
 #[test]
