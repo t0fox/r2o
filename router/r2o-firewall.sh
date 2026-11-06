@@ -408,14 +408,13 @@ flowoffload_ensure_unlocked() {
     [ "${R2O_FLOWOFFLOAD_RESTORING:-0}" != 1 ] || return 0
     command -v uci >/dev/null 2>&1 || return 0
     [ "$(uci -q get firewall.@defaults[0].flow_offloading 2>/dev/null || true)" = 1 ] || return 0
-    mkdir -p "$RUN_DIR" || return 1
-    [ -f "$FLOWOFFLOAD_STATE" ] || flowoffload_store_state 1 || return 1
+    mkdir -p "$RUN_DIR" || return 0
+    [ -f "$FLOWOFFLOAD_STATE" ] || flowoffload_store_state 1 || true
     if uci set firewall.@defaults[0].flow_offloading=0 && uci commit firewall; then
-        flowoffload_firewall_reload || return 1
+        flowoffload_firewall_reload || true
         echo "r2o: fw4 flow offloading отключён на время работы datapath и будет восстановлен при остановке" >&2
     else
-        echo "r2o: не удалось отключить fw4 flow offloading; останавливаю datapath, чтобы сохранить видимость трафика" >&2
-        return 1
+        echo "r2o: не удалось выключить fw4 flow offloading — datapath не увидит часть потоков клиентов" >&2
     fi
 }
 
@@ -428,10 +427,7 @@ flowoffload_restore_unlocked() {
         1)
             command -v uci >/dev/null 2>&1 || return 0
             if uci set firewall.@defaults[0].flow_offloading=1 && uci commit firewall; then
-                flowoffload_firewall_reload || return 1
-            else
-                echo "r2o: не удалось восстановить fw4 flow offloading" >&2
-                return 1
+                flowoffload_firewall_reload || true
             fi
             ;;
         selective|fallback|legacy)
