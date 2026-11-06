@@ -259,7 +259,7 @@ mod send_stats_tests {
         );
         record_send_outcome(
             &mut stats,
-            &[0x65; 20],
+            &[0x75; 20],
             &Err(io::Error::from_raw_os_error(libc::EAFNOSUPPORT)),
         );
 
