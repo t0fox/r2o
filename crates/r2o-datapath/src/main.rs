@@ -37,9 +37,8 @@ mod app {
     };
     use r2o_datapath::r2o_udp_hold::{
         R2oUdpDeferredEnqueueError, R2oUdpDeferredResends, R2oUdpDeferredVerdicts,
-        R2oUdpFollowTable, R2oUdpHeldPacket, R2oUdpHoldBatch, R2oUdpHoldFeed,
-        R2oUdpHoldTable, r2o_release_batch_with, r2o_udp_hold_candidate,
-        r2o_udp_send_busy,
+        R2oUdpFollowTable, R2oUdpHeldPacket, R2oUdpHoldBatch, R2oUdpHoldFeed, R2oUdpHoldTable,
+        r2o_release_batch_with, r2o_udp_hold_candidate, r2o_udp_send_busy,
     };
     use r2o_datapath::r2o_udp_sessions::R2oUdpSessions;
     use r2o_datapath::r2o_voice::{R2oVoiceSessions, R2oVoiceTrialProofs};
@@ -1216,8 +1215,7 @@ mod app {
             if route_ready {
                 match route_monitor.r2o_drain_watch() {
                     Ok(true) => {
-                        route_watch_notifications =
-                            route_watch_notifications.saturating_add(1);
+                        route_watch_notifications = route_watch_notifications.saturating_add(1);
                         let settled =
                             (last_route_refresh + R2O_ROUTE_SETTLE_INTERVAL).max(Instant::now());
                         next_route_refresh = next_route_refresh.min(settled);

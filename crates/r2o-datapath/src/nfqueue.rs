@@ -155,9 +155,9 @@ impl QueueSocket {
                     "r2o-datapath: SO_RCVBUF NFQUEUE ограничен: запрос {receive_buffer}, ядро установило {effective}"
                 ),
                 Ok(_) => {}
-                Err(error) => eprintln!(
-                    "r2o-datapath: не удалось настроить SO_RCVBUF NFQUEUE: {error}"
-                ),
+                Err(error) => {
+                    eprintln!("r2o-datapath: не удалось настроить SO_RCVBUF NFQUEUE: {error}")
+                }
             }
         }
 

@@ -207,9 +207,10 @@ impl Ndm for SystemNdm {
     }
 
     fn save(&mut self) -> Result<(), String> {
-        self.ndmc("system configuration save").and_then(command_success(
-            "ndmc не смог сохранить конфигурацию роутера",
-        ))
+        self.ndmc("system configuration save")
+            .and_then(command_success(
+                "ndmc не смог сохранить конфигурацию роутера",
+            ))
     }
 }
 
@@ -834,7 +835,8 @@ pub async fn refresh_from_env() -> Result<(), String> {
 
 pub fn remove_from_env() -> Result<(), String> {
     let paths = MetaDnsPaths::from_env();
-    let mut manager = MetaDnsManager::new(DirectMetaNetwork::new(None), SystemNdm::default(), paths);
+    let mut manager =
+        MetaDnsManager::new(DirectMetaNetwork::new(None), SystemNdm::default(), paths);
     manager.remove_owned()
 }
 

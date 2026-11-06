@@ -239,7 +239,14 @@ mod send_stats_tests {
             &Err(io::Error::from_raw_os_error(libc::ENOBUFS)),
         );
 
-        assert_eq!(stats, RawSendStats { sent: 1, errors: 1, busy: 1 });
+        assert_eq!(
+            stats,
+            RawSendStats {
+                sent: 1,
+                errors: 1,
+                busy: 1
+            }
+        );
     }
 
     #[test]
