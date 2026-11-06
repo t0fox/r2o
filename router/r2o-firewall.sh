@@ -12,7 +12,6 @@ MARK=${MARK:-45}
 # D2O controller measurements use this fixed mark to avoid observing their own probes.
 MEASURE_MARK=0x2f
 PROBE_MARK=${PROBE_MARK:-46}
-TG_OUTBOUND_MARK=0x40000000
 BACKEND=${FW_BACKEND:-auto}
 IPV6_ENABLED_CONFIG=${IPV6_ENABLED:-1}
 IPV6_ENABLED=$IPV6_ENABLED_CONFIG
@@ -225,7 +224,6 @@ table inet r2o {
         ip6 daddr ff00::/8 return
         meta mark $MARK return
         meta mark $MEASURE_MARK return
-        meta mark $TG_OUTBOUND_MARK return
         meta l4proto { tcp, udp } th dport { $nft_dns } return
         ct status dnat return
         $nft_gate_out
@@ -653,7 +651,6 @@ xt_family_up() {
     fi
     xt "$tool" -t mangle -A R2O_OUT -m mark --mark "$MARK" -j RETURN || return 1
     xt "$tool" -t mangle -A R2O_OUT -m mark --mark "$MEASURE_MARK" -j RETURN || return 1
-    xt "$tool" -t mangle -A R2O_OUT -m mark --mark "$TG_OUTBOUND_MARK" -j RETURN || return 1
     for proto in tcp udp; do
         xt "$tool" -t mangle -A R2O_OUT -p "$proto" -m multiport --dports "$DNS_PORTS" -j RETURN || return 1
         xt "$tool" -t mangle -A R2O_IN -p "$proto" -m multiport --sports "$DNS_PORTS" -j RETURN || return 1
@@ -697,7 +694,8 @@ xt_family_up() {
             -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
     fi
     if [ "$tool" = iptables ]; then
-        xt "$tool" -t nat -A POSTROUTING -p udp -m mark --mark "$MARK" -j MASQUERADE || return 1
+        xt "$tool" -t nat -A POSTROUTING -p udp -m mark --mark "$MARK" -j MASQUERADE \
+            || echo "r2o: не поставить MASQUERADE для своих посылок — QUIC за роутером может не работать" >&2
     fi
     xt "$tool" -t mangle -I POSTROUTING 1 -j R2O_OUT || return 1
     xt "$tool" -t mangle -I FORWARD 1 -j R2O_IN || return 1
@@ -731,7 +729,6 @@ xt_family_installed() {
     fi
     xt "$fw_tool" -t mangle -C R2O_OUT -m mark --mark "$MARK" -j RETURN || return 1
     xt "$fw_tool" -t mangle -C R2O_OUT -m mark --mark "$MEASURE_MARK" -j RETURN || return 1
-    xt "$fw_tool" -t mangle -C R2O_OUT -m mark --mark "$TG_OUTBOUND_MARK" -j RETURN || return 1
     for proto in tcp udp; do
         xt "$fw_tool" -t mangle -C R2O_OUT -p "$proto" -m multiport --dports "$DNS_PORTS" -j RETURN || return 1
         xt "$fw_tool" -t mangle -C R2O_IN -p "$proto" -m multiport --sports "$DNS_PORTS" -j RETURN || return 1
@@ -754,12 +751,10 @@ xt_family_installed() {
         -m conntrack --ctdir ORIGINAL -m connbytes --connbytes "$VOICE_CONNBYTES" \
         --connbytes-dir original --connbytes-mode packets -j NFQUEUE \
         --queue-num "$queue" --queue-bypass || return 1
-    xt "$fw_tool" -t mangle -C R2O_OUT -p udp -m multiport --dports "$VOICE_PORTS" -j RETURN || return 1
     xt "$fw_tool" -t mangle -C R2O_IN -p udp -m multiport --sports "$VOICE_PORTS" \
         -m conntrack --ctdir REPLY -m connbytes --connbytes "$VOICE_CONNBYTES" \
         --connbytes-dir reply --connbytes-mode packets -j NFQUEUE \
         --queue-num "$queue" --queue-bypass || return 1
-    xt "$fw_tool" -t mangle -C R2O_IN -p udp -m multiport --sports "$VOICE_PORTS" -j RETURN || return 1
     for direction in OUT IN; do
         chain=R2O_$direction
         if [ "$direction" = OUT ]; then
@@ -785,7 +780,6 @@ xt_family_installed() {
     if [ "$fw_tool" = iptables ]; then
         xt "$fw_tool" -t mangle -C R2O_IN -p icmp --icmp-type 11/0 \
             -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
-        xt "$fw_tool" -t nat -C POSTROUTING -p udp -m mark --mark "$MARK" -j MASQUERADE || return 1
     else
         xt "$fw_tool" -t mangle -C R2O_IN -p ipv6-icmp --icmpv6-type 3/0 \
             -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1

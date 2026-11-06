@@ -506,7 +506,7 @@ impl Config {
     }
 
     pub fn outbound_connector(&self) -> OutboundConnector {
-        OutboundConnector::direct().with_socket_mark(Some(0x4000_0000))
+        OutboundConnector::direct().with_socket_mark(Some(0x31))
     }
 
     pub fn bind_host(&self) -> String {

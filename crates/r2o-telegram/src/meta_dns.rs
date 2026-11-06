@@ -1521,6 +1521,87 @@ esac
         let _ = std::fs::remove_dir_all(paths.r2o_dir);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn system_ndm_removes_only_manifest_owned_records_and_saves_once() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let paths = paths("system-ndmc-remove-owned");
+        let executable = paths.r2o_dir.join("ndmc");
+        let state = paths.r2o_dir.join("running-config");
+        std::fs::write(
+            &state,
+            concat!(
+                "system name test-router\n",
+                "ip host instagram.com 157.240.9.174\n",
+                "ip host instagram.com 157.240.9.175\n",
+                "ip host web.whatsapp.com 57.144.245.32\n",
+                "ip host unrelated.example 192.0.2.7\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &executable,
+            r##"#!/bin/sh
+command=$2
+printf '%s\n' "$*" >> "${0%/*}/commands"
+case "$command" in
+    'show running-config') cat "${0%/*}/running-config" ;;
+    'no ip host '*)
+        set -- $command
+        host=$4
+        address=$5
+        awk -v h="$host" -v ip="$address" \
+            '!($1 == "ip" && $2 == "host" && $3 == h && $4 == ip)' \
+            "${0%/*}/running-config" > "${0%/*}/running-config.tmp"
+        mv "${0%/*}/running-config.tmp" "${0%/*}/running-config"
+        ;;
+    'system configuration save') : ;;
+    *) exit 2 ;;
+esac
+"##,
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(
+            &paths.manifest,
+            concat!(
+                "instagram.com 157.240.9.174\n",
+                "web.whatsapp.com 57.144.245.32\n",
+                "unrelated.example 192.0.2.7\n",
+            ),
+        )
+        .unwrap();
+
+        let network = FakeNetwork::with_answers(BTreeMap::new());
+        let ndm = SystemNdm {
+            executable: executable.into_os_string(),
+        };
+        let mut manager = MetaDnsManager::new(network, ndm, paths.clone());
+        manager.remove_owned().unwrap();
+
+        assert!(!paths.manifest.exists());
+        assert_eq!(
+            std::fs::read_to_string(&state).unwrap(),
+            concat!(
+                "system name test-router\n",
+                "ip host instagram.com 157.240.9.175\n",
+                "ip host unrelated.example 192.0.2.7\n",
+            )
+        );
+        assert_eq!(
+            std::fs::read_to_string(paths.r2o_dir.join("commands")).unwrap(),
+            concat!(
+                "-c show running-config\n",
+                "-c no ip host instagram.com 157.240.9.174\n",
+                "-c show running-config\n",
+                "-c no ip host web.whatsapp.com 57.144.245.32\n",
+                "-c system configuration save\n",
+            )
+        );
+        let _ = std::fs::remove_dir_all(paths.r2o_dir);
+    }
+
     fn manager(
         network: FakeNetwork,
         ndm: FakeNdm,

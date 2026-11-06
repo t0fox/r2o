@@ -1,10 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O parity 83.91%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O parity 85.06%">
 <rect width="1100" height="790" rx="20" fill="#0c121e"/>
 <text x="36" y="48" fill="#edf7ff" font-family="Arial,sans-serif" font-size="29" font-weight="700">R2O / D2O · Functional parity</text>
-<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">83.91%</text>
-<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">73 / 87 verified points</text>
-<rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/><rect x="37" y="113" width="859.2" height="11" rx="5" fill="#36c989"/>
-<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">55 contracts · 43 verified · 11 partial · 1 implemented</text>
+<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">85.06%</text>
+<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">74 / 87 verified points</text>
+<rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/><rect x="37" y="113" width="871.0" height="11" rx="5" fill="#36c989"/>
+<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">55 contracts · 44 verified · 10 partial · 1 implemented</text>
 <rect x="35" y="163" width="510" height="100" rx="12" fill="#152030" stroke="#2c3a4d"/>
 <text x="52" y="188" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="17" font-weight="700">Datapath</text><text x="528" y="188" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="13">11/18</text>
 <rect x="52" y="202" width="29" height="22" rx="5" fill="#36c989"><title>TCP datapath: поток, разрезы, удержание, RST и счётчики: Эквивалентно (3/3)</title></rect>
@@ -71,8 +71,8 @@
 <rect x="126" y="538" width="29" height="22" rx="5" fill="#e6b45d"><title>Панель: control/actions, прочие status branches, настройки и assets: Частично (0/1)</title></rect>
 <text x="527" y="586" text-anchor="end" fill="#8298aa" font-family="Arial,sans-serif" font-size="12">3 contracts</text>
 <rect x="563" y="499" width="510" height="100" rx="12" fill="#152030" stroke="#2c3a4d"/>
-<text x="580" y="524" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="17" font-weight="700">Firewall / PPE</text><text x="1056" y="524" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="13">7/9</text>
-<rect x="580" y="538" width="29" height="22" rx="5" fill="#e6b45d"><title>Firewall: статические packet rules и backend: Частично (0/1)</title></rect>
+<text x="580" y="524" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="17" font-weight="700">Firewall / PPE</text><text x="1056" y="524" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="13">8/9</text>
+<rect x="580" y="538" width="29" height="22" rx="5" fill="#36c989"><title>Firewall: статические packet rules и backend: Доказанно эквивалентно (1/1)</title></rect>
 <rect x="617" y="538" width="29" height="22" rx="5" fill="#36c989"><title>Firewall: successful software flow-offload disable and restore: Доказанно эквивалентно (1/1)</title></rect>
 <rect x="654" y="538" width="29" height="22" rx="5" fill="#36c989"><title>Firewall: flow-offload write-failure policy: Доказанно эквивалентно (1/1)</title></rect>
 <rect x="691" y="538" width="29" height="22" rx="5" fill="#e6b45d"><title>Аппаратное ускорение PPE: backend, datapath, миграция тегов и очистка владельца: Частично (0/1)</title></rect>

@@ -50,6 +50,7 @@ VOICE_PORTS=50000:50099
 VOICE_CONNBYTES=0:4
 HTTP_KEEPALIVE_PORTS=80
 late_rst_from() { echo 9; }
+say() { :; }
 fw_return_broadcast() { return 0; }
 fw_icmp_te_rule() { return 0; }
 . "$D2O_FUNCTIONS"
@@ -108,4 +109,39 @@ fi
     exit 1
 }
 
-printf 'D2O/R2O reject early and late iptables rule-installation failures (%s).\n' "$ACTUAL_D2O_SHA"
+: > "$TEMP/d2o-masquerade.trace"
+if D2O_FUNCTIONS=$TEMP/d2o-family.sh FW_TRACE=$TEMP/d2o-masquerade.trace \
+    D2O_FAIL_PATTERN='-A POSTROUTING -p udp -m mark --mark 45 -j MASQUERADE' \
+    PATH=$TEMP/bin:/usr/bin:/bin "$SH_BIN" "$TEMP/d2o-probe"; then
+    d2o_masquerade_rc=0
+else
+    d2o_masquerade_rc=$?
+fi
+: > "$TEMP/r2o-masquerade.trace"
+if R2O_DIR=$TEMP/root R2O_CONFIG=/dev/null R2O_RUN_DIR=$TEMP/root/run \
+    R2O_PROC_DIR=$TEMP/proc R2O_SYS_MODULE_DIR=$TEMP/sys R2O_MODULES_DIR=$TEMP/modules \
+    FW_BACKEND=iptables IPV6_ENABLED=0 FW_TRACE=$TEMP/r2o-masquerade.trace \
+    R2O_FAIL_PATTERN='-A POSTROUTING -p udp -m mark --mark 45 -j MASQUERADE' \
+    PATH=$TEMP/bin:/usr/bin:/bin "$SH_BIN" "$ROOT/router/r2o-firewall.sh" up; then
+    r2o_masquerade_rc=0
+else
+    r2o_masquerade_rc=$?
+fi
+grep -Fq -- '-A POSTROUTING -p udp -m mark --mark 45 -j MASQUERADE' "$TEMP/d2o-masquerade.trace" || {
+    echo 'D2O fixture did not reach the injected MASQUERADE failure' >&2
+    exit 1
+}
+grep -Fq -- '-A POSTROUTING -p udp -m mark --mark 45 -j MASQUERADE' "$TEMP/r2o-masquerade.trace" || {
+    echo 'R2O fixture did not reach the injected MASQUERADE failure' >&2
+    exit 1
+}
+grep -Fq -- '-I POSTROUTING 1 -j R2O_OUT' "$TEMP/r2o-masquerade.trace" || {
+    echo 'R2O did not continue to install the firewall hooks after MASQUERADE failed' >&2
+    exit 1
+}
+[ "$d2o_masquerade_rc" = "$r2o_masquerade_rc" ] && [ "$d2o_masquerade_rc" = 0 ] || {
+    printf 'MASQUERADE failure returned D2O=%s R2O=%s\n' "$d2o_masquerade_rc" "$r2o_masquerade_rc" >&2
+    exit 1
+}
+
+printf 'D2O/R2O reject early and late rule failures, and continue after optional MASQUERADE failure (%s).\n' "$ACTUAL_D2O_SHA"

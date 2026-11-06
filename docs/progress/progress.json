@@ -2,12 +2,12 @@
   "source": "docs/functional-parity-matrix.md",
   "date": "2026-11-06",
   "weight": 87,
-  "points": 73,
-  "percent": 83.91,
+  "points": 74,
+  "percent": 85.06,
   "total": 55,
   "counts": {
-    "verified": 43,
-    "partial": 11,
+    "verified": 44,
+    "partial": 10,
     "implemented": 1,
     "unknown": 0
   },
@@ -552,12 +552,12 @@
           "id": 45,
           "name": "Firewall: статические packet rules и backend",
           "weight": 1,
-          "points": 0,
-          "status": "partial",
-          "statusLabel": "Частично",
+          "points": 1,
+          "status": "verified",
+          "statusLabel": "Доказанно эквивалентно",
           "group": "Firewall / PPE",
-          "mapping": "C `fw_nft_up`/`fw_up_unlocked` → `r2o-firewall.sh::{nft_up,iptables_up}`",
-          "evidence": "На D2O main `8e2c981` 2026-11-06 напрямую прошли 7 current-source differential harnesses: `test-firewall-port-scope-differential.sh`, `test-firewall-connbytes-boundary-differential.sh`, `test-firewall-broadcast-differential.sh`, `test-firewall-nft-failure-differential.sh`, `test-firewall-nft-legacy-iptables-differential.sh`, `test-firewall-nft-down-rst-lifetime-differential.sh` и `test-firewall-rule-error-differential.sh`. Поднаборы покрывают `PORTS`/`DNS_PORTS`, `MEASURE_MARK`, `D2K_GATE` IPv4 исключения для iptables/nft, границу `CONNBYTES + 1`, выбранные broadcast/multicast/ICMP правила, nf"
+          "mapping": "C fw_nft_up/fw_up_unlocked → R2O r2o-firewall.sh nft_up/iptables_up",
+          "evidence": "На D2O main 8e2c981 прошли current-source differential harnesses для port/DNS/voice order, MEASURE_MARK, D2K_GATE, CONNBYTES + 1, broadcast/multicast/ICMP, nft rollback, legacy iptables cleanup и RST-table lifetime. test-firewall-rule-error-differential.sh сверяет обязательный отказ раннего правила и позднего hook, а также D2O best-effort MASQUERADE: при отказе обе стороны завершают up успешно, продолжают ставить hooks, а status остаётся healthy без этого необязательного правила. test-router-iptables-status-differential.sh совпадает для полного набора, отсутствующих NFQUEUE/INPUT/FORWARD/MEASU"
         },
         {
           "id": 46,
@@ -638,7 +638,7 @@
         }
       ],
       "weight": 9,
-      "points": 7
+      "points": 8
     },
     {
       "name": "Release / ABI",
@@ -1170,12 +1170,12 @@
       "id": 45,
       "name": "Firewall: статические packet rules и backend",
       "weight": 1,
-      "points": 0,
-      "status": "partial",
-      "statusLabel": "Частично",
+      "points": 1,
+      "status": "verified",
+      "statusLabel": "Доказанно эквивалентно",
       "group": "Firewall / PPE",
-      "mapping": "C `fw_nft_up`/`fw_up_unlocked` → `r2o-firewall.sh::{nft_up,iptables_up}`",
-      "evidence": "На D2O main `8e2c981` 2026-11-06 напрямую прошли 7 current-source differential harnesses: `test-firewall-port-scope-differential.sh`, `test-firewall-connbytes-boundary-differential.sh`, `test-firewall-broadcast-differential.sh`, `test-firewall-nft-failure-differential.sh`, `test-firewall-nft-legacy-iptables-differential.sh`, `test-firewall-nft-down-rst-lifetime-differential.sh` и `test-firewall-rule-error-differential.sh`. Поднаборы покрывают `PORTS`/`DNS_PORTS`, `MEASURE_MARK`, `D2K_GATE` IPv4 исключения для iptables/nft, границу `CONNBYTES + 1`, выбранные broadcast/multicast/ICMP правила, nf"
+      "mapping": "C fw_nft_up/fw_up_unlocked → R2O r2o-firewall.sh nft_up/iptables_up",
+      "evidence": "На D2O main 8e2c981 прошли current-source differential harnesses для port/DNS/voice order, MEASURE_MARK, D2K_GATE, CONNBYTES + 1, broadcast/multicast/ICMP, nft rollback, legacy iptables cleanup и RST-table lifetime. test-firewall-rule-error-differential.sh сверяет обязательный отказ раннего правила и позднего hook, а также D2O best-effort MASQUERADE: при отказе обе стороны завершают up успешно, продолжают ставить hooks, а status остаётся healthy без этого необязательного правила. test-router-iptables-status-differential.sh совпадает для полного набора, отсутствующих NFQUEUE/INPUT/FORWARD/MEASU"
     },
     {
       "id": 46,

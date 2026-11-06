@@ -55,7 +55,7 @@ run_tg sh "$TG_FW" start || fail "не удалось запустить nftable
 rules=$(table)
 [ -n "$rules" ] || fail "таблица Telegram для nftables не установлена"
 printf '%s\n' "$rules" | grep -qF 'comment "r2o-managed"' || fail "ownership marker missing"
-printf '%s\n' "$rules" | grep -qF 'meta mark 0x40000000 return' || fail "метка исходящих пакетов r2o-telegram не исключена"
+printf '%s\n' "$rules" | grep -qF 'meta mark 0x31 return' || fail "D2O-метка исходящих пакетов r2o-telegram не исключена"
 for rule in \
     'ip daddr @tg4 tcp dport 443 redirect to :1443' \
     'ip daddr @tg4 tcp dport 5222 redirect to :1443' \
@@ -168,8 +168,8 @@ run_iptables() {
 run_iptables sh "$TG_FW" start || fail "не удалось запустить iptables"
 [ "$(grep -c 'REDIRECT --to-port 1443' "$TEMP/iptables-state/iptables")" -eq 6 ] || fail "правила перенаправления IPv4 неполны"
 [ "$(grep -c 'REDIRECT --to-port 1443' "$TEMP/iptables-state/ip6tables")" -eq 6 ] || fail "правила перенаправления IPv6 неполны"
-grep -qF -- '--mark 0x40000000' "$TEMP/iptables-state/iptables" || fail "не установлено исключение для исходящих пакетов IPv4"
-grep -qF -- '--mark 0x40000000' "$TEMP/iptables-state/ip6tables" || fail "не установлено исключение для исходящих пакетов IPv6"
+grep -qF -- '--mark 0x31' "$TEMP/iptables-state/iptables" || fail "не установлено D2O-исключение исходящих пакетов IPv4"
+grep -qF -- '--mark 0x31' "$TEMP/iptables-state/ip6tables" || fail "не установлено D2O-исключение исходящих пакетов IPv6"
 MANIFEST=$TEMP/telegram-dc-endpoints.tsv
 printf 'r2o-tg-dc-options-v1 1 2\n149.154.175.52 443\n2001:67c:4e8::1 5222\n' > "$MANIFEST"
 run_iptables env R2O_TG_DC_MAP_ENDPOINTS_PATH="$MANIFEST" sh "$TG_FW" sync-dc-map || fail "синхронизация точных пар в ipset завершилась ошибкой"

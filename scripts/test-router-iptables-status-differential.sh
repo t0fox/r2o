@@ -82,7 +82,6 @@ QUEUE4=2000
 MARK=45
 MEASURE_MARK=0x2f
 PROBE_MARK=46
-TG_OUTBOUND_MARK=0x40000000
 PORTS=443,8443
 CONNBYTES=0:8
 VOICE_PORTS=50000:50099,1400,3478:3481,5349,19294:19344
@@ -126,11 +125,15 @@ check_r2o() {
         grep -vF -- '-A R2O_OUT -m mark --mark 0x2f -j RETURN' "$TEMP/r2o-state" > "$TEMP/r2o-state.tmp"
         mv "$TEMP/r2o-state.tmp" "$TEMP/r2o-state"
     fi
+    if [ "$2" = missing-masquerade ]; then
+        grep -vF -- '-A POSTROUTING -p udp -m mark --mark 45 -j MASQUERADE' "$TEMP/r2o-state" > "$TEMP/r2o-state.tmp"
+        mv "$TEMP/r2o-state.tmp" "$TEMP/r2o-state"
+    fi
     STATUS_IMPL=r2o STATUS_STATE=$2 STATE_FILE="$TEMP/r2o-state" R2O_CONFIG=$TEMP/config R2O_RUN_DIR=$TEMP/run \
         PATH="$TEMP/bin:$PATH" sh "$ROOT/router/r2o-firewall.sh" status
 }
 
-for state in complete missing-queues missing-forward missing-input missing-measure-mark; do
+for state in complete missing-queues missing-forward missing-input missing-measure-mark missing-masquerade; do
     d2o_status=healthy
     r2o_status=healthy
     check_d2o "$TEMP" "$state" || d2o_status=unhealthy
