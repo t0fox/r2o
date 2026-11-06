@@ -145,16 +145,19 @@ jobs:
           R2O_DONOR_ROOT: ${{ github.workspace }}/d2o
         run: |
           set -euo pipefail
+          cd "${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is not set}"
           shopt -s nullglob
-          tests=(scripts/test-router-*.sh)
+          tests=("$GITHUB_WORKSPACE"/scripts/test-router-*.sh)
           if [ "${#tests[@]}" -eq 0 ]; then
-            echo "::error::Не найдены сценарии проверки роутерных служб"
+            echo "::error::Не найдены сценарии проверки роутерных служб в $GITHUB_WORKSPACE/scripts"
+            find "$GITHUB_WORKSPACE" -maxdepth 2 -type f -name 'test-router-*.sh' -print
             exit 1
           fi
           failed=()
           for test in "${tests[@]}"; do
             echo "::group::$test"
-            if [ "$test" = scripts/test-router-firewall.sh ]; then
+            test_name=${test##*/}
+            if [ "$test_name" = test-router-firewall.sh ]; then
               if sudo sh "$test"; then
                 :
               else
@@ -163,7 +166,7 @@ jobs:
               fi
             else
               test_shell=sh
-              if [ "$test" = scripts/test-router-openwrt-init.sh ]; then
+              if [ "$test_name" = test-router-openwrt-init.sh ]; then
                 test_shell=bash
               fi
               if grep -q 'EXPECTED_D2O_SHA=8e2c98146cf0b712dc967fbec558c7b904666e87' "$test"; then

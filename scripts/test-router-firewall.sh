@@ -42,7 +42,11 @@ QUEUE_NUM=34000 \
 QUEUE_NUM6=34001 \
 PATH="$TEMP/bin:$PATH" \
     sh "$ROOT/router/r2o-firewall.sh" up
-grep -qF 'meta mark 0x40000000 return' "$TEMP/main.nft"
+grep -qF 'meta mark 0x2f return' "$TEMP/main.nft"
+if grep -qF 'meta mark 0x31 return' "$TEMP/main.nft"; then
+    echo "main firewall must queue Telegram-marked packets like D2O" >&2
+    exit 1
+fi
 grep -qF 'table inet r2o_rst' "$TEMP/main.nft"
 grep -qF 'tcp sport . ip daddr . tcp dport @rst4 drop' "$TEMP/main.nft"
 grep -qF 'tcp sport . ip6 daddr . tcp dport @rst6 drop' "$TEMP/main.nft"
@@ -55,6 +59,6 @@ R2O_FW=nft \
 PATH="$TEMP/bin:$PATH" \
     sh "$ROOT/router/r2o-tg-firewall.sh" start
 grep -qF 'comment "r2o-managed"' "$TEMP/telegram.nft"
-grep -qF 'meta mark 0x40000000 return' "$TEMP/telegram.nft"
+grep -qF 'meta mark 0x31 return' "$TEMP/telegram.nft"
 
 echo "Синтаксис правил nftables для роутера и Telegram проверен без установки правил"
