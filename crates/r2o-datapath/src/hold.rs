@@ -823,10 +823,10 @@ impl HoldTable {
                     return FeedResult {
                         released,
                         outcome: if current_owned {
-                    HoldOutcome::OwnedWaiting
-                } else {
-                    HoldOutcome::Waiting
-                },
+                            HoldOutcome::OwnedWaiting
+                        } else {
+                            HoldOutcome::Waiting
+                        },
                     };
                 };
                 if held.kind == HoldKind::Http {
@@ -864,10 +864,10 @@ impl HoldTable {
                 FeedResult {
                     released,
                     outcome: if current_owned {
-                    HoldOutcome::OwnedWaiting
-                } else {
-                    HoldOutcome::Waiting
-                },
+                        HoldOutcome::OwnedWaiting
+                    } else {
+                        HoldOutcome::Waiting
+                    },
                 }
             }
             CaptureResult::Ignored | CaptureResult::Incomplete => FeedResult {
