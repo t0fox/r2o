@@ -1,13 +1,13 @@
 {
   "source": "docs/functional-parity-matrix.md",
-  "date": "",
+  "date": "2026-11-06",
   "weight": 87,
-  "points": 72,
-  "percent": 82.76,
+  "points": 73,
+  "percent": 83.91,
   "total": 55,
   "counts": {
-    "verified": 42,
-    "partial": 12,
+    "verified": 43,
+    "partial": 11,
     "implemented": 1,
     "unknown": 0
   },
@@ -499,7 +499,7 @@
           "statusLabel": "Реализовано, паритет частичный",
           "group": "Telegram",
           "mapping": "D2O Telegram service integration → Rust `r2o-telegram` and router lifecycle",
-          "evidence": "Аудит источников `z2kOW@42c8111` и `crates/r2o-telegram` подтвердил перенос ядра WS proxy: `ws_client`, `routing`, `transparent_proxy`, `splitter`, `server` и соответствующие тестовые случаи присутствуют; в WS/routing сравнении функциональные различия ограничены R2O адаптацией, telemetry и платформенной синхронизацией. `scripts/test-router-tg-firewall.sh` и `test-telegram-stop-order-differential.sh` прошли на текущем D2O `8e2c981`. `test-router-telegram-service.sh` здесь остановился до проверки поведения: отсутствует release-бинарь `target/release/r2o-telegram`, а Cargo/rustc в среде нет. Полн"
+          "evidence": "Аудит `z2kOW@42c8111` сопоставил все 38 файлов из `tg-proxy/src` и `tg-proxy/tests` с `crates/r2o-telegram`; все пути присутствуют. В `ws_client` и `splitter` executable logic совпадает, отличия — тексты ошибок; в `routing` обнаружены локализованные panic-тексты, один `#[allow(deprecated)]` и R2O-имена временных файлов тестов. R2O добавляет directional byte telemetry в `transparent_proxy`, валидатор ответа MTProto в `bridge` и platform DC-map sync в `server`. Это исходниковое сравнение, оно не доказывает исполнение этих ветвей. `scripts/test-router-tg-firewall.sh` и `test-telegram-stop-order-d"
         }
       ],
       "weight": 3,
@@ -574,12 +574,12 @@
           "id": 47,
           "name": "Firewall: flow-offload write-failure policy",
           "weight": 1,
-          "points": 0,
-          "status": "partial",
-          "statusLabel": "Частично",
+          "points": 1,
+          "status": "verified",
+          "statusLabel": "Доказанно эквивалентно",
           "group": "Firewall / PPE",
           "mapping": "C D2O `flowoffload_off` → Rust R2O `flowoffload_ensure_unlocked` and S99 error path",
-          "evidence": "`test-router-flowoffload-d2o-differential.sh` explicitly proves a mismatch: on failed UCI write D2O returns success and continues startup, while R2O returns failure and stops the datapath to preserve NFQUEUE visibility. This is an intentional fail-closed behavior difference, so this point earns zero."
+          "evidence": "`test-router-flowoffload-d2o-differential.sh` сравнивает nft включён/выключен и iptables lifecycle, а также ошибки UCI `set` и `commit`: D2O и R2O дают одинаковый результат запуска, конечную настройку, saved-state cleanup и trace. Актуальный helper `files/S99d2k` в D2O `8e2c981` совпадает с закреплённым C-эталоном `a63d964` (SHA-256 извлечённого блока `5205447a3d425d260d8a9dc7b8fe10a3cb933850e96b6d1a53c6609836275488`). Differential прошёл; это command-fixture, не live fw4/kernel прогон. По контракту UCI write-failure начислен 1 балл"
         },
         {
           "id": 48,
@@ -638,7 +638,7 @@
         }
       ],
       "weight": 9,
-      "points": 6
+      "points": 7
     },
     {
       "name": "Release / ABI",
@@ -1109,7 +1109,7 @@
       "statusLabel": "Реализовано, паритет частичный",
       "group": "Telegram",
       "mapping": "D2O Telegram service integration → Rust `r2o-telegram` and router lifecycle",
-      "evidence": "Аудит источников `z2kOW@42c8111` и `crates/r2o-telegram` подтвердил перенос ядра WS proxy: `ws_client`, `routing`, `transparent_proxy`, `splitter`, `server` и соответствующие тестовые случаи присутствуют; в WS/routing сравнении функциональные различия ограничены R2O адаптацией, telemetry и платформенной синхронизацией. `scripts/test-router-tg-firewall.sh` и `test-telegram-stop-order-differential.sh` прошли на текущем D2O `8e2c981`. `test-router-telegram-service.sh` здесь остановился до проверки поведения: отсутствует release-бинарь `target/release/r2o-telegram`, а Cargo/rustc в среде нет. Полн"
+      "evidence": "Аудит `z2kOW@42c8111` сопоставил все 38 файлов из `tg-proxy/src` и `tg-proxy/tests` с `crates/r2o-telegram`; все пути присутствуют. В `ws_client` и `splitter` executable logic совпадает, отличия — тексты ошибок; в `routing` обнаружены локализованные panic-тексты, один `#[allow(deprecated)]` и R2O-имена временных файлов тестов. R2O добавляет directional byte telemetry в `transparent_proxy`, валидатор ответа MTProto в `bridge` и platform DC-map sync в `server`. Это исходниковое сравнение, оно не доказывает исполнение этих ветвей. `scripts/test-router-tg-firewall.sh` и `test-telegram-stop-order-d"
     },
     {
       "id": 40,
@@ -1192,12 +1192,12 @@
       "id": 47,
       "name": "Firewall: flow-offload write-failure policy",
       "weight": 1,
-      "points": 0,
-      "status": "partial",
-      "statusLabel": "Частично",
+      "points": 1,
+      "status": "verified",
+      "statusLabel": "Доказанно эквивалентно",
       "group": "Firewall / PPE",
       "mapping": "C D2O `flowoffload_off` → Rust R2O `flowoffload_ensure_unlocked` and S99 error path",
-      "evidence": "`test-router-flowoffload-d2o-differential.sh` explicitly proves a mismatch: on failed UCI write D2O returns success and continues startup, while R2O returns failure and stops the datapath to preserve NFQUEUE visibility. This is an intentional fail-closed behavior difference, so this point earns zero."
+      "evidence": "`test-router-flowoffload-d2o-differential.sh` сравнивает nft включён/выключен и iptables lifecycle, а также ошибки UCI `set` и `commit`: D2O и R2O дают одинаковый результат запуска, конечную настройку, saved-state cleanup и trace. Актуальный helper `files/S99d2k` в D2O `8e2c981` совпадает с закреплённым C-эталоном `a63d964` (SHA-256 извлечённого блока `5205447a3d425d260d8a9dc7b8fe10a3cb933850e96b6d1a53c6609836275488`). Differential прошёл; это command-fixture, не live fw4/kernel прогон. По контракту UCI write-failure начислен 1 балл"
     },
     {
       "id": 48,

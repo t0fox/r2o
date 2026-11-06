@@ -33,7 +33,7 @@ function parse(source){
  if(!items.length)throw Error("No rows");
  const groups=CATS.map(name=>{const cards=items.filter(v=>v.group===name);return {name,items:cards,weight:cards.reduce((a,v)=>a+v.weight,0),points:cards.reduce((a,v)=>a+v.points,0)}}).filter(g=>g.items.length);
  const weight=items.reduce((a,v)=>a+v.weight,0),points=items.reduce((a,v)=>a+v.points,0);
- return {source:"docs/functional-parity-matrix.md",date:source.match(/Аудит среза\s+`(\d{4}-\d{2}-\d{2})`/)?.[1]||"",weight,points,percent:+(points/weight*100).toFixed(2),total:items.length,counts:{verified:items.filter(i=>i.status==="verified").length,partial:items.filter(i=>i.status==="partial").length,implemented:items.filter(i=>i.status==="implemented").length,unknown:items.filter(i=>i.status==="unknown").length},groups,items};
+ return {source:"docs/functional-parity-matrix.md",date:source.match(/(?:Аудит среза\s+`|Актуальный документный срез:\s*)(\d{4}-\d{2}-\d{2})/)?.[1]||"",weight,points,percent:+(points/weight*100).toFixed(2),total:items.length,counts:{verified:items.filter(i=>i.status==="verified").length,partial:items.filter(i=>i.status==="partial").length,implemented:items.filter(i=>i.status==="implemented").length,unknown:items.filter(i=>i.status==="unknown").length},groups,items};
 }
 
 function svg(d){
