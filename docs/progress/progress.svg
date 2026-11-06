@@ -1,12 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O parity 85.06%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O parity 86.21%">
 <rect width="1100" height="790" rx="20" fill="#0c121e"/>
 <text x="36" y="48" fill="#edf7ff" font-family="Arial,sans-serif" font-size="29" font-weight="700">R2O / D2O · Functional parity</text>
-<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">85.06%</text>
-<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">74 / 87 verified points</text>
-<rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/><rect x="37" y="113" width="871.0" height="11" rx="5" fill="#36c989"/>
-<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">55 contracts · 44 verified · 10 partial · 1 implemented</text>
+<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">86.21%</text>
+<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">75 / 87 verified points</text>
+<rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/><rect x="37" y="113" width="882.8" height="11" rx="5" fill="#36c989"/>
+<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">55 contracts · 45 verified · 9 partial · 1 implemented</text>
 <rect x="35" y="163" width="510" height="100" rx="12" fill="#152030" stroke="#2c3a4d"/>
-<text x="52" y="188" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="17" font-weight="700">Datapath</text><text x="528" y="188" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="13">11/18</text>
+<text x="52" y="188" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="17" font-weight="700">Datapath</text><text x="528" y="188" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="13">12/18</text>
 <rect x="52" y="202" width="29" height="22" rx="5" fill="#36c989"><title>TCP datapath: поток, разрезы, удержание, RST и счётчики: Эквивалентно (3/3)</title></rect>
 <rect x="89" y="202" width="29" height="22" rx="5" fill="#36c989"><title>UDP exchange и QUIC/STUN наблюдение: Эквивалентно (2/2)</title></rect>
 <rect x="126" y="202" width="29" height="22" rx="5" fill="#e6b45d"><title>IPv6/фрагментация в живом NFQUEUE, маркировка маршрута, fail-open и conntrack: Частично (0/3)</title></rect>
@@ -19,7 +19,7 @@
 <rect x="385" y="202" width="29" height="22" rx="5" fill="#e6b45d"><title>HTTP/3 request budgets, transport limits and stall deadlines: Частично (0/1)</title></rect>
 <rect x="422" y="202" width="29" height="22" rx="5" fill="#e6b45d"><title>Production controller recovery and long-running Discord RTC lifecycle: Частично (0/1)</title></rect>
 <rect x="459" y="202" width="29" height="22" rx="5" fill="#36c989"><title>Meta DNS scheduler lifecycle and packaged range asset: Доказанно эквивалентно (1/1)</title></rect>
-<rect x="52" y="230" width="29" height="22" rx="5" fill="#e6b45d"><title>Keenetic direct DNS, TLS edge verification and owned-record removal: Частично (0/1)</title></rect>
+<rect x="52" y="230" width="29" height="22" rx="5" fill="#36c989"><title>Keenetic direct DNS, TLS edge verification and owned-record removal: Доказанно эквивалентно (1/1)</title></rect>
 <text x="527" y="250" text-anchor="end" fill="#8298aa" font-family="Arial,sans-serif" font-size="12">13 contracts</text>
 <rect x="563" y="163" width="510" height="100" rx="12" fill="#152030" stroke="#2c3a4d"/>
 <text x="580" y="188" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="17" font-weight="700">Classifier / TLS</text><text x="1056" y="188" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="13">14/14</text>

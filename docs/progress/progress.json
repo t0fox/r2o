@@ -2,12 +2,12 @@
   "source": "docs/functional-parity-matrix.md",
   "date": "2026-11-06",
   "weight": 87,
-  "points": 74,
-  "percent": 85.06,
+  "points": 75,
+  "percent": 86.21,
   "total": 55,
   "counts": {
-    "verified": 44,
-    "partial": 10,
+    "verified": 45,
+    "partial": 9,
     "implemented": 1,
     "unknown": 0
   },
@@ -151,16 +151,16 @@
           "id": 41,
           "name": "Keenetic direct DNS, TLS edge verification and owned-record removal",
           "weight": 1,
-          "points": 0,
-          "status": "partial",
-          "statusLabel": "Частично",
+          "points": 1,
+          "status": "verified",
+          "statusLabel": "Доказанно эквивалентно",
           "group": "Datapath",
           "mapping": "D2O resolver/edge pin workflow → R2O direct DNS/TLS and `ndmc` cleanup",
-          "evidence": "Production `--resolve-meta` returned IPv4 for 18/18 hosts, but edge TLS was not confirmed because the fixture peer presented a certificate only for `example.com`; real Keenetic `ndmc` and complete owned-record cleanup remain untested."
+          "evidence": "Production `--resolve-meta` returned IPv4 for 18/18 hosts. On D2O `8e2c981` and the R2O production build from PR commit `4e77871`, CI run #445 compared valid `instagram.com` and canonical alias, wrong certificate name, untrusted CA and unsupported host with `scripts/test-meta-edge-differential.sh`: both CLIs returned matching exit codes (0/1/2), and both sent neutral SNI `example.com` for every TLS case. `test-router-meta-dns-remove-differential.sh` compared production C/Rust removal of owned DNS records; the `ndmc` traces were identical. Linux fixtures; no physical Keenetic runtime."
         }
       ],
       "weight": 18,
-      "points": 11
+      "points": 12
     },
     {
       "name": "Classifier / TLS",
@@ -1126,12 +1126,12 @@
       "id": 41,
       "name": "Keenetic direct DNS, TLS edge verification and owned-record removal",
       "weight": 1,
-      "points": 0,
-      "status": "partial",
-      "statusLabel": "Частично",
+      "points": 1,
+      "status": "verified",
+      "statusLabel": "Доказанно эквивалентно",
       "group": "Datapath",
       "mapping": "D2O resolver/edge pin workflow → R2O direct DNS/TLS and `ndmc` cleanup",
-      "evidence": "Production `--resolve-meta` returned IPv4 for 18/18 hosts, but edge TLS was not confirmed because the fixture peer presented a certificate only for `example.com`; real Keenetic `ndmc` and complete owned-record cleanup remain untested."
+      "evidence": "Production `--resolve-meta` returned IPv4 for 18/18 hosts. On D2O `8e2c981` and the R2O production build from PR commit `4e77871`, CI run #445 compared valid `instagram.com` and canonical alias, wrong certificate name, untrusted CA and unsupported host with `scripts/test-meta-edge-differential.sh`: both CLIs returned matching exit codes (0/1/2), and both sent neutral SNI `example.com` for every TLS case. `test-router-meta-dns-remove-differential.sh` compared production C/Rust removal of owned DNS records; the `ndmc` traces were identical. Linux fixtures; no physical Keenetic runtime."
     },
     {
       "id": 42,
