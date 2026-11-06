@@ -104,7 +104,7 @@ assert_before_rule() {
     second_line=$(awk -v prefix="-A $chain " -v ports="$second_ports" -v window="$second_window" \
         'index($0, prefix) && index($0, ports) && index($0, window) { print NR; exit }' "$trace")
     [ -n "$first_line" ] && [ -n "$second_line" ] && [ "$first_line" -lt "$second_line" ] || {
-        echo "UDP rule order differs in $chain: $first must precede $second" >&2
+        echo "UDP rule order differs in $chain: $first_ports must precede $second_ports" >&2
         grep -F -- "-A $chain -p udp" "$trace" >&2 || true
         exit 1
     }

@@ -90,15 +90,16 @@ run_case() {
                 export PATH
                 PPE_FAILURE=$failure
                 export PPE_FAILURE
-                D2K_PPE_TAG=d2k-ppe
-                D2K_PPE_TARGET=PPE
-                D2K_PPE_CONNSKIP=30
-                D2K_PPE_TCP_PORTS=443,8443
-                D2K_PPE_UDP_PORTS=443,8443
-                D2K_PPE_HTTP_PORTS=80
-                D2K_PPE_HTTP_CONNSKIP=1000000
-                D2K_PPE_PROC=$TEMP/proc
+                export D2K_PPE_TAG=d2k-ppe
+                export D2K_PPE_TARGET=PPE
+                export D2K_PPE_CONNSKIP=30
+                export D2K_PPE_TCP_PORTS=443,8443
+                export D2K_PPE_UDP_PORTS=443,8443
+                export D2K_PPE_HTTP_PORTS=80
+                export D2K_PPE_HTTP_CONNSKIP=1000000
+                export D2K_PPE_PROC=$TEMP/proc
                 D2K_PPE_DEOFFLOAD=$D2K_PPE_DEOFFLOAD
+                # shellcheck disable=SC1090 # the harness sources an extracted production helper
                 . "$library"
                 if "$command_name"; then rc=0; else rc=$?; fi
                 printf 'rc=%s\n' "$rc"
@@ -117,15 +118,16 @@ run_case() {
                 export PATH
                 PPE_FAILURE=$failure
                 export PPE_FAILURE
-                R2O_PPE_TAG=r2o-ppe
-                R2O_PPE_LEGACY_TAG=d2k-ppe
-                R2O_PPE_TARGET=PPE
-                R2O_PPE_PROC=$TEMP/proc
-                R2O_PPE_TCP_PORTS=443,8443
-                R2O_PPE_UDP_PORTS=443,8443
-                R2O_PPE_HTTP_PORTS=80
-                R2O_PPE_CONFIG=/dev/null
+                export R2O_PPE_TAG=r2o-ppe
+                export R2O_PPE_LEGACY_TAG=d2k-ppe
+                export R2O_PPE_TARGET=PPE
+                export R2O_PPE_PROC=$TEMP/proc
+                export R2O_PPE_TCP_PORTS=443,8443
+                export R2O_PPE_UDP_PORTS=443,8443
+                export R2O_PPE_HTTP_PORTS=80
+                export R2O_PPE_CONFIG=/dev/null
                 R2O_PPE_DEOFFLOAD=$R2O_PPE_DEOFFLOAD
+                # shellcheck disable=SC1090 # the harness sources an extracted production helper
                 . "$library"
                 if "$command_name"; then rc=0; else rc=$?; fi
                 printf 'rc=%s\n' "$rc"

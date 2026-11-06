@@ -284,16 +284,14 @@ grep -Fq -- '-m addrtype --dst-type BROADCAST -j RETURN' "$TEMP/r2o-iptables.tra
     echo "R2O iptables rules differ from D2O: missing broadcast exclusion" >&2
     exit 1
 }
-for trace in "$TEMP/r2o-iptables.trace"; do
-    grep -Fq -- '-p tcp -d 203.0.113.9 --dport 8443 -j RETURN' "$trace" || {
-        echo "$trace omitted the IPv4 update-gate outbound exclusion" >&2
-        exit 1
-    }
-    grep -Fq -- '-p tcp -s 203.0.113.9 --sport 8443 -j RETURN' "$trace" || {
-        echo "$trace omitted the IPv4 update-gate reply exclusion" >&2
-        exit 1
-    }
-done
+grep -Fq -- '-p tcp -d 203.0.113.9 --dport 8443 -j RETURN' "$TEMP/r2o-iptables.trace" || {
+    echo "$TEMP/r2o-iptables.trace omitted the IPv4 update-gate outbound exclusion" >&2
+    exit 1
+}
+grep -Fq -- '-p tcp -s 203.0.113.9 --sport 8443 -j RETURN' "$TEMP/r2o-iptables.trace" || {
+    echo "$TEMP/r2o-iptables.trace omitted the IPv4 update-gate reply exclusion" >&2
+    exit 1
+}
 assert_before "$TEMP/r2o-iptables.trace" '-d 203.0.113.9 --dport 8443 -j RETURN' '--queue-num'
 assert_xt_chain_before_queue "$TEMP/r2o-iptables.trace" R2O_IN '-p tcp -s 203.0.113.9 --sport 8443 -j RETURN'
 assert_before "$TEMP/r2o-iptables.trace" '-m addrtype --dst-type BROADCAST -j RETURN' '--queue-num'
