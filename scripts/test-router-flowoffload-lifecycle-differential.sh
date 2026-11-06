@@ -3,7 +3,7 @@ set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 D2O_ROOT=${R2O_DONOR_ROOT:-${ROOT%/*}/d2o}
-EXPECTED_D2O_SHA=a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe
+EXPECTED_D2O_SHA=8e2c98146cf0b712dc967fbec558c7b904666e87
 [ "$(git -C "$D2O_ROOT" rev-parse HEAD)" = "$EXPECTED_D2O_SHA" ] || {
     echo "unexpected D2O revision" >&2
     exit 2
