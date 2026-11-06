@@ -1,37 +1,9 @@
 [
   {
-    "sha": "260cab8177491ab355eab11cb6c8003c1a757bfd",
-    "date": "2026-10-30",
-    "points": 46,
-    "weight": 77,
-    "percent": 59.74
-  },
-  {
-    "sha": "fb8fe95a1882d89f92e72a5665849ea1b3864b62",
-    "date": "2026-10-31",
-    "points": 58,
+    "sha": "55f9cf4bb5f5b021f1615e0b4ec96ccf727c6659",
+    "date": "2026-11-06",
+    "points": 73,
     "weight": 87,
-    "percent": 66.67
-  },
-  {
-    "sha": "51c74db42e5c7dbf8771d768c0e1b0b2c0317980",
-    "date": "2026-11-01",
-    "points": 62,
-    "weight": 87,
-    "percent": 71.26
-  },
-  {
-    "sha": "62f106413cea6de132341f53ccb7508a35843b4b",
-    "date": "2026-11-02",
-    "points": 62,
-    "weight": 87,
-    "percent": 71.26
-  },
-  {
-    "sha": "b5174594fe3b62cb7359d1041b8a55efbae2428c",
-    "date": "2026-11-03",
-    "points": 62,
-    "weight": 87,
-    "percent": 71.26
+    "percent": 83.91
   }
 ]
