@@ -5,7 +5,7 @@
 <text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">82 / 261 verified points</text>
 <rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/>
 <rect x="37" y="113" width="321.7" height="11" rx="5" fill="#36c989"/>
-<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">173 contracts · 59 verified · 15 missing · 2026-11-08</text>
+<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">173 contracts · 59 verified · 13 missing · 2026-11-08</text>
 <text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 145/261 = 55.56% · strict 82/261 = 31.42%</text>
 <rect x="37" y="190" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="213" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Datapath</text>
@@ -125,8 +125,8 @@
 <rect x="723" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>A5 Совместимость known-list с D2O-конфигом: частично (0/1)</title></rect>
 <rect x="761" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>A6 Лимит заголовка 32 КиБ и код 431: частично (0/1)</title></rect>
 <rect x="799" y="559" width="30" height="22" rx="5" fill="#819bf8"><title>A7 Абсолютный дедлайн заголовка 5 с / 408: carry (304) — historical (0/1)</title></rect>
-<rect x="837" y="559" width="30" height="22" rx="5" fill="#e06c75"><title>A8 Абсолютный дедлайн ответа 5 с: пробел (0/1)</title></rect>
-<rect x="875" y="559" width="30" height="22" rx="5" fill="#e06c75"><title>A9 Устойчивость к обрыву клиента/IO-ошибке: пробел (0/1)</title></rect>
+<rect x="837" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>A8 Абсолютный дедлайн ответа 5 с: частично (0/1)</title></rect>
+<rect x="875" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>A9 Устойчивость к обрыву клиента/IO-ошибке: частично (0/1)</title></rect>
 <rect x="913" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>A10 Неизвестный маршрут/метод/HTTP-версия: частично (0/1)</title></rect>
 <rect x="951" y="559" width="30" height="22" rx="5" fill="#819bf8"><title>A11 `/api/status`: unavailable-контракт: carry (304) — historical (0/1)</title></rect>
 <rect x="989" y="559" width="30" height="22" rx="5" fill="#819bf8"><title>A12 `/api/status`: live shape и catalog revision: carry (304) — historical (0/1)</title></rect>

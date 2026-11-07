@@ -9,8 +9,8 @@
   "counts": {
     "verified": 59,
     "carry": 40,
-    "partial": 59,
-    "missing": 15,
+    "partial": 61,
+    "missing": 13,
     "implemented": 0,
     "unknown": 0
   },
@@ -1486,13 +1486,13 @@
           "weight": 1,
           "points": 0,
           "carry_points": 0,
-          "status": "missing",
-          "statusLabel": "пробел",
+          "status": "partial",
+          "statusLabel": "частично",
           "group": "WebPanel",
-          "coverage": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-          "gap": "**нет дифференциала**",
-          "mapping": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-          "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: **нет дифференциала**"
+          "coverage": "`Response::send_before`; unit `response_send_honors_absolute_deadline`; C oracle `panel/test_response_deadline.c`",
+          "gap": "Парный C/Rust прогон 5-секундного slow-reader ещё не выполнен",
+          "mapping": "`Response::send_before`; unit `response_send_honors_absolute_deadline`; C oracle `panel/test_response_deadline.c`",
+          "evidence": "`Response::send_before`; unit `response_send_honors_absolute_deadline`; C oracle `panel/test_response_deadline.c` · пробел: Парный C/Rust прогон 5-секундного slow-reader ещё не выполнен"
         },
         {
           "id": 82,
@@ -1501,13 +1501,13 @@
           "weight": 1,
           "points": 0,
           "carry_points": 0,
-          "status": "missing",
-          "statusLabel": "пробел",
+          "status": "partial",
+          "statusLabel": "частично",
           "group": "WebPanel",
-          "coverage": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-          "gap": "**нет дифференциала; расхождение**",
-          "mapping": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-          "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: **нет дифференциала; расхождение**"
+          "coverage": "`serve` изолирует `handle_connection`; IO-ошибка больше не завершает весь serve",
+          "gap": "Нет paired C/Rust теста обрыва клиента",
+          "mapping": "`serve` изолирует `handle_connection`; IO-ошибка больше не завершает весь serve",
+          "evidence": "`serve` изолирует `handle_connection`; IO-ошибка больше не завершает весь serve · пробел: Нет paired C/Rust теста обрыва клиента"
         },
         {
           "id": 83,
@@ -3889,13 +3889,13 @@
       "weight": 1,
       "points": 0,
       "carry_points": 0,
-      "status": "missing",
-      "statusLabel": "пробел",
+      "status": "partial",
+      "statusLabel": "частично",
       "group": "WebPanel",
-      "coverage": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-      "gap": "**нет дифференциала**",
-      "mapping": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-      "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: **нет дифференциала**"
+      "coverage": "`Response::send_before`; unit `response_send_honors_absolute_deadline`; C oracle `panel/test_response_deadline.c`",
+      "gap": "Парный C/Rust прогон 5-секундного slow-reader ещё не выполнен",
+      "mapping": "`Response::send_before`; unit `response_send_honors_absolute_deadline`; C oracle `panel/test_response_deadline.c`",
+      "evidence": "`Response::send_before`; unit `response_send_honors_absolute_deadline`; C oracle `panel/test_response_deadline.c` · пробел: Парный C/Rust прогон 5-секундного slow-reader ещё не выполнен"
     },
     {
       "id": 82,
@@ -3904,13 +3904,13 @@
       "weight": 1,
       "points": 0,
       "carry_points": 0,
-      "status": "missing",
-      "statusLabel": "пробел",
+      "status": "partial",
+      "statusLabel": "частично",
       "group": "WebPanel",
-      "coverage": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-      "gap": "**нет дифференциала; расхождение**",
-      "mapping": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-      "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: **нет дифференциала; расхождение**"
+      "coverage": "`serve` изолирует `handle_connection`; IO-ошибка больше не завершает весь serve",
+      "gap": "Нет paired C/Rust теста обрыва клиента",
+      "mapping": "`serve` изолирует `handle_connection`; IO-ошибка больше не завершает весь serve",
+      "evidence": "`serve` изолирует `handle_connection`; IO-ошибка больше не завершает весь serve · пробел: Нет paired C/Rust теста обрыва клиента"
     },
     {
       "id": 83,

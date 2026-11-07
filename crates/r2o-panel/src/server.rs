@@ -21,6 +21,7 @@ const TELEGRAM_DIAGNOSTICS_MAX: usize = 256 * 1024;
 // D2O reserves the last byte of its 131072-byte buffer and requires a separate EOF read.
 const TELEGRAM_STATS_MAX: usize = 131_071;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(60);
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const UPDATE_INSTALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -155,6 +156,14 @@ impl Response {
     }
 
     fn send(self, stream: &mut TcpStream) -> std::io::Result<()> {
+        self.send_before(stream, std::time::Instant::now() + RESPONSE_TIMEOUT)
+    }
+
+    fn send_before(
+        self,
+        stream: &mut TcpStream,
+        deadline: std::time::Instant,
+    ) -> std::io::Result<()> {
         let reason = match self.status {
             200 => "OK",
             202 => "Accepted",
@@ -171,19 +180,57 @@ impl Response {
             503 => "Service Unavailable",
             _ => "Error",
         };
+        let mut bytes = Vec::new();
         write!(
-            stream,
+            &mut bytes,
             "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; style-src 'self'; font-src 'self'; img-src 'self'; connect-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n",
             self.status,
             reason,
             self.content_type,
             self.body.len()
-        )?;
+        )
+        .expect("Vec writer is infallible");
         for (name, value) in self.headers {
-            write!(stream, "{name}: {value}\r\n")?;
+            write!(&mut bytes, "{name}: {value}\r\n").expect("Vec writer is infallible");
         }
-        stream.write_all(b"\r\n")?;
-        stream.write_all(&self.body)
+        bytes.extend_from_slice(b"\r\n");
+        bytes.extend_from_slice(&self.body);
+
+        // D2O `response_ex`: один абсолютный дедлайн на заголовки и тело,
+        // включая повторные частичные записи.
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "panel response deadline",
+                ));
+            }
+            stream.set_write_timeout(Some(remaining))?;
+            match stream.write(&bytes[offset..]) {
+                Ok(0) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "panel response write returned zero",
+                    ));
+                }
+                Ok(written) => offset += written,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(error);
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -375,25 +422,38 @@ pub fn serve(listener: TcpListener, config: Config) -> std::io::Result<()> {
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         };
-        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-        let request = read_request(&mut stream)?;
-        let response = match request {
-            Ok(raw) => handle_request(&config, &raw),
-            Err(status) => text_response(
-                status,
-                if status == 408 {
-                    "request timeout\n"
-                } else if status == 431 {
-                    "request too large\n"
-                } else {
-                    "bad request\n"
-                },
-            ),
-        };
-        let _ = response.send(&mut stream);
+        if handle_connection(&mut stream, &config).is_err() {
+            continue;
+        }
     }
     Ok(())
+}
+
+fn handle_connection(stream: &mut TcpStream, config: &Config) -> std::io::Result<()> {
+    if stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .is_err()
+        || stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .is_err()
+    {
+        return Ok(());
+    }
+    let request = read_request(stream)?;
+    let response = match request {
+        Ok(raw) => handle_request(config, &raw),
+        Err(status) => text_response(
+            status,
+            if status == 408 {
+                "request timeout\n"
+            } else if status == 431 {
+                "request too large\n"
+            } else {
+                "bad request\n"
+            },
+        ),
+    };
+    response.send(stream)
 }
 
 #[cfg(unix)]
@@ -2237,6 +2297,26 @@ mod differential_tests {
     use super::*;
     use std::process::Command;
     use std::time::Instant;
+
+    #[test]
+    fn response_send_honors_absolute_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let _slow_client = TcpStream::connect(address).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let response = Response::new(
+            200,
+            "application/octet-stream",
+            vec![0x5a; 16 * 1024 * 1024],
+        );
+        let started = Instant::now();
+        let result = response.send_before(&mut server, started + Duration::from_millis(100));
+        assert!(
+            result.is_err(),
+            "slow client must hit the absolute deadline"
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
 
     #[test]
     #[ignore = "run through scripts/test-panel-worker-content-length-differential.sh"]
