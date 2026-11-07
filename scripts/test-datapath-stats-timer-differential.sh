@@ -29,7 +29,9 @@ cleanup() {
         kill -TERM "$server_pid" 2>/dev/null || true
         wait "$server_pid" 2>/dev/null || true
     fi
-    rm -f "" "" 2>/dev/null || true
+    if [ -n "$control" ] || [ -n "$ready" ]; then
+        rm -f "$control" "$ready" 2>/dev/null || true
+    fi
     if ip netns list | awk '{print $1}' | grep -Fxq "$namespace"; then
         ip netns del "$namespace" 2>/dev/null || true
     fi
@@ -57,11 +59,11 @@ ip netns exec "$peer_namespace" ip link set "$peer_if" up
 ip netns exec "$namespace" ip route add default via "$peer_address" dev "$client_if"
 ip netns exec "$namespace" nft add table inet stats
 ip netns exec "$namespace" nft 'add chain inet stats output { type filter hook output priority filter; policy accept; }'
-ip netns exec "$namespace" nft add rule inet stats output ip daddr 127.0.0.1 udp dport "$traffic_port" queue num "$queue"
+ip netns exec "$namespace" nft add rule inet stats output oifname "$client_if" ip daddr "$peer_address" udp dport "$traffic_port" queue num "$queue"
 ip netns exec "$namespace" nft add rule inet stats output oifname "$client_if" ip daddr "$peer_address" tcp dport 443 queue num "$queue"
 
 send_traffic() {
-    ip netns exec "$namespace" python3 -c 'import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); [s.sendto(bytes([i])*(i+1),("127.0.0.1",39992)) for i in range(1,9)]; s.sendto(b"x"*512,("127.0.0.1",39992))'
+    ip netns exec "$namespace" python3 -c 'import socket,sys; target=sys.argv[1]; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); [s.sendto(bytes([i])*(i+1),(target,39992)) for i in range(1,9)]; s.sendto(b"x"*512,(target,39992))' "$peer_address"
 }
 
 run_hello_case() {
@@ -175,7 +177,9 @@ expected = bytes.fromhex("160301002001")
 if actual != expected:
     raise SystemExit(f"incomplete TLS record did not reach the peer intact: {actual.hex()}")
 PY
-    sleep 0.2
+    # Leave the process alive for another timer tick after the capture expires;
+    # otherwise only the shutdown summary can observe the nonzero counter.
+    sleep 1.2
     kill -TERM "$running_pid"
     wait "$running_pid"
     running_pid=
@@ -196,6 +200,16 @@ run_capture_expiry_case d2o "$d2o_datapath"
 run_capture_expiry_case r2o "$r2o_datapath"
 c_capture_values=$(grep 'снимки TCP:' "$test_tmpdir/r2o-stats-capture-expiry-d2o.log" | tail -n 1 | sed -E 's/.*полных=([0-9]+) отвергнутых=([0-9]+) истекших=([0-9]+) отказов ёмкости=([0-9]+).*/\1 \2 \3 \4/')
 r_capture_values=$(grep 'снимки TLS/TCP:' "$test_tmpdir/r2o-stats-capture-expiry-r2o.log" | tail -n 1 | sed -E 's/.*завершено ([0-9]+), отклонено ([0-9]+), истекло ([0-9]+), отказов ёмкости ([0-9]+).*/\1 \2 \3 \4/')
+if [ "$(grep 'снимки TCP:' "$test_tmpdir/r2o-stats-capture-expiry-d2o.log" | sed '$d' | grep -Fc 'истекших=1' || true)" -lt 1 ]; then
+    cat "$test_tmpdir/r2o-stats-capture-expiry-d2o.log" >&2
+    echo 'D2O capture expiry must appear in a periodic sample before shutdown' >&2
+    exit 1
+fi
+if [ "$(grep 'снимки TLS/TCP:' "$test_tmpdir/r2o-stats-capture-expiry-r2o.log" | sed '$d' | grep -Fc 'истекло 1' || true)" -lt 1 ]; then
+    cat "$test_tmpdir/r2o-stats-capture-expiry-r2o.log" >&2
+    echo 'R2O capture expiry must appear in a periodic sample before shutdown' >&2
+    exit 1
+fi
 if [ "$c_capture_values" != "$r_capture_values" ]; then
     echo "D2O and R2O periodic capture expiry counters differ: C=$c_capture_values Rust=$r_capture_values" >&2
     exit 1
@@ -332,6 +346,23 @@ if ! printf '%s\n' "$c_queue_values" | grep -Eq '^ 9 396 9 0$'; then
     exit 1
 fi
 echo 'nfqueue_traffic_stats_numeric_trace=identical (9 packets, 396 bytes, 9 accepted)'
+
+# Exercise nonzero UDP session occupancy, then compare both periodic samples
+# and the shutdown summary from the production C and Rust NFQUEUE processes.
+c_udp_flow_values=$(grep -E 'TCP.*UDP' "$test_tmpdir/r2o-stats-traffic-d2o.log" | sed -E 's/[^0-9]+/ /g' | sed '/^ *$/d')
+r_udp_flow_values=$(grep -E 'TCP.*UDP' "$test_tmpdir/r2o-stats-traffic-r2o.log" | sed -E 's/^r2o-datapath: //' | sed -E 's/[^0-9]+/ /g' | sed '/^ *$/d')
+if [ "$c_udp_flow_values" != "$r_udp_flow_values" ]; then
+    echo "D2O and R2O nonzero UDP flow-table statistics differ" >&2
+    printf 'C:\n%s\nRust:\n%s\n' "$c_udp_flow_values" "$r_udp_flow_values" >&2
+    exit 1
+fi
+if ! grep -E 'TCP.*UDP' "$test_tmpdir/r2o-stats-traffic-d2o.log" | sed '$d' | grep -Eq 'UDP [1-9][0-9]* из' \
+    || ! grep -E 'TCP.*UDP' "$test_tmpdir/r2o-stats-traffic-r2o.log" | sed '$d' | grep -Eq 'UDP-потоки [1-9][0-9]* из'; then
+    cat "$test_tmpdir/r2o-stats-traffic-d2o.log" "$test_tmpdir/r2o-stats-traffic-r2o.log" >&2
+    echo "the traffic fixture did not produce a nonzero periodic UDP flow count on both daemons" >&2
+    exit 1
+fi
+echo 'udp_flow_stats_trace=identical (nonzero periodic occupancy)'
 
 c_truncated_count=$(grep -Ec 'обрезано [0-9]+, без нагрузки [0-9]+, без заголовка [0-9]+' "$test_tmpdir/r2o-stats-traffic-d2o.log" || true)
 r_truncated_count=$(grep -Ec 'r2o-datapath: обрезано [0-9]+, без нагрузки [0-9]+, без заголовка [0-9]+' "$test_tmpdir/r2o-stats-traffic-r2o.log" || true)
@@ -554,12 +585,20 @@ run_hold_timeout_case() {
     done
     if [ "$name" = d2o ]; then
         ip netns exec "$namespace" "$binary" --queue "$queue" --mode apply --mark 180001 --plan "$plan" --stats 1 >"$log" 2>&1 &
+        route_mark=190001
+        route_priority=31001
     else
         ip netns exec "$namespace" "$binary" --queue "$queue" --family ipv4 --mode apply --mark 180001 --plan "$plan" --stats 1 >"$log" 2>&1 &
+        route_mark=190002
+        route_priority=31002
     fi
     running_pid=$!
     sleep 0.3
     if ! kill -0 "$running_pid" 2>/dev/null; then cat "$log" >&2; exit 1; fi
+    # Exercise the production rtnetlink watcher while each daemon is active.
+    # The marked rule does not select traffic generated by this test.
+    ip netns exec "$namespace" ip rule add fwmark "$route_mark" lookup 101 priority "$route_priority"
+    sleep 0.2
     ip netns exec "$namespace" python3 -c 'import socket,sys,time; s=socket.create_connection((sys.argv[1],443),timeout=3); s.sendall(bytes.fromhex("16030300200100")); time.sleep(0.7); s.close()' "$peer_address" &
     client_pid=$!
     sleep 0.03
@@ -594,6 +633,26 @@ PY
         echo "$name hold counters differ: expected=$expected_hold_values actual=$hold_values" >&2
         exit 1
     fi
+    stats_count=$(grep -Fc 'составной вход:' "$log" || true)
+    if [ "$name" = d2o ]; then
+        process_count=$(grep -Fc -- '--- d2kd[' "$log" || true)
+    else
+        process_count=$(grep -Fc 'r2o-datapath: TCP-потоки' "$log" || true)
+    fi
+    raw_count=$(grep -Fc 'сырым сокетом отправлено ' "$log" || true)
+    follow_count=$(grep -Fc 'UDP переиздание: отказано потоков ' "$log" || true)
+    if [ "$process_count" -ne "$stats_count" ] || [ "$raw_count" -ne "$stats_count" ] \
+        || [ "$follow_count" -ne "$stats_count" ]; then
+        cat "$log" >&2
+        echo "$name raw/follow/route metrics must be logged once per periodic and final summary" >&2
+        exit 1
+    fi
+    route_values=$(grep 'UDP переиздание: отказано потоков ' "$log" | sed -E 's/.*; уведомлений о правилах\/маршрутах ([0-9]+)$/\1/')
+    if ! printf '%s\n' "$route_values" | sed '$d' | grep -Eq '[1-9][0-9]*'; then
+        cat "$log" >&2
+        echo "$name route-watch notification is missing from periodic metrics" >&2
+        exit 1
+    fi
     printf '%s hold_timeout_stats=%s\n' "$name" "$hold_values"
 }
 
@@ -606,3 +665,17 @@ if [ "$c_hold_values" != "$r_hold_values" ]; then
     exit 1
 fi
 echo 'held_packet_timeout_stats_trace=identical (production IPv4 NFQUEUE processes)'
+
+c_raw_values=$(grep 'сырым сокетом отправлено ' "$test_tmpdir/r2o-stats-hold-d2o.log" | sed -E 's/.*отправлено ([0-9]+), ошибок ([0-9]+) \(из них сокет полон ([0-9]+)\)/\1 \2 \3/')
+r_raw_values=$(grep 'сырым сокетом отправлено ' "$test_tmpdir/r2o-stats-hold-r2o.log" | sed -E 's/.*отправлено ([0-9]+), ошибок ([0-9]+) \(из них сокет полон ([0-9]+)\)/\1 \2 \3/')
+c_follow_values=$(grep 'UDP переиздание: отказано потоков ' "$test_tmpdir/r2o-stats-hold-d2o.log" | sed -E 's/.*отказано потоков ([0-9]+), сокет полон ([0-9]+) раз, очередь отложенных полна ([0-9]+) раз; уведомлений о правилах\/маршрутах ([0-9]+)/\1 \2 \3 \4/')
+r_follow_values=$(grep 'UDP переиздание: отказано потоков ' "$test_tmpdir/r2o-stats-hold-r2o.log" | sed -E 's/.*отказано потоков ([0-9]+), сокет полон ([0-9]+) раз, очередь отложенных полна ([0-9]+) раз; уведомлений о правилах\/маршрутах ([0-9]+)/\1 \2 \3 \4/')
+if [ "$c_raw_values" != "$r_raw_values" ]; then
+    echo "D2O and R2O periodic raw-send statistics differ: C=$c_raw_values Rust=$r_raw_values" >&2
+    exit 1
+fi
+if [ "$c_follow_values" != "$r_follow_values" ]; then
+    echo "D2O and R2O periodic UDP-follow/route statistics differ: C=$c_follow_values Rust=$r_follow_values" >&2
+    exit 1
+fi
+echo 'raw_send_and_udp_follow_route_stats_trace=identical (live C/Rust NFQUEUE processes)'

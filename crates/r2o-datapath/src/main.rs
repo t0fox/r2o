@@ -36,9 +36,9 @@ mod app {
         R2oRouteMonitor, R2oRoutePacket, R2oRoutePolicy, R2oRoutedFlows,
     };
     use r2o_datapath::r2o_udp_hold::{
-        R2oUdpDeferredResends, R2oUdpDeferredVerdicts, R2oUdpFollowTable, R2oUdpHeldPacket,
-        R2oUdpHoldBatch, R2oUdpHoldFeed, R2oUdpHoldTable, r2o_release_batch_with,
-        r2o_udp_hold_candidate, r2o_udp_send_busy,
+        R2oUdpDeferredEnqueueError, R2oUdpDeferredResends, R2oUdpDeferredVerdicts,
+        R2oUdpFollowTable, R2oUdpHeldPacket, R2oUdpHoldBatch, R2oUdpHoldFeed, R2oUdpHoldTable,
+        r2o_release_batch_with, r2o_udp_hold_candidate, r2o_udp_send_busy,
     };
     use r2o_datapath::r2o_udp_sessions::R2oUdpSessions;
     use r2o_datapath::r2o_voice::{R2oVoiceSessions, R2oVoiceTrialProofs};
@@ -178,6 +178,7 @@ mod app {
             },
             |id, verdict| queue.send_verdict(id, verdict),
         );
+        follow.r2o_note_busy(stats.resend_busy);
         if head_neutral && let Some(head) = head {
             follow.r2o_mark(&head.packet, now, None, receive_seq);
         }
@@ -244,8 +245,17 @@ mod app {
         }
         let neutral = r2o_udp_packet_is_neutral(route_gate, probe_mark, mark, packet);
         if let Some(due) = matched.at {
-            if neutral && raw.is_some() && deferred_resends.r2o_enqueue(due, id, packet) {
-                return true;
+            if neutral && raw.is_some() {
+                match deferred_resends.r2o_enqueue_with_error(due, id, packet) {
+                    Ok(()) => return true,
+                    Err(R2oUdpDeferredEnqueueError::Full) => {
+                        follow.r2o_note_queue_full();
+                    }
+                    Err(R2oUdpDeferredEnqueueError::NoMemory) => {
+                        follow.r2o_mark_failed(packet);
+                    }
+                    Err(R2oUdpDeferredEnqueueError::InvalidPacket) => {}
+                }
             }
             if deferred_verdicts.r2o_enqueue(due, &[id], &[NF_ACCEPT], Some(packet)) {
                 return true;
@@ -268,7 +278,9 @@ mod app {
                 }
             }
             Err(error) => {
-                if !r2o_udp_send_busy(&error) {
+                if r2o_udp_send_busy(&error) {
+                    follow.r2o_note_busy(1);
+                } else {
                     follow.r2o_mark_failed(packet);
                 }
                 eprintln!("r2o-datapath: поздний UDP-хвост принят ядром: {error}");
@@ -419,11 +431,13 @@ mod app {
 
     fn r2o_release_damaged_tcp_hold(
         queue: &mut QueueSocket,
+        raw: Option<&RawSocket>,
         holding: &mut HoldTable,
         packet: Option<&[u8]>,
     ) {
         if let Some(packet) = packet {
             let ids = holding.r2o_release_damaged_flow(packet);
+            r2o_flush_owned_hold_releases(holding, raw);
             release_accepting(queue, &ids);
         }
     }
@@ -630,6 +644,24 @@ mod app {
         );
     }
 
+    fn r2o_log_raw_stats(raw: Option<&RawSocket>) {
+        if let Some(raw) = raw {
+            let stats = raw.send_stats();
+            eprintln!(
+                "r2o-datapath: сырым сокетом отправлено {}, ошибок {} (из них сокет полон {})",
+                stats.sent, stats.errors, stats.busy
+            );
+        }
+    }
+
+    fn r2o_log_udp_follow_stats(follow: &R2oUdpFollowTable, route_notifications: u64) {
+        let stats = follow.r2o_stats();
+        eprintln!(
+            "r2o-datapath: UDP переиздание: отказано потоков {}, сокет полон {} раз, очередь отложенных полна {} раз; уведомлений о правилах/маршрутах {}",
+            stats.refused, stats.busy, stats.queue_full, route_notifications
+        );
+    }
+
     fn r2o_log_flow_table_stats(tcp_sessions: &TcpSessions, udp_sessions: &R2oUdpSessions) {
         let udp_stats = udp_sessions.stats();
         eprintln!(
@@ -811,6 +843,7 @@ mod app {
             }
         }
         let mut route_monitor = R2oRouteMonitor::default();
+        let mut route_watch_notifications = 0_u64;
         if let Err(error) = route_monitor.r2o_open_watch() {
             eprintln!(
                 "r2o-datapath: уведомления rtnetlink недоступны ({error}); оставляю опрос раз в 30 секунд"
@@ -928,6 +961,7 @@ mod app {
                 drain_queued(&mut socket, &mut batch, packet_type);
                 let released = holding.flush(Instant::now(), name_plans.revision(), true);
                 r2o_report_incomplete_captures(&mut holding);
+                r2o_flush_owned_hold_releases(&mut holding, raw.as_ref());
                 release_accepting(&mut socket, &released);
                 for (ticket, pending) in pending_udp_releases.drain() {
                     scheduled.cancel(ticket);
@@ -952,6 +986,7 @@ mod app {
                     if damaged {
                         r2o_release_damaged_tcp_hold(
                             &mut socket,
+                            raw.as_ref(),
                             &mut holding,
                             pending.r2o_tcp_packet.as_deref(),
                         );
@@ -993,6 +1028,10 @@ mod app {
                 r2o_log_payload_stats(&tcp_sessions);
                 r2o_log_capture_stats(&tcp_sessions);
                 r2o_log_hold_stats(&holding);
+                r2o_log_raw_stats(raw.as_ref());
+                if raw.is_some() {
+                    r2o_log_udp_follow_stats(&udp_follow, route_watch_notifications);
+                }
                 if let Some(line) = icmp_guard.r2o_stats_line() {
                     eprintln!("r2o-datapath: {line}");
                 }
@@ -1022,6 +1061,10 @@ mod app {
                 r2o_log_capture_stats(&tcp_sessions);
                 r2o_log_payload_stats(&tcp_sessions);
                 r2o_log_hold_stats(&holding);
+                r2o_log_raw_stats(raw.as_ref());
+                if raw.is_some() {
+                    r2o_log_udp_follow_stats(&udp_follow, route_watch_notifications);
+                }
                 if let Some(line) = icmp_guard.r2o_stats_line() {
                     eprintln!("r2o-datapath: {line}");
                 }
@@ -1152,6 +1195,7 @@ mod app {
                     }
                     let released = holding.flush(Instant::now(), name_plans.revision(), true);
                     r2o_report_incomplete_captures(&mut holding);
+                    r2o_flush_owned_hold_releases(&mut holding, raw.as_ref());
                     release_accepting(&mut socket, &released);
                     r2o_release_udp_batches(
                         &mut socket,
@@ -1176,6 +1220,7 @@ mod app {
             if route_ready {
                 match route_monitor.r2o_drain_watch() {
                     Ok(true) => {
+                        route_watch_notifications = route_watch_notifications.saturating_add(1);
                         let settled =
                             (last_route_refresh + R2O_ROUTE_SETTLE_INTERVAL).max(Instant::now());
                         next_route_refresh = next_route_refresh.min(settled);
@@ -1277,6 +1322,7 @@ mod app {
             let release_now = Instant::now();
             let released = holding.flush(release_now, name_plans.revision(), false);
             r2o_report_incomplete_captures(&mut holding);
+            r2o_flush_owned_hold_releases(&mut holding, raw.as_ref());
             release_accepting(&mut socket, &released);
             r2o_release_udp_batches(
                 &mut socket,
@@ -1485,6 +1531,7 @@ mod app {
                         })
                         .unwrap_or(queue_hook);
                     let mut batch_ids = Vec::new();
+                    let mut batch_owned_originals: Option<Vec<Vec<u8>>> = None;
                     let mut synthetic = None;
                     let mut response_candidate = None;
                     let mut portal_candidate = None;
@@ -1538,6 +1585,7 @@ mod app {
                         let tcp_flow_damaged = tcp_sessions.r2o_is_damaged_packet(bytes);
                         if tcp_flow_damaged {
                             let released = holding.r2o_release_damaged_flow(bytes);
+                            r2o_flush_owned_hold_releases(&mut holding, raw.as_ref());
                             release_accepting(&mut socket, &released);
                         }
                         let inspect_quic = observe_tls
@@ -1592,6 +1640,7 @@ mod app {
                             allow_http: allow_http && !tcp_flow_damaged,
                             observe_tls,
                             observe_http,
+                            own_packets: raw.is_some(),
                         };
                         let fed = if controller_probe {
                             holding.feed_controller_probe(packet_id, bytes, now, hold_options)
@@ -1599,6 +1648,7 @@ mod app {
                             holding.feed_observing(packet_id, bytes, now, hold_options)
                         };
                         r2o_report_incomplete_captures(&mut holding);
+                        r2o_flush_owned_hold_releases(&mut holding, raw.as_ref());
                         release_accepting(&mut socket, &fed.released);
                         match fed.outcome {
                             HoldOutcome::Pass => {
@@ -1640,6 +1690,10 @@ mod app {
                                 }
                             }
                             HoldOutcome::Waiting => continue,
+                            HoldOutcome::OwnedWaiting => {
+                                socket.send_verdict(packet_id, NF_DROP)?;
+                                continue;
+                            }
                             HoldOutcome::Drop => PacketDecision::Drop,
                             HoldOutcome::Ready { ids, packet } => {
                                 if !controller_probe
@@ -1689,6 +1743,63 @@ mod app {
                                     )
                                 };
                                 batch_ids = ids;
+                                synthetic = Some(packet);
+                                decision
+                            }
+                            HoldOutcome::OwnedReady {
+                                ids,
+                                packet,
+                                originals,
+                            } => {
+                                socket.send_verdict(packet_id, NF_DROP)?;
+                                if !controller_probe
+                                    && let Some(mut hello) = tcp_hello_from_packet(&packet)
+                                        .or_else(|| tcp_http_hello_from_packet(&packet))
+                                {
+                                    hello.tcp_has_timestamp = tcp_sessions
+                                        .r2o_client_offers_tcp_timestamps_for_packet(&packet);
+                                    send_hello_event(
+                                        &mut control,
+                                        &mut r2o_snapshot_control,
+                                        &mut flow_journal,
+                                        journal_origin.elapsed().as_nanos().min(u64::MAX as u128)
+                                            as u64,
+                                        &hello.event_body(),
+                                        hello.shape_event_body(),
+                                    );
+                                }
+                                let decision = if options.mode == RuntimeMode::Observe {
+                                    PacketDecision::Accept
+                                } else {
+                                    let decision = decide_with_tcp_session_mode(
+                                        &mut tcp_sessions,
+                                        name_plans
+                                            .select_with_quic_host(&packet, None)
+                                            .unwrap_or(&plan),
+                                        &packet,
+                                        &mut control,
+                                        &mut flow_journal,
+                                        &journal_origin,
+                                        controller_probe,
+                                        raw.as_ref()
+                                            .map_or(0, |raw| raw.tls_route_segment_cap(&packet)),
+                                    );
+                                    let selected = name_plans
+                                        .select_with_quic_host(&packet, None)
+                                        .unwrap_or(&plan);
+                                    let tcp_syn_ack_seen =
+                                        tcp_sessions.r2o_syn_ack_seen_for_packet(&packet);
+                                    guard_decision(
+                                        &mut conntrack_gate,
+                                        &packet,
+                                        decision,
+                                        selected.id,
+                                        false,
+                                        tcp_syn_ack_seen,
+                                    )
+                                };
+                                batch_ids = ids;
+                                batch_owned_originals = Some(originals);
                                 synthetic = Some(packet);
                                 decision
                             }
@@ -1753,6 +1864,11 @@ mod app {
                         std::slice::from_ref(&packet_id)
                     } else {
                         batch_ids.as_slice()
+                    };
+                    let delivery_ids: &[u32] = if batch_owned_originals.is_some() {
+                        &[]
+                    } else {
+                        ids
                     };
                     let redirect_packets = if options.mode == RuntimeMode::Apply
                         && raw.is_some()
@@ -1879,7 +1995,7 @@ mod app {
                             }
                             response_delivered = true;
                         } else {
-                            send_verdicts(&mut socket, ids, NF_ACCEPT, false)?;
+                            send_verdicts(&mut socket, delivery_ids, NF_ACCEPT, false)?;
                             response_delivered = true;
                         }
                     } else {
@@ -1904,7 +2020,10 @@ mod app {
                                         )
                                     });
                                 if !late_tail_handled {
-                                    send_verdicts(&mut socket, ids, NF_ACCEPT, false)?;
+                                    send_verdicts(&mut socket, delivery_ids, NF_ACCEPT, false)?;
+                                    if let Some(originals) = batch_owned_originals.as_ref() {
+                                        r2o_resend_owned_originals(raw.as_ref(), originals);
+                                    }
                                     if options.mode == RuntimeMode::Apply
                                         && !controller_probe
                                         && let Some(bytes) = original
@@ -1958,7 +2077,10 @@ mod app {
                                         )
                                     });
                                 if !late_tail_handled {
-                                    send_verdicts(&mut socket, ids, NF_ACCEPT, false)?;
+                                    send_verdicts(&mut socket, delivery_ids, NF_ACCEPT, false)?;
+                                    if let Some(originals) = batch_owned_originals.as_ref() {
+                                        r2o_resend_owned_originals(raw.as_ref(), originals);
+                                    }
                                     if options.mode == RuntimeMode::Apply
                                         && !controller_probe
                                         && let Some(bytes) = original
@@ -2002,12 +2124,23 @@ mod app {
                                     send_verdicts(&mut socket, &all_ids, NF_DROP, true)?;
                                     udp_batch_handled = true;
                                 } else {
-                                    send_verdicts(&mut socket, ids, NF_DROP, true)?;
+                                    send_verdicts(&mut socket, delivery_ids, NF_DROP, true)?;
                                     udp_head_verdict = NF_DROP;
                                 }
                             }
                             PacketDecision::Replace(replacement) => {
-                                if ids.len() == 1 {
+                                if let Some(originals) = batch_owned_originals.as_ref() {
+                                    if let Some(raw) = raw.as_ref() {
+                                        if let Err(error) = raw.send_packet(&replacement) {
+                                            eprintln!(
+                                                "r2o-datapath: не отправлен raw replacement удержанного TLS: {error}"
+                                            );
+                                            r2o_resend_owned_originals(Some(raw), originals);
+                                        } else {
+                                            execution_succeeded = true;
+                                        }
+                                    }
+                                } else if ids.len() == 1 {
                                     let id = ids[0];
                                     if let Err(error) = socket.send_replacement(id, &replacement) {
                                         eprintln!(
@@ -2033,6 +2166,7 @@ mod app {
                                         if damaged {
                                             r2o_release_damaged_tcp_hold(
                                                 &mut socket,
+                                                raw.as_ref(),
                                                 &mut holding,
                                                 tx_original,
                                             );
@@ -2042,7 +2176,7 @@ mod app {
                                         execution_succeeded = true;
                                     }
                                 } else {
-                                    send_verdicts(&mut socket, ids, NF_ACCEPT, false)?;
+                                    send_verdicts(&mut socket, delivery_ids, NF_ACCEPT, false)?;
                                     r2o_finish_tcp_execution(
                                         &mut tcp_sessions,
                                         tcp_execution,
@@ -2065,7 +2199,10 @@ mod app {
                                             .collect::<Vec<_>>();
                                         release_accepting(&mut socket, &all_ids);
                                     } else {
-                                        send_verdicts(&mut socket, ids, NF_ACCEPT, false)?;
+                                        send_verdicts(&mut socket, delivery_ids, NF_ACCEPT, false)?;
+                                    }
+                                    if let Some(originals) = batch_owned_originals.as_ref() {
+                                        r2o_resend_owned_originals(raw.as_ref(), originals);
                                     }
                                     if let Some(event) = applied_candidate.as_ref() {
                                         flow_journal.record_execution_failure(
@@ -2082,13 +2219,22 @@ mod app {
                                     raw.as_ref(),
                                     &mut scheduled,
                                     &mut icmp_guard,
-                                    if udp_replay.is_some() { &[] } else { ids },
+                                    if udp_replay.is_some() {
+                                        &[]
+                                    } else {
+                                        delivery_ids
+                                    },
                                     tx_original,
                                     packets,
                                     fate,
                                     &journal_origin,
                                 )? {
                                     TransmissionOutcome::Complete => {
+                                        if fate == OriginalFate::Pass
+                                            && let Some(originals) = batch_owned_originals.as_ref()
+                                        {
+                                            r2o_resend_owned_originals(raw.as_ref(), originals);
+                                        }
                                         if udp_replay.is_some() {
                                             let verdict = if fate == OriginalFate::Pass {
                                                 NF_ACCEPT
@@ -2129,6 +2275,11 @@ mod app {
                                         r2o_sends_done,
                                         payload_on_wire,
                                     } => {
+                                        if fate == OriginalFate::Pass
+                                            && let Some(originals) = batch_owned_originals.as_ref()
+                                        {
+                                            r2o_resend_owned_originals(raw.as_ref(), originals);
+                                        }
                                         response_delivered = fate == OriginalFate::Pass;
                                         let due = deferred_due.unwrap_or_else(Instant::now);
                                         if let Some(batch) = udp_replay.as_ref() {
@@ -2244,6 +2395,11 @@ mod app {
                                         original_spent,
                                         original_taken,
                                     } => {
+                                        if (fate == OriginalFate::Pass || !original_taken)
+                                            && let Some(originals) = batch_owned_originals.as_ref()
+                                        {
+                                            r2o_resend_owned_originals(raw.as_ref(), originals);
+                                        }
                                         if let Some(batch) = udp_replay.as_ref() {
                                             let pending = PendingUdpRelease {
                                                 packets: batch.packets.clone(),
@@ -2288,6 +2444,7 @@ mod app {
                                         if damaged {
                                             r2o_release_damaged_tcp_hold(
                                                 &mut socket,
+                                                raw.as_ref(),
                                                 &mut holding,
                                                 Some(tx_original),
                                             );
@@ -2381,14 +2538,22 @@ mod app {
             let deferred_resend_stats = udp_deferred_resends.r2o_flush(
                 Instant::now(),
                 |_id, packet| {
-                    raw.as_ref()
+                    let result = raw
+                        .as_ref()
                         .ok_or_else(|| {
                             io::Error::new(io::ErrorKind::NotConnected, "raw-сокет недоступен")
                         })?
-                        .send_packet(packet)
+                        .send_packet(packet);
+                    if let Err(error) = &result
+                        && !r2o_udp_send_busy(error)
+                    {
+                        udp_follow.r2o_mark_failed(packet);
+                    }
+                    result
                 },
                 |id, verdict| socket.send_verdict(id, verdict),
             );
+            udp_follow.r2o_note_busy(deferred_resend_stats.resend_busy);
             if deferred_resend_stats.resend_failed != 0 {
                 eprintln!(
                     "r2o-datapath: {} отложенных UDP-хвостов не отправлены raw и приняты ядром",
@@ -3486,6 +3651,23 @@ mod app {
         STOP.store(true, Ordering::Relaxed);
     }
 
+    fn r2o_resend_owned_originals(raw: Option<&RawSocket>, originals: &[Vec<u8>]) {
+        let Some(raw) = raw else {
+            eprintln!("r2o-datapath: owned TLS originals остались без raw socket");
+            return;
+        };
+        for packet in originals {
+            if let Err(error) = raw.send_packet(packet) {
+                eprintln!("r2o-datapath: не возвращён owned TLS original через raw-send: {error}");
+            }
+        }
+    }
+
+    fn r2o_flush_owned_hold_releases(holding: &mut HoldTable, raw: Option<&RawSocket>) {
+        let originals = holding.r2o_take_owned_releases();
+        r2o_resend_owned_originals(raw, &originals);
+    }
+
     fn release_accepting(queue: &mut QueueSocket, ids: &[u32]) {
         for &id in ids {
             if let Err(error) = queue.send_verdict(id, NF_ACCEPT) {
@@ -3825,6 +4007,7 @@ mod app {
                     if damaged {
                         r2o_release_damaged_tcp_hold(
                             queue,
+                            raw,
                             holding,
                             pending.r2o_tcp_packet.as_deref(),
                         );
@@ -3864,6 +4047,7 @@ mod app {
                     if damaged {
                         r2o_release_damaged_tcp_hold(
                             queue,
+                            Some(raw),
                             holding,
                             pending.r2o_tcp_packet.as_deref(),
                         );
@@ -3957,7 +4141,12 @@ mod app {
                     r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_QUEUE,
                 );
                 if damaged {
-                    r2o_release_damaged_tcp_hold(queue, holding, pending.r2o_tcp_packet.as_deref());
+                    r2o_release_damaged_tcp_hold(
+                        queue,
+                        raw,
+                        holding,
+                        pending.r2o_tcp_packet.as_deref(),
+                    );
                 }
                 if let Some(packet) = pending.r2o_udp_packet.as_deref() {
                     udp_sessions.r2o_note_execution_failure(

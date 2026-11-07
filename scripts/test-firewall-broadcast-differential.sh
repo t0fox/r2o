@@ -3,7 +3,7 @@ set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 D2O_ROOT=${R2O_DONOR_ROOT:-${ROOT%/*}/d2o}
-EXPECTED_D2O_SHA=304ba893dd37197128ac8799c0495b035f6a38c0
+EXPECTED_D2O_SHA=8e2c98146cf0b712dc967fbec558c7b904666e87
 ACTUAL_D2O_SHA=$(git -C "$D2O_ROOT" rev-parse HEAD)
 if [ "$ACTUAL_D2O_SHA" != "$EXPECTED_D2O_SHA" ]; then
     printf 'Expected d2o %s, got %s\n' "$EXPECTED_D2O_SHA" "$ACTUAL_D2O_SHA" >&2
@@ -33,6 +33,38 @@ assert_before() {
     }
 }
 assert_before_queue() { assert_before "$1" "$2" 'queue num'; }
+assert_xt_chain_before_queue() {
+    awk -v chain="-A $2 " -v rule="$3" '
+        index($0, chain) {
+            if (!gate && index($0, rule)) gate = NR
+            if (!queue && index($0, "--queue-num")) queue = NR
+        }
+        END { exit !(gate && queue && gate < queue) }
+    ' "$1" || { echo "iptables rule is missing or appears after queue in $2: $3" >&2; exit 1; }
+}
+assert_nft_chain_before_queue() {
+    awk -v chain="$2" -v rule="$3" '
+        index($0, chain) { in_chain = 1; next }
+        in_chain && /^    chain / { exit }
+        in_chain && !gate && index($0, rule) { gate = NR }
+        in_chain && !queue && index($0, "queue num") { queue = NR }
+        END { exit !(gate && queue && gate < queue) }
+    ' "$1" || { echo "nft rule is missing or appears after queue in $2: $3" >&2; exit 1; }
+}
+assert_nft_rule_order() {
+    awk -v chain="$2" -v first_rule="$3" -v first_count="$4" \
+        -v second_rule="$5" -v second_count="$6" '
+        index($0, chain) { in_chain = 1; next }
+        in_chain && /^    chain / { exit }
+        in_chain && !first && index($0, first_rule) && index($0, first_count) { first = NR }
+        in_chain && !second && index($0, second_rule) && index($0, second_count) { second = NR }
+        END { exit !(first && second && first < second) }
+    ' "$1" || {
+        echo "UDP rules are out of D2O order in $2: common port queue must precede voice queue" >&2
+        sed -n '/chain out {/,/chain in_rules {/p; /chain in_rules {/,/chain in_forward {/p' "$1" >&2
+        exit 1
+    }
+}
 
 sed -n '/^nft_ruleset() (/,$p' "$D2O_ROOT/files/S99d2k" |
     tr -d '\r' | sed -n '1,/^)/p' > "$TEMP/d2o-nft-function.sh"
@@ -54,8 +86,8 @@ MARK=0x2d
 MEASURE_MARK=0x2f
 NFT_TABLE=d2k
 NFT_PACKETS_MAX=18446744073709551615
-GATE_IP=
-GATE_PORT=443
+GATE_IP=203.0.113.9
+GATE_PORT=8443
 late_rst_from() { echo $((${CONNBYTES#0:} + 1)); }
 nft_list() { printf '%s' "$1" | sed -e 's/:/-/g' -e 's/,/, /g'; }
 nft_count() {
@@ -92,6 +124,7 @@ exit 2
 NFT
 chmod 0755 "$TEMP/bin/nft"
 
+D2K_GATE=http://203.0.113.9:8443/update \
 R2O_DIR="$TEMP/root" \
 R2O_CONFIG=/dev/null \
 R2O_RUN_DIR="$TEMP/root/run" \
@@ -119,6 +152,34 @@ for rule in \
     }
     assert_before_queue "$TEMP/r2o.nft" "$rule"
 done
+for rules in "$TEMP/d2o.nft" "$TEMP/r2o.nft"; do
+    grep -Fq 'meta mark 0x2f return' "$rules" || {
+        echo "$rules omitted the measurement-mark NFQUEUE bypass" >&2
+        exit 1
+    }
+    grep -Fq 'ip daddr 203.0.113.9 tcp dport 8443 return' "$rules" || {
+        echo "$rules omitted the IPv4 update-gate exclusion" >&2
+        exit 1
+    }
+    grep -Fq 'ip saddr 203.0.113.9 tcp sport 8443 return' "$rules" || {
+        echo "$rules omitted the IPv4 update-gate reply exclusion" >&2
+        exit 1
+    }
+done
+assert_before_queue "$TEMP/r2o.nft" 'ip daddr 203.0.113.9 tcp dport 8443 return'
+assert_nft_chain_before_queue "$TEMP/r2o.nft" 'chain in_rules {' 'ip saddr 203.0.113.9 tcp sport 8443 return'
+for rules in "$TEMP/d2o.nft" "$TEMP/r2o.nft"; do
+    assert_nft_rule_order "$rules" 'chain out {' \
+        'meta l4proto udp' 'ct original packets 1-8' \
+        'meta l4proto udp' 'ct original packets 1-4'
+    assert_nft_rule_order "$rules" 'chain in_rules {' \
+        'meta l4proto udp' 'ct reply packets 1-8' \
+        'meta l4proto udp' 'ct reply packets 1-4'
+done
+if grep -Eq 'th dport \{[^}]*50000-50099[^}]*\} return|th sport \{[^}]*50000-50099[^}]*\} return' "$TEMP/r2o.nft"; then
+    echo "R2O prematurely returns from overlapping voice UDP ports" >&2
+    exit 1
+fi
 grep -Fq 'icmp type time-exceeded icmp code 0 queue num 2000 bypass' "$TEMP/d2o.nft" || {
     echo "D2O nft oracle omitted IPv4 time-exceeded queue" >&2
     exit 1
@@ -193,6 +254,7 @@ FW_TRACE="$TEMP/d2o-iptables-fallback.trace" FW_NO_ADDRTYPE=1 PATH="$TEMP/bin:$P
 FW_TRACE="$TEMP/d2o-icmp.trace" PATH="$TEMP/bin:$PATH" \
     sh "$TEMP/d2o-icmp-harness.sh" "$TEMP/d2o-icmp-function.sh"
 
+D2K_GATE=http://203.0.113.9:8443/update \
 R2O_DIR="$TEMP/root" \
 R2O_CONFIG=/dev/null \
 R2O_RUN_DIR="$TEMP/root/run" \
@@ -202,6 +264,7 @@ IPV6_ENABLED=1 \
 FW_TRACE="$TEMP/r2o-iptables.trace" \
 PATH="$TEMP/bin:$PATH" \
     sh "$ROOT/router/r2o-firewall.sh" up
+D2K_GATE=http://203.0.113.9:8443/update \
 R2O_DIR="$TEMP/root" \
 R2O_CONFIG=/dev/null \
 R2O_RUN_DIR="$TEMP/root/run" \
@@ -221,6 +284,16 @@ grep -Fq -- '-m addrtype --dst-type BROADCAST -j RETURN' "$TEMP/r2o-iptables.tra
     echo "R2O iptables rules differ from D2O: missing broadcast exclusion" >&2
     exit 1
 }
+grep -Fq -- '-p tcp -d 203.0.113.9 --dport 8443 -j RETURN' "$TEMP/r2o-iptables.trace" || {
+    echo "$TEMP/r2o-iptables.trace omitted the IPv4 update-gate outbound exclusion" >&2
+    exit 1
+}
+grep -Fq -- '-p tcp -s 203.0.113.9 --sport 8443 -j RETURN' "$TEMP/r2o-iptables.trace" || {
+    echo "$TEMP/r2o-iptables.trace omitted the IPv4 update-gate reply exclusion" >&2
+    exit 1
+}
+assert_before "$TEMP/r2o-iptables.trace" '-d 203.0.113.9 --dport 8443 -j RETURN' '--queue-num'
+assert_xt_chain_before_queue "$TEMP/r2o-iptables.trace" R2O_IN '-p tcp -s 203.0.113.9 --sport 8443 -j RETURN'
 assert_before "$TEMP/r2o-iptables.trace" '-m addrtype --dst-type BROADCAST -j RETURN' '--queue-num'
 assert_before "$TEMP/r2o-iptables.trace" '-d 224.0.0.0/4 -j RETURN' '--queue-num 2000'
 assert_before "$TEMP/r2o-iptables.trace" '-d ff00::/8 -j RETURN' '--queue-num 2001'
@@ -263,4 +336,4 @@ grep -Fq -- '-p ipv6-icmp --icmpv6-type 3/0 -j NFQUEUE --queue-num 2001 --queue-
     exit 1
 }
 
-echo "D2O/R2O nft and iptables broadcast/multicast/ICMP rules match d2o $ACTUAL_D2O_SHA."
+echo "R2O IPv4 gate exclusions and D2O/R2O nft and iptables broadcast/multicast/ICMP rules match d2o $ACTUAL_D2O_SHA."

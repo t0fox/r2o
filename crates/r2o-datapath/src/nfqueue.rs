@@ -10,6 +10,65 @@ const ACK_TIMEOUT_MS: i32 = 1000;
 const ACK_ATTEMPTS: usize = 8;
 const RECEIVE_CAPACITY: usize = 1 << 17;
 
+fn set_receive_buffer_with(
+    requested: i32,
+    force_option: Option<i32>,
+    normal_option: i32,
+    mut set_option: impl FnMut(i32, i32) -> io::Result<()>,
+    mut get_effective: impl FnMut(i32) -> io::Result<i32>,
+) -> io::Result<i32> {
+    let forced = match force_option {
+        Some(option) => set_option(option, requested).is_ok(),
+        None => false,
+    };
+    if !forced {
+        set_option(normal_option, requested)?;
+    }
+    get_effective(normal_option)
+}
+
+fn set_receive_buffer(fd: RawFd, requested: i32) -> io::Result<i32> {
+    set_receive_buffer_with(
+        requested,
+        Some(libc::SO_RCVBUFFORCE),
+        libc::SO_RCVBUF,
+        |option, value| {
+            let result = unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    option,
+                    &value as *const i32 as *const libc::c_void,
+                    std::mem::size_of_val(&value) as libc::socklen_t,
+                )
+            };
+            if result == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        },
+        |option| {
+            let mut effective = 0_i32;
+            let mut length = std::mem::size_of_val(&effective) as libc::socklen_t;
+            let result = unsafe {
+                libc::getsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    option,
+                    &mut effective as *mut i32 as *mut libc::c_void,
+                    &mut length,
+                )
+            };
+            if result == 0 {
+                Ok(effective)
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        },
+    )
+}
+
 #[derive(Debug)]
 pub enum ReceiveError {
     Wait(io::Error),
@@ -91,14 +150,14 @@ impl QueueSocket {
             return Err(io::Error::last_os_error());
         }
         if receive_buffer > 0 {
-            unsafe {
-                libc::setsockopt(
-                    fd.as_raw_fd(),
-                    libc::SOL_SOCKET,
-                    libc::SO_RCVBUF,
-                    &receive_buffer as *const i32 as *const libc::c_void,
-                    std::mem::size_of_val(&receive_buffer) as libc::socklen_t,
-                );
+            match set_receive_buffer(fd.as_raw_fd(), receive_buffer) {
+                Ok(effective) if effective < receive_buffer => eprintln!(
+                    "r2o-datapath: SO_RCVBUF NFQUEUE ограничен: запрос {receive_buffer}, ядро установило {effective}"
+                ),
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!("r2o-datapath: не удалось настроить SO_RCVBUF NFQUEUE: {error}")
+                }
             }
         }
 
@@ -447,5 +506,78 @@ mod tests {
         assert_eq!(socket.stats().packets, 0);
         assert_eq!(socket.stats().accepted, 0);
         assert_eq!(socket.stats().dropped, 0);
+    }
+
+    #[test]
+    fn receive_buffer_uses_privileged_override_and_reads_back_effective_size() {
+        let mut options = Vec::new();
+        let requested = 4 * 1024 * 1024;
+        let effective = super::set_receive_buffer_with(
+            requested,
+            Some(1),
+            2,
+            |option, value| {
+                options.push((option, value));
+                Ok(())
+            },
+            |option| {
+                assert_eq!(option, 2);
+                Ok(requested * 2)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(effective, requested * 2);
+        assert_eq!(options, [(1, requested)]);
+    }
+
+    #[test]
+    fn receive_buffer_falls_back_and_reports_kernel_cap() {
+        let mut options = Vec::new();
+        let requested = 4 * 1024 * 1024;
+        let effective = super::set_receive_buffer_with(
+            requested,
+            Some(1),
+            2,
+            |option, value| {
+                options.push((option, value));
+                if option == 1 {
+                    Err(std::io::Error::from_raw_os_error(libc::EPERM))
+                } else {
+                    Ok(())
+                }
+            },
+            |option| {
+                assert_eq!(option, 2);
+                Ok(425_984)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(effective, 425_984);
+        assert_eq!(options, [(1, requested), (2, requested)]);
+        assert!(effective < requested);
+    }
+
+    #[test]
+    fn receive_buffer_returns_fallback_error_without_readback() {
+        let mut readback_called = false;
+        let error = super::set_receive_buffer_with(
+            4096,
+            Some(1),
+            2,
+            |option, _| {
+                assert!(option == 1 || option == 2);
+                Err(std::io::Error::from_raw_os_error(libc::EPERM))
+            },
+            |_| {
+                readback_called = true;
+                Ok(0)
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+        assert!(!readback_called);
     }
 }

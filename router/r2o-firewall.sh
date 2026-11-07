@@ -9,7 +9,9 @@ CONF=${R2O_CONFIG:-$ROOT/config}
 QUEUE4=${QUEUE_NUM:-2000}
 QUEUE6=${QUEUE_NUM6:-2001}
 MARK=${MARK:-45}
-TG_OUTBOUND_MARK=0x40000000
+# D2O controller measurements use this fixed mark to avoid observing their own probes.
+MEASURE_MARK=0x2f
+PROBE_MARK=${PROBE_MARK:-46}
 BACKEND=${FW_BACKEND:-auto}
 IPV6_ENABLED_CONFIG=${IPV6_ENABLED:-1}
 IPV6_ENABLED=$IPV6_ENABLED_CONFIG
@@ -50,6 +52,43 @@ late_rst_from() {
     echo $((late_rst_upper + 1))
 }
 
+valid_ipv4() (
+    case "$1" in ''|*[!0-9.]*) return 1 ;; esac
+    set -f
+    valid_ipv4_ifs=$IFS
+    IFS=.
+    # shellcheck disable=SC2086 # split the restricted address on dots
+    set -- $1
+    IFS=$valid_ipv4_ifs
+    [ "$#" -eq 4 ] || return 1
+    for valid_ipv4_octet do
+        case "$valid_ipv4_octet" in ''|*[!0-9]*) return 1 ;; esac
+        case "$valid_ipv4_octet" in ?|??|???) ;; *) return 1 ;; esac
+        [ "$valid_ipv4_octet" -le 255 ] || return 1
+    done
+)
+
+# D2O excludes its configured IPv4 update relay from NFQUEUE. Keep that path
+# when an existing configuration carries the same D2K_GATE setting.
+GATE_IP=
+GATE_PORT=
+gate_endpoint=${D2K_GATE:-}
+case "$gate_endpoint" in http://*) gate_endpoint=${gate_endpoint#http://} ;; esac
+gate_endpoint=${gate_endpoint%%/*}
+case "$gate_endpoint" in
+    *:*)
+        gate_candidate_ip=${gate_endpoint%:*}
+        gate_candidate_port=${gate_endpoint##*:}
+        case "$gate_candidate_port" in ?|??|???|????|?????)
+            if valid_ipv4 "$gate_candidate_ip" && number "$gate_candidate_port" 65535; then
+                GATE_IP=$gate_candidate_ip
+                GATE_PORT=$gate_candidate_port
+            fi
+            ;;
+        esac
+        ;;
+esac
+
 number "$QUEUE4" 65535 || { echo "неверный QUEUE_NUM" >&2; exit 2; }
 number "$QUEUE6" 65535 || { echo "неверный QUEUE_NUM6" >&2; exit 2; }
 [ "$QUEUE4" != "$QUEUE6" ] || { echo "номера очередей IPv4 и IPv6 должны различаться" >&2; exit 2; }
@@ -65,6 +104,13 @@ case "$MARK" in
     0x*|0X*) MARK=$(printf '%d' "$MARK") || exit 2 ;;
 esac
 number "$MARK" 4294967295 || { echo "неверная MARK" >&2; exit 2; }
+measure_mark_value=$(printf '%d' "$MEASURE_MARK") || exit 2
+case "$PROBE_MARK" in
+    0x*|0X*) PROBE_MARK=$(printf '%d' "$PROBE_MARK") || exit 2 ;;
+esac
+number "$PROBE_MARK" 4294967295 || { echo "неверная PROBE_MARK" >&2; exit 2; }
+[ "$MARK" != "$measure_mark_value" ] || { echo "MARK должен отличаться от MEASURE_MARK" >&2; exit 2; }
+[ "$PROBE_MARK" != "$measure_mark_value" ] || { echo "PROBE_MARK должен отличаться от MEASURE_MARK" >&2; exit 2; }
 
 case "$BACKEND" in
     nft|iptables) ;;
@@ -145,6 +191,12 @@ nft_up() {
     nft_voice=$(printf '%s' "$VOICE_PORTS" | sed -e 's/:/-/g' -e 's/,/, /g')
     nft_keepalive=$(printf '%s' "$HTTP_KEEPALIVE_PORTS" | sed -e 's/:/-/g' -e 's/,/, /g')
     nft_dns=$(printf '%s' "$DNS_PORTS" | sed -e 's/:/-/g' -e 's/,/, /g')
+    nft_gate_out=
+    nft_gate_in=
+    if [ -n "$GATE_IP" ]; then
+        nft_gate_out="ip daddr $GATE_IP tcp dport $GATE_PORT return"
+        nft_gate_in="ip saddr $GATE_IP tcp sport $GATE_PORT return"
+    fi
     nft_window=$(printf '%s' "$CONNBYTES" | sed -e 's/^0:/1-/' -e 's/:/-/g')
     nft_voice_window=$(printf '%s' "$VOICE_CONNBYTES" | sed -e 's/^0:/1-/' -e 's/:/-/g')
     mkdir -p "$(dirname "$rules")"
@@ -171,17 +223,16 @@ table inet r2o {
         ip daddr 224.0.0.0/4 return
         ip6 daddr ff00::/8 return
         meta mark $MARK return
-        meta mark $TG_OUTBOUND_MARK return
+        meta mark $MEASURE_MARK return
         meta l4proto { tcp, udp } th dport { $nft_dns } return
         ct status dnat return
-        meta nfproto ipv4 meta l4proto udp th dport { $nft_voice } ct direction original ct original packets $nft_voice_window queue num $QUEUE4 bypass
-        meta nfproto ipv4 meta l4proto udp th dport { $nft_voice } return
-        meta nfproto ipv6 meta l4proto udp th dport { $nft_voice } ct direction original ct original packets $nft_voice_window queue num $QUEUE6 bypass
-        meta nfproto ipv6 meta l4proto udp th dport { $nft_voice } return
+        $nft_gate_out
         meta nfproto ipv4 meta l4proto tcp th dport { $nft_ports } ct direction original ct original packets $nft_window queue num $QUEUE4 bypass
         meta nfproto ipv4 meta l4proto udp th dport { $nft_ports } ct direction original ct original packets $nft_window queue num $QUEUE4 bypass
         meta nfproto ipv6 meta l4proto tcp th dport { $nft_ports } ct direction original ct original packets $nft_window queue num $QUEUE6 bypass
         meta nfproto ipv6 meta l4proto udp th dport { $nft_ports } ct direction original ct original packets $nft_window queue num $QUEUE6 bypass
+        meta nfproto ipv4 meta l4proto udp th dport { $nft_voice } ct direction original ct original packets $nft_voice_window queue num $QUEUE4 bypass
+        meta nfproto ipv6 meta l4proto udp th dport { $nft_voice } ct direction original ct original packets $nft_voice_window queue num $QUEUE6 bypass
         meta nfproto ipv4 meta l4proto tcp ct direction original ct original packets $nft_late_window tcp flags & rst == rst queue num $QUEUE4 bypass
         meta nfproto ipv4 meta l4proto tcp ct direction original ct original packets $nft_late_window tcp flags & fin == fin queue num $QUEUE4 bypass
         meta nfproto ipv4 meta l4proto tcp th dport { $nft_keepalive } ct direction original ct original packets $nft_late_window queue num $QUEUE4 bypass
@@ -196,14 +247,13 @@ table inet r2o {
         ip6 daddr ::1 return
         meta l4proto { tcp, udp } th sport { $nft_dns } return
         ct status dnat return
-        meta nfproto ipv4 meta l4proto udp th sport { $nft_voice } ct direction reply ct reply packets $nft_voice_window queue num $QUEUE4 bypass
-        meta nfproto ipv4 meta l4proto udp th sport { $nft_voice } return
-        meta nfproto ipv6 meta l4proto udp th sport { $nft_voice } ct direction reply ct reply packets $nft_voice_window queue num $QUEUE6 bypass
-        meta nfproto ipv6 meta l4proto udp th sport { $nft_voice } return
+        $nft_gate_in
         meta nfproto ipv4 meta l4proto tcp th sport { $nft_ports } ct direction reply ct reply packets $nft_window queue num $QUEUE4 bypass
         meta nfproto ipv4 meta l4proto udp th sport { $nft_ports } ct direction reply ct reply packets $nft_window queue num $QUEUE4 bypass
         meta nfproto ipv6 meta l4proto tcp th sport { $nft_ports } ct direction reply ct reply packets $nft_window queue num $QUEUE6 bypass
         meta nfproto ipv6 meta l4proto udp th sport { $nft_ports } ct direction reply ct reply packets $nft_window queue num $QUEUE6 bypass
+        meta nfproto ipv4 meta l4proto udp th sport { $nft_voice } ct direction reply ct reply packets $nft_voice_window queue num $QUEUE4 bypass
+        meta nfproto ipv6 meta l4proto udp th sport { $nft_voice } ct direction reply ct reply packets $nft_voice_window queue num $QUEUE6 bypass
         meta nfproto ipv4 meta l4proto tcp ct direction reply ct reply packets $nft_late_window tcp flags & rst == rst queue num $QUEUE4 bypass
         meta nfproto ipv4 meta l4proto tcp ct direction reply ct reply packets $nft_late_window tcp flags & fin == fin queue num $QUEUE4 bypass
         meta nfproto ipv4 meta l4proto tcp th sport { $nft_keepalive } ct direction reply ct reply packets $nft_late_window queue num $QUEUE4 bypass
@@ -352,14 +402,13 @@ flowoffload_ensure_unlocked() {
     [ "${R2O_FLOWOFFLOAD_RESTORING:-0}" != 1 ] || return 0
     command -v uci >/dev/null 2>&1 || return 0
     [ "$(uci -q get firewall.@defaults[0].flow_offloading 2>/dev/null || true)" = 1 ] || return 0
-    mkdir -p "$RUN_DIR" || return 1
-    [ -f "$FLOWOFFLOAD_STATE" ] || flowoffload_store_state 1 || return 1
+    mkdir -p "$RUN_DIR" || return 0
+    [ -f "$FLOWOFFLOAD_STATE" ] || flowoffload_store_state 1 || true
     if uci set firewall.@defaults[0].flow_offloading=0 && uci commit firewall; then
-        flowoffload_firewall_reload || return 1
+        flowoffload_firewall_reload || true
         echo "r2o: fw4 flow offloading отключён на время работы datapath и будет восстановлен при остановке" >&2
     else
-        echo "r2o: не удалось отключить fw4 flow offloading; останавливаю datapath, чтобы сохранить видимость трафика" >&2
-        return 1
+        echo "r2o: не удалось выключить fw4 flow offloading — datapath не увидит часть потоков клиентов" >&2
     fi
 }
 
@@ -372,10 +421,7 @@ flowoffload_restore_unlocked() {
         1)
             command -v uci >/dev/null 2>&1 || return 0
             if uci set firewall.@defaults[0].flow_offloading=1 && uci commit firewall; then
-                flowoffload_firewall_reload || return 1
-            else
-                echo "r2o: не удалось восстановить fw4 flow offloading" >&2
-                return 1
+                flowoffload_firewall_reload || true
             fi
             ;;
         selective|fallback|legacy)
@@ -593,6 +639,10 @@ xt_family_up() {
         xt "$tool" -t mangle -A "$chain" -d "$loopback" -j RETURN || return 1
         xt "$tool" -t mangle -A "$chain" -m conntrack --ctstate DNAT -j RETURN || return 1
     done
+    if [ "$tool" = iptables ] && [ -n "${GATE_IP:-}" ]; then
+        xt "$tool" -t mangle -A R2O_OUT -p tcp -d "$GATE_IP" --dport "$GATE_PORT" -j RETURN || return 1
+        xt "$tool" -t mangle -A R2O_IN -p tcp -s "$GATE_IP" --sport "$GATE_PORT" -j RETURN || return 1
+    fi
     if [ "$tool" = iptables ]; then
         xt_broadcast_return "$tool" || return 1
         xt "$tool" -t mangle -A R2O_OUT -d 224.0.0.0/4 -j RETURN || return 1
@@ -600,29 +650,27 @@ xt_family_up() {
         xt "$tool" -t mangle -A R2O_OUT -d ff00::/8 -j RETURN || return 1
     fi
     xt "$tool" -t mangle -A R2O_OUT -m mark --mark "$MARK" -j RETURN || return 1
-    xt "$tool" -t mangle -A R2O_OUT -m mark --mark "$TG_OUTBOUND_MARK" -j RETURN || return 1
+    xt "$tool" -t mangle -A R2O_OUT -m mark --mark "$MEASURE_MARK" -j RETURN || return 1
     for proto in tcp udp; do
         xt "$tool" -t mangle -A R2O_OUT -p "$proto" -m multiport --dports "$DNS_PORTS" -j RETURN || return 1
         xt "$tool" -t mangle -A R2O_IN -p "$proto" -m multiport --sports "$DNS_PORTS" -j RETURN || return 1
     done
     voice_ports=$VOICE_PORTS
     for proto in tcp udp; do
-        if [ "$proto" = udp ]; then
-            xt "$tool" -t mangle -A R2O_OUT -p udp -m multiport --dports "$voice_ports" \
-                -m conntrack --ctdir ORIGINAL -m connbytes --connbytes "$VOICE_CONNBYTES" --connbytes-dir original --connbytes-mode packets \
-                -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
-            xt "$tool" -t mangle -A R2O_OUT -p udp -m multiport --dports "$voice_ports" -j RETURN || return 1
-            xt "$tool" -t mangle -A R2O_IN -p udp -m multiport --sports "$voice_ports" \
-                -m conntrack --ctdir REPLY -m connbytes --connbytes "$VOICE_CONNBYTES" --connbytes-dir reply --connbytes-mode packets \
-                -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
-            xt "$tool" -t mangle -A R2O_IN -p udp -m multiport --sports "$voice_ports" -j RETURN || return 1
-        fi
         xt "$tool" -t mangle -A R2O_OUT -p "$proto" -m conntrack --ctdir ORIGINAL -m multiport --dports "$PORTS" \
             -m connbytes --connbytes "$CONNBYTES" --connbytes-dir original --connbytes-mode packets \
             -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
         xt "$tool" -t mangle -A R2O_IN -p "$proto" -m conntrack --ctdir REPLY -m multiport --sports "$PORTS" \
             -m connbytes --connbytes "$CONNBYTES" --connbytes-dir reply --connbytes-mode packets \
             -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
+        if [ "$proto" = udp ]; then
+            xt "$tool" -t mangle -A R2O_OUT -p udp -m multiport --dports "$voice_ports" \
+                -m conntrack --ctdir ORIGINAL -m connbytes --connbytes "$VOICE_CONNBYTES" --connbytes-dir original --connbytes-mode packets \
+                -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
+            xt "$tool" -t mangle -A R2O_IN -p udp -m multiport --sports "$voice_ports" \
+                -m conntrack --ctdir REPLY -m connbytes --connbytes "$VOICE_CONNBYTES" --connbytes-dir reply --connbytes-mode packets \
+                -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
+        fi
     done
     for direction in OUT IN; do
         chain=R2O_$direction
@@ -646,7 +694,8 @@ xt_family_up() {
             -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
     fi
     if [ "$tool" = iptables ]; then
-        xt "$tool" -t nat -A POSTROUTING -p udp -m mark --mark "$MARK" -j MASQUERADE || return 1
+        xt "$tool" -t nat -A POSTROUTING -p udp -m mark --mark "$MARK" -j MASQUERADE \
+            || echo "r2o: не поставить MASQUERADE для своих посылок — QUIC за роутером может не работать" >&2
     fi
     xt "$tool" -t mangle -I POSTROUTING 1 -j R2O_OUT || return 1
     xt "$tool" -t mangle -I FORWARD 1 -j R2O_IN || return 1
@@ -667,6 +716,10 @@ xt_family_installed() {
         xt "$fw_tool" -t mangle -C "$chain" -d "$loopback" -j RETURN || return 1
         xt "$fw_tool" -t mangle -C "$chain" -m conntrack --ctstate DNAT -j RETURN || return 1
     done
+    if [ "$fw_tool" = iptables ] && [ -n "${GATE_IP:-}" ]; then
+        xt "$fw_tool" -t mangle -C R2O_OUT -p tcp -d "$GATE_IP" --dport "$GATE_PORT" -j RETURN || return 1
+        xt "$fw_tool" -t mangle -C R2O_IN -p tcp -s "$GATE_IP" --sport "$GATE_PORT" -j RETURN || return 1
+    fi
     if [ "$fw_tool" = iptables ]; then
         { xt "$fw_tool" -t mangle -C R2O_OUT -m addrtype --dst-type BROADCAST -j RETURN ||
             xt "$fw_tool" -t mangle -C R2O_OUT -d 255.255.255.255 -j RETURN; } || return 1
@@ -675,7 +728,7 @@ xt_family_installed() {
         xt "$fw_tool" -t mangle -C R2O_OUT -d ff00::/8 -j RETURN || return 1
     fi
     xt "$fw_tool" -t mangle -C R2O_OUT -m mark --mark "$MARK" -j RETURN || return 1
-    xt "$fw_tool" -t mangle -C R2O_OUT -m mark --mark "$TG_OUTBOUND_MARK" -j RETURN || return 1
+    xt "$fw_tool" -t mangle -C R2O_OUT -m mark --mark "$MEASURE_MARK" -j RETURN || return 1
     for proto in tcp udp; do
         xt "$fw_tool" -t mangle -C R2O_OUT -p "$proto" -m multiport --dports "$DNS_PORTS" -j RETURN || return 1
         xt "$fw_tool" -t mangle -C R2O_IN -p "$proto" -m multiport --sports "$DNS_PORTS" -j RETURN || return 1
@@ -698,12 +751,10 @@ xt_family_installed() {
         -m conntrack --ctdir ORIGINAL -m connbytes --connbytes "$VOICE_CONNBYTES" \
         --connbytes-dir original --connbytes-mode packets -j NFQUEUE \
         --queue-num "$queue" --queue-bypass || return 1
-    xt "$fw_tool" -t mangle -C R2O_OUT -p udp -m multiport --dports "$VOICE_PORTS" -j RETURN || return 1
     xt "$fw_tool" -t mangle -C R2O_IN -p udp -m multiport --sports "$VOICE_PORTS" \
         -m conntrack --ctdir REPLY -m connbytes --connbytes "$VOICE_CONNBYTES" \
         --connbytes-dir reply --connbytes-mode packets -j NFQUEUE \
         --queue-num "$queue" --queue-bypass || return 1
-    xt "$fw_tool" -t mangle -C R2O_IN -p udp -m multiport --sports "$VOICE_PORTS" -j RETURN || return 1
     for direction in OUT IN; do
         chain=R2O_$direction
         if [ "$direction" = OUT ]; then
@@ -729,7 +780,6 @@ xt_family_installed() {
     if [ "$fw_tool" = iptables ]; then
         xt "$fw_tool" -t mangle -C R2O_IN -p icmp --icmp-type 11/0 \
             -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1
-        xt "$fw_tool" -t nat -C POSTROUTING -p udp -m mark --mark "$MARK" -j MASQUERADE || return 1
     else
         xt "$fw_tool" -t mangle -C R2O_IN -p ipv6-icmp --icmpv6-type 3/0 \
             -j NFQUEUE --queue-num "$queue" --queue-bypass || return 1

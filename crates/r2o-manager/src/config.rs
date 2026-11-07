@@ -31,6 +31,7 @@ const DEFAULT_CONFIG_KEYS: &[&str] = &[
     "VOICE_CONNBYTES",
     "HTTP_KEEPALIVE_PORTS",
     "DNS_PORTS",
+    "D2K_GATE",
     "PANEL_LISTEN",
     "TG_ENABLED",
     "TG_MODE",
@@ -57,6 +58,7 @@ const IMPORTABLE_KEYS: &[&str] = &[
     "VOICE_CONNBYTES",
     "HTTP_KEEPALIVE_PORTS",
     "DNS_PORTS",
+    "D2K_GATE",
     "PANEL_LISTEN",
     "TG_ENABLED",
     "TG_MODE",
@@ -392,6 +394,7 @@ fn validate_value(key: &str, value: &str, donor: bool) -> io::Result<()> {
         "CONNBYTES" | "VOICE_CONNBYTES" => valid_connbytes_window(value),
         "MARK" | "PROBE_MARK" => valid_mark(value),
         "ONLY_MARK" => valid_only_mark(value),
+        "D2K_GATE" => valid_gate_endpoint(value),
         "FW_BACKEND" => matches!(value, "auto" | "iptables" | "nft"),
         "PANEL_LISTEN" => valid_panel_listen(value),
         "TG_MODE" => value == "local" || (donor && value == "relay"),
@@ -404,6 +407,37 @@ fn validate_value(key: &str, value: &str, donor: bool) -> io::Result<()> {
             "значение параметра конфигурации недопустимо",
         ))
     }
+}
+
+fn valid_gate_endpoint(value: &str) -> bool {
+    if value.is_empty() {
+        return true;
+    }
+    let endpoint = value.strip_prefix("http://").unwrap_or(value);
+    let (authority, path) = match endpoint.split_once('/') {
+        Some((authority, path)) => (authority, path),
+        None => (endpoint, ""),
+    };
+    if !path
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"._-/".contains(&byte))
+    {
+        return false;
+    }
+    let Some((address, port)) = authority.rsplit_once(':') else {
+        return false;
+    };
+    if port.is_empty() || port.len() > 5 || port.parse::<u16>().is_err() {
+        return false;
+    }
+    let octets = address.split('.').collect::<Vec<_>>();
+    octets.len() == 4
+        && octets.iter().all(|octet| {
+            !octet.is_empty()
+                && octet.len() <= 3
+                && octet.bytes().all(|byte| byte.is_ascii_digit())
+                && octet.parse::<u16>().is_ok_and(|value| value <= 255)
+        })
 }
 
 fn valid_port_list(value: &str) -> bool {

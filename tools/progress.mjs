@@ -12,9 +12,9 @@ function groupFor(t){
  if(/^(Telegram|Keenetic Meta DNS)/.test(t))return "Telegram";
  if(/^Панель/.test(t))return "WebPanel";
  if(/^(Firewall|Аппаратное ускорение PPE)/.test(t))return "Firewall / PPE";
- if(/^(Install\/update|ABI\/QEMU)/.test(t))return "Release / ABI";
+ if(/^(Install\/update|Release availability|Release guard|Update guard|Update activation ordering|Signed end-to-end install|ABI\/QEMU)/.test(t))return "Release / ABI";
  if(/^(QUIC|Остальные QUIC)/.test(t))return "QUIC / HTTP3";
- if(/^(Scheduler|Discovery|ACK →|JSON catalog|Полный автоматический цикл|Кадр управления|HTTP search)/.test(t))return "Discovery";
+ if(/^(Scheduler|Discovery|ACK →|JSON catalog|Полный автоматический цикл|S99\/procd|Production daemon crash\/restart|Automatic refusal →|Кадр управления|HTTP search)/.test(t))return "Discovery";
  if(/^(Raw-|Подтверждение базового CLEAR|CLEAR|Базовые transport|Классификатор|TCP measurement|Потолок classifier|TLS|ECH)/.test(t))return "Classifier / TLS";
  return "Datapath";
 }
@@ -33,7 +33,7 @@ function parse(source){
  if(!items.length)throw Error("No rows");
  const groups=CATS.map(name=>{const cards=items.filter(v=>v.group===name);return {name,items:cards,weight:cards.reduce((a,v)=>a+v.weight,0),points:cards.reduce((a,v)=>a+v.points,0)}}).filter(g=>g.items.length);
  const weight=items.reduce((a,v)=>a+v.weight,0),points=items.reduce((a,v)=>a+v.points,0);
- return {source:"docs/functional-parity-matrix.md",date:source.match(/Аудит среза\s+`(\d{4}-\d{2}-\d{2})`/)?.[1]||"",weight,points,percent:+(points/weight*100).toFixed(2),total:items.length,counts:{verified:items.filter(i=>i.status==="verified").length,partial:items.filter(i=>i.status==="partial").length,implemented:items.filter(i=>i.status==="implemented").length,unknown:items.filter(i=>i.status==="unknown").length},groups,items};
+ return {source:"docs/functional-parity-matrix.md",date:source.match(/(?:Аудит среза\s+`|Актуальный документный срез:\s*)(\d{4}-\d{2}-\d{2})/)?.[1]||"",weight,points,percent:+(points/weight*100).toFixed(2),total:items.length,counts:{verified:items.filter(i=>i.status==="verified").length,partial:items.filter(i=>i.status==="partial").length,implemented:items.filter(i=>i.status==="implemented").length,unknown:items.filter(i=>i.status==="unknown").length},groups,items};
 }
 
 function svg(d){

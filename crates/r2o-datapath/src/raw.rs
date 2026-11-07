@@ -8,12 +8,35 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 const R2O_ROUTE_MTU_CACHE_CAPACITY: usize = 16;
 const R2O_RAW_MTU_FLOOR: usize = 576;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RawSendStats {
+    pub sent: u64,
+    pub errors: u64,
+    pub busy: u64,
+}
+
+fn record_send_outcome(stats: &mut RawSendStats, packet: &[u8], result: &io::Result<()>) {
+    match result {
+        Ok(()) => stats.sent = stats.sent.saturating_add(1),
+        Err(error) if packet.len() >= 20 && matches!(packet[0] >> 4, 4 | 6) => {
+            stats.errors = stats.errors.saturating_add(1);
+            if error.raw_os_error().is_some_and(|code| {
+                code == libc::EAGAIN || code == libc::EWOULDBLOCK || code == libc::ENOBUFS
+            }) {
+                stats.busy = stats.busy.saturating_add(1);
+            }
+        }
+        Err(_) => {}
+    }
+}
+
 /// Помеченный raw-сокет Linux для целых TCP/UDP-пакетов и UDP-фрагментов IPv4/IPv6.
 #[derive(Debug)]
 pub struct RawSocket {
     fd: OwnedFd,
     family: i32,
     mark: u32,
+    send_stats: Cell<RawSendStats>,
     maxlen: Cell<usize>,
     maxlen_declared: bool,
     egress_mtu: Cell<Option<usize>>,
@@ -61,6 +84,7 @@ impl RawSocket {
             fd,
             family,
             mark,
+            send_stats: Cell::new(RawSendStats::default()),
             maxlen: Cell::new(maxlen),
             maxlen_declared,
             egress_mtu: Cell::new(None),
@@ -71,6 +95,10 @@ impl RawSocket {
     /// Возвращает общий предел длины одной посылки.
     pub fn maxlen(&self) -> usize {
         self.maxlen.get()
+    }
+
+    pub fn send_stats(&self) -> RawSendStats {
+        self.send_stats.get()
     }
 
     /// Подстраивает общий предел под MTU интерфейсов текущих выходных маршрутов.
@@ -117,6 +145,14 @@ impl RawSocket {
 
     /// Отправить пакет, не ожидая освобождения очереди raw-сокета.
     pub fn send_packet(&self, packet: &[u8]) -> io::Result<()> {
+        let result = self.send_packet_inner(packet);
+        let mut stats = self.send_stats.get();
+        record_send_outcome(&mut stats, packet, &result);
+        self.send_stats.set(stats);
+        result
+    }
+
+    fn send_packet_inner(&self, packet: &[u8]) -> io::Result<()> {
         let Some(outbound) = outgoing_packet(packet, self.family) else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -184,6 +220,50 @@ impl RawSocket {
                 return Err(error);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod send_stats_tests {
+    use super::{RawSendStats, record_send_outcome};
+    use std::io;
+
+    #[test]
+    fn raw_send_stats_count_success_and_busy_errors_like_d2o() {
+        let packet = [0x45; 20];
+        let mut stats = RawSendStats::default();
+        record_send_outcome(&mut stats, &packet, &Ok(()));
+        record_send_outcome(
+            &mut stats,
+            &packet,
+            &Err(io::Error::from_raw_os_error(libc::ENOBUFS)),
+        );
+
+        assert_eq!(
+            stats,
+            RawSendStats {
+                sent: 1,
+                errors: 1,
+                busy: 1
+            }
+        );
+    }
+
+    #[test]
+    fn raw_send_stats_ignore_input_rejections_before_d2o_send_accounting() {
+        let mut stats = RawSendStats::default();
+        record_send_outcome(
+            &mut stats,
+            &[0; 19],
+            &Err(io::Error::from_raw_os_error(libc::EINVAL)),
+        );
+        record_send_outcome(
+            &mut stats,
+            &[0x75; 20],
+            &Err(io::Error::from_raw_os_error(libc::EAFNOSUPPORT)),
+        );
+
+        assert_eq!(stats, RawSendStats::default());
     }
 }
 

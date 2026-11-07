@@ -3,7 +3,7 @@ set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 D2O_ROOT=${R2O_DONOR_ROOT:-${ROOT%/*}/d2o}
-EXPECTED_D2O_SHA=a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe
+EXPECTED_D2O_SHA=8e2c98146cf0b712dc967fbec558c7b904666e87
 [ "$(git -C "$D2O_ROOT" rev-parse HEAD)" = "$EXPECTED_D2O_SHA" ] || {
     echo "unexpected D2O revision" >&2
     exit 2
@@ -44,6 +44,7 @@ case "${1:-}" in
         ;;
     commit)
         [ "${2:-}" = firewall ] || exit 2
+        [ "${FLOW_FAIL_COMMIT:-0}" != 1 ] || exit 1
         printf 'uci commit firewall\n' >> "$FLOW_TRACE"
         ;;
     *) exit 2 ;;
@@ -85,15 +86,22 @@ cat "$FLOW_TRACE"
 RUN
 chmod 0755 "$TEMP/run-helper.sh"
 
-run_set_failure() {
+run_write_failure() {
     kind=$1
-    run="$TEMP/nft-set-failure/$kind"
+    failure=$2
+    run="$TEMP/nft-$failure-failure/$kind"
     mkdir -p "$run"
     printf '1\n' > "$run/flow"
     printf '1\n' > "$run/hw"
     : > "$run/trace"
+    fail_set=0
+    fail_commit=0
+    [ "$failure" != set ] || fail_set=1
+    [ "$failure" != commit ] || fail_commit=1
     if RUN="$run" FLOW_SETTING_FILE="$run/flow" FLOW_HW_SETTING_FILE="$run/hw" \
-        FLOW_TRACE="$run/trace" HELPER_BACKEND=nft FLOW_FAIL_SET=1 PATH="$TEMP/bin:$PATH" \
+        FLOW_TRACE="$run/trace" HELPER_BACKEND=nft \
+        FLOW_FAIL_SET="$fail_set" FLOW_FAIL_COMMIT="$fail_commit" \
+        PATH="$TEMP/bin:$PATH" \
         sh "$TEMP/run-helper.sh" "$TEMP/$kind.sh" "$kind" "$run" > "$run/output" 2>&1; then
         run_rc=0
     else
@@ -127,21 +135,31 @@ for scenario in nft-on nft-off iptables-on; do
     fi
 done
 
-# A failed UCI write is an intentional safety divergence: D2O logs and keeps
-# starting, while R2O returns failure so S99r2o stops the datapath instead of
-# forwarding flows that bypass NFQUEUE visibility.
-run_set_failure d2o
-run_set_failure r2o
-[ "$(cat "$TEMP/nft-set-failure/d2o/rc")" = 0 ] || {
-    echo "D2O failure behavior changed; update the differential contract" >&2
-    exit 1
-}
-[ "$(cat "$TEMP/nft-set-failure/r2o/rc")" != 0 ] || {
-    echo "R2O no longer fails closed when fw4 offload cannot be disabled" >&2
-    exit 1
-}
-[ "$(cat "$TEMP/nft-set-failure/d2o/flow")" = 1 ] || exit 1
-[ "$(cat "$TEMP/nft-set-failure/r2o/flow")" = 1 ] || exit 1
+for failure in set commit; do
+    run_write_failure d2o "$failure"
+    run_write_failure r2o "$failure"
+    d2o="$TEMP/nft-$failure-failure/d2o"
+    r2o="$TEMP/nft-$failure-failure/r2o"
+    [ "$(cat "$d2o/rc")" = 0 ] || {
+        echo "D2O $failure-failure behavior changed; update the differential contract" >&2
+        exit 1
+    }
+    [ "$(cat "$r2o/rc")" = "$(cat "$d2o/rc")" ] || {
+        echo "R2O $failure-failure flow-offload lifecycle differs from D2O" >&2
+        diff -u "$d2o/output" "$r2o/output" >&2 || true
+        exit 1
+    }
+    [ "$(cat "$d2o/flow")" = "$(cat "$r2o/flow")" ] || exit 1
+    [ "$(cat "$d2o/hw")" = "$(cat "$r2o/hw")" ] || exit 1
+    saved_d2o=$(if [ -f "$d2o/flow-offloading.saved" ]; then cat "$d2o/flow-offloading.saved"; else echo absent; fi)
+    saved_r2o=$(if [ -f "$r2o/flow-offloading.saved" ]; then cat "$r2o/flow-offloading.saved"; else echo absent; fi)
+    [ "$saved_d2o" = "$saved_r2o" ] || exit 1
+    cmp -s "$d2o/trace" "$r2o/trace" || {
+        echo "R2O $failure-failure UCI trace differs from D2O" >&2
+        diff -u "$d2o/trace" "$r2o/trace" >&2 || true
+        exit 1
+    }
+done
 grep -q 'flowoffload-ensure' "$ROOT/router/S99r2o" || exit 1
 grep -q 'engine_stop' "$ROOT/router/S99r2o" || exit 1
 
@@ -150,4 +168,4 @@ if grep -Eq 'ct mark|mark_flow|flow offload @' "$ROOT/router/r2o-firewall.sh"; t
     exit 1
 fi
 
-echo "D2O/R2O success lifecycle matches; fw4 write failure is explicitly fail-closed in R2O; HW setting and fw3/iptable backend stay untouched."
+echo "D2O/R2O flow-offload success, UCI set-failure and commit-failure lifecycles match; HW setting and fw3/iptables backend stay untouched."

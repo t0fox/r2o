@@ -125,9 +125,21 @@ jobs:
           ref: a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe
           path: d2o
           persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # version v7.0.1
+        with:
+          repository: t0fox/d2o
+          ref: 8e2c98146cf0b712dc967fbec558c7b904666e87
+          path: d2o-current
+          persist-credentials: false
+      - name: Установить зависимости production TLS fixture
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libssl-dev pkg-config zlib1g-dev
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
       - name: Собрать бинарники для сценариев роутера
         run: cargo build --locked --release --package r2o-manager --bin r2o-manager --package r2o-controller --bin r2o-controller --package r2o-telegram --bin r2o-telegram
+      - name: Собрать production d2ktg из текущего D2O
+        run: make -B -C d2o-current/telegram BUILD_DIR="$RUNNER_TEMP/d2o-current-telegram" d2ktg
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # версия v7.1.0
         with:
           node-version: '24'
@@ -139,16 +151,19 @@ jobs:
           R2O_DONOR_ROOT: ${{ github.workspace }}/d2o
         run: |
           set -euo pipefail
+          cd "${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is not set}"
           shopt -s nullglob
-          tests=(scripts/test-router-*.sh)
+          tests=("$GITHUB_WORKSPACE"/scripts/test-router-*.sh)
           if [ "${#tests[@]}" -eq 0 ]; then
-            echo "::error::Не найдены сценарии проверки роутерных служб"
+            echo "::error::Не найдены сценарии проверки роутерных служб в $GITHUB_WORKSPACE/scripts"
+            find "$GITHUB_WORKSPACE" -maxdepth 2 -type f -name 'test-router-*.sh' -print
             exit 1
           fi
           failed=()
           for test in "${tests[@]}"; do
             echo "::group::$test"
-            if [ "$test" = scripts/test-router-firewall.sh ]; then
+            test_name=${test##*/}
+            if [ "$test_name" = test-router-firewall.sh ]; then
               if sudo sh "$test"; then
                 :
               else
@@ -157,10 +172,15 @@ jobs:
               fi
             else
               test_shell=sh
-              if [ "$test" = scripts/test-router-openwrt-init.sh ]; then
+              if [ "$test_name" = test-router-openwrt-init.sh ]; then
                 test_shell=bash
               fi
-              if "$test_shell" "$test"; then
+              if grep -q 'EXPECTED_D2O_SHA=8e2c98146cf0b712dc967fbec558c7b904666e87' "$test"; then
+                donor_root="$GITHUB_WORKSPACE/d2o-current"
+              else
+                donor_root="$R2O_DONOR_ROOT"
+              fi
+              if R2O_DONOR_ROOT="$donor_root" "$test_shell" "$test"; then
                 :
               else
                 status=$?
@@ -173,6 +193,13 @@ jobs:
             printf '::error::Ошибки сценариев роутера: %s\n' "${failed[*]}"
             exit 1
           fi
+
+      - name: Сравнить production Meta edge TLS проверки C/Rust
+        run: |
+          sudo env \
+            D2O_TELEGRAM_BIN="$RUNNER_TEMP/d2o-current-telegram/d2ktg" \
+            R2O_TELEGRAM_BIN="$GITHUB_WORKSPACE/target/release/r2o-telegram" \
+            sh "$GITHUB_WORKSPACE/scripts/test-meta-edge-differential.sh"
 
   datapath:
     name: Датапат — тесты и переносимость
@@ -313,6 +340,11 @@ jobs:
           D2O_ROOT="$GITHUB_WORKSPACE/d2o"
           R2O_TEST_TMPDIR="$RUNNER_TEMP/r2o-capture-lifecycle"
           sh scripts/test-datapath-capture-lifecycle-differential.sh
+      - name: Сверить CPU/RSS статистику процесса D2O C/Rust
+        run: >-
+          D2O_ROOT="$GITHUB_WORKSPACE/d2o"
+          R2O_TEST_TMPDIR="$RUNNER_TEMP/r2o-process-stats"
+          sh scripts/test-datapath-process-stats-differential.sh
       - name: Собрать регрессию предела raw-пакета по MTU
         run: cargo test --no-run --locked --package r2o-datapath --test raw_egress_mtu
       - name: Проверить MTU raw-посылки в отдельном сетевом пространстве
