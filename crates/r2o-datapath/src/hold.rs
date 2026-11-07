@@ -23,10 +23,18 @@ const HTTP_FLOW_CAPACITY: usize = 1024;
 pub enum HoldOutcome {
     Pass,
     Waiting,
+    /// The saved packet is now owned by raw-send; immediately DROP its NFQUEUE id.
+    OwnedWaiting,
     Drop,
     Ready {
         ids: Vec<u32>,
         packet: Vec<u8>,
+    },
+    /// The held originals were already removed from NFQUEUE and may be replayed via raw-send.
+    OwnedReady {
+        ids: Vec<u32>,
+        packet: Vec<u8>,
+        originals: Vec<Vec<u8>>,
     },
     Observed {
         hello: TcpHello,
@@ -66,6 +74,8 @@ pub struct HoldOptions {
     pub allow_http: bool,
     pub observe_tls: bool,
     pub observe_http: bool,
+    /// Own eligible held non-HTTP originals through the raw socket, matching D2O.
+    pub own_packets: bool,
 }
 
 /// Счётчики владения TCP-пакетами, соответствующие d2k_hold_stats в D2O.
@@ -148,6 +158,7 @@ struct HeldPacket {
     id: u32,
     sequence: u32,
     bytes: Vec<u8>,
+    owned: bool,
 }
 
 struct HeldFlow {
@@ -177,6 +188,7 @@ pub struct HoldTable {
     incomplete_diagnostics: VecDeque<R2oIncompleteCaptureDiagnostic>,
     next_generation: u64,
     stats: R2oHoldStats,
+    owned_releases: Vec<Vec<u8>>,
 }
 
 impl HoldTable {
@@ -187,6 +199,11 @@ impl HoldTable {
 
     pub fn r2o_hold_stats(&self) -> R2oHoldStats {
         self.stats
+    }
+
+    /// Take held originals that must be replayed through the raw socket on release.
+    pub fn r2o_take_owned_releases(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.owned_releases)
     }
 
     pub fn note_http_execution(&mut self, sequence: u32, event: &AppliedEvent) {
@@ -297,6 +314,7 @@ impl HoldTable {
                 allow_http,
                 observe_tls: false,
                 observe_http: false,
+                own_packets: false,
             },
         )
     }
@@ -349,6 +367,7 @@ impl HoldTable {
             allow_http,
             observe_tls,
             observe_http,
+            own_packets,
         } = options;
         let mut released = self.flush(now, revision, false);
         self.syns
@@ -688,6 +707,7 @@ impl HoldTable {
             self.slots.len() - 1
         };
 
+        let current_owned = own_packets && destination.port != 80;
         let slot = &self.slots[index];
         let slot_full = slot.packets.len() >= HOLD_PACKETS;
         let mismatched = slot.generation != anchor.generation
@@ -704,12 +724,20 @@ impl HoldTable {
             }
             self.stats.mismatched = self.stats.mismatched.saturating_add(1);
             released.extend(self.remove_slot(index));
-            released.push(id);
+            if current_owned {
+                self.owned_releases.push(packet[..view.total_len].to_vec());
+            } else {
+                released.push(id);
+            }
             self.stats.released = self.stats.released.saturating_add(1);
             self.capture.forget(&key);
             return FeedResult {
                 released,
-                outcome: HoldOutcome::Waiting,
+                outcome: if current_owned {
+                    HoldOutcome::OwnedWaiting
+                } else {
+                    HoldOutcome::Waiting
+                },
             };
         }
 
@@ -730,6 +758,7 @@ impl HoldTable {
             id,
             sequence: tcp.sequence,
             bytes: packet[..view.total_len].to_vec(),
+            owned: current_owned,
         });
         self.stats.pending = self.stats.pending.saturating_add(1);
 
@@ -790,10 +819,14 @@ impl HoldTable {
                         .stats
                         .released
                         .saturating_add(held.packets.len() as u64);
-                    released.extend(held.packets.into_iter().map(|held_packet| held_packet.id));
+                    released.extend(self.release_held_packets(held.packets));
                     return FeedResult {
                         released,
-                        outcome: HoldOutcome::Waiting,
+                        outcome: if current_owned {
+                            HoldOutcome::OwnedWaiting
+                        } else {
+                            HoldOutcome::Waiting
+                        },
                     };
                 };
                 if held.kind == HoldKind::Http {
@@ -802,29 +835,48 @@ impl HoldTable {
                         .observe(sequence, &bytes);
                 }
                 self.stats.ready = self.stats.ready.saturating_add(1);
-                FeedResult {
-                    released,
-                    outcome: HoldOutcome::Ready {
-                        ids: held
-                            .packets
-                            .into_iter()
-                            .map(|held_packet| held_packet.id)
-                            .collect(),
+                let ids = held
+                    .packets
+                    .iter()
+                    .map(|held_packet| held_packet.id)
+                    .collect();
+                let all_owned = held.packets.iter().all(|held_packet| held_packet.owned);
+                let outcome = if all_owned {
+                    let mut originals = held.packets;
+                    originals
+                        .sort_by_key(|held_packet| held_packet.sequence.wrapping_sub(sequence));
+                    HoldOutcome::OwnedReady {
+                        ids,
                         packet,
-                    },
-                }
+                        originals: originals
+                            .into_iter()
+                            .map(|held_packet| held_packet.bytes)
+                            .collect(),
+                    }
+                } else {
+                    HoldOutcome::Ready { ids, packet }
+                };
+                FeedResult { released, outcome }
             }
             CaptureResult::Rejected | CaptureResult::Full => {
                 released.extend(self.remove_slot(index));
                 self.capture.forget(&key);
                 FeedResult {
                     released,
-                    outcome: HoldOutcome::Waiting,
+                    outcome: if current_owned {
+                        HoldOutcome::OwnedWaiting
+                    } else {
+                        HoldOutcome::Waiting
+                    },
                 }
             }
             CaptureResult::Ignored | CaptureResult::Incomplete => FeedResult {
                 released,
-                outcome: HoldOutcome::Waiting,
+                outcome: if current_owned {
+                    HoldOutcome::OwnedWaiting
+                } else {
+                    HoldOutcome::Waiting
+                },
             },
         }
     }
@@ -1174,7 +1226,19 @@ impl HoldTable {
         let packets = self.slots.remove(index).packets;
         self.stats.pending = self.stats.pending.saturating_sub(packets.len());
         self.stats.released = self.stats.released.saturating_add(packets.len() as u64);
-        packets.into_iter().map(|packet| packet.id).collect()
+        self.release_held_packets(packets)
+    }
+
+    fn release_held_packets(&mut self, packets: Vec<HeldPacket>) -> Vec<u32> {
+        let mut released = Vec::new();
+        for packet in packets {
+            if packet.owned {
+                self.owned_releases.push(packet.bytes);
+            } else {
+                released.push(packet.id);
+            }
+        }
+        released
     }
 }
 
@@ -2072,6 +2136,60 @@ mod tests {
         assert_eq!(ids, [2, 3]);
         assert_eq!(&packet[40..], hello);
         assert_eq!(u32::from_be_bytes(packet[24..28].try_into().unwrap()), 9001);
+    }
+
+    #[test]
+    fn owned_tls_timeout_replays_saved_bytes_without_accepting_queue_ids() {
+        let now = Instant::now();
+        let options = HoldOptions {
+            allow_tls: true,
+            own_packets: true,
+            ..HoldOptions::default()
+        };
+        let mut hold = HoldTable::default();
+        let _ = hold.feed(1, &tcp_packet(1000, 0x02, &[]), now, 0, true, false);
+        let partial = tcp_packet(1001, 0x18, &hello()[..5]);
+
+        let result = hold.feed_observing(2, &partial, now, options);
+        assert_eq!(result.outcome, HoldOutcome::OwnedWaiting);
+        assert!(result.released.is_empty());
+        assert!(hold.r2o_take_owned_releases().is_empty());
+
+        assert!(hold.flush(now + HOLD_WAIT, 0, false).is_empty());
+        assert_eq!(hold.r2o_take_owned_releases(), [partial]);
+    }
+
+    #[test]
+    fn owned_tls_ready_batch_returns_originals_in_stream_order() {
+        let now = Instant::now();
+        let options = HoldOptions {
+            allow_tls: true,
+            own_packets: true,
+            ..HoldOptions::default()
+        };
+        let hello = hello();
+        let first = tcp_packet(2001, 0x18, &hello[..5]);
+        let second = tcp_packet(2006, 0x18, &hello[5..]);
+        let mut hold = HoldTable::default();
+        let _ = hold.feed(1, &tcp_packet(2000, 0x02, &[]), now, 0, true, false);
+
+        assert_eq!(
+            hold.feed_observing(2, &first, now, options).outcome,
+            HoldOutcome::OwnedWaiting
+        );
+        let result = hold.feed_observing(3, &second, now, options);
+        let HoldOutcome::OwnedReady {
+            ids,
+            packet,
+            originals,
+        } = result.outcome
+        else {
+            panic!("complete owned ClientHello should return its raw originals");
+        };
+        assert_eq!(ids, [2, 3]);
+        assert_eq!(originals, [first, second]);
+        assert_eq!(&packet[40..], hello);
+        assert!(result.released.is_empty());
     }
 
     #[test]

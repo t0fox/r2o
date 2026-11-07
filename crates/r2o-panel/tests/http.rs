@@ -345,7 +345,7 @@ fn control_requires_same_origin() {
 }
 
 #[test]
-fn telegram_start_failure_is_exposed_when_listener_is_not_running() {
+fn telegram_start_failure_is_reported_as_stopped_like_d2o() {
     let temp = TempDir::new();
     let config_path = temp.file("config");
     fs::write(&config_path, "TG_ENABLED=1\nTG_MODE=local\n").unwrap();
@@ -353,7 +353,7 @@ fn telegram_start_failure_is_exposed_when_listener_is_not_running() {
     fs::write(&telegram_status_path, "error\n").unwrap();
     let mut config = Config::default();
     config.config_path = config_path;
-    config.telegram_status_path = telegram_status_path;
+    config.telegram_status_path = telegram_status_path.clone();
     config.telegram_pid_path = temp.file("missing-telegram.pid");
 
     let (status, _, body) = request(
@@ -363,7 +363,10 @@ fn telegram_start_failure_is_exposed_when_listener_is_not_running() {
     assert_eq!(status, 200);
     let value: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(value["snapshot"]["telegram_running"], false);
-    assert_eq!(value["snapshot"]["telegram_status"], "error");
+    // D2O отдаёт `stopped` при отсутствующем PID, даже если status-файл
+    // содержит `error`; исходный файл не перезаписывается.
+    assert_eq!(value["snapshot"]["telegram_status"], "stopped");
+    assert_eq!(fs::read_to_string(telegram_status_path).unwrap(), "error\n");
 }
 
 #[test]
@@ -397,6 +400,50 @@ fn root_serves_panel_layout_without_non_d2o_settings_controls() {
         status, 404,
         "панель не должна предоставлять API управления настройками"
     );
+}
+
+#[test]
+#[ignore = "run through scripts/test-panel-update-state-differential.sh"]
+fn d2o_update_state_matches_rust_route() {
+    let env = |name: &str| {
+        std::env::var(name).unwrap_or_else(|_| panic!("missing {name} from differential script"))
+    };
+    let body = |path: &str| fs::read_to_string(path).unwrap();
+    let updater = env("R2O_PANEL_UPDATE_UPDATER");
+    let valid = env("R2O_PANEL_UPDATE_STATE_VALID");
+    let invalid = env("R2O_PANEL_UPDATE_STATE_INVALID");
+    let broken = env("R2O_PANEL_UPDATE_STATE_BROKEN");
+    let absent_c = body(&env("R2O_PANEL_UPDATE_ABSENT_C"));
+    let never_c = body(&env("R2O_PANEL_UPDATE_NEVER_C"));
+    let valid_c = body(&env("R2O_PANEL_UPDATE_VALID_C"));
+    let invalid_c = body(&env("R2O_PANEL_UPDATE_INVALID_C"));
+    let broken_c = body(&env("R2O_PANEL_UPDATE_BROKEN_C"));
+
+    let temp = TempDir::new();
+    let missing_updater = temp.file("missing-updater");
+    let missing_manager = temp.file("missing-manager");
+    let get = |config: &Config| {
+        let (status, _, body) = request(
+            config,
+            "GET /api/update HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert_eq!(status, 200);
+        body
+    };
+
+    let mut config = Config::default();
+    config.updater_path = missing_updater;
+    config.manager_path = missing_manager.clone();
+    assert_eq!(get(&config), absent_c);
+
+    config.updater_path = updater.clone().into();
+    config.update_state_path = temp.file("missing-state.json");
+    assert_eq!(get(&config), never_c);
+
+    for (state, expected) in [(valid, valid_c), (invalid, invalid_c), (broken, broken_c)] {
+        config.update_state_path = state.into();
+        assert_eq!(get(&config), expected);
+    }
 }
 
 #[test]
@@ -1351,6 +1398,20 @@ fn r2o_служебная_команда_панели_остаётся_асин�
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[test]
+fn config_parser_accepts_all_shipped_and_donor_known_keys() {
+    let temp = TempDir::new();
+    let path = temp.file("config");
+    fs::write(
+        &path,
+        "SCHEMA=1\nMODE=apply\nPANEL_LISTEN=127.0.0.1:8090\nSTATE_DIR=/opt/r2o/state\nQUEUE_NUM=2000\nQUEUE_NUM6=2001\nR2O_FLOW_CAPACITY=2048\nIPV6_ENABLED=1\nMARK=45\nPROBE_MARK=46\nONLY_MARK=\nAUTOUPDATE=1\nLOGMAX=2097152\nLOGKEEP=1048576\nLOG_EVERY=60\nFW_BACKEND=auto\nPORTS=0:65535\nCONNBYTES=0:8\nVOICE_PORTS=50000:50099\nVOICE_CONNBYTES=0:4\nHTTP_KEEPALIVE_PORTS=80\nDNS_PORTS=53,853\nD2K_GATE=\nTG_ENABLED=1\nTG_MODE=local\nTG_PORT=1443\nTG_RELAY_URL=\nTG_RELAY_SECRET=\nTG_ENROLL_PORT=9443\nD2K_PPE_DEOFFLOAD=1\nR2O_PPE_DEOFFLOAD=1\n",
+    )
+    .unwrap();
+    let mut config = Config::default();
+    parse_config(&path, &mut config, &[]).unwrap();
+    assert!(config.unknown_keys.is_empty(), "{:?}", config.unknown_keys);
 }
 
 #[test]

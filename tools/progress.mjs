@@ -1,13 +1,16 @@
+// LEGACY: генератор старой 57-строчной агрегированной таблицы. Основной дашборд
+// аудита 2026-11-07 генерируется `python3 tools/progress_audit.py`.
 // AnyPS5-inspired R2O progress map; standard Node.js only.
 import {readFileSync,writeFileSync,mkdirSync,existsSync} from "node:fs";
 import {execFileSync} from "node:child_process";
 import {fileURLToPath} from "node:url";
 import {resolve} from "node:path";
-const CATS=["Datapath","Classifier / TLS","Discovery","QUIC / HTTP3","Discord RTC","Telegram","WebPanel","Firewall / PPE","Release / ABI"];
+const CATS=["Datapath","Classifier / TLS","Discovery","QUIC / HTTP3","Discord RTC","Discord Gateway","Telegram","WebPanel","Firewall / PPE","Release / ABI"];
 const COLORS={"verified":"#36c989","partial":"#e6b45d","implemented":"#819bf8","unknown":"#65758c"};
 function esc(v){return String(v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;")}
 
 function groupFor(t){
+ if(/^Discord Gateway/.test(t))return "Discord Gateway";
  if(/^Discord/.test(t))return "Discord RTC";
  if(/^(Telegram|Keenetic Meta DNS)/.test(t))return "Telegram";
  if(/^Панель/.test(t))return "WebPanel";

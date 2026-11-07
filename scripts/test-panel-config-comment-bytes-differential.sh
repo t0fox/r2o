@@ -75,7 +75,22 @@ printf 'CONTROL_SOCKET=opaque value with byte ' >> "$TEMP/ignored.conf"
 printf '\377\n' >> "$TEMP/ignored.conf"
 "$TEMP/d2o-config-trace" "$TEMP/ignored.conf" > "$TEMP/ignored.c.trace"
 
-cat > "$TEMP/run-rust-test.ps1" <<PS
+if [ "$(uname -s 2>/dev/null || printf unknown)" = Linux ]; then
+    CARGO_HOME=${R2O_CARGO_HOME:-$HOME/.cargo} \
+    RUSTUP_HOME=${R2O_RUSTUP_HOME:-$HOME/.rustup} \
+    CARGO_TARGET_DIR=${R2O_CARGO_TARGET_DIR:-$HOME/r2o-target} \
+    R2O_PANEL_CONFIG_BYTES_PATH="$TEMP/config" \
+    R2O_PANEL_CONFIG_BYTES_C_TRACE="$TEMP/c.trace" \
+    R2O_PANEL_CONFIG_QUOTED_PATH="$TEMP/quoted.conf" \
+    R2O_PANEL_CONFIG_QUOTED_C_TRACE="$TEMP/quoted.c.trace" \
+    R2O_PANEL_CONFIG_TAB_PATH="$TEMP/tab.conf" \
+    R2O_PANEL_CONFIG_TAB_C_TRACE="$TEMP/tab.c.trace" \
+    R2O_PANEL_CONFIG_IGNORED_PATH="$TEMP/ignored.conf" \
+    R2O_PANEL_CONFIG_IGNORED_C_TRACE="$TEMP/ignored.c.trace" \
+        "${CARGO:-cargo}" test -p r2o-panel --test http --locked --offline \
+            d2o_config_parser_matches_ -- --ignored --nocapture
+else
+    cat > "$TEMP/run-rust-test.ps1" <<PS
 \$env:CARGO_HOME = '$WIN_CARGO_HOME'
 \$env:RUSTUP_HOME = '$WIN_RUSTUP_HOME'
 \$env:CARGO_TARGET_DIR = '$WIN_BUILD_TARGET'
@@ -93,7 +108,8 @@ cat > "$TEMP/run-rust-test.ps1" <<PS
 & '$WIN_CARGO' +1.98.0-x86_64-pc-windows-gnu test -p r2o-panel --test http --locked --offline d2o_config_parser_matches_ -- --ignored --nocapture
 exit \$LASTEXITCODE
 PS
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass \
-    -File "$(windows_path "$TEMP/run-rust-test.ps1")"
+    powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass \
+        -File "$(windows_path "$TEMP/run-rust-test.ps1")"
+fi
 
 echo "D2O/R2O config parsing matches for comments, ignored bytes, and ignored known values at $ACTUAL_D2O_SHA."

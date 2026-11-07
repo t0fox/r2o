@@ -131,9 +131,15 @@ jobs:
           ref: 8e2c98146cf0b712dc967fbec558c7b904666e87
           path: d2o-current
           persist-credentials: false
+      - name: Установить зависимости production TLS fixture
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libssl-dev pkg-config zlib1g-dev
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
       - name: Собрать бинарники для сценариев роутера
         run: cargo build --locked --release --package r2o-manager --bin r2o-manager --package r2o-controller --bin r2o-controller --package r2o-telegram --bin r2o-telegram
+      - name: Собрать production d2ktg из текущего D2O
+        run: make -B -C d2o-current/telegram BUILD_DIR="$RUNNER_TEMP/d2o-current-telegram" d2ktg
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # версия v7.1.0
         with:
           node-version: '24'
@@ -187,6 +193,13 @@ jobs:
             printf '::error::Ошибки сценариев роутера: %s\n' "${failed[*]}"
             exit 1
           fi
+
+      - name: Сравнить production Meta edge TLS проверки C/Rust
+        run: |
+          sudo env \
+            D2O_TELEGRAM_BIN="$RUNNER_TEMP/d2o-current-telegram/d2ktg" \
+            R2O_TELEGRAM_BIN="$GITHUB_WORKSPACE/target/release/r2o-telegram" \
+            sh "$GITHUB_WORKSPACE/scripts/test-meta-edge-differential.sh"
 
   datapath:
     name: Датапат — тесты и переносимость
@@ -327,6 +340,11 @@ jobs:
           D2O_ROOT="$GITHUB_WORKSPACE/d2o"
           R2O_TEST_TMPDIR="$RUNNER_TEMP/r2o-capture-lifecycle"
           sh scripts/test-datapath-capture-lifecycle-differential.sh
+      - name: Сверить CPU/RSS статистику процесса D2O C/Rust
+        run: >-
+          D2O_ROOT="$GITHUB_WORKSPACE/d2o"
+          R2O_TEST_TMPDIR="$RUNNER_TEMP/r2o-process-stats"
+          sh scripts/test-datapath-process-stats-differential.sh
       - name: Собрать регрессию предела raw-пакета по MTU
         run: cargo test --no-run --locked --package r2o-datapath --test raw_egress_mtu
       - name: Проверить MTU raw-посылки в отдельном сетевом пространстве

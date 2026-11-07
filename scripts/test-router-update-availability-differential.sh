@@ -86,22 +86,19 @@ export R2O_SCENARIO
 cat > "$MANAGER" <<'EOF'
 #!/bin/sh
 case "$1" in
-    update-install*)
+    update-stage*)
         printf 'download\n' >> "$EVENTS"
         case "$R2O_SCENARIO" in
-            current) printf '{"activated":false,"already_current":true}\n' ;;
+            current) printf '{"staged":false,"already_current":true}\n' ;;
             failed) exit 1 ;;
-            success)
-                printf 'activate\n' >> "$EVENTS"
-                printf '{"activated":true,"already_current":false}\n'
-                ;;
+            success|stop-failure) printf '{"staged":true,"already_current":false}\n' ;;
             unknown) printf '{"ok":true}\n' ;;
-            stop-failure)
-                printf 'activate\n' >> "$EVENTS"
-                printf '{"activated":true,"already_current":false}\n'
-                ;;
             *) exit 2 ;;
         esac
+        ;;
+    update-activate)
+        printf 'activate\n' >> "$EVENTS"
+        printf '{"activated":true,"already_current":false}\n'
         ;;
     rollback|update-mark-bad-previous) printf '%s\n' "$1" >> "$EVENTS" ;;
     *) exit 2 ;;
@@ -123,8 +120,8 @@ die() { fail "unexpected fatal router action: $*"; }
 
 : > "$EVENTS"
 update_install manual >/dev/null
-[ "$(cat "$EVENTS")" = "$(printf 'download\nactivate\nstop\ninit:start')" ] || \
-    fail "R2O stopped its service before verified release activation"
+[ "$(cat "$EVENTS")" = "$(printf 'download\nstop\nactivate\ninit:start')" ] || \
+    fail "R2O did not stop its service before verified release activation"
 
 : > "$EVENTS"
 R2O_SCENARIO=current
@@ -142,13 +139,13 @@ if update_install manual >/dev/null 2>&1; then fail "R2O download-failure fixtur
 R2O_SCENARIO=unknown
 if update_install manual >/dev/null 2>&1; then fail "R2O accepted an unrecognized manager result"; fi
 [ "$(cat "$EVENTS")" = download ] || \
-    fail "R2O stopped or restarted services without confirmed activation"
+    fail "R2O stopped or restarted services without confirmed staging"
 
 : > "$EVENTS"
 R2O_SCENARIO=stop-failure
 R2O_STOP_FAIL=1
 if update_install manual >/dev/null; then fail "R2O stop-failure fixture unexpectedly succeeded"; fi
-[ "$(cat "$EVENTS")" = "$(printf 'download\nactivate\nstop\ninit:stop\nrollback\nupdate-mark-bad-previous\ninit:start')" ] || \
-    fail "R2O did not roll back an activated release when shutdown failed"
+[ "$(cat "$EVENTS")" = "$(printf 'download\nstop\ninit:start')" ] || \
+    fail "R2O did not restore the previous runtime when shutdown failed before activation"
 
-echo "D2O/R2O download failures and no-op updates preserve the running datapath; stop follows activation"
+echo "D2O/R2O download failures and no-op updates preserve the running datapath; stop precedes activation"

@@ -125,3 +125,82 @@ For crash recovery, R2O router/openwrt-init now keeps the procd boot worker aliv
 - R2O: cargo +1.98.0 test -p r2o-datapath --locked --offline passed 344 tests, 0 failed, 5 ignored across its unit and integration binaries.
 - Runtime evidence already recorded in docs/functional-parity-matrix.md covers IPv4/IPv6 NFQUEUE/netns, queue overflow/fail-open, route mark, conntrack, and OpenWrt QEMU cases. D2O datapath/nfq.c binds AF_INET only, so these R2O IPv6 kernel-path checks do not have a D2O C IPv6 NFQUEUE oracle.
 - ABI/QEMU release evidence: official OpenWrt 25.12.5 scripts passed for aarch64, armv7 and mipsel; clean D2O datapath cross-build passed for aarch64, big-endian MIPS and mipsel. ARMv5 `armv5te-unknown-linux-musleabi` release build also passed on 2026-11-01: six static EABI5 binaries ran under `qemu-arm`; controller catalog clear/check and SHA256 verification passed. Long-duration high-cardinality 128-MiB mixed-load/peak-RSS qualification and physical-router calibration remain open. This slice does not close Task 1 or the datapath item in Task 2.
+
+## Аудит 2026-11-07: расширенная инвентаризация
+
+Источники этого дополнения: локальное дерево D2O `a378e230947ebfd011439e1cac0f1e994d883aae`, рабочее дерево R2O `de0298cd789896cc442be70c0831eafa10192580`, полный индекс C-функций `docs/audit/function-index.md` (2523 production-функции) и отчёты `docs/audit/*.md`. Аудит статический: `git`/`cargo`/`rustc` в Windows PATH отсутствуют, тесты не перезапускались.
+
+### Ранее отсутствовавшие модули core
+
+| C-модуль | Функций | Rust-владелец / вызывающий путь | Фактический статус | Не покрыто / расхождения | Детали |
+|---|---:|---|---|---|---|
+| `compose.c` | 53 | `ask.rs`, `classify.rs`, `r2o_fallback.rs`, `plan_text.rs`, `main.rs` | partial | properties/compose без control не создаёт кандидат «всё сразу»; TCP profile (`connect_with_tcp_profile`) не перенесён; compose/fallback differentials покрывают не все ветви | `docs/audit/core-controller-audit.md` |
+| `d2kask.c` | 24 | `ask.rs`, `main.rs::run_r2o_ask` | partial | Rust строже трактует `--ip`/повтор флагов; exit-коды 0/1/2 расходятся; stdout-дифференциала нет | там же |
+| `d2kfetch.c` | 6 | `src/bin/r2o-fetch.rs`, `fetch.rs` | partial | JSON `level` 5/6, `name_ok` по сертификату, `location:null` не совпадают; CLI differential покрывает DNS + QUIC refusal, не все ветви | там же |
+| `d2kvoice.c` | 4 | `voice_measure.rs`, `voice_targets.rs` | partial | `--wait 0` (C → 3000 мс, Rust → 0), `--voice-list` принимает только `--conntrack`, блок «Приём»/`fake_arm` неполон | там же |
+| `d2kc.c` | 28 | `main.rs::{serve_catalog,watch_events}`, `diagnostics.rs`, `live.rs` | partial | нет `--self-check`, `--release-id`, `--measure-mark`, `--health-file`, `--log`, `--https-cache`; usage exit 2 vs 1; нет периодической сводки событий | там же |
+| `link.c` | 43 | `r2k-core/control.rs`, `main.rs::ControlClient` | decode equivalent, encode partial | версия протокола и ID событий несовместимы; часть encoders не имеет paired differential | там же |
+| `plantlv.c` | 20 | `plan_text.rs` | partial | C принимает заголовок `d2k-plan`, Rust — `r2o-plan`; C не требует `minexec>=13` для `autottl`, Rust требует | там же |
+| `net4.c` | 4 | `std::net`, `quic_replay::r2o_quic_address_is_local`, `voice_targets::r2o_is_private` | partial | `d2k_ip4_parse` допускает ведущие нули, Rust — нет; общего `d2k_ip6_private` нет, логика продублирована | там же |
+| `volume.c` | 19 | `r2o_volume.rs`, `fetch.rs::{r2o_fetch_measure_tx_volume,r2o_fetch_measure_rx_volume}` | partial | TX/RX/ladder реализованы, но нет отдельного C/Rust differential полного verdict-контракта | там же |
+| `crypto.c` | 28 | `ring`, `rustls`, `hpke`, `aes`/`aes-gcm`/`hkdf`/`sha2` | partial | прямая замена зависимостями; RFC 9001 векторы покрывают QUIC-примитивы, остальные C-векторы не сопоставлены | там же |
+| `p256.c` | 22 | `rustls`/`ring` P-256 ECDHE | implemented-unproven | нет прямого C/Rust вектора; TLS 1.2 differential покрывает протокол, не примитив | там же |
+| `x25519.c` | 11 | `hpke` X25519HkdfSha256, `rustls` | partial | ECH/QUIC тесты покрывают протокол, не примитив | там же |
+| `props.c` | 5 | `quic_replay.rs`, `main.rs` QUIC worker | partial | original/strategy measure покрыты косвенно QUIC-дифференциалами | там же |
+| `udpplan.c` | 12 | `quic_replay.rs`, `voice_discovery.rs`, `voice_measure.rs` | partial | QUIC/voice plans покрыты не всеми arm-ветвями | там же |
+| `udpruntime.c` | 8 | `r2k-core/plan`, datapath engine; raw UDP sender в контроллере отсутствует | partial/missing | `d2k_udp_plan_build/send` из контроллера не имеет прямого Rust-аналога | там же |
+
+### Ранее отсутствовавшие модули datapath и detect
+
+| C-модуль | Функций | Rust-владелец | Статус | Не покрыто / расхождения |
+|---|---:|---|---|---|
+| `datapath/d2kd.c` | 44 | `r2o-datapath/src/main.rs` | partial | CLI `--flows`, `--sched-slots`, `--duration`, `--log`, `--health-file`, `--udp-reverse-hook`; часть periodic stats |
+| `datapath/session.c` | 107 | `engine.rs`, `hold.rs`, `r2o_udp_sessions.rs`, `r2o_voice.rs`, `r2o_quic.rs` | partial | не все ветви имеют paired differential; IPv6 без C-oracle |
+| `datapath/track.c` | 18 | `engine.rs::TcpSessions`, `flow_capacity.rs` | equivalent (scoped) | `test-datapath-tcp-capacity-differential.sh` закреплён на 304 |
+| `datapath/plan_parse.c` | 17 | `r2k-core/plan.rs` | partial | C принимает `D2KP`, Rust — `R2OP`; TLV-записи совпадают численно |
+| `datapath/plan_apply.c` | 15 | `r2k-core/plan.rs`, `wire.rs`, `engine.rs` | partial | нет полного plan apply differential; `ts_up` отсутствует |
+| `datapath/plans.c` | 75 | `r2o-datapath/src/control.rs`, `r2k-core/plan.rs` | partial | ёмкости таблиц 128/64/… против C `--flows` 2048 |
+| `datapath/http80.c` | 30 | `http_replace.rs`, `hold.rs`, `r2k-core/httpup.rs` | partial | нет `d2k_http80_packet`-эквивалента и полного differential; часть stats отсутствует |
+| `datapath/http_trace.c` | 1 | — | missing | текстовой трассы `d2kd: HTTP execution ...` нет |
+| `datapath/journal.c` | 14 | `flow_journal.rs` | partial | тексты suspect/refuse и часть полей не совпадают |
+| `datapath/icmpguard.c` | 7 | `r2o_icmp_guard.rs` | partial | helper differential; live IPv6 NFQUEUE не проверен |
+| `datapath/capture.c`, `tls.c`, `wire.c`, `wire_udp.c`, `addr.c` | 30 | `capture.rs`, `r2k-core/tls.rs`, `wire.rs`, `addr.rs` | partial | unit-трассы и helper differentials; полного paired differential нет |
+| `datapath/nat.c`, `ctq.c` | 25 | `proc_nat.rs`, `conntrack.rs`, `r2o_conntrack_gate.rs` | partial | IPv4 scoped equivalent; IPv6/live router нет |
+| `datapath/raw.c`, `routemark.c`, `routemark_nl.c` | 48 | `raw.rs`, `r2o_route.rs`, `netlink.rs` | partial | route mark/MTU live ветви; `d2k_routemark_describe` отсутствует |
+| `datapath/ctl.c`, `ctlsrv.c` | 26 | `r2o-datapath/src/control.rs`, `r2k-core/control.rs`, `main.rs` | partial | версия 22 vs 48, event ID 0x0D, ring 64 КиБ vs 128 КиБ, нет `sent` counters |
+| `datapath/hold.c`, `udp_hold.c`, `udp_path.c`, `udp_release.c` | 63 | `hold.rs`, `r2o_udp_hold.rs`, `main.rs` | partial | независимые suites без paired differential для hold/RST/late-tail |
+| `detect/bridge.c` | 17 | `classify.rs`, `discovery.rs`, `raw_probe.rs`, `main.rs` | partial | split/clone/decoy differentials покрывают часть ветвей |
+| `detect/classify.c` | 36 | `classify.rs` | equivalent (scoped) | full-tree/control differential; live DPI не заявлен |
+| `detect/poison.c` | 12 | `classify.rs`, `raw_probe.rs`, `classify_measured.rs` | partial | candidate-filter/raw production покрывают часть; полный poison tree нет |
+| `detect/props.c` | 7 | `classify.rs`, `raw_probe.rs` | partial | properties/compose без control |
+| `detect/raw.c` | 62 | `raw_probe.rs` | equivalent (scoped) | profile/emission/cancel/connect-fallback differentials; live DPI нет |
+| `detect/response.c` | 7 | `response.rs` | equivalent (scoped) | shared fixtures + classifier follow-up; live DPI нет |
+| `detect/trigger.c` | 9 | `trigger.rs` | equivalent (scoped) | raw hex differential |
+| `detect/main.c` | 8 | `main.rs` CLI | partial | CLI stdout/exit/JSON не полностью сопоставлены |
+
+### Панель, router, Telegram и VPS
+
+- Панель: 68 production-функций C (`panel/main.c`, `panel/server.c`). Rust `r2o-panel` покрывает endpoints, config parser, лимиты, таймауты, assets и browser-flow; 22 differential-сценария закреплены на `304ba893` и требуют перепина/повторного прогона на текущей ревизии. Детали — `docs/audit/panel-router-vps-telegram-audit.md`.
+- Router/service/firewall/release: shell-функции D2O (`S99d2k`, `d2k-openwrt-init`, `d2k-fw-heal.sh`, `d2k-ppe-deoffload.sh`, `d2k-tg-firewall.sh`, `d2k-tg-watchdog.sh`, `d2k-update.sh`, `d2k-instagram-dns.sh`, `install.sh`) сопоставлены с `router/*` и `r2o-manager`; большинство контрактов — service/helper fixtures, не live kernel/OpenWrt. Установка/rollback/подпись проверены на static-musl, физический роутер и полный procd/reboot — нет.
+- Telegram: R2O `r2o-telegram` — перенос из Rust-донора z2kOW `tg-proxy`, а C11 D2O не является источником. Сравнение 38 файлов донора — source audit, не поведенческий differential. C-only функции D2O Telegram (например, `mtproto_auth.c`, `mtproto_probe.c`, `epoll_proxy.c`) не являются обязательными к переносу; для них статус `not-applicable`, а не «недоперенесено». Два исторических differential (route/DNS и response observer) закреплены на `304ba893` и в этом окружении не перезапускались.
+- VPS `relay-enroll` (45 production-функций) и `relay-gate` (18) — отдельные сервисы с systemd units. R2O README явно исключает обязательный VPS/relay/WARP; их серверные реализации не переносятся и не входят в router-runtime матрицу. Router-side Meta DNS (`/resolve`) и install fallback (`D2K_GATE`) остаются в соответствующих строках.
+
+### Совместимость control/plan
+
+Аудит выявил не только пробелы тестов, но и фактические несовместимости:
+
+- C `plan_parse.c` требует `D2KP`, R2O `r2k-core/src/plan.rs` требует `R2OP`; D2O-план отвергается R2O.
+- C `plantlv.c` принимает текст `d2k-plan`, R2O `plan_text.rs` — `r2o-plan`.
+- C control protocol version 22, R2O — 48; событие `0x000D` в C — `D2K_EV_CLIENT_TCP`, в R2O — `EVENT_R2O_VOICE_SUSPECT`.
+- C control out ring 64 КиБ, R2O 128 КиБ.
+- C plan tables ёмкостью `--flows` (2048), R2O — 128/128/64 и др.
+- C `D2K_POISON_TS_UP` (`tcp_ts_up`) не реализован в R2O.
+- C datapath принимает `--flows`, `--sched-slots`, `--duration`, `--log`, `--health-file`, `--udp-reverse-hook`; R2O переименовал часть и не принимает остальные.
+- C `d2kc` принимает `--measure-mark`, `--health-file`, `--log`, `--https-cache`, `--self-check`, `--release-id`; R2O `--serve` их не знает.
+- D2O пишет heartbeat `D2KH1 ...`; R2O panel пишет `R2OH1 ...`, datapath/controller heartbeat отсутствует.
+
+Эти пункты добавлены в уточнённую матрицу как отдельные контракты с 0 баллов до появления paired differential на принятой ревизии.
+
+### Итог
+
+Инвентарь больше не ограничивается примечанием «остальные модули не покрыты»: для каждого production-файла определён Rust-владелец, а для неполных модулей перечислены конкретные непокрытые ветви. При этом ни один из перечисленных модулей не объявляется полностью перенесённым. Текущая строгая оценка — **37/132 = 28,03 %** (только доказательства на `a63d964`/`a378e23`/`8e2c981`); перенос с принятием `304ba893` — **89/132 = 67,42 %**; legacy-агрегат — 80/89 = 89,89 %, но он не является оценкой текущей ревизии.

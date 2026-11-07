@@ -1,8 +1,8 @@
 use r2o_manager::{
-    activate_bundle, active_component_path, check_update, config::initialize_config,
-    decode_public_key, install_archive, install_update, install_update_auto,
-    mark_bad_previous_release, read_install_architecture, rollback, set_auto_update,
-    verify_release_archive,
+    activate_bundle, activate_staged_update, active_component_path, check_update,
+    config::initialize_config, decode_public_key, install_archive, install_update,
+    install_update_auto, mark_bad_previous_release, read_install_architecture, rollback,
+    set_auto_update, stage_update, stage_update_auto, verify_release_archive,
 };
 use serde_json::json;
 use std::error::Error;
@@ -38,6 +38,9 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some("update-check") => update_command(args, false, false),
         Some("update-install") => update_command(args, true, false),
         Some("update-install-auto") => update_command(args, true, true),
+        Some("update-stage") => stage_command(args, false),
+        Some("update-stage-auto") => stage_command(args, true),
+        Some("update-activate") => activate_command(args),
         Some("update-auto") => update_auto_command(args),
         Some("update-mark-bad-previous") => update_mark_bad_previous_command(args),
         Some("exec") => exec_command(args),
@@ -122,6 +125,62 @@ fn update_command(
     } else {
         check_update(&root, &architecture)?
     };
+    println!("{}", serde_json::to_string(&result)?);
+    Ok(())
+}
+
+fn stage_command(
+    mut args: impl Iterator<Item = std::ffi::OsString>,
+    automatic: bool,
+) -> Result<(), Box<dyn Error>> {
+    let mut root = None;
+    let mut architecture: Option<String> = None;
+    while let Some(option) = args.next() {
+        let value = args
+            .next()
+            .ok_or_else(|| format!("missing value for {}", option.to_string_lossy()))?;
+        match option.to_str() {
+            Some("--root") => set_once(&mut root, PathBuf::from(value), "--root")?,
+            Some("--architecture") => set_once(
+                &mut architecture,
+                value
+                    .into_string()
+                    .map_err(|_| "architecture must be UTF-8")?,
+                "--architecture",
+            )?,
+            _ => return Err(format!("unknown option: {}", option.to_string_lossy()).into()),
+        }
+    }
+    let root = required(root, "--root")?;
+    let architecture = match architecture {
+        Some(value) => value,
+        None => read_install_architecture(&root)?
+            .ok_or("missing --architecture and no active release records one")?,
+    };
+    let result = if automatic {
+        stage_update_auto(&root, &architecture)?
+    } else {
+        stage_update(&root, &architecture)?
+    };
+    println!("{}", serde_json::to_string(&result)?);
+    Ok(())
+}
+
+fn activate_command(
+    mut args: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<(), Box<dyn Error>> {
+    let mut root = None;
+    while let Some(option) = args.next() {
+        let value = args
+            .next()
+            .ok_or_else(|| format!("missing value for {}", option.to_string_lossy()))?;
+        match option.to_str() {
+            Some("--root") => set_once(&mut root, PathBuf::from(value), "--root")?,
+            _ => return Err(format!("unknown option: {}", option.to_string_lossy()).into()),
+        }
+    }
+    let root = required(root, "--root")?;
+    let result = activate_staged_update(&root)?;
     println!("{}", serde_json::to_string(&result)?);
     Ok(())
 }
@@ -430,6 +489,9 @@ fn usage() {
     println!("  update-check --root DIR [--architecture ARCH]");
     println!("  update-install --root DIR [--architecture ARCH]");
     println!("  update-install-auto --root DIR [--architecture ARCH]");
+    println!("  update-stage --root DIR [--architecture ARCH]");
+    println!("  update-stage-auto --root DIR [--architecture ARCH]");
+    println!("  update-activate --root DIR");
     println!("  update-mark-bad-previous --root DIR");
     println!("  update-auto --root DIR --enabled 0|1");
     println!("  exec --root DIR --component NAME [-- ARGS...]");

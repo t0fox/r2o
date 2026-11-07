@@ -1149,3 +1149,309 @@ fn donor_and_r2o_apply_an_absolute_deadline_to_replayed_client_hello() {
     assert_eq!(captured_receiver.recv().unwrap(), client_hello);
     server.join().unwrap();
 }
+
+fn serve_gateway_response(
+    config: Arc<rustls::ServerConfig>,
+    listener: TcpListener,
+    response: Vec<u8>,
+    requests: std::sync::mpsc::Sender<Vec<u8>>,
+) {
+    for _ in 0..2 {
+        let Ok((mut socket, _)) = listener.accept() else {
+            return;
+        };
+        let _ = socket.set_read_timeout(Some(Duration::from_secs(3)));
+        let _ = socket.set_write_timeout(Some(Duration::from_secs(3)));
+        let Ok(mut connection) = rustls::ServerConnection::new(Arc::clone(&config)) else {
+            continue;
+        };
+        while connection.is_handshaking() {
+            if connection.complete_io(&mut socket).is_err() {
+                break;
+            }
+        }
+        if connection.is_handshaking() {
+            continue;
+        }
+
+        let mut stream = rustls::StreamOwned::new(connection, socket);
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let Ok(length) = stream.read(&mut buffer) else {
+                break;
+            };
+            if length == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..length]);
+        }
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            if requests.send(request).is_err() {
+                return;
+            }
+            let _ = stream.write_all(&response);
+            let _ = stream.flush();
+            stream.conn.send_close_notify();
+            let _ = stream.conn.complete_io(&mut stream.sock);
+        }
+    }
+}
+
+fn gateway_frame(payload: &[u8]) -> Vec<u8> {
+    let mut frame = vec![0x81];
+    if payload.len() < 126 {
+        frame.push(payload.len() as u8);
+    } else if payload.len() <= usize::from(u16::MAX) {
+        frame.push(126);
+        frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    } else {
+        frame.push(127);
+        frame.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    }
+    frame.extend_from_slice(payload);
+    frame
+}
+
+#[test]
+#[ignore = "run by scripts/r2o-tls-verify-differential.sh with the donor C verifier"]
+fn donor_and_r2o_validate_the_discord_gateway_websocket_like_d2o() {
+    let helper = std::env::var_os("R2O_D2O_VERIFY_HELPER")
+        .expect("differential script must provide the donor C verifier");
+    const HEADERS: &[u8] = b"HTTP/1.1 101 Switching Protocols\r\n\
+Upgrade: WebSocket\r\n\
+Connection: keep-alive, Upgrade\r\n\
+Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
+    let long_hello = {
+        let mut payload = b"{\"op\":10,\"d\":\"".to_vec();
+        payload.extend(std::iter::repeat_n(b'a', 200));
+        payload.extend_from_slice(b"\"}");
+        payload
+    };
+    let scenarios: Vec<(&str, Vec<u8>, bool, u16, bool)> = vec![
+        (
+            "hello",
+            [
+                HEADERS,
+                &gateway_frame(b"{\"op\":10,\"d\":{\"heartbeat_interval\":45000}}"),
+            ]
+            .concat(),
+            true,
+            101,
+            true,
+        ),
+        (
+            "reordered",
+            [HEADERS, &gateway_frame(b"{\"d\":{},\"op\":10}")].concat(),
+            true,
+            101,
+            true,
+        ),
+        (
+            "extended-length",
+            [HEADERS, &gateway_frame(&long_hello)].concat(),
+            true,
+            101,
+            true,
+        ),
+        (
+            "not-found",
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 3\r\n\r\nno!".to_vec(),
+            false,
+            404,
+            false,
+        ),
+        (
+            "bad-accept",
+            [
+                b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+Connection: Upgrade\r\nSec-WebSocket-Accept: x3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n"
+                    .as_slice(),
+                &gateway_frame(b"{\"op\":10}"),
+            ]
+            .concat(),
+            false,
+            101,
+            false,
+        ),
+        (
+            "op-nine",
+            [HEADERS, &gateway_frame(b"{\"op\":9,\"d\":{}}")].concat(),
+            false,
+            101,
+            false,
+        ),
+        (
+            "nested-op",
+            [HEADERS, &gateway_frame(b"{\"d\":{\"op\":10},\"op\":9}")].concat(),
+            false,
+            101,
+            false,
+        ),
+        (
+            "masked-frame",
+            [HEADERS, &[0x81, 0x90, 0, 0, 0, 0, 0x7b, 0x7d]].concat(),
+            false,
+            101,
+            false,
+        ),
+        (
+            "binary-frame",
+            [HEADERS, &[0x82, 0x02, b'{', b'}']].concat(),
+            false,
+            101,
+            false,
+        ),
+        (
+            "fragmented-first-frame",
+            [HEADERS, &[0x01, 0x02, b'{', b'}']].concat(),
+            false,
+            101,
+            false,
+        ),
+        (
+            "declared-too-large",
+            [HEADERS, &[0x81, 0x7f, 0, 0, 0, 0, 0, 1, 0x11, 0x70]].concat(),
+            false,
+            101,
+            false,
+        ),
+        (
+            "wrong-upgrade",
+            [
+                b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: h2c\r\nConnection: Upgrade\r\n\
+Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n"
+                    .as_slice(),
+                &gateway_frame(b"{\"op\":10}"),
+            ]
+            .concat(),
+            false,
+            101,
+            false,
+        ),
+        (
+            "connection-close",
+            [
+                b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: close\r\n\
+Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n"
+                    .as_slice(),
+                &gateway_frame(b"{\"op\":10}"),
+            ]
+            .concat(),
+            false,
+            101,
+            false,
+        ),
+        (
+            "header-over-limit",
+            {
+                let mut response = b"HTTP/1.1 101 Switching Protocols\r\nX-Pad: ".to_vec();
+                response.extend(std::iter::repeat_n(b'a', 5000));
+                response.extend_from_slice(b"\r\n\r\n");
+                response
+            },
+            false,
+            0,
+            false,
+        ),
+    ];
+
+    for (label, response, application, status, complete) in scenarios {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            serve_gateway_response(
+                server_config(false, false, false),
+                listener,
+                response,
+                sender,
+            )
+        });
+
+        let c_result = Command::new(&helper)
+            .args([
+                "127.0.0.1",
+                &address.port().to_string(),
+                "gateway.discord.gg",
+                "tls13",
+            ])
+            .output()
+            .expect("run donor C verifier");
+        assert!(
+            c_result.status.success(),
+            "donor verifier exited with {} for {label}: {}",
+            c_result.status,
+            String::from_utf8_lossy(&c_result.stderr)
+        );
+
+        let options = FetchOptions {
+            name: "gateway.discord.gg".into(),
+            ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            port: address.port(),
+            path: "/".into(),
+            deadline: Duration::from_secs(3),
+            tls12: false,
+            wire_len: None,
+            mark: None,
+        };
+        let rust_result = r2o_fetch_with_phase_timeout(&options, Duration::from_secs(3))
+            .unwrap_or_else(|error| panic!("Rust verifier failed for {label}: {error}"));
+        server.join().unwrap();
+
+        assert_eq!(
+            String::from_utf8(c_result.stdout).unwrap().trim(),
+            format!(
+                "{}\t0\t{}\t{}",
+                u8::from(application),
+                status,
+                u8::from(complete)
+            ),
+            "donor C Gateway verdict for {label}"
+        );
+        assert_eq!(
+            rust_result.peer_name_ok,
+            Some(false),
+            "name check for {label}"
+        );
+        assert_eq!(rust_result.status, status, "status for {label}");
+        assert_eq!(
+            rust_result.complete, complete,
+            "body completeness for {label}"
+        );
+        assert_eq!(
+            rust_result.application_verified, application,
+            "application level for {label}"
+        );
+        assert_eq!(rust_result.tls, Some("1.3"), "TLS version for {label}");
+
+        let requests: Vec<Vec<u8>> = receiver.try_iter().collect();
+        assert_eq!(
+            requests.len(),
+            2,
+            "both verifiers open one connection for {label}"
+        );
+        assert_eq!(
+            requests[0], requests[1],
+            "C and Rust send the same Gateway upgrade request for {label}"
+        );
+        assert!(
+            requests[0]
+                .starts_with(b"GET /?v=10&encoding=json HTTP/1.1\r\nHost: gateway.discord.gg\r\n"),
+            "Gateway request line and Host for {label}: {}",
+            String::from_utf8_lossy(&requests[0])
+        );
+        assert!(
+            requests[0]
+                .windows(b"Upgrade: websocket\r\n".len())
+                .any(|window| window == b"Upgrade: websocket\r\n"),
+            "Upgrade header for {label}"
+        );
+        assert!(
+            requests[0]
+                .windows(b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n".len())
+                .any(|window| window == b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"),
+            "fixed RFC nonce for {label}"
+        );
+    }
+}

@@ -132,7 +132,7 @@ Discord UDP / STUN
 
 ## Telegram
 
-**r2o-telegram** — локальный прозрачный прокси **MTProto over WebSocket на Rust**, основанный на Rust-компоненте [z2kOW](https://github.com/t0fox/z2kOW). Для обычных Telegram-клиентов в LAN ручная настройка MTProxy не требуется, если на роутере включены нужные правила перенаправления.
+**r2o-telegram** — локальный прозрачный прокси **MTProto over WebSocket на Rust**, полностью взятый из Rust-донора [z2kOW](https://github.com/t0fox/z2kOW) (`tg-proxy`). C11-реализация Telegram из D2O не переносится и источником не является. Для обычных Telegram-клиентов в LAN ручная настройка MTProxy не требуется, если на роутере включены нужные правила перенаправления.
 
 ### Как работает Telegram-прокси
 

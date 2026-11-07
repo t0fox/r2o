@@ -950,6 +950,59 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
     let mut request_path = options.path.clone();
     let root_probe = options.path == "/";
     let mut redirects = 0;
+    // D2O различает корневой verifier-зонд (initial_path == NULL) и явный
+    // ресурсный путь. В R2O корневой зонд представлен как "/", поэтому
+    // Gateway-протокол проверяется для этого же пути.
+    if options.name.eq_ignore_ascii_case("gateway.discord.gg") && root_probe {
+        let gateway_deadline = match phase_timeout {
+            Some(timeout) => Instant::now()
+                .checked_add(timeout)
+                .ok_or_else(|| "срок HTTP-шага слишком велик".to_owned())?,
+            None => deadline,
+        };
+        let r2o_gateway = r2o_gateway_websocket_exchange(&mut stream, gateway_deadline);
+        let r2o_negotiated_tls = match tls {
+            Some("1.3") => Some(0x0304),
+            Some("1.2") => Some(0x0303),
+            _ => None,
+        };
+        let r2o_stage = if r2o_gateway.complete {
+            crate::r2o_volume::R2oVolumeProbeStage::Application
+        } else {
+            crate::r2o_volume::R2oVolumeProbeStage::Handshake
+        };
+        return Ok(FetchResult {
+            address,
+            local_port,
+            tls,
+            peer_name_ok,
+            ech_accepted,
+            status: r2o_gateway.status,
+            http_outcome: R2oFetchHttpOutcome::Neutral,
+            cloudflare_challenge: false,
+            body_bytes: 0,
+            body_expected: None,
+            body_has_length: false,
+            location: String::new(),
+            chunked: false,
+            gzip: false,
+            complete: r2o_gateway.complete,
+            application_verified: r2o_gateway.complete,
+            handshake_verified: false,
+            elapsed: started.elapsed(),
+            reason: Some(r2o_gateway.reason),
+            r2o_volume_observation: crate::r2o_volume::R2oVolumeObservation {
+                stage: r2o_stage,
+                name_valid: r2o_negotiated_tls.is_some(),
+                negotiated_tls: r2o_negotiated_tls,
+                status: r2o_gateway.status,
+                body_complete: r2o_gateway.complete,
+                packet_budget: crate::r2o_volume::R2oVolumePacketBudget::NotApplicable,
+                ..Default::default()
+            },
+            r2o_resources: Vec::new(),
+        });
+    }
     loop {
         let response_deadline = match phase_timeout {
             Some(timeout) => Instant::now()
@@ -1814,6 +1867,386 @@ fn r2o_fetch_measure_tx_volume_with_roots(
         elapsed: r2o_started.elapsed(),
         reason: "лестница пройдена целиком".into(),
     })
+}
+
+/// Запрос Gateway-проверки байт в байт как `request_gateway_websocket` из
+/// D2O: обычный GET корня для `gateway.discord.gg` отвечает 404 и ничего не
+/// говорит о том, что кандидат несёт протокол Gateway.
+const R2O_GATEWAY_REQUEST: &[u8] = b"GET /?v=10&encoding=json HTTP/1.1\r\n\
+Host: gateway.discord.gg\r\n\
+User-Agent: Mozilla/5.0\r\n\
+Origin: https://discord.com\r\n\
+Connection: Upgrade\r\n\
+Upgrade: websocket\r\n\
+Sec-WebSocket-Version: 13\r\n\
+Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+/// Фиксированный RFC 6455 nonce: донор использует его же, поэтому и
+/// `Sec-WebSocket-Accept` проверяется по одной константе.
+const R2O_GATEWAY_ACCEPT: &[u8] = b"s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
+const R2O_GATEWAY_BUFFER: usize = 4096;
+
+#[derive(Debug, Eq, PartialEq)]
+struct R2oGatewayReply {
+    status: u16,
+    complete: bool,
+    reason: String,
+}
+
+fn r2o_gateway_reply(status: u16, complete: bool, reason: impl Into<String>) -> R2oGatewayReply {
+    R2oGatewayReply {
+        status,
+        complete,
+        reason: reason.into(),
+    }
+}
+
+fn r2o_gateway_trim(value: &[u8]) -> &[u8] {
+    let mut value = value;
+    while matches!(value.first(), Some(b' ' | b'\t')) {
+        value = &value[1..];
+    }
+    while matches!(value.last(), Some(b' ' | b'\t')) {
+        value = &value[..value.len() - 1];
+    }
+    value
+}
+
+fn r2o_gateway_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn r2o_gateway_header_value<'a>(line: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
+    let colon = line.iter().position(|byte| *byte == b':')?;
+    if colon != name.len() || !line[..colon].eq_ignore_ascii_case(name) {
+        return None;
+    }
+    Some(r2o_gateway_trim(&line[colon + 1..]))
+}
+
+fn r2o_gateway_connection_upgrade(value: &[u8]) -> bool {
+    value
+        .split(|byte| *byte == b',')
+        .any(|token| r2o_gateway_trim(token).eq_ignore_ascii_case(b"Upgrade"))
+}
+
+/// `HTTP/1.1 %d` из строки статуса, включая допустимый по C пробел перед
+/// числом. Значение вне 100..=599 считается битой строкой.
+fn r2o_gateway_status_code(line: &[u8]) -> Option<u16> {
+    let rest = line.strip_prefix(b"HTTP/1.1")?;
+    let rest = r2o_gateway_trim(rest);
+    let (negative, rest) = match rest.first() {
+        Some(b'-') => (true, &rest[1..]),
+        Some(b'+') => (false, &rest[1..]),
+        _ => (false, rest),
+    };
+    let mut digits = false;
+    let mut value: i64 = 0;
+    for byte in rest {
+        if !byte.is_ascii_digit() {
+            break;
+        }
+        digits = true;
+        value = value
+            .saturating_mul(10)
+            .saturating_add(i64::from(byte - b'0'));
+    }
+    if !digits {
+        return None;
+    }
+    if negative {
+        value = -value;
+    }
+    (100..=599).contains(&value).then_some(value as u16)
+}
+
+fn r2o_gateway_json_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
+}
+
+/// Верхнеуровневый `op` первого WebSocket-кадра, как `gateway_json_hello`.
+/// Возвращает `Some` только для разобранного числа не больше 100000:
+/// вложенные `op` не считаются, а переполнение остаётся неразобранным.
+fn r2o_gateway_json_op(json: &[u8]) -> Option<u64> {
+    let mut index = 0;
+    while index < json.len() && r2o_gateway_json_space(json[index]) {
+        index += 1;
+    }
+    if index == json.len() || json[index] != b'{' {
+        return None;
+    }
+    index += 1;
+    let mut depth = 1_i32;
+    while index < json.len() && depth > 0 {
+        let byte = json[index];
+        if r2o_gateway_json_space(byte) {
+            index += 1;
+            continue;
+        }
+        if byte == b'"' {
+            index += 1;
+            let start = index;
+            let mut closed = false;
+            while index < json.len() {
+                if json[index] == b'\\' {
+                    if index + 1 >= json.len() {
+                        return None;
+                    }
+                    index += 2;
+                } else {
+                    let current = json[index];
+                    index += 1;
+                    if current == b'"' {
+                        closed = true;
+                        break;
+                    }
+                }
+            }
+            if !closed {
+                return None;
+            }
+            let end = index - 1;
+            let mut colon = index;
+            while colon < json.len() && r2o_gateway_json_space(json[colon]) {
+                colon += 1;
+            }
+            if depth == 1 && colon < json.len() && json[colon] == b':' {
+                if end - start == 2 && &json[start..start + 2] == b"op" {
+                    let mut position = colon + 1;
+                    let mut value: u64 = 0;
+                    let mut digits = false;
+                    let mut overflow = false;
+                    while position < json.len() && r2o_gateway_json_space(json[position]) {
+                        position += 1;
+                    }
+                    while position < json.len() && json[position].is_ascii_digit() {
+                        digits = true;
+                        if value > 100_000 {
+                            overflow = true;
+                        } else {
+                            value = value * 10 + u64::from(json[position] - b'0');
+                        }
+                        if value > 100_000 {
+                            overflow = true;
+                        }
+                        position += 1;
+                    }
+                    while position < json.len() && r2o_gateway_json_space(json[position]) {
+                        position += 1;
+                    }
+                    if !digits
+                        || position >= json.len()
+                        || (json[position] != b',' && json[position] != b'}')
+                    {
+                        return None;
+                    }
+                    return (!overflow).then_some(value);
+                }
+                index = colon + 1;
+                continue;
+            }
+            continue;
+        }
+        if byte == b'{' || byte == b'[' {
+            depth += 1;
+        } else if byte == b'}' || byte == b']' {
+            depth -= 1;
+        }
+        index += 1;
+    }
+    None
+}
+
+fn r2o_gateway_fill(
+    stream: &mut StreamOwned<rustls::ClientConnection, R2oTlsTcpStream>,
+    deadline: Instant,
+    buffer: &mut [u8],
+    used: &mut usize,
+    need: usize,
+) -> Result<(), String> {
+    while *used < need {
+        if *used == buffer.len() {
+            return Err("WebSocket-ответ больше локального предела".into());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("тайм-аут WebSocket Gateway".into());
+        }
+        stream
+            .sock
+            .socket
+            .set_read_timeout(Some(remaining))
+            .map_err(|error| format!("не удалось установить срок WebSocket-чтения: {error}"))?;
+        match stream.read(&mut buffer[*used..]) {
+            Ok(0) => return Err("Gateway закрыл WebSocket до Hello".into()),
+            Ok(length) => *used += length,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ) =>
+            {
+                return Err("тайм-аут WebSocket Gateway".into());
+            }
+            Err(error) => return Err(format!("ошибка чтения WebSocket Gateway: {error}")),
+        }
+    }
+    Ok(())
+}
+
+/// Перенести проверку D2O `request_gateway_websocket`: Upgrade/101,
+/// `Sec-WebSocket-Accept` и первый текстовый Hello-кадр с верхнеуровневым
+/// `op=10`. Обычный HTTP-ответ на `GET /` доказательством Gateway не является.
+fn r2o_gateway_websocket_exchange(
+    stream: &mut StreamOwned<rustls::ClientConnection, R2oTlsTcpStream>,
+    deadline: Instant,
+) -> R2oGatewayReply {
+    if let Err(error) = stream
+        .sock
+        .socket
+        .set_write_timeout(Some(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .max(Duration::from_millis(1)),
+        ))
+        .and_then(|()| stream.write_all(R2O_GATEWAY_REQUEST))
+        .and_then(|()| stream.flush())
+    {
+        return r2o_gateway_reply(0, false, format!("WebSocket-запрос не ушёл: {error}"));
+    }
+
+    let mut buffer = [0_u8; R2O_GATEWAY_BUFFER];
+    let mut used = 0_usize;
+    let header_end = loop {
+        if let Some(end) = r2o_gateway_header_end(&buffer[..used]) {
+            break end;
+        }
+        let need = used + 1;
+        if let Err(error) = r2o_gateway_fill(stream, deadline, &mut buffer, &mut used, need) {
+            return r2o_gateway_reply(
+                0,
+                false,
+                format!("нет полного WebSocket-заголовка: {:.100}", error),
+            );
+        }
+    };
+
+    let mut status_end = 0_usize;
+    while status_end + 1 < header_end
+        && !(buffer[status_end] == b'\r' && buffer[status_end + 1] == b'\n')
+    {
+        status_end += 1;
+    }
+    if status_end + 1 >= header_end || status_end >= 128 {
+        return r2o_gateway_reply(0, false, "битая строка статуса WebSocket Gateway");
+    }
+    let Some(code) = r2o_gateway_status_code(&buffer[..status_end]) else {
+        return r2o_gateway_reply(0, false, "битая строка статуса WebSocket Gateway");
+    };
+    if code != 101 {
+        return r2o_gateway_reply(
+            code,
+            false,
+            format!("Gateway ответил HTTP {code} без WebSocket Upgrade"),
+        );
+    }
+
+    let mut upgrades = 0_u32;
+    let mut connection_upgrade = false;
+    let mut accepts = 0_u32;
+    let mut position = status_end + 2;
+    while position < header_end {
+        let mut end = position;
+        while end <= header_end && !(buffer[end] == b'\r' && buffer[end + 1] == b'\n') {
+            end += 1;
+        }
+        if end > header_end {
+            break;
+        }
+        let line = &buffer[position..end];
+        if let Some(value) = r2o_gateway_header_value(line, b"Upgrade") {
+            upgrades += 1;
+            if !value.eq_ignore_ascii_case(b"websocket") {
+                upgrades = 2;
+            }
+        } else if let Some(value) = r2o_gateway_header_value(line, b"Connection") {
+            if r2o_gateway_connection_upgrade(value) {
+                connection_upgrade = true;
+            }
+        } else if let Some(value) = r2o_gateway_header_value(line, b"Sec-WebSocket-Accept") {
+            accepts += 1;
+            if value != R2O_GATEWAY_ACCEPT {
+                accepts = 2;
+            }
+        }
+        position = end + 2;
+    }
+    if upgrades != 1 || !connection_upgrade || accepts != 1 {
+        return r2o_gateway_reply(101, false, "Gateway 101 не подтвердил WebSocket Upgrade");
+    }
+
+    let frame = header_end + 4;
+    if let Err(error) = r2o_gateway_fill(stream, deadline, &mut buffer, &mut used, frame + 2) {
+        return r2o_gateway_reply(
+            101,
+            false,
+            format!("Gateway не прислал Hello: {:.100}", error),
+        );
+    }
+    let first = buffer[frame];
+    let second = buffer[frame + 1];
+    if first & 0x80 == 0 || first & 0x70 != 0 || first & 0x0f != 1 || second & 0x80 != 0 {
+        return r2o_gateway_reply(
+            101,
+            false,
+            "Gateway прислал неподдерживаемый первый WebSocket frame",
+        );
+    }
+    let mut frame_header = 2_usize;
+    let mut payload_len = u64::from(second & 0x7f);
+    if payload_len == 126 {
+        if let Err(error) = r2o_gateway_fill(stream, deadline, &mut buffer, &mut used, frame + 4) {
+            return r2o_gateway_reply(101, false, format!("неполная длина Gateway Hello: {error}"));
+        }
+        payload_len = (u64::from(buffer[frame + 2]) << 8) | u64::from(buffer[frame + 3]);
+        frame_header = 4;
+    } else if payload_len == 127 {
+        if let Err(error) = r2o_gateway_fill(stream, deadline, &mut buffer, &mut used, frame + 10) {
+            return r2o_gateway_reply(101, false, format!("неполная длина Gateway Hello: {error}"));
+        }
+        payload_len = 0;
+        for byte in &buffer[frame + 2..frame + 10] {
+            payload_len = (payload_len << 8) | u64::from(*byte);
+        }
+        frame_header = 10;
+    }
+    let Some(payload_start) = frame.checked_add(frame_header) else {
+        return r2o_gateway_reply(101, false, "Gateway Hello превышает предел или неполон");
+    };
+    let Some(payload_end) = payload_len
+        .try_into()
+        .ok()
+        .and_then(|length: usize| payload_start.checked_add(length))
+    else {
+        return r2o_gateway_reply(101, false, "Gateway Hello превышает предел или неполон");
+    };
+    if payload_end > buffer.len()
+        || r2o_gateway_fill(stream, deadline, &mut buffer, &mut used, payload_end).is_err()
+    {
+        return r2o_gateway_reply(101, false, "Gateway Hello превышает предел или неполон");
+    }
+    match r2o_gateway_json_op(&buffer[payload_start..payload_end]) {
+        Some(10) => r2o_gateway_reply(101, true, "Gateway WebSocket принят, получен Hello op=10"),
+        Some(opcode) => r2o_gateway_reply(
+            101,
+            false,
+            format!("первый WebSocket frame Gateway op={opcode}, не Hello op=10"),
+        ),
+        None => r2o_gateway_reply(
+            101,
+            false,
+            "первый WebSocket frame Gateway не содержит top-level op=10",
+        ),
+    }
 }
 
 fn build_request(name: &str, path: &str, encoding: R2oFetchEncoding) -> Vec<u8> {
@@ -4027,5 +4460,62 @@ mod tests {
 
         let record_len = usize::from(u16::from_be_bytes([bytes[3], bytes[4]]));
         assert_eq!(record_len + 5, 1275);
+    }
+
+    #[test]
+    fn gateway_json_hello_reads_only_the_top_level_op() {
+        assert_eq!(r2o_gateway_json_op(b"{\"op\":10}"), Some(10));
+        assert_eq!(
+            r2o_gateway_json_op(b" \r\n{\"op\" : 10 , \"d\":{}}"),
+            Some(10)
+        );
+        assert_eq!(r2o_gateway_json_op(b"{\"d\":{},\"op\":10}"), Some(10));
+        assert_eq!(
+            r2o_gateway_json_op(b"{\"d\":{\"op\":10},\"op\":9}"),
+            Some(9)
+        );
+        assert_eq!(r2o_gateway_json_op(b"{\"d\":{\"op\":10}}"), None);
+        assert_eq!(r2o_gateway_json_op(b"{\"op\":\"10\"}"), None);
+        assert_eq!(r2o_gateway_json_op(b"{\"op\":10},\"x\":1"), Some(10));
+        assert_eq!(r2o_gateway_json_op(b"{\"op\":100000}"), Some(100_000));
+        assert_eq!(r2o_gateway_json_op(b"{\"op\":100001}"), None);
+        assert_eq!(r2o_gateway_json_op(b"{\"op\":999999999999}"), None);
+        assert_eq!(r2o_gateway_json_op(b"{\"op\":10x}"), None);
+        assert_eq!(r2o_gateway_json_op(b"{\"op\":}"), None);
+        assert_eq!(r2o_gateway_json_op(b"[]"), None);
+        assert_eq!(
+            r2o_gateway_json_op(b"{\"escaped\\\"key\":1,\"op\":10}"),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn gateway_upgrade_headers_follow_d2o_parsing() {
+        assert_eq!(
+            r2o_gateway_header_value(b"Upgrade: WebSocket", b"Upgrade"),
+            Some(b"WebSocket".as_slice())
+        );
+        assert_eq!(
+            r2o_gateway_header_value(b"upgrade:\t websocket \t", b"Upgrade"),
+            Some(b"websocket".as_slice())
+        );
+        assert_eq!(
+            r2o_gateway_header_value(b"UpgradeX: websocket", b"Upgrade"),
+            None
+        );
+        assert_eq!(
+            r2o_gateway_header_value(b"Upgrade : websocket", b"Upgrade"),
+            None
+        );
+        assert!(r2o_gateway_connection_upgrade(b"keep-alive, Upgrade"));
+        assert!(r2o_gateway_connection_upgrade(b"upgrade"));
+        assert!(!r2o_gateway_connection_upgrade(b"keep-alive"));
+        assert!(!r2o_gateway_connection_upgrade(b"UpgradeX"));
+        assert_eq!(r2o_gateway_status_code(b"HTTP/1.1 101"), Some(101));
+        assert_eq!(r2o_gateway_status_code(b"HTTP/1.1\t404"), Some(404));
+        assert_eq!(r2o_gateway_status_code(b"HTTP/1.1 99"), None);
+        assert_eq!(r2o_gateway_status_code(b"HTTP/1.1 600"), None);
+        assert_eq!(r2o_gateway_status_code(b"HTTP/1.0 200"), None);
+        assert_eq!(r2o_gateway_status_code(b"HTTP/1.1"), None);
     }
 }
