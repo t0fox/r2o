@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'docs/functional-parity-matrix.md'
+      - 'docs/progress/**'
       - 'tools/progress_audit.py'
       - '.github/workflows/progress.yml'
   pull_request:
