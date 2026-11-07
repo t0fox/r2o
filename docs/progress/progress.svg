@@ -1,15 +1,15 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 902" width="1100" height="902" role="img" aria-label="R2O strict parity 28.03%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 902" width="1100" height="902" role="img" aria-label="R2O strict parity 25.69%">
 <rect width="1100" height="902" rx="20" fill="#0c121e"/>
 <text x="36" y="48" fill="#edf7ff" font-family="Arial,sans-serif" font-size="29" font-weight="700">R2O / D2O · Strict parity</text>
-<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">28.03%</text>
-<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">37 / 132 verified points</text>
+<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">25.69%</text>
+<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">37 / 144 verified points</text>
 <rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/>
-<rect x="37" y="113" width="287.0" height="11" rx="5" fill="#36c989"/>
-<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">97 contracts · 37 verified · 60 without accepted proof · 2026-11-07</text>
-<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry-forward 89/132 = 67.42% · strict 37/132 = 28.03%</text>
+<rect x="37" y="113" width="263.1" height="11" rx="5" fill="#36c989"/>
+<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">108 contracts · 37 verified · 71 without accepted proof · 2026-11-07</text>
+<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry-forward 89/144 = 61.81% · strict 37/144 = 25.69%</text>
 <rect x="37" y="190" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="213" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Datapath</text>
-<text x="533" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">11/22</text>
+<text x="533" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">11/26</text>
 <rect x="51" y="223" width="30" height="22" rx="5" fill="#36c989"><title>D1a NFQUEUE receive/verdict/truncation: доказано (1/1)</title></rect>
 <rect x="89" y="223" width="30" height="22" rx="5" fill="#65758c"><title>D1b NFQUEUE rcvbuf/poll/recv error policy: 0 — нет принятого доказательства (0/1)</title></rect>
 <rect x="127" y="223" width="30" height="22" rx="5" fill="#65758c"><title>D2 IPv6 live NFQUEUE gateway FORWARD, fragments, route mark, fail-open: 0 — нет принятого доказательства (0/3)</title></rect>
@@ -30,9 +30,12 @@
 <rect x="241" y="250" width="30" height="22" rx="5" fill="#65758c"><title>D17 HTTP/80 replacement + hold: 0 — нет принятого доказательства (0/1)</title></rect>
 <rect x="279" y="250" width="30" height="22" rx="5" fill="#65758c"><title>D18 Capture/TLS/wire/addr helpers: 0 — нет принятого доказательства (0/1)</title></rect>
 <rect x="317" y="250" width="30" height="22" rx="5" fill="#65758c"><title>D19 Route mark/socket route selection: 0 — нет принятого доказательства (0/1)</title></rect>
+<rect x="355" y="250" width="30" height="22" rx="5" fill="#65758c"><title>D20 TCP timestamp shape contexts 8-13 (`d2k_link_shape_tcp_*`): 0 — нет принятого доказательства (0/2)</title></rect>
+<rect x="393" y="250" width="30" height="22" rx="5" fill="#65758c"><title>D21 Datapath scheduler: due ordering, refusals, owned IDs: 0 — нет принятого доказательства (0/1)</title></rect>
+<rect x="431" y="250" width="30" height="22" rx="5" fill="#65758c"><title>D22 Journal: ring/retention/dropped/added/format: 0 — нет принятого доказательства (0/1)</title></rect>
 <rect x="557" y="190" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="571" y="213" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Classifier / TLS</text>
-<text x="1053" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">2/23</text>
+<text x="1053" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">2/24</text>
 <rect x="571" y="223" width="30" height="22" rx="5" fill="#65758c"><title>C1 Raw profiles/ECH shapes/send/cancel/fallback/connect: 0 — нет принятого доказательства (0/3)</title></rect>
 <rect x="609" y="223" width="30" height="22" rx="5" fill="#65758c"><title>C2 CLEAR confirmation/cancel: 0 — нет принятого доказательства (0/1)</title></rect>
 <rect x="647" y="223" width="30" height="22" rx="5" fill="#65758c"><title>C3 SO_MARK confirmation: 0 — нет принятого доказательства (0/1)</title></rect>
@@ -48,9 +51,10 @@
 <rect x="571" y="250" width="30" height="22" rx="5" fill="#65758c"><title>C13 HTTPS probe/ECH resolver/cache state: 0 — нет принятого доказательства (0/1)</title></rect>
 <rect x="609" y="250" width="30" height="22" rx="5" fill="#65758c"><title>C14 HTTP/3 status/header parser + httpup: 0 — нет принятого доказательства (0/1)</title></rect>
 <rect x="647" y="250" width="30" height="22" rx="5" fill="#65758c"><title>C15 Compose/crypto/p256/x25519/props helpers: 0 — нет принятого доказательства (0/2)</title></rect>
+<rect x="685" y="250" width="30" height="22" rx="5" fill="#65758c"><title>C16 Detect/classifier CLI output/exit/JSON: 0 — нет принятого доказательства (0/1)</title></rect>
 <rect x="37" y="302" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="325" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Discovery</text>
-<text x="533" y="325" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">1/20</text>
+<text x="533" y="325" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">1/21</text>
 <rect x="51" y="335" width="30" height="22" rx="5" fill="#65758c"><title>S1 Control frame/commands/ACK/APPLIED/REFUSED: 0 — нет принятого доказательства (0/2)</title></rect>
 <rect x="89" y="335" width="30" height="22" rx="5" fill="#65758c"><title>S2 Scheduler due order/cooldown/dead address/concurrent endpoints: 0 — нет принятого доказательства (0/3)</title></rect>
 <rect x="127" y="335" width="30" height="22" rx="5" fill="#65758c"><title>S3 Discovery known-plan/coalesce/queue/permits/own-first: 0 — нет принятого доказательства (0/3)</title></rect>
@@ -61,9 +65,10 @@
 <rect x="317" y="335" width="30" height="22" rx="5" fill="#65758c"><title>S8 Process crash/restart + catalog reapply: 0 — нет принятого доказательства (0/1)</title></rect>
 <rect x="355" y="335" width="30" height="22" rx="5" fill="#65758c"><title>S9 Auto refusal → Discovery → APPLIED → firewall reapply: 0 — нет принятого доказательства (0/2)</title></rect>
 <rect x="393" y="335" width="30" height="22" rx="5" fill="#65758c"><title>S10 Long-running controller recovery: 0 — нет принятого доказательства (0/1)</title></rect>
+<rect x="431" y="335" width="30" height="22" rx="5" fill="#65758c"><title>S11 Diagnostics records/snapshots/madvise and periodic report: 0 — нет принятого доказательства (0/1)</title></rect>
 <rect x="557" y="302" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="571" y="325" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">QUIC / HTTP3</text>
-<text x="1053" y="325" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">2/10</text>
+<text x="1053" y="325" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">2/11</text>
 <rect x="571" y="335" width="30" height="22" rx="5" fill="#65758c"><title>Q1 QUIC Initial/QSN/SNI/local-address gate: 0 — нет принятого доказательства (0/2)</title></rect>
 <rect x="609" y="335" width="30" height="22" rx="5" fill="#65758c"><title>Q2 Residual/VN/address pool/neutral controls/fallback: 0 — нет принятого доказательства (0/3)</title></rect>
 <rect x="647" y="335" width="30" height="22" rx="5" fill="#65758c"><title>Q3 Short-control complete/budget: 0 — нет принятого доказательства (0/1)</title></rect>
@@ -71,6 +76,7 @@
 <rect x="723" y="335" width="30" height="22" rx="5" fill="#65758c"><title>Q5 HTTP/3 budgets/transport limits/stall: 0 — нет принятого доказательства (0/1)</title></rect>
 <rect x="761" y="335" width="30" height="22" rx="5" fill="#65758c"><title>Q6 Budget init/app-bytes helper: 0 — нет принятого доказательства (0/1)</title></rect>
 <rect x="799" y="335" width="30" height="22" rx="5" fill="#36c989"><title>Q7 Silent peer handshake timeout: доказано (1/1)</title></rect>
+<rect x="837" y="335" width="30" height="22" rx="5" fill="#65758c"><title>Q8 QUIC deny/recheck lifecycle: 0 — нет принятого доказательства (0/1)</title></rect>
 <rect x="37" y="414" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="437" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Discord RTC</text>
 <text x="533" y="437" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">1/10</text>
@@ -87,23 +93,25 @@
 <rect x="571" y="447" width="30" height="22" rx="5" fill="#36c989"><title>R8 Discord Gateway WebSocket upgrade/Hello: доказано (1/1)</title></rect>
 <rect x="37" y="526" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="549" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Telegram</text>
-<text x="533" y="549" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">3/7</text>
+<text x="533" y="549" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">3/8</text>
 <rect x="51" y="559" width="30" height="22" rx="5" fill="#65758c"><title>T1 Telegram route plan/DNS exclusion: 0 — нет принятого доказательства (0/1)</title></rect>
 <rect x="89" y="559" width="30" height="22" rx="5" fill="#65758c"><title>T2 Telegram response observer: 0 — нет принятого доказательства (0/1)</title></rect>
 <rect x="127" y="559" width="30" height="22" rx="5" fill="#65758c"><title>T3 Config/DC map/MTProto/WS retries/service lifecycle: 0 — нет принятого доказательства (0/2)</title></rect>
 <rect x="165" y="559" width="30" height="22" rx="5" fill="#36c989"><title>T4 Telegram firewall mark/stop order: доказано (1/1)</title></rect>
 <rect x="203" y="559" width="30" height="22" rx="5" fill="#36c989"><title>T5 Meta DNS scheduler lifecycle + range asset: доказано (1/1)</title></rect>
 <rect x="241" y="559" width="30" height="22" rx="5" fill="#36c989"><title>T6 Direct DNS/TLS edge/owned-record removal: доказано (1/1)</title></rect>
+<rect x="279" y="559" width="30" height="22" rx="5" fill="#65758c"><title>T7 Telegram limits/memory budget/stats timeout/config validation: 0 — нет принятого доказательства (0/1)</title></rect>
 <rect x="557" y="526" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="571" y="549" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">WebPanel</text>
-<text x="1053" y="549" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">0/5</text>
+<text x="1053" y="549" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">0/6</text>
 <rect x="571" y="559" width="30" height="22" rx="5" fill="#65758c"><title>P1 Bind selection/install safety: 0 — нет принятого доказательства (0/1)</title></rect>
 <rect x="609" y="559" width="30" height="22" rx="5" fill="#65758c"><title>P2 Status unavailable/catalog token/size: 0 — нет принятого доказательства (0/1)</title></rect>
 <rect x="647" y="559" width="30" height="22" rx="5" fill="#65758c"><title>P3 Control/actions/workers/config/static/update: 0 — нет принятого доказательства (0/2)</title></rect>
 <rect x="685" y="559" width="30" height="22" rx="5" fill="#65758c"><title>P4 Browser flow/layout: 0 — нет принятого доказательства (0/1)</title></rect>
+<rect x="723" y="559" width="30" height="22" rx="5" fill="#65758c"><title>P5 Panel absolute response deadline and client IO resilience: 0 — нет принятого доказательства (0/1)</title></rect>
 <rect x="37" y="638" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="661" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Firewall / PPE</text>
-<text x="533" y="661" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">11/13</text>
+<text x="533" y="661" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">11/14</text>
 <rect x="51" y="671" width="30" height="22" rx="5" fill="#36c989"><title>F1a Static nft/iptables rule generation: port/DNS/voice order, broadcast/ICMP: доказано (1/1)</title></rect>
 <rect x="89" y="671" width="30" height="22" rx="5" fill="#36c989"><title>F1b Marks/gate/connbytes: MEASURE_MARK, D2K_GATE, CONNBYTES+1, Telegram mark: доказано (1/1)</title></rect>
 <rect x="127" y="671" width="30" height="22" rx="5" fill="#36c989"><title>F2 nft rollback/legacy cleanup/RST lifetime: доказано (1/1)</title></rect>
@@ -117,9 +125,10 @@
 <rect x="431" y="671" width="30" height="22" rx="5" fill="#65758c"><title>F9b IPv6 live kernel switch/queue recovery: 0 — нет принятого доказательства (0/1)</title></rect>
 <rect x="469" y="671" width="30" height="22" rx="5" fill="#36c989"><title>F10a PPE rule generation/backend/cleanup/errors: доказано (1/1)</title></rect>
 <rect x="51" y="698" width="30" height="22" rx="5" fill="#65758c"><title>F10b PPE hardware datapath/tag migration/restart: 0 — нет принятого доказательства (0/1)</title></rect>
+<rect x="89" y="698" width="30" height="22" rx="5" fill="#65758c"><title>F11 Router clear-found/KEENETIC_POLICY/log rotation/heal semantics: 0 — нет принятого доказательства (0/1)</title></rect>
 <rect x="557" y="638" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="571" y="661" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Release / ABI</text>
-<text x="1053" y="661" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">4/7</text>
+<text x="1053" y="661" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">4/8</text>
 <rect x="571" y="671" width="30" height="22" rx="5" fill="#36c989"><title>L1 Update guard current/download failure: доказано (1/1)</title></rect>
 <rect x="609" y="671" width="30" height="22" rx="5" fill="#36c989"><title>L2a Staging/signature/stop/activate/health/rollback: доказано (1/1)</title></rect>
 <rect x="647" y="671" width="30" height="22" rx="5" fill="#65758c"><title>L2b OpenWrt procd/reboot/signed field install: 0 — нет принятого доказательства (0/1)</title></rect>
@@ -127,9 +136,10 @@
 <rect x="723" y="671" width="30" height="22" rx="5" fill="#36c989"><title>L4a Cross-build ABI + QEMU smoke 4 targets: доказано (1/1)</title></rect>
 <rect x="761" y="671" width="30" height="22" rx="5" fill="#65758c"><title>L4b Runtime parity/load on target: 0 — нет принятого доказательства (0/1)</title></rect>
 <rect x="799" y="671" width="30" height="22" rx="5" fill="#65758c"><title>L5 Physical router/procd update/reboot: 0 — нет принятого доказательства (0/1)</title></rect>
+<rect x="837" y="671" width="30" height="22" rx="5" fill="#65758c"><title>L6 Install/bootstrap/uninstall lifecycle: 0 — нет принятого доказательства (0/1)</title></rect>
 <rect x="37" y="750" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="773" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Core / CLI</text>
-<text x="533" y="773" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">1/14</text>
+<text x="533" y="773" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">1/15</text>
 <rect x="51" y="783" width="30" height="22" rx="5" fill="#65758c"><title>M1 `compose.c` + `d2kc.c` orchestration/event loop: 0 — нет принятого доказательства (0/3)</title></rect>
 <rect x="89" y="783" width="30" height="22" rx="5" fill="#65758c"><title>M2 `d2kask.c`: 0 — нет принятого доказательства (0/1)</title></rect>
 <rect x="127" y="783" width="30" height="22" rx="5" fill="#36c989"><title>M3 `d2kfetch.c` CLI: доказано (1/1)</title></rect>
@@ -137,4 +147,5 @@
 <rect x="203" y="783" width="30" height="22" rx="5" fill="#65758c"><title>M5 `link.c`, `net4.c`, `udpruntime.c`, `volume.c`: 0 — нет принятого доказательства (0/3)</title></rect>
 <rect x="241" y="783" width="30" height="22" rx="5" fill="#65758c"><title>M6 `crypto.c`, `p256.c`, `x25519.c`, `props.c`, `udpplan.c`, `plantlv.c` helpers: 0 — нет принятого доказательства (0/3)</title></rect>
 <rect x="279" y="783" width="30" height="22" rx="5" fill="#65758c"><title>M7 `http80.c`, `http_trace.c`, `journal.c`, `plans.c`, `plan_parse/apply.c`: 0 — нет принятого доказательства (0/2)</title></rect>
+<rect x="317" y="783" width="30" height="22" rx="5" fill="#65758c"><title>M8 Production header-inline helpers inventory/mapping: 0 — нет принятого доказательства (0/1)</title></rect>
 </svg>

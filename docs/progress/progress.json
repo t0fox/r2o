@@ -2,20 +2,20 @@
   "source": "docs/functional-parity-matrix.md",
   "date": "2026-11-07",
   "mode": "strict-current-revision",
-  "weight": 132,
+  "weight": 144,
   "points": 37,
-  "percent": 28.03,
-  "total": 97,
+  "percent": 25.69,
+  "total": 108,
   "counts": {
     "verified": 37,
     "partial": 0,
     "implemented": 0,
-    "unknown": 60
+    "unknown": 71
   },
   "groups": [
     {
       "name": "Datapath",
-      "weight": 22,
+      "weight": 26,
       "points": 11,
       "items": [
         {
@@ -293,20 +293,62 @@
           "status": "unknown",
           "statusLabel": "0 — нет принятого доказательства",
           "group": "Datapath",
-          "coverage": "`test-router-route-gate-config.sh` (a63) — только service args",
+          "coverage": "`test-router-route-gate-config.sh` (a63) - только service args",
           "gap": "Runtime SO_MARK/route selection не проверен",
-          "mapping": "`test-router-route-gate-config.sh` (a63) — только service args",
-          "evidence": "`test-router-route-gate-config.sh` (a63) — только service args · пробел: Runtime SO_MARK/route selection не проверен"
+          "mapping": "`test-router-route-gate-config.sh` (a63) - только service args",
+          "evidence": "`test-router-route-gate-config.sh` (a63) - только service args · пробел: Runtime SO_MARK/route selection не проверен"
+        },
+        {
+          "id": 21,
+          "key": "D20",
+          "name": "TCP timestamp shape contexts 8-13 (`d2k_link_shape_tcp_*`)",
+          "weight": 2,
+          "points": 0,
+          "status": "unknown",
+          "statusLabel": "0 — нет принятого доказательства",
+          "group": "Datapath",
+          "coverage": "`core/include/d2k_link.h`; `sched.c` использует 8-13",
+          "gap": "R2O поддерживает только 1-7; `D2K_TCP_SHAPE_*_TS` отсутствуют",
+          "mapping": "`core/include/d2k_link.h`; `sched.c` использует 8-13",
+          "evidence": "`core/include/d2k_link.h`; `sched.c` использует 8-13 · пробел: R2O поддерживает только 1-7; `D2K_TCP_SHAPE_*_TS` отсутствуют"
+        },
+        {
+          "id": 22,
+          "key": "D21",
+          "name": "Datapath scheduler: due ordering, refusals, owned IDs",
+          "weight": 1,
+          "points": 0,
+          "status": "unknown",
+          "statusLabel": "0 — нет принятого доказательства",
+          "group": "Datapath",
+          "coverage": "`scheduler.rs`",
+          "gap": "нет paired differential; cancel/reservation — R2O-only расширение",
+          "mapping": "`scheduler.rs`",
+          "evidence": "`scheduler.rs` · пробел: нет paired differential; cancel/reservation — R2O-only расширение"
+        },
+        {
+          "id": 23,
+          "key": "D22",
+          "name": "Journal: ring/retention/dropped/added/format",
+          "weight": 1,
+          "points": 0,
+          "status": "unknown",
+          "statusLabel": "0 — нет принятого доказательства",
+          "group": "Datapath",
+          "coverage": "`flow_journal.rs`",
+          "gap": "тексты suspect/refuse и часть полей не совпадают",
+          "mapping": "`flow_journal.rs`",
+          "evidence": "`flow_journal.rs` · пробел: тексты suspect/refuse и часть полей не совпадают"
         }
       ]
     },
     {
       "name": "Classifier / TLS",
-      "weight": 23,
+      "weight": 24,
       "points": 2,
       "items": [
         {
-          "id": 31,
+          "id": 35,
           "key": "C1",
           "name": "Raw profiles/ECH shapes/send/cancel/fallback/connect",
           "weight": 3,
@@ -320,7 +362,7 @@
           "evidence": "`r2o-raw-profile`, `r2o-raw-emission-cancel`, `r2o-raw-connect-fallback`, `r2o-fallback`, `r2o-raw-split-support` (304) · пробел: 304; live DPI; cancel/timing"
         },
         {
-          "id": 32,
+          "id": 36,
           "key": "C2",
           "name": "CLEAR confirmation/cancel",
           "weight": 1,
@@ -334,7 +376,7 @@
           "evidence": "`test-classifier-clear-confirm` (304) · пробел: 304"
         },
         {
-          "id": 33,
+          "id": 37,
           "key": "C3",
           "name": "SO_MARK confirmation",
           "weight": 1,
@@ -348,7 +390,7 @@
           "evidence": "`test-classifier-so-mark-production` (304) · пробел: 304; production getsockopt"
         },
         {
-          "id": 34,
+          "id": 38,
           "key": "C4",
           "name": "Base transport errors → split",
           "weight": 1,
@@ -362,7 +404,7 @@
           "evidence": "`test-classifier-full-tree-control` (304) · пробел: 304"
         },
         {
-          "id": 35,
+          "id": 39,
           "key": "C5",
           "name": "Poison/strategy tree/control/neutral ACK",
           "weight": 2,
@@ -376,7 +418,7 @@
           "evidence": "`test-classifier-full-tree-control`, `candidate-filter`, `raw-production` (304) · пробел: 304; injected/scripted branches"
         },
         {
-          "id": 36,
+          "id": 40,
           "key": "C6",
           "name": "TCP measurement + core verifier",
           "weight": 2,
@@ -390,7 +432,7 @@
           "evidence": "`r2o-meas`, `r2o-measured-split` (304) · пробел: 304; full call path"
         },
         {
-          "id": 37,
+          "id": 41,
           "key": "C7",
           "name": "TLS/HTTP verifier outcomes/retry",
           "weight": 1,
@@ -404,7 +446,7 @@
           "evidence": "`r2o-tls-verify-differential.sh` (a378), `test-http-chunk-framing` (a63) · пробел: Loopback; не live DPI"
         },
         {
-          "id": 38,
+          "id": 42,
           "key": "C8",
           "name": "Connect/read timeout + doubled baseline retry",
           "weight": 1,
@@ -418,7 +460,7 @@
           "evidence": "`test-classifier-full-tree-control` (304) · пробел: 304"
         },
         {
-          "id": 39,
+          "id": 43,
           "key": "C9",
           "name": "TLS 1.2 reverse response probe/verdicts",
           "weight": 3,
@@ -432,7 +474,7 @@
           "evidence": "`test-d2o-shared-fixtures` (304), `test-classifier-full-tree-control` (304) · пробел: 304; live DPI"
         },
         {
-          "id": 40,
+          "id": 44,
           "key": "C10",
           "name": "ECH receive ladder/witness/retries",
           "weight": 2,
@@ -446,7 +488,7 @@
           "evidence": "`r2o-ech-rx-ladder`, `r2o-layered-rx` (304) · пробел: 304; реальные ECH-конфигурации"
         },
         {
-          "id": 41,
+          "id": 45,
           "key": "C11",
           "name": "HTTP response framing/reader",
           "weight": 1,
@@ -460,7 +502,7 @@
           "evidence": "`test-http-chunk-framing-differential.sh` (a63), `r2k-core` tests · пробел: Остальные call-path/ветви"
         },
         {
-          "id": 42,
+          "id": 46,
           "key": "C12",
           "name": "ClientHello/TLS12/13/ECH parser helpers",
           "weight": 1,
@@ -474,7 +516,7 @@
           "evidence": "C `test_hello/test_ech/test_tls12`, Rust unit · пробел: Нет paired diff"
         },
         {
-          "id": 43,
+          "id": 47,
           "key": "C13",
           "name": "HTTPS probe/ECH resolver/cache state",
           "weight": 1,
@@ -488,7 +530,7 @@
           "evidence": "C `test_httpsprobe`, Rust tests · пробел: Нет paired diff"
         },
         {
-          "id": 44,
+          "id": 48,
           "key": "C14",
           "name": "HTTP/3 status/header parser + httpup",
           "weight": 1,
@@ -502,7 +544,7 @@
           "evidence": "C `test_h3`, `test_httpup_logic`; Rust tests · пробел: Нет paired diff"
         },
         {
-          "id": 45,
+          "id": 49,
           "key": "C15",
           "name": "Compose/crypto/p256/x25519/props helpers",
           "weight": 2,
@@ -514,16 +556,30 @@
           "gap": "Нет matrix-контракта",
           "mapping": "C tests, Rust unit",
           "evidence": "C tests, Rust unit · пробел: Нет matrix-контракта"
+        },
+        {
+          "id": 50,
+          "key": "C16",
+          "name": "Detect/classifier CLI output/exit/JSON",
+          "weight": 1,
+          "points": 0,
+          "status": "unknown",
+          "statusLabel": "0 — нет принятого доказательства",
+          "group": "Classifier / TLS",
+          "coverage": "`r2o-controller/main.rs`",
+          "gap": "human stdout/exit/JSON не полностью сопоставлены",
+          "mapping": "`r2o-controller/main.rs`",
+          "evidence": "`r2o-controller/main.rs` · пробел: human stdout/exit/JSON не полностью сопоставлены"
         }
       ]
     },
     {
       "name": "Discovery",
-      "weight": 20,
+      "weight": 21,
       "points": 1,
       "items": [
         {
-          "id": 21,
+          "id": 24,
           "key": "S1",
           "name": "Control frame/commands/ACK/APPLIED/REFUSED",
           "weight": 2,
@@ -537,7 +593,7 @@
           "evidence": "`r2o-control-events`, `r2o-control-dropped`, `r2o-ack-applied-persist` (все 304) · пробел: Другая ревизия; длительный процессный restart"
         },
         {
-          "id": 22,
+          "id": 25,
           "key": "S2",
           "name": "Scheduler due order/cooldown/dead address/concurrent endpoints",
           "weight": 3,
@@ -551,7 +607,7 @@
           "evidence": "`r2o-scheduler-cooldown`/`dead-address`/`concurrent` (304), `r2o-scheduler-differential` (без diff) · пробел: 304; due ordering не paired"
         },
         {
-          "id": 23,
+          "id": 26,
           "key": "S3",
           "name": "Discovery known-plan/coalesce/queue/permits/own-first",
           "weight": 3,
@@ -565,7 +621,7 @@
           "evidence": "`r2o-discovery-*`, `r2o-queue-order`, `r2o-worker-permit`, `r2o-own-first` (304) · пробел: 304; нет текущего прогона"
         },
         {
-          "id": 24,
+          "id": 27,
           "key": "S4",
           "name": "ACK → APPLIED exact proof → candidate persistence",
           "weight": 2,
@@ -579,7 +635,7 @@
           "evidence": "`r2o-ack-applied-persist` (304), `r2o-known-plans` (304) · пробел: 304; process restart"
         },
         {
-          "id": 25,
+          "id": 28,
           "key": "S5",
           "name": "JSON catalog atomic save/merge/sync",
           "weight": 2,
@@ -593,7 +649,7 @@
           "evidence": "`r2o-catalog-persist`, `r2o-catalog-sync` (304) · пробел: 304; concurrent external writer"
         },
         {
-          "id": 26,
+          "id": 29,
           "key": "S6",
           "name": "HTTP search candidate/order/retry/judge/APPLIED",
           "weight": 3,
@@ -607,7 +663,7 @@
           "evidence": "`r2o-http-search` (304), `r2o-fetch-cli` (без пина) · пробел: 304; живой поиск; APPLIED branch"
         },
         {
-          "id": 27,
+          "id": 30,
           "key": "S7",
           "name": "S99/procd boot waiters/restart/stop/delayed /opt",
           "weight": 1,
@@ -621,7 +677,7 @@
           "evidence": "`test-router-procd-lifecycle-qemu.py` (a63), `test-router-openwrt-init.sh` · пробел: Только waiter dispatch; crash recovery отдельно"
         },
         {
-          "id": 28,
+          "id": 31,
           "key": "S8",
           "name": "Process crash/restart + catalog reapply",
           "weight": 1,
@@ -635,7 +691,7 @@
           "evidence": "`test-controller-process-reapply-qemu.py` (R2O-only), `test-router-process-supervisor.sh` · пробел: Нет C-parity; D2O waiter one-shot"
         },
         {
-          "id": 29,
+          "id": 32,
           "key": "S9",
           "name": "Auto refusal → Discovery → APPLIED → firewall reapply",
           "weight": 2,
@@ -649,7 +705,7 @@
           "evidence": "Process smoke с fake datapath peer · пробел: Нет реального datapath/firewall; failure injection"
         },
         {
-          "id": 30,
+          "id": 33,
           "key": "S10",
           "name": "Long-running controller recovery",
           "weight": 1,
@@ -661,16 +717,30 @@
           "gap": "Полный цикл после crash/restart",
           "mapping": "Нет",
           "evidence": "Нет · пробел: Полный цикл после crash/restart"
+        },
+        {
+          "id": 34,
+          "key": "S11",
+          "name": "Diagnostics records/snapshots/madvise and periodic report",
+          "weight": 1,
+          "points": 0,
+          "status": "unknown",
+          "statusLabel": "0 — нет принятого доказательства",
+          "group": "Discovery",
+          "coverage": "`diagnostics.rs`, `r2o-diagnostics-differential.sh`",
+          "gap": "allocator/madvise и часть периодической RSS-сводки отсутствуют",
+          "mapping": "`diagnostics.rs`, `r2o-diagnostics-differential.sh`",
+          "evidence": "`diagnostics.rs`, `r2o-diagnostics-differential.sh` · пробел: allocator/madvise и часть периодической RSS-сводки отсутствуют"
         }
       ]
     },
     {
       "name": "QUIC / HTTP3",
-      "weight": 10,
+      "weight": 11,
       "points": 2,
       "items": [
         {
-          "id": 46,
+          "id": 51,
           "key": "Q1",
           "name": "QUIC Initial/QSN/SNI/local-address gate",
           "weight": 2,
@@ -684,7 +754,7 @@
           "evidence": "`r2o-quic-hello`, `r2o-quic-local-address` (304), `r2o-discovery-quic-stop` · пробел: 304; stop/fallback"
         },
         {
-          "id": 47,
+          "id": 52,
           "key": "Q2",
           "name": "Residual/VN/address pool/neutral controls/fallback",
           "weight": 3,
@@ -698,7 +768,7 @@
           "evidence": "REA_EVIDENCE (source mapping), controller unit tests · пробел: Нет поведенческого differential"
         },
         {
-          "id": 48,
+          "id": 53,
           "key": "Q3",
           "name": "Short-control complete/budget",
           "weight": 1,
@@ -712,7 +782,7 @@
           "evidence": "`test-quic-short-control` (304) · пробел: 304"
         },
         {
-          "id": 49,
+          "id": 54,
           "key": "Q4",
           "name": "HTTP/3 framing/stream termination",
           "weight": 1,
@@ -726,7 +796,7 @@
           "evidence": "`test-quic-http3-full-stage-differential.sh` (a63), 18/18 · пробел: Network errors/lifecycle"
         },
         {
-          "id": 50,
+          "id": 55,
           "key": "Q5",
           "name": "HTTP/3 budgets/transport limits/stall",
           "weight": 1,
@@ -740,7 +810,7 @@
           "evidence": "Full-stage 18/18; `test-quic-http3` · пробел: 70-KiB HEADERS app_bytes; timing-sensitive stall"
         },
         {
-          "id": 51,
+          "id": 56,
           "key": "Q6",
           "name": "Budget init/app-bytes helper",
           "weight": 1,
@@ -754,7 +824,7 @@
           "evidence": "`test-quic-budget-init`, `test-quic-app-bytes` (304) · пробел: 304"
         },
         {
-          "id": 52,
+          "id": 57,
           "key": "Q7",
           "name": "Silent peer handshake timeout",
           "weight": 1,
@@ -766,6 +836,20 @@
           "gap": "Нет ICMP/close-port вариантов",
           "mapping": "Full-stage/`r2o_http3_silent_udp_peer_timeout` (a63)",
           "evidence": "Full-stage/`r2o_http3_silent_udp_peer_timeout` (a63) · пробел: Нет ICMP/close-port вариантов"
+        },
+        {
+          "id": 58,
+          "key": "Q8",
+          "name": "QUIC deny/recheck lifecycle",
+          "weight": 1,
+          "points": 0,
+          "status": "unknown",
+          "statusLabel": "0 — нет принятого доказательства",
+          "group": "QUIC / HTTP3",
+          "coverage": "`r2o_quic_deny.rs`",
+          "gap": "Нет paired C/Rust lifecycle differential",
+          "mapping": "`r2o_quic_deny.rs`",
+          "evidence": "`r2o_quic_deny.rs` · пробел: Нет paired C/Rust lifecycle differential"
         }
       ]
     },
@@ -775,7 +859,7 @@
       "points": 1,
       "items": [
         {
-          "id": 53,
+          "id": 59,
           "key": "R1",
           "name": "UDP observer initiator/SSRC/endpoint event",
           "weight": 2,
@@ -789,7 +873,7 @@
           "evidence": "`test-discord-udp-observer-reconnect` (304) · пробел: 304; production RTC"
         },
         {
-          "id": 54,
+          "id": 60,
           "key": "R2",
           "name": "Manual measurement arm propagation",
           "weight": 1,
@@ -803,7 +887,7 @@
           "evidence": "`test-discord-voice-discovery-arm` (304) · пробел: 304"
         },
         {
-          "id": 55,
+          "id": 61,
           "key": "R3",
           "name": "Voice trial lease/renewal/120-s waiter/APPLIED",
           "weight": 3,
@@ -817,7 +901,7 @@
           "evidence": "`r2o-discord-discovery`, `r2o-discord-voice-lifecycle-helper` (304), `test-discord-scheduled-udp` (a63) · пробел: 304; production process/long RTC"
         },
         {
-          "id": 56,
+          "id": 62,
           "key": "R4",
           "name": "Endpoint change/late NAK/persistence/reapply",
           "weight": 1,
@@ -831,7 +915,7 @@
           "evidence": "`r2o-discord-voice-lifecycle-helper` (304) · пробел: 304; source-backed helper"
         },
         {
-          "id": 57,
+          "id": 63,
           "key": "R5",
           "name": "Trial clock after queue admission",
           "weight": 1,
@@ -845,7 +929,7 @@
           "evidence": "`test-discord-voice-trial-clock` (304) · пробел: 304"
         },
         {
-          "id": 58,
+          "id": 64,
           "key": "R6",
           "name": "Scheduled UDP emission/queue stats",
           "weight": 1,
@@ -859,7 +943,7 @@
           "evidence": "`test-discord-scheduled-udp-differential.sh` (a63) · пробел: Periodic/shutdown queue output"
         },
         {
-          "id": 59,
+          "id": 65,
           "key": "R7",
           "name": "Long RTC session/process recovery",
           "weight": 1,
@@ -880,7 +964,7 @@
       "points": 1,
       "items": [
         {
-          "id": 60,
+          "id": 66,
           "key": "R8",
           "name": "Discord Gateway WebSocket upgrade/Hello",
           "weight": 1,
@@ -897,11 +981,11 @@
     },
     {
       "name": "Telegram",
-      "weight": 7,
+      "weight": 8,
       "points": 3,
       "items": [
         {
-          "id": 61,
+          "id": 67,
           "key": "T1",
           "name": "Telegram route plan/DNS exclusion",
           "weight": 1,
@@ -915,7 +999,7 @@
           "evidence": "`r2o-telegram-route-dns` (304, historical) · пробел: Не перезапущен; z2kOW donor, не C11 D2O"
         },
         {
-          "id": 62,
+          "id": 68,
           "key": "T2",
           "name": "Telegram response observer",
           "weight": 1,
@@ -929,7 +1013,7 @@
           "evidence": "`r2o-telegram-response-observer` (304, historical) · пробел: То же"
         },
         {
-          "id": 63,
+          "id": 69,
           "key": "T3",
           "name": "Config/DC map/MTProto/WS retries/service lifecycle",
           "weight": 2,
@@ -943,7 +1027,7 @@
           "evidence": "Source compare 38 files; `test-router-telegram-service.sh` (R2O-only) · пробел: Нет C/Rust behavior diff; CF/WS не проверены"
         },
         {
-          "id": 64,
+          "id": 70,
           "key": "T4",
           "name": "Telegram firewall mark/stop order",
           "weight": 1,
@@ -957,7 +1041,7 @@
           "evidence": "`test-router-tg-mark-differential.sh`, `test-telegram-stop-order-differential.sh` (8e2c) · пробел: Live router netfilter"
         },
         {
-          "id": 65,
+          "id": 71,
           "key": "T5",
           "name": "Meta DNS scheduler lifecycle + range asset",
           "weight": 1,
@@ -971,7 +1055,7 @@
           "evidence": "`test-router-meta-dns-scheduler-differential.sh`, `test-package-release.sh` · пробел: Live `ndmc`; scheduler restart"
         },
         {
-          "id": 66,
+          "id": 72,
           "key": "T6",
           "name": "Direct DNS/TLS edge/owned-record removal",
           "weight": 1,
@@ -983,16 +1067,30 @@
           "gap": "Physical Keenetic",
           "mapping": "`test-meta-edge-differential.sh`, `test-router-meta-dns-remove-differential.sh` (8e2c, CI #445)",
           "evidence": "`test-meta-edge-differential.sh`, `test-router-meta-dns-remove-differential.sh` (8e2c, CI #445) · пробел: Physical Keenetic"
+        },
+        {
+          "id": 73,
+          "key": "T7",
+          "name": "Telegram limits/memory budget/stats timeout/config validation",
+          "weight": 1,
+          "points": 0,
+          "status": "unknown",
+          "statusLabel": "0 — нет принятого доказательства",
+          "group": "Telegram",
+          "coverage": "`limits.rs`, `stats.rs`, `config.rs`",
+          "gap": "memory budget отсутствует; stats read без таймаута; CF/TG_PORT validation расходится",
+          "mapping": "`limits.rs`, `stats.rs`, `config.rs`",
+          "evidence": "`limits.rs`, `stats.rs`, `config.rs` · пробел: memory budget отсутствует; stats read без таймаута; CF/TG_PORT validation расходится"
         }
       ]
     },
     {
       "name": "WebPanel",
-      "weight": 5,
+      "weight": 6,
       "points": 0,
       "items": [
         {
-          "id": 67,
+          "id": 74,
           "key": "P1",
           "name": "Bind selection/install safety",
           "weight": 1,
@@ -1006,7 +1104,7 @@
           "evidence": "`r2o-panel-bind-default`, `test-router-select-panel-ip`, `test-router-panel-bind-install` (304) · пробел: 304; physical router"
         },
         {
-          "id": 68,
+          "id": 75,
           "key": "P2",
           "name": "Status unavailable/catalog token/size",
           "weight": 1,
@@ -1020,7 +1118,7 @@
           "evidence": "`test-panel-status-unavailable`, `test-panel-catalog-revision` (304) · пробел: 304"
         },
         {
-          "id": 69,
+          "id": 76,
           "key": "P3",
           "name": "Control/actions/workers/config/static/update",
           "weight": 2,
@@ -1034,7 +1132,7 @@
           "evidence": "22 panel scripts (304; temp a378) · пробел: 304; checked-in pin; browser"
         },
         {
-          "id": 70,
+          "id": 77,
           "key": "P4",
           "name": "Browser flow/layout",
           "weight": 1,
@@ -1046,16 +1144,30 @@
           "gap": "Нет C-oracle; только визуальная проверка",
           "mapping": "`crates/r2o-panel/tests/browser.cjs` (R2O-only)",
           "evidence": "`crates/r2o-panel/tests/browser.cjs` (R2O-only) · пробел: Нет C-oracle; только визуальная проверка"
+        },
+        {
+          "id": 78,
+          "key": "P5",
+          "name": "Panel absolute response deadline and client IO resilience",
+          "weight": 1,
+          "points": 0,
+          "status": "unknown",
+          "statusLabel": "0 — нет принятого доказательства",
+          "group": "WebPanel",
+          "coverage": "`server.rs`",
+          "gap": "C absolute 5s deadline vs per-read/write; client IO error может остановить serve",
+          "mapping": "`server.rs`",
+          "evidence": "`server.rs` · пробел: C absolute 5s deadline vs per-read/write; client IO error может остановить serve"
         }
       ]
     },
     {
       "name": "Firewall / PPE",
-      "weight": 13,
+      "weight": 14,
       "points": 11,
       "items": [
         {
-          "id": 71,
+          "id": 79,
           "key": "F1a",
           "name": "Static nft/iptables rule generation: port/DNS/voice order, broadcast/ICMP",
           "weight": 1,
@@ -1069,7 +1181,7 @@
           "evidence": "`test-firewall-port-scope`, `broadcast`, `rule-error`, `nft-legacy` (8e2c) · пробел: Live kernel; полный syntax/effect"
         },
         {
-          "id": 72,
+          "id": 80,
           "key": "F1b",
           "name": "Marks/gate/connbytes: MEASURE_MARK, D2K_GATE, CONNBYTES+1, Telegram mark",
           "weight": 1,
@@ -1083,7 +1195,7 @@
           "evidence": "`test-firewall-connbytes-boundary`, `iptables-status`, `test-router-tg-mark-differential` (8e2c) · пробел: Live kernel; fault branches"
         },
         {
-          "id": 73,
+          "id": 81,
           "key": "F2",
           "name": "nft rollback/legacy cleanup/RST lifetime",
           "weight": 1,
@@ -1097,7 +1209,7 @@
           "evidence": "`test-firewall-nft-failure`, `nft-legacy`, `nft-down-rst-lifetime` (8e2c) · пробел: Live nft transaction"
         },
         {
-          "id": 74,
+          "id": 82,
           "key": "F3",
           "name": "Rule install error code",
           "weight": 1,
@@ -1111,7 +1223,7 @@
           "evidence": "`test-firewall-rule-error-differential.sh` (8e2c) · пробел: Полная таблица правил"
         },
         {
-          "id": 75,
+          "id": 83,
           "key": "F4",
           "name": "Flow-offload success/restore",
           "weight": 1,
@@ -1125,7 +1237,7 @@
           "evidence": "`test-router-flowoffload-d2o-differential.sh` (8e2c) · пробел: Live fw4/kernel"
         },
         {
-          "id": 76,
+          "id": 84,
           "key": "F5",
           "name": "Flow-offload UCI write-failure",
           "weight": 1,
@@ -1139,7 +1251,7 @@
           "evidence": "Тот же скрипт (8e2c) · пробел: Один fixture на две строки"
         },
         {
-          "id": 77,
+          "id": 85,
           "key": "F6",
           "name": "FastNAT lifecycle",
           "weight": 1,
@@ -1153,7 +1265,7 @@
           "evidence": "`test-router-fastnat-lifecycle-differential.sh` (a63) · пробел: Реальный sysctl/kernel"
         },
         {
-          "id": 78,
+          "id": 86,
           "key": "F7",
           "name": "DNS upstream exclusions/refresh",
           "weight": 1,
@@ -1167,7 +1279,7 @@
           "evidence": "`test-router-dns-exclusion-differential.sh` (a63) · пробел: Live DNS/ndmc"
         },
         {
-          "id": 79,
+          "id": 87,
           "key": "F8",
           "name": "Heal/watchdog/reapply/cooldown",
           "weight": 1,
@@ -1181,7 +1293,7 @@
           "evidence": "`test-router-reapply`, `heal-concurrency`, `firewall-watchdog`, `firewall-status`, `iptables-status` · пробел: Kernel; реальный watchdog crash"
         },
         {
-          "id": 80,
+          "id": 88,
           "key": "F9a",
           "name": "IPv6 fallback classification/modules/marker/reapply helper",
           "weight": 1,
@@ -1195,7 +1307,7 @@
           "evidence": "`test-router-ipv6-fallback-differential.sh` (a63), `route-gate-config` · пробел: Live kernel modules/NFQUEUE"
         },
         {
-          "id": 81,
+          "id": 89,
           "key": "F9b",
           "name": "IPv6 live kernel switch/queue recovery",
           "weight": 1,
@@ -1209,7 +1321,7 @@
           "evidence": "QEMU flow-offload only · пробел: Полный live module/queue/reapply"
         },
         {
-          "id": 82,
+          "id": 90,
           "key": "F10a",
           "name": "PPE rule generation/backend/cleanup/errors",
           "weight": 1,
@@ -1223,7 +1335,7 @@
           "evidence": "`test-router-ppe-rule-generation`, `backend`, `ensure-running`, `legacy-cleanup`, `firewall-lock`, `removal-error` (8e2c) · пробел: —"
         },
         {
-          "id": 83,
+          "id": 91,
           "key": "F10b",
           "name": "PPE hardware datapath/tag migration/restart",
           "weight": 1,
@@ -1231,20 +1343,34 @@
           "status": "unknown",
           "statusLabel": "0 — нет принятого доказательства",
           "group": "Firewall / PPE",
-          "coverage": "—",
+          "coverage": "-",
           "gap": "Реальный PPE kernel, hardware tags, restart",
-          "mapping": "—",
-          "evidence": "— · пробел: Реальный PPE kernel, hardware tags, restart"
+          "mapping": "-",
+          "evidence": "- · пробел: Реальный PPE kernel, hardware tags, restart"
+        },
+        {
+          "id": 92,
+          "key": "F11",
+          "name": "Router clear-found/KEENETIC_POLICY/log rotation/heal semantics",
+          "weight": 1,
+          "points": 0,
+          "status": "unknown",
+          "statusLabel": "0 — нет принятого доказательства",
+          "group": "Firewall / PPE",
+          "coverage": "`S99r2o`",
+          "gap": "clear-found оставляет https-cache/measurements; KEENETIC_POLICY отсутствует; Meta DNS логи не ротируются; heal может запустить остановленный Telegram",
+          "mapping": "`S99r2o`",
+          "evidence": "`S99r2o` · пробел: clear-found оставляет https-cache/measurements; KEENETIC_POLICY отсутствует; Meta DNS логи не ротируются; heal может запустить остановленный Telegram"
         }
       ]
     },
     {
       "name": "Release / ABI",
-      "weight": 7,
+      "weight": 8,
       "points": 4,
       "items": [
         {
-          "id": 84,
+          "id": 93,
           "key": "L1",
           "name": "Update guard current/download failure",
           "weight": 1,
@@ -1258,7 +1384,7 @@
           "evidence": "`test-router-update-availability`, `update-scheduler` (8e2c) · пробел: Mock downloads"
         },
         {
-          "id": 85,
+          "id": 94,
           "key": "L2a",
           "name": "Staging/signature/stop/activate/health/rollback",
           "weight": 1,
@@ -1272,7 +1398,7 @@
           "evidence": "`test-router-update-lifecycle`, `test-signed-install-rollback.sh`, manager tests · пробел: Mock downloads; field"
         },
         {
-          "id": 86,
+          "id": 95,
           "key": "L2b",
           "name": "OpenWrt procd/reboot/signed field install",
           "weight": 1,
@@ -1286,7 +1412,7 @@
           "evidence": "— · пробел: Всё"
         },
         {
-          "id": 87,
+          "id": 96,
           "key": "L3",
           "name": "Package release manifest/asset bytes",
           "weight": 1,
@@ -1300,7 +1426,7 @@
           "evidence": "`test-package-release.sh`, meta-ranges bytes · пробел: Placeholder executables"
         },
         {
-          "id": 88,
+          "id": 97,
           "key": "L4a",
           "name": "Cross-build ABI + QEMU smoke 4 targets",
           "weight": 1,
@@ -1314,7 +1440,7 @@
           "evidence": "`r2o-build-openwrt-*`, ARMv5, D2O `make cross` · пробел: —"
         },
         {
-          "id": 89,
+          "id": 98,
           "key": "L4b",
           "name": "Runtime parity/load on target",
           "weight": 1,
@@ -1328,7 +1454,7 @@
           "evidence": "— · пробел: Runtime/физический роутер"
         },
         {
-          "id": 90,
+          "id": 99,
           "key": "L5",
           "name": "Physical router/procd update/reboot",
           "weight": 1,
@@ -1336,20 +1462,34 @@
           "status": "unknown",
           "statusLabel": "0 — нет принятого доказательства",
           "group": "Release / ABI",
-          "coverage": "—",
+          "coverage": "-",
           "gap": "Всё",
-          "mapping": "—",
-          "evidence": "— · пробел: Всё"
+          "mapping": "-",
+          "evidence": "- · пробел: Всё"
+        },
+        {
+          "id": 100,
+          "key": "L6",
+          "name": "Install/bootstrap/uninstall lifecycle",
+          "weight": 1,
+          "points": 0,
+          "status": "unknown",
+          "statusLabel": "0 — нет принятого доказательства",
+          "group": "Release / ABI",
+          "coverage": "`router/install.sh`, `uninstall.sh`",
+          "gap": "bootstrap и uninstall fallback не проверены полностью",
+          "mapping": "`router/install.sh`, `uninstall.sh`",
+          "evidence": "`router/install.sh`, `uninstall.sh` · пробел: bootstrap и uninstall fallback не проверены полностью"
         }
       ]
     },
     {
       "name": "Core / CLI",
-      "weight": 14,
+      "weight": 15,
       "points": 1,
       "items": [
         {
-          "id": 91,
+          "id": 101,
           "key": "M1",
           "name": "`compose.c` + `d2kc.c` orchestration/event loop",
           "weight": 3,
@@ -1363,7 +1503,7 @@
           "evidence": "Inventory note; REA fragments · пробел: Нет отдельного контракта и differential"
         },
         {
-          "id": 92,
+          "id": 102,
           "key": "M2",
           "name": "`d2kask.c`",
           "weight": 1,
@@ -1377,7 +1517,7 @@
           "evidence": "`r2o-ask-differential.sh` — независимые suites · пробел: Нет paired diff"
         },
         {
-          "id": 93,
+          "id": 103,
           "key": "M3",
           "name": "`d2kfetch.c` CLI",
           "weight": 1,
@@ -1391,7 +1531,7 @@
           "evidence": "`r2o-fetch-cli-differential.sh` (сравнивает C/Rust CLI) · пробел: Нет SHA-пина; не все ветви"
         },
         {
-          "id": 94,
+          "id": 104,
           "key": "M4",
           "name": "`d2kvoice.c` controller entry",
           "weight": 1,
@@ -1405,7 +1545,7 @@
           "evidence": "Discord rows частично · пробел: Нет контракта"
         },
         {
-          "id": 95,
+          "id": 105,
           "key": "M5",
           "name": "`link.c`, `net4.c`, `udpruntime.c`, `volume.c`",
           "weight": 3,
@@ -1419,7 +1559,7 @@
           "evidence": "Inventory note; Rust `r2o_volume` tests · пробел: Нет C/Rust diff"
         },
         {
-          "id": 96,
+          "id": 106,
           "key": "M6",
           "name": "`crypto.c`, `p256.c`, `x25519.c`, `props.c`, `udpplan.c`, `plantlv.c` helpers",
           "weight": 3,
@@ -1433,7 +1573,7 @@
           "evidence": "C unit tests; Rust units · пробел: Нет paired diff и контракта"
         },
         {
-          "id": 97,
+          "id": 107,
           "key": "M7",
           "name": "`http80.c`, `http_trace.c`, `journal.c`, `plans.c`, `plan_parse/apply.c`",
           "weight": 2,
@@ -1445,6 +1585,20 @@
           "gap": "Нет matrix-контракта",
           "mapping": "C tests; Rust units",
           "evidence": "C tests; Rust units · пробел: Нет matrix-контракта"
+        },
+        {
+          "id": 108,
+          "key": "M8",
+          "name": "Production header-inline helpers inventory/mapping",
+          "weight": 1,
+          "points": 0,
+          "status": "unknown",
+          "statusLabel": "0 — нет принятого доказательства",
+          "group": "Core / CLI",
+          "coverage": "`docs/audit/function-index.md`",
+          "gap": "61 header-inline функций добавлены; helper-level mapping не проверен дифференциалами",
+          "mapping": "`docs/audit/function-index.md`",
+          "evidence": "`docs/audit/function-index.md` · пробел: 61 header-inline функций добавлены; helper-level mapping не проверен дифференциалами"
         }
       ]
     }
@@ -1725,13 +1879,55 @@
       "status": "unknown",
       "statusLabel": "0 — нет принятого доказательства",
       "group": "Datapath",
-      "coverage": "`test-router-route-gate-config.sh` (a63) — только service args",
+      "coverage": "`test-router-route-gate-config.sh` (a63) - только service args",
       "gap": "Runtime SO_MARK/route selection не проверен",
-      "mapping": "`test-router-route-gate-config.sh` (a63) — только service args",
-      "evidence": "`test-router-route-gate-config.sh` (a63) — только service args · пробел: Runtime SO_MARK/route selection не проверен"
+      "mapping": "`test-router-route-gate-config.sh` (a63) - только service args",
+      "evidence": "`test-router-route-gate-config.sh` (a63) - только service args · пробел: Runtime SO_MARK/route selection не проверен"
     },
     {
       "id": 21,
+      "key": "D20",
+      "name": "TCP timestamp shape contexts 8-13 (`d2k_link_shape_tcp_*`)",
+      "weight": 2,
+      "points": 0,
+      "status": "unknown",
+      "statusLabel": "0 — нет принятого доказательства",
+      "group": "Datapath",
+      "coverage": "`core/include/d2k_link.h`; `sched.c` использует 8-13",
+      "gap": "R2O поддерживает только 1-7; `D2K_TCP_SHAPE_*_TS` отсутствуют",
+      "mapping": "`core/include/d2k_link.h`; `sched.c` использует 8-13",
+      "evidence": "`core/include/d2k_link.h`; `sched.c` использует 8-13 · пробел: R2O поддерживает только 1-7; `D2K_TCP_SHAPE_*_TS` отсутствуют"
+    },
+    {
+      "id": 22,
+      "key": "D21",
+      "name": "Datapath scheduler: due ordering, refusals, owned IDs",
+      "weight": 1,
+      "points": 0,
+      "status": "unknown",
+      "statusLabel": "0 — нет принятого доказательства",
+      "group": "Datapath",
+      "coverage": "`scheduler.rs`",
+      "gap": "нет paired differential; cancel/reservation — R2O-only расширение",
+      "mapping": "`scheduler.rs`",
+      "evidence": "`scheduler.rs` · пробел: нет paired differential; cancel/reservation — R2O-only расширение"
+    },
+    {
+      "id": 23,
+      "key": "D22",
+      "name": "Journal: ring/retention/dropped/added/format",
+      "weight": 1,
+      "points": 0,
+      "status": "unknown",
+      "statusLabel": "0 — нет принятого доказательства",
+      "group": "Datapath",
+      "coverage": "`flow_journal.rs`",
+      "gap": "тексты suspect/refuse и часть полей не совпадают",
+      "mapping": "`flow_journal.rs`",
+      "evidence": "`flow_journal.rs` · пробел: тексты suspect/refuse и часть полей не совпадают"
+    },
+    {
+      "id": 24,
       "key": "S1",
       "name": "Control frame/commands/ACK/APPLIED/REFUSED",
       "weight": 2,
@@ -1745,7 +1941,7 @@
       "evidence": "`r2o-control-events`, `r2o-control-dropped`, `r2o-ack-applied-persist` (все 304) · пробел: Другая ревизия; длительный процессный restart"
     },
     {
-      "id": 22,
+      "id": 25,
       "key": "S2",
       "name": "Scheduler due order/cooldown/dead address/concurrent endpoints",
       "weight": 3,
@@ -1759,7 +1955,7 @@
       "evidence": "`r2o-scheduler-cooldown`/`dead-address`/`concurrent` (304), `r2o-scheduler-differential` (без diff) · пробел: 304; due ordering не paired"
     },
     {
-      "id": 23,
+      "id": 26,
       "key": "S3",
       "name": "Discovery known-plan/coalesce/queue/permits/own-first",
       "weight": 3,
@@ -1773,7 +1969,7 @@
       "evidence": "`r2o-discovery-*`, `r2o-queue-order`, `r2o-worker-permit`, `r2o-own-first` (304) · пробел: 304; нет текущего прогона"
     },
     {
-      "id": 24,
+      "id": 27,
       "key": "S4",
       "name": "ACK → APPLIED exact proof → candidate persistence",
       "weight": 2,
@@ -1787,7 +1983,7 @@
       "evidence": "`r2o-ack-applied-persist` (304), `r2o-known-plans` (304) · пробел: 304; process restart"
     },
     {
-      "id": 25,
+      "id": 28,
       "key": "S5",
       "name": "JSON catalog atomic save/merge/sync",
       "weight": 2,
@@ -1801,7 +1997,7 @@
       "evidence": "`r2o-catalog-persist`, `r2o-catalog-sync` (304) · пробел: 304; concurrent external writer"
     },
     {
-      "id": 26,
+      "id": 29,
       "key": "S6",
       "name": "HTTP search candidate/order/retry/judge/APPLIED",
       "weight": 3,
@@ -1815,7 +2011,7 @@
       "evidence": "`r2o-http-search` (304), `r2o-fetch-cli` (без пина) · пробел: 304; живой поиск; APPLIED branch"
     },
     {
-      "id": 27,
+      "id": 30,
       "key": "S7",
       "name": "S99/procd boot waiters/restart/stop/delayed /opt",
       "weight": 1,
@@ -1829,7 +2025,7 @@
       "evidence": "`test-router-procd-lifecycle-qemu.py` (a63), `test-router-openwrt-init.sh` · пробел: Только waiter dispatch; crash recovery отдельно"
     },
     {
-      "id": 28,
+      "id": 31,
       "key": "S8",
       "name": "Process crash/restart + catalog reapply",
       "weight": 1,
@@ -1843,7 +2039,7 @@
       "evidence": "`test-controller-process-reapply-qemu.py` (R2O-only), `test-router-process-supervisor.sh` · пробел: Нет C-parity; D2O waiter one-shot"
     },
     {
-      "id": 29,
+      "id": 32,
       "key": "S9",
       "name": "Auto refusal → Discovery → APPLIED → firewall reapply",
       "weight": 2,
@@ -1857,7 +2053,7 @@
       "evidence": "Process smoke с fake datapath peer · пробел: Нет реального datapath/firewall; failure injection"
     },
     {
-      "id": 30,
+      "id": 33,
       "key": "S10",
       "name": "Long-running controller recovery",
       "weight": 1,
@@ -1871,7 +2067,21 @@
       "evidence": "Нет · пробел: Полный цикл после crash/restart"
     },
     {
-      "id": 31,
+      "id": 34,
+      "key": "S11",
+      "name": "Diagnostics records/snapshots/madvise and periodic report",
+      "weight": 1,
+      "points": 0,
+      "status": "unknown",
+      "statusLabel": "0 — нет принятого доказательства",
+      "group": "Discovery",
+      "coverage": "`diagnostics.rs`, `r2o-diagnostics-differential.sh`",
+      "gap": "allocator/madvise и часть периодической RSS-сводки отсутствуют",
+      "mapping": "`diagnostics.rs`, `r2o-diagnostics-differential.sh`",
+      "evidence": "`diagnostics.rs`, `r2o-diagnostics-differential.sh` · пробел: allocator/madvise и часть периодической RSS-сводки отсутствуют"
+    },
+    {
+      "id": 35,
       "key": "C1",
       "name": "Raw profiles/ECH shapes/send/cancel/fallback/connect",
       "weight": 3,
@@ -1885,7 +2095,7 @@
       "evidence": "`r2o-raw-profile`, `r2o-raw-emission-cancel`, `r2o-raw-connect-fallback`, `r2o-fallback`, `r2o-raw-split-support` (304) · пробел: 304; live DPI; cancel/timing"
     },
     {
-      "id": 32,
+      "id": 36,
       "key": "C2",
       "name": "CLEAR confirmation/cancel",
       "weight": 1,
@@ -1899,7 +2109,7 @@
       "evidence": "`test-classifier-clear-confirm` (304) · пробел: 304"
     },
     {
-      "id": 33,
+      "id": 37,
       "key": "C3",
       "name": "SO_MARK confirmation",
       "weight": 1,
@@ -1913,7 +2123,7 @@
       "evidence": "`test-classifier-so-mark-production` (304) · пробел: 304; production getsockopt"
     },
     {
-      "id": 34,
+      "id": 38,
       "key": "C4",
       "name": "Base transport errors → split",
       "weight": 1,
@@ -1927,7 +2137,7 @@
       "evidence": "`test-classifier-full-tree-control` (304) · пробел: 304"
     },
     {
-      "id": 35,
+      "id": 39,
       "key": "C5",
       "name": "Poison/strategy tree/control/neutral ACK",
       "weight": 2,
@@ -1941,7 +2151,7 @@
       "evidence": "`test-classifier-full-tree-control`, `candidate-filter`, `raw-production` (304) · пробел: 304; injected/scripted branches"
     },
     {
-      "id": 36,
+      "id": 40,
       "key": "C6",
       "name": "TCP measurement + core verifier",
       "weight": 2,
@@ -1955,7 +2165,7 @@
       "evidence": "`r2o-meas`, `r2o-measured-split` (304) · пробел: 304; full call path"
     },
     {
-      "id": 37,
+      "id": 41,
       "key": "C7",
       "name": "TLS/HTTP verifier outcomes/retry",
       "weight": 1,
@@ -1969,7 +2179,7 @@
       "evidence": "`r2o-tls-verify-differential.sh` (a378), `test-http-chunk-framing` (a63) · пробел: Loopback; не live DPI"
     },
     {
-      "id": 38,
+      "id": 42,
       "key": "C8",
       "name": "Connect/read timeout + doubled baseline retry",
       "weight": 1,
@@ -1983,7 +2193,7 @@
       "evidence": "`test-classifier-full-tree-control` (304) · пробел: 304"
     },
     {
-      "id": 39,
+      "id": 43,
       "key": "C9",
       "name": "TLS 1.2 reverse response probe/verdicts",
       "weight": 3,
@@ -1997,7 +2207,7 @@
       "evidence": "`test-d2o-shared-fixtures` (304), `test-classifier-full-tree-control` (304) · пробел: 304; live DPI"
     },
     {
-      "id": 40,
+      "id": 44,
       "key": "C10",
       "name": "ECH receive ladder/witness/retries",
       "weight": 2,
@@ -2011,7 +2221,7 @@
       "evidence": "`r2o-ech-rx-ladder`, `r2o-layered-rx` (304) · пробел: 304; реальные ECH-конфигурации"
     },
     {
-      "id": 41,
+      "id": 45,
       "key": "C11",
       "name": "HTTP response framing/reader",
       "weight": 1,
@@ -2025,7 +2235,7 @@
       "evidence": "`test-http-chunk-framing-differential.sh` (a63), `r2k-core` tests · пробел: Остальные call-path/ветви"
     },
     {
-      "id": 42,
+      "id": 46,
       "key": "C12",
       "name": "ClientHello/TLS12/13/ECH parser helpers",
       "weight": 1,
@@ -2039,7 +2249,7 @@
       "evidence": "C `test_hello/test_ech/test_tls12`, Rust unit · пробел: Нет paired diff"
     },
     {
-      "id": 43,
+      "id": 47,
       "key": "C13",
       "name": "HTTPS probe/ECH resolver/cache state",
       "weight": 1,
@@ -2053,7 +2263,7 @@
       "evidence": "C `test_httpsprobe`, Rust tests · пробел: Нет paired diff"
     },
     {
-      "id": 44,
+      "id": 48,
       "key": "C14",
       "name": "HTTP/3 status/header parser + httpup",
       "weight": 1,
@@ -2067,7 +2277,7 @@
       "evidence": "C `test_h3`, `test_httpup_logic`; Rust tests · пробел: Нет paired diff"
     },
     {
-      "id": 45,
+      "id": 49,
       "key": "C15",
       "name": "Compose/crypto/p256/x25519/props helpers",
       "weight": 2,
@@ -2081,7 +2291,21 @@
       "evidence": "C tests, Rust unit · пробел: Нет matrix-контракта"
     },
     {
-      "id": 46,
+      "id": 50,
+      "key": "C16",
+      "name": "Detect/classifier CLI output/exit/JSON",
+      "weight": 1,
+      "points": 0,
+      "status": "unknown",
+      "statusLabel": "0 — нет принятого доказательства",
+      "group": "Classifier / TLS",
+      "coverage": "`r2o-controller/main.rs`",
+      "gap": "human stdout/exit/JSON не полностью сопоставлены",
+      "mapping": "`r2o-controller/main.rs`",
+      "evidence": "`r2o-controller/main.rs` · пробел: human stdout/exit/JSON не полностью сопоставлены"
+    },
+    {
+      "id": 51,
       "key": "Q1",
       "name": "QUIC Initial/QSN/SNI/local-address gate",
       "weight": 2,
@@ -2095,7 +2319,7 @@
       "evidence": "`r2o-quic-hello`, `r2o-quic-local-address` (304), `r2o-discovery-quic-stop` · пробел: 304; stop/fallback"
     },
     {
-      "id": 47,
+      "id": 52,
       "key": "Q2",
       "name": "Residual/VN/address pool/neutral controls/fallback",
       "weight": 3,
@@ -2109,7 +2333,7 @@
       "evidence": "REA_EVIDENCE (source mapping), controller unit tests · пробел: Нет поведенческого differential"
     },
     {
-      "id": 48,
+      "id": 53,
       "key": "Q3",
       "name": "Short-control complete/budget",
       "weight": 1,
@@ -2123,7 +2347,7 @@
       "evidence": "`test-quic-short-control` (304) · пробел: 304"
     },
     {
-      "id": 49,
+      "id": 54,
       "key": "Q4",
       "name": "HTTP/3 framing/stream termination",
       "weight": 1,
@@ -2137,7 +2361,7 @@
       "evidence": "`test-quic-http3-full-stage-differential.sh` (a63), 18/18 · пробел: Network errors/lifecycle"
     },
     {
-      "id": 50,
+      "id": 55,
       "key": "Q5",
       "name": "HTTP/3 budgets/transport limits/stall",
       "weight": 1,
@@ -2151,7 +2375,7 @@
       "evidence": "Full-stage 18/18; `test-quic-http3` · пробел: 70-KiB HEADERS app_bytes; timing-sensitive stall"
     },
     {
-      "id": 51,
+      "id": 56,
       "key": "Q6",
       "name": "Budget init/app-bytes helper",
       "weight": 1,
@@ -2165,7 +2389,7 @@
       "evidence": "`test-quic-budget-init`, `test-quic-app-bytes` (304) · пробел: 304"
     },
     {
-      "id": 52,
+      "id": 57,
       "key": "Q7",
       "name": "Silent peer handshake timeout",
       "weight": 1,
@@ -2179,7 +2403,21 @@
       "evidence": "Full-stage/`r2o_http3_silent_udp_peer_timeout` (a63) · пробел: Нет ICMP/close-port вариантов"
     },
     {
-      "id": 53,
+      "id": 58,
+      "key": "Q8",
+      "name": "QUIC deny/recheck lifecycle",
+      "weight": 1,
+      "points": 0,
+      "status": "unknown",
+      "statusLabel": "0 — нет принятого доказательства",
+      "group": "QUIC / HTTP3",
+      "coverage": "`r2o_quic_deny.rs`",
+      "gap": "Нет paired C/Rust lifecycle differential",
+      "mapping": "`r2o_quic_deny.rs`",
+      "evidence": "`r2o_quic_deny.rs` · пробел: Нет paired C/Rust lifecycle differential"
+    },
+    {
+      "id": 59,
       "key": "R1",
       "name": "UDP observer initiator/SSRC/endpoint event",
       "weight": 2,
@@ -2193,7 +2431,7 @@
       "evidence": "`test-discord-udp-observer-reconnect` (304) · пробел: 304; production RTC"
     },
     {
-      "id": 54,
+      "id": 60,
       "key": "R2",
       "name": "Manual measurement arm propagation",
       "weight": 1,
@@ -2207,7 +2445,7 @@
       "evidence": "`test-discord-voice-discovery-arm` (304) · пробел: 304"
     },
     {
-      "id": 55,
+      "id": 61,
       "key": "R3",
       "name": "Voice trial lease/renewal/120-s waiter/APPLIED",
       "weight": 3,
@@ -2221,7 +2459,7 @@
       "evidence": "`r2o-discord-discovery`, `r2o-discord-voice-lifecycle-helper` (304), `test-discord-scheduled-udp` (a63) · пробел: 304; production process/long RTC"
     },
     {
-      "id": 56,
+      "id": 62,
       "key": "R4",
       "name": "Endpoint change/late NAK/persistence/reapply",
       "weight": 1,
@@ -2235,7 +2473,7 @@
       "evidence": "`r2o-discord-voice-lifecycle-helper` (304) · пробел: 304; source-backed helper"
     },
     {
-      "id": 57,
+      "id": 63,
       "key": "R5",
       "name": "Trial clock after queue admission",
       "weight": 1,
@@ -2249,7 +2487,7 @@
       "evidence": "`test-discord-voice-trial-clock` (304) · пробел: 304"
     },
     {
-      "id": 58,
+      "id": 64,
       "key": "R6",
       "name": "Scheduled UDP emission/queue stats",
       "weight": 1,
@@ -2263,7 +2501,7 @@
       "evidence": "`test-discord-scheduled-udp-differential.sh` (a63) · пробел: Periodic/shutdown queue output"
     },
     {
-      "id": 59,
+      "id": 65,
       "key": "R7",
       "name": "Long RTC session/process recovery",
       "weight": 1,
@@ -2277,7 +2515,7 @@
       "evidence": "Нет · пробел: Полный RTC, restart, endpoint recovery"
     },
     {
-      "id": 60,
+      "id": 66,
       "key": "R8",
       "name": "Discord Gateway WebSocket upgrade/Hello",
       "weight": 1,
@@ -2291,7 +2529,7 @@
       "evidence": "`r2o-tls-verify-differential.sh` + `d2o_verify_differential` (a378), 14 сценариев · пробел: Loopback; не живой Gateway"
     },
     {
-      "id": 61,
+      "id": 67,
       "key": "T1",
       "name": "Telegram route plan/DNS exclusion",
       "weight": 1,
@@ -2305,7 +2543,7 @@
       "evidence": "`r2o-telegram-route-dns` (304, historical) · пробел: Не перезапущен; z2kOW donor, не C11 D2O"
     },
     {
-      "id": 62,
+      "id": 68,
       "key": "T2",
       "name": "Telegram response observer",
       "weight": 1,
@@ -2319,7 +2557,7 @@
       "evidence": "`r2o-telegram-response-observer` (304, historical) · пробел: То же"
     },
     {
-      "id": 63,
+      "id": 69,
       "key": "T3",
       "name": "Config/DC map/MTProto/WS retries/service lifecycle",
       "weight": 2,
@@ -2333,7 +2571,7 @@
       "evidence": "Source compare 38 files; `test-router-telegram-service.sh` (R2O-only) · пробел: Нет C/Rust behavior diff; CF/WS не проверены"
     },
     {
-      "id": 64,
+      "id": 70,
       "key": "T4",
       "name": "Telegram firewall mark/stop order",
       "weight": 1,
@@ -2347,7 +2585,7 @@
       "evidence": "`test-router-tg-mark-differential.sh`, `test-telegram-stop-order-differential.sh` (8e2c) · пробел: Live router netfilter"
     },
     {
-      "id": 65,
+      "id": 71,
       "key": "T5",
       "name": "Meta DNS scheduler lifecycle + range asset",
       "weight": 1,
@@ -2361,7 +2599,7 @@
       "evidence": "`test-router-meta-dns-scheduler-differential.sh`, `test-package-release.sh` · пробел: Live `ndmc`; scheduler restart"
     },
     {
-      "id": 66,
+      "id": 72,
       "key": "T6",
       "name": "Direct DNS/TLS edge/owned-record removal",
       "weight": 1,
@@ -2375,7 +2613,21 @@
       "evidence": "`test-meta-edge-differential.sh`, `test-router-meta-dns-remove-differential.sh` (8e2c, CI #445) · пробел: Physical Keenetic"
     },
     {
-      "id": 67,
+      "id": 73,
+      "key": "T7",
+      "name": "Telegram limits/memory budget/stats timeout/config validation",
+      "weight": 1,
+      "points": 0,
+      "status": "unknown",
+      "statusLabel": "0 — нет принятого доказательства",
+      "group": "Telegram",
+      "coverage": "`limits.rs`, `stats.rs`, `config.rs`",
+      "gap": "memory budget отсутствует; stats read без таймаута; CF/TG_PORT validation расходится",
+      "mapping": "`limits.rs`, `stats.rs`, `config.rs`",
+      "evidence": "`limits.rs`, `stats.rs`, `config.rs` · пробел: memory budget отсутствует; stats read без таймаута; CF/TG_PORT validation расходится"
+    },
+    {
+      "id": 74,
       "key": "P1",
       "name": "Bind selection/install safety",
       "weight": 1,
@@ -2389,7 +2641,7 @@
       "evidence": "`r2o-panel-bind-default`, `test-router-select-panel-ip`, `test-router-panel-bind-install` (304) · пробел: 304; physical router"
     },
     {
-      "id": 68,
+      "id": 75,
       "key": "P2",
       "name": "Status unavailable/catalog token/size",
       "weight": 1,
@@ -2403,7 +2655,7 @@
       "evidence": "`test-panel-status-unavailable`, `test-panel-catalog-revision` (304) · пробел: 304"
     },
     {
-      "id": 69,
+      "id": 76,
       "key": "P3",
       "name": "Control/actions/workers/config/static/update",
       "weight": 2,
@@ -2417,7 +2669,7 @@
       "evidence": "22 panel scripts (304; temp a378) · пробел: 304; checked-in pin; browser"
     },
     {
-      "id": 70,
+      "id": 77,
       "key": "P4",
       "name": "Browser flow/layout",
       "weight": 1,
@@ -2431,7 +2683,21 @@
       "evidence": "`crates/r2o-panel/tests/browser.cjs` (R2O-only) · пробел: Нет C-oracle; только визуальная проверка"
     },
     {
-      "id": 71,
+      "id": 78,
+      "key": "P5",
+      "name": "Panel absolute response deadline and client IO resilience",
+      "weight": 1,
+      "points": 0,
+      "status": "unknown",
+      "statusLabel": "0 — нет принятого доказательства",
+      "group": "WebPanel",
+      "coverage": "`server.rs`",
+      "gap": "C absolute 5s deadline vs per-read/write; client IO error может остановить serve",
+      "mapping": "`server.rs`",
+      "evidence": "`server.rs` · пробел: C absolute 5s deadline vs per-read/write; client IO error может остановить serve"
+    },
+    {
+      "id": 79,
       "key": "F1a",
       "name": "Static nft/iptables rule generation: port/DNS/voice order, broadcast/ICMP",
       "weight": 1,
@@ -2445,7 +2711,7 @@
       "evidence": "`test-firewall-port-scope`, `broadcast`, `rule-error`, `nft-legacy` (8e2c) · пробел: Live kernel; полный syntax/effect"
     },
     {
-      "id": 72,
+      "id": 80,
       "key": "F1b",
       "name": "Marks/gate/connbytes: MEASURE_MARK, D2K_GATE, CONNBYTES+1, Telegram mark",
       "weight": 1,
@@ -2459,7 +2725,7 @@
       "evidence": "`test-firewall-connbytes-boundary`, `iptables-status`, `test-router-tg-mark-differential` (8e2c) · пробел: Live kernel; fault branches"
     },
     {
-      "id": 73,
+      "id": 81,
       "key": "F2",
       "name": "nft rollback/legacy cleanup/RST lifetime",
       "weight": 1,
@@ -2473,7 +2739,7 @@
       "evidence": "`test-firewall-nft-failure`, `nft-legacy`, `nft-down-rst-lifetime` (8e2c) · пробел: Live nft transaction"
     },
     {
-      "id": 74,
+      "id": 82,
       "key": "F3",
       "name": "Rule install error code",
       "weight": 1,
@@ -2487,7 +2753,7 @@
       "evidence": "`test-firewall-rule-error-differential.sh` (8e2c) · пробел: Полная таблица правил"
     },
     {
-      "id": 75,
+      "id": 83,
       "key": "F4",
       "name": "Flow-offload success/restore",
       "weight": 1,
@@ -2501,7 +2767,7 @@
       "evidence": "`test-router-flowoffload-d2o-differential.sh` (8e2c) · пробел: Live fw4/kernel"
     },
     {
-      "id": 76,
+      "id": 84,
       "key": "F5",
       "name": "Flow-offload UCI write-failure",
       "weight": 1,
@@ -2515,7 +2781,7 @@
       "evidence": "Тот же скрипт (8e2c) · пробел: Один fixture на две строки"
     },
     {
-      "id": 77,
+      "id": 85,
       "key": "F6",
       "name": "FastNAT lifecycle",
       "weight": 1,
@@ -2529,7 +2795,7 @@
       "evidence": "`test-router-fastnat-lifecycle-differential.sh` (a63) · пробел: Реальный sysctl/kernel"
     },
     {
-      "id": 78,
+      "id": 86,
       "key": "F7",
       "name": "DNS upstream exclusions/refresh",
       "weight": 1,
@@ -2543,7 +2809,7 @@
       "evidence": "`test-router-dns-exclusion-differential.sh` (a63) · пробел: Live DNS/ndmc"
     },
     {
-      "id": 79,
+      "id": 87,
       "key": "F8",
       "name": "Heal/watchdog/reapply/cooldown",
       "weight": 1,
@@ -2557,7 +2823,7 @@
       "evidence": "`test-router-reapply`, `heal-concurrency`, `firewall-watchdog`, `firewall-status`, `iptables-status` · пробел: Kernel; реальный watchdog crash"
     },
     {
-      "id": 80,
+      "id": 88,
       "key": "F9a",
       "name": "IPv6 fallback classification/modules/marker/reapply helper",
       "weight": 1,
@@ -2571,7 +2837,7 @@
       "evidence": "`test-router-ipv6-fallback-differential.sh` (a63), `route-gate-config` · пробел: Live kernel modules/NFQUEUE"
     },
     {
-      "id": 81,
+      "id": 89,
       "key": "F9b",
       "name": "IPv6 live kernel switch/queue recovery",
       "weight": 1,
@@ -2585,7 +2851,7 @@
       "evidence": "QEMU flow-offload only · пробел: Полный live module/queue/reapply"
     },
     {
-      "id": 82,
+      "id": 90,
       "key": "F10a",
       "name": "PPE rule generation/backend/cleanup/errors",
       "weight": 1,
@@ -2599,7 +2865,7 @@
       "evidence": "`test-router-ppe-rule-generation`, `backend`, `ensure-running`, `legacy-cleanup`, `firewall-lock`, `removal-error` (8e2c) · пробел: —"
     },
     {
-      "id": 83,
+      "id": 91,
       "key": "F10b",
       "name": "PPE hardware datapath/tag migration/restart",
       "weight": 1,
@@ -2607,13 +2873,27 @@
       "status": "unknown",
       "statusLabel": "0 — нет принятого доказательства",
       "group": "Firewall / PPE",
-      "coverage": "—",
+      "coverage": "-",
       "gap": "Реальный PPE kernel, hardware tags, restart",
-      "mapping": "—",
-      "evidence": "— · пробел: Реальный PPE kernel, hardware tags, restart"
+      "mapping": "-",
+      "evidence": "- · пробел: Реальный PPE kernel, hardware tags, restart"
     },
     {
-      "id": 84,
+      "id": 92,
+      "key": "F11",
+      "name": "Router clear-found/KEENETIC_POLICY/log rotation/heal semantics",
+      "weight": 1,
+      "points": 0,
+      "status": "unknown",
+      "statusLabel": "0 — нет принятого доказательства",
+      "group": "Firewall / PPE",
+      "coverage": "`S99r2o`",
+      "gap": "clear-found оставляет https-cache/measurements; KEENETIC_POLICY отсутствует; Meta DNS логи не ротируются; heal может запустить остановленный Telegram",
+      "mapping": "`S99r2o`",
+      "evidence": "`S99r2o` · пробел: clear-found оставляет https-cache/measurements; KEENETIC_POLICY отсутствует; Meta DNS логи не ротируются; heal может запустить остановленный Telegram"
+    },
+    {
+      "id": 93,
       "key": "L1",
       "name": "Update guard current/download failure",
       "weight": 1,
@@ -2627,7 +2907,7 @@
       "evidence": "`test-router-update-availability`, `update-scheduler` (8e2c) · пробел: Mock downloads"
     },
     {
-      "id": 85,
+      "id": 94,
       "key": "L2a",
       "name": "Staging/signature/stop/activate/health/rollback",
       "weight": 1,
@@ -2641,7 +2921,7 @@
       "evidence": "`test-router-update-lifecycle`, `test-signed-install-rollback.sh`, manager tests · пробел: Mock downloads; field"
     },
     {
-      "id": 86,
+      "id": 95,
       "key": "L2b",
       "name": "OpenWrt procd/reboot/signed field install",
       "weight": 1,
@@ -2655,7 +2935,7 @@
       "evidence": "— · пробел: Всё"
     },
     {
-      "id": 87,
+      "id": 96,
       "key": "L3",
       "name": "Package release manifest/asset bytes",
       "weight": 1,
@@ -2669,7 +2949,7 @@
       "evidence": "`test-package-release.sh`, meta-ranges bytes · пробел: Placeholder executables"
     },
     {
-      "id": 88,
+      "id": 97,
       "key": "L4a",
       "name": "Cross-build ABI + QEMU smoke 4 targets",
       "weight": 1,
@@ -2683,7 +2963,7 @@
       "evidence": "`r2o-build-openwrt-*`, ARMv5, D2O `make cross` · пробел: —"
     },
     {
-      "id": 89,
+      "id": 98,
       "key": "L4b",
       "name": "Runtime parity/load on target",
       "weight": 1,
@@ -2697,7 +2977,7 @@
       "evidence": "— · пробел: Runtime/физический роутер"
     },
     {
-      "id": 90,
+      "id": 99,
       "key": "L5",
       "name": "Physical router/procd update/reboot",
       "weight": 1,
@@ -2705,13 +2985,27 @@
       "status": "unknown",
       "statusLabel": "0 — нет принятого доказательства",
       "group": "Release / ABI",
-      "coverage": "—",
+      "coverage": "-",
       "gap": "Всё",
-      "mapping": "—",
-      "evidence": "— · пробел: Всё"
+      "mapping": "-",
+      "evidence": "- · пробел: Всё"
     },
     {
-      "id": 91,
+      "id": 100,
+      "key": "L6",
+      "name": "Install/bootstrap/uninstall lifecycle",
+      "weight": 1,
+      "points": 0,
+      "status": "unknown",
+      "statusLabel": "0 — нет принятого доказательства",
+      "group": "Release / ABI",
+      "coverage": "`router/install.sh`, `uninstall.sh`",
+      "gap": "bootstrap и uninstall fallback не проверены полностью",
+      "mapping": "`router/install.sh`, `uninstall.sh`",
+      "evidence": "`router/install.sh`, `uninstall.sh` · пробел: bootstrap и uninstall fallback не проверены полностью"
+    },
+    {
+      "id": 101,
       "key": "M1",
       "name": "`compose.c` + `d2kc.c` orchestration/event loop",
       "weight": 3,
@@ -2725,7 +3019,7 @@
       "evidence": "Inventory note; REA fragments · пробел: Нет отдельного контракта и differential"
     },
     {
-      "id": 92,
+      "id": 102,
       "key": "M2",
       "name": "`d2kask.c`",
       "weight": 1,
@@ -2739,7 +3033,7 @@
       "evidence": "`r2o-ask-differential.sh` — независимые suites · пробел: Нет paired diff"
     },
     {
-      "id": 93,
+      "id": 103,
       "key": "M3",
       "name": "`d2kfetch.c` CLI",
       "weight": 1,
@@ -2753,7 +3047,7 @@
       "evidence": "`r2o-fetch-cli-differential.sh` (сравнивает C/Rust CLI) · пробел: Нет SHA-пина; не все ветви"
     },
     {
-      "id": 94,
+      "id": 104,
       "key": "M4",
       "name": "`d2kvoice.c` controller entry",
       "weight": 1,
@@ -2767,7 +3061,7 @@
       "evidence": "Discord rows частично · пробел: Нет контракта"
     },
     {
-      "id": 95,
+      "id": 105,
       "key": "M5",
       "name": "`link.c`, `net4.c`, `udpruntime.c`, `volume.c`",
       "weight": 3,
@@ -2781,7 +3075,7 @@
       "evidence": "Inventory note; Rust `r2o_volume` tests · пробел: Нет C/Rust diff"
     },
     {
-      "id": 96,
+      "id": 106,
       "key": "M6",
       "name": "`crypto.c`, `p256.c`, `x25519.c`, `props.c`, `udpplan.c`, `plantlv.c` helpers",
       "weight": 3,
@@ -2795,7 +3089,7 @@
       "evidence": "C unit tests; Rust units · пробел: Нет paired diff и контракта"
     },
     {
-      "id": 97,
+      "id": 107,
       "key": "M7",
       "name": "`http80.c`, `http_trace.c`, `journal.c`, `plans.c`, `plan_parse/apply.c`",
       "weight": 2,
@@ -2807,18 +3101,32 @@
       "gap": "Нет matrix-контракта",
       "mapping": "C tests; Rust units",
       "evidence": "C tests; Rust units · пробел: Нет matrix-контракта"
+    },
+    {
+      "id": 108,
+      "key": "M8",
+      "name": "Production header-inline helpers inventory/mapping",
+      "weight": 1,
+      "points": 0,
+      "status": "unknown",
+      "statusLabel": "0 — нет принятого доказательства",
+      "group": "Core / CLI",
+      "coverage": "`docs/audit/function-index.md`",
+      "gap": "61 header-inline функций добавлены; helper-level mapping не проверен дифференциалами",
+      "mapping": "`docs/audit/function-index.md`",
+      "evidence": "`docs/audit/function-index.md` · пробел: 61 header-inline функций добавлены; helper-level mapping не проверен дифференциалами"
     }
   ],
   "comparison": {
     "strict": {
       "points": 37,
-      "weight": 132,
-      "percent": 28.03
+      "weight": 144,
+      "percent": 25.69
     },
     "carry_forward": {
       "points": 89,
-      "weight": 132,
-      "percent": 67.42,
+      "weight": 144,
+      "percent": 61.81,
       "note": "принять 304ba893 как допустимую ревизию"
     },
     "legacy": {

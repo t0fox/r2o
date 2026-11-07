@@ -151,8 +151,8 @@ def build_data(items):
             },
             "carry_forward": {
                 "points": 89,
-                "weight": 132,
-                "percent": 67.42,
+                "weight": 144,
+                "percent": 61.81,
                 "note": "принять 304ba893 как допустимую ревизию",
             },
             "legacy": {
@@ -246,7 +246,7 @@ def render_index(data, css, grid, rows):
 <div class="panel"><h2>Три оценки</h2><div class="compare">{compare_cards}</div>
 <p class="note">Строгий счёт — единственный, который подтверждает текущую ревизию. Carry-forward
 принимает <code>304ba893</code> как допустимую; legacy-агрегат имеет другой знаменатель (57 строк / 89 баллов)
-и не сопоставим напрямую с 97 контрактами / 132 баллами.</p></div>
+и не сопоставим напрямую с 108 контрактами / 144 баллами.</p></div>
 <div class="legend"><span style="--c:#36c989">доказано</span><span style="--c:#e6b45d">частично</span>
 <span style="--c:#819bf8">реализовано</span><span style="--c:#65758c">0 — нет доказательства</span></div>
 <div class="grid">{grid}</div>
@@ -296,7 +296,7 @@ def render_svg(data):
         '<rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/>',
         f'<rect x="37" y="113" width="{1024 * data["points"] / data["weight"]:.1f}" height="11" rx="5" fill="#36c989"/>',
         f'<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">{data["total"]} contracts · {data["counts"]["verified"]} verified · {data["counts"]["unknown"]} without accepted proof · 2026-11-07</text>',
-        '<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry-forward 89/132 = 67.42% · strict 37/132 = 28.03%</text>',
+        f'<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry-forward 89/{data["comparison"]["carry_forward"]["weight"]} = {data["comparison"]["carry_forward"]["percent"]:.2f}% · strict {data["points"]}/{data["weight"]} = {data["percent"]:.2f}%</text>',
     ]
     for index, group in enumerate(groups):
         x = 37 + (index % 2) * 520
@@ -349,16 +349,16 @@ def render_history():
             "sha": "carry-304",
             "date": "2026-11-07",
             "points": 89,
-            "weight": 132,
-            "percent": 67.42,
+            "weight": 144,
+            "percent": 61.81,
             "label": "carry-forward 304ba893",
         },
         {
             "sha": "strict-current",
             "date": "2026-11-07",
             "points": 37,
-            "weight": 132,
-            "percent": 28.03,
+            "weight": 144,
+            "percent": 25.69,
             "label": "строгий текущий",
         },
     ]

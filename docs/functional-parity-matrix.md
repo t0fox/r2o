@@ -2,11 +2,13 @@
 
 Актуальный документный срез: 2026-11-07. Зафиксированный C-эталон D2O: main `a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe`; базовый проверенный код R2O: main `234f72904657959031cca4d39d081988f081ccf2`; локальный аудит выполнен на D2O `a378e230947ebfd011439e1cac0f1e994d883aae` и R2O `de0298cd789896cc442be70c0831eafa10192580`.
 
-**Важно.** Таблица ниже — legacy-агрегат из 57 строк: 89 баллов веса, **80/89 (89,89 %)**. Это не оценка текущей ревизии. Аудит 2026-11-07 показал, что 49 из 80 баллов опираются на дифференциалы, закреплённые на `304ba893`, а несколько широких строк объединяют независимые контракты. Уточнённая матрица содержит **97 контрактов на 132 балла**:
+**Важно.** Таблица ниже — legacy-агрегат из 57 строк: 89 баллов веса, **80/89 (89,89 %)**. Это не оценка текущей ревизии. Аудит 2026-11-07 показал, что 49 из 80 баллов опираются на дифференциалы, закреплённые на `304ba893`, а несколько широких строк объединяют независимые контракты. После независимой валидации 2026-11-08 уточнённая матрица содержит **108 контрактов на 144 балла** (добавлены TCP shape contexts 8-13, diagnostics, panel response deadline/IO, router clear-found/policy/log, Telegram limits/stats, install/uninstall, QUIC deny/recheck, header-inline inventory, datapath scheduler/journal, detect CLI):
 
-- строгий режим (только `a63d964`/`a378e23`/`8e2c981`, без helper/mock/build): **37/132 = 28,03 %**;
-- перенос с принятием `304ba893`: **89/132 = 67,42 %**;
-- существующий scope без ранее неучтённых модулей: **36/118 = 30,51 %** строго и **88/118 = 74,58 %** с 304.
+- строгий режим (только `a63d964`/`a378e23`/`8e2c981`, без helper/mock/build): **37/144 = 25,69 %**;
+- перенос с принятием `304ba893`: **89/144 = 61,81 %**;
+- существующий scope без ранее неучтённых модулей: **36/129 = 27,91 %** строго и **88/129 = 68,22 %** с 304.
+
+Валидация также установила, что `a63d964` и `304ba893` отсутствуют в локальном git-объекте D2O; доказательства, закреплённые на них, в этом окружении не воспроизводятся. Детали — `docs/audit/validation-2026-11-08.md`.
 
 Legacy-таблица сохранена для исторической непрерывности и для `tools/progress.mjs`; уточнённая матрица находится в разделе «Уточнённая матрица покрытия (аудит 2026-11-07)». До перепина и перезапуска 304-дифференциалов балл 89,89 % нельзя использовать как доказательство текущего паритета.
 Ограничение версии: текущий D2O main — `8e2c98146cf0b712dc967fbec558c7b904666e87`, позже закреплённого C-эталона. Между этими ревизиями затронуты controller scheduler/HTTP search/TLS/QUIC, diagnostics, NFQUEUE и panel/Telegram. Поэтому оценка ниже относится к зафиксированному `a63d964` и только к явно перечисленным более поздним сравнениям; полный перенос относительно `8e2c981` ещё не переоценён. Дополнительные точечные прогоны 2026-11-06 для Meta DNS, firewall service/flow-offload и update guards явно отмечены в строках матрицы и выполнены против D2O main `8e2c981`; остальные строки остаются на зафиксированном baseline.
@@ -101,11 +103,11 @@ Scope boundary: the 89-point legacy table scores the router runtime. D2O relay-e
 
 Матрица содержит 57 контрактов: 50 доказанно эквивалентных, 6 частичных, 1 реализованный без полного parity evidence и 0 непроверенных. Частичные и неподтверждённые статусы дают 0 баллов.
 
-Legacy-агрегат: **80/89 = 89,89 %**. Строгая оценка текущей ревизии: **37/132 = 28,03 %** (см. раздел «Уточнённая матрица покрытия»).
+Legacy-агрегат: **80/89 = 89,89 %**. Строгая оценка текущей ревизии: **37/144 = 25,69 %** (см. раздел «Уточнённая матрица покрытия»).
 
 Историческая корректировка от 2026-11-01: `core/verify.c:d2k_verify_probe*` сопоставлен с R2O `fetch.rs`; обратный TLS 1.2 зонд сопоставлен с D2O `detect/response.c:d2k_probe_response` и R2O `response.rs`. На этом промежуточном срезе общие fixtures подтверждали сканер и решения, но не весь сетевой retry/address-resolution путь; оценка временно снижалась до 55/87. Последующие доказанные изменения отражены в таблице выше. Профиль RAM 128 МиБ исключён из требований по указанию владельца; это не является заявлением о производительности.
 
-**Legacy evidence-weighted parity: 80 / 89 = 89,89 %.** Это доля требований старой агрегированной таблицы с подтверждением перечисленных C/Rust ветвей. Она не равна строгой оценке текущей ревизии (37/132 = 28,03 %): 49 из 80 баллов опираются на `304ba893`, а широкие строки объединяют независимые контракты.
+**Legacy evidence-weighted parity: 80 / 89 = 89,89 %.** Это доля требований старой агрегированной таблицы с подтверждением перечисленных C/Rust ветвей. Она не равна строгой оценке текущей ревизии (37/144 = 25,69 %): 49 из 80 баллов опираются на `304ba893`, а широкие строки объединяют независимые контракты.
 
 Дополнительное доказательство datapath (2026-11-03): `scripts/test-conntrack-retry-current-differential.sh` запустил production `d2kd` из D2O main `a63d964` и production `r2o-datapath` на R2O main `67a191f` с изменением retry из этого follow-up. В изолированном network namespace shim отклонил только второй `NETLINK_NETFILTER` socket (ctnetlink после NFQUEUE); после изменения `ip rule` оба процесса открыли ctnetlink повторно и сообщили о восстановлении на route/rules refresh. Прогон Debian 13 WSL2 прошёл. Это доказывает ветвь восстановления conntrack; IPv6 NFQUEUE C-oracle и остальные ветви строки остаются открыты, поэтому статус и баллы этого контракта не меняются.
 
@@ -293,7 +295,7 @@ Legacy-агрегат: **80/89 = 89,89 %**. Строгая оценка теку
 
 Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` прошёл. Windows `r2o-panel --lib --test http` дал 12 passed, 6 ignored, 1 failed: тест worker-config атомарно заменяет уже существующий файл, а Windows `rename` не имеет Linux overwrite semantics; отдельный panel CLI HTTP health test также не дождался HTTP-ответа. Эти два отказа не подтверждают дефект Linux/OpenWrt поведения, но panel HTTP/runtime тесты остаются непроверенными на Linux.
 
-Остаются: полное C-сравнение IPv6 NFQUEUE (D2O привязывает очередь только к AF_INET); остальные periodic datapath/process metrics; полный service цикл после отказа/crash/restart/reapply; остаточные QUIC HTTP/3 transport errors, timing-sensitive stall и lifecycle ветви; Discord endpoint change, NAK/timeout persistence, durable restart и длинная RTC-сессия; Telegram service/config/DC/handshake/retry/firewall parity; Meta DNS на целевой платформе; полный panel API/status/errors/settings/assets; полный static firewall rules/backend contract, flow-offload recovery и PPE; остаточные heal/watchdog ветви; Linux signed update/rollback. Помимо короткого smoke, текущий R2O прошёл 301,2-секундный смешанный IPv6 soak в полном OpenWrt QEMU при 128 МиБ; отдельный Rust IPv6 gateway soak в WSL2 длился 300 с. C/Rust high-cardinality mixed load measured for 60 s per side; физический роутер и калибровка не использовались и остаются вне области. OpenWrt 25.12-SNAPSHOT загружен в QEMU с адресом `192.168.1.1`; dual-stack queues 2000/2001, исходящий IPv6 TCP и fw4 flow offload/NFQUEUE на production datapath проверены; гостю выделялось 512 MiB. Физический роутер не использовался. Исторический расчёт «46 строк / 63/87» устарел и заменён аудитом 2026-11-07: действующая legacy-таблица содержит 57 строк и 80/89, а уточнённая матрица — 97 контрактов и 37/132 в строгом режиме. См. `docs/audit/README.md`.
+Остаются: полное C-сравнение IPv6 NFQUEUE (D2O привязывает очередь только к AF_INET); остальные periodic datapath/process metrics; полный service цикл после отказа/crash/restart/reapply; остаточные QUIC HTTP/3 transport errors, timing-sensitive stall и lifecycle ветви; Discord endpoint change, NAK/timeout persistence, durable restart и длинная RTC-сессия; Telegram service/config/DC/handshake/retry/firewall parity; Meta DNS на целевой платформе; полный panel API/status/errors/settings/assets; полный static firewall rules/backend contract, flow-offload recovery и PPE; остаточные heal/watchdog ветви; Linux signed update/rollback. Помимо короткого smoke, текущий R2O прошёл 301,2-секундный смешанный IPv6 soak в полном OpenWrt QEMU при 128 МиБ; отдельный Rust IPv6 gateway soak в WSL2 длился 300 с. C/Rust high-cardinality mixed load measured for 60 s per side; физический роутер и калибровка не использовались и остаются вне области. OpenWrt 25.12-SNAPSHOT загружен в QEMU с адресом `192.168.1.1`; dual-stack queues 2000/2001, исходящий IPv6 TCP и fw4 flow offload/NFQUEUE на production datapath проверены; гостю выделялось 512 MiB. Физический роутер не использовался. Исторический расчёт «46 строк / 63/87» устарел и заменён аудитом 2026-11-07: действующая legacy-таблица содержит 57 строк и 80/89, а уточнённая матрица - 108 контрактов и 37/144 в строгом режиме. См. `docs/audit/README.md`.
 
 97. **Flow offload возвращён к D2O lifecycle по требованию владельца.** D2O flowoffload_off() сохраняет включённый flow_offloading, устанавливает 0 и перезагружает firewall; stop возвращает исходное значение. Аппаратная UCI-настройка не меняется; fw3/iptables helper — no-op. RED/GREEN в test-router-flowoffload-d2o-differential.sh подтверждает состояния и trace; lifecycle тест подтверждает ordering. Удалены selective ct-mark/rule/include механизмы и их тест; сохранена очистка legacy hook от предыдущих локальных selective сборок. Глобальное fw4 runtime поведение и отсутствие потери NFQUEUE видимости в настоящем OpenWrt остаются непроверенными; статус partial, 0 баллов. Исторические selective записи выше superseded этим решением.
 
@@ -474,8 +476,11 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | D16 | Raw IPv6 emission shapes/UDP delivery (1) | доказано | 1 | `test-raw6-send-differential.sh` (a63) | Route mark/MTU on live router |
 | D17 | HTTP/80 replacement + hold (1) | 0 | 0 | `http80.c`/`http_trace.c`; C tests; Rust `http_replace` | Нет matrix-контракта и paired diff |
 | D18 | Capture/TLS/wire/addr helpers (1) | 0 | 0 | C tests, Rust unit tests | Нет paired diff |
-| D19 | Route mark/socket route selection (1) | 0 | 0 | `test-router-route-gate-config.sh` (a63) — только service args | Runtime SO_MARK/route selection не проверен |
-| | **Итого Datapath** | | **11/22** | | |
+| D19 | Route mark/socket route selection (1) | 0 | 0 | `test-router-route-gate-config.sh` (a63) - только service args | Runtime SO_MARK/route selection не проверен |
+| D20 | TCP timestamp shape contexts 8-13 (`d2k_link_shape_tcp_*`) (2) | 0 | 0 | `core/include/d2k_link.h`; `sched.c` использует 8-13 | R2O поддерживает только 1-7; `D2K_TCP_SHAPE_*_TS` отсутствуют |
+| D21 | Datapath scheduler: due ordering, refusals, owned IDs (1) | 0 | 0 | `scheduler.rs` | нет paired differential; cancel/reservation — R2O-only расширение |
+| D22 | Journal: ring/retention/dropped/added/format (1) | 0 | 0 | `flow_journal.rs` | тексты suspect/refuse и часть полей не совпадают |
+| | **Итого Datapath** | | **11/26** | | |
 
 ### 6.2. Control / Scheduler / Discovery / Catalog
 
@@ -491,7 +496,8 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | S8 | Process crash/restart + catalog reapply (1) | 0 | 0 | `test-controller-process-reapply-qemu.py` (R2O-only), `test-router-process-supervisor.sh` | Нет C-parity; D2O waiter one-shot |
 | S9 | Auto refusal → Discovery → APPLIED → firewall reapply (2) | 0 | 0 | Process smoke с fake datapath peer | Нет реального datapath/firewall; failure injection |
 | S10 | Long-running controller recovery (1) | 0 | 0 | Нет | Полный цикл после crash/restart |
-| | **Итого Discovery** | | **1/20** | | |
+| S11 | Diagnostics records/snapshots/madvise and periodic report (1) | 0 | 0 | `diagnostics.rs`, `r2o-diagnostics-differential.sh` | allocator/madvise и часть периодической RSS-сводки отсутствуют |
+| | **Итого Discovery** | | **1/21** | | |
 
 ### 6.3. Classifier / TLS / HTTP
 
@@ -512,7 +518,8 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | C13 | HTTPS probe/ECH resolver/cache state (1) | 0 | 0 | C `test_httpsprobe`, Rust tests | Нет paired diff |
 | C14 | HTTP/3 status/header parser + httpup (1) | 0 | 0 | C `test_h3`, `test_httpup_logic`; Rust tests | Нет paired diff |
 | C15 | Compose/crypto/p256/x25519/props helpers (2) | 0 | 0 | C tests, Rust unit | Нет matrix-контракта |
-| | **Итого Classifier/TLS** | | **2/23** | | |
+| C16 | Detect/classifier CLI output/exit/JSON (1) | 0 | 0 | `r2o-controller/main.rs` | human stdout/exit/JSON не полностью сопоставлены |
+| | **Итого Classifier/TLS** | | **2/24** | | |
 
 ### 6.4. QUIC / HTTP3
 
@@ -525,7 +532,8 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | Q5 | HTTP/3 budgets/transport limits/stall (1) | 0 | 0 | Full-stage 18/18; `test-quic-http3` | 70-KiB HEADERS app_bytes; timing-sensitive stall |
 | Q6 | Budget init/app-bytes helper (1) | 0 | 0 | `test-quic-budget-init`, `test-quic-app-bytes` (304) | 304 |
 | Q7 | Silent peer handshake timeout (1) | доказано | 1 | Full-stage/`r2o_http3_silent_udp_peer_timeout` (a63) | Нет ICMP/close-port вариантов |
-| | **Итого QUIC/HTTP3** | | **2/10** | | |
+| Q8 | QUIC deny/recheck lifecycle (1) | 0 | 0 | `r2o_quic_deny.rs` | Нет paired C/Rust lifecycle differential |
+| | **Итого QUIC/HTTP3** | | **2/11** | | |
 
 ### 6.5. Discord
 
@@ -551,7 +559,8 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | T4 | Telegram firewall mark/stop order (1) | доказано | 1 | `test-router-tg-mark-differential.sh`, `test-telegram-stop-order-differential.sh` (8e2c) | Live router netfilter |
 | T5 | Meta DNS scheduler lifecycle + range asset (1) | доказано | 1 | `test-router-meta-dns-scheduler-differential.sh`, `test-package-release.sh` | Live `ndmc`; scheduler restart |
 | T6 | Direct DNS/TLS edge/owned-record removal (1) | доказано | 1 | `test-meta-edge-differential.sh`, `test-router-meta-dns-remove-differential.sh` (8e2c, CI #445) | Physical Keenetic |
-| | **Итого Telegram/Meta** | | **3/7** | | |
+| T7 | Telegram limits/memory budget/stats timeout/config validation (1) | 0 | 0 | `limits.rs`, `stats.rs`, `config.rs` | memory budget отсутствует; stats read без таймаута; CF/TG_PORT validation расходится |
+| | **Итого Telegram/Meta** | | **3/8** | | |
 
 ### 6.7. WebPanel
 
@@ -561,7 +570,8 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | P2 | Status unavailable/catalog token/size (1) | 0 | 0 | `test-panel-status-unavailable`, `test-panel-catalog-revision` (304) | 304 |
 | P3 | Control/actions/workers/config/static/update (2) | 0 | 0 | 22 panel scripts (304; temp a378) | 304; checked-in pin; browser |
 | P4 | Browser flow/layout (1) | 0 | 0 | `crates/r2o-panel/tests/browser.cjs` (R2O-only) | Нет C-oracle; только визуальная проверка |
-| | **Итого WebPanel** | | **0/5** | | |
+| P5 | Panel absolute response deadline and client IO resilience (1) | 0 | 0 | `server.rs` | C absolute 5s deadline vs per-read/write; client IO error может остановить serve |
+| | **Итого WebPanel** | | **0/6** | | |
 
 ### 6.8. Firewall / PPE
 
@@ -579,8 +589,9 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | F9a | IPv6 fallback classification/modules/marker/reapply helper (1) | доказано | 1 | `test-router-ipv6-fallback-differential.sh` (a63), `route-gate-config` | Live kernel modules/NFQUEUE |
 | F9b | IPv6 live kernel switch/queue recovery (1) | 0 | 0 | QEMU flow-offload only | Полный live module/queue/reapply |
 | F10a | PPE rule generation/backend/cleanup/errors (1) | доказано | 1 | `test-router-ppe-rule-generation`, `backend`, `ensure-running`, `legacy-cleanup`, `firewall-lock`, `removal-error` (8e2c) | — |
-| F10b | PPE hardware datapath/tag migration/restart (1) | 0 | 0 | — | Реальный PPE kernel, hardware tags, restart |
-| | **Итого Firewall/PPE** | | **11/13** | | |
+| F10b | PPE hardware datapath/tag migration/restart (1) | 0 | 0 | - | Реальный PPE kernel, hardware tags, restart |
+| F11 | Router clear-found/KEENETIC_POLICY/log rotation/heal semantics (1) | 0 | 0 | `S99r2o` | clear-found оставляет https-cache/measurements; KEENETIC_POLICY отсутствует; Meta DNS логи не ротируются; heal может запустить остановленный Telegram |
+| | **Итого Firewall/PPE** | | **11/14** | | |
 
 ### 6.9. Release / ABI / Service
 
@@ -592,8 +603,9 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | L3 | Package release manifest/asset bytes (1) | доказано | 1 | `test-package-release.sh`, meta-ranges bytes | Placeholder executables |
 | L4a | Cross-build ABI + QEMU smoke 4 targets (1) | доказано | 1 | `r2o-build-openwrt-*`, ARMv5, D2O `make cross` | — |
 | L4b | Runtime parity/load on target (1) | 0 | 0 | — | Runtime/физический роутер |
-| L5 | Physical router/procd update/reboot (1) | 0 | 0 | — | Всё |
-| | **Итого Release/ABI** | | **4/7** | | |
+| L5 | Physical router/procd update/reboot (1) | 0 | 0 | - | Всё |
+| L6 | Install/bootstrap/uninstall lifecycle (1) | 0 | 0 | `router/install.sh`, `uninstall.sh` | bootstrap и uninstall fallback не проверены полностью |
+| | **Итого Release/ABI** | | **4/8** | | |
 
 ### 6.10. Ранее не учтённые production-модули
 
@@ -606,7 +618,8 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | M5 | `link.c`, `net4.c`, `udpruntime.c`, `volume.c` (3) | 0 | 0 | Inventory note; Rust `r2o_volume` tests | Нет C/Rust diff |
 | M6 | `crypto.c`, `p256.c`, `x25519.c`, `props.c`, `udpplan.c`, `plantlv.c` helpers (3) | 0 | 0 | C unit tests; Rust units | Нет paired diff и контракта |
 | M7 | `http80.c`, `http_trace.c`, `journal.c`, `plans.c`, `plan_parse/apply.c` (2) | 0 | 0 | C tests; Rust units | Нет matrix-контракта |
-| | **Итого неучтённые модули** | | **1/14** | | |
+| M8 | Production header-inline helpers inventory/mapping (1) | 0 | 0 | `docs/audit/function-index.md` | 61 header-inline функций добавлены; helper-level mapping не проверен дифференциалами |
+| | **Итого неучтённые модули** | | **1/15** | | |
 
 ### 6.11. Дополнительная декомпозиция Panel / Router / Telegram
 
@@ -619,11 +632,10 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 
 Эти подпункты нужно свести в таблицу с весами и бинарными статусами (доказано/0) в следующем проходе. До сведения они не влияют на 97/132 и не дают баллов.
 
-**Итог аудита.** 97 контрактов, вес 132: **37/132 = 28,03 %** в строгом режиме; **89/132 = 67,42 %** при принятии `304ba893`; legacy-агрегат 80/89 = 89,89 % не является оценкой текущей ревизии. Детали и ограничения — `docs/audit/README.md`.
+**Итог аудита.** 108 контрактов, вес 144: **37/144 = 25,69 %** в строгом режиме; **89/144 = 61,81 %** при принятии `304ba893`; legacy-агрегат 80/89 = 89,89 % не является оценкой текущей ревизии. Детали и ограничения — `docs/audit/README.md` и `docs/audit/validation-2026-11-08.md`.
 
 **Первое исправление после аудита (2026-11-07).** В `r2o-datapath` добавлены CLI-алиасы D2O `--flows` и `--udp-reverse-hook`; `cargo test -p r2o-datapath` прошёл 257 + 49 + 6 + 20 + 9 + 1 + 9 + 21 + 5 тестов, 0 failed, 1+ ignored; новый тест `d2o_cli_aliases_map_to_the_same_options` пройден. В `r2o-panel` known-list дополнен D2O/R2O ключами (`TG_RELAY_URL`, `TG_RELAY_SECRET`, `TG_ENROLL_PORT`, `D2K_PPE_DEOFFLOAD`, `D2K_RUNTIME_DIR`, `AUTOUPDATE`, `D2K_GATE`, `DNS_PORTS`, `HTTP_KEEPALIVE_PORTS`); `cargo test -p r2o-panel --test http` прошёл 20 passed, 0 failed, 16 ignored; новый тест `config_parser_accepts_all_shipped_and_donor_known_keys` пройден. Контракты CLI и panel остаются частичными: `--sched-slots`, `--duration`, `--log`, `--health-file`, абсолютный дедлайн ответа, обрыв клиента и незакрытая кавычка ещё не исправлены.
 
 **Важно для классификатора.** `core/meas.c` и `core/verdict.c` не вызываются текущим `d2kc`; production-путь идёт через `detect/classify.c` и `d2k_sched_tcp_*`. Строки C6/C8 и прежние строки L30–L33/L36 нужно читать как API-only или перепривязать к `detect/classify.c`.
 
 ---
-
