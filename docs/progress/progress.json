@@ -1,15 +1,15 @@
 {
   "source": "docs/functional-parity-matrix.md",
-  "date": "2026-11-06",
-  "weight": 87,
-  "points": 75,
-  "percent": 86.21,
-  "total": 55,
+  "date": "2026-11-07",
+  "weight": 89,
+  "points": 77,
+  "percent": 86.52,
+  "total": 57,
   "counts": {
-    "verified": 45,
-    "partial": 9,
+    "verified": 47,
+    "partial": 8,
     "implemented": 1,
-    "unknown": 0
+    "unknown": 1
   },
   "groups": [
     {
@@ -93,7 +93,7 @@
           "evidence": "Pinned D2O `304ba893dd37197128ac8799c0495b035f6a38c0` and Rust release `03d29dc7516fdad50e8bbd6970c524979d3789d5`; `scripts/test-datapath-high-cardinality-differential.sh` in Debian 13 WSL2: 1536 UDP peers, 60 paced rounds over 60 s plus one registration round (93,696 replies), concurrent 64-KiB TCP echo 12 times (786,432 bytes). Both tables: TCP 1/2048, UDP 1536/2048, refusals 0; NFQUEUE losses 0. VmHWM C 7,624 KiB, Rust 3,924 KiB. Separate Rust IPv6 gateway soak: 300 s/1024 peers. Namespace tests do not calibrate physical-router performance"
         },
         {
-          "id": 15,
+          "id": 17,
           "name": "Connect/read timeout classifier и единственный удвоенный baseline retry",
           "weight": 1,
           "points": 1,
@@ -104,7 +104,7 @@
           "evidence": "`test-classifier-full-tree-control-differential.sh` сверяет connect deadlines C/Rust 400→800 мс и production loopback probes: TLS ServerHello через 5,5 с принимается при настроенном сроке 7 с. R2O передаёт срок classifier напрямую; 5-секундный `core/meas.c::WAIT_CEIL_MS` относится к отдельному `d2k_meas_once`, не к `d2k_classify_run`"
         },
         {
-          "id": 29,
+          "id": 31,
           "name": "HTTP/3 response framing and stream termination",
           "weight": 1,
           "points": 1,
@@ -115,7 +115,7 @@
           "evidence": "Current-main D2O `a63d964` / R2O test source `17d5ea9` (production path unchanged since `394b994`): the C/Rust full-stage differential covers HTTP 204 with empty body, informational 103 followed by 451, Content-Length mismatch/open stream, final trailers and QUIC FIN, RESET_STREAM before headers/after headers/between body chunks, connection close before DATA/after partial DATA, and live one-way response activity. Verdict, app_bytes and request totals match; Rust checks response completion/error and avoids false stall on close/reset. `scripts/test-quic-http3-full-stage-differential.sh` passed 1"
         },
         {
-          "id": 30,
+          "id": 32,
           "name": "HTTP/3 request budgets, transport limits and stall deadlines",
           "weight": 1,
           "points": 0,
@@ -126,7 +126,7 @@
           "evidence": "Current-main D2O `a63d964` / R2O test source `17d5ea9`: the full-stage C/Rust harness passes 18/18, with targeted coverage also for ALPN refusal. Repeated GET/GOAWAY and zero bidi/uni stream-credit attempts, repeated budgets and growth, silent/closed peers, and `/budget-slow` are covered. One historical `/budget-slow` Cut/NotRun mismatch has not recurred; packet counts can differ (32/33). The 70-KiB response HEADERS case returns NotRun on both sides, but `app_bytes` differs (~66 KiB C, 0 Rust) because Rust advertises a 65,536 field-section limit. Timing-sensitive stall variants, header diagnos"
         },
         {
-          "id": 36,
+          "id": 38,
           "name": "Production controller recovery and long-running Discord RTC lifecycle",
           "weight": 1,
           "points": 0,
@@ -137,7 +137,7 @@
           "evidence": "Production R2O bounded Discovery and manual restart/reload are recorded, but automatic restart through the full candidate/APPLIED chain, endpoint recovery across service failure, and a long RTC session remain unverified. The helper-level persistence result above does not establish this process contract."
         },
         {
-          "id": 40,
+          "id": 42,
           "name": "Meta DNS scheduler lifecycle and packaged range asset",
           "weight": 1,
           "points": 1,
@@ -148,7 +148,7 @@
           "evidence": "`test-router-meta-dns-scheduler-differential.sh` verifies start/stop ordering, prerequisites and all 23 IPv4 CIDRs; Debian 13 WSL2 `test-package-release.sh` checks the asset bytes in single- and five-architecture packages. Live `ndmc` cleanup is not included in this point."
         },
         {
-          "id": 41,
+          "id": 43,
           "name": "Keenetic direct DNS, TLS edge verification and owned-record removal",
           "weight": 1,
           "points": 1,
@@ -177,7 +177,7 @@
           "evidence": "On pinned D2O `304ba893dd37197128ac8799c0495b035f6a38c0`, `r2o-raw-profile-differential.sh` compares family/ECH SYN options, self-test cache invalidation/recheck, and `white-hello-ts` without client TCP timestamps (`tcp_ts=0`, badsum+ECH decoy, 8 repeats, split=2, matching properties). `r2o-raw-emission-cancel-differential.sh` byte-compares pinned D2O `detect/raw.c::raw_send_plan` tcp-split packets with the R2O production packet builder/emitter; only random IPv4 ID and dependent header checksum are normalized. It also matches cancellation between spans and cancellation during an already-starte"
         },
         {
-          "id": 10,
+          "id": 11,
           "name": "Подтверждение базового CLEAR и отмена",
           "weight": 1,
           "points": 1,
@@ -188,7 +188,7 @@
           "evidence": "`test-classifier-clear-confirm-differential.sh` сравнивает 5/5 CLEAR, молчание и отказ соединения на подтверждении (FLAKY/5), отмену после базы (INCONCLUSIVE/3); Rust unit test отдельно проверяет транспортную ошибку подтверждения"
         },
         {
-          "id": 11,
+          "id": 12,
           "name": "CLEAR только с подтверждённым SO_MARK",
           "weight": 1,
           "points": 1,
@@ -199,7 +199,7 @@
           "evidence": "`test-classifier-so-mark-production-differential.sh` сравнивает настоящий D2O `core/meas.c` и Rust `probe_trigger` на loopback: успешный `SO_MARK 0x2d` и принятие совпадают; тот же Rust production socket test на OpenWrt 25.12 QEMU прошёл. Отказ `SO_MARK` и непомеченные ответы остаются покрыты предыдущим C/Rust classifier differential"
         },
         {
-          "id": 12,
+          "id": 13,
           "name": "Базовые transport errors и переход к разрезу",
           "weight": 1,
           "points": 1,
@@ -210,7 +210,7 @@
           "evidence": "Тот же differential сравнивает все ошибки базы → UNREACHABLE/3 без дополнительной серии, частичную ошибку базы с переходом к разрезу → FLAKY/6"
         },
         {
-          "id": 13,
+          "id": 14,
           "name": "Классификатор: baseline, poison/strategy tree, control и neutral ACK",
           "weight": 1,
           "points": 1,
@@ -221,7 +221,7 @@
           "evidence": "`test-classifier-full-tree-control-differential.sh` доказывает baseline deadline retry/error handling, 3-пробный CLEAR, control errors/unproven/first-pass, TLS alert как trigger miss и Address после отказа всех neutral ACK. C/Rust также сравнивает `--progress` для завершённых трёх повторов, досрочного успешного control и neutral ACK; `--json` проверяется настоящим C `d2k_cli_main` для raw CLEAR и настоящим D2O `d2k_classify_run` compose-case против Rust JSON serializer с injected poison result (`composed`, `path`, JSON DPI props совпадают). test-classifier-raw-production-differential.sh запуск"
         },
         {
-          "id": 14,
+          "id": 15,
           "name": "TCP measurement and core TLS/HTTP verifier outcomes/retry",
           "weight": 2,
           "points": 2,
@@ -232,7 +232,7 @@
           "evidence": "`r2o-meas-differential.sh`, `r2o-tls-verify-differential.sh`, `r2o-measured-split-differential.sh`; measured inputs, transport errors and verifier outputs are covered by C/Rust fixtures; `test-http-chunk-framing-differential.sh` also confirms C/Rust agreement when bytes remain buffered after Content-Length completion"
         },
         {
-          "id": 23,
+          "id": 25,
           "name": "TLS 1.2 reverse-direction response probe and verdicts",
           "weight": 3,
           "points": 3,
@@ -243,7 +243,7 @@
           "evidence": "`test-d2o-shared-fixtures.sh` pairs actual C `d2k_probe_response` with production Rust `probe_response` over loopback for CLEAR, BLOCKED, FLAKY, NOT_APPLICABLE, and the 64-KiB unmeasured cap; each case accepts six probes. The shared 13 parser/decision vectors, poll EINTR, and rotating-DNS retry also match. `test-classifier-full-tree-control-differential.sh` pairs actual C `d2k_classify_run` with production Rust `classify::run_with_backend` across all four follow-up outcomes, including overall verdict, response reason visibility, and 3 baseline plus 6 response probes. Debian WSL2: response inte"
         },
         {
-          "id": 25,
+          "id": 27,
           "name": "ECH receive ladder, witness и повторные испытания",
           "weight": 2,
           "points": 2,
@@ -272,7 +272,18 @@
           "evidence": "`r2o-control-events-differential.sh`, `r2o-control-dropped-differential.sh`, `r2o-ack-applied-persist-differential.sh`; только закодированные сценарии, не длительный процессный рестарт"
         },
         {
-          "id": 16,
+          "id": 10,
+          "name": "Scheduler worker-аргументы и возврат страниц после join",
+          "weight": 1,
+          "points": 0,
+          "status": "unknown",
+          "statusLabel": "Не проверено",
+          "group": "Discovery",
+          "mapping": "C `core/sched.c::worker_arg_alloc/free` → Rust controller worker captures",
+          "evidence": "D2O `f9669f8` заменил Linux worker-аргументы на отдельные `mmap/munmap`, чтобы освобождённые страницы возвращались ядру. Для Rust worker allocations не выполнено сопоставимое cross-thread retention/RSS измерение на том же профиле нагрузки."
+        },
+        {
+          "id": 18,
           "name": "Scheduler: cooldown, мёртвый адрес, повтор и параллельные endpoints",
           "weight": 3,
           "points": 3,
@@ -283,7 +294,7 @@
           "evidence": "On pinned D2O `304ba893dd37197128ac8799c0495b035f6a38c0`, `r2o-scheduler-cooldown-differential.sh` compares ECH-witness exhaustion: ordinary signals remain eligible, the late trigger is blocked only for the recorded endpoint, and active generic exhaustion is preserved. `r2o-scheduler-dead-address-differential.sh` compares the saved-address task path: three silent neutral ACKs send no trigger and retain the 30-minute retry; a successful ACK clears the address pause before normal probing resumes. The same scripts also cover transport/family separation, dead-address backoff, ring eviction, and br"
         },
         {
-          "id": 17,
+          "id": 19,
           "name": "Discovery: known-plan reuse, очередь, coalesce, приоритет и worker permits",
           "weight": 3,
           "points": 3,
@@ -294,7 +305,7 @@
           "evidence": "`r2o-discovery-active-lifetime-differential.sh`, `r2o-discovery-coalesce-differential.sh`, `r2o-queue-order-differential.sh`, `r2o-worker-permit-differential.sh`, `r2o-own-first-differential.sh`; clean D2O source manifest passed 53/53; exact carry-forward scope is documented above"
         },
         {
-          "id": 18,
+          "id": 20,
           "name": "ACK → точный APPLIED/proof → запись кандидата и reapply fixture",
           "weight": 3,
           "points": 3,
@@ -305,7 +316,7 @@
           "evidence": "`r2o-ack-applied-persist-differential.sh`, `r2o-known-plans-differential.sh`; доказан fixture-путь команды и точного события, не аварийное восстановление процесса; 2026-11-03 C/Rust HTTP APPLIED differential covers IPv4 and IPv6 address matching, unique execution IDs and the donor confirmation window; family-plan HTTPS APPLIED checks exact full-width IPv6 endpoints in both flow directions"
         },
         {
-          "id": 19,
+          "id": 21,
           "name": "JSON catalog, schema, atomic save и конкурентное слияние",
           "weight": 3,
           "points": 3,
@@ -316,7 +327,7 @@
           "evidence": "`r2o-catalog-persist-differential.sh`, `r2o-catalog-sync-differential.sh`; общая сериализация/слияние покрыты"
         },
         {
-          "id": 20,
+          "id": 22,
           "name": "S99/procd: boot waiters, повторный start, detach/stop cancellation and delayed /opt dispatch",
           "weight": 1,
           "points": 1,
@@ -327,7 +338,7 @@
           "evidence": "OpenWrt 25.12.5 ARM64 QEMU differential (2026-11-02): cold boot starts both waiters; detach cancels each, restart is idempotent, stop cancels before `/opt`, and delayed `/opt` invokes each fixture start/stop exactly once. Log: `E:/r2o-tooling/tests/r2o-procd-differential-2026-11-02.log`. This point covers waiter dispatch and cancellation only; automatic daemon crash recovery and the full Discovery/APPLIED chain are separate open contracts."
         },
         {
-          "id": 21,
+          "id": 23,
           "name": "Production daemon crash/restart and persisted catalogue reapply",
           "weight": 1,
           "points": 0,
@@ -338,7 +349,7 @@
           "evidence": "R2O ARM64 production QEMU recovers datapath/controller after SIGKILL and reapplies the same persisted catalogue after restart and second boot (`2 sent, 0 skipped`); firewall was stubbed. D2O waiter is one-shot in the recorded comparison, so matching automatic recovery is not established. See `test-controller-process-reapply-qemu.py` and entry #145."
         },
         {
-          "id": 22,
+          "id": 24,
           "name": "Automatic refusal → Discovery/classification → exact APPLIED and firewall-rule reapply",
           "weight": 1,
           "points": 0,
@@ -349,7 +360,7 @@
           "evidence": "The recent R2O process smoke exercises candidate trial/persistence with an injected fake datapath peer. D2O process differential, failure injection, real firewall-rule reapply and the end-to-end automatic chain remain open (entry #155)."
         },
         {
-          "id": 24,
+          "id": 26,
           "name": "HTTP search: кандидаты, повторы, all-failed/confirmed и точный APPLIED",
           "weight": 3,
           "points": 3,
@@ -360,14 +371,14 @@
           "evidence": "`r2o-http-search-differential.sh`, `r2o-ack-applied-persist-differential.sh`, `r2o-fetch-cli-differential.sh`; живой длительный поиск на целевых сетях не входит в evidence"
         }
       ],
-      "weight": 21,
+      "weight": 22,
       "points": 19
     },
     {
       "name": "QUIC / HTTP3",
       "items": [
         {
-          "id": 26,
+          "id": 28,
           "name": "QUIC Initial/QSN, local-address gate и stop/fallback Discovery",
           "weight": 3,
           "points": 3,
@@ -378,7 +389,7 @@
           "evidence": "`r2o-quic-hello-differential.sh`, `r2o-quic-local-address-differential.sh`, `r2o-discovery-quic-stop-differential.sh`, `r2o-quic-stun-watch-differential.sh`"
         },
         {
-          "id": 27,
+          "id": 29,
           "name": "QUIC стратегия: residual/VN, адресный пул, neutral controls и fallback-кандидаты",
           "weight": 3,
           "points": 3,
@@ -389,7 +400,7 @@
           "evidence": "Текущие controller QUIC unit/differential fixtures и исторические записи `REA_EVIDENCE.md` (29 окт.); сетевой результат зависит от endpoints, полевой прогон не заявляется"
         },
         {
-          "id": 28,
+          "id": 30,
           "name": "QUIC short-control: полный ответ или проход живого box budget",
           "weight": 1,
           "points": 1,
@@ -407,7 +418,7 @@
       "name": "Discord RTC",
       "items": [
         {
-          "id": 31,
+          "id": 33,
           "name": "Discord UDP observer: инициатор, SSRC reconnect, endpoint change и долгий silence",
           "weight": 2,
           "points": 2,
@@ -418,7 +429,7 @@
           "evidence": "`test-discord-udp-observer-reconnect-differential.sh` запускает D2O `d2k_session` и Rust `R2oVoiceSessions` на одинаковом trace: смена SSRC на прежнем 5-tuple не сбрасывает одноразовую защёлку (`first=1 reconnect=0 suspects=1`); смена server IP:port создаёт новое событие (`endpoint_change=1`). Двадцать двусторонних RTP-интервалов за 600 с не дают ложного silence; обе стороны удаляют поток на границе простоя 120 с. Изолированный Rust observer suite ранее прошёл 24/24"
         },
         {
-          "id": 32,
+          "id": 34,
           "name": "Discord Discovery manual measurement arm propagation",
           "weight": 1,
           "points": 1,
@@ -429,7 +440,7 @@
           "evidence": "`scripts/test-discord-voice-discovery-arm-differential.sh` вызывает актуальную C-функцию, сравнивает имя/copies и те же 20 возвращённых байт с Rust, проверяет wrapper branch; Rust unit `discovery_measurement_keeps_the_verified_prefix_arm`; controller lib suite на OpenWrt QEMU прошёл 277 тестов"
         },
         {
-          "id": 33,
+          "id": 35,
           "name": "Discord временная voice проба: lease, renewal, 120-секундное ожидание и точный APPLIED proof",
           "weight": 3,
           "points": 3,
@@ -440,7 +451,7 @@
           "evidence": "`r2o-discord-discovery-differential.sh` вызывает `r2o-discord-voice-lifecycle-helper.sh`; C fixture и Rust `voice_lifecycle_trace_matches_d2o_a_to_b_queue_lease_proof_and_persistence` сверяют указанные transitions; `scripts/test-discord-scheduled-udp-differential.sh` сравнил production D2O `d2k_sched_push_serial`/`pop_due_serial` из a63d964 с Rust `ScheduledQueue`: одинаковые 28 байт UDP при сроке 15 мс, C очередь оставалась pending на 1 и 14.999999 мс, Rust также проверил сохранение после reverse-flow наблюдения на 1 мс"
         },
         {
-          "id": 34,
+          "id": 36,
           "name": "Discord endpoint change, late NAK retention, binding persistence and helper reapply",
           "weight": 1,
           "points": 1,
@@ -451,7 +462,7 @@
           "evidence": "`r2o-discord-voice-lifecycle-helper.sh` passed against D2O `a63d964` (2026-11-03): endpoint B rejection while A is measured, latest-endpoint trial queue, late NAK binding retention, disk persistence/reapply and fallback provenance match. This is a source-backed helper differential, not a long-running controller or RTC session."
         },
         {
-          "id": 35,
+          "id": 37,
           "name": "Discord voice trial clock starts after queue admission and expires at D2O boundaries",
           "weight": 1,
           "points": 1,
@@ -466,10 +477,28 @@
       "points": 8
     },
     {
+      "name": "Discord Gateway",
+      "items": [
+        {
+          "id": 16,
+          "name": "Discord Gateway WebSocket upgrade и первый Hello `op=10`",
+          "weight": 1,
+          "points": 1,
+          "status": "verified",
+          "statusLabel": "Доказанно эквивалентно",
+          "group": "Discord Gateway",
+          "mapping": "C `core/verify.c::request_gateway_websocket` → Rust `fetch::r2o_gateway_websocket_exchange`",
+          "evidence": "D2O `a378e230947ebfd011439e1cac0f1e994d883aae` отправляет WebSocket Upgrade к `gateway.discord.gg`, требует HTTP 101, ровно один `Upgrade: websocket`, `Connection: Upgrade` и точный `Sec-WebSocket-Accept`, затем первый FIN-текстовый кадр с top-level JSON `op=10`. R2O реализует ту же ветвь в общем TCP/TLS verifier-пути до обычного HTTP-запроса. `d2o_verify_differential` сравнивает настоящий C `d2k_verify_probe` и production Rust на 14 сценариях: Hello `op=10`, переставленные поля, 126-байтная длина, HTTP 404, неверный `Sec-WebSocket-Accept`, `op=9`, вложенный `op`, masked-кадр, binary-кадр, фра"
+        }
+      ],
+      "weight": 1,
+      "points": 1
+    },
+    {
       "name": "Telegram",
       "items": [
         {
-          "id": 37,
+          "id": 39,
           "name": "Telegram firewall route and DNS exclusion behavior",
           "weight": 1,
           "points": 1,
@@ -480,7 +509,7 @@
           "evidence": "`r2o-telegram-route-dns-differential.sh` compares the actual C route/DNS implementation and Rust counterpart against pinned D2O Telegram source `304ba893`; direct-Rust DNS intentionally does not reuse D2O Relay under the documented scope boundary. The historical differential passed; this environment lacks Cargo/Clang 18 for a rerun."
         },
         {
-          "id": 38,
+          "id": 40,
           "name": "Telegram response observer behavior",
           "weight": 1,
           "points": 1,
@@ -491,7 +520,7 @@
           "evidence": "`r2o-telegram-response-observer-differential.sh` builds the actual C MTProto response observer and diffs its output against the Rust observer using pinned D2O Telegram source `304ba893`; the historical differential and targeted Rust donor test passed. This point is limited to the observer contract; Cargo/Clang 18 are unavailable for a rerun here."
         },
         {
-          "id": 39,
+          "id": 41,
           "name": "Telegram config/DC map, handshake, MTProto/WebSocket retries and full service lifecycle",
           "weight": 1,
           "points": 0,
@@ -509,7 +538,7 @@
       "name": "WebPanel",
       "items": [
         {
-          "id": 42,
+          "id": 44,
           "name": "Панель: первичный bind и безопасный выбор интерфейса при установке",
           "weight": 1,
           "points": 1,
@@ -520,7 +549,7 @@
           "evidence": "`r2o-panel-bind-default-differential.sh`, `test-router-select-panel-ip.sh`, `test-router-panel-bind-install.sh`, `panel_default_bind_matches_d2o_config_and_server_fallback`; bridge preference, RFC1918 fallback, public-only fail-closed и сохранение явной настройки проверены"
         },
         {
-          "id": 43,
+          "id": 45,
           "name": "Панель: недоступное live-состояние и catalog cache token",
           "weight": 1,
           "points": 1,
@@ -531,7 +560,7 @@
           "evidence": "`test-panel-status-unavailable-differential.sh` сравнивает настоящий C HTTP handler с production Rust fallback; Cargo HTTP test `status_without_live_file_returns_the_panel_contract` подтверждает route. `test-panel-catalog-revision-differential.sh` сверяет настоящий C hash с production Rust raw helper; Cargo HTTP test `live_catalog_revision_reuses_only_catalog_arrays` подтверждает conditional response."
         },
         {
-          "id": 44,
+          "id": 46,
           "name": "Панель: control/actions, прочие status branches, настройки и assets",
           "weight": 1,
           "points": 0,
@@ -549,7 +578,7 @@
       "name": "Firewall / PPE",
       "items": [
         {
-          "id": 45,
+          "id": 47,
           "name": "Firewall: статические packet rules и backend",
           "weight": 1,
           "points": 1,
@@ -560,7 +589,7 @@
           "evidence": "На D2O main 8e2c981 прошли current-source differential harnesses для port/DNS/voice order, MEASURE_MARK, D2K_GATE, CONNBYTES + 1, broadcast/multicast/ICMP, nft rollback, legacy iptables cleanup и RST-table lifetime. test-firewall-rule-error-differential.sh сверяет обязательный отказ раннего правила и позднего hook, а также D2O best-effort MASQUERADE: при отказе обе стороны завершают up успешно, продолжают ставить hooks, а status остаётся healthy без этого необязательного правила. test-router-iptables-status-differential.sh совпадает для полного набора, отсутствующих NFQUEUE/INPUT/FORWARD/MEASU"
         },
         {
-          "id": 46,
+          "id": 48,
           "name": "Firewall: successful software flow-offload disable and restore",
           "weight": 1,
           "points": 1,
@@ -571,7 +600,7 @@
           "evidence": "`test-router-flowoffload-d2o-differential.sh` compares the normal success cases: UCI `1→0→1`, commit/reload, preservation of `flow_offloading_hw`, and fw3 no-op; the successful traces match. A temporary copy of this test, pointed at current D2O `8e2c981` without changing either checkout, passed the same success scenarios on 2026-11-06. `test-router-flowoffload-lifecycle-differential.sh` and the recorded OpenWrt QEMU runtime check cover startup/stop ordering and restoring the native software flowtable. This point excludes write-failure behavior."
         },
         {
-          "id": 47,
+          "id": 49,
           "name": "Firewall: flow-offload write-failure policy",
           "weight": 1,
           "points": 1,
@@ -582,7 +611,7 @@
           "evidence": "`test-router-flowoffload-d2o-differential.sh` сравнивает nft включён/выключен и iptables lifecycle, а также ошибки UCI `set` и `commit`: D2O и R2O дают одинаковый результат запуска, конечную настройку, saved-state cleanup и trace. Актуальный helper `files/S99d2k` в D2O `8e2c981` совпадает с закреплённым C-эталоном `a63d964` (SHA-256 извлечённого блока `5205447a3d425d260d8a9dc7b8fe10a3cb933850e96b6d1a53c6609836275488`). Differential прошёл; это command-fixture, не live fw4/kernel прогон. По контракту UCI write-failure начислен 1 балл"
         },
         {
-          "id": 48,
+          "id": 50,
           "name": "Аппаратное ускорение PPE: backend, datapath, миграция тегов и очистка владельца",
           "weight": 1,
           "points": 0,
@@ -593,7 +622,7 @@
           "evidence": "`test-router-ppe-rule-generation-differential.sh` сравнивает production C `d2k-ppe-deoffload.sh::_d2k_ppe_rules` и R2O `_r2o_ppe_rules`: default и custom `PORTS`/voice/HTTP inputs дают одинаковые 8 правил и тот же порядок на D2O main `8e2c981` (2026-11-06). `test-router-ppe-backend-differential.sh` сверяет nft reapply; `test-router-ppe-ensure-running-differential.sh` — gate активного datapath; `test-router-ppe-legacy-cleanup-differential.sh` — IPv4/IPv6 удаление старого `d2k-ppe` с сохранением чужих правил; `test-router-ppe-firewall-lock-differential.sh` — ожидание общего firewall lock. `test-"
         },
         {
-          "id": 49,
+          "id": 51,
           "name": "Firewall: код ошибки при отказе отдельного правила",
           "weight": 1,
           "points": 1,
@@ -604,7 +633,7 @@
           "evidence": "`test-firewall-rule-error-differential.sh` вводит отказ первой loopback-правила и позднего `POSTROUTING` hook; C и Rust возвращают 1 в обоих случаях. Полная проверка синтаксиса/эффекта всех правил остаётся в предыдущей частичной строке"
         },
         {
-          "id": 50,
+          "id": 52,
           "name": "Firewall service: IPv4-only fallback, kernel modules, persistent marker, повторная установка по явному reapply и очистка выключенного семейства",
           "weight": 2,
           "points": 2,
@@ -615,7 +644,7 @@
           "evidence": "`test-router-ipv6-fallback-differential.sh` сравнивает D2O/R2O fallback classification (нет команды, mangle и неподдерживаемый `-w`), modprobe и `.ko`/insmod traces, NFQUEUE 2001 после загрузки модуля, marker-aware status после позднего появления mangle, явный reapply, конфиг IPv6=1 и stale-family cleanup. `test-router-route-gate-config.sh` проверяет S99 start/reapply не передают устаревший runtime probe в firewall up. Это helper/service fixture, не live kernel test"
         },
         {
-          "id": 51,
+          "id": 53,
           "name": "Firewall: динамические DNS-upstream exclusions и refresh",
           "weight": 1,
           "points": 1,
@@ -626,7 +655,7 @@
           "evidence": "`test-router-dns-exclusion-differential.sh` сравнивает настоящие функции: fresh install, IPv4/IPv6 upstreams, plain DNS/DoH/DoT, пропуск localhost proxy, A/AAAA, смену адреса, удаление upstream, fallback на сохранённые адреса при ошибке resolve и два конкурентных refresh. Проверяются TCP/UDP, обе стороны conntrack, вставки и удаления правил"
         },
         {
-          "id": 52,
+          "id": 54,
           "name": "Firewall service: heal/watchdog, reapply и ошибки",
           "weight": 1,
           "points": 1,
@@ -644,7 +673,7 @@
       "name": "Release / ABI",
       "items": [
         {
-          "id": 53,
+          "id": 55,
           "name": "Update guard: reject invalid release, skip current version and keep datapath running on download failure",
           "weight": 1,
           "points": 1,
@@ -655,18 +684,18 @@
           "evidence": "`test-router-update-availability-differential.sh` and `test-router-update-scheduler.sh` passed on 2026-11-06 against the current D2O checkout at `8e2c981`. The C/Rust fixture confirms current-release no-op and failed-download paths do not stop the running datapath; the scheduler honors disabled/out-of-window/bad-release guards. The success-path stop ordering and rollback behavior are deliberately excluded from this point."
         },
         {
-          "id": 54,
+          "id": 56,
           "name": "Update activation ordering, rollback recovery and signed Linux/OpenWrt install",
           "weight": 1,
-          "points": 0,
-          "status": "partial",
-          "statusLabel": "Частично",
+          "points": 1,
+          "status": "verified",
+          "statusLabel": "Доказанно эквивалентно",
           "group": "Release / ABI",
           "mapping": "D2O updater/runtime → Rust manager activation and router recovery",
-          "evidence": "R2O has mock-tested rollback ordering, and package artifacts were built and checked. The C/Rust success-path ordering differs, and a complete signed installation/rollback on the target Linux/OpenWrt process ABI has not been run; this point remains open."
+          "evidence": "D2O `install_release()` скачивает и проверяет `latest.json`/архив до stop-фазы `install.sh`, затем устанавливает файлы и запускает службу. R2O manager разделён на `update-stage[-auto]` (скачивание, проверка подписи и хеша, распаковка в приватный каталог; слоты не меняются) и `update-activate` (атомарное переключение слотов). `router/S99r2o` выполняет stage → stop → activate → start + 60-секундную health-проверку; ошибка загрузки, `already_current` и неизвестный ответ manager оставляют работающий datapath без изменений, а отказ stop запускает прежний release. `test-router-update-availability-di"
         },
         {
-          "id": 55,
+          "id": 57,
           "name": "ABI/QEMU и сборка OpenWrt targets",
           "weight": 2,
           "points": 2,
@@ -678,7 +707,7 @@
         }
       ],
       "weight": 4,
-      "points": 3
+      "points": 4
     }
   ],
   "items": [
@@ -783,6 +812,17 @@
     },
     {
       "id": 10,
+      "name": "Scheduler worker-аргументы и возврат страниц после join",
+      "weight": 1,
+      "points": 0,
+      "status": "unknown",
+      "statusLabel": "Не проверено",
+      "group": "Discovery",
+      "mapping": "C `core/sched.c::worker_arg_alloc/free` → Rust controller worker captures",
+      "evidence": "D2O `f9669f8` заменил Linux worker-аргументы на отдельные `mmap/munmap`, чтобы освобождённые страницы возвращались ядру. Для Rust worker allocations не выполнено сопоставимое cross-thread retention/RSS измерение на том же профиле нагрузки."
+    },
+    {
+      "id": 11,
       "name": "Подтверждение базового CLEAR и отмена",
       "weight": 1,
       "points": 1,
@@ -793,7 +833,7 @@
       "evidence": "`test-classifier-clear-confirm-differential.sh` сравнивает 5/5 CLEAR, молчание и отказ соединения на подтверждении (FLAKY/5), отмену после базы (INCONCLUSIVE/3); Rust unit test отдельно проверяет транспортную ошибку подтверждения"
     },
     {
-      "id": 11,
+      "id": 12,
       "name": "CLEAR только с подтверждённым SO_MARK",
       "weight": 1,
       "points": 1,
@@ -804,7 +844,7 @@
       "evidence": "`test-classifier-so-mark-production-differential.sh` сравнивает настоящий D2O `core/meas.c` и Rust `probe_trigger` на loopback: успешный `SO_MARK 0x2d` и принятие совпадают; тот же Rust production socket test на OpenWrt 25.12 QEMU прошёл. Отказ `SO_MARK` и непомеченные ответы остаются покрыты предыдущим C/Rust classifier differential"
     },
     {
-      "id": 12,
+      "id": 13,
       "name": "Базовые transport errors и переход к разрезу",
       "weight": 1,
       "points": 1,
@@ -815,7 +855,7 @@
       "evidence": "Тот же differential сравнивает все ошибки базы → UNREACHABLE/3 без дополнительной серии, частичную ошибку базы с переходом к разрезу → FLAKY/6"
     },
     {
-      "id": 13,
+      "id": 14,
       "name": "Классификатор: baseline, poison/strategy tree, control и neutral ACK",
       "weight": 1,
       "points": 1,
@@ -826,7 +866,7 @@
       "evidence": "`test-classifier-full-tree-control-differential.sh` доказывает baseline deadline retry/error handling, 3-пробный CLEAR, control errors/unproven/first-pass, TLS alert как trigger miss и Address после отказа всех neutral ACK. C/Rust также сравнивает `--progress` для завершённых трёх повторов, досрочного успешного control и neutral ACK; `--json` проверяется настоящим C `d2k_cli_main` для raw CLEAR и настоящим D2O `d2k_classify_run` compose-case против Rust JSON serializer с injected poison result (`composed`, `path`, JSON DPI props совпадают). test-classifier-raw-production-differential.sh запуск"
     },
     {
-      "id": 14,
+      "id": 15,
       "name": "TCP measurement and core TLS/HTTP verifier outcomes/retry",
       "weight": 2,
       "points": 2,
@@ -837,7 +877,18 @@
       "evidence": "`r2o-meas-differential.sh`, `r2o-tls-verify-differential.sh`, `r2o-measured-split-differential.sh`; measured inputs, transport errors and verifier outputs are covered by C/Rust fixtures; `test-http-chunk-framing-differential.sh` also confirms C/Rust agreement when bytes remain buffered after Content-Length completion"
     },
     {
-      "id": 15,
+      "id": 16,
+      "name": "Discord Gateway WebSocket upgrade и первый Hello `op=10`",
+      "weight": 1,
+      "points": 1,
+      "status": "verified",
+      "statusLabel": "Доказанно эквивалентно",
+      "group": "Discord Gateway",
+      "mapping": "C `core/verify.c::request_gateway_websocket` → Rust `fetch::r2o_gateway_websocket_exchange`",
+      "evidence": "D2O `a378e230947ebfd011439e1cac0f1e994d883aae` отправляет WebSocket Upgrade к `gateway.discord.gg`, требует HTTP 101, ровно один `Upgrade: websocket`, `Connection: Upgrade` и точный `Sec-WebSocket-Accept`, затем первый FIN-текстовый кадр с top-level JSON `op=10`. R2O реализует ту же ветвь в общем TCP/TLS verifier-пути до обычного HTTP-запроса. `d2o_verify_differential` сравнивает настоящий C `d2k_verify_probe` и production Rust на 14 сценариях: Hello `op=10`, переставленные поля, 126-байтная длина, HTTP 404, неверный `Sec-WebSocket-Accept`, `op=9`, вложенный `op`, masked-кадр, binary-кадр, фра"
+    },
+    {
+      "id": 17,
       "name": "Connect/read timeout classifier и единственный удвоенный baseline retry",
       "weight": 1,
       "points": 1,
@@ -848,7 +899,7 @@
       "evidence": "`test-classifier-full-tree-control-differential.sh` сверяет connect deadlines C/Rust 400→800 мс и production loopback probes: TLS ServerHello через 5,5 с принимается при настроенном сроке 7 с. R2O передаёт срок classifier напрямую; 5-секундный `core/meas.c::WAIT_CEIL_MS` относится к отдельному `d2k_meas_once`, не к `d2k_classify_run`"
     },
     {
-      "id": 16,
+      "id": 18,
       "name": "Scheduler: cooldown, мёртвый адрес, повтор и параллельные endpoints",
       "weight": 3,
       "points": 3,
@@ -859,7 +910,7 @@
       "evidence": "On pinned D2O `304ba893dd37197128ac8799c0495b035f6a38c0`, `r2o-scheduler-cooldown-differential.sh` compares ECH-witness exhaustion: ordinary signals remain eligible, the late trigger is blocked only for the recorded endpoint, and active generic exhaustion is preserved. `r2o-scheduler-dead-address-differential.sh` compares the saved-address task path: three silent neutral ACKs send no trigger and retain the 30-minute retry; a successful ACK clears the address pause before normal probing resumes. The same scripts also cover transport/family separation, dead-address backoff, ring eviction, and br"
     },
     {
-      "id": 17,
+      "id": 19,
       "name": "Discovery: known-plan reuse, очередь, coalesce, приоритет и worker permits",
       "weight": 3,
       "points": 3,
@@ -870,7 +921,7 @@
       "evidence": "`r2o-discovery-active-lifetime-differential.sh`, `r2o-discovery-coalesce-differential.sh`, `r2o-queue-order-differential.sh`, `r2o-worker-permit-differential.sh`, `r2o-own-first-differential.sh`; clean D2O source manifest passed 53/53; exact carry-forward scope is documented above"
     },
     {
-      "id": 18,
+      "id": 20,
       "name": "ACK → точный APPLIED/proof → запись кандидата и reapply fixture",
       "weight": 3,
       "points": 3,
@@ -881,7 +932,7 @@
       "evidence": "`r2o-ack-applied-persist-differential.sh`, `r2o-known-plans-differential.sh`; доказан fixture-путь команды и точного события, не аварийное восстановление процесса; 2026-11-03 C/Rust HTTP APPLIED differential covers IPv4 and IPv6 address matching, unique execution IDs and the donor confirmation window; family-plan HTTPS APPLIED checks exact full-width IPv6 endpoints in both flow directions"
     },
     {
-      "id": 19,
+      "id": 21,
       "name": "JSON catalog, schema, atomic save и конкурентное слияние",
       "weight": 3,
       "points": 3,
@@ -892,7 +943,7 @@
       "evidence": "`r2o-catalog-persist-differential.sh`, `r2o-catalog-sync-differential.sh`; общая сериализация/слияние покрыты"
     },
     {
-      "id": 20,
+      "id": 22,
       "name": "S99/procd: boot waiters, повторный start, detach/stop cancellation and delayed /opt dispatch",
       "weight": 1,
       "points": 1,
@@ -903,7 +954,7 @@
       "evidence": "OpenWrt 25.12.5 ARM64 QEMU differential (2026-11-02): cold boot starts both waiters; detach cancels each, restart is idempotent, stop cancels before `/opt`, and delayed `/opt` invokes each fixture start/stop exactly once. Log: `E:/r2o-tooling/tests/r2o-procd-differential-2026-11-02.log`. This point covers waiter dispatch and cancellation only; automatic daemon crash recovery and the full Discovery/APPLIED chain are separate open contracts."
     },
     {
-      "id": 21,
+      "id": 23,
       "name": "Production daemon crash/restart and persisted catalogue reapply",
       "weight": 1,
       "points": 0,
@@ -914,7 +965,7 @@
       "evidence": "R2O ARM64 production QEMU recovers datapath/controller after SIGKILL and reapplies the same persisted catalogue after restart and second boot (`2 sent, 0 skipped`); firewall was stubbed. D2O waiter is one-shot in the recorded comparison, so matching automatic recovery is not established. See `test-controller-process-reapply-qemu.py` and entry #145."
     },
     {
-      "id": 22,
+      "id": 24,
       "name": "Automatic refusal → Discovery/classification → exact APPLIED and firewall-rule reapply",
       "weight": 1,
       "points": 0,
@@ -925,7 +976,7 @@
       "evidence": "The recent R2O process smoke exercises candidate trial/persistence with an injected fake datapath peer. D2O process differential, failure injection, real firewall-rule reapply and the end-to-end automatic chain remain open (entry #155)."
     },
     {
-      "id": 23,
+      "id": 25,
       "name": "TLS 1.2 reverse-direction response probe and verdicts",
       "weight": 3,
       "points": 3,
@@ -936,7 +987,7 @@
       "evidence": "`test-d2o-shared-fixtures.sh` pairs actual C `d2k_probe_response` with production Rust `probe_response` over loopback for CLEAR, BLOCKED, FLAKY, NOT_APPLICABLE, and the 64-KiB unmeasured cap; each case accepts six probes. The shared 13 parser/decision vectors, poll EINTR, and rotating-DNS retry also match. `test-classifier-full-tree-control-differential.sh` pairs actual C `d2k_classify_run` with production Rust `classify::run_with_backend` across all four follow-up outcomes, including overall verdict, response reason visibility, and 3 baseline plus 6 response probes. Debian WSL2: response inte"
     },
     {
-      "id": 24,
+      "id": 26,
       "name": "HTTP search: кандидаты, повторы, all-failed/confirmed и точный APPLIED",
       "weight": 3,
       "points": 3,
@@ -947,7 +998,7 @@
       "evidence": "`r2o-http-search-differential.sh`, `r2o-ack-applied-persist-differential.sh`, `r2o-fetch-cli-differential.sh`; живой длительный поиск на целевых сетях не входит в evidence"
     },
     {
-      "id": 25,
+      "id": 27,
       "name": "ECH receive ladder, witness и повторные испытания",
       "weight": 2,
       "points": 2,
@@ -958,7 +1009,7 @@
       "evidence": "`r2o-ech-rx-ladder-differential.sh`, `r2o-layered-rx-differential.sh`; подтверждены сценарии ladder, не все реальные ECH-конфигурации провайдеров"
     },
     {
-      "id": 26,
+      "id": 28,
       "name": "QUIC Initial/QSN, local-address gate и stop/fallback Discovery",
       "weight": 3,
       "points": 3,
@@ -969,7 +1020,7 @@
       "evidence": "`r2o-quic-hello-differential.sh`, `r2o-quic-local-address-differential.sh`, `r2o-discovery-quic-stop-differential.sh`, `r2o-quic-stun-watch-differential.sh`"
     },
     {
-      "id": 27,
+      "id": 29,
       "name": "QUIC стратегия: residual/VN, адресный пул, neutral controls и fallback-кандидаты",
       "weight": 3,
       "points": 3,
@@ -980,7 +1031,7 @@
       "evidence": "Текущие controller QUIC unit/differential fixtures и исторические записи `REA_EVIDENCE.md` (29 окт.); сетевой результат зависит от endpoints, полевой прогон не заявляется"
     },
     {
-      "id": 28,
+      "id": 30,
       "name": "QUIC short-control: полный ответ или проход живого box budget",
       "weight": 1,
       "points": 1,
@@ -991,7 +1042,7 @@
       "evidence": "`test-quic-short-control-differential.sh` покрывает полный ответ, обрыв, stall и HTTP 451. Новый случай в `test-quic-http3-full-stage-differential.sh`: C и Rust засчитывают неполный 64-КиБ ответ только после 50 датаграмм и свежего роста; stream остаётся без FIN. Обычный одноразовый fetch дочитывает полное тело, включая 16 МиБ."
     },
     {
-      "id": 29,
+      "id": 31,
       "name": "HTTP/3 response framing and stream termination",
       "weight": 1,
       "points": 1,
@@ -1002,7 +1053,7 @@
       "evidence": "Current-main D2O `a63d964` / R2O test source `17d5ea9` (production path unchanged since `394b994`): the C/Rust full-stage differential covers HTTP 204 with empty body, informational 103 followed by 451, Content-Length mismatch/open stream, final trailers and QUIC FIN, RESET_STREAM before headers/after headers/between body chunks, connection close before DATA/after partial DATA, and live one-way response activity. Verdict, app_bytes and request totals match; Rust checks response completion/error and avoids false stall on close/reset. `scripts/test-quic-http3-full-stage-differential.sh` passed 1"
     },
     {
-      "id": 30,
+      "id": 32,
       "name": "HTTP/3 request budgets, transport limits and stall deadlines",
       "weight": 1,
       "points": 0,
@@ -1013,7 +1064,7 @@
       "evidence": "Current-main D2O `a63d964` / R2O test source `17d5ea9`: the full-stage C/Rust harness passes 18/18, with targeted coverage also for ALPN refusal. Repeated GET/GOAWAY and zero bidi/uni stream-credit attempts, repeated budgets and growth, silent/closed peers, and `/budget-slow` are covered. One historical `/budget-slow` Cut/NotRun mismatch has not recurred; packet counts can differ (32/33). The 70-KiB response HEADERS case returns NotRun on both sides, but `app_bytes` differs (~66 KiB C, 0 Rust) because Rust advertises a 65,536 field-section limit. Timing-sensitive stall variants, header diagnos"
     },
     {
-      "id": 31,
+      "id": 33,
       "name": "Discord UDP observer: инициатор, SSRC reconnect, endpoint change и долгий silence",
       "weight": 2,
       "points": 2,
@@ -1024,7 +1075,7 @@
       "evidence": "`test-discord-udp-observer-reconnect-differential.sh` запускает D2O `d2k_session` и Rust `R2oVoiceSessions` на одинаковом trace: смена SSRC на прежнем 5-tuple не сбрасывает одноразовую защёлку (`first=1 reconnect=0 suspects=1`); смена server IP:port создаёт новое событие (`endpoint_change=1`). Двадцать двусторонних RTP-интервалов за 600 с не дают ложного silence; обе стороны удаляют поток на границе простоя 120 с. Изолированный Rust observer suite ранее прошёл 24/24"
     },
     {
-      "id": 32,
+      "id": 34,
       "name": "Discord Discovery manual measurement arm propagation",
       "weight": 1,
       "points": 1,
@@ -1035,7 +1086,7 @@
       "evidence": "`scripts/test-discord-voice-discovery-arm-differential.sh` вызывает актуальную C-функцию, сравнивает имя/copies и те же 20 возвращённых байт с Rust, проверяет wrapper branch; Rust unit `discovery_measurement_keeps_the_verified_prefix_arm`; controller lib suite на OpenWrt QEMU прошёл 277 тестов"
     },
     {
-      "id": 33,
+      "id": 35,
       "name": "Discord временная voice проба: lease, renewal, 120-секундное ожидание и точный APPLIED proof",
       "weight": 3,
       "points": 3,
@@ -1046,7 +1097,7 @@
       "evidence": "`r2o-discord-discovery-differential.sh` вызывает `r2o-discord-voice-lifecycle-helper.sh`; C fixture и Rust `voice_lifecycle_trace_matches_d2o_a_to_b_queue_lease_proof_and_persistence` сверяют указанные transitions; `scripts/test-discord-scheduled-udp-differential.sh` сравнил production D2O `d2k_sched_push_serial`/`pop_due_serial` из a63d964 с Rust `ScheduledQueue`: одинаковые 28 байт UDP при сроке 15 мс, C очередь оставалась pending на 1 и 14.999999 мс, Rust также проверил сохранение после reverse-flow наблюдения на 1 мс"
     },
     {
-      "id": 34,
+      "id": 36,
       "name": "Discord endpoint change, late NAK retention, binding persistence and helper reapply",
       "weight": 1,
       "points": 1,
@@ -1057,7 +1108,7 @@
       "evidence": "`r2o-discord-voice-lifecycle-helper.sh` passed against D2O `a63d964` (2026-11-03): endpoint B rejection while A is measured, latest-endpoint trial queue, late NAK binding retention, disk persistence/reapply and fallback provenance match. This is a source-backed helper differential, not a long-running controller or RTC session."
     },
     {
-      "id": 35,
+      "id": 37,
       "name": "Discord voice trial clock starts after queue admission and expires at D2O boundaries",
       "weight": 1,
       "points": 1,
@@ -1068,7 +1119,7 @@
       "evidence": "`test-discord-voice-trial-clock-differential.sh` compares the actual C/Rust timer conditions after a nine-minute queue wait and checks the ten-minute waiter boundary; the standalone Rust resource-limit suite passed 28/28. Trial starts after slot admission and the queued waiter expires strictly after the same D2O limit (entry #68)."
     },
     {
-      "id": 36,
+      "id": 38,
       "name": "Production controller recovery and long-running Discord RTC lifecycle",
       "weight": 1,
       "points": 0,
@@ -1079,7 +1130,7 @@
       "evidence": "Production R2O bounded Discovery and manual restart/reload are recorded, but automatic restart through the full candidate/APPLIED chain, endpoint recovery across service failure, and a long RTC session remain unverified. The helper-level persistence result above does not establish this process contract."
     },
     {
-      "id": 37,
+      "id": 39,
       "name": "Telegram firewall route and DNS exclusion behavior",
       "weight": 1,
       "points": 1,
@@ -1090,7 +1141,7 @@
       "evidence": "`r2o-telegram-route-dns-differential.sh` compares the actual C route/DNS implementation and Rust counterpart against pinned D2O Telegram source `304ba893`; direct-Rust DNS intentionally does not reuse D2O Relay under the documented scope boundary. The historical differential passed; this environment lacks Cargo/Clang 18 for a rerun."
     },
     {
-      "id": 38,
+      "id": 40,
       "name": "Telegram response observer behavior",
       "weight": 1,
       "points": 1,
@@ -1101,7 +1152,7 @@
       "evidence": "`r2o-telegram-response-observer-differential.sh` builds the actual C MTProto response observer and diffs its output against the Rust observer using pinned D2O Telegram source `304ba893`; the historical differential and targeted Rust donor test passed. This point is limited to the observer contract; Cargo/Clang 18 are unavailable for a rerun here."
     },
     {
-      "id": 39,
+      "id": 41,
       "name": "Telegram config/DC map, handshake, MTProto/WebSocket retries and full service lifecycle",
       "weight": 1,
       "points": 0,
@@ -1112,7 +1163,7 @@
       "evidence": "Аудит `z2kOW@42c8111` сопоставил все 38 файлов из `tg-proxy/src` и `tg-proxy/tests` с `crates/r2o-telegram`; все пути присутствуют. В `ws_client` и `splitter` executable logic совпадает, отличия — тексты ошибок; в `routing` обнаружены локализованные panic-тексты, один `#[allow(deprecated)]` и R2O-имена временных файлов тестов. R2O добавляет directional byte telemetry в `transparent_proxy`, валидатор ответа MTProto в `bridge` и platform DC-map sync в `server`. Это исходниковое сравнение, оно не доказывает исполнение этих ветвей. `scripts/test-router-tg-firewall.sh` и `test-telegram-stop-order-d"
     },
     {
-      "id": 40,
+      "id": 42,
       "name": "Meta DNS scheduler lifecycle and packaged range asset",
       "weight": 1,
       "points": 1,
@@ -1123,7 +1174,7 @@
       "evidence": "`test-router-meta-dns-scheduler-differential.sh` verifies start/stop ordering, prerequisites and all 23 IPv4 CIDRs; Debian 13 WSL2 `test-package-release.sh` checks the asset bytes in single- and five-architecture packages. Live `ndmc` cleanup is not included in this point."
     },
     {
-      "id": 41,
+      "id": 43,
       "name": "Keenetic direct DNS, TLS edge verification and owned-record removal",
       "weight": 1,
       "points": 1,
@@ -1134,7 +1185,7 @@
       "evidence": "Production `--resolve-meta` returned IPv4 for 18/18 hosts. On D2O `8e2c981` and the R2O production build from PR commit `4e77871`, CI run #445 compared valid `instagram.com` and canonical alias, wrong certificate name, untrusted CA and unsupported host with `scripts/test-meta-edge-differential.sh`: both CLIs returned matching exit codes (0/1/2), and both sent neutral SNI `example.com` for every TLS case. `test-router-meta-dns-remove-differential.sh` compared production C/Rust removal of owned DNS records; the `ndmc` traces were identical. Linux fixtures; no physical Keenetic runtime."
     },
     {
-      "id": 42,
+      "id": 44,
       "name": "Панель: первичный bind и безопасный выбор интерфейса при установке",
       "weight": 1,
       "points": 1,
@@ -1145,7 +1196,7 @@
       "evidence": "`r2o-panel-bind-default-differential.sh`, `test-router-select-panel-ip.sh`, `test-router-panel-bind-install.sh`, `panel_default_bind_matches_d2o_config_and_server_fallback`; bridge preference, RFC1918 fallback, public-only fail-closed и сохранение явной настройки проверены"
     },
     {
-      "id": 43,
+      "id": 45,
       "name": "Панель: недоступное live-состояние и catalog cache token",
       "weight": 1,
       "points": 1,
@@ -1156,7 +1207,7 @@
       "evidence": "`test-panel-status-unavailable-differential.sh` сравнивает настоящий C HTTP handler с production Rust fallback; Cargo HTTP test `status_without_live_file_returns_the_panel_contract` подтверждает route. `test-panel-catalog-revision-differential.sh` сверяет настоящий C hash с production Rust raw helper; Cargo HTTP test `live_catalog_revision_reuses_only_catalog_arrays` подтверждает conditional response."
     },
     {
-      "id": 44,
+      "id": 46,
       "name": "Панель: control/actions, прочие status branches, настройки и assets",
       "weight": 1,
       "points": 0,
@@ -1167,7 +1218,7 @@
       "evidence": "`test-panel-diagnostics-default-query-differential.sh` сравнивает C/Rust `GET /api/diagnostics` без query и с пустым `?`: отсутствие query выбирает `status`, явный пустой query остаётся запросом отчёта. Также проверены Control success/busy/start-error и timeout state; Workers busy/save-order, UTF-8 и произвольные comment bytes; `test-panel-worker-content-length-differential.sh` воспроизводит ведущие нули в `Content-Length`: RED — C `400` без записи, Rust `500` после изменения config; GREEN — одинаковые `400` и неизменённый файл; дополнительный реальный C/Rust сценарий передаёт валидный JSON и "
     },
     {
-      "id": 45,
+      "id": 47,
       "name": "Firewall: статические packet rules и backend",
       "weight": 1,
       "points": 1,
@@ -1178,7 +1229,7 @@
       "evidence": "На D2O main 8e2c981 прошли current-source differential harnesses для port/DNS/voice order, MEASURE_MARK, D2K_GATE, CONNBYTES + 1, broadcast/multicast/ICMP, nft rollback, legacy iptables cleanup и RST-table lifetime. test-firewall-rule-error-differential.sh сверяет обязательный отказ раннего правила и позднего hook, а также D2O best-effort MASQUERADE: при отказе обе стороны завершают up успешно, продолжают ставить hooks, а status остаётся healthy без этого необязательного правила. test-router-iptables-status-differential.sh совпадает для полного набора, отсутствующих NFQUEUE/INPUT/FORWARD/MEASU"
     },
     {
-      "id": 46,
+      "id": 48,
       "name": "Firewall: successful software flow-offload disable and restore",
       "weight": 1,
       "points": 1,
@@ -1189,7 +1240,7 @@
       "evidence": "`test-router-flowoffload-d2o-differential.sh` compares the normal success cases: UCI `1→0→1`, commit/reload, preservation of `flow_offloading_hw`, and fw3 no-op; the successful traces match. A temporary copy of this test, pointed at current D2O `8e2c981` without changing either checkout, passed the same success scenarios on 2026-11-06. `test-router-flowoffload-lifecycle-differential.sh` and the recorded OpenWrt QEMU runtime check cover startup/stop ordering and restoring the native software flowtable. This point excludes write-failure behavior."
     },
     {
-      "id": 47,
+      "id": 49,
       "name": "Firewall: flow-offload write-failure policy",
       "weight": 1,
       "points": 1,
@@ -1200,7 +1251,7 @@
       "evidence": "`test-router-flowoffload-d2o-differential.sh` сравнивает nft включён/выключен и iptables lifecycle, а также ошибки UCI `set` и `commit`: D2O и R2O дают одинаковый результат запуска, конечную настройку, saved-state cleanup и trace. Актуальный helper `files/S99d2k` в D2O `8e2c981` совпадает с закреплённым C-эталоном `a63d964` (SHA-256 извлечённого блока `5205447a3d425d260d8a9dc7b8fe10a3cb933850e96b6d1a53c6609836275488`). Differential прошёл; это command-fixture, не live fw4/kernel прогон. По контракту UCI write-failure начислен 1 балл"
     },
     {
-      "id": 48,
+      "id": 50,
       "name": "Аппаратное ускорение PPE: backend, datapath, миграция тегов и очистка владельца",
       "weight": 1,
       "points": 0,
@@ -1211,7 +1262,7 @@
       "evidence": "`test-router-ppe-rule-generation-differential.sh` сравнивает production C `d2k-ppe-deoffload.sh::_d2k_ppe_rules` и R2O `_r2o_ppe_rules`: default и custom `PORTS`/voice/HTTP inputs дают одинаковые 8 правил и тот же порядок на D2O main `8e2c981` (2026-11-06). `test-router-ppe-backend-differential.sh` сверяет nft reapply; `test-router-ppe-ensure-running-differential.sh` — gate активного datapath; `test-router-ppe-legacy-cleanup-differential.sh` — IPv4/IPv6 удаление старого `d2k-ppe` с сохранением чужих правил; `test-router-ppe-firewall-lock-differential.sh` — ожидание общего firewall lock. `test-"
     },
     {
-      "id": 49,
+      "id": 51,
       "name": "Firewall: код ошибки при отказе отдельного правила",
       "weight": 1,
       "points": 1,
@@ -1222,7 +1273,7 @@
       "evidence": "`test-firewall-rule-error-differential.sh` вводит отказ первой loopback-правила и позднего `POSTROUTING` hook; C и Rust возвращают 1 в обоих случаях. Полная проверка синтаксиса/эффекта всех правил остаётся в предыдущей частичной строке"
     },
     {
-      "id": 50,
+      "id": 52,
       "name": "Firewall service: IPv4-only fallback, kernel modules, persistent marker, повторная установка по явному reapply и очистка выключенного семейства",
       "weight": 2,
       "points": 2,
@@ -1233,7 +1284,7 @@
       "evidence": "`test-router-ipv6-fallback-differential.sh` сравнивает D2O/R2O fallback classification (нет команды, mangle и неподдерживаемый `-w`), modprobe и `.ko`/insmod traces, NFQUEUE 2001 после загрузки модуля, marker-aware status после позднего появления mangle, явный reapply, конфиг IPv6=1 и stale-family cleanup. `test-router-route-gate-config.sh` проверяет S99 start/reapply не передают устаревший runtime probe в firewall up. Это helper/service fixture, не live kernel test"
     },
     {
-      "id": 51,
+      "id": 53,
       "name": "Firewall: динамические DNS-upstream exclusions и refresh",
       "weight": 1,
       "points": 1,
@@ -1244,7 +1295,7 @@
       "evidence": "`test-router-dns-exclusion-differential.sh` сравнивает настоящие функции: fresh install, IPv4/IPv6 upstreams, plain DNS/DoH/DoT, пропуск localhost proxy, A/AAAA, смену адреса, удаление upstream, fallback на сохранённые адреса при ошибке resolve и два конкурентных refresh. Проверяются TCP/UDP, обе стороны conntrack, вставки и удаления правил"
     },
     {
-      "id": 52,
+      "id": 54,
       "name": "Firewall service: heal/watchdog, reapply и ошибки",
       "weight": 1,
       "points": 1,
@@ -1255,7 +1306,7 @@
       "evidence": "`test-router-reapply-differential.sh`, `test-router-heal-concurrency-differential.sh`, `test-router-firewall-watchdog-differential.sh`, `test-router-firewall-status-differential.sh` and `test-router-iptables-status-differential.sh` pass service-level reapply, missing-firewall heal, concurrent NDM/failure cooldown, watchdog start/stop ordering and complete/incomplete nft/iptables status cases, including configured IPv4 gate-exclusion validation in the iptables status harness. I reran these five harnesses on 2026-11-06 against D2O `8e2c981` using temporary copies with only the expected revision "
     },
     {
-      "id": 53,
+      "id": 55,
       "name": "Update guard: reject invalid release, skip current version and keep datapath running on download failure",
       "weight": 1,
       "points": 1,
@@ -1266,18 +1317,18 @@
       "evidence": "`test-router-update-availability-differential.sh` and `test-router-update-scheduler.sh` passed on 2026-11-06 against the current D2O checkout at `8e2c981`. The C/Rust fixture confirms current-release no-op and failed-download paths do not stop the running datapath; the scheduler honors disabled/out-of-window/bad-release guards. The success-path stop ordering and rollback behavior are deliberately excluded from this point."
     },
     {
-      "id": 54,
+      "id": 56,
       "name": "Update activation ordering, rollback recovery and signed Linux/OpenWrt install",
       "weight": 1,
-      "points": 0,
-      "status": "partial",
-      "statusLabel": "Частично",
+      "points": 1,
+      "status": "verified",
+      "statusLabel": "Доказанно эквивалентно",
       "group": "Release / ABI",
       "mapping": "D2O updater/runtime → Rust manager activation and router recovery",
-      "evidence": "R2O has mock-tested rollback ordering, and package artifacts were built and checked. The C/Rust success-path ordering differs, and a complete signed installation/rollback on the target Linux/OpenWrt process ABI has not been run; this point remains open."
+      "evidence": "D2O `install_release()` скачивает и проверяет `latest.json`/архив до stop-фазы `install.sh`, затем устанавливает файлы и запускает службу. R2O manager разделён на `update-stage[-auto]` (скачивание, проверка подписи и хеша, распаковка в приватный каталог; слоты не меняются) и `update-activate` (атомарное переключение слотов). `router/S99r2o` выполняет stage → stop → activate → start + 60-секундную health-проверку; ошибка загрузки, `already_current` и неизвестный ответ manager оставляют работающий datapath без изменений, а отказ stop запускает прежний release. `test-router-update-availability-di"
     },
     {
-      "id": 55,
+      "id": 57,
       "name": "ABI/QEMU и сборка OpenWrt targets",
       "weight": 2,
       "points": 2,
