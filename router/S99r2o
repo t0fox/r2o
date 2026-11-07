@@ -902,12 +902,11 @@ heal_reapply() {
 
 telegram_reapply() {
     [ "$TG_ENABLED" = 1 ] || return 0
+    component_running r2o-telegram "$TG_PID" || return 0
+    "$TG_FIREWALL" heal || return 1
     if telegram_ready; then
-        "$TG_FIREWALL" heal || return 1
         "$TG_FIREWALL" sync-dc-map || say "не удалось синхронизировать динамическую карту Telegram DC"
         telegram_watchdog_start || say "сторож Telegram не запустился"
-    else
-        telegram_start
     fi
 }
 

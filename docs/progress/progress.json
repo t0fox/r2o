@@ -3,14 +3,14 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 261,
-  "points": 84,
-  "percent": 32.18,
+  "points": 86,
+  "percent": 32.95,
   "total": 173,
   "counts": {
-    "verified": 60,
+    "verified": 61,
     "carry": 40,
     "partial": 61,
-    "missing": 12,
+    "missing": 11,
     "implemented": 0,
     "unknown": 0
   },
@@ -1769,7 +1769,7 @@
     {
       "name": "Router / Service",
       "weight": 84,
-      "points": 64,
+      "points": 66,
       "items": [
         {
           "id": 100,
@@ -2376,15 +2376,15 @@
           "key": "B42",
           "name": "Telegram reapply semantics",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "missing",
-          "statusLabel": "пробел",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Router / Service",
-          "coverage": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-          "gap": "**пробел (запускает процесс)**",
-          "mapping": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-          "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: **пробел (запускает процесс)**"
+          "coverage": "`scripts/test-router-telegram-reapply.sh`; C oracle `files/S99d2k:1470-1474`",
+          "gap": "Остановленный процесс не запускается; heal только для running",
+          "mapping": "`scripts/test-router-telegram-reapply.sh`; C oracle `files/S99d2k:1470-1474`",
+          "evidence": "`scripts/test-router-telegram-reapply.sh`; C oracle `files/S99d2k:1470-1474` · пробел: Остановленный процесс не запускается; heal только для running"
         },
         {
           "id": 141,
@@ -4772,15 +4772,15 @@
       "key": "B42",
       "name": "Telegram reapply semantics",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "missing",
-      "statusLabel": "пробел",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Router / Service",
-      "coverage": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-      "gap": "**пробел (запускает процесс)**",
-      "mapping": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-      "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: **пробел (запускает процесс)**"
+      "coverage": "`scripts/test-router-telegram-reapply.sh`; C oracle `files/S99d2k:1470-1474`",
+      "gap": "Остановленный процесс не запускается; heal только для running",
+      "mapping": "`scripts/test-router-telegram-reapply.sh`; C oracle `files/S99d2k:1470-1474`",
+      "evidence": "`scripts/test-router-telegram-reapply.sh`; C oracle `files/S99d2k:1470-1474` · пробел: Остановленный процесс не запускается; heal только для running"
     },
     {
       "id": 141,
@@ -5280,14 +5280,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 84,
+      "points": 86,
       "weight": 261,
-      "percent": 32.18
+      "percent": 32.95
     },
     "carry_forward": {
-      "points": 147,
+      "points": 149,
       "weight": 261,
-      "percent": 56.32,
+      "percent": 57.09,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

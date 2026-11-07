@@ -4,7 +4,7 @@
 
 Источники: локальные деревья `E:\d2o` (C/shell/section units) и `E:\r2o` (Rust/shell), `docs/functional-parity-matrix.md`, `docs/parity-function-inventory.md`, `README.md`, `router/README.md`, `docs/audit/function-index.md`, существующие differential-скрипты и CI-workflow.
 
-**Интеграция 2026-11-08.** Детальные строки A1–A26, B1–B54 и C1–C26 сведены в единую scored-матрицу `docs/functional-parity-matrix.md`, раздел «Нормализованная матрица покрытия»: 173 контракта / 261 балл, строгий счёт 84/261 = 32,18 %. В scored не входят `B32`/`B45`/`B54`, `C2`, `C25`/`C26` как extension/out-of-scope/дубли. `B9` и `B52` закрыты после аудита (`scripts/test-router-clear-found-state.sh`, `scripts/test-router-log-maintenance.sh`); таблицы ниже сохранены как исходное доказательное основание.
+**Интеграция 2026-11-08.** Детальные строки A1–A26, B1–B54 и C1–C26 сведены в единую scored-матрицу `docs/functional-parity-matrix.md`, раздел «Нормализованная матрица покрытия»: 173 контракта / 261 балл, строгий счёт 86/261 = 32,95 %. В scored не входят `B32`/`B45`/`B54`, `C2`, `C25`/`C26` как extension/out-of-scope/дубли. `B9` и `B52` закрыты после аудита (`scripts/test-router-clear-found-state.sh`, `scripts/test-router-log-maintenance.sh`); таблицы ниже сохранены как исходное доказательное основание.
 
 ## 0. Метод и ограничения
 
