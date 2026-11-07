@@ -2,12 +2,12 @@
   "source": "docs/functional-parity-matrix.md",
   "date": "2026-11-07",
   "weight": 89,
-  "points": 77,
-  "percent": 86.52,
+  "points": 78,
+  "percent": 87.64,
   "total": 57,
   "counts": {
-    "verified": 47,
-    "partial": 8,
+    "verified": 48,
+    "partial": 7,
     "implemented": 1,
     "unknown": 1
   },
@@ -74,12 +74,12 @@
           "id": 8,
           "name": "Остальные периодические метрики datapath и процесса",
           "weight": 1,
-          "points": 0,
-          "status": "partial",
-          "statusLabel": "Частично",
+          "points": 1,
+          "status": "verified",
+          "statusLabel": "Доказанно эквивалентно",
           "group": "Datapath",
           "mapping": "C print_stats/self_cost → Rust QueueSocket counters/runtime diagnostics",
-          "evidence": "D2O a63d964/R2O main: idle timer traces match flow/scheduler/capture/payload/reply/hold; 4 IPv4 NFQUEUE summaries match 9 packets/396 bytes/9 accepted/0 dropped; copy-range 128: truncated=1/no_payload=0/no_header=0. Headerless unit; runtime case open. TLS1.2 SNI one/split traces match; second-segment counters=0,1,1,1. QUIC v1 Initial summaries match 1/1; Rust counts once across late SNI/repeats. Alien-RST summaries match at 0; unit covers repeats. The live held-packet timeout trace now matches with started=1, released=1, timed_out=1, timed_out_packets=1 and pending=0; the incomplete 7-byte TLS"
+          "evidence": "На текущем D2O `a378e230947ebfd011439e1cac0f1e994d883aae` и R2O `af5eddf` (datapath ownership fix `16c31f6`) `scripts/test-datapath-stats-timer-differential.sh` прошёл полностью (rc=0) в WSL root netns на production IPv4 NFQUEUE процессах: capture expiry `0/0/1/0`; flow-table, scheduler, capture, reply visibility, hold, payload/session, TLS/QUIC hello, split SNI, alien RST и copy-range traces совпали; NFQUEUE `9 пакетов / 396 байт / 9 accepted / 0 dropped`; nonzero UDP occupancy; hold timeout `1 0 1 1 1 0 0 0 0 0 0 0`; raw-send `1/0/0` и UDP-follow `0/0/0` с route notification `1` совпали на о"
         },
         {
           "id": 9,
@@ -160,7 +160,7 @@
         }
       ],
       "weight": 18,
-      "points": 12
+      "points": 13
     },
     {
       "name": "Classifier / TLS",
@@ -792,12 +792,12 @@
       "id": 8,
       "name": "Остальные периодические метрики datapath и процесса",
       "weight": 1,
-      "points": 0,
-      "status": "partial",
-      "statusLabel": "Частично",
+      "points": 1,
+      "status": "verified",
+      "statusLabel": "Доказанно эквивалентно",
       "group": "Datapath",
       "mapping": "C print_stats/self_cost → Rust QueueSocket counters/runtime diagnostics",
-      "evidence": "D2O a63d964/R2O main: idle timer traces match flow/scheduler/capture/payload/reply/hold; 4 IPv4 NFQUEUE summaries match 9 packets/396 bytes/9 accepted/0 dropped; copy-range 128: truncated=1/no_payload=0/no_header=0. Headerless unit; runtime case open. TLS1.2 SNI one/split traces match; second-segment counters=0,1,1,1. QUIC v1 Initial summaries match 1/1; Rust counts once across late SNI/repeats. Alien-RST summaries match at 0; unit covers repeats. The live held-packet timeout trace now matches with started=1, released=1, timed_out=1, timed_out_packets=1 and pending=0; the incomplete 7-byte TLS"
+      "evidence": "На текущем D2O `a378e230947ebfd011439e1cac0f1e994d883aae` и R2O `af5eddf` (datapath ownership fix `16c31f6`) `scripts/test-datapath-stats-timer-differential.sh` прошёл полностью (rc=0) в WSL root netns на production IPv4 NFQUEUE процессах: capture expiry `0/0/1/0`; flow-table, scheduler, capture, reply visibility, hold, payload/session, TLS/QUIC hello, split SNI, alien RST и copy-range traces совпали; NFQUEUE `9 пакетов / 396 байт / 9 accepted / 0 dropped`; nonzero UDP occupancy; hold timeout `1 0 1 1 1 0 0 0 0 0 0 0`; raw-send `1/0/0` и UDP-follow `0/0/0` с route notification `1` совпали на о"
     },
     {
       "id": 9,
