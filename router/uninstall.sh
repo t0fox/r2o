@@ -82,6 +82,23 @@ esac
 ACTIVE_SCRIPT=$ROOT/releases/$ACTIVE/router/S99r2o
 ACTIVE_NDM_HOOK=$ROOT/releases/$ACTIVE/router/001-r2o.sh
 OWNED_SHIM=0
+emergency_stop() {
+    # D2O uninstall продолжает удаление, даже если init уже снят. Останавливаем
+    # только собственные PID-файлы, не трогая чужие процессы.
+    for pidfile in "$ROOT"/run/*.pid; do
+        [ -f "$pidfile" ] || continue
+        pid=$(cat "$pidfile" 2>/dev/null) || continue
+        case "$pid" in ''|*[!0-9]*) continue ;; esac
+        kill -0 "$pid" 2>/dev/null || continue
+        kill -TERM "$pid" 2>/dev/null || true
+        attempt=0
+        while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt 50 ]; do
+            attempt=$((attempt + 1))
+            sleep 0.1 2>/dev/null || sleep 1
+        done
+        kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+    done
+}
 if [ -e "$INIT_SCRIPT" ]; then
     [ ! -L "$INIT_SCRIPT" ] || fail "shim автозапуска изменён или является ссылкой"
     [ -f "$INIT_SCRIPT" ] || fail "shim автозапуска изменён или является ссылкой"
@@ -91,11 +108,12 @@ if [ -e "$INIT_SCRIPT" ]; then
     cmp -s "$INIT_SCRIPT" "$EXPECTED_SHIM" || fail "shim автозапуска не совпадает с активным выпуском"
     [ -x "$INIT_SCRIPT" ] || fail "shim автозапуска не исполняемый"
     OWNED_SHIM=1
-    "$INIT_SCRIPT" stop
+    "$INIT_SCRIPT" stop || echo "r2o uninstall: остановка через shim вернула ошибку — продолжаю удаление" >&2
 elif [ ! -L "$ACTIVE_SCRIPT" ] && [ -f "$ACTIVE_SCRIPT" ] && [ -x "$ACTIVE_SCRIPT" ]; then
-    R2O_DIR=$ROOT "$ACTIVE_SCRIPT" stop
+    R2O_DIR=$ROOT "$ACTIVE_SCRIPT" stop || echo "r2o uninstall: остановка активного выпуска вернула ошибку — продолжаю удаление" >&2
 else
-    fail "не найден адаптер службы для безопасной остановки"
+    echo "r2o uninstall: адаптер службы не найден — аварийная остановка по PID-файлам" >&2
+    emergency_stop
 fi
 
 if [ -f "$OPENWRT_RELEASE" ] || [ "${R2O_PLATFORM:-}" = openwrt ]; then
