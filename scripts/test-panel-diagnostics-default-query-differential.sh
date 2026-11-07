@@ -48,7 +48,17 @@ clang-18 -std=gnu11 -O2 -Wall -Wextra -Werror -pthread \
 R2O_PANEL_DIAGNOSTICS_DIR="$TEMP/diagnostics" \
     "$TEMP/d2o-panel-diagnostics" > "$TEMP/c.trace"
 
-cat > "$TEMP/run-rust-test.ps1" <<PS
+if [ "$(uname -s 2>/dev/null || printf unknown)" = Linux ]; then
+    CARGO_HOME=${R2O_CARGO_HOME:-$HOME/.cargo} \
+    RUSTUP_HOME=${R2O_RUSTUP_HOME:-$HOME/.rustup} \
+    CARGO_TARGET_DIR=${R2O_CARGO_TARGET_DIR:-$HOME/r2o-target} \
+    R2O_PANEL_DIAGNOSTICS_STATE_DIR="$TEMP/state" \
+    R2O_PANEL_DIAGNOSTICS_C_TRACE="$TEMP/c.trace" \
+    R2O_PANEL_DIAGNOSTICS_TRACE_OUTPUT="$TEMP/rust.trace" \
+        "${CARGO:-cargo}" test -p r2o-panel --test http --locked --offline \
+            d2o_diagnostics_default_query_trace -- --ignored --nocapture
+else
+    cat > "$TEMP/run-rust-test.ps1" <<PS
 \$env:CARGO_HOME = '$WIN_CARGO_HOME'
 \$env:RUSTUP_HOME = '$WIN_RUSTUP_HOME'
 \$env:CARGO_TARGET_DIR = '$WIN_BUILD_TARGET'
@@ -61,7 +71,8 @@ cat > "$TEMP/run-rust-test.ps1" <<PS
 & '$WIN_CARGO' +1.98.0-x86_64-pc-windows-gnu test -p r2o-panel --test http --locked --offline d2o_diagnostics_default_query_trace -- --ignored --nocapture
 exit \$LASTEXITCODE
 PS
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass \
-    -File "$(windows_path "$TEMP/run-rust-test.ps1")"
+    powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass \
+        -File "$(windows_path "$TEMP/run-rust-test.ps1")"
+fi
 
 echo "C/Rust diagnostics default-query responses match d2o $ACTUAL_D2O_SHA."
