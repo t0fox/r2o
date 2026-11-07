@@ -2,12 +2,12 @@
   "source": "docs/functional-parity-matrix.md",
   "date": "2026-11-07",
   "weight": 89,
-  "points": 78,
-  "percent": 87.64,
+  "points": 79,
+  "percent": 88.76,
   "total": 57,
   "counts": {
-    "verified": 48,
-    "partial": 7,
+    "verified": 49,
+    "partial": 6,
     "implemented": 1,
     "unknown": 1
   },
@@ -563,16 +563,16 @@
           "id": 46,
           "name": "Панель: control/actions, прочие status branches, настройки и assets",
           "weight": 1,
-          "points": 0,
-          "status": "partial",
-          "statusLabel": "Частично",
+          "points": 1,
+          "status": "verified",
+          "statusLabel": "Доказанно эквивалентно",
           "group": "WebPanel",
-          "mapping": "C `panel/server.c::{api_control,api_telegram_workers,api_status,static_file,telegram_config_flags}` → Rust `r2o-panel::server::{api_control,api_workers,api_status,static_asset,telegram_config_flags}`",
-          "evidence": "`test-panel-diagnostics-default-query-differential.sh` сравнивает C/Rust `GET /api/diagnostics` без query и с пустым `?`: отсутствие query выбирает `status`, явный пустой query остаётся запросом отчёта. Также проверены Control success/busy/start-error и timeout state; Workers busy/save-order, UTF-8 и произвольные comment bytes; `test-panel-worker-content-length-differential.sh` воспроизводит ведущие нули в `Content-Length`: RED — C `400` без записи, Rust `500` после изменения config; GREEN — одинаковые `400` и неизменённый файл; дополнительный реальный C/Rust сценарий передаёт валидный JSON и "
+          "mapping": "C `panel/server.c::{api_control,api_telegram_workers,api_status,api_update,static_file,telegram_config_flags}` → Rust `r2o-panel::server::{api_control,api_workers,api_status,api_update,static_asset,telegram_config_flags}`",
+          "evidence": "На текущем D2O `a378e230947ebfd011439e1cac0f1e994d883aae` и R2O `1093795` прошли все 22 panel differential-сценария: control success/busy/start-error/timeout; Workers busy/config/JSON/content-length/size; diagnostics default query; config comment bytes; header limit/deadline; status unavailable/live-size/catalog-revision; static ETag/size; Telegram config/stats/status; `/api/update` absent/never/valid/invalid. `cargo test -p r2o-panel --test http` на Linux — 19 passed, 0 failed, 16 ignored. `node crates/r2o-panel/tests/browser.cjs` с headless Chrome 157 и production `r2o-panel` прошёл проверку"
         }
       ],
       "weight": 3,
-      "points": 2
+      "points": 3
     },
     {
       "name": "Firewall / PPE",
@@ -1210,12 +1210,12 @@
       "id": 46,
       "name": "Панель: control/actions, прочие status branches, настройки и assets",
       "weight": 1,
-      "points": 0,
-      "status": "partial",
-      "statusLabel": "Частично",
+      "points": 1,
+      "status": "verified",
+      "statusLabel": "Доказанно эквивалентно",
       "group": "WebPanel",
-      "mapping": "C `panel/server.c::{api_control,api_telegram_workers,api_status,static_file,telegram_config_flags}` → Rust `r2o-panel::server::{api_control,api_workers,api_status,static_asset,telegram_config_flags}`",
-      "evidence": "`test-panel-diagnostics-default-query-differential.sh` сравнивает C/Rust `GET /api/diagnostics` без query и с пустым `?`: отсутствие query выбирает `status`, явный пустой query остаётся запросом отчёта. Также проверены Control success/busy/start-error и timeout state; Workers busy/save-order, UTF-8 и произвольные comment bytes; `test-panel-worker-content-length-differential.sh` воспроизводит ведущие нули в `Content-Length`: RED — C `400` без записи, Rust `500` после изменения config; GREEN — одинаковые `400` и неизменённый файл; дополнительный реальный C/Rust сценарий передаёт валидный JSON и "
+      "mapping": "C `panel/server.c::{api_control,api_telegram_workers,api_status,api_update,static_file,telegram_config_flags}` → Rust `r2o-panel::server::{api_control,api_workers,api_status,api_update,static_asset,telegram_config_flags}`",
+      "evidence": "На текущем D2O `a378e230947ebfd011439e1cac0f1e994d883aae` и R2O `1093795` прошли все 22 panel differential-сценария: control success/busy/start-error/timeout; Workers busy/config/JSON/content-length/size; diagnostics default query; config comment bytes; header limit/deadline; status unavailable/live-size/catalog-revision; static ETag/size; Telegram config/stats/status; `/api/update` absent/never/valid/invalid. `cargo test -p r2o-panel --test http` на Linux — 19 passed, 0 failed, 16 ignored. `node crates/r2o-panel/tests/browser.cjs` с headless Chrome 157 и production `r2o-panel` прошёл проверку"
     },
     {
       "id": 47,
