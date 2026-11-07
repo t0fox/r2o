@@ -91,6 +91,12 @@ mod linux {
             "{CYCLES} mock TCP measurements: VmRSS {rss_before:?} -> {rss_warm:?} -> {rss_after:?} KiB, \
              VmData {data_before:?} -> {data_warm:?} -> {data_after:?} KiB (start/warm/end)"
         );
+        let asan = std::env::var_os("ASAN_OPTIONS").is_some()
+            || std::env::var("RUSTFLAGS").is_ok_and(|flags| flags.contains("sanitize=address"));
+        if asan {
+            println!("ASan active: RSS delta omitted because freed allocations are quarantined");
+            return;
+        }
         if let (Some(warm), Some(after)) = (rss_warm, rss_after) {
             assert!(
                 after <= warm + MEMORY_GROWTH_LIMIT_KIB,
