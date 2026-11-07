@@ -1,7 +1,8 @@
 use crate::install::activate_previous_release;
 use crate::{
-    InstallSlots, VerifyError, decode_public_key, install_archive, read_install_architecture,
-    read_install_slots, verify_manifest,
+    InstallSlots, PreparedRelease, VerifyError, activate_prepared, decode_public_key,
+    install_archive, prepare_archive, read_install_architecture, read_install_slots,
+    verify_manifest,
 };
 use r2k_core::dns::{DNS_RESOLVERS, build_a_query, parse_a_reply};
 use serde_json::{Value, json};
@@ -41,6 +42,7 @@ pub enum UpdateError {
     Download(String),
     InvalidArchitecture,
     PreviouslyFailedRelease(String),
+    NoStagedRelease,
 }
 
 impl fmt::Display for UpdateError {
@@ -56,6 +58,9 @@ impl fmt::Display for UpdateError {
                     f,
                     "автоматический повтор выпуска {release} пропущен после отказа runtime-проверки"
                 )
+            }
+            Self::NoStagedRelease => {
+                write!(f, "нет подготовленного выпуска для активации")
             }
         }
     }
@@ -224,6 +229,308 @@ fn install_update_with_policy(
             Err(error)
         }
     }
+}
+
+fn staged_file(root: &Path) -> PathBuf {
+    root.join("state/update-stage.json")
+}
+
+fn read_staged(root: &Path) -> Option<Value> {
+    let bytes = fs::read(staged_file(root)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn write_staged(root: &Path, value: &Value) -> Result<(), UpdateError> {
+    let path = staged_file(root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let text =
+        serde_json::to_vec(value).map_err(|error| UpdateError::Io(io::Error::other(error)))?;
+    let temporary = path.with_extension("json.new");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&temporary)?;
+    file.write_all(&text)?;
+    file.sync_all()?;
+    fs::rename(&temporary, &path)?;
+    Ok(())
+}
+
+/// Удалить маркер подготовки и приватный распакованный каталог, если он был.
+fn clear_staged(root: &Path) {
+    if let Some(staged) = read_staged(root) {
+        if staged.get("kind").and_then(Value::as_str) == Some("archive")
+            && let Some(work) = staged.get("work").and_then(Value::as_str)
+        {
+            let _ = fs::remove_dir_all(root.join(work));
+        }
+    }
+    let _ = fs::remove_file(staged_file(root));
+}
+
+enum StagedOutcome {
+    AlreadyCurrent(crate::ReleaseManifest, InstallSlots),
+    Staged(crate::ReleaseManifest),
+}
+
+/// Скачать и проверить выпуск, распаковав его в приватный каталог, но не
+/// переключать слоты. Адаптер останавливает runtime только после успешной
+/// подготовки, как D2O `install.sh`, и затем вызывает `update-activate`.
+pub fn stage_update(root: &Path, architecture: &str) -> Result<Value, UpdateError> {
+    stage_update_with_policy(root, architecture, false)
+}
+
+/// Ночная подготовка сохраняет запрет повторной активации bad_release.
+pub fn stage_update_auto(root: &Path, architecture: &str) -> Result<Value, UpdateError> {
+    stage_update_with_policy(root, architecture, true)
+}
+
+fn stage_update_with_policy(
+    root: &Path,
+    architecture: &str,
+    automatic: bool,
+) -> Result<Value, UpdateError> {
+    validate_architecture(architecture)?;
+    let _lock = UpdateLock::acquire(root)?;
+    fs::create_dir_all(root)?;
+    clear_staged(root);
+    let mut state = read_state(root);
+    state["auto"] = json!(auto_update_enabled(&state));
+    state["busy"] = json!("staging");
+    write_state(root, &state)?;
+
+    let result = (|| {
+        let work = create_work_dir(root)?;
+        let result = stage_update_in(&work, root, architecture, automatic);
+        let _ = fs::remove_dir_all(work);
+        result
+    })();
+
+    match result {
+        Ok(StagedOutcome::AlreadyCurrent(manifest, slots)) => {
+            state["busy"] = json!("");
+            state["current"] = json!(slots.current);
+            state["arch"] = json!(architecture);
+            state["checked_utc"] = json!(now_epoch());
+            state["check_ok"] = json!(true);
+            state["check_error"] = json!("");
+            state["latest"] = json!({"release_id":manifest.release_id,"version":manifest.version,"notes":manifest.notes});
+            state["last_utc"] = json!(now_epoch());
+            state["last_ok"] = json!(true);
+            state["last_release"] = json!(manifest.release_id);
+            state["last_message"] = json!("Уже установлен последний релиз");
+            state["bad_release"] = json!("");
+            if let Some(object) = state.as_object_mut() {
+                object.remove("never");
+            }
+            write_state(root, &state)?;
+            Ok(json!({
+                "staged": false,
+                "already_current": true,
+                "current": slots.current,
+                "previous": slots.previous,
+                "architecture": architecture
+            }))
+        }
+        Ok(StagedOutcome::Staged(manifest)) => {
+            state["busy"] = json!("");
+            state["arch"] = json!(architecture);
+            state["checked_utc"] = json!(now_epoch());
+            state["check_ok"] = json!(true);
+            state["check_error"] = json!("");
+            state["latest"] = json!({"release_id":manifest.release_id,"version":manifest.version,"notes":manifest.notes});
+            state["last_utc"] = json!(now_epoch());
+            state["last_ok"] = json!(true);
+            state["last_release"] = json!(manifest.release_id);
+            state["last_message"] = json!("Релиз подготовлен; runtime ещё не изменён");
+            if let Some(object) = state.as_object_mut() {
+                object.remove("never");
+            }
+            write_state(root, &state)?;
+            Ok(json!({
+                "staged": true,
+                "already_current": false,
+                "release_id": manifest.release_id,
+                "architecture": architecture
+            }))
+        }
+        Err(error) => {
+            state["busy"] = json!("");
+            state["last_utc"] = json!(now_epoch());
+            state["last_ok"] = json!(false);
+            state["last_message"] = json!(error.to_string());
+            if let Some(object) = state.as_object_mut() {
+                object.remove("never");
+            }
+            write_state(root, &state)?;
+            Err(error)
+        }
+    }
+}
+
+fn stage_update_in(
+    work: &Path,
+    root: &Path,
+    architecture: &str,
+    automatic: bool,
+) -> Result<StagedOutcome, UpdateError> {
+    let manifest_path = work.join("latest.json");
+    let signature_path = work.join("latest.json.sig");
+    download(LATEST_URL, &manifest_path, MANIFEST_MAX_BYTES, "60")?;
+    download(
+        &format!("{LATEST_URL}.sig"),
+        &signature_path,
+        SIGNATURE_MAX_BYTES,
+        "60",
+    )?;
+    let manifest_bytes = read_bounded(&manifest_path, MANIFEST_MAX_BYTES)?;
+    let signature = read_bounded(&signature_path, SIGNATURE_MAX_BYTES)?;
+    let public_key = decode_public_key(PUBLIC_KEY)?;
+    let manifest = verify_manifest(&manifest_bytes, &signature, &public_key)?;
+    if !manifest.assets.contains_key(architecture) {
+        return Err(VerifyError::UnknownArchitecture(architecture.to_owned()).into());
+    }
+    let slots = read_install_slots(root)?;
+    if slots
+        .as_ref()
+        .is_some_and(|installed| installed.current == manifest.release_id)
+    {
+        return Ok(StagedOutcome::AlreadyCurrent(
+            manifest,
+            slots.expect("current release was checked"),
+        ));
+    }
+    if should_skip_failed_release(automatic, &read_state(root), &manifest.release_id) {
+        return Err(UpdateError::PreviouslyFailedRelease(manifest.release_id).into());
+    }
+    if slots.as_ref().is_some_and(|installed| {
+        installed.previous.as_deref() == Some(manifest.release_id.as_str())
+    }) {
+        write_staged(
+            root,
+            &json!({
+                "release_id": manifest.release_id,
+                "architecture": architecture,
+                "kind": "previous"
+            }),
+        )?;
+        return Ok(StagedOutcome::Staged(manifest));
+    }
+    let url = format!(
+        "{DOWNLOAD_URL}/{}/r2o-{architecture}.tar.gz",
+        manifest.release_id
+    );
+    let archive_path = work.join("release.tar.gz");
+    download(
+        &url,
+        &archive_path,
+        ARCHIVE_MAX_BYTES,
+        DOWNLOAD_TIMEOUT_SECONDS,
+    )?;
+    let prepared = prepare_archive(
+        root,
+        &archive_path,
+        &manifest_bytes,
+        &signature,
+        &public_key,
+        architecture,
+    )?;
+    let relative_work = prepared
+        .work
+        .strip_prefix(root)
+        .map_err(|_| UpdateError::Io(io::Error::other("prepared release is outside root")))?;
+    if let Err(error) = write_staged(
+        root,
+        &json!({
+            "release_id": prepared.release_id,
+            "architecture": architecture,
+            "kind": "archive",
+            "work": relative_work
+        }),
+    ) {
+        prepared.discard();
+        return Err(error);
+    }
+    Ok(StagedOutcome::Staged(manifest))
+}
+
+/// Активировать подготовленный выпуск после остановки runtime.
+pub fn activate_staged_update(root: &Path) -> Result<Value, UpdateError> {
+    let _lock = UpdateLock::acquire(root)?;
+    let staged = read_staged(root).ok_or(UpdateError::NoStagedRelease)?;
+    let release_id = staged
+        .get("release_id")
+        .and_then(Value::as_str)
+        .ok_or(UpdateError::NoStagedRelease)?
+        .to_owned();
+    let architecture = staged
+        .get("architecture")
+        .and_then(Value::as_str)
+        .ok_or(UpdateError::NoStagedRelease)?
+        .to_owned();
+    validate_architecture(&architecture)?;
+    let kind = staged
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or(UpdateError::NoStagedRelease)?;
+    let result = (|| {
+        if kind == "previous" {
+            activate_previous_release(root, &release_id, &architecture)?
+                .ok_or(UpdateError::NoStagedRelease)
+        } else if kind == "archive" {
+            let work = staged
+                .get("work")
+                .and_then(Value::as_str)
+                .ok_or(UpdateError::NoStagedRelease)?;
+            let prepared = PreparedRelease {
+                release_id: release_id.clone(),
+                architecture: architecture.clone(),
+                bundle: root.join(work).join("bundle"),
+                work: root.join(work),
+            };
+            let slots = match activate_prepared(root, &prepared) {
+                Ok(slots) => slots,
+                Err(error) => {
+                    prepared.discard();
+                    return Err(error.into());
+                }
+            };
+            prepared.discard();
+            Ok(slots)
+        } else {
+            Err(UpdateError::NoStagedRelease)
+        }
+    })();
+    let _ = fs::remove_file(staged_file(root));
+    let slots = result?;
+
+    let mut state = read_state(root);
+    state["busy"] = json!("");
+    state["current"] = json!(slots.current);
+    state["arch"] = json!(architecture);
+    state["checked_utc"] = json!(now_epoch());
+    state["check_ok"] = json!(true);
+    state["check_error"] = json!("");
+    state["last_utc"] = json!(now_epoch());
+    state["last_ok"] = json!(true);
+    state["last_release"] = json!(release_id);
+    state["last_message"] =
+        json!("Релиз активирован; для проверки и перезапуска вызовите адаптер роутера");
+    state["bad_release"] = json!("");
+    if let Some(object) = state.as_object_mut() {
+        object.remove("never");
+    }
+    write_state(root, &state)?;
+    Ok(json!({
+        "activated": true,
+        "already_current": false,
+        "current": slots.current,
+        "previous": slots.previous,
+        "architecture": architecture
+    }))
 }
 
 /// Записать провалившийся текущий релиз после успешного возврата на previous slot.
@@ -968,5 +1275,62 @@ mod tests {
     #[test]
     fn embedded_release_key_is_a_valid_ed25519_public_key() {
         assert_eq!(decode_public_key(PUBLIC_KEY).unwrap().len(), 32);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_archive_activates_only_on_explicit_request() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TestDir::new();
+        let root = &temp.0;
+        let work_relative = ".install-test-stage";
+        let work = root.join(work_relative);
+        let builds = work.join("bundle/builds");
+        fs::create_dir_all(&builds).unwrap();
+        for component in [
+            "r2o-datapath",
+            "r2o-controller",
+            "r2o-panel",
+            "r2o-telegram",
+            "r2o-manager",
+            "r2o-fetch",
+        ] {
+            let path = builds.join(format!("{component}-linux-mipsel"));
+            fs::write(&path, "release payload").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        write_staged(
+            root,
+            &json!({
+                "release_id": "r2o-stage-1",
+                "architecture": "mipsel",
+                "kind": "archive",
+                "work": work_relative
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(read_install_slots(root).unwrap(), None);
+        assert!(staged_file(root).exists());
+
+        let result = activate_staged_update(root).unwrap();
+        assert_eq!(result["activated"], true);
+        assert_eq!(result["current"], "r2o-stage-1");
+        assert_eq!(
+            read_install_slots(root).unwrap().unwrap().current,
+            "r2o-stage-1"
+        );
+        assert!(!staged_file(root).exists());
+        assert!(!work.exists());
+        assert_eq!(read_state(root)["current"], "r2o-stage-1");
+    }
+
+    #[test]
+    fn activation_without_a_staged_release_fails() {
+        let temp = TestDir::new();
+        assert!(matches!(
+            activate_staged_update(&temp.0),
+            Err(UpdateError::NoStagedRelease)
+        ));
     }
 }

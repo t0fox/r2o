@@ -117,6 +117,104 @@ pub fn activate_bundle(
     activate_bundle_locked(root, bundle, release_id, architecture)
 }
 
+/// Проверенный и уже распакованный выпуск, который ещё не переключил слоты.
+/// Нужен, чтобы скачивание/проверка/распаковка происходили до остановки
+/// runtime, как в D2O `install.sh`, а замена файлов — после неё.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedRelease {
+    pub release_id: String,
+    pub architecture: String,
+    pub bundle: PathBuf,
+    pub work: PathBuf,
+}
+
+impl PreparedRelease {
+    /// Удалить приватный рабочий каталог подготовленного выпуска.
+    pub fn discard(&self) {
+        let _ = fs::remove_dir_all(&self.work);
+    }
+}
+
+/// Проверить подписанный архив и распаковать его, не активируя. Вызывающий
+/// позже подтверждает выпуск через [`activate_prepared`].
+pub fn prepare_archive(
+    root: &Path,
+    archive_path: &Path,
+    manifest_bytes: &[u8],
+    signature: &[u8],
+    public_key: &[u8],
+    architecture: &str,
+) -> Result<PreparedRelease, InstallError> {
+    if manifest_bytes.len() > super::MANIFEST_MAX_BYTES {
+        return Err(VerifyError::ManifestTooLarge.into());
+    }
+    validate_token(architecture, "architecture", 32)
+        .map_err(|_| InstallError::InvalidArchitecture)?;
+    fs::create_dir_all(root)?;
+    let _lock = ManagerLock::acquire(root)?;
+    prepare_archive_locked(
+        root,
+        archive_path,
+        manifest_bytes,
+        signature,
+        public_key,
+        architecture,
+    )
+}
+
+fn prepare_archive_locked(
+    root: &Path,
+    archive_path: &Path,
+    manifest_bytes: &[u8],
+    signature: &[u8],
+    public_key: &[u8],
+    architecture: &str,
+) -> Result<PreparedRelease, InstallError> {
+    let work = create_work_dir(root)?;
+    let result = (|| {
+        let local_archive = work.join("release.tar.gz");
+        copy_archive(archive_path, &local_archive)?;
+        let mut archive_file = File::open(&local_archive)?;
+        let (manifest, _) = verify_release_archive(
+            manifest_bytes,
+            signature,
+            public_key,
+            architecture,
+            &mut archive_file,
+        )?;
+        archive_file.seek(SeekFrom::Start(0))?;
+        let bundle = work.join("bundle");
+        fs::create_dir(&bundle)?;
+        extract_bundle(&mut archive_file, &bundle)?;
+        validate_bundle(&bundle, architecture)?;
+        Ok(PreparedRelease {
+            release_id: manifest.release_id,
+            architecture: architecture.to_owned(),
+            bundle,
+            work: work.clone(),
+        })
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&work);
+    }
+    result
+}
+
+/// Активировать ранее подготовленный выпуск, не перепроверяя архив.
+pub fn activate_prepared(
+    root: &Path,
+    prepared: &PreparedRelease,
+) -> Result<InstallSlots, InstallError> {
+    fs::create_dir_all(root)?;
+    let _lock = ManagerLock::acquire(root)?;
+    activate_bundle_locked(
+        root,
+        &prepared.bundle,
+        &prepared.release_id,
+        &prepared.architecture,
+    )
+}
+
 /// Проверить подписанный выпуск и активировать архив, не раскрывая
 /// непроверенные файлы. Сжатый архив сначала копируется в закрытый временный
 /// каталог, поэтому проверка и распаковка читают одни и те же байты.
@@ -135,25 +233,21 @@ pub fn install_archive(
         .map_err(|_| InstallError::InvalidArchitecture)?;
     fs::create_dir_all(root)?;
     let _lock = ManagerLock::acquire(root)?;
-    let work = create_work_dir(root)?;
-    let result = (|| {
-        let local_archive = work.join("release.tar.gz");
-        copy_archive(archive_path, &local_archive)?;
-        let mut archive_file = File::open(&local_archive)?;
-        let (manifest, _) = verify_release_archive(
-            manifest_bytes,
-            signature,
-            public_key,
-            architecture,
-            &mut archive_file,
-        )?;
-        archive_file.seek(SeekFrom::Start(0))?;
-        let bundle = work.join("bundle");
-        fs::create_dir(&bundle)?;
-        extract_bundle(&mut archive_file, &bundle)?;
-        activate_bundle_locked(root, &bundle, &manifest.release_id, architecture)
-    })();
-    let _ = fs::remove_dir_all(work);
+    let prepared = prepare_archive_locked(
+        root,
+        archive_path,
+        manifest_bytes,
+        signature,
+        public_key,
+        architecture,
+    )?;
+    let result = activate_bundle_locked(
+        root,
+        &prepared.bundle,
+        &prepared.release_id,
+        &prepared.architecture,
+    );
+    prepared.discard();
     result
 }
 
@@ -1082,6 +1176,43 @@ mod tests {
             rollback(&root),
             Err(InstallError::NoPreviousRelease)
         ));
+    }
+
+    #[test]
+    fn prepared_archive_does_not_change_slots_until_activated() {
+        let temp = TestDir::new();
+        let root = temp.0.join("install");
+        let archive_path = temp.0.join("release.tar.gz");
+        let (archive, manifest, signature, public_key) = signed_archive();
+        fs::write(&archive_path, archive).unwrap();
+
+        let prepared = prepare_archive(
+            &root,
+            &archive_path,
+            &manifest,
+            &signature,
+            &public_key,
+            "mipsel",
+        )
+        .unwrap();
+        assert_eq!(prepared.release_id, "r2o-archive-1");
+        assert_eq!(read_install_slots(&root).unwrap(), None);
+        assert!(
+            prepared
+                .bundle
+                .join("builds/r2o-datapath-linux-mipsel")
+                .is_file()
+        );
+
+        let slots = activate_prepared(&root, &prepared).unwrap();
+        assert_eq!(slots.current, "r2o-archive-1");
+        assert_eq!(slots.previous, None);
+        assert_eq!(
+            read_install_slots(&root).unwrap().unwrap().current,
+            "r2o-archive-1"
+        );
+        prepared.discard();
+        assert!(!prepared.work.exists());
     }
 
     #[test]

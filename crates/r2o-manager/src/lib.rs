@@ -245,12 +245,13 @@ mod install;
 mod update;
 
 pub use install::{
-    InstallError, InstallSlots, activate_bundle, active_component_path, install_archive,
-    read_install_architecture, read_install_slots, rollback,
+    InstallError, InstallSlots, PreparedRelease, activate_bundle, activate_prepared,
+    active_component_path, install_archive, prepare_archive, read_install_architecture,
+    read_install_slots, rollback,
 };
 pub use update::{
-    UpdateError, check_update, install_update, install_update_auto, mark_bad_previous_release,
-    set_auto_update,
+    UpdateError, activate_staged_update, check_update, install_update, install_update_auto,
+    mark_bad_previous_release, set_auto_update, stage_update, stage_update_auto,
 };
 
 /// Принять сырые байты Ed25519, 64 шестнадцатеричных символа или PEM Ed25519 SPKI.

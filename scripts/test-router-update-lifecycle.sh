@@ -12,7 +12,8 @@ cat > "$TEMP/manager" <<'EOF'
 #!/bin/sh
 printf 'manager:%s\n' "$1" >> "$EVENTS"
 case "$1" in
-    update-install-auto) printf '{"activated":true,"already_current":false}\n' ;;
+    update-stage-auto) printf '{"staged":true,"already_current":false}\n' ;;
+    update-activate) printf '{"activated":true,"already_current":false}\n' ;;
 esac
 exit 0
 EOF
@@ -50,17 +51,19 @@ count() { grep -c "^$1$" "$TEMP/events" || true; }
 [ "$(count 'init:stop')" -eq 1 ] || fail "the failed release adapter was not stopped"
 
 line() { grep -nF "$1" "$TEMP/events" | head -n 1 | cut -d: -f1; }
-install_line=$(line manager:update-install-auto)
+stage_line=$(line manager:update-stage-auto)
 stop_line=$(line firewall:down)
 tg_stop_line=$(line telegram-firewall:stop)
+activate_line=$(line manager:update-activate)
 first_start_line=$(line init:start)
 stop_failed_line=$(line init:stop)
 rollback_line=$(line manager:rollback)
 mark_bad_line=$(line manager:update-mark-bad-previous)
-[ "$install_line" -lt "$tg_stop_line" ] || fail "Telegram rules were stopped before update activation"
-[ "$install_line" -lt "$stop_line" ] || fail "datapath was stopped before update activation"
+[ "$stage_line" -lt "$tg_stop_line" ] || fail "Telegram rules were stopped before update staging"
+[ "$stage_line" -lt "$stop_line" ] || fail "datapath was stopped before update staging"
 [ "$tg_stop_line" -lt "$stop_line" ] || fail "Telegram rules were not stopped before datapath shutdown"
-[ "$install_line" -lt "$first_start_line" ] || fail "the new adapter was not started after activation"
+[ "$stop_line" -lt "$activate_line" ] || fail "release was activated before the datapath stopped"
+[ "$activate_line" -lt "$first_start_line" ] || fail "the new adapter was not started after activation"
 [ "$first_start_line" -lt "$stop_failed_line" ] || fail "the unhealthy adapter was not checked before stop"
 [ "$stop_failed_line" -lt "$rollback_line" ] || fail "rollback happened before the unhealthy adapter stopped"
 [ "$rollback_line" -lt "$mark_bad_line" ] || fail "runtime failure was not recorded after rollback"
