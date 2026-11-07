@@ -505,8 +505,8 @@
           "status": "verified",
           "statusLabel": "Доказанно эквивалентно",
           "group": "Telegram",
-          "mapping": "D2O Telegram routing integration → Rust `r2o-telegram` route/DNS adapter",
-          "evidence": "`r2o-telegram-route-dns-differential.sh` compares the actual C route/DNS implementation and Rust counterpart against pinned D2O Telegram source `304ba893`; direct-Rust DNS intentionally does not reuse D2O Relay under the documented scope boundary. The historical differential passed; this environment lacks Cargo/Clang 18 for a rerun."
+          "mapping": "z2kOW routing/DNS adapter → Rust `r2o-telegram` route/DNS adapter",
+          "evidence": "Реализация полностью взята из Rust-донора z2kOW (`tg-proxy`); C11 D2O Telegram не является источником. `r2o-telegram-route-dns-differential.sh` compares the actual C route/DNS implementation and Rust counterpart against pinned D2O Telegram source `304ba893`; direct-Rust DNS intentionally does not reuse D2O Relay under the documented scope boundary. The historical differential passed; this environment lacks Cargo/Clang 18 for a rerun."
         },
         {
           "id": 40,
@@ -516,8 +516,8 @@
           "status": "verified",
           "statusLabel": "Доказанно эквивалентно",
           "group": "Telegram",
-          "mapping": "D2O response observation/integration → Rust `r2o-telegram` observer",
-          "evidence": "`r2o-telegram-response-observer-differential.sh` builds the actual C MTProto response observer and diffs its output against the Rust observer using pinned D2O Telegram source `304ba893`; the historical differential and targeted Rust donor test passed. This point is limited to the observer contract; Cargo/Clang 18 are unavailable for a rerun here."
+          "mapping": "z2kOW response observer → Rust `r2o-telegram` observer",
+          "evidence": "Реализация полностью взята из Rust-донора z2kOW (`tg-proxy`); C11 D2O Telegram не является источником. `r2o-telegram-response-observer-differential.sh` builds the actual C MTProto response observer and diffs its output against the Rust observer using pinned D2O Telegram source `304ba893`; the historical differential and targeted Rust donor test passed. This point is limited to the observer contract; Cargo/Clang 18 are unavailable for a rerun here."
         },
         {
           "id": 41,
@@ -527,8 +527,8 @@
           "status": "implemented",
           "statusLabel": "Реализовано, паритет частичный",
           "group": "Telegram",
-          "mapping": "D2O Telegram service integration → Rust `r2o-telegram` and router lifecycle",
-          "evidence": "Аудит `z2kOW@42c8111` сопоставил все 38 файлов из `tg-proxy/src` и `tg-proxy/tests` с `crates/r2o-telegram`; все пути присутствуют. В `ws_client` и `splitter` executable logic совпадает, отличия — тексты ошибок; в `routing` обнаружены локализованные panic-тексты, один `#[allow(deprecated)]` и R2O-имена временных файлов тестов. R2O добавляет directional byte telemetry в `transparent_proxy`, валидатор ответа MTProto в `bridge` и platform DC-map sync в `server`. Это исходниковое сравнение, оно не доказывает исполнение этих ветвей. `scripts/test-router-tg-firewall.sh` и `test-telegram-stop-order-d"
+          "mapping": "z2kOW `tg-proxy` → Rust `r2o-telegram` and router lifecycle",
+          "evidence": "Реализация полностью взята из Rust-донора z2kOW (`tg-proxy`); C11 D2O Telegram не является источником. Аудит `z2kOW@42c8111` сопоставил все 38 файлов из `tg-proxy/src` и `tg-proxy/tests` с `crates/r2o-telegram`; все пути присутствуют. В `ws_client` и `splitter` executable logic совпадает, отличия — тексты ошибок; в `routing` обнаружены локализованные panic-тексты, один `#[allow(deprecated)]` и R2O-имена временных файлов тестов. R2O добавляет directional byte telemetry в `transparent_proxy`, валидатор ответа MTProto в `bridge` и platform DC-map sync в `server`. Это исходниковое сравнение, оно н"
         }
       ],
       "weight": 3,
@@ -1137,8 +1137,8 @@
       "status": "verified",
       "statusLabel": "Доказанно эквивалентно",
       "group": "Telegram",
-      "mapping": "D2O Telegram routing integration → Rust `r2o-telegram` route/DNS adapter",
-      "evidence": "`r2o-telegram-route-dns-differential.sh` compares the actual C route/DNS implementation and Rust counterpart against pinned D2O Telegram source `304ba893`; direct-Rust DNS intentionally does not reuse D2O Relay under the documented scope boundary. The historical differential passed; this environment lacks Cargo/Clang 18 for a rerun."
+      "mapping": "z2kOW routing/DNS adapter → Rust `r2o-telegram` route/DNS adapter",
+      "evidence": "Реализация полностью взята из Rust-донора z2kOW (`tg-proxy`); C11 D2O Telegram не является источником. `r2o-telegram-route-dns-differential.sh` compares the actual C route/DNS implementation and Rust counterpart against pinned D2O Telegram source `304ba893`; direct-Rust DNS intentionally does not reuse D2O Relay under the documented scope boundary. The historical differential passed; this environment lacks Cargo/Clang 18 for a rerun."
     },
     {
       "id": 40,
@@ -1148,8 +1148,8 @@
       "status": "verified",
       "statusLabel": "Доказанно эквивалентно",
       "group": "Telegram",
-      "mapping": "D2O response observation/integration → Rust `r2o-telegram` observer",
-      "evidence": "`r2o-telegram-response-observer-differential.sh` builds the actual C MTProto response observer and diffs its output against the Rust observer using pinned D2O Telegram source `304ba893`; the historical differential and targeted Rust donor test passed. This point is limited to the observer contract; Cargo/Clang 18 are unavailable for a rerun here."
+      "mapping": "z2kOW response observer → Rust `r2o-telegram` observer",
+      "evidence": "Реализация полностью взята из Rust-донора z2kOW (`tg-proxy`); C11 D2O Telegram не является источником. `r2o-telegram-response-observer-differential.sh` builds the actual C MTProto response observer and diffs its output against the Rust observer using pinned D2O Telegram source `304ba893`; the historical differential and targeted Rust donor test passed. This point is limited to the observer contract; Cargo/Clang 18 are unavailable for a rerun here."
     },
     {
       "id": 41,
@@ -1159,8 +1159,8 @@
       "status": "implemented",
       "statusLabel": "Реализовано, паритет частичный",
       "group": "Telegram",
-      "mapping": "D2O Telegram service integration → Rust `r2o-telegram` and router lifecycle",
-      "evidence": "Аудит `z2kOW@42c8111` сопоставил все 38 файлов из `tg-proxy/src` и `tg-proxy/tests` с `crates/r2o-telegram`; все пути присутствуют. В `ws_client` и `splitter` executable logic совпадает, отличия — тексты ошибок; в `routing` обнаружены локализованные panic-тексты, один `#[allow(deprecated)]` и R2O-имена временных файлов тестов. R2O добавляет directional byte telemetry в `transparent_proxy`, валидатор ответа MTProto в `bridge` и platform DC-map sync в `server`. Это исходниковое сравнение, оно не доказывает исполнение этих ветвей. `scripts/test-router-tg-firewall.sh` и `test-telegram-stop-order-d"
+      "mapping": "z2kOW `tg-proxy` → Rust `r2o-telegram` and router lifecycle",
+      "evidence": "Реализация полностью взята из Rust-донора z2kOW (`tg-proxy`); C11 D2O Telegram не является источником. Аудит `z2kOW@42c8111` сопоставил все 38 файлов из `tg-proxy/src` и `tg-proxy/tests` с `crates/r2o-telegram`; все пути присутствуют. В `ws_client` и `splitter` executable logic совпадает, отличия — тексты ошибок; в `routing` обнаружены локализованные panic-тексты, один `#[allow(deprecated)]` и R2O-имена временных файлов тестов. R2O добавляет directional byte telemetry в `transparent_proxy`, валидатор ответа MTProto в `bridge` и platform DC-map sync в `server`. Это исходниковое сравнение, оно н"
     },
     {
       "id": 42,
