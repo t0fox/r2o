@@ -5,13 +5,13 @@ on:
     branches: [main]
     paths:
       - 'docs/functional-parity-matrix.md'
-      - 'tools/progress.mjs'
+      - 'tools/progress_audit.py'
       - '.github/workflows/progress.yml'
   pull_request:
     paths:
       - 'docs/functional-parity-matrix.md'
       - 'docs/progress/**'
-      - 'tools/progress.mjs'
+      - 'tools/progress_audit.py'
       - '.github/workflows/progress.yml'
       - 'README.md'
   workflow_dispatch:
@@ -24,10 +24,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - run: node tools/progress.mjs --check
+      - run: python3 tools/progress_audit.py --check
   publish:
     if: github.event_name != 'pull_request'
     needs: verify
@@ -41,12 +38,6 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - run: node tools/progress.mjs --pages
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

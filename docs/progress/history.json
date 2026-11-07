@@ -1,9 +1,26 @@
 [
   {
-    "sha": "55f9cf4bb5f5b021f1615e0b4ec96ccf727c6659",
+    "sha": "legacy-80-89",
     "date": "2026-11-06",
-    "points": 73,
-    "weight": 87,
-    "percent": 83.91
+    "points": 80,
+    "weight": 89,
+    "percent": 89.89,
+    "label": "legacy-агрегат"
+  },
+  {
+    "sha": "carry-304",
+    "date": "2026-11-07",
+    "points": 89,
+    "weight": 132,
+    "percent": 67.42,
+    "label": "carry-forward 304ba893"
+  },
+  {
+    "sha": "strict-current",
+    "date": "2026-11-07",
+    "points": 37,
+    "weight": 132,
+    "percent": 28.03,
+    "label": "строгий текущий"
   }
 ]

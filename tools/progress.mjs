@@ -1,3 +1,5 @@
+// LEGACY: генератор старой 57-строчной агрегированной таблицы. Основной дашборд
+// аудита 2026-11-07 генерируется `python3 tools/progress_audit.py`.
 // AnyPS5-inspired R2O progress map; standard Node.js only.
 import {readFileSync,writeFileSync,mkdirSync,existsSync} from "node:fs";
 import {execFileSync} from "node:child_process";
