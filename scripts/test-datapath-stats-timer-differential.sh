@@ -29,7 +29,9 @@ cleanup() {
         kill -TERM "$server_pid" 2>/dev/null || true
         wait "$server_pid" 2>/dev/null || true
     fi
-    rm -f "" "" 2>/dev/null || true
+    if [ -n "$control" ] || [ -n "$ready" ]; then
+        rm -f "$control" "$ready" 2>/dev/null || true
+    fi
     if ip netns list | awk '{print $1}' | grep -Fxq "$namespace"; then
         ip netns del "$namespace" 2>/dev/null || true
     fi
@@ -57,11 +59,11 @@ ip netns exec "$peer_namespace" ip link set "$peer_if" up
 ip netns exec "$namespace" ip route add default via "$peer_address" dev "$client_if"
 ip netns exec "$namespace" nft add table inet stats
 ip netns exec "$namespace" nft 'add chain inet stats output { type filter hook output priority filter; policy accept; }'
-ip netns exec "$namespace" nft add rule inet stats output ip daddr 127.0.0.1 udp dport "$traffic_port" queue num "$queue"
+ip netns exec "$namespace" nft add rule inet stats output oifname "$client_if" ip daddr "$peer_address" udp dport "$traffic_port" queue num "$queue"
 ip netns exec "$namespace" nft add rule inet stats output oifname "$client_if" ip daddr "$peer_address" tcp dport 443 queue num "$queue"
 
 send_traffic() {
-    ip netns exec "$namespace" python3 -c 'import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); [s.sendto(bytes([i])*(i+1),("127.0.0.1",39992)) for i in range(1,9)]; s.sendto(b"x"*512,("127.0.0.1",39992))'
+    ip netns exec "$namespace" python3 -c 'import socket,sys; target=sys.argv[1]; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); [s.sendto(bytes([i])*(i+1),(target,39992)) for i in range(1,9)]; s.sendto(b"x"*512,(target,39992))' "$peer_address"
 }
 
 run_hello_case() {
@@ -348,7 +350,7 @@ echo 'nfqueue_traffic_stats_numeric_trace=identical (9 packets, 396 bytes, 9 acc
 # Exercise nonzero UDP session occupancy, then compare both periodic samples
 # and the shutdown summary from the production C and Rust NFQUEUE processes.
 c_udp_flow_values=$(grep -E 'TCP.*UDP' "$test_tmpdir/r2o-stats-traffic-d2o.log" | sed -E 's/[^0-9]+/ /g' | sed '/^ *$/d')
-r_udp_flow_values=$(grep -E 'TCP.*UDP' "$test_tmpdir/r2o-stats-traffic-r2o.log" | sed -E 's/[^0-9]+/ /g' | sed '/^ *$/d')
+r_udp_flow_values=$(grep -E 'TCP.*UDP' "$test_tmpdir/r2o-stats-traffic-r2o.log" | sed -E 's/^r2o-datapath: //' | sed -E 's/[^0-9]+/ /g' | sed '/^ *$/d')
 if [ "$c_udp_flow_values" != "$r_udp_flow_values" ]; then
     echo "D2O and R2O nonzero UDP flow-table statistics differ" >&2
     printf 'C:\n%s\nRust:\n%s\n' "$c_udp_flow_values" "$r_udp_flow_values" >&2
