@@ -394,7 +394,8 @@ fn canonical_evidence(evidence: u8) -> Result<u8, CatalogError> {
 }
 
 fn validate_key(key: &GroupKey) -> Result<(), CatalogError> {
-    let valid = (key.transport == 6 && matches!(key.shape, 1 | 2 | 6))
+    let valid = (key.transport == 6
+        && (matches!(key.shape, 1 | 2 | 6) || r2k_core::control::is_tcp_context_shape(key.shape)))
         || (key.transport == 17 && key.shape == 3);
     if !matches!(key.family, 4 | 6) || !valid {
         return Err(CatalogError::new(

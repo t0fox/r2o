@@ -4850,6 +4850,7 @@ fn r2o_family_recovery_sibling_trial_with_ech(
         commands,
         ech,
         None,
+        None,
         false,
         wire_len,
         None,
@@ -4867,6 +4868,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
     commands: &SyncSender<HttpSearchCommand>,
     ech: Option<&r2o_controller::ech::R2oEchConfig>,
     client_hello: Option<&[u8]>,
+    has_timestamp: Option<bool>,
     allow_non_http_alpn: bool,
     wire_len: Option<usize>,
     packet_budget: Option<u32>,
@@ -4877,6 +4879,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
     bool,
 ) {
     let result = (|| {
+        let wire_shape = r2o_plan_wire_shape(target.shape, has_timestamp);
         let confirmation_mark = r2o_candidate_confirmation_mark(mark);
         let bound = BoundTcpProbe::open(target.family, confirmation_mark)
             .map_err(|error| format!("не удалось открыть сокет семейной пробы: {error}"))?;
@@ -4885,7 +4888,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
         let records = compile_text(&candidate.plan_text).map_err(|error| error.to_string())?;
         let command = encode_set_name_probe(
             &target.host,
-            target.shape,
+            wire_shape,
             target.family,
             local_port,
             &records,
@@ -4894,7 +4897,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
         .map_err(|error| error.to_string())?;
         let ack = ask_http_controller(commands, |reply| HttpSearchCommand::InstallProbe {
             host: target.host.clone(),
-            shape: target.shape,
+            shape: wire_shape,
             family: target.family,
             port: local_port,
             command,
@@ -4911,7 +4914,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
         if ack.as_ref().is_some_and(|ack| !ack.ok) {
             ask_http_controller(commands, |reply| HttpSearchCommand::DeleteProbe {
                 host: target.host.clone(),
-                shape: target.shape,
+                shape: wire_shape,
                 family: target.family,
                 port: local_port,
                 reply,
@@ -5019,7 +5022,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
         );
         let delete_result = ask_http_controller(commands, |reply| HttpSearchCommand::DeleteProbe {
             host: target.host.clone(),
-            shape: target.shape,
+            shape: wire_shape,
             family: target.family,
             port: local_port,
             reply,
@@ -5046,6 +5049,7 @@ fn r2o_run_discovery_candidate_trial(
     mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
     client_hello: Option<&[u8]>,
+    has_timestamp: Option<bool>,
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
     resource_memory: &std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>,
     packet_budget: Option<u32>,
@@ -5061,6 +5065,7 @@ fn r2o_run_discovery_candidate_trial(
         mark,
         commands,
         client_hello,
+        has_timestamp,
         ech_config,
         resource_memory,
         packet_budget,
@@ -5076,6 +5081,7 @@ fn r2o_run_discovery_candidate_trial_with_encoding(
     mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
     client_hello: Option<&[u8]>,
+    has_timestamp: Option<bool>,
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
     resource_memory: &std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>,
     packet_budget: Option<u32>,
@@ -5092,6 +5098,7 @@ fn r2o_run_discovery_candidate_trial_with_encoding(
         mark,
         commands,
         client_hello,
+        has_timestamp,
         ech_config,
         resource_memory,
         1 + usize::from(client_hello.is_some()),
@@ -5110,6 +5117,7 @@ fn r2o_run_discovery_candidate_trial_with_retries(
     mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
     client_hello: Option<&[u8]>,
+    has_timestamp: Option<bool>,
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
     resource_memory: &std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>,
     probe_budget_remaining: usize,
@@ -5128,6 +5136,7 @@ fn r2o_run_discovery_candidate_trial_with_retries(
         mark,
         commands,
         client_hello,
+        has_timestamp,
         false,
         ech_config,
         resource_memory,
@@ -5162,6 +5171,7 @@ fn r2o_run_discovery_candidate_trial_with_progress(
     mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
     client_hello: Option<&[u8]>,
+    has_timestamp: Option<bool>,
     allow_non_http_alpn: bool,
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
     resource_memory: &std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>,
@@ -5282,6 +5292,7 @@ fn r2o_run_discovery_candidate_trial_with_progress(
                                     commands,
                                     trial_ech_config.as_ref(),
                                     client_hello,
+                                    has_timestamp,
                                     allow_non_http_alpn,
                                     wire_len,
                                     packet_budget,
@@ -5650,6 +5661,14 @@ fn r2o_discovery_plan_shape(shape: u8) -> u8 {
     } else {
         shape
     }
+}
+
+#[cfg(unix)]
+fn r2o_plan_wire_shape(shape: u8, has_timestamp: Option<bool>) -> u8 {
+    r2k_core::control::r2k_link_shape_tcp_context(
+        shape,
+        r2k_core::control::tcp_profile_from_has_timestamp(has_timestamp),
+    )
 }
 
 #[cfg(unix)]
@@ -9776,6 +9795,7 @@ impl DiscoveryWorker {
                                     mark,
                                     &commands,
                                     client_hello.as_deref(),
+                                    client_has_tcp_timestamps,
                                     r2o_discovery_client_alpn_verification_allowed(
                                         &target,
                                         &probe_path,
@@ -10053,6 +10073,7 @@ impl DiscoveryWorker {
                             mark,
                             &commands,
                             client_hello.as_deref(),
+                            client_has_tcp_timestamps,
                             r2o_discovery_client_alpn_verification_allowed(
                                 &target,
                                 &known_probe_path,
@@ -10243,6 +10264,7 @@ impl DiscoveryWorker {
                     mark,
                     &commands,
                     client_hello.as_deref(),
+                    client_has_tcp_timestamps,
                     r2o_discovery_client_alpn_verification_allowed(
                         &target,
                         &probe_path,
@@ -10378,6 +10400,7 @@ impl DiscoveryWorker {
                             mark,
                             &commands,
                             client_hello.as_deref(),
+                            client_has_tcp_timestamps,
                             r2o_discovery_client_alpn_verification_allowed(
                                 &target,
                                 &probe_path,
@@ -10495,6 +10518,7 @@ impl DiscoveryWorker {
                             mark,
                             &commands,
                             client_hello.as_deref(),
+                            client_has_tcp_timestamps,
                             Some(config),
                             &runner_resource_memory,
                             None,
@@ -10594,6 +10618,7 @@ impl DiscoveryWorker {
                         mark,
                         &commands,
                         client_hello.as_deref(),
+                        client_has_tcp_timestamps,
                         Some(&selected_config),
                         &runner_resource_memory,
                         None,
@@ -10742,6 +10767,7 @@ impl DiscoveryWorker {
                         mark,
                         &commands,
                         client_hello.as_deref(),
+                        client_has_tcp_timestamps,
                         Some(&selected_config),
                         &runner_resource_memory,
                         None,
@@ -10788,6 +10814,7 @@ impl DiscoveryWorker {
                                     mark,
                                     &commands,
                                     client_hello.as_deref(),
+                                    client_has_tcp_timestamps,
                                     Some(config),
                                     &runner_resource_memory,
                                     None,
@@ -13663,6 +13690,7 @@ fn r2o_discovery_volume_recovery(
             mark,
             commands,
             client_hello,
+            Some(client_has_tcp_timestamps),
             None,
             resource_memory,
             None,
@@ -13757,6 +13785,7 @@ fn r2o_discovery_volume_recovery(
             mark,
             commands,
             client_hello,
+            Some(client_has_tcp_timestamps),
             None,
             resource_memory,
             probe_counts.remaining(probe_cap),
@@ -13907,6 +13936,7 @@ fn r2o_discovery_volume_recovery(
             mark,
             commands,
             client_hello,
+            Some(client_has_tcp_timestamps),
             None,
             resource_memory,
             tx_ladder_requires_packet_budget.then_some(R2O_VOLUME_TX_LADDER_PACKET_BUDGET),
@@ -15698,6 +15728,12 @@ impl ControlClient {
                     let has_candidate = outcome.plan_text.is_some();
                     let client_input = worker.take_client_snapshot_provenance(&outcome.target)
                         && outcome.plan_text.is_some();
+                    let has_timestamp = worker
+                        .client_tcp_timestamps
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get(&r2o_discovery_task_key(&outcome.target))
+                        .copied();
                     if outcome.queue_expired {
                         println!(
                             "подозрение {} устарело в очереди Discovery; сетевой замер не запускался",
@@ -15710,6 +15746,7 @@ impl ControlClient {
                             catalog,
                             path,
                             if client_input { 1 } else { 2 },
+                            has_timestamp,
                             catalog_persistence.as_mut(),
                         ) {
                             Ok(Some(_installed_groups)) => {}
@@ -20148,6 +20185,7 @@ impl ControlClient {
             catalog_path,
             input,
             None,
+            None,
         )
     }
 
@@ -20157,6 +20195,7 @@ impl ControlClient {
         catalog: &mut Catalog,
         catalog_path: &std::path::Path,
         input: u8,
+        has_timestamp: Option<bool>,
         mut persistence: Option<&mut R2oCatalogPersistence>,
     ) -> Result<Option<Vec<r2o_controller::live::LiveGroupKey>>, Box<dyn Error>> {
         if outcome.direct_clear {
@@ -20170,9 +20209,11 @@ impl ControlClient {
             );
             return Ok(None);
         };
+        let mut binding_target = outcome.target.clone();
+        binding_target.shape = r2o_plan_wire_shape(binding_target.shape, has_timestamp);
         if r2o_discovery_existing_binding_blocks_outcome(
             catalog,
-            &outcome.target,
+            &binding_target,
             input,
             outcome.volume_recovery || outcome.volume_box_id.is_some(),
         ) {
@@ -20187,7 +20228,7 @@ impl ControlClient {
             locked_catalog_for_persistence(catalog_path, catalog, persistence.as_deref())?;
         if r2o_discovery_existing_binding_blocks_outcome(
             &previous,
-            &outcome.target,
+            &binding_target,
             input,
             outcome.volume_recovery || outcome.volume_box_id.is_some(),
         ) {
@@ -20205,7 +20246,7 @@ impl ControlClient {
         let mut updated = previous.clone();
         let plan_id = r2o_controller::discovery::add_measured_binding_with_fingerprint_in_box(
             &mut updated,
-            &outcome.target,
+            &binding_target,
             &source_text,
             now,
             input,
@@ -21720,17 +21761,18 @@ mod tests {
         r2o_candidate_confirmation_mark, r2o_catalog_mark_flow_unfit,
         r2o_discovery_failure_retry_due, r2o_family_applied_flow_matches,
         r2o_family_recovery_decision, r2o_handle_client_shape_event, r2o_http_failed_disposition,
-        r2o_http_live_cut_recheck, r2o_quic_binding_blocks_retry, r2o_tcp_stall_budgets,
-        r2o_tcp_stall_budgets_for_name, r2o_tcp_stall_in_name_band, r2o_voice_proof_matches_target,
-        r2o_voice_suspect_frame_is_udp, save_plan_file, shape_matches_plan,
+        r2o_http_live_cut_recheck, r2o_plan_wire_shape, r2o_quic_binding_blocks_retry,
+        r2o_tcp_stall_budgets, r2o_tcp_stall_budgets_for_name, r2o_tcp_stall_in_name_band,
+        r2o_voice_proof_matches_target, r2o_voice_suspect_frame_is_udp, save_plan_file,
+        shape_matches_plan,
     };
     use r2k_core::control::{
         Ack, BindingContext, COMMAND_DEL_NAME_PROBE, COMMAND_DEL_VOICE_ADDR_PROBE,
         COMMAND_SET_NAME, COMMAND_SET_NAME_BOUND, COMMAND_SET_NAME_PROBE, COMMAND_SET_VOICE_ADDR,
         EVENT_APPLIED, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_SUSPECT, Frame,
-        HelloEvent, HttpResponseEvent, KEY_LEN, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_MODERN,
-        SHAPE_QUIC, SHAPE_VOICE, encode_ack, encode_ack_for_trial, encode_frame, encode_greeting,
-        read_frame,
+        HelloEvent, HttpResponseEvent, KEY_LEN, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_LEGACY,
+        SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, encode_ack, encode_ack_for_trial, encode_frame,
+        encode_greeting, read_frame,
     };
     use r2k_core::plan::{PLAN_MAGIC, Plan};
     use r2o_controller::catalog::{Binding, BoxRecord, Catalog, Fingerprint, Signal};
@@ -21740,6 +21782,33 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn plan_wire_shape_uses_tcp_timestamp_profile() {
+        assert_eq!(
+            r2o_plan_wire_shape(SHAPE_MODERN, None),
+            r2k_core::control::SHAPE_MODERN
+        );
+        assert_eq!(
+            r2o_plan_wire_shape(SHAPE_MODERN, Some(false)),
+            r2k_core::control::SHAPE_MODERN_NO_TS
+        );
+        assert_eq!(
+            r2o_plan_wire_shape(SHAPE_MODERN, Some(true)),
+            r2k_core::control::SHAPE_MODERN_TS
+        );
+        assert_eq!(
+            r2o_plan_wire_shape(SHAPE_LEGACY, Some(true)),
+            r2k_core::control::SHAPE_LEGACY_TS
+        );
+        assert_eq!(
+            r2o_plan_wire_shape(SHAPE_ECH_TCP, Some(false)),
+            r2k_core::control::SHAPE_ECH_NO_TS
+        );
+        assert_eq!(r2o_plan_wire_shape(SHAPE_HTTP, Some(true)), SHAPE_HTTP);
+        assert_eq!(r2o_plan_wire_shape(SHAPE_QUIC, Some(true)), SHAPE_QUIC);
+    }
 
     #[test]
     fn voice_suspect_guard_ignores_c_client_tcp_frames() {
@@ -33156,6 +33225,7 @@ mod tests {
                 &mut catalog,
                 &catalog_path,
                 2,
+                None,
                 Some(&mut persistence),
             )
             .unwrap();
@@ -35222,6 +35292,7 @@ mod tests {
                 &mut catalog,
                 &catalog_path,
                 2,
+                None,
                 Some(&mut persistence),
             );
             let mut server_stream = server.join().unwrap();

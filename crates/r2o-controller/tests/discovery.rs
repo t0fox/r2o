@@ -205,6 +205,25 @@ fn repeated_measurement_updates_one_binding_and_keeps_other_shapes_independent()
 }
 
 #[test]
+fn measured_plan_accepts_and_persists_context_shape() {
+    let mut target =
+        DiscoveryTarget::from_event(&hello(Some("example.com"), 4, Some(SHAPE_MODERN))).unwrap();
+    target.shape = r2k_core::control::SHAPE_MODERN_TS;
+    let mut catalog = Catalog::default();
+
+    add_measured_binding(&mut catalog, &target, PLAN_TEXT, 1_800_000_000).unwrap();
+
+    assert!(has_usable_binding(&catalog, &target));
+    assert_eq!(
+        catalog.boxes[0].bindings[0].shape,
+        r2k_core::control::SHAPE_MODERN_TS
+    );
+    let persisted = catalog.to_json_at(1_800_000_000).unwrap();
+    let restored = Catalog::parse(persisted.as_bytes()).unwrap();
+    assert!(has_usable_binding(&restored, &target));
+}
+
+#[test]
 fn invalid_discovery_endpoint_does_not_mutate_the_catalog() {
     let mut target =
         DiscoveryTarget::from_event(&hello(Some("example.com"), 4, Some(SHAPE_MODERN))).unwrap();

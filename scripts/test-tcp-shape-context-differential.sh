@@ -28,6 +28,10 @@ trap 'rm -rf -- "$TEMP"' EXIT HUP INT TERM
 
 "$CARGO" run --manifest-path "$ROOT/Cargo.toml" --locked --offline \
     --package r2k-core --example tcp_shape_table > "$TEMP/rust.txt"
+"$CARGO" test --manifest-path "$ROOT/Cargo.toml" --locked --offline \
+    -p r2o-controller --bin r2o-controller plan_wire_shape_uses_tcp_timestamp_profile \
+    > "$TEMP/controller.trace" 2>&1
+grep -q 'test result: ok. 1 passed' "$TEMP/controller.trace"
 
 if ! diff -u "$TEMP/c.txt" "$TEMP/rust.txt"; then
     printf 'FAIL: TCP shape context C/Rust differential\n' >&2

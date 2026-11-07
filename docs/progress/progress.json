@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 261,
-  "points": 91,
-  "percent": 34.87,
+  "points": 93,
+  "percent": 35.63,
   "total": 173,
   "counts": {
-    "verified": 66,
+    "verified": 67,
     "carry": 40,
-    "partial": 60,
+    "partial": 59,
     "missing": 7,
     "implemented": 0,
     "unknown": 0
@@ -18,7 +18,7 @@
     {
       "name": "Datapath",
       "weight": 26,
-      "points": 11,
+      "points": 13,
       "items": [
         {
           "id": 1,
@@ -325,15 +325,15 @@
           "key": "D20",
           "name": "TCP timestamp shape contexts 8-13 (`d2k_link_shape_tcp_*`)",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Datapath",
-          "coverage": "`scripts/test-tcp-shape-context-differential.sh` (a378); Rust `tcp_shape_context_tests`; datapath exact-context + base bridge",
-          "gap": "Контроллер пока ставит планы в базовой форме 1/2/6; контекст 8-13 принимается и выбирается датапатом",
-          "mapping": "`scripts/test-tcp-shape-context-differential.sh` (a378); Rust `tcp_shape_context_tests`; datapath exact-context + base bridge",
-          "evidence": "`scripts/test-tcp-shape-context-differential.sh` (a378); Rust `tcp_shape_context_tests`; datapath exact-context + base bridge · пробел: Контроллер пока ставит планы в базовой форме 1/2/6; контекст 8-13 принимается и выбирается датапатом"
+          "coverage": "`scripts/test-tcp-shape-context-differential.sh` (a378); Rust `tcp_shape_context_tests`; `r2o_plan_wire_shape` + `measured_plan_accepts_and_persists_context_shape`; datapath exact-context",
+          "gap": "Контроллер ставит контекст 8-13 для trial и постоянных привязок; base fallback оставлен только для старых R2O-планов",
+          "mapping": "`scripts/test-tcp-shape-context-differential.sh` (a378); Rust `tcp_shape_context_tests`; `r2o_plan_wire_shape` + `measured_plan_accepts_and_persists_context_shape`; datapath exact-context",
+          "evidence": "`scripts/test-tcp-shape-context-differential.sh` (a378); Rust `tcp_shape_context_tests`; `r2o_plan_wire_shape` + `measured_plan_accepts_and_persists_context_shape`; datapath exact-context · пробел: Контроллер ставит контекст 8-13 для trial и постоянных привязок; base fallback оставлен только для старых R2O-планов"
         },
         {
           "id": 22,
@@ -2987,15 +2987,15 @@
       "key": "D20",
       "name": "TCP timestamp shape contexts 8-13 (`d2k_link_shape_tcp_*`)",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Datapath",
-      "coverage": "`scripts/test-tcp-shape-context-differential.sh` (a378); Rust `tcp_shape_context_tests`; datapath exact-context + base bridge",
-      "gap": "Контроллер пока ставит планы в базовой форме 1/2/6; контекст 8-13 принимается и выбирается датапатом",
-      "mapping": "`scripts/test-tcp-shape-context-differential.sh` (a378); Rust `tcp_shape_context_tests`; datapath exact-context + base bridge",
-      "evidence": "`scripts/test-tcp-shape-context-differential.sh` (a378); Rust `tcp_shape_context_tests`; datapath exact-context + base bridge · пробел: Контроллер пока ставит планы в базовой форме 1/2/6; контекст 8-13 принимается и выбирается датапатом"
+      "coverage": "`scripts/test-tcp-shape-context-differential.sh` (a378); Rust `tcp_shape_context_tests`; `r2o_plan_wire_shape` + `measured_plan_accepts_and_persists_context_shape`; datapath exact-context",
+      "gap": "Контроллер ставит контекст 8-13 для trial и постоянных привязок; base fallback оставлен только для старых R2O-планов",
+      "mapping": "`scripts/test-tcp-shape-context-differential.sh` (a378); Rust `tcp_shape_context_tests`; `r2o_plan_wire_shape` + `measured_plan_accepts_and_persists_context_shape`; datapath exact-context",
+      "evidence": "`scripts/test-tcp-shape-context-differential.sh` (a378); Rust `tcp_shape_context_tests`; `r2o_plan_wire_shape` + `measured_plan_accepts_and_persists_context_shape`; datapath exact-context · пробел: Контроллер ставит контекст 8-13 для trial и постоянных привязок; base fallback оставлен только для старых R2O-планов"
     },
     {
       "id": 22,
@@ -5280,14 +5280,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 91,
+      "points": 93,
       "weight": 261,
-      "percent": 34.87
+      "percent": 35.63
     },
     "carry_forward": {
-      "points": 154,
+      "points": 156,
       "weight": 261,
-      "percent": 59.0,
+      "percent": 59.77,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

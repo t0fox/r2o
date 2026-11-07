@@ -970,7 +970,8 @@ pub fn add_measured_binding_with_fingerprint_in_box(
     preferred_box_id: Option<&str>,
 ) -> Result<String, String> {
     if !matches!(target.family, 4 | 6)
-        || !matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_HTTP)
+        || !(matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_HTTP)
+            || r2k_core::control::is_tcp_context_shape(target.shape))
         || !matches!(input, 1 | 2)
     {
         return Err("discovery target or input source is unsupported".into());
@@ -1385,6 +1386,7 @@ fn usable_runtime_plan(plan: &RuntimePlan, shape: u8) -> bool {
         && match shape {
             SHAPE_HTTP => plan.proto == r2k_core::plan::PROTO_HTTP,
             SHAPE_MODERN | SHAPE_LEGACY => plan.proto == 1,
+            _ if r2k_core::control::is_tcp_context_shape(shape) => plan.proto == 1,
             _ => false,
         }
 }
