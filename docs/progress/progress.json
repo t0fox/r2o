@@ -3,14 +3,14 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 261,
-  "points": 82,
-  "percent": 31.42,
+  "points": 84,
+  "percent": 32.18,
   "total": 173,
   "counts": {
-    "verified": 59,
+    "verified": 60,
     "carry": 40,
     "partial": 61,
-    "missing": 13,
+    "missing": 12,
     "implemented": 0,
     "unknown": 0
   },
@@ -1769,7 +1769,7 @@
     {
       "name": "Router / Service",
       "weight": 84,
-      "points": 62,
+      "points": 64,
       "items": [
         {
           "id": 100,
@@ -2526,15 +2526,15 @@
           "key": "B53",
           "name": "`KEENETIC_POLICY` → `--only-mark`",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "missing",
-          "statusLabel": "пробел",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Router / Service",
-          "coverage": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-          "gap": "**не перенесено**",
-          "mapping": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-          "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: **не перенесено**"
+          "coverage": "`router/r2o-policy-mark.sh`, `scripts/test-router-keenetic-policy.sh`; C oracle `files/S99d2k:1130-1166`",
+          "gap": "Нет live `ndmc` на физическом Keenetic",
+          "mapping": "`router/r2o-policy-mark.sh`, `scripts/test-router-keenetic-policy.sh`; C oracle `files/S99d2k:1130-1166`",
+          "evidence": "`router/r2o-policy-mark.sh`, `scripts/test-router-keenetic-policy.sh`; C oracle `files/S99d2k:1130-1166` · пробел: Нет live `ndmc` на физическом Keenetic"
         }
       ]
     },
@@ -4922,15 +4922,15 @@
       "key": "B53",
       "name": "`KEENETIC_POLICY` → `--only-mark`",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "missing",
-      "statusLabel": "пробел",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Router / Service",
-      "coverage": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-      "gap": "**не перенесено**",
-      "mapping": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-      "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: **не перенесено**"
+      "coverage": "`router/r2o-policy-mark.sh`, `scripts/test-router-keenetic-policy.sh`; C oracle `files/S99d2k:1130-1166`",
+      "gap": "Нет live `ndmc` на физическом Keenetic",
+      "mapping": "`router/r2o-policy-mark.sh`, `scripts/test-router-keenetic-policy.sh`; C oracle `files/S99d2k:1130-1166`",
+      "evidence": "`router/r2o-policy-mark.sh`, `scripts/test-router-keenetic-policy.sh`; C oracle `files/S99d2k:1130-1166` · пробел: Нет live `ndmc` на физическом Keenetic"
     },
     {
       "id": 151,
@@ -5280,14 +5280,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 82,
+      "points": 84,
       "weight": 261,
-      "percent": 31.42
+      "percent": 32.18
     },
     "carry_forward": {
-      "points": 145,
+      "points": 147,
       "weight": 261,
-      "percent": 55.56,
+      "percent": 56.32,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

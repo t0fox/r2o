@@ -3,6 +3,7 @@ SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 
 PATH=/opt/sbin:/opt/bin:/opt/usr/sbin:/opt/usr/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
+[ ! -r "$SCRIPT_DIR/r2o-policy-mark.sh" ] || . "$SCRIPT_DIR/r2o-policy-mark.sh"
 
 ROOT=${R2O_DIR:-/opt/r2o}
 CONF=${R2O_CONFIG:-$ROOT/config}
@@ -34,6 +35,7 @@ MODE=${MODE:-observe}
 MARK=${MARK:-45}
 PROBE_MARK=${PROBE_MARK:-46}
 ONLY_MARK=${ONLY_MARK:-}
+KEENETIC_POLICY=${KEENETIC_POLICY:-}
 IPV6_ENABLED=${IPV6_ENABLED:-1}
 PANEL_LISTEN=${PANEL_LISTEN-127.0.0.1:8090}
 TG_ENABLED=${TG_ENABLED:-0}
@@ -64,6 +66,7 @@ MODE=${MODE:-observe}
 MARK=${MARK:-45}
 PROBE_MARK=${PROBE_MARK:-46}
 ONLY_MARK=${ONLY_MARK:-}
+KEENETIC_POLICY=${KEENETIC_POLICY:-}
 IPV6_ENABLED=${IPV6_ENABLED:-1}
 PANEL_LISTEN=${PANEL_LISTEN-127.0.0.1:8090}
 TG_ENABLED=${TG_ENABLED:-0}
@@ -212,6 +215,19 @@ valid_number "$TG_PORT" 65535 && [ "$TG_PORT" -gt 0 ] || die "неверный T
 MARK=$(r2o_normalize_mark "$MARK") || die "неверный MARK"
 PROBE_MARK=$(r2o_normalize_mark "$PROBE_MARK") || die "неверный PROBE_MARK"
 [ "$PROBE_MARK" = 0 ] || [ "$PROBE_MARK" != "$MARK" ] || die "PROBE_MARK и MARK должны различаться"
+if [ -z "$ONLY_MARK" ] && [ -n "${KEENETIC_POLICY:-}" ]; then
+    keenetic_mark=$(r2o_keenetic_policy_mark "$KEENETIC_POLICY")
+    case "$keenetic_mark" in
+        ''|*[!0-9a-fA-F]*)
+            ONLY_MARK=none
+            echo "r2o: ВНИМАНИЕ: политика Keenetic «$KEENETIC_POLICY» не найдена (ndmc show ip policy) — устройства не обрабатываются; проверьте KEENETIC_POLICY в $CONF" >&2
+            ;;
+        *)
+            ONLY_MARK="0x$keenetic_mark/0xffffffff"
+            echo "r2o: только политика Keenetic «$KEENETIC_POLICY» (метка 0x$keenetic_mark); остальные устройства идут как без R2O" >&2
+            ;;
+    esac
+fi
 ONLY_MARK=$(r2o_normalize_only_mark "$ONLY_MARK") || die "неверный ONLY_MARK"
 
 prepare_dirs() {
