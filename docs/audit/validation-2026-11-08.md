@@ -121,13 +121,13 @@
 
 | Режим | Баллы | Процент |
 |---|---:|---:|
-| Строгий текущий | **90/261** | **34,48 %** |
-| Carry (только явно помеченные `304`) | **153/261** | **58,62 %** |
+| Строгий текущий | **91/261** | **34,87 %** |
+| Carry (только явно помеченные `304`) | **154/261** | **59,00 %** |
 | Legacy-агрегат | 80/89 | 89,89 % (другой знаменатель) |
 
-Рост строгого счёта с 25,69 % до 34,48 % — не новые доказательства: 84 детальных Router-контракта (59 strict) заменили 30 coarse-баллов `F*`/`L*`/`T*`/`P*` (18 strict), а 71 балл Panel/Telegram добавлен с нулём. Знаменатели 144 и 261 несопоставимы напрямую.
+Рост строгого счёта с 25,69 % до 34,87 % — не новые доказательства: 84 детальных Router-контракта (59 strict) заменили 30 coarse-баллов `F*`/`L*`/`T*`/`P*` (18 strict), а 71 балл Panel/Telegram добавлен с нулём. Знаменатели 144 и 261 несопоставимы напрямую.
 
-Статусы в нормализованной матрице: `verified` — 65 строк, `carry (304)` — 40, `partial` — 60, `missing` — 8. Дополнительно доказаны `M7a` (legacy `D2KP`), `M7b` (`tcp_ts_up`), `B9` (`clear-found` state), `B52` (Meta DNS log rotation), `B53` (`KEENETIC_POLICY`), `B42` (Telegram reapply), `B40` (uninstall fallback), `A26` (panel offline CLI), `A21` (Telegram stats absolute timeout) и `A8` (panel response deadline); `D20` и `A9` остаются `partial`. Все 2584 C-функции в `docs/audit/function-index.md` ссылаются только на существующие ID нормализованной матрицы; проверка `check_contract_refs.py` даёт 0 отсутствующих ссылок.
+Статусы в нормализованной матрице: `verified` — 66 строк, `carry (304)` — 40, `partial` — 60, `missing` — 7. Дополнительно доказаны `M7a` (legacy `D2KP`), `M7b` (`tcp_ts_up`), `B9` (`clear-found` state), `B52` (Meta DNS log rotation), `B53` (`KEENETIC_POLICY`), `B42` (Telegram reapply), `B40` (uninstall fallback), `A26` (panel offline CLI), `A21` (Telegram stats absolute timeout), `A8` (panel response deadline) и `TG20` (stats socket timeout); `D20` и `A9` остаются `partial`. Все 2584 C-функции в `docs/audit/function-index.md` ссылаются только на существующие ID нормализованной матрицы; проверка `check_contract_refs.py` даёт 0 отсутствующих ссылок.
 
 ## 9. Ограничения
 

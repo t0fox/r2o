@@ -3,14 +3,14 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 261,
-  "points": 90,
-  "percent": 34.48,
+  "points": 91,
+  "percent": 34.87,
   "total": 173,
   "counts": {
-    "verified": 65,
+    "verified": 66,
     "carry": 40,
     "partial": 60,
-    "missing": 8,
+    "missing": 7,
     "implemented": 0,
     "unknown": 0
   },
@@ -1020,7 +1020,7 @@
     {
       "name": "Telegram",
       "weight": 41,
-      "points": 0,
+      "points": 1,
       "items": [
         {
           "id": 151,
@@ -1297,15 +1297,15 @@
           "key": "TG20",
           "name": "Stats request protocol robustness",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "missing",
-          "statusLabel": "пробел",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Telegram",
-          "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "gap": "**пробел (нет таймаута)**",
-          "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C · пробел: **пробел (нет таймаута)**"
+          "coverage": "`stats.rs::serve_unix`; unit `unix_stats_socket_times_out_silent_client_and_continues`; C oracle `telegram/src/stats_socket.c`",
+          "gap": "Абсолютный 1250 мс на чтение/запись; снимок отдаётся и молчащему клиенту",
+          "mapping": "`stats.rs::serve_unix`; unit `unix_stats_socket_times_out_silent_client_and_continues`; C oracle `telegram/src/stats_socket.c`",
+          "evidence": "`stats.rs::serve_unix`; unit `unix_stats_socket_times_out_silent_client_and_continues`; C oracle `telegram/src/stats_socket.c` · пробел: Абсолютный 1250 мс на чтение/запись; снимок отдаётся и молчащему клиенту"
         },
         {
           "id": 170,
@@ -5207,15 +5207,15 @@
       "key": "TG20",
       "name": "Stats request protocol robustness",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "missing",
-      "statusLabel": "пробел",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Telegram",
-      "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "gap": "**пробел (нет таймаута)**",
-      "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C · пробел: **пробел (нет таймаута)**"
+      "coverage": "`stats.rs::serve_unix`; unit `unix_stats_socket_times_out_silent_client_and_continues`; C oracle `telegram/src/stats_socket.c`",
+      "gap": "Абсолютный 1250 мс на чтение/запись; снимок отдаётся и молчащему клиенту",
+      "mapping": "`stats.rs::serve_unix`; unit `unix_stats_socket_times_out_silent_client_and_continues`; C oracle `telegram/src/stats_socket.c`",
+      "evidence": "`stats.rs::serve_unix`; unit `unix_stats_socket_times_out_silent_client_and_continues`; C oracle `telegram/src/stats_socket.c` · пробел: Абсолютный 1250 мс на чтение/запись; снимок отдаётся и молчащему клиенту"
     },
     {
       "id": 170,
@@ -5280,14 +5280,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 90,
+      "points": 91,
       "weight": 261,
-      "percent": 34.48
+      "percent": 34.87
     },
     "carry_forward": {
-      "points": 153,
+      "points": 154,
       "weight": 261,
-      "percent": 58.62,
+      "percent": 59.0,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

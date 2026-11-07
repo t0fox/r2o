@@ -676,45 +676,55 @@ pub async fn serve_unix(path: PathBuf, stats: Arc<RuntimeStats>) -> Result<(), S
     loop {
         let (mut stream, _) = listener.accept().await.map_err(|error| error.to_string())?;
         let mut request = Vec::with_capacity(9);
-        let mut read_failed = false;
-        while request.len() < 32 {
-            let mut byte = [0u8; 1];
-            let length = match stream.read(&mut byte).await {
-                Ok(length) => length,
-                Err(error) => {
-                    tracing::debug!(%error, "клиент статистики закрыл чтение с ошибкой");
-                    read_failed = true;
-                    break;
+        let read = tokio::time::timeout(Duration::from_millis(1250), async {
+            while request.len() < 32 {
+                let mut byte = [0u8; 1];
+                match stream.read(&mut byte).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        request.push(byte[0]);
+                        if byte[0] == b'\n' {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::debug!(%error, "клиент статистики закрыл чтение с ошибкой");
+                        break;
+                    }
                 }
-            };
-            if length == 0 {
-                break;
             }
-            request.push(byte[0]);
-            if byte[0] == b'\n' {
-                break;
-            }
-        }
-        if read_failed || request.is_empty() {
-            continue;
-        }
-        if request != b"snapshot\n" {
-            if let Err(error) = stream
-                .write_all(b"{\"error\":\"unsupported request\"}\n")
-                .await
+            request
+        })
+        .await;
+        let request = read.unwrap_or_default();
+        // D2O stats_socket отдаёт снимок сразу после connect, не ожидая
+        // запроса. Таймаут не даёт молчащему клиенту заблокировать цикл.
+        if !request.is_empty() && request != b"snapshot\n" {
+            if tokio::time::timeout(
+                Duration::from_millis(1250),
+                stream.write_all(b"{\"error\":\"unsupported request\"}\n"),
+            )
+            .await
+            .is_err()
             {
-                tracing::debug!(%error, "не удалось ответить клиенту статистики");
+                tracing::debug!("не удалось ответить клиенту статистики");
             }
             continue;
         }
         let response = serde_json::to_vec(&stats.snapshot())
             .map_err(|error| format!("сериализация статистики: {error}"))?;
-        if let Err(error) = stream.write_all(&response).await {
-            tracing::debug!(%error, "не удалось передать статистику клиенту");
+        if tokio::time::timeout(Duration::from_millis(1250), stream.write_all(&response))
+            .await
+            .is_err()
+        {
+            tracing::debug!("не удалось передать статистику клиенту");
             continue;
         }
-        if let Err(error) = stream.write_all(b"\n").await {
-            tracing::debug!(%error, "не удалось завершить ответ статистики");
+        if tokio::time::timeout(Duration::from_millis(1250), stream.write_all(b"\n"))
+            .await
+            .is_err()
+        {
+            tracing::debug!("не удалось завершить ответ статистики");
         }
     }
 }
@@ -842,6 +852,53 @@ mod tests {
         let timestamp = AtomicCounterI64::default();
         timestamp.store(-9, std::sync::atomic::Ordering::Release);
         assert_eq!(timestamp.load(std::sync::atomic::Ordering::Acquire), -9);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_stats_socket_times_out_silent_client_and_continues() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::UnixStream;
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("r2o-stats-socket-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("stats.sock");
+        let stats = Arc::new(RuntimeStats::new());
+        let server = tokio::spawn(super::serve_unix(path.clone(), stats));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !path.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "stats socket not bound"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // Молчащий клиент не должен заблокировать цикл: C отдаёт снимок сразу.
+        let mut silent = UnixStream::connect(&path).await.unwrap();
+        let mut buffer = [0u8; 4096];
+        let read = tokio::time::timeout(Duration::from_secs(2), silent.read(&mut buffer))
+            .await
+            .expect("silent client must not block stats server")
+            .unwrap();
+        assert!(read > 0 && buffer[..read].starts_with(b"{"));
+        drop(silent);
+
+        let mut client = UnixStream::connect(&path).await.unwrap();
+        client.write_all(b"snapshot\n").await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        assert!(response.starts_with(b"{"));
+        assert!(response.ends_with(b"\n"));
+
+        server.abort();
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
