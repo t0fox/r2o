@@ -3,14 +3,14 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 261,
-  "points": 88,
-  "percent": 33.72,
+  "points": 89,
+  "percent": 34.1,
   "total": 173,
   "counts": {
-    "verified": 63,
+    "verified": 64,
     "carry": 40,
     "partial": 61,
-    "missing": 9,
+    "missing": 8,
     "implemented": 0,
     "unknown": 0
   },
@@ -1372,7 +1372,7 @@
     {
       "name": "WebPanel",
       "weight": 30,
-      "points": 1,
+      "points": 2,
       "items": [
         {
           "id": 74,
@@ -1679,15 +1679,15 @@
           "key": "A21",
           "name": "Telegram stats: лимит, схема, таймаут",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "missing",
-          "statusLabel": "пробел",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "WebPanel",
-          "coverage": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-          "gap": "ДИФ по размеру; абсолютный таймаут — пробел",
-          "mapping": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-          "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: ДИФ по размеру; абсолютный таймаут — пробел"
+          "coverage": "`read_telegram_stats`; unit `telegram_stats_read_has_absolute_deadline`; C oracle `panel/server.c:445-510`",
+          "gap": "Абсолютный 1250 мс на connect/read; лимит и схема прежние",
+          "mapping": "`read_telegram_stats`; unit `telegram_stats_read_has_absolute_deadline`; C oracle `panel/server.c:445-510`",
+          "evidence": "`read_telegram_stats`; unit `telegram_stats_read_has_absolute_deadline`; C oracle `panel/server.c:445-510` · пробел: Абсолютный 1250 мс на connect/read; лимит и схема прежние"
         },
         {
           "id": 95,
@@ -4082,15 +4082,15 @@
       "key": "A21",
       "name": "Telegram stats: лимит, схема, таймаут",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "missing",
-      "statusLabel": "пробел",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "WebPanel",
-      "coverage": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-      "gap": "ДИФ по размеру; абсолютный таймаут — пробел",
-      "mapping": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-      "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: ДИФ по размеру; абсолютный таймаут — пробел"
+      "coverage": "`read_telegram_stats`; unit `telegram_stats_read_has_absolute_deadline`; C oracle `panel/server.c:445-510`",
+      "gap": "Абсолютный 1250 мс на connect/read; лимит и схема прежние",
+      "mapping": "`read_telegram_stats`; unit `telegram_stats_read_has_absolute_deadline`; C oracle `panel/server.c:445-510`",
+      "evidence": "`read_telegram_stats`; unit `telegram_stats_read_has_absolute_deadline`; C oracle `panel/server.c:445-510` · пробел: Абсолютный 1250 мс на connect/read; лимит и схема прежние"
     },
     {
       "id": 95,
@@ -5280,14 +5280,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 88,
+      "points": 89,
       "weight": 261,
-      "percent": 33.72
+      "percent": 34.1
     },
     "carry_forward": {
-      "points": 151,
+      "points": 152,
       "weight": 261,
-      "percent": 57.85,
+      "percent": 58.24,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

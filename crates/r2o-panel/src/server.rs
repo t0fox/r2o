@@ -2267,16 +2267,37 @@ fn read_telegram_stats(path: &Path) -> Option<Value> {
         use std::io::Read;
         use std::os::unix::net::UnixStream;
         let mut stream = UnixStream::connect(path).ok()?;
-        let timeout = Some(Duration::from_millis(1250));
-        let _ = stream.set_read_timeout(timeout);
-        let _ = stream.set_write_timeout(timeout);
+        let deadline = std::time::Instant::now() + Duration::from_millis(1250);
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(1250)));
         stream.write_all(b"snapshot\n").ok()?;
         let mut raw = Vec::with_capacity(2048);
-        stream
-            .take(TELEGRAM_STATS_MAX as u64)
-            .read_to_end(&mut raw)
-            .ok()?;
-        if raw.len() >= TELEGRAM_STATS_MAX {
+        let mut chunk = [0u8; 4096];
+        let mut complete = false;
+        while raw.len() < TELEGRAM_STATS_MAX {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            let _ = stream.set_read_timeout(Some(remaining));
+            match stream.read(&mut chunk) {
+                Ok(0) => {
+                    complete = true;
+                    break;
+                }
+                Ok(read) => raw.extend_from_slice(&chunk[..read]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    return None;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return None,
+            }
+        }
+        if !complete || raw.is_empty() || raw.len() >= TELEGRAM_STATS_MAX {
             return None;
         }
         let stats: Value = serde_json::from_slice(&raw).ok()?;
@@ -2316,6 +2337,34 @@ mod differential_tests {
             "slow client must hit the absolute deadline"
         );
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn telegram_stats_read_has_absolute_deadline() {
+        use std::os::unix::net::UnixListener;
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("r2o-stats-deadline-{}-{nonce}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("stats.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 9];
+            stream.read_exact(&mut request).unwrap();
+            stream.write_all(b"{\"active_connections\":1").unwrap();
+            std::thread::sleep(Duration::from_millis(2000));
+        });
+        let started = Instant::now();
+        assert!(read_telegram_stats(&path).is_none());
+        assert!(started.elapsed() < Duration::from_millis(1800));
+        server.join().unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
