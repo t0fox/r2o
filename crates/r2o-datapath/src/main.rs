@@ -2661,7 +2661,9 @@ mod app {
                     options.plan_explicit = true;
                 }
                 "--controller-only" => options.controller_only = true,
-                "--r2o-udp-reverse-visible" => options.reverse_queue_visible = true,
+                "--r2o-udp-reverse-visible" | "--udp-reverse-hook" => {
+                    options.reverse_queue_visible = true
+                }
                 "--control" => {
                     options.control_path =
                         Some(PathBuf::from(next_value(arguments, &mut cursor, option)?))
@@ -2670,10 +2672,12 @@ mod app {
                 "--journal" => {
                     options.journal_capacity = parse_value(arguments, &mut cursor, option)?
                 }
-                "--r2o-flow-capacity" => {
+                "--r2o-flow-capacity" | "--flows" => {
                     let requested: u32 = parse_value(arguments, &mut cursor, option)?;
                     options.flow_capacity = R2oFlowCapacity::from_requested(requested as usize)
-                        .ok_or_else(|| invalid("--r2o-flow-capacity должен быть больше нуля"))?;
+                        .ok_or_else(|| {
+                            invalid("--flows/--r2o-flow-capacity должен быть больше нуля")
+                        })?;
                 }
                 "--stats" => {
                     let seconds: u32 = parse_value(arguments, &mut cursor, option)?;
@@ -2814,10 +2818,10 @@ mod app {
 Параметры:
   --plan FILE        статический план R2OP (по умолчанию /etc/r2o/plans/current.r2op)
   --controller-only  запуск без статического плана; планы поступают через control socket
-  --r2o-udp-reverse-visible  обратные UDP-пакеты проходят через ту же NFQUEUE
+  --r2o-udp-reverse-visible | --udp-reverse-hook  обратные UDP-пакеты проходят через ту же NFQUEUE
   --queue N          номер очереди NFQUEUE
   --idle SEC         срок удаления молчащего состояния потока (по умолчанию 120; 0 — без ожидания)
-  --r2o-flow-capacity N число слотов TCP/UDP (по умолчанию 2048)
+  --r2o-flow-capacity N | --flows N число слотов TCP/UDP (по умолчанию 2048)
   --stats SEC        период печати сводки (по умолчанию 10; 0 — отключить периодическую сводку)
   --family ipv4|ipv6 протокол очереди (по умолчанию ipv4)
   --mode observe|apply пропускать пакеты или исполнять планы (по умолчанию observe)
@@ -5191,6 +5195,30 @@ mod app {
             )
             .unwrap();
             assert_eq!(apply_options.mode, RuntimeMode::Apply);
+        }
+
+        #[test]
+        fn d2o_cli_aliases_map_to_the_same_options() {
+            let aliases = parse_options(
+                &["--queue", "2000", "--flows", "64", "--udp-reverse-hook"].map(str::to_owned),
+            )
+            .unwrap();
+            let canonical = parse_options(
+                &[
+                    "--queue",
+                    "2000",
+                    "--r2o-flow-capacity",
+                    "64",
+                    "--r2o-udp-reverse-visible",
+                ]
+                .map(str::to_owned),
+            )
+            .unwrap();
+            assert_eq!(aliases.flow_capacity.slots(), 64);
+            assert_eq!(aliases.flow_capacity.limit(), 48);
+            assert_eq!(aliases.flow_capacity, canonical.flow_capacity);
+            assert!(aliases.reverse_queue_visible);
+            assert!(canonical.reverse_queue_visible);
         }
 
         #[test]

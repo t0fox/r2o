@@ -1401,6 +1401,20 @@ fn r2o_служебная_команда_панели_остаётся_асин�
 }
 
 #[test]
+fn config_parser_accepts_all_shipped_and_donor_known_keys() {
+    let temp = TempDir::new();
+    let path = temp.file("config");
+    fs::write(
+        &path,
+        "SCHEMA=1\nMODE=apply\nPANEL_LISTEN=127.0.0.1:8090\nSTATE_DIR=/opt/r2o/state\nQUEUE_NUM=2000\nQUEUE_NUM6=2001\nR2O_FLOW_CAPACITY=2048\nIPV6_ENABLED=1\nMARK=45\nPROBE_MARK=46\nONLY_MARK=\nAUTOUPDATE=1\nLOGMAX=2097152\nLOGKEEP=1048576\nLOG_EVERY=60\nFW_BACKEND=auto\nPORTS=0:65535\nCONNBYTES=0:8\nVOICE_PORTS=50000:50099\nVOICE_CONNBYTES=0:4\nHTTP_KEEPALIVE_PORTS=80\nDNS_PORTS=53,853\nD2K_GATE=\nTG_ENABLED=1\nTG_MODE=local\nTG_PORT=1443\nTG_RELAY_URL=\nTG_RELAY_SECRET=\nTG_ENROLL_PORT=9443\nD2K_PPE_DEOFFLOAD=1\nR2O_PPE_DEOFFLOAD=1\n",
+    )
+    .unwrap();
+    let mut config = Config::default();
+    parse_config(&path, &mut config, &[]).unwrap();
+    assert!(config.unknown_keys.is_empty(), "{:?}", config.unknown_keys);
+}
+
+#[test]
 fn config_parser_honors_overrides_and_keeps_unknown_keys_visible() {
     let temp = TempDir::new();
     let path = temp.file("config");
