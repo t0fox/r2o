@@ -2340,6 +2340,58 @@ mod differential_tests {
     }
 
     #[test]
+    fn connection_io_error_does_not_kill_serve() {
+        STOP_REQUESTED.store(false, Ordering::Release);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || serve(listener, Config::default()));
+
+        let mut first = TcpStream::connect(address).unwrap();
+        first
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        let _ = first.shutdown(std::net::Shutdown::Both);
+        drop(first);
+        std::thread::sleep(Duration::from_millis(100));
+
+        let mut second = TcpStream::connect(address).unwrap();
+        second
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        second.shutdown(std::net::Shutdown::Write).unwrap();
+        second
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut response = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match second.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => response.extend_from_slice(&chunk[..read]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    if Instant::now() >= deadline {
+                        panic!("second client did not receive a response");
+                    }
+                }
+                Err(error) => panic!("second client read failed: {error}"),
+            }
+        }
+        assert!(
+            response.starts_with(b"HTTP/1.1 200"),
+            "second request must be served after the first client abort"
+        );
+        STOP_REQUESTED.store(true, Ordering::Release);
+        std::thread::sleep(Duration::from_millis(150));
+        let _ = handle.join();
+    }
+
+    #[test]
     #[ignore = "run through scripts/test-panel-response-deadline-differential.sh"]
     fn d2o_response_deadline_matches_rust_sender() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
