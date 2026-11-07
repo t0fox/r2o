@@ -23,14 +23,13 @@ make -C "$D2O_ROOT/core" test_sched_worker_lifecycle \
     exit 1
 }
 
-R2O_CARGO_HOME=${R2O_CARGO_HOME:-$HOME/.cargo} \
-R2O_RUSTUP_HOME=${R2O_RUSTUP_HOME:-$HOME/.rustup} \
-R2O_CARGO_TARGET_DIR=${R2O_CARGO_TARGET_DIR:-$HOME/r2o-target} \
-CARGO_HOME=${R2O_CARGO_HOME} \
-RUSTUP_HOME=${R2O_RUSTUP_HOME} \
-CARGO_TARGET_DIR=${R2O_CARGO_TARGET_DIR} \
+(
+    export CARGO_HOME=${R2O_CARGO_HOME:-$HOME/.cargo}
+    export RUSTUP_HOME=${R2O_RUSTUP_HOME:-$HOME/.rustup}
+    export CARGO_TARGET_DIR=${R2O_CARGO_TARGET_DIR:-$HOME/r2o-target}
     "${CARGO:-cargo}" test -p r2o-controller --test worker_memory --locked --offline \
-        -- --nocapture >"$TEMP/rust.log" 2>&1 || {
+        -- --nocapture >"$TEMP/rust.log" 2>&1
+) || {
     cat "$TEMP/rust.log" >&2
     exit 1
 }

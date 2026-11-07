@@ -72,9 +72,6 @@ install_release() {
         fail "менеджер не подтвердил установку $release_id"
 }
 
-current=$(sed -n '2p' "$INSTALL_ROOT/release-slots" 2>/dev/null || true)
-previous=$(sed -n '3p' "$INSTALL_ROOT/release-slots" 2>/dev/null || true)
-
 make_release r2o-signed-1
 make_release r2o-signed-2
 
