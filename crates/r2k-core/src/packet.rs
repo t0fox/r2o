@@ -33,6 +33,36 @@ pub struct TcpSegmentView {
 }
 
 impl PacketView {
+    /// TCP-профиль по списку опций: UNKNOWN при повреждённом списке,
+    /// TS при корректной option kind 8 length 10, иначе NO_TS.
+    /// Семантика совпадает с D2O `tcp_options_timestamp_profile`.
+    pub fn tcp_options_timestamp_profile(options: &[u8]) -> u8 {
+        use crate::control::{TCP_PROFILE_NO_TS, TCP_PROFILE_TS, TCP_PROFILE_UNKNOWN};
+        let mut offset = 0;
+        while offset < options.len() {
+            match options[offset] {
+                0 => break,
+                1 => {
+                    offset += 1;
+                    continue;
+                }
+                kind => {
+                    let Some(length) = options.get(offset + 1).copied().map(usize::from) else {
+                        return TCP_PROFILE_UNKNOWN;
+                    };
+                    if length < 2 || offset.saturating_add(length) > options.len() {
+                        return TCP_PROFILE_UNKNOWN;
+                    }
+                    if kind == 8 && length == 10 {
+                        return TCP_PROFILE_TS;
+                    }
+                    offset += length;
+                }
+            }
+        }
+        TCP_PROFILE_NO_TS
+    }
+
     /// Разбирать только такие пакеты, которые datapath может безопасно изменить.
     ///
     /// Для неподдерживаемых пакетов вернуть `None`, чтобы вызывающий код пропустил их.
@@ -206,4 +236,53 @@ fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
 fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
     let value = bytes.get(offset..offset.checked_add(4)?)?;
     Some(u32::from_be_bytes(value.try_into().ok()?))
+}
+
+#[cfg(test)]
+mod tcp_option_profile_tests {
+    use super::PacketView;
+    use crate::control::{TCP_PROFILE_NO_TS, TCP_PROFILE_TS, TCP_PROFILE_UNKNOWN};
+
+    #[test]
+    fn timestamp_profile_matches_d2o_parser() {
+        // kind 8, length 10, два timestamp-слова.
+        let mut with_ts = vec![1, 1, 8, 10];
+        with_ts.extend_from_slice(&[0; 8]);
+        with_ts.push(0);
+        assert_eq!(
+            PacketView::tcp_options_timestamp_profile(&with_ts),
+            TCP_PROFILE_TS
+        );
+
+        // Корректный список без timestamp.
+        assert_eq!(
+            PacketView::tcp_options_timestamp_profile(&[1, 1, 0]),
+            TCP_PROFILE_NO_TS
+        );
+        assert_eq!(
+            PacketView::tcp_options_timestamp_profile(&[]),
+            TCP_PROFILE_NO_TS
+        );
+
+        // Оборванная или неверная длина option — UNKNOWN, как в C.
+        assert_eq!(
+            PacketView::tcp_options_timestamp_profile(&[8, 10, 0]),
+            TCP_PROFILE_UNKNOWN
+        );
+        assert_eq!(
+            PacketView::tcp_options_timestamp_profile(&[8]),
+            TCP_PROFILE_UNKNOWN
+        );
+        assert_eq!(
+            PacketView::tcp_options_timestamp_profile(&[8, 1]),
+            TCP_PROFILE_UNKNOWN
+        );
+        // kind 8 с длиной не 10 — не timestamp, список корректен.
+        let mut short_ts = vec![8, 2];
+        short_ts.push(0);
+        assert_eq!(
+            PacketView::tcp_options_timestamp_profile(&short_ts),
+            TCP_PROFILE_NO_TS
+        );
+    }
 }

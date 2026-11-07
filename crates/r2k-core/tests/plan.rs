@@ -189,6 +189,27 @@ fn declared_record_count_is_exact_and_malformed_bytes_never_panic() {
     }
 }
 
+#[test]
+fn parses_legacy_d2kp_container_with_identical_body() {
+    let d2kp = include_bytes!("fixtures/d2kp_fake_before.tlv");
+    let parsed = Plan::parse_wire(d2kp).unwrap();
+    assert_eq!(parsed.schema, 1);
+    assert_eq!(parsed.minexec, 1);
+    assert_eq!(parsed.payloads.len(), 1);
+    assert_eq!(parsed.payloads[0].id, 1);
+    assert_eq!(parsed.payloads[0].bytes, [0xde, 0xad, 0xbe]);
+    assert_eq!(parsed.poisons.len(), 1);
+    assert_eq!(parsed.poisons[0].flags, 0x01);
+    assert_eq!(parsed.fakes.len(), 1);
+    assert_eq!(parsed.fakes[0].payload_id, 1);
+    assert_eq!(parsed.fakes[0].repeats, 2);
+    assert_eq!(parsed.fakes[0].gap_us, 78_000);
+
+    let mut r2op = d2kp.to_vec();
+    r2op[..4].copy_from_slice(&PLAN_MAGIC);
+    assert_eq!(Plan::parse(&r2op).unwrap(), parsed);
+}
+
 fn tlv(kind: u16, value: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(4 + value.len());
     bytes.extend_from_slice(&kind.to_be_bytes());

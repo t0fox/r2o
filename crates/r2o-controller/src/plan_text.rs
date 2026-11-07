@@ -87,12 +87,12 @@ pub fn compile_text(text: &str) -> Result<Vec<u8>, String> {
         }
         let parse_error = |message: &str| format!("line {line_number}: {message}");
         match fields[0] {
-            "r2o-plan" => {
+            "r2o-plan" | "d2k-plan" => {
                 require_fields(
                     &fields,
                     3,
                     line_number,
-                    "r2o-plan expects schema and minexec",
+                    "plan header expects schema and minexec",
                 )?;
                 plan.schema = number(fields[1], u16::MAX as u64)
                     .map_err(|_| parse_error("invalid schema"))?
@@ -290,6 +290,8 @@ pub fn compile_text(text: &str) -> Result<Vec<u8>, String> {
                         flags |= 4;
                     } else if *field == "md5" {
                         flags |= 8;
+                    } else if *field == "tsup" {
+                        flags |= 1 << 4;
                     } else if let Some(value) = field.strip_prefix("autottl=") {
                         if autottl.is_some() {
                             return Err(parse_error("autottl may be specified only once"));
@@ -516,7 +518,7 @@ pub fn compile_text(text: &str) -> Result<Vec<u8>, String> {
     }
 
     if !plan.header_seen {
-        return Err("missing r2o-plan header".into());
+        return Err("missing r2o-plan or d2k-plan header".into());
     }
     let mut records = Vec::<(u16, Vec<u8>)>::new();
     records.push((REC_ID, plan.id.to_vec()));

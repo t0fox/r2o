@@ -3645,7 +3645,7 @@ mod app {
             return Ok(Plan::default());
         }
         let bytes = std::fs::read(&options.plan_path)?;
-        let plan = Plan::parse(&bytes)
+        let plan = Plan::parse_wire(&bytes)
             .map_err(|error| invalid(format!("план {}: {}", options.plan_path.display(), error)))?;
         validate_runtime_plan(&plan).map_err(invalid)?;
         Ok(plan)

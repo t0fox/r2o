@@ -6,9 +6,11 @@ use r2k_core::control::{
     COMMAND_DEL_NAME_PROBE, COMMAND_DEL_SUFFIX, COMMAND_DEL_VOICE_ADDR_PROBE, COMMAND_SET_ADDR,
     COMMAND_SET_ADDR_PROBE, COMMAND_SET_BYPASS, COMMAND_SET_HTTPS, COMMAND_SET_NAME,
     COMMAND_SET_NAME_BOUND, COMMAND_SET_NAME_PROBE, COMMAND_SET_SUFFIX, COMMAND_SET_VOICE_ADDR,
-    COMMAND_SET_VOICE_ADDR_PROBE, Frame, MAX_HTTPS_TTL_SECONDS, SHAPE_ECH_TCP, SHAPE_GRANDFATHER,
-    SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, decode_arm_shape,
-    decode_client_shape,
+    COMMAND_SET_VOICE_ADDR_PROBE, Frame, MAX_HTTPS_TTL_SECONDS, SHAPE_ECH_NO_TS, SHAPE_ECH_TCP,
+    SHAPE_ECH_TS, SHAPE_GRANDFATHER, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_MODERN_NO_TS,
+    SHAPE_MODERN_TS, SHAPE_QUIC, SHAPE_VOICE, TCP_PROFILE_UNKNOWN, decode_arm_shape,
+    decode_client_shape, is_tcp_context_shape, is_tcp_plan_shape, r2k_link_shape_tcp_base,
+    r2k_link_shape_tcp_context,
 };
 use r2k_core::packet::PacketView;
 #[cfg(test)]
@@ -291,7 +293,7 @@ impl NamePlans {
             return None;
         }
         let host = canonical_plan_name(&body[1..1 + name_len], SHAPE_HTTP)?;
-        let plan = Plan::parse(&body[fields_end..]).ok()?;
+        let plan = Plan::parse_wire(&body[fields_end..]).ok()?;
         let installed = self.plans.get(&NamePlanKey {
             host,
             family,
@@ -415,18 +417,37 @@ impl NamePlans {
             .sni_range
             .filter(|range| range.end <= payload.len())
             .and_then(|range| payload.get(range));
-        let shape = if tls.ech_offer {
+        let base_shape = if tls.ech_offer {
             SHAPE_ECH_TCP
         } else if tls.is_tls13 {
             SHAPE_MODERN
         } else {
             SHAPE_LEGACY
         };
+        // D2O берёт TCP-профиль из самого ClientHello: при известном профиле
+        // план ищется в контексте 8–13, иначе — в базовой форме 1/2/6.
+        let tcp_profile = packet.get(tcp.options.clone()).map_or(
+            TCP_PROFILE_UNKNOWN,
+            PacketView::tcp_options_timestamp_profile,
+        );
+        let shape = r2k_link_shape_tcp_context(base_shape, tcp_profile);
+        // R2O-контроллер пока ставит планы в базовой форме 1/2/6, а D2O —
+        // в контексте 8–13. Точный контекст имеет приоритет; базовая форма
+        // остаётся совместимым мостом для уже установленных R2O-планов.
+        let bridge_shape = r2k_link_shape_tcp_base(shape);
+        let fallback_shape = match shape {
+            SHAPE_ECH_TCP => Some(SHAPE_MODERN),
+            SHAPE_ECH_NO_TS => Some(SHAPE_MODERN_NO_TS),
+            SHAPE_ECH_TS => Some(SHAPE_MODERN_TS),
+            _ => None,
+        };
         let Some(sni) = sni else {
             if !tls.is_client_hello || tls.extensions_truncated {
                 return None;
             }
-            return self.find_addr(view.dst, shape);
+            return self
+                .find_addr(view.dst, shape)
+                .or_else(|| self.find_addr(view.dst, bridge_shape));
         };
         if let Some(probe) = self.probes.get(&NameProbeKey {
             name: NamePlanKey {
@@ -439,19 +460,17 @@ impl NamePlans {
             return Some(&probe.plan);
         }
         self.find(sni, view.family, shape)
-            .or_else(|| {
-                (shape == SHAPE_ECH_TCP)
-                    .then(|| self.find(sni, view.family, SHAPE_MODERN))
-                    .flatten()
-            })
+            .or_else(|| self.find(sni, view.family, bridge_shape))
+            .or_else(|| fallback_shape.and_then(|fallback| self.find(sni, view.family, fallback)))
             .or_else(|| self.find(sni, view.family, SHAPE_GRANDFATHER))
             .or_else(|| self.find_in_domain(sni, view.family, shape, 6))
+            .or_else(|| self.find_in_domain(sni, view.family, bridge_shape, 6))
             .or_else(|| {
-                (shape == SHAPE_ECH_TCP)
-                    .then(|| self.find_in_domain(sni, view.family, SHAPE_MODERN, 6))
-                    .flatten()
+                fallback_shape
+                    .and_then(|fallback| self.find_in_domain(sni, view.family, fallback, 6))
             })
             .or_else(|| self.find_addr_fallback(view.dst, Some(sni), view.family, shape, 6))
+            .or_else(|| self.find_addr_fallback(view.dst, Some(sni), view.family, bridge_shape, 6))
     }
 
     pub const fn revision(&self) -> u64 {
@@ -723,7 +742,7 @@ impl NamePlans {
             family,
             shape,
         };
-        let plan = match Plan::parse(&body[fields_end..]) {
+        let plan = match Plan::parse_wire(&body[fields_end..]) {
             Ok(plan) => plan,
             Err(_) => return (false, control::ACK_BAD_PLAN),
         };
@@ -732,6 +751,7 @@ impl NamePlans {
             SHAPE_MODERN | SHAPE_LEGACY | SHAPE_GRANDFATHER | SHAPE_ECH_TCP => {
                 plan.transport == 6 && plan.proto == 1
             }
+            _ if is_tcp_context_shape(shape) => plan.transport == 6 && plan.proto == 1,
             SHAPE_QUIC => valid_quic_plan(&plan),
             SHAPE_VOICE => plan.transport == 17 && plan.proto == PROTO_VOICE,
             _ => false,
@@ -760,7 +780,7 @@ impl NamePlans {
         if !valid_addr_shape(shape) {
             return (false, control::ACK_BAD_ARGS);
         }
-        let plan = match Plan::parse(&body[18..]) {
+        let plan = match Plan::parse_wire(&body[18..]) {
             Ok(plan) => plan,
             Err(_) => return (false, control::ACK_BAD_PLAN),
         };
@@ -796,19 +816,20 @@ impl NamePlans {
         let shape = body[1 + name_len];
         let family = body[2 + name_len];
         if !matches!(family, 4 | 6)
-            || !matches!(
+            || !(matches!(
                 shape,
                 SHAPE_MODERN | SHAPE_LEGACY | SHAPE_QUIC | SHAPE_ECH_TCP
-            )
+            ) || is_tcp_context_shape(shape))
         {
             return (false, control::ACK_BAD_ARGS);
         }
-        let plan = match Plan::parse(&body[fields_end..]) {
+        let plan = match Plan::parse_wire(&body[fields_end..]) {
             Ok(plan) => plan,
             Err(_) => return (false, control::ACK_BAD_PLAN),
         };
         let compatible = match shape {
             SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP => plan.transport == 6 && plan.proto == 1,
+            _ if is_tcp_context_shape(shape) => plan.transport == 6 && plan.proto == 1,
             SHAPE_QUIC => valid_quic_plan(&plan),
             _ => false,
         };
@@ -964,13 +985,14 @@ impl NamePlans {
             },
             source_port,
         };
-        let plan = match Plan::parse(&body[fields_end..]) {
+        let plan = match Plan::parse_wire(&body[fields_end..]) {
             Ok(plan) => plan,
             Err(_) => return (false, control::ACK_BAD_PLAN),
         };
         let proto_matches = match shape {
             SHAPE_HTTP => plan.proto == PROTO_HTTP,
             SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP => plan.proto == 1,
+            _ if is_tcp_context_shape(shape) => plan.proto == 1,
             _ => false,
         };
         if plan.transport != 6 || !proto_matches || !self.r2o_plan_valid(&plan) {
@@ -1002,7 +1024,7 @@ impl NamePlans {
         if r2o_server.is_unspecified() || r2o_server.is_multicast() {
             return (false, control::ACK_BAD_ARGS);
         }
-        let r2o_plan = match Plan::parse(&body[4..]) {
+        let r2o_plan = match Plan::parse_wire(&body[4..]) {
             Ok(r2o_plan) => r2o_plan,
             Err(_) => return (false, control::ACK_BAD_PLAN),
         };
@@ -1063,7 +1085,7 @@ impl NamePlans {
         {
             return (false, control::ACK_BAD_ARGS);
         }
-        let r2o_plan = match Plan::parse(&body[14..]) {
+        let r2o_plan = match Plan::parse_wire(&body[14..]) {
             Ok(r2o_plan) => r2o_plan,
             Err(_) => return (false, control::ACK_BAD_PLAN),
         };
@@ -1117,7 +1139,7 @@ impl NamePlans {
         {
             return (false, control::ACK_BAD_ARGS);
         }
-        let plan = match Plan::parse(&body[fixed..]) {
+        let plan = match Plan::parse_wire(&body[fixed..]) {
             Ok(plan) => plan,
             Err(_) => return (false, control::ACK_BAD_PLAN),
         };
@@ -1280,7 +1302,10 @@ impl NamePlans {
                 .try_into()
                 .expect("размер binding context проверен"),
         };
-        if binding.kind > 4 || !matches!(binding.family, 0 | 4 | 6) || binding.shape > SHAPE_HTTP {
+        if binding.kind > 4
+            || !matches!(binding.family, 0 | 4 | 6)
+            || !valid_binding_shape(binding.shape)
+        {
             return (false, control::ACK_BAD_ARGS);
         }
         let Some(host) = canonical_plan_name(&body[1..1 + name_len], binding.shape) else {
@@ -1428,7 +1453,9 @@ impl NamePlans {
 
 fn valid_domain_area_context(transport: u8, shape: u8, family: u8) -> bool {
     matches!(family, 4 | 6)
-        && ((transport == 6 && matches!(shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP))
+        && ((transport == 6
+            && (matches!(shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP)
+                || is_tcp_context_shape(shape)))
             || (transport == 17 && shape == SHAPE_QUIC))
 }
 
@@ -1556,17 +1583,15 @@ fn canonical_plan_name(bytes: &[u8], shape: u8) -> Option<String> {
 }
 
 fn valid_tcp_shape(shape: u8) -> bool {
-    matches!(
-        shape,
-        SHAPE_MODERN | SHAPE_LEGACY | SHAPE_GRANDFATHER | SHAPE_ECH_TCP | SHAPE_HTTP
-    )
+    is_tcp_plan_shape(shape) || shape == SHAPE_GRANDFATHER
+}
+
+fn valid_binding_shape(shape: u8) -> bool {
+    valid_tcp_shape(shape) || matches!(shape, SHAPE_QUIC | SHAPE_VOICE)
 }
 
 fn valid_tcp_probe_shape(shape: u8) -> bool {
-    matches!(
-        shape,
-        SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP | SHAPE_HTTP
-    )
+    is_tcp_plan_shape(shape)
 }
 
 fn valid_quic_plan(plan: &Plan) -> bool {
@@ -2386,7 +2411,7 @@ mod tests {
         frame
             .body
             .extend_from_slice(&[0x01, 0x01, 0x00, 0x0a, 0x00, 0x01, 0, 0, 1, 0, 0, 0, 0, 0]);
-        let plan = Plan::parse(&frame.body[prefix_len..]).unwrap();
+        let plan = Plan::parse_wire(&frame.body[prefix_len..]).unwrap();
 
         plans.r2o_set_send_maxlen(1);
         assert!(!plans.handle(&frame).ok);
@@ -3469,5 +3494,104 @@ mod tests {
         packet[33] = 0x18;
         packet[40..].copy_from_slice(&payload);
         packet
+    }
+
+    fn set_name_shape(host: &str, shape: u8, id: [u8; 16]) -> Frame {
+        let mut body = vec![host.len() as u8];
+        body.extend_from_slice(host.as_bytes());
+        body.extend_from_slice(&[shape, 4]);
+        body.extend_from_slice(&plan_header(0, 2));
+        body.extend_from_slice(&[0x00, 0x01, 0x00, 0x10]);
+        body.extend_from_slice(&id);
+        body.extend_from_slice(&[0x00, 0x02, 0x00, 0x02, 0x06, 0x01]);
+        Frame {
+            kind: COMMAND_SET_NAME,
+            body,
+        }
+    }
+
+    fn tcp_tls_packet_with_options(host: &str, options: &[u8]) -> Vec<u8> {
+        assert_eq!(options.len() % 4, 0);
+        let mut base = tcp_tls_packet(host);
+        let payload = base.split_off(40);
+        let mut packet = base;
+        packet[32] = (((20 + options.len()) / 4) as u8) << 4;
+        packet.extend_from_slice(options);
+        packet.extend_from_slice(&payload);
+        let total_len = packet.len() as u16;
+        packet[2..4].copy_from_slice(&total_len.to_be_bytes());
+        packet
+    }
+
+    #[test]
+    fn tcp_shape_context_8_13_selects_by_timestamp_profile() {
+        let mut plans = NamePlans::default();
+        assert!(
+            plans
+                .handle(&set_name_shape(
+                    "example.test",
+                    r2k_core::control::SHAPE_MODERN_NO_TS,
+                    [0xA1; 16],
+                ))
+                .ok
+        );
+        assert!(
+            plans
+                .handle(&set_name_shape(
+                    "example.test",
+                    r2k_core::control::SHAPE_MODERN_TS,
+                    [0xB2; 16],
+                ))
+                .ok
+        );
+
+        let no_ts = tcp_tls_packet("example.test");
+        assert_eq!(plans.select(&no_ts).map(|plan| plan.id), Some([0xA1; 16]));
+
+        let with_ts =
+            tcp_tls_packet_with_options("example.test", &[1, 1, 8, 10, 0, 0, 0, 1, 0, 0, 0, 0]);
+        assert_eq!(plans.select(&with_ts).map(|plan| plan.id), Some([0xB2; 16]));
+
+        // Точный контекст имеет приоритет над базовой формой.
+        let mut both = NamePlans::default();
+        assert!(
+            both.handle(&set_name_shape(
+                "example.test",
+                r2k_core::control::SHAPE_MODERN,
+                [0xC3; 16],
+            ))
+            .ok
+        );
+        assert!(
+            both.handle(&set_name_shape(
+                "example.test",
+                r2k_core::control::SHAPE_MODERN_TS,
+                [0xB2; 16],
+            ))
+            .ok
+        );
+        assert_eq!(both.select(&with_ts).map(|plan| plan.id), Some([0xB2; 16]));
+        assert_eq!(both.select(&no_ts).map(|plan| plan.id), Some([0xC3; 16]));
+
+        // Базовая форма остаётся совместимым мостом, пока R2O-контроллер
+        // ставит планы без контекста 8–13.
+        let mut base_only = NamePlans::default();
+        assert!(
+            base_only
+                .handle(&set_name_shape(
+                    "example.test",
+                    r2k_core::control::SHAPE_MODERN,
+                    [0xC3; 16],
+                ))
+                .ok
+        );
+        assert_eq!(
+            base_only.select(&with_ts).map(|plan| plan.id),
+            Some([0xC3; 16])
+        );
+        assert_eq!(
+            base_only.select(&no_ts).map(|plan| plan.id),
+            Some([0xC3; 16])
+        );
     }
 }

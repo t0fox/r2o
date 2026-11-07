@@ -8431,6 +8431,14 @@ impl R2oFlowUnfitDone {
 }
 
 #[cfg(unix)]
+fn r2o_voice_suspect_frame_is_udp(frame: &Frame) -> bool {
+    frame
+        .body
+        .get(..r2k_core::control::KEY_LEN)
+        .is_some_and(|key| key[37] == 17)
+}
+
+#[cfg(unix)]
 fn r2o_handle_client_shape_event(
     worker: &mut DiscoveryWorker,
     shape: &r2k_core::control::ClientShapeEvent,
@@ -16668,6 +16676,12 @@ impl ControlClient {
                     continue;
                 }
                 if frame.kind == EVENT_R2O_VOICE_SUSPECT {
+                    // C datapath использует 0x000D для CLIENT_TCP (TCP key).
+                    // Не отдавать такой кадр voice-декодеру: это фатально для
+                    // смешанного C-контроллера/датапата.
+                    if !r2o_voice_suspect_frame_is_udp(&frame) {
+                        continue;
+                    }
                     let event = decode_r2o_voice_suspect(&frame)
                         .map_err(|error| format!("событие голосового потока: {error}"))?;
                     let Some(r2o_target) =
@@ -21708,14 +21722,15 @@ mod tests {
         r2o_family_recovery_decision, r2o_handle_client_shape_event, r2o_http_failed_disposition,
         r2o_http_live_cut_recheck, r2o_quic_binding_blocks_retry, r2o_tcp_stall_budgets,
         r2o_tcp_stall_budgets_for_name, r2o_tcp_stall_in_name_band, r2o_voice_proof_matches_target,
-        save_plan_file, shape_matches_plan,
+        r2o_voice_suspect_frame_is_udp, save_plan_file, shape_matches_plan,
     };
     use r2k_core::control::{
         Ack, BindingContext, COMMAND_DEL_NAME_PROBE, COMMAND_DEL_VOICE_ADDR_PROBE,
         COMMAND_SET_NAME, COMMAND_SET_NAME_BOUND, COMMAND_SET_NAME_PROBE, COMMAND_SET_VOICE_ADDR,
-        EVENT_APPLIED, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, Frame, HelloEvent,
-        HttpResponseEvent, KEY_LEN, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_MODERN, SHAPE_QUIC,
-        SHAPE_VOICE, encode_ack, encode_ack_for_trial, encode_frame, encode_greeting, read_frame,
+        EVENT_APPLIED, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_SUSPECT, Frame,
+        HelloEvent, HttpResponseEvent, KEY_LEN, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_MODERN,
+        SHAPE_QUIC, SHAPE_VOICE, encode_ack, encode_ack_for_trial, encode_frame, encode_greeting,
+        read_frame,
     };
     use r2k_core::plan::{PLAN_MAGIC, Plan};
     use r2o_controller::catalog::{Binding, BoxRecord, Catalog, Fingerprint, Signal};
@@ -21725,6 +21740,27 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
+    #[test]
+    fn voice_suspect_guard_ignores_c_client_tcp_frames() {
+        let mut key = [0; KEY_LEN];
+        key[0] = 4;
+        key[37] = 6;
+        let mut body = key.to_vec();
+        body.extend_from_slice(&[1, 1, 4, 2]);
+        let frame = Frame {
+            kind: EVENT_R2O_VOICE_SUSPECT,
+            body,
+        };
+        assert!(!r2o_voice_suspect_frame_is_udp(&frame));
+
+        key[37] = 17;
+        let frame = Frame {
+            kind: EVENT_R2O_VOICE_SUSPECT,
+            body: key.to_vec(),
+        };
+        assert!(r2o_voice_suspect_frame_is_udp(&frame));
+    }
 
     #[cfg(unix)]
     #[test]

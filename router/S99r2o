@@ -660,6 +660,16 @@ clear_found() {
     clear_found_result=0
     "$MANAGER" exec --root "$ROOT" --component r2o-controller -- \
         --clear-catalog "$CATALOG" || clear_found_result=$?
+    if [ "$clear_found_result" -eq 0 ]; then
+        # D2O clear_found снимает не только каталог, но и все производные
+        # state-файлы: https-cache, live/measurements и legacy-имена.
+        for file in https-cache.json https-cache.txt http-plans.txt live.json; do
+            [ ! -e "$STATE/$file" ] || rm -f "$STATE/$file" || true
+        done
+        if [ -d "$STATE/measurements" ]; then
+            rm -rf "$STATE/measurements" || true
+        fi
+    fi
     if [ "$clear_found_restart" = 1 ] && [ "$MODE" != off ]; then
         engine_start || return 1
     fi

@@ -1,12 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 29.50%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 31.42%">
 <rect width="1100" height="790" rx="20" fill="#0c121e"/>
 <text x="36" y="48" fill="#edf7ff" font-family="Arial,sans-serif" font-size="29" font-weight="700">R2O / D2O · Strict parity</text>
-<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">29.50%</text>
-<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">77 / 261 verified points</text>
+<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">31.42%</text>
+<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">82 / 261 verified points</text>
 <rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/>
-<rect x="37" y="113" width="302.1" height="11" rx="5" fill="#36c989"/>
-<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">172 contracts · 55 verified · 18 missing · 2026-11-08</text>
-<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 140/261 = 53.64% · strict 77/261 = 29.50%</text>
+<rect x="37" y="113" width="321.7" height="11" rx="5" fill="#36c989"/>
+<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">173 contracts · 59 verified · 15 missing · 2026-11-08</text>
+<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 145/261 = 55.56% · strict 82/261 = 31.42%</text>
 <rect x="37" y="190" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="213" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Datapath</text>
 <text x="533" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">11/26</text>
@@ -30,7 +30,7 @@
 <rect x="241" y="250" width="30" height="22" rx="5" fill="#e6b45d"><title>D17 HTTP/80 replacement + hold: частично (0/1)</title></rect>
 <rect x="279" y="250" width="30" height="22" rx="5" fill="#e6b45d"><title>D18 Capture/TLS/wire/addr helpers: частично (0/1)</title></rect>
 <rect x="317" y="250" width="30" height="22" rx="5" fill="#e6b45d"><title>D19 Route mark/socket route selection: частично (0/1)</title></rect>
-<rect x="355" y="250" width="30" height="22" rx="5" fill="#e06c75"><title>D20 TCP timestamp shape contexts 8-13 (`d2k_link_shape_tcp_*`): пробел (0/2)</title></rect>
+<rect x="355" y="250" width="30" height="22" rx="5" fill="#e6b45d"><title>D20 TCP timestamp shape contexts 8-13 (`d2k_link_shape_tcp_*`): частично (0/2)</title></rect>
 <rect x="393" y="250" width="30" height="22" rx="5" fill="#e6b45d"><title>D21 Datapath scheduler: due ordering, refusals, owned IDs: частично (0/1)</title></rect>
 <rect x="431" y="250" width="30" height="22" rx="5" fill="#e06c75"><title>D22 Journal: ring/retention/dropped/added/format: пробел (0/1)</title></rect>
 <rect x="557" y="190" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
@@ -146,7 +146,7 @@
 <rect x="609" y="613" width="30" height="22" rx="5" fill="#e06c75"><title>A26 CLI `--version`/`serve`/`--self-check`/`--release-id`: пробел (0/1)</title></rect>
 <rect x="37" y="638" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="661" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Router / Service</text>
-<text x="533" y="661" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">59/84</text>
+<text x="533" y="661" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">62/84</text>
 <rect x="51" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>B1 Config defaults и совместимость ключей: частично (0/1)</title></rect>
 <rect x="89" y="671" width="30" height="22" rx="5" fill="#36c989"><title>B2 Start order: engine→telegram→panel→schedulers: доказано (2/2)</title></rect>
 <rect x="127" y="671" width="30" height="22" rx="5" fill="#36c989"><title>B3 Stop order и восстановление fastnat/offload: доказано (2/2)</title></rect>
@@ -155,7 +155,7 @@
 <rect x="241" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>B6 `engine-restart`/`settings-restart`: частично (0/1)</title></rect>
 <rect x="279" y="671" width="30" height="22" rx="5" fill="#36c989"><title>B7 Panel lifecycle и disabled panel: доказано (1/1)</title></rect>
 <rect x="317" y="671" width="30" height="22" rx="5" fill="#e06c75"><title>B8 `status` (поля и коды): пробел (0/1)</title></rect>
-<rect x="355" y="671" width="30" height="22" rx="5" fill="#e06c75"><title>B9 `clear-found`: все state-файлы: пробел (0/2)</title></rect>
+<rect x="355" y="671" width="30" height="22" rx="5" fill="#36c989"><title>B9 `clear-found`: все state-файлы: доказано (2/2)</title></rect>
 <rect x="393" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>B10 nft backend: генерация и postconditions: частично (0/3)</title></rect>
 <rect x="431" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>B11 iptables backend: генерация и postconditions: частично (0/3)</title></rect>
 <rect x="469" y="671" width="30" height="22" rx="5" fill="#36c989"><title>B12 Код ошибки отдельного правила: доказано (1/1)</title></rect>
@@ -196,17 +196,18 @@
 <rect x="431" y="752" width="30" height="22" rx="5" fill="#36c989"><title>B49 Meta DNS ranges asset: доказано (1/1)</title></rect>
 <rect x="469" y="752" width="30" height="22" rx="5" fill="#36c989"><title>B50 Meta DNS edge verification: доказано (1/1)</title></rect>
 <rect x="51" y="779" width="30" height="22" rx="5" fill="#36c989"><title>B51 Meta DNS owned-record removal: доказано (1/1)</title></rect>
-<rect x="89" y="779" width="30" height="22" rx="5" fill="#e06c75"><title>B52 Log maintenance: все owned-логи: пробел (0/1)</title></rect>
+<rect x="89" y="779" width="30" height="22" rx="5" fill="#36c989"><title>B52 Log maintenance: все owned-логи: доказано (1/1)</title></rect>
 <rect x="127" y="779" width="30" height="22" rx="5" fill="#e06c75"><title>B53 `KEENETIC_POLICY` → `--only-mark`: пробел (0/2)</title></rect>
 <rect x="557" y="638" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="571" y="661" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Core / CLI</text>
-<text x="1053" y="661" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">1/15</text>
+<text x="1053" y="661" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">3/15</text>
 <rect x="571" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>M1 `compose.c` + `d2kc.c` orchestration/event loop: частично (0/3)</title></rect>
 <rect x="609" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>M2 `d2kask.c`: частично (0/1)</title></rect>
 <rect x="647" y="671" width="30" height="22" rx="5" fill="#36c989"><title>M3 `d2kfetch.c` CLI: доказано (1/1)</title></rect>
 <rect x="685" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>M4 `d2kvoice.c` controller entry: частично (0/1)</title></rect>
 <rect x="723" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>M5 `link.c`, `net4.c`, `udpruntime.c`, `volume.c`: частично (0/3)</title></rect>
 <rect x="761" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>M6 `crypto.c`, `p256.c`, `x25519.c`, `props.c`, `udpplan.c`, `plantlv.c` helpers: частично (0/3)</title></rect>
-<rect x="799" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>M7 `http80.c`, `http_trace.c`, `journal.c`, `plans.c`, `plan_parse/apply.c`: частично (0/2)</title></rect>
-<rect x="837" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>M8 Production header-inline helpers inventory/mapping: частично (0/1)</title></rect>
+<rect x="799" y="671" width="30" height="22" rx="5" fill="#36c989"><title>M7a Legacy `D2KP` container compatibility: доказано (1/1)</title></rect>
+<rect x="837" y="671" width="30" height="22" rx="5" fill="#36c989"><title>M7b `tcp_ts_up` / `D2K_POISON_TS_UP` wire reorder: доказано (1/1)</title></rect>
+<rect x="875" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>M8 Production header-inline helpers inventory/mapping: частично (0/1)</title></rect>
 </svg>

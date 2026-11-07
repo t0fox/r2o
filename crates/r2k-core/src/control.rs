@@ -76,6 +76,97 @@ pub const SHAPE_GRANDFATHER: u8 = 4;
 pub const SHAPE_VOICE: u8 = 5;
 pub const SHAPE_ECH_TCP: u8 = 6;
 pub const SHAPE_HTTP: u8 = 7;
+/// TCP TLS plan contexts: отличают план, подтверждённый с TCP timestamps,
+/// от плана без них. Значения совпадают с D2O `runtime/d2k_protocol.h`.
+pub const SHAPE_MODERN_NO_TS: u8 = 8;
+pub const SHAPE_LEGACY_NO_TS: u8 = 9;
+pub const SHAPE_ECH_NO_TS: u8 = 10;
+pub const SHAPE_MODERN_TS: u8 = 11;
+pub const SHAPE_LEGACY_TS: u8 = 12;
+pub const SHAPE_ECH_TS: u8 = 13;
+pub const TCP_PROFILE_UNKNOWN: u8 = 0;
+pub const TCP_PROFILE_NO_TS: u8 = 1;
+pub const TCP_PROFILE_TS: u8 = 2;
+
+/// Базовая TLS-форма по контексту 8–13.
+pub const fn r2k_link_shape_tcp_profile(shape: u8) -> u8 {
+    match shape {
+        SHAPE_MODERN_NO_TS | SHAPE_LEGACY_NO_TS | SHAPE_ECH_NO_TS => TCP_PROFILE_NO_TS,
+        SHAPE_MODERN_TS | SHAPE_LEGACY_TS | SHAPE_ECH_TS => TCP_PROFILE_TS,
+        _ => TCP_PROFILE_UNKNOWN,
+    }
+}
+
+/// Базовая форма 1/2/6 по контексту 8–13; прочие значения возвращаются как есть.
+pub const fn r2k_link_shape_tcp_base(shape: u8) -> u8 {
+    match shape {
+        SHAPE_MODERN_NO_TS | SHAPE_MODERN_TS => SHAPE_MODERN,
+        SHAPE_LEGACY_NO_TS | SHAPE_LEGACY_TS => SHAPE_LEGACY,
+        SHAPE_ECH_NO_TS | SHAPE_ECH_TS => SHAPE_ECH_TCP,
+        _ => shape,
+    }
+}
+
+/// Контекст 8–13 по базовой форме и TCP-профилю.
+pub const fn r2k_link_shape_tcp_context(shape: u8, profile: u8) -> u8 {
+    if profile == TCP_PROFILE_UNKNOWN {
+        return shape;
+    }
+    match shape {
+        SHAPE_MODERN => {
+            if profile == TCP_PROFILE_TS {
+                SHAPE_MODERN_TS
+            } else {
+                SHAPE_MODERN_NO_TS
+            }
+        }
+        SHAPE_LEGACY => {
+            if profile == TCP_PROFILE_TS {
+                SHAPE_LEGACY_TS
+            } else {
+                SHAPE_LEGACY_NO_TS
+            }
+        }
+        SHAPE_ECH_TCP => {
+            if profile == TCP_PROFILE_TS {
+                SHAPE_ECH_TS
+            } else {
+                SHAPE_ECH_NO_TS
+            }
+        }
+        _ => shape,
+    }
+}
+
+/// Контекстная TLS-форма: базовая 1/2/6 либо 8–13.
+pub const fn is_tcp_context_shape(shape: u8) -> bool {
+    matches!(
+        shape,
+        SHAPE_MODERN_NO_TS
+            | SHAPE_LEGACY_NO_TS
+            | SHAPE_ECH_NO_TS
+            | SHAPE_MODERN_TS
+            | SHAPE_LEGACY_TS
+            | SHAPE_ECH_TS
+    )
+}
+
+/// Любая допустимая TCP TLS-форма: базовая 1/2/6, HTTP 7, контекст 8–13.
+pub const fn is_tcp_plan_shape(shape: u8) -> bool {
+    matches!(
+        shape,
+        SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP | SHAPE_HTTP
+    ) || is_tcp_context_shape(shape)
+}
+
+/// TCP-профиль по признаку timestamp option: None — неизвестно.
+pub const fn tcp_profile_from_has_timestamp(has_timestamp: Option<bool>) -> u8 {
+    match has_timestamp {
+        Some(false) => TCP_PROFILE_NO_TS,
+        Some(true) => TCP_PROFILE_TS,
+        None => TCP_PROFILE_UNKNOWN,
+    }
+}
 
 const HTTP_CONTEXT_HEADER_LEN: usize = 50;
 const HTTP_BINDING_LEN: usize = BINDING_CONTEXT_LEN;
@@ -264,7 +355,8 @@ pub struct RefusedEvent {
 
 impl RefusedEvent {
     pub fn event_body(&self) -> Option<Vec<u8>> {
-        if !valid_flow_key(&self.key) || self.client_shape.is_some_and(|shape| shape > SHAPE_HTTP) {
+        if !valid_flow_key(&self.key) || self.client_shape.is_some_and(|shape| shape > SHAPE_ECH_TS)
+        {
             return None;
         }
         let execution_context = match (self.execution_id, self.binding) {
@@ -934,7 +1026,8 @@ pub fn encode_set_name(
             | SHAPE_VOICE
             | SHAPE_ECH_TCP
             | SHAPE_HTTP
-    ) {
+    ) && !is_tcp_context_shape(shape)
+    {
         return Err("форма приветствия не поддерживается");
     }
     let mut body = Vec::with_capacity(3 + name.len() + plan_records.len());
@@ -1042,10 +1135,10 @@ pub fn encode_set_suffix(
         return Err("суффикс должен занимать от 1 до 253 байт");
     }
     if !matches!(family, 4 | 6)
-        || !matches!(
+        || !(matches!(
             shape,
             SHAPE_MODERN | SHAPE_LEGACY | SHAPE_QUIC | SHAPE_ECH_TCP
-        )
+        ) || is_tcp_context_shape(shape))
         || !valid_domain_plan_records(shape, plan_records)
     {
         return Err("суффикс требует поддерживаемые форму, семейство и план");
@@ -1107,13 +1200,16 @@ fn encode_domain_area_key(
 
 fn valid_domain_area_context(transport: u8, shape: u8, family: u8) -> bool {
     matches!(family, 4 | 6)
-        && ((transport == 6 && matches!(shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP))
+        && ((transport == 6
+            && (matches!(shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP)
+                || is_tcp_context_shape(shape)))
             || (transport == 17 && shape == SHAPE_QUIC))
 }
 
 fn valid_domain_plan_records(shape: u8, records: &[u8]) -> bool {
     Plan::parse(records).is_ok_and(|plan| match shape {
         SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP => plan.transport == 6 && plan.proto == 1,
+        _ if is_tcp_context_shape(shape) => plan.transport == 6 && plan.proto == 1,
         SHAPE_QUIC => plan.r2k_is_quic_address_plan(),
         _ => false,
     })
@@ -1414,10 +1510,10 @@ pub fn encode_delete_name(
     }
     if !matches!(family, 4 | 6)
         || !(transport == 6
-            && matches!(
+            && (matches!(
                 shape,
                 SHAPE_MODERN | SHAPE_LEGACY | SHAPE_GRANDFATHER | SHAPE_ECH_TCP | SHAPE_HTTP
-            )
+            ) || is_tcp_context_shape(shape))
             || transport == 17 && matches!(shape, SHAPE_VOICE | SHAPE_QUIC))
     {
         return Err("привязка требует поддерживаемые транспорт, форму и семейство");
@@ -1479,16 +1575,14 @@ pub fn encode_delete_name_probe(
 }
 
 fn valid_tcp_probe_shape(shape: u8) -> bool {
-    matches!(
-        shape,
-        SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP | SHAPE_HTTP
-    )
+    is_tcp_plan_shape(shape)
 }
 
 fn valid_name_probe_plan_records(shape: u8, records: &[u8]) -> bool {
     Plan::parse(records).is_ok_and(|plan| match shape {
         SHAPE_HTTP => plan.transport == 6 && plan.proto == PROTO_HTTP,
         SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP => plan.transport == 6 && plan.proto == 1,
+        _ if is_tcp_context_shape(shape) => plan.transport == 6 && plan.proto == 1,
         _ => false,
     })
 }
@@ -1941,7 +2035,7 @@ pub fn decode_refused(frame: &Frame) -> Result<RefusedEvent, &'static str> {
         .map_err(|_| "неверный идентификатор испытания в событии REFUSED")?;
     let client_shape = if frame.body.len() > BASE_LEN {
         let shape = frame.body[BASE_LEN];
-        if shape > SHAPE_HTTP {
+        if shape > SHAPE_ECH_TS {
             return Err("событие REFUSED содержит неизвестную форму ClientHello");
         }
         Some(shape)
@@ -2575,7 +2669,7 @@ pub fn decode_r2o_tcp_stall(frame: &Frame) -> Result<R2oTcpStallEvent, &'static 
 }
 
 fn valid_binding(binding: &BindingContext) -> bool {
-    binding.kind <= 4 && matches!(binding.family, 0 | 4 | 6) && binding.shape <= SHAPE_HTTP
+    binding.kind <= 4 && matches!(binding.family, 0 | 4 | 6) && binding.shape <= SHAPE_ECH_TS
 }
 
 /// Разбирает событие HTTP-портала v22 с необязательным контекстом запроса.
@@ -2964,5 +3058,90 @@ mod arm_shape_command_tests {
             body: vec![3, b'a', b'b', b'c', 5, 4],
         };
         assert!(decode_arm_shape(&frame).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tcp_shape_context_tests {
+    use super::{
+        SHAPE_ECH_NO_TS, SHAPE_ECH_TCP, SHAPE_ECH_TS, SHAPE_GRANDFATHER, SHAPE_HTTP, SHAPE_LEGACY,
+        SHAPE_LEGACY_NO_TS, SHAPE_LEGACY_TS, SHAPE_MODERN, SHAPE_MODERN_NO_TS, SHAPE_MODERN_TS,
+        SHAPE_QUIC, SHAPE_VOICE, TCP_PROFILE_NO_TS, TCP_PROFILE_TS, TCP_PROFILE_UNKNOWN,
+        is_tcp_context_shape, is_tcp_plan_shape, r2k_link_shape_tcp_base,
+        r2k_link_shape_tcp_context, r2k_link_shape_tcp_profile,
+    };
+
+    /// Вектор снят с production C `d2k_link_shape_tcp_{profile,base,context}`
+    /// (`core/include/d2k_link.h`) harness-вызовом на локальном D2O `a378e23`.
+    #[test]
+    fn tcp_shape_context_table_matches_d2o() {
+        let expected: &[(u8, u8, u8, [u8; 4])] = &[
+            (0, 0, 0, [0, 0, 0, 0]),
+            (1, 0, 1, [1, 8, 11, 8]),
+            (2, 0, 2, [2, 9, 12, 9]),
+            (3, 0, 3, [3, 3, 3, 3]),
+            (4, 0, 4, [4, 4, 4, 4]),
+            (5, 0, 5, [5, 5, 5, 5]),
+            (6, 0, 6, [6, 10, 13, 10]),
+            (7, 0, 7, [7, 7, 7, 7]),
+            (8, 1, 1, [8, 8, 8, 8]),
+            (9, 1, 2, [9, 9, 9, 9]),
+            (10, 1, 6, [10, 10, 10, 10]),
+            (11, 2, 1, [11, 11, 11, 11]),
+            (12, 2, 2, [12, 12, 12, 12]),
+            (13, 2, 6, [13, 13, 13, 13]),
+            (14, 0, 14, [14, 14, 14, 14]),
+            (15, 0, 15, [15, 15, 15, 15]),
+        ];
+        for &(shape, profile, base, contexts) in expected {
+            assert_eq!(
+                r2k_link_shape_tcp_profile(shape),
+                profile,
+                "profile {shape}"
+            );
+            assert_eq!(r2k_link_shape_tcp_base(shape), base, "base {shape}");
+            for (index, &expected_context) in contexts.iter().enumerate() {
+                assert_eq!(
+                    r2k_link_shape_tcp_context(shape, index as u8),
+                    expected_context,
+                    "context {shape}/{index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tcp_plan_shape_set_matches_d2o_validation() {
+        for shape in [
+            SHAPE_MODERN,
+            SHAPE_LEGACY,
+            SHAPE_ECH_TCP,
+            SHAPE_HTTP,
+            SHAPE_MODERN_NO_TS,
+            SHAPE_LEGACY_NO_TS,
+            SHAPE_ECH_NO_TS,
+            SHAPE_MODERN_TS,
+            SHAPE_LEGACY_TS,
+            SHAPE_ECH_TS,
+        ] {
+            assert!(is_tcp_plan_shape(shape), "shape {shape}");
+        }
+        for shape in [SHAPE_QUIC, SHAPE_GRANDFATHER, SHAPE_VOICE, 14, 15] {
+            assert!(!is_tcp_plan_shape(shape), "shape {shape}");
+        }
+        for shape in [
+            SHAPE_MODERN_NO_TS,
+            SHAPE_LEGACY_NO_TS,
+            SHAPE_ECH_NO_TS,
+            SHAPE_MODERN_TS,
+            SHAPE_LEGACY_TS,
+            SHAPE_ECH_TS,
+        ] {
+            assert!(is_tcp_context_shape(shape), "context {shape}");
+        }
+        assert!(!is_tcp_context_shape(SHAPE_MODERN));
+        assert_eq!(TCP_PROFILE_UNKNOWN, 0);
+        assert_eq!(TCP_PROFILE_NO_TS, 1);
+        assert_eq!(TCP_PROFILE_TS, 2);
     }
 }

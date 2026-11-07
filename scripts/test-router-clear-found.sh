@@ -33,6 +33,12 @@ cp /bin/sleep "$TEMP/root/releases/test/builds/r2o-controller-linux-test"
 chmod 0755 "$TEMP/root/releases/test/builds/r2o-datapath-linux-test" "$TEMP/root/releases/test/builds/r2o-controller-linux-test"
 printf 'MODE=observe\nSTATE_DIR=%s\nFW_BACKEND=nft\n' "$TEMP/root/state" > "$TEMP/root/config"
 printf '{"schema":1,"boxes":[{"id":"found"}]}\n' > "$TEMP/root/state/catalog.json"
+printf '{"schema":1}\n' > "$TEMP/root/state/https-cache.json"
+printf '{"linked":true}\n' > "$TEMP/root/state/live.json"
+printf 'legacy\n' > "$TEMP/root/state/https-cache.txt"
+printf 'legacy\n' > "$TEMP/root/state/http-plans.txt"
+mkdir -p "$TEMP/root/state/measurements"
+printf 'legacy\n' > "$TEMP/root/state/measurements/probe.json"
 printf '2000 1 128\n2001 1 128\n' > "$TEMP/proc/net/netfilter/nfnetlink_queue"
 "$TEMP/root/releases/test/builds/r2o-datapath-linux-test" 30 &
 initial_pid=$!
@@ -74,6 +80,12 @@ env EVENTS="$TEMP/events" R2O_DIR="$TEMP/root" R2O_CONFIG="$TEMP/root/config" \
 
 catalog_state=$("$R2OC_BIN" --check-catalog "$TEMP/root/state/catalog.json")
 printf '%s\n' "$catalog_state" | grep -q '0 коробок'
+for leftover in https-cache.json live.json https-cache.txt http-plans.txt measurements; do
+    if [ -e "$TEMP/root/state/$leftover" ]; then
+        echo "clear-found оставил state: $leftover" >&2
+        exit 1
+    fi
+done
 grep -q '^firewall:down$' "$TEMP/events"
 grep -q -- '--clear-catalog ' "$TEMP/events"
 grep -q '^firewall:up$' "$TEMP/events"

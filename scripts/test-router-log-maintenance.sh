@@ -23,6 +23,8 @@ EOF
 
 head -c 4096 /dev/zero | tr '\000' x > "$install_root/log/panel.log"
 printf 'retained-tail\n' >> "$install_root/log/panel.log"
+head -c 4096 /dev/zero | tr '\000' m > "$install_root/log/instagram-dns.log"
+head -c 4096 /dev/zero | tr '\000' n > "$install_root/log/instagram-dns-scheduler.log"
 head -c 4096 /dev/zero | tr '\000' y > "$install_root/log/unowned.log"
 head -c 4096 /dev/zero | tr '\000' z > "$install_root/log/telegram.log.target"
 ln -s telegram.log.target "$install_root/log/telegram.log"
@@ -34,6 +36,8 @@ env R2O_DIR="$install_root" R2O_CONFIG="$install_root/config" \
 
 [ "$(wc -c < "$install_root/log/panel.log")" -eq 1024 ]
 tail -c 14 "$install_root/log/panel.log" | grep -qx 'retained-tail'
+[ "$(wc -c < "$install_root/log/instagram-dns.log")" -eq 1024 ]
+[ "$(wc -c < "$install_root/log/instagram-dns-scheduler.log")" -eq 1024 ]
 [ "$(stat -c %i "$install_root/log/panel.log")" = "$before_inode" ]
 [ "$(wc -c < "$install_root/log/unowned.log")" -eq "$before_unowned" ]
 [ -L "$install_root/log/telegram.log" ]

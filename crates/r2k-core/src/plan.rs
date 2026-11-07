@@ -9,6 +9,8 @@ pub const SCHEMA_MAX: u16 = 1;
 /// Максимальное число пакетов в результате обработки потока.
 pub const WIRE_BATCH_MAX: usize = 26;
 pub const PLAN_MAGIC: [u8; 4] = *b"R2OP";
+/// Legacy-контейнер D2O. Формат записей идентичен R2OP, отличается только magic.
+pub const LEGACY_PLAN_MAGIC: [u8; 4] = *b"D2KP";
 pub const PROTO_QUIC: u8 = 2;
 pub const PROTO_HTTP: u8 = 4;
 pub const PROTO_VOICE: u8 = 3;
@@ -20,6 +22,8 @@ pub const POISON_BADSUM: u8 = 1 << 0;
 pub const POISON_TCPTS_BACK: u8 = 1 << 1;
 pub const POISON_IPID_ZERO: u8 = 1 << 2;
 pub const POISON_MD5: u8 = 1 << 3;
+/// Переставить TCP timestamp option в начало блока опций (D2O `D2K_POISON_TS_UP`).
+pub const POISON_TS_UP: u8 = 1 << 4;
 pub const GUARD_RST_ALIEN: u8 = 1 << 0;
 
 const HEADER_LEN: usize = 12;
@@ -156,6 +160,20 @@ pub struct Plan {
 
 impl Plan {
     /// Проверяет все записи до возврата плана; неизвестные и неполные данные отклоняются.
+    /// Разобрать план из внешнего источника: R2OP или legacy D2KP.
+    ///
+    /// Тело D2KP и R2OP побайтно совпадает; отличается только magic.
+    /// Канонический путь R2O по-прежнему принимает только R2OP.
+    pub fn parse_wire(bytes: &[u8]) -> Result<Self, PlanError> {
+        if bytes.starts_with(LEGACY_PLAN_MAGIC.as_slice()) {
+            let mut converted = bytes.to_vec();
+            converted[..PLAN_MAGIC.len()].copy_from_slice(&PLAN_MAGIC);
+            Self::parse(&converted)
+        } else {
+            Self::parse(bytes)
+        }
+    }
+
     pub fn parse(bytes: &[u8]) -> Result<Self, PlanError> {
         if bytes.len() < HEADER_LEN {
             return Err(PlanError::new("короче заголовка"));

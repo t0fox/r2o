@@ -26,6 +26,15 @@ fn compiles_payload_poison_fake_and_split_with_the_c_record_order() {
 }
 
 #[test]
+fn accepts_d2k_plan_header_and_tsup_flag() {
+    let text = "d2k-plan 1 8\nproto tcp tls\npayload 1 00\npoison 1 tsup\nfake payload=1 poison=1 repeats=1 gap_us=0 place=before\n";
+    let compiled = compile_text(text).unwrap();
+    let plan = Plan::parse(&compiled).unwrap();
+    assert_eq!(plan.poisons[0].flags & 0x10, 0x10);
+    assert_eq!(plan.poison_used() & 0x10, 0x10);
+}
+
+#[test]
 fn refuses_unknown_plan_directives_instead_of_dropping_them() {
     let text = "r2o-plan 1 1\nproto tcp tls\nunknown-guard x\n";
     assert!(

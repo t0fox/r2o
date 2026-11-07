@@ -1,7 +1,7 @@
 use r2k_core::{
     plan::{
         Emission, EmitKind, POISON_BADSUM, POISON_IPID_ZERO, POISON_MD5, POISON_TCPTS_BACK,
-        WIRE_DETECT_TCP, WIRE_TCP_TEMPLATE,
+        POISON_TS_UP, WIRE_DETECT_TCP, WIRE_TCP_TEMPLATE,
     },
     wire,
 };
@@ -198,6 +198,45 @@ fn native_timestamp_poison_requires_a_valid_timestamp_option() {
 
     let packet = original_v4(&[1, 1, 8, 10, 0, 0, 0, 1, 0, 0, 0, 2]);
     assert!(build(&packet, &emitted).is_some());
+}
+
+#[test]
+fn tcp_ts_up_moves_timestamp_first_with_tcpts_back() {
+    // Точный вектор C `datapath/test_wire.c`: NOP,NOP, SACK, TS@4, NOP,NOP.
+    let options = [1, 1, 4, 2, 8, 10, 0x11, 0x22, 0x33, 0x44, 0, 0, 0, 0, 1, 1];
+    let packet = original_v4(&options);
+    let mut emitted = emission(&[7, 8, 9]);
+    emitted.seq = 9;
+    emitted.wire_profile = WIRE_TCP_TEMPLATE;
+    emitted.poison = POISON_TCPTS_BACK | POISON_TS_UP;
+    let built = build(&packet, &emitted).unwrap();
+    assert_eq!(built.len(), 59);
+    assert_eq!(built[32] >> 4, 9);
+    assert_eq!(
+        &built[40..56],
+        &[8, 10, 0x11, 0x22, 0x2f, 0x5c, 0, 0, 0, 0, 1, 1, 4, 2, 1, 1]
+    );
+    assert_eq!(&built[56..], &[7, 8, 9]);
+    assert!(wire::tcp_checksum_ok(&built));
+}
+
+#[test]
+fn tcp_ts_up_reorders_without_tcpts_back_and_is_inert_without_timestamp() {
+    let options = [1, 1, 4, 2, 8, 10, 0x11, 0x22, 0x33, 0x44, 0, 0, 0, 0, 1, 1];
+    let packet = original_v4(&options);
+    let mut emitted = emission(&[7]);
+    emitted.wire_profile = WIRE_TCP_TEMPLATE;
+    emitted.poison = POISON_TS_UP;
+    let built = build(&packet, &emitted).unwrap();
+    assert_eq!(
+        &built[40..56],
+        &[8, 10, 0x11, 0x22, 0x33, 0x44, 0, 0, 0, 0, 1, 1, 4, 2, 1, 1]
+    );
+
+    // Без timestamp option TS_UP ничего не переставляет и не отказывает.
+    let packet = original_v4(&[2, 4, 0, 0]);
+    let built = build(&packet, &emitted).unwrap();
+    assert_eq!(&built[40..44], &[2, 4, 0, 0]);
 }
 
 #[test]

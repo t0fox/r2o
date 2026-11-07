@@ -1,7 +1,7 @@
 use crate::{packet::PacketView, plan::Emission};
 
 use crate::plan::{
-    POISON_BADSUM, POISON_IPID_ZERO, POISON_MD5, POISON_TCPTS_BACK, WIRE_DETECT_TCP,
+    POISON_BADSUM, POISON_IPID_ZERO, POISON_MD5, POISON_TCPTS_BACK, POISON_TS_UP, WIRE_DETECT_TCP,
     WIRE_TCP_TEMPLATE,
 };
 
@@ -47,12 +47,19 @@ pub fn build_tcp_packet(input: &[u8], emission: &Emission, out: &mut [u8]) -> Op
     let mut options = [0; 40];
     let options_len = if native {
         options[..original_options.len()].copy_from_slice(original_options);
-        let has_timestamp = shift_native_timestamp(
+        let timestamp_at = shift_native_timestamp(
             &mut options[..original_options.len()],
             emission.poison & POISON_TCPTS_BACK != 0,
         )?;
-        if emission.poison & POISON_TCPTS_BACK != 0 && !has_timestamp {
+        if emission.poison & POISON_TCPTS_BACK != 0 && timestamp_at.is_none() {
             return None;
+        }
+        if emission.poison & POISON_TS_UP != 0
+            && let Some(offset) = timestamp_at
+        {
+            // D2O `wire.c` переносит весь 10-байтовый TS option в начало,
+            // не меняя длину блока опций и data offset.
+            options[..offset + 10].rotate_right(10);
         }
         original_options.len()
     } else if emission.poison & POISON_MD5 != 0 {
@@ -452,9 +459,9 @@ pub fn tcp_checksum_ok(packet: &[u8]) -> bool {
     checksum_value(sum16(tcp, acc)) == 0
 }
 
-fn shift_native_timestamp(options: &mut [u8], shift: bool) -> Option<bool> {
+fn shift_native_timestamp(options: &mut [u8], shift: bool) -> Option<Option<usize>> {
     let mut offset = 0;
-    let mut found = false;
+    let mut found = None;
     while offset < options.len() {
         match options[offset] {
             0 => break,
@@ -465,10 +472,10 @@ fn shift_native_timestamp(options: &mut [u8], shift: bool) -> Option<bool> {
                     return None;
                 }
                 if kind == 8 {
-                    if len != 10 || found {
+                    if len != 10 || found.is_some() {
                         return None;
                     }
-                    found = true;
+                    found = Some(offset);
                     if shift {
                         let timestamp =
                             u32::from_be_bytes(options[offset + 2..offset + 6].try_into().ok()?);
