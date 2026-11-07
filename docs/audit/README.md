@@ -176,6 +176,7 @@ D2O datapath, controller, panel и Telegram пишут `D2KH1 ...` через `d
 
 ### 5. Завышенные или требующие перепроверки зачёты
 
+- **`core/meas.c` и `core/verdict.c` не вызываются текущим `d2kc`.** Production-путь классификации идёт через `detect/classify.c` и хуки `d2k_sched_tcp_*`. Матричные строки, сопоставляющие `d2k_meas_once`/`d2k_classify_cancelable` с Rust, описывают библиотечный API, а не текущий production-путь. Их нужно переформулировать на `detect/classify.c` или пометить как API-only.
 - Строка `Панель: control/actions...` начисляет 1 балл за очень широкий набор endpoint-ветвей. Differential покрывает 22 сценария, но не все error/status/assets/settings ветви; физический роутер и браузер не использовались.
 - Строка `Firewall: статические packet rules и backend` остаётся 0/1, хотя подпункты MEASURE_MARK/D2K_GATE/voice order уже проверены; это не завышение, а недоразбиение.
 - `QUIC/HTTP3` строки 50/51 разделяют framing (1/1) и budgets/stall (0/1), но app-byte/request-count ветви и total deadline разбросаны по журналу и не имеют отдельного контракта.

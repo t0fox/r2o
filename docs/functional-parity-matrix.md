@@ -623,5 +623,7 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 
 **Первое исправление после аудита (2026-11-07).** В `r2o-datapath` добавлены CLI-алиасы D2O `--flows` и `--udp-reverse-hook`; `cargo test -p r2o-datapath` прошёл 257 + 49 + 6 + 20 + 9 + 1 + 9 + 21 + 5 тестов, 0 failed, 1+ ignored; новый тест `d2o_cli_aliases_map_to_the_same_options` пройден. В `r2o-panel` known-list дополнен D2O/R2O ключами (`TG_RELAY_URL`, `TG_RELAY_SECRET`, `TG_ENROLL_PORT`, `D2K_PPE_DEOFFLOAD`, `D2K_RUNTIME_DIR`, `AUTOUPDATE`, `D2K_GATE`, `DNS_PORTS`, `HTTP_KEEPALIVE_PORTS`); `cargo test -p r2o-panel --test http` прошёл 20 passed, 0 failed, 16 ignored; новый тест `config_parser_accepts_all_shipped_and_donor_known_keys` пройден. Контракты CLI и panel остаются частичными: `--sched-slots`, `--duration`, `--log`, `--health-file`, абсолютный дедлайн ответа, обрыв клиента и незакрытая кавычка ещё не исправлены.
 
+**Важно для классификатора.** `core/meas.c` и `core/verdict.c` не вызываются текущим `d2kc`; production-путь идёт через `detect/classify.c` и `d2k_sched_tcp_*`. Строки C6/C8 и прежние строки L30–L33/L36 нужно читать как API-only или перепривязать к `detect/classify.c`.
+
 ---
 
