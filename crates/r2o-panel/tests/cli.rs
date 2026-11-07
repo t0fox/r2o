@@ -130,6 +130,25 @@ fn cli_version_is_reported_without_starting_the_server() {
 }
 
 #[test]
+fn cli_offline_self_check_and_release_id_match_d2o_contract() {
+    let self_check = Command::new(env!("CARGO_BIN_EXE_r2o-panel"))
+        .arg("--self-check")
+        .output()
+        .unwrap();
+    assert!(self_check.status.success());
+    let stdout = String::from_utf8(self_check.stdout).unwrap();
+    assert!(stdout.starts_with("r2o-panel self-check=ok release="));
+    assert!(stdout.contains(" wire=48"));
+
+    let release = Command::new(env!("CARGO_BIN_EXE_r2o-panel"))
+        .arg("--release-id")
+        .output()
+        .unwrap();
+    assert!(release.status.success());
+    assert!(!String::from_utf8(release.stdout).unwrap().trim().is_empty());
+}
+
+#[test]
 fn cli_rejects_zero_port_instead_of_binding_an_ephemeral_port() {
     let temp = TempDir::new();
     let mut child = Command::new(env!("CARGO_BIN_EXE_r2o-panel"))

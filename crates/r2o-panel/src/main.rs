@@ -29,6 +29,20 @@ fn run() -> Result<(), Box<dyn Error>> {
         );
         return Ok(());
     }
+    if args.len() == 1 && args[0] == "--release-id" {
+        println!("{RELEASE}");
+        return Ok(());
+    }
+    if args.len() == 1 && args[0] == "--self-check" {
+        let valid = split_listen("127.0.0.1:8090").is_ok()
+            && split_listen("[::1]:8090").is_ok()
+            && split_listen("127.0.0.1:65536").is_err();
+        if !valid {
+            return Err("panel self-check failed".into());
+        }
+        println!("r2o-panel self-check=ok release={RELEASE} wire={PROTOCOL_VERSION}");
+        return Ok(());
+    }
     if args.first().is_none_or(|arg| arg != "serve") {
         usage();
         return Err("используйте `r2o-panel serve`".into());
@@ -162,6 +176,6 @@ fn redirect_logs(path: &std::path::Path) -> std::io::Result<()> {
 
 fn usage() {
     println!(
-        "r2o-panel --version | serve [--config FILE] [--live FILE] [--live-extra FILE] [--assets DIR] [--listen HOST:PORT] [--state-dir DIR] [--mode MODE] [--queue N] [--service FILE] [--manager FILE] [--manager-root DIR] [--engine-pid FILE] [--controller-pid FILE] [--telegram-stats PATH] [--log FILE]"
+        "r2o-panel --version | --release-id | --self-check | serve [--config FILE] [--live FILE] [--live-extra FILE] [--assets DIR] [--listen HOST:PORT] [--state-dir DIR] [--mode MODE] [--queue N] [--service FILE] [--manager FILE] [--manager-root DIR] [--engine-pid FILE] [--controller-pid FILE] [--telegram-stats PATH] [--log FILE]"
     );
 }

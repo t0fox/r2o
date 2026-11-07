@@ -1,12 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 33.33%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 33.72%">
 <rect width="1100" height="790" rx="20" fill="#0c121e"/>
 <text x="36" y="48" fill="#edf7ff" font-family="Arial,sans-serif" font-size="29" font-weight="700">R2O / D2O · Strict parity</text>
-<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">33.33%</text>
-<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">87 / 261 verified points</text>
+<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">33.72%</text>
+<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">88 / 261 verified points</text>
 <rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/>
-<rect x="37" y="113" width="341.3" height="11" rx="5" fill="#36c989"/>
-<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">173 contracts · 62 verified · 10 missing · 2026-11-08</text>
-<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 150/261 = 57.47% · strict 87/261 = 33.33%</text>
+<rect x="37" y="113" width="345.3" height="11" rx="5" fill="#36c989"/>
+<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">173 contracts · 63 verified · 9 missing · 2026-11-08</text>
+<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 151/261 = 57.85% · strict 88/261 = 33.72%</text>
 <rect x="37" y="190" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="213" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Datapath</text>
 <text x="533" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">11/26</text>
@@ -117,7 +117,7 @@
 <rect x="431" y="586" width="30" height="22" rx="5" fill="#e6b45d"><title>TG24 Service lifecycle/recovery: частично (0/2)</title></rect>
 <rect x="557" y="526" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="571" y="549" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">WebPanel</text>
-<text x="1053" y="549" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">0/30</text>
+<text x="1053" y="549" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">1/30</text>
 <rect x="571" y="559" width="30" height="22" rx="5" fill="#819bf8"><title>A1 Bind по умолчанию и выбор LAN IP при установке: carry (304) — historical (0/1)</title></rect>
 <rect x="609" y="559" width="30" height="22" rx="5" fill="#819bf8"><title>A2 Пустой `PANEL_LISTEN` отключает панель и health update: carry (304) — historical (0/1)</title></rect>
 <rect x="647" y="559" width="30" height="22" rx="5" fill="#e06c75"><title>A3 Парсер: комментарии, кавычки, хвостовые комментарии: пробел (0/1)</title></rect>
@@ -143,7 +143,7 @@
 <rect x="951" y="586" width="30" height="22" rx="5" fill="#819bf8"><title>A23 Diagnostics GET/POST/download: carry (304) — historical (0/1)</title></rect>
 <rect x="989" y="586" width="30" height="22" rx="5" fill="#819bf8"><title>A24 Static assets: ETag/304/1 МиБ: carry (304) — historical (0/1)</title></rect>
 <rect x="571" y="613" width="30" height="22" rx="5" fill="#e06c75"><title>A25 Static assets: missing/symlink/embedded fallback: пробел (0/1)</title></rect>
-<rect x="609" y="613" width="30" height="22" rx="5" fill="#e06c75"><title>A26 CLI `--version`/`serve`/`--self-check`/`--release-id`: пробел (0/1)</title></rect>
+<rect x="609" y="613" width="30" height="22" rx="5" fill="#36c989"><title>A26 CLI `--version`/`serve`/`--self-check`/`--release-id`: доказано (1/1)</title></rect>
 <rect x="37" y="638" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="661" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Router / Service</text>
 <text x="533" y="661" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">67/84</text>
