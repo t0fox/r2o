@@ -83,6 +83,7 @@ D2O datapath, controller, panel и Telegram пишут `D2KH1 ...` через `d
 | `d2kc --measure-mark M` | нет | Пропущено |
 | `d2kvoice --list` | `--voice-list` | Подкоманда вместо флага |
 | `d2kpanel --version` | `r2o-panel --version` | Другой формат строки |
+| `d2k-detect --mark` (default) | `0x40000000` (z2k legacy) | `raw_probe::BYPASS_MARK = 0x2d` | Разный default SO_MARK у standalone detect |
 
 `FLOWS` из D2O-конфига мигрирует в `R2O_FLOW_CAPACITY` только через `r2o-manager config-init`; прямой runtime-конфиг с `FLOWS` не читается.
 
