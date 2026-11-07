@@ -1,10 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O parity 88.76%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O parity 89.89%">
 <rect width="1100" height="790" rx="20" fill="#0c121e"/>
 <text x="36" y="48" fill="#edf7ff" font-family="Arial,sans-serif" font-size="29" font-weight="700">R2O / D2O · Functional parity</text>
-<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">88.76%</text>
-<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">79 / 89 verified points</text>
-<rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/><rect x="37" y="113" width="908.9" height="11" rx="5" fill="#36c989"/>
-<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">57 contracts · 49 verified · 6 partial · 1 implemented</text>
+<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">89.89%</text>
+<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">80 / 89 verified points</text>
+<rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/><rect x="37" y="113" width="920.4" height="11" rx="5" fill="#36c989"/>
+<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">57 contracts · 50 verified · 6 partial · 1 implemented</text>
 <rect x="35" y="163" width="510" height="100" rx="12" fill="#152030" stroke="#2c3a4d"/>
 <text x="52" y="188" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="17" font-weight="700">Datapath</text><text x="528" y="188" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="13">13/18</text>
 <rect x="52" y="202" width="29" height="22" rx="5" fill="#36c989"><title>TCP datapath: поток, разрезы, удержание, RST и счётчики: Эквивалентно (3/3)</title></rect>
@@ -33,9 +33,9 @@
 <rect x="839" y="202" width="29" height="22" rx="5" fill="#36c989"><title>ECH receive ladder, witness и повторные испытания: Эквивалентно (2/2)</title></rect>
 <text x="1055" y="250" text-anchor="end" fill="#8298aa" font-family="Arial,sans-serif" font-size="12">8 contracts</text>
 <rect x="35" y="275" width="510" height="100" rx="12" fill="#152030" stroke="#2c3a4d"/>
-<text x="52" y="300" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="17" font-weight="700">Discovery</text><text x="528" y="300" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="13">19/22</text>
+<text x="52" y="300" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="17" font-weight="700">Discovery</text><text x="528" y="300" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="13">20/22</text>
 <rect x="52" y="314" width="29" height="22" rx="5" fill="#36c989"><title>Кадр управления, команды и ACK/APPLIED/REFUSED: Эквивалентно (3/3)</title></rect>
-<rect x="89" y="314" width="29" height="22" rx="5" fill="#65758c"><title>Scheduler worker-аргументы и возврат страниц после join: Не проверено (0/1)</title></rect>
+<rect x="89" y="314" width="29" height="22" rx="5" fill="#36c989"><title>Scheduler worker-аргументы и возврат страниц после join: Доказанно эквивалентно (1/1)</title></rect>
 <rect x="126" y="314" width="29" height="22" rx="5" fill="#36c989"><title>Scheduler: cooldown, мёртвый адрес, повтор и параллельные endpoints: Эквивалентно (3/3)</title></rect>
 <rect x="163" y="314" width="29" height="22" rx="5" fill="#36c989"><title>Discovery: known-plan reuse, очередь, coalesce, приоритет и worker permits: Эквивалентно (3/3)</title></rect>
 <rect x="200" y="314" width="29" height="22" rx="5" fill="#36c989"><title>ACK → точный APPLIED/proof → запись кандидата и reapply fixture: Эквивалентно (3/3)</title></rect>

@@ -2,14 +2,14 @@
   "source": "docs/functional-parity-matrix.md",
   "date": "2026-11-07",
   "weight": 89,
-  "points": 79,
-  "percent": 88.76,
+  "points": 80,
+  "percent": 89.89,
   "total": 57,
   "counts": {
-    "verified": 49,
+    "verified": 50,
     "partial": 6,
     "implemented": 1,
-    "unknown": 1
+    "unknown": 0
   },
   "groups": [
     {
@@ -275,12 +275,12 @@
           "id": 10,
           "name": "Scheduler worker-аргументы и возврат страниц после join",
           "weight": 1,
-          "points": 0,
-          "status": "unknown",
-          "statusLabel": "Не проверено",
+          "points": 1,
+          "status": "verified",
+          "statusLabel": "Доказанно эквивалентно",
           "group": "Discovery",
-          "mapping": "C `core/sched.c::worker_arg_alloc/free` → Rust controller worker captures",
-          "evidence": "D2O `f9669f8` заменил Linux worker-аргументы на отдельные `mmap/munmap`, чтобы освобождённые страницы возвращались ядру. Для Rust worker allocations не выполнено сопоставимое cross-thread retention/RSS измерение на том же профиле нагрузки."
+          "mapping": "C `core/sched.c::worker_arg_alloc/free` → Rust controller worker pool/job captures",
+          "evidence": "Сопоставимый замер на D2O `a378e230947ebfd011439e1cac0f1e994d883aae` и R2O `538b54d`: `scripts/test-worker-memory-differential.sh` запускает настоящий D2O `test_sched_worker_lifecycle` (1500 циклов, два 4-КиБ буфера) и Rust `worker_memory` (1500 задач, два 4-КиБ буфера через пул из четырёх worker-потоков). C: VmRSS 2480→12080→12080 KiB, VmData 10588→11616→11616; Rust: VmRSS 3160→3240→3368 KiB, VmData 11208→11204→11172. Рост после прогрева: C 0/0, Rust +128/−32 KiB при общем пределе 5 МиБ; удержания страниц после join не обнаружено. Rust не использует отдельный `mmap` на аргумент, а повторяет p"
         },
         {
           "id": 18,
@@ -372,7 +372,7 @@
         }
       ],
       "weight": 22,
-      "points": 19
+      "points": 20
     },
     {
       "name": "QUIC / HTTP3",
@@ -814,12 +814,12 @@
       "id": 10,
       "name": "Scheduler worker-аргументы и возврат страниц после join",
       "weight": 1,
-      "points": 0,
-      "status": "unknown",
-      "statusLabel": "Не проверено",
+      "points": 1,
+      "status": "verified",
+      "statusLabel": "Доказанно эквивалентно",
       "group": "Discovery",
-      "mapping": "C `core/sched.c::worker_arg_alloc/free` → Rust controller worker captures",
-      "evidence": "D2O `f9669f8` заменил Linux worker-аргументы на отдельные `mmap/munmap`, чтобы освобождённые страницы возвращались ядру. Для Rust worker allocations не выполнено сопоставимое cross-thread retention/RSS измерение на том же профиле нагрузки."
+      "mapping": "C `core/sched.c::worker_arg_alloc/free` → Rust controller worker pool/job captures",
+      "evidence": "Сопоставимый замер на D2O `a378e230947ebfd011439e1cac0f1e994d883aae` и R2O `538b54d`: `scripts/test-worker-memory-differential.sh` запускает настоящий D2O `test_sched_worker_lifecycle` (1500 циклов, два 4-КиБ буфера) и Rust `worker_memory` (1500 задач, два 4-КиБ буфера через пул из четырёх worker-потоков). C: VmRSS 2480→12080→12080 KiB, VmData 10588→11616→11616; Rust: VmRSS 3160→3240→3368 KiB, VmData 11208→11204→11172. Рост после прогрева: C 0/0, Rust +128/−32 KiB при общем пределе 5 МиБ; удержания страниц после join не обнаружено. Rust не использует отдельный `mmap` на аргумент, а повторяет p"
     },
     {
       "id": 11,
