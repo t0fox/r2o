@@ -855,6 +855,26 @@ Diagnostics:
 - C: `d2k_diag_record`, `record_limit`, `sample`, `write`; счётчики allocator/madvise.
 - R2O: `Recorder::record/tick/write_report`, process memory/smaps/fd; allocator/madvise отсутствуют.
 
+### 6.5. Переходы candidate/trial
+
+| Фаза | D2O | R2O |
+|---|---|---|
+| Постановка в очередь | `on_suspect` → `launch_or_queue`; `T_QUEUED`, `queued_ms` | `r2o_queue_tcp_suspect` (18366) → `R2oDiscoveryQueue::enqueue` (8107); `R2oDiscoveryQueueEntry` (7085) |
+| Допуск | `launch_task`, `SCHED_START_GAP_MS`, permits | `R2oMeasurementGate::r2o_acquire_discovery` (649), `r2o_acquire_family_recovery` (641), `r2o_try_acquire_queued` (588) |
+| Trial | `prop_send_next`/`verify_confirm`/`task_fail`, `SCHED_PROP_STEP_MS` | `r2o_run_discovery_candidate_trial_with_retries` (5106), `r2o_repeat_candidate_trials` (5412), `r2o_discovery_candidate_retryable` (5494) |
+| Установка | `install_next`, ACK `SET_NAME_PROBE`, `APPlied`/`REFUSED` | `install_http_candidate` (20044), `r2o_install_quic_candidate` (19770), `CatalogSyncCursor::send_step` (3623), `ControlClient::exchange_command_with_timeout` (20344) |
+| Подтверждение | `on_applied`, `applied_of_candidate`, `binding_for` | `remember_applied_event` (18568), `r2o_ask_applied_matches` (20459), `apply_discovery_outcome_with_input_and_persistence` (20140) |
+| Провал/clear | `on_refused`, `task_fail`, `cooldown_record`, `catalog_changed` | `on_refused_*` в `watch_events`, `r2o_record_discovery_cooldown` (11555), `record_install_failure` (12566) |
+| Повтор | `SCHED_UNSENT_RETRIES=2`, `SCHED_BARE_RETRIES=1`, `SCHED_ARM_VERIFY_RETRIES=2` | `r2o_discovery_candidate_retry_count` (5395), `r2o_repeat_candidate_trials` (5412), `r2o_discovery_candidate_retryable` (5494) |
+
+### 6.6. Порядок остановки
+
+D2O (`d2kc.c`): SIGINT/SIGTERM → `stop_asked` → `d2k_detect_stop_all()` → `d2k_httpsprobe_free` → `d2k_hs_runner_free` → `d2k_httpsearch_free` → `d2k_sched_free` → `d2k_diag_free` → save-on-exit → `d2k_link_close` → `d2k_catalog_free`. Возврат `1`, если связь с датапатом была потеряна.
+
+R2O (`main.rs`): `R2O_CONTROLLER_STOP` → остановка family recovery (`r2o_stop_family_recovery`, 17898) и QUIC Discovery (`r2o_stop_quic_discovery`, 17935) → `worker.r2o_begin_shutdown()`/`r2o_join()` (4630/4641, 6330/6343) → обработка оставшихся команд HTTP search → `persist_on_shutdown` (1748) → закрытие control-сокета. Ошибки сборки/остановки агрегируются в один `Err` (17883..17894).
+
+
+
 ## 7. Пробелы
 
 ### 7.1. C-функции без прямого Rust-аналога

@@ -40,6 +40,8 @@
 
 ## Таблицы datapath по файлам
 
+Правило группировки: строки с самостоятельным алгоритмом (`main`, `handle_udp`, `session_packet`, `d2k_plan_apply`, `d2k_raw_probe_poison_family`, `d2k_classify_run`, `sched_tcp` и т.п.) выделены отдельно; остальные строки объединяют однотипные helpers/accessors, причём все члены группы перечислены в первой колонке. Если для группы указан один статус, он относится к худшей из непроверенных ветвей группы, а не к каждой функции по отдельности.
+
 ### addr.c (3 функции)
 
 | C-функция | Rust-аналог | Вызывающий путь R2O | Покрыто | Не покрыто / расхождения | Тесты / доказательства | Статус |
@@ -253,7 +255,7 @@
 | `canonical_address` (static), `addr_shape_valid` (static) | `valid_addr_shape` (`control.rs:1458`), `addr_plan_matches_shape` (`:1465`), `set_addr` (`:753`) | SET_ADDR | family 4/6, zero tail, shape whitelist | — | control unit | partial |
 | `read_probe_flow` (static) | `encode/decode` addr probe (`r2k-core/control.rs:1186`, `:1209`), `set_addr_probe` (`control.rs:1097`) | SET_ADDR_PROBE | family, IP, ports, transport | — | control unit | partial |
 | `d2k_ctlsrv_command` | `NamePlans::handle` (`control.rs:163`) | `main.rs:1277` | все команды, bad args/plan/no room, trial ACK, ARM_SHAPE, SET_HTTPS, stall budgets | R2O добавляет `--controller-only`/`COMMAND_STATS`; **R2O не поддерживает C `D2K_CMD_SET_STALL_BUDGETS`?** проверено наличие `COMMAND_SET_TCP_STALL_BUDGETS` и decode; C `D2K_CMD_STATS`? R2O `COMMAND_STATS` есть, но обработчик — stats? | `control_cli.rs`, `test-panel-control-response-differential.sh` | partial |
-| `d2k_ctlsrv_pump` | `send_journal_snapshot`/`send_journal_updates` (`main.rs:2585`, `:2604`), `R2oFlowJournalEntry::to_event_frame` | события | HELLO/SUSPECT/APPLIED/REFUSED/DAMAGED/UNSENT/SHAPE/EXCHANGE, key/plan/trial/execution/binding | **R2O event IDs и тела отличаются** (`EVENT_CLIENT_SHAPE 0x17` вместо C `0x0d`; R2O voice/quic/tcp events 0x0e..0x1e). C `d2k_ctlsrv_pump` шлёт `D2K_EV_SUSPECT` 10-байтовое тело; R2O `send_tcp_silent_event`/`send_quic_suspect_event` имеют другой формат. | `r2o-control-events-differential.sh`, `r2o-control-dropped-differential.sh`, `control_cli.rs` | partial |
+| `d2k_ctlsrv_pump` | `send_journal_snapshot`/`send_journal_updates` (`main.rs:2585`, `:2604`), `R2oFlowJournalEntry::to_event_frame` | события | HELLO/SUSPECT/APPLIED/REFUSED/DAMAGED/UNSENT/SHAPE/EXCHANGE, key/plan/trial/execution/binding | **R2O event IDs и тела отличаются** (`EVENT_CLIENT_SHAPE 0x17` вместо C `0x0d`; R2O voice/quic/tcp events 0x0e..0x1e). C отдельно шлёт `D2K_EV_CLIENT_TCP` (0x0d) с TCP options, затем `D2K_EV_SHAPE`; R2O шлёт один `EVENT_CLIENT_SHAPE` (0x17) с `tcp_has_timestamp` и байтами hello, отдельного CLIENT_TCP нет. C `D2K_EV_SUSPECT` 10-байтовое тело; R2O `send_tcp_silent_event`/`send_quic_suspect_event` имеют другой формат. | `r2o-control-events-differential.sh`, `r2o-control-dropped-differential.sh`, `control_cli.rs` | partial |
 | `d2k_ctlsrv_http80_event` | `send_http_portal_event` (`main.rs:2996`), `send_http_response_event` (`:3008`) | HTTP80 | key, response/answered, host, execution/plan/trial, request_ms, path, binding, status/body_bytes/request_no | Нет C/Rust дифференциала тела события HTTP80; `http_trace` отсутствует | HTTP hold tests (косвенно) | implemented-unproven |
 
 ### raw.c datapath (17 функций)
@@ -355,7 +357,7 @@
 
 | C-функция / группа | Rust-аналог | Вызывающий путь R2O | Покрыто | Не покрыто / расхождения | Тесты / доказательства | Статус |
 |---|---|---|---|---|---|---|
-| `d2k_http80_new`, `free`, `get_stats` | `HoldTable::default` (`hold.rs:190`), `r2o_hold_stats` (`:200`); **get_stats нет** | `main.rs:917` | создание/освобождение | **Нет счётчиков requests/injections/evicted/untracked/unparsed/later**; C печатает их в stats. | hold unit | partial |
+| `d2k_http80_new`, `free`, `get_stats` | `HoldTable::default` (`hold.rs:190`), `r2o_hold_stats` (`:200`); **get_stats нет** | `main.rs:917` | создание/освобождение | **Нет счётчиков requests/injections/evicted/untracked/unparsed/later**; C печатает их в stats. C `D2K_HTTP80_FLOWS=128`, R2O `HTTP_FLOW_CAPACITY=1024` (`hold.rs:20`). | hold unit | partial |
 | `name_norm` (static) | `canonical_name` (`control.rs:1976`) / HTTP host normalization | SET_HTTPS/план | lowercase/trailing dot/port | C `name_norm` для HTTP host; R2O `httpup` нормализация host | `test-classifier-white-decoy-differential.sh` (косвенно) | partial |
 | `d2k_http80_set_https`, `d2k_http80_https` | `NamePlans::set_https` (`control.rs:903`), `has_verified_https` (`:461`) | SET_HTTPS, redirect gate | TTL, exact host | R2O хранит `https_names` с TTL; C `d2k_http80` хранит свою таблицу; TTL/лимит могут расходиться | `set_https_command_accepts_an_exact_name_with_a_bounded_ttl` (`control.rs:2763`) | partial |
 | `wr16`, `wr32`, `sum16`, `fold`, `build`, `rd32`, `stale`, `find`, `make` (static) | `http_replace.rs:79 build_segment`, `:147 pseudo_sum`, `:154 sum16`, `:165 checksum`, `:178 server_packet`; hold HTTP flow table | замена 307/RST | TCP checksum, SYN/seq/ack, stale/find | R2O строит 307 и RST в `build_http_redirect_packets`; C `make` кеширует; не доказано совпадение всех полей | `http_replace.rs:219 builds_checksum_valid_307...`; `r2o-tcp-rst-cut-differential.sh` (косвенно) | partial |
@@ -408,6 +410,8 @@
 | `d2k_actions_free` | `Drop` | — | — | — | unit | partial |
 
 ### plans.c (75 функций)
+
+Все ссылки вида `:NNN` в колонке Rust-аналога этой таблицы относятся к `crates/r2o-datapath/src/control.rs`, если не указан другой файл.
 
 | C-функция / группа | Rust-аналог | Вызывающий путь R2O | Покрыто | Не покрыто / расхождения | Тесты / доказательства | Статус |
 |---|---|---|---|---|---|---|
@@ -462,6 +466,8 @@
 | Metrics: `d2k_session_flows`, `send_pending`, `sent`, `exec_failed`, `guards`, `client_shape`, `damaged`, `unsent`, `applied`, `done`, `damaged_count`, `sent_lost`, `refusals`, `capacity`, `flows_tcp/udp`, `capacity_tcp/udp`, `refusals_tcp/udp`, `hellos`, `with_sni`, `suspects`, `rst_dropped`, `exchanges`, `reply_hidden`, `tcp_hello_flows`, `payload_stats`, `journal` | `TcpSessions::{len,r2o_tcp_flow_capacity,r2o_tcp_flow_refusals,r2o_flow_metrics,r2o_http_keepalive_stats,r2o_tcp_payload_stats,r2o_tcp_hello_flows,r2o_tcp_hellos_with_sni,r2o_reply_hidden,r2o_tcp_rst_dropped}` (`engine.rs:430-552`), `R2oUdpSessions::stats` (`r2o_udp_sessions.rs:465`), `R2oFlowJournal` | `main.rs:665-763` | почти все счётчики | **Нет `exchanges`, `suspects` (episode counters), `nat_stats`, `shape_misses`, plan count/capacity.** C `d2k_session_suspects`/`exchanges` — агрегаты; R2O отдаёт события, не агрегаты. | stats differential (subset) | partial |
 
 ### d2kd.c (45 функций)
+
+Все ссылки вида `:NNN` в колонке Rust-аналога этой таблицы относятся к `crates/r2o-datapath/src/main.rs`, если не указан другой файл.
 
 | C-функция / группа | Rust-аналог | Вызывающий путь R2O | Покрыто | Не покрыто / расхождения | Тесты / доказательства | Статус |
 |---|---|---|---|---|---|---|
@@ -733,7 +739,7 @@
 | D20 | Route mark: rules dump/lookup/watch/gate/OIF | `routemark.c`, `routemark_nl.c` | 2 | partial | уже есть route gate diff; describe/logs; all kernel errno |
 | D21 | Conntrack/NAT: ctnetlink, proc NAT, probe, gate/retry | `ctq.c`, `nat.c`, `d2kd.c` | 2 | partial | CT_GET/NAT proc уже scoped; IPv6 live; fragment rewrite (R2O-only) |
 | D22 | ICMP guard: note/check/ring/summary | `icmpguard.c` | 1 | partial | уже есть current differential; live IPv6; все поля цитаты |
-| D23 | HTTP80: parse/HTTPS gate/307/RST/delivered/executed/sweep/stats | `http80.c` | 3 | partial | нет полного differential; `http_trace` и stats missing |
+| D23 | HTTP80: parse/HTTPS gate/307/RST/delivered/executed/sweep/stats | `http80.c` | 3 | partial | нет полного differential; `http_trace` и stats missing; flows 128 vs 1024 |
 | D24 | Scheduler: heap/order/refusals/owned IDs | `sched.c` | 2 | partial | уже есть ordering/refusals; cancellation/reservation — R2O-only |
 | D25 | Journal: ring/retention/dropped/added/entry fidelity | `journal.c` | 1 | partial | нужен C/Rust differential формата/retention; тексты не совпадают |
 
@@ -750,7 +756,7 @@
 | T5 | Poisons: 85 list, family, has_fake, strategy, arm/plan | `poison.c` | 2 | partial | точный список/поля/стратегии; `strategy_for`; autottl |
 | T6 | Raw: profiles, self-test cache/recheck, RST suppression, build/send/recv, IPv6 | `raw.c` | 4 | partial | все профили/ошибки nft/iptables; stale cleanup; syndata/oob/seq-out; IPv6 |
 | T7 | Response: scan12, handshake12, neutral SNI, decide, probe | `response.c` | 3 | partial | shared 13 vectors + full-tree follow-up уже есть; DNS rotation/errno/live IPv6 |
-| T8 | CLI/output: flags, exit codes, stdout, progress, JSON | `main.c` | 2 | partial | human output, notes, progress err, exit codes, `--json` full |
+| T8 | CLI/output: flags, exit codes, stdout, progress, JSON | `main.c` | 2 | partial | human output, notes, progress err, exit codes, `--json` full, default mark 0x40000000 vs 0x2d |
 
 Сумма весов = 20. Если сохранять существующие 14 баллов Classifier/TLS, веса нормируются на 14/20 (detect — часть группы; не добавлять новые баллы).
 
