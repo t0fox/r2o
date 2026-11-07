@@ -455,7 +455,7 @@
 
 ## 7. Итоговые суммы и проценты
 
-**Примечание 2026-11-08.** Независимая валидация добавила D20 (TCP shape contexts), D21 (datapath scheduler), D22 (journal), S11 (diagnostics), P5 (panel deadline/IO), F11 (router clear-found/policy/log), T7 (Telegram limits/stats), L6 (install/uninstall), Q8 (QUIC deny/recheck), C16 (detect CLI) и M8 (header-inline inventory), а также 61 header-inline функцию. Актуальный итог: **108 контрактов / 144 балла**, строгий **37/144 = 25,69 %**, carry-forward **89/144 = 61,81 %**. Таблицы ниже — исходное предложение до этой валидации.
+**Примечание 2026-11-08.** Независимая валидация добавила D20 (TCP shape contexts), D21 (datapath scheduler), D22 (journal), S11 (diagnostics), P5 (panel deadline/IO), F11 (router clear-found/policy/log), T7 (Telegram limits/stats), L6 (install/uninstall), Q8 (QUIC deny/recheck), C16 (detect CLI) и M8 (header-inline inventory), а также 61 header-inline функцию. Нормализация затем свела Panel A1–A26, Router B1–B54 и Telegram C1–C26 в единую матрицу: **172 контракта / 261 балл**, строгий **77/261 = 29,50 %**, carry с явно помеченными `304` — **140/261 = 53,64 %**. Таблицы ниже — исходное предложение до валидации и нормализации.
 
 ### (a) Текущая таблица как есть
 

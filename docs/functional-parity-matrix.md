@@ -1,14 +1,16 @@
 # Матрица функционального паритета D2O → R2O
 
-Актуальный документный срез: 2026-11-07. Зафиксированный C-эталон D2O: main `a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe`; базовый проверенный код R2O: main `234f72904657959031cca4d39d081988f081ccf2`; локальный аудит выполнен на D2O `a378e230947ebfd011439e1cac0f1e994d883aae` и R2O `de0298cd789896cc442be70c0831eafa10192580`.
+Актуальный документный срез: 2026-11-08. Зафиксированный C-эталон D2O: main `a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe`; базовый проверенный код R2O: main `234f72904657959031cca4d39d081988f081ccf2`; локальный аудит выполнен на D2O `a378e230947ebfd011439e1cac0f1e994d883aae` и R2O `de0298cd789896cc442be70c0831eafa10192580`.
 
-**Важно.** Таблица ниже — legacy-агрегат из 57 строк: 89 баллов веса, **80/89 (89,89 %)**. Это не оценка текущей ревизии. Аудит 2026-11-07 показал, что 49 из 80 баллов опираются на дифференциалы, закреплённые на `304ba893`, а несколько широких строк объединяют независимые контракты. После независимой валидации 2026-11-08 уточнённая матрица содержит **108 контрактов на 144 балла** (добавлены TCP shape contexts 8-13, diagnostics, panel response deadline/IO, router clear-found/policy/log, Telegram limits/stats, install/uninstall, QUIC deny/recheck, header-inline inventory, datapath scheduler/journal, detect CLI):
+**Важно.** Таблица ниже — legacy-агрегат из 57 строк: 89 баллов веса, **80/89 (89,89 %)**. Это не оценка текущей ревизии. Аудит 2026-11-07 показал, что 49 из 80 баллов опираются на дифференциалы, закреплённые на `304ba893`, а несколько широких строк объединяют независимые контракты. После нормализации 2026-11-08 единая scored-матрица содержит **172 контракта на 261 балл**: Panel A1–A26, Router B1–B54 (без B32/B45/B54), Telegram TG1–TG26 (без C2/C25/C26); coarse-строки `P*`, `F*`, `L*`, `T*` и `S7`/`S8` удалены как дубли:
 
-- строгий режим (только `a63d964`/`a378e23`/`8e2c981`, без helper/mock/build): **37/144 = 25,69 %**;
-- перенос с принятием `304ba893`: **89/144 = 61,81 %**;
-- существующий scope без ранее неучтённых модулей: **36/129 = 27,91 %** строго и **88/129 = 68,22 %** с 304.
+- строгий режим (только `a63d964`/`a378e23`/`8e2c981`, без helper/mock/build): **77/261 = 29,50 %**;
+- carry с явно помеченными `304ba893`: **140/261 = 53,64 %**;
+- legacy-агрегат: **80/89 = 89,89 %** (другой знаменатель, не сопоставим).
 
-Валидация также установила, что `a63d964` и `304ba893` отсутствуют в локальном git-объекте D2O; доказательства, закреплённые на них, в этом окружении не воспроизводятся. Детали — `docs/audit/validation-2026-11-08.md`.
+Рост строгого счёта с 25,69 % до 29,50 % — не новые доказательства и не регресс: 84 детальных Router-контракта (59 strict) заменили 30 coarse-баллов `F*`/`L*`/`T*`/`P*` (18 strict), а 71 балл Panel/Telegram добавлен с нулём. Знаменатели 144 и 261 несопоставимы напрямую.
+
+Нормализация также установила, что `a63d964` и `304ba893` отсутствуют в локальном git-объекте D2O; доказательства, закреплённые на них, в этом окружении не воспроизводятся. Детали — `docs/audit/validation-2026-11-08.md`.
 
 Legacy-таблица сохранена для исторической непрерывности и для `tools/progress.mjs`; уточнённая матрица находится в разделе «Уточнённая матрица покрытия (аудит 2026-11-07)». До перепина и перезапуска 304-дифференциалов балл 89,89 % нельзя использовать как доказательство текущего паритета.
 Ограничение версии: текущий D2O main — `8e2c98146cf0b712dc967fbec558c7b904666e87`, позже закреплённого C-эталона. Между этими ревизиями затронуты controller scheduler/HTTP search/TLS/QUIC, diagnostics, NFQUEUE и panel/Telegram. Поэтому оценка ниже относится к зафиксированному `a63d964` и только к явно перечисленным более поздним сравнениям; полный перенос относительно `8e2c981` ещё не переоценён. Дополнительные точечные прогоны 2026-11-06 для Meta DNS, firewall service/flow-offload и update guards явно отмечены в строках матрицы и выполнены против D2O main `8e2c981`; остальные строки остаются на зафиксированном baseline.
@@ -103,17 +105,19 @@ Scope boundary: the 89-point legacy table scores the router runtime. D2O relay-e
 
 Матрица содержит 57 контрактов: 50 доказанно эквивалентных, 6 частичных, 1 реализованный без полного parity evidence и 0 непроверенных. Частичные и неподтверждённые статусы дают 0 баллов.
 
-Legacy-агрегат: **80/89 = 89,89 %**. Строгая оценка текущей ревизии: **37/144 = 25,69 %** (см. раздел «Уточнённая матрица покрытия»).
+Legacy-агрегат: **80/89 = 89,89 %**. Строгая оценка текущей ревизии после нормализации: **77/261 = 29,50 %** (см. раздел «Нормализованная матрица покрытия»).
 
 Историческая корректировка от 2026-11-01: `core/verify.c:d2k_verify_probe*` сопоставлен с R2O `fetch.rs`; обратный TLS 1.2 зонд сопоставлен с D2O `detect/response.c:d2k_probe_response` и R2O `response.rs`. На этом промежуточном срезе общие fixtures подтверждали сканер и решения, но не весь сетевой retry/address-resolution путь; оценка временно снижалась до 55/87. Последующие доказанные изменения отражены в таблице выше. Профиль RAM 128 МиБ исключён из требований по указанию владельца; это не является заявлением о производительности.
 
-**Legacy evidence-weighted parity: 80 / 89 = 89,89 %.** Это доля требований старой агрегированной таблицы с подтверждением перечисленных C/Rust ветвей. Она не равна строгой оценке текущей ревизии (37/144 = 25,69 %): 49 из 80 баллов опираются на `304ba893`, а широкие строки объединяют независимые контракты.
+**Legacy evidence-weighted parity: 80 / 89 = 89,89 %.** Это доля требований старой агрегированной таблицы с подтверждением перечисленных C/Rust ветвей. Она не равна строгой оценке текущей ревизии (77/261 = 29,50 %): 49 из 80 баллов опираются на `304ba893`, а широкие строки объединяют независимые контракты.
 
 Дополнительное доказательство datapath (2026-11-03): `scripts/test-conntrack-retry-current-differential.sh` запустил production `d2kd` из D2O main `a63d964` и production `r2o-datapath` на R2O main `67a191f` с изменением retry из этого follow-up. В изолированном network namespace shim отклонил только второй `NETLINK_NETFILTER` socket (ctnetlink после NFQUEUE); после изменения `ip rule` оба процесса открыли ctnetlink повторно и сообщили о восстановлении на route/rules refresh. Прогон Debian 13 WSL2 прошёл. Это доказывает ветвь восстановления conntrack; IPv6 NFQUEUE C-oracle и остальные ветви строки остаются открыты, поэтому статус и баллы этого контракта не меняются.
 
 В оценку не включены C relay/enrollment серверы D2O и WARP/VPS/relay сценарии: они вне разрешённой целевой архитектуры R2O. Реализация Telegram в R2O полностью взята из Rust-донора z2kOW (`tg-proxy`, `crates/r2o-telegram`); отдельная C11 реализация Telegram из D2O не переносится и источником не является. Сравниваются пользовательские функции с z2kOW.
 
 ## Известные расхождения и тестовые ограничения
+
+**Historical evidence и отсутствующий скрипт (2026-11-08).** Примечания #20/#26/#28/#81–#96 ссылаются на `test-router-flowoffload-selective-differential.sh`. Этого скрипта нет в дереве, selective-схема удалена, а действующий `test-router-flowoffload-d2o-differential.sh` проверяет глобальное выключение offload. Поэтому эти записи сохранены только как исторические; их числа `53/84`, `53/86` и подобные не являются текущей оценкой. Действующий счёт — в разделе «Нормализованная матрица покрытия».
 
 **Classifier CLEAR confirmation mismatch исправлен.** D2O выполняет два дополнительных whole-trigger зонда после исходного 3/3 и возвращает FLAKY при молчании или транспортном отказе; Rust раньше сразу объявлял CLEAR. Rust теперь подтверждает базу, учитывает transport errors и прекращает классификацию как CLEAR после отмены. C/Rust differential сравнивает CLEAR/5, silent FLAKY/5, refused FLAKY/5 и cancellation INCONCLUSIVE/3. Полное дерево poison/strategy и control/neutral ACK остаётся частично проверенным.
 
@@ -295,7 +299,7 @@ Legacy-агрегат: **80/89 = 89,89 %**. Строгая оценка теку
 
 Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` прошёл. Windows `r2o-panel --lib --test http` дал 12 passed, 6 ignored, 1 failed: тест worker-config атомарно заменяет уже существующий файл, а Windows `rename` не имеет Linux overwrite semantics; отдельный panel CLI HTTP health test также не дождался HTTP-ответа. Эти два отказа не подтверждают дефект Linux/OpenWrt поведения, но panel HTTP/runtime тесты остаются непроверенными на Linux.
 
-Остаются: полное C-сравнение IPv6 NFQUEUE (D2O привязывает очередь только к AF_INET); остальные periodic datapath/process metrics; полный service цикл после отказа/crash/restart/reapply; остаточные QUIC HTTP/3 transport errors, timing-sensitive stall и lifecycle ветви; Discord endpoint change, NAK/timeout persistence, durable restart и длинная RTC-сессия; Telegram service/config/DC/handshake/retry/firewall parity; Meta DNS на целевой платформе; полный panel API/status/errors/settings/assets; полный static firewall rules/backend contract, flow-offload recovery и PPE; остаточные heal/watchdog ветви; Linux signed update/rollback. Помимо короткого smoke, текущий R2O прошёл 301,2-секундный смешанный IPv6 soak в полном OpenWrt QEMU при 128 МиБ; отдельный Rust IPv6 gateway soak в WSL2 длился 300 с. C/Rust high-cardinality mixed load measured for 60 s per side; физический роутер и калибровка не использовались и остаются вне области. OpenWrt 25.12-SNAPSHOT загружен в QEMU с адресом `192.168.1.1`; dual-stack queues 2000/2001, исходящий IPv6 TCP и fw4 flow offload/NFQUEUE на production datapath проверены; гостю выделялось 512 MiB. Физический роутер не использовался. Исторический расчёт «46 строк / 63/87» устарел и заменён аудитом 2026-11-07: действующая legacy-таблица содержит 57 строк и 80/89, а уточнённая матрица - 108 контрактов и 37/144 в строгом режиме. См. `docs/audit/README.md`.
+Остаются: полное C-сравнение IPv6 NFQUEUE (D2O привязывает очередь только к AF_INET); остальные periodic datapath/process metrics; полный service цикл после отказа/crash/restart/reapply; остаточные QUIC HTTP/3 transport errors, timing-sensitive stall и lifecycle ветви; Discord endpoint change, NAK/timeout persistence, durable restart и длинная RTC-сессия; Telegram service/config/DC/handshake/retry/firewall parity; Meta DNS на целевой платформе; полный panel API/status/errors/settings/assets; полный static firewall rules/backend contract, flow-offload recovery и PPE; остаточные heal/watchdog ветви; Linux signed update/rollback. Помимо короткого smoke, текущий R2O прошёл 301,2-секундный смешанный IPv6 soak в полном OpenWrt QEMU при 128 МиБ; отдельный Rust IPv6 gateway soak в WSL2 длился 300 с. C/Rust high-cardinality mixed load measured for 60 s per side; физический роутер и калибровка не использовались и остаются вне области. OpenWrt 25.12-SNAPSHOT загружен в QEMU с адресом `192.168.1.1`; dual-stack queues 2000/2001, исходящий IPv6 TCP и fw4 flow offload/NFQUEUE на production datapath проверены; гостю выделялось 512 MiB. Физический роутер не использовался. Исторический расчёт «46 строк / 63/87» устарел и заменён аудитом 2026-11-07: действующая legacy-таблица содержит 57 строк и 80/89, а нормализованная матрица 2026-11-08 - 172 контракта и 77/261 в строгом режиме. См. `docs/audit/README.md`.
 
 97. **Flow offload возвращён к D2O lifecycle по требованию владельца.** D2O flowoffload_off() сохраняет включённый flow_offloading, устанавливает 0 и перезагружает firewall; stop возвращает исходное значение. Аппаратная UCI-настройка не меняется; fw3/iptables helper — no-op. RED/GREEN в test-router-flowoffload-d2o-differential.sh подтверждает состояния и trace; lifecycle тест подтверждает ordering. Удалены selective ct-mark/rule/include механизмы и их тест; сохранена очистка legacy hook от предыдущих локальных selective сборок. Глобальное fw4 runtime поведение и отсутствие потери NFQUEUE видимости в настоящем OpenWrt остаются непроверенными; статус partial, 0 баллов. Исторические selective записи выше superseded этим решением.
 
@@ -444,198 +448,223 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 
 171. **Worker-аргументы и удержание RSS сверены на сопоставимой нагрузке.** `scripts/test-worker-memory-differential.sh` собрал и запустил настоящий D2O `test_sched_worker_lifecycle` и Rust `worker_memory`: по 1500 циклов с двумя 4-КиБ буферами, освобождение в другом потоке, общий предел роста 5 МиБ. C: VmRSS 2480→12080→12080 KiB, VmData 10588→11616→11616; Rust: VmRSS 3160→3240→3368 KiB, VmData 11208→11204→11172. C использует `mmap/munmap` на аргумент, Rust — production-пул воркеров; syscall-паритет не заявляется, но удержания страниц после join не обнаружено. Строка переведена в «Доказанно эквивалентно» (1/1), общий счёт 80/89 = 89,89%.
 
-## Уточнённая матрица покрытия (аудит 2026-11-07)
+## Нормализованная матрица покрытия (2026-11-08)
 
-Раздел не участвует в legacy-подсчёте выше. Он фиксирует разбиение широких контрактов, ранее неучтённые production-модули и фактический статус доказательств. правила:
+Единый scored-реестр после сведения Panel A1–A26, Router B1–B54 и Telegram C1–C26. Coarse-строки `P*`, `F*`, `L*`, `T*` удалены: их поведение раскрыто детальными `A*`/`B*`/`TG*`. `S7`/`S8` удалены (покрыты `B31`/`B32`), `R8` переименован в `G1`, Classifier `C*` — в `CL*`, Telegram `C*` — в `TG*`.
 
-- вес 1–3 назначается независимой проверяемой ветви, а не модулю целиком;
-- балл начисляется только при прямом C/Rust differential на принятой ревизии (63d964, 378e23, 8e2c981) либо при production-процессном differential с C-oracle;
-- 1/2 и подобные записи означают частичное покрытие; в legacy-таблице такие строки дают 0;
-- helper/fixture/mock/source mapping не считаются доказательством production-поведения.
+### Правила статусов
 
-### 6.1. Datapath / NFQUEUE
+| Статус | Значение | Балл |
+|---|---|---:|
+| `verified` | Прямой C/Rust differential на принятой ревизии (`a63d964`, `a378e23`, `8e2c981`), без mock/partial/gap/EXT | вес |
+| `carry (304)` | Дифференциал закреплён на `304ba893`; historical evidence, локально не воспроизводится | 0 strict, вес в carry |
+| `partial` | Реализация есть, но доказательство неполное: unit/fixture/mock/ТЕСТ/ИСХ/частичный diff | 0 |
+| `missing` | Реальное расхождение, отсутствующая ветвь или доказанная несовместимость | 0 |
+| `extension` | Намеренное R2O-only поведение, не паритет | 0 |
+| `out-of-scope` | VPS/relay, N/A или дубль router-side-контракта | 0 |
 
-| ID | Контракт (вес) | Статус | Балл | Покрытие сейчас | Пробел |
+**Итог:** 172 контрактов, вес 261. Строгий счёт — **77/261 = 29.50 %**. Carry с явно помеченными `304` — **140/261 = 53.64 %**. Исторический coarse carry-forward `89/144 = 61,81 %` относится к прежней матрице и не сопоставим напрямую.
+
+### Сводка по областям
+
+| Область | Контрактов | Вес | Strict | Carry (304) |
+|---|---:|---:|---:|---:|
+| Datapath | 23 | 26 | 11 | 14 |
+| Classifier / TLS | 16 | 24 | 2 | 18 |
+| Discovery | 9 | 19 | 0 | 15 |
+| QUIC / HTTP3 | 8 | 11 | 2 | 6 |
+| Discord RTC | 7 | 10 | 1 | 9 |
+| Discord Gateway | 1 | 1 | 1 | 1 |
+| Core / CLI | 8 | 15 | 1 | 1 |
+| WebPanel | 26 | 30 | 0 | 17 |
+| Router / Service | 51 | 84 | 59 | 59 |
+| Telegram | 23 | 41 | 0 | 0 |
+| **Итого** | **172** | **261** | **77** | **140** |
+
+### Контракты
+
+| ID | Контракт (вес) | Статус | Strict | Покрытие / Rust-владелец | Пробел |
 |---|---|---|---:|---|---|
-| D1a | NFQUEUE receive/verdict/truncation (1) | доказано | 1 | `test-nfq-netns.sh`, `test-datapath-default-mode-differential.sh`, unit queues | IPv6 C-oracle; malformed header injection |
-| D1b | NFQUEUE rcvbuf/poll/recv error policy (1) | 0 | 0 | `test-nfq-ipv4-recv-error-differential.sh` (a63), `test-nfq-ipv6-recv-error-recovery.sh` (R2O-only), unit `receive_error_policy...` | `SO_RCVBUFFORCE/SO_RCVBUF` только unit, без прогона; IPv6 C-oracle |
-| D2 | IPv6 live NFQUEUE gateway FORWARD, fragments, route mark, fail-open (3) | 0 | 0 | `test-nfq-ipv6-forward-netns.sh`, QEMU/WSL evidence; C `nfq.c` binds только AF_INET | Нет C IPv6 oracle; route mark/fail-open/PPE не проверены в одном прогоне |
-| D3 | Fragment builders IPv4/IPv6 shapes 1–4 + session decide (1) | доказано | 1 | `test-ipfrag-differential.sh` (a63), `r2k-core/tests/ipfrag.rs` | Нет live IPv6 raw-send |
-| D4 | TCP payload/SNI counters, split hello (1) | доказано | 1 | `r2o-tcp-payload-stats-differential.sh` (output diff), Rust unit | Только IPv4/TCP; нет непустых periodic samples |
-| D5 | TCP silence/expiry/FIN/RST/ClientHello retry (1) | доказано | 1 | `test-tcp-silence-current-differential.sh` (a63), `test-datapath-capture-lifecycle-differential.sh` (a63) | Нет длительного процесса/таймингов на реальном роутере |
-| D6 | TCP hold/order/ownership/release (1) | 0 | 0 | `r2o-hold-differential.sh` — независимые C/Rust suites, без diff | Нет paired output differential; timeout/revision только unit |
-| D7 | TCP RST cut/observation/reply-hidden (1) | 0 | 0 | `r2o-tcp-rst-cut-differential.sh`, `r2o-tcp-rst-observation-differential.sh`, `r2o-tcp-reply-hidden-differential.sh` — независимые suites | Нет paired diff; 304 pin |
-| D8 | TCP flow-table capacity/refusal/expiry/reuse (1) | 0 | 0 | `test-datapath-tcp-capacity-differential.sh` (304) | Другая ревизия; нужен прогон на a63/a378 |
-| D9 | Periodic flow-table stats + service interval (1) | доказано | 1 | `test-datapath-stats-timer-differential.sh` (a378) | Нулевой/неполный traffic; IPv6 |
-| D10 | Other periodic datapath/process metrics (1) | доказано | 1 | `test-datapath-stats-timer-differential.sh` (a378), `test-datapath-process-stats-differential.sh` | Не все метрики; C/Rust traces на одном fixture |
-| D11 | High-cardinality mixed load + peak RSS (1) | 0 | 0 | `test-datapath-high-cardinality-differential.sh` (304) | Другая ревизия; физическая калибровка |
-| D12 | Worker args/page return after join (1) | доказано | 1 | `test-worker-memory-differential.sh` (a378) | Syscall parity не заявлен; только RSS |
-| D13 | IPv4 NAT/conntrack/SNAT/reverse (1) | доказано | 1 | `test-conntrack-retry-current-differential.sh` (a63), `test-nfq-ipv4-recv-error-differential.sh` (a63) | IPv6; ctnetlink errors; live router |
-| D14 | Default observe/apply mode (1) | доказано | 1 | `test-datapath-default-mode-differential.sh` (a63) | Явный `--mode apply` parser regression |
-| D15 | ICMP guard counters/quoted-packet matching (1) | доказано | 1 | `test-icmp-guard-current-differential.sh` (a63) | Live IPv6 NFQUEUE |
-| D16 | Raw IPv6 emission shapes/UDP delivery (1) | доказано | 1 | `test-raw6-send-differential.sh` (a63) | Route mark/MTU on live router |
-| D17 | HTTP/80 replacement + hold (1) | 0 | 0 | `http80.c`/`http_trace.c`; C tests; Rust `http_replace` | Нет matrix-контракта и paired diff |
-| D18 | Capture/TLS/wire/addr helpers (1) | 0 | 0 | C tests, Rust unit tests | Нет paired diff |
-| D19 | Route mark/socket route selection (1) | 0 | 0 | `test-router-route-gate-config.sh` (a63) - только service args | Runtime SO_MARK/route selection не проверен |
-| D20 | TCP timestamp shape contexts 8-13 (`d2k_link_shape_tcp_*`) (2) | 0 | 0 | `core/include/d2k_link.h`; `sched.c` использует 8-13 | R2O поддерживает только 1-7; `D2K_TCP_SHAPE_*_TS` отсутствуют |
-| D21 | Datapath scheduler: due ordering, refusals, owned IDs (1) | 0 | 0 | `scheduler.rs` | нет paired differential; cancel/reservation — R2O-only расширение |
-| D22 | Journal: ring/retention/dropped/added/format (1) | 0 | 0 | `flow_journal.rs` | тексты suspect/refuse и часть полей не совпадают |
-| | **Итого Datapath** | | **11/26** | | |
+| D1a | NFQUEUE receive/verdict/truncation (1) | verified | 1 | `test-nfq-netns.sh`, `test-datapath-default-mode-differential.sh`, unit queues | IPv6 C-oracle; malformed header injection |
+| D1b | NFQUEUE rcvbuf/poll/recv error policy (1) | partial | 0 | `test-nfq-ipv4-recv-error-differential.sh` (a63), `test-nfq-ipv6-recv-error-recovery.sh` (R2O-only), unit `receive_error_policy...` | `SO_RCVBUFFORCE/SO_RCVBUF` только unit, без прогона; IPv6 C-oracle |
+| D2 | IPv6 live NFQUEUE gateway FORWARD, fragments, route mark, fail-open (3) | partial | 0 | `test-nfq-ipv6-forward-netns.sh`, QEMU/WSL evidence; C `nfq.c` binds только AF_INET | Нет C IPv6 oracle; route mark/fail-open/PPE не проверены в одном прогоне |
+| D3 | Fragment builders IPv4/IPv6 shapes 1–4 + session decide (1) | verified | 1 | `test-ipfrag-differential.sh` (a63), `r2k-core/tests/ipfrag.rs` | Нет live IPv6 raw-send |
+| D4 | TCP payload/SNI counters, split hello (1) | verified | 1 | `r2o-tcp-payload-stats-differential.sh` (output diff), Rust unit | Только IPv4/TCP; нет непустых periodic samples |
+| D5 | TCP silence/expiry/FIN/RST/ClientHello retry (1) | verified | 1 | `test-tcp-silence-current-differential.sh` (a63), `test-datapath-capture-lifecycle-differential.sh` (a63) | Нет длительного процесса/таймингов на реальном роутере |
+| D6 | TCP hold/order/ownership/release (1) | partial | 0 | `r2o-hold-differential.sh` — независимые C/Rust suites, без diff | Нет paired output differential; timeout/revision только unit |
+| D7 | TCP RST cut/observation/reply-hidden (1) | carry (304) | 0 | `r2o-tcp-rst-cut-differential.sh`, `r2o-tcp-rst-observation-differential.sh`, `r2o-tcp-reply-hidden-differential.sh` — независимые suites | Нет paired diff; 304 pin |
+| D8 | TCP flow-table capacity/refusal/expiry/reuse (1) | carry (304) | 0 | `test-datapath-tcp-capacity-differential.sh` (304) | Другая ревизия; нужен прогон на a63/a378 |
+| D9 | Periodic flow-table stats + service interval (1) | verified | 1 | `test-datapath-stats-timer-differential.sh` (a378) | Нулевой/неполный traffic; IPv6 |
+| D10 | Other periodic datapath/process metrics (1) | verified | 1 | `test-datapath-stats-timer-differential.sh` (a378), `test-datapath-process-stats-differential.sh` | Не все метрики; C/Rust traces на одном fixture |
+| D11 | High-cardinality mixed load + peak RSS (1) | carry (304) | 0 | `test-datapath-high-cardinality-differential.sh` (304) | Другая ревизия; физическая калибровка |
+| D12 | Worker args/page return after join (1) | verified | 1 | `test-worker-memory-differential.sh` (a378) | Syscall parity не заявлен; только RSS |
+| D13 | IPv4 NAT/conntrack/SNAT/reverse (1) | verified | 1 | `test-conntrack-retry-current-differential.sh` (a63), `test-nfq-ipv4-recv-error-differential.sh` (a63) | IPv6; ctnetlink errors; live router |
+| D14 | Default observe/apply mode (1) | verified | 1 | `test-datapath-default-mode-differential.sh` (a63) | Явный `--mode apply` parser regression |
+| D15 | ICMP guard counters/quoted-packet matching (1) | verified | 1 | `test-icmp-guard-current-differential.sh` (a63) | Live IPv6 NFQUEUE |
+| D16 | Raw IPv6 emission shapes/UDP delivery (1) | verified | 1 | `test-raw6-send-differential.sh` (a63) | Route mark/MTU on live router |
+| D17 | HTTP/80 replacement + hold (1) | partial | 0 | `http80.c`/`http_trace.c`; C tests; Rust `http_replace` | Нет matrix-контракта и paired diff |
+| D18 | Capture/TLS/wire/addr helpers (1) | partial | 0 | C tests, Rust unit tests | Нет paired diff |
+| D19 | Route mark/socket route selection (1) | partial | 0 | `test-router-route-gate-config.sh` (a63) - только service args | Runtime SO_MARK/route selection не проверен |
+| D20 | TCP timestamp shape contexts 8-13 (`d2k_link_shape_tcp_*`) (2) | missing | 0 | `core/include/d2k_link.h`; `sched.c` использует 8-13 | R2O поддерживает только 1-7; `D2K_TCP_SHAPE_*_TS` отсутствуют |
+| D21 | Datapath scheduler: due ordering, refusals, owned IDs (1) | partial | 0 | `scheduler.rs` | нет paired differential; cancel/reservation — R2O-only расширение |
+| D22 | Journal: ring/retention/dropped/added/format (1) | missing | 0 | `flow_journal.rs` | тексты suspect/refuse и часть полей не совпадают |
+| S1 | Control frame/commands/ACK/APPLIED/REFUSED (2) | carry (304) | 0 | `r2o-control-events`, `r2o-control-dropped`, `r2o-ack-applied-persist` (все 304) | Другая ревизия; длительный процессный restart |
+| S2 | Scheduler due order/cooldown/dead address/concurrent endpoints (3) | carry (304) | 0 | `r2o-scheduler-cooldown`/`dead-address`/`concurrent` (304), `r2o-scheduler-differential` (без diff) | 304; due ordering не paired |
+| S3 | Discovery known-plan/coalesce/queue/permits/own-first (3) | carry (304) | 0 | `r2o-discovery-*`, `r2o-queue-order`, `r2o-worker-permit`, `r2o-own-first` (304) | 304; нет текущего прогона |
+| S4 | ACK → APPLIED exact proof → candidate persistence (2) | carry (304) | 0 | `r2o-ack-applied-persist` (304), `r2o-known-plans` (304) | 304; process restart |
+| S5 | JSON catalog atomic save/merge/sync (2) | carry (304) | 0 | `r2o-catalog-persist`, `r2o-catalog-sync` (304) | 304; concurrent external writer |
+| S6 | HTTP search candidate/order/retry/judge/APPLIED (3) | carry (304) | 0 | `r2o-http-search` (304), `r2o-fetch-cli` (без пина) | 304; живой поиск; APPLIED branch |
+| S9 | Auto refusal → Discovery → APPLIED → firewall reapply (2) | partial | 0 | Process smoke с fake datapath peer | Нет реального datapath/firewall; failure injection |
+| S10 | Long-running controller recovery (1) | partial | 0 | Нет | Полный цикл после crash/restart |
+| S11 | Diagnostics records/snapshots/madvise and periodic report (1) | missing | 0 | `diagnostics.rs`, `r2o-diagnostics-differential.sh` | allocator/madvise и часть периодической RSS-сводки отсутствуют |
+| CL1 | Raw profiles/ECH shapes/send/cancel/fallback/connect (3) | carry (304) | 0 | `r2o-raw-profile`, `r2o-raw-emission-cancel`, `r2o-raw-connect-fallback`, `r2o-fallback`, `r2o-raw-split-support` (304) | 304; live DPI; cancel/timing |
+| CL2 | CLEAR confirmation/cancel (1) | carry (304) | 0 | `test-classifier-clear-confirm` (304) | 304 |
+| CL3 | SO_MARK confirmation (1) | carry (304) | 0 | `test-classifier-so-mark-production` (304) | 304; production getsockopt |
+| CL4 | Base transport errors → split (1) | carry (304) | 0 | `test-classifier-full-tree-control` (304) | 304 |
+| CL5 | Poison/strategy tree/control/neutral ACK (2) | carry (304) | 0 | `test-classifier-full-tree-control`, `candidate-filter`, `raw-production` (304) | 304; injected/scripted branches |
+| CL6 | TCP measurement + core verifier (2) | carry (304) | 0 | `r2o-meas`, `r2o-measured-split` (304) | 304; full call path |
+| CL7 | TLS/HTTP verifier outcomes/retry (1) | verified | 1 | `r2o-tls-verify-differential.sh` (a378), `test-http-chunk-framing` (a63) | Loopback; не live DPI |
+| CL8 | Connect/read timeout + doubled baseline retry (1) | carry (304) | 0 | `test-classifier-full-tree-control` (304) | 304 |
+| CL9 | TLS 1.2 reverse response probe/verdicts (3) | carry (304) | 0 | `test-d2o-shared-fixtures` (304), `test-classifier-full-tree-control` (304) | 304; live DPI |
+| CL10 | ECH receive ladder/witness/retries (2) | carry (304) | 0 | `r2o-ech-rx-ladder`, `r2o-layered-rx` (304) | 304; реальные ECH-конфигурации |
+| CL11 | HTTP response framing/reader (1) | verified | 1 | `test-http-chunk-framing-differential.sh` (a63), `r2k-core` tests | Остальные call-path/ветви |
+| CL12 | ClientHello/TLS12/13/ECH parser helpers (1) | partial | 0 | C `test_hello/test_ech/test_tls12`, Rust unit | Нет paired diff |
+| CL13 | HTTPS probe/ECH resolver/cache state (1) | partial | 0 | C `test_httpsprobe`, Rust tests | Нет paired diff |
+| CL14 | HTTP/3 status/header parser + httpup (1) | partial | 0 | C `test_h3`, `test_httpup_logic`; Rust tests | Нет paired diff |
+| CL15 | Compose/crypto/p256/x25519/props helpers (2) | partial | 0 | C tests, Rust unit | Нет matrix-контракта |
+| CL16 | Detect/classifier CLI output/exit/JSON (1) | partial | 0 | `r2o-controller/main.rs` | human stdout/exit/JSON не полностью сопоставлены |
+| Q1 | QUIC Initial/QSN/SNI/local-address gate (2) | carry (304) | 0 | `r2o-quic-hello`, `r2o-quic-local-address` (304), `r2o-discovery-quic-stop` | 304; stop/fallback |
+| Q2 | Residual/VN/address pool/neutral controls/fallback (3) | partial | 0 | REA_EVIDENCE (source mapping), controller unit tests | Нет поведенческого differential |
+| Q3 | Short-control complete/budget (1) | carry (304) | 0 | `test-quic-short-control` (304) | 304 |
+| Q4 | HTTP/3 framing/stream termination (1) | verified | 1 | `test-quic-http3-full-stage-differential.sh` (a63), 18/18 | Network errors/lifecycle |
+| Q5 | HTTP/3 budgets/transport limits/stall (1) | partial | 0 | Full-stage 18/18; `test-quic-http3` | 70-KiB HEADERS app_bytes; timing-sensitive stall |
+| Q6 | Budget init/app-bytes helper (1) | carry (304) | 0 | `test-quic-budget-init`, `test-quic-app-bytes` (304) | 304 |
+| Q7 | Silent peer handshake timeout (1) | verified | 1 | Full-stage/`r2o_http3_silent_udp_peer_timeout` (a63) | Нет ICMP/close-port вариантов |
+| Q8 | QUIC deny/recheck lifecycle (1) | partial | 0 | `r2o_quic_deny.rs` | Нет paired C/Rust lifecycle differential |
+| R1 | UDP observer initiator/SSRC/endpoint event (2) | carry (304) | 0 | `test-discord-udp-observer-reconnect` (304) | 304; production RTC |
+| R2 | Manual measurement arm propagation (1) | carry (304) | 0 | `test-discord-voice-discovery-arm` (304) | 304 |
+| R3 | Voice trial lease/renewal/120-s waiter/APPLIED (3) | carry (304) | 0 | `r2o-discord-discovery`, `r2o-discord-voice-lifecycle-helper` (304), `test-discord-scheduled-udp` (a63) | 304; production process/long RTC |
+| R4 | Endpoint change/late NAK/persistence/reapply (1) | carry (304) | 0 | `r2o-discord-voice-lifecycle-helper` (304) | 304; source-backed helper |
+| R5 | Trial clock after queue admission (1) | carry (304) | 0 | `test-discord-voice-trial-clock` (304) | 304 |
+| R6 | Scheduled UDP emission/queue stats (1) | verified | 1 | `test-discord-scheduled-udp-differential.sh` (a63) | Periodic/shutdown queue output |
+| R7 | Long RTC session/process recovery (1) | partial | 0 | Нет | Полный RTC, restart, endpoint recovery |
+| G1 | Discord Gateway WebSocket upgrade/Hello (1) | verified | 1 | `r2o-tls-verify-differential.sh` + `d2o_verify_differential` (a378), 14 сценариев | Loopback; не живой Gateway |
+| M1 | `compose.c` + `d2kc.c` orchestration/event loop (3) | partial | 0 | Inventory note; REA fragments | Нет отдельного контракта и differential |
+| M2 | `d2kask.c` (1) | partial | 0 | `r2o-ask-differential.sh` — независимые suites | Нет paired diff |
+| M3 | `d2kfetch.c` CLI (1) | verified | 1 | `r2o-fetch-cli-differential.sh` (сравнивает C/Rust CLI) | Нет SHA-пина; не все ветви |
+| M4 | `d2kvoice.c` controller entry (1) | partial | 0 | Discord rows частично | Нет контракта |
+| M5 | `link.c`, `net4.c`, `udpruntime.c`, `volume.c` (3) | partial | 0 | Inventory note; Rust `r2o_volume` tests | Нет C/Rust diff |
+| M6 | `crypto.c`, `p256.c`, `x25519.c`, `props.c`, `udpplan.c`, `plantlv.c` helpers (3) | partial | 0 | C unit tests; Rust units | Нет paired diff и контракта |
+| M7 | `http80.c`, `http_trace.c`, `journal.c`, `plans.c`, `plan_parse/apply.c` (2) | partial | 0 | C tests; Rust units | Нет matrix-контракта |
+| M8 | Production header-inline helpers inventory/mapping (1) | partial | 0 | `docs/audit/function-index.md` | 61 header-inline функций добавлены; helper-level mapping не проверен дифференциалами |
+| A1 | Bind по умолчанию и выбор LAN IP при установке (1) | carry (304) | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A |  |
+| A2 | Пустой `PANEL_LISTEN` отключает панель и health update (1) | carry (304) | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A |  |
+| A3 | Парсер: комментарии, кавычки, хвостовые комментарии (1) | missing | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A | ДИФ есть; незакрытая кавычка — пробел |
+| A4 | Парсер: unknown keys, не-UTF-8, ignored bytes (1) | carry (304) | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A |  |
+| A5 | Совместимость known-list с D2O-конфигом (1) | partial | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A | **не доказано/пробел** |
+| A6 | Лимит заголовка 32 КиБ и код 431 (1) | partial | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A | ДИФ; точная граница не проверена |
+| A7 | Абсолютный дедлайн заголовка 5 с / 408 (1) | carry (304) | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A |  |
+| A8 | Абсолютный дедлайн ответа 5 с (1) | missing | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A | **нет дифференциала** |
+| A9 | Устойчивость к обрыву клиента/IO-ошибке (1) | missing | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A | **нет дифференциала; расхождение** |
+| A10 | Неизвестный маршрут/метод/HTTP-версия (1) | partial | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A | ТЕСТ |
+| A11 | `/api/status`: unavailable-контракт (1) | carry (304) | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A |  |
+| A12 | `/api/status`: live shape и catalog revision (1) | carry (304) | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A |  |
+| A13 | `/api/status`: snapshot/stages/unknown_keys (1) | partial | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A | частично; порядок ключей/`unknown_keys` не доказаны |
+| A14 | `/api/control`: список действий, коды, gates (2) | carry (304) | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A |  |
+| A15 | Action state machine и timeout (включая 124) (2) | partial | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A | ДИФ timeout; 124 — пробел |
+| A16 | Workers GET и байты конфига (1) | carry (304) | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A |  |
+| A17 | Workers POST: Content-Type/TE/CL/JSON/8 доменов (2) | carry (304) | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A |  |
+| A18 | Workers POST: busy до записи (2) | carry (304) | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A |  |
+| A19 | Атомарная запись и сохранение режима (1) | partial | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A | ДИФ по байтам; режим/umask не доказан |
+| A20 | Telegram config gate/status (1) | carry (304) | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A |  |
+| A21 | Telegram stats: лимит, схема, таймаут (1) | missing | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A | ДИФ по размеру; абсолютный таймаут — пробел |
+| A22 | `/api/update` absent/never/raw (1) | carry (304) | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A |  |
+| A23 | Diagnostics GET/POST/download (1) | carry (304) | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A |  |
+| A24 | Static assets: ETag/304/1 МиБ (1) | carry (304) | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A |  |
+| A25 | Static assets: missing/symlink/embedded fallback (1) | missing | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A | ТЕСТ; C 404 vs Rust fallback |
+| A26 | CLI `--version`/`serve`/`--self-check`/`--release-id` (1) | missing | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A | частично; self-check отсутствует |
+| B1 | Config defaults и совместимость ключей (1) | partial | 0 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B | частично; `MODE` fallback и `KEENETIC_POLICY` — пробелы |
+| B2 | Start order: engine→telegram→panel→schedulers (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B3 | Stop order и восстановление fastnat/offload (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B4 | Engine start: queue wait, firewall, controller, watchdog (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B5 | Engine stop: порядок и коды (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B6 | `engine-restart`/`settings-restart` (1) | partial | 0 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B | ДИФ/пробел `MODE=off` |
+| B7 | Panel lifecycle и disabled panel (1) | verified | 1 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B8 | `status` (поля и коды) (1) | missing | 0 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B | ДИФ; текстовый формат отличается |
+| B9 | `clear-found`: все state-файлы (2) | missing | 0 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B | **пробел (`https-cache.json`)** |
+| B10 | nft backend: генерация и postconditions (3) | partial | 0 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B | ДИФ (mock) |
+| B11 | iptables backend: генерация и postconditions (3) | partial | 0 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B | ДИФ (mock) |
+| B12 | Код ошибки отдельного правила (1) | verified | 1 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B13 | nft rollback и RST-table cleanup (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B14 | Legacy D2K cleanup (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B15 | RST table lifetime (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B16 | Status nft completeness (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B17 | Status iptables completeness (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B18 | IPv6 fallback + marker + reapply (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B19 | DNS upstream exclusions/refresh (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B20 | Flow-offload disable/restore (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B21 | Flow-offload write-failure (1) | verified | 1 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B22 | Fastnat lifecycle (1) | verified | 1 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B23 | PPE rule generation/order (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B24 | PPE removal error codes (1) | verified | 1 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B25 | PPE backend/gate/lock (2) | partial | 0 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B | ДИФ (mock) |
+| B26 | Firewall lock/reapply (1) | verified | 1 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B27 | Heal: status/ppe/dns (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B28 | Heal concurrency/cooldown (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B29 | Firewall watchdog period/start-stop (1) | verified | 1 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B30 | NDM hook nat/mangle (1) | verified | 1 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B31 | S99/procd waiter и detach (1) | verified | 1 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B33 | Update guard/availability (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B34 | Stage→stop→activate→start порядок (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B35 | Rollback + bad release + health (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B36 | Signed bootstrap/install (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B37 | OpenWrt ABI/reboot update (2) | partial | 0 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B | **не доказано** |
+| B38 | Package release manifest/assets (1) | verified | 1 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B39 | Router install lifecycle (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B40 | Uninstall и аварийная очистка (1) | missing | 0 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B | **пробел** |
+| B41 | Telegram start/stop/restart (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B42 | Telegram reapply semantics (2) | missing | 0 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B | **пробел (запускает процесс)** |
+| B43 | Telegram mark/gate (1) | verified | 1 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B44 | Telegram firewall nft/iptables (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B46 | Telegram watchdog health contract (2) | missing | 0 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B | **пробел** |
+| B47 | Meta DNS scheduler lifecycle (1) | verified | 1 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B48 | Meta DNS offset/backoff/tick (2) | partial | 0 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B | **не доказано** |
+| B49 | Meta DNS ranges asset (1) | verified | 1 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B50 | Meta DNS edge verification (1) | verified | 1 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B51 | Meta DNS owned-record removal (1) | verified | 1 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
+| B52 | Log maintenance: все owned-логи (1) | missing | 0 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B | **пробел** |
+| B53 | `KEENETIC_POLICY` → `--only-mark` (2) | missing | 0 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B | **не перенесено** |
+| TG1 | Config file/env mapping и валидация (2) | partial | 0 | D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C |  |
+| TG3 | DC map persist/merge/validate (2) | partial | 0 | D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C |  |
+| TG4 | `help.getConfig` и dcOption (2) | partial | 0 | D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C |  |
+| TG5 | obfuscated2/secret/DC/media/proto (2) | partial | 0 | D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C |  |
+| TG6 | MTProto splitter (2) | partial | 0 | D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C |  |
+| TG7 | v2 encrypted (1) | partial | 0 | D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C |  |
+| TG8 | resPQ probe (1) | partial | 0 | D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C |  |
+| TG9 | DC→WSS/CF route plan (2) | partial | 0 | D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C |  |
+| TG10 | Route DNS/DoH/DoT (2) | partial | 0 | D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C |  |
+| TG11 | TLS verification/SNI (1) | partial | 0 | D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C |  |
+| TG12 | WS upgrade/frames (2) | partial | 0 | D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C |  |
+| TG13 | CF domain pool refresh/cache (2) | partial | 0 | D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C |  |
+| TG14 | CF proxy DoH (2) | partial | 0 | D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C |  |
+| TG15 | Transparent listener/SO_ORIGINAL_DST (2) | partial | 0 | D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C |  |
+| TG16 | Transparent policy ports/CIDR/self-dial (2) | partial | 0 | D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C |  |
+| TG17 | Official secret/DD (2) | partial | 0 | D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C |  |
+| TG18 | Retry/cooldown/routing policy (2) | partial | 0 | D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C |  |
+| TG19 | Stats schema и Unix socket (2) | partial | 0 | D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C |  |
+| TG20 | Stats request protocol robustness (1) | missing | 0 | D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C | **пробел (нет таймаута)** |
+| TG21 | Response observer (1) | partial | 0 | D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C |  |
+| TG22 | Connection/memory limits (2) | missing | 0 | D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C | **пробел (memory budget)** |
+| TG23 | Diagnostics `--check` (2) | partial | 0 | D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C |  |
+| TG24 | Service lifecycle/recovery (2) | partial | 0 | D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C |  |
 
-### 6.2. Control / Scheduler / Discovery / Catalog
+### Вне scored-матрицы
 
-| ID | Контракт (вес) | Статус | Балл | Покрытие сейчас | Пробел |
-|---|---|---|---:|---|---|
-| S1 | Control frame/commands/ACK/APPLIED/REFUSED (2) | 0 | 0 | `r2o-control-events`, `r2o-control-dropped`, `r2o-ack-applied-persist` (все 304) | Другая ревизия; длительный процессный restart |
-| S2 | Scheduler due order/cooldown/dead address/concurrent endpoints (3) | 0 | 0 | `r2o-scheduler-cooldown`/`dead-address`/`concurrent` (304), `r2o-scheduler-differential` (без diff) | 304; due ordering не paired |
-| S3 | Discovery known-plan/coalesce/queue/permits/own-first (3) | 0 | 0 | `r2o-discovery-*`, `r2o-queue-order`, `r2o-worker-permit`, `r2o-own-first` (304) | 304; нет текущего прогона |
-| S4 | ACK → APPLIED exact proof → candidate persistence (2) | 0 | 0 | `r2o-ack-applied-persist` (304), `r2o-known-plans` (304) | 304; process restart |
-| S5 | JSON catalog atomic save/merge/sync (2) | 0 | 0 | `r2o-catalog-persist`, `r2o-catalog-sync` (304) | 304; concurrent external writer |
-| S6 | HTTP search candidate/order/retry/judge/APPLIED (3) | 0 | 0 | `r2o-http-search` (304), `r2o-fetch-cli` (без пина) | 304; живой поиск; APPLIED branch |
-| S7 | S99/procd boot waiters/restart/stop/delayed /opt (1) | доказано | 1 | `test-router-procd-lifecycle-qemu.py` (a63), `test-router-openwrt-init.sh` | Только waiter dispatch; crash recovery отдельно |
-| S8 | Process crash/restart + catalog reapply (1) | 0 | 0 | `test-controller-process-reapply-qemu.py` (R2O-only), `test-router-process-supervisor.sh` | Нет C-parity; D2O waiter one-shot |
-| S9 | Auto refusal → Discovery → APPLIED → firewall reapply (2) | 0 | 0 | Process smoke с fake datapath peer | Нет реального datapath/firewall; failure injection |
-| S10 | Long-running controller recovery (1) | 0 | 0 | Нет | Полный цикл после crash/restart |
-| S11 | Diagnostics records/snapshots/madvise and periodic report (1) | 0 | 0 | `diagnostics.rs`, `r2o-diagnostics-differential.sh` | allocator/madvise и часть периодической RSS-сводки отсутствуют |
-| | **Итого Discovery** | | **1/21** | | |
-
-### 6.3. Classifier / TLS / HTTP
-
-| ID | Контракт (вес) | Статус | Балл | Покрытие сейчас | Пробел |
-|---|---|---|---:|---|---|
-| C1 | Raw profiles/ECH shapes/send/cancel/fallback/connect (3) | 0 | 0 | `r2o-raw-profile`, `r2o-raw-emission-cancel`, `r2o-raw-connect-fallback`, `r2o-fallback`, `r2o-raw-split-support` (304) | 304; live DPI; cancel/timing |
-| C2 | CLEAR confirmation/cancel (1) | 0 | 0 | `test-classifier-clear-confirm` (304) | 304 |
-| C3 | SO_MARK confirmation (1) | 0 | 0 | `test-classifier-so-mark-production` (304) | 304; production getsockopt |
-| C4 | Base transport errors → split (1) | 0 | 0 | `test-classifier-full-tree-control` (304) | 304 |
-| C5 | Poison/strategy tree/control/neutral ACK (2) | 0 | 0 | `test-classifier-full-tree-control`, `candidate-filter`, `raw-production` (304) | 304; injected/scripted branches |
-| C6 | TCP measurement + core verifier (2) | 0 | 0 | `r2o-meas`, `r2o-measured-split` (304) | 304; full call path |
-| C7 | TLS/HTTP verifier outcomes/retry (1) | доказано | 1 | `r2o-tls-verify-differential.sh` (a378), `test-http-chunk-framing` (a63) | Loopback; не live DPI |
-| C8 | Connect/read timeout + doubled baseline retry (1) | 0 | 0 | `test-classifier-full-tree-control` (304) | 304 |
-| C9 | TLS 1.2 reverse response probe/verdicts (3) | 0 | 0 | `test-d2o-shared-fixtures` (304), `test-classifier-full-tree-control` (304) | 304; live DPI |
-| C10 | ECH receive ladder/witness/retries (2) | 0 | 0 | `r2o-ech-rx-ladder`, `r2o-layered-rx` (304) | 304; реальные ECH-конфигурации |
-| C11 | HTTP response framing/reader (1) | доказано | 1 | `test-http-chunk-framing-differential.sh` (a63), `r2k-core` tests | Остальные call-path/ветви |
-| C12 | ClientHello/TLS12/13/ECH parser helpers (1) | 0 | 0 | C `test_hello/test_ech/test_tls12`, Rust unit | Нет paired diff |
-| C13 | HTTPS probe/ECH resolver/cache state (1) | 0 | 0 | C `test_httpsprobe`, Rust tests | Нет paired diff |
-| C14 | HTTP/3 status/header parser + httpup (1) | 0 | 0 | C `test_h3`, `test_httpup_logic`; Rust tests | Нет paired diff |
-| C15 | Compose/crypto/p256/x25519/props helpers (2) | 0 | 0 | C tests, Rust unit | Нет matrix-контракта |
-| C16 | Detect/classifier CLI output/exit/JSON (1) | 0 | 0 | `r2o-controller/main.rs` | human stdout/exit/JSON не полностью сопоставлены |
-| | **Итого Classifier/TLS** | | **2/24** | | |
-
-### 6.4. QUIC / HTTP3
-
-| ID | Контракт (вес) | Статус | Балл | Покрытие сейчас | Пробел |
-|---|---|---|---:|---|---|
-| Q1 | QUIC Initial/QSN/SNI/local-address gate (2) | 0 | 0 | `r2o-quic-hello`, `r2o-quic-local-address` (304), `r2o-discovery-quic-stop` | 304; stop/fallback |
-| Q2 | Residual/VN/address pool/neutral controls/fallback (3) | 0 | 0 | REA_EVIDENCE (source mapping), controller unit tests | Нет поведенческого differential |
-| Q3 | Short-control complete/budget (1) | 0 | 0 | `test-quic-short-control` (304) | 304 |
-| Q4 | HTTP/3 framing/stream termination (1) | доказано | 1 | `test-quic-http3-full-stage-differential.sh` (a63), 18/18 | Network errors/lifecycle |
-| Q5 | HTTP/3 budgets/transport limits/stall (1) | 0 | 0 | Full-stage 18/18; `test-quic-http3` | 70-KiB HEADERS app_bytes; timing-sensitive stall |
-| Q6 | Budget init/app-bytes helper (1) | 0 | 0 | `test-quic-budget-init`, `test-quic-app-bytes` (304) | 304 |
-| Q7 | Silent peer handshake timeout (1) | доказано | 1 | Full-stage/`r2o_http3_silent_udp_peer_timeout` (a63) | Нет ICMP/close-port вариантов |
-| Q8 | QUIC deny/recheck lifecycle (1) | 0 | 0 | `r2o_quic_deny.rs` | Нет paired C/Rust lifecycle differential |
-| | **Итого QUIC/HTTP3** | | **2/11** | | |
-
-### 6.5. Discord
-
-| ID | Контракт (вес) | Статус | Балл | Покрытие сейчас | Пробел |
-|---|---|---|---:|---|---|
-| R1 | UDP observer initiator/SSRC/endpoint event (2) | 0 | 0 | `test-discord-udp-observer-reconnect` (304) | 304; production RTC |
-| R2 | Manual measurement arm propagation (1) | 0 | 0 | `test-discord-voice-discovery-arm` (304) | 304 |
-| R3 | Voice trial lease/renewal/120-s waiter/APPLIED (3) | 0 | 0 | `r2o-discord-discovery`, `r2o-discord-voice-lifecycle-helper` (304), `test-discord-scheduled-udp` (a63) | 304; production process/long RTC |
-| R4 | Endpoint change/late NAK/persistence/reapply (1) | 0 | 0 | `r2o-discord-voice-lifecycle-helper` (304) | 304; source-backed helper |
-| R5 | Trial clock after queue admission (1) | 0 | 0 | `test-discord-voice-trial-clock` (304) | 304 |
-| R6 | Scheduled UDP emission/queue stats (1) | доказано | 1 | `test-discord-scheduled-udp-differential.sh` (a63) | Periodic/shutdown queue output |
-| R7 | Long RTC session/process recovery (1) | 0 | 0 | Нет | Полный RTC, restart, endpoint recovery |
-| R8 | Discord Gateway WebSocket upgrade/Hello (1) | доказано | 1 | `r2o-tls-verify-differential.sh` + `d2o_verify_differential` (a378), 14 сценариев | Loopback; не живой Gateway |
-| | **Итого Discord** | | **2/11** | | |
-
-### 6.6. Telegram / Meta DNS
-
-| ID | Контракт (вес) | Статус | Балл | Покрытие сейчас | Пробел |
-|---|---|---|---:|---|---|
-| T1 | Telegram route plan/DNS exclusion (1) | 0 | 0 | `r2o-telegram-route-dns` (304, historical) | Не перезапущен; z2kOW donor, не C11 D2O |
-| T2 | Telegram response observer (1) | 0 | 0 | `r2o-telegram-response-observer` (304, historical) | То же |
-| T3 | Config/DC map/MTProto/WS retries/service lifecycle (2) | 0 | 0 | Source compare 38 files; `test-router-telegram-service.sh` (R2O-only) | Нет C/Rust behavior diff; CF/WS не проверены |
-| T4 | Telegram firewall mark/stop order (1) | доказано | 1 | `test-router-tg-mark-differential.sh`, `test-telegram-stop-order-differential.sh` (8e2c) | Live router netfilter |
-| T5 | Meta DNS scheduler lifecycle + range asset (1) | доказано | 1 | `test-router-meta-dns-scheduler-differential.sh`, `test-package-release.sh` | Live `ndmc`; scheduler restart |
-| T6 | Direct DNS/TLS edge/owned-record removal (1) | доказано | 1 | `test-meta-edge-differential.sh`, `test-router-meta-dns-remove-differential.sh` (8e2c, CI #445) | Physical Keenetic |
-| T7 | Telegram limits/memory budget/stats timeout/config validation (1) | 0 | 0 | `limits.rs`, `stats.rs`, `config.rs` | memory budget отсутствует; stats read без таймаута; CF/TG_PORT validation расходится |
-| | **Итого Telegram/Meta** | | **3/8** | | |
-
-### 6.7. WebPanel
-
-| ID | Контракт (вес) | Статус | Балл | Покрытие сейчас | Пробел |
-|---|---|---|---:|---|---|
-| P1 | Bind selection/install safety (1) | 0 | 0 | `r2o-panel-bind-default`, `test-router-select-panel-ip`, `test-router-panel-bind-install` (304) | 304; physical router |
-| P2 | Status unavailable/catalog token/size (1) | 0 | 0 | `test-panel-status-unavailable`, `test-panel-catalog-revision` (304) | 304 |
-| P3 | Control/actions/workers/config/static/update (2) | 0 | 0 | 22 panel scripts (304; temp a378) | 304; checked-in pin; browser |
-| P4 | Browser flow/layout (1) | 0 | 0 | `crates/r2o-panel/tests/browser.cjs` (R2O-only) | Нет C-oracle; только визуальная проверка |
-| P5 | Panel absolute response deadline and client IO resilience (1) | 0 | 0 | `server.rs` | C absolute 5s deadline vs per-read/write; client IO error может остановить serve |
-| | **Итого WebPanel** | | **0/6** | | |
-
-### 6.8. Firewall / PPE
-
-| ID | Контракт (вес) | Статус | Балл | Покрытие сейчас | Пробел |
-|---|---|---|---:|---|---|
-| F1a | Static nft/iptables rule generation: port/DNS/voice order, broadcast/ICMP (1) | доказано | 1 | `test-firewall-port-scope`, `broadcast`, `rule-error`, `nft-legacy` (8e2c) | Live kernel; полный syntax/effect |
-| F1b | Marks/gate/connbytes: MEASURE_MARK, D2K_GATE, CONNBYTES+1, Telegram mark (1) | доказано | 1 | `test-firewall-connbytes-boundary`, `iptables-status`, `test-router-tg-mark-differential` (8e2c) | Live kernel; fault branches |
-| F2 | nft rollback/legacy cleanup/RST lifetime (1) | доказано | 1 | `test-firewall-nft-failure`, `nft-legacy`, `nft-down-rst-lifetime` (8e2c) | Live nft transaction |
-| F3 | Rule install error code (1) | доказано | 1 | `test-firewall-rule-error-differential.sh` (8e2c) | Полная таблица правил |
-| F4 | Flow-offload success/restore (1) | доказано | 1 | `test-router-flowoffload-d2o-differential.sh` (8e2c) | Live fw4/kernel |
-| F5 | Flow-offload UCI write-failure (1) | доказано | 1 | Тот же скрипт (8e2c) | Один fixture на две строки |
-| F6 | FastNAT lifecycle (1) | доказано | 1 | `test-router-fastnat-lifecycle-differential.sh` (a63) | Реальный sysctl/kernel |
-| F7 | DNS upstream exclusions/refresh (1) | доказано | 1 | `test-router-dns-exclusion-differential.sh` (a63) | Live DNS/ndmc |
-| F8 | Heal/watchdog/reapply/cooldown (1) | доказано | 1 | `test-router-reapply`, `heal-concurrency`, `firewall-watchdog`, `firewall-status`, `iptables-status` | Kernel; реальный watchdog crash |
-| F9a | IPv6 fallback classification/modules/marker/reapply helper (1) | доказано | 1 | `test-router-ipv6-fallback-differential.sh` (a63), `route-gate-config` | Live kernel modules/NFQUEUE |
-| F9b | IPv6 live kernel switch/queue recovery (1) | 0 | 0 | QEMU flow-offload only | Полный live module/queue/reapply |
-| F10a | PPE rule generation/backend/cleanup/errors (1) | доказано | 1 | `test-router-ppe-rule-generation`, `backend`, `ensure-running`, `legacy-cleanup`, `firewall-lock`, `removal-error` (8e2c) | — |
-| F10b | PPE hardware datapath/tag migration/restart (1) | 0 | 0 | - | Реальный PPE kernel, hardware tags, restart |
-| F11 | Router clear-found/KEENETIC_POLICY/log rotation/heal semantics (1) | 0 | 0 | `S99r2o` | clear-found оставляет https-cache/measurements; KEENETIC_POLICY отсутствует; Meta DNS логи не ротируются; heal может запустить остановленный Telegram |
-| | **Итого Firewall/PPE** | | **11/14** | | |
-
-### 6.9. Release / ABI / Service
-
-| ID | Контракт (вес) | Статус | Балл | Покрытие сейчас | Пробел |
-|---|---|---|---:|---|---|
-| L1 | Update guard current/download failure (1) | доказано | 1 | `test-router-update-availability`, `update-scheduler` (8e2c) | Mock downloads |
-| L2a | Staging/signature/stop/activate/health/rollback (1) | доказано | 1 | `test-router-update-lifecycle`, `test-signed-install-rollback.sh`, manager tests | Mock downloads; field |
-| L2b | OpenWrt procd/reboot/signed field install (1) | 0 | 0 | — | Всё |
-| L3 | Package release manifest/asset bytes (1) | доказано | 1 | `test-package-release.sh`, meta-ranges bytes | Placeholder executables |
-| L4a | Cross-build ABI + QEMU smoke 4 targets (1) | доказано | 1 | `r2o-build-openwrt-*`, ARMv5, D2O `make cross` | — |
-| L4b | Runtime parity/load on target (1) | 0 | 0 | — | Runtime/физический роутер |
-| L5 | Physical router/procd update/reboot (1) | 0 | 0 | - | Всё |
-| L6 | Install/bootstrap/uninstall lifecycle (1) | 0 | 0 | `router/install.sh`, `uninstall.sh` | bootstrap и uninstall fallback не проверены полностью |
-| | **Итого Release/ABI** | | **4/8** | | |
-
-### 6.10. Ранее не учтённые production-модули
-
-| ID | Контракт (вес) | Статус | Балл | Покрытие сейчас | Пробел |
-|---|---|---|---:|---|---|
-| M1 | `compose.c` + `d2kc.c` orchestration/event loop (3) | 0 | 0 | Inventory note; REA fragments | Нет отдельного контракта и differential |
-| M2 | `d2kask.c` (1) | 0 | 0 | `r2o-ask-differential.sh` — независимые suites | Нет paired diff |
-| M3 | `d2kfetch.c` CLI (1) | доказано | 1 | `r2o-fetch-cli-differential.sh` (сравнивает C/Rust CLI) | Нет SHA-пина; не все ветви |
-| M4 | `d2kvoice.c` controller entry (1) | 0 | 0 | Discord rows частично | Нет контракта |
-| M5 | `link.c`, `net4.c`, `udpruntime.c`, `volume.c` (3) | 0 | 0 | Inventory note; Rust `r2o_volume` tests | Нет C/Rust diff |
-| M6 | `crypto.c`, `p256.c`, `x25519.c`, `props.c`, `udpplan.c`, `plantlv.c` helpers (3) | 0 | 0 | C unit tests; Rust units | Нет paired diff и контракта |
-| M7 | `http80.c`, `http_trace.c`, `journal.c`, `plans.c`, `plan_parse/apply.c` (2) | 0 | 0 | C tests; Rust units | Нет matrix-контракта |
-| M8 | Production header-inline helpers inventory/mapping (1) | 0 | 0 | `docs/audit/function-index.md` | 61 header-inline функций добавлены; helper-level mapping не проверен дифференциалами |
-| | **Итого неучтённые модули** | | **1/15** | | |
-
-### 6.11. Дополнительная декомпозиция Panel / Router / Telegram
-
-Отчёты `docs/audit/panel-router-vps-telegram-audit.md` и `docs/audit/core-controller-audit.md` содержат более тонкое разбиение, которое пока не сведено в 97 строк выше:
-
-- Panel: 26 контрактов A1–A26 (bind, config parser, known-list, 32-КиБ заголовок, абсолютные дедлайны, обрыв клиента, control/actions, Workers, update, diagnostics, static, CLI).
-- Router: 54 контракта B1–B54 (start/stop/restart, clear-found, nft/iptables, rollback, legacy cleanup, RST lifetime, IPv6 fallback, DNS exclusions, flow-offload, fastnat, PPE, heal/watchdog, NDM, procd, update, signed install, OpenWrt/reboot, uninstall, Telegram/Meta DNS, log maintenance, `KEENETIC_POLICY`).
-- Telegram: 26 контрактов C1–C26 (config, identity, DC-map, MTProto auth/crypto, splitter/probe, route/DNS, listener/transparent, WS/retry, stats, limits/memory, service lifecycle).
-- VPS: 4 контракта D1–D4 (`relay-enroll` 45 функций, `relay-gate` 18) — `N/A (unported)`, вне router-runtime scope.
-
-Эти подпункты нужно свести в таблицу с весами и бинарными статусами (доказано/0) в следующем проходе. До сведения они не влияют на 97/132 и не дают баллов.
-
-**Итог аудита.** 108 контрактов, вес 144: **37/144 = 25,69 %** в строгом режиме; **89/144 = 61,81 %** при принятии `304ba893`; legacy-агрегат 80/89 = 89,89 % не является оценкой текущей ревизии. Детали и ограничения — `docs/audit/README.md` и `docs/audit/validation-2026-11-08.md`.
-
-**Первое исправление после аудита (2026-11-07).** В `r2o-datapath` добавлены CLI-алиасы D2O `--flows` и `--udp-reverse-hook`; `cargo test -p r2o-datapath` прошёл 257 + 49 + 6 + 20 + 9 + 1 + 9 + 21 + 5 тестов, 0 failed, 1+ ignored; новый тест `d2o_cli_aliases_map_to_the_same_options` пройден. В `r2o-panel` known-list дополнен D2O/R2O ключами (`TG_RELAY_URL`, `TG_RELAY_SECRET`, `TG_ENROLL_PORT`, `D2K_PPE_DEOFFLOAD`, `D2K_RUNTIME_DIR`, `AUTOUPDATE`, `D2K_GATE`, `DNS_PORTS`, `HTTP_KEEPALIVE_PORTS`); `cargo test -p r2o-panel --test http` прошёл 20 passed, 0 failed, 16 ignored; новый тест `config_parser_accepts_all_shipped_and_donor_known_keys` пройден. Контракты CLI и panel остаются частичными: `--sched-slots`, `--duration`, `--log`, `--health-file`, абсолютный дедлайн ответа, обрыв клиента и незакрытая кавычка ещё не исправлены.
-
-**Важно для классификатора.** `core/meas.c` и `core/verdict.c` не вызываются текущим `d2kc`; production-путь идёт через `detect/classify.c` и `d2k_sched_tcp_*`. Строки C6/C8 и прежние строки L30–L33/L36 нужно читать как API-only или перепривязать к `detect/classify.c`.
-
----
+| ID | Контракт (вес) | Причина |
+|---|---|---|
+| B32 | Automatic crash recovery/reapply (2) | extension: extension: automatic crash recovery, C-oracle отсутствует |
+| B45 | Telegram DC-map sync (1) | extension: extension: R2O DC-map sync; C production-ветвь не вызывается |
+| B54 | Migration cleanup старого `d2khttp` (1) | out-of-scope: out-of-scope: миграция старого `d2khttp` |
+| TG2 | Identity/ed25519 и его потребитель (1) | extension: extension: identity/ed25519 без production-потребителя |
+| TG25 | Meta DNS direct resolve/scheduler (2) | out-of-scope: дубль router-side B47–B51 (Meta DNS) |
+| TG26 | Panel/shell integration (1) | out-of-scope: дубль router-side B41–B46 (panel/shell integration) |

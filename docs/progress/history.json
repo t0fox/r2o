@@ -8,19 +8,19 @@
     "label": "legacy-агрегат"
   },
   {
-    "sha": "carry-304",
-    "date": "2026-11-07",
-    "points": 89,
-    "weight": 144,
-    "percent": 61.81,
-    "label": "carry-forward 304ba893"
+    "sha": "carry-304-normalized",
+    "date": "2026-11-08",
+    "points": 140,
+    "weight": 261,
+    "percent": 53.64,
+    "label": "carry (только явно помеченные 304)"
   },
   {
-    "sha": "strict-current",
-    "date": "2026-11-07",
-    "points": 37,
-    "weight": 144,
-    "percent": 25.69,
-    "label": "строгий текущий"
+    "sha": "strict-normalized",
+    "date": "2026-11-08",
+    "points": 77,
+    "weight": 261,
+    "percent": 29.5,
+    "label": "строгий текущий (нормализованный)"
   }
 ]

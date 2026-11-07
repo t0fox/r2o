@@ -14,13 +14,15 @@
 
 Функций, не названных в тексте аудиторских отчётов: **660**. Они перечислены в `docs/audit/unmentioned-functions.md`; для них действует module-level статус из таблицы ниже.
 
+Контрактные ID нормализованы 2026-11-08: Panel → `A*`, Router → `B*`, Telegram → `TG*`, Classifier → `CL*`, Discord Gateway → `G1`. Все 2584 строки ссылаются только на существующие ID нормализованной матрицы (172 контракта / 261 балл); проверка `check_contract_refs.py` даёт 0 отсутствующих ссылок.
+
 ## Сводка по файлам
 
 | Файл | Функций | Rust-владелец | Контракт | Файловый статус |
 |---|---:|---|---|---|
 | `core/catalog.c` | 60 | r2o-controller/catalog.rs | S5 | partial |
-| `core/compose.c` | 53 | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial |
-| `core/crypto.c` | 28 | ring/rustls/hpke | C15/M6 | partial |
+| `core/compose.c` | 53 | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial |
+| `core/crypto.c` | 28 | ring/rustls/hpke | CL15/M6 | partial |
 | `core/d2kask.c` | 24 | ask.rs, main.rs::run_r2o_ask | M2 | partial |
 | `core/d2kc.c` | 28 | main.rs::serve_catalog/watch_events, diagnostics.rs, live.rs | M1 | partial |
 | `core/d2kfetch.c` | 6 | src/bin/r2o-fetch.rs, fetch.rs | M3 | partial |
@@ -29,23 +31,23 @@
 | `core/domain.c` | 4 | r2o-controller/domain.rs | S5 | implemented-unproven |
 | `core/groups.c` | 14 | r2o-controller/groups.rs | S5 | implemented-unproven |
 | `core/h3.c` | 9 | crate h3, r2o_quic_http3.rs | Q4/Q5 | partial |
-| `core/hello.c` | 19 | r2k-core/tls.rs, hello.rs, r2o_tls.rs | C12 | partial |
+| `core/hello.c` | 19 | r2k-core/tls.rs, hello.rs, r2o_tls.rs | CL12 | partial |
 | `core/httpsearch.c` | 66 | main.rs HTTP search, http_search.rs | S6 | partial |
-| `core/httpsprobe.c` | 22 | https_probe.rs, response.rs | C13 | partial |
-| `core/httpup_logic.c` | 15 | r2k-core/httpup.rs | C14 | partial |
+| `core/httpsprobe.c` | 22 | https_probe.rs, response.rs | CL13 | partial |
+| `core/httpup_logic.c` | 15 | r2k-core/httpup.rs | CL14 | partial |
 | `core/include/d2k_arm.h` | 1 | r2k-core/plan/apply.rs | D14/D15 | partial |
-| `core/include/d2k_http_reply.h` | 6 | r2k-core/httpup.rs, fetch.rs | C13/C14 | partial |
+| `core/include/d2k_http_reply.h` | 6 | r2k-core/httpup.rs, fetch.rs | CL13/CL14 | partial |
 | `core/include/d2k_ip6frag_send.h` | 9 | r2o-datapath/raw.rs | D19 | partial |
 | `core/include/d2k_link.h` | 3 | r2k-core/control.rs | D20 | missing |
 | `core/include/d2k_quicprobe.h` | 9 | quic_replay.rs, r2o_quic_http3.rs | Q3/Q5 | partial |
-| `core/include/d2k_resource.h` | 6 | r2o-controller/r2o_resource.rs | C15 | partial |
+| `core/include/d2k_resource.h` | 6 | r2o-controller/r2o_resource.rs | CL15 | partial |
 | `core/ipfrag.c` | 8 | r2k-core/wire.rs | D3 | equivalent (scoped) |
 | `core/link.c` | 43 | r2k-core/control.rs, main.rs::ControlClient | S1 | partial |
 | `core/match.c` | 3 | r2o-controller/catalog.rs | S5 | partial |
-| `core/meas.c` | 13 | classify.rs (API-only) | C6/C8 | partial |
-| `core/measured.c` | 11 | classify_measured.rs, r2o_rx_volume.rs | C5/C6 | partial |
+| `core/meas.c` | 13 | classify.rs (API-only) | CL6/CL8 | partial |
+| `core/measured.c` | 11 | classify_measured.rs, r2o_rx_volume.rs | CL5/CL6 | partial |
 | `core/net4.c` | 4 | r2k-core/addr.rs, quic_replay.rs, voice_targets.rs | M5 | partial |
-| `core/p256.c` | 22 | ring/rustls | C15/M6 | implemented-unproven |
+| `core/p256.c` | 22 | ring/rustls | CL15/M6 | implemented-unproven |
 | `core/plantlv.c` | 20 | r2o-controller/plan_text.rs | M6 | partial |
 | `core/props.c` | 5 | quic_replay.rs, main.rs QUIC | Q2/M6 | partial |
 | `core/quic.c` | 21 | r2k-core/quic.rs | Q1 | partial |
@@ -58,18 +60,18 @@
 | `core/quicwire.c` | 28 | r2k-core/quic.rs, wire.rs | Q1 | partial |
 | `core/sched.c` | 282 | main.rs, discovery.rs, r2o_resource_limit.rs | S2 | partial |
 | `core/stun.c` | 5 | r2k-core/stun.rs, voice_measure.rs | R1 | partial |
-| `core/tls12.c` | 26 | rustls, fetch.rs | C12 | partial |
-| `core/tls13.c` | 23 | rustls, r2o_tls.rs | C12 | partial |
-| `core/tls13core.c` | 24 | rustls, ech.rs, hello.rs | C12/C10 | partial |
+| `core/tls12.c` | 26 | rustls, fetch.rs | CL12 | partial |
+| `core/tls13.c` | 23 | rustls, r2o_tls.rs | CL12 | partial |
+| `core/tls13core.c` | 24 | rustls, ech.rs, hello.rs | CL12/CL10 | partial |
 | `core/udpplan.c` | 12 | quic_replay.rs, voice_discovery.rs, voice_measure.rs | Q2/R2 | partial |
 | `core/udpruntime.c` | 8 | r2k-core/plan, datapath engine; raw UDP sender отсутствует | M5 | missing |
-| `core/verdict.c` | 7 | classify.rs (API-only) | C5 | not-applicable |
-| `core/verify.c` | 73 | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial |
+| `core/verdict.c` | 7 | classify.rs (API-only) | CL5 | not-applicable |
+| `core/verify.c` | 73 | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial |
 | `core/verify_quic_replay.c` | 2 | quic_replay.rs, fetch.rs | Q2 | partial |
 | `core/voice.c` | 14 | voice_measure.rs, voice_targets.rs | R2/R3 | partial |
 | `core/voice_discovery.c` | 7 | voice_discovery.rs | R2 | partial |
-| `core/volume.c` | 19 | r2o_volume.rs, fetch.rs | C15/M5 | partial |
-| `core/x25519.c` | 11 | hpke/rustls | C15/M6 | partial |
+| `core/volume.c` | 19 | r2o_volume.rs, fetch.rs | CL15/M5 | partial |
+| `core/x25519.c` | 11 | hpke/rustls | CL15/M6 | partial |
 | `datapath/addr.c` | 3 | r2k-core/addr.rs | D18 | partial |
 | `datapath/capture.c` | 6 | r2o-datapath/capture.rs | D12 | partial |
 | `datapath/ctl.c` | 14 | r2o-datapath/control.rs | S1/D17 | partial |
@@ -81,8 +83,8 @@
 | `datapath/http_trace.c` | 1 | — | D17 | missing |
 | `datapath/icmpguard.c` | 7 | r2o_icmp_guard.rs | D15 | partial |
 | `datapath/include/d2k_ctl.h` | 2 | r2k-core/control.rs | S1 | partial |
-| `datapath/include/d2k_http_request_stream.h` | 3 | r2k-core/httpup.rs | C14 | partial |
-| `datapath/include/d2k_http_response.h` | 6 | r2k-core/http_response.rs | C11 | partial |
+| `datapath/include/d2k_http_request_stream.h` | 3 | r2k-core/httpup.rs | CL14 | partial |
+| `datapath/include/d2k_http_response.h` | 6 | r2k-core/http_response.rs | CL11 | partial |
 | `datapath/include/d2k_packet.h` | 2 | r2k-core/packet.rs | D18 | partial |
 | `datapath/include/d2k_plans.h` | 2 | r2o-datapath/control.rs | D16 | partial |
 | `datapath/include/d2k_track.h` | 1 | r2o-datapath/engine.rs | D10 | partial |
@@ -105,47 +107,47 @@
 | `datapath/udp_release.c` | 34 | r2o_udp_hold.rs | D9 | partial |
 | `datapath/wire.c` | 9 | r2k-core/wire.rs | D13 | partial |
 | `datapath/wire_udp.c` | 5 | r2k-core/wire.rs | D3/D13 | partial |
-| `detect/bridge.c` | 17 | classify.rs, discovery.rs, raw_probe.rs, main.rs | C5/T2 | partial |
-| `detect/classify.c` | 36 | r2o-controller/classify.rs | C5/T3 | equivalent (scoped) |
-| `detect/include/d2k_detect.h` | 1 | r2o-controller/classify.rs | C5 | partial |
-| `detect/main.c` | 8 | r2o-controller/main.rs CLI | C16 | partial |
-| `detect/poison.c` | 12 | classify.rs, raw_probe.rs, classify_measured.rs | C5/T5 | partial |
-| `detect/props.c` | 7 | classify.rs, raw_probe.rs | C5/T4 | partial |
-| `detect/raw.c` | 62 | r2o-controller/raw_probe.rs | C1/T6 | equivalent (scoped) |
-| `detect/response.c` | 7 | r2o-controller/response.rs | C9/T7 | equivalent (scoped) |
-| `detect/trigger.c` | 9 | r2o-controller/trigger.rs | C?/T1 | equivalent (scoped) |
-| `panel/main.c` | 18 | r2o-panel/main.rs | P1/P5 | partial |
-| `panel/server.c` | 51 | r2o-panel/server.rs | P2-P5 | partial |
-| `relay-enroll/main.c` | 45 | — | VPS D1a/D1b/D2 | not-applicable |
-| `relay-gate/main.c` | 19 | — | VPS D3 | not-applicable |
+| `detect/bridge.c` | 17 | classify.rs, discovery.rs, raw_probe.rs, main.rs | CL5 | partial |
+| `detect/classify.c` | 36 | r2o-controller/classify.rs | CL5 | equivalent (scoped) |
+| `detect/include/d2k_detect.h` | 1 | r2o-controller/classify.rs | CL5 | partial |
+| `detect/main.c` | 8 | r2o-controller/main.rs CLI | CL16 | partial |
+| `detect/poison.c` | 12 | classify.rs, raw_probe.rs, classify_measured.rs | CL5 | partial |
+| `detect/props.c` | 7 | classify.rs, raw_probe.rs | CL5 | partial |
+| `detect/raw.c` | 62 | r2o-controller/raw_probe.rs | CL1 | equivalent (scoped) |
+| `detect/response.c` | 7 | r2o-controller/response.rs | CL9 | equivalent (scoped) |
+| `detect/trigger.c` | 9 | r2o-controller/trigger.rs | CL1 | equivalent (scoped) |
+| `panel/main.c` | 18 | r2o-panel/main.rs | A1/A2/A5 | partial |
+| `panel/server.c` | 51 | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial |
+| `relay-enroll/main.c` | 45 | — | — | not-applicable |
+| `relay-gate/main.c` | 19 | — | — | not-applicable |
 | `runtime/d2k_diagnostics_files.h` | 4 | r2o-controller/diagnostics.rs | S11 | partial |
 | `runtime/d2k_runtime.h` | 6 | r2k-core/control.rs::valid_release_id | S1 | missing |
-| `telegram/src/cf_domains.c` | 19 | r2o-telegram/cf_domain_pool.rs | T3/T7 | partial |
-| `telegram/src/config.c` | 9 | r2o-telegram/config.rs | T3/T7 | partial |
-| `telegram/src/dc_map.c` | 13 | r2o-telegram/dc_map.rs | T3 | partial |
-| `telegram/src/dc_map_json.c` | 16 | r2o-telegram/dc_map.rs | T3 | partial |
-| `telegram/src/dc_map_store.c` | 27 | r2o-telegram/dc_map.rs | T3 | partial |
-| `telegram/src/enroll.c` | 1 | — | VPS D1 | not-applicable |
-| `telegram/src/epoll_proxy.c` | 101 | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | partial |
-| `telegram/src/identity.c` | 12 | r2o-telegram/identity.rs | T3 | partial |
-| `telegram/src/limits.c` | 3 | r2o-telegram/limits.rs | T7 | partial |
-| `telegram/src/listener.c` | 8 | r2o-telegram/transparent.rs | T3 | partial |
-| `telegram/src/main.c` | 29 | r2o-telegram/main.rs, server.rs | T3 | partial |
-| `telegram/src/memory_budget.c` | 2 | — | T7 | missing |
-| `telegram/src/mtproto_auth.c` | 27 | r2o-telegram/dc_discovery.rs, grammers | T3 | partial |
-| `telegram/src/mtproto_config.c` | 11 | r2o-telegram/dc_discovery.rs | T3 | partial |
-| `telegram/src/mtproto_crypto.c` | 12 | r2o-telegram/crypto.rs | T3 | partial |
-| `telegram/src/mtproto_encrypted.c` | 4 | grammers mtp::Encrypted | T3 | partial |
-| `telegram/src/mtproto_probe.c` | 39 | r2o-telegram/dc_discovery.rs, ws_client | T3 | partial |
-| `telegram/src/mtproto_splitter.c` | 12 | r2o-telegram/splitter.rs | T3 | partial |
-| `telegram/src/net.c` | 2 | r2o-telegram/outbound/connector.rs | T3 | partial |
-| `telegram/src/route_dns.c` | 49 | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | partial |
-| `telegram/src/route_plan.c` | 6 | r2o-telegram/routing.rs, ws_client.rs | T3 | partial |
-| `telegram/src/stats_socket.c` | 10 | r2o-telegram/stats.rs | T7 | partial |
-| `telegram/src/tls.c` | 4 | r2o-telegram/ws_client.rs, meta_edge.rs | T3 | partial |
-| `telegram/src/transparent.c` | 6 | r2o-telegram/transparent.rs | T3 | partial |
-| `telegram/src/ws.c` | 18 | r2o-telegram/ws_client.rs | T3 | partial |
-| `telegram/src/ws_pump.c` | 20 | r2o-telegram/bridge.rs, ws_client.rs | T3 | partial |
+| `telegram/src/cf_domains.c` | 19 | r2o-telegram/cf_domain_pool.rs | TG13 | partial |
+| `telegram/src/config.c` | 9 | r2o-telegram/config.rs | TG1 | partial |
+| `telegram/src/dc_map.c` | 13 | r2o-telegram/dc_map.rs | TG3 | partial |
+| `telegram/src/dc_map_json.c` | 16 | r2o-telegram/dc_map.rs | TG3 | partial |
+| `telegram/src/dc_map_store.c` | 27 | r2o-telegram/dc_map.rs | TG3 | partial |
+| `telegram/src/enroll.c` | 1 | — | — | not-applicable |
+| `telegram/src/epoll_proxy.c` | 101 | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | partial |
+| `telegram/src/identity.c` | 12 | r2o-telegram/identity.rs | TG2 | partial |
+| `telegram/src/limits.c` | 3 | r2o-telegram/limits.rs | TG22 | partial |
+| `telegram/src/listener.c` | 8 | r2o-telegram/transparent.rs | TG15 | partial |
+| `telegram/src/main.c` | 29 | r2o-telegram/main.rs, server.rs | TG24 | partial |
+| `telegram/src/memory_budget.c` | 2 | — | TG22 | missing |
+| `telegram/src/mtproto_auth.c` | 27 | r2o-telegram/dc_discovery.rs, grammers | TG8 | partial |
+| `telegram/src/mtproto_config.c` | 11 | r2o-telegram/dc_discovery.rs | TG4 | partial |
+| `telegram/src/mtproto_crypto.c` | 12 | r2o-telegram/crypto.rs | TG5 | partial |
+| `telegram/src/mtproto_encrypted.c` | 4 | grammers mtp::Encrypted | TG7 | partial |
+| `telegram/src/mtproto_probe.c` | 39 | r2o-telegram/dc_discovery.rs, ws_client | TG8 | partial |
+| `telegram/src/mtproto_splitter.c` | 12 | r2o-telegram/splitter.rs | TG6 | partial |
+| `telegram/src/net.c` | 2 | r2o-telegram/outbound/connector.rs | TG9/TG18 | partial |
+| `telegram/src/route_dns.c` | 49 | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | partial |
+| `telegram/src/route_plan.c` | 6 | r2o-telegram/routing.rs, ws_client.rs | TG9 | partial |
+| `telegram/src/stats_socket.c` | 10 | r2o-telegram/stats.rs | TG19/TG20 | partial |
+| `telegram/src/tls.c` | 4 | r2o-telegram/ws_client.rs, meta_edge.rs | TG11 | partial |
+| `telegram/src/transparent.c` | 6 | r2o-telegram/transparent.rs | TG15/TG16 | partial |
+| `telegram/src/ws.c` | 18 | r2o-telegram/ws_client.rs | TG12 | partial |
+| `telegram/src/ws_pump.c` | 20 | r2o-telegram/bridge.rs, ws_client.rs | TG12 | partial |
 
 ## Полные таблицы
 
@@ -218,92 +220,92 @@
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `d2k_net_whitelist_count` | 107 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 2 | `d2k_net_whitelist_name` | 110 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 3 | `wr16be` | 150 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 4 | `rd16be` | 151 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 5 | `wr32be` | 152 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 6 | `tlv_rec` | 162 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 7 | `tlv_header` | 186 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 8 | `plan_tlv_stamp_ident` | 218 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 9 | `overlap_plan_tlv` | 258 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 10 | `reorder_plan_tlv` | 277 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 11 | `badsum_fake_plan_tlv` | 296 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 12 | `checksum_plan_tlv` | 322 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 13 | `to_hex` | 331 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 14 | `ev_matches_flow` | 351 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 15 | `wait_for_event3` | 397 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 16 | `wait_for_event` | 423 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 17 | `props_bind_any` | 494 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 18 | `d2k_props_bind` | 526 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 19 | `d2k_props_bind_family` | 530 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 20 | `d2k_props_bind_udp` | 534 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 21 | `d2k_props_bind_udp_family` | 538 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 22 | `d2k_props_contact` | 542 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 23 | `d2k_props_contact_on` | 547 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 24 | `d2k_props_contact_on_family` | 553 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 25 | `tcp_timestamps_read` | 567 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 26 | `tcp_timestamps_write` | 580 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 27 | `connect_with_tcp_profile` | 591 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 28 | `d2k_props_contact_on_family_tcp_profile` | 638 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 29 | `build_fake_body` | 786 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 30 | `d2k_props_question_plan` | 798 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 31 | `d2k_props_question_passed` | 845 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 32 | `question_retire` | 874 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 33 | `d2k_props_ask` | 881 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 34 | `step_rc` | 889 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 35 | `d2k_props_ask_traced` | 900 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 36 | `append_fmt` | 1203 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 37 | `emit_header_proto` | 1221 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 38 | `emit_header` | 1229 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 39 | `append_hex` | 1233 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 40 | `overlap_plan_text` | 1245 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 41 | `reorder_plan_text` | 1271 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 42 | `badsum_fake_plan_text` | 1288 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 43 | `checksum_plan_text` | 1312 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 44 | `build_decoy_hello` | 1346 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 45 | `parse_protocol_plan_text` | 1356 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 46 | `duplicates_plan_text` | 1367 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 47 | `body_room` | 1384 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 48 | `everything_plan_text` | 1397 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 49 | `d2k_fallback_arms` | 1498 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 50 | `fb_arm_at` | 1503 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 51 | `d2k_fallback_plan` | 1542 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 52 | `d2k_arm_plan` | 1551 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
-| 53 | `d2k_compose` | 1762 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | C1/C5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 1 | `d2k_net_whitelist_count` | 107 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 2 | `d2k_net_whitelist_name` | 110 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 3 | `wr16be` | 150 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 4 | `rd16be` | 151 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 5 | `wr32be` | 152 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 6 | `tlv_rec` | 162 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 7 | `tlv_header` | 186 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 8 | `plan_tlv_stamp_ident` | 218 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 9 | `overlap_plan_tlv` | 258 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 10 | `reorder_plan_tlv` | 277 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 11 | `badsum_fake_plan_tlv` | 296 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 12 | `checksum_plan_tlv` | 322 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 13 | `to_hex` | 331 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 14 | `ev_matches_flow` | 351 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 15 | `wait_for_event3` | 397 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 16 | `wait_for_event` | 423 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 17 | `props_bind_any` | 494 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 18 | `d2k_props_bind` | 526 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 19 | `d2k_props_bind_family` | 530 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 20 | `d2k_props_bind_udp` | 534 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 21 | `d2k_props_bind_udp_family` | 538 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 22 | `d2k_props_contact` | 542 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 23 | `d2k_props_contact_on` | 547 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 24 | `d2k_props_contact_on_family` | 553 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 25 | `tcp_timestamps_read` | 567 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 26 | `tcp_timestamps_write` | 580 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 27 | `connect_with_tcp_profile` | 591 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 28 | `d2k_props_contact_on_family_tcp_profile` | 638 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 29 | `build_fake_body` | 786 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 30 | `d2k_props_question_plan` | 798 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 31 | `d2k_props_question_passed` | 845 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 32 | `question_retire` | 874 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 33 | `d2k_props_ask` | 881 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 34 | `step_rc` | 889 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 35 | `d2k_props_ask_traced` | 900 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 36 | `append_fmt` | 1203 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 37 | `emit_header_proto` | 1221 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 38 | `emit_header` | 1229 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 39 | `append_hex` | 1233 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 40 | `overlap_plan_text` | 1245 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 41 | `reorder_plan_text` | 1271 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 42 | `badsum_fake_plan_text` | 1288 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 43 | `checksum_plan_text` | 1312 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 44 | `build_decoy_hello` | 1346 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 45 | `parse_protocol_plan_text` | 1356 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 46 | `duplicates_plan_text` | 1367 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 47 | `body_room` | 1384 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 48 | `everything_plan_text` | 1397 | да | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 49 | `d2k_fallback_arms` | 1498 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 50 | `fb_arm_at` | 1503 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 51 | `d2k_fallback_plan` | 1542 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 52 | `d2k_arm_plan` | 1551 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
+| 53 | `d2k_compose` | 1762 |  | ask.rs, classify.rs, r2o_fallback.rs, plan_text.rs | CL1/CL5/M1 | partial | named in report | compose/fallback; TCP-profile connect отсутствует |
 
 ### `core/crypto.c` — 28
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `xtime` | 33 | да | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 2 | `d2k_aes_sbox_byte` | 70 |  | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 3 | `aes128_key_expand` | 80 | да | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 4 | `sub_bytes` | 112 | да | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 5 | `shift_rows` | 121 | да | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 6 | `mix_columns` | 131 | да | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 7 | `add_round_key` | 142 | да | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 8 | `aes128_encrypt_block` | 151 | да | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 9 | `d2k_aes128_ecb` | 167 |  | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 10 | `rotr32` | 175 | да | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 11 | `sha256_compress` | 201 | да | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 12 | `sha256_init` | 230 | да | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 13 | `sha256_update` | 242 | да | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 14 | `sha256_final` | 267 | да | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 15 | `d2k_sha256` | 292 |  | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 16 | `d2k_hmac_sha256` | 301 |  | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 17 | `d2k_hkdf_extract` | 331 |  | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 18 | `d2k_hkdf_expand_label` | 350 |  | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 19 | `d2k_hkdf_expand_label_ctx` | 355 |  | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 20 | `gf128_h_table` | 449 | да | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 21 | `gf128_mul_fast` | 463 | да | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 22 | `ghash` | 479 | да | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 23 | `d2k_ghash_for_test` | 538 |  | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 24 | `inc32` | 547 | да | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 25 | `gctr` | 560 | да | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 26 | `consttime_eq16` | 584 | да | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 27 | `d2k_aes128_gcm_encrypt` | 596 |  | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
-| 28 | `d2k_aes128_gcm_decrypt` | 627 |  | ring/rustls/hpke | C15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 1 | `xtime` | 33 | да | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 2 | `d2k_aes_sbox_byte` | 70 |  | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 3 | `aes128_key_expand` | 80 | да | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 4 | `sub_bytes` | 112 | да | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 5 | `shift_rows` | 121 | да | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 6 | `mix_columns` | 131 | да | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 7 | `add_round_key` | 142 | да | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 8 | `aes128_encrypt_block` | 151 | да | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 9 | `d2k_aes128_ecb` | 167 |  | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 10 | `rotr32` | 175 | да | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 11 | `sha256_compress` | 201 | да | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 12 | `sha256_init` | 230 | да | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 13 | `sha256_update` | 242 | да | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 14 | `sha256_final` | 267 | да | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 15 | `d2k_sha256` | 292 |  | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 16 | `d2k_hmac_sha256` | 301 |  | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 17 | `d2k_hkdf_extract` | 331 |  | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 18 | `d2k_hkdf_expand_label` | 350 |  | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 19 | `d2k_hkdf_expand_label_ctx` | 355 |  | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 20 | `gf128_h_table` | 449 | да | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 21 | `gf128_mul_fast` | 463 | да | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 22 | `ghash` | 479 | да | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 23 | `d2k_ghash_for_test` | 538 |  | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 24 | `inc32` | 547 | да | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 25 | `gctr` | 560 | да | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 26 | `consttime_eq16` | 584 | да | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 27 | `d2k_aes128_gcm_encrypt` | 596 |  | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
+| 28 | `d2k_aes128_gcm_decrypt` | 627 |  | ring/rustls/hpke | CL15/M6 | partial | named in report | замена зависимостями; RFC 9001 векторы |
 
 ### `core/d2kask.c` — 24
 
@@ -479,25 +481,25 @@
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `rd16` | 51 | да | r2k-core/tls.rs, hello.rs, r2o_tls.rs | C12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
-| 2 | `rd24` | 54 | да | r2k-core/tls.rs, hello.rs, r2o_tls.rs | C12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
-| 3 | `wr16` | 57 | да | r2k-core/tls.rs, hello.rs, r2o_tls.rs | C12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
-| 4 | `wr24` | 61 | да | r2k-core/tls.rs, hello.rs, r2o_tls.rs | C12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
-| 5 | `skip_u8_vec` | 69 | да | r2k-core/tls.rs, hello.rs, r2o_tls.rs | C12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
-| 6 | `skip_u16_vec` | 80 | да | r2k-core/tls.rs, hello.rs, r2o_tls.rs | C12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
-| 7 | `parse_hello` | 128 | да | r2k-core/tls.rs, hello.rs, r2o_tls.rs | C12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
-| 8 | `d2k_hello_complete` | 274 |  | r2k-core/tls.rs, hello.rs, r2o_tls.rs | C12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
-| 9 | `d2k_hello_shape` | 283 |  | r2k-core/tls.rs, hello.rs, r2o_tls.rs | C12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
-| 10 | `d2k_hello_sni` | 308 |  | r2k-core/tls.rs, hello.rs, r2o_tls.rs | C12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
-| 11 | `d2k_hello_ech_offer` | 322 |  | r2k-core/tls.rs, hello.rs, r2o_tls.rs | C12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
-| 12 | `d2k_hello_alpn` | 349 |  | r2k-core/tls.rs, hello.rs, r2o_tls.rs | C12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
-| 13 | `d2k_alpn_is_http` | 377 |  | r2k-core/tls.rs, hello.rs, r2o_tls.rs | C12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
-| 14 | `splice_sni` | 409 | да | r2k-core/tls.rs, hello.rs, r2o_tls.rs | C12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
-| 15 | `hex_nibble` | 462 | да | r2k-core/tls.rs, hello.rs, r2o_tls.rs | C12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
-| 16 | `hex_decode` | 480 | да | r2k-core/tls.rs, hello.rs, r2o_tls.rs | C12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
-| 17 | `d2k_hello_rename` | 500 |  | r2k-core/tls.rs, hello.rs, r2o_tls.rs | C12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
-| 18 | `d2k_hello_without_sni` | 537 |  | r2k-core/tls.rs, hello.rs, r2o_tls.rs | C12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
-| 19 | `d2k_hello_from_profile` | 578 |  | r2k-core/tls.rs, hello.rs, r2o_tls.rs | C12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
+| 1 | `rd16` | 51 | да | r2k-core/tls.rs, hello.rs, r2o_tls.rs | CL12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
+| 2 | `rd24` | 54 | да | r2k-core/tls.rs, hello.rs, r2o_tls.rs | CL12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
+| 3 | `wr16` | 57 | да | r2k-core/tls.rs, hello.rs, r2o_tls.rs | CL12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
+| 4 | `wr24` | 61 | да | r2k-core/tls.rs, hello.rs, r2o_tls.rs | CL12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
+| 5 | `skip_u8_vec` | 69 | да | r2k-core/tls.rs, hello.rs, r2o_tls.rs | CL12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
+| 6 | `skip_u16_vec` | 80 | да | r2k-core/tls.rs, hello.rs, r2o_tls.rs | CL12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
+| 7 | `parse_hello` | 128 | да | r2k-core/tls.rs, hello.rs, r2o_tls.rs | CL12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
+| 8 | `d2k_hello_complete` | 274 |  | r2k-core/tls.rs, hello.rs, r2o_tls.rs | CL12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
+| 9 | `d2k_hello_shape` | 283 |  | r2k-core/tls.rs, hello.rs, r2o_tls.rs | CL12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
+| 10 | `d2k_hello_sni` | 308 |  | r2k-core/tls.rs, hello.rs, r2o_tls.rs | CL12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
+| 11 | `d2k_hello_ech_offer` | 322 |  | r2k-core/tls.rs, hello.rs, r2o_tls.rs | CL12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
+| 12 | `d2k_hello_alpn` | 349 |  | r2k-core/tls.rs, hello.rs, r2o_tls.rs | CL12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
+| 13 | `d2k_alpn_is_http` | 377 |  | r2k-core/tls.rs, hello.rs, r2o_tls.rs | CL12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
+| 14 | `splice_sni` | 409 | да | r2k-core/tls.rs, hello.rs, r2o_tls.rs | CL12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
+| 15 | `hex_nibble` | 462 | да | r2k-core/tls.rs, hello.rs, r2o_tls.rs | CL12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
+| 16 | `hex_decode` | 480 | да | r2k-core/tls.rs, hello.rs, r2o_tls.rs | CL12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
+| 17 | `d2k_hello_rename` | 500 |  | r2k-core/tls.rs, hello.rs, r2o_tls.rs | CL12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
+| 18 | `d2k_hello_without_sni` | 537 |  | r2k-core/tls.rs, hello.rs, r2o_tls.rs | CL12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
+| 19 | `d2k_hello_from_profile` | 578 |  | r2k-core/tls.rs, hello.rs, r2o_tls.rs | CL12 | partial | named in report | ClientHello/SNI/ECH/ALPN parse |
 
 ### `core/httpsearch.c` — 66
 
@@ -574,48 +576,48 @@
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `d2k_https_classify` | 32 |  | https_probe.rs, response.rs | C13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
-| 2 | `d2k_https_upgrade` | 42 |  | https_probe.rs, response.rs | C13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
-| 3 | `d2k_https_ttl` | 46 |  | https_probe.rs, response.rs | C13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
-| 4 | `d2k_https_state_name` | 57 |  | https_probe.rs, response.rs | C13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
-| 5 | `mono_ms` | 69 | да | https_probe.rs, response.rs | C13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
-| 6 | `https_connect` | 77 | да | https_probe.rs, response.rs | C13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
-| 7 | `https_tls` | 148 | да | https_probe.rs, response.rs | C13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
-| 8 | `first_flight` | 171 | да | https_probe.rs, response.rs | C13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
-| 9 | `d2k_https_probe_real` | 203 |  | https_probe.rs, response.rs | C13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
-| 10 | `host_ok` | 274 | да | https_probe.rs, response.rs | C13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
-| 11 | `cache_find` | 285 | да | https_probe.rs, response.rs | C13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
-| 12 | `cache_put` | 292 | да | https_probe.rs, response.rs | C13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
-| 13 | `worker` | 314 | да | https_probe.rs, response.rs | C13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
-| 14 | `d2k_httpsprobe_new` | 351 |  | https_probe.rs, response.rs | C13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
-| 15 | `d2k_httpsprobe_free` | 377 |  | https_probe.rs, response.rs | C13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
-| 16 | `d2k_httpsprobe_wake_fd` | 393 |  | https_probe.rs, response.rs | C13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
-| 17 | `d2k_httpsprobe_portal` | 397 |  | https_probe.rs, response.rs | C13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
-| 18 | `d2k_httpsprobe_done` | 430 |  | https_probe.rs, response.rs | C13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
-| 19 | `d2k_httpsprobe_state` | 451 |  | https_probe.rs, response.rs | C13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
-| 20 | `d2k_httpsprobe_lost` | 460 |  | https_probe.rs, response.rs | C13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
-| 21 | `d2k_httpsprobe_save` | 476 |  | https_probe.rs, response.rs | C13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
-| 22 | `d2k_httpsprobe_load` | 507 |  | https_probe.rs, response.rs | C13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
+| 1 | `d2k_https_classify` | 32 |  | https_probe.rs, response.rs | CL13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
+| 2 | `d2k_https_upgrade` | 42 |  | https_probe.rs, response.rs | CL13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
+| 3 | `d2k_https_ttl` | 46 |  | https_probe.rs, response.rs | CL13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
+| 4 | `d2k_https_state_name` | 57 |  | https_probe.rs, response.rs | CL13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
+| 5 | `mono_ms` | 69 | да | https_probe.rs, response.rs | CL13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
+| 6 | `https_connect` | 77 | да | https_probe.rs, response.rs | CL13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
+| 7 | `https_tls` | 148 | да | https_probe.rs, response.rs | CL13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
+| 8 | `first_flight` | 171 | да | https_probe.rs, response.rs | CL13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
+| 9 | `d2k_https_probe_real` | 203 |  | https_probe.rs, response.rs | CL13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
+| 10 | `host_ok` | 274 | да | https_probe.rs, response.rs | CL13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
+| 11 | `cache_find` | 285 | да | https_probe.rs, response.rs | CL13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
+| 12 | `cache_put` | 292 | да | https_probe.rs, response.rs | CL13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
+| 13 | `worker` | 314 | да | https_probe.rs, response.rs | CL13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
+| 14 | `d2k_httpsprobe_new` | 351 |  | https_probe.rs, response.rs | CL13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
+| 15 | `d2k_httpsprobe_free` | 377 |  | https_probe.rs, response.rs | CL13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
+| 16 | `d2k_httpsprobe_wake_fd` | 393 |  | https_probe.rs, response.rs | CL13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
+| 17 | `d2k_httpsprobe_portal` | 397 |  | https_probe.rs, response.rs | CL13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
+| 18 | `d2k_httpsprobe_done` | 430 |  | https_probe.rs, response.rs | CL13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
+| 19 | `d2k_httpsprobe_state` | 451 |  | https_probe.rs, response.rs | CL13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
+| 20 | `d2k_httpsprobe_lost` | 460 |  | https_probe.rs, response.rs | CL13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
+| 21 | `d2k_httpsprobe_save` | 476 |  | https_probe.rs, response.rs | CL13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
+| 22 | `d2k_httpsprobe_load` | 507 |  | https_probe.rs, response.rs | CL13 | partial | named in report | cache/TTL/ECH; lost-probe отсутствует |
 
 ### `core/httpup_logic.c` — 15
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `ascii_alnum` | 16 | да | r2k-core/httpup.rs | C14 | partial | named in report | portal/redirect/request rules |
-| 2 | `dns_host` | 21 | да | r2k-core/httpup.rs | C14 | partial | named in report | portal/redirect/request rules |
-| 3 | `host_equal` | 37 | да | r2k-core/httpup.rs | C14 | partial | named in report | portal/redirect/request rules |
-| 4 | `known_portal_host` | 46 | да | r2k-core/httpup.rs | C14 | partial | named in report | portal/redirect/request rules |
-| 5 | `find_crlf` | 53 | да | r2k-core/httpup.rs | C14 | partial | named in report | portal/redirect/request rules |
-| 6 | `parse_request` | 60 | да | r2k-core/httpup.rs | C14 | partial | named in report | portal/redirect/request rules |
-| 7 | `d2k_httpup_request_safe` | 132 |  | r2k-core/httpup.rs | C14 | partial | named in report | portal/redirect/request rules |
-| 8 | `build_redirect` | 137 | да | r2k-core/httpup.rs | C14 | partial | named in report | portal/redirect/request rules |
-| 9 | `portal_marker` | 151 | да | r2k-core/httpup.rs | C14 | partial | named in report | portal/redirect/request rules |
-| 10 | `redirect_location_host` | 172 | да | r2k-core/httpup.rs | C14 | partial | named in report | portal/redirect/request rules |
-| 11 | `portal_answer` | 193 | да | r2k-core/httpup.rs | C14 | partial | named in report | portal/redirect/request rules |
-| 12 | `d2k_httpup_portal_response` | 227 |  | r2k-core/httpup.rs | C14 | partial | named in report | portal/redirect/request rules |
-| 13 | `d2k_httpup_request_target` | 240 |  | r2k-core/httpup.rs | C14 | partial | named in report | portal/redirect/request rules |
-| 14 | `d2k_httpup_portal_location` | 253 |  | r2k-core/httpup.rs | C14 | partial | named in report | portal/redirect/request rules |
-| 15 | `d2k_httpup_redirect_https` | 264 |  | r2k-core/httpup.rs | C14 | partial | named in report | portal/redirect/request rules |
+| 1 | `ascii_alnum` | 16 | да | r2k-core/httpup.rs | CL14 | partial | named in report | portal/redirect/request rules |
+| 2 | `dns_host` | 21 | да | r2k-core/httpup.rs | CL14 | partial | named in report | portal/redirect/request rules |
+| 3 | `host_equal` | 37 | да | r2k-core/httpup.rs | CL14 | partial | named in report | portal/redirect/request rules |
+| 4 | `known_portal_host` | 46 | да | r2k-core/httpup.rs | CL14 | partial | named in report | portal/redirect/request rules |
+| 5 | `find_crlf` | 53 | да | r2k-core/httpup.rs | CL14 | partial | named in report | portal/redirect/request rules |
+| 6 | `parse_request` | 60 | да | r2k-core/httpup.rs | CL14 | partial | named in report | portal/redirect/request rules |
+| 7 | `d2k_httpup_request_safe` | 132 |  | r2k-core/httpup.rs | CL14 | partial | named in report | portal/redirect/request rules |
+| 8 | `build_redirect` | 137 | да | r2k-core/httpup.rs | CL14 | partial | named in report | portal/redirect/request rules |
+| 9 | `portal_marker` | 151 | да | r2k-core/httpup.rs | CL14 | partial | named in report | portal/redirect/request rules |
+| 10 | `redirect_location_host` | 172 | да | r2k-core/httpup.rs | CL14 | partial | named in report | portal/redirect/request rules |
+| 11 | `portal_answer` | 193 | да | r2k-core/httpup.rs | CL14 | partial | named in report | portal/redirect/request rules |
+| 12 | `d2k_httpup_portal_response` | 227 |  | r2k-core/httpup.rs | CL14 | partial | named in report | portal/redirect/request rules |
+| 13 | `d2k_httpup_request_target` | 240 |  | r2k-core/httpup.rs | CL14 | partial | named in report | portal/redirect/request rules |
+| 14 | `d2k_httpup_portal_location` | 253 |  | r2k-core/httpup.rs | CL14 | partial | named in report | portal/redirect/request rules |
+| 15 | `d2k_httpup_redirect_https` | 264 |  | r2k-core/httpup.rs | CL14 | partial | named in report | portal/redirect/request rules |
 
 ### `core/include/d2k_arm.h` — 1
 
@@ -627,12 +629,12 @@
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `d2k_http_lower` | 9 | да | r2k-core/httpup.rs, fetch.rs | C13/C14 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
-| 2 | `d2k_http_equal` | 12 | да | r2k-core/httpup.rs, fetch.rs | C13/C14 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
-| 3 | `d2k_http_hostchar` | 17 | да | r2k-core/httpup.rs, fetch.rs | C13/C14 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
-| 4 | `d2k_http_portal` | 22 | да | r2k-core/httpup.rs, fetch.rs | C13/C14 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
-| 5 | `d2k_http_location_portal` | 27 | да | r2k-core/httpup.rs, fetch.rs | C13/C14 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
-| 6 | `d2k_http_reply_classify` | 55 | да | r2k-core/httpup.rs, fetch.rs | C13/C14 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
+| 1 | `d2k_http_lower` | 9 | да | r2k-core/httpup.rs, fetch.rs | CL13/CL14 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
+| 2 | `d2k_http_equal` | 12 | да | r2k-core/httpup.rs, fetch.rs | CL13/CL14 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
+| 3 | `d2k_http_hostchar` | 17 | да | r2k-core/httpup.rs, fetch.rs | CL13/CL14 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
+| 4 | `d2k_http_portal` | 22 | да | r2k-core/httpup.rs, fetch.rs | CL13/CL14 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
+| 5 | `d2k_http_location_portal` | 27 | да | r2k-core/httpup.rs, fetch.rs | CL13/CL14 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
+| 6 | `d2k_http_reply_classify` | 55 | да | r2k-core/httpup.rs, fetch.rs | CL13/CL14 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
 
 ### `core/include/d2k_ip6frag_send.h` — 9
 
@@ -674,12 +676,12 @@
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `d2k_resource_word` | 27 | да | r2o-controller/r2o_resource.rs | C15 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
-| 2 | `d2k_resource_space` | 36 | да | r2o-controller/r2o_resource.rs | C15 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
-| 3 | `d2k_resource_path_ok` | 39 | да | r2o-controller/r2o_resource.rs | C15 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
-| 4 | `d2k_resource_add` | 51 | да | r2o-controller/r2o_resource.rs | C15 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
-| 5 | `d2k_resource_tag` | 74 | да | r2o-controller/r2o_resource.rs | C15 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
-| 6 | `d2k_resource_feed` | 114 | да | r2o-controller/r2o_resource.rs | C15 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
+| 1 | `d2k_resource_word` | 27 | да | r2o-controller/r2o_resource.rs | CL15 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
+| 2 | `d2k_resource_space` | 36 | да | r2o-controller/r2o_resource.rs | CL15 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
+| 3 | `d2k_resource_path_ok` | 39 | да | r2o-controller/r2o_resource.rs | CL15 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
+| 4 | `d2k_resource_add` | 51 | да | r2o-controller/r2o_resource.rs | CL15 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
+| 5 | `d2k_resource_tag` | 74 | да | r2o-controller/r2o_resource.rs | CL15 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
+| 6 | `d2k_resource_feed` | 114 | да | r2o-controller/r2o_resource.rs | CL15 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
 
 ### `core/ipfrag.c` — 8
 
@@ -754,35 +756,35 @@
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `nap_us` | 52 | да | classify.rs (API-only) | C6/C8 | partial | named in report | в текущем d2kc не вызывается |
-| 2 | `d2k_mark_real` | 61 | да | classify.rs (API-only) | C6/C8 | partial | named in report | в текущем d2kc не вызывается |
-| 3 | `d2k_accept_serverhello` | 87 |  | classify.rs (API-only) | C6/C8 | partial | named in report | в текущем d2kc не вызывается |
-| 4 | `d2k_accept_tls_record` | 96 |  | classify.rs (API-only) | C6/C8 | partial | named in report | в текущем d2kc не вызывается |
-| 5 | `d2k_accept_any` | 101 |  | classify.rs (API-only) | C6/C8 | partial | named in report | в текущем d2kc не вызывается |
-| 6 | `cuts_valid` | 109 | да | classify.rs (API-only) | C6/C8 | partial | named in report | в текущем d2kc не вызывается |
-| 7 | `send_all` | 124 | да | classify.rs (API-only) | C6/C8 | partial | named in report | в текущем d2kc не вызывается |
-| 8 | `connect_bounded` | 142 | да | classify.rs (API-only) | C6/C8 | partial | named in report | в текущем d2kc не вызывается |
-| 9 | `d2k_meas_once` | 175 |  | classify.rs (API-only) | C6/C8 | partial | named in report | в текущем d2kc не вызывается |
-| 10 | `d2k_meas` | 269 |  | classify.rs (API-only) | C6/C8 | partial | named in report | в текущем d2kc не вызывается |
-| 11 | `udp_now_ms` | 307 | да | classify.rs (API-only) | C6/C8 | partial | named in report | в текущем d2kc не вызывается |
-| 12 | `d2k_udp_port_claim` | 313 |  | classify.rs (API-only) | C6/C8 | partial | named in report | в текущем d2kc не вызывается |
-| 13 | `d2k_udp_port_forget_all` | 341 |  | classify.rs (API-only) | C6/C8 | partial | named in report | в текущем d2kc не вызывается |
+| 1 | `nap_us` | 52 | да | classify.rs (API-only) | CL6/CL8 | partial | named in report | в текущем d2kc не вызывается |
+| 2 | `d2k_mark_real` | 61 | да | classify.rs (API-only) | CL6/CL8 | partial | named in report | в текущем d2kc не вызывается |
+| 3 | `d2k_accept_serverhello` | 87 |  | classify.rs (API-only) | CL6/CL8 | partial | named in report | в текущем d2kc не вызывается |
+| 4 | `d2k_accept_tls_record` | 96 |  | classify.rs (API-only) | CL6/CL8 | partial | named in report | в текущем d2kc не вызывается |
+| 5 | `d2k_accept_any` | 101 |  | classify.rs (API-only) | CL6/CL8 | partial | named in report | в текущем d2kc не вызывается |
+| 6 | `cuts_valid` | 109 | да | classify.rs (API-only) | CL6/CL8 | partial | named in report | в текущем d2kc не вызывается |
+| 7 | `send_all` | 124 | да | classify.rs (API-only) | CL6/CL8 | partial | named in report | в текущем d2kc не вызывается |
+| 8 | `connect_bounded` | 142 | да | classify.rs (API-only) | CL6/CL8 | partial | named in report | в текущем d2kc не вызывается |
+| 9 | `d2k_meas_once` | 175 |  | classify.rs (API-only) | CL6/CL8 | partial | named in report | в текущем d2kc не вызывается |
+| 10 | `d2k_meas` | 269 |  | classify.rs (API-only) | CL6/CL8 | partial | named in report | в текущем d2kc не вызывается |
+| 11 | `udp_now_ms` | 307 | да | classify.rs (API-only) | CL6/CL8 | partial | named in report | в текущем d2kc не вызывается |
+| 12 | `d2k_udp_port_claim` | 313 |  | classify.rs (API-only) | CL6/CL8 | partial | named in report | в текущем d2kc не вызывается |
+| 13 | `d2k_udp_port_forget_all` | 341 |  | classify.rs (API-only) | CL6/CL8 | partial | named in report | в текущем d2kc не вызывается |
 
 ### `core/measured.c` — 11
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `append_fmt` | 10 | да | classify_measured.rs, r2o_rx_volume.rs | C5/C6 | partial | named in report | measured plans; не все ветви |
-| 2 | `append_hex` | 22 | да | classify_measured.rs, r2o_rx_volume.rs | C5/C6 | partial | named in report | measured plans; не все ветви |
-| 3 | `d2k_white_decoy_hello` | 33 |  | classify_measured.rs, r2o_rx_volume.rs | C5/C6 | partial | named in report | measured plans; не все ветви |
-| 4 | `template_plan` | 57 | да | classify_measured.rs, r2o_rx_volume.rs | C5/C6 | partial | named in report | measured plans; не все ветви |
-| 5 | `d2k_rx_volume_plan_named` | 84 |  | classify_measured.rs, r2o_rx_volume.rs | C5/C6 | partial | named in report | measured plans; не все ветви |
-| 6 | `d2k_rx_volume_plan_client` | 90 |  | classify_measured.rs, r2o_rx_volume.rs | C5/C6 | partial | named in report | measured plans; не все ветви |
-| 7 | `d2k_rx_volume_plan` | 114 |  | classify_measured.rs, r2o_rx_volume.rs | C5/C6 | partial | named in report | measured plans; не все ветви |
-| 8 | `measured_payload` | 121 | да | classify_measured.rs, r2o_rx_volume.rs | C5/C6 | partial | named in report | measured plans; не все ветви |
-| 9 | `d2k_tcp_split_plan` | 140 |  | classify_measured.rs, r2o_rx_volume.rs | C5/C6 | partial | named in report | measured plans; не все ветви |
-| 10 | `d2k_arm_plan_measured_cap` | 153 |  | classify_measured.rs, r2o_rx_volume.rs | C5/C6 | partial | named in report | measured plans; не все ветви |
-| 11 | `d2k_arm_plan_measured` | 387 |  | classify_measured.rs, r2o_rx_volume.rs | C5/C6 | partial | named in report | measured plans; не все ветви |
+| 1 | `append_fmt` | 10 | да | classify_measured.rs, r2o_rx_volume.rs | CL5/CL6 | partial | named in report | measured plans; не все ветви |
+| 2 | `append_hex` | 22 | да | classify_measured.rs, r2o_rx_volume.rs | CL5/CL6 | partial | named in report | measured plans; не все ветви |
+| 3 | `d2k_white_decoy_hello` | 33 |  | classify_measured.rs, r2o_rx_volume.rs | CL5/CL6 | partial | named in report | measured plans; не все ветви |
+| 4 | `template_plan` | 57 | да | classify_measured.rs, r2o_rx_volume.rs | CL5/CL6 | partial | named in report | measured plans; не все ветви |
+| 5 | `d2k_rx_volume_plan_named` | 84 |  | classify_measured.rs, r2o_rx_volume.rs | CL5/CL6 | partial | named in report | measured plans; не все ветви |
+| 6 | `d2k_rx_volume_plan_client` | 90 |  | classify_measured.rs, r2o_rx_volume.rs | CL5/CL6 | partial | named in report | measured plans; не все ветви |
+| 7 | `d2k_rx_volume_plan` | 114 |  | classify_measured.rs, r2o_rx_volume.rs | CL5/CL6 | partial | named in report | measured plans; не все ветви |
+| 8 | `measured_payload` | 121 | да | classify_measured.rs, r2o_rx_volume.rs | CL5/CL6 | partial | named in report | measured plans; не все ветви |
+| 9 | `d2k_tcp_split_plan` | 140 |  | classify_measured.rs, r2o_rx_volume.rs | CL5/CL6 | partial | named in report | measured plans; не все ветви |
+| 10 | `d2k_arm_plan_measured_cap` | 153 |  | classify_measured.rs, r2o_rx_volume.rs | CL5/CL6 | partial | named in report | measured plans; не все ветви |
+| 11 | `d2k_arm_plan_measured` | 387 |  | classify_measured.rs, r2o_rx_volume.rs | CL5/CL6 | partial | named in report | measured plans; не все ветви |
 
 ### `core/net4.c` — 4
 
@@ -797,28 +799,28 @@
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `fe_copy` | 31 | да | ring/rustls | C15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
-| 2 | `ge` | 34 | да | ring/rustls | C15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
-| 3 | `is_zero` | 41 | да | ring/rustls | C15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
-| 4 | `sub_raw` | 48 | да | ring/rustls | C15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
-| 5 | `add_raw` | 59 | да | ring/rustls | C15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
-| 6 | `fe_add` | 69 | да | ring/rustls | C15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
-| 7 | `fe_sub` | 76 | да | ring/rustls | C15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
-| 8 | `fe_mul` | 84 | да | ring/rustls | C15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
-| 9 | `fe_sqr` | 115 | да | ring/rustls | C15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
-| 10 | `to_mont` | 124 | да | ring/rustls | C15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
-| 11 | `from_mont` | 125 | да | ring/rustls | C15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
-| 12 | `fe_inv` | 131 | да | ring/rustls | C15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
-| 13 | `fe_from_be` | 143 | да | ring/rustls | C15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
-| 14 | `fe_to_be` | 150 | да | ring/rustls | C15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
-| 15 | `pt_double` | 161 | да | ring/rustls | C15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
-| 16 | `pt_add` | 192 | да | ring/rustls | C15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
-| 17 | `pt_mul` | 235 | да | ring/rustls | C15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
-| 18 | `pt_affine` | 249 | да | ring/rustls | C15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
-| 19 | `scalar_ok` | 262 | да | ring/rustls | C15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
-| 20 | `d2k_p256_public` | 268 |  | ring/rustls | C15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
-| 21 | `d2k_p256_keypair` | 282 |  | ring/rustls | C15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
-| 22 | `d2k_p256_ecdh` | 291 |  | ring/rustls | C15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
+| 1 | `fe_copy` | 31 | да | ring/rustls | CL15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
+| 2 | `ge` | 34 | да | ring/rustls | CL15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
+| 3 | `is_zero` | 41 | да | ring/rustls | CL15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
+| 4 | `sub_raw` | 48 | да | ring/rustls | CL15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
+| 5 | `add_raw` | 59 | да | ring/rustls | CL15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
+| 6 | `fe_add` | 69 | да | ring/rustls | CL15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
+| 7 | `fe_sub` | 76 | да | ring/rustls | CL15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
+| 8 | `fe_mul` | 84 | да | ring/rustls | CL15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
+| 9 | `fe_sqr` | 115 | да | ring/rustls | CL15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
+| 10 | `to_mont` | 124 | да | ring/rustls | CL15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
+| 11 | `from_mont` | 125 | да | ring/rustls | CL15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
+| 12 | `fe_inv` | 131 | да | ring/rustls | CL15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
+| 13 | `fe_from_be` | 143 | да | ring/rustls | CL15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
+| 14 | `fe_to_be` | 150 | да | ring/rustls | CL15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
+| 15 | `pt_double` | 161 | да | ring/rustls | CL15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
+| 16 | `pt_add` | 192 | да | ring/rustls | CL15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
+| 17 | `pt_mul` | 235 | да | ring/rustls | CL15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
+| 18 | `pt_affine` | 249 | да | ring/rustls | CL15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
+| 19 | `scalar_ok` | 262 | да | ring/rustls | CL15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
+| 20 | `d2k_p256_public` | 268 |  | ring/rustls | CL15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
+| 21 | `d2k_p256_keypair` | 282 |  | ring/rustls | CL15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
+| 22 | `d2k_p256_ecdh` | 291 |  | ring/rustls | CL15/M6 | implemented-unproven | named in report | P-256 ECDHE; прямого C/Rust вектора нет |
 
 ### `core/plantlv.c` — 20
 
@@ -1366,89 +1368,89 @@
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `tls12_dispose` | 98 | да | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
-| 2 | `say` | 102 | да | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
-| 3 | `now_ms` | 110 | да | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
-| 4 | `put16` | 116 | да | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
-| 5 | `get16` | 117 | да | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
-| 6 | `read_exact` | 119 | да | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
-| 7 | `write_all` | 155 | да | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
-| 8 | `prf` | 183 | да | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
-| 9 | `d2k_tls12_prf_for_test` | 214 |  | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
-| 10 | `tr_add` | 220 | да | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
-| 11 | `nonce_of` | 228 | да | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
-| 12 | `aad_of` | 235 | да | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
-| 13 | `send_plain` | 246 | да | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
-| 14 | `send_sealed` | 258 | да | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
-| 15 | `read_record` | 287 | да | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
-| 16 | `hs_next` | 355 | да | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
-| 17 | `ch12_build` | 415 | да | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
-| 18 | `d2k_tls12_connect` | 492 |  | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
-| 19 | `d2k_tls12_resume` | 532 |  | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
-| 20 | `tls12_finish` | 556 | да | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
-| 21 | `d2k_tls12_write` | 750 |  | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
-| 22 | `d2k_tls12_read` | 756 |  | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
-| 23 | `d2k_tls12_peer_name` | 795 |  | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
-| 24 | `d2k_tls12_free` | 797 |  | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
-| 25 | `d2k_tls12_rx_wire_bytes` | 799 |  | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
-| 26 | `d2k_tls12_rx_record_missing` | 800 |  | rustls, fetch.rs | C12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 1 | `tls12_dispose` | 98 | да | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 2 | `say` | 102 | да | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 3 | `now_ms` | 110 | да | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 4 | `put16` | 116 | да | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 5 | `get16` | 117 | да | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 6 | `read_exact` | 119 | да | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 7 | `write_all` | 155 | да | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 8 | `prf` | 183 | да | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 9 | `d2k_tls12_prf_for_test` | 214 |  | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 10 | `tr_add` | 220 | да | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 11 | `nonce_of` | 228 | да | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 12 | `aad_of` | 235 | да | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 13 | `send_plain` | 246 | да | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 14 | `send_sealed` | 258 | да | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 15 | `read_record` | 287 | да | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 16 | `hs_next` | 355 | да | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 17 | `ch12_build` | 415 | да | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 18 | `d2k_tls12_connect` | 492 |  | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 19 | `d2k_tls12_resume` | 532 |  | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 20 | `tls12_finish` | 556 | да | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 21 | `d2k_tls12_write` | 750 |  | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 22 | `d2k_tls12_read` | 756 |  | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 23 | `d2k_tls12_peer_name` | 795 |  | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 24 | `d2k_tls12_free` | 797 |  | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 25 | `d2k_tls12_rx_wire_bytes` | 799 |  | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
+| 26 | `d2k_tls12_rx_record_missing` | 800 |  | rustls, fetch.rs | CL12 | partial | named in report | TLS 1.2 client заменён rustls |
 
 ### `core/tls13.c` — 23
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `tls_dispose` | 83 | да | rustls, r2o_tls.rs | C12 | partial | named in report | TLS 1.3 client заменён rustls |
-| 2 | `say` | 87 | да | rustls, r2o_tls.rs | C12 | partial | named in report | TLS 1.3 client заменён rustls |
-| 3 | `now_ms` | 95 | да | rustls, r2o_tls.rs | C12 | partial | named in report | TLS 1.3 client заменён rustls |
-| 4 | `read_exact` | 102 | да | rustls, r2o_tls.rs | C12 | partial | named in report | TLS 1.3 client заменён rustls |
-| 5 | `write_all` | 138 | да | rustls, r2o_tls.rs | C12 | partial | named in report | TLS 1.3 client заменён rustls |
-| 6 | `put16` | 160 | да | rustls, r2o_tls.rs | C12 | partial | named in report | TLS 1.3 client заменён rustls |
-| 7 | `get16` | 161 | да | rustls, r2o_tls.rs | C12 | partial | named in report | TLS 1.3 client заменён rustls |
-| 8 | `nonce_of` | 165 | да | rustls, r2o_tls.rs | C12 | partial | named in report | TLS 1.3 client заменён rustls |
-| 9 | `read_record` | 175 | да | rustls, r2o_tls.rs | C12 | partial | named in report | TLS 1.3 client заменён rustls |
-| 10 | `write_record` | 236 | да | rustls, r2o_tls.rs | C12 | partial | named in report | TLS 1.3 client заменён rustls |
-| 11 | `traffic_keys` | 260 | да | rustls, r2o_tls.rs | C12 | partial | named in report | TLS 1.3 client заменён rustls |
-| 12 | `tls_connect_internal` | 265 | да | rustls, r2o_tls.rs | C12 | partial | named in report | TLS 1.3 client заменён rustls |
-| 13 | `d2k_tls_connect` | 525 |  | rustls, r2o_tls.rs | C12 | partial | named in report | TLS 1.3 client заменён rustls |
-| 14 | `d2k_tls_connect_alpn` | 531 |  | rustls, r2o_tls.rs | C12 | partial | named in report | TLS 1.3 client заменён rustls |
-| 15 | `d2k_tls_connect_ech` | 538 |  | rustls, r2o_tls.rs | C12 | partial | named in report | TLS 1.3 client заменён rustls |
-| 16 | `d2k_tls_ech_accepted` | 548 |  | rustls, r2o_tls.rs | C12 | partial | named in report | TLS 1.3 client заменён rustls |
-| 17 | `d2k_tls_write` | 550 |  | rustls, r2o_tls.rs | C12 | partial | named in report | TLS 1.3 client заменён rustls |
-| 18 | `d2k_tls_read` | 562 |  | rustls, r2o_tls.rs | C12 | partial | named in report | TLS 1.3 client заменён rustls |
-| 19 | `d2k_tls_peer_name` | 603 |  | rustls, r2o_tls.rs | C12 | partial | named in report | TLS 1.3 client заменён rustls |
-| 20 | `d2k_tls_free` | 605 |  | rustls, r2o_tls.rs | C12 | partial | named in report | TLS 1.3 client заменён rustls |
-| 21 | `d2k_tls_rx_wire_bytes` | 610 |  | rustls, r2o_tls.rs | C12 | partial | named in report | TLS 1.3 client заменён rustls |
-| 22 | `d2k_tls_rx_record_missing` | 611 |  | rustls, r2o_tls.rs | C12 | partial | named in report | TLS 1.3 client заменён rustls |
-| 23 | `d2k_tls_version` | 613 |  | rustls, r2o_tls.rs | C12 | partial | named in report | TLS 1.3 client заменён rustls |
+| 1 | `tls_dispose` | 83 | да | rustls, r2o_tls.rs | CL12 | partial | named in report | TLS 1.3 client заменён rustls |
+| 2 | `say` | 87 | да | rustls, r2o_tls.rs | CL12 | partial | named in report | TLS 1.3 client заменён rustls |
+| 3 | `now_ms` | 95 | да | rustls, r2o_tls.rs | CL12 | partial | named in report | TLS 1.3 client заменён rustls |
+| 4 | `read_exact` | 102 | да | rustls, r2o_tls.rs | CL12 | partial | named in report | TLS 1.3 client заменён rustls |
+| 5 | `write_all` | 138 | да | rustls, r2o_tls.rs | CL12 | partial | named in report | TLS 1.3 client заменён rustls |
+| 6 | `put16` | 160 | да | rustls, r2o_tls.rs | CL12 | partial | named in report | TLS 1.3 client заменён rustls |
+| 7 | `get16` | 161 | да | rustls, r2o_tls.rs | CL12 | partial | named in report | TLS 1.3 client заменён rustls |
+| 8 | `nonce_of` | 165 | да | rustls, r2o_tls.rs | CL12 | partial | named in report | TLS 1.3 client заменён rustls |
+| 9 | `read_record` | 175 | да | rustls, r2o_tls.rs | CL12 | partial | named in report | TLS 1.3 client заменён rustls |
+| 10 | `write_record` | 236 | да | rustls, r2o_tls.rs | CL12 | partial | named in report | TLS 1.3 client заменён rustls |
+| 11 | `traffic_keys` | 260 | да | rustls, r2o_tls.rs | CL12 | partial | named in report | TLS 1.3 client заменён rustls |
+| 12 | `tls_connect_internal` | 265 | да | rustls, r2o_tls.rs | CL12 | partial | named in report | TLS 1.3 client заменён rustls |
+| 13 | `d2k_tls_connect` | 525 |  | rustls, r2o_tls.rs | CL12 | partial | named in report | TLS 1.3 client заменён rustls |
+| 14 | `d2k_tls_connect_alpn` | 531 |  | rustls, r2o_tls.rs | CL12 | partial | named in report | TLS 1.3 client заменён rustls |
+| 15 | `d2k_tls_connect_ech` | 538 |  | rustls, r2o_tls.rs | CL12 | partial | named in report | TLS 1.3 client заменён rustls |
+| 16 | `d2k_tls_ech_accepted` | 548 |  | rustls, r2o_tls.rs | CL12 | partial | named in report | TLS 1.3 client заменён rustls |
+| 17 | `d2k_tls_write` | 550 |  | rustls, r2o_tls.rs | CL12 | partial | named in report | TLS 1.3 client заменён rustls |
+| 18 | `d2k_tls_read` | 562 |  | rustls, r2o_tls.rs | CL12 | partial | named in report | TLS 1.3 client заменён rustls |
+| 19 | `d2k_tls_peer_name` | 603 |  | rustls, r2o_tls.rs | CL12 | partial | named in report | TLS 1.3 client заменён rustls |
+| 20 | `d2k_tls_free` | 605 |  | rustls, r2o_tls.rs | CL12 | partial | named in report | TLS 1.3 client заменён rustls |
+| 21 | `d2k_tls_rx_wire_bytes` | 610 |  | rustls, r2o_tls.rs | CL12 | partial | named in report | TLS 1.3 client заменён rustls |
+| 22 | `d2k_tls_rx_record_missing` | 611 |  | rustls, r2o_tls.rs | CL12 | partial | named in report | TLS 1.3 client заменён rustls |
+| 23 | `d2k_tls_version` | 613 |  | rustls, r2o_tls.rs | CL12 | partial | named in report | TLS 1.3 client заменён rustls |
 
 ### `core/tls13core.c` — 24
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `put16` | 16 | да | rustls, ech.rs, hello.rs | C12/C10 | partial | named in report | ECH/HPKE/TLS core |
-| 2 | `get16` | 17 | да | rustls, ech.rs, hello.rs | C12/C10 | partial | named in report | ECH/HPKE/TLS core |
-| 3 | `d2k_t13_random` | 21 |  | rustls, ech.rs, hello.rs | C12/C10 | partial | named in report | ECH/HPKE/TLS core |
-| 4 | `der_len` | 53 | да | rustls, ech.rs, hello.rs | C12/C10 | partial | named in report | ECH/HPKE/TLS core |
-| 5 | `ascii_lower` | 64 | да | rustls, ech.rs, hello.rs | C12/C10 | partial | named in report | ECH/HPKE/TLS core |
-| 6 | `name_matches` | 73 | да | rustls, ech.rs, hello.rs | C12/C10 | partial | named in report | ECH/HPKE/TLS core |
-| 7 | `cert_name_ok` | 106 | да | rustls, ech.rs, hello.rs | C12/C10 | partial | named in report | ECH/HPKE/TLS core |
-| 8 | `d2k_t13_cert_name_ok12` | 166 |  | rustls, ech.rs, hello.rs | C12/C10 | partial | named in report | ECH/HPKE/TLS core |
-| 9 | `d2k_t13_cert_name_ok` | 177 |  | rustls, ech.rs, hello.rs | C12/C10 | partial | named in report | ECH/HPKE/TLS core |
-| 10 | `d2k_t13_ch_build` | 197 |  | rustls, ech.rs, hello.rs | C12/C10 | partial | named in report | ECH/HPKE/TLS core |
-| 11 | `d2k_t13_derive_secret` | 361 |  | rustls, ech.rs, hello.rs | C12/C10 | partial | named in report | ECH/HPKE/TLS core |
-| 12 | `d2k_t13_schedule_hs` | 368 |  | rustls, ech.rs, hello.rs | C12/C10 | partial | named in report | ECH/HPKE/TLS core |
-| 13 | `d2k_t13_schedule_ap` | 383 |  | rustls, ech.rs, hello.rs | C12/C10 | partial | named in report | ECH/HPKE/TLS core |
-| 14 | `d2k_t13_finished_mac` | 396 |  | rustls, ech.rs, hello.rs | C12/C10 | partial | named in report | ECH/HPKE/TLS core |
-| 15 | `d2k_t13_sh_version` | 407 |  | rustls, ech.rs, hello.rs | C12/C10 | partial | named in report | ECH/HPKE/TLS core |
-| 16 | `d2k_t13_sh_parse` | 428 |  | rustls, ech.rs, hello.rs | C12/C10 | partial | named in report | ECH/HPKE/TLS core |
-| 17 | `d2k_t13_flight_next` | 479 |  | rustls, ech.rs, hello.rs | C12/C10 | partial | named in report | ECH/HPKE/TLS core |
-| 18 | `ech_host_ok` | 492 | да | rustls, ech.rs, hello.rs | C12/C10 | partial | named in report | ECH/HPKE/TLS core |
-| 19 | `d2k_ech_config_parse` | 510 |  | rustls, ech.rs, hello.rs | C12/C10 | partial | named in report | ECH/HPKE/TLS core |
-| 20 | `hpke_extract` | 570 | да | rustls, ech.rs, hello.rs | C12/C10 | partial | named in report | ECH/HPKE/TLS core |
-| 21 | `hpke_expand` | 583 | да | rustls, ech.rs, hello.rs | C12/C10 | partial | named in report | ECH/HPKE/TLS core |
-| 22 | `ech_hpke` | 598 | да | rustls, ech.rs, hello.rs | C12/C10 | partial | named in report | ECH/HPKE/TLS core |
-| 23 | `d2k_t13_ech_build` | 621 |  | rustls, ech.rs, hello.rs | C12/C10 | partial | named in report | ECH/HPKE/TLS core |
-| 24 | `d2k_t13_ech_accepted` | 684 |  | rustls, ech.rs, hello.rs | C12/C10 | partial | named in report | ECH/HPKE/TLS core |
+| 1 | `put16` | 16 | да | rustls, ech.rs, hello.rs | CL12/CL10 | partial | named in report | ECH/HPKE/TLS core |
+| 2 | `get16` | 17 | да | rustls, ech.rs, hello.rs | CL12/CL10 | partial | named in report | ECH/HPKE/TLS core |
+| 3 | `d2k_t13_random` | 21 |  | rustls, ech.rs, hello.rs | CL12/CL10 | partial | named in report | ECH/HPKE/TLS core |
+| 4 | `der_len` | 53 | да | rustls, ech.rs, hello.rs | CL12/CL10 | partial | named in report | ECH/HPKE/TLS core |
+| 5 | `ascii_lower` | 64 | да | rustls, ech.rs, hello.rs | CL12/CL10 | partial | named in report | ECH/HPKE/TLS core |
+| 6 | `name_matches` | 73 | да | rustls, ech.rs, hello.rs | CL12/CL10 | partial | named in report | ECH/HPKE/TLS core |
+| 7 | `cert_name_ok` | 106 | да | rustls, ech.rs, hello.rs | CL12/CL10 | partial | named in report | ECH/HPKE/TLS core |
+| 8 | `d2k_t13_cert_name_ok12` | 166 |  | rustls, ech.rs, hello.rs | CL12/CL10 | partial | named in report | ECH/HPKE/TLS core |
+| 9 | `d2k_t13_cert_name_ok` | 177 |  | rustls, ech.rs, hello.rs | CL12/CL10 | partial | named in report | ECH/HPKE/TLS core |
+| 10 | `d2k_t13_ch_build` | 197 |  | rustls, ech.rs, hello.rs | CL12/CL10 | partial | named in report | ECH/HPKE/TLS core |
+| 11 | `d2k_t13_derive_secret` | 361 |  | rustls, ech.rs, hello.rs | CL12/CL10 | partial | named in report | ECH/HPKE/TLS core |
+| 12 | `d2k_t13_schedule_hs` | 368 |  | rustls, ech.rs, hello.rs | CL12/CL10 | partial | named in report | ECH/HPKE/TLS core |
+| 13 | `d2k_t13_schedule_ap` | 383 |  | rustls, ech.rs, hello.rs | CL12/CL10 | partial | named in report | ECH/HPKE/TLS core |
+| 14 | `d2k_t13_finished_mac` | 396 |  | rustls, ech.rs, hello.rs | CL12/CL10 | partial | named in report | ECH/HPKE/TLS core |
+| 15 | `d2k_t13_sh_version` | 407 |  | rustls, ech.rs, hello.rs | CL12/CL10 | partial | named in report | ECH/HPKE/TLS core |
+| 16 | `d2k_t13_sh_parse` | 428 |  | rustls, ech.rs, hello.rs | CL12/CL10 | partial | named in report | ECH/HPKE/TLS core |
+| 17 | `d2k_t13_flight_next` | 479 |  | rustls, ech.rs, hello.rs | CL12/CL10 | partial | named in report | ECH/HPKE/TLS core |
+| 18 | `ech_host_ok` | 492 | да | rustls, ech.rs, hello.rs | CL12/CL10 | partial | named in report | ECH/HPKE/TLS core |
+| 19 | `d2k_ech_config_parse` | 510 |  | rustls, ech.rs, hello.rs | CL12/CL10 | partial | named in report | ECH/HPKE/TLS core |
+| 20 | `hpke_extract` | 570 | да | rustls, ech.rs, hello.rs | CL12/CL10 | partial | named in report | ECH/HPKE/TLS core |
+| 21 | `hpke_expand` | 583 | да | rustls, ech.rs, hello.rs | CL12/CL10 | partial | named in report | ECH/HPKE/TLS core |
+| 22 | `ech_hpke` | 598 | да | rustls, ech.rs, hello.rs | CL12/CL10 | partial | named in report | ECH/HPKE/TLS core |
+| 23 | `d2k_t13_ech_build` | 621 |  | rustls, ech.rs, hello.rs | CL12/CL10 | partial | named in report | ECH/HPKE/TLS core |
+| 24 | `d2k_t13_ech_accepted` | 684 |  | rustls, ech.rs, hello.rs | CL12/CL10 | partial | named in report | ECH/HPKE/TLS core |
 
 ### `core/udpplan.c` — 12
 
@@ -1484,91 +1486,91 @@
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `looks_like_tls` | 33 | да | classify.rs (API-only) | C5 | not-applicable | named in report | в текущем d2kc не вызывается; production — detect/ |
-| 2 | `reverse_note` | 53 | да | classify.rs (API-only) | C5 | not-applicable | named in report | в текущем d2kc не вызывается; production — detect/ |
-| 3 | `pause_note` | 74 | да | classify.rs (API-only) | C5 | not-applicable | named in report | в текущем d2kc не вызывается; production — detect/ |
-| 4 | `stop_requested` | 92 | да | classify.rs (API-only) | C5 | not-applicable | named in report | в текущем d2kc не вызывается; production — detect/ |
-| 5 | `classify_cancelled` | 96 | да | classify.rs (API-only) | C5 | not-applicable | named in report | в текущем d2kc не вызывается; production — detect/ |
-| 6 | `d2k_classify_cancelable` | 104 |  | classify.rs (API-only) | C5 | not-applicable | named in report | в текущем d2kc не вызывается; production — detect/ |
-| 7 | `d2k_classify` | 336 |  | classify.rs (API-only) | C5 | not-applicable | named in report | в текущем d2kc не вызывается; production — detect/ |
+| 1 | `looks_like_tls` | 33 | да | classify.rs (API-only) | CL5 | not-applicable | named in report | в текущем d2kc не вызывается; production — detect/ |
+| 2 | `reverse_note` | 53 | да | classify.rs (API-only) | CL5 | not-applicable | named in report | в текущем d2kc не вызывается; production — detect/ |
+| 3 | `pause_note` | 74 | да | classify.rs (API-only) | CL5 | not-applicable | named in report | в текущем d2kc не вызывается; production — detect/ |
+| 4 | `stop_requested` | 92 | да | classify.rs (API-only) | CL5 | not-applicable | named in report | в текущем d2kc не вызывается; production — detect/ |
+| 5 | `classify_cancelled` | 96 | да | classify.rs (API-only) | CL5 | not-applicable | named in report | в текущем d2kc не вызывается; production — detect/ |
+| 6 | `d2k_classify_cancelable` | 104 |  | classify.rs (API-only) | CL5 | not-applicable | named in report | в текущем d2kc не вызывается; production — detect/ |
+| 7 | `d2k_classify` | 336 |  | classify.rs (API-only) | CL5 | not-applicable | named in report | в текущем d2kc не вызывается; production — detect/ |
 
 ### `core/verify.c` — 73
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `verify_now_ms` | 52 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 2 | `dns16` | 58 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 3 | `ech_dns_name` | 62 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 4 | `d2k_ech_resolve` | 90 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 5 | `find_hdr_end` | 193 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 6 | `find_eol` | 203 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 7 | `lower_ascii` | 210 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 8 | `span_eq_ascii_ci` | 214 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 9 | `has_cf_challenge` | 227 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 10 | `read13` | 273 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 11 | `read12` | 278 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 12 | `body_read_reason` | 298 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 13 | `body_say` | 304 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 14 | `body_feed` | 308 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 15 | `body_byte` | 317 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 16 | `body_exact` | 331 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 17 | `body_line` | 352 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 18 | `read_http_body` | 380 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 19 | `read_status_buf` | 457 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 20 | `read_status_rd` | 699 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 21 | `d2k_http_read_response` | 730 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 22 | `d2k_verify_probe` | 739 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 23 | `write13` | 750 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 24 | `write12` | 755 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 25 | `redirect_path` | 762 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 26 | `https_redirect_response` | 799 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 27 | `d2k_verify_budget_set` | 822 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 28 | `d2k_verify_budget_get` | 823 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 29 | `d2k_verify_tcp_timestamps_set` | 826 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 30 | `d2k_verify_tcp_timestamps_get` | 829 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 31 | `d2k_verify_quic_form_set` | 837 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 32 | `d2k_verify_tcp_data_packets` | 850 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 33 | `budget_say` | 877 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 34 | `gateway_header_end` | 885 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 35 | `gateway_header_value` | 892 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 36 | `gateway_connection_upgrade` | 905 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 37 | `gateway_json_hello` | 917 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 38 | `gateway_fill` | 976 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 39 | `request_gateway_websocket` | 1000 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 40 | `read_eof` | 1132 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 41 | `budget_tcp` | 1146 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 42 | `fd_peer_spoke` | 1217 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 43 | `fd_packets` | 1223 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 44 | `request_complete_page` | 1238 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 45 | `request_page_budget` | 1247 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 46 | `verify_contact` | 1349 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 47 | `verify_probe13_internal` | 1365 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 48 | `verify_probe13_on` | 1444 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 49 | `ech_http_denial` | 1451 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 50 | `d2k_verify_probe_ech_on` | 1462 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 51 | `d2k_verify_probe_ech_origin_on` | 1478 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 52 | `d2k_verify_replay_on` | 1499 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 53 | `d2k_verify_probe_on` | 1564 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 54 | `d2k_verify_probe_alpn_on` | 1578 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 55 | `verify_probe12_internal` | 1636 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 56 | `d2k_verify_probe12_on` | 1703 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 57 | `d2k_verify_probe_identity_on` | 1710 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 58 | `d2k_verify_probe_gzip_on` | 1717 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 59 | `d2k_verify_probe_baseline` | 1724 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 60 | `d2k_verify_probe_path_on` | 1744 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 61 | `d2k_verify_close` | 1759 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 62 | `d2k_verify_probe_quic` | 1768 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 63 | `quic_app_silent` | 1780 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 64 | `h3_read_headers` | 1799 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 65 | `quic_recv_chunk` | 1816 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 66 | `budget_quic` | 1836 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 67 | `qb_request` | 1953 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 68 | `qb_recv` | 1960 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 69 | `qb_progress` | 1964 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 70 | `qb_packets` | 1967 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 71 | `d2k_verify_probe_quic_on` | 1975 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 72 | `d2k_verify_probe_quic_path_on` | 1983 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
-| 73 | `d2k_verify_probe_quic_path_mark_on` | 1991 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | C6/C7/C9/C10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 1 | `verify_now_ms` | 52 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 2 | `dns16` | 58 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 3 | `ech_dns_name` | 62 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 4 | `d2k_ech_resolve` | 90 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 5 | `find_hdr_end` | 193 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 6 | `find_eol` | 203 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 7 | `lower_ascii` | 210 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 8 | `span_eq_ascii_ci` | 214 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 9 | `has_cf_challenge` | 227 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 10 | `read13` | 273 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 11 | `read12` | 278 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 12 | `body_read_reason` | 298 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 13 | `body_say` | 304 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 14 | `body_feed` | 308 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 15 | `body_byte` | 317 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 16 | `body_exact` | 331 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 17 | `body_line` | 352 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 18 | `read_http_body` | 380 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 19 | `read_status_buf` | 457 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 20 | `read_status_rd` | 699 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 21 | `d2k_http_read_response` | 730 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 22 | `d2k_verify_probe` | 739 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 23 | `write13` | 750 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 24 | `write12` | 755 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 25 | `redirect_path` | 762 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 26 | `https_redirect_response` | 799 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 27 | `d2k_verify_budget_set` | 822 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 28 | `d2k_verify_budget_get` | 823 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 29 | `d2k_verify_tcp_timestamps_set` | 826 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 30 | `d2k_verify_tcp_timestamps_get` | 829 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 31 | `d2k_verify_quic_form_set` | 837 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 32 | `d2k_verify_tcp_data_packets` | 850 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 33 | `budget_say` | 877 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 34 | `gateway_header_end` | 885 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 35 | `gateway_header_value` | 892 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 36 | `gateway_connection_upgrade` | 905 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 37 | `gateway_json_hello` | 917 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 38 | `gateway_fill` | 976 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 39 | `request_gateway_websocket` | 1000 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 40 | `read_eof` | 1132 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 41 | `budget_tcp` | 1146 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 42 | `fd_peer_spoke` | 1217 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 43 | `fd_packets` | 1223 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 44 | `request_complete_page` | 1238 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 45 | `request_page_budget` | 1247 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 46 | `verify_contact` | 1349 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 47 | `verify_probe13_internal` | 1365 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 48 | `verify_probe13_on` | 1444 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 49 | `ech_http_denial` | 1451 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 50 | `d2k_verify_probe_ech_on` | 1462 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 51 | `d2k_verify_probe_ech_origin_on` | 1478 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 52 | `d2k_verify_replay_on` | 1499 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 53 | `d2k_verify_probe_on` | 1564 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 54 | `d2k_verify_probe_alpn_on` | 1578 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 55 | `verify_probe12_internal` | 1636 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 56 | `d2k_verify_probe12_on` | 1703 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 57 | `d2k_verify_probe_identity_on` | 1710 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 58 | `d2k_verify_probe_gzip_on` | 1717 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 59 | `d2k_verify_probe_baseline` | 1724 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 60 | `d2k_verify_probe_path_on` | 1744 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 61 | `d2k_verify_close` | 1759 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 62 | `d2k_verify_probe_quic` | 1768 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 63 | `quic_app_silent` | 1780 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 64 | `h3_read_headers` | 1799 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 65 | `quic_recv_chunk` | 1816 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 66 | `budget_quic` | 1836 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 67 | `qb_request` | 1953 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 68 | `qb_recv` | 1960 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 69 | `qb_progress` | 1964 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 70 | `qb_packets` | 1967 | да | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 71 | `d2k_verify_probe_quic_on` | 1975 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 72 | `d2k_verify_probe_quic_path_on` | 1983 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
+| 73 | `d2k_verify_probe_quic_path_mark_on` | 1991 |  | fetch.rs, response.rs, ech.rs, https_probe.rs | CL6/CL7/CL9/CL10 | partial | named in report | TLS/HTTP verifier; бюджет/QUIC частично |
 
 ### `core/verify_quic_replay.c` — 2
 
@@ -1612,41 +1614,41 @@
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `rx_wire_partial` | 58 | да | r2o_volume.rs, fetch.rs | C15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
-| 2 | `d2k_volume_rx_partial` | 66 |  | r2o_volume.rs, fetch.rs | C15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
-| 3 | `d2k_volume_rx_pair_agrees` | 78 |  | r2o_volume.rs, fetch.rs | C15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
-| 4 | `d2k_volume_rx_needs_repeat` | 103 |  | r2o_volume.rs, fetch.rs | C15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
-| 5 | `d2k_volume_rx_evidence` | 111 |  | r2o_volume.rs, fetch.rs | C15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
-| 6 | `d2k_vol_verdict_name` | 215 |  | r2o_volume.rs, fetch.rs | C15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
-| 7 | `now_ms` | 224 | да | r2o_volume.rs, fetch.rs | C15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
-| 8 | `nap_ms` | 230 | да | r2o_volume.rs, fetch.rs | C15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
-| 9 | `clamp_ms` | 237 | да | r2o_volume.rs, fetch.rs | C15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
-| 10 | `fill_pad` | 247 | да | r2o_volume.rs, fetch.rs | C15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
-| 11 | `connect_bounded` | 259 | да | r2o_volume.rs, fetch.rs | C15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
-| 12 | `drain_head_tls` | 325 | да | r2o_volume.rs, fetch.rs | C15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
-| 13 | `drain_head_plain` | 351 | да | r2o_volume.rs, fetch.rs | C15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
-| 14 | `resource_retry_path` | 393 | да | r2o_volume.rs, fetch.rs | C15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
-| 15 | `rx_probe` | 411 | да | r2o_volume.rs, fetch.rs | C15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
-| 16 | `measure_response_volume` | 440 | да | r2o_volume.rs, fetch.rs | C15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
-| 17 | `probe_response_volume` | 558 | да | r2o_volume.rs, fetch.rs | C15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
-| 18 | `d2k_volume_probe_path` | 595 |  | r2o_volume.rs, fetch.rs | C15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
-| 19 | `d2k_volume_probe` | 729 |  | r2o_volume.rs, fetch.rs | C15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
+| 1 | `rx_wire_partial` | 58 | да | r2o_volume.rs, fetch.rs | CL15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
+| 2 | `d2k_volume_rx_partial` | 66 |  | r2o_volume.rs, fetch.rs | CL15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
+| 3 | `d2k_volume_rx_pair_agrees` | 78 |  | r2o_volume.rs, fetch.rs | CL15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
+| 4 | `d2k_volume_rx_needs_repeat` | 103 |  | r2o_volume.rs, fetch.rs | CL15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
+| 5 | `d2k_volume_rx_evidence` | 111 |  | r2o_volume.rs, fetch.rs | CL15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
+| 6 | `d2k_vol_verdict_name` | 215 |  | r2o_volume.rs, fetch.rs | CL15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
+| 7 | `now_ms` | 224 | да | r2o_volume.rs, fetch.rs | CL15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
+| 8 | `nap_ms` | 230 | да | r2o_volume.rs, fetch.rs | CL15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
+| 9 | `clamp_ms` | 237 | да | r2o_volume.rs, fetch.rs | CL15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
+| 10 | `fill_pad` | 247 | да | r2o_volume.rs, fetch.rs | CL15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
+| 11 | `connect_bounded` | 259 | да | r2o_volume.rs, fetch.rs | CL15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
+| 12 | `drain_head_tls` | 325 | да | r2o_volume.rs, fetch.rs | CL15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
+| 13 | `drain_head_plain` | 351 | да | r2o_volume.rs, fetch.rs | CL15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
+| 14 | `resource_retry_path` | 393 | да | r2o_volume.rs, fetch.rs | CL15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
+| 15 | `rx_probe` | 411 | да | r2o_volume.rs, fetch.rs | CL15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
+| 16 | `measure_response_volume` | 440 | да | r2o_volume.rs, fetch.rs | CL15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
+| 17 | `probe_response_volume` | 558 | да | r2o_volume.rs, fetch.rs | CL15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
+| 18 | `d2k_volume_probe_path` | 595 |  | r2o_volume.rs, fetch.rs | CL15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
+| 19 | `d2k_volume_probe` | 729 |  | r2o_volume.rs, fetch.rs | CL15/M5 | partial | named in report | TX/RX/ladder; полного verdict differential нет |
 
 ### `core/x25519.c` — 11
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `car25519` | 32 | да | hpke/rustls | C15/M6 | partial | named in report | X25519; протокольные тесты |
-| 2 | `sel25519` | 54 | да | hpke/rustls | C15/M6 | partial | named in report | X25519; протокольные тесты |
-| 3 | `pack25519` | 63 | да | hpke/rustls | C15/M6 | partial | named in report | X25519; протокольные тесты |
-| 4 | `unpack25519` | 84 | да | hpke/rustls | C15/M6 | partial | named in report | X25519; протокольные тесты |
-| 5 | `A` | 91 | да | hpke/rustls | C15/M6 | partial | named in report | X25519; протокольные тесты |
-| 6 | `Z` | 92 | да | hpke/rustls | C15/M6 | partial | named in report | X25519; протокольные тесты |
-| 7 | `M` | 94 | да | hpke/rustls | C15/M6 | partial | named in report | X25519; протокольные тесты |
-| 8 | `S` | 106 | да | hpke/rustls | C15/M6 | partial | named in report | X25519; протокольные тесты |
-| 9 | `inv25519` | 109 | да | hpke/rustls | C15/M6 | partial | named in report | X25519; протокольные тесты |
-| 10 | `d2k_x25519` | 119 |  | hpke/rustls | C15/M6 | partial | named in report | X25519; протокольные тесты |
-| 11 | `d2k_x25519_base` | 170 |  | hpke/rustls | C15/M6 | partial | named in report | X25519; протокольные тесты |
+| 1 | `car25519` | 32 | да | hpke/rustls | CL15/M6 | partial | named in report | X25519; протокольные тесты |
+| 2 | `sel25519` | 54 | да | hpke/rustls | CL15/M6 | partial | named in report | X25519; протокольные тесты |
+| 3 | `pack25519` | 63 | да | hpke/rustls | CL15/M6 | partial | named in report | X25519; протокольные тесты |
+| 4 | `unpack25519` | 84 | да | hpke/rustls | CL15/M6 | partial | named in report | X25519; протокольные тесты |
+| 5 | `A` | 91 | да | hpke/rustls | CL15/M6 | partial | named in report | X25519; протокольные тесты |
+| 6 | `Z` | 92 | да | hpke/rustls | CL15/M6 | partial | named in report | X25519; протокольные тесты |
+| 7 | `M` | 94 | да | hpke/rustls | CL15/M6 | partial | named in report | X25519; протокольные тесты |
+| 8 | `S` | 106 | да | hpke/rustls | CL15/M6 | partial | named in report | X25519; протокольные тесты |
+| 9 | `inv25519` | 109 | да | hpke/rustls | CL15/M6 | partial | named in report | X25519; протокольные тесты |
+| 10 | `d2k_x25519` | 119 |  | hpke/rustls | CL15/M6 | partial | named in report | X25519; протокольные тесты |
+| 11 | `d2k_x25519_base` | 170 |  | hpke/rustls | CL15/M6 | partial | named in report | X25519; протокольные тесты |
 
 ### `datapath/addr.c` — 3
 
@@ -1858,20 +1860,20 @@
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `d2k_http_request_stream_init` | 19 | да | r2k-core/httpup.rs | C14 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
-| 2 | `d2k_http_request_stream_line` | 22 | да | r2k-core/httpup.rs | C14 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
-| 3 | `d2k_http_request_stream_feed` | 31 | да | r2k-core/httpup.rs | C14 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
+| 1 | `d2k_http_request_stream_init` | 19 | да | r2k-core/httpup.rs | CL14 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
+| 2 | `d2k_http_request_stream_line` | 22 | да | r2k-core/httpup.rs | CL14 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
+| 3 | `d2k_http_request_stream_feed` | 31 | да | r2k-core/httpup.rs | CL14 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
 
 ### `datapath/include/d2k_http_response.h` — 6
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `d2k_hr_decimal` | 21 | да | r2k-core/http_response.rs | C11 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
-| 2 | `d2k_hr_token` | 31 | да | r2k-core/http_response.rs | C11 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
-| 3 | `d2k_hr_field` | 35 | да | r2k-core/http_response.rs | C11 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
-| 4 | `d2k_hr_extensions` | 43 | да | r2k-core/http_response.rs | C11 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
-| 5 | `d2k_hr_headers` | 72 | да | r2k-core/http_response.rs | C11 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
-| 6 | `d2k_http_response_feed` | 107 | да | r2k-core/http_response.rs | C11 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
+| 1 | `d2k_hr_decimal` | 21 | да | r2k-core/http_response.rs | CL11 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
+| 2 | `d2k_hr_token` | 31 | да | r2k-core/http_response.rs | CL11 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
+| 3 | `d2k_hr_field` | 35 | да | r2k-core/http_response.rs | CL11 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
+| 4 | `d2k_hr_extensions` | 43 | да | r2k-core/http_response.rs | CL11 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
+| 5 | `d2k_hr_headers` | 72 | да | r2k-core/http_response.rs | CL11 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
+| 6 | `d2k_http_response_feed` | 107 | да | r2k-core/http_response.rs | CL11 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
 
 ### `datapath/include/d2k_packet.h` — 2
 
@@ -2410,358 +2412,358 @@
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `d2k_detect_stop_all` | 45 |  | classify.rs, discovery.rs, raw_probe.rs, main.rs | C5/T2 | partial | named in report | bridge/split/clone/decoy |
-| 2 | `stop_asked` | 50 | да | classify.rs, discovery.rs, raw_probe.rs, main.rs | C5/T2 | partial | named in report | bridge/split/clone/decoy |
-| 3 | `plannable_hit` | 76 | да | classify.rs, discovery.rs, raw_probe.rs, main.rs | C5/T2 | partial | named in report | bridge/split/clone/decoy |
-| 4 | `map_verdict` | 95 | да | classify.rs, discovery.rs, raw_probe.rs, main.rs | C5/T2 | partial | named in report | bridge/split/clone/decoy |
-| 5 | `bridge_input` | 116 | да | classify.rs, discovery.rs, raw_probe.rs, main.rs | C5/T2 | partial | named in report | bridge/split/clone/decoy |
-| 6 | `progress_seen` | 261 | да | classify.rs, discovery.rs, raw_probe.rs, main.rs | C5/T2 | partial | named in report | bridge/split/clone/decoy |
-| 7 | `trace_questions` | 284 | да | classify.rs, discovery.rs, raw_probe.rs, main.rs | C5/T2 | partial | named in report | bridge/split/clone/decoy |
-| 8 | `retry_base_timeout` | 314 | да | classify.rs, discovery.rs, raw_probe.rs, main.rs | C5/T2 | partial | named in report | bridge/split/clone/decoy |
-| 9 | `sched_tcp` | 320 | да | classify.rs, discovery.rs, raw_probe.rs, main.rs | C5/T2 | partial | named in report | bridge/split/clone/decoy |
-| 10 | `d2k_detect_sched_tcp` | 466 |  | classify.rs, discovery.rs, raw_probe.rs, main.rs | C5/T2 | partial | named in report | bridge/split/clone/decoy |
-| 11 | `d2k_detect_sched_tcp_white` | 478 |  | classify.rs, discovery.rs, raw_probe.rs, main.rs | C5/T2 | implemented-unproven | module-level only | helper; module-level only |
-| 12 | `d2k_detect_sched_tcp_seeded` | 488 |  | classify.rs, discovery.rs, raw_probe.rs, main.rs | C5/T2 | implemented-unproven | module-level only | helper; module-level only |
-| 13 | `d2k_detect_sched_tcp_seeded_white` | 503 |  | classify.rs, discovery.rs, raw_probe.rs, main.rs | C5/T2 | implemented-unproven | module-level only | helper; module-level only |
-| 14 | `base_seen` | 531 | да | classify.rs, discovery.rs, raw_probe.rs, main.rs | C5/T2 | partial | named in report | bridge/split/clone/decoy |
-| 15 | `base_stop` | 537 | да | classify.rs, discovery.rs, raw_probe.rs, main.rs | C5/T2 | partial | named in report | bridge/split/clone/decoy |
-| 16 | `d2k_detect_sched_tcp_ack` | 548 |  | classify.rs, discovery.rs, raw_probe.rs, main.rs | C5/T2 | partial | named in report | bridge/split/clone/decoy |
-| 17 | `d2k_detect_sched_tcp_base` | 575 |  | classify.rs, discovery.rs, raw_probe.rs, main.rs | C5/T2 | partial | named in report | bridge/split/clone/decoy |
+| 1 | `d2k_detect_stop_all` | 45 |  | classify.rs, discovery.rs, raw_probe.rs, main.rs | CL5 | partial | named in report | bridge/split/clone/decoy |
+| 2 | `stop_asked` | 50 | да | classify.rs, discovery.rs, raw_probe.rs, main.rs | CL5 | partial | named in report | bridge/split/clone/decoy |
+| 3 | `plannable_hit` | 76 | да | classify.rs, discovery.rs, raw_probe.rs, main.rs | CL5 | partial | named in report | bridge/split/clone/decoy |
+| 4 | `map_verdict` | 95 | да | classify.rs, discovery.rs, raw_probe.rs, main.rs | CL5 | partial | named in report | bridge/split/clone/decoy |
+| 5 | `bridge_input` | 116 | да | classify.rs, discovery.rs, raw_probe.rs, main.rs | CL5 | partial | named in report | bridge/split/clone/decoy |
+| 6 | `progress_seen` | 261 | да | classify.rs, discovery.rs, raw_probe.rs, main.rs | CL5 | partial | named in report | bridge/split/clone/decoy |
+| 7 | `trace_questions` | 284 | да | classify.rs, discovery.rs, raw_probe.rs, main.rs | CL5 | partial | named in report | bridge/split/clone/decoy |
+| 8 | `retry_base_timeout` | 314 | да | classify.rs, discovery.rs, raw_probe.rs, main.rs | CL5 | partial | named in report | bridge/split/clone/decoy |
+| 9 | `sched_tcp` | 320 | да | classify.rs, discovery.rs, raw_probe.rs, main.rs | CL5 | partial | named in report | bridge/split/clone/decoy |
+| 10 | `d2k_detect_sched_tcp` | 466 |  | classify.rs, discovery.rs, raw_probe.rs, main.rs | CL5 | partial | named in report | bridge/split/clone/decoy |
+| 11 | `d2k_detect_sched_tcp_white` | 478 |  | classify.rs, discovery.rs, raw_probe.rs, main.rs | CL5 | implemented-unproven | module-level only | helper; module-level only |
+| 12 | `d2k_detect_sched_tcp_seeded` | 488 |  | classify.rs, discovery.rs, raw_probe.rs, main.rs | CL5 | implemented-unproven | module-level only | helper; module-level only |
+| 13 | `d2k_detect_sched_tcp_seeded_white` | 503 |  | classify.rs, discovery.rs, raw_probe.rs, main.rs | CL5 | implemented-unproven | module-level only | helper; module-level only |
+| 14 | `base_seen` | 531 | да | classify.rs, discovery.rs, raw_probe.rs, main.rs | CL5 | partial | named in report | bridge/split/clone/decoy |
+| 15 | `base_stop` | 537 | да | classify.rs, discovery.rs, raw_probe.rs, main.rs | CL5 | partial | named in report | bridge/split/clone/decoy |
+| 16 | `d2k_detect_sched_tcp_ack` | 548 |  | classify.rs, discovery.rs, raw_probe.rs, main.rs | CL5 | partial | named in report | bridge/split/clone/decoy |
+| 17 | `d2k_detect_sched_tcp_base` | 575 |  | classify.rs, discovery.rs, raw_probe.rs, main.rs | CL5 | partial | named in report | bridge/split/clone/decoy |
 
 ### `detect/classify.c` — 36
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `d2k_verdict_name` | 57 |  | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 2 | `d2k_resp_name` | 74 |  | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 3 | `d2k_now_ms` | 86 |  | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 4 | `d2k_sleep_ms` | 96 |  | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 5 | `d2k_trigger_accepts` | 109 |  | r2o-controller/classify.rs | C5/T3 | equivalent (scoped) | named in report | full-tree/control differential (scoped) |
-| 6 | `d2k_trigger_sni` | 126 |  | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 7 | `d2k_detect_stopped` | 136 |  | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 8 | `d2k_opts_defaults` | 141 |  | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 9 | `d2k_opts_acceptable` | 164 |  | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 10 | `d2k_opts_skipped` | 172 |  | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 11 | `d2k_trace_add` | 183 |  | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 12 | `obs_done` | 210 | да | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 13 | `d2k_note` | 217 |  | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 14 | `note_gap_loss` | 238 | да | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 15 | `d2k_split_offsets` | 253 |  | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 16 | `dial_marked_mode` | 292 | да | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 17 | `d2k_dial_deadline_err` | 368 |  | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 18 | `dial_marked` | 376 | да | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 19 | `once_probe` | 385 | да | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 20 | `unacked_bytes` | 499 | да | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 21 | `d2k_probe_data_ack` | 520 |  | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 22 | `measure` | 608 | да | r2o-controller/classify.rs | C5/T3 | equivalent (scoped) | named in report | full-tree/control differential (scoped) |
-| 23 | `bind_decoy` | 717 | да | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 24 | `answered_by_props` | 732 | да | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 25 | `fam_ix` | 766 | да | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 26 | `self_ix` | 769 | да | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 27 | `selftest_cached_age` | 774 | да | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 28 | `selftest_store` | 791 | да | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 29 | `d2k_raw_note_rc` | 801 |  | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 30 | `raw_selftest` | 827 | да | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 31 | `raw_doubted` | 860 | да | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 32 | `raw_recheck` | 867 | да | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 33 | `sweep_poisons` | 887 | да | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 34 | `cross_check_tls12` | 1084 | да | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 35 | `d2k_classify_run` | 1095 |  | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
-| 36 | `d2k_send_nosig` | 1481 |  | r2o-controller/classify.rs | C5/T3 | partial | named in report | full-tree/control differential (scoped) |
+| 1 | `d2k_verdict_name` | 57 |  | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 2 | `d2k_resp_name` | 74 |  | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 3 | `d2k_now_ms` | 86 |  | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 4 | `d2k_sleep_ms` | 96 |  | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 5 | `d2k_trigger_accepts` | 109 |  | r2o-controller/classify.rs | CL5 | equivalent (scoped) | named in report | full-tree/control differential (scoped) |
+| 6 | `d2k_trigger_sni` | 126 |  | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 7 | `d2k_detect_stopped` | 136 |  | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 8 | `d2k_opts_defaults` | 141 |  | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 9 | `d2k_opts_acceptable` | 164 |  | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 10 | `d2k_opts_skipped` | 172 |  | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 11 | `d2k_trace_add` | 183 |  | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 12 | `obs_done` | 210 | да | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 13 | `d2k_note` | 217 |  | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 14 | `note_gap_loss` | 238 | да | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 15 | `d2k_split_offsets` | 253 |  | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 16 | `dial_marked_mode` | 292 | да | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 17 | `d2k_dial_deadline_err` | 368 |  | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 18 | `dial_marked` | 376 | да | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 19 | `once_probe` | 385 | да | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 20 | `unacked_bytes` | 499 | да | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 21 | `d2k_probe_data_ack` | 520 |  | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 22 | `measure` | 608 | да | r2o-controller/classify.rs | CL5 | equivalent (scoped) | named in report | full-tree/control differential (scoped) |
+| 23 | `bind_decoy` | 717 | да | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 24 | `answered_by_props` | 732 | да | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 25 | `fam_ix` | 766 | да | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 26 | `self_ix` | 769 | да | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 27 | `selftest_cached_age` | 774 | да | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 28 | `selftest_store` | 791 | да | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 29 | `d2k_raw_note_rc` | 801 |  | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 30 | `raw_selftest` | 827 | да | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 31 | `raw_doubted` | 860 | да | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 32 | `raw_recheck` | 867 | да | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 33 | `sweep_poisons` | 887 | да | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 34 | `cross_check_tls12` | 1084 | да | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 35 | `d2k_classify_run` | 1095 |  | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
+| 36 | `d2k_send_nosig` | 1481 |  | r2o-controller/classify.rs | CL5 | partial | named in report | full-tree/control differential (scoped) |
 
 ### `detect/include/d2k_detect.h` — 1
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `d2k_prop_majority` | 490 | да | r2o-controller/classify.rs | C5 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
+| 1 | `d2k_prop_majority` | 490 | да | r2o-controller/classify.rs | CL5 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
 
 ### `detect/main.c` — 8
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `usage` | 19 | да | r2o-controller/main.rs CLI | C16 | partial | named in report | stdout/exit/JSON не полностью |
-| 2 | `print_json_str` | 51 | да | r2o-controller/main.rs CLI | C16 | partial | named in report | stdout/exit/JSON не полностью |
-| 3 | `print_tri` | 67 | да | r2o-controller/main.rs CLI | C16 | partial | named in report | stdout/exit/JSON не полностью |
-| 4 | `print_json` | 75 | да | r2o-controller/main.rs CLI | C16 | partial | named in report | stdout/exit/JSON не полностью |
-| 5 | `print_progress` | 193 | да | r2o-controller/main.rs CLI | C16 | partial | named in report | stdout/exit/JSON не полностью |
-| 6 | `tri_word` | 201 | да | r2o-controller/main.rs CLI | C16 | partial | named in report | stdout/exit/JSON не полностью |
-| 7 | `print_human` | 207 | да | r2o-controller/main.rs CLI | C16 | partial | named in report | stdout/exit/JSON не полностью |
-| 8 | `main` | 277 |  | r2o-controller/main.rs CLI | C16 | partial | named in report | stdout/exit/JSON не полностью |
+| 1 | `usage` | 19 | да | r2o-controller/main.rs CLI | CL16 | partial | named in report | stdout/exit/JSON не полностью |
+| 2 | `print_json_str` | 51 | да | r2o-controller/main.rs CLI | CL16 | partial | named in report | stdout/exit/JSON не полностью |
+| 3 | `print_tri` | 67 | да | r2o-controller/main.rs CLI | CL16 | partial | named in report | stdout/exit/JSON не полностью |
+| 4 | `print_json` | 75 | да | r2o-controller/main.rs CLI | CL16 | partial | named in report | stdout/exit/JSON не полностью |
+| 5 | `print_progress` | 193 | да | r2o-controller/main.rs CLI | CL16 | partial | named in report | stdout/exit/JSON не полностью |
+| 6 | `tri_word` | 201 | да | r2o-controller/main.rs CLI | CL16 | partial | named in report | stdout/exit/JSON не полностью |
+| 7 | `print_human` | 207 | да | r2o-controller/main.rs CLI | CL16 | partial | named in report | stdout/exit/JSON не полностью |
+| 8 | `main` | 277 |  | r2o-controller/main.rs CLI | CL16 | partial | named in report | stdout/exit/JSON не полностью |
 
 ### `detect/poison.c` — 12
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `d2k_poison_supports_family` | 17 |  | classify.rs, raw_probe.rs, classify_measured.rs | C5/T5 | partial | named in report | 85 poison; strategy_for отсутствует |
-| 2 | `d2k_poison_has_fake` | 24 |  | classify.rs, raw_probe.rs, classify_measured.rs | C5/T5 | partial | named in report | 85 poison; strategy_for отсутствует |
-| 3 | `add` | 47 | да | classify.rs, raw_probe.rs, classify_measured.rs | C5/T5 | partial | named in report | 85 poison; strategy_for отсутствует |
-| 4 | `d2k_poison_same` | 62 |  | classify.rs, raw_probe.rs, classify_measured.rs | C5/T5 | partial | named in report | 85 poison; strategy_for отсутствует |
-| 5 | `already_listed` | 73 | да | classify.rs, raw_probe.rs, classify_measured.rs | C5/T5 | partial | named in report | 85 poison; strategy_for отсутствует |
-| 6 | `init_poisons` | 84 | да | classify.rs, raw_probe.rs, classify_measured.rs | C5/T5 | partial | named in report | 85 poison; strategy_for отсутствует |
-| 7 | `d2k_poisons` | 182 |  | classify.rs, raw_probe.rs, classify_measured.rs | C5/T5 | partial | named in report | 85 poison; strategy_for отсутствует |
-| 8 | `d2k_note_props_hit` | 194 |  | classify.rs, raw_probe.rs, classify_measured.rs | C5/T5 | partial | named in report | 85 poison; strategy_for отсутствует |
-| 9 | `d2k_note_props_miss` | 216 |  | classify.rs, raw_probe.rs, classify_measured.rs | C5/T5 | partial | named in report | 85 poison; strategy_for отсутствует |
-| 10 | `d2k_strategy_for_poison` | 226 |  | classify.rs, raw_probe.rs, classify_measured.rs | C5/T5 | partial | named in report | 85 poison; strategy_for отсутствует |
-| 11 | `d2k_strategy_for` | 401 |  | classify.rs, raw_probe.rs, classify_measured.rs | C5/T5 | partial | named in report | 85 poison; strategy_for отсутствует |
-| 12 | `d2k_arm_from_poison` | 413 |  | classify.rs, raw_probe.rs, classify_measured.rs | C5/T5 | partial | named in report | 85 poison; strategy_for отсутствует |
+| 1 | `d2k_poison_supports_family` | 17 |  | classify.rs, raw_probe.rs, classify_measured.rs | CL5 | partial | named in report | 85 poison; strategy_for отсутствует |
+| 2 | `d2k_poison_has_fake` | 24 |  | classify.rs, raw_probe.rs, classify_measured.rs | CL5 | partial | named in report | 85 poison; strategy_for отсутствует |
+| 3 | `add` | 47 | да | classify.rs, raw_probe.rs, classify_measured.rs | CL5 | partial | named in report | 85 poison; strategy_for отсутствует |
+| 4 | `d2k_poison_same` | 62 |  | classify.rs, raw_probe.rs, classify_measured.rs | CL5 | partial | named in report | 85 poison; strategy_for отсутствует |
+| 5 | `already_listed` | 73 | да | classify.rs, raw_probe.rs, classify_measured.rs | CL5 | partial | named in report | 85 poison; strategy_for отсутствует |
+| 6 | `init_poisons` | 84 | да | classify.rs, raw_probe.rs, classify_measured.rs | CL5 | partial | named in report | 85 poison; strategy_for отсутствует |
+| 7 | `d2k_poisons` | 182 |  | classify.rs, raw_probe.rs, classify_measured.rs | CL5 | partial | named in report | 85 poison; strategy_for отсутствует |
+| 8 | `d2k_note_props_hit` | 194 |  | classify.rs, raw_probe.rs, classify_measured.rs | CL5 | partial | named in report | 85 poison; strategy_for отсутствует |
+| 9 | `d2k_note_props_miss` | 216 |  | classify.rs, raw_probe.rs, classify_measured.rs | CL5 | partial | named in report | 85 poison; strategy_for отсутствует |
+| 10 | `d2k_strategy_for_poison` | 226 |  | classify.rs, raw_probe.rs, classify_measured.rs | CL5 | partial | named in report | 85 poison; strategy_for отсутствует |
+| 11 | `d2k_strategy_for` | 401 |  | classify.rs, raw_probe.rs, classify_measured.rs | CL5 | partial | named in report | 85 poison; strategy_for отсутствует |
+| 12 | `d2k_arm_from_poison` | 413 |  | classify.rs, raw_probe.rs, classify_measured.rs | CL5 | partial | named in report | 85 poison; strategy_for отсутствует |
 
 ### `detect/props.c` — 7
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `prop_probes` | 49 | да | classify.rs, raw_probe.rs | C5/T4 | partial | named in report | 12 questions/compose |
-| 2 | `apply_set` | 198 | да | classify.rs, raw_probe.rs | C5/T4 | partial | named in report | 12 questions/compose |
-| 3 | `d2k_run_properties` | 261 |  | classify.rs, raw_probe.rs | C5/T4 | partial | named in report | 12 questions/compose |
-| 4 | `d2k_run_properties_family` | 267 |  | classify.rs, raw_probe.rs | C5/T4 | partial | named in report | 12 questions/compose |
-| 5 | `tri_no` | 418 | да | classify.rs, raw_probe.rs | C5/T4 | partial | named in report | 12 questions/compose |
-| 6 | `tri_yes` | 419 | да | classify.rs, raw_probe.rs | C5/T4 | partial | named in report | 12 questions/compose |
-| 7 | `d2k_compose_from_props` | 426 |  | classify.rs, raw_probe.rs | C5/T4 | partial | named in report | 12 questions/compose |
+| 1 | `prop_probes` | 49 | да | classify.rs, raw_probe.rs | CL5 | partial | named in report | 12 questions/compose |
+| 2 | `apply_set` | 198 | да | classify.rs, raw_probe.rs | CL5 | partial | named in report | 12 questions/compose |
+| 3 | `d2k_run_properties` | 261 |  | classify.rs, raw_probe.rs | CL5 | partial | named in report | 12 questions/compose |
+| 4 | `d2k_run_properties_family` | 267 |  | classify.rs, raw_probe.rs | CL5 | partial | named in report | 12 questions/compose |
+| 5 | `tri_no` | 418 | да | classify.rs, raw_probe.rs | CL5 | partial | named in report | 12 questions/compose |
+| 6 | `tri_yes` | 419 | да | classify.rs, raw_probe.rs | CL5 | partial | named in report | 12 questions/compose |
+| 7 | `d2k_compose_from_props` | 426 |  | classify.rs, raw_probe.rs | CL5 | partial | named in report | 12 questions/compose |
 
 ### `detect/raw.c` — 62
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `parse_long_exact` | 63 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 2 | `d2k_parse_rst_rule` | 79 |  | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 3 | `d2k_parse_stale_rst_rule` | 121 |  | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 4 | `pid_alive` | 128 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 5 | `d2k_rst_rule_stale` | 137 |  | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 6 | `d2k_raw_supported` | 164 |  | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 7 | `raw_rule_system` | 224 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 8 | `d2k_raw_rst_fail_count` | 262 |  | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 9 | `d2k_raw_dial_count` | 263 |  | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 10 | `seed_init` | 265 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 11 | `seed_once` | 271 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 12 | `next_source_port` | 283 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 13 | `rst_nft` | 313 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 14 | `sweep_stale_rst_rules` | 319 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 15 | `rst_rule_cmd_form` | 382 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 16 | `rst_rule_cmd` | 402 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 17 | `rc_exit1` | 407 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 18 | `rst_delete_once` | 416 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 19 | `rst_abandon` | 424 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 20 | `register_atexit` | 437 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 21 | `rst_remember` | 440 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 22 | `retry_pending_releases` | 454 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 23 | `rst_release_locked` | 471 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 24 | `d2k_raw_flush_pending` | 481 |  | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 25 | `d2k_raw_pending_count` | 488 |  | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 26 | `raw_atexit` | 497 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 27 | `rst_key_of` | 506 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 28 | `suppress_kernel_rst` | 517 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 29 | `release_kernel_rst` | 547 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 30 | `local_addr_for` | 556 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 31 | `rd16` | 598 | да | r2o-controller/raw_probe.rs | C1/T6 | equivalent (scoped) | named in report | profile/emission/cancel differential (scoped) |
-| 32 | `rd32` | 600 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 33 | `wr16` | 606 | да | r2o-controller/raw_probe.rs | C1/T6 | equivalent (scoped) | named in report | profile/emission/cancel differential (scoped) |
-| 34 | `wr32` | 608 | да | r2o-controller/raw_probe.rs | C1/T6 | equivalent (scoped) | named in report | profile/emission/cancel differential (scoped) |
-| 35 | `checksum` | 614 | да | r2o-controller/raw_probe.rs | C1/T6 | equivalent (scoped) | named in report | profile/emission/cancel differential (scoped) |
-| 36 | `tcp_checksum` | 630 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 37 | `build_ipv4_tcp` | 652 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 38 | `tcp_checksum_family` | 738 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 39 | `build_ip_tcp` | 750 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 40 | `raw_sendto` | 773 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 41 | `d2k_raw_set_segment_max` | 814 |  | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 42 | `raw_send` | 830 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 43 | `raw_send_syn` | 864 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 44 | `raw_recv` | 900 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 45 | `raw_read_payload` | 952 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 46 | `raw_close` | 990 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 47 | `raw_handshake` | 1008 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 48 | `raw_dial` | 1092 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 49 | `d2k_raw_probe_handshake_as` | 1187 |  | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 50 | `raw_send_plan` | 1209 | да | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 51 | `d2k_raw_probe_poison_family` | 1272 |  | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 52 | `d2k_raw_supported` | 1328 |  | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 53 | `d2k_raw_set_segment_max` | 1329 |  | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 54 | `d2k_raw_rst_fail_count` | 1330 |  | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 55 | `d2k_raw_dial_count` | 1331 |  | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 56 | `d2k_raw_flush_pending` | 1332 |  | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 57 | `d2k_raw_pending_count` | 1333 |  | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 58 | `d2k_raw_probe_poison_family` | 1335 |  | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 59 | `d2k_raw_probe_handshake_as` | 1345 |  | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 60 | `d2k_raw_probe_handshake` | 1357 |  | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 61 | `d2k_raw_probe_handshake_family` | 1364 |  | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
-| 62 | `d2k_raw_probe_poison` | 1372 |  | r2o-controller/raw_probe.rs | C1/T6 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 1 | `parse_long_exact` | 63 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 2 | `d2k_parse_rst_rule` | 79 |  | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 3 | `d2k_parse_stale_rst_rule` | 121 |  | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 4 | `pid_alive` | 128 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 5 | `d2k_rst_rule_stale` | 137 |  | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 6 | `d2k_raw_supported` | 164 |  | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 7 | `raw_rule_system` | 224 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 8 | `d2k_raw_rst_fail_count` | 262 |  | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 9 | `d2k_raw_dial_count` | 263 |  | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 10 | `seed_init` | 265 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 11 | `seed_once` | 271 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 12 | `next_source_port` | 283 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 13 | `rst_nft` | 313 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 14 | `sweep_stale_rst_rules` | 319 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 15 | `rst_rule_cmd_form` | 382 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 16 | `rst_rule_cmd` | 402 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 17 | `rc_exit1` | 407 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 18 | `rst_delete_once` | 416 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 19 | `rst_abandon` | 424 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 20 | `register_atexit` | 437 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 21 | `rst_remember` | 440 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 22 | `retry_pending_releases` | 454 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 23 | `rst_release_locked` | 471 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 24 | `d2k_raw_flush_pending` | 481 |  | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 25 | `d2k_raw_pending_count` | 488 |  | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 26 | `raw_atexit` | 497 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 27 | `rst_key_of` | 506 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 28 | `suppress_kernel_rst` | 517 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 29 | `release_kernel_rst` | 547 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 30 | `local_addr_for` | 556 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 31 | `rd16` | 598 | да | r2o-controller/raw_probe.rs | CL1 | equivalent (scoped) | named in report | profile/emission/cancel differential (scoped) |
+| 32 | `rd32` | 600 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 33 | `wr16` | 606 | да | r2o-controller/raw_probe.rs | CL1 | equivalent (scoped) | named in report | profile/emission/cancel differential (scoped) |
+| 34 | `wr32` | 608 | да | r2o-controller/raw_probe.rs | CL1 | equivalent (scoped) | named in report | profile/emission/cancel differential (scoped) |
+| 35 | `checksum` | 614 | да | r2o-controller/raw_probe.rs | CL1 | equivalent (scoped) | named in report | profile/emission/cancel differential (scoped) |
+| 36 | `tcp_checksum` | 630 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 37 | `build_ipv4_tcp` | 652 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 38 | `tcp_checksum_family` | 738 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 39 | `build_ip_tcp` | 750 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 40 | `raw_sendto` | 773 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 41 | `d2k_raw_set_segment_max` | 814 |  | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 42 | `raw_send` | 830 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 43 | `raw_send_syn` | 864 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 44 | `raw_recv` | 900 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 45 | `raw_read_payload` | 952 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 46 | `raw_close` | 990 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 47 | `raw_handshake` | 1008 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 48 | `raw_dial` | 1092 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 49 | `d2k_raw_probe_handshake_as` | 1187 |  | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 50 | `raw_send_plan` | 1209 | да | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 51 | `d2k_raw_probe_poison_family` | 1272 |  | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 52 | `d2k_raw_supported` | 1328 |  | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 53 | `d2k_raw_set_segment_max` | 1329 |  | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 54 | `d2k_raw_rst_fail_count` | 1330 |  | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 55 | `d2k_raw_dial_count` | 1331 |  | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 56 | `d2k_raw_flush_pending` | 1332 |  | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 57 | `d2k_raw_pending_count` | 1333 |  | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 58 | `d2k_raw_probe_poison_family` | 1335 |  | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 59 | `d2k_raw_probe_handshake_as` | 1345 |  | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 60 | `d2k_raw_probe_handshake` | 1357 |  | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 61 | `d2k_raw_probe_handshake_family` | 1364 |  | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
+| 62 | `d2k_raw_probe_poison` | 1372 |  | r2o-controller/raw_probe.rs | CL1 | partial | named in report | profile/emission/cancel differential (scoped) |
 
 ### `detect/response.c` — 7
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `resp_timeout` | 64 | да | r2o-controller/response.rs | C9/T7 | partial | named in report | shared fixtures + follow-up (scoped) |
-| 2 | `d2k_resp_scan12` | 83 |  | r2o-controller/response.rs | C9/T7 | equivalent (scoped) | named in report | shared fixtures + follow-up (scoped) |
-| 3 | `d2k_resp_handshake12` | 123 |  | r2o-controller/response.rs | C9/T7 | partial | named in report | shared fixtures + follow-up (scoped) |
-| 4 | `count_handshakes` | 215 | да | r2o-controller/response.rs | C9/T7 | partial | named in report | shared fixtures + follow-up (scoped) |
-| 5 | `d2k_neutral_sni` | 233 |  | r2o-controller/response.rs | C9/T7 | partial | named in report | shared fixtures + follow-up (scoped) |
-| 6 | `d2k_resp_decide` | 274 |  | r2o-controller/response.rs | C9/T7 | equivalent (scoped) | named in report | shared fixtures + follow-up (scoped) |
-| 7 | `d2k_probe_response` | 310 |  | r2o-controller/response.rs | C9/T7 | partial | named in report | shared fixtures + follow-up (scoped) |
+| 1 | `resp_timeout` | 64 | да | r2o-controller/response.rs | CL9 | partial | named in report | shared fixtures + follow-up (scoped) |
+| 2 | `d2k_resp_scan12` | 83 |  | r2o-controller/response.rs | CL9 | equivalent (scoped) | named in report | shared fixtures + follow-up (scoped) |
+| 3 | `d2k_resp_handshake12` | 123 |  | r2o-controller/response.rs | CL9 | partial | named in report | shared fixtures + follow-up (scoped) |
+| 4 | `count_handshakes` | 215 | да | r2o-controller/response.rs | CL9 | partial | named in report | shared fixtures + follow-up (scoped) |
+| 5 | `d2k_neutral_sni` | 233 |  | r2o-controller/response.rs | CL9 | partial | named in report | shared fixtures + follow-up (scoped) |
+| 6 | `d2k_resp_decide` | 274 |  | r2o-controller/response.rs | CL9 | equivalent (scoped) | named in report | shared fixtures + follow-up (scoped) |
+| 7 | `d2k_probe_response` | 310 |  | r2o-controller/response.rs | CL9 | partial | named in report | shared fixtures + follow-up (scoped) |
 
 ### `detect/trigger.c` — 9
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `d2k_trigger_tls` | 21 |  | r2o-controller/trigger.rs | C?/T1 | partial | named in report | raw hex differential (scoped) |
-| 2 | `hexval` | 52 | да | r2o-controller/trigger.rs | C?/T1 | partial | named in report | raw hex differential (scoped) |
-| 3 | `d2k_trigger_raw_hex` | 67 |  | r2o-controller/trigger.rs | C?/T1 | partial | named in report | raw hex differential (scoped) |
-| 4 | `d2k_trigger_control` | 118 |  | r2o-controller/trigger.rs | C?/T1 | partial | named in report | raw hex differential (scoped) |
-| 5 | `d2k_opts_decoy` | 130 |  | r2o-controller/trigger.rs | C?/T1 | partial | named in report | raw hex differential (scoped) |
-| 6 | `d2k_trigger_host_ts_override` | 156 |  | r2o-controller/trigger.rs | C?/T1 | partial | named in report | raw hex differential (scoped) |
-| 7 | `host_offers_ts` | 158 | да | r2o-controller/trigger.rs | C?/T1 | partial | named in report | raw hex differential (scoped) |
-| 8 | `d2k_trigger_offers_ts` | 180 |  | r2o-controller/trigger.rs | C?/T1 | partial | named in report | raw hex differential (scoped) |
-| 9 | `d2k_trigger_allows_poison` | 201 |  | r2o-controller/trigger.rs | C?/T1 | partial | named in report | raw hex differential (scoped) |
+| 1 | `d2k_trigger_tls` | 21 |  | r2o-controller/trigger.rs | CL1 | partial | named in report | raw hex differential (scoped) |
+| 2 | `hexval` | 52 | да | r2o-controller/trigger.rs | CL1 | partial | named in report | raw hex differential (scoped) |
+| 3 | `d2k_trigger_raw_hex` | 67 |  | r2o-controller/trigger.rs | CL1 | partial | named in report | raw hex differential (scoped) |
+| 4 | `d2k_trigger_control` | 118 |  | r2o-controller/trigger.rs | CL1 | partial | named in report | raw hex differential (scoped) |
+| 5 | `d2k_opts_decoy` | 130 |  | r2o-controller/trigger.rs | CL1 | partial | named in report | raw hex differential (scoped) |
+| 6 | `d2k_trigger_host_ts_override` | 156 |  | r2o-controller/trigger.rs | CL1 | partial | named in report | raw hex differential (scoped) |
+| 7 | `host_offers_ts` | 158 | да | r2o-controller/trigger.rs | CL1 | partial | named in report | raw hex differential (scoped) |
+| 8 | `d2k_trigger_offers_ts` | 180 |  | r2o-controller/trigger.rs | CL1 | partial | named in report | raw hex differential (scoped) |
+| 9 | `d2k_trigger_allows_poison` | 201 |  | r2o-controller/trigger.rs | CL1 | partial | named in report | raw hex differential (scoped) |
 
 ### `panel/main.c` — 18
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `on_signal` | 42 | да | r2o-panel/main.rs | P1/P5 | partial | named in report | serve/config/bind |
-| 2 | `say` | 47 | да | r2o-panel/main.rs | P1/P5 | partial | named in report | serve/config/bind |
-| 3 | `usage` | 55 | да | r2o-panel/main.rs | P1/P5 | partial | named in report | serve/config/bind |
-| 4 | `trim` | 63 | да | r2o-panel/main.rs | P1/P5 | implemented-unproven | module-level only | helper; module-level only |
-| 5 | `known_key` | 71 | да | r2o-panel/main.rs | P1/P5 | partial | named in report | serve/config/bind |
-| 6 | `valid_mode` | 91 | да | r2o-panel/main.rs | P1/P5 | implemented-unproven | module-level only | helper; module-level only |
-| 7 | `remember_unknown` | 96 | да | r2o-panel/main.rs | P1/P5 | partial | named in report | serve/config/bind |
-| 8 | `copy_value` | 106 | да | r2o-panel/main.rs | P1/P5 | implemented-unproven | module-level only | helper; module-level only |
-| 9 | `normalize_shell_value` | 114 | да | r2o-panel/main.rs | P1/P5 | implemented-unproven | module-level only | helper; module-level only |
-| 10 | `config_unsigned` | 138 | да | r2o-panel/main.rs | P1/P5 | implemented-unproven | module-level only | helper; module-level only |
-| 11 | `read_config` | 151 | да | r2o-panel/main.rs | P1/P5 | implemented-unproven | module-level only | helper; module-level only |
-| 12 | `split_listen` | 211 | да | r2o-panel/main.rs | P1/P5 | partial | named in report | serve/config/bind |
-| 13 | `listen_socket` | 235 | да | r2o-panel/main.rs | P1/P5 | implemented-unproven | module-level only | helper; module-level only |
-| 14 | `is_loopback_addr` | 269 | да | r2o-panel/main.rs | P1/P5 | implemented-unproven | module-level only | helper; module-level only |
-| 15 | `set_state_note` | 276 | да | r2o-panel/main.rs | P1/P5 | implemented-unproven | module-level only | helper; module-level only |
-| 16 | `serve` | 287 | да | r2o-panel/main.rs | P1/P5 | partial | named in report | serve/config/bind |
-| 17 | `offline_self_check` | 396 | да | r2o-panel/main.rs | P1/P5 | partial | named in report | serve/config/bind |
-| 18 | `main` | 404 |  | r2o-panel/main.rs | P1/P5 | partial | named in report | serve/config/bind |
+| 1 | `on_signal` | 42 | да | r2o-panel/main.rs | A1/A2/A5 | partial | named in report | serve/config/bind |
+| 2 | `say` | 47 | да | r2o-panel/main.rs | A1/A2/A5 | partial | named in report | serve/config/bind |
+| 3 | `usage` | 55 | да | r2o-panel/main.rs | A1/A2/A5 | partial | named in report | serve/config/bind |
+| 4 | `trim` | 63 | да | r2o-panel/main.rs | A1/A2/A5 | implemented-unproven | module-level only | helper; module-level only |
+| 5 | `known_key` | 71 | да | r2o-panel/main.rs | A1/A2/A5 | partial | named in report | serve/config/bind |
+| 6 | `valid_mode` | 91 | да | r2o-panel/main.rs | A1/A2/A5 | implemented-unproven | module-level only | helper; module-level only |
+| 7 | `remember_unknown` | 96 | да | r2o-panel/main.rs | A1/A2/A5 | partial | named in report | serve/config/bind |
+| 8 | `copy_value` | 106 | да | r2o-panel/main.rs | A1/A2/A5 | implemented-unproven | module-level only | helper; module-level only |
+| 9 | `normalize_shell_value` | 114 | да | r2o-panel/main.rs | A1/A2/A5 | implemented-unproven | module-level only | helper; module-level only |
+| 10 | `config_unsigned` | 138 | да | r2o-panel/main.rs | A1/A2/A5 | implemented-unproven | module-level only | helper; module-level only |
+| 11 | `read_config` | 151 | да | r2o-panel/main.rs | A1/A2/A5 | implemented-unproven | module-level only | helper; module-level only |
+| 12 | `split_listen` | 211 | да | r2o-panel/main.rs | A1/A2/A5 | partial | named in report | serve/config/bind |
+| 13 | `listen_socket` | 235 | да | r2o-panel/main.rs | A1/A2/A5 | implemented-unproven | module-level only | helper; module-level only |
+| 14 | `is_loopback_addr` | 269 | да | r2o-panel/main.rs | A1/A2/A5 | implemented-unproven | module-level only | helper; module-level only |
+| 15 | `set_state_note` | 276 | да | r2o-panel/main.rs | A1/A2/A5 | implemented-unproven | module-level only | helper; module-level only |
+| 16 | `serve` | 287 | да | r2o-panel/main.rs | A1/A2/A5 | partial | named in report | serve/config/bind |
+| 17 | `offline_self_check` | 396 | да | r2o-panel/main.rs | A1/A2/A5 | partial | named in report | serve/config/bind |
+| 18 | `main` | 404 |  | r2o-panel/main.rs | A1/A2/A5 | partial | named in report | serve/config/bind |
 
 ### `panel/server.c` — 51
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `monotonic_ms` | 41 | да | r2o-panel/server.rs | P2-P5 | implemented-unproven | module-level only | helper; module-level only |
-| 2 | `d2k_panel_control_tick` | 47 |  | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 3 | `d2k_panel_ignore_sigpipe` | 58 |  | r2o-panel/server.rs | P2-P5 | implemented-unproven | module-level only | helper; module-level only |
-| 4 | `json_ws` | 68 | да | r2o-panel/server.rs | P2-P5 | implemented-unproven | module-level only | helper; module-level only |
-| 5 | `json_string` | 73 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 6 | `json_compound` | 96 | да | r2o-panel/server.rs | P2-P5 | implemented-unproven | module-level only | helper; module-level only |
-| 7 | `json_number` | 120 | да | r2o-panel/server.rs | P2-P5 | implemented-unproven | module-level only | helper; module-level only |
-| 8 | `json_value` | 144 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 9 | `json_valid_object` | 158 | да | r2o-panel/server.rs | P2-P5 | implemented-unproven | module-level only | helper; module-level only |
-| 10 | `json_top_value` | 166 | да | r2o-panel/server.rs | P2-P5 | implemented-unproven | module-level only | helper; module-level only |
-| 11 | `json_top_true` | 197 | да | r2o-panel/server.rs | P2-P5 | implemented-unproven | module-level only | helper; module-level only |
-| 12 | `json_top_nonempty_string` | 204 | да | r2o-panel/server.rs | P2-P5 | implemented-unproven | module-level only | helper; module-level only |
-| 13 | `pid_path_running` | 211 | да | r2o-panel/server.rs | P2-P5 | implemented-unproven | module-level only | helper; module-level only |
-| 14 | `engine_pid_running` | 233 | да | r2o-panel/server.rs | P2-P5 | implemented-unproven | module-level only | helper; module-level only |
-| 15 | `controller_pid_running` | 237 | да | r2o-panel/server.rs | P2-P5 | implemented-unproven | module-level only | helper; module-level only |
-| 16 | `write_all` | 241 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 17 | `response_ex` | 261 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 18 | `response` | 287 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 19 | `header_value` | 292 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 20 | `d2k_panel_same_origin` | 316 |  | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 21 | `run_service_action` | 329 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 22 | `telegram_config_flags` | 376 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 23 | `telegram_status_value` | 405 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 24 | `telegram_stats_number` | 420 | да | r2o-panel/server.rs | P2-P5 | implemented-unproven | module-level only | helper; module-level only |
-| 25 | `telegram_stats_optional_number` | 434 | да | r2o-panel/server.rs | P2-P5 | implemented-unproven | module-level only | helper; module-level only |
-| 26 | `telegram_stats_value` | 445 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 27 | `worker_domain_normalize` | 547 | да | r2o-panel/server.rs | P2-P5 | implemented-unproven | module-level only | helper; module-level only |
-| 28 | `worker_domain_add` | 588 | да | r2o-panel/server.rs | P2-P5 | implemented-unproven | module-level only | helper; module-level only |
-| 29 | `worker_line` | 601 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 30 | `worker_domains_from_config` | 614 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 31 | `worker_domains_from_json` | 670 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 32 | `worker_config_write` | 711 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 33 | `worker_request_body` | 784 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 34 | `api_telegram_workers` | 822 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 35 | `api_control` | 895 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 36 | `api_update` | 980 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 37 | `read_request` | 1008 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 38 | `json_object_file` | 1030 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 39 | `buf_add` | 1065 | да | r2o-panel/server.rs | P2-P5 | implemented-unproven | module-level only | helper; module-level only |
-| 40 | `buf_puts` | 1072 | да | r2o-panel/server.rs | P2-P5 | implemented-unproven | module-level only | helper; module-level only |
-| 41 | `buf_printf` | 1074 | да | r2o-panel/server.rs | P2-P5 | implemented-unproven | module-level only | helper; module-level only |
-| 42 | `buf_json_string` | 1091 | да | r2o-panel/server.rs | P2-P5 | implemented-unproven | module-level only | helper; module-level only |
-| 43 | `catalog_revision` | 1110 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 44 | `buf_live_knowledge` | 1129 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 45 | `append_stage` | 1155 | да | r2o-panel/server.rs | P2-P5 | implemented-unproven | module-level only | helper; module-level only |
-| 46 | `append_snapshot` | 1165 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 47 | `api_status` | 1249 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 48 | `static_file` | 1314 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 49 | `diagnostic_response` | 1361 | да | r2o-panel/server.rs | P2-P5 | implemented-unproven | module-level only | helper; module-level only |
-| 50 | `api_diagnostics` | 1364 | да | r2o-panel/server.rs | P2-P5 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
-| 51 | `d2k_panel_handle_fd` | 1397 |  | r2o-panel/server.rs | P2-P5 | implemented-unproven | module-level only | helper; module-level only |
+| 1 | `monotonic_ms` | 41 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | implemented-unproven | module-level only | helper; module-level only |
+| 2 | `d2k_panel_control_tick` | 47 |  | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 3 | `d2k_panel_ignore_sigpipe` | 58 |  | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | implemented-unproven | module-level only | helper; module-level only |
+| 4 | `json_ws` | 68 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | implemented-unproven | module-level only | helper; module-level only |
+| 5 | `json_string` | 73 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 6 | `json_compound` | 96 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | implemented-unproven | module-level only | helper; module-level only |
+| 7 | `json_number` | 120 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | implemented-unproven | module-level only | helper; module-level only |
+| 8 | `json_value` | 144 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 9 | `json_valid_object` | 158 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | implemented-unproven | module-level only | helper; module-level only |
+| 10 | `json_top_value` | 166 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | implemented-unproven | module-level only | helper; module-level only |
+| 11 | `json_top_true` | 197 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | implemented-unproven | module-level only | helper; module-level only |
+| 12 | `json_top_nonempty_string` | 204 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | implemented-unproven | module-level only | helper; module-level only |
+| 13 | `pid_path_running` | 211 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | implemented-unproven | module-level only | helper; module-level only |
+| 14 | `engine_pid_running` | 233 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | implemented-unproven | module-level only | helper; module-level only |
+| 15 | `controller_pid_running` | 237 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | implemented-unproven | module-level only | helper; module-level only |
+| 16 | `write_all` | 241 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 17 | `response_ex` | 261 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 18 | `response` | 287 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 19 | `header_value` | 292 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 20 | `d2k_panel_same_origin` | 316 |  | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 21 | `run_service_action` | 329 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 22 | `telegram_config_flags` | 376 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 23 | `telegram_status_value` | 405 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 24 | `telegram_stats_number` | 420 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | implemented-unproven | module-level only | helper; module-level only |
+| 25 | `telegram_stats_optional_number` | 434 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | implemented-unproven | module-level only | helper; module-level only |
+| 26 | `telegram_stats_value` | 445 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 27 | `worker_domain_normalize` | 547 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | implemented-unproven | module-level only | helper; module-level only |
+| 28 | `worker_domain_add` | 588 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | implemented-unproven | module-level only | helper; module-level only |
+| 29 | `worker_line` | 601 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 30 | `worker_domains_from_config` | 614 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 31 | `worker_domains_from_json` | 670 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 32 | `worker_config_write` | 711 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 33 | `worker_request_body` | 784 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 34 | `api_telegram_workers` | 822 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 35 | `api_control` | 895 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 36 | `api_update` | 980 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 37 | `read_request` | 1008 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 38 | `json_object_file` | 1030 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 39 | `buf_add` | 1065 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | implemented-unproven | module-level only | helper; module-level only |
+| 40 | `buf_puts` | 1072 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | implemented-unproven | module-level only | helper; module-level only |
+| 41 | `buf_printf` | 1074 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | implemented-unproven | module-level only | helper; module-level only |
+| 42 | `buf_json_string` | 1091 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | implemented-unproven | module-level only | helper; module-level only |
+| 43 | `catalog_revision` | 1110 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 44 | `buf_live_knowledge` | 1129 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 45 | `append_stage` | 1155 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | implemented-unproven | module-level only | helper; module-level only |
+| 46 | `append_snapshot` | 1165 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 47 | `api_status` | 1249 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 48 | `static_file` | 1314 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 49 | `diagnostic_response` | 1361 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | implemented-unproven | module-level only | helper; module-level only |
+| 50 | `api_diagnostics` | 1364 | да | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | partial | named in report | endpoints/limits; absolute response deadline/IO gap |
+| 51 | `d2k_panel_handle_fd` | 1397 |  | r2o-panel/server.rs | A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15/A16/A17/A18/A19/A20/A21/A22/A23/A24/A25/A26 | implemented-unproven | module-level only | helper; module-level only |
 
 ### `relay-enroll/main.c` — 45
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `rate_allow` | 112 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 2 | `shared_limits_create` | 123 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 3 | `shared_lock` | 133 | да | — | VPS D1a/D1b/D2 | not-applicable | module-level only | helper; module-level only |
-| 4 | `shared_unlock` | 148 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 5 | `limits_lock` | 151 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 6 | `limits_unlock` | 152 | да | — | VPS D1a/D1b/D2 | not-applicable | module-level only | helper; module-level only |
-| 7 | `conn_admit` | 156 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 8 | `conn_set_pid` | 170 | да | — | VPS D1a/D1b/D2 | not-applicable | module-level only | helper; module-level only |
-| 9 | `conn_release_slot` | 174 | да | — | VPS D1a/D1b/D2 | not-applicable | module-level only | helper; module-level only |
-| 10 | `conn_release_pid` | 179 | да | — | VPS D1a/D1b/D2 | not-applicable | module-level only | helper; module-level only |
-| 11 | `conn_route` | 187 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 12 | `route_status` | 200 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 13 | `valid_proof` | 210 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 14 | `parse_headers` | 221 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 15 | `system_resolve` | 258 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 16 | `monotonic_ms` | 270 | да | — | VPS D1a/D1b/D2 | not-applicable | module-level only | helper; module-level only |
-| 17 | `monotonic_seconds` | 275 | да | — | VPS D1a/D1b/D2 | not-applicable | module-level only | helper; module-level only |
-| 18 | `clock_now` | 276 | да | — | VPS D1a/D1b/D2 | not-applicable | module-level only | helper; module-level only |
-| 19 | `dns_build_query` | 280 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 20 | `dns16` | 293 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 21 | `dns_read_name` | 297 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 22 | `dns_parse_reply` | 321 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 23 | `udp_open` | 373 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 24 | `udp_send` | 385 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 25 | `udp_recv` | 389 | да | — | VPS D1a/D1b/D2 | not-applicable | module-level only | helper; module-level only |
-| 26 | `udp_close` | 402 | да | — | VPS D1a/D1b/D2 | not-applicable | module-level only | helper; module-level only |
-| 27 | `addr_add` | 409 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 28 | `answer_cache_create` | 416 | да | — | VPS D1a/D1b/D2 | not-applicable | module-level only | helper; module-level only |
-| 29 | `cache_get` | 421 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 30 | `cache_put` | 430 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 31 | `public_phase` | 439 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 32 | `json_space` | 474 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 33 | `json_char` | 477 | да | — | VPS D1a/D1b/D2 | not-applicable | module-level only | helper; module-level only |
-| 34 | `json_name` | 481 | да | — | VPS D1a/D1b/D2 | not-applicable | module-level only | helper; module-level only |
-| 35 | `allowed_host` | 492 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 36 | `handle_resolve` | 502 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 37 | `socket_write_all` | 554 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 38 | `forward_registration` | 560 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 39 | `ssl_write_all` | 587 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 40 | `reply_json` | 592 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 41 | `reply` | 600 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 42 | `serve_client` | 611 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 43 | `stop_server` | 658 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 44 | `child_exited` | 659 | да | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 45 | `main` | 661 |  | — | VPS D1a/D1b/D2 | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 1 | `rate_allow` | 112 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 2 | `shared_limits_create` | 123 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 3 | `shared_lock` | 133 | да | — | — | not-applicable | module-level only | helper; module-level only |
+| 4 | `shared_unlock` | 148 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 5 | `limits_lock` | 151 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 6 | `limits_unlock` | 152 | да | — | — | not-applicable | module-level only | helper; module-level only |
+| 7 | `conn_admit` | 156 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 8 | `conn_set_pid` | 170 | да | — | — | not-applicable | module-level only | helper; module-level only |
+| 9 | `conn_release_slot` | 174 | да | — | — | not-applicable | module-level only | helper; module-level only |
+| 10 | `conn_release_pid` | 179 | да | — | — | not-applicable | module-level only | helper; module-level only |
+| 11 | `conn_route` | 187 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 12 | `route_status` | 200 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 13 | `valid_proof` | 210 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 14 | `parse_headers` | 221 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 15 | `system_resolve` | 258 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 16 | `monotonic_ms` | 270 | да | — | — | not-applicable | module-level only | helper; module-level only |
+| 17 | `monotonic_seconds` | 275 | да | — | — | not-applicable | module-level only | helper; module-level only |
+| 18 | `clock_now` | 276 | да | — | — | not-applicable | module-level only | helper; module-level only |
+| 19 | `dns_build_query` | 280 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 20 | `dns16` | 293 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 21 | `dns_read_name` | 297 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 22 | `dns_parse_reply` | 321 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 23 | `udp_open` | 373 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 24 | `udp_send` | 385 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 25 | `udp_recv` | 389 | да | — | — | not-applicable | module-level only | helper; module-level only |
+| 26 | `udp_close` | 402 | да | — | — | not-applicable | module-level only | helper; module-level only |
+| 27 | `addr_add` | 409 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 28 | `answer_cache_create` | 416 | да | — | — | not-applicable | module-level only | helper; module-level only |
+| 29 | `cache_get` | 421 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 30 | `cache_put` | 430 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 31 | `public_phase` | 439 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 32 | `json_space` | 474 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 33 | `json_char` | 477 | да | — | — | not-applicable | module-level only | helper; module-level only |
+| 34 | `json_name` | 481 | да | — | — | not-applicable | module-level only | helper; module-level only |
+| 35 | `allowed_host` | 492 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 36 | `handle_resolve` | 502 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 37 | `socket_write_all` | 554 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 38 | `forward_registration` | 560 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 39 | `ssl_write_all` | 587 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 40 | `reply_json` | 592 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 41 | `reply` | 600 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 42 | `serve_client` | 611 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 43 | `stop_server` | 658 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 44 | `child_exited` | 659 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 45 | `main` | 661 |  | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
 
 ### `relay-gate/main.c` — 19
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `host_allowed` | 93 | да | — | VPS D3 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 2 | `host_syntax_ok` | 106 | да | — | VPS D3 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 3 | `parse_port` | 116 | да | — | VPS D3 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 4 | `split_hostport` | 129 | да | — | VPS D3 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 5 | `parse_head` | 143 | да | — | VPS D3 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 6 | `request_allowed` | 187 | да | — | VPS D3 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 7 | `header_is` | 194 | да | — | VPS D3 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 8 | `build_origin_request` | 202 | да | — | VPS D3 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 9 | `v4_public` | 238 | да | — | VPS D3 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 10 | `addr_public` | 248 | да | — | VPS D3 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 11 | `rate_allow` | 278 | да | — | VPS D3 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 12 | `now_ms` | 295 | да | — | VPS D3 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 13 | `write_all` | 300 | да | — | VPS D3 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 14 | `reply` | 309 | да | — | VPS D3 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 15 | `connect_timeout` | 315 | да | — | VPS D3 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 16 | `dial` | 333 | да | — | VPS D3 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 17 | `relay` | 347 | да | — | VPS D3 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 18 | `serve` | 375 | да | — | VPS D3 | not-applicable | named in report | отдельный VPS-сервис, unported |
-| 19 | `main` | 441 |  | — | VPS D3 | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 1 | `host_allowed` | 93 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 2 | `host_syntax_ok` | 106 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 3 | `parse_port` | 116 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 4 | `split_hostport` | 129 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 5 | `parse_head` | 143 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 6 | `request_allowed` | 187 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 7 | `header_is` | 194 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 8 | `build_origin_request` | 202 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 9 | `v4_public` | 238 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 10 | `addr_public` | 248 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 11 | `rate_allow` | 278 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 12 | `now_ms` | 295 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 13 | `write_all` | 300 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 14 | `reply` | 309 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 15 | `connect_timeout` | 315 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 16 | `dial` | 333 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 17 | `relay` | 347 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 18 | `serve` | 375 | да | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
+| 19 | `main` | 441 |  | — | — | not-applicable | named in report | отдельный VPS-сервис, unported |
 
 ### `runtime/d2k_diagnostics_files.h` — 4
 
@@ -2787,588 +2789,588 @@
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `normalize_domain` | 29 | да | r2o-telegram/cf_domain_pool.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 2 | `add_unique` | 59 | да | r2o-telegram/cf_domain_pool.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 3 | `decode_domain` | 70 | да | r2o-telegram/cf_domain_pool.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 4 | `tg_cf_domain_pool_parse_remote` | 97 |  | r2o-telegram/cf_domain_pool.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 5 | `merge_domains` | 130 | да | r2o-telegram/cf_domain_pool.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 6 | `parse_timestamp` | 141 | да | r2o-telegram/cf_domain_pool.rs | T3/T7 | partial | named in report | donor z2kOW; remote/cache/fallback |
-| 7 | `load_cache` | 155 | да | r2o-telegram/cf_domain_pool.rs | T3/T7 | partial | named in report | donor z2kOW; remote/cache/fallback |
-| 8 | `write_all` | 201 | да | r2o-telegram/cf_domain_pool.rs | T3/T7 | partial | named in report | donor z2kOW; remote/cache/fallback |
-| 9 | `create_parent_directories` | 212 | да | r2o-telegram/cf_domain_pool.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 10 | `write_cache` | 232 | да | r2o-telegram/cf_domain_pool.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 11 | `load_fallback` | 270 | да | r2o-telegram/cf_domain_pool.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 12 | `tg_cf_domain_pool_init` | 282 |  | r2o-telegram/cf_domain_pool.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 13 | `tg_cf_domain_pool_install_remote` | 311 |  | r2o-telegram/cf_domain_pool.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 14 | `tg_cf_domain_pool_count` | 339 |  | r2o-telegram/cf_domain_pool.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 15 | `tg_cf_domain_pool_copy_at` | 348 |  | r2o-telegram/cf_domain_pool.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 16 | `tg_cf_domain_pool_fetched_at` | 362 |  | r2o-telegram/cf_domain_pool.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 17 | `tg_cf_domain_pool_refresh_due` | 371 |  | r2o-telegram/cf_domain_pool.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 18 | `tg_cf_domain_pool_refresh` | 383 |  | r2o-telegram/cf_domain_pool.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 19 | `tg_cf_domain_pool_destroy` | 423 |  | r2o-telegram/cf_domain_pool.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
+| 1 | `normalize_domain` | 29 | да | r2o-telegram/cf_domain_pool.rs | TG13 | implemented-unproven | module-level only | helper; module-level only |
+| 2 | `add_unique` | 59 | да | r2o-telegram/cf_domain_pool.rs | TG13 | implemented-unproven | module-level only | helper; module-level only |
+| 3 | `decode_domain` | 70 | да | r2o-telegram/cf_domain_pool.rs | TG13 | implemented-unproven | module-level only | helper; module-level only |
+| 4 | `tg_cf_domain_pool_parse_remote` | 97 |  | r2o-telegram/cf_domain_pool.rs | TG13 | implemented-unproven | module-level only | helper; module-level only |
+| 5 | `merge_domains` | 130 | да | r2o-telegram/cf_domain_pool.rs | TG13 | implemented-unproven | module-level only | helper; module-level only |
+| 6 | `parse_timestamp` | 141 | да | r2o-telegram/cf_domain_pool.rs | TG13 | partial | named in report | donor z2kOW; remote/cache/fallback |
+| 7 | `load_cache` | 155 | да | r2o-telegram/cf_domain_pool.rs | TG13 | partial | named in report | donor z2kOW; remote/cache/fallback |
+| 8 | `write_all` | 201 | да | r2o-telegram/cf_domain_pool.rs | TG13 | partial | named in report | donor z2kOW; remote/cache/fallback |
+| 9 | `create_parent_directories` | 212 | да | r2o-telegram/cf_domain_pool.rs | TG13 | implemented-unproven | module-level only | helper; module-level only |
+| 10 | `write_cache` | 232 | да | r2o-telegram/cf_domain_pool.rs | TG13 | implemented-unproven | module-level only | helper; module-level only |
+| 11 | `load_fallback` | 270 | да | r2o-telegram/cf_domain_pool.rs | TG13 | implemented-unproven | module-level only | helper; module-level only |
+| 12 | `tg_cf_domain_pool_init` | 282 |  | r2o-telegram/cf_domain_pool.rs | TG13 | implemented-unproven | module-level only | helper; module-level only |
+| 13 | `tg_cf_domain_pool_install_remote` | 311 |  | r2o-telegram/cf_domain_pool.rs | TG13 | implemented-unproven | module-level only | helper; module-level only |
+| 14 | `tg_cf_domain_pool_count` | 339 |  | r2o-telegram/cf_domain_pool.rs | TG13 | implemented-unproven | module-level only | helper; module-level only |
+| 15 | `tg_cf_domain_pool_copy_at` | 348 |  | r2o-telegram/cf_domain_pool.rs | TG13 | implemented-unproven | module-level only | helper; module-level only |
+| 16 | `tg_cf_domain_pool_fetched_at` | 362 |  | r2o-telegram/cf_domain_pool.rs | TG13 | implemented-unproven | module-level only | helper; module-level only |
+| 17 | `tg_cf_domain_pool_refresh_due` | 371 |  | r2o-telegram/cf_domain_pool.rs | TG13 | implemented-unproven | module-level only | helper; module-level only |
+| 18 | `tg_cf_domain_pool_refresh` | 383 |  | r2o-telegram/cf_domain_pool.rs | TG13 | implemented-unproven | module-level only | helper; module-level only |
+| 19 | `tg_cf_domain_pool_destroy` | 423 |  | r2o-telegram/cf_domain_pool.rs | TG13 | implemented-unproven | module-level only | helper; module-level only |
 
 ### `telegram/src/config.c` — 9
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `trim` | 12 | да | r2o-telegram/config.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 2 | `copy_value` | 18 | да | r2o-telegram/config.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 3 | `normalize_domain` | 22 | да | r2o-telegram/config.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 4 | `parse_domain_list` | 63 | да | r2o-telegram/config.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 5 | `parse_boolean` | 91 | да | r2o-telegram/config.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 6 | `parse_bounded_uint` | 98 | да | r2o-telegram/config.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 7 | `normalize_shell_value` | 110 | да | r2o-telegram/config.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 8 | `tg_config_read` | 123 |  | r2o-telegram/config.rs | T3/T7 | partial | named in report | donor; файловый парсер не используется |
-| 9 | `tg_config_clean` | 227 |  | r2o-telegram/config.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
+| 1 | `trim` | 12 | да | r2o-telegram/config.rs | TG1 | implemented-unproven | module-level only | helper; module-level only |
+| 2 | `copy_value` | 18 | да | r2o-telegram/config.rs | TG1 | implemented-unproven | module-level only | helper; module-level only |
+| 3 | `normalize_domain` | 22 | да | r2o-telegram/config.rs | TG1 | implemented-unproven | module-level only | helper; module-level only |
+| 4 | `parse_domain_list` | 63 | да | r2o-telegram/config.rs | TG1 | implemented-unproven | module-level only | helper; module-level only |
+| 5 | `parse_boolean` | 91 | да | r2o-telegram/config.rs | TG1 | implemented-unproven | module-level only | helper; module-level only |
+| 6 | `parse_bounded_uint` | 98 | да | r2o-telegram/config.rs | TG1 | implemented-unproven | module-level only | helper; module-level only |
+| 7 | `normalize_shell_value` | 110 | да | r2o-telegram/config.rs | TG1 | implemented-unproven | module-level only | helper; module-level only |
+| 8 | `tg_config_read` | 123 |  | r2o-telegram/config.rs | TG1 | partial | named in report | donor; файловый парсер не используется |
+| 9 | `tg_config_clean` | 227 |  | r2o-telegram/config.rs | TG1 | implemented-unproven | module-level only | helper; module-level only |
 
 ### `telegram/src/dc_map.c` — 13
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `tg_dc_builtin_endpoint_count` | 42 |  | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 2 | `tg_dc_builtin_endpoint_at` | 46 |  | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 3 | `ipv4_non_global` | 61 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 4 | `ipv6_v4_mapped` | 73 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 5 | `public_address` | 78 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 6 | `not_future` | 91 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 7 | `tg_dc_snapshot_validate` | 96 |  | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 8 | `normalized_destination` | 128 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 9 | `endpoint_matches` | 140 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 10 | `resolve_official` | 147 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 11 | `resolve_builtin` | 182 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 12 | `tg_dc_resolve` | 206 |  | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 13 | `tg_dc_lookup_result_text` | 231 |  | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
+| 1 | `tg_dc_builtin_endpoint_count` | 42 |  | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 2 | `tg_dc_builtin_endpoint_at` | 46 |  | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 3 | `ipv4_non_global` | 61 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 4 | `ipv6_v4_mapped` | 73 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 5 | `public_address` | 78 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 6 | `not_future` | 91 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 7 | `tg_dc_snapshot_validate` | 96 |  | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 8 | `normalized_destination` | 128 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 9 | `endpoint_matches` | 140 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 10 | `resolve_official` | 147 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 11 | `resolve_builtin` | 182 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 12 | `tg_dc_resolve` | 206 |  | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 13 | `tg_dc_lookup_result_text` | 231 |  | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
 
 ### `telegram/src/dc_map_json.c` — 16
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `appendf` | 20 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 2 | `skip_space` | 63 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 3 | `take` | 70 | да | r2o-telegram/dc_map.rs | T3 | partial | named in report | donor; JSON parse/encode |
-| 4 | `hex_value` | 77 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 5 | `read_string` | 84 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 6 | `read_integer` | 122 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 7 | `read_u32` | 153 | да | r2o-telegram/dc_map.rs | T3 | partial | named in report | donor; JSON parse/encode |
-| 8 | `read_port` | 162 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 9 | `read_bool` | 169 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 10 | `read_nullable_secret` | 186 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 11 | `read_endpoint` | 209 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 12 | `read_endpoints` | 256 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 13 | `tg_dc_snapshot_parse_json` | 280 |  | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 14 | `tg_dc_snapshot_destroy` | 327 |  | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 15 | `bool_text` | 333 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 16 | `tg_dc_snapshot_encode_json` | 337 |  | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
+| 1 | `appendf` | 20 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 2 | `skip_space` | 63 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 3 | `take` | 70 | да | r2o-telegram/dc_map.rs | TG3 | partial | named in report | donor; JSON parse/encode |
+| 4 | `hex_value` | 77 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 5 | `read_string` | 84 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 6 | `read_integer` | 122 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 7 | `read_u32` | 153 | да | r2o-telegram/dc_map.rs | TG3 | partial | named in report | donor; JSON parse/encode |
+| 8 | `read_port` | 162 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 9 | `read_bool` | 169 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 10 | `read_nullable_secret` | 186 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 11 | `read_endpoint` | 209 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 12 | `read_endpoints` | 256 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 13 | `tg_dc_snapshot_parse_json` | 280 |  | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 14 | `tg_dc_snapshot_destroy` | 327 |  | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 15 | `bool_text` | 333 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 16 | `tg_dc_snapshot_encode_json` | 337 |  | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
 
 ### `telegram/src/dc_map_store.c` — 27
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `copy_snapshot` | 29 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 2 | `same_address_port` | 39 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 3 | `same_address` | 46 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 4 | `same_route` | 53 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 5 | `same_identity` | 60 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 6 | `replaced_by_incoming` | 70 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 7 | `endpoint_order` | 83 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 8 | `append_builtin_endpoints` | 98 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 9 | `merge_snapshot` | 124 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 10 | `read_snapshot_file` | 160 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 11 | `make_parent_dirs` | 190 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 12 | `write_all` | 212 | да | r2o-telegram/dc_map.rs | T3 | partial | named in report | donor; persist/merge/manifest |
-| 13 | `atomic_write` | 223 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 14 | `save_snapshot` | 253 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 15 | `tg_dc_map_store_init` | 263 |  | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 16 | `tg_dc_map_store_destroy` | 270 |  | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 17 | `tg_dc_map_store_load` | 276 |  | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 18 | `tg_dc_map_store_current` | 299 |  | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 19 | `tg_dc_map_store_refresh_due` | 303 |  | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 20 | `tg_dc_map_store_install` | 312 |  | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 21 | `snapshot_is_fresh` | 338 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 22 | `tg_dc_map_store_resolve` | 343 |  | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 23 | `destination_equals` | 353 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 24 | `tg_dc_handshake_secrets` | 368 |  | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 25 | `pair_order` | 403 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 26 | `port_is_allowed` | 413 | да | r2o-telegram/dc_map.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 27 | `tg_dc_write_endpoint_manifest` | 420 |  | r2o-telegram/dc_map.rs | T3 | partial | named in report | donor; persist/merge/manifest |
+| 1 | `copy_snapshot` | 29 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 2 | `same_address_port` | 39 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 3 | `same_address` | 46 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 4 | `same_route` | 53 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 5 | `same_identity` | 60 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 6 | `replaced_by_incoming` | 70 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 7 | `endpoint_order` | 83 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 8 | `append_builtin_endpoints` | 98 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 9 | `merge_snapshot` | 124 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 10 | `read_snapshot_file` | 160 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 11 | `make_parent_dirs` | 190 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 12 | `write_all` | 212 | да | r2o-telegram/dc_map.rs | TG3 | partial | named in report | donor; persist/merge/manifest |
+| 13 | `atomic_write` | 223 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 14 | `save_snapshot` | 253 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 15 | `tg_dc_map_store_init` | 263 |  | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 16 | `tg_dc_map_store_destroy` | 270 |  | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 17 | `tg_dc_map_store_load` | 276 |  | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 18 | `tg_dc_map_store_current` | 299 |  | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 19 | `tg_dc_map_store_refresh_due` | 303 |  | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 20 | `tg_dc_map_store_install` | 312 |  | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 21 | `snapshot_is_fresh` | 338 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 22 | `tg_dc_map_store_resolve` | 343 |  | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 23 | `destination_equals` | 353 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 24 | `tg_dc_handshake_secrets` | 368 |  | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 25 | `pair_order` | 403 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 26 | `port_is_allowed` | 413 | да | r2o-telegram/dc_map.rs | TG3 | implemented-unproven | module-level only | helper; module-level only |
+| 27 | `tg_dc_write_endpoint_manifest` | 420 |  | r2o-telegram/dc_map.rs | TG3 | partial | named in report | donor; persist/merge/manifest |
 
 ### `telegram/src/enroll.c` — 1
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `tg_enroll_proof` | 5 |  | — | VPS D1 | not-applicable | named in report | relay enrollment вне scope |
+| 1 | `tg_enroll_proof` | 5 |  | — | — | not-applicable | named in report | relay enrollment вне scope |
 
 ### `telegram/src/epoll_proxy.c` — 101
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `monotonic_ms` | 213 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 2 | `monotonic_us` | 219 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 3 | `record_client_response_latency` | 226 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 4 | `add_bytes` | 243 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 5 | `add_u64` | 248 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 6 | `route_session_owner` | 253 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 7 | `route_session_add_bytes` | 258 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 8 | `route_session_transport_for` | 268 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 9 | `route_session_append` | 283 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 10 | `route_session_event` | 300 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 11 | `route_session_selected` | 321 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 12 | `route_session_first_response` | 345 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 13 | `read_le32` | 359 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 14 | `read_le64` | 364 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 15 | `set_nonblocking` | 369 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | partial | named in report | donor; Tokio вместо epoll |
-| 16 | `set_tcp_nodelay` | 374 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 17 | `set_tcp_quickack` | 379 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 18 | `default_original_destination` | 388 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 19 | `queue_append_grow` | 394 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 20 | `queue_prepend` | 433 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 21 | `queue_release` | 464 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 22 | `queue_flush` | 477 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 23 | `client_events` | 499 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 24 | `upstream_events` | 518 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 25 | `watch_update` | 538 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 26 | `watch_remove` | 557 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 27 | `connection_close` | 564 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 28 | `collect_retired` | 594 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 29 | `route_health_key_matches` | 608 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 30 | `route_health_in_use` | 629 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 31 | `route_health_get` | 642 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 32 | `route_failure_record` | 673 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 33 | `route_health_cooldown_at` | 688 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 34 | `route_health_failed_at` | 704 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 35 | `route_health_failed` | 716 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 36 | `route_health_preferred_step` | 741 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 37 | `route_plan_prioritize` | 810 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 38 | `route_plan_prioritize_kind` | 825 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 39 | `target_sockaddr` | 838 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 40 | `ipv4_public` | 862 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 41 | `public_route_target` | 876 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 42 | `resolve_route_domain` | 900 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 43 | `route_worker_count` | 911 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 44 | `route_worker_domain` | 916 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 45 | `route_cf_domain_count` | 923 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 46 | `route_cf_domain` | 930 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 47 | `set_direct_hostname` | 943 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 48 | `set_worker_path` | 954 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 49 | `prepare_wss_tls` | 965 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 50 | `begin_upstream` | 979 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 51 | `clear_wss_state` | 1039 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 52 | `clear_route_attempt` | 1067 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 53 | `hedge_retire_candidate` | 1107 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 54 | `hedge_cancel_candidates` | 1121 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 55 | `setup_route_attempt` | 1132 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 56 | `start_next_route` | 1185 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 57 | `advance_route` | 1314 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 58 | `hedge_candidate_count` | 1323 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 59 | `hedge_connection_count` | 1328 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 60 | `hedge_launch_next` | 1336 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 61 | `hedge_fill` | 1438 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 62 | `hedge_fail_candidate` | 1466 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 63 | `connection_update` | 1473 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 64 | `hedge_promote_candidate` | 1492 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 65 | `advance_half_closes` | 1589 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 66 | `route_after_handshake` | 1621 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 67 | `receive_client` | 1717 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 68 | `receive_upstream` | 1805 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 69 | `socket_error` | 1834 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 70 | `queue_wss_packet` | 1841 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 71 | `process_client_payload` | 1848 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 72 | `clear_wss_replay` | 1869 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 73 | `disable_wss_replay_after_payload_write` | 1874 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 74 | `queue_wss_replay_payload` | 1884 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 75 | `flush_wss_replay` | 1903 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 76 | `hedge_candidate_flush_buffered_payload` | 1923 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 77 | `response_packet_valid` | 1942 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 78 | `observe_mtproto_response` | 1971 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 79 | `queue_wss_response` | 2089 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 80 | `establish_wss_stream` | 2139 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 81 | `set_tls_want` | 2180 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 82 | `progress_wss` | 2193 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 83 | `handle_pending_dns_client_event` | 2322 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 84 | `client_event` | 2348 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 85 | `upstream_event` | 2380 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 86 | `accept_clients` | 2519 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 87 | `wss_waiting_for_first_response` | 2580 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 88 | `timeout_until_expiry` | 2585 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 89 | `expire_connections` | 2629 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 90 | `tg_epoll_proxy_create` | 2724 |  | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 91 | `tg_epoll_proxy_step` | 2811 |  | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 92 | `tg_epoll_proxy_destroy` | 2838 |  | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 93 | `tg_epoll_proxy_active_connections` | 2847 |  | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 94 | `tg_epoll_proxy_max_connections` | 2851 |  | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 95 | `tg_epoll_proxy_get_stats` | 2855 |  | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 96 | `tg_epoll_proxy_create` | 2974 |  | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 97 | `tg_epoll_proxy_step` | 2979 |  | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 98 | `tg_epoll_proxy_destroy` | 2985 |  | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 99 | `tg_epoll_proxy_active_connections` | 2986 |  | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 100 | `tg_epoll_proxy_max_connections` | 2990 |  | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
-| 101 | `tg_epoll_proxy_get_stats` | 2994 |  | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | T3/T7 | implemented-unproven | module-level only | helper; module-level only |
+| 1 | `monotonic_ms` | 213 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 2 | `monotonic_us` | 219 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 3 | `record_client_response_latency` | 226 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 4 | `add_bytes` | 243 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 5 | `add_u64` | 248 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 6 | `route_session_owner` | 253 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 7 | `route_session_add_bytes` | 258 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 8 | `route_session_transport_for` | 268 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 9 | `route_session_append` | 283 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 10 | `route_session_event` | 300 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 11 | `route_session_selected` | 321 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 12 | `route_session_first_response` | 345 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 13 | `read_le32` | 359 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 14 | `read_le64` | 364 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 15 | `set_nonblocking` | 369 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | partial | named in report | donor; Tokio вместо epoll |
+| 16 | `set_tcp_nodelay` | 374 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 17 | `set_tcp_quickack` | 379 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 18 | `default_original_destination` | 388 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 19 | `queue_append_grow` | 394 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 20 | `queue_prepend` | 433 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 21 | `queue_release` | 464 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 22 | `queue_flush` | 477 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 23 | `client_events` | 499 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 24 | `upstream_events` | 518 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 25 | `watch_update` | 538 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 26 | `watch_remove` | 557 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 27 | `connection_close` | 564 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 28 | `collect_retired` | 594 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 29 | `route_health_key_matches` | 608 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 30 | `route_health_in_use` | 629 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 31 | `route_health_get` | 642 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 32 | `route_failure_record` | 673 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 33 | `route_health_cooldown_at` | 688 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 34 | `route_health_failed_at` | 704 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 35 | `route_health_failed` | 716 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 36 | `route_health_preferred_step` | 741 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 37 | `route_plan_prioritize` | 810 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 38 | `route_plan_prioritize_kind` | 825 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 39 | `target_sockaddr` | 838 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 40 | `ipv4_public` | 862 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 41 | `public_route_target` | 876 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 42 | `resolve_route_domain` | 900 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 43 | `route_worker_count` | 911 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 44 | `route_worker_domain` | 916 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 45 | `route_cf_domain_count` | 923 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 46 | `route_cf_domain` | 930 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 47 | `set_direct_hostname` | 943 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 48 | `set_worker_path` | 954 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 49 | `prepare_wss_tls` | 965 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 50 | `begin_upstream` | 979 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 51 | `clear_wss_state` | 1039 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 52 | `clear_route_attempt` | 1067 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 53 | `hedge_retire_candidate` | 1107 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 54 | `hedge_cancel_candidates` | 1121 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 55 | `setup_route_attempt` | 1132 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 56 | `start_next_route` | 1185 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 57 | `advance_route` | 1314 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 58 | `hedge_candidate_count` | 1323 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 59 | `hedge_connection_count` | 1328 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 60 | `hedge_launch_next` | 1336 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 61 | `hedge_fill` | 1438 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 62 | `hedge_fail_candidate` | 1466 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 63 | `connection_update` | 1473 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 64 | `hedge_promote_candidate` | 1492 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 65 | `advance_half_closes` | 1589 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 66 | `route_after_handshake` | 1621 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 67 | `receive_client` | 1717 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 68 | `receive_upstream` | 1805 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 69 | `socket_error` | 1834 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 70 | `queue_wss_packet` | 1841 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 71 | `process_client_payload` | 1848 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 72 | `clear_wss_replay` | 1869 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 73 | `disable_wss_replay_after_payload_write` | 1874 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 74 | `queue_wss_replay_payload` | 1884 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 75 | `flush_wss_replay` | 1903 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 76 | `hedge_candidate_flush_buffered_payload` | 1923 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 77 | `response_packet_valid` | 1942 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 78 | `observe_mtproto_response` | 1971 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 79 | `queue_wss_response` | 2089 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 80 | `establish_wss_stream` | 2139 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 81 | `set_tls_want` | 2180 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 82 | `progress_wss` | 2193 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 83 | `handle_pending_dns_client_event` | 2322 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 84 | `client_event` | 2348 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 85 | `upstream_event` | 2380 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 86 | `accept_clients` | 2519 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 87 | `wss_waiting_for_first_response` | 2580 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 88 | `timeout_until_expiry` | 2585 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 89 | `expire_connections` | 2629 | да | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 90 | `tg_epoll_proxy_create` | 2724 |  | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 91 | `tg_epoll_proxy_step` | 2811 |  | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 92 | `tg_epoll_proxy_destroy` | 2838 |  | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 93 | `tg_epoll_proxy_active_connections` | 2847 |  | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 94 | `tg_epoll_proxy_max_connections` | 2851 |  | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 95 | `tg_epoll_proxy_get_stats` | 2855 |  | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 96 | `tg_epoll_proxy_create` | 2974 |  | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 97 | `tg_epoll_proxy_step` | 2979 |  | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 98 | `tg_epoll_proxy_destroy` | 2985 |  | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 99 | `tg_epoll_proxy_active_connections` | 2986 |  | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 100 | `tg_epoll_proxy_max_connections` | 2990 |  | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 101 | `tg_epoll_proxy_get_stats` | 2994 |  | r2o-telegram/server.rs, transparent_proxy.rs, bridge.rs | TG15/TG24 | implemented-unproven | module-level only | helper; module-level only |
 
 ### `telegram/src/identity.c` — 12
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `read_all` | 18 | да | r2o-telegram/identity.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 2 | `write_all` | 29 | да | r2o-telegram/identity.rs | T3 | partial | named in report | donor; identity без production-потребителя |
-| 3 | `set_hex_id` | 40 | да | r2o-telegram/identity.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 4 | `save_identity` | 48 | да | r2o-telegram/identity.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 5 | `identity_error` | 77 | да | r2o-telegram/identity.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 6 | `load_identity` | 86 | да | r2o-telegram/identity.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 7 | `tg_identity_load_or_mint` | 121 |  | r2o-telegram/identity.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 8 | `tg_identity_cleanup` | 154 |  | r2o-telegram/identity.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 9 | `tg_identity_public_key` | 160 |  | r2o-telegram/identity.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 10 | `tg_identity_sign` | 168 |  | r2o-telegram/identity.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 11 | `tg_identity_verify` | 183 |  | r2o-telegram/identity.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 12 | `tg_register_hmac_hex` | 198 |  | r2o-telegram/identity.rs | T3 | partial | named in report | donor; identity без production-потребителя |
+| 1 | `read_all` | 18 | да | r2o-telegram/identity.rs | TG2 | implemented-unproven | module-level only | helper; module-level only |
+| 2 | `write_all` | 29 | да | r2o-telegram/identity.rs | TG2 | partial | named in report | donor; identity без production-потребителя (TG2 extension) |
+| 3 | `set_hex_id` | 40 | да | r2o-telegram/identity.rs | TG2 | implemented-unproven | module-level only | helper; module-level only |
+| 4 | `save_identity` | 48 | да | r2o-telegram/identity.rs | TG2 | implemented-unproven | module-level only | helper; module-level only |
+| 5 | `identity_error` | 77 | да | r2o-telegram/identity.rs | TG2 | implemented-unproven | module-level only | helper; module-level only |
+| 6 | `load_identity` | 86 | да | r2o-telegram/identity.rs | TG2 | implemented-unproven | module-level only | helper; module-level only |
+| 7 | `tg_identity_load_or_mint` | 121 |  | r2o-telegram/identity.rs | TG2 | implemented-unproven | module-level only | helper; module-level only |
+| 8 | `tg_identity_cleanup` | 154 |  | r2o-telegram/identity.rs | TG2 | implemented-unproven | module-level only | helper; module-level only |
+| 9 | `tg_identity_public_key` | 160 |  | r2o-telegram/identity.rs | TG2 | implemented-unproven | module-level only | helper; module-level only |
+| 10 | `tg_identity_sign` | 168 |  | r2o-telegram/identity.rs | TG2 | implemented-unproven | module-level only | helper; module-level only |
+| 11 | `tg_identity_verify` | 183 |  | r2o-telegram/identity.rs | TG2 | implemented-unproven | module-level only | helper; module-level only |
+| 12 | `tg_register_hmac_hex` | 198 |  | r2o-telegram/identity.rs | TG2 | partial | named in report | donor; identity без production-потребителя (TG2 extension) |
 
 ### `telegram/src/limits.c` — 3
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `tg_limits_soft_nofile` | 13 |  | r2o-telegram/limits.rs | T7 | implemented-unproven | module-level only | helper; module-level only |
-| 2 | `tg_limits_auto_max_connections` | 21 |  | r2o-telegram/limits.rs | T7 | implemented-unproven | module-level only | helper; module-level only |
-| 3 | `tg_limits_runtime_memory_budget` | 41 |  | r2o-telegram/limits.rs | T7 | partial | named in report | donor; memory budget отсутствует |
+| 1 | `tg_limits_soft_nofile` | 13 |  | r2o-telegram/limits.rs | TG22 | implemented-unproven | module-level only | helper; module-level only |
+| 2 | `tg_limits_auto_max_connections` | 21 |  | r2o-telegram/limits.rs | TG22 | implemented-unproven | module-level only | helper; module-level only |
+| 3 | `tg_limits_runtime_memory_budget` | 41 |  | r2o-telegram/limits.rs | TG22 | partial | named in report | donor; memory budget отсутствует |
 
 ### `telegram/src/listener.c` — 8
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `tg_listener_decode_original_dst` | 9 |  | r2o-telegram/transparent.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 2 | `tg_listener_is_self_dial` | 18 |  | r2o-telegram/transparent.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 3 | `tg_listener_get_original_dst` | 27 |  | r2o-telegram/transparent.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 4 | `tg_listener_decode_original_dst_any` | 38 |  | r2o-telegram/transparent.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 5 | `original_dst_option` | 68 | да | r2o-telegram/transparent.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 6 | `tg_listener_get_original_dst_any` | 78 |  | r2o-telegram/transparent.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 7 | `ipv4_non_global` | 105 | да | r2o-telegram/transparent.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 8 | `tg_listener_is_self_dial_addr` | 117 |  | r2o-telegram/transparent.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
+| 1 | `tg_listener_decode_original_dst` | 9 |  | r2o-telegram/transparent.rs | TG15 | implemented-unproven | module-level only | helper; module-level only |
+| 2 | `tg_listener_is_self_dial` | 18 |  | r2o-telegram/transparent.rs | TG15 | implemented-unproven | module-level only | helper; module-level only |
+| 3 | `tg_listener_get_original_dst` | 27 |  | r2o-telegram/transparent.rs | TG15 | implemented-unproven | module-level only | helper; module-level only |
+| 4 | `tg_listener_decode_original_dst_any` | 38 |  | r2o-telegram/transparent.rs | TG15 | implemented-unproven | module-level only | helper; module-level only |
+| 5 | `original_dst_option` | 68 | да | r2o-telegram/transparent.rs | TG15 | implemented-unproven | module-level only | helper; module-level only |
+| 6 | `tg_listener_get_original_dst_any` | 78 |  | r2o-telegram/transparent.rs | TG15 | implemented-unproven | module-level only | helper; module-level only |
+| 7 | `ipv4_non_global` | 105 | да | r2o-telegram/transparent.rs | TG15 | implemented-unproven | module-level only | helper; module-level only |
+| 8 | `tg_listener_is_self_dial_addr` | 117 |  | r2o-telegram/transparent.rs | TG15 | implemented-unproven | module-level only | helper; module-level only |
 
 ### `telegram/src/main.c` — 29
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `memory_bytes_from_sysinfo` | 54 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 2 | `proxy_memory_budget` | 62 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 3 | `on_signal` | 79 | да | r2o-telegram/main.rs, server.rs | T3 | partial | named in report | donor; CLI/check |
-| 4 | `log_msg` | 81 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 5 | `write_status` | 87 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 6 | `create_local_listener` | 96 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 7 | `monotonic_ms` | 167 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 8 | `discovery_cancelled` | 173 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 9 | `discover_wss_host` | 180 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 10 | `refresh_local_dc_map` | 229 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 11 | `dc_refresh_worker` | 295 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 12 | `start_dc_refresh` | 304 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 13 | `finish_dc_refresh` | 324 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 14 | `stop_dc_refresh` | 337 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 15 | `run_local_daemon` | 345 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 16 | `check_config` | 500 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 17 | `redirect_log` | 509 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 18 | `meta_verify_name` | 536 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 19 | `check_instagram_ip` | 546 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 20 | `offline_self_check` | 559 | да | r2o-telegram/main.rs, server.rs | T3 | partial | named in report | donor; CLI/check |
-| 21 | `parse_unsigned_arg` | 563 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 22 | `check_telegram_dc` | 576 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 23 | `telegram_probe_stage_name` | 612 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 24 | `telegram_probe_error_name` | 624 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 25 | `check_telegram_wss_matrix` | 641 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 26 | `discover_telegram_dc` | 671 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 27 | `check_telegram_dc_matrix` | 713 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 28 | `discover_telegram_dc_matrix` | 722 | да | r2o-telegram/main.rs, server.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 29 | `main` | 731 |  | r2o-telegram/main.rs, server.rs | T3 | partial | named in report | donor; CLI/check |
+| 1 | `memory_bytes_from_sysinfo` | 54 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 2 | `proxy_memory_budget` | 62 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 3 | `on_signal` | 79 | да | r2o-telegram/main.rs, server.rs | TG24 | partial | named in report | donor; CLI/check |
+| 4 | `log_msg` | 81 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 5 | `write_status` | 87 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 6 | `create_local_listener` | 96 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 7 | `monotonic_ms` | 167 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 8 | `discovery_cancelled` | 173 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 9 | `discover_wss_host` | 180 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 10 | `refresh_local_dc_map` | 229 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 11 | `dc_refresh_worker` | 295 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 12 | `start_dc_refresh` | 304 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 13 | `finish_dc_refresh` | 324 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 14 | `stop_dc_refresh` | 337 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 15 | `run_local_daemon` | 345 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 16 | `check_config` | 500 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 17 | `redirect_log` | 509 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 18 | `meta_verify_name` | 536 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 19 | `check_instagram_ip` | 546 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 20 | `offline_self_check` | 559 | да | r2o-telegram/main.rs, server.rs | TG24 | partial | named in report | donor; CLI/check |
+| 21 | `parse_unsigned_arg` | 563 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 22 | `check_telegram_dc` | 576 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 23 | `telegram_probe_stage_name` | 612 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 24 | `telegram_probe_error_name` | 624 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 25 | `check_telegram_wss_matrix` | 641 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 26 | `discover_telegram_dc` | 671 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 27 | `check_telegram_dc_matrix` | 713 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 28 | `discover_telegram_dc_matrix` | 722 | да | r2o-telegram/main.rs, server.rs | TG24 | implemented-unproven | module-level only | helper; module-level only |
+| 29 | `main` | 731 |  | r2o-telegram/main.rs, server.rs | TG24 | partial | named in report | donor; CLI/check |
 
 ### `telegram/src/memory_budget.c` — 2
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `tg_memory_budget_reserve` | 5 |  | — | T7 | missing | module-level only | helper; module-level only |
-| 2 | `tg_memory_budget_release` | 16 |  | — | T7 | missing | module-level only | helper; module-level only |
+| 1 | `tg_memory_budget_reserve` | 5 |  | — | TG22 | missing | module-level only | helper; module-level only |
+| 2 | `tg_memory_budget_release` | 16 |  | — | TG22 | missing | module-level only | helper; module-level only |
 
 ### `telegram/src/mtproto_auth.c` — 27
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `read_le32` | 40 | да | r2o-telegram/dc_discovery.rs, grammers | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 2 | `read_le64` | 45 | да | r2o-telegram/dc_discovery.rs, grammers | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 3 | `write_bytes` | 50 | да | r2o-telegram/dc_discovery.rs, grammers | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 4 | `write_u32` | 59 | да | r2o-telegram/dc_discovery.rs, grammers | T3 | partial | named in report | donor; auth через grammers |
-| 5 | `write_u64` | 66 | да | r2o-telegram/dc_discovery.rs, grammers | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 6 | `write_tl_bytes` | 73 | да | r2o-telegram/dc_discovery.rs, grammers | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 7 | `read_tl_bytes` | 97 | да | r2o-telegram/dc_discovery.rs, grammers | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 8 | `read_fixed` | 128 | да | r2o-telegram/dc_discovery.rs, grammers | T3 | partial | named in report | donor; auth через grammers |
-| 9 | `read_tl_u32` | 137 | да | r2o-telegram/dc_discovery.rs, grammers | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 10 | `sha1_pair` | 146 | да | r2o-telegram/dc_discovery.rs, grammers | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 11 | `sha1_triple` | 159 | да | r2o-telegram/dc_discovery.rs, grammers | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 12 | `parse_res_pq` | 174 | да | r2o-telegram/dc_discovery.rs, grammers | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 13 | `add_mod` | 200 | да | r2o-telegram/dc_discovery.rs, grammers | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 14 | `mul_mod` | 204 | да | r2o-telegram/dc_discovery.rs, grammers | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 15 | `gcd_u64` | 215 | да | r2o-telegram/dc_discovery.rs, grammers | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 16 | `pow_mod` | 224 | да | r2o-telegram/dc_discovery.rs, grammers | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 17 | `is_prime_u64` | 235 | да | r2o-telegram/dc_discovery.rs, grammers | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 18 | `rho_next` | 271 | да | r2o-telegram/dc_discovery.rs, grammers | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 19 | `factorize_pq` | 275 | да | r2o-telegram/dc_discovery.rs, grammers | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 20 | `u64_to_be_min` | 305 | да | r2o-telegram/dc_discovery.rs, grammers | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 21 | `sha256_pair` | 317 | да | r2o-telegram/dc_discovery.rs, grammers | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 22 | `rsa_modulus` | 330 | да | r2o-telegram/dc_discovery.rs, grammers | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 23 | `rsa_encrypt_hashed` | 338 | да | r2o-telegram/dc_discovery.rs, grammers | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 24 | `tg_mtproto_auth_step2` | 397 |  | r2o-telegram/dc_discovery.rs, grammers | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 25 | `tg_mtproto_auth_step3` | 466 |  | r2o-telegram/dc_discovery.rs, grammers | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 26 | `tg_mtproto_auth_step4` | 665 |  | r2o-telegram/dc_discovery.rs, grammers | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 27 | `tg_mtproto_auth_clear` | 717 |  | r2o-telegram/dc_discovery.rs, grammers | T3 | implemented-unproven | module-level only | helper; module-level only |
+| 1 | `read_le32` | 40 | да | r2o-telegram/dc_discovery.rs, grammers | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 2 | `read_le64` | 45 | да | r2o-telegram/dc_discovery.rs, grammers | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 3 | `write_bytes` | 50 | да | r2o-telegram/dc_discovery.rs, grammers | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 4 | `write_u32` | 59 | да | r2o-telegram/dc_discovery.rs, grammers | TG8 | partial | named in report | donor; auth через grammers |
+| 5 | `write_u64` | 66 | да | r2o-telegram/dc_discovery.rs, grammers | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 6 | `write_tl_bytes` | 73 | да | r2o-telegram/dc_discovery.rs, grammers | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 7 | `read_tl_bytes` | 97 | да | r2o-telegram/dc_discovery.rs, grammers | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 8 | `read_fixed` | 128 | да | r2o-telegram/dc_discovery.rs, grammers | TG8 | partial | named in report | donor; auth через grammers |
+| 9 | `read_tl_u32` | 137 | да | r2o-telegram/dc_discovery.rs, grammers | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 10 | `sha1_pair` | 146 | да | r2o-telegram/dc_discovery.rs, grammers | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 11 | `sha1_triple` | 159 | да | r2o-telegram/dc_discovery.rs, grammers | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 12 | `parse_res_pq` | 174 | да | r2o-telegram/dc_discovery.rs, grammers | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 13 | `add_mod` | 200 | да | r2o-telegram/dc_discovery.rs, grammers | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 14 | `mul_mod` | 204 | да | r2o-telegram/dc_discovery.rs, grammers | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 15 | `gcd_u64` | 215 | да | r2o-telegram/dc_discovery.rs, grammers | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 16 | `pow_mod` | 224 | да | r2o-telegram/dc_discovery.rs, grammers | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 17 | `is_prime_u64` | 235 | да | r2o-telegram/dc_discovery.rs, grammers | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 18 | `rho_next` | 271 | да | r2o-telegram/dc_discovery.rs, grammers | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 19 | `factorize_pq` | 275 | да | r2o-telegram/dc_discovery.rs, grammers | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 20 | `u64_to_be_min` | 305 | да | r2o-telegram/dc_discovery.rs, grammers | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 21 | `sha256_pair` | 317 | да | r2o-telegram/dc_discovery.rs, grammers | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 22 | `rsa_modulus` | 330 | да | r2o-telegram/dc_discovery.rs, grammers | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 23 | `rsa_encrypt_hashed` | 338 | да | r2o-telegram/dc_discovery.rs, grammers | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 24 | `tg_mtproto_auth_step2` | 397 |  | r2o-telegram/dc_discovery.rs, grammers | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 25 | `tg_mtproto_auth_step3` | 466 |  | r2o-telegram/dc_discovery.rs, grammers | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 26 | `tg_mtproto_auth_step4` | 665 |  | r2o-telegram/dc_discovery.rs, grammers | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 27 | `tg_mtproto_auth_clear` | 717 |  | r2o-telegram/dc_discovery.rs, grammers | TG8 | implemented-unproven | module-level only | helper; module-level only |
 
 ### `telegram/src/mtproto_config.c` — 11
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `load_le32` | 24 | да | r2o-telegram/dc_discovery.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 2 | `read_u32` | 29 | да | r2o-telegram/dc_discovery.rs | T3 | partial | named in report | donor; getConfig |
-| 3 | `read_bytes` | 38 | да | r2o-telegram/dc_discovery.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 4 | `skip_bytes` | 71 | да | r2o-telegram/dc_discovery.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 5 | `skip_string` | 77 | да | r2o-telegram/dc_discovery.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 6 | `skip_ints` | 81 | да | r2o-telegram/dc_discovery.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 7 | `parse_reaction` | 89 | да | r2o-telegram/dc_discovery.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 8 | `parse_dc_option` | 100 | да | r2o-telegram/dc_discovery.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 9 | `parse_uncompressed_config` | 149 | да | r2o-telegram/dc_discovery.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 10 | `inflate_config_gzip` | 218 | да | r2o-telegram/dc_discovery.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 11 | `tg_mtproto_config_parse` | 250 |  | r2o-telegram/dc_discovery.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
+| 1 | `load_le32` | 24 | да | r2o-telegram/dc_discovery.rs | TG4 | implemented-unproven | module-level only | helper; module-level only |
+| 2 | `read_u32` | 29 | да | r2o-telegram/dc_discovery.rs | TG4 | partial | named in report | donor; getConfig |
+| 3 | `read_bytes` | 38 | да | r2o-telegram/dc_discovery.rs | TG4 | implemented-unproven | module-level only | helper; module-level only |
+| 4 | `skip_bytes` | 71 | да | r2o-telegram/dc_discovery.rs | TG4 | implemented-unproven | module-level only | helper; module-level only |
+| 5 | `skip_string` | 77 | да | r2o-telegram/dc_discovery.rs | TG4 | implemented-unproven | module-level only | helper; module-level only |
+| 6 | `skip_ints` | 81 | да | r2o-telegram/dc_discovery.rs | TG4 | implemented-unproven | module-level only | helper; module-level only |
+| 7 | `parse_reaction` | 89 | да | r2o-telegram/dc_discovery.rs | TG4 | implemented-unproven | module-level only | helper; module-level only |
+| 8 | `parse_dc_option` | 100 | да | r2o-telegram/dc_discovery.rs | TG4 | implemented-unproven | module-level only | helper; module-level only |
+| 9 | `parse_uncompressed_config` | 149 | да | r2o-telegram/dc_discovery.rs | TG4 | implemented-unproven | module-level only | helper; module-level only |
+| 10 | `inflate_config_gzip` | 218 | да | r2o-telegram/dc_discovery.rs | TG4 | implemented-unproven | module-level only | helper; module-level only |
+| 11 | `tg_mtproto_config_parse` | 250 |  | r2o-telegram/dc_discovery.rs | TG4 | implemented-unproven | module-level only | helper; module-level only |
 
 ### `telegram/src/mtproto_crypto.c` — 12
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `proto_from_bytes` | 9 | да | r2o-telegram/crypto.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 2 | `reserved_handshake_prefix` | 24 | да | r2o-telegram/crypto.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 3 | `tg_mtproto_ctr_init` | 38 |  | r2o-telegram/crypto.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 4 | `tg_mtproto_ctr_xor` | 50 |  | r2o-telegram/crypto.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 5 | `tg_mtproto_ctr_destroy` | 64 |  | r2o-telegram/crypto.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 6 | `tg_mtproto_direct_stream_ciphers` | 70 |  | r2o-telegram/crypto.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 7 | `tg_mtproto_direct_server_stream_cipher` | 93 |  | r2o-telegram/crypto.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 8 | `tg_mtproto_aes_ige` | 105 |  | r2o-telegram/crypto.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 9 | `parse_with_key` | 159 | да | r2o-telegram/crypto.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 10 | `tg_mtproto_parse_obfuscated2` | 187 |  | r2o-telegram/crypto.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 11 | `tg_mtproto_parse_secret` | 193 |  | r2o-telegram/crypto.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 12 | `tg_mtproto_make_obfuscated2_init` | 215 |  | r2o-telegram/crypto.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
+| 1 | `proto_from_bytes` | 9 | да | r2o-telegram/crypto.rs | TG5 | implemented-unproven | module-level only | helper; module-level only |
+| 2 | `reserved_handshake_prefix` | 24 | да | r2o-telegram/crypto.rs | TG5 | implemented-unproven | module-level only | helper; module-level only |
+| 3 | `tg_mtproto_ctr_init` | 38 |  | r2o-telegram/crypto.rs | TG5 | implemented-unproven | module-level only | helper; module-level only |
+| 4 | `tg_mtproto_ctr_xor` | 50 |  | r2o-telegram/crypto.rs | TG5 | implemented-unproven | module-level only | helper; module-level only |
+| 5 | `tg_mtproto_ctr_destroy` | 64 |  | r2o-telegram/crypto.rs | TG5 | implemented-unproven | module-level only | helper; module-level only |
+| 6 | `tg_mtproto_direct_stream_ciphers` | 70 |  | r2o-telegram/crypto.rs | TG5 | implemented-unproven | module-level only | helper; module-level only |
+| 7 | `tg_mtproto_direct_server_stream_cipher` | 93 |  | r2o-telegram/crypto.rs | TG5 | implemented-unproven | module-level only | helper; module-level only |
+| 8 | `tg_mtproto_aes_ige` | 105 |  | r2o-telegram/crypto.rs | TG5 | implemented-unproven | module-level only | helper; module-level only |
+| 9 | `parse_with_key` | 159 | да | r2o-telegram/crypto.rs | TG5 | implemented-unproven | module-level only | helper; module-level only |
+| 10 | `tg_mtproto_parse_obfuscated2` | 187 |  | r2o-telegram/crypto.rs | TG5 | implemented-unproven | module-level only | helper; module-level only |
+| 11 | `tg_mtproto_parse_secret` | 193 |  | r2o-telegram/crypto.rs | TG5 | implemented-unproven | module-level only | helper; module-level only |
+| 12 | `tg_mtproto_make_obfuscated2_init` | 215 |  | r2o-telegram/crypto.rs | TG5 | implemented-unproven | module-level only | helper; module-level only |
 
 ### `telegram/src/mtproto_encrypted.c` — 4
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `digest_parts` | 7 | да | grammers mtp::Encrypted | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 2 | `derive_v2_key_iv` | 24 | да | grammers mtp::Encrypted | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 3 | `tg_mtproto_v2_encrypt` | 48 |  | grammers mtp::Encrypted | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 4 | `tg_mtproto_v2_decrypt` | 95 |  | grammers mtp::Encrypted | T3 | implemented-unproven | module-level only | helper; module-level only |
+| 1 | `digest_parts` | 7 | да | grammers mtp::Encrypted | TG7 | implemented-unproven | module-level only | helper; module-level only |
+| 2 | `derive_v2_key_iv` | 24 | да | grammers mtp::Encrypted | TG7 | implemented-unproven | module-level only | helper; module-level only |
+| 3 | `tg_mtproto_v2_encrypt` | 48 |  | grammers mtp::Encrypted | TG7 | implemented-unproven | module-level only | helper; module-level only |
+| 4 | `tg_mtproto_v2_decrypt` | 95 |  | grammers mtp::Encrypted | TG7 | implemented-unproven | module-level only | helper; module-level only |
 
 ### `telegram/src/mtproto_probe.c` — 39
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `monotonic_ms` | 40 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 2 | `wait_fd` | 46 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 3 | `transfer_all` | 73 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 4 | `collect_discovery_wss_bytes` | 106 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 5 | `discovery_wss_pump` | 138 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 6 | `discovery_transfer_all` | 180 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 7 | `read_le32` | 210 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 8 | `write_le32` | 215 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 9 | `read_le64` | 219 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 10 | `write_le64` | 224 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 11 | `make_message_id` | 228 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 12 | `read_tl_bytes` | 249 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 13 | `parse_res_pq` | 277 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 14 | `parse_plain_response` | 309 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 15 | `set_probe_socket_mark` | 326 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 16 | `make_address` | 337 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 17 | `connect_numeric_until` | 358 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 18 | `tg_mtproto_probe_res_pq` | 395 |  | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 19 | `connect_hostname` | 525 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 20 | `ssl_wait` | 585 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 21 | `ssl_handshake_until` | 601 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 22 | `ssl_transfer_until` | 611 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 23 | `wss_upgrade_until` | 634 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 24 | `collect_wss_probe_response` | 671 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 25 | `wss_wait_for_res_pq` | 718 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 26 | `tg_mtproto_probe_res_pq_wss` | 757 |  | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 27 | `discovery_write` | 885 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 28 | `discovery_write_u32` | 895 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 29 | `discovery_write_u64` | 901 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 30 | `discovery_write_tl_bytes` | 907 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 31 | `discovery_write_string` | 931 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 32 | `send_frame` | 938 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 33 | `read_frame` | 963 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 34 | `exchange_plain` | 995 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 35 | `build_config_query` | 1032 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 36 | `tg_mtproto_parse_rpc_result` | 1049 |  | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 37 | `discover_config_common` | 1105 | да | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 38 | `tg_mtproto_discover_config` | 1256 |  | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 39 | `tg_mtproto_discover_config_wss` | 1276 |  | r2o-telegram/dc_discovery.rs, ws_client | T3 | implemented-unproven | module-level only | helper; module-level only |
+| 1 | `monotonic_ms` | 40 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 2 | `wait_fd` | 46 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 3 | `transfer_all` | 73 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 4 | `collect_discovery_wss_bytes` | 106 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 5 | `discovery_wss_pump` | 138 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 6 | `discovery_transfer_all` | 180 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 7 | `read_le32` | 210 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 8 | `write_le32` | 215 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 9 | `read_le64` | 219 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 10 | `write_le64` | 224 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 11 | `make_message_id` | 228 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 12 | `read_tl_bytes` | 249 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 13 | `parse_res_pq` | 277 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 14 | `parse_plain_response` | 309 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 15 | `set_probe_socket_mark` | 326 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 16 | `make_address` | 337 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 17 | `connect_numeric_until` | 358 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 18 | `tg_mtproto_probe_res_pq` | 395 |  | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 19 | `connect_hostname` | 525 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 20 | `ssl_wait` | 585 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 21 | `ssl_handshake_until` | 601 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 22 | `ssl_transfer_until` | 611 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 23 | `wss_upgrade_until` | 634 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 24 | `collect_wss_probe_response` | 671 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 25 | `wss_wait_for_res_pq` | 718 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 26 | `tg_mtproto_probe_res_pq_wss` | 757 |  | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 27 | `discovery_write` | 885 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 28 | `discovery_write_u32` | 895 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 29 | `discovery_write_u64` | 901 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 30 | `discovery_write_tl_bytes` | 907 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 31 | `discovery_write_string` | 931 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 32 | `send_frame` | 938 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 33 | `read_frame` | 963 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 34 | `exchange_plain` | 995 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 35 | `build_config_query` | 1032 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 36 | `tg_mtproto_parse_rpc_result` | 1049 |  | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 37 | `discover_config_common` | 1105 | да | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 38 | `tg_mtproto_discover_config` | 1256 |  | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
+| 39 | `tg_mtproto_discover_config_wss` | 1276 |  | r2o-telegram/dc_discovery.rs, ws_client | TG8 | implemented-unproven | module-level only | helper; module-level only |
 
 ### `telegram/src/mtproto_splitter.c` — 12
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `grow_packet` | 9 | да | r2o-telegram/splitter.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 2 | `append_encrypted` | 36 | да | r2o-telegram/splitter.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 3 | `required_header` | 48 | да | r2o-telegram/splitter.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 4 | `parse_total_length` | 56 | да | r2o-telegram/splitter.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 5 | `tg_mtproto_splitter_init` | 88 |  | r2o-telegram/splitter.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 6 | `tg_mtproto_splitter_init_accounted` | 93 |  | r2o-telegram/splitter.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 7 | `tg_mtproto_splitter_destroy` | 105 |  | r2o-telegram/splitter.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 8 | `emit_packet` | 112 | да | r2o-telegram/splitter.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 9 | `tg_mtproto_splitter_feed` | 129 |  | r2o-telegram/splitter.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 10 | `tg_mtproto_splitter_flush` | 213 |  | r2o-telegram/splitter.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 11 | `tg_mtproto_splitter_error` | 225 |  | r2o-telegram/splitter.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 12 | `tg_mtproto_split_result_text` | 229 |  | r2o-telegram/splitter.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
+| 1 | `grow_packet` | 9 | да | r2o-telegram/splitter.rs | TG6 | implemented-unproven | module-level only | helper; module-level only |
+| 2 | `append_encrypted` | 36 | да | r2o-telegram/splitter.rs | TG6 | implemented-unproven | module-level only | helper; module-level only |
+| 3 | `required_header` | 48 | да | r2o-telegram/splitter.rs | TG6 | implemented-unproven | module-level only | helper; module-level only |
+| 4 | `parse_total_length` | 56 | да | r2o-telegram/splitter.rs | TG6 | implemented-unproven | module-level only | helper; module-level only |
+| 5 | `tg_mtproto_splitter_init` | 88 |  | r2o-telegram/splitter.rs | TG6 | implemented-unproven | module-level only | helper; module-level only |
+| 6 | `tg_mtproto_splitter_init_accounted` | 93 |  | r2o-telegram/splitter.rs | TG6 | implemented-unproven | module-level only | helper; module-level only |
+| 7 | `tg_mtproto_splitter_destroy` | 105 |  | r2o-telegram/splitter.rs | TG6 | implemented-unproven | module-level only | helper; module-level only |
+| 8 | `emit_packet` | 112 | да | r2o-telegram/splitter.rs | TG6 | implemented-unproven | module-level only | helper; module-level only |
+| 9 | `tg_mtproto_splitter_feed` | 129 |  | r2o-telegram/splitter.rs | TG6 | implemented-unproven | module-level only | helper; module-level only |
+| 10 | `tg_mtproto_splitter_flush` | 213 |  | r2o-telegram/splitter.rs | TG6 | implemented-unproven | module-level only | helper; module-level only |
+| 11 | `tg_mtproto_splitter_error` | 225 |  | r2o-telegram/splitter.rs | TG6 | implemented-unproven | module-level only | helper; module-level only |
+| 12 | `tg_mtproto_split_result_text` | 229 |  | r2o-telegram/splitter.rs | TG6 | implemented-unproven | module-level only | helper; module-level only |
 
 ### `telegram/src/net.c` — 2
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `tg_nip_host_to_ipv4` | 16 |  | r2o-telegram/outbound/connector.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 2 | `tg_tcp_connect_ipv4` | 43 |  | r2o-telegram/outbound/connector.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
+| 1 | `tg_nip_host_to_ipv4` | 16 |  | r2o-telegram/outbound/connector.rs | TG9/TG18 | implemented-unproven | module-level only | helper; module-level only |
+| 2 | `tg_tcp_connect_ipv4` | 43 |  | r2o-telegram/outbound/connector.rs | TG9/TG18 | implemented-unproven | module-level only | helper; module-level only |
 
 ### `telegram/src/route_dns.c` — 49
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `tg_route_dns_test_doh_endpoint_count` | 70 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 2 | `tg_route_dns_test_doh_endpoint` | 74 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 3 | `monotonic_ms` | 87 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 4 | `ipv4_public` | 93 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 5 | `public_target` | 107 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 6 | `system_dns_error_is_negative` | 135 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 7 | `system_lookup` | 143 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 8 | `dns_skip_name` | 188 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 9 | `tg_route_dns_parse_response` | 217 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 10 | `wait_socket` | 271 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 11 | `set_route_socket_mark` | 284 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 12 | `https_connect` | 295 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | partial | named in report | donor; узкий differential |
-| 13 | `dns_encode_question` | 386 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 14 | `ssl_write_all` | 424 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | partial | named in report | donor; узкий differential |
-| 15 | `ssl_read_exact` | 443 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 16 | `h2_write_frame` | 465 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 17 | `h2_read_frame` | 482 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 18 | `hpack_encode_integer` | 501 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 19 | `hpack_encode_string` | 523 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 20 | `hpack_encode_header` | 533 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 21 | `h2_encode_doh_headers` | 541 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 22 | `tg_route_dns_test_h2_encode_headers` | 568 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 23 | `hpack_read_integer` | 576 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 24 | `hpack_skip_string` | 602 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 25 | `h2_response_is_ok` | 616 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 26 | `tg_route_dns_test_h2_response_is_ok` | 663 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 27 | `h2_response_body` | 669 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 28 | `tg_route_dns_https2_request` | 752 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 29 | `http_response_has_explicit_framing` | 790 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 30 | `ssl_read_response` | 819 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 31 | `decode_chunked_body` | 848 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 32 | `tg_route_dns_parse_http_response` | 893 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 33 | `contains_http_control` | 949 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 34 | `tg_route_dns_https_request` | 956 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 35 | `doh_query_endpoint` | 1004 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 36 | `doh_lookup` | 1032 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 37 | `system_then_doh_lookup` | 1063 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 38 | `tg_route_dns_lookup_now` | 1074 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 39 | `find_entry` | 1082 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 40 | `get_entry` | 1089 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 41 | `enqueue` | 1112 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | partial | named in report | donor; узкий differential |
-| 42 | `resolver_worker` | 1125 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 43 | `tg_route_dns_create` | 1187 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 44 | `tg_route_dns_destroy` | 1217 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 45 | `valid_domain` | 1229 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | partial | named in report | donor; узкий differential |
-| 46 | `tg_route_dns_prefetch` | 1253 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 47 | `tg_route_dns_prefetch_cf_pool` | 1263 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 48 | `tg_route_dns_resolve_status` | 1285 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
-| 49 | `tg_route_dns_resolve` | 1312 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | T1/T6 | implemented-unproven | module-level only | helper; module-level only |
+| 1 | `tg_route_dns_test_doh_endpoint_count` | 70 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 2 | `tg_route_dns_test_doh_endpoint` | 74 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 3 | `monotonic_ms` | 87 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 4 | `ipv4_public` | 93 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 5 | `public_target` | 107 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 6 | `system_dns_error_is_negative` | 135 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 7 | `system_lookup` | 143 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 8 | `dns_skip_name` | 188 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 9 | `tg_route_dns_parse_response` | 217 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 10 | `wait_socket` | 271 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 11 | `set_route_socket_mark` | 284 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 12 | `https_connect` | 295 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | partial | named in report | donor; узкий differential |
+| 13 | `dns_encode_question` | 386 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 14 | `ssl_write_all` | 424 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | partial | named in report | donor; узкий differential |
+| 15 | `ssl_read_exact` | 443 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 16 | `h2_write_frame` | 465 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 17 | `h2_read_frame` | 482 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 18 | `hpack_encode_integer` | 501 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 19 | `hpack_encode_string` | 523 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 20 | `hpack_encode_header` | 533 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 21 | `h2_encode_doh_headers` | 541 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 22 | `tg_route_dns_test_h2_encode_headers` | 568 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 23 | `hpack_read_integer` | 576 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 24 | `hpack_skip_string` | 602 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 25 | `h2_response_is_ok` | 616 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 26 | `tg_route_dns_test_h2_response_is_ok` | 663 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 27 | `h2_response_body` | 669 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 28 | `tg_route_dns_https2_request` | 752 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 29 | `http_response_has_explicit_framing` | 790 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 30 | `ssl_read_response` | 819 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 31 | `decode_chunked_body` | 848 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 32 | `tg_route_dns_parse_http_response` | 893 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 33 | `contains_http_control` | 949 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 34 | `tg_route_dns_https_request` | 956 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 35 | `doh_query_endpoint` | 1004 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 36 | `doh_lookup` | 1032 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 37 | `system_then_doh_lookup` | 1063 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 38 | `tg_route_dns_lookup_now` | 1074 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 39 | `find_entry` | 1082 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 40 | `get_entry` | 1089 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 41 | `enqueue` | 1112 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | partial | named in report | donor; узкий differential |
+| 42 | `resolver_worker` | 1125 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 43 | `tg_route_dns_create` | 1187 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 44 | `tg_route_dns_destroy` | 1217 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 45 | `valid_domain` | 1229 | да | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | partial | named in report | donor; узкий differential |
+| 46 | `tg_route_dns_prefetch` | 1253 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 47 | `tg_route_dns_prefetch_cf_pool` | 1263 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 48 | `tg_route_dns_resolve_status` | 1285 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
+| 49 | `tg_route_dns_resolve` | 1312 |  | r2o-telegram/routing.rs, cf_proxy_doh.rs | TG10 | implemented-unproven | module-level only | helper; module-level only |
 
 ### `telegram/src/route_plan.c` — 6
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `tg_route_websocket_dc` | 6 |  | r2o-telegram/routing.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 2 | `tg_route_cf_proxy_hostname` | 10 |  | r2o-telegram/routing.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 3 | `append_step` | 22 | да | r2o-telegram/routing.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 4 | `append_direct` | 31 | да | r2o-telegram/routing.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 5 | `append_cloudflare` | 39 | да | r2o-telegram/routing.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 6 | `tg_route_plan_build` | 54 |  | r2o-telegram/routing.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
+| 1 | `tg_route_websocket_dc` | 6 |  | r2o-telegram/routing.rs, ws_client.rs | TG9 | implemented-unproven | module-level only | helper; module-level only |
+| 2 | `tg_route_cf_proxy_hostname` | 10 |  | r2o-telegram/routing.rs, ws_client.rs | TG9 | implemented-unproven | module-level only | helper; module-level only |
+| 3 | `append_step` | 22 | да | r2o-telegram/routing.rs, ws_client.rs | TG9 | implemented-unproven | module-level only | helper; module-level only |
+| 4 | `append_direct` | 31 | да | r2o-telegram/routing.rs, ws_client.rs | TG9 | implemented-unproven | module-level only | helper; module-level only |
+| 5 | `append_cloudflare` | 39 | да | r2o-telegram/routing.rs, ws_client.rs | TG9 | implemented-unproven | module-level only | helper; module-level only |
+| 6 | `tg_route_plan_build` | 54 |  | r2o-telegram/routing.rs, ws_client.rs | TG9 | implemented-unproven | module-level only | helper; module-level only |
 
 ### `telegram/src/stats_socket.c` — 10
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `route_stage_name` | 16 | да | r2o-telegram/stats.rs | T7 | implemented-unproven | module-level only | helper; module-level only |
-| 2 | `route_state_name` | 26 | да | r2o-telegram/stats.rs | T7 | implemented-unproven | module-level only | helper; module-level only |
-| 3 | `route_transport_name` | 34 | да | r2o-telegram/stats.rs | T7 | implemented-unproven | module-level only | helper; module-level only |
-| 4 | `stats_append` | 45 | да | r2o-telegram/stats.rs | T7 | implemented-unproven | module-level only | helper; module-level only |
-| 5 | `append_active_sessions` | 57 | да | r2o-telegram/stats.rs | T7 | implemented-unproven | module-level only | helper; module-level only |
-| 6 | `set_socket_flags` | 130 | да | r2o-telegram/stats.rs | T7 | implemented-unproven | module-level only | helper; module-level only |
-| 7 | `remove_stale_socket` | 140 | да | r2o-telegram/stats.rs | T7 | implemented-unproven | module-level only | helper; module-level only |
-| 8 | `tg_stats_socket_open` | 169 |  | r2o-telegram/stats.rs | T7 | implemented-unproven | module-level only | helper; module-level only |
-| 9 | `tg_stats_socket_serve` | 233 |  | r2o-telegram/stats.rs | T7 | implemented-unproven | module-level only | helper; module-level only |
-| 10 | `tg_stats_socket_close` | 322 |  | r2o-telegram/stats.rs | T7 | implemented-unproven | module-level only | helper; module-level only |
+| 1 | `route_stage_name` | 16 | да | r2o-telegram/stats.rs | TG19/TG20 | implemented-unproven | module-level only | helper; module-level only |
+| 2 | `route_state_name` | 26 | да | r2o-telegram/stats.rs | TG19/TG20 | implemented-unproven | module-level only | helper; module-level only |
+| 3 | `route_transport_name` | 34 | да | r2o-telegram/stats.rs | TG19/TG20 | implemented-unproven | module-level only | helper; module-level only |
+| 4 | `stats_append` | 45 | да | r2o-telegram/stats.rs | TG19/TG20 | implemented-unproven | module-level only | helper; module-level only |
+| 5 | `append_active_sessions` | 57 | да | r2o-telegram/stats.rs | TG19/TG20 | implemented-unproven | module-level only | helper; module-level only |
+| 6 | `set_socket_flags` | 130 | да | r2o-telegram/stats.rs | TG19/TG20 | implemented-unproven | module-level only | helper; module-level only |
+| 7 | `remove_stale_socket` | 140 | да | r2o-telegram/stats.rs | TG19/TG20 | implemented-unproven | module-level only | helper; module-level only |
+| 8 | `tg_stats_socket_open` | 169 |  | r2o-telegram/stats.rs | TG19/TG20 | implemented-unproven | module-level only | helper; module-level only |
+| 9 | `tg_stats_socket_serve` | 233 |  | r2o-telegram/stats.rs | TG19/TG20 | implemented-unproven | module-level only | helper; module-level only |
+| 10 | `tg_stats_socket_close` | 322 |  | r2o-telegram/stats.rs | TG19/TG20 | implemented-unproven | module-level only | helper; module-level only |
 
 ### `telegram/src/tls.c` — 4
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `tg_tls_client_context` | 8 |  | r2o-telegram/ws_client.rs, meta_edge.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 2 | `tg_tls_connect_fd` | 23 |  | r2o-telegram/ws_client.rs, meta_edge.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 3 | `tg_tls_prepare_client_fd` | 27 |  | r2o-telegram/ws_client.rs, meta_edge.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 4 | `tg_tls_connect_fd_sni` | 54 |  | r2o-telegram/ws_client.rs, meta_edge.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
+| 1 | `tg_tls_client_context` | 8 |  | r2o-telegram/ws_client.rs, meta_edge.rs | TG11 | implemented-unproven | module-level only | helper; module-level only |
+| 2 | `tg_tls_connect_fd` | 23 |  | r2o-telegram/ws_client.rs, meta_edge.rs | TG11 | implemented-unproven | module-level only | helper; module-level only |
+| 3 | `tg_tls_prepare_client_fd` | 27 |  | r2o-telegram/ws_client.rs, meta_edge.rs | TG11 | implemented-unproven | module-level only | helper; module-level only |
+| 4 | `tg_tls_connect_fd_sni` | 54 |  | r2o-telegram/ws_client.rs, meta_edge.rs | TG11 | implemented-unproven | module-level only | helper; module-level only |
 
 ### `telegram/src/transparent.c` — 6
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `prefix_matches` | 14 | да | r2o-telegram/transparent.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 2 | `cidr_matches` | 25 | да | r2o-telegram/transparent.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 3 | `destination_allowed` | 50 | да | r2o-telegram/transparent.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 4 | `parse_client_handshake` | 68 | да | r2o-telegram/transparent.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 5 | `tg_transparent_select_route` | 101 |  | r2o-telegram/transparent.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 6 | `tg_transparent_select_target` | 136 |  | r2o-telegram/transparent.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
+| 1 | `prefix_matches` | 14 | да | r2o-telegram/transparent.rs | TG15/TG16 | implemented-unproven | module-level only | helper; module-level only |
+| 2 | `cidr_matches` | 25 | да | r2o-telegram/transparent.rs | TG15/TG16 | implemented-unproven | module-level only | helper; module-level only |
+| 3 | `destination_allowed` | 50 | да | r2o-telegram/transparent.rs | TG15/TG16 | implemented-unproven | module-level only | helper; module-level only |
+| 4 | `parse_client_handshake` | 68 | да | r2o-telegram/transparent.rs | TG15/TG16 | implemented-unproven | module-level only | helper; module-level only |
+| 5 | `tg_transparent_select_route` | 101 |  | r2o-telegram/transparent.rs | TG15/TG16 | implemented-unproven | module-level only | helper; module-level only |
+| 6 | `tg_transparent_select_target` | 136 |  | r2o-telegram/transparent.rs | TG15/TG16 | implemented-unproven | module-level only | helper; module-level only |
 
 ### `telegram/src/ws.c` — 18
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `valid_opcode` | 11 | да | r2o-telegram/ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 2 | `tg_ws_encode_client_frame` | 16 |  | r2o-telegram/ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 3 | `tg_ws_decode_server_frame` | 47 |  | r2o-telegram/ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 4 | `ssl_read_all` | 82 | да | r2o-telegram/ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 5 | `ssl_write_all` | 92 | да | r2o-telegram/ws_client.rs | T3 | partial | named in report | donor; upgrade/frames |
-| 6 | `header_has_token` | 102 | да | r2o-telegram/ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 7 | `get_header` | 116 | да | r2o-telegram/ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 8 | `has_http_control` | 137 | да | r2o-telegram/ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 9 | `tg_ws_upgrade_start_ex` | 144 |  | r2o-telegram/ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 10 | `tg_ws_upgrade_start` | 197 |  | r2o-telegram/ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 11 | `tg_ws_upgrade_pending` | 202 |  | r2o-telegram/ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 12 | `tg_ws_upgrade_advance` | 214 |  | r2o-telegram/ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 13 | `validate_upgrade_response` | 223 |  | r2o-telegram/ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 14 | `tg_ws_upgrade_feed` | 255 |  | r2o-telegram/ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 15 | `tg_ws_upgrade` | 290 |  | r2o-telegram/ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 16 | `write_frame` | 309 |  | r2o-telegram/ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 17 | `tg_ws_write_binary` | 319 | да | r2o-telegram/ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 18 | `tg_ws_read_binary` | 324 |  | r2o-telegram/ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
+| 1 | `valid_opcode` | 11 | да | r2o-telegram/ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 2 | `tg_ws_encode_client_frame` | 16 |  | r2o-telegram/ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 3 | `tg_ws_decode_server_frame` | 47 |  | r2o-telegram/ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 4 | `ssl_read_all` | 82 | да | r2o-telegram/ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 5 | `ssl_write_all` | 92 | да | r2o-telegram/ws_client.rs | TG12 | partial | named in report | donor; upgrade/frames |
+| 6 | `header_has_token` | 102 | да | r2o-telegram/ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 7 | `get_header` | 116 | да | r2o-telegram/ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 8 | `has_http_control` | 137 | да | r2o-telegram/ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 9 | `tg_ws_upgrade_start_ex` | 144 |  | r2o-telegram/ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 10 | `tg_ws_upgrade_start` | 197 |  | r2o-telegram/ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 11 | `tg_ws_upgrade_pending` | 202 |  | r2o-telegram/ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 12 | `tg_ws_upgrade_advance` | 214 |  | r2o-telegram/ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 13 | `validate_upgrade_response` | 223 |  | r2o-telegram/ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 14 | `tg_ws_upgrade_feed` | 255 |  | r2o-telegram/ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 15 | `tg_ws_upgrade` | 290 |  | r2o-telegram/ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 16 | `write_frame` | 309 |  | r2o-telegram/ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 17 | `tg_ws_write_binary` | 319 | да | r2o-telegram/ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 18 | `tg_ws_read_binary` | 324 |  | r2o-telegram/ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
 
 ### `telegram/src/ws_pump.c` — 20
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `release_frames` | 15 | да | r2o-telegram/bridge.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 2 | `tg_ws_pump_init` | 24 |  | r2o-telegram/bridge.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 3 | `tg_ws_pump_init_accounted` | 28 |  | r2o-telegram/bridge.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 4 | `reserve_rx` | 49 | да | r2o-telegram/bridge.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 5 | `trim_idle_buffers` | 67 | да | r2o-telegram/bridge.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 6 | `tg_ws_pump_destroy` | 97 |  | r2o-telegram/bridge.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 7 | `queue_opcode` | 104 | да | r2o-telegram/bridge.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 8 | `tg_ws_pump_queue_binary` | 128 |  | r2o-telegram/bridge.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 9 | `tg_ws_pump_queue_mtproto_payload` | 129 |  | r2o-telegram/bridge.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 10 | `tg_ws_pump_queue_ping` | 131 |  | r2o-telegram/bridge.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 11 | `tg_ws_pump_queue_close` | 132 |  | r2o-telegram/bridge.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 12 | `tg_ws_pump_fd` | 133 |  | r2o-telegram/bridge.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 13 | `tg_ws_pump_events` | 134 |  | r2o-telegram/bridge.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 14 | `append_fragment` | 141 | да | r2o-telegram/bridge.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 15 | `tg_ws_reassembly_destroy` | 170 |  | r2o-telegram/bridge.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 16 | `valid_utf8` | 177 | да | r2o-telegram/bridge.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 17 | `tg_ws_reassembly_feed` | 203 |  | r2o-telegram/bridge.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 18 | `dispatch_frames` | 293 | да | r2o-telegram/bridge.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 19 | `flush_tx` | 313 | да | r2o-telegram/bridge.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
-| 20 | `tg_ws_pump_process` | 329 |  | r2o-telegram/bridge.rs, ws_client.rs | T3 | implemented-unproven | module-level only | helper; module-level only |
+| 1 | `release_frames` | 15 | да | r2o-telegram/bridge.rs, ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 2 | `tg_ws_pump_init` | 24 |  | r2o-telegram/bridge.rs, ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 3 | `tg_ws_pump_init_accounted` | 28 |  | r2o-telegram/bridge.rs, ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 4 | `reserve_rx` | 49 | да | r2o-telegram/bridge.rs, ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 5 | `trim_idle_buffers` | 67 | да | r2o-telegram/bridge.rs, ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 6 | `tg_ws_pump_destroy` | 97 |  | r2o-telegram/bridge.rs, ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 7 | `queue_opcode` | 104 | да | r2o-telegram/bridge.rs, ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 8 | `tg_ws_pump_queue_binary` | 128 |  | r2o-telegram/bridge.rs, ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 9 | `tg_ws_pump_queue_mtproto_payload` | 129 |  | r2o-telegram/bridge.rs, ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 10 | `tg_ws_pump_queue_ping` | 131 |  | r2o-telegram/bridge.rs, ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 11 | `tg_ws_pump_queue_close` | 132 |  | r2o-telegram/bridge.rs, ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 12 | `tg_ws_pump_fd` | 133 |  | r2o-telegram/bridge.rs, ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 13 | `tg_ws_pump_events` | 134 |  | r2o-telegram/bridge.rs, ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 14 | `append_fragment` | 141 | да | r2o-telegram/bridge.rs, ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 15 | `tg_ws_reassembly_destroy` | 170 |  | r2o-telegram/bridge.rs, ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 16 | `valid_utf8` | 177 | да | r2o-telegram/bridge.rs, ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 17 | `tg_ws_reassembly_feed` | 203 |  | r2o-telegram/bridge.rs, ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 18 | `dispatch_frames` | 293 | да | r2o-telegram/bridge.rs, ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 19 | `flush_tx` | 313 | да | r2o-telegram/bridge.rs, ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |
+| 20 | `tg_ws_pump_process` | 329 |  | r2o-telegram/bridge.rs, ws_client.rs | TG12 | implemented-unproven | module-level only | helper; module-level only |

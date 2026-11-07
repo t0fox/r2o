@@ -23,21 +23,20 @@ GROUP_ORDER = [
     "Discord Gateway",
     "Telegram",
     "WebPanel",
-    "Firewall / PPE",
-    "Release / ABI",
+    "Router / Service",
     "Core / CLI",
 ]
 
 GROUP_BY_PREFIX = {
+    "TG": "Telegram",
+    "CL": "Classifier / TLS",
     "D": "Datapath",
     "S": "Discovery",
-    "C": "Classifier / TLS",
     "Q": "QUIC / HTTP3",
     "R": "Discord RTC",
-    "T": "Telegram",
-    "P": "WebPanel",
-    "F": "Firewall / PPE",
-    "L": "Release / ABI",
+    "G": "Discord Gateway",
+    "A": "WebPanel",
+    "B": "Router / Service",
     "M": "Core / CLI",
 }
 
@@ -53,6 +52,9 @@ COMPARE_CSS = """
 
 
 def group_for(key: str, name: str) -> str:
+    for prefix in ("TG", "CL"):
+        if key.startswith(prefix):
+            return GROUP_BY_PREFIX[prefix]
     if key.startswith("R") and ("Gateway" in name or "WebSocket" in name):
         return "Discord Gateway"
     return GROUP_BY_PREFIX.get(key[:1], "Core / CLI")
@@ -60,7 +62,7 @@ def group_for(key: str, name: str) -> str:
 
 def parse_items():
     text = MATRIX.read_text(encoding="utf-8")
-    start = text.index("## Уточнённая матрица покрытия")
+    start = text.index("## Нормализованная матрица покрытия")
     items = []
     for line in text[start:].splitlines():
         if not line.startswith("|"):
@@ -70,23 +72,36 @@ def parse_items():
             continue
         key = cells[1]
         weight_match = re.search(r"\((\d+)\)\s*$", cells[2])
-        if not re.fullmatch(r"[A-Z]\d+[a-z]?", key) or not weight_match:
+        if not re.fullmatch(r"[A-Z]{1,2}\d+[a-z]?", key) or not weight_match:
             continue
         name = re.sub(r"\s*\(\d+\)\s*$", "", cells[2]).strip()
         weight = int(weight_match.group(1))
-        raw_status = cells[3]
+        raw_status = cells[3].lower()
         coverage = cells[5]
         gap = cells[6]
-        if "доказано" in raw_status.lower():
-            status, status_label, points = "verified", "доказано", weight
-        elif "частично" in raw_status.lower():
-            status, status_label, points = "partial", "частично", 0
-        elif "реализовано" in raw_status.lower():
-            status, status_label, points = "implemented", "реализовано", 0
+        strict = int(cells[4]) if cells[4].isdigit() else 0
+        if "carry" in raw_status:
+            status, status_label, points, carry = (
+                "carry",
+                "carry (304) — historical",
+                0,
+                weight,
+            )
+        elif "verified" in raw_status or "доказано" in raw_status:
+            status, status_label, points, carry = "verified", "доказано", strict, weight
+        elif "missing" in raw_status:
+            status, status_label, points, carry = "missing", "пробел", 0, 0
+        elif "extension" in raw_status:
+            status, status_label, points, carry = "extension", "R2O-only", 0, 0
+        elif "out-of-scope" in raw_status:
+            status, status_label, points, carry = "out-of-scope", "вне scope", 0, 0
+        elif "partial" in raw_status or "частично" in raw_status:
+            status, status_label, points, carry = "partial", "частично", strict, weight if strict else 0
         else:
-            status, status_label, points = (
-                "unknown",
+            status, status_label, points, carry = (
+                "missing",
                 "0 — нет принятого доказательства",
+                0,
                 0,
             )
         items.append(
@@ -96,6 +111,7 @@ def parse_items():
                 "name": name,
                 "weight": weight,
                 "points": points,
+                "carry_points": carry,
                 "status": status,
                 "statusLabel": status_label,
                 "group": group_for(key, name),
@@ -106,7 +122,7 @@ def parse_items():
             }
         )
     if not items:
-        raise SystemExit("No contracts found in the refined matrix")
+        raise SystemExit("No contracts found in the normalized matrix")
     return items
 
 
@@ -126,15 +142,18 @@ def build_data(items):
         )
     weight = sum(item["weight"] for item in items)
     points = sum(item["points"] for item in items)
+    carry_points = sum(item["carry_points"] for item in items)
     counts = {
         "verified": sum(1 for item in items if item["status"] == "verified"),
+        "carry": sum(1 for item in items if item["status"] == "carry"),
         "partial": sum(1 for item in items if item["status"] == "partial"),
-        "implemented": sum(1 for item in items if item["status"] == "implemented"),
-        "unknown": sum(1 for item in items if item["status"] == "unknown"),
+        "missing": sum(1 for item in items if item["status"] == "missing"),
+        "implemented": 0,
+        "unknown": 0,
     }
     return {
         "source": "docs/functional-parity-matrix.md",
-        "date": "2026-11-07",
+        "date": "2026-11-08",
         "mode": "strict-current-revision",
         "weight": weight,
         "points": points,
@@ -150,10 +169,10 @@ def build_data(items):
                 "percent": round(100 * points / weight, 2),
             },
             "carry_forward": {
-                "points": 89,
-                "weight": 144,
-                "percent": 61.81,
-                "note": "принять 304ba893 как допустимую ревизию",
+                "points": carry_points,
+                "weight": weight,
+                "percent": round(100 * carry_points / weight, 2),
+                "note": "только строки, явно помеченные carry (304); historical evidence",
             },
             "legacy": {
                 "points": 80,
@@ -239,23 +258,24 @@ def render_index(data, css, grid, rows):
 <div class="bar"><b style="width:{data["percent"]}%"></b></div>
 <div class="stats">
 <div class="stat"><b>{counts["verified"]}</b><small>доказано</small></div>
+<div class="stat"><b>{counts["carry"]}</b><small>carry (304)</small></div>
 <div class="stat"><b>{counts["partial"]}</b><small>частично</small></div>
-<div class="stat"><b>{counts["implemented"]}</b><small>реализовано</small></div>
-<div class="stat"><b>{counts["unknown"]}</b><small>0 — нет доказательства</small></div>
+<div class="stat"><b>{counts["missing"]}</b><small>пробел</small></div>
 </div>
 <div class="panel"><h2>Три оценки</h2><div class="compare">{compare_cards}</div>
 <p class="note">Строгий счёт — единственный, который подтверждает текущую ревизию. Carry-forward
-принимает <code>304ba893</code> как допустимую; legacy-агрегат имеет другой знаменатель (57 строк / 89 баллов)
-и не сопоставим напрямую с 108 контрактами / 144 баллами.</p></div>
-<div class="legend"><span style="--c:#36c989">доказано</span><span style="--c:#e6b45d">частично</span>
-<span style="--c:#819bf8">реализовано</span><span style="--c:#65758c">0 — нет доказательства</span></div>
+принимает <code>304ba893</code> как допустимую; здесь учитываются только строки, явно помеченные
+<code>carry (304)</code>. Legacy-агрегат имеет другой знаменатель (57 строк / 89 баллов)
+и не сопоставим напрямую с 172 контрактами / 261 баллом.</p></div>
+<div class="legend"><span style="--c:#36c989">доказано</span><span style="--c:#819bf8">carry (304)</span>
+<span style="--c:#e6b45d">частично</span><span style="--c:#e06c75">пробел</span></div>
 <div class="grid">{grid}</div>
 <div id="detail" class="panel" aria-live="polite"><h2>Выберите контракт</h2>
 <div>Нажмите на плитку, чтобы увидеть покрытие, пробел и статус.</div></div>
 <div class="controls"><input id="search" placeholder="поиск контракта:" aria-label="поиск">
 <select id="filter" aria-label="фильтр"><option value="all">все статусы</option>
-<option value="verified">доказано</option><option value="partial">частично</option>
-<option value="implemented">реализовано</option><option value="unknown">0 — нет доказательства</option></select></div>
+<option value="verified">доказано</option><option value="carry">carry (304)</option>
+<option value="partial">частично</option><option value="missing">пробел</option></select></div>
 <div id="rows">{rows}</div>
 <p class="footer">Источник — <a href="https://github.com/t0fox/r2o/blob/main/docs/functional-parity-matrix.md">матрица</a>,
 аудит — <a href="https://github.com/t0fox/r2o/blob/main/docs/audit/README.md">docs/audit/README.md</a>.
@@ -283,7 +303,9 @@ def render_svg(data):
     height = 175 + math.ceil(len(groups) / 2) * 112 + 55
     colors = {
         "verified": "#36c989",
+        "carry": "#819bf8",
         "partial": "#e6b45d",
+        "missing": "#e06c75",
         "implemented": "#819bf8",
         "unknown": "#65758c",
     }
@@ -295,8 +317,8 @@ def render_svg(data):
         f'<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">{data["points"]} / {data["weight"]} verified points</text>',
         '<rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/>',
         f'<rect x="37" y="113" width="{1024 * data["points"] / data["weight"]:.1f}" height="11" rx="5" fill="#36c989"/>',
-        f'<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">{data["total"]} contracts · {data["counts"]["verified"]} verified · {data["counts"]["unknown"]} without accepted proof · 2026-11-07</text>',
-        f'<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry-forward 89/{data["comparison"]["carry_forward"]["weight"]} = {data["comparison"]["carry_forward"]["percent"]:.2f}% · strict {data["points"]}/{data["weight"]} = {data["percent"]:.2f}%</text>',
+        f'<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">{data["total"]} contracts · {data["counts"]["verified"]} verified · {data["counts"]["missing"]} missing · 2026-11-08</text>',
+        f'<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 {data["comparison"]["carry_forward"]["points"]}/{data["comparison"]["carry_forward"]["weight"]} = {data["comparison"]["carry_forward"]["percent"]:.2f}% · strict {data["points"]}/{data["weight"]} = {data["percent"]:.2f}%</text>',
     ]
     for index, group in enumerate(groups):
         x = 37 + (index % 2) * 520
@@ -346,20 +368,20 @@ def render_history():
             "label": "legacy-агрегат",
         },
         {
-            "sha": "carry-304",
-            "date": "2026-11-07",
-            "points": 89,
-            "weight": 144,
-            "percent": 61.81,
-            "label": "carry-forward 304ba893",
+            "sha": "carry-304-normalized",
+            "date": "2026-11-08",
+            "points": 140,
+            "weight": 261,
+            "percent": 53.64,
+            "label": "carry (только явно помеченные 304)",
         },
         {
-            "sha": "strict-current",
-            "date": "2026-11-07",
-            "points": 37,
-            "weight": 144,
-            "percent": 25.69,
-            "label": "строгий текущий",
+            "sha": "strict-normalized",
+            "date": "2026-11-08",
+            "points": 77,
+            "weight": 261,
+            "percent": 29.50,
+            "label": "строгий текущий (нормализованный)",
         },
     ]
     history_json = json.dumps(entries, ensure_ascii=False, indent=2)

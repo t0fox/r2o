@@ -1,151 +1,212 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 902" width="1100" height="902" role="img" aria-label="R2O strict parity 25.69%">
-<rect width="1100" height="902" rx="20" fill="#0c121e"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 29.50%">
+<rect width="1100" height="790" rx="20" fill="#0c121e"/>
 <text x="36" y="48" fill="#edf7ff" font-family="Arial,sans-serif" font-size="29" font-weight="700">R2O / D2O · Strict parity</text>
-<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">25.69%</text>
-<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">37 / 144 verified points</text>
+<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">29.50%</text>
+<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">77 / 261 verified points</text>
 <rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/>
-<rect x="37" y="113" width="263.1" height="11" rx="5" fill="#36c989"/>
-<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">108 contracts · 37 verified · 71 without accepted proof · 2026-11-07</text>
-<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry-forward 89/144 = 61.81% · strict 37/144 = 25.69%</text>
+<rect x="37" y="113" width="302.1" height="11" rx="5" fill="#36c989"/>
+<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">172 contracts · 55 verified · 18 missing · 2026-11-08</text>
+<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 140/261 = 53.64% · strict 77/261 = 29.50%</text>
 <rect x="37" y="190" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="213" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Datapath</text>
 <text x="533" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">11/26</text>
 <rect x="51" y="223" width="30" height="22" rx="5" fill="#36c989"><title>D1a NFQUEUE receive/verdict/truncation: доказано (1/1)</title></rect>
-<rect x="89" y="223" width="30" height="22" rx="5" fill="#65758c"><title>D1b NFQUEUE rcvbuf/poll/recv error policy: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="127" y="223" width="30" height="22" rx="5" fill="#65758c"><title>D2 IPv6 live NFQUEUE gateway FORWARD, fragments, route mark, fail-open: 0 — нет принятого доказательства (0/3)</title></rect>
+<rect x="89" y="223" width="30" height="22" rx="5" fill="#e6b45d"><title>D1b NFQUEUE rcvbuf/poll/recv error policy: частично (0/1)</title></rect>
+<rect x="127" y="223" width="30" height="22" rx="5" fill="#e6b45d"><title>D2 IPv6 live NFQUEUE gateway FORWARD, fragments, route mark, fail-open: частично (0/3)</title></rect>
 <rect x="165" y="223" width="30" height="22" rx="5" fill="#36c989"><title>D3 Fragment builders IPv4/IPv6 shapes 1–4 + session decide: доказано (1/1)</title></rect>
 <rect x="203" y="223" width="30" height="22" rx="5" fill="#36c989"><title>D4 TCP payload/SNI counters, split hello: доказано (1/1)</title></rect>
 <rect x="241" y="223" width="30" height="22" rx="5" fill="#36c989"><title>D5 TCP silence/expiry/FIN/RST/ClientHello retry: доказано (1/1)</title></rect>
-<rect x="279" y="223" width="30" height="22" rx="5" fill="#65758c"><title>D6 TCP hold/order/ownership/release: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="317" y="223" width="30" height="22" rx="5" fill="#65758c"><title>D7 TCP RST cut/observation/reply-hidden: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="355" y="223" width="30" height="22" rx="5" fill="#65758c"><title>D8 TCP flow-table capacity/refusal/expiry/reuse: 0 — нет принятого доказательства (0/1)</title></rect>
+<rect x="279" y="223" width="30" height="22" rx="5" fill="#e6b45d"><title>D6 TCP hold/order/ownership/release: частично (0/1)</title></rect>
+<rect x="317" y="223" width="30" height="22" rx="5" fill="#819bf8"><title>D7 TCP RST cut/observation/reply-hidden: carry (304) — historical (0/1)</title></rect>
+<rect x="355" y="223" width="30" height="22" rx="5" fill="#819bf8"><title>D8 TCP flow-table capacity/refusal/expiry/reuse: carry (304) — historical (0/1)</title></rect>
 <rect x="393" y="223" width="30" height="22" rx="5" fill="#36c989"><title>D9 Periodic flow-table stats + service interval: доказано (1/1)</title></rect>
 <rect x="431" y="223" width="30" height="22" rx="5" fill="#36c989"><title>D10 Other periodic datapath/process metrics: доказано (1/1)</title></rect>
-<rect x="469" y="223" width="30" height="22" rx="5" fill="#65758c"><title>D11 High-cardinality mixed load + peak RSS: 0 — нет принятого доказательства (0/1)</title></rect>
+<rect x="469" y="223" width="30" height="22" rx="5" fill="#819bf8"><title>D11 High-cardinality mixed load + peak RSS: carry (304) — historical (0/1)</title></rect>
 <rect x="51" y="250" width="30" height="22" rx="5" fill="#36c989"><title>D12 Worker args/page return after join: доказано (1/1)</title></rect>
 <rect x="89" y="250" width="30" height="22" rx="5" fill="#36c989"><title>D13 IPv4 NAT/conntrack/SNAT/reverse: доказано (1/1)</title></rect>
 <rect x="127" y="250" width="30" height="22" rx="5" fill="#36c989"><title>D14 Default observe/apply mode: доказано (1/1)</title></rect>
 <rect x="165" y="250" width="30" height="22" rx="5" fill="#36c989"><title>D15 ICMP guard counters/quoted-packet matching: доказано (1/1)</title></rect>
 <rect x="203" y="250" width="30" height="22" rx="5" fill="#36c989"><title>D16 Raw IPv6 emission shapes/UDP delivery: доказано (1/1)</title></rect>
-<rect x="241" y="250" width="30" height="22" rx="5" fill="#65758c"><title>D17 HTTP/80 replacement + hold: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="279" y="250" width="30" height="22" rx="5" fill="#65758c"><title>D18 Capture/TLS/wire/addr helpers: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="317" y="250" width="30" height="22" rx="5" fill="#65758c"><title>D19 Route mark/socket route selection: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="355" y="250" width="30" height="22" rx="5" fill="#65758c"><title>D20 TCP timestamp shape contexts 8-13 (`d2k_link_shape_tcp_*`): 0 — нет принятого доказательства (0/2)</title></rect>
-<rect x="393" y="250" width="30" height="22" rx="5" fill="#65758c"><title>D21 Datapath scheduler: due ordering, refusals, owned IDs: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="431" y="250" width="30" height="22" rx="5" fill="#65758c"><title>D22 Journal: ring/retention/dropped/added/format: 0 — нет принятого доказательства (0/1)</title></rect>
+<rect x="241" y="250" width="30" height="22" rx="5" fill="#e6b45d"><title>D17 HTTP/80 replacement + hold: частично (0/1)</title></rect>
+<rect x="279" y="250" width="30" height="22" rx="5" fill="#e6b45d"><title>D18 Capture/TLS/wire/addr helpers: частично (0/1)</title></rect>
+<rect x="317" y="250" width="30" height="22" rx="5" fill="#e6b45d"><title>D19 Route mark/socket route selection: частично (0/1)</title></rect>
+<rect x="355" y="250" width="30" height="22" rx="5" fill="#e06c75"><title>D20 TCP timestamp shape contexts 8-13 (`d2k_link_shape_tcp_*`): пробел (0/2)</title></rect>
+<rect x="393" y="250" width="30" height="22" rx="5" fill="#e6b45d"><title>D21 Datapath scheduler: due ordering, refusals, owned IDs: частично (0/1)</title></rect>
+<rect x="431" y="250" width="30" height="22" rx="5" fill="#e06c75"><title>D22 Journal: ring/retention/dropped/added/format: пробел (0/1)</title></rect>
 <rect x="557" y="190" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="571" y="213" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Classifier / TLS</text>
 <text x="1053" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">2/24</text>
-<rect x="571" y="223" width="30" height="22" rx="5" fill="#65758c"><title>C1 Raw profiles/ECH shapes/send/cancel/fallback/connect: 0 — нет принятого доказательства (0/3)</title></rect>
-<rect x="609" y="223" width="30" height="22" rx="5" fill="#65758c"><title>C2 CLEAR confirmation/cancel: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="647" y="223" width="30" height="22" rx="5" fill="#65758c"><title>C3 SO_MARK confirmation: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="685" y="223" width="30" height="22" rx="5" fill="#65758c"><title>C4 Base transport errors → split: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="723" y="223" width="30" height="22" rx="5" fill="#65758c"><title>C5 Poison/strategy tree/control/neutral ACK: 0 — нет принятого доказательства (0/2)</title></rect>
-<rect x="761" y="223" width="30" height="22" rx="5" fill="#65758c"><title>C6 TCP measurement + core verifier: 0 — нет принятого доказательства (0/2)</title></rect>
-<rect x="799" y="223" width="30" height="22" rx="5" fill="#36c989"><title>C7 TLS/HTTP verifier outcomes/retry: доказано (1/1)</title></rect>
-<rect x="837" y="223" width="30" height="22" rx="5" fill="#65758c"><title>C8 Connect/read timeout + doubled baseline retry: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="875" y="223" width="30" height="22" rx="5" fill="#65758c"><title>C9 TLS 1.2 reverse response probe/verdicts: 0 — нет принятого доказательства (0/3)</title></rect>
-<rect x="913" y="223" width="30" height="22" rx="5" fill="#65758c"><title>C10 ECH receive ladder/witness/retries: 0 — нет принятого доказательства (0/2)</title></rect>
-<rect x="951" y="223" width="30" height="22" rx="5" fill="#36c989"><title>C11 HTTP response framing/reader: доказано (1/1)</title></rect>
-<rect x="989" y="223" width="30" height="22" rx="5" fill="#65758c"><title>C12 ClientHello/TLS12/13/ECH parser helpers: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="571" y="250" width="30" height="22" rx="5" fill="#65758c"><title>C13 HTTPS probe/ECH resolver/cache state: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="609" y="250" width="30" height="22" rx="5" fill="#65758c"><title>C14 HTTP/3 status/header parser + httpup: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="647" y="250" width="30" height="22" rx="5" fill="#65758c"><title>C15 Compose/crypto/p256/x25519/props helpers: 0 — нет принятого доказательства (0/2)</title></rect>
-<rect x="685" y="250" width="30" height="22" rx="5" fill="#65758c"><title>C16 Detect/classifier CLI output/exit/JSON: 0 — нет принятого доказательства (0/1)</title></rect>
+<rect x="571" y="223" width="30" height="22" rx="5" fill="#819bf8"><title>CL1 Raw profiles/ECH shapes/send/cancel/fallback/connect: carry (304) — historical (0/3)</title></rect>
+<rect x="609" y="223" width="30" height="22" rx="5" fill="#819bf8"><title>CL2 CLEAR confirmation/cancel: carry (304) — historical (0/1)</title></rect>
+<rect x="647" y="223" width="30" height="22" rx="5" fill="#819bf8"><title>CL3 SO_MARK confirmation: carry (304) — historical (0/1)</title></rect>
+<rect x="685" y="223" width="30" height="22" rx="5" fill="#819bf8"><title>CL4 Base transport errors → split: carry (304) — historical (0/1)</title></rect>
+<rect x="723" y="223" width="30" height="22" rx="5" fill="#819bf8"><title>CL5 Poison/strategy tree/control/neutral ACK: carry (304) — historical (0/2)</title></rect>
+<rect x="761" y="223" width="30" height="22" rx="5" fill="#819bf8"><title>CL6 TCP measurement + core verifier: carry (304) — historical (0/2)</title></rect>
+<rect x="799" y="223" width="30" height="22" rx="5" fill="#36c989"><title>CL7 TLS/HTTP verifier outcomes/retry: доказано (1/1)</title></rect>
+<rect x="837" y="223" width="30" height="22" rx="5" fill="#819bf8"><title>CL8 Connect/read timeout + doubled baseline retry: carry (304) — historical (0/1)</title></rect>
+<rect x="875" y="223" width="30" height="22" rx="5" fill="#819bf8"><title>CL9 TLS 1.2 reverse response probe/verdicts: carry (304) — historical (0/3)</title></rect>
+<rect x="913" y="223" width="30" height="22" rx="5" fill="#819bf8"><title>CL10 ECH receive ladder/witness/retries: carry (304) — historical (0/2)</title></rect>
+<rect x="951" y="223" width="30" height="22" rx="5" fill="#36c989"><title>CL11 HTTP response framing/reader: доказано (1/1)</title></rect>
+<rect x="989" y="223" width="30" height="22" rx="5" fill="#e6b45d"><title>CL12 ClientHello/TLS12/13/ECH parser helpers: частично (0/1)</title></rect>
+<rect x="571" y="250" width="30" height="22" rx="5" fill="#e6b45d"><title>CL13 HTTPS probe/ECH resolver/cache state: частично (0/1)</title></rect>
+<rect x="609" y="250" width="30" height="22" rx="5" fill="#e6b45d"><title>CL14 HTTP/3 status/header parser + httpup: частично (0/1)</title></rect>
+<rect x="647" y="250" width="30" height="22" rx="5" fill="#e6b45d"><title>CL15 Compose/crypto/p256/x25519/props helpers: частично (0/2)</title></rect>
+<rect x="685" y="250" width="30" height="22" rx="5" fill="#e6b45d"><title>CL16 Detect/classifier CLI output/exit/JSON: частично (0/1)</title></rect>
 <rect x="37" y="302" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="325" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Discovery</text>
-<text x="533" y="325" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">1/21</text>
-<rect x="51" y="335" width="30" height="22" rx="5" fill="#65758c"><title>S1 Control frame/commands/ACK/APPLIED/REFUSED: 0 — нет принятого доказательства (0/2)</title></rect>
-<rect x="89" y="335" width="30" height="22" rx="5" fill="#65758c"><title>S2 Scheduler due order/cooldown/dead address/concurrent endpoints: 0 — нет принятого доказательства (0/3)</title></rect>
-<rect x="127" y="335" width="30" height="22" rx="5" fill="#65758c"><title>S3 Discovery known-plan/coalesce/queue/permits/own-first: 0 — нет принятого доказательства (0/3)</title></rect>
-<rect x="165" y="335" width="30" height="22" rx="5" fill="#65758c"><title>S4 ACK → APPLIED exact proof → candidate persistence: 0 — нет принятого доказательства (0/2)</title></rect>
-<rect x="203" y="335" width="30" height="22" rx="5" fill="#65758c"><title>S5 JSON catalog atomic save/merge/sync: 0 — нет принятого доказательства (0/2)</title></rect>
-<rect x="241" y="335" width="30" height="22" rx="5" fill="#65758c"><title>S6 HTTP search candidate/order/retry/judge/APPLIED: 0 — нет принятого доказательства (0/3)</title></rect>
-<rect x="279" y="335" width="30" height="22" rx="5" fill="#36c989"><title>S7 S99/procd boot waiters/restart/stop/delayed /opt: доказано (1/1)</title></rect>
-<rect x="317" y="335" width="30" height="22" rx="5" fill="#65758c"><title>S8 Process crash/restart + catalog reapply: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="355" y="335" width="30" height="22" rx="5" fill="#65758c"><title>S9 Auto refusal → Discovery → APPLIED → firewall reapply: 0 — нет принятого доказательства (0/2)</title></rect>
-<rect x="393" y="335" width="30" height="22" rx="5" fill="#65758c"><title>S10 Long-running controller recovery: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="431" y="335" width="30" height="22" rx="5" fill="#65758c"><title>S11 Diagnostics records/snapshots/madvise and periodic report: 0 — нет принятого доказательства (0/1)</title></rect>
+<text x="533" y="325" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">0/19</text>
+<rect x="51" y="335" width="30" height="22" rx="5" fill="#819bf8"><title>S1 Control frame/commands/ACK/APPLIED/REFUSED: carry (304) — historical (0/2)</title></rect>
+<rect x="89" y="335" width="30" height="22" rx="5" fill="#819bf8"><title>S2 Scheduler due order/cooldown/dead address/concurrent endpoints: carry (304) — historical (0/3)</title></rect>
+<rect x="127" y="335" width="30" height="22" rx="5" fill="#819bf8"><title>S3 Discovery known-plan/coalesce/queue/permits/own-first: carry (304) — historical (0/3)</title></rect>
+<rect x="165" y="335" width="30" height="22" rx="5" fill="#819bf8"><title>S4 ACK → APPLIED exact proof → candidate persistence: carry (304) — historical (0/2)</title></rect>
+<rect x="203" y="335" width="30" height="22" rx="5" fill="#819bf8"><title>S5 JSON catalog atomic save/merge/sync: carry (304) — historical (0/2)</title></rect>
+<rect x="241" y="335" width="30" height="22" rx="5" fill="#819bf8"><title>S6 HTTP search candidate/order/retry/judge/APPLIED: carry (304) — historical (0/3)</title></rect>
+<rect x="279" y="335" width="30" height="22" rx="5" fill="#e6b45d"><title>S9 Auto refusal → Discovery → APPLIED → firewall reapply: частично (0/2)</title></rect>
+<rect x="317" y="335" width="30" height="22" rx="5" fill="#e6b45d"><title>S10 Long-running controller recovery: частично (0/1)</title></rect>
+<rect x="355" y="335" width="30" height="22" rx="5" fill="#e06c75"><title>S11 Diagnostics records/snapshots/madvise and periodic report: пробел (0/1)</title></rect>
 <rect x="557" y="302" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="571" y="325" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">QUIC / HTTP3</text>
 <text x="1053" y="325" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">2/11</text>
-<rect x="571" y="335" width="30" height="22" rx="5" fill="#65758c"><title>Q1 QUIC Initial/QSN/SNI/local-address gate: 0 — нет принятого доказательства (0/2)</title></rect>
-<rect x="609" y="335" width="30" height="22" rx="5" fill="#65758c"><title>Q2 Residual/VN/address pool/neutral controls/fallback: 0 — нет принятого доказательства (0/3)</title></rect>
-<rect x="647" y="335" width="30" height="22" rx="5" fill="#65758c"><title>Q3 Short-control complete/budget: 0 — нет принятого доказательства (0/1)</title></rect>
+<rect x="571" y="335" width="30" height="22" rx="5" fill="#819bf8"><title>Q1 QUIC Initial/QSN/SNI/local-address gate: carry (304) — historical (0/2)</title></rect>
+<rect x="609" y="335" width="30" height="22" rx="5" fill="#e6b45d"><title>Q2 Residual/VN/address pool/neutral controls/fallback: частично (0/3)</title></rect>
+<rect x="647" y="335" width="30" height="22" rx="5" fill="#819bf8"><title>Q3 Short-control complete/budget: carry (304) — historical (0/1)</title></rect>
 <rect x="685" y="335" width="30" height="22" rx="5" fill="#36c989"><title>Q4 HTTP/3 framing/stream termination: доказано (1/1)</title></rect>
-<rect x="723" y="335" width="30" height="22" rx="5" fill="#65758c"><title>Q5 HTTP/3 budgets/transport limits/stall: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="761" y="335" width="30" height="22" rx="5" fill="#65758c"><title>Q6 Budget init/app-bytes helper: 0 — нет принятого доказательства (0/1)</title></rect>
+<rect x="723" y="335" width="30" height="22" rx="5" fill="#e6b45d"><title>Q5 HTTP/3 budgets/transport limits/stall: частично (0/1)</title></rect>
+<rect x="761" y="335" width="30" height="22" rx="5" fill="#819bf8"><title>Q6 Budget init/app-bytes helper: carry (304) — historical (0/1)</title></rect>
 <rect x="799" y="335" width="30" height="22" rx="5" fill="#36c989"><title>Q7 Silent peer handshake timeout: доказано (1/1)</title></rect>
-<rect x="837" y="335" width="30" height="22" rx="5" fill="#65758c"><title>Q8 QUIC deny/recheck lifecycle: 0 — нет принятого доказательства (0/1)</title></rect>
+<rect x="837" y="335" width="30" height="22" rx="5" fill="#e6b45d"><title>Q8 QUIC deny/recheck lifecycle: частично (0/1)</title></rect>
 <rect x="37" y="414" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="437" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Discord RTC</text>
 <text x="533" y="437" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">1/10</text>
-<rect x="51" y="447" width="30" height="22" rx="5" fill="#65758c"><title>R1 UDP observer initiator/SSRC/endpoint event: 0 — нет принятого доказательства (0/2)</title></rect>
-<rect x="89" y="447" width="30" height="22" rx="5" fill="#65758c"><title>R2 Manual measurement arm propagation: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="127" y="447" width="30" height="22" rx="5" fill="#65758c"><title>R3 Voice trial lease/renewal/120-s waiter/APPLIED: 0 — нет принятого доказательства (0/3)</title></rect>
-<rect x="165" y="447" width="30" height="22" rx="5" fill="#65758c"><title>R4 Endpoint change/late NAK/persistence/reapply: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="203" y="447" width="30" height="22" rx="5" fill="#65758c"><title>R5 Trial clock after queue admission: 0 — нет принятого доказательства (0/1)</title></rect>
+<rect x="51" y="447" width="30" height="22" rx="5" fill="#819bf8"><title>R1 UDP observer initiator/SSRC/endpoint event: carry (304) — historical (0/2)</title></rect>
+<rect x="89" y="447" width="30" height="22" rx="5" fill="#819bf8"><title>R2 Manual measurement arm propagation: carry (304) — historical (0/1)</title></rect>
+<rect x="127" y="447" width="30" height="22" rx="5" fill="#819bf8"><title>R3 Voice trial lease/renewal/120-s waiter/APPLIED: carry (304) — historical (0/3)</title></rect>
+<rect x="165" y="447" width="30" height="22" rx="5" fill="#819bf8"><title>R4 Endpoint change/late NAK/persistence/reapply: carry (304) — historical (0/1)</title></rect>
+<rect x="203" y="447" width="30" height="22" rx="5" fill="#819bf8"><title>R5 Trial clock after queue admission: carry (304) — historical (0/1)</title></rect>
 <rect x="241" y="447" width="30" height="22" rx="5" fill="#36c989"><title>R6 Scheduled UDP emission/queue stats: доказано (1/1)</title></rect>
-<rect x="279" y="447" width="30" height="22" rx="5" fill="#65758c"><title>R7 Long RTC session/process recovery: 0 — нет принятого доказательства (0/1)</title></rect>
+<rect x="279" y="447" width="30" height="22" rx="5" fill="#e6b45d"><title>R7 Long RTC session/process recovery: частично (0/1)</title></rect>
 <rect x="557" y="414" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="571" y="437" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Discord Gateway</text>
 <text x="1053" y="437" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">1/1</text>
-<rect x="571" y="447" width="30" height="22" rx="5" fill="#36c989"><title>R8 Discord Gateway WebSocket upgrade/Hello: доказано (1/1)</title></rect>
+<rect x="571" y="447" width="30" height="22" rx="5" fill="#36c989"><title>G1 Discord Gateway WebSocket upgrade/Hello: доказано (1/1)</title></rect>
 <rect x="37" y="526" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="549" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Telegram</text>
-<text x="533" y="549" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">3/8</text>
-<rect x="51" y="559" width="30" height="22" rx="5" fill="#65758c"><title>T1 Telegram route plan/DNS exclusion: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="89" y="559" width="30" height="22" rx="5" fill="#65758c"><title>T2 Telegram response observer: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="127" y="559" width="30" height="22" rx="5" fill="#65758c"><title>T3 Config/DC map/MTProto/WS retries/service lifecycle: 0 — нет принятого доказательства (0/2)</title></rect>
-<rect x="165" y="559" width="30" height="22" rx="5" fill="#36c989"><title>T4 Telegram firewall mark/stop order: доказано (1/1)</title></rect>
-<rect x="203" y="559" width="30" height="22" rx="5" fill="#36c989"><title>T5 Meta DNS scheduler lifecycle + range asset: доказано (1/1)</title></rect>
-<rect x="241" y="559" width="30" height="22" rx="5" fill="#36c989"><title>T6 Direct DNS/TLS edge/owned-record removal: доказано (1/1)</title></rect>
-<rect x="279" y="559" width="30" height="22" rx="5" fill="#65758c"><title>T7 Telegram limits/memory budget/stats timeout/config validation: 0 — нет принятого доказательства (0/1)</title></rect>
+<text x="533" y="549" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">0/41</text>
+<rect x="51" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>TG1 Config file/env mapping и валидация: частично (0/2)</title></rect>
+<rect x="89" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>TG3 DC map persist/merge/validate: частично (0/2)</title></rect>
+<rect x="127" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>TG4 `help.getConfig` и dcOption: частично (0/2)</title></rect>
+<rect x="165" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>TG5 obfuscated2/secret/DC/media/proto: частично (0/2)</title></rect>
+<rect x="203" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>TG6 MTProto splitter: частично (0/2)</title></rect>
+<rect x="241" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>TG7 v2 encrypted: частично (0/1)</title></rect>
+<rect x="279" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>TG8 resPQ probe: частично (0/1)</title></rect>
+<rect x="317" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>TG9 DC→WSS/CF route plan: частично (0/2)</title></rect>
+<rect x="355" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>TG10 Route DNS/DoH/DoT: частично (0/2)</title></rect>
+<rect x="393" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>TG11 TLS verification/SNI: частично (0/1)</title></rect>
+<rect x="431" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>TG12 WS upgrade/frames: частично (0/2)</title></rect>
+<rect x="469" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>TG13 CF domain pool refresh/cache: частично (0/2)</title></rect>
+<rect x="51" y="586" width="30" height="22" rx="5" fill="#e6b45d"><title>TG14 CF proxy DoH: частично (0/2)</title></rect>
+<rect x="89" y="586" width="30" height="22" rx="5" fill="#e6b45d"><title>TG15 Transparent listener/SO_ORIGINAL_DST: частично (0/2)</title></rect>
+<rect x="127" y="586" width="30" height="22" rx="5" fill="#e6b45d"><title>TG16 Transparent policy ports/CIDR/self-dial: частично (0/2)</title></rect>
+<rect x="165" y="586" width="30" height="22" rx="5" fill="#e6b45d"><title>TG17 Official secret/DD: частично (0/2)</title></rect>
+<rect x="203" y="586" width="30" height="22" rx="5" fill="#e6b45d"><title>TG18 Retry/cooldown/routing policy: частично (0/2)</title></rect>
+<rect x="241" y="586" width="30" height="22" rx="5" fill="#e6b45d"><title>TG19 Stats schema и Unix socket: частично (0/2)</title></rect>
+<rect x="279" y="586" width="30" height="22" rx="5" fill="#e06c75"><title>TG20 Stats request protocol robustness: пробел (0/1)</title></rect>
+<rect x="317" y="586" width="30" height="22" rx="5" fill="#e6b45d"><title>TG21 Response observer: частично (0/1)</title></rect>
+<rect x="355" y="586" width="30" height="22" rx="5" fill="#e06c75"><title>TG22 Connection/memory limits: пробел (0/2)</title></rect>
+<rect x="393" y="586" width="30" height="22" rx="5" fill="#e6b45d"><title>TG23 Diagnostics `--check`: частично (0/2)</title></rect>
+<rect x="431" y="586" width="30" height="22" rx="5" fill="#e6b45d"><title>TG24 Service lifecycle/recovery: частично (0/2)</title></rect>
 <rect x="557" y="526" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="571" y="549" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">WebPanel</text>
-<text x="1053" y="549" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">0/6</text>
-<rect x="571" y="559" width="30" height="22" rx="5" fill="#65758c"><title>P1 Bind selection/install safety: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="609" y="559" width="30" height="22" rx="5" fill="#65758c"><title>P2 Status unavailable/catalog token/size: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="647" y="559" width="30" height="22" rx="5" fill="#65758c"><title>P3 Control/actions/workers/config/static/update: 0 — нет принятого доказательства (0/2)</title></rect>
-<rect x="685" y="559" width="30" height="22" rx="5" fill="#65758c"><title>P4 Browser flow/layout: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="723" y="559" width="30" height="22" rx="5" fill="#65758c"><title>P5 Panel absolute response deadline and client IO resilience: 0 — нет принятого доказательства (0/1)</title></rect>
+<text x="1053" y="549" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">0/30</text>
+<rect x="571" y="559" width="30" height="22" rx="5" fill="#819bf8"><title>A1 Bind по умолчанию и выбор LAN IP при установке: carry (304) — historical (0/1)</title></rect>
+<rect x="609" y="559" width="30" height="22" rx="5" fill="#819bf8"><title>A2 Пустой `PANEL_LISTEN` отключает панель и health update: carry (304) — historical (0/1)</title></rect>
+<rect x="647" y="559" width="30" height="22" rx="5" fill="#e06c75"><title>A3 Парсер: комментарии, кавычки, хвостовые комментарии: пробел (0/1)</title></rect>
+<rect x="685" y="559" width="30" height="22" rx="5" fill="#819bf8"><title>A4 Парсер: unknown keys, не-UTF-8, ignored bytes: carry (304) — historical (0/1)</title></rect>
+<rect x="723" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>A5 Совместимость known-list с D2O-конфигом: частично (0/1)</title></rect>
+<rect x="761" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>A6 Лимит заголовка 32 КиБ и код 431: частично (0/1)</title></rect>
+<rect x="799" y="559" width="30" height="22" rx="5" fill="#819bf8"><title>A7 Абсолютный дедлайн заголовка 5 с / 408: carry (304) — historical (0/1)</title></rect>
+<rect x="837" y="559" width="30" height="22" rx="5" fill="#e06c75"><title>A8 Абсолютный дедлайн ответа 5 с: пробел (0/1)</title></rect>
+<rect x="875" y="559" width="30" height="22" rx="5" fill="#e06c75"><title>A9 Устойчивость к обрыву клиента/IO-ошибке: пробел (0/1)</title></rect>
+<rect x="913" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>A10 Неизвестный маршрут/метод/HTTP-версия: частично (0/1)</title></rect>
+<rect x="951" y="559" width="30" height="22" rx="5" fill="#819bf8"><title>A11 `/api/status`: unavailable-контракт: carry (304) — historical (0/1)</title></rect>
+<rect x="989" y="559" width="30" height="22" rx="5" fill="#819bf8"><title>A12 `/api/status`: live shape и catalog revision: carry (304) — historical (0/1)</title></rect>
+<rect x="571" y="586" width="30" height="22" rx="5" fill="#e6b45d"><title>A13 `/api/status`: snapshot/stages/unknown_keys: частично (0/1)</title></rect>
+<rect x="609" y="586" width="30" height="22" rx="5" fill="#819bf8"><title>A14 `/api/control`: список действий, коды, gates: carry (304) — historical (0/2)</title></rect>
+<rect x="647" y="586" width="30" height="22" rx="5" fill="#e6b45d"><title>A15 Action state machine и timeout (включая 124): частично (0/2)</title></rect>
+<rect x="685" y="586" width="30" height="22" rx="5" fill="#819bf8"><title>A16 Workers GET и байты конфига: carry (304) — historical (0/1)</title></rect>
+<rect x="723" y="586" width="30" height="22" rx="5" fill="#819bf8"><title>A17 Workers POST: Content-Type/TE/CL/JSON/8 доменов: carry (304) — historical (0/2)</title></rect>
+<rect x="761" y="586" width="30" height="22" rx="5" fill="#819bf8"><title>A18 Workers POST: busy до записи: carry (304) — historical (0/2)</title></rect>
+<rect x="799" y="586" width="30" height="22" rx="5" fill="#e6b45d"><title>A19 Атомарная запись и сохранение режима: частично (0/1)</title></rect>
+<rect x="837" y="586" width="30" height="22" rx="5" fill="#819bf8"><title>A20 Telegram config gate/status: carry (304) — historical (0/1)</title></rect>
+<rect x="875" y="586" width="30" height="22" rx="5" fill="#e06c75"><title>A21 Telegram stats: лимит, схема, таймаут: пробел (0/1)</title></rect>
+<rect x="913" y="586" width="30" height="22" rx="5" fill="#819bf8"><title>A22 `/api/update` absent/never/raw: carry (304) — historical (0/1)</title></rect>
+<rect x="951" y="586" width="30" height="22" rx="5" fill="#819bf8"><title>A23 Diagnostics GET/POST/download: carry (304) — historical (0/1)</title></rect>
+<rect x="989" y="586" width="30" height="22" rx="5" fill="#819bf8"><title>A24 Static assets: ETag/304/1 МиБ: carry (304) — historical (0/1)</title></rect>
+<rect x="571" y="613" width="30" height="22" rx="5" fill="#e06c75"><title>A25 Static assets: missing/symlink/embedded fallback: пробел (0/1)</title></rect>
+<rect x="609" y="613" width="30" height="22" rx="5" fill="#e06c75"><title>A26 CLI `--version`/`serve`/`--self-check`/`--release-id`: пробел (0/1)</title></rect>
 <rect x="37" y="638" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
-<text x="51" y="661" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Firewall / PPE</text>
-<text x="533" y="661" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">11/14</text>
-<rect x="51" y="671" width="30" height="22" rx="5" fill="#36c989"><title>F1a Static nft/iptables rule generation: port/DNS/voice order, broadcast/ICMP: доказано (1/1)</title></rect>
-<rect x="89" y="671" width="30" height="22" rx="5" fill="#36c989"><title>F1b Marks/gate/connbytes: MEASURE_MARK, D2K_GATE, CONNBYTES+1, Telegram mark: доказано (1/1)</title></rect>
-<rect x="127" y="671" width="30" height="22" rx="5" fill="#36c989"><title>F2 nft rollback/legacy cleanup/RST lifetime: доказано (1/1)</title></rect>
-<rect x="165" y="671" width="30" height="22" rx="5" fill="#36c989"><title>F3 Rule install error code: доказано (1/1)</title></rect>
-<rect x="203" y="671" width="30" height="22" rx="5" fill="#36c989"><title>F4 Flow-offload success/restore: доказано (1/1)</title></rect>
-<rect x="241" y="671" width="30" height="22" rx="5" fill="#36c989"><title>F5 Flow-offload UCI write-failure: доказано (1/1)</title></rect>
-<rect x="279" y="671" width="30" height="22" rx="5" fill="#36c989"><title>F6 FastNAT lifecycle: доказано (1/1)</title></rect>
-<rect x="317" y="671" width="30" height="22" rx="5" fill="#36c989"><title>F7 DNS upstream exclusions/refresh: доказано (1/1)</title></rect>
-<rect x="355" y="671" width="30" height="22" rx="5" fill="#36c989"><title>F8 Heal/watchdog/reapply/cooldown: доказано (1/1)</title></rect>
-<rect x="393" y="671" width="30" height="22" rx="5" fill="#36c989"><title>F9a IPv6 fallback classification/modules/marker/reapply helper: доказано (1/1)</title></rect>
-<rect x="431" y="671" width="30" height="22" rx="5" fill="#65758c"><title>F9b IPv6 live kernel switch/queue recovery: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="469" y="671" width="30" height="22" rx="5" fill="#36c989"><title>F10a PPE rule generation/backend/cleanup/errors: доказано (1/1)</title></rect>
-<rect x="51" y="698" width="30" height="22" rx="5" fill="#65758c"><title>F10b PPE hardware datapath/tag migration/restart: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="89" y="698" width="30" height="22" rx="5" fill="#65758c"><title>F11 Router clear-found/KEENETIC_POLICY/log rotation/heal semantics: 0 — нет принятого доказательства (0/1)</title></rect>
+<text x="51" y="661" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Router / Service</text>
+<text x="533" y="661" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">59/84</text>
+<rect x="51" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>B1 Config defaults и совместимость ключей: частично (0/1)</title></rect>
+<rect x="89" y="671" width="30" height="22" rx="5" fill="#36c989"><title>B2 Start order: engine→telegram→panel→schedulers: доказано (2/2)</title></rect>
+<rect x="127" y="671" width="30" height="22" rx="5" fill="#36c989"><title>B3 Stop order и восстановление fastnat/offload: доказано (2/2)</title></rect>
+<rect x="165" y="671" width="30" height="22" rx="5" fill="#36c989"><title>B4 Engine start: queue wait, firewall, controller, watchdog: доказано (2/2)</title></rect>
+<rect x="203" y="671" width="30" height="22" rx="5" fill="#36c989"><title>B5 Engine stop: порядок и коды: доказано (2/2)</title></rect>
+<rect x="241" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>B6 `engine-restart`/`settings-restart`: частично (0/1)</title></rect>
+<rect x="279" y="671" width="30" height="22" rx="5" fill="#36c989"><title>B7 Panel lifecycle и disabled panel: доказано (1/1)</title></rect>
+<rect x="317" y="671" width="30" height="22" rx="5" fill="#e06c75"><title>B8 `status` (поля и коды): пробел (0/1)</title></rect>
+<rect x="355" y="671" width="30" height="22" rx="5" fill="#e06c75"><title>B9 `clear-found`: все state-файлы: пробел (0/2)</title></rect>
+<rect x="393" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>B10 nft backend: генерация и postconditions: частично (0/3)</title></rect>
+<rect x="431" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>B11 iptables backend: генерация и postconditions: частично (0/3)</title></rect>
+<rect x="469" y="671" width="30" height="22" rx="5" fill="#36c989"><title>B12 Код ошибки отдельного правила: доказано (1/1)</title></rect>
+<rect x="51" y="698" width="30" height="22" rx="5" fill="#36c989"><title>B13 nft rollback и RST-table cleanup: доказано (2/2)</title></rect>
+<rect x="89" y="698" width="30" height="22" rx="5" fill="#36c989"><title>B14 Legacy D2K cleanup: доказано (2/2)</title></rect>
+<rect x="127" y="698" width="30" height="22" rx="5" fill="#36c989"><title>B15 RST table lifetime: доказано (2/2)</title></rect>
+<rect x="165" y="698" width="30" height="22" rx="5" fill="#36c989"><title>B16 Status nft completeness: доказано (2/2)</title></rect>
+<rect x="203" y="698" width="30" height="22" rx="5" fill="#36c989"><title>B17 Status iptables completeness: доказано (2/2)</title></rect>
+<rect x="241" y="698" width="30" height="22" rx="5" fill="#36c989"><title>B18 IPv6 fallback + marker + reapply: доказано (2/2)</title></rect>
+<rect x="279" y="698" width="30" height="22" rx="5" fill="#36c989"><title>B19 DNS upstream exclusions/refresh: доказано (2/2)</title></rect>
+<rect x="317" y="698" width="30" height="22" rx="5" fill="#36c989"><title>B20 Flow-offload disable/restore: доказано (2/2)</title></rect>
+<rect x="355" y="698" width="30" height="22" rx="5" fill="#36c989"><title>B21 Flow-offload write-failure: доказано (1/1)</title></rect>
+<rect x="393" y="698" width="30" height="22" rx="5" fill="#36c989"><title>B22 Fastnat lifecycle: доказано (1/1)</title></rect>
+<rect x="431" y="698" width="30" height="22" rx="5" fill="#36c989"><title>B23 PPE rule generation/order: доказано (2/2)</title></rect>
+<rect x="469" y="698" width="30" height="22" rx="5" fill="#36c989"><title>B24 PPE removal error codes: доказано (1/1)</title></rect>
+<rect x="51" y="725" width="30" height="22" rx="5" fill="#e6b45d"><title>B25 PPE backend/gate/lock: частично (0/2)</title></rect>
+<rect x="89" y="725" width="30" height="22" rx="5" fill="#36c989"><title>B26 Firewall lock/reapply: доказано (1/1)</title></rect>
+<rect x="127" y="725" width="30" height="22" rx="5" fill="#36c989"><title>B27 Heal: status/ppe/dns: доказано (2/2)</title></rect>
+<rect x="165" y="725" width="30" height="22" rx="5" fill="#36c989"><title>B28 Heal concurrency/cooldown: доказано (2/2)</title></rect>
+<rect x="203" y="725" width="30" height="22" rx="5" fill="#36c989"><title>B29 Firewall watchdog period/start-stop: доказано (1/1)</title></rect>
+<rect x="241" y="725" width="30" height="22" rx="5" fill="#36c989"><title>B30 NDM hook nat/mangle: доказано (1/1)</title></rect>
+<rect x="279" y="725" width="30" height="22" rx="5" fill="#36c989"><title>B31 S99/procd waiter и detach: доказано (1/1)</title></rect>
+<rect x="317" y="725" width="30" height="22" rx="5" fill="#36c989"><title>B33 Update guard/availability: доказано (2/2)</title></rect>
+<rect x="355" y="725" width="30" height="22" rx="5" fill="#36c989"><title>B34 Stage→stop→activate→start порядок: доказано (2/2)</title></rect>
+<rect x="393" y="725" width="30" height="22" rx="5" fill="#36c989"><title>B35 Rollback + bad release + health: доказано (2/2)</title></rect>
+<rect x="431" y="725" width="30" height="22" rx="5" fill="#36c989"><title>B36 Signed bootstrap/install: доказано (2/2)</title></rect>
+<rect x="469" y="725" width="30" height="22" rx="5" fill="#e6b45d"><title>B37 OpenWrt ABI/reboot update: частично (0/2)</title></rect>
+<rect x="51" y="752" width="30" height="22" rx="5" fill="#36c989"><title>B38 Package release manifest/assets: доказано (1/1)</title></rect>
+<rect x="89" y="752" width="30" height="22" rx="5" fill="#36c989"><title>B39 Router install lifecycle: доказано (2/2)</title></rect>
+<rect x="127" y="752" width="30" height="22" rx="5" fill="#e06c75"><title>B40 Uninstall и аварийная очистка: пробел (0/1)</title></rect>
+<rect x="165" y="752" width="30" height="22" rx="5" fill="#36c989"><title>B41 Telegram start/stop/restart: доказано (2/2)</title></rect>
+<rect x="203" y="752" width="30" height="22" rx="5" fill="#e06c75"><title>B42 Telegram reapply semantics: пробел (0/2)</title></rect>
+<rect x="241" y="752" width="30" height="22" rx="5" fill="#36c989"><title>B43 Telegram mark/gate: доказано (1/1)</title></rect>
+<rect x="279" y="752" width="30" height="22" rx="5" fill="#36c989"><title>B44 Telegram firewall nft/iptables: доказано (2/2)</title></rect>
+<rect x="317" y="752" width="30" height="22" rx="5" fill="#e06c75"><title>B46 Telegram watchdog health contract: пробел (0/2)</title></rect>
+<rect x="355" y="752" width="30" height="22" rx="5" fill="#36c989"><title>B47 Meta DNS scheduler lifecycle: доказано (1/1)</title></rect>
+<rect x="393" y="752" width="30" height="22" rx="5" fill="#e6b45d"><title>B48 Meta DNS offset/backoff/tick: частично (0/2)</title></rect>
+<rect x="431" y="752" width="30" height="22" rx="5" fill="#36c989"><title>B49 Meta DNS ranges asset: доказано (1/1)</title></rect>
+<rect x="469" y="752" width="30" height="22" rx="5" fill="#36c989"><title>B50 Meta DNS edge verification: доказано (1/1)</title></rect>
+<rect x="51" y="779" width="30" height="22" rx="5" fill="#36c989"><title>B51 Meta DNS owned-record removal: доказано (1/1)</title></rect>
+<rect x="89" y="779" width="30" height="22" rx="5" fill="#e06c75"><title>B52 Log maintenance: все owned-логи: пробел (0/1)</title></rect>
+<rect x="127" y="779" width="30" height="22" rx="5" fill="#e06c75"><title>B53 `KEENETIC_POLICY` → `--only-mark`: пробел (0/2)</title></rect>
 <rect x="557" y="638" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
-<text x="571" y="661" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Release / ABI</text>
-<text x="1053" y="661" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">4/8</text>
-<rect x="571" y="671" width="30" height="22" rx="5" fill="#36c989"><title>L1 Update guard current/download failure: доказано (1/1)</title></rect>
-<rect x="609" y="671" width="30" height="22" rx="5" fill="#36c989"><title>L2a Staging/signature/stop/activate/health/rollback: доказано (1/1)</title></rect>
-<rect x="647" y="671" width="30" height="22" rx="5" fill="#65758c"><title>L2b OpenWrt procd/reboot/signed field install: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="685" y="671" width="30" height="22" rx="5" fill="#36c989"><title>L3 Package release manifest/asset bytes: доказано (1/1)</title></rect>
-<rect x="723" y="671" width="30" height="22" rx="5" fill="#36c989"><title>L4a Cross-build ABI + QEMU smoke 4 targets: доказано (1/1)</title></rect>
-<rect x="761" y="671" width="30" height="22" rx="5" fill="#65758c"><title>L4b Runtime parity/load on target: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="799" y="671" width="30" height="22" rx="5" fill="#65758c"><title>L5 Physical router/procd update/reboot: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="837" y="671" width="30" height="22" rx="5" fill="#65758c"><title>L6 Install/bootstrap/uninstall lifecycle: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="37" y="750" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
-<text x="51" y="773" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Core / CLI</text>
-<text x="533" y="773" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">1/15</text>
-<rect x="51" y="783" width="30" height="22" rx="5" fill="#65758c"><title>M1 `compose.c` + `d2kc.c` orchestration/event loop: 0 — нет принятого доказательства (0/3)</title></rect>
-<rect x="89" y="783" width="30" height="22" rx="5" fill="#65758c"><title>M2 `d2kask.c`: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="127" y="783" width="30" height="22" rx="5" fill="#36c989"><title>M3 `d2kfetch.c` CLI: доказано (1/1)</title></rect>
-<rect x="165" y="783" width="30" height="22" rx="5" fill="#65758c"><title>M4 `d2kvoice.c` controller entry: 0 — нет принятого доказательства (0/1)</title></rect>
-<rect x="203" y="783" width="30" height="22" rx="5" fill="#65758c"><title>M5 `link.c`, `net4.c`, `udpruntime.c`, `volume.c`: 0 — нет принятого доказательства (0/3)</title></rect>
-<rect x="241" y="783" width="30" height="22" rx="5" fill="#65758c"><title>M6 `crypto.c`, `p256.c`, `x25519.c`, `props.c`, `udpplan.c`, `plantlv.c` helpers: 0 — нет принятого доказательства (0/3)</title></rect>
-<rect x="279" y="783" width="30" height="22" rx="5" fill="#65758c"><title>M7 `http80.c`, `http_trace.c`, `journal.c`, `plans.c`, `plan_parse/apply.c`: 0 — нет принятого доказательства (0/2)</title></rect>
-<rect x="317" y="783" width="30" height="22" rx="5" fill="#65758c"><title>M8 Production header-inline helpers inventory/mapping: 0 — нет принятого доказательства (0/1)</title></rect>
+<text x="571" y="661" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Core / CLI</text>
+<text x="1053" y="661" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">1/15</text>
+<rect x="571" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>M1 `compose.c` + `d2kc.c` orchestration/event loop: частично (0/3)</title></rect>
+<rect x="609" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>M2 `d2kask.c`: частично (0/1)</title></rect>
+<rect x="647" y="671" width="30" height="22" rx="5" fill="#36c989"><title>M3 `d2kfetch.c` CLI: доказано (1/1)</title></rect>
+<rect x="685" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>M4 `d2kvoice.c` controller entry: частично (0/1)</title></rect>
+<rect x="723" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>M5 `link.c`, `net4.c`, `udpruntime.c`, `volume.c`: частично (0/3)</title></rect>
+<rect x="761" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>M6 `crypto.c`, `p256.c`, `x25519.c`, `props.c`, `udpplan.c`, `plantlv.c` helpers: частично (0/3)</title></rect>
+<rect x="799" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>M7 `http80.c`, `http_trace.c`, `journal.c`, `plans.c`, `plan_parse/apply.c`: частично (0/2)</title></rect>
+<rect x="837" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>M8 Production header-inline helpers inventory/mapping: частично (0/1)</title></rect>
 </svg>
