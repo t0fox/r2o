@@ -4,11 +4,11 @@
 
 **Важно.** Таблица ниже — legacy-агрегат из 57 строк: 89 баллов веса, **80/89 (89,89 %)**. Это не оценка текущей ревизии. Аудит 2026-11-07 показал, что 49 из 80 баллов опираются на дифференциалы, закреплённые на `304ba893`, а несколько широких строк объединяют независимые контракты. После нормализации 2026-11-08 единая scored-матрица содержит **173 контракта на 261 балл**: Panel A1–A26, Router B1–B54 (без B32/B45/B54), Telegram TG1–TG26 (без C2/C25/C26); coarse-строки `P*`, `F*`, `L*`, `T*` и `S7`/`S8` удалены как дубли:
 
-- строгий режим (только `a63d964`/`a378e23`/`8e2c981`, без helper/mock/build): **89/261 = 34,10 %**;
-- carry с явно помеченными `304ba893`: **152/261 = 58,24 %**;
+- строгий режим (только `a63d964`/`a378e23`/`8e2c981`, без helper/mock/build): **90/261 = 34,48 %**;
+- carry с явно помеченными `304ba893`: **153/261 = 58,62 %**;
 - legacy-агрегат: **80/89 = 89,89 %** (другой знаменатель, не сопоставим).
 
-Рост строгого счёта с 25,69 % до 34,10 % — не новые доказательства и не регресс: 84 детальных Router-контракта (67 strict) заменили 30 coarse-баллов `F*`/`L*`/`T*`/`P*` (18 strict), а 71 балл Panel/Telegram добавлен с нулём; ещё 2 балла дали доказанные M7a/M7b, 8 — B9/B52/B53/B42/B40 и 2 — A26/A21. Знаменатели 144 и 261 несопоставимы напрямую.
+Рост строгого счёта с 25,69 % до 34,48 % — не новые доказательства и не регресс: 84 детальных Router-контракта (67 strict) заменили 30 coarse-баллов `F*`/`L*`/`T*`/`P*` (18 strict), а 71 балл Panel/Telegram добавлен с нулём; ещё 2 балла дали доказанные M7a/M7b, 8 — B9/B52/B53/B42/B40 и 3 — A26/A21/A8. Знаменатели 144 и 261 несопоставимы напрямую.
 
 Нормализация также установила, что `a63d964` и `304ba893` отсутствуют в локальном git-объекте D2O; доказательства, закреплённые на них, в этом окружении не воспроизводятся. Детали — `docs/audit/validation-2026-11-08.md`.
 
@@ -105,11 +105,11 @@ Scope boundary: the 89-point legacy table scores the router runtime. D2O relay-e
 
 Матрица содержит 57 контрактов: 50 доказанно эквивалентных, 6 частичных, 1 реализованный без полного parity evidence и 0 непроверенных. Частичные и неподтверждённые статусы дают 0 баллов.
 
-Legacy-агрегат: **80/89 = 89,89 %**. Строгая оценка текущей ревизии после нормализации: **89/261 = 34,10 %** (см. раздел «Нормализованная матрица покрытия»).
+Legacy-агрегат: **80/89 = 89,89 %**. Строгая оценка текущей ревизии после нормализации: **90/261 = 34,48 %** (см. раздел «Нормализованная матрица покрытия»).
 
 Историческая корректировка от 2026-11-01: `core/verify.c:d2k_verify_probe*` сопоставлен с R2O `fetch.rs`; обратный TLS 1.2 зонд сопоставлен с D2O `detect/response.c:d2k_probe_response` и R2O `response.rs`. На этом промежуточном срезе общие fixtures подтверждали сканер и решения, но не весь сетевой retry/address-resolution путь; оценка временно снижалась до 55/87. Последующие доказанные изменения отражены в таблице выше. Профиль RAM 128 МиБ исключён из требований по указанию владельца; это не является заявлением о производительности.
 
-**Legacy evidence-weighted parity: 80 / 89 = 89,89 %.** Это доля требований старой агрегированной таблицы с подтверждением перечисленных C/Rust ветвей. Она не равна строгой оценке текущей ревизии (89/261 = 34,10 %): 49 из 80 баллов опираются на `304ba893`, а широкие строки объединяют независимые контракты.
+**Legacy evidence-weighted parity: 80 / 89 = 89,89 %.** Это доля требований старой агрегированной таблицы с подтверждением перечисленных C/Rust ветвей. Она не равна строгой оценке текущей ревизии (90/261 = 34,48 %): 49 из 80 баллов опираются на `304ba893`, а широкие строки объединяют независимые контракты.
 
 Дополнительное доказательство datapath (2026-11-03): `scripts/test-conntrack-retry-current-differential.sh` запустил production `d2kd` из D2O main `a63d964` и production `r2o-datapath` на R2O main `67a191f` с изменением retry из этого follow-up. В изолированном network namespace shim отклонил только второй `NETLINK_NETFILTER` socket (ctnetlink после NFQUEUE); после изменения `ip rule` оба процесса открыли ctnetlink повторно и сообщили о восстановлении на route/rules refresh. Прогон Debian 13 WSL2 прошёл. Это доказывает ветвь восстановления conntrack; IPv6 NFQUEUE C-oracle и остальные ветви строки остаются открыты, поэтому статус и баллы этого контракта не меняются.
 
@@ -299,7 +299,7 @@ Legacy-агрегат: **80/89 = 89,89 %**. Строгая оценка теку
 
 Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` прошёл. Windows `r2o-panel --lib --test http` дал 12 passed, 6 ignored, 1 failed: тест worker-config атомарно заменяет уже существующий файл, а Windows `rename` не имеет Linux overwrite semantics; отдельный panel CLI HTTP health test также не дождался HTTP-ответа. Эти два отказа не подтверждают дефект Linux/OpenWrt поведения, но panel HTTP/runtime тесты остаются непроверенными на Linux.
 
-Остаются: полное C-сравнение IPv6 NFQUEUE (D2O привязывает очередь только к AF_INET); остальные periodic datapath/process metrics; полный service цикл после отказа/crash/restart/reapply; остаточные QUIC HTTP/3 transport errors, timing-sensitive stall и lifecycle ветви; Discord endpoint change, NAK/timeout persistence, durable restart и длинная RTC-сессия; Telegram service/config/DC/handshake/retry/firewall parity; Meta DNS на целевой платформе; полный panel API/status/errors/settings/assets; полный static firewall rules/backend contract, flow-offload recovery и PPE; остаточные heal/watchdog ветви; Linux signed update/rollback. Помимо короткого smoke, текущий R2O прошёл 301,2-секундный смешанный IPv6 soak в полном OpenWrt QEMU при 128 МиБ; отдельный Rust IPv6 gateway soak в WSL2 длился 300 с. C/Rust high-cardinality mixed load measured for 60 s per side; физический роутер и калибровка не использовались и остаются вне области. OpenWrt 25.12-SNAPSHOT загружен в QEMU с адресом `192.168.1.1`; dual-stack queues 2000/2001, исходящий IPv6 TCP и fw4 flow offload/NFQUEUE на production datapath проверены; гостю выделялось 512 MiB. Физический роутер не использовался. Исторический расчёт «46 строк / 63/87» устарел и заменён аудитом 2026-11-07: действующая legacy-таблица содержит 57 строк и 80/89, а нормализованная матрица 2026-11-08 - 173 контракта и 89/261 в строгом режиме. См. `docs/audit/README.md`.
+Остаются: полное C-сравнение IPv6 NFQUEUE (D2O привязывает очередь только к AF_INET); остальные periodic datapath/process metrics; полный service цикл после отказа/crash/restart/reapply; остаточные QUIC HTTP/3 transport errors, timing-sensitive stall и lifecycle ветви; Discord endpoint change, NAK/timeout persistence, durable restart и длинная RTC-сессия; Telegram service/config/DC/handshake/retry/firewall parity; Meta DNS на целевой платформе; полный panel API/status/errors/settings/assets; полный static firewall rules/backend contract, flow-offload recovery и PPE; остаточные heal/watchdog ветви; Linux signed update/rollback. Помимо короткого smoke, текущий R2O прошёл 301,2-секундный смешанный IPv6 soak в полном OpenWrt QEMU при 128 МиБ; отдельный Rust IPv6 gateway soak в WSL2 длился 300 с. C/Rust high-cardinality mixed load measured for 60 s per side; физический роутер и калибровка не использовались и остаются вне области. OpenWrt 25.12-SNAPSHOT загружен в QEMU с адресом `192.168.1.1`; dual-stack queues 2000/2001, исходящий IPv6 TCP и fw4 flow offload/NFQUEUE на production datapath проверены; гостю выделялось 512 MiB. Физический роутер не использовался. Исторический расчёт «46 строк / 63/87» устарел и заменён аудитом 2026-11-07: действующая legacy-таблица содержит 57 строк и 80/89, а нормализованная матрица 2026-11-08 - 173 контракта и 90/261 в строгом режиме. См. `docs/audit/README.md`.
 
 97. **Flow offload возвращён к D2O lifecycle по требованию владельца.** D2O flowoffload_off() сохраняет включённый flow_offloading, устанавливает 0 и перезагружает firewall; stop возвращает исходное значение. Аппаратная UCI-настройка не меняется; fw3/iptables helper — no-op. RED/GREEN в test-router-flowoffload-d2o-differential.sh подтверждает состояния и trace; lifecycle тест подтверждает ordering. Удалены selective ct-mark/rule/include механизмы и их тест; сохранена очистка legacy hook от предыдущих локальных selective сборок. Глобальное fw4 runtime поведение и отсутствие потери NFQUEUE видимости в настоящем OpenWrt остаются непроверенными; статус partial, 0 баллов. Исторические selective записи выше superseded этим решением.
 
@@ -463,7 +463,7 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | `extension` | Намеренное R2O-only поведение, не паритет | 0 |
 | `out-of-scope` | VPS/relay, N/A или дубль router-side-контракта | 0 |
 
-**Итог:** 173 контракта, вес 261. Строгий счёт — **89/261 = 34.10 %**. Carry с явно помеченными `304` — **152/261 = 58.24 %**. Исторический coarse carry-forward `89/144 = 61,81 %` относится к прежней матрице и не сопоставим напрямую.
+**Итог:** 173 контракта, вес 261. Строгий счёт — **90/261 = 34.48 %**. Carry с явно помеченными `304` — **153/261 = 58.62 %**. Исторический coarse carry-forward `89/144 = 61,81 %` относится к прежней матрице и не сопоставим напрямую.
 
 ### Сводка по областям
 
@@ -476,10 +476,10 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | Discord RTC | 7 | 10 | 1 | 9 |
 | Discord Gateway | 1 | 1 | 1 | 1 |
 | Core / CLI | 9 | 15 | 3 | 3 |
-| WebPanel | 26 | 30 | 2 | 19 |
+| WebPanel | 26 | 30 | 3 | 20 |
 | Router / Service | 51 | 84 | 67 | 67 |
 | Telegram | 23 | 41 | 0 | 0 |
-| **Итого** | **173** | **261** | **89** | **152** |
+| **Итого** | **173** | **261** | **90** | **153** |
 
 ### Контракты
 
@@ -565,7 +565,7 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | A5 | Совместимость known-list с D2O-конфигом (1) | partial | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A | **не доказано/пробел** |
 | A6 | Лимит заголовка 32 КиБ и код 431 (1) | partial | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A | ДИФ; точная граница не проверена |
 | A7 | Абсолютный дедлайн заголовка 5 с / 408 (1) | carry (304) | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A |  |
-| A8 | Абсолютный дедлайн ответа 5 с (1) | partial | 0 | `Response::send_before`; unit `response_send_honors_absolute_deadline`; C oracle `panel/test_response_deadline.c` | Парный C/Rust прогон 5-секундного slow-reader ещё не выполнен |
+| A8 | Абсолютный дедлайн ответа 5 с (1) | verified | 1 | `scripts/test-panel-response-deadline-differential.sh` (a378); C `test_response_deadline.c`; Rust `d2o_response_deadline_matches_rust_sender` | Deadline общий для заголовков и тела; 5215 мс в прогоне |
 | A9 | Устойчивость к обрыву клиента/IO-ошибке (1) | partial | 0 | `serve` изолирует `handle_connection`; IO-ошибка больше не завершает весь serve | Нет paired C/Rust теста обрыва клиента |
 | A10 | Неизвестный маршрут/метод/HTTP-версия (1) | partial | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A | ТЕСТ |
 | A11 | `/api/status`: unavailable-контракт (1) | carry (304) | 0 | `panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A |  |

@@ -2339,6 +2339,26 @@ mod differential_tests {
         assert!(started.elapsed() < Duration::from_secs(2));
     }
 
+    #[test]
+    #[ignore = "run through scripts/test-panel-response-deadline-differential.sh"]
+    fn d2o_response_deadline_matches_rust_sender() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let _slow_client = TcpStream::connect(address).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let response = Response::new(200, "application/octet-stream", vec![0x5a; 8 * 1024 * 1024]);
+        let started = Instant::now();
+        let result = response.send(&mut server);
+        println!(
+            "R2O_RESPONSE_DEADLINE rc={} elapsed_ms={}",
+            result.is_err(),
+            started.elapsed().as_millis()
+        );
+        assert!(result.is_err());
+        assert!(started.elapsed() >= Duration::from_millis(4900));
+        assert!(started.elapsed() < Duration::from_secs(7));
+    }
+
     #[cfg(unix)]
     #[test]
     fn telegram_stats_read_has_absolute_deadline() {

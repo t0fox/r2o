@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 261,
-  "points": 89,
-  "percent": 34.1,
+  "points": 90,
+  "percent": 34.48,
   "total": 173,
   "counts": {
-    "verified": 64,
+    "verified": 65,
     "carry": 40,
-    "partial": 61,
+    "partial": 60,
     "missing": 8,
     "implemented": 0,
     "unknown": 0
@@ -1372,7 +1372,7 @@
     {
       "name": "WebPanel",
       "weight": 30,
-      "points": 2,
+      "points": 3,
       "items": [
         {
           "id": 74,
@@ -1484,15 +1484,15 @@
           "key": "A8",
           "name": "Абсолютный дедлайн ответа 5 с",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "WebPanel",
-          "coverage": "`Response::send_before`; unit `response_send_honors_absolute_deadline`; C oracle `panel/test_response_deadline.c`",
-          "gap": "Парный C/Rust прогон 5-секундного slow-reader ещё не выполнен",
-          "mapping": "`Response::send_before`; unit `response_send_honors_absolute_deadline`; C oracle `panel/test_response_deadline.c`",
-          "evidence": "`Response::send_before`; unit `response_send_honors_absolute_deadline`; C oracle `panel/test_response_deadline.c` · пробел: Парный C/Rust прогон 5-секундного slow-reader ещё не выполнен"
+          "coverage": "`scripts/test-panel-response-deadline-differential.sh` (a378); C `test_response_deadline.c`; Rust `d2o_response_deadline_matches_rust_sender`",
+          "gap": "Deadline общий для заголовков и тела; 5215 мс в прогоне",
+          "mapping": "`scripts/test-panel-response-deadline-differential.sh` (a378); C `test_response_deadline.c`; Rust `d2o_response_deadline_matches_rust_sender`",
+          "evidence": "`scripts/test-panel-response-deadline-differential.sh` (a378); C `test_response_deadline.c`; Rust `d2o_response_deadline_matches_rust_sender` · пробел: Deadline общий для заголовков и тела; 5215 мс в прогоне"
         },
         {
           "id": 82,
@@ -3887,15 +3887,15 @@
       "key": "A8",
       "name": "Абсолютный дедлайн ответа 5 с",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "WebPanel",
-      "coverage": "`Response::send_before`; unit `response_send_honors_absolute_deadline`; C oracle `panel/test_response_deadline.c`",
-      "gap": "Парный C/Rust прогон 5-секундного slow-reader ещё не выполнен",
-      "mapping": "`Response::send_before`; unit `response_send_honors_absolute_deadline`; C oracle `panel/test_response_deadline.c`",
-      "evidence": "`Response::send_before`; unit `response_send_honors_absolute_deadline`; C oracle `panel/test_response_deadline.c` · пробел: Парный C/Rust прогон 5-секундного slow-reader ещё не выполнен"
+      "coverage": "`scripts/test-panel-response-deadline-differential.sh` (a378); C `test_response_deadline.c`; Rust `d2o_response_deadline_matches_rust_sender`",
+      "gap": "Deadline общий для заголовков и тела; 5215 мс в прогоне",
+      "mapping": "`scripts/test-panel-response-deadline-differential.sh` (a378); C `test_response_deadline.c`; Rust `d2o_response_deadline_matches_rust_sender`",
+      "evidence": "`scripts/test-panel-response-deadline-differential.sh` (a378); C `test_response_deadline.c`; Rust `d2o_response_deadline_matches_rust_sender` · пробел: Deadline общий для заголовков и тела; 5215 мс в прогоне"
     },
     {
       "id": 82,
@@ -5280,14 +5280,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 89,
+      "points": 90,
       "weight": 261,
-      "percent": 34.1
+      "percent": 34.48
     },
     "carry_forward": {
-      "points": 152,
+      "points": 153,
       "weight": 261,
-      "percent": 58.24,
+      "percent": 58.62,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
