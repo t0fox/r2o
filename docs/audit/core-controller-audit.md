@@ -11,7 +11,7 @@
 1. Инвентарь C: 46 production-файлов, **1214** определений (1163 уникальных имён; повторы вроде `say`, `append_fmt`, `free`), найденных эвристическим парсером. Из них минимум два ложных срабатывания (`memcmp`/`strcmp` в `sched.c`, дубль `voice_trial_owned`) и несколько helper-макросов; фактически около **1210** функций.
 2. Крупнейшие модули: `sched.c` — 286 определений (282 по счётчику проекта + 2 ложных + 2 пограничных), `verify.c` — 74, `httpsearch.c` — 66, `catalog.c` — 60, `quicprobe.c` — 57, `compose.c` — 53.
 3. Rust-контроллер — не построчный порт. Он перестроен в `main.rs` (≈1,5 МБ), `discovery.rs`, `r2o_resource_limit.rs`, `fetch.rs`, `quic_replay.rs`, `http_search.rs` и набор специализированных модулей. Прямое соответствие «C-функция → Rust-функция» существует для протокольных кодеков, парсеров и планов; для планировщика соответствие идёт на уровне подсистем.
-4. Доказанный паритет по контрактным весам матрицы: **80/89 = 89,89 %** (последняя запись матрицы, №171). Это не функция-уровневый процент: многие функции покрыты только косвенно, а часть C-кода в текущем production-пути вообще не вызывается.
+4. Доказанный паритет по контрактным весам матрицы: **80/89 = 89,89 %** (последняя запись матрицы, №171). Это не функция-уровневый процент: многие функции покрыты только косвенно, а часть C-кода в текущем production-пути вообще не вызывается. **Примечание сводного аудита:** 80/89 — legacy-агрегат; строгая оценка текущей ревизии — 37/132 = 28,03 %, с принятием `304ba893` — 89/132 = 67,42 % (`docs/audit/README.md`).
 5. Наиболее сильные доказанные участки: control-события (`d2k_link_next`), fallback-планы (`d2k_fallback_plan`), JSON-каталог и atomic save, QUIC Initial/QSN и HTTP/3, TLS 1.2 response probe, HTTP search lifecycle, Discord voice discovery/arm, IP-фрагментация, resource-limit gate, ряд scheduler cooldown/dead-address сценариев.
 6. Наиболее слабые участки: CLI-совместимость `d2kask`/`d2kfetch`/`d2kvoice`/`d2kc` (нет прямых differential-тестов stdout/exit/JSON для большинства ветвей), `udpruntime.c` (raw UDP-отправка планов из контроллера), `p256.c`/`x25519.c`/`crypto.c` (заменены зависимостями, прямых C/Rust-векторов почти нет), диагностический учёт аллокатора/madvise, sysctl TCP timestamps, health/log/self-check у `d2kc`.
 7. Обнаружены фактические расхождения поведения, а не только отсутствие тестов:
@@ -302,7 +302,7 @@
 | C-функция (строка) | Rust-аналог | Покрытие/отличия | Тесты | Статус |
 |---|---|---|---|---|
 | `d2k_ip4_parse` (2) | `std::net::Ipv4Addr::from_str`, `parse_ask_options` (97) | Строгий разбор; C запрещает ведущие нули? C допускает `01` как 1; Rust std тоже допускает? Проверка нужна отдельно. | `parse_ask_options` tests | `partial` |
-| `d2k_ip4_text` (32) | `Display for Ipv4Addr` | Формат `a.b.c.d`. | `voice_targets` tests | `equivalent` |
+| `d2k_ip4_text` (32) | `Display for Ipv4Addr` | Формат `a.b.c.d`. | `voice_targets` tests | `partial` |
 | `d2k_ip4_private` (40) | `quic_replay.rs:ipv4_is_local` (24), `voice_targets.rs:r2o_is_private` (150) | 127/8, 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10, 0.0.0.0. | `r2o_quic_local_address_policy_matches_d2o` | `equivalent` |
 | `d2k_ip6_private` (53) | `quic_replay.rs:r2o_quic_address_is_local` (23) | ::/127, fc00::/7, fe80::/10, ff00::/8, v4-mapped → ipv4_is_local. | тот же тест | `equivalent` |
 
@@ -315,7 +315,7 @@
 | `d2k_volume_rx_pair_agrees` (78) | `r2o_volume_rx_pair_agrees` (80) | Один домен, согласованная версия/framing. | unit | `equivalent` |
 | `d2k_volume_rx_needs_repeat` (103) | `r2o_volume_rx_needs_repeat` (112) | Один обрыв + один полный 2xx выше полосы → нужен третий. | unit | `equivalent` |
 | `d2k_volume_rx_evidence` (111) | `r2o_volume_rx_evidence` (125), `r2o_volume_rx_wire_evidence` (147), `r2o_volume_rx_body_evidence` (190) | Байтовое и пакетное доказательство, gzip-контроль, допуск `D2K_VOLUME_SLACK`, `measured_path`. | `r2o_volume.rs` unit (5) | `partial` (нет C/Rust differential на все ветви) |
-| `d2k_vol_verdict_name` (215) | `r2o-fetch.rs` verdict_human (232), `src/bin/r2o-fetch.rs:r2o_label` (440) | Тексты вердиктов TX. | fetch CLI tests | `equivalent` |
+| `d2k_vol_verdict_name` (215) | `r2o-fetch.rs` verdict_human (232), `src/bin/r2o-fetch.rs:r2o_label` (440) | Тексты вердиктов TX. | fetch CLI tests | `partial` |
 | `now_ms` (224), `nap_ms` (230), `clamp_ms` (237) | `Instant`/`sleep`/`clamp` | Системные helper. | — | `not-applicable` |
 | `fill_pad` (243) | `fetch.rs:r2o_volume_padding` (2457) | C берёт `/dev/urandom`, Rust — случайные печатные символы. | `tx_packet_budget...` | `partial` |
 | `connect_bounded` (259) | `fetch.rs:connect_target`/`connect_marked` (2929/2941) | Неблокирующий connect, 8 с, SO_MARK; Rust использует `TcpStream` + deadline/mark. | fetch/socket tests | `partial` |
@@ -383,7 +383,7 @@
 | `d2k_meas_once` (175) | `classify.rs::TcpProbeBackend` | Один TCP-зонд: connect, write, accept. | `r2o-meas-differential.sh` (hist.) | `equivalent` (в рамках контракта) |
 | `d2k_meas` (269) | `classify::run_with_backend` | Повторы, tally, controls. | `r2o-meas-differential.sh` | `partial` |
 | `udp_now_ms` (307) | `Instant` | — | — | `not-applicable` |
-| `d2k_udp_port_claim` (313) | `r2o_quic_http3.rs:r2o_quic_port_was_recently_claimed` (121) | Окно «недавно занятых» UDP-портов, 16 попыток. | `quic_candidate_trials_use_fresh_conntrack_tuples`, quic unit | `equivalent` (по поведению) |
+| `d2k_udp_port_claim` (313) | `r2o_quic_http3.rs:r2o_quic_port_was_recently_claimed` (121) | Окно «недавно занятых» UDP-портов, 16 попыток. | `quic_candidate_trials_use_fresh_conntrack_tuples`, quic unit | `partial` |
 | `d2k_udp_port_forget_all` (341) | сброс состояния в тестах `r2o_quic_http3` | Явного API сброса в production нет. | — | `partial` |
 
 | C-функция (строка) | Rust-аналог | Покрытие/отличия | Тесты | Статус |
@@ -480,13 +480,13 @@
 | `rd16` (51), `rd24` (54), `wr16` (57), `wr24` (61), `skip_u8_vec` (69), `skip_u16_vec` (80), `parse_hello` (128) | `r2k-core/tls.rs:read_u16` (129), `read_u24` (135), `skip_u8_vector` (141), `skip_u16_vector` (158), `parse` (32) | Разбор ClientHello, границы расширений. | `parses_complete_tls13...`, `partial_key_share...` | `equivalent`/`partial` |
 | `d2k_hello_complete` (274) | `tls.rs:parse` + `is_client_hello`, `record_end` | Полнота записи. | `complete_supported_versions...` | `partial` |
 | `d2k_hello_shape` (283) | `tls.rs:is_tls13`, `has_ech_offer`; `ask.rs:hello_shape` (282) | MODERN/LEGACY/ECH/UNKNOWN. Rust ECH→shape ECH_TCP. | `clienthello_shape...` | `partial` |
-| `d2k_hello_sni` (308) | `tls.rs:find_sni` (274), `controller/hello.rs:locate_sni` (61) | SNI offset/length. | `distinguishes_application_record...` | `equivalent` |
-| `d2k_hello_ech_offer` (322) | `tls.rs:has_ech_offer` (230) | Структурная проверка ECH offer. | `recognizes_only_structurally_consistent_ech_offer` | `equivalent` |
-| `d2k_hello_alpn` (349) | `r2o_tls.rs:r2o_tls_client_hello_non_http_alpn` (121) | Список ALPN. | `captured_non_http_alpn...` | `equivalent` |
+| `d2k_hello_sni` (308) | `tls.rs:find_sni` (274), `controller/hello.rs:locate_sni` (61) | SNI offset/length. | `distinguishes_application_record...` | `partial` (нет прямого C/Rust differential) |
+| `d2k_hello_ech_offer` (322) | `tls.rs:has_ech_offer` (230) | Структурная проверка ECH offer. | `recognizes_only_structurally_consistent_ech_offer` | `partial` (нет прямого C/Rust differential) |
+| `d2k_hello_alpn` (349) | `r2o_tls.rs:r2o_tls_client_hello_non_http_alpn` (121) | Список ALPN. | `captured_non_http_alpn...` | `partial` (нет прямого C/Rust differential) |
 | `d2k_alpn_is_http` (377) | `r2o_tls_client_hello_non_http_alpn` (121) | HTTP/1.1 vs не-HTTP. | тот же | `partial` |
 | `splice_sni` (409), `hex_nibble` (462), `hex_decode` (480), `d2k_hello_rename` (500) | `controller/hello.rs:rename_sni` (135), `quic.rs:r2k_quic_client_hello_rename_sni` (1113) | Замена SNI с пересчётом длин. | `r2o_tls.rs` tests, QUIC rename tests | `partial` |
 | `d2k_hello_without_sni` (537) | `quic.rs:r2k_quic_client_hello_rename_sni(..., None)` (1113); для TLS отдельной функции нет | Удаление SNI. | QUIC test (1412) | `partial` |
-| `d2k_hello_from_profile` (578) | `controller/hello.rs:client_hello_from_profile` (245), `legacy_client_hello` (284), `modern_client_hello` (289) | Профили `legacy.hex`/`modern.hex`. | `hello.rs` tests | `equivalent` |
+| `d2k_hello_from_profile` (578) | `controller/hello.rs:client_hello_from_profile` (245), `legacy_client_hello` (284), `modern_client_hello` (289) | Профили `legacy.hex`/`modern.hex`. | `hello.rs` tests | `partial` (нет C/Rust differential) |
 
 `tls12.c`:
 
