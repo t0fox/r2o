@@ -1115,8 +1115,8 @@ fn api_update(config: &Config) -> Response {
     if !updater_present && !manager_present {
         return json_response(200, &json!({"absent":true}));
     }
-    match read_json_object(&config.update_state_path, 16 * 1024) {
-        Some(value) => json_response(200, &value),
+    match read_update_state_body(&config.update_state_path) {
+        Some(body) => Response::new(200, "application/json; charset=utf-8", body),
         None => json_response(200, &json!({"never":true})),
     }
 }
@@ -1892,6 +1892,24 @@ fn read_json_object(path: &Path, limit: usize) -> Option<Value> {
     value.is_object().then_some(value)
 }
 
+/// D2O `api_update` не разбирает `state/update.json`: он обрезает хвостовые
+/// CR/LF и проверяет только первую `{` и последнюю `}`. Тело отдаётся
+/// байт-в-байт, поэтому порядок ключей и пробелы сохраняются.
+fn read_update_state_body(path: &Path) -> Option<Vec<u8>> {
+    let bytes = read_regular_file(path, 16 * 1024).ok()?;
+    if bytes.len() >= 16 * 1024 {
+        return None;
+    }
+    let mut end = bytes.len();
+    while end > 0 && matches!(bytes[end - 1], b'\n' | b'\r') {
+        end -= 1;
+    }
+    if end < 2 || bytes[0] != b'{' || bytes[end - 1] != b'}' {
+        return None;
+    }
+    Some(bytes[..end].to_vec())
+}
+
 fn read_regular_file(path: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
     read_regular_file_with_metadata(path, limit).map(|(bytes, _)| bytes)
 }
@@ -2171,11 +2189,7 @@ fn telegram_status(
             })
         });
     if !running {
-        return match stored.as_deref() {
-            Some("error") => "error",
-            Some("not_configured") => "not_configured",
-            _ => "stopped",
-        };
+        return "stopped";
     }
     match stored.as_deref().unwrap_or("") {
         "connected" => "connected",
