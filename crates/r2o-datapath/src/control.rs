@@ -16,6 +16,7 @@ use r2k_core::packet::PacketView;
 #[cfg(test)]
 use r2k_core::plan::PLAN_MAGIC;
 use r2k_core::plan::{PROTO_HTTP, PROTO_VOICE, Plan};
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown};
@@ -26,8 +27,7 @@ use std::time::{Duration, Instant};
 
 const MAX_CONTROL_OUTPUT: usize = 128 * 1024;
 const MAX_COMMANDS_PER_POLL: usize = 256;
-pub const MAX_NAME_PLANS: usize = 128;
-const MAX_ADDR_PLANS: usize = 128;
+pub const MAX_NAME_PLANS: usize = 2048;
 const MAX_ADDR_PROBES: usize = 64;
 const MAX_HTTPS_NAMES: usize = 256;
 const MAX_VOICE_ADDR_PLANS: usize = 128;
@@ -87,6 +87,9 @@ pub struct NamePlans {
     voice_addr_probes: HashMap<VoiceProbeKey, VoiceProbePlan>,
     addr_probes: HashMap<[u8; control::KEY_LEN], AddrProbePlan>,
     https_names: HashMap<String, Instant>,
+    exact_capacity: usize,
+    plan_clock: Cell<u64>,
+    shape_misses: Cell<u64>,
     send_maxlen: usize,
     revision: u64,
     epoch: [u8; 16],
@@ -95,12 +98,14 @@ pub struct NamePlans {
 struct InstalledPlan {
     plan: Plan,
     generation: u64,
+    last_used: Cell<u64>,
 }
 
 struct ProbePlan {
     plan: Plan,
     trial_id: [u8; 16],
     generation: u64,
+    last_used: Cell<u64>,
 }
 
 struct VoiceProbePlan {
@@ -125,8 +130,20 @@ struct PlanBinding {
     temporary: bool,
 }
 
+enum ExactVictim {
+    Name(NamePlanKey),
+    Addr(AddrPlanKey),
+    Probe(NameProbeKey),
+}
+
 impl Default for NamePlans {
     fn default() -> Self {
+        Self::with_capacity(MAX_NAME_PLANS)
+    }
+}
+
+impl NamePlans {
+    pub fn with_capacity(exact_capacity: usize) -> Self {
         let mut epoch = [0; 16];
         if std::fs::File::open("/dev/urandom")
             .and_then(|mut source| source.read_exact(&mut epoch))
@@ -144,17 +161,95 @@ impl Default for NamePlans {
             voice_addr_probes: HashMap::new(),
             addr_probes: HashMap::new(),
             https_names: HashMap::new(),
+            exact_capacity: exact_capacity.max(1),
+            plan_clock: Cell::new(0),
+            shape_misses: Cell::new(0),
             send_maxlen: 0,
             revision: 0,
             epoch,
         }
     }
-}
 
-impl NamePlans {
     /// Задаёт предел одной raw-посылки, чтобы отклонять неподходящие планы до установки.
     pub fn r2o_set_send_maxlen(&mut self, maxlen: usize) {
         self.send_maxlen = maxlen;
+    }
+
+    pub fn r2o_plan_count(&self) -> usize {
+        self.plans.len() + self.addr_plans.len() + self.probes.len()
+    }
+
+    pub const fn r2o_plan_capacity(&self) -> usize {
+        self.exact_capacity
+    }
+
+    pub fn r2o_probe_count(&self, now: Instant) -> usize {
+        self.addr_probes
+            .values()
+            .filter(|probe| probe.expires > now)
+            .count()
+    }
+
+    pub fn r2o_shape_misses(&self) -> u64 {
+        self.shape_misses.get()
+    }
+
+    fn next_plan_clock(&self) -> u64 {
+        let next = self.plan_clock.get().wrapping_add(1);
+        self.plan_clock.set(next);
+        next
+    }
+
+    fn touch(entry: &InstalledPlan, clock: u64) {
+        entry.last_used.set(clock);
+    }
+
+    fn touch_probe(entry: &ProbePlan, clock: u64) {
+        entry.last_used.set(clock);
+    }
+
+    fn exact_victim(&self) -> Option<ExactVictim> {
+        let mut oldest: Option<(u64, ExactVictim)> = None;
+        for (key, entry) in &self.plans {
+            let used = entry.last_used.get();
+            if oldest.as_ref().is_none_or(|(oldest, _)| used < *oldest) {
+                oldest = Some((used, ExactVictim::Name(key.clone())));
+            }
+        }
+        for (key, entry) in &self.addr_plans {
+            let used = entry.last_used.get();
+            if oldest.as_ref().is_none_or(|(oldest, _)| used < *oldest) {
+                oldest = Some((used, ExactVictim::Addr(*key)));
+            }
+        }
+        for (key, entry) in &self.probes {
+            let used = entry.last_used.get();
+            if oldest.as_ref().is_none_or(|(oldest, _)| used < *oldest) {
+                oldest = Some((used, ExactVictim::Probe(key.clone())));
+            }
+        }
+        oldest.map(|(_, victim)| victim)
+    }
+
+    fn make_room_exact(&mut self) -> bool {
+        if self.r2o_plan_count() < self.exact_capacity {
+            return true;
+        }
+        match self.exact_victim() {
+            Some(ExactVictim::Name(key)) => {
+                self.plans.remove(&key);
+                true
+            }
+            Some(ExactVictim::Addr(key)) => {
+                self.addr_plans.remove(&key);
+                true
+            }
+            Some(ExactVictim::Probe(key)) => {
+                self.probes.remove(&key);
+                true
+            }
+            None => false,
+        }
     }
 
     fn r2o_plan_valid(&self, plan: &Plan) -> bool {
@@ -408,6 +503,7 @@ impl NamePlans {
                     source_port: tcp.source_port,
                 })
             {
+                Self::touch_probe(probe, self.next_plan_clock());
                 return Some(&probe.plan);
             }
             return self.find(payload.get(host_range)?, view.family, SHAPE_HTTP);
@@ -449,14 +545,28 @@ impl NamePlans {
                 .find_addr(view.dst, shape)
                 .or_else(|| self.find_addr(view.dst, bridge_shape));
         };
-        if let Some(probe) = self.probes.get(&NameProbeKey {
-            name: NamePlanKey {
-                host: canonical_plan_name(sni, shape)?,
-                family: view.family,
-                shape,
-            },
-            source_port: tcp.source_port,
-        }) {
+        if let Some(probe) = self
+            .probes
+            .get(&NameProbeKey {
+                name: NamePlanKey {
+                    host: canonical_plan_name(sni, shape)?,
+                    family: view.family,
+                    shape,
+                },
+                source_port: tcp.source_port,
+            })
+            .or_else(|| {
+                self.probes.get(&NameProbeKey {
+                    name: NamePlanKey {
+                        host: canonical_plan_name(sni, bridge_shape)?,
+                        family: view.family,
+                        shape: bridge_shape,
+                    },
+                    source_port: tcp.source_port,
+                })
+            })
+        {
+            Self::touch_probe(probe, self.next_plan_clock());
             return Some(&probe.plan);
         }
         self.find(sni, view.family, shape)
@@ -759,14 +869,22 @@ impl NamePlans {
         if !compatible || !self.r2o_plan_valid(&plan) {
             return (false, control::ACK_BAD_PLAN);
         }
-        if !self.plans.contains_key(&key) && self.plans.len() >= MAX_NAME_PLANS {
+        if !self.plans.contains_key(&key) && !self.make_room_exact() {
             return (false, control::ACK_NO_ROOM);
         }
         if self.plans.try_reserve(1).is_err() {
             return (false, control::ACK_NO_ROOM);
         }
         let generation = self.next_generation();
-        self.plans.insert(key, InstalledPlan { plan, generation });
+        let last_used = Cell::new(self.next_plan_clock());
+        self.plans.insert(
+            key,
+            InstalledPlan {
+                plan,
+                generation,
+                last_used,
+            },
+        );
         (true, control::ACK_OK)
     }
 
@@ -788,15 +906,22 @@ impl NamePlans {
             return (false, control::ACK_BAD_PLAN);
         }
         let key = AddrPlanKey { address, shape };
-        if !self.addr_plans.contains_key(&key) && self.addr_plans.len() >= MAX_ADDR_PLANS {
+        if !self.addr_plans.contains_key(&key) && !self.make_room_exact() {
             return (false, control::ACK_NO_ROOM);
         }
         if self.addr_plans.try_reserve(1).is_err() {
             return (false, control::ACK_NO_ROOM);
         }
         let generation = self.next_generation();
-        self.addr_plans
-            .insert(key, InstalledPlan { plan, generation });
+        let last_used = Cell::new(self.next_plan_clock());
+        self.addr_plans.insert(
+            key,
+            InstalledPlan {
+                plan,
+                generation,
+                last_used,
+            },
+        );
         (true, control::ACK_OK)
     }
 
@@ -849,8 +974,14 @@ impl NamePlans {
             return (false, control::ACK_NO_ROOM);
         }
         let generation = self.next_generation();
-        self.suffix_plans
-            .insert(key, InstalledPlan { plan, generation });
+        self.suffix_plans.insert(
+            key,
+            InstalledPlan {
+                plan,
+                generation,
+                last_used: Cell::new(0),
+            },
+        );
         (true, control::ACK_OK)
     }
 
@@ -998,19 +1129,28 @@ impl NamePlans {
         if plan.transport != 6 || !proto_matches || !self.r2o_plan_valid(&plan) {
             return (false, control::ACK_BAD_PLAN);
         }
-        if !self.probes.contains_key(&key) && self.probes.len() >= MAX_NAME_PLANS {
+        // D2O `set_name_trial` снимает прежнюю пробную запись того же
+        // (name, family, port) перед вставкой новой формы.
+        self.probes.retain(|old, _| {
+            old.name.host != key.name.host
+                || old.name.family != key.name.family
+                || old.source_port != key.source_port
+        });
+        if !self.probes.contains_key(&key) && !self.make_room_exact() {
             return (false, control::ACK_NO_ROOM);
         }
         if self.probes.try_reserve(1).is_err() {
             return (false, control::ACK_NO_ROOM);
         }
         let generation = self.next_generation();
+        let last_used = Cell::new(self.next_plan_clock());
         self.probes.insert(
             key,
             ProbePlan {
                 plan,
                 trial_id: trial_id.unwrap(),
                 generation,
+                last_used,
             },
         );
         (true, control::ACK_OK)
@@ -1048,6 +1188,7 @@ impl NamePlans {
             InstalledPlan {
                 plan: r2o_plan,
                 generation: r2o_generation,
+                last_used: Cell::new(0),
             },
         );
         (true, control::ACK_OK)
@@ -1351,17 +1492,18 @@ impl NamePlans {
 
     fn find(&self, bytes: &[u8], family: u8, shape: u8) -> Option<&Plan> {
         let host = canonical_plan_name(bytes, shape)?;
-        self.plans
-            .get(&NamePlanKey {
-                host,
-                family,
-                shape,
-            })
-            .map(|entry| &entry.plan)
+        let entry = self.plans.get(&NamePlanKey {
+            host,
+            family,
+            shape,
+        })?;
+        Self::touch(entry, self.next_plan_clock());
+        Some(&entry.plan)
     }
 
     fn find_addr(&self, address: Address, shape: u8) -> Option<&Plan> {
-        self.addr_plans
+        let entry = self
+            .addr_plans
             .get(&AddrPlanKey { address, shape })
             .or_else(|| {
                 if shape == SHAPE_ECH_TCP {
@@ -1372,8 +1514,9 @@ impl NamePlans {
                 } else {
                     None
                 }
-            })
-            .map(|entry| &entry.plan)
+            })?;
+        Self::touch(entry, self.next_plan_clock());
+        Some(&entry.plan)
     }
 
     fn find_addr_fallback(
@@ -2029,7 +2172,7 @@ fn canonical_name(bytes: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ControlServer, MAX_NAME_PLANS, NamePlanKey, NamePlans};
+    use super::{ControlServer, NamePlanKey, NamePlans};
     use r2k_core::control::BindingContext;
     use r2k_core::plan::Plan;
 
@@ -2296,27 +2439,62 @@ mod tests {
     }
 
     #[test]
-    fn name_plan_table_is_bounded_and_delete_releases_a_slot() {
-        let mut plans = NamePlans::default();
-        for index in 0..MAX_NAME_PLANS {
-            let host = format!("host-{index}.example");
-            let ack = plans.handle(&set_name(&host));
-            assert!(ack.ok, "{host}: {}", ack.reason);
-        }
+    fn exact_name_addr_probe_tables_share_lru_capacity() {
+        let address_b = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2));
+        let address_c = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 3));
+        let mut plans = NamePlans::with_capacity(2);
+        assert!(plans.handle(&set_name("a.example")).ok);
+        let command =
+            encode_set_addr(address_b, SHAPE_MODERN, &tls_plan_records([0x42; 16])).unwrap();
+        let frame = control::read_frame(&mut std::io::Cursor::new(command)).unwrap();
+        assert!(plans.handle(&frame).ok);
+        assert_eq!(plans.r2o_plan_count(), 2);
 
-        let overflow = plans.handle(&set_name("overflow.example"));
-        assert!(!overflow.ok);
-        assert_eq!(overflow.reason, control::ACK_NO_ROOM);
+        // Обращение к имени делает его свежим; старая адресная запись уходит.
+        assert!(plans.select(&tcp_tls_packet("a.example")).is_some());
+        let command =
+            encode_set_addr(address_c, SHAPE_MODERN, &tls_plan_records([0x43; 16])).unwrap();
+        let frame = control::read_frame(&mut std::io::Cursor::new(command)).unwrap();
+        assert!(plans.handle(&frame).ok);
+        assert_eq!(plans.r2o_plan_count(), 2);
+        assert!(plans.select(&tcp_tls_packet("a.example")).is_some());
+        assert!(!plans.addr_plans.contains_key(&super::AddrPlanKey {
+            address: address_b.into(),
+            shape: SHAPE_MODERN,
+        }));
+        assert!(plans.addr_plans.contains_key(&super::AddrPlanKey {
+            address: address_c.into(),
+            shape: SHAPE_MODERN,
+        }));
+    }
 
-        let mut delete = vec!["host-0.example".len() as u8];
-        delete.extend_from_slice(b"host-0.example");
+    #[test]
+    fn name_plan_table_evicts_lru_and_delete_releases_a_slot() {
+        let mut plans = NamePlans::with_capacity(2);
+        assert!(plans.handle(&set_name("a.example")).ok);
+        assert!(plans.handle(&set_name("b.example")).ok);
+        assert!(plans.select(&tcp_tls_packet("a.example")).is_some());
+        assert!(plans.handle(&set_name("c.example")).ok);
+        assert_eq!(plans.r2o_plan_count(), 2);
+        assert_eq!(plans.r2o_plan_capacity(), 2);
+        assert!(plans.select(&tcp_tls_packet("a.example")).is_some());
+        assert!(plans.select(&tcp_tls_packet("b.example")).is_none());
+        assert!(plans.select(&tcp_tls_packet("c.example")).is_some());
+
+        let mut delete = vec!["a.example".len() as u8];
+        delete.extend_from_slice(b"a.example");
         delete.extend_from_slice(&[6, SHAPE_MODERN, 4]);
-        let ack = plans.handle(&Frame {
-            kind: COMMAND_DEL_NAME,
-            body: delete,
-        });
-        assert!(ack.ok);
-        assert!(plans.handle(&set_name("overflow.example")).ok);
+        assert!(
+            plans
+                .handle(&Frame {
+                    kind: COMMAND_DEL_NAME,
+                    body: delete,
+                })
+                .ok
+        );
+        assert!(plans.handle(&set_name("d.example")).ok);
+        assert_eq!(plans.r2o_plan_count(), 2);
+        assert!(plans.select(&tcp_tls_packet("d.example")).is_some());
         assert!(
             plans
                 .handle(&Frame {

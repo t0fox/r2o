@@ -2,12 +2,12 @@
   "source": "docs/functional-parity-matrix.md",
   "date": "2026-11-08",
   "mode": "strict-current-revision",
-  "weight": 261,
-  "points": 93,
-  "percent": 35.63,
-  "total": 173,
+  "weight": 263,
+  "points": 95,
+  "percent": 36.12,
+  "total": 174,
   "counts": {
-    "verified": 67,
+    "verified": 68,
     "carry": 40,
     "partial": 59,
     "missing": 7,
@@ -17,8 +17,8 @@
   "groups": [
     {
       "name": "Datapath",
-      "weight": 26,
-      "points": 13,
+      "weight": 28,
+      "points": 15,
       "items": [
         {
           "id": 1,
@@ -364,6 +364,21 @@
           "gap": "тексты suspect/refuse и часть полей не совпадают",
           "mapping": "`flow_journal.rs`",
           "evidence": "`flow_journal.rs` · пробел: тексты suspect/refuse и часть полей не совпадают"
+        },
+        {
+          "id": 24,
+          "key": "D23",
+          "name": "Plan table capacity/LRU",
+          "weight": 2,
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
+          "group": "Datapath",
+          "coverage": "`scripts/test-datapath-plan-capacity-differential.sh` (a378); C `test_plans`; Rust LRU/shared-budget tests",
+          "gap": "`--flows`/2048, общий exact-бюджет name/addr/probe, LRU по last_used; `plan_count`/`probe_count` добавлены",
+          "mapping": "`scripts/test-datapath-plan-capacity-differential.sh` (a378); C `test_plans`; Rust LRU/shared-budget tests",
+          "evidence": "`scripts/test-datapath-plan-capacity-differential.sh` (a378); C `test_plans`; Rust LRU/shared-budget tests · пробел: `--flows`/2048, общий exact-бюджет name/addr/probe, LRU по last_used; `plan_count`/`probe_count` добавлены"
         }
       ]
     },
@@ -373,7 +388,7 @@
       "points": 2,
       "items": [
         {
-          "id": 33,
+          "id": 34,
           "key": "CL1",
           "name": "Raw profiles/ECH shapes/send/cancel/fallback/connect",
           "weight": 3,
@@ -388,7 +403,7 @@
           "evidence": "`r2o-raw-profile`, `r2o-raw-emission-cancel`, `r2o-raw-connect-fallback`, `r2o-fallback`, `r2o-raw-split-support` (304) · пробел: 304; live DPI; cancel/timing"
         },
         {
-          "id": 34,
+          "id": 35,
           "key": "CL2",
           "name": "CLEAR confirmation/cancel",
           "weight": 1,
@@ -403,7 +418,7 @@
           "evidence": "`test-classifier-clear-confirm` (304) · пробел: 304"
         },
         {
-          "id": 35,
+          "id": 36,
           "key": "CL3",
           "name": "SO_MARK confirmation",
           "weight": 1,
@@ -418,7 +433,7 @@
           "evidence": "`test-classifier-so-mark-production` (304) · пробел: 304; production getsockopt"
         },
         {
-          "id": 36,
+          "id": 37,
           "key": "CL4",
           "name": "Base transport errors → split",
           "weight": 1,
@@ -433,7 +448,7 @@
           "evidence": "`test-classifier-full-tree-control` (304) · пробел: 304"
         },
         {
-          "id": 37,
+          "id": 38,
           "key": "CL5",
           "name": "Poison/strategy tree/control/neutral ACK",
           "weight": 2,
@@ -448,7 +463,7 @@
           "evidence": "`test-classifier-full-tree-control`, `candidate-filter`, `raw-production` (304) · пробел: 304; injected/scripted branches"
         },
         {
-          "id": 38,
+          "id": 39,
           "key": "CL6",
           "name": "TCP measurement + core verifier",
           "weight": 2,
@@ -463,7 +478,7 @@
           "evidence": "`r2o-meas`, `r2o-measured-split` (304) · пробел: 304; full call path"
         },
         {
-          "id": 39,
+          "id": 40,
           "key": "CL7",
           "name": "TLS/HTTP verifier outcomes/retry",
           "weight": 1,
@@ -478,7 +493,7 @@
           "evidence": "`r2o-tls-verify-differential.sh` (a378), `test-http-chunk-framing` (a63) · пробел: Loopback; не live DPI"
         },
         {
-          "id": 40,
+          "id": 41,
           "key": "CL8",
           "name": "Connect/read timeout + doubled baseline retry",
           "weight": 1,
@@ -493,7 +508,7 @@
           "evidence": "`test-classifier-full-tree-control` (304) · пробел: 304"
         },
         {
-          "id": 41,
+          "id": 42,
           "key": "CL9",
           "name": "TLS 1.2 reverse response probe/verdicts",
           "weight": 3,
@@ -508,7 +523,7 @@
           "evidence": "`test-d2o-shared-fixtures` (304), `test-classifier-full-tree-control` (304) · пробел: 304; live DPI"
         },
         {
-          "id": 42,
+          "id": 43,
           "key": "CL10",
           "name": "ECH receive ladder/witness/retries",
           "weight": 2,
@@ -523,7 +538,7 @@
           "evidence": "`r2o-ech-rx-ladder`, `r2o-layered-rx` (304) · пробел: 304; реальные ECH-конфигурации"
         },
         {
-          "id": 43,
+          "id": 44,
           "key": "CL11",
           "name": "HTTP response framing/reader",
           "weight": 1,
@@ -538,7 +553,7 @@
           "evidence": "`test-http-chunk-framing-differential.sh` (a63), `r2k-core` tests · пробел: Остальные call-path/ветви"
         },
         {
-          "id": 44,
+          "id": 45,
           "key": "CL12",
           "name": "ClientHello/TLS12/13/ECH parser helpers",
           "weight": 1,
@@ -553,7 +568,7 @@
           "evidence": "C `test_hello/test_ech/test_tls12`, Rust unit · пробел: Нет paired diff"
         },
         {
-          "id": 45,
+          "id": 46,
           "key": "CL13",
           "name": "HTTPS probe/ECH resolver/cache state",
           "weight": 1,
@@ -568,7 +583,7 @@
           "evidence": "C `test_httpsprobe`, Rust tests · пробел: Нет paired diff"
         },
         {
-          "id": 46,
+          "id": 47,
           "key": "CL14",
           "name": "HTTP/3 status/header parser + httpup",
           "weight": 1,
@@ -583,7 +598,7 @@
           "evidence": "C `test_h3`, `test_httpup_logic`; Rust tests · пробел: Нет paired diff"
         },
         {
-          "id": 47,
+          "id": 48,
           "key": "CL15",
           "name": "Compose/crypto/p256/x25519/props helpers",
           "weight": 2,
@@ -598,7 +613,7 @@
           "evidence": "C tests, Rust unit · пробел: Нет matrix-контракта"
         },
         {
-          "id": 48,
+          "id": 49,
           "key": "CL16",
           "name": "Detect/classifier CLI output/exit/JSON",
           "weight": 1,
@@ -620,7 +635,7 @@
       "points": 0,
       "items": [
         {
-          "id": 24,
+          "id": 25,
           "key": "S1",
           "name": "Control frame/commands/ACK/APPLIED/REFUSED",
           "weight": 2,
@@ -635,7 +650,7 @@
           "evidence": "`r2o-control-events`, `r2o-control-dropped`, `r2o-ack-applied-persist` (все 304) · пробел: Другая ревизия; длительный процессный restart"
         },
         {
-          "id": 25,
+          "id": 26,
           "key": "S2",
           "name": "Scheduler due order/cooldown/dead address/concurrent endpoints",
           "weight": 3,
@@ -650,7 +665,7 @@
           "evidence": "`r2o-scheduler-cooldown`/`dead-address`/`concurrent` (304), `r2o-scheduler-differential` (без diff) · пробел: 304; due ordering не paired"
         },
         {
-          "id": 26,
+          "id": 27,
           "key": "S3",
           "name": "Discovery known-plan/coalesce/queue/permits/own-first",
           "weight": 3,
@@ -665,7 +680,7 @@
           "evidence": "`r2o-discovery-*`, `r2o-queue-order`, `r2o-worker-permit`, `r2o-own-first` (304) · пробел: 304; нет текущего прогона"
         },
         {
-          "id": 27,
+          "id": 28,
           "key": "S4",
           "name": "ACK → APPLIED exact proof → candidate persistence",
           "weight": 2,
@@ -680,7 +695,7 @@
           "evidence": "`r2o-ack-applied-persist` (304), `r2o-known-plans` (304) · пробел: 304; process restart"
         },
         {
-          "id": 28,
+          "id": 29,
           "key": "S5",
           "name": "JSON catalog atomic save/merge/sync",
           "weight": 2,
@@ -695,7 +710,7 @@
           "evidence": "`r2o-catalog-persist`, `r2o-catalog-sync` (304) · пробел: 304; concurrent external writer"
         },
         {
-          "id": 29,
+          "id": 30,
           "key": "S6",
           "name": "HTTP search candidate/order/retry/judge/APPLIED",
           "weight": 3,
@@ -710,7 +725,7 @@
           "evidence": "`r2o-http-search` (304), `r2o-fetch-cli` (без пина) · пробел: 304; живой поиск; APPLIED branch"
         },
         {
-          "id": 30,
+          "id": 31,
           "key": "S9",
           "name": "Auto refusal → Discovery → APPLIED → firewall reapply",
           "weight": 2,
@@ -725,7 +740,7 @@
           "evidence": "Process smoke с fake datapath peer · пробел: Нет реального datapath/firewall; failure injection"
         },
         {
-          "id": 31,
+          "id": 32,
           "key": "S10",
           "name": "Long-running controller recovery",
           "weight": 1,
@@ -740,7 +755,7 @@
           "evidence": "Нет · пробел: Полный цикл после crash/restart"
         },
         {
-          "id": 32,
+          "id": 33,
           "key": "S11",
           "name": "Diagnostics records/snapshots/madvise and periodic report",
           "weight": 1,
@@ -762,7 +777,7 @@
       "points": 2,
       "items": [
         {
-          "id": 49,
+          "id": 50,
           "key": "Q1",
           "name": "QUIC Initial/QSN/SNI/local-address gate",
           "weight": 2,
@@ -777,7 +792,7 @@
           "evidence": "`r2o-quic-hello`, `r2o-quic-local-address` (304), `r2o-discovery-quic-stop` · пробел: 304; stop/fallback"
         },
         {
-          "id": 50,
+          "id": 51,
           "key": "Q2",
           "name": "Residual/VN/address pool/neutral controls/fallback",
           "weight": 3,
@@ -792,7 +807,7 @@
           "evidence": "REA_EVIDENCE (source mapping), controller unit tests · пробел: Нет поведенческого differential"
         },
         {
-          "id": 51,
+          "id": 52,
           "key": "Q3",
           "name": "Short-control complete/budget",
           "weight": 1,
@@ -807,7 +822,7 @@
           "evidence": "`test-quic-short-control` (304) · пробел: 304"
         },
         {
-          "id": 52,
+          "id": 53,
           "key": "Q4",
           "name": "HTTP/3 framing/stream termination",
           "weight": 1,
@@ -822,7 +837,7 @@
           "evidence": "`test-quic-http3-full-stage-differential.sh` (a63), 18/18 · пробел: Network errors/lifecycle"
         },
         {
-          "id": 53,
+          "id": 54,
           "key": "Q5",
           "name": "HTTP/3 budgets/transport limits/stall",
           "weight": 1,
@@ -837,7 +852,7 @@
           "evidence": "Full-stage 18/18; `test-quic-http3` · пробел: 70-KiB HEADERS app_bytes; timing-sensitive stall"
         },
         {
-          "id": 54,
+          "id": 55,
           "key": "Q6",
           "name": "Budget init/app-bytes helper",
           "weight": 1,
@@ -852,7 +867,7 @@
           "evidence": "`test-quic-budget-init`, `test-quic-app-bytes` (304) · пробел: 304"
         },
         {
-          "id": 55,
+          "id": 56,
           "key": "Q7",
           "name": "Silent peer handshake timeout",
           "weight": 1,
@@ -867,7 +882,7 @@
           "evidence": "Full-stage/`r2o_http3_silent_udp_peer_timeout` (a63) · пробел: Нет ICMP/close-port вариантов"
         },
         {
-          "id": 56,
+          "id": 57,
           "key": "Q8",
           "name": "QUIC deny/recheck lifecycle",
           "weight": 1,
@@ -889,7 +904,7 @@
       "points": 1,
       "items": [
         {
-          "id": 57,
+          "id": 58,
           "key": "R1",
           "name": "UDP observer initiator/SSRC/endpoint event",
           "weight": 2,
@@ -904,7 +919,7 @@
           "evidence": "`test-discord-udp-observer-reconnect` (304) · пробел: 304; production RTC"
         },
         {
-          "id": 58,
+          "id": 59,
           "key": "R2",
           "name": "Manual measurement arm propagation",
           "weight": 1,
@@ -919,7 +934,7 @@
           "evidence": "`test-discord-voice-discovery-arm` (304) · пробел: 304"
         },
         {
-          "id": 59,
+          "id": 60,
           "key": "R3",
           "name": "Voice trial lease/renewal/120-s waiter/APPLIED",
           "weight": 3,
@@ -934,7 +949,7 @@
           "evidence": "`r2o-discord-discovery`, `r2o-discord-voice-lifecycle-helper` (304), `test-discord-scheduled-udp` (a63) · пробел: 304; production process/long RTC"
         },
         {
-          "id": 60,
+          "id": 61,
           "key": "R4",
           "name": "Endpoint change/late NAK/persistence/reapply",
           "weight": 1,
@@ -949,7 +964,7 @@
           "evidence": "`r2o-discord-voice-lifecycle-helper` (304) · пробел: 304; source-backed helper"
         },
         {
-          "id": 61,
+          "id": 62,
           "key": "R5",
           "name": "Trial clock after queue admission",
           "weight": 1,
@@ -964,7 +979,7 @@
           "evidence": "`test-discord-voice-trial-clock` (304) · пробел: 304"
         },
         {
-          "id": 62,
+          "id": 63,
           "key": "R6",
           "name": "Scheduled UDP emission/queue stats",
           "weight": 1,
@@ -979,7 +994,7 @@
           "evidence": "`test-discord-scheduled-udp-differential.sh` (a63) · пробел: Periodic/shutdown queue output"
         },
         {
-          "id": 63,
+          "id": 64,
           "key": "R7",
           "name": "Long RTC session/process recovery",
           "weight": 1,
@@ -1001,7 +1016,7 @@
       "points": 1,
       "items": [
         {
-          "id": 64,
+          "id": 65,
           "key": "G1",
           "name": "Discord Gateway WebSocket upgrade/Hello",
           "weight": 1,
@@ -1023,7 +1038,7 @@
       "points": 1,
       "items": [
         {
-          "id": 151,
+          "id": 152,
           "key": "TG1",
           "name": "Config file/env mapping и валидация",
           "weight": 2,
@@ -1038,7 +1053,7 @@
           "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
         },
         {
-          "id": 152,
+          "id": 153,
           "key": "TG3",
           "name": "DC map persist/merge/validate",
           "weight": 2,
@@ -1053,7 +1068,7 @@
           "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
         },
         {
-          "id": 153,
+          "id": 154,
           "key": "TG4",
           "name": "`help.getConfig` и dcOption",
           "weight": 2,
@@ -1068,7 +1083,7 @@
           "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
         },
         {
-          "id": 154,
+          "id": 155,
           "key": "TG5",
           "name": "obfuscated2/secret/DC/media/proto",
           "weight": 2,
@@ -1083,7 +1098,7 @@
           "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
         },
         {
-          "id": 155,
+          "id": 156,
           "key": "TG6",
           "name": "MTProto splitter",
           "weight": 2,
@@ -1098,7 +1113,7 @@
           "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
         },
         {
-          "id": 156,
+          "id": 157,
           "key": "TG7",
           "name": "v2 encrypted",
           "weight": 1,
@@ -1113,7 +1128,7 @@
           "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
         },
         {
-          "id": 157,
+          "id": 158,
           "key": "TG8",
           "name": "resPQ probe",
           "weight": 1,
@@ -1128,7 +1143,7 @@
           "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
         },
         {
-          "id": 158,
+          "id": 159,
           "key": "TG9",
           "name": "DC→WSS/CF route plan",
           "weight": 2,
@@ -1143,7 +1158,7 @@
           "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
         },
         {
-          "id": 159,
+          "id": 160,
           "key": "TG10",
           "name": "Route DNS/DoH/DoT",
           "weight": 2,
@@ -1158,7 +1173,7 @@
           "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
         },
         {
-          "id": 160,
+          "id": 161,
           "key": "TG11",
           "name": "TLS verification/SNI",
           "weight": 1,
@@ -1173,7 +1188,7 @@
           "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
         },
         {
-          "id": 161,
+          "id": 162,
           "key": "TG12",
           "name": "WS upgrade/frames",
           "weight": 2,
@@ -1188,7 +1203,7 @@
           "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
         },
         {
-          "id": 162,
+          "id": 163,
           "key": "TG13",
           "name": "CF domain pool refresh/cache",
           "weight": 2,
@@ -1203,7 +1218,7 @@
           "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
         },
         {
-          "id": 163,
+          "id": 164,
           "key": "TG14",
           "name": "CF proxy DoH",
           "weight": 2,
@@ -1218,7 +1233,7 @@
           "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
         },
         {
-          "id": 164,
+          "id": 165,
           "key": "TG15",
           "name": "Transparent listener/SO_ORIGINAL_DST",
           "weight": 2,
@@ -1233,7 +1248,7 @@
           "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
         },
         {
-          "id": 165,
+          "id": 166,
           "key": "TG16",
           "name": "Transparent policy ports/CIDR/self-dial",
           "weight": 2,
@@ -1248,7 +1263,7 @@
           "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
         },
         {
-          "id": 166,
+          "id": 167,
           "key": "TG17",
           "name": "Official secret/DD",
           "weight": 2,
@@ -1263,7 +1278,7 @@
           "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
         },
         {
-          "id": 167,
+          "id": 168,
           "key": "TG18",
           "name": "Retry/cooldown/routing policy",
           "weight": 2,
@@ -1278,7 +1293,7 @@
           "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
         },
         {
-          "id": 168,
+          "id": 169,
           "key": "TG19",
           "name": "Stats schema и Unix socket",
           "weight": 2,
@@ -1293,7 +1308,7 @@
           "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
         },
         {
-          "id": 169,
+          "id": 170,
           "key": "TG20",
           "name": "Stats request protocol robustness",
           "weight": 1,
@@ -1308,7 +1323,7 @@
           "evidence": "`stats.rs::serve_unix`; unit `unix_stats_socket_times_out_silent_client_and_continues`; C oracle `telegram/src/stats_socket.c` · пробел: Абсолютный 1250 мс на чтение/запись; снимок отдаётся и молчащему клиенту"
         },
         {
-          "id": 170,
+          "id": 171,
           "key": "TG21",
           "name": "Response observer",
           "weight": 1,
@@ -1323,7 +1338,7 @@
           "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
         },
         {
-          "id": 171,
+          "id": 172,
           "key": "TG22",
           "name": "Connection/memory limits",
           "weight": 2,
@@ -1338,7 +1353,7 @@
           "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C · пробел: **пробел (memory budget)**"
         },
         {
-          "id": 172,
+          "id": 173,
           "key": "TG23",
           "name": "Diagnostics `--check`",
           "weight": 2,
@@ -1353,7 +1368,7 @@
           "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
         },
         {
-          "id": 173,
+          "id": 174,
           "key": "TG24",
           "name": "Service lifecycle/recovery",
           "weight": 2,
@@ -1375,7 +1390,7 @@
       "points": 3,
       "items": [
         {
-          "id": 74,
+          "id": 75,
           "key": "A1",
           "name": "Bind по умолчанию и выбор LAN IP при установке",
           "weight": 1,
@@ -1390,7 +1405,7 @@
           "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
         },
         {
-          "id": 75,
+          "id": 76,
           "key": "A2",
           "name": "Пустой `PANEL_LISTEN` отключает панель и health update",
           "weight": 1,
@@ -1405,7 +1420,7 @@
           "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
         },
         {
-          "id": 76,
+          "id": 77,
           "key": "A3",
           "name": "Парсер: комментарии, кавычки, хвостовые комментарии",
           "weight": 1,
@@ -1420,7 +1435,7 @@
           "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: ДИФ есть; незакрытая кавычка — пробел"
         },
         {
-          "id": 77,
+          "id": 78,
           "key": "A4",
           "name": "Парсер: unknown keys, не-UTF-8, ignored bytes",
           "weight": 1,
@@ -1435,7 +1450,7 @@
           "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
         },
         {
-          "id": 78,
+          "id": 79,
           "key": "A5",
           "name": "Совместимость known-list с D2O-конфигом",
           "weight": 1,
@@ -1450,7 +1465,7 @@
           "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: **не доказано/пробел**"
         },
         {
-          "id": 79,
+          "id": 80,
           "key": "A6",
           "name": "Лимит заголовка 32 КиБ и код 431",
           "weight": 1,
@@ -1465,7 +1480,7 @@
           "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: ДИФ; точная граница не проверена"
         },
         {
-          "id": 80,
+          "id": 81,
           "key": "A7",
           "name": "Абсолютный дедлайн заголовка 5 с / 408",
           "weight": 1,
@@ -1480,7 +1495,7 @@
           "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
         },
         {
-          "id": 81,
+          "id": 82,
           "key": "A8",
           "name": "Абсолютный дедлайн ответа 5 с",
           "weight": 1,
@@ -1495,7 +1510,7 @@
           "evidence": "`scripts/test-panel-response-deadline-differential.sh` (a378); C `test_response_deadline.c`; Rust `d2o_response_deadline_matches_rust_sender` · пробел: Deadline общий для заголовков и тела; 5215 мс в прогоне"
         },
         {
-          "id": 82,
+          "id": 83,
           "key": "A9",
           "name": "Устойчивость к обрыву клиента/IO-ошибке",
           "weight": 1,
@@ -1510,7 +1525,7 @@
           "evidence": "`serve` изолирует `handle_connection`; IO-ошибка больше не завершает весь serve · пробел: Нет paired C/Rust теста обрыва клиента"
         },
         {
-          "id": 83,
+          "id": 84,
           "key": "A10",
           "name": "Неизвестный маршрут/метод/HTTP-версия",
           "weight": 1,
@@ -1525,7 +1540,7 @@
           "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: ТЕСТ"
         },
         {
-          "id": 84,
+          "id": 85,
           "key": "A11",
           "name": "`/api/status`: unavailable-контракт",
           "weight": 1,
@@ -1540,7 +1555,7 @@
           "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
         },
         {
-          "id": 85,
+          "id": 86,
           "key": "A12",
           "name": "`/api/status`: live shape и catalog revision",
           "weight": 1,
@@ -1555,7 +1570,7 @@
           "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
         },
         {
-          "id": 86,
+          "id": 87,
           "key": "A13",
           "name": "`/api/status`: snapshot/stages/unknown_keys",
           "weight": 1,
@@ -1570,7 +1585,7 @@
           "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: частично; порядок ключей/`unknown_keys` не доказаны"
         },
         {
-          "id": 87,
+          "id": 88,
           "key": "A14",
           "name": "`/api/control`: список действий, коды, gates",
           "weight": 2,
@@ -1585,7 +1600,7 @@
           "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
         },
         {
-          "id": 88,
+          "id": 89,
           "key": "A15",
           "name": "Action state machine и timeout (включая 124)",
           "weight": 2,
@@ -1600,7 +1615,7 @@
           "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: ДИФ timeout; 124 — пробел"
         },
         {
-          "id": 89,
+          "id": 90,
           "key": "A16",
           "name": "Workers GET и байты конфига",
           "weight": 1,
@@ -1615,7 +1630,7 @@
           "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
         },
         {
-          "id": 90,
+          "id": 91,
           "key": "A17",
           "name": "Workers POST: Content-Type/TE/CL/JSON/8 доменов",
           "weight": 2,
@@ -1630,7 +1645,7 @@
           "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
         },
         {
-          "id": 91,
+          "id": 92,
           "key": "A18",
           "name": "Workers POST: busy до записи",
           "weight": 2,
@@ -1645,7 +1660,7 @@
           "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
         },
         {
-          "id": 92,
+          "id": 93,
           "key": "A19",
           "name": "Атомарная запись и сохранение режима",
           "weight": 1,
@@ -1660,7 +1675,7 @@
           "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: ДИФ по байтам; режим/umask не доказан"
         },
         {
-          "id": 93,
+          "id": 94,
           "key": "A20",
           "name": "Telegram config gate/status",
           "weight": 1,
@@ -1675,7 +1690,7 @@
           "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
         },
         {
-          "id": 94,
+          "id": 95,
           "key": "A21",
           "name": "Telegram stats: лимит, схема, таймаут",
           "weight": 1,
@@ -1690,7 +1705,7 @@
           "evidence": "`read_telegram_stats`; unit `telegram_stats_read_has_absolute_deadline`; C oracle `panel/server.c:445-510` · пробел: Абсолютный 1250 мс на connect/read; лимит и схема прежние"
         },
         {
-          "id": 95,
+          "id": 96,
           "key": "A22",
           "name": "`/api/update` absent/never/raw",
           "weight": 1,
@@ -1705,7 +1720,7 @@
           "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
         },
         {
-          "id": 96,
+          "id": 97,
           "key": "A23",
           "name": "Diagnostics GET/POST/download",
           "weight": 1,
@@ -1720,7 +1735,7 @@
           "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
         },
         {
-          "id": 97,
+          "id": 98,
           "key": "A24",
           "name": "Static assets: ETag/304/1 МиБ",
           "weight": 1,
@@ -1735,7 +1750,7 @@
           "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
         },
         {
-          "id": 98,
+          "id": 99,
           "key": "A25",
           "name": "Static assets: missing/symlink/embedded fallback",
           "weight": 1,
@@ -1750,7 +1765,7 @@
           "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: ТЕСТ; C 404 vs Rust fallback"
         },
         {
-          "id": 99,
+          "id": 100,
           "key": "A26",
           "name": "CLI `--version`/`serve`/`--self-check`/`--release-id`",
           "weight": 1,
@@ -1772,7 +1787,7 @@
       "points": 67,
       "items": [
         {
-          "id": 100,
+          "id": 101,
           "key": "B1",
           "name": "Config defaults и совместимость ключей",
           "weight": 1,
@@ -1787,7 +1802,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: частично; `MODE` fallback и `KEENETIC_POLICY` — пробелы"
         },
         {
-          "id": 101,
+          "id": 102,
           "key": "B2",
           "name": "Start order: engine→telegram→panel→schedulers",
           "weight": 2,
@@ -1802,7 +1817,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 102,
+          "id": 103,
           "key": "B3",
           "name": "Stop order и восстановление fastnat/offload",
           "weight": 2,
@@ -1817,7 +1832,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 103,
+          "id": 104,
           "key": "B4",
           "name": "Engine start: queue wait, firewall, controller, watchdog",
           "weight": 2,
@@ -1832,7 +1847,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 104,
+          "id": 105,
           "key": "B5",
           "name": "Engine stop: порядок и коды",
           "weight": 2,
@@ -1847,7 +1862,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 105,
+          "id": 106,
           "key": "B6",
           "name": "`engine-restart`/`settings-restart`",
           "weight": 1,
@@ -1862,7 +1877,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: ДИФ/пробел `MODE=off`"
         },
         {
-          "id": 106,
+          "id": 107,
           "key": "B7",
           "name": "Panel lifecycle и disabled panel",
           "weight": 1,
@@ -1877,7 +1892,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 107,
+          "id": 108,
           "key": "B8",
           "name": "`status` (поля и коды)",
           "weight": 1,
@@ -1892,7 +1907,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: ДИФ; текстовый формат отличается"
         },
         {
-          "id": 108,
+          "id": 109,
           "key": "B9",
           "name": "`clear-found`: все state-файлы",
           "weight": 2,
@@ -1907,7 +1922,7 @@
           "evidence": "`scripts/test-router-clear-found-state.sh`; C oracle `files/S99d2k:1588-1604` · пробел: Fatal `rm` ошибки игнорируются как в C"
         },
         {
-          "id": 109,
+          "id": 110,
           "key": "B10",
           "name": "nft backend: генерация и postconditions",
           "weight": 3,
@@ -1922,7 +1937,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: ДИФ (mock)"
         },
         {
-          "id": 110,
+          "id": 111,
           "key": "B11",
           "name": "iptables backend: генерация и postconditions",
           "weight": 3,
@@ -1937,7 +1952,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: ДИФ (mock)"
         },
         {
-          "id": 111,
+          "id": 112,
           "key": "B12",
           "name": "Код ошибки отдельного правила",
           "weight": 1,
@@ -1952,7 +1967,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 112,
+          "id": 113,
           "key": "B13",
           "name": "nft rollback и RST-table cleanup",
           "weight": 2,
@@ -1967,7 +1982,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 113,
+          "id": 114,
           "key": "B14",
           "name": "Legacy D2K cleanup",
           "weight": 2,
@@ -1982,7 +1997,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 114,
+          "id": 115,
           "key": "B15",
           "name": "RST table lifetime",
           "weight": 2,
@@ -1997,7 +2012,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 115,
+          "id": 116,
           "key": "B16",
           "name": "Status nft completeness",
           "weight": 2,
@@ -2012,7 +2027,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 116,
+          "id": 117,
           "key": "B17",
           "name": "Status iptables completeness",
           "weight": 2,
@@ -2027,7 +2042,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 117,
+          "id": 118,
           "key": "B18",
           "name": "IPv6 fallback + marker + reapply",
           "weight": 2,
@@ -2042,7 +2057,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 118,
+          "id": 119,
           "key": "B19",
           "name": "DNS upstream exclusions/refresh",
           "weight": 2,
@@ -2057,7 +2072,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 119,
+          "id": 120,
           "key": "B20",
           "name": "Flow-offload disable/restore",
           "weight": 2,
@@ -2072,7 +2087,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 120,
+          "id": 121,
           "key": "B21",
           "name": "Flow-offload write-failure",
           "weight": 1,
@@ -2087,7 +2102,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 121,
+          "id": 122,
           "key": "B22",
           "name": "Fastnat lifecycle",
           "weight": 1,
@@ -2102,7 +2117,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 122,
+          "id": 123,
           "key": "B23",
           "name": "PPE rule generation/order",
           "weight": 2,
@@ -2117,7 +2132,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 123,
+          "id": 124,
           "key": "B24",
           "name": "PPE removal error codes",
           "weight": 1,
@@ -2132,7 +2147,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 124,
+          "id": 125,
           "key": "B25",
           "name": "PPE backend/gate/lock",
           "weight": 2,
@@ -2147,7 +2162,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: ДИФ (mock)"
         },
         {
-          "id": 125,
+          "id": 126,
           "key": "B26",
           "name": "Firewall lock/reapply",
           "weight": 1,
@@ -2162,7 +2177,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 126,
+          "id": 127,
           "key": "B27",
           "name": "Heal: status/ppe/dns",
           "weight": 2,
@@ -2177,7 +2192,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 127,
+          "id": 128,
           "key": "B28",
           "name": "Heal concurrency/cooldown",
           "weight": 2,
@@ -2192,7 +2207,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 128,
+          "id": 129,
           "key": "B29",
           "name": "Firewall watchdog period/start-stop",
           "weight": 1,
@@ -2207,7 +2222,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 129,
+          "id": 130,
           "key": "B30",
           "name": "NDM hook nat/mangle",
           "weight": 1,
@@ -2222,7 +2237,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 130,
+          "id": 131,
           "key": "B31",
           "name": "S99/procd waiter и detach",
           "weight": 1,
@@ -2237,7 +2252,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 131,
+          "id": 132,
           "key": "B33",
           "name": "Update guard/availability",
           "weight": 2,
@@ -2252,7 +2267,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 132,
+          "id": 133,
           "key": "B34",
           "name": "Stage→stop→activate→start порядок",
           "weight": 2,
@@ -2267,7 +2282,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 133,
+          "id": 134,
           "key": "B35",
           "name": "Rollback + bad release + health",
           "weight": 2,
@@ -2282,7 +2297,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 134,
+          "id": 135,
           "key": "B36",
           "name": "Signed bootstrap/install",
           "weight": 2,
@@ -2297,7 +2312,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 135,
+          "id": 136,
           "key": "B37",
           "name": "OpenWrt ABI/reboot update",
           "weight": 2,
@@ -2312,7 +2327,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: **не доказано**"
         },
         {
-          "id": 136,
+          "id": 137,
           "key": "B38",
           "name": "Package release manifest/assets",
           "weight": 1,
@@ -2327,7 +2342,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 137,
+          "id": 138,
           "key": "B39",
           "name": "Router install lifecycle",
           "weight": 2,
@@ -2342,7 +2357,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 138,
+          "id": 139,
           "key": "B40",
           "name": "Uninstall и аварийная очистка",
           "weight": 1,
@@ -2357,7 +2372,7 @@
           "evidence": "`scripts/test-router-uninstall-fallback.sh`; C oracle `scripts/uninstall.sh:57-74` · пробел: Аварийная остановка только по owned PID-файлам"
         },
         {
-          "id": 139,
+          "id": 140,
           "key": "B41",
           "name": "Telegram start/stop/restart",
           "weight": 2,
@@ -2372,7 +2387,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 140,
+          "id": 141,
           "key": "B42",
           "name": "Telegram reapply semantics",
           "weight": 2,
@@ -2387,7 +2402,7 @@
           "evidence": "`scripts/test-router-telegram-reapply.sh`; C oracle `files/S99d2k:1470-1474` · пробел: Остановленный процесс не запускается; heal только для running"
         },
         {
-          "id": 141,
+          "id": 142,
           "key": "B43",
           "name": "Telegram mark/gate",
           "weight": 1,
@@ -2402,7 +2417,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 142,
+          "id": 143,
           "key": "B44",
           "name": "Telegram firewall nft/iptables",
           "weight": 2,
@@ -2417,7 +2432,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 143,
+          "id": 144,
           "key": "B46",
           "name": "Telegram watchdog health contract",
           "weight": 2,
@@ -2432,7 +2447,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: **пробел**"
         },
         {
-          "id": 144,
+          "id": 145,
           "key": "B47",
           "name": "Meta DNS scheduler lifecycle",
           "weight": 1,
@@ -2447,7 +2462,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 145,
+          "id": 146,
           "key": "B48",
           "name": "Meta DNS offset/backoff/tick",
           "weight": 2,
@@ -2462,7 +2477,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: **не доказано**"
         },
         {
-          "id": 146,
+          "id": 147,
           "key": "B49",
           "name": "Meta DNS ranges asset",
           "weight": 1,
@@ -2477,7 +2492,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 147,
+          "id": 148,
           "key": "B50",
           "name": "Meta DNS edge verification",
           "weight": 1,
@@ -2492,7 +2507,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 148,
+          "id": 149,
           "key": "B51",
           "name": "Meta DNS owned-record removal",
           "weight": 1,
@@ -2507,7 +2522,7 @@
           "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
         },
         {
-          "id": 149,
+          "id": 150,
           "key": "B52",
           "name": "Log maintenance: все owned-логи",
           "weight": 1,
@@ -2522,7 +2537,7 @@
           "evidence": "`scripts/test-router-log-maintenance.sh`; C oracle `files/d2k-log-maintenance.sh:68-75` · пробел: Meta DNS логи добавлены в ротацию"
         },
         {
-          "id": 150,
+          "id": 151,
           "key": "B53",
           "name": "`KEENETIC_POLICY` → `--only-mark`",
           "weight": 2,
@@ -2544,7 +2559,7 @@
       "points": 3,
       "items": [
         {
-          "id": 65,
+          "id": 66,
           "key": "M1",
           "name": "`compose.c` + `d2kc.c` orchestration/event loop",
           "weight": 3,
@@ -2559,7 +2574,7 @@
           "evidence": "Inventory note; REA fragments · пробел: Нет отдельного контракта и differential"
         },
         {
-          "id": 66,
+          "id": 67,
           "key": "M2",
           "name": "`d2kask.c`",
           "weight": 1,
@@ -2574,7 +2589,7 @@
           "evidence": "`r2o-ask-differential.sh` — независимые suites · пробел: Нет paired diff"
         },
         {
-          "id": 67,
+          "id": 68,
           "key": "M3",
           "name": "`d2kfetch.c` CLI",
           "weight": 1,
@@ -2589,7 +2604,7 @@
           "evidence": "`r2o-fetch-cli-differential.sh` (сравнивает C/Rust CLI) · пробел: Нет SHA-пина; не все ветви"
         },
         {
-          "id": 68,
+          "id": 69,
           "key": "M4",
           "name": "`d2kvoice.c` controller entry",
           "weight": 1,
@@ -2604,7 +2619,7 @@
           "evidence": "Discord rows частично · пробел: Нет контракта"
         },
         {
-          "id": 69,
+          "id": 70,
           "key": "M5",
           "name": "`link.c`, `net4.c`, `udpruntime.c`, `volume.c`",
           "weight": 3,
@@ -2619,7 +2634,7 @@
           "evidence": "Inventory note; Rust `r2o_volume` tests · пробел: Нет C/Rust diff"
         },
         {
-          "id": 70,
+          "id": 71,
           "key": "M6",
           "name": "`crypto.c`, `p256.c`, `x25519.c`, `props.c`, `udpplan.c`, `plantlv.c` helpers",
           "weight": 3,
@@ -2634,7 +2649,7 @@
           "evidence": "C unit tests; Rust units · пробел: Нет paired diff и контракта"
         },
         {
-          "id": 71,
+          "id": 72,
           "key": "M7a",
           "name": "Legacy `D2KP` container compatibility",
           "weight": 1,
@@ -2649,7 +2664,7 @@
           "evidence": "`scripts/test-wire-ts-up-plan-differential.sh` (a378); C `test_plan_parse`; Rust `parses_legacy_d2kp_container_with_identical_body` · пробел: Дубли `REC_AUTOTTL` в неканоническом D2KP пока отвергаются; канонические C-планы принимаются"
         },
         {
-          "id": 72,
+          "id": 73,
           "key": "M7b",
           "name": "`tcp_ts_up` / `D2K_POISON_TS_UP` wire reorder",
           "weight": 1,
@@ -2664,7 +2679,7 @@
           "evidence": "`scripts/test-wire-ts-up-plan-differential.sh` (a378); C `test_wire`; Rust `tcp_ts_up_*` vectors · пробел: MD5+template остаётся запрещён"
         },
         {
-          "id": 73,
+          "id": 74,
           "key": "M8",
           "name": "Production header-inline helpers inventory/mapping",
           "weight": 1,
@@ -3029,6 +3044,21 @@
     },
     {
       "id": 24,
+      "key": "D23",
+      "name": "Plan table capacity/LRU",
+      "weight": 2,
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
+      "group": "Datapath",
+      "coverage": "`scripts/test-datapath-plan-capacity-differential.sh` (a378); C `test_plans`; Rust LRU/shared-budget tests",
+      "gap": "`--flows`/2048, общий exact-бюджет name/addr/probe, LRU по last_used; `plan_count`/`probe_count` добавлены",
+      "mapping": "`scripts/test-datapath-plan-capacity-differential.sh` (a378); C `test_plans`; Rust LRU/shared-budget tests",
+      "evidence": "`scripts/test-datapath-plan-capacity-differential.sh` (a378); C `test_plans`; Rust LRU/shared-budget tests · пробел: `--flows`/2048, общий exact-бюджет name/addr/probe, LRU по last_used; `plan_count`/`probe_count` добавлены"
+    },
+    {
+      "id": 25,
       "key": "S1",
       "name": "Control frame/commands/ACK/APPLIED/REFUSED",
       "weight": 2,
@@ -3043,7 +3073,7 @@
       "evidence": "`r2o-control-events`, `r2o-control-dropped`, `r2o-ack-applied-persist` (все 304) · пробел: Другая ревизия; длительный процессный restart"
     },
     {
-      "id": 25,
+      "id": 26,
       "key": "S2",
       "name": "Scheduler due order/cooldown/dead address/concurrent endpoints",
       "weight": 3,
@@ -3058,7 +3088,7 @@
       "evidence": "`r2o-scheduler-cooldown`/`dead-address`/`concurrent` (304), `r2o-scheduler-differential` (без diff) · пробел: 304; due ordering не paired"
     },
     {
-      "id": 26,
+      "id": 27,
       "key": "S3",
       "name": "Discovery known-plan/coalesce/queue/permits/own-first",
       "weight": 3,
@@ -3073,7 +3103,7 @@
       "evidence": "`r2o-discovery-*`, `r2o-queue-order`, `r2o-worker-permit`, `r2o-own-first` (304) · пробел: 304; нет текущего прогона"
     },
     {
-      "id": 27,
+      "id": 28,
       "key": "S4",
       "name": "ACK → APPLIED exact proof → candidate persistence",
       "weight": 2,
@@ -3088,7 +3118,7 @@
       "evidence": "`r2o-ack-applied-persist` (304), `r2o-known-plans` (304) · пробел: 304; process restart"
     },
     {
-      "id": 28,
+      "id": 29,
       "key": "S5",
       "name": "JSON catalog atomic save/merge/sync",
       "weight": 2,
@@ -3103,7 +3133,7 @@
       "evidence": "`r2o-catalog-persist`, `r2o-catalog-sync` (304) · пробел: 304; concurrent external writer"
     },
     {
-      "id": 29,
+      "id": 30,
       "key": "S6",
       "name": "HTTP search candidate/order/retry/judge/APPLIED",
       "weight": 3,
@@ -3118,7 +3148,7 @@
       "evidence": "`r2o-http-search` (304), `r2o-fetch-cli` (без пина) · пробел: 304; живой поиск; APPLIED branch"
     },
     {
-      "id": 30,
+      "id": 31,
       "key": "S9",
       "name": "Auto refusal → Discovery → APPLIED → firewall reapply",
       "weight": 2,
@@ -3133,7 +3163,7 @@
       "evidence": "Process smoke с fake datapath peer · пробел: Нет реального datapath/firewall; failure injection"
     },
     {
-      "id": 31,
+      "id": 32,
       "key": "S10",
       "name": "Long-running controller recovery",
       "weight": 1,
@@ -3148,7 +3178,7 @@
       "evidence": "Нет · пробел: Полный цикл после crash/restart"
     },
     {
-      "id": 32,
+      "id": 33,
       "key": "S11",
       "name": "Diagnostics records/snapshots/madvise and periodic report",
       "weight": 1,
@@ -3163,7 +3193,7 @@
       "evidence": "`diagnostics.rs`, `r2o-diagnostics-differential.sh` · пробел: allocator/madvise и часть периодической RSS-сводки отсутствуют"
     },
     {
-      "id": 33,
+      "id": 34,
       "key": "CL1",
       "name": "Raw profiles/ECH shapes/send/cancel/fallback/connect",
       "weight": 3,
@@ -3178,7 +3208,7 @@
       "evidence": "`r2o-raw-profile`, `r2o-raw-emission-cancel`, `r2o-raw-connect-fallback`, `r2o-fallback`, `r2o-raw-split-support` (304) · пробел: 304; live DPI; cancel/timing"
     },
     {
-      "id": 34,
+      "id": 35,
       "key": "CL2",
       "name": "CLEAR confirmation/cancel",
       "weight": 1,
@@ -3193,7 +3223,7 @@
       "evidence": "`test-classifier-clear-confirm` (304) · пробел: 304"
     },
     {
-      "id": 35,
+      "id": 36,
       "key": "CL3",
       "name": "SO_MARK confirmation",
       "weight": 1,
@@ -3208,7 +3238,7 @@
       "evidence": "`test-classifier-so-mark-production` (304) · пробел: 304; production getsockopt"
     },
     {
-      "id": 36,
+      "id": 37,
       "key": "CL4",
       "name": "Base transport errors → split",
       "weight": 1,
@@ -3223,7 +3253,7 @@
       "evidence": "`test-classifier-full-tree-control` (304) · пробел: 304"
     },
     {
-      "id": 37,
+      "id": 38,
       "key": "CL5",
       "name": "Poison/strategy tree/control/neutral ACK",
       "weight": 2,
@@ -3238,7 +3268,7 @@
       "evidence": "`test-classifier-full-tree-control`, `candidate-filter`, `raw-production` (304) · пробел: 304; injected/scripted branches"
     },
     {
-      "id": 38,
+      "id": 39,
       "key": "CL6",
       "name": "TCP measurement + core verifier",
       "weight": 2,
@@ -3253,7 +3283,7 @@
       "evidence": "`r2o-meas`, `r2o-measured-split` (304) · пробел: 304; full call path"
     },
     {
-      "id": 39,
+      "id": 40,
       "key": "CL7",
       "name": "TLS/HTTP verifier outcomes/retry",
       "weight": 1,
@@ -3268,7 +3298,7 @@
       "evidence": "`r2o-tls-verify-differential.sh` (a378), `test-http-chunk-framing` (a63) · пробел: Loopback; не live DPI"
     },
     {
-      "id": 40,
+      "id": 41,
       "key": "CL8",
       "name": "Connect/read timeout + doubled baseline retry",
       "weight": 1,
@@ -3283,7 +3313,7 @@
       "evidence": "`test-classifier-full-tree-control` (304) · пробел: 304"
     },
     {
-      "id": 41,
+      "id": 42,
       "key": "CL9",
       "name": "TLS 1.2 reverse response probe/verdicts",
       "weight": 3,
@@ -3298,7 +3328,7 @@
       "evidence": "`test-d2o-shared-fixtures` (304), `test-classifier-full-tree-control` (304) · пробел: 304; live DPI"
     },
     {
-      "id": 42,
+      "id": 43,
       "key": "CL10",
       "name": "ECH receive ladder/witness/retries",
       "weight": 2,
@@ -3313,7 +3343,7 @@
       "evidence": "`r2o-ech-rx-ladder`, `r2o-layered-rx` (304) · пробел: 304; реальные ECH-конфигурации"
     },
     {
-      "id": 43,
+      "id": 44,
       "key": "CL11",
       "name": "HTTP response framing/reader",
       "weight": 1,
@@ -3328,7 +3358,7 @@
       "evidence": "`test-http-chunk-framing-differential.sh` (a63), `r2k-core` tests · пробел: Остальные call-path/ветви"
     },
     {
-      "id": 44,
+      "id": 45,
       "key": "CL12",
       "name": "ClientHello/TLS12/13/ECH parser helpers",
       "weight": 1,
@@ -3343,7 +3373,7 @@
       "evidence": "C `test_hello/test_ech/test_tls12`, Rust unit · пробел: Нет paired diff"
     },
     {
-      "id": 45,
+      "id": 46,
       "key": "CL13",
       "name": "HTTPS probe/ECH resolver/cache state",
       "weight": 1,
@@ -3358,7 +3388,7 @@
       "evidence": "C `test_httpsprobe`, Rust tests · пробел: Нет paired diff"
     },
     {
-      "id": 46,
+      "id": 47,
       "key": "CL14",
       "name": "HTTP/3 status/header parser + httpup",
       "weight": 1,
@@ -3373,7 +3403,7 @@
       "evidence": "C `test_h3`, `test_httpup_logic`; Rust tests · пробел: Нет paired diff"
     },
     {
-      "id": 47,
+      "id": 48,
       "key": "CL15",
       "name": "Compose/crypto/p256/x25519/props helpers",
       "weight": 2,
@@ -3388,7 +3418,7 @@
       "evidence": "C tests, Rust unit · пробел: Нет matrix-контракта"
     },
     {
-      "id": 48,
+      "id": 49,
       "key": "CL16",
       "name": "Detect/classifier CLI output/exit/JSON",
       "weight": 1,
@@ -3403,7 +3433,7 @@
       "evidence": "`r2o-controller/main.rs` · пробел: human stdout/exit/JSON не полностью сопоставлены"
     },
     {
-      "id": 49,
+      "id": 50,
       "key": "Q1",
       "name": "QUIC Initial/QSN/SNI/local-address gate",
       "weight": 2,
@@ -3418,7 +3448,7 @@
       "evidence": "`r2o-quic-hello`, `r2o-quic-local-address` (304), `r2o-discovery-quic-stop` · пробел: 304; stop/fallback"
     },
     {
-      "id": 50,
+      "id": 51,
       "key": "Q2",
       "name": "Residual/VN/address pool/neutral controls/fallback",
       "weight": 3,
@@ -3433,7 +3463,7 @@
       "evidence": "REA_EVIDENCE (source mapping), controller unit tests · пробел: Нет поведенческого differential"
     },
     {
-      "id": 51,
+      "id": 52,
       "key": "Q3",
       "name": "Short-control complete/budget",
       "weight": 1,
@@ -3448,7 +3478,7 @@
       "evidence": "`test-quic-short-control` (304) · пробел: 304"
     },
     {
-      "id": 52,
+      "id": 53,
       "key": "Q4",
       "name": "HTTP/3 framing/stream termination",
       "weight": 1,
@@ -3463,7 +3493,7 @@
       "evidence": "`test-quic-http3-full-stage-differential.sh` (a63), 18/18 · пробел: Network errors/lifecycle"
     },
     {
-      "id": 53,
+      "id": 54,
       "key": "Q5",
       "name": "HTTP/3 budgets/transport limits/stall",
       "weight": 1,
@@ -3478,7 +3508,7 @@
       "evidence": "Full-stage 18/18; `test-quic-http3` · пробел: 70-KiB HEADERS app_bytes; timing-sensitive stall"
     },
     {
-      "id": 54,
+      "id": 55,
       "key": "Q6",
       "name": "Budget init/app-bytes helper",
       "weight": 1,
@@ -3493,7 +3523,7 @@
       "evidence": "`test-quic-budget-init`, `test-quic-app-bytes` (304) · пробел: 304"
     },
     {
-      "id": 55,
+      "id": 56,
       "key": "Q7",
       "name": "Silent peer handshake timeout",
       "weight": 1,
@@ -3508,7 +3538,7 @@
       "evidence": "Full-stage/`r2o_http3_silent_udp_peer_timeout` (a63) · пробел: Нет ICMP/close-port вариантов"
     },
     {
-      "id": 56,
+      "id": 57,
       "key": "Q8",
       "name": "QUIC deny/recheck lifecycle",
       "weight": 1,
@@ -3523,7 +3553,7 @@
       "evidence": "`r2o_quic_deny.rs` · пробел: Нет paired C/Rust lifecycle differential"
     },
     {
-      "id": 57,
+      "id": 58,
       "key": "R1",
       "name": "UDP observer initiator/SSRC/endpoint event",
       "weight": 2,
@@ -3538,7 +3568,7 @@
       "evidence": "`test-discord-udp-observer-reconnect` (304) · пробел: 304; production RTC"
     },
     {
-      "id": 58,
+      "id": 59,
       "key": "R2",
       "name": "Manual measurement arm propagation",
       "weight": 1,
@@ -3553,7 +3583,7 @@
       "evidence": "`test-discord-voice-discovery-arm` (304) · пробел: 304"
     },
     {
-      "id": 59,
+      "id": 60,
       "key": "R3",
       "name": "Voice trial lease/renewal/120-s waiter/APPLIED",
       "weight": 3,
@@ -3568,7 +3598,7 @@
       "evidence": "`r2o-discord-discovery`, `r2o-discord-voice-lifecycle-helper` (304), `test-discord-scheduled-udp` (a63) · пробел: 304; production process/long RTC"
     },
     {
-      "id": 60,
+      "id": 61,
       "key": "R4",
       "name": "Endpoint change/late NAK/persistence/reapply",
       "weight": 1,
@@ -3583,7 +3613,7 @@
       "evidence": "`r2o-discord-voice-lifecycle-helper` (304) · пробел: 304; source-backed helper"
     },
     {
-      "id": 61,
+      "id": 62,
       "key": "R5",
       "name": "Trial clock after queue admission",
       "weight": 1,
@@ -3598,7 +3628,7 @@
       "evidence": "`test-discord-voice-trial-clock` (304) · пробел: 304"
     },
     {
-      "id": 62,
+      "id": 63,
       "key": "R6",
       "name": "Scheduled UDP emission/queue stats",
       "weight": 1,
@@ -3613,7 +3643,7 @@
       "evidence": "`test-discord-scheduled-udp-differential.sh` (a63) · пробел: Periodic/shutdown queue output"
     },
     {
-      "id": 63,
+      "id": 64,
       "key": "R7",
       "name": "Long RTC session/process recovery",
       "weight": 1,
@@ -3628,7 +3658,7 @@
       "evidence": "Нет · пробел: Полный RTC, restart, endpoint recovery"
     },
     {
-      "id": 64,
+      "id": 65,
       "key": "G1",
       "name": "Discord Gateway WebSocket upgrade/Hello",
       "weight": 1,
@@ -3643,7 +3673,7 @@
       "evidence": "`r2o-tls-verify-differential.sh` + `d2o_verify_differential` (a378), 14 сценариев · пробел: Loopback; не живой Gateway"
     },
     {
-      "id": 65,
+      "id": 66,
       "key": "M1",
       "name": "`compose.c` + `d2kc.c` orchestration/event loop",
       "weight": 3,
@@ -3658,7 +3688,7 @@
       "evidence": "Inventory note; REA fragments · пробел: Нет отдельного контракта и differential"
     },
     {
-      "id": 66,
+      "id": 67,
       "key": "M2",
       "name": "`d2kask.c`",
       "weight": 1,
@@ -3673,7 +3703,7 @@
       "evidence": "`r2o-ask-differential.sh` — независимые suites · пробел: Нет paired diff"
     },
     {
-      "id": 67,
+      "id": 68,
       "key": "M3",
       "name": "`d2kfetch.c` CLI",
       "weight": 1,
@@ -3688,7 +3718,7 @@
       "evidence": "`r2o-fetch-cli-differential.sh` (сравнивает C/Rust CLI) · пробел: Нет SHA-пина; не все ветви"
     },
     {
-      "id": 68,
+      "id": 69,
       "key": "M4",
       "name": "`d2kvoice.c` controller entry",
       "weight": 1,
@@ -3703,7 +3733,7 @@
       "evidence": "Discord rows частично · пробел: Нет контракта"
     },
     {
-      "id": 69,
+      "id": 70,
       "key": "M5",
       "name": "`link.c`, `net4.c`, `udpruntime.c`, `volume.c`",
       "weight": 3,
@@ -3718,7 +3748,7 @@
       "evidence": "Inventory note; Rust `r2o_volume` tests · пробел: Нет C/Rust diff"
     },
     {
-      "id": 70,
+      "id": 71,
       "key": "M6",
       "name": "`crypto.c`, `p256.c`, `x25519.c`, `props.c`, `udpplan.c`, `plantlv.c` helpers",
       "weight": 3,
@@ -3733,7 +3763,7 @@
       "evidence": "C unit tests; Rust units · пробел: Нет paired diff и контракта"
     },
     {
-      "id": 71,
+      "id": 72,
       "key": "M7a",
       "name": "Legacy `D2KP` container compatibility",
       "weight": 1,
@@ -3748,7 +3778,7 @@
       "evidence": "`scripts/test-wire-ts-up-plan-differential.sh` (a378); C `test_plan_parse`; Rust `parses_legacy_d2kp_container_with_identical_body` · пробел: Дубли `REC_AUTOTTL` в неканоническом D2KP пока отвергаются; канонические C-планы принимаются"
     },
     {
-      "id": 72,
+      "id": 73,
       "key": "M7b",
       "name": "`tcp_ts_up` / `D2K_POISON_TS_UP` wire reorder",
       "weight": 1,
@@ -3763,7 +3793,7 @@
       "evidence": "`scripts/test-wire-ts-up-plan-differential.sh` (a378); C `test_wire`; Rust `tcp_ts_up_*` vectors · пробел: MD5+template остаётся запрещён"
     },
     {
-      "id": 73,
+      "id": 74,
       "key": "M8",
       "name": "Production header-inline helpers inventory/mapping",
       "weight": 1,
@@ -3778,7 +3808,7 @@
       "evidence": "`docs/audit/function-index.md` · пробел: 61 header-inline функций добавлены; helper-level mapping не проверен дифференциалами"
     },
     {
-      "id": 74,
+      "id": 75,
       "key": "A1",
       "name": "Bind по умолчанию и выбор LAN IP при установке",
       "weight": 1,
@@ -3793,7 +3823,7 @@
       "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
     },
     {
-      "id": 75,
+      "id": 76,
       "key": "A2",
       "name": "Пустой `PANEL_LISTEN` отключает панель и health update",
       "weight": 1,
@@ -3808,7 +3838,7 @@
       "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
     },
     {
-      "id": 76,
+      "id": 77,
       "key": "A3",
       "name": "Парсер: комментарии, кавычки, хвостовые комментарии",
       "weight": 1,
@@ -3823,7 +3853,7 @@
       "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: ДИФ есть; незакрытая кавычка — пробел"
     },
     {
-      "id": 77,
+      "id": 78,
       "key": "A4",
       "name": "Парсер: unknown keys, не-UTF-8, ignored bytes",
       "weight": 1,
@@ -3838,7 +3868,7 @@
       "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
     },
     {
-      "id": 78,
+      "id": 79,
       "key": "A5",
       "name": "Совместимость known-list с D2O-конфигом",
       "weight": 1,
@@ -3853,7 +3883,7 @@
       "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: **не доказано/пробел**"
     },
     {
-      "id": 79,
+      "id": 80,
       "key": "A6",
       "name": "Лимит заголовка 32 КиБ и код 431",
       "weight": 1,
@@ -3868,7 +3898,7 @@
       "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: ДИФ; точная граница не проверена"
     },
     {
-      "id": 80,
+      "id": 81,
       "key": "A7",
       "name": "Абсолютный дедлайн заголовка 5 с / 408",
       "weight": 1,
@@ -3883,7 +3913,7 @@
       "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
     },
     {
-      "id": 81,
+      "id": 82,
       "key": "A8",
       "name": "Абсолютный дедлайн ответа 5 с",
       "weight": 1,
@@ -3898,7 +3928,7 @@
       "evidence": "`scripts/test-panel-response-deadline-differential.sh` (a378); C `test_response_deadline.c`; Rust `d2o_response_deadline_matches_rust_sender` · пробел: Deadline общий для заголовков и тела; 5215 мс в прогоне"
     },
     {
-      "id": 82,
+      "id": 83,
       "key": "A9",
       "name": "Устойчивость к обрыву клиента/IO-ошибке",
       "weight": 1,
@@ -3913,7 +3943,7 @@
       "evidence": "`serve` изолирует `handle_connection`; IO-ошибка больше не завершает весь serve · пробел: Нет paired C/Rust теста обрыва клиента"
     },
     {
-      "id": 83,
+      "id": 84,
       "key": "A10",
       "name": "Неизвестный маршрут/метод/HTTP-версия",
       "weight": 1,
@@ -3928,7 +3958,7 @@
       "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: ТЕСТ"
     },
     {
-      "id": 84,
+      "id": 85,
       "key": "A11",
       "name": "`/api/status`: unavailable-контракт",
       "weight": 1,
@@ -3943,7 +3973,7 @@
       "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
     },
     {
-      "id": 85,
+      "id": 86,
       "key": "A12",
       "name": "`/api/status`: live shape и catalog revision",
       "weight": 1,
@@ -3958,7 +3988,7 @@
       "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
     },
     {
-      "id": 86,
+      "id": 87,
       "key": "A13",
       "name": "`/api/status`: snapshot/stages/unknown_keys",
       "weight": 1,
@@ -3973,7 +4003,7 @@
       "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: частично; порядок ключей/`unknown_keys` не доказаны"
     },
     {
-      "id": 87,
+      "id": 88,
       "key": "A14",
       "name": "`/api/control`: список действий, коды, gates",
       "weight": 2,
@@ -3988,7 +4018,7 @@
       "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
     },
     {
-      "id": 88,
+      "id": 89,
       "key": "A15",
       "name": "Action state machine и timeout (включая 124)",
       "weight": 2,
@@ -4003,7 +4033,7 @@
       "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: ДИФ timeout; 124 — пробел"
     },
     {
-      "id": 89,
+      "id": 90,
       "key": "A16",
       "name": "Workers GET и байты конфига",
       "weight": 1,
@@ -4018,7 +4048,7 @@
       "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
     },
     {
-      "id": 90,
+      "id": 91,
       "key": "A17",
       "name": "Workers POST: Content-Type/TE/CL/JSON/8 доменов",
       "weight": 2,
@@ -4033,7 +4063,7 @@
       "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
     },
     {
-      "id": 91,
+      "id": 92,
       "key": "A18",
       "name": "Workers POST: busy до записи",
       "weight": 2,
@@ -4048,7 +4078,7 @@
       "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
     },
     {
-      "id": 92,
+      "id": 93,
       "key": "A19",
       "name": "Атомарная запись и сохранение режима",
       "weight": 1,
@@ -4063,7 +4093,7 @@
       "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: ДИФ по байтам; режим/umask не доказан"
     },
     {
-      "id": 93,
+      "id": 94,
       "key": "A20",
       "name": "Telegram config gate/status",
       "weight": 1,
@@ -4078,7 +4108,7 @@
       "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
     },
     {
-      "id": 94,
+      "id": 95,
       "key": "A21",
       "name": "Telegram stats: лимит, схема, таймаут",
       "weight": 1,
@@ -4093,7 +4123,7 @@
       "evidence": "`read_telegram_stats`; unit `telegram_stats_read_has_absolute_deadline`; C oracle `panel/server.c:445-510` · пробел: Абсолютный 1250 мс на connect/read; лимит и схема прежние"
     },
     {
-      "id": 95,
+      "id": 96,
       "key": "A22",
       "name": "`/api/update` absent/never/raw",
       "weight": 1,
@@ -4108,7 +4138,7 @@
       "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
     },
     {
-      "id": 96,
+      "id": 97,
       "key": "A23",
       "name": "Diagnostics GET/POST/download",
       "weight": 1,
@@ -4123,7 +4153,7 @@
       "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
     },
     {
-      "id": 97,
+      "id": 98,
       "key": "A24",
       "name": "Static assets: ETag/304/1 МиБ",
       "weight": 1,
@@ -4138,7 +4168,7 @@
       "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A"
     },
     {
-      "id": 98,
+      "id": 99,
       "key": "A25",
       "name": "Static assets: missing/symlink/embedded fallback",
       "weight": 1,
@@ -4153,7 +4183,7 @@
       "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: ТЕСТ; C 404 vs Rust fallback"
     },
     {
-      "id": 99,
+      "id": 100,
       "key": "A26",
       "name": "CLI `--version`/`serve`/`--self-check`/`--release-id`",
       "weight": 1,
@@ -4168,7 +4198,7 @@
       "evidence": "`crates/r2o-panel/tests/cli.rs`; C oracle `runtime/d2k_runtime.h:26-35` · пробел: Формат self-check совпадает, release=сборочный"
     },
     {
-      "id": 100,
+      "id": 101,
       "key": "B1",
       "name": "Config defaults и совместимость ключей",
       "weight": 1,
@@ -4183,7 +4213,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: частично; `MODE` fallback и `KEENETIC_POLICY` — пробелы"
     },
     {
-      "id": 101,
+      "id": 102,
       "key": "B2",
       "name": "Start order: engine→telegram→panel→schedulers",
       "weight": 2,
@@ -4198,7 +4228,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 102,
+      "id": 103,
       "key": "B3",
       "name": "Stop order и восстановление fastnat/offload",
       "weight": 2,
@@ -4213,7 +4243,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 103,
+      "id": 104,
       "key": "B4",
       "name": "Engine start: queue wait, firewall, controller, watchdog",
       "weight": 2,
@@ -4228,7 +4258,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 104,
+      "id": 105,
       "key": "B5",
       "name": "Engine stop: порядок и коды",
       "weight": 2,
@@ -4243,7 +4273,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 105,
+      "id": 106,
       "key": "B6",
       "name": "`engine-restart`/`settings-restart`",
       "weight": 1,
@@ -4258,7 +4288,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: ДИФ/пробел `MODE=off`"
     },
     {
-      "id": 106,
+      "id": 107,
       "key": "B7",
       "name": "Panel lifecycle и disabled panel",
       "weight": 1,
@@ -4273,7 +4303,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 107,
+      "id": 108,
       "key": "B8",
       "name": "`status` (поля и коды)",
       "weight": 1,
@@ -4288,7 +4318,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: ДИФ; текстовый формат отличается"
     },
     {
-      "id": 108,
+      "id": 109,
       "key": "B9",
       "name": "`clear-found`: все state-файлы",
       "weight": 2,
@@ -4303,7 +4333,7 @@
       "evidence": "`scripts/test-router-clear-found-state.sh`; C oracle `files/S99d2k:1588-1604` · пробел: Fatal `rm` ошибки игнорируются как в C"
     },
     {
-      "id": 109,
+      "id": 110,
       "key": "B10",
       "name": "nft backend: генерация и postconditions",
       "weight": 3,
@@ -4318,7 +4348,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: ДИФ (mock)"
     },
     {
-      "id": 110,
+      "id": 111,
       "key": "B11",
       "name": "iptables backend: генерация и postconditions",
       "weight": 3,
@@ -4333,7 +4363,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: ДИФ (mock)"
     },
     {
-      "id": 111,
+      "id": 112,
       "key": "B12",
       "name": "Код ошибки отдельного правила",
       "weight": 1,
@@ -4348,7 +4378,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 112,
+      "id": 113,
       "key": "B13",
       "name": "nft rollback и RST-table cleanup",
       "weight": 2,
@@ -4363,7 +4393,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 113,
+      "id": 114,
       "key": "B14",
       "name": "Legacy D2K cleanup",
       "weight": 2,
@@ -4378,7 +4408,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 114,
+      "id": 115,
       "key": "B15",
       "name": "RST table lifetime",
       "weight": 2,
@@ -4393,7 +4423,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 115,
+      "id": 116,
       "key": "B16",
       "name": "Status nft completeness",
       "weight": 2,
@@ -4408,7 +4438,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 116,
+      "id": 117,
       "key": "B17",
       "name": "Status iptables completeness",
       "weight": 2,
@@ -4423,7 +4453,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 117,
+      "id": 118,
       "key": "B18",
       "name": "IPv6 fallback + marker + reapply",
       "weight": 2,
@@ -4438,7 +4468,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 118,
+      "id": 119,
       "key": "B19",
       "name": "DNS upstream exclusions/refresh",
       "weight": 2,
@@ -4453,7 +4483,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 119,
+      "id": 120,
       "key": "B20",
       "name": "Flow-offload disable/restore",
       "weight": 2,
@@ -4468,7 +4498,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 120,
+      "id": 121,
       "key": "B21",
       "name": "Flow-offload write-failure",
       "weight": 1,
@@ -4483,7 +4513,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 121,
+      "id": 122,
       "key": "B22",
       "name": "Fastnat lifecycle",
       "weight": 1,
@@ -4498,7 +4528,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 122,
+      "id": 123,
       "key": "B23",
       "name": "PPE rule generation/order",
       "weight": 2,
@@ -4513,7 +4543,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 123,
+      "id": 124,
       "key": "B24",
       "name": "PPE removal error codes",
       "weight": 1,
@@ -4528,7 +4558,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 124,
+      "id": 125,
       "key": "B25",
       "name": "PPE backend/gate/lock",
       "weight": 2,
@@ -4543,7 +4573,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: ДИФ (mock)"
     },
     {
-      "id": 125,
+      "id": 126,
       "key": "B26",
       "name": "Firewall lock/reapply",
       "weight": 1,
@@ -4558,7 +4588,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 126,
+      "id": 127,
       "key": "B27",
       "name": "Heal: status/ppe/dns",
       "weight": 2,
@@ -4573,7 +4603,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 127,
+      "id": 128,
       "key": "B28",
       "name": "Heal concurrency/cooldown",
       "weight": 2,
@@ -4588,7 +4618,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 128,
+      "id": 129,
       "key": "B29",
       "name": "Firewall watchdog period/start-stop",
       "weight": 1,
@@ -4603,7 +4633,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 129,
+      "id": 130,
       "key": "B30",
       "name": "NDM hook nat/mangle",
       "weight": 1,
@@ -4618,7 +4648,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 130,
+      "id": 131,
       "key": "B31",
       "name": "S99/procd waiter и detach",
       "weight": 1,
@@ -4633,7 +4663,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 131,
+      "id": 132,
       "key": "B33",
       "name": "Update guard/availability",
       "weight": 2,
@@ -4648,7 +4678,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 132,
+      "id": 133,
       "key": "B34",
       "name": "Stage→stop→activate→start порядок",
       "weight": 2,
@@ -4663,7 +4693,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 133,
+      "id": 134,
       "key": "B35",
       "name": "Rollback + bad release + health",
       "weight": 2,
@@ -4678,7 +4708,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 134,
+      "id": 135,
       "key": "B36",
       "name": "Signed bootstrap/install",
       "weight": 2,
@@ -4693,7 +4723,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 135,
+      "id": 136,
       "key": "B37",
       "name": "OpenWrt ABI/reboot update",
       "weight": 2,
@@ -4708,7 +4738,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: **не доказано**"
     },
     {
-      "id": 136,
+      "id": 137,
       "key": "B38",
       "name": "Package release manifest/assets",
       "weight": 1,
@@ -4723,7 +4753,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 137,
+      "id": 138,
       "key": "B39",
       "name": "Router install lifecycle",
       "weight": 2,
@@ -4738,7 +4768,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 138,
+      "id": 139,
       "key": "B40",
       "name": "Uninstall и аварийная очистка",
       "weight": 1,
@@ -4753,7 +4783,7 @@
       "evidence": "`scripts/test-router-uninstall-fallback.sh`; C oracle `scripts/uninstall.sh:57-74` · пробел: Аварийная остановка только по owned PID-файлам"
     },
     {
-      "id": 139,
+      "id": 140,
       "key": "B41",
       "name": "Telegram start/stop/restart",
       "weight": 2,
@@ -4768,7 +4798,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 140,
+      "id": 141,
       "key": "B42",
       "name": "Telegram reapply semantics",
       "weight": 2,
@@ -4783,7 +4813,7 @@
       "evidence": "`scripts/test-router-telegram-reapply.sh`; C oracle `files/S99d2k:1470-1474` · пробел: Остановленный процесс не запускается; heal только для running"
     },
     {
-      "id": 141,
+      "id": 142,
       "key": "B43",
       "name": "Telegram mark/gate",
       "weight": 1,
@@ -4798,7 +4828,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 142,
+      "id": 143,
       "key": "B44",
       "name": "Telegram firewall nft/iptables",
       "weight": 2,
@@ -4813,7 +4843,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 143,
+      "id": 144,
       "key": "B46",
       "name": "Telegram watchdog health contract",
       "weight": 2,
@@ -4828,7 +4858,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: **пробел**"
     },
     {
-      "id": 144,
+      "id": 145,
       "key": "B47",
       "name": "Meta DNS scheduler lifecycle",
       "weight": 1,
@@ -4843,7 +4873,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 145,
+      "id": 146,
       "key": "B48",
       "name": "Meta DNS offset/backoff/tick",
       "weight": 2,
@@ -4858,7 +4888,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: **не доказано**"
     },
     {
-      "id": 146,
+      "id": 147,
       "key": "B49",
       "name": "Meta DNS ranges asset",
       "weight": 1,
@@ -4873,7 +4903,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 147,
+      "id": 148,
       "key": "B50",
       "name": "Meta DNS edge verification",
       "weight": 1,
@@ -4888,7 +4918,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 148,
+      "id": 149,
       "key": "B51",
       "name": "Meta DNS owned-record removal",
       "weight": 1,
@@ -4903,7 +4933,7 @@
       "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B"
     },
     {
-      "id": 149,
+      "id": 150,
       "key": "B52",
       "name": "Log maintenance: все owned-логи",
       "weight": 1,
@@ -4918,7 +4948,7 @@
       "evidence": "`scripts/test-router-log-maintenance.sh`; C oracle `files/d2k-log-maintenance.sh:68-75` · пробел: Meta DNS логи добавлены в ротацию"
     },
     {
-      "id": 150,
+      "id": 151,
       "key": "B53",
       "name": "`KEENETIC_POLICY` → `--only-mark`",
       "weight": 2,
@@ -4933,7 +4963,7 @@
       "evidence": "`router/r2o-policy-mark.sh`, `scripts/test-router-keenetic-policy.sh`; C oracle `files/S99d2k:1130-1166` · пробел: Нет live `ndmc` на физическом Keenetic"
     },
     {
-      "id": 151,
+      "id": 152,
       "key": "TG1",
       "name": "Config file/env mapping и валидация",
       "weight": 2,
@@ -4948,7 +4978,7 @@
       "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
     },
     {
-      "id": 152,
+      "id": 153,
       "key": "TG3",
       "name": "DC map persist/merge/validate",
       "weight": 2,
@@ -4963,7 +4993,7 @@
       "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
     },
     {
-      "id": 153,
+      "id": 154,
       "key": "TG4",
       "name": "`help.getConfig` и dcOption",
       "weight": 2,
@@ -4978,7 +5008,7 @@
       "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
     },
     {
-      "id": 154,
+      "id": 155,
       "key": "TG5",
       "name": "obfuscated2/secret/DC/media/proto",
       "weight": 2,
@@ -4993,7 +5023,7 @@
       "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
     },
     {
-      "id": 155,
+      "id": 156,
       "key": "TG6",
       "name": "MTProto splitter",
       "weight": 2,
@@ -5008,7 +5038,7 @@
       "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
     },
     {
-      "id": 156,
+      "id": 157,
       "key": "TG7",
       "name": "v2 encrypted",
       "weight": 1,
@@ -5023,7 +5053,7 @@
       "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
     },
     {
-      "id": 157,
+      "id": 158,
       "key": "TG8",
       "name": "resPQ probe",
       "weight": 1,
@@ -5038,7 +5068,7 @@
       "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
     },
     {
-      "id": 158,
+      "id": 159,
       "key": "TG9",
       "name": "DC→WSS/CF route plan",
       "weight": 2,
@@ -5053,7 +5083,7 @@
       "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
     },
     {
-      "id": 159,
+      "id": 160,
       "key": "TG10",
       "name": "Route DNS/DoH/DoT",
       "weight": 2,
@@ -5068,7 +5098,7 @@
       "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
     },
     {
-      "id": 160,
+      "id": 161,
       "key": "TG11",
       "name": "TLS verification/SNI",
       "weight": 1,
@@ -5083,7 +5113,7 @@
       "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
     },
     {
-      "id": 161,
+      "id": 162,
       "key": "TG12",
       "name": "WS upgrade/frames",
       "weight": 2,
@@ -5098,7 +5128,7 @@
       "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
     },
     {
-      "id": 162,
+      "id": 163,
       "key": "TG13",
       "name": "CF domain pool refresh/cache",
       "weight": 2,
@@ -5113,7 +5143,7 @@
       "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
     },
     {
-      "id": 163,
+      "id": 164,
       "key": "TG14",
       "name": "CF proxy DoH",
       "weight": 2,
@@ -5128,7 +5158,7 @@
       "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
     },
     {
-      "id": 164,
+      "id": 165,
       "key": "TG15",
       "name": "Transparent listener/SO_ORIGINAL_DST",
       "weight": 2,
@@ -5143,7 +5173,7 @@
       "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
     },
     {
-      "id": 165,
+      "id": 166,
       "key": "TG16",
       "name": "Transparent policy ports/CIDR/self-dial",
       "weight": 2,
@@ -5158,7 +5188,7 @@
       "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
     },
     {
-      "id": 166,
+      "id": 167,
       "key": "TG17",
       "name": "Official secret/DD",
       "weight": 2,
@@ -5173,7 +5203,7 @@
       "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
     },
     {
-      "id": 167,
+      "id": 168,
       "key": "TG18",
       "name": "Retry/cooldown/routing policy",
       "weight": 2,
@@ -5188,7 +5218,7 @@
       "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
     },
     {
-      "id": 168,
+      "id": 169,
       "key": "TG19",
       "name": "Stats schema и Unix socket",
       "weight": 2,
@@ -5203,7 +5233,7 @@
       "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
     },
     {
-      "id": 169,
+      "id": 170,
       "key": "TG20",
       "name": "Stats request protocol robustness",
       "weight": 1,
@@ -5218,7 +5248,7 @@
       "evidence": "`stats.rs::serve_unix`; unit `unix_stats_socket_times_out_silent_client_and_continues`; C oracle `telegram/src/stats_socket.c` · пробел: Абсолютный 1250 мс на чтение/запись; снимок отдаётся и молчащему клиенту"
     },
     {
-      "id": 170,
+      "id": 171,
       "key": "TG21",
       "name": "Response observer",
       "weight": 1,
@@ -5233,7 +5263,7 @@
       "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
     },
     {
-      "id": 171,
+      "id": 172,
       "key": "TG22",
       "name": "Connection/memory limits",
       "weight": 2,
@@ -5248,7 +5278,7 @@
       "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C · пробел: **пробел (memory budget)**"
     },
     {
-      "id": 172,
+      "id": 173,
       "key": "TG23",
       "name": "Diagnostics `--check`",
       "weight": 2,
@@ -5263,7 +5293,7 @@
       "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
     },
     {
-      "id": 173,
+      "id": 174,
       "key": "TG24",
       "name": "Service lifecycle/recovery",
       "weight": 2,
@@ -5280,14 +5310,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 93,
-      "weight": 261,
-      "percent": 35.63
+      "points": 95,
+      "weight": 263,
+      "percent": 36.12
     },
     "carry_forward": {
-      "points": 156,
-      "weight": 261,
-      "percent": 59.77,
+      "points": 158,
+      "weight": 263,
+      "percent": 60.08,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

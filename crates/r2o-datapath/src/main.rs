@@ -885,7 +885,7 @@ mod app {
             .map(|path| r2k_core::control::r2k_snapshot_socket_path(path))
             .map(|path| ControlServer::open(path, u16::MAX as u32))
             .transpose()?;
-        let mut name_plans = NamePlans::default();
+        let mut name_plans = NamePlans::with_capacity(options.flow_capacity.slots());
         name_plans.r2o_set_send_maxlen(effective_send_maxlen);
         let mut socket = QueueSocket::open(
             queue,
