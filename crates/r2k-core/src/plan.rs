@@ -174,6 +174,19 @@ impl Plan {
         }
     }
 
+    /// Перекодировать валидный R2OP в выбранный внешний контейнер.
+    /// Тело не меняется; для legacy D2KP заменяется только magic.
+    pub fn to_wire(bytes: &[u8], legacy: bool) -> Result<Vec<u8>, PlanError> {
+        Self::parse_wire(bytes)?;
+        let mut converted = bytes.to_vec();
+        converted[..PLAN_MAGIC.len()].copy_from_slice(if legacy {
+            &LEGACY_PLAN_MAGIC
+        } else {
+            &PLAN_MAGIC
+        });
+        Ok(converted)
+    }
+
     pub fn parse(bytes: &[u8]) -> Result<Self, PlanError> {
         if bytes.len() < HEADER_LEN {
             return Err(PlanError::new("короче заголовка"));

@@ -210,6 +210,19 @@ fn parses_legacy_d2kp_container_with_identical_body() {
     assert_eq!(Plan::parse(&r2op).unwrap(), parsed);
 }
 
+#[test]
+fn converts_r2op_to_legacy_d2kp_and_back() {
+    let r2op = plan(1, 8, &[tlv(0x0103, &[0])]);
+    let d2kp = Plan::to_wire(&r2op, true).unwrap();
+    assert_eq!(&d2kp[..4], b"D2KP");
+    assert_eq!(
+        Plan::parse_wire(&d2kp).unwrap(),
+        Plan::parse(&r2op).unwrap()
+    );
+    assert_eq!(Plan::to_wire(&d2kp, false).unwrap(), r2op);
+    assert!(Plan::to_wire(b"not a plan", true).is_err());
+}
+
 fn tlv(kind: u16, value: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(4 + value.len());
     bytes.extend_from_slice(&kind.to_be_bytes());

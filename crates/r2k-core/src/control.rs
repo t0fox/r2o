@@ -68,6 +68,13 @@ pub const ACK_NO_ROOM: u8 = 2;
 pub const ACK_BAD_ARGS: u8 = 3;
 pub const BINDING_CONTEXT_LEN: usize = 28;
 
+/// Профиль управляющего провода. V22 — D2O-совместимый, V48 — текущий R2O.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WireProfile {
+    V22,
+    V48,
+}
+
 pub const SHAPE_MODERN: u8 = 1;
 pub const SHAPE_LEGACY: u8 = 2;
 pub const SHAPE_QUIC: u8 = 3;
@@ -1618,6 +1625,26 @@ pub fn encode_ack_with_identifiers(
     area_id: Option<[u8; 16]>,
     binding_context: Option<BindingContext>,
 ) -> Result<Vec<u8>, &'static str> {
+    encode_ack_with_identifiers_profile(
+        WireProfile::V48,
+        command,
+        ok,
+        reason,
+        trial_id,
+        area_id,
+        binding_context,
+    )
+}
+
+pub fn encode_ack_with_identifiers_profile(
+    profile: WireProfile,
+    command: u16,
+    ok: bool,
+    reason: u8,
+    trial_id: Option<[u8; 16]>,
+    area_id: Option<[u8; 16]>,
+    binding_context: Option<BindingContext>,
+) -> Result<Vec<u8>, &'static str> {
     if command == COMMAND_SET_NAME_BOUND && (trial_id.is_none() || binding_context.is_none()) {
         return Err("SET_NAME_BOUND ACK требует trial ID и контекст привязки");
     }
@@ -1661,7 +1688,10 @@ pub fn encode_ack_with_identifiers(
             + 4
             + trial_id.map_or(0, |_| 16)
             + area_id.map_or(0, |_| 16)
-            + binding_context.map_or(0, |_| ACK_BINDING_CONTEXT_LEN),
+            + binding_context.map_or(0, |_| match profile {
+                WireProfile::V22 => BINDING_CONTEXT_LEN,
+                WireProfile::V48 => ACK_BINDING_CONTEXT_LEN,
+            }),
     );
     body.resize(KEY_LEN + 4, 0);
     body[0] = 4;
@@ -1675,7 +1705,9 @@ pub fn encode_ack_with_identifiers(
         body.extend_from_slice(&area_id);
     }
     if let Some(binding) = binding_context {
-        body.extend_from_slice(ACK_BINDING_CONTEXT_MAGIC);
+        if profile == WireProfile::V48 {
+            body.extend_from_slice(ACK_BINDING_CONTEXT_MAGIC);
+        }
         body.extend_from_slice(&binding.generation.to_be_bytes());
         body.extend_from_slice(&[
             binding.kind,
@@ -1689,6 +1721,11 @@ pub fn encode_ack_with_identifiers(
 }
 
 pub fn decode_ack(frame: &Frame) -> Result<Ack, &'static str> {
+    decode_ack_profile(WireProfile::V48, frame)
+}
+
+pub fn decode_ack_profile(profile: WireProfile, frame: &Frame) -> Result<Ack, &'static str> {
+    let _ = profile;
     if frame.kind != EVENT_ACK || frame.body.len() < KEY_LEN + 4 {
         return Err("неверное подтверждение команды");
     }
@@ -1720,7 +1757,9 @@ pub fn decode_ack(frame: &Frame) -> Result<Ack, &'static str> {
     let remaining = frame.body.len() - cursor;
     let trial_id = if supports_trial_id
         && (remaining == 16
-            || command == COMMAND_SET_NAME_BOUND && remaining == 16 + ACK_BINDING_CONTEXT_LEN)
+            || command == COMMAND_SET_NAME_BOUND
+                && (remaining == 16 + ACK_BINDING_CONTEXT_LEN
+                    || remaining == 16 + BINDING_CONTEXT_LEN))
     {
         let trial_id = frame.body[cursor..cursor + 16]
             .try_into()
@@ -1742,11 +1781,16 @@ pub fn decode_ack(frame: &Frame) -> Result<Ack, &'static str> {
     };
     let binding_context = if cursor == frame.body.len() {
         None
-    } else if matches!(command, COMMAND_SET_NAME | COMMAND_SET_NAME_BOUND)
-        && frame.body.len() == cursor + ACK_BINDING_CONTEXT_LEN
-        && frame.body[cursor..cursor + 4] == *ACK_BINDING_CONTEXT_MAGIC
-    {
-        let context = &frame.body[cursor + 4..];
+    } else if matches!(command, COMMAND_SET_NAME | COMMAND_SET_NAME_BOUND) {
+        let context = if frame.body.len() == cursor + ACK_BINDING_CONTEXT_LEN
+            && frame.body[cursor..cursor + 4] == *ACK_BINDING_CONTEXT_MAGIC
+        {
+            &frame.body[cursor + 4..]
+        } else if frame.body.len() == cursor + BINDING_CONTEXT_LEN {
+            &frame.body[cursor..]
+        } else {
+            return Err("неверная длина подтверждения команды");
+        };
         let binding = BindingContext {
             generation: u64::from_be_bytes(
                 context[..8]
@@ -1798,9 +1842,9 @@ pub fn decode_ack(frame: &Frame) -> Result<Ack, &'static str> {
 mod ack_binding_context_tests {
     use super::{
         BindingContext, COMMAND_DEL_NAME_BOUND, COMMAND_SET_BYPASS, COMMAND_SET_NAME,
-        COMMAND_SET_NAME_BOUND, SHAPE_HTTP, decode_ack, encode_ack_for_trial,
-        encode_ack_with_binding, encode_ack_with_identifiers, encode_delete_name_bound,
-        encode_set_name_bound, read_frame,
+        COMMAND_SET_NAME_BOUND, SHAPE_HTTP, WireProfile, decode_ack, encode_ack_for_trial,
+        encode_ack_with_binding, encode_ack_with_identifiers, encode_ack_with_identifiers_profile,
+        encode_delete_name_bound, encode_set_name_bound, read_frame,
     };
     use std::io::Cursor;
 
@@ -1910,6 +1954,51 @@ mod ack_binding_context_tests {
                 .unwrap();
         let frame = read_frame(&mut Cursor::new(bytes)).unwrap();
         assert_eq!(decode_ack(&frame).unwrap().area_id, Some([3; 16]));
+    }
+
+    #[test]
+    fn v22_bound_ack_uses_raw_binding_without_r2bc() {
+        let binding = BindingContext {
+            generation: 0x0102_0304_0506_0708,
+            kind: 1,
+            family: 4,
+            shape: SHAPE_HTTP,
+            temporary: false,
+            epoch: [0x11; 16],
+        };
+        let bytes = encode_ack_with_identifiers_profile(
+            WireProfile::V22,
+            COMMAND_SET_NAME_BOUND,
+            true,
+            0,
+            Some([0x22; 16]),
+            None,
+            Some(binding),
+        )
+        .unwrap();
+        let frame = read_frame(&mut Cursor::new(bytes)).unwrap();
+        assert_eq!(frame.body.len(), super::KEY_LEN + 4 + 16 + 28);
+        let context = &frame.body[super::KEY_LEN + 4 + 16..];
+        assert_ne!(&context[..4], b"R2BC");
+        assert_eq!(context[..8], 0x0102_0304_0506_0708u64.to_be_bytes());
+        assert_eq!(decode_ack(&frame).unwrap().binding_context, Some(binding));
+
+        let v48 = encode_ack_with_identifiers_profile(
+            WireProfile::V48,
+            COMMAND_SET_NAME_BOUND,
+            true,
+            0,
+            Some([0x22; 16]),
+            None,
+            Some(binding),
+        )
+        .unwrap();
+        let v48_frame = read_frame(&mut Cursor::new(v48)).unwrap();
+        assert_eq!(v48_frame.body.len(), super::KEY_LEN + 4 + 16 + 32);
+        assert_eq!(
+            &v48_frame.body[super::KEY_LEN + 4 + 16..super::KEY_LEN + 4 + 20],
+            b"R2BC"
+        );
     }
 
     #[test]
