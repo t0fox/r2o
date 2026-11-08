@@ -3,12 +3,12 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 249,
-  "percent": 91.88,
+  "points": 250,
+  "percent": 92.25,
   "total": 179,
   "counts": {
-    "verified": 167,
-    "carry": 1,
+    "verified": 168,
+    "carry": 0,
     "partial": 10,
     "missing": 0,
     "implemented": 0,
@@ -18,7 +18,7 @@
     {
       "name": "Datapath",
       "weight": 28,
-      "points": 24,
+      "points": 25,
       "items": [
         {
           "id": 1,
@@ -190,15 +190,15 @@
           "key": "D11",
           "name": "High-cardinality mixed load + peak RSS",
           "weight": 1,
-          "points": 0,
+          "points": 1,
           "carry_points": 1,
-          "status": "carry",
-          "statusLabel": "carry (304) — historical",
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Datapath",
-          "coverage": "`test-datapath-high-cardinality-differential.sh` (304)",
-          "gap": "Другая ревизия; физическая калибровка",
-          "mapping": "`test-datapath-high-cardinality-differential.sh` (304)",
-          "evidence": "`test-datapath-high-cardinality-differential.sh` (304) · пробел: Другая ревизия; физическая калибровка"
+          "coverage": "`scripts/test-datapath-high-cardinality-differential.sh` (a378, `unshare -Urnm` + tmpfs `/run/netns`)",
+          "gap": "1536 UDP/60 с: D2O 60/60 раундов, R2O 60/60; 93696 ответов, TCP echo 12×64 КиБ, потерь ядра 0; peak RSS D2O 7936 КиБ, R2O 4452 КиБ. Исправлен баг пустого `OwnedReady` (потеря вердиктов и 33k сообщений)",
+          "mapping": "`scripts/test-datapath-high-cardinality-differential.sh` (a378, `unshare -Urnm` + tmpfs `/run/netns`)",
+          "evidence": "`scripts/test-datapath-high-cardinality-differential.sh` (a378, `unshare -Urnm` + tmpfs `/run/netns`) · пробел: 1536 UDP/60 с: D2O 60/60 раундов, R2O 60/60; 93696 ответов, TCP echo 12×64 КиБ, потерь ядра 0; peak RSS D2O 7936 КиБ, R2O 4452 КиБ. Исправлен баг пустого `OwnedReady` (потеря вердиктов и 33k сообщений)"
         },
         {
           "id": 13,
@@ -2942,15 +2942,15 @@
       "key": "D11",
       "name": "High-cardinality mixed load + peak RSS",
       "weight": 1,
-      "points": 0,
+      "points": 1,
       "carry_points": 1,
-      "status": "carry",
-      "statusLabel": "carry (304) — historical",
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Datapath",
-      "coverage": "`test-datapath-high-cardinality-differential.sh` (304)",
-      "gap": "Другая ревизия; физическая калибровка",
-      "mapping": "`test-datapath-high-cardinality-differential.sh` (304)",
-      "evidence": "`test-datapath-high-cardinality-differential.sh` (304) · пробел: Другая ревизия; физическая калибровка"
+      "coverage": "`scripts/test-datapath-high-cardinality-differential.sh` (a378, `unshare -Urnm` + tmpfs `/run/netns`)",
+      "gap": "1536 UDP/60 с: D2O 60/60 раундов, R2O 60/60; 93696 ответов, TCP echo 12×64 КиБ, потерь ядра 0; peak RSS D2O 7936 КиБ, R2O 4452 КиБ. Исправлен баг пустого `OwnedReady` (потеря вердиктов и 33k сообщений)",
+      "mapping": "`scripts/test-datapath-high-cardinality-differential.sh` (a378, `unshare -Urnm` + tmpfs `/run/netns`)",
+      "evidence": "`scripts/test-datapath-high-cardinality-differential.sh` (a378, `unshare -Urnm` + tmpfs `/run/netns`) · пробел: 1536 UDP/60 с: D2O 60/60 раундов, R2O 60/60; 93696 ответов, TCP echo 12×64 КиБ, потерь ядра 0; peak RSS D2O 7936 КиБ, R2O 4452 КиБ. Исправлен баг пустого `OwnedReady` (потеря вердиктов и 33k сообщений)"
     },
     {
       "id": 13,
@@ -5460,9 +5460,9 @@
   ],
   "comparison": {
     "strict": {
-      "points": 249,
+      "points": 250,
       "weight": 271,
-      "percent": 91.88
+      "percent": 92.25
     },
     "carry_forward": {
       "points": 250,

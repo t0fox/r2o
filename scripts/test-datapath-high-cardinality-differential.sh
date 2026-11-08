@@ -9,13 +9,13 @@ CARGO_HOME=${CARGO_HOME:-$tooling_root/linux-cargo}
 RUSTUP_HOME=${RUSTUP_HOME:-$tooling_root/linux-rustup}
 CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$tooling_root/linux-target}
 TMPDIR=${TMPDIR:-$tooling_root/tests}
-for path in "$tooling_root" "$CARGO_HOME" "$RUSTUP_HOME" "$CARGO_TARGET_DIR" "$TMPDIR"; do
+for path in "$tooling_root" "$CARGO_TARGET_DIR" "$TMPDIR"; do
     case "$path" in /mnt/e/*) ;; *) printf 'Build and temporary paths must stay on E: %s\n' "$path" >&2; exit 2 ;; esac
 done
 PATH="$CARGO_HOME/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export CARGO_HOME RUSTUP_HOME CARGO_TARGET_DIR TMPDIR PATH
 cd "$repo_root"
-expected_donor_sha=304ba893dd37197128ac8799c0495b035f6a38c0
+expected_donor_sha=a378e230947ebfd011439e1cac0f1e994d883aae
 actual_donor_sha=$(git -C "$donor_root" rev-parse HEAD)
 if [ "$actual_donor_sha" != "$expected_donor_sha" ]; then
     printf 'Expected d2o %s, got %s\n' "$expected_donor_sha" "$actual_donor_sha" >&2
@@ -250,7 +250,7 @@ cleanup() {
         fi
     done
     if [ "$status" -ne 0 ]; then
-        for log in "$work"/*.log "$work"/*.out; do [ ! -f "$log" ] || { echo "--- $log ---" >&2; cat "$log" >&2; }; done
+        for log in "$work"/*.log "$work"/*.out "$work"/*.err; do [ ! -f "$log" ] || { echo "--- $log ---" >&2; cat "$log" >&2; }; done
     fi
     rm -rf -- "$work"
 }
@@ -310,7 +310,7 @@ run_case() {
     attempts=0
     while [ ! -f "$work/$side.ready" ] && [ "$attempts" -lt 100 ]; do sleep 0.05; attempts=$((attempts + 1)); done
     [ -f "$work/$side.ready" ] || { echo "$side echo server did not start" >&2; return 1; }
-    ip netns exec "$client_ns" python3 "$work/client.py" "$flow_count" "$duration" "$CLIENT_IP" "$SERVER_IP" "$UDP_PORT" "$TCP_PORT" >"$work/$side.client.out"
+    ip netns exec "$client_ns" python3 "$work/client.py" "$flow_count" "$duration" "$CLIENT_IP" "$SERVER_IP" "$UDP_PORT" "$TCP_PORT" >"$work/$side.client.out" 2>"$work/$side.client.err"
     ip netns exec "$client_ns" ip route show >"$work/$side.route.log"
     ip netns exec "$client_ns" ip route get "$SERVER_IP" >>"$work/$side.route.log"
     ip netns exec "$client_ns" nft list table inet stress >"$work/$side.nft.log"

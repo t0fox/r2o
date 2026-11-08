@@ -3672,6 +3672,9 @@ mod app {
     }
 
     fn r2o_resend_owned_originals(raw: Option<&RawSocket>, originals: &[Vec<u8>]) {
+        if originals.is_empty() {
+            return;
+        }
         let Some(raw) = raw else {
             eprintln!("r2o-datapath: owned TLS originals остались без raw socket");
             return;

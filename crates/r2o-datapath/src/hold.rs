@@ -840,7 +840,11 @@ impl HoldTable {
                     .iter()
                     .map(|held_packet| held_packet.id)
                     .collect();
-                let all_owned = held.packets.iter().all(|held_packet| held_packet.owned);
+                // Пустой список не должен попадать в OwnedReady: иначе
+                // NFQUEUE-вердикты удержанных пакетов теряются, а raw-send
+                // получает пустой набор. Это же отличает «нечего возвращать».
+                let all_owned = !held.packets.is_empty()
+                    && held.packets.iter().all(|held_packet| held_packet.owned);
                 let outcome = if all_owned {
                     let mut originals = held.packets;
                     originals
