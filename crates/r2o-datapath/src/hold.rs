@@ -2594,4 +2594,120 @@ mod tests {
             }
         );
     }
+
+    fn d17_action(result: &super::FeedResult, https: bool) -> (&'static str, bool) {
+        match &result.outcome {
+            HoldOutcome::HttpResponse {
+                portal, redirect, ..
+            } => {
+                let action = if redirect.is_some() && https {
+                    "replace"
+                } else {
+                    "pass"
+                };
+                (action, portal.is_some())
+            }
+            HoldOutcome::Drop => ("drop", false),
+            _ => ("pass", false),
+        }
+    }
+
+    fn d17_start(start: Instant, options: HoldOptions, request: &[u8]) -> HoldTable {
+        let mut hold = HoldTable::default();
+        let _ = hold.feed_observing(1, &http_packet(2000, 0x02, &[]), start, options);
+        let _ = hold.feed_observing(
+            2,
+            &http_response_packet(9000, 2001, 0x12, &[]),
+            start + Duration::from_millis(10),
+            options,
+        );
+        let _ = hold.feed_observing(
+            3,
+            &http_packet(2001, 0x18, request),
+            start + Duration::from_millis(11),
+            options,
+        );
+        hold
+    }
+
+    #[test]
+    #[ignore]
+    fn d17_http80_trace() {
+        let start = Instant::now();
+        let options = HoldOptions {
+            observe_http: true,
+            ..HoldOptions::default()
+        };
+        let request = b"GET /path?q=1 HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        let request_end = 2001 + request.len() as u32;
+        let response = b"HTTP/1.1 302 Found\r\nLocation: http://lawfilter.example/blocked\r\nContent-Length: 0\r\n\r\n";
+
+        let mut no_https = d17_start(start, options, request);
+        let result = no_https.feed_observing(
+            4,
+            &http_response_packet(9001, request_end, 0x18, response),
+            start + Duration::from_millis(12),
+            options,
+        );
+        let (action, portal) = d17_action(&result, false);
+        println!("D17 no-https action={action} portal={}", u8::from(portal));
+
+        let mut https = d17_start(start, options, request);
+        let result = https.feed_observing(
+            4,
+            &http_response_packet(9001, request_end, 0x18, response),
+            start + Duration::from_millis(12),
+            options,
+        );
+        let (action, portal) = d17_action(&result, true);
+        println!("D17 https action={action} portal={}", u8::from(portal));
+        let answered = match &result.outcome {
+            HoldOutcome::HttpResponse { event, .. } => Some((event.key, event.request_no)),
+            _ => None,
+        };
+
+        let mut slow = d17_start(start, options, request);
+        let result = slow.feed_observing(
+            4,
+            &http_response_packet(9001, request_end, 0x18, response),
+            start + Duration::from_millis(200),
+            options,
+        );
+        let (action, portal) = d17_action(&result, false);
+        println!("D17 slow action={action} portal={}", u8::from(portal));
+
+        let mut duplicate = d17_start(start, options, request);
+        let _ = duplicate.feed_observing(
+            4,
+            &http_response_packet(9001, request_end, 0x18, response),
+            start + Duration::from_millis(12),
+            options,
+        );
+        let result = duplicate.feed_observing(
+            5,
+            &http_response_packet(9001, request_end, 0x18, response),
+            start + Duration::from_millis(13),
+            options,
+        );
+        let (action, portal) = d17_action(&result, false);
+        println!("D17 duplicate action={action} portal={}", u8::from(portal));
+
+        if let Some((key, request_no)) = answered {
+            assert!(https.mark_http_response_answered(&key, request_no));
+            let server = https.feed_observing(
+                5,
+                &http_response_packet(9001 + response.len() as u32, request_end, 0x18, b"late"),
+                start + Duration::from_millis(13),
+                options,
+            );
+            let (action, _) = d17_action(&server, true);
+            println!("D17 post-server action={action}");
+            let mut client = http_packet(request_end, 0x10, &[]);
+            client[28..32].copy_from_slice(&(9001 + response.len() as u32).to_be_bytes());
+            let client =
+                https.feed_observing(6, &client, start + Duration::from_millis(14), options);
+            let (action, _) = d17_action(&client, true);
+            println!("D17 post-client action={action}");
+        }
+    }
 }

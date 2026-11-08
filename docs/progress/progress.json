@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 167,
-  "percent": 61.62,
+  "points": 168,
+  "percent": 61.99,
   "total": 179,
   "counts": {
-    "verified": 115,
+    "verified": 116,
     "carry": 40,
-    "partial": 23,
+    "partial": 22,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -18,7 +18,7 @@
     {
       "name": "Datapath",
       "weight": 28,
-      "points": 19,
+      "points": 20,
       "items": [
         {
           "id": 1,
@@ -280,15 +280,15 @@
           "key": "D17",
           "name": "HTTP/80 replacement + hold",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Datapath",
-          "coverage": "`http80.c`/`http_trace.c`; C tests; Rust `http_replace`",
-          "gap": "Нет matrix-контракта и paired diff",
-          "mapping": "`http80.c`/`http_trace.c`; C tests; Rust `http_replace`",
-          "evidence": "`http80.c`/`http_trace.c`; C tests; Rust `http_replace` · пробел: Нет matrix-контракта и paired diff"
+          "coverage": "`test-datapath-http80-differential.sh` (a378), D6 hold diff, CL14 redirect",
+          "gap": "6 paired кейсов: no-https PASS, https REPLACE, slow/duplicate PASS, post-server DROP, post-client PASS; hold — D6, 307 — CL14",
+          "mapping": "`test-datapath-http80-differential.sh` (a378), D6 hold diff, CL14 redirect",
+          "evidence": "`test-datapath-http80-differential.sh` (a378), D6 hold diff, CL14 redirect · пробел: 6 paired кейсов: no-https PASS, https REPLACE, slow/duplicate PASS, post-server DROP, post-client PASS; hold — D6, 307 — CL14"
         },
         {
           "id": 19,
@@ -3032,15 +3032,15 @@
       "key": "D17",
       "name": "HTTP/80 replacement + hold",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Datapath",
-      "coverage": "`http80.c`/`http_trace.c`; C tests; Rust `http_replace`",
-      "gap": "Нет matrix-контракта и paired diff",
-      "mapping": "`http80.c`/`http_trace.c`; C tests; Rust `http_replace`",
-      "evidence": "`http80.c`/`http_trace.c`; C tests; Rust `http_replace` · пробел: Нет matrix-контракта и paired diff"
+      "coverage": "`test-datapath-http80-differential.sh` (a378), D6 hold diff, CL14 redirect",
+      "gap": "6 paired кейсов: no-https PASS, https REPLACE, slow/duplicate PASS, post-server DROP, post-client PASS; hold — D6, 307 — CL14",
+      "mapping": "`test-datapath-http80-differential.sh` (a378), D6 hold diff, CL14 redirect",
+      "evidence": "`test-datapath-http80-differential.sh` (a378), D6 hold diff, CL14 redirect · пробел: 6 paired кейсов: no-https PASS, https REPLACE, slow/duplicate PASS, post-server DROP, post-client PASS; hold — D6, 307 — CL14"
     },
     {
       "id": 19,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 167,
+      "points": 168,
       "weight": 271,
-      "percent": 61.62
+      "percent": 61.99
     },
     "carry_forward": {
-      "points": 230,
+      "points": 231,
       "weight": 271,
-      "percent": 84.87,
+      "percent": 85.24,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
