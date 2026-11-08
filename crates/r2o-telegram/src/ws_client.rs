@@ -264,6 +264,8 @@ const CF_EDGE_HEDGE_DELAY: Duration = Duration::from_millis(125);
 pub struct CfDialOpts<'a> {
     pub cf_ips: &'a [IpAddr],
     pub fail_cooldown: Duration,
+    /// `TG_CA_BUNDLE` для проверки сертификатов DoH, как C `tg_tls_client_context`.
+    pub ca_bundle: Option<&'a std::path::Path>,
 }
 
 /// Начальный индекс для одного логического соединения с Cloudflare. До отказа
@@ -701,7 +703,7 @@ async fn connect_cf_with_path(
     opts: CfDialOpts<'_>,
 ) -> WsConnectResult {
     let ips = if opts.cf_ips.is_empty() {
-        match crate::cf_proxy_doh::resolve_cf_ips(domain, outbound).await {
+        match crate::cf_proxy_doh::resolve_cf_ips(domain, outbound, opts.ca_bundle).await {
             Ok(ips) => ips,
             Err(reason) => {
                 crate::stats::global().record_failure("dns");

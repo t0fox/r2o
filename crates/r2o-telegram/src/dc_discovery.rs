@@ -206,6 +206,7 @@ async fn fetch_from_cf_dc(
         CfDialOpts {
             cf_ips: runtime.cf_ips(),
             fail_cooldown: runtime.cf_fail_cooldown(),
+            ca_bundle: runtime.ca_bundle(),
         },
     )
     .await;
@@ -236,6 +237,7 @@ async fn fetch_from_worker(
         CfDialOpts {
             cf_ips: runtime.cf_ips(),
             fail_cooldown: runtime.cf_fail_cooldown(),
+            ca_bundle: runtime.ca_bundle(),
         },
     )
     .await

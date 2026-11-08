@@ -107,6 +107,7 @@ async fn rebind_listener(
 #[derive(Debug)]
 pub enum RunError {
     InvalidListenAddress(String),
+    CaBundle(String),
     ResourceLimits {
         fd_limit: usize,
         memory_budget_bytes: usize,
@@ -127,6 +128,9 @@ impl std::fmt::Display for RunError {
         match self {
             Self::InvalidListenAddress(address) => {
                 write!(f, "неверный адрес прослушивания: {address}")
+            }
+            Self::CaBundle(error) => {
+                write!(f, "не удалось загрузить доверенные сертификаты: {error}")
             }
             Self::ResourceLimits {
                 fd_limit,
@@ -177,6 +181,10 @@ pub async fn run_with_listen(
     on_listen: impl FnOnce(ListenInfo) + Send,
 ) -> Result<(), RunError> {
     install_crypto_provider();
+    // C main.c завершает запуск, если заданный CA bundle не загружается.
+    if let Some(path) = config.ca_bundle.as_deref() {
+        crate::cf_proxy_doh::validate_doh_ca_bundle(path).map_err(RunError::CaBundle)?;
+    }
 
     let outbound = config.outbound_connector();
     let runtime = Arc::new(
@@ -191,7 +199,8 @@ pub async fn run_with_listen(
             )
             .with_cf_ips(config.cf_ips.clone())
             .with_cf_worker_domains(config.cf_worker_domains.clone())
-            .with_cf_fail_cooldown(Duration::from_secs(config.cf_fail_cooldown)),
+            .with_cf_fail_cooldown(Duration::from_secs(config.cf_fail_cooldown))
+            .with_ca_bundle(config.ca_bundle.clone()),
     );
 
     tokio::pin!(shutdown);

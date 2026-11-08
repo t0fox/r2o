@@ -69,6 +69,9 @@ struct RouteSpec {
 /// Проверить DC1–DC5 по активным маршрутам из текущей конфигурации.
 /// Успех засчитывается только после получения и разбора `resPQ`.
 pub async fn run(config: &Config) -> Result<DiagnosticReport, String> {
+    if let Some(path) = config.ca_bundle.as_deref() {
+        crate::cf_proxy_doh::validate_doh_ca_bundle(path)?;
+    }
     let runtime = Runtime::new(config.outbound_connector())
         .with_dc_map_path(config.dc_map_path.clone())
         .with_cf_domain_pool(
@@ -80,7 +83,8 @@ pub async fn run(config: &Config) -> Result<DiagnosticReport, String> {
         )
         .with_cf_ips(config.cf_ips.clone())
         .with_cf_worker_domains(config.cf_worker_domains.clone())
-        .with_cf_fail_cooldown(Duration::from_secs(config.cf_fail_cooldown));
+        .with_cf_fail_cooldown(Duration::from_secs(config.cf_fail_cooldown))
+        .with_ca_bundle(config.ca_bundle.clone());
 
     let specs = route_specs(config, &runtime);
     let semaphore = std::sync::Arc::new(Semaphore::new(MAX_PARALLEL_ROUTES));
@@ -281,7 +285,7 @@ async fn probe_wss(
         let started = std::time::Instant::now();
         match tokio::time::timeout(
             Duration::from_secs(3),
-            crate::cf_proxy_doh::resolve_cf_ips(domain, runtime.outbound()),
+            crate::cf_proxy_doh::resolve_cf_ips(domain, runtime.outbound(), runtime.ca_bundle()),
         )
         .await
         {

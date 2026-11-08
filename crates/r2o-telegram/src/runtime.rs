@@ -23,6 +23,8 @@ pub struct Runtime {
     /// Пользовательские Worker общие для маршрутизации и DC discovery.
     cf_worker_domains: Vec<String>,
     cf_fail_cooldown: Duration,
+    /// `TG_CA_BUNDLE`: доверенные корни для DoH, как C route_dns.
+    ca_bundle: Option<std::path::PathBuf>,
     stats: Arc<RuntimeStats>,
 }
 
@@ -39,8 +41,19 @@ impl Runtime {
             cf_ips: Vec::new(),
             cf_worker_domains: Vec::new(),
             cf_fail_cooldown: Duration::from_secs(60),
+            ca_bundle: None,
             stats: crate::stats::global(),
         }
+    }
+
+    /// Задать CA bundle для проверки TLS DoH (`TG_CA_BUNDLE`).
+    pub fn with_ca_bundle(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.ca_bundle = path;
+        self
+    }
+
+    pub fn ca_bundle(&self) -> Option<&std::path::Path> {
+        self.ca_bundle.as_deref()
     }
 
     /// Загрузить проверенный кэш карты DC из заданного файла.

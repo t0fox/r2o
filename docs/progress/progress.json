@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 144,
-  "percent": 53.14,
+  "points": 146,
+  "percent": 53.87,
   "total": 179,
   "counts": {
-    "verified": 100,
+    "verified": 101,
     "carry": 40,
-    "partial": 38,
+    "partial": 37,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1095,7 +1095,7 @@
     {
       "name": "Telegram",
       "weight": 41,
-      "points": 27,
+      "points": 29,
       "items": [
         {
           "id": 157,
@@ -1282,15 +1282,15 @@
           "key": "TG14",
           "name": "CF proxy DoH",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Telegram",
-          "coverage": "`scripts/test-telegram-doh-wire-differential.sh` (a378); C `route_dns.c`; Rust `doh_wire`",
-          "gap": "DNS-wire encode/parser совпадают; POST `/dns-query` HTTP/1.1/HTTP2 для 4 endpoints, CA/SNI и production-интеграция не доказаны",
-          "mapping": "`scripts/test-telegram-doh-wire-differential.sh` (a378); C `route_dns.c`; Rust `doh_wire`",
-          "evidence": "`scripts/test-telegram-doh-wire-differential.sh` (a378); C `route_dns.c`; Rust `doh_wire` · пробел: DNS-wire encode/parser совпадают; POST `/dns-query` HTTP/1.1/HTTP2 для 4 endpoints, CA/SNI и production-интеграция не доказаны"
+          "coverage": "`scripts/test-telegram-doh-wire-differential.sh` + `test-telegram-doh-transport-differential.sh` (a378); C `doh_lookup`/`doh_query_endpoint`; Rust `resolve_cf_ips_via_doh`",
+          "gap": "DNS-wire, POST `/dns-query`, h1+h2, порядок 4 endpoints, A→AAAA, CA/SNI, private/filter, bad-id/NXDOMAIN/TLS-fail fallback совпадают; production `resolve_cf_ips` использует этот путь и `TG_CA_BUNDLE`",
+          "mapping": "`scripts/test-telegram-doh-wire-differential.sh` + `test-telegram-doh-transport-differential.sh` (a378); C `doh_lookup`/`doh_query_endpoint`; Rust `resolve_cf_ips_via_doh`",
+          "evidence": "`scripts/test-telegram-doh-wire-differential.sh` + `test-telegram-doh-transport-differential.sh` (a378); C `doh_lookup`/`doh_query_endpoint`; Rust `resolve_cf_ips_via_doh` · пробел: DNS-wire, POST `/dns-query`, h1+h2, порядок 4 endpoints, A→AAAA, CA/SNI, private/filter, bad-id/NXDOMAIN/TLS-fail fallback совпадают; production `resolve_cf_ips` использует этот путь и `TG_CA_BUNDLE`"
         },
         {
           "id": 170,
@@ -5297,15 +5297,15 @@
       "key": "TG14",
       "name": "CF proxy DoH",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Telegram",
-      "coverage": "`scripts/test-telegram-doh-wire-differential.sh` (a378); C `route_dns.c`; Rust `doh_wire`",
-      "gap": "DNS-wire encode/parser совпадают; POST `/dns-query` HTTP/1.1/HTTP2 для 4 endpoints, CA/SNI и production-интеграция не доказаны",
-      "mapping": "`scripts/test-telegram-doh-wire-differential.sh` (a378); C `route_dns.c`; Rust `doh_wire`",
-      "evidence": "`scripts/test-telegram-doh-wire-differential.sh` (a378); C `route_dns.c`; Rust `doh_wire` · пробел: DNS-wire encode/parser совпадают; POST `/dns-query` HTTP/1.1/HTTP2 для 4 endpoints, CA/SNI и production-интеграция не доказаны"
+      "coverage": "`scripts/test-telegram-doh-wire-differential.sh` + `test-telegram-doh-transport-differential.sh` (a378); C `doh_lookup`/`doh_query_endpoint`; Rust `resolve_cf_ips_via_doh`",
+      "gap": "DNS-wire, POST `/dns-query`, h1+h2, порядок 4 endpoints, A→AAAA, CA/SNI, private/filter, bad-id/NXDOMAIN/TLS-fail fallback совпадают; production `resolve_cf_ips` использует этот путь и `TG_CA_BUNDLE`",
+      "mapping": "`scripts/test-telegram-doh-wire-differential.sh` + `test-telegram-doh-transport-differential.sh` (a378); C `doh_lookup`/`doh_query_endpoint`; Rust `resolve_cf_ips_via_doh`",
+      "evidence": "`scripts/test-telegram-doh-wire-differential.sh` + `test-telegram-doh-transport-differential.sh` (a378); C `doh_lookup`/`doh_query_endpoint`; Rust `resolve_cf_ips_via_doh` · пробел: DNS-wire, POST `/dns-query`, h1+h2, порядок 4 endpoints, A→AAAA, CA/SNI, private/filter, bad-id/NXDOMAIN/TLS-fail fallback совпадают; production `resolve_cf_ips` использует этот путь и `TG_CA_BUNDLE`"
     },
     {
       "id": 170,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 144,
+      "points": 146,
       "weight": 271,
-      "percent": 53.14
+      "percent": 53.87
     },
     "carry_forward": {
-      "points": 207,
+      "points": 209,
       "weight": 271,
-      "percent": 76.38,
+      "percent": 77.12,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

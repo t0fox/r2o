@@ -926,6 +926,7 @@ impl Route<'_> {
                 CfDialOpts {
                     cf_ips: self.runtime.cf_ips(),
                     fail_cooldown: self.timeouts.cf_fail_cooldown,
+                    ca_bundle: self.runtime.ca_bundle(),
                 },
             )
             .await;
@@ -1066,6 +1067,7 @@ impl Route<'_> {
                         CfDialOpts {
                             cf_ips: route.runtime.cf_ips(),
                             fail_cooldown: route.timeouts.cf_fail_cooldown,
+                            ca_bundle: route.runtime.ca_bundle(),
                         },
                     )
                     .await

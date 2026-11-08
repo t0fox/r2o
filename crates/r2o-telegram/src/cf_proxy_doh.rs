@@ -2,18 +2,23 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr};
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::default_domains::http::https_get_to_ip;
+use crate::default_domains::http::{
+    build_doh_tls_config, https_post_h2_with_tls_config, https_post_with_tls_config_timeout,
+};
 use crate::default_domains::valid_domain;
 use crate::outbound::OutboundConnector;
 
-const DOH_TIMEOUT: Duration = Duration::from_secs(2);
+/// C `TG_ROUTE_DOH_TIMEOUT_MS`: deadline одного DoH-запроса.
+const DOH_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+/// Верхняя граница всего DoH-этапа: 4 endpoint × (A + AAAA) × 2 c.
+const DOH_TOTAL_TIMEOUT: Duration = Duration::from_secs(16);
 const CF_DNS_TIMEOUT: Duration = Duration::from_millis(500);
 const CF_DNS_CACHE_TTL: Duration = Duration::from_secs(60);
 const MAX_CF_DNS_CACHE_ENTRIES: usize = 256;
@@ -27,21 +32,63 @@ enum SystemDnsLookup {
     Failed,
 }
 
+/// Один DoH endpoint D2O `route_dns.c` (порядок и транспорт важны).
 struct DohEndpoint {
     host: &'static str,
     ip: &'static str,
+    http2: bool,
 }
 
 const DOH_ENDPOINTS: &[DohEndpoint] = &[
     DohEndpoint {
+        host: "d.webshiftvpn.ru",
+        ip: "31.31.207.68",
+        http2: true,
+    },
+    DohEndpoint {
         host: "cloudflare-dns.com",
         ip: "1.1.1.1",
+        http2: false,
     },
     DohEndpoint {
         host: "dns.google",
         ip: "8.8.8.8",
+        http2: false,
+    },
+    DohEndpoint {
+        host: "dns.sb",
+        ip: "185.222.222.222",
+        http2: true,
     },
 ];
+
+/// TLS-профили DoH: отдельный для h1 (без ALPN) и h2 (ALPN h2), как C.
+pub(crate) struct DohTls {
+    pub(crate) h1: Arc<rustls::ClientConfig>,
+    pub(crate) h2: Arc<rustls::ClientConfig>,
+}
+
+static DOH_TLS_CACHE: LazyLock<Mutex<HashMap<Option<PathBuf>, Result<Arc<DohTls>, String>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn doh_tls(ca_bundle: Option<&Path>) -> Result<Arc<DohTls>, String> {
+    let key = ca_bundle.map(Path::to_path_buf);
+    let mut cache = DOH_TLS_CACHE.lock().expect("кэш TLS DoH повреждён");
+    if let Some(cached) = cache.get(&key) {
+        return cached.clone();
+    }
+    if cache.len() >= 8 {
+        cache.clear();
+    }
+    let built = (|| {
+        Ok::<_, String>(Arc::new(DohTls {
+            h1: build_doh_tls_config(key.as_deref(), false)?,
+            h2: build_doh_tls_config(key.as_deref(), true)?,
+        }))
+    })();
+    cache.insert(key, built.clone());
+    built
+}
 
 static CF_IP_LIST_CACHE: LazyLock<Mutex<CachedCfIpLists>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -60,13 +107,20 @@ fn clear_cf_ip(domain: &str) {
 pub(crate) async fn resolve_cf_ips(
     domain: &str,
     outbound: &OutboundConnector,
+    ca_bundle: Option<&Path>,
 ) -> Result<Vec<IpAddr>, String> {
     let system_domain = domain.to_string();
     let doh_domain = domain.to_string();
+    // Как C: при недоступном CA/TLS DoH просто не используется, а системный
+    // DNS остаётся рабочим путём.
+    let tls = doh_tls(ca_bundle).ok();
     resolve_cf_ips_with_status(
         domain,
         move || async move { system_dns_lookup(system_domain).await },
-        || async move { resolve_doh_ips(&doh_domain, outbound).await },
+        move || async move {
+            let tls = tls?;
+            resolve_doh_ips(&doh_domain, outbound, &tls).await
+        },
     )
     .await
     .ok_or_else(|| format!("не удалось разрешить CF-хост {domain} через системный DNS и DoH"))
@@ -113,7 +167,7 @@ where
         system_lookup,
         doh_lookup,
         CF_DNS_TIMEOUT,
-        DOH_TIMEOUT,
+        DOH_TOTAL_TIMEOUT,
     )
     .await
 }
@@ -338,85 +392,94 @@ fn ipv4_public(ip: &Ipv4Addr) -> bool {
         && !(a == 203 && b == 0 && c == 113)
 }
 
-fn doh_answers(body: &[u8]) -> Vec<IpAddr> {
-    let Ok(response) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return Vec::new();
-    };
-    if response.get("Status").and_then(serde_json::Value::as_u64) != Some(0) {
-        return Vec::new();
-    }
-    let Some(answers) = response.get("Answer").and_then(serde_json::Value::as_array) else {
-        return Vec::new();
-    };
-    let mut result = Vec::new();
-    for answer in answers {
-        let record_type = answer.get("type").and_then(serde_json::Value::as_u64);
-        let address = answer
-            .get("data")
-            .and_then(serde_json::Value::as_str)
-            .and_then(|value| value.parse::<IpAddr>().ok());
-        match (record_type, address) {
-            (Some(1), Some(ip @ IpAddr::V4(_))) | (Some(28), Some(ip @ IpAddr::V6(_))) => {
-                if is_usable_edge_ip(&ip) && !result.contains(&ip) {
-                    result.push(ip);
-                }
-            }
-            _ => continue,
-        }
-    }
-    result
-}
-
+/// C `doh_query_endpoint`: POST DNS-wire на IP endpoint с SNI/Host хоста.
 async fn query_endpoint(
-    endpoint: &'static DohEndpoint,
+    tls: &DohTls,
+    endpoint: &DohEndpoint,
     domain: &str,
-    record_type: &'static str,
+    qtype: u16,
     outbound: &OutboundConnector,
-) -> Option<Vec<IpAddr>> {
-    let path = format!("/dns-query?name={domain}&type={record_type}");
-    let body = tokio::time::timeout(
-        DOH_TIMEOUT,
-        https_get_to_ip(
+) -> Result<Vec<IpAddr>, String> {
+    let query_id: u16 = rand::random();
+    let query = crate::doh_wire::encode_question(domain, qtype, query_id)?;
+    let body = if endpoint.http2 {
+        https_post_h2_with_tls_config(
             endpoint.ip,
             endpoint.host,
-            &path,
-            &[("Accept", "application/dns-json")],
+            "/dns-query",
+            &[],
+            "application/dns-message",
+            &query,
             outbound,
-        ),
-    )
-    .await
-    .ok()?
-    .ok()?;
-    Some(doh_answers(body.as_bytes()))
+            Arc::clone(&tls.h2),
+            DOH_REQUEST_TIMEOUT,
+        )
+        .await?
+    } else {
+        https_post_with_tls_config_timeout(
+            endpoint.ip,
+            endpoint.host,
+            "/dns-query",
+            &[],
+            "application/dns-message",
+            &query,
+            outbound,
+            Arc::clone(&tls.h1),
+            DOH_REQUEST_TIMEOUT,
+        )
+        .await?
+    };
+    crate::doh_wire::parse_response(&body, query_id)
 }
 
-async fn resolve_doh_ips(domain: &str, outbound: &OutboundConnector) -> Option<Vec<IpAddr>> {
+/// Проверить CA bundle до старта, как C `tg_tls_client_context` в main.c:
+/// при явно заданном, но нечитаемом/пустом файле запуск прекращается.
+pub fn validate_doh_ca_bundle(path: &Path) -> Result<(), String> {
+    doh_tls(Some(path)).map(|_| ())
+}
+
+/// DoH-only разрешение (production `doh_lookup`) для диагностики и
+/// differential-проверок транспорта. Системный DNS не используется.
+pub async fn resolve_cf_ips_via_doh(
+    domain: &str,
+    outbound: &OutboundConnector,
+    ca_bundle: Option<&Path>,
+) -> Result<Vec<IpAddr>, String> {
+    let tls = doh_tls(ca_bundle)?;
+    resolve_doh_ips(domain, outbound, &tls)
+        .await
+        .ok_or_else(|| format!("DoH не вернул публичных адресов для {domain}"))
+}
+
+/// C `doh_lookup`: endpoint по порядку, внутри A затем AAAA, первый
+/// endpoint с публичными адресами выигрывает.
+pub(crate) async fn resolve_doh_ips(
+    domain: &str,
+    outbound: &OutboundConnector,
+    tls: &DohTls,
+) -> Option<Vec<IpAddr>> {
     let domain = domain.trim();
     if !valid_domain(domain) {
         return None;
     }
-    let mut queries = FuturesUnordered::new();
+    let mut addresses = Vec::new();
     for endpoint in DOH_ENDPOINTS {
-        queries.push(query_endpoint(endpoint, domain, "A", outbound));
-        queries.push(query_endpoint(endpoint, domain, "AAAA", outbound));
-    }
-    let ips = tokio::time::timeout(DOH_TIMEOUT, async {
-        let mut ips = Vec::new();
-        while let Some(answer) = queries.next().await {
-            if let Some(answer) = answer {
-                for ip in answer {
-                    if is_usable_edge_ip(&ip) && !ips.contains(&ip) {
-                        ips.push(ip);
-                    }
+        for qtype in [1u16, 28u16] {
+            let Ok(found) = query_endpoint(tls, endpoint, domain, qtype, outbound).await else {
+                continue;
+            };
+            for address in found {
+                if !addresses.contains(&address) && addresses.len() < crate::doh_wire::MAX_ADDRESSES
+                {
+                    addresses.push(address);
                 }
             }
         }
-        (!ips.is_empty()).then_some(ips)
-    })
-    .await
-    .ok()??;
-
-    Some(ips)
+        if !addresses.is_empty() {
+            return Some(addresses);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -429,22 +492,49 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        CfDomainLocks, SystemDnsLookup, cache_cf_ips, cached_cf_ips, clear_cf_ip, doh_answers,
+        CfDomainLocks, SystemDnsLookup, cache_cf_ips, cached_cf_ips, clear_cf_ip,
         is_usable_edge_ip, resolve_cf_ips_with, resolve_cf_ips_with_status,
         resolve_cf_ips_with_timeouts, retain_active_domain_locks, system_dns_error_result,
     };
 
     #[test]
-    fn doh_собирает_ipv4_и_ipv6_и_отвергает_ошибочный_status() {
-        let body = br#"{"Status":0,"Answer":[{"name":"edge.example","type":28,"TTL":120,"data":"2606:4700:4700::1111"},{"name":"edge.example","type":1,"TTL":120,"data":"104.21.75.42"},{"name":"edge.example","type":16,"TTL":120,"data":"text"}]}"#;
+    fn doh_ca_bundle_validation_matches_c_startup() {
+        let missing = std::env::temp_dir().join("r2o-tg14-missing-ca.pem");
+        let _ = std::fs::remove_file(&missing);
+        assert!(super::validate_doh_ca_bundle(&missing).is_err());
+
+        let params = rcgen::CertificateParams::new(Vec::new());
+        let ca = rcgen::Certificate::from_params(params).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "r2o-tg14-ca-{}-{}.pem",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, ca.serialize_pem().unwrap()).unwrap();
+        assert!(super::validate_doh_ca_bundle(&path).is_ok());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn doh_endpoint_order_and_transport_match_d2o() {
+        // Зафиксированный порядок и h1/h2 из C `doh_endpoints`.
         assert_eq!(
-            doh_answers(body)
+            super::DOH_ENDPOINTS
                 .iter()
-                .map(ToString::to_string)
+                .map(|endpoint| (endpoint.host, endpoint.ip, endpoint.http2))
                 .collect::<Vec<_>>(),
-            ["2606:4700:4700::1111", "104.21.75.42"]
+            [
+                ("d.webshiftvpn.ru", "31.31.207.68", true),
+                ("cloudflare-dns.com", "1.1.1.1", false),
+                ("dns.google", "8.8.8.8", false),
+                ("dns.sb", "185.222.222.222", true),
+            ]
         );
-        assert!(doh_answers(br#"{"Status":2,"Answer":[]}"#).is_empty());
+        assert_eq!(super::DOH_REQUEST_TIMEOUT, Duration::from_secs(2));
+        assert_eq!(super::DOH_TOTAL_TIMEOUT, Duration::from_secs(16));
     }
 
     #[tokio::test]

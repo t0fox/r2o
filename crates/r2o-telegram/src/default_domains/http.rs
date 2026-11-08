@@ -20,6 +20,43 @@ fn build_tls_config() -> rustls::ClientConfig {
         .with_no_client_auth()
 }
 
+/// TLS-конфиг DoH: при заданном `ca_bundle` доверять только ему, как C
+/// `tg_tls_client_context` (`SSL_CTX_load_verify_locations`). `http2`
+/// включает ALPN `h2`; иначе ALPN не предлагается, как C h1-путь.
+pub(crate) fn build_doh_tls_config(
+    ca_bundle: Option<&std::path::Path>,
+    http2: bool,
+) -> Result<Arc<rustls::ClientConfig>, String> {
+    let root_store = if let Some(path) = ca_bundle {
+        let file = std::fs::File::open(path)
+            .map_err(|error| format!("не удалось открыть CA bundle {}: {error}", path.display()))?;
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in rustls_pemfile::certs(&mut std::io::BufReader::new(file)) {
+            roots
+                .add(cert.map_err(|error| format!("некорректный CA cert: {error}"))?)
+                .map_err(|error| format!("не удалось добавить CA cert: {error}"))?;
+        }
+        if roots.is_empty() {
+            return Err(format!(
+                "CA bundle {} не содержит сертификатов",
+                path.display()
+            ));
+        }
+        roots
+    } else {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        roots
+    };
+    let mut config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    if http2 {
+        config.alpn_protocols = vec![b"h2".to_vec()];
+    }
+    Ok(Arc::new(config))
+}
+
 /// Выполнить HTTPS GET и вернуть тело ответа в виде `String`.
 pub(super) async fn https_get(
     host: &str,
@@ -55,23 +92,167 @@ async fn https_get_with_tls_config(
     outbound: &OutboundConnector,
     tls_config: Arc<rustls::ClientConfig>,
 ) -> Result<String, String> {
+    let body = https_request_with_tls_config(
+        connect_ip,
+        host,
+        "GET",
+        path,
+        headers,
+        None,
+        &[],
+        outbound,
+        tls_config,
+        FETCH_TIMEOUT,
+    )
+    .await?;
+    String::from_utf8(body).map_err(|_| "response body is not valid UTF-8".to_string())
+}
+
+/// C `tg_route_dns_https_request`: POST HTTP/1.1 с deadline на весь запрос.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn https_post_with_tls_config_timeout(
+    connect_ip: &str,
+    host: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    content_type: &str,
+    body: &[u8],
+    outbound: &OutboundConnector,
+    tls_config: Arc<rustls::ClientConfig>,
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
+    https_request_with_tls_config(
+        connect_ip,
+        host,
+        "POST",
+        path,
+        headers,
+        Some(content_type),
+        body,
+        outbound,
+        tls_config,
+        timeout,
+    )
+    .await
+}
+
+/// C `tg_route_dns_https2_request`: HTTP/2 POST `application/dns-message`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn https_post_h2_with_tls_config(
+    connect_ip: &str,
+    host: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    content_type: &str,
+    body: &[u8],
+    outbound: &OutboundConnector,
+    tls_config: Arc<rustls::ClientConfig>,
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
+    let connector = TlsConnector::from(tls_config);
+    let tcp = outbound
+        .connect(connect_ip, 443, timeout)
+        .await
+        .map_err(|e| e.reason)?;
+    let _ = tcp.set_nodelay(true);
+    let server_name = ServerName::try_from(host.to_string())
+        .map_err(|e| format!("недопустимое имя сервера: {e}"))?;
+    let tls = tokio::time::timeout(timeout, connector.connect(server_name, tcp))
+        .await
+        .map_err(|_| "истёк тайм-аут рукопожатия TLS".to_string())?
+        .map_err(|e| format!("TLS handshake: {e}"))?;
+    // C требует выбранный ALPN ровно `h2`; иначе endpoint считается сбойным.
+    if tls.get_ref().1.alpn_protocol() != Some(b"h2".as_slice()) {
+        return Err("TLS не выбрал ALPN h2".to_string());
+    }
+
+    let (mut sender, connection) = tokio::time::timeout(timeout, h2::client::handshake(tls))
+        .await
+        .map_err(|_| "истёк тайм-аут HTTP/2 handshake".to_string())?
+        .map_err(|e| format!("HTTP/2 handshake: {e}"))?;
+    let connection_task = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    let mut builder = http::Request::builder()
+        .method(http::Method::POST)
+        .uri(format!("https://{host}{path}"))
+        .header(http::header::HOST, host)
+        .header(http::header::CONTENT_TYPE, content_type)
+        .header(http::header::ACCEPT, "application/dns-message");
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let request = builder
+        .body(())
+        .map_err(|e| format!("HTTP/2 request: {e}"))?;
+    let (response, mut send_stream) = sender
+        .send_request(request, false)
+        .map_err(|e| format!("HTTP/2 send_request: {e}"))?;
+    send_stream
+        .send_data(bytes::Bytes::copy_from_slice(body), true)
+        .map_err(|e| format!("HTTP/2 send_data: {e}"))?;
+
+    let response = tokio::time::timeout(timeout, response)
+        .await
+        .map_err(|_| "истёк тайм-аут HTTP/2 response".to_string())?
+        .map_err(|e| format!("HTTP/2 response: {e}"))?;
+    if response.status() != http::StatusCode::OK {
+        connection_task.abort();
+        return Err(format!("HTTP/2 status {}", response.status()));
+    }
+    let mut response_body = response.into_body();
+    let mut output = Vec::new();
+    loop {
+        let chunk = tokio::time::timeout(timeout, response_body.data())
+            .await
+            .map_err(|_| "истёк тайм-аут HTTP/2 body".to_string())?;
+        let Some(chunk) = chunk else {
+            break;
+        };
+        let chunk = chunk.map_err(|e| format!("HTTP/2 body: {e}"))?;
+        if output.len() + chunk.len() > MAX_BODY_BYTES {
+            connection_task.abort();
+            return Err("HTTP/2 response body exceeds limit".to_string());
+        }
+        let len = chunk.len();
+        output.extend_from_slice(&chunk);
+        let _ = response_body.flow_control().release_capacity(len);
+    }
+    connection_task.abort();
+    Ok(output)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn https_request_with_tls_config(
+    connect_ip: &str,
+    host: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    content_type: Option<&str>,
+    body: &[u8],
+    outbound: &OutboundConnector,
+    tls_config: Arc<rustls::ClientConfig>,
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
     let connector = TlsConnector::from(tls_config);
 
     let tcp = outbound
-        .connect(connect_ip, 443, FETCH_TIMEOUT)
+        .connect(connect_ip, 443, timeout)
         .await
         .map_err(|e| e.reason)?;
     let _ = tcp.set_nodelay(true);
 
     let server_name = ServerName::try_from(host.to_string())
         .map_err(|e| format!("недопустимое имя сервера: {e}"))?;
-    let mut tls = tokio::time::timeout(FETCH_TIMEOUT, connector.connect(server_name, tcp))
+    let mut tls = tokio::time::timeout(timeout, connector.connect(server_name, tcp))
         .await
         .map_err(|_| "истёк тайм-аут рукопожатия TLS".to_string())?
         .map_err(|e| format!("TLS handshake: {e}"))?;
 
     let mut request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nUser-Agent: tg-ws-proxy\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nUser-Agent: tg-ws-proxy\r\n"
     );
     for (name, value) in headers {
         request.push_str(name);
@@ -79,17 +260,30 @@ async fn https_get_with_tls_config(
         request.push_str(value);
         request.push_str("\r\n");
     }
+    if let Some(content_type) = content_type {
+        request.push_str("Content-Type: ");
+        request.push_str(content_type);
+        request.push_str("\r\n");
+    }
+    if method == "POST" {
+        request.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
     request.push_str("\r\n");
     tls.write_all(request.as_bytes())
         .await
         .map_err(|e| format!("write: {e}"))?;
+    if !body.is_empty() {
+        tls.write_all(body)
+            .await
+            .map_err(|e| format!("write body: {e}"))?;
+    }
 
-    tokio::time::timeout(FETCH_TIMEOUT, read_http_response_body(&mut tls))
+    tokio::time::timeout(timeout, read_http_response_bytes(&mut tls))
         .await
         .map_err(|_| "истёк тайм-аут чтения".to_string())?
 }
 
-async fn read_http_response_body<R>(reader: &mut R) -> Result<String, String>
+async fn read_http_response_bytes<R>(reader: &mut R) -> Result<Vec<u8>, String>
 where
     R: AsyncRead + Unpin,
 {
@@ -123,7 +317,7 @@ where
         read_until_eof_limited(reader, buf[header_len..].to_vec()).await?
     };
 
-    String::from_utf8(body).map_err(|_| "response body is not valid UTF-8".to_string())
+    Ok(body)
 }
 
 async fn read_until_headers<R>(reader: &mut R, buf: &mut Vec<u8>) -> Result<usize, String>

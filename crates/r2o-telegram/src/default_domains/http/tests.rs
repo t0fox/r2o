@@ -30,7 +30,7 @@ async fn read_http_response_body_rejects_conflicting_content_length_with_chunked
         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n0\r\n\r\n"
             .as_slice();
 
-    let err = read_http_response_body(&mut response).await.unwrap_err();
+    let err = read_http_response_bytes(&mut response).await.unwrap_err();
 
     assert!(err.contains("conflicting"));
 }
@@ -46,9 +46,9 @@ async fn read_http_response_body_stops_at_content_length_without_eof() {
         tokio::time::sleep(Duration::from_secs(5)).await;
     });
 
-    let body = read_http_response_body(&mut client).await.unwrap();
+    let body = read_http_response_bytes(&mut client).await.unwrap();
 
-    assert_eq!(body, "virkgj.com\n");
+    assert_eq!(body, b"virkgj.com\n");
     writer.abort();
     assert!(writer.await.unwrap_err().is_cancelled());
 }
@@ -57,16 +57,16 @@ async fn read_http_response_body_stops_at_content_length_without_eof() {
 async fn read_http_response_body_accepts_chunked_body() {
     let mut response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n6\r\nvirkgj\r\n5\r\n.com\n\r\n0\r\n\r\n".as_slice();
 
-    let body = read_http_response_body(&mut response).await.unwrap();
+    let body = read_http_response_bytes(&mut response).await.unwrap();
 
-    assert_eq!(body, "virkgj.com\n");
+    assert_eq!(body, b"virkgj.com\n");
 }
 
 #[tokio::test]
 async fn read_http_response_body_rejects_truncated_chunked_terminator() {
     let mut response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n".as_slice();
 
-    let err = read_http_response_body(&mut response).await.unwrap_err();
+    let err = read_http_response_bytes(&mut response).await.unwrap_err();
 
     assert!(err.contains("unexpected EOF"));
 }
@@ -79,18 +79,18 @@ async fn read_http_response_body_accepts_more_than_32_headers() {
     }
     response.extend_from_slice(b"Content-Length: 11\r\n\r\nvirkgj.com\n");
 
-    let body = read_http_response_body(&mut response.as_slice())
+    let body = read_http_response_bytes(&mut response.as_slice())
         .await
         .unwrap();
 
-    assert_eq!(body, "virkgj.com\n");
+    assert_eq!(body, b"virkgj.com\n");
 }
 
 #[tokio::test]
 async fn read_http_response_body_rejects_non_200_status() {
     let mut response = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".as_slice();
 
-    let err = read_http_response_body(&mut response).await.unwrap_err();
+    let err = read_http_response_bytes(&mut response).await.unwrap_err();
 
     assert!(err.contains("HTTP status 404"));
 }
@@ -99,7 +99,7 @@ async fn read_http_response_body_rejects_non_200_status() {
 async fn read_http_response_body_rejects_oversized_content_length() {
     let mut response = b"HTTP/1.1 200 OK\r\nContent-Length: 999999\r\n\r\n".as_slice();
 
-    let err = read_http_response_body(&mut response).await.unwrap_err();
+    let err = read_http_response_bytes(&mut response).await.unwrap_err();
 
     assert!(err.contains("exceeds limit"));
 }
@@ -109,7 +109,7 @@ async fn read_http_response_body_accepts_eof_delimited_body_at_limit() {
     let mut response = b"HTTP/1.1 200 OK\r\n\r\n".to_vec();
     response.extend(vec![b'a'; MAX_BODY_BYTES]);
 
-    let body = read_http_response_body(&mut response.as_slice())
+    let body = read_http_response_bytes(&mut response.as_slice())
         .await
         .unwrap();
 

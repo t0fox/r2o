@@ -32,6 +32,10 @@ serde_json = "1"
 # gzip_packed в help.getConfig: C `tg_mtproto_config_parse` распаковывает
 # до 4 уровней; Rust обязан принимать тот же TL-объект.
 flate2 = "1.1"
+# DoH HTTP/2 endpoints D2O (d.webshiftvpn.ru, dns.sb).
+h2 = "0.4"
+http = "1"
+bytes = "1"
 grammers-crypto = "0.10.0"
 grammers-mtproto = "0.10.0"
 grammers-tl-types = "0.10.0"
