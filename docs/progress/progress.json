@@ -3,12 +3,12 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 172,
-  "percent": 63.47,
+  "points": 173,
+  "percent": 63.84,
   "total": 179,
   "counts": {
-    "verified": 119,
-    "carry": 39,
+    "verified": 120,
+    "carry": 38,
     "partial": 20,
     "missing": 0,
     "implemented": 0,
@@ -18,7 +18,7 @@
     {
       "name": "Datapath",
       "weight": 28,
-      "points": 21,
+      "points": 22,
       "items": [
         {
           "id": 1,
@@ -145,15 +145,15 @@
           "key": "D8",
           "name": "TCP flow-table capacity/refusal/expiry/reuse",
           "weight": 1,
-          "points": 0,
+          "points": 1,
           "carry_points": 1,
-          "status": "carry",
-          "statusLabel": "carry (304) — historical",
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Datapath",
-          "coverage": "`test-datapath-tcp-capacity-differential.sh` (304)",
-          "gap": "Другая ревизия; нужен прогон на a63/a378",
-          "mapping": "`test-datapath-tcp-capacity-differential.sh` (304)",
-          "evidence": "`test-datapath-tcp-capacity-differential.sh` (304) · пробел: Другая ревизия; нужен прогон на a63/a378"
+          "coverage": "`test-datapath-tcp-capacity-differential.sh` (a378)",
+          "gap": "C/Rust вывод совпал на a378: capacity 64/128, refusal count, reverse lookup, expiry и приём после истечения",
+          "mapping": "`test-datapath-tcp-capacity-differential.sh` (a378)",
+          "evidence": "`test-datapath-tcp-capacity-differential.sh` (a378) · пробел: C/Rust вывод совпал на a378: capacity 64/128, refusal count, reverse lookup, expiry и приём после истечения"
         },
         {
           "id": 10,
@@ -2897,15 +2897,15 @@
       "key": "D8",
       "name": "TCP flow-table capacity/refusal/expiry/reuse",
       "weight": 1,
-      "points": 0,
+      "points": 1,
       "carry_points": 1,
-      "status": "carry",
-      "statusLabel": "carry (304) — historical",
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Datapath",
-      "coverage": "`test-datapath-tcp-capacity-differential.sh` (304)",
-      "gap": "Другая ревизия; нужен прогон на a63/a378",
-      "mapping": "`test-datapath-tcp-capacity-differential.sh` (304)",
-      "evidence": "`test-datapath-tcp-capacity-differential.sh` (304) · пробел: Другая ревизия; нужен прогон на a63/a378"
+      "coverage": "`test-datapath-tcp-capacity-differential.sh` (a378)",
+      "gap": "C/Rust вывод совпал на a378: capacity 64/128, refusal count, reverse lookup, expiry и приём после истечения",
+      "mapping": "`test-datapath-tcp-capacity-differential.sh` (a378)",
+      "evidence": "`test-datapath-tcp-capacity-differential.sh` (a378) · пробел: C/Rust вывод совпал на a378: capacity 64/128, refusal count, reverse lookup, expiry и приём после истечения"
     },
     {
       "id": 10,
@@ -5460,9 +5460,9 @@
   ],
   "comparison": {
     "strict": {
-      "points": 172,
+      "points": 173,
       "weight": 271,
-      "percent": 63.47
+      "percent": 63.84
     },
     "carry_forward": {
       "points": 234,

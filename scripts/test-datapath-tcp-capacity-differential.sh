@@ -3,7 +3,7 @@ set -eu
 
 r2o_root=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 r2o_donor_root=${R2O_DONOR_ROOT:-"${r2o_root%/*}/d2o"}
-r2o_expected_donor_sha=304ba893dd37197128ac8799c0495b035f6a38c0
+r2o_expected_donor_sha=a378e230947ebfd011439e1cac0f1e994d883aae
 r2o_actual_donor_sha=$(git -C "$r2o_donor_root" rev-parse HEAD)
 if [ "$r2o_actual_donor_sha" != "$r2o_expected_donor_sha" ]; then
     printf 'Expected d2o %s, got %s\n' "$r2o_expected_donor_sha" "$r2o_actual_donor_sha" >&2
