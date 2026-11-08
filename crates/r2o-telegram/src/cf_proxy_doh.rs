@@ -301,7 +301,7 @@ fn cache_cf_ips(domain: &str, ips: Vec<IpAddr>, ttl: Duration) {
     cache.insert(domain.to_string(), (ips, Instant::now() + ttl));
 }
 
-fn is_usable_edge_ip(ip: &IpAddr) -> bool {
+pub(crate) fn is_usable_edge_ip(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => ipv4_public(ip),
         IpAddr::V6(ip) => {

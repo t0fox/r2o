@@ -7,6 +7,7 @@ pub mod dc_discovery;
 pub mod dc_map;
 pub mod default_domains;
 pub mod diagnostics;
+pub mod doh_wire;
 pub mod health;
 pub mod identity;
 pub mod limits;
