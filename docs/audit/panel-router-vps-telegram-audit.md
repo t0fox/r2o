@@ -4,7 +4,7 @@
 
 Источники: локальные деревья `E:\d2o` (C/shell/section units) и `E:\r2o` (Rust/shell), `docs/functional-parity-matrix.md`, `docs/parity-function-inventory.md`, `README.md`, `router/README.md`, `docs/audit/function-index.md`, существующие differential-скрипты и CI-workflow.
 
-**Интеграция 2026-11-08.** Детальные строки A1–A26, B1–B54 и C1–C26 сведены в единую scored-матрицу `docs/functional-parity-matrix.md`, раздел «Нормализованная матрица покрытия»: 179 контрактов / 271 балл, строгий счёт 173/271 = 63,84 %. В scored не входят `B32`/`B45`/`B54`, `C2`, `C25`/`C26` как extension/out-of-scope/дубли. `B9` и `B52` закрыты после аудита (`scripts/test-router-clear-found-state.sh`, `scripts/test-router-log-maintenance.sh`); таблицы ниже сохранены как исходное доказательное основание.
+**Интеграция 2026-11-08.** Детальные строки A1–A26, B1–B54 и C1–C26 сведены в единую scored-матрицу `docs/functional-parity-matrix.md`, раздел «Нормализованная матрица покрытия»: 179 контрактов / 271 балл, строгий счёт 185/271 = 68,27 %. В scored не входят `B32`/`B45`/`B54`, `C2`, `C25`/`C26` как extension/out-of-scope/дубли. `B9` и `B52` закрыты после аудита (`scripts/test-router-clear-found-state.sh`, `scripts/test-router-log-maintenance.sh`); таблицы ниже сохранены как исходное доказательное основание.
 
 ## 0. Метод и ограничения
 
@@ -28,7 +28,7 @@
 - **Flow-offload.** Текущий `r2o-firewall.sh` **глобально выключает** fw4 offload, как D2O. Примечания матрицы 20/26/28/66/67/81/83/84/85/86/88/92 описывают уже отсутствующую selective-схему; скрипт `test-router-flowoffload-selective-differential.sh`, на который они ссылаются, в дереве отсутствует, а действующий `test-router-flowoffload-d2o-differential.sh` прямо запрещает `ct mark`/`mark_flow`/`flow offload @`.
 - **Telegram.** R2O — функциональный superset донора по большинству модулей, но не пофункциональный паритет с C. Неперенесённые/расходящиеся ветви: файловый парсер `tg_config_read`; строгая проверка `TG_PORT=1443`; `TG_DIAGNOSTIC_DIRECT_TCP`; `TG_CF_DOMAIN_CACHE_PATH`; отсутствие стартовой валидации и лимита 32 для `TG_CF_DOMAIN`; stats-сокет без таймаута чтения запроса; identity/`enroll.c` без потребителя. Memory budget и `configured_max_connections=64` реализованы и проверены `test-telegram-limits-differential.sh`; splitter проверен `test-telegram-mtproto-splitter-differential.sh`; obfuscated2/secret — `test-telegram-mtproto-handshake-differential.sh`; `help.getConfig`/dcOption/gzip — `test-telegram-config-differential.sh`. C-векторы `mtproto_encrypted`/`mtproto_auth` в Rust-дифференциалах пока не используются.
 - **VPS.** `relay-enroll` и `relay-gate` в R2O отсутствуют полностью: нет бинарников, systemd-юнитов, install-server, портов 9443/9444, `/register`, `/resolve`, allowlist-proxy. README прямо фиксирует работу без VPS/relay/WARP. Единственный след — совместимое исключение `D2K_GATE` из NFQUEUE; транспорт обновлений R2O его не использует (`curl --noproxy '*'`). Identity в R2O создаётся, но ни для enrollment, ни для relay не применяется.
-- **CI.** Все 40 `test-router-*.sh` запускаются в CI (shell job). Panel-джоба запускает только `cargo test -p r2o-panel`; 22 `test-panel-*.sh` не входят в CI (в donor-shard есть только `r2o-panel-bind-default-differential.sh`). Telegram `--check`/service harness в CI отдельно не запускаются; они входят только через `test-router-*.sh`.
+- **CI.** Все 40 `test-router-*.sh` запускаются в CI (shell job). Panel-джоба запускает только `cargo test -p r2o-panel`; 32 `test-panel-*.sh` в CI не входят (в donor-shard есть только `r2o-panel-bind-default-differential.sh`). Все 32 panel-дифференциала прогнаны вручную на a378 — PASS, кроме частичных A14/A23. Telegram `--check`/service harness в CI отдельно не запускаются; они входят только через `test-router-*.sh`.
 
 ## 2. A. Panel (`E:\d2o\panel`, `E:\r2o\crates\r2o-panel`)
 
@@ -132,7 +132,7 @@
 
 ### A.6 Тесты panel: что есть и чего нет
 
-Существуют 22 скрипта `scripts/test-panel-*.sh` (все закреплены на D2O `304ba893`) плюс `r2o-panel-bind-default-differential.sh`. Они вызывают настоящие C handler-функции через `tests/d2o_*.c` и production Rust route. **В CI эти 22 скрипта не запускаются**; panel-джоба делает только `cargo test -p r2o-panel`. В donor-shard включён только bind-default.
+Существуют 32 скрипта `scripts/test-panel-*.sh` (все переведены на D2O `a378e230`) плюс `r2o-panel-bind-default-differential.sh`. Они вызывают настоящие C handler-функции через `tests/d2o_*.c` и production Rust route. Все 32 прогнаны вручную на a378 и прошли; `test-panel-telegram-stats-size` требует tmpfs для AF_UNIX. **В CI эти 32 скрипта не запускаются**; panel-джоба делает только `cargo test -p r2o-panel`. В donor-shard включён только bind-default.
 
 Нет дифференциалов для:
 - абсолютного дедлайна ответа (`test_response_deadline.c`);
@@ -436,32 +436,32 @@
 
 | # | Контракт | Вес | Факт (в аудите) |
 |---|---|---:|---|
-| A1 | Bind по умолчанию и выбор LAN IP при установке | 1 | ДИФ-скрипты есть; не перезапускались |
-| A2 | Пустой `PANEL_LISTEN` отключает панель и health update | 1 | ДИФ есть |
-| A3 | Парсер: комментарии, кавычки, хвостовые комментарии | 1 | ДИФ есть; незакрытая кавычка — пробел |
-| A4 | Парсер: unknown keys, не-UTF-8, ignored bytes | 1 | ДИФ есть |
-| A5 | Совместимость known-list с D2O-конфигом | 1 | ДИФ: D2O known-ключи и unknown_keys |
-| A6 | Лимит заголовка 32 КиБ и код 431 | 1 | ДИФ: 32768→404, 32769→431 |
-| A7 | Абсолютный дедлайн заголовка 5 с / 408 | 1 | ДИФ |
-| A8 | Абсолютный дедлайн ответа 5 с | 1 | **нет дифференциала** |
-| A9 | Устойчивость к обрыву клиента/IO-ошибке | 1 | ДИФ: следующий клиент обслуживается |
-| A10 | Неизвестный маршрут/метод/HTTP-версия | 1 | ДИФ: 404/405/400 байт-в-байт |
-| A11 | `/api/status`: unavailable-контракт | 1 | ДИФ |
-| A12 | `/api/status`: live shape и catalog revision | 1 | ДИФ (семантика) |
-| A13 | `/api/status`: snapshot/stages/unknown_keys | 1 | ДИФ: keys/stages/unknown_keys |
-| A14 | `/api/control`: список действий, коды, gates | 2 | ДИФ для stop/success/busy/500 |
-| A15 | Action state machine и timeout (включая 124) | 2 | ДИФ: exit 124 → timeout |
-| A16 | Workers GET и байты конфига | 1 | ДИФ |
-| A17 | Workers POST: Content-Type/TE/CL/JSON/8 доменов | 2 | ДИФ |
-| A18 | Workers POST: busy до записи | 2 | ДИФ |
-| A19 | Атомарная запись и сохранение режима | 1 | ДИФ: режим 0640 под umask 0077 |
-| A20 | Telegram config gate/status | 1 | ДИФ |
-| A21 | Telegram stats: лимит, схема, таймаут | 1 | ДИФ по размеру; абсолютный таймаут — пробел |
-| A22 | `/api/update` absent/never/raw | 1 | ДИФ |
-| A23 | Diagnostics GET/POST/download | 1 | ДИФ |
-| A24 | Static assets: ETag/304/1 МиБ | 1 | ДИФ |
-| A25 | Static assets: missing/symlink/embedded fallback | 1 | ТЕСТ; C 404 vs Rust fallback |
-| A26 | CLI `--version`/`serve`/`--self-check`/`--release-id` | 1 | частично; self-check отсутствует |
+| A1 | Bind по умолчанию и выбор LAN IP при установке | 1 | PASS на a378: `r2o-panel-bind-default-differential.sh` + `test-router-select-panel-ip.sh` + `test-router-panel-bind-install.sh` |
+| A2 | Пустой `PANEL_LISTEN` отключает панель и health update | 1 | ДИФ есть, отдельного прогона нет |
+| A3 | Парсер: комментарии, кавычки, хвостовые комментарии | 1 | PASS на a378: `test-panel-config-unquoted-quote-differential.sh` |
+| A4 | Парсер: unknown keys, не-UTF-8, ignored bytes | 1 | PASS на a378: `test-panel-config-comment-bytes-differential.sh` + `known-keys` |
+| A5 | Совместимость known-list с D2O-конфигом | 1 | PASS на a378: D2O known-ключи и unknown_keys |
+| A6 | Лимит заголовка 32 КиБ и код 431 | 1 | PASS на a378: 32768→404, 32769→431 |
+| A7 | Абсолютный дедлайн заголовка 5 с / 408 | 1 | PASS на a378: `test-panel-header-deadline-differential.sh` |
+| A8 | Абсолютный дедлайн ответа 5 с | 1 | PASS на a378: `test-panel-response-deadline-differential.sh` |
+| A9 | Устойчивость к обрыву клиента/IO-ошибке | 1 | PASS на a378: следующий клиент обслуживается |
+| A10 | Неизвестный маршрут/метод/HTTP-версия | 1 | PASS на a378: 404/405/400 байт-в-байт |
+| A11 | `/api/status`: unavailable-контракт | 1 | PASS на a378: `test-panel-status-unavailable-differential.sh` |
+| A12 | `/api/status`: live shape и catalog revision | 1 | PASS на a378: live-status-size + catalog-revision |
+| A13 | `/api/status`: snapshot/stages/unknown_keys | 1 | PASS на a378: keys/stages/unknown_keys |
+| A14 | `/api/control`: список действий, коды, gates | 2 | Частично: stop 202/409/500 и timeout; полный список действий/gates не покрыт |
+| A15 | Action state machine и timeout (включая 124) | 2 | PASS на a378: exit 124 → timeout |
+| A16 | Workers GET и байты конфига | 1 | PASS на a378: `test-panel-workers-config-differential.sh` |
+| A17 | Workers POST: Content-Type/TE/CL/JSON/8 доменов | 2 | PASS на a378: json/content-length/header-limit/body-deadline/config-size/config-write |
+| A18 | Workers POST: busy до записи | 2 | PASS на a378: `test-panel-workers-busy-differential.sh` |
+| A19 | Атомарная запись и сохранение режима | 1 | PASS на a378: режим 0640 под umask 0077 |
+| A20 | Telegram config gate/status | 1 | Источник — z2kOW (`platform/openwrt/tg.sh`, `webpanel/cgi/api.sh`); сверка с R2O ещё не построена |
+| A21 | Telegram stats: лимит, схема, таймаут | 1 | PASS: лимит/1250 мс reader; producer — порт z2kOW `tg-proxy/src/stats.rs`; отдельная z2kOW-сверка полей ещё нужна |
+| A22 | `/api/update` absent/never/raw | 1 | PASS на a378: `test-panel-update-state-differential.sh` |
+| A23 | Diagnostics GET/POST/download | 1 | Частично: GET `/api/diagnostics` и `?`; POST/download не покрыты |
+| A24 | Static assets: ETag/304/1 МиБ | 1 | PASS на a378: static-etag + static-asset-size |
+| A25 | Static assets: missing/symlink/embedded fallback | 1 | PASS на a378: C 404 vs Rust fallback |
+| A26 | CLI `--version`/`serve`/`--self-check`/`--release-id` | 1 | PASS: `crates/r2o-panel/tests/cli.rs`; self-check формат совпадает |
 
 ### B. Router
 
@@ -564,11 +564,7 @@
 
 ## 8. Блокеры и следующие проверки
 
-1. **Воспроизвести panel-дифференциалы** в Linux с D2O `304ba893` и текущим R2O: все 22 `test-panel-*.sh` + `r2o-panel-bind-default-differential.sh`. Отдельно добавить:
-   - `test_response_deadline` (медленный клиент на теле ответа);
-   - reset во время чтения заголовка;
-   - незакрытая кавычка в `PANEL_LISTEN`/`STATE_DIR`;
-   - known-list D2O-конфига (`TG_RELAY_*`, `TG_ENROLL_PORT`, `D2K_PPE_DEOFFLOAD`);
+1. **Panel-дифференциалы воспроизведены** в Linux с D2O `a378e230` и текущим R2O: все 32 `test-panel-*.sh` + `r2o-panel-bind-default-differential.sh` — PASS. Остались частичные A14 (полный список действий/gates) и A23 (POST/download diagnostics); Telegram A20/A21 должны сверяться с z2kOW, а не с C D2O.
    - `unknown_keys` на `config.default` R2O;
    - точная граница 32 КиБ, non-UTF-8 заголовок, path >255.
 2. **Router:** прогнать все 40 `test-router-*.sh` в CI-режиме с `d2o-current`; отдельно добавить:

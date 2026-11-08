@@ -3,7 +3,7 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 D2O_ROOT=${R2O_DONOR_ROOT:-${SCRIPT_DIR%/*}/d2o}
-EXPECTED_D2O_SHA=${R2O_EXPECTED_DONOR_SHA:-304ba893dd37197128ac8799c0495b035f6a38c0}
+EXPECTED_D2O_SHA=${R2O_EXPECTED_DONOR_SHA:-a378e230947ebfd011439e1cac0f1e994d883aae}
 ACTUAL_D2O_SHA=$(git -C "$D2O_ROOT" rev-parse HEAD)
 [ "$ACTUAL_D2O_SHA" = "$EXPECTED_D2O_SHA" ] || {
     echo "expected d2o $EXPECTED_D2O_SHA, got $ACTUAL_D2O_SHA" >&2
@@ -36,12 +36,12 @@ compare_selection private-fallback '9: ppp0 inet 198.51.100.11/24 scope global p
 10: eth0 inet 10.23.0.1/24 scope global eth0'
 compare_selection no-private-address '9: ppp0 inet 198.51.100.11/24 scope global ppp0'
 
-C_CONFIG=$(sed -n 's/^PANEL_LISTEN=//p' "$D2O_ROOT/files/config" | tail -n 1)
+C_CONFIG=$(sed -n 's/^PANEL_LISTEN=//p' "$D2O_ROOT/files/config" | tail -n 1 | tr -d '\r')
 C_FALLBACK=$(sed -n 's/.*panel_listen = cfg .* : "\([^"]*\)";.*/\1/p' \
-    "$D2O_ROOT/panel/server.c" | tail -n 1)
-RUST_CONFIG=$(sed -n 's/^PANEL_LISTEN=//p' "$SCRIPT_DIR/router/config.default" | tail -n 1)
+    "$D2O_ROOT/panel/server.c" | tail -n 1 | tr -d '\r')
+RUST_CONFIG=$(sed -n 's/^PANEL_LISTEN=//p' "$SCRIPT_DIR/router/config.default" | tail -n 1 | tr -d '\r')
 RUST_FALLBACK=$(sed -n 's/^PANEL_LISTEN=${PANEL_LISTEN-\([^}]*\)}/\1/p' \
-    "$SCRIPT_DIR/router/S99r2o" | head -n 1)
+    "$SCRIPT_DIR/router/S99r2o" | head -n 1 | tr -d '\r')
 [ "$C_CONFIG" = "127.0.0.1:8090" ] &&
     [ "$C_FALLBACK" = "127.0.0.1:8090" ] &&
     [ "$RUST_CONFIG" = "$C_CONFIG" ] &&

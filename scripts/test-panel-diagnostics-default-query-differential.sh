@@ -17,7 +17,7 @@ WIN_BUILD_TARGET=$(windows_path "$ROOT_BUILD_TARGET")
 WIN_TMP=$(windows_path "$ROOT_TMP")
 WIN_CARGO=$(windows_path "$ROOT_TOOLCHAIN_BIN/cargo.exe")
 D2O_ROOT=${R2O_DONOR_ROOT:-${ROOT%/*}/d2o}
-EXPECTED_D2O_SHA=304ba893dd37197128ac8799c0495b035f6a38c0
+EXPECTED_D2O_SHA=a378e230947ebfd011439e1cac0f1e994d883aae
 ACTUAL_D2O_SHA=$(git -C "$D2O_ROOT" rev-parse HEAD)
 if [ "$ACTUAL_D2O_SHA" != "$EXPECTED_D2O_SHA" ]; then
     printf 'Expected d2o %s, got %s\n' "$EXPECTED_D2O_SHA" "$ACTUAL_D2O_SHA" >&2
