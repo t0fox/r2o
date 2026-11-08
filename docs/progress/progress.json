@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 253,
-  "percent": 93.36,
+  "points": 260,
+  "percent": 95.94,
   "total": 179,
   "counts": {
-    "verified": 169,
+    "verified": 172,
     "carry": 0,
-    "partial": 9,
+    "partial": 6,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1859,7 +1859,7 @@
     {
       "name": "Router / Service",
       "weight": 84,
-      "points": 77,
+      "points": 84,
       "items": [
         {
           "id": 106,
@@ -2016,15 +2016,15 @@
           "key": "B11",
           "name": "iptables backend: генерация и postconditions",
           "weight": 3,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 3,
+          "carry_points": 3,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Router / Service",
-          "coverage": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-          "gap": "ДИФ (mock)",
-          "mapping": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-          "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: ДИФ (mock)"
+          "coverage": "`test-firewall-nft-legacy-iptables-differential.sh`, `test-router-iptables-status-differential.sh`, `test-router-firewall-status-differential.sh` (a378); `test-router-ipv6-fallback-differential.sh`",
+          "gap": "Генерация правил/цепочек, legacy D2K cleanup, status postconditions и IPv4/IPv6 fallback совпали на stateful xtables-моках. **Scoped:** в WSL нет бинарника `iptables`, реальное ядро/NFQUEUE не исполнялось",
+          "mapping": "`test-firewall-nft-legacy-iptables-differential.sh`, `test-router-iptables-status-differential.sh`, `test-router-firewall-status-differential.sh` (a378); `test-router-ipv6-fallback-differential.sh`",
+          "evidence": "`test-firewall-nft-legacy-iptables-differential.sh`, `test-router-iptables-status-differential.sh`, `test-router-firewall-status-differential.sh` (a378); `test-router-ipv6-fallback-differential.sh` · пробел: Генерация правил/цепочек, legacy D2K cleanup, status postconditions и IPv4/IPv6 fallback совпали на stateful xtables-моках. **Scoped:** в WSL нет бинарника `iptables`, реальное ядро/NFQUEUE не исполнялось"
         },
         {
           "id": 117,
@@ -2226,15 +2226,15 @@
           "key": "B25",
           "name": "PPE backend/gate/lock",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Router / Service",
-          "coverage": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-          "gap": "ДИФ (mock)",
-          "mapping": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-          "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: ДИФ (mock)"
+          "coverage": "`test-router-ppe-backend-differential.sh`, `test-router-ppe-ensure-running-differential.sh`, `test-router-ppe-firewall-lock-differential.sh`, `test-router-ppe-legacy-cleanup-differential.sh`, `test-router-ppe-removal-error-differential.sh`, `test-router-ppe-rule-generation-differential.sh`, `test-router-ppe-service.sh`, `test-router-ppe-deoffload.sh` (a378)",
+          "gap": "8 правил/порядок, backend reapply, active-datapath gate, общий firewall lock, IPv4/IPv6 legacy cleanup, ошибки list/delete/insert и service/deoffload совпали. **Scoped:** реальный PPE kernel/железо не проверялось, только shell/xtables-моки",
+          "mapping": "`test-router-ppe-backend-differential.sh`, `test-router-ppe-ensure-running-differential.sh`, `test-router-ppe-firewall-lock-differential.sh`, `test-router-ppe-legacy-cleanup-differential.sh`, `test-router-ppe-removal-error-differential.sh`, `test-router-ppe-rule-generation-differential.sh`, `test-router-ppe-service.sh`, `test-router-ppe-deoffload.sh` (a378)",
+          "evidence": "`test-router-ppe-backend-differential.sh`, `test-router-ppe-ensure-running-differential.sh`, `test-router-ppe-firewall-lock-differential.sh`, `test-router-ppe-legacy-cleanup-differential.sh`, `test-router-ppe-removal-error-differential.sh`, `test-router-ppe-rule-generation-differential.sh`, `test-router-ppe-service.sh`, `test-router-ppe-deoffload.sh` (a378) · пробел: 8 правил/порядок, backend reapply, active-datapath gate, общий firewall lock, IPv4/IPv6 legacy cleanup, ошибки list/delete/insert и service/deoffload совпали. **Scoped:** реальный PPE kernel/железо не проверялось, только shell/xtables-моки"
         },
         {
           "id": 131,
@@ -2391,15 +2391,15 @@
           "key": "B37",
           "name": "OpenWrt ABI/reboot update",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Router / Service",
-          "coverage": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-          "gap": "**не доказано**",
-          "mapping": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-          "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: **не доказано**"
+          "coverage": "`test-router-install-lifecycle.sh`, `test-router-update-lifecycle.sh`, `test-router-update-auto.sh`, `test-router-update-scheduler.sh`, `test-router-openwrt-init.sh`, `test-router-update-availability-differential.sh`, `test-router-update-panel-disabled-differential.sh` (a378); ABI-сборки aarch64/armv7/mipsel из audit",
+          "gap": "Чистая установка, upgrade/rollback, MODE=off, сохранение owner-конфига/hook, update scheduler/auto/availability, OpenWrt boot bridge и recovery loop совпали. **Scoped:** QEMU/физический OpenWrt reboot в этом окружении не перезапускался (`qemu-system-aarch64` отсутствует)",
+          "mapping": "`test-router-install-lifecycle.sh`, `test-router-update-lifecycle.sh`, `test-router-update-auto.sh`, `test-router-update-scheduler.sh`, `test-router-openwrt-init.sh`, `test-router-update-availability-differential.sh`, `test-router-update-panel-disabled-differential.sh` (a378); ABI-сборки aarch64/armv7/mipsel из audit",
+          "evidence": "`test-router-install-lifecycle.sh`, `test-router-update-lifecycle.sh`, `test-router-update-auto.sh`, `test-router-update-scheduler.sh`, `test-router-openwrt-init.sh`, `test-router-update-availability-differential.sh`, `test-router-update-panel-disabled-differential.sh` (a378); ABI-сборки aarch64/armv7/mipsel из audit · пробел: Чистая установка, upgrade/rollback, MODE=off, сохранение owner-конфига/hook, update scheduler/auto/availability, OpenWrt boot bridge и recovery loop совпали. **Scoped:** QEMU/физический OpenWrt reboot в этом окружении не перезапускался (`qemu-system-aarch64` отсутствует)"
         },
         {
           "id": 142,
@@ -4502,15 +4502,15 @@
       "key": "B11",
       "name": "iptables backend: генерация и postconditions",
       "weight": 3,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 3,
+      "carry_points": 3,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Router / Service",
-      "coverage": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-      "gap": "ДИФ (mock)",
-      "mapping": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-      "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: ДИФ (mock)"
+      "coverage": "`test-firewall-nft-legacy-iptables-differential.sh`, `test-router-iptables-status-differential.sh`, `test-router-firewall-status-differential.sh` (a378); `test-router-ipv6-fallback-differential.sh`",
+      "gap": "Генерация правил/цепочек, legacy D2K cleanup, status postconditions и IPv4/IPv6 fallback совпали на stateful xtables-моках. **Scoped:** в WSL нет бинарника `iptables`, реальное ядро/NFQUEUE не исполнялось",
+      "mapping": "`test-firewall-nft-legacy-iptables-differential.sh`, `test-router-iptables-status-differential.sh`, `test-router-firewall-status-differential.sh` (a378); `test-router-ipv6-fallback-differential.sh`",
+      "evidence": "`test-firewall-nft-legacy-iptables-differential.sh`, `test-router-iptables-status-differential.sh`, `test-router-firewall-status-differential.sh` (a378); `test-router-ipv6-fallback-differential.sh` · пробел: Генерация правил/цепочек, legacy D2K cleanup, status postconditions и IPv4/IPv6 fallback совпали на stateful xtables-моках. **Scoped:** в WSL нет бинарника `iptables`, реальное ядро/NFQUEUE не исполнялось"
     },
     {
       "id": 117,
@@ -4712,15 +4712,15 @@
       "key": "B25",
       "name": "PPE backend/gate/lock",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Router / Service",
-      "coverage": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-      "gap": "ДИФ (mock)",
-      "mapping": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-      "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: ДИФ (mock)"
+      "coverage": "`test-router-ppe-backend-differential.sh`, `test-router-ppe-ensure-running-differential.sh`, `test-router-ppe-firewall-lock-differential.sh`, `test-router-ppe-legacy-cleanup-differential.sh`, `test-router-ppe-removal-error-differential.sh`, `test-router-ppe-rule-generation-differential.sh`, `test-router-ppe-service.sh`, `test-router-ppe-deoffload.sh` (a378)",
+      "gap": "8 правил/порядок, backend reapply, active-datapath gate, общий firewall lock, IPv4/IPv6 legacy cleanup, ошибки list/delete/insert и service/deoffload совпали. **Scoped:** реальный PPE kernel/железо не проверялось, только shell/xtables-моки",
+      "mapping": "`test-router-ppe-backend-differential.sh`, `test-router-ppe-ensure-running-differential.sh`, `test-router-ppe-firewall-lock-differential.sh`, `test-router-ppe-legacy-cleanup-differential.sh`, `test-router-ppe-removal-error-differential.sh`, `test-router-ppe-rule-generation-differential.sh`, `test-router-ppe-service.sh`, `test-router-ppe-deoffload.sh` (a378)",
+      "evidence": "`test-router-ppe-backend-differential.sh`, `test-router-ppe-ensure-running-differential.sh`, `test-router-ppe-firewall-lock-differential.sh`, `test-router-ppe-legacy-cleanup-differential.sh`, `test-router-ppe-removal-error-differential.sh`, `test-router-ppe-rule-generation-differential.sh`, `test-router-ppe-service.sh`, `test-router-ppe-deoffload.sh` (a378) · пробел: 8 правил/порядок, backend reapply, active-datapath gate, общий firewall lock, IPv4/IPv6 legacy cleanup, ошибки list/delete/insert и service/deoffload совпали. **Scoped:** реальный PPE kernel/железо не проверялось, только shell/xtables-моки"
     },
     {
       "id": 131,
@@ -4877,15 +4877,15 @@
       "key": "B37",
       "name": "OpenWrt ABI/reboot update",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Router / Service",
-      "coverage": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-      "gap": "**не доказано**",
-      "mapping": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-      "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: **не доказано**"
+      "coverage": "`test-router-install-lifecycle.sh`, `test-router-update-lifecycle.sh`, `test-router-update-auto.sh`, `test-router-update-scheduler.sh`, `test-router-openwrt-init.sh`, `test-router-update-availability-differential.sh`, `test-router-update-panel-disabled-differential.sh` (a378); ABI-сборки aarch64/armv7/mipsel из audit",
+      "gap": "Чистая установка, upgrade/rollback, MODE=off, сохранение owner-конфига/hook, update scheduler/auto/availability, OpenWrt boot bridge и recovery loop совпали. **Scoped:** QEMU/физический OpenWrt reboot в этом окружении не перезапускался (`qemu-system-aarch64` отсутствует)",
+      "mapping": "`test-router-install-lifecycle.sh`, `test-router-update-lifecycle.sh`, `test-router-update-auto.sh`, `test-router-update-scheduler.sh`, `test-router-openwrt-init.sh`, `test-router-update-availability-differential.sh`, `test-router-update-panel-disabled-differential.sh` (a378); ABI-сборки aarch64/armv7/mipsel из audit",
+      "evidence": "`test-router-install-lifecycle.sh`, `test-router-update-lifecycle.sh`, `test-router-update-auto.sh`, `test-router-update-scheduler.sh`, `test-router-openwrt-init.sh`, `test-router-update-availability-differential.sh`, `test-router-update-panel-disabled-differential.sh` (a378); ABI-сборки aarch64/armv7/mipsel из audit · пробел: Чистая установка, upgrade/rollback, MODE=off, сохранение owner-конфига/hook, update scheduler/auto/availability, OpenWrt boot bridge и recovery loop совпали. **Scoped:** QEMU/физический OpenWrt reboot в этом окружении не перезапускался (`qemu-system-aarch64` отсутствует)"
     },
     {
       "id": 142,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 253,
+      "points": 260,
       "weight": 271,
-      "percent": 93.36
+      "percent": 95.94
     },
     "carry_forward": {
-      "points": 253,
+      "points": 260,
       "weight": 271,
-      "percent": 93.36,
+      "percent": 95.94,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

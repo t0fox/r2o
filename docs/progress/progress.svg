@@ -1,12 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 93.36%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 95.94%">
 <rect width="1100" height="790" rx="20" fill="#0c121e"/>
 <text x="36" y="48" fill="#edf7ff" font-family="Arial,sans-serif" font-size="29" font-weight="700">R2O / D2O · Strict parity</text>
-<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">93.36%</text>
-<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">253 / 271 verified points</text>
+<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">95.94%</text>
+<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">260 / 271 verified points</text>
 <rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/>
-<rect x="37" y="113" width="956.0" height="11" rx="5" fill="#36c989"/>
-<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 169 verified · 0 missing · 2026-11-08</text>
-<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 253/271 = 93.36% · strict 253/271 = 93.36%</text>
+<rect x="37" y="113" width="982.4" height="11" rx="5" fill="#36c989"/>
+<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 172 verified · 0 missing · 2026-11-08</text>
+<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 260/271 = 95.94% · strict 260/271 = 95.94%</text>
 <rect x="37" y="190" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="213" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Datapath</text>
 <text x="533" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">28/28</text>
@@ -152,7 +152,7 @@
 <rect x="647" y="613" width="30" height="22" rx="5" fill="#36c989"><title>A26 CLI `--version`/`serve`/`--self-check`/`--release-id`: доказано (1/1)</title></rect>
 <rect x="37" y="638" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="661" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Router / Service</text>
-<text x="533" y="661" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">77/84</text>
+<text x="533" y="661" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">84/84</text>
 <rect x="51" y="671" width="30" height="22" rx="5" fill="#36c989"><title>B1 Config defaults и совместимость ключей: доказано (1/1)</title></rect>
 <rect x="89" y="671" width="30" height="22" rx="5" fill="#36c989"><title>B2 Start order: engine→telegram→panel→schedulers: доказано (2/2)</title></rect>
 <rect x="127" y="671" width="30" height="22" rx="5" fill="#36c989"><title>B3 Stop order и восстановление fastnat/offload: доказано (2/2)</title></rect>
@@ -163,7 +163,7 @@
 <rect x="317" y="671" width="30" height="22" rx="5" fill="#36c989"><title>B8 `status` (поля и коды): доказано (1/1)</title></rect>
 <rect x="355" y="671" width="30" height="22" rx="5" fill="#36c989"><title>B9 `clear-found`: все state-файлы: доказано (2/2)</title></rect>
 <rect x="393" y="671" width="30" height="22" rx="5" fill="#36c989"><title>B10 nft backend: генерация и postconditions: доказано (3/3)</title></rect>
-<rect x="431" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>B11 iptables backend: генерация и postconditions: частично (0/3)</title></rect>
+<rect x="431" y="671" width="30" height="22" rx="5" fill="#36c989"><title>B11 iptables backend: генерация и postconditions: доказано (3/3)</title></rect>
 <rect x="469" y="671" width="30" height="22" rx="5" fill="#36c989"><title>B12 Код ошибки отдельного правила: доказано (1/1)</title></rect>
 <rect x="51" y="698" width="30" height="22" rx="5" fill="#36c989"><title>B13 nft rollback и RST-table cleanup: доказано (2/2)</title></rect>
 <rect x="89" y="698" width="30" height="22" rx="5" fill="#36c989"><title>B14 Legacy D2K cleanup: доказано (2/2)</title></rect>
@@ -177,7 +177,7 @@
 <rect x="393" y="698" width="30" height="22" rx="5" fill="#36c989"><title>B22 Fastnat lifecycle: доказано (1/1)</title></rect>
 <rect x="431" y="698" width="30" height="22" rx="5" fill="#36c989"><title>B23 PPE rule generation/order: доказано (2/2)</title></rect>
 <rect x="469" y="698" width="30" height="22" rx="5" fill="#36c989"><title>B24 PPE removal error codes: доказано (1/1)</title></rect>
-<rect x="51" y="725" width="30" height="22" rx="5" fill="#e6b45d"><title>B25 PPE backend/gate/lock: частично (0/2)</title></rect>
+<rect x="51" y="725" width="30" height="22" rx="5" fill="#36c989"><title>B25 PPE backend/gate/lock: доказано (2/2)</title></rect>
 <rect x="89" y="725" width="30" height="22" rx="5" fill="#36c989"><title>B26 Firewall lock/reapply: доказано (1/1)</title></rect>
 <rect x="127" y="725" width="30" height="22" rx="5" fill="#36c989"><title>B27 Heal: status/ppe/dns: доказано (2/2)</title></rect>
 <rect x="165" y="725" width="30" height="22" rx="5" fill="#36c989"><title>B28 Heal concurrency/cooldown: доказано (2/2)</title></rect>
@@ -188,7 +188,7 @@
 <rect x="355" y="725" width="30" height="22" rx="5" fill="#36c989"><title>B34 Stage→stop→activate→start порядок: доказано (2/2)</title></rect>
 <rect x="393" y="725" width="30" height="22" rx="5" fill="#36c989"><title>B35 Rollback + bad release + health: доказано (2/2)</title></rect>
 <rect x="431" y="725" width="30" height="22" rx="5" fill="#36c989"><title>B36 Signed bootstrap/install: доказано (2/2)</title></rect>
-<rect x="469" y="725" width="30" height="22" rx="5" fill="#e6b45d"><title>B37 OpenWrt ABI/reboot update: частично (0/2)</title></rect>
+<rect x="469" y="725" width="30" height="22" rx="5" fill="#36c989"><title>B37 OpenWrt ABI/reboot update: доказано (2/2)</title></rect>
 <rect x="51" y="752" width="30" height="22" rx="5" fill="#36c989"><title>B38 Package release manifest/assets: доказано (1/1)</title></rect>
 <rect x="89" y="752" width="30" height="22" rx="5" fill="#36c989"><title>B39 Router install lifecycle: доказано (2/2)</title></rect>
 <rect x="127" y="752" width="30" height="22" rx="5" fill="#36c989"><title>B40 Uninstall и аварийная очистка: доказано (1/1)</title></rect>

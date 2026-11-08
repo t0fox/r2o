@@ -228,4 +228,13 @@ if [ -f /etc/openwrt_release ] || [ "${R2O_PLATFORM:-}" = openwrt ]; then
     "$OPENWRT_SERVICE" enable
 fi
 
-"$INIT_SHIM" start
+# D2O S99d2k start возвращает 1 при MODE=off: служба обязана остаться
+# остановленной. Установка при этом успешна, поэтому код возврата не
+# пробрасываем; для рабочих режимов ошибка запуска остаётся фатальной.
+INSTALL_CONFIG=${R2O_CONFIG:-$ROOT/config}
+INSTALL_MODE=$(sed -n 's/^MODE=//p' "$INSTALL_CONFIG" | tail -n 1)
+if [ "$INSTALL_MODE" = off ]; then
+    "$INIT_SHIM" start || true
+else
+    "$INIT_SHIM" start
+fi

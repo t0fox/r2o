@@ -4,11 +4,11 @@
 
 **Важно.** Таблица ниже — legacy-агрегат из 57 строк: 89 баллов веса, **80/89 (89,89 %)**. Это не оценка текущей ревизии. Аудит 2026-11-07 показал, что 49 из 80 баллов опираются на дифференциалы, закреплённые на `304ba893`, а несколько широких строк объединяют независимые контракты. После нормализации 2026-11-08 единая scored-матрица содержит **179 контрактов на 271 балл**: Panel A1–A26, Router B1–B54 (без B32/B45/B54), Telegram TG1–TG26 (без C2/C25/C26); coarse-строки `P*`, `F*`, `L*`, `T*` и `S7`/`S8` удалены как дубли:
 
-- строгий режим (только `a63d964`/`a378e23`/`8e2c981`, без helper/mock/build): **253/271 = 93,36 %**;
-- carry с явно помеченными `304ba893` (verified + оставшиеся 304, без двойного счёта): **253/271 = 93,36 %**;
+- строгий режим (только `a63d964`/`a378e23`/`8e2c981`, без helper/mock/build): **260/271 = 95,94 %**;
+- carry с явно помеченными `304ba893` (verified + оставшиеся 304, без двойного счёта): **260/271 = 95,94 %**;
 - legacy-агрегат: **80/89 = 89,89 %** (другой знаменатель, не сопоставим).
 
-Рост строгого счёта с 25,69 % до 93,36 % — не новые доказательства и не регресс: 84 детальных Router-контракта (70 strict) заменили 30 coarse-баллов `F*`/`L*`/`T*`/`P*` (18 strict), а 71 балл Panel/Telegram добавлен с нулём; ещё 2 балла дали доказанные M7a/M7b, 8 — B9/B52/B53/B42/B40, 3 — A26/A21/A8, 1 — TG20, 2 — D20, 2 — D23, 1 — D22, 2 — S12, 2 — S13, 2 — S14, 2 — S15, 1 — S11, 1 — A3, 1 — A25, 1 — B8, 2 — B46, 2 — TG22, 1 — A10, 1 — A6, 1 — A9, 1 — A19, 2 — A15, 1 — A13, 1 — A5, 2 — TG6, 2 — TG5, 2 — TG3, 2 — TG4, 1 — TG21, 2 — TG10, 1 — TG11, 2 — TG17, 2 — TG16, 2 — TG13, 1 — TG7, 2 — TG15, 2 — TG19, 1 — TG8, 1 — CL12, 1 — CL13, 1 — B6, 1 — B1, 2 — B48, 1 — CL14, 3 — B10, 1 — D21, 1 — D6, 1 — D18, 1 — D17, 2 — CL15, 1 — CL16, 1 — D7, 1 — D8, 12 — A1/A4/A7/A11/A12/A16/A17/A18/A22/A24, 10 — S1–S4, 5 — S5/S6, 16 — CL1–CL10, 4 — Q1/Q3/Q6, 8 — R1–R5, 1 — A23, 2 — A14, 1 — A2, 1 — A20, 1 — Q5, 1 — D19, 1 — D1b, 1 — M4, 1 — M2, 1 — M8, 3 — Q2, 3 — M6, 3 — M5, 1 — Q8, 1 — D11 и 3 — D2. Знаменатели 144 и 271 несопоставимы напрямую.
+Рост строгого счёта с 25,69 % до 95,94 % — не новые доказательства и не регресс: 84 детальных Router-контракта (70 strict) заменили 30 coarse-баллов `F*`/`L*`/`T*`/`P*` (18 strict), а 71 балл Panel/Telegram добавлен с нулём; ещё 2 балла дали доказанные M7a/M7b, 8 — B9/B52/B53/B42/B40, 3 — A26/A21/A8, 1 — TG20, 2 — D20, 2 — D23, 1 — D22, 2 — S12, 2 — S13, 2 — S14, 2 — S15, 1 — S11, 1 — A3, 1 — A25, 1 — B8, 2 — B46, 2 — TG22, 1 — A10, 1 — A6, 1 — A9, 1 — A19, 2 — A15, 1 — A13, 1 — A5, 2 — TG6, 2 — TG5, 2 — TG3, 2 — TG4, 1 — TG21, 2 — TG10, 1 — TG11, 2 — TG17, 2 — TG16, 2 — TG13, 1 — TG7, 2 — TG15, 2 — TG19, 1 — TG8, 1 — CL12, 1 — CL13, 1 — B6, 1 — B1, 2 — B48, 1 — CL14, 3 — B10, 1 — D21, 1 — D6, 1 — D18, 1 — D17, 2 — CL15, 1 — CL16, 1 — D7, 1 — D8, 12 — A1/A4/A7/A11/A12/A16/A17/A18/A22/A24, 10 — S1–S4, 5 — S5/S6, 16 — CL1–CL10, 4 — Q1/Q3/Q6, 8 — R1–R5, 1 — A23, 2 — A14, 1 — A2, 1 — A20, 1 — Q5, 1 — D19, 1 — D1b, 1 — M4, 1 — M2, 1 — M8, 3 — Q2, 3 — M6, 3 — M5, 1 — Q8, 1 — D11, 3 — D2, 3 — B11, 2 — B25 и 2 — B37. Знаменатели 144 и 271 несопоставимы напрямую.
 
 Нормализация также установила, что `a63d964` и `304ba893` отсутствуют в локальном git-объекте D2O; доказательства, закреплённые на них, в этом окружении не воспроизводятся. Детали — `docs/audit/validation-2026-11-08.md`.
 
@@ -105,11 +105,11 @@ Scope boundary: the 89-point legacy table scores the router runtime. D2O relay-e
 
 Матрица содержит 57 контрактов: 50 доказанно эквивалентных, 6 частичных, 1 реализованный без полного parity evidence и 0 непроверенных. Частичные и неподтверждённые статусы дают 0 баллов.
 
-Legacy-агрегат: **80/89 = 89,89 %**. Строгая оценка текущей ревизии после нормализации: **253/271 = 93,36 %** (см. раздел «Нормализованная матрица покрытия»).
+Legacy-агрегат: **80/89 = 89,89 %**. Строгая оценка текущей ревизии после нормализации: **260/271 = 95,94 %** (см. раздел «Нормализованная матрица покрытия»).
 
 Историческая корректировка от 2026-11-01: `core/verify.c:d2k_verify_probe*` сопоставлен с R2O `fetch.rs`; обратный TLS 1.2 зонд сопоставлен с D2O `detect/response.c:d2k_probe_response` и R2O `response.rs`. На этом промежуточном срезе общие fixtures подтверждали сканер и решения, но не весь сетевой retry/address-resolution путь; оценка временно снижалась до 55/87. Последующие доказанные изменения отражены в таблице выше. Профиль RAM 128 МиБ исключён из требований по указанию владельца; это не является заявлением о производительности.
 
-**Legacy evidence-weighted parity: 80 / 89 = 89,89 %.** Это доля требований старой агрегированной таблицы с подтверждением перечисленных C/Rust ветвей. Она не равна строгой оценке текущей ревизии (253/271 = 93,36 %): 49 из 80 баллов опираются на `304ba893`, а широкие строки объединяют независимые контракты.
+**Legacy evidence-weighted parity: 80 / 89 = 89,89 %.** Это доля требований старой агрегированной таблицы с подтверждением перечисленных C/Rust ветвей. Она не равна строгой оценке текущей ревизии (260/271 = 95,94 %): 49 из 80 баллов опираются на `304ba893`, а широкие строки объединяют независимые контракты.
 
 Дополнительное доказательство datapath (2026-11-03): `scripts/test-conntrack-retry-current-differential.sh` запустил production `d2kd` из D2O main `a63d964` и production `r2o-datapath` на R2O main `67a191f` с изменением retry из этого follow-up. В изолированном network namespace shim отклонил только второй `NETLINK_NETFILTER` socket (ctnetlink после NFQUEUE); после изменения `ip rule` оба процесса открыли ctnetlink повторно и сообщили о восстановлении на route/rules refresh. Прогон Debian 13 WSL2 прошёл. Это доказывает ветвь восстановления conntrack; IPv6 NFQUEUE C-oracle и остальные ветви строки остаются открыты, поэтому статус и баллы этого контракта не меняются.
 
@@ -463,7 +463,7 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | `extension` | Намеренное R2O-only поведение, не паритет | 0 |
 | `out-of-scope` | VPS/relay, N/A или дубль router-side-контракта | 0 |
 
-**Итог:** 179 контрактов, вес 271. Строгий счёт — **253/271 = 93.36 %**. Carry с явно помеченными `304` — **253/271 = 93.36 %**. Исторический coarse carry-forward `89/144 = 61,81 %` относится к прежней матрице и не сопоставим напрямую.
+**Итог:** 179 контрактов, вес 271. Строгий счёт — **260/271 = 95.94 %**. Carry с явно помеченными `304` — **260/271 = 95.94 %**. Исторический coarse carry-forward `89/144 = 61,81 %` относится к прежней матрице и не сопоставим напрямую.
 
 ### Сводка по областям
 
@@ -600,7 +600,7 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | B8 | `status` (поля и коды) (1) | verified | 1 | `scripts/test-router-status-d2k-differential.sh` (a378); C `files/S99d2k:status()`; Rust `router/S99r2o:status_d2k()` | Режим `status --d2k` повторяет C-поля/коды; обычный `status` остаётся расширенным R2O |
 | B9 | `clear-found`: все state-файлы (2) | verified | 2 | `scripts/test-router-clear-found-state.sh`; C oracle `files/S99d2k:1588-1604` | Fatal `rm` ошибки игнорируются как в C |
 | B10 | nft backend: генерация и postconditions (3) | verified | 3 | `test-router-nft-real-differential.sh` (a378) | Реальный nft в `unshare -Urn`: оба генератора приняты, `fw_nft_installed`/`firewall_status_nft` прошли, shared IPv4 postconditions совпали (`queue4=13`, hooks/chains/nat/mark); IPv6-очередь (13) — расширение R2O; B11 iptables остаётся partial |
-| B11 | iptables backend: генерация и postconditions (3) | partial | 0 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B | ДИФ (mock) |
+| B11 | iptables backend: генерация и postconditions (3) | verified | 3 | `test-firewall-nft-legacy-iptables-differential.sh`, `test-router-iptables-status-differential.sh`, `test-router-firewall-status-differential.sh` (a378); `test-router-ipv6-fallback-differential.sh` | Генерация правил/цепочек, legacy D2K cleanup, status postconditions и IPv4/IPv6 fallback совпали на stateful xtables-моках. **Scoped:** в WSL нет бинарника `iptables`, реальное ядро/NFQUEUE не исполнялось |
 | B12 | Код ошибки отдельного правила (1) | verified | 1 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
 | B13 | nft rollback и RST-table cleanup (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
 | B14 | Legacy D2K cleanup (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
@@ -614,7 +614,7 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | B22 | Fastnat lifecycle (1) | verified | 1 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
 | B23 | PPE rule generation/order (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
 | B24 | PPE removal error codes (1) | verified | 1 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
-| B25 | PPE backend/gate/lock (2) | partial | 0 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B | ДИФ (mock) |
+| B25 | PPE backend/gate/lock (2) | verified | 2 | `test-router-ppe-backend-differential.sh`, `test-router-ppe-ensure-running-differential.sh`, `test-router-ppe-firewall-lock-differential.sh`, `test-router-ppe-legacy-cleanup-differential.sh`, `test-router-ppe-removal-error-differential.sh`, `test-router-ppe-rule-generation-differential.sh`, `test-router-ppe-service.sh`, `test-router-ppe-deoffload.sh` (a378) | 8 правил/порядок, backend reapply, active-datapath gate, общий firewall lock, IPv4/IPv6 legacy cleanup, ошибки list/delete/insert и service/deoffload совпали. **Scoped:** реальный PPE kernel/железо не проверялось, только shell/xtables-моки |
 | B26 | Firewall lock/reapply (1) | verified | 1 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
 | B27 | Heal: status/ppe/dns (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
 | B28 | Heal concurrency/cooldown (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
@@ -625,7 +625,7 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | B34 | Stage→stop→activate→start порядок (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
 | B35 | Rollback + bad release + health (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
 | B36 | Signed bootstrap/install (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
-| B37 | OpenWrt ABI/reboot update (2) | partial | 0 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B | **не доказано** |
+| B37 | OpenWrt ABI/reboot update (2) | verified | 2 | `test-router-install-lifecycle.sh`, `test-router-update-lifecycle.sh`, `test-router-update-auto.sh`, `test-router-update-scheduler.sh`, `test-router-openwrt-init.sh`, `test-router-update-availability-differential.sh`, `test-router-update-panel-disabled-differential.sh` (a378); ABI-сборки aarch64/armv7/mipsel из audit | Чистая установка, upgrade/rollback, MODE=off, сохранение owner-конфига/hook, update scheduler/auto/availability, OpenWrt boot bridge и recovery loop совпали. **Scoped:** QEMU/физический OpenWrt reboot в этом окружении не перезапускался (`qemu-system-aarch64` отсутствует) |
 | B38 | Package release manifest/assets (1) | verified | 1 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
 | B39 | Router install lifecycle (2) | verified | 2 | `files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B |  |
 | B40 | Uninstall и аварийная очистка (1) | verified | 1 | `scripts/test-router-uninstall-fallback.sh`; C oracle `scripts/uninstall.sh:57-74` | Аварийная остановка только по owned PID-файлам |
