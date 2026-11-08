@@ -26,21 +26,17 @@ fn media_tag_marks_only_media_dcs() {
 
 #[test]
 fn диагностический_wss_запрос_сохраняет_host_origin_и_binary_protocol() {
-    let upgrade = crate::ws_upgrade::begin(
+    let request = websocket_request(
         "worker.example",
         "/apiws?dst=149.154.167.51&dc=2&media=0",
-        Some("binary"),
-        Some("https://web.telegram.org"),
-        Some("r2o-test/1.0"),
+        true,
     )
     .unwrap();
-    let request = std::str::from_utf8(upgrade.request()).unwrap();
-    assert!(request.starts_with(
-        "GET /apiws?dst=149.154.167.51&dc=2&media=0 HTTP/1.1\r\nHost: worker.example\r\n"
-    ));
-    assert!(request.contains("Origin: https://web.telegram.org\r\n"));
-    assert!(request.contains("Sec-WebSocket-Protocol: binary\r\n"));
-    assert!(request.contains("Sec-WebSocket-Version: 13\r\n"));
+
+    assert_eq!(request.uri().host(), Some("worker.example"));
+    assert_eq!(request.headers()["Host"], "worker.example");
+    assert_eq!(request.headers()["Origin"], "https://web.telegram.org");
+    assert_eq!(request.headers()["Sec-WebSocket-Protocol"], "binary");
 }
 
 #[test]
@@ -160,8 +156,11 @@ async fn tls_verification_rejects_self_signed_certificates() {
     });
 
     let tcp = TcpStream::connect(addr).await.unwrap();
+    let request = format!("wss://{real_domain}/apiws")
+        .into_client_request()
+        .unwrap();
 
-    let result = tls_handshake_and_upgrade(tcp, real_domain, "/apiws", true).await;
+    let result = tls_handshake_and_upgrade(tcp, request).await;
     assert!(
         result.is_err(),
         "expected certificate verification to reject the self-signed cert"
@@ -329,8 +328,6 @@ async fn a_second_connection_to_the_same_host_resumes_its_tls_session() {
 
 #[tokio::test]
 async fn фрагментированное_binary_сообщение_возвращается_единым_mtproto_потоком() {
-    use tokio_tungstenite::client_async_tls_with_config;
-    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     use tokio_tungstenite::tungstenite::protocol::frame::{
         Frame,
         coding::{Data, OpCode},

@@ -26,15 +26,17 @@ use crate::outbound::OutboundConnector;
 use futures_util::{SinkExt, StreamExt, stream::FuturesUnordered};
 use rustls_pki_types::ServerName;
 use tokio::net::TcpStream;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{
+    Connector, MaybeTlsStream, WebSocketStream, client_async_tls_with_config,
+    tungstenite::{client::IntoClientRequest, http::HeaderValue},
+};
 use tracing::{debug, warn};
+use tungstenite::Error as WsError;
 use tungstenite::Message;
 use tungstenite::protocol::WebSocketConfig;
 
-/// Открытое WebSocket-соединение с узлом Telegram DC. FrameGuard до разбора
-/// tungstenite отвергает кадры, которые C `tg_ws_reassembly_feed` считает
-/// нарушением протокола.
-pub type TgWsStream = WebSocketStream<crate::ws_frames::FrameGuard<MaybeTlsStream<TcpStream>>>;
+/// Открытое WebSocket-соединение с узлом Telegram DC.
+pub type TgWsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 type CandidateFuture<'a, T, E> = Pin<Box<dyn Future<Output = (String, Result<T, E>)> + Send + 'a>>;
 
@@ -431,75 +433,6 @@ impl WsAttempt {
 }
 
 /// Открыть TLS/WSS-соединение к заданному DC IP и домену.
-const WS_ORIGIN: &str = "https://web.telegram.org";
-const WS_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
-     AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-
-enum UpgradeConnectError {
-    Tls(String),
-    Protocol(String),
-}
-
-enum UpgradeOutcome {
-    Connected(TgWsStream),
-    Http(u16),
-}
-
-fn ws_upgrade_request(
-    domain: &str,
-    path: &str,
-    binary_subprotocol: bool,
-) -> Result<crate::ws_upgrade::Upgrade, String> {
-    crate::ws_upgrade::begin(
-        domain,
-        path,
-        binary_subprotocol.then_some("binary"),
-        Some(WS_ORIGIN),
-        Some(WS_USER_AGENT),
-    )
-}
-
-async fn websocket_from_tls(
-    tls: tokio_rustls::client::TlsStream<TcpStream>,
-    leftover: Vec<u8>,
-) -> TgWsStream {
-    let guarded = crate::ws_frames::FrameGuard::with_prefix(MaybeTlsStream::Rustls(tls), leftover);
-    WebSocketStream::from_raw_socket(
-        guarded,
-        tokio_tungstenite::tungstenite::protocol::Role::Client,
-        Some(ws_config()),
-    )
-    .await
-}
-
-/// TLS и WebSocket upgrade строго по D2O: собственный заголовок/проверка,
-/// tungstenite используется только для кадров.
-async fn tls_handshake_and_upgrade(
-    tcp: TcpStream,
-    domain: &str,
-    path: &str,
-    binary_subprotocol: bool,
-) -> Result<UpgradeOutcome, UpgradeConnectError> {
-    let connector = tokio_rustls::TlsConnector::from(verifying_rustls_config());
-    let server_name = ServerName::try_from(domain.to_string())
-        .map_err(|error| UpgradeConnectError::Tls(format!("неверное имя TLS-сервера: {error}")))?;
-    let mut tls = connector
-        .connect(server_name, tcp)
-        .await
-        .map_err(|error| UpgradeConnectError::Tls(error.to_string()))?;
-    let upgrade = ws_upgrade_request(domain, path, binary_subprotocol)
-        .map_err(UpgradeConnectError::Protocol)?;
-    let (status, leftover) = crate::ws_upgrade::perform(&mut tls, &upgrade)
-        .await
-        .map_err(UpgradeConnectError::Protocol)?;
-    if status != 101 {
-        return Ok(UpgradeOutcome::Http(status));
-    }
-    Ok(UpgradeOutcome::Connected(
-        websocket_from_tls(tls, leftover).await,
-    ))
-}
-
 async fn connect_ws_with_path(
     ip: &str,
     domain: &str,
@@ -525,31 +458,41 @@ async fn connect_ws_with_path(
     };
     let _ = tcp.set_nodelay(true);
 
-    match tokio::time::timeout(
-        timeout,
-        tls_handshake_and_upgrade(tcp, domain, path, request_binary_subprotocol),
-    )
-    .await
-    {
-        Ok(Ok(UpgradeOutcome::Connected(ws))) => {
+    let request = match websocket_request(domain, path, request_binary_subprotocol) {
+        Ok(request) => request,
+        Err(error) => return WsConnectResult::Failed(error),
+    };
+
+    match tokio::time::timeout(timeout, tls_handshake_and_upgrade(tcp, request)).await {
+        Ok(Ok((ws, response))) if response.status().as_u16() == 101 => {
             crate::stats::global().record_wss_established();
             WsConnectResult::Connected(ws)
         }
-        Ok(Ok(UpgradeOutcome::Http(status))) if matches!(status, 301 | 302 | 303 | 307 | 308) => {
-            WsConnectResult::Redirect(status)
+        Ok(Ok((_, response)))
+            if matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) =>
+        {
+            WsConnectResult::Redirect(response.status().as_u16())
         }
-        Ok(Ok(UpgradeOutcome::Http(status))) => {
-            record_http_failure(status);
-            WsConnectResult::HttpStatus(status)
+        Ok(Ok((_, response))) => {
+            record_http_failure(response.status().as_u16());
+            WsConnectResult::HttpStatus(response.status().as_u16())
         }
-        Ok(Err(UpgradeConnectError::Tls(reason))) => {
-            debug!("TLS handshake WSS не удался: {reason}");
+        Ok(Err(WsError::Http(response)))
+            if matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) =>
+        {
+            WsConnectResult::Redirect(response.status().as_u16())
+        }
+        Ok(Err(WsError::Http(response))) => {
+            record_http_failure(response.status().as_u16());
+            WsConnectResult::HttpStatus(response.status().as_u16())
+        }
+        Ok(Err(WsError::Tls(_))) => {
             crate::stats::global().record_failure("tls");
             WsConnectResult::Failed("ошибка TLS handshake".to_string())
         }
-        Ok(Err(UpgradeConnectError::Protocol(error))) => {
+        Ok(Err(error)) => {
             crate::stats::global().record_failure("websocket");
-            WsConnectResult::Failed(error)
+            WsConnectResult::Failed(error.to_string())
         }
         Err(_) => {
             crate::stats::global().record_failure("timeout");
@@ -564,6 +507,32 @@ fn record_http_failure(status: u16) {
         503 => crate::stats::global().record_failure("http_503"),
         _ => crate::stats::global().record_failure("websocket"),
     }
+}
+
+fn websocket_request(
+    domain: &str,
+    path: &str,
+    request_binary_subprotocol: bool,
+) -> Result<tungstenite::http::Request<()>, String> {
+    let url = format!("wss://{domain}{path}");
+    let mut request = url
+        .into_client_request()
+        .map_err(|error| format!("некорректный URL: {error}"))?;
+    let headers = request.headers_mut();
+    if request_binary_subprotocol {
+        headers.insert("Sec-WebSocket-Protocol", HeaderValue::from_static("binary"));
+    }
+    headers.insert(
+        "Origin",
+        HeaderValue::from_static("https://web.telegram.org"),
+    );
+    headers.insert(
+        "User-Agent",
+        HeaderValue::from_static(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        ),
+    );
+    Ok(request)
 }
 
 pub(crate) async fn connect_probe_ws(
@@ -656,29 +625,48 @@ async fn connect_probe_ws_with_config(
     };
     timing.tls_ms = Some(elapsed_ms(started));
 
-    let upgrade =
-        ws_upgrade_request(domain, path, request_binary_subprotocol).map_err(|error| {
-            WsProbeError {
-                phase: "websocket",
-                reason: error,
-                http_status: None,
-                timing: timing.clone(),
-            }
-        })?;
+    let request = websocket_request(domain, path, request_binary_subprotocol).map_err(|error| {
+        WsProbeError {
+            phase: "websocket",
+            reason: error,
+            http_status: None,
+            timing: timing.clone(),
+        }
+    })?;
     let started = Instant::now();
-    let mut tls_stream = tls_stream;
-    let (status, leftover) = match tokio::time::timeout(
+    let stream = MaybeTlsStream::Rustls(tls_stream);
+    let (ws, _response) = match tokio::time::timeout(
         timeout,
-        crate::ws_upgrade::perform(&mut tls_stream, &upgrade),
+        tokio_tungstenite::client_async_with_config(request, stream, Some(ws_config())),
     )
     .await
     {
-        Ok(Ok(value)) => value,
+        Ok(Ok(result)) if result.1.status().as_u16() == 101 => result,
+        Ok(Ok((_, response))) => {
+            let status = response.status().as_u16();
+            timing.websocket_ms = Some(elapsed_ms(started));
+            return Err(WsProbeError {
+                phase: "websocket",
+                reason: format!("сервер ответил HTTP {status}"),
+                http_status: Some(status),
+                timing,
+            });
+        }
+        Ok(Err(WsError::Http(response))) => {
+            let status = response.status().as_u16();
+            timing.websocket_ms = Some(elapsed_ms(started));
+            return Err(WsProbeError {
+                phase: "websocket",
+                reason: format!("сервер ответил HTTP {status}"),
+                http_status: Some(status),
+                timing,
+            });
+        }
         Ok(Err(error)) => {
             timing.websocket_ms = Some(elapsed_ms(started));
             return Err(WsProbeError {
                 phase: "websocket",
-                reason: error,
+                reason: error.to_string(),
                 http_status: None,
                 timing,
             });
@@ -694,15 +682,6 @@ async fn connect_probe_ws_with_config(
         }
     };
     timing.websocket_ms = Some(elapsed_ms(started));
-    if status != 101 {
-        return Err(WsProbeError {
-            phase: "websocket",
-            reason: format!("сервер ответил HTTP {status}"),
-            http_status: Some(status),
-            timing,
-        });
-    }
-    let ws = websocket_from_tls(tls_stream, leftover).await;
     Ok((ws, timing))
 }
 
@@ -836,6 +815,17 @@ async fn connect_cf_with_path(
     })
 }
 
+#[allow(clippy::result_large_err)]
+async fn tls_handshake_and_upgrade<R>(
+    tcp: TcpStream,
+    request: R,
+) -> Result<(TgWsStream, tungstenite::handshake::client::Response), WsError>
+where
+    R: IntoClientRequest + Unpin,
+{
+    let connector = Connector::Rustls(verifying_rustls_config());
+    client_async_tls_with_config(request, tcp, Some(ws_config()), Some(connector)).await
+}
 /// Верхний размер входного WebSocket-кадра и собранного сообщения.
 ///
 /// По умолчанию Tungstenite допускает кадры до 16 МиБ и сообщения до 64 МиБ;
@@ -1287,15 +1277,11 @@ pub async fn ws_send(ws: &mut TgWsStream, data: Vec<u8>) -> Result<(), String> {
 /// Получить следующее двоичное сообщение WebSocket.
 /// Вернуть `None`, если соединение закрыто штатно.
 #[allow(dead_code)]
-pub async fn ws_recv<S>(ws: &mut WebSocketStream<S>) -> Option<Vec<u8>>
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
+pub async fn ws_recv(ws: &mut TgWsStream) -> Option<Vec<u8>> {
     loop {
         match ws.next().await {
             Some(Ok(Message::Binary(b))) => return Some(b),
-            // C `tg_ws_read_binary` отвергает TEXT как нарушение протокола.
-            Some(Ok(Message::Text(_))) => return None,
+            Some(Ok(Message::Text(t))) => return Some(t.into_bytes()),
             Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => continue,
             Some(Ok(Message::Close(_))) | None => return None,
             Some(Err(_)) => return None,

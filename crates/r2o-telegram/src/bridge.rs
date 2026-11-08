@@ -440,10 +440,25 @@ pub(crate) async fn bridge_transparent_ws(
                         activity.touch();
                     }
                     Ok(Message::Text(data)) => {
-                        // C `dispatch_frames`: TEXT — нарушение протокола.
-                        let _ = data;
-                        record_mtproto_failure_if_pending(&response_state, &feedback).await;
-                        return "upstream прислал текстовый WSS-кадр".to_string();
+                        let length = data.len();
+                        let _message_reservation = match memory_budget.as_ref() {
+                            Some(budget) => match BudgetReservation::acquire(budget, length) {
+                                Some(reservation) => Some(reservation),
+                                None => {
+                                    record_mtproto_failure_if_pending(&response_state, &feedback)
+                                        .await;
+                                    return "бюджет памяти Telegram исчерпан для ответа WSS"
+                                        .to_string();
+                                }
+                            },
+                            None => None,
+                        };
+                        telemetry.record_upstream_bytes(length as u64);
+                        if let Err(error) = client_write.write_all(data.as_bytes()).await {
+                            return format!("ошибка записи текста WSS в TCP клиента: {error}");
+                        }
+                        bytes_down.fetch_add(length, Ordering::Relaxed);
+                        activity.touch();
                     }
                     Ok(Message::Ping(data)) => {
                         if let Err(error) = ws_write.lock().await.send(Message::Pong(data)).await {

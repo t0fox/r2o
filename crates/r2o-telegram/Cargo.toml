@@ -62,8 +62,6 @@ cipher = "0.4"
 # SHA-256 для получения ключей MTProto.
 sha2 = "0.10"
 ring = "0.17"
-# Sec-WebSocket-Key/Accept по RFC 6455, как C `EVP_EncodeBlock`.
-base64 = "0.22"
 zeroize = "1"
 
 # Случайные байты для рукопожатия.
