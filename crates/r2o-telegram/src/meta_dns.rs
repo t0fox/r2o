@@ -1068,7 +1068,7 @@ fn parse_legacy_offset(stored: &str) -> Option<u64> {
     let valid = match bytes {
         [digit] => digit.is_ascii_digit(),
         [b'0', second] => second.is_ascii_digit(),
-        [first @ b'1'..=b'5', second] => second.is_ascii_digit(),
+        [b'1'..=b'5', second] => second.is_ascii_digit(),
         _ => false,
     };
     valid.then(|| stored.parse().ok()).flatten()

@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 160,
-  "percent": 59.04,
+  "points": 161,
+  "percent": 59.41,
   "total": 179,
   "counts": {
-    "verified": 110,
+    "verified": 111,
     "carry": 40,
-    "partial": 28,
+    "partial": 27,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -385,7 +385,7 @@
     {
       "name": "Classifier / TLS",
       "weight": 24,
-      "points": 4,
+      "points": 5,
       "items": [
         {
           "id": 38,
@@ -587,15 +587,15 @@
           "key": "CL14",
           "name": "HTTP/3 status/header parser + httpup",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Classifier / TLS",
-          "coverage": "C `test_h3`, `test_httpup_logic`; Rust tests",
-          "gap": "Нет paired diff",
-          "mapping": "C `test_h3`, `test_httpup_logic`; Rust tests",
-          "evidence": "C `test_h3`, `test_httpup_logic`; Rust tests · пробел: Нет paired diff"
+          "coverage": "`test-controller-h3-httpup-differential.sh` (a378), C `test_h3`/`test_httpup_logic`, Rust tests",
+          "gap": "49 paired кейсов: control/request/status, static/Huffman/literal QPACK и httpup request/portal/redirect; `X-*-HTTP-Upgrade` нормализован",
+          "mapping": "`test-controller-h3-httpup-differential.sh` (a378), C `test_h3`/`test_httpup_logic`, Rust tests",
+          "evidence": "`test-controller-h3-httpup-differential.sh` (a378), C `test_h3`/`test_httpup_logic`, Rust tests · пробел: 49 paired кейсов: control/request/status, static/Huffman/literal QPACK и httpup request/portal/redirect; `X-*-HTTP-Upgrade` нормализован"
         },
         {
           "id": 52,
@@ -3527,15 +3527,15 @@
       "key": "CL14",
       "name": "HTTP/3 status/header parser + httpup",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Classifier / TLS",
-      "coverage": "C `test_h3`, `test_httpup_logic`; Rust tests",
-      "gap": "Нет paired diff",
-      "mapping": "C `test_h3`, `test_httpup_logic`; Rust tests",
-      "evidence": "C `test_h3`, `test_httpup_logic`; Rust tests · пробел: Нет paired diff"
+      "coverage": "`test-controller-h3-httpup-differential.sh` (a378), C `test_h3`/`test_httpup_logic`, Rust tests",
+      "gap": "49 paired кейсов: control/request/status, static/Huffman/literal QPACK и httpup request/portal/redirect; `X-*-HTTP-Upgrade` нормализован",
+      "mapping": "`test-controller-h3-httpup-differential.sh` (a378), C `test_h3`/`test_httpup_logic`, Rust tests",
+      "evidence": "`test-controller-h3-httpup-differential.sh` (a378), C `test_h3`/`test_httpup_logic`, Rust tests · пробел: 49 paired кейсов: control/request/status, static/Huffman/literal QPACK и httpup request/portal/redirect; `X-*-HTTP-Upgrade` нормализован"
     },
     {
       "id": 52,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 160,
+      "points": 161,
       "weight": 271,
-      "percent": 59.04
+      "percent": 59.41
     },
     "carry_forward": {
-      "points": 223,
+      "points": 224,
       "weight": 271,
-      "percent": 82.29,
+      "percent": 82.66,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
