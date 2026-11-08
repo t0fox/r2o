@@ -260,6 +260,79 @@ mod tests {
         let _ = std::fs::remove_file(ca_path);
     }
 
+    /// Сервер с захватом SNI из ClientHello до проверки сертификата.
+    async fn sni_capture_server(
+        server_config: Arc<rustls::ServerConfig>,
+    ) -> (SocketAddr, tokio::task::JoinHandle<Option<String>>) {
+        let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.ok()?;
+            let acceptor =
+                tokio_rustls::LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream);
+            tokio::pin!(acceptor);
+            let start = acceptor.as_mut().await.ok()?;
+            let sni = start.client_hello().server_name().map(str::to_owned);
+            // Для неверного имени/CA клиент прерывает рукопожатие; сервер
+            // должен лишь зафиксировать SNI и не зависнуть.
+            let _ = start.into_stream(server_config).await;
+            sni
+        });
+        (address, handle)
+    }
+
+    #[tokio::test]
+    #[ignore = "run through scripts/test-telegram-tls-sni-differential.sh"]
+    async fn d2o_tls_sni_and_hostname_verification_matches_c_trace() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let cert_path = std::env::var("R2O_TG_TLS_CERT").expect("cert path");
+        let key_path = std::env::var("R2O_TG_TLS_KEY").expect("key path");
+        let good_ca = std::env::var("R2O_TG_TLS_GOOD_CA").expect("good CA");
+        let other_ca = std::env::var("R2O_TG_TLS_OTHER_CA").expect("other CA");
+        let c_trace =
+            std::fs::read_to_string(std::env::var("R2O_TG_TLS_C_TRACE").expect("C trace")).unwrap();
+
+        let certs = rustls_pemfile::certs(&mut std::io::BufReader::new(
+            std::fs::File::open(&cert_path).unwrap(),
+        ))
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+        let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(
+            std::fs::File::open(&key_path).unwrap(),
+        ))
+        .unwrap()
+        .expect("private key");
+        let server_config = Arc::new(
+            rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(certs, key)
+                .unwrap(),
+        );
+
+        let mut trace = String::new();
+        for (name, verify_name, ca) in [
+            ("valid", "instagram.com", good_ca.as_str()),
+            ("wrong-name", "api.instagram.com", good_ca.as_str()),
+            ("untrusted", "instagram.com", other_ca.as_str()),
+        ] {
+            let (address, server) = sni_capture_server(Arc::clone(&server_config)).await;
+            let result = check_meta_edge_at(verify_name, address, Path::new(ca)).await;
+            let sni = tokio::time::timeout(Duration::from_secs(5), server)
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .flatten()
+                .unwrap_or_default();
+            trace.push_str(&format!(
+                "{name} ok={} sni={sni}\n",
+                u8::from(result.is_ok())
+            ));
+        }
+        assert_eq!(trace, c_trace);
+    }
+
     #[tokio::test]
     async fn wrong_certificate_name_is_rejected_even_with_valid_ca() {
         let _ = rustls::crypto::ring::default_provider().install_default();

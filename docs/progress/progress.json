@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 131,
-  "percent": 48.34,
+  "points": 132,
+  "percent": 48.71,
   "total": 179,
   "counts": {
-    "verified": 92,
+    "verified": 93,
     "carry": 40,
-    "partial": 46,
+    "partial": 45,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1095,7 +1095,7 @@
     {
       "name": "Telegram",
       "weight": 41,
-      "points": 14,
+      "points": 15,
       "items": [
         {
           "id": 157,
@@ -1237,15 +1237,15 @@
           "key": "TG11",
           "name": "TLS verification/SNI",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Telegram",
-          "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "gap": "",
-          "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+          "coverage": "`scripts/test-telegram-tls-sni-differential.sh` (a378); C `tg_tls_connect_fd_sni`; Rust `meta_edge::check_meta_edge_at`",
+          "gap": "Нейтральный SNI example.com, проверка instagram.com, wrong-name и untrusted CA совпадают",
+          "mapping": "`scripts/test-telegram-tls-sni-differential.sh` (a378); C `tg_tls_connect_fd_sni`; Rust `meta_edge::check_meta_edge_at`",
+          "evidence": "`scripts/test-telegram-tls-sni-differential.sh` (a378); C `tg_tls_connect_fd_sni`; Rust `meta_edge::check_meta_edge_at` · пробел: Нейтральный SNI example.com, проверка instagram.com, wrong-name и untrusted CA совпадают"
         },
         {
           "id": 167,
@@ -5252,15 +5252,15 @@
       "key": "TG11",
       "name": "TLS verification/SNI",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Telegram",
-      "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "gap": "",
-      "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+      "coverage": "`scripts/test-telegram-tls-sni-differential.sh` (a378); C `tg_tls_connect_fd_sni`; Rust `meta_edge::check_meta_edge_at`",
+      "gap": "Нейтральный SNI example.com, проверка instagram.com, wrong-name и untrusted CA совпадают",
+      "mapping": "`scripts/test-telegram-tls-sni-differential.sh` (a378); C `tg_tls_connect_fd_sni`; Rust `meta_edge::check_meta_edge_at`",
+      "evidence": "`scripts/test-telegram-tls-sni-differential.sh` (a378); C `tg_tls_connect_fd_sni`; Rust `meta_edge::check_meta_edge_at` · пробел: Нейтральный SNI example.com, проверка instagram.com, wrong-name и untrusted CA совпадают"
     },
     {
       "id": 167,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 131,
+      "points": 132,
       "weight": 271,
-      "percent": 48.34
+      "percent": 48.71
     },
     "carry_forward": {
-      "points": 194,
+      "points": 195,
       "weight": 271,
-      "percent": 71.59,
+      "percent": 71.96,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
