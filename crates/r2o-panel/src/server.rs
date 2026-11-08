@@ -1453,7 +1453,13 @@ where
                     loop {
                         match child.try_wait() {
                             Ok(Some(status)) => {
-                                return Some(if status.success() { "done" } else { "failed" });
+                                return Some(if status.success() {
+                                    "done"
+                                } else if status.code() == Some(124) {
+                                    "timeout"
+                                } else {
+                                    "failed"
+                                });
                             }
                             Ok(None) if start.elapsed() < timeout => {
                                 std::thread::sleep(Duration::from_millis(20))

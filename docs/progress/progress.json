@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 116,
-  "percent": 42.8,
+  "points": 118,
+  "percent": 43.54,
   "total": 179,
   "counts": {
-    "verified": 83,
+    "verified": 84,
     "carry": 40,
-    "partial": 55,
+    "partial": 54,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1447,7 +1447,7 @@
     {
       "name": "WebPanel",
       "weight": 30,
-      "points": 9,
+      "points": 11,
       "items": [
         {
           "id": 79,
@@ -1664,15 +1664,15 @@
           "key": "A15",
           "name": "Action state machine и timeout (включая 124)",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "WebPanel",
-          "coverage": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-          "gap": "ДИФ timeout; 124 — пробел",
-          "mapping": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-          "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: ДИФ timeout; 124 — пробел"
+          "coverage": "`scripts/test-panel-action-exit124-differential.sh` (a378); C `run_service_action`/`control_tick`; Rust `start_action_command_with_completion`",
+          "gap": "Exit 124 → `control_state=timeout`; busy/timeout состояния совпадают",
+          "mapping": "`scripts/test-panel-action-exit124-differential.sh` (a378); C `run_service_action`/`control_tick`; Rust `start_action_command_with_completion`",
+          "evidence": "`scripts/test-panel-action-exit124-differential.sh` (a378); C `run_service_action`/`control_tick`; Rust `start_action_command_with_completion` · пробел: Exit 124 → `control_state=timeout`; busy/timeout состояния совпадают"
         },
         {
           "id": 94,
@@ -4157,15 +4157,15 @@
       "key": "A15",
       "name": "Action state machine и timeout (включая 124)",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "WebPanel",
-      "coverage": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-      "gap": "ДИФ timeout; 124 — пробел",
-      "mapping": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-      "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: ДИФ timeout; 124 — пробел"
+      "coverage": "`scripts/test-panel-action-exit124-differential.sh` (a378); C `run_service_action`/`control_tick`; Rust `start_action_command_with_completion`",
+      "gap": "Exit 124 → `control_state=timeout`; busy/timeout состояния совпадают",
+      "mapping": "`scripts/test-panel-action-exit124-differential.sh` (a378); C `run_service_action`/`control_tick`; Rust `start_action_command_with_completion`",
+      "evidence": "`scripts/test-panel-action-exit124-differential.sh` (a378); C `run_service_action`/`control_tick`; Rust `start_action_command_with_completion` · пробел: Exit 124 → `control_state=timeout`; busy/timeout состояния совпадают"
     },
     {
       "id": 94,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 116,
+      "points": 118,
       "weight": 271,
-      "percent": 42.8
+      "percent": 43.54
     },
     "carry_forward": {
-      "points": 179,
+      "points": 181,
       "weight": 271,
-      "percent": 66.05,
+      "percent": 66.79,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
