@@ -726,7 +726,24 @@ pub(crate) async fn select_upstream(route: &Route<'_>, target_ip: &str) -> Optio
         return route.tcp_last_resort(target_ip, "отказ недавних WSS маршрутов");
     }
 
-    let cf_first = route.config.ws_routing == WsRoutingPolicy::CfFirst;
+    // Порядок категорий берём из порта C `tg_route_plan_build`; для
+    // CfFirst первый шаг — Cloudflare, для остальных политик — direct WSS.
+    let cf_first = crate::route_plan::build_plan(
+        route.dc,
+        route.is_media,
+        route.config.ws_routing.into(),
+        false,
+        route.config.cf_worker_domains().len(),
+        route.runtime.cf_domains().domains.len(),
+        false,
+    )
+    .and_then(|plan| plan.steps.first().map(|step| step.kind))
+    .is_some_and(|kind| {
+        matches!(
+            kind,
+            crate::route_plan::RouteKind::CfWorker | crate::route_plan::RouteKind::CfProxy
+        )
+    });
     if cf_first
         && has_fallback
         && let Some(upstream) = route.fallback_chain(target_ip, "CF-first").await
