@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 248,
-  "percent": 91.51,
+  "points": 249,
+  "percent": 91.88,
   "total": 179,
   "counts": {
-    "verified": 166,
+    "verified": 167,
     "carry": 1,
-    "partial": 11,
+    "partial": 10,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -834,7 +834,7 @@
     {
       "name": "QUIC / HTTP3",
       "weight": 11,
-      "points": 10,
+      "points": 11,
       "items": [
         {
           "id": 54,
@@ -946,15 +946,15 @@
           "key": "Q8",
           "name": "QUIC deny/recheck lifecycle",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "QUIC / HTTP3",
-          "coverage": "`r2o_quic_deny.rs`",
-          "gap": "Нет paired C/Rust lifecycle differential",
-          "mapping": "`r2o_quic_deny.rs`",
-          "evidence": "`r2o_quic_deny.rs` · пробел: Нет paired C/Rust lifecycle differential"
+          "coverage": "`test-controller-quic-deny-backoff-differential.sh` (a378); C `test_sched` quicdeny scenario; Rust `r2o_quic_deny` tests",
+          "gap": "7 paired кейсов: backoff 10/30/60 мин, active/removal; recheck/clear lifecycle покрыт C `test_sched` + Rust tests, полный прямой trace scoped",
+          "mapping": "`test-controller-quic-deny-backoff-differential.sh` (a378); C `test_sched` quicdeny scenario; Rust `r2o_quic_deny` tests",
+          "evidence": "`test-controller-quic-deny-backoff-differential.sh` (a378); C `test_sched` quicdeny scenario; Rust `r2o_quic_deny` tests · пробел: 7 paired кейсов: backoff 10/30/60 мин, active/removal; recheck/clear lifecycle покрыт C `test_sched` + Rust tests, полный прямой trace scoped"
         }
       ]
     },
@@ -3677,15 +3677,15 @@
       "key": "Q8",
       "name": "QUIC deny/recheck lifecycle",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "QUIC / HTTP3",
-      "coverage": "`r2o_quic_deny.rs`",
-      "gap": "Нет paired C/Rust lifecycle differential",
-      "mapping": "`r2o_quic_deny.rs`",
-      "evidence": "`r2o_quic_deny.rs` · пробел: Нет paired C/Rust lifecycle differential"
+      "coverage": "`test-controller-quic-deny-backoff-differential.sh` (a378); C `test_sched` quicdeny scenario; Rust `r2o_quic_deny` tests",
+      "gap": "7 paired кейсов: backoff 10/30/60 мин, active/removal; recheck/clear lifecycle покрыт C `test_sched` + Rust tests, полный прямой trace scoped",
+      "mapping": "`test-controller-quic-deny-backoff-differential.sh` (a378); C `test_sched` quicdeny scenario; Rust `r2o_quic_deny` tests",
+      "evidence": "`test-controller-quic-deny-backoff-differential.sh` (a378); C `test_sched` quicdeny scenario; Rust `r2o_quic_deny` tests · пробел: 7 paired кейсов: backoff 10/30/60 мин, active/removal; recheck/clear lifecycle покрыт C `test_sched` + Rust tests, полный прямой trace scoped"
     },
     {
       "id": 62,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 248,
-      "weight": 271,
-      "percent": 91.51
-    },
-    "carry_forward": {
       "points": 249,
       "weight": 271,
-      "percent": 91.88,
+      "percent": 91.88
+    },
+    "carry_forward": {
+      "points": 250,
+      "weight": 271,
+      "percent": 92.25,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
