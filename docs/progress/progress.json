@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 233,
-  "percent": 85.98,
+  "points": 234,
+  "percent": 86.35,
   "total": 179,
   "counts": {
-    "verified": 157,
+    "verified": 158,
     "carry": 1,
-    "partial": 20,
+    "partial": 19,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -834,7 +834,7 @@
     {
       "name": "QUIC / HTTP3",
       "weight": 11,
-      "points": 6,
+      "points": 7,
       "items": [
         {
           "id": 54,
@@ -901,15 +901,15 @@
           "key": "Q5",
           "name": "HTTP/3 budgets/transport limits/stall",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "QUIC / HTTP3",
-          "coverage": "Full-stage 18/18; `test-quic-http3`",
-          "gap": "70-KiB HEADERS app_bytes; timing-sensitive stall",
-          "mapping": "Full-stage 18/18; `test-quic-http3`",
-          "evidence": "Full-stage 18/18; `test-quic-http3` · пробел: 70-KiB HEADERS app_bytes; timing-sensitive stall"
+          "coverage": "`test-quic-http3-full-stage-differential.sh` (a378), `r2o_quic_http3` 18/18",
+          "gap": "Oversized 70-KiB HEADERS, slow headers/body, transport close, UDP-drop stall и app_bytes совпали; live network не покрыт",
+          "mapping": "`test-quic-http3-full-stage-differential.sh` (a378), `r2o_quic_http3` 18/18",
+          "evidence": "`test-quic-http3-full-stage-differential.sh` (a378), `r2o_quic_http3` 18/18 · пробел: Oversized 70-KiB HEADERS, slow headers/body, transport close, UDP-drop stall и app_bytes совпали; live network не покрыт"
         },
         {
           "id": 59,
@@ -3632,15 +3632,15 @@
       "key": "Q5",
       "name": "HTTP/3 budgets/transport limits/stall",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "QUIC / HTTP3",
-      "coverage": "Full-stage 18/18; `test-quic-http3`",
-      "gap": "70-KiB HEADERS app_bytes; timing-sensitive stall",
-      "mapping": "Full-stage 18/18; `test-quic-http3`",
-      "evidence": "Full-stage 18/18; `test-quic-http3` · пробел: 70-KiB HEADERS app_bytes; timing-sensitive stall"
+      "coverage": "`test-quic-http3-full-stage-differential.sh` (a378), `r2o_quic_http3` 18/18",
+      "gap": "Oversized 70-KiB HEADERS, slow headers/body, transport close, UDP-drop stall и app_bytes совпали; live network не покрыт",
+      "mapping": "`test-quic-http3-full-stage-differential.sh` (a378), `r2o_quic_http3` 18/18",
+      "evidence": "`test-quic-http3-full-stage-differential.sh` (a378), `r2o_quic_http3` 18/18 · пробел: Oversized 70-KiB HEADERS, slow headers/body, transport close, UDP-drop stall и app_bytes совпали; live network не покрыт"
     },
     {
       "id": 59,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 233,
-      "weight": 271,
-      "percent": 85.98
-    },
-    "carry_forward": {
       "points": 234,
       "weight": 271,
-      "percent": 86.35,
+      "percent": 86.35
+    },
+    "carry_forward": {
+      "points": 235,
+      "weight": 271,
+      "percent": 86.72,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

@@ -4,7 +4,7 @@ set -eu
 ROOT=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 ROOT_PARENT=$(dirname "$ROOT")
 D2O_ROOT="${R2O_DONOR_ROOT:-$ROOT_PARENT/r2o-tooling/d2o-current-main}"
-EXPECTED_D2O_SHA=a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe
+EXPECTED_D2O_SHA=a378e230947ebfd011439e1cac0f1e994d883aae
 [ "$(git -C "$D2O_ROOT" rev-parse HEAD)" = "$EXPECTED_D2O_SHA" ] || {
     echo "pinned D2O checkout is missing or changed" >&2
     exit 2
@@ -15,10 +15,10 @@ EXPECTED_D2O_SHA=a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe
 }
 
 TOOLING_ROOT="$ROOT_PARENT/r2o-tooling"
-CARGO_HOME="$TOOLING_ROOT/linux-cargo"
-RUSTUP_HOME="$TOOLING_ROOT/linux-rustup"
-CARGO_TARGET_DIR="$TOOLING_ROOT/linux-target"
-TMPDIR="$TOOLING_ROOT/tests"
+CARGO_HOME="${CARGO_HOME:-$TOOLING_ROOT/linux-cargo}"
+RUSTUP_HOME="${RUSTUP_HOME:-$TOOLING_ROOT/linux-rustup}"
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$TOOLING_ROOT/linux-target}"
+TMPDIR="${TMPDIR:-$TOOLING_ROOT/tests}"
 PATH="$CARGO_HOME/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export CARGO_HOME RUSTUP_HOME CARGO_TARGET_DIR TMPDIR PATH
 CC=cc
@@ -38,6 +38,7 @@ make -C "$DONOR_CORE" hello_profiles.inc
     "$DONOR_CORE/p256.c" "$DONOR_CORE/quichello.c" "$DONOR_CORE/hello.c" \
     "$DONOR_CORE/quicsnap.c" "$DONOR_CORE/quicsnap_reseal.c" \
     "$DONOR_CORE/meas.c" "$DONOR_CORE/net4.c" "$DONOR_CORE/ipfrag.c" \
+    "$DONOR_CORE/diagnostics.c" \
     -pthread -Wl,--gc-sections -o "$TEMP/d2o-quic-data-stage"
 
 cd "$ROOT"
