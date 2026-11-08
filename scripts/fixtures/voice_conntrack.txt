@@ -1,0 +1,14 @@
+ipv4 2 udp 17 29 src=192.168.1.10 dst=203.0.113.8 sport=40000 dport=50000 packets=10 bytes=1000 [UNREPLIED] src=203.0.113.8 dst=192.168.1.10 sport=50000 dport=40000 packets=5 bytes=500 mark=0 use=1
+ipv4 2 udp 17 29 src=192.168.1.10 dst=203.0.113.8 sport=40000 dport=50000 packets=5 bytes=500 src=203.0.113.8 dst=192.168.1.10 sport=50000 dport=40000 packets=5 bytes=500 mark=0 use=1
+ipv4 2 udp 17 29 src=192.168.1.11 dst=203.0.113.9 sport=40001 dport=50001 packets=90 bytes=9000 [UNREPLIED] src=203.0.113.9 dst=192.168.1.11 sport=50001 dport=40001 packets=9 bytes=900 mark=0 use=1
+ipv4 2 udp 17 29 src=192.168.1.12 dst=203.0.113.10 sport=40002 dport=50002 packets=80 bytes=8000 src=203.0.113.10 dst=192.168.1.12 sport=50002 dport=40002 packets=8 bytes=800 mark=0 use=1
+ipv4 2 udp 17 29 src=192.168.1.13 dst=203.0.113.11 sport=40003 dport=50003 packets=70 bytes=7000 [UNREPLIED] src=203.0.113.11 dst=192.168.1.13 sport=50003 dport=40003 packets=7 bytes=700 mark=0 use=1
+ipv4 2 udp 17 29 src=192.168.1.14 dst=203.0.113.12 sport=40004 dport=50004 packets=60 bytes=6000 src=203.0.113.12 dst=192.168.1.14 sport=50004 dport=40004 packets=6 bytes=600 mark=0 use=1
+ipv4 2 udp 17 29 src=192.168.1.15 dst=203.0.113.13 sport=40005 dport=50005 packets=50 bytes=5000 [UNREPLIED] src=203.0.113.13 dst=192.168.1.15 sport=50005 dport=40005 packets=5 bytes=500 mark=0 use=1
+ipv4 2 udp 17 29 src=192.168.1.16 dst=203.0.113.14 sport=40006 dport=50006 packets=40 bytes=4000 src=203.0.113.14 dst=192.168.1.16 sport=50006 dport=40006 packets=4 bytes=400 mark=0 use=1
+ipv4 2 udp 17 29 src=192.168.1.17 dst=203.0.113.15 sport=40007 dport=50007 packets=30 bytes=3000 [UNREPLIED] src=203.0.113.15 dst=192.168.1.17 sport=50007 dport=40007 packets=3 bytes=300 mark=0 use=1
+ipv4 2 udp 17 29 src=192.168.1.18 dst=203.0.113.16 sport=40008 dport=50008 packets=20 bytes=2000 src=203.0.113.16 dst=192.168.1.18 sport=50008 dport=40008 packets=2 bytes=200 mark=0 use=1
+ipv4 2 udp 17 29 src=192.168.1.19 dst=203.0.113.17 sport=40009 dport=50009 packets=10 bytes=1000 src=203.0.113.17 dst=192.168.1.19 sport=50009 dport=40009 packets=1 bytes=100 mark=0 use=1
+ipv4 2 udp 17 29 src=192.168.1.20 dst=192.168.1.1 sport=40010 dport=50010 packets=99 bytes=9900 src=192.168.1.1 dst=192.168.1.20 sport=50010 dport=40010 packets=9 bytes=900 mark=0 use=1
+ipv4 2 tcp 6 29 src=192.168.1.21 dst=203.0.113.18 sport=40011 dport=50011 packets=99 bytes=9900 src=203.0.113.18 dst=192.168.1.21 sport=50011 dport=40011 packets=9 bytes=900 mark=0 use=1
+ipv4 2 udp 17 29 src=192.168.1.22 dst=203.0.113.19 sport=40012 dport=50100 packets=99 bytes=9900 src=203.0.113.19 dst=192.168.1.22 sport=50100 dport=40012 packets=9 bytes=900 mark=0 use=1

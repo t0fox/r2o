@@ -4,11 +4,11 @@
 
 **Важно.** Таблица ниже — legacy-агрегат из 57 строк: 89 баллов веса, **80/89 (89,89 %)**. Это не оценка текущей ревизии. Аудит 2026-11-07 показал, что 49 из 80 баллов опираются на дифференциалы, закреплённые на `304ba893`, а несколько широких строк объединяют независимые контракты. После нормализации 2026-11-08 единая scored-матрица содержит **179 контрактов на 271 балл**: Panel A1–A26, Router B1–B54 (без B32/B45/B54), Telegram TG1–TG26 (без C2/C25/C26); coarse-строки `P*`, `F*`, `L*`, `T*` и `S7`/`S8` удалены как дубли:
 
-- строгий режим (только `a63d964`/`a378e23`/`8e2c981`, без helper/mock/build): **236/271 = 87,08 %**;
-- carry с явно помеченными `304ba893` (verified + оставшиеся 304, без двойного счёта): **237/271 = 87,45 %**;
+- строгий режим (только `a63d964`/`a378e23`/`8e2c981`, без helper/mock/build): **237/271 = 87,45 %**;
+- carry с явно помеченными `304ba893` (verified + оставшиеся 304, без двойного счёта): **238/271 = 87,82 %**;
 - legacy-агрегат: **80/89 = 89,89 %** (другой знаменатель, не сопоставим).
 
-Рост строгого счёта с 25,69 % до 87,08 % — не новые доказательства и не регресс: 84 детальных Router-контракта (70 strict) заменили 30 coarse-баллов `F*`/`L*`/`T*`/`P*` (18 strict), а 71 балл Panel/Telegram добавлен с нулём; ещё 2 балла дали доказанные M7a/M7b, 8 — B9/B52/B53/B42/B40, 3 — A26/A21/A8, 1 — TG20, 2 — D20, 2 — D23, 1 — D22, 2 — S12, 2 — S13, 2 — S14, 2 — S15, 1 — S11, 1 — A3, 1 — A25, 1 — B8, 2 — B46, 2 — TG22, 1 — A10, 1 — A6, 1 — A9, 1 — A19, 2 — A15, 1 — A13, 1 — A5, 2 — TG6, 2 — TG5, 2 — TG3, 2 — TG4, 1 — TG21, 2 — TG10, 1 — TG11, 2 — TG17, 2 — TG16, 2 — TG13, 1 — TG7, 2 — TG15, 2 — TG19, 1 — TG8, 1 — CL12, 1 — CL13, 1 — B6, 1 — B1, 2 — B48, 1 — CL14, 3 — B10, 1 — D21, 1 — D6, 1 — D18, 1 — D17, 2 — CL15, 1 — CL16, 1 — D7, 1 — D8, 12 — A1/A4/A7/A11/A12/A16/A17/A18/A22/A24, 10 — S1–S4, 5 — S5/S6, 16 — CL1–CL10, 4 — Q1/Q3/Q6, 8 — R1–R5, 1 — A23, 2 — A14, 1 — A2, 1 — A20, 1 — Q5, 1 — D19 и 1 — D1b. Знаменатели 144 и 271 несопоставимы напрямую.
+Рост строгого счёта с 25,69 % до 87,45 % — не новые доказательства и не регресс: 84 детальных Router-контракта (70 strict) заменили 30 coarse-баллов `F*`/`L*`/`T*`/`P*` (18 strict), а 71 балл Panel/Telegram добавлен с нулём; ещё 2 балла дали доказанные M7a/M7b, 8 — B9/B52/B53/B42/B40, 3 — A26/A21/A8, 1 — TG20, 2 — D20, 2 — D23, 1 — D22, 2 — S12, 2 — S13, 2 — S14, 2 — S15, 1 — S11, 1 — A3, 1 — A25, 1 — B8, 2 — B46, 2 — TG22, 1 — A10, 1 — A6, 1 — A9, 1 — A19, 2 — A15, 1 — A13, 1 — A5, 2 — TG6, 2 — TG5, 2 — TG3, 2 — TG4, 1 — TG21, 2 — TG10, 1 — TG11, 2 — TG17, 2 — TG16, 2 — TG13, 1 — TG7, 2 — TG15, 2 — TG19, 1 — TG8, 1 — CL12, 1 — CL13, 1 — B6, 1 — B1, 2 — B48, 1 — CL14, 3 — B10, 1 — D21, 1 — D6, 1 — D18, 1 — D17, 2 — CL15, 1 — CL16, 1 — D7, 1 — D8, 12 — A1/A4/A7/A11/A12/A16/A17/A18/A22/A24, 10 — S1–S4, 5 — S5/S6, 16 — CL1–CL10, 4 — Q1/Q3/Q6, 8 — R1–R5, 1 — A23, 2 — A14, 1 — A2, 1 — A20, 1 — Q5, 1 — D19, 1 — D1b и 1 — M4. Знаменатели 144 и 271 несопоставимы напрямую.
 
 Нормализация также установила, что `a63d964` и `304ba893` отсутствуют в локальном git-объекте D2O; доказательства, закреплённые на них, в этом окружении не воспроизводятся. Детали — `docs/audit/validation-2026-11-08.md`.
 
@@ -105,11 +105,11 @@ Scope boundary: the 89-point legacy table scores the router runtime. D2O relay-e
 
 Матрица содержит 57 контрактов: 50 доказанно эквивалентных, 6 частичных, 1 реализованный без полного parity evidence и 0 непроверенных. Частичные и неподтверждённые статусы дают 0 баллов.
 
-Legacy-агрегат: **80/89 = 89,89 %**. Строгая оценка текущей ревизии после нормализации: **236/271 = 87,08 %** (см. раздел «Нормализованная матрица покрытия»).
+Legacy-агрегат: **80/89 = 89,89 %**. Строгая оценка текущей ревизии после нормализации: **237/271 = 87,45 %** (см. раздел «Нормализованная матрица покрытия»).
 
 Историческая корректировка от 2026-11-01: `core/verify.c:d2k_verify_probe*` сопоставлен с R2O `fetch.rs`; обратный TLS 1.2 зонд сопоставлен с D2O `detect/response.c:d2k_probe_response` и R2O `response.rs`. На этом промежуточном срезе общие fixtures подтверждали сканер и решения, но не весь сетевой retry/address-resolution путь; оценка временно снижалась до 55/87. Последующие доказанные изменения отражены в таблице выше. Профиль RAM 128 МиБ исключён из требований по указанию владельца; это не является заявлением о производительности.
 
-**Legacy evidence-weighted parity: 80 / 89 = 89,89 %.** Это доля требований старой агрегированной таблицы с подтверждением перечисленных C/Rust ветвей. Она не равна строгой оценке текущей ревизии (236/271 = 87,08 %): 49 из 80 баллов опираются на `304ba893`, а широкие строки объединяют независимые контракты.
+**Legacy evidence-weighted parity: 80 / 89 = 89,89 %.** Это доля требований старой агрегированной таблицы с подтверждением перечисленных C/Rust ветвей. Она не равна строгой оценке текущей ревизии (237/271 = 87,45 %): 49 из 80 баллов опираются на `304ba893`, а широкие строки объединяют независимые контракты.
 
 Дополнительное доказательство datapath (2026-11-03): `scripts/test-conntrack-retry-current-differential.sh` запустил production `d2kd` из D2O main `a63d964` и production `r2o-datapath` на R2O main `67a191f` с изменением retry из этого follow-up. В изолированном network namespace shim отклонил только второй `NETLINK_NETFILTER` socket (ctnetlink после NFQUEUE); после изменения `ip rule` оба процесса открыли ctnetlink повторно и сообщили о восстановлении на route/rules refresh. Прогон Debian 13 WSL2 прошёл. Это доказывает ветвь восстановления conntrack; IPv6 NFQUEUE C-oracle и остальные ветви строки остаются открыты, поэтому статус и баллы этого контракта не меняются.
 
@@ -463,7 +463,7 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | `extension` | Намеренное R2O-only поведение, не паритет | 0 |
 | `out-of-scope` | VPS/relay, N/A или дубль router-side-контракта | 0 |
 
-**Итог:** 179 контрактов, вес 271. Строгий счёт — **236/271 = 87.08 %**. Carry с явно помеченными `304` — **237/271 = 87.45 %**. Исторический coarse carry-forward `89/144 = 61,81 %` относится к прежней матрице и не сопоставим напрямую.
+**Итог:** 179 контрактов, вес 271. Строгий счёт — **237/271 = 87.45 %**. Carry с явно помеченными `304` — **238/271 = 87.82 %**. Исторический coarse carry-forward `89/144 = 61,81 %` относится к прежней матрице и не сопоставим напрямую.
 
 ### Сводка по областям
 
@@ -557,7 +557,7 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | M1 | `compose.c` + `d2kc.c` orchestration/event loop (3) | partial | 0 | Inventory note; REA fragments | Нет отдельного контракта и differential |
 | M2 | `d2kask.c` (1) | partial | 0 | `r2o-ask-differential.sh` — независимые suites | Нет paired diff |
 | M3 | `d2kfetch.c` CLI (1) | verified | 1 | `r2o-fetch-cli-differential.sh` (сравнивает C/Rust CLI) | Нет SHA-пина; не все ветви |
-| M4 | `d2kvoice.c` controller entry (1) | partial | 0 | Discord rows частично | Нет контракта |
+| M4 | `d2kvoice.c` controller entry (1) | verified | 1 | `test-voice-list-differential.sh` (a378): C `d2kvoice --list` vs R2O `--voice-list`; R3/R4 дифференциалы | Список разговоров, сортировка, cap 8, `[UNREPLIED]` и exit-коды совпали; live `voice-check` не входит |
 | M5 | `link.c`, `net4.c`, `udpruntime.c`, `volume.c` (3) | partial | 0 | Inventory note; Rust `r2o_volume` tests | Нет C/Rust diff |
 | M6 | `crypto.c`, `p256.c`, `x25519.c`, `props.c`, `udpplan.c`, `plantlv.c` helpers (3) | partial | 0 | C unit tests; Rust units; `test-controller-plantlv-differential.sh`, `test-core-crypto-differential.sh`, `test-controller-udpplan-differential.sh` (a378); CL15 published vectors | plantlv: 64 paired + 4 stricter; crypto: 13 paired (SHA/HMAC/HKDF/AES); udpplan voice: 3 paired; p256/x25519 — published vectors (CL15); props и QUIC-ветви udpplan — поведенческие Q2/Q8, helper-level не парные → partial |
 | M7a | Legacy `D2KP` container compatibility (1) | verified | 1 | `scripts/test-wire-ts-up-plan-differential.sh` (a378); C `test_plan_parse`; Rust `parses_legacy_d2kp_container_with_identical_body` | Дубли `REC_AUTOTTL` в неканоническом D2KP пока отвергаются; канонические C-планы принимаются |

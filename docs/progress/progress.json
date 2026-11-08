@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 236,
-  "percent": 87.08,
+  "points": 237,
+  "percent": 87.45,
   "total": 179,
   "counts": {
-    "verified": 160,
+    "verified": 161,
     "carry": 1,
-    "partial": 17,
+    "partial": 16,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -2631,7 +2631,7 @@
     {
       "name": "Core / CLI",
       "weight": 15,
-      "points": 3,
+      "points": 4,
       "items": [
         {
           "id": 70,
@@ -2683,15 +2683,15 @@
           "key": "M4",
           "name": "`d2kvoice.c` controller entry",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Core / CLI",
-          "coverage": "Discord rows частично",
-          "gap": "Нет контракта",
-          "mapping": "Discord rows частично",
-          "evidence": "Discord rows частично · пробел: Нет контракта"
+          "coverage": "`test-voice-list-differential.sh` (a378): C `d2kvoice --list` vs R2O `--voice-list`; R3/R4 дифференциалы",
+          "gap": "Список разговоров, сортировка, cap 8, `[UNREPLIED]` и exit-коды совпали; live `voice-check` не входит",
+          "mapping": "`test-voice-list-differential.sh` (a378): C `d2kvoice --list` vs R2O `--voice-list`; R3/R4 дифференциалы",
+          "evidence": "`test-voice-list-differential.sh` (a378): C `d2kvoice --list` vs R2O `--voice-list`; R3/R4 дифференциалы · пробел: Список разговоров, сортировка, cap 8, `[UNREPLIED]` и exit-коды совпали; live `voice-check` не входит"
         },
         {
           "id": 74,
@@ -3857,15 +3857,15 @@
       "key": "M4",
       "name": "`d2kvoice.c` controller entry",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Core / CLI",
-      "coverage": "Discord rows частично",
-      "gap": "Нет контракта",
-      "mapping": "Discord rows частично",
-      "evidence": "Discord rows частично · пробел: Нет контракта"
+      "coverage": "`test-voice-list-differential.sh` (a378): C `d2kvoice --list` vs R2O `--voice-list`; R3/R4 дифференциалы",
+      "gap": "Список разговоров, сортировка, cap 8, `[UNREPLIED]` и exit-коды совпали; live `voice-check` не входит",
+      "mapping": "`test-voice-list-differential.sh` (a378): C `d2kvoice --list` vs R2O `--voice-list`; R3/R4 дифференциалы",
+      "evidence": "`test-voice-list-differential.sh` (a378): C `d2kvoice --list` vs R2O `--voice-list`; R3/R4 дифференциалы · пробел: Список разговоров, сортировка, cap 8, `[UNREPLIED]` и exit-коды совпали; live `voice-check` не входит"
     },
     {
       "id": 74,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 236,
-      "weight": 271,
-      "percent": 87.08
-    },
-    "carry_forward": {
       "points": 237,
       "weight": 271,
-      "percent": 87.45,
+      "percent": 87.45
+    },
+    "carry_forward": {
+      "points": 238,
+      "weight": 271,
+      "percent": 87.82,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
