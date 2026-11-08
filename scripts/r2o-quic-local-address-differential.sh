@@ -3,7 +3,7 @@ set -eu
 
 r2o_script_dir=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 r2o_donor_core=${R2O_DONOR_CORE:-${r2o_script_dir%/r2o}/d2o/core}
-r2o_expected_donor_sha=${R2O_EXPECTED_DONOR_SHA:-304ba893dd37197128ac8799c0495b035f6a38c0}
+r2o_expected_donor_sha=${R2O_EXPECTED_DONOR_SHA:-a378e230947ebfd011439e1cac0f1e994d883aae}
 r2o_actual_donor_sha=$(git -C "${r2o_donor_core%/core}" rev-parse HEAD)
 r2o_fixture="$r2o_script_dir/crates/r2o-controller/tests/fixtures/d2o_quic_local_address.tsv"
 r2o_tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/r2o-quic-local-address.XXXXXX")

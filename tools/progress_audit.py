@@ -379,9 +379,9 @@ def render_history():
         {
             "sha": "strict-normalized",
             "date": "2026-11-08",
-            "points": 216,
+            "points": 220,
             "weight": 271,
-            "percent": 79.70,
+            "percent": 81.18,
             "label": "строгий текущий (нормализованный)",
         },
     ]

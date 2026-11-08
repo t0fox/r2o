@@ -7,7 +7,7 @@ r2o_donor_test="$r2o_donor_datapath/test_quic_session"
 r2o_log_dir=${R2O_LOG_DIR:-"$r2o_script_dir/.rea"}
 r2o_log="$r2o_log_dir/r2o-quic-hello-differential-$(date +%Y%m%d-%H%M%S).log"
 r2o_started_at=$(date +%s)
-r2o_upstream_sha=304ba893dd37197128ac8799c0495b035f6a38c0
+r2o_upstream_sha=a378e230947ebfd011439e1cac0f1e994d883aae
 
 if [ "${R2O_EXPECTED_DONOR_SHA:-}" != "$r2o_upstream_sha" ]; then
     printf 'QUIC differential requires pinned upstream donor %s\n' "$r2o_upstream_sha" >&2
@@ -72,7 +72,7 @@ mkdir -p "$r2o_log_dir"
         rev-parse HEAD:datapath/session.c)
     r2o_test_blob=$(git -C "${r2o_donor_datapath%/datapath}" \
         rev-parse HEAD:datapath/test_quic_session.c)
-    if [ "$r2o_session_blob" != '061c98f61e1faea5178c379e94e83e17c21be7da' ] || \
+    if [ "$r2o_session_blob" != '49d636f3af3947785c82e48881202a449d2482a8' ] || \
         [ "$r2o_test_blob" != 'dc3af4d5aafb9423622ab2d5df202b4be8e1e823' ]; then
         printf 'Исходники донора отличаются от проверенного снимка\n' >&2
         exit 1
