@@ -3,7 +3,7 @@ set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 D2O_ROOT=${R2O_DONOR_ROOT:-${ROOT%/r2o}/d2o}
-EXPECTED_D2O_SHA=304ba893dd37197128ac8799c0495b035f6a38c0
+EXPECTED_D2O_SHA=a378e230947ebfd011439e1cac0f1e994d883aae
 ACTUAL_D2O_SHA=$(git -C "$D2O_ROOT" rev-parse HEAD)
 [ "$ACTUAL_D2O_SHA" = "$EXPECTED_D2O_SHA" ] || {
     echo "expected D2O $EXPECTED_D2O_SHA, got $ACTUAL_D2O_SHA" >&2
@@ -123,10 +123,20 @@ fn main() {
 RUST_SOURCE
 
 ${CLANG:-clang-18} -std=c11 -Wall -Wextra -Werror "$TEMP/d2o.c" -o "$TEMP/d2o"
-rust_source_path=$(cygpath -w "$TEMP/r2o.rs")
-rust_binary_path=$(cygpath -w "$TEMP/r2o.exe")
-${RUSTC:-rustc} --edition=2024 --target "${RUSTC_TARGET:-x86_64-pc-windows-gnu}" "$rust_source_path" -o "$rust_binary_path"
+if command -v cygpath >/dev/null 2>&1; then
+    rust_source_path=$(cygpath -w "$TEMP/r2o.rs")
+    rust_binary_path=$(cygpath -w "$TEMP/r2o.exe")
+    rust_target_args="--target ${RUSTC_TARGET:-x86_64-pc-windows-gnu}"
+    rust_binary="$TEMP/r2o.exe"
+else
+    rust_source_path=$TEMP/r2o.rs
+    rust_binary_path=$TEMP/r2o
+    rust_target_args=
+    rust_binary=$TEMP/r2o
+fi
+# shellcheck disable=SC2086 # пустой target — host-сборка
+${RUSTC:-rustc} --edition=2024 $rust_target_args "$rust_source_path" -o "$rust_binary_path"
 "$TEMP/d2o" >"$TEMP/c.out"
-"$TEMP/r2o.exe" >"$TEMP/rust.out"
+"$rust_binary" >"$TEMP/rust.out"
 diff -u "$TEMP/c.out" "$TEMP/rust.out"
 cat "$TEMP/rust.out"

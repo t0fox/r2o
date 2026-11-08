@@ -3,7 +3,7 @@ set -eu
 
 r2o_script_dir=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 r2o_donor_core="${R2O_DONOR_CORE:-${r2o_script_dir%/*}/d2o/core}"
-r2o_expected_donor_sha=${R2O_EXPECTED_DONOR_SHA:-304ba893dd37197128ac8799c0495b035f6a38c0}
+r2o_expected_donor_sha=${R2O_EXPECTED_DONOR_SHA:-a378e230947ebfd011439e1cac0f1e994d883aae}
 r2o_actual_donor_sha=$(git -C "${r2o_donor_core%/core}" rev-parse HEAD)
 if [ "$r2o_actual_donor_sha" != "$r2o_expected_donor_sha" ]; then
     printf 'Expected d2o %s, got %s\n' "$r2o_expected_donor_sha" "$r2o_actual_donor_sha" >&2
@@ -34,7 +34,7 @@ clang-18 -std=gnu11 -O2 -Wall -Wextra -Werror -pthread \
     "$r2o_donor_core/match.o" "$r2o_donor_core/compose.o" \
     "$r2o_donor_core/measured.o" "$r2o_donor_core/link.o" \
     "$r2o_donor_core/volume.o" "$r2o_donor_core/tls13.o" \
-    "$r2o_donor_core/tls13core.o" "$r2o_donor_core/x25519.o" \
+    "$r2o_donor_core/tls13core.o" "$r2o_donor_core/x25519.o" "$r2o_donor_core/diagnostics.o" \
     "$r2o_donor_core/verify.o" "$r2o_donor_core/tls12.o" \
     "$r2o_donor_core/p256.o" "$r2o_donor_core/quicconn.o" \
     "$r2o_donor_core/h3.o" "$r2o_donor_core/libd2k_udp.a" \

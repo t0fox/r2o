@@ -3,7 +3,7 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
-D2O_ROOT=${D2O_ROOT:-"$ROOT/d2o"}
+D2O_ROOT=${R2O_DONOR_ROOT:-${D2O_ROOT:-"${ROOT%/r2o}/d2o"}}
 TARGET_DIR=${CARGO_TARGET_DIR:-"$ROOT/target"}
 WORK_ROOT=${R2O_TEST_WORK_ROOT:-"$TARGET_DIR/test-work"}
 

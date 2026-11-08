@@ -4,11 +4,11 @@
 
 **Важно.** Таблица ниже — legacy-агрегат из 57 строк: 89 баллов веса, **80/89 (89,89 %)**. Это не оценка текущей ревизии. Аудит 2026-11-07 показал, что 49 из 80 баллов опираются на дифференциалы, закреплённые на `304ba893`, а несколько широких строк объединяют независимые контракты. После нормализации 2026-11-08 единая scored-матрица содержит **179 контрактов на 271 балл**: Panel A1–A26, Router B1–B54 (без B32/B45/B54), Telegram TG1–TG26 (без C2/C25/C26); coarse-строки `P*`, `F*`, `L*`, `T*` и `S7`/`S8` удалены как дубли:
 
-- строгий режим (только `a63d964`/`a378e23`/`8e2c981`, без helper/mock/build): **220/271 = 81,18 %**;
+- строгий режим (только `a63d964`/`a378e23`/`8e2c981`, без helper/mock/build): **228/271 = 84,13 %**;
 - carry с явно помеченными `304ba893` (verified + оставшиеся 304, без двойного счёта): **231/271 = 85,24 %**;
 - legacy-агрегат: **80/89 = 89,89 %** (другой знаменатель, не сопоставим).
 
-Рост строгого счёта с 25,69 % до 81,18 % — не новые доказательства и не регресс: 84 детальных Router-контракта (70 strict) заменили 30 coarse-баллов `F*`/`L*`/`T*`/`P*` (18 strict), а 71 балл Panel/Telegram добавлен с нулём; ещё 2 балла дали доказанные M7a/M7b, 8 — B9/B52/B53/B42/B40, 3 — A26/A21/A8, 1 — TG20, 2 — D20, 2 — D23, 1 — D22, 2 — S12, 2 — S13, 2 — S14, 2 — S15, 1 — S11, 1 — A3, 1 — A25, 1 — B8, 2 — B46, 2 — TG22, 1 — A10, 1 — A6, 1 — A9, 1 — A19, 2 — A15, 1 — A13, 1 — A5, 2 — TG6, 2 — TG5, 2 — TG3, 2 — TG4, 1 — TG21, 2 — TG10, 1 — TG11, 2 — TG17, 2 — TG16, 2 — TG13, 1 — TG7, 2 — TG15, 2 — TG19, 1 — TG8, 1 — CL12, 1 — CL13, 1 — B6, 1 — B1, 2 — B48, 1 — CL14, 3 — B10, 1 — D21, 1 — D6, 1 — D18, 1 — D17, 2 — CL15, 1 — CL16, 1 — D7, 1 — D8, 12 — A1/A4/A7/A11/A12/A16/A17/A18/A22/A24, 10 — S1–S4, 5 — S5/S6, 16 — CL1–CL10 и 4 — Q1/Q3/Q6. Знаменатели 144 и 271 несопоставимы напрямую.
+Рост строгого счёта с 25,69 % до 84,13 % — не новые доказательства и не регресс: 84 детальных Router-контракта (70 strict) заменили 30 coarse-баллов `F*`/`L*`/`T*`/`P*` (18 strict), а 71 балл Panel/Telegram добавлен с нулём; ещё 2 балла дали доказанные M7a/M7b, 8 — B9/B52/B53/B42/B40, 3 — A26/A21/A8, 1 — TG20, 2 — D20, 2 — D23, 1 — D22, 2 — S12, 2 — S13, 2 — S14, 2 — S15, 1 — S11, 1 — A3, 1 — A25, 1 — B8, 2 — B46, 2 — TG22, 1 — A10, 1 — A6, 1 — A9, 1 — A19, 2 — A15, 1 — A13, 1 — A5, 2 — TG6, 2 — TG5, 2 — TG3, 2 — TG4, 1 — TG21, 2 — TG10, 1 — TG11, 2 — TG17, 2 — TG16, 2 — TG13, 1 — TG7, 2 — TG15, 2 — TG19, 1 — TG8, 1 — CL12, 1 — CL13, 1 — B6, 1 — B1, 2 — B48, 1 — CL14, 3 — B10, 1 — D21, 1 — D6, 1 — D18, 1 — D17, 2 — CL15, 1 — CL16, 1 — D7, 1 — D8, 12 — A1/A4/A7/A11/A12/A16/A17/A18/A22/A24, 10 — S1–S4, 5 — S5/S6, 16 — CL1–CL10, 4 — Q1/Q3/Q6 и 8 — R1–R5. Знаменатели 144 и 271 несопоставимы напрямую.
 
 Нормализация также установила, что `a63d964` и `304ba893` отсутствуют в локальном git-объекте D2O; доказательства, закреплённые на них, в этом окружении не воспроизводятся. Детали — `docs/audit/validation-2026-11-08.md`.
 
@@ -105,11 +105,11 @@ Scope boundary: the 89-point legacy table scores the router runtime. D2O relay-e
 
 Матрица содержит 57 контрактов: 50 доказанно эквивалентных, 6 частичных, 1 реализованный без полного parity evidence и 0 непроверенных. Частичные и неподтверждённые статусы дают 0 баллов.
 
-Legacy-агрегат: **80/89 = 89,89 %**. Строгая оценка текущей ревизии после нормализации: **220/271 = 81,18 %** (см. раздел «Нормализованная матрица покрытия»).
+Legacy-агрегат: **80/89 = 89,89 %**. Строгая оценка текущей ревизии после нормализации: **228/271 = 84,13 %** (см. раздел «Нормализованная матрица покрытия»).
 
 Историческая корректировка от 2026-11-01: `core/verify.c:d2k_verify_probe*` сопоставлен с R2O `fetch.rs`; обратный TLS 1.2 зонд сопоставлен с D2O `detect/response.c:d2k_probe_response` и R2O `response.rs`. На этом промежуточном срезе общие fixtures подтверждали сканер и решения, но не весь сетевой retry/address-resolution путь; оценка временно снижалась до 55/87. Последующие доказанные изменения отражены в таблице выше. Профиль RAM 128 МиБ исключён из требований по указанию владельца; это не является заявлением о производительности.
 
-**Legacy evidence-weighted parity: 80 / 89 = 89,89 %.** Это доля требований старой агрегированной таблицы с подтверждением перечисленных C/Rust ветвей. Она не равна строгой оценке текущей ревизии (220/271 = 81,18 %): 49 из 80 баллов опираются на `304ba893`, а широкие строки объединяют независимые контракты.
+**Legacy evidence-weighted parity: 80 / 89 = 89,89 %.** Это доля требований старой агрегированной таблицы с подтверждением перечисленных C/Rust ветвей. Она не равна строгой оценке текущей ревизии (228/271 = 84,13 %): 49 из 80 баллов опираются на `304ba893`, а широкие строки объединяют независимые контракты.
 
 Дополнительное доказательство datapath (2026-11-03): `scripts/test-conntrack-retry-current-differential.sh` запустил production `d2kd` из D2O main `a63d964` и production `r2o-datapath` на R2O main `67a191f` с изменением retry из этого follow-up. В изолированном network namespace shim отклонил только второй `NETLINK_NETFILTER` socket (ctnetlink после NFQUEUE); после изменения `ip rule` оба процесса открыли ctnetlink повторно и сообщили о восстановлении на route/rules refresh. Прогон Debian 13 WSL2 прошёл. Это доказывает ветвь восстановления conntrack; IPv6 NFQUEUE C-oracle и остальные ветви строки остаются открыты, поэтому статус и баллы этого контракта не меняются.
 
@@ -463,7 +463,7 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | `extension` | Намеренное R2O-only поведение, не паритет | 0 |
 | `out-of-scope` | VPS/relay, N/A или дубль router-side-контракта | 0 |
 
-**Итог:** 179 контрактов, вес 271. Строгий счёт — **220/271 = 81.18 %**. Carry с явно помеченными `304` — **231/271 = 85.24 %**. Исторический coarse carry-forward `89/144 = 61,81 %` относится к прежней матрице и не сопоставим напрямую.
+**Итог:** 179 контрактов, вес 271. Строгий счёт — **228/271 = 84.13 %**. Carry с явно помеченными `304` — **231/271 = 85.24 %**. Исторический coarse carry-forward `89/144 = 61,81 %` относится к прежней матрице и не сопоставим напрямую.
 
 ### Сводка по областям
 
@@ -546,11 +546,11 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | Q6 | Budget init/app-bytes helper (1) | verified | 1 | `test-quic-budget-init-differential.sh`, `test-quic-app-bytes-differential.sh` (a378) | budget init и app-bytes helper совпали |
 | Q7 | Silent peer handshake timeout (1) | verified | 1 | Full-stage/`r2o_http3_silent_udp_peer_timeout` (a63) | Нет ICMP/close-port вариантов |
 | Q8 | QUIC deny/recheck lifecycle (1) | partial | 0 | `r2o_quic_deny.rs` | Нет paired C/Rust lifecycle differential |
-| R1 | UDP observer initiator/SSRC/endpoint event (2) | carry (304) | 0 | `test-discord-udp-observer-reconnect` (304) | 304; production RTC |
-| R2 | Manual measurement arm propagation (1) | carry (304) | 0 | `test-discord-voice-discovery-arm` (304) | 304 |
-| R3 | Voice trial lease/renewal/120-s waiter/APPLIED (3) | carry (304) | 0 | `r2o-discord-discovery`, `r2o-discord-voice-lifecycle-helper` (304), `test-discord-scheduled-udp` (a63) | 304; production process/long RTC |
-| R4 | Endpoint change/late NAK/persistence/reapply (1) | carry (304) | 0 | `r2o-discord-voice-lifecycle-helper` (304) | 304; source-backed helper |
-| R5 | Trial clock after queue admission (1) | carry (304) | 0 | `test-discord-voice-trial-clock` (304) | 304 |
+| R1 | UDP observer initiator/SSRC/endpoint event (2) | verified | 2 | `test-discord-udp-observer-reconnect-differential.sh` (a378) | initiator/SSRC/endpoint event совпали; production RTC не покрыт |
+| R2 | Manual measurement arm propagation (1) | verified | 1 | `test-discord-voice-discovery-arm-differential.sh` (a378) | рука измерения и префикс совпали |
+| R3 | Voice trial lease/renewal/120-s waiter/APPLIED (3) | verified | 3 | `r2o-discord-discovery-differential.sh`, `r2o-discord-voice-lifecycle-helper.sh`, `test-discord-scheduled-udp-differential.sh` (a378) | lease/renewal/waiter/APPLIED и scheduled UDP совпали; production process/long RTC не покрыты |
+| R4 | Endpoint change/late NAK/persistence/reapply (1) | verified | 1 | `r2o-discord-voice-lifecycle-helper.sh` (a378) | endpoint change/late NAK/persistence/reapply совпали |
+| R5 | Trial clock after queue admission (1) | verified | 1 | `test-discord-voice-trial-clock-differential.sh` (a378) | trial clock после queue admission совпал |
 | R6 | Scheduled UDP emission/queue stats (1) | verified | 1 | `test-discord-scheduled-udp-differential.sh` (a63) | Periodic/shutdown queue output |
 | R7 | Long RTC session/process recovery (1) | partial | 0 | Нет | Полный RTC, restart, endpoint recovery |
 | G1 | Discord Gateway WebSocket upgrade/Hello (1) | verified | 1 | `r2o-tls-verify-differential.sh` + `d2o_verify_differential` (a378), 14 сценариев | Loopback; не живой Gateway |
