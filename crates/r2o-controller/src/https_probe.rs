@@ -2,8 +2,7 @@
 
 use crate::response::{HttpsProbeState, probe_https_state};
 use r2k_core::control::{HttpPortalEvent, HttpResponseEvent, KEY_LEN};
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -15,7 +14,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub const VERIFIED_TTL_SECONDS: u32 = 6 * 60 * 60;
 const QUEUE_CAPACITY: usize = 16;
 const CACHE_CAPACITY: usize = 128;
-const MAX_CACHE_BYTES: u64 = 64 * 1024;
 
 struct Job {
     host: String,
@@ -75,24 +73,45 @@ fn target_from_http_key(key: &[u8; KEY_LEN], host_bytes: &[u8]) -> Option<(Strin
 }
 
 struct CachedResult {
-    expires: Instant,
-    state: HttpsProbeState,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct HttpsCacheFile {
-    schema: u8,
-    written_at: u64,
-    entries: Vec<HttpsCacheEntry>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct HttpsCacheEntry {
     host: String,
+    expires: Instant,
+    /// Момент последней записи — по нему C `cache_put` выбирает жертву.
+    stamp: Instant,
     state: HttpsProbeState,
-    expires_at: u64,
+}
+
+/// Проверка имени из кэша — побайтный перенос C `host_ok`: только ASCII
+/// буквы, цифры, дефис и точка, длина 1..=253.
+fn cache_host_ok(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 253
+        && host
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'.')
+}
+
+fn cache_find(cache: &[CachedResult], host: &str) -> Option<usize> {
+    cache
+        .iter()
+        .position(|entry| entry.host.eq_ignore_ascii_case(host))
+}
+
+/// Разобрать десятичное целое так же строго, как `%lld`: необязательный
+/// знак и цифры до конца токена.
+fn parse_signed_decimal(text: &str) -> Option<i64> {
+    let bytes = text.as_bytes();
+    let (negative, digits) = match bytes.first() {
+        Some(b'-') => (true, &bytes[1..]),
+        Some(b'+') => (false, &bytes[1..]),
+        _ => (false, bytes),
+    };
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let digits = std::str::from_utf8(digits).ok()?;
+    let magnitude = digits.parse::<i128>().ok()?;
+    let value = if negative { -magnitude } else { magnitude };
+    i64::try_from(value).ok()
 }
 
 pub struct HttpsProbeWorker {
@@ -100,7 +119,9 @@ pub struct HttpsProbeWorker {
     results: Receiver<HttpsProbeResult>,
     thread: Option<JoinHandle<()>>,
     pending: HashSet<String>,
-    cache: HashMap<String, CachedResult>,
+    /// Слоты кэша в порядке C-массива: загрузка и сохранение обязаны давать
+    /// тот же файл, что `d2k_httpsprobe_load/save`.
+    cache: Vec<CachedResult>,
 }
 
 impl HttpsProbeWorker {
@@ -132,22 +153,18 @@ impl HttpsProbeWorker {
             results,
             thread,
             pending: HashSet::new(),
-            cache: HashMap::new(),
+            cache: Vec::new(),
         }
     }
 
     pub fn submit(&mut self, host: &str, address: SocketAddr, now: Instant) -> bool {
         let host = host.to_ascii_lowercase();
-        if r2k_core::control::encode_set_https(&host, 1).is_err()
+        if !cache_host_ok(&host)
             || self.pending.contains(&host)
-            || self
-                .cache
-                .get(&host)
-                .is_some_and(|entry| entry.expires > now)
+            || cache_find(&self.cache, &host).is_some_and(|index| self.cache[index].expires > now)
         {
             return false;
         }
-        self.cache.remove(&host);
         let Some(jobs) = &self.jobs else {
             return false;
         };
@@ -164,8 +181,8 @@ impl HttpsProbeWorker {
     }
 
     pub fn cached_state(&self, host: &str, now: Instant) -> Option<HttpsProbeState> {
-        let host = host.to_ascii_lowercase();
-        let entry = self.cache.get(&host)?;
+        let index = cache_find(&self.cache, host)?;
+        let entry = &self.cache[index];
         (entry.expires > now).then_some(entry.state)
     }
 
@@ -190,9 +207,9 @@ impl HttpsProbeWorker {
     }
 
     pub fn verified_names(&self, now: Instant) -> impl Iterator<Item = (&str, u32)> {
-        self.cache.iter().filter_map(move |(host, entry)| {
+        self.cache.iter().filter_map(move |entry| {
             (entry.state.should_redirect() && entry.expires > now).then_some((
-                host.as_str(),
+                entry.host.as_str(),
                 entry.expires.saturating_duration_since(now).as_secs() as u32,
             ))
         })
@@ -209,16 +226,10 @@ impl HttpsProbeWorker {
         ttl_seconds: u32,
         now: Instant,
     ) -> bool {
-        let Ok(host) = crate::domain::normalize(host) else {
-            return false;
-        };
-        if ttl_seconds == 0
-            || ttl_seconds > state.ttl_seconds()
-            || r2k_core::control::encode_set_https(&host, 1).is_err()
-        {
+        if ttl_seconds == 0 || ttl_seconds > state.ttl_seconds() || !cache_host_ok(host) {
             return false;
         }
-        self.insert_cache(host, state, ttl_seconds, now);
+        self.insert_cache(host.to_owned(), state, ttl_seconds, now);
         true
     }
 
@@ -229,23 +240,38 @@ impl HttpsProbeWorker {
         ttl_seconds: u32,
         now: Instant,
     ) {
-        if !self.cache.contains_key(&host)
-            && self.cache.len() >= CACHE_CAPACITY
-            && let Some(oldest) = self
-                .cache
-                .iter()
-                .min_by_key(|(_, entry)| entry.expires)
-                .map(|(name, _)| name.clone())
-        {
-            self.cache.remove(&oldest);
+        let expires = now + Duration::from_secs(u64::from(ttl_seconds));
+        if let Some(index) = cache_find(&self.cache, &host) {
+            let entry = &mut self.cache[index];
+            entry.state = state;
+            entry.stamp = now;
+            entry.expires = expires;
+            return;
         }
-        self.cache.insert(
-            host,
-            CachedResult {
-                expires: now + Duration::from_secs(u64::from(ttl_seconds)),
+        if self.cache.len() < CACHE_CAPACITY {
+            self.cache.push(CachedResult {
+                host,
+                expires,
+                stamp: now,
                 state,
-            },
-        );
+            });
+            return;
+        }
+        // Как C `cache_put`: жертва — самая давняя запись; при равных
+        // отметках сохраняется порядок слотов.
+        let victim = self
+            .cache
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, entry)| entry.stamp)
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        self.cache[victim] = CachedResult {
+            host,
+            expires,
+            stamp: now,
+            state,
+        };
     }
 
     pub fn load_cache(
@@ -258,37 +284,62 @@ impl HttpsProbeWorker {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(format!("{}: {error}", path.display())),
         };
-        if bytes.len() as u64 > MAX_CACHE_BYTES {
-            return Err("файл кэша HTTPS превышает 64 КиБ".into());
-        }
-        let file: HttpsCacheFile =
-            serde_json::from_slice(&bytes).map_err(|error| format!("кэш HTTPS: {error}"))?;
-        if file.schema != 1 || file.entries.len() > CACHE_CAPACITY {
-            return Err("неподдерживаемая схема или размер кэша HTTPS".into());
-        }
-        if file.written_at > wall_now {
+        let mut lines = bytes.split_inclusive(|byte| *byte == b'\n');
+        let header_bytes = lines
+            .next()
+            .ok_or_else(|| format!("{}: пустой кэш HTTPS", path.display()))?;
+        let header = std::str::from_utf8(header_bytes)
+            .map_err(|_| format!("{}: не кэш HTTPS d2k", path.display()))?;
+        let written = if header == "d2k-https 1\n" {
+            None
+        } else if let Some(rest) = header.strip_prefix("d2k-https 2 ") {
+            let number = rest
+                .strip_suffix('\n')
+                .ok_or_else(|| format!("{}: не кэш HTTPS d2k", path.display()))?;
+            let value = parse_signed_decimal(number)
+                .filter(|value| *value >= 0)
+                .ok_or_else(|| format!("{}: не кэш HTTPS d2k", path.display()))?;
+            Some(value)
+        } else {
+            return Err(format!("{}: не кэш HTTPS d2k", path.display()));
+        };
+        // Файл записан позже, чем «сейчас»: часы отстают. Не оживляем.
+        if written.is_some_and(|written| written > wall_now as i64) {
             return Ok(Vec::new());
         }
-        let mut entries = BTreeMap::new();
-        for entry in file.entries {
-            let Ok(host) = crate::domain::normalize(&entry.host) else {
+        let wall_now = wall_now as i64;
+        let mut entries = Vec::new();
+        for line_bytes in lines {
+            let Ok(line) = std::str::from_utf8(line_bytes) else {
                 continue;
             };
-            if host != entry.host || r2k_core::control::encode_set_https(&host, 1).is_err() {
+            let line = line.strip_suffix('\n').unwrap_or(line);
+            let mut fields = line.split_ascii_whitespace();
+            let (Some(state_name), Some(expires_text), Some(host)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            if fields.next().is_some()
+                || state_name.len() > 31
+                || host.len() > 299
+                || !cache_host_ok(host)
+            {
                 continue;
             }
-            let ttl = entry
-                .expires_at
-                .saturating_sub(wall_now)
-                .min(u64::from(entry.state.ttl_seconds())) as u32;
-            if ttl > 0 {
-                entries.insert(host, (entry.state, ttl));
+            let Some(expires) = parse_signed_decimal(expires_text) else {
+                continue;
+            };
+            let Some(state) = HttpsProbeState::from_stored_name(state_name) else {
+                continue;
+            };
+            if expires <= wall_now {
+                continue;
             }
+            let ttl = (expires - wall_now).min(i64::from(state.ttl_seconds())) as u32;
+            entries.push((host.to_owned(), state, ttl));
         }
-        Ok(entries
-            .into_iter()
-            .map(|(host, (state, ttl))| (host, state, ttl))
-            .collect())
+        Ok(entries)
     }
 
     pub fn load_verified(
@@ -309,28 +360,22 @@ impl HttpsProbeWorker {
         now: Instant,
     ) -> Result<(), String> {
         let path = path.as_ref();
-        let mut entries: Vec<_> = self
-            .cache
-            .iter()
-            .filter_map(|(host, cached)| {
-                let ttl = cached.expires.saturating_duration_since(now).as_secs();
-                (ttl > 0).then(|| HttpsCacheEntry {
-                    host: host.clone(),
-                    state: cached.state,
-                    expires_at: wall_now
-                        .saturating_add(ttl.min(u64::from(cached.state.ttl_seconds()))),
-                })
-            })
-            .collect();
-        entries.sort_by(|left, right| left.host.cmp(&right.host));
-        let file = HttpsCacheFile {
-            schema: 1,
-            written_at: wall_now,
-            entries,
-        };
-        let mut bytes = serde_json::to_vec_pretty(&file)
-            .map_err(|error| format!("не удалось собрать кэш HTTPS: {error}"))?;
-        bytes.push(b'\n');
+        let mut bytes = format!("d2k-https 2 {wall_now}\n").into_bytes();
+        for cached in &self.cache {
+            let ttl = cached.expires.saturating_duration_since(now).as_secs();
+            if ttl == 0 {
+                continue;
+            }
+            bytes.extend_from_slice(
+                format!(
+                    "{} {} {}\n",
+                    cached.state.stored_name(),
+                    wall_now.saturating_add(ttl),
+                    cached.host
+                )
+                .as_bytes(),
+            );
+        }
         let file_name = path
             .file_name()
             .ok_or_else(|| "у кэша HTTPS нет имени файла".to_owned())?;
@@ -384,7 +429,9 @@ impl Drop for HttpsProbeWorker {
 #[cfg(test)]
 mod tests {
     use super::{HttpsProbeWorker, target_from_http_response, target_from_portal};
-    use crate::response::HttpsProbeState;
+    use crate::response::{
+        HTTPS_CONNECTED, HTTPS_NO_ANSWER, HTTPS_REFUSED, HttpsProbeState, classify_https_probe,
+    };
     use r2k_core::control::{BindingContext, HttpPortalEvent, HttpResponseEvent, KEY_LEN};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::time::{Duration, Instant};
@@ -393,13 +440,12 @@ mod tests {
     fn cached_state_and_pending_lookup_follow_host_and_expiry() {
         let now = Instant::now();
         let mut worker = HttpsProbeWorker::new(None);
-        worker.cache.insert(
-            "example.com".into(),
-            super::CachedResult {
-                expires: now + Duration::from_secs(30),
-                state: HttpsProbeState::Served,
-            },
-        );
+        worker.cache.push(super::CachedResult {
+            host: "example.com".into(),
+            expires: now + Duration::from_secs(30),
+            stamp: now,
+            state: HttpsProbeState::Served,
+        });
         worker.pending.insert("pending.example".into());
 
         assert_eq!(
@@ -412,6 +458,67 @@ mod tests {
         );
         assert!(worker.is_pending("PENDING.EXAMPLE"));
         assert!(!worker.is_pending("missing.example"));
+    }
+
+    #[test]
+    fn classify_matches_d2o_https_state_machine() {
+        assert_eq!(
+            classify_https_probe(HTTPS_REFUSED, true, true, 1),
+            HttpsProbeState::Closed
+        );
+        assert_eq!(
+            classify_https_probe(HTTPS_NO_ANSWER, true, true, 1),
+            HttpsProbeState::Unconfirmed
+        );
+        assert_eq!(
+            classify_https_probe(HTTPS_CONNECTED, false, false, -1),
+            HttpsProbeState::TlsBlocked
+        );
+        assert_eq!(
+            classify_https_probe(HTTPS_CONNECTED, true, false, -1),
+            HttpsProbeState::Unconfirmed
+        );
+        assert_eq!(
+            classify_https_probe(HTTPS_CONNECTED, true, true, 1),
+            HttpsProbeState::Served
+        );
+        assert_eq!(
+            classify_https_probe(HTTPS_CONNECTED, true, true, 0),
+            HttpsProbeState::OtherName
+        );
+        assert_eq!(
+            classify_https_probe(HTTPS_CONNECTED, true, true, -1),
+            HttpsProbeState::Unconfirmed
+        );
+    }
+
+    #[test]
+    fn https_cache_reads_d2o_text_format_and_skips_bad_lines() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "r2o-https-text-cache-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("cache.txt");
+        std::fs::write(
+            &path,
+            "d2k-https 1\n\
+             served 1700003600 Example.Test\n\
+             probing 1700003600 skipped.test\n\
+             served 1700003600 bad_host\n\
+             closed 1699999999 expired.test\n\
+             served 1700003600 extra.test tail\n",
+        )
+        .unwrap();
+        assert_eq!(
+            HttpsProbeWorker::load_cache(&path, 1_700_000_000).unwrap(),
+            vec![("Example.Test".to_owned(), HttpsProbeState::Served, 3600)]
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -510,7 +617,7 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("r2o-https-cache-{}-{nonce}", std::process::id()));
         std::fs::create_dir(&directory).unwrap();
-        let path = directory.join("cache.json");
+        let path = directory.join("cache.txt");
         let now = Instant::now();
         let mut worker = HttpsProbeWorker::new(None);
 
@@ -518,7 +625,7 @@ mod tests {
         worker.save_cache(&path, 1000, now).unwrap();
 
         let loaded = HttpsProbeWorker::load_verified(&path, 1100).unwrap();
-        assert_eq!(loaded, vec![("example.test".to_owned(), 3500)]);
+        assert_eq!(loaded, vec![("Example.Test".to_owned(), 3500)]);
         assert!(
             HttpsProbeWorker::load_verified(&path, 4700)
                 .unwrap()
@@ -545,7 +652,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir(&directory).unwrap();
-        let path = directory.join("cache.json");
+        let path = directory.join("cache.txt");
         let now = Instant::now();
         let mut worker = HttpsProbeWorker::new(None);
 

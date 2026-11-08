@@ -80,7 +80,63 @@ pub enum HttpsProbeState {
     Unconfirmed,
 }
 
+/// Исход соединения зонда HTTPS, как в C `d2k_https_classify`:
+/// 0 — соединился, 1 — отказ/недостижимо, 2 — тишина/местная ошибка.
+pub const HTTPS_CONNECTED: i32 = 0;
+pub const HTTPS_REFUSED: i32 = 1;
+pub const HTTPS_NO_ANSWER: i32 = 2;
+
+/// Факты одного зонда → состояние. Побайтный перенос `d2k_https_classify`.
+pub fn classify_https_probe(
+    connect_result: i32,
+    server_tls: bool,
+    tls_ok: bool,
+    peer_name: i32,
+) -> HttpsProbeState {
+    if connect_result == HTTPS_REFUSED {
+        return HttpsProbeState::Closed;
+    }
+    if connect_result != HTTPS_CONNECTED {
+        return HttpsProbeState::Unconfirmed;
+    }
+    if !server_tls {
+        return HttpsProbeState::TlsBlocked;
+    }
+    if !tls_ok {
+        return HttpsProbeState::Unconfirmed;
+    }
+    match peer_name {
+        1 => HttpsProbeState::Served,
+        0 => HttpsProbeState::OtherName,
+        _ => HttpsProbeState::Unconfirmed,
+    }
+}
+
 impl HttpsProbeState {
+    /// Имя состояния в кэше на диске — как у C `d2k_https_state_name`.
+    pub const fn stored_name(self) -> &'static str {
+        match self {
+            Self::Served => "served",
+            Self::TlsBlocked => "tls-blocked",
+            Self::Closed => "closed",
+            Self::OtherName => "other-name",
+            Self::Unconfirmed => "unconfirmed",
+        }
+    }
+
+    /// Разобрать имя состояния из кэша на диске; `unknown`/`probing` не
+    /// сохраняются (как в C `stored[]`).
+    pub fn from_stored_name(name: &str) -> Option<Self> {
+        match name {
+            "served" => Some(Self::Served),
+            "tls-blocked" => Some(Self::TlsBlocked),
+            "closed" => Some(Self::Closed),
+            "other-name" => Some(Self::OtherName),
+            "unconfirmed" => Some(Self::Unconfirmed),
+            _ => None,
+        }
+    }
+
     pub const fn ttl_seconds(self) -> u32 {
         match self {
             Self::Served => 6 * 60 * 60,

@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 155,
-  "percent": 57.2,
+  "points": 156,
+  "percent": 57.56,
   "total": 179,
   "counts": {
-    "verified": 106,
+    "verified": 107,
     "carry": 40,
-    "partial": 32,
+    "partial": 31,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -385,7 +385,7 @@
     {
       "name": "Classifier / TLS",
       "weight": 24,
-      "points": 3,
+      "points": 4,
       "items": [
         {
           "id": 38,
@@ -572,15 +572,15 @@
           "key": "CL13",
           "name": "HTTPS probe/ECH resolver/cache state",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Classifier / TLS",
-          "coverage": "C `test_httpsprobe`, Rust tests",
-          "gap": "Нет paired diff",
-          "mapping": "C `test_httpsprobe`, Rust tests",
-          "evidence": "C `test_httpsprobe`, Rust tests · пробел: Нет paired diff"
+          "coverage": "`test-controller-httpsprobe-differential.sh` (a378), C `test_httpsprobe`, Rust tests",
+          "gap": "23 paired кейса: classify/upgrade/ttl/state names и текстовая схема кэша v1/v2, включая capacity и битые строки; сетевой зонд — rustls",
+          "mapping": "`test-controller-httpsprobe-differential.sh` (a378), C `test_httpsprobe`, Rust tests",
+          "evidence": "`test-controller-httpsprobe-differential.sh` (a378), C `test_httpsprobe`, Rust tests · пробел: 23 paired кейса: classify/upgrade/ttl/state names и текстовая схема кэша v1/v2, включая capacity и битые строки; сетевой зонд — rustls"
         },
         {
           "id": 51,
@@ -3512,15 +3512,15 @@
       "key": "CL13",
       "name": "HTTPS probe/ECH resolver/cache state",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Classifier / TLS",
-      "coverage": "C `test_httpsprobe`, Rust tests",
-      "gap": "Нет paired diff",
-      "mapping": "C `test_httpsprobe`, Rust tests",
-      "evidence": "C `test_httpsprobe`, Rust tests · пробел: Нет paired diff"
+      "coverage": "`test-controller-httpsprobe-differential.sh` (a378), C `test_httpsprobe`, Rust tests",
+      "gap": "23 paired кейса: classify/upgrade/ttl/state names и текстовая схема кэша v1/v2, включая capacity и битые строки; сетевой зонд — rustls",
+      "mapping": "`test-controller-httpsprobe-differential.sh` (a378), C `test_httpsprobe`, Rust tests",
+      "evidence": "`test-controller-httpsprobe-differential.sh` (a378), C `test_httpsprobe`, Rust tests · пробел: 23 paired кейса: classify/upgrade/ttl/state names и текстовая схема кэша v1/v2, включая capacity и битые строки; сетевой зонд — rustls"
     },
     {
       "id": 51,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 155,
+      "points": 156,
       "weight": 271,
-      "percent": 57.2
+      "percent": 57.56
     },
     "carry_forward": {
-      "points": 218,
+      "points": 219,
       "weight": 271,
-      "percent": 80.44,
+      "percent": 80.81,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
