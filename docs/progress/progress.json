@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 115,
-  "percent": 42.44,
+  "points": 116,
+  "percent": 42.8,
   "total": 179,
   "counts": {
-    "verified": 82,
+    "verified": 83,
     "carry": 40,
-    "partial": 56,
+    "partial": 55,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1447,7 +1447,7 @@
     {
       "name": "WebPanel",
       "weight": 30,
-      "points": 8,
+      "points": 9,
       "items": [
         {
           "id": 79,
@@ -1724,15 +1724,15 @@
           "key": "A19",
           "name": "Атомарная запись и сохранение режима",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "WebPanel",
-          "coverage": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-          "gap": "ДИФ по байтам; режим/umask не доказан",
-          "mapping": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-          "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: ДИФ по байтам; режим/umask не доказан"
+          "coverage": "`scripts/test-panel-config-mode-differential.sh` (a378); C `worker_config_write`/`fchmod`; Rust `r2o_write_config_atomically`",
+          "gap": "Режим 0640 сохраняется под umask 0077, байты совпадают",
+          "mapping": "`scripts/test-panel-config-mode-differential.sh` (a378); C `worker_config_write`/`fchmod`; Rust `r2o_write_config_atomically`",
+          "evidence": "`scripts/test-panel-config-mode-differential.sh` (a378); C `worker_config_write`/`fchmod`; Rust `r2o_write_config_atomically` · пробел: Режим 0640 сохраняется под umask 0077, байты совпадают"
         },
         {
           "id": 98,
@@ -4217,15 +4217,15 @@
       "key": "A19",
       "name": "Атомарная запись и сохранение режима",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "WebPanel",
-      "coverage": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-      "gap": "ДИФ по байтам; режим/umask не доказан",
-      "mapping": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-      "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: ДИФ по байтам; режим/umask не доказан"
+      "coverage": "`scripts/test-panel-config-mode-differential.sh` (a378); C `worker_config_write`/`fchmod`; Rust `r2o_write_config_atomically`",
+      "gap": "Режим 0640 сохраняется под umask 0077, байты совпадают",
+      "mapping": "`scripts/test-panel-config-mode-differential.sh` (a378); C `worker_config_write`/`fchmod`; Rust `r2o_write_config_atomically`",
+      "evidence": "`scripts/test-panel-config-mode-differential.sh` (a378); C `worker_config_write`/`fchmod`; Rust `r2o_write_config_atomically` · пробел: Режим 0640 сохраняется под umask 0077, байты совпадают"
     },
     {
       "id": 98,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 115,
+      "points": 116,
       "weight": 271,
-      "percent": 42.44
+      "percent": 42.8
     },
     "carry_forward": {
-      "points": 178,
+      "points": 179,
       "weight": 271,
-      "percent": 65.68,
+      "percent": 66.05,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

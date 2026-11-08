@@ -1816,12 +1816,30 @@ fn r2o_write_config_atomically(
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
+        let desired_mode = {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.permissions().mode() & 0o777
+        };
+        #[cfg(unix)]
         {
-            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-            options.mode(metadata.permissions().mode() & 0o777);
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(desired_mode);
         }
         match options.open(&temporary) {
             Ok(mut file) => {
+                // C `worker_config_write`: fchmod(out, st.st_mode & 0777)
+                // после mkstemp. `OpenOptions::mode` маскируется umask, поэтому
+                // режим выставляется явно и не зависит от umask процесса.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Err(error) =
+                        file.set_permissions(fs::Permissions::from_mode(desired_mode))
+                    {
+                        let _ = fs::remove_file(&temporary);
+                        return Err(error);
+                    }
+                }
                 let result = (|| {
                     file.write_all(output)?;
                     file.sync_all()?;
