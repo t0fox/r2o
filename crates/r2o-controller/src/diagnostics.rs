@@ -7,7 +7,224 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+pub const MEMORY_SITE_COUNT: usize = 6;
+pub const MADVISE_ERRNO_SLOTS: usize = 4;
+const MEMORY_SITE_SPECS: [(&str, &str, &str); MEMORY_SITE_COUNT] = [
+    (
+        "tcp.worker_arg",
+        "TCP worker argument",
+        "core/sched.c:start_worker",
+    ),
+    (
+        "tls12.session",
+        "TLS 1.2 session",
+        "core/tls12.c:d2k_tls12_connect/resume",
+    ),
+    (
+        "tls13.session",
+        "TLS 1.3 session",
+        "core/tls13.c:tls_connect_internal",
+    ),
+    (
+        "tcp.tls_rx_buffer",
+        "TCP/TLS receive buffer",
+        "core/verify.c:TCP/TLS response buffer",
+    ),
+    (
+        "quic.connection",
+        "QUIC connection",
+        "core/quicconn.c:d2k_qc_first_initial/connect",
+    ),
+    (
+        "quic.response_header",
+        "QUIC response header",
+        "core/verify.c and quicprobe.c:HTTP/3 response buffers",
+    ),
+];
+static MEMORY_ENABLED: AtomicBool = AtomicBool::new(false);
+static MEMORY_SITES: [MemorySiteCounters; MEMORY_SITE_COUNT] = [
+    MemorySiteCounters::new(),
+    MemorySiteCounters::new(),
+    MemorySiteCounters::new(),
+    MemorySiteCounters::new(),
+    MemorySiteCounters::new(),
+    MemorySiteCounters::new(),
+];
+
+struct MemorySiteCounters {
+    live_bytes: AtomicU64,
+    peak_bytes: AtomicU64,
+    live_objects: AtomicU64,
+    created: AtomicU64,
+    destroyed: AtomicU64,
+    alloc_failures: AtomicU64,
+}
+
+impl MemorySiteCounters {
+    const fn new() -> Self {
+        Self {
+            live_bytes: AtomicU64::new(0),
+            peak_bytes: AtomicU64::new(0),
+            live_objects: AtomicU64::new(0),
+            created: AtomicU64::new(0),
+            destroyed: AtomicU64::new(0),
+            alloc_failures: AtomicU64::new(0),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MemorySite {
+    pub live_bytes: u64,
+    pub peak_bytes: u64,
+    pub live_objects: u64,
+    pub created: u64,
+    pub destroyed: u64,
+    pub alloc_failures: u64,
+}
+
+pub fn memory_enable(enabled: bool) {
+    MEMORY_ENABLED.store(enabled, Ordering::Release);
+}
+
+pub fn memory_active() -> bool {
+    MEMORY_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Учесть объект, выделенный при включённом сборе. Возвращает true, если
+/// объект нужно освобождать парным `memory_release`.
+pub fn memory_acquire(site: usize, bytes: usize) -> bool {
+    if site >= MEMORY_SITE_COUNT || !memory_active() || bytes > u32::MAX as usize {
+        return false;
+    }
+    let counters = &MEMORY_SITES[site];
+    let bytes = bytes as u64;
+    let live = counters.live_bytes.fetch_add(bytes, Ordering::AcqRel) + bytes;
+    counters.live_objects.fetch_add(1, Ordering::AcqRel);
+    counters.created.fetch_add(1, Ordering::AcqRel);
+    let mut peak = counters.peak_bytes.load(Ordering::Acquire);
+    while live > peak {
+        match counters.peak_bytes.compare_exchange_weak(
+            peak,
+            live,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => break,
+            Err(seen) => peak = seen,
+        }
+    }
+    true
+}
+
+pub fn memory_release(site: usize, bytes: usize, tracked: bool) {
+    if !tracked || site >= MEMORY_SITE_COUNT || bytes > u32::MAX as usize {
+        return;
+    }
+    let counters = &MEMORY_SITES[site];
+    counters
+        .live_bytes
+        .fetch_sub(bytes as u64, Ordering::AcqRel);
+    counters.live_objects.fetch_sub(1, Ordering::AcqRel);
+    counters.destroyed.fetch_add(1, Ordering::AcqRel);
+}
+
+pub fn memory_alloc_failure(site: usize) {
+    if site < MEMORY_SITE_COUNT && memory_active() {
+        MEMORY_SITES[site]
+            .alloc_failures
+            .fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+pub fn memory_snapshot() -> [MemorySite; MEMORY_SITE_COUNT] {
+    std::array::from_fn(|index| {
+        let counters = &MEMORY_SITES[index];
+        MemorySite {
+            live_bytes: counters.live_bytes.load(Ordering::Acquire),
+            peak_bytes: counters.peak_bytes.load(Ordering::Acquire),
+            live_objects: counters.live_objects.load(Ordering::Acquire),
+            created: counters.created.load(Ordering::Acquire),
+            destroyed: counters.destroyed.load(Ordering::Acquire),
+            alloc_failures: counters.alloc_failures.load(Ordering::Acquire),
+        }
+    })
+}
+
+/// (tracked_tcp, tracked_tls, tracked_quic) в байтах, как в C
+/// `d2k_diag_memory_counts`.
+pub fn tracked_memory_bytes() -> (u64, u64, u64) {
+    let sites = memory_snapshot();
+    (
+        sites[0].live_bytes + sites[3].live_bytes,
+        sites[1].live_bytes + sites[2].live_bytes,
+        sites[4].live_bytes + sites[5].live_bytes,
+    )
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MadviseErrno {
+    pub error: i32,
+    pub count: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MadviseStats {
+    pub successes: u64,
+    pub failures: u64,
+    pub requested_bytes: u64,
+    pub failed_requested_bytes: u64,
+    pub last_errno: i32,
+    pub other_errno_count: u64,
+    pub errno_hist: [MadviseErrno; MADVISE_ERRNO_SLOTS],
+}
+
+pub fn memory_tracking_json() -> Value {
+    let sites = memory_snapshot();
+    let entries: Vec<Value> = sites
+        .iter()
+        .enumerate()
+        .map(|(index, site)| {
+            json!({
+                "id": MEMORY_SITE_SPECS[index].0,
+                "name": MEMORY_SITE_SPECS[index].1,
+                "location": MEMORY_SITE_SPECS[index].2,
+                "live_bytes": site.live_bytes,
+                "peak_bytes": site.peak_bytes,
+                "live_objects": site.live_objects,
+                "created": site.created,
+                "destroyed": site.destroyed,
+                "alloc_failures": site.alloc_failures,
+            })
+        })
+        .collect();
+    json!({
+        "enabled": memory_active(),
+        "coverage": "учитываются объекты, выделенные при включённом сборе; уже существующие объекты задним числом не учитываются",
+        "sites": entries,
+    })
+}
+
+pub fn madvise_json(stats: &MadviseStats) -> Value {
+    let errno: Vec<Value> = stats
+        .errno_hist
+        .iter()
+        .filter(|entry| entry.error != 0)
+        .map(|entry| json!({"code": entry.error, "count": entry.count}))
+        .collect();
+    json!({
+        "successes": stats.successes,
+        "failures": stats.failures,
+        "requested_bytes": stats.requested_bytes,
+        "failed_requested_bytes": stats.failed_requested_bytes,
+        "last_errno": if stats.last_errno == 0 { Value::Null } else { json!(stats.last_errno) },
+        "other_errno_count": stats.other_errno_count,
+        "errno": errno,
+    })
+}
 
 const EVENT_CAPACITY: usize = 64;
 const SAMPLE_CAPACITY: usize = 120;
@@ -166,6 +383,7 @@ pub struct Recorder {
     events: VecDeque<Value>,
     samples: VecDeque<Value>,
     first_details: HashMap<String, Value>,
+    madvise: MadviseStats,
 }
 
 impl Recorder {
@@ -183,7 +401,12 @@ impl Recorder {
             events: VecDeque::with_capacity(EVENT_CAPACITY),
             samples: VecDeque::with_capacity(SAMPLE_CAPACITY),
             first_details: HashMap::new(),
+            madvise: MadviseStats::default(),
         }
+    }
+
+    pub fn set_madvise(&mut self, stats: MadviseStats) {
+        self.madvise = stats;
     }
 
     pub fn record(&mut self, mut event: Value) {
@@ -322,6 +545,8 @@ impl Recorder {
             "sample_interval_ms": SAMPLE_INTERVAL.as_millis(),
             "events_overwritten": self.event_total.saturating_sub(self.events.len() as u64),
             "samples_overwritten": self.sample_total.saturating_sub(self.samples.len() as u64),
+            "memory_tracking": memory_tracking_json(),
+            "madvise": madvise_json(&self.madvise),
             "events": self.events,
             "samples": self.samples,
             "memory_details": details,
@@ -499,14 +724,16 @@ fn process_memory(proc_dir: &Path, run_dir: &Path) -> Vec<Value> {
             };
             json!({
                 "name":spec.name,"pid":pid,"rss_kib":field("VmRSS"),"hwm_kib":field("VmHWM"),
-                "anon_kib":field("RssAnon"),"threads":field("Threads")
+                "anon_kib":field("RssAnon"),"threads":field("Threads"),
+                "vm_data_kib":field("VmData"),"vm_swap_kib":field("VmSwap")
             })
         })
         .collect()
 }
 
 fn empty_process(name: &str) -> Value {
-    json!({"name":name,"pid":0,"rss_kib":null,"hwm_kib":null,"anon_kib":null,"threads":null})
+    json!({"name":name,"pid":0,"rss_kib":null,"hwm_kib":null,"anon_kib":null,"threads":null,
+        "vm_data_kib":null,"vm_swap_kib":null})
 }
 
 fn process_detail(process: &Value, at: u64, mono_ms: u64, proc_dir: &Path) -> Value {
@@ -620,10 +847,115 @@ fn read_smaps(proc_dir: &Path, pid: u64) -> Option<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Counts, Recorder, d2o_ring_bytes};
+    use super::{
+        Counts, MADVISE_ERRNO_SLOTS, MadviseErrno, MadviseStats, Recorder, d2o_ring_bytes,
+        madvise_json, memory_acquire, memory_enable, memory_release, memory_tracking_json,
+    };
     use serde_json::json;
     use std::fs::{self, OpenOptions};
     use std::time::{Duration, Instant};
+
+    #[cfg(unix)]
+    #[test]
+    fn memory_tracking_and_madvise_json_match_d2o_shape() {
+        memory_enable(true);
+        let tracked = memory_acquire(2, 77);
+        let tracking = memory_tracking_json();
+        assert_eq!(tracking["enabled"], true);
+        let sites = tracking["sites"].as_array().unwrap();
+        assert_eq!(sites.len(), 6);
+        assert_eq!(sites[2]["id"], "tls13.session");
+        assert_eq!(sites[2]["location"], "core/tls13.c:tls_connect_internal");
+        assert!(sites[2]["live_bytes"].as_u64().unwrap() >= 77);
+        assert!(sites[2]["peak_bytes"].as_u64().unwrap() >= 77);
+        memory_release(2, 77, tracked);
+        memory_enable(false);
+
+        let stats = MadviseStats {
+            successes: 3,
+            failures: 2,
+            requested_bytes: 1000,
+            failed_requested_bytes: 500,
+            last_errno: 0,
+            other_errno_count: 1,
+            errno_hist: [MadviseErrno::default(); MADVISE_ERRNO_SLOTS],
+        };
+        let madvise = madvise_json(&stats);
+        assert_eq!(madvise["successes"], 3);
+        assert_eq!(madvise["failures"], 2);
+        assert!(madvise["last_errno"].is_null());
+        assert_eq!(madvise["errno"].as_array().unwrap().len(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "run through scripts/test-diagnostics-rss-differential.sh"]
+    fn d2o_periodic_rss_sample_matches_c() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let root = std::path::PathBuf::from(
+            std::env::var_os("R2O_DIAG_RSS_ROOT").expect("test helper provides proc/run root"),
+        );
+        let c_trace = std::fs::read_to_string(
+            std::env::var_os("R2O_DIAG_RSS_C_TRACE").expect("test helper provides C trace"),
+        )
+        .unwrap();
+        let diag_dir = root.join("state/diagnostics");
+        std::fs::create_dir_all(&diag_dir).unwrap();
+        std::fs::set_permissions(&diag_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(diag_dir.join("enabled"))
+            .unwrap();
+        let mut recorder = Recorder::new(diag_dir.clone(), root.join("run"));
+        recorder.proc_dir = root.join("proc");
+        let counts = || Counts {
+            boxes: 2,
+            bindings: 3,
+            plans: 4,
+            ..Counts::default()
+        };
+        recorder.checked = None;
+        recorder.sampled = None;
+        recorder.tick(counts);
+        recorder.checked = Some(Instant::now() - Duration::from_secs(1));
+        recorder.sampled = Some(Instant::now() - Duration::from_secs(60));
+        recorder.tick(counts);
+        recorder.checked = Some(Instant::now() - Duration::from_secs(1));
+        recorder.sampled = Some(Instant::now());
+        recorder.tick(counts);
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(diag_dir.join("report.json")).unwrap()).unwrap();
+        let samples = report["samples"].as_array().unwrap();
+        assert_eq!(samples.len(), 2);
+        let field = |sample: &serde_json::Value, key: &str| {
+            sample["processes"][0]
+                .get(key)
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(-1)
+        };
+        let line = |sample: &serde_json::Value| {
+            format!(
+                "rss={} hwm={} anon={} threads={} vm_data={} vm_swap={}",
+                field(sample, "rss_kib"),
+                field(sample, "hwm_kib"),
+                field(sample, "anon_kib"),
+                field(sample, "threads"),
+                field(sample, "vm_data_kib"),
+                field(sample, "vm_swap_kib")
+            )
+        };
+        let rust_trace = format!(
+            "samples={}\n{}\n{}\n",
+            samples.len(),
+            line(&samples[0]),
+            line(&samples[1])
+        );
+        assert_eq!(rust_trace, c_trace);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]

@@ -3,14 +3,14 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 106,
-  "percent": 39.11,
+  "points": 107,
+  "percent": 39.48,
   "total": 179,
   "counts": {
-    "verified": 75,
+    "verified": 76,
     "carry": 40,
     "partial": 59,
-    "missing": 4,
+    "missing": 3,
     "implemented": 0,
     "unknown": 0
   },
@@ -632,7 +632,7 @@
     {
       "name": "Discovery",
       "weight": 27,
-      "points": 8,
+      "points": 9,
       "items": [
         {
           "id": 25,
@@ -757,17 +757,17 @@
         {
           "id": 33,
           "key": "S11",
-          "name": "Diagnostics records/snapshots/madvise and periodic report",
+          "name": "Diagnostics records/snapshots/madvise and periodic RSS report",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "missing",
-          "statusLabel": "пробел",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Discovery",
-          "coverage": "`diagnostics.rs`, `r2o-diagnostics-differential.sh`",
-          "gap": "allocator/madvise и часть периодической RSS-сводки отсутствуют",
-          "mapping": "`diagnostics.rs`, `r2o-diagnostics-differential.sh`",
-          "evidence": "`diagnostics.rs`, `r2o-diagnostics-differential.sh` · пробел: allocator/madvise и часть периодической RSS-сводки отсутствуют"
+          "coverage": "`scripts/test-diagnostics-memory-differential.sh`, `scripts/test-diagnostics-rss-differential.sh` (a378); C `diagnostics.c`; Rust `diagnostics.rs`",
+          "gap": "Allocator sites/madvise и 60s RSS sample (rss/hwm/anon/threads/vm_data/vm_swap) совпадают; полный 1440-sample memory_history пока не заявлен",
+          "mapping": "`scripts/test-diagnostics-memory-differential.sh`, `scripts/test-diagnostics-rss-differential.sh` (a378); C `diagnostics.c`; Rust `diagnostics.rs`",
+          "evidence": "`scripts/test-diagnostics-memory-differential.sh`, `scripts/test-diagnostics-rss-differential.sh` (a378); C `diagnostics.c`; Rust `diagnostics.rs` · пробел: Allocator sites/madvise и 60s RSS sample (rss/hwm/anon/threads/vm_data/vm_swap) совпадают; полный 1440-sample memory_history пока не заявлен"
         },
         {
           "id": 34,
@@ -3255,17 +3255,17 @@
     {
       "id": 33,
       "key": "S11",
-      "name": "Diagnostics records/snapshots/madvise and periodic report",
+      "name": "Diagnostics records/snapshots/madvise and periodic RSS report",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "missing",
-      "statusLabel": "пробел",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Discovery",
-      "coverage": "`diagnostics.rs`, `r2o-diagnostics-differential.sh`",
-      "gap": "allocator/madvise и часть периодической RSS-сводки отсутствуют",
-      "mapping": "`diagnostics.rs`, `r2o-diagnostics-differential.sh`",
-      "evidence": "`diagnostics.rs`, `r2o-diagnostics-differential.sh` · пробел: allocator/madvise и часть периодической RSS-сводки отсутствуют"
+      "coverage": "`scripts/test-diagnostics-memory-differential.sh`, `scripts/test-diagnostics-rss-differential.sh` (a378); C `diagnostics.c`; Rust `diagnostics.rs`",
+      "gap": "Allocator sites/madvise и 60s RSS sample (rss/hwm/anon/threads/vm_data/vm_swap) совпадают; полный 1440-sample memory_history пока не заявлен",
+      "mapping": "`scripts/test-diagnostics-memory-differential.sh`, `scripts/test-diagnostics-rss-differential.sh` (a378); C `diagnostics.c`; Rust `diagnostics.rs`",
+      "evidence": "`scripts/test-diagnostics-memory-differential.sh`, `scripts/test-diagnostics-rss-differential.sh` (a378); C `diagnostics.c`; Rust `diagnostics.rs` · пробел: Allocator sites/madvise и 60s RSS sample (rss/hwm/anon/threads/vm_data/vm_swap) совпадают; полный 1440-sample memory_history пока не заявлен"
     },
     {
       "id": 34,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 106,
+      "points": 107,
       "weight": 271,
-      "percent": 39.11
+      "percent": 39.48
     },
     "carry_forward": {
-      "points": 169,
+      "points": 170,
       "weight": 271,
-      "percent": 62.36,
+      "percent": 62.73,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
