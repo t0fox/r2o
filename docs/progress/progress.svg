@@ -1,12 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 43.54%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 43.91%">
 <rect width="1100" height="790" rx="20" fill="#0c121e"/>
 <text x="36" y="48" fill="#edf7ff" font-family="Arial,sans-serif" font-size="29" font-weight="700">R2O / D2O · Strict parity</text>
-<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">43.54%</text>
-<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">118 / 271 verified points</text>
+<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">43.91%</text>
+<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">119 / 271 verified points</text>
 <rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/>
-<rect x="37" y="113" width="445.9" height="11" rx="5" fill="#36c989"/>
-<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 84 verified · 0 missing · 2026-11-08</text>
-<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 181/271 = 66.79% · strict 118/271 = 43.54%</text>
+<rect x="37" y="113" width="449.7" height="11" rx="5" fill="#36c989"/>
+<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 85 verified · 0 missing · 2026-11-08</text>
+<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 182/271 = 67.16% · strict 119/271 = 43.91%</text>
 <rect x="37" y="190" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="213" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Datapath</text>
 <text x="533" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">16/28</text>
@@ -122,7 +122,7 @@
 <rect x="431" y="586" width="30" height="22" rx="5" fill="#e6b45d"><title>TG24 Service lifecycle/recovery: частично (0/2)</title></rect>
 <rect x="557" y="526" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="571" y="549" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">WebPanel</text>
-<text x="1053" y="549" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">11/30</text>
+<text x="1053" y="549" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">12/30</text>
 <rect x="571" y="559" width="30" height="22" rx="5" fill="#819bf8"><title>A1 Bind по умолчанию и выбор LAN IP при установке: carry (304) — historical (0/1)</title></rect>
 <rect x="609" y="559" width="30" height="22" rx="5" fill="#819bf8"><title>A2 Пустой `PANEL_LISTEN` отключает панель и health update: carry (304) — historical (0/1)</title></rect>
 <rect x="647" y="559" width="30" height="22" rx="5" fill="#36c989"><title>A3 Парсер: комментарии, кавычки, хвостовые комментарии: доказано (1/1)</title></rect>
@@ -135,7 +135,7 @@
 <rect x="913" y="559" width="30" height="22" rx="5" fill="#36c989"><title>A10 Неизвестный маршрут/метод/HTTP-версия: доказано (1/1)</title></rect>
 <rect x="951" y="559" width="30" height="22" rx="5" fill="#819bf8"><title>A11 `/api/status`: unavailable-контракт: carry (304) — historical (0/1)</title></rect>
 <rect x="989" y="559" width="30" height="22" rx="5" fill="#819bf8"><title>A12 `/api/status`: live shape и catalog revision: carry (304) — historical (0/1)</title></rect>
-<rect x="571" y="586" width="30" height="22" rx="5" fill="#e6b45d"><title>A13 `/api/status`: snapshot/stages/unknown_keys: частично (0/1)</title></rect>
+<rect x="571" y="586" width="30" height="22" rx="5" fill="#36c989"><title>A13 `/api/status`: snapshot/stages/unknown_keys: доказано (1/1)</title></rect>
 <rect x="609" y="586" width="30" height="22" rx="5" fill="#819bf8"><title>A14 `/api/control`: список действий, коды, gates: carry (304) — historical (0/2)</title></rect>
 <rect x="647" y="586" width="30" height="22" rx="5" fill="#36c989"><title>A15 Action state machine и timeout (включая 124): доказано (2/2)</title></rect>
 <rect x="685" y="586" width="30" height="22" rx="5" fill="#819bf8"><title>A16 Workers GET и байты конфига: carry (304) — historical (0/1)</title></rect>

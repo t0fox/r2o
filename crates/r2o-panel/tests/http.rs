@@ -1571,6 +1571,41 @@ fn d2o_unknown_route_method_version_matches() {
     assert_eq!(rust_trace, c_trace);
 }
 
+#[test]
+#[ignore = "run through scripts/test-panel-status-structure-differential.sh"]
+fn d2o_status_snapshot_structure_matches() {
+    let state_dir = PathBuf::from(
+        std::env::var_os("R2O_PANEL_STATUS_STATE_DIR")
+            .expect("test helper provides state directory"),
+    );
+    let mut config = Config::default();
+    config.live_path = PathBuf::from("/nonexistent/r2o-live.json");
+    config.version = "9.9.9".into();
+    config.commit = "abc123".into();
+    config.built = "2026-11-08".into();
+    config.mode = "apply".into();
+    config.panel_listen = "127.0.0.1:8090".into();
+    config.config_path = PathBuf::from("/tmp/r2o-panel-status/config");
+    config.state_dir = state_dir;
+    config.unknown_keys = vec!["Z-KEY".into(), "A-KEY".into()];
+    config.started_epoch = 0;
+    config.queue_num = 2000;
+    config.config_exists = true;
+    config.dirty = false;
+    config.control_enabled = false;
+    let response = handle_request(
+        &config,
+        b"GET /api/status HTTP/1.1\r\nHost: localhost:8090\r\n\r\n",
+    );
+    assert_eq!(response.status, 200);
+    std::fs::write(
+        std::env::var_os("R2O_PANEL_STATUS_RUST_BODY")
+            .expect("test helper provides Rust body path"),
+        &response.body,
+    )
+    .unwrap();
+}
+
 fn assert_d2o_config_trace(config_path_env: &str, c_trace_env: &str) {
     let config_path =
         PathBuf::from(std::env::var_os(config_path_env).expect("test helper provides config"));

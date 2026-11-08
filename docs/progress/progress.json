@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 118,
-  "percent": 43.54,
+  "points": 119,
+  "percent": 43.91,
   "total": 179,
   "counts": {
-    "verified": 84,
+    "verified": 85,
     "carry": 40,
-    "partial": 54,
+    "partial": 53,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1447,7 +1447,7 @@
     {
       "name": "WebPanel",
       "weight": 30,
-      "points": 11,
+      "points": 12,
       "items": [
         {
           "id": 79,
@@ -1634,15 +1634,15 @@
           "key": "A13",
           "name": "`/api/status`: snapshot/stages/unknown_keys",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "WebPanel",
-          "coverage": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-          "gap": "частично; порядок ключей/`unknown_keys` не доказаны",
-          "mapping": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-          "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: частично; порядок ключей/`unknown_keys` не доказаны"
+          "coverage": "`scripts/test-panel-status-structure-differential.sh` (a378); C `api_status`; Rust `api_status`",
+          "gap": "Набор ключей snapshot, порядок stages/absent и unknown_keys совпадают; `telegram_diagnostics` — явное R2O-расширение, порядок ключей JSON не семантичен",
+          "mapping": "`scripts/test-panel-status-structure-differential.sh` (a378); C `api_status`; Rust `api_status`",
+          "evidence": "`scripts/test-panel-status-structure-differential.sh` (a378); C `api_status`; Rust `api_status` · пробел: Набор ключей snapshot, порядок stages/absent и unknown_keys совпадают; `telegram_diagnostics` — явное R2O-расширение, порядок ключей JSON не семантичен"
         },
         {
           "id": 92,
@@ -4127,15 +4127,15 @@
       "key": "A13",
       "name": "`/api/status`: snapshot/stages/unknown_keys",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "WebPanel",
-      "coverage": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-      "gap": "частично; порядок ключей/`unknown_keys` не доказаны",
-      "mapping": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-      "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: частично; порядок ключей/`unknown_keys` не доказаны"
+      "coverage": "`scripts/test-panel-status-structure-differential.sh` (a378); C `api_status`; Rust `api_status`",
+      "gap": "Набор ключей snapshot, порядок stages/absent и unknown_keys совпадают; `telegram_diagnostics` — явное R2O-расширение, порядок ключей JSON не семантичен",
+      "mapping": "`scripts/test-panel-status-structure-differential.sh` (a378); C `api_status`; Rust `api_status`",
+      "evidence": "`scripts/test-panel-status-structure-differential.sh` (a378); C `api_status`; Rust `api_status` · пробел: Набор ключей snapshot, порядок stages/absent и unknown_keys совпадают; `telegram_diagnostics` — явное R2O-расширение, порядок ключей JSON не семантичен"
     },
     {
       "id": 92,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 118,
+      "points": 119,
       "weight": 271,
-      "percent": 43.54
+      "percent": 43.91
     },
     "carry_forward": {
-      "points": 181,
+      "points": 182,
       "weight": 271,
-      "percent": 66.79,
+      "percent": 67.16,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

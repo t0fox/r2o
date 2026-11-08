@@ -1158,9 +1158,10 @@ fn snapshot(
         "config_path":config.config_path,"config_exists":config.config_exists,"mode":config.mode,"panel_listen":config.panel_listen,
         "controls_enabled":config.control_enabled,"control_state":action,"catalog_available":have_catalog,"live_fresh":live_fresh,
         "engine_running":engine_running,"controller_running":controller_running,"telegram_enabled":tg_enabled,
-        "telegram_configured":tg_configured,"telegram_running":tg_running,"telegram_status":tg_status,"telegram_stats":read_telegram_stats(&config.telegram_stats_path),"telegram_diagnostics":telegram_diagnostics_snapshot(config),
+        "telegram_configured":tg_configured,"telegram_running":tg_running,"telegram_status":tg_status,"telegram_stats":read_telegram_stats(&config.telegram_stats_path),
         "state_dir":config.state_dir,"state_dir_note":state_dir_note(&config.state_dir),"queue_num":config.queue_num,
-        "unknown_keys":config.unknown_keys,"started_at":started,"uptime_seconds":uptime,"stages":stages,"absent":absent
+        "unknown_keys":config.unknown_keys,"started_at":started,"uptime_seconds":uptime,"stages":stages,"absent":absent,
+        "telegram_diagnostics":telegram_diagnostics_snapshot(config)
     })
 }
 
