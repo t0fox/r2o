@@ -607,10 +607,10 @@
           "status": "partial",
           "statusLabel": "частично",
           "group": "Classifier / TLS",
-          "coverage": "C tests, Rust unit",
-          "gap": "Нет matrix-контракта",
-          "mapping": "C tests, Rust unit",
-          "evidence": "C tests, Rust unit · пробел: Нет matrix-контракта"
+          "coverage": "C tests, Rust unit; compose probe (a378)",
+          "gap": "C/Rust plan-тексты — разные языки: `d2k-plan` vs `r2o-plan` (`wire`/`input`/`segment`, `payload-pad64`, разные payload ID); нужен критерий паритета (port C helper / wire-level diff); crypto/p256/x25519/props — отдельные векторы",
+          "mapping": "C tests, Rust unit; compose probe (a378)",
+          "evidence": "C tests, Rust unit; compose probe (a378) · пробел: C/Rust plan-тексты — разные языки: `d2k-plan` vs `r2o-plan` (`wire`/`input`/`segment`, `payload-pad64`, разные payload ID); нужен критерий паритета (port C helper / wire-level diff); crypto/p256/x25519/props — отдельные векторы"
         },
         {
           "id": 53,
@@ -3547,10 +3547,10 @@
       "status": "partial",
       "statusLabel": "частично",
       "group": "Classifier / TLS",
-      "coverage": "C tests, Rust unit",
-      "gap": "Нет matrix-контракта",
-      "mapping": "C tests, Rust unit",
-      "evidence": "C tests, Rust unit · пробел: Нет matrix-контракта"
+      "coverage": "C tests, Rust unit; compose probe (a378)",
+      "gap": "C/Rust plan-тексты — разные языки: `d2k-plan` vs `r2o-plan` (`wire`/`input`/`segment`, `payload-pad64`, разные payload ID); нужен критерий паритета (port C helper / wire-level diff); crypto/p256/x25519/props — отдельные векторы",
+      "mapping": "C tests, Rust unit; compose probe (a378)",
+      "evidence": "C tests, Rust unit; compose probe (a378) · пробел: C/Rust plan-тексты — разные языки: `d2k-plan` vs `r2o-plan` (`wire`/`input`/`segment`, `payload-pad64`, разные payload ID); нужен критерий паритета (port C helper / wire-level diff); crypto/p256/x25519/props — отдельные векторы"
     },
     {
       "id": 53,
