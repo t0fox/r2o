@@ -117,6 +117,7 @@ grep -q '^sync-dc-map$' "$TEMP/firewall-calls" || fail "служба не син
 grep -qF "$TEMP/tg-firewall|$TEMP/root/state/telegram-dc-endpoints.tsv" "$TEMP/tg-env-capture" || fail "служба не передала прокси путь адаптера и манифеста"
 
 old_pid=$(cat "$TEMP/root/run/r2o-telegram.pid")
+old_watchdog_pid=$(cat "$TEMP/root/run/r2o-telegram-watchdog.pid")
 kill -KILL "$old_pid"
 attempt=0
 recovered=
@@ -147,7 +148,34 @@ if [ "$recovered" != yes ]; then
 fi
 [ "$recovered" = yes ] || fail "сторож не восстановил завершившийся Rust Telegram listener"
 
-: > "$TEMP/manager-fail"
+# restart выполняется синхронно внутри сторожа; дождаться нового pid сторожа,
+# иначе следующий kill попадёт в ещё не завершившийся telegram_start.
+attempt=0
+while :; do
+    new_watchdog_pid=$(cat "$TEMP/root/run/r2o-telegram-watchdog.pid" 2>/dev/null || true)
+    if [ -n "$new_watchdog_pid" ] && [ "$new_watchdog_pid" != "$old_watchdog_pid" ] &&
+        kill -0 "$new_watchdog_pid" 2>/dev/null; then
+        break
+    fi
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt 200 ] || fail "сторож не перезапустился после восстановления listener"
+    sleep 0.1
+done
+
+second_pid=$(cat "$TEMP/root/run/r2o-telegram.pid")
+kill -KILL "$second_pid"
+attempt=0
+while :; do
+    third_pid=$(cat "$TEMP/root/run/r2o-telegram.pid" 2>/dev/null || true)
+    if [ -n "$third_pid" ] && [ "$third_pid" != "$second_pid" ] && kill -0 "$third_pid" 2>/dev/null; then
+        break
+    fi
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt 200 ] || fail "сторож не выполнил второй перезапуск"
+    sleep 0.1
+done
+sleep 0.2
+kill -KILL "$third_pid"
 attempt=0
 while [ ! -e "$TEMP/root/state/telegram-health.restart-limited" ]; do
     attempt=$((attempt + 1))

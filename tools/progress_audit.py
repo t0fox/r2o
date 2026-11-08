@@ -371,17 +371,17 @@ def render_history():
         {
             "sha": "carry-304-normalized",
             "date": "2026-11-08",
-            "points": 171,
+            "points": 173,
             "weight": 271,
-            "percent": 63.10,
+            "percent": 63.84,
             "label": "carry (только явно помеченные 304)",
         },
         {
             "sha": "strict-normalized",
             "date": "2026-11-08",
-            "points": 108,
+            "points": 110,
             "weight": 271,
-            "percent": 39.85,
+            "percent": 40.59,
             "label": "строгий текущий (нормализованный)",
         },
     ]

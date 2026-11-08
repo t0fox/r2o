@@ -88,6 +88,7 @@ PPE_ADAPTER=${R2O_PPE_ADAPTER:-$SCRIPT_DIR/r2o-ppe-deoffload.sh}
 R2O_PPE_DEOFFLOAD=${R2O_PPE_DEOFFLOAD:-1}
 CATALOG=$STATE/catalog.json
 export R2O_DIR="$ROOT" R2O_CONFIG="$CONF" R2O_RUN_DIR="$RUN" R2O_PPE_ADAPTER="$PPE_ADAPTER" \
+    R2O_RUNTIME_DIR="$RUNTIME" \
     R2O_META_RANGES R2O_INSTAGRAM_SCHED_ATTEMPT
 
 if [ "${ACTION:-}" = includes ]; then
@@ -760,7 +761,7 @@ telegram_start() {
         fi
     fi
     stop_component r2o-telegram "$TG_PID"
-    rm -f "$TG_STATS_SOCKET"
+    rm -f "$TG_STATS_SOCKET" "$RUNTIME/d2ktg.health"
     write_telegram_status connecting || return 1
     export_telegram_config
     R2O_TG_DC_MAP_ENDPOINTS_PATH="$STATE/telegram-dc-endpoints.tsv"
@@ -768,6 +769,7 @@ telegram_start() {
     export R2O_TG_DC_MAP_ENDPOINTS_PATH R2O_TG_DC_MAP_SYNC
     spawn_component r2o-telegram "$TG_PID" "$LOG/telegram.log" \
         --port "$TG_PORT" --stats-socket-path "$TG_STATS_SOCKET" \
+        --health-file "$RUNTIME/d2ktg.health" \
         --dc-map-path "$STATE/telegram-dc-map.json" \
         --dc-map-endpoints-path "$STATE/telegram-dc-endpoints.tsv" \
         --default-domains || {

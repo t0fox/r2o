@@ -195,6 +195,10 @@ pub struct Config {
     )]
     pub stats_socket_path: PathBuf,
 
+    /// D2O-совместимый heartbeat-файл для Telegram watchdog.
+    #[arg(long = "health-file", env = "TG_HEALTH_FILE")]
+    pub health_file: Option<PathBuf>,
+
     /// TCP-порты перехвата, заданные платформенным адаптером.
     #[arg(long = "transparent-ports", value_delimiter = ',')]
     pub transparent_ports: Vec<u16>,

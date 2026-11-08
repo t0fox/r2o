@@ -210,6 +210,27 @@ pub async fn run_with_listen(
     let bound_addr = listener.local_addr().unwrap_or(addr);
     runtime.stats().set_listener_ready(true);
 
+    // Первый heartbeat пишется до объявления listener готовым: иначе watchdog
+    // с коротким интервалом может увидеть отсутствие файла и перезапустить
+    // ещё не успевший стартовать процесс.
+    let health_writer = match config.health_file.clone() {
+        Some(path) => match crate::health::HealthWriter::new(path) {
+            Ok(writer) => {
+                if let Err(error) = writer.write(false, true, false) {
+                    warn!("Heartbeat-файл Telegram не записан: {error}");
+                    None
+                } else {
+                    Some(writer)
+                }
+            }
+            Err(error) => {
+                warn!("Heartbeat-файл Telegram не создан: {error}");
+                None
+            }
+        },
+        None => None,
+    };
+
     let fd_limit = soft_nofile_limit();
     let safe_max_connections = auto_max_connections(fd_limit, config.ws_hedge_limit);
     let max_connections = config.max_connections.unwrap_or(safe_max_connections);
@@ -234,6 +255,24 @@ pub async fn run_with_listen(
         background_tasks.spawn(async move {
             if let Err(error) = crate::stats::serve_unix(path, stats).await {
                 warn!("Локальный сокет статистики TG не запущен: {error}");
+            }
+        });
+    }
+    if let Some(writer) = health_writer {
+        let stats = Arc::clone(runtime.stats());
+        background_tasks.spawn(async move {
+            // Первый тик interval() выполняется сразу: heartbeat обновляется
+            // без секундной паузы после старта.
+            let mut ticker = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                ticker.tick().await;
+                if let Err(error) = writer.write(
+                    stats.active_connections() > 0,
+                    stats.listener_ready(),
+                    false,
+                ) {
+                    warn!("Heartbeat-файл Telegram не записан: {error}");
+                }
             }
         });
     }

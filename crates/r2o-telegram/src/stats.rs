@@ -239,6 +239,14 @@ impl RuntimeStats {
         self.listener_ready.store(ready, Ordering::Release);
     }
 
+    pub fn listener_ready(&self) -> bool {
+        self.listener_ready.load(Ordering::Acquire)
+    }
+
+    pub fn active_connections(&self) -> usize {
+        self.active_connections.load(Ordering::Acquire)
+    }
+
     pub fn set_max_connections(&self, max: usize) {
         self.max_connections.store(max, Ordering::Release);
     }

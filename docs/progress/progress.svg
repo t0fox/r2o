@@ -1,12 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 39.85%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 40.59%">
 <rect width="1100" height="790" rx="20" fill="#0c121e"/>
 <text x="36" y="48" fill="#edf7ff" font-family="Arial,sans-serif" font-size="29" font-weight="700">R2O / D2O · Strict parity</text>
-<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">39.85%</text>
-<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">108 / 271 verified points</text>
+<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">40.59%</text>
+<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">110 / 271 verified points</text>
 <rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/>
-<rect x="37" y="113" width="408.1" height="11" rx="5" fill="#36c989"/>
-<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 77 verified · 2 missing · 2026-11-08</text>
-<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 171/271 = 63.10% · strict 108/271 = 39.85%</text>
+<rect x="37" y="113" width="415.6" height="11" rx="5" fill="#36c989"/>
+<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 78 verified · 1 missing · 2026-11-08</text>
+<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 173/271 = 63.84% · strict 110/271 = 40.59%</text>
 <rect x="37" y="190" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="213" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Datapath</text>
 <text x="533" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">16/28</text>
@@ -152,7 +152,7 @@
 <rect x="647" y="613" width="30" height="22" rx="5" fill="#36c989"><title>A26 CLI `--version`/`serve`/`--self-check`/`--release-id`: доказано (1/1)</title></rect>
 <rect x="37" y="638" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="661" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Router / Service</text>
-<text x="533" y="661" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">68/84</text>
+<text x="533" y="661" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">70/84</text>
 <rect x="51" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>B1 Config defaults и совместимость ключей: частично (0/1)</title></rect>
 <rect x="89" y="671" width="30" height="22" rx="5" fill="#36c989"><title>B2 Start order: engine→telegram→panel→schedulers: доказано (2/2)</title></rect>
 <rect x="127" y="671" width="30" height="22" rx="5" fill="#36c989"><title>B3 Stop order и восстановление fastnat/offload: доказано (2/2)</title></rect>
@@ -196,7 +196,7 @@
 <rect x="203" y="752" width="30" height="22" rx="5" fill="#36c989"><title>B42 Telegram reapply semantics: доказано (2/2)</title></rect>
 <rect x="241" y="752" width="30" height="22" rx="5" fill="#36c989"><title>B43 Telegram mark/gate: доказано (1/1)</title></rect>
 <rect x="279" y="752" width="30" height="22" rx="5" fill="#36c989"><title>B44 Telegram firewall nft/iptables: доказано (2/2)</title></rect>
-<rect x="317" y="752" width="30" height="22" rx="5" fill="#e06c75"><title>B46 Telegram watchdog health contract: пробел (0/2)</title></rect>
+<rect x="317" y="752" width="30" height="22" rx="5" fill="#36c989"><title>B46 Telegram watchdog health contract: доказано (2/2)</title></rect>
 <rect x="355" y="752" width="30" height="22" rx="5" fill="#36c989"><title>B47 Meta DNS scheduler lifecycle: доказано (1/1)</title></rect>
 <rect x="393" y="752" width="30" height="22" rx="5" fill="#e6b45d"><title>B48 Meta DNS offset/backoff/tick: частично (0/2)</title></rect>
 <rect x="431" y="752" width="30" height="22" rx="5" fill="#36c989"><title>B49 Meta DNS ranges asset: доказано (1/1)</title></rect>

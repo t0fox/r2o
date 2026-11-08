@@ -3,14 +3,14 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 108,
-  "percent": 39.85,
+  "points": 110,
+  "percent": 40.59,
   "total": 179,
   "counts": {
-    "verified": 77,
+    "verified": 78,
     "carry": 40,
     "partial": 59,
-    "missing": 2,
+    "missing": 1,
     "implemented": 0,
     "unknown": 0
   },
@@ -1859,7 +1859,7 @@
     {
       "name": "Router / Service",
       "weight": 84,
-      "points": 68,
+      "points": 70,
       "items": [
         {
           "id": 106,
@@ -2511,15 +2511,15 @@
           "key": "B46",
           "name": "Telegram watchdog health contract",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "missing",
-          "statusLabel": "пробел",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Router / Service",
-          "coverage": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-          "gap": "**пробел**",
-          "mapping": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-          "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: **пробел**"
+          "coverage": "`scripts/test-telegram-health-differential.sh` (a378); C `d2k-tg-watchdog.sh` + `d2k_runtime_heartbeat`; Rust `HealthWriter` + `r2o-telegram-watchdog.sh`",
+          "gap": "D2KH1-поля, start_ticks/boot_id, 15s freshness, restart limit — совпадают; C и Rust принимают heartbeat друг друга",
+          "mapping": "`scripts/test-telegram-health-differential.sh` (a378); C `d2k-tg-watchdog.sh` + `d2k_runtime_heartbeat`; Rust `HealthWriter` + `r2o-telegram-watchdog.sh`",
+          "evidence": "`scripts/test-telegram-health-differential.sh` (a378); C `d2k-tg-watchdog.sh` + `d2k_runtime_heartbeat`; Rust `HealthWriter` + `r2o-telegram-watchdog.sh` · пробел: D2KH1-поля, start_ticks/boot_id, 15s freshness, restart limit — совпадают; C и Rust принимают heartbeat друг друга"
         },
         {
           "id": 150,
@@ -4997,15 +4997,15 @@
       "key": "B46",
       "name": "Telegram watchdog health contract",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "missing",
-      "statusLabel": "пробел",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Router / Service",
-      "coverage": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-      "gap": "**пробел**",
-      "mapping": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-      "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: **пробел**"
+      "coverage": "`scripts/test-telegram-health-differential.sh` (a378); C `d2k-tg-watchdog.sh` + `d2k_runtime_heartbeat`; Rust `HealthWriter` + `r2o-telegram-watchdog.sh`",
+      "gap": "D2KH1-поля, start_ticks/boot_id, 15s freshness, restart limit — совпадают; C и Rust принимают heartbeat друг друга",
+      "mapping": "`scripts/test-telegram-health-differential.sh` (a378); C `d2k-tg-watchdog.sh` + `d2k_runtime_heartbeat`; Rust `HealthWriter` + `r2o-telegram-watchdog.sh`",
+      "evidence": "`scripts/test-telegram-health-differential.sh` (a378); C `d2k-tg-watchdog.sh` + `d2k_runtime_heartbeat`; Rust `HealthWriter` + `r2o-telegram-watchdog.sh` · пробел: D2KH1-поля, start_ticks/boot_id, 15s freshness, restart limit — совпадают; C и Rust принимают heartbeat друг друга"
     },
     {
       "id": 150,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 108,
+      "points": 110,
       "weight": 271,
-      "percent": 39.85
+      "percent": 40.59
     },
     "carry_forward": {
-      "points": 171,
+      "points": 173,
       "weight": 271,
-      "percent": 63.1,
+      "percent": 63.84,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
