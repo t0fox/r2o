@@ -1606,6 +1606,41 @@ fn d2o_status_snapshot_structure_matches() {
     .unwrap();
 }
 
+#[test]
+#[ignore = "run through scripts/test-panel-known-keys-differential.sh"]
+fn d2o_known_config_keys_match() {
+    let config_path = PathBuf::from(
+        std::env::var_os("R2O_PANEL_KNOWN_KEYS_CONFIG").expect("test helper provides config path"),
+    );
+    let c_trace = fs::read_to_string(
+        std::env::var_os("R2O_PANEL_KNOWN_KEYS_C_TRACE").expect("test helper provides D2O trace"),
+    )
+    .unwrap();
+    let mut config = Config::default();
+    let result = parse_config(&config_path, &mut config, &[]);
+    assert!(result.is_ok(), "parse_config: {result:?}");
+    let trace = format!(
+        "result={} mode={} listen={} state={} queue={} exists={} unknown={}\n",
+        if result.is_ok() { 0 } else { -1 },
+        config.mode,
+        config.panel_listen,
+        config.state_dir.display(),
+        config.queue_num,
+        u8::from(config.config_exists),
+        config.unknown_keys.join(",")
+    );
+    assert_eq!(trace, c_trace);
+    if let Some(path) = std::env::var_os("R2O_PANEL_KNOWN_KEYS_DEFAULT_CONFIG") {
+        let mut default = Config::default();
+        parse_config(PathBuf::from(path).as_path(), &mut default, &[]).unwrap();
+        assert!(
+            default.unknown_keys.is_empty(),
+            "R2O config.default даёт unknown_keys: {:?}",
+            default.unknown_keys
+        );
+    }
+}
+
 fn assert_d2o_config_trace(config_path_env: &str, c_trace_env: &str) {
     let config_path =
         PathBuf::from(std::env::var_os(config_path_env).expect("test helper provides config"));

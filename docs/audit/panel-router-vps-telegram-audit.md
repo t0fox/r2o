@@ -4,13 +4,13 @@
 
 Источники: локальные деревья `E:\d2o` (C/shell/section units) и `E:\r2o` (Rust/shell), `docs/functional-parity-matrix.md`, `docs/parity-function-inventory.md`, `README.md`, `router/README.md`, `docs/audit/function-index.md`, существующие differential-скрипты и CI-workflow.
 
-**Интеграция 2026-11-08.** Детальные строки A1–A26, B1–B54 и C1–C26 сведены в единую scored-матрицу `docs/functional-parity-matrix.md`, раздел «Нормализованная матрица покрытия»: 179 контрактов / 271 балл, строгий счёт 119/271 = 43,91 %. В scored не входят `B32`/`B45`/`B54`, `C2`, `C25`/`C26` как extension/out-of-scope/дубли. `B9` и `B52` закрыты после аудита (`scripts/test-router-clear-found-state.sh`, `scripts/test-router-log-maintenance.sh`); таблицы ниже сохранены как исходное доказательное основание.
+**Интеграция 2026-11-08.** Детальные строки A1–A26, B1–B54 и C1–C26 сведены в единую scored-матрицу `docs/functional-parity-matrix.md`, раздел «Нормализованная матрица покрытия»: 179 контрактов / 271 балл, строгий счёт 120/271 = 44,28 %. В scored не входят `B32`/`B45`/`B54`, `C2`, `C25`/`C26` как extension/out-of-scope/дубли. `B9` и `B52` закрыты после аудита (`scripts/test-router-clear-found-state.sh`, `scripts/test-router-log-maintenance.sh`); таблицы ниже сохранены как исходное доказательное основание.
 
 ## 0. Метод и ограничения
 
 1. **Ничего не собиралось и не запускалось.** В PATH нет `git`, `cargo`, `rustc`; C-оракулы и Rust-тесты в этом окружении не запускались. Все выводы ниже — анализ исходников, встроенных тестов, differential-скриптов и CI-конфигурации, а не результат прогона.
 2. **C D2O — эталон поведения, но не источник переноса для Telegram.** C11-реализация Telegram сравнивается как oracle; R2O Telegram взят из донора z2kOW (`tg-proxy`). Для panel/router C-код является и источником, и oracle.
-3. **Версии в документах противоречат друг другу.** Заголовок матрицы говорит о 57 контрактах/89 баллах и 80/89, а примечания 73–92 — о 84 баллах, 53/84 и 67,16 %. Одновременно panel-скрипты закреплены на D2O `304ba893`, матрица panel-строки — на `a378e23`, router-скрипты — на `8e2c981`. В этом аудите **баллы не начислялись**; единый процент по четырём областям не выводится.
+3. **Версии в документах противоречат друг другу.** Заголовок матрицы говорит о 57 контрактах/89 баллах и 80/89, а примечания 73–92 — о 84 баллах, 53/84 и 67,53 %. Одновременно panel-скрипты закреплены на D2O `304ba893`, матрица panel-строки — на `a378e23`, router-скрипты — на `8e2c981`. В этом аудите **баллы не начислялись**; единый процент по четырём областям не выводится.
 4. **Легенда статусов:**
    - `ДИФ` — есть production C/Rust differential-скрипт или fixture, прямо вызывающий обе реализации; в этом аудите не перезапускался.
    - `ТЕСТ` — есть только Rust unit/integration/browser-тест либо shell-harness с моками.
@@ -23,7 +23,7 @@
 
 ## 1. Резюме
 
-- **Panel.** Все 8 route-групп и 22 differential-сценария имеют Rust-аналоги. Основные пробелы: нет абсолютного дедлайна ответа (C `response_ex`, есть `test_response_deadline.c`, нет R2O-дифференциала); фатальная ошибка чтения сокета завершает весь `serve`, тогда как C отвечает 400 и продолжает; парсер конфигурации Rust не отвергает незакрытую кавычку в `PANEL_LISTEN`/`STATE_DIR`; список известных ключей Rust не совпадает с D2O (`TG_RELAY_*`, `TG_ENROLL_PORT`, `D2K_PPE_DEOFFLOAD`); R2O-конфиг по умолчанию содержит `AUTOUPDATE` и `D2K_GATE`, которых нет в known-list, поэтому `/api/status` на свежей установке показывает непустой `unknown_keys`.
+- **Panel.** Все 8 route-групп покрыты differential-сценариями. Закрыты: абсолютный дедлайн заголовка/ответа, устойчивость к обрыву, незакрытая кавычка, known-list D2O-конфига и `unknown_keys`, граница 32 КиБ/431, request semantics, status structure, mode preservation, exit 124 → timeout. Остаётся более строгая, чем в C, валидация значений R2O-ключей (например `LOGMAX`/`CONNBYTES`): C игнорирует значения, Rust отвергает недопустимые.
 - **Router.** Порядок start/stop, nft/iptables-генерация, fastnat, flow-offload, PPE, DNS-exclusions, heal/watchdog и procd в основном отображены. Реальные пробелы: `clear-found` удаляет только каталог и оставляет `https-cache.json`; `KEENETIC_POLICY` (`ndmc show ip policy` → `--only-mark`) не перенесён вовсе; ротация журналов не покрывает `instagram-dns.log` и `instagram-dns-scheduler.log`; `heal` в R2O может запустить остановленный Telegram, чего D2O не делает; `engine-restart` при `MODE=off` сначала останавливает движок; действия `dns-tick/dns-refresh/dns-remove` отсутствуют в `S99r2o`; uninstall не имеет аварийной очистки при отсутствующем адаптере.
 - **Flow-offload.** Текущий `r2o-firewall.sh` **глобально выключает** fw4 offload, как D2O. Примечания матрицы 20/26/28/66/67/81/83/84/85/86/88/92 описывают уже отсутствующую selective-схему; скрипт `test-router-flowoffload-selective-differential.sh`, на который они ссылаются, в дереве отсутствует, а действующий `test-router-flowoffload-d2o-differential.sh` прямо запрещает `ct mark`/`mark_flow`/`flow offload @`.
 - **Telegram.** R2O — функциональный superset донора по большинству модулей, но не пофункциональный паритет с C. Неперенесённые/расходящиеся ветви: файловый парсер `tg_config_read`; строгая проверка `TG_PORT=1443`; `TG_DIAGNOSTIC_DIRECT_TCP`; `TG_CF_DOMAIN_CACHE_PATH`; отсутствие стартовой валидации и лимита 32 для `TG_CF_DOMAIN`; stats-сокет без таймаута чтения запроса; identity/`enroll.c` без потребителя. C-векторы crypto/splitter не используются в Rust-дифференциалах. Memory budget и `configured_max_connections=64` реализованы и проверены `test-telegram-limits-differential.sh`.
@@ -440,7 +440,7 @@
 | A2 | Пустой `PANEL_LISTEN` отключает панель и health update | 1 | ДИФ есть |
 | A3 | Парсер: комментарии, кавычки, хвостовые комментарии | 1 | ДИФ есть; незакрытая кавычка — пробел |
 | A4 | Парсер: unknown keys, не-UTF-8, ignored bytes | 1 | ДИФ есть |
-| A5 | Совместимость known-list с D2O-конфигом | 1 | **не доказано/пробел** |
+| A5 | Совместимость known-list с D2O-конфигом | 1 | ДИФ: D2O known-ключи и unknown_keys |
 | A6 | Лимит заголовка 32 КиБ и код 431 | 1 | ДИФ: 32768→404, 32769→431 |
 | A7 | Абсолютный дедлайн заголовка 5 с / 408 | 1 | ДИФ |
 | A8 | Абсолютный дедлайн ответа 5 с | 1 | **нет дифференциала** |

@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 119,
-  "percent": 43.91,
+  "points": 120,
+  "percent": 44.28,
   "total": 179,
   "counts": {
-    "verified": 85,
+    "verified": 86,
     "carry": 40,
-    "partial": 53,
+    "partial": 52,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1447,7 +1447,7 @@
     {
       "name": "WebPanel",
       "weight": 30,
-      "points": 12,
+      "points": 13,
       "items": [
         {
           "id": 79,
@@ -1514,15 +1514,15 @@
           "key": "A5",
           "name": "Совместимость known-list с D2O-конфигом",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "WebPanel",
-          "coverage": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-          "gap": "**не доказано/пробел**",
-          "mapping": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-          "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: **не доказано/пробел**"
+          "coverage": "`scripts/test-panel-known-keys-differential.sh` (a378); C `known_key`; Rust `parse_config` known-list",
+          "gap": "Все D2O known-ключи (`TG_RELAY_*`, `TG_ENROLL_PORT`, `D2K_PPE_DEOFFLOAD`) известны; unknown_keys/порядок совпадают; config.default R2O без unknown",
+          "mapping": "`scripts/test-panel-known-keys-differential.sh` (a378); C `known_key`; Rust `parse_config` known-list",
+          "evidence": "`scripts/test-panel-known-keys-differential.sh` (a378); C `known_key`; Rust `parse_config` known-list · пробел: Все D2O known-ключи (`TG_RELAY_*`, `TG_ENROLL_PORT`, `D2K_PPE_DEOFFLOAD`) известны; unknown_keys/порядок совпадают; config.default R2O без unknown"
         },
         {
           "id": 84,
@@ -4007,15 +4007,15 @@
       "key": "A5",
       "name": "Совместимость known-list с D2O-конфигом",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "WebPanel",
-      "coverage": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-      "gap": "**не доказано/пробел**",
-      "mapping": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-      "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: **не доказано/пробел**"
+      "coverage": "`scripts/test-panel-known-keys-differential.sh` (a378); C `known_key`; Rust `parse_config` known-list",
+      "gap": "Все D2O known-ключи (`TG_RELAY_*`, `TG_ENROLL_PORT`, `D2K_PPE_DEOFFLOAD`) известны; unknown_keys/порядок совпадают; config.default R2O без unknown",
+      "mapping": "`scripts/test-panel-known-keys-differential.sh` (a378); C `known_key`; Rust `parse_config` known-list",
+      "evidence": "`scripts/test-panel-known-keys-differential.sh` (a378); C `known_key`; Rust `parse_config` known-list · пробел: Все D2O known-ключи (`TG_RELAY_*`, `TG_ENROLL_PORT`, `D2K_PPE_DEOFFLOAD`) известны; unknown_keys/порядок совпадают; config.default R2O без unknown"
     },
     {
       "id": 84,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 119,
+      "points": 120,
       "weight": 271,
-      "percent": 43.91
+      "percent": 44.28
     },
     "carry_forward": {
-      "points": 182,
+      "points": 183,
       "weight": 271,
-      "percent": 67.16,
+      "percent": 67.53,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
