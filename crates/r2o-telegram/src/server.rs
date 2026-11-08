@@ -13,7 +13,6 @@ use tokio::task::{JoinError, JoinSet};
 use tracing::{error, info, warn};
 
 use crate::config::Config;
-use crate::limits::{auto_max_connections, soft_nofile_limit};
 use crate::runtime::Runtime;
 use crate::transparent_proxy;
 
@@ -108,6 +107,11 @@ async fn rebind_listener(
 #[derive(Debug)]
 pub enum RunError {
     InvalidListenAddress(String),
+    ResourceLimits {
+        fd_limit: usize,
+        memory_budget_bytes: usize,
+        configured_max: usize,
+    },
     Bind {
         addr: SocketAddr,
         source: std::io::Error,
@@ -124,6 +128,14 @@ impl std::fmt::Display for RunError {
             Self::InvalidListenAddress(address) => {
                 write!(f, "неверный адрес прослушивания: {address}")
             }
+            Self::ResourceLimits {
+                fd_limit,
+                memory_budget_bytes,
+                configured_max,
+            } => write!(
+                f,
+                "безопасный предел соединений равен нулю (fd={fd_limit}, память={memory_budget_bytes} байт, configured={configured_max})"
+            ),
             Self::Bind { addr, source } => {
                 write!(f, "не удалось начать прослушивание {addr}: {source}")
             }
@@ -231,14 +243,44 @@ pub async fn run_with_listen(
         None => None,
     };
 
-    let fd_limit = soft_nofile_limit();
-    let safe_max_connections = auto_max_connections(fd_limit, config.ws_hedge_limit);
-    let max_connections = config.max_connections.unwrap_or(safe_max_connections);
+    let fd_limit = crate::limits::soft_nofile_limit();
+    let memory_budget_bytes = crate::limits::proxy_memory_budget();
+    let connection_reserve = crate::limits::connection_reserve_bytes();
+    // D2O всегда включает direct WSS и потому добавляет RX-буфер к резерву.
+    let bytes_per_connection = connection_reserve.saturating_add(crate::limits::WS_RX_INITIAL);
+    let configured_max = config
+        .max_connections
+        .unwrap_or(crate::limits::D2O_CONFIGURED_MAX_CONNECTIONS);
+    let max_connections = crate::limits::auto_max_connections(
+        fd_limit,
+        memory_budget_bytes,
+        bytes_per_connection,
+        0,
+        configured_max,
+    );
+    if max_connections == 0 {
+        return Err(RunError::ResourceLimits {
+            fd_limit,
+            memory_budget_bytes,
+            configured_max,
+        });
+    }
+    let budget_bytes =
+        memory_budget_bytes.saturating_sub(max_connections.saturating_mul(connection_reserve));
+    runtime
+        .stats()
+        .set_memory_budget(Arc::new(crate::memory_budget::MemoryBudget::new(
+            budget_bytes,
+        )));
     runtime.stats().set_max_connections(max_connections);
-    if max_connections > safe_max_connections {
+    if config
+        .max_connections
+        .is_some_and(|configured| configured > max_connections)
+    {
         warn!(
-            "max-connections={} выше безопасного лимита {} для {} дескрипторов",
-            max_connections, safe_max_connections, fd_limit
+            "max-connections={} уменьшен до {} по бюджета памяти/дескрипторов",
+            config.max_connections.unwrap_or(0),
+            max_connections
         );
     }
 

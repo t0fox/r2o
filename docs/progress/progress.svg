@@ -1,12 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 40.59%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 41.33%">
 <rect width="1100" height="790" rx="20" fill="#0c121e"/>
 <text x="36" y="48" fill="#edf7ff" font-family="Arial,sans-serif" font-size="29" font-weight="700">R2O / D2O · Strict parity</text>
-<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">40.59%</text>
-<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">110 / 271 verified points</text>
+<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">41.33%</text>
+<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">112 / 271 verified points</text>
 <rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/>
-<rect x="37" y="113" width="415.6" height="11" rx="5" fill="#36c989"/>
-<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 78 verified · 1 missing · 2026-11-08</text>
-<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 173/271 = 63.84% · strict 110/271 = 40.59%</text>
+<rect x="37" y="113" width="423.2" height="11" rx="5" fill="#36c989"/>
+<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 79 verified · 0 missing · 2026-11-08</text>
+<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 175/271 = 64.58% · strict 112/271 = 41.33%</text>
 <rect x="37" y="190" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="213" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Datapath</text>
 <text x="533" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">16/28</text>
@@ -96,7 +96,7 @@
 <rect x="571" y="447" width="30" height="22" rx="5" fill="#36c989"><title>G1 Discord Gateway WebSocket upgrade/Hello: доказано (1/1)</title></rect>
 <rect x="37" y="526" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="549" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Telegram</text>
-<text x="533" y="549" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">1/41</text>
+<text x="533" y="549" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">3/41</text>
 <rect x="51" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>TG1 Config file/env mapping и валидация: частично (0/2)</title></rect>
 <rect x="89" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>TG3 DC map persist/merge/validate: частично (0/2)</title></rect>
 <rect x="127" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>TG4 `help.getConfig` и dcOption: частично (0/2)</title></rect>
@@ -117,7 +117,7 @@
 <rect x="241" y="586" width="30" height="22" rx="5" fill="#e6b45d"><title>TG19 Stats schema и Unix socket: частично (0/2)</title></rect>
 <rect x="279" y="586" width="30" height="22" rx="5" fill="#36c989"><title>TG20 Stats request protocol robustness: доказано (1/1)</title></rect>
 <rect x="317" y="586" width="30" height="22" rx="5" fill="#e6b45d"><title>TG21 Response observer: частично (0/1)</title></rect>
-<rect x="355" y="586" width="30" height="22" rx="5" fill="#e06c75"><title>TG22 Connection/memory limits: пробел (0/2)</title></rect>
+<rect x="355" y="586" width="30" height="22" rx="5" fill="#36c989"><title>TG22 Connection/memory limits: доказано (2/2)</title></rect>
 <rect x="393" y="586" width="30" height="22" rx="5" fill="#e6b45d"><title>TG23 Diagnostics `--check`: частично (0/2)</title></rect>
 <rect x="431" y="586" width="30" height="22" rx="5" fill="#e6b45d"><title>TG24 Service lifecycle/recovery: частично (0/2)</title></rect>
 <rect x="557" y="526" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>

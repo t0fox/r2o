@@ -15,6 +15,7 @@ use tracing::{info, warn};
 use tungstenite::Message;
 
 use crate::crypto::ProtoTag;
+use crate::memory_budget::{BudgetReservation, MemoryBudget};
 use crate::response_observer::MtprotoResponseObserver;
 use crate::routing::{RouteFeedback, WsFraming};
 use crate::splitter::MsgSplitter;
@@ -216,6 +217,7 @@ pub(crate) async fn bridge_transparent_ws(
     route_type: &'static str,
     feedback: RouteFeedback,
     telemetry: ConnectionTelemetry,
+    memory_budget: Option<Arc<MemoryBudget>>,
 ) {
     info!(
         "[{}] прозрачный маршрут: {} → DC{}{} через {} (кадрирование: {})",
@@ -226,6 +228,21 @@ pub(crate) async fn bridge_transparent_ws(
         route_type,
         framing.as_str()
     );
+    // C epoll_proxy резервирует базовый буфер соединения в общем бюджете.
+    // R2O удерживает тот же RELAY_BUF_SIZE на всё время моста.
+    let _relay_reservation = match memory_budget.as_ref() {
+        Some(budget) => match BudgetReservation::acquire(budget, RELAY_BUF_SIZE) {
+            Some(reservation) => Some(reservation),
+            None => {
+                warn!(
+                    "[{}] бюджет памяти Telegram исчерпан до старта моста",
+                    label
+                );
+                return;
+            }
+        },
+        None => None,
+    };
     let (mut client_read, mut client_write) = stream.into_split();
     let (ws_write, mut ws_read) = ws.split();
     let ws_write = Arc::new(AsyncMutex::new(ws_write));
@@ -242,7 +259,15 @@ pub(crate) async fn bridge_transparent_ws(
         let response_state = Arc::clone(&response_state);
         let feedback = feedback.clone();
         let telemetry = telemetry.clone();
+        let memory_budget = memory_budget.clone();
         async move {
+            let init_reservation = match memory_budget.as_ref() {
+                Some(budget) => match BudgetReservation::acquire(budget, init.len()) {
+                    Some(reservation) => Some(reservation),
+                    None => return "бюджет памяти Telegram исчерпан для init".to_string(),
+                },
+                None => None,
+            };
             if ws_write
                 .lock()
                 .await
@@ -252,6 +277,7 @@ pub(crate) async fn bridge_transparent_ws(
             {
                 return "не удалось отправить init по WSS".to_string();
             }
+            drop(init_reservation);
             bytes_up.fetch_add(init.len(), Ordering::Relaxed);
             activity.touch();
 
@@ -274,6 +300,16 @@ pub(crate) async fn bridge_transparent_ws(
                     }
                     for frame in frames {
                         let frame_len = frame.len();
+                        let _frame_reservation = match memory_budget.as_ref() {
+                            Some(budget) => match BudgetReservation::acquire(budget, frame_len) {
+                                Some(reservation) => Some(reservation),
+                                None => {
+                                    return "бюджет памяти Telegram исчерпан для кадра WSS"
+                                        .to_string();
+                                }
+                            },
+                            None => None,
+                        };
                         if let Err(error) =
                             send_application_frame(&ws_write, &response_state, &feedback, frame)
                                 .await
@@ -284,6 +320,15 @@ pub(crate) async fn bridge_transparent_ws(
                         activity.touch();
                     }
                 } else {
+                    let _frame_reservation = match memory_budget.as_ref() {
+                        Some(budget) => match BudgetReservation::acquire(budget, length) {
+                            Some(reservation) => Some(reservation),
+                            None => {
+                                return "бюджет памяти Telegram исчерпан для кадра WSS".to_string();
+                            }
+                        },
+                        None => None,
+                    };
                     if let Err(error) = send_application_frame(
                         &ws_write,
                         &response_state,
@@ -309,6 +354,15 @@ pub(crate) async fn bridge_transparent_ws(
                 }
                 for frame in splitter.flush() {
                     let frame_len = frame.len();
+                    let _frame_reservation = match memory_budget.as_ref() {
+                        Some(budget) => match BudgetReservation::acquire(budget, frame_len) {
+                            Some(reservation) => Some(reservation),
+                            None => {
+                                return "бюджет памяти Telegram исчерпан для кадра WSS".to_string();
+                            }
+                        },
+                        None => None,
+                    };
                     if let Err(error) =
                         send_application_frame(&ws_write, &response_state, &feedback, frame).await
                     {
@@ -330,6 +384,7 @@ pub(crate) async fn bridge_transparent_ws(
         let response_state = Arc::clone(&response_state);
         let feedback = feedback.clone();
         let telemetry = telemetry.clone();
+        let memory_budget = memory_budget.clone();
         let mut response_observer = response_observer;
         async move {
             let mut response_observer_enabled = true;
@@ -337,6 +392,18 @@ pub(crate) async fn bridge_transparent_ws(
                 match message {
                     Ok(Message::Binary(data)) => {
                         let length = data.len();
+                        let _message_reservation = match memory_budget.as_ref() {
+                            Some(budget) => match BudgetReservation::acquire(budget, length) {
+                                Some(reservation) => Some(reservation),
+                                None => {
+                                    record_mtproto_failure_if_pending(&response_state, &feedback)
+                                        .await;
+                                    return "бюджет памяти Telegram исчерпан для ответа WSS"
+                                        .to_string();
+                                }
+                            },
+                            None => None,
+                        };
                         telemetry.record_upstream_bytes(length as u64);
                         if response_observer_enabled {
                             match observe_and_record_first_mtproto_response(
@@ -370,6 +437,18 @@ pub(crate) async fn bridge_transparent_ws(
                     }
                     Ok(Message::Text(data)) => {
                         let length = data.len();
+                        let _message_reservation = match memory_budget.as_ref() {
+                            Some(budget) => match BudgetReservation::acquire(budget, length) {
+                                Some(reservation) => Some(reservation),
+                                None => {
+                                    record_mtproto_failure_if_pending(&response_state, &feedback)
+                                        .await;
+                                    return "бюджет памяти Telegram исчерпан для ответа WSS"
+                                        .to_string();
+                                }
+                            },
+                            None => None,
+                        };
                         telemetry.record_upstream_bytes(length as u64);
                         if let Err(error) = client_write.write_all(data.as_bytes()).await {
                             return format!("ошибка записи текста WSS в TCP клиента: {error}");

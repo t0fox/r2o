@@ -90,6 +90,7 @@ pub struct RuntimeStats {
     listener_ready: AtomicBool,
     active_connections: AtomicUsize,
     max_connections: AtomicUsize,
+    memory_budget: std::sync::Mutex<Option<Arc<crate::memory_budget::MemoryBudget>>>,
     accepted_connections: AtomicCounterU64,
     wss_established: AtomicCounterU64,
     mtproto_success: AtomicCounterU64,
@@ -131,6 +132,8 @@ pub struct StatsSnapshot {
     pub active_sessions: Vec<ActiveRouteSession>,
     pub route_sessions_truncated: bool,
     pub max_connections: usize,
+    pub buffer_bytes_current: usize,
+    pub buffer_bytes_peak: usize,
     pub accepted_connections: u64,
     pub wss_established: u64,
     pub mtproto_success: u64,
@@ -249,6 +252,20 @@ impl RuntimeStats {
 
     pub fn set_max_connections(&self, max: usize) {
         self.max_connections.store(max, Ordering::Release);
+    }
+
+    pub fn set_memory_budget(&self, budget: Arc<crate::memory_budget::MemoryBudget>) {
+        *self
+            .memory_budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(budget);
+    }
+
+    pub fn memory_budget(&self) -> Option<Arc<crate::memory_budget::MemoryBudget>> {
+        self.memory_budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn connection_started(self: &Arc<Self>) -> ConnectionGuard {
@@ -380,6 +397,10 @@ impl RuntimeStats {
         };
         let active_connections = self.active_connections.load(Ordering::Acquire);
         let route_sessions_truncated = active_connections > active_sessions.len();
+        let memory_budget = self.memory_budget();
+        let (buffer_bytes_current, buffer_bytes_peak) = memory_budget
+            .as_ref()
+            .map_or((0, 0), |budget| (budget.used(), budget.peak()));
         StatsSnapshot {
             process_started_at: self.started_at.load(Ordering::Acquire),
             listener_ready: self.listener_ready.load(Ordering::Acquire),
@@ -387,6 +408,8 @@ impl RuntimeStats {
             route_sessions_truncated,
             active_sessions,
             max_connections: self.max_connections.load(Ordering::Acquire),
+            buffer_bytes_current,
+            buffer_bytes_peak,
             accepted_connections: self.accepted_connections.load(Ordering::Acquire),
             wss_established: self.wss_established.load(Ordering::Acquire),
             mtproto_success: self.mtproto_success.load(Ordering::Acquire),

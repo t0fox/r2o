@@ -3,14 +3,14 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 110,
-  "percent": 40.59,
+  "points": 112,
+  "percent": 41.33,
   "total": 179,
   "counts": {
-    "verified": 78,
+    "verified": 79,
     "carry": 40,
     "partial": 59,
-    "missing": 1,
+    "missing": 0,
     "implemented": 0,
     "unknown": 0
   },
@@ -1095,7 +1095,7 @@
     {
       "name": "Telegram",
       "weight": 41,
-      "points": 1,
+      "points": 3,
       "items": [
         {
           "id": 157,
@@ -1402,15 +1402,15 @@
           "key": "TG22",
           "name": "Connection/memory limits",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "missing",
-          "statusLabel": "пробел",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Telegram",
-          "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "gap": "**пробел (memory budget)**",
-          "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C · пробел: **пробел (memory budget)**"
+          "coverage": "`scripts/test-telegram-limits-differential.sh` (a378); C `limits.c`/`memory_budget.c`; Rust `limits.rs`/`memory_budget.rs` + stats",
+          "gap": "C-векторы, 192-МиБ бюджет, configured_max=64, reserve/release/peak и stats `buffer_bytes_*` совпадают; буферы моста учитываются в общем бюджете",
+          "mapping": "`scripts/test-telegram-limits-differential.sh` (a378); C `limits.c`/`memory_budget.c`; Rust `limits.rs`/`memory_budget.rs` + stats",
+          "evidence": "`scripts/test-telegram-limits-differential.sh` (a378); C `limits.c`/`memory_budget.c`; Rust `limits.rs`/`memory_budget.rs` + stats · пробел: C-векторы, 192-МиБ бюджет, configured_max=64, reserve/release/peak и stats `buffer_bytes_*` совпадают; буферы моста учитываются в общем бюджете"
         },
         {
           "id": 178,
@@ -5417,15 +5417,15 @@
       "key": "TG22",
       "name": "Connection/memory limits",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "missing",
-      "statusLabel": "пробел",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Telegram",
-      "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "gap": "**пробел (memory budget)**",
-      "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C · пробел: **пробел (memory budget)**"
+      "coverage": "`scripts/test-telegram-limits-differential.sh` (a378); C `limits.c`/`memory_budget.c`; Rust `limits.rs`/`memory_budget.rs` + stats",
+      "gap": "C-векторы, 192-МиБ бюджет, configured_max=64, reserve/release/peak и stats `buffer_bytes_*` совпадают; буферы моста учитываются в общем бюджете",
+      "mapping": "`scripts/test-telegram-limits-differential.sh` (a378); C `limits.c`/`memory_budget.c`; Rust `limits.rs`/`memory_budget.rs` + stats",
+      "evidence": "`scripts/test-telegram-limits-differential.sh` (a378); C `limits.c`/`memory_budget.c`; Rust `limits.rs`/`memory_budget.rs` + stats · пробел: C-векторы, 192-МиБ бюджет, configured_max=64, reserve/release/peak и stats `buffer_bytes_*` совпадают; буферы моста учитываются в общем бюджете"
     },
     {
       "id": 178,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 110,
+      "points": 112,
       "weight": 271,
-      "percent": 40.59
+      "percent": 41.33
     },
     "carry_forward": {
-      "points": 173,
+      "points": 175,
       "weight": 271,
-      "percent": 63.84,
+      "percent": 64.58,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

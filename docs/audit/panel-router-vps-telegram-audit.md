@@ -4,13 +4,13 @@
 
 Источники: локальные деревья `E:\d2o` (C/shell/section units) и `E:\r2o` (Rust/shell), `docs/functional-parity-matrix.md`, `docs/parity-function-inventory.md`, `README.md`, `router/README.md`, `docs/audit/function-index.md`, существующие differential-скрипты и CI-workflow.
 
-**Интеграция 2026-11-08.** Детальные строки A1–A26, B1–B54 и C1–C26 сведены в единую scored-матрицу `docs/functional-parity-matrix.md`, раздел «Нормализованная матрица покрытия»: 179 контрактов / 271 балл, строгий счёт 110/271 = 40,59 %. В scored не входят `B32`/`B45`/`B54`, `C2`, `C25`/`C26` как extension/out-of-scope/дубли. `B9` и `B52` закрыты после аудита (`scripts/test-router-clear-found-state.sh`, `scripts/test-router-log-maintenance.sh`); таблицы ниже сохранены как исходное доказательное основание.
+**Интеграция 2026-11-08.** Детальные строки A1–A26, B1–B54 и C1–C26 сведены в единую scored-матрицу `docs/functional-parity-matrix.md`, раздел «Нормализованная матрица покрытия»: 179 контрактов / 271 балл, строгий счёт 112/271 = 41,33 %. В scored не входят `B32`/`B45`/`B54`, `C2`, `C25`/`C26` как extension/out-of-scope/дубли. `B9` и `B52` закрыты после аудита (`scripts/test-router-clear-found-state.sh`, `scripts/test-router-log-maintenance.sh`); таблицы ниже сохранены как исходное доказательное основание.
 
 ## 0. Метод и ограничения
 
 1. **Ничего не собиралось и не запускалось.** В PATH нет `git`, `cargo`, `rustc`; C-оракулы и Rust-тесты в этом окружении не запускались. Все выводы ниже — анализ исходников, встроенных тестов, differential-скриптов и CI-конфигурации, а не результат прогона.
 2. **C D2O — эталон поведения, но не источник переноса для Telegram.** C11-реализация Telegram сравнивается как oracle; R2O Telegram взят из донора z2kOW (`tg-proxy`). Для panel/router C-код является и источником, и oracle.
-3. **Версии в документах противоречат друг другу.** Заголовок матрицы говорит о 57 контрактах/89 баллах и 80/89, а примечания 73–92 — о 84 баллах, 53/84 и 63,84 %. Одновременно panel-скрипты закреплены на D2O `304ba893`, матрица panel-строки — на `a378e23`, router-скрипты — на `8e2c981`. В этом аудите **баллы не начислялись**; единый процент по четырём областям не выводится.
+3. **Версии в документах противоречат друг другу.** Заголовок матрицы говорит о 57 контрактах/89 баллах и 80/89, а примечания 73–92 — о 84 баллах, 53/84 и 64,58 %. Одновременно panel-скрипты закреплены на D2O `304ba893`, матрица panel-строки — на `a378e23`, router-скрипты — на `8e2c981`. В этом аудите **баллы не начислялись**; единый процент по четырём областям не выводится.
 4. **Легенда статусов:**
    - `ДИФ` — есть production C/Rust differential-скрипт или fixture, прямо вызывающий обе реализации; в этом аудите не перезапускался.
    - `ТЕСТ` — есть только Rust unit/integration/browser-тест либо shell-harness с моками.
@@ -26,7 +26,7 @@
 - **Panel.** Все 8 route-групп и 22 differential-сценария имеют Rust-аналоги. Основные пробелы: нет абсолютного дедлайна ответа (C `response_ex`, есть `test_response_deadline.c`, нет R2O-дифференциала); фатальная ошибка чтения сокета завершает весь `serve`, тогда как C отвечает 400 и продолжает; парсер конфигурации Rust не отвергает незакрытую кавычку в `PANEL_LISTEN`/`STATE_DIR`; список известных ключей Rust не совпадает с D2O (`TG_RELAY_*`, `TG_ENROLL_PORT`, `D2K_PPE_DEOFFLOAD`); R2O-конфиг по умолчанию содержит `AUTOUPDATE` и `D2K_GATE`, которых нет в known-list, поэтому `/api/status` на свежей установке показывает непустой `unknown_keys`.
 - **Router.** Порядок start/stop, nft/iptables-генерация, fastnat, flow-offload, PPE, DNS-exclusions, heal/watchdog и procd в основном отображены. Реальные пробелы: `clear-found` удаляет только каталог и оставляет `https-cache.json`; `KEENETIC_POLICY` (`ndmc show ip policy` → `--only-mark`) не перенесён вовсе; ротация журналов не покрывает `instagram-dns.log` и `instagram-dns-scheduler.log`; `heal` в R2O может запустить остановленный Telegram, чего D2O не делает; `engine-restart` при `MODE=off` сначала останавливает движок; действия `dns-tick/dns-refresh/dns-remove` отсутствуют в `S99r2o`; uninstall не имеет аварийной очистки при отсутствующем адаптере.
 - **Flow-offload.** Текущий `r2o-firewall.sh` **глобально выключает** fw4 offload, как D2O. Примечания матрицы 20/26/28/66/67/81/83/84/85/86/88/92 описывают уже отсутствующую selective-схему; скрипт `test-router-flowoffload-selective-differential.sh`, на который они ссылаются, в дереве отсутствует, а действующий `test-router-flowoffload-d2o-differential.sh` прямо запрещает `ct mark`/`mark_flow`/`flow offload @`.
-- **Telegram.** R2O — функциональный superset донора по большинству модулей, но не пофункциональный паритет с C. Неперенесённые/расходящиеся ветви: memory budget и жёсткий `max_connections=64` D2O; файловый парсер `tg_config_read`; строгая проверка `TG_PORT=1443`; `TG_DIAGNOSTIC_DIRECT_TCP`; `TG_CF_DOMAIN_CACHE_PATH`; отсутствие стартовой валидации и лимита 32 для `TG_CF_DOMAIN`; stats-сокет без таймаута чтения запроса; identity/`enroll.c` без потребителя. C-векторы crypto/splitter не используются в Rust-дифференциалах.
+- **Telegram.** R2O — функциональный superset донора по большинству модулей, но не пофункциональный паритет с C. Неперенесённые/расходящиеся ветви: файловый парсер `tg_config_read`; строгая проверка `TG_PORT=1443`; `TG_DIAGNOSTIC_DIRECT_TCP`; `TG_CF_DOMAIN_CACHE_PATH`; отсутствие стартовой валидации и лимита 32 для `TG_CF_DOMAIN`; stats-сокет без таймаута чтения запроса; identity/`enroll.c` без потребителя. C-векторы crypto/splitter не используются в Rust-дифференциалах. Memory budget и `configured_max_connections=64` реализованы и проверены `test-telegram-limits-differential.sh`.
 - **VPS.** `relay-enroll` и `relay-gate` в R2O отсутствуют полностью: нет бинарников, systemd-юнитов, install-server, портов 9443/9444, `/register`, `/resolve`, allowlist-proxy. README прямо фиксирует работу без VPS/relay/WARP. Единственный след — совместимое исключение `D2K_GATE` из NFQUEUE; транспорт обновлений R2O его не использует (`curl --noproxy '*'`). Identity в R2O создаётся, но ни для enrollment, ни для relay не применяется.
 - **CI.** Все 40 `test-router-*.sh` запускаются в CI (shell job). Panel-джоба запускает только `cargo test -p r2o-panel`; 22 `test-panel-*.sh` не входят в CI (в donor-shard есть только `r2o-panel-bind-default-differential.sh`). Telegram `--check`/service harness в CI отдельно не запускаются; они входят только через `test-router-*.sh`.
 
@@ -311,7 +311,7 @@
 | `epoll_proxy.c` (101): listener, buffers, retries, stats, lifecycle | `server.rs`, `transparent_proxy.rs`, `bridge.rs`, `routing.rs`, `stats.rs`, `ws_client.rs` | Tokio-архитектура вместо epoll; донорское покрытие | donor tests + service harness | ИСХ |
 | `cf_domains.c` (19): remote/cache/fallback | `cf_domain_pool.rs`, `default_domains.rs` | remote/cache/fallback/refresh | `cf_domain_pool` unit | ИСХ |
 | `net.c` (2) | `outbound/connector.rs` | TCP connect + SO_MARK + timeout; R2O добавляет IPv6 | `tests/outbound.rs` | ИСХ |
-| `limits.c` (3): nofile, auto max, memory budget | `limits.rs:47` `auto_max_connections` | Только nofile/hedge; **memory budget отсутствует** | `tests/limits.rs` | **ПРОБЕЛ** |
+| `limits.c` (3): nofile, auto max, memory budget | `limits.rs` `auto_max_connections`/`runtime_memory_budget`; `memory_budget.rs` | Полный C-контракт: nofile, memory cap, configured_max | `tests/limits.rs`, `test-telegram-limits-differential.sh` | ДИФ |
 | `memory_budget.c` (2) | нет | — | — | **ПРОБЕЛ** |
 | `stats_socket.c` (10) | `stats.rs:127-720` | JSON snapshot + Unix socket; другая схема | `test-router-telegram-service` | ДИФ/EXT |
 | `ws.c` (18): frame encode/decode, upgrade | `ws_client.rs` (tungstenite) | TLS/Upgrade/frames | `tests/ws_client` 3 теста | ИСХ |
@@ -348,7 +348,7 @@
 ### C.4 Неперенесённые C-функции и Rust-only расширения
 
 **Неперенесено/заменено архитектурно:**
-- `memory_budget.c` целиком; `tg_limits_runtime_memory_budget`; жёсткий `configured_max_connections=64` (`main.c:415-416`). R2O считает лимит только по `nofile` и hedge, без memory cap. На 128-МиБ роутере это может дать ~495 соединений против 64 у D2O.
+- `memory_budget.c` целиком, `tg_limits_runtime_memory_budget` и жёсткий `configured_max_connections=64` (`main.c:415-416`) перенесены: `memory_budget.rs`, `limits.rs`, серверный расчёт предела и stats `buffer_bytes_current/peak`; C/Rust differential — `scripts/test-telegram-limits-differential.sh`.
 - `enroll.c::tg_enroll_proof`, `tg_register_hmac_hex` (нет потребителя; relay вне области).
 - Полный файловый парсер `tg_config_read` (shell-value, duplicate-key rejection, `TG_PORT=1443`).
 - `route_dns.c` как самостоятельный DoH/DoT/H2-резолвер с кэшем/префетчем; R2O использует system DNS и CF-proxy DoH.
@@ -547,7 +547,7 @@
 | C19 | Stats schema и Unix socket | 2 | ДИФ/EXT |
 | C20 | Stats request protocol robustness | 1 | **пробел (нет таймаута)** |
 | C21 | Response observer | 1 | ДИФ (fixture) |
-| C22 | Connection/memory limits | 2 | **пробел (memory budget)** |
+| C22 | Connection/memory limits | 2 | ДИФ: limits/memory budget, configured_max=64 |
 | C23 | Diagnostics `--check` | 2 | ИСХ; CF unverified |
 | C24 | Service lifecycle/recovery | 2 | ТЕСТ (harness) |
 | C25 | Meta DNS direct resolve/scheduler | 2 | ДИФ |

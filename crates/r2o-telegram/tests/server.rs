@@ -66,6 +66,71 @@ async fn writes_d2o_health_file_before_listener_is_ready() {
 }
 
 #[tokio::test]
+async fn connection_limit_and_buffer_stats_match_d2o_contract() {
+    let temp = std::env::temp_dir().join(format!(
+        "r2o-tg-limits-server-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp).unwrap();
+    let stats_path = temp.join("stats.sock");
+    let config = Config::try_from_cli_line(&format!(
+        "--host 127.0.0.1 --port 0 --quiet --stats-socket-path {}",
+        stats_path.display()
+    ))
+    .unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let (listen_tx, listen_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        server::run_with_listen(
+            config,
+            async move {
+                let _ = shutdown_rx.await;
+            },
+            move |info| {
+                let _ = listen_tx.send(info.addr);
+            },
+        )
+        .await
+    });
+    let _address = tokio::time::timeout(Duration::from_secs(5), listen_rx)
+        .await
+        .expect("listener не начал принимать подключения")
+        .expect("callback прослушивания завершился без адреса");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let snapshot = loop {
+        match r2o_telegram::stats::read_socket(&stats_path).await {
+            Ok(snapshot) => break snapshot,
+            Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => panic!("stats-сокет не ответил: {error}"),
+        }
+    };
+    let snapshot: serde_json::Value = serde_json::from_slice(&snapshot).unwrap();
+    assert_eq!(
+        snapshot["max_connections"],
+        r2o_telegram::limits::D2O_CONFIGURED_MAX_CONNECTIONS
+    );
+    assert!(snapshot["buffer_bytes_current"].is_u64());
+    assert!(snapshot["buffer_bytes_peak"].is_u64());
+    assert!(
+        snapshot["buffer_bytes_peak"].as_u64().unwrap()
+            >= snapshot["buffer_bytes_current"].as_u64().unwrap()
+    );
+
+    shutdown_tx.send(()).unwrap();
+    task.await
+        .expect("задача сервера завершилась аварийно")
+        .expect("сервер вернул ошибку при остановке");
+    std::fs::remove_dir_all(&temp).unwrap();
+}
+
+#[tokio::test]
 async fn implicit_transparent_listener_binds_then_stops_cleanly() {
     let config = Config::try_from_cli_line("--host 127.0.0.1 --port 0 --quiet").unwrap();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();

@@ -462,6 +462,7 @@ pub async fn handle_transparent_client_with_runtime(
                 route_type,
                 feedback,
                 telemetry.clone(),
+                runtime.stats().memory_budget(),
             )
             .await;
         }
