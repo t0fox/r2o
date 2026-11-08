@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 234,
-  "percent": 86.35,
+  "points": 235,
+  "percent": 86.72,
   "total": 179,
   "counts": {
-    "verified": 158,
+    "verified": 159,
     "carry": 1,
-    "partial": 19,
+    "partial": 18,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -18,7 +18,7 @@
     {
       "name": "Datapath",
       "weight": 28,
-      "points": 22,
+      "points": 23,
       "items": [
         {
           "id": 1,
@@ -310,15 +310,15 @@
           "key": "D19",
           "name": "Route mark/socket route selection",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Datapath",
-          "coverage": "`test-router-route-gate-config.sh` (a63) - только service args",
-          "gap": "Runtime SO_MARK/route selection не проверен",
-          "mapping": "`test-router-route-gate-config.sh` (a63) - только service args",
-          "evidence": "`test-router-route-gate-config.sh` (a63) - только service args · пробел: Runtime SO_MARK/route selection не проверен"
+          "coverage": "`r2o-route-gate-differential.sh` (a378): C `test_routemark`/`test_session`, Rust `r2o_route` 12 tests, runtime UDP route flow, CLI hex marks; `test-router-route-gate-config.sh`",
+          "gap": "Маршруты/fwmark/маски/семейства и runtime-пропуск потока совпали; live kernel route changes в одном прогоне не покрыты",
+          "mapping": "`r2o-route-gate-differential.sh` (a378): C `test_routemark`/`test_session`, Rust `r2o_route` 12 tests, runtime UDP route flow, CLI hex marks; `test-router-route-gate-config.sh`",
+          "evidence": "`r2o-route-gate-differential.sh` (a378): C `test_routemark`/`test_session`, Rust `r2o_route` 12 tests, runtime UDP route flow, CLI hex marks; `test-router-route-gate-config.sh` · пробел: Маршруты/fwmark/маски/семейства и runtime-пропуск потока совпали; live kernel route changes в одном прогоне не покрыты"
         },
         {
           "id": 21,
@@ -3062,15 +3062,15 @@
       "key": "D19",
       "name": "Route mark/socket route selection",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Datapath",
-      "coverage": "`test-router-route-gate-config.sh` (a63) - только service args",
-      "gap": "Runtime SO_MARK/route selection не проверен",
-      "mapping": "`test-router-route-gate-config.sh` (a63) - только service args",
-      "evidence": "`test-router-route-gate-config.sh` (a63) - только service args · пробел: Runtime SO_MARK/route selection не проверен"
+      "coverage": "`r2o-route-gate-differential.sh` (a378): C `test_routemark`/`test_session`, Rust `r2o_route` 12 tests, runtime UDP route flow, CLI hex marks; `test-router-route-gate-config.sh`",
+      "gap": "Маршруты/fwmark/маски/семейства и runtime-пропуск потока совпали; live kernel route changes в одном прогоне не покрыты",
+      "mapping": "`r2o-route-gate-differential.sh` (a378): C `test_routemark`/`test_session`, Rust `r2o_route` 12 tests, runtime UDP route flow, CLI hex marks; `test-router-route-gate-config.sh`",
+      "evidence": "`r2o-route-gate-differential.sh` (a378): C `test_routemark`/`test_session`, Rust `r2o_route` 12 tests, runtime UDP route flow, CLI hex marks; `test-router-route-gate-config.sh` · пробел: Маршруты/fwmark/маски/семейства и runtime-пропуск потока совпали; live kernel route changes в одном прогоне не покрыты"
     },
     {
       "id": 21,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 234,
-      "weight": 271,
-      "percent": 86.35
-    },
-    "carry_forward": {
       "points": 235,
       "weight": 271,
-      "percent": 86.72,
+      "percent": 86.72
+    },
+    "carry_forward": {
+      "points": 236,
+      "weight": 271,
+      "percent": 87.08,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

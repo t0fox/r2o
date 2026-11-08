@@ -4,11 +4,11 @@
 
 **Важно.** Таблица ниже — legacy-агрегат из 57 строк: 89 баллов веса, **80/89 (89,89 %)**. Это не оценка текущей ревизии. Аудит 2026-11-07 показал, что 49 из 80 баллов опираются на дифференциалы, закреплённые на `304ba893`, а несколько широких строк объединяют независимые контракты. После нормализации 2026-11-08 единая scored-матрица содержит **179 контрактов на 271 балл**: Panel A1–A26, Router B1–B54 (без B32/B45/B54), Telegram TG1–TG26 (без C2/C25/C26); coarse-строки `P*`, `F*`, `L*`, `T*` и `S7`/`S8` удалены как дубли:
 
-- строгий режим (только `a63d964`/`a378e23`/`8e2c981`, без helper/mock/build): **234/271 = 86,35 %**;
-- carry с явно помеченными `304ba893` (verified + оставшиеся 304, без двойного счёта): **235/271 = 86,72 %**;
+- строгий режим (только `a63d964`/`a378e23`/`8e2c981`, без helper/mock/build): **235/271 = 86,72 %**;
+- carry с явно помеченными `304ba893` (verified + оставшиеся 304, без двойного счёта): **236/271 = 87,08 %**;
 - legacy-агрегат: **80/89 = 89,89 %** (другой знаменатель, не сопоставим).
 
-Рост строгого счёта с 25,69 % до 86,35 % — не новые доказательства и не регресс: 84 детальных Router-контракта (70 strict) заменили 30 coarse-баллов `F*`/`L*`/`T*`/`P*` (18 strict), а 71 балл Panel/Telegram добавлен с нулём; ещё 2 балла дали доказанные M7a/M7b, 8 — B9/B52/B53/B42/B40, 3 — A26/A21/A8, 1 — TG20, 2 — D20, 2 — D23, 1 — D22, 2 — S12, 2 — S13, 2 — S14, 2 — S15, 1 — S11, 1 — A3, 1 — A25, 1 — B8, 2 — B46, 2 — TG22, 1 — A10, 1 — A6, 1 — A9, 1 — A19, 2 — A15, 1 — A13, 1 — A5, 2 — TG6, 2 — TG5, 2 — TG3, 2 — TG4, 1 — TG21, 2 — TG10, 1 — TG11, 2 — TG17, 2 — TG16, 2 — TG13, 1 — TG7, 2 — TG15, 2 — TG19, 1 — TG8, 1 — CL12, 1 — CL13, 1 — B6, 1 — B1, 2 — B48, 1 — CL14, 3 — B10, 1 — D21, 1 — D6, 1 — D18, 1 — D17, 2 — CL15, 1 — CL16, 1 — D7, 1 — D8, 12 — A1/A4/A7/A11/A12/A16/A17/A18/A22/A24, 10 — S1–S4, 5 — S5/S6, 16 — CL1–CL10, 4 — Q1/Q3/Q6, 8 — R1–R5, 1 — A23, 2 — A14, 1 — A2, 1 — A20 и 1 — Q5. Знаменатели 144 и 271 несопоставимы напрямую.
+Рост строгого счёта с 25,69 % до 86,72 % — не новые доказательства и не регресс: 84 детальных Router-контракта (70 strict) заменили 30 coarse-баллов `F*`/`L*`/`T*`/`P*` (18 strict), а 71 балл Panel/Telegram добавлен с нулём; ещё 2 балла дали доказанные M7a/M7b, 8 — B9/B52/B53/B42/B40, 3 — A26/A21/A8, 1 — TG20, 2 — D20, 2 — D23, 1 — D22, 2 — S12, 2 — S13, 2 — S14, 2 — S15, 1 — S11, 1 — A3, 1 — A25, 1 — B8, 2 — B46, 2 — TG22, 1 — A10, 1 — A6, 1 — A9, 1 — A19, 2 — A15, 1 — A13, 1 — A5, 2 — TG6, 2 — TG5, 2 — TG3, 2 — TG4, 1 — TG21, 2 — TG10, 1 — TG11, 2 — TG17, 2 — TG16, 2 — TG13, 1 — TG7, 2 — TG15, 2 — TG19, 1 — TG8, 1 — CL12, 1 — CL13, 1 — B6, 1 — B1, 2 — B48, 1 — CL14, 3 — B10, 1 — D21, 1 — D6, 1 — D18, 1 — D17, 2 — CL15, 1 — CL16, 1 — D7, 1 — D8, 12 — A1/A4/A7/A11/A12/A16/A17/A18/A22/A24, 10 — S1–S4, 5 — S5/S6, 16 — CL1–CL10, 4 — Q1/Q3/Q6, 8 — R1–R5, 1 — A23, 2 — A14, 1 — A2, 1 — A20, 1 — Q5 и 1 — D19. Знаменатели 144 и 271 несопоставимы напрямую.
 
 Нормализация также установила, что `a63d964` и `304ba893` отсутствуют в локальном git-объекте D2O; доказательства, закреплённые на них, в этом окружении не воспроизводятся. Детали — `docs/audit/validation-2026-11-08.md`.
 
@@ -105,11 +105,11 @@ Scope boundary: the 89-point legacy table scores the router runtime. D2O relay-e
 
 Матрица содержит 57 контрактов: 50 доказанно эквивалентных, 6 частичных, 1 реализованный без полного parity evidence и 0 непроверенных. Частичные и неподтверждённые статусы дают 0 баллов.
 
-Legacy-агрегат: **80/89 = 89,89 %**. Строгая оценка текущей ревизии после нормализации: **234/271 = 86,35 %** (см. раздел «Нормализованная матрица покрытия»).
+Legacy-агрегат: **80/89 = 89,89 %**. Строгая оценка текущей ревизии после нормализации: **235/271 = 86,72 %** (см. раздел «Нормализованная матрица покрытия»).
 
 Историческая корректировка от 2026-11-01: `core/verify.c:d2k_verify_probe*` сопоставлен с R2O `fetch.rs`; обратный TLS 1.2 зонд сопоставлен с D2O `detect/response.c:d2k_probe_response` и R2O `response.rs`. На этом промежуточном срезе общие fixtures подтверждали сканер и решения, но не весь сетевой retry/address-resolution путь; оценка временно снижалась до 55/87. Последующие доказанные изменения отражены в таблице выше. Профиль RAM 128 МиБ исключён из требований по указанию владельца; это не является заявлением о производительности.
 
-**Legacy evidence-weighted parity: 80 / 89 = 89,89 %.** Это доля требований старой агрегированной таблицы с подтверждением перечисленных C/Rust ветвей. Она не равна строгой оценке текущей ревизии (234/271 = 86,35 %): 49 из 80 баллов опираются на `304ba893`, а широкие строки объединяют независимые контракты.
+**Legacy evidence-weighted parity: 80 / 89 = 89,89 %.** Это доля требований старой агрегированной таблицы с подтверждением перечисленных C/Rust ветвей. Она не равна строгой оценке текущей ревизии (235/271 = 86,72 %): 49 из 80 баллов опираются на `304ba893`, а широкие строки объединяют независимые контракты.
 
 Дополнительное доказательство datapath (2026-11-03): `scripts/test-conntrack-retry-current-differential.sh` запустил production `d2kd` из D2O main `a63d964` и production `r2o-datapath` на R2O main `67a191f` с изменением retry из этого follow-up. В изолированном network namespace shim отклонил только второй `NETLINK_NETFILTER` socket (ctnetlink после NFQUEUE); после изменения `ip rule` оба процесса открыли ctnetlink повторно и сообщили о восстановлении на route/rules refresh. Прогон Debian 13 WSL2 прошёл. Это доказывает ветвь восстановления conntrack; IPv6 NFQUEUE C-oracle и остальные ветви строки остаются открыты, поэтому статус и баллы этого контракта не меняются.
 
@@ -463,7 +463,7 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | `extension` | Намеренное R2O-only поведение, не паритет | 0 |
 | `out-of-scope` | VPS/relay, N/A или дубль router-side-контракта | 0 |
 
-**Итог:** 179 контрактов, вес 271. Строгий счёт — **234/271 = 86.35 %**. Carry с явно помеченными `304` — **235/271 = 86.72 %**. Исторический coarse carry-forward `89/144 = 61,81 %` относится к прежней матрице и не сопоставим напрямую.
+**Итог:** 179 контрактов, вес 271. Строгий счёт — **235/271 = 86.72 %**. Carry с явно помеченными `304` — **236/271 = 87.08 %**. Исторический coarse carry-forward `89/144 = 61,81 %` относится к прежней матрице и не сопоставим напрямую.
 
 ### Сводка по областям
 
@@ -504,7 +504,7 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | D16 | Raw IPv6 emission shapes/UDP delivery (1) | verified | 1 | `test-raw6-send-differential.sh` (a63) | Route mark/MTU on live router |
 | D17 | HTTP/80 replacement + hold (1) | verified | 1 | `test-datapath-http80-differential.sh` (a378), D6 hold diff, CL14 redirect | 6 paired кейсов: no-https PASS, https REPLACE, slow/duplicate PASS, post-server DROP, post-client PASS; hold — D6, 307 — CL14 |
 | D18 | Capture/TLS/wire/addr helpers (1) | verified | 1 | `test-datapath-addr-differential.sh` (a378), CL12 TLS diff, D6 capture diff, D3/D11 wire diffs, C tests | 34 paired addr-кейса; TLS/capture/wire покрыты соответствующими paired-дифференциалами; scoped, без новых live-сценариев |
-| D19 | Route mark/socket route selection (1) | partial | 0 | `test-router-route-gate-config.sh` (a63) - только service args | Runtime SO_MARK/route selection не проверен |
+| D19 | Route mark/socket route selection (1) | verified | 1 | `r2o-route-gate-differential.sh` (a378): C `test_routemark`/`test_session`, Rust `r2o_route` 12 tests, runtime UDP route flow, CLI hex marks; `test-router-route-gate-config.sh` | Маршруты/fwmark/маски/семейства и runtime-пропуск потока совпали; live kernel route changes в одном прогоне не покрыты |
 | D20 | TCP timestamp shape contexts 8-13 (`d2k_link_shape_tcp_*`) (2) | verified | 2 | `scripts/test-tcp-shape-context-differential.sh` (a378); Rust `tcp_shape_context_tests`; `r2o_plan_wire_shape` + `measured_plan_accepts_and_persists_context_shape`; datapath exact-context | Контроллер ставит контекст 8-13 для trial и постоянных привязок; base fallback оставлен только для старых R2O-планов |
 | D21 | Datapath scheduler: due ordering, refusals, owned IDs (1) | verified | 1 | `test-datapath-scheduler-differential.sh` (a378) | 51 paired кейс: стабильный порядок равных сроков, refusals capacity/slot, grow_slot_size, owned-ID и oversized-выдача; cancel/reservation — R2O-only расширение |
 | D22 | Journal: ring/retention/dropped/added/format (1) | verified | 1 | `scripts/test-journal-c-parity-differential.sh` (a378); C `datapath/journal.c`; Rust `flow_journal` | Ring/retention/order/name sanitization/note-тексты и поля plan/trial/execution/binding совпадают; R2O-only виды сохраняют свои имена |
