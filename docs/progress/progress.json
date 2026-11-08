@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 128,
-  "percent": 47.23,
+  "points": 129,
+  "percent": 47.6,
   "total": 179,
   "counts": {
-    "verified": 90,
+    "verified": 91,
     "carry": 40,
-    "partial": 48,
+    "partial": 47,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1095,7 +1095,7 @@
     {
       "name": "Telegram",
       "weight": 41,
-      "points": 11,
+      "points": 12,
       "items": [
         {
           "id": 157,
@@ -1387,15 +1387,15 @@
           "key": "TG21",
           "name": "Response observer",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Telegram",
-          "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "gap": "",
-          "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+          "coverage": "`scripts/r2o-telegram-response-observer-differential.sh` (a378); C `observe_mtproto_response`; Rust `MtprotoResponseObserver`",
+          "gap": "13 векторов abridged/intermediate/padded, split, ACK, plain и ошибки совпадают",
+          "mapping": "`scripts/r2o-telegram-response-observer-differential.sh` (a378); C `observe_mtproto_response`; Rust `MtprotoResponseObserver`",
+          "evidence": "`scripts/r2o-telegram-response-observer-differential.sh` (a378); C `observe_mtproto_response`; Rust `MtprotoResponseObserver` · пробел: 13 векторов abridged/intermediate/padded, split, ACK, plain и ошибки совпадают"
         },
         {
           "id": 177,
@@ -5402,15 +5402,15 @@
       "key": "TG21",
       "name": "Response observer",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Telegram",
-      "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "gap": "",
-      "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+      "coverage": "`scripts/r2o-telegram-response-observer-differential.sh` (a378); C `observe_mtproto_response`; Rust `MtprotoResponseObserver`",
+      "gap": "13 векторов abridged/intermediate/padded, split, ACK, plain и ошибки совпадают",
+      "mapping": "`scripts/r2o-telegram-response-observer-differential.sh` (a378); C `observe_mtproto_response`; Rust `MtprotoResponseObserver`",
+      "evidence": "`scripts/r2o-telegram-response-observer-differential.sh` (a378); C `observe_mtproto_response`; Rust `MtprotoResponseObserver` · пробел: 13 векторов abridged/intermediate/padded, split, ACK, plain и ошибки совпадают"
     },
     {
       "id": 177,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 128,
+      "points": 129,
       "weight": 271,
-      "percent": 47.23
+      "percent": 47.6
     },
     "carry_forward": {
-      "points": 191,
+      "points": 192,
       "weight": 271,
-      "percent": 70.48,
+      "percent": 70.85,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

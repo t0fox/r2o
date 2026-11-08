@@ -10,17 +10,17 @@
   {
     "sha": "carry-304-normalized",
     "date": "2026-11-08",
-    "points": 191,
+    "points": 192,
     "weight": 271,
-    "percent": 70.48,
+    "percent": 70.85,
     "label": "carry (только явно помеченные 304)"
   },
   {
     "sha": "strict-normalized",
     "date": "2026-11-08",
-    "points": 128,
+    "points": 129,
     "weight": 271,
-    "percent": 47.23,
+    "percent": 47.6,
     "label": "строгий текущий (нормализованный)"
   }
 ]
