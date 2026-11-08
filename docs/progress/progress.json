@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 150,
-  "percent": 55.35,
+  "points": 152,
+  "percent": 56.09,
   "total": 179,
   "counts": {
-    "verified": 103,
+    "verified": 104,
     "carry": 40,
-    "partial": 35,
+    "partial": 34,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1095,7 +1095,7 @@
     {
       "name": "Telegram",
       "weight": 41,
-      "points": 33,
+      "points": 35,
       "items": [
         {
           "id": 157,
@@ -1417,15 +1417,15 @@
           "key": "TG23",
           "name": "Diagnostics `--check`",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Telegram",
-          "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "gap": "",
-          "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+          "coverage": "`scripts/test-telegram-diagnostics-differential.sh` (z2kOW 42c8111); donor `diagnostics.rs` + JSON probe",
+          "gap": "Реализация совпадает с донором кроме ca_bundle; JSON-схема, healthy/partial/unverified/blocked, ошибки и `--check` config совпадают; donor-тесты PASS",
+          "mapping": "`scripts/test-telegram-diagnostics-differential.sh` (z2kOW 42c8111); donor `diagnostics.rs` + JSON probe",
+          "evidence": "`scripts/test-telegram-diagnostics-differential.sh` (z2kOW 42c8111); donor `diagnostics.rs` + JSON probe · пробел: Реализация совпадает с донором кроме ca_bundle; JSON-схема, healthy/partial/unverified/blocked, ошибки и `--check` config совпадают; donor-тесты PASS"
         },
         {
           "id": 179,
@@ -5432,15 +5432,15 @@
       "key": "TG23",
       "name": "Diagnostics `--check`",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Telegram",
-      "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "gap": "",
-      "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+      "coverage": "`scripts/test-telegram-diagnostics-differential.sh` (z2kOW 42c8111); donor `diagnostics.rs` + JSON probe",
+      "gap": "Реализация совпадает с донором кроме ca_bundle; JSON-схема, healthy/partial/unverified/blocked, ошибки и `--check` config совпадают; donor-тесты PASS",
+      "mapping": "`scripts/test-telegram-diagnostics-differential.sh` (z2kOW 42c8111); donor `diagnostics.rs` + JSON probe",
+      "evidence": "`scripts/test-telegram-diagnostics-differential.sh` (z2kOW 42c8111); donor `diagnostics.rs` + JSON probe · пробел: Реализация совпадает с донором кроме ca_bundle; JSON-схема, healthy/partial/unverified/blocked, ошибки и `--check` config совпадают; donor-тесты PASS"
     },
     {
       "id": 179,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 150,
+      "points": 152,
       "weight": 271,
-      "percent": 55.35
+      "percent": 56.09
     },
     "carry_forward": {
-      "points": 213,
+      "points": 215,
       "weight": 271,
-      "percent": 78.6,
+      "percent": 79.34,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
