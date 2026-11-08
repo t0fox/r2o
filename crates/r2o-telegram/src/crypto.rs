@@ -75,20 +75,44 @@ pub struct HandshakeInfo {
     pub prekey_and_iv: [u8; PREKEY_LEN + IV_LEN],
 }
 
+/// Префиксы, которые Telegram/HTTP/TLS уже заняли: такой поток не может быть
+/// obfuscated2. C `reserved_handshake_prefix`.
+fn reserved_handshake_prefix(packet: &[u8; HANDSHAKE_LEN]) -> bool {
+    if packet[0] == 0xef || packet[4..8] == [0, 0, 0, 0] {
+        return true;
+    }
+    matches!(
+        &packet[..4],
+        b"HEAD"
+            | b"POST"
+            | b"GET "
+            | [0xee, 0xee, 0xee, 0xee]
+            | [0xdd, 0xdd, 0xdd, 0xdd]
+            | [0x16, 0x03, 0x01, 0x02]
+    )
+}
+
 /// Разобрать рукопожатие обфускации MTProto длиной 64 байта.
 ///
 /// Возвращает `None`, если метка протокола не распознана
 /// (неверный секрет, повреждённые данные или прямая проверка соединения).
 pub fn parse_handshake(handshake: &[u8; HANDSHAKE_LEN], secret: &[u8]) -> Option<HandshakeInfo> {
+    if reserved_handshake_prefix(handshake) {
+        return None;
+    }
     let prekey = &handshake[SKIP_LEN..SKIP_LEN + PREKEY_LEN];
     let iv = &handshake[SKIP_LEN + PREKEY_LEN..SKIP_LEN + PREKEY_LEN + IV_LEN];
 
-    // Ключ = SHA-256(prekey ∥ secret).
-    let key = {
+    // Прямой obfuscated2 (без proxy-secret) использует prekey как ключ;
+    // секретный режим — SHA-256(prekey ∥ secret). Это расхождение было
+    // обнаружено C/Rust differential-тестом TG5.
+    let key: [u8; 32] = if secret.is_empty() {
+        prekey.try_into().expect("prekey имеет длину 32")
+    } else {
         let mut h = Sha256::new();
         h.update(prekey);
         h.update(secret);
-        h.finalize()
+        h.finalize().into()
     };
 
     // Расшифровать всё рукопожатие, чтобы получить proto_tag и dc_idx.
