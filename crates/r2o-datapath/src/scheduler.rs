@@ -32,11 +32,35 @@ struct FlowState {
     fin_mask: u8,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScheduledOwner {
+    /// Посылка плана, привязанная к потоку (production-путь).
+    Flow(FlowTicket),
+    /// Отложенный UDP-хвост, владеющий NFQUEUE-ID до выдачи.
+    Owned(u32),
+    /// Лабораторная посылка без потока (paired differential).
+    Raw,
+}
+
 struct ScheduledPacket {
     due: Instant,
     order: u64,
-    ticket: FlowTicket,
+    owner: ScheduledOwner,
     packet: WirePacket,
+}
+
+/// Исход `pop_due_ex`; повторяет коды C `d2k_sched_pop_due_ex`.
+pub enum ScheduledPop {
+    Emitted {
+        packet: WirePacket,
+        owner: ScheduledOwner,
+    },
+    /// Владеющая посылка не влезла в буфер: ID возвращается вызывающему.
+    OversizedOwned { owner_id: u32 },
+    /// Обычная посылка не влезла и выброшена (C возвращает 0).
+    Dropped,
+    /// Созревших нет.
+    Empty,
 }
 
 struct Reservation {
@@ -46,6 +70,7 @@ struct Reservation {
 
 pub struct ScheduledQueue {
     capacity: usize,
+    slot_size: usize,
     entries: Vec<ScheduledPacket>,
     flows: HashMap<FlowKey, FlowState>,
     reservations: HashMap<u64, Reservation>,
@@ -57,14 +82,20 @@ pub struct ScheduledQueue {
 
 impl ScheduledQueue {
     pub fn with_capacity(capacity: usize) -> io::Result<Self> {
-        if capacity == 0 {
+        Self::with_limits(capacity, 65536)
+    }
+
+    /// Вместимость и предельный размер посылки — как `d2k_sched_new`.
+    pub fn with_limits(capacity: usize, slot_size: usize) -> io::Result<Self> {
+        if capacity == 0 || slot_size == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "scheduler должен иметь ненулевую вместимость",
+                "scheduler должен иметь ненулевую вместимость и слот",
             ));
         }
         Ok(Self {
             capacity,
+            slot_size,
             entries: Vec::new(),
             flows: HashMap::new(),
             reservations: HashMap::new(),
@@ -167,11 +198,105 @@ impl ScheduledQueue {
             ScheduledPacket {
                 due,
                 order,
-                ticket,
+                owner: ScheduledOwner::Flow(ticket),
                 packet,
             },
         );
         Ok(())
+    }
+
+    /// Лабораторная посылка без потока: сравнивает ядро очереди с C.
+    pub fn push_raw(&mut self, due: Instant, packet: WirePacket) -> Result<(), WirePacket> {
+        self.push_owner(due, packet, ScheduledOwner::Raw)
+    }
+
+    /// Отложенный UDP-хвост, владеющий NFQUEUE-ID до выдачи.
+    pub fn push_owned(
+        &mut self,
+        due: Instant,
+        packet: WirePacket,
+        owner_id: u32,
+    ) -> Result<(), WirePacket> {
+        self.push_owner(due, packet, ScheduledOwner::Owned(owner_id))
+    }
+
+    fn push_owner(
+        &mut self,
+        due: Instant,
+        packet: WirePacket,
+        owner: ScheduledOwner,
+    ) -> Result<(), WirePacket> {
+        // C `push`: пустая посылка — -2 без счётчика; слишком длинная и
+        // переполнение — -2/-1 со счётчиком отказов.
+        if packet.packet.is_empty() {
+            return Err(packet);
+        }
+        if packet.packet.len() > self.slot_size {
+            self.refusals = self.refusals.saturating_add(1);
+            return Err(packet);
+        }
+        if self.entries.len() >= self.capacity {
+            self.refusals = self.refusals.saturating_add(1);
+            return Err(packet);
+        }
+        let order = self.next_order;
+        self.next_order = self.next_order.wrapping_add(1);
+        let index = self
+            .entries
+            .partition_point(|entry| (entry.due, entry.order) <= (due, order));
+        self.entries.insert(
+            index,
+            ScheduledPacket {
+                due,
+                order,
+                owner,
+                packet,
+            },
+        );
+        Ok(())
+    }
+
+    /// Увеличить предельный размер слота; коды как `d2k_sched_grow_slot_size`.
+    pub fn grow_slot_size(&mut self, slot_size: usize) -> i32 {
+        if slot_size == 0 {
+            return -1;
+        }
+        if slot_size <= self.slot_size {
+            return 0;
+        }
+        if self.capacity > usize::MAX / slot_size {
+            return -1;
+        }
+        self.slot_size = slot_size;
+        1
+    }
+
+    /// Забрать созревшую посылку с C-семантикой `d2k_sched_pop_due_ex`.
+    pub fn pop_due_ex(&mut self, now: Instant, outcap: usize) -> ScheduledPop {
+        self.expire(now);
+        let Some(entry) = self.entries.first() else {
+            return ScheduledPop::Empty;
+        };
+        if entry.due > now {
+            return ScheduledPop::Empty;
+        }
+        if entry.packet.packet.len() > outcap {
+            self.refusals = self.refusals.saturating_add(1);
+            let removed = self.entries.remove(0);
+            return match removed.owner {
+                ScheduledOwner::Owned(owner_id) => ScheduledPop::OversizedOwned { owner_id },
+                _ => ScheduledPop::Dropped,
+            };
+        }
+        let removed = self.entries.remove(0);
+        ScheduledPop::Emitted {
+            packet: removed.packet,
+            owner: removed.owner,
+        }
+    }
+
+    pub fn next_due(&self) -> Option<Instant> {
+        self.entries.first().map(|entry| entry.due)
     }
 
     pub fn observe(&mut self, packet: &[u8], now: Instant) {
@@ -203,18 +328,25 @@ impl ScheduledQueue {
 
     pub fn pop_due(&mut self, now: Instant) -> Option<(WirePacket, FlowTicket)> {
         self.expire(now);
-        if self.entries.first().is_none_or(|entry| entry.due > now) {
+        let entry = self.entries.first()?;
+        if entry.due > now || !matches!(entry.owner, ScheduledOwner::Flow(_)) {
             return None;
         }
         let scheduled = self.entries.remove(0);
-        Some((scheduled.packet, scheduled.ticket))
+        match scheduled.owner {
+            ScheduledOwner::Flow(ticket) => Some((scheduled.packet, ticket)),
+            _ => None,
+        }
     }
 
     pub fn has_pending(&self, ticket: FlowTicket) -> bool {
         self.reservations
             .get(&ticket.batch)
             .is_some_and(|reservation| reservation.ticket == ticket)
-            || self.entries.iter().any(|entry| entry.ticket == ticket)
+            || self
+                .entries
+                .iter()
+                .any(|entry| matches!(entry.owner, ScheduledOwner::Flow(owner) if owner == ticket))
     }
 
     pub fn timeout_ms(&self, now: Instant, max_ms: i32) -> i32 {
@@ -230,8 +362,9 @@ impl ScheduledQueue {
     }
 
     pub fn cancel(&mut self, ticket: FlowTicket) {
-        self.entries
-            .retain(|entry| entry.ticket.batch != ticket.batch);
+        self.entries.retain(|entry| {
+            !matches!(entry.owner, ScheduledOwner::Flow(owner) if owner.batch == ticket.batch)
+        });
         if let Some(reservation) = self.reservations.remove(&ticket.batch) {
             self.reserved_packets -= reservation.remaining;
         }
@@ -250,7 +383,9 @@ impl ScheduledQueue {
     }
 
     fn cancel_flow(&mut self, key: FlowKey) {
-        self.entries.retain(|entry| entry.ticket.key != key);
+        self.entries.retain(
+            |entry| !matches!(entry.owner, ScheduledOwner::Flow(owner) if owner.key == key),
+        );
         let mut released = 0;
         self.reservations.retain(|_, reservation| {
             if reservation.ticket.key == key {
@@ -265,8 +400,10 @@ impl ScheduledQueue {
     }
 
     fn cancel_direction(&mut self, key: FlowKey, direction: u8) {
-        self.entries
-            .retain(|entry| entry.ticket.key != key || entry.ticket.direction != direction);
+        self.entries.retain(|entry| {
+            !matches!(entry.owner, ScheduledOwner::Flow(owner)
+                if owner.key == key && owner.direction == direction)
+        });
         let mut released = 0;
         self.reservations.retain(|_, reservation| {
             if reservation.ticket.key == key && reservation.ticket.direction == direction {
@@ -283,8 +420,10 @@ impl ScheduledQueue {
         self.flows
             .retain(|_, flow| now.saturating_duration_since(flow.last_seen) < MAX_FLOW_IDLE);
         let flows = &self.flows;
-        self.entries
-            .retain(|entry| flows.contains_key(&entry.ticket.key));
+        self.entries.retain(|entry| match entry.owner {
+            ScheduledOwner::Flow(owner) => flows.contains_key(&owner.key),
+            _ => true,
+        });
         let mut released = 0;
         self.reservations.retain(|_, reservation| {
             if flows.contains_key(&reservation.ticket.key) {

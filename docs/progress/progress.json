@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 164,
-  "percent": 60.52,
+  "points": 165,
+  "percent": 60.89,
   "total": 179,
   "counts": {
-    "verified": 112,
+    "verified": 113,
     "carry": 40,
-    "partial": 26,
+    "partial": 25,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -18,7 +18,7 @@
     {
       "name": "Datapath",
       "weight": 28,
-      "points": 16,
+      "points": 17,
       "items": [
         {
           "id": 1,
@@ -340,15 +340,15 @@
           "key": "D21",
           "name": "Datapath scheduler: due ordering, refusals, owned IDs",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Datapath",
-          "coverage": "`scheduler.rs`",
-          "gap": "нет paired differential; cancel/reservation — R2O-only расширение",
-          "mapping": "`scheduler.rs`",
-          "evidence": "`scheduler.rs` · пробел: нет paired differential; cancel/reservation — R2O-only расширение"
+          "coverage": "`test-datapath-scheduler-differential.sh` (a378)",
+          "gap": "51 paired кейс: стабильный порядок равных сроков, refusals capacity/slot, grow_slot_size, owned-ID и oversized-выдача; cancel/reservation — R2O-only расширение",
+          "mapping": "`test-datapath-scheduler-differential.sh` (a378)",
+          "evidence": "`test-datapath-scheduler-differential.sh` (a378) · пробел: 51 paired кейс: стабильный порядок равных сроков, refusals capacity/slot, grow_slot_size, owned-ID и oversized-выдача; cancel/reservation — R2O-only расширение"
         },
         {
           "id": 23,
@@ -3092,15 +3092,15 @@
       "key": "D21",
       "name": "Datapath scheduler: due ordering, refusals, owned IDs",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Datapath",
-      "coverage": "`scheduler.rs`",
-      "gap": "нет paired differential; cancel/reservation — R2O-only расширение",
-      "mapping": "`scheduler.rs`",
-      "evidence": "`scheduler.rs` · пробел: нет paired differential; cancel/reservation — R2O-only расширение"
+      "coverage": "`test-datapath-scheduler-differential.sh` (a378)",
+      "gap": "51 paired кейс: стабильный порядок равных сроков, refusals capacity/slot, grow_slot_size, owned-ID и oversized-выдача; cancel/reservation — R2O-only расширение",
+      "mapping": "`test-datapath-scheduler-differential.sh` (a378)",
+      "evidence": "`test-datapath-scheduler-differential.sh` (a378) · пробел: 51 paired кейс: стабильный порядок равных сроков, refusals capacity/slot, grow_slot_size, owned-ID и oversized-выдача; cancel/reservation — R2O-only расширение"
     },
     {
       "id": 23,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 164,
+      "points": 165,
       "weight": 271,
-      "percent": 60.52
+      "percent": 60.89
     },
     "carry_forward": {
-      "points": 227,
+      "points": 228,
       "weight": 271,
-      "percent": 83.76,
+      "percent": 84.13,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

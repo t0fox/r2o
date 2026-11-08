@@ -1,15 +1,15 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 60.52%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 60.89%">
 <rect width="1100" height="790" rx="20" fill="#0c121e"/>
 <text x="36" y="48" fill="#edf7ff" font-family="Arial,sans-serif" font-size="29" font-weight="700">R2O / D2O · Strict parity</text>
-<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">60.52%</text>
-<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">164 / 271 verified points</text>
+<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">60.89%</text>
+<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">165 / 271 verified points</text>
 <rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/>
-<rect x="37" y="113" width="619.7" height="11" rx="5" fill="#36c989"/>
-<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 112 verified · 0 missing · 2026-11-08</text>
-<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 227/271 = 83.76% · strict 164/271 = 60.52%</text>
+<rect x="37" y="113" width="623.5" height="11" rx="5" fill="#36c989"/>
+<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 113 verified · 0 missing · 2026-11-08</text>
+<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 228/271 = 84.13% · strict 165/271 = 60.89%</text>
 <rect x="37" y="190" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="213" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Datapath</text>
-<text x="533" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">16/28</text>
+<text x="533" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">17/28</text>
 <rect x="51" y="223" width="30" height="22" rx="5" fill="#36c989"><title>D1a NFQUEUE receive/verdict/truncation: доказано (1/1)</title></rect>
 <rect x="89" y="223" width="30" height="22" rx="5" fill="#e6b45d"><title>D1b NFQUEUE rcvbuf/poll/recv error policy: частично (0/1)</title></rect>
 <rect x="127" y="223" width="30" height="22" rx="5" fill="#e6b45d"><title>D2 IPv6 live NFQUEUE gateway FORWARD, fragments, route mark, fail-open: частично (0/3)</title></rect>
@@ -31,7 +31,7 @@
 <rect x="279" y="250" width="30" height="22" rx="5" fill="#e6b45d"><title>D18 Capture/TLS/wire/addr helpers: частично (0/1)</title></rect>
 <rect x="317" y="250" width="30" height="22" rx="5" fill="#e6b45d"><title>D19 Route mark/socket route selection: частично (0/1)</title></rect>
 <rect x="355" y="250" width="30" height="22" rx="5" fill="#36c989"><title>D20 TCP timestamp shape contexts 8-13 (`d2k_link_shape_tcp_*`): доказано (2/2)</title></rect>
-<rect x="393" y="250" width="30" height="22" rx="5" fill="#e6b45d"><title>D21 Datapath scheduler: due ordering, refusals, owned IDs: частично (0/1)</title></rect>
+<rect x="393" y="250" width="30" height="22" rx="5" fill="#36c989"><title>D21 Datapath scheduler: due ordering, refusals, owned IDs: доказано (1/1)</title></rect>
 <rect x="431" y="250" width="30" height="22" rx="5" fill="#36c989"><title>D22 Journal: ring/retention/dropped/added/format: доказано (1/1)</title></rect>
 <rect x="469" y="250" width="30" height="22" rx="5" fill="#36c989"><title>D23 Plan table capacity/LRU: доказано (2/2)</title></rect>
 <rect x="557" y="190" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
