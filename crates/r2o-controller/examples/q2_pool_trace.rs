@@ -1,8 +1,6 @@
 //! Q2: Rust trace address pool / next-question.
 
-use r2o_controller::quic_replay::{
-    r2o_quic_address_pool, r2o_quic_next_question_address,
-};
+use r2o_controller::quic_replay::{r2o_quic_address_pool, r2o_quic_next_question_address};
 use std::net::SocketAddr;
 
 fn extras() -> Vec<SocketAddr> {

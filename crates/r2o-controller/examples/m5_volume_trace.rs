@@ -33,7 +33,10 @@ fn wire() -> R2oVolumeObservation {
 }
 
 fn print_partial(name: &str, value: &R2oVolumeObservation) {
-    println!("case {name}\nvalue={}", u8::from(r2o_volume_rx_partial(value)));
+    println!(
+        "case {name}\nvalue={}",
+        u8::from(r2o_volume_rx_partial(value))
+    );
 }
 
 fn main() {

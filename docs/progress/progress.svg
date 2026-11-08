@@ -1,12 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 97.42%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 100.00%">
 <rect width="1100" height="790" rx="20" fill="#0c121e"/>
 <text x="36" y="48" fill="#edf7ff" font-family="Arial,sans-serif" font-size="29" font-weight="700">R2O / D2O · Strict parity</text>
-<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">97.42%</text>
-<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">264 / 271 verified points</text>
+<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">100.00%</text>
+<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">271 / 271 verified points</text>
 <rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/>
-<rect x="37" y="113" width="997.5" height="11" rx="5" fill="#36c989"/>
-<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 174 verified · 0 missing · 2026-11-08</text>
-<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 264/271 = 97.42% · strict 264/271 = 97.42%</text>
+<rect x="37" y="113" width="1024.0" height="11" rx="5" fill="#36c989"/>
+<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 178 verified · 0 missing · 2026-11-08</text>
+<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 271/271 = 100.00% · strict 271/271 = 100.00%</text>
 <rect x="37" y="190" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="213" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Datapath</text>
 <text x="533" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">28/28</text>
@@ -55,15 +55,15 @@
 <rect x="685" y="250" width="30" height="22" rx="5" fill="#36c989"><title>CL16 Detect/classifier CLI output/exit/JSON: доказано (1/1)</title></rect>
 <rect x="37" y="302" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="325" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Discovery</text>
-<text x="533" y="325" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">24/27</text>
+<text x="533" y="325" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">27/27</text>
 <rect x="51" y="335" width="30" height="22" rx="5" fill="#36c989"><title>S1 Control frame/commands/ACK/APPLIED/REFUSED: доказано (2/2)</title></rect>
 <rect x="89" y="335" width="30" height="22" rx="5" fill="#36c989"><title>S2 Scheduler due order/cooldown/dead address/concurrent endpoints: доказано (3/3)</title></rect>
 <rect x="127" y="335" width="30" height="22" rx="5" fill="#36c989"><title>S3 Discovery known-plan/coalesce/queue/permits/own-first: доказано (3/3)</title></rect>
 <rect x="165" y="335" width="30" height="22" rx="5" fill="#36c989"><title>S4 ACK → APPLIED exact proof → candidate persistence: доказано (2/2)</title></rect>
 <rect x="203" y="335" width="30" height="22" rx="5" fill="#36c989"><title>S5 JSON catalog atomic save/merge/sync: доказано (2/2)</title></rect>
 <rect x="241" y="335" width="30" height="22" rx="5" fill="#36c989"><title>S6 HTTP search candidate/order/retry/judge/APPLIED: доказано (3/3)</title></rect>
-<rect x="279" y="335" width="30" height="22" rx="5" fill="#e6b45d"><title>S9 Auto refusal → Discovery → APPLIED → firewall reapply: частично (0/2)</title></rect>
-<rect x="317" y="335" width="30" height="22" rx="5" fill="#e6b45d"><title>S10 Long-running controller recovery: частично (0/1)</title></rect>
+<rect x="279" y="335" width="30" height="22" rx="5" fill="#36c989"><title>S9 Auto refusal → Discovery → APPLIED → firewall reapply: доказано (2/2)</title></rect>
+<rect x="317" y="335" width="30" height="22" rx="5" fill="#36c989"><title>S10 Long-running controller recovery: доказано (1/1)</title></rect>
 <rect x="355" y="335" width="30" height="22" rx="5" fill="#36c989"><title>S11 Diagnostics records/snapshots/madvise and periodic RSS report: доказано (1/1)</title></rect>
 <rect x="393" y="335" width="30" height="22" rx="5" fill="#36c989"><title>S12 v22 control-wire codec: raw binding ACK + D2KP outbound: доказано (2/2)</title></rect>
 <rect x="431" y="335" width="30" height="22" rx="5" fill="#36c989"><title>S13 Live v22 datapath: greeting/release + event translation + real d2kc: доказано (2/2)</title></rect>
@@ -82,14 +82,14 @@
 <rect x="837" y="335" width="30" height="22" rx="5" fill="#36c989"><title>Q8 QUIC deny/recheck lifecycle: доказано (1/1)</title></rect>
 <rect x="37" y="414" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="437" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Discord RTC</text>
-<text x="533" y="437" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">9/10</text>
+<text x="533" y="437" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">10/10</text>
 <rect x="51" y="447" width="30" height="22" rx="5" fill="#36c989"><title>R1 UDP observer initiator/SSRC/endpoint event: доказано (2/2)</title></rect>
 <rect x="89" y="447" width="30" height="22" rx="5" fill="#36c989"><title>R2 Manual measurement arm propagation: доказано (1/1)</title></rect>
 <rect x="127" y="447" width="30" height="22" rx="5" fill="#36c989"><title>R3 Voice trial lease/renewal/120-s waiter/APPLIED: доказано (3/3)</title></rect>
 <rect x="165" y="447" width="30" height="22" rx="5" fill="#36c989"><title>R4 Endpoint change/late NAK/persistence/reapply: доказано (1/1)</title></rect>
 <rect x="203" y="447" width="30" height="22" rx="5" fill="#36c989"><title>R5 Trial clock after queue admission: доказано (1/1)</title></rect>
 <rect x="241" y="447" width="30" height="22" rx="5" fill="#36c989"><title>R6 Scheduled UDP emission/queue stats: доказано (1/1)</title></rect>
-<rect x="279" y="447" width="30" height="22" rx="5" fill="#e6b45d"><title>R7 Long RTC session/process recovery: частично (0/1)</title></rect>
+<rect x="279" y="447" width="30" height="22" rx="5" fill="#36c989"><title>R7 Long RTC session/process recovery: доказано (1/1)</title></rect>
 <rect x="557" y="414" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="571" y="437" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Discord Gateway</text>
 <text x="1053" y="437" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">1/1</text>
@@ -206,8 +206,8 @@
 <rect x="127" y="779" width="30" height="22" rx="5" fill="#36c989"><title>B53 `KEENETIC_POLICY` → `--only-mark`: доказано (2/2)</title></rect>
 <rect x="557" y="638" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="571" y="661" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Core / CLI</text>
-<text x="1053" y="661" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">12/15</text>
-<rect x="571" y="671" width="30" height="22" rx="5" fill="#e6b45d"><title>M1 `compose.c` + `d2kc.c` orchestration/event loop: частично (0/3)</title></rect>
+<text x="1053" y="661" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">15/15</text>
+<rect x="571" y="671" width="30" height="22" rx="5" fill="#36c989"><title>M1 `compose.c` + `d2kc.c` orchestration/event loop: доказано (3/3)</title></rect>
 <rect x="609" y="671" width="30" height="22" rx="5" fill="#36c989"><title>M2 `d2kask.c`: доказано (1/1)</title></rect>
 <rect x="647" y="671" width="30" height="22" rx="5" fill="#36c989"><title>M3 `d2kfetch.c` CLI: доказано (1/1)</title></rect>
 <rect x="685" y="671" width="30" height="22" rx="5" fill="#36c989"><title>M4 `d2kvoice.c` controller entry: доказано (1/1)</title></rect>

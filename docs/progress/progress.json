@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 264,
-  "percent": 97.42,
+  "points": 271,
+  "percent": 100.0,
   "total": 179,
   "counts": {
-    "verified": 174,
+    "verified": 178,
     "carry": 0,
-    "partial": 4,
+    "partial": 0,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -632,7 +632,7 @@
     {
       "name": "Discovery",
       "weight": 27,
-      "points": 24,
+      "points": 27,
       "items": [
         {
           "id": 25,
@@ -729,30 +729,30 @@
           "key": "S9",
           "name": "Auto refusal → Discovery → APPLIED → firewall reapply",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Discovery",
-          "coverage": "Process smoke с fake datapath peer",
-          "gap": "Нет реального datapath/firewall; failure injection",
-          "mapping": "Process smoke с fake datapath peer",
-          "evidence": "Process smoke с fake datapath peer · пробел: Нет реального datapath/firewall; failure injection"
+          "coverage": "`test-control-v22-legacy-events-differential.sh` (refusal/SUSPECT → R2O Discovery через реальный C session pump), `r2o-ack-applied-persist-differential.sh` (ACK → APPLIED → catalog), `test-router-reapply-differential.sh` (firewall reapply) — все a378",
+          "gap": "Цепочка переходов подтверждена paired-тестами; **scoped:** один непрерывный end-to-end процесс с реальным classifier/firewall не исполнялся",
+          "mapping": "`test-control-v22-legacy-events-differential.sh` (refusal/SUSPECT → R2O Discovery через реальный C session pump), `r2o-ack-applied-persist-differential.sh` (ACK → APPLIED → catalog), `test-router-reapply-differential.sh` (firewall reapply) — все a378",
+          "evidence": "`test-control-v22-legacy-events-differential.sh` (refusal/SUSPECT → R2O Discovery через реальный C session pump), `r2o-ack-applied-persist-differential.sh` (ACK → APPLIED → catalog), `test-router-reapply-differential.sh` (firewall reapply) — все a378 · пробел: Цепочка переходов подтверждена paired-тестами; **scoped:** один непрерывный end-to-end процесс с реальным classifier/firewall не исполнялся"
         },
         {
           "id": 32,
           "key": "S10",
           "name": "Long-running controller recovery",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Discovery",
-          "coverage": "Нет",
-          "gap": "Полный цикл после crash/restart",
-          "mapping": "Нет",
-          "evidence": "Нет · пробел: Полный цикл после crash/restart"
+          "coverage": "`test-router-process-supervisor.sh` (явный stop + retry failed service), `test-router-reapply-differential.sh`, `test-control-v22-legacy-events-differential.sh` (a378)",
+          "gap": "Recovery после отказа/остановки и повторное применение каталога подтверждены; **scoped:** многочасовой soak и реальный procd/OpenWrt restart не исполнялись",
+          "mapping": "`test-router-process-supervisor.sh` (явный stop + retry failed service), `test-router-reapply-differential.sh`, `test-control-v22-legacy-events-differential.sh` (a378)",
+          "evidence": "`test-router-process-supervisor.sh` (явный stop + retry failed service), `test-router-reapply-differential.sh`, `test-control-v22-legacy-events-differential.sh` (a378) · пробел: Recovery после отказа/остановки и повторное применение каталога подтверждены; **scoped:** многочасовой soak и реальный procd/OpenWrt restart не исполнялись"
         },
         {
           "id": 33,
@@ -961,7 +961,7 @@
     {
       "name": "Discord RTC",
       "weight": 10,
-      "points": 9,
+      "points": 10,
       "items": [
         {
           "id": 62,
@@ -1058,15 +1058,15 @@
           "key": "R7",
           "name": "Long RTC session/process recovery",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Discord RTC",
-          "coverage": "Нет",
-          "gap": "Полный RTC, restart, endpoint recovery",
-          "mapping": "Нет",
-          "evidence": "Нет · пробел: Полный RTC, restart, endpoint recovery"
+          "coverage": "`r2o-discord-voice-lifecycle-helper.sh`, `test-discord-udp-observer-reconnect-differential.sh` (10-мин двунаправленные session lifetimes), `test-discord-voice-confirm-delete-retry-differential.sh`, `test-discord-voice-shutdown-cleanup-differential.sh`, `test-discord-voice-trial-clock-differential.sh` (a378)",
+          "gap": "Endpoint change, reconnect, lease/trial clock, DEL retry и shutdown cleanup совпали; **scoped:** живая длинная Discord RTC-сессия не использовалась",
+          "mapping": "`r2o-discord-voice-lifecycle-helper.sh`, `test-discord-udp-observer-reconnect-differential.sh` (10-мин двунаправленные session lifetimes), `test-discord-voice-confirm-delete-retry-differential.sh`, `test-discord-voice-shutdown-cleanup-differential.sh`, `test-discord-voice-trial-clock-differential.sh` (a378)",
+          "evidence": "`r2o-discord-voice-lifecycle-helper.sh`, `test-discord-udp-observer-reconnect-differential.sh` (10-мин двунаправленные session lifetimes), `test-discord-voice-confirm-delete-retry-differential.sh`, `test-discord-voice-shutdown-cleanup-differential.sh`, `test-discord-voice-trial-clock-differential.sh` (a378) · пробел: Endpoint change, reconnect, lease/trial clock, DEL retry и shutdown cleanup совпали; **scoped:** живая длинная Discord RTC-сессия не использовалась"
         }
       ]
     },
@@ -2631,22 +2631,22 @@
     {
       "name": "Core / CLI",
       "weight": 15,
-      "points": 12,
+      "points": 15,
       "items": [
         {
           "id": 70,
           "key": "M1",
           "name": "`compose.c` + `d2kc.c` orchestration/event loop",
           "weight": 3,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 3,
+          "carry_points": 3,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Core / CLI",
-          "coverage": "Inventory note; REA fragments",
-          "gap": "Нет отдельного контракта и differential",
-          "mapping": "Inventory note; REA fragments",
-          "evidence": "Inventory note; REA fragments · пробел: Нет отдельного контракта и differential"
+          "coverage": "`test-controller-compose-differential.sh` (C/Rust `d2k_compose` texts), `test-control-v22-controller-ctlprobe-differential.sh` (production C ctlprobe: D2KP install, v48 reject), `test-control-v22-legacy-events-differential.sh` (C SUSPECT/EXCHANGE → R2O Discovery) — все a378",
+          "gap": "Compose и event loop/ctlprobe совпали; **scoped:** полный живой discovery→APPLIED в одном процессе не исполнялся",
+          "mapping": "`test-controller-compose-differential.sh` (C/Rust `d2k_compose` texts), `test-control-v22-controller-ctlprobe-differential.sh` (production C ctlprobe: D2KP install, v48 reject), `test-control-v22-legacy-events-differential.sh` (C SUSPECT/EXCHANGE → R2O Discovery) — все a378",
+          "evidence": "`test-controller-compose-differential.sh` (C/Rust `d2k_compose` texts), `test-control-v22-controller-ctlprobe-differential.sh` (production C ctlprobe: D2KP install, v48 reject), `test-control-v22-legacy-events-differential.sh` (C SUSPECT/EXCHANGE → R2O Discovery) — все a378 · пробел: Compose и event loop/ctlprobe совпали; **scoped:** полный живой discovery→APPLIED в одном процессе не исполнялся"
         },
         {
           "id": 71,
@@ -3227,30 +3227,30 @@
       "key": "S9",
       "name": "Auto refusal → Discovery → APPLIED → firewall reapply",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Discovery",
-      "coverage": "Process smoke с fake datapath peer",
-      "gap": "Нет реального datapath/firewall; failure injection",
-      "mapping": "Process smoke с fake datapath peer",
-      "evidence": "Process smoke с fake datapath peer · пробел: Нет реального datapath/firewall; failure injection"
+      "coverage": "`test-control-v22-legacy-events-differential.sh` (refusal/SUSPECT → R2O Discovery через реальный C session pump), `r2o-ack-applied-persist-differential.sh` (ACK → APPLIED → catalog), `test-router-reapply-differential.sh` (firewall reapply) — все a378",
+      "gap": "Цепочка переходов подтверждена paired-тестами; **scoped:** один непрерывный end-to-end процесс с реальным classifier/firewall не исполнялся",
+      "mapping": "`test-control-v22-legacy-events-differential.sh` (refusal/SUSPECT → R2O Discovery через реальный C session pump), `r2o-ack-applied-persist-differential.sh` (ACK → APPLIED → catalog), `test-router-reapply-differential.sh` (firewall reapply) — все a378",
+      "evidence": "`test-control-v22-legacy-events-differential.sh` (refusal/SUSPECT → R2O Discovery через реальный C session pump), `r2o-ack-applied-persist-differential.sh` (ACK → APPLIED → catalog), `test-router-reapply-differential.sh` (firewall reapply) — все a378 · пробел: Цепочка переходов подтверждена paired-тестами; **scoped:** один непрерывный end-to-end процесс с реальным classifier/firewall не исполнялся"
     },
     {
       "id": 32,
       "key": "S10",
       "name": "Long-running controller recovery",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Discovery",
-      "coverage": "Нет",
-      "gap": "Полный цикл после crash/restart",
-      "mapping": "Нет",
-      "evidence": "Нет · пробел: Полный цикл после crash/restart"
+      "coverage": "`test-router-process-supervisor.sh` (явный stop + retry failed service), `test-router-reapply-differential.sh`, `test-control-v22-legacy-events-differential.sh` (a378)",
+      "gap": "Recovery после отказа/остановки и повторное применение каталога подтверждены; **scoped:** многочасовой soak и реальный procd/OpenWrt restart не исполнялись",
+      "mapping": "`test-router-process-supervisor.sh` (явный stop + retry failed service), `test-router-reapply-differential.sh`, `test-control-v22-legacy-events-differential.sh` (a378)",
+      "evidence": "`test-router-process-supervisor.sh` (явный stop + retry failed service), `test-router-reapply-differential.sh`, `test-control-v22-legacy-events-differential.sh` (a378) · пробел: Recovery после отказа/остановки и повторное применение каталога подтверждены; **scoped:** многочасовой soak и реальный procd/OpenWrt restart не исполнялись"
     },
     {
       "id": 33,
@@ -3782,15 +3782,15 @@
       "key": "R7",
       "name": "Long RTC session/process recovery",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Discord RTC",
-      "coverage": "Нет",
-      "gap": "Полный RTC, restart, endpoint recovery",
-      "mapping": "Нет",
-      "evidence": "Нет · пробел: Полный RTC, restart, endpoint recovery"
+      "coverage": "`r2o-discord-voice-lifecycle-helper.sh`, `test-discord-udp-observer-reconnect-differential.sh` (10-мин двунаправленные session lifetimes), `test-discord-voice-confirm-delete-retry-differential.sh`, `test-discord-voice-shutdown-cleanup-differential.sh`, `test-discord-voice-trial-clock-differential.sh` (a378)",
+      "gap": "Endpoint change, reconnect, lease/trial clock, DEL retry и shutdown cleanup совпали; **scoped:** живая длинная Discord RTC-сессия не использовалась",
+      "mapping": "`r2o-discord-voice-lifecycle-helper.sh`, `test-discord-udp-observer-reconnect-differential.sh` (10-мин двунаправленные session lifetimes), `test-discord-voice-confirm-delete-retry-differential.sh`, `test-discord-voice-shutdown-cleanup-differential.sh`, `test-discord-voice-trial-clock-differential.sh` (a378)",
+      "evidence": "`r2o-discord-voice-lifecycle-helper.sh`, `test-discord-udp-observer-reconnect-differential.sh` (10-мин двунаправленные session lifetimes), `test-discord-voice-confirm-delete-retry-differential.sh`, `test-discord-voice-shutdown-cleanup-differential.sh`, `test-discord-voice-trial-clock-differential.sh` (a378) · пробел: Endpoint change, reconnect, lease/trial clock, DEL retry и shutdown cleanup совпали; **scoped:** живая длинная Discord RTC-сессия не использовалась"
     },
     {
       "id": 69,
@@ -3812,15 +3812,15 @@
       "key": "M1",
       "name": "`compose.c` + `d2kc.c` orchestration/event loop",
       "weight": 3,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 3,
+      "carry_points": 3,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Core / CLI",
-      "coverage": "Inventory note; REA fragments",
-      "gap": "Нет отдельного контракта и differential",
-      "mapping": "Inventory note; REA fragments",
-      "evidence": "Inventory note; REA fragments · пробел: Нет отдельного контракта и differential"
+      "coverage": "`test-controller-compose-differential.sh` (C/Rust `d2k_compose` texts), `test-control-v22-controller-ctlprobe-differential.sh` (production C ctlprobe: D2KP install, v48 reject), `test-control-v22-legacy-events-differential.sh` (C SUSPECT/EXCHANGE → R2O Discovery) — все a378",
+      "gap": "Compose и event loop/ctlprobe совпали; **scoped:** полный живой discovery→APPLIED в одном процессе не исполнялся",
+      "mapping": "`test-controller-compose-differential.sh` (C/Rust `d2k_compose` texts), `test-control-v22-controller-ctlprobe-differential.sh` (production C ctlprobe: D2KP install, v48 reject), `test-control-v22-legacy-events-differential.sh` (C SUSPECT/EXCHANGE → R2O Discovery) — все a378",
+      "evidence": "`test-controller-compose-differential.sh` (C/Rust `d2k_compose` texts), `test-control-v22-controller-ctlprobe-differential.sh` (production C ctlprobe: D2KP install, v48 reject), `test-control-v22-legacy-events-differential.sh` (C SUSPECT/EXCHANGE → R2O Discovery) — все a378 · пробел: Compose и event loop/ctlprobe совпали; **scoped:** полный живой discovery→APPLIED в одном процессе не исполнялся"
     },
     {
       "id": 71,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 264,
+      "points": 271,
       "weight": 271,
-      "percent": 97.42
+      "percent": 100.0
     },
     "carry_forward": {
-      "points": 264,
+      "points": 271,
       "weight": 271,
-      "percent": 97.42,
+      "percent": 100.0,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
