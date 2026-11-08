@@ -1,5 +1,6 @@
 use r2o_panel::server::{Config, handle_request, parse_config};
 use serde_json::Value;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1538,6 +1539,36 @@ fn d2o_config_parser_rejects_unquoted_trailing_quote() {
     );
     assert_eq!(trace, c_trace);
     assert!(result.is_err(), "unquoted trailing quote must be rejected");
+}
+
+#[test]
+#[ignore = "run through scripts/test-panel-request-semantics-differential.sh"]
+fn d2o_unknown_route_method_version_matches() {
+    let c_trace = fs::read_to_string(
+        std::env::var_os("R2O_PANEL_SEMANTICS_C_TRACE")
+            .expect("test helper provides D2O response bytes"),
+    )
+    .unwrap();
+    let requests: [&[u8]; 9] = [
+        b"GET /nope HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        b"GET /nope HTTP/1.0\r\n\r\n",
+        b"POST /nope HTTP/1.1\r\nContent-Length: 0\r\n\r\n",
+        b"PUT / HTTP/1.1\r\nContent-Length: 0\r\n\r\n",
+        b"GET /nope HTTP/2.0\r\n\r\n",
+        b"DELETE /assets/missing.js HTTP/1.1\r\n\r\n",
+        b"GET /api/unknown HTTP/1.1\r\n\r\n",
+        b"BREW /api/status HTTP/1.1\r\n\r\n",
+        b"GET /api/control/heal HTTP/1.1\r\n\r\n",
+    ];
+    let mut rust_trace = String::new();
+    for request in requests {
+        let response = handle_request(&Config::default(), request);
+        for byte in response.to_http_bytes() {
+            write!(&mut rust_trace, "{byte:02x}").unwrap();
+        }
+        rust_trace.push('\n');
+    }
+    assert_eq!(rust_trace, c_trace);
 }
 
 fn assert_d2o_config_trace(config_path_env: &str, c_trace_env: &str) {

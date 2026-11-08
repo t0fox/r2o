@@ -155,15 +155,9 @@ impl Response {
         self
     }
 
-    fn send(self, stream: &mut TcpStream) -> std::io::Result<()> {
-        self.send_before(stream, std::time::Instant::now() + RESPONSE_TIMEOUT)
-    }
-
-    fn send_before(
-        self,
-        stream: &mut TcpStream,
-        deadline: std::time::Instant,
-    ) -> std::io::Result<()> {
+    /// Полные байты HTTP/1.1-ответа в том же порядке заголовков, что C
+    /// `response_ex`. Нужен differential-тестам и не скрывает extra-заголовки.
+    pub fn to_http_bytes(&self) -> Vec<u8> {
         let reason = match self.status {
             200 => "OK",
             202 => "Accepted",
@@ -190,11 +184,24 @@ impl Response {
             self.body.len()
         )
         .expect("Vec writer is infallible");
-        for (name, value) in self.headers {
+        for (name, value) in &self.headers {
             write!(&mut bytes, "{name}: {value}\r\n").expect("Vec writer is infallible");
         }
         bytes.extend_from_slice(b"\r\n");
         bytes.extend_from_slice(&self.body);
+        bytes
+    }
+
+    fn send(self, stream: &mut TcpStream) -> std::io::Result<()> {
+        self.send_before(stream, std::time::Instant::now() + RESPONSE_TIMEOUT)
+    }
+
+    fn send_before(
+        self,
+        stream: &mut TcpStream,
+        deadline: std::time::Instant,
+    ) -> std::io::Result<()> {
+        let bytes = self.to_http_bytes();
 
         // D2O `response_ex`: один абсолютный дедлайн на заголовки и тело,
         // включая повторные частичные записи.
