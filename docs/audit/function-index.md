@@ -642,11 +642,11 @@
 |---:|---|---:|---|---|---|---|---|---|
 | 1 | `d2k_ip6frag_sender_init` | 34 | да | r2o-datapath/raw.rs | D19 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
 | 2 | `d2k_ip6frag_sender_close` | 37 | да | r2o-datapath/raw.rs | D19 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
-| 3 | `d2k_f6_now` | 41 | да | — | D19 | missing | header-inline; module-level only | route/neighbor query не перенесён |
-| 4 | `d2k_f6_attr` | 46 | да | — | D19 | missing | header-inline; module-level only | route/neighbor query не перенесён |
-| 5 | `d2k_f6_query` | 56 | да | — | D19 | missing | header-inline; module-level only | route/neighbor query не перенесён |
-| 6 | `d2k_f6_route` | 73 | да | — | D19 | missing | header-inline; module-level only | route lookup не перенесён |
-| 7 | `d2k_f6_neighbor` | 107 | да | — | D19 | missing | header-inline; module-level only | neighbor lookup не перенесён |
+| 3 | `d2k_f6_now` | 41 | да | r2o-datapath/r2o_route.rs, raw.rs | D19 | equivalent (scoped) | r2o-route-gate-differential.sh | route/rule — r2o_route; neighbor — ядро/raw send |
+| 4 | `d2k_f6_attr` | 46 | да | r2o-datapath/r2o_route.rs, raw.rs | D19 | equivalent (scoped) | r2o-route-gate-differential.sh | route/rule — r2o_route; neighbor — ядро/raw send |
+| 5 | `d2k_f6_query` | 56 | да | r2o-datapath/r2o_route.rs, raw.rs | D19 | equivalent (scoped) | r2o-route-gate-differential.sh | route/rule — r2o_route; neighbor — ядро/raw send |
+| 6 | `d2k_f6_route` | 73 | да | r2o-datapath/r2o_route.rs, raw.rs | D19 | equivalent (scoped) | r2o-route-gate-differential.sh | route lookup — r2o_route lookup |
+| 7 | `d2k_f6_neighbor` | 107 | да | r2o-datapath/r2o_route.rs, raw.rs | D19 | equivalent (scoped) | r2o-route-gate-differential.sh | neighbor resolution делегирована ядру/raw send |
 | 8 | `d2k_ip6frag_prepare` | 155 | да | r2o-datapath/raw.rs | D19 | implemented-unproven | header-inline; module-level only | header-inline; module-level only |
 | 9 | `d2k_ip6frag_send` | 196 | да | r2o-datapath/raw.rs | D19 | partial | named in report | IPv6 fragment send частично; route/neighbor нет |
 
@@ -654,9 +654,9 @@
 
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
-| 1 | `d2k_link_shape_tcp_profile` | 309 | да | r2k-core/control.rs | D20 | missing | named in report | TCP shape contexts 8-13 не реализованы |
-| 2 | `d2k_link_shape_tcp_base` | 321 | да | r2k-core/control.rs | D20 | missing | header-inline; module-level only | header-inline; module-level only |
-| 3 | `d2k_link_shape_tcp_context` | 333 | да | r2k-core/control.rs | D20 | missing | header-inline; module-level only | header-inline; module-level only |
+| 1 | `d2k_link_shape_tcp_profile` | 309 | да | r2k-core/control.rs | D20 | equivalent (scoped) | test-tcp-shape-context-differential.sh | r2k_link_shape_tcp_profile/base/context |
+| 2 | `d2k_link_shape_tcp_base` | 321 | да | r2k-core/control.rs | D20 | equivalent (scoped) | test-tcp-shape-context-differential.sh | r2k_link_shape_tcp_profile/base/context |
+| 3 | `d2k_link_shape_tcp_context` | 333 | да | r2k-core/control.rs | D20 | equivalent (scoped) | test-tcp-shape-context-differential.sh | r2k_link_shape_tcp_profile/base/context |
 
 ### `core/include/d2k_quicprobe.h` — 9
 
@@ -2779,11 +2779,11 @@
 | # | Функция | Строка | static | Rust-владелец | Контракт | Статус | Evidence | Примечание |
 |---:|---|---:|---|---|---|---|---|---|
 | 1 | `d2k_runtime_id_valid` | 18 | да | r2k-core/control.rs::valid_release_id | S1 | implemented-unproven | header-inline; module-level only | release ID validation |
-| 2 | `d2k_runtime_offline` | 26 | да | — | D5 | missing | header-inline; module-level only | offline self-check не перенесён |
+| 2 | `d2k_runtime_offline` | 26 | да | crates/r2o-panel/src/main.rs | A26 | equivalent (scoped) | crates/r2o-panel/tests/cli.rs | --release-id/--self-check CLI |
 | 3 | `d2k_runtime_mono_ms` | 34 | да | std::time::Instant | D5 | implemented-unproven | header-inline; module-level only | monotonic helper |
-| 4 | `d2k_runtime_start_ticks` | 38 | да | — | D5 | missing | header-inline; module-level only | start_ticks для health не перенесён |
-| 5 | `d2k_runtime_listener_ready` | 50 | да | — | D5 | missing | header-inline; module-level only | listener readiness helper |
-| 6 | `d2k_runtime_heartbeat` | 54 | да | — | D5 | missing | named in report | heartbeat datapath/controller отсутствует |
+| 4 | `d2k_runtime_start_ticks` | 38 | да | crates/r2o-panel/src/server.rs, r2o-telegram/src/health.rs | D5 | equivalent (scoped) | r2o-telegram health tests | start_ticks для health |
+| 5 | `d2k_runtime_listener_ready` | 50 | да | r2o-telegram/src/stats.rs, r2o-panel/src/server.rs | D5 | equivalent (scoped) | r2o-telegram stats tests | listener readiness |
+| 6 | `d2k_runtime_heartbeat` | 54 | да | r2o-panel/src/server.rs, r2o-telegram/src/health.rs | D5 | equivalent (scoped) | panel/telegram health tests | heartbeat writer |
 
 ### `telegram/src/cf_domains.c` — 19
 

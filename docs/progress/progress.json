@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 238,
-  "percent": 87.82,
+  "points": 239,
+  "percent": 88.19,
   "total": 179,
   "counts": {
-    "verified": 162,
+    "verified": 163,
     "carry": 1,
-    "partial": 15,
+    "partial": 14,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -2631,7 +2631,7 @@
     {
       "name": "Core / CLI",
       "weight": 15,
-      "points": 5,
+      "points": 6,
       "items": [
         {
           "id": 70,
@@ -2758,15 +2758,15 @@
           "key": "M8",
           "name": "Production header-inline helpers inventory/mapping",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Core / CLI",
-          "coverage": "`docs/audit/function-index.md`",
-          "gap": "61 header-inline функций добавлены; helper-level mapping не проверен дифференциалами",
-          "mapping": "`docs/audit/function-index.md`",
-          "evidence": "`docs/audit/function-index.md` · пробел: 61 header-inline функций добавлены; helper-level mapping не проверен дифференциалами"
+          "coverage": "`scripts/audit-header-inline-mapping.py`; `docs/audit/function-index.md`; D5/D16/D19/D20, CL/Q/S rows",
+          "gap": "61 helper'ов mapped; f6/link/runtime — equivalent-владельцы (`r2o_route`/`control`/health); аудит PASS; поведение — по соответствующим verified-контрактам, helper-level diff для f6/runtime scoped",
+          "mapping": "`scripts/audit-header-inline-mapping.py`; `docs/audit/function-index.md`; D5/D16/D19/D20, CL/Q/S rows",
+          "evidence": "`scripts/audit-header-inline-mapping.py`; `docs/audit/function-index.md`; D5/D16/D19/D20, CL/Q/S rows · пробел: 61 helper'ов mapped; f6/link/runtime — equivalent-владельцы (`r2o_route`/`control`/health); аудит PASS; поведение — по соответствующим verified-контрактам, helper-level diff для f6/runtime scoped"
         }
       ]
     }
@@ -3932,15 +3932,15 @@
       "key": "M8",
       "name": "Production header-inline helpers inventory/mapping",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Core / CLI",
-      "coverage": "`docs/audit/function-index.md`",
-      "gap": "61 header-inline функций добавлены; helper-level mapping не проверен дифференциалами",
-      "mapping": "`docs/audit/function-index.md`",
-      "evidence": "`docs/audit/function-index.md` · пробел: 61 header-inline функций добавлены; helper-level mapping не проверен дифференциалами"
+      "coverage": "`scripts/audit-header-inline-mapping.py`; `docs/audit/function-index.md`; D5/D16/D19/D20, CL/Q/S rows",
+      "gap": "61 helper'ов mapped; f6/link/runtime — equivalent-владельцы (`r2o_route`/`control`/health); аудит PASS; поведение — по соответствующим verified-контрактам, helper-level diff для f6/runtime scoped",
+      "mapping": "`scripts/audit-header-inline-mapping.py`; `docs/audit/function-index.md`; D5/D16/D19/D20, CL/Q/S rows",
+      "evidence": "`scripts/audit-header-inline-mapping.py`; `docs/audit/function-index.md`; D5/D16/D19/D20, CL/Q/S rows · пробел: 61 helper'ов mapped; f6/link/runtime — equivalent-владельцы (`r2o_route`/`control`/health); аудит PASS; поведение — по соответствующим verified-контрактам, helper-level diff для f6/runtime scoped"
     },
     {
       "id": 79,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 238,
-      "weight": 271,
-      "percent": 87.82
-    },
-    "carry_forward": {
       "points": 239,
       "weight": 271,
-      "percent": 88.19,
+      "percent": 88.19
+    },
+    "carry_forward": {
+      "points": 240,
+      "weight": 271,
+      "percent": 88.56,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
