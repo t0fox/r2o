@@ -3,7 +3,7 @@ set -eu
 
 repo_root=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 donor_root=${R2O_DONOR_ROOT:-"${repo_root%/*}/d2o"}
-expected_donor_sha=304ba893dd37197128ac8799c0495b035f6a38c0
+expected_donor_sha=a378e230947ebfd011439e1cac0f1e994d883aae
 actual_donor_sha=$(git -C "$donor_root" rev-parse HEAD)
 if [ "$actual_donor_sha" != "$expected_donor_sha" ]; then
     printf 'Expected d2o %s, got %s\n' "$expected_donor_sha" "$actual_donor_sha" >&2
@@ -20,6 +20,8 @@ make -s -C "$donor_core" test_sched CC=clang-18
 donor_sched_objects=$(make -s -C "$donor_core" \
     --eval='print-sched-test-objects:;@echo $(filter-out sched.o,$(SCHED_TEST_OBJ))' \
     print-sched-test-objects)
+# diagnostics.o входит в TEST_LDFLAGS Makefile, но не в SCHED_TEST_OBJ.
+donor_sched_objects="$donor_sched_objects diagnostics.o"
 (
     cd "$donor_core"
     # shellcheck disable=SC2086

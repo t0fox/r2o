@@ -1,12 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 68.27%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 71.96%">
 <rect width="1100" height="790" rx="20" fill="#0c121e"/>
 <text x="36" y="48" fill="#edf7ff" font-family="Arial,sans-serif" font-size="29" font-weight="700">R2O / D2O · Strict parity</text>
-<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">68.27%</text>
-<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">185 / 271 verified points</text>
+<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">71.96%</text>
+<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">195 / 271 verified points</text>
 <rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/>
-<rect x="37" y="113" width="699.0" height="11" rx="5" fill="#36c989"/>
-<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 130 verified · 0 missing · 2026-11-08</text>
-<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 231/271 = 85.24% · strict 185/271 = 68.27%</text>
+<rect x="37" y="113" width="736.8" height="11" rx="5" fill="#36c989"/>
+<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 134 verified · 0 missing · 2026-11-08</text>
+<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 231/271 = 85.24% · strict 195/271 = 71.96%</text>
 <rect x="37" y="190" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="213" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Datapath</text>
 <text x="533" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">22/28</text>
@@ -55,11 +55,11 @@
 <rect x="685" y="250" width="30" height="22" rx="5" fill="#36c989"><title>CL16 Detect/classifier CLI output/exit/JSON: доказано (1/1)</title></rect>
 <rect x="37" y="302" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="325" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Discovery</text>
-<text x="533" y="325" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">9/27</text>
-<rect x="51" y="335" width="30" height="22" rx="5" fill="#819bf8"><title>S1 Control frame/commands/ACK/APPLIED/REFUSED: carry (304) — historical (0/2)</title></rect>
-<rect x="89" y="335" width="30" height="22" rx="5" fill="#819bf8"><title>S2 Scheduler due order/cooldown/dead address/concurrent endpoints: carry (304) — historical (0/3)</title></rect>
-<rect x="127" y="335" width="30" height="22" rx="5" fill="#819bf8"><title>S3 Discovery known-plan/coalesce/queue/permits/own-first: carry (304) — historical (0/3)</title></rect>
-<rect x="165" y="335" width="30" height="22" rx="5" fill="#819bf8"><title>S4 ACK → APPLIED exact proof → candidate persistence: carry (304) — historical (0/2)</title></rect>
+<text x="533" y="325" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">19/27</text>
+<rect x="51" y="335" width="30" height="22" rx="5" fill="#36c989"><title>S1 Control frame/commands/ACK/APPLIED/REFUSED: доказано (2/2)</title></rect>
+<rect x="89" y="335" width="30" height="22" rx="5" fill="#36c989"><title>S2 Scheduler due order/cooldown/dead address/concurrent endpoints: доказано (3/3)</title></rect>
+<rect x="127" y="335" width="30" height="22" rx="5" fill="#36c989"><title>S3 Discovery known-plan/coalesce/queue/permits/own-first: доказано (3/3)</title></rect>
+<rect x="165" y="335" width="30" height="22" rx="5" fill="#36c989"><title>S4 ACK → APPLIED exact proof → candidate persistence: доказано (2/2)</title></rect>
 <rect x="203" y="335" width="30" height="22" rx="5" fill="#819bf8"><title>S5 JSON catalog atomic save/merge/sync: carry (304) — historical (0/2)</title></rect>
 <rect x="241" y="335" width="30" height="22" rx="5" fill="#819bf8"><title>S6 HTTP search candidate/order/retry/judge/APPLIED: carry (304) — historical (0/3)</title></rect>
 <rect x="279" y="335" width="30" height="22" rx="5" fill="#e6b45d"><title>S9 Auto refusal → Discovery → APPLIED → firewall reapply: частично (0/2)</title></rect>
