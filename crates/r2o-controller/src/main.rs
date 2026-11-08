@@ -245,8 +245,32 @@ fn main() {
     }
     if let Err(error) = run(r2o_arguments) {
         eprintln!("r2o-controller: {error}");
-        std::process::exit(1);
+        // Ошибки командной строки возвращают 2, как оракул `d2k-detect`
+        // (usage() + return 2); отказ выполнения — 1.
+        let r2o_code = if error.downcast_ref::<CliUsageError>().is_some() {
+            2
+        } else {
+            1
+        };
+        std::process::exit(r2o_code);
     }
+}
+
+/// Ошибка разбора командной строки: оракул отличает её от отказа
+/// выполнения кодом возврата 2.
+#[derive(Debug)]
+struct CliUsageError(String);
+
+impl std::fmt::Display for CliUsageError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CliUsageError {}
+
+fn r2o_usage_error(message: impl Into<String>) -> Box<dyn Error> {
+    Box::new(CliUsageError(message.into()))
 }
 
 fn r2o_ask_command(arguments: &[std::ffi::OsString]) -> Option<i32> {
@@ -940,15 +964,20 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
     if arguments.len() >= 3 && arguments[0] == "--classify" {
-        let host = arguments[1].to_str().ok_or("HOST должен быть в UTF-8")?;
+        let host = arguments[1]
+            .to_str()
+            .ok_or_else(|| r2o_usage_error("HOST должен быть в UTF-8"))?;
         let port = arguments[2]
             .to_str()
-            .ok_or("PORT должен быть в UTF-8")?
-            .parse::<u16>()?;
+            .ok_or_else(|| r2o_usage_error("PORT должен быть в UTF-8"))?
+            .parse::<u16>()
+            .map_err(|_| r2o_usage_error("PORT должен быть числом от 0 до 65535"))?;
         let explicit_sni = match arguments.get(3) {
-            Some(argument) if !argument.to_string_lossy().starts_with("--") => {
-                Some(argument.to_str().ok_or("SNI должен быть в UTF-8")?)
-            }
+            Some(argument) if !argument.to_string_lossy().starts_with("--") => Some(
+                argument
+                    .to_str()
+                    .ok_or_else(|| r2o_usage_error("SNI должен быть в UTF-8"))?,
+            ),
             _ => None,
         };
         let options_start = 3 + usize::from(explicit_sni.is_some());
@@ -972,7 +1001,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
             save_plan_path,
             arm_socket_path,
             modern,
-        } = parse_classify_options(&arguments[options_start..])?;
+        } = parse_classify_options(&arguments[options_start..]).map_err(r2o_usage_error)?;
         let target = if host.contains(':') {
             format!("[{host}]:{port}")
         } else {
@@ -1174,7 +1203,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
         );
         return Ok(());
     }
-    Err("используйте `r2o-controller --help`".into())
+    Err(r2o_usage_error("используйте `r2o-controller --help`"))
 }
 
 fn print_http_candidates() {

@@ -696,6 +696,16 @@ fn get_socket_mark(fd: libc::c_int) -> io::Result<libc::c_int> {
     }
 }
 
+/// Текст ошибки без хвоста `(os error N)`: эталон печатает Go-текст
+/// (`Connection refused`), а `std::io::Error` добавляет числовой код.
+fn io_error_text(error: &std::io::Error) -> String {
+    let text = error.to_string();
+    text.split(" (os error ")
+        .next()
+        .unwrap_or(&text)
+        .to_string()
+}
+
 fn dial_probe_target(
     target: &ProbeTarget,
     timeout: Duration,
@@ -726,7 +736,8 @@ fn dial_probe_target(
             "dial tcp {endpoint}: i/o timeout"
         ))),
         Some(Err(error)) => Err(ProbeError::Transport(format!(
-            "dial tcp {endpoint}: {error}"
+            "dial tcp {endpoint}: {}",
+            io_error_text(&error)
         ))),
         None => Err(ProbeError::Transport(format!(
             "dial tcp {endpoint}: no address found"

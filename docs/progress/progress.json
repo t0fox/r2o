@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 170,
-  "percent": 62.73,
+  "points": 171,
+  "percent": 63.1,
   "total": 179,
   "counts": {
-    "verified": 117,
+    "verified": 118,
     "carry": 40,
-    "partial": 21,
+    "partial": 20,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -385,7 +385,7 @@
     {
       "name": "Classifier / TLS",
       "weight": 24,
-      "points": 7,
+      "points": 8,
       "items": [
         {
           "id": 38,
@@ -617,15 +617,15 @@
           "key": "CL16",
           "name": "Detect/classifier CLI output/exit/JSON",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Classifier / TLS",
-          "coverage": "`r2o-controller/main.rs`",
-          "gap": "human stdout/exit/JSON не полностью сопоставлены",
-          "mapping": "`r2o-controller/main.rs`",
-          "evidence": "`r2o-controller/main.rs` · пробел: human stdout/exit/JSON не полностью сопоставлены"
+          "coverage": "`test-controller-detect-cli-differential.sh` (a378)",
+          "gap": "6 paired `--dump-trigger` (modern/legacy, 3 имени) байт-в-байт; 5 usage-путей с кодом 2; JSON отказа `127.0.0.1:1`: нормализованное равенство (порядок ключей/`duration` — несемантические, `(os error N)` срезается как в C). Scoped: live-успех и отличия справки `--help` (валидная команда R2O) не сравнивались",
+          "mapping": "`test-controller-detect-cli-differential.sh` (a378)",
+          "evidence": "`test-controller-detect-cli-differential.sh` (a378) · пробел: 6 paired `--dump-trigger` (modern/legacy, 3 имени) байт-в-байт; 5 usage-путей с кодом 2; JSON отказа `127.0.0.1:1`: нормализованное равенство (порядок ключей/`duration` — несемантические, `(os error N)` срезается как в C). Scoped: live-успех и отличия справки `--help` (валидная команда R2O) не сравнивались"
         }
       ]
     },
@@ -3557,15 +3557,15 @@
       "key": "CL16",
       "name": "Detect/classifier CLI output/exit/JSON",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Classifier / TLS",
-      "coverage": "`r2o-controller/main.rs`",
-      "gap": "human stdout/exit/JSON не полностью сопоставлены",
-      "mapping": "`r2o-controller/main.rs`",
-      "evidence": "`r2o-controller/main.rs` · пробел: human stdout/exit/JSON не полностью сопоставлены"
+      "coverage": "`test-controller-detect-cli-differential.sh` (a378)",
+      "gap": "6 paired `--dump-trigger` (modern/legacy, 3 имени) байт-в-байт; 5 usage-путей с кодом 2; JSON отказа `127.0.0.1:1`: нормализованное равенство (порядок ключей/`duration` — несемантические, `(os error N)` срезается как в C). Scoped: live-успех и отличия справки `--help` (валидная команда R2O) не сравнивались",
+      "mapping": "`test-controller-detect-cli-differential.sh` (a378)",
+      "evidence": "`test-controller-detect-cli-differential.sh` (a378) · пробел: 6 paired `--dump-trigger` (modern/legacy, 3 имени) байт-в-байт; 5 usage-путей с кодом 2; JSON отказа `127.0.0.1:1`: нормализованное равенство (порядок ключей/`duration` — несемантические, `(os error N)` срезается как в C). Scoped: live-успех и отличия справки `--help` (валидная команда R2O) не сравнивались"
     },
     {
       "id": 54,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 170,
+      "points": 171,
       "weight": 271,
-      "percent": 62.73
+      "percent": 63.1
     },
     "carry_forward": {
-      "points": 233,
+      "points": 234,
       "weight": 271,
-      "percent": 85.98,
+      "percent": 86.35,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
