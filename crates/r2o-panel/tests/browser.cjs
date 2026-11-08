@@ -429,6 +429,9 @@ async function main() {
 
   await evaluate(`document.querySelector('a[href="#telegram"]').click()`);
   assert.equal(await evaluate("location.hash"), "#telegram", "ссылка навигации открывает раздел Telegram");
+  await waitFor(() => evaluate(
+    "(() => { const c = document.querySelector('#telegram-body canvas.tg-flow-canvas'); return !!c && c.width >= 300 && c.height >= 100 && !!c.dataset.state; })()"
+  ), "анимация Telegram смонтирована и обновлена");
   await waitFor(() => evaluate("document.querySelector('.tg-check-details')?.textContent.includes('DC5')"), "диагностика маршрутов Telegram DC1–DC5");
   assert.equal(await evaluate("document.querySelector('.tg-check-details').textContent.includes('Все пять DC')"), false, "частичный resPQ не отображается как успех для всех DC");
   assert.equal(await evaluate("document.querySelector('.tg-check-details').textContent.includes('DC2 · маршруты заблокированы')"), true, "панель показывает заблокированный DC из отчёта");

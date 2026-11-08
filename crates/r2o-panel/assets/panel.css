@@ -679,7 +679,7 @@ main { min-width: 0; }
 .tg-flow-lamp[data-tone="idle"] { background: var(--ink-3); box-shadow: none; }
 .tg-flow-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
 .tg-flow-stage { margin-top: 16px; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: #120f17; }
-.tg-flow-canvas { display: block; width: 100%; height: auto; aspect-ratio: 900 / 420; color: #fff; }
+.tg-flow-canvas { display: block; width: 100%; height: auto; aspect-ratio: 760 / 340; color: #fff; }
 .tg-flow-caption { min-height: 1.4em; margin: 12px 2px 0; color: var(--ink-2); font-size: .875rem; }
 .tg-flow-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 14px; }
 .tg-flow-metric { min-width: 0; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: rgba(255, 255, 255, .03); }

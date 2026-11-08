@@ -2,28 +2,25 @@
 "use strict";
 
 const PROTOTYPE_GEOMETRY = Object.freeze({
-  width: 900,
-  height: 420,
-  client: Object.freeze([70, 210]),
-  hub: Object.freeze([300, 210]),
-  collector: Object.freeze([720, 210]),
-  laneY: Object.freeze([62, 148, 272, 358]),
-  gateX: Object.freeze([465, 500, 535, 570, 605]),
-  dcPositions: Object.freeze([[802, 70], [816, 140], [830, 210], [816, 280], [802, 350]]
-    .map(position => Object.freeze(position))),
+  width: 760,
+  height: 340,
+  client: Object.freeze([60, 170]),
+  hub: Object.freeze([230, 170]),
+  collector: Object.freeze([700, 170]),
+  laneY: Object.freeze([50, 125, 215, 290]),
 });
 const MOTION = Object.freeze({
-  maxParticles: 12,
-  maxSparks: 8,
-  maxRipples: 6,
-  attemptDurationMs: 1100,
-  failureDurationMs: 1800,
-  responseDurationMs: 1100,
-  winnerDurationMs: 900,
+  maxParticles: 64,
+  maxSparks: 24,
+  maxRipples: 12,
+  attemptDurationMs: 1250,
+  failureDurationMs: 760,
+  responseDurationMs: 2200,
+  winnerDurationMs: 1250,
   upstreamDurationMs: 300,
-  sparkDurationMs: 800,
-  fadeDurationMs: 600,
-  rippleDurationMs: 1200,
+  sparkDurationMs: 450,
+  fadeDurationMs: 300,
+  rippleDurationMs: 700,
 });
 const ROUTES = [
   { transport: "direct_wss", label: "Прямой WSS" },
@@ -37,6 +34,7 @@ const TRANSPORT_TO_LANE = new Map([
   ["cloudflare_worker", 1],
   ["cloudflare_proxy", 2],
   ["tcp_passthrough", 3],
+  ["tcp_fallback", 3],
 ]);
 
 const STATE_LABELS = {
@@ -154,7 +152,7 @@ function eventState(value) {
 }
 
 function routeDescription(transport, lane) {
-  if (transport === "tcp_passthrough") return "Прямой TCP passthrough";
+  if (transport === "tcp_passthrough" || transport === "tcp_fallback") return "Прямой TCP · диагностика";
   return ROUTES[lane]?.label || "WSS-транспорт не определён";
 }
 

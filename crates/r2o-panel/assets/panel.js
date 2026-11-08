@@ -1920,10 +1920,10 @@
 
     var stage = el(doc, "div", "tg-flow-stage");
     var canvas = el(doc, "canvas", "tg-flow-canvas");
-    canvas.width = 900;
-    canvas.height = 420;
+    canvas.width = 760;
+    canvas.height = 340;
     canvas.setAttribute("role", "img");
-    canvas.setAttribute("aria-label", "Схема: клиент, r2o, маршруты, дата-центры Telegram");
+    canvas.setAttribute("aria-label", "Поток соединений: клиент → r2o → Telegram DC");
     stage.appendChild(canvas);
     var caption = el(doc, "p", "tg-flow-caption", "Прокси устанавливает соединение");
     caption.id = "tg-flow-caption";
