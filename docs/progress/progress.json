@@ -2718,10 +2718,10 @@
           "status": "partial",
           "statusLabel": "частично",
           "group": "Core / CLI",
-          "coverage": "C unit tests; Rust units; `test-controller-plantlv-differential.sh` (a378)",
-          "gap": "plantlv: 64 paired кейса текст→TLV + 4 stricter (C принимает, R2O отвергает как `plan_parse.c`); crypto/p256/x25519/props/udpplan — paired diff ещё нет",
-          "mapping": "C unit tests; Rust units; `test-controller-plantlv-differential.sh` (a378)",
-          "evidence": "C unit tests; Rust units; `test-controller-plantlv-differential.sh` (a378) · пробел: plantlv: 64 paired кейса текст→TLV + 4 stricter (C принимает, R2O отвергает как `plan_parse.c`); crypto/p256/x25519/props/udpplan — paired diff ещё нет"
+          "coverage": "C unit tests; Rust units; `test-controller-plantlv-differential.sh`, `test-core-crypto-differential.sh`, `test-controller-udpplan-differential.sh` (a378); CL15 published vectors",
+          "gap": "plantlv: 64 paired + 4 stricter; crypto: 13 paired (SHA/HMAC/HKDF/AES); udpplan voice: 3 paired; p256/x25519 — published vectors (CL15); props и QUIC-ветви udpplan — поведенческие Q2/Q8, helper-level не парные → partial",
+          "mapping": "C unit tests; Rust units; `test-controller-plantlv-differential.sh`, `test-core-crypto-differential.sh`, `test-controller-udpplan-differential.sh` (a378); CL15 published vectors",
+          "evidence": "C unit tests; Rust units; `test-controller-plantlv-differential.sh`, `test-core-crypto-differential.sh`, `test-controller-udpplan-differential.sh` (a378); CL15 published vectors · пробел: plantlv: 64 paired + 4 stricter; crypto: 13 paired (SHA/HMAC/HKDF/AES); udpplan voice: 3 paired; p256/x25519 — published vectors (CL15); props и QUIC-ветви udpplan — поведенческие Q2/Q8, helper-level не парные → partial"
         },
         {
           "id": 76,
@@ -3892,10 +3892,10 @@
       "status": "partial",
       "statusLabel": "частично",
       "group": "Core / CLI",
-      "coverage": "C unit tests; Rust units; `test-controller-plantlv-differential.sh` (a378)",
-      "gap": "plantlv: 64 paired кейса текст→TLV + 4 stricter (C принимает, R2O отвергает как `plan_parse.c`); crypto/p256/x25519/props/udpplan — paired diff ещё нет",
-      "mapping": "C unit tests; Rust units; `test-controller-plantlv-differential.sh` (a378)",
-      "evidence": "C unit tests; Rust units; `test-controller-plantlv-differential.sh` (a378) · пробел: plantlv: 64 paired кейса текст→TLV + 4 stricter (C принимает, R2O отвергает как `plan_parse.c`); crypto/p256/x25519/props/udpplan — paired diff ещё нет"
+      "coverage": "C unit tests; Rust units; `test-controller-plantlv-differential.sh`, `test-core-crypto-differential.sh`, `test-controller-udpplan-differential.sh` (a378); CL15 published vectors",
+      "gap": "plantlv: 64 paired + 4 stricter; crypto: 13 paired (SHA/HMAC/HKDF/AES); udpplan voice: 3 paired; p256/x25519 — published vectors (CL15); props и QUIC-ветви udpplan — поведенческие Q2/Q8, helper-level не парные → partial",
+      "mapping": "C unit tests; Rust units; `test-controller-plantlv-differential.sh`, `test-core-crypto-differential.sh`, `test-controller-udpplan-differential.sh` (a378); CL15 published vectors",
+      "evidence": "C unit tests; Rust units; `test-controller-plantlv-differential.sh`, `test-core-crypto-differential.sh`, `test-controller-udpplan-differential.sh` (a378); CL15 published vectors · пробел: plantlv: 64 paired + 4 stricter; crypto: 13 paired (SHA/HMAC/HKDF/AES); udpplan voice: 3 paired; p256/x25519 — published vectors (CL15); props и QUIC-ветви udpplan — поведенческие Q2/Q8, helper-level не парные → partial"
     },
     {
       "id": 76,

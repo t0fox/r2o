@@ -12,6 +12,7 @@ hkdf = "0.12.4"
 sha2 = "0.10.9"
 
 [dev-dependencies]
+hmac = "0.12.1"
 tls-parser = "0.12.2"
 
 [lib]
