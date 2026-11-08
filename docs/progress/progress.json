@@ -1100,7 +1100,7 @@
         {
           "id": 157,
           "key": "TG1",
-          "name": "Config file/env mapping и валидация",
+          "name": "Config CLI/env interface и валидация",
           "weight": 2,
           "points": 2,
           "carry_points": 2,
@@ -5115,7 +5115,7 @@
     {
       "id": 157,
       "key": "TG1",
-      "name": "Config file/env mapping и валидация",
+      "name": "Config CLI/env interface и валидация",
       "weight": 2,
       "points": 2,
       "carry_points": 2,
