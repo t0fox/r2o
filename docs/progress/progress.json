@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 134,
-  "percent": 49.45,
+  "points": 136,
+  "percent": 50.18,
   "total": 179,
   "counts": {
-    "verified": 94,
+    "verified": 95,
     "carry": 40,
-    "partial": 44,
+    "partial": 43,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1095,7 +1095,7 @@
     {
       "name": "Telegram",
       "weight": 41,
-      "points": 17,
+      "points": 19,
       "items": [
         {
           "id": 157,
@@ -1312,15 +1312,15 @@
           "key": "TG16",
           "name": "Transparent policy ports/CIDR/self-dial",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Telegram",
-          "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "gap": "",
-          "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+          "coverage": "`scripts/test-telegram-transparent-policy-differential.sh` (a378); C `destination_allowed`; Rust `transparent::destination_allowed`",
+          "gap": "Лимиты 32/64, порт 0/80, CIDR-префиксы и non-public self-dial совпадают",
+          "mapping": "`scripts/test-telegram-transparent-policy-differential.sh` (a378); C `destination_allowed`; Rust `transparent::destination_allowed`",
+          "evidence": "`scripts/test-telegram-transparent-policy-differential.sh` (a378); C `destination_allowed`; Rust `transparent::destination_allowed` · пробел: Лимиты 32/64, порт 0/80, CIDR-префиксы и non-public self-dial совпадают"
         },
         {
           "id": 172,
@@ -5327,15 +5327,15 @@
       "key": "TG16",
       "name": "Transparent policy ports/CIDR/self-dial",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Telegram",
-      "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "gap": "",
-      "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+      "coverage": "`scripts/test-telegram-transparent-policy-differential.sh` (a378); C `destination_allowed`; Rust `transparent::destination_allowed`",
+      "gap": "Лимиты 32/64, порт 0/80, CIDR-префиксы и non-public self-dial совпадают",
+      "mapping": "`scripts/test-telegram-transparent-policy-differential.sh` (a378); C `destination_allowed`; Rust `transparent::destination_allowed`",
+      "evidence": "`scripts/test-telegram-transparent-policy-differential.sh` (a378); C `destination_allowed`; Rust `transparent::destination_allowed` · пробел: Лимиты 32/64, порт 0/80, CIDR-префиксы и non-public self-dial совпадают"
     },
     {
       "id": 172,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 134,
+      "points": 136,
       "weight": 271,
-      "percent": 49.45
+      "percent": 50.18
     },
     "carry_forward": {
-      "points": 197,
+      "points": 199,
       "weight": 271,
-      "percent": 72.69,
+      "percent": 73.43,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

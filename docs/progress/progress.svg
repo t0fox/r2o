@@ -1,12 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 49.45%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 50.18%">
 <rect width="1100" height="790" rx="20" fill="#0c121e"/>
 <text x="36" y="48" fill="#edf7ff" font-family="Arial,sans-serif" font-size="29" font-weight="700">R2O / D2O · Strict parity</text>
-<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">49.45%</text>
-<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">134 / 271 verified points</text>
+<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">50.18%</text>
+<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">136 / 271 verified points</text>
 <rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/>
-<rect x="37" y="113" width="506.3" height="11" rx="5" fill="#36c989"/>
-<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 94 verified · 0 missing · 2026-11-08</text>
-<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 197/271 = 72.69% · strict 134/271 = 49.45%</text>
+<rect x="37" y="113" width="513.9" height="11" rx="5" fill="#36c989"/>
+<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 95 verified · 0 missing · 2026-11-08</text>
+<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 199/271 = 73.43% · strict 136/271 = 50.18%</text>
 <rect x="37" y="190" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="213" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Datapath</text>
 <text x="533" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">16/28</text>
@@ -96,7 +96,7 @@
 <rect x="571" y="447" width="30" height="22" rx="5" fill="#36c989"><title>G1 Discord Gateway WebSocket upgrade/Hello: доказано (1/1)</title></rect>
 <rect x="37" y="526" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="549" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Telegram</text>
-<text x="533" y="549" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">17/41</text>
+<text x="533" y="549" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">19/41</text>
 <rect x="51" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>TG1 Config file/env mapping и валидация: частично (0/2)</title></rect>
 <rect x="89" y="559" width="30" height="22" rx="5" fill="#36c989"><title>TG3 DC map persist/merge/validate: доказано (2/2)</title></rect>
 <rect x="127" y="559" width="30" height="22" rx="5" fill="#36c989"><title>TG4 `help.getConfig` и dcOption: доказано (2/2)</title></rect>
@@ -111,7 +111,7 @@
 <rect x="469" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>TG13 CF domain pool refresh/cache: частично (0/2)</title></rect>
 <rect x="51" y="586" width="30" height="22" rx="5" fill="#e6b45d"><title>TG14 CF proxy DoH: частично (0/2)</title></rect>
 <rect x="89" y="586" width="30" height="22" rx="5" fill="#e6b45d"><title>TG15 Transparent listener/SO_ORIGINAL_DST: частично (0/2)</title></rect>
-<rect x="127" y="586" width="30" height="22" rx="5" fill="#e6b45d"><title>TG16 Transparent policy ports/CIDR/self-dial: частично (0/2)</title></rect>
+<rect x="127" y="586" width="30" height="22" rx="5" fill="#36c989"><title>TG16 Transparent policy ports/CIDR/self-dial: доказано (2/2)</title></rect>
 <rect x="165" y="586" width="30" height="22" rx="5" fill="#36c989"><title>TG17 Official secret/DD: доказано (2/2)</title></rect>
 <rect x="203" y="586" width="30" height="22" rx="5" fill="#e6b45d"><title>TG18 Retry/cooldown/routing policy: частично (0/2)</title></rect>
 <rect x="241" y="586" width="30" height="22" rx="5" fill="#e6b45d"><title>TG19 Stats schema и Unix socket: частично (0/2)</title></rect>
