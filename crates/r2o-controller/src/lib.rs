@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod classify;
 pub mod classify_json;
 mod classify_measured;
+pub mod compose_d2o;
 pub mod diagnostics;
 pub mod discovery;
 pub mod domain;

@@ -607,10 +607,10 @@
           "status": "partial",
           "statusLabel": "частично",
           "group": "Classifier / TLS",
-          "coverage": "C tests, Rust unit; compose probe (a378)",
-          "gap": "C/Rust plan-тексты — разные языки: `d2k-plan` vs `r2o-plan` (`wire`/`input`/`segment`, `payload-pad64`, разные payload ID); нужен критерий паритета (port C helper / wire-level diff); crypto/p256/x25519/props — отдельные векторы",
-          "mapping": "C tests, Rust unit; compose probe (a378)",
-          "evidence": "C tests, Rust unit; compose probe (a378) · пробел: C/Rust plan-тексты — разные языки: `d2k-plan` vs `r2o-plan` (`wire`/`input`/`segment`, `payload-pad64`, разные payload ID); нужен критерий паритета (port C helper / wire-level diff); crypto/p256/x25519/props — отдельные векторы"
+          "coverage": "C tests, Rust unit; `test-controller-compose-differential.sh` (a378)",
+          "gap": "Compose: 29 paired кейсов `d2k-plan` (чистый Rust-порт `compose_d2o`) — PASS; crypto/p256/x25519/props — ещё не paired",
+          "mapping": "C tests, Rust unit; `test-controller-compose-differential.sh` (a378)",
+          "evidence": "C tests, Rust unit; `test-controller-compose-differential.sh` (a378) · пробел: Compose: 29 paired кейсов `d2k-plan` (чистый Rust-порт `compose_d2o`) — PASS; crypto/p256/x25519/props — ещё не paired"
         },
         {
           "id": 53,
@@ -3547,10 +3547,10 @@
       "status": "partial",
       "statusLabel": "частично",
       "group": "Classifier / TLS",
-      "coverage": "C tests, Rust unit; compose probe (a378)",
-      "gap": "C/Rust plan-тексты — разные языки: `d2k-plan` vs `r2o-plan` (`wire`/`input`/`segment`, `payload-pad64`, разные payload ID); нужен критерий паритета (port C helper / wire-level diff); crypto/p256/x25519/props — отдельные векторы",
-      "mapping": "C tests, Rust unit; compose probe (a378)",
-      "evidence": "C tests, Rust unit; compose probe (a378) · пробел: C/Rust plan-тексты — разные языки: `d2k-plan` vs `r2o-plan` (`wire`/`input`/`segment`, `payload-pad64`, разные payload ID); нужен критерий паритета (port C helper / wire-level diff); crypto/p256/x25519/props — отдельные векторы"
+      "coverage": "C tests, Rust unit; `test-controller-compose-differential.sh` (a378)",
+      "gap": "Compose: 29 paired кейсов `d2k-plan` (чистый Rust-порт `compose_d2o`) — PASS; crypto/p256/x25519/props — ещё не paired",
+      "mapping": "C tests, Rust unit; `test-controller-compose-differential.sh` (a378)",
+      "evidence": "C tests, Rust unit; `test-controller-compose-differential.sh` (a378) · пробел: Compose: 29 paired кейсов `d2k-plan` (чистый Rust-порт `compose_d2o`) — PASS; crypto/p256/x25519/props — ещё не paired"
     },
     {
       "id": 53,
