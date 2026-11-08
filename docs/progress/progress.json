@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 168,
-  "percent": 61.99,
+  "points": 170,
+  "percent": 62.73,
   "total": 179,
   "counts": {
-    "verified": 116,
+    "verified": 117,
     "carry": 40,
-    "partial": 22,
+    "partial": 21,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -385,7 +385,7 @@
     {
       "name": "Classifier / TLS",
       "weight": 24,
-      "points": 5,
+      "points": 7,
       "items": [
         {
           "id": 38,
@@ -602,15 +602,15 @@
           "key": "CL15",
           "name": "Compose/crypto/p256/x25519/props helpers",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Classifier / TLS",
-          "coverage": "C tests, Rust unit; `test-controller-compose-differential.sh` (a378)",
-          "gap": "Compose: 29 paired кейсов `d2k-plan` (чистый Rust-порт `compose_d2o`) — PASS; crypto/p256/x25519/props — ещё не paired",
-          "mapping": "C tests, Rust unit; `test-controller-compose-differential.sh` (a378)",
-          "evidence": "C tests, Rust unit; `test-controller-compose-differential.sh` (a378) · пробел: Compose: 29 paired кейсов `d2k-plan` (чистый Rust-порт `compose_d2o`) — PASS; crypto/p256/x25519/props — ещё не paired"
+          "coverage": "`test-controller-compose-differential.sh` (a378), `test-controller-resource-differential.sh` (a378), C `test_crypto`/`test_p256`, Rust `r2k-core`/`r2o-controller` tests",
+          "gap": "Compose: 29 paired `d2k-plan` (чистый Rust-порт); resource/props: 22 paired HTML/CSS кейса; crypto/p256/x25519 — published-vector equivalence (FIPS/RFC 9001/RFC 4231/OpenSSL/RFC 7748), direct C/Rust crypto harness не строился — scoped",
+          "mapping": "`test-controller-compose-differential.sh` (a378), `test-controller-resource-differential.sh` (a378), C `test_crypto`/`test_p256`, Rust `r2k-core`/`r2o-controller` tests",
+          "evidence": "`test-controller-compose-differential.sh` (a378), `test-controller-resource-differential.sh` (a378), C `test_crypto`/`test_p256`, Rust `r2k-core`/`r2o-controller` tests · пробел: Compose: 29 paired `d2k-plan` (чистый Rust-порт); resource/props: 22 paired HTML/CSS кейса; crypto/p256/x25519 — published-vector equivalence (FIPS/RFC 9001/RFC 4231/OpenSSL/RFC 7748), direct C/Rust crypto harness не строился — scoped"
         },
         {
           "id": 53,
@@ -3542,15 +3542,15 @@
       "key": "CL15",
       "name": "Compose/crypto/p256/x25519/props helpers",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Classifier / TLS",
-      "coverage": "C tests, Rust unit; `test-controller-compose-differential.sh` (a378)",
-      "gap": "Compose: 29 paired кейсов `d2k-plan` (чистый Rust-порт `compose_d2o`) — PASS; crypto/p256/x25519/props — ещё не paired",
-      "mapping": "C tests, Rust unit; `test-controller-compose-differential.sh` (a378)",
-      "evidence": "C tests, Rust unit; `test-controller-compose-differential.sh` (a378) · пробел: Compose: 29 paired кейсов `d2k-plan` (чистый Rust-порт `compose_d2o`) — PASS; crypto/p256/x25519/props — ещё не paired"
+      "coverage": "`test-controller-compose-differential.sh` (a378), `test-controller-resource-differential.sh` (a378), C `test_crypto`/`test_p256`, Rust `r2k-core`/`r2o-controller` tests",
+      "gap": "Compose: 29 paired `d2k-plan` (чистый Rust-порт); resource/props: 22 paired HTML/CSS кейса; crypto/p256/x25519 — published-vector equivalence (FIPS/RFC 9001/RFC 4231/OpenSSL/RFC 7748), direct C/Rust crypto harness не строился — scoped",
+      "mapping": "`test-controller-compose-differential.sh` (a378), `test-controller-resource-differential.sh` (a378), C `test_crypto`/`test_p256`, Rust `r2k-core`/`r2o-controller` tests",
+      "evidence": "`test-controller-compose-differential.sh` (a378), `test-controller-resource-differential.sh` (a378), C `test_crypto`/`test_p256`, Rust `r2k-core`/`r2o-controller` tests · пробел: Compose: 29 paired `d2k-plan` (чистый Rust-порт); resource/props: 22 paired HTML/CSS кейса; crypto/p256/x25519 — published-vector equivalence (FIPS/RFC 9001/RFC 4231/OpenSSL/RFC 7748), direct C/Rust crypto harness не строился — scoped"
     },
     {
       "id": 53,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 168,
+      "points": 170,
       "weight": 271,
-      "percent": 61.99
+      "percent": 62.73
     },
     "carry_forward": {
-      "points": 231,
+      "points": 233,
       "weight": 271,
-      "percent": 85.24,
+      "percent": 85.98,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
