@@ -227,7 +227,11 @@ pub fn madvise_json(stats: &MadviseStats) -> Value {
 }
 
 const EVENT_CAPACITY: usize = 64;
+const LIMIT_CAPACITY: usize = 32;
 const SAMPLE_CAPACITY: usize = 120;
+const MEMORY_HISTORY_CAPACITY: usize = 1440;
+const ANOMALY_CAPACITY: usize = 8;
+const GROWTH_CAPACITY: usize = 10;
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
 const REPORT_MAX: usize = 256 * 1024;
 const D2O_PROCESS_CAPACITY: usize = 3;
@@ -261,12 +265,14 @@ const PROCESS_SPECS: [ProcessSpec; 5] = [
 
 #[allow(dead_code)]
 #[repr(C)]
-struct D2oDiagnosticProcessMemory {
+struct D2oDiagnosticProcMem {
     pid: c_long,
     rss: i64,
     hwm: i64,
     anon: i64,
     threads: i64,
+    vm_data: i64,
+    vm_swap: i64,
 }
 
 #[allow(dead_code)]
@@ -279,8 +285,10 @@ struct D2oDiagnosticMemoryDetail {
     start_ticks: i64,
     vm: [i64; 4],
     fds: i64,
-    smaps_ok: c_int,
-    groups: [[i64; 5]; 4],
+    rollup_status: c_int,
+    rollup_errno: c_int,
+    rollup_source: c_int,
+    rollup: [i64; 5],
 }
 
 #[allow(dead_code)]
@@ -305,6 +313,25 @@ struct D2oDiagnosticEvent {
 
 #[allow(dead_code)]
 #[repr(C)]
+struct D2oDiagnosticErrnoCount {
+    error: c_int,
+    count: u64,
+}
+
+#[allow(dead_code)]
+#[repr(C)]
+struct D2oDiagnosticMadvise {
+    successes: u64,
+    failures: u64,
+    requested_bytes: u64,
+    failed_requested_bytes: u64,
+    other_errno_count: u64,
+    last_errno: c_int,
+    errno_hist: [D2oDiagnosticErrnoCount; 4],
+}
+
+#[allow(dead_code)]
+#[repr(C)]
 struct D2oDiagnosticCounts {
     boxes: u64,
     bindings: u64,
@@ -316,6 +343,75 @@ struct D2oDiagnosticCounts {
     snapshots: u64,
     http_records: u64,
     http_queued: u64,
+    task_states: [u64; 15],
+    snapshot_bytes: u64,
+    catalog_bytes: u64,
+    tracked_tcp_bytes: u64,
+    tracked_quic_bytes: u64,
+    tracked_tls_bytes: u64,
+    workers_running: u64,
+    workers_live: u64,
+    workers_result_pending: u64,
+    workers_join_pending: u64,
+    worker_oldest_age_ms: i64,
+    last_measurement_age_ms: i64,
+    workers_started: u64,
+    workers_joined: u64,
+    worker_start_failures: u64,
+    worker_join_failures: u64,
+    http_failures: u64,
+    http_bytes: u64,
+    http_records_bytes: u64,
+    http_queue_bytes: u64,
+    http_failure_bytes: u64,
+    http_records_limit_bytes: u64,
+    http_queue_limit_bytes: u64,
+    http_failure_limit_bytes: u64,
+    http_failure_record_limit_bytes: u64,
+    http_failure_limit_hits: u64,
+    http_failure_record_limit_hits: u64,
+    http_failure_alloc_failures: u64,
+    http_record_limit_hits: u64,
+    http_record_alloc_failures: u64,
+    http_queue_limit_hits: u64,
+    http_queue_alloc_failures: u64,
+    worker_oldest_type: [u8; 12],
+    measurement_limit: u64,
+    measurement_slots: u64,
+    resource_sequence: u64,
+    limit_sequence: u64,
+    limit_age_ms: u64,
+    mem_avail_kb: u64,
+    mem_total_kb: u64,
+    mem_reserve_kb: u64,
+    conntrack_count: u64,
+    conntrack_max: u64,
+    cpu_free_pct: i64,
+    limiter_mask: u32,
+    resources_valid: c_int,
+    cpu_valid: c_int,
+    mem_valid: c_int,
+    conntrack_valid: c_int,
+    grow_pending: c_int,
+}
+
+#[allow(dead_code)]
+#[repr(C)]
+struct D2oDiagnosticLimitEvent {
+    at: i64,
+    mono: i64,
+    cpu_free_pct: i64,
+    limit: u64,
+    slots: u64,
+    resource_seq: u64,
+    limit_seq: u64,
+    mem_avail: u64,
+    mem_total: u64,
+    mem_reserve: u64,
+    ct_count: u64,
+    ct_max: u64,
+    mask: u32,
+    flags: u32,
 }
 
 #[allow(dead_code)]
@@ -327,7 +423,51 @@ struct D2oDiagnosticSample {
     available: i64,
     conntrack: i64,
     counts: D2oDiagnosticCounts,
-    processes: [D2oDiagnosticProcessMemory; D2O_PROCESS_CAPACITY],
+    procs: [D2oDiagnosticProcMem; D2O_PROCESS_CAPACITY],
+}
+
+#[allow(dead_code)]
+#[repr(C)]
+struct D2oDiagnosticMemorySample {
+    at_s: u32,
+    mono_s: u32,
+    rss: i32,
+    vm_data: i32,
+    vm_swap: i32,
+    rollup: [i32; 5],
+    rollup_errno: i32,
+    rollup_status: u8,
+    d2kc_epoch: u16,
+    rss_anon_kib: i32,
+    catalog_bytes: i32,
+    http_bytes: i32,
+    snapshot_bytes: i32,
+    tracked_tcp_bytes: i32,
+    tracked_quic_bytes: i32,
+    tracked_tls_bytes: i32,
+    tasks: u8,
+    workers_live: u8,
+    workers_result_pending: u8,
+    workers_join_pending: u8,
+}
+
+#[allow(dead_code)]
+#[repr(C)]
+struct D2oDiagnosticGrowthPoint {
+    mono: i64,
+    rss: i32,
+    accounted: i32,
+}
+
+#[allow(dead_code)]
+#[repr(C)]
+struct D2oDiagnosticAnomaly {
+    at: u64,
+    code: i32,
+    rss_delta: i32,
+    accounted_delta: i32,
+    kind: u8,
+    stage: [u8; 24],
 }
 
 #[allow(dead_code)]
@@ -336,12 +476,32 @@ struct D2oDiagnosticRing {
     first: [D2oDiagnosticMemoryDetail; D2O_PROCESS_CAPACITY],
     latest: [D2oDiagnosticMemoryDetail; D2O_PROCESS_CAPACITY],
     events: [D2oDiagnosticEvent; EVENT_CAPACITY],
+    limits: [D2oDiagnosticLimitEvent; LIMIT_CAPACITY],
     samples: [D2oDiagnosticSample; SAMPLE_CAPACITY],
-    event_count: usize,
-    sample_count: usize,
+    memory_history: [D2oDiagnosticMemorySample; MEMORY_HISTORY_CAPACITY],
+    anomalies: [D2oDiagnosticAnomaly; ANOMALY_CAPACITY],
+    growth: [D2oDiagnosticGrowthPoint; GROWTH_CAPACITY],
+    madvise: D2oDiagnosticMadvise,
+    ne: usize,
+    nl: usize,
+    ns: usize,
+    nm: usize,
+    na: usize,
+    ng: usize,
+    growth_next: usize,
     event_total: u64,
+    limit_total: u64,
     sample_total: u64,
+    memory_total: u64,
+    anomaly_total: u64,
+    write_failures: u64,
+    growth_pid: i32,
+    memory_pid: c_long,
+    memory_start_ticks: i64,
+    last_unattributed_ms: i64,
     last_ms: i64,
+    d2kc_epoch: u16,
+    memory_pid_seen: c_int,
     sampled: c_int,
 }
 

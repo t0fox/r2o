@@ -12,7 +12,6 @@ ROOT=${R2O_DIR:-/opt/r2o}
 CONF=${R2O_CONFIG:-$ROOT/config}
 # shellcheck disable=SC1090  # конфигурация owner-managed, путь задаётся выше
 [ ! -r "$CONF" ] || . "$CONF"
-RUN=${R2O_RUN_DIR:-$ROOT/run}
 RUNTIME=${R2O_RUNTIME_DIR:-/tmp/r2o}
 STATE_DIR=${STATE_DIR:-$ROOT/state}
 INIT=${TG_WATCHDOG_INIT:-${R2O_INIT:-/opt/etc/init.d/S99r2o}}

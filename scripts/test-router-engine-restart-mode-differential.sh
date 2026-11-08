@@ -1,4 +1,5 @@
 #!/bin/sh
+# shellcheck disable=SC1090
 # B6: paired C/Rust differential ветвей start/restart/engine-restart при MODE=off.
 #
 # Ветви извлекаются из закреплённых исходников, а не переписываются: проверяется
@@ -65,6 +66,7 @@ run_branch() {
     (
         # Ветви обязаны вернуть отказ, не роняя стенд: set -e снят только здесь.
         set +e
+        # shellcheck disable=SC2034  # MODE читают извлечённые ветви службы
         MODE=$mode
         say() { :; }
         die() { echo "die"; exit 1; }

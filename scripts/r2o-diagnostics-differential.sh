@@ -3,7 +3,7 @@ set -eu
 
 repo_root=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 donor_root=${R2O_DONOR_ROOT:-"${repo_root%/*}/d2o"}
-donor_sha=304ba893dd37197128ac8799c0495b035f6a38c0
+donor_sha=a378e230947ebfd011439e1cac0f1e994d883aae
 test "$(git -C "$donor_root" rev-parse HEAD)" = "$donor_sha"
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/r2o-diagnostics-diff.XXXXXX")
 trap 'rm -rf -- "$tmp_dir"' EXIT HUP INT TERM
@@ -40,6 +40,7 @@ clang-18 -std=gnu11 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-section
     -DD2K_RELEASE_ID='"dev"' -I"$donor_core" -I"$donor_core/include" \
     -I"$donor_root/datapath/include" \
     "$repo_root/crates/r2o-controller/tests/d2o_diagnostics_snapshot_differential.c" \
+    "$donor_core/catalog.c" \
     -Wl,--gc-sections -pthread -o "$tmp_dir/d2o-snapshots"
 "$tmp_dir/d2o-snapshots" >"$tmp_dir/c-snapshots.out"
 R2O_DIAGNOSTICS_SNAPSHOT_DIFF_OUTPUT="$tmp_dir/rust-snapshots.out" \
@@ -73,6 +74,7 @@ clang-18 -std=gnu11 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-section
     -DD2K_RELEASE_ID='"dev"' -I"$donor_core" -I"$donor_core/include" \
     -I"$donor_root/datapath/include" \
     "$repo_root/crates/r2o-controller/tests/d2o_scheduler_diagnostic_differential.c" \
+    "$donor_core/catalog.c" \
     -Wl,--gc-sections -pthread -o "$tmp_dir/d2o-scheduler-diagnostic"
 "$tmp_dir/d2o-scheduler-diagnostic" >"$tmp_dir/c-scheduler-diagnostic.out"
 R2O_SCHED_DIAGNOSTIC_DIFF_OUTPUT="$tmp_dir/rust-scheduler-diagnostic.out" \
@@ -85,6 +87,7 @@ clang-18 -std=gnu11 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-section
     -DD2K_RELEASE_ID='"dev"' -I"$donor_core" -I"$donor_core/include" \
     -I"$donor_root/datapath/include" \
     "$repo_root/crates/r2o-controller/tests/d2o_scheduler_queue_full_differential.c" \
+    "$donor_core/catalog.c" \
     -Wl,--gc-sections -pthread -o "$tmp_dir/d2o-scheduler-queue-full"
 "$tmp_dir/d2o-scheduler-queue-full" >"$tmp_dir/c-scheduler-queue-full.out"
 R2O_SCHED_QUEUE_FULL_DIFF_OUTPUT="$tmp_dir/rust-scheduler-queue-full.out" \
@@ -97,6 +100,7 @@ clang-18 -std=gnu11 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-section
     -DD2K_RELEASE_ID='"dev"' -I"$donor_core" -I"$donor_core/include" \
     -I"$donor_root/datapath/include" \
     "$repo_root/crates/r2o-controller/tests/d2o_scheduler_timing_differential.c" \
+    "$donor_core/catalog.c" \
     -Wl,--gc-sections -pthread -o "$tmp_dir/d2o-scheduler-timing"
 "$tmp_dir/d2o-scheduler-timing" >"$tmp_dir/c-scheduler-timing.out"
 R2O_SCHED_TIMING_DIFF_OUTPUT="$tmp_dir/rust-scheduler-timing.out" \
@@ -109,6 +113,7 @@ clang-18 -std=gnu11 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-section
     -DD2K_RELEASE_ID='"dev"' -I"$donor_core" -I"$donor_core/include" \
     -I"$donor_root/datapath/include" \
     "$repo_root/crates/r2o-controller/tests/d2o_scheduler_voice_diagnostic_differential.c" \
+    "$donor_core/catalog.c" \
     -Wl,--gc-sections -pthread -o "$tmp_dir/d2o-scheduler-voice-diagnostic"
 "$tmp_dir/d2o-scheduler-voice-diagnostic" >"$tmp_dir/c-scheduler-voice-diagnostic.out"
 R2O_SCHED_VOICE_DIAGNOSTIC_DIFF_OUTPUT="$tmp_dir/rust-scheduler-voice-diagnostic.out" \
@@ -132,6 +137,7 @@ clang-18 -std=gnu11 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-section
     -DD2K_RELEASE_ID='"dev"' -I"$donor_core" -I"$donor_core/include" \
     -I"$donor_root/datapath/include" \
     "$repo_root/crates/r2o-controller/tests/d2o_scheduler_voice_terminal_diagnostic_differential.c" \
+    "$donor_core/catalog.c" \
     -Wl,--gc-sections -pthread -o "$tmp_dir/d2o-scheduler-voice-terminal-diagnostic"
 : >"$tmp_dir/c-scheduler-voice-terminal.out"
 for outcome in discovery-confirmed stun-confirmed failed cancelled; do
@@ -155,6 +161,7 @@ clang-18 -std=c99 -O2 -Wall -Wextra -Werror -DD2K_RELEASE_ID='"dev"' \
     "$donor_core/udpruntime.c" "$donor_core/plantlv.c" \
     "$donor_root/datapath/plan_parse.c" "$donor_root/datapath/plan_apply.c" \
     "$donor_root/datapath/wire.c" "$donor_root/datapath/wire_udp.c" \
+    "$donor_core/diagnostics.c" \
     -pthread -o "$tmp_dir/d2o-quic-base"
 "$tmp_dir/d2o-quic-base" profile >"$tmp_dir/c-quic-profile.out"
 R2O_QUIC_PROFILE_DIFF_OUTPUT="$tmp_dir/rust-quic-profile.out" \
@@ -263,7 +270,8 @@ clang-18 -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections 
     -I"$donor_core" -I"$donor_core/include" -I"$donor_root/runtime" \
     -I"$donor_root/datapath/include" \
     "$repo_root/crates/r2o-controller/tests/d2o_diagnostic_tick_differential.c" \
-    "$donor_core/diagnostics.c" -Wl,--gc-sections -o "$tmp_dir/d2o-diagnostic-tick"
+    "$donor_core/diagnostics.c" \
+    -Wl,--gc-sections -o "$tmp_dir/d2o-diagnostic-tick"
 "$tmp_dir/d2o-diagnostic-tick" >"$tmp_dir/c-diagnostic-tick.out"
 R2O_DIAGNOSTIC_TICK_DIFF_OUTPUT="$tmp_dir/rust-diagnostic-tick.out" \
     cargo +1.98.0 test -p r2o-controller --lib --locked --offline \

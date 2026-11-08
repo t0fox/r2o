@@ -4,10 +4,12 @@ set -eu
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 
 BASELINE_SHA=eb848976ed9491791b7f2130b874867b61b2ca5d
-UPSTREAM_SHA=304ba893dd37197128ac8799c0495b035f6a38c0
+UPSTREAM_SHA=a378e230947ebfd011439e1cac0f1e994d883aae
+LEGACY_SHA=304ba893dd37197128ac8799c0495b035f6a38c0
 
 BASELINE_EXPECTED='r2o-ask-differential.sh r2o-discord-discovery-differential.sh r2o-discovery-active-lifetime-differential.sh r2o-discovery-coalesce-differential.sh r2o-fetch-cli-differential.sh r2o-quic-stun-watch-differential.sh r2o-tcp-exchange-differential.sh r2o-hold-differential.sh r2o-tcp-payload-stats-differential.sh r2o-tcp-rst-cut-differential.sh r2o-tcp-rst-observation-differential.sh r2o-udp-exchange-differential.sh'
-UPSTREAM_EXPECTED='r2o-ask-differential.sh r2o-ack-applied-persist-differential.sh r2o-bridge-clone-decoy-differential.sh r2o-catalog-persist-differential.sh r2o-catalog-sync-differential.sh r2o-control-dropped-differential.sh r2o-control-events-differential.sh r2o-diagnostics-differential.sh r2o-discord-discovery-differential.sh r2o-discovery-active-lifetime-differential.sh r2o-discovery-coalesce-differential.sh r2o-discovery-concurrency-check.sh r2o-discovery-quic-stop-differential.sh r2o-ech-rx-ladder-differential.sh r2o-fallback-differential.sh r2o-fetch-cli-differential.sh r2o-http-search-differential.sh r2o-known-plans-differential.sh r2o-layered-rx-differential.sh r2o-meas-differential.sh r2o-measured-split-differential.sh r2o-nat-proc-differential.sh r2o-conntrack-ctget-differential.sh r2o-net-whitelist-probe-differential.sh r2o-own-first-differential.sh r2o-panel-bind-default-differential.sh r2o-quic-hello-differential.sh r2o-quic-local-address-differential.sh r2o-queue-order-differential.sh r2o-quic-stun-watch-differential.sh r2o-raw-connect-fallback-differential.sh r2o-raw-emission-cancel-differential.sh r2o-raw-profile-differential.sh r2o-raw-split-support-differential.sh r2o-resource-limit-differential.sh r2o-route-gate-differential.sh r2o-scheduler-concurrent-endpoint-differential.sh r2o-scheduler-cooldown-differential.sh r2o-scheduler-dead-address-differential.sh r2o-scheduler-differential.sh r2o-socket-split-deadline-differential.sh r2o-tcp-exchange-differential.sh r2o-hold-differential.sh r2o-tcp-payload-stats-differential.sh r2o-tcp-reply-hidden-differential.sh r2o-tcp-rst-cut-differential.sh r2o-tcp-rst-observation-differential.sh r2o-telegram-route-dns-differential.sh r2o-telegram-response-observer-differential.sh r2o-tls-verify-differential.sh r2o-udp-exchange-differential.sh r2o-udp-session-table-check.sh r2o-worker-permit-differential.sh test-d2o-shared-fixtures.sh'
+UPSTREAM_EXPECTED='r2o-ask-differential.sh r2o-ack-applied-persist-differential.sh r2o-bridge-clone-decoy-differential.sh r2o-catalog-persist-differential.sh r2o-catalog-sync-differential.sh r2o-control-dropped-differential.sh r2o-control-events-differential.sh r2o-diagnostics-differential.sh r2o-discord-discovery-differential.sh r2o-discovery-active-lifetime-differential.sh r2o-discovery-coalesce-differential.sh r2o-discovery-concurrency-check.sh r2o-discovery-quic-stop-differential.sh r2o-ech-rx-ladder-differential.sh r2o-fallback-differential.sh r2o-fetch-cli-differential.sh r2o-http-search-differential.sh r2o-known-plans-differential.sh r2o-layered-rx-differential.sh r2o-meas-differential.sh r2o-measured-split-differential.sh r2o-nat-proc-differential.sh r2o-conntrack-ctget-differential.sh r2o-own-first-differential.sh r2o-panel-bind-default-differential.sh r2o-quic-hello-differential.sh r2o-quic-local-address-differential.sh r2o-queue-order-differential.sh r2o-quic-stun-watch-differential.sh r2o-raw-connect-fallback-differential.sh r2o-raw-emission-cancel-differential.sh r2o-raw-profile-differential.sh r2o-raw-split-support-differential.sh r2o-resource-limit-differential.sh r2o-route-gate-differential.sh r2o-scheduler-concurrent-endpoint-differential.sh r2o-scheduler-cooldown-differential.sh r2o-scheduler-dead-address-differential.sh r2o-scheduler-differential.sh r2o-socket-split-deadline-differential.sh r2o-tcp-exchange-differential.sh r2o-hold-differential.sh r2o-tcp-payload-stats-differential.sh r2o-tcp-reply-hidden-differential.sh r2o-tcp-rst-cut-differential.sh r2o-tcp-rst-observation-differential.sh r2o-telegram-route-dns-differential.sh r2o-telegram-response-observer-differential.sh r2o-tls-verify-differential.sh r2o-udp-exchange-differential.sh r2o-udp-session-table-check.sh r2o-worker-permit-differential.sh test-d2o-shared-fixtures.sh'
+LEGACY_EXPECTED='r2o-net-whitelist-probe-differential.sh'
 
 shards_for() {
     case "$1" in
@@ -15,6 +17,7 @@ shards_for() {
             printf '%s\n' host tcp
             ;;
         upstream) printf '%s\n' discovery httpsearch panel quic-control rst-udp scheduler tcp telegram tls ;;
+        legacy) printf '%s\n' legacy ;;
         *) echo "ci-differential-shards: unknown snapshot: $1" >&2; return 2 ;;
     esac
 }
@@ -52,7 +55,6 @@ scripts_for() {
                 r2o-ech-rx-ladder-differential.sh \
                 r2o-known-plans-differential.sh \
                 test-d2o-shared-fixtures.sh \
-                r2o-net-whitelist-probe-differential.sh \
                 r2o-own-first-differential.sh \
                 r2o-layered-rx-differential.sh \
                 r2o-fallback-differential.sh
@@ -104,6 +106,9 @@ scripts_for() {
         upstream:telegram)
             printf '%s\n' r2o-telegram-route-dns-differential.sh r2o-telegram-response-observer-differential.sh
             ;;
+        legacy:legacy)
+            printf '%s\n' r2o-net-whitelist-probe-differential.sh
+            ;;
         upstream:rst-udp)
             printf '%s\n' \
                 r2o-raw-profile-differential.sh \
@@ -123,6 +128,7 @@ expected_for() {
     case "$1" in
         baseline) printf '%s\n' "$BASELINE_EXPECTED" | tr ' ' '\n' | LC_ALL=C sort ;;
         upstream) printf '%s\n' "$UPSTREAM_EXPECTED" | tr ' ' '\n' | LC_ALL=C sort ;;
+        legacy) printf '%s\n' "$LEGACY_EXPECTED" | tr ' ' '\n' | LC_ALL=C sort ;;
         *) echo "ci-differential-shards: unknown snapshot: $1" >&2; return 2 ;;
     esac
 }
@@ -161,13 +167,19 @@ EOF
 verify() {
     verify_snapshot baseline
     verify_snapshot upstream
+    verify_snapshot legacy
     discovered=$(find "$SCRIPT_DIR" -maxdepth 1 -type f \
         \( -name 'r2o-*-differential.sh' \
            -o -name 'r2o-discovery-concurrency-check.sh' \
            -o -name 'r2o-udp-session-table-check.sh' \
            -o -name 'test-d2o-shared-fixtures.sh' \) \
         -printf '%f\n' | LC_ALL=C sort)
-    expected=$(expected_for upstream)
+    expected=$(
+        {
+            expected_for upstream
+            expected_for legacy
+        } | LC_ALL=C sort -u
+    )
     if [ "$discovered" != "$expected" ]; then
         echo 'ci-differential-shards: update the pinned scenario manifests when differential scripts change' >&2
         echo "expected: $expected" >&2
@@ -176,17 +188,19 @@ verify() {
     fi
     baseline_count=$(printf '%s\n' "$BASELINE_EXPECTED" | wc -w | tr -d ' ')
     upstream_count=$(printf '%s\n' "$UPSTREAM_EXPECTED" | wc -w | tr -d ' ')
-    echo "ci-differential-shards: baseline $baseline_count and upstream $upstream_count scenarios are covered exactly once"
+    legacy_count=$(printf '%s\n' "$LEGACY_EXPECTED" | wc -w | tr -d ' ')
+    echo "ci-differential-shards: baseline $baseline_count, upstream $upstream_count and legacy $legacy_count scenarios are covered exactly once"
 }
 
 matrix() {
     verify >/dev/null
     first=1
     entries=
-    for snapshot in baseline upstream; do
+    for snapshot in baseline upstream legacy; do
         case "$snapshot" in
             baseline) donor_sha=$BASELINE_SHA ;;
             upstream) donor_sha=$UPSTREAM_SHA ;;
+            legacy) donor_sha=$LEGACY_SHA ;;
         esac
         # The shard names are fixed in this script and contain no whitespace.
         # shellcheck disable=SC2046

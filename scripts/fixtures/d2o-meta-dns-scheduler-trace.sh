@@ -1,4 +1,5 @@
 #!/bin/sh
+# shellcheck disable=SC1090,SC2034
 # B48 C-side trace: offset/backoff/run_at/tick из D2O scheduler.
 set -eu
 

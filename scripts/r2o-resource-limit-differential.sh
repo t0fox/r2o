@@ -3,7 +3,7 @@ set -eu
 
 repo_root=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 donor_root=${R2O_DONOR_ROOT:-"${repo_root%/*}/d2o"}
-expected_donor_sha=304ba893dd37197128ac8799c0495b035f6a38c0
+expected_donor_sha=a378e230947ebfd011439e1cac0f1e994d883aae
 actual_donor_sha=$(git -C "$donor_root" rev-parse HEAD)
 if [ "$actual_donor_sha" != "$expected_donor_sha" ]; then
     printf 'Expected d2o %s, got %s\n' "$expected_donor_sha" "$actual_donor_sha" >&2
@@ -53,6 +53,7 @@ printf 'C donor d2k_sched_cpu_parse: all three vectors match\n'
     -pthread -I"$donor_core" -I"$donor_core/include" \
     -I"$donor_root/datapath/include" -DD2K_RELEASE_ID='"dev"' \
     "$repo_root/crates/r2o-controller/tests/d2o_aimd_differential.c" \
+    "$donor_core/catalog.c" \
     -Wl,--gc-sections -o "$tmp_dir/aimd"
 fixture="$repo_root/crates/r2o-controller/tests/fixtures/d2o_aimd.tsv"
 "$tmp_dir/aimd" "$fixture" >"$tmp_dir/c-aimd.out"

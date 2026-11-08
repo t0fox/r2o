@@ -60,11 +60,15 @@ fn запись_журнала_сохраняет_все_поля_при_пер�
 }
 
 #[test]
-fn передача_журнала_отвергает_непредставленную_заметку() {
+fn передача_журнала_не_несёт_локальную_заметку() {
     let mut entry = запись(1);
+    entry.key[0] = 4;
+    entry.key[37] = 6;
     entry.note = Some("непередаваемая заметка");
 
-    assert!(entry.to_event_frame().is_err());
+    let frame = entry.to_event_frame().unwrap();
+    let restored = R2oFlowJournalEntry::from_event_frame(&frame).unwrap();
+    assert_eq!(restored.note, None);
 }
 
 #[test]
@@ -387,10 +391,11 @@ fn отказ_исполнителя_сохраняет_код_плана_поп
     assert_eq!(refused.trial_id, [0x5a; 16]);
     assert_eq!(refused.execution_id, 77);
     assert_eq!(refused.binding, Some(binding));
-    assert_eq!(
-        R2oFlowJournalEntry::from_event_frame(&refused.to_event_frame().unwrap()).unwrap(),
-        *refused
-    );
+    let mut restored =
+        R2oFlowJournalEntry::from_event_frame(&refused.to_event_frame().unwrap()).unwrap();
+    assert_eq!(restored.note, None);
+    restored.note = refused.note;
+    assert_eq!(restored, *refused);
 
     assert!(journal.record_plan_refused(
         322,

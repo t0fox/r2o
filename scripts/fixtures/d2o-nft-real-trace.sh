@@ -1,4 +1,5 @@
 #!/bin/sh
+# shellcheck disable=SC2034
 # B10 C-side: применить nft-генератор D2O к реальному nft в netns.
 set -eu
 

@@ -131,6 +131,12 @@ jobs:
           ref: 8e2c98146cf0b712dc967fbec558c7b904666e87
           path: d2o-current
           persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # version v7.0.1
+        with:
+          repository: t0fox/d2o
+          ref: a378e230947ebfd011439e1cac0f1e994d883aae
+          path: d2o-a378
+          persist-credentials: false
       - name: Установить зависимости production TLS fixture
         run: |
           sudo apt-get update
@@ -175,7 +181,9 @@ jobs:
               if [ "$test_name" = test-router-openwrt-init.sh ]; then
                 test_shell=bash
               fi
-              if grep -q 'EXPECTED_D2O_SHA=8e2c98146cf0b712dc967fbec558c7b904666e87' "$test"; then
+              if grep -q 'a378e230947ebfd011439e1cac0f1e994d883aae' "$test"; then
+                donor_root="$GITHUB_WORKSPACE/d2o-a378"
+              elif grep -q '8e2c98146cf0b712dc967fbec558c7b904666e87' "$test"; then
                 donor_root="$GITHUB_WORKSPACE/d2o-current"
               else
                 donor_root="$R2O_DONOR_ROOT"
@@ -322,10 +330,18 @@ jobs:
           ref: a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe
           path: d2o
           persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
+        with:
+          repository: t0fox/d2o
+          ref: a378e230947ebfd011439e1cac0f1e994d883aae
+          path: d2o-a378
+          persist-credentials: false
       - name: Установить средства проверки сетевых пакетов
         run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential iproute2 nftables python3
       - name: Собрать эталонный C datapath
-        run: make -B -C d2o/datapath d2kd
+        run: |
+          make -B -C d2o/datapath d2kd
+          make -B -C d2o-a378/datapath d2kd
       - name: Собрать сетевой исполнитель
         run: cargo build --release --locked --package r2o-datapath --package r2o-controller
       - name: Сверить периодические метрики datapath с D2O C
@@ -370,8 +386,8 @@ jobs:
         run: >-
           sudo env
           R2O_TOOL_HOME="$GITHUB_WORKSPACE/target/nfq-eio-tooling"
-          R2O_DONOR_ROOT="$GITHUB_WORKSPACE/d2o"
-          D2OD_BIN="$GITHUB_WORKSPACE/d2o/datapath/d2kd"
+          R2O_DONOR_ROOT="$GITHUB_WORKSPACE/d2o-a378"
+          D2OD_BIN="$GITHUB_WORKSPACE/d2o-a378/datapath/d2kd"
           R2OD_BIN="$GITHUB_WORKSPACE/target/release/r2o-datapath"
           R2O_TEST_TMP="$GITHUB_WORKSPACE/target/nfq-eio-tooling/tmp"
           R2O_TEST_LOG="$GITHUB_WORKSPACE/target/nfq-eio-tooling/nfq-ipv4-eio.log"

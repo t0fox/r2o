@@ -29,6 +29,22 @@ void d2k_httpsearch_diagnostic_counts(d2k_httpsearch *search, d2k_diag_counts *c
     memset(counts, 0, sizeof(*counts));
 }
 
+void d2k_sched_limit_diagnostics(d2k_sched *sched, d2k_diag_limit_observer observer,
+                                 void *ctx) {
+    (void)sched;
+    (void)observer;
+    (void)ctx;
+}
+
+void d2k_sched_diagnostic_madvise(d2k_sched *sched, d2k_diag_madvise *stats) {
+    (void)sched;
+    if (stats) memset(stats, 0, sizeof(*stats));
+}
+
+void d2k_sched_diagnostic_madvise_reset(d2k_sched *sched) {
+    (void)sched;
+}
+
 static int exists(const char *name) {
     char path[512];
     if (snprintf(path, sizeof(path), "%s/%s", D2K_DIAG_DIR, name) >= (int)sizeof(path))

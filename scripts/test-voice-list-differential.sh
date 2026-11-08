@@ -23,7 +23,6 @@ trap 'rm -rf -- "$TEMP"' EXIT HUP INT TERM
 
 make -s -B -C "$D2O_ROOT/core" d2kvoice CC="$CC" >/dev/null
 D2O_VOICE="$D2O_ROOT/core/d2kvoice"
-R2O="cargo"
 
 run_case() {
     name=$1
