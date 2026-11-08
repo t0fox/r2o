@@ -266,7 +266,7 @@ def render_index(data, css, grid, rows):
 <p class="note">Строгий счёт — единственный, который подтверждает текущую ревизию. Carry-forward
 принимает <code>304ba893</code> как допустимую; здесь учитываются только строки, явно помеченные
 <code>carry (304)</code>. Legacy-агрегат имеет другой знаменатель (57 строк / 89 баллов)
-и не сопоставим напрямую с 178 контрактами / 271 баллом.</p></div>
+и не сопоставим напрямую с 179 контрактами / 271 баллом.</p></div>
 <div class="legend"><span style="--c:#36c989">доказано</span><span style="--c:#819bf8">carry (304)</span>
 <span style="--c:#e6b45d">частично</span><span style="--c:#e06c75">пробел</span></div>
 <div class="grid">{grid}</div>
@@ -306,6 +306,7 @@ def render_svg(data):
         "carry": "#819bf8",
         "partial": "#e6b45d",
         "missing": "#e06c75",
+        "extension": "#65758c",
         "implemented": "#819bf8",
         "unknown": "#65758c",
     }
@@ -370,17 +371,17 @@ def render_history():
         {
             "sha": "carry-304-normalized",
             "date": "2026-11-08",
-            "points": 167,
+            "points": 168,
             "weight": 271,
-            "percent": 61.62,
+            "percent": 61.99,
             "label": "carry (только явно помеченные 304)",
         },
         {
             "sha": "strict-normalized",
             "date": "2026-11-08",
-            "points": 104,
+            "points": 105,
             "weight": 271,
-            "percent": 38.38,
+            "percent": 38.75,
             "label": "строгий текущий (нормализованный)",
         },
     ]

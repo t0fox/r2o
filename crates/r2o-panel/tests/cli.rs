@@ -87,6 +87,8 @@ fn cli_starts_http_panel_writes_health_and_stops_cleanly() {
         .arg(&health)
         .arg("--state-dir")
         .arg(temp.file("state"))
+        .arg("--assets")
+        .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets"))
         .arg("--service")
         .arg(temp.file("missing-service"))
         .stdin(Stdio::null())

@@ -1871,40 +1871,53 @@ fn static_asset(
 }
 
 fn read_asset(config: &Config, name: &str) -> std::io::Result<(Vec<u8>, Option<fs::Metadata>)> {
-    let root_safe = fs::symlink_metadata(&config.asset_dir)
-        .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink());
-    if !root_safe {
-        return embedded_asset(name)
-            .map(|bytes| (bytes.to_vec(), None))
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::NotFound, "asset root unavailable")
-            });
+    let asset_dir_state = fs::symlink_metadata(&config.asset_dir);
+    match asset_dir_state {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            // C `static_file`: каталог-символ или не-каталог — 404, без подмены.
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "asset root unsafe",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // R2O extension: выпуск без отдельного каталога panel отдаёт
+            // встроенные ассеты. C в этом случае всегда 404.
+            return embedded_asset(name)
+                .map(|bytes| (bytes.to_vec(), None))
+                .ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::NotFound, "asset root unavailable")
+                });
+        }
+        Err(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "asset root unavailable",
+            ));
+        }
     }
     if name.starts_with("fonts/")
         && fs::symlink_metadata(config.asset_dir.join("fonts"))
             .is_ok_and(|m| !m.is_dir() || m.file_type().is_symlink())
     {
-        return embedded_asset(name)
-            .map(|bytes| (bytes.to_vec(), None))
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::NotFound, "asset directory unsafe")
-            });
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "asset directory unsafe",
+        ));
     }
     let path = config.asset_dir.join(name);
     if fs::symlink_metadata(&path)
         .is_ok_and(|metadata| metadata.is_file() && metadata.len() > STATIC_ASSET_MAX as u64)
     {
         return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
+            std::io::ErrorKind::NotFound,
             "asset exceeds D2O static file limit",
         ));
     }
-    match read_regular_file_with_metadata(&path, STATIC_ASSET_MAX) {
-        Ok((bytes, metadata)) => Ok((bytes, Some(metadata))),
-        Err(_) => embedded_asset(name)
-            .map(|bytes| (bytes.to_vec(), None))
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "asset missing")),
-    }
+    read_regular_file_with_metadata(&path, STATIC_ASSET_MAX)
+        .map(|(bytes, metadata)| (bytes, Some(metadata)))
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::NotFound, "asset missing"))
 }
 
 fn asset_modified_time(metadata: &fs::Metadata) -> u64 {

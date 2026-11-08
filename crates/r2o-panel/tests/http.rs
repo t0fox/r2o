@@ -1176,6 +1176,46 @@ fn static_assets_use_etag_and_return_not_modified() {
 }
 
 #[test]
+#[ignore = "run through scripts/test-panel-static-asset-fallback-differential.sh"]
+fn d2o_static_asset_missing_or_symlink_returns_404() {
+    let asset_dir = PathBuf::from(
+        std::env::var_os("R2O_PANEL_ASSET_STATUS_DIR")
+            .expect("test helper provides asset directory"),
+    );
+    let c_trace = fs::read_to_string(
+        std::env::var_os("R2O_PANEL_ASSET_STATUS_C_TRACE").expect("test helper provides D2O trace"),
+    )
+    .unwrap();
+    let mut config = Config::default();
+    config.asset_dir = asset_dir;
+    let response = handle_request(&config, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    let trace = format!(
+        "{} {}",
+        response.status,
+        String::from_utf8_lossy(&response.body).trim()
+    );
+    assert_eq!(trace, c_trace.trim());
+    assert_eq!(response.status, 404);
+}
+
+#[test]
+#[ignore = "run through scripts/test-panel-static-asset-fallback-differential.sh"]
+fn embedded_static_assets_are_an_explicit_extension_without_asset_dir() {
+    let asset_dir = PathBuf::from(
+        std::env::var_os("R2O_PANEL_ASSET_ABSENT_DIR")
+            .expect("test helper provides absent asset directory"),
+    );
+    let mut config = Config::default();
+    config.asset_dir = asset_dir;
+    let response = handle_request(&config, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert_eq!(response.status, 200);
+    assert!(
+        String::from_utf8_lossy(&response.body).contains("id=\"app\""),
+        "embedded index.html must be served when the asset directory is absent"
+    );
+}
+
+#[test]
 fn worker_domains_are_normalized_and_saved_without_losing_other_config() {
     let temp = TempDir::new();
     let config_path = temp.file("config");
