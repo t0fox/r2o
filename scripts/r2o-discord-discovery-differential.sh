@@ -42,6 +42,24 @@ if [ ! -d "$r2o_donor_core" ]; then
     exit 2
 fi
 mkdir -p "$r2o_log_dir"
+
+# diagnostics.o появился позже baseline-донора eb848976: на старом доноре
+# голосовые объекты его не требуют, на новом — без него не линкуются.
+r2o_build_voice_eintr_fixture() {
+    set -- "$r2o_donor_core/voice.o" "$r2o_donor_core/voice_discovery.o" \
+        "$r2o_donor_core/stun.o" "$r2o_donor_core/net4.o" \
+        "$r2o_donor_core/tls13core.o" "$r2o_donor_core/crypto.o" \
+        "$r2o_donor_core/x25519.o"
+    if [ -f "$r2o_donor_core/diagnostics.o" ]; then
+        set -- "$@" "$r2o_donor_core/diagnostics.o"
+    fi
+    set -- "$@" "$r2o_donor_core/meas.o" "$r2o_donor_core/libd2k_udp.a"
+    clang-18 -std=c99 -O2 -Wall -Wextra -Werror -pthread \
+        -I"$r2o_donor_core/include" \
+        "$r2o_script_dir/crates/r2o-controller/tests/d2o_voice_poll_eintr.c" \
+        "$@" -o "$r2o_tmp_dir/d2o-voice-poll-eintr"
+}
+
 {
     printf 'Дифференциальная проверка Discord Discovery: %s\n' \
         "$(date '+%Y-%m-%dT%H:%M:%S%z')"
@@ -105,14 +123,8 @@ mkdir -p "$r2o_log_dir"
     r2o_run_timed 'C/Rust endpoint A → B lifecycle differential' sh \
         "$r2o_script_dir/scripts/r2o-discord-voice-lifecycle-helper.sh"
     r2o_voice_eintr_fixture="$r2o_script_dir/crates/r2o-controller/tests/fixtures/d2o_voice_poll_eintr.tsv"
-    r2o_run_timed 'сборка voice poll EINTR fixture C' clang-18 -std=c99 -O2 \
-        -Wall -Wextra -Werror -pthread -I"$r2o_donor_core/include" \
-        "$r2o_script_dir/crates/r2o-controller/tests/d2o_voice_poll_eintr.c" \
-        "$r2o_donor_core/voice.o" "$r2o_donor_core/voice_discovery.o" \
-        "$r2o_donor_core/stun.o" "$r2o_donor_core/net4.o" \
-        "$r2o_donor_core/tls13core.o" "$r2o_donor_core/crypto.o" \
-        "$r2o_donor_core/x25519.o" "$r2o_donor_core/diagnostics.o" "$r2o_donor_core/meas.o" \
-        "$r2o_donor_core/libd2k_udp.a" -o "$r2o_tmp_dir/d2o-voice-poll-eintr"
+    r2o_run_timed 'сборка voice poll EINTR fixture C' \
+        r2o_build_voice_eintr_fixture
     r2o_c_voice_eintr=$("$r2o_tmp_dir/d2o-voice-poll-eintr" "$r2o_voice_eintr_fixture")
     printf '%s\n' "$r2o_c_voice_eintr"
     printf '%s\n' "$r2o_c_voice_eintr" >"$r2o_tmp_dir/c-voice-eintr.out"
