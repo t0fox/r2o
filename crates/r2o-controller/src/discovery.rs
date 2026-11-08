@@ -857,7 +857,7 @@ pub fn update_direct_clear_bindings(
     let mut update = DirectClearBindingUpdate::default();
     if now < 0
         || !matches!(target.family, 4 | 6)
-        || !matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY)
+        || !matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP)
     {
         return update;
     }
@@ -970,8 +970,10 @@ pub fn add_measured_binding_with_fingerprint_in_box(
     preferred_box_id: Option<&str>,
 ) -> Result<String, String> {
     if !matches!(target.family, 4 | 6)
-        || !(matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_HTTP)
-            || r2k_core::control::is_tcp_context_shape(target.shape))
+        || !(matches!(
+            target.shape,
+            SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP | SHAPE_HTTP
+        ) || r2k_core::control::is_tcp_context_shape(target.shape))
         || !matches!(input, 1 | 2)
     {
         return Err("discovery target or input source is unsupported".into());
@@ -1009,18 +1011,15 @@ pub fn add_measured_binding_with_fingerprint_in_box(
         })
         .unwrap_or_default();
     let preferred_box_index = if let Some(box_id) = preferred_box_id {
+        // C-оракул (box_id_for): коробка, узнанная при планировании
+        // (t->box_id), принимает подтверждение безусловно. Несовпадение
+        // отпечатка не отменяет найденный план: bind_confirmed не смешивает
+        // чужие identity-признаки, а обновляет только объёмные.
         let index = catalog
             .boxes
             .iter()
             .position(|box_record| box_record.id == box_id)
             .ok_or("known plan owner disappeared from the catalog")?;
-        if !observed_fingerprint.is_some_and(|observed| {
-            catalog.boxes[index]
-                .fingerprint
-                .is_compatible_with(observed)
-        }) {
-            return Err("known plan owner no longer matches the measured fingerprint".into());
-        }
         Some(index)
     } else {
         None
@@ -1134,7 +1133,15 @@ pub fn add_measured_binding_with_fingerprint_in_box(
 
     let selected = &mut catalog.boxes[box_index];
     if let Some(observed) = observed_fingerprint {
-        selected.fingerprint.merge_observed(observed);
+        if selected.fingerprint.signals.is_empty() {
+            selected.fingerprint = observed.clone();
+        } else if selected.fingerprint.is_compatible_with(observed) {
+            selected.fingerprint.merge_observed(observed);
+        } else {
+            // C bind_confirmed: у заведённой коробки обновляются только
+            // объёмные приметы; identity не переписывается чужым замером.
+            selected.fingerprint.merge_volume_observed(observed);
+        }
     }
     if let Some(saved) = selected.plans.iter_mut().find(|saved| saved.id == plan_id) {
         saved.text = plan_text;
@@ -1385,7 +1392,9 @@ fn usable_runtime_plan(plan: &RuntimePlan, shape: u8) -> bool {
     plan.transport == 6
         && match shape {
             SHAPE_HTTP => plan.proto == r2k_core::plan::PROTO_HTTP,
-            SHAPE_MODERN | SHAPE_LEGACY => plan.proto == 1,
+            // ECH-предложение — тоже TLS 1.3 по TCP: C-оракул пишет привязку
+            // формой D2K_LINK_SHAPE_ECH_TCP и принимает те же TLS-планы.
+            SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP => plan.proto == 1,
             _ if r2k_core::control::is_tcp_context_shape(shape) => plan.proto == 1,
             _ => false,
         }
@@ -1974,6 +1983,157 @@ mod tests {
         assert!(super::has_usable_profile_binding(&catalog, &target));
         catalog.boxes[0].bindings[0].input = 1;
         assert!(!super::has_usable_profile_binding(&catalog, &target));
+    }
+
+    #[test]
+    fn ech_предложение_сохраняет_подтверждённый_tls_план_формой_ech() {
+        // C-оракул: record_shape ECH-задачи — D2K_LINK_SHAPE_ECH_TCP,
+        // bind_confirmed пишет привязку этой формой. Сохранение не должно
+        // отвергать цель только за то, что клиент предложил ECH.
+        let target = DiscoveryTarget {
+            host: "gateway.discord.gg".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: SHAPE_ECH_TCP,
+        };
+        let mut catalog = crate::catalog::Catalog::default();
+        let plan_id = super::add_measured_binding_with_fingerprint(
+            &mut catalog,
+            &target,
+            "r2o-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit sni_middle +0\n",
+            100,
+            1,
+            None,
+        )
+        .unwrap();
+
+        assert!(!plan_id.is_empty());
+        let binding = &catalog.boxes[0].bindings[0];
+        assert_eq!(binding.target, "gateway.discord.gg");
+        assert_eq!(binding.shape, SHAPE_ECH_TCP);
+        assert_eq!(binding.input, 1);
+        assert_eq!(binding.level, 3);
+        assert!(super::has_usable_binding(&catalog, &target));
+    }
+
+    #[test]
+    fn подтверждение_известной_коробки_принимает_чужой_отпечаток_без_смешивания_identity() {
+        use crate::catalog::{BoxRecord, Catalog, Fingerprint, Signal};
+
+        let target = DiscoveryTarget {
+            host: "updates.discord.com".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let mut catalog = Catalog {
+            boxes: vec![BoxRecord {
+                id: "known-box".into(),
+                fingerprint: Fingerprint {
+                    method: 2,
+                    signals: vec![
+                        Signal {
+                            kind: "rx-volume".into(),
+                            volume: 16,
+                            seen: 3,
+                            packets: 10,
+                            ..Signal::default()
+                        },
+                        Signal {
+                            kind: "rst".into(),
+                            ttl: 128,
+                            ..Signal::default()
+                        },
+                    ],
+                },
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        let observed = Fingerprint {
+            method: 2,
+            signals: vec![
+                Signal {
+                    kind: "rx-volume".into(),
+                    volume: 16,
+                    seen: 1,
+                    packets: 22,
+                    ..Signal::default()
+                },
+                Signal {
+                    kind: "rst".into(),
+                    ttl: 64,
+                    ttl_delta: 63,
+                    ..Signal::default()
+                },
+            ],
+        };
+
+        super::add_measured_binding_with_fingerprint_in_box(
+            &mut catalog,
+            &target,
+            "r2o-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit sni_middle +0\n",
+            100,
+            1,
+            Some(&observed),
+            Some("known-box"),
+        )
+        .unwrap();
+
+        assert_eq!(catalog.boxes.len(), 1);
+        assert_eq!(catalog.boxes[0].id, "known-box");
+        assert_eq!(catalog.boxes[0].bindings[0].target, "updates.discord.com");
+        let volume = catalog.boxes[0]
+            .fingerprint
+            .signals
+            .iter()
+            .find(|signal| signal.kind == "rx-volume")
+            .unwrap();
+        assert_eq!(volume.packets, 22);
+        assert_eq!(volume.seen, 4);
+        let rst = catalog.boxes[0]
+            .fingerprint
+            .signals
+            .iter()
+            .find(|signal| signal.kind == "rst")
+            .unwrap();
+        assert_eq!(rst.ttl, 128, "identity чужого замера не перезаписывается");
+    }
+
+    #[test]
+    fn прямой_проход_помечает_привязку_ech_цели() {
+        use super::update_direct_clear_bindings;
+        use crate::catalog::{Binding, BoxRecord, Catalog};
+
+        let target = DiscoveryTarget {
+            host: "gateway.discord.gg".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: SHAPE_ECH_TCP,
+        };
+        let mut catalog = Catalog {
+            boxes: vec![BoxRecord {
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: target.host.clone(),
+                    enabled: true,
+                    transport: 6,
+                    family: 4,
+                    shape: SHAPE_ECH_TCP,
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+
+        let result =
+            update_direct_clear_bindings(&mut catalog, &target, 100, std::time::Instant::now());
+
+        assert_eq!(result.marked, 1);
+        assert_eq!(result.removed, 0);
+        assert!(result.delete_runtime);
+        assert_eq!(catalog.boxes[0].bindings[0].recheck_since, Some(100));
     }
 
     #[test]

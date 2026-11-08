@@ -303,7 +303,48 @@ const MEMORY_HISTORY_CAPACITY: usize = 1440;
 const ANOMALY_CAPACITY: usize = 8;
 const GROWTH_CAPACITY: usize = 10;
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
-const REPORT_MAX: usize = 256 * 1024;
+// D2O: D2K_DIAG_REPORT_MAX (448 КиБ). История 1440 строк не помещается
+// в прежние 256 КиБ и молча перестала бы записываться.
+const REPORT_MAX: usize = 448 * 1024;
+const MEMORY_HISTORY_FIELDS: [&str; 20] = [
+    "at_delta_s",
+    "mono_delta_s",
+    "rss_kib",
+    "vm_data_kib",
+    "vm_swap_kib",
+    "smaps_rollup_status_code",
+    "smaps_rollup_errno",
+    "smaps_rollup_kib",
+    "rss_anon_kib",
+    "catalog_bytes",
+    "http_bytes",
+    "snapshot_bytes",
+    "tracked_tcp_bytes",
+    "tracked_quic_bytes",
+    "tracked_tls_bytes",
+    "tasks",
+    "workers_live",
+    "workers_result_pending",
+    "workers_join_pending",
+    "d2kc_epoch",
+];
+const TASK_STATE_NAMES: [&str; 15] = [
+    "free",
+    "queued",
+    "asking",
+    "shape_wait",
+    "props_contact",
+    "props_wait",
+    "planning",
+    "trial_settle",
+    "verify",
+    "verify_wait",
+    "watching",
+    "resting",
+    "voice_measure",
+    "voice_trial",
+    "voice_watch",
+];
 const D2O_PROCESS_CAPACITY: usize = 3;
 const PROCESS_SPECS: [ProcessSpec; 5] = [
     ProcessSpec {
@@ -598,6 +639,50 @@ pub struct Counts {
     pub snapshots: usize,
     pub http_records: usize,
     pub http_queued: usize,
+    pub catalog_bytes: u64,
+    pub snapshot_bytes: u64,
+    pub http_bytes: u64,
+    pub http_records_bytes: u64,
+    pub http_queue_bytes: u64,
+    pub http_failure_bytes: u64,
+    pub http_records_limit_bytes: u64,
+    pub http_queue_limit_bytes: u64,
+    pub http_failure_limit_bytes: u64,
+    pub http_failure_record_limit_bytes: u64,
+    pub http_failure_limit_hits: u64,
+    pub http_failure_record_limit_hits: u64,
+    pub http_failure_alloc_failures: u64,
+    pub http_record_limit_hits: u64,
+    pub http_record_alloc_failures: u64,
+    pub http_queue_limit_hits: u64,
+    pub http_queue_alloc_failures: u64,
+    pub measurement_limit: u64,
+    pub measurement_slots: u64,
+    pub limiter_mask: u32,
+    pub resources_valid: bool,
+    pub cpu_valid: bool,
+    pub cpu_free_pct: Option<u64>,
+    pub mem_valid: bool,
+    pub mem_avail_kb: u64,
+    pub mem_total_kb: u64,
+    pub mem_reserve_kb: u64,
+    pub conntrack_valid: bool,
+    pub conntrack_count: u64,
+    pub conntrack_max: u64,
+    pub tracked_tcp_bytes: u64,
+    pub tracked_quic_bytes: u64,
+    pub tracked_tls_bytes: u64,
+    pub workers_running: u64,
+    pub workers_live: u64,
+    pub workers_result_pending: u64,
+    pub workers_join_pending: u64,
+    pub worker_oldest_age_ms: Option<u64>,
+    pub last_measurement_age_ms: Option<u64>,
+    pub workers_started: u64,
+    pub workers_joined: u64,
+    pub worker_start_failures: u64,
+    pub worker_join_failures: u64,
+    pub worker_oldest_type: &'static str,
 }
 
 pub struct Recorder {
@@ -612,6 +697,22 @@ pub struct Recorder {
     sample_total: u64,
     events: VecDeque<Value>,
     samples: VecDeque<Value>,
+    limit_total: u64,
+    limits: VecDeque<Value>,
+    limit_sequence: u64,
+    last_counts: Option<Counts>,
+    last_limit_change: Option<Instant>,
+    memory_total: u64,
+    // Кортеж: (абсолютное время at, абсолютное mono_ms, значения строки без времени).
+    memory_history: VecDeque<(u64, u64, Vec<Value>)>,
+    anomaly_total: u64,
+    anomalies: VecDeque<Value>,
+    write_failures: u64,
+    growth: VecDeque<(u64, i64, i64)>,
+    last_unattributed: Option<Instant>,
+    memory_pid: Option<u64>,
+    memory_start_ticks: Option<u64>,
+    memory_epoch: u64,
     first_details: HashMap<String, Value>,
     madvise: MadviseStats,
 }
@@ -630,6 +731,21 @@ impl Recorder {
             sample_total: 0,
             events: VecDeque::with_capacity(EVENT_CAPACITY),
             samples: VecDeque::with_capacity(SAMPLE_CAPACITY),
+            limit_total: 0,
+            limits: VecDeque::with_capacity(LIMIT_CAPACITY),
+            limit_sequence: 0,
+            last_counts: None,
+            last_limit_change: None,
+            memory_total: 0,
+            memory_history: VecDeque::with_capacity(MEMORY_HISTORY_CAPACITY),
+            anomaly_total: 0,
+            anomalies: VecDeque::with_capacity(ANOMALY_CAPACITY),
+            write_failures: 0,
+            growth: VecDeque::with_capacity(GROWTH_CAPACITY),
+            last_unattributed: None,
+            memory_pid: None,
+            memory_start_ticks: None,
+            memory_epoch: 0,
             first_details: HashMap::new(),
             madvise: MadviseStats::default(),
         }
@@ -687,8 +803,23 @@ impl Recorder {
             if self.enabled {
                 self.events.clear();
                 self.samples.clear();
+                self.limits.clear();
+                self.memory_history.clear();
+                self.anomalies.clear();
+                self.growth.clear();
                 self.event_total = 0;
                 self.sample_total = 0;
+                self.limit_total = 0;
+                self.limit_sequence = 0;
+                self.memory_total = 0;
+                self.anomaly_total = 0;
+                self.write_failures = 0;
+                self.last_counts = None;
+                self.last_limit_change = None;
+                self.last_unattributed = None;
+                self.memory_pid = None;
+                self.memory_start_ticks = None;
+                self.memory_epoch = 0;
                 self.first_details.clear();
                 if ensure_diagnostics_dir(&self.dir, true) {
                     for name in ["enabled", "report.json", "report.new"] {
@@ -715,6 +846,41 @@ impl Recorder {
         self.sample_total = self.sample_total.saturating_add(1);
         let at = unix_seconds();
         let mono_ms = self.started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+
+        // D2O пишет переход AIMD только при смене маски/лимита, а не каждый снимок.
+        let limit_changed = self.last_counts.is_none_or(|previous| {
+            previous.limiter_mask != counts.limiter_mask
+                || previous.measurement_limit != counts.measurement_limit
+                || previous.measurement_slots != counts.measurement_slots
+                || previous.resources_valid != counts.resources_valid
+                || previous.cpu_valid != counts.cpu_valid
+                || previous.mem_valid != counts.mem_valid
+                || previous.conntrack_valid != counts.conntrack_valid
+        });
+        if limit_changed {
+            self.limit_sequence = self.limit_sequence.saturating_add(1);
+            self.limit_total = self.limit_total.saturating_add(1);
+            let limit_age_ms = self.last_limit_change.map(|started| {
+                now.saturating_duration_since(started)
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64
+            });
+            let event = limit_event_json(
+                at,
+                mono_ms,
+                &counts,
+                self.limit_sequence,
+                self.sample_total,
+                limit_age_ms,
+            );
+            if self.limits.len() == LIMIT_CAPACITY {
+                self.limits.pop_front();
+            }
+            self.limits.push_back(event);
+            self.last_limit_change = Some(now);
+        }
+        self.last_counts = Some(counts);
+
         let processes = process_memory(&self.proc_dir, &self.run_dir);
         let mut details = Vec::with_capacity(processes.len());
         for process in &processes {
@@ -741,12 +907,129 @@ impl Recorder {
                     .push(json!({"name":name,"first":self.first_details.get(name),"latest":null}));
             }
         }
+
+        // Строка истории памяти по основному контроллеру IPv4.
+        let primary = processes
+            .iter()
+            .find(|process| process["name"] == "r2o-controller4")
+            .or_else(|| processes.first());
+        let primary_pid = primary
+            .and_then(|process| process["pid"].as_u64())
+            .unwrap_or(0);
+        let primary_start_ticks = details
+            .iter()
+            .find(|detail| detail["name"] == "r2o-controller4")
+            .and_then(|detail| detail["latest"]["start_ticks"].as_u64());
+        if primary_pid != 0
+            && (self.memory_pid != Some(primary_pid)
+                || primary_start_ticks.is_some()
+                    && self.memory_start_ticks.is_some()
+                    && self.memory_start_ticks != primary_start_ticks)
+        {
+            self.memory_epoch = self.memory_epoch.saturating_add(1);
+            self.memory_pid = Some(primary_pid);
+            self.memory_start_ticks = primary_start_ticks;
+        }
+        let field_u64 = |process: Option<&Value>, key: &str| {
+            process
+                .and_then(|process| process.get(key))
+                .and_then(Value::as_u64)
+        };
+        let rss_kib = field_u64(primary, "rss_kib").unwrap_or(0);
+        let vm_data_kib = field_u64(primary, "vm_data_kib").unwrap_or(0);
+        let vm_swap_kib = field_u64(primary, "vm_swap_kib").unwrap_or(0);
+        let rss_anon_kib = field_u64(primary, "anon_kib").unwrap_or(0);
+        let accounted_bytes = counts
+            .tracked_tcp_bytes
+            .saturating_add(counts.tracked_quic_bytes)
+            .saturating_add(counts.tracked_tls_bytes)
+            .saturating_add(counts.catalog_bytes)
+            .saturating_add(counts.http_bytes)
+            .saturating_add(counts.snapshot_bytes);
+        let memory_tail = vec![
+            json!(rss_kib),
+            json!(vm_data_kib),
+            json!(vm_swap_kib),
+            json!(0),
+            Value::Null,
+            Value::Null,
+            json!(rss_anon_kib),
+            json!(counts.catalog_bytes),
+            json!(counts.http_bytes),
+            json!(counts.snapshot_bytes),
+            json!(counts.tracked_tcp_bytes),
+            json!(counts.tracked_quic_bytes),
+            json!(counts.tracked_tls_bytes),
+            json!(counts.tasks),
+            json!(counts.workers_live),
+            json!(counts.workers_result_pending),
+            json!(counts.workers_join_pending),
+            json!(self.memory_epoch),
+        ];
+        self.memory_total = self.memory_total.saturating_add(1);
+        if self.memory_history.len() == MEMORY_HISTORY_CAPACITY {
+            self.memory_history.pop_front();
+        }
+        self.memory_history.push_back((at, mono_ms, memory_tail));
+
+        // Критерий D2O: устойчивый рост RSS без сопоставимого роста учтённых объектов.
+        if primary_pid != 0 && rss_kib > 0 {
+            self.growth
+                .push_back((mono_ms, rss_kib as i64, (accounted_bytes / 1024) as i64));
+            while self.growth.len() > GROWTH_CAPACITY {
+                self.growth.pop_front();
+            }
+            if self.growth.len() == GROWTH_CAPACITY {
+                let points: Vec<(u64, i64, i64)> = self.growth.iter().copied().collect();
+                let span_ms = points
+                    .last()
+                    .map(|last| last.0)
+                    .unwrap_or(0)
+                    .saturating_sub(points.first().map(|first| first.0).unwrap_or(0));
+                let rising = points
+                    .windows(2)
+                    .filter(|pair| pair[1].1 > pair[0].1)
+                    .count();
+                let rss_delta = points.last().map(|last| last.1).unwrap_or(0)
+                    - points.first().map(|first| first.1).unwrap_or(0);
+                let accounted_delta = points.last().map(|last| last.2).unwrap_or(0)
+                    - points.first().map(|first| first.2).unwrap_or(0);
+                let cooldown_ok = self.last_unattributed.is_none_or(|last| {
+                    now.saturating_duration_since(last) >= Duration::from_secs(30 * 60)
+                });
+                if span_ms >= 9 * 60_000
+                    && rising >= 7
+                    && rss_delta >= 1024
+                    && accounted_delta < rss_delta / 4
+                    && cooldown_ok
+                {
+                    self.record_anomaly(json!({
+                        "kind": "unattributed-rss-growth",
+                        "at": at,
+                        "error_code": null,
+                        "stage": "",
+                        "rss_delta_kib": rss_delta,
+                        "accounted_delta_kib": accounted_delta,
+                        "window_samples": GROWTH_CAPACITY,
+                    }));
+                    self.last_unattributed = Some(now);
+                }
+            }
+        }
+
+        let conntrack_count =
+            read_number(&self.proc_dir.join("sys/net/netfilter/nf_conntrack_count"));
+        let limit_age_ms = self.last_limit_change.map(|started| {
+            now.saturating_duration_since(started)
+                .as_millis()
+                .min(u64::MAX as u128) as u64
+        });
         let sample = json!({
             "at": at,
             "mono_ms": mono_ms,
             "mem_total_kib": meminfo(&self.proc_dir, "MemTotal:"),
             "mem_available_kib": meminfo(&self.proc_dir, "MemAvailable:"),
-            "system_conntrack": read_number(&self.proc_dir.join("sys/net/netfilter/nf_conntrack_count")),
+            "system_conntrack": conntrack_count,
             "datapath_flows": null,
             "http_records": counts.http_records,
             "http_queued": counts.http_queued,
@@ -758,12 +1041,76 @@ impl Recorder {
             "queued": counts.queued,
             "tasks": counts.tasks,
             "snapshots": counts.snapshots,
+            "snapshot_bytes": counts.snapshot_bytes,
+            "catalog_bytes": counts.catalog_bytes,
+            "workers_running": counts.workers_running,
+            "workers_live": counts.workers_live,
+            "workers_result_pending": counts.workers_result_pending,
+            "workers_join_pending": counts.workers_join_pending,
+            "worker_oldest_age_ms": counts.worker_oldest_age_ms,
+            "worker_oldest_type": counts.worker_oldest_type,
+            "last_measurement_age_ms": counts.last_measurement_age_ms,
+            "workers_started": counts.workers_started,
+            "workers_joined": counts.workers_joined,
+            "worker_start_failures": counts.worker_start_failures,
+            "worker_join_failures": counts.worker_join_failures,
+            "http_failures": 0,
+            "http_bytes": counts.http_bytes,
+            "http_records_bytes": counts.http_records_bytes,
+            "http_queue_bytes": counts.http_queue_bytes,
+            "http_failure_bytes": counts.http_failure_bytes,
+            "http_failure_limit_hits": counts.http_failure_limit_hits,
+            "http_failure_record_limit_hits": counts.http_failure_record_limit_hits,
+            "http_failure_alloc_failures": counts.http_failure_alloc_failures,
+            "http_record_limit_hits": counts.http_record_limit_hits,
+            "http_record_alloc_failures": counts.http_record_alloc_failures,
+            "http_queue_limit_hits": counts.http_queue_limit_hits,
+            "http_queue_alloc_failures": counts.http_queue_alloc_failures,
+            "measurement_limit": counts.measurement_limit,
+            "measurement_slots": counts.measurement_slots,
+            "resources_valid": counts.resources_valid,
+            "cpu_valid": counts.cpu_valid,
+            "cpu_free_pct": counts.cpu_free_pct,
+            "mem_valid": counts.mem_valid,
+            "scheduler_mem_avail_kib": counts.mem_valid.then_some(counts.mem_avail_kb),
+            "scheduler_mem_total_kib": counts.mem_valid.then_some(counts.mem_total_kb),
+            "scheduler_mem_reserve_kib": counts.mem_valid.then_some(counts.mem_reserve_kb),
+            "conntrack_valid": counts.conntrack_valid,
+            "conntrack_count": counts.conntrack_valid.then_some(counts.conntrack_count),
+            "conntrack_max": counts.conntrack_valid.then_some(counts.conntrack_max),
+            "limiter_mask": counts.limiter_mask,
+            "grow_pending": false,
+            "resource_sequence": self.sample_total,
+            "limit_sequence": self.limit_sequence,
+            "limit_age_ms": limit_age_ms,
+            "task_states": task_states_json(&counts),
+            "limit_reason": limit_reason_values(&counts),
             "processes": processes,
         });
         if self.samples.len() == SAMPLE_CAPACITY {
             self.samples.pop_front();
         }
         self.samples.push_back(sample);
+
+        let memory_base = self
+            .memory_history
+            .front()
+            .map(|(row_at, row_mono, _)| (*row_at, *row_mono));
+        let memory_rows: Vec<Value> = self
+            .memory_history
+            .iter()
+            .map(|(row_at, row_mono, tail)| {
+                let (base_at, base_mono) = memory_base.unwrap_or((*row_at, *row_mono));
+                let mut row = Vec::with_capacity(2 + tail.len());
+                row.push(json!(row_at.saturating_sub(base_at)));
+                row.push(json!(row_mono.saturating_sub(base_mono)));
+                row.extend(tail.iter().cloned());
+                Value::Array(row)
+            })
+            .collect();
+        let memory_time_base = memory_base
+            .map(|(base_at, base_mono)| json!([base_at, base_mono]))
+            .unwrap_or_else(|| json!([null, null]));
         let report = json!({
             "schema": 1,
             "enabled": true,
@@ -771,25 +1118,81 @@ impl Recorder {
             "release": option_env!("R2O_RELEASE_ID").unwrap_or("dev"),
             "ring_bytes": d2o_ring_bytes(),
             "event_capacity": EVENT_CAPACITY,
+            "limit_transition_capacity": LIMIT_CAPACITY,
             "sample_capacity": SAMPLE_CAPACITY,
             "sample_interval_ms": SAMPLE_INTERVAL.as_millis(),
+            "memory_history_capacity": MEMORY_HISTORY_CAPACITY,
+            "memory_history_interval_ms": SAMPLE_INTERVAL.as_millis(),
             "events_overwritten": self.event_total.saturating_sub(self.events.len() as u64),
+            "limit_transitions_overwritten": self.limit_total.saturating_sub(self.limits.len() as u64),
             "samples_overwritten": self.sample_total.saturating_sub(self.samples.len() as u64),
+            "memory_history_overwritten": self.memory_total.saturating_sub(self.memory_history.len() as u64),
+            "http_storage_limits": {
+                "records_bytes": counts.http_records_limit_bytes,
+                "queue_bytes": counts.http_queue_limit_bytes,
+                "failures_bytes": counts.http_failure_limit_bytes,
+                "failure_record_bytes": counts.http_failure_record_limit_bytes,
+            },
             "memory_tracking": memory_tracking_json(),
             "madvise": madvise_json(&self.madvise),
+            "anomalies_overwritten": self.anomaly_total.saturating_sub(self.anomalies.len() as u64),
+            "diagnostic_write_failures": self.write_failures,
+            "anomalies": self.anomalies,
             "events": self.events,
+            "limit_transitions": self.limits,
+            "memory_history": {
+                "capacity": MEMORY_HISTORY_CAPACITY,
+                "sample_interval_ms": SAMPLE_INTERVAL.as_millis(),
+                "time_base": memory_time_base,
+                "smaps_rollup_status_codes": ["not-read","unavailable","ok","parse-error","unsupported"],
+                "fields": MEMORY_HISTORY_FIELDS,
+                "samples": memory_rows,
+            },
             "samples": self.samples,
             "memory_details": details,
         });
         self.write_report(&report);
     }
 
-    fn write_report(&self, report: &Value) {
+    fn record_anomaly(&mut self, anomaly: Value) {
+        self.anomaly_total = self.anomaly_total.saturating_add(1);
+        if self.anomalies.len() == ANOMALY_CAPACITY {
+            self.anomalies.pop_front();
+        }
+        self.anomalies.push_back(anomaly);
+    }
+
+    fn record_write_error(&mut self, stage: &'static str) {
+        self.write_failures = self.write_failures.saturating_add(1);
+        let anomaly = json!({
+            "kind": "diagnostic-json-write-error",
+            "at": unix_seconds(),
+            "error_code": null,
+            "stage": stage,
+            "rss_delta_kib": null,
+            "accounted_delta_kib": null,
+            "window_samples": 0,
+        });
+        self.record_anomaly(anomaly);
+    }
+
+    fn write_report(&mut self, report: &Value) {
         if !ensure_diagnostics_dir(&self.dir, true) {
+            self.record_write_error("path");
             return;
         }
-        let bytes = serde_json::to_vec(report).unwrap_or_default();
-        if bytes.is_empty() || bytes.len() > REPORT_MAX || !diagnostics_enabled(&self.dir) {
+        let bytes = match serde_json::to_vec(report) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                self.record_write_error("serialize");
+                return;
+            }
+        };
+        if bytes.is_empty() || !diagnostics_enabled(&self.dir) {
+            return;
+        }
+        if bytes.len() > REPORT_MAX {
+            self.record_write_error("size-limit");
             return;
         }
         let tmp = self.dir.join("report.new");
@@ -803,23 +1206,102 @@ impl Recorder {
             options.mode(0o600);
         }
         let Ok(mut file) = options.open(&tmp) else {
+            self.record_write_error("open-temp");
             return;
         };
-        if file
+        let write_failed = file
             .write_all(&bytes)
             .and_then(|()| file.sync_all())
-            .is_err()
+            .is_err();
+        if write_failed
             || fs::metadata(&tmp).map_or(true, |metadata| metadata.len() as usize > REPORT_MAX)
             || !diagnostics_enabled(&self.dir)
         {
             let _ = fs::remove_file(&tmp);
+            if write_failed {
+                self.record_write_error("flush-close");
+            }
             return;
         }
         drop(file);
         if fs::rename(&tmp, &path).is_err() {
             let _ = fs::remove_file(&tmp);
+            self.record_write_error("rename");
         }
     }
+}
+
+fn limit_reason_values(counts: &Counts) -> Vec<&'static str> {
+    if !counts.resources_valid {
+        return vec!["resource-data-unavailable"];
+    }
+    if counts.limiter_mask == 0 {
+        return vec!["no-current-resource-limit"];
+    }
+    let mut reasons = Vec::new();
+    if counts.limiter_mask & 1 != 0 {
+        reasons.push("cpu");
+    }
+    if counts.limiter_mask & 2 != 0 {
+        reasons.push("memory");
+    }
+    if counts.limiter_mask & 4 != 0 {
+        reasons.push("conntrack");
+    }
+    if counts.limiter_mask & 8 != 0 {
+        reasons.push("slots");
+    }
+    reasons
+}
+
+fn limit_event_json(
+    at: u64,
+    mono_ms: u64,
+    counts: &Counts,
+    limit_sequence: u64,
+    resource_sequence: u64,
+    limit_age_ms: Option<u64>,
+) -> Value {
+    json!({
+        "at": at,
+        "mono_ms": mono_ms,
+        "measurement_limit": counts.measurement_limit,
+        "measurement_slots": counts.measurement_slots,
+        "limiter_mask": counts.limiter_mask,
+        "grow_pending": false,
+        "resource_sequence": resource_sequence,
+        "limit_sequence": limit_sequence,
+        "resources_valid": counts.resources_valid,
+        "cpu_valid": counts.cpu_valid,
+        "cpu_free_pct": counts.cpu_free_pct,
+        "mem_valid": counts.mem_valid,
+        "mem_available_kib": counts.mem_valid.then_some(counts.mem_avail_kb),
+        "mem_total_kib": counts.mem_valid.then_some(counts.mem_total_kb),
+        "mem_reserve_kib": counts.mem_valid.then_some(counts.mem_reserve_kb),
+        "conntrack_valid": counts.conntrack_valid,
+        "conntrack_count": counts.conntrack_valid.then_some(counts.conntrack_count),
+        "conntrack_max": counts.conntrack_valid.then_some(counts.conntrack_max),
+        "limit_age_ms": limit_age_ms,
+        "limit_reason": limit_reason_values(counts),
+    })
+}
+
+fn task_states_json(counts: &Counts) -> Value {
+    let mut states = serde_json::Map::new();
+    for name in TASK_STATE_NAMES {
+        states.insert(name.to_owned(), json!(0));
+    }
+    states.insert("queued".into(), json!(counts.queued));
+    states.insert("planning".into(), json!(counts.active));
+    states.insert(
+        "free".into(),
+        json!(
+            counts
+                .tasks
+                .saturating_sub(counts.active.saturating_add(counts.queued))
+        ),
+    );
+    Value::Object(states)
 }
 
 fn unix_seconds() -> u64 {
@@ -938,8 +1420,13 @@ fn process_memory(proc_dir: &Path, run_dir: &Path) -> Vec<Value> {
                 return empty_process(spec.name);
             };
             let base = proc_dir.join(pid.to_string());
-            let comm_matches = fs::read_to_string(base.join("comm"))
-                .is_ok_and(|name| name.trim_end_matches(['\r', '\n']) == spec.comm);
+            // Ядро усекает comm до 15 символов: r2o-controller-linux…
+            // превращается в r2o-controller-. Проверяем префикс, иначе
+            // диагностика показывала pid=0 и нулевой RSS для всех процессов.
+            let comm_matches = fs::read_to_string(base.join("comm")).is_ok_and(|name| {
+                let name = name.trim_end_matches(['\r', '\n']);
+                name == spec.comm || name.starts_with(spec.comm)
+            });
             if !comm_matches {
                 return empty_process(spec.name);
             }
@@ -1214,6 +1701,7 @@ mod tests {
             snapshots: 4,
             http_records: 5,
             http_queued: 6,
+            ..Counts::default()
         });
         for id in 0..64 {
             recorder.record(json!({"target":format!("target-{id}"),"outcome":"inconclusive"}));

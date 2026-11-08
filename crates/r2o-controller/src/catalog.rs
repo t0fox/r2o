@@ -82,6 +82,31 @@ impl Fingerprint {
         any_agreement
     }
 
+    /// Обновить только объёмные приметы, не смешивая identity (как bind_confirmed D2O).
+    pub fn merge_volume_observed(&mut self, observed: &Self) {
+        if self.method != observed.method {
+            return;
+        }
+        for signal in &observed.signals {
+            if !matches!(
+                signal.kind.as_str(),
+                "volume" | "rx-volume" | "rx-volume-wire"
+            ) {
+                continue;
+            }
+            if let Some(saved) = self
+                .signals
+                .iter_mut()
+                .find(|saved| saved.kind == signal.kind && same_signal(saved, signal))
+            {
+                saved.seen = saved.seen.saturating_add(signal.seen);
+                if signal.packets > 0 {
+                    saved.packets = signal.packets;
+                }
+            }
+        }
+    }
+
     /// Добавить наблюдённые признаки по тем же допускам, что и донорский каталог.
     pub fn merge_observed(&mut self, observed: &Self) {
         if self.signals.is_empty() {

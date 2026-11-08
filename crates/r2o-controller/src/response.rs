@@ -643,6 +643,20 @@ pub fn probe_https_state(host: &str, address: SocketAddr, mark: Option<u32>) -> 
         }
         match connection.complete_io(&mut stream) {
             Ok((0, 0)) => return HttpsProbeState::Unconfirmed,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                // EAGAIN от SO_RCVTIMEO — не отказ рукопожатия; ждём дедлайн.
+                if Instant::now() >= deadline {
+                    return HttpsProbeState::Unconfirmed;
+                }
+                continue;
+            }
             Err(error) => {
                 let invalid_name = error
                     .get_ref()

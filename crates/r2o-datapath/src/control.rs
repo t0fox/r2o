@@ -1759,12 +1759,19 @@ pub struct ControlServer {
     output: VecDeque<PendingWrite>,
     output_bytes: usize,
     dropped_events: u64,
-    last_client_shapes: [Option<CachedClientShape>; 2],
+    // D2O хранит снимки нескольких целей. Один последний снимок на семейство
+    // терялся на занятом роутере: ARM_SHAPE приходил уже после того, как его
+    // вытеснило приветствие другого клиента, и Discovery шёл без ClientHello.
+    last_client_shapes: VecDeque<CachedClientShape>,
     armed_client_shapes: [Option<Vec<u8>>; 2],
 }
 
+const CLIENT_SHAPE_CACHE_MAX: usize = 512;
+
+#[derive(Clone)]
 struct CachedClientShape {
     host: Vec<u8>,
+    family: u8,
     event_body: Vec<u8>,
 }
 
@@ -1868,7 +1875,7 @@ impl ControlServer {
             output: VecDeque::new(),
             output_bytes: 0,
             dropped_events: 0,
-            last_client_shapes: [None, None],
+            last_client_shapes: VecDeque::new(),
             armed_client_shapes: [None, None],
         })
     }
@@ -2006,9 +2013,16 @@ impl ControlServer {
             );
         }
         let slot = shape_family_slot(command.family);
-        if let Some(cached) = &self.last_client_shapes[slot]
-            && cached.host.eq_ignore_ascii_case(&command.name)
-        {
+        if let Some(position) = self.last_client_shapes.iter().position(|cached| {
+            cached.family == command.family && cached.host.eq_ignore_ascii_case(&command.name)
+        }) {
+            let cached = self
+                .last_client_shapes
+                .remove(position)
+                .expect("позиция кэша ClientHello только что найдена");
+            // Свежий запрос продлевает жизнь снимка в LRU.
+            let body = cached.event_body.clone();
+            self.last_client_shapes.push_back(cached);
             return (
                 Ack {
                     command: COMMAND_ARM_SHAPE,
@@ -2018,7 +2032,7 @@ impl ControlServer {
                     area_id: None,
                     binding_context: None,
                 },
-                Some(cached.event_body.clone()),
+                Some(body),
             );
         }
         self.armed_client_shapes[slot] = Some(command.name);
@@ -2043,10 +2057,19 @@ impl ControlServer {
         })?;
         let family = event.key[0];
         let slot = shape_family_slot(family);
-        self.last_client_shapes[slot] = Some(CachedClientShape {
+        if let Some(position) = self.last_client_shapes.iter().position(|cached| {
+            cached.family == family && cached.host.eq_ignore_ascii_case(&event.host)
+        }) {
+            self.last_client_shapes.remove(position);
+        }
+        self.last_client_shapes.push_back(CachedClientShape {
             host: event.host.clone(),
+            family,
             event_body: body.to_vec(),
         });
+        while self.last_client_shapes.len() > CLIENT_SHAPE_CACHE_MAX {
+            self.last_client_shapes.pop_front();
+        }
         if self.armed_client_shapes[slot]
             .as_ref()
             .is_some_and(|host| host.eq_ignore_ascii_case(&event.host))
@@ -2286,12 +2309,12 @@ mod tests {
         bytes
     }
     use r2k_core::control::{
-        self, Ack, COMMAND_CLEAR, COMMAND_DEL_ADDR, COMMAND_DEL_BYPASS, COMMAND_DEL_NAME,
-        COMMAND_DEL_NAME_PROBE, COMMAND_DEL_SUFFIX, COMMAND_SET_ADDR, COMMAND_SET_BYPASS,
-        COMMAND_SET_NAME, COMMAND_SET_NAME_BOUND, COMMAND_SET_NAME_PROBE, COMMAND_SET_SUFFIX,
-        EVENT_HELLO, Frame, SHAPE_GRANDFATHER, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC,
-        SHAPE_VOICE, encode_delete_addr, encode_set_addr, encode_set_voice_addr,
-        encode_set_voice_addr_probe,
+        self, Ack, COMMAND_ARM_SHAPE, COMMAND_CLEAR, COMMAND_DEL_ADDR, COMMAND_DEL_BYPASS,
+        COMMAND_DEL_NAME, COMMAND_DEL_NAME_PROBE, COMMAND_DEL_SUFFIX, COMMAND_SET_ADDR,
+        COMMAND_SET_BYPASS, COMMAND_SET_NAME, COMMAND_SET_NAME_BOUND, COMMAND_SET_NAME_PROBE,
+        COMMAND_SET_SUFFIX, EVENT_HELLO, Frame, SHAPE_GRANDFATHER, SHAPE_HTTP, SHAPE_LEGACY,
+        SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, encode_delete_addr, encode_set_addr,
+        encode_set_voice_addr, encode_set_voice_addr_probe,
     };
     use std::net::{IpAddr, Ipv4Addr};
     use std::os::unix::fs::PermissionsExt;
@@ -2359,6 +2382,50 @@ mod tests {
         );
 
         drop(reconnected);
+        drop(server);
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn arm_shape_serves_cached_client_hello_of_older_target() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "r2o-control-shape-cache-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("control.sock");
+        let mut server = ControlServer::open(&path, u16::MAX as u32).unwrap();
+
+        let first = crate::capture::tcp_hello_from_packet(&tcp_tls_packet("first.example"))
+            .unwrap()
+            .shape_event_body()
+            .unwrap();
+        let second = crate::capture::tcp_hello_from_packet(&tcp_tls_packet("second.example"))
+            .unwrap()
+            .shape_event_body()
+            .unwrap();
+        server.observe_client_shape(&first).unwrap();
+        server.observe_client_shape(&second).unwrap();
+
+        let name = b"first.example";
+        let mut body = vec![name.len() as u8];
+        body.extend_from_slice(name);
+        body.extend_from_slice(&[6, 4]);
+        let (ack, cached) = server.arm_client_shape(&Frame {
+            kind: COMMAND_ARM_SHAPE,
+            body,
+        });
+        assert!(ack.ok);
+        assert_eq!(
+            cached.as_deref(),
+            Some(first.as_slice()),
+            "снимок старой цели должен отдаваться из кэша, а не теряться"
+        );
+
         drop(server);
         std::fs::remove_dir(&directory).unwrap();
     }

@@ -670,7 +670,8 @@ fn json_response(status: u16, value: &Value) -> Response {
     )
 }
 
-const DIAGNOSTICS_REPORT_MAX: u64 = 256 * 1024;
+// Соответствует D2K_DIAG_REPORT_MAX в D2O (448 КиБ).
+const DIAGNOSTICS_REPORT_MAX: u64 = 448 * 1024;
 
 fn diagnostic_response(status: u16, body: impl Into<Vec<u8>>) -> Response {
     Response::new(status, "application/json; charset=utf-8", body)

@@ -1,3 +1,6 @@
+// Расширенный диагностический JSON в стиле D2O требует большего лимита макроса.
+#![recursion_limit = "256"]
+
 pub mod ask;
 pub mod catalog;
 pub mod classify;

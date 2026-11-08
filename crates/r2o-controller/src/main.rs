@@ -217,6 +217,18 @@ struct ServeCliOptions {
     discover: bool,
     mark: Option<u32>,
     live_path: Option<PathBuf>,
+    no_diagnostics: bool,
+}
+
+#[derive(Debug)]
+struct ServeBothOptions {
+    serve4: Option<PathBuf>,
+    serve6: Option<PathBuf>,
+    catalog: PathBuf,
+    discover: bool,
+    mark: Option<u32>,
+    live4: Option<PathBuf>,
+    live6: Option<PathBuf>,
 }
 
 fn main() {
@@ -918,7 +930,19 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
         #[cfg(not(unix))]
         return Err("очистка каталога поддерживается только на Unix".into());
     }
-    if (3..=8).contains(&arguments.len()) && arguments[0] == "--serve" {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "--serve-both")
+    {
+        #[cfg(unix)]
+        {
+            let options = parse_serve_both_options(&arguments)?;
+            return serve_catalog_both(options);
+        }
+        #[cfg(not(unix))]
+        return Err("управляющий AF_UNIX сокет поддерживается только на Unix".into());
+    }
+    if (3..=9).contains(&arguments.len()) && arguments[0] == "--serve" {
         #[cfg(unix)]
         {
             let options = parse_serve_options(&arguments[3..])?;
@@ -928,6 +952,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
                 options.discover,
                 options.mark,
                 options.live_path,
+                options.no_diagnostics,
             );
         }
         #[cfg(not(unix))]
@@ -1471,6 +1496,7 @@ fn parse_serve_options(arguments: &[std::ffi::OsString]) -> Result<ServeCliOptio
         discover: false,
         mark: None,
         live_path: None,
+        no_diagnostics: false,
     };
     let mut index = 0;
     while index < arguments.len() {
@@ -1492,6 +1518,9 @@ fn parse_serve_options(arguments: &[std::ffi::OsString]) -> Result<ServeCliOptio
                     .ok_or("--live требует путь")?;
                 options.live_path = Some(PathBuf::from(value));
             }
+            Some("--no-diagnostics") if !options.no_diagnostics => {
+                options.no_diagnostics = true;
+            }
             Some(option) if option.starts_with("--") => {
                 return Err(format!("неизвестный параметр serve: {option}"));
             }
@@ -1501,6 +1530,62 @@ fn parse_serve_options(arguments: &[std::ffi::OsString]) -> Result<ServeCliOptio
         index += 1;
     }
     Ok(options)
+}
+
+fn parse_serve_both_options(arguments: &[std::ffi::OsString]) -> Result<ServeBothOptions, String> {
+    let mut serve4 = None;
+    let mut serve6 = None;
+    let mut catalog = None;
+    let mut discover = false;
+    let mut mark = None;
+    let mut live4 = None;
+    let mut live6 = None;
+    let mut index = 1;
+    while index < arguments.len() {
+        let option = arguments[index]
+            .to_str()
+            .ok_or("параметр --serve-both должен быть UTF-8")?;
+        index += 1;
+        let mut value = |name: &str| -> Result<PathBuf, String> {
+            let value = arguments
+                .get(index)
+                .ok_or_else(|| format!("{name} требует путь"))?;
+            index += 1;
+            Ok(PathBuf::from(value))
+        };
+        match option {
+            "--serve4" if serve4.is_none() => serve4 = Some(value("--serve4")?),
+            "--serve6" if serve6.is_none() => serve6 = Some(value("--serve6")?),
+            "--live4" if live4.is_none() => live4 = Some(value("--live4")?),
+            "--live6" if live6.is_none() => live6 = Some(value("--live6")?),
+            "--discover" if !discover => discover = true,
+            "--mark" if mark.is_none() => {
+                let value = arguments
+                    .get(index)
+                    .and_then(|value| value.to_str())
+                    .ok_or("--mark требует числовую метку")?;
+                index += 1;
+                mark = Some(parse_mark(value)?);
+            }
+            value if value.starts_with("--") => {
+                return Err(format!("неизвестный параметр --serve-both: {value}"));
+            }
+            value if catalog.is_none() => catalog = Some(PathBuf::from(value)),
+            _ => return Err("лишний аргумент --serve-both".into()),
+        }
+    }
+    if serve4.is_none() && serve6.is_none() {
+        return Err("--serve-both требует --serve4 и/или --serve6".into());
+    }
+    Ok(ServeBothOptions {
+        serve4,
+        serve6,
+        catalog: catalog.ok_or("--serve-both требует путь каталога")?,
+        discover,
+        mark,
+        live4,
+        live6,
+    })
 }
 
 fn parse_mark(value: &str) -> Result<u32, String> {
@@ -1753,6 +1838,7 @@ fn serve_catalog(
     discover: bool,
     mark: Option<u32>,
     live_path: Option<PathBuf>,
+    no_diagnostics: bool,
 ) -> Result<(), Box<dyn Error>> {
     use std::io::Write;
 
@@ -1786,7 +1872,106 @@ fn serve_catalog(
         live_path,
         active_groups,
         Some(compiled),
+        no_diagnostics,
     )
+}
+
+#[cfg(unix)]
+fn serve_catalog_both(options: ServeBothOptions) -> Result<(), Box<dyn Error>> {
+    fn family_args(
+        socket: PathBuf,
+        catalog: &std::path::Path,
+        discover: bool,
+        mark: Option<u32>,
+        live: Option<PathBuf>,
+        no_diagnostics: bool,
+    ) -> Vec<std::ffi::OsString> {
+        let mut args = vec![
+            std::ffi::OsString::from("--serve"),
+            socket.into_os_string(),
+            catalog.as_os_str().to_owned(),
+        ];
+        if discover {
+            args.push("--discover".into());
+        }
+        if let Some(mark) = mark {
+            args.push("--mark".into());
+            args.push(mark.to_string().into());
+        }
+        if let Some(live) = live {
+            args.push("--live".into());
+            args.push(live.into_os_string());
+        }
+        if no_diagnostics {
+            args.push("--no-diagnostics".into());
+        }
+        args
+    }
+
+    let mut jobs: Vec<(&'static str, Vec<std::ffi::OsString>)> = Vec::new();
+    if let Some(socket) = options.serve4 {
+        jobs.push((
+            "IPv4",
+            family_args(
+                socket,
+                &options.catalog,
+                options.discover,
+                options.mark,
+                options.live4,
+                false,
+            ),
+        ));
+    }
+    if let Some(socket) = options.serve6 {
+        jobs.push((
+            "IPv6",
+            family_args(
+                socket,
+                &options.catalog,
+                options.discover,
+                options.mark,
+                options.live6,
+                !jobs.is_empty(),
+            ),
+        ));
+    }
+    let handles: Vec<_> = jobs
+        .into_iter()
+        .map(|(name, arguments)| {
+            std::thread::spawn(move || {
+                let result = run(arguments).map_err(|error| error.to_string());
+                (name, result)
+            })
+        })
+        .collect();
+    let mut succeeded = 0_usize;
+    let mut first_error = None;
+    for handle in handles {
+        match handle.join() {
+            Ok((name, Ok(()))) => {
+                succeeded += 1;
+                eprintln!("r2o-controller: обработчик {name} остановлен штатно");
+            }
+            Ok((name, Err(error))) => {
+                eprintln!("r2o-controller: обработчик {name} отказал: {error}");
+                if first_error.is_none() {
+                    first_error = Some(format!("{name}: {error}"));
+                }
+            }
+            Err(_) => {
+                if first_error.is_none() {
+                    first_error = Some("семейный обработчик паниковал".into());
+                }
+            }
+        }
+    }
+    if succeeded == 0 {
+        Err(first_error
+            .unwrap_or_else(|| "оба семейных обработчика завершились".into())
+            .into())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(unix)]
@@ -5141,6 +5326,22 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
         drop(socket_hold);
         let events = events?;
         delete_result?;
+        if std::env::var_os("R2O_DEBUG_APPLIED").is_some() {
+            eprintln!(
+                "R2O_DEBUG_APPLIED target={} local_port={} plan={:02x?} trial={:02x?} events={}",
+                target.host,
+                local_port,
+                candidate.plan_id,
+                trial_id,
+                events.len()
+            );
+            for event in &events {
+                eprintln!(
+                    "R2O_DEBUG_APPLIED event plan={:02x?} trial={:02x?} key={:02x?}",
+                    event.plan_id, event.trial_id, event.key
+                );
+            }
+        }
         let applied = events.iter().any(|event| {
             r2o_family_applied_flow_matches(event, target, local_port, candidate.plan_id, trial_id)
         });
@@ -6514,6 +6715,7 @@ fn watch(socket_path: PathBuf) -> Result<(), Box<dyn Error>> {
         None,
         HashSet::new(),
         None,
+        false,
     )
 }
 
@@ -9990,6 +10192,7 @@ impl DiscoveryWorker {
                                     client_has_tcp_timestamps,
                                     r2o_discovery_client_alpn_verification_allowed(
                                         &target,
+                                        client_hello.as_deref(),
                                         &probe_path,
                                         base.blocked,
                                         own_cached_volume_cut,
@@ -10268,6 +10471,7 @@ impl DiscoveryWorker {
                             client_has_tcp_timestamps,
                             r2o_discovery_client_alpn_verification_allowed(
                                 &target,
+                                client_hello.as_deref(),
                                 &known_probe_path,
                                 client_alpn_handshake_blocked,
                                 outcome.volume_recovery || cached_volume_cut,
@@ -10459,6 +10663,7 @@ impl DiscoveryWorker {
                     client_has_tcp_timestamps,
                     r2o_discovery_client_alpn_verification_allowed(
                         &target,
+                        client_hello.as_deref(),
                         &probe_path,
                         client_alpn_handshake_blocked,
                         outcome.volume_recovery || cached_volume_cut,
@@ -10595,6 +10800,7 @@ impl DiscoveryWorker {
                             client_has_tcp_timestamps,
                             r2o_discovery_client_alpn_verification_allowed(
                                 &target,
+                                client_hello.as_deref(),
                                 &probe_path,
                                 client_alpn_handshake_blocked,
                                 outcome.volume_recovery || cached_volume_cut,
@@ -14393,11 +14599,21 @@ fn r2o_discovery_ech_replay_required(
 #[cfg(unix)]
 fn r2o_discovery_client_alpn_verification_allowed(
     target: &r2o_controller::discovery::DiscoveryTarget,
+    client_hello: Option<&[u8]>,
     probe_path: &str,
     handshake_blocked: bool,
     volume_cut: bool,
 ) -> bool {
-    target.shape == SHAPE_MODERN && probe_path == "/" && handshake_blocked && !volume_cut
+    // C client_alpn_nonhttp: рукопожатие доказывает план только там, где
+    // клиент говорил не по HTTP. Браузерный ALPN h2/http/1.1 требует полного
+    // HTTP-ответа; иначе обрыв после нескольких КиБ принимался за успех.
+    target.shape == SHAPE_MODERN
+        && probe_path == "/"
+        && handshake_blocked
+        && !volume_cut
+        && client_hello.is_some_and(|hello| {
+            r2o_controller::r2o_tls::r2o_tls_client_hello_non_http_alpn(hello).is_some()
+        })
 }
 
 #[cfg(unix)]
@@ -15433,6 +15649,7 @@ impl ControlClient {
         explicit_live_path: Option<PathBuf>,
         mut active_groups: HashSet<r2o_controller::live::LiveGroupKey>,
         initial_catalog_sync: Option<CompiledCatalog>,
+        no_diagnostics: bool,
     ) -> Result<(), Box<dyn Error>> {
         use std::io::Write;
 
@@ -15564,16 +15781,25 @@ impl ControlClient {
                 .as_ref()
                 .map(|(_, path)| path.with_file_name("live.json"))
         });
-        let mut diagnostics = live_path
-            .as_ref()
-            .and_then(|path| path.parent())
-            .map(|state_dir| {
-                let install_root = state_dir.parent().unwrap_or(state_dir);
-                let run_dir = std::env::var_os("R2O_RUN_DIR")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| install_root.join("run"));
-                r2o_controller::diagnostics::Recorder::new(state_dir.join("diagnostics"), run_dir)
-            });
+        let mut diagnostics = if no_diagnostics {
+            // В объединённом процессе второй семейный serve-поток не должен
+            // конкурировать за один report.json; отчёт ведёт первый поток.
+            None
+        } else {
+            live_path
+                .as_ref()
+                .and_then(|path| path.parent())
+                .map(|state_dir| {
+                    let install_root = state_dir.parent().unwrap_or(state_dir);
+                    let run_dir = std::env::var_os("R2O_RUN_DIR")
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| install_root.join("run"));
+                    r2o_controller::diagnostics::Recorder::new(
+                        state_dir.join("diagnostics"),
+                        run_dir,
+                    )
+                })
+        };
         let mut live_written_at = None;
         let run_result = (|| -> Result<(), Box<dyn Error>> {
             loop {
@@ -15593,6 +15819,40 @@ impl ControlClient {
                                 worker.r2o_outstanding_task_count(std::time::Instant::now())
                             })
                             .unwrap_or_default();
+                        let limiter = measurements.limited_by.as_deref().unwrap_or_default();
+                        let limiter_mask = u32::from(limiter.contains("процессор"))
+                            | u32::from(limiter.contains("память")) << 1
+                            | u32::from(limiter.contains("conntrack")) << 2
+                            | u32::from(limiter.contains("слоты")) << 3;
+                        let conntrack = |name: &str| {
+                            std::fs::read_to_string(format!("/proc/sys/net/netfilter/{name}"))
+                                .ok()
+                                .and_then(|value| value.trim().parse::<u64>().ok())
+                        };
+                        let meminfo = |key: &str| {
+                            std::fs::read_to_string("/proc/meminfo")
+                                .ok()
+                                .and_then(|text| {
+                                    text.lines().find_map(|line| {
+                                        let (name, rest) = line.split_once(':')?;
+                                        (name == key)
+                                            .then(|| {
+                                                rest.split_whitespace().next()?.parse::<u64>().ok()
+                                            })
+                                            .flatten()
+                                    })
+                                })
+                        };
+                        let mem_total_kb = measurements
+                            .mem_total_mb
+                            .map(|mb| mb * 1024)
+                            .or_else(|| meminfo("MemTotal"));
+                        let mem_avail_kb = measurements
+                            .mem_avail_mb
+                            .map(|mb| mb * 1024)
+                            .or_else(|| meminfo("MemAvailable"));
+                        let (tracked_tcp, tracked_quic, tracked_tls) =
+                            r2o_controller::diagnostics::tracked_memory_bytes();
                         r2o_controller::diagnostics::Counts {
                             boxes: catalog.map_or(0, |catalog| catalog.boxes.len()),
                             bindings: catalog.map_or(0, |catalog| {
@@ -15621,6 +15881,48 @@ impl ControlClient {
                             http_queued: http_search
                                 .as_ref()
                                 .map_or(0, HttpSearchWorker::queued_jobs),
+                            catalog_bytes: catalog
+                                .and_then(|catalog| {
+                                    catalog
+                                        .to_json_at(
+                                            std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .map(|duration| duration.as_secs() as i64)
+                                                .unwrap_or(0),
+                                        )
+                                        .ok()
+                                })
+                                .map_or(0, |text| text.len() as u64),
+                            snapshot_bytes: 0,
+                            measurement_limit: measurements.limit as u64,
+                            measurement_slots: measurement_gate.r2o_max_slots() as u64,
+                            limiter_mask,
+                            resources_valid: true,
+                            cpu_valid: measurements.free_pct.is_some(),
+                            cpu_free_pct: measurements.free_pct,
+                            mem_valid: mem_total_kb.is_some(),
+                            mem_avail_kb: mem_avail_kb.unwrap_or(0),
+                            mem_total_kb: mem_total_kb.unwrap_or(0),
+                            mem_reserve_kb: 0,
+                            conntrack_valid: conntrack("nf_conntrack_count").is_some()
+                                && conntrack("nf_conntrack_max").is_some(),
+                            conntrack_count: conntrack("nf_conntrack_count").unwrap_or(0),
+                            conntrack_max: conntrack("nf_conntrack_max").unwrap_or(0),
+                            tracked_tcp_bytes: tracked_tcp,
+                            tracked_quic_bytes: tracked_quic,
+                            tracked_tls_bytes: tracked_tls,
+                            workers_running: measurements.active as u64,
+                            workers_live: (measurements.active + measurements.queued) as u64,
+                            workers_result_pending: measurements.queued as u64,
+                            workers_join_pending: 0,
+                            worker_oldest_age_ms: None,
+                            last_measurement_age_ms: None,
+                            workers_started: 0,
+                            workers_joined: 0,
+                            worker_start_failures: 0,
+                            worker_join_failures: 0,
+                            worker_oldest_type: "",
+                            ..r2o_controller::diagnostics::Counts::default()
                         }
                     });
                 }
@@ -17234,7 +17536,6 @@ impl ControlClient {
                                     || r2o_controller::discovery::has_covering_binding(
                                         catalog, &target,
                                     )
-                                    || matching_domain_group(catalog, &target).is_some()
                                 {
                                     println!(
                                         "молчание без плана для {} не создаёт повторную задачу: каталог уже содержит применимое решение",
@@ -17334,8 +17635,7 @@ impl ControlClient {
                                 r2o_controller::discovery::has_usable_binding(catalog, &target)
                                     || r2o_controller::discovery::has_covering_binding(
                                         catalog, &target,
-                                    )
-                                    || matching_domain_group(catalog, &target).is_some();
+                                    );
                             if event.planned {
                                 let queued = self.r2o_queue_tcp_suspect(
                                     worker,
@@ -17425,8 +17725,7 @@ impl ControlClient {
                                 r2o_controller::discovery::has_usable_binding(catalog, &target)
                                     || r2o_controller::discovery::has_covering_binding(
                                         catalog, &target,
-                                    )
-                                    || matching_domain_group(catalog, &target).is_some();
+                                    );
                             if event.planned {
                                 let queued = self.r2o_queue_tcp_suspect(
                                     worker,
@@ -18110,7 +18409,7 @@ impl ControlClient {
                         println!("план каталога уже покрывает {} ({shape_name})", target.host);
                     } else if let Some(group) = matching_domain_group(catalog, &target) {
                         println!(
-                            "область {} уже применяет план {} к {} ({shape_name}); новый поиск не запускаю",
+                            "область {} известна (план {}), но применение к {} ({shape_name}) не подтверждено; жду подтверждённого подозрения",
                             group.suffix, group.plan_id, target.host
                         );
                     } else {
@@ -18724,8 +19023,7 @@ impl ControlClient {
             return;
         };
         let has_solution = r2o_controller::discovery::has_usable_binding(catalog, &target)
-            || r2o_controller::discovery::has_covering_binding(catalog, &target)
-            || matching_domain_group(catalog, &target).is_some();
+            || r2o_controller::discovery::has_covering_binding(catalog, &target);
         let signal = r2o_discovery_suspect_signal(
             event.code,
             event.ttl,
@@ -24632,17 +24930,65 @@ mod tests {
             family: 4,
             shape: SHAPE_MODERN,
         };
+        let public_key = [0x11_u8; 32];
+        let random = [0x22_u8; 32];
+        let hello = |alpn: &'static str| {
+            let handshake = r2o_controller::r2o_tls::r2o_tls13_client_hello(
+                &r2o_controller::r2o_tls::R2oTls13ClientHelloOptions {
+                    server_name: Some("mqtt.example"),
+                    public_key: &public_key,
+                    random: &random,
+                    session_id_len: 0,
+                    offer_tls12: false,
+                    alpn: Some(alpn),
+                    alpn_wire: None,
+                    extra_extensions: &[],
+                    pad_to: 0,
+                },
+            )
+            .unwrap();
+            let mut record = Vec::with_capacity(handshake.len() + 5);
+            record.extend_from_slice(&[0x16, 0x03, 0x01]);
+            record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+            record.extend_from_slice(&handshake);
+            record
+        };
+        let mqtt = hello("mqtt");
+        let http = hello("h2");
         assert!(super::r2o_discovery_client_alpn_verification_allowed(
-            &target, "/", true, false
+            &target,
+            Some(&mqtt),
+            "/",
+            true,
+            false
         ));
         assert!(!super::r2o_discovery_client_alpn_verification_allowed(
-            &target, "/", false, false
-        ));
-        assert!(!super::r2o_discovery_client_alpn_verification_allowed(
-            &target, "/", true, true
+            &target, None, "/", true, false
         ));
         assert!(!super::r2o_discovery_client_alpn_verification_allowed(
             &target,
+            Some(&http),
+            "/",
+            true,
+            false
+        ));
+        assert!(!super::r2o_discovery_client_alpn_verification_allowed(
+            &target,
+            Some(&mqtt),
+            "/",
+            false,
+            false
+        ));
+        assert!(!super::r2o_discovery_client_alpn_verification_allowed(
+            &target,
+            Some(&mqtt),
+            "/",
+            true,
+            true
+        ));
+        assert!(!super::r2o_discovery_client_alpn_verification_allowed(
+            &target,
+            Some(&mqtt),
             "/resource",
             true,
             false
@@ -27784,6 +28130,7 @@ mod tests {
         assert!(cached_rx_cut);
         assert!(!super::r2o_discovery_client_alpn_verification_allowed(
             &target,
+            None,
             "/",
             true,
             cached_rx_cut,
@@ -27842,6 +28189,7 @@ mod tests {
         assert!(cached_volume_cut);
         assert!(!super::r2o_discovery_client_alpn_verification_allowed(
             &target,
+            None,
             "/",
             true,
             cached_volume_cut,
@@ -36390,6 +36738,7 @@ mod tests {
                 discover: true,
                 mark: Some(77),
                 live_path: Some(PathBuf::from("/tmp/live6.json")),
+                no_diagnostics: false,
             }
         );
     }

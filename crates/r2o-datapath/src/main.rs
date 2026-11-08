@@ -44,6 +44,7 @@ mod app {
     use r2o_datapath::r2o_voice::{R2oVoiceSessions, R2oVoiceTrialProofs};
     use r2o_datapath::raw::{RawSocket, r2o_pick_maxlen};
     use r2o_datapath::scheduler::{FlowTicket, ScheduledQueue};
+    use std::cell::RefCell;
     use std::collections::HashMap;
     use std::error::Error;
     use std::io;
@@ -764,8 +765,124 @@ mod app {
         }
     }
 
+    thread_local! {
+        // Аргументы семейного обработчика в режиме --both. Каждый поток
+        // проходит тот же разбор и тот же движок, что и одиночный процесс;
+        // общими остаются только код и сигнал остановки.
+        static R2O_THREAD_ARGUMENTS: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+    }
+
+    fn r2o_thread_arguments() -> Vec<String> {
+        R2O_THREAD_ARGUMENTS
+            .with(|arguments| arguments.borrow().clone())
+            .unwrap_or_else(|| std::env::args().skip(1).collect())
+    }
+
+    /// Разобрать общие аргументы `--both` и собрать независимые наборы для
+    /// каждого семейства. Чистая функция: её проверяют unit-тесты, а потоки
+    /// получают уже готовые аргументы.
+    fn r2o_both_family_arguments(
+        arguments: &[String],
+    ) -> Result<Vec<(&'static str, Vec<String>)>, String> {
+        let mut common = Vec::new();
+        let mut queue4 = None;
+        let mut queue6 = None;
+        let mut control4 = None;
+        let mut control6 = None;
+        let mut cursor = 0;
+        while cursor < arguments.len() {
+            let option = arguments[cursor].as_str();
+            cursor += 1;
+            let mut next = |name: &str| -> Result<String, String> {
+                let value = arguments
+                    .get(cursor)
+                    .ok_or_else(|| format!("{name} требует значение"))?;
+                cursor += 1;
+                Ok(value.clone())
+            };
+            match option {
+                "--both" => {}
+                "--queue4" => queue4 = Some(next("--queue4")?),
+                "--queue6" => queue6 = Some(next("--queue6")?),
+                "--control4" => control4 = Some(next("--control4")?),
+                "--control6" => control6 = Some(next("--control6")?),
+                "--queue" | "--control" | "--family" => {
+                    return Err(format!(
+                        "{option} несовместим с --both; используйте --queue4/--queue6 и --control4/--control6"
+                    ));
+                }
+                _ => common.push(option.to_owned()),
+            }
+        }
+        let mut jobs = Vec::new();
+        if let Some(queue) = queue4 {
+            let mut family = common.clone();
+            family.extend(["--family".into(), "ipv4".into(), "--queue".into(), queue]);
+            if let Some(control) = control4 {
+                family.extend(["--control".into(), control]);
+            }
+            jobs.push(("IPv4", family));
+        }
+        if let Some(queue) = queue6 {
+            let mut family = common.clone();
+            family.extend(["--family".into(), "ipv6".into(), "--queue".into(), queue]);
+            if let Some(control) = control6 {
+                family.extend(["--control".into(), control]);
+            }
+            jobs.push(("IPv6", family));
+        }
+        if jobs.is_empty() {
+            return Err("--both требует --queue4 и/или --queue6".into());
+        }
+        Ok(jobs)
+    }
+
+    fn run_both(arguments: &[String]) -> Result<(), Box<dyn Error>> {
+        let jobs = r2o_both_family_arguments(arguments).map_err(|error| invalid(error))?;
+        let handles: Vec<_> = jobs
+            .into_iter()
+            .map(|(name, arguments)| {
+                std::thread::spawn(move || {
+                    R2O_THREAD_ARGUMENTS.with(|slot| {
+                        *slot.borrow_mut() = Some(arguments);
+                    });
+                    let result = run().map_err(|error| error.to_string());
+                    (name, result)
+                })
+            })
+            .collect();
+        let mut succeeded = 0_usize;
+        let mut first_error = None;
+        for handle in handles {
+            match handle.join() {
+                Ok((name, Ok(()))) => {
+                    succeeded += 1;
+                    eprintln!("r2o-datapath: обработчик {name} остановлен штатно");
+                }
+                Ok((name, Err(error))) => {
+                    eprintln!("r2o-datapath: обработчик {name} отказал: {error}");
+                    if first_error.is_none() {
+                        first_error = Some(format!("{name}: {error}"));
+                    }
+                }
+                Err(_) => {
+                    if first_error.is_none() {
+                        first_error = Some("семейный обработчик паниковал".into());
+                    }
+                }
+            }
+        }
+        if succeeded == 0 {
+            Err(first_error
+                .unwrap_or_else(|| "оба семейных обработчика завершились".into())
+                .into())
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn run() -> Result<(), Box<dyn Error>> {
-        let arguments: Vec<String> = std::env::args().skip(1).collect();
+        let arguments = r2o_thread_arguments();
         if arguments
             .iter()
             .any(|argument| argument == "--help" || argument == "-h")
@@ -779,6 +896,9 @@ mod app {
         {
             println!("r2o-datapath release={RELEASE_ID} wire={PROTOCOL_VERSION}");
             return Ok(());
+        }
+        if arguments.iter().any(|argument| argument == "--both") {
+            return run_both(&arguments);
         }
         let options = parse_options(&arguments)?;
         let plan = load_plan(&options)?;

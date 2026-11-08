@@ -233,9 +233,31 @@ pub fn r2o_verify_tls_connected_stream_with_alpn(
             .set_read_timeout(Some(remaining))
             .and_then(|()| socket.set_write_timeout(Some(remaining)))
             .map_err(|error| format!("не удалось установить срок TLS-сокета: {error}"))?;
-        connection
-            .complete_io(&mut socket)
-            .map_err(|error| format!("TLS-рукопожатие с ALPN клиента не завершилось: {error}"))?;
+        match connection.complete_io(&mut socket) {
+            Ok(_) => {}
+            // SO_RCVTIMEO на Linux возвращает EAGAIN: это не разрыв
+            // рукопожатия, а истёкший квант ожидания. Повторяем до дедлайна.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
+                ) =>
+            {
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "TLS-рукопожатие с ALPN клиента не завершилось: {error}"
+                    ));
+                }
+                continue;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "TLS-рукопожатие с ALPN клиента не завершилось: {error}"
+                ));
+            }
+        }
     }
     let address = socket
         .peer_addr()
@@ -916,9 +938,27 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
     let mut r2o_socket = R2oTlsTcpStream::new(socket);
     while connection.is_handshaking() {
         set_deadline(&r2o_socket.socket, deadline)?;
-        connection
-            .complete_io(&mut r2o_socket)
-            .map_err(|error| format!("TLS-рукопожатие не завершилось: {error}"))?;
+        match connection.complete_io(&mut r2o_socket) {
+            Ok(_) => {}
+            // EAGAIN/TimedOut от SO_RCVTIMEO — не отказ сервера. D2O ждёт
+            // полный фазовый таймаут, а не первый истёкший квант.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
+                ) =>
+            {
+                if Instant::now() >= deadline {
+                    return Err(format!("TLS-рукопожатие не завершилось: {error}"));
+                }
+                continue;
+            }
+            Err(error) => {
+                return Err(format!("TLS-рукопожатие не завершилось: {error}"));
+            }
+        }
     }
     if ech.is_some() && connection.ech_status() != rustls::client::EchStatus::Accepted {
         return Err(format!(
@@ -1800,14 +1840,36 @@ fn r2o_fetch_measure_tx_volume_with_roots(
                     reason: error,
                 });
             }
-            if let Err(error) = connection.complete_io(&mut r2o_tracked_socket) {
-                return Ok(R2oFetchVolumeTxResult {
-                    address: r2o_address,
-                    verdict: R2oFetchVolumeTxVerdict::Unreachable,
-                    at_kb: 0,
-                    elapsed: r2o_started.elapsed(),
-                    reason: format!("TLS-рукопожатие не завершилось: {error}"),
-                });
+            match connection.complete_io(&mut r2o_tracked_socket) {
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock
+                            | io::ErrorKind::TimedOut
+                            | io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    if Instant::now() >= r2o_deadline {
+                        return Ok(R2oFetchVolumeTxResult {
+                            address: r2o_address,
+                            verdict: R2oFetchVolumeTxVerdict::Unreachable,
+                            at_kb: 0,
+                            elapsed: r2o_started.elapsed(),
+                            reason: format!("TLS-рукопожатие не завершилось: {error}"),
+                        });
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    return Ok(R2oFetchVolumeTxResult {
+                        address: r2o_address,
+                        verdict: R2oFetchVolumeTxVerdict::Unreachable,
+                        at_kb: 0,
+                        elapsed: r2o_started.elapsed(),
+                        reason: format!("TLS-рукопожатие не завершилось: {error}"),
+                    });
+                }
             }
         }
         r2o_tracked_socket.r2o_reset_after_handshake();
