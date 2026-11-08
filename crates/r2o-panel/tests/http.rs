@@ -1334,6 +1334,22 @@ fn embedded_static_assets_are_an_explicit_extension_without_asset_dir() {
 }
 
 #[test]
+fn embedded_diagnostics_asset_is_served_without_asset_dir() {
+    let mut config = Config::default();
+    config.asset_dir = PathBuf::from("/nonexistent/r2o-panel-assets");
+    let response = handle_request(
+        &config,
+        b"GET /assets/diagnostics.js HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    assert_eq!(response.status, 200);
+    let body = String::from_utf8_lossy(&response.body);
+    assert!(
+        body.contains("Локальная история поиска"),
+        "diagnostics.js должен отдаваться из встроенных ресурсов"
+    );
+}
+
+#[test]
 fn worker_domains_are_normalized_and_saved_without_losing_other_config() {
     let temp = TempDir::new();
     let config_path = temp.file("config");

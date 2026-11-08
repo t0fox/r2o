@@ -2023,6 +2023,7 @@ fn embedded_asset(name: &str) -> Option<&'static [u8]> {
         "refresh-mask.svg" => include_bytes!("../assets/refresh-mask.svg"),
         "panel.css" => include_bytes!("../assets/panel.css"),
         "panel.js" => include_bytes!("../assets/panel.js"),
+        "diagnostics.js" => include_bytes!("../assets/diagnostics.js"),
         "telegram-flow.js" => include_bytes!("../assets/telegram-flow.js"),
         "telegram-flow-prototype.js" => include_bytes!("../assets/telegram-flow-prototype.js"),
         "gsap.js" => include_bytes!("../assets/gsap.js"),
