@@ -335,10 +335,9 @@ async fn bridge_ws_byte_stream(stream: DuplexStream, ws: TgWsStream) {
                 Message::Binary(_) => {
                     return Err::<(), String>("пакет ответа WSS превышает 1 MiB".to_string());
                 }
-                Message::Text(data) => writer
-                    .write_all(data.as_bytes())
-                    .await
-                    .map_err(|error| format!("не удалось передать текстовый ответ WSS: {error}"))?,
+                Message::Text(_) => {
+                    return Err::<(), String>("WSS прислал текстовый кадр".to_string());
+                }
                 Message::Ping(data) => {
                     download_sink
                         .lock()

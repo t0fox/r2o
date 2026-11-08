@@ -1576,6 +1576,7 @@ name = "r2o-telegram"
 version = "0.1.0"
 dependencies = [
  "aes 0.8.4",
+ "base64",
  "bytes",
  "cipher 0.4.4",
  "clap",

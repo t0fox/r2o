@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 148,
-  "percent": 54.61,
+  "points": 150,
+  "percent": 55.35,
   "total": 179,
   "counts": {
-    "verified": 102,
+    "verified": 103,
     "carry": 40,
-    "partial": 36,
+    "partial": 35,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1095,7 +1095,7 @@
     {
       "name": "Telegram",
       "weight": 41,
-      "points": 31,
+      "points": 33,
       "items": [
         {
           "id": 157,
@@ -1252,15 +1252,15 @@
           "key": "TG12",
           "name": "WS upgrade/frames",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Telegram",
-          "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "gap": "",
-          "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+          "coverage": "`scripts/test-telegram-ws-differential.sh` (a378); C `tg_ws_upgrade_*`/`tg_ws_reassembly_feed`; Rust `ws_upgrade`/`ws_frames` + tungstenite",
+          "gap": "12 upgrade-вариантов (Accept, Connection token-list, subprotocol, control chars, extra bytes) и 27 frame-кейсов (fragmentation, TEXT rejection, ping/pong/close, masked/RSV, canonical length, bounds) совпадают; production использует оба слоя",
+          "mapping": "`scripts/test-telegram-ws-differential.sh` (a378); C `tg_ws_upgrade_*`/`tg_ws_reassembly_feed`; Rust `ws_upgrade`/`ws_frames` + tungstenite",
+          "evidence": "`scripts/test-telegram-ws-differential.sh` (a378); C `tg_ws_upgrade_*`/`tg_ws_reassembly_feed`; Rust `ws_upgrade`/`ws_frames` + tungstenite · пробел: 12 upgrade-вариантов (Accept, Connection token-list, subprotocol, control chars, extra bytes) и 27 frame-кейсов (fragmentation, TEXT rejection, ping/pong/close, masked/RSV, canonical length, bounds) совпадают; production использует оба слоя"
         },
         {
           "id": 168,
@@ -5267,15 +5267,15 @@
       "key": "TG12",
       "name": "WS upgrade/frames",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Telegram",
-      "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "gap": "",
-      "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+      "coverage": "`scripts/test-telegram-ws-differential.sh` (a378); C `tg_ws_upgrade_*`/`tg_ws_reassembly_feed`; Rust `ws_upgrade`/`ws_frames` + tungstenite",
+      "gap": "12 upgrade-вариантов (Accept, Connection token-list, subprotocol, control chars, extra bytes) и 27 frame-кейсов (fragmentation, TEXT rejection, ping/pong/close, masked/RSV, canonical length, bounds) совпадают; production использует оба слоя",
+      "mapping": "`scripts/test-telegram-ws-differential.sh` (a378); C `tg_ws_upgrade_*`/`tg_ws_reassembly_feed`; Rust `ws_upgrade`/`ws_frames` + tungstenite",
+      "evidence": "`scripts/test-telegram-ws-differential.sh` (a378); C `tg_ws_upgrade_*`/`tg_ws_reassembly_feed`; Rust `ws_upgrade`/`ws_frames` + tungstenite · пробел: 12 upgrade-вариантов (Accept, Connection token-list, subprotocol, control chars, extra bytes) и 27 frame-кейсов (fragmentation, TEXT rejection, ping/pong/close, masked/RSV, canonical length, bounds) совпадают; production использует оба слоя"
     },
     {
       "id": 168,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 148,
+      "points": 150,
       "weight": 271,
-      "percent": 54.61
+      "percent": 55.35
     },
     "carry_forward": {
-      "points": 211,
+      "points": 213,
       "weight": 271,
-      "percent": 77.86,
+      "percent": 78.6,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

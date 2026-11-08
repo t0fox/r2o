@@ -25,3 +25,5 @@ pub mod stats;
 pub mod transparent;
 pub mod transparent_proxy;
 pub mod ws_client;
+pub mod ws_frames;
+pub mod ws_upgrade;
