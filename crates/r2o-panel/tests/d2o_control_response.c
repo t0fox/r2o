@@ -7,17 +7,14 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-static int exchange(const d2k_panel_config *config, char *body, size_t body_cap) {
-    static const char request[] =
-        "POST /api/control/stop HTTP/1.1\r\n"
-        "Host: localhost:8090\r\n"
-        "Origin: http://localhost:8090\r\n"
-        "Content-Length: 0\r\n\r\n";
+static int exchange(const d2k_panel_config *config, const char *request,
+                    char *body, size_t body_cap) {
     int sockets[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0) { return -1; }
+    size_t request_len = strlen(request);
     size_t sent = 0;
-    while (sent < sizeof request - 1) {
-        ssize_t count = write(sockets[0], request + sent, sizeof request - 1 - sent);
+    while (sent < request_len) {
+        ssize_t count = write(sockets[0], request + sent, request_len - sent);
         if (count <= 0) { close(sockets[0]); close(sockets[1]); return -1; }
         sent += (size_t)count;
     }
@@ -48,6 +45,29 @@ static int exchange(const d2k_panel_config *config, char *body, size_t body_cap)
     return status;
 }
 
+static int show(const d2k_panel_config *config, const char *request) {
+    char body[4096];
+    int status = exchange(config, request, body, sizeof body);
+    if (status < 0) { return -1; }
+    size_t length = strlen(body);
+    while (length && (body[length - 1] == '\n' || body[length - 1] == '\r')) {
+        body[--length] = '\0';
+    }
+    printf("%d\n%s\n", status, body);
+    return 0;
+}
+
+static const char stop_request[] =
+    "POST /api/control/stop HTTP/1.1\r\n"
+    "Host: localhost:8090\r\n"
+    "Origin: http://localhost:8090\r\n"
+    "Content-Length: 0\r\n\r\n";
+static const char start_request[] =
+    "POST /api/control/start HTTP/1.1\r\n"
+    "Host: localhost:8090\r\n"
+    "Origin: http://localhost:8090\r\n"
+    "Content-Length: 0\r\n\r\n";
+
 int main(void) {
     const char *service = getenv("R2O_PANEL_CONTROL_SERVICE");
     if (!service || !*service) { return 2; }
@@ -55,16 +75,59 @@ int main(void) {
         .service_path = service,
         .control_enabled = 1,
     };
-    char body[4096];
-    int status = exchange(&config, body, sizeof body);
-    if (status < 0) { return 3; }
-    printf("%d\n%s\n", status, body);
-    status = exchange(&config, body, sizeof body);
-    if (status < 0) { return 4; }
-    printf("%d\n%s\n", status, body);
+
+    /* 202: команда запущена. */
+    if (show(&config, stop_request) != 0) { return 3; }
+    /* 409: предыдущая команда ещё выполняется. */
+    if (show(&config, stop_request) != 0) { return 4; }
+    /* 500: служба не найдена. */
     config.service_path = "";
-    status = exchange(&config, body, sizeof body);
-    if (status < 0) { return 5; }
-    printf("%d\n%s\n", status, body);
+    if (show(&config, stop_request) != 0) { return 5; }
+
+    /* 404: неизвестное действие. */
+    if (show(&config, "POST /api/control/bogus HTTP/1.1\r\n"
+                      "Host: localhost:8090\r\n"
+                      "Origin: http://localhost:8090\r\n"
+                      "Content-Length: 0\r\n\r\n") != 0) { return 6; }
+
+    /* 403: управление выключено. */
+    config.control_enabled = 0;
+    if (show(&config, stop_request) != 0) { return 7; }
+    config.control_enabled = 1;
+
+    /* 403: чужой источник. */
+    if (show(&config, "POST /api/control/stop HTTP/1.1\r\n"
+                      "Host: localhost:8090\r\n"
+                      "Origin: http://evil.example\r\n"
+                      "Content-Length: 0\r\n\r\n") != 0) { return 8; }
+
+    /* 409: MODE=off запрещает запуск/перезапуск. */
+    config.mode = "off";
+    if (show(&config, start_request) != 0) { return 9; }
+    config.mode = "apply";
+
+    /* 409: telegram-enable без TG_MODE=local. */
+    config.config_path = "/nonexistent/r2o-panel-test-config";
+    if (show(&config, "POST /api/control/telegram-enable HTTP/1.1\r\n"
+                      "Host: localhost:8090\r\n"
+                      "Origin: http://localhost:8090\r\n"
+                      "Content-Length: 0\r\n\r\n") != 0) { return 10; }
+    config.config_path = "";
+
+    /* 400: тело запрещено (Content-Length). */
+    if (show(&config, "POST /api/control/stop HTTP/1.1\r\n"
+                      "Host: localhost:8090\r\n"
+                      "Origin: http://localhost:8090\r\n"
+                      "Content-Length: 1\r\n\r\nx") != 0) { return 11; }
+
+    /* 400: тело запрещено (Transfer-Encoding). */
+    if (show(&config, "POST /api/control/stop HTTP/1.1\r\n"
+                      "Host: localhost:8090\r\n"
+                      "Origin: http://localhost:8090\r\n"
+                      "Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n") != 0) { return 12; }
+
+    /* 405: не-POST на control. */
+    if (show(&config, "GET /api/control/stop HTTP/1.1\r\n"
+                      "Host: localhost:8090\r\n\r\n") != 0) { return 13; }
     return 0;
 }

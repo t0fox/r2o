@@ -593,35 +593,74 @@ fn d2o_control_action_response_trace() {
     let mut config = Config::default();
     config.service_path = service;
     config.control_enabled = true;
+    config.mode = "apply".into();
 
-    let success = request(
-        &config,
-        "POST /api/control/stop HTTP/1.1\r\nHost: localhost:8090\r\nOrigin: http://localhost:8090\r\nContent-Length: 0\r\n\r\n",
-    );
-    let busy = request(
-        &config,
-        "POST /api/control/stop HTTP/1.1\r\nHost: localhost:8090\r\nOrigin: http://localhost:8090\r\nContent-Length: 0\r\n\r\n",
-    );
-    config.service_path.clear();
-    let start_error = request(
-        &config,
-        "POST /api/control/stop HTTP/1.1\r\nHost: localhost:8090\r\nOrigin: http://localhost:8090\r\nContent-Length: 0\r\n\r\n",
-    );
-    let trace = format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n",
-        success.0, success.2, busy.0, busy.2, start_error.0, start_error.2
-    );
+    let stop_request = "POST /api/control/stop HTTP/1.1\r\nHost: localhost:8090\r\nOrigin: http://localhost:8090\r\nContent-Length: 0\r\n\r\n";
+    let start_request = "POST /api/control/start HTTP/1.1\r\nHost: localhost:8090\r\nOrigin: http://localhost:8090\r\nContent-Length: 0\r\n\r\n";
+    let mut responses: Vec<(u16, String)> = Vec::new();
+    {
+        let mut run = |config: &Config, request_line: &str| {
+            let (status, _, body) = request(config, request_line);
+            responses.push((status, body.trim_end_matches(['\n', '\r']).to_owned()));
+        };
+        run(&config, stop_request);
+        run(&config, stop_request);
+        config.service_path.clear();
+        run(&config, stop_request);
+        run(
+            &config,
+            "POST /api/control/bogus HTTP/1.1\r\nHost: localhost:8090\r\nOrigin: http://localhost:8090\r\nContent-Length: 0\r\n\r\n",
+        );
+        config.control_enabled = false;
+        run(&config, stop_request);
+        config.control_enabled = true;
+        run(
+            &config,
+            "POST /api/control/stop HTTP/1.1\r\nHost: localhost:8090\r\nOrigin: http://evil.example\r\nContent-Length: 0\r\n\r\n",
+        );
+        config.mode = "off".into();
+        run(&config, start_request);
+        config.mode = "apply".into();
+        config.config_path = PathBuf::from("/nonexistent/r2o-panel-test-config");
+        run(
+            &config,
+            "POST /api/control/telegram-enable HTTP/1.1\r\nHost: localhost:8090\r\nOrigin: http://localhost:8090\r\nContent-Length: 0\r\n\r\n",
+        );
+        config.config_path = PathBuf::new();
+        run(
+            &config,
+            "POST /api/control/stop HTTP/1.1\r\nHost: localhost:8090\r\nOrigin: http://localhost:8090\r\nContent-Length: 1\r\n\r\nx",
+        );
+        run(
+            &config,
+            "POST /api/control/stop HTTP/1.1\r\nHost: localhost:8090\r\nOrigin: http://localhost:8090\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+        );
+        run(
+            &config,
+            "GET /api/control/stop HTTP/1.1\r\nHost: localhost:8090\r\n\r\n",
+        );
+    }
+    let trace = responses
+        .iter()
+        .map(|(status, body)| format!("{status}\n{body}\n"))
+        .collect::<String>();
     println!("{trace}");
+    #[derive(Debug, PartialEq)]
+    enum TraceBody {
+        Json(Value),
+        Text(String),
+    }
     let parse_trace = |trace: &str| {
         let lines = trace.lines().collect::<Vec<_>>();
-        assert_eq!(lines.len(), 6, "control response trace has six lines");
+        assert_eq!(lines.len() % 2, 0, "control response trace has pairs");
         lines
             .chunks_exact(2)
             .map(|pair| {
-                (
-                    pair[0].parse::<u16>().unwrap(),
-                    serde_json::from_str::<Value>(pair[1]).unwrap(),
-                )
+                let body = match serde_json::from_str::<Value>(pair[1]) {
+                    Ok(value) => TraceBody::Json(value),
+                    Err(_) => TraceBody::Text(pair[1].to_owned()),
+                };
+                (pair[0].parse::<u16>().unwrap(), body)
             })
             .collect::<Vec<_>>()
     };
@@ -632,9 +671,9 @@ fn d2o_control_action_response_trace() {
         .expect("test helper provides the D2O C trace");
     let c_trace = fs::read_to_string(c_path).unwrap();
     assert_eq!(parse_trace(&c_trace), parse_trace(&trace));
-    assert_eq!(success.0, 202);
-    assert_eq!(busy.0, 409);
-    assert_eq!(start_error.0, 500);
+    assert_eq!(responses[0].0, 202);
+    assert_eq!(responses[1].0, 409);
+    assert_eq!(responses[2].0, 500);
 }
 
 #[cfg(unix)]

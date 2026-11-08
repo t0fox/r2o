@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 229,
-  "percent": 84.5,
+  "points": 231,
+  "percent": 85.24,
   "total": 179,
   "counts": {
-    "verified": 154,
+    "verified": 155,
     "carry": 3,
-    "partial": 21,
+    "partial": 20,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1447,7 +1447,7 @@
     {
       "name": "WebPanel",
       "weight": 30,
-      "points": 26,
+      "points": 28,
       "items": [
         {
           "id": 79,
@@ -1649,15 +1649,15 @@
           "key": "A14",
           "name": "`/api/control`: список действий, коды, gates",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "WebPanel",
           "coverage": "`scripts/test-panel-control-response-differential.sh`, `test-panel-control-timeout-differential.sh` (a378)",
-          "gap": "stop: 202/409/500 и timeout совпали; полный список действий/gates дифференциалом не покрыт",
+          "gap": "13 paired-кейсов: 202/409/500, 404, 403 (disabled/cross-origin), 409 MODE=off/TG gate, 400 CL/TE, 405 GET и timeout; остальные действия идут через тот же обработчик",
           "mapping": "`scripts/test-panel-control-response-differential.sh`, `test-panel-control-timeout-differential.sh` (a378)",
-          "evidence": "`scripts/test-panel-control-response-differential.sh`, `test-panel-control-timeout-differential.sh` (a378) · пробел: stop: 202/409/500 и timeout совпали; полный список действий/gates дифференциалом не покрыт"
+          "evidence": "`scripts/test-panel-control-response-differential.sh`, `test-panel-control-timeout-differential.sh` (a378) · пробел: 13 paired-кейсов: 202/409/500, 404, 403 (disabled/cross-origin), 409 MODE=off/TG gate, 400 CL/TE, 405 GET и timeout; остальные действия идут через тот же обработчик"
         },
         {
           "id": 93,
@@ -4142,15 +4142,15 @@
       "key": "A14",
       "name": "`/api/control`: список действий, коды, gates",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "WebPanel",
       "coverage": "`scripts/test-panel-control-response-differential.sh`, `test-panel-control-timeout-differential.sh` (a378)",
-      "gap": "stop: 202/409/500 и timeout совпали; полный список действий/gates дифференциалом не покрыт",
+      "gap": "13 paired-кейсов: 202/409/500, 404, 403 (disabled/cross-origin), 409 MODE=off/TG gate, 400 CL/TE, 405 GET и timeout; остальные действия идут через тот же обработчик",
       "mapping": "`scripts/test-panel-control-response-differential.sh`, `test-panel-control-timeout-differential.sh` (a378)",
-      "evidence": "`scripts/test-panel-control-response-differential.sh`, `test-panel-control-timeout-differential.sh` (a378) · пробел: stop: 202/409/500 и timeout совпали; полный список действий/gates дифференциалом не покрыт"
+      "evidence": "`scripts/test-panel-control-response-differential.sh`, `test-panel-control-timeout-differential.sh` (a378) · пробел: 13 paired-кейсов: 202/409/500, 404, 403 (disabled/cross-origin), 409 MODE=off/TG gate, 400 CL/TE, 405 GET и timeout; остальные действия идут через тот же обработчик"
     },
     {
       "id": 93,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 229,
+      "points": 231,
       "weight": 271,
-      "percent": 84.5
+      "percent": 85.24
     },
     "carry_forward": {
-      "points": 232,
+      "points": 234,
       "weight": 271,
-      "percent": 85.61,
+      "percent": 86.35,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
