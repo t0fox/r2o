@@ -73,11 +73,5 @@ fn main() {
         false,
     );
     let packet = [12, 0, 0, 0, b'A', b'B', b'C'];
-    run(
-        "partial_flush",
-        ProtoTag::Intermediate,
-        &packet,
-        &[7],
-        true,
-    );
+    run("partial_flush", ProtoTag::Intermediate, &packet, &[7], true);
 }
