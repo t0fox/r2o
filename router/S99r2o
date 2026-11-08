@@ -954,7 +954,7 @@ panel_start() {
 }
 
 start() {
-    [ "$MODE" = off ] && { say "MODE=off — R2O остаётся остановленным"; return 0; }
+    [ "$MODE" = off ] && { say "MODE=off — R2O остаётся остановленным"; return 1; }
     engine_start || return 1
     telegram_start || say "Telegram не запущен; см. $LOG/telegram.log и $TG_STATUS"
     panel_start || say "панель не запущена; datapath продолжает работу"
@@ -1157,7 +1157,10 @@ case "${1:-}" in
         ;;
     engine-start) engine_start ;;
     engine-stop) disable_supervisor || die "не отключить автоматическое восстановление"; engine_stop ;;
-    engine-restart) engine_stop && engine_start ;;
+    engine-restart)
+        [ "$MODE" != off ] || die "MODE=off — перезапуск невозможен"
+        engine_stop && engine_start
+        ;;
     settings-restart) settings_restart ;;
     reapply)
         reapply

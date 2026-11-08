@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 156,
-  "percent": 57.56,
+  "points": 157,
+  "percent": 57.93,
   "total": 179,
   "counts": {
-    "verified": 107,
+    "verified": 108,
     "carry": 40,
-    "partial": 31,
+    "partial": 30,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1859,7 +1859,7 @@
     {
       "name": "Router / Service",
       "weight": 84,
-      "points": 70,
+      "points": 71,
       "items": [
         {
           "id": 106,
@@ -1941,15 +1941,15 @@
           "key": "B6",
           "name": "`engine-restart`/`settings-restart`",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Router / Service",
-          "coverage": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-          "gap": "ДИФ/пробел `MODE=off`",
-          "mapping": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-          "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: ДИФ/пробел `MODE=off`"
+          "coverage": "`test-router-engine-restart-mode-differential.sh` (a378), `test-router-install-lifecycle.sh`",
+          "gap": "8 paired ветвей `start`/`restart`/`engine-restart` при `MODE=off/observe`; `settings-restart` — R2O-специфичная команда, её off-ветвь проверена отдельно",
+          "mapping": "`test-router-engine-restart-mode-differential.sh` (a378), `test-router-install-lifecycle.sh`",
+          "evidence": "`test-router-engine-restart-mode-differential.sh` (a378), `test-router-install-lifecycle.sh` · пробел: 8 paired ветвей `start`/`restart`/`engine-restart` при `MODE=off/observe`; `settings-restart` — R2O-специфичная команда, её off-ветвь проверена отдельно"
         },
         {
           "id": 112,
@@ -4427,15 +4427,15 @@
       "key": "B6",
       "name": "`engine-restart`/`settings-restart`",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Router / Service",
-      "coverage": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-      "gap": "ДИФ/пробел `MODE=off`",
-      "mapping": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-      "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: ДИФ/пробел `MODE=off`"
+      "coverage": "`test-router-engine-restart-mode-differential.sh` (a378), `test-router-install-lifecycle.sh`",
+      "gap": "8 paired ветвей `start`/`restart`/`engine-restart` при `MODE=off/observe`; `settings-restart` — R2O-специфичная команда, её off-ветвь проверена отдельно",
+      "mapping": "`test-router-engine-restart-mode-differential.sh` (a378), `test-router-install-lifecycle.sh`",
+      "evidence": "`test-router-engine-restart-mode-differential.sh` (a378), `test-router-install-lifecycle.sh` · пробел: 8 paired ветвей `start`/`restart`/`engine-restart` при `MODE=off/observe`; `settings-restart` — R2O-специфичная команда, её off-ветвь проверена отдельно"
     },
     {
       "id": 112,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 156,
+      "points": 157,
       "weight": 271,
-      "percent": 57.56
+      "percent": 57.93
     },
     "carry_forward": {
-      "points": 219,
+      "points": 220,
       "weight": 271,
-      "percent": 80.81,
+      "percent": 81.18,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
