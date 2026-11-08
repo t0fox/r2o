@@ -1,0 +1,10 @@
+CLIENT_TCP tcp_options_len=0
+SHAPE shape_len=79
+SUSPECT code=8 ttl=0 ref=0 tos=0 ipid=0 planned=1 shape=0 num=700
+EXCHANGE first=22 seen=10 num=900 server_hello=1 planned=2
+SUSPECT code=1 ttl=63 ref=64 tos=136 ipid=17185 planned=1 shape=0 num=0
+SUSPECT code=4 ttl=62 ref=64 tos=68 ipid=4660 planned=0 shape=0 num=0
+SUSPECT code=3 ttl=0 ref=0 tos=0 ipid=0 planned=2 shape=0 num=0
+SUSPECT code=2 ttl=0 ref=0 tos=0 ipid=0 planned=1 shape=0 num=0
+SUSPECT code=6 ttl=0 ref=0 tos=0 ipid=0 planned=2 shape=0 num=0
+SUSPECT code=5 ttl=0 ref=0 tos=0 ipid=0 planned=1 shape=0 num=0

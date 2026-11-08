@@ -1752,6 +1752,8 @@ pub struct ControlServer {
     socket_dev: u64,
     socket_ino: u64,
     send_maxlen: u32,
+    wire_profile: control::WireProfile,
+    release_id: String,
     peer: Option<UnixStream>,
     input: Vec<u8>,
     output: VecDeque<PendingWrite>,
@@ -1770,8 +1772,43 @@ fn shape_family_slot(family: u8) -> usize {
     usize::from(family == 6)
 }
 
+/// События, формат которых в v22 совпадает с R2O. Остальные номера v22
+/// либо транслируются, либо не отправляются C-контроллеру вовсе.
+fn v22_event_frames(kind: u16, body: &[u8]) -> Vec<(u16, Vec<u8>)> {
+    match kind {
+        control::EVENT_HELLO
+        | control::EVENT_STATS
+        | control::EVENT_REFUSED
+        | control::EVENT_APPLIED
+        | control::EVENT_PROTOCOL
+        | control::EVENT_HTTP_PORTAL
+        | control::EVENT_HTTP_RESPONSE => vec![(kind, body.to_vec())],
+        _ => control::translate_event_to_v22(kind, body),
+    }
+}
+
 impl ControlServer {
     pub fn open(path: impl AsRef<Path>, send_maxlen: u32) -> io::Result<Self> {
+        Self::open_with_profile(
+            path,
+            send_maxlen,
+            control::WireProfile::V48,
+            control::RELEASE_ID,
+        )
+    }
+
+    pub fn open_with_profile(
+        path: impl AsRef<Path>,
+        send_maxlen: u32,
+        wire_profile: control::WireProfile,
+        release_id: &str,
+    ) -> io::Result<Self> {
+        if !control::valid_release_id(release_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "недопустимый release ID control-wire",
+            ));
+        }
         let path = path.as_ref().to_owned();
         if let Ok(metadata) = std::fs::symlink_metadata(&path) {
             if !metadata.file_type().is_socket() {
@@ -1824,6 +1861,8 @@ impl ControlServer {
             socket_dev: metadata.dev(),
             socket_ino: metadata.ino(),
             send_maxlen,
+            wire_profile,
+            release_id: release_id.to_owned(),
             peer: None,
             input: Vec::new(),
             output: VecDeque::new(),
@@ -1850,7 +1889,8 @@ impl ControlServer {
     }
 
     pub fn send_ack(&mut self, ack: Ack) -> io::Result<()> {
-        let bytes = control::encode_ack_with_identifiers(
+        let bytes = control::encode_ack_with_identifiers_profile(
+            self.wire_profile,
             ack.command,
             ack.ok,
             ack.reason,
@@ -1868,6 +1908,14 @@ impl ControlServer {
             self.dropped_events = self.dropped_events.saturating_add(1);
             return Ok(());
         }
+        if self.wire_profile == control::WireProfile::V22 {
+            for (legacy_kind, legacy_body) in v22_event_frames(kind, body) {
+                let bytes = control::encode_frame(legacy_kind, &legacy_body)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+                self.enqueue(bytes);
+            }
+            return self.flush();
+        }
         let bytes = control::encode_frame(kind, body)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         self.enqueue(bytes);
@@ -1880,8 +1928,21 @@ impl ControlServer {
             self.dropped_events = self.dropped_events.saturating_add(1);
             return Ok(false);
         }
-        let bytes = control::encode_frame(kind, body)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let frames = if self.wire_profile == control::WireProfile::V22 {
+            v22_event_frames(kind, body)
+        } else {
+            vec![(kind, body.to_vec())]
+        };
+        if frames.is_empty() {
+            return Ok(self.peer.is_some());
+        }
+        let mut bytes = Vec::new();
+        for (frame_kind, frame_body) in frames {
+            bytes.extend_from_slice(
+                &control::encode_frame(frame_kind, &frame_body)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?,
+            );
+        }
         if self.output_bytes.saturating_add(bytes.len()) > MAX_CONTROL_OUTPUT {
             self.dropped_events = self.dropped_events.saturating_add(1);
             return Ok(false);
@@ -1899,8 +1960,9 @@ impl ControlServer {
         }
         self.send_maxlen = send_maxlen;
         if self.peer.is_some() {
-            let greeting = control::encode_greeting(send_maxlen)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+            let greeting =
+                control::encode_greeting_profile(self.wire_profile, &self.release_id, send_maxlen)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
             self.enqueue(greeting);
             self.flush()?;
         }
@@ -2005,7 +2067,11 @@ impl ControlServer {
                         return;
                     }
                     self.peer = Some(peer);
-                    if let Ok(greeting) = control::encode_greeting(self.send_maxlen) {
+                    if let Ok(greeting) = control::encode_greeting_profile(
+                        self.wire_profile,
+                        &self.release_id,
+                        self.send_maxlen,
+                    ) {
                         self.enqueue(greeting);
                     }
                 }
@@ -2220,7 +2286,7 @@ mod tests {
         bytes
     }
     use r2k_core::control::{
-        self, COMMAND_CLEAR, COMMAND_DEL_ADDR, COMMAND_DEL_BYPASS, COMMAND_DEL_NAME,
+        self, Ack, COMMAND_CLEAR, COMMAND_DEL_ADDR, COMMAND_DEL_BYPASS, COMMAND_DEL_NAME,
         COMMAND_DEL_NAME_PROBE, COMMAND_DEL_SUFFIX, COMMAND_SET_ADDR, COMMAND_SET_BYPASS,
         COMMAND_SET_NAME, COMMAND_SET_NAME_BOUND, COMMAND_SET_NAME_PROBE, COMMAND_SET_SUFFIX,
         EVENT_HELLO, Frame, SHAPE_GRANDFATHER, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC,
@@ -2352,6 +2418,64 @@ mod tests {
         assert_eq!(event.kind, EVENT_HELLO);
         assert_eq!(event.body, body);
 
+        drop(client);
+        drop(server);
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn v22_control_server_greets_with_profile_release_and_raw_bound_ack() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("r2o-control-v22-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("control.sock");
+        let mut server =
+            ControlServer::open_with_profile(&path, 1500, control::WireProfile::V22, "dev")
+                .unwrap();
+        let mut client = UnixStream::connect(&path).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        assert!(server.poll().unwrap().is_empty());
+        let greeting =
+            control::decode_greeting(&control::read_frame(&mut client).unwrap()).unwrap();
+        assert_eq!(greeting.version, control::PROTOCOL_VERSION_V22);
+        assert_eq!(greeting.release_id, "dev");
+        assert_eq!(greeting.send_maxlen, 1500);
+
+        let binding = control::BindingContext {
+            generation: 0x0102_0304_0506_0708,
+            kind: 1,
+            family: 4,
+            shape: SHAPE_HTTP,
+            temporary: false,
+            epoch: [0x11; 16],
+        };
+        server
+            .send_ack(Ack {
+                command: COMMAND_SET_NAME_BOUND,
+                ok: true,
+                reason: 0,
+                trial_id: Some([0x22; 16]),
+                area_id: None,
+                binding_context: Some(binding),
+            })
+            .unwrap();
+        let frame = control::read_frame(&mut client).unwrap();
+        assert_eq!(frame.kind, control::EVENT_ACK);
+        assert_eq!(frame.body.len(), control::KEY_LEN + 4 + 16 + 28);
+        assert_ne!(
+            &frame.body[control::KEY_LEN + 4 + 16..control::KEY_LEN + 4 + 20],
+            b"R2BC"
+        );
+        assert_eq!(
+            control::decode_ack(&frame).unwrap().binding_context,
+            Some(binding)
+        );
         drop(client);
         drop(server);
         std::fs::remove_dir(&directory).unwrap();

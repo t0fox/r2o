@@ -970,17 +970,31 @@ pub fn write_frame(writer: &mut impl Write, kind: u16, body: &[u8]) -> io::Resul
     writer.write_all(&frame)
 }
 
+pub const PROTOCOL_VERSION_V22: u16 = 22;
+
 pub fn encode_greeting(send_maxlen: u32) -> Result<Vec<u8>, &'static str> {
-    if !valid_release_id(RELEASE_ID) {
-        return Err("R2O_RELEASE_ID имеет недопустимый формат");
+    encode_greeting_profile(WireProfile::V48, RELEASE_ID, send_maxlen)
+}
+
+pub fn encode_greeting_profile(
+    profile: WireProfile,
+    release_id: &str,
+    send_maxlen: u32,
+) -> Result<Vec<u8>, &'static str> {
+    if !valid_release_id(release_id) {
+        return Err("RELEASE_ID имеет недопустимый формат");
     }
-    let release_id = RELEASE_ID.as_bytes();
-    let mut body = vec![0; KEY_LEN + 7 + release_id.len()];
+    let version = match profile {
+        WireProfile::V22 => PROTOCOL_VERSION_V22,
+        WireProfile::V48 => PROTOCOL_VERSION,
+    };
+    let release = release_id.as_bytes();
+    let mut body = vec![0; KEY_LEN + 7 + release.len()];
     body[0] = 4;
-    body[KEY_LEN..KEY_LEN + 2].copy_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+    body[KEY_LEN..KEY_LEN + 2].copy_from_slice(&version.to_be_bytes());
     body[KEY_LEN + 2..KEY_LEN + 6].copy_from_slice(&send_maxlen.to_be_bytes());
-    body[KEY_LEN + 6] = release_id.len() as u8;
-    body[KEY_LEN + 7..].copy_from_slice(release_id);
+    body[KEY_LEN + 6] = release.len() as u8;
+    body[KEY_LEN + 7..].copy_from_slice(release);
     encode_frame(EVENT_PROTOCOL, &body)
 }
 
@@ -1010,6 +1024,335 @@ pub fn decode_greeting(frame: &Frame) -> Result<Greeting, &'static str> {
         send_maxlen,
         release_id: release_id.to_owned(),
     })
+}
+
+pub const EVENT_LEGACY_SUSPECT: u16 = 0x0002;
+pub const EVENT_LEGACY_EXCHANGE: u16 = 0x0005;
+pub const EVENT_LEGACY_SHAPE: u16 = 0x0007;
+pub const EVENT_LEGACY_CLIENT_TCP: u16 = 0x000d;
+
+pub const LEGACY_PLANNED_UNKNOWN: u8 = 0;
+pub const LEGACY_PLANNED_YES: u8 = 1;
+pub const LEGACY_PLANNED_NO: u8 = 2;
+
+/// Подозрение D2O v22: ключ, код причины и необязательные подробности.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LegacySuspectEvent {
+    pub key: [u8; KEY_LEN],
+    pub code: u8,
+    pub ttl: u8,
+    pub reference_ttl: u8,
+    pub traffic_class: u8,
+    pub ip_id: u16,
+    pub planned: u8,
+    pub client_shape: u8,
+    pub num: u16,
+}
+
+impl LegacySuspectEvent {
+    pub fn event_body(&self) -> Option<Vec<u8>> {
+        if !valid_flow_key(&self.key) || self.key[37] != 6 || self.code == 0 {
+            return None;
+        }
+        let mut body = Vec::with_capacity(KEY_LEN + 10);
+        body.extend_from_slice(&self.key);
+        body.push(self.code);
+        body.push(self.ttl);
+        body.push(self.reference_ttl);
+        body.push(self.traffic_class);
+        body.extend_from_slice(&self.ip_id.to_be_bytes());
+        body.push(self.planned);
+        body.push(self.client_shape);
+        body.extend_from_slice(&self.num.to_be_bytes());
+        Some(body)
+    }
+}
+
+/// Ответный TLS-обмен D2O v22: первая запись, маска типов, длина и приёмка.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LegacyExchangeEvent {
+    pub key: [u8; KEY_LEN],
+    pub first_record_type: u8,
+    pub seen_types: u8,
+    pub num: u32,
+    pub server_hello: bool,
+    pub planned: u8,
+}
+
+impl LegacyExchangeEvent {
+    pub fn event_body(&self) -> Option<Vec<u8>> {
+        if !valid_flow_key(&self.key) || self.key[37] != 6 || self.seen_types & !0x0f != 0 {
+            return None;
+        }
+        let mut body = Vec::with_capacity(KEY_LEN + 8);
+        body.extend_from_slice(&self.key);
+        body.push(self.first_record_type);
+        body.push(self.seen_types);
+        body.extend_from_slice(&self.num.to_be_bytes());
+        body.push(u8::from(self.server_hello));
+        body.push(self.planned);
+        Some(body)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LegacyShapeEvent {
+    pub key: [u8; KEY_LEN],
+    pub client_hello: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LegacyClientTcpEvent {
+    pub key: [u8; KEY_LEN],
+    pub options: Vec<u8>,
+}
+
+pub fn decode_legacy_suspect(frame: &Frame) -> Result<LegacySuspectEvent, &'static str> {
+    if frame.kind != EVENT_LEGACY_SUSPECT || frame.body.len() < KEY_LEN + 1 {
+        return Err("неверное событие SUSPECT v22");
+    }
+    let key: [u8; KEY_LEN] = frame
+        .body
+        .get(..KEY_LEN)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or("неверный ключ SUSPECT v22")?;
+    if !valid_flow_key(&key) || key[37] != 6 {
+        return Err("SUSPECT v22 привязан не к TCP-потоку");
+    }
+    let rest = &frame.body[KEY_LEN..];
+    let byte = |index: usize| rest.get(index).copied().unwrap_or(0);
+    let code = rest[0];
+    if code == 0 {
+        return Err("SUSPECT v22 без кода причины");
+    }
+    Ok(LegacySuspectEvent {
+        key,
+        code,
+        ttl: byte(1),
+        reference_ttl: byte(2),
+        traffic_class: byte(3),
+        ip_id: u16::from_be_bytes([byte(4), byte(5)]),
+        planned: byte(6),
+        client_shape: byte(7),
+        num: u16::from_be_bytes([byte(8), byte(9)]),
+    })
+}
+
+pub fn decode_legacy_exchange(frame: &Frame) -> Result<LegacyExchangeEvent, &'static str> {
+    if frame.kind != EVENT_LEGACY_EXCHANGE || frame.body.len() < KEY_LEN + 6 {
+        return Err("неверное событие EXCHANGE v22");
+    }
+    let key: [u8; KEY_LEN] = frame.body[..KEY_LEN]
+        .try_into()
+        .map_err(|_| "неверный ключ EXCHANGE v22")?;
+    if !valid_flow_key(&key) {
+        return Err("EXCHANGE v22 содержит неверный ключ потока");
+    }
+    let rest = &frame.body[KEY_LEN..];
+    Ok(LegacyExchangeEvent {
+        key,
+        first_record_type: rest[0],
+        seen_types: rest[1],
+        num: u32::from_be_bytes([rest[2], rest[3], rest[4], rest[5]]),
+        server_hello: rest.get(6).is_some_and(|byte| *byte != 0),
+        planned: rest.get(7).copied().unwrap_or(LEGACY_PLANNED_UNKNOWN),
+    })
+}
+
+pub fn decode_legacy_shape(frame: &Frame) -> Result<LegacyShapeEvent, &'static str> {
+    if frame.kind != EVENT_LEGACY_SHAPE || frame.body.len() <= KEY_LEN {
+        return Err("неверное событие SHAPE v22");
+    }
+    let key: [u8; KEY_LEN] = frame.body[..KEY_LEN]
+        .try_into()
+        .map_err(|_| "неверный ключ SHAPE v22")?;
+    if !valid_flow_key(&key) || key[37] != 6 {
+        return Err("SHAPE v22 привязан не к TCP-потоку");
+    }
+    Ok(LegacyShapeEvent {
+        key,
+        client_hello: frame.body[KEY_LEN..].to_vec(),
+    })
+}
+
+pub fn decode_legacy_client_tcp(frame: &Frame) -> Result<LegacyClientTcpEvent, &'static str> {
+    if frame.kind != EVENT_LEGACY_CLIENT_TCP {
+        return Err("неверное событие CLIENT_TCP v22");
+    }
+    let key: [u8; KEY_LEN] = frame
+        .body
+        .get(..KEY_LEN)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or("неверный ключ CLIENT_TCP v22")?;
+    if !valid_flow_key(&key) || key[37] != 6 {
+        return Err("CLIENT_TCP v22 привязан не к TCP-потоку");
+    }
+    let options = frame.body[KEY_LEN..].to_vec();
+    if options.len() > 40 {
+        return Err("набор опций TCP клиента длиннее 40 байт");
+    }
+    Ok(LegacyClientTcpEvent { key, options })
+}
+
+/// Перевести R2O v48 событие в набор кадров D2O v22.
+///
+/// Возвращает пустой список для R2O-only событий, чтобы не отправлять C
+/// контроллеру неизвестные ему номера. События, совпадающие по формату,
+/// вызывающий код отправляет без преобразования.
+pub fn translate_event_to_v22(kind: u16, body: &[u8]) -> Vec<(u16, Vec<u8>)> {
+    let frame = Frame {
+        kind,
+        body: body.to_vec(),
+    };
+    match kind {
+        EVENT_CLIENT_SHAPE => {
+            let Ok(event) = decode_client_shape(&frame) else {
+                return Vec::new();
+            };
+            let client_tcp = LegacyClientTcpEvent {
+                key: event.key,
+                options: Vec::new(),
+            };
+            let mut frames = Vec::with_capacity(2);
+            let mut tcp_body = Vec::with_capacity(KEY_LEN);
+            tcp_body.extend_from_slice(&client_tcp.key);
+            frames.push((EVENT_LEGACY_CLIENT_TCP, tcp_body));
+            let mut shape_body = Vec::with_capacity(KEY_LEN + event.client_hello.len());
+            shape_body.extend_from_slice(&event.key);
+            shape_body.extend_from_slice(&event.client_hello);
+            frames.push((EVENT_LEGACY_SHAPE, shape_body));
+            frames
+        }
+        EVENT_R2O_TCP_EARLY_RST => {
+            let Ok(event) = decode_r2o_tcp_early_rst(&frame) else {
+                return Vec::new();
+            };
+            let suspect = LegacySuspectEvent {
+                key: event.key,
+                code: 1,
+                ttl: event.ttl,
+                reference_ttl: event.reference_ttl,
+                traffic_class: event.traffic_class,
+                ip_id: event.ip_id,
+                planned: if event.planned {
+                    LEGACY_PLANNED_YES
+                } else {
+                    LEGACY_PLANNED_NO
+                },
+                client_shape: 0,
+                num: 0,
+            };
+            suspect
+                .event_body()
+                .map(|body| vec![(EVENT_LEGACY_SUSPECT, body)])
+                .unwrap_or_default()
+        }
+        EVENT_R2O_TCP_REPEAT => {
+            let Ok(event) = decode_r2o_tcp_repeat(&frame) else {
+                return Vec::new();
+            };
+            legacy_suspect_from_planned(event.key, 2, event.planned, 0, 0, 0, 0, 0)
+        }
+        EVENT_R2O_TCP_SILENT => {
+            let Ok(event) = decode_r2o_tcp_silence(&frame) else {
+                return Vec::new();
+            };
+            legacy_suspect_from_planned(event.key, 3, event.planned, 0, 0, 0, 0, 0)
+        }
+        EVENT_R2O_TCP_RST_CUT => {
+            let Ok(event) = decode_r2o_tcp_rst_cut_signal(&frame) else {
+                return Vec::new();
+            };
+            let suspect = LegacySuspectEvent {
+                key: event.key,
+                code: 4,
+                ttl: event.ttl,
+                reference_ttl: event.reference_ttl,
+                traffic_class: event.traffic_class,
+                ip_id: event.ip_id,
+                planned: LEGACY_PLANNED_UNKNOWN,
+                client_shape: 0,
+                num: 0,
+            };
+            suspect
+                .event_body()
+                .map(|body| vec![(EVENT_LEGACY_SUSPECT, body)])
+                .unwrap_or_default()
+        }
+        EVENT_R2O_TCP_RST_AFTER_APP => {
+            let Ok(event) = decode_r2o_tcp_rst_after_app(&frame) else {
+                return Vec::new();
+            };
+            legacy_suspect_from_planned(event.key, 5, event.planned, 0, 0, 0, 0, 0)
+        }
+        EVENT_R2O_TCP_FIN_RETRY => {
+            let Ok(event) = decode_r2o_tcp_fin_retry(&frame) else {
+                return Vec::new();
+            };
+            legacy_suspect_from_planned(event.key, 6, event.planned, 0, 0, 0, 0, 0)
+        }
+        EVENT_R2O_TCP_STALL => {
+            let Ok(event) = decode_r2o_tcp_stall(&frame) else {
+                return Vec::new();
+            };
+            let num =
+                u16::try_from(event.estimated_packets.min(u32::from(u16::MAX))).unwrap_or(u16::MAX);
+            legacy_suspect_from_planned(event.key, 8, event.planned, 0, 0, 0, 0, num)
+        }
+        EVENT_R2O_TCP_EXCHANGE => {
+            let Ok(event) = decode_r2o_tcp_exchange(&frame) else {
+                return Vec::new();
+            };
+            let exchange = LegacyExchangeEvent {
+                key: event.key,
+                first_record_type: event.first_record_type,
+                seen_types: event.record_types,
+                num: event.bytes_after_client_hello,
+                server_hello: event.server_hello,
+                planned: if event.planned {
+                    LEGACY_PLANNED_YES
+                } else {
+                    LEGACY_PLANNED_NO
+                },
+            };
+            exchange
+                .event_body()
+                .map(|body| vec![(EVENT_LEGACY_EXCHANGE, body)])
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn legacy_suspect_from_planned(
+    key: [u8; KEY_LEN],
+    code: u8,
+    planned: bool,
+    ttl: u8,
+    reference_ttl: u8,
+    traffic_class: u8,
+    ip_id: u16,
+    num: u16,
+) -> Vec<(u16, Vec<u8>)> {
+    let suspect = LegacySuspectEvent {
+        key,
+        code,
+        ttl,
+        reference_ttl,
+        traffic_class,
+        ip_id,
+        planned: if planned {
+            LEGACY_PLANNED_YES
+        } else {
+            LEGACY_PLANNED_NO
+        },
+        client_shape: 0,
+        num,
+    };
+    suspect
+        .event_body()
+        .map(|body| vec![(EVENT_LEGACY_SUSPECT, body)])
+        .unwrap_or_default()
 }
 
 pub fn encode_set_name(
@@ -1124,7 +1467,7 @@ fn valid_addr_shape(shape: u8) -> bool {
 }
 
 fn valid_addr_plan_records(shape: u8, records: &[u8]) -> bool {
-    Plan::parse(records).is_ok_and(|plan| match shape {
+    Plan::parse_wire(records).is_ok_and(|plan| match shape {
         SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP => plan.transport == 6 && plan.proto == 1,
         SHAPE_QUIC => plan.r2k_is_quic_address_plan(),
         SHAPE_VOICE => plan.transport == 17 && plan.proto == PROTO_VOICE,
@@ -1214,7 +1557,7 @@ fn valid_domain_area_context(transport: u8, shape: u8, family: u8) -> bool {
 }
 
 fn valid_domain_plan_records(shape: u8, records: &[u8]) -> bool {
-    Plan::parse(records).is_ok_and(|plan| match shape {
+    Plan::parse_wire(records).is_ok_and(|plan| match shape {
         SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP => plan.transport == 6 && plan.proto == 1,
         _ if is_tcp_context_shape(shape) => plan.transport == 6 && plan.proto == 1,
         SHAPE_QUIC => plan.r2k_is_quic_address_plan(),
@@ -1375,7 +1718,8 @@ pub fn valid_udp_addr_probe_flow(flow: &[u8; KEY_LEN]) -> bool {
 }
 
 fn valid_voice_plan_records(plan_records: &[u8]) -> bool {
-    Plan::parse(plan_records).is_ok_and(|plan| plan.transport == 17 && plan.proto == PROTO_VOICE)
+    Plan::parse_wire(plan_records)
+        .is_ok_and(|plan| plan.transport == 17 && plan.proto == PROTO_VOICE)
 }
 
 pub fn decode_r2o_voice_proof(frame: &Frame) -> Result<R2oVoiceProofEvent, &'static str> {
@@ -1586,7 +1930,7 @@ fn valid_tcp_probe_shape(shape: u8) -> bool {
 }
 
 fn valid_name_probe_plan_records(shape: u8, records: &[u8]) -> bool {
-    Plan::parse(records).is_ok_and(|plan| match shape {
+    Plan::parse_wire(records).is_ok_and(|plan| match shape {
         SHAPE_HTTP => plan.transport == 6 && plan.proto == PROTO_HTTP,
         SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP => plan.transport == 6 && plan.proto == 1,
         _ if is_tcp_context_shape(shape) => plan.transport == 6 && plan.proto == 1,
@@ -2915,7 +3259,7 @@ fn validate_zero_key(key: &[u8]) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn valid_release_id(value: &str) -> bool {
+pub fn valid_release_id(value: &str) -> bool {
     let bytes = value.as_bytes();
     !bytes.is_empty()
         && bytes.len() <= 64
@@ -3232,5 +3576,245 @@ mod tcp_shape_context_tests {
         assert_eq!(TCP_PROFILE_UNKNOWN, 0);
         assert_eq!(TCP_PROFILE_NO_TS, 1);
         assert_eq!(TCP_PROFILE_TS, 2);
+    }
+}
+
+#[cfg(test)]
+mod legacy_v22_wire_tests {
+    use super::{
+        EVENT_LEGACY_CLIENT_TCP, EVENT_LEGACY_EXCHANGE, EVENT_LEGACY_SHAPE, EVENT_LEGACY_SUSPECT,
+        EVENT_R2O_TCP_EARLY_RST, EVENT_R2O_TCP_EXCHANGE, EVENT_R2O_TCP_STALL, Frame, KEY_LEN,
+        LEGACY_PLANNED_NO, LEGACY_PLANNED_YES, LegacyExchangeEvent, LegacySuspectEvent,
+        PROTOCOL_VERSION_V22, R2oTcpEarlyRstEvent, R2oTcpExchangeEvent, R2oTcpStallEvent,
+        WireProfile, decode_greeting, decode_legacy_client_tcp, decode_legacy_exchange,
+        decode_legacy_shape, decode_legacy_suspect, encode_ack_with_identifiers_profile,
+        encode_greeting_profile, read_frame, translate_event_to_v22,
+    };
+    use std::io::Cursor;
+
+    fn tcp_key() -> [u8; KEY_LEN] {
+        let mut key = [0; KEY_LEN];
+        key[0] = 4;
+        key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+        key[17..21].copy_from_slice(&[198, 51, 100, 80]);
+        key[33..35].copy_from_slice(&45_000_u16.to_be_bytes());
+        key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+        key[37] = 6;
+        key
+    }
+
+    fn client_hello(host: &str) -> Vec<u8> {
+        let host = host.as_bytes();
+        let mut server_name = Vec::with_capacity(host.len() + 5);
+        server_name.extend_from_slice(&((host.len() + 3) as u16).to_be_bytes());
+        server_name.push(0);
+        server_name.extend_from_slice(&(host.len() as u16).to_be_bytes());
+        server_name.extend_from_slice(host);
+
+        let mut extensions = vec![0x00, 0x00];
+        extensions.extend_from_slice(&(server_name.len() as u16).to_be_bytes());
+        extensions.extend_from_slice(&server_name);
+        extensions.extend_from_slice(&[0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04]);
+
+        let mut hello = vec![0x03, 0x03];
+        hello.extend_from_slice(&[0x42; 32]);
+        hello.extend_from_slice(&[0x00, 0x00, 0x02, 0x13, 0x01, 0x01, 0x00]);
+        hello.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        hello.extend_from_slice(&extensions);
+
+        let mut handshake = vec![0x01];
+        handshake.extend_from_slice(&[
+            ((hello.len() >> 16) & 0xff) as u8,
+            ((hello.len() >> 8) & 0xff) as u8,
+            (hello.len() & 0xff) as u8,
+        ]);
+        handshake.extend_from_slice(&hello);
+
+        let mut payload = vec![0x16, 0x03, 0x01];
+        payload.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+        payload.extend_from_slice(&handshake);
+        payload
+    }
+
+    #[test]
+    fn v22_greeting_carries_version_22_and_release_id() {
+        let bytes = encode_greeting_profile(WireProfile::V22, "dev", 1500).unwrap();
+        let frame = read_frame(&mut Cursor::new(bytes)).unwrap();
+        assert_eq!(frame.kind, super::EVENT_PROTOCOL);
+        assert_eq!(&frame.body[..KEY_LEN], &{
+            let mut zero = [0u8; KEY_LEN];
+            zero[0] = 4;
+            zero
+        });
+        assert_eq!(
+            u16::from_be_bytes([frame.body[KEY_LEN], frame.body[KEY_LEN + 1]]),
+            PROTOCOL_VERSION_V22
+        );
+        assert_eq!(
+            u32::from_be_bytes(frame.body[KEY_LEN + 2..KEY_LEN + 6].try_into().unwrap()),
+            1500
+        );
+        assert_eq!(&frame.body[KEY_LEN + 7..], b"dev");
+        let greeting = decode_greeting(&frame).unwrap();
+        assert_eq!(greeting.version, 22);
+        assert_eq!(greeting.release_id, "dev");
+    }
+
+    #[test]
+    fn v22_suspect_and_exchange_round_trip_with_c_layout() {
+        let key = tcp_key();
+        let suspect = LegacySuspectEvent {
+            key,
+            code: 1,
+            ttl: 63,
+            reference_ttl: 64,
+            traffic_class: 0x88,
+            ip_id: 0x1234,
+            planned: LEGACY_PLANNED_YES,
+            client_shape: 0,
+            num: 7,
+        };
+        let body = suspect.event_body().unwrap();
+        assert_eq!(body.len(), KEY_LEN + 10);
+        assert_eq!(body[KEY_LEN], 1);
+        assert_eq!(&body[KEY_LEN + 4..KEY_LEN + 6], &[0x12, 0x34]);
+        let frame = Frame {
+            kind: EVENT_LEGACY_SUSPECT,
+            body,
+        };
+        assert_eq!(decode_legacy_suspect(&frame), Ok(suspect));
+
+        let exchange = LegacyExchangeEvent {
+            key,
+            first_record_type: 22,
+            seen_types: 0b1001,
+            num: 1234,
+            server_hello: true,
+            planned: LEGACY_PLANNED_NO,
+        };
+        let body = exchange.event_body().unwrap();
+        assert_eq!(body.len(), KEY_LEN + 8);
+        assert_eq!(&body[KEY_LEN..KEY_LEN + 2], &[22, 0b1001]);
+        let frame = Frame {
+            kind: EVENT_LEGACY_EXCHANGE,
+            body,
+        };
+        assert_eq!(decode_legacy_exchange(&frame), Ok(exchange));
+    }
+
+    #[test]
+    fn translates_r2o_tcp_stall_and_exchange_to_v22() {
+        let key = tcp_key();
+        let stall = R2oTcpStallEvent {
+            key,
+            client_is_low: true,
+            elapsed_ms: 4200,
+            estimated_packets: 700,
+            planned: true,
+        };
+        let frames = translate_event_to_v22(EVENT_R2O_TCP_STALL, &stall.event_body().unwrap());
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].0, EVENT_LEGACY_SUSPECT);
+        let decoded = decode_legacy_suspect(&Frame {
+            kind: frames[0].0,
+            body: frames[0].1.clone(),
+        })
+        .unwrap();
+        assert_eq!(decoded.code, 8);
+        assert_eq!(decoded.num, 700);
+        assert_eq!(decoded.planned, LEGACY_PLANNED_YES);
+
+        let exchange = R2oTcpExchangeEvent {
+            key,
+            first_record_type: 22,
+            bytes_after_client_hello: 900,
+            record_types: 0b1010,
+            server_hello: true,
+            planned: false,
+        };
+        let frames =
+            translate_event_to_v22(EVENT_R2O_TCP_EXCHANGE, &exchange.event_body().unwrap());
+        assert_eq!(frames.len(), 1);
+        let decoded = decode_legacy_exchange(&Frame {
+            kind: frames[0].0,
+            body: frames[0].1.clone(),
+        })
+        .unwrap();
+        assert_eq!(decoded.first_record_type, 22);
+        assert_eq!(decoded.seen_types, 0b1010);
+        assert_eq!(decoded.num, 900);
+        assert!(decoded.server_hello);
+        assert_eq!(decoded.planned, LEGACY_PLANNED_NO);
+    }
+
+    #[test]
+    fn translates_r2o_early_rst_details_and_shape_pair() {
+        let key = tcp_key();
+        let rst = R2oTcpEarlyRstEvent {
+            key,
+            client_is_low: true,
+            planned: true,
+            ttl: 63,
+            reference_ttl: 64,
+            traffic_class: 0x88,
+            ip_id: 0x4321,
+        };
+        let frames = translate_event_to_v22(EVENT_R2O_TCP_EARLY_RST, &rst.event_body().unwrap());
+        let decoded = decode_legacy_suspect(&Frame {
+            kind: frames[0].0,
+            body: frames[0].1.clone(),
+        })
+        .unwrap();
+        assert_eq!(decoded.code, 1);
+        assert_eq!(decoded.ttl, 63);
+        assert_eq!(decoded.ip_id, 0x4321);
+
+        // SHAPE v22 — только ключ и сырой ClientHello; CLIENT_TCP идёт первым.
+        let hello = client_hello("example.com");
+        let event = super::ClientShapeEvent {
+            key,
+            host: b"example.com".to_vec(),
+            shape: super::SHAPE_MODERN,
+            client_hello: hello.clone(),
+            tcp_has_timestamp: Some(true),
+        };
+        let frames =
+            translate_event_to_v22(super::EVENT_CLIENT_SHAPE, &event.event_body().unwrap());
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].0, EVENT_LEGACY_CLIENT_TCP);
+        assert_eq!(frames[1].0, EVENT_LEGACY_SHAPE);
+        assert_eq!(
+            decode_legacy_client_tcp(&Frame {
+                kind: frames[0].0,
+                body: frames[0].1.clone(),
+            })
+            .unwrap()
+            .options,
+            Vec::<u8>::new()
+        );
+        let shape = decode_legacy_shape(&Frame {
+            kind: frames[1].0,
+            body: frames[1].1.clone(),
+        })
+        .unwrap();
+        assert_eq!(shape.client_hello, hello);
+
+        let ack = encode_ack_with_identifiers_profile(
+            WireProfile::V22,
+            super::COMMAND_SET_NAME_BOUND,
+            true,
+            0,
+            Some([0x22; 16]),
+            None,
+            Some(super::BindingContext {
+                generation: 1,
+                kind: 1,
+                family: 4,
+                shape: super::SHAPE_HTTP,
+                temporary: false,
+                epoch: [1; 16],
+            }),
+        );
+        assert!(ack.is_ok());
     }
 }

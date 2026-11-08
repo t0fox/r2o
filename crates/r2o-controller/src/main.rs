@@ -14,7 +14,8 @@ use r2k_core::control::{
     Frame, HelloEvent, PROTOCOL_VERSION, RELEASE_ID, SHAPE_ECH_TCP, SHAPE_GRANDFATHER, SHAPE_HTTP,
     SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, VOICE_ADDR_PROBE_LEASE_MAX_MS, decode_ack,
     decode_applied, decode_client_shape, decode_greeting, decode_hello, decode_http_portal,
-    decode_http_response, decode_r2o_quic_stall, decode_r2o_quic_suspect,
+    decode_http_response, decode_legacy_client_tcp, decode_legacy_exchange, decode_legacy_shape,
+    decode_legacy_suspect, decode_r2o_quic_stall, decode_r2o_quic_suspect,
     decode_r2o_tcp_clean_handshake, decode_r2o_tcp_early_rst, decode_r2o_tcp_exchange,
     decode_r2o_tcp_fin_retry, decode_r2o_tcp_repeat, decode_r2o_tcp_rst_after_app,
     decode_r2o_tcp_rst_cut_signal, decode_r2o_tcp_silence, decode_r2o_tcp_stall,
@@ -133,6 +134,61 @@ const R2O_QUIC_DISCOVERY_FAILURE_COOLDOWN: std::time::Duration =
 const CONTROL_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const D2O_TRIAL_SETTLE_MS: u64 = 50;
 
+static R2O_CONTROL_WIRE: std::sync::OnceLock<r2k_core::control::WireProfile> =
+    std::sync::OnceLock::new();
+static R2O_CONTROL_RELEASE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn r2o_control_wire() -> r2k_core::control::WireProfile {
+    *R2O_CONTROL_WIRE.get_or_init(|| r2k_core::control::WireProfile::V48)
+}
+
+fn r2o_control_release() -> &'static str {
+    R2O_CONTROL_RELEASE
+        .get_or_init(|| r2k_core::control::RELEASE_ID.to_owned())
+        .as_str()
+}
+
+/// Вынимает глобальные `--control-wire`/`--control-release-id` до разбора
+/// подкоманды: профиль относится ко всем control-соединениям процесса.
+fn r2o_take_control_wire_args(arguments: &mut Vec<std::ffi::OsString>) -> Result<(), String> {
+    let mut index = 0;
+    while index < arguments.len() {
+        let Some(option) = arguments[index].to_str() else {
+            index += 1;
+            continue;
+        };
+        if option != "--control-wire" && option != "--control-release-id" {
+            index += 1;
+            continue;
+        }
+        if index + 1 >= arguments.len() {
+            return Err(format!("{option} требует значение"));
+        }
+        let value = arguments[index + 1]
+            .to_str()
+            .ok_or_else(|| format!("{option} должен быть UTF-8"))?;
+        if option == "--control-wire" {
+            let profile = match value {
+                "v22" => r2k_core::control::WireProfile::V22,
+                "v48" => r2k_core::control::WireProfile::V48,
+                _ => return Err("--control-wire принимает v22 или v48".into()),
+            };
+            R2O_CONTROL_WIRE
+                .set(profile)
+                .map_err(|_| "--control-wire задан дважды".to_owned())?;
+        } else {
+            if !r2k_core::control::valid_release_id(value) {
+                return Err("--control-release-id имеет недопустимый формат".into());
+            }
+            R2O_CONTROL_RELEASE
+                .set(value.to_owned())
+                .map_err(|_| "--control-release-id задан дважды".to_owned())?;
+        }
+        arguments.drain(index..index + 2);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct ClassifyCliOptions {
     repeats: usize,
@@ -164,7 +220,11 @@ struct ServeCliOptions {
 }
 
 fn main() {
-    let r2o_arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    let mut r2o_arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    if let Err(error) = r2o_take_control_wire_args(&mut r2o_arguments) {
+        eprintln!("r2o-controller: {error}");
+        std::process::exit(2);
+    }
     if let Some(r2o_code) = r2o_ask_command(&r2o_arguments) {
         if r2o_code != 0 {
             std::process::exit(r2o_code);
@@ -384,6 +444,7 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
         };
         let plan_records = compile_text(&plan_text)?;
         let plan_len = plan_records.len();
+        let wire_records = r2o_plan_records_for_wire(&plan_records)?;
         if plan.id != plan_id {
             return Err("план вопроса потерял случайный идентификатор".into());
         }
@@ -411,7 +472,7 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
             shape,
             family,
             source_port,
-            &plan_records,
+            &wire_records,
             trial_id,
         )?;
         let ack = match client.exchange_command_with_timeout(
@@ -1453,6 +1514,9 @@ fn print_help() {
         "  r2o-controller --ask --control СОКЕТ --ip IP --sni ИМЯ (--hello-hex ФАЙЛ | --arm-wait-ms МС)"
     );
     println!("  r2o-controller --import-donor-catalog ФАЙЛ КАТАЛОГА");
+    println!(
+        "  глобально: [--control-wire v22|v48] [--control-release-id ID] — профиль control-соединения (по умолчанию v48)"
+    );
     println!("  r2o-controller --voice-list [--conntrack ФАЙЛ]");
     println!(
         "  r2o-controller --voice-check [--addr IPv4:ПОРТ] [--control ХОСТ:ПОРТ] [--conntrack ФАЙЛ] [--wait МС] [--mark 0xN] [--discovery]"
@@ -1539,14 +1603,15 @@ fn set_addr(
         _ => return Err("неизвестная SHAPE адресной привязки".into()),
     };
     let bytes = std::fs::read(&plan_path)?;
-    let plan = Plan::parse(&bytes)?;
+    let plan = Plan::parse_wire(&bytes)?;
     if !shape_matches_plan(shape, &plan) {
         return Err("SHAPE не соответствует transport/proto плана".into());
     }
     r2o_datapath::engine::validate_runtime_plan(&plan)
         .map_err(|error| format!("план не подходит runtime r2o-datapath: {error}"))?;
-    let command =
-        encode_set_addr(address, shape, &bytes).map_err(|error| format!("SET_ADDR: {error}"))?;
+    let wire_bytes = r2o_plan_records_for_wire(&bytes)?;
+    let command = encode_set_addr(address, shape, &wire_bytes)
+        .map_err(|error| format!("SET_ADDR: {error}"))?;
     let mut client = ControlClient::connect(socket_path)?;
     client.send_command(&command, COMMAND_SET_ADDR)?;
     println!("план установлен для адреса {address} ({shape})");
@@ -1583,13 +1648,14 @@ fn set_name_bytes(
     bytes: &[u8],
 ) -> Result<(), Box<dyn Error>> {
     let host = normalize_plan_target(host, shape).map_err(|error| format!("HOST: {error}"))?;
-    let plan = Plan::parse(bytes)?;
+    let plan = Plan::parse_wire(bytes)?;
     if !shape_matches_plan(shape, &plan) {
         return Err("SHAPE не соответствует transport/proto плана".into());
     }
     r2o_datapath::engine::validate_runtime_plan(&plan)
         .map_err(|error| format!("план не подходит runtime r2o-datapath: {error}"))?;
-    let command = encode_set_name(&host, shape, family, bytes)
+    let wire_bytes = r2o_plan_records_for_wire(bytes)?;
+    let command = encode_set_name(&host, shape, family, &wire_bytes)
         .map_err(|error| format!("SET_NAME: {error}"))?;
 
     let mut client = ControlClient::connect(socket_path)?;
@@ -2297,7 +2363,14 @@ fn catalog_commands_with_send_cap(
                 skipped += 1;
                 continue;
             }
-            let Ok(command) = encode_set_name(&host, shape, family, &bytes) else {
+            let wire_bytes = match r2o_plan_records_for_wire(&bytes) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+            let Ok(command) = encode_set_name(&host, shape, family, &wire_bytes) else {
                 skipped += 1;
                 continue;
             };
@@ -2359,9 +2432,15 @@ fn catalog_commands_with_send_cap(
             if !seen_suffixes.insert(wire_key) {
                 continue;
             }
-            let command =
-                encode_set_suffix(&group.suffix, group.key.shape, group.key.family, &bytes)
-                    .map_err(|error| format!("SET_SUFFIX для {}: {error}", group.suffix))?;
+            let wire_bytes = r2o_plan_records_for_wire(&bytes)
+                .map_err(|error| format!("SET_SUFFIX для {}: {error}", group.suffix))?;
+            let command = encode_set_suffix(
+                &group.suffix,
+                group.key.shape,
+                group.key.family,
+                &wire_bytes,
+            )
+            .map_err(|error| format!("SET_SUFFIX для {}: {error}", group.suffix))?;
             suffix_commands.push((
                 format!("суффикс {}", group.suffix),
                 command,
@@ -2449,7 +2528,9 @@ fn r2o_catalog_encode_set_addr(
     shape: u8,
     plan_records: &[u8],
 ) -> Result<Vec<u8>, &'static str> {
-    let mut body = Vec::with_capacity(18 + plan_records.len());
+    let wire_records = r2o_plan_records_for_wire(plan_records)
+        .map_err(|_| "план не перекодируется для control-wire")?;
+    let mut body = Vec::with_capacity(18 + wire_records.len());
     match address {
         std::net::IpAddr::V4(address) => {
             body.push(4);
@@ -2462,7 +2543,7 @@ fn r2o_catalog_encode_set_addr(
         }
     }
     body.push(shape);
-    body.extend_from_slice(plan_records);
+    body.extend_from_slice(&wire_records);
     control::encode_frame(COMMAND_SET_ADDR, &body)
 }
 
@@ -4886,12 +4967,13 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
         let local_port = bound.local_port;
         let trial_id = random_id().map_err(|error| error.to_string())?;
         let records = compile_text(&candidate.plan_text).map_err(|error| error.to_string())?;
+        let wire_records = r2o_plan_records_for_wire(&records)?;
         let command = encode_set_name_probe(
             &target.host,
             wire_shape,
             target.family,
             local_port,
-            &records,
+            &wire_records,
             trial_id,
         )
         .map_err(|error| error.to_string())?;
@@ -5671,6 +5753,22 @@ fn r2o_plan_wire_shape(shape: u8, has_timestamp: Option<bool>) -> u8 {
     )
 }
 
+/// План для внешнего провода: v22 C-датапат принимает только `D2KP`.
+fn r2o_plan_records_for_wire(records: &[u8]) -> Result<Vec<u8>, String> {
+    r2o_plan_records_for_profile(r2o_control_wire(), records)
+}
+
+fn r2o_plan_records_for_profile(
+    profile: r2k_core::control::WireProfile,
+    records: &[u8],
+) -> Result<Vec<u8>, String> {
+    if profile == r2k_core::control::WireProfile::V22 {
+        Plan::to_wire(records, true).map_err(|error| format!("R2OP→D2KP: {error}"))
+    } else {
+        Ok(records.to_vec())
+    }
+}
+
 #[cfg(unix)]
 fn r2o_discovery_client_shape_trial(
     target: &r2o_controller::discovery::DiscoveryTarget,
@@ -5689,12 +5787,13 @@ fn r2o_discovery_client_shape_trial(
     let trial_id = random_id().map_err(|error| error.to_string())?;
     let records = compile_text(source_text).map_err(|error| error.to_string())?;
     let plan = Plan::parse(&records).map_err(|error| error.to_string())?;
+    let wire_records = r2o_plan_records_for_wire(&records)?;
     let command = encode_set_name_probe(
         &target.host,
         target.shape,
         target.family,
         local_port,
-        &records,
+        &wire_records,
         trial_id,
     )
     .map_err(|error| error.to_string())?;
@@ -8458,6 +8557,49 @@ fn r2o_voice_suspect_frame_is_udp(frame: &Frame) -> bool {
 }
 
 #[cfg(unix)]
+/// Собрать R2O-снимок из пары v22 SHAPE/CLIENT_TCP.
+///
+/// C присылает сырой ClientHello и, отдельным событием перед ним, опции TCP.
+/// Форма и SNI восстанавливаются тем же TLS-разбором, что и в R2O-событии.
+fn r2o_client_shape_from_legacy(
+    shape: &r2k_core::control::LegacyShapeEvent,
+    tcp_options: Option<&[u8]>,
+) -> Option<r2k_core::control::ClientShapeEvent> {
+    let tls = r2k_core::tls::parse(&shape.client_hello);
+    if !tls.is_client_hello
+        || tls.extensions_truncated
+        || tls.record_end != Some(shape.client_hello.len())
+    {
+        return None;
+    }
+    let host = tls
+        .sni_range
+        .as_ref()
+        .and_then(|range| shape.client_hello.get(range.clone()))?
+        .to_vec();
+    if host.is_empty() {
+        return None;
+    }
+    let client_shape = if tls.ech_offer {
+        SHAPE_ECH_TCP
+    } else if tls.is_tls13 {
+        SHAPE_MODERN
+    } else {
+        SHAPE_LEGACY
+    };
+    let tcp_has_timestamp = tcp_options.map(|options| {
+        r2k_core::packet::PacketView::tcp_options_timestamp_profile(options)
+            == r2k_core::control::TCP_PROFILE_TS
+    });
+    Some(r2k_core::control::ClientShapeEvent {
+        key: shape.key,
+        host,
+        shape: client_shape,
+        client_hello: shape.client_hello.clone(),
+        tcp_has_timestamp,
+    })
+}
+
 fn r2o_handle_client_shape_event(
     worker: &mut DiscoveryWorker,
     shape: &r2k_core::control::ClientShapeEvent,
@@ -14702,9 +14844,15 @@ impl ControlClient {
         socket.set_write_timeout(Some(std::time::Duration::from_secs(2)))?;
         let greeting = decode_greeting(&read_frame(&mut socket)?)
             .map_err(|error| format!("приветствие датапата: {error}"))?;
-        if greeting.version != PROTOCOL_VERSION || greeting.release_id != RELEASE_ID {
+        let profile = r2o_control_wire();
+        let expected_release = r2o_control_release();
+        let expected_version = match profile {
+            r2k_core::control::WireProfile::V22 => r2k_core::control::PROTOCOL_VERSION_V22,
+            r2k_core::control::WireProfile::V48 => PROTOCOL_VERSION,
+        };
+        if greeting.version != expected_version || greeting.release_id != expected_release {
             return Err(format!(
-                "несовместимый r2o-datapath: wire={}, release={}, нужен wire={PROTOCOL_VERSION}, release={RELEASE_ID}",
+                "несовместимый r2o-datapath: wire={}, release={}, нужен wire={expected_version}, release={expected_release}",
                 greeting.version, greeting.release_id
             )
             .into());
@@ -15308,6 +15456,8 @@ impl ControlClient {
             );
         let mut tcp_hello_names = R2oTcpHelloCache::default();
         let mut clean_handshakes = R2oCleanHandshakeCache::default();
+        let mut legacy_client_tcp =
+            HashMap::<[u8; r2k_core::control::KEY_LEN], (Vec<u8>, std::time::Instant)>::new();
         let mut quic_trial_cooldowns = HashMap::<std::net::IpAddr, std::time::Instant>::new();
         let mut quic_deny = R2oQuicDenyCache::default();
         let mut r2o_pending_quic_discovery = VecDeque::<R2oPendingQuicDiscovery>::new();
@@ -17724,6 +17874,49 @@ impl ControlClient {
                     }
                     continue;
                 }
+                if frame.kind == control::EVENT_LEGACY_CLIENT_TCP {
+                    let event = decode_legacy_client_tcp(&frame)
+                        .map_err(|error| format!("CLIENT_TCP v22: {error}"))?;
+                    let now = std::time::Instant::now();
+                    legacy_client_tcp.retain(|_, (_, seen)| {
+                        now.saturating_duration_since(*seen) < std::time::Duration::from_secs(30)
+                    });
+                    legacy_client_tcp.insert(event.key, (event.options, now));
+                    continue;
+                }
+                if frame.kind == control::EVENT_LEGACY_SHAPE {
+                    let event = decode_legacy_shape(&frame)
+                        .map_err(|error| format!("SHAPE v22: {error}"))?;
+                    let options = legacy_client_tcp
+                        .remove(&event.key)
+                        .map(|(options, _)| options);
+                    let shape = r2o_client_shape_from_legacy(&event, options.as_deref())
+                        .ok_or("SHAPE v22 не содержит разбираемого ClientHello")?;
+                    if let Some((worker, catalog, _, _)) = &mut discovery
+                        && let Some(target) = r2o_handle_client_shape_event(worker, &shape)
+                    {
+                        let reason = if r2o_controller::discovery::has_usable_profile_binding(
+                            catalog, &target,
+                        ) {
+                            "сохранён для точного повторного измерения профильной привязки"
+                        } else {
+                            "сохранён; Discovery запускается только отдельным подозрением"
+                        };
+                        println!("ClientHello {}: {reason}", target.host);
+                    }
+                    std::io::stdout().flush()?;
+                    continue;
+                }
+                if frame.kind == control::EVENT_LEGACY_SUSPECT {
+                    let _event = decode_legacy_suspect(&frame)
+                        .map_err(|error| format!("SUSPECT v22: {error}"))?;
+                    continue;
+                }
+                if frame.kind == control::EVENT_LEGACY_EXCHANGE {
+                    let _event = decode_legacy_exchange(&frame)
+                        .map_err(|error| format!("EXCHANGE v22: {error}"))?;
+                    continue;
+                }
                 if frame.kind == EVENT_CLIENT_SHAPE {
                     let shape = decode_client_shape(&frame)
                         .map_err(|error| format!("снимок ClientHello: {error}"))?;
@@ -18656,6 +18849,7 @@ impl ControlClient {
             candidate.directives
         );
         let plan_records = compile_text(&plan_text)?;
+        let wire_records = r2o_plan_records_for_wire(&plan_records)?;
         let plan = Plan::parse(&plan_records)?;
         r2o_datapath::engine::validate_runtime_plan(&plan).map_err(|error| {
             format!(
@@ -18667,7 +18861,7 @@ impl ControlClient {
             local,
             server,
             ADDR_PROBE_LEASE_MAX_MS,
-            &plan_records,
+            &wire_records,
             trial_id,
         )?;
         let delete = encode_delete_addr_probe(local, server, trial_id)?;
@@ -19761,10 +19955,11 @@ impl ControlClient {
         let plan_text =
             format!("r2o-plan 1 11\nid {plan_id}\nproto udp quic\nquicdeny 1\norder forward\n");
         let records = compile_text(&plan_text)?;
+        let wire_records = r2o_plan_records_for_wire(&records)?;
         let plan = Plan::parse(&records)?;
         r2o_datapath::engine::validate_runtime_plan(&plan)
             .map_err(|error| format!("datapath отверг запрет QUIC: {error}"))?;
-        let command = encode_set_name(host, SHAPE_QUIC, family, &records)?;
+        let command = encode_set_name(host, SHAPE_QUIC, family, &wire_records)?;
         self.send_command(&command, COMMAND_SET_NAME)?;
         if marked > 0
             && let Err(save_error) =
@@ -19872,14 +20067,15 @@ impl ControlClient {
             .find(|saved| saved.id == saved_plan_id && saved.enabled)
             .ok_or("сохранённый QUIC-план исчез из каталога")?;
         let saved_records = compile_text(&saved_plan.text)?;
+        let wire_records = r2o_plan_records_for_wire(&saved_records)?;
         let (command, command_kind) = if address_binding {
             (
-                encode_set_addr(server.ip(), SHAPE_QUIC, &saved_records)?,
+                encode_set_addr(server.ip(), SHAPE_QUIC, &wire_records)?,
                 COMMAND_SET_ADDR,
             )
         } else {
             (
-                encode_set_name(host, SHAPE_QUIC, family, &saved_records)?,
+                encode_set_name(host, SHAPE_QUIC, family, &wire_records)?,
                 COMMAND_SET_NAME,
             )
         };
@@ -20122,9 +20318,15 @@ impl ControlClient {
         let runtime_plan = Plan::parse(&bytes)?;
         r2o_datapath::engine::validate_runtime_plan(&runtime_plan)
             .map_err(|error| format!("план HTTP не принят runtime r2o-datapath: {error}"))?;
+        let wire_bytes = r2o_plan_records_for_wire(&bytes)?;
         let trial_id = random_id()?;
-        let command =
-            encode_set_name_bound(&target.host, SHAPE_HTTP, target.family, &bytes, trial_id)?;
+        let command = encode_set_name_bound(
+            &target.host,
+            SHAPE_HTTP,
+            target.family,
+            &wire_bytes,
+            trial_id,
+        )?;
         persist_catalog_update(&updated, catalog_path, now, persistence.as_deref_mut())?;
         if let Err(install_error) = self.write_http_candidate_install(
             &command,
@@ -20489,9 +20691,15 @@ impl ControlClient {
     fn r2o_update_send_cap(&mut self, frame: &Frame) -> Result<(), Box<dyn Error>> {
         let greeting = decode_greeting(frame)
             .map_err(|error| format!("обновлённое приветствие датапата: {error}"))?;
-        if greeting.version != PROTOCOL_VERSION || greeting.release_id != RELEASE_ID {
+        let profile = r2o_control_wire();
+        let expected_release = r2o_control_release();
+        let expected_version = match profile {
+            r2k_core::control::WireProfile::V22 => r2k_core::control::PROTOCOL_VERSION_V22,
+            r2k_core::control::WireProfile::V48 => PROTOCOL_VERSION,
+        };
+        if greeting.version != expected_version || greeting.release_id != expected_release {
             return Err(format!(
-                "несовместимое обновлённое приветствие датапата: wire={}, release={}, нужен wire={PROTOCOL_VERSION}, release={RELEASE_ID}",
+                "несовместимое обновлённое приветствие датапата: wire={}, release={}, нужен wire={expected_version}, release={expected_release}",
                 greeting.version, greeting.release_id
             )
             .into());
@@ -21383,12 +21591,14 @@ fn run_http_trial_task(
     let records = compile_text(&plan_text).map_err(|error| {
         HttpSearchFailure::local_abort("probe-build-or-socket", error.to_string())
     })?;
+    let wire_records = r2o_plan_records_for_wire(&records)
+        .map_err(|error| HttpSearchFailure::local_abort("probe-build-or-socket", error))?;
     let command = encode_set_name_probe(
         &target.host,
         SHAPE_HTTP,
         target.family,
         port,
-        &records,
+        &wire_records,
         trial_id,
     )
     .map_err(|error| HttpSearchFailure::local_abort("probe-build-or-socket", error.to_string()))?;
@@ -21808,6 +22018,88 @@ mod tests {
         );
         assert_eq!(r2o_plan_wire_shape(SHAPE_HTTP, Some(true)), SHAPE_HTTP);
         assert_eq!(r2o_plan_wire_shape(SHAPE_QUIC, Some(true)), SHAPE_QUIC);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_v22_shape_reconstructs_r2o_client_shape_and_tcp_profile() {
+        use super::r2o_client_shape_from_legacy;
+        use r2k_core::control::LegacyShapeEvent;
+
+        fn client_hello(host: &str) -> Vec<u8> {
+            let host = host.as_bytes();
+            let mut server_name = Vec::with_capacity(host.len() + 5);
+            server_name.extend_from_slice(&((host.len() + 3) as u16).to_be_bytes());
+            server_name.push(0);
+            server_name.extend_from_slice(&(host.len() as u16).to_be_bytes());
+            server_name.extend_from_slice(host);
+            let mut extensions = vec![0x00, 0x00];
+            extensions.extend_from_slice(&(server_name.len() as u16).to_be_bytes());
+            extensions.extend_from_slice(&server_name);
+            extensions.extend_from_slice(&[0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04]);
+            let mut hello = vec![0x03, 0x03];
+            hello.extend_from_slice(&[0x42; 32]);
+            hello.extend_from_slice(&[0x00, 0x00, 0x02, 0x13, 0x01, 0x01, 0x00]);
+            hello.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+            hello.extend_from_slice(&extensions);
+            let mut handshake = vec![0x01];
+            handshake.extend_from_slice(&[
+                ((hello.len() >> 16) & 0xff) as u8,
+                ((hello.len() >> 8) & 0xff) as u8,
+                (hello.len() & 0xff) as u8,
+            ]);
+            handshake.extend_from_slice(&hello);
+            let mut record = vec![0x16, 0x03, 0x01];
+            record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+            record.extend_from_slice(&handshake);
+            record
+        }
+
+        let mut key = [0; KEY_LEN];
+        key[0] = 4;
+        key[37] = 6;
+        let event = LegacyShapeEvent {
+            key,
+            client_hello: client_hello("example.com"),
+        };
+
+        let without_options = r2o_client_shape_from_legacy(&event, None).unwrap();
+        assert_eq!(without_options.host, b"example.com");
+        assert_eq!(without_options.shape, SHAPE_MODERN);
+        assert_eq!(without_options.tcp_has_timestamp, None);
+
+        let empty_options = r2o_client_shape_from_legacy(&event, Some(&[])).unwrap();
+        assert_eq!(empty_options.tcp_has_timestamp, Some(false));
+
+        let with_ts = [1, 1, 8, 10, 0, 0, 0, 1, 0, 0, 0, 0];
+        let with_ts = r2o_client_shape_from_legacy(&event, Some(&with_ts)).unwrap();
+        assert_eq!(with_ts.tcp_has_timestamp, Some(true));
+
+        // Снимок обязан проходить ту же проверку, что и R2O CLIENT_SHAPE.
+        assert!(with_ts.event_body().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn v22_plan_records_are_d2kp_and_accepted_by_command_codec() {
+        use super::r2o_plan_records_for_profile;
+        use r2k_core::control::WireProfile;
+
+        let r2op = compile_text(
+            "r2o-plan 1 8\nproto tcp tls\npayload 1 00\npoison 1 tsup\nfake payload=1 poison=1 repeats=1 gap_us=0 place=before\n",
+        )
+        .unwrap();
+        let d2kp = r2o_plan_records_for_profile(WireProfile::V22, &r2op).unwrap();
+        assert_eq!(&d2kp[..4], b"D2KP");
+        assert_eq!(&d2kp[4..], &r2op[4..]);
+        let command = encode_set_name("example.com", SHAPE_MODERN, 4, &d2kp).unwrap();
+        let frame = read_frame(&mut std::io::Cursor::new(command)).unwrap();
+        assert_eq!(frame.kind, COMMAND_SET_NAME);
+        assert!(frame.body.ends_with(&d2kp));
+        assert_eq!(
+            r2o_plan_records_for_profile(WireProfile::V48, &r2op).unwrap(),
+            r2op
+        );
     }
 
     #[test]

@@ -526,6 +526,8 @@ mod app {
         receive_buffer: i32,
         control_path: Option<PathBuf>,
         controller_only: bool,
+        control_wire: r2k_core::control::WireProfile,
+        control_release_id: String,
         reverse_queue_visible: bool,
         plan_explicit: bool,
         fail_open: bool,
@@ -872,10 +874,12 @@ mod app {
             .control_path
             .as_ref()
             .map(|path| {
-                ControlServer::open(
+                ControlServer::open_with_profile(
                     path,
                     raw.as_ref()
                         .map_or(u16::MAX as u32, |raw| raw.maxlen() as u32),
+                    options.control_wire,
+                    &options.control_release_id,
                 )
             })
             .transpose()?;
@@ -2646,6 +2650,8 @@ mod app {
             receive_buffer: 4 * 1024 * 1024,
             control_path: None,
             controller_only: false,
+            control_wire: r2k_core::control::WireProfile::V48,
+            control_release_id: r2k_core::control::RELEASE_ID.to_owned(),
             reverse_queue_visible: false,
             plan_explicit: false,
             fail_open: true,
@@ -2667,6 +2673,20 @@ mod app {
                 "--control" => {
                     options.control_path =
                         Some(PathBuf::from(next_value(arguments, &mut cursor, option)?))
+                }
+                "--control-wire" => {
+                    options.control_wire = match next_value(arguments, &mut cursor, option)? {
+                        "v22" => r2k_core::control::WireProfile::V22,
+                        "v48" => r2k_core::control::WireProfile::V48,
+                        _ => return Err(invalid("--control-wire принимает v22 или v48")),
+                    }
+                }
+                "--control-release-id" => {
+                    let value = next_value(arguments, &mut cursor, option)?;
+                    if !r2k_core::control::valid_release_id(value) {
+                        return Err(invalid("--control-release-id имеет недопустимый формат"));
+                    }
+                    options.control_release_id = value.to_owned();
                 }
                 "--queue" => options.queue = Some(parse_value(arguments, &mut cursor, option)?),
                 "--journal" => {
@@ -2834,6 +2854,8 @@ mod app {
   --journal N        глубина журнала потоков (256; 0 — выключить)
   --rcvbuf N         размер приёмного буфера сокета
   --control PATH     Unix-сокет r2o-controller; также открывает PATH.snapshot для снимков
+  --control-wire v22|v48  профиль управляющего провода (по умолчанию v48)
+  --control-release-id ID release ID в приветствии v22 (по умолчанию сборочный)
   --no-fail-open     не пропускать пакеты при переполнении очереди
   --check            проверить формат и поддерживаемый режим плана
   --version          версия
@@ -5256,6 +5278,25 @@ mod app {
                 ])
                 .is_err()
             );
+        }
+
+        #[test]
+        fn r2o_профиль_control_wire_разбирается_и_проверяется() {
+            let options = parse_options(&[
+                "--control-wire".into(),
+                "v22".into(),
+                "--control-release-id".into(),
+                "dev".into(),
+            ])
+            .unwrap();
+            assert_eq!(options.control_wire, r2k_core::control::WireProfile::V22);
+            assert_eq!(options.control_release_id, "dev");
+            assert_eq!(
+                parse_options(&[]).unwrap().control_wire,
+                r2k_core::control::WireProfile::V48
+            );
+            assert!(parse_options(&["--control-wire".into(), "v49".into()]).is_err());
+            assert!(parse_options(&["--control-release-id".into(), "bad id".into()]).is_err());
         }
 
         #[test]
