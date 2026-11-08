@@ -2431,4 +2431,167 @@ mod tests {
         assert_eq!(&packet[40..], request);
         assert!(r2k_core::httpup::request_host_range(&packet[40..]).is_some());
     }
+
+    fn trace_outcome(label: &str, result: &super::FeedResult) {
+        let name = match result.outcome {
+            HoldOutcome::Pass => "pass",
+            HoldOutcome::Waiting | HoldOutcome::OwnedWaiting => "wait",
+            HoldOutcome::Ready { .. } | HoldOutcome::OwnedReady { .. } => "ready",
+            HoldOutcome::Drop => "drop",
+            _ => "other",
+        };
+        println!(
+            "{label} {name} released={}",
+            result
+                .released
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn d6_hold_trace() {
+        let now = Instant::now();
+        let hello = hello();
+        let options = HoldOptions {
+            allow_tls: true,
+            own_packets: true,
+            ..HoldOptions::default()
+        };
+
+        let mut hold = HoldTable::default();
+        trace_outcome(
+            "A syn",
+            &hold.feed_observing(1, &tcp_packet(1000, 0x02, &[]), now, options),
+        );
+        let first = tcp_packet(1001, 0x18, &hello[..5]);
+        trace_outcome("A first", &hold.feed_observing(2, &first, now, options));
+        let second = tcp_packet(1006, 0x18, &hello[5..]);
+        let result = hold.feed_observing(3, &second, now, options);
+        if let HoldOutcome::OwnedReady {
+            ids,
+            packet,
+            originals,
+        } = &result.outcome
+        {
+            println!(
+                "A second ready ids={} body={} originals={} lens={}",
+                ids.iter().map(u32::to_string).collect::<Vec<_>>().join(","),
+                u8::from(packet.get(40..) == Some(hello.as_slice())),
+                originals.len(),
+                originals
+                    .iter()
+                    .map(|packet| packet.len().to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+        } else {
+            trace_outcome("A second", &result);
+        }
+
+        let mut hold = HoldTable::default();
+        trace_outcome(
+            "B syn",
+            &hold.feed(1, &tcp_packet(9000, 0x02, &[]), now, 0, true, false),
+        );
+        trace_outcome(
+            "B tail",
+            &hold.feed(2, &tcp_packet(9006, 0x18, &hello[5..]), now, 0, true, false),
+        );
+        let result = hold.feed(3, &tcp_packet(9001, 0x18, &hello[..5]), now, 0, true, false);
+        if let HoldOutcome::Ready { ids, packet } = &result.outcome {
+            println!(
+                "B head ready ids={} seq={}",
+                ids.iter().map(u32::to_string).collect::<Vec<_>>().join(","),
+                u32::from_be_bytes(packet[24..28].try_into().unwrap())
+            );
+        } else {
+            trace_outcome("B head", &result);
+        }
+
+        let mut hold = HoldTable::default();
+        trace_outcome(
+            "C syn",
+            &hold.feed(1, &tcp_packet(1000, 0x02, &[]), now, 0, true, false),
+        );
+        trace_outcome(
+            "C first",
+            &hold.feed(2, &tcp_packet(1001, 0x18, &hello[..5]), now, 0, true, false),
+        );
+        println!(
+            "C flush released={}",
+            hold.flush(now + HOLD_WAIT, 0, false)
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let stats = hold.r2o_hold_stats();
+        println!(
+            "C stats timed_out={} timed_out_packets={} pending={}",
+            stats.timed_out, stats.timed_out_packets, stats.pending
+        );
+
+        let mut hold = HoldTable::default();
+        trace_outcome(
+            "D syn",
+            &hold.feed(3, &tcp_packet(2000, 0x02, &[]), now, 4, true, false),
+        );
+        trace_outcome(
+            "D first",
+            &hold.feed(4, &tcp_packet(2001, 0x18, &hello[..5]), now, 4, true, false),
+        );
+        println!(
+            "D revision released={}",
+            hold.flush(now, 5, false)
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let stats = hold.r2o_hold_stats();
+        println!(
+            "D stats plan_changed={} released={} pending={}",
+            stats.plan_changed, stats.released, stats.pending
+        );
+
+        let mut hold = HoldTable::default();
+        let _ = hold.feed(1, &tcp_packet(3000, 0x02, &[]), now, 0, true, false);
+        for id in 2..=9 {
+            let _ = hold.feed(
+                id,
+                &tcp_packet(3001, 0x18, &hello[..5]),
+                now,
+                0,
+                true,
+                false,
+            );
+        }
+        let result = hold.feed(
+            10,
+            &tcp_packet(3001, 0x18, &hello[..5]),
+            now,
+            0,
+            false,
+            false,
+        );
+        println!(
+            "E ninth released={} outcome={}",
+            result
+                .released
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            match result.outcome {
+                HoldOutcome::Pass => "pass",
+                HoldOutcome::Waiting | HoldOutcome::OwnedWaiting => "wait",
+                HoldOutcome::Ready { .. } | HoldOutcome::OwnedReady { .. } => "ready",
+                _ => "other",
+            }
+        );
+    }
 }

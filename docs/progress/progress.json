@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 165,
-  "percent": 60.89,
+  "points": 166,
+  "percent": 61.25,
   "total": 179,
   "counts": {
-    "verified": 113,
+    "verified": 114,
     "carry": 40,
-    "partial": 25,
+    "partial": 24,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -18,7 +18,7 @@
     {
       "name": "Datapath",
       "weight": 28,
-      "points": 17,
+      "points": 18,
       "items": [
         {
           "id": 1,
@@ -115,15 +115,15 @@
           "key": "D6",
           "name": "TCP hold/order/ownership/release",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Datapath",
-          "coverage": "`r2o-hold-differential.sh` — независимые C/Rust suites, без diff",
-          "gap": "Нет paired output differential; timeout/revision только unit",
-          "mapping": "`r2o-hold-differential.sh` — независимые C/Rust suites, без diff",
-          "evidence": "`r2o-hold-differential.sh` — независимые C/Rust suites, без diff · пробел: Нет paired output differential; timeout/revision только unit"
+          "coverage": "`test-datapath-hold-differential.sh` (a378), `r2o-hold-differential.sh`",
+          "gap": "15 paired-сценариев: split/out-of-order (SYN-anchor), timeout, revision, capacity, originals по порядку потока; независимые suites сохранены",
+          "mapping": "`test-datapath-hold-differential.sh` (a378), `r2o-hold-differential.sh`",
+          "evidence": "`test-datapath-hold-differential.sh` (a378), `r2o-hold-differential.sh` · пробел: 15 paired-сценариев: split/out-of-order (SYN-anchor), timeout, revision, capacity, originals по порядку потока; независимые suites сохранены"
         },
         {
           "id": 8,
@@ -2867,15 +2867,15 @@
       "key": "D6",
       "name": "TCP hold/order/ownership/release",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Datapath",
-      "coverage": "`r2o-hold-differential.sh` — независимые C/Rust suites, без diff",
-      "gap": "Нет paired output differential; timeout/revision только unit",
-      "mapping": "`r2o-hold-differential.sh` — независимые C/Rust suites, без diff",
-      "evidence": "`r2o-hold-differential.sh` — независимые C/Rust suites, без diff · пробел: Нет paired output differential; timeout/revision только unit"
+      "coverage": "`test-datapath-hold-differential.sh` (a378), `r2o-hold-differential.sh`",
+      "gap": "15 paired-сценариев: split/out-of-order (SYN-anchor), timeout, revision, capacity, originals по порядку потока; независимые suites сохранены",
+      "mapping": "`test-datapath-hold-differential.sh` (a378), `r2o-hold-differential.sh`",
+      "evidence": "`test-datapath-hold-differential.sh` (a378), `r2o-hold-differential.sh` · пробел: 15 paired-сценариев: split/out-of-order (SYN-anchor), timeout, revision, capacity, originals по порядку потока; независимые suites сохранены"
     },
     {
       "id": 8,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 165,
+      "points": 166,
       "weight": 271,
-      "percent": 60.89
+      "percent": 61.25
     },
     "carry_forward": {
-      "points": 228,
+      "points": 229,
       "weight": 271,
-      "percent": 84.13,
+      "percent": 84.5,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
