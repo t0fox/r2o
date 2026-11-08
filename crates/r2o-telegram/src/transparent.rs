@@ -18,11 +18,79 @@ pub struct ClientInit {
     pub dc: Option<u32>,
     pub is_media: bool,
     pub proto: crate::crypto::ProtoTag,
+    /// Рукопожатие расшифровано официальным `secret` из dcOption.
+    pub used_official_secret: bool,
+}
+
+/// Максимум секретов, как C `TG_TRANSPARENT_MAX_SECRETS`.
+pub const MAX_HANDSHAKE_SECRETS: usize = 16;
+
+/// Решение прозрачного маршрута, эквивалентное C `tg_transparent_select_route`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransparentSelection {
+    /// Прямой TCP к исходному адресу: official secret, CDN/tcpo-only,
+    /// либо неизвестное назначение без DC-hint.
+    DirectTcp { dc: u32, is_media: bool },
+    /// WSS/CF-маршрут к найденному dcOption.
+    Wss { dc: u32, is_media: bool },
+    /// Неизвестное назначение с DC-hint: WSS не выбирается.
+    Reject,
+}
+
+/// Выбрать direct/DD или WSS по найденному dcOption и данным рукопожатия.
+pub fn select_transparent_route(
+    init: &ClientInit,
+    endpoint: Option<&crate::dc_map::DcEndpoint>,
+) -> TransparentSelection {
+    let Some(endpoint) = endpoint else {
+        return if init.dc.is_none() {
+            TransparentSelection::DirectTcp {
+                dc: 0,
+                is_media: init.is_media,
+            }
+        } else {
+            TransparentSelection::Reject
+        };
+    };
+    let is_media = init.is_media || endpoint.media_only;
+    if init.used_official_secret || endpoint.cdn || endpoint.tcpo_only {
+        TransparentSelection::DirectTcp {
+            dc: endpoint.id,
+            is_media,
+        }
+    } else {
+        TransparentSelection::Wss {
+            dc: endpoint.id,
+            is_media,
+        }
+    }
 }
 
 /// Проверить исходный порт по списку общей политики перехвата.
 pub fn supports_destination_port(port: u16, configured_ports: &[u16]) -> bool {
-    port != 80 && configured_ports.contains(&port)
+    port != 0 && port != 80 && configured_ports.contains(&port)
+}
+
+/// C `tg_listener_is_self_dial_addr`: порт 80/0 и непубличный адрес.
+pub fn is_self_dial_destination(destination: std::net::SocketAddr) -> bool {
+    destination.port() == 0
+        || destination.port() == 80
+        || !crate::dc_map::is_public_address(destination.ip())
+}
+
+/// C `destination_allowed`: лимиты политики, порт, CIDR и self-dial.
+pub fn destination_allowed(
+    destination: std::net::SocketAddr,
+    allowed_ports: &[u16],
+    allowed_cidrs: &[String],
+) -> bool {
+    !allowed_ports.is_empty()
+        && allowed_ports.len() <= 32
+        && !allowed_cidrs.is_empty()
+        && allowed_cidrs.len() <= 64
+        && supports_destination_port(destination.port(), allowed_ports)
+        && is_telegram_destination(destination.ip(), allowed_cidrs)
+        && !is_self_dial_destination(destination)
 }
 
 /// Проверить исходный IP по CIDR общей политики перехвата.
@@ -189,6 +257,7 @@ pub fn parse_client_init(init: &[u8; HANDSHAKE_LEN]) -> Option<ClientInit> {
         dc: (1..=999).contains(&raw_dc).then_some(raw_dc),
         is_media: dc_idx < 0,
         proto,
+        used_official_secret: false,
     })
 }
 
@@ -199,6 +268,10 @@ pub fn parse_client_init_with_secrets(
 ) -> Option<ClientInit> {
     if let Some(parsed) = parse_client_init(init) {
         return Some(parsed);
+    }
+    // C `parse_client_handshake`: больше 16 секретов — отказ, без перебора.
+    if secrets.len() > MAX_HANDSHAKE_SECRETS {
+        return None;
     }
 
     let mut parsed: Option<ClientInit> = None;
@@ -212,6 +285,7 @@ pub fn parse_client_init_with_secrets(
                 .then_some(handshake.dc_id),
             is_media: handshake.is_media,
             proto: handshake.proto,
+            used_official_secret: true,
         };
         if let Some(previous) = &parsed {
             if previous.dc != candidate.dc
@@ -225,4 +299,147 @@ pub fn parse_client_init_with_secrets(
         }
     }
     parsed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ClientInit, TransparentSelection, select_transparent_route};
+    use crate::crypto::ProtoTag;
+    use crate::dc_map::DcEndpoint;
+    use std::net::IpAddr;
+
+    fn endpoint(tcpo_only: bool, cdn: bool, media_only: bool) -> DcEndpoint {
+        DcEndpoint {
+            id: 2,
+            address: "149.154.167.51".parse::<IpAddr>().unwrap(),
+            port: 443,
+            ipv6: false,
+            media_only,
+            tcpo_only,
+            cdn,
+            is_static: true,
+            this_port_only: false,
+            secret: None,
+            last_seen: 1_800_000_000,
+        }
+    }
+
+    fn init(dc: Option<u32>, is_media: bool, used_official_secret: bool) -> ClientInit {
+        ClientInit {
+            dc,
+            is_media,
+            proto: ProtoTag::Intermediate,
+            used_official_secret,
+        }
+    }
+
+    #[test]
+    fn official_secret_and_tcpo_only_force_direct_tcp() {
+        let listed = endpoint(false, false, false);
+        assert_eq!(
+            select_transparent_route(&init(Some(2), false, true), Some(&listed)),
+            TransparentSelection::DirectTcp {
+                dc: 2,
+                is_media: false
+            }
+        );
+        let tcpo = endpoint(true, false, true);
+        assert_eq!(
+            select_transparent_route(&init(Some(2), false, false), Some(&tcpo)),
+            TransparentSelection::DirectTcp {
+                dc: 2,
+                is_media: true
+            }
+        );
+        let cdn = endpoint(false, true, false);
+        assert_eq!(
+            select_transparent_route(&init(Some(2), false, false), Some(&cdn)),
+            TransparentSelection::DirectTcp {
+                dc: 2,
+                is_media: false
+            }
+        );
+    }
+
+    #[test]
+    fn destination_policy_rejects_bad_ports_cidrs_and_self_dial() {
+        let ports = [443u16, 5222];
+        let cidrs = vec!["149.154.0.0/16".to_string()];
+        assert!(super::destination_allowed(
+            "149.154.167.51:443".parse().unwrap(),
+            &ports,
+            &cidrs
+        ));
+        assert!(!super::destination_allowed(
+            "149.154.167.51:80".parse().unwrap(),
+            &ports,
+            &cidrs
+        ));
+        assert!(!super::destination_allowed(
+            "149.154.167.51:0".parse().unwrap(),
+            &[0, 443],
+            &cidrs
+        ));
+        assert!(!super::destination_allowed(
+            "8.8.8.8:443".parse().unwrap(),
+            &ports,
+            &cidrs
+        ));
+        // CIDR намеренно широкий: self-dial обязан отсечь приватный адрес.
+        assert!(!super::destination_allowed(
+            "10.0.0.1:443".parse().unwrap(),
+            &ports,
+            &["0.0.0.0/0".to_string()]
+        ));
+    }
+
+    #[test]
+    fn official_secret_is_reported_and_more_than_16_candidates_reject() {
+        let packet: [u8; crate::crypto::HANDSHAKE_LEN] = hex::decode(
+            "0001020304050607000102030405060708090a0b0c0d0e0f\
+             101112131415161718191a1b1c1d1e1f0001020304050607\
+             08090a0b0c0d0e0f7c380b6e418caed2",
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        let secret = hex::decode("101112131415161718191a1b1c1d1e1f").unwrap();
+        let parsed = super::parse_client_init_with_secrets(&packet, &[secret.clone()])
+            .expect("секретное рукопожатие");
+        assert_eq!(parsed.dc, Some(4));
+        assert!(parsed.is_media);
+        assert!(parsed.used_official_secret);
+
+        let mut many = vec![secret];
+        for index in 0..16u8 {
+            many.push(vec![0x40 + index]);
+        }
+        assert!(
+            super::parse_client_init_with_secrets(&packet, &many).is_none(),
+            "C отвергает более 16 кандидатов до разбора"
+        );
+    }
+
+    #[test]
+    fn regular_listed_endpoint_uses_wss_and_unknown_hint_is_rejected() {
+        let listed = endpoint(false, false, false);
+        assert_eq!(
+            select_transparent_route(&init(Some(2), false, false), Some(&listed)),
+            TransparentSelection::Wss {
+                dc: 2,
+                is_media: false
+            }
+        );
+        assert_eq!(
+            select_transparent_route(&init(Some(4), false, false), None),
+            TransparentSelection::Reject
+        );
+        assert_eq!(
+            select_transparent_route(&init(None, true, false), None),
+            TransparentSelection::DirectTcp {
+                dc: 0,
+                is_media: true
+            }
+        );
+    }
 }

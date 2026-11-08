@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 132,
-  "percent": 48.71,
+  "points": 134,
+  "percent": 49.45,
   "total": 179,
   "counts": {
-    "verified": 93,
+    "verified": 94,
     "carry": 40,
-    "partial": 45,
+    "partial": 44,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1095,7 +1095,7 @@
     {
       "name": "Telegram",
       "weight": 41,
-      "points": 15,
+      "points": 17,
       "items": [
         {
           "id": 157,
@@ -1327,15 +1327,15 @@
           "key": "TG17",
           "name": "Official secret/DD",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Telegram",
-          "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "gap": "",
-          "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+          "coverage": "`scripts/test-telegram-secret-dd-differential.sh` (a378); C `tg_dc_handshake_secrets`/`tg_transparent_select_route`; Rust `handshake_secrets_for_at`/`select_transparent_route`",
+          "gap": "Секреты scoped по адресу/порту/tcpo/this_port_only, mapped IPv6, stale/empty, 17 секретов и direct TCP для secret/CDN/tcpo-only совпадают",
+          "mapping": "`scripts/test-telegram-secret-dd-differential.sh` (a378); C `tg_dc_handshake_secrets`/`tg_transparent_select_route`; Rust `handshake_secrets_for_at`/`select_transparent_route`",
+          "evidence": "`scripts/test-telegram-secret-dd-differential.sh` (a378); C `tg_dc_handshake_secrets`/`tg_transparent_select_route`; Rust `handshake_secrets_for_at`/`select_transparent_route` · пробел: Секреты scoped по адресу/порту/tcpo/this_port_only, mapped IPv6, stale/empty, 17 секретов и direct TCP для secret/CDN/tcpo-only совпадают"
         },
         {
           "id": 173,
@@ -5342,15 +5342,15 @@
       "key": "TG17",
       "name": "Official secret/DD",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Telegram",
-      "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "gap": "",
-      "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+      "coverage": "`scripts/test-telegram-secret-dd-differential.sh` (a378); C `tg_dc_handshake_secrets`/`tg_transparent_select_route`; Rust `handshake_secrets_for_at`/`select_transparent_route`",
+      "gap": "Секреты scoped по адресу/порту/tcpo/this_port_only, mapped IPv6, stale/empty, 17 секретов и direct TCP для secret/CDN/tcpo-only совпадают",
+      "mapping": "`scripts/test-telegram-secret-dd-differential.sh` (a378); C `tg_dc_handshake_secrets`/`tg_transparent_select_route`; Rust `handshake_secrets_for_at`/`select_transparent_route`",
+      "evidence": "`scripts/test-telegram-secret-dd-differential.sh` (a378); C `tg_dc_handshake_secrets`/`tg_transparent_select_route`; Rust `handshake_secrets_for_at`/`select_transparent_route` · пробел: Секреты scoped по адресу/порту/tcpo/this_port_only, mapped IPv6, stale/empty, 17 секретов и direct TCP для secret/CDN/tcpo-only совпадают"
     },
     {
       "id": 173,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 132,
+      "points": 134,
       "weight": 271,
-      "percent": 48.71
+      "percent": 49.45
     },
     "carry_forward": {
-      "points": 195,
+      "points": 197,
       "weight": 271,
-      "percent": 71.96,
+      "percent": 72.69,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

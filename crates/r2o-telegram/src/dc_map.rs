@@ -214,12 +214,33 @@ impl DcMapStore {
 
     /// Вернуть уникальные секреты точных TCP-only опций для разбора рукопожатия.
     pub fn handshake_secrets_for(&self, address: IpAddr, original_port: u16) -> Vec<Vec<u8>> {
+        self.handshake_secrets_for_at(address, original_port, unix_time())
+    }
+
+    /// То же с явным временем, как C `tg_dc_handshake_secrets(snapshot, ..., now)`.
+    pub fn handshake_secrets_for_at(
+        &self,
+        address: IpAddr,
+        original_port: u16,
+        now: i64,
+    ) -> Vec<Vec<u8>> {
         let Some(snapshot) = self.current() else {
             return Vec::new();
         };
-        if unix_time().saturating_sub(snapshot.fetched_at) > CACHE_MAX_AGE_SECS {
+        if original_port == 0 {
             return Vec::new();
         }
+        if now >= snapshot.fetched_at && now - snapshot.fetched_at > CACHE_MAX_AGE_SECS {
+            return Vec::new();
+        }
+        // C `destination_equals`: IPv4-mapped IPv6 сравнивается как IPv4.
+        let address = match address {
+            IpAddr::V6(ip) => ip
+                .to_ipv4_mapped()
+                .map(IpAddr::V4)
+                .unwrap_or(IpAddr::V6(ip)),
+            IpAddr::V4(_) => address,
+        };
 
         let mut secrets = Vec::new();
         for endpoint in snapshot.endpoints.iter().filter(|endpoint| {
@@ -233,6 +254,9 @@ impl DcMapStore {
             let Ok(secret) = hex::decode(secret) else {
                 continue;
             };
+            if secret.is_empty() {
+                continue;
+            }
             if !secrets.contains(&secret) {
                 secrets.push(secret);
             }
@@ -641,7 +665,7 @@ fn has_primary_coverage(endpoints: &[DcEndpoint]) -> bool {
     })
 }
 
-fn is_public_address(address: IpAddr) -> bool {
+pub(crate) fn is_public_address(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(ip) => !ipv4_non_global(ip),
         IpAddr::V6(ip) => {
@@ -1134,6 +1158,10 @@ mod tests {
         let mut cdn_option = endpoint_at(3, "149.154.175.102", false, true, true, now);
         cdn_option.port = 5222;
         endpoints.push(cdn_option);
+        let mut empty_secret = endpoint_at(4, "149.154.167.99", false, false, true, now);
+        empty_secret.port = 5222;
+        empty_secret.secret = Some(String::new());
+        endpoints.push(empty_secret);
         store.install(current_complete(endpoints), now).unwrap();
 
         assert_eq!(
@@ -1157,6 +1185,33 @@ mod tests {
             store.handshake_secrets_for("149.154.175.102".parse().unwrap(), 5222),
             [vec![0xaa, 0xbb, 0xcc, 0xdd]],
             "секрет TCP-only CDN применяется только к точному официальному адресу и порту"
+        );
+        assert_eq!(
+            store.handshake_secrets_for("::ffff:149.154.167.151".parse().unwrap(), 5222),
+            [vec![0xaa, 0xbb, 0xcc, 0xdd]],
+            "IPv4-mapped IPv6 нормализуется как IPv4, как C destination_equals"
+        );
+        assert!(
+            store
+                .handshake_secrets_for("149.154.167.151".parse().unwrap(), 0)
+                .is_empty(),
+            "порт 0 не даёт секретов"
+        );
+        assert!(
+            store
+                .handshake_secrets_for_at(
+                    "149.154.167.151".parse().unwrap(),
+                    5222,
+                    now + super::CACHE_MAX_AGE_SECS + 1,
+                )
+                .is_empty(),
+            "просроченный снимок не даёт секретов"
+        );
+        assert!(
+            store
+                .handshake_secrets_for("149.154.167.99".parse().unwrap(), 5222)
+                .is_empty(),
+            "пустой secret игнорируется"
         );
 
         fs::remove_dir_all(directory).unwrap();

@@ -265,19 +265,14 @@ pub async fn handle_transparent_client_with_runtime(
         "[{}] исходное назначение прозрачного потока: {}",
         peer, destination
     );
-    if !transparent::supports_destination_port(destination.port(), &config.transparent_ports) {
+    if !transparent::destination_allowed(
+        destination,
+        &config.transparent_ports,
+        &config.transparent_cidrs,
+    ) {
         debug!(
-            "[{}] прозрачное перенаправление отклонено: порт {} отсутствует в политике",
-            peer,
-            destination.port()
-        );
-        return;
-    }
-    if !transparent::is_telegram_destination(destination.ip(), &config.transparent_cidrs) {
-        debug!(
-            "[{}] прозрачное перенаправление отклонено: IP назначения {} не входит в CIDR Telegram",
-            peer,
-            destination.ip()
+            "[{}] прозрачное перенаправление отклонено политикой портов/CIDR/self-dial: {}",
+            peer, destination
         );
         return;
     }
@@ -395,27 +390,45 @@ pub async fn handle_transparent_client_with_runtime(
         destination_route.port,
         destination.port()
     );
-    if destination_route.cdn {
-        info!(
-            "[{}] официальный CDN DC{} направляется только прямым TCP к исходному назначению {}",
-            peer, destination_route.id, destination
-        );
-        bridge_direct_payload(
-            stream,
-            DirectPayload {
-                initial: init,
-                destination,
+    let (dc, is_media) = match transparent::select_transparent_route(
+        &init_info,
+        Some(&destination_route),
+    ) {
+        transparent::TransparentSelection::DirectTcp { is_media, .. } => {
+            info!(
+                "[{}] DC{} направляется только прямым TCP к исходному назначению {} (official secret={}, CDN={}, TCP-only={})",
                 peer,
-                is_media: effective_media_route(init_info.is_media, destination_route.media_only),
-                transport: "прямой TCP",
-                telemetry: Some(telemetry),
-            },
-            Arc::clone(&config),
-            Arc::clone(&runtime),
-        )
-        .await;
-        return;
-    }
+                destination_route.id,
+                destination,
+                init_info.used_official_secret,
+                destination_route.cdn,
+                destination_route.tcpo_only
+            );
+            bridge_direct_payload(
+                stream,
+                DirectPayload {
+                    initial: init,
+                    destination,
+                    peer,
+                    is_media,
+                    transport: "прямой TCP",
+                    telemetry: Some(telemetry),
+                },
+                Arc::clone(&config),
+                Arc::clone(&runtime),
+            )
+            .await;
+            return;
+        }
+        transparent::TransparentSelection::Reject => {
+            warn!(
+                "[{}] прозрачный маршрут отклонён: DC-hint не подтверждён dcOption",
+                peer
+            );
+            return;
+        }
+        transparent::TransparentSelection::Wss { dc, is_media } => (dc, is_media),
+    };
     let label = peer;
     let target_ip = destination.ip().to_string();
     let route = routing::Route::new(
