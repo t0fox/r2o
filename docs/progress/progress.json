@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 129,
-  "percent": 47.6,
+  "points": 131,
+  "percent": 48.34,
   "total": 179,
   "counts": {
-    "verified": 91,
+    "verified": 92,
     "carry": 40,
-    "partial": 47,
+    "partial": 46,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1095,7 +1095,7 @@
     {
       "name": "Telegram",
       "weight": 41,
-      "points": 12,
+      "points": 14,
       "items": [
         {
           "id": 157,
@@ -1222,15 +1222,15 @@
           "key": "TG10",
           "name": "Route DNS/DoH/DoT",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Telegram",
-          "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "gap": "",
-          "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+          "coverage": "`scripts/r2o-telegram-route-dns-differential.sh` (a378); C `route_dns.c`/`cf_domains.c`/`tls.c`; Rust `route_dns`-фильтр",
+          "gap": "Публичные IP, mapped IPv6 и system-negative/transient fallback совпадают",
+          "mapping": "`scripts/r2o-telegram-route-dns-differential.sh` (a378); C `route_dns.c`/`cf_domains.c`/`tls.c`; Rust `route_dns`-фильтр",
+          "evidence": "`scripts/r2o-telegram-route-dns-differential.sh` (a378); C `route_dns.c`/`cf_domains.c`/`tls.c`; Rust `route_dns`-фильтр · пробел: Публичные IP, mapped IPv6 и system-negative/transient fallback совпадают"
         },
         {
           "id": 166,
@@ -5237,15 +5237,15 @@
       "key": "TG10",
       "name": "Route DNS/DoH/DoT",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Telegram",
-      "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "gap": "",
-      "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+      "coverage": "`scripts/r2o-telegram-route-dns-differential.sh` (a378); C `route_dns.c`/`cf_domains.c`/`tls.c`; Rust `route_dns`-фильтр",
+      "gap": "Публичные IP, mapped IPv6 и system-negative/transient fallback совпадают",
+      "mapping": "`scripts/r2o-telegram-route-dns-differential.sh` (a378); C `route_dns.c`/`cf_domains.c`/`tls.c`; Rust `route_dns`-фильтр",
+      "evidence": "`scripts/r2o-telegram-route-dns-differential.sh` (a378); C `route_dns.c`/`cf_domains.c`/`tls.c`; Rust `route_dns`-фильтр · пробел: Публичные IP, mapped IPv6 и system-negative/transient fallback совпадают"
     },
     {
       "id": 166,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 129,
+      "points": 131,
       "weight": 271,
-      "percent": 47.6
+      "percent": 48.34
     },
     "carry_forward": {
-      "points": 192,
+      "points": 194,
       "weight": 271,
-      "percent": 70.85,
+      "percent": 71.59,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
