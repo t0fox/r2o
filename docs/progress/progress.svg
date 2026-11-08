@@ -1,12 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 79.70%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 81.18%">
 <rect width="1100" height="790" rx="20" fill="#0c121e"/>
 <text x="36" y="48" fill="#edf7ff" font-family="Arial,sans-serif" font-size="29" font-weight="700">R2O / D2O · Strict parity</text>
-<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">79.70%</text>
-<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">216 / 271 verified points</text>
+<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">81.18%</text>
+<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">220 / 271 verified points</text>
 <rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/>
-<rect x="37" y="113" width="816.2" height="11" rx="5" fill="#36c989"/>
-<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 145 verified · 0 missing · 2026-11-08</text>
-<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 231/271 = 85.24% · strict 216/271 = 79.70%</text>
+<rect x="37" y="113" width="831.3" height="11" rx="5" fill="#36c989"/>
+<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 148 verified · 0 missing · 2026-11-08</text>
+<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 231/271 = 85.24% · strict 220/271 = 81.18%</text>
 <rect x="37" y="190" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="213" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Datapath</text>
 <text x="533" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">22/28</text>
@@ -71,13 +71,13 @@
 <rect x="51" y="362" width="30" height="22" rx="5" fill="#36c989"><title>S15 v22 legacy SUSPECT/EXCHANGE discovery semantics: доказано (2/2)</title></rect>
 <rect x="557" y="302" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="571" y="325" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">QUIC / HTTP3</text>
-<text x="1053" y="325" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">2/11</text>
-<rect x="571" y="335" width="30" height="22" rx="5" fill="#819bf8"><title>Q1 QUIC Initial/QSN/SNI/local-address gate: carry (304) — historical (0/2)</title></rect>
+<text x="1053" y="325" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">6/11</text>
+<rect x="571" y="335" width="30" height="22" rx="5" fill="#36c989"><title>Q1 QUIC Initial/QSN/SNI/local-address gate: доказано (2/2)</title></rect>
 <rect x="609" y="335" width="30" height="22" rx="5" fill="#e6b45d"><title>Q2 Residual/VN/address pool/neutral controls/fallback: частично (0/3)</title></rect>
-<rect x="647" y="335" width="30" height="22" rx="5" fill="#819bf8"><title>Q3 Short-control complete/budget: carry (304) — historical (0/1)</title></rect>
+<rect x="647" y="335" width="30" height="22" rx="5" fill="#36c989"><title>Q3 Short-control complete/budget: доказано (1/1)</title></rect>
 <rect x="685" y="335" width="30" height="22" rx="5" fill="#36c989"><title>Q4 HTTP/3 framing/stream termination: доказано (1/1)</title></rect>
 <rect x="723" y="335" width="30" height="22" rx="5" fill="#e6b45d"><title>Q5 HTTP/3 budgets/transport limits/stall: частично (0/1)</title></rect>
-<rect x="761" y="335" width="30" height="22" rx="5" fill="#819bf8"><title>Q6 Budget init/app-bytes helper: carry (304) — historical (0/1)</title></rect>
+<rect x="761" y="335" width="30" height="22" rx="5" fill="#36c989"><title>Q6 Budget init/app-bytes helper: доказано (1/1)</title></rect>
 <rect x="799" y="335" width="30" height="22" rx="5" fill="#36c989"><title>Q7 Silent peer handshake timeout: доказано (1/1)</title></rect>
 <rect x="837" y="335" width="30" height="22" rx="5" fill="#e6b45d"><title>Q8 QUIC deny/recheck lifecycle: частично (0/1)</title></rect>
 <rect x="37" y="414" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>

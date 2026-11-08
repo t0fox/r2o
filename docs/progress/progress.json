@@ -3,12 +3,12 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 216,
-  "percent": 79.7,
+  "points": 220,
+  "percent": 81.18,
   "total": 179,
   "counts": {
-    "verified": 145,
-    "carry": 11,
+    "verified": 148,
+    "carry": 8,
     "partial": 22,
     "missing": 0,
     "implemented": 0,
@@ -834,22 +834,22 @@
     {
       "name": "QUIC / HTTP3",
       "weight": 11,
-      "points": 2,
+      "points": 6,
       "items": [
         {
           "id": 54,
           "key": "Q1",
           "name": "QUIC Initial/QSN/SNI/local-address gate",
           "weight": 2,
-          "points": 0,
+          "points": 2,
           "carry_points": 2,
-          "status": "carry",
-          "statusLabel": "carry (304) — historical",
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "QUIC / HTTP3",
-          "coverage": "`r2o-quic-hello`, `r2o-quic-local-address` (304), `r2o-discovery-quic-stop`",
-          "gap": "304; stop/fallback",
-          "mapping": "`r2o-quic-hello`, `r2o-quic-local-address` (304), `r2o-discovery-quic-stop`",
-          "evidence": "`r2o-quic-hello`, `r2o-quic-local-address` (304), `r2o-discovery-quic-stop` · пробел: 304; stop/fallback"
+          "coverage": "`r2o-quic-hello-differential.sh`, `r2o-quic-local-address-differential.sh`, `r2o-discovery-quic-stop-differential.sh` (a378)",
+          "gap": "Initial/QSN/SNI/local-address gate и stop совпали; fallback/live не покрыты",
+          "mapping": "`r2o-quic-hello-differential.sh`, `r2o-quic-local-address-differential.sh`, `r2o-discovery-quic-stop-differential.sh` (a378)",
+          "evidence": "`r2o-quic-hello-differential.sh`, `r2o-quic-local-address-differential.sh`, `r2o-discovery-quic-stop-differential.sh` (a378) · пробел: Initial/QSN/SNI/local-address gate и stop совпали; fallback/live не покрыты"
         },
         {
           "id": 55,
@@ -871,15 +871,15 @@
           "key": "Q3",
           "name": "Short-control complete/budget",
           "weight": 1,
-          "points": 0,
+          "points": 1,
           "carry_points": 1,
-          "status": "carry",
-          "statusLabel": "carry (304) — historical",
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "QUIC / HTTP3",
-          "coverage": "`test-quic-short-control` (304)",
-          "gap": "304",
-          "mapping": "`test-quic-short-control` (304)",
-          "evidence": "`test-quic-short-control` (304) · пробел: 304"
+          "coverage": "`test-quic-short-control-differential.sh` (a378)",
+          "gap": "short-control complete/budget совпали",
+          "mapping": "`test-quic-short-control-differential.sh` (a378)",
+          "evidence": "`test-quic-short-control-differential.sh` (a378) · пробел: short-control complete/budget совпали"
         },
         {
           "id": 57,
@@ -916,15 +916,15 @@
           "key": "Q6",
           "name": "Budget init/app-bytes helper",
           "weight": 1,
-          "points": 0,
+          "points": 1,
           "carry_points": 1,
-          "status": "carry",
-          "statusLabel": "carry (304) — historical",
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "QUIC / HTTP3",
-          "coverage": "`test-quic-budget-init`, `test-quic-app-bytes` (304)",
-          "gap": "304",
-          "mapping": "`test-quic-budget-init`, `test-quic-app-bytes` (304)",
-          "evidence": "`test-quic-budget-init`, `test-quic-app-bytes` (304) · пробел: 304"
+          "coverage": "`test-quic-budget-init-differential.sh`, `test-quic-app-bytes-differential.sh` (a378)",
+          "gap": "budget init и app-bytes helper совпали",
+          "mapping": "`test-quic-budget-init-differential.sh`, `test-quic-app-bytes-differential.sh` (a378)",
+          "evidence": "`test-quic-budget-init-differential.sh`, `test-quic-app-bytes-differential.sh` (a378) · пробел: budget init и app-bytes helper совпали"
         },
         {
           "id": 60,
@@ -3572,15 +3572,15 @@
       "key": "Q1",
       "name": "QUIC Initial/QSN/SNI/local-address gate",
       "weight": 2,
-      "points": 0,
+      "points": 2,
       "carry_points": 2,
-      "status": "carry",
-      "statusLabel": "carry (304) — historical",
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "QUIC / HTTP3",
-      "coverage": "`r2o-quic-hello`, `r2o-quic-local-address` (304), `r2o-discovery-quic-stop`",
-      "gap": "304; stop/fallback",
-      "mapping": "`r2o-quic-hello`, `r2o-quic-local-address` (304), `r2o-discovery-quic-stop`",
-      "evidence": "`r2o-quic-hello`, `r2o-quic-local-address` (304), `r2o-discovery-quic-stop` · пробел: 304; stop/fallback"
+      "coverage": "`r2o-quic-hello-differential.sh`, `r2o-quic-local-address-differential.sh`, `r2o-discovery-quic-stop-differential.sh` (a378)",
+      "gap": "Initial/QSN/SNI/local-address gate и stop совпали; fallback/live не покрыты",
+      "mapping": "`r2o-quic-hello-differential.sh`, `r2o-quic-local-address-differential.sh`, `r2o-discovery-quic-stop-differential.sh` (a378)",
+      "evidence": "`r2o-quic-hello-differential.sh`, `r2o-quic-local-address-differential.sh`, `r2o-discovery-quic-stop-differential.sh` (a378) · пробел: Initial/QSN/SNI/local-address gate и stop совпали; fallback/live не покрыты"
     },
     {
       "id": 55,
@@ -3602,15 +3602,15 @@
       "key": "Q3",
       "name": "Short-control complete/budget",
       "weight": 1,
-      "points": 0,
+      "points": 1,
       "carry_points": 1,
-      "status": "carry",
-      "statusLabel": "carry (304) — historical",
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "QUIC / HTTP3",
-      "coverage": "`test-quic-short-control` (304)",
-      "gap": "304",
-      "mapping": "`test-quic-short-control` (304)",
-      "evidence": "`test-quic-short-control` (304) · пробел: 304"
+      "coverage": "`test-quic-short-control-differential.sh` (a378)",
+      "gap": "short-control complete/budget совпали",
+      "mapping": "`test-quic-short-control-differential.sh` (a378)",
+      "evidence": "`test-quic-short-control-differential.sh` (a378) · пробел: short-control complete/budget совпали"
     },
     {
       "id": 57,
@@ -3647,15 +3647,15 @@
       "key": "Q6",
       "name": "Budget init/app-bytes helper",
       "weight": 1,
-      "points": 0,
+      "points": 1,
       "carry_points": 1,
-      "status": "carry",
-      "statusLabel": "carry (304) — historical",
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "QUIC / HTTP3",
-      "coverage": "`test-quic-budget-init`, `test-quic-app-bytes` (304)",
-      "gap": "304",
-      "mapping": "`test-quic-budget-init`, `test-quic-app-bytes` (304)",
-      "evidence": "`test-quic-budget-init`, `test-quic-app-bytes` (304) · пробел: 304"
+      "coverage": "`test-quic-budget-init-differential.sh`, `test-quic-app-bytes-differential.sh` (a378)",
+      "gap": "budget init и app-bytes helper совпали",
+      "mapping": "`test-quic-budget-init-differential.sh`, `test-quic-app-bytes-differential.sh` (a378)",
+      "evidence": "`test-quic-budget-init-differential.sh`, `test-quic-app-bytes-differential.sh` (a378) · пробел: budget init и app-bytes helper совпали"
     },
     {
       "id": 60,
@@ -5460,9 +5460,9 @@
   ],
   "comparison": {
     "strict": {
-      "points": 216,
+      "points": 220,
       "weight": 271,
-      "percent": 79.7
+      "percent": 81.18
     },
     "carry_forward": {
       "points": 231,
