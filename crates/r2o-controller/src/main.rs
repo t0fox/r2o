@@ -6557,7 +6557,7 @@ fn format_flow_journal_entry(entry: &r2o_datapath::flow_journal::R2oFlowJournalE
     format!(
         "[{} нс] {} {} имя={:?} код={} число={} TTL={}/{} TOS={} серверный_hello={} план={} форма={} направление={} длительность={}мс IP_ID={} mapped={}:{} план_ID={:02x?} попытка_ID={:02x?} исполнение={} привязка={}",
         entry.at_ns,
-        entry.kind.russian_name(),
+        entry.kind.c_name(),
         format_flow_journal_key(&entry.key),
         name,
         entry.code,

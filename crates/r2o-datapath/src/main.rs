@@ -1045,7 +1045,7 @@ mod app {
                     eprintln!(
                         "r2o-datapath: [{} нс] {} {} {}{}",
                         entry.at_ns,
-                        entry.kind.russian_name(),
+                        entry.kind.c_name(),
                         format_journal_key(&entry.key),
                         name,
                         details
@@ -2904,7 +2904,7 @@ mod app {
             | R2oFlowJournalKind::PlanUnsent
             | R2oFlowJournalKind::PlanDamaged => format!(
                 " причина={} план={:02x?} попытка={:02x?} исполнение={}",
-                format_journal_refusal_code(entry.code),
+                r2o_datapath::flow_journal::r2o_refuse_text(entry.code),
                 entry.plan_id,
                 entry.trial_id,
                 entry.execution_id
@@ -2954,19 +2954,6 @@ mod app {
         }
     }
 
-    fn format_journal_refusal_code(code: u8) -> &'static str {
-        match code {
-            0 => "причина не указана",
-            1 => "ошибка отправки",
-            2 => "очередь отправки заполнена или закрыта",
-            3 => "срок отправки переполнен",
-            4 => "поток повреждён недоисполнением",
-            5 => "исполнитель отклонил план",
-            6 => "поток клиента не несёт требуемой TCP timestamp опции",
-            _ => "неизвестная причина",
-        }
-    }
-
     fn is_tls_plan(plan: &Plan) -> bool {
         plan.transport == 6 && plan.proto == 1 && plan.stream_input()
     }
@@ -2992,6 +2979,13 @@ mod app {
         client_shape: Option<Vec<u8>>,
     ) {
         flow_journal.record_control_event(at_ns, EVENT_HELLO, body);
+        if client_shape.is_some()
+            && let Some(key) = body
+                .get(..r2k_core::control::KEY_LEN)
+                .and_then(|bytes| bytes.try_into().ok())
+        {
+            flow_journal.record_shape(at_ns, key);
+        }
         if let Some(client_shape) = client_shape
             && let Some(control) = control.as_mut()
         {
@@ -5420,7 +5414,7 @@ mod app {
 
             let details = format_journal_details(&entry);
 
-            assert!(details.contains("поток повреждён недоисполнением"));
+            assert!(details.contains("поток испорчен недоисполнением плана"));
             assert!(details.contains("исполнение=77"));
             assert!(details.contains("план=[a5"));
             assert!(details.contains("попытка=[5a"));
@@ -5545,12 +5539,18 @@ mod app {
                     Some(1275)
                 );
             }
-            assert_eq!(flow_journal.count(), 1);
+            assert_eq!(flow_journal.count(), 2);
             let recorded = flow_journal.get(0).unwrap();
             assert_eq!(recorded.at_ns, 42);
             assert_eq!(recorded.name_len, 7);
             assert_eq!(recorded.client_shape, r2k_core::control::SHAPE_MODERN);
             assert_eq!(recorded.num, 1275);
+            let shape = flow_journal.get(1).unwrap();
+            assert_eq!(
+                shape.kind,
+                r2o_datapath::flow_journal::R2oFlowJournalKind::Shape
+            );
+            assert_eq!(shape.key, recorded.key);
             drop(browser_capture);
             drop(controller);
             drop(snapshot);
@@ -5959,10 +5959,10 @@ mod app {
             assert_eq!(запись.client_is_low, Some(true));
             assert_eq!(запись.kind.russian_name(), "чужой RST TCP снят защитой");
             let кадр = запись.to_event_frame().unwrap();
-            assert_eq!(
-                r2o_datapath::flow_journal::R2oFlowJournalEntry::from_event_frame(&кадр).unwrap(),
-                *запись
-            );
+            let mut декодировано =
+                r2o_datapath::flow_journal::R2oFlowJournalEntry::from_event_frame(&кадр).unwrap();
+            декодировано.note = запись.note;
+            assert_eq!(декодировано, *запись);
 
             super::decide_with_tcp_session(
                 &mut sessions,
@@ -6085,13 +6085,13 @@ mod app {
             assert_eq!(entry.planned, 2);
             assert_eq!(entry.client_shape, r2k_core::control::SHAPE_LEGACY);
             assert_eq!(entry.client_is_low, Some(true));
-            assert_eq!(
+            let mut декодировано =
                 r2o_datapath::flow_journal::R2oFlowJournalEntry::from_event_frame(
-                    &entry.to_event_frame().unwrap()
+                    &entry.to_event_frame().unwrap(),
                 )
-                .unwrap(),
-                *entry
-            );
+                .unwrap();
+            декодировано.note = entry.note;
+            assert_eq!(декодировано, *entry);
             println!(
                 "R2O_DIFF code={} ttl={} ref={} tos={} ipid={} planned={} shape={} client_is_low={}",
                 entry.code,

@@ -14,6 +14,7 @@ use r2k_core::control::{
 };
 
 pub const R2O_JOURNAL_NAME_MAX: usize = 63;
+pub const R2O_JOURNAL_REFUSE_NONE: u8 = 0;
 pub const R2O_JOURNAL_REFUSE_SEND: u8 = 1;
 pub const R2O_JOURNAL_REFUSE_QUEUE: u8 = 2;
 pub const R2O_JOURNAL_REFUSE_TOO_LONG: u8 = 3;
@@ -22,6 +23,37 @@ pub const R2O_JOURNAL_REFUSE_NOT_APPLIED: u8 = 5;
 pub const R2O_JOURNAL_REFUSE_FLOW_UNFIT: u8 = 6;
 const R2O_JOURNAL_WIRE_VERSION: u8 = 1;
 const R2O_JOURNAL_ENTRY_BODY_LEN: usize = 205;
+
+/// Тексты D2O `d2k_suspect_text`, байт-в-байт.
+pub fn r2o_suspect_text(code: u8) -> &'static str {
+    match code {
+        1 => "сброс в ответ на приветствие",
+        2 => "приветствие повторено",
+        3 => "ответа на приветствие не было",
+        4 => "снят чужой сброс в ответ на приветствие",
+        5 => "сброс клиента или сервера после TLS app-data; проверить объём ответа",
+        7 => {
+            "QUIC: сервер замолчал после рукопожатия, клиент повторяет; проверить ответ своим запросом"
+        }
+        8 => "TCP: сервер замолчал на бюджете коробки, соединение открыто; проверить объём ответа",
+        6 => "FIN клиента повторён без ответа после ответа сервера; проверить объём ответа",
+        _ => "подозрение без кода",
+    }
+}
+
+/// Тексты D2O `d2k_refuse_text`, байт-в-байт.
+pub fn r2o_refuse_text(code: u8) -> &'static str {
+    match code {
+        0 => "причина не названа",
+        1 => "ядро отвергло посылку",
+        2 => "очередь отложенной отправки не приняла посылку",
+        3 => "посылка длиннее того, что унесёт способ отправки",
+        4 => "поток испорчен недоисполнением плана",
+        5 => "исполнитель отверг план на этом пакете (причина — в записи)",
+        6 => "поток клиента не несёт того, что план требует (причина — в записи)",
+        _ => "отказ без кода",
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum R2oFlowJournalKind {
@@ -49,6 +81,22 @@ pub enum R2oFlowJournalKind {
 }
 
 impl R2oFlowJournalKind {
+    /// Имена D2O `jrn_kind`; R2O-only виды сохраняют свои названия.
+    pub fn c_name(self) -> &'static str {
+        match self {
+            Self::Hello => "приветствие",
+            Self::PlanApplied => "план применён",
+            Self::PlanRefused => "план не применён",
+            Self::Exchange => "обмен пошёл",
+            Self::Shape => "снята форма приветствия",
+            Self::Suspect => "подозрение",
+            Self::PlanDone => "",
+            Self::PlanUnsent => "посылка не ушла",
+            Self::PlanDamaged => "поток испорчен",
+            _ => self.russian_name(),
+        }
+    }
+
     pub fn russian_name(self) -> &'static str {
         match self {
             Self::Observation => "наблюдение",
@@ -147,10 +195,11 @@ impl R2oFlowJournalEntry {
     }
 
     /// Закодировать полную запись кольца в управляющее событие.
+    ///
+    /// Контрольный формат v1 не несёт `note`: тексты suspect/refuse остаются
+    /// локальной диагностикой, как и в C printf-журнале. Поле не мешает
+    /// снимку и не подменяет остальные поля.
     pub fn to_event_frame(&self) -> Result<Frame, &'static str> {
-        if self.note.is_some() {
-            return Err("заметка журнала не представима в управляющем протоколе");
-        }
         let name_length = usize::from(self.name_len);
         if name_length > R2O_JOURNAL_NAME_MAX
             || self.name[name_length..].iter().any(|byte| *byte != 0)
@@ -477,6 +526,20 @@ fn valid_journal_key(key: &[u8; KEY_LEN]) -> bool {
                 && key[21..33].iter().all(|byte| *byte == 0)))
 }
 
+/// Заметка по умолчанию, как в C `add_entry`/`d2k_journal_add_fate_bound`.
+fn default_journal_note(kind: R2oFlowJournalKind, code: u8) -> Option<&'static str> {
+    use R2oFlowJournalKind::*;
+    match kind {
+        Suspect | R2oQuicSuspect | R2oTcpSilent | R2oTcpStall | R2oTcpFinRetry
+        | R2oTcpRstAfterApp | R2oQuicStall | R2oTcpRstCut | R2oTcpRst => {
+            Some(r2o_suspect_text(code))
+        }
+        PlanRefused | PlanUnsent | PlanDamaged => Some(r2o_refuse_text(code)),
+        PlanDone => Some("план доисполнен"),
+        _ => None,
+    }
+}
+
 pub struct R2oFlowJournal {
     entries: Vec<R2oFlowJournalEntry>,
     length: usize,
@@ -499,7 +562,10 @@ impl R2oFlowJournal {
         })
     }
 
-    pub fn push(&mut self, entry: R2oFlowJournalEntry) {
+    pub fn push(&mut self, mut entry: R2oFlowJournalEntry) {
+        if entry.note.is_none() {
+            entry.note = default_journal_note(entry.kind, entry.code);
+        }
         self.added = self.added.wrapping_add(1);
         let capacity = self.entries.len();
         if capacity == 0 {
@@ -565,6 +631,19 @@ impl R2oFlowJournal {
         };
         entry.set_name(name);
         self.push(entry);
+        true
+    }
+
+    pub fn record_shape(&mut self, at_ns: u64, key: [u8; KEY_LEN]) -> bool {
+        if !valid_journal_key(&key) {
+            return false;
+        }
+        self.push(R2oFlowJournalEntry {
+            at_ns,
+            key,
+            kind: R2oFlowJournalKind::Shape,
+            ..R2oFlowJournalEntry::default()
+        });
         true
     }
 
@@ -934,5 +1013,98 @@ impl R2oFlowJournal {
 
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &R2oFlowJournalEntry> {
         (0..self.length).map(|index| self.get(index).expect("индекс кольца проверен"))
+    }
+}
+
+#[cfg(test)]
+mod journal_parity_tests {
+    use super::{
+        R2oFlowJournal, R2oFlowJournalEntry, R2oFlowJournalKind, r2o_refuse_text, r2o_suspect_text,
+    };
+
+    /// Векторы сняты с production C `d2k_suspect_text`/`d2k_refuse_text`.
+    #[test]
+    fn journal_note_texts_match_d2o() {
+        let suspects = [
+            (1, "сброс в ответ на приветствие"),
+            (2, "приветствие повторено"),
+            (3, "ответа на приветствие не было"),
+            (4, "снят чужой сброс в ответ на приветствие"),
+            (
+                5,
+                "сброс клиента или сервера после TLS app-data; проверить объём ответа",
+            ),
+            (
+                7,
+                "QUIC: сервер замолчал после рукопожатия, клиент повторяет; проверить ответ своим запросом",
+            ),
+            (
+                8,
+                "TCP: сервер замолчал на бюджете коробки, соединение открыто; проверить объём ответа",
+            ),
+            (
+                6,
+                "FIN клиента повторён без ответа после ответа сервера; проверить объём ответа",
+            ),
+        ];
+        for (code, text) in suspects {
+            assert_eq!(r2o_suspect_text(code), text, "suspect {code}");
+        }
+        assert_eq!(r2o_suspect_text(0), "подозрение без кода");
+        assert_eq!(r2o_suspect_text(9), "подозрение без кода");
+
+        let refusals = [
+            (0, "причина не названа"),
+            (1, "ядро отвергло посылку"),
+            (2, "очередь отложенной отправки не приняла посылку"),
+            (3, "посылка длиннее того, что унесёт способ отправки"),
+            (4, "поток испорчен недоисполнением плана"),
+            (
+                5,
+                "исполнитель отверг план на этом пакете (причина — в записи)",
+            ),
+            (
+                6,
+                "поток клиента не несёт того, что план требует (причина — в записи)",
+            ),
+        ];
+        for (code, text) in refusals {
+            assert_eq!(r2o_refuse_text(code), text, "refuse {code}");
+        }
+        assert_eq!(r2o_refuse_text(7), "отказ без кода");
+    }
+
+    #[test]
+    fn journal_push_sets_c_default_notes() {
+        let mut journal = R2oFlowJournal::with_capacity(4).unwrap();
+        let mut key = [0; r2k_core::control::KEY_LEN];
+        key[0] = 4;
+        key[37] = 6;
+        journal.push(R2oFlowJournalEntry {
+            key,
+            kind: R2oFlowJournalKind::Suspect,
+            code: 1,
+            ..R2oFlowJournalEntry::default()
+        });
+        journal.push(R2oFlowJournalEntry {
+            key,
+            kind: R2oFlowJournalKind::PlanUnsent,
+            code: 3,
+            ..R2oFlowJournalEntry::default()
+        });
+        journal.push(R2oFlowJournalEntry {
+            key,
+            kind: R2oFlowJournalKind::PlanDone,
+            ..R2oFlowJournalEntry::default()
+        });
+        assert_eq!(
+            journal.get(0).unwrap().note,
+            Some("сброс в ответ на приветствие")
+        );
+        assert_eq!(
+            journal.get(1).unwrap().note,
+            Some("посылка длиннее того, что унесёт способ отправки")
+        );
+        assert_eq!(journal.get(2).unwrap().note, Some("план доисполнен"));
     }
 }

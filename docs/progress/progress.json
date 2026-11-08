@@ -3,14 +3,14 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 105,
-  "percent": 38.75,
+  "points": 106,
+  "percent": 39.11,
   "total": 179,
   "counts": {
-    "verified": 74,
+    "verified": 75,
     "carry": 40,
     "partial": 59,
-    "missing": 5,
+    "missing": 4,
     "implemented": 0,
     "unknown": 0
   },
@@ -18,7 +18,7 @@
     {
       "name": "Datapath",
       "weight": 28,
-      "points": 15,
+      "points": 16,
       "items": [
         {
           "id": 1,
@@ -355,15 +355,15 @@
           "key": "D22",
           "name": "Journal: ring/retention/dropped/added/format",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "missing",
-          "statusLabel": "пробел",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Datapath",
-          "coverage": "`flow_journal.rs`",
-          "gap": "тексты suspect/refuse и часть полей не совпадают",
-          "mapping": "`flow_journal.rs`",
-          "evidence": "`flow_journal.rs` · пробел: тексты suspect/refuse и часть полей не совпадают"
+          "coverage": "`scripts/test-journal-c-parity-differential.sh` (a378); C `datapath/journal.c`; Rust `flow_journal`",
+          "gap": "Ring/retention/order/name sanitization/note-тексты и поля plan/trial/execution/binding совпадают; R2O-only виды сохраняют свои имена",
+          "mapping": "`scripts/test-journal-c-parity-differential.sh` (a378); C `datapath/journal.c`; Rust `flow_journal`",
+          "evidence": "`scripts/test-journal-c-parity-differential.sh` (a378); C `datapath/journal.c`; Rust `flow_journal` · пробел: Ring/retention/order/name sanitization/note-тексты и поля plan/trial/execution/binding совпадают; R2O-only виды сохраняют свои имена"
         },
         {
           "id": 24,
@@ -3107,15 +3107,15 @@
       "key": "D22",
       "name": "Journal: ring/retention/dropped/added/format",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "missing",
-      "statusLabel": "пробел",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Datapath",
-      "coverage": "`flow_journal.rs`",
-      "gap": "тексты suspect/refuse и часть полей не совпадают",
-      "mapping": "`flow_journal.rs`",
-      "evidence": "`flow_journal.rs` · пробел: тексты suspect/refuse и часть полей не совпадают"
+      "coverage": "`scripts/test-journal-c-parity-differential.sh` (a378); C `datapath/journal.c`; Rust `flow_journal`",
+      "gap": "Ring/retention/order/name sanitization/note-тексты и поля plan/trial/execution/binding совпадают; R2O-only виды сохраняют свои имена",
+      "mapping": "`scripts/test-journal-c-parity-differential.sh` (a378); C `datapath/journal.c`; Rust `flow_journal`",
+      "evidence": "`scripts/test-journal-c-parity-differential.sh` (a378); C `datapath/journal.c`; Rust `flow_journal` · пробел: Ring/retention/order/name sanitization/note-тексты и поля plan/trial/execution/binding совпадают; R2O-only виды сохраняют свои имена"
     },
     {
       "id": 24,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 105,
+      "points": 106,
       "weight": 271,
-      "percent": 38.75
+      "percent": 39.11
     },
     "carry_forward": {
-      "points": 168,
+      "points": 169,
       "weight": 271,
-      "percent": 61.99,
+      "percent": 62.36,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
