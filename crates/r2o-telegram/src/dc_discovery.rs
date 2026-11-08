@@ -112,15 +112,67 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let started = std::time::Instant::now();
+    let deadline = tokio::time::Instant::now() + EXCHANGE_TIMEOUT;
     let mut transport = Obfuscated::new(Intermediate::new());
     let mut wire = Vec::with_capacity(16 * 1024);
-    let (request, _) = authentication::step1()
-        .map_err(|error| format!("req_pq_multi: не удалось создать запрос: {error}"))?;
-    let response = exchange_plain(stream, &mut transport, &mut wire, &request)
+    let nonce: [u8; 16] = rand::random();
+    let request = grammers_tl_types::functions::ReqPqMulti { nonce }.to_bytes();
+    let mut mtp = Plain::new();
+    let mut packet = DequeBuffer::with_capacity(request.len() + 64, 0);
+    if mtp.push(&mut packet, &request).is_none() || mtp.finalize(&mut packet).is_none() {
+        return Err("req_pq_multi: не удалось сформировать plain-сообщение".to_string());
+    }
+    transport.pack(&mut packet);
+    tokio::time::timeout_at(deadline, stream.write_all(packet.as_ref()))
         .await
-        .map_err(|error| format!("req_pq_multi: {error}"))?;
-    parse_res_pq_response(&response)?;
+        .map_err(|_| "req_pq_multi: истекло время передачи запроса".to_string())?
+        .map_err(|error| format!("req_pq_multi: передача запроса: {error}"))?;
+    let payload = tokio::time::timeout_at(
+        deadline,
+        read_transport_packet(stream, &mut transport, &mut wire),
+    )
+    .await
+    .map_err(|_| "req_pq_multi: истекло время ожидания ответа".to_string())??;
+    validate_res_pq_probe_response(&payload, nonce)?;
     Ok(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
+}
+
+/// C `parse_plain_response` + `parse_res_pq`: точная длина plain-сообщения,
+/// совпадение nonce, pq 1..8 байт, 1..64 fingerprint и отсутствие хвоста.
+fn validate_res_pq_probe_response(payload: &[u8], nonce: [u8; 16]) -> Result<(), String> {
+    if payload.len() < 20 {
+        return Err("resPQ: короткий plain-ответ".to_string());
+    }
+    if payload[..8] != [0u8; 8] {
+        return Err("resPQ: ответ не является plain-сообщением".to_string());
+    }
+    let message_id = i64::from_le_bytes(payload[8..16].try_into().expect("8 байт"));
+    if message_id <= 0 || (message_id & 3) != 1 {
+        return Err("resPQ: неверный message_id".to_string());
+    }
+    let length = u32::from_le_bytes(payload[16..20].try_into().expect("4 байта")) as usize;
+    if length == 0 || length + 20 != payload.len() {
+        return Err("resPQ: неверная длина plain-сообщения".to_string());
+    }
+    let body = &payload[20..];
+    let response = parse_res_pq_response(body)?;
+    let grammers_tl_types::enums::ResPq::Pq(parsed) = response;
+    if parsed.nonce != nonce {
+        return Err("resPQ: nonce не совпадает с запросом".to_string());
+    }
+    if parsed.pq.is_empty() || parsed.pq.len() > 8 {
+        return Err("resPQ: неверный pq".to_string());
+    }
+    if parsed.server_public_key_fingerprints.is_empty()
+        || parsed.server_public_key_fingerprints.len() > 64
+    {
+        return Err("resPQ: неверный список fingerprint".to_string());
+    }
+    let canonical = grammers_tl_types::enums::ResPq::Pq(parsed).to_bytes();
+    if canonical != body {
+        return Err("resPQ: лишние байты после ответа".to_string());
+    }
+    Ok(())
 }
 
 async fn fetch_from_dc(runtime: &Runtime, address: &str) -> Result<DcSnapshot, String> {
@@ -1102,7 +1154,9 @@ mod tests {
                 "клиент должен отправить Telegram req_pq_multi"
             );
 
-            let response_body = valid_res_pq_bytes();
+            let mut response_body = valid_res_pq_bytes();
+            // resPQ обязан вернуть nonce исходного req_pq_multi.
+            response_body[4..20].copy_from_slice(&request[24..40]);
             let mut response = Vec::with_capacity(response_body.len() + 20);
             response.extend_from_slice(&0_i64.to_le_bytes());
             response.extend_from_slice(&1_i64.to_le_bytes());

@@ -4,13 +4,13 @@
 
 Источники: локальные деревья `E:\d2o` (C/shell/section units) и `E:\r2o` (Rust/shell), `docs/functional-parity-matrix.md`, `docs/parity-function-inventory.md`, `README.md`, `router/README.md`, `docs/audit/function-index.md`, существующие differential-скрипты и CI-workflow.
 
-**Интеграция 2026-11-08.** Детальные строки A1–A26, B1–B54 и C1–C26 сведены в единую scored-матрицу `docs/functional-parity-matrix.md`, раздел «Нормализованная матрица покрытия»: 179 контрактов / 271 балл, строгий счёт 143/271 = 52,77 %. В scored не входят `B32`/`B45`/`B54`, `C2`, `C25`/`C26` как extension/out-of-scope/дубли. `B9` и `B52` закрыты после аудита (`scripts/test-router-clear-found-state.sh`, `scripts/test-router-log-maintenance.sh`); таблицы ниже сохранены как исходное доказательное основание.
+**Интеграция 2026-11-08.** Детальные строки A1–A26, B1–B54 и C1–C26 сведены в единую scored-матрицу `docs/functional-parity-matrix.md`, раздел «Нормализованная матрица покрытия»: 179 контрактов / 271 балл, строгий счёт 144/271 = 53,14 %. В scored не входят `B32`/`B45`/`B54`, `C2`, `C25`/`C26` как extension/out-of-scope/дубли. `B9` и `B52` закрыты после аудита (`scripts/test-router-clear-found-state.sh`, `scripts/test-router-log-maintenance.sh`); таблицы ниже сохранены как исходное доказательное основание.
 
 ## 0. Метод и ограничения
 
 1. **Ничего не собиралось и не запускалось.** В PATH нет `git`, `cargo`, `rustc`; C-оракулы и Rust-тесты в этом окружении не запускались. Все выводы ниже — анализ исходников, встроенных тестов, differential-скриптов и CI-конфигурации, а не результат прогона.
 2. **C D2O — эталон поведения, но не источник переноса для Telegram.** C11-реализация Telegram сравнивается как oracle; R2O Telegram взят из донора z2kOW (`tg-proxy`). Для panel/router C-код является и источником, и oracle.
-3. **Версии в документах противоречат друг другу.** Заголовок матрицы говорит о 57 контрактах/89 баллах и 80/89, а примечания 73–92 — о 84 баллах, 53/84 и 76,01 %. Одновременно panel-скрипты закреплены на D2O `304ba893`, матрица panel-строки — на `a378e23`, router-скрипты — на `8e2c981`. В этом аудите **баллы не начислялись**; единый процент по четырём областям не выводится.
+3. **Версии в документах противоречат друг другу.** Заголовок матрицы говорит о 57 контрактах/89 баллах и 80/89, а примечания 73–92 — о 84 баллах, 53/84 и 76,38 %. Одновременно panel-скрипты закреплены на D2O `304ba893`, матрица panel-строки — на `a378e23`, router-скрипты — на `8e2c981`. В этом аудите **баллы не начислялись**; единый процент по четырём областям не выводится.
 4. **Легенда статусов:**
    - `ДИФ` — есть production C/Rust differential-скрипт или fixture, прямо вызывающий обе реализации; в этом аудите не перезапускался.
    - `ТЕСТ` — есть только Rust unit/integration/browser-тест либо shell-harness с моками.
@@ -533,7 +533,7 @@
 | C5 | obfuscated2/secret/DC/media/proto | 2 | ДИФ: direct/secret/reserved |
 | C6 | MTProto splitter | 2 | ДИФ: frames/flush |
 | C7 | v2 encrypted | 1 | ДИФ: decrypt/vector/tamper |
-| C8 | resPQ probe | 1 | ИСХ |
+| C8 | resPQ probe | 1 | ДИФ: fake DC + validation |
 | C9 | DC→WSS/CF route plan | 2 | ИСХ |
 | C10 | Route DNS/DoH/DoT | 2 | ДИФ: public-IP/fallback a378 |
 | C11 | TLS verification/SNI | 1 | ДИФ: neutral SNI + hostname |

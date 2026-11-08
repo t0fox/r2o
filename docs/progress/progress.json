@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 143,
-  "percent": 52.77,
+  "points": 144,
+  "percent": 53.14,
   "total": 179,
   "counts": {
-    "verified": 99,
+    "verified": 100,
     "carry": 40,
-    "partial": 39,
+    "partial": 38,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1095,7 +1095,7 @@
     {
       "name": "Telegram",
       "weight": 41,
-      "points": 26,
+      "points": 27,
       "items": [
         {
           "id": 157,
@@ -1192,15 +1192,15 @@
           "key": "TG8",
           "name": "resPQ probe",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Telegram",
-          "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "gap": "",
-          "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+          "coverage": "`scripts/test-telegram-respq-probe-differential.sh` (a378); C `tg_mtproto_probe_res_pq`; Rust `probe_res_pq`",
+          "gap": "Общий fake DC: valid healthy; wrong nonce/auth-key/pq/fingerprints/trailing/message-id отвергаются одинаково",
+          "mapping": "`scripts/test-telegram-respq-probe-differential.sh` (a378); C `tg_mtproto_probe_res_pq`; Rust `probe_res_pq`",
+          "evidence": "`scripts/test-telegram-respq-probe-differential.sh` (a378); C `tg_mtproto_probe_res_pq`; Rust `probe_res_pq` · пробел: Общий fake DC: valid healthy; wrong nonce/auth-key/pq/fingerprints/trailing/message-id отвергаются одинаково"
         },
         {
           "id": 164,
@@ -5207,15 +5207,15 @@
       "key": "TG8",
       "name": "resPQ probe",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Telegram",
-      "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "gap": "",
-      "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+      "coverage": "`scripts/test-telegram-respq-probe-differential.sh` (a378); C `tg_mtproto_probe_res_pq`; Rust `probe_res_pq`",
+      "gap": "Общий fake DC: valid healthy; wrong nonce/auth-key/pq/fingerprints/trailing/message-id отвергаются одинаково",
+      "mapping": "`scripts/test-telegram-respq-probe-differential.sh` (a378); C `tg_mtproto_probe_res_pq`; Rust `probe_res_pq`",
+      "evidence": "`scripts/test-telegram-respq-probe-differential.sh` (a378); C `tg_mtproto_probe_res_pq`; Rust `probe_res_pq` · пробел: Общий fake DC: valid healthy; wrong nonce/auth-key/pq/fingerprints/trailing/message-id отвергаются одинаково"
     },
     {
       "id": 164,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 143,
+      "points": 144,
       "weight": 271,
-      "percent": 52.77
+      "percent": 53.14
     },
     "carry_forward": {
-      "points": 206,
+      "points": 207,
       "weight": 271,
-      "percent": 76.01,
+      "percent": 76.38,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
