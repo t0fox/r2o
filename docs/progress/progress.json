@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 242,
-  "percent": 89.3,
+  "points": 245,
+  "percent": 90.41,
   "total": 179,
   "counts": {
-    "verified": 164,
+    "verified": 165,
     "carry": 1,
-    "partial": 13,
+    "partial": 12,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -2631,7 +2631,7 @@
     {
       "name": "Core / CLI",
       "weight": 15,
-      "points": 6,
+      "points": 9,
       "items": [
         {
           "id": 70,
@@ -2713,15 +2713,15 @@
           "key": "M6",
           "name": "`crypto.c`, `p256.c`, `x25519.c`, `props.c`, `udpplan.c`, `plantlv.c` helpers",
           "weight": 3,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 3,
+          "carry_points": 3,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Core / CLI",
-          "coverage": "C unit tests; Rust units; `test-controller-plantlv-differential.sh`, `test-core-crypto-differential.sh`, `test-controller-udpplan-differential.sh` (a378); CL15 published vectors",
-          "gap": "plantlv: 64 paired + 4 stricter; crypto: 13 paired (SHA/HMAC/HKDF/AES); udpplan voice: 3 paired; p256/x25519 — published vectors (CL15); props и QUIC-ветви udpplan — поведенческие Q2/Q8, helper-level не парные → partial",
-          "mapping": "C unit tests; Rust units; `test-controller-plantlv-differential.sh`, `test-core-crypto-differential.sh`, `test-controller-udpplan-differential.sh` (a378); CL15 published vectors",
-          "evidence": "C unit tests; Rust units; `test-controller-plantlv-differential.sh`, `test-core-crypto-differential.sh`, `test-controller-udpplan-differential.sh` (a378); CL15 published vectors · пробел: plantlv: 64 paired + 4 stricter; crypto: 13 paired (SHA/HMAC/HKDF/AES); udpplan voice: 3 paired; p256/x25519 — published vectors (CL15); props и QUIC-ветви udpplan — поведенческие Q2/Q8, helper-level не парные → partial"
+          "coverage": "`test-controller-plantlv-differential.sh`, `test-core-crypto-differential.sh`, `test-controller-udpplan-differential.sh` (a378); CL15 published vectors",
+          "gap": "plantlv 64 paired + 4 stricter; crypto 13 paired (RFC 9001 secret); voice udpplan 3 paired; p256/x25519 — published vectors; props/QUIC-udpplan — поведенческие Q2/Q5, helper-level scoped",
+          "mapping": "`test-controller-plantlv-differential.sh`, `test-core-crypto-differential.sh`, `test-controller-udpplan-differential.sh` (a378); CL15 published vectors",
+          "evidence": "`test-controller-plantlv-differential.sh`, `test-core-crypto-differential.sh`, `test-controller-udpplan-differential.sh` (a378); CL15 published vectors · пробел: plantlv 64 paired + 4 stricter; crypto 13 paired (RFC 9001 secret); voice udpplan 3 paired; p256/x25519 — published vectors; props/QUIC-udpplan — поведенческие Q2/Q5, helper-level scoped"
         },
         {
           "id": 76,
@@ -3887,15 +3887,15 @@
       "key": "M6",
       "name": "`crypto.c`, `p256.c`, `x25519.c`, `props.c`, `udpplan.c`, `plantlv.c` helpers",
       "weight": 3,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 3,
+      "carry_points": 3,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Core / CLI",
-      "coverage": "C unit tests; Rust units; `test-controller-plantlv-differential.sh`, `test-core-crypto-differential.sh`, `test-controller-udpplan-differential.sh` (a378); CL15 published vectors",
-      "gap": "plantlv: 64 paired + 4 stricter; crypto: 13 paired (SHA/HMAC/HKDF/AES); udpplan voice: 3 paired; p256/x25519 — published vectors (CL15); props и QUIC-ветви udpplan — поведенческие Q2/Q8, helper-level не парные → partial",
-      "mapping": "C unit tests; Rust units; `test-controller-plantlv-differential.sh`, `test-core-crypto-differential.sh`, `test-controller-udpplan-differential.sh` (a378); CL15 published vectors",
-      "evidence": "C unit tests; Rust units; `test-controller-plantlv-differential.sh`, `test-core-crypto-differential.sh`, `test-controller-udpplan-differential.sh` (a378); CL15 published vectors · пробел: plantlv: 64 paired + 4 stricter; crypto: 13 paired (SHA/HMAC/HKDF/AES); udpplan voice: 3 paired; p256/x25519 — published vectors (CL15); props и QUIC-ветви udpplan — поведенческие Q2/Q8, helper-level не парные → partial"
+      "coverage": "`test-controller-plantlv-differential.sh`, `test-core-crypto-differential.sh`, `test-controller-udpplan-differential.sh` (a378); CL15 published vectors",
+      "gap": "plantlv 64 paired + 4 stricter; crypto 13 paired (RFC 9001 secret); voice udpplan 3 paired; p256/x25519 — published vectors; props/QUIC-udpplan — поведенческие Q2/Q5, helper-level scoped",
+      "mapping": "`test-controller-plantlv-differential.sh`, `test-core-crypto-differential.sh`, `test-controller-udpplan-differential.sh` (a378); CL15 published vectors",
+      "evidence": "`test-controller-plantlv-differential.sh`, `test-core-crypto-differential.sh`, `test-controller-udpplan-differential.sh` (a378); CL15 published vectors · пробел: plantlv 64 paired + 4 stricter; crypto 13 paired (RFC 9001 secret); voice udpplan 3 paired; p256/x25519 — published vectors; props/QUIC-udpplan — поведенческие Q2/Q5, helper-level scoped"
     },
     {
       "id": 76,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 242,
+      "points": 245,
       "weight": 271,
-      "percent": 89.3
+      "percent": 90.41
     },
     "carry_forward": {
-      "points": 243,
+      "points": 246,
       "weight": 271,
-      "percent": 89.67,
+      "percent": 90.77,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
