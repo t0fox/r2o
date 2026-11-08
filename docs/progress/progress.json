@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 260,
-  "percent": 95.94,
+  "points": 264,
+  "percent": 97.42,
   "total": 179,
   "counts": {
-    "verified": 172,
+    "verified": 174,
     "carry": 0,
-    "partial": 6,
+    "partial": 4,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1095,7 +1095,7 @@
     {
       "name": "Telegram",
       "weight": 41,
-      "points": 37,
+      "points": 41,
       "items": [
         {
           "id": 157,
@@ -1252,15 +1252,15 @@
           "key": "TG12",
           "name": "WS upgrade/frames",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Telegram",
-          "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "gap": "",
-          "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+          "coverage": "`crates/r2o-telegram` `ws_client::tests` 23/23 (z2kOW-порт); diff с z2kOW `ws_client.rs`/tests — перевод комментариев + `ca_bundle`; `docs/audit/panel-router-vps-telegram-audit.md` C",
+          "gap": "TLS upgrade, `Sec-WebSocket-Protocol: binary`, Host/Origin, fragmented binary → единый MTProto-поток, bounded buffers, TTL/cooldown доменов, CF edge/path; **scoped:** живой Telegram DC не использовался, z2kOW suite не перезапускался offline из-за отсутствующего кэша rustls",
+          "mapping": "`crates/r2o-telegram` `ws_client::tests` 23/23 (z2kOW-порт); diff с z2kOW `ws_client.rs`/tests — перевод комментариев + `ca_bundle`; `docs/audit/panel-router-vps-telegram-audit.md` C",
+          "evidence": "`crates/r2o-telegram` `ws_client::tests` 23/23 (z2kOW-порт); diff с z2kOW `ws_client.rs`/tests — перевод комментариев + `ca_bundle`; `docs/audit/panel-router-vps-telegram-audit.md` C · пробел: TLS upgrade, `Sec-WebSocket-Protocol: binary`, Host/Origin, fragmented binary → единый MTProto-поток, bounded buffers, TTL/cooldown доменов, CF edge/path; **scoped:** живой Telegram DC не использовался, z2kOW suite не перезапускался offline из-за отсутствующего кэша rustls"
         },
         {
           "id": 168,
@@ -1432,15 +1432,15 @@
           "key": "TG24",
           "name": "Service lifecycle/recovery",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Telegram",
-          "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "gap": "",
-          "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+          "coverage": "`test-telegram-health-differential.sh`, `test-router-telegram-service.sh`, `test-telegram-stop-order-differential.sh`, `test-router-telegram-reapply.sh`, `test-telegram-config-differential.sh`, `test-panel-telegram-status-differential.sh` (a378); z2kOW `platform/openwrt/tg.sh`",
+          "gap": "Health-файл до listener, ready/listener_ready, service start/stop, stop-order, reapply, config gate и panel status совпали. **Scoped:** живой Telegram upstream не использовался; recovery проверен локальным процессом/fake upstream",
+          "mapping": "`test-telegram-health-differential.sh`, `test-router-telegram-service.sh`, `test-telegram-stop-order-differential.sh`, `test-router-telegram-reapply.sh`, `test-telegram-config-differential.sh`, `test-panel-telegram-status-differential.sh` (a378); z2kOW `platform/openwrt/tg.sh`",
+          "evidence": "`test-telegram-health-differential.sh`, `test-router-telegram-service.sh`, `test-telegram-stop-order-differential.sh`, `test-router-telegram-reapply.sh`, `test-telegram-config-differential.sh`, `test-panel-telegram-status-differential.sh` (a378); z2kOW `platform/openwrt/tg.sh` · пробел: Health-файл до listener, ready/listener_ready, service start/stop, stop-order, reapply, config gate и panel status совпали. **Scoped:** живой Telegram upstream не использовался; recovery проверен локальным процессом/fake upstream"
         }
       ]
     },
@@ -5267,15 +5267,15 @@
       "key": "TG12",
       "name": "WS upgrade/frames",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Telegram",
-      "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "gap": "",
-      "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+      "coverage": "`crates/r2o-telegram` `ws_client::tests` 23/23 (z2kOW-порт); diff с z2kOW `ws_client.rs`/tests — перевод комментариев + `ca_bundle`; `docs/audit/panel-router-vps-telegram-audit.md` C",
+      "gap": "TLS upgrade, `Sec-WebSocket-Protocol: binary`, Host/Origin, fragmented binary → единый MTProto-поток, bounded buffers, TTL/cooldown доменов, CF edge/path; **scoped:** живой Telegram DC не использовался, z2kOW suite не перезапускался offline из-за отсутствующего кэша rustls",
+      "mapping": "`crates/r2o-telegram` `ws_client::tests` 23/23 (z2kOW-порт); diff с z2kOW `ws_client.rs`/tests — перевод комментариев + `ca_bundle`; `docs/audit/panel-router-vps-telegram-audit.md` C",
+      "evidence": "`crates/r2o-telegram` `ws_client::tests` 23/23 (z2kOW-порт); diff с z2kOW `ws_client.rs`/tests — перевод комментариев + `ca_bundle`; `docs/audit/panel-router-vps-telegram-audit.md` C · пробел: TLS upgrade, `Sec-WebSocket-Protocol: binary`, Host/Origin, fragmented binary → единый MTProto-поток, bounded buffers, TTL/cooldown доменов, CF edge/path; **scoped:** живой Telegram DC не использовался, z2kOW suite не перезапускался offline из-за отсутствующего кэша rustls"
     },
     {
       "id": 168,
@@ -5447,27 +5447,27 @@
       "key": "TG24",
       "name": "Service lifecycle/recovery",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Telegram",
-      "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "gap": "",
-      "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+      "coverage": "`test-telegram-health-differential.sh`, `test-router-telegram-service.sh`, `test-telegram-stop-order-differential.sh`, `test-router-telegram-reapply.sh`, `test-telegram-config-differential.sh`, `test-panel-telegram-status-differential.sh` (a378); z2kOW `platform/openwrt/tg.sh`",
+      "gap": "Health-файл до listener, ready/listener_ready, service start/stop, stop-order, reapply, config gate и panel status совпали. **Scoped:** живой Telegram upstream не использовался; recovery проверен локальным процессом/fake upstream",
+      "mapping": "`test-telegram-health-differential.sh`, `test-router-telegram-service.sh`, `test-telegram-stop-order-differential.sh`, `test-router-telegram-reapply.sh`, `test-telegram-config-differential.sh`, `test-panel-telegram-status-differential.sh` (a378); z2kOW `platform/openwrt/tg.sh`",
+      "evidence": "`test-telegram-health-differential.sh`, `test-router-telegram-service.sh`, `test-telegram-stop-order-differential.sh`, `test-router-telegram-reapply.sh`, `test-telegram-config-differential.sh`, `test-panel-telegram-status-differential.sh` (a378); z2kOW `platform/openwrt/tg.sh` · пробел: Health-файл до listener, ready/listener_ready, service start/stop, stop-order, reapply, config gate и panel status совпали. **Scoped:** живой Telegram upstream не использовался; recovery проверен локальным процессом/fake upstream"
     }
   ],
   "comparison": {
     "strict": {
-      "points": 260,
+      "points": 264,
       "weight": 271,
-      "percent": 95.94
+      "percent": 97.42
     },
     "carry_forward": {
-      "points": 260,
+      "points": 264,
       "weight": 271,
-      "percent": 95.94,
+      "percent": 97.42,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

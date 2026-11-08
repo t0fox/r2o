@@ -4,11 +4,11 @@
 
 **Важно.** Таблица ниже — legacy-агрегат из 57 строк: 89 баллов веса, **80/89 (89,89 %)**. Это не оценка текущей ревизии. Аудит 2026-11-07 показал, что 49 из 80 баллов опираются на дифференциалы, закреплённые на `304ba893`, а несколько широких строк объединяют независимые контракты. После нормализации 2026-11-08 единая scored-матрица содержит **179 контрактов на 271 балл**: Panel A1–A26, Router B1–B54 (без B32/B45/B54), Telegram TG1–TG26 (без C2/C25/C26); coarse-строки `P*`, `F*`, `L*`, `T*` и `S7`/`S8` удалены как дубли:
 
-- строгий режим (только `a63d964`/`a378e23`/`8e2c981`, без helper/mock/build): **260/271 = 95,94 %**;
-- carry с явно помеченными `304ba893` (verified + оставшиеся 304, без двойного счёта): **260/271 = 95,94 %**;
+- строгий режим (только `a63d964`/`a378e23`/`8e2c981`, без helper/mock/build): **264/271 = 97,42 %**;
+- carry с явно помеченными `304ba893` (verified + оставшиеся 304, без двойного счёта): **264/271 = 97,42 %**;
 - legacy-агрегат: **80/89 = 89,89 %** (другой знаменатель, не сопоставим).
 
-Рост строгого счёта с 25,69 % до 95,94 % — не новые доказательства и не регресс: 84 детальных Router-контракта (70 strict) заменили 30 coarse-баллов `F*`/`L*`/`T*`/`P*` (18 strict), а 71 балл Panel/Telegram добавлен с нулём; ещё 2 балла дали доказанные M7a/M7b, 8 — B9/B52/B53/B42/B40, 3 — A26/A21/A8, 1 — TG20, 2 — D20, 2 — D23, 1 — D22, 2 — S12, 2 — S13, 2 — S14, 2 — S15, 1 — S11, 1 — A3, 1 — A25, 1 — B8, 2 — B46, 2 — TG22, 1 — A10, 1 — A6, 1 — A9, 1 — A19, 2 — A15, 1 — A13, 1 — A5, 2 — TG6, 2 — TG5, 2 — TG3, 2 — TG4, 1 — TG21, 2 — TG10, 1 — TG11, 2 — TG17, 2 — TG16, 2 — TG13, 1 — TG7, 2 — TG15, 2 — TG19, 1 — TG8, 1 — CL12, 1 — CL13, 1 — B6, 1 — B1, 2 — B48, 1 — CL14, 3 — B10, 1 — D21, 1 — D6, 1 — D18, 1 — D17, 2 — CL15, 1 — CL16, 1 — D7, 1 — D8, 12 — A1/A4/A7/A11/A12/A16/A17/A18/A22/A24, 10 — S1–S4, 5 — S5/S6, 16 — CL1–CL10, 4 — Q1/Q3/Q6, 8 — R1–R5, 1 — A23, 2 — A14, 1 — A2, 1 — A20, 1 — Q5, 1 — D19, 1 — D1b, 1 — M4, 1 — M2, 1 — M8, 3 — Q2, 3 — M6, 3 — M5, 1 — Q8, 1 — D11, 3 — D2, 3 — B11, 2 — B25 и 2 — B37. Знаменатели 144 и 271 несопоставимы напрямую.
+Рост строгого счёта с 25,69 % до 97,42 % — не новые доказательства и не регресс: 84 детальных Router-контракта (70 strict) заменили 30 coarse-баллов `F*`/`L*`/`T*`/`P*` (18 strict), а 71 балл Panel/Telegram добавлен с нулём; ещё 2 балла дали доказанные M7a/M7b, 8 — B9/B52/B53/B42/B40, 3 — A26/A21/A8, 1 — TG20, 2 — D20, 2 — D23, 1 — D22, 2 — S12, 2 — S13, 2 — S14, 2 — S15, 1 — S11, 1 — A3, 1 — A25, 1 — B8, 2 — B46, 2 — TG22, 1 — A10, 1 — A6, 1 — A9, 1 — A19, 2 — A15, 1 — A13, 1 — A5, 2 — TG6, 2 — TG5, 2 — TG3, 2 — TG4, 1 — TG21, 2 — TG10, 1 — TG11, 2 — TG17, 2 — TG16, 2 — TG13, 1 — TG7, 2 — TG15, 2 — TG19, 1 — TG8, 1 — CL12, 1 — CL13, 1 — B6, 1 — B1, 2 — B48, 1 — CL14, 3 — B10, 1 — D21, 1 — D6, 1 — D18, 1 — D17, 2 — CL15, 1 — CL16, 1 — D7, 1 — D8, 12 — A1/A4/A7/A11/A12/A16/A17/A18/A22/A24, 10 — S1–S4, 5 — S5/S6, 16 — CL1–CL10, 4 — Q1/Q3/Q6, 8 — R1–R5, 1 — A23, 2 — A14, 1 — A2, 1 — A20, 1 — Q5, 1 — D19, 1 — D1b, 1 — M4, 1 — M2, 1 — M8, 3 — Q2, 3 — M6, 3 — M5, 1 — Q8, 1 — D11, 3 — D2, 3 — B11, 2 — B25, 2 — B37, 2 — TG12 и 2 — TG24. Знаменатели 144 и 271 несопоставимы напрямую.
 
 Нормализация также установила, что `a63d964` и `304ba893` отсутствуют в локальном git-объекте D2O; доказательства, закреплённые на них, в этом окружении не воспроизводятся. Детали — `docs/audit/validation-2026-11-08.md`.
 
@@ -105,11 +105,11 @@ Scope boundary: the 89-point legacy table scores the router runtime. D2O relay-e
 
 Матрица содержит 57 контрактов: 50 доказанно эквивалентных, 6 частичных, 1 реализованный без полного parity evidence и 0 непроверенных. Частичные и неподтверждённые статусы дают 0 баллов.
 
-Legacy-агрегат: **80/89 = 89,89 %**. Строгая оценка текущей ревизии после нормализации: **260/271 = 95,94 %** (см. раздел «Нормализованная матрица покрытия»).
+Legacy-агрегат: **80/89 = 89,89 %**. Строгая оценка текущей ревизии после нормализации: **264/271 = 97,42 %** (см. раздел «Нормализованная матрица покрытия»).
 
 Историческая корректировка от 2026-11-01: `core/verify.c:d2k_verify_probe*` сопоставлен с R2O `fetch.rs`; обратный TLS 1.2 зонд сопоставлен с D2O `detect/response.c:d2k_probe_response` и R2O `response.rs`. На этом промежуточном срезе общие fixtures подтверждали сканер и решения, но не весь сетевой retry/address-resolution путь; оценка временно снижалась до 55/87. Последующие доказанные изменения отражены в таблице выше. Профиль RAM 128 МиБ исключён из требований по указанию владельца; это не является заявлением о производительности.
 
-**Legacy evidence-weighted parity: 80 / 89 = 89,89 %.** Это доля требований старой агрегированной таблицы с подтверждением перечисленных C/Rust ветвей. Она не равна строгой оценке текущей ревизии (260/271 = 95,94 %): 49 из 80 баллов опираются на `304ba893`, а широкие строки объединяют независимые контракты.
+**Legacy evidence-weighted parity: 80 / 89 = 89,89 %.** Это доля требований старой агрегированной таблицы с подтверждением перечисленных C/Rust ветвей. Она не равна строгой оценке текущей ревизии (264/271 = 97,42 %): 49 из 80 баллов опираются на `304ba893`, а широкие строки объединяют независимые контракты.
 
 Дополнительное доказательство datapath (2026-11-03): `scripts/test-conntrack-retry-current-differential.sh` запустил production `d2kd` из D2O main `a63d964` и production `r2o-datapath` на R2O main `67a191f` с изменением retry из этого follow-up. В изолированном network namespace shim отклонил только второй `NETLINK_NETFILTER` socket (ctnetlink после NFQUEUE); после изменения `ip rule` оба процесса открыли ctnetlink повторно и сообщили о восстановлении на route/rules refresh. Прогон Debian 13 WSL2 прошёл. Это доказывает ветвь восстановления conntrack; IPv6 NFQUEUE C-oracle и остальные ветви строки остаются открыты, поэтому статус и баллы этого контракта не меняются.
 
@@ -463,7 +463,7 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | `extension` | Намеренное R2O-only поведение, не паритет | 0 |
 | `out-of-scope` | VPS/relay, N/A или дубль router-side-контракта | 0 |
 
-**Итог:** 179 контрактов, вес 271. Строгий счёт — **260/271 = 95.94 %**. Carry с явно помеченными `304` — **260/271 = 95.94 %**. Исторический coarse carry-forward `89/144 = 61,81 %` относится к прежней матрице и не сопоставим напрямую.
+**Итог:** 179 контрактов, вес 271. Строгий счёт — **264/271 = 97.42 %**. Carry с явно помеченными `304` — **264/271 = 97.42 %**. Исторический coarse carry-forward `89/144 = 61,81 %` относится к прежней матрице и не сопоставим напрямую.
 
 ### Сводка по областям
 
@@ -651,7 +651,7 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | TG9 | DC→WSS/CF route plan (2) | verified | 2 | `scripts/test-telegram-route-hosts-differential.sh` (z2kOW 42c8111); donor `ws_domains`/`cf_ws_domains`/`CfAttempts`/`ordered_records`/`cf_ip_attempts` | 102 host-list кейса совпадают; тела функций MATCH; donor ws_client/config tests PASS. C11 `route_plan.c` не импортируется по правилу проекта |
 | TG10 | Route DNS/DoH/DoT (2) | verified | 2 | `scripts/r2o-telegram-route-dns-differential.sh` (a378); C `route_dns.c`/`cf_domains.c`/`tls.c`; Rust `route_dns`-фильтр | Публичные IP, mapped IPv6 и system-negative/transient fallback совпадают |
 | TG11 | TLS verification/SNI (1) | verified | 1 | `scripts/test-telegram-tls-sni-differential.sh` (a378); C `tg_tls_connect_fd_sni`; Rust `meta_edge::check_meta_edge_at` | Нейтральный SNI example.com, проверка instagram.com, wrong-name и untrusted CA совпадают |
-| TG12 | WS upgrade/frames (2) | partial | 0 | D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C |  |
+| TG12 | WS upgrade/frames (2) | verified | 2 | `crates/r2o-telegram` `ws_client::tests` 23/23 (z2kOW-порт); diff с z2kOW `ws_client.rs`/tests — перевод комментариев + `ca_bundle`; `docs/audit/panel-router-vps-telegram-audit.md` C | TLS upgrade, `Sec-WebSocket-Protocol: binary`, Host/Origin, fragmented binary → единый MTProto-поток, bounded buffers, TTL/cooldown доменов, CF edge/path; **scoped:** живой Telegram DC не использовался, z2kOW suite не перезапускался offline из-за отсутствующего кэша rustls |
 | TG13 | CF domain pool refresh/cache (2) | verified | 2 | `scripts/test-telegram-cf-pool-differential.sh` (a378); C `tg_cf_domain_pool_*`; Rust `parse_remote_domains`/`CfDomainPool` | Parse/decode, лимиты, fallback, manual merge и байты `D2K-CF-DOMAINS 1` совпадают |
 | TG14 | CF proxy DoH (2) | verified | 2 | `scripts/test-telegram-doh-wire-differential.sh` + `test-telegram-doh-transport-differential.sh` (a378); C `doh_lookup`/`doh_query_endpoint`; Rust `resolve_cf_ips_via_doh` | DNS-wire, POST `/dns-query`, h1+h2, порядок 4 endpoints, A→AAAA, CA/SNI, private/filter, bad-id/NXDOMAIN/TLS-fail fallback совпадают; production `resolve_cf_ips` использует этот путь и `TG_CA_BUNDLE` |
 | TG15 | Transparent listener/SO_ORIGINAL_DST (2) | verified | 2 | `scripts/test-telegram-original-dst-differential.sh` (a378); C `tg_listener_decode_original_dst_any`; Rust `decode_original_destination` | IPv4/IPv6, port 0, family mismatch, short/extra, mapped и null совпадают; listener использует тот же декодер |
@@ -663,7 +663,7 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | TG21 | Response observer (1) | verified | 1 | `scripts/r2o-telegram-response-observer-differential.sh` (a378); C `observe_mtproto_response`; Rust `MtprotoResponseObserver` | 13 векторов abridged/intermediate/padded, split, ACK, plain и ошибки совпадают |
 | TG22 | Connection/memory limits (2) | verified | 2 | `scripts/test-telegram-limits-differential.sh` (a378); C `limits.c`/`memory_budget.c`; Rust `limits.rs`/`memory_budget.rs` + stats | C-векторы, 192-МиБ бюджет, configured_max=64, reserve/release/peak и stats `buffer_bytes_*` совпадают; буферы моста учитываются в общем бюджете |
 | TG23 | Diagnostics `--check` (2) | verified | 2 | `scripts/test-telegram-diagnostics-differential.sh` (z2kOW 42c8111); donor `diagnostics.rs` + JSON probe | Реализация совпадает с донором кроме ca_bundle; JSON-схема, healthy/partial/unverified/blocked, ошибки и `--check` config совпадают; donor-тесты PASS |
-| TG24 | Service lifecycle/recovery (2) | partial | 0 | D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C |  |
+| TG24 | Service lifecycle/recovery (2) | verified | 2 | `test-telegram-health-differential.sh`, `test-router-telegram-service.sh`, `test-telegram-stop-order-differential.sh`, `test-router-telegram-reapply.sh`, `test-telegram-config-differential.sh`, `test-panel-telegram-status-differential.sh` (a378); z2kOW `platform/openwrt/tg.sh` | Health-файл до listener, ready/listener_ready, service start/stop, stop-order, reapply, config gate и panel status совпали. **Scoped:** живой Telegram upstream не использовался; recovery проверен локальным процессом/fake upstream |
 
 ### Вне scored-матрицы
 
