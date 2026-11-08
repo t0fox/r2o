@@ -18,8 +18,17 @@ mkdir -p "$TMPDIR"
 TEMP=$(mktemp -d "$TMPDIR/r2o-b10-nft.XXXXXX")
 trap 'rm -rf -- "$TEMP"' EXIT HUP INT TERM
 
-unshare -Urn sh "$ROOT/scripts/fixtures/d2o-nft-real-trace.sh" "$D2O_ROOT" "$TEMP" >"$TEMP/c.out"
-unshare -Urn sh "$ROOT/scripts/fixtures/r2o-nft-real-trace.sh" "$ROOT" "$TEMP" >"$TEMP/r.out"
+# GitHub runner запрещает unprivileged user namespaces. Под sudo достаточно
+# network namespace; локально без root используем user+network namespace.
+run_unshare() {
+    if [ "$(id -u)" -eq 0 ]; then
+        unshare -n "$@"
+    else
+        unshare -Urn "$@"
+    fi
+}
+run_unshare sh "$ROOT/scripts/fixtures/d2o-nft-real-trace.sh" "$D2O_ROOT" "$TEMP" >"$TEMP/c.out"
+run_unshare sh "$ROOT/scripts/fixtures/r2o-nft-real-trace.sh" "$ROOT" "$TEMP" >"$TEMP/r.out"
 
 canonical() {
     rules=$1

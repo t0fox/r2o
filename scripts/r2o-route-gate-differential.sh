@@ -67,19 +67,26 @@ mkdir -p "$r2o_log_dir"
         "$r2o_script_dir/crates/r2o-datapath/src/main.rs" \
         "$r2o_script_dir/crates/r2o-datapath/src/nfqueue.rs" \
         "$r2o_script_dir/router/S99r2o"
-    r2o_hashes=$(sha256sum \
-        "$r2o_donor_datapath/routemark.c" \
-        "$r2o_donor_datapath/routemark_nl.c" \
-        "$r2o_donor_datapath/include/d2k_routemark.h" \
-        "$r2o_donor_datapath/test_routemark.c" \
-        "$r2o_donor_datapath/session.c" \
-        "$r2o_donor_datapath/test_session.c")
-    printf '%s\n' "$r2o_hashes" | grep -q '53fdb658a6dadce23273ffda1d187a427cf5ae129c5284922c2d24584e6d398e'
-    printf '%s\n' "$r2o_hashes" | grep -q '03be99b80fa5f1fdff16af9cfef183a0c670e34c36113bdde0b0a397242b8eb2'
-    printf '%s\n' "$r2o_hashes" | grep -q '969b16e8f86da0fe651654d28a8ac627b46e9cae3e8b2a61f271f3d1ca9cf89a'
-    printf '%s\n' "$r2o_hashes" | grep -q '9e7e2ec357aaace34768991d736906e36ff8da64fdd8e72a1c8becdaf166aee8'
-    printf '%s\n' "$r2o_hashes" | grep -q '7a610ea7f9651391ea4768028d1abb65e7eeee2279f20c139167dfd05af1ab35'
-    printf '%s\n' "$r2o_hashes" | grep -q '84d980e5f4e8850b7ba3a638987021e96eba5e1721a63a3cdfd30b224817ec43'
+    # GitHub checkout на Linux хранит LF, локальный E: — CRLF. Хэши считаем
+    # по нормализованным LF-байтам, иначе один и тот же донор даёт разные суммы.
+    r2o_hashes=$(
+        for r2o_file in \
+            "$r2o_donor_datapath/routemark.c" \
+            "$r2o_donor_datapath/routemark_nl.c" \
+            "$r2o_donor_datapath/include/d2k_routemark.h" \
+            "$r2o_donor_datapath/test_routemark.c" \
+            "$r2o_donor_datapath/session.c" \
+            "$r2o_donor_datapath/test_session.c"
+        do
+            sed 's/\r$//' "$r2o_file" | sha256sum | awk '{print $1}'
+        done
+    )
+    printf '%s\n' "$r2o_hashes" | grep -q '3e5f0ea6bf53e2b8a542446b30b8d0178453f61881755db547c088c3169e6845'
+    printf '%s\n' "$r2o_hashes" | grep -q '8695849a779e5e1a6f554ce5599900b146092eb8806e42df11f8e667a28ba8d6'
+    printf '%s\n' "$r2o_hashes" | grep -q 'fa46df3ecbb2b33777a447de17bbc5c7ae96d0993f39d0de79297288de3478b0'
+    printf '%s\n' "$r2o_hashes" | grep -q 'f2863fbf294fc185568a6b500286e3c36d18485d4302417403301cbeef69d45d'
+    printf '%s\n' "$r2o_hashes" | grep -q '30def3c2ed70900d6ce9ab6bacafa781553b5edfa5a699083284281c3a11c154'
+    printf '%s\n' "$r2o_hashes" | grep -q '8fcf2f4d1e0aa908e65b051b18f6fde2e1899f060ccda9463e66c184dae23996'
 
     printf '\nСборка C-контролей из закреплённого donor commit\n'
     r2o_run_timed 'сборка test_routemark и test_session' \

@@ -169,7 +169,7 @@ jobs:
           for test in "${tests[@]}"; do
             echo "::group::$test"
             test_name=${test##*/}
-            if [ "$test_name" = test-router-firewall.sh ]; then
+            if [ "$test_name" = test-router-firewall.sh ] || [ "$test_name" = test-router-nft-real-differential.sh ]; then
               if sudo sh "$test"; then
                 :
               else
@@ -621,6 +621,7 @@ jobs:
           set -euo pipefail
           test "$(git -C d2o rev-parse HEAD)" = "$DONOR_SHA"
           make -B -C d2o/datapath test_session test_quic_session test_stun_session test_routemark CC=clang-18
+          make -B -C d2o/core diagnostics.o httpsearch.o httpup_logic.o CC=clang-18
           cargo +1.98.0 fetch --locked
       - name: C/Rust сценарии
         env:

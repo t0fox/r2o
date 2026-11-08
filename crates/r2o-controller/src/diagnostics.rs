@@ -7,8 +7,77 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(not(target_has_atomic = "64"))]
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[cfg(target_has_atomic = "64")]
+type AtomicU64 = std::sync::atomic::AtomicU64;
+
+#[cfg(not(target_has_atomic = "64"))]
+#[derive(Default)]
+struct AtomicU64(Mutex<u64>);
+
+#[cfg(not(target_has_atomic = "64"))]
+impl AtomicU64 {
+    const fn new(value: u64) -> Self {
+        Self(Mutex::new(value))
+    }
+
+    fn load(&self, _ordering: Ordering) -> u64 {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn store(&self, value: u64, _ordering: Ordering) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = value;
+    }
+
+    fn fetch_add(&self, value: u64, _ordering: Ordering) -> u64 {
+        let mut current = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = *current;
+        *current = current.wrapping_add(value);
+        previous
+    }
+
+    fn fetch_sub(&self, value: u64, _ordering: Ordering) -> u64 {
+        let mut current = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = *current;
+        *current = current.wrapping_sub(value);
+        previous
+    }
+
+    fn compare_exchange_weak(
+        &self,
+        current: u64,
+        new: u64,
+        _success: Ordering,
+        _failure: Ordering,
+    ) -> Result<u64, u64> {
+        let mut value = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *value == current {
+            *value = new;
+            Ok(current)
+        } else {
+            Err(*value)
+        }
+    }
+}
 
 pub const MEMORY_SITE_COUNT: usize = 6;
 pub const MADVISE_ERRNO_SLOTS: usize = 4;

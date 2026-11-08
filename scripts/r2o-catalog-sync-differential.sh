@@ -19,7 +19,7 @@ area_delete_order_fixture="$repo_root/crates/r2o-controller/tests/fixtures/d2o_c
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/r2o-catalog-sync.XXXXXX")
 trap 'rm -rf -- "$tmp_dir"' EXIT HUP INT TERM
 
-make -s -B -C "$donor_core" test_catalog_sync httpsearch.o httpup_logic.o CC=clang-18
+make -s -B -C "$donor_core" test_catalog_sync httpsearch.o httpup_logic.o diagnostics.o CC=clang-18
 donor_objects=$(make -s -C "$donor_core" \
     --eval='print-donor-objects:;@echo $(SRC:.c=.o)' print-donor-objects)
 # diagnostics.o входит в TEST_LDFLAGS Makefile, но не в SRC.

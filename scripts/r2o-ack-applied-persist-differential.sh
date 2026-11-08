@@ -20,7 +20,7 @@ if [ "$(sed -n 's/^#define SAVE_EVERY_MS //p' "$donor_core/d2kc.c" | tr -d '\r')
     exit 2
 fi
 
-make -s -C "$donor_core" test_sched CC=clang-18
+make -s -C "$donor_core" test_sched diagnostics.o CC=clang-18
 donor_sched_objects=$(make -s -C "$donor_core" \
     --eval='print-sched-test-objects:;@echo $(filter-out sched.o,$(SCHED_TEST_OBJ))' \
     print-sched-test-objects)

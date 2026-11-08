@@ -65,12 +65,12 @@ mkdir -p "$r2o_log_dir"
         "$r2o_donor_datapath/test_session.c" \
         "$r2o_script_dir/crates/r2o-datapath/src/engine.rs" \
         "$r2o_script_dir/crates/r2o-datapath/src/main.rs"
-    r2o_session_sha256=$(sha256sum "$r2o_donor_datapath/session.c" | awk '{print $1}')
-    r2o_test_sha256=$(sha256sum "$r2o_donor_datapath/test_session.c" | awk '{print $1}')
+    r2o_session_sha256=$(sed 's/\r$//' "$r2o_donor_datapath/session.c" | sha256sum | awk '{print $1}')
+    r2o_test_sha256=$(sed 's/\r$//' "$r2o_donor_datapath/test_session.c" | sha256sum | awk '{print $1}')
     if [ "$r2o_session_sha256" != \
-        '7a610ea7f9651391ea4768028d1abb65e7eeee2279f20c139167dfd05af1ab35' ] || \
+        '30def3c2ed70900d6ce9ab6bacafa781553b5edfa5a699083284281c3a11c154' ] || \
         [ "$r2o_test_sha256" != \
-        '84d980e5f4e8850b7ba3a638987021e96eba5e1721a63a3cdfd30b224817ec43' ]; then
+        '8fcf2f4d1e0aa908e65b051b18f6fde2e1899f060ccda9463e66c184dae23996' ]; then
         printf 'Исходники донора отличаются от проверенного снимка\n' >&2
         exit 1
     fi
