@@ -159,6 +159,85 @@ pub fn direct_stream_ciphers(init: &[u8; HANDSHAKE_LEN]) -> (AesCtr256, AesCtr25
     (decrypt, encrypt)
 }
 
+/// Разобрать сырой `sockaddr_in`/`sockaddr_in6` из SO_ORIGINAL_DST.
+/// C `tg_listener_decode_original_dst_any`: family, port != 0, без scope/flow.
+pub fn decode_original_destination(raw: &[u8]) -> Option<SocketAddr> {
+    let family_size = std::mem::size_of::<libc::sa_family_t>();
+    if raw.len() < family_size {
+        return None;
+    }
+    let mut family: libc::sa_family_t = 0;
+    // SAFETY: копируем ровно sizeof(sa_family_t) байт в локальную переменную.
+    unsafe {
+        std::ptr::copy_nonoverlapping(raw.as_ptr(), &mut family as *mut _ as *mut u8, family_size);
+    }
+    if family == libc::AF_INET as libc::sa_family_t {
+        let size = std::mem::size_of::<libc::sockaddr_in>();
+        if raw.len() < size {
+            return None;
+        }
+        let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+        // SAFETY: raw длиннее struct, копирование в локальную struct.
+        unsafe {
+            std::ptr::copy_nonoverlapping(raw.as_ptr(), &mut addr as *mut _ as *mut u8, size);
+        }
+        if addr.sin_family != libc::AF_INET as libc::sa_family_t || addr.sin_port == 0 {
+            return None;
+        }
+        return Some(SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr)),
+            u16::from_be(addr.sin_port),
+        )));
+    }
+    if family == libc::AF_INET6 as libc::sa_family_t {
+        let size = std::mem::size_of::<libc::sockaddr_in6>();
+        if raw.len() < size {
+            return None;
+        }
+        let mut addr: libc::sockaddr_in6 = unsafe { std::mem::zeroed() };
+        // SAFETY: raw длиннее struct, копирование в локальную struct.
+        unsafe {
+            std::ptr::copy_nonoverlapping(raw.as_ptr(), &mut addr as *mut _ as *mut u8, size);
+        }
+        if addr.sin6_family != libc::AF_INET6 as libc::sa_family_t || addr.sin6_port == 0 {
+            return None;
+        }
+        return Some(SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::from(addr.sin6_addr.s6_addr),
+            u16::from_be(addr.sin6_port),
+            0,
+            0,
+        )));
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn original_destination_option(stream: &TcpStream, level: libc::c_int) -> io::Result<SocketAddr> {
+    let mut raw = [0u8; 128];
+    let mut len = raw.len() as libc::socklen_t;
+    // Значение 80: SO_ORIGINAL_DST (IPv4) и IP6T_SO_ORIGINAL_DST (IPv6).
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            level,
+            80,
+            raw.as_mut_ptr() as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let used = usize::try_from(len).unwrap_or(0).min(raw.len());
+    decode_original_destination(&raw[..used]).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "некорректный исходный адрес назначения",
+        )
+    })
+}
+
 /// Получить исходный адрес назначения, сохранённый nftables REDIRECT.
 pub fn original_destination(stream: &TcpStream) -> io::Result<SocketAddr> {
     #[cfg(target_os = "linux")]
@@ -167,13 +246,15 @@ pub fn original_destination(stream: &TcpStream) -> io::Result<SocketAddr> {
         let mapped_v4 =
             matches!(peer, SocketAddr::V6(addr) if addr.ip().to_ipv4_mapped().is_some());
         if peer.is_ipv4() || mapped_v4 {
-            match original_destination_v4(stream) {
-                Ok(addr) => Ok(addr.into()),
-                Err(v4_error) => original_destination_v6(stream).map_err(|_| v4_error),
+            match original_destination_option(stream, libc::SOL_IP) {
+                Ok(addr) => Ok(addr),
+                Err(v4_error) => {
+                    original_destination_option(stream, libc::IPPROTO_IPV6).map_err(|_| v4_error)
+                }
             }
         } else {
-            original_destination_v6(stream)
-                .or_else(|_| original_destination_v4(stream).map(Into::into))
+            original_destination_option(stream, libc::IPPROTO_IPV6)
+                .or_else(|_| original_destination_option(stream, libc::SOL_IP))
         }
     }
     #[cfg(not(target_os = "linux"))]
@@ -184,66 +265,6 @@ pub fn original_destination(stream: &TcpStream) -> io::Result<SocketAddr> {
             "для прозрачного режима в Linux требуется SO_ORIGINAL_DST",
         ))
     }
-}
-
-#[cfg(target_os = "linux")]
-fn original_destination_v4(stream: &TcpStream) -> io::Result<SocketAddrV4> {
-    let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-    let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
-    // Значение SO_ORIGINAL_DST из linux/netfilter_ipv4.h.
-    let rc = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_IP,
-            80,
-            &mut addr as *mut _ as *mut libc::c_void,
-            &mut len,
-        )
-    };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if (addr.sin_family as libc::c_int) != libc::AF_INET {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "исходный адрес назначения не является IPv4",
-        ));
-    }
-    Ok(SocketAddrV4::new(
-        Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr)),
-        u16::from_be(addr.sin_port),
-    ))
-}
-
-#[cfg(target_os = "linux")]
-fn original_destination_v6(stream: &TcpStream) -> io::Result<SocketAddr> {
-    let mut addr: libc::sockaddr_in6 = unsafe { std::mem::zeroed() };
-    let mut len = std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t;
-    // IP6T_SO_ORIGINAL_DST из linux/netfilter_ipv6/ip6_tables.h.
-    let rc = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::IPPROTO_IPV6,
-            80,
-            &mut addr as *mut _ as *mut libc::c_void,
-            &mut len,
-        )
-    };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if (addr.sin6_family as libc::c_int) != libc::AF_INET6 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "исходный адрес назначения не является IPv6",
-        ));
-    }
-    Ok(SocketAddr::V6(SocketAddrV6::new(
-        Ipv6Addr::from(addr.sin6_addr.s6_addr),
-        u16::from_be(addr.sin6_port),
-        addr.sin6_flowinfo,
-        addr.sin6_scope_id,
-    )))
 }
 
 /// Распознать obfuscated2; DC ID присутствует только в MTProxy-рукопожатии.
