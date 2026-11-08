@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use crate::config::websocket_dc;
 use crate::outbound::OutboundConnector;
 
 use futures_util::{SinkExt, StreamExt, stream::FuturesUnordered};
@@ -350,26 +351,23 @@ fn remember_cf_edge(domain: &str, ip: IpAddr) {
 /// номер WebSocket через `config::websocket_dc()`. Это необходимо для проверки
 /// сертификата TLS: сертификат Telegram покрывает только рабочие DC 1–5.
 pub fn ws_domains(dc: u32, is_media: bool) -> Vec<String> {
-    // Порядок DIRECT_WSS шагов задаёт порт C `tg_route_plan_build`.
-    let Some(plan) = crate::route_plan::build_plan(
-        dc,
+    let effective_dc = websocket_dc(dc);
+
+    ordered_records(
+        format!("kws{}.web.telegram.org", effective_dc),
+        format!("kws{}-1.web.telegram.org", effective_dc),
         is_media,
-        crate::route_plan::RoutingPolicy::Sequential,
-        false,
-        0,
-        0,
-        false,
-    ) else {
-        return Vec::new();
-    };
-    plan.steps
-        .iter()
-        .filter_map(|step| {
-            (step.kind == crate::route_plan::RouteKind::DirectWss)
-                .then(|| crate::route_plan::direct_wss_hostname(dc, step.index))
-                .flatten()
-        })
-        .collect()
+    )
+}
+
+/// Упорядочить пару записей `kws{N}` и `kws{N}-1`: медиасерверы начинают с `-1`,
+/// остальные — с основной записи.
+fn ordered_records(base: String, dash_one: String, is_media: bool) -> Vec<String> {
+    if is_media {
+        vec![dash_one, base]
+    } else {
+        vec![base, dash_one]
+    }
 }
 
 /// Результат попытки WebSocket-соединения.
@@ -967,35 +965,14 @@ fn should_retry_cf_domain(result: &WsConnectResult) -> bool {
 /// отдельную media-запись, поэтому базовое имя остаётся fallback. Номер DC не
 /// переназначается, включая нестандартные идентификаторы из официальной карты.
 pub fn cf_ws_domains(dc: u32, cf_domains: &[String], is_media: bool) -> Vec<String> {
-    if dc > 999 {
-        return Vec::new();
+    let mut hosts = Vec::with_capacity(cf_domains.len() * if is_media { 2 } else { 1 });
+    for cf_domain in cf_domains {
+        if is_media {
+            hosts.push(format!("kws{dc}-1.{cf_domain}"));
+        }
+        hosts.push(format!("kws{dc}.{cf_domain}"));
     }
-    let Some(plan) = crate::route_plan::build_plan(
-        dc,
-        is_media,
-        crate::route_plan::RoutingPolicy::Sequential,
-        false,
-        0,
-        cf_domains.len(),
-        false,
-    ) else {
-        return Vec::new();
-    };
-    plan.steps
-        .iter()
-        .filter_map(|step| {
-            if step.kind != crate::route_plan::RouteKind::CfProxy {
-                return None;
-            }
-            let domain = cf_domains.get(usize::from(step.index) / 2)?;
-            crate::route_plan::cf_proxy_hostname(
-                dc,
-                step.index % 2,
-                domain,
-                crate::route_plan::CF_DOMAIN_LEN,
-            )
-        })
-        .collect()
+    hosts
 }
 
 pub(crate) async fn connect_cf_domain_with_outbound_opts(
@@ -1078,7 +1055,7 @@ impl<'a> CfAttempts<'a> {
     /// Следующая запись для проверки.
     fn next_domain(&mut self) -> Option<String> {
         if let Some(domain_index) = self.pending_retry.take() {
-            return self.hostname(domain_index);
+            return Some(self.hostname(domain_index));
         }
 
         while self.next_ordinal < self.domains.len() {
@@ -1093,7 +1070,7 @@ impl<'a> CfAttempts<'a> {
             }
 
             self.pending_retry = Some(domain_index);
-            return self.hostname(domain_index);
+            return Some(self.hostname(domain_index));
         }
 
         None
@@ -1109,13 +1086,8 @@ impl<'a> CfAttempts<'a> {
         self.pending_retry = None;
     }
 
-    fn hostname(&self, domain_index: usize) -> Option<String> {
-        crate::route_plan::cf_proxy_hostname(
-            self.dc,
-            0,
-            &self.domains[domain_index],
-            crate::route_plan::CF_DOMAIN_LEN,
-        )
+    fn hostname(&self, domain_index: usize) -> String {
+        format!("kws{}.{}", self.dc, self.domains[domain_index])
     }
 }
 

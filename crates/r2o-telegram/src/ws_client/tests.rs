@@ -40,20 +40,18 @@ fn диагностический_wss_запрос_сохраняет_host_origi
 }
 
 #[test]
-fn route_plan_places_the_preferred_direct_variant_first() {
+fn ordered_records_put_the_preferred_variant_first() {
+    let base = || "kws2.example".to_string();
+    let dash_one = || "kws2-1.example".to_string();
+
     assert_eq!(
-        ws_domains(2, false),
-        ["kws2.web.telegram.org", "kws2-1.web.telegram.org"]
+        ordered_records(base(), dash_one(), false),
+        ["kws2.example", "kws2-1.example"]
     );
     assert_eq!(
-        ws_domains(2, true),
-        ["kws2-1.web.telegram.org", "kws2.web.telegram.org"]
+        ordered_records(base(), dash_one(), true),
+        ["kws2-1.example", "kws2.example"]
     );
-    assert_eq!(
-        ws_domains(203, false),
-        ["kws2.web.telegram.org", "kws2-1.web.telegram.org"]
-    );
-    assert!(ws_domains(6, false).is_empty());
 }
 
 #[test]

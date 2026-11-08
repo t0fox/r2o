@@ -113,8 +113,10 @@ pub fn default_dc_overrides() -> HashMap<u32, u32> {
 }
 
 pub fn websocket_dc(dc: u32) -> u32 {
-    // Единственная реализация — порт C `tg_route_websocket_dc`.
-    crate::route_plan::websocket_dc(dc)
+    DC_OVERRIDES
+        .iter()
+        .find_map(|(from, to)| (*from == dc).then_some(*to))
+        .unwrap_or(dc)
 }
 
 /// Политика выбора между direct WSS и Cloudflare WSS.

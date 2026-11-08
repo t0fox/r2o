@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 148,
-  "percent": 54.61,
+  "points": 146,
+  "percent": 53.87,
   "total": 179,
   "counts": {
-    "verified": 102,
+    "verified": 101,
     "carry": 40,
-    "partial": 36,
+    "partial": 37,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1095,7 +1095,7 @@
     {
       "name": "Telegram",
       "weight": 41,
-      "points": 31,
+      "points": 29,
       "items": [
         {
           "id": 157,
@@ -1207,15 +1207,15 @@
           "key": "TG9",
           "name": "DC→WSS/CF route plan",
           "weight": 2,
-          "points": 2,
-          "carry_points": 2,
-          "status": "verified",
-          "statusLabel": "доказано",
+          "points": 0,
+          "carry_points": 0,
+          "status": "partial",
+          "statusLabel": "частично",
           "group": "Telegram",
-          "coverage": "`scripts/test-telegram-route-plan-differential.sh` (a378); C `tg_route_plan_build`/`tg_route_cf_proxy_hostname`/`tg_route_websocket_dc`; Rust `route_plan` + production `ws_client`/`routing`",
-          "gap": "3595 планов и 1050 hostname-кейсов: DC 203→2, media-варианты, policy/prefer_cf/worker/pool, границы и capacity совпадают; `ws_domains`, `cf_ws_domains`, `CfAttempts`, `CfFirst` используют порт",
-          "mapping": "`scripts/test-telegram-route-plan-differential.sh` (a378); C `tg_route_plan_build`/`tg_route_cf_proxy_hostname`/`tg_route_websocket_dc`; Rust `route_plan` + production `ws_client`/`routing`",
-          "evidence": "`scripts/test-telegram-route-plan-differential.sh` (a378); C `tg_route_plan_build`/`tg_route_cf_proxy_hostname`/`tg_route_websocket_dc`; Rust `route_plan` + production `ws_client`/`routing` · пробел: 3595 планов и 1050 hostname-кейсов: DC 203→2, media-варианты, policy/prefer_cf/worker/pool, границы и capacity совпадают; `ws_domains`, `cf_ws_domains`, `CfAttempts`, `CfFirst` используют порт"
+          "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
+          "gap": "",
+          "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
+          "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
         },
         {
           "id": 165,
@@ -5222,15 +5222,15 @@
       "key": "TG9",
       "name": "DC→WSS/CF route plan",
       "weight": 2,
-      "points": 2,
-      "carry_points": 2,
-      "status": "verified",
-      "statusLabel": "доказано",
+      "points": 0,
+      "carry_points": 0,
+      "status": "partial",
+      "statusLabel": "частично",
       "group": "Telegram",
-      "coverage": "`scripts/test-telegram-route-plan-differential.sh` (a378); C `tg_route_plan_build`/`tg_route_cf_proxy_hostname`/`tg_route_websocket_dc`; Rust `route_plan` + production `ws_client`/`routing`",
-      "gap": "3595 планов и 1050 hostname-кейсов: DC 203→2, media-варианты, policy/prefer_cf/worker/pool, границы и capacity совпадают; `ws_domains`, `cf_ws_domains`, `CfAttempts`, `CfFirst` используют порт",
-      "mapping": "`scripts/test-telegram-route-plan-differential.sh` (a378); C `tg_route_plan_build`/`tg_route_cf_proxy_hostname`/`tg_route_websocket_dc`; Rust `route_plan` + production `ws_client`/`routing`",
-      "evidence": "`scripts/test-telegram-route-plan-differential.sh` (a378); C `tg_route_plan_build`/`tg_route_cf_proxy_hostname`/`tg_route_websocket_dc`; Rust `route_plan` + production `ws_client`/`routing` · пробел: 3595 планов и 1050 hostname-кейсов: DC 203→2, media-варианты, policy/prefer_cf/worker/pool, границы и capacity совпадают; `ws_domains`, `cf_ws_domains`, `CfAttempts`, `CfFirst` используют порт"
+      "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
+      "gap": "",
+      "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
+      "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
     },
     {
       "id": 165,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 148,
+      "points": 146,
       "weight": 271,
-      "percent": 54.61
+      "percent": 53.87
     },
     "carry_forward": {
-      "points": 211,
+      "points": 209,
       "weight": 271,
-      "percent": 77.86,
+      "percent": 77.12,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

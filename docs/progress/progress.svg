@@ -1,12 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 54.61%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 53.87%">
 <rect width="1100" height="790" rx="20" fill="#0c121e"/>
 <text x="36" y="48" fill="#edf7ff" font-family="Arial,sans-serif" font-size="29" font-weight="700">R2O / D2O · Strict parity</text>
-<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">54.61%</text>
-<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">148 / 271 verified points</text>
+<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">53.87%</text>
+<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">146 / 271 verified points</text>
 <rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/>
-<rect x="37" y="113" width="559.2" height="11" rx="5" fill="#36c989"/>
-<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 102 verified · 0 missing · 2026-11-08</text>
-<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 211/271 = 77.86% · strict 148/271 = 54.61%</text>
+<rect x="37" y="113" width="551.7" height="11" rx="5" fill="#36c989"/>
+<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 101 verified · 0 missing · 2026-11-08</text>
+<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 209/271 = 77.12% · strict 146/271 = 53.87%</text>
 <rect x="37" y="190" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="213" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Datapath</text>
 <text x="533" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">16/28</text>
@@ -96,7 +96,7 @@
 <rect x="571" y="447" width="30" height="22" rx="5" fill="#36c989"><title>G1 Discord Gateway WebSocket upgrade/Hello: доказано (1/1)</title></rect>
 <rect x="37" y="526" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="549" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Telegram</text>
-<text x="533" y="549" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">31/41</text>
+<text x="533" y="549" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">29/41</text>
 <rect x="51" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>TG1 Config file/env mapping и валидация: частично (0/2)</title></rect>
 <rect x="89" y="559" width="30" height="22" rx="5" fill="#36c989"><title>TG3 DC map persist/merge/validate: доказано (2/2)</title></rect>
 <rect x="127" y="559" width="30" height="22" rx="5" fill="#36c989"><title>TG4 `help.getConfig` и dcOption: доказано (2/2)</title></rect>
@@ -104,7 +104,7 @@
 <rect x="203" y="559" width="30" height="22" rx="5" fill="#36c989"><title>TG6 MTProto splitter: доказано (2/2)</title></rect>
 <rect x="241" y="559" width="30" height="22" rx="5" fill="#36c989"><title>TG7 v2 encrypted: доказано (1/1)</title></rect>
 <rect x="279" y="559" width="30" height="22" rx="5" fill="#36c989"><title>TG8 resPQ probe: доказано (1/1)</title></rect>
-<rect x="317" y="559" width="30" height="22" rx="5" fill="#36c989"><title>TG9 DC→WSS/CF route plan: доказано (2/2)</title></rect>
+<rect x="317" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>TG9 DC→WSS/CF route plan: частично (0/2)</title></rect>
 <rect x="355" y="559" width="30" height="22" rx="5" fill="#36c989"><title>TG10 Route DNS/DoH/DoT: доказано (2/2)</title></rect>
 <rect x="393" y="559" width="30" height="22" rx="5" fill="#36c989"><title>TG11 TLS verification/SNI: доказано (1/1)</title></rect>
 <rect x="431" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>TG12 WS upgrade/frames: частично (0/2)</title></rect>

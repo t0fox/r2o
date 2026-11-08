@@ -16,7 +16,6 @@ pub mod meta_dns;
 pub mod meta_edge;
 pub mod outbound;
 pub(crate) mod response_observer;
-pub mod route_plan;
 pub mod routing;
 pub mod runtime;
 pub mod server;
