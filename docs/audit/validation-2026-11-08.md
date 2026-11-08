@@ -121,13 +121,13 @@
 
 | Режим | Баллы | Процент |
 |---|---:|---:|
-| Строгий текущий | **113/271** | **41,70 %** |
-| Carry (только явно помеченные `304`) | **176/271** | **64,94 %** |
+| Строгий текущий | **114/271** | **42,07 %** |
+| Carry (только явно помеченные `304`) | **177/271** | **65,31 %** |
 | Legacy-агрегат | 80/89 | 89,89 % (другой знаменатель) |
 
-Рост строгого счёта с 25,69 % до 41,70 % — не новые доказательства: 84 детальных Router-контракта (59 strict) заменили 30 coarse-баллов `F*`/`L*`/`T*`/`P*` (18 strict), а 71 балл Panel/Telegram добавлен с нулём. Знаменатели 144 и 261 несопоставимы напрямую.
+Рост строгого счёта с 25,69 % до 42,07 % — не новые доказательства: 84 детальных Router-контракта (59 strict) заменили 30 coarse-баллов `F*`/`L*`/`T*`/`P*` (18 strict), а 71 балл Panel/Telegram добавлен с нулём. Знаменатели 144 и 261 несопоставимы напрямую.
 
-Статусы в нормализованной матрице: `verified` — 80 строк, `carry (304)` — 40, `partial` — 58, `missing` — 0, `extension` — 1. Дополнительно доказаны `M7a` (legacy `D2KP`), `M7b` (`tcp_ts_up`), `B9` (`clear-found` state), `B52` (Meta DNS log rotation), `B53` (`KEENETIC_POLICY`), `B42` (Telegram reapply), `B40` (uninstall fallback), `A26` (panel offline CLI), `A21` (Telegram stats absolute timeout), `A8` (panel response deadline), `A3` (panel config unquoted quote), `A25` (static asset missing/symlink 404), `A10` (unknown route/method/version), `B8` (`status --d2k` поля/коды), `B46` (Telegram watchdog health), `TG20` (stats socket timeout), `D20` (контроллерная эмиссия shape contexts 8–13), `D23` (plan table capacity/LRU), `D22` (journal ring/notes), `S12` (v22 ACK/D2KP codec), `S11` (diagnostics allocator/madvise/RSS), `S13` (live v22 datapath + real d2kc), `S14` (live v22 controller + real C ctlprobe), `S15` (legacy SUSPECT/EXCHANGE → Discovery) и `TG22` (connection/memory limits); `A9` остаётся `partial`. Все 2584 C-функции в `docs/audit/function-index.md` ссылаются только на существующие ID нормализованной матрицы; проверка `check_contract_refs.py` даёт 0 отсутствующих ссылок.
+Статусы в нормализованной матрице: `verified` — 81 строка, `carry (304)` — 40, `partial` — 57, `missing` — 0, `extension` — 1. Дополнительно доказаны `M7a` (legacy `D2KP`), `M7b` (`tcp_ts_up`), `B9` (`clear-found` state), `B52` (Meta DNS log rotation), `B53` (`KEENETIC_POLICY`), `B42` (Telegram reapply), `B40` (uninstall fallback), `A26` (panel offline CLI), `A21` (Telegram stats absolute timeout), `A8` (panel response deadline), `A3` (panel config unquoted quote), `A25` (static asset missing/symlink 404), `A6` (32 KiB header boundary/431), `A10` (unknown route/method/version), `B8` (`status --d2k` поля/коды), `B46` (Telegram watchdog health), `TG20` (stats socket timeout), `D20` (контроллерная эмиссия shape contexts 8–13), `D23` (plan table capacity/LRU), `D22` (journal ring/notes), `S12` (v22 ACK/D2KP codec), `S11` (diagnostics allocator/madvise/RSS), `S13` (live v22 datapath + real d2kc), `S14` (live v22 controller + real C ctlprobe), `S15` (legacy SUSPECT/EXCHANGE → Discovery) и `TG22` (connection/memory limits); `A9` остаётся `partial`. Все 2584 C-функции в `docs/audit/function-index.md` ссылаются только на существующие ID нормализованной матрицы; проверка `check_contract_refs.py` даёт 0 отсутствующих ссылок.
 
 ## 9. Ограничения
 

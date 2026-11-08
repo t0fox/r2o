@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 113,
-  "percent": 41.7,
+  "points": 114,
+  "percent": 42.07,
   "total": 179,
   "counts": {
-    "verified": 80,
+    "verified": 81,
     "carry": 40,
-    "partial": 58,
+    "partial": 57,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1447,7 +1447,7 @@
     {
       "name": "WebPanel",
       "weight": 30,
-      "points": 6,
+      "points": 7,
       "items": [
         {
           "id": 79,
@@ -1529,15 +1529,15 @@
           "key": "A6",
           "name": "Лимит заголовка 32 КиБ и код 431",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "WebPanel",
-          "coverage": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-          "gap": "ДИФ; точная граница не проверена",
-          "mapping": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-          "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: ДИФ; точная граница не проверена"
+          "coverage": "`scripts/test-panel-request-boundary-differential.sh` (a378); C `read_request`; Rust `read_request`",
+          "gap": "Границы 32767/32768 → 404, 32769/32770 → 431 совпадают",
+          "mapping": "`scripts/test-panel-request-boundary-differential.sh` (a378); C `read_request`; Rust `read_request`",
+          "evidence": "`scripts/test-panel-request-boundary-differential.sh` (a378); C `read_request`; Rust `read_request` · пробел: Границы 32767/32768 → 404, 32769/32770 → 431 совпадают"
         },
         {
           "id": 85,
@@ -4022,15 +4022,15 @@
       "key": "A6",
       "name": "Лимит заголовка 32 КиБ и код 431",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "WebPanel",
-      "coverage": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-      "gap": "ДИФ; точная граница не проверена",
-      "mapping": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-      "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: ДИФ; точная граница не проверена"
+      "coverage": "`scripts/test-panel-request-boundary-differential.sh` (a378); C `read_request`; Rust `read_request`",
+      "gap": "Границы 32767/32768 → 404, 32769/32770 → 431 совпадают",
+      "mapping": "`scripts/test-panel-request-boundary-differential.sh` (a378); C `read_request`; Rust `read_request`",
+      "evidence": "`scripts/test-panel-request-boundary-differential.sh` (a378); C `read_request`; Rust `read_request` · пробел: Границы 32767/32768 → 404, 32769/32770 → 431 совпадают"
     },
     {
       "id": 85,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 113,
+      "points": 114,
       "weight": 271,
-      "percent": 41.7
+      "percent": 42.07
     },
     "carry_forward": {
-      "points": 176,
+      "points": 177,
       "weight": 271,
-      "percent": 64.94,
+      "percent": 65.31,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

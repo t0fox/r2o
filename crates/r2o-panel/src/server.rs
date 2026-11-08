@@ -2570,6 +2570,48 @@ mod differential_tests {
     }
 
     #[test]
+    #[ignore = "run through scripts/test-panel-request-boundary-differential.sh"]
+    fn d2o_request_header_boundary_matches_rust_reader() {
+        use std::fmt::Write as _;
+        use std::io::Write as _;
+        use std::net::{TcpListener, TcpStream};
+
+        let c_trace = std::fs::read_to_string(
+            std::env::var_os("R2O_PANEL_BOUNDARY_C_TRACE")
+                .expect("test helper provides D2O boundary trace"),
+        )
+        .unwrap();
+        let mut rust_trace = String::new();
+        for header_end in [32767usize, 32768, 32769, 32770] {
+            let prefix = b"GET /nope HTTP/1.1\r\nX-Pad: ";
+            let padding = header_end - prefix.len() - 4;
+            let mut request = prefix.to_vec();
+            request.extend(std::iter::repeat_n(b'a', padding));
+            request.extend_from_slice(b"\r\n\r\n");
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let sender = std::thread::spawn(move || {
+                let mut client = TcpStream::connect(address).unwrap();
+                client.write_all(&request).unwrap();
+                client.shutdown(std::net::Shutdown::Write).unwrap();
+            });
+            let (mut stream, _) = listener.accept().unwrap();
+            let status = match read_request(&mut stream) {
+                Ok(Ok(raw)) => handle_request(&Config::default(), &raw).status,
+                Ok(Err(code)) => code,
+                Err(error) => panic!("read_request: {error}"),
+            };
+            sender.join().unwrap();
+            write!(
+                &mut rust_trace,
+                "header_end={header_end} HTTP/1.1 {status}\n"
+            )
+            .unwrap();
+        }
+        assert_eq!(rust_trace, c_trace);
+    }
+
+    #[test]
     #[ignore = "run through scripts/test-panel-header-deadline-differential.sh"]
     fn d2o_header_deadline_matches_rust_reader() {
         use std::io::Write;

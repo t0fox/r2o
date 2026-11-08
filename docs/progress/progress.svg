@@ -1,12 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 41.70%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 42.07%">
 <rect width="1100" height="790" rx="20" fill="#0c121e"/>
 <text x="36" y="48" fill="#edf7ff" font-family="Arial,sans-serif" font-size="29" font-weight="700">R2O / D2O · Strict parity</text>
-<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">41.70%</text>
-<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">113 / 271 verified points</text>
+<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">42.07%</text>
+<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">114 / 271 verified points</text>
 <rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/>
-<rect x="37" y="113" width="427.0" height="11" rx="5" fill="#36c989"/>
-<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 80 verified · 0 missing · 2026-11-08</text>
-<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 176/271 = 64.94% · strict 113/271 = 41.70%</text>
+<rect x="37" y="113" width="430.8" height="11" rx="5" fill="#36c989"/>
+<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 81 verified · 0 missing · 2026-11-08</text>
+<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 177/271 = 65.31% · strict 114/271 = 42.07%</text>
 <rect x="37" y="190" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="213" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Datapath</text>
 <text x="533" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">16/28</text>
@@ -122,13 +122,13 @@
 <rect x="431" y="586" width="30" height="22" rx="5" fill="#e6b45d"><title>TG24 Service lifecycle/recovery: частично (0/2)</title></rect>
 <rect x="557" y="526" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="571" y="549" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">WebPanel</text>
-<text x="1053" y="549" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">6/30</text>
+<text x="1053" y="549" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">7/30</text>
 <rect x="571" y="559" width="30" height="22" rx="5" fill="#819bf8"><title>A1 Bind по умолчанию и выбор LAN IP при установке: carry (304) — historical (0/1)</title></rect>
 <rect x="609" y="559" width="30" height="22" rx="5" fill="#819bf8"><title>A2 Пустой `PANEL_LISTEN` отключает панель и health update: carry (304) — historical (0/1)</title></rect>
 <rect x="647" y="559" width="30" height="22" rx="5" fill="#36c989"><title>A3 Парсер: комментарии, кавычки, хвостовые комментарии: доказано (1/1)</title></rect>
 <rect x="685" y="559" width="30" height="22" rx="5" fill="#819bf8"><title>A4 Парсер: unknown keys, не-UTF-8, ignored bytes: carry (304) — historical (0/1)</title></rect>
 <rect x="723" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>A5 Совместимость known-list с D2O-конфигом: частично (0/1)</title></rect>
-<rect x="761" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>A6 Лимит заголовка 32 КиБ и код 431: частично (0/1)</title></rect>
+<rect x="761" y="559" width="30" height="22" rx="5" fill="#36c989"><title>A6 Лимит заголовка 32 КиБ и код 431: доказано (1/1)</title></rect>
 <rect x="799" y="559" width="30" height="22" rx="5" fill="#819bf8"><title>A7 Абсолютный дедлайн заголовка 5 с / 408: carry (304) — historical (0/1)</title></rect>
 <rect x="837" y="559" width="30" height="22" rx="5" fill="#36c989"><title>A8 Абсолютный дедлайн ответа 5 с: доказано (1/1)</title></rect>
 <rect x="875" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>A9 Устойчивость к обрыву клиента/IO-ошибке: частично (0/1)</title></rect>
