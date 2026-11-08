@@ -28,7 +28,7 @@ if [ -z "$CC" ]; then
     CC=cc
 fi
 
-EXPECTED_D2O_SHA=a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe
+EXPECTED_D2O_SHA=a378e230947ebfd011439e1cac0f1e994d883aae
 ACTUAL_D2O_SHA=$(git -c safe.directory="$D2O_ROOT" -C "$D2O_ROOT" rev-parse HEAD)
 if [ "$ACTUAL_D2O_SHA" != "$EXPECTED_D2O_SHA" ]; then
     echo "D2O source must be $EXPECTED_D2O_SHA, got $ACTUAL_D2O_SHA" >&2

@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 235,
-  "percent": 86.72,
+  "points": 236,
+  "percent": 87.08,
   "total": 179,
   "counts": {
-    "verified": 159,
+    "verified": 160,
     "carry": 1,
-    "partial": 18,
+    "partial": 17,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -18,7 +18,7 @@
     {
       "name": "Datapath",
       "weight": 28,
-      "points": 23,
+      "points": 24,
       "items": [
         {
           "id": 1,
@@ -40,15 +40,15 @@
           "key": "D1b",
           "name": "NFQUEUE rcvbuf/poll/recv error policy",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Datapath",
-          "coverage": "`test-nfq-ipv4-recv-error-differential.sh` (a63), `test-nfq-ipv6-recv-error-recovery.sh` (R2O-only), unit `receive_error_policy...`",
-          "gap": "`SO_RCVBUFFORCE/SO_RCVBUF` только unit, без прогона; IPv6 C-oracle",
-          "mapping": "`test-nfq-ipv4-recv-error-differential.sh` (a63), `test-nfq-ipv6-recv-error-recovery.sh` (R2O-only), unit `receive_error_policy...`",
-          "evidence": "`test-nfq-ipv4-recv-error-differential.sh` (a63), `test-nfq-ipv6-recv-error-recovery.sh` (R2O-only), unit `receive_error_policy...` · пробел: `SO_RCVBUFFORCE/SO_RCVBUF` только unit, без прогона; IPv6 C-oracle"
+          "coverage": "`test-nfq-ipv4-recv-error-differential.sh` (a378), unit `receive_error_policy...`",
+          "gap": "IPv4 recv(EIO): injected=1, 64 echo, held TCP flush, SNAT 32/32 совпали; `SO_RCVBUF/BUFFORCE` только unit; IPv6 C-oracle по-прежнему нет (C `nfq.c` AF_INET) — scoped",
+          "mapping": "`test-nfq-ipv4-recv-error-differential.sh` (a378), unit `receive_error_policy...`",
+          "evidence": "`test-nfq-ipv4-recv-error-differential.sh` (a378), unit `receive_error_policy...` · пробел: IPv4 recv(EIO): injected=1, 64 echo, held TCP flush, SNAT 32/32 совпали; `SO_RCVBUF/BUFFORCE` только unit; IPv6 C-oracle по-прежнему нет (C `nfq.c` AF_INET) — scoped"
         },
         {
           "id": 3,
@@ -2792,15 +2792,15 @@
       "key": "D1b",
       "name": "NFQUEUE rcvbuf/poll/recv error policy",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Datapath",
-      "coverage": "`test-nfq-ipv4-recv-error-differential.sh` (a63), `test-nfq-ipv6-recv-error-recovery.sh` (R2O-only), unit `receive_error_policy...`",
-      "gap": "`SO_RCVBUFFORCE/SO_RCVBUF` только unit, без прогона; IPv6 C-oracle",
-      "mapping": "`test-nfq-ipv4-recv-error-differential.sh` (a63), `test-nfq-ipv6-recv-error-recovery.sh` (R2O-only), unit `receive_error_policy...`",
-      "evidence": "`test-nfq-ipv4-recv-error-differential.sh` (a63), `test-nfq-ipv6-recv-error-recovery.sh` (R2O-only), unit `receive_error_policy...` · пробел: `SO_RCVBUFFORCE/SO_RCVBUF` только unit, без прогона; IPv6 C-oracle"
+      "coverage": "`test-nfq-ipv4-recv-error-differential.sh` (a378), unit `receive_error_policy...`",
+      "gap": "IPv4 recv(EIO): injected=1, 64 echo, held TCP flush, SNAT 32/32 совпали; `SO_RCVBUF/BUFFORCE` только unit; IPv6 C-oracle по-прежнему нет (C `nfq.c` AF_INET) — scoped",
+      "mapping": "`test-nfq-ipv4-recv-error-differential.sh` (a378), unit `receive_error_policy...`",
+      "evidence": "`test-nfq-ipv4-recv-error-differential.sh` (a378), unit `receive_error_policy...` · пробел: IPv4 recv(EIO): injected=1, 64 echo, held TCP flush, SNAT 32/32 совпали; `SO_RCVBUF/BUFFORCE` только unit; IPv6 C-oracle по-прежнему нет (C `nfq.c` AF_INET) — scoped"
     },
     {
       "id": 3,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 235,
-      "weight": 271,
-      "percent": 86.72
-    },
-    "carry_forward": {
       "points": 236,
       "weight": 271,
-      "percent": 87.08,
+      "percent": 87.08
+    },
+    "carry_forward": {
+      "points": 237,
+      "weight": 271,
+      "percent": 87.45,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

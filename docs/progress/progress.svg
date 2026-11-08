@@ -1,17 +1,17 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 86.72%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 87.08%">
 <rect width="1100" height="790" rx="20" fill="#0c121e"/>
 <text x="36" y="48" fill="#edf7ff" font-family="Arial,sans-serif" font-size="29" font-weight="700">R2O / D2O · Strict parity</text>
-<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">86.72%</text>
-<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">235 / 271 verified points</text>
+<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">87.08%</text>
+<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">236 / 271 verified points</text>
 <rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/>
-<rect x="37" y="113" width="888.0" height="11" rx="5" fill="#36c989"/>
-<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 159 verified · 0 missing · 2026-11-08</text>
-<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 236/271 = 87.08% · strict 235/271 = 86.72%</text>
+<rect x="37" y="113" width="891.7" height="11" rx="5" fill="#36c989"/>
+<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 160 verified · 0 missing · 2026-11-08</text>
+<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 237/271 = 87.45% · strict 236/271 = 87.08%</text>
 <rect x="37" y="190" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="213" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Datapath</text>
-<text x="533" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">23/28</text>
+<text x="533" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">24/28</text>
 <rect x="51" y="223" width="30" height="22" rx="5" fill="#36c989"><title>D1a NFQUEUE receive/verdict/truncation: доказано (1/1)</title></rect>
-<rect x="89" y="223" width="30" height="22" rx="5" fill="#e6b45d"><title>D1b NFQUEUE rcvbuf/poll/recv error policy: частично (0/1)</title></rect>
+<rect x="89" y="223" width="30" height="22" rx="5" fill="#36c989"><title>D1b NFQUEUE rcvbuf/poll/recv error policy: доказано (1/1)</title></rect>
 <rect x="127" y="223" width="30" height="22" rx="5" fill="#e6b45d"><title>D2 IPv6 live NFQUEUE gateway FORWARD, fragments, route mark, fail-open: частично (0/3)</title></rect>
 <rect x="165" y="223" width="30" height="22" rx="5" fill="#36c989"><title>D3 Fragment builders IPv4/IPv6 shapes 1–4 + session decide: доказано (1/1)</title></rect>
 <rect x="203" y="223" width="30" height="22" rx="5" fill="#36c989"><title>D4 TCP payload/SNI counters, split hello: доказано (1/1)</title></rect>
