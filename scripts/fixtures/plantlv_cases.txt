@@ -1,0 +1,320 @@
+### minimal
+d2k-plan 1 13
+id 00000000000000000000000000000000
+proto tcp tls
+### order-forward
+d2k-plan 1 13
+id 00000000000000000000000000000000
+proto tcp tls
+order forward
+### order-reverse
+d2k-plan 1 1
+id 00000000000000000000000000000000
+proto tcp tls
+order reverse
+### payload-hex
+d2k-plan 1 13
+id 00112233445566778899aabbccddeeff
+proto tcp tls
+payload 1 0f0e0d
+order forward
+### payload-empty
+d2k-plan 1 13
+id 00000000000000000000000000000000
+proto tcp tls
+payload 0
+order forward
+### payload-pad-hex
+d2k-plan 1 13
+id 00000000000000000000000000000000
+proto tcp tls
+payload-pad 1 4 15 ab
+order forward
+### payload-pad64
+d2k-plan 1 13
+id 00000000000000000000000000000000
+proto tcp tls
+payload-pad64 1 4 15 qrv=
+order forward
+### payload-slice
+d2k-plan 1 13
+id 00000000000000000000000000000000
+proto tcp tls
+payload 1 aabbccdd
+payload-slice 2 1 1 2
+order forward
+### poison-flags
+d2k-plan 1 1
+id 00000000000000000000000000000000
+proto tcp tls
+poison 1 badsum tcpts ipidzero tsup ttl=5 seqshift=-2
+order forward
+### poison-autottl
+d2k-plan 1 13
+id 00000000000000000000000000000000
+proto tcp tls
+poison 1 autottl=-3,4-9
+order forward
+### poison-md5
+d2k-plan 1 12
+id 00000000000000000000000000000000
+proto tcp tls
+wire detect-tcp-v1
+poison 1 md5
+order forward
+### split-anchors
+d2k-plan 1 13
+id 00000000000000000000000000000000
+proto tcp tls
+split payload_start +1
+split sni_middle -2
+order reverse
+### fake-before
+d2k-plan 1 1
+id 00000000000000000000000000000000
+proto tcp tls
+payload 1 aa
+poison 1 badsum
+fake payload=1 poison=1 repeats=2 gap_us=20000 place=before
+order forward
+### fake-tlsmod
+d2k-plan 1 8
+id 00000000000000000000000000000000
+proto tcp tls
+payload 1 aa
+poison 1 badsum
+split sni_middle +0
+fake payload=1 poison=1 repeats=2 gap_us=20000 place=between tlsmod=rnd,dupsid
+order forward
+### seqovl
+d2k-plan 1 1
+id 00000000000000000000000000000000
+proto tcp tls
+payload 1 aa
+poison 1 badsum
+seqovl payload=1 poison=1
+order forward
+### guard
+d2k-plan 1 1
+id 00000000000000000000000000000000
+proto tcp tls
+guard rst_alien
+order forward
+### pace
+d2k-plan 1 1
+id 00000000000000000000000000000000
+proto tcp tls
+pace 12000
+order forward
+### input-bounds
+d2k-plan 1 3
+id 00000000000000000000000000000000
+proto tcp tls
+input 100 10 20
+order forward
+### input-tls-sni
+d2k-plan 1 5
+id 00000000000000000000000000000000
+proto tcp tls
+input tls-sni
+order forward
+### settle
+d2k-plan 1 3
+id 00000000000000000000000000000000
+proto tcp tls
+settle 15000
+order forward
+### segment
+d2k-plan 1 3
+id 00000000000000000000000000000000
+proto tcp tls
+segment 1200
+order forward
+### wire-detect
+d2k-plan 1 4
+id 00000000000000000000000000000000
+proto tcp tls
+wire detect-tcp-v1
+order forward
+### wire-template
+d2k-plan 1 8
+id 00000000000000000000000000000000
+proto tcp tls
+wire tcp-template-v1
+order forward
+### delay
+d2k-plan 1 6
+id 00000000000000000000000000000000
+proto tcp tls
+delay 1000
+order forward
+### ipfrag
+d2k-plan 1 7
+id 00000000000000000000000000000000
+proto udp quic
+ipfrag 1
+### udplen
+d2k-plan 1 9
+id 00000000000000000000000000000000
+proto udp quic
+udplen 100
+### quicsplit
+d2k-plan 1 10
+id 00000000000000000000000000000000
+proto udp quic
+quicsplit 1
+### quicdeny
+d2k-plan 1 11
+id 00000000000000000000000000000000
+proto udp quic
+quicdeny 1
+### oob
+d2k-plan 1 8
+id 00000000000000000000000000000000
+proto tcp tls
+input tls-sni
+wire detect-tcp-v1
+oob sni_middle 41
+### combined-mixed
+d2k-plan 1 13
+id 0102030405060708090a0b0c0d0e0f10
+proto tcp tls
+payload 1 0f0e
+poison 1 badsum ttl=3
+poison 2 autottl=-1,2-4
+split sni_middle +0
+fake payload=1 poison=1 repeats=1 gap_us=0 place=before
+seqovl payload=1 poison=2
+order reverse
+pace 12000
+settle 15000
+segment 1200
+delay 500
+guard rst_alien
+### comments-and-spaces
+  # ведущий комментарий
+d2k-plan 1 1
+id 00000000000000000000000000000000
+
+	proto tcp tls  
+order forward
+# хвостовой комментарий
+### no-header
+id 00000000000000000000000000000000
+proto tcp tls
+### unknown-directive
+d2k-plan 1 1
+bogus 1
+### bad-transport
+d2k-plan 1 13
+proto sctp tls
+### bad-protocol
+d2k-plan 1 1
+proto tcp dns
+### odd-hex
+d2k-plan 1 13
+payload 1 abc
+### id-wrong-length
+d2k-plan 1 1
+id 0011
+### pad-prefix-too-long
+d2k-plan 1 13
+payload-pad 1 2 0f aabbcc
+### slice-missing-source
+d2k-plan 1 1
+payload-slice 2 1 0 1
+### poison-unknown-flag
+d2k-plan 1 13
+poison 1 mystery
+### autottl-malformed
+d2k-plan 1 1
+poison 1 autottl=-3;4-9
+### split-unknown-anchor
+d2k-plan 1 13
+split mystery +1
+### split-offset-range
+d2k-plan 1 1
+split payload_start 40000
+### fake-bad-place
+d2k-plan 1 13
+fake payload=1 poison=1 repeats=1 gap_us=0 place=after
+### fake-tlsmod-needs-minexec
+d2k-plan 1 7
+id 00000000000000000000000000000000
+proto tcp tls
+fake payload=1 poison=1 repeats=1 gap_us=0 place=before tlsmod=rnd
+order forward
+### seqovl-missing-poison
+d2k-plan 1 1
+seqovl payload=1
+### order-bad
+d2k-plan 1 13
+order sideways
+### input-range
+d2k-plan 1 3
+input 10 8 5
+### input-tls-udp
+d2k-plan 1 5
+proto udp tls
+input tls-sni
+### settle-zero
+d2k-plan 1 3
+settle 0
+### segment-too-big
+d2k-plan 1 3
+segment 70000
+### wire-template-needs-minexec
+d2k-plan 1 7
+proto tcp tls
+wire tcp-template-v1
+### delay-zero
+d2k-plan 1 6
+proto tcp tls
+delay 0
+### ipfrag-tcp
+d2k-plan 1 7
+proto tcp tls
+ipfrag 1
+### ipfrag-with-order
+d2k-plan 1 7
+proto udp quic
+ipfrag 1
+order reverse
+### udplen-low-minexec
+d2k-plan 1 8
+proto udp quic
+udplen 100
+### quicsplit-low-minexec
+d2k-plan 1 9
+proto udp quic
+quicsplit 1
+### quicdeny-with-payload
+d2k-plan 1 11
+proto udp quic
+payload 1 aa
+quicdeny 1
+### oob-missing-input
+d2k-plan 1 8
+proto tcp tls
+wire detect-tcp-v1
+oob sni_middle 41
+### md5-without-wire
+d2k-plan 1 12
+proto tcp tls
+poison 1 md5
+### md5-low-minexec
+d2k-plan 1 4
+proto tcp tls
+wire detect-tcp-v1
+poison 1 md5
+### duplicate-oob
+d2k-plan 1 8
+proto tcp tls
+input tls-sni
+wire detect-tcp-v1
+oob sni_middle 41
+oob sni_start 42
+### header-non-numeric
+d2k-plan one 1
+### too-many-fields
+d2k-plan 1 1 a b c d e f

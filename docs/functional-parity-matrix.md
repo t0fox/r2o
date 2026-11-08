@@ -559,7 +559,7 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | M3 | `d2kfetch.c` CLI (1) | verified | 1 | `r2o-fetch-cli-differential.sh` (сравнивает C/Rust CLI) | Нет SHA-пина; не все ветви |
 | M4 | `d2kvoice.c` controller entry (1) | partial | 0 | Discord rows частично | Нет контракта |
 | M5 | `link.c`, `net4.c`, `udpruntime.c`, `volume.c` (3) | partial | 0 | Inventory note; Rust `r2o_volume` tests | Нет C/Rust diff |
-| M6 | `crypto.c`, `p256.c`, `x25519.c`, `props.c`, `udpplan.c`, `plantlv.c` helpers (3) | partial | 0 | C unit tests; Rust units | Нет paired diff и контракта |
+| M6 | `crypto.c`, `p256.c`, `x25519.c`, `props.c`, `udpplan.c`, `plantlv.c` helpers (3) | partial | 0 | C unit tests; Rust units; `test-controller-plantlv-differential.sh` (a378) | plantlv: 64 paired кейса текст→TLV + 4 stricter (C принимает, R2O отвергает как `plan_parse.c`); crypto/p256/x25519/props/udpplan — paired diff ещё нет |
 | M7a | Legacy `D2KP` container compatibility (1) | verified | 1 | `scripts/test-wire-ts-up-plan-differential.sh` (a378); C `test_plan_parse`; Rust `parses_legacy_d2kp_container_with_identical_body` | Дубли `REC_AUTOTTL` в неканоническом D2KP пока отвергаются; канонические C-планы принимаются |
 | M7b | `tcp_ts_up` / `D2K_POISON_TS_UP` wire reorder (1) | verified | 1 | `scripts/test-wire-ts-up-plan-differential.sh` (a378); C `test_wire`; Rust `tcp_ts_up_*` vectors | MD5+template остаётся запрещён |
 | M8 | Production header-inline helpers inventory/mapping (1) | partial | 0 | `docs/audit/function-index.md` | 61 header-inline функций добавлены; helper-level mapping не проверен дифференциалами |
