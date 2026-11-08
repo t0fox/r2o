@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 154,
-  "percent": 56.83,
+  "points": 155,
+  "percent": 57.2,
   "total": 179,
   "counts": {
-    "verified": 105,
+    "verified": 106,
     "carry": 40,
-    "partial": 33,
+    "partial": 32,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -385,7 +385,7 @@
     {
       "name": "Classifier / TLS",
       "weight": 24,
-      "points": 2,
+      "points": 3,
       "items": [
         {
           "id": 38,
@@ -557,15 +557,15 @@
           "key": "CL12",
           "name": "ClientHello/TLS12/13/ECH parser helpers",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Classifier / TLS",
-          "coverage": "C `test_hello/test_ech/test_tls12`, Rust unit",
-          "gap": "Нет paired diff",
-          "mapping": "C `test_hello/test_ech/test_tls12`, Rust unit",
-          "evidence": "C `test_hello/test_ech/test_tls12`, Rust unit · пробел: Нет paired diff"
+          "coverage": "`test-controller-clienthello-differential.sh` (a378), C `test_hello/test_ech/test_tls12`, Rust unit",
+          "gap": "56 paired C/Rust кейсов: shape/SNI/complete/ECH, TLS-разбор и координаты; TLS1.2 PRF и обмен — rustls, отдельные suite",
+          "mapping": "`test-controller-clienthello-differential.sh` (a378), C `test_hello/test_ech/test_tls12`, Rust unit",
+          "evidence": "`test-controller-clienthello-differential.sh` (a378), C `test_hello/test_ech/test_tls12`, Rust unit · пробел: 56 paired C/Rust кейсов: shape/SNI/complete/ECH, TLS-разбор и координаты; TLS1.2 PRF и обмен — rustls, отдельные suite"
         },
         {
           "id": 50,
@@ -3497,15 +3497,15 @@
       "key": "CL12",
       "name": "ClientHello/TLS12/13/ECH parser helpers",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Classifier / TLS",
-      "coverage": "C `test_hello/test_ech/test_tls12`, Rust unit",
-      "gap": "Нет paired diff",
-      "mapping": "C `test_hello/test_ech/test_tls12`, Rust unit",
-      "evidence": "C `test_hello/test_ech/test_tls12`, Rust unit · пробел: Нет paired diff"
+      "coverage": "`test-controller-clienthello-differential.sh` (a378), C `test_hello/test_ech/test_tls12`, Rust unit",
+      "gap": "56 paired C/Rust кейсов: shape/SNI/complete/ECH, TLS-разбор и координаты; TLS1.2 PRF и обмен — rustls, отдельные suite",
+      "mapping": "`test-controller-clienthello-differential.sh` (a378), C `test_hello/test_ech/test_tls12`, Rust unit",
+      "evidence": "`test-controller-clienthello-differential.sh` (a378), C `test_hello/test_ech/test_tls12`, Rust unit · пробел: 56 paired C/Rust кейсов: shape/SNI/complete/ECH, TLS-разбор и координаты; TLS1.2 PRF и обмен — rustls, отдельные suite"
     },
     {
       "id": 50,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 154,
+      "points": 155,
       "weight": 271,
-      "percent": 56.83
+      "percent": 57.2
     },
     "carry_forward": {
-      "points": 217,
+      "points": 218,
       "weight": 271,
-      "percent": 80.07,
+      "percent": 80.44,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

@@ -1,12 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 56.83%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 57.20%">
 <rect width="1100" height="790" rx="20" fill="#0c121e"/>
 <text x="36" y="48" fill="#edf7ff" font-family="Arial,sans-serif" font-size="29" font-weight="700">R2O / D2O · Strict parity</text>
-<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">56.83%</text>
-<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">154 / 271 verified points</text>
+<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">57.20%</text>
+<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">155 / 271 verified points</text>
 <rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/>
-<rect x="37" y="113" width="581.9" height="11" rx="5" fill="#36c989"/>
-<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 105 verified · 0 missing · 2026-11-08</text>
-<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 217/271 = 80.07% · strict 154/271 = 56.83%</text>
+<rect x="37" y="113" width="585.7" height="11" rx="5" fill="#36c989"/>
+<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 106 verified · 0 missing · 2026-11-08</text>
+<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 218/271 = 80.44% · strict 155/271 = 57.20%</text>
 <rect x="37" y="190" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="213" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Datapath</text>
 <text x="533" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">16/28</text>
@@ -36,7 +36,7 @@
 <rect x="469" y="250" width="30" height="22" rx="5" fill="#36c989"><title>D23 Plan table capacity/LRU: доказано (2/2)</title></rect>
 <rect x="557" y="190" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="571" y="213" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Classifier / TLS</text>
-<text x="1053" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">2/24</text>
+<text x="1053" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">3/24</text>
 <rect x="571" y="223" width="30" height="22" rx="5" fill="#819bf8"><title>CL1 Raw profiles/ECH shapes/send/cancel/fallback/connect: carry (304) — historical (0/3)</title></rect>
 <rect x="609" y="223" width="30" height="22" rx="5" fill="#819bf8"><title>CL2 CLEAR confirmation/cancel: carry (304) — historical (0/1)</title></rect>
 <rect x="647" y="223" width="30" height="22" rx="5" fill="#819bf8"><title>CL3 SO_MARK confirmation: carry (304) — historical (0/1)</title></rect>
@@ -48,7 +48,7 @@
 <rect x="875" y="223" width="30" height="22" rx="5" fill="#819bf8"><title>CL9 TLS 1.2 reverse response probe/verdicts: carry (304) — historical (0/3)</title></rect>
 <rect x="913" y="223" width="30" height="22" rx="5" fill="#819bf8"><title>CL10 ECH receive ladder/witness/retries: carry (304) — historical (0/2)</title></rect>
 <rect x="951" y="223" width="30" height="22" rx="5" fill="#36c989"><title>CL11 HTTP response framing/reader: доказано (1/1)</title></rect>
-<rect x="989" y="223" width="30" height="22" rx="5" fill="#e6b45d"><title>CL12 ClientHello/TLS12/13/ECH parser helpers: частично (0/1)</title></rect>
+<rect x="989" y="223" width="30" height="22" rx="5" fill="#36c989"><title>CL12 ClientHello/TLS12/13/ECH parser helpers: доказано (1/1)</title></rect>
 <rect x="571" y="250" width="30" height="22" rx="5" fill="#e6b45d"><title>CL13 HTTPS probe/ECH resolver/cache state: частично (0/1)</title></rect>
 <rect x="609" y="250" width="30" height="22" rx="5" fill="#e6b45d"><title>CL14 HTTP/3 status/header parser + httpup: частично (0/1)</title></rect>
 <rect x="647" y="250" width="30" height="22" rx="5" fill="#e6b45d"><title>CL15 Compose/crypto/p256/x25519/props helpers: частично (0/2)</title></rect>

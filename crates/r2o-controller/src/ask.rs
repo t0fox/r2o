@@ -284,13 +284,19 @@ pub fn hello_shape(bytes: &[u8]) -> Result<u8, String> {
     if !tls.is_client_hello || tls.record_end != Some(bytes.len()) {
         return Err("снимок неполон или не является TLS ClientHello".into());
     }
-    Ok(if tls.ech_offer {
-        r2k_core::control::SHAPE_ECH_TCP
-    } else if tls.is_tls13 {
-        r2k_core::control::SHAPE_MODERN
-    } else {
-        r2k_core::control::SHAPE_LEGACY
-    })
+    if tls.ech_offer {
+        return Ok(r2k_core::control::SHAPE_ECH_TCP);
+    }
+    // Вид приветствия решает тот же разбор, что и d2k_hello_shape: UNKNOWN
+    // не подменяется на LEGACY — оборванный блок расширений это «не
+    // измерено», а не «TLS 1.2».
+    match crate::hello::hello_shape(bytes) {
+        crate::hello::HelloShape::Modern => Ok(r2k_core::control::SHAPE_MODERN),
+        crate::hello::HelloShape::Legacy => Ok(r2k_core::control::SHAPE_LEGACY),
+        crate::hello::HelloShape::Unknown => {
+            Err("вид ClientHello не измерен: расширения оборваны".into())
+        }
+    }
 }
 
 /// Build the candidate plan list from the measured three-valued properties.
