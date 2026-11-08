@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 166,
-  "percent": 61.25,
+  "points": 167,
+  "percent": 61.62,
   "total": 179,
   "counts": {
-    "verified": 114,
+    "verified": 115,
     "carry": 40,
-    "partial": 24,
+    "partial": 23,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -18,7 +18,7 @@
     {
       "name": "Datapath",
       "weight": 28,
-      "points": 18,
+      "points": 19,
       "items": [
         {
           "id": 1,
@@ -295,15 +295,15 @@
           "key": "D18",
           "name": "Capture/TLS/wire/addr helpers",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Datapath",
-          "coverage": "C tests, Rust unit tests",
-          "gap": "Нет paired diff",
-          "mapping": "C tests, Rust unit tests",
-          "evidence": "C tests, Rust unit tests · пробел: Нет paired diff"
+          "coverage": "`test-datapath-addr-differential.sh` (a378), CL12 TLS diff, D6 capture diff, D3/D11 wire diffs, C tests",
+          "gap": "34 paired addr-кейса; TLS/capture/wire покрыты соответствующими paired-дифференциалами; scoped, без новых live-сценариев",
+          "mapping": "`test-datapath-addr-differential.sh` (a378), CL12 TLS diff, D6 capture diff, D3/D11 wire diffs, C tests",
+          "evidence": "`test-datapath-addr-differential.sh` (a378), CL12 TLS diff, D6 capture diff, D3/D11 wire diffs, C tests · пробел: 34 paired addr-кейса; TLS/capture/wire покрыты соответствующими paired-дифференциалами; scoped, без новых live-сценариев"
         },
         {
           "id": 20,
@@ -3047,15 +3047,15 @@
       "key": "D18",
       "name": "Capture/TLS/wire/addr helpers",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Datapath",
-      "coverage": "C tests, Rust unit tests",
-      "gap": "Нет paired diff",
-      "mapping": "C tests, Rust unit tests",
-      "evidence": "C tests, Rust unit tests · пробел: Нет paired diff"
+      "coverage": "`test-datapath-addr-differential.sh` (a378), CL12 TLS diff, D6 capture diff, D3/D11 wire diffs, C tests",
+      "gap": "34 paired addr-кейса; TLS/capture/wire покрыты соответствующими paired-дифференциалами; scoped, без новых live-сценариев",
+      "mapping": "`test-datapath-addr-differential.sh` (a378), CL12 TLS diff, D6 capture diff, D3/D11 wire diffs, C tests",
+      "evidence": "`test-datapath-addr-differential.sh` (a378), CL12 TLS diff, D6 capture diff, D3/D11 wire diffs, C tests · пробел: 34 paired addr-кейса; TLS/capture/wire покрыты соответствующими paired-дифференциалами; scoped, без новых live-сценариев"
     },
     {
       "id": 20,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 166,
+      "points": 167,
       "weight": 271,
-      "percent": 61.25
+      "percent": 61.62
     },
     "carry_forward": {
-      "points": 229,
+      "points": 230,
       "weight": 271,
-      "percent": 84.5,
+      "percent": 84.87,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
