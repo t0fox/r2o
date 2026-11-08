@@ -1363,9 +1363,9 @@
           "statusLabel": "доказано",
           "group": "Telegram",
           "coverage": "`scripts/test-telegram-stats-schema-differential.sh` (a378); C `stats_socket.c`; Rust `RuntimeStats::d2o_snapshot` + Unix socket",
-          "gap": "Все D2O-поля, sessions/events, cooldowns, WSS-счётчики и latency-перцентили совпадают; donor-поля панели остаются расширением",
+          "gap": "Все D2O-поля, sessions/events, cooldowns, WSS-счётчики и latency-перцентили совпадают; donor-поля панели — расширение. Ограничение: connect-сбои учитываются стадией WebSocket (4), live DNS/TCP/TLS-классификация не дифференцирована",
           "mapping": "`scripts/test-telegram-stats-schema-differential.sh` (a378); C `stats_socket.c`; Rust `RuntimeStats::d2o_snapshot` + Unix socket",
-          "evidence": "`scripts/test-telegram-stats-schema-differential.sh` (a378); C `stats_socket.c`; Rust `RuntimeStats::d2o_snapshot` + Unix socket · пробел: Все D2O-поля, sessions/events, cooldowns, WSS-счётчики и latency-перцентили совпадают; donor-поля панели остаются расширением"
+          "evidence": "`scripts/test-telegram-stats-schema-differential.sh` (a378); C `stats_socket.c`; Rust `RuntimeStats::d2o_snapshot` + Unix socket · пробел: Все D2O-поля, sessions/events, cooldowns, WSS-счётчики и latency-перцентили совпадают; donor-поля панели — расширение. Ограничение: connect-сбои учитываются стадией WebSocket (4), live DNS/TCP/TLS-классификация не дифференцирована"
         },
         {
           "id": 175,
@@ -5378,9 +5378,9 @@
       "statusLabel": "доказано",
       "group": "Telegram",
       "coverage": "`scripts/test-telegram-stats-schema-differential.sh` (a378); C `stats_socket.c`; Rust `RuntimeStats::d2o_snapshot` + Unix socket",
-      "gap": "Все D2O-поля, sessions/events, cooldowns, WSS-счётчики и latency-перцентили совпадают; donor-поля панели остаются расширением",
+      "gap": "Все D2O-поля, sessions/events, cooldowns, WSS-счётчики и latency-перцентили совпадают; donor-поля панели — расширение. Ограничение: connect-сбои учитываются стадией WebSocket (4), live DNS/TCP/TLS-классификация не дифференцирована",
       "mapping": "`scripts/test-telegram-stats-schema-differential.sh` (a378); C `stats_socket.c`; Rust `RuntimeStats::d2o_snapshot` + Unix socket",
-      "evidence": "`scripts/test-telegram-stats-schema-differential.sh` (a378); C `stats_socket.c`; Rust `RuntimeStats::d2o_snapshot` + Unix socket · пробел: Все D2O-поля, sessions/events, cooldowns, WSS-счётчики и latency-перцентили совпадают; donor-поля панели остаются расширением"
+      "evidence": "`scripts/test-telegram-stats-schema-differential.sh` (a378); C `stats_socket.c`; Rust `RuntimeStats::d2o_snapshot` + Unix socket · пробел: Все D2O-поля, sessions/events, cooldowns, WSS-счётчики и latency-перцентили совпадают; donor-поля панели — расширение. Ограничение: connect-сбои учитываются стадией WebSocket (4), live DNS/TCP/TLS-классификация не дифференцирована"
     },
     {
       "id": 175,
