@@ -4,11 +4,11 @@
 
 **Важно.** Таблица ниже — legacy-агрегат из 57 строк: 89 баллов веса, **80/89 (89,89 %)**. Это не оценка текущей ревизии. Аудит 2026-11-07 показал, что 49 из 80 баллов опираются на дифференциалы, закреплённые на `304ba893`, а несколько широких строк объединяют независимые контракты. После нормализации 2026-11-08 единая scored-матрица содержит **179 контрактов на 271 балл**: Panel A1–A26, Router B1–B54 (без B32/B45/B54), Telegram TG1–TG26 (без C2/C25/C26); coarse-строки `P*`, `F*`, `L*`, `T*` и `S7`/`S8` удалены как дубли:
 
-- строгий режим (только `a63d964`/`a378e23`/`8e2c981`, без helper/mock/build): **200/271 = 73,80 %**;
-- carry с явно помеченными `304ba893`: **263/271 = 97,05 %**;
+- строгий режим (только `a63d964`/`a378e23`/`8e2c981`, без helper/mock/build): **216/271 = 79,70 %**;
+- carry с явно помеченными `304ba893` (verified + оставшиеся 304, без двойного счёта): **231/271 = 85,24 %**;
 - legacy-агрегат: **80/89 = 89,89 %** (другой знаменатель, не сопоставим).
 
-Рост строгого счёта с 25,69 % до 73,80 % — не новые доказательства и не регресс: 84 детальных Router-контракта (70 strict) заменили 30 coarse-баллов `F*`/`L*`/`T*`/`P*` (18 strict), а 71 балл Panel/Telegram добавлен с нулём; ещё 2 балла дали доказанные M7a/M7b, 8 — B9/B52/B53/B42/B40, 3 — A26/A21/A8, 1 — TG20, 2 — D20, 2 — D23, 1 — D22, 2 — S12, 2 — S13, 2 — S14, 2 — S15, 1 — S11, 1 — A3, 1 — A25, 1 — B8, 2 — B46, 2 — TG22, 1 — A10, 1 — A6, 1 — A9, 1 — A19, 2 — A15, 1 — A13, 1 — A5, 2 — TG6, 2 — TG5, 2 — TG3, 2 — TG4, 1 — TG21, 2 — TG10, 1 — TG11, 2 — TG17, 2 — TG16, 2 — TG13, 1 — TG7, 2 — TG15, 2 — TG19, 1 — TG8, 1 — CL12, 1 — CL13, 1 — B6, 1 — B1, 2 — B48, 1 — CL14, 3 — B10, 1 — D21, 1 — D6, 1 — D18, 1 — D17, 2 — CL15, 1 — CL16, 1 — D7, 1 — D8, 12 — A1/A4/A7/A11/A12/A16/A17/A18/A22/A24, 10 — S1–S4 и 5 — S5/S6. Знаменатели 144 и 271 несопоставимы напрямую.
+Рост строгого счёта с 25,69 % до 79,70 % — не новые доказательства и не регресс: 84 детальных Router-контракта (70 strict) заменили 30 coarse-баллов `F*`/`L*`/`T*`/`P*` (18 strict), а 71 балл Panel/Telegram добавлен с нулём; ещё 2 балла дали доказанные M7a/M7b, 8 — B9/B52/B53/B42/B40, 3 — A26/A21/A8, 1 — TG20, 2 — D20, 2 — D23, 1 — D22, 2 — S12, 2 — S13, 2 — S14, 2 — S15, 1 — S11, 1 — A3, 1 — A25, 1 — B8, 2 — B46, 2 — TG22, 1 — A10, 1 — A6, 1 — A9, 1 — A19, 2 — A15, 1 — A13, 1 — A5, 2 — TG6, 2 — TG5, 2 — TG3, 2 — TG4, 1 — TG21, 2 — TG10, 1 — TG11, 2 — TG17, 2 — TG16, 2 — TG13, 1 — TG7, 2 — TG15, 2 — TG19, 1 — TG8, 1 — CL12, 1 — CL13, 1 — B6, 1 — B1, 2 — B48, 1 — CL14, 3 — B10, 1 — D21, 1 — D6, 1 — D18, 1 — D17, 2 — CL15, 1 — CL16, 1 — D7, 1 — D8, 12 — A1/A4/A7/A11/A12/A16/A17/A18/A22/A24, 10 — S1–S4, 5 — S5/S6 и 16 — CL1–CL10. Знаменатели 144 и 271 несопоставимы напрямую.
 
 Нормализация также установила, что `a63d964` и `304ba893` отсутствуют в локальном git-объекте D2O; доказательства, закреплённые на них, в этом окружении не воспроизводятся. Детали — `docs/audit/validation-2026-11-08.md`.
 
@@ -105,11 +105,11 @@ Scope boundary: the 89-point legacy table scores the router runtime. D2O relay-e
 
 Матрица содержит 57 контрактов: 50 доказанно эквивалентных, 6 частичных, 1 реализованный без полного parity evidence и 0 непроверенных. Частичные и неподтверждённые статусы дают 0 баллов.
 
-Legacy-агрегат: **80/89 = 89,89 %**. Строгая оценка текущей ревизии после нормализации: **200/271 = 73,80 %** (см. раздел «Нормализованная матрица покрытия»).
+Legacy-агрегат: **80/89 = 89,89 %**. Строгая оценка текущей ревизии после нормализации: **216/271 = 79,70 %** (см. раздел «Нормализованная матрица покрытия»).
 
 Историческая корректировка от 2026-11-01: `core/verify.c:d2k_verify_probe*` сопоставлен с R2O `fetch.rs`; обратный TLS 1.2 зонд сопоставлен с D2O `detect/response.c:d2k_probe_response` и R2O `response.rs`. На этом промежуточном срезе общие fixtures подтверждали сканер и решения, но не весь сетевой retry/address-resolution путь; оценка временно снижалась до 55/87. Последующие доказанные изменения отражены в таблице выше. Профиль RAM 128 МиБ исключён из требований по указанию владельца; это не является заявлением о производительности.
 
-**Legacy evidence-weighted parity: 80 / 89 = 89,89 %.** Это доля требований старой агрегированной таблицы с подтверждением перечисленных C/Rust ветвей. Она не равна строгой оценке текущей ревизии (200/271 = 73,80 %): 49 из 80 баллов опираются на `304ba893`, а широкие строки объединяют независимые контракты.
+**Legacy evidence-weighted parity: 80 / 89 = 89,89 %.** Это доля требований старой агрегированной таблицы с подтверждением перечисленных C/Rust ветвей. Она не равна строгой оценке текущей ревизии (216/271 = 79,70 %): 49 из 80 баллов опираются на `304ba893`, а широкие строки объединяют независимые контракты.
 
 Дополнительное доказательство datapath (2026-11-03): `scripts/test-conntrack-retry-current-differential.sh` запустил production `d2kd` из D2O main `a63d964` и production `r2o-datapath` на R2O main `67a191f` с изменением retry из этого follow-up. В изолированном network namespace shim отклонил только второй `NETLINK_NETFILTER` socket (ctnetlink после NFQUEUE); после изменения `ip rule` оба процесса открыли ctnetlink повторно и сообщили о восстановлении на route/rules refresh. Прогон Debian 13 WSL2 прошёл. Это доказывает ветвь восстановления conntrack; IPv6 NFQUEUE C-oracle и остальные ветви строки остаются открыты, поэтому статус и баллы этого контракта не меняются.
 
@@ -463,7 +463,7 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | `extension` | Намеренное R2O-only поведение, не паритет | 0 |
 | `out-of-scope` | VPS/relay, N/A или дубль router-side-контракта | 0 |
 
-**Итог:** 179 контрактов, вес 271. Строгий счёт — **200/271 = 73.80 %**. Carry с явно помеченными `304` — **263/271 = 97.05 %**. Исторический coarse carry-forward `89/144 = 61,81 %` относится к прежней матрице и не сопоставим напрямую.
+**Итог:** 179 контрактов, вес 271. Строгий счёт — **216/271 = 79.70 %**. Carry с явно помеченными `304` — **231/271 = 85.24 %**. Исторический coarse carry-forward `89/144 = 61,81 %` относится к прежней матрице и не сопоставим напрямую.
 
 ### Сводка по областям
 
@@ -522,16 +522,16 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | S13 | Live v22 datapath: greeting/release + event translation + real d2kc (2) | verified | 2 | `scripts/test-control-v22-live-differential.sh` (a378): real `d2kc`, C `link.c`; production `ControlServer` | Полный бинарник требует CAP_NET_ADMIN; harness использует тот же ControlServer без NFQUEUE. CLIENT_TCP передаёт пустой набор: R2O CLIENT_SHAPE не хранит сырые TCP options |
 | S14 | Live v22 controller: greeting + D2KP install + shape ingress (2) | verified | 2 | `scripts/test-control-v22-controller-ctlprobe-differential.sh` (a378): real C `ctlprobe`; D2KP план установлен, v48 отвергнут до команды | `--fetch` snapshot и полный C-only discovery не покрыты |
 | S15 | v22 legacy SUSPECT/EXCHANGE discovery semantics (2) | verified | 2 | `scripts/test-control-v22-legacy-events-differential.sh` (a378): real C `d2k_session`+`d2k_ctlsrv_pump`; SUSPECT code 1 ставит цель в Discovery, EXCHANGE без плана отмечает чистое рукопожатие | Коды 5/6/8 запускают полную классификацию вместо R2O late-RX; C QUIC SUSPECT (transport 17) не входит |
-| CL1 | Raw profiles/ECH shapes/send/cancel/fallback/connect (3) | carry (304) | 0 | `r2o-raw-profile`, `r2o-raw-emission-cancel`, `r2o-raw-connect-fallback`, `r2o-fallback`, `r2o-raw-split-support` (304) | 304; live DPI; cancel/timing |
-| CL2 | CLEAR confirmation/cancel (1) | carry (304) | 0 | `test-classifier-clear-confirm` (304) | 304 |
-| CL3 | SO_MARK confirmation (1) | carry (304) | 0 | `test-classifier-so-mark-production` (304) | 304; production getsockopt |
-| CL4 | Base transport errors → split (1) | carry (304) | 0 | `test-classifier-full-tree-control` (304) | 304 |
-| CL5 | Poison/strategy tree/control/neutral ACK (2) | carry (304) | 0 | `test-classifier-full-tree-control`, `candidate-filter`, `raw-production` (304) | 304; injected/scripted branches |
-| CL6 | TCP measurement + core verifier (2) | carry (304) | 0 | `r2o-meas`, `r2o-measured-split` (304) | 304; full call path |
+| CL1 | Raw profiles/ECH shapes/send/cancel/fallback/connect (3) | verified | 3 | `r2o-raw-profile-differential.sh`, `r2o-raw-emission-cancel-differential.sh`, `r2o-raw-connect-fallback-differential.sh`, `r2o-fallback-differential.sh`, `r2o-raw-split-support-differential.sh` (a378) | профили/ECH/отправка/cancel/connect/fallback совпали; live DPI и timing-ветви не покрыты |
+| CL2 | CLEAR confirmation/cancel (1) | verified | 1 | `test-classifier-clear-confirm-differential.sh` (a378) | CLEAR confirmation/cancel совпали |
+| CL3 | SO_MARK confirmation (1) | verified | 1 | `test-classifier-so-mark-production-differential.sh` (a378) | production SO_MARK/getsockopt совпали |
+| CL4 | Base transport errors → split (1) | verified | 1 | `test-classifier-full-tree-control-differential.sh` (a378, `CC=gcc`: обёртка `clang-18` не поддерживает `--wrap`) | transport-error → split совпал |
+| CL5 | Poison/strategy tree/control/neutral ACK (2) | verified | 2 | `test-classifier-full-tree-control-differential.sh`, `test-classifier-candidate-filter-differential.sh`, `test-classifier-raw-production-differential.sh` (a378; raw-production под `unshare -Urnm` + tmpfs `/run/netns`) | poison/strategy tree/control/neutral ACK и production hits совпали; injected/scripted branches не покрыты |
+| CL6 | TCP measurement + core verifier (2) | verified | 2 | `r2o-meas-differential.sh`, `r2o-measured-split-differential.sh` (a378) | TCP measurement и core verifier совпали; полный call path не покрыт |
 | CL7 | TLS/HTTP verifier outcomes/retry (1) | verified | 1 | `r2o-tls-verify-differential.sh` (a378), `test-http-chunk-framing` (a63) | Loopback; не live DPI |
-| CL8 | Connect/read timeout + doubled baseline retry (1) | carry (304) | 0 | `test-classifier-full-tree-control` (304) | 304 |
-| CL9 | TLS 1.2 reverse response probe/verdicts (3) | carry (304) | 0 | `test-d2o-shared-fixtures` (304), `test-classifier-full-tree-control` (304) | 304; live DPI |
-| CL10 | ECH receive ladder/witness/retries (2) | carry (304) | 0 | `r2o-ech-rx-ladder`, `r2o-layered-rx` (304) | 304; реальные ECH-конфигурации |
+| CL8 | Connect/read timeout + doubled baseline retry (1) | verified | 1 | `test-classifier-full-tree-control-differential.sh` (a378, `CC=gcc`) | connect/read timeout и doubled baseline retry совпали |
+| CL9 | TLS 1.2 reverse response probe/verdicts (3) | verified | 3 | `test-d2o-shared-fixtures.sh`, `test-classifier-full-tree-control-differential.sh` (a378) | TLS1.2 reverse response probe/verdicts совпали; live DPI не покрыт |
+| CL10 | ECH receive ladder/witness/retries (2) | verified | 2 | `r2o-ech-rx-ladder-differential.sh`, `r2o-layered-rx-differential.sh` (a378) | ECH receive ladder/witness/retries совпали; реальные ECH-конфигурации не покрыты |
 | CL11 | HTTP response framing/reader (1) | verified | 1 | `test-http-chunk-framing-differential.sh` (a63), `r2k-core` tests | Остальные call-path/ветви |
 | CL12 | ClientHello/TLS12/13/ECH parser helpers (1) | verified | 1 | `test-controller-clienthello-differential.sh` (a378), C `test_hello/test_ech/test_tls12`, Rust unit | 56 paired C/Rust кейсов: shape/SNI/complete/ECH, TLS-разбор и координаты; TLS1.2 PRF и обмен — rustls, отдельные suite |
 | CL13 | HTTPS probe/ECH resolver/cache state (1) | verified | 1 | `test-controller-httpsprobe-differential.sh` (a378), C `test_httpsprobe`, Rust tests | 23 paired кейса: classify/upgrade/ttl/state names и текстовая схема кэша v1/v2, включая capacity и битые строки; сетевой зонд — rustls |
