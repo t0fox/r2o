@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 152,
-  "percent": 56.09,
+  "points": 154,
+  "percent": 56.83,
   "total": 179,
   "counts": {
-    "verified": 104,
+    "verified": 105,
     "carry": 40,
-    "partial": 34,
+    "partial": 33,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1095,7 +1095,7 @@
     {
       "name": "Telegram",
       "weight": 41,
-      "points": 35,
+      "points": 37,
       "items": [
         {
           "id": 157,
@@ -1207,15 +1207,15 @@
           "key": "TG9",
           "name": "DC→WSS/CF route plan",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Telegram",
-          "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "gap": "",
-          "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+          "coverage": "`scripts/test-telegram-route-hosts-differential.sh` (z2kOW 42c8111); donor `ws_domains`/`cf_ws_domains`/`CfAttempts`/`ordered_records`/`cf_ip_attempts`",
+          "gap": "102 host-list кейса совпадают; тела функций MATCH; donor ws_client/config tests PASS. C11 `route_plan.c` не импортируется по правилу проекта",
+          "mapping": "`scripts/test-telegram-route-hosts-differential.sh` (z2kOW 42c8111); donor `ws_domains`/`cf_ws_domains`/`CfAttempts`/`ordered_records`/`cf_ip_attempts`",
+          "evidence": "`scripts/test-telegram-route-hosts-differential.sh` (z2kOW 42c8111); donor `ws_domains`/`cf_ws_domains`/`CfAttempts`/`ordered_records`/`cf_ip_attempts` · пробел: 102 host-list кейса совпадают; тела функций MATCH; donor ws_client/config tests PASS. C11 `route_plan.c` не импортируется по правилу проекта"
         },
         {
           "id": 165,
@@ -5222,15 +5222,15 @@
       "key": "TG9",
       "name": "DC→WSS/CF route plan",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Telegram",
-      "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "gap": "",
-      "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+      "coverage": "`scripts/test-telegram-route-hosts-differential.sh` (z2kOW 42c8111); donor `ws_domains`/`cf_ws_domains`/`CfAttempts`/`ordered_records`/`cf_ip_attempts`",
+      "gap": "102 host-list кейса совпадают; тела функций MATCH; donor ws_client/config tests PASS. C11 `route_plan.c` не импортируется по правилу проекта",
+      "mapping": "`scripts/test-telegram-route-hosts-differential.sh` (z2kOW 42c8111); donor `ws_domains`/`cf_ws_domains`/`CfAttempts`/`ordered_records`/`cf_ip_attempts`",
+      "evidence": "`scripts/test-telegram-route-hosts-differential.sh` (z2kOW 42c8111); donor `ws_domains`/`cf_ws_domains`/`CfAttempts`/`ordered_records`/`cf_ip_attempts` · пробел: 102 host-list кейса совпадают; тела функций MATCH; donor ws_client/config tests PASS. C11 `route_plan.c` не импортируется по правилу проекта"
     },
     {
       "id": 165,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 152,
+      "points": 154,
       "weight": 271,
-      "percent": 56.09
+      "percent": 56.83
     },
     "carry_forward": {
-      "points": 215,
+      "points": 217,
       "weight": 271,
-      "percent": 79.34,
+      "percent": 80.07,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
