@@ -16,6 +16,12 @@ const MAX_COUNTER_KEYS: usize = 96;
 const MAX_TTFB_SAMPLES: usize = 128;
 const MAX_ACTIVE_ROUTE_SESSIONS: usize = 64;
 const MAX_ROUTE_EVENTS: usize = 6;
+/// C `TG_ROUTE_HEALTH_COOLDOWN_MS`.
+const D2O_ROUTE_COOLDOWN_MS: u32 = 30_000;
+/// C `TG_CLIENT_LATENCY_SAMPLE_COUNT`.
+const CLIENT_LATENCY_SAMPLES: usize = 128;
+/// C `TG_EPOLL_MAX_ROUTE_COOLDOWNS`.
+const MAX_ROUTE_COOLDOWNS: usize = 256;
 
 static GLOBAL: LazyLock<Arc<RuntimeStats>> = LazyLock::new(|| Arc::new(RuntimeStats::new()));
 
@@ -92,6 +98,24 @@ pub struct RuntimeStats {
     max_connections: AtomicUsize,
     memory_budget: std::sync::Mutex<Option<Arc<crate::memory_budget::MemoryBudget>>>,
     accepted_connections: AtomicCounterU64,
+    bytes_from_clients: AtomicCounterU64,
+    bytes_from_upstreams: AtomicCounterU64,
+    active_wss_connections: AtomicUsize,
+    wss_attempts: AtomicCounterU64,
+    wss_failures: AtomicCounterU64,
+    wss_responses: AtomicCounterU64,
+    cf_wss_responses: AtomicCounterU64,
+    last_success_ms: AtomicCounterU64,
+    last_success_dc: AtomicUsize,
+    last_success_route: AtomicUsize,
+    last_success_latency_ms: AtomicCounterU64,
+    last_failure_ms: AtomicCounterU64,
+    last_failure_dc: AtomicUsize,
+    last_failure_route: AtomicUsize,
+    last_failure_stage: AtomicUsize,
+    client_latency: Mutex<ClientLatency>,
+    route_cooldowns: Mutex<BTreeMap<(u32, bool, u32), RouteCooldown>>,
+    route_cooldowns_truncated: AtomicBool,
     wss_established: AtomicCounterU64,
     mtproto_success: AtomicCounterU64,
     mtproto_failure: AtomicCounterU64,
@@ -169,9 +193,13 @@ pub struct ActiveRouteSession {
 #[derive(Clone, Debug, Serialize)]
 pub struct ActiveRouteEvent {
     pub sequence: u64,
+    #[serde(skip)]
+    pub timestamp_ms: u64,
     pub branch: &'static str,
     pub transport: &'static str,
     pub state: &'static str,
+    #[serde(skip)]
+    pub failure_stage: u32,
 }
 
 struct RouteSession {
@@ -205,11 +233,16 @@ impl RouteSession {
         if self.snapshot.events.len() == MAX_ROUTE_EVENTS {
             self.snapshot.events.pop_front();
         }
+        // C `route_session_event`: failed-событие несёт route_failure_stage;
+        // для сетевых ошибок WSS это стадия WebSocket (4).
+        let failure_stage = u32::from(state == "failed").saturating_mul(4);
         self.snapshot.events.push_back(ActiveRouteEvent {
             sequence: self.next_event_sequence,
+            timestamp_ms: monotonic_ms(),
             branch,
             transport,
             state,
+            failure_stage,
         });
         self.next_event_sequence = self.next_event_sequence.saturating_add(1);
     }
@@ -229,6 +262,107 @@ pub struct CfPoolStats {
     pub freshness_seconds: Option<u64>,
 }
 
+#[derive(Default)]
+struct ClientLatency {
+    samples: VecDeque<u64>,
+    total: u64,
+}
+
+#[derive(Clone, Copy)]
+struct RouteCooldown {
+    until_ms: u64,
+    failure_stage: u32,
+}
+
+/// D2O `stats_socket.c`: точная схема и порядок полей.
+#[derive(Clone, Debug, Serialize)]
+pub struct D2oStatsSnapshot {
+    pub active_connections: usize,
+    pub process_started_at: u64,
+    pub accepted_connections: u64,
+    pub active_sessions: Vec<D2oActiveSession>,
+    pub route_sessions_truncated: bool,
+    pub route_cooldown_ms: u32,
+    pub route_cooldowns: Vec<D2oRouteCooldown>,
+    pub route_cooldowns_truncated: bool,
+    pub max_connections: usize,
+    pub active_wss_connections: usize,
+    pub max_wss_connections: usize,
+    pub buffer_bytes_current: usize,
+    pub buffer_bytes_peak: usize,
+    pub buffer_bytes_limit: usize,
+    pub connections_started: u64,
+    pub bytes_from_clients: u64,
+    pub bytes_from_upstreams: u64,
+    pub wss_attempts: u64,
+    pub wss_failures: u64,
+    pub wss_responses: u64,
+    pub cf_wss_responses: u64,
+    pub last_success_dc: u32,
+    pub last_success_route: u32,
+    pub last_success_latency_ms: u64,
+    pub last_success_age_ms: u64,
+    pub last_failure_dc: u32,
+    pub last_failure_route: u32,
+    pub last_failure_stage: u32,
+    pub last_failure_age_ms: u64,
+    pub client_response_latency_total: u64,
+    pub client_response_latency_samples: usize,
+    pub client_response_latency_last_us: u64,
+    pub client_response_latency_p50_us: u64,
+    pub client_response_latency_p95_us: u64,
+    // Явные R2O-расширения, которые читает панель.
+    pub listener_ready: bool,
+    pub wss_established: u64,
+    pub mtproto_success: u64,
+    pub mtproto_failure: u64,
+    pub last_mtproto_response_at: u64,
+    pub dc_map: DcMapStats,
+    pub cf_domain_pool: CfPoolStats,
+    pub workers: BTreeMap<String, WorkerState>,
+    pub sessions_by_dc_transport: BTreeMap<String, u64>,
+    pub failures: BTreeMap<String, u64>,
+    pub ttfb: BTreeMap<String, LatencyPercentiles>,
+    pub rss_kib: Option<u64>,
+    pub rss_hwm_kib: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct D2oActiveSession {
+    pub id: u64,
+    pub dc: Option<u32>,
+    pub is_media: Option<bool>,
+    pub stage: &'static str,
+    pub direct_state: &'static str,
+    pub direct_transport: Option<&'static str>,
+    pub fallback_state: &'static str,
+    pub fallback_transport: Option<&'static str>,
+    pub selected_transport: Option<&'static str>,
+    pub telegram_response_seen: bool,
+    pub bytes_from_clients: u64,
+    pub bytes_from_upstreams: u64,
+    pub events: Vec<D2oRouteEvent>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct D2oRouteEvent {
+    pub sequence: u64,
+    pub age_ms: u64,
+    pub failure_stage: u32,
+    pub branch: &'static str,
+    pub transport: &'static str,
+    pub state: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct D2oRouteCooldown {
+    pub dc: u32,
+    pub is_media: bool,
+    pub transport: &'static str,
+    pub remaining_ms: u64,
+    pub failure_stage: u32,
+}
+
 impl RuntimeStats {
     pub fn new() -> Self {
         Self {
@@ -236,6 +370,10 @@ impl RuntimeStats {
             next_route_session_id: AtomicCounterU64::new(0),
             ..Self::default()
         }
+    }
+
+    pub fn set_started_at(&self, started_at: u64) {
+        self.started_at.store(started_at, Ordering::Release);
     }
 
     pub fn set_listener_ready(&self, ready: bool) {
@@ -287,12 +425,82 @@ impl RuntimeStats {
                 stats: Arc::clone(self),
                 id,
                 tracked,
+                accepted_at_us: monotonic_us(),
             },
         }
     }
 
     pub fn record_wss_established(&self) {
         self.wss_established.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Учесть активное WSS-соединение на время моста.
+    pub fn wss_connection(self: &Arc<Self>) -> WssConnectionGuard {
+        self.active_wss_connections.fetch_add(1, Ordering::AcqRel);
+        WssConnectionGuard {
+            stats: Arc::clone(self),
+        }
+    }
+
+    pub fn record_wss_attempt(&self, transport: &str) {
+        if wss_transport_number(transport).is_some() {
+            self.wss_attempts.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// C `route_health_failed_at`: сетевой отказ и активный cooldown.
+    pub fn record_route_failure(
+        &self,
+        dc: u32,
+        is_media: bool,
+        transport: &str,
+        failure_stage: u32,
+    ) {
+        let now = monotonic_ms();
+        if now >= self.last_failure_ms.load(Ordering::Acquire) {
+            self.last_failure_ms.store(now, Ordering::Release);
+            self.last_failure_dc.store(dc as usize, Ordering::Release);
+            self.last_failure_route.store(
+                wss_transport_number(transport)
+                    .or_else(|| route_kind_number(transport))
+                    .unwrap_or(0) as usize,
+                Ordering::Release,
+            );
+            self.last_failure_stage
+                .store(failure_stage as usize, Ordering::Release);
+        }
+        if let Some(transport_number) = wss_transport_number(transport) {
+            self.wss_failures.fetch_add(1, Ordering::Relaxed);
+            self.set_cooldown(dc, is_media, transport_number, failure_stage, now);
+        }
+    }
+
+    fn set_cooldown(&self, dc: u32, is_media: bool, transport: u32, failure_stage: u32, now: u64) {
+        let mut cooldowns = self.route_cooldowns.lock().expect("route cooldowns заняты");
+        cooldowns.retain(|_, entry| entry.until_ms > now);
+        if cooldowns.len() >= MAX_ROUTE_COOLDOWNS
+            && !cooldowns.contains_key(&(dc, is_media, transport))
+        {
+            self.route_cooldowns_truncated
+                .store(true, Ordering::Release);
+            if let Some(first) = cooldowns.keys().next().copied() {
+                cooldowns.remove(&first);
+            }
+        }
+        cooldowns.insert(
+            (dc, is_media, transport),
+            RouteCooldown {
+                until_ms: now.saturating_add(u64::from(D2O_ROUTE_COOLDOWN_MS)),
+                failure_stage,
+            },
+        );
+    }
+
+    fn clear_cooldown(&self, dc: u32, is_media: bool, transport: u32) {
+        self.route_cooldowns
+            .lock()
+            .expect("route cooldowns заняты")
+            .remove(&(dc, is_media, transport));
     }
 
     pub fn record_failure(&self, stage: &str) {
@@ -304,6 +512,21 @@ impl RuntimeStats {
     }
 
     pub fn record_mtproto_response(&self, dc: u32, transport: &str, ttfb: Duration) {
+        self.record_mtproto_response_with_client_latency(
+            dc,
+            transport,
+            ttfb,
+            ttfb.as_micros().min(u128::from(u64::MAX)) as u64,
+        );
+    }
+
+    pub fn record_mtproto_response_with_client_latency(
+        &self,
+        dc: u32,
+        transport: &str,
+        ttfb: Duration,
+        client_latency_us: u64,
+    ) {
         self.mtproto_success.fetch_add(1, Ordering::Relaxed);
         self.last_mtproto_response_at
             .store(unix_time(), Ordering::Release);
@@ -325,6 +548,31 @@ impl RuntimeStats {
                 values.pop_front();
             }
             values.push_back(millis);
+        }
+        drop(samples);
+
+        if let Some(transport_number) = wss_transport_number(transport) {
+            let now = monotonic_ms();
+            self.wss_responses.fetch_add(1, Ordering::Relaxed);
+            if transport_number >= 2 {
+                self.cf_wss_responses.fetch_add(1, Ordering::Relaxed);
+            }
+            self.clear_cooldown(dc, false, transport_number);
+            // C route_health не различает cooldown по media-ключу при успехе;
+            // очищаем оба варианта, чтобы не оставлять ложный cooldown.
+            self.clear_cooldown(dc, true, transport_number);
+            self.last_success_ms.store(now, Ordering::Release);
+            self.last_success_dc.store(dc as usize, Ordering::Release);
+            self.last_success_route
+                .store(transport_number as usize, Ordering::Release);
+            self.last_success_latency_ms
+                .store(millis, Ordering::Release);
+            let mut latency = self.client_latency.lock().expect("latency занята");
+            if latency.samples.len() == CLIENT_LATENCY_SAMPLES {
+                latency.samples.pop_front();
+            }
+            latency.samples.push_back(client_latency_us);
+            latency.total = latency.total.saturating_add(1);
         }
     }
 
@@ -373,6 +621,142 @@ impl RuntimeStats {
         let mut current = self.cf_domains.lock().expect("снимок CF pool занят");
         *current = domains.iter().take(256).cloned().collect();
         self.cf_fetched_at.store(fetched_at, Ordering::Release);
+    }
+
+    /// Снимок строгой D2O-схемы `stats_socket.c` плюс R2O-расширения панели.
+    pub fn d2o_snapshot(&self) -> D2oStatsSnapshot {
+        let now_ms = monotonic_ms();
+        let donor = self.snapshot();
+        let active_connections = donor.active_connections;
+        let active_sessions = {
+            let sessions = self.route_sessions.lock().expect("маршруты заняты");
+            sessions
+                .values()
+                .map(|session| {
+                    let snapshot = &session.snapshot;
+                    D2oActiveSession {
+                        id: snapshot.id,
+                        dc: snapshot.dc,
+                        is_media: snapshot.is_media,
+                        stage: snapshot.stage,
+                        direct_state: snapshot.direct_state,
+                        direct_transport: snapshot.direct_transport,
+                        fallback_state: snapshot.fallback_state,
+                        fallback_transport: snapshot.fallback_transport,
+                        selected_transport: snapshot.selected_transport,
+                        telegram_response_seen: snapshot.telegram_response_seen,
+                        bytes_from_clients: snapshot.bytes_from_clients,
+                        bytes_from_upstreams: snapshot.bytes_from_upstreams,
+                        events: snapshot
+                            .events
+                            .iter()
+                            .map(|event| D2oRouteEvent {
+                                sequence: event.sequence,
+                                age_ms: now_ms.saturating_sub(event.timestamp_ms),
+                                failure_stage: event.failure_stage,
+                                branch: event.branch,
+                                transport: event.transport,
+                                state: event.state,
+                            })
+                            .collect(),
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let (route_cooldowns, route_cooldowns_truncated) = {
+            let mut cooldowns = self.route_cooldowns.lock().expect("route cooldowns заняты");
+            cooldowns.retain(|_, entry| entry.until_ms > now_ms);
+            let values = cooldowns
+                .iter()
+                .map(|((dc, is_media, transport), entry)| D2oRouteCooldown {
+                    dc: *dc,
+                    is_media: *is_media,
+                    transport: d2o_transport_name(*transport),
+                    remaining_ms: entry.until_ms - now_ms,
+                    failure_stage: entry.failure_stage,
+                })
+                .collect::<Vec<_>>();
+            (
+                values,
+                self.route_cooldowns_truncated.load(Ordering::Acquire),
+            )
+        };
+        let (latency_samples, latency_total) = {
+            let latency = self.client_latency.lock().expect("latency занята");
+            (latency.samples.clone(), latency.total)
+        };
+        let mut sorted = latency_samples.iter().copied().collect::<Vec<_>>();
+        sorted.sort_unstable();
+        let percentile = |p: usize| {
+            if sorted.is_empty() {
+                0
+            } else {
+                let index = ((sorted.len() * p).div_ceil(100)).saturating_sub(1);
+                sorted[index]
+            }
+        };
+        let last_success_ms = self.last_success_ms.load(Ordering::Acquire);
+        let last_failure_ms = self.last_failure_ms.load(Ordering::Acquire);
+        D2oStatsSnapshot {
+            active_connections,
+            process_started_at: donor.process_started_at,
+            accepted_connections: donor.accepted_connections,
+            route_sessions_truncated: active_connections > active_sessions.len(),
+            active_sessions,
+            route_cooldown_ms: D2O_ROUTE_COOLDOWN_MS,
+            route_cooldowns,
+            route_cooldowns_truncated,
+            max_connections: donor.max_connections,
+            active_wss_connections: self.active_wss_connections.load(Ordering::Acquire),
+            max_wss_connections: donor.max_connections,
+            buffer_bytes_current: donor.buffer_bytes_current,
+            buffer_bytes_peak: donor.buffer_bytes_peak,
+            buffer_bytes_limit: self
+                .memory_budget()
+                .as_ref()
+                .map_or(0, |budget| budget.limit()),
+            connections_started: donor.accepted_connections,
+            bytes_from_clients: self.bytes_from_clients.load(Ordering::Acquire),
+            bytes_from_upstreams: self.bytes_from_upstreams.load(Ordering::Acquire),
+            wss_attempts: self.wss_attempts.load(Ordering::Acquire),
+            wss_failures: self.wss_failures.load(Ordering::Acquire),
+            wss_responses: self.wss_responses.load(Ordering::Acquire),
+            cf_wss_responses: self.cf_wss_responses.load(Ordering::Acquire),
+            last_success_dc: self.last_success_dc.load(Ordering::Acquire) as u32,
+            last_success_route: self.last_success_route.load(Ordering::Acquire) as u32,
+            last_success_latency_ms: self.last_success_latency_ms.load(Ordering::Acquire),
+            last_success_age_ms: if last_success_ms == 0 {
+                0
+            } else {
+                now_ms.saturating_sub(last_success_ms)
+            },
+            last_failure_dc: self.last_failure_dc.load(Ordering::Acquire) as u32,
+            last_failure_route: self.last_failure_route.load(Ordering::Acquire) as u32,
+            last_failure_stage: self.last_failure_stage.load(Ordering::Acquire) as u32,
+            last_failure_age_ms: if last_failure_ms == 0 {
+                0
+            } else {
+                now_ms.saturating_sub(last_failure_ms)
+            },
+            client_response_latency_total: latency_total,
+            client_response_latency_samples: sorted.len(),
+            client_response_latency_last_us: latency_samples.back().copied().unwrap_or(0),
+            client_response_latency_p50_us: percentile(50),
+            client_response_latency_p95_us: percentile(95),
+            listener_ready: donor.listener_ready,
+            wss_established: donor.wss_established,
+            mtproto_success: donor.mtproto_success,
+            mtproto_failure: donor.mtproto_failure,
+            last_mtproto_response_at: donor.last_mtproto_response_at,
+            dc_map: donor.dc_map,
+            cf_domain_pool: donor.cf_domain_pool,
+            workers: donor.workers,
+            sessions_by_dc_transport: donor.sessions_by_dc_transport,
+            failures: donor.failures,
+            ttfb: donor.ttfb,
+            rss_kib: donor.rss_kib,
+            rss_hwm_kib: donor.rss_hwm_kib,
+        }
     }
 
     pub fn snapshot(&self) -> StatsSnapshot {
@@ -452,6 +836,18 @@ impl RuntimeStats {
     }
 }
 
+pub struct WssConnectionGuard {
+    stats: Arc<RuntimeStats>,
+}
+
+impl Drop for WssConnectionGuard {
+    fn drop(&mut self) {
+        self.stats
+            .active_wss_connections
+            .fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 pub struct ConnectionGuard {
     stats: Arc<RuntimeStats>,
     telemetry: ConnectionTelemetry,
@@ -468,10 +864,14 @@ pub struct ConnectionTelemetry {
     stats: Arc<RuntimeStats>,
     id: u64,
     tracked: bool,
+    accepted_at_us: u64,
 }
 
 impl ConnectionTelemetry {
     pub fn record_client_bytes(&self, bytes: u64) {
+        self.stats
+            .bytes_from_clients
+            .fetch_add(bytes, Ordering::Relaxed);
         if !self.tracked {
             return;
         }
@@ -488,6 +888,9 @@ impl ConnectionTelemetry {
     }
 
     pub fn record_upstream_bytes(&self, bytes: u64) {
+        self.stats
+            .bytes_from_upstreams
+            .fetch_add(bytes, Ordering::Relaxed);
         if !self.tracked {
             return;
         }
@@ -534,11 +937,16 @@ impl ConnectionTelemetry {
         }
     }
 
+    pub fn client_elapsed_us(&self) -> u64 {
+        monotonic_us().saturating_sub(self.accepted_at_us)
+    }
+
     pub fn begin_attempt(
         &self,
         branch: &'static str,
         transport: &'static str,
     ) -> RouteAttemptGuard {
+        self.stats.record_wss_attempt(transport);
         self.set_attempt_state(branch, transport, "connecting");
         RouteAttemptGuard {
             telemetry: self.clone(),
@@ -550,6 +958,23 @@ impl ConnectionTelemetry {
 
     pub fn mark_cooldown(&self, branch: &'static str, transport: &'static str) {
         self.set_attempt_state(branch, transport, "cooldown");
+        let Some(transport_number) = wss_transport_number(transport) else {
+            return;
+        };
+        let (dc, is_media) = self
+            .stats
+            .route_sessions
+            .lock()
+            .expect("маршруты заняты")
+            .get(&self.id)
+            .map_or((0, false), |session| {
+                (
+                    session.snapshot.dc.unwrap_or(0),
+                    session.snapshot.is_media.unwrap_or(false),
+                )
+            });
+        self.stats
+            .set_cooldown(dc, is_media, transport_number, 0, monotonic_ms());
     }
 
     pub fn select_transport(&self, branch: &'static str, transport: &'static str) {
@@ -622,8 +1047,32 @@ impl ConnectionTelemetry {
             };
             session.snapshot.stage = "first_wss_binary_response";
             session.snapshot.telegram_response_seen = true;
+            if branch == "direct" {
+                session.snapshot.direct_state = "first_binary_response";
+            } else {
+                session.snapshot.fallback_state = "first_binary_response";
+            }
             session.event(branch, transport, "first_binary_response");
         }
+    }
+
+    fn record_attempt_failure(&self, transport: &'static str) {
+        if wss_transport_number(transport).is_none() {
+            return;
+        }
+        let (dc, is_media) = self
+            .stats
+            .route_sessions
+            .lock()
+            .expect("маршруты заняты")
+            .get(&self.id)
+            .map_or((0, false), |session| {
+                (
+                    session.snapshot.dc.unwrap_or(0),
+                    session.snapshot.is_media.unwrap_or(false),
+                )
+            });
+        self.stats.record_route_failure(dc, is_media, transport, 4);
     }
 
     fn set_attempt_state(
@@ -666,6 +1115,9 @@ impl RouteAttemptGuard {
     pub fn finish(mut self, state: &'static str) {
         self.telemetry
             .set_attempt_state(self.branch, self.transport, state);
+        if state == "failed" {
+            self.telemetry.record_attempt_failure(self.transport);
+        }
         self.complete = true;
     }
 }
@@ -742,7 +1194,7 @@ pub async fn serve_unix(path: PathBuf, stats: Arc<RuntimeStats>) -> Result<(), S
             }
             continue;
         }
-        let response = serde_json::to_vec(&stats.snapshot())
+        let response = serde_json::to_vec(&stats.d2o_snapshot())
             .map_err(|error| format!("сериализация статистики: {error}"))?;
         if tokio::time::timeout(Duration::from_millis(1250), stream.write_all(&response))
             .await
@@ -845,6 +1297,54 @@ fn bounded_failure_key(stage: &str) -> String {
         | "fd_exhaustion" => stage.to_string(),
         _ => "other".to_string(),
     }
+}
+
+fn wss_transport_number(transport: &str) -> Option<u32> {
+    match transport {
+        "direct_wss" | "direct-wss" => Some(1),
+        "cloudflare_worker" | "cf-worker" => Some(2),
+        "cloudflare_proxy" | "cf-proxy" => Some(3),
+        _ => None,
+    }
+}
+
+fn route_kind_number(transport: &str) -> Option<u32> {
+    match transport {
+        "tcp_fallback" => Some(4),
+        "tcp_passthrough" => Some(5),
+        _ => None,
+    }
+}
+
+fn d2o_transport_name(transport: u32) -> &'static str {
+    match transport {
+        1 => "direct_wss",
+        2 => "cloudflare_worker",
+        3 => "cloudflare_proxy",
+        4 => "tcp_fallback",
+        5 => "tcp_passthrough",
+        _ => "direct_wss",
+    }
+}
+
+fn monotonic_us() -> u64 {
+    #[cfg(unix)]
+    {
+        let mut time = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) } == 0 {
+            return (time.tv_sec as u64)
+                .saturating_mul(1_000_000)
+                .saturating_add((time.tv_nsec as u64) / 1_000);
+        }
+    }
+    0
+}
+
+fn monotonic_ms() -> u64 {
+    monotonic_us() / 1_000
 }
 
 fn unix_time() -> u64 {
@@ -1047,6 +1547,43 @@ mod tests {
                 .iter()
                 .any(|event| { event.branch == "fallback" && event.state == "cancelled" })
         );
+    }
+
+    #[test]
+    fn d2o_stats_tracks_wss_failures_cooldowns_and_client_latency() {
+        let stats = Arc::new(RuntimeStats::new());
+        let guard = stats.connection_started();
+        let telemetry = guard.telemetry();
+        telemetry.set_dc(2, false);
+        telemetry
+            .begin_attempt("direct", "direct_wss")
+            .finish("connected");
+        stats.record_mtproto_response_with_client_latency(
+            2,
+            "direct_wss",
+            Duration::from_millis(120),
+            500,
+        );
+        stats.record_route_failure(3, true, "cloudflare_worker", 4);
+
+        let snapshot = stats.d2o_snapshot();
+        assert_eq!(snapshot.wss_attempts, 1);
+        assert_eq!(snapshot.wss_responses, 1);
+        assert_eq!(snapshot.cf_wss_responses, 0);
+        assert_eq!(snapshot.wss_failures, 1);
+        assert_eq!(snapshot.last_success_dc, 2);
+        assert_eq!(snapshot.last_success_route, 1);
+        assert_eq!(snapshot.last_success_latency_ms, 120);
+        assert_eq!(snapshot.last_failure_dc, 3);
+        assert_eq!(snapshot.last_failure_stage, 4);
+        assert_eq!(snapshot.client_response_latency_samples, 1);
+        assert_eq!(snapshot.client_response_latency_last_us, 500);
+        assert_eq!(snapshot.route_cooldowns.len(), 1);
+        assert_eq!(snapshot.route_cooldowns[0].dc, 3);
+        assert!(snapshot.route_cooldowns[0].is_media);
+        assert_eq!(snapshot.route_cooldowns[0].transport, "cloudflare_worker");
+        assert_eq!(snapshot.route_cooldowns[0].failure_stage, 4);
+        drop(guard);
     }
 
     #[test]

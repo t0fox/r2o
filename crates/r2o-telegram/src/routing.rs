@@ -174,7 +174,20 @@ impl RouteFeedback {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn record_mtproto_response(feedback: &RouteFeedback, latency: Duration) {
+    record_mtproto_response_with_client_latency(
+        feedback,
+        latency,
+        latency.as_micros().min(u128::from(u64::MAX)) as u64,
+    );
+}
+
+pub(crate) fn record_mtproto_response_with_client_latency(
+    feedback: &RouteFeedback,
+    latency: Duration,
+    client_latency_us: u64,
+) {
     let route_class = match &feedback.kind {
         RouteFeedbackKind::Direct { .. } => RouteClass::Direct,
         RouteFeedbackKind::CfWorker { .. } | RouteFeedbackKind::CfProxy { .. } => {
@@ -187,7 +200,12 @@ pub(crate) fn record_mtproto_response(feedback: &RouteFeedback, latency: Duratio
         RouteFeedbackKind::CfWorker { route_key, .. } => ("cf-worker", Some(route_key.3.as_str())),
         RouteFeedbackKind::CfProxy { route_key, .. } => ("cf-proxy", Some(route_key.3.as_str())),
     };
-    crate::stats::global().record_mtproto_response(feedback.direct_key.0, transport, latency);
+    crate::stats::global().record_mtproto_response_with_client_latency(
+        feedback.direct_key.0,
+        transport,
+        latency,
+        client_latency_us,
+    );
     if let Some(domain) = worker_domain {
         crate::stats::global().record_worker_success(domain);
     }
@@ -228,6 +246,17 @@ pub(crate) fn record_mtproto_failure(feedback: &RouteFeedback) {
         _ => None,
     };
     crate::stats::global().record_mtproto_failure("mtproto");
+    let transport = match &feedback.kind {
+        RouteFeedbackKind::Direct { .. } => "direct_wss",
+        RouteFeedbackKind::CfWorker { .. } => "cloudflare_worker",
+        RouteFeedbackKind::CfProxy { .. } => "cloudflare_proxy",
+    };
+    crate::stats::global().record_route_failure(
+        feedback.direct_key.0,
+        feedback.direct_key.1,
+        transport,
+        5,
+    );
     if let Some(domain) = worker_domain {
         crate::stats::global().record_worker_failure(domain, "не получен MTProto-ответ");
     }

@@ -462,6 +462,7 @@ pub async fn handle_transparent_client_with_runtime(
                 _ => ("fallback", "unknown_wss"),
             };
             telemetry.select_transport(branch, transport);
+            let _wss_connection = runtime.stats().wss_connection();
             crate::bridge::bridge_transparent_ws(
                 stream,
                 *ws,

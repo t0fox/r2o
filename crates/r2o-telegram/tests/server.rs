@@ -122,6 +122,25 @@ async fn connection_limit_and_buffer_stats_match_d2o_contract() {
         snapshot["buffer_bytes_peak"].as_u64().unwrap()
             >= snapshot["buffer_bytes_current"].as_u64().unwrap()
     );
+    assert!(snapshot["buffer_bytes_limit"].as_u64().unwrap() > 0);
+    assert_eq!(snapshot["route_cooldown_ms"], 30_000);
+    assert_eq!(
+        snapshot["max_wss_connections"],
+        r2o_telegram::limits::D2O_CONFIGURED_MAX_CONNECTIONS
+    );
+    assert!(snapshot["active_wss_connections"].is_u64());
+    assert!(snapshot["connections_started"].is_u64());
+    assert!(snapshot["wss_attempts"].is_u64());
+    assert!(snapshot["wss_failures"].is_u64());
+    assert!(snapshot["wss_responses"].is_u64());
+    assert!(snapshot["cf_wss_responses"].is_u64());
+    assert!(snapshot["client_response_latency_total"].is_u64());
+    assert!(snapshot["client_response_latency_samples"].is_u64());
+    assert!(snapshot["client_response_latency_last_us"].is_u64());
+    assert!(snapshot["client_response_latency_p50_us"].is_u64());
+    assert!(snapshot["client_response_latency_p95_us"].is_u64());
+    assert!(snapshot["last_success_dc"].is_u64());
+    assert!(snapshot["last_failure_dc"].is_u64());
 
     shutdown_tx.send(()).unwrap();
     task.await

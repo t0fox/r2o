@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 141,
-  "percent": 52.03,
+  "points": 143,
+  "percent": 52.77,
   "total": 179,
   "counts": {
-    "verified": 98,
+    "verified": 99,
     "carry": 40,
-    "partial": 40,
+    "partial": 39,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1095,7 +1095,7 @@
     {
       "name": "Telegram",
       "weight": 41,
-      "points": 24,
+      "points": 26,
       "items": [
         {
           "id": 157,
@@ -1357,15 +1357,15 @@
           "key": "TG19",
           "name": "Stats schema и Unix socket",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Telegram",
-          "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "gap": "",
-          "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+          "coverage": "`scripts/test-telegram-stats-schema-differential.sh` (a378); C `stats_socket.c`; Rust `RuntimeStats::d2o_snapshot` + Unix socket",
+          "gap": "Все D2O-поля, sessions/events, cooldowns, WSS-счётчики и latency-перцентили совпадают; donor-поля панели остаются расширением",
+          "mapping": "`scripts/test-telegram-stats-schema-differential.sh` (a378); C `stats_socket.c`; Rust `RuntimeStats::d2o_snapshot` + Unix socket",
+          "evidence": "`scripts/test-telegram-stats-schema-differential.sh` (a378); C `stats_socket.c`; Rust `RuntimeStats::d2o_snapshot` + Unix socket · пробел: Все D2O-поля, sessions/events, cooldowns, WSS-счётчики и latency-перцентили совпадают; donor-поля панели остаются расширением"
         },
         {
           "id": 175,
@@ -5372,15 +5372,15 @@
       "key": "TG19",
       "name": "Stats schema и Unix socket",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Telegram",
-      "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "gap": "",
-      "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+      "coverage": "`scripts/test-telegram-stats-schema-differential.sh` (a378); C `stats_socket.c`; Rust `RuntimeStats::d2o_snapshot` + Unix socket",
+      "gap": "Все D2O-поля, sessions/events, cooldowns, WSS-счётчики и latency-перцентили совпадают; donor-поля панели остаются расширением",
+      "mapping": "`scripts/test-telegram-stats-schema-differential.sh` (a378); C `stats_socket.c`; Rust `RuntimeStats::d2o_snapshot` + Unix socket",
+      "evidence": "`scripts/test-telegram-stats-schema-differential.sh` (a378); C `stats_socket.c`; Rust `RuntimeStats::d2o_snapshot` + Unix socket · пробел: Все D2O-поля, sessions/events, cooldowns, WSS-счётчики и latency-перцентили совпадают; donor-поля панели остаются расширением"
     },
     {
       "id": 175,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 141,
+      "points": 143,
       "weight": 271,
-      "percent": 52.03
+      "percent": 52.77
     },
     "carry_forward": {
-      "points": 204,
+      "points": 206,
       "weight": 271,
-      "percent": 75.28,
+      "percent": 76.01,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

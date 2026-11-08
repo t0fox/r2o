@@ -423,7 +423,11 @@ pub(crate) async fn bridge_transparent_ws(
                                         route_type,
                                         latency.as_millis()
                                     );
-                                    crate::routing::record_mtproto_response(&feedback, latency);
+                                    crate::routing::record_mtproto_response_with_client_latency(
+                                        &feedback,
+                                        latency,
+                                        telemetry.client_elapsed_us(),
+                                    );
                                 }
                                 Ok(None) => {}
                                 Err(()) => response_observer_enabled = false,
