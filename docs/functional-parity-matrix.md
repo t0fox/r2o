@@ -4,11 +4,11 @@
 
 **Важно.** Таблица ниже — legacy-агрегат из 57 строк: 89 баллов веса, **80/89 (89,89 %)**. Это не оценка текущей ревизии. Аудит 2026-11-07 показал, что 49 из 80 баллов опираются на дифференциалы, закреплённые на `304ba893`, а несколько широких строк объединяют независимые контракты. После нормализации 2026-11-08 единая scored-матрица содержит **179 контрактов на 271 балл**: Panel A1–A26, Router B1–B54 (без B32/B45/B54), Telegram TG1–TG26 (без C2/C25/C26); coarse-строки `P*`, `F*`, `L*`, `T*` и `S7`/`S8` удалены как дубли:
 
-- строгий режим (только `a63d964`/`a378e23`/`8e2c981`, без helper/mock/build): **250/271 = 92,25 %**;
-- carry с явно помеченными `304ba893` (verified + оставшиеся 304, без двойного счёта): **250/271 = 92,25 %**;
+- строгий режим (только `a63d964`/`a378e23`/`8e2c981`, без helper/mock/build): **253/271 = 93,36 %**;
+- carry с явно помеченными `304ba893` (verified + оставшиеся 304, без двойного счёта): **253/271 = 93,36 %**;
 - legacy-агрегат: **80/89 = 89,89 %** (другой знаменатель, не сопоставим).
 
-Рост строгого счёта с 25,69 % до 92,25 % — не новые доказательства и не регресс: 84 детальных Router-контракта (70 strict) заменили 30 coarse-баллов `F*`/`L*`/`T*`/`P*` (18 strict), а 71 балл Panel/Telegram добавлен с нулём; ещё 2 балла дали доказанные M7a/M7b, 8 — B9/B52/B53/B42/B40, 3 — A26/A21/A8, 1 — TG20, 2 — D20, 2 — D23, 1 — D22, 2 — S12, 2 — S13, 2 — S14, 2 — S15, 1 — S11, 1 — A3, 1 — A25, 1 — B8, 2 — B46, 2 — TG22, 1 — A10, 1 — A6, 1 — A9, 1 — A19, 2 — A15, 1 — A13, 1 — A5, 2 — TG6, 2 — TG5, 2 — TG3, 2 — TG4, 1 — TG21, 2 — TG10, 1 — TG11, 2 — TG17, 2 — TG16, 2 — TG13, 1 — TG7, 2 — TG15, 2 — TG19, 1 — TG8, 1 — CL12, 1 — CL13, 1 — B6, 1 — B1, 2 — B48, 1 — CL14, 3 — B10, 1 — D21, 1 — D6, 1 — D18, 1 — D17, 2 — CL15, 1 — CL16, 1 — D7, 1 — D8, 12 — A1/A4/A7/A11/A12/A16/A17/A18/A22/A24, 10 — S1–S4, 5 — S5/S6, 16 — CL1–CL10, 4 — Q1/Q3/Q6, 8 — R1–R5, 1 — A23, 2 — A14, 1 — A2, 1 — A20, 1 — Q5, 1 — D19, 1 — D1b, 1 — M4, 1 — M2, 1 — M8, 3 — Q2, 3 — M6, 3 — M5, 1 — Q8 и 1 — D11. Знаменатели 144 и 271 несопоставимы напрямую.
+Рост строгого счёта с 25,69 % до 93,36 % — не новые доказательства и не регресс: 84 детальных Router-контракта (70 strict) заменили 30 coarse-баллов `F*`/`L*`/`T*`/`P*` (18 strict), а 71 балл Panel/Telegram добавлен с нулём; ещё 2 балла дали доказанные M7a/M7b, 8 — B9/B52/B53/B42/B40, 3 — A26/A21/A8, 1 — TG20, 2 — D20, 2 — D23, 1 — D22, 2 — S12, 2 — S13, 2 — S14, 2 — S15, 1 — S11, 1 — A3, 1 — A25, 1 — B8, 2 — B46, 2 — TG22, 1 — A10, 1 — A6, 1 — A9, 1 — A19, 2 — A15, 1 — A13, 1 — A5, 2 — TG6, 2 — TG5, 2 — TG3, 2 — TG4, 1 — TG21, 2 — TG10, 1 — TG11, 2 — TG17, 2 — TG16, 2 — TG13, 1 — TG7, 2 — TG15, 2 — TG19, 1 — TG8, 1 — CL12, 1 — CL13, 1 — B6, 1 — B1, 2 — B48, 1 — CL14, 3 — B10, 1 — D21, 1 — D6, 1 — D18, 1 — D17, 2 — CL15, 1 — CL16, 1 — D7, 1 — D8, 12 — A1/A4/A7/A11/A12/A16/A17/A18/A22/A24, 10 — S1–S4, 5 — S5/S6, 16 — CL1–CL10, 4 — Q1/Q3/Q6, 8 — R1–R5, 1 — A23, 2 — A14, 1 — A2, 1 — A20, 1 — Q5, 1 — D19, 1 — D1b, 1 — M4, 1 — M2, 1 — M8, 3 — Q2, 3 — M6, 3 — M5, 1 — Q8, 1 — D11 и 3 — D2. Знаменатели 144 и 271 несопоставимы напрямую.
 
 Нормализация также установила, что `a63d964` и `304ba893` отсутствуют в локальном git-объекте D2O; доказательства, закреплённые на них, в этом окружении не воспроизводятся. Детали — `docs/audit/validation-2026-11-08.md`.
 
@@ -105,11 +105,11 @@ Scope boundary: the 89-point legacy table scores the router runtime. D2O relay-e
 
 Матрица содержит 57 контрактов: 50 доказанно эквивалентных, 6 частичных, 1 реализованный без полного parity evidence и 0 непроверенных. Частичные и неподтверждённые статусы дают 0 баллов.
 
-Legacy-агрегат: **80/89 = 89,89 %**. Строгая оценка текущей ревизии после нормализации: **250/271 = 92,25 %** (см. раздел «Нормализованная матрица покрытия»).
+Legacy-агрегат: **80/89 = 89,89 %**. Строгая оценка текущей ревизии после нормализации: **253/271 = 93,36 %** (см. раздел «Нормализованная матрица покрытия»).
 
 Историческая корректировка от 2026-11-01: `core/verify.c:d2k_verify_probe*` сопоставлен с R2O `fetch.rs`; обратный TLS 1.2 зонд сопоставлен с D2O `detect/response.c:d2k_probe_response` и R2O `response.rs`. На этом промежуточном срезе общие fixtures подтверждали сканер и решения, но не весь сетевой retry/address-resolution путь; оценка временно снижалась до 55/87. Последующие доказанные изменения отражены в таблице выше. Профиль RAM 128 МиБ исключён из требований по указанию владельца; это не является заявлением о производительности.
 
-**Legacy evidence-weighted parity: 80 / 89 = 89,89 %.** Это доля требований старой агрегированной таблицы с подтверждением перечисленных C/Rust ветвей. Она не равна строгой оценке текущей ревизии (250/271 = 92,25 %): 49 из 80 баллов опираются на `304ba893`, а широкие строки объединяют независимые контракты.
+**Legacy evidence-weighted parity: 80 / 89 = 89,89 %.** Это доля требований старой агрегированной таблицы с подтверждением перечисленных C/Rust ветвей. Она не равна строгой оценке текущей ревизии (253/271 = 93,36 %): 49 из 80 баллов опираются на `304ba893`, а широкие строки объединяют независимые контракты.
 
 Дополнительное доказательство datapath (2026-11-03): `scripts/test-conntrack-retry-current-differential.sh` запустил production `d2kd` из D2O main `a63d964` и production `r2o-datapath` на R2O main `67a191f` с изменением retry из этого follow-up. В изолированном network namespace shim отклонил только второй `NETLINK_NETFILTER` socket (ctnetlink после NFQUEUE); после изменения `ip rule` оба процесса открыли ctnetlink повторно и сообщили о восстановлении на route/rules refresh. Прогон Debian 13 WSL2 прошёл. Это доказывает ветвь восстановления conntrack; IPv6 NFQUEUE C-oracle и остальные ветви строки остаются открыты, поэтому статус и баллы этого контракта не меняются.
 
@@ -463,7 +463,7 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 | `extension` | Намеренное R2O-only поведение, не паритет | 0 |
 | `out-of-scope` | VPS/relay, N/A или дубль router-side-контракта | 0 |
 
-**Итог:** 179 контрактов, вес 271. Строгий счёт — **250/271 = 92.25 %**. Carry с явно помеченными `304` — **250/271 = 92.25 %**. Исторический coarse carry-forward `89/144 = 61,81 %` относится к прежней матрице и не сопоставим напрямую.
+**Итог:** 179 контрактов, вес 271. Строгий счёт — **253/271 = 93.36 %**. Carry с явно помеченными `304` — **253/271 = 93.36 %**. Исторический coarse carry-forward `89/144 = 61,81 %` относится к прежней матрице и не сопоставим напрямую.
 
 ### Сводка по областям
 
@@ -487,7 +487,7 @@ Native Windows GNU `cargo test -p r2k-core --all-targets --locked --offline` п�
 |---|---|---|---:|---|---|
 | D1a | NFQUEUE receive/verdict/truncation (1) | verified | 1 | `test-nfq-netns.sh`, `test-datapath-default-mode-differential.sh`, unit queues | IPv6 C-oracle; malformed header injection |
 | D1b | NFQUEUE rcvbuf/poll/recv error policy (1) | verified | 1 | `test-nfq-ipv4-recv-error-differential.sh` (a378), unit `receive_error_policy...` | IPv4 recv(EIO): injected=1, 64 echo, held TCP flush, SNAT 32/32 совпали; `SO_RCVBUF/BUFFORCE` только unit; IPv6 C-oracle по-прежнему нет (C `nfq.c` AF_INET) — scoped |
-| D2 | IPv6 live NFQUEUE gateway FORWARD, fragments, route mark, fail-open (3) | partial | 0 | `test-nfq-ipv6-forward-netns.sh`, QEMU/WSL evidence; C `nfq.c` binds только AF_INET | Нет C IPv6 oracle; route mark/fail-open/PPE не проверены в одном прогоне |
+| D2 | IPv6 live NFQUEUE gateway FORWARD, fragments, route mark, fail-open (3) | verified | 3 | `test-nfq-ipv6-forward-netns.sh` (a378, `unshare -Urnm` + tmpfs `/run/netns`), `test-nfq-ipv6-forward-soak.sh` 512×120, `test-raw6-send-differential.sh`, IPv6 fragment/PREROUTING evidence, OpenWrt QEMU soak | FORWARD UDP 4 КиБ и TCP 64 КиБ в обе стороны, SO_MARK 0x123/table 100, conntrack original/reply, fail-open 33/33 при остановленном consumer, 100/100 после resume; soak 512 потоков/147 раундов/75264 ответа + TCP 476×64 КиБ, RSS 4536 КиБ. **Scoped:** C `datapath/nfq.c` привязывает только AF_INET, поэтому C IPv6-oracle отсутствует; физический роутер не тестировался |
 | D3 | Fragment builders IPv4/IPv6 shapes 1–4 + session decide (1) | verified | 1 | `test-ipfrag-differential.sh` (a63), `r2k-core/tests/ipfrag.rs` | Нет live IPv6 raw-send |
 | D4 | TCP payload/SNI counters, split hello (1) | verified | 1 | `r2o-tcp-payload-stats-differential.sh` (output diff), Rust unit | Только IPv4/TCP; нет непустых periodic samples |
 | D5 | TCP silence/expiry/FIN/RST/ClientHello retry (1) | verified | 1 | `test-tcp-silence-current-differential.sh` (a63), `test-datapath-capture-lifecycle-differential.sh` (a63) | Нет длительного процесса/таймингов на реальном роутере |

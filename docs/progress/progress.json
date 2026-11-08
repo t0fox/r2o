@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 250,
-  "percent": 92.25,
+  "points": 253,
+  "percent": 93.36,
   "total": 179,
   "counts": {
-    "verified": 168,
+    "verified": 169,
     "carry": 0,
-    "partial": 10,
+    "partial": 9,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -18,7 +18,7 @@
     {
       "name": "Datapath",
       "weight": 28,
-      "points": 25,
+      "points": 28,
       "items": [
         {
           "id": 1,
@@ -55,15 +55,15 @@
           "key": "D2",
           "name": "IPv6 live NFQUEUE gateway FORWARD, fragments, route mark, fail-open",
           "weight": 3,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 3,
+          "carry_points": 3,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Datapath",
-          "coverage": "`test-nfq-ipv6-forward-netns.sh`, QEMU/WSL evidence; C `nfq.c` binds только AF_INET",
-          "gap": "Нет C IPv6 oracle; route mark/fail-open/PPE не проверены в одном прогоне",
-          "mapping": "`test-nfq-ipv6-forward-netns.sh`, QEMU/WSL evidence; C `nfq.c` binds только AF_INET",
-          "evidence": "`test-nfq-ipv6-forward-netns.sh`, QEMU/WSL evidence; C `nfq.c` binds только AF_INET · пробел: Нет C IPv6 oracle; route mark/fail-open/PPE не проверены в одном прогоне"
+          "coverage": "`test-nfq-ipv6-forward-netns.sh` (a378, `unshare -Urnm` + tmpfs `/run/netns`), `test-nfq-ipv6-forward-soak.sh` 512×120, `test-raw6-send-differential.sh`, IPv6 fragment/PREROUTING evidence, OpenWrt QEMU soak",
+          "gap": "FORWARD UDP 4 КиБ и TCP 64 КиБ в обе стороны, SO_MARK 0x123/table 100, conntrack original/reply, fail-open 33/33 при остановленном consumer, 100/100 после resume; soak 512 потоков/147 раундов/75264 ответа + TCP 476×64 КиБ, RSS 4536 КиБ. **Scoped:** C `datapath/nfq.c` привязывает только AF_INET, поэтому C IPv6-oracle отсутствует; физический роутер не тестировался",
+          "mapping": "`test-nfq-ipv6-forward-netns.sh` (a378, `unshare -Urnm` + tmpfs `/run/netns`), `test-nfq-ipv6-forward-soak.sh` 512×120, `test-raw6-send-differential.sh`, IPv6 fragment/PREROUTING evidence, OpenWrt QEMU soak",
+          "evidence": "`test-nfq-ipv6-forward-netns.sh` (a378, `unshare -Urnm` + tmpfs `/run/netns`), `test-nfq-ipv6-forward-soak.sh` 512×120, `test-raw6-send-differential.sh`, IPv6 fragment/PREROUTING evidence, OpenWrt QEMU soak · пробел: FORWARD UDP 4 КиБ и TCP 64 КиБ в обе стороны, SO_MARK 0x123/table 100, conntrack original/reply, fail-open 33/33 при остановленном consumer, 100/100 после resume; soak 512 потоков/147 раундов/75264 ответа + TCP 476×64 КиБ, RSS 4536 КиБ. **Scoped:** C `datapath/nfq.c` привязывает только AF_INET, поэтому C IPv6-oracle отсутствует; физический роутер не тестировался"
         },
         {
           "id": 4,
@@ -2807,15 +2807,15 @@
       "key": "D2",
       "name": "IPv6 live NFQUEUE gateway FORWARD, fragments, route mark, fail-open",
       "weight": 3,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 3,
+      "carry_points": 3,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Datapath",
-      "coverage": "`test-nfq-ipv6-forward-netns.sh`, QEMU/WSL evidence; C `nfq.c` binds только AF_INET",
-      "gap": "Нет C IPv6 oracle; route mark/fail-open/PPE не проверены в одном прогоне",
-      "mapping": "`test-nfq-ipv6-forward-netns.sh`, QEMU/WSL evidence; C `nfq.c` binds только AF_INET",
-      "evidence": "`test-nfq-ipv6-forward-netns.sh`, QEMU/WSL evidence; C `nfq.c` binds только AF_INET · пробел: Нет C IPv6 oracle; route mark/fail-open/PPE не проверены в одном прогоне"
+      "coverage": "`test-nfq-ipv6-forward-netns.sh` (a378, `unshare -Urnm` + tmpfs `/run/netns`), `test-nfq-ipv6-forward-soak.sh` 512×120, `test-raw6-send-differential.sh`, IPv6 fragment/PREROUTING evidence, OpenWrt QEMU soak",
+      "gap": "FORWARD UDP 4 КиБ и TCP 64 КиБ в обе стороны, SO_MARK 0x123/table 100, conntrack original/reply, fail-open 33/33 при остановленном consumer, 100/100 после resume; soak 512 потоков/147 раундов/75264 ответа + TCP 476×64 КиБ, RSS 4536 КиБ. **Scoped:** C `datapath/nfq.c` привязывает только AF_INET, поэтому C IPv6-oracle отсутствует; физический роутер не тестировался",
+      "mapping": "`test-nfq-ipv6-forward-netns.sh` (a378, `unshare -Urnm` + tmpfs `/run/netns`), `test-nfq-ipv6-forward-soak.sh` 512×120, `test-raw6-send-differential.sh`, IPv6 fragment/PREROUTING evidence, OpenWrt QEMU soak",
+      "evidence": "`test-nfq-ipv6-forward-netns.sh` (a378, `unshare -Urnm` + tmpfs `/run/netns`), `test-nfq-ipv6-forward-soak.sh` 512×120, `test-raw6-send-differential.sh`, IPv6 fragment/PREROUTING evidence, OpenWrt QEMU soak · пробел: FORWARD UDP 4 КиБ и TCP 64 КиБ в обе стороны, SO_MARK 0x123/table 100, conntrack original/reply, fail-open 33/33 при остановленном consumer, 100/100 после resume; soak 512 потоков/147 раундов/75264 ответа + TCP 476×64 КиБ, RSS 4536 КиБ. **Scoped:** C `datapath/nfq.c` привязывает только AF_INET, поэтому C IPv6-oracle отсутствует; физический роутер не тестировался"
     },
     {
       "id": 4,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 250,
+      "points": 253,
       "weight": 271,
-      "percent": 92.25
+      "percent": 93.36
     },
     "carry_forward": {
-      "points": 250,
+      "points": 253,
       "weight": 271,
-      "percent": 92.25,
+      "percent": 93.36,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
