@@ -18,6 +18,7 @@ cat > "$MOCK/curl" <<'EOF'
 set -eu
 output=
 url=
+head=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -o|--max-filesize|--connect-timeout|--max-time|--proto|--proto-redir)
@@ -25,16 +26,33 @@ while [ "$#" -gt 0 ]; do
             if [ "$1" = -o ]; then output=$2; fi
             shift 2
             ;;
+        -I|--head) head=1; shift ;;
         -* ) shift ;;
         * ) url=$1; shift ;;
     esac
 done
-[ -n "$url" ] && [ -n "$output" ] || exit 2
+[ -n "$url" ] || exit 2
+if [ "$head" -eq 1 ]; then
+    [ "${R2O_TEST_FAIL_HEAD:-0}" = 1 ] && exit 22
+    case "$url" in
+        */r2o-mipsel-openwrt-musl.tar.gz)
+            archive_size=$(wc -c < "$R2O_TEST_FIXTURES/r2o-mipsel-openwrt-musl.tar.gz" | tr -d ' ')
+            printf 'HTTP/2 302\r\ncontent-length: 0\r\n\r\nHTTP/2 200\r\ncontent-length: %s\r\n' \
+                "$archive_size"
+            exit 0
+            ;;
+        *) exit 22 ;;
+    esac
+fi
+[ -n "$output" ] || exit 2
 printf '%s\t%s\n' "$url" "$output" >> "$R2O_TEST_FETCH_LOG"
 case "$url" in
     */latest.json.sig) source=$R2O_TEST_FIXTURES/latest.json.sig ;;
     */latest.json) source=$R2O_TEST_FIXTURES/latest.json ;;
-    https://api.github.com/repos/t0fox/r2o/releases/tags/*) source=$R2O_TEST_FIXTURES/release-api.json ;;
+    https://api.github.com/repos/t0fox/r2o/releases/tags/*)
+        [ "${R2O_TEST_FAIL_API:-0}" = 1 ] && exit 22
+        source=$R2O_TEST_FIXTURES/release-api.json
+        ;;
     */r2o-mipsel-openwrt-musl.tar.gz) source=$R2O_TEST_FIXTURES/r2o-mipsel-openwrt-musl.tar.gz ;;
     *) echo "unexpected fetch URL: $url" >&2; exit 22 ;;
 esac
@@ -216,6 +234,29 @@ if run_install > "$CASE/out" 2>&1; then fail 'archive with a hash mismatch was a
 grep -q 'SHA-256' "$CASE/out" || { cat "$CASE/out" >&2; cat "$CASE/fetch.log" >&2; fail 'archive hash mismatch was not rejected'; }
 [ ! -s "$CASE/manager.log" ] || fail 'archive code ran before its SHA-256 was verified'
 [ ! -e "$CASE/opt/r2o" ] || fail 'bad archive created the installation root'
+
+new_case api-without-size
+# GitHub API вернул ответ без размера актива (кэш/прокси). Размер должен быть
+# взят из Content-Length загрузки на github.com.
+printf '{"message":"API rate limit exceeded"}\n' > "$CASE/fixtures/release-api.json"
+run_install > "$CASE/out" 2>&1 || { cat "$CASE/out" >&2; fail 'install failed when the GitHub API had no asset size'; }
+grep -q 'по заголовкам загрузки' "$CASE/out" || fail 'HEAD size fallback was not reported'
+[ -s "$CASE/manager.log" ] || fail 'manager was not activated after the HEAD size fallback'
+
+new_case api-unreachable
+# API недоступен целиком; выпуск и его подпись на github.com доступны.
+R2O_TEST_FAIL_API=1 run_install > "$CASE/out" 2>&1 ||
+    { cat "$CASE/out" >&2; fail 'install failed when the GitHub API was unreachable'; }
+grep -q 'по заголовкам загрузки' "$CASE/out" || fail 'unreachable API did not use the HEAD size fallback'
+[ -s "$CASE/manager.log" ] || fail 'manager was not activated after the unreachable API fallback'
+
+new_case api-and-head-unavailable
+# API и заголовки недоступны (wget без -S, прокси): архив скачивается с
+# верхним лимитом, измеряется фактический размер и установка продолжается.
+R2O_TEST_FAIL_API=1 R2O_TEST_FAIL_HEAD=1 run_install > "$CASE/out" 2>&1 ||
+    { cat "$CASE/out" >&2; fail 'install failed when neither API nor HEAD reported the size'; }
+grep -q 'проверяю фактический размер' "$CASE/out" || fail 'bounded download fallback was not reported'
+[ -s "$CASE/manager.log" ] || fail 'manager was not activated after the bounded download fallback'
 
 new_case unsupported-abi
 sed 's/mipsel_24kc/mips_24kc/' "$CASE/openwrt_release" > "$CASE/openwrt_release.new"

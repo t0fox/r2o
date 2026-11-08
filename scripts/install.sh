@@ -252,23 +252,42 @@ check_runtime_dependencies() {
     fi
 }
 
-fetch_url() {
+fetch_url_impl() {
     fetch_url_value=$1
     fetch_output=$2
     fetch_limit=$3
+    fetch_timeout=${4:-600}
+    fetch_error=
     if command -v curl >/dev/null 2>&1; then
         curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 15 \
-            --max-time 600 --max-filesize "$fetch_limit" -o "$fetch_output" "$fetch_url_value" ||
-            die "не удалось скачать $fetch_url_value"
+            --max-time "$fetch_timeout" --max-filesize "$fetch_limit" \
+            -o "$fetch_output" "$fetch_url_value" ||
+            { fetch_error="не удалось скачать $fetch_url_value"; return 1; }
     elif command -v wget >/dev/null 2>&1; then
-        wget -q -T 600 -O "$fetch_output" "$fetch_url_value" || die "не удалось скачать $fetch_url_value"
+        wget -q -T "$fetch_timeout" -O "$fetch_output" "$fetch_url_value" ||
+            { fetch_error="не удалось скачать $fetch_url_value"; return 1; }
     else
-        die 'нужен curl или wget для загрузки выпуска'
+        fetch_error='нужен curl или wget для загрузки выпуска'
+        return 1
     fi
-    [ -f "$fetch_output" ] || die "загрузчик не создал $fetch_output"
+    [ -f "$fetch_output" ] ||
+        { fetch_error="загрузчик не создал $fetch_output"; return 1; }
     fetched_bytes=$(wc -c < "$fetch_output" | tr -d ' ')
-    case "$fetched_bytes" in ''|*[!0-9]*) die "не удалось проверить размер $fetch_output" ;; esac
-    [ "$fetched_bytes" -le "$fetch_limit" ] || die "загрузка превысила лимит $fetch_limit байт"
+    case "$fetched_bytes" in
+        ''|*[!0-9]*) fetch_error="не удалось проверить размер $fetch_output"; return 1 ;;
+    esac
+    [ "$fetched_bytes" -le "$fetch_limit" ] ||
+        { fetch_error="загрузка превысила лимит $fetch_limit байт"; return 1; }
+    return 0
+}
+
+fetch_url() {
+    fetch_url_impl "$@" || die "${fetch_error:-не удалось скачать $1}"
+}
+
+# Мягкая загрузка: не завершает установку, если необязательный запрос не удался.
+try_fetch_url() {
+    fetch_url_impl "$@"
 }
 
 sha256_file() {
@@ -295,6 +314,31 @@ asset_size_from_api() {
             exit
         }
     ' "$2"
+}
+
+# GitHub API может быть недоступен, ограничен по частоте или отдавать ответ без
+# размера (прокси, кэш, ограничение площадки). Ссылка выпуска на github.com при
+# этом работает, и её последний ответ содержит Content-Length архива.
+asset_size_from_headers() {
+    r2o_size_url=$1
+    r2o_headers=
+    if command -v curl >/dev/null 2>&1; then
+        r2o_headers=$(curl -f -s -S -I -L --proto '=https' --proto-redir '=https' \
+            --connect-timeout 15 --max-time 60 "$r2o_size_url" 2>/dev/null) || return 1
+    elif command -v wget >/dev/null 2>&1; then
+        r2o_headers=$(wget -qS --spider -T 60 "$r2o_size_url" 2>&1) || return 1
+    else
+        return 1
+    fi
+    printf '%s\n' "$r2o_headers" | awk '
+        {
+            header = tolower($1)
+            value = $2
+            gsub(/\r/, "", value)
+            if (header == "content-length:" && value ~ /^[0-9]+$/) size = value
+        }
+        END { print size }
+    '
 }
 
 verify_archive_listing() {
@@ -476,9 +520,32 @@ if [ "$CURRENT_RELEASE" = "$TARGET_RELEASE" ]; then
     exit 0
 fi
 
-fetch_url "$RELEASE_API/$TARGET_RELEASE" "$TMP/release-api.json" 1048576
-archive_bytes=$(asset_size_from_api "$ASSET" "$TMP/release-api.json")
-case "$archive_bytes" in ''|*[!0-9]*) die "GitHub не сообщил размер актива $ASSET" ;; esac
+archive_bytes=
+if try_fetch_url "$RELEASE_API/$TARGET_RELEASE" "$TMP/release-api.json" 1048576 60; then
+    archive_bytes=$(asset_size_from_api "$ASSET" "$TMP/release-api.json")
+fi
+case "$archive_bytes" in ''|*[!0-9]*) archive_bytes= ;; esac
+if [ -z "$archive_bytes" ] ||
+    [ "$archive_bytes" -le 0 ] || [ "$archive_bytes" -gt "$MAX_ARCHIVE_BYTES" ]; then
+    say 'GitHub API не сообщил размер актива; определяю размер по заголовкам загрузки'
+    archive_bytes=$(asset_size_from_headers "$LATEST/$ASSET" || true)
+fi
+case "$archive_bytes" in ''|*[!0-9]*) archive_bytes= ;; esac
+
+archive_downloaded=0
+if [ -z "$archive_bytes" ]; then
+    # Ни API, ни заголовки не дали размер (wget без вывода заголовков, прокси,
+    # ограничение площадки). Скачиваем в staging на flash с верхним лимитом и
+    # измеряем фактический файл до выбора схемы размещения.
+    say 'размер актива не удалось узнать заранее; скачиваю с ограничением и проверяю фактический размер'
+    DISK_TMP=$(mktemp -d "$STORAGE_PATH/.r2o-install.XXXXXX") ||
+        die "не удалось создать staging на $STORAGE_PATH"
+    ARCHIVE=$DISK_TMP/$ASSET
+    fetch_url "$LATEST/$ASSET" "$ARCHIVE" "$MAX_ARCHIVE_BYTES"
+    archive_bytes=$(wc -c < "$ARCHIVE" | tr -d ' ')
+    case "$archive_bytes" in ''|*[!0-9]*) die "не удалось проверить размер актива $ASSET" ;; esac
+    archive_downloaded=1
+fi
 [ "$archive_bytes" -gt 0 ] && [ "$archive_bytes" -le "$MAX_ARCHIVE_BYTES" ] ||
     die "недопустимый размер актива $ASSET: $archive_bytes байт"
 archive_kb=$(((archive_bytes + 1023) / 1024))
@@ -503,15 +570,24 @@ elif [ "$memory_kb" -ge "$RAM_RESERVE_KB" ] && [ "$flash_kb" -ge "$flash_archive
 else
     die "не хватает ресурсов до установки: RAM ${memory_kb} КиБ; flash ${flash_kb} КиБ; архив до ${archive_kb} КиБ, распаковка до ${MAX_EXPANDED_KB} КиБ"
 fi
-if [ "$ARCHIVE_IN_RAM" -eq 1 ]; then ARCHIVE=$TMP/$ASSET; else :; fi
+if [ "$ARCHIVE_IN_RAM" -eq 1 ]; then
+    if [ "$archive_downloaded" -eq 1 ]; then
+        mv "$ARCHIVE" "$TMP/$ASSET" || die 'не удалось перенести скачанный архив в RAM'
+    fi
+    ARCHIVE=$TMP/$ASSET
+fi
 if [ "$ARCHIVE_IN_RAM" -eq 0 ] || [ "$BUNDLE_IN_RAM" -eq 0 ]; then
-    DISK_TMP=$(mktemp -d "$STORAGE_PATH/.r2o-install.XXXXXX") || die "не удалось создать staging на $STORAGE_PATH"
+    [ -n "$DISK_TMP" ] ||
+        DISK_TMP=$(mktemp -d "$STORAGE_PATH/.r2o-install.XXXXXX") ||
+        die "не удалось создать staging на $STORAGE_PATH"
 fi
 [ -n "$ARCHIVE" ] || ARCHIVE=$DISK_TMP/$ASSET
 if [ "$BUNDLE_IN_RAM" -eq 1 ]; then BUNDLE=$TMP/bundle; else BUNDLE=$DISK_TMP/bundle; fi
 say "ресурсы проверены: свободно ${memory_kb} КиБ RAM и ${flash_kb} КиБ flash; архив и распаковка размещены безопасно"
 
-fetch_url "$LATEST/$ASSET" "$ARCHIVE" "$archive_bytes"
+if [ "$archive_downloaded" -eq 0 ]; then
+    fetch_url "$LATEST/$ASSET" "$ARCHIVE" "$archive_bytes"
+fi
 [ "$(wc -c < "$ARCHIVE" | tr -d ' ')" = "$archive_bytes" ] || die "размер актива $ASSET не совпал с GitHub"
 actual_sha=$(sha256_file "$ARCHIVE")
 [ "$actual_sha" = "$expected_sha" ] || die 'SHA-256 архива не совпадает с подписанным манифестом'
