@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 158,
-  "percent": 58.3,
+  "points": 160,
+  "percent": 59.04,
   "total": 179,
   "counts": {
-    "verified": 109,
+    "verified": 110,
     "carry": 40,
-    "partial": 29,
+    "partial": 28,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1859,7 +1859,7 @@
     {
       "name": "Router / Service",
       "weight": 84,
-      "points": 72,
+      "points": 74,
       "items": [
         {
           "id": 106,
@@ -2541,15 +2541,15 @@
           "key": "B48",
           "name": "Meta DNS offset/backoff/tick",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Router / Service",
-          "coverage": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-          "gap": "**не доказано**",
-          "mapping": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-          "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: **не доказано**"
+          "coverage": "`test-router-meta-dns-scheduler-parity-differential.sh` (a378), `test-router-meta-dns-scheduler-differential.sh`",
+          "gap": "26 offset-кейсов (включая отвергаемые C ведущие нули/пробелы), backoff 0..12 при трёх RETRY_AFTER, run_at и 10 tick-ветвей; сетевой refresh/NDM — существующие suite",
+          "mapping": "`test-router-meta-dns-scheduler-parity-differential.sh` (a378), `test-router-meta-dns-scheduler-differential.sh`",
+          "evidence": "`test-router-meta-dns-scheduler-parity-differential.sh` (a378), `test-router-meta-dns-scheduler-differential.sh` · пробел: 26 offset-кейсов (включая отвергаемые C ведущие нули/пробелы), backoff 0..12 при трёх RETRY_AFTER, run_at и 10 tick-ветвей; сетевой refresh/NDM — существующие suite"
         },
         {
           "id": 152,
@@ -5027,15 +5027,15 @@
       "key": "B48",
       "name": "Meta DNS offset/backoff/tick",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Router / Service",
-      "coverage": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-      "gap": "**не доказано**",
-      "mapping": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-      "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: **не доказано**"
+      "coverage": "`test-router-meta-dns-scheduler-parity-differential.sh` (a378), `test-router-meta-dns-scheduler-differential.sh`",
+      "gap": "26 offset-кейсов (включая отвергаемые C ведущие нули/пробелы), backoff 0..12 при трёх RETRY_AFTER, run_at и 10 tick-ветвей; сетевой refresh/NDM — существующие suite",
+      "mapping": "`test-router-meta-dns-scheduler-parity-differential.sh` (a378), `test-router-meta-dns-scheduler-differential.sh`",
+      "evidence": "`test-router-meta-dns-scheduler-parity-differential.sh` (a378), `test-router-meta-dns-scheduler-differential.sh` · пробел: 26 offset-кейсов (включая отвергаемые C ведущие нули/пробелы), backoff 0..12 при трёх RETRY_AFTER, run_at и 10 tick-ветвей; сетевой refresh/NDM — существующие suite"
     },
     {
       "id": 152,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 158,
+      "points": 160,
       "weight": 271,
-      "percent": 58.3
+      "percent": 59.04
     },
     "carry_forward": {
-      "points": 221,
+      "points": 223,
       "weight": 271,
-      "percent": 81.55,
+      "percent": 82.29,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

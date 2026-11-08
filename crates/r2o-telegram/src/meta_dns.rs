@@ -903,10 +903,7 @@ impl MetaDnsScheduler {
     async fn tick(&mut self) -> Result<(), String> {
         let clock = local_clock()?;
         let offset = self.refresh_offset()?;
-        let run_at = self
-            .explicit_run_at
-            .clone()
-            .unwrap_or_else(|| format!("{:02}{:02}", 1 + offset / 60, offset % 60));
+        let run_at = self.run_at(offset);
         let attempt = read_attempt(&self.attempt);
         if !should_run(&self.state, &attempt, &clock, &run_at, self.retry_after) {
             return Ok(());
@@ -947,6 +944,13 @@ impl MetaDnsScheduler {
             }
         }
         Ok(())
+    }
+
+    /// Явный HHMM перекрывает оконный слот; иначе 01:00 + offset минут.
+    fn run_at(&self, offset: u64) -> String {
+        self.explicit_run_at
+            .clone()
+            .unwrap_or_else(|| format!("{:02}{:02}", 1 + offset / 60, offset % 60))
     }
 
     fn refresh_offset(&self) -> Result<u64, String> {
@@ -2073,6 +2077,202 @@ esac
         assert!(regenerated <= 239);
         assert_eq!(scheduler.refresh_offset().unwrap(), regenerated);
         let _ = std::fs::remove_dir_all(paths.r2o_dir);
+    }
+
+    #[test]
+    #[ignore]
+    fn b48_scheduler_trace() {
+        let dir = PathBuf::from(std::env::var("R2O_B48_TRACE_DIR").expect("trace dir"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut scheduler = MetaDnsScheduler {
+            state: dir.join("state"),
+            attempt: dir.join("attempt"),
+            offset: dir.join("offset"),
+            log: dir.join("log"),
+            interval: Duration::from_secs(60),
+            retry_after: 1800,
+            explicit_run_at: None,
+        };
+        for (name, content) in [
+            ("v2-0", "v2 0"),
+            ("v2-9", "v2 9"),
+            ("v2-10", "v2 10"),
+            ("v2-99", "v2 99"),
+            ("v2-100", "v2 100"),
+            ("v2-199", "v2 199"),
+            ("v2-200", "v2 200"),
+            ("v2-239", "v2 239"),
+            ("v2-240", "v2 240"),
+            ("v2-007", "v2 007"),
+            ("v2-07", "v2 07"),
+            ("v2-00", "v2 00"),
+            ("v2-plus", "v2 +5"),
+            ("v2-space", "v2 5 "),
+            ("bare-0", "0"),
+            ("bare-9", "9"),
+            ("bare-00", "00"),
+            ("bare-09", "09"),
+            ("bare-10", "10"),
+            ("bare-59", "59"),
+            ("bare-60", "60"),
+            ("bare-007", "007"),
+            ("bare-plus", "+5"),
+            ("bare-space", " 5"),
+            ("junk", "junk"),
+            ("empty", ""),
+        ] {
+            std::fs::write(&scheduler.offset, content).unwrap();
+            let stored = content.trim_end_matches('\n');
+            let classification = if let Some(value) = parse_stored_v2_offset(stored) {
+                format!("stored value={value}")
+            } else if parse_legacy_offset(stored).is_some() {
+                "migrated".to_string()
+            } else {
+                "regenerated".to_string()
+            };
+            let value = scheduler.refresh_offset().unwrap();
+            if classification.starts_with("stored") {
+                assert_eq!(classification, format!("stored value={value}"));
+            }
+            println!("offset {name} {classification}");
+        }
+        for retry in [60_u64, 1800, 86400] {
+            for failures in 0..=12_u32 {
+                println!(
+                    "backoff retry={retry} failures={failures} secs={}",
+                    backoff_after(failures, retry)
+                );
+            }
+        }
+        for offset in [0_u64, 1, 59, 60, 120, 239] {
+            scheduler.explicit_run_at = None;
+            println!(
+                "run_at explicit=none offset={offset} value={}",
+                scheduler.run_at(offset)
+            );
+        }
+        scheduler.explicit_run_at = Some("0345".to_string());
+        println!(
+            "run_at explicit=0345 offset=10 value={}",
+            scheduler.run_at(10)
+        );
+        scheduler.explicit_run_at = None;
+
+        struct TickCase {
+            name: &'static str,
+            day: &'static str,
+            hhmm: &'static str,
+            epoch: u64,
+            state_day: Option<&'static str>,
+            attempt: Option<(u64, &'static str, u32)>,
+        }
+        let cases = [
+            TickCase {
+                name: "first-install",
+                day: "2026-11-08",
+                hhmm: "0000",
+                epoch: 1000,
+                state_day: None,
+                attempt: None,
+            },
+            TickCase {
+                name: "backoff-wait",
+                day: "2026-11-08",
+                hhmm: "0000",
+                epoch: 1000,
+                state_day: None,
+                attempt: Some((0, "2026-11-07", 1)),
+            },
+            TickCase {
+                name: "backoff-elapsed",
+                day: "2026-11-08",
+                hhmm: "0000",
+                epoch: 2000,
+                state_day: None,
+                attempt: Some((0, "2026-11-07", 1)),
+            },
+            TickCase {
+                name: "before-slot",
+                day: "2026-11-08",
+                hhmm: "0059",
+                epoch: 1000,
+                state_day: Some("2026-11-07"),
+                attempt: None,
+            },
+            TickCase {
+                name: "at-slot",
+                day: "2026-11-08",
+                hhmm: "0100",
+                epoch: 1000,
+                state_day: Some("2026-11-07"),
+                attempt: None,
+            },
+            TickCase {
+                name: "already-today",
+                day: "2026-11-08",
+                hhmm: "0100",
+                epoch: 1000,
+                state_day: Some("2026-11-08"),
+                attempt: None,
+            },
+            TickCase {
+                name: "today-fail-wait",
+                day: "2026-11-08",
+                hhmm: "0100",
+                epoch: 2000,
+                state_day: Some("2026-11-07"),
+                attempt: Some((1000, "2026-11-08", 1)),
+            },
+            TickCase {
+                name: "today-fail-elapsed",
+                day: "2026-11-08",
+                hhmm: "0100",
+                epoch: 2000,
+                state_day: Some("2026-11-07"),
+                attempt: Some((0, "2026-11-08", 1)),
+            },
+            TickCase {
+                name: "yesterday-attempt",
+                day: "2026-11-08",
+                hhmm: "0100",
+                epoch: 2000,
+                state_day: Some("2026-11-07"),
+                attempt: Some((1000, "2026-11-07", 1)),
+            },
+            TickCase {
+                name: "future-attempt",
+                day: "2026-11-08",
+                hhmm: "0000",
+                epoch: 1000,
+                state_day: None,
+                attempt: Some((5000, "2026-11-07", 0)),
+            },
+        ];
+        for case in cases {
+            let state = dir.join("state");
+            if let Some(day) = case.state_day {
+                std::fs::write(&state, format!("{day}\n0\n")).unwrap();
+            } else {
+                let _ = std::fs::remove_file(&state);
+            }
+            let attempt = case
+                .attempt
+                .map_or_else(Attempt::default, |(last, day, failures)| Attempt {
+                    last_epoch: last,
+                    last_day: Some(day.to_string()),
+                    failures,
+                });
+            let clock = Clock {
+                day: case.day.to_string(),
+                hhmm: case.hhmm.to_string(),
+                epoch: case.epoch,
+            };
+            println!(
+                "tick {} run={}",
+                case.name,
+                u8::from(should_run(&state, &attempt, &clock, "0100", 1800))
+            );
+        }
     }
 
     #[test]
