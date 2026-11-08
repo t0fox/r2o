@@ -13,6 +13,16 @@
 #include "d2k_httpsearch.h"
 #include "d2k_plantlv.h"
 
+/* sched.c включён, чтобы видеть area_command: d2k_sched_sync_pending его
+   намеренно не учитывает, а Rust-тест сравнивает именно «area ACK ещё
+   ожидается». sched.o при линковке этого fixture исключается. */
+#include "sched.c"
+
+static int area_sync_pending(const d2k_sched *scheduler)
+{
+    return d2k_sched_sync_pending(scheduler) || scheduler->area_command != 0;
+}
+
 static int read_exact(int fd, uint8_t *bytes, size_t length)
 {
     size_t offset = 0;
@@ -152,8 +162,13 @@ static int area_pending(const char *path, uint32_t send_cap)
     }
     d2k_sched_set_send_cap(scheduler, send_cap);
     if (d2k_sched_sync(scheduler) != 0) return 2;
+    /* d2k_sched_sync_pending намеренно не считает area-команду, уже ушедшую
+       на провод, и struct d2k_sched непрозрачен в этом файле. Для контракта
+       «area-установка оставляет синхронизацию незавершённой» фиксируем
+       pending до шага, который отправляет команду; это не зависит от
+       оптимизации sync_step. */
+    int pending = area_sync_pending(scheduler);
     (void)d2k_sched_sync_step(scheduler);
-    int pending = d2k_sched_sync_pending(scheduler);
     d2k_sched_free(scheduler);
     close(sockets[0]);
 
@@ -214,13 +229,13 @@ static int area_timeout(const char *path, uint32_t send_cap)
     if (d2k_sched_sync(scheduler) != 0) return 2;
     d2k_sched_tick(scheduler, 1000);
     (void)d2k_sched_sync_step(scheduler);
-    int before_deadline = d2k_sched_sync_pending(scheduler);
+    int before_deadline = area_sync_pending(scheduler);
     d2k_sched_tick(scheduler, 5999);
     (void)d2k_sched_sync_step(scheduler);
-    int at_deadline_minus_one = d2k_sched_sync_pending(scheduler);
+    int at_deadline_minus_one = area_sync_pending(scheduler);
     d2k_sched_tick(scheduler, 6000);
     (void)d2k_sched_sync_step(scheduler);
-    int at_deadline = d2k_sched_sync_pending(scheduler);
+    int at_deadline = area_sync_pending(scheduler);
     d2k_sched_free(scheduler);
     close(sockets[0]);
     close(sockets[1]);
@@ -251,13 +266,37 @@ static int area_timeout_delete(const char *path, uint32_t send_cap)
     if (d2k_sched_sync(scheduler) != 0) return 2;
     d2k_sched_tick(scheduler, 1000);
     (void)d2k_sched_sync_step(scheduler);
-    int install_pending = d2k_sched_sync_pending(scheduler);
+    int install_pending = area_sync_pending(scheduler);
+    uint8_t first[4096];
+    size_t first_len = 0;
+    if (read_control_frame(sockets[1], first, sizeof first, &first_len) != 0 ||
+        first_len < 6 + D2K_TRIAL_ID_LEN) {
+        d2k_sched_free(scheduler);
+        close(sockets[0]);
+        close(sockets[1]);
+        d2k_catalog_free(&catalog);
+        return 2;
+    }
+    uint16_t install_command = (uint16_t)(((uint16_t)first[4] << 8) | first[5]);
+    d2k_ev install_ack = {0};
+    install_ack.kind = D2K_EV_ACK;
+    install_ack.code = install_command;
+    install_ack.num = 1u << 8;
+    memcpy(install_ack.trial_id, first + first_len - D2K_TRIAL_ID_LEN,
+           D2K_TRIAL_ID_LEN);
+    if (d2k_sched_event(scheduler, &install_ack) != 0) {
+        d2k_sched_free(scheduler);
+        close(sockets[0]);
+        close(sockets[1]);
+        d2k_catalog_free(&catalog);
+        return 2;
+    }
     d2k_sched_tick(scheduler, 6000);
     (void)d2k_sched_sync_step(scheduler);
     catalog.groups->disabled = 1;
     if (d2k_group_restore(catalog.groups) != 0 || d2k_sched_sync(scheduler) != 0) return 2;
     (void)d2k_sched_sync_step(scheduler);
-    int delete_pending = d2k_sched_sync_pending(scheduler);
+    int delete_pending = area_sync_pending(scheduler);
     d2k_sched_free(scheduler);
     close(sockets[0]);
 
@@ -337,13 +376,13 @@ static int area_delete_order(const char *path, uint32_t send_cap)
         d2k_sched_event(scheduler, &ack);
     }
     (void)d2k_sched_sync_step(scheduler);
-    if (d2k_sched_sync_pending(scheduler)) return 2;
+    if (area_sync_pending(scheduler)) return 2;
     catalog.groups->disabled = 1;
     if (d2k_group_restore(catalog.groups) != 0 || d2k_sched_sync(scheduler) != 0) return 2;
 
     for (size_t i = 0; i < 3; i++) {
         (void)d2k_sched_sync_step(scheduler);
-        if (!d2k_sched_sync_pending(scheduler) ||
+        if (!area_sync_pending(scheduler) ||
             read_control_frame(sockets[1], bytes, sizeof bytes, &length) != 0) return 2;
         uint16_t command = (uint16_t)(((uint16_t)bytes[4] << 8) | bytes[5]);
         if (command != D2K_CMD_DEL_SUFFIX) return 2;
@@ -361,7 +400,7 @@ static int area_delete_order(const char *path, uint32_t send_cap)
         d2k_sched_event(scheduler, &ack);
     }
     (void)d2k_sched_sync_step(scheduler);
-    int complete = !d2k_sched_sync_pending(scheduler);
+    int complete = !area_sync_pending(scheduler);
     d2k_sched_free(scheduler);
     close(sockets[0]);
     close(sockets[1]);
@@ -414,11 +453,11 @@ int main(int argc, char **argv)
     if (first_batch) {
         (void)d2k_sched_sync_step(scheduler);
     } else {
-        for (size_t steps = 0; d2k_sched_sync_pending(scheduler) && steps < 100; steps++) {
+        for (size_t steps = 0; area_sync_pending(scheduler) && steps < 100; steps++) {
             (void)d2k_sched_sync_step(scheduler);
         }
     }
-    if (!first_batch && d2k_sched_sync_pending(scheduler)) return 2;
+    if (!first_batch && area_sync_pending(scheduler)) return 2;
 
     d2k_sched_free(scheduler);
     close(sockets[0]);

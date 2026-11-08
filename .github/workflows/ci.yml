@@ -170,10 +170,13 @@ jobs:
             echo "::group::$test"
             test_name=${test##*/}
             if [ "$test_name" = test-router-firewall.sh ] || [ "$test_name" = test-router-nft-real-differential.sh ]; then
-              if sudo sh "$test"; then
-                :
+              if [ "$test_name" = test-router-nft-real-differential.sh ]; then
+                sudo env R2O_DONOR_ROOT="$GITHUB_WORKSPACE/d2o-a378" sh "$test"
               else
-                status=$?
+                sudo sh "$test"
+              fi
+              status=$?
+              if [ "$status" -ne 0 ]; then
                 failed+=("$test ($status)")
               fi
             else
@@ -621,7 +624,13 @@ jobs:
           set -euo pipefail
           test "$(git -C d2o rev-parse HEAD)" = "$DONOR_SHA"
           make -B -C d2o/datapath test_session test_quic_session test_stun_session test_routemark CC=clang-18
-          make -B -C d2o/core diagnostics.o httpsearch.o httpup_logic.o CC=clang-18
+          # У baseline/legacy доноров этих файлов ещё нет; собираем только
+          # существующие, иначе make падает на отсутствующей цели.
+          for object in diagnostics httpsearch httpup_logic; do
+            if [ -f "d2o/core/$object.c" ]; then
+              make -B -C d2o/core "$object.o" CC=clang-18
+            fi
+          done
           cargo +1.98.0 fetch --locked
       - name: C/Rust сценарии
         env:

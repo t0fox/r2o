@@ -301,6 +301,10 @@ int main(int argc, char **argv) {
             task *candidate = &scheduler->tasks[0];
             task_reset(scheduler, candidate);
             candidate->state = states[i]; candidate->transport = 6; candidate->family = 4;
+            /* Ключ потока должен совпасть с событием; иначе on_shape не
+               доходит до отмены T_ASKING и C-оракул молчит. */
+            candidate->trigger_flow.transport = 6;
+            candidate->trigger_flow.family = 4;
             candidate->trigger_shape = candidate->asked_shape = D2K_SHAPE_MODERN;
             snprintf(candidate->name, sizeof candidate->name, "owner.example.com");
             if (d2k_hello_from_profile(D2K_SHAPE_MODERN, candidate->name,
@@ -329,6 +333,11 @@ int main(int argc, char **argv) {
             candidate->state = T_ASKING;
             candidate->transport = 6;
             candidate->family = 4;
+            /* Событие в этом кейсе не несёт адресов/портов; ключ потока
+               должен совпасть с ним, иначе on_shape не дойдёт до проверки
+               stop и результат зависит от компилятора/остатков памяти. */
+            candidate->trigger_flow.transport = 6;
+            candidate->trigger_flow.family = 4;
             candidate->trigger_shape = candidate->asked_shape = D2K_SHAPE_MODERN;
             candidate->trig_snapped = (mode & 1) != 0;
             candidate->reasked = (mode & 2) != 0;

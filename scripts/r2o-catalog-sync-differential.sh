@@ -24,10 +24,14 @@ donor_objects=$(make -s -C "$donor_core" \
     --eval='print-donor-objects:;@echo $(SRC:.c=.o)' print-donor-objects)
 # diagnostics.o входит в TEST_LDFLAGS Makefile, но не в SRC.
 donor_objects="$donor_objects diagnostics.o"
+# Фикстура сама включает sched.c ради area_command; sched.o исключаем,
+# иначе получаем duplicate symbols.
+donor_objects=$(printf '%s\n' "$donor_objects" | tr ' ' '\n' |
+    grep -vx 'sched.o' | tr '\n' ' ')
 (
     cd "$donor_core"
     clang-18 -std=c99 -O2 -Wall -Wextra -Werror \
-        -Iinclude -I"$donor_root/datapath/include" \
+        -I. -Iinclude -I"$donor_root/datapath/include" \
         "$repo_root/crates/r2o-controller/tests/d2o_catalog_sync_wire_fixture.c" \
         $donor_objects httpsearch.o httpup_logic.o libd2k_udp.a -lpthread -o "$tmp_dir/donor-catalog-wire"
 )
@@ -69,11 +73,15 @@ if ! cargo +1.98.0 test --locked -p r2o-controller --bin r2o-controller \
 fi
 grep '^D2O_AREA_PENDING=' "$tmp_dir/c.area-pending" >"$tmp_dir/c.area-pending.state"
 grep '^D2O_AREA_PENDING=' "$tmp_dir/rust.area-pending.log" >"$tmp_dir/rust.area-pending.state"
-grep '^D2O_AREA_COMMAND=' "$tmp_dir/c.area-pending" >"$tmp_dir/c.area-pending.command"
-grep '^D2O_AREA_COMMAND=' "$tmp_dir/rust.area-pending.log" >"$tmp_dir/rust.area-pending.command"
+grep '^D2O_AREA_COMMAND=' "$tmp_dir/c.area-pending" |
+    sed -E 's/^(D2O_AREA_COMMAND=)([0-9a-f]*)([0-9a-f]{32})$/\1\2<area-id>/' \
+        >"$tmp_dir/c.area-pending.command"
+grep '^D2O_AREA_COMMAND=' "$tmp_dir/rust.area-pending.log" |
+    sed -E 's/^(D2O_AREA_COMMAND=)([0-9a-f]*)([0-9a-f]{32})$/\1\2<area-id>/' \
+        >"$tmp_dir/rust.area-pending.command"
 diff -u "$tmp_dir/c.area-pending.state" "$tmp_dir/rust.area-pending.state"
 diff -u "$tmp_dir/c.area-pending.command" "$tmp_dir/rust.area-pending.command"
-"$tmp_dir/donor-catalog-wire" "$area_pending_fixture" 1280 --area-timeout >"$tmp_dir/c.area-timeout"
+"$tmp_dir/donor-catalog-wire" "$area_timeout_fixture" 1280 --area-timeout >"$tmp_dir/c.area-timeout"
 if ! cargo +1.98.0 test --locked -p r2o-controller --bin r2o-controller \
     catalog_sync_area_ack_expires_at_five_seconds_like_donor -- --nocapture \
     >"$tmp_dir/rust.area-timeout.log" 2>&1; then
@@ -92,8 +100,12 @@ if ! cargo +1.98.0 test --locked -p r2o-controller --bin r2o-controller \
 fi
 grep '^D2O_AREA_TIMEOUT_DELETE=' "$tmp_dir/c.area-timeout-delete" >"$tmp_dir/c.area-timeout-delete.state"
 grep '^D2O_AREA_TIMEOUT_DELETE=' "$tmp_dir/rust.area-timeout-delete.log" >"$tmp_dir/rust.area-timeout-delete.state"
-grep '^D2O_AREA_DELETE_COMMAND=' "$tmp_dir/c.area-timeout-delete" >"$tmp_dir/c.area-timeout-delete.command"
-grep '^D2O_AREA_DELETE_COMMAND=' "$tmp_dir/rust.area-timeout-delete.log" >"$tmp_dir/rust.area-timeout-delete.command"
+grep '^D2O_AREA_DELETE_COMMAND=' "$tmp_dir/c.area-timeout-delete" |
+    sed -E 's/^(D2O_AREA_DELETE_COMMAND=)([0-9a-f]*)([0-9a-f]{32})$/\1\2<area-id>/' \
+        >"$tmp_dir/c.area-timeout-delete.command"
+grep '^D2O_AREA_DELETE_COMMAND=' "$tmp_dir/rust.area-timeout-delete.log" |
+    sed -E 's/^(D2O_AREA_DELETE_COMMAND=)([0-9a-f]*)([0-9a-f]{32})$/\1\2<area-id>/' \
+        >"$tmp_dir/rust.area-timeout-delete.command"
 diff -u "$tmp_dir/c.area-timeout-delete.state" "$tmp_dir/rust.area-timeout-delete.state"
 diff -u "$tmp_dir/c.area-timeout-delete.command" "$tmp_dir/rust.area-timeout-delete.command"
 "$tmp_dir/donor-catalog-wire" "$area_delete_order_fixture" 1280 --area-delete-order >"$tmp_dir/c.area-delete-order"
@@ -103,8 +115,12 @@ if ! cargo +1.98.0 test --locked -p r2o-controller --bin r2o-controller \
     cat "$tmp_dir/rust.area-delete-order.log" >&2
     exit 1
 fi
-grep '^D2O_AREA_DELETE_' "$tmp_dir/c.area-delete-order" >"$tmp_dir/c.area-delete-order.out"
-grep '^D2O_AREA_DELETE_' "$tmp_dir/rust.area-delete-order.log" >"$tmp_dir/rust.area-delete-order.out"
+grep '^D2O_AREA_DELETE_' "$tmp_dir/c.area-delete-order" |
+    sed -E 's/^(D2O_AREA_DELETE_COMMAND=)([0-9a-f]*)([0-9a-f]{32})$/\1\2<area-id>/' \
+        >"$tmp_dir/c.area-delete-order.out"
+grep '^D2O_AREA_DELETE_' "$tmp_dir/rust.area-delete-order.log" |
+    sed -E 's/^(D2O_AREA_DELETE_COMMAND=)([0-9a-f]*)([0-9a-f]{32})$/\1\2<area-id>/' \
+        >"$tmp_dir/rust.area-delete-order.out"
 diff -u "$tmp_dir/c.area-delete-order.out" "$tmp_dir/rust.area-delete-order.out"
 "$tmp_dir/donor-catalog-wire" --http-bound-set >"$tmp_dir/c.http-bound"
 if ! cargo +1.98.0 test --locked -p r2o-controller --bin r2o-controller \

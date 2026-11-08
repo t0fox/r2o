@@ -20,6 +20,7 @@ type AtomicU64 = std::sync::atomic::AtomicU64;
 struct AtomicU64(Mutex<u64>);
 
 #[cfg(not(target_has_atomic = "64"))]
+#[allow(dead_code)]
 impl AtomicU64 {
     const fn new(value: u64) -> Self {
         Self(Mutex::new(value))
