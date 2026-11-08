@@ -2412,6 +2412,70 @@ mod differential_tests {
     }
 
     #[test]
+    #[ignore = "run through scripts/test-panel-client-disconnect-differential.sh"]
+    fn d2o_client_disconnect_keeps_serve_alive() {
+        STOP_REQUESTED.store(false, Ordering::Release);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || serve(listener, Config::default()));
+
+        let mut first = TcpStream::connect(address).unwrap();
+        first.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n").unwrap();
+        let _ = first.shutdown(std::net::Shutdown::Both);
+        drop(first);
+        std::thread::sleep(Duration::from_millis(100));
+
+        let mut second = TcpStream::connect(address).unwrap();
+        second
+            .write_all(b"GET /nope HTTP/1.1\r\nHost: x\r\n\r\n")
+            .unwrap();
+        second.shutdown(std::net::Shutdown::Write).unwrap();
+        second
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut response = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match second.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => response.extend_from_slice(&chunk[..read]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    if Instant::now() >= deadline {
+                        panic!("second client did not receive a response");
+                    }
+                }
+                Err(error) => panic!("second client read failed: {error}"),
+            }
+        }
+        assert!(
+            !handle.is_finished(),
+            "serve завершился после обрыва клиента"
+        );
+        let status = std::str::from_utf8(&response)
+            .unwrap()
+            .lines()
+            .next()
+            .and_then(|line| line.split_ascii_whitespace().nth(1))
+            .and_then(|status| status.parse::<u16>().ok())
+            .expect("HTTP status");
+        std::fs::write(
+            std::env::var_os("R2O_PANEL_DISCONNECT_RUST_TRACE")
+                .expect("test helper provides Rust trace path"),
+            format!("second={status}\n"),
+        )
+        .unwrap();
+        STOP_REQUESTED.store(true, Ordering::Release);
+        std::thread::sleep(Duration::from_millis(150));
+        let _ = handle.join();
+    }
+
+    #[test]
     #[ignore = "run through scripts/test-panel-response-deadline-differential.sh"]
     fn d2o_response_deadline_matches_rust_sender() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

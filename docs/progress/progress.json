@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 114,
-  "percent": 42.07,
+  "points": 115,
+  "percent": 42.44,
   "total": 179,
   "counts": {
-    "verified": 81,
+    "verified": 82,
     "carry": 40,
-    "partial": 57,
+    "partial": 56,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1447,7 +1447,7 @@
     {
       "name": "WebPanel",
       "weight": 30,
-      "points": 7,
+      "points": 8,
       "items": [
         {
           "id": 79,
@@ -1574,15 +1574,15 @@
           "key": "A9",
           "name": "Устойчивость к обрыву клиента/IO-ошибке",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "WebPanel",
-          "coverage": "`serve` изолирует `handle_connection`; IO-ошибка больше не завершает весь serve",
-          "gap": "Нет paired C/Rust теста обрыва клиента",
-          "mapping": "`serve` изолирует `handle_connection`; IO-ошибка больше не завершает весь serve",
-          "evidence": "`serve` изолирует `handle_connection`; IO-ошибка больше не завершает весь serve · пробел: Нет paired C/Rust теста обрыва клиента"
+          "coverage": "`scripts/test-panel-client-disconnect-differential.sh` (a378); C `read_request`/handle loop; Rust `serve`",
+          "gap": "После обрыва первого клиента следующий запрос получает 404",
+          "mapping": "`scripts/test-panel-client-disconnect-differential.sh` (a378); C `read_request`/handle loop; Rust `serve`",
+          "evidence": "`scripts/test-panel-client-disconnect-differential.sh` (a378); C `read_request`/handle loop; Rust `serve` · пробел: После обрыва первого клиента следующий запрос получает 404"
         },
         {
           "id": 88,
@@ -4067,15 +4067,15 @@
       "key": "A9",
       "name": "Устойчивость к обрыву клиента/IO-ошибке",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "WebPanel",
-      "coverage": "`serve` изолирует `handle_connection`; IO-ошибка больше не завершает весь serve",
-      "gap": "Нет paired C/Rust теста обрыва клиента",
-      "mapping": "`serve` изолирует `handle_connection`; IO-ошибка больше не завершает весь serve",
-      "evidence": "`serve` изолирует `handle_connection`; IO-ошибка больше не завершает весь serve · пробел: Нет paired C/Rust теста обрыва клиента"
+      "coverage": "`scripts/test-panel-client-disconnect-differential.sh` (a378); C `read_request`/handle loop; Rust `serve`",
+      "gap": "После обрыва первого клиента следующий запрос получает 404",
+      "mapping": "`scripts/test-panel-client-disconnect-differential.sh` (a378); C `read_request`/handle loop; Rust `serve`",
+      "evidence": "`scripts/test-panel-client-disconnect-differential.sh` (a378); C `read_request`/handle loop; Rust `serve` · пробел: После обрыва первого клиента следующий запрос получает 404"
     },
     {
       "id": 88,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 114,
+      "points": 115,
       "weight": 271,
-      "percent": 42.07
+      "percent": 42.44
     },
     "carry_forward": {
-      "points": 177,
+      "points": 178,
       "weight": 271,
-      "percent": 65.31,
+      "percent": 65.68,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
