@@ -5,7 +5,7 @@ r2o_script_dir=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 r2o_donor_core="${R2O_DONOR_CORE:-${r2o_script_dir%/*}/d2o/core}"
 r2o_log_dir="$r2o_script_dir/.rea"
 r2o_log="$r2o_log_dir/r2o-http-search-differential-$(date +%Y%m%d-%H%M%S).log"
-r2o_upstream_sha=304ba893dd37197128ac8799c0495b035f6a38c0
+r2o_upstream_sha=a378e230947ebfd011439e1cac0f1e994d883aae
 
 if [ "${R2O_EXPECTED_DONOR_SHA:-}" != "$r2o_upstream_sha" ]; then
     printf 'HTTP-search differential requires pinned upstream donor %s\n' "$r2o_upstream_sha" >&2
@@ -51,19 +51,38 @@ mkdir -p "$r2o_log_dir"
     r2o_d2kc_sha=$(sed 's/\r$//' "$r2o_donor_core/d2kc.c" | sha256sum | awk '{print $1}')
     r2o_httpsprobe_sha=$(sed 's/\r$//' "$r2o_donor_core/httpsprobe.c" | sha256sum | awk '{print $1}')
     if [ "$r2o_httpsearch_sha" != \
-        '7075b74f1340b53c410422bfe2ac5f558d009b29c20a7085e674f49b0210fa3a' ] || \
+        '0731e627c42dd88ad7903de2016a0fd49f6ffbdd0a8dc950635c9c4e03ad8523' ] || \
         [ "$r2o_test_sha" != \
-        '7a1f589858f8ab5bec6b419e64f2bd262da023008726984487f4efa1cdad8195' ] || \
+        'f62937fea7725fc591c6a66587f6cd242905d91ad2220280164d00a3204669b7' ] || \
         [ "$r2o_d2kc_sha" != \
-        'b6848021494bdf52e2850db671567a5b3d8f522cdcc933ca8bf9a9ec10efce46' ] || \
+        'adc5c3af851e271b4e4b829b172a83fb742acf3dcf94cbae13e601c5845e836b' ] || \
         [ "$r2o_httpsprobe_sha" != \
         '2a3f20b042d71f8565f4794fa474bc559cfb9a49045ad8c7d4d9400d4100968d' ]; then
         printf 'Исходники HTTP-search отличаются от проверенного снимка донора\n' >&2
         exit 1
     fi
     printf '\nТесты C-эталона HTTP-search\n'
+    # Makefile-цель test_httpsearch на a378 тянет libd2k_udp.a через LDFLAGS
+    # и одновременно компилирует plan_apply.c, что даёт дубли символов.
+    # Собираем тест напрямую из источников, как это делает san-httpsearch.
+    r2o_build_c_httpsearch() {
+        r2o_binary=$1
+        (
+        cd "$r2o_donor_core" || exit 1
+        clang-18 -std=c99 -O2 -Wall -Wextra -Werror -DD2K_HS_TESTING \
+            -Iinclude -I"$r2o_donor_core/../datapath/include" \
+            -o "$r2o_binary" \
+            test_httpsearch.c httpsearch.c httpup_logic.c plantlv.c quic.c \
+            quicwire.c crypto.c ../datapath/plan_parse.c \
+            ../datapath/plan_apply.c ../datapath/wire.c \
+            verify.c quicconn.c h3.c tls12.c p256.c compose.c measured.c \
+            hello.c meas.c link.c tls13.c tls13core.c x25519.c \
+            diagnostics.c -lpthread &&
+            "$r2o_binary"
+        )
+    }
     r2o_run_timed 'test_httpsearch C-эталона' \
-        make -B -C "$r2o_donor_core" test-httpsearch httpsearch.o httpup_logic.o CC=clang-18
+        r2o_build_c_httpsearch "$r2o_log_dir/test_httpsearch-$$"
     printf '\nСверка усечённого portal response и timeout внутри заголовка C/Rust\n'
     r2o_state_binary="$r2o_log_dir/http-response-state-$$"
     r2o_state_c="$r2o_log_dir/http-response-state-c-$$"
@@ -84,7 +103,7 @@ mkdir -p "$r2o_log_dir"
         "$r2o_donor_core/measured.o" "$r2o_donor_core/hello.o" \
         "$r2o_donor_core/meas.o" "$r2o_donor_core/link.o" \
         "$r2o_donor_core/tls13.o" "$r2o_donor_core/tls13core.o" \
-        "$r2o_donor_core/x25519.o" -lpthread
+        "$r2o_donor_core/x25519.o" "$r2o_donor_core/diagnostics.o" -lpthread
     "$r2o_state_binary" >"$r2o_state_c"
     if R2O_HTTP_RESPONSE_DIFF_OUTPUT="$r2o_state_rust" \
         cargo +1.98.0 test -p r2o-controller --locked --offline \
@@ -115,7 +134,7 @@ mkdir -p "$r2o_log_dir"
         "$r2o_donor_core/measured.o" "$r2o_donor_core/hello.o" \
         "$r2o_donor_core/meas.o" "$r2o_donor_core/link.o" \
         "$r2o_donor_core/tls13.o" "$r2o_donor_core/tls13core.o" \
-        "$r2o_donor_core/x25519.o" -lpthread
+        "$r2o_donor_core/x25519.o" "$r2o_donor_core/diagnostics.o" -lpthread
     "$r2o_applied_binary" >"$r2o_applied_c"
     R2O_HTTP_APPLIED_DIFF_OUTPUT="$r2o_applied_rust" \
         cargo +1.98.0 test -p r2o-controller --bin r2o-controller \
@@ -161,7 +180,7 @@ mkdir -p "$r2o_log_dir"
         "$r2o_donor_core/measured.o" "$r2o_donor_core/hello.o" \
         "$r2o_donor_core/meas.o" "$r2o_donor_core/link.o" \
         "$r2o_donor_core/tls13.o" "$r2o_donor_core/tls13core.o" \
-        "$r2o_donor_core/x25519.o" -Wl,--gc-sections -lpthread
+        "$r2o_donor_core/x25519.o" "$r2o_donor_core/diagnostics.o" -Wl,--gc-sections -lpthread
     "$r2o_durable_binary" >"$r2o_durable_c"
     R2O_HTTP_DURABLE_DIFF_OUTPUT="$r2o_durable_rust" \
         cargo +1.98.0 test -p r2o-controller --bin r2o-controller \
@@ -191,7 +210,7 @@ mkdir -p "$r2o_log_dir"
         "$r2o_donor_core/measured.o" "$r2o_donor_core/hello.o" \
         "$r2o_donor_core/meas.o" "$r2o_donor_core/link.o" \
         "$r2o_donor_core/tls13.o" "$r2o_donor_core/tls13core.o" \
-        "$r2o_donor_core/x25519.o" -Wl,--gc-sections -lpthread
+        "$r2o_donor_core/x25519.o" "$r2o_donor_core/diagnostics.o" -Wl,--gc-sections -lpthread
     "$r2o_rollback_binary" >"$r2o_rollback_c"
     R2O_HTTP_ROLLBACK_DIFF_OUTPUT="$r2o_rollback_rust" \
         cargo +1.98.0 test -p r2o-controller --bin r2o-controller \
@@ -220,7 +239,7 @@ mkdir -p "$r2o_log_dir"
         "$r2o_donor_core/measured.o" "$r2o_donor_core/hello.o" \
         "$r2o_donor_core/meas.o" "$r2o_donor_core/link.o" \
         "$r2o_donor_core/tls13.o" "$r2o_donor_core/tls13core.o" \
-        "$r2o_donor_core/x25519.o" -Wl,--gc-sections -pthread
+        "$r2o_donor_core/x25519.o" "$r2o_donor_core/diagnostics.o" -Wl,--gc-sections -pthread
     "$r2o_baseline_binary" >"$r2o_baseline_c"
     R2O_HTTP_BASELINE_DIFF_OUTPUT="$r2o_baseline_rust" \
         cargo +1.98.0 test -p r2o-controller --bin r2o-controller \
@@ -248,7 +267,7 @@ mkdir -p "$r2o_log_dir"
         "$r2o_donor_core/measured.o" "$r2o_donor_core/hello.o" \
         "$r2o_donor_core/meas.o" "$r2o_donor_core/link.o" \
         "$r2o_donor_core/tls13.o" "$r2o_donor_core/tls13core.o" \
-        "$r2o_donor_core/x25519.o"
+        "$r2o_donor_core/x25519.o" "$r2o_donor_core/diagnostics.o"
     r2o_c_answer=$("$r2o_judge_binary" "$r2o_judge_fixture")
     r2o_run_timed 'суждение HTTP-ответа в Rust' \
         env R2O_HTTP_JUDGE_DIFF_OUTPUT="$r2o_rust_answer" \
@@ -280,7 +299,7 @@ mkdir -p "$r2o_log_dir"
         "$r2o_donor_core/compose.o" "$r2o_donor_core/measured.o" \
         "$r2o_donor_core/hello.o" "$r2o_donor_core/meas.o" \
         "$r2o_donor_core/link.o" "$r2o_donor_core/tls13.o" \
-        "$r2o_donor_core/tls13core.o" "$r2o_donor_core/x25519.o" \
+        "$r2o_donor_core/tls13core.o" "$r2o_donor_core/x25519.o" "$r2o_donor_core/diagnostics.o" \
         -Wl,--gc-sections -pthread
     "$r2o_cut_context_binary" >"$r2o_cut_context_c"
     R2O_HTTP_CUT_CONTEXT_DIFF_OUTPUT="$r2o_cut_context_rust" \
@@ -309,7 +328,7 @@ mkdir -p "$r2o_log_dir"
         "$r2o_donor_core/measured.o" "$r2o_donor_core/hello.o" \
         "$r2o_donor_core/meas.o" "$r2o_donor_core/link.o" \
         "$r2o_donor_core/tls13.o" "$r2o_donor_core/tls13core.o" \
-        "$r2o_donor_core/x25519.o" -Wl,--gc-sections -pthread
+        "$r2o_donor_core/x25519.o" "$r2o_donor_core/diagnostics.o" -Wl,--gc-sections -pthread
     r2o_queue_c=$("$r2o_queue_binary" "$r2o_queue_fixture")
     r2o_run_timed 'очередь HTTP в Rust' \
         env R2O_HTTP_QUEUE_DIFF_OUTPUT="$r2o_queue_rust" \
@@ -339,7 +358,7 @@ mkdir -p "$r2o_log_dir"
         "$r2o_donor_core/tls12.o" "$r2o_donor_core/p256.o" "$r2o_donor_core/compose.o" \
         "$r2o_donor_core/measured.o" "$r2o_donor_core/hello.o" "$r2o_donor_core/meas.o" \
         "$r2o_donor_core/link.o" "$r2o_donor_core/tls13.o" "$r2o_donor_core/tls13core.o" \
-        "$r2o_donor_core/x25519.o" -Wl,--gc-sections -pthread
+        "$r2o_donor_core/x25519.o" "$r2o_donor_core/diagnostics.o" -Wl,--gc-sections -pthread
     "$r2o_no_exec_binary" >"$r2o_no_exec_c"
     R2O_HTTP_NO_EXECUTED_DIFF_OUTPUT="$r2o_no_exec_rust" \
         cargo +1.98.0 test -p r2o-controller --bin r2o-controller --locked --offline \

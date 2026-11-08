@@ -3,12 +3,12 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 195,
-  "percent": 71.96,
+  "points": 200,
+  "percent": 73.8,
   "total": 179,
   "counts": {
-    "verified": 134,
-    "carry": 22,
+    "verified": 136,
+    "carry": 20,
     "partial": 22,
     "missing": 0,
     "implemented": 0,
@@ -632,7 +632,7 @@
     {
       "name": "Discovery",
       "weight": 27,
-      "points": 19,
+      "points": 24,
       "items": [
         {
           "id": 25,
@@ -699,30 +699,30 @@
           "key": "S5",
           "name": "JSON catalog atomic save/merge/sync",
           "weight": 2,
-          "points": 0,
+          "points": 2,
           "carry_points": 2,
-          "status": "carry",
-          "statusLabel": "carry (304) — historical",
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Discovery",
-          "coverage": "`r2o-catalog-persist`, `r2o-catalog-sync` (304)",
-          "gap": "304; concurrent external writer",
-          "mapping": "`r2o-catalog-persist`, `r2o-catalog-sync` (304)",
-          "evidence": "`r2o-catalog-persist`, `r2o-catalog-sync` (304) · пробел: 304; concurrent external writer"
+          "coverage": "`r2o-catalog-persist-differential.sh`, `r2o-catalog-sync-differential.sh` (a378)",
+          "gap": "atomic save/merge/sync, batch/area/order/timeout совпали; concurrent external writer не покрыт",
+          "mapping": "`r2o-catalog-persist-differential.sh`, `r2o-catalog-sync-differential.sh` (a378)",
+          "evidence": "`r2o-catalog-persist-differential.sh`, `r2o-catalog-sync-differential.sh` (a378) · пробел: atomic save/merge/sync, batch/area/order/timeout совпали; concurrent external writer не покрыт"
         },
         {
           "id": 30,
           "key": "S6",
           "name": "HTTP search candidate/order/retry/judge/APPLIED",
           "weight": 3,
-          "points": 0,
+          "points": 3,
           "carry_points": 3,
-          "status": "carry",
-          "statusLabel": "carry (304) — historical",
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Discovery",
-          "coverage": "`r2o-http-search` (304), `r2o-fetch-cli` (без пина)",
-          "gap": "304; живой поиск; APPLIED branch",
-          "mapping": "`r2o-http-search` (304), `r2o-fetch-cli` (без пина)",
-          "evidence": "`r2o-http-search` (304), `r2o-fetch-cli` (без пина) · пробел: 304; живой поиск; APPLIED branch"
+          "coverage": "`r2o-http-search-differential.sh`, `r2o-fetch-cli-differential.sh` (a378)",
+          "gap": "HTTP baseline/portal/timeout/state, повторы и fetch CLI JSON совпали; живой поиск/APPLIED branch не покрыты",
+          "mapping": "`r2o-http-search-differential.sh`, `r2o-fetch-cli-differential.sh` (a378)",
+          "evidence": "`r2o-http-search-differential.sh`, `r2o-fetch-cli-differential.sh` (a378) · пробел: HTTP baseline/portal/timeout/state, повторы и fetch CLI JSON совпали; живой поиск/APPLIED branch не покрыты"
         },
         {
           "id": 31,
@@ -3197,30 +3197,30 @@
       "key": "S5",
       "name": "JSON catalog atomic save/merge/sync",
       "weight": 2,
-      "points": 0,
+      "points": 2,
       "carry_points": 2,
-      "status": "carry",
-      "statusLabel": "carry (304) — historical",
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Discovery",
-      "coverage": "`r2o-catalog-persist`, `r2o-catalog-sync` (304)",
-      "gap": "304; concurrent external writer",
-      "mapping": "`r2o-catalog-persist`, `r2o-catalog-sync` (304)",
-      "evidence": "`r2o-catalog-persist`, `r2o-catalog-sync` (304) · пробел: 304; concurrent external writer"
+      "coverage": "`r2o-catalog-persist-differential.sh`, `r2o-catalog-sync-differential.sh` (a378)",
+      "gap": "atomic save/merge/sync, batch/area/order/timeout совпали; concurrent external writer не покрыт",
+      "mapping": "`r2o-catalog-persist-differential.sh`, `r2o-catalog-sync-differential.sh` (a378)",
+      "evidence": "`r2o-catalog-persist-differential.sh`, `r2o-catalog-sync-differential.sh` (a378) · пробел: atomic save/merge/sync, batch/area/order/timeout совпали; concurrent external writer не покрыт"
     },
     {
       "id": 30,
       "key": "S6",
       "name": "HTTP search candidate/order/retry/judge/APPLIED",
       "weight": 3,
-      "points": 0,
+      "points": 3,
       "carry_points": 3,
-      "status": "carry",
-      "statusLabel": "carry (304) — historical",
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Discovery",
-      "coverage": "`r2o-http-search` (304), `r2o-fetch-cli` (без пина)",
-      "gap": "304; живой поиск; APPLIED branch",
-      "mapping": "`r2o-http-search` (304), `r2o-fetch-cli` (без пина)",
-      "evidence": "`r2o-http-search` (304), `r2o-fetch-cli` (без пина) · пробел: 304; живой поиск; APPLIED branch"
+      "coverage": "`r2o-http-search-differential.sh`, `r2o-fetch-cli-differential.sh` (a378)",
+      "gap": "HTTP baseline/portal/timeout/state, повторы и fetch CLI JSON совпали; живой поиск/APPLIED branch не покрыты",
+      "mapping": "`r2o-http-search-differential.sh`, `r2o-fetch-cli-differential.sh` (a378)",
+      "evidence": "`r2o-http-search-differential.sh`, `r2o-fetch-cli-differential.sh` (a378) · пробел: HTTP baseline/portal/timeout/state, повторы и fetch CLI JSON совпали; живой поиск/APPLIED branch не покрыты"
     },
     {
       "id": 31,
@@ -5460,9 +5460,9 @@
   ],
   "comparison": {
     "strict": {
-      "points": 195,
+      "points": 200,
       "weight": 271,
-      "percent": 71.96
+      "percent": 73.8
     },
     "carry_forward": {
       "points": 231,
