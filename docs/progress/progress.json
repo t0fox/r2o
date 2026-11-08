@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 157,
-  "percent": 57.93,
+  "points": 158,
+  "percent": 58.3,
   "total": 179,
   "counts": {
-    "verified": 108,
+    "verified": 109,
     "carry": 40,
-    "partial": 30,
+    "partial": 29,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1859,22 +1859,22 @@
     {
       "name": "Router / Service",
       "weight": 84,
-      "points": 71,
+      "points": 72,
       "items": [
         {
           "id": 106,
           "key": "B1",
           "name": "Config defaults и совместимость ключей",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Router / Service",
-          "coverage": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-          "gap": "частично; `MODE` fallback и `KEENETIC_POLICY` — пробелы",
-          "mapping": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-          "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: частично; `MODE` fallback и `KEENETIC_POLICY` — пробелы"
+          "coverage": "`test-router-config-defaults-differential.sh` (a378), `test-router-keenetic-policy.sh`",
+          "gap": "36 paired кейсов разбора `KEENETIC_POLICY`; сверены `MODE` fallback, `MARK`/`PROBE_MARK`, `QUEUE`, `PANEL_LISTEN`, `FLOWS`/`R2O_FLOW_CAPACITY`",
+          "mapping": "`test-router-config-defaults-differential.sh` (a378), `test-router-keenetic-policy.sh`",
+          "evidence": "`test-router-config-defaults-differential.sh` (a378), `test-router-keenetic-policy.sh` · пробел: 36 paired кейсов разбора `KEENETIC_POLICY`; сверены `MODE` fallback, `MARK`/`PROBE_MARK`, `QUEUE`, `PANEL_LISTEN`, `FLOWS`/`R2O_FLOW_CAPACITY`"
         },
         {
           "id": 107,
@@ -4352,15 +4352,15 @@
       "key": "B1",
       "name": "Config defaults и совместимость ключей",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Router / Service",
-      "coverage": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-      "gap": "частично; `MODE` fallback и `KEENETIC_POLICY` — пробелы",
-      "mapping": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-      "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: частично; `MODE` fallback и `KEENETIC_POLICY` — пробелы"
+      "coverage": "`test-router-config-defaults-differential.sh` (a378), `test-router-keenetic-policy.sh`",
+      "gap": "36 paired кейсов разбора `KEENETIC_POLICY`; сверены `MODE` fallback, `MARK`/`PROBE_MARK`, `QUEUE`, `PANEL_LISTEN`, `FLOWS`/`R2O_FLOW_CAPACITY`",
+      "mapping": "`test-router-config-defaults-differential.sh` (a378), `test-router-keenetic-policy.sh`",
+      "evidence": "`test-router-config-defaults-differential.sh` (a378), `test-router-keenetic-policy.sh` · пробел: 36 paired кейсов разбора `KEENETIC_POLICY`; сверены `MODE` fallback, `MARK`/`PROBE_MARK`, `QUEUE`, `PANEL_LISTEN`, `FLOWS`/`R2O_FLOW_CAPACITY`"
     },
     {
       "id": 107,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 157,
+      "points": 158,
       "weight": 271,
-      "percent": 57.93
+      "percent": 58.3
     },
     "carry_forward": {
-      "points": 220,
+      "points": 221,
       "weight": 271,
-      "percent": 81.18,
+      "percent": 81.55,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
