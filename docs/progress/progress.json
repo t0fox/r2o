@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 161,
-  "percent": 59.41,
+  "points": 164,
+  "percent": 60.52,
   "total": 179,
   "counts": {
-    "verified": 111,
+    "verified": 112,
     "carry": 40,
-    "partial": 27,
+    "partial": 26,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1859,7 +1859,7 @@
     {
       "name": "Router / Service",
       "weight": 84,
-      "points": 74,
+      "points": 77,
       "items": [
         {
           "id": 106,
@@ -2001,15 +2001,15 @@
           "key": "B10",
           "name": "nft backend: генерация и postconditions",
           "weight": 3,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 3,
+          "carry_points": 3,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Router / Service",
-          "coverage": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-          "gap": "ДИФ (mock)",
-          "mapping": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-          "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: ДИФ (mock)"
+          "coverage": "`test-router-nft-real-differential.sh` (a378)",
+          "gap": "Реальный nft в `unshare -Urn`: оба генератора приняты, `fw_nft_installed`/`firewall_status_nft` прошли, shared IPv4 postconditions совпали (`queue4=13`, hooks/chains/nat/mark); IPv6-очередь (13) — расширение R2O; B11 iptables остаётся partial",
+          "mapping": "`test-router-nft-real-differential.sh` (a378)",
+          "evidence": "`test-router-nft-real-differential.sh` (a378) · пробел: Реальный nft в `unshare -Urn`: оба генератора приняты, `fw_nft_installed`/`firewall_status_nft` прошли, shared IPv4 postconditions совпали (`queue4=13`, hooks/chains/nat/mark); IPv6-очередь (13) — расширение R2O; B11 iptables остаётся partial"
         },
         {
           "id": 116,
@@ -4487,15 +4487,15 @@
       "key": "B10",
       "name": "nft backend: генерация и postconditions",
       "weight": 3,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 3,
+      "carry_points": 3,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Router / Service",
-      "coverage": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-      "gap": "ДИФ (mock)",
-      "mapping": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B",
-      "evidence": "`files/S99d2k`, `files/*.sh` → `router/*`, `r2o-manager`; `docs/audit/panel-router-vps-telegram-audit.md` B · пробел: ДИФ (mock)"
+      "coverage": "`test-router-nft-real-differential.sh` (a378)",
+      "gap": "Реальный nft в `unshare -Urn`: оба генератора приняты, `fw_nft_installed`/`firewall_status_nft` прошли, shared IPv4 postconditions совпали (`queue4=13`, hooks/chains/nat/mark); IPv6-очередь (13) — расширение R2O; B11 iptables остаётся partial",
+      "mapping": "`test-router-nft-real-differential.sh` (a378)",
+      "evidence": "`test-router-nft-real-differential.sh` (a378) · пробел: Реальный nft в `unshare -Urn`: оба генератора приняты, `fw_nft_installed`/`firewall_status_nft` прошли, shared IPv4 postconditions совпали (`queue4=13`, hooks/chains/nat/mark); IPv6-очередь (13) — расширение R2O; B11 iptables остаётся partial"
     },
     {
       "id": 116,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 161,
+      "points": 164,
       "weight": 271,
-      "percent": 59.41
+      "percent": 60.52
     },
     "carry_forward": {
-      "points": 224,
+      "points": 227,
       "weight": 271,
-      "percent": 82.66,
+      "percent": 83.76,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
