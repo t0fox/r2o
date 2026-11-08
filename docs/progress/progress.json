@@ -3,12 +3,12 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 171,
-  "percent": 63.1,
+  "points": 172,
+  "percent": 63.47,
   "total": 179,
   "counts": {
-    "verified": 118,
-    "carry": 40,
+    "verified": 119,
+    "carry": 39,
     "partial": 20,
     "missing": 0,
     "implemented": 0,
@@ -18,7 +18,7 @@
     {
       "name": "Datapath",
       "weight": 28,
-      "points": 20,
+      "points": 21,
       "items": [
         {
           "id": 1,
@@ -130,15 +130,15 @@
           "key": "D7",
           "name": "TCP RST cut/observation/reply-hidden",
           "weight": 1,
-          "points": 0,
+          "points": 1,
           "carry_points": 1,
-          "status": "carry",
-          "statusLabel": "carry (304) — historical",
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Datapath",
-          "coverage": "`r2o-tcp-rst-cut-differential.sh`, `r2o-tcp-rst-observation-differential.sh`, `r2o-tcp-reply-hidden-differential.sh` — независимые suites",
-          "gap": "Нет paired diff; 304 pin",
-          "mapping": "`r2o-tcp-rst-cut-differential.sh`, `r2o-tcp-rst-observation-differential.sh`, `r2o-tcp-reply-hidden-differential.sh` — независимые suites",
-          "evidence": "`r2o-tcp-rst-cut-differential.sh`, `r2o-tcp-rst-observation-differential.sh`, `r2o-tcp-reply-hidden-differential.sh` — независимые suites · пробел: Нет paired diff; 304 pin"
+          "coverage": "`r2o-tcp-rst-cut-differential.sh`, `r2o-tcp-rst-observation-differential.sh`, `r2o-tcp-reply-hidden-differential.sh` (a378)",
+          "gap": "Все три suite прошли на a378: C `test_session` + Rust RST-CUT/ранний RST/reply-hidden; отпечаток `R2O_DIFF` совпал; пин reply-hidden и SHA источников обновлены",
+          "mapping": "`r2o-tcp-rst-cut-differential.sh`, `r2o-tcp-rst-observation-differential.sh`, `r2o-tcp-reply-hidden-differential.sh` (a378)",
+          "evidence": "`r2o-tcp-rst-cut-differential.sh`, `r2o-tcp-rst-observation-differential.sh`, `r2o-tcp-reply-hidden-differential.sh` (a378) · пробел: Все три suite прошли на a378: C `test_session` + Rust RST-CUT/ранний RST/reply-hidden; отпечаток `R2O_DIFF` совпал; пин reply-hidden и SHA источников обновлены"
         },
         {
           "id": 9,
@@ -2718,10 +2718,10 @@
           "status": "partial",
           "statusLabel": "частично",
           "group": "Core / CLI",
-          "coverage": "C unit tests; Rust units",
-          "gap": "Нет paired diff и контракта",
-          "mapping": "C unit tests; Rust units",
-          "evidence": "C unit tests; Rust units · пробел: Нет paired diff и контракта"
+          "coverage": "C unit tests; Rust units; `test-controller-plantlv-differential.sh` (a378)",
+          "gap": "plantlv: 64 paired кейса текст→TLV + 4 stricter (C принимает, R2O отвергает как `plan_parse.c`); crypto/p256/x25519/props/udpplan — paired diff ещё нет",
+          "mapping": "C unit tests; Rust units; `test-controller-plantlv-differential.sh` (a378)",
+          "evidence": "C unit tests; Rust units; `test-controller-plantlv-differential.sh` (a378) · пробел: plantlv: 64 paired кейса текст→TLV + 4 stricter (C принимает, R2O отвергает как `plan_parse.c`); crypto/p256/x25519/props/udpplan — paired diff ещё нет"
         },
         {
           "id": 76,
@@ -2882,15 +2882,15 @@
       "key": "D7",
       "name": "TCP RST cut/observation/reply-hidden",
       "weight": 1,
-      "points": 0,
+      "points": 1,
       "carry_points": 1,
-      "status": "carry",
-      "statusLabel": "carry (304) — historical",
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Datapath",
-      "coverage": "`r2o-tcp-rst-cut-differential.sh`, `r2o-tcp-rst-observation-differential.sh`, `r2o-tcp-reply-hidden-differential.sh` — независимые suites",
-      "gap": "Нет paired diff; 304 pin",
-      "mapping": "`r2o-tcp-rst-cut-differential.sh`, `r2o-tcp-rst-observation-differential.sh`, `r2o-tcp-reply-hidden-differential.sh` — независимые suites",
-      "evidence": "`r2o-tcp-rst-cut-differential.sh`, `r2o-tcp-rst-observation-differential.sh`, `r2o-tcp-reply-hidden-differential.sh` — независимые suites · пробел: Нет paired diff; 304 pin"
+      "coverage": "`r2o-tcp-rst-cut-differential.sh`, `r2o-tcp-rst-observation-differential.sh`, `r2o-tcp-reply-hidden-differential.sh` (a378)",
+      "gap": "Все три suite прошли на a378: C `test_session` + Rust RST-CUT/ранний RST/reply-hidden; отпечаток `R2O_DIFF` совпал; пин reply-hidden и SHA источников обновлены",
+      "mapping": "`r2o-tcp-rst-cut-differential.sh`, `r2o-tcp-rst-observation-differential.sh`, `r2o-tcp-reply-hidden-differential.sh` (a378)",
+      "evidence": "`r2o-tcp-rst-cut-differential.sh`, `r2o-tcp-rst-observation-differential.sh`, `r2o-tcp-reply-hidden-differential.sh` (a378) · пробел: Все три suite прошли на a378: C `test_session` + Rust RST-CUT/ранний RST/reply-hidden; отпечаток `R2O_DIFF` совпал; пин reply-hidden и SHA источников обновлены"
     },
     {
       "id": 9,
@@ -3892,10 +3892,10 @@
       "status": "partial",
       "statusLabel": "частично",
       "group": "Core / CLI",
-      "coverage": "C unit tests; Rust units",
-      "gap": "Нет paired diff и контракта",
-      "mapping": "C unit tests; Rust units",
-      "evidence": "C unit tests; Rust units · пробел: Нет paired diff и контракта"
+      "coverage": "C unit tests; Rust units; `test-controller-plantlv-differential.sh` (a378)",
+      "gap": "plantlv: 64 paired кейса текст→TLV + 4 stricter (C принимает, R2O отвергает как `plan_parse.c`); crypto/p256/x25519/props/udpplan — paired diff ещё нет",
+      "mapping": "C unit tests; Rust units; `test-controller-plantlv-differential.sh` (a378)",
+      "evidence": "C unit tests; Rust units; `test-controller-plantlv-differential.sh` (a378) · пробел: plantlv: 64 paired кейса текст→TLV + 4 stricter (C принимает, R2O отвергает как `plan_parse.c`); crypto/p256/x25519/props/udpplan — paired diff ещё нет"
     },
     {
       "id": 76,
@@ -5460,9 +5460,9 @@
   ],
   "comparison": {
     "strict": {
-      "points": 171,
+      "points": 172,
       "weight": 271,
-      "percent": 63.1
+      "percent": 63.47
     },
     "carry_forward": {
       "points": 234,

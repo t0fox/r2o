@@ -7,7 +7,7 @@ r2o_donor_test="$r2o_donor_datapath/test_session"
 r2o_log_dir="$r2o_script_dir/.rea"
 r2o_log="$r2o_log_dir/r2o-tcp-reply-hidden-differential-$(date +%Y%m%d-%H%M%S).log"
 r2o_started_at=$(date +%s)
-r2o_upstream_sha=304ba893dd37197128ac8799c0495b035f6a38c0
+r2o_upstream_sha=a378e230947ebfd011439e1cac0f1e994d883aae
 
 r2o_show_log_on_error() {
     r2o_status=$?
@@ -68,9 +68,9 @@ mkdir -p "$r2o_log_dir"
     r2o_session_sha256=$(sha256sum "$r2o_donor_datapath/session.c" | awk '{print $1}')
     r2o_test_sha256=$(sha256sum "$r2o_donor_datapath/test_session.c" | awk '{print $1}')
     if [ "$r2o_session_sha256" != \
-        'a7446b416481674b9a6332dad97430c903f6a3c7d53b45e8794a86eee2f127ea' ] || \
+        '7a610ea7f9651391ea4768028d1abb65e7eeee2279f20c139167dfd05af1ab35' ] || \
         [ "$r2o_test_sha256" != \
-        '2fcad959cdb7086312ae1b8a7d2c0b168fe9c5cfd8038b2aa87f75a6c3ce3561' ]; then
+        '84d980e5f4e8850b7ba3a638987021e96eba5e1721a63a3cdfd30b224817ec43' ]; then
         printf 'Исходники донора отличаются от проверенного снимка\n' >&2
         exit 1
     fi
