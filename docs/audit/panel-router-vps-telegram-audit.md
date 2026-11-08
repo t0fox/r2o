@@ -4,13 +4,13 @@
 
 Источники: локальные деревья `E:\d2o` (C/shell/section units) и `E:\r2o` (Rust/shell), `docs/functional-parity-matrix.md`, `docs/parity-function-inventory.md`, `README.md`, `router/README.md`, `docs/audit/function-index.md`, существующие differential-скрипты и CI-workflow.
 
-**Интеграция 2026-11-08.** Детальные строки A1–A26, B1–B54 и C1–C26 сведены в единую scored-матрицу `docs/functional-parity-matrix.md`, раздел «Нормализованная матрица покрытия»: 179 контрактов / 271 балл, строгий счёт 120/271 = 44,28 %. В scored не входят `B32`/`B45`/`B54`, `C2`, `C25`/`C26` как extension/out-of-scope/дубли. `B9` и `B52` закрыты после аудита (`scripts/test-router-clear-found-state.sh`, `scripts/test-router-log-maintenance.sh`); таблицы ниже сохранены как исходное доказательное основание.
+**Интеграция 2026-11-08.** Детальные строки A1–A26, B1–B54 и C1–C26 сведены в единую scored-матрицу `docs/functional-parity-matrix.md`, раздел «Нормализованная матрица покрытия»: 179 контрактов / 271 балл, строгий счёт 122/271 = 45,02 %. В scored не входят `B32`/`B45`/`B54`, `C2`, `C25`/`C26` как extension/out-of-scope/дубли. `B9` и `B52` закрыты после аудита (`scripts/test-router-clear-found-state.sh`, `scripts/test-router-log-maintenance.sh`); таблицы ниже сохранены как исходное доказательное основание.
 
 ## 0. Метод и ограничения
 
 1. **Ничего не собиралось и не запускалось.** В PATH нет `git`, `cargo`, `rustc`; C-оракулы и Rust-тесты в этом окружении не запускались. Все выводы ниже — анализ исходников, встроенных тестов, differential-скриптов и CI-конфигурации, а не результат прогона.
 2. **C D2O — эталон поведения, но не источник переноса для Telegram.** C11-реализация Telegram сравнивается как oracle; R2O Telegram взят из донора z2kOW (`tg-proxy`). Для panel/router C-код является и источником, и oracle.
-3. **Версии в документах противоречат друг другу.** Заголовок матрицы говорит о 57 контрактах/89 баллах и 80/89, а примечания 73–92 — о 84 баллах, 53/84 и 67,53 %. Одновременно panel-скрипты закреплены на D2O `304ba893`, матрица panel-строки — на `a378e23`, router-скрипты — на `8e2c981`. В этом аудите **баллы не начислялись**; единый процент по четырём областям не выводится.
+3. **Версии в документах противоречат друг другу.** Заголовок матрицы говорит о 57 контрактах/89 баллах и 80/89, а примечания 73–92 — о 84 баллах, 53/84 и 68,27 %. Одновременно panel-скрипты закреплены на D2O `304ba893`, матрица panel-строки — на `a378e23`, router-скрипты — на `8e2c981`. В этом аудите **баллы не начислялись**; единый процент по четырём областям не выводится.
 4. **Легенда статусов:**
    - `ДИФ` — есть production C/Rust differential-скрипт или fixture, прямо вызывающий обе реализации; в этом аудите не перезапускался.
    - `ТЕСТ` — есть только Rust unit/integration/browser-тест либо shell-harness с моками.
@@ -26,7 +26,7 @@
 - **Panel.** Все 8 route-групп покрыты differential-сценариями. Закрыты: абсолютный дедлайн заголовка/ответа, устойчивость к обрыву, незакрытая кавычка, known-list D2O-конфига и `unknown_keys`, граница 32 КиБ/431, request semantics, status structure, mode preservation, exit 124 → timeout. Остаётся более строгая, чем в C, валидация значений R2O-ключей (например `LOGMAX`/`CONNBYTES`): C игнорирует значения, Rust отвергает недопустимые.
 - **Router.** Порядок start/stop, nft/iptables-генерация, fastnat, flow-offload, PPE, DNS-exclusions, heal/watchdog и procd в основном отображены. Реальные пробелы: `clear-found` удаляет только каталог и оставляет `https-cache.json`; `KEENETIC_POLICY` (`ndmc show ip policy` → `--only-mark`) не перенесён вовсе; ротация журналов не покрывает `instagram-dns.log` и `instagram-dns-scheduler.log`; `heal` в R2O может запустить остановленный Telegram, чего D2O не делает; `engine-restart` при `MODE=off` сначала останавливает движок; действия `dns-tick/dns-refresh/dns-remove` отсутствуют в `S99r2o`; uninstall не имеет аварийной очистки при отсутствующем адаптере.
 - **Flow-offload.** Текущий `r2o-firewall.sh` **глобально выключает** fw4 offload, как D2O. Примечания матрицы 20/26/28/66/67/81/83/84/85/86/88/92 описывают уже отсутствующую selective-схему; скрипт `test-router-flowoffload-selective-differential.sh`, на который они ссылаются, в дереве отсутствует, а действующий `test-router-flowoffload-d2o-differential.sh` прямо запрещает `ct mark`/`mark_flow`/`flow offload @`.
-- **Telegram.** R2O — функциональный superset донора по большинству модулей, но не пофункциональный паритет с C. Неперенесённые/расходящиеся ветви: файловый парсер `tg_config_read`; строгая проверка `TG_PORT=1443`; `TG_DIAGNOSTIC_DIRECT_TCP`; `TG_CF_DOMAIN_CACHE_PATH`; отсутствие стартовой валидации и лимита 32 для `TG_CF_DOMAIN`; stats-сокет без таймаута чтения запроса; identity/`enroll.c` без потребителя. C-векторы crypto/splitter не используются в Rust-дифференциалах. Memory budget и `configured_max_connections=64` реализованы и проверены `test-telegram-limits-differential.sh`.
+- **Telegram.** R2O — функциональный superset донора по большинству модулей, но не пофункциональный паритет с C. Неперенесённые/расходящиеся ветви: файловый парсер `tg_config_read`; строгая проверка `TG_PORT=1443`; `TG_DIAGNOSTIC_DIRECT_TCP`; `TG_CF_DOMAIN_CACHE_PATH`; отсутствие стартовой валидации и лимита 32 для `TG_CF_DOMAIN`; stats-сокет без таймаута чтения запроса; identity/`enroll.c` без потребителя. Memory budget и `configured_max_connections=64` реализованы и проверены `test-telegram-limits-differential.sh`; splitter проверен `test-telegram-mtproto-splitter-differential.sh`. C-векторы `mtproto_encrypted`/`mtproto_auth` в Rust-дифференциалах пока не используются.
 - **VPS.** `relay-enroll` и `relay-gate` в R2O отсутствуют полностью: нет бинарников, systemd-юнитов, install-server, портов 9443/9444, `/register`, `/resolve`, allowlist-proxy. README прямо фиксирует работу без VPS/relay/WARP. Единственный след — совместимое исключение `D2K_GATE` из NFQUEUE; транспорт обновлений R2O его не использует (`curl --noproxy '*'`). Identity в R2O создаётся, но ни для enrollment, ни для relay не применяется.
 - **CI.** Все 40 `test-router-*.sh` запускаются в CI (shell job). Panel-джоба запускает только `cargo test -p r2o-panel`; 22 `test-panel-*.sh` не входят в CI (в donor-shard есть только `r2o-panel-bind-default-differential.sh`). Telegram `--check`/service harness в CI отдельно не запускаются; они входят только через `test-router-*.sh`.
 
@@ -301,7 +301,7 @@
 | `mtproto_auth.c` (27): step2/3/4 | `dc_discovery.rs:342` `grammers_mtproto::Encrypted` | Аутентификация через grammers | `tests` + mock DC | ИСХ (donor) |
 | `mtproto_crypto.c` (12): CTR, AES-IGE, obfuscated2, secret, relay init | `crypto.rs:82` `parse_handshake`, `direct_stream_ciphers:233`, `generate_relay_init:139` | obfuscated2/secret/DC/proto | Rust unit; **нет C-векторов** | ТЕСТ/ПРОБЕЛ |
 | `mtproto_encrypted.c` (4): v2 encrypt/decrypt | `grammers_mtproto::mtp::Encrypted` | v2-обмен | donor unit; **нет C-векторов** | ИСХ/ПРОБЕЛ |
-| `mtproto_splitter.c` (12) | `splitter.rs` + `tests/splitter.rs` | intermediate/abridged, partial, flush | Rust unit 8 тестов; **нет C-дифференциала** | ТЕСТ/ПРОБЕЛ |
+| `mtproto_splitter.c` (12) | `splitter.rs` + `tests/splitter.rs` | intermediate/abridged, partial, flush | C/Rust differential `test-telegram-mtproto-splitter-differential.sh` | ДИФ |
 | `mtproto_probe.c` (39): resPQ/TCP/WSS/matrix | `dc_discovery.rs:103` `probe_res_pq`, `ws_client`; `diagnostics.rs` | resPQ и маршрутная матрица; D2O-матрицы как CLI отсутствуют | `--check`, unit | ИСХ |
 | `route_dns.c` (49): DoH/DoT/H2/DNS cache/prefetch | `cf_proxy_doh.rs`, `routing.rs`, system DNS | CF-proxy DoH + system DNS; **не** полноценный DoH/DoT-резолвер D2O | `d2o_route_dns_public_ip_differential.c`, fixture | ДИФ (узкий) |
 | `route_plan.c` (6): WS DC, CF hostname, plan | `config::websocket_dc:115`, `routing.rs`, `ws_client::cf_*` | DC→WSS/CF | `ws_client` unit | ИСХ |
@@ -343,7 +343,7 @@
 - **Узкие C/Rust дифференциалы:** route-DNS public IP filter и MTProto response observer (fixtures, `clang-18`, cargo). В этом окружении не запускались; ширина — только эти два контракта.
 - **Service harness:** `test-router-telegram-service.sh` (x86_64 Linux release): запуск, stats/data-plane, DC-map sync, SIGKILL recovery, лимит двух перезапусков. Матрица заявляет успешный прогон; здесь не воспроизводился.
 - **`--check`:** по матрице, под root на release: `tcp-fallback` и `direct-wss` healthy для всех пяти DC, MTProto 76–511 мс; CF-worker/CF-proxy `unverified`. Длительная transparent-сессия и реальные CF-маршруты не проверены.
-- **C-оракулы D2O Telegram:** `make test` в чистом дереве проходил (по матрице). C-тесты `test_mtproto_auth`, `test_mtproto_encrypted`, `test_mtproto_splitter`, `test_epoll_proxy` не сопоставлены с Rust дифференциалами; используется только source-сравнение донора.
+- **C-оракулы D2O Telegram:** `make test` в чистом дереве проходил (по матрице). C-тест `test_mtproto_splitter` сопоставлен дифференциалом; `test_mtproto_auth`, `test_mtproto_encrypted`, `test_epoll_proxy` пока не сопоставлены с Rust дифференциалами.
 
 ### C.4 Неперенесённые C-функции и Rust-only расширения
 
@@ -370,7 +370,7 @@
 3. `--cf-domain` (CF proxy) не валидируется и не ограничен 32 именами, тогда как D2O отказывает в конфигурации; `TG_CF_WORKER_DOMAIN` валидируется clap-парсером, но список после разбора дедуплицируется/усекается.
 4. `TG_PORT` restriction 1443 не сохранён (R2O расширяет диапазон; не потеря функциональности, но расхождение).
 5. `TG_DIAGNOSTIC_DIRECT_TCP` отсутствует.
-6. C-векторы `mtproto_encrypted`/`mtproto_splitter`/`mtproto_auth` не используются в Rust-дифференциалах.
+6. C-векторы `mtproto_encrypted`/`mtproto_auth` не используются в Rust-дифференциалах; splitter уже сопоставлен.
 7. Полный `transparent` data path с реальным Telegram-клиентом, CF-worker/CF-proxy и длительной сессией не проверялся.
 8. `identity` не имеет production-потребителя (создаётся, но не участвует в протоколе).
 
@@ -531,7 +531,7 @@
 | C3 | DC map persist/merge/validate | 2 | ИСХ + unit |
 | C4 | `help.getConfig` и dcOption | 2 | ИСХ + unit |
 | C5 | obfuscated2/secret/DC/media/proto | 2 | ТЕСТ; C-векторов нет |
-| C6 | MTProto splitter | 2 | ТЕСТ; C-дифференциала нет |
+| C6 | MTProto splitter | 2 | ДИФ: frames/flush |
 | C7 | v2 encrypted | 1 | ИСХ; C-векторов нет |
 | C8 | resPQ probe | 1 | ИСХ |
 | C9 | DC→WSS/CF route plan | 2 | ИСХ |
@@ -581,7 +581,7 @@
    - uninstall при отсутствующем adapter;
    - Meta DNS tick/offset/backoff (сейчас тест только lifecycle).
 3. **Flow-offload:** привести примечания 20/26/28/66/67/81/83/84/85/86/88/92 в соответствие с текущим кодом (глобальное выключение); удалить/пометить отсутствующий `test-router-flowoffload-selective-differential.sh`; добавить отдельный контракт «write-failure + восстановление UCI» если он нужен.
-4. **Telegram:** добавить differential C-векторов для `mtproto_encrypted`, `mtproto_splitter`, `mtproto_auth`; решить, нужен ли memory budget; добавить таймаут чтения запроса stats-сокета; выровнять валидацию CF-доменов; проверить длительную transparent-сессию и CF-маршруты.
+4. **Telegram:** добавить differential C-векторов для `mtproto_encrypted`, `mtproto_auth`; добавить таймаут чтения запроса stats-сокета; выровнять валидацию CF-доменов; проверить длительную transparent-сессию и CF-маршруты.
 5. **VPS:** оставить `N/A (unported)`; не начислять баллы. Если когда-либо понадобится совместимость с D2O-инфраструктурой, отдельно описать `D2K_GATE` и `TG_RELAY_URL` как миграционные ключи, не как паритет.
 
 ## 9. Приложение: что именно проверялось в исходниках

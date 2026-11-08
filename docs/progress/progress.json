@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 120,
-  "percent": 44.28,
+  "points": 122,
+  "percent": 45.02,
   "total": 179,
   "counts": {
-    "verified": 86,
+    "verified": 87,
     "carry": 40,
-    "partial": 52,
+    "partial": 51,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1095,7 +1095,7 @@
     {
       "name": "Telegram",
       "weight": 41,
-      "points": 3,
+      "points": 5,
       "items": [
         {
           "id": 157,
@@ -1162,15 +1162,15 @@
           "key": "TG6",
           "name": "MTProto splitter",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Telegram",
-          "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "gap": "",
-          "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+          "coverage": "`scripts/test-telegram-mtproto-splitter-differential.sh` (a378); C `tg_mtproto_splitter`; Rust `MsgSplitter`",
+          "gap": "Abridged/intermediate/padded, частичные фиды, два пакета и flush совпадают байт-в-байт",
+          "mapping": "`scripts/test-telegram-mtproto-splitter-differential.sh` (a378); C `tg_mtproto_splitter`; Rust `MsgSplitter`",
+          "evidence": "`scripts/test-telegram-mtproto-splitter-differential.sh` (a378); C `tg_mtproto_splitter`; Rust `MsgSplitter` · пробел: Abridged/intermediate/padded, частичные фиды, два пакета и flush совпадают байт-в-байт"
         },
         {
           "id": 162,
@@ -5177,15 +5177,15 @@
       "key": "TG6",
       "name": "MTProto splitter",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Telegram",
-      "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "gap": "",
-      "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+      "coverage": "`scripts/test-telegram-mtproto-splitter-differential.sh` (a378); C `tg_mtproto_splitter`; Rust `MsgSplitter`",
+      "gap": "Abridged/intermediate/padded, частичные фиды, два пакета и flush совпадают байт-в-байт",
+      "mapping": "`scripts/test-telegram-mtproto-splitter-differential.sh` (a378); C `tg_mtproto_splitter`; Rust `MsgSplitter`",
+      "evidence": "`scripts/test-telegram-mtproto-splitter-differential.sh` (a378); C `tg_mtproto_splitter`; Rust `MsgSplitter` · пробел: Abridged/intermediate/padded, частичные фиды, два пакета и flush совпадают байт-в-байт"
     },
     {
       "id": 162,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 120,
+      "points": 122,
       "weight": 271,
-      "percent": 44.28
+      "percent": 45.02
     },
     "carry_forward": {
-      "points": 183,
+      "points": 185,
       "weight": 271,
-      "percent": 67.53,
+      "percent": 68.27,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
