@@ -326,6 +326,48 @@ pub fn handle_request(config: &Config, raw: &[u8]) -> Response {
         }
         return api_diagnostics(config, &request);
     }
+    if request.path == "/tunnel/stats" {
+        if request.method != "GET" {
+            return text_response(405, "method not allowed\n");
+        }
+        return match read_telegram_stats(&config.telegram_stats_path) {
+            Some(stats) => json_response(200, &stats),
+            None => json_response(
+                503,
+                &json!({"ok": false, "error": "процесс Telegram не вернул статистику"}),
+            ),
+        };
+    }
+    if request.path == "/tunnel/check" {
+        if request.method == "GET" {
+            return json_response(200, &telegram_diagnostics_snapshot(config));
+        }
+        if request.method == "POST" {
+            return match start_telegram_check(config) {
+                Ok(()) => json_response(202, &json!({"ok": true})),
+                Err(ActionError::Busy) => json_response(
+                    409,
+                    &json!({"ok": false, "error": "диагностика Telegram уже выполняется"}),
+                ),
+                Err(_) => json_response(
+                    500,
+                    &json!({"ok": false, "error": "не удалось запустить диагностику Telegram"}),
+                ),
+            };
+        }
+        return text_response(405, "method not allowed\n");
+    }
+    if request.path == "/tunnel/enable" || request.path == "/tunnel/disable" {
+        if request.method != "POST" {
+            return text_response(405, "method not allowed\n");
+        }
+        let control_path = if request.path.ends_with("enable") {
+            "/api/control/telegram-enable"
+        } else {
+            "/api/control/telegram-disable"
+        };
+        return api_control_path(config, &request, control_path);
+    }
     if request.path.starts_with("/api/control/") {
         if request.method != "POST" {
             return text_response(405, "method not allowed\n");
@@ -1190,6 +1232,10 @@ fn api_update(config: &Config) -> Response {
 }
 
 fn api_control(config: &Config, request: &Request<'_>) -> Response {
+    api_control_path(config, request, request.path)
+}
+
+fn api_control_path(config: &Config, request: &Request<'_>, path: &str) -> Response {
     let actions = [
         ("/api/control/start", "engine-start", "Запуск движка"),
         ("/api/control/stop", "engine-stop", "Остановка движка"),
@@ -1240,7 +1286,9 @@ fn api_control(config: &Config, request: &Request<'_>) -> Response {
             "Выключение автообновления",
         ),
     ];
-    let Some((_, command, label)) = actions.iter().find(|(path, _, _)| *path == request.path)
+    let Some((_, command, label)) = actions
+        .iter()
+        .find(|(action_path, _, _)| *action_path == path)
     else {
         return json_response(404, &json!({"ok":false,"message":"Неизвестная операция"}));
     };

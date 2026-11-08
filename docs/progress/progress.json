@@ -3,12 +3,12 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 232,
-  "percent": 85.61,
+  "points": 233,
+  "percent": 85.98,
   "total": 179,
   "counts": {
-    "verified": 156,
-    "carry": 2,
+    "verified": 157,
+    "carry": 1,
     "partial": 20,
     "missing": 0,
     "implemented": 0,
@@ -1447,7 +1447,7 @@
     {
       "name": "WebPanel",
       "weight": 30,
-      "points": 29,
+      "points": 30,
       "items": [
         {
           "id": 79,
@@ -1739,15 +1739,15 @@
           "key": "A20",
           "name": "Telegram config gate/status",
           "weight": 1,
-          "points": 0,
+          "points": 1,
           "carry_points": 1,
-          "status": "carry",
-          "statusLabel": "carry (304) — historical",
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "WebPanel",
-          "coverage": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-          "gap": "Источник Telegram-панели заменён на z2kOW; сверка ещё не построена",
-          "mapping": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-          "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: Источник Telegram-панели заменён на z2kOW; сверка ещё не построена"
+          "coverage": "`crates/r2o-panel/tests/http.rs` `z2kow_tunnel_routes_follow_telegram_contract`, `tunnel_stats_returns_z2kow_snapshot`; z2kOW `platform/openwrt/tg.sh` (42c811)",
+          "gap": "`/tunnel/stats` (raw snapshot/503), `/tunnel/check` (report), `/tunnel/enable",
+          "mapping": "`crates/r2o-panel/tests/http.rs` `z2kow_tunnel_routes_follow_telegram_contract`, `tunnel_stats_returns_z2kow_snapshot`; z2kOW `platform/openwrt/tg.sh` (42c811)",
+          "evidence": "`crates/r2o-panel/tests/http.rs` `z2kow_tunnel_routes_follow_telegram_contract`, `tunnel_stats_returns_z2kow_snapshot`; z2kOW `platform/openwrt/tg.sh` (42c811) · пробел: `/tunnel/stats` (raw snapshot/503), `/tunnel/check` (report), `/tunnel/enable"
         },
         {
           "id": 99,
@@ -1759,10 +1759,10 @@
           "status": "verified",
           "statusLabel": "доказано",
           "group": "WebPanel",
-          "coverage": "`read_telegram_stats`; unit `telegram_stats_read_has_absolute_deadline`; C oracle `panel/server.c:445-510`",
-          "gap": "Абсолютный 1250 мс на connect/read; лимит и схема прежние; требуется сверка с z2kOW",
-          "mapping": "`read_telegram_stats`; unit `telegram_stats_read_has_absolute_deadline`; C oracle `panel/server.c:445-510`",
-          "evidence": "`read_telegram_stats`; unit `telegram_stats_read_has_absolute_deadline`; C oracle `panel/server.c:445-510` · пробел: Абсолютный 1250 мс на connect/read; лимит и схема прежние; требуется сверка с z2kOW"
+          "coverage": "`read_telegram_stats`; `tunnel_stats_returns_z2kow_snapshot`; unit `telegram_stats_read_has_absolute_deadline`; producer — z2kOW `tg-proxy/src/stats.rs`",
+          "gap": "Абсолютный 1250 мс на connect/read, лимит 131071 и схема; `/tunnel/stats` отдаёт raw snapshot z2kOW; C oracle использован только для reader timeout/limit",
+          "mapping": "`read_telegram_stats`; `tunnel_stats_returns_z2kow_snapshot`; unit `telegram_stats_read_has_absolute_deadline`; producer — z2kOW `tg-proxy/src/stats.rs`",
+          "evidence": "`read_telegram_stats`; `tunnel_stats_returns_z2kow_snapshot`; unit `telegram_stats_read_has_absolute_deadline`; producer — z2kOW `tg-proxy/src/stats.rs` · пробел: Абсолютный 1250 мс на connect/read, лимит 131071 и схема; `/tunnel/stats` отдаёт raw snapshot z2kOW; C oracle использован только для reader timeout/limit"
         },
         {
           "id": 100,
@@ -4232,15 +4232,15 @@
       "key": "A20",
       "name": "Telegram config gate/status",
       "weight": 1,
-      "points": 0,
+      "points": 1,
       "carry_points": 1,
-      "status": "carry",
-      "statusLabel": "carry (304) — historical",
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "WebPanel",
-      "coverage": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-      "gap": "Источник Telegram-панели заменён на z2kOW; сверка ещё не построена",
-      "mapping": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-      "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: Источник Telegram-панели заменён на z2kOW; сверка ещё не построена"
+      "coverage": "`crates/r2o-panel/tests/http.rs` `z2kow_tunnel_routes_follow_telegram_contract`, `tunnel_stats_returns_z2kow_snapshot`; z2kOW `platform/openwrt/tg.sh` (42c811)",
+      "gap": "`/tunnel/stats` (raw snapshot/503), `/tunnel/check` (report), `/tunnel/enable",
+      "mapping": "`crates/r2o-panel/tests/http.rs` `z2kow_tunnel_routes_follow_telegram_contract`, `tunnel_stats_returns_z2kow_snapshot`; z2kOW `platform/openwrt/tg.sh` (42c811)",
+      "evidence": "`crates/r2o-panel/tests/http.rs` `z2kow_tunnel_routes_follow_telegram_contract`, `tunnel_stats_returns_z2kow_snapshot`; z2kOW `platform/openwrt/tg.sh` (42c811) · пробел: `/tunnel/stats` (raw snapshot/503), `/tunnel/check` (report), `/tunnel/enable"
     },
     {
       "id": 99,
@@ -4252,10 +4252,10 @@
       "status": "verified",
       "statusLabel": "доказано",
       "group": "WebPanel",
-      "coverage": "`read_telegram_stats`; unit `telegram_stats_read_has_absolute_deadline`; C oracle `panel/server.c:445-510`",
-      "gap": "Абсолютный 1250 мс на connect/read; лимит и схема прежние; требуется сверка с z2kOW",
-      "mapping": "`read_telegram_stats`; unit `telegram_stats_read_has_absolute_deadline`; C oracle `panel/server.c:445-510`",
-      "evidence": "`read_telegram_stats`; unit `telegram_stats_read_has_absolute_deadline`; C oracle `panel/server.c:445-510` · пробел: Абсолютный 1250 мс на connect/read; лимит и схема прежние; требуется сверка с z2kOW"
+      "coverage": "`read_telegram_stats`; `tunnel_stats_returns_z2kow_snapshot`; unit `telegram_stats_read_has_absolute_deadline`; producer — z2kOW `tg-proxy/src/stats.rs`",
+      "gap": "Абсолютный 1250 мс на connect/read, лимит 131071 и схема; `/tunnel/stats` отдаёт raw snapshot z2kOW; C oracle использован только для reader timeout/limit",
+      "mapping": "`read_telegram_stats`; `tunnel_stats_returns_z2kow_snapshot`; unit `telegram_stats_read_has_absolute_deadline`; producer — z2kOW `tg-proxy/src/stats.rs`",
+      "evidence": "`read_telegram_stats`; `tunnel_stats_returns_z2kow_snapshot`; unit `telegram_stats_read_has_absolute_deadline`; producer — z2kOW `tg-proxy/src/stats.rs` · пробел: Абсолютный 1250 мс на connect/read, лимит 131071 и схема; `/tunnel/stats` отдаёт raw snapshot z2kOW; C oracle использован только для reader timeout/limit"
     },
     {
       "id": 100,
@@ -5460,9 +5460,9 @@
   ],
   "comparison": {
     "strict": {
-      "points": 232,
+      "points": 233,
       "weight": 271,
-      "percent": 85.61
+      "percent": 85.98
     },
     "carry_forward": {
       "points": 234,

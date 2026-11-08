@@ -169,6 +169,75 @@ fn d2o_diagnostics_default_query_trace() {
     assert_eq!(trace, c_output);
 }
 
+#[cfg(unix)]
+#[test]
+fn z2kow_tunnel_routes_follow_telegram_contract() {
+    let mut config = Config::default();
+    config.control_enabled = true;
+    config.config_path = PathBuf::from("/nonexistent/r2o-panel-test-config");
+
+    let (status, _, body) = request(
+        &config,
+        "POST /tunnel/enable HTTP/1.1\r\nHost: localhost:8090\r\nOrigin: http://localhost:8090\r\nContent-Length: 0\r\n\r\n",
+    );
+    assert_eq!(status, 409);
+    assert!(body.contains("TG_MODE=local"));
+
+    config.control_enabled = false;
+    let (status, _, _) = request(
+        &config,
+        "POST /tunnel/disable HTTP/1.1\r\nHost: localhost:8090\r\nOrigin: http://localhost:8090\r\nContent-Length: 0\r\n\r\n",
+    );
+    assert_eq!(status, 403);
+    config.control_enabled = true;
+
+    let (status, _, body) = request(
+        &config,
+        "GET /tunnel/check HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    assert_eq!(status, 200);
+    assert!(body.contains("not_checked") || body.contains("state"));
+
+    let mut config = Config::default();
+    config.telegram_stats_path = PathBuf::from("/nonexistent/r2o-stats.sock");
+    let (status, _, body) = request(
+        &config,
+        "GET /tunnel/stats HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    assert_eq!(status, 503);
+    assert!(body.contains("не вернул статистику"));
+}
+
+#[cfg(unix)]
+#[test]
+fn tunnel_stats_returns_z2kow_snapshot() {
+    use std::io::{Read, Write};
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixListener;
+
+    let directory = TempDir::new();
+    let path = directory.file("stats.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    let payload = br#"{"active_connections":1,"max_connections":64,"accepted_connections":9,"process_started_at":1800000000,"active_sessions":[],"route_sessions_truncated":false,"connections_started":9,"bytes_from_clients":1234,"bytes_from_upstreams":5678,"wss_attempts":8,"wss_failures":2,"wss_responses":5,"cf_wss_responses":3}"#.to_vec();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0u8; 9];
+        stream.read_exact(&mut request).unwrap();
+        stream.write_all(&payload).unwrap();
+        let _ = stream.shutdown(Shutdown::Write);
+    });
+    let mut config = Config::default();
+    config.telegram_stats_path = path;
+    let (status, _, body) = request(
+        &config,
+        "GET /tunnel/stats HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    assert_eq!(status, 200);
+    let stats: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(stats["active_connections"], 1);
+    server.join().unwrap();
+}
+
 #[test]
 fn status_without_live_file_returns_the_panel_contract() {
     let mut config = Config::default();
