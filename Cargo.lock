@@ -1554,6 +1554,7 @@ dependencies = [
  "cipher 0.4.4",
  "clap",
  "ctr 0.9.2",
+ "flate2",
  "futures-util",
  "glass_pumpkin",
  "grammers-crypto",

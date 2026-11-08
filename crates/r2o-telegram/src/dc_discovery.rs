@@ -1,3 +1,4 @@
+use std::io::Read as _;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -28,6 +29,12 @@ use crate::ws_client::{
 };
 
 const TELEGRAM_TCP_PORT: u16 = 443;
+/// TL `gzip_packed#3072cfa1`.
+const GZIP_PACKED_CONSTRUCTOR: u32 = 0x3072_cfa1;
+/// Верхний предел распакованного `help.getConfig`, как C `TG_CONFIG_MAX_UNPACKED`.
+const CONFIG_MAX_UNPACKED: usize = 1024 * 1024;
+/// C `TG_CONFIG_MAX_GZIP_DEPTH`.
+const CONFIG_MAX_GZIP_DEPTH: usize = 4;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_PACKET_BYTES: usize = 1024 * 1024;
@@ -347,10 +354,7 @@ where
     let response = exchange_encrypted(stream, &mut transport, &mut wire, &mut encrypted, &request)
         .await
         .map_err(|error| format!("этап help.getConfig: {error}"))?;
-    let response = grammers_tl_types::enums::Config::from_bytes(&response)
-        .map_err(|error| format!("разбор help.getConfig: {error}"))?;
-    let grammers_tl_types::enums::Config::Config(config) = response;
-    config_to_snapshot(config)
+    config_bytes_to_snapshot(&response, unix_time())
 }
 
 fn parse_res_pq_response(bytes: &[u8]) -> Result<grammers_tl_types::enums::ResPq, String> {
@@ -508,19 +512,51 @@ where
     }
 }
 
+/// Удобная обёртка для unit-тестов; production разбирает TL-байты через
+/// [`config_bytes_to_snapshot`], как C `tg_mtproto_config_parse`.
+#[cfg(test)]
 fn config_to_snapshot(config: grammers_tl_types::types::Config) -> Result<DcSnapshot, String> {
-    let now = unix_time();
+    config_to_snapshot_at(config, unix_time())
+}
+
+/// Преобразовать `help.getConfig` в snapshot на фиксированный момент времени.
+/// C `tg_mtproto_config_parse` проверяет теперь-зависимые даты и покрытие DC,
+/// поэтому здесь вызывается тот же `validate_snapshot`.
+fn config_to_snapshot_at(
+    config: grammers_tl_types::types::Config,
+    now: i64,
+) -> Result<DcSnapshot, String> {
+    if now <= 0 {
+        return Err("время разбора help.getConfig некорректно".to_string());
+    }
     let mut endpoints = Vec::with_capacity(config.dc_options.len());
     for option in config.dc_options {
         let grammers_tl_types::enums::DcOption::Option(option) = option;
         let id = u32::try_from(option.id)
-            .map_err(|_| format!("dcOption содержит недопустимый DC ID {}", option.id))?;
+            .ok()
+            .filter(|id| (1..=999).contains(id))
+            .ok_or_else(|| format!("dcOption содержит недопустимый DC ID {}", option.id))?;
+        // C `parse_dc_option`: ip_len >= INET6_ADDRSTRLEN и встроенный NUL
+        // отвергаются до inet_pton.
+        if option.ip_address.len() >= 46 || option.ip_address.as_bytes().contains(&0) {
+            return Err(format!("dcOption DC{id} содержит неверный IP-адрес"));
+        }
         let address: IpAddr = option
             .ip_address
             .parse()
             .map_err(|_| format!("dcOption DC{id} содержит неверный IP-адрес"))?;
         let port = u16::try_from(option.port)
-            .map_err(|_| format!("dcOption DC{id} содержит неверный TCP-порт"))?;
+            .ok()
+            .filter(|port| *port != 0)
+            .ok_or_else(|| format!("dcOption DC{id} содержит неверный TCP-порт"))?;
+        // C: флаг secret требует непустой секрет не длиннее 256 байт.
+        if option
+            .secret
+            .as_ref()
+            .is_some_and(|secret| secret.is_empty() || secret.len() > 256)
+        {
+            return Err(format!("dcOption DC{id} содержит неверный секрет"));
+        }
         endpoints.push(DcEndpoint {
             id,
             address,
@@ -535,7 +571,7 @@ fn config_to_snapshot(config: grammers_tl_types::types::Config) -> Result<DcSnap
             last_seen: now,
         });
     }
-    Ok(DcSnapshot {
+    let snapshot = DcSnapshot {
         schema_version: 1,
         fetched_at: now,
         config_date: i64::from(config.date),
@@ -543,7 +579,123 @@ fn config_to_snapshot(config: grammers_tl_types::types::Config) -> Result<DcSnap
         this_dc: u32::try_from(config.this_dc)
             .map_err(|_| "help.getConfig вернул неверный текущий DC".to_string())?,
         endpoints,
-    })
+    };
+    crate::dc_map::validate_snapshot(&snapshot, now)?;
+    Ok(snapshot)
+}
+
+/// Разобрать TL-байты `help.getConfig` как C `tg_mtproto_config_parse`:
+/// поддержать `gzip_packed` до 4 уровней, канонический TL и полное покрытие DC.
+pub fn config_bytes_to_snapshot(bytes: &[u8], now: i64) -> Result<DcSnapshot, String> {
+    if now <= 0 {
+        return Err("время разбора help.getConfig некорректно".to_string());
+    }
+    let mut object = bytes.to_vec();
+    for _ in 0..CONFIG_MAX_GZIP_DEPTH {
+        if object.len() < 4
+            || u32::from_le_bytes(object[..4].try_into().expect("4 байта"))
+                != GZIP_PACKED_CONSTRUCTOR
+        {
+            break;
+        }
+        object = inflate_config_gzip(&object)?;
+    }
+    if object.len() >= 4
+        && u32::from_le_bytes(object[..4].try_into().expect("4 байта")) == GZIP_PACKED_CONSTRUCTOR
+    {
+        return Err("help.getConfig превышает глубину gzip_packed".to_string());
+    }
+    let response = grammers_tl_types::enums::Config::from_bytes(&object)
+        .map_err(|error| format!("разбор help.getConfig: {error}"))?;
+    let grammers_tl_types::enums::Config::Config(config) = response;
+    // C требует точного потребления объекта: неизвестные флаги/хвост байтов
+    // не должны молча игнорироваться. Каноническая ресериализация это ловит.
+    if grammers_tl_types::enums::Config::Config(config.clone()).to_bytes() != object {
+        return Err("help.getConfig содержит неизвестные поля или лишние байты".to_string());
+    }
+    config_to_snapshot_at(config, now)
+}
+
+/// Прочитать TL `bytes` ровно как C `read_bytes`: длина, выравнивание,
+/// нулевой padding и проверка границ.
+fn read_tl_bytes<'a>(data: &'a [u8], offset: &mut usize) -> Result<&'a [u8], String> {
+    let remaining = data
+        .len()
+        .checked_sub(*offset)
+        .ok_or_else(|| "gzip_packed: смещение вне объекта".to_string())?;
+    if remaining == 0 {
+        return Err("gzip_packed: нет длины bytes".to_string());
+    }
+    let first = data[*offset];
+    let (prefix_len, count) = if first < 254 {
+        (1usize, first as usize)
+    } else if first == 254 {
+        if remaining < 4 {
+            return Err("gzip_packed: усечённая длина bytes".to_string());
+        }
+        let count = data[*offset + 1] as usize
+            | (data[*offset + 2] as usize) << 8
+            | (data[*offset + 3] as usize) << 16;
+        if count < 254 {
+            return Err("gzip_packed: неверная минимальная длина bytes".to_string());
+        }
+        (4usize, count)
+    } else {
+        return Err("gzip_packed: неверная длина bytes".to_string());
+    };
+    if prefix_len > remaining || count > remaining - prefix_len {
+        return Err("gzip_packed: длина bytes вне объекта".to_string());
+    }
+    let encoded_len = prefix_len + count;
+    let padding = (4 - (encoded_len & 3)) & 3;
+    if padding > remaining - encoded_len {
+        return Err("gzip_packed: усечённый padding".to_string());
+    }
+    for index in 0..padding {
+        if data[*offset + encoded_len + index] != 0 {
+            return Err("gzip_packed: padding не нулевой".to_string());
+        }
+    }
+    let start = *offset + prefix_len;
+    let bytes = &data[start..start + count];
+    *offset += encoded_len + padding;
+    Ok(bytes)
+}
+
+fn inflate_config_gzip(object: &[u8]) -> Result<Vec<u8>, String> {
+    let mut offset = 4;
+    let compressed = read_tl_bytes(object, &mut offset)?;
+    if offset != object.len() {
+        return Err("gzip_packed содержит лишние байты".to_string());
+    }
+    if compressed.is_empty() || compressed.len() > u32::MAX as usize {
+        return Err("gzip_packed: неверная длина".to_string());
+    }
+    let mut cursor = std::io::Cursor::new(compressed);
+    let mut expanded = Vec::new();
+    let mut chunk = [0u8; 16 * 1024];
+    {
+        let mut decoder = flate2::read::GzDecoder::new(&mut cursor);
+        loop {
+            match decoder.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => {
+                    if expanded.len() + read > CONFIG_MAX_UNPACKED {
+                        return Err("gzip_packed превышает 1 МиБ".to_string());
+                    }
+                    expanded.extend_from_slice(&chunk[..read]);
+                }
+                Err(error) => return Err(format!("gzip_packed: {error}")),
+            }
+        }
+    }
+    if cursor.position() != compressed.len() as u64 {
+        return Err("gzip_packed: поток не消费 все входные байты".to_string());
+    }
+    if expanded.is_empty() {
+        return Err("gzip_packed пуст".to_string());
+    }
+    Ok(expanded)
 }
 
 /// Загружать официальную карту не чаще заданного интервала и не терять кэш при ошибке сети.
@@ -725,9 +877,9 @@ fn unix_time() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        TELEGRAM_CONFIG_API_ID, config_request, config_to_snapshot, exchange_encrypted,
-        parse_res_pq_response, probe_res_pq, sync_platform_adapter, worker_domains_for_discovery,
-        write_manifest_and_sync,
+        TELEGRAM_CONFIG_API_ID, config_bytes_to_snapshot, config_request, config_to_snapshot,
+        exchange_encrypted, parse_res_pq_response, probe_res_pq, sync_platform_adapter,
+        worker_domains_for_discovery, write_manifest_and_sync,
     };
     use crate::outbound::OutboundConnector;
     use crate::runtime::Runtime;
@@ -980,13 +1132,19 @@ mod tests {
             r#static: true,
             this_port_only: true,
             id: 2,
-            ip_address: "2001:db8::2".to_string(),
+            ip_address: "2001:67c:4e8:f002::a".to_string(),
             port: 5222,
             secret: Some(vec![0xaa, 0xbb]),
         };
-        let config = test_config(vec![option.into()]);
+        let mut options = primary_options();
+        options.push(option.into());
+        let config = test_config(options);
         let snapshot = config_to_snapshot(config).unwrap();
-        let endpoint = &snapshot.endpoints[0];
+        let endpoint = snapshot
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.id == 2 && endpoint.media_only)
+            .expect("медиа-опция DC2");
         assert_eq!(endpoint.id, 2);
         assert!(endpoint.ipv6);
         assert!(endpoint.media_only);
@@ -996,6 +1154,64 @@ mod tests {
         assert!(endpoint.this_port_only);
         assert_eq!(endpoint.port, 5222);
         assert_eq!(endpoint.secret.as_deref(), Some("aabb"));
+    }
+
+    fn tl_bytes_field(value: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        if value.len() < 254 {
+            out.push(value.len() as u8);
+        } else {
+            out.push(254);
+            out.push(value.len() as u8);
+            out.push((value.len() >> 8) as u8);
+            out.push((value.len() >> 16) as u8);
+        }
+        out.extend_from_slice(value);
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+        out
+    }
+
+    fn gzip_packed(payload: &[u8]) -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        std::io::Write::write_all(&mut encoder, payload).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let mut out = 0x3072_cfa1_u32.to_le_bytes().to_vec();
+        out.extend_from_slice(&tl_bytes_field(&compressed));
+        out
+    }
+
+    #[test]
+    fn config_bytes_accepts_full_tl_and_gzip_and_rejects_unknown_flags() {
+        let config = test_config(primary_options());
+        let bytes = tl::enums::Config::Config(config).to_bytes();
+        let now = super::unix_time();
+        let snapshot = config_bytes_to_snapshot(&bytes, now).unwrap();
+        assert_eq!(snapshot.endpoints.len(), 5);
+        assert_eq!(snapshot.this_dc, 2);
+
+        let gzipped = gzip_packed(&bytes);
+        let snapshot = config_bytes_to_snapshot(&gzipped, now).unwrap();
+        assert_eq!(snapshot.endpoints.len(), 5);
+
+        let nested = gzip_packed(&gzipped);
+        assert_eq!(
+            config_bytes_to_snapshot(&nested, now)
+                .unwrap()
+                .endpoints
+                .len(),
+            5
+        );
+
+        let mut unknown = bytes.clone();
+        let flags = u32::from_le_bytes(unknown[4..8].try_into().unwrap());
+        unknown[4..8].copy_from_slice(&(flags | (1 << 5)).to_le_bytes());
+        assert!(config_bytes_to_snapshot(&unknown, now).is_err());
+
+        let mut trailing = bytes;
+        trailing.extend_from_slice(&[0, 0, 0, 0]);
+        assert!(config_bytes_to_snapshot(&trailing, now).is_err());
     }
 
     #[test]
@@ -1069,15 +1285,44 @@ mod tests {
         );
     }
 
+    /// Основные IPv4-адреса DC1–5, нужные `validate_snapshot`.
+    fn primary_options() -> Vec<tl::enums::DcOption> {
+        [
+            (1, "149.154.175.50"),
+            (2, "149.154.167.51"),
+            (3, "149.154.175.100"),
+            (4, "149.154.167.91"),
+            (5, "149.154.171.5"),
+        ]
+        .into_iter()
+        .map(|(id, address)| {
+            tl::types::DcOption {
+                ipv6: false,
+                media_only: false,
+                tcpo_only: false,
+                cdn: false,
+                r#static: true,
+                this_port_only: false,
+                id,
+                ip_address: address.to_string(),
+                port: 443,
+                secret: None,
+            }
+            .into()
+        })
+        .collect()
+    }
+
     fn test_config(dc_options: Vec<tl::enums::DcOption>) -> tl::types::Config {
+        let now = super::unix_time();
         tl::types::Config {
             default_p2p_contacts: false,
             preload_featured_stickers: false,
             revoke_pm_inbox: false,
             blocked_mode: false,
             force_try_ipv6: false,
-            date: 1_797_000_000,
-            expires: 1_797_086_400,
+            date: now as i32,
+            expires: (now + 86_400) as i32,
             test_mode: false,
             this_dc: 2,
             dc_options,
