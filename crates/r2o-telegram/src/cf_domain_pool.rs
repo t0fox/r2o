@@ -11,6 +11,11 @@ use tracing::{info, warn};
 use crate::default_domains::{MIN_VALID_DOMAINS, fallback_domains, normalize_domain_pool};
 
 const CACHE_SCHEMA_VERSION: u32 = 1;
+/// C `D2K-CF-DOMAINS 1` и `TG_CF_CACHE_FILE_MAX`.
+const CACHE_HEADER: &str = "D2K-CF-DOMAINS 1\n";
+const CACHE_MAX_BYTES: usize = 64 * 254 + 128;
+/// C `TG_CF_REMOTE_MAX`.
+const REMOTE_MAX: usize = 32;
 
 #[derive(Clone, Debug)]
 pub struct CfDomainSnapshot {
@@ -112,10 +117,13 @@ impl CfDomainPool {
         if !self.enabled {
             return Err("автообновление доменов CF выключено".to_string());
         }
+        if fetched_at == 0 {
+            return Err("дата получения списка CF не задана".to_string());
+        }
         let domains = normalize_domain_pool(&domains);
-        if domains.len() < MIN_VALID_DOMAINS {
+        if !(MIN_VALID_DOMAINS..=REMOTE_MAX).contains(&domains.len()) {
             return Err(format!(
-                "список Flowseal содержит только {} корректных доменов; требуется не меньше {MIN_VALID_DOMAINS}",
+                "список Flowseal содержит {} корректных доменов; требуется от {MIN_VALID_DOMAINS} до {REMOTE_MAX}",
                 domains.len()
             ));
         }
@@ -124,12 +132,7 @@ impl CfDomainPool {
             .update_lock
             .lock()
             .expect("повреждена блокировка обновления доменов Cloudflare");
-        let cache = CachedDomainPool {
-            schema_version: CACHE_SCHEMA_VERSION,
-            fetched_at,
-            domains: domains.clone(),
-        };
-        write_cache_atomically(&self.path, &cache)?;
+        write_cache_atomically(&self.path, fetched_at, &domains)?;
 
         let previous_generation = self.snapshot().generation;
         *self
@@ -189,7 +192,21 @@ pub async fn refresh_loop(runtime: Arc<crate::runtime::Runtime>) {
 }
 
 fn load_cached(path: &Path) -> Option<(Vec<String>, u64)> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file()
+        || metadata.len() == 0
+        || metadata.len() > CACHE_MAX_BYTES as u64
+    {
+        return None;
+    }
     let data = fs::read(path).ok()?;
+    if data.len() > CACHE_MAX_BYTES || data.contains(&0) {
+        return None;
+    }
+    if data.starts_with(CACHE_HEADER.as_bytes()) {
+        return parse_text_cache(&data);
+    }
+    // Совместимость с прежним JSON-кэшем R2O.
     let cache: CachedDomainPool = serde_json::from_slice(&data).ok()?;
     if cache.schema_version != CACHE_SCHEMA_VERSION {
         return None;
@@ -198,15 +215,70 @@ fn load_cached(path: &Path) -> Option<(Vec<String>, u64)> {
     (domains.len() >= MIN_VALID_DOMAINS).then_some((domains, cache.fetched_at))
 }
 
+fn parse_text_cache(data: &[u8]) -> Option<(Vec<String>, u64)> {
+    let text = std::str::from_utf8(data).ok()?;
+    let body = text.strip_prefix(CACHE_HEADER)?;
+    let (timestamp, rest) = body.split_once('\n')?;
+    let timestamp = timestamp.strip_prefix("fetched_at=")?;
+    if timestamp.is_empty() || !timestamp.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let fetched_at: u64 = timestamp.parse().ok()?;
+    if fetched_at == 0 {
+        return None;
+    }
+    // C требует завершающий '\n' после каждой строки домена.
+    let mut lines: Vec<&str> = rest.split('\n').collect();
+    if lines.last() != Some(&"") {
+        return None;
+    }
+    lines.pop();
+    let mut domains = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for line in lines {
+        if line.is_empty() || line.len() >= 254 {
+            return None;
+        }
+        let domain = crate::default_domains::normalize_domain(line)?;
+        if seen.insert(domain.clone()) {
+            if domains.len() == REMOTE_MAX {
+                return None;
+            }
+            domains.push(domain);
+        }
+    }
+    (domains.len() >= MIN_VALID_DOMAINS).then_some((domains, fetched_at))
+}
+
+fn encode_text_cache(fetched_at: u64, domains: &[String]) -> Vec<u8> {
+    let mut output = CACHE_HEADER.as_bytes().to_vec();
+    output.extend_from_slice(format!("fetched_at={fetched_at}\n").as_bytes());
+    for domain in domains {
+        output.extend_from_slice(domain.as_bytes());
+        output.push(b'\n');
+    }
+    output
+}
+
 fn merge_domains(manual: &[String], remote: &[String]) -> Vec<String> {
     normalize_domain_pool(&manual.iter().chain(remote).cloned().collect::<Vec<_>>())
 }
 
-fn write_cache_atomically(path: &Path, cache: &CachedDomainPool) -> Result<(), String> {
+fn write_cache_atomically(path: &Path, fetched_at: u64, domains: &[String]) -> Result<(), String> {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)
+                .map_err(|error| format!("не удалось создать каталог кэша CF: {error}"))?;
+        }
+        #[cfg(not(unix))]
         fs::create_dir_all(parent)
             .map_err(|error| format!("не удалось создать каталог кэша CF: {error}"))?;
     }
@@ -219,12 +291,16 @@ fn write_cache_atomically(path: &Path, cache: &CachedDomainPool) -> Result<(), S
         .unwrap_or_default()
         .as_nanos();
     let temporary = path.with_file_name(format!(".{file_name}.tmp-{}-{nonce}", std::process::id()));
-    let bytes = serde_json::to_vec(cache)
-        .map_err(|error| format!("не удалось сериализовать кэш CF: {error}"))?;
+    let bytes = encode_text_cache(fetched_at, domains);
     let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
             .open(&temporary)
             .map_err(|error| format!("не удалось создать временный кэш CF: {error}"))?;
         file.write_all(&bytes)

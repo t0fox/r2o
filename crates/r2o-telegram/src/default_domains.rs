@@ -78,24 +78,50 @@ pub fn deobfuscate(s: &str) -> Option<String> {
     Some(format!("{}{}", decoded, REAL_SUFFIX))
 }
 
-/// Разобрать текстовый список доменов (по одному на строку; строки с `#` пропускаются).
-/// Каждая строка расшифровывается перед добавлением в список.
+/// C `tg_cf_domain_pool_parse_remote`: 64 КиБ, без NUL, до 32 уникальных.
+pub fn parse_remote_domains(text: &str) -> Result<Vec<String>, String> {
+    if text.len() > 64 * 1024 || text.as_bytes().contains(&0) {
+        return Err("список CF-доменов слишком большой или содержит NUL".to_string());
+    }
+    let mut domains: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for line in text.split('\n') {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some(decoded) = deobfuscate(trimmed) else {
+            continue;
+        };
+        let Some(normalized) = normalize_domain(&decoded) else {
+            continue;
+        };
+        if seen.insert(normalized.clone()) && domains.len() < 32 {
+            domains.push(normalized);
+        }
+    }
+    Ok(domains)
+}
+
+/// Разобрать текстовый список доменов без возврата ошибки (unit-тесты).
+#[cfg(test)]
 fn parse_domain_list(text: &str) -> Vec<String> {
-    let domains: Vec<String> = text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .filter_map(deobfuscate)
-        .collect();
-    normalize_domain_pool(&domains)
+    parse_remote_domains(text).unwrap_or_default()
+}
+
+/// C `normalize_domain`: lower-case, обрезать точки, проверить labels/TLD.
+pub(crate) fn normalize_domain(domain: &str) -> Option<String> {
+    let lowered = domain.trim().to_ascii_lowercase();
+    let trimmed = lowered.trim_end_matches('.');
+    valid_domain(trimmed).then(|| trimmed.to_string())
 }
 
 pub(crate) fn normalize_domain_pool(domains: &[String]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     domains
         .iter()
-        .map(|domain| domain.trim().to_ascii_lowercase())
-        .filter(|domain| valid_domain(domain) && seen.insert(domain.clone()))
+        .filter_map(|domain| normalize_domain(domain))
+        .filter(|domain| seen.insert(domain.clone()))
         .collect()
 }
 
@@ -158,7 +184,7 @@ pub(crate) async fn fetch_flowseal_domains_with_outbound(
     outbound: &OutboundConnector,
 ) -> Result<Vec<String>, String> {
     let body = https_get(DOMAINS_URL_HOST, DOMAINS_URL_PATH, outbound).await?;
-    let domains = parse_domain_list(&body);
+    let domains = parse_remote_domains(&body)?;
     if domains.len() < MIN_VALID_DOMAINS {
         return Err(format!(
             "список Flowseal содержит только {} корректных доменов; требуется не меньше {MIN_VALID_DOMAINS}",

@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 136,
-  "percent": 50.18,
+  "points": 138,
+  "percent": 50.92,
   "total": 179,
   "counts": {
-    "verified": 95,
+    "verified": 96,
     "carry": 40,
-    "partial": 43,
+    "partial": 42,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1095,7 +1095,7 @@
     {
       "name": "Telegram",
       "weight": 41,
-      "points": 19,
+      "points": 21,
       "items": [
         {
           "id": 157,
@@ -1267,15 +1267,15 @@
           "key": "TG13",
           "name": "CF domain pool refresh/cache",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Telegram",
-          "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "gap": "",
-          "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+          "coverage": "`scripts/test-telegram-cf-pool-differential.sh` (a378); C `tg_cf_domain_pool_*`; Rust `parse_remote_domains`/`CfDomainPool`",
+          "gap": "Parse/decode, лимиты, fallback, manual merge и байты `D2K-CF-DOMAINS 1` совпадают",
+          "mapping": "`scripts/test-telegram-cf-pool-differential.sh` (a378); C `tg_cf_domain_pool_*`; Rust `parse_remote_domains`/`CfDomainPool`",
+          "evidence": "`scripts/test-telegram-cf-pool-differential.sh` (a378); C `tg_cf_domain_pool_*`; Rust `parse_remote_domains`/`CfDomainPool` · пробел: Parse/decode, лимиты, fallback, manual merge и байты `D2K-CF-DOMAINS 1` совпадают"
         },
         {
           "id": 169,
@@ -5282,15 +5282,15 @@
       "key": "TG13",
       "name": "CF domain pool refresh/cache",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Telegram",
-      "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "gap": "",
-      "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+      "coverage": "`scripts/test-telegram-cf-pool-differential.sh` (a378); C `tg_cf_domain_pool_*`; Rust `parse_remote_domains`/`CfDomainPool`",
+      "gap": "Parse/decode, лимиты, fallback, manual merge и байты `D2K-CF-DOMAINS 1` совпадают",
+      "mapping": "`scripts/test-telegram-cf-pool-differential.sh` (a378); C `tg_cf_domain_pool_*`; Rust `parse_remote_domains`/`CfDomainPool`",
+      "evidence": "`scripts/test-telegram-cf-pool-differential.sh` (a378); C `tg_cf_domain_pool_*`; Rust `parse_remote_domains`/`CfDomainPool` · пробел: Parse/decode, лимиты, fallback, manual merge и байты `D2K-CF-DOMAINS 1` совпадают"
     },
     {
       "id": 169,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 136,
+      "points": 138,
       "weight": 271,
-      "percent": 50.18
+      "percent": 50.92
     },
     "carry_forward": {
-      "points": 199,
+      "points": 201,
       "weight": 271,
-      "percent": 73.43,
+      "percent": 74.17,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
