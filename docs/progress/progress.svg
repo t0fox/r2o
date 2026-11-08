@@ -1,12 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 45.76%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 790" width="1100" height="790" role="img" aria-label="R2O strict parity 46.49%">
 <rect width="1100" height="790" rx="20" fill="#0c121e"/>
 <text x="36" y="48" fill="#edf7ff" font-family="Arial,sans-serif" font-size="29" font-weight="700">R2O / D2O · Strict parity</text>
-<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">45.76%</text>
-<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">124 / 271 verified points</text>
+<text x="37" y="98" fill="#36c989" font-family="Arial,sans-serif" font-size="42" font-weight="700">46.49%</text>
+<text x="230" y="93" fill="#9bafc3" font-family="Arial,sans-serif" font-size="18">126 / 271 verified points</text>
 <rect x="37" y="113" width="1024" height="11" rx="5" fill="#273245"/>
-<rect x="37" y="113" width="468.5" height="11" rx="5" fill="#36c989"/>
-<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 88 verified · 0 missing · 2026-11-08</text>
-<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 187/271 = 69.00% · strict 124/271 = 45.76%</text>
+<rect x="37" y="113" width="476.1" height="11" rx="5" fill="#36c989"/>
+<text x="38" y="147" fill="#90a5b8" font-family="Arial,sans-serif" font-size="13">179 contracts · 89 verified · 0 missing · 2026-11-08</text>
+<text x="38" y="166" fill="#65758c" font-family="Arial,sans-serif" font-size="12">legacy 80/89 = 89.89% · carry 304 189/271 = 69.74% · strict 126/271 = 46.49%</text>
 <rect x="37" y="190" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="213" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Datapath</text>
 <text x="533" y="213" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">16/28</text>
@@ -96,9 +96,9 @@
 <rect x="571" y="447" width="30" height="22" rx="5" fill="#36c989"><title>G1 Discord Gateway WebSocket upgrade/Hello: доказано (1/1)</title></rect>
 <rect x="37" y="526" width="510" height="100" rx="12" fill="#162233" stroke="#2b394c"/>
 <text x="51" y="549" fill="#e8f1fa" font-family="Arial,sans-serif" font-size="15" font-weight="700">Telegram</text>
-<text x="533" y="549" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">7/41</text>
+<text x="533" y="549" text-anchor="end" fill="#9bb0c5" font-family="Arial,sans-serif" font-size="12">9/41</text>
 <rect x="51" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>TG1 Config file/env mapping и валидация: частично (0/2)</title></rect>
-<rect x="89" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>TG3 DC map persist/merge/validate: частично (0/2)</title></rect>
+<rect x="89" y="559" width="30" height="22" rx="5" fill="#36c989"><title>TG3 DC map persist/merge/validate: доказано (2/2)</title></rect>
 <rect x="127" y="559" width="30" height="22" rx="5" fill="#e6b45d"><title>TG4 `help.getConfig` и dcOption: частично (0/2)</title></rect>
 <rect x="165" y="559" width="30" height="22" rx="5" fill="#36c989"><title>TG5 obfuscated2/secret/DC/media/proto: доказано (2/2)</title></rect>
 <rect x="203" y="559" width="30" height="22" rx="5" fill="#36c989"><title>TG6 MTProto splitter: доказано (2/2)</title></rect>

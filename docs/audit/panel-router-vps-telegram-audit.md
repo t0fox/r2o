@@ -4,13 +4,13 @@
 
 Источники: локальные деревья `E:\d2o` (C/shell/section units) и `E:\r2o` (Rust/shell), `docs/functional-parity-matrix.md`, `docs/parity-function-inventory.md`, `README.md`, `router/README.md`, `docs/audit/function-index.md`, существующие differential-скрипты и CI-workflow.
 
-**Интеграция 2026-11-08.** Детальные строки A1–A26, B1–B54 и C1–C26 сведены в единую scored-матрицу `docs/functional-parity-matrix.md`, раздел «Нормализованная матрица покрытия»: 179 контрактов / 271 балл, строгий счёт 124/271 = 45,76 %. В scored не входят `B32`/`B45`/`B54`, `C2`, `C25`/`C26` как extension/out-of-scope/дубли. `B9` и `B52` закрыты после аудита (`scripts/test-router-clear-found-state.sh`, `scripts/test-router-log-maintenance.sh`); таблицы ниже сохранены как исходное доказательное основание.
+**Интеграция 2026-11-08.** Детальные строки A1–A26, B1–B54 и C1–C26 сведены в единую scored-матрицу `docs/functional-parity-matrix.md`, раздел «Нормализованная матрица покрытия»: 179 контрактов / 271 балл, строгий счёт 126/271 = 46,49 %. В scored не входят `B32`/`B45`/`B54`, `C2`, `C25`/`C26` как extension/out-of-scope/дубли. `B9` и `B52` закрыты после аудита (`scripts/test-router-clear-found-state.sh`, `scripts/test-router-log-maintenance.sh`); таблицы ниже сохранены как исходное доказательное основание.
 
 ## 0. Метод и ограничения
 
 1. **Ничего не собиралось и не запускалось.** В PATH нет `git`, `cargo`, `rustc`; C-оракулы и Rust-тесты в этом окружении не запускались. Все выводы ниже — анализ исходников, встроенных тестов, differential-скриптов и CI-конфигурации, а не результат прогона.
 2. **C D2O — эталон поведения, но не источник переноса для Telegram.** C11-реализация Telegram сравнивается как oracle; R2O Telegram взят из донора z2kOW (`tg-proxy`). Для panel/router C-код является и источником, и oracle.
-3. **Версии в документах противоречат друг другу.** Заголовок матрицы говорит о 57 контрактах/89 баллах и 80/89, а примечания 73–92 — о 84 баллах, 53/84 и 69,00 %. Одновременно panel-скрипты закреплены на D2O `304ba893`, матрица panel-строки — на `a378e23`, router-скрипты — на `8e2c981`. В этом аудите **баллы не начислялись**; единый процент по четырём областям не выводится.
+3. **Версии в документах противоречат друг другу.** Заголовок матрицы говорит о 57 контрактах/89 баллах и 80/89, а примечания 73–92 — о 84 баллах, 53/84 и 69,74 %. Одновременно panel-скрипты закреплены на D2O `304ba893`, матрица panel-строки — на `a378e23`, router-скрипты — на `8e2c981`. В этом аудите **баллы не начислялись**; единый процент по четырём областям не выводится.
 4. **Легенда статусов:**
    - `ДИФ` — есть production C/Rust differential-скрипт или fixture, прямо вызывающий обе реализации; в этом аудите не перезапускался.
    - `ТЕСТ` — есть только Rust unit/integration/browser-тест либо shell-harness с моками.
@@ -294,9 +294,9 @@
 |---|---|---|---|---|
 | `config.c` (9): `tg_config_read/clean`, shell-value, domain/boolean/uint | `config.rs:426+` (clap/env), `with_defaults:458`, `normalize_cf_worker_domain:476`; router `export_telegram_config` | Ключи через env, не через файл; domain lists нормализуются/отбрасываются, а не валидируются фатально | `tests/config.rs`, `config.rs` unit | ИСХ/ПРОБЕЛ |
 | `identity.c` (12): load/mint, public key, sign/verify, HMAC hex | `identity.rs:20+` (Ed25519, формат `R2OTGID1`) | Создание identity; **нет** enroll-proof/HMAC | `--init-identity`, unit | ИСХ/ПРОБЕЛ (нет потребителя) |
-| `dc_map.c` (13): builtin endpoints, validate, resolve | `dc_map.rs:353-466` | builtin/validate/lookup/merge | `tests` + donor | ИСХ |
-| `dc_map_json.c` (16) | `dc_map.rs:61-99` (serde) | JSON parse/encode | `dc_map.rs` unit | ИСХ |
-| `dc_map_store.c` (27): load/install/refresh, merge, endpoint manifest | `dc_map.rs:125-580`; `write_endpoint_manifest:155` | Persist/merge/manifest; R2O вызывает manifest в production (D2O — только тест) | `dc_discovery` unit | ИСХ + EXT |
+| `dc_map.c` (13): builtin endpoints, validate, resolve | `dc_map.rs:353-466` | builtin/validate/lookup/merge | `test-telegram-dc-map-differential.sh` | ДИФ |
+| `dc_map_json.c` (16) | `dc_map.rs:61-99` (serde) | JSON parse/encode | `test-telegram-dc-map-differential.sh` | ДИФ |
+| `dc_map_store.c` (27): load/install/refresh, merge, endpoint manifest | `dc_map.rs:125-580`; `write_endpoint_manifest:155` | Persist/merge/manifest; R2O вызывает manifest в production (D2O — только тест) | `test-telegram-dc-map-differential.sh` | ДИФ + EXT |
 | `dc_discovery`/`mtproto_config.c` (11): `help.getConfig`, dcOption | `dc_discovery.rs:47` `fetch_config`, `config_to_snapshot`; grammers TL | Полный getConfig/DC options | `dc_discovery.rs` unit | ИСХ |
 | `mtproto_auth.c` (27): step2/3/4 | `dc_discovery.rs:342` `grammers_mtproto::Encrypted` | Аутентификация через grammers | `tests` + mock DC | ИСХ (donor) |
 | `mtproto_crypto.c` (12): CTR, AES-IGE, obfuscated2, secret, relay init | `crypto.rs:82` `parse_handshake`, `direct_stream_ciphers:233`, `generate_relay_init:139` | obfuscated2/secret/DC/proto | `test-telegram-mtproto-handshake-differential.sh` | ДИФ |
@@ -528,7 +528,7 @@
 |---|---|---:|---|
 | C1 | Config file/env mapping и валидация | 2 | частично; CF-домены/TG_PORT/диагностика — пробелы |
 | C2 | Identity/ed25519 и его потребитель | 1 | EXT; потребителя нет |
-| C3 | DC map persist/merge/validate | 2 | ИСХ + unit |
+| C3 | DC map persist/merge/validate | 2 | ДИФ: parse/merge/load |
 | C4 | `help.getConfig` и dcOption | 2 | ИСХ + unit |
 | C5 | obfuscated2/secret/DC/media/proto | 2 | ДИФ: direct/secret/reserved |
 | C6 | MTProto splitter | 2 | ДИФ: frames/flush |

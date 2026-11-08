@@ -186,7 +186,12 @@ impl DcMapStore {
         let now = unix_time();
         let snapshot = read_valid_snapshot(&path, now)
             .or_else(|| read_valid_snapshot(&last_good_path(&path), now))
-            .map(Arc::new);
+            .map(|(snapshot, augmented)| {
+                if augmented && let Ok(bytes) = serde_json::to_vec_pretty(&snapshot) {
+                    let _ = atomic_write(&path, &bytes);
+                }
+                Arc::new(snapshot)
+            });
         Self {
             path,
             snapshot: RwLock::new(snapshot),
@@ -336,10 +341,7 @@ impl DcMapStore {
     pub fn install(&self, incoming: DcSnapshot, now: i64) -> Result<DcSnapshot, String> {
         validate_snapshot(&incoming, now)?;
         let previous = self.current();
-        let merged = match previous.as_deref() {
-            Some(previous) => merge_snapshots(previous, &incoming, now)?,
-            None => incoming,
-        };
+        let merged = merge_optional(previous.as_deref(), &incoming, now)?;
         persist_snapshot(&self.path, previous.as_deref(), &merged)?;
         let mut current = self
             .snapshot
@@ -469,30 +471,48 @@ pub fn merge_snapshots(
     incoming: &DcSnapshot,
     now: i64,
 ) -> Result<DcSnapshot, String> {
+    merge_optional(Some(previous), incoming, now)
+}
+
+fn merge_optional(
+    previous: Option<&DcSnapshot>,
+    incoming: &DcSnapshot,
+    now: i64,
+) -> Result<DcSnapshot, String> {
     validate_snapshot(incoming, now)?;
-    if incoming.config_date < previous.config_date {
-        return Err("ответ help.getConfig старше уже сохранённой конфигурации".to_string());
+    if let Some(previous) = previous {
+        if incoming.config_date < previous.config_date {
+            return Err("ответ help.getConfig старше уже сохранённой конфигурации".to_string());
+        }
     }
     let mut merged = incoming.clone();
 
-    for old in &previous.endpoints {
-        let replaced_by_new_option = incoming.endpoints.iter().any(|new| {
-            new.address == old.address
-                && new.port == old.port
-                && (new.id != old.id || new.media_only != old.media_only || new.cdn != old.cdn)
-        });
-        if replaced_by_new_option || now.saturating_sub(old.last_seen) > RETAIN_OLD_OPTION_SECS {
-            continue;
-        }
-        if !merged
-            .endpoints
-            .iter()
-            .any(|new| same_option_identity(new, old))
-        {
-            merged.endpoints.push(old.clone());
+    if let Some(previous) = previous {
+        for old in &previous.endpoints {
+            let replaced_by_new_option = incoming.endpoints.iter().any(|new| {
+                new.address == old.address
+                    && new.port == old.port
+                    && (new.id != old.id
+                        || new.media_only != old.media_only
+                        || new.tcpo_only != old.tcpo_only
+                        || new.cdn != old.cdn
+                        || new.this_port_only != old.this_port_only)
+            });
+            if replaced_by_new_option || now.saturating_sub(old.last_seen) > RETAIN_OLD_OPTION_SECS
+            {
+                continue;
+            }
+            if !merged
+                .endpoints
+                .iter()
+                .any(|new| same_option_identity(new, old))
+            {
+                merged.endpoints.push(old.clone());
+            }
         }
     }
 
+    append_builtin_endpoints(&mut merged, now)?;
     merged.endpoints.sort_by_key(|endpoint| {
         (
             endpoint.id,
@@ -506,7 +526,111 @@ pub fn merge_snapshots(
     if merged.endpoints.len() > CACHE_MAX_OPTIONS {
         return Err("объединённая карта DC превышает допустимый размер".to_string());
     }
+    validate_snapshot(&merged, now)?;
     Ok(merged)
+}
+
+/// Встроенные адреса C `dc_map.c:builtin_endpoints`.
+const BUILTIN_ENDPOINTS: &[(u32, &str, bool)] = &[
+    (1, "149.154.175.50", false),
+    (1, "149.154.175.51", false),
+    (1, "149.154.175.52", true),
+    (1, "149.154.175.53", false),
+    (1, "149.154.175.54", false),
+    (2, "149.154.167.41", false),
+    (2, "149.154.167.50", false),
+    (2, "149.154.167.51", false),
+    (2, "149.154.167.220", false),
+    (2, "95.161.76.100", false),
+    (2, "149.154.167.151", true),
+    (2, "149.154.167.222", true),
+    (2, "149.154.167.223", true),
+    (2, "149.154.162.123", true),
+    (3, "149.154.175.100", false),
+    (3, "149.154.175.101", false),
+    (3, "149.154.175.102", true),
+    (4, "149.154.167.91", false),
+    (4, "149.154.167.43", true),
+    (4, "149.154.167.92", false),
+    (4, "149.154.164.250", true),
+    (4, "149.154.166.120", true),
+    (4, "149.154.166.121", true),
+    (4, "149.154.167.118", true),
+    (4, "149.154.165.111", true),
+    (5, "91.108.56.100", false),
+    (5, "91.108.56.101", false),
+    (5, "91.108.56.116", false),
+    (5, "91.108.56.126", false),
+    (5, "149.154.171.5", false),
+    (5, "91.108.56.102", true),
+    (5, "91.108.56.128", true),
+    (5, "91.108.56.151", true),
+    (203, "91.105.192.100", false),
+    (1, "2001:b28:f23d:f001::a", false),
+    (2, "2001:67c:4e8:f002::a", false),
+    (3, "2001:b28:f23d:f003::a", false),
+    (4, "2001:67c:4e8:f004::a", false),
+    (5, "2001:b28:f23f:f005::a", false),
+];
+
+fn append_builtin_endpoints(snapshot: &mut DcSnapshot, now: i64) -> Result<(), String> {
+    for &(id, address, media_only) in BUILTIN_ENDPOINTS {
+        let address: IpAddr = address
+            .parse()
+            .map_err(|error| format!("встроенный адрес DC: {error}"))?;
+        let builtin = DcEndpoint {
+            id,
+            address,
+            port: 443,
+            ipv6: address.is_ipv6(),
+            media_only,
+            tcpo_only: false,
+            cdn: false,
+            is_static: true,
+            this_port_only: false,
+            secret: None,
+            last_seen: now,
+        };
+        let mut duplicate = false;
+        let mut conflict = false;
+        for known in &snapshot.endpoints {
+            if known.address != builtin.address {
+                continue;
+            }
+            if same_route(known, &builtin) {
+                duplicate = true;
+            } else {
+                conflict = true;
+            }
+        }
+        if duplicate || conflict {
+            continue;
+        }
+        if snapshot.endpoints.len() == CACHE_MAX_OPTIONS {
+            return Err("встроенная карта DC превышает допустимый размер".to_string());
+        }
+        snapshot.endpoints.push(builtin);
+    }
+    Ok(())
+}
+
+fn same_route(left: &DcEndpoint, right: &DcEndpoint) -> bool {
+    left.id == right.id
+        && left.media_only == right.media_only
+        && left.tcpo_only == right.tcpo_only
+        && left.cdn == right.cdn
+        && left.this_port_only == right.this_port_only
+}
+
+fn same_option_identity(left: &DcEndpoint, right: &DcEndpoint) -> bool {
+    left.id == right.id
+        && left.address == right.address
+        && left.port == right.port
+        && left.media_only == right.media_only
+        && left.tcpo_only == right.tcpo_only
+        && left.cdn == right.cdn
+        && left.this_port_only == right.this_port_only
+        && left.secret == right.secret
 }
 
 fn has_primary_coverage(endpoints: &[DcEndpoint]) -> bool {
@@ -517,40 +641,45 @@ fn has_primary_coverage(endpoints: &[DcEndpoint]) -> bool {
     })
 }
 
-fn same_option_identity(left: &DcEndpoint, right: &DcEndpoint) -> bool {
-    left.id == right.id
-        && left.address == right.address
-        && left.port == right.port
-        && left.ipv6 == right.ipv6
-        && left.media_only == right.media_only
-        && left.tcpo_only == right.tcpo_only
-        && left.cdn == right.cdn
-        && left.is_static == right.is_static
-        && left.this_port_only == right.this_port_only
-        && left.secret == right.secret
-}
-
 fn is_public_address(address: IpAddr) -> bool {
     match address {
-        IpAddr::V4(ip) => {
-            !ip.is_unspecified()
-                && !ip.is_loopback()
-                && !ip.is_private()
-                && !ip.is_link_local()
-                && !ip.is_multicast()
-                && !ip.is_broadcast()
-        }
+        IpAddr::V4(ip) => !ipv4_non_global(ip),
         IpAddr::V6(ip) => {
-            !ip.is_unspecified()
-                && !ip.is_loopback()
-                && !ip.is_unique_local()
-                && !ip.is_unicast_link_local()
-                && !ip.is_multicast()
+            let octets = ip.octets();
+            if octets[..12] == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff] {
+                return !ipv4_non_global(std::net::Ipv4Addr::new(
+                    octets[12], octets[13], octets[14], octets[15],
+                ));
+            }
+            octets != [0; 16]
+                && !(octets[..15] == [0; 15] && octets[15] == 1)
+                && (octets[0] & 0xfe) != 0xfc
+                && octets[0] != 0xff
+                && !(octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80)
+                && !(octets[0] == 0x20
+                    && octets[1] == 0x01
+                    && octets[2] == 0x0d
+                    && octets[3] == 0xb8)
         }
     }
 }
 
-fn read_valid_snapshot(path: &Path, now: i64) -> Option<DcSnapshot> {
+/// C `ipv4_non_global`: точный список непубличных диапазонов D2O.
+fn ipv4_non_global(ip: std::net::Ipv4Addr) -> bool {
+    let o = ip.octets();
+    o[0] == 0
+        || o[0] == 10
+        || o[0] == 127
+        || o[0] >= 224
+        || (o[0] == 100 && (o[1] & 0xc0) == 0x40)
+        || (o[0] == 169 && o[1] == 254)
+        || (o[0] == 172 && (16..=31).contains(&o[1]))
+        || (o[0] == 192 && (o[1] == 168 || (o[1] == 0 && (o[2] == 0 || o[2] == 2))))
+        || (o[0] == 198 && (o[1] == 18 || o[1] == 19 || (o[1] == 51 && o[2] == 100)))
+        || (o[0] == 203 && o[1] == 0 && o[2] == 113)
+}
+
+fn read_valid_snapshot(path: &Path, now: i64) -> Option<(DcSnapshot, bool)> {
     let metadata = fs::metadata(path).ok()?;
     if metadata.len() > CACHE_MAX_BYTES {
         return None;
@@ -563,9 +692,13 @@ fn read_valid_snapshot(path: &Path, now: i64) -> Option<DcSnapshot> {
     if bytes.len() as u64 > CACHE_MAX_BYTES {
         return None;
     }
-    let snapshot: DcSnapshot = serde_json::from_slice(&bytes).ok()?;
+    let mut snapshot: DcSnapshot = serde_json::from_slice(&bytes).ok()?;
     validate_snapshot(&snapshot, now).ok()?;
-    Some(snapshot)
+    let before = snapshot.endpoints.len();
+    append_builtin_endpoints(&mut snapshot, now).ok()?;
+    validate_snapshot(&snapshot, now).ok()?;
+    let augmented = snapshot.endpoints.len() != before;
+    Some((snapshot, augmented))
 }
 
 fn persist_snapshot(
@@ -772,7 +905,7 @@ mod tests {
             .install(current_complete(primary_endpoints_at(now)), now)
             .unwrap();
 
-        for address in ["149.154.167.43", "91.108.56.137"] {
+        for address in ["8.8.8.8", "91.108.56.137"] {
             for media_hint in [false, true] {
                 assert_eq!(
                     store.resolve(address.parse().unwrap(), 5222, media_hint, None),
@@ -833,7 +966,14 @@ mod tests {
         fs::write(&backup, serde_json::to_vec(&snapshot).unwrap()).unwrap();
 
         let store = DcMapStore::load(&path);
-        assert_eq!(store.current().as_deref(), Some(&snapshot));
+        let current = store.current().unwrap();
+        for endpoint in &snapshot.endpoints {
+            assert!(
+                current.endpoints.contains(endpoint),
+                "после load потерян endpoint {:?}",
+                endpoint.address
+            );
+        }
         assert_eq!(
             store
                 .resolve("149.154.167.43".parse().unwrap(), 5222, false, Some(2))
@@ -851,7 +991,7 @@ mod tests {
         let store = DcMapStore::without_cache(&path);
         let now = unix_time();
         let first = current_complete(primary_endpoints_at(now));
-        store.install(first.clone(), now).unwrap();
+        let first = store.install(first, now).unwrap();
 
         let mut changed = first.clone();
         changed.fetched_at = now + 1;
@@ -1232,6 +1372,6 @@ mod tests {
                 .iter()
                 .any(|entry| { entry.address == "149.154.167.43".parse::<IpAddr>().unwrap() })
         );
-        assert_eq!(merged.endpoints.len(), 6);
+        assert!(merged.endpoints.len() >= 6);
     }
 }

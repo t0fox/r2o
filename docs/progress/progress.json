@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 124,
-  "percent": 45.76,
+  "points": 126,
+  "percent": 46.49,
   "total": 179,
   "counts": {
-    "verified": 88,
+    "verified": 89,
     "carry": 40,
-    "partial": 50,
+    "partial": 49,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1095,7 +1095,7 @@
     {
       "name": "Telegram",
       "weight": 41,
-      "points": 7,
+      "points": 9,
       "items": [
         {
           "id": 157,
@@ -1117,15 +1117,15 @@
           "key": "TG3",
           "name": "DC map persist/merge/validate",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Telegram",
-          "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "gap": "",
-          "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+          "coverage": "`scripts/test-telegram-dc-map-differential.sh` (a378); C `tg_dc_snapshot_parse_json`/`merge_snapshot`/store; Rust `DcSnapshot`/`validate_snapshot`/`merge_snapshots`/`DcMapStore`",
+          "gap": "Parse/validate (включая CGNAT, v4-mapped, 2001:db8), merge с builtin-списком, load/install и retention/expiry совпадают",
+          "mapping": "`scripts/test-telegram-dc-map-differential.sh` (a378); C `tg_dc_snapshot_parse_json`/`merge_snapshot`/store; Rust `DcSnapshot`/`validate_snapshot`/`merge_snapshots`/`DcMapStore`",
+          "evidence": "`scripts/test-telegram-dc-map-differential.sh` (a378); C `tg_dc_snapshot_parse_json`/`merge_snapshot`/store; Rust `DcSnapshot`/`validate_snapshot`/`merge_snapshots`/`DcMapStore` · пробел: Parse/validate (включая CGNAT, v4-mapped, 2001:db8), merge с builtin-списком, load/install и retention/expiry совпадают"
         },
         {
           "id": 159,
@@ -5132,15 +5132,15 @@
       "key": "TG3",
       "name": "DC map persist/merge/validate",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Telegram",
-      "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "gap": "",
-      "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+      "coverage": "`scripts/test-telegram-dc-map-differential.sh` (a378); C `tg_dc_snapshot_parse_json`/`merge_snapshot`/store; Rust `DcSnapshot`/`validate_snapshot`/`merge_snapshots`/`DcMapStore`",
+      "gap": "Parse/validate (включая CGNAT, v4-mapped, 2001:db8), merge с builtin-списком, load/install и retention/expiry совпадают",
+      "mapping": "`scripts/test-telegram-dc-map-differential.sh` (a378); C `tg_dc_snapshot_parse_json`/`merge_snapshot`/store; Rust `DcSnapshot`/`validate_snapshot`/`merge_snapshots`/`DcMapStore`",
+      "evidence": "`scripts/test-telegram-dc-map-differential.sh` (a378); C `tg_dc_snapshot_parse_json`/`merge_snapshot`/store; Rust `DcSnapshot`/`validate_snapshot`/`merge_snapshots`/`DcMapStore` · пробел: Parse/validate (включая CGNAT, v4-mapped, 2001:db8), merge с builtin-списком, load/install и retention/expiry совпадают"
     },
     {
       "id": 159,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 124,
+      "points": 126,
       "weight": 271,
-      "percent": 45.76
+      "percent": 46.49
     },
     "carry_forward": {
-      "points": 187,
+      "points": 189,
       "weight": 271,
-      "percent": 69.0,
+      "percent": 69.74,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
