@@ -3,14 +3,14 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 101,
-  "percent": 37.27,
+  "points": 102,
+  "percent": 37.64,
   "total": 178,
   "counts": {
-    "verified": 71,
+    "verified": 72,
     "carry": 40,
     "partial": 60,
-    "missing": 7,
+    "missing": 6,
     "implemented": 0,
     "unknown": 0
   },
@@ -1447,7 +1447,7 @@
     {
       "name": "WebPanel",
       "weight": 30,
-      "points": 3,
+      "points": 4,
       "items": [
         {
           "id": 79,
@@ -1484,15 +1484,15 @@
           "key": "A3",
           "name": "Парсер: комментарии, кавычки, хвостовые комментарии",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "missing",
-          "statusLabel": "пробел",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "WebPanel",
-          "coverage": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-          "gap": "ДИФ есть; незакрытая кавычка — пробел",
-          "mapping": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-          "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: ДИФ есть; незакрытая кавычка — пробел"
+          "coverage": "`scripts/test-panel-config-unquoted-quote-differential.sh` (a378); C `normalize_shell_value`; Rust `strip_shell_value`",
+          "gap": "Незакрытая кавычка отвергается в обоих",
+          "mapping": "`scripts/test-panel-config-unquoted-quote-differential.sh` (a378); C `normalize_shell_value`; Rust `strip_shell_value`",
+          "evidence": "`scripts/test-panel-config-unquoted-quote-differential.sh` (a378); C `normalize_shell_value`; Rust `strip_shell_value` · пробел: Незакрытая кавычка отвергается в обоих"
         },
         {
           "id": 82,
@@ -3962,15 +3962,15 @@
       "key": "A3",
       "name": "Парсер: комментарии, кавычки, хвостовые комментарии",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "missing",
-      "statusLabel": "пробел",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "WebPanel",
-      "coverage": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-      "gap": "ДИФ есть; незакрытая кавычка — пробел",
-      "mapping": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A",
-      "evidence": "`panel/main.c`, `panel/server.c` → `crates/r2o-panel/src/{main,server}.rs`; `docs/audit/panel-router-vps-telegram-audit.md` A · пробел: ДИФ есть; незакрытая кавычка — пробел"
+      "coverage": "`scripts/test-panel-config-unquoted-quote-differential.sh` (a378); C `normalize_shell_value`; Rust `strip_shell_value`",
+      "gap": "Незакрытая кавычка отвергается в обоих",
+      "mapping": "`scripts/test-panel-config-unquoted-quote-differential.sh` (a378); C `normalize_shell_value`; Rust `strip_shell_value`",
+      "evidence": "`scripts/test-panel-config-unquoted-quote-differential.sh` (a378); C `normalize_shell_value`; Rust `strip_shell_value` · пробел: Незакрытая кавычка отвергается в обоих"
     },
     {
       "id": 82,
@@ -5430,14 +5430,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 101,
+      "points": 102,
       "weight": 271,
-      "percent": 37.27
+      "percent": 37.64
     },
     "carry_forward": {
-      "points": 164,
+      "points": 165,
       "weight": 271,
-      "percent": 60.52,
+      "percent": 60.89,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

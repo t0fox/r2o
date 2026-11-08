@@ -1471,6 +1471,35 @@ fn d2o_config_parser_matches_ignored_known_values() {
     );
 }
 
+#[test]
+#[ignore = "run through scripts/test-panel-config-unquoted-quote-differential.sh"]
+fn d2o_config_parser_rejects_unquoted_trailing_quote() {
+    let config_path = PathBuf::from(
+        std::env::var_os("R2O_PANEL_CONFIG_UNQUOTED_QUOTE_PATH")
+            .expect("test helper provides config"),
+    );
+    let c_trace = fs::read_to_string(
+        std::env::var_os("R2O_PANEL_CONFIG_UNQUOTED_QUOTE_C_TRACE")
+            .expect("test helper provides D2O trace"),
+    )
+    .unwrap();
+    let mut config = Config::default();
+    config.config_path = config_path.clone();
+    let result = parse_config(&config_path, &mut config, &[]);
+    let trace = format!(
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+        if result.is_ok() { 0 } else { -1 },
+        config.mode,
+        config.panel_listen,
+        config.state_dir.display(),
+        config.queue_num,
+        u8::from(config.config_exists),
+        config.unknown_keys.len()
+    );
+    assert_eq!(trace, c_trace);
+    assert!(result.is_err(), "unquoted trailing quote must be rejected");
+}
+
 fn assert_d2o_config_trace(config_path_env: &str, c_trace_env: &str) {
     let config_path =
         PathBuf::from(std::env::var_os(config_path_env).expect("test helper provides config"));

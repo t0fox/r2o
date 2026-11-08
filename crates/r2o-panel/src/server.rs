@@ -3395,6 +3395,16 @@ fn strip_shell_value(raw: &str) -> Option<&str> {
             (*byte == b'#' && (index == 0 || matches!(bytes[index - 1], b' ' | b'\t')))
                 .then_some(index)
         });
-        Some(raw[..comment.unwrap_or(raw.len())].trim_matches([' ', '\t', '\r', '\n']))
+        let value = raw[..comment.unwrap_or(raw.len())].trim_matches([' ', '\t', '\r', '\n']);
+        // D2O `normalize_shell_value`: незакрытая кавычка в некавыченном
+        // значении — ошибка конфигурации, а не часть значения.
+        if value
+            .as_bytes()
+            .last()
+            .is_some_and(|byte| matches!(byte, b'\'' | b'"'))
+        {
+            return None;
+        }
+        Some(value)
     }
 }
