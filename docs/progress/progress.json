@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 138,
-  "percent": 50.92,
+  "points": 139,
+  "percent": 51.29,
   "total": 179,
   "counts": {
-    "verified": 96,
+    "verified": 97,
     "carry": 40,
-    "partial": 42,
+    "partial": 41,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -1095,7 +1095,7 @@
     {
       "name": "Telegram",
       "weight": 41,
-      "points": 21,
+      "points": 22,
       "items": [
         {
           "id": 157,
@@ -1177,15 +1177,15 @@
           "key": "TG7",
           "name": "v2 encrypted",
           "weight": 1,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 1,
+          "carry_points": 1,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Telegram",
-          "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "gap": "",
-          "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-          "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+          "coverage": "`scripts/test-telegram-mtproto-v2-differential.sh` (a378); C `tg_mtproto_v2_decrypt`; Rust `grammers_crypto::decrypt_data_v2`",
+          "gap": "Серверный decrypt, tampered msg_key/key-id, truncation и D2O plaintext-вектор совпадают",
+          "mapping": "`scripts/test-telegram-mtproto-v2-differential.sh` (a378); C `tg_mtproto_v2_decrypt`; Rust `grammers_crypto::decrypt_data_v2`",
+          "evidence": "`scripts/test-telegram-mtproto-v2-differential.sh` (a378); C `tg_mtproto_v2_decrypt`; Rust `grammers_crypto::decrypt_data_v2` · пробел: Серверный decrypt, tampered msg_key/key-id, truncation и D2O plaintext-вектор совпадают"
         },
         {
           "id": 163,
@@ -5192,15 +5192,15 @@
       "key": "TG7",
       "name": "v2 encrypted",
       "weight": 1,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 1,
+      "carry_points": 1,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Telegram",
-      "coverage": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "gap": "",
-      "mapping": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C",
-      "evidence": "D2O C11 Telegram (oracle) → `crates/r2o-telegram`; donor z2kOW, не C-порт; `docs/audit/panel-router-vps-telegram-audit.md` C"
+      "coverage": "`scripts/test-telegram-mtproto-v2-differential.sh` (a378); C `tg_mtproto_v2_decrypt`; Rust `grammers_crypto::decrypt_data_v2`",
+      "gap": "Серверный decrypt, tampered msg_key/key-id, truncation и D2O plaintext-вектор совпадают",
+      "mapping": "`scripts/test-telegram-mtproto-v2-differential.sh` (a378); C `tg_mtproto_v2_decrypt`; Rust `grammers_crypto::decrypt_data_v2`",
+      "evidence": "`scripts/test-telegram-mtproto-v2-differential.sh` (a378); C `tg_mtproto_v2_decrypt`; Rust `grammers_crypto::decrypt_data_v2` · пробел: Серверный decrypt, tampered msg_key/key-id, truncation и D2O plaintext-вектор совпадают"
     },
     {
       "id": 163,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 138,
+      "points": 139,
       "weight": 271,
-      "percent": 50.92
+      "percent": 51.29
     },
     "carry_forward": {
-      "points": 201,
+      "points": 202,
       "weight": 271,
-      "percent": 74.17,
+      "percent": 74.54,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
