@@ -1060,6 +1060,46 @@ update_install() {
     return 1
 }
 
+status_d2k() {
+    echo "${NAME:-r2o}"
+    component_running r2o-datapath "$DP4_PID" && echo "  датапат: работает (pid $(cat "$DP4_PID"))" \
+        || echo "  датапат: не работает"
+    component_running r2o-controller "$CT4_PID" && echo "  контроллер: работает (pid $(cat "$CT4_PID"))" \
+        || echo "  контроллер: не работает"
+    component_running r2o-panel "$PN_PID" && echo "  панель: работает (pid $(cat "$PN_PID"))" \
+        || echo "  панель: не работает"
+    component_running r2o-telegram "$TG_PID" && echo "  Telegram tunnel: работает (pid $(cat "$TG_PID"))" \
+        || echo "  Telegram tunnel: не работает (enabled=${TG_ENABLED:-0})"
+    meta_dns_scheduler_running && echo "  Instagram DNS: суточное обновление запланировано (pid $(cat "$META_DNS_PID"))" \
+        || echo "  Instagram DNS: планировщик не работает"
+    update_scheduler_running && echo "  автообновление: ночная проверка запланирована (pid $(cat "$UPD_PID"))" \
+        || echo "  автообновление: не запланировано"
+    firewall_watchdog_running && echo "  сторож правил: работает (pid $(cat "$FW_WD_PID"))" \
+        || echo "  сторож правил: не работает"
+    "$FIREWALL" status >/dev/null 2>&1 && echo "  правила: стоят" || echo "  правила: отсутствуют или неполны"
+    if [ -n "${KEENETIC_POLICY:-}" ]; then
+        pm=$(r2o_keenetic_policy_mark "$KEENETIC_POLICY")
+        if [ -n "$pm" ]; then
+            echo "  политика Keenetic: «${KEENETIC_POLICY}» (метка 0x$pm) — остальные устройства идут как без D2K"
+        else
+            echo "  политика Keenetic: «${KEENETIC_POLICY}» НЕ НАЙДЕНА — устройства не обрабатываются"
+        fi
+    fi
+    [ ! -f "${FW_V4ONLY:-$RUN/fw-v4only}" ] || echo "  IPv6: не обслуживается — нет ip6tables mangle, работа только по IPv4"
+    if [ "$FW_BACKEND" = iptables ] && command -v d2k_ppe_status >/dev/null 2>&1; then
+        d2k_ppe_status
+    fi
+    bound=$(awk -v q="$QUEUE4" '$1==q{print $2}' "$NFQUEUE_STATUS" 2>/dev/null)
+    if [ -n "$bound" ] && [ "$bound" != "0" ]; then
+        echo "  очередь $QUEUE4: привязана к $bound"
+    else
+        echo "  очередь $QUEUE4: НЕ привязана"
+    fi
+    if [ -x "$MANAGER" ]; then
+        "$MANAGER" exec --root "$ROOT" --component r2o-datapath -- --version 2>/dev/null | sed 's/^/  /'
+    fi
+}
+
 status() {
     ppe_target_ip=${1:-}
     echo "r2o"
@@ -1106,7 +1146,11 @@ case "${1:-}" in
     supervise) supervise ;;
     status)
         shift
-        [ "$#" -le 1 ] || die "использование: $0 status [IPv4-address]"
+        if [ "${1:-}" = "--d2k" ]; then
+            status_d2k
+            exit 0
+        fi
+        [ "$#" -le 1 ] || die "использование: $0 status [IPv4-address|--d2k]"
         status "${1:-}"
         ;;
     engine-start) engine_start ;;
