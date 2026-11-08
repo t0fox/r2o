@@ -37,8 +37,11 @@ trap cleanup EXIT HUP INT TERM
 mkdir -p "$TEMP/diagnostics" "$TEMP/state/diagnostics"
 : > "$TEMP/diagnostics/enabled"
 : > "$TEMP/state/diagnostics/enabled"
+printf '{"report":"ok"}\n' > "$TEMP/diagnostics/report.json"
+cp "$TEMP/diagnostics/report.json" "$TEMP/state/diagnostics/report.json"
 chmod 0700 "$TEMP/diagnostics" "$TEMP/state/diagnostics"
-chmod 0600 "$TEMP/diagnostics/enabled" "$TEMP/state/diagnostics/enabled"
+chmod 0600 "$TEMP/diagnostics/enabled" "$TEMP/state/diagnostics/enabled" \
+    "$TEMP/diagnostics/report.json" "$TEMP/state/diagnostics/report.json"
 
 clang-18 -std=gnu11 -O2 -Wall -Wextra -Werror -pthread \
     -I"$D2O_ROOT/panel" \

@@ -145,12 +145,21 @@ fn d2o_diagnostics_default_query_trace() {
     config.state_dir = PathBuf::from(state);
     config.control_enabled = true;
 
+    let requests = [
+        "GET /api/diagnostics HTTP/1.1\r\nHost: router.local\r\n\r\n",
+        "GET /api/diagnostics? HTTP/1.1\r\nHost: router.local\r\n\r\n",
+        "GET /api/diagnostics?status HTTP/1.1\r\nHost: router.local\r\n\r\n",
+        "GET /api/diagnostics?download HTTP/1.1\r\nHost: router.local\r\n\r\n",
+        "GET /api/diagnostics?unknown HTTP/1.1\r\nHost: router.local\r\n\r\n",
+        "POST /api/diagnostics?disable HTTP/1.1\r\nHost: router.local\r\nOrigin: http://router.local\r\nContent-Length: 0\r\n\r\n",
+        "GET /api/diagnostics HTTP/1.1\r\nHost: router.local\r\n\r\n",
+        "POST /api/diagnostics?enable HTTP/1.1\r\nHost: router.local\r\nOrigin: http://router.local\r\nContent-Length: 0\r\n\r\n",
+        "POST /api/diagnostics?bogus HTTP/1.1\r\nHost: router.local\r\nOrigin: http://router.local\r\nContent-Length: 0\r\n\r\n",
+        "POST /api/diagnostics?enable HTTP/1.1\r\nHost: router.local\r\nContent-Length: 0\r\n\r\n",
+    ];
     let mut trace = String::new();
-    for target in ["/api/diagnostics", "/api/diagnostics?"] {
-        let (status, _, body) = request(
-            &config,
-            &format!("GET {target} HTTP/1.1\r\nHost: router.local\r\n\r\n"),
-        );
+    for request_line in requests {
+        let (status, _, body) = request(&config, request_line);
         trace.push_str(&format!("{status}\n{body}\n"));
     }
     fs::write(rust_trace, &trace).unwrap();

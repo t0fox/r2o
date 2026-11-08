@@ -47,6 +47,18 @@ int main(void) {
     static const char *requests[] = {
         "GET /api/diagnostics HTTP/1.1\r\nHost: router.local\r\n\r\n",
         "GET /api/diagnostics? HTTP/1.1\r\nHost: router.local\r\n\r\n",
+        "GET /api/diagnostics?status HTTP/1.1\r\nHost: router.local\r\n\r\n",
+        "GET /api/diagnostics?download HTTP/1.1\r\nHost: router.local\r\n\r\n",
+        "GET /api/diagnostics?unknown HTTP/1.1\r\nHost: router.local\r\n\r\n",
+        "POST /api/diagnostics?disable HTTP/1.1\r\nHost: router.local\r\n"
+        "Origin: http://router.local\r\nContent-Length: 0\r\n\r\n",
+        "GET /api/diagnostics HTTP/1.1\r\nHost: router.local\r\n\r\n",
+        "POST /api/diagnostics?enable HTTP/1.1\r\nHost: router.local\r\n"
+        "Origin: http://router.local\r\nContent-Length: 0\r\n\r\n",
+        "POST /api/diagnostics?bogus HTTP/1.1\r\nHost: router.local\r\n"
+        "Origin: http://router.local\r\nContent-Length: 0\r\n\r\n",
+        "POST /api/diagnostics?enable HTTP/1.1\r\nHost: router.local\r\n"
+        "Content-Length: 0\r\n\r\n",
     };
     for (size_t i = 0; i < sizeof requests / sizeof requests[0]; ++i) {
         if (exchange(&config, requests[i]) != 0) { return 7; }
