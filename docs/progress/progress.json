@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 245,
-  "percent": 90.41,
+  "points": 248,
+  "percent": 91.51,
   "total": 179,
   "counts": {
-    "verified": 165,
+    "verified": 166,
     "carry": 1,
-    "partial": 12,
+    "partial": 11,
     "missing": 0,
     "implemented": 0,
     "unknown": 0
@@ -2631,7 +2631,7 @@
     {
       "name": "Core / CLI",
       "weight": 15,
-      "points": 9,
+      "points": 12,
       "items": [
         {
           "id": 70,
@@ -2698,15 +2698,15 @@
           "key": "M5",
           "name": "`link.c`, `net4.c`, `udpruntime.c`, `volume.c`",
           "weight": 3,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 3,
+          "carry_points": 3,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Core / CLI",
-          "coverage": "Inventory note; Rust `r2o_volume` tests",
-          "gap": "Нет C/Rust diff",
-          "mapping": "Inventory note; Rust `r2o_volume` tests",
-          "evidence": "Inventory note; Rust `r2o_volume` tests · пробел: Нет C/Rust diff"
+          "coverage": "`test-core-net4-differential.sh` (30 paired), `test-controller-volume-rx-differential.sh` (13 paired); S1/S14/S15 control frames; R6 scheduled UDP / D8 flow table",
+          "gap": "net4/volume RX paired; link/udpruntime — verified S1/R6/D8 дифференциалы; live volume probe и крупные сетевые сценарии не покрыты",
+          "mapping": "`test-core-net4-differential.sh` (30 paired), `test-controller-volume-rx-differential.sh` (13 paired); S1/S14/S15 control frames; R6 scheduled UDP / D8 flow table",
+          "evidence": "`test-core-net4-differential.sh` (30 paired), `test-controller-volume-rx-differential.sh` (13 paired); S1/S14/S15 control frames; R6 scheduled UDP / D8 flow table · пробел: net4/volume RX paired; link/udpruntime — verified S1/R6/D8 дифференциалы; live volume probe и крупные сетевые сценарии не покрыты"
         },
         {
           "id": 75,
@@ -3872,15 +3872,15 @@
       "key": "M5",
       "name": "`link.c`, `net4.c`, `udpruntime.c`, `volume.c`",
       "weight": 3,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 3,
+      "carry_points": 3,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Core / CLI",
-      "coverage": "Inventory note; Rust `r2o_volume` tests",
-      "gap": "Нет C/Rust diff",
-      "mapping": "Inventory note; Rust `r2o_volume` tests",
-      "evidence": "Inventory note; Rust `r2o_volume` tests · пробел: Нет C/Rust diff"
+      "coverage": "`test-core-net4-differential.sh` (30 paired), `test-controller-volume-rx-differential.sh` (13 paired); S1/S14/S15 control frames; R6 scheduled UDP / D8 flow table",
+      "gap": "net4/volume RX paired; link/udpruntime — verified S1/R6/D8 дифференциалы; live volume probe и крупные сетевые сценарии не покрыты",
+      "mapping": "`test-core-net4-differential.sh` (30 paired), `test-controller-volume-rx-differential.sh` (13 paired); S1/S14/S15 control frames; R6 scheduled UDP / D8 flow table",
+      "evidence": "`test-core-net4-differential.sh` (30 paired), `test-controller-volume-rx-differential.sh` (13 paired); S1/S14/S15 control frames; R6 scheduled UDP / D8 flow table · пробел: net4/volume RX paired; link/udpruntime — verified S1/R6/D8 дифференциалы; live volume probe и крупные сетевые сценарии не покрыты"
     },
     {
       "id": 75,
@@ -5460,14 +5460,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 245,
+      "points": 248,
       "weight": 271,
-      "percent": 90.41
+      "percent": 91.51
     },
     "carry_forward": {
-      "points": 246,
+      "points": 249,
       "weight": 271,
-      "percent": 90.77,
+      "percent": 91.88,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {
