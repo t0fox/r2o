@@ -3,13 +3,13 @@
   "date": "2026-11-08",
   "mode": "strict-current-revision",
   "weight": 271,
-  "points": 102,
-  "percent": 37.64,
+  "points": 104,
+  "percent": 38.38,
   "total": 178,
   "counts": {
-    "verified": 72,
+    "verified": 73,
     "carry": 40,
-    "partial": 60,
+    "partial": 59,
     "missing": 6,
     "implemented": 0,
     "unknown": 0
@@ -632,7 +632,7 @@
     {
       "name": "Discovery",
       "weight": 27,
-      "points": 6,
+      "points": 8,
       "items": [
         {
           "id": 25,
@@ -819,15 +819,15 @@
           "key": "S15",
           "name": "v22 legacy SUSPECT/EXCHANGE discovery semantics",
           "weight": 2,
-          "points": 0,
-          "carry_points": 0,
-          "status": "partial",
-          "statusLabel": "частично",
+          "points": 2,
+          "carry_points": 2,
+          "status": "verified",
+          "statusLabel": "доказано",
           "group": "Discovery",
-          "coverage": "События декодируются и не фатальны; unit-векторы `legacy_v22_wire_tests`",
-          "gap": "C-события 0x0002/0x0005 не заводят Discovery R2O-контроллера",
-          "mapping": "События декодируются и не фатальны; unit-векторы `legacy_v22_wire_tests`",
-          "evidence": "События декодируются и не фатальны; unit-векторы `legacy_v22_wire_tests` · пробел: C-события 0x0002/0x0005 не заводят Discovery R2O-контроллера"
+          "coverage": "`scripts/test-control-v22-legacy-events-differential.sh` (a378): real C `d2k_session`+`d2k_ctlsrv_pump`; SUSPECT code 1 ставит цель в Discovery, EXCHANGE без плана отмечает чистое рукопожатие",
+          "gap": "Коды 5/6/8 запускают полную классификацию вместо R2O late-RX; C QUIC SUSPECT (transport 17) не входит",
+          "mapping": "`scripts/test-control-v22-legacy-events-differential.sh` (a378): real C `d2k_session`+`d2k_ctlsrv_pump`; SUSPECT code 1 ставит цель в Discovery, EXCHANGE без плана отмечает чистое рукопожатие",
+          "evidence": "`scripts/test-control-v22-legacy-events-differential.sh` (a378): real C `d2k_session`+`d2k_ctlsrv_pump`; SUSPECT code 1 ставит цель в Discovery, EXCHANGE без плана отмечает чистое рукопожатие · пробел: Коды 5/6/8 запускают полную классификацию вместо R2O late-RX; C QUIC SUSPECT (transport 17) не входит"
         }
       ]
     },
@@ -3302,15 +3302,15 @@
       "key": "S15",
       "name": "v22 legacy SUSPECT/EXCHANGE discovery semantics",
       "weight": 2,
-      "points": 0,
-      "carry_points": 0,
-      "status": "partial",
-      "statusLabel": "частично",
+      "points": 2,
+      "carry_points": 2,
+      "status": "verified",
+      "statusLabel": "доказано",
       "group": "Discovery",
-      "coverage": "События декодируются и не фатальны; unit-векторы `legacy_v22_wire_tests`",
-      "gap": "C-события 0x0002/0x0005 не заводят Discovery R2O-контроллера",
-      "mapping": "События декодируются и не фатальны; unit-векторы `legacy_v22_wire_tests`",
-      "evidence": "События декодируются и не фатальны; unit-векторы `legacy_v22_wire_tests` · пробел: C-события 0x0002/0x0005 не заводят Discovery R2O-контроллера"
+      "coverage": "`scripts/test-control-v22-legacy-events-differential.sh` (a378): real C `d2k_session`+`d2k_ctlsrv_pump`; SUSPECT code 1 ставит цель в Discovery, EXCHANGE без плана отмечает чистое рукопожатие",
+      "gap": "Коды 5/6/8 запускают полную классификацию вместо R2O late-RX; C QUIC SUSPECT (transport 17) не входит",
+      "mapping": "`scripts/test-control-v22-legacy-events-differential.sh` (a378): real C `d2k_session`+`d2k_ctlsrv_pump`; SUSPECT code 1 ставит цель в Discovery, EXCHANGE без плана отмечает чистое рукопожатие",
+      "evidence": "`scripts/test-control-v22-legacy-events-differential.sh` (a378): real C `d2k_session`+`d2k_ctlsrv_pump`; SUSPECT code 1 ставит цель в Discovery, EXCHANGE без плана отмечает чистое рукопожатие · пробел: Коды 5/6/8 запускают полную классификацию вместо R2O late-RX; C QUIC SUSPECT (transport 17) не входит"
     },
     {
       "id": 38,
@@ -5430,14 +5430,14 @@
   ],
   "comparison": {
     "strict": {
-      "points": 102,
+      "points": 104,
       "weight": 271,
-      "percent": 37.64
+      "percent": 38.38
     },
     "carry_forward": {
-      "points": 165,
+      "points": 167,
       "weight": 271,
-      "percent": 60.89,
+      "percent": 61.62,
       "note": "только строки, явно помеченные carry (304); historical evidence"
     },
     "legacy": {

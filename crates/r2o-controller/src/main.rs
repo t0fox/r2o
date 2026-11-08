@@ -7112,6 +7112,27 @@ impl R2oTcpHelloCache {
         }
         r2o_controller::discovery::DiscoveryTarget::from_event(hello)
     }
+
+    /// Цель по ключу потока с формой из C SUSPECT: HELLO v22 не несёт форму.
+    fn target_for_tcp_flow_with_shape(
+        &self,
+        key: &[u8; r2k_core::control::KEY_LEN],
+        shape: u8,
+        now: std::time::Instant,
+    ) -> Option<r2o_controller::discovery::DiscoveryTarget> {
+        if !matches!(shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP)
+            && !r2k_core::control::is_tcp_context_shape(shape)
+        {
+            return None;
+        }
+        let (hello, seen) = self.entries.get(key)?;
+        if now.saturating_duration_since(*seen) > R2O_CLEAN_HANDSHAKE_TTL {
+            return None;
+        }
+        let mut hello = hello.clone();
+        hello.shape = Some(r2k_core::control::r2k_link_shape_tcp_base(shape));
+        r2o_controller::discovery::DiscoveryTarget::from_event(&hello)
+    }
 }
 
 #[cfg(unix)]
@@ -17908,13 +17929,24 @@ impl ControlClient {
                     continue;
                 }
                 if frame.kind == control::EVENT_LEGACY_SUSPECT {
-                    let _event = decode_legacy_suspect(&frame)
+                    let event = decode_legacy_suspect(&frame)
                         .map_err(|error| format!("SUSPECT v22: {error}"))?;
+                    self.r2o_handle_legacy_suspect(
+                        &event,
+                        &mut discovery,
+                        &tcp_hello_names,
+                        &clean_handshakes,
+                    );
                     continue;
                 }
                 if frame.kind == control::EVENT_LEGACY_EXCHANGE {
-                    let _event = decode_legacy_exchange(&frame)
+                    let event = decode_legacy_exchange(&frame)
                         .map_err(|error| format!("EXCHANGE v22: {error}"))?;
+                    self.r2o_handle_legacy_exchange(
+                        &event,
+                        &tcp_hello_names,
+                        &mut clean_handshakes,
+                    );
                     continue;
                 }
                 if frame.kind == EVENT_CLIENT_SHAPE {
@@ -18605,6 +18637,164 @@ impl ControlClient {
         } else {
             Err(format!("датапат отверг ARM_SHAPE для {host} (код {})", ack.reason).into())
         }
+    }
+
+    /// Обработать C-событие SUSPECT (0x0002) в v22-профиле.
+    ///
+    /// C HELLO не несёт форму приветствия, поэтому цель строится по ключу
+    /// потока и `client_shape` из самого SUSPECT. Коды совпадают с
+    /// D2K_SUSPECT_*; для 1/2/3/4 повторяется семантика R2O-событий, для
+    /// 5/6/8 запускается полная классификация (R2O late-RX требует снимок,
+    /// которого у C SUSPECT нет).
+    #[cfg(unix)]
+    fn r2o_handle_legacy_suspect(
+        &mut self,
+        event: &r2k_core::control::LegacySuspectEvent,
+        discovery: &mut Option<(DiscoveryWorker, Catalog, PathBuf, Option<u32>)>,
+        tcp_hello_names: &R2oTcpHelloCache,
+        clean_handshakes: &R2oCleanHandshakeCache,
+    ) {
+        let now = std::time::Instant::now();
+        let target = if matches!(
+            event.client_shape,
+            SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP
+        ) || r2k_core::control::is_tcp_context_shape(event.client_shape)
+        {
+            tcp_hello_names.target_for_tcp_flow_with_shape(&event.key, event.client_shape, now)
+        } else {
+            tcp_hello_names.target_for_tcp_flow(&event.key, now)
+        };
+        let Some(target) = target else {
+            println!(
+                "v22 SUSPECT code={}: нет свежего HELLO/SNI того же потока (shape={}, planned={}, key={:02x?})",
+                event.code,
+                event.client_shape,
+                event.planned,
+                &event.key[..]
+            );
+            return;
+        };
+        let planned = event.planned == r2k_core::control::LEGACY_PLANNED_YES;
+        if clean_handshakes.suppresses_unplanned_tcp_suspicion(
+            &target.host,
+            target.family,
+            planned,
+            now,
+        ) {
+            println!(
+                "v22 SUSPECT {}: недавнее рукопожатие без плана подавляет подозрение",
+                target.host
+            );
+            return;
+        }
+        let Some((worker, catalog, _, _)) = discovery.as_mut() else {
+            println!(
+                "v22 SUSPECT {}: Discovery не подключён, событие не запускает поиск",
+                target.host
+            );
+            return;
+        };
+        let has_solution = r2o_controller::discovery::has_usable_binding(catalog, &target)
+            || r2o_controller::discovery::has_covering_binding(catalog, &target)
+            || matching_domain_group(catalog, &target).is_some();
+        let signal = r2o_discovery_suspect_signal(
+            event.code,
+            event.ttl,
+            event.reference_ttl,
+            event.traffic_class,
+            event.ip_id,
+        );
+        let (mode, trigger_planned, description) = match event.code {
+            1 | 2 | 5 | 6 | 8 => {
+                if planned {
+                    (
+                        if has_solution {
+                            R2oSuspectQueueMode::ConfirmedFailure
+                        } else {
+                            R2oSuspectQueueMode::Normal
+                        },
+                        true,
+                        "подтверждённый отказ плана",
+                    )
+                } else if has_solution {
+                    println!(
+                        "v22 SUSPECT {}: каталог уже содержит применимое решение",
+                        target.host
+                    );
+                    return;
+                } else {
+                    (R2oSuspectQueueMode::Normal, false, "подозрение без плана")
+                }
+            }
+            3 => {
+                if planned {
+                    (
+                        R2oSuspectQueueMode::ConfirmedFailure,
+                        true,
+                        "молчание под планом",
+                    )
+                } else if has_solution {
+                    println!(
+                        "v22 SUSPECT {}: каталог уже содержит применимое решение",
+                        target.host
+                    );
+                    return;
+                } else {
+                    (R2oSuspectQueueMode::Normal, false, "молчание без плана")
+                }
+            }
+            4 => (
+                R2oSuspectQueueMode::Fresh,
+                false,
+                "снятый защитой чужой RST",
+            ),
+            _ => {
+                println!(
+                    "v22 SUSPECT code={} для {} не запускает TCP-классификацию",
+                    event.code, target.host
+                );
+                return;
+            }
+        };
+        let queued =
+            self.r2o_queue_tcp_suspect(worker, target.clone(), signal, mode, trigger_planned);
+        println!(
+            "v22 SUSPECT {}: {} — {}",
+            target.host,
+            description,
+            if queued {
+                "поставлено в очередь Discovery"
+            } else {
+                "задача уже выполняется или очередь занята"
+            }
+        );
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+    }
+
+    /// Обработать C-событие EXCHANGE (0x0005) в v22-профиле.
+    ///
+    /// Ответ сервера без плана — доказательство чистого рукопожатия, которое
+    /// подавляет последующее подозрение по тому же имени (как R2O
+    /// EVENT_R2O_TCP_CLEAN_HANDSHAKE). Ответ под планом ничего не отменяет.
+    #[cfg(unix)]
+    fn r2o_handle_legacy_exchange(
+        &self,
+        event: &r2k_core::control::LegacyExchangeEvent,
+        tcp_hello_names: &R2oTcpHelloCache,
+        clean_handshakes: &mut R2oCleanHandshakeCache,
+    ) {
+        let now = std::time::Instant::now();
+        let has_response = event.server_hello || event.seen_types & 0x0f != 0;
+        if event.planned == r2k_core::control::LEGACY_PLANNED_NO && has_response {
+            if let Some(name) = tcp_hello_names.clean_handshake_name(&event.key, now) {
+                clean_handshakes.note(&name, event.key[0], now);
+                println!(
+                    "v22 EXCHANGE {}: ответ сервера без плана отмечен как чистое рукопожатие",
+                    name
+                );
+            }
+        }
+        let _ = std::io::Write::flush(&mut std::io::stdout());
     }
 
     fn r2o_queue_tcp_suspect(
@@ -20659,6 +20849,10 @@ impl ControlClient {
                 | EVENT_APPLIED
                 | EVENT_REFUSED
                 | EVENT_CLIENT_SHAPE
+                | control::EVENT_LEGACY_CLIENT_TCP
+                | control::EVENT_LEGACY_SHAPE
+                | control::EVENT_LEGACY_SUSPECT
+                | control::EVENT_LEGACY_EXCHANGE
                 | EVENT_HTTP_PORTAL
                 | EVENT_HTTP_RESPONSE
                 | EVENT_R2O_QUIC_STALL
@@ -20672,7 +20866,6 @@ impl ControlClient {
                 | EVENT_R2O_TCP_REPEAT
                 | EVENT_R2O_TCP_RST_CUT
                 | EVENT_R2O_TCP_EXCHANGE
-                | EVENT_R2O_VOICE_SUSPECT
                 | EVENT_R2O_VOICE_PROOF
                 | EVENT_R2O_VOICE_RTP_PROOF
                 | EVENT_R2O_VOICE_STUN_PROOF
@@ -22100,6 +22293,42 @@ mod tests {
             r2o_plan_records_for_profile(WireProfile::V48, &r2op).unwrap(),
             r2op
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_suspect_shape_completes_target_without_hello_shape() {
+        use super::R2oTcpHelloCache;
+        use r2k_core::control::HelloEvent;
+
+        let mut key = [0; KEY_LEN];
+        key[0] = 4;
+        key[1..5].copy_from_slice(&[192, 0, 2, 1]);
+        key[17..21].copy_from_slice(&[198, 51, 100, 2]);
+        key[33..35].copy_from_slice(&45_000_u16.to_be_bytes());
+        key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+        key[37] = 6;
+        let hello = HelloEvent {
+            key,
+            host: Some(b"example.com".to_vec()),
+            shape: None,
+            r2o_wire_len: None,
+            quic_snapshot: None,
+            tcp_has_timestamp: None,
+        };
+        let mut cache = R2oTcpHelloCache::default();
+        let now = std::time::Instant::now();
+        cache.note(hello, now);
+        assert!(
+            cache.target_for_tcp_flow(&key, now).is_none(),
+            "C HELLO без формы не должен давать цель"
+        );
+        let target = cache
+            .target_for_tcp_flow_with_shape(&key, r2k_core::control::SHAPE_MODERN_TS, now)
+            .expect("SUSPECT client_shape должен дополнять цель");
+        assert_eq!(target.host, "example.com");
+        assert_eq!(target.shape, SHAPE_MODERN);
+        assert_eq!(target.endpoint, "198.51.100.2:443");
     }
 
     #[test]
