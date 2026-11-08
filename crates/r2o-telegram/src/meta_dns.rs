@@ -951,16 +951,13 @@ impl MetaDnsScheduler {
 
     fn refresh_offset(&self) -> Result<u64, String> {
         let stored = std::fs::read_to_string(&self.offset).unwrap_or_default();
-        let stored = stored.trim();
-        if let Some(raw) = stored.strip_prefix("v2 ")
-            && let Ok(offset) = raw.parse::<u64>()
-            && offset <= 239
-        {
+        // Командная подстановка в C снимает только хвостовые '\n'; пробелы и
+        // '\r' остаются и делают строку негодной — повторяем это точно.
+        let stored = stored.trim_end_matches('\n');
+        if let Some(offset) = parse_stored_v2_offset(stored) {
             return Ok(offset);
         }
-        if let Ok(old) = stored.parse::<u64>()
-            && old <= 59
-        {
+        if let Some(old) = parse_legacy_offset(stored) {
             let offset = old * 4 + (random_u16()? % 4) as u64;
             self.store_offset(offset)?;
             append_log(
@@ -1043,6 +1040,34 @@ fn read_attempt(path: &Path) -> Attempt {
         last_day: Some(day.to_string()),
         failures,
     }
+}
+
+/// Точный перенос C-шаблонов `'v2 '[0-9] | 'v2 '[1-9][0-9] |
+/// 'v2 1'[0-9][0-9] | 'v2 2'[0-3][0-9]`: ведущие нули, знак и лишние
+/// пробелы не допускаются.
+fn parse_stored_v2_offset(stored: &str) -> Option<u64> {
+    let raw = stored.strip_prefix("v2 ")?;
+    let bytes = raw.as_bytes();
+    let valid = match bytes {
+        [digit] => digit.is_ascii_digit(),
+        [first, second] => first.is_ascii_digit() && second.is_ascii_digit() && *first != b'0',
+        [b'1', second, third] => second.is_ascii_digit() && third.is_ascii_digit(),
+        [b'2', second @ b'0'..=b'3', third] => second.is_ascii_digit() && third.is_ascii_digit(),
+        _ => false,
+    };
+    valid.then(|| raw.parse().ok()).flatten()
+}
+
+/// Точный перенос C-шаблонов `[0-9] | [1-5][0-9] | 0[0-9]`.
+fn parse_legacy_offset(stored: &str) -> Option<u64> {
+    let bytes = stored.as_bytes();
+    let valid = match bytes {
+        [digit] => digit.is_ascii_digit(),
+        [b'0', second] => second.is_ascii_digit(),
+        [first @ b'1'..=b'5', second] => second.is_ascii_digit(),
+        _ => false,
+    };
+    valid.then(|| stored.parse().ok()).flatten()
 }
 
 fn should_run(
@@ -2048,5 +2073,44 @@ esac
         assert!(regenerated <= 239);
         assert_eq!(scheduler.refresh_offset().unwrap(), regenerated);
         let _ = std::fs::remove_dir_all(paths.r2o_dir);
+    }
+
+    #[test]
+    fn scheduler_offset_parser_matches_d2o_shell_patterns() {
+        for (stored, want) in [
+            ("v2 0", Some(0)),
+            ("v2 9", Some(9)),
+            ("v2 10", Some(10)),
+            ("v2 99", Some(99)),
+            ("v2 100", Some(100)),
+            ("v2 199", Some(199)),
+            ("v2 200", Some(200)),
+            ("v2 239", Some(239)),
+            ("v2 240", None),
+            ("v2 007", None),
+            ("v2 07", None),
+            ("v2 00", None),
+            ("v2 +5", None),
+            ("v2 5 ", None),
+            ("v2 5\r", None),
+        ] {
+            assert_eq!(parse_stored_v2_offset(stored), want, "{stored:?}");
+        }
+        for (stored, want) in [
+            ("0", Some(0)),
+            ("9", Some(9)),
+            ("00", Some(0)),
+            ("09", Some(9)),
+            ("10", Some(10)),
+            ("59", Some(59)),
+            ("60", None),
+            ("007", None),
+            ("+5", None),
+            (" 5", None),
+            ("5 ", None),
+            ("5\r", None),
+        ] {
+            assert_eq!(parse_legacy_offset(stored), want, "{stored:?}");
+        }
     }
 }
