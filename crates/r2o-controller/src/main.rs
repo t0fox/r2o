@@ -6864,6 +6864,11 @@ type R2oDiscoveryRunner = dyn Fn(r2o_controller::discovery::DiscoveryTarget, boo
 
 #[cfg(unix)]
 const R2O_DISCOVERY_TASK_CAPACITY: usize = 64;
+/// D2O создаёт поток на задачу и присоединяет его после замера. R2O держит
+/// постоянный пул; 64 потока на семейство почти всегда простаивали и давали
+/// 145 потоков в merged-процессе. Восьми потоков достаточно для текущего
+/// adaptive limit, а очередь и permits по-прежнему допускают до max_slots.
+const R2O_DISCOVERY_WORKER_THREADS: usize = 8;
 // Matches SCHED_REST_MS: failed and direct-clear tasks keep a scheduler slot for two minutes.
 const R2O_DISCOVERY_TASK_REST: std::time::Duration = std::time::Duration::from_secs(120);
 #[cfg(unix)]
@@ -11540,7 +11545,9 @@ impl DiscoveryWorker {
         let cancel = Arc::new(AtomicBool::new(false));
         let active_cancels = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let catalog_refreshes = Arc::new(std::sync::Mutex::new(HashSet::new()));
-        let worker_count = measurement_gate.r2o_max_slots();
+        let worker_count = measurement_gate
+            .r2o_max_slots()
+            .min(R2O_DISCOVERY_WORKER_THREADS);
         let mut threads = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
             let worker_cancel = Arc::clone(&cancel);

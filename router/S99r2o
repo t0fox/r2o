@@ -63,6 +63,15 @@ UPD_PID=$RUN/update-scheduler.pid
 LOG_WORKER=${R2O_LOG_MAINTENANCE:-$SCRIPT_DIR/r2o-log-maintenance.sh}
 LM_PID=$RUN/r2o-log-maintenance.pid
 META_DNS_PID=$RUN/meta-dns-scheduler.pid
+# RuTracker rt-proxy: официальный HTTPS-CONNECT пул blockme.site, DNS-пины
+# на sentinel и nft REDIRECT на локальный порт. Отключается R2O_RT_PROXY=0.
+RT_PROXY_ENABLED=${R2O_RT_PROXY:-1}
+RT_PROXY_BIN=${R2O_RT_PROXY_BIN:-$ROOT/bin/z2k-rt-proxy}
+RT_PROXY_PORT=${R2O_RT_PROXY_PORT:-1445}
+RT_PROXY_PID=$RUN/r2o-rt-proxy.pid
+RT_PROXY_LOG=$LOG/rt-proxy.log
+RT_SENTINEL=${R2O_RT_SENTINEL:-10.171.171.171}
+RT_DOMAINS=${R2O_RT_DOMAINS:-"rutracker.org rutracker.wiki api.rutracker.cc rep.rutracker.cc static.rutracker.cc"}
 
 # shellcheck disable=SC1090  # конфигурация owner-managed, путь задаётся выше
 [ ! -r "$CONF" ] || . "$CONF"
@@ -231,6 +240,8 @@ valid_positive_decimal "$R2O_FLOW_CAPACITY" || die "неверный R2O_FLOW_CA
 case "$MODE" in off|observe|apply) ;; *) die "неверный MODE" ;; esac
 case "$IPV6_ENABLED" in 0|1) ;; *) die "IPV6_ENABLED должен быть 0 или 1" ;; esac
 case "$SPLIT_RUNTIME" in 0|1) ;; *) die "R2O_SPLIT_RUNTIME должен быть 0 или 1" ;; esac
+case "$RT_PROXY_ENABLED" in 0|1) ;; *) die "R2O_RT_PROXY должен быть 0 или 1" ;; esac
+valid_number "$RT_PROXY_PORT" 65535 && [ "$RT_PROXY_PORT" -gt 0 ] || die "неверный R2O_RT_PROXY_PORT"
 case "$AUTOUPDATE" in 1|yes) AUTOUPDATE=1 ;; 0|no) AUTOUPDATE=0 ;; *) die "AUTOUPDATE должен быть 0, 1, yes или no" ;; esac
 case "$TG_ENABLED" in 1|yes) TG_ENABLED=1 ;; 0|no) TG_ENABLED=0 ;; *) die "TG_ENABLED должен быть 0, 1, yes или no" ;; esac
 case "$R2O_PPE_DEOFFLOAD" in 0|1) ;; *) die "R2O_PPE_DEOFFLOAD должен быть 0 или 1" ;; esac
@@ -631,6 +642,125 @@ meta_dns_scheduler_start() {
 meta_dns_scheduler_stop() {
     stop_component r2o-telegram "$META_DNS_PID"
 }
+
+rt_proxy_running() {
+    [ -s "$RT_PROXY_PID" ] || return 1
+    rt_pid=$(cat "$RT_PROXY_PID" 2>/dev/null) || return 1
+    case "$rt_pid" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$rt_pid" 2>/dev/null || return 1
+    rt_cmdline=$(tr '\000' ' ' < "/proc/$rt_pid/cmdline" 2>/dev/null) || return 1
+    case "$rt_cmdline" in *z2k-rt-proxy*) return 0 ;; *) return 1 ;; esac
+}
+
+rt_nft_remove() {
+    command -v nft >/dev/null 2>&1 || return 0
+    nft delete table inet r2o_rt 2>/dev/null || true
+}
+
+rt_nft_apply() {
+    command -v nft >/dev/null 2>&1 || return 1
+    rt_nft_remove
+    nft add table inet r2o_rt || return 1
+    nft 'add chain inet r2o_rt prerouting { type nat hook prerouting priority dstnat; policy accept; }' || return 1
+    nft 'add chain inet r2o_rt output { type nat hook output priority dstnat; policy accept; }' || return 1
+    nft add rule inet r2o_rt prerouting ip daddr "$RT_SENTINEL" tcp dport 443 redirect to :"$RT_PROXY_PORT" || return 1
+    nft add rule inet r2o_rt output ip daddr "$RT_SENTINEL" tcp dport 443 redirect to :"$RT_PROXY_PORT" || return 1
+    return 0
+}
+
+rt_dns_apply() {
+    command -v uci >/dev/null 2>&1 || return 1
+    rt_changed=0
+    for rt_domain in $RT_DOMAINS; do
+        rt_section="r2o_rt_$(printf '%s' "$rt_domain" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9' '_')"
+        if [ "$(uci -q get "dhcp.$rt_section" 2>/dev/null || true)" != hostrecord ] \
+            || [ "$(uci -q get "dhcp.$rt_section.name" 2>/dev/null || true)" != "$rt_domain" ] \
+            || [ "$(uci -q get "dhcp.$rt_section.ip" 2>/dev/null || true)" != "$RT_SENTINEL" ]; then
+            uci set "dhcp.$rt_section=hostrecord" || return 1
+            uci set "dhcp.$rt_section.name=$rt_domain" || return 1
+            uci set "dhcp.$rt_section.ip=$RT_SENTINEL" || return 1
+            rt_changed=1
+        fi
+    done
+    if [ "$rt_changed" = 1 ]; then
+        uci commit dhcp || return 1
+        /etc/init.d/dnsmasq reload >/dev/null 2>&1 || return 1
+    fi
+    return 0
+}
+
+rt_dns_clear() {
+    command -v uci >/dev/null 2>&1 || return 0
+    rt_changed=0
+    for rt_section in $(uci show dhcp 2>/dev/null | sed -n 's/^dhcp\.\(r2o_rt_[A-Za-z0-9_]*\)=hostrecord$/\1/p'); do
+        uci -q delete "dhcp.$rt_section" || true
+        rt_changed=1
+    done
+    if [ "$rt_changed" = 1 ]; then
+        uci commit dhcp || true
+        /etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
+    fi
+  return 0
+}
+
+rt_proxy_stop() {
+    rt_keep_dns=${1:-keep}
+    if rt_proxy_running; then
+        rt_pid=$(cat "$RT_PROXY_PID")
+        kill -TERM "$rt_pid" 2>/dev/null || true
+        rt_attempt=0
+        while kill -0 "$rt_pid" 2>/dev/null && [ "$rt_attempt" -lt 50 ]; do
+            rt_attempt=$((rt_attempt + 1))
+            sleep 0.1 2>/dev/null || sleep 1
+        done
+        kill -0 "$rt_pid" 2>/dev/null && kill -KILL "$rt_pid" 2>/dev/null || true
+    fi
+    rm -f "$RT_PROXY_PID"
+    rt_nft_remove
+    [ "$rt_keep_dns" = keep ] || rt_dns_clear
+}
+
+rt_proxy_start() {
+    if [ "$RT_PROXY_ENABLED" != 1 ]; then
+        rt_proxy_stop full
+        return 0
+    fi
+    if [ ! -x "$RT_PROXY_BIN" ]; then
+        say "rt-proxy RuTracker не найден: $RT_PROXY_BIN; DNS-пины не добавляю"
+        rt_proxy_stop full
+        return 1
+    fi
+    rt_proxy_stop keep
+    prepare_dirs
+    case "$MARK" in 0x*|0X*) rt_mark=$(printf '%d' "$MARK") ;; *) rt_mark=$MARK ;; esac
+    start-stop-daemon -S -b -m -p "$RT_PROXY_PID" -x /bin/sh -- \
+        -c 'log=$1; shift; exec "$@" >> "$log" 2>&1' r2o-rt "$RT_PROXY_LOG" \
+        "$RT_PROXY_BIN" --listen=:"$RT_PROXY_PORT" --timeout=15m --so-mark="$rt_mark" || return 1
+    rt_attempt=0
+    while [ "$rt_attempt" -lt 30 ]; do
+        rt_proxy_running && break
+        rt_attempt=$((rt_attempt + 1))
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    if ! rt_proxy_running; then
+        say "rt-proxy RuTracker не запустился; см. $RT_PROXY_LOG"
+        rt_proxy_stop full
+        return 1
+    fi
+    if ! rt_nft_apply; then
+        say "rt-proxy: не удалось поставить nft REDIRECT"
+        rt_proxy_stop full
+        return 1
+    fi
+    if ! rt_dns_apply; then
+        say "rt-proxy: не удалось закрепить DNS rutracker"
+        rt_proxy_stop full
+        return 1
+    fi
+    say "rt-proxy RuTracker запущен на :$RT_PROXY_PORT"
+    return 0
+}
+
 
 log_maintenance_running() {
     [ -s "$LM_PID" ] || return 1
@@ -1051,6 +1181,7 @@ start() {
     engine_start || return 1
     telegram_start || say "Telegram не запущен; см. $LOG/telegram.log и $TG_STATUS"
     panel_start || say "панель не запущена; datapath продолжает работу"
+    rt_proxy_start || say "rt-proxy RuTracker не запущен; rutracker останется без прокси"
     meta_dns_scheduler_start || say "планировщик Meta DNS не запустился"
     update_scheduler_start || say "ночная проверка обновлений не запустилась"
 }
@@ -1060,6 +1191,7 @@ stop() {
     meta_dns_scheduler_stop || say "не удалось остановить планировщик Meta DNS"
     update_scheduler_stop || say "не удалось остановить планировщик обновлений"
     telegram_stop || say "не удалось безопасно остановить Telegram"
+    rt_proxy_stop full || say "не удалось полностью остановить rt-proxy RuTracker"
     engine_stop
     panel_stop
     log_maintenance_stop
@@ -1234,6 +1366,11 @@ status() {
         [ ! -r "$TG_STATUS" ] || { printf '  Telegram status: '; cat "$TG_STATUS"; }
     else
         echo "  r2o-telegram: выключен конфигурацией"
+    fi
+    if [ "$RT_PROXY_ENABLED" = 1 ]; then
+        rt_proxy_running && echo "  rt-proxy RuTracker: работает (:$RT_PROXY_PORT)" || echo "  rt-proxy RuTracker: не работает"
+    else
+        echo "  rt-proxy RuTracker: выключен конфигурацией"
     fi
     if command -v ndmc >/dev/null 2>&1; then
         meta_dns_scheduler_running && echo "  планировщик Meta DNS: работает" || echo "  планировщик Meta DNS: не работает"
