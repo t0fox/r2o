@@ -971,7 +971,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_secs() as i64;
-            let (result, group) = r2o_update_recheck_catalog(&mut catalog, &target, now);
+            let (result, group) = r2o_update_recheck_catalog(&mut catalog, &target, now, true);
             catalog.save_atomic(&catalog_path, now.max(1))?;
             println!(
                 "каталог: {} marked={} removed={} group={}",
@@ -6522,7 +6522,7 @@ impl Drop for R2oLateRxWorker {
 
 #[cfg(unix)]
 struct HttpSearchWorker {
-    jobs: Option<mpsc::Sender<(HttpSearchTask, bool, usize)>>,
+    jobs: Option<mpsc::Sender<HttpSearchTask>>,
     command_sender: SyncSender<HttpSearchCommand>,
     commands: Option<Receiver<HttpSearchCommand>>,
     outcomes: Option<Receiver<HttpSearchOutcome>>,
@@ -6535,7 +6535,7 @@ struct HttpSearchWorker {
 #[cfg(unix)]
 impl HttpSearchWorker {
     fn new(measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate) -> Self {
-        let (job_sender, job_receiver) = mpsc::channel::<(HttpSearchTask, bool, usize)>();
+        let (job_sender, job_receiver) = mpsc::channel::<HttpSearchTask>();
         let pending_jobs = Arc::new(AtomicUsize::new(0));
         let worker_pending_jobs = Arc::clone(&pending_jobs);
         let (command_sender, commands) = mpsc::sync_channel::<HttpSearchCommand>(16);
@@ -6548,9 +6548,8 @@ impl HttpSearchWorker {
         let worker_gate = measurement_gate.clone();
         let thread = std::thread::spawn(move || {
             let mut diagnostic_seq = 0_u64;
-            while let Ok((task, tracked, bytes)) = job_receiver.recv() {
+            while let Ok(task) = job_receiver.recv() {
                 worker_pending_jobs.fetch_sub(1, Ordering::Relaxed);
-                r2o_controller::diagnostics::memory_release(0, bytes, tracked);
                 if worker_cancel.load(Ordering::Relaxed) {
                     break;
                 }
@@ -6626,18 +6625,14 @@ impl HttpSearchWorker {
         let Some(jobs) = self.jobs.as_ref() else {
             return false;
         };
-        let bytes = std::mem::size_of::<HttpSearchTask>();
-        let tracked = r2o_controller::diagnostics::memory_acquire(0, bytes);
         if self.pending_jobs.fetch_add(1, Ordering::Relaxed) >= R2O_HTTP_QUEUE_MAX_ITEMS {
             self.pending_jobs.fetch_sub(1, Ordering::Relaxed);
-            r2o_controller::diagnostics::memory_release(0, bytes, tracked);
             return false;
         }
-        if jobs.send((task, tracked, bytes)).is_ok() {
+        if jobs.send(task).is_ok() {
             true
         } else {
             self.pending_jobs.fetch_sub(1, Ordering::Relaxed);
-            r2o_controller::diagnostics::memory_release(0, bytes, tracked);
             false
         }
     }
@@ -7237,7 +7232,22 @@ const R2O_DISCOVERY_CLEAR_RETRY_SECOND: std::time::Duration =
 #[cfg(unix)]
 const R2O_DISCOVERY_CLEAR_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 #[cfg(unix)]
-const R2O_DISCOVERY_INCOMPLETE_RETRY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const R2O_DISCOVERY_INCOMPLETE_RETRY: std::time::Duration = std::time::Duration::from_secs(15);
+/// Повтор late-RST-only подозрения не должен превращаться в поток зондов:
+/// это отдельный часовой интервал, как прежний 10-минутный отдых endpoint.
+#[cfg(unix)]
+const R2O_DISCOVERY_LATE_RST_COOLDOWN: std::time::Duration =
+    std::time::Duration::from_secs(10 * 60);
+/// D2O `AREA_RETRY_BASE_MS`; в тестах уменьшено, чтобы проверять backoff быстро.
+#[cfg(unix)]
+#[cfg(not(test))]
+const R2O_AREA_RETRY_BASE: std::time::Duration = std::time::Duration::from_secs(15);
+#[cfg(unix)]
+#[cfg(test)]
+const R2O_AREA_RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(50);
+/// D2O `AREA_RETRY_MAX_MS`.
+#[cfg(unix)]
+const R2O_AREA_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(300);
 #[cfg(unix)]
 fn r2o_discovery_late_trigger(signal_code: Option<u8>) -> bool {
     matches!(signal_code, Some(5 | 6 | 8))
@@ -7782,6 +7792,73 @@ struct R2oDiscoveryQueueEntry {
     queued_event: u64,
     hot_event: u64,
     catalog_generation: u64,
+    /// D2O `tcp.worker_arg`: аргумент задачи замера, освобождается при
+    /// извлечении/истечении/сбросе очереди. Держит счётчик живым ровно
+    /// столько, сколько задача ждёт worker'а.
+    #[allow(dead_code)]
+    memory: R2oDiagTrackedMemory,
+}
+
+/// Учёт production-аллокации в site-счётчике диагностики.
+#[cfg(unix)]
+struct R2oDiagTrackedMemory {
+    site: usize,
+    bytes: usize,
+    tracked: bool,
+}
+
+#[cfg(unix)]
+impl R2oDiagTrackedMemory {
+    const fn new(site: usize, bytes: usize, tracked: bool) -> Self {
+        Self {
+            site,
+            bytes,
+            tracked,
+        }
+    }
+
+    fn acquire(site: usize, bytes: usize) -> Self {
+        Self::new(
+            site,
+            bytes,
+            r2o_controller::diagnostics::memory_acquire(site, bytes),
+        )
+    }
+}
+
+#[cfg(unix)]
+impl Drop for R2oDiagTrackedMemory {
+    fn drop(&mut self) {
+        if self.tracked {
+            r2o_controller::diagnostics::memory_release(self.site, self.bytes, true);
+        }
+    }
+}
+
+#[cfg(unix)]
+impl R2oDiscoveryQueueEntry {
+    /// D2O `sizeof(worker_arg)` из `core/sched.c`; счётчик site 0 показывает
+    /// столько же байт на ожидающую задачу замера.
+    const R2O_WORKER_ARG_BYTES: usize = 512;
+
+    fn new(
+        target: r2o_controller::discovery::DiscoveryTarget,
+        trigger_planned: bool,
+        queued_at: std::time::Instant,
+        queued_event: u64,
+        hot_event: u64,
+        catalog_generation: u64,
+    ) -> Self {
+        Self {
+            target,
+            trigger_planned,
+            queued_at,
+            queued_event,
+            hot_event,
+            catalog_generation,
+            memory: R2oDiagTrackedMemory::acquire(0, Self::R2O_WORKER_ARG_BYTES),
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -8820,14 +8897,14 @@ impl R2oDiscoveryQueue {
         self.event_sequence = self.event_sequence.wrapping_add(1);
         let hot_event = self.event_sequence;
         let catalog_generation = self.catalog_generation;
-        self.entries.push(R2oDiscoveryQueueEntry {
+        self.entries.push(R2oDiscoveryQueueEntry::new(
             target,
             trigger_planned,
             queued_at,
-            queued_event: self.event_sequence,
+            self.event_sequence,
             hot_event,
             catalog_generation,
-        });
+        ));
         true
     }
 
@@ -13420,13 +13497,13 @@ impl DiscoveryWorker {
         }
         if self.r2o_record_discovery_cooldown_state(
             R2oDiscoveryCooldownKey::Endpoint(failure_key.clone()),
-            now + R2O_DISCOVERY_INCOMPLETE_RETRY,
+            now + R2O_DISCOVERY_LATE_RST_COOLDOWN,
             now,
             true,
         ) {
             self.failed_at.insert(failure_key.clone(), now);
             self.failed_retry_after
-                .insert(failure_key, R2O_DISCOVERY_INCOMPLETE_RETRY);
+                .insert(failure_key, R2O_DISCOVERY_LATE_RST_COOLDOWN);
         }
     }
 
@@ -13975,8 +14052,20 @@ impl DiscoveryWorker {
             } else if !r2o_discovery_volume_challenge_outcome(&outcome) {
                 let failed_at = std::time::Instant::now();
                 let default_retry = outcome.retry_after.unwrap_or(R2O_DISCOVERY_FAILURE_RETRY);
-                let retry_after =
-                    r2o_discovery_failure_backoff(&outcome.target, &outcome.detail, default_retry);
+                // D2O area_retry_delay: 15 с, далее удвоение до 5 минут.
+                let previous_retry = self.failed_retry_after.get(&failure_key).copied();
+                let backoff = match previous_retry {
+                    Some(previous) if previous < R2O_AREA_RETRY_MAX => {
+                        previous.saturating_mul(2).min(R2O_AREA_RETRY_MAX)
+                    }
+                    Some(previous) => previous,
+                    None => R2O_AREA_RETRY_BASE,
+                };
+                let retry_after = r2o_discovery_failure_backoff(
+                    &outcome.target,
+                    &outcome.detail,
+                    default_retry.max(backoff),
+                );
                 if retry_after > default_retry {
                     println!(
                         "Discovery: backoff для {} — {} с",
@@ -13992,6 +14081,17 @@ impl DiscoveryWorker {
                     self.failed_at.insert(failure_key.clone(), failed_at);
                     self.failed_retry_after
                         .insert(failure_key.clone(), retry_after);
+                }
+                // `seen` — это защита от повторного замера уже проверенного
+                // имени. После неудачного поиска её должен заменить
+                // failure-cooldown: иначе имя остаётся в `seen` навсегда и
+                // после истечения backoff повторная классификация всё равно
+                // отклоняется. D2O повторяет область после area_retry_delay.
+                // Прямой CLEAR — отдельная лестница 10/30/60 минут: её
+                // состояние держится в clear_streaks и не должно терять seen.
+                if !outcome.direct_clear {
+                    self.seen.remove(&outcome.target);
+                    self.seen_order.retain(|seen| seen != &outcome.target);
                 }
             }
         } else {
@@ -15609,13 +15709,35 @@ struct QuicDiscoveryTrialOutcome {
 }
 
 /// Исключить имя из общего плана после планового отказа. Если группы уже
-/// нет, используется plan_id активной exact-привязки: операторский запрет
-/// должен переживать распад группы и последующее подтверждение плана.
+/// нет, используется plan_id активной exact-привязки. Автоматический отказ
+/// не ставит OPERATOR_REJECT: иначе переподтверждённый план уже никогда бы
+/// не применился. Sticky-бит ставит только явный `--mark-recheck`.
 #[cfg(unix)]
 fn r2o_exclude_failed_group(
     catalog: &mut Catalog,
     target: &r2o_controller::discovery::DiscoveryTarget,
     now: i64,
+) -> Option<r2o_controller::catalog::DomainGroup> {
+    r2o_exclude_failed_group_with_policy(catalog, target, now, false)
+}
+
+/// Операторский запрет: sticky-бит переживает последующее подтверждение
+/// плана и restore каталога.
+#[cfg(unix)]
+fn r2o_operator_reject_group(
+    catalog: &mut Catalog,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    now: i64,
+) -> Option<r2o_controller::catalog::DomainGroup> {
+    r2o_exclude_failed_group_with_policy(catalog, target, now, true)
+}
+
+#[cfg(unix)]
+fn r2o_exclude_failed_group_with_policy(
+    catalog: &mut Catalog,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    now: i64,
+    operator_reject: bool,
 ) -> Option<r2o_controller::catalog::DomainGroup> {
     let key = GroupKey {
         transport: 6,
@@ -15674,7 +15796,11 @@ fn r2o_exclude_failed_group(
         name: target.host.clone(),
         plan_id: plan_id.clone(),
         key: key.clone(),
-        evidence: DOMAIN_BLOCKED | DOMAIN_PLAN_FAILED | DOMAIN_OPERATOR_REJECT,
+        evidence: if operator_reject {
+            DOMAIN_BLOCKED | DOMAIN_PLAN_FAILED | DOMAIN_OPERATOR_REJECT
+        } else {
+            DOMAIN_BLOCKED | DOMAIN_PLAN_FAILED
+        },
         at: now.max(1),
     };
     catalog
@@ -15698,6 +15824,7 @@ fn r2o_update_recheck_catalog(
     catalog: &mut Catalog,
     target: &r2o_controller::discovery::DiscoveryTarget,
     now: i64,
+    operator_reject: bool,
 ) -> (
     r2o_controller::discovery::DirectClearBindingUpdate,
     Option<r2o_controller::catalog::DomainGroup>,
@@ -15708,7 +15835,11 @@ fn r2o_update_recheck_catalog(
         now,
         std::time::Instant::now(),
     );
-    let group = r2o_exclude_failed_group(catalog, target, now);
+    let group = if operator_reject {
+        r2o_operator_reject_group(catalog, target, now)
+    } else {
+        r2o_exclude_failed_group(catalog, target, now)
+    };
     (result, group)
 }
 
@@ -18086,18 +18217,13 @@ impl ControlClient {
                         let target = r2o_late_rx_hellos
                             .discovery_target_for_tcp_silence(&event, std::time::Instant::now());
                         if let Some(target) = target {
-                            if let Some((_, catalog, catalog_path, _)) = &mut discovery
-                                && let Err(error) = self.r2o_recheck_failed_exact_binding(
-                                    &target,
-                                    catalog,
-                                    catalog_path,
-                                )
-                            {
-                                eprintln!(
-                                    "не удалось пометить устаревшую привязку {}: {error}",
-                                    target.host
-                                );
-                            }
+                            // D2O не снимает установленный план по одному
+                            // «молчанию»: area_failure оставляет план
+                            // установленным и назначает повтор. Снятие
+                            // привязки здесь превращало кратковременную
+                            // задержку ответа в полный обрыв до следующего
+                            // подтверждения. Привязку снимает только
+                            // доказанный отказ (RX-проверка/RST-после-APPLIED).
                             let family_candidates = discovery
                                 .as_ref()
                                 .map(|(_, catalog, _, _)| {
@@ -18444,20 +18570,12 @@ impl ControlClient {
                             }
                             Some(mut input) => {
                                 if event.planned {
-                                    let target = input.discovery_target.clone();
-                                    if let (Some(target), Some((_, catalog, catalog_path, _))) =
-                                        (target, &mut discovery)
-                                        && let Err(error) = self.r2o_recheck_failed_exact_binding(
-                                            &target,
-                                            catalog,
-                                            catalog_path,
-                                        )
-                                    {
-                                        eprintln!(
-                                            "не удалось пометить устаревшую привязку {} после зависания: {error}",
-                                            target.host
-                                        );
-                                    }
+                                    // План сохраняется: зависание ещё не
+                                    // доказанный отказ. D2O оставляет area
+                                    // установленной и назначает повтор;
+                                    // снятие привязки здесь рвало рабочий
+                                    // gateway на каждом OP_HELLO timeout.
+                                    let _ = &input.discovery_target;
                                 }
                                 if let Some((discovery_worker, catalog, _, _)) = discovery.as_ref()
                                 {
@@ -18499,18 +18617,10 @@ impl ControlClient {
                                     None
                                 };
                                 if let Some(target) = fallback {
-                                    if let Some((_, catalog, catalog_path, _)) = &mut discovery
-                                        && let Err(error) = self.r2o_recheck_failed_exact_binding(
-                                            &target,
-                                            catalog,
-                                            catalog_path,
-                                        )
-                                    {
-                                        eprintln!(
-                                            "не удалось пометить устаревшую привязку {} после зависания по недавнему SNI/IP: {error}",
-                                            target.host
-                                        );
-                                    }
+                                    // Зависание по недавнему SNI/IP — тоже не
+                                    // доказанный отказ: привязка остаётся, пока
+                                    // RX-проверка не подтвердит обрыв.
+                                    let _ = (target, event.planned);
                                 } else {
                                     println!(
                                         "парная RX-проверка не запущена: нет свежего полного ClientHello с SNI для потока {client} -> {server}"
@@ -18552,20 +18662,10 @@ impl ControlClient {
                             }
                             Some(mut input) => {
                                 if event.planned {
-                                    let target = input.discovery_target.clone();
-                                    if let (Some(target), Some((_, catalog, catalog_path, _))) =
-                                        (target, &mut discovery)
-                                        && let Err(error) = self.r2o_recheck_failed_exact_binding(
-                                            &target,
-                                            catalog,
-                                            catalog_path,
-                                        )
-                                    {
-                                        eprintln!(
-                                            "не удалось пометить устаревшую привязку {} после повторного FIN: {error}",
-                                            target.host
-                                        );
-                                    }
+                                    // Повторный FIN под планом не доказывает
+                                    // отказ: привязка остаётся до
+                                    // подтверждённой RX-проверки.
+                                    let _ = (&input, event.planned);
                                 }
                                 if let Some((discovery_worker, catalog, _, _)) = discovery.as_ref()
                                 {
@@ -21763,7 +21863,8 @@ impl ControlClient {
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
         let mut updated = catalog.clone();
-        let (result, group_exception) = r2o_update_recheck_catalog(&mut updated, target, now);
+        let (result, group_exception) =
+            r2o_update_recheck_catalog(&mut updated, target, now, false);
         if result.marked == 0 && result.removed == 0 {
             let Some(group) = group_exception else {
                 return Ok(false);
@@ -24610,6 +24711,101 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn discovery_retries_failed_target_after_backoff() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        use std::time::{Duration, Instant};
+
+        let runner = Arc::new(
+            |target: r2o_controller::discovery::DiscoveryTarget,
+             _trigger_planned: bool,
+             _cancel: Arc<AtomicBool>| super::DiscoveryOutcome {
+                target,
+                plan_text: None,
+                detail: "не удалось подобрать план".into(),
+                queue_expired: false,
+                address_failure: false,
+                address_recheck_acknowledged: false,
+                address_recheck_probes: 0,
+                direct_clear: false,
+                volume_recovery: false,
+                volume_fingerprint: None,
+                volume_box_id: None,
+                retry_after: Some(Duration::from_millis(150)),
+            },
+        );
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
+        let mut worker = super::DiscoveryWorker::r2o_new_with_runner(gate, runner);
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "retry.example".into(),
+            endpoint: "192.0.2.30:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        assert!(worker.queue_with_planned(target.clone(), false));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let outcome = loop {
+            if let Some(outcome) = worker.try_outcome() {
+                break outcome;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "исход неудачного поиска не пришёл"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(outcome.plan_text.is_none());
+        assert!(
+            !worker.queue_with_planned(target.clone(), false),
+            "во время failure-cooldown повторная задача запрещена"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(
+            worker.queue_with_planned(target.clone(), false),
+            "после истечения backoff Discovery обязан снова принять имя"
+        );
+        let _ = worker.try_outcome();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_queue_counts_worker_arg_memory_when_tracking_enabled() {
+        use std::time::Instant;
+
+        r2o_controller::diagnostics::memory_enable(true);
+        let counters = || {
+            let site = &r2o_controller::diagnostics::memory_tracking_json()["sites"][0];
+            (
+                site["created"].as_u64().unwrap(),
+                site["destroyed"].as_u64().unwrap(),
+            )
+        };
+        let (created_before, destroyed_before) = counters();
+        let mut queue = super::R2oDiscoveryQueue::default();
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "memory-worker.example".into(),
+            endpoint: "192.0.2.20:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        assert!(queue.enqueue(target, Instant::now()));
+        let (created_after, _) = counters();
+        assert!(
+            created_after >= created_before + 1,
+            "ожидающая задача должна учитываться как tcp.worker_arg"
+        );
+        let entry = queue.entries.pop().expect("задача должна быть в очереди");
+        drop(entry);
+        let (_, destroyed_after) = counters();
+        assert!(
+            destroyed_after >= destroyed_before + 1,
+            "извлечение задачи обязано освободить счётчик"
+        );
+        r2o_controller::diagnostics::memory_enable(false);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn late_rx_worker_exits_idle_and_restarts_on_queue() {
         use std::time::{Duration, Instant};
 
@@ -24710,6 +24906,60 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn автоматический_отказ_плана_не_становится_sticky_запретом() {
+        use r2o_controller::catalog::{Binding, Catalog};
+
+        let plan_id = "a0479da26d1df262779028a171882465".to_owned();
+        let mut catalog = Catalog {
+            boxes: vec![r2o_controller::catalog::BoxRecord {
+                id: "auto-a0479".into(),
+                plans: vec![r2o_controller::catalog::Plan {
+                    id: plan_id.clone(),
+                    proto: "tls".into(),
+                    text: "r2o-plan 1 5\nproto tcp tls\nsegment 1400\npayload-pad64 2 1 15\nseqovl payload=2 poison=0\norder forward\n".into(),
+                    enabled: true,
+                    ..Default::default()
+                }],
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: "media.discordapp.net".into(),
+                    plan_id: plan_id.clone(),
+                    level: 3,
+                    enabled: true,
+                    transport: 6,
+                    family: 4,
+                    shape: SHAPE_ECH_TCP,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Catalog::default()
+        };
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "media.discordapp.net".into(),
+            endpoint: "162.159.134.233:443".into(),
+            family: 4,
+            shape: SHAPE_ECH_TCP,
+        };
+        let group = super::r2o_exclude_failed_group(&mut catalog, &target, 10)
+            .expect("автоматический отказ должен записаться");
+        assert_eq!(group.plan_id, plan_id);
+        let state = catalog.domain_state.as_ref().unwrap();
+        let observation = state
+            .observations
+            .iter()
+            .find(|observation| observation.name == target.host)
+            .expect("наблюдение отказа должно сохраниться");
+        assert_eq!(
+            observation.evidence & super::DOMAIN_OPERATOR_REJECT,
+            0,
+            "автоматический отказ не должен блокировать план навсегда"
+        );
+        assert_ne!(observation.evidence & super::DOMAIN_PLAN_FAILED, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn операторский_запрет_переживает_подтверждение_плана_и_даёт_bypass() {
         use r2o_controller::catalog::{Binding, Catalog, DomainObservation, GroupKey};
 
@@ -24752,7 +25002,7 @@ mod tests {
             family: 4,
             shape: SHAPE_ECH_TCP,
         };
-        let rejected = super::r2o_exclude_failed_group(&mut catalog, &target, 10)
+        let rejected = super::r2o_operator_reject_group(&mut catalog, &target, 10)
             .expect("exact-привязка должна дать операторский запрет без группы");
         assert_eq!(rejected.plan_id, plan_id);
         let state = catalog.domain_state.as_mut().unwrap();
@@ -34883,14 +35133,14 @@ mod tests {
                         SHAPE_MODERN
                     },
                 };
-                queue.entries.push(R2oDiscoveryQueueEntry {
+                queue.entries.push(R2oDiscoveryQueueEntry::new(
                     target,
-                    trigger_planned: false,
-                    queued_at: now - Duration::from_millis(queued_age_ms),
+                    false,
+                    now - Duration::from_millis(queued_age_ms),
                     queued_event,
                     hot_event,
-                    catalog_generation: queue.catalog_generation,
-                });
+                    queue.catalog_generation,
+                ));
             }
             let selected = queue
                 .pop(now)
@@ -34938,8 +35188,8 @@ mod tests {
                 panic!("malformed d2o worker/permit task: {entry}");
             };
             let transport = transport.parse::<u8>().unwrap();
-            queue.entries.push(R2oDiscoveryQueueEntry {
-                target: r2o_controller::discovery::DiscoveryTarget {
+            queue.entries.push(R2oDiscoveryQueueEntry::new(
+                r2o_controller::discovery::DiscoveryTarget {
                     host: (*host).to_owned(),
                     endpoint: format!("{host}:443"),
                     family: 4,
@@ -34949,12 +35199,12 @@ mod tests {
                         SHAPE_MODERN
                     },
                 },
-                trigger_planned: false,
-                queued_at: now - Duration::from_millis(1),
-                queued_event: queued_event.parse().unwrap(),
-                hot_event: hot_event.parse().unwrap(),
-                catalog_generation: queue.catalog_generation,
-            });
+                false,
+                now - Duration::from_millis(1),
+                queued_event.parse().unwrap(),
+                hot_event.parse().unwrap(),
+                queue.catalog_generation,
+            ));
         }
 
         let selected = queue
@@ -35449,14 +35699,14 @@ mod tests {
                 shape: SHAPE_MODERN,
             };
             let mut queue = R2oDiscoveryQueue::default();
-            queue.entries.push(R2oDiscoveryQueueEntry {
+            queue.entries.push(R2oDiscoveryQueueEntry::new(
                 target,
-                trigger_planned: false,
-                queued_at: now - Duration::from_millis(queued_age_ms),
-                queued_event: 0,
-                hot_event: 0,
-                catalog_generation: queue.catalog_generation,
-            });
+                false,
+                now - Duration::from_millis(queued_age_ms),
+                0,
+                0,
+                queue.catalog_generation,
+            ));
             let expired = queue.r2o_expire(now);
             let actual = if expired.is_empty() {
                 "queued"
@@ -36957,17 +37207,17 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn r2o_неубедительный_замер_ждёт_десять_минут_до_повтора() {
+    fn r2o_неубедительный_замер_ждёт_пятнадцать_секунд_до_повтора() {
         use r2o_controller::classify::Verdict;
         use std::time::Duration;
 
         let retry_after =
             super::r2o_discovery_retry_after(false, Verdict::Inconclusive, "частичный ответ")
                 .expect("неубедительный результат должен задать отдельную паузу");
-        assert_eq!(retry_after, Duration::from_secs(10 * 60));
+        assert_eq!(retry_after, Duration::from_secs(15));
         assert_eq!(
             super::r2o_discovery_retry_after(false, Verdict::Flaky, "база не воспроизводится"),
-            Some(Duration::from_secs(10 * 60))
+            Some(Duration::from_secs(15))
         );
         assert_eq!(
             super::r2o_discovery_retry_after(
@@ -36985,7 +37235,7 @@ mod tests {
         ));
         assert_eq!(
             super::r2o_discovery_retry_after(false, Verdict::Unreachable, "нет TCP до цели"),
-            Some(Duration::from_secs(10 * 60))
+            Some(Duration::from_secs(15))
         );
         assert_eq!(
             super::r2o_discovery_retry_after(true, Verdict::Inconclusive, "частичный ответ"),
@@ -37021,11 +37271,15 @@ mod tests {
             retry_after: Some(retry_after),
         });
         assert!(!worker.queue(target.clone()));
+        assert!(
+            !worker.seen.contains(&target),
+            "после failure-cooldown имя не должно навсегда оставаться в seen"
+        );
 
         let failure_key = super::r2o_discovery_failure_key(&target);
         worker.failed_at.insert(
             failure_key.clone(),
-            std::time::Instant::now() - Duration::from_secs(599),
+            std::time::Instant::now() - Duration::from_secs(1),
         );
         assert!(!worker.queue(target.clone()));
         worker
@@ -37125,7 +37379,10 @@ mod tests {
 
         assert!(finished.plan_text.is_none());
         assert!(!worker.is_active(&target));
-        assert!(worker.seen.contains(&target));
+        assert!(
+            !worker.seen.contains(&target),
+            "таймаут поиска заменяет seen на failure-cooldown"
+        );
         assert!(!worker.queue(target.clone()));
         let failure_key = super::r2o_discovery_failure_key(&target);
         assert_eq!(
