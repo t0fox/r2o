@@ -15506,6 +15506,21 @@ fn r2o_exclude_failed_group(
                     .any(|plan| plan.id == binding.plan_id && plan.enabled)
                     .then(|| binding.plan_id.clone())
             })
+        })
+        .or_else(|| {
+            // При повторном mark-recheck exact-привязка уже удалена, но
+            // прежняя запись отказа хранит plan_id, который нельзя терять.
+            catalog.domain_state.as_ref().and_then(|state| {
+                state
+                    .observations
+                    .iter()
+                    .find(|observation| {
+                        observation.name == target.host
+                            && observation.key == key
+                            && !observation.plan_id.is_empty()
+                    })
+                    .map(|observation| observation.plan_id.clone())
+            })
         })?;
     let suffix = group
         .as_ref()
