@@ -20613,11 +20613,18 @@ impl ControlClient {
         .expect("ответ контроля задаёт прямой вопрос");
         println!("QUIC {server}: {}", base.reason);
         if !control.marked || !trigger.marked || trigger.err != 0 {
+            eprintln!(
+                "QUIC {server}: базовый этап остановлен (control_marked={}, trigger_marked={}, trigger_err={}) — HTTP/3 data-stage не запускался",
+                control.marked, trigger.marked, trigger.err
+            );
             return Ok(None);
         }
         let mut residual_blocking = false;
         let mut baseline = None;
-        match r2o_controller::quic_replay::r2o_quic_direct_action(trigger.pass, trigger.err, 3) {
+        let base_action =
+            r2o_controller::quic_replay::r2o_quic_direct_action(trigger.pass, trigger.err, 3);
+        println!("QUIC {server}: после базового вопроса действие={base_action:?}");
+        match base_action {
             r2o_controller::quic_replay::R2oQuicDirectAction::Stop => return Ok(None),
             r2o_controller::quic_replay::R2oQuicDirectAction::Candidates => {
                 if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
@@ -20671,6 +20678,9 @@ impl ControlClient {
                 );
             }
             r2o_controller::quic_replay::R2oQuicDirectAction::Data => {
+                println!(
+                    "QUIC {server}: рукопожатие прошло 3/3, запускаю прямой HTTP/3 data-stage"
+                );
                 let data_remaining = r2o_quic_trial_remaining(started_at, measurement_permit);
                 if data_remaining.is_zero() {
                     return Ok(None);
