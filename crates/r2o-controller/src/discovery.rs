@@ -819,6 +819,7 @@ fn has_usable_binding_with_input(
     catalog.boxes.iter().any(|box_record| {
         box_record.bindings.iter().any(|binding| {
             if !binding.enabled
+                || binding.recheck_since.is_some()
                 || binding.kind != "name"
                 || binding.target != target.host
                 || !(binding.family == target.family || binding.family == 0 && target.family == 4)
@@ -877,11 +878,15 @@ pub fn update_direct_clear_bindings(
             } else {
                 binding.family
             };
+            // MODERN-привязка покрывает ECH/TLS 1.3 так же, как в
+            // has_covering_binding и в C binding_covering. Без этого
+            // direct-clear ECH-потока не снимал бы устаревшую MODERN-привязку.
+            let modern_covers_ech = binding.shape == SHAPE_MODERN && target.shape == SHAPE_ECH_TCP;
             let matches_target = binding.kind == "name"
                 && binding.target == target.host
                 && transport == 6
                 && family == target.family
-                && (binding.shape == 0 || binding.shape == target.shape);
+                && (binding.shape == 0 || binding.shape == target.shape || modern_covers_ech);
             if !matches_target {
                 index += 1;
                 continue;
@@ -906,8 +911,9 @@ pub fn update_direct_clear_bindings(
             binding.recheck_mono = Some(monotonic_now);
             update.marked += 1;
             changed = true;
-            update.delete_runtime |=
-                transport == 6 && family == target.family && binding.shape == target.shape;
+            update.delete_runtime |= transport == 6
+                && family == target.family
+                && (binding.shape == target.shape || modern_covers_ech);
             index += 1;
         }
         if changed {
@@ -1857,6 +1863,43 @@ mod tests {
             ..Catalog::default()
         };
         assert!(!super::has_covering_binding(&recheck_catalog, &target));
+    }
+
+    #[test]
+    fn direct_clear_помечает_modern_привязку_для_ech() {
+        use crate::catalog::{Binding, BoxRecord, Catalog};
+
+        let target = DiscoveryTarget {
+            host: "discord.com".into(),
+            endpoint: "198.51.100.81:443".into(),
+            family: 4,
+            shape: SHAPE_ECH_TCP,
+        };
+        let mut catalog = Catalog {
+            boxes: vec![BoxRecord {
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: target.host.clone(),
+                    level: 3,
+                    enabled: true,
+                    transport: 6,
+                    family: 4,
+                    shape: SHAPE_MODERN,
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        let update = super::update_direct_clear_bindings(
+            &mut catalog,
+            &target,
+            100,
+            std::time::Instant::now(),
+        );
+        assert_eq!(update.marked, 1);
+        assert!(update.delete_runtime);
+        assert_eq!(catalog.boxes[0].bindings[0].recheck_since, Some(100));
     }
 
     #[test]

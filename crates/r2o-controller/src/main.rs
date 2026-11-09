@@ -17526,6 +17526,18 @@ impl ControlClient {
                         let target = r2o_late_rx_hellos
                             .discovery_target_for_tcp_silence(&event, std::time::Instant::now());
                         if let Some(target) = target {
+                            if let Some((_, catalog, catalog_path, _)) = &mut discovery
+                                && let Err(error) = self.r2o_recheck_failed_exact_binding(
+                                    &target,
+                                    catalog,
+                                    catalog_path,
+                                )
+                            {
+                                eprintln!(
+                                    "не удалось пометить устаревшую привязку {}: {error}",
+                                    target.host
+                                );
+                            }
                             let family_candidates = discovery
                                 .as_ref()
                                 .map(|(_, catalog, _, _)| {
@@ -21075,6 +21087,71 @@ impl ControlClient {
             }
         );
         Ok(Some(active_groups))
+    }
+
+    /// Пометить устаревшую exact-привязку на перепроверку и сразу снять её
+    /// из runtime. Это не ручная правка каталога: пометку и DEL_NAME делает
+    /// контроллер после доказанного планового отказа.
+    fn r2o_recheck_failed_exact_binding(
+        &mut self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        catalog: &mut Catalog,
+        catalog_path: &std::path::Path,
+    ) -> Result<bool, Box<dyn Error>> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64;
+        let mut updated = catalog.clone();
+        let result = r2o_controller::discovery::update_direct_clear_bindings(
+            &mut updated,
+            target,
+            now,
+            std::time::Instant::now(),
+        );
+        if result.marked == 0 && result.removed == 0 {
+            return Ok(false);
+        }
+        if let Err(error) = updated.save_atomic(catalog_path, now.max(1)) {
+            eprintln!(
+                "не удалось сохранить пометку перепроверки {}: {error}",
+                target.host
+            );
+        }
+        *catalog = updated;
+        if result.delete_runtime {
+            let mut shapes = vec![target.shape];
+            if target.shape == SHAPE_ECH_TCP {
+                shapes.push(SHAPE_MODERN);
+            }
+            for shape in shapes {
+                let command = match encode_delete_name(&target.host, 6, shape, target.family) {
+                    Ok(command) => command,
+                    Err(error) => {
+                        eprintln!(
+                            "не удалось собрать DEL_NAME для {} shape={shape}: {error}",
+                            target.host
+                        );
+                        continue;
+                    }
+                };
+                if let Err(error) = self.send_command(&command, control::COMMAND_DEL_NAME) {
+                    eprintln!(
+                        "DEL_NAME для {} shape={shape} не подтверждён: {error}",
+                        target.host
+                    );
+                }
+            }
+        }
+        println!(
+            "{}: устаревшая exact-привязка помечена для перепроверки{}",
+            target.host,
+            if result.delete_runtime {
+                ", снята из runtime"
+            } else {
+                ""
+            }
+        );
+        Ok(true)
     }
 
     fn apply_discovery_direct_clear(
