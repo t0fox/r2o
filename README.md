@@ -223,8 +223,8 @@ Lava показывает состояние движка и controller, эта�
 Логи:
 
 ```sh
-tail -n 100 /opt/r2o/log/r2o-datapath4.log
-tail -n 100 /opt/r2o/log/r2o-controller4.log
+tail -n 100 /opt/r2o/log/r2o-datapath.log
+tail -n 100 /opt/r2o/log/r2o-controller.log
 tail -n 100 /opt/r2o/log/panel.log
 ```
 

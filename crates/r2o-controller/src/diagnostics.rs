@@ -346,31 +346,24 @@ const TASK_STATE_NAMES: [&str; 15] = [
     "voice_watch",
 ];
 const D2O_PROCESS_CAPACITY: usize = 3;
-const PROCESS_SPECS: [ProcessSpec; 5] = [
+const PROCESS_SPECS: [ProcessSpec; 3] = [
     ProcessSpec {
-        name: "r2o-controller4",
+        name: "r2o-controller",
         comm: "r2o-controller",
-        pidfile: "r2o-controller4.pid",
+        pidfile: "r2o-controller.pid",
+        fallback_pidfile: Some("r2o-controller4.pid"),
     },
     ProcessSpec {
-        name: "r2o-controller6",
-        comm: "r2o-controller",
-        pidfile: "r2o-controller6.pid",
-    },
-    ProcessSpec {
-        name: "r2o-datapath4",
+        name: "r2o-datapath",
         comm: "r2o-datapath",
-        pidfile: "r2o-datapath4.pid",
-    },
-    ProcessSpec {
-        name: "r2o-datapath6",
-        comm: "r2o-datapath",
-        pidfile: "r2o-datapath6.pid",
+        pidfile: "r2o-datapath.pid",
+        fallback_pidfile: Some("r2o-datapath4.pid"),
     },
     ProcessSpec {
         name: "r2o-panel",
         comm: "r2o-panel",
         pidfile: "r2o-panel.pid",
+        fallback_pidfile: None,
     },
 ];
 
@@ -625,6 +618,9 @@ struct ProcessSpec {
     name: &'static str,
     comm: &'static str,
     pidfile: &'static str,
+    // При аварийном откате S99r2o поднимает раздельные процессы. Диагностика
+    // должна продолжать показывать работающий IPv4-компонент, а не нули.
+    fallback_pidfile: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -771,7 +767,9 @@ impl Recorder {
             ("target", 255),
             ("protocol", 15),
             ("outcome", 31),
-            ("reason", 255),
+            // Полная причина важнее дословного 255-байтового предела D2O:
+            // иначе диагностика обрывает текст на полуслове.
+            ("reason", 1024),
             ("ip", 47),
             ("path", 15),
             ("kind", 7),
@@ -908,17 +906,17 @@ impl Recorder {
             }
         }
 
-        // Строка истории памяти по основному контроллеру IPv4.
+        // Строка истории памяти по объединённому контроллеру.
         let primary = processes
             .iter()
-            .find(|process| process["name"] == "r2o-controller4")
+            .find(|process| process["name"] == "r2o-controller")
             .or_else(|| processes.first());
         let primary_pid = primary
             .and_then(|process| process["pid"].as_u64())
             .unwrap_or(0);
         let primary_start_ticks = details
             .iter()
-            .find(|detail| detail["name"] == "r2o-controller4")
+            .find(|detail| detail["name"] == "r2o-controller")
             .and_then(|detail| detail["latest"]["start_ticks"].as_u64());
         if primary_pid != 0
             && (self.memory_pid != Some(primary_pid)
@@ -1412,10 +1410,14 @@ fn process_memory(proc_dir: &Path, run_dir: &Path) -> Vec<Value> {
     PROCESS_SPECS
         .iter()
         .map(|spec| {
-            let pid = fs::read_to_string(run_dir.join(spec.pidfile))
-                .ok()
-                .and_then(|value| value.trim().parse::<u64>().ok())
-                .filter(|pid| *pid > 0 && *pid <= i32::MAX as u64);
+            let read_pid = |pidfile: &str| {
+                fs::read_to_string(run_dir.join(pidfile))
+                    .ok()
+                    .and_then(|value| value.trim().parse::<u64>().ok())
+                    .filter(|pid| *pid > 0 && *pid <= i32::MAX as u64)
+            };
+            let pid = read_pid(spec.pidfile)
+                .or_else(|| spec.fallback_pidfile.and_then(|pidfile| read_pid(pidfile)));
             let Some(pid) = pid else {
                 return empty_process(spec.name);
             };
@@ -1474,12 +1476,67 @@ fn process_detail(process: &Value, at: u64, mono_ms: u64, proc_dir: &Path) -> Va
             .ok()
     });
     let fd_count = read_fd_count(&base.join("fd"));
+    // D2O читает только smaps_rollup; полный smaps не обходит даже как
+    // fallback, потому что это дорого и не требуется для отчёта.
+    let (rollup_status, rollup_source, rollup_errno, rollup) = read_smaps_rollup(&base);
     json!({
         "pid":pid,"at":at,"mono_ms":mono_ms,"rss_kib":process["rss_kib"],
         "start_ticks":start_ticks,"vm_size_kib":field("VmSize"),"vm_data_kib":field("VmData"),
         "vm_stack_kib":field("VmStk"),"vm_swap_kib":field("VmSwap"),"fd_count":fd_count,
-        "smaps":read_smaps(proc_dir, pid)
+        "smaps_rollup_status":rollup_status,
+        "smaps_rollup_source":rollup_source,
+        "smaps_rollup_errno":rollup_errno,
+        "smaps_rollup":rollup,
+        "smaps_status":"not-read",
+        "smaps_errno":null,
+        "smaps":null
     })
+}
+
+/// Повторяет семантику D2O `read_detail`: отсутствие smaps_rollup при
+/// существующем каталоге процесса — ожидаемое ограничение ядра
+/// (unsupported без errno), а не ошибка чтения.
+fn read_smaps_rollup(base: &Path) -> (&'static str, &'static str, Option<i32>, Option<Value>) {
+    let path = base.join("smaps_rollup");
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) => {
+            let status = if error.kind() == std::io::ErrorKind::NotFound && base.is_dir() {
+                "unsupported"
+            } else {
+                "unavailable"
+            };
+            let errno = (status == "unavailable")
+                .then(|| error.raw_os_error())
+                .flatten();
+            return (status, "unavailable", errno, None);
+        }
+    };
+    let mut values = [None; 5];
+    let keys = ["Rss", "Pss", "Anonymous", "Private_Dirty", "Swap"];
+    for line in text.lines() {
+        let Some((name, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let Some(index) = keys.iter().position(|key| *key == name) else {
+            continue;
+        };
+        values[index] = rest
+            .split_whitespace()
+            .next()
+            .and_then(|value| value.parse::<u64>().ok());
+    }
+    if values.iter().any(Option::is_none) {
+        return ("parse-error", "unavailable", None, None);
+    }
+    let value = json!({
+        "rss_kib": values[0],
+        "pss_kib": values[1],
+        "anonymous_kib": values[2],
+        "private_dirty_kib": values[3],
+        "swap_kib": values[4],
+    });
+    ("ok", "smaps_rollup", None, Some(value))
 }
 
 fn read_fd_count(path: &Path) -> Option<u64> {
@@ -1492,74 +1549,6 @@ fn read_fd_count(path: &Path) -> Option<u64> {
         }
     }
     Some(count)
-}
-
-fn smaps_group(line: &str) -> Option<usize> {
-    let mut tokens = line.split_whitespace();
-    let (start, end) = tokens.next()?.split_once('-')?;
-    if u64::from_str_radix(start, 16).is_err() || u64::from_str_radix(end, 16).is_err() {
-        return None;
-    }
-    for _ in 0..4 {
-        tokens.next()?;
-    }
-    Some(match tokens.next() {
-        None => 0,
-        Some("[heap]") => 1,
-        Some(label) if label.starts_with("[stack") => 2,
-        Some(_) => 3,
-    })
-}
-
-fn read_smaps(proc_dir: &Path, pid: u64) -> Option<Value> {
-    let text = fs::read_to_string(proc_dir.join(pid.to_string()).join("smaps")).ok()?;
-    let mut groups = [[0_u64; 5]; 4];
-    let mut current = None;
-    let mut maps = 0_u64;
-    let mut fields = 0_u64;
-    for line in text.lines() {
-        if let Some(group) = smaps_group(line) {
-            current = Some(group);
-            groups[group][0] = groups[group][0].checked_add(1)?;
-            maps = maps.checked_add(1)?;
-            continue;
-        }
-        let Some(group) = current else { continue };
-        for (field, key) in [
-            (1, "Size"),
-            (2, "Rss"),
-            (3, "Anonymous"),
-            (4, "Private_Dirty"),
-        ] {
-            if let Some((name, value)) = line.split_once(':')
-                && name == key
-            {
-                let kib = value.split_whitespace().next()?.parse::<u64>().ok()?;
-                groups[group][field] = groups[group][field].checked_add(kib)?;
-                fields = fields.checked_add(1)?;
-            }
-        }
-    }
-    if maps == 0 || fields != maps.checked_mul(4)? {
-        return None;
-    }
-    let group_names = ["anonymous", "heap", "stack", "other"];
-    let metric_names = [
-        "maps",
-        "size_kib",
-        "rss_kib",
-        "anonymous_kib",
-        "private_dirty_kib",
-    ];
-    let mut result = serde_json::Map::new();
-    for (index, name) in group_names.into_iter().enumerate() {
-        let mut metrics = serde_json::Map::new();
-        for (metric, value) in metric_names.into_iter().zip(groups[index]) {
-            metrics.insert(metric.into(), json!(value));
-        }
-        result.insert(name.into(), Value::Object(metrics));
-    }
-    Some(Value::Object(result))
 }
 
 #[cfg(test)]
@@ -1718,7 +1707,7 @@ mod tests {
         assert_eq!(report["samples"][0]["http_queued"], 6);
         assert_eq!(
             report["samples"][0]["processes"].as_array().unwrap().len(),
-            5
+            3
         );
         recorder.checked = Some(Instant::now() - Duration::from_secs(1));
         recorder.sampled = Some(Instant::now() - Duration::from_secs(60));
@@ -1729,6 +1718,44 @@ mod tests {
         assert_eq!(report["events_overwritten"], 1);
         assert_eq!(report["events"][63]["target"].as_str().unwrap().len(), 254);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_split_pidfile_is_visible_under_merged_process_name() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let root = std::env::temp_dir().join(format!("r2o-diag-legacy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let diag = root.join("diag");
+        let proc_dir = root.join("proc");
+        let run = root.join("run");
+        fs::create_dir_all(proc_dir.join("321")).unwrap();
+        fs::create_dir_all(&run).unwrap();
+        fs::create_dir_all(&diag).unwrap();
+        fs::set_permissions(&diag, fs::Permissions::from_mode(0o700)).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(diag.join("enabled"))
+            .unwrap();
+        fs::write(run.join("r2o-controller4.pid"), "321\n").unwrap();
+        fs::write(proc_dir.join("321/comm"), "r2o-controller\n").unwrap();
+        fs::write(proc_dir.join("321/status"), "VmRSS: 2048 kB\n").unwrap();
+        let mut recorder = Recorder::new(diag.clone(), run);
+        recorder.proc_dir = proc_dir;
+        recorder.tick(Counts::default);
+        let report: serde_json::Value =
+            serde_json::from_slice(&fs::read(diag.join("report.json")).unwrap()).unwrap();
+        let process = report["samples"][0]["processes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|process| process["name"] == "r2o-controller")
+            .unwrap();
+        assert_eq!(process["pid"], 321);
+        assert_eq!(process["rss_kib"], 2048);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
@@ -1891,13 +1918,13 @@ mod tests {
             .mode(0o600)
             .open(diag.join("enabled"))
             .unwrap();
-        fs::write(run.join("r2o-controller4.pid"), "123\n").unwrap();
+        fs::write(run.join("r2o-controller.pid"), "123\n").unwrap();
         fs::write(proc_dir.join("123/comm"), "r2o-controller\n").unwrap();
         fs::write(proc_dir.join("123/status"), "VmRSS: 1024 kB\n").unwrap();
         let mut recorder = Recorder::new(diag.clone(), run.clone());
         recorder.proc_dir = proc_dir;
         recorder.tick(Counts::default);
-        fs::remove_file(run.join("r2o-controller4.pid")).unwrap();
+        fs::remove_file(run.join("r2o-controller.pid")).unwrap();
         recorder.checked = Some(Instant::now() - Duration::from_secs(1));
         recorder.sampled = Some(Instant::now() - Duration::from_secs(60));
         recorder.tick(Counts::default);
@@ -1947,8 +1974,7 @@ mod tests {
             .unwrap();
         fs::create_dir_all(&run_dir).unwrap();
         fs::create_dir_all(proc_dir.join("123")).unwrap();
-        fs::write(run_dir.join("r2o-controller4.pid"), "123\n").unwrap();
-        fs::write(run_dir.join("r2o-controller6.pid"), "125\n").unwrap();
+        fs::write(run_dir.join("r2o-controller.pid"), "123\n").unwrap();
         fs::write(proc_dir.join("123/comm"), "r2o-controller\n").unwrap();
         fs::write(
             proc_dir.join("123/status"),
@@ -1956,8 +1982,8 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            proc_dir.join("123/smaps"),
-            "1000-2000 rw-p 00000000 00:00 0 [heap]\nSize: 16 kB\nRss: 8 kB\nAnonymous: 8 kB\nPrivate_Dirty: 8 kB\n2000-3000 rw-p 00000000 00:00 0\nSize: 32 kB\nRss: 24 kB\nAnonymous: 24 kB\nPrivate_Dirty: 24 kB\n3000-4000 r--p 00000000 00:00 1 /private/never-export-me\nSize: 4 kB\nRss: 4 kB\nAnonymous: 0 kB\nPrivate_Dirty: 0 kB\n",
+            proc_dir.join("123/smaps_rollup"),
+            "Rss: 32 kB\nPss: 30 kB\nAnonymous: 24 kB\nPrivate_Dirty: 24 kB\nSwap: 0 kB\n",
         )
         .unwrap();
         fs::create_dir_all(proc_dir.join("124")).unwrap();
@@ -1983,24 +2009,16 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|process| process["name"] == "r2o-controller4")
+            .find(|process| process["name"] == "r2o-controller")
             .unwrap();
         assert_eq!(process["pid"], 123);
         assert_eq!(process["rss_kib"], 1024);
-        let controller6 = first["samples"][0]["processes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|process| process["name"] == "r2o-controller6")
-            .unwrap();
-        assert_eq!(controller6["pid"], 125);
-        assert_eq!(controller6["rss_kib"], 8192);
         assert!(
             !first["samples"][0]["processes"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|process| process["pid"] == 124)
+                .any(|process| process["pid"] == 124 || process["pid"] == 125)
         );
         assert_eq!(first["samples"][0]["mem_available_kib"], 8192);
         assert_eq!(first["samples"][0]["mem_total_kib"], 65536);
@@ -2014,16 +2032,21 @@ mod tests {
             serde_json::Value::Null
         );
         assert_eq!(
-            first["memory_details"][0]["first"]["smaps"]["heap"]["rss_kib"],
-            8
+            first["memory_details"][0]["first"]["smaps_rollup_status"],
+            "ok"
         );
         assert_eq!(
-            first["memory_details"][0]["first"]["smaps"]["anonymous"]["rss_kib"],
-            24
+            first["memory_details"][0]["first"]["smaps_rollup"]["rss_kib"],
+            32
         );
         assert_eq!(
-            first["memory_details"][0]["first"]["smaps"]["other"]["rss_kib"],
-            4
+            first["memory_details"][0]["first"]["smaps_rollup"]["pss_kib"],
+            30
+        );
+        assert!(first["memory_details"][0]["first"]["smaps"].is_null());
+        assert_eq!(
+            first["memory_details"][0]["first"]["smaps_status"],
+            "not-read"
         );
         assert!(!first.to_string().contains("never-export-me"));
 
@@ -2041,7 +2064,9 @@ mod tests {
         assert_eq!(detail["latest"]["rss_kib"], 4096);
         assert_eq!(detail["latest"]["vm_size_kib"], 8192);
         assert_eq!(detail["latest"]["fd_count"], serde_json::Value::Null);
-        assert_eq!(detail["latest"]["smaps"]["heap"]["rss_kib"], 8);
+        assert_eq!(detail["latest"]["smaps_rollup_status"], "ok");
+        assert_eq!(detail["latest"]["smaps_rollup"]["rss_kib"], 32);
+        assert!(detail["latest"]["smaps"].is_null());
 
         recorder.checked = Some(Instant::now() - Duration::from_secs(1));
         recorder.sampled = Some(Instant::now() - Duration::from_secs(60));

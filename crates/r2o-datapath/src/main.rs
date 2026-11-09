@@ -4365,11 +4365,12 @@ mod app {
             RuntimeMode, TcpSessions, WirePacket, decide_with_tcp_session_mode,
             format_journal_details, format_journal_key, handle_control_command, load_plan,
             needs_raw_socket, observe_quic_packet, observe_stun_packet, parse_options,
-            r2o_clean_handshake_event, r2o_datapath_payload, r2o_execution_is_damaged,
-            r2o_fail_pending_applied, r2o_finish_tcp_execution, r2o_first_oversized_emit,
-            r2o_is_controller_probe, r2o_packet_route_skip, r2o_release_delayed_udp_batch_with,
-            r2o_tcp_early_rst_event, r2o_tcp_rst_cut_signal_event, r2o_udp_decide_once,
-            r2o_udp_mark_plain_pass, r2o_udp_mark_planned, r2o_udp_packet_admitted_at_hook,
+            r2o_both_family_arguments, r2o_clean_handshake_event, r2o_datapath_payload,
+            r2o_execution_is_damaged, r2o_fail_pending_applied, r2o_finish_tcp_execution,
+            r2o_first_oversized_emit, r2o_is_controller_probe, r2o_packet_route_skip,
+            r2o_release_delayed_udp_batch_with, r2o_tcp_early_rst_event,
+            r2o_tcp_rst_cut_signal_event, r2o_udp_decide_once, r2o_udp_mark_plain_pass,
+            r2o_udp_mark_planned, r2o_udp_packet_admitted_at_hook,
             r2o_udp_packet_admitted_for_mode, release_many_with, release_with, send_applied_event,
             send_hello_event, send_journal_snapshot, send_journal_updates, udp_packet_admitted,
         };
@@ -6595,6 +6596,77 @@ mod app {
 
             assert!(result.is_err());
             assert_eq!(verdicts, [(21, NF_DROP), (22, NF_DROP)]);
+        }
+
+        #[test]
+        fn both_mode_builds_independent_family_argument_sets() {
+            let arguments: Vec<String> = [
+                "--both",
+                "--queue4",
+                "2000",
+                "--queue6",
+                "2001",
+                "--control4",
+                "/run/dp4.sock",
+                "--control6",
+                "/run/dp6.sock",
+                "--mode",
+                "apply",
+                "--mark",
+                "45",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+            let jobs = r2o_both_family_arguments(&arguments).unwrap();
+            assert_eq!(jobs.len(), 2);
+            assert_eq!(jobs[0].0, "IPv4");
+            assert!(
+                jobs[0]
+                    .1
+                    .windows(2)
+                    .any(|pair| pair == ["--family", "ipv4"])
+            );
+            assert!(jobs[0].1.windows(2).any(|pair| pair == ["--queue", "2000"]));
+            assert!(
+                jobs[0]
+                    .1
+                    .windows(2)
+                    .any(|pair| pair == ["--control", "/run/dp4.sock"])
+            );
+            assert_eq!(jobs[1].0, "IPv6");
+            assert!(
+                jobs[1]
+                    .1
+                    .windows(2)
+                    .any(|pair| pair == ["--family", "ipv6"])
+            );
+            assert!(jobs[1].1.windows(2).any(|pair| pair == ["--queue", "2001"]));
+            assert!(
+                jobs[1]
+                    .1
+                    .windows(2)
+                    .any(|pair| pair == ["--control", "/run/dp6.sock"])
+            );
+        }
+
+        #[test]
+        fn both_mode_allows_ipv4_only_and_rejects_single_family_flags() {
+            let ipv4_only: Vec<String> = ["--both", "--queue4", "2000"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            let jobs = r2o_both_family_arguments(&ipv4_only).unwrap();
+            assert_eq!(jobs.len(), 1);
+            assert_eq!(jobs[0].0, "IPv4");
+
+            for option in ["--queue", "--family", "--control"] {
+                let arguments: Vec<String> = ["--both", option, "2000"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect();
+                assert!(r2o_both_family_arguments(&arguments).is_err());
+            }
         }
     }
 }

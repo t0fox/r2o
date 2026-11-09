@@ -36889,6 +36889,52 @@ mod tests {
     }
 
     #[test]
+    fn serve_both_accepts_separate_family_sockets_and_live_paths() {
+        let options = super::parse_serve_both_options(&[
+            OsString::from("--serve-both"),
+            OsString::from("--serve4"),
+            OsString::from("/run/dp4.sock"),
+            OsString::from("--serve6"),
+            OsString::from("/run/dp6.sock"),
+            OsString::from("--live4"),
+            OsString::from("/state/live4.json"),
+            OsString::from("--live6"),
+            OsString::from("/state/live6.json"),
+            OsString::from("--discover"),
+            OsString::from("--mark"),
+            OsString::from("46"),
+            OsString::from("/state/catalog.json"),
+        ])
+        .unwrap();
+        assert_eq!(options.serve4, Some(PathBuf::from("/run/dp4.sock")));
+        assert_eq!(options.serve6, Some(PathBuf::from("/run/dp6.sock")));
+        assert_eq!(options.live4, Some(PathBuf::from("/state/live4.json")));
+        assert_eq!(options.live6, Some(PathBuf::from("/state/live6.json")));
+        assert_eq!(options.catalog, PathBuf::from("/state/catalog.json"));
+        assert!(options.discover);
+        assert_eq!(options.mark, Some(46));
+    }
+
+    #[test]
+    fn serve_both_requires_catalog_and_at_least_one_family() {
+        assert!(
+            super::parse_serve_both_options(&[
+                OsString::from("--serve-both"),
+                OsString::from("--serve4"),
+                OsString::from("/run/dp4.sock"),
+            ])
+            .is_err()
+        );
+        assert!(
+            super::parse_serve_both_options(&[
+                OsString::from("--serve-both"),
+                OsString::from("/state/catalog.json"),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn saved_plan_file_is_created_without_overwriting_existing_data() {
         let path = std::env::temp_dir().join(format!(
             "r2o-classify-{}-{}.r2op",

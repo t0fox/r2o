@@ -23,6 +23,11 @@ SOCK6=$RUN/r2o-datapath6.sock
 CATALOG=$STATE/catalog.json
 FIREWALL=${R2O_FIREWALL:-$SCRIPT_DIR/r2o-firewall.sh}
 PPE_ADAPTER=${R2O_PPE_ADAPTER:-$SCRIPT_DIR/r2o-ppe-deoffload.sh}
+# Объединённый режим: один процесс на компонент, внутри независимые
+# IPv4/IPv6-обработчики. Раздельные PID-файлы остаются для аварийного
+# отката и для совместимости со старыми release.
+DP_PID=$RUN/r2o-datapath.pid
+CT_PID=$RUN/r2o-controller.pid
 DP4_PID=$RUN/r2o-datapath4.pid
 DP6_PID=$RUN/r2o-datapath6.pid
 CT4_PID=$RUN/r2o-controller4.pid
@@ -37,6 +42,9 @@ PROBE_MARK=${PROBE_MARK:-46}
 ONLY_MARK=${ONLY_MARK:-}
 KEENETIC_POLICY=${KEENETIC_POLICY:-}
 IPV6_ENABLED=${IPV6_ENABLED:-1}
+# Аварийный и тестовый запуск старым раздельным способом. По умолчанию
+# работает объединённый процесс; R2O_SPLIT_RUNTIME=1 возвращает split.
+SPLIT_RUNTIME=${R2O_SPLIT_RUNTIME:-0}
 PANEL_LISTEN=${PANEL_LISTEN-127.0.0.1:8090}
 TG_ENABLED=${TG_ENABLED:-0}
 TG_MODE=${TG_MODE:-local}
@@ -68,10 +76,24 @@ PROBE_MARK=${PROBE_MARK:-46}
 ONLY_MARK=${ONLY_MARK:-}
 KEENETIC_POLICY=${KEENETIC_POLICY:-}
 IPV6_ENABLED=${IPV6_ENABLED:-1}
+# Аварийный и тестовый запуск старым раздельным способом. По умолчанию
+# работает объединённый процесс; R2O_SPLIT_RUNTIME=1 возвращает split.
+SPLIT_RUNTIME=${R2O_SPLIT_RUNTIME:-0}
 PANEL_LISTEN=${PANEL_LISTEN-127.0.0.1:8090}
 TG_ENABLED=${TG_ENABLED:-0}
 TG_MODE=${TG_MODE:-local}
 TG_PORT=${TG_PORT:-1443}
+# Политика прозрачного перехвата. Без этих аргументов r2o-telegram отклоняет
+# все SO_ORIGINAL_DST как чужие: destination_allowed требует непустые списки.
+TG_TCP_PORTS=${TG_TCP_PORTS:-"443 5222"}
+TG_CIDRS4=${TG_CIDRS4:-"149.154.160.0/20 91.108.4.0/22 91.108.8.0/22 91.108.12.0/22 91.108.16.0/22 91.108.20.0/22 91.108.56.0/22 91.105.192.0/23 95.161.64.0/20 185.76.151.0/24"}
+TG_CIDRS6=${TG_CIDRS6:-"2001:67c:4e8::/48 2001:b28:f23c::/47 2001:b28:f23f::/48 2a0a:f280:203::/48"}
+tg_ports_csv() {
+    printf '%s' "$TG_TCP_PORTS" | sed 's/[[:space:]][[:space:]]*/,/g; s/,,*/,/g; s/^,//; s/,$//'
+}
+tg_cidrs_csv() {
+    printf '%s %s' "$TG_CIDRS4" "$TG_CIDRS6" | sed 's/[[:space:]][[:space:]]*/,/g; s/,,*/,/g; s/^,//; s/,$//'
+}
 TG_STATUS=${TG_STATUS:-$STATE/telegram.status}
 TG_STATS_SOCKET=${TG_STATS_SOCKET:-$STATE/telegram.stats.sock}
 TG_FIREWALL=${R2O_TG_FIREWALL:-$SCRIPT_DIR/r2o-tg-firewall.sh}
@@ -129,7 +151,7 @@ ppe_call() {
 ppe_ensure() {
     [ "$R2O_FW" = iptables ] || return 0
     [ -x "$PPE_ADAPTER" ] || { say "нет PPE adapter $PPE_ADAPTER"; return 0; }
-    component_running r2o-datapath "$DP4_PID" || return 0
+    component_running r2o-datapath "$DP_PID" || component_running r2o-datapath "$DP4_PID" || return 0
     if ppe_call ensure; then ppe_rc=0; else ppe_rc=$?; fi
     case "$ppe_rc" in
         0) ;;
@@ -208,6 +230,7 @@ valid_positive_decimal "$R2O_FLOW_CAPACITY" || die "неверный R2O_FLOW_CA
 [ "$QUEUE4" != "$QUEUE6" ] || die "QUEUE_NUM и QUEUE_NUM6 должны различаться"
 case "$MODE" in off|observe|apply) ;; *) die "неверный MODE" ;; esac
 case "$IPV6_ENABLED" in 0|1) ;; *) die "IPV6_ENABLED должен быть 0 или 1" ;; esac
+case "$SPLIT_RUNTIME" in 0|1) ;; *) die "R2O_SPLIT_RUNTIME должен быть 0 или 1" ;; esac
 case "$AUTOUPDATE" in 1|yes) AUTOUPDATE=1 ;; 0|no) AUTOUPDATE=0 ;; *) die "AUTOUPDATE должен быть 0, 1, yes или no" ;; esac
 case "$TG_ENABLED" in 1|yes) TG_ENABLED=1 ;; 0|no) TG_ENABLED=0 ;; *) die "TG_ENABLED должен быть 0, 1, yes или no" ;; esac
 case "$R2O_PPE_DEOFFLOAD" in 0|1) ;; *) die "R2O_PPE_DEOFFLOAD должен быть 0 или 1" ;; esac
@@ -334,6 +357,82 @@ start_datapath() {
     spawn_component r2o-datapath "$r2o_dp_pid" "$r2o_dp_log" "$@"
 }
 
+# Один процесс датапата обслуживает обе очереди. Семейные обработчики
+# внутри процесса независимы: свои сокеты управления, потоки и состояние.
+start_datapath_both() {
+    set -- --both --queue4 "$QUEUE4" --control4 "$SOCK4" --mode "$MODE" --mark "$MARK" \
+        --r2o-flow-capacity "$R2O_FLOW_CAPACITY" --stats "${STATS_SEC:-900}"
+    if [ "$IPV6_ENABLED" = 1 ]; then
+        set -- "$@" --queue6 "$QUEUE6" --control6 "$SOCK6"
+    fi
+    [ "$PROBE_MARK" = 0 ] || set -- "$@" --probe-mark "$PROBE_MARK"
+    [ -z "$ONLY_MARK" ] || set -- "$@" --only-mark "$ONLY_MARK"
+    set -- "$@" --controller-only --r2o-udp-reverse-visible
+    spawn_component r2o-datapath "$DP_PID" "$LOG/r2o-datapath.log" "$@"
+}
+
+# Один контроллер ведёт оба семейных serve-потока. Отчёт диагностики
+# пишет только первый поток, второй запускается с --no-diagnostics.
+start_controller_both() {
+    r2o_ct_mark=$1
+    set -- --serve-both --serve4 "$SOCK4" "$CATALOG" --discover --mark "$r2o_ct_mark" \
+        --live4 "$STATE/live4.json"
+    if [ "$IPV6_ENABLED" = 1 ]; then
+        set -- "$@" --serve6 "$SOCK6" --live6 "$STATE/live6.json"
+    fi
+    spawn_component r2o-controller "$CT_PID" "$LOG/r2o-controller.log" "$@"
+}
+
+engine_firewall_up() {
+    R2O_IPV6_ENABLED_RUNTIME='' "$FIREWALL" up || return 1
+    fastnat_off
+    "$FIREWALL" flowoffload-ensure || return 1
+}
+
+start_engine_merged() {
+    r2o_merged_mark=$1
+    start_datapath_both || return 1
+    wait_queue "$QUEUE4" || return 1
+    if [ "$IPV6_ENABLED" = 1 ]; then
+        wait_queue "$QUEUE6" || return 1
+    fi
+    engine_firewall_up || return 1
+    start_controller_both "$r2o_merged_mark"
+}
+
+start_engine_split() {
+    r2o_split_mark=$1
+    start_datapath "$QUEUE4" ipv4 "$DP4_PID" "$LOG/r2o-datapath4.log" "$SOCK4" || return 1
+    if [ "$IPV6_ENABLED" = 1 ]; then
+        start_datapath "$QUEUE6" ipv6 "$DP6_PID" "$LOG/r2o-datapath6.log" "$SOCK6" || return 1
+    fi
+    wait_queue "$QUEUE4" || return 1
+    if [ "$IPV6_ENABLED" = 1 ]; then
+        wait_queue "$QUEUE6" || return 1
+    fi
+    engine_firewall_up || return 1
+    spawn_component r2o-controller "$CT4_PID" "$LOG/r2o-controller4.log" \
+        --serve "$SOCK4" "$CATALOG" --discover --mark "$r2o_split_mark" --live "$STATE/live4.json" || return 1
+    if [ "$IPV6_ENABLED" = 1 ]; then
+        spawn_component r2o-controller "$CT6_PID" "$LOG/r2o-controller6.log" \
+            --serve "$SOCK6" "$CATALOG" --discover --mark "$r2o_split_mark" --live "$STATE/live6.json" || return 1
+    fi
+}
+
+merged_components_running() {
+    component_running r2o-datapath "$DP_PID" \
+        && component_running r2o-controller "$CT_PID"
+}
+
+split_components_running() {
+    component_running r2o-datapath "$DP4_PID" \
+        && component_running r2o-controller "$CT4_PID" && ipv6_components_running
+}
+
+engine_components_running() {
+    merged_components_running || split_components_running
+}
+
 queue_bound() {
     queue=$1
     [ -r "$NFQUEUE_STATUS" ] || return 1
@@ -368,8 +467,10 @@ engine_stop() {
     "$FIREWALL" down || say "не удалось полностью снять правила firewall"
     fastnat_restore
     flowoffload_restore || { flowoffload_rc=$?; say "не удалось восстановить нативный fw4 flow offload"; }
+    stop_component r2o-controller "$CT_PID"
     stop_component r2o-controller "$CT4_PID"
     stop_component r2o-controller "$CT6_PID"
+    stop_component r2o-datapath "$DP_PID"
     stop_component r2o-datapath "$DP4_PID"
     stop_component r2o-datapath "$DP6_PID"
     rm -f "$SOCK4" "$SOCK6"
@@ -428,8 +529,7 @@ engine_start() {
     [ -x "$FIREWALL" ] || die "нет firewall adapter $FIREWALL"
     [ -x "$MANAGER" ] || die "нет release manager $MANAGER"
     log_maintenance_start || say "ротация журналов не запустилась"
-    if component_running r2o-datapath "$DP4_PID" \
-        && component_running r2o-controller "$CT4_PID" && ipv6_components_running \
+    if engine_components_running \
         && "$FIREWALL" status >/dev/null 2>&1 \
         && { [ ! -x "$FW_WATCHDOG" ] || firewall_watchdog_running; }; then
         if ! "$FIREWALL" flowoffload-ensure; then
@@ -444,42 +544,26 @@ engine_start() {
     engine_stop
     mark=$MARK
     case "$mark" in 0x*|0X*) mark=$(printf '%d' "$mark") ;; esac
-    if ! start_datapath "$QUEUE4" ipv4 "$DP4_PID" "$LOG/r2o-datapath4.log" "$SOCK4"; then
-        engine_stop
-        return 1
-    fi
-    if [ "$IPV6_ENABLED" = 1 ]; then
-        if ! start_datapath "$QUEUE6" ipv6 "$DP6_PID" "$LOG/r2o-datapath6.log" "$SOCK6"; then
-            engine_stop
-            return 1
-        fi
-    fi
-    wait_queue "$QUEUE4" || { engine_stop; die "IPv4 NFQUEUE $QUEUE4 не привязалась"; }
-    if [ "$IPV6_ENABLED" = 1 ]; then
-        wait_queue "$QUEUE6" || { engine_stop; die "IPv6 NFQUEUE $QUEUE6 не привязалась"; }
-    fi
-    R2O_IPV6_ENABLED_RUNTIME='' "$FIREWALL" up || { engine_stop; die "не поставить правила NFQUEUE"; }
-    fastnat_off
-    if ! "$FIREWALL" flowoffload-ensure; then
-        say "не удалось отключить fw4 flow offloading; останавливаю datapath, чтобы сохранить видимость трафика"
-        engine_stop
-        return 1
-    fi
     # Nonzero PROBE_MARK sends controller verifier traffic through NFQUEUE.
     controller_mark=$mark
     [ "$PROBE_MARK" = 0 ] || controller_mark=$PROBE_MARK
-    if ! spawn_component r2o-controller "$CT4_PID" "$LOG/r2o-controller4.log" \
-        --serve "$SOCK4" "$CATALOG" --discover --mark "$controller_mark" --live "$STATE/live4.json"; then
-        engine_stop
-        return 1
+    if [ "$SPLIT_RUNTIME" = 1 ]; then
+        say "R2O_SPLIT_RUNTIME=1 — используется раздельный режим"
+    elif start_engine_merged "$controller_mark"; then
+        firewall_watchdog_start || say "сторож правил не запустился — правила придётся возвращать вручную"
+        say "datapath запущен: один процесс, IPv4 очередь $QUEUE4, IPv6 $([ "$IPV6_ENABLED" = 1 ] && echo "$QUEUE6" || echo выключен), режим $MODE"
+        return 0
+    else
+        say "объединённый runtime не поднялся; откат на раздельные процессы"
     fi
-    if [ "$IPV6_ENABLED" = 1 ] && ! spawn_component r2o-controller "$CT6_PID" "$LOG/r2o-controller6.log" \
-        --serve "$SOCK6" "$CATALOG" --discover --mark "$controller_mark" --live "$STATE/live6.json"; then
+    engine_stop
+    if ! start_engine_split "$controller_mark"; then
         engine_stop
+        say "не удалось запустить datapath ни в объединённом, ни в раздельном режиме"
         return 1
     fi
     firewall_watchdog_start || say "сторож правил не запустился — правила придётся возвращать вручную"
-    say "datapath запущен: IPv4 очередь $QUEUE4, IPv6 $([ "$IPV6_ENABLED" = 1 ] && echo "$QUEUE6" || echo выключен), режим $MODE"
+    say "datapath запущен раздельно: IPv4 очередь $QUEUE4, IPv6 $([ "$IPV6_ENABLED" = 1 ] && echo "$QUEUE6" || echo выключен), режим $MODE"
 }
 
 settings_restart() {
@@ -669,7 +753,9 @@ clear_found() {
     prepare_dirs || return 1
     [ -x "$MANAGER" ] || die "нет release manager $MANAGER"
     clear_found_restart=0
-    if component_running r2o-datapath "$DP4_PID" || component_running r2o-datapath "$DP6_PID" \
+    if component_running r2o-datapath "$DP_PID" || component_running r2o-datapath "$DP4_PID" \
+        || component_running r2o-datapath "$DP6_PID" \
+        || component_running r2o-controller "$CT_PID" \
         || component_running r2o-controller "$CT4_PID" || component_running r2o-controller "$CT6_PID"; then
         clear_found_restart=1
     fi
@@ -769,6 +855,8 @@ telegram_start() {
     export R2O_TG_DC_MAP_ENDPOINTS_PATH R2O_TG_DC_MAP_SYNC
     spawn_component r2o-telegram "$TG_PID" "$LOG/telegram.log" \
         --port "$TG_PORT" --stats-socket-path "$TG_STATS_SOCKET" \
+        --transparent-ports "$(tg_ports_csv)" \
+        --transparent-cidrs "$(tg_cidrs_csv)" \
         --health-file "$RUNTIME/d2ktg.health" \
         --dc-map-path "$STATE/telegram-dc-map.json" \
         --dc-map-endpoints-path "$STATE/telegram-dc-endpoints.tsv" \
@@ -879,7 +967,8 @@ telegram_check() {
 }
 
 reapply() {
-    component_running r2o-datapath "$DP4_PID" || die "r2o-datapath IPv4 не работает"
+    component_running r2o-datapath "$DP_PID" || component_running r2o-datapath "$DP4_PID" \
+        || die "r2o-datapath не работает"
     R2O_IPV6_ENABLED_RUNTIME='' "$FIREWALL" up || die "не поставить полный набор правил"
 }
 
@@ -913,7 +1002,7 @@ telegram_reapply() {
 }
 
 firewall_heal() {
-    if component_running r2o-datapath "$DP4_PID"; then
+    if component_running r2o-datapath "$DP_PID" || component_running r2o-datapath "$DP4_PID"; then
         if "$FIREWALL" status >/dev/null 2>&1; then
             "$FIREWALL" dns-ensure >/dev/null 2>&1 || true
         else
@@ -942,13 +1031,17 @@ panel_start() {
     [ -x "$MANAGER" ] || return 1
     if component_running r2o-panel "$PN_PID"; then return 0; fi
     rm -f "$RUNTIME/r2o-panel.health"
+    panel_engine_pid=$DP_PID
+    component_running r2o-datapath "$DP_PID" || panel_engine_pid=$DP4_PID
+    panel_controller_pid=$CT_PID
+    component_running r2o-controller "$CT_PID" || panel_controller_pid=$CT4_PID
     spawn_component r2o-panel "$PN_PID" "$LOG/panel.log" serve \
         --health-file "$RUNTIME/r2o-panel.health" --config "$CONF" \
         --live "$STATE/live4.json" --live-extra "$STATE/live6.json" \
         --assets "$ROOT/panel" --listen "$PANEL_LISTEN" \
         --state-dir "$STATE" --mode "$MODE" --queue "$QUEUE4" \
         --service "$INIT" --manager "$MANAGER" --manager-root "$ROOT" \
-        --engine-pid "$DP4_PID" --controller-pid "$CT4_PID" \
+        --engine-pid "$panel_engine_pid" --controller-pid "$panel_controller_pid" \
         --telegram-pid "$TG_PID" --telegram-status "$TG_STATUS" \
         --telegram-stats "$TG_STATS_SOCKET" --log "$LOG/panel.log"
 }
@@ -973,24 +1066,19 @@ stop() {
     "$FIREWALL" rst-down || say "не удалось снять RST таблицу firewall"
 }
 
+engine_health_once() {
+    engine_components_running && queue_bound "$QUEUE4" \
+        && { [ "$IPV6_ENABLED" = 0 ] || queue_bound "$QUEUE6"; } \
+        && { [ -z "$PANEL_LISTEN" ] \
+            || { component_running r2o-panel "$PN_PID" && [ -s "$RUNTIME/r2o-panel.health" ]; }; }
+}
+
 wait_health() {
     attempt=0
     while [ "$attempt" -lt 100 ]; do
-        if component_running r2o-datapath "$DP4_PID" && component_running r2o-controller "$CT4_PID" \
-            && queue_bound "$QUEUE4" \
-            && { [ -z "$PANEL_LISTEN" ] || \
-                { component_running r2o-panel "$PN_PID" && [ -s "$RUNTIME/r2o-panel.health" ]; }; } \
-            && { [ "$IPV6_ENABLED" = 0 ] || \
-                { component_running r2o-datapath "$DP6_PID" && component_running r2o-controller "$CT6_PID" && queue_bound "$QUEUE6"; }; }; then
+        if engine_health_once; then
             sleep 60 2>/dev/null || sleep 1
-            if component_running r2o-datapath "$DP4_PID" && component_running r2o-controller "$CT4_PID" \
-                && queue_bound "$QUEUE4" \
-                && { [ -z "$PANEL_LISTEN" ] || \
-                    { component_running r2o-panel "$PN_PID" && [ -s "$RUNTIME/r2o-panel.health" ]; }; } \
-                && { [ "$IPV6_ENABLED" = 0 ] || \
-                    { component_running r2o-datapath "$DP6_PID" && component_running r2o-controller "$CT6_PID" && queue_bound "$QUEUE6"; }; }; then
-                return 0
-            fi
+            engine_health_once && return 0
             return 1
         fi
         attempt=$((attempt + 1))
@@ -1064,10 +1152,20 @@ update_install() {
 
 status_d2k() {
     echo "${NAME:-r2o}"
-    component_running r2o-datapath "$DP4_PID" && echo "  датапат: работает (pid $(cat "$DP4_PID"))" \
-        || echo "  датапат: не работает"
-    component_running r2o-controller "$CT4_PID" && echo "  контроллер: работает (pid $(cat "$CT4_PID"))" \
-        || echo "  контроллер: не работает"
+    if component_running r2o-datapath "$DP_PID"; then
+        echo "  датапат: работает (pid $(cat "$DP_PID"), IPv4+IPv6)"
+    elif component_running r2o-datapath "$DP4_PID"; then
+        echo "  датапат: работает раздельно (pid $(cat "$DP4_PID") IPv4)"
+    else
+        echo "  датапат: не работает"
+    fi
+    if component_running r2o-controller "$CT_PID"; then
+        echo "  контроллер: работает (pid $(cat "$CT_PID"), IPv4+IPv6)"
+    elif component_running r2o-controller "$CT4_PID"; then
+        echo "  контроллер: работает раздельно (pid $(cat "$CT4_PID") IPv4)"
+    else
+        echo "  контроллер: не работает"
+    fi
     component_running r2o-panel "$PN_PID" && echo "  панель: работает (pid $(cat "$PN_PID"))" \
         || echo "  панель: не работает"
     component_running r2o-telegram "$TG_PID" && echo "  Telegram tunnel: работает (pid $(cat "$TG_PID"))" \
@@ -1105,18 +1203,30 @@ status_d2k() {
 status() {
     ppe_target_ip=${1:-}
     echo "r2o"
-    component_running r2o-datapath "$DP4_PID" && echo "  r2o-datapath IPv4: работает" || echo "  r2o-datapath IPv4: не работает"
-    if [ "$IPV6_ENABLED" = 1 ]; then
-        component_running r2o-datapath "$DP6_PID" && echo "  r2o-datapath IPv6: работает" || echo "  r2o-datapath IPv6: не работает"
+    if component_running r2o-datapath "$DP_PID"; then
+        echo "  r2o-datapath: работает (IPv4+IPv6, pid $(cat "$DP_PID"))"
+    elif component_running r2o-datapath "$DP4_PID"; then
+        echo "  r2o-datapath IPv4: работает (раздельный режим)"
+        if [ "$IPV6_ENABLED" = 1 ]; then
+            component_running r2o-datapath "$DP6_PID" && echo "  r2o-datapath IPv6: работает (раздельный режим)" || echo "  r2o-datapath IPv6: не работает"
+        else
+            echo "  r2o-datapath IPv6: выключен конфигурацией"
+        fi
     else
-        echo "  r2o-datapath IPv6: выключен конфигурацией"
+        echo "  r2o-datapath: не работает"
     fi
     if [ "$IPV6_ENABLED" = 1 ] && [ "$IPV6_ENABLED_RUNTIME" = 0 ]; then
         echo "  IPv6: не обслуживается — нет ip6tables mangle, работа только по IPv4"
     fi
-    component_running r2o-controller "$CT4_PID" && echo "  r2o-controller IPv4: работает" || echo "  r2o-controller IPv4: не работает"
-    if [ "$IPV6_ENABLED" = 1 ]; then
-        component_running r2o-controller "$CT6_PID" && echo "  r2o-controller IPv6: работает" || echo "  r2o-controller IPv6: не работает"
+    if component_running r2o-controller "$CT_PID"; then
+        echo "  r2o-controller: работает (IPv4+IPv6, pid $(cat "$CT_PID"))"
+    elif component_running r2o-controller "$CT4_PID"; then
+        echo "  r2o-controller IPv4: работает (раздельный режим)"
+        if [ "$IPV6_ENABLED" = 1 ]; then
+            component_running r2o-controller "$CT6_PID" && echo "  r2o-controller IPv6: работает (раздельный режим)" || echo "  r2o-controller IPv6: не работает"
+        fi
+    else
+        echo "  r2o-controller: не работает"
     fi
     if [ "$TG_ENABLED" = 1 ]; then
         component_running r2o-telegram "$TG_PID" && echo "  r2o-telegram: работает ($TG_MODE, :$TG_PORT)" || echo "  r2o-telegram: не работает (TG_ENABLED=1)"

@@ -3,7 +3,7 @@
 (function (root) {
   "use strict";
   var SVG = "http://www.w3.org/2000/svg";
-  var PRIMARY = "r2o-controller4";
+  var PRIMARY = "r2o-controller";
   var metrics = [
     { key: "rss", label: "RSS", color: "rss" },
     { key: "rss_anon", label: "RssAnon", color: "rss_anon" },
@@ -300,8 +300,9 @@
     if (!body) return { mismatch: null };
     body.replaceChildren();
     var labels = {
-      "r2o-controller4": "Контроллер IPv4", "r2o-controller6": "Контроллер IPv6",
-      "r2o-datapath4": "Датапат IPv4", "r2o-datapath6": "Датапат IPv6", "r2o-panel": "Панель"
+      "r2o-controller": "Контроллер", "r2o-datapath": "Датапат", "r2o-panel": "Панель",
+      "r2o-controller4": "Контроллер IPv4 (раздельно)", "r2o-controller6": "Контроллер IPv6 (раздельно)",
+      "r2o-datapath4": "Датапат IPv4 (раздельно)", "r2o-datapath6": "Датапат IPv6 (раздельно)"
     };
     var last = samples[samples.length - 1];
     if (!last || !list(last.processes).length) {

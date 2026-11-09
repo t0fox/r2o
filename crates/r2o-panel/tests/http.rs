@@ -1344,7 +1344,7 @@ fn embedded_diagnostics_asset_is_served_without_asset_dir() {
     assert_eq!(response.status, 200);
     let body = String::from_utf8_lossy(&response.body);
     assert!(
-        body.contains("Локальная история поиска"),
+        body.contains("Локальная история отключена"),
         "diagnostics.js должен отдаваться из встроенных ресурсов"
     );
 }

@@ -93,6 +93,9 @@ export R2O_DIR="$ROOT" R2O_CONFIG="$ROOT/config" R2O_INIT="$SERVICE" R2O_MANAGER
 export R2O_FIREWALL=/opt/etc/init.d/r2o-firewall.sh R2O_LOG_MAINTENANCE="$ROOT/missing-log-worker"
 export R2O_FIREWALL_WATCHDOG="$ROOT/missing-firewall-watchdog" R2O_PPE_ADAPTER="$ROOT/missing-ppe"
 export R2O_RUNTIME_DIR=/tmp/r2o
+# Этот harness проверяет раздельные PID-файлы и журналы, поэтому
+# принудительно использует старый split-режим.
+export R2O_SPLIT_RUNTIME=1
 wait_for_sync() {
     label=$1
     expected=$2

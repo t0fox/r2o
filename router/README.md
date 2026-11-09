@@ -33,7 +33,7 @@ Keenetic/Entware `mipsel` и совместимые ARM ABI. Он проверя
 
 ```sh
 /opt/etc/init.d/S99r2o status
-tail -n 100 /opt/r2o/log/r2o-datapath4.log /opt/r2o/log/r2o-controller4.log /opt/r2o/log/panel.log
+tail -n 100 /opt/r2o/log/r2o-datapath.log /opt/r2o/log/r2o-controller.log /opt/r2o/log/panel.log
 ```
 
 Установить обновление из последнего подписанного выпуска:
