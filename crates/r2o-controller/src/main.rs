@@ -936,6 +936,107 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
         #[cfg(not(unix))]
         return Err("очистка каталога поддерживается только на Unix".into());
     }
+    if arguments.len() == 5 && arguments[0] == "--mark-recheck" {
+        #[cfg(unix)]
+        {
+            let family = arguments[2]
+                .to_str()
+                .ok_or("FAMILY должен быть 4 или 6")?
+                .parse::<u8>()
+                .map_err(|_| "FAMILY должен быть 4 или 6")?;
+            let shape = arguments[3]
+                .to_str()
+                .ok_or("SHAPE должен быть числом")?
+                .parse::<u8>()
+                .map_err(|_| "SHAPE должен быть числом")?;
+            if !matches!(family, 4 | 6)
+                || !matches!(shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP)
+            {
+                return Err("--mark-recheck: неверные FAMILY или SHAPE".into());
+            }
+            let host = r2o_controller::domain::normalize(
+                arguments[1]
+                    .to_str()
+                    .ok_or("--mark-recheck: неверное имя")?,
+            )
+            .map_err(|_| "--mark-recheck: неверное имя".to_string())?;
+            let target = r2o_controller::discovery::DiscoveryTarget {
+                host,
+                endpoint: String::new(),
+                family,
+                shape,
+            };
+            let catalog_path = PathBuf::from(&arguments[4]);
+            let mut catalog = Catalog::load(&catalog_path)?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs() as i64;
+            let (result, group) = r2o_update_recheck_catalog(&mut catalog, &target, now);
+            catalog.save_atomic(&catalog_path, now.max(1))?;
+            println!(
+                "каталог: {} marked={} removed={} group={}",
+                target.host,
+                result.marked,
+                result.removed,
+                group
+                    .as_ref()
+                    .map(|group| format!("{} ({})", group.suffix, group.plan_id))
+                    .unwrap_or_else(|| "нет".into())
+            );
+            return Ok(());
+        }
+        #[cfg(not(unix))]
+        return Err("каталог поддерживается только на Unix".into());
+    }
+    if arguments.len() == 6 && arguments[0] == "--recheck-name" {
+        #[cfg(unix)]
+        {
+            let family = arguments[3]
+                .to_str()
+                .ok_or("FAMILY должен быть 4 или 6")?
+                .parse::<u8>()
+                .map_err(|_| "FAMILY должен быть 4 или 6")?;
+            let shape = arguments[4]
+                .to_str()
+                .ok_or("SHAPE должен быть числом")?
+                .parse::<u8>()
+                .map_err(|_| "SHAPE должен быть числом")?;
+            if !matches!(family, 4 | 6)
+                || !matches!(shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP)
+            {
+                return Err("--recheck-name: неверные FAMILY или SHAPE".into());
+            }
+            let host = r2o_controller::domain::normalize(
+                arguments[2]
+                    .to_str()
+                    .ok_or("--recheck-name: неверное имя")?,
+            )
+            .map_err(|_| "--recheck-name: неверное имя".to_string())?;
+            let target = r2o_controller::discovery::DiscoveryTarget {
+                host,
+                endpoint: String::new(),
+                family,
+                shape,
+            };
+            let catalog_path = PathBuf::from(&arguments[5]);
+            let mut catalog = Catalog::load(&catalog_path)?;
+            let mut client = ControlClient::connect(PathBuf::from(&arguments[1]))?;
+            let changed =
+                client.r2o_recheck_failed_exact_binding(&target, &mut catalog, &catalog_path)?;
+            println!(
+                "перепроверка {} (family={family}, shape={shape}): {}",
+                target.host,
+                if changed {
+                    "привязка помечена, runtime обновлён"
+                } else {
+                    "точной привязки или группы не найдено"
+                }
+            );
+            return Ok(());
+        }
+        #[cfg(not(unix))]
+        return Err("управляющий AF_UNIX сокет поддерживается только на Unix".into());
+    }
     if arguments
         .first()
         .is_some_and(|argument| argument == "--serve-both")
@@ -1611,7 +1712,7 @@ fn save_plan_file(path: &std::path::Path, plan: &[u8]) -> std::io::Result<()> {
 
 fn print_help() {
     println!(
-        "r2o-controller — каталог и контроллер r2o\n\nИспользование:\n  r2o-controller --check-catalog ФАЙЛ\n  r2o-controller --clear-catalog ФАЙЛ\n  r2o-controller --classify HOST PORT SNI [REPEATS] [--modern] [--allow-loopback] [--mark N] [--only ИМЯ] [--skip ИМЯ ...] [--save-plan ФАЙЛ] [--arm СОКЕТ]\n  r2o-controller --probe-response HOST PORT SNI [REPEATS]\n  r2o-controller --set-name СОКЕТ HOST FAMILY SHAPE ПЛАН.r2op\n  r2o-controller --set-addr СОКЕТ IP SHAPE ПЛАН.r2op\n  r2o-controller --del-addr СОКЕТ IP SHAPE\n  r2o-controller --apply-catalog СОКЕТ КАТАЛОГ.json\n  r2o-controller --serve СОКЕТ КАТАЛОГ.json [--discover] [--mark N]\n  r2o-controller --watch СОКЕТ\n  r2o-controller --journal СОКЕТ\n  r2o-controller --http-candidates\n  r2o-controller --version\n  r2o-controller --help\n\nFAMILY: ipv4 или ipv6. SHAPE: modern, legacy, ech, http, quic или voice; voice использует HOST @discord-voice. Адресная привязка принимает modern, legacy, ech, quic или voice. QUIC поддерживает планы quicsplit, quicdeny, четыре формы IP-фрагментации после контрольной пробы, удлинение UDP, нулевую 16-байтовую фальшивку и пару фальшивых quic5 с TTL 3 после подтверждённого рукопожатия и зависания; --modern использует сохранённый TLS 1.3 ClientHello; --discover ставит новые TCP SNI в ограниченную очередь классификации и ищет обход HTTP-портала, а для Discord voice запускает ограниченный IP Discovery поиск, требующий --mark; --mark задаёт SO_MARK управляющим зондам и raw-пакетам; --save-plan создаёт новый файл и не перезаписывает существующий; --arm передаёт найденный план работающему r2o-datapath для соответствующей формы."
+        "r2o-controller — каталог и контроллер r2o\n\nИспользование:\n  r2o-controller --check-catalog ФАЙЛ\n  r2o-controller --clear-catalog ФАЙЛ\n  r2o-controller --classify HOST PORT SNI [REPEATS] [--modern] [--allow-loopback] [--mark N] [--only ИМЯ] [--skip ИМЯ ...] [--save-plan ФАЙЛ] [--arm СОКЕТ]\n  r2o-controller --probe-response HOST PORT SNI [REPEATS]\n  r2o-controller --set-name СОКЕТ HOST FAMILY SHAPE ПЛАН.r2op\n  r2o-controller --set-addr СОКЕТ IP SHAPE ПЛАН.r2op\n  r2o-controller --del-addr СОКЕТ IP SHAPE\n  r2o-controller --apply-catalog СОКЕТ КАТАЛОГ.json\n  r2o-controller --recheck-name СОКЕТ HOST FAMILY SHAPE КАТАЛОГ.json\n  r2o-controller --mark-recheck HOST FAMILY SHAPE КАТАЛОГ.json\n  r2o-controller --serve СОКЕТ КАТАЛОГ.json [--discover] [--mark N]\n  r2o-controller --watch СОКЕТ\n  r2o-controller --journal СОКЕТ\n  r2o-controller --http-candidates\n  r2o-controller --version\n  r2o-controller --help\n\nFAMILY: ipv4 или ipv6. SHAPE: modern, legacy, ech, http, quic или voice; voice использует HOST @discord-voice. Адресная привязка принимает modern, legacy, ech, quic или voice. QUIC поддерживает планы quicsplit, quicdeny, четыре формы IP-фрагментации после контрольной пробы, удлинение UDP, нулевую 16-байтовую фальшивку и пару фальшивых quic5 с TTL 3 после подтверждённого рукопожатия и зависания; --modern использует сохранённый TLS 1.3 ClientHello; --discover ставит новые TCP SNI в ограниченную очередь классификации и ищет обход HTTP-портала, а для Discord voice запускает ограниченный IP Discovery поиск, требующий --mark; --mark задаёт SO_MARK управляющим зондам и raw-пакетам; --save-plan создаёт новый файл и не перезаписывает существующий; --arm передаёт найденный план работающему r2o-datapath для соответствующей формы."
     );
     println!("  classify: [--white ИМЯ] задаёт ECH-приманку для гипотезы белого ClientHello");
     println!("  classify: [--control-sni ИМЯ] задаёт подтверждённое контрольное имя");
@@ -2670,6 +2771,51 @@ fn catalog_commands_with_send_cap(
 
         let mut seen_bypasses = HashSet::new();
         let mut bypass_commands = Vec::new();
+        // Exact-привязка, уже помеченная recheck, не должна снова покрываться
+        // общим планом группы на первом же синке после restart.
+        for box_record in &catalog.boxes {
+            for binding in &box_record.bindings {
+                if binding.recheck_since.is_none()
+                    || !binding.enabled
+                    || binding.kind != "name"
+                    || binding.transport != 6
+                {
+                    continue;
+                }
+                let Ok(name) = r2o_controller::domain::normalize(&binding.target) else {
+                    continue;
+                };
+                let family = if binding.family == 0 {
+                    4
+                } else {
+                    binding.family
+                };
+                let shape = binding.shape;
+                if !matches!(shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP) {
+                    continue;
+                }
+                let key = GroupKey {
+                    transport: 6,
+                    family,
+                    shape,
+                    probe_path: binding.probe_path.clone(),
+                    ech_origin: binding.ech_origin.clone(),
+                };
+                let Some(group) = domain_state.match_domain(&name, &key) else {
+                    continue;
+                };
+                if group.plan_id != binding.plan_id {
+                    continue;
+                }
+                let wire_key = (name.clone(), 6, shape, family);
+                if !seen_bypasses.insert(wire_key) {
+                    continue;
+                }
+                let command = encode_set_bypass(&name, 6, shape, family)
+                    .map_err(|error| format!("SET_BYPASS для recheck {name}: {error}"))?;
+                bypass_commands.push((format!("исключение {name}"), command));
+            }
+        }
         for observation in &domain_state.observations {
             let direct_clear = observation.evidence & DOMAIN_DIRECT_CLEAR != 0;
             let failed_group_plan = observation.evidence & DOMAIN_PLAN_FAILED != 0
@@ -15227,6 +15373,25 @@ fn r2o_exclude_failed_group(
 }
 
 #[cfg(unix)]
+fn r2o_update_recheck_catalog(
+    catalog: &mut Catalog,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    now: i64,
+) -> (
+    r2o_controller::discovery::DirectClearBindingUpdate,
+    Option<r2o_controller::catalog::DomainGroup>,
+) {
+    let result = r2o_controller::discovery::update_direct_clear_bindings(
+        catalog,
+        target,
+        now,
+        std::time::Instant::now(),
+    );
+    let group = r2o_exclude_failed_group(catalog, target, now);
+    (result, group)
+}
+
+#[cfg(unix)]
 impl ControlClient {
     fn connect(path: PathBuf) -> Result<Self, Box<dyn Error>> {
         let mut socket = std::os::unix::net::UnixStream::connect(path)?;
@@ -21263,19 +21428,9 @@ impl ControlClient {
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
         let mut updated = catalog.clone();
-        let result = r2o_controller::discovery::update_direct_clear_bindings(
-            &mut updated,
-            target,
-            now,
-            std::time::Instant::now(),
-        );
+        let (result, group_exception) = r2o_update_recheck_catalog(&mut updated, target, now);
         if result.marked == 0 && result.removed == 0 {
-            // Exact-привязки нет, но имя может покрываться общим планом группы.
-            // Добавляем наблюдение PLAN_FAILED и сразу ставим SET_BYPASS —
-            // тот же механизм, которым catalog_commands_for_runtime исключает
-            // участника группы при следующей синхронизации.
-            let exception = r2o_exclude_failed_group(&mut updated, target, now);
-            let Some(group) = exception else {
+            let Some(group) = group_exception else {
                 return Ok(false);
             };
             if let Err(error) = updated.save_atomic(catalog_path, now.max(1)) {
@@ -21285,15 +21440,7 @@ impl ControlClient {
                 );
             }
             *catalog = updated;
-            let command = control_frame_with_area_id(
-                &encode_set_bypass(&target.host, 6, target.shape, target.family)?,
-                random_id()?,
-            )?;
-            self.send_command(&command, control::COMMAND_SET_BYPASS)?;
-            println!(
-                "{}: общий план {} для суффикса {} исключён из runtime и сохранён как неудачный",
-                target.host, group.plan_id, group.suffix
-            );
+            self.r2o_apply_group_bypass(target, &group)?;
             return Ok(true);
         }
         if let Err(error) = updated.save_atomic(catalog_path, now.max(1)) {
@@ -21327,6 +21474,9 @@ impl ControlClient {
                 }
             }
         }
+        if let Some(group) = group_exception.as_ref() {
+            self.r2o_apply_group_bypass(target, group)?;
+        }
         println!(
             "{}: устаревшая exact-привязка помечена для перепроверки{}",
             target.host,
@@ -21337,6 +21487,23 @@ impl ControlClient {
             }
         );
         Ok(true)
+    }
+
+    fn r2o_apply_group_bypass(
+        &mut self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        group: &r2o_controller::catalog::DomainGroup,
+    ) -> Result<(), Box<dyn Error>> {
+        let command = control_frame_with_area_id(
+            &encode_set_bypass(&target.host, 6, target.shape, target.family)?,
+            random_id()?,
+        )?;
+        self.send_command(&command, control::COMMAND_SET_BYPASS)?;
+        println!(
+            "{}: общий план {} для суффикса {} исключён из runtime и сохранён как неудачный",
+            target.host, group.plan_id, group.suffix
+        );
+        Ok(())
     }
 
     fn apply_discovery_direct_clear(
@@ -24004,7 +24171,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn плановый_отказ_исключает_имя_из_общего_группового_плана() {
-        use r2o_controller::catalog::{Catalog, DomainObservation, DomainState, GroupKey};
+        use r2o_controller::catalog::{Binding, Catalog, DomainObservation, DomainState, GroupKey};
 
         let key = GroupKey {
             transport: 6,
@@ -24042,6 +24209,18 @@ mod tests {
                 enabled: true,
                 ..Default::default()
             }],
+            bindings: vec![Binding {
+                kind: "name".into(),
+                target: "gateway.discord.gg".into(),
+                plan_id: plan_id.clone(),
+                level: 3,
+                enabled: true,
+                transport: 6,
+                family: 4,
+                shape: SHAPE_ECH_TCP,
+                recheck_since: Some(1),
+                ..Default::default()
+            }],
             ..Default::default()
         });
         let target = r2o_controller::discovery::DiscoveryTarget {
@@ -24067,22 +24246,40 @@ mod tests {
 
         let compiled = super::catalog_commands_with_send_cap(&mut catalog, 1280, 100)
             .expect("каталог с групповым исключением должен компилироваться");
-        let mut bypass_sent = false;
+        let mut bypass_names = Vec::new();
         for (_, bytes) in &compiled.commands {
             let frame = read_frame(&mut std::io::Cursor::new(bytes.clone())).unwrap();
             if frame.kind == r2k_core::control::COMMAND_SET_BYPASS {
                 let name_len = usize::from(frame.body[0]);
-                if frame.body.len() >= name_len + 1
-                    && &frame.body[1..1 + name_len] == target.host.as_bytes()
-                {
-                    bypass_sent = true;
+                if frame.body.len() >= name_len + 1 {
+                    bypass_names
+                        .push(String::from_utf8_lossy(&frame.body[1..1 + name_len]).into_owned());
                 }
             }
         }
         assert!(
-            bypass_sent,
-            "первый синк обязан отправить SET_BYPASS, даже когда active_groups ещё пуст"
+            bypass_names.iter().any(|name| name == &target.host),
+            "первый синк обязан отправить SET_BYPASS для явно исключённого имени"
         );
+        assert!(
+            bypass_names.iter().any(|name| name == "gateway.discord.gg"),
+            "recheck-привязка не должна снова покрываться общим планом группы"
+        );
+    }
+
+    #[test]
+    fn recheck_name_rejects_invalid_family_and_shape_before_connecting() {
+        for (family, shape) in [("5", "6"), ("4", "9")] {
+            let arguments = vec![
+                std::ffi::OsString::from("--recheck-name"),
+                std::ffi::OsString::from("/nonexistent.sock"),
+                std::ffi::OsString::from("gateway.discord.gg"),
+                std::ffi::OsString::from(family),
+                std::ffi::OsString::from(shape),
+                std::ffi::OsString::from("/nonexistent.json"),
+            ];
+            assert!(super::run(arguments).is_err());
+        }
     }
 
     #[cfg(unix)]
