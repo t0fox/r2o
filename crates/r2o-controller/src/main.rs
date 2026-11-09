@@ -4329,6 +4329,25 @@ fn saved_http_candidate_keys(
 }
 
 #[cfg(unix)]
+const R2O_HTTP_RECORD_LIMIT_BYTES: usize = 256 * 1024;
+#[cfg(unix)]
+const R2O_HTTP_QUEUE_LIMIT_BYTES: usize = 32 * 1024;
+#[cfg(unix)]
+const R2O_HTTP_FAILURE_LIMIT_BYTES: usize = 64 * 1024;
+#[cfg(unix)]
+const R2O_HTTP_FAILURE_RECORD_LIMIT_BYTES: usize = 8 * 1024;
+/// `sizeof(rec)` D2O; посчитано по тому же C-структурному определению.
+#[cfg(unix)]
+const R2O_HTTP_RECORD_BYTES: usize = 1480;
+/// `sizeof(pend)` D2O.
+#[cfg(unix)]
+const R2O_HTTP_QUEUE_ITEM_BYTES: usize = 273;
+#[cfg(unix)]
+const R2O_HTTP_RECORD_MAX_ITEMS: usize = R2O_HTTP_RECORD_LIMIT_BYTES / R2O_HTTP_RECORD_BYTES;
+#[cfg(unix)]
+const R2O_HTTP_QUEUE_MAX_ITEMS: usize = R2O_HTTP_QUEUE_LIMIT_BYTES / R2O_HTTP_QUEUE_ITEM_BYTES;
+
+#[cfg(unix)]
 #[derive(Clone, Debug, Default)]
 struct HttpLiveFailures {
     programs: Vec<Vec<u8>>,
@@ -4353,22 +4372,38 @@ impl HttpSearchRecordCache {
         (target.host.to_ascii_lowercase(), target.family)
     }
 
+    fn has_room_for(&self, key: &(String, u8)) -> bool {
+        self.0.contains_key(key) || self.0.len() < R2O_HTTP_RECORD_MAX_ITEMS
+    }
+
     fn record(&mut self, target: &r2o_controller::discovery::DiscoveryTarget) {
-        self.0.entry(Self::key(target)).or_default();
+        let key = Self::key(target);
+        if self.has_room_for(&key) {
+            self.0.entry(key).or_default();
+        }
     }
 
     fn record_name(&mut self, host: &str, family: u8) {
-        self.0
-            .entry((host.to_ascii_lowercase(), family))
-            .or_default();
+        let key = (host.to_ascii_lowercase(), family);
+        if self.has_room_for(&key) {
+            self.0.entry(key).or_default();
+        }
     }
 
     fn count(&self) -> usize {
         self.0.len()
     }
 
+    fn bytes(&self) -> usize {
+        self.0.len() * R2O_HTTP_RECORD_BYTES
+    }
+
     fn record_cut(&mut self, target: &r2o_controller::discovery::DiscoveryTarget, path: &[u8]) {
-        let record = self.0.entry(Self::key(target)).or_default();
+        let key = Self::key(target);
+        if !self.has_room_for(&key) {
+            return;
+        }
+        let record = self.0.entry(key).or_default();
         record.repro_gap = false;
         if !record.cut || record.repeat_path.is_empty() {
             record.cut = true;
@@ -4381,7 +4416,11 @@ impl HttpSearchRecordCache {
         target: &r2o_controller::discovery::DiscoveryTarget,
         path: &[u8],
     ) {
-        let record = self.0.entry(Self::key(target)).or_default();
+        let key = Self::key(target);
+        if !self.has_room_for(&key) {
+            return;
+        }
+        let record = self.0.entry(key).or_default();
         record.repro_gap = !r2o_controller::http_search::repeatable_path(path);
         record.repeat_path = if record.repro_gap {
             Vec::new()
@@ -6503,7 +6542,10 @@ impl HttpSearchWorker {
         let Some(jobs) = self.jobs.as_ref() else {
             return false;
         };
-        self.pending_jobs.fetch_add(1, Ordering::Relaxed);
+        if self.pending_jobs.fetch_add(1, Ordering::Relaxed) >= R2O_HTTP_QUEUE_MAX_ITEMS {
+            self.pending_jobs.fetch_sub(1, Ordering::Relaxed);
+            return false;
+        }
         if jobs.send(task).is_ok() {
             true
         } else {
@@ -6514,6 +6556,10 @@ impl HttpSearchWorker {
 
     fn queued_jobs(&self) -> usize {
         self.pending_jobs.load(Ordering::Relaxed)
+    }
+
+    fn queued_bytes(&self) -> usize {
+        self.queued_jobs() * R2O_HTTP_QUEUE_ITEM_BYTES
     }
 
     fn record_cut(&self, target: &r2o_controller::discovery::DiscoveryTarget, path: &[u8]) {
@@ -6547,6 +6593,13 @@ impl HttpSearchWorker {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .count()
+    }
+
+    fn record_bytes(&self) -> usize {
+        self.records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .bytes()
     }
 
     fn seed_records(&self, catalog: &Catalog) {
@@ -16351,6 +16404,20 @@ impl ControlClient {
                             http_queued: http_search
                                 .as_ref()
                                 .map_or(0, HttpSearchWorker::queued_jobs),
+                            http_records_bytes: http_search
+                                .as_ref()
+                                .map_or(0, HttpSearchWorker::record_bytes)
+                                as u64,
+                            http_queue_bytes: http_search
+                                .as_ref()
+                                .map_or(0, HttpSearchWorker::queued_bytes)
+                                as u64,
+                            http_failure_bytes: 0,
+                            http_records_limit_bytes: R2O_HTTP_RECORD_LIMIT_BYTES as u64,
+                            http_queue_limit_bytes: R2O_HTTP_QUEUE_LIMIT_BYTES as u64,
+                            http_failure_limit_bytes: R2O_HTTP_FAILURE_LIMIT_BYTES as u64,
+                            http_failure_record_limit_bytes: R2O_HTTP_FAILURE_RECORD_LIMIT_BYTES
+                                as u64,
                             catalog_bytes: catalog
                                 .and_then(|catalog| {
                                     catalog
@@ -24447,6 +24514,28 @@ mod tests {
         assert!(
             bypass_names.iter().any(|name| name == "gateway.discord.gg"),
             "recheck-привязка не должна снова покрываться общим планом группы"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn http_record_and_queue_caps_match_d2o_storage_limits() {
+        let mut cache = super::HttpSearchRecordCache::default();
+        for index in 0..(super::R2O_HTTP_RECORD_MAX_ITEMS + 25) {
+            cache.record_name(&format!("host{index}.example"), 4);
+        }
+        assert_eq!(cache.count(), super::R2O_HTTP_RECORD_MAX_ITEMS);
+        assert_eq!(
+            cache.bytes(),
+            super::R2O_HTTP_RECORD_MAX_ITEMS * super::R2O_HTTP_RECORD_BYTES
+        );
+        assert_eq!(super::R2O_HTTP_RECORD_BYTES, 1480);
+        assert_eq!(super::R2O_HTTP_RECORD_MAX_ITEMS, 177);
+        assert_eq!(super::R2O_HTTP_QUEUE_ITEM_BYTES, 273);
+        assert_eq!(super::R2O_HTTP_QUEUE_MAX_ITEMS, 120);
+        assert!(
+            super::R2O_HTTP_QUEUE_MAX_ITEMS * super::R2O_HTTP_QUEUE_ITEM_BYTES
+                <= super::R2O_HTTP_QUEUE_LIMIT_BYTES
         );
     }
 
@@ -36214,13 +36303,21 @@ mod tests {
         let runner = Arc::new(
             move |target: r2o_controller::discovery::DiscoveryTarget,
                   _trigger_planned: bool,
-                  _cancel: Arc<AtomicBool>| {
+                  cancel: Arc<AtomicBool>| {
                 started_sender.send(target.host.clone()).unwrap();
-                runner_release
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .recv()
-                    .unwrap();
+                loop {
+                    if cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let released = runner_release
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .recv_timeout(Duration::from_millis(20))
+                        .is_ok();
+                    if released {
+                        break;
+                    }
+                }
                 super::DiscoveryOutcome {
                     target,
                     plan_text: Some("план".into()),

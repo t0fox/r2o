@@ -798,6 +798,7 @@ impl Recorder {
         self.checked = Some(now);
         let enabled = diagnostics_enabled(&self.dir);
         if !enabled {
+            memory_enable(false);
             if self.enabled {
                 self.events.clear();
                 self.samples.clear();
@@ -832,6 +833,7 @@ impl Recorder {
         if !self.enabled {
             self.enabled = true;
             self.sampled = None;
+            memory_enable(true);
         }
         if self
             .sampled
@@ -1555,15 +1557,20 @@ fn read_fd_count(path: &Path) -> Option<u64> {
 mod tests {
     use super::{
         Counts, MADVISE_ERRNO_SLOTS, MadviseErrno, MadviseStats, Recorder, d2o_ring_bytes,
-        madvise_json, memory_acquire, memory_enable, memory_release, memory_tracking_json,
+        madvise_json, memory_acquire, memory_active, memory_enable, memory_release,
+        memory_tracking_json,
     };
     use serde_json::json;
     use std::fs::{self, OpenOptions};
+    use std::sync::Mutex;
     use std::time::{Duration, Instant};
+
+    static MEMORY_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[cfg(unix)]
     #[test]
     fn memory_tracking_and_madvise_json_match_d2o_shape() {
+        let _guard = MEMORY_TEST_LOCK.lock().unwrap();
         memory_enable(true);
         let tracked = memory_acquire(2, 77);
         let tracking = memory_tracking_json();
@@ -1591,6 +1598,45 @@ mod tests {
         assert_eq!(madvise["failures"], 2);
         assert!(madvise["last_errno"].is_null());
         assert_eq!(madvise["errno"].as_array().unwrap().len(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recorder_toggles_memory_tracking_with_enabled_file() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let _guard = MEMORY_TEST_LOCK.lock().unwrap();
+        let root =
+            std::env::temp_dir().join(format!("r2o-diag-memory-toggle-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let diag = root.join("diag");
+        let run = root.join("run");
+        fs::create_dir_all(&diag).unwrap();
+        fs::create_dir_all(&run).unwrap();
+        fs::set_permissions(&diag, fs::Permissions::from_mode(0o700)).unwrap();
+        let enabled = diag.join("enabled");
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&enabled)
+            .unwrap();
+
+        let mut recorder = Recorder::new(diag.clone(), run);
+        recorder.tick(|| Counts::default());
+        assert!(
+            memory_active(),
+            "включённая диагностика включает memory tracking"
+        );
+
+        fs::remove_file(&enabled).unwrap();
+        recorder.checked = Some(Instant::now() - Duration::from_secs(2));
+        recorder.tick(|| Counts::default());
+        assert!(
+            !memory_active(),
+            "выключенная диагностика выключает memory tracking"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
