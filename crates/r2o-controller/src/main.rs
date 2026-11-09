@@ -980,7 +980,13 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
                 result.removed,
                 group
                     .as_ref()
-                    .map(|group| format!("{} ({})", group.suffix, group.plan_id))
+                    .map(|group| {
+                        if group.suffix.is_empty() {
+                            group.plan_id.clone()
+                        } else {
+                            format!("{} ({})", group.suffix, group.plan_id)
+                        }
+                    })
                     .unwrap_or_else(|| "нет".into())
             );
             return Ok(());
@@ -2422,7 +2428,13 @@ fn r2o_tcp_stall_in_name_band(catalog: &Catalog, host: &str, packets: u32) -> bo
 #[cfg(unix)]
 const DOMAIN_DIRECT_CLEAR: u8 = 2;
 #[cfg(unix)]
+const DOMAIN_BLOCKED: u8 = 1;
+#[cfg(unix)]
 const DOMAIN_PLAN_FAILED: u8 = 4;
+/// Операторский sticky-запрет: последующее подтверждение плана не снимает
+/// bypass. Используется --mark-recheck и recheck после доказанного отказа.
+#[cfg(unix)]
+const DOMAIN_OPERATOR_REJECT: u8 = 32;
 
 #[cfg(unix)]
 const R2O_D2K_CAT_BUDGET_PASSED: u8 = 1;
@@ -2818,6 +2830,7 @@ fn catalog_commands_with_send_cap(
         }
         for observation in &domain_state.observations {
             let direct_clear = observation.evidence & DOMAIN_DIRECT_CLEAR != 0;
+            let operator_reject = observation.evidence & DOMAIN_OPERATOR_REJECT != 0;
             let failed_group_plan = observation.evidence & DOMAIN_PLAN_FAILED != 0
                 && (active_groups.iter().any(|group| {
                     group.key == observation.key
@@ -2832,7 +2845,7 @@ fn catalog_commands_with_send_cap(
                         && domain_member(&observation.name, &group.suffix)
                 }))
                 && !has_confirmed_exact_binding(catalog, observation);
-            if !direct_clear && !failed_group_plan {
+            if !direct_clear && !failed_group_plan && !operator_reject {
                 continue;
             }
             let wire_key = (
@@ -15451,15 +15464,15 @@ struct QuicDiscoveryTrialOutcome {
     applied: bool,
 }
 
-/// Исключить имя из общего группового плана после планового отказа.
-/// Возвращает исключённую группу, если observation принят каталогом.
+/// Исключить имя из общего плана после планового отказа. Если группы уже
+/// нет, используется plan_id активной exact-привязки: операторский запрет
+/// должен переживать распад группы и последующее подтверждение плана.
 #[cfg(unix)]
 fn r2o_exclude_failed_group(
     catalog: &mut Catalog,
     target: &r2o_controller::discovery::DiscoveryTarget,
     now: i64,
 ) -> Option<r2o_controller::catalog::DomainGroup> {
-    let state = catalog.domain_state.as_mut()?;
     let key = GroupKey {
         transport: 6,
         family: target.family,
@@ -15467,15 +15480,58 @@ fn r2o_exclude_failed_group(
         probe_path: String::new(),
         ech_origin: String::new(),
     };
-    let group = state.match_domain(&target.host, &key)?.clone();
+    let group = catalog
+        .domain_state
+        .as_ref()
+        .and_then(|state| state.match_domain(&target.host, &key))
+        .cloned();
+    let plan_id = group
+        .as_ref()
+        .map(|group| group.plan_id.clone())
+        .or_else(|| {
+            catalog.boxes.iter().find_map(|box_record| {
+                let binding = box_record.bindings.iter().find(|binding| {
+                    binding.enabled
+                        && binding.kind == "name"
+                        && binding.target == target.host
+                        && (binding.transport == 0 || binding.transport == 6)
+                        && (binding.family == 0 || binding.family == target.family)
+                        && (binding.shape == 0
+                            || binding.shape == target.shape
+                            || binding.shape == SHAPE_MODERN && target.shape == SHAPE_ECH_TCP)
+                })?;
+                box_record
+                    .plans
+                    .iter()
+                    .any(|plan| plan.id == binding.plan_id && plan.enabled)
+                    .then(|| binding.plan_id.clone())
+            })
+        })?;
+    let suffix = group
+        .as_ref()
+        .map(|group| group.suffix.clone())
+        .unwrap_or_default();
     let observation = DomainObservation {
         name: target.host.clone(),
-        plan_id: group.plan_id.clone(),
-        key: group.key.clone(),
-        evidence: DOMAIN_PLAN_FAILED,
+        plan_id: plan_id.clone(),
+        key: key.clone(),
+        evidence: DOMAIN_BLOCKED | DOMAIN_PLAN_FAILED | DOMAIN_OPERATOR_REJECT,
         at: now.max(1),
     };
-    state.learn(observation).ok()?.then_some(group)
+    catalog
+        .domain_state
+        .get_or_insert_with(r2o_controller::catalog::DomainState::default)
+        .learn(observation)
+        .ok()?;
+    Some(
+        group.unwrap_or_else(|| r2o_controller::catalog::DomainGroup {
+            suffix,
+            plan_id,
+            key,
+            evidence_count: 0,
+            at: now.max(1),
+        }),
+    )
 }
 
 #[cfg(unix)]
@@ -21606,8 +21662,14 @@ impl ControlClient {
         )?;
         self.send_command(&command, control::COMMAND_SET_BYPASS)?;
         println!(
-            "{}: общий план {} для суффикса {} исключён из runtime и сохранён как неудачный",
-            target.host, group.plan_id, group.suffix
+            "{}: план {} исключён из runtime{} и сохранён как неудачный",
+            target.host,
+            group.plan_id,
+            if group.suffix.is_empty() {
+                String::new()
+            } else {
+                format!(" (суффикс {})", group.suffix)
+            }
         );
         Ok(())
     }
@@ -24370,6 +24432,102 @@ mod tests {
         assert!(
             bypass_names.iter().any(|name| name == "gateway.discord.gg"),
             "recheck-привязка не должна снова покрываться общим планом группы"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn операторский_запрет_переживает_подтверждение_плана_и_даёт_bypass() {
+        use r2o_controller::catalog::{Binding, Catalog, DomainObservation, GroupKey};
+
+        let key = GroupKey {
+            transport: 6,
+            family: 4,
+            shape: SHAPE_ECH_TCP,
+            probe_path: String::new(),
+            ech_origin: String::new(),
+        };
+        let plan_id = "a0479da26d1df262779028a171882465".to_owned();
+        let mut catalog = Catalog {
+            boxes: vec![r2o_controller::catalog::BoxRecord {
+                id: "auto-a0479".into(),
+                plans: vec![r2o_controller::catalog::Plan {
+                    id: plan_id.clone(),
+                    proto: "tls".into(),
+                    text: "r2o-plan 1 5\nproto tcp tls\nsegment 1400\npayload-pad64 2 1 15\nseqovl payload=2 poison=0\norder forward\n".into(),
+                    enabled: true,
+                    ..Default::default()
+                }],
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: "gateway.discord.gg".into(),
+                    plan_id: plan_id.clone(),
+                    level: 3,
+                    enabled: true,
+                    transport: 6,
+                    family: 4,
+                    shape: SHAPE_ECH_TCP,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Catalog::default()
+        };
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "gateway.discord.gg".into(),
+            endpoint: "162.159.134.234:443".into(),
+            family: 4,
+            shape: SHAPE_ECH_TCP,
+        };
+        let rejected = super::r2o_exclude_failed_group(&mut catalog, &target, 10)
+            .expect("exact-привязка должна дать операторский запрет без группы");
+        assert_eq!(rejected.plan_id, plan_id);
+        let state = catalog.domain_state.as_mut().unwrap();
+        assert!(
+            state
+                .observations
+                .iter()
+                .any(|observation| observation.evidence & super::DOMAIN_OPERATOR_REJECT != 0)
+        );
+        // Успешное подтверждение того же плана не снимает операторский запрет.
+        state
+            .learn(DomainObservation {
+                name: "gateway.discord.gg".into(),
+                plan_id: rejected.plan_id.clone(),
+                key,
+                evidence: 1,
+                at: 20,
+            })
+            .unwrap();
+        assert!(
+            state
+                .observations
+                .iter()
+                .any(|observation| observation.evidence & super::DOMAIN_OPERATOR_REJECT != 0),
+            "BLOCKED-подтверждение не должно стирать операторский запрет"
+        );
+        state
+            .restore()
+            .expect("каталог с операторским запретом должен восстанавливаться");
+
+        let compiled = super::catalog_commands_with_send_cap(&mut catalog, 1280, 100)
+            .expect("каталог с операторским запретом должен компилироваться");
+        let mut bypass = false;
+        for (_, bytes) in &compiled.commands {
+            let frame = read_frame(&mut std::io::Cursor::new(bytes.clone())).unwrap();
+            if frame.kind != r2k_core::control::COMMAND_SET_BYPASS {
+                continue;
+            }
+            let name_len = usize::from(frame.body[0]);
+            if frame.body.len() >= name_len + 1
+                && &frame.body[1..1 + name_len] == b"gateway.discord.gg"
+            {
+                bypass = true;
+            }
+        }
+        assert!(
+            bypass,
+            "операторский запрет обязан отправлять SET_BYPASS даже при активной exact-привязке"
         );
     }
 

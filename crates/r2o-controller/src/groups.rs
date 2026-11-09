@@ -6,6 +6,9 @@ const DIRECT_CLEAR: u8 = 2;
 const PLAN_FAILED: u8 = 4;
 const INCONCLUSIVE: u8 = 8;
 const ADMITTED_EXCEPTION: u8 = 16;
+/// Операторский запрет плана для имени. В отличие от обычного PLAN_FAILED,
+/// последующее успешное подтверждение плана не снимает его.
+const OPERATOR_REJECT: u8 = 32;
 const MAX_GROUPS: usize = 64;
 const MAX_OBSERVATIONS: usize = 256;
 
@@ -63,13 +66,21 @@ pub(crate) fn learn(
     state: &mut DomainState,
     mut observation: DomainObservation,
 ) -> Result<bool, CatalogError> {
-    if !matches!(
-        observation.evidence,
-        BLOCKED | DIRECT_CLEAR | PLAN_FAILED | INCONCLUSIVE
-    ) {
+    let base_evidence = observation.evidence & !OPERATOR_REJECT;
+    let valid_base = base_evidence == BLOCKED
+        || base_evidence == PLAN_FAILED
+        || base_evidence == (BLOCKED | PLAN_FAILED)
+        || base_evidence == DIRECT_CLEAR
+        || base_evidence == INCONCLUSIVE;
+    if !valid_base
+        || observation.evidence & OPERATOR_REJECT != 0
+            && !(base_evidence == BLOCKED
+                || base_evidence == PLAN_FAILED
+                || base_evidence == (BLOCKED | PLAN_FAILED))
+    {
         return Err(CatalogError::new("invalid domain observation evidence"));
     }
-    if matches!(observation.evidence, BLOCKED | PLAN_FAILED) && observation.plan_id.is_empty() {
+    if base_evidence & (BLOCKED | PLAN_FAILED) != 0 && observation.plan_id.is_empty() {
         return Err(CatalogError::new(
             "blocked and failed observations require a plan id",
         ));
@@ -100,6 +111,15 @@ pub(crate) fn learn(
         ));
     }
     observation.name = name;
+    if state.observations.iter().any(|old| {
+        old.name == observation.name
+            && old.key == observation.key
+            && old.evidence & OPERATOR_REJECT != 0
+    }) {
+        // Операторский запрет снимается только правкой каталога, а не
+        // последующим автоматическим замером.
+        return Ok(false);
+    }
 
     let mut admitted_clear = observation.evidence == DIRECT_CLEAR
         && covering_group(state, &observation.name, &observation.key).is_some();
@@ -355,7 +375,7 @@ pub(crate) fn match_domain<'a>(
         let excluded = state.observations.iter().any(|observation| {
             observation.name == name
                 && observation.key == *key
-                && (observation.evidence & DIRECT_CLEAR != 0
+                && (observation.evidence & (DIRECT_CLEAR | OPERATOR_REJECT) != 0
                     || (observation.evidence & PLAN_FAILED != 0
                         && observation.plan_id == group.plan_id))
         });
@@ -367,6 +387,14 @@ pub(crate) fn match_domain<'a>(
 }
 
 fn canonical_evidence(evidence: u8) -> Result<u8, CatalogError> {
+    let operator_reject = evidence & OPERATOR_REJECT != 0;
+    if operator_reject {
+        let base = evidence & !OPERATOR_REJECT;
+        if !matches!(base, BLOCKED | PLAN_FAILED | 5) {
+            return Err(CatalogError::new("invalid operator-reject evidence"));
+        }
+        return Ok(base | OPERATOR_REJECT);
+    }
     let mut evidence = evidence;
     if evidence != INCONCLUSIVE {
         evidence &= !INCONCLUSIVE;
