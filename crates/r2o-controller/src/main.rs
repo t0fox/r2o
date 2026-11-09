@@ -4989,7 +4989,9 @@ struct R2oLateRxOutcome {
 #[cfg(unix)]
 struct R2oLateRxWorker {
     jobs: Option<SyncSender<R2oLateRxInput>>,
+    outcome_sender: SyncSender<R2oLateRxOutcome>,
     outcomes: Receiver<R2oLateRxOutcome>,
+    measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
     cancel: Arc<AtomicBool>,
     active: HashSet<R2oDiscoveryFailureKey>,
     thread: Option<JoinHandle<()>>,
@@ -5052,7 +5054,10 @@ struct R2oFamilyRecoveryOutcome {
 #[cfg(unix)]
 struct R2oFamilyRecoveryWorker {
     jobs: Option<SyncSender<R2oFamilyRecoveryTask>>,
+    outcome_sender: SyncSender<R2oFamilyRecoveryOutcome>,
     outcomes: Receiver<R2oFamilyRecoveryOutcome>,
+    measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
+    trial_commands: SyncSender<HttpSearchCommand>,
     cancel: Arc<AtomicBool>,
     active: HashSet<r2o_controller::discovery::DiscoveryTarget>,
     thread: Option<JoinHandle<()>>,
@@ -5064,14 +5069,44 @@ impl R2oFamilyRecoveryWorker {
         measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
         trial_commands: SyncSender<HttpSearchCommand>,
     ) -> Self {
-        let (jobs, job_receiver) = mpsc::sync_channel::<R2oFamilyRecoveryTask>(8);
         let (outcome_sender, outcomes) = mpsc::sync_channel(8);
-        let cancel = Arc::new(AtomicBool::new(false));
-        let worker_cancel = Arc::clone(&cancel);
-        let worker_gate = measurement_gate.clone();
-        let worker_commands = trial_commands;
+        let mut worker = Self {
+            jobs: None,
+            outcome_sender,
+            outcomes,
+            measurement_gate,
+            trial_commands,
+            cancel: Arc::new(AtomicBool::new(false)),
+            active: HashSet::new(),
+            thread: None,
+        };
+        worker.r2o_ensure_worker();
+        worker
+    }
+
+    fn r2o_ensure_worker(&mut self) {
+        if self
+            .thread
+            .as_ref()
+            .is_some_and(|thread| !thread.is_finished())
+        {
+            return;
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        let (jobs, job_receiver) = mpsc::sync_channel::<R2oFamilyRecoveryTask>(8);
+        let outcome_sender = self.outcome_sender.clone();
+        let worker_cancel = Arc::clone(&self.cancel);
+        let worker_gate = self.measurement_gate.clone();
+        let worker_commands = self.trial_commands.clone();
         let thread = std::thread::spawn(move || {
-            while let Ok(task) = job_receiver.recv() {
+            loop {
+                let task = match job_receiver.recv_timeout(R2O_ON_DEMAND_WORKER_IDLE) {
+                    Ok(task) => task,
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                    | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                };
                 if worker_cancel.load(Ordering::Relaxed) {
                     break;
                 }
@@ -5089,13 +5124,8 @@ impl R2oFamilyRecoveryWorker {
                 }
             }
         });
-        Self {
-            jobs: Some(jobs),
-            outcomes,
-            cancel,
-            active: HashSet::new(),
-            thread: Some(thread),
-        }
+        self.jobs = Some(jobs);
+        self.thread = Some(thread);
     }
 
     fn queue(
@@ -5107,22 +5137,36 @@ impl R2oFamilyRecoveryWorker {
         if candidates.is_empty() || !self.active.insert(target.clone()) {
             return false;
         }
-        let Some(jobs) = self.jobs.as_ref() else {
+        self.r2o_ensure_worker();
+        let Some(jobs) = self.jobs.clone() else {
             self.active.remove(&target);
             return false;
         };
-        if jobs
-            .try_send(R2oFamilyRecoveryTask {
-                target: target.clone(),
-                candidates,
-                mark,
-            })
-            .is_err()
-        {
-            self.active.remove(&target);
-            return false;
+        let task = R2oFamilyRecoveryTask {
+            target: target.clone(),
+            candidates,
+            mark,
+        };
+        match jobs.try_send(task) {
+            Ok(()) => true,
+            Err(mpsc::TrySendError::Full(_)) => {
+                self.active.remove(&target);
+                false
+            }
+            Err(mpsc::TrySendError::Disconnected(task)) => {
+                self.r2o_ensure_worker();
+                let Some(jobs) = self.jobs.clone() else {
+                    self.active.remove(&target);
+                    return false;
+                };
+                if jobs.try_send(task).is_ok() {
+                    true
+                } else {
+                    self.active.remove(&target);
+                    false
+                }
+            }
         }
-        true
     }
 
     fn try_outcome(&self) -> Option<R2oFamilyRecoveryOutcome> {
@@ -6357,14 +6401,43 @@ fn r2o_family_applied_flow_matches(
 #[cfg(unix)]
 impl R2oLateRxWorker {
     fn new(measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate) -> Self {
+        let (outcome_sender, outcomes) = mpsc::sync_channel(R2O_LATE_RX_TASK_CAPACITY);
+        let mut worker = Self {
+            jobs: None,
+            outcome_sender,
+            outcomes,
+            measurement_gate,
+            cancel: Arc::new(AtomicBool::new(false)),
+            active: HashSet::new(),
+            thread: None,
+        };
+        worker.r2o_ensure_worker();
+        worker
+    }
+
+    fn r2o_ensure_worker(&mut self) {
+        if self
+            .thread
+            .as_ref()
+            .is_some_and(|thread| !thread.is_finished())
+        {
+            return;
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
         let (jobs, job_receiver) =
             mpsc::sync_channel::<R2oLateRxInput>(R2O_LATE_RX_TASK_CAPACITY - 1);
-        let (outcome_sender, outcomes) = mpsc::sync_channel(R2O_LATE_RX_TASK_CAPACITY);
-        let cancel = Arc::new(AtomicBool::new(false));
-        let worker_cancel = Arc::clone(&cancel);
-        let worker_gate = measurement_gate.clone();
+        let outcome_sender = self.outcome_sender.clone();
+        let worker_cancel = Arc::clone(&self.cancel);
+        let worker_gate = self.measurement_gate.clone();
         let thread = std::thread::spawn(move || {
-            while let Ok(input) = job_receiver.recv() {
+            loop {
+                let input = match job_receiver.recv_timeout(R2O_ON_DEMAND_WORKER_IDLE) {
+                    Ok(input) => input,
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                    | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                };
                 if worker_cancel.load(Ordering::Relaxed) {
                     break;
                 }
@@ -6385,13 +6458,8 @@ impl R2oLateRxWorker {
                 }
             }
         });
-        Self {
-            jobs: Some(jobs),
-            outcomes,
-            cancel,
-            active: HashSet::new(),
-            thread: Some(thread),
-        }
+        self.jobs = Some(jobs);
+        self.thread = Some(thread);
     }
 
     fn queue(
@@ -6409,14 +6477,29 @@ impl R2oLateRxWorker {
         if self.active.contains(&failure_key) {
             return false;
         }
-        let Some(jobs) = self.jobs.as_ref() else {
+        self.r2o_ensure_worker();
+        let Some(jobs) = self.jobs.clone() else {
             return false;
         };
-        if jobs.try_send(input).is_err() {
-            return false;
+        match jobs.try_send(input) {
+            Ok(()) => {
+                self.active.insert(failure_key);
+                true
+            }
+            Err(mpsc::TrySendError::Full(_)) => false,
+            Err(mpsc::TrySendError::Disconnected(input)) => {
+                self.r2o_ensure_worker();
+                let Some(jobs) = self.jobs.clone() else {
+                    return false;
+                };
+                if jobs.try_send(input).is_ok() {
+                    self.active.insert(failure_key);
+                    true
+                } else {
+                    false
+                }
+            }
         }
-        self.active.insert(failure_key);
-        true
     }
 
     fn try_outcome(&mut self) -> Option<R2oLateRxOutcome> {
@@ -6439,7 +6522,7 @@ impl Drop for R2oLateRxWorker {
 
 #[cfg(unix)]
 struct HttpSearchWorker {
-    jobs: Option<mpsc::Sender<HttpSearchTask>>,
+    jobs: Option<mpsc::Sender<(HttpSearchTask, bool, usize)>>,
     command_sender: SyncSender<HttpSearchCommand>,
     commands: Option<Receiver<HttpSearchCommand>>,
     outcomes: Option<Receiver<HttpSearchOutcome>>,
@@ -6452,7 +6535,7 @@ struct HttpSearchWorker {
 #[cfg(unix)]
 impl HttpSearchWorker {
     fn new(measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate) -> Self {
-        let (job_sender, job_receiver) = mpsc::channel::<HttpSearchTask>();
+        let (job_sender, job_receiver) = mpsc::channel::<(HttpSearchTask, bool, usize)>();
         let pending_jobs = Arc::new(AtomicUsize::new(0));
         let worker_pending_jobs = Arc::clone(&pending_jobs);
         let (command_sender, commands) = mpsc::sync_channel::<HttpSearchCommand>(16);
@@ -6465,8 +6548,9 @@ impl HttpSearchWorker {
         let worker_gate = measurement_gate.clone();
         let thread = std::thread::spawn(move || {
             let mut diagnostic_seq = 0_u64;
-            while let Ok(task) = job_receiver.recv() {
+            while let Ok((task, tracked, bytes)) = job_receiver.recv() {
                 worker_pending_jobs.fetch_sub(1, Ordering::Relaxed);
+                r2o_controller::diagnostics::memory_release(0, bytes, tracked);
                 if worker_cancel.load(Ordering::Relaxed) {
                     break;
                 }
@@ -6542,14 +6626,18 @@ impl HttpSearchWorker {
         let Some(jobs) = self.jobs.as_ref() else {
             return false;
         };
+        let bytes = std::mem::size_of::<HttpSearchTask>();
+        let tracked = r2o_controller::diagnostics::memory_acquire(0, bytes);
         if self.pending_jobs.fetch_add(1, Ordering::Relaxed) >= R2O_HTTP_QUEUE_MAX_ITEMS {
             self.pending_jobs.fetch_sub(1, Ordering::Relaxed);
+            r2o_controller::diagnostics::memory_release(0, bytes, tracked);
             return false;
         }
-        if jobs.send(task).is_ok() {
+        if jobs.send((task, tracked, bytes)).is_ok() {
             true
         } else {
             self.pending_jobs.fetch_sub(1, Ordering::Relaxed);
+            r2o_controller::diagnostics::memory_release(0, bytes, tracked);
             false
         }
     }
@@ -7083,6 +7171,9 @@ const R2O_DISCOVERY_TASK_CAPACITY: usize = 64;
 const R2O_DISCOVERY_WORKER_THREADS: usize = 8;
 /// Сколько ждать новую задачу, прежде чем on-demand worker завершится.
 const R2O_DISCOVERY_WORKER_IDLE: std::time::Duration = std::time::Duration::from_secs(10);
+/// Общий idle-таймаут простаивающих on-demand worker'ов.
+#[cfg(unix)]
+const R2O_ON_DEMAND_WORKER_IDLE: std::time::Duration = std::time::Duration::from_secs(10);
 // Matches SCHED_REST_MS: failed and direct-clear tasks keep a scheduler slot for two minutes.
 const R2O_DISCOVERY_TASK_REST: std::time::Duration = std::time::Duration::from_secs(120);
 #[cfg(unix)]
@@ -24514,6 +24605,84 @@ mod tests {
         assert!(
             bypass_names.iter().any(|name| name == "gateway.discord.gg"),
             "recheck-привязка не должна снова покрываться общим планом группы"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn late_rx_worker_exits_idle_and_restarts_on_queue() {
+        use std::time::{Duration, Instant};
+
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
+        let mut worker = super::R2oLateRxWorker::new(gate);
+        let deadline = Instant::now() + Duration::from_secs(13);
+        while worker
+            .thread
+            .as_ref()
+            .is_some_and(|thread| !thread.is_finished())
+        {
+            assert!(
+                Instant::now() < deadline,
+                "late-RX worker не завершился по idle-timeout"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            worker
+                .thread
+                .as_ref()
+                .is_some_and(std::thread::JoinHandle::is_finished)
+        );
+        let input = super::R2oLateRxInput {
+            options: r2o_controller::fetch::FetchOptions {
+                name: "idle-rx.example".into(),
+                ip: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+                port: 1,
+                path: "/".into(),
+                deadline: Duration::from_millis(200),
+                tls12: false,
+                wire_len: None,
+                mark: None,
+            },
+            discovery_target: None,
+            alternate_path: None,
+        };
+        assert!(worker.queue(input, Instant::now(), None));
+        assert!(
+            worker
+                .thread
+                .as_ref()
+                .is_some_and(|thread| !thread.is_finished()),
+            "очередь обязана поднять новый late-RX worker"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn family_recovery_worker_exits_idle() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
+        let (commands, _receiver) = mpsc::sync_channel(1);
+        let worker = super::R2oFamilyRecoveryWorker::new(gate, commands);
+        let deadline = Instant::now() + Duration::from_secs(13);
+        while worker
+            .thread
+            .as_ref()
+            .is_some_and(|thread| !thread.is_finished())
+        {
+            assert!(
+                Instant::now() < deadline,
+                "family-recovery worker не завершился по idle-timeout"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            worker
+                .thread
+                .as_ref()
+                .is_some_and(std::thread::JoinHandle::is_finished)
         );
     }
 

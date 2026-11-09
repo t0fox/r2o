@@ -24,6 +24,30 @@ const R2O_VOLUME_TX_READ_MAX: Duration = Duration::from_secs(12);
 const R2O_VOLUME_TX_CHUNK_GAP: Duration = Duration::from_millis(50);
 pub const R2O_D2O_VOLUME_RX_TIMEOUT: Duration = Duration::from_secs(6);
 pub const R2O_VOLUME_RX_PROBE_GAP: Duration = Duration::from_millis(500);
+/// D2O diagnostic site `tcp.tls_rx_buffer`; учитывает реальный Vec ответа.
+const R2O_DIAG_TCP_TLS_RX_BUFFER: usize = 3;
+
+struct R2oRxBufferTracking {
+    bytes: usize,
+    tracked: bool,
+}
+
+impl R2oRxBufferTracking {
+    fn new(bytes: usize) -> Self {
+        Self {
+            bytes,
+            tracked: crate::diagnostics::memory_acquire(R2O_DIAG_TCP_TLS_RX_BUFFER, bytes),
+        }
+    }
+}
+
+impl Drop for R2oRxBufferTracking {
+    fn drop(&mut self) {
+        if self.tracked {
+            crate::diagnostics::memory_release(R2O_DIAG_TCP_TLS_RX_BUFFER, self.bytes, true);
+        }
+    }
+}
 
 /// Дождаться ClientHello TCP с заданным именем и вернуть длину его TLS-записи.
 pub fn r2o_fetch_snapshot_wire_len(
@@ -1064,6 +1088,8 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
         let mut r2o_local_limit = false;
         let mut r2o_body_expected_at_eof = None;
         let mut r2o_pending_response = Vec::with_capacity(16 * 1024);
+        let _r2o_pending_response_tracking =
+            R2oRxBufferTracking::new(r2o_pending_response.capacity());
         let mut r2o_pending_overflow = false;
         let mut r2o_resource_tap: Option<crate::r2o_resource::R2oResourceBodyTap> = None;
         let mut r2o_reply_body_tap: Option<crate::r2o_resource::R2oResourceBodyTap> = None;

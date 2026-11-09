@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub const VERIFIED_TTL_SECONDS: u32 = 6 * 60 * 60;
 const QUEUE_CAPACITY: usize = 16;
 const CACHE_CAPACITY: usize = 128;
+const HTTPS_PROBE_IDLE: Duration = Duration::from_secs(10);
 
 struct Job {
     host: String,
@@ -116,7 +117,9 @@ fn parse_signed_decimal(text: &str) -> Option<i64> {
 
 pub struct HttpsProbeWorker {
     jobs: Option<SyncSender<Job>>,
+    result_sender: SyncSender<HttpsProbeResult>,
     results: Receiver<HttpsProbeResult>,
+    mark: Option<u32>,
     thread: Option<JoinHandle<()>>,
     pending: HashSet<String>,
     /// Слоты кэша в порядке C-массива: загрузка и сохранение обязаны давать
@@ -126,12 +129,43 @@ pub struct HttpsProbeWorker {
 
 impl HttpsProbeWorker {
     pub fn new(mark: Option<u32>) -> Self {
-        let (jobs, job_queue) = mpsc::sync_channel::<Job>(QUEUE_CAPACITY);
         let (result_sender, results) = mpsc::sync_channel::<HttpsProbeResult>(QUEUE_CAPACITY);
+        let mut worker = Self {
+            jobs: None,
+            result_sender,
+            results,
+            mark,
+            thread: None,
+            pending: HashSet::new(),
+            cache: Vec::new(),
+        };
+        worker.r2o_ensure_worker();
+        worker
+    }
+
+    fn r2o_ensure_worker(&mut self) {
+        if self
+            .thread
+            .as_ref()
+            .is_some_and(|thread| !thread.is_finished())
+        {
+            return;
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        let (jobs, job_queue) = mpsc::sync_channel::<Job>(QUEUE_CAPACITY);
+        let result_sender = self.result_sender.clone();
+        let mark = self.mark;
         let thread = thread::Builder::new()
             .name("r2o-проверка-https".into())
             .spawn(move || {
-                while let Ok(job) = job_queue.recv() {
+                loop {
+                    let job = match job_queue.recv_timeout(HTTPS_PROBE_IDLE) {
+                        Ok(job) => job,
+                        Err(mpsc::RecvTimeoutError::Timeout)
+                        | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    };
                     let state = probe_https_state(&job.host, job.address, mark);
                     let result = HttpsProbeResult {
                         host: job.host,
@@ -148,13 +182,8 @@ impl HttpsProbeWorker {
                 }
             })
             .ok();
-        Self {
-            jobs: thread.as_ref().map(|_| jobs),
-            results,
-            thread,
-            pending: HashSet::new(),
-            cache: Vec::new(),
-        }
+        self.jobs = thread.as_ref().map(|_| jobs);
+        self.thread = thread;
     }
 
     pub fn submit(&mut self, host: &str, address: SocketAddr, now: Instant) -> bool {
@@ -165,18 +194,32 @@ impl HttpsProbeWorker {
         {
             return false;
         }
-        let Some(jobs) = &self.jobs else {
+        self.r2o_ensure_worker();
+        let Some(jobs) = self.jobs.clone() else {
             return false;
         };
-        match jobs.try_send(Job {
+        let job = Job {
             host: host.clone(),
             address,
-        }) {
+        };
+        match jobs.try_send(job) {
             Ok(()) => {
                 self.pending.insert(host);
                 true
             }
-            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => false,
+            Err(TrySendError::Full(_)) => false,
+            Err(TrySendError::Disconnected(job)) => {
+                self.r2o_ensure_worker();
+                let Some(jobs) = self.jobs.clone() else {
+                    return false;
+                };
+                if jobs.try_send(job).is_ok() {
+                    self.pending.insert(host);
+                    true
+                } else {
+                    false
+                }
+            }
         }
     }
 
@@ -672,5 +715,37 @@ mod tests {
 
         drop(worker);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn idle_https_probe_worker_exits_and_restarts() {
+        let mut worker = HttpsProbeWorker::new(None);
+        let deadline = Instant::now() + Duration::from_secs(13);
+        while worker
+            .thread
+            .as_ref()
+            .is_some_and(|thread| !thread.is_finished())
+        {
+            assert!(
+                Instant::now() < deadline,
+                "HTTPS probe worker не завершился по idle-timeout"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            worker
+                .thread
+                .as_ref()
+                .is_some_and(std::thread::JoinHandle::is_finished)
+        );
+        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1);
+        assert!(worker.submit("idle-https.example", address, Instant::now()));
+        assert!(
+            worker
+                .thread
+                .as_ref()
+                .is_some_and(|thread| !thread.is_finished()),
+            "submit обязан поднять новый HTTPS probe worker"
+        );
     }
 }
