@@ -86,5 +86,5 @@ Rust-алгоритмы прокси и его тестовые сценарии
 - `gsap.js` — неизменённый GSAP 3.15.0; уведомление GreenSock о бесплатной
   стандартной лицензии сохранено в заголовке файла:
   https://gsap.com/standard-license.
-- Шрифты Onest и JetBrains Mono сопровождаются текстами лицензий OFL в
-  `crates/r2o-panel/assets/fonts/`.
+- Шрифты Onest, Manrope, Unbounded, IBM Plex Mono и JetBrains Mono
+  сопровождаются текстами лицензий OFL в `crates/r2o-panel/assets/fonts/`.

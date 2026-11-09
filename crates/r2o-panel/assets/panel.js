@@ -19,13 +19,28 @@
     { label: "Распознаём", phases: ["распознаём поведение"] },
     { label: "Свойства", phases: ["спрашиваем коробку о свойствах"] },
     { label: "Планы", phases: ["выводим планы"] },
-    { label: "Проверка", phases: ["проверяем готовое узнанной коробки", "проверяем выведенный план"] },
+    { label: "Проверка", phases: ["проверяем готовое узнанной коробки", "проверяем выведенный план", "проверяем свои планы"] },
     { label: "Подтверждено", phases: ["подтверждено, смотрим живой трафик"] }
   ];
   var VOICE_TRACK = [
     { label: "Замер голоса", phases: ["измеряем живой голосовой поток"] },
     { label: "Приём стоит", phases: ["приём голоса стоит, ждём разговора"] },
     { label: "Ждём ответа", phases: ["приём применился к разговору, ждём ответа сервера"] }
+  ];
+
+  var TRACK_ICONS = [
+    "M3 5h7M3 8h10M3 11h6",
+    "M8 2.2 13.2 5v6L8 13.8 2.8 11V5Z",
+    "M8 2.8a5.2 5.2 0 1 0 5.2 5.2M8 8l4-2.4",
+    "M3 5h10M3 8h10M3 11h10M5.5 3.5v3M10 6.5v3M7 9.5v3",
+    "M3 4h7v9H3zM6 2h7v9",
+    "M2 8h8M13 8h1M10 5l3 3-3 3",
+    "M3 8.5l3 3 7-7"
+  ];
+  var VOICE_ICONS = [
+    "M2 8h2l1.5-4 2 8 2-6 1.5 2H14",
+    "M2 8h2l1.5-3 2 6 2-4 1.5 1H14",
+    "M2 8h2l1.5-4 2 8 2-6 1.5 2H14"
   ];
 
   function plural(n, one, few, many) {
@@ -63,6 +78,21 @@
       for (var i = 0; i < tracks[t].length; i++) {
         if (tracks[t][i].phases.indexOf(phase) >= 0) return { steps: tracks[t], at: i, voice: t === 1 };
       }
+    }
+    /* Фазы D2O и старых сборок могут отличаться формулировкой. Не оставляем
+       карточку без дорожки: узнаём этап по ключевому слову. */
+    var text = str(phase).toLowerCase();
+    var rules = [
+      [/подтвержд/, 6],
+      [/провер/, 5],
+      [/свойств/, 3],
+      [/распозна|классифиц/, 2],
+      [/план|вывед/, 4],
+      [/форм|приветств/, 1],
+      [/очеред|слот|завод|старт/, 0]
+    ];
+    for (var r = 0; r < rules.length; r++) {
+      if (rules[r][0].test(text)) return { steps: TRACK, at: rules[r][1], voice: false };
     }
     return null;
   }
@@ -129,6 +159,17 @@
       var parts = line.split(/\s+/);
       return parts.length > 3 ? parts.slice(0, 3).join(" ") + "…" : line;
     }).join(" · ");
+  }
+
+  /* Кандидат плана — техническая строка. В карточке показываем только
+     первый приём и число остальных; полный текст раскрывается по клику. */
+  function candidateGist(text) {
+    var value = str(text).trim().replace(/^план\s+(?:поставлен|применён|применен|принят)\s*:\s*/i, "");
+    var parts = value.split(/\s*·\s*/).filter(Boolean);
+    if (!parts.length) return value;
+    var first = parts[0];
+    if (first.length > 36) first = first.slice(0, 35) + "…";
+    return parts.length > 1 ? first + " · ещё " + (parts.length - 1) : first;
   }
 
   /* Предел одновременных замеров считает движок по нагрузке роутера:
@@ -240,7 +281,7 @@
         global.ScrollToPlugin, global.SplitText, global.CustomEase, global.CustomWiggle].filter(Boolean);
       if (plugins.length) g.registerPlugin.apply(g, plugins);
       if (global.CustomEase) global.CustomEase.create("r2o", ".16,1,.3,1");
-      g.defaults({ ease: global.CustomEase ? "r2o" : "power3.out", duration: 0.5 });
+      g.defaults({ ease: global.CustomEase ? "r2o" : "power3.out", duration: 0.35 });
       if (global.CustomWiggle) global.CustomWiggle.create("r2oShake", { wiggles: 5, type: "easeOut" });
       if (doc && doc.documentElement) doc.documentElement.classList.add("has-gsap");
     }
@@ -314,7 +355,7 @@
       /* Анимации уходящих узлов не должны доживать после перерисовки. */
       var gone = node.querySelectorAll("[style]");
       if (gone.length) Motion.g.killTweensOf(gone);
-      var tls = node.querySelectorAll(".crate");
+      var tls = node.querySelectorAll(".box-card, .family-card");
       for (var ti = 0; ti < tls.length; ti++) if (tls[ti].__tl) tls[ti].__tl.kill();
     }
     node.replaceChildren.apply(node, fresh);
@@ -337,10 +378,15 @@
     this.pending = null;
     this.armed = null;
     this.filter = "";
-    this.openTags = {};
     this.flash = null;
     this.workerDialog = null;
     this.workerDomains = [];
+    this.screen = "now";
+    this.screenTitle = "Обзор";
+    this.screenKicker = "Пульт";
+    this.commandItems = [];
+    this.commandIndex = 0;
+    this.commandOpened = false;
     this.$ = function (id) { return doc.getElementById(id); };
   }
 
@@ -359,23 +405,289 @@
     } else { win.addEventListener("resize", update); }
   };
 
+  /* Экраны вместо длинной ленты: один активный раздел, глубокие ссылки
+     сохраняются в hash, а рабочие данные продолжают обновляться во всех. */
+  App.prototype.initRouter = function () {
+    var self = this, doc = this.doc, win = this.win;
+    this.screens = [].slice.call(doc.querySelectorAll("#app > section[data-screen]"));
+    this.screenLinks = [].slice.call(doc.querySelectorAll(".index a[data-nav]"));
+    var valid = {};
+    this.screens.forEach(function (screen) { valid[screen.id] = screen; });
+    this.validScreens = valid;
+    var fromHash = function () {
+      var id = (win.location.hash || "").replace(/^#/, "");
+      return valid[id] ? id : "now";
+    };
+    doc.addEventListener("click", function (event) {
+      var link = event.target.closest ? event.target.closest("a[href^='#']") : null;
+      if (!link) return;
+      var id = (link.getAttribute("href") || "").replace(/^#/, "");
+      if (!valid[id]) return;
+      event.preventDefault();
+      self.showScreen(id);
+    });
+    win.addEventListener("hashchange", function () { self.showScreen(fromHash(), { fromHash: true }); });
+    this.showScreen(fromHash(), { instant: true, fromHash: true });
+  };
+
+  App.prototype.showScreen = function (id, options) {
+    options = options || {};
+    var doc = this.doc, win = this.win;
+    if (!this.validScreens || !this.validScreens[id]) id = "now";
+    var screen = this.validScreens[id];
+    var previous = this.screen;
+    var changed = previous !== id || options.instant;
+    this.screen = id;
+    this.screenTitle = screen.getAttribute("data-title") || "Обзор";
+    this.screenKicker = screen.getAttribute("data-kicker") || "Пульт";
+    this.screens.forEach(function (item) { item.hidden = item !== screen; });
+    this.screenLinks.forEach(function (link) {
+      var current = link.getAttribute("data-nav") === id;
+      if (current) link.setAttribute("aria-current", "page");
+      else link.removeAttribute("aria-current");
+    });
+    var kicker = this.$("screen-kicker"), title = this.$("screen-title");
+    if (kicker) kicker.textContent = this.screenKicker;
+    if (title) title.textContent = this.screenTitle;
+    this.updateTitle();
+    if (options.fromHash !== true && win.location.hash !== "#" + id && win.history && win.history.pushState) {
+      win.history.pushState(null, "", "#" + id);
+    }
+    if (!changed) return;
+    if (win.scrollTo) win.scrollTo(0, 0);
+    if (options.fromHash === true) {
+      var resetScroll = function () { if (win.scrollTo) win.scrollTo(0, 0); };
+      if (win.requestAnimationFrame) win.requestAnimationFrame(resetScroll);
+      else win.setTimeout(resetScroll, 0);
+    }
+    if (id === "telegram") {
+      var body = this.$("telegram-body");
+      if (body && body.__tgUi && body.__tgUi.scene && body.__tgUi.scene.__flow) {
+        body.__tgUi.scene.__flow.attach();
+      }
+      if (this.m) this.renderTelegram(this.m, true);
+    }
+    if (Motion.on() && !options.instant) {
+      var g = Motion.g;
+      var parts = [].slice.call(screen.querySelectorAll(".screen-head, .status-panel, .overview-metric, .metric-card, .card, .family-card, .box-card, .diag-card, .tg-flow, .release-hero, .diag-history"));
+      if (screen.id === "now") parts = [].slice.call(screen.querySelectorAll(".status-panel, .overview-metrics, .workload-card, .overview-side > *"));
+      g.killTweensOf(screen);
+      g.killTweensOf(parts);
+      Motion.track(g.timeline({ defaults: { ease: "power3.out", clearProps: "all" } })
+        .fromTo(screen, { autoAlpha: 0, y: 7 }, { autoAlpha: 1, y: 0, duration: 0.24 }, 0)
+        .fromTo(parts, { y: 10, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.3, stagger: 0.02 }, 0.03));
+    }
+  };
+
+  App.prototype.updateTitle = function () {
+    var live = this.m && this.m.hunting ? "● " : "";
+    this.doc.title = live + "R2O — " + (this.screenTitle || "Обзор");
+  };
+
+  App.prototype.navigate = function (id) {
+    if (!this.validScreens || !this.validScreens[id]) return;
+    if (this.doc.location.hash === "#" + id) this.showScreen(id, { instant: false });
+    else this.doc.location.hash = "#" + id;
+  };
+
+  /* Командная палитра: единая точка входа в разделы и найденные сущности. */
+  App.prototype.initCommand = function () {
+    var self = this, doc = this.doc;
+    var dialog = this.$("command"), input = this.$("command-input"), list = this.$("command-list");
+    if (!dialog || !input || !list) return;
+    this.commandDialog = dialog;
+    this.commandInput = input;
+    this.commandList = list;
+    var openers = [this.$("command-open"), this.$("command-hint")];
+    openers.forEach(function (button) { if (button) button.addEventListener("click", function () { self.openCommand(); }); });
+    input.addEventListener("input", function () { self.renderCommand(input.value); });
+    input.addEventListener("keydown", function (event) {
+      if (event.key === "ArrowDown") { event.preventDefault(); self.moveCommand(1); }
+      else if (event.key === "ArrowUp") { event.preventDefault(); self.moveCommand(-1); }
+      else if (event.key === "Enter") { event.preventDefault(); self.chooseCommand(); }
+    });
+    list.addEventListener("click", function (event) {
+      var button = event.target.closest ? event.target.closest(".command-item") : null;
+      if (!button) return;
+      self.commandIndex = Number(button.getAttribute("data-index")) || 0;
+      self.chooseCommand();
+    });
+    dialog.addEventListener("click", function (event) { if (event.target === dialog) dialog.close(); });
+    dialog.addEventListener("close", function () { self.commandOpened = false; });
+  };
+
+  App.prototype.openCommand = function () {
+    var dialog = this.commandDialog, input = this.commandInput;
+    if (!dialog || !input) return;
+    this.commandOpened = true;
+    this.commandIndex = 0;
+    input.value = "";
+    this.renderCommand("");
+    if (typeof dialog.showModal === "function") {
+      if (!dialog.open) dialog.showModal();
+    } else if (!dialog.hasAttribute("open")) dialog.setAttribute("open", "");
+    input.focus();
+  };
+
+  App.prototype.commandCatalog = function () {
+    var self = this, m = this.m;
+    var out = [];
+    var maps = [
+      { id: "now", title: "Обзор", meta: "Состояние движка и живые поиски", icon: "i-overview" },
+      { id: "families", title: "Семейства", meta: "Подтверждённые суффиксы и исключения", icon: "i-families" },
+      { id: "boxes", title: "Коробки", meta: "Поведение блокировок, планы и привязки", icon: "i-boxes" },
+      { id: "telegram", title: "Telegram-туннель", meta: "Служба, маршруты DC1–DC5 и Workers", icon: "i-telegram" },
+      { id: "updates", title: "Обновления", meta: "Выпуски, автообновление и заметки", icon: "i-updates" },
+      { id: "diagnostics", title: "Диагностика", meta: "Цепочка движка, память и подборы", icon: "i-diagnostics" }
+    ];
+    maps.forEach(function (item) {
+      out.push({ kind: "route", route: item.id, title: item.title, meta: item.meta, icon: item.icon });
+    });
+    if (!m) return out;
+    m.groups.forEach(function (group) {
+      var evidenceCount = num(group.evidence_count) || list(group.evidence).length;
+      out.push({
+        kind: "family", route: "families", filter: str(group.suffix),
+        title: "*." + str(group.suffix),
+        meta: "Семейство · " + count(evidenceCount, "домен", "домена", "доменов") + " · " + shapeLabel(group.shape, group.transport),
+        icon: "i-families"
+      });
+    });
+    m.boxes.forEach(function (box, index) {
+      var sigs = list(box.signals);
+      var first = sigs.length ? (str(sigs[0].human) || str(sigs[0].kind)) : "приметы не записаны";
+      out.push({
+        kind: "box", route: "boxes", boxId: str(box.id),
+        title: "Коробка " + (index + 1) + " · " + str(box.id),
+        meta: first + " · " + count(list(box.bindings).length, "цель", "цели", "целей"),
+        icon: "i-boxes"
+      });
+    });
+    return out;
+  };
+
+  App.prototype.renderCommand = function (query) {
+    var doc = this.doc, list = this.commandList, empty = this.$("command-empty");
+    if (!list) return;
+    var needle = normName(query || "");
+    var items = this.commandCatalog().filter(function (item) {
+      if (!needle) return true;
+      return normName(item.title + " " + item.meta).indexOf(needle) >= 0 ||
+        normName(item.filter || "").indexOf(needle) >= 0;
+    }).slice(0, 14);
+    this.commandItems = items;
+    if (this.commandIndex >= items.length) this.commandIndex = Math.max(0, items.length - 1);
+    list.replaceChildren();
+    if (empty) empty.hidden = items.length > 0;
+    items.forEach(function (item, index) {
+      var button = el(doc, "button", "command-item");
+      button.type = "button";
+      button.setAttribute("role", "option");
+      button.setAttribute("data-index", String(index));
+      button.setAttribute("aria-selected", String(index === this.commandIndex));
+      var svg = doc.createElementNS(SVG, "svg");
+      svg.setAttribute("viewBox", "0 0 24 24");
+      svg.setAttribute("aria-hidden", "true");
+      var use = doc.createElementNS(SVG, "use");
+      use.setAttribute("href", "#" + item.icon);
+      svg.appendChild(use);
+      var copy = el(doc, "span", "command-item-copy");
+      add(copy, el(doc, "strong", "", item.title), el(doc, "small", "", item.meta));
+      var key = el(doc, "kbd", "", item.kind === "route" ? "→" : "↵");
+      add(button, svg, copy, key);
+      list.appendChild(button);
+    }, this);
+    this.markCommand();
+  };
+
+  App.prototype.markCommand = function () {
+    if (!this.commandList) return;
+    var buttons = this.commandList.children;
+    for (var i = 0; i < buttons.length; i++) {
+      var selected = i === this.commandIndex;
+      buttons[i].setAttribute("aria-selected", String(selected));
+      if (selected && buttons[i].scrollIntoView) buttons[i].scrollIntoView({ block: "nearest" });
+    }
+  };
+
+  App.prototype.moveCommand = function (step) {
+    if (!this.commandItems.length) return;
+    this.commandIndex = (this.commandIndex + step + this.commandItems.length) % this.commandItems.length;
+    this.markCommand();
+  };
+
+  App.prototype.chooseCommand = function () {
+    var item = this.commandItems[this.commandIndex];
+    if (!item) return;
+    if (this.commandDialog) this.commandDialog.close();
+    if (item.kind === "route") { this.navigate(item.route); return; }
+    if (item.kind === "family") {
+      var self = this;
+      this.filter = normName(item.filter);
+      var input = this.$("filter");
+      if (input) input.value = item.filter;
+      var clear = this.$("filter-clear");
+      if (clear) clear.hidden = false;
+      this.renderCatalog(true);
+      this.navigate("families");
+      this.win.setTimeout(function () { self.focusFamily(item.filter); }, 80);
+      return;
+    }
+    if (item.kind === "box") {
+      this.navigate("boxes");
+      this.showBox(item.boxId);
+    }
+  };
+
+  App.prototype.focusFamily = function (suffix) {
+    var self = this, doc = this.doc;
+    var locate = function () {
+      var cards = doc.querySelectorAll("#families-body .family-card");
+      for (var i = 0; i < cards.length; i++) {
+        var name = cards[i].querySelector(".family-name");
+        if (name && normName(name.textContent.replace("*.", "")) === normName(suffix)) {
+          cards[i].open = true;
+          cards[i].scrollIntoView({ block: "center", behavior: Motion.on() ? "smooth" : "auto" });
+          return true;
+        }
+      }
+      return false;
+    };
+    if (!locate()) {
+      this.filter = "";
+      var input = this.$("filter");
+      if (input) input.value = "";
+      this.renderCatalog(true);
+      this.win.setTimeout(locate, 60);
+    }
+  };
+
   App.prototype.start = function () {
     var self = this, doc = this.doc, win = this.win;
     this.trackMastHeight();
     var input = this.$("filter");
+    var clear = this.$("filter-clear");
     input.addEventListener("input", function () {
       self.filter = input.value.trim().toLowerCase();
+      if (clear) clear.hidden = !self.filter;
       var flip = Motion.on() && Motion.Flip;
-      var state = flip ? Motion.Flip.getState(".ftag-wrap, .crate") : null;
+      var state = flip ? Motion.Flip.getState(".family-card, .box-card") : null;
       self.renderCatalog(true);
       if (state) {
-        /* Оставшиеся бирки и коробки съезжаются; появившиеся проявляются. */
+        /* Оставшиеся карточки съезжаются; найденные проявляются на месте. */
         Motion.track(Motion.Flip.from(state, {
-          targets: doc.querySelectorAll(".ftag-wrap, .crate"),
-          duration: 0.5, ease: "power3.inOut", absolute: false, nested: true, scale: true, simple: true,
-          onEnter: function (els) { return Motion.g.fromTo(els, { autoAlpha: 0, scale: 0.94 }, { autoAlpha: 1, scale: 1, duration: 0.4, clearProps: "transform,opacity,visibility" }); }
+          targets: doc.querySelectorAll(".family-card, .box-card"),
+          duration: 0.28, ease: "power3.inOut", absolute: false, nested: true, scale: true, simple: true,
+          onEnter: function (els) { return Motion.g.fromTo(els, { autoAlpha: 0, y: 8 }, { autoAlpha: 1, y: 0, duration: 0.34, clearProps: "transform,opacity,visibility" }); }
         }));
       }
+    });
+    if (clear) clear.addEventListener("click", function () {
+      input.value = "";
+      self.filter = "";
+      clear.hidden = true;
+      self.renderCatalog(true);
+      input.focus();
     });
     doc.addEventListener("visibilitychange", function () {
       if (doc.hidden) {
@@ -386,12 +698,17 @@
     });
     doc.addEventListener("keydown", function (e) {
       if (e.key === "Escape" && self.armed) { self.armed = null; self.renderActions(); }
-      if (e.key === "/" && doc.activeElement && doc.activeElement.tagName !== "INPUT") {
+      if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K")) {
+        e.preventDefault();
+        self.openCommand();
+        return;
+      }
+      if (e.key === "/" && doc.activeElement && doc.activeElement.tagName !== "INPUT" && doc.activeElement.tagName !== "TEXTAREA") {
         e.preventDefault(); input.focus();
       }
     });
-    this.spy();
-    this.navMotion();
+    this.initRouter();
+    this.initCommand();
     this.drawMark();
     this.poll();
     this.initUpdates();
@@ -567,6 +884,13 @@
     write("update-reason", reason).hidden = !reason;
     write("update-checked", num(s.checked_utc) > 0 ? "проверено " + localTime(num(s.checked_utc) * 1000) : "проверки ещё не было");
     this.$("update-release").hidden = !newer;
+    var empty = this.$("update-empty");
+    if (empty) {
+      empty.hidden = !!newer;
+      empty.textContent = absent ? "Автообновление не подключено. Эта установка обновляется командой установки."
+        : s.never ? "Проверьте обновления, чтобы увидеть описание нового выпуска."
+          : "Новых выпусков нет. Установленная версия актуальна.";
+    }
     write("update-version", newer ? "Что изменилось в " + (str(latest.version) || latest.release_id) : "");
     write("update-notes-text", str(latest && latest.notes) || "Описание изменений не опубликовано.");
     var install = this.$("update-install");
@@ -579,7 +903,7 @@
     this.$("update-progress").hidden = true;
     write("update-progress-text", "").hidden = true;
     var auto = this.$("update-auto");
-    if (!(pending && /^auto-/.test(pending.action))) auto.checked = s.auto !== false;
+    if (!(pending && /^auto-/.test(pending.action))) auto.checked = !absent && s.auto !== false;
     auto.disabled = absent || !!action || !!pending;
     var schedule = absent ? "Станет доступно, когда автообновление будет подключено" :
       "Ставит новые выпуски в 03:00–05:00 по времени роутера" + (s.auto === false ? " · выключено: ночью только проверка" : "");
@@ -589,6 +913,179 @@
     write("update-result", result).hidden = !result;
     var nav = write("nav-updates", absent ? "" : newer ? "новая" : action ? "…" : tone ? "!" : "");
     nav.setAttribute("data-tone", tone || "idle");
+    var meta = this.$("updates-meta");
+    if (meta) {
+      var metaKey = JSON.stringify([absent, current, newer, str(latest && latest.version), tone, action]);
+      if (meta.__r2oKey !== metaKey) {
+        meta.__r2oKey = metaKey;
+        meta.replaceChildren();
+        var chip = el(this.doc, "span", "meta-chip", absent ? "без автообновления" : "версия " + (current || "—"));
+        if (newer) { chip.setAttribute("data-tone", "live"); chip.textContent = "доступна " + (str(latest.version) || latest.release_id); }
+        if (tone) chip.setAttribute("data-tone", tone);
+        meta.appendChild(chip);
+      }
+    }
+    if (this.m) this.renderOverview(this.m);
+  };
+
+  App.prototype.telegramState = function (m) {
+    if (!m) return "stopped";
+    var snap = m.snap, stats = snap.telegram_stats;
+    var st = TG[snap.telegram_status] ? snap.telegram_status : (snap.telegram_configured ? "stopped" : "not_configured");
+    var routeFailure = (st === "connected" || st === "local") && stats && global.R2oTelegramFlow &&
+      global.R2oTelegramFlow.hasCurrentRouteFailure(stats);
+    return routeFailure ? "unavailable" : st;
+  };
+
+  App.prototype.renderOverview = function (m) {
+    var doc = this.doc;
+    var metrics = this.$("overview-metrics");
+    if (!metrics) return;
+    var st = this.telegramState(m);
+    var info = TG[st] || TG.stopped;
+    var stages = list(m.snap.stages);
+    var broken = stages.filter(function (stage) { return !stage.built; }).length;
+    var update = this.updateStatus || {};
+    var newer = update.latest && update.latest.release_id && update.latest.release_id !== str(update.current);
+    var bindings = 0;
+    m.boxes.forEach(function (box) { bindings += list(box.bindings).length; });
+    var meas = m.k.measurements || {};
+    var activeMeasures = num(meas.active);
+    var limitMeasures = num(meas.limit);
+    var freePct = num(meas.free_pct);
+    var confirms = num(m.k.confirms) || 0;
+    var probes = num(m.k.probes_used) || 0;
+    var unfit = num(m.k.client_unfit);
+
+    var panel = this.$("status-panel");
+    if (panel) panel.setAttribute("data-tone", m.tone);
+    var statusLamp = this.$("status-lamp");
+    if (statusLamp) statusLamp.setAttribute("data-tone", m.lamp);
+    var statusState = this.$("status-state");
+    if (statusState && statusState.textContent !== m.state) statusState.textContent = m.state;
+
+    var metricKey = JSON.stringify([m.hunting, m.queued.length, activeMeasures, limitMeasures, freePct, confirms, probes, unfit, broken]);
+    if (metrics.__r2oKey !== metricKey) {
+      metrics.__r2oKey = metricKey;
+      metrics.replaceChildren();
+      var measureValue = activeMeasures !== null && limitMeasures !== null ? activeMeasures + " / " + limitMeasures : "—";
+      var measureNote = freePct !== null ? "свободно CPU " + freePct + "%" : "лимит не указан";
+      var items = [
+        { route: "now", label: "Поиски", value: String(m.hunting), note: m.queued.length ? "в очереди " + m.queued.length : "очередь пуста", tone: m.hunting ? "live" : "" },
+        { route: "now", label: "Замеры", value: measureValue, note: measureNote, tone: "" },
+        { route: "now", label: "Очередь", value: String(m.queued.length), note: m.queued.length ? "ждут свободного слота" : "нет ожидающих", tone: m.queued.length ? "warn" : "" },
+        { route: "families", label: "Подтверждения", value: String(confirms), note: "за сессию", tone: confirms ? "ok" : "" },
+        { route: "diagnostics", label: "Зонды", value: String(probes), note: "отправлено", tone: "" },
+        { route: "diagnostics", label: "План не подошёл", value: unfit === null ? "—" : String(unfit), note: "клиент не принял", tone: unfit ? "warn" : "" }
+      ];
+      items.forEach(function (item) {
+        var card = item.route === "now" ? el(doc, "div", "metric-card") : el(doc, "a", "metric-card");
+        if (item.route !== "now") card.href = "#" + item.route;
+        card.setAttribute("data-route", item.route);
+        var top = el(doc, "div", "metric-top");
+        add(top, el(doc, "span", "metric-label", item.label));
+        var value = el(doc, "div", "metric-value", item.value);
+        value.setAttribute("data-tone", item.tone || "idle");
+        add(card, top, value, el(doc, "div", "metric-note", item.note));
+        metrics.appendChild(card);
+      });
+      if (Motion.on() && metrics.children.length) {
+        Motion.g.fromTo(metrics.children, { y: 4, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.2, stagger: 0.02, ease: "power2.out", clearProps: "all" });
+      }
+    }
+
+    var services = this.$("overview-services");
+    if (services) {
+      var updateState = newer ? "доступна " + (str(update.latest.version) || update.latest.release_id) :
+        update.absent ? "не подключено" : update.never || !update.checked_utc ? "не проверялось" : "актуальна";
+      var updateTone = newer ? "live" : update.check_ok === false || update.last_ok === false ? "warn" : "";
+      var diagState = broken ? "требует внимания" : "цепочка собрана";
+      var serviceKey = JSON.stringify([st, info.word, updateState, updateTone, broken, m.snap.telegram_stats]);
+      if (services.__r2oKey !== serviceKey) {
+        services.__r2oKey = serviceKey;
+        services.replaceChildren();
+        [
+          { route: "telegram", icon: "i-telegram", title: "Telegram-туннель", note: info.note, state: info.word, tone: st === "connected" || st === "local" ? "live" : info.lamp === "bad" ? "bad" : info.lamp === "warn" ? "warn" : "" },
+          { route: "updates", icon: "i-updates", title: "Обновления", note: updateState, state: newer ? "новая" : "проверка", tone: updateTone },
+          { route: "diagnostics", icon: "i-diagnostics", title: "Диагностика", note: broken ? count(broken, "звено", "звена", "звеньев") + " без подтверждения" : "все звенья на месте", state: broken ? "!" + broken : "ок", tone: broken ? "warn" : "ok" }
+        ].forEach(function (item) {
+          var card = el(doc, "a", "service-card");
+          card.href = "#" + item.route;
+          if (item.tone) card.setAttribute("data-tone", item.tone);
+          var icon = el(doc, "span", "service-icon");
+          var svg = doc.createElementNS(SVG, "svg");
+          svg.setAttribute("viewBox", "0 0 24 24");
+          svg.setAttribute("aria-hidden", "true");
+          var use = doc.createElementNS(SVG, "use");
+          use.setAttribute("href", "#" + item.icon);
+          svg.appendChild(use);
+          icon.appendChild(svg);
+          var copy = el(doc, "span", "service-copy");
+          add(copy, el(doc, "strong", "", item.title), el(doc, "small", "", item.note));
+          var state = el(doc, "span", "service-state", item.state);
+          var arrow = doc.createElementNS(SVG, "svg");
+          arrow.setAttribute("class", "service-arrow");
+          arrow.setAttribute("viewBox", "0 0 24 24");
+          arrow.setAttribute("aria-hidden", "true");
+          var arrowUse = doc.createElementNS(SVG, "use");
+          arrowUse.setAttribute("href", "#i-arrow");
+          arrow.appendChild(arrowUse);
+          add(card, icon, copy, state, arrow);
+          services.appendChild(card);
+        });
+      }
+    }
+
+    var catalog = this.$("overview-catalog");
+    if (catalog) {
+      var catalogKey = JSON.stringify([m.groups.length, m.boxes.length, bindings, m.k.catalog_at]);
+      if (catalog.__r2oKey !== catalogKey) {
+        catalog.__r2oKey = catalogKey;
+        catalog.replaceChildren();
+        var grid = el(doc, "dl", "catalog-grid");
+        var catalogAt = parseTime(m.k.catalog_at);
+        var catalogAge = catalogAt ? this.serverNow() - catalogAt : null;
+        var catalogAgeText = catalogAge === null ? "—"
+          : catalogAge < 45000 ? "сейчас"
+            : catalogAge < 3600000 ? Math.max(1, Math.round(catalogAge / 60000)) + " мин"
+              : Math.round(catalogAge / 3600000) + " ч";
+        [
+          ["Семейства", String(m.groups.length)],
+          ["Коробки", String(m.boxes.length)],
+          ["Цели", String(bindings)],
+          ["Обновлён", catalogAgeText]
+        ].forEach(function (item) {
+          var cell = el(doc, "div", "catalog-cell");
+          add(cell, el(doc, "dt", "", item[0]), el(doc, "dd", "", item[1]));
+          grid.appendChild(cell);
+        });
+        var actions = el(doc, "div", "catalog-actions");
+        [["families", "Семейства", String(m.groups.length)], ["boxes", "Коробки", String(m.boxes.length)]].forEach(function (item) {
+          var link = el(doc, "a", "catalog-link");
+          link.href = "#" + item[0];
+          add(link, el(doc, "span", "", item[1]), el(doc, "span", "", item[2]));
+          actions.appendChild(link);
+        });
+        catalog.append(grid, actions);
+      }
+    }
+
+    var workload = this.$("workload-meta");
+    if (workload) {
+      var text = m.hunting ? m.hunting + " в работе" + (m.queued.length ? " · " + m.queued.length + " ждут" : "") : "очередь пуста";
+      if (workload.textContent !== text) workload.textContent = text;
+    }
+    var tm = this.$("telegram-meta");
+    if (tm) {
+      var tgKey = JSON.stringify([st, info.word]);
+      if (tm.__r2oKey !== tgKey) {
+        tm.__r2oKey = tgKey;
+        tm.replaceChildren();
+        var chip = el(doc, "span", "meta-chip", info.word);
+        chip.setAttribute("data-tone", st === "connected" || st === "local" ? "live" : info.lamp === "bad" ? "bad" : info.lamp === "warn" ? "warn" : "");
+        tm.appendChild(chip);
+      }
+    }
   };
 
   App.prototype.serverNow = function () {
@@ -616,17 +1113,19 @@
     this.renderCatalog(false);
     this.renderTelegram(m);
     this.renderDiagnostics(m);
+    this.renderOverview(m);
     this.renderNav(m);
     if (!this.arrived) {
       this.arrived = true;
       if (Motion.on()) {
         var d = this.doc;
         var rows = [].slice.call(d.querySelectorAll("#searches > li")).slice(0, 4);
-        Motion.g.timeline({ defaults: { ease: "power4.out", clearProps: "transform,opacity,visibility" } })
-          .from("#now-title", { y: 36, autoAlpha: 0, duration: 0.7 })
-          .from("#now-lede", { y: 16, autoAlpha: 0, duration: 0.55 }, "-=0.5")
-          .from(".slot-cell", { scale: 0.3, autoAlpha: 0, duration: 0.4, stagger: 0.05, ease: "back.out(2.4)" }, "-=0.4")
-          .from(rows, { y: 24, autoAlpha: 0, duration: 0.6, stagger: 0.08 }, "-=0.35");
+        var cells = [].slice.call(d.querySelectorAll(".slot-cell"));
+        var intro = Motion.g.timeline({ defaults: { ease: "power4.out", clearProps: "transform,opacity,visibility" } })
+          .from("#now-title", { y: 22, autoAlpha: 0, duration: 0.45 })
+          .from("#now-lede", { y: 10, autoAlpha: 0, duration: 0.35 }, "-=0.32");
+        if (cells.length) intro.from(cells, { scale: 0.3, autoAlpha: 0, duration: 0.36, stagger: 0.045, ease: "back.out(2.4)" }, "-=0.38");
+        if (rows.length) intro.from(rows, { y: 12, autoAlpha: 0, duration: 0.35, stagger: 0.05 }, "-=0.22");
       }
     }
   };
@@ -647,8 +1146,15 @@
       text.__r2oKey = stateKey;
       text.replaceChildren(doc.createTextNode(m.state), el(doc, "small", "", m.stateDetail));
     }
-    doc.title = (m.hunting ? "● " : "") + "R2O — " + m.state;
+    this.updateTitle();
     this.renderActions();
+    var rail = this.$("rail-status");
+    if (rail) {
+      var railLamp = rail.querySelector(".lamp");
+      if (railLamp) railLamp.setAttribute("data-tone", m.lamp);
+      var railText = this.$("rail-status-text");
+      if (railText && railText.textContent !== m.state) railText.textContent = m.state;
+    }
   };
 
   App.prototype.renderActions = function () {
@@ -692,14 +1198,14 @@
     if (flipState) {
       /* Кнопки перетекают: «Остановить» ↔ «Остановить движок?», «стоп» ↔ «запуск». */
       Motion.track(Motion.Flip.from(flipState, {
-        targets: box.children, duration: 0.45, ease: "power3.inOut", scale: false, simple: true,
+        targets: box.children, duration: 0.25, ease: "power3.inOut", scale: false, simple: true,
         onEnter: function (els) { return Motion.g.fromTo(els, { autoAlpha: 0, scale: 0.85 }, { autoAlpha: 1, scale: 1, duration: 0.35, clearProps: "transform,opacity,visibility" }); }
       }));
       if (global.MorphSVGPlugin) {
         for (var ni = 0; ni < box.children.length; ni++) {
           var np = box.children[ni].querySelector && box.children[ni].querySelector("svg path");
           var was = oldIcons[box.children[ni].getAttribute("data-flip-id")];
-          if (np && was && was !== np.getAttribute("d")) Motion.g.from(np, { morphSVG: was, duration: 0.5, ease: "power2.inOut" });
+          if (np && was && was !== np.getAttribute("d")) Motion.g.from(np, { morphSVG: was, duration: 0.3, ease: "power2.inOut" });
         }
       }
     }
@@ -1026,7 +1532,7 @@
     n.setAttribute("data-tone", tone);
     n.replaceChildren();
     add.apply(null, [n].concat(parts));
-    if (appearing && Motion.on()) Motion.g.from(n, { height: 0, paddingTop: 0, paddingBottom: 0, autoAlpha: 0, duration: 0.4, clearProps: "all" });
+    if (appearing && Motion.on()) Motion.g.from(n, { height: 0, paddingTop: 0, paddingBottom: 0, autoAlpha: 0, duration: 0.28, clearProps: "all" });
   };
 
   /* ─── Сейчас ─── */
@@ -1047,11 +1553,11 @@
         /* Тот же заголовок, другое число: число прокручивается. */
         apply();
         var em = title.lastChild, n = { v: +from[1] };
-        Motion.g.to(n, { v: +to[1], duration: 0.6, ease: "power2.out", onUpdate: function () {
+        Motion.g.to(n, { v: +to[1], duration: 0.4, ease: "power2.out", onUpdate: function () {
           var v = Math.round(n.v);
           em.textContent = count(v, "поиск", "поиска", "поисков");
         } });
-        Motion.g.fromTo(em, { y: -6 }, { y: 0, duration: 0.5, ease: "back.out(3)" });
+        Motion.g.fromTo(em, { y: -5 }, { y: 0, duration: 0.32, ease: "back.out(3)" });
       } else {
         /* Новая фраза собирается по буквам; разбиение снимается по окончании. */
         Motion.g.timeline()
@@ -1059,15 +1565,21 @@
           .add(function () {
             apply();
             Motion.g.set(title, { y: 0, autoAlpha: 1 });
-            if (!global.SplitText) { Motion.g.from(title, { y: 22, autoAlpha: 0, duration: 0.5, clearProps: "all" }); return; }
+            if (!global.SplitText) { Motion.g.from(title, { y: 16, autoAlpha: 0, duration: 0.34, clearProps: "all" }); return; }
             var split = new global.SplitText(title, { type: "words,chars" });
-            Motion.g.from(split.chars, { yPercent: 70, autoAlpha: 0, rotation: 4, duration: 0.55, stagger: 0.018, ease: "power4.out",
+            Motion.g.from(split.chars, { yPercent: 70, autoAlpha: 0, rotation: 4, duration: 0.4, stagger: 0.014, ease: "power4.out",
               onComplete: function () { split.revert(); Motion.g.set(title, { clearProps: "all" }); } });
           });
       }
     }
     title.setAttribute("data-tone", m.tone);
     this.$("now-lede").textContent = m.lede;
+    var panel = this.$("status-panel");
+    if (panel) panel.setAttribute("data-tone", m.tone);
+    var statusLamp = this.$("status-lamp");
+    if (statusLamp) statusLamp.setAttribute("data-tone", m.lamp);
+    var statusState = this.$("status-state");
+    if (statusState && statusState.textContent !== m.state) statusState.textContent = m.state;
 
     var slots = this.$("slots");
     var meas = m.k.measurements;
@@ -1125,10 +1637,10 @@
       for (var ci = 0; ci < cellsNow.length; ci++) {
         if (ci >= Math.min(wasActive || 0, nowActive) && ci < Math.max(wasActive || 0, nowActive)) (ci < nowActive ? lit : dim).push(cellsNow[ci]);
       }
-      if (lit.length) Motion.g.from(lit, { scale: 0.2, autoAlpha: 0, duration: 0.45, stagger: 0.07, ease: "back.out(2.4)", clearProps: "all" });
+      if (lit.length) Motion.g.from(lit, { scale: 0.2, autoAlpha: 0, duration: 0.3, stagger: 0.05, ease: "back.out(2.4)", clearProps: "all" });
       if (dim.length) {
-        var sig = global.getComputedStyle(doc.documentElement).getPropertyValue("--signal").trim();
-        Motion.g.from(dim, { backgroundColor: sig, duration: 0.6, ease: "power2.out", clearProps: "all" });
+        var sig = global.getComputedStyle(doc.documentElement).getPropertyValue("--acc").trim() || "#7fd0d4";
+        Motion.g.from(dim, { backgroundColor: sig, duration: 0.35, ease: "power2.out", clearProps: "all" });
       }
     }
     slots.__r2oActive = nowActive === null ? undefined : nowActive;
@@ -1214,22 +1726,22 @@
         for (var k = 0; k < listNode.children.length; k++) if (listNode.children[k] !== row && !listNode.children[k].__leaving) rest.push(listNode.children[k]);
         var st = rest.length ? Motion.Flip.getState(rest) : null;
         if (row.parentNode) row.parentNode.removeChild(row);
-        if (st) Motion.track(Motion.Flip.from(st, { duration: 0.5, ease: "power3.inOut", scale: true, simple: true }));
+        if (st) Motion.track(Motion.Flip.from(st, { duration: 0.3, ease: "power3.inOut", scale: true, simple: true }));
       } })
-        .to(row, { x: done ? 0 : 36, y: done ? 18 : 0, autoAlpha: 0, duration: 0.4, ease: "power2.in" });
+        .to(row, { x: done ? 0 : 36, y: done ? 18 : 0, autoAlpha: 0, duration: 0.22, ease: "power2.in" });
     });
     if (flipState) {
       /* Переставляемые строки «приподнимаются» и проезжают поверх соседних, не сквозь них. */
       var movers = stable.filter(function (r) { return !r.__leaving; });
       movers.forEach(function (r) { r.__goesUp = r.getBoundingClientRect().top < r.__oldTop - 1; });
       Motion.track(Motion.Flip.from(flipState, {
-        duration: 0.6, ease: "power3.inOut", scale: true, simple: true, targets: movers,
+        duration: 0.34, ease: "power3.inOut", scale: true, simple: true, targets: movers,
         onStart: function () { movers.forEach(function (r) { r.classList.add("is-moving"); r.style.zIndex = r.__goesUp ? 3 : 2; }); },
         onComplete: function () { movers.forEach(function (r) { r.classList.remove("is-moving"); r.style.zIndex = ""; }); }
       }));
     }
     if (entered.length && !firstLive) {
-      Motion.g.fromTo(entered, { y: 28, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.6, stagger: 0.08, ease: "power4.out", clearProps: "transform,opacity,visibility" });
+      Motion.g.fromTo(entered, { y: 18, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.34, stagger: 0.05, ease: "power4.out", clearProps: "transform,opacity,visibility" });
     }
   };
 
@@ -1255,22 +1767,88 @@
     for (var i = 0; i < waits.length; i++) waits[i].textContent = waits[i].__since ? "ждёт " + clock(now - waits[i].__since) : "";
   };
 
+  function searchArc(cx, cy, radius, start, end) {
+    var rad = function (deg) { return (deg - 90) * Math.PI / 180; };
+    var sx = cx + radius * Math.cos(rad(start)), sy = cy + radius * Math.sin(rad(start));
+    var ex = cx + radius * Math.cos(rad(end)), ey = cy + radius * Math.sin(rad(end));
+    var large = Math.abs(end - start) > 180 ? 1 : 0;
+    return "M" + sx.toFixed(2) + " " + sy.toFixed(2) + " A" + radius + " " + radius + " 0 " + large + " 1 " + ex.toFixed(2) + " " + ey.toFixed(2);
+  }
+
+  /* Прибор подбора: семь сегментов, один центральный знак этапа и живой
+     пунктир только на текущем сегменте. Движение показывает, где именно
+     идёт работа, а не украшает карточку. */
+  function searchVisual(doc) {
+    var wrap = el(doc, "div", "search-visual");
+    wrap.setAttribute("aria-hidden", "true");
+    var svg = svgEl(doc, "svg", { viewBox: "0 0 64 64" }, "probe-dial");
+    var segments = svgEl(doc, "g", {}, "probe-segments");
+    var segmentPaths = [];
+    for (var index = 0; index < 7; index += 1) {
+      var start = index * (360 / 7) + 3.2;
+      var end = (index + 1) * (360 / 7) - 3.2;
+      var path = searchArc(32, 32, 25, start, end);
+      segmentPaths.push(path);
+      var segment = svgEl(doc, "path", { d: path }, "probe-segment");
+      segment.setAttribute("data-stage", String(index));
+      segments.appendChild(segment);
+    }
+    svg.appendChild(segments);
+    var sweep = svgEl(doc, "g", {}, "probe-sweep");
+    sweep.appendChild(svgEl(doc, "path", { d: "M32 32 L32 7 A25 25 0 0 1 48 15 Z" }));
+    svg.appendChild(sweep);
+    var glyphs = svgEl(doc, "g", {}, "probe-glyphs");
+    TRACK_ICONS.forEach(function (d, index) {
+      var group = svgEl(doc, "g", {}, "probe-glyph");
+      group.setAttribute("data-glyph", String(index));
+      group.appendChild(svgEl(doc, "path", { d: d, transform: "translate(22.8 22.8) scale(1.15)" }));
+      glyphs.appendChild(group);
+    });
+    var voice = svgEl(doc, "g", {}, "probe-glyph");
+    voice.setAttribute("data-glyph", "voice");
+    voice.appendChild(svgEl(doc, "path", { d: VOICE_ICONS[0], transform: "translate(22.8 22.8) scale(1.15)" }));
+    glyphs.appendChild(voice);
+    svg.appendChild(glyphs);
+    var pulse = svgEl(doc, "circle", { cx: "32", cy: "32", r: "24" }, "probe-pulse");
+    svg.appendChild(pulse);
+    var code = el(doc, "span", "search-stage-code", "—");
+    wrap.append(svg, code);
+    wrap.__code = code;
+    wrap.__segments = segments;
+    wrap.__segmentPaths = segmentPaths;
+    wrap.__glyphs = glyphs;
+    wrap.__pulse = pulse;
+    return wrap;
+  }
+
   App.prototype.searchRow = function (s) {
     var doc = this.doc;
     var li = el(doc, "li", "search");
     li.__parts = {
+      visual: searchVisual(doc),
       target: el(doc, "h2", "search-target"),
       meta: el(doc, "div", "search-meta"),
       clock: el(doc, "div", "search-clock"),
       phase: el(doc, "p", "search-phase"),
       question: el(doc, "p", "search-question"),
-      track: el(doc, "div", "track")
+      plan: el(doc, "details", "search-plan-details"),
+      planSummary: el(doc, "span", "search-plan-summary"),
+      planBody: el(doc, "p", "search-plan-body"),
+      track: el(doc, "div", "track"),
+      trackNote: el(doc, "p", "track-note")
     };
+    li.__parts.plan.hidden = true;
+    var planHead = el(doc, "summary");
+    planHead.appendChild(li.__parts.planSummary);
+    add(li.__parts.plan, planHead, li.__parts.planBody);
     li.__parts.track.setAttribute("aria-hidden", "true");
     li.__parts.fill = el(doc, "span", "track-fill");
     li.__parts.puck = el(doc, "span", "track-puck");
+    li.__parts.sweep = el(doc, "span", "search-sweep");
+    li.__parts.sweepInner = el(doc, "span", "");
+    li.__parts.sweep.appendChild(li.__parts.sweepInner);
     li.__parts.question.hidden = true;
-    add(li, li.__parts.target, li.__parts.clock, li.__parts.meta, li.__parts.phase, li.__parts.question, li.__parts.track);
+    add(li, li.__parts.visual, li.__parts.target, li.__parts.clock, li.__parts.meta, li.__parts.phase, li.__parts.question, li.__parts.plan, li.__parts.sweep, li.__parts.track, li.__parts.trackNote);
     void s;
     return li;
   };
@@ -1297,30 +1875,84 @@
     li.__counters = counters.join(" · ");
     this.updateClock(li);
 
-    var phaseText = phase.charAt(0).toUpperCase() + phase.slice(1) + (s.candidate ? " — " + s.candidate : "");
+    var phaseText = phase.charAt(0).toUpperCase() + phase.slice(1);
     if (p.phase.textContent !== phaseText) {
       if (p.phase.textContent && Motion.on()) {
         Motion.g.timeline()
           .to(p.phase, { y: -8, autoAlpha: 0, duration: 0.16, ease: "power2.in" })
           .add(function () { p.phase.textContent = phaseText; })
-          .fromTo(p.phase, { y: 10, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.45, ease: "power3.out", clearProps: "transform,opacity,visibility" });
+          .fromTo(p.phase, { y: 8, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.3, ease: "power3.out", clearProps: "transform,opacity,visibility" });
       } else {
         p.phase.textContent = phaseText;
       }
+    }
+    var candidate = str(s.candidate);
+    p.plan.hidden = !candidate;
+    if (candidate) {
+      var gist = candidateGist(candidate);
+      if (p.planSummary.textContent !== gist) p.planSummary.textContent = gist;
+      if (p.planSummary.title !== candidate) p.planSummary.title = candidate;
+      if (p.planBody.textContent !== candidate) p.planBody.textContent = candidate;
+      var planHead = p.plan.querySelector("summary");
+      if (planHead && planHead.getAttribute("aria-label") !== "План: " + gist) planHead.setAttribute("aria-label", "План: " + gist);
     }
     var classifying = s.phase === TRACK[2].phases[0] && !!str(s.question);
     p.question.hidden = !classifying;
     var qText = classifying ? "Вопрос коробке: " + str(s.question) : "";
     if (p.question.textContent !== qText) p.question.textContent = qText;
     var tr = trackFor(s.phase);
+    var stageKey = tr ? (tr.voice ? "voice" : String(tr.at)) : "idle";
+    var oldStage = li.__stage;
+    li.__stage = stageKey;
+    li.setAttribute("data-stage", stageKey);
+    li.setAttribute("data-voice", String(!!tr && tr.voice));
+    if (p.visual && p.visual.__code) {
+      var stageCode = tr ? (tr.voice ? "голос" : ("0" + (tr.at + 1)).slice(-2) + "/" + ("0" + tr.steps.length).slice(-2)) : "—";
+      var codeChanged = p.visual.__code.textContent !== stageCode;
+      if (codeChanged) p.visual.__code.textContent = stageCode;
+      var visualStage = tr ? tr.at : 0;
+      var speeds = ["4.5s", "4s", "2.8s", "4s", "3.4s", "2.2s", "0s"];
+      p.visual.style.setProperty("--probe-speed", tr && !tr.voice ? (speeds[tr.at] || "3.4s") : "3s");
+      var segments = p.visual.__segments.children;
+      for (var si = 0; si < segments.length; si += 1) {
+        segments[si].setAttribute("data-state", si < visualStage ? "past" : si === visualStage ? "now" : "future");
+      }
+      var glyphs = p.visual.__glyphs.children;
+      for (var gi = 0; gi < glyphs.length; gi += 1) {
+        var on = glyphs[gi].getAttribute("data-glyph") === stageKey;
+        glyphs[gi].classList.toggle("is-on", on);
+      }
+      if (oldStage !== undefined && oldStage !== stageKey && Motion.on()) {
+        Motion.g.fromTo(p.visual.__pulse, { scale: .62, opacity: .5 }, {
+          scale: 1.55, opacity: 0, duration: 0.8, ease: "power2.out", svgOrigin: "32 32", clearProps: "opacity,transform"
+        });
+        if (codeChanged) Motion.g.fromTo(p.visual.__code, { y: 2, opacity: 0 }, { y: 0, opacity: 1, duration: 0.24, ease: "power2.out", clearProps: "transform,opacity" });
+        var width = li.getBoundingClientRect().width || 640;
+        Motion.g.killTweensOf(p.sweepInner);
+        Motion.g.fromTo(p.sweepInner, { x: -width * 0.35, opacity: 0 }, { x: width * 0.1, opacity: .7, duration: 0.2, ease: "power2.out" })
+          .to(p.sweepInner, { x: width * 1.1, opacity: 0, duration: 0.5, ease: "power2.in" });
+      }
+    }
     li.setAttribute("data-done", String(!!tr && !tr.voice && tr.at === TRACK.length - 1));
+    if (p.trackNote) {
+      var noteText = tr ? tr.steps[tr.at].label + " · этап " + (tr.at + 1) + " из " + tr.steps.length : "этап не распознан";
+      if (p.trackNote.textContent !== noteText) p.trackNote.textContent = noteText;
+    }
     if (!tr) { p.track.hidden = true; return; }
     p.track.hidden = false;
     var trackKey = (tr.voice ? "v" : "t");
     if (p.track.__r2oKey !== trackKey) {
       p.track.__r2oKey = trackKey;
       p.track.replaceChildren(p.fill, p.puck);
-      tr.steps.forEach(function (step) { p.track.appendChild(el(doc, "span", "track-step", step.label)); });
+      var icons = tr.voice ? VOICE_ICONS : TRACK_ICONS;
+      tr.steps.forEach(function (step, index) {
+        var node = el(doc, "span", "track-step");
+        var iconNode = svgEl(doc, "svg", { viewBox: "0 0 16 16", "aria-hidden": "true" }, "track-icon");
+        iconNode.appendChild(svgEl(doc, "path", { d: icons[index] || "M3 8h10" }));
+        node.appendChild(iconNode);
+        node.appendChild(el(doc, "span", "track-label", step.label));
+        p.track.appendChild(node);
+      });
       p.track.style.setProperty("--steps", String(tr.steps.length));
     }
     var steps = p.track.querySelectorAll(".track-step");
@@ -1335,7 +1967,7 @@
     if (oldAt !== undefined && oldAt !== tr.at && Motion.on()) {
       /* Маркер переезжает к новому этапу; точки загораются, когда он их проходит. */
       var pos = { at: oldAt };
-      p.track.__tween = Motion.g.to(pos, { at: tr.at, duration: 0.9, ease: "power3.inOut", onUpdate: function () {
+      p.track.__tween = Motion.g.to(pos, { at: tr.at, duration: 0.32, ease: "power3.inOut", onUpdate: function () {
         p.track.style.setProperty("--at", String(pos.at));
         paint(pos.at, tr.at);
       } });
@@ -1343,6 +1975,15 @@
     } else {
       p.track.style.setProperty("--at", String(tr.at));
       paint(tr.at, tr.at);
+    }
+    if (oldStage !== undefined && oldStage !== stageKey && Motion.on()) {
+      var currentIcon = p.track.querySelector('.track-step[data-state="now"] .track-icon');
+      if (currentIcon) {
+        Motion.g.fromTo(currentIcon, { scale: .6, autoAlpha: .2 }, {
+          scale: 1, autoAlpha: 1, duration: .38, ease: "back.out(2.2)",
+          transformOrigin: "50% 50%", clearProps: "all"
+        });
+      }
     }
   };
 
@@ -1380,17 +2021,17 @@
     if (!force && key === this.catalogKey) return;
     this.catalogKey = key;
     var self = this;
-    var famBody = this.$("families-body"), famKey = famBody.__r2oKey;
     this.renderFamilies(m);
-    if (famBody.__r2oKey !== famKey && !force) this.swingTags();
-    if (this.renderBoxes(m) === false) this.catalogKey = null;
+    this.renderBoxes(m);
     var families = m.groups.filter(function (g) { return self.familyMatches(g); }).length;
     var bindings = 0;
     m.boxes.forEach(function (b) { list(b.bindings).forEach(function (bd) { if (self.matches(bd.target)) bindings++; }); });
     var c = this.$("filter-count");
     c.textContent = this.filter
-      ? "Найдено: " + count(families, "семейство", "семейства", "семейств") + ", " + count(bindings, "цель", "цели", "целей")
+      ? "Найдено: " + count(families, "семейство", "семейства", "семейств") + " · " + count(bindings, "цель", "цели", "целей")
       : "";
+    var clear = this.$("filter-clear");
+    if (clear) clear.hidden = !this.filter;
   };
 
   App.prototype.familyMatches = function (g) {
@@ -1410,31 +2051,31 @@
         return [e];
       }
       if (!groups.length) return [el(doc, "p", "empty", "Ни одно семейство не подходит под запрос.")];
-      /* Семейство — бирка на общей струне: суффикс, контекст протокола, штамп
-         применения, дерево доменов-доказательств, исключения и коробки с этим планом. */
-      var rail = el(doc, "div", "tag-rail");
-      groups.forEach(function (g, gi) {
+      var cards = [];
+      groups.forEach(function (g) {
         var active = !!(m.linked && g.active);
-        var wrap = el(doc, "div", "ftag-wrap");
-        wrap.setAttribute("data-flip-id", "fam:" + JSON.stringify([g.suffix, g.family, g.transport, g.shape, g.probe_path || "/", g.ech_origin || ""]));
-        wrap.setAttribute("data-active", String(active));
-        var swing = el(doc, "div", "ftag-swing");
-        swing.appendChild(el(doc, "span", "ftag-string"));
-        wrap.appendChild(swing);
-        var card = el(doc, "article", "ftag");
-        card.appendChild(el(doc, "span", "ftag-eyelet"));
-        var name = el(doc, "h3", "ftag-name");
+        var fid = "fam:" + JSON.stringify([g.suffix, g.family, g.transport, g.shape, g.probe_path || "/", g.ech_origin || ""]);
+        var card = el(doc, "details", "family-card");
+        card.setAttribute("data-key", fid);
+        card.setAttribute("data-flip-id", fid);
+        card.setAttribute("data-active", String(active));
+        /* Совпадение только по доказательству раскрывает семейство: иначе
+           найденный домен остался бы скрытым внутри строки. */
+        if (self.filter && !self.matches(g.suffix)) card.open = true;
+
+        var summary = el(doc, "summary", "family-summary");
+        var glyph = el(doc, "span", "family-glyph", "*.");
+        glyph.setAttribute("aria-hidden", "true");
+        var main = el(doc, "div", "family-main");
+        var name = el(doc, "h3", "family-name");
         add(name, el(doc, "span", "", "*."), str(g.suffix));
-        var ctx = el(doc, "div", "ftag-ctx");
+        var ctx = el(doc, "div", "family-ctx");
         add(ctx, tag(doc, shapeLabel(g.shape, g.transport)), tag(doc, familyLabel(g.family)));
         if (g.ech_origin) ctx.appendChild(tag(doc, "ECH: " + g.ech_origin));
         if (g.probe_path && g.probe_path !== "/") ctx.appendChild(tag(doc, "путь " + g.probe_path));
-        var stamp = el(doc, "span", "ftag-stamp", active ? "Применяется" : "Не подтверждено");
-        stamp.setAttribute("data-active", String(active));
-        if (!active) stamp.title = "Решение сохранено, но применение к семейству сейчас не подтверждено";
+        add(main, name, ctx);
+
         var ev = list(g.evidence);
-        /* Отказы узла — по одной строке на узел, с причиной: r2o хранит отказ
-           каждого плана отдельно, человеку нужен узел, а не журнал. */
         var dead = [], seen = {};
         list(g.exceptions).forEach(function (x) {
           var nm = str(x && typeof x === "object" ? x.name : x);
@@ -1442,167 +2083,141 @@
           seen[nm] = { name: nm, reason: str(x && x.reason) || "общий план не подошёл", n: 1 };
           dead.push(seen[nm]);
         });
-        var fid = wrap.getAttribute("data-flip-id");
-        var open = !!self.openTags[fid] || (!!self.filter && !self.matches(g.suffix));
-        var regionId = "ftag-more-" + gi;
-        var fold = el(doc, "button", "ftag-fold");
-        fold.type = "button";
-        fold.setAttribute("aria-expanded", String(open));
-        fold.setAttribute("aria-controls", regionId);
-        var foldText = el(doc, "span", "ftag-fold-text",
-          "Подтверждено на " + count(num(g.evidence_count) || ev.length, "домене", "доменах", "доменах"));
-        if (dead.length) foldText.appendChild(el(doc, "span", "ftag-fold-dead", " · без плана " + dead.length));
-        fold.appendChild(foldText);
-        fold.appendChild(foldMark(doc));
-        var more = el(doc, "div", "ftag-more");
-        more.id = regionId;
-        if (!open) more.hidden = true;
-        var tree = el(doc, "ul", "ftag-tree");
+        var stat = el(doc, "span", "family-stat");
+        add(stat, el(doc, "b", "", String(num(g.evidence_count) || ev.length)),
+          " " + plural(num(g.evidence_count) || ev.length, "домен", "домена", "доменов"));
+        if (dead.length) stat.appendChild(doc.createTextNode(" · без плана " + dead.length));
+        var stamp = el(doc, "span", "family-status", active ? "Применяется" : "Не подтверждено");
+        stamp.setAttribute("data-active", String(active));
+        if (!active) stamp.title = "Решение сохранено, но применение к семейству сейчас не подтверждено";
+        var chevron = svgEl(doc, "svg", { viewBox: "0 0 24 24", "aria-hidden": "true" }, "family-chevron");
+        chevron.appendChild(svgEl(doc, "path", { d: "m7 10 5 5 5-5" }));
+        add(summary, glyph, main, stat, stamp, chevron);
+
+        var wrap = el(doc, "div", "family-body");
+        var inner = el(doc, "div", "family-body-inner");
+        var grid = el(doc, "div", "family-grid");
+        var evidence = el(doc, "div", "family-block");
+        evidence.appendChild(el(doc, "h4", "", "Подтверждено на " +
+          count(num(g.evidence_count) || ev.length, "домене", "доменах", "доменах")));
+        var tree = el(doc, "ul", "family-tree");
         ev.forEach(function (d) { tree.appendChild(el(doc, "li", "", d)); });
         dead.forEach(function (x) {
           var li = el(doc, "li", "ex");
           add(li, x.name, el(doc, "small", "", " — " + x.reason.toLowerCase() + (x.n > 1 ? " (планов: " + x.n + ")" : "")));
           tree.appendChild(li);
         });
-        more.appendChild(tree);
-        fold.addEventListener("click", function () { self.toggleTag(wrap, fold, more, fid); });
-        var sub = fold;
-        var foot = el(doc, "div", "ftag-foot");
+        if (!ev.length && !dead.length) tree.appendChild(el(doc, "li", "", "Домены-доказательства не записаны."));
+        evidence.appendChild(tree);
+
+        var side = el(doc, "div", "family-block");
+        side.appendChild(el(doc, "h4", "", "План и коробки"));
+        var plan = el(doc, "div", "family-plan");
         if (g.plan_id) {
-          foot.appendChild(el(doc, "code", "", str(g.plan_id)));
+          plan.appendChild(el(doc, "code", "", str(g.plan_id)));
           var owners = [];
           m.boxes.forEach(function (b, bi) {
             if (list(b.plans).some(function (p) { return p.id === g.plan_id; })) owners.push({ id: str(b.id), n: bi + 1 });
           });
           if (owners.length) {
-            var links = el(doc, "span", "ftag-boxes", owners.length > 1 ? "план есть в коробках " : "план из коробки ");
+            var links = el(doc, "span", "family-boxes", owners.length > 1 ? "в коробках " : "в коробке ");
             owners.forEach(function (o, oi) {
               if (oi) links.appendChild(doc.createTextNode(" · "));
-              var b = el(doc, "button", "ftag-box", String(o.n));
+              var b = el(doc, "button", "family-box", String(o.n));
               b.type = "button";
               b.setAttribute("aria-label", "Показать коробку " + o.n);
               b.addEventListener("click", function () { self.showBox(o.id); });
               links.appendChild(b);
             });
-            foot.appendChild(links);
+            plan.appendChild(links);
           }
+        } else {
+          plan.appendChild(el(doc, "span", "box-dates", "План не записан."));
         }
-        add(card, name, ctx, stamp, sub, more, foot);
-        swing.appendChild(card);
-        var tilt = ([-1.4, 0.9, -0.5, 1.6, -1.1, 0.4])[gi % 6];
-        wrap.style.setProperty("--tilt", tilt + "deg");
-        swing.__tilt = tilt;
-        if (Motion.on()) {
-          /* Наклон, раскачивание и наведение ведёт GSAP — без спора с CSS-переходом. */
-          Motion.g.set(swing, { rotation: tilt, transformOrigin: "50% -44px" });
-          var straighten = function () { Motion.g.to(swing, { rotation: 0, duration: 0.5, ease: "power3.out", overwrite: "auto" }); };
-          var release = function () {
-            if (wrap.matches(":hover") || wrap.contains(doc.activeElement)) return;
-            Motion.g.to(swing, { rotation: tilt, duration: 1.6, ease: "elastic.out(1, 0.32)", overwrite: "auto" });
-          };
-          wrap.addEventListener("mouseenter", straighten);
-          wrap.addEventListener("mouseleave", release);
-          wrap.addEventListener("focusin", straighten);
-          wrap.addEventListener("focusout", function () { setTimeout(release, 0); });
-        }
-        rail.appendChild(wrap);
+        side.appendChild(plan);
+        add(grid, evidence, side);
+        inner.appendChild(grid);
+        wrap.appendChild(inner);
+        card.append(summary, wrap);
+        card.addEventListener("toggle", function () {
+          if (!card.open || !Motion.on()) return;
+          var bits = card.querySelectorAll(".family-tree li, .family-plan > *");
+          if (bits.length) Motion.g.fromTo(bits, { y: 7, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.32, stagger: 0.025, ease: "power3.out", clearProps: "all" });
+        });
+        cards.push(card);
       });
-      var grid = rail;
-      return [grid];
+      return cards;
     });
-  };
-
-  /* Знак раскрытия бирки: рисованная галочка в тон крафта. */
-  function foldMark(doc) {
-    var s = svgEl(doc, "svg", { viewBox: "0 0 16 16", width: "16", height: "16", "aria-hidden": "true" }, "ftag-fold-mark");
-    s.appendChild(svgEl(doc, "path", { d: "M3.5 6 8 10.5 12.5 6" }));
-    return s;
-  }
-
-  /* Бирка разворачивается как сложенная бумага: лист выходит из-под штампа,
-     ветки дерева вырастают по очереди, потяжелевшая бирка качается на нитке.
-     Свёртка — та же сцена назад, быстрее; повторный клик разворачивает её на ходу. */
-  App.prototype.toggleTag = function (wrap, fold, more, fid) {
-    var open = fold.getAttribute("aria-expanded") !== "true";
-    fold.setAttribute("aria-expanded", String(open));
-    if (open) this.openTags[fid] = true; else delete this.openTags[fid];
-    if (!Motion.on()) { more.hidden = !open; return; }
-    var tl = more.__tl;
-    if (tl && tl.isActive()) { tl.timeScale(open ? 1 : 1.6).reversed(!open); return; }
-    if (tl) tl.kill();
-    var g = Motion.g, swing = wrap.querySelector(".ftag-swing"), mark = fold.querySelector(".ftag-fold-mark");
-    var tilt = swing.__tilt || 0;
-    var rows = [].slice.call(more.querySelectorAll("li")).slice(0, 40);
-    more.hidden = false;
-    tl = g.timeline({ paused: true, defaults: { ease: "power3.out" },
-      onComplete: function () { g.set([more, rows], { clearProps: "all" }); more.__tl = null; },
-      onReverseComplete: function () { more.hidden = true; g.set([more, rows], { clearProps: "all" }); more.__tl = null; } });
-    tl.fromTo(more, { height: 0, clipPath: "inset(0% 0% 100% 0%)", overflow: "hidden" },
-        { height: "auto", clipPath: "inset(0% 0% 0% 0%)", duration: 0.55, ease: "power3.inOut" }, 0)
-      .fromTo(mark, { rotation: 0 }, { rotation: 180, duration: 0.45, ease: "back.out(2)", transformOrigin: "50% 50%" }, 0)
-      .fromTo(swing, { rotation: tilt }, { rotation: tilt + (tilt < 0 ? -2.6 : 2.6), duration: 0.22, ease: "power2.out" }, 0.05)
-      .to(swing, { rotation: tilt, duration: 1.1, ease: "elastic.out(1, 0.35)" }, 0.27);
-    if (rows.length) tl.fromTo(rows, { x: -10, autoAlpha: 0 }, { x: 0, autoAlpha: 1, duration: 0.36,
-      stagger: { amount: Math.min(0.4, rows.length * 0.04) } }, 0.16);
-    more.__tl = tl;
-    if (open) tl.timeScale(1).play(0); else tl.progress(1).timeScale(1.6).reverse();
-  };
-
-  /* Бирки раскачиваются, когда блок впервые попадает на экран и когда набор семейств меняется. */
-  App.prototype.swingTags = function () {
-    var body = this.$("families-body"), win = global;
-    if (!Motion.on()) return;
-    var run = function () {
-      var swings = body.querySelectorAll(".ftag-swing");
-      if (!swings.length) return;
-      Motion.g.fromTo(swings, { rotation: function (i) { return (i % 2 ? 7 : -7) + i % 3; } },
-        { rotation: function (i, t) { return t.__tilt || 0; }, duration: 1.8, ease: "elastic.out(1, 0.3)", stagger: 0.07, overwrite: "auto" });
-    };
-    if (body.__seen) { run(); return; }
-    if (typeof win.IntersectionObserver !== "function") { body.__seen = true; return; }
-    if (body.__io) return;
-    body.__io = new win.IntersectionObserver(function (entries) {
-      if (!entries[entries.length - 1].isIntersecting) return;
-      body.__seen = true;
-      body.__io.disconnect();
-      run();
-    }, { threshold: 0.25 });
-    body.__io.observe(body);
-  };
-
-  /* Переход от бирки к коробке: прокрутка к ней, раскрытие и короткая подсветка. */
-  App.prototype.showBox = function (id) {
-    var doc = this.doc;
-    var crates = doc.querySelectorAll(".crate"), crate = null;
-    for (var i = 0; i < crates.length; i++) if (crates[i].getAttribute("data-key") === "box:" + id) crate = crates[i];
-    if (!crate) return;
-    var open = function () {
-      if (!crate.open) { if (Motion.on()) crateToggle(crate); else crate.open = true; }
-      if (Motion.on()) {
-        var sig = global.getComputedStyle(doc.documentElement).getPropertyValue("--signal").trim() || "#e8470f";
-        Motion.g.fromTo(crate, { boxShadow: "0 0 0 4px " + sig }, { boxShadow: "0 0 0 0px transparent", duration: 1.4, ease: "power2.out", clearProps: "boxShadow" });
+    var meta = this.$("families-meta");
+    if (meta) {
+      var key = JSON.stringify([m.groups.length, m.groups.filter(function (g) { return g.active; }).length, this.filter]);
+      if (meta.__r2oKey !== key) {
+        meta.__r2oKey = key;
+        meta.replaceChildren();
+        var total = el(this.doc, "span", "meta-chip");
+        add(total, el(this.doc, "b", "", String(m.groups.length)), " " + plural(m.groups.length, "семейство", "семейства", "семейств"));
+        meta.appendChild(total);
+        var active = m.groups.filter(function (g) { return g.active; }).length;
+        var activeChip = el(this.doc, "span", "meta-chip", active + " " + plural(active, "применяется", "применяются", "применяются"));
+        if (active) activeChip.setAttribute("data-tone", "live");
+        meta.appendChild(activeChip);
       }
-      var lid = crate.querySelector(".crate-lid");
-      if (lid) lid.focus({ preventScroll: true });
+    }
+  };
+
+  /* Переход от семейства к коробке: переключаем раздел, находим запись,
+     раскрываем её и подсвечиваем. */
+  App.prototype.showBox = function (id) {
+    var self = this, doc = this.doc;
+    if (this.screen !== "boxes") {
+      this.showScreen("boxes", { instant: true });
+    }
+    var find = function () {
+      var cards = doc.querySelectorAll("#boxes-body .box-card");
+      for (var i = 0; i < cards.length; i++) if (cards[i].getAttribute("data-key") === "box:" + id) return cards[i];
+      return null;
     };
-    var mast = doc.getElementById("mast");
-    var offset = (mast ? mast.offsetHeight : 0) + 24;
-    if (Motion.on() && global.ScrollToPlugin) {
-      Motion.g.to(global, { scrollTo: { y: crate, offsetY: offset }, duration: 0.8, ease: "power3.inOut", onComplete: open });
-    } else {
-      global.scrollTo(0, crate.getBoundingClientRect().top + global.pageYOffset - offset);
-      open();
+    var open = function () {
+      var card = find();
+      if (!card) {
+        if (!self.filter) return;
+        self.filter = "";
+        var input = self.$("filter");
+        if (input) input.value = "";
+        var clear = self.$("filter-clear");
+        if (clear) clear.hidden = true;
+        self.renderCatalog(true);
+        self.win.setTimeout(open, 30);
+        return;
+      }
+      card.open = true;
+      card.classList.add("is-target");
+      var summary = card.querySelector(".box-summary");
+      if (summary && summary.focus) summary.focus({ preventScroll: true });
+      var top = card.getBoundingClientRect().top + self.win.pageYOffset - 86;
+      self.win.scrollTo({ top: top, behavior: Motion.on() ? "smooth" : "auto" });
+      if (Motion.on()) {
+        Motion.g.fromTo(card, { boxShadow: "0 0 0 3px rgba(185,138,82,.32)" },
+          { boxShadow: "0 0 0 0 rgba(185,138,82,0)", duration: 1.2, ease: "power2.out", clearProps: "boxShadow" });
+      }
+      self.win.setTimeout(function () { card.classList.remove("is-target"); }, 1600);
+    };
+    if (find()) open();
+    else {
+      /* Фильтр мог скрыть нужную коробку: сначала показываем весь каталог. */
+      if (this.filter) {
+        this.filter = "";
+        var input = this.$("filter");
+        if (input) input.value = "";
+        this.renderCatalog(true);
+      }
+      this.win.setTimeout(open, 40);
     }
   };
 
   App.prototype.renderBoxes = function (m) {
     var doc = this.doc, self = this;
     var body = this.$("boxes-body");
-    var busy = body.querySelectorAll(".crate");
-    for (var bi0 = 0; bi0 < busy.length; bi0++) {
-      /* Пока коробка в движении, перерисовку отложим до следующего опроса. */
-      if (busy[bi0].__tl && busy[bi0].__tl.isActive()) return false;
-    }
     var available = this.status.snapshot.catalog_available !== false || m.boxes.length;
     section(body, JSON.stringify([this.filter, m.linked, available, m.boxes, m.groups]), function () {
       if (!available) {
@@ -1631,6 +2246,19 @@
       if (!out.length) return [el(doc, "p", "empty", "Ни одна цель в коробках не подходит под запрос.")];
       return out;
     });
+    var meta = this.$("boxes-meta");
+    if (meta) {
+      var key = JSON.stringify([m.boxes.length, m.boxes.reduce(function (sum, b) { return sum + list(b.bindings).length; }, 0), this.filter]);
+      if (meta.__r2oKey !== key) {
+        meta.__r2oKey = key;
+        meta.replaceChildren();
+        var boxes = el(this.doc, "span", "meta-chip");
+        add(boxes, el(this.doc, "b", "", String(m.boxes.length)), " " + plural(m.boxes.length, "коробка", "коробки", "коробок"));
+        meta.appendChild(boxes);
+        var targets = m.boxes.reduce(function (sum, b) { return sum + list(b.bindings).length; }, 0);
+        meta.appendChild(el(this.doc, "span", "meta-chip", targets + " " + plural(targets, "цель", "цели", "целей")));
+      }
+    }
   };
 
   function svgEl(doc, tag, attrs, cls) {
@@ -1638,108 +2266,6 @@
     for (var k in attrs) n.setAttribute(k, attrs[k]);
     if (cls) n.setAttribute("class", cls);
     return n;
-  }
-
-  /* Коробка в изометрии: закрытая — с лентой на крышке; открытая — откинутые клапаны. */
-  /* Иконка коробки в изометрии. Верх — два клапана на шарнирах: левый на переднем
-     ребре A–D, правый на заднем B–C; шов между ними (M1–M2) заклеен лентой.
-     Положение клапана считается по углу поворота вокруг его ребра:
-     0° — лежит плашмя (закрыто), 90° — стоит, ~135° — откинут наружу. */
-  var BOX = { A: [8, 24], B: [32, 12], C: [56, 24], D: [32, 36] };
-  var FLAP_W = Math.sqrt(12 * 12 + 6 * 6);
-  /* Углы раскрытия подобраны под изометрию: передний клапан при большем угле
-     смотрел бы на зрителя ребром и пропадал. */
-  var CRATE_OPEN = { l: 105, r: 130 };
-  function flapPoints(side, deg) {
-    var r = deg * Math.PI / 180, c = Math.cos(r), sn = Math.sin(r);
-    /* В плоскости верха клапан тянется от шарнира к шву; «вверх» в изометрии — это −y. */
-    var inward = side === "l" ? [12, -6] : [-12, 6];
-    var off = [c * inward[0], c * inward[1] - sn * FLAP_W];
-    var h1 = side === "l" ? BOX.A : BOX.B, h2 = side === "l" ? BOX.D : BOX.C;
-    var f = function (p) { return (p[0] + off[0]).toFixed(2) + "," + (p[1] + off[1]).toFixed(2); };
-    return h1.join(",") + " " + h2.join(",") + " " + f(h2) + " " + f(h1);
-  }
-  function setFlaps(icon, degL, degR) {
-    var l = icon.querySelector(".flap-l"), r = icon.querySelector(".flap-r");
-    l.setAttribute("points", flapPoints("l", degL));
-    r.setAttribute("points", flapPoints("r", degR));
-    /* За вертикалью видна внутренняя сторона клапана. */
-    l.setAttribute("data-inner", String(degL > 90));
-    r.setAttribute("data-inner", String(degR > 90));
-  }
-
-  function crateIcon(doc) {
-    var s = svgEl(doc, "svg", { viewBox: "0 0 64 64", "aria-hidden": "true" }, "crate-icon");
-    var pg = function (pts, cls) { s.appendChild(svgEl(doc, "polygon", { points: pts }, cls)); };
-    pg("8,24 32,36 32,60 8,48", "face-l");
-    pg("32,36 56,24 56,48 32,60", "face-r");
-    pg("8,24 32,12 56,24 32,36", "inside");
-    s.appendChild(svgEl(doc, "polygon", { points: flapPoints("r", 0) }, "flap flap-r"));
-    s.appendChild(svgEl(doc, "polygon", { points: flapPoints("l", 0) }, "flap flap-l"));
-    s.appendChild(svgEl(doc, "path", { d: "M20 18 44 30" }, "tape"));
-    s.appendChild(svgEl(doc, "path", { d: "M14 39v7l6 3" }, "mark"));
-    return s;
-  }
-
-  /* Сцена коробки — один таймлайн: вперёд открывает, назад закрывает.
-     Повторный клик во время анимации разворачивает её с текущего места.
-     Лента на крышке рвётся пополам, крышка приподнимается, клапаны откидываются,
-     наклейка качается, тело раскрывается, строки проявляются все, по очереди. */
-  function crateTimeline(crate) {
-    var g = Motion.g;
-    var lidEl = crate.querySelector(".crate-lid"), body = crate.querySelector(".crate-body");
-    var icon = crate.querySelector(".crate-icon");
-    var iconTape = icon.querySelector(".tape");
-    var hinge = { l: 0, r: 0 };
-    var drawFlaps = function () { setFlaps(icon, hinge.l, hinge.r); };
-    var tapeL = lidEl.querySelector(".crate-tape-l"), tapeR = lidEl.querySelector(".crate-tape-r");
-    var label = crate.querySelector(".crate-label");
-    var bits = [].slice.call(body.querySelectorAll(".box-aside > *, .bindings tbody tr, .covered")).slice(0, 60);
-    var all = [lidEl, body, iconTape, tapeL, tapeR, label, bits];
-    var cs = global.getComputedStyle(body), padT = cs.paddingTop, padB = cs.paddingBottom;
-    var done = function () {
-      g.set(all, { clearProps: "all" });
-      crate.__tl = null;
-      setFlaps(icon, crate.open ? CRATE_OPEN.l : 0, crate.open ? CRATE_OPEN.r : 0);
-    };
-    var tl = g.timeline({ paused: true, defaults: { ease: "power3.out" },
-      onComplete: done,
-      onReverseComplete: function () { crate.open = false; done(); } });
-    /* Начало ленты задано явно: CSS прячет её у открытой коробки, а коробка
-       помечается открытой в самом начале сцены. */
-    var tape0 = { xPercent: 0, yPercent: 0, rotation: 0, autoAlpha: 1 };
-    tl.fromTo(tapeL, tape0, { xPercent: -10, yPercent: -160, rotation: -9, autoAlpha: 0, duration: 0.42, ease: "power2.in", transformOrigin: "0% 50%" }, 0)
-      .fromTo(tapeR, tape0, { xPercent: 10, yPercent: -160, rotation: 9, autoAlpha: 0, duration: 0.42, ease: "power2.in", transformOrigin: "100% 50%" }, 0.05)
-      .fromTo(iconTape, { drawSVG: "0% 100%", opacity: 0.8 }, { drawSVG: "50% 50%", opacity: 0.8, duration: 0.2, ease: "power2.in" }, 0)
-      .to(lidEl, { y: -5, duration: 0.16, ease: "power2.out" }, 0.02)
-      .to(lidEl, { y: 0, duration: 0.45, ease: "back.out(3)" }, 0.18)
-      .to(iconTape, { opacity: 0, duration: 0.08 }, 0.17)
-      .fromTo(hinge, { l: 0 }, { l: CRATE_OPEN.l, duration: 0.6, ease: "back.out(1.6)", onUpdate: drawFlaps }, 0.14)
-      .fromTo(hinge, { r: 0 }, { r: CRATE_OPEN.r, duration: 0.6, ease: "back.out(1.6)", onUpdate: drawFlaps }, 0.22)
-      .fromTo(label, { rotation: -1.5 }, { rotation: 3.5, duration: 0.18, ease: "power2.out" }, 0.06)
-      .to(label, { rotation: -1.5, duration: 0.7, ease: "elastic.out(1, 0.4)" }, 0.24)
-      .fromTo(body, { height: 0, paddingTop: 0, paddingBottom: 0, overflow: "hidden" },
-        { height: "auto", paddingTop: padT, paddingBottom: padB, duration: 0.6, ease: "power3.inOut" }, 0.14);
-    if (bits.length) tl.fromTo(bits, { y: 16, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.42, stagger: { amount: Math.min(0.45, bits.length * 0.03) } }, 0.3);
-    return tl;
-  }
-
-  function crateToggle(crate) {
-    var tl = crate.__tl;
-    if (tl && tl.isActive()) {
-      /* Разворот на ходу: та же сцена в обратную сторону с текущего кадра. */
-      tl.timeScale(tl.reversed() ? 1 : 1.6).reversed(!tl.reversed());
-      return;
-    }
-    if (tl) tl.kill();
-    if (!crate.open) {
-      crate.open = true;
-      crate.__tl = crateTimeline(crate);
-      crate.__tl.timeScale(1).play(0);
-    } else {
-      crate.__tl = crateTimeline(crate);
-      crate.__tl.progress(1).timeScale(1.6).reverse();
-    }
   }
 
   function boxFacts(binds) {
@@ -1754,50 +2280,45 @@
   }
 
   App.prototype.boxNode = function (b, bi, visible, covered, total) {
-    var doc = this.doc;
-    var crate = el(doc, "details", "crate");
-    crate.addEventListener("toggle", function () {
-      if (crate.__tl) return;
-      var ic = crate.querySelector(".crate-icon");
-      if (ic) setFlaps(ic, crate.open ? CRATE_OPEN.l : 0, crate.open ? CRATE_OPEN.r : 0);
-    });
-    crate.setAttribute("data-key", "box:" + str(b.id));
-    crate.setAttribute("data-flip-id", "box:" + str(b.id));
-    if (this.filter) crate.open = true;
-    var lid = el(doc, "summary", "crate-lid");
-    var head = el(doc, "div", "crate-head");
+    var doc = this.doc, self = this;
+    var card = el(doc, "details", "box-card");
+    card.setAttribute("data-key", "box:" + str(b.id));
+    card.setAttribute("data-flip-id", "box:" + str(b.id));
+    if (this.filter) card.open = true;
     var sigs = list(b.signals);
     var first = sigs.length ? (str(sigs[0].human) || str(sigs[0].kind)) : "приметы не записаны";
-    add(head, el(doc, "h3", "crate-name", "Коробка " + (bi + 1)),
-      el(doc, "p", "crate-signal", first + (sigs.length > 1 ? " · ещё " + (sigs.length - 1) : "")));
     var facts = boxFacts(list(b.bindings));
-    var meta = el(doc, "div", "crate-meta");
+    var nPlans = list(b.plans).length;
+
+    var summary = el(doc, "summary", "box-summary");
+    var number = el(doc, "span", "box-number", ("0" + (bi + 1)).slice(-2));
+    var main = el(doc, "div", "box-main");
+    var name = el(doc, "h3", "box-name", "Коробка " + (bi + 1));
+    name.appendChild(el(doc, "code", "", str(b.id)));
+    add(main, name, el(doc, "p", "box-signal", first + (sigs.length > 1 ? " · ещё " + (sigs.length - 1) : "")));
+
+    var meta = el(doc, "div", "box-meta");
     facts.protos.forEach(function (p) { meta.appendChild(tag(doc, p)); });
     if (facts.v6) meta.appendChild(tag(doc, "IPv6"));
     if (facts.recheck) meta.appendChild(tag(doc, "перепроверяется: " + facts.recheck, "live"));
+    if (facts.off) meta.appendChild(tag(doc, "выключено: " + facts.off, "mute"));
     var updated = parseTime(b.updated);
-    if (updated) meta.appendChild(el(doc, "span", "crate-when", "обновлена " + ago(this.serverNow() - updated)));
-    head.appendChild(meta);
-    var label = el(doc, "div", "crate-label");
-    var nPlans = list(b.plans).length;
-    add(label,
-      el(doc, "code", "crate-id", str(b.id)),
-      el(doc, "strong", "", String(total)),
-      el(doc, "span", "", plural(total, "цель", "цели", "целей") + " · " + count(nPlans, "план", "плана", "планов")));
-    var tapeL = el(doc, "span", "crate-tape crate-tape-l"), tapeR = el(doc, "span", "crate-tape crate-tape-r");
-    tapeL.setAttribute("aria-hidden", "true");
-    tapeR.setAttribute("aria-hidden", "true");
-    add(lid, tapeL, tapeR, crateIcon(doc), head, label);
-    lid.addEventListener("click", function (e) {
-      if (!Motion.on()) return;
-      e.preventDefault();
-      crateToggle(crate);
-    });
-    var art = el(doc, "div", "box crate-body");
+    if (updated) meta.appendChild(el(doc, "span", "box-when", "обновлена " + ago(this.serverNow() - updated)));
+
+    var countBox = el(doc, "div", "box-count");
+    add(countBox, el(doc, "strong", "", String(total)), el(doc, "span", "", plural(total, "цель", "цели", "целей") + " · " + count(nPlans, "план", "плана", "планов")));
+    var chevron = svgEl(doc, "svg", { viewBox: "0 0 24 24", "aria-hidden": "true" }, "box-chevron");
+    chevron.appendChild(svgEl(doc, "path", { d: "m7 10 5 5 5-5" }));
+    add(summary, number, main, meta, countBox, chevron);
+
+    var wrap = el(doc, "div", "box-body");
+    var inner = el(doc, "div", "box-body-inner");
+    var columns = el(doc, "div", "box-columns");
     var aside = el(doc, "div", "box-aside");
-    var self = this;
+    var mainCol = el(doc, "div", "box-main-col");
+
     var dates = [];
-    var created = parseTime(b.created), updated = parseTime(b.updated);
+    var created = parseTime(b.created);
     if (created) dates.push("найдена " + localTime(created));
     if (updated && updated !== created) dates.push("обновлена " + localTime(updated));
     if (dates.length) aside.appendChild(el(doc, "p", "box-dates", dates.join(" · ")));
@@ -1839,9 +2360,9 @@
     plansWrap.appendChild(plans);
     aside.appendChild(plansWrap);
 
-    var main = el(doc, "div");
-    main.appendChild(el(doc, "h4", "", count(total, "цель", "цели", "целей")));
+    mainCol.appendChild(el(doc, "h4", "", count(total, "цель", "цели", "целей")));
     if (visible.length) {
+      var tableWrap = el(doc, "div", "table-scroll");
       var table = el(doc, "table", "bindings");
       var cg = el(doc, "colgroup");
       ["c-target", "c-proto", "c-level", "c-wins", "c-when"].forEach(function (c) { cg.appendChild(el(doc, "col", c)); });
@@ -1865,7 +2386,6 @@
         if (bd.enabled === false) add(lv, " ", tag(doc, "выключено", "mute"));
         var nw = num(bd.successes) || 0;
         var wins = el(doc, "td", "n c-wins", String(nw));
-
         var c = parseTime(bd.confirmed);
         var when = el(doc, "td", "n c-when", c ? ago(now - c) : "—");
         if (c) when.title = localTime(c);
@@ -1874,9 +2394,10 @@
         tb.appendChild(tr);
       });
       add(table, thead, tb);
-      main.appendChild(table);
+      tableWrap.appendChild(table);
+      mainCol.appendChild(tableWrap);
     } else if (!covered.length) {
-      main.appendChild(el(doc, "p", "box-dates", "Привязанных целей нет"));
+      mainCol.appendChild(el(doc, "p", "box-dates", "Привязанных целей нет"));
     }
     if (covered.length) {
       var det = el(doc, "details", "covered");
@@ -1886,11 +2407,18 @@
       var ul = el(doc, "ul");
       covered.forEach(function (v) { ul.appendChild(el(doc, "li", "", targetLabel(v.bd.target) + " → *." + v.g.suffix)); });
       det.appendChild(ul);
-      main.appendChild(det);
+      mainCol.appendChild(det);
     }
-    add(art, aside, main);
-    add(crate, lid, art);
-    return crate;
+    add(columns, aside, mainCol);
+    inner.appendChild(columns);
+    wrap.appendChild(inner);
+    add(card, summary, wrap);
+    card.addEventListener("toggle", function () {
+      if (!card.open || !Motion.on()) return;
+      var bits = card.querySelectorAll(".box-aside > *, .bindings tbody tr, .covered");
+      if (bits.length) Motion.g.fromTo(bits, { y: 8, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.32, stagger: 0.018, ease: "power3.out", clearProps: "all" });
+    });
+    return card;
   };
 
   /* ─── Telegram ─── */
@@ -1907,21 +2435,25 @@
   function tunnelScene(doc) {
     var root = el(doc, "div", "tg-flow");
     var top = el(doc, "div", "tg-flow-top");
-    var title = el(doc, "h1", "tg-flow-title");
+    var status = el(doc, "div", "tg-flow-status");
+    var title = el(doc, "h3", "tg-flow-title");
     var lamp = el(doc, "span", "tg-flow-lamp");
     lamp.setAttribute("data-tg-state-lamp", "");
     lamp.setAttribute("aria-hidden", "true");
     var titleText = el(doc, "span", "", "Локальный прокси");
     titleText.setAttribute("data-tg-state-title", "");
     title.append(lamp, titleText);
+    var note = el(doc, "p", "tg-state-note", "Служба не запущена.");
+    note.setAttribute("data-tg-state-note", "");
     var actions = el(doc, "div", "tg-flow-actions");
     actions.setAttribute("data-tg-actions", "");
-    top.append(title, actions);
+    status.append(title, note);
+    top.append(status, actions);
 
     var stage = el(doc, "div", "tg-flow-stage");
     var canvas = el(doc, "canvas", "tg-flow-canvas");
-    canvas.width = 760;
-    canvas.height = 340;
+    canvas.width = 960;
+    canvas.height = 420;
     canvas.setAttribute("role", "img");
     canvas.setAttribute("aria-label", "Поток соединений: клиент → r2o → Telegram DC");
     stage.appendChild(canvas);
@@ -2079,11 +2611,8 @@
     if (!m) return;
     var doc = this.doc, snap = m.snap;
     var stats = snap.telegram_stats;
-    var st = TG[snap.telegram_status] ? snap.telegram_status : (snap.telegram_configured ? "stopped" : "not_configured");
-    var routeFailure = (st === "connected" || st === "local") && stats && global.R2oTelegramFlow &&
-      global.R2oTelegramFlow.hasCurrentRouteFailure(stats);
-    if (routeFailure) st = "unavailable";
-    var info = TG[st];
+    var st = this.telegramState(m);
+    var info = TG[st] || TG.stopped;
     var busy = snap.control_state === "running" || !!this.pending;
     var body = this.$("telegram-body");
     var stale = doc.body.getAttribute("data-stale") === "true";
@@ -2100,6 +2629,7 @@
         scene: scene,
         lamp: scene.querySelector("[data-tg-state-lamp]"),
         word: scene.querySelector("[data-tg-state-title]"),
+        note: scene.querySelector("[data-tg-state-note]"),
         actions: scene.querySelector("[data-tg-actions]"),
       };
       body.replaceChildren(scene);
@@ -2108,6 +2638,7 @@
     ui.lamp.setAttribute("data-tone", info.lamp);
     ui.lamp.setAttribute("aria-label", info.word);
     if (ui.word.textContent !== "Локальный прокси") ui.word.textContent = "Локальный прокси";
+    if (ui.note && ui.note.textContent !== info.note) ui.note.textContent = info.note;
     var buttons = [];
     if (snap.controls_enabled) {
       if (snap.telegram_enabled) {
@@ -2120,6 +2651,7 @@
     buttons.push(this.button("telegram-workers", "Мои Workers", null, null, busy));
     ui.actions.replaceChildren.apply(ui.actions, buttons);
     body.setAttribute("data-state", st);
+    ui.scene.setAttribute("data-state", st);
     if (ui.scene.__flow) ui.scene.__flow.update(stats, stale);
     updateTelegramMetrics(ui, stats);
     renderTelegramDiagnostics(ui.scene.querySelector(".tg-check-details"), snap.telegram_diagnostics);
@@ -2136,7 +2668,7 @@
     if (!Motion.on()) return;
     var run = function () {
       var paths = body.querySelectorAll(".stages svg path");
-      if (paths.length) Motion.g.fromTo(paths, { drawSVG: "0%" }, { drawSVG: "100%", duration: 0.5, stagger: 0.07, ease: "power2.out", clearProps: "strokeDasharray,strokeDashoffset" });
+      if (paths.length) Motion.g.fromTo(paths, { drawSVG: "0%" }, { drawSVG: "100%", duration: 0.35, stagger: 0.05, ease: "power2.out", clearProps: "strokeDasharray,strokeDashoffset" });
     };
     if (body.__seen) { run(); return; }
     if (typeof win.IntersectionObserver !== "function" || body.__io) return;
@@ -2216,105 +2748,67 @@
       snap.commit ? el(doc, "span", "mono", str(snap.commit).slice(0, 12)) : null,
       parseTime(snap.built) ? el(doc, "span", "", "собран " + localTime(parseTime(snap.built))) : null,
       parseTime(snap.taken) ? el(doc, "span", "", "снимок " + localTime(parseTime(snap.taken))) : null);
+    var railVersion = this.$("rail-version");
+    if (railVersion) {
+      var version = "R2O " + str(snap.version) + (snap.dirty ? " · изменённая сборка" : "");
+      if (railVersion.textContent !== version) railVersion.textContent = version;
+    }
+    var meta = this.$("diagnostics-meta");
+    if (meta) {
+      var metaKey = JSON.stringify([snap.version, snap.mode, m.linked, snap.live_fresh, list(snap.stages).filter(function (stage) { return !stage.built; }).length]);
+      if (meta.__r2oKey !== metaKey) {
+        meta.__r2oKey = metaKey;
+        meta.replaceChildren();
+        var versionChip = el(doc, "span", "meta-chip", "версия " + str(snap.version));
+        meta.appendChild(versionChip);
+        var modeChip = el(doc, "span", "meta-chip", "режим " + (MODES[snap.mode] || str(snap.mode) || "—"));
+        meta.appendChild(modeChip);
+        var bad = list(snap.stages).filter(function (stage) { return !stage.built; }).length;
+        var chainChip = el(doc, "span", "meta-chip", bad ? bad + " " + plural(bad, "звено", "звена", "звеньев") + " без подтверждения" : "цепочка собрана");
+        chainChip.setAttribute("data-tone", bad ? "warn" : "ok");
+        meta.appendChild(chainChip);
+        var linkChip = el(doc, "span", "meta-chip", m.linked ? "датапат на связи" : "нет связи с датапатом");
+        linkChip.setAttribute("data-tone", m.linked ? "live" : "bad");
+        meta.appendChild(linkChip);
+      }
+    }
   };
 
   /* ─── Навигация ─── */
 
   App.prototype.renderNav = function (m) {
+    var self = this;
     var set = function (id, text, tone) {
-      var n = this.$(id);
+      var n = self.$(id);
+      if (!n) return;
+      var changed = n.textContent !== text;
       n.textContent = text;
       if (tone) n.setAttribute("data-tone", tone); else n.removeAttribute("data-tone");
-    }.bind(this);
-    set("nav-now", !m.engine ? "стоп" : !m.linked ? "нет связи" : m.hunting ? String(m.hunting) : "", m.hunting ? "live" : null);
+      if (changed && text && Motion.on()) {
+        Motion.g.killTweensOf(n);
+        Motion.g.fromTo(n, { scale: 1.35, opacity: .5 }, { scale: 1, opacity: 1, duration: .35, ease: "back.out(2.6)", clearProps: "transform,opacity" });
+      }
+    };
+    set("nav-now", !m.engine ? "стоп" : !m.linked ? "нет связи" : m.hunting ? String(m.hunting) : "", m.hunting ? "live" : !m.engine || !m.linked ? "warn" : null);
     set("nav-families", m.groups.length ? String(m.groups.length) : "");
     set("nav-boxes", m.boxes.length ? String(m.boxes.length) : "");
-    var tg = m.snap.telegram_status;
-    set("nav-telegram", tg === "connected" ? "вкл" : tg === "local" ? "лок." : tg === "connecting" ? "…" : "выкл");
+    var tg = this.telegramState(m);
+    set("nav-telegram", tg === "connected" ? "вкл" : tg === "local" ? "лок." : tg === "connecting" ? "…" : "выкл",
+      tg === "connected" ? "live" : tg === "unavailable" ? "bad" : null);
     var bad = list(m.snap.stages).filter(function (s) { return !s.built; }).length;
     set("nav-diagnostics", bad ? "!" + bad : "", bad ? "warn" : null);
   };
 
-  /* Оглавление: плавный переход к разделу с учётом шапки, маркер переезжает
-     к активному пункту, тонкая полоса под шапкой показывает прокрутку страницы. */
-  App.prototype.navMotion = function () {
-    var doc = this.doc, win = this.win, self = this;
-    var nav = doc.querySelector(".index"), mast = doc.getElementById("mast");
-    if (!nav) return;
-    nav.addEventListener("click", function (e) {
-      var a = e.target.closest ? e.target.closest("a[href^='#']") : null;
-      if (!a || !Motion.on() || !win.ScrollToPlugin) return;
-      var target = doc.querySelector(a.getAttribute("href"));
-      if (!target) return;
-      e.preventDefault();
-      var off = (mast ? mast.offsetHeight : 0) + (win.innerWidth <= 1080 ? 72 : 20);
-      Motion.g.to(win, { scrollTo: { y: target, offsetY: off, autoKill: true }, duration: 0.8, ease: "power3.inOut" });
-      if (win.history && win.history.replaceState) win.history.replaceState(null, "", a.getAttribute("href"));
-    });
-    var marker = el(doc, "span", "index-marker");
-    marker.setAttribute("aria-hidden", "true");
-    nav.insertBefore(marker, nav.firstChild);
-    this.navMarker = marker;
-    var bar = el(doc, "span", "mast-progress");
-    bar.setAttribute("aria-hidden", "true");
-    if (mast) mast.appendChild(bar);
-    var setBar = Motion.g ? Motion.g.quickSetter(bar, "scaleX") : function (v) { bar.style.transform = "scaleX(" + v + ")"; };
-    var ticking = false;
-    var onScroll = function () {
-      if (ticking) return;
-      ticking = true;
-      win.requestAnimationFrame(function () {
-        ticking = false;
-        var max = doc.documentElement.scrollHeight - win.innerHeight;
-        setBar(max > 0 ? Math.min(1, win.pageYOffset / max) : 0);
-      });
-    };
-    win.addEventListener("scroll", onScroll, { passive: true });
-    win.addEventListener("resize", function () { onScroll(); self.moveMarker(true); });
-    onScroll();
-  };
-
-  App.prototype.moveMarker = function (instant) {
-    var marker = this.navMarker, nav = marker && marker.parentNode;
-    if (!marker) return;
-    var cur = nav.querySelector("a[aria-current='true']");
-    if (!cur) { marker.style.opacity = "0"; return; }
-    var box = { x: cur.offsetLeft, y: cur.offsetTop, width: cur.offsetWidth, height: cur.offsetHeight, opacity: 1 };
-    if (Motion.on() && !instant && marker.__placed) Motion.g.to(marker, Object.assign({ duration: 0.45, ease: "power3.out" }, box));
-    else if (Motion.g) Motion.g.set(marker, box);
-    else { marker.style.transform = "translate(" + box.x + "px," + box.y + "px)"; marker.style.width = box.width + "px"; marker.style.height = box.height + "px"; marker.style.opacity = "1"; }
-    marker.__placed = true;
-  };
-
-  /* Знак R2O: линия обхода прорисовывается один раз, препятствие садится на место. */
+  /* Знак R2O и навигация появляются один раз при загрузке. */
   App.prototype.drawMark = function () {
     if (!Motion.on()) return;
     var d = this.doc;
-    Motion.g.timeline({ delay: 0.1 })
-      .from(d.querySelector(".mark-line"), { drawSVG: "0%", duration: 0.9, ease: "power2.inOut" })
-      .from(d.querySelector(".mark-block"), { y: -10, autoAlpha: 0, duration: 0.6, ease: "bounce.out", svgOrigin: "18 20" }, "-=0.45");
-  };
-
-  App.prototype.spy = function () {
-    var doc = this.doc, self = this;
-    if (typeof IntersectionObserver !== "function") return;
-    var links = doc.querySelectorAll("[data-nav]");
-    var seen = {};
-    var io = new IntersectionObserver(function (entries) {
-      entries.forEach(function (e) { seen[e.target.id] = e.isIntersecting ? e.intersectionRatio : 0; });
-      var best = null, score = 0;
-      Object.keys(seen).forEach(function (id) { if (seen[id] > score) { score = seen[id]; best = id; } });
-      if (!best) return;
-      for (var i = 0; i < links.length; i++) {
-        if (links[i].getAttribute("data-nav") === best) links[i].setAttribute("aria-current", "true");
-        else links[i].removeAttribute("aria-current");
-      }
-      self.moveMarker();
-    }, { rootMargin: "-20% 0px -55% 0px", threshold: [0, .1, .3, .6] });
-    ["now", "families", "boxes", "telegram", "updates", "diagnostics"].forEach(function (id) {
-      var s = doc.getElementById(id);
-      if (s) io.observe(s);
-    });
+    var marks = d.querySelectorAll(".brand-mark, .mast-mark");
+    var links = d.querySelectorAll(".index a");
+    Motion.g.timeline({ delay: 0.05, defaults: { ease: "power3.out" } })
+      .from(marks, { scale: 0.78, autoAlpha: 0, duration: 0.4, stagger: 0.06, ease: "back.out(2)" })
+      .from(links, { x: -7, autoAlpha: 0, duration: 0.36, stagger: 0.035 }, "-=0.3")
+      .set([marks, links], { clearProps: "transform,opacity,visibility" });
   };
 
   var api = {

@@ -4,12 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <meta name="theme-color" content="#141019">
+  <meta name="theme-color" content="#0a0d0f">
   <title>r2o — панель R2O</title>
   <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
-  <link rel="preload" href="/assets/nunito-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="preload" href="/assets/nunito-latin.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="preload" href="/assets/jetbrains-mono-lava.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/assets/manrope-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/assets/manrope-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/assets/unbounded-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/assets/unbounded-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/assets/plexmono-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/assets/panel.css">
   <script src="/assets/gsap.js" defer></script>
   <script src="/assets/telegram-flow.js" defer></script>
@@ -17,103 +19,237 @@
   <script src="/assets/panel.js" defer></script>
   <script src="/assets/diagnostics.js" defer></script>
   <script src="/assets/panel-motion.js" defer></script>
-  <script src="/assets/panel-lava.js" defer></script>
 </head>
 <body>
-<a class="skip" href="#now">К текущему состоянию</a>
+<a class="skip" href="#app">К содержимому</a>
 
-  <header class="mast" id="mast">
-    <div class="mast-id">
-      <svg class="mark" viewBox="0 0 64 64" aria-hidden="true">
-        <defs><linearGradient id="r2o-route-gradient" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#e9c7ff"/><stop offset=".48" stop-color="#a855f7"/><stop offset="1" stop-color="#7c3aed"/></linearGradient></defs>
-        <circle cx="9.5" cy="25.5" r="5" fill="#d8b4fe"/>
-        <path class="mark-route" d="M10 25.5H18.5C24.5 25.5 23 13 35.5 12C48 11 55 21 51 31.5C48 39.5 37 43 29 51H51" fill="none" stroke="url(#r2o-route-gradient)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
-        <path d="M46 44L53 51L46 58" fill="none" stroke="#c084fc" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
-        <circle cx="36.5" cy="29" r="8.2" fill="#271530" stroke="#b57cee" stroke-width="1.5"/>
-        <path d="M32 33.5L41 24.5" fill="none" stroke="#d8b4fe" stroke-width="2.5" stroke-linecap="round"/>
-      </svg>
-      <span class="wordmark">r2o</span>
-      <span class="mast-host" id="host"></span>
-    </div>
+<svg class="svg-defs" aria-hidden="true" focusable="false">
+  <defs>
+    <linearGradient id="r2o-mark-gradient" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e0b878"/>
+      <stop offset=".55" stop-color="#b98a52"/>
+      <stop offset="1" stop-color="#5aaeb5"/>
+    </linearGradient>
+    <symbol id="r2o-mark" viewBox="0 0 40 40">
+      <rect x="1" y="1" width="38" height="38" rx="10" fill="#10161a" stroke="rgba(185,138,82,.34)"/>
+      <path d="M11.5 28V16.4A4.4 4.4 0 0 1 15.9 12h6.2a4.6 4.6 0 0 1 0 9.2h-7.4a4.6 4.6 0 0 0 0 9.2H29" fill="none" stroke="url(#r2o-mark-gradient)" stroke-width="3.1" stroke-linecap="round"/>
+      <circle cx="29" cy="28" r="2.6" fill="#d7a45b"/>
+      <circle cx="11.5" cy="16.4" r="1.8" fill="#7fd0d4"/>
+    </symbol>
+    <symbol id="i-overview" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.6"/><rect x="14" y="3" width="7" height="4" rx="1.4"/><rect x="14" y="11" width="7" height="10" rx="1.6"/><rect x="3" y="14" width="7" height="7" rx="1.6"/></symbol>
+    <symbol id="i-families" viewBox="0 0 24 24"><path d="M12 3v5"/><path d="M5 21v-4a3 3 0 0 1 3-3h8a3 3 0 0 1 3 3v4"/><circle cx="12" cy="10" r="2.4"/><circle cx="5" cy="21" r="1.5"/><circle cx="19" cy="21" r="1.5"/></symbol>
+    <symbol id="i-boxes" viewBox="0 0 24 24"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path d="m4.4 7.7 7.6 4.4 7.6-4.4"/><path d="M12 12v9"/></symbol>
+    <symbol id="i-telegram" viewBox="0 0 24 24"><path d="m21 3-7 18-3.2-7.1L3 10.5 21 3Z"/><path d="m10.8 13.9 4.4-4.4"/></symbol>
+    <symbol id="i-updates" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></symbol>
+    <symbol id="i-diagnostics" viewBox="0 0 24 24"><path d="M3 12h4l2.2-6 4 12 2.2-6H21"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></symbol>
+    <symbol id="i-command" viewBox="0 0 24 24"><path d="M9 9V6a3 3 0 1 0-3 3h3Zm0 0h6m-6 0v6m6-6V6a3 3 0 1 1 3 3h-3Zm0 0v6m0 0h3a3 3 0 1 1-3 3v-3Zm0 0H9m0 0v3a3 3 0 1 1-3-3h3Z"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="m14 7 5 5-5 5"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+  </defs>
+</svg>
 
-    <div class="mast-state" id="engine-state" aria-live="polite">
+<div class="shell">
+  <aside class="rail">
+    <a class="brand" href="#now" aria-label="R2O — обзор">
+      <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true"><use href="#r2o-mark"></use></svg>
+      <span class="brand-text"><strong>r2o</strong><small>router console</small></span>
+    </a>
+
+    <div class="rail-status" id="rail-status" aria-live="polite">
       <span class="lamp" data-tone="idle"></span>
-      <span class="mast-state-text">Получаем состояние…</span>
+      <span id="rail-status-text">Связь…</span>
     </div>
 
-    <div class="mast-actions" id="engine-actions" role="group" aria-label="Управление движком"></div>
-  </header>
-
-  <div class="notice" id="notice" role="status" aria-live="polite" hidden></div>
-
-  <div class="frame">
-    <nav class="index" aria-label="Разделы">
-      <a href="#now" data-nav="now"><span>Сейчас</span><b id="nav-now"></b></a>
-      <a href="#families" data-nav="families"><span>Семейства</span><b id="nav-families"></b></a>
-      <a href="#boxes" data-nav="boxes"><span>Коробки</span><b id="nav-boxes"></b></a>
-      <a href="#telegram" data-nav="telegram"><span>Telegram</span><b id="nav-telegram"></b></a>
-      <a href="#updates" data-nav="updates"><span>Обновления</span><b id="nav-updates"></b></a>
-      <a href="#diagnostics" data-nav="diagnostics"><span>Диагностика</span><b id="nav-diagnostics"></b></a>
+    <nav class="index" aria-label="Разделы панели">
+      <div class="index-group">
+        <span class="index-label">Пульт</span>
+        <a href="#now" data-nav="now" aria-current="page" title="Обзор">
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-overview"></use></svg>
+          <span class="nav-label"><span class="nav-full">Обзор</span><span class="nav-short">Обзор</span></span>
+          <b id="nav-now"></b>
+        </a>
+      </div>
+      <div class="index-group">
+        <span class="index-label">Обходы</span>
+        <a href="#families" data-nav="families" title="Семейства">
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-families"></use></svg>
+          <span class="nav-label"><span class="nav-full">Семейства</span><span class="nav-short">Семьи</span></span>
+          <b id="nav-families"></b>
+        </a>
+        <a href="#boxes" data-nav="boxes" title="Коробки">
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-boxes"></use></svg>
+          <span class="nav-label"><span class="nav-full">Коробки</span><span class="nav-short">Коробки</span></span>
+          <b id="nav-boxes"></b>
+        </a>
+      </div>
+      <div class="index-group">
+        <span class="index-label">Сервисы</span>
+        <a href="#telegram" data-nav="telegram" title="Telegram-туннель">
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-telegram"></use></svg>
+          <span class="nav-label"><span class="nav-full">Telegram</span><span class="nav-short">TG</span></span>
+          <b id="nav-telegram"></b>
+        </a>
+        <a href="#updates" data-nav="updates" title="Обновления">
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-updates"></use></svg>
+          <span class="nav-label"><span class="nav-full">Обновления</span><span class="nav-short">Обновл.</span></span>
+          <b id="nav-updates"></b>
+        </a>
+      </div>
+      <div class="index-group">
+        <span class="index-label">Система</span>
+        <a href="#diagnostics" data-nav="diagnostics" title="Диагностика">
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-diagnostics"></use></svg>
+          <span class="nav-label"><span class="nav-full">Диагностика</span><span class="nav-short">Диагн.</span></span>
+          <b id="nav-diagnostics"></b>
+        </a>
+      </div>
     </nav>
 
-    <main id="app">
-      <section class="sheet sheet-now" id="now" aria-labelledby="now-title">
-        <div class="hero">
-          <p class="hero-pill"><span>R2O</span>Обход блокировок на роутере</p>
-          <h1 class="statement" id="now-title">Получаем состояние…</h1>
-          <p class="lede" id="now-lede"></p>
-          <div class="slots" id="slots"></div>
+    <div class="rail-foot">
+      <button class="rail-search" id="command-open" type="button" aria-haspopup="dialog" aria-controls="command">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-search"></use></svg>
+        <span>Найти</span>
+        <kbd>Ctrl K</kbd>
+      </button>
+      <div class="rail-version" id="rail-version">R2O</div>
+    </div>
+  </aside>
+
+  <div class="workspace">
+    <header class="mast" id="mast">
+      <div class="mast-id">
+        <a class="mast-brand" href="#now" aria-label="R2O — обзор">
+          <svg class="mast-mark" viewBox="0 0 40 40" aria-hidden="true"><use href="#r2o-mark"></use></svg>
+          <span>r2o</span>
+        </a>
+        <div class="mast-context">
+          <span class="mast-kicker" id="screen-kicker">Пульт</span>
+          <span class="mast-title" id="screen-title">Обзор</span>
         </div>
-        <ol class="searches" id="searches" aria-label="Текущие поиски"></ol>
-      </section>
-
-      <div class="filter-bar">
-        <label class="filter" for="filter">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></svg>
-          <span class="visually-hidden">Найти цель</span>
-          <input id="filter" type="search" placeholder="Найти домен или адрес в семействах и коробках" autocomplete="off" spellcheck="false">
-          <kbd class="filter-key" aria-hidden="true">/</kbd>
-        </label>
-        <p class="filter-count" id="filter-count" aria-live="polite"></p>
+        <span class="mast-host" id="host"></span>
       </div>
+      <div class="mast-state" id="engine-state" aria-live="polite">
+        <span class="lamp" data-tone="idle"></span>
+        <span class="mast-state-text">Получаем состояние…</span>
+      </div>
+      <div class="mast-actions" id="engine-actions" role="group" aria-label="Управление движком"></div>
+    </header>
 
-      <section class="sheet" id="families" aria-labelledby="families-title">
-        <header class="sheet-head">
-          <span class="kicker">Обходы</span>
-          <h2 id="families-title">Семейства</h2>
-          <p>Обход, подтверждённый на нескольких доменах одного суффикса, применяется ко всему семейству. Исключения остаются отдельными.</p>
-        </header>
-        <div id="families-body"></div>
+    <div class="notice" id="notice" role="status" aria-live="polite" hidden></div>
+
+    <div class="context-bar" id="context-bar">
+      <label class="filter" for="filter">
+        <svg class="filter-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-search"></use></svg>
+        <span class="visually-hidden">Найти цель в семействах и коробках</span>
+        <input id="filter" type="search" placeholder="Найти домен, адрес или коробку" autocomplete="off" spellcheck="false">
+        <kbd class="filter-key" aria-hidden="true">/</kbd>
+      </label>
+      <button class="filter-clear" id="filter-clear" type="button" aria-label="Очистить поиск" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"></use></svg>
+      </button>
+      <p class="filter-count" id="filter-count" aria-live="polite"></p>
+      <button class="command-trigger" id="command-hint" type="button" aria-haspopup="dialog" aria-controls="command" title="Поиск по панели (Ctrl K)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-command"></use></svg>
+        <span>Ctrl K</span>
+      </button>
+    </div>
+
+    <main id="app">
+      <section class="sheet screen-now" id="now" data-screen="now" data-title="Обзор" data-kicker="Пульт" aria-labelledby="now-title">
+        <div class="overview-hero">
+          <div class="status-panel" id="status-panel" data-tone="idle">
+            <div class="status-panel-top">
+              <span class="eyebrow">Состояние R2O</span>
+              <span class="status-live"><span class="lamp" id="status-lamp" data-tone="idle" aria-hidden="true"></span><span id="status-state">Получаем состояние…</span></span>
+            </div>
+            <h1 class="statement" id="now-title">Получаем состояние…</h1>
+            <p class="lede" id="now-lede"></p>
+            <div class="slots" id="slots"></div>
+          </div>
+          <div class="overview-metrics" id="overview-metrics" aria-label="Сводка по R2O"></div>
+        </div>
+
+        <div class="overview-grid">
+          <section class="card workload-card" aria-labelledby="workload-title">
+            <header class="card-head">
+              <div>
+                <span class="eyebrow">Подбор</span>
+                <h2 id="workload-title">Живые поиски</h2>
+              </div>
+              <span class="card-meta mono" id="workload-meta"></span>
+            </header>
+            <ol class="searches" id="searches" aria-label="Текущие поиски"></ol>
+          </section>
+          <aside class="overview-side">
+            <div class="service-stack" id="overview-services" aria-label="Сервисы R2O"></div>
+            <section class="card catalog-card" aria-labelledby="overview-catalog-title">
+              <header class="card-head">
+                <div>
+                  <span class="eyebrow">Каталог</span>
+                  <h2 id="overview-catalog-title">Найденное</h2>
+                </div>
+              </header>
+              <div id="overview-catalog"></div>
+            </section>
+          </aside>
+        </div>
       </section>
 
-      <section class="sheet" id="boxes" aria-labelledby="boxes-title">
-        <header class="sheet-head">
-          <span class="kicker">Каталог</span>
-          <h2 id="boxes-title">Коробки</h2>
-          <p>Коробка — измеренное поведение блокировки. Для совместимой коробки сначала проверяется уже найденный план.</p>
+      <section class="sheet" id="families" data-screen="families" data-title="Семейства" data-kicker="Обходы" aria-labelledby="families-title">
+        <header class="screen-head">
+          <div class="screen-head-copy">
+            <span class="kicker">Обходы</span>
+            <h2 id="families-title">Семейства</h2>
+            <p>Обход, подтверждённый на нескольких доменах одного суффикса, применяется ко всему семейству. Исключения остаются отдельными.</p>
+          </div>
+          <div class="screen-head-meta" id="families-meta"></div>
         </header>
-        <div id="boxes-body"></div>
+        <div id="families-body" class="family-list"></div>
       </section>
 
-      <section class="sheet sheet-telegram" id="telegram" aria-labelledby="telegram-title">
-        <header class="sheet-head">
-          <span class="kicker">Служба</span>
-          <h2 id="telegram-title">Telegram-туннель</h2>
-          <p>Отдельная служба со своим состоянием. Обходы R2O через неё не идут.</p>
+      <section class="sheet" id="boxes" data-screen="boxes" data-title="Коробки" data-kicker="Обходы" aria-labelledby="boxes-title">
+        <header class="screen-head">
+          <div class="screen-head-copy">
+            <span class="kicker">Каталог</span>
+            <h2 id="boxes-title">Коробки</h2>
+            <p>Коробка — измеренное поведение блокировки. Для совместимой коробки сначала проверяется уже найденный план.</p>
+          </div>
+          <div class="screen-head-meta" id="boxes-meta"></div>
+        </header>
+        <div id="boxes-body" class="box-list"></div>
+      </section>
+
+      <section class="sheet" id="telegram" data-screen="telegram" data-title="Telegram-туннель" data-kicker="Сервисы" aria-labelledby="telegram-title">
+        <header class="screen-head">
+          <div class="screen-head-copy">
+            <span class="kicker">Служба</span>
+            <h2 id="telegram-title">Telegram-туннель</h2>
+            <p>Отдельная служба со своим состоянием. Обходы R2O через неё не идут.</p>
+          </div>
+          <div class="screen-head-meta" id="telegram-meta"></div>
         </header>
         <div class="tunnel" id="telegram-body"></div>
       </section>
 
-      <section class="sheet sheet-updates" id="updates" aria-labelledby="updates-title">
-        <header class="sheet-head">
-          <span class="kicker">Выпуски</span>
-          <h2 id="updates-title">Обновления</h2>
-          <p>Новые выпуски R2O. Настройки, регистрация Telegram и найденные обходы сохраняются.</p>
+      <section class="sheet" id="updates" data-screen="updates" data-title="Обновления" data-kicker="Сервисы" aria-labelledby="updates-title">
+        <header class="screen-head">
+          <div class="screen-head-copy">
+            <span class="kicker">Выпуски</span>
+            <h2 id="updates-title">Обновления</h2>
+            <p>Новые выпуски R2O. Настройки, регистрация Telegram и найденные обходы сохраняются.</p>
+          </div>
+          <div class="screen-head-meta" id="updates-meta"></div>
         </header>
         <div id="updates-body" class="upd" data-mode="loading">
-          <div class="upd-line" aria-live="polite" aria-atomic="true">
-            <span class="lamp" id="update-lamp" data-tone="idle" aria-hidden="true"></span>
+          <section class="release-hero">
+            <div class="release-mark" aria-hidden="true">
+              <span class="lamp" id="update-lamp" data-tone="idle"></span>
+              <span class="release-wave"></span>
+            </div>
             <div class="upd-text update-status">
+              <span class="eyebrow">Состояние выпуска</span>
               <h3 id="update-state">Обновления ещё не проверялись</h3>
               <p class="upd-meta"><span class="update-installed">Версия <span id="update-current" class="mono">—</span></span><span class="upd-sep" aria-hidden="true"> · </span><span id="update-checked">проверка при открытии панели</span></p>
               <p id="update-reason" hidden></p>
@@ -122,43 +258,66 @@
               <button type="button" class="btn" id="update-install" data-variant="primary" hidden>Установить сейчас</button>
               <button type="button" class="btn" id="update-check" data-variant="ghost">Проверить</button>
             </div>
+          </section>
+
+          <div class="release-grid">
+            <section class="card release-card" aria-label="Детали выпуска">
+              <p class="release-empty" id="update-empty">Проверьте обновления, чтобы увидеть описание нового выпуска.</p>
+              <div class="update-release" id="update-release" hidden>
+                <details class="update-notes" id="update-notes">
+                  <summary><span id="update-version"></span></summary>
+                  <div class="update-notes-content"><p id="update-notes-text"></p></div>
+                </details>
+              </div>
+              <div class="update-transfer">
+                <progress id="update-progress" max="100" value="0" aria-label="Загрузка выпуска" hidden></progress>
+                <p class="upd-meta" id="update-progress-text" hidden></p>
+              </div>
+              <p class="upd-meta" id="update-warning" hidden></p>
+              <p class="update-action" id="update-action" role="status" aria-live="polite" hidden></p>
+              <p class="upd-meta update-result" id="update-result" hidden></p>
+            </section>
+
+            <aside class="card auto-card" aria-label="Автообновление">
+              <span class="eyebrow">Ночное окно</span>
+              <div class="update-night">
+                <label class="upd-switch" for="update-auto"><input type="checkbox" role="switch" id="update-auto" disabled><span class="upd-knob" aria-hidden="true"></span><span>Автообновление</span></label>
+                <p id="update-schedule">03:00–05:00 по времени роутера</p>
+              </div>
+              <p class="auto-note">Новый выпуск ставится только в ночное окно. Проверка и установка вручную доступны в любое время.</p>
+            </aside>
           </div>
-          <div class="update-release" id="update-release" hidden>
-            <details class="update-notes" id="update-notes">
-              <summary><span id="update-version"></span></summary>
-              <div class="update-notes-content"><p id="update-notes-text"></p></div>
-            </details>
-          </div>
-          <div class="update-transfer">
-            <progress id="update-progress" max="100" value="0" aria-label="Загрузка выпуска" hidden></progress>
-            <p class="upd-meta" id="update-progress-text" hidden></p>
-          </div>
-          <p class="upd-meta" id="update-warning" hidden></p>
-          <p class="update-action" id="update-action" role="status" aria-live="polite" hidden></p>
-          <div class="update-night">
-            <label class="upd-switch" for="update-auto"><input type="checkbox" role="switch" id="update-auto" disabled><span class="upd-knob" aria-hidden="true"></span><span>Автообновление</span></label>
-            <p id="update-schedule">03:00–05:00 по времени роутера</p>
-          </div>
-          <p class="upd-meta update-result" id="update-result" hidden></p>
         </div>
       </section>
 
-      <section class="sheet" id="diagnostics" aria-labelledby="diagnostics-title">
-        <header class="sheet-head">
-          <span class="kicker">Состояние</span>
-          <h2 id="diagnostics-title">Диагностика</h2>
-          <p>Что движок может подтвердить сам, чего не измеряет, и с какими настройками запущен.</p>
+      <section class="sheet" id="diagnostics" data-screen="diagnostics" data-title="Диагностика" data-kicker="Система" aria-labelledby="diagnostics-title">
+        <header class="screen-head">
+          <div class="screen-head-copy">
+            <span class="kicker">Система</span>
+            <h2 id="diagnostics-title">Диагностика</h2>
+            <p>Что движок может подтвердить сам, чего не измеряет, и с какими настройками запущен.</p>
+          </div>
+          <div class="screen-head-meta" id="diagnostics-meta"></div>
         </header>
         <div id="diagnostics-body"></div>
+
         <section class="diag-history" aria-labelledby="diagnostic-history-title">
           <div class="diag-history-head">
-            <div><span class="kicker">Локально на роутере</span><h3 id="diagnostic-history-title">Память и подборы</h3><p>Сбор выключен по умолчанию · данные остаются в закрытом каталоге</p></div>
+            <div>
+              <span class="kicker">Локально на роутере</span>
+              <h3 id="diagnostic-history-title">Память и подборы</h3>
+              <p>Сбор выключен по умолчанию · данные остаются в закрытом каталоге</p>
+            </div>
             <span class="diag-collection-state" id="diagnostic-state">Проверяем…</span>
           </div>
           <p id="diagnostic-status" class="diag-history-note" role="status">Проверяем состояние сбора…</p>
           <div id="diagnostic-data" class="diag-history-data" hidden>
             <section class="diag-card diag-memory-panel" aria-labelledby="diagnostic-memory-title">
-              <div class="diag-card-head"><div><h4 id="diagnostic-memory-title">Память контроллера</h4><p id="diagnostic-memory-interval">Интервал указан в отчёте · значения в МиБ</p></div>
+              <div class="diag-card-head">
+                <div>
+                  <h4 id="diagnostic-memory-title">Память контроллера</h4>
+                  <p id="diagnostic-memory-interval">Интервал указан в отчёте · значения в МиБ</p>
+                </div>
                 <div class="diag-range" role="group" aria-label="Период графика памяти">
                   <button type="button" data-memory-range="2" aria-pressed="true">2 часа</button>
                   <button type="button" data-memory-range="24" aria-pressed="false">24 часа</button>
@@ -182,11 +341,15 @@
               <p id="diagnostic-memory-empty" class="diag-empty" hidden>Для выбранного периода нет доступных снимков памяти.</p>
               <p id="diagnostic-memory-caption" class="diag-history-note">Рост RSS сам по себе не подтверждает утечку.</p>
             </section>
+
             <section class="diag-card diag-process-panel" aria-labelledby="diagnostic-process-title">
               <h4 id="diagnostic-process-title">Память процессов</h4>
-              <table class="diag-memory"><thead><tr><th scope="col">Процесс</th><th scope="col">RSS</th><th scope="col">Изменение</th></tr></thead><tbody id="diagnostic-processes"></tbody></table>
+              <div class="table-scroll">
+                <table class="diag-memory"><thead><tr><th scope="col">Процесс</th><th scope="col">RSS</th><th scope="col">Изменение</th></tr></thead><tbody id="diagnostic-processes"></tbody></table>
+              </div>
               <p id="diagnostic-process-note" class="diag-history-note">Изменение считается от первого сохранённого снимка того же PID.</p>
             </section>
+
             <section class="diag-card diag-workers-panel" aria-labelledby="diagnostic-workers-title">
               <h4 id="diagnostic-workers-title">Workers</h4>
               <dl class="diag-history-counts">
@@ -198,11 +361,13 @@
                 <div><dt>Задачи / workers за 24 ч</dt><dd id="diagnostic-workers-trend">—</dd></div>
               </dl>
             </section>
+
             <section class="diag-card diag-subsystems-panel" aria-labelledby="diagnostic-subsystems-title">
               <h4 id="diagnostic-subsystems-title">Инструментированная память</h4>
               <p id="diagnostic-memory-tracking-coverage" class="diag-history-note">—</p>
               <ul id="diagnostic-memory-sites" class="diag-memory-sites"></ul>
             </section>
+
             <section class="diag-card diag-catalog-panel" aria-labelledby="diagnostic-catalog-title">
               <h4 id="diagnostic-catalog-title">Каталог</h4>
               <dl class="diag-history-counts">
@@ -212,6 +377,7 @@
               </dl>
               <p id="diagnostic-catalog-note" class="diag-history-note">Объём берётся из последнего снимка графика.</p>
             </section>
+
             <section class="diag-card diag-http-panel" aria-labelledby="diagnostic-http-title">
               <h4 id="diagnostic-http-title">HTTP-хранилище</h4>
               <dl class="diag-history-counts">
@@ -223,6 +389,7 @@
               </dl>
               <p id="diagnostic-http-note" class="diag-history-note">Объём берётся из последнего снимка графика.</p>
             </section>
+
             <section class="diag-card diag-madvise-panel" aria-labelledby="diagnostic-madvise-title">
               <h4 id="diagnostic-madvise-title">Возврат страниц</h4>
               <dl class="diag-history-counts">
@@ -232,11 +399,13 @@
               </dl>
               <p class="diag-history-note">Успешный вызов не гарантирует такого же уменьшения RSS.</p>
             </section>
+
             <section class="diag-card diag-limiter-panel" aria-labelledby="diagnostic-limiter-title">
               <h4 id="diagnostic-limiter-title">Переходы AIMD</h4>
               <p id="diagnostic-aimd-current" class="diag-history-note">—</p>
               <ol id="diagnostic-aimd-history" class="diag-transition-list"></ol>
             </section>
+
             <section class="diag-card diag-search-panel" aria-labelledby="diagnostic-search-title">
               <h4 id="diagnostic-search-title">История подбора</h4>
               <dl class="diag-history-counts">
@@ -246,8 +415,10 @@
               </dl>
               <p class="diag-history-note">Неподтверждённый результат поиска не равен недоступности сайта.</p>
             </section>
+
             <div id="diagnostic-warnings" class="diag-warning-list" role="status" aria-live="polite" hidden></div>
           </div>
+
           <div class="diag-history-footer">
             <div class="diag-history-actions">
               <a class="btn" data-variant="primary" id="diagnostic-download" href="/api/diagnostics?download" download="r2o-diagnostics.json" hidden>Скачать отчёт</a>
@@ -263,12 +434,7 @@
 
       <footer class="foot">
         <div class="foot-brand">
-          <svg class="foot-mark" viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="r2o-route-gradient-foot" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#e9c7ff"/><stop offset=".48" stop-color="#a855f7"/><stop offset="1" stop-color="#7c3aed"/></linearGradient></defs>
-<circle cx="9.5" cy="25.5" r="5" fill="#d8b4fe"/>
-<path class="mark-route" d="M10 25.5H18.5C24.5 25.5 23 13 35.5 12C48 11 55 21 51 31.5C48 39.5 37 43 29 51H51" fill="none" stroke="url(#r2o-route-gradient-foot)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
-<path d="M46 44L53 51L46 58" fill="none" stroke="#c084fc" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
-<circle cx="36.5" cy="29" r="8.2" fill="#271530" stroke="#b57cee" stroke-width="1.5"/>
-<path d="M32 33.5L41 24.5" fill="none" stroke="#d8b4fe" stroke-width="2.5" stroke-linecap="round"/></svg>
+          <svg class="foot-mark" viewBox="0 0 40 40" aria-hidden="true"><use href="#r2o-mark"></use></svg>
           <span>r2o · панель R2O</span>
         </div>
         <div class="colophon" id="colophon"></div>
@@ -276,14 +442,36 @@
       </footer>
     </main>
   </div>
-<dialog class="ask" id="ask" aria-labelledby="ask-title" aria-describedby="ask-text">
-    <span class="ask-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg></span>
-    <h2 id="ask-title"></h2>
-    <p id="ask-text"></p>
-    <div class="ask-actions">
-      <button type="button" class="btn" data-ask="no">Отмена</button>
-      <button type="button" class="btn" data-variant="confirm" data-ask="yes"></button>
+</div>
+
+<dialog class="command" id="command" aria-labelledby="command-title">
+  <div class="command-shell">
+    <div class="command-head">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-search"></use></svg>
+      <input id="command-input" type="search" placeholder="Перейти в раздел или найти цель…" autocomplete="off" spellcheck="false" aria-labelledby="command-title">
+      <kbd>Esc</kbd>
     </div>
-  </dialog>
+    <div class="command-body">
+      <p class="command-label" id="command-title">Навигация и цели</p>
+      <ul class="command-list" id="command-list" role="listbox" aria-label="Результаты поиска"></ul>
+      <p class="command-empty" id="command-empty" hidden>Ничего не найдено. Попробуйте домен, адрес или название раздела.</p>
+    </div>
+    <div class="command-foot">
+      <span><kbd>↑</kbd><kbd>↓</kbd> выбрать</span>
+      <span><kbd>Enter</kbd> открыть</span>
+      <span>Поиск идёт по разделам, семействам и коробкам</span>
+    </div>
+  </div>
+</dialog>
+
+<dialog class="ask" id="ask" aria-labelledby="ask-title" aria-describedby="ask-text">
+  <span class="ask-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg></span>
+  <h2 id="ask-title"></h2>
+  <p id="ask-text"></p>
+  <div class="ask-actions">
+    <button type="button" class="btn" data-ask="no">Отмена</button>
+    <button type="button" class="btn" data-variant="confirm" data-ask="yes"></button>
+  </div>
+</dialog>
 </body>
 </html>

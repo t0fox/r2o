@@ -443,6 +443,46 @@ pub fn handle_request(config: &Config, raw: &[u8]) -> Response {
             "fonts/jetbrains-mono-lava.woff2",
             "font/woff2",
         ),
+        (
+            "/assets/manrope-cyrillic.woff2",
+            "fonts/manrope-cyrillic.woff2",
+            "font/woff2",
+        ),
+        (
+            "/assets/manrope-latin.woff2",
+            "fonts/manrope-latin.woff2",
+            "font/woff2",
+        ),
+        (
+            "/assets/unbounded-cyrillic.woff2",
+            "fonts/unbounded-cyrillic.woff2",
+            "font/woff2",
+        ),
+        (
+            "/assets/unbounded-latin.woff2",
+            "fonts/unbounded-latin.woff2",
+            "font/woff2",
+        ),
+        (
+            "/assets/plexmono-cyrillic.woff2",
+            "fonts/plexmono-cyrillic.woff2",
+            "font/woff2",
+        ),
+        (
+            "/assets/plexmono-latin.woff2",
+            "fonts/plexmono-latin.woff2",
+            "font/woff2",
+        ),
+        (
+            "/assets/plexmono-semibold-cyrillic.woff2",
+            "fonts/plexmono-semibold-cyrillic.woff2",
+            "font/woff2",
+        ),
+        (
+            "/assets/plexmono-semibold-latin.woff2",
+            "fonts/plexmono-semibold-latin.woff2",
+            "font/woff2",
+        ),
     ] {
         if request.path == route {
             return static_asset(config, &request, file, content_type);
@@ -2036,6 +2076,22 @@ fn embedded_asset(name: &str) -> Option<&'static [u8]> {
         "fonts/nunito-latin.woff2" => include_bytes!("../assets/fonts/nunito-latin.woff2"),
         "fonts/jetbrains-mono-lava.woff2" => {
             include_bytes!("../assets/fonts/jetbrains-mono-lava.woff2")
+        }
+        "fonts/manrope-cyrillic.woff2" => include_bytes!("../assets/fonts/manrope-cyrillic.woff2"),
+        "fonts/manrope-latin.woff2" => include_bytes!("../assets/fonts/manrope-latin.woff2"),
+        "fonts/unbounded-cyrillic.woff2" => {
+            include_bytes!("../assets/fonts/unbounded-cyrillic.woff2")
+        }
+        "fonts/unbounded-latin.woff2" => include_bytes!("../assets/fonts/unbounded-latin.woff2"),
+        "fonts/plexmono-cyrillic.woff2" => {
+            include_bytes!("../assets/fonts/plexmono-cyrillic.woff2")
+        }
+        "fonts/plexmono-latin.woff2" => include_bytes!("../assets/fonts/plexmono-latin.woff2"),
+        "fonts/plexmono-semibold-cyrillic.woff2" => {
+            include_bytes!("../assets/fonts/plexmono-semibold-cyrillic.woff2")
+        }
+        "fonts/plexmono-semibold-latin.woff2" => {
+            include_bytes!("../assets/fonts/plexmono-semibold-latin.woff2")
         }
         _ => return None,
     })

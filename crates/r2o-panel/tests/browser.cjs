@@ -111,6 +111,10 @@ async function main() {
     assert.equal(track?.at, at, `голосовой статус «${phase}» отмечает правильный этап d2o`);
     assert.deepEqual(track?.steps.map((step) => step.label), ["Замер голоса", "Приём стоит", "Ждём ответа"]);
   }
+  const ownPlanTrack = panelUi.trackFor("проверяем свои планы");
+  assert.equal(ownPlanTrack?.at, 5, "фаза проверки своего плана остаётся на дорожке d2o");
+  assert.deepEqual(ownPlanTrack?.steps.map((step) => step.label), ["Очередь", "Форма", "Распознаём", "Свойства", "Планы", "Проверка", "Подтверждено"]);
+  assert.equal(panelUi.trackFor("неизвестная фаза новой сборки"), null, "неизвестная фаза не выдумывает этап");
   assert.equal(diagnosticsUi.summary({ samples: [{ at: 1, processes: [], bindings: 0, plans: 0 }], events: [{ outcome: "failed" }, { outcome: "queue-expired" }, { outcome: "plan-found" }] }).includes("без подтверждённого результата: 2"), true, "диагностика считает отказ и истёкшую очередь неподтверждёнными исходами");
   assert.ok(fs.existsSync(panelBinary), `Не найден исполняемый файл панели: ${panelBinary}`);
   fs.mkdirSync(chromeProfile, { recursive: true });
@@ -370,9 +374,14 @@ async function main() {
   assert.equal(await evaluate("document.title.includes('R2O')"), true, "заголовок страницы панели");
   assert.equal(await evaluate("document.querySelector('#r2o-settings') === null && ![...document.querySelectorAll('.index a')].some((link) => link.hash === '#r2o-settings')"), true, "в панели нет отдельного раздела настроек, которого нет в d2o");
   assert.equal(await evaluate("document.querySelectorAll('#app > section').length"), 6, "все разделы панели отображаются");
-  assert.equal(await evaluate("getComputedStyle(document.body).fontFamily.includes('Nunito')"), true, "оформление использует Nunito");
-  assert.equal(await evaluate("document.fonts.check('500 16px Nunito')"), true, "локальный шрифт Nunito загружен");
-  assert.equal(await evaluate("document.fonts.check('400 16px \\\"JetBrains Mono\\\"')"), true, "локальный JetBrains Mono загружен");
+  assert.equal(await evaluate("[...document.querySelectorAll('#app > section')].filter((section) => !section.hidden).length"), 1, "одновременно открыт ровно один экран");
+  assert.equal(await evaluate("document.querySelector('#now').hidden === false"), true, "панель открывается на обзоре");
+  assert.equal(await evaluate("!!document.querySelector('#overview-metrics .metric-card')"), true, "обзор содержит быстрые переходы к разделам");
+  assert.equal(await evaluate("document.querySelectorAll('#overview-metrics .metric-card').length"), 6, "сводка обзора показывает шесть ключевых чисел");
+  assert.equal(await evaluate("getComputedStyle(document.body).fontFamily.includes('Manrope')"), true, "оформление использует Manrope");
+  assert.equal(await evaluate("document.fonts.check('500 16px Manrope')"), true, "локальный шрифт Manrope загружен");
+  assert.equal(await evaluate("document.fonts.check('600 16px Unbounded')"), true, "локальный шрифт Unbounded загружен");
+  assert.equal(await evaluate("document.fonts.check('400 16px \\\"IBM Plex Mono\\\"')"), true, "локальный IBM Plex Mono загружен");
   assert.equal(await evaluate("document.querySelectorAll('script:not([src])').length"), 0, "встроенные скрипты макета не исполняются");
   await waitFor(() => evaluate("document.querySelector('#now-title').textContent !== 'Получаем состояние…'"), "состояние из /api/status");
   await waitFor(() => evaluate("document.querySelector('.bindings tr[data-enabled] .t')?.textContent === 'Голос Discord'"), "голосовая привязка в коробке");
@@ -380,6 +389,8 @@ async function main() {
   assert.equal(await evaluate("document.querySelector('.search-plan') === null && document.querySelector('.search-plan-result') === null"), true, "карточка Discovery показывает тот же набор статусов, что и d2o");
   await waitFor(() => evaluate("[...document.querySelectorAll('.search-question')].some((row) => !row.hidden && row.textContent.includes('whole · проверок: 1'))"), "текущий вопрос классификатора в карточке Discovery");
   assert.equal(await evaluate("document.querySelectorAll('#searches .search').length"), 4, "активные стадии представлены карточками, очередь выделена отдельно");
+  assert.equal(await evaluate("document.querySelectorAll('#searches .search-visual').length"), 4, "у каждой карточки поиска есть сцена текущего этапа");
+  assert.equal(await evaluate("[...document.querySelectorAll('#searches .search')].every((row) => row.dataset.stage !== undefined && row.dataset.stage !== 'idle')"), true, "сцена поиска получает этап подбора для анимации");
   assert.equal(await evaluate("document.querySelectorAll('#searches .queue-list .queue-target').length"), 1, "ожидающие замера собраны в список D2O");
   assert.equal(await evaluate("(() => { const row = [...document.querySelectorAll('#searches .search')].find((item) => item.querySelector('.search-target')?.textContent === 'starting.example'); return row?.querySelector('.search-phase')?.textContent === 'Заводим поиск' && row.querySelector('.search-clock').textContent.includes('идёт') && !row.querySelector('.search-clock').textContent.includes('в очереди'); })()"), true, "фаза запуска совпадает с D2O и не дублирует отдельную очередь");
   assert.equal(await evaluate("(() => { const row = [...document.querySelectorAll('.search')].find((item) => item.querySelector('.search-target')?.textContent === 'failed.example'); return row?.querySelector('.search-phase')?.textContent.startsWith('Проверяем выведенный план'); })()"), true, "отказный поиск отображает исходную фазу d2o без дополнительной строки результата");
@@ -429,6 +440,8 @@ async function main() {
 
   await evaluate(`document.querySelector('a[href="#telegram"]').click()`);
   assert.equal(await evaluate("location.hash"), "#telegram", "ссылка навигации открывает раздел Telegram");
+  assert.equal(await evaluate("document.querySelector('#telegram').hidden === false && document.querySelector('#now').hidden === true"), true, "переход меняет активный экран, а не просто прокручивает страницу");
+  assert.equal(await evaluate("document.querySelector('.index a[data-nav=\\\"telegram\\\"]').getAttribute('aria-current')"), "page", "активный пункт навигации отмечен");
   await waitFor(() => evaluate(
     "(() => { const c = document.querySelector('#telegram-body canvas.tg-flow-canvas'); return !!c && c.width >= 300 && c.height >= 100 && !!c.dataset.state; })()"
   ), "анимация Telegram смонтирована и обновлена");
@@ -440,6 +453,11 @@ async function main() {
   await evaluate("document.querySelector('#filter').focus(); document.querySelector('#filter').value = 'example'; document.querySelector('#filter').dispatchEvent(new Event('input', { bubbles: true }))");
   assert.equal(await evaluate("document.querySelector('#filter').value"), "example", "поле поиска принимает ввод");
   await delay(100);
+  assert.equal(await evaluate("document.querySelector('#filter-clear').hidden === false"), true, "у активного поиска есть очистка");
+  await evaluate("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }))");
+  await waitFor(() => evaluate("document.querySelector('#command').open === true"), "командная палитра открывается по Ctrl K");
+  assert.equal(await evaluate("document.querySelectorAll('#command-list .command-item').length >= 6"), true, "палитра содержит навигацию по разделам");
+  await evaluate("document.querySelector('#command').close()");
   assert.deepEqual(runtimeErrors, [], `ошибки JavaScript в браузере: ${runtimeErrors.join("; ")}`);
   console.log("Проверка Chrome-панели R2O: ПРОЙДЕНА");
 }
