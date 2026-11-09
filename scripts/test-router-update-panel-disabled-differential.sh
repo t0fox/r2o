@@ -13,10 +13,12 @@ R2O_INIT=$ROOT/router/S99r2o
 
 tr -d '\r' < "$D2O_UPDATE" | sed -n '/^healthy() {/,$p' | sed '/^do_install() {/,$d' > "$TEMP/d2o-healthy.sh"
 tr -d '\r' < "$R2O_INIT" | sed -n '/^wait_health() {/,$p' | sed '/^update_install() {/,$d' > "$TEMP/r2o-wait-health.sh"
+tr -d '\r' < "$R2O_INIT" | sed -n '/^engine_health_once() {/,/^}/p' > "$TEMP/r2o-engine-health.sh"
 tr -d '\r' < "$R2O_INIT" | sed -n '/^panel_start() {/,$p' | sed '/^start() {/,$d' > "$TEMP/r2o-panel-start.sh"
 R2O_PANEL_DEFAULT=$(tr -d '\r' < "$R2O_INIT" | sed -n 's/^\(PANEL_LISTEN=.*\)$/\1/p' | tail -n 1)
 [ -n "$R2O_PANEL_DEFAULT" ] || fail "не найдена инициализация PANEL_LISTEN в R2O"
 . "$TEMP/d2o-healthy.sh"
+. "$TEMP/r2o-engine-health.sh"
 . "$TEMP/r2o-wait-health.sh"
 . "$TEMP/r2o-panel-start.sh"
 
@@ -50,6 +52,11 @@ component_running() {
     esac
 }
 queue_bound() { return 0; }
+# wait_health проверяет только объединённый runtime; для фикстуры
+# достаточно раздельного PID, который использует этот тест.
+engine_components_running() {
+    component_running r2o-datapath "$DP4_PID"
+}
 prepare_dirs() { :; }
 log_maintenance_start() { :; }
 

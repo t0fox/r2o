@@ -72,16 +72,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 #[cfg(unix)]
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[cfg(unix)]
 static R2O_CONTROLLER_STOP: AtomicBool = AtomicBool::new(false);
 /// Счётчики задач Discovery на весь процесс: в merged-режиме они
 /// агрегируют IPv4 и IPv6, как единый планировщик D2O.
 #[cfg(unix)]
-static R2O_DISCOVERY_WORKERS_STARTED: AtomicU64 = AtomicU64::new(0);
+static R2O_DISCOVERY_WORKERS_STARTED: AtomicUsize = AtomicUsize::new(0);
 #[cfg(unix)]
-static R2O_DISCOVERY_WORKERS_JOINED: AtomicU64 = AtomicU64::new(0);
+static R2O_DISCOVERY_WORKERS_JOINED: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(unix)]
 extern "C" fn r2o_controller_request_stop(_signal: libc::c_int) {
@@ -12602,8 +12602,8 @@ impl DiscoveryWorker {
 
     fn r2o_worker_counts(&self) -> (u64, u64) {
         (
-            R2O_DISCOVERY_WORKERS_STARTED.load(Ordering::Relaxed),
-            R2O_DISCOVERY_WORKERS_JOINED.load(Ordering::Relaxed),
+            R2O_DISCOVERY_WORKERS_STARTED.load(Ordering::Relaxed) as u64,
+            R2O_DISCOVERY_WORKERS_JOINED.load(Ordering::Relaxed) as u64,
         )
     }
 

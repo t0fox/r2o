@@ -1285,14 +1285,16 @@ update_install() {
 status_d2k() {
     echo "${NAME:-r2o}"
     if component_running r2o-datapath "$DP_PID"; then
-        echo "  датапат: работает (pid $(cat "$DP_PID"), IPv4+IPv6)"
+        # Merged-runtime печатается в формате C-оракула D2O, чтобы
+        # status --d2k оставался дифференциально совместимым.
+        echo "  датапат: работает (pid $(cat "$DP_PID"))"
     elif component_running r2o-datapath "$DP4_PID"; then
         echo "  датапат: работает раздельно (pid $(cat "$DP4_PID") IPv4)"
     else
         echo "  датапат: не работает"
     fi
     if component_running r2o-controller "$CT_PID"; then
-        echo "  контроллер: работает (pid $(cat "$CT_PID"), IPv4+IPv6)"
+        echo "  контроллер: работает (pid $(cat "$CT_PID"))"
     elif component_running r2o-controller "$CT4_PID"; then
         echo "  контроллер: работает раздельно (pid $(cat "$CT4_PID") IPv4)"
     else

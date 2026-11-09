@@ -105,6 +105,7 @@ set -u
 TRACE=$1
 SCENARIO=$2
 FIREWALL=$3
+DP_PID=running
 DP4_PID=running
 RUNTIME=$TRACE.runtime
 FIREWALL_UP_RC=$4

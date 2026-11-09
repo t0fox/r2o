@@ -40,6 +40,7 @@ TRACE=$1
 MOCK_RUNNING=$2
 R2O_FW=iptables
 DP4_PID=datapath.pid
+DP_PID=datapath.pid
 PPE_ADAPTER=$3
 component_running() { [ "$MOCK_RUNNING" = 1 ]; }
 ppe_call() { "$PPE_ADAPTER" "$@"; }

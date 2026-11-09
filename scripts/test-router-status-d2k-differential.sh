@@ -68,10 +68,10 @@ EOF
     cat > "$TEMP/$name-r.sh" <<EOF
 . "$TEMP/r2o-status.sh"
 NAME=r2o
-DP4_PID=$TEMP/dp.pid; CT4_PID=$TEMP/ct.pid; PN_PID=$TEMP/pn.pid
+DP_PID=$TEMP/dp.pid; CT_PID=$TEMP/ct.pid; PN_PID=$TEMP/pn.pid
 TG_PID=$TEMP/tg.pid; META_DNS_PID=$TEMP/dns.pid; UPD_PID=$TEMP/upd.pid
 FW_WD_PID=$TEMP/hl.pid
-printf '111\n' > "\$DP4_PID"; printf '222\n' > "\$CT4_PID"; printf '333\n' > "\$PN_PID"
+printf '111\n' > "\$DP_PID"; printf '222\n' > "\$CT_PID"; printf '333\n' > "\$PN_PID"
 printf '444\n' > "\$TG_PID"; printf '555\n' > "\$META_DNS_PID"
 printf '666\n' > "\$UPD_PID"; printf '777\n' > "\$FW_WD_PID"
 TG_ENABLED=$tg_enabled
@@ -88,7 +88,7 @@ printf '#!/bin/sh\nexit %s\n' "$([ "$firewall_ok" = 1 ] && echo 0 || echo 1)" > 
 chmod 0755 "\$FIREWALL"
 component_running() {
     [ "$running" = 1 ] || return 1
-    case "\$2" in "\$DP4_PID"|"\$CT4_PID"|"\$PN_PID"|"\$TG_PID") return 0;; esac
+    case "\$2" in "\$DP_PID"|"\$CT_PID"|"\$PN_PID"|"\$TG_PID") return 0;; esac
     return 1
 }
 meta_dns_scheduler_running() { [ "$running" = 1 ] && [ -s "\$META_DNS_PID" ]; }

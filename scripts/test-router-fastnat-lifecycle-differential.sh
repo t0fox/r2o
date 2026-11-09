@@ -71,8 +71,12 @@ for initial in 1 0; do
     fi
 done
 
-grep -A 90 '^engine_start() {' "$ROOT/router/S99r2o" | grep -q 'fastnat_off' || {
-    echo "R2O engine_start does not disable fastnat" >&2
+grep -A 8 '^engine_firewall_up() {' "$ROOT/router/S99r2o" | grep -q 'fastnat_off' || {
+    echo "R2O engine_firewall_up does not disable fastnat" >&2
+    exit 1
+}
+grep -A 45 '^engine_start() {' "$ROOT/router/S99r2o" | grep -q 'start_engine_merged' || {
+    echo "R2O engine_start no longer enters the merged datapath startup" >&2
     exit 1
 }
 grep -A 15 '^engine_stop() {' "$ROOT/router/S99r2o" | grep -q 'fastnat_restore' || {

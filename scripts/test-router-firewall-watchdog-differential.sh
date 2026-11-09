@@ -112,13 +112,15 @@ FW_WATCHDOG=$TEST_WATCHDOG
 FW_WD_PID=$RUN/r2o-firewall-watchdog.pid
 FIREWALL=$TEST_FIREWALL
 EVENTS=$TEST_EVENTS
+CT_PID=$RUN/controller.pid
 CT4_PID=$RUN/controller4.pid
 CT6_PID=$RUN/controller6.pid
+DP_PID=$RUN/datapath.pid
 DP4_PID=$RUN/datapath4.pid
 DP6_PID=$RUN/datapath6.pid
 SOCK4=$RUN/datapath4.sock
 SOCK6=$RUN/datapath6.sock
-export RUN PROC FW_WATCHDOG FW_WD_PID FIREWALL EVENTS CT4_PID CT6_PID DP4_PID DP6_PID SOCK4 SOCK6
+export RUN PROC FW_WATCHDOG FW_WD_PID FIREWALL EVENTS CT_PID CT4_PID CT6_PID DP_PID DP4_PID DP6_PID SOCK4 SOCK6
 prepare_dirs() { mkdir -p "$RUN"; }
 say() { :; }
 ppe_remove() { :; }

@@ -90,6 +90,7 @@ PORTS=0:65535
 VOICE_PORTS=50000:50099,1400,3478:3481,5349,19294:19344
 HTTP_KEEPALIVE_PORTS=80
 ROOT=$6
+DP_PID=datapath.pid
 DP4_PID=datapath.pid
 component_running() { return 0; }
 die() { echo "$*" >&2; exit 1; }

@@ -47,9 +47,13 @@ trap r2o_cleanup EXIT HUP INT TERM
 
 mkdir -p "$r2o_temp/root/releases/test/builds" "$r2o_temp/proc/net/netfilter" "$r2o_temp/mockbin"
 : >"$r2o_temp/up-runtime"
-cp /bin/sleep "$r2o_temp/root/releases/test/builds/r2o-datapath-linux-test"
-cp /bin/sleep "$r2o_temp/root/releases/test/builds/r2o-controller-linux-test"
-cp /bin/sleep "$r2o_temp/root/releases/test/builds/r2o-panel-linux-test"
+# CI использует /bin/sleep. Локально uutils-сборка sleep не работает
+# как multicall под чужим argv[0], поэтому тест допускает подмену
+# бинарника-заглушки через R2O_TEST_COMPONENT_BIN.
+component_bin=${R2O_TEST_COMPONENT_BIN:-/bin/sleep}
+cp "$component_bin" "$r2o_temp/root/releases/test/builds/r2o-datapath-linux-test"
+cp "$component_bin" "$r2o_temp/root/releases/test/builds/r2o-controller-linux-test"
+cp "$component_bin" "$r2o_temp/root/releases/test/builds/r2o-panel-linux-test"
 chmod 0755 "$r2o_temp/root/releases/test/builds/"*
 cat >"$r2o_temp/root/config" <<EOF
 MODE=observe
@@ -153,14 +157,31 @@ grep -Fq 'IPv6: не обслуживается — нет ip6tables mangle, р�
 
 r2o_mark=$(printf '%d' 0xffffaaa)
 r2o_mask=$(printf '%d' 0xffffff00)
-for r2o_family in ipv4 ipv6; do
-    r2o_queue=2000
-    [ "$r2o_family" = ipv4 ] || r2o_queue=2001
-    grep -Fq "r2o-datapath|--queue|$r2o_queue|--family|$r2o_family" "$r2o_temp/launches"
-done
-[ "$(grep -c '^r2o-datapath|' "$r2o_temp/launches")" -eq 2 ]
+# Merged runtime: один datapath на обе очереди и один controller на оба семейства.
+grep -Fq 'r2o-datapath|--both|--queue4|2000|' "$r2o_temp/launches" || {
+    cat "$r2o_temp/launches" >&2
+    echo "merged datapath не получил IPv4-очередь 2000" >&2
+    exit 1
+}
+grep -Fq '|--queue6|2001|--control6|' "$r2o_temp/launches" || {
+    cat "$r2o_temp/launches" >&2
+    echo "merged datapath не получил IPv6-очередь 2001" >&2
+    exit 1
+}
+[ "$(grep -c '^r2o-datapath|' "$r2o_temp/launches")" -eq 1 ] || {
+    cat "$r2o_temp/launches" >&2
+    echo "merged runtime запустил неверное количество datapath-процессов" >&2
+    exit 1
+}
+[ "$(grep -c '^r2o-controller|' "$r2o_temp/launches")" -eq 1 ] || {
+    cat "$r2o_temp/launches" >&2
+    echo "merged runtime запустил неверное количество controller-процессов" >&2
+    exit 1
+}
+grep -Fq '|--serve-both|--serve4|' "$r2o_temp/launches"
+grep -Fq '|--serve6|' "$r2o_temp/launches"
 grep -Fq "|--probe-mark|46|--only-mark|$r2o_mark/$r2o_mask" "$r2o_temp/launches"
-grep -Fq '|--discover|--mark|46|--live|' "$r2o_temp/launches" || {
+grep -Fq '|--discover|--mark|46|--live4|' "$r2o_temp/launches" || {
     cat "$r2o_temp/launches" >&2
     echo "R2O controller probe mark diverges from D2O PROBE_MARK" >&2
     exit 1
@@ -171,22 +192,18 @@ grep -Fq '|--stats|900' "$r2o_temp/launches" || {
     echo "R2O datapath stats interval must match the D2O service default" >&2
     exit 1
 }
-[ -s "$r2o_temp/root/run/r2o-datapath4.pid" ]
-[ -s "$r2o_temp/root/run/r2o-datapath6.pid" ]
-[ -s "$r2o_temp/root/run/r2o-controller4.pid" ]
-[ -s "$r2o_temp/root/run/r2o-controller6.pid" ]
+[ -s "$r2o_temp/root/run/r2o-datapath.pid" ]
+[ -s "$r2o_temp/root/run/r2o-controller.pid" ]
 
-old_dp4=$(cat "$r2o_temp/root/run/r2o-datapath4.pid")
-old_dp6=$(cat "$r2o_temp/root/run/r2o-datapath6.pid")
-old_ct4=$(cat "$r2o_temp/root/run/r2o-controller4.pid")
-old_ct6=$(cat "$r2o_temp/root/run/r2o-controller6.pid")
-kill -KILL "$old_ct4"
+old_dp=$(cat "$r2o_temp/root/run/r2o-datapath.pid")
+old_ct=$(cat "$r2o_temp/root/run/r2o-controller.pid")
+kill -KILL "$old_ct"
 attempt=0
-while [ -e "/proc/$old_ct4/exe" ] && [ "$attempt" -lt 50 ]; do
+while [ -e "/proc/$old_ct/exe" ] && [ "$attempt" -lt 50 ]; do
     sleep 0.1
     attempt=$((attempt + 1))
 done
-[ ! -e "/proc/$old_ct4/exe" ] || {
+[ ! -e "/proc/$old_ct/exe" ] || {
     echo "controller process survived SIGKILL" >&2
     exit 1
 }
@@ -196,16 +213,12 @@ grep -Fxq '<>' "$r2o_temp/up-runtime" || {
     echo "engine-start did not restore firewall rules after controller SIGKILL" >&2
     exit 1
 }
-new_dp4=$(cat "$r2o_temp/root/run/r2o-datapath4.pid")
-new_dp6=$(cat "$r2o_temp/root/run/r2o-datapath6.pid")
-new_ct4=$(cat "$r2o_temp/root/run/r2o-controller4.pid")
-new_ct6=$(cat "$r2o_temp/root/run/r2o-controller6.pid")
-[ "$new_dp4" != "$old_dp4" ]
-[ "$new_dp6" != "$old_dp6" ]
-[ "$new_ct4" != "$old_ct4" ]
-[ "$new_ct6" != "$old_ct6" ]
+new_dp=$(cat "$r2o_temp/root/run/r2o-datapath.pid")
+new_ct=$(cat "$r2o_temp/root/run/r2o-controller.pid")
+[ "$new_dp" != "$old_dp" ]
+[ "$new_ct" != "$old_ct" ]
 
-echo "engine-start recovered datapath and controllers after controller SIGKILL"
+echo "engine-start recovered merged datapath and controller after controller SIGKILL"
 
 : >"$r2o_temp/up-runtime"
 R2O_IPV6_TEST_CAPABILITY=0 r2o_run_service reapply
@@ -214,6 +227,30 @@ grep -Fxq '<>' "$r2o_temp/up-runtime" || {
     exit 1
 }
 r2o_run_service engine-stop
+
+# Split-runtime contract: R2O_SPLIT_RUNTIME=1 должен поднимать
+# отдельные семейные datapath/controller-процессы.
+printf 'R2O_SPLIT_RUNTIME=1\n' >>"$r2o_temp/root/config"
+: >"$r2o_temp/launches"
+r2o_run_service engine-start
+for r2o_family in ipv4 ipv6; do
+    r2o_queue=2000
+    [ "$r2o_family" = ipv4 ] || r2o_queue=2001
+    grep -Fq "r2o-datapath|--queue|$r2o_queue|--family|$r2o_family" "$r2o_temp/launches" || {
+        cat "$r2o_temp/launches" >&2
+        echo "split datapath не получил $r2o_family-очередь $r2o_queue" >&2
+        exit 1
+    }
+done
+[ "$(grep -c '^r2o-datapath|' "$r2o_temp/launches")" -eq 2 ]
+[ "$(grep -c '^r2o-controller|' "$r2o_temp/launches")" -eq 2 ]
+grep -Fq '|--serve|' "$r2o_temp/launches"
+[ -s "$r2o_temp/root/run/r2o-datapath4.pid" ]
+[ -s "$r2o_temp/root/run/r2o-datapath6.pid" ]
+[ -s "$r2o_temp/root/run/r2o-controller4.pid" ]
+[ -s "$r2o_temp/root/run/r2o-controller6.pid" ]
+r2o_run_service engine-stop
+
 cat >"$r2o_temp/root/config" <<'EOF'
 MODE=observe
 IPV6_ENABLED=0
@@ -232,7 +269,7 @@ grep -Fq '|--probe-mark|46|' "$r2o_temp/launches" || {
     echo "service startup without PROBE_MARK must use the D2O default 46" >&2
     exit 1
 }
-grep -Fq '|--discover|--mark|46|--live|' "$r2o_temp/launches" || {
+grep -Fq '|--discover|--mark|46|--live4|' "$r2o_temp/launches" || {
     cat "$r2o_temp/launches" >&2
     echo "service startup without PROBE_MARK did not pass the D2O default to controller" >&2
     exit 1
@@ -252,7 +289,7 @@ grep -Fq 'r2o-panel|serve|' "$r2o_temp/launches" || {
     echo "панель не запустилась в тестовой конфигурации" >&2
     exit 1
 }
-grep -Fq '|--discover|--mark|45|--live|' "$r2o_temp/launches" || {
+grep -Fq '|--discover|--mark|45|--live4|' "$r2o_temp/launches" || {
     cat "$r2o_temp/launches" >&2
     echo "явный PROBE_MARK=0 должен сохранить MARK для controller probes" >&2
     exit 1

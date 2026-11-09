@@ -35,6 +35,8 @@ run_start() {
     telegram_start() { :; }
     start_panel() { :; }
     panel_start() { :; }
+    rt_proxy_start() { :; }
+    say() { :; }
     update_scheduler_start() { printf '%s:update\n' "$implementation" >> "$events"; }
     running() { return 1; }
     component_running() { return 1; }
@@ -81,6 +83,7 @@ run_stop() {
     }
     update_scheduler_stop() { printf '%s:update-stop\n' "$implementation" >> "$events"; }
     telegram_stop() { :; }
+    rt_proxy_stop() { :; }
     engine_stop() { :; }
     panel_stop() { :; }
     log_maintenance_stop() { :; }
