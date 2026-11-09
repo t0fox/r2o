@@ -13536,7 +13536,16 @@ impl DiscoveryWorker {
                 self.r2o_record_late_rst_only_cooldown(&outcome.target);
             } else if !r2o_discovery_volume_challenge_outcome(&outcome) {
                 let failed_at = std::time::Instant::now();
-                let retry_after = outcome.retry_after.unwrap_or(R2O_DISCOVERY_FAILURE_RETRY);
+                let default_retry = outcome.retry_after.unwrap_or(R2O_DISCOVERY_FAILURE_RETRY);
+                let retry_after =
+                    r2o_discovery_failure_backoff(&outcome.target, &outcome.detail, default_retry);
+                if retry_after > default_retry {
+                    println!(
+                        "Discovery: backoff для {} — {} с",
+                        outcome.target.host,
+                        retry_after.as_secs()
+                    );
+                }
                 if self.r2o_record_discovery_cooldown(
                     R2oDiscoveryCooldownKey::Endpoint(failure_key.clone()),
                     failed_at + retry_after,
@@ -13609,6 +13618,65 @@ impl Drop for DiscoveryWorker {
             let _ = thread.join();
         }
     }
+}
+
+#[cfg(unix)]
+const R2O_DISCOVERY_ECH_CANARY_RETRY: std::time::Duration =
+    std::time::Duration::from_secs(6 * 60 * 60);
+#[cfg(unix)]
+const R2O_DISCOVERY_RX_CUT_RETRY: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// После доказанного отрицательного результата не повторять дорогой поиск
+/// каждые две минуты. ECH-canary — служебная точка Cloudflare, полный RX-cut
+/// означает, что содержимым обход не строится.
+#[cfg(unix)]
+fn r2o_discovery_failure_backoff(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    detail: &str,
+    current: std::time::Duration,
+) -> std::time::Duration {
+    if target.host == "cloudflare-ech.com" || target.host.ends_with(".cloudflare-ech.com") {
+        return current.max(R2O_DISCOVERY_ECH_CANARY_RETRY);
+    }
+    if detail.contains("данные к адресу режутся целиком")
+        || detail.contains("не подтвердил ни одного нейтрального")
+    {
+        return current.max(R2O_DISCOVERY_RX_CUT_RETRY);
+    }
+    current
+}
+
+#[cfg(all(unix, test))]
+#[test]
+fn failure_backoff_covers_ech_canary_and_full_rx_cut() {
+    let canary = r2o_controller::discovery::DiscoveryTarget {
+        host: "cloudflare-ech.com".into(),
+        endpoint: "203.0.113.10:443".into(),
+        family: 4,
+        shape: SHAPE_ECH_TCP,
+    };
+    assert_eq!(
+        r2o_discovery_failure_backoff(&canary, "", R2O_DISCOVERY_FAILURE_RETRY),
+        R2O_DISCOVERY_ECH_CANARY_RETRY
+    );
+    let rx_cut = r2o_controller::discovery::DiscoveryTarget {
+        host: "v58.tiktokcdn.com".into(),
+        endpoint: "203.0.113.11:443".into(),
+        family: 4,
+        shape: SHAPE_MODERN,
+    };
+    assert_eq!(
+        r2o_discovery_failure_backoff(
+            &rx_cut,
+            "сервер не подтвердил ни одного нейтрального байта: данные к адресу режутся целиком",
+            R2O_DISCOVERY_FAILURE_RETRY,
+        ),
+        R2O_DISCOVERY_RX_CUT_RETRY
+    );
+    assert_eq!(
+        r2o_discovery_failure_backoff(&rx_cut, "обычная ошибка", R2O_DISCOVERY_FAILURE_RETRY),
+        R2O_DISCOVERY_FAILURE_RETRY
+    );
 }
 
 #[cfg(unix)]
