@@ -18731,20 +18731,13 @@ impl ControlClient {
                             }
                             Some(mut input) => {
                                 if event.planned {
-                                    let target = input.discovery_target.clone();
-                                    if let (Some(target), Some((_, catalog, catalog_path, _))) =
-                                        (target, &mut discovery)
-                                        && let Err(error) = self.r2o_recheck_failed_exact_binding(
-                                            &target,
-                                            catalog,
-                                            catalog_path,
-                                        )
-                                    {
-                                        eprintln!(
-                                            "не удалось пометить устаревшую привязку {} после позднего RST: {error}",
-                                            target.host
-                                        );
-                                    }
+                                    // Поздний RST не доказывает отказ плана:
+                                    // RX-проверка ниже прямо пишет «обрыв не
+                                    // подтверждён». Снятие привязки здесь
+                                    // заставляло discord.com флапать. План
+                                    // меняется только новым подтверждённым
+                                    // планом или явной командой оператора.
+                                    let _ = (input.discovery_target.as_ref(), event.planned);
                                 }
                                 if let Some((discovery_worker, catalog, _, _)) = discovery.as_ref()
                                 {
@@ -18773,18 +18766,9 @@ impl ControlClient {
                                     None
                                 };
                                 if let Some(target) = fallback {
-                                    if let Some((_, catalog, catalog_path, _)) = &mut discovery
-                                        && let Err(error) = self.r2o_recheck_failed_exact_binding(
-                                            &target,
-                                            catalog,
-                                            catalog_path,
-                                        )
-                                    {
-                                        eprintln!(
-                                            "не удалось пометить устаревшую привязку {} после позднего RST по недавнему SNI/IP: {error}",
-                                            target.host
-                                        );
-                                    }
+                                    // Поздний RST по недавнему SNI/IP — не
+                                    // доказанный отказ; привязка сохраняется.
+                                    let _ = (target, event.planned);
                                 } else {
                                     println!(
                                         "парная RX-проверка для {client} -> {server} не запущена: нет свежего полного ClientHello с SNI и однозначного недавнего SNI/IP"
