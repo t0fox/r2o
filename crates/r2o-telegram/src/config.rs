@@ -163,6 +163,10 @@ pub struct Config {
     #[arg(long, conflicts_with_all = ["remove_meta_dns", "meta_dns_scheduler", "initialize_identity", "resolve_meta"])]
     pub refresh_meta_dns: bool,
 
+    /// Обновить IP-диапазоны и доменные списки Meta/Telegram/Google/Cloudflare/Geosite.
+    #[arg(long, conflicts_with_all = ["refresh_meta_dns", "remove_meta_dns", "meta_dns_scheduler", "initialize_identity", "resolve_meta"])]
+    pub refresh_lists: bool,
+
     /// Удалить только записи Meta DNS, перечисленные в манифесте владения R2O.
     #[arg(long, conflicts_with_all = ["refresh_meta_dns", "meta_dns_scheduler", "initialize_identity", "resolve_meta"])]
     pub remove_meta_dns: bool,

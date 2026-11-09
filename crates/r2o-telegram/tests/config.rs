@@ -107,4 +107,7 @@ fn local_identity_and_direct_meta_resolve_have_separate_cli_modes() {
     assert!(Config::try_from_cli_line("--initialize-identity --resolve-meta").is_err());
     assert!(Config::try_from_cli_line("--resolve-meta --relay-url https://proxy.invalid").is_err());
     assert!(Config::try_from_cli_line("--meta-dns-scheduler --refresh-meta-dns").is_err());
+    let lists = Config::try_from_cli_line("--refresh-lists").unwrap();
+    assert!(lists.refresh_lists);
+    assert!(Config::try_from_cli_line("--refresh-lists --refresh-meta-dns").is_err());
 }

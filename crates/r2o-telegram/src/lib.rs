@@ -11,6 +11,7 @@ pub mod doh_wire;
 pub mod health;
 pub mod identity;
 pub mod limits;
+pub mod list_update;
 pub mod memory_budget;
 pub mod meta_dns;
 pub mod meta_edge;

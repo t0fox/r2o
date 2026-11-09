@@ -84,6 +84,20 @@ async fn main() {
         return;
     }
 
+    if config.refresh_lists {
+        match r2o_telegram::list_update::refresh_from_env(true).await {
+            Ok(summary) => println!(
+                "списки обновлены: updated={}, fresh={}, kept={}, failed={}",
+                summary.updated, summary.fresh, summary.kept, summary.failed
+            ),
+            Err(error) => {
+                eprintln!("ошибка обновления списков: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     if config.refresh_meta_dns {
         if let Err(error) = r2o_telegram::meta_dns::refresh_from_env().await {
             eprintln!("ошибка обновления Meta DNS: {error}");

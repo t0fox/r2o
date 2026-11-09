@@ -255,8 +255,9 @@ impl MetaDnsPaths {
             .unwrap_or_else(|| PathBuf::from("/opt/r2o"));
         Self {
             meta_ranges: std::env::var_os("R2O_META_RANGES")
+                .filter(|value| !value.is_empty())
                 .map(PathBuf::from)
-                .unwrap_or_else(|| r2o_dir.join("files/meta-ranges.txt")),
+                .unwrap_or_else(|| default_meta_ranges_path(&r2o_dir)),
             manifest: std::env::var_os("R2O_INSTAGRAM_MANIFEST")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| r2o_dir.join("state/instagram-ip-hosts.tsv")),
@@ -269,6 +270,22 @@ impl MetaDnsPaths {
             r2o_dir,
         }
     }
+}
+
+/// Актуальный список диапазонов Meta: сначала база, обновлённая ночным
+/// загрузчиком, затем поставляемый с выпуском снимок. Пустой файл в state
+/// считается отсутствующим, чтобы повреждённое обновление не отключило
+/// проверку диапазонов.
+pub(crate) fn default_meta_ranges_path(r2o_dir: &Path) -> PathBuf {
+    let updated = r2o_dir.join("state/lists/meta-ranges.txt");
+    if let Ok(body) = std::fs::read_to_string(&updated)
+        && parse_meta_ranges(&body)
+            .map(|ranges| ranges.len() >= 10)
+            .unwrap_or(false)
+    {
+        return updated;
+    }
+    r2o_dir.join("files/meta-ranges.txt")
 }
 
 pub struct MetaDnsManager<N, D> {
@@ -842,7 +859,14 @@ pub fn remove_from_env() -> Result<(), String> {
 
 pub async fn run_scheduler() -> Result<(), String> {
     let mut scheduler = MetaDnsScheduler::from_env();
+    let mut lists = crate::list_update::ListUpdater::from_env();
     loop {
+        if let Err(error) = lists.tick().await {
+            append_log(
+                &scheduler.log,
+                &format!("ошибка обновления списков: {error}"),
+            );
+        }
         if let Err(error) = scheduler.tick().await {
             append_log(
                 &scheduler.log,
@@ -854,17 +878,17 @@ pub async fn run_scheduler() -> Result<(), String> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct Clock {
-    day: String,
-    hhmm: String,
-    epoch: u64,
+pub(crate) struct Clock {
+    pub(crate) day: String,
+    pub(crate) hhmm: String,
+    pub(crate) epoch: u64,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct Attempt {
-    last_epoch: u64,
-    last_day: Option<String>,
-    failures: u32,
+pub(crate) struct Attempt {
+    pub(crate) last_epoch: u64,
+    pub(crate) last_day: Option<String>,
+    pub(crate) failures: u32,
 }
 
 struct MetaDnsScheduler {
@@ -982,7 +1006,7 @@ impl MetaDnsScheduler {
     }
 }
 
-fn local_clock() -> Result<Clock, String> {
+pub(crate) fn local_clock() -> Result<Clock, String> {
     let output = Command::new("date")
         .arg("+%Y-%m-%d|%H%M|%s")
         .output()
@@ -1024,7 +1048,7 @@ fn valid_hhmm(value: &str) -> bool {
     hour <= 23 && minute <= 59
 }
 
-fn read_attempt(path: &Path) -> Attempt {
+pub(crate) fn read_attempt(path: &Path) -> Attempt {
     let Ok(input) = std::fs::read_to_string(path) else {
         return Attempt::default();
     };
@@ -1074,7 +1098,7 @@ fn parse_legacy_offset(stored: &str) -> Option<u64> {
     valid.then(|| stored.parse().ok()).flatten()
 }
 
-fn should_run(
+pub(crate) fn should_run(
     state: &Path,
     attempt: &Attempt,
     clock: &Clock,
@@ -1098,13 +1122,13 @@ fn should_run(
     }
 }
 
-fn read_success_day(path: &Path) -> Option<String> {
+pub(crate) fn read_success_day(path: &Path) -> Option<String> {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|contents| contents.lines().next().map(str::to_string))
 }
 
-fn backoff_after(failures: u32, retry_after: u64) -> u64 {
+pub(crate) fn backoff_after(failures: u32, retry_after: u64) -> u64 {
     if failures == 0 {
         return 0;
     }
@@ -1112,7 +1136,7 @@ fn backoff_after(failures: u32, retry_after: u64) -> u64 {
     retry_after.saturating_mul(1_u64 << exponent).min(86_400)
 }
 
-fn write_attempt(path: &Path, attempt: &Attempt) -> Result<(), String> {
+pub(crate) fn write_attempt(path: &Path, attempt: &Attempt) -> Result<(), String> {
     let day = attempt.last_day.as_deref().unwrap_or("");
     atomic_write(
         path,
@@ -1120,7 +1144,7 @@ fn write_attempt(path: &Path, attempt: &Attempt) -> Result<(), String> {
     )
 }
 
-fn random_u16() -> Result<u16, String> {
+pub(crate) fn random_u16() -> Result<u16, String> {
     use ring::rand::{SecureRandom, SystemRandom};
     let mut bytes = [0_u8; 2];
     SystemRandom::new()
@@ -1323,7 +1347,7 @@ fn write_success_mark(path: &Path) -> Result<(), String> {
     atomic_write(path, format!("{date}\n{now}\n").as_bytes())
 }
 
-fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), String> {
+pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), String> {
     let parent = path
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -1359,7 +1383,7 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn append_log(path: &Path, message: &str) {
+pub(crate) fn append_log(path: &Path, message: &str) {
     let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) else {
         return;
     };
@@ -1380,7 +1404,7 @@ fn append_log(path: &Path, message: &str) {
     let _ = writeln!(log, "[{now}] {message}");
 }
 
-fn env_bounded(key: &str, default: u64, minimum: u64, maximum: u64) -> u64 {
+pub(crate) fn env_bounded(key: &str, default: u64, minimum: u64, maximum: u64) -> u64 {
     std::env::var(key)
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
@@ -2312,5 +2336,34 @@ esac
         ] {
             assert_eq!(parse_legacy_offset(stored), want, "{stored:?}");
         }
+    }
+
+    #[test]
+    fn default_meta_ranges_prefers_nonempty_state_database() {
+        let dir = std::env::temp_dir().join(format!(
+            "r2o-meta-ranges-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("files")).unwrap();
+        std::fs::create_dir_all(dir.join("state/lists")).unwrap();
+        let shipped = dir.join("files/meta-ranges.txt");
+        std::fs::write(&shipped, "31.13.24.0/21\n").unwrap();
+        assert_eq!(default_meta_ranges_path(&dir), shipped);
+        let updated = dir.join("state/lists/meta-ranges.txt");
+        std::fs::write(&updated, "31.13.24.0/21\n").unwrap();
+        assert_eq!(default_meta_ranges_path(&dir), shipped);
+        let mut many = String::new();
+        for index in 0..10 {
+            many.push_str(&format!("31.13.{}.0/24\n", index));
+        }
+        std::fs::write(&updated, &many).unwrap();
+        assert_eq!(default_meta_ranges_path(&dir), updated);
+        std::fs::write(&updated, "").unwrap();
+        assert_eq!(default_meta_ranges_path(&dir), shipped);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
