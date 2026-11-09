@@ -15,6 +15,9 @@ const R2O_LATE_RX_EXACT_TTL: std::time::Duration = std::time::Duration::from_sec
 /// Совпадение проверяется и по IP, и по порту, поэтому смена адреса
 /// автоматически отбрасывает устаревшую запись.
 const R2O_LATE_RX_FALLBACK_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+/// Минимальный отрыв самого свежего имени от второго, чтобы считать
+/// привязку к серверному IP однозначной для recheck без полного ClientHello.
+const R2O_RECENT_TARGET_GAP: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub struct R2oLateRxInput {
     pub options: FetchOptions,
@@ -172,6 +175,65 @@ impl R2oLateRxCache {
         self.take_for_flow(&event.key, event.client_is_low, mark, now)
     }
 
+    /// Цель для recheck планового позднего RST, когда полного ClientHello нет.
+    /// Берётся самое свежее имя на серверном endpoint, но только если оно
+    /// заметно свежее остальных имён на том же IP.
+    pub fn recent_target_for_rst(
+        &self,
+        reset: &R2oTcpRstAfterAppEvent,
+        now: Instant,
+    ) -> Option<DiscoveryTarget> {
+        self.recent_target_for_endpoint(&reset.key, reset.client_is_low, now)
+    }
+
+    /// То же для планового зависания TCP.
+    pub fn recent_target_for_tcp_stall(
+        &self,
+        event: &R2oTcpStallEvent,
+        now: Instant,
+    ) -> Option<DiscoveryTarget> {
+        self.recent_target_for_endpoint(&event.key, event.client_is_low, now)
+    }
+
+    fn recent_target_for_endpoint(
+        &self,
+        key: &[u8; r2k_core::control::KEY_LEN],
+        client_is_low: bool,
+        now: Instant,
+    ) -> Option<DiscoveryTarget> {
+        let (_, server_ip, server_port) = r2o_server_endpoint(key, client_is_low)?;
+        let mut latest: HashMap<String, (Instant, HelloEvent)> = HashMap::new();
+        for (entry_key, (hello, captured)) in self.entries.iter() {
+            if now.saturating_duration_since(*captured) >= R2O_LATE_RX_FALLBACK_TTL
+                || hello.key[0] != key[0]
+                || hello.key[37] != 6
+                || !r2o_cached_hello_matches_server(entry_key, server_ip, server_port)
+            {
+                continue;
+            }
+            let Some(host) = r2o_cached_hello_host(hello) else {
+                continue;
+            };
+            let replace = latest.get(&host).is_none_or(|(seen, _)| *seen < *captured);
+            if replace {
+                latest.insert(host, (*captured, hello.clone()));
+            }
+        }
+        let mut ordered: Vec<_> = latest.into_values().collect();
+        ordered.sort_by(|left, right| right.0.cmp(&left.0));
+        let (newest_seen, newest_hello) = ordered.first()?;
+        let independent = ordered.len() == 1
+            || ordered.get(1).is_some_and(|(second_seen, _)| {
+                newest_seen.saturating_duration_since(*second_seen) >= R2O_RECENT_TARGET_GAP
+            });
+        if !independent {
+            return None;
+        }
+        let mut target = DiscoveryTarget::from_event(newest_hello)?;
+        target.endpoint = std::net::SocketAddr::new(server_ip, server_port).to_string();
+        Some(target)
+    }
+
     pub fn take_for_fin_retry(
         &mut self,
         event: &R2oTcpFinRetryEvent,
@@ -302,7 +364,7 @@ mod tests {
     use super::{R2O_LATE_RX_CACHE_CAPACITY, R2oLateRxCache};
     use r2k_core::control::{
         HelloEvent, R2oTcpFinRetryEvent, R2oTcpRstAfterAppEvent, R2oTcpSilenceEvent,
-        R2oTcpStallEvent, SHAPE_LEGACY, SHAPE_MODERN,
+        R2oTcpStallEvent, SHAPE_ECH_TCP, SHAPE_LEGACY, SHAPE_MODERN,
     };
     use std::time::{Duration, Instant};
 
@@ -463,6 +525,62 @@ mod tests {
                 .take_for_rst_fallback(&reset, None, now + Duration::from_secs(601))
                 .is_none(),
             "связь SNI/IP старше fallback-срока не используется"
+        );
+    }
+
+    #[test]
+    fn rst_fallback_выбирает_самое_свежее_sni_для_recheck_без_clienthello() {
+        let now = Instant::now();
+        let mut cache = R2oLateRxCache::default();
+        let first = hello(SHAPE_MODERN, true, Some(812));
+        assert!(cache.capture(&first, now));
+        let mut second = hello(SHAPE_ECH_TCP, true, Some(701));
+        second.key[33..35].copy_from_slice(&52_003u16.to_be_bytes());
+        second.host = Some(b"gateway.example.com".to_vec());
+        assert!(cache.capture(&second, now + Duration::from_secs(10)));
+
+        let mut reset_key = first.key;
+        reset_key[33..35].copy_from_slice(&52_004u16.to_be_bytes());
+        let reset = R2oTcpRstAfterAppEvent {
+            key: reset_key,
+            client_is_low: true,
+            planned: true,
+        };
+        let target = cache
+            .recent_target_for_rst(&reset, now + Duration::from_secs(11))
+            .unwrap();
+        assert_eq!(target.host, "gateway.example.com");
+        assert_eq!(target.endpoint, "198.51.100.9:443");
+        assert_eq!(target.shape, SHAPE_ECH_TCP);
+    }
+
+    #[test]
+    fn rst_fallback_не_выбирает_свежее_sni_при_близких_конкурентах() {
+        let now = Instant::now();
+        let mut cache = R2oLateRxCache::default();
+        let first = hello(SHAPE_MODERN, true, Some(812));
+        assert!(cache.capture(&first, now));
+        let mut second = hello(SHAPE_MODERN, true, Some(701));
+        second.key[33..35].copy_from_slice(&52_003u16.to_be_bytes());
+        second.host = Some(b"other.example".to_vec());
+        assert!(cache.capture(&second, now + Duration::from_secs(1)));
+
+        let mut reset_key = first.key;
+        reset_key[33..35].copy_from_slice(&52_004u16.to_be_bytes());
+        let reset = R2oTcpRstAfterAppEvent {
+            key: reset_key,
+            client_is_low: true,
+            planned: true,
+        };
+        assert!(
+            cache
+                .recent_target_for_rst(&reset, now + Duration::from_secs(2))
+                .is_none()
+        );
+        assert!(
+            cache
+                .recent_target_for_rst(&reset, now + Duration::from_secs(601))
+                .is_none()
         );
     }
 

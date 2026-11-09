@@ -72,10 +72,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 #[cfg(unix)]
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 #[cfg(unix)]
 static R2O_CONTROLLER_STOP: AtomicBool = AtomicBool::new(false);
+/// Счётчики задач Discovery на весь процесс: в merged-режиме они
+/// агрегируют IPv4 и IPv6, как единый планировщик D2O.
+#[cfg(unix)]
+static R2O_DISCOVERY_WORKERS_STARTED: AtomicU64 = AtomicU64::new(0);
+#[cfg(unix)]
+static R2O_DISCOVERY_WORKERS_JOINED: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(unix)]
 extern "C" fn r2o_controller_request_stop(_signal: libc::c_int) {
@@ -2667,11 +2673,18 @@ fn catalog_commands_with_send_cap(
         for observation in &domain_state.observations {
             let direct_clear = observation.evidence & DOMAIN_DIRECT_CLEAR != 0;
             let failed_group_plan = observation.evidence & DOMAIN_PLAN_FAILED != 0
-                && active_groups.iter().any(|group| {
+                && (active_groups.iter().any(|group| {
                     group.key == observation.key
                         && group.plan_id == observation.plan_id
                         && domain_member(&observation.name, &group.suffix)
-                })
+                }) || domain_state.groups.iter().any(|group| {
+                    // На первом синке active_groups ещё пуст: группа будет
+                    // установлена ниже, но исключение обязано попасть в тот же
+                    // пакет команд, иначе плохой общий план применяется снова.
+                    group.key == observation.key
+                        && group.plan_id == observation.plan_id
+                        && domain_member(&observation.name, &group.suffix)
+                }))
                 && !has_confirmed_exact_binding(catalog, observation);
             if !direct_clear && !failed_group_plan {
                 continue;
@@ -11599,6 +11612,7 @@ impl DiscoveryWorker {
                         let Some(_permit) = permit else {
                             break;
                         };
+                        R2O_DISCOVERY_WORKERS_STARTED.fetch_add(1, Ordering::Relaxed);
                         for target in expired {
                             if worker_outcomes
                                 .send(R2oDiscoveryWorkOutcome {
@@ -11736,6 +11750,7 @@ impl DiscoveryWorker {
                     if worker_outcomes.send(outcome).is_err() {
                         break;
                     }
+                    R2O_DISCOVERY_WORKERS_JOINED.fetch_add(1, Ordering::Relaxed);
                 }
             }));
         }
@@ -12091,6 +12106,13 @@ impl DiscoveryWorker {
             now,
         );
         self.challenge_cooldowns.insert(key, expires_at);
+    }
+
+    fn r2o_worker_counts(&self) -> (u64, u64) {
+        (
+            R2O_DISCOVERY_WORKERS_STARTED.load(Ordering::Relaxed),
+            R2O_DISCOVERY_WORKERS_JOINED.load(Ordering::Relaxed),
+        )
     }
 
     fn r2o_outstanding_task_count(&self, now: std::time::Instant) -> usize {
@@ -15170,6 +15192,33 @@ struct QuicDiscoveryTrialOutcome {
     applied: bool,
 }
 
+/// Исключить имя из общего группового плана после планового отказа.
+/// Возвращает исключённую группу, если observation принят каталогом.
+#[cfg(unix)]
+fn r2o_exclude_failed_group(
+    catalog: &mut Catalog,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    now: i64,
+) -> Option<r2o_controller::catalog::DomainGroup> {
+    let state = catalog.domain_state.as_mut()?;
+    let key = GroupKey {
+        transport: 6,
+        family: target.family,
+        shape: target.shape,
+        probe_path: String::new(),
+        ech_origin: String::new(),
+    };
+    let group = state.match_domain(&target.host, &key)?.clone();
+    let observation = DomainObservation {
+        name: target.host.clone(),
+        plan_id: group.plan_id.clone(),
+        key: group.key.clone(),
+        evidence: DOMAIN_PLAN_FAILED,
+        at: now.max(1),
+    };
+    state.learn(observation).ok()?.then_some(group)
+}
+
 #[cfg(unix)]
 impl ControlClient {
     fn connect(path: PathBuf) -> Result<Self, Box<dyn Error>> {
@@ -15887,6 +15936,10 @@ impl ControlClient {
                                 worker.r2o_outstanding_task_count(std::time::Instant::now())
                             })
                             .unwrap_or_default();
+                        let (workers_started, workers_joined) = discovery
+                            .as_ref()
+                            .map(|(worker, _, _, _)| worker.r2o_worker_counts())
+                            .unwrap_or_default();
                         let limiter = measurements.limited_by.as_deref().unwrap_or_default();
                         let limiter_mask = u32::from(limiter.contains("процессор"))
                             | u32::from(limiter.contains("память")) << 1
@@ -15985,8 +16038,8 @@ impl ControlClient {
                             workers_join_pending: 0,
                             worker_oldest_age_ms: None,
                             last_measurement_age_ms: None,
-                            workers_started: 0,
-                            workers_joined: 0,
+                            workers_started,
+                            workers_joined,
                             worker_start_failures: 0,
                             worker_join_failures: 0,
                             worker_oldest_type: "",
@@ -17883,6 +17936,22 @@ impl ControlClient {
                                 );
                             }
                             Some(mut input) => {
+                                if event.planned {
+                                    let target = input.discovery_target.clone();
+                                    if let (Some(target), Some((_, catalog, catalog_path, _))) =
+                                        (target, &mut discovery)
+                                        && let Err(error) = self.r2o_recheck_failed_exact_binding(
+                                            &target,
+                                            catalog,
+                                            catalog_path,
+                                        )
+                                    {
+                                        eprintln!(
+                                            "не удалось пометить устаревшую привязку {} после зависания: {error}",
+                                            target.host
+                                        );
+                                    }
+                                }
                                 if let Some((discovery_worker, catalog, _, _)) = discovery.as_ref()
                                 {
                                     discovery_worker
@@ -17916,9 +17985,31 @@ impl ControlClient {
                                     );
                                 }
                             }
-                            None => println!(
-                                "парная RX-проверка не запущена: нет свежего полного ClientHello с SNI для потока {client} -> {server}"
-                            ),
+                            None => {
+                                let fallback = if event.planned {
+                                    r2o_late_rx_hellos.recent_target_for_tcp_stall(&event, now)
+                                } else {
+                                    None
+                                };
+                                if let Some(target) = fallback {
+                                    if let Some((_, catalog, catalog_path, _)) = &mut discovery
+                                        && let Err(error) = self.r2o_recheck_failed_exact_binding(
+                                            &target,
+                                            catalog,
+                                            catalog_path,
+                                        )
+                                    {
+                                        eprintln!(
+                                            "не удалось пометить устаревшую привязку {} после зависания по недавнему SNI/IP: {error}",
+                                            target.host
+                                        );
+                                    }
+                                } else {
+                                    println!(
+                                        "парная RX-проверка не запущена: нет свежего полного ClientHello с SNI для потока {client} -> {server}"
+                                    );
+                                }
+                            }
                         }
                     }
                     std::io::stdout().flush()?;
@@ -17953,6 +18044,22 @@ impl ControlClient {
                                 );
                             }
                             Some(mut input) => {
+                                if event.planned {
+                                    let target = input.discovery_target.clone();
+                                    if let (Some(target), Some((_, catalog, catalog_path, _))) =
+                                        (target, &mut discovery)
+                                        && let Err(error) = self.r2o_recheck_failed_exact_binding(
+                                            &target,
+                                            catalog,
+                                            catalog_path,
+                                        )
+                                    {
+                                        eprintln!(
+                                            "не удалось пометить устаревшую привязку {} после повторного FIN: {error}",
+                                            target.host
+                                        );
+                                    }
+                                }
                                 if let Some((discovery_worker, catalog, _, _)) = discovery.as_ref()
                                 {
                                     discovery_worker
@@ -18016,6 +18123,22 @@ impl ControlClient {
                                 );
                             }
                             Some(mut input) => {
+                                if event.planned {
+                                    let target = input.discovery_target.clone();
+                                    if let (Some(target), Some((_, catalog, catalog_path, _))) =
+                                        (target, &mut discovery)
+                                        && let Err(error) = self.r2o_recheck_failed_exact_binding(
+                                            &target,
+                                            catalog,
+                                            catalog_path,
+                                        )
+                                    {
+                                        eprintln!(
+                                            "не удалось пометить устаревшую привязку {} после позднего RST: {error}",
+                                            target.host
+                                        );
+                                    }
+                                }
                                 if let Some((discovery_worker, catalog, _, _)) = discovery.as_ref()
                                 {
                                     discovery_worker
@@ -18036,9 +18159,31 @@ impl ControlClient {
                                     );
                                 }
                             }
-                            None => println!(
-                                "парная RX-проверка для {client} -> {server} не запущена: нет свежего полного ClientHello с SNI и однозначного недавнего SNI/IP"
-                            ),
+                            None => {
+                                let fallback = if event.planned {
+                                    r2o_late_rx_hellos.recent_target_for_rst(&event, now)
+                                } else {
+                                    None
+                                };
+                                if let Some(target) = fallback {
+                                    if let Some((_, catalog, catalog_path, _)) = &mut discovery
+                                        && let Err(error) = self.r2o_recheck_failed_exact_binding(
+                                            &target,
+                                            catalog,
+                                            catalog_path,
+                                        )
+                                    {
+                                        eprintln!(
+                                            "не удалось пометить устаревшую привязку {} после позднего RST по недавнему SNI/IP: {error}",
+                                            target.host
+                                        );
+                                    }
+                                } else {
+                                    println!(
+                                        "парная RX-проверка для {client} -> {server} не запущена: нет свежего полного ClientHello с SNI и однозначного недавнего SNI/IP"
+                                    );
+                                }
+                            }
                         }
                     }
                     std::io::stdout().flush()?;
@@ -21118,7 +21263,31 @@ impl ControlClient {
             std::time::Instant::now(),
         );
         if result.marked == 0 && result.removed == 0 {
-            return Ok(false);
+            // Exact-привязки нет, но имя может покрываться общим планом группы.
+            // Добавляем наблюдение PLAN_FAILED и сразу ставим SET_BYPASS —
+            // тот же механизм, которым catalog_commands_for_runtime исключает
+            // участника группы при следующей синхронизации.
+            let exception = r2o_exclude_failed_group(&mut updated, target, now);
+            let Some(group) = exception else {
+                return Ok(false);
+            };
+            if let Err(error) = updated.save_atomic(catalog_path, now.max(1)) {
+                eprintln!(
+                    "не удалось сохранить групповое исключение {}: {error}",
+                    target.host
+                );
+            }
+            *catalog = updated;
+            let command = control_frame_with_area_id(
+                &encode_set_bypass(&target.host, 6, target.shape, target.family)?,
+                random_id()?,
+            )?;
+            self.send_command(&command, control::COMMAND_SET_BYPASS)?;
+            println!(
+                "{}: общий план {} для суффикса {} исключён из runtime и сохранён как неудачный",
+                target.host, group.plan_id, group.suffix
+            );
+            return Ok(true);
         }
         if let Err(error) = updated.save_atomic(catalog_path, now.max(1)) {
             eprintln!(
@@ -23822,6 +23991,90 @@ mod tests {
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn плановый_отказ_исключает_имя_из_общего_группового_плана() {
+        use r2o_controller::catalog::{Catalog, DomainObservation, DomainState, GroupKey};
+
+        let key = GroupKey {
+            transport: 6,
+            family: 4,
+            shape: SHAPE_ECH_TCP,
+            probe_path: String::new(),
+            ech_origin: String::new(),
+        };
+        let plan_id = "a0479da26d1df262779028a171882465".to_owned();
+        let mut state = DomainState::default();
+        for name in [
+            "gateway.discord.gg",
+            "gateway-us-east1-d.discord.gg",
+            "remote-auth-gateway.discord.gg",
+        ] {
+            state.observations.push(DomainObservation {
+                name: name.into(),
+                plan_id: plan_id.clone(),
+                key: key.clone(),
+                evidence: 1,
+                at: 1,
+            });
+        }
+        state.restore().unwrap();
+        let mut catalog = Catalog {
+            domain_state: Some(state),
+            ..Catalog::default()
+        };
+        catalog.boxes.push(r2o_controller::catalog::BoxRecord {
+            id: "auto-a0479".into(),
+            plans: vec![r2o_controller::catalog::Plan {
+                id: plan_id.clone(),
+                proto: "tls".into(),
+                text: "r2o-plan 1 5\nproto tcp tls\nsegment 1400\npayload-pad64 2 1 15\nseqovl payload=2 poison=0\norder forward\n".into(),
+                enabled: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "gateway-us-east1-c.discord.gg".into(),
+            endpoint: "162.159.133.234:443".into(),
+            family: 4,
+            shape: SHAPE_ECH_TCP,
+        };
+
+        let excluded = super::r2o_exclude_failed_group(&mut catalog, &target, 100)
+            .expect("группа должна быть исключена");
+        assert_eq!(excluded.suffix, "discord.gg");
+        let state = catalog.domain_state.as_ref().unwrap();
+        assert!(state.observations.iter().any(|observation| {
+            observation.name == target.host
+                && observation.plan_id == excluded.plan_id
+                && observation.evidence & super::DOMAIN_PLAN_FAILED != 0
+        }));
+        assert!(
+            state.match_domain(&target.host, &key).is_none(),
+            "исключённый хост не должен снова покрываться групповым планом"
+        );
+
+        let compiled = super::catalog_commands_with_send_cap(&mut catalog, 1280, 100)
+            .expect("каталог с групповым исключением должен компилироваться");
+        let mut bypass_sent = false;
+        for (_, bytes) in &compiled.commands {
+            let frame = read_frame(&mut std::io::Cursor::new(bytes.clone())).unwrap();
+            if frame.kind == r2k_core::control::COMMAND_SET_BYPASS {
+                let name_len = usize::from(frame.body[0]);
+                if frame.body.len() >= name_len + 1
+                    && &frame.body[1..1 + name_len] == target.host.as_bytes()
+                {
+                    bypass_sent = true;
+                }
+            }
+        }
+        assert!(
+            bypass_sent,
+            "первый синк обязан отправить SET_BYPASS, даже когда active_groups ещё пуст"
         );
     }
 

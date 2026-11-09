@@ -1690,6 +1690,8 @@ mod tests {
             snapshots: 4,
             http_records: 5,
             http_queued: 6,
+            workers_started: 12,
+            workers_joined: 9,
             ..Counts::default()
         });
         for id in 0..64 {
@@ -1705,6 +1707,8 @@ mod tests {
         assert_eq!(report["samples"][0]["snapshots"], 4);
         assert_eq!(report["samples"][0]["http_records"], 5);
         assert_eq!(report["samples"][0]["http_queued"], 6);
+        assert_eq!(report["samples"][0]["workers_started"], 12);
+        assert_eq!(report["samples"][0]["workers_joined"], 9);
         assert_eq!(
             report["samples"][0]["processes"].as_array().unwrap().len(),
             3
