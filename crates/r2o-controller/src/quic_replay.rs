@@ -888,16 +888,23 @@ async fn r2o_quic_collect_donor_answers(
 }
 
 /// Выполнить параллельные raw Initial-пробы с критерием ответа d2o.
+/// Начальное состояние QUIC-опроса: метка считается выставленной, пока
+/// конкретный сокет не докажет обратное. Иначе `false & true` скрывает
+/// успешный SO_MARK при `mark != 0` и останавливает data-stage.
+fn r2o_quic_raw_ask_initial() -> R2oQuicRawAskResult {
+    R2oQuicRawAskResult {
+        marked: true,
+        ..R2oQuicRawAskResult::default()
+    }
+}
+
 pub async fn r2o_quic_ask_donor_parallel(
     endpoint: SocketAddr,
     snapshots: &[Vec<u8>],
     mark: Option<u32>,
     timeout: Duration,
 ) -> R2oQuicRawAskResult {
-    let mut result = R2oQuicRawAskResult {
-        marked: mark.is_none_or(|mark| mark == 0),
-        ..R2oQuicRawAskResult::default()
-    };
+    let mut result = r2o_quic_raw_ask_initial();
     let mut pending = Vec::with_capacity(snapshots.len());
     for snapshot in snapshots {
         let (socket, marked) =
@@ -962,10 +969,7 @@ pub async fn r2o_quic_ask_donor_version_negotiation(
     mark: Option<u32>,
     timeout: Duration,
 ) -> R2oQuicRawAskResult {
-    let mut result = R2oQuicRawAskResult {
-        marked: mark.is_none_or(|mark| mark == 0),
-        ..R2oQuicRawAskResult::default()
-    };
+    let mut result = r2o_quic_raw_ask_initial();
     let mut pending = Vec::with_capacity(3);
     for _ in 0..3 {
         let Some((packet, dcid)) = r2o_quic_build_vn_probe() else {
@@ -1012,12 +1016,26 @@ mod tests {
         r2o_quic_data_proof_confirmed, r2o_quic_direct_action, r2o_quic_discovery_candidates,
         r2o_quic_filter_round_decision, r2o_quic_fragment_control_succeeded,
         r2o_quic_neutral_control_snapshots, r2o_quic_original_fallback_candidates,
-        r2o_quic_short_control_data_verdict, r2o_quic_strategy_attempt_decision,
-        r2o_quic_trial_data_verdict,
+        r2o_quic_raw_ask_initial, r2o_quic_short_control_data_verdict,
+        r2o_quic_strategy_attempt_decision, r2o_quic_trial_data_verdict,
     };
     use r2k_core::quic::R2kQuicDataVerdict;
     use std::net::{SocketAddr, UdpSocket};
     use std::time::Duration;
+
+    #[test]
+    fn r2o_quic_raw_ask_starts_marked_for_nonzero_mark() {
+        // Регрессия: начальное `marked = mark.is_none_or(|m| m == 0)`
+        // давало false при mark=Some(46), и `false & true` после успешного
+        // SO_MARK навсегда скрывал метку. QUIC-воркер останавливался до
+        // HTTP/3 data-stage.
+        assert!(r2o_quic_raw_ask_initial().marked);
+        assert_eq!(
+            r2o_quic_raw_ask_initial().marked,
+            true,
+            "метка должна начинаться как подтверждённая"
+        );
+    }
 
     #[test]
     fn r2o_quic_base_result_matches_d2o() {

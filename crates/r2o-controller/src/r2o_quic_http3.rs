@@ -84,7 +84,13 @@ pub fn r2o_quic_http3_udp_socket_fresh(
         let socket = UdpSocket::bind(bind).map_err(R2oQuicUdpSocketError::ordinary)?;
         let mut marked = mark.is_none_or(|mark| mark == 0);
         if let Some(mark) = mark.filter(|mark| *mark != 0) {
-            marked = r2o_quic_http3_set_socket_mark(&socket, mark).is_ok();
+            marked = match r2o_quic_http3_set_socket_mark(&socket, mark) {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!("QUIC SO_MARK {mark:#x} не установился: {error}");
+                    false
+                }
+            };
         }
         socket
             .connect(server)
