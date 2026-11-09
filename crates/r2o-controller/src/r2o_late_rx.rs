@@ -7,7 +7,14 @@ use std::net::IpAddr;
 use std::time::Instant;
 
 const R2O_LATE_RX_CACHE_CAPACITY: usize = 128;
-const R2O_LATE_RX_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+/// Точный flow-ключ живёт минуту: именно столько D2O считает поздний RST
+/// связанным с исходным ClientHello.
+const R2O_LATE_RX_EXACT_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+/// Связь «недавний SNI -> серверный IP» хранится дольше: она нужна только
+/// как безопасный fallback, когда точного ClientHello для потока нет.
+/// Совпадение проверяется и по IP, и по порту, поэтому смена адреса
+/// автоматически отбрасывает устаревшую запись.
+const R2O_LATE_RX_FALLBACK_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
 pub struct R2oLateRxInput {
     pub options: FetchOptions,
@@ -95,6 +102,67 @@ impl R2oLateRxCache {
         self.take_for_flow(&reset.key, reset.client_is_low, mark, now)
     }
 
+    /// Fallback для RST после TLS app-data, когда точного ClientHello потока
+    /// нет. Ищет недавний HelloEvent по серверному IP и порту. Если тому же
+    /// endpoint соответствует несколько имён, fallback отказывается угадывать.
+    pub fn take_for_rst_fallback(
+        &mut self,
+        reset: &R2oTcpRstAfterAppEvent,
+        mark: Option<u32>,
+        now: Instant,
+    ) -> Option<R2oLateRxInput> {
+        self.expire(now);
+        let (family, server_ip, server_port) =
+            r2o_server_endpoint(&reset.key, reset.client_is_low)?;
+        let mut candidates: HashMap<
+            String,
+            (Instant, [u8; r2k_core::control::KEY_LEN], HelloEvent),
+        > = HashMap::new();
+        for (key, (hello, captured)) in self.entries.iter() {
+            if now.saturating_duration_since(*captured) >= R2O_LATE_RX_FALLBACK_TTL
+                || hello.key[0] != family
+                || hello.key[37] != 6
+                || !r2o_cached_hello_matches_server(key, server_ip, server_port)
+            {
+                continue;
+            }
+            let Some(host) = r2o_cached_hello_host(hello) else {
+                continue;
+            };
+            let candidate = (*captured, *key, hello.clone());
+            match candidates.get(&host) {
+                Some((seen, _, _)) if *seen >= *captured => {}
+                _ => {
+                    candidates.insert(host, candidate);
+                }
+            }
+        }
+        if candidates.len() != 1 {
+            return None;
+        }
+        let (host, (_, key, hello)) = candidates.into_iter().next()?;
+        let mut target = DiscoveryTarget::from_event(&hello)?;
+        target.endpoint = std::net::SocketAddr::new(server_ip, server_port).to_string();
+        let shape = hello.shape?;
+        let options = FetchOptions {
+            name: host,
+            ip: Some(server_ip),
+            port: server_port,
+            path: "/".into(),
+            deadline: std::time::Duration::from_secs(6),
+            tls12: shape == r2k_core::control::SHAPE_LEGACY,
+            wire_len: hello.r2o_wire_len,
+            mark,
+        };
+        options.validate().ok()?;
+        self.entries.remove(&key);
+        Some(R2oLateRxInput {
+            discovery_target: Some(target),
+            options,
+            alternate_path: None,
+        })
+    }
+
     pub fn take_for_tcp_stall(
         &mut self,
         event: &R2oTcpStallEvent,
@@ -124,7 +192,7 @@ impl R2oLateRxCache {
         self.expire(now);
         let (hello, captured) = self.entries.get(&event.key)?;
         if hello.key != event.key
-            || now.saturating_duration_since(*captured) >= R2O_LATE_RX_CACHE_TTL
+            || now.saturating_duration_since(*captured) >= R2O_LATE_RX_EXACT_TTL
         {
             return None;
         }
@@ -140,29 +208,11 @@ impl R2oLateRxCache {
     ) -> Option<R2oLateRxInput> {
         self.expire(now);
         let (hello, captured) = self.entries.remove(key)?;
-        if hello.key != *key || now.saturating_duration_since(captured) >= R2O_LATE_RX_CACHE_TTL {
+        if hello.key != *key || now.saturating_duration_since(captured) >= R2O_LATE_RX_EXACT_TTL {
             return None;
         }
-        let family = hello.key[0];
-        let (address, port_bytes) = if client_is_low {
-            (&hello.key[17..], &hello.key[35..37])
-        } else {
-            (&hello.key[1..], &hello.key[33..35])
-        };
-        let ip = match family {
-            4 => IpAddr::V4(std::net::Ipv4Addr::new(
-                address[0], address[1], address[2], address[3],
-            )),
-            6 => IpAddr::V6(std::net::Ipv6Addr::from(
-                <[u8; 16]>::try_from(&address[..16]).ok()?,
-            )),
-            _ => return None,
-        };
-        let port = u16::from_be_bytes([port_bytes[0], port_bytes[1]]);
-        if port == 0 || port == 80 {
-            return None;
-        }
-        let host = std::str::from_utf8(hello.host.as_deref()?).ok()?.to_owned();
+        let (_, ip, port) = r2o_server_endpoint(&hello.key, client_is_low)?;
+        let host = r2o_cached_hello_host(&hello)?;
         let discovery_target = DiscoveryTarget::from_event(&hello);
         let options = FetchOptions {
             name: host,
@@ -184,9 +234,67 @@ impl R2oLateRxCache {
 
     fn expire(&mut self, now: Instant) {
         self.entries.retain(|_, (_, captured)| {
-            now.saturating_duration_since(*captured) < R2O_LATE_RX_CACHE_TTL
+            now.saturating_duration_since(*captured) < R2O_LATE_RX_FALLBACK_TTL
         });
     }
+}
+
+fn r2o_cached_hello_host(hello: &HelloEvent) -> Option<String> {
+    let raw = hello
+        .host
+        .as_deref()
+        .and_then(|host| std::str::from_utf8(host).ok())?;
+    crate::domain::normalize(raw).ok()
+}
+
+/// Определить серверный конец TCP-потока по ориентации клиента.
+fn r2o_server_endpoint(
+    key: &[u8; r2k_core::control::KEY_LEN],
+    client_is_low: bool,
+) -> Option<(u8, IpAddr, u16)> {
+    let family = key[0];
+    let (address, port_bytes) = if client_is_low {
+        (&key[17..], &key[35..37])
+    } else {
+        (&key[1..], &key[33..35])
+    };
+    let ip = match family {
+        4 => IpAddr::V4(std::net::Ipv4Addr::new(
+            address[0], address[1], address[2], address[3],
+        )),
+        6 => IpAddr::V6(std::net::Ipv6Addr::from(
+            <[u8; 16]>::try_from(&address[..16]).ok()?,
+        )),
+        _ => return None,
+    };
+    let port = u16::from_be_bytes([port_bytes[0], port_bytes[1]]);
+    (port != 0 && port != 80).then_some((family, ip, port))
+}
+
+/// Совпадает ли любой конец сохранённого HelloEvent с серверным endpoint RST.
+/// Клиентская сторона неизвестна, поэтому проверяются оба конца ключа.
+fn r2o_cached_hello_matches_server(
+    key: &[u8; r2k_core::control::KEY_LEN],
+    server_ip: IpAddr,
+    server_port: u16,
+) -> bool {
+    let family = key[0];
+    if family != 4 && family != 6 {
+        return false;
+    }
+    let low_port = u16::from_be_bytes([key[33], key[34]]);
+    let high_port = u16::from_be_bytes([key[35], key[36]]);
+    let matches = |address: &[u8], port: u16| {
+        if port != server_port {
+            return false;
+        }
+        match (family, server_ip) {
+            (4, IpAddr::V4(ip)) => address.get(..4) == Some(ip.octets().as_slice()),
+            (6, IpAddr::V6(ip)) => address.get(..16) == Some(ip.octets().as_slice()),
+            _ => false,
+        }
+    };
+    matches(&key[1..], low_port) || matches(&key[17..], high_port)
 }
 
 #[cfg(test)]
@@ -274,6 +382,88 @@ mod tests {
         assert_eq!(input.options.ip.unwrap().to_string(), "2001:db8::20");
         assert_eq!(input.options.port, 443);
         assert!(input.options.tls12);
+    }
+
+    #[test]
+    fn rst_fallback_находит_единственный_недавний_sni_по_серверному_ip() {
+        let now = Instant::now();
+        let mut cache = R2oLateRxCache::default();
+        let hello = hello(SHAPE_MODERN, true, Some(812));
+        assert!(cache.capture(&hello, now));
+
+        let mut reset_key = hello.key;
+        reset_key[33..35].copy_from_slice(&52_002u16.to_be_bytes());
+        let reset = R2oTcpRstAfterAppEvent {
+            key: reset_key,
+            client_is_low: true,
+            planned: true,
+        };
+        assert!(cache.take_for_rst(&reset, None, now).is_none());
+
+        let input = cache.take_for_rst_fallback(&reset, Some(46), now).unwrap();
+        assert_eq!(input.options.name, "example.com");
+        assert_eq!(input.options.ip.unwrap().to_string(), "198.51.100.9");
+        assert_eq!(input.options.port, 443);
+        assert_eq!(input.options.wire_len, Some(812));
+        assert_eq!(input.options.mark, Some(46));
+        assert_eq!(input.discovery_target.unwrap().endpoint, "198.51.100.9:443");
+        assert!(cache.take_for_rst_fallback(&reset, None, now).is_none());
+    }
+
+    #[test]
+    fn rst_fallback_не_угадывает_при_нескольких_sni_на_том_же_ip() {
+        let now = Instant::now();
+        let mut cache = R2oLateRxCache::default();
+        let first = hello(SHAPE_MODERN, true, Some(812));
+        assert!(cache.capture(&first, now));
+        let mut second = hello(SHAPE_MODERN, true, Some(701));
+        second.key[33..35].copy_from_slice(&52_003u16.to_be_bytes());
+        second.host = Some(b"other.example".to_vec());
+        assert!(cache.capture(&second, now));
+
+        let mut reset_key = first.key;
+        reset_key[33..35].copy_from_slice(&52_004u16.to_be_bytes());
+        let reset = R2oTcpRstAfterAppEvent {
+            key: reset_key,
+            client_is_low: true,
+            planned: true,
+        };
+        assert!(
+            cache.take_for_rst_fallback(&reset, None, now).is_none(),
+            "неоднозначный IP не должен снимать привязку"
+        );
+    }
+
+    #[test]
+    fn rst_fallback_проверяет_порт_и_срок_жизни_связи() {
+        let now = Instant::now();
+        let mut cache = R2oLateRxCache::default();
+        let hello = hello(SHAPE_MODERN, true, Some(812));
+        assert!(cache.capture(&hello, now));
+
+        let mut wrong_port = hello.key;
+        wrong_port[33..35].copy_from_slice(&52_002u16.to_be_bytes());
+        wrong_port[35..37].copy_from_slice(&8443u16.to_be_bytes());
+        let reset = R2oTcpRstAfterAppEvent {
+            key: wrong_port,
+            client_is_low: true,
+            planned: true,
+        };
+        assert!(cache.take_for_rst_fallback(&reset, None, now).is_none());
+
+        let mut right_port = hello.key;
+        right_port[33..35].copy_from_slice(&52_002u16.to_be_bytes());
+        let reset = R2oTcpRstAfterAppEvent {
+            key: right_port,
+            client_is_low: true,
+            planned: true,
+        };
+        assert!(
+            cache
+                .take_for_rst_fallback(&reset, None, now + Duration::from_secs(601))
+                .is_none(),
+            "связь SNI/IP старше fallback-срока не используется"
+        );
     }
 
     #[test]

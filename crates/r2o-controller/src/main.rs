@@ -17994,7 +17994,16 @@ impl ControlClient {
                     if let Some(worker) = &mut r2o_late_rx {
                         let now = std::time::Instant::now();
                         let mark = discovery.as_ref().and_then(|(_, _, _, mark)| *mark);
-                        match r2o_late_rx_hellos.take_for_rst(&event, mark, now) {
+                        let exact = r2o_late_rx_hellos.take_for_rst(&event, mark, now);
+                        let (input, source) = match exact {
+                            Some(input) => (Some(input), "точному ClientHello"),
+                            None if event.planned => (
+                                r2o_late_rx_hellos.take_for_rst_fallback(&event, mark, now),
+                                "недавнему SNI/IP",
+                            ),
+                            None => (None, "точному ClientHello"),
+                        };
+                        match input {
                             Some(input)
                                 if r2o_late_rx_is_covered_by_catalog(
                                     &input,
@@ -18018,8 +18027,8 @@ impl ControlClient {
                                     discovery.as_ref().map(|(worker, _, _, _)| worker),
                                 ) {
                                     println!(
-                                        "поставлена в очередь парная identity/gzip RX-проверка для {} -> {}",
-                                        client, server
+                                        "поставлена в очередь парная identity/gzip RX-проверка для {} -> {} по {}",
+                                        client, server, source
                                     );
                                 } else {
                                     println!(
@@ -18028,7 +18037,7 @@ impl ControlClient {
                                 }
                             }
                             None => println!(
-                                "парная RX-проверка для {client} -> {server} не запущена: нет свежего полного ClientHello с SNI"
+                                "парная RX-проверка для {client} -> {server} не запущена: нет свежего полного ClientHello с SNI и однозначного недавнего SNI/IP"
                             ),
                         }
                     }
