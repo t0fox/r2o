@@ -158,7 +158,7 @@
           <p id="diagnostic-status" class="diag-history-note" role="status">Проверяем состояние сбора…</p>
           <div id="diagnostic-data" class="diag-history-data" hidden>
             <section class="diag-card diag-memory-panel" aria-labelledby="diagnostic-memory-title">
-              <div class="diag-card-head"><div><h4 id="diagnostic-memory-title">Память контроллера IPv4</h4><p id="diagnostic-memory-interval">Интервал указан в отчёте · значения в МиБ</p></div>
+              <div class="diag-card-head"><div><h4 id="diagnostic-memory-title">Память контроллера</h4><p id="diagnostic-memory-interval">Интервал указан в отчёте · значения в МиБ</p></div>
                 <div class="diag-range" role="group" aria-label="Период графика памяти">
                   <button type="button" data-memory-range="2" aria-pressed="true">2 часа</button>
                   <button type="button" data-memory-range="24" aria-pressed="false">24 часа</button>
@@ -178,7 +178,7 @@
                 <label data-series-option="tracked_tls"><input type="checkbox" data-memory-series="tracked_tls"><span>TLS</span></label>
               </div>
               <p id="diagnostic-history-coverage" class="diag-history-note" role="status">Длительность истории определяется по снимкам.</p>
-              <svg id="diagnostic-memory-chart" class="diag-memory-chart" viewBox="0 0 960 260" role="img" aria-label="Память контроллера IPv4"></svg>
+              <svg id="diagnostic-memory-chart" class="diag-memory-chart" viewBox="0 0 960 260" role="img" aria-label="Память контроллера"></svg>
               <p id="diagnostic-memory-empty" class="diag-empty" hidden>Для выбранного периода нет доступных снимков памяти.</p>
               <p id="diagnostic-memory-caption" class="diag-history-note">Рост RSS сам по себе не подтверждает утечку.</p>
             </section>
@@ -255,7 +255,7 @@
             </div>
             <details class="diag-history-help" id="diagnostic-history-help">
               <summary>Что сохраняется</summary>
-              <p>Пока сбор включён, r2o-controller4 раз в указанный в отчёте интервал сохраняет ограниченную историю до указанной ёмкости: RSS, RssAnon, VmData, доступные показатели smaps_rollup, память каталога и HTTP-хранилища, задачи, workers и учтённые объекты TCP/QUIC/TLS. Отдельно сохраняются текущие счётчики madvise, аномалии, ошибки записи отчёта, переходы AIMD, исходы поиска и подробные снимки процессов. smaps_rollup необязателен и в OpenWrt может отсутствовать из-за конфигурации ядра; полный smaps не обходится. RssAnon читается из /proc/PID/status, дополнительных пакетов не требуется. Отсутствующий необязательный интерфейс отмечается как unsupported, а реальные ошибки чтения сохраняются в полном JSON. В отчёте видны вытесненные записи и доступность источников. Учёт объектов покрывает только перечисленные места выделения и не пересчитывает уже существующие объекты. Данные не отправляются автоматически. Полный отчёт содержит домены и IP-адреса: проверьте его перед отправкой в issue. Сбор по умолчанию выключен и отключается после перезагрузки; выключение удаляет историю. Последние 120 минутных снимков и 64 завершения поиска сохраняются локально. Полный отчёт содержит домены и IP-адреса; он остаётся локально и никуда не отправляется.</p>
+              <p>Пока сбор включён, r2o-controller раз в указанный в отчёте интервал сохраняет ограниченную историю до указанной ёмкости: RSS, RssAnon, VmData, доступные показатели smaps_rollup, память каталога и HTTP-хранилища, задачи, workers и учтённые объекты TCP/QUIC/TLS. Отдельно сохраняются текущие счётчики madvise, аномалии, ошибки записи отчёта, переходы AIMD, исходы поиска и подробные снимки процессов. smaps_rollup необязателен и в OpenWrt может отсутствовать из-за конфигурации ядра; полный smaps не обходится. RssAnon читается из /proc/PID/status, дополнительных пакетов не требуется. Отсутствующий необязательный интерфейс отмечается как unsupported, а реальные ошибки чтения сохраняются в полном JSON. В отчёте видны вытесненные записи и доступность источников. Учёт объектов покрывает только перечисленные места выделения и не пересчитывает уже существующие объекты. Данные не отправляются автоматически. Полный отчёт содержит домены и IP-адреса: проверьте его перед отправкой в issue. Сбор по умолчанию выключен и отключается после перезагрузки; выключение удаляет историю. Последние 120 минутных снимков и 64 завершения поиска сохраняются локально. Полный отчёт содержит домены и IP-адреса; он остаётся локально и никуда не отправляется.</p>
             </details>
           </div>
         </section>

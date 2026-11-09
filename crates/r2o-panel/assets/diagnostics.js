@@ -245,7 +245,7 @@
     active.forEach(function (metric) { rows.forEach(function (row) { if (number(row[metric.key]) !== null) all.push(row[metric.key]); }); });
     chart.replaceChildren();
     chart.dataset.points = String(rows.length);
-    chart.setAttribute("aria-label", "Память контроллера IPv4, период " + hours + " часа, точек: " + rows.length);
+    chart.setAttribute("aria-label", "Память контроллера, период " + hours + " часа, точек: " + rows.length);
     if (!rows.length || !active.length || !all.length) {
       chart.hidden = true;
       empty.hidden = false;
@@ -342,7 +342,7 @@
       var timeNote = timeDifference === null ? "Время одного из последних снимков неизвестно." :
         aligned ? "Снимки процессов и памяти: " + timeLabel(processAt !== null ? processAt : memoryWallAt) + "." :
           "Снимок процессов: " + timeLabel(processAt) + "; памяти: " + timeLabel(memoryWallAt) + " (разница " + formatAge(timeDifference * 1000) + ").";
-      note.textContent = timeNote + " Изменение контроллера IPv4 — за выбранный период графика; остальных процессов — за доступную историю того же PID.";
+      note.textContent = timeNote + " Изменение контроллера — за выбранный период графика; остальных процессов — за доступную историю того же PID.";
     }
     return { mismatch: mismatch };
   }
@@ -389,7 +389,7 @@
       "Кольцевые журналы перезаписали старые диагностические записи.",
       lost.map(function (entry) { return entry.label + " — " + entry.count; }).join("; "));
     if (processMismatch) add("warning", "Несогласованные снимки памяти",
-      "В снимках с одной меткой времени RSS контроллера IPv4 различается; значения оставлены у своих источников.",
+      "В снимках с одной меткой времени RSS контроллера различается; значения оставлены у своих источников.",
       "Процессы: " + formatBytes(processMismatch.process) + "; история памяти: " + formatBytes(processMismatch.memory));
     if (storageMismatch && storageMismatch.length) add("warning", "Несовпадение объёмов в отчёте",
       "График и карточки показывают снимок истории памяти; общий отчёт содержит другие значения.", storageMismatch.join("; "));
@@ -595,7 +595,7 @@
     if (latestDetail && latestDetail.smaps_rollup_status === "unsupported") extras += " В procfs отсутствует smaps_rollup; RssAnon читается из status.";
     if (latestDetail && latestDetail.smaps_rollup_source === "smaps-fallback") extras += " Anonymous и Private_Dirty получены из smaps.";
     return "Снимков: " + countWithCapacity(samples.length, report.sample_capacity) + "; завершений поиска: " + countWithCapacity(events.length, report.event_capacity) +
-      ", без подтверждённого результата: " + failures + ". " + (rss ? "RSS контроллера IPv4: " + formatKib(rss.rss_kib) +
+      ", без подтверждённого результата: " + failures + ". " + (rss ? "RSS контроллера: " + formatKib(rss.rss_kib) +
       (first ? " (" + ((rss.rss_kib - first.rss_kib) >= 0 ? "+" : "") + ((rss.rss_kib - first.rss_kib) / 1024).toFixed(1) + " за историю этого PID)" : "") + ". " : "") +
       "Снимков памяти: " + countWithCapacity(list(memory.samples).length, memory.capacity) + extras;
   }

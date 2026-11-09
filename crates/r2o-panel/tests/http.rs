@@ -468,6 +468,8 @@ fn root_serves_panel_layout_without_non_d2o_settings_controls() {
     assert!(body.contains("<!doctype html") || body.contains("<!DOCTYPE html"));
     assert!(body.contains(r#"<main id="app">"#));
     assert!(body.contains("id=\"diagnostics\""));
+    assert!(body.contains("id=\"diagnostic-memory-title\">Память контроллера<"));
+    assert!(!body.contains("id=\"diagnostic-memory-title\">Память контроллера IPv4<"));
     assert!(!body.contains("href=\"#r2o-settings\""));
     assert!(!body.contains("id=\"r2o-settings\""));
     assert!(!body.contains("id=\"r2o-settings-form\""));
