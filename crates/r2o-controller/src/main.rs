@@ -8872,6 +8872,38 @@ fn r2o_take_ready_quic_discovery(
     Some((entry, permit))
 }
 
+/// Учёт живых on-demand worker'ов. `finish` вызывается под блокировкой
+/// очереди перед выходом по простою: новая задача не должна принять
+/// завершающийся поток за свободный. Drop страхует панику и прочие выходы.
+#[cfg(unix)]
+struct R2oDiscoveryWorkerLife {
+    live: Arc<AtomicUsize>,
+    counted: AtomicBool,
+}
+
+#[cfg(unix)]
+impl R2oDiscoveryWorkerLife {
+    fn new(live: Arc<AtomicUsize>) -> Self {
+        Self {
+            live,
+            counted: AtomicBool::new(true),
+        }
+    }
+
+    fn finish(&self) {
+        if self.counted.swap(false, Ordering::AcqRel) {
+            self.live.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for R2oDiscoveryWorkerLife {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
 #[cfg(unix)]
 struct DiscoveryWorker {
     jobs: Arc<(std::sync::Mutex<R2oDiscoveryQueue>, std::sync::Condvar)>,
@@ -8924,6 +8956,7 @@ struct DiscoveryWorker {
     >,
     spawn_worker: Arc<dyn Fn() -> std::thread::JoinHandle<()> + Send + Sync>,
     worker_target: usize,
+    worker_live: Arc<AtomicUsize>,
     active: HashMap<R2oDiscoveryTaskKey, r2o_controller::discovery::DiscoveryTarget>,
     completed: HashSet<R2oDiscoveryTaskKey>,
     completed_started_at: HashMap<R2oDiscoveryTaskKey, std::time::Instant>,
@@ -11698,6 +11731,7 @@ impl DiscoveryWorker {
         let worker_target = measurement_gate
             .r2o_max_slots()
             .min(R2O_DISCOVERY_WORKER_THREADS);
+        let worker_live = Arc::new(AtomicUsize::new(0));
         let spawn_worker: Arc<dyn Fn() -> std::thread::JoinHandle<()> + Send + Sync> = {
             let base_cancel = Arc::clone(&cancel);
             let base_gate = measurement_gate.clone();
@@ -11707,6 +11741,7 @@ impl DiscoveryWorker {
             let base_outcomes = outcome_sender.clone();
             let base_runner = Arc::clone(&runner);
             let base_searches = Arc::clone(&searches);
+            let base_live = Arc::clone(&worker_live);
             Arc::new(move || {
                 let worker_cancel = Arc::clone(&base_cancel);
                 let worker_gate = base_gate.clone();
@@ -11716,7 +11751,10 @@ impl DiscoveryWorker {
                 let worker_outcomes = base_outcomes.clone();
                 let worker_runner = Arc::clone(&base_runner);
                 let worker_searches = Arc::clone(&base_searches);
+                let worker_live = Arc::clone(&base_live);
+                worker_live.fetch_add(1, Ordering::AcqRel);
                 std::thread::spawn(move || {
+                    let life = R2oDiscoveryWorkerLife::new(worker_live);
                     loop {
                         let has_jobs = {
                             let (queue, wake) = &*worker_jobs;
@@ -11725,6 +11763,7 @@ impl DiscoveryWorker {
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
                             loop {
                                 if worker_cancel.load(Ordering::Relaxed) {
+                                    life.finish();
                                     break false;
                                 }
                                 if queue.has_runnable(std::time::Instant::now()) {
@@ -11741,6 +11780,7 @@ impl DiscoveryWorker {
                                 if wait.timed_out()
                                     && !queue.has_runnable(std::time::Instant::now())
                                 {
+                                    life.finish();
                                     break false;
                                 }
                             }
@@ -11964,6 +12004,7 @@ impl DiscoveryWorker {
             pending_rechecks: HashMap::new(),
             spawn_worker,
             worker_target,
+            worker_live,
             active: HashMap::new(),
             completed: HashSet::new(),
             completed_started_at: HashMap::new(),
@@ -12004,11 +12045,11 @@ impl DiscoveryWorker {
         if !has_work {
             return;
         }
-        // `active` включает и уже выполняемые, и ожидающие задачи. Поэтому
-        // при втором подозрении рядом с занятым worker'ом поднимается ещё
-        // один, как в D2O с потоком на задачу.
+        // `active` включает и уже выполняемые, и ожидающие задачи. `worker_live`
+        // уменьшается завершающимся worker'ом ещё под блокировкой очереди,
+        // поэтому новая задача не примет выходящий поток за свободный.
         let desired = self.active.len().min(self.worker_target);
-        while self.threads.len() < desired {
+        while self.worker_live.load(Ordering::Acquire) < desired {
             self.threads.push((self.spawn_worker)());
         }
     }
@@ -25765,6 +25806,7 @@ mod tests {
             pending_rechecks: std::collections::HashMap::new(),
             spawn_worker: Arc::new(|| unreachable!("тестовый worker без потоков")),
             worker_target: 0,
+            worker_live: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             active: std::collections::HashMap::new(),
             completed: std::collections::HashSet::new(),
             completed_started_at: std::collections::HashMap::new(),
@@ -35351,6 +35393,75 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn discovery_worker_restarts_after_idle_exit_without_losing_task() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        use std::time::{Duration, Instant};
+
+        let runner = Arc::new(
+            |target: r2o_controller::discovery::DiscoveryTarget,
+             _trigger_planned: bool,
+             _cancel: Arc<AtomicBool>| {
+                super::DiscoveryOutcome {
+                    target,
+                    plan_text: Some("plan".into()),
+                    detail: "idle restart".into(),
+                    queue_expired: false,
+                    address_failure: false,
+                    address_recheck_acknowledged: false,
+                    address_recheck_probes: 0,
+                    direct_clear: false,
+                    volume_recovery: false,
+                    volume_fingerprint: None,
+                    volume_box_id: None,
+                    retry_after: None,
+                }
+            },
+        );
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
+        let mut worker = super::DiscoveryWorker::r2o_new_with_runner(gate, runner);
+        let target = |host: &str| r2o_controller::discovery::DiscoveryTarget {
+            host: host.into(),
+            endpoint: "192.0.2.11:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        assert!(worker.queue(target("idle-first.example")));
+        worker
+            .outcomes
+            .recv_timeout(Duration::from_secs(2))
+            .expect("первая задача должна завершиться");
+
+        let deadline = Instant::now() + Duration::from_secs(13);
+        while worker.worker_live.load(Ordering::Acquire) != 0 {
+            assert!(
+                Instant::now() < deadline,
+                "простаивающий worker не завершился за idle-timeout"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            worker
+                .threads
+                .iter()
+                .all(std::thread::JoinHandle::is_finished),
+            "handle завершившегося worker'а должен оставаться только до reap"
+        );
+
+        assert!(worker.queue(target("idle-second.example")));
+        assert!(
+            worker.worker_live.load(Ordering::Acquire) >= 1,
+            "новая задача обязана поднять worker после idle-выхода"
+        );
+        let outcome = worker
+            .outcomes
+            .recv_timeout(Duration::from_secs(2))
+            .expect("новая задача не должна потеряться после idle-выхода");
+        assert_eq!(outcome.requested_target.host, "idle-second.example");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn r2o_discovery_expiration_releases_target_and_keeps_worker_alive() {
         let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
         let permit = gate.r2o_try_acquire().unwrap();
@@ -39223,6 +39334,7 @@ mod tests {
             pending_rechecks: std::collections::HashMap::new(),
             spawn_worker: Arc::new(|| unreachable!("тестовый worker без потоков")),
             worker_target: 0,
+            worker_live: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             outcomes,
             network_whitelist_updates: Arc::new(Mutex::new(VecDeque::new())),
             cancel: Arc::new(AtomicBool::new(false)),
