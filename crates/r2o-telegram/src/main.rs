@@ -58,6 +58,47 @@ async fn main() {
     let config = Config::from_args();
     init_logging(&config);
 
+    if config.rt_proxy {
+        let idle_timeout = match r2o_telegram::rt_proxy::parse_duration(&config.rt_timeout) {
+            Ok(duration) => duration,
+            Err(error) => {
+                eprintln!("ошибка --timeout: {error}");
+                std::process::exit(2);
+            }
+        };
+        let health_interval =
+            match r2o_telegram::rt_proxy::parse_duration(&config.rt_health_interval) {
+                Ok(duration) => duration,
+                Err(error) => {
+                    eprintln!("ошибка --health-interval: {error}");
+                    std::process::exit(2);
+                }
+            };
+        let settings = r2o_telegram::rt_proxy::RtProxySettings {
+            listen: config.listen.clone(),
+            idle_timeout,
+            mark: config.rt_so_mark,
+            proxy_host: config.rt_proxy_host.clone(),
+            proxy_port: config.rt_proxy_port,
+            max_clients: config.rt_max_clients,
+            health_interval,
+            direct_hosts: config
+                .rt_direct_hosts
+                .split(',')
+                .map(|host| host.trim().to_ascii_lowercase())
+                .filter(|host| !host.is_empty())
+                .collect(),
+            direct_fallback: !config.rt_no_direct_fallback,
+            verbose: config.verbose,
+            health_spki_pin: config.rt_health_spki_pin.clone(),
+        };
+        if let Err(error) = r2o_telegram::rt_proxy::run(settings).await {
+            eprintln!("ошибка RuTracker-прокси: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     if config.initialize_identity {
         let identity = match r2o_telegram::identity::Identity::load_or_mint(&config.identity_file) {
             Ok(identity) => identity,

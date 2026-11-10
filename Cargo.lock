@@ -1556,10 +1556,12 @@ dependencies = [
  "libc",
  "r2k-core",
  "ring",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tar",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -1610,6 +1612,7 @@ dependencies = [
  "tracing-subscriber",
  "tungstenite",
  "webpki-roots 0.26.11",
+ "x509-parser",
  "zeroize",
 ]
 

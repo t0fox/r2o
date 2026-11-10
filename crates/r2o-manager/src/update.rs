@@ -5,15 +5,20 @@ use crate::{
     verify_manifest,
 };
 use r2k_core::dns::{DNS_RESOLVERS, build_a_query, parse_a_reply};
+use rustls::pki_types::ServerName;
+use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const PUBLIC_KEY: &[u8] = include_bytes!("../release-public.pem");
 const LATEST_URL: &str = "https://github.com/t0fox/r2o/releases/latest/download/latest.json";
@@ -743,9 +748,449 @@ fn download(
     max_bytes: u64,
     timeout: &str,
 ) -> Result<(), UpdateError> {
-    download_with("curl", url, destination, max_bytes, timeout)
+    validate_download_url(url)?;
+    let overrides = resolve_download_overrides(url)?;
+    download_rust(url, destination, max_bytes, timeout, &overrides)
 }
 
+const HTTP_MAX_REDIRECTS: usize = 5;
+const HTTP_HEADER_MAX_BYTES: usize = 64 * 1024;
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+struct HttpHead {
+    status: u16,
+    location: Option<String>,
+    chunked: bool,
+    content_length: Option<u64>,
+}
+
+fn download_rust(
+    url: &str,
+    destination: &Path,
+    max_bytes: u64,
+    timeout: &str,
+    overrides: &[(String, Vec<Ipv4Addr>)],
+) -> Result<(), UpdateError> {
+    let timeout_seconds = timeout.parse::<u64>().unwrap_or(600).clamp(1, 3600);
+    let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
+    let initial_host = download_url_host(url)
+        .ok_or_else(|| UpdateError::Download("недопустимый HTTPS-адрес загрузки".into()))?;
+    let override_map = overrides
+        .iter()
+        .map(|(host, addresses)| (host.as_str(), addresses.as_slice()))
+        .collect::<HashMap<_, _>>();
+    let mut current = url.to_owned();
+
+    for redirect in 0..=HTTP_MAX_REDIRECTS {
+        let (host, path) = parse_https_url(&current)?;
+        if redirect > 0
+            && initial_host == "github.com"
+            && !GITHUB_DOWNLOAD_HOSTS.contains(&host.as_str())
+        {
+            return Err(UpdateError::Download(format!(
+                "перенаправление на недопустимый хост {host}"
+            )));
+        }
+        let addresses = if let Some(addresses) = override_map.get(host.as_str()) {
+            (*addresses).to_vec()
+        } else {
+            resolve_download_host(&host)?
+        };
+        let mut last_error = None;
+        let mut next_url = None;
+        for address in addresses.into_iter().take(4) {
+            match fetch_https(&host, &path, address, destination, max_bytes, deadline) {
+                Ok(Some(location)) => {
+                    next_url = Some(resolve_redirect(&current, &host, &location, &initial_host)?);
+                    break;
+                }
+                Ok(None) => return Ok(()),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        if let Some(next) = next_url {
+            current = next;
+            continue;
+        }
+        return Err(last_error
+            .unwrap_or_else(|| UpdateError::Download(format!("не удалось скачать {current}"))));
+    }
+    Err(UpdateError::Download(
+        "слишком много перенаправлений при загрузке".into(),
+    ))
+}
+
+fn parse_https_url(url: &str) -> Result<(String, String), UpdateError> {
+    let rest = url
+        .strip_prefix("https://")
+        .ok_or_else(|| UpdateError::Download("разрешён только https".into()))?;
+    let (authority, path) = match rest.find('/') {
+        Some(index) => (&rest[..index], &rest[index..]),
+        None => (rest, "/"),
+    };
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, "443")) => (host, 443),
+        Some((_, _)) => {
+            return Err(UpdateError::Download(
+                "разрешён только HTTPS-порт 443".into(),
+            ));
+        }
+        None => (authority, 443),
+    };
+    let host = host.to_ascii_lowercase();
+    let normalized = if port == 443 {
+        format!("https://{host}")
+    } else {
+        format!("https://{host}:{port}")
+    };
+    if download_url_host(&normalized).as_deref() != Some(host.as_str()) {
+        return Err(UpdateError::Download(format!(
+            "недопустимый HTTPS-хост {host}"
+        )));
+    }
+    if path.is_empty() || path.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
+        return Err(UpdateError::Download("недопустимый путь загрузки".into()));
+    }
+    Ok((host, path.to_owned()))
+}
+
+fn resolve_redirect(
+    base_url: &str,
+    base_host: &str,
+    location: &str,
+    initial_host: &str,
+) -> Result<String, UpdateError> {
+    let location = location.trim();
+    if location.is_empty() {
+        return Err(UpdateError::Download("перенаправление без Location".into()));
+    }
+    let next = if location.starts_with("https://") {
+        location.to_owned()
+    } else if location.starts_with("//") {
+        return Err(UpdateError::Download(
+            "протокол-относительное перенаправление запрещено".into(),
+        ));
+    } else if location.starts_with('/') {
+        format!("https://{base_host}{location}")
+    } else if location.starts_with('?') {
+        let (_, path) = parse_https_url(base_url)?;
+        format!("https://{base_host}{path}{location}")
+    } else {
+        let (_, path) = parse_https_url(base_url)?;
+        let directory = path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+        format!("https://{base_host}{directory}/{location}")
+    };
+    validate_download_url(&next)?;
+    let host = download_url_host(&next)
+        .ok_or_else(|| UpdateError::Download("недопустимый адрес перенаправления".into()))?;
+    if initial_host == "github.com" && !GITHUB_DOWNLOAD_HOSTS.contains(&host.as_str()) {
+        return Err(UpdateError::Download(format!(
+            "перенаправление на недопустимый хост {host}"
+        )));
+    }
+    Ok(next)
+}
+
+fn fetch_https(
+    host: &str,
+    path: &str,
+    address: Ipv4Addr,
+    destination: &Path,
+    max_bytes: u64,
+    deadline: Instant,
+) -> Result<Option<String>, UpdateError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(UpdateError::Download("истёк тайм-аут загрузки".into()));
+    }
+    let tcp = TcpStream::connect_timeout(
+        &SocketAddr::from((address, 443)),
+        remaining.min(HTTP_CONNECT_TIMEOUT),
+    )
+    .map_err(|error| UpdateError::Download(format!("TCP {address}: {error}")))?;
+    tcp.set_read_timeout(Some(remaining.min(HTTP_READ_TIMEOUT)))
+        .map_err(|error| UpdateError::Download(format!("тайм-аут чтения: {error}")))?;
+    tcp.set_write_timeout(Some(remaining.min(HTTP_READ_TIMEOUT)))
+        .map_err(|error| UpdateError::Download(format!("тайм-аут записи: {error}")))?;
+
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let mut config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let server_name = ServerName::try_from(host.to_owned())
+        .map_err(|error| UpdateError::Download(format!("неверное TLS-имя {host}: {error}")))?;
+    let connection = ClientConnection::new(Arc::new(config), server_name)
+        .map_err(|error| UpdateError::Download(format!("TLS {host}: {error}")))?;
+    let mut stream = BufReader::new(StreamOwned::new(connection, tcp));
+
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: r2o-manager/{}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    stream
+        .get_mut()
+        .write_all(request.as_bytes())
+        .map_err(|error| UpdateError::Download(format!("отправка запроса: {error}")))?;
+    stream
+        .get_mut()
+        .flush()
+        .map_err(|error| UpdateError::Download(format!("отправка запроса: {error}")))?;
+
+    let head = read_http_head(&mut stream)?;
+    let parsed = parse_http_head(&head)?;
+    if matches!(parsed.status, 301 | 302 | 303 | 307 | 308) {
+        return Ok(Some(parsed.location.ok_or_else(|| {
+            UpdateError::Download("перенаправление без Location".into())
+        })?));
+    }
+    if parsed.status != 200 && parsed.status != 206 {
+        return Err(UpdateError::Download(format!(
+            "HTTP {} при загрузке {host}{path}",
+            parsed.status
+        )));
+    }
+
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut output = options.open(destination).map_err(|error| {
+        UpdateError::Download(format!(
+            "не удалось создать {}: {error}",
+            destination.display()
+        ))
+    })?;
+    let copied = if parsed.chunked {
+        copy_chunked(&mut stream, &mut output, max_bytes, deadline)
+    } else if let Some(length) = parsed.content_length {
+        copy_exact(&mut stream, &mut output, length, max_bytes, deadline)
+    } else {
+        copy_until_eof(&mut stream, &mut output, max_bytes, deadline)
+    };
+    let bytes = match copied {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            drop(output);
+            let _ = fs::remove_file(destination);
+            return Err(error);
+        }
+    };
+    if bytes == 0 {
+        drop(output);
+        let _ = fs::remove_file(destination);
+        return Err(UpdateError::Download("загрузки не содержат данных".into()));
+    }
+    output
+        .sync_all()
+        .map_err(|error| UpdateError::Download(format!("sync загрузки: {error}")))?;
+    Ok(None)
+}
+
+fn read_http_head(reader: &mut impl BufRead) -> Result<Vec<u8>, UpdateError> {
+    let mut head = Vec::new();
+    loop {
+        let mut line = Vec::new();
+        let read = reader
+            .read_until(b'\n', &mut line)
+            .map_err(|error| UpdateError::Download(format!("чтение заголовков: {error}")))?;
+        if read == 0 {
+            return Err(UpdateError::Download(
+                "соединение закрылось до HTTP-заголовков".into(),
+            ));
+        }
+        head.extend_from_slice(&line);
+        if head.len() > HTTP_HEADER_MAX_BYTES {
+            return Err(UpdateError::Download(
+                "HTTP-заголовки больше предела".into(),
+            ));
+        }
+        if line == b"\r\n" || line == b"\n" {
+            return Ok(head);
+        }
+    }
+}
+
+fn parse_http_head(head: &[u8]) -> Result<HttpHead, UpdateError> {
+    let text = String::from_utf8_lossy(head);
+    let mut lines = text.lines();
+    let status_line = lines
+        .next()
+        .ok_or_else(|| UpdateError::Download("пустой HTTP-ответ".into()))?;
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| UpdateError::Download("некорректный HTTP-статус".into()))?;
+    let mut location = None;
+    let mut chunked = false;
+    let mut content_length = None;
+    for line in lines {
+        let line = line.trim_end_matches('\r');
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("location") {
+            location = Some(value.to_owned());
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            chunked = value
+                .split(',')
+                .any(|part| part.trim().eq_ignore_ascii_case("chunked"));
+        } else if name.eq_ignore_ascii_case("content-length") {
+            content_length = Some(
+                value
+                    .parse::<u64>()
+                    .map_err(|_| UpdateError::Download("некорректный Content-Length".into()))?,
+            );
+        }
+    }
+    Ok(HttpHead {
+        status,
+        location,
+        chunked,
+        content_length,
+    })
+}
+
+fn check_deadline(deadline: Instant) -> Result<(), UpdateError> {
+    if Instant::now() > deadline {
+        return Err(UpdateError::Download("истёк тайм-аут загрузки".into()));
+    }
+    Ok(())
+}
+
+fn write_body_chunk(
+    output: &mut impl Write,
+    chunk: &[u8],
+    total: &mut u64,
+    max_bytes: u64,
+) -> Result<(), UpdateError> {
+    *total = total.saturating_add(chunk.len() as u64);
+    if *total > max_bytes {
+        return Err(UpdateError::Download(format!(
+            "размер загрузки превышает {max_bytes} байт"
+        )));
+    }
+    output
+        .write_all(chunk)
+        .map_err(|error| UpdateError::Download(format!("запись загрузки: {error}")))
+}
+
+fn copy_exact(
+    reader: &mut impl Read,
+    output: &mut impl Write,
+    length: u64,
+    max_bytes: u64,
+    deadline: Instant,
+) -> Result<u64, UpdateError> {
+    let mut left = length;
+    let mut total = 0u64;
+    let mut buffer = [0u8; 16 * 1024];
+    while left > 0 {
+        check_deadline(deadline)?;
+        let want = left.min(buffer.len() as u64) as usize;
+        let read = reader
+            .read(&mut buffer[..want])
+            .map_err(|error| UpdateError::Download(format!("чтение загрузки: {error}")))?;
+        if read == 0 {
+            return Err(UpdateError::Download(
+                "соединение закрылось до конца тела ответа".into(),
+            ));
+        }
+        write_body_chunk(output, &buffer[..read], &mut total, max_bytes)?;
+        left -= read as u64;
+    }
+    Ok(total)
+}
+
+fn copy_until_eof(
+    reader: &mut impl Read,
+    output: &mut impl Write,
+    max_bytes: u64,
+    deadline: Instant,
+) -> Result<u64, UpdateError> {
+    let mut total = 0u64;
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        check_deadline(deadline)?;
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| UpdateError::Download(format!("чтение загрузки: {error}")))?;
+        if read == 0 {
+            return Ok(total);
+        }
+        write_body_chunk(output, &buffer[..read], &mut total, max_bytes)?;
+    }
+}
+
+fn copy_chunked(
+    reader: &mut impl BufRead,
+    output: &mut impl Write,
+    max_bytes: u64,
+    deadline: Instant,
+) -> Result<u64, UpdateError> {
+    let mut total = 0u64;
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        check_deadline(deadline)?;
+        let mut line = String::new();
+        let read = reader
+            .read_line(&mut line)
+            .map_err(|error| UpdateError::Download(format!("чтение chunk: {error}")))?;
+        if read == 0 {
+            return Err(UpdateError::Download(
+                "соединение закрылось до конца chunked-тела".into(),
+            ));
+        }
+        let size = line
+            .trim()
+            .split(';')
+            .next()
+            .and_then(|value| usize::from_str_radix(value.trim(), 16).ok())
+            .ok_or_else(|| UpdateError::Download("некорректный chunk size".into()))?;
+        if size == 0 {
+            loop {
+                let mut trailer = String::new();
+                let read = reader
+                    .read_line(&mut trailer)
+                    .map_err(|error| UpdateError::Download(format!("чтение trailer: {error}")))?;
+                if read == 0 || trailer == "\r\n" || trailer == "\n" {
+                    return Ok(total);
+                }
+            }
+        }
+        let mut left = size;
+        while left > 0 {
+            check_deadline(deadline)?;
+            let want = left.min(buffer.len());
+            let read = reader
+                .read(&mut buffer[..want])
+                .map_err(|error| UpdateError::Download(format!("чтение chunk: {error}")))?;
+            if read == 0 {
+                return Err(UpdateError::Download(
+                    "соединение закрылось внутри chunk".into(),
+                ));
+            }
+            write_body_chunk(output, &buffer[..read], &mut total, max_bytes)?;
+            left -= read;
+        }
+        let mut crlf = [0u8; 2];
+        reader
+            .read_exact(&mut crlf)
+            .map_err(|error| UpdateError::Download(format!("чтение CRLF: {error}")))?;
+        if &crlf != b"\r\n" {
+            return Err(UpdateError::Download("некорректный chunk CRLF".into()));
+        }
+    }
+}
+
+#[cfg(test)]
 fn download_with(
     curl: &str,
     url: &str,
@@ -758,6 +1203,7 @@ fn download_with(
     download_with_overrides(curl, url, destination, max_bytes, timeout, &overrides)
 }
 
+#[cfg(test)]
 fn download_with_overrides(
     curl: &str,
     url: &str,
@@ -910,6 +1356,7 @@ fn release_download_hosts(url: &str) -> &'static [&'static str] {
     }
 }
 
+#[cfg(test)]
 fn download_curl_args(
     url: &str,
     timeout: &str,
@@ -1331,6 +1778,89 @@ mod tests {
         assert!(matches!(
             activate_staged_update(&temp.0),
             Err(UpdateError::NoStagedRelease)
+        ));
+    }
+
+    #[test]
+    fn https_url_parser_requires_port_443_and_clean_path() {
+        assert_eq!(
+            parse_https_url("https://github.com/t0fox/r2o/releases/download/x.tar.gz").unwrap(),
+            (
+                "github.com".to_string(),
+                "/t0fox/r2o/releases/download/x.tar.gz".to_string()
+            )
+        );
+        assert!(parse_https_url("http://github.com/x").is_err());
+        assert!(parse_https_url("https://github.com:444/x").is_err());
+        assert!(parse_https_url("https://github.com/x\r\nInjected: 1").is_err());
+    }
+
+    #[test]
+    fn redirect_resolution_allows_only_release_hosts() {
+        assert_eq!(
+            resolve_redirect(
+                "https://github.com/t0fox/r2o/releases/download/x.tar.gz",
+                "github.com",
+                "/t0fox/r2o/releases/download/y.tar.gz",
+                "github.com",
+            )
+            .unwrap(),
+            "https://github.com/t0fox/r2o/releases/download/y.tar.gz"
+        );
+        assert_eq!(
+            resolve_redirect(
+                "https://github.com/t0fox/r2o/releases/download/x.tar.gz",
+                "github.com",
+                "https://objects.githubusercontent.com/blob",
+                "github.com",
+            )
+            .unwrap(),
+            "https://objects.githubusercontent.com/blob"
+        );
+        assert!(
+            resolve_redirect(
+                "https://github.com/t0fox/r2o/releases/download/x.tar.gz",
+                "github.com",
+                "https://evil.example/blob",
+                "github.com",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn http_head_parser_reads_status_location_and_length() {
+        let head = b"HTTP/1.1 302 Found\r\nLocation: https://objects.githubusercontent.com/x\r\nContent-Length: 0\r\n\r\n";
+        let parsed = parse_http_head(head).unwrap();
+        assert_eq!(parsed.status, 302);
+        assert_eq!(
+            parsed.location.as_deref(),
+            Some("https://objects.githubusercontent.com/x")
+        );
+        assert!(!parsed.chunked);
+        assert_eq!(parsed.content_length, Some(0));
+
+        let head = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+        let parsed = parse_http_head(head).unwrap();
+        assert_eq!(parsed.status, 200);
+        assert!(parsed.chunked);
+    }
+
+    #[test]
+    fn chunked_body_is_decoded_and_size_limited() {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let input = b"4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n";
+        let mut reader = std::io::Cursor::new(input);
+        let mut output = Vec::new();
+        let total = copy_chunked(&mut reader, &mut output, 100, deadline).unwrap();
+        assert_eq!(total, 9);
+        assert_eq!(output, b"Wikipedia");
+
+        let mut reader = std::io::Cursor::new(input);
+        let mut output = Vec::new();
+        assert!(matches!(
+            copy_chunked(&mut reader, &mut output, 5, deadline),
+            Err(UpdateError::Download(message)) if message.contains("превышает")
         ));
     }
 }

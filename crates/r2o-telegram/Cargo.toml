@@ -90,6 +90,7 @@ rustls = { version = "0.23", default-features = false, features = [
     "tls12",
     "logging",
 ] }
+x509-parser = { version = "0.18.1", default-features = false }
 rustls-pki-types = "1"
 rustls-pemfile = "2"
 # Встроенное хранилище корневых сертификатов Mozilla для TLS-коннектора.

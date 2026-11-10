@@ -145,8 +145,12 @@ run_r2o_gate() {
         PATH="$gate_path" meta_dns_scheduler_start
 }
 mkdir -p "$TEMP/no-ndmc"
+# Без ndmc Meta DNS закреплять некуда, но планировщик всё равно должен
+# запуститься ради обновления списков (R2O_META_DNS_DISABLED=1).
 run_r2o_gate "$TEMP/no-ndmc" "$TEMP/meta-ranges.txt" "$TEMP/gates"
+# С ndmc, но без явно заданного файла диапазонов, запуск пропускается.
 run_r2o_gate "$TEMP/bin" "$TEMP/missing-meta-ranges.txt" "$TEMP/gates"
-[ ! -s "$TEMP/gates" ] || { echo "Meta DNS scheduler ignored its NDM/data prerequisites" >&2; exit 1; }
+[ "$(wc -l <"$TEMP/gates")" -eq 1 ] || { echo "Meta DNS scheduler gate mismatch" >&2; exit 1; }
+grep -q -- '--meta-dns-scheduler' "$TEMP/gates" || { echo "scheduler did not start for list updates" >&2; exit 1; }
 
 echo "D2O/R2O Meta DNS scheduler start/stop lifecycle matches"

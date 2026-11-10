@@ -175,6 +175,67 @@ pub struct Config {
     #[arg(long, conflicts_with_all = ["refresh_meta_dns", "remove_meta_dns", "initialize_identity", "resolve_meta"])]
     pub meta_dns_scheduler: bool,
 
+    /// Запустить прозрачный RuTracker-прокси (TLS SNI → HTTPS CONNECT-пул).
+    #[arg(long, conflicts_with_all = [
+        "check",
+        "meta_dns_scheduler",
+        "refresh_meta_dns",
+        "remove_meta_dns",
+        "refresh_lists",
+        "initialize_identity",
+        "resolve_meta",
+        "stats",
+    ])]
+    pub rt_proxy: bool,
+
+    /// Локальный адрес RuTracker-прокси.
+    #[arg(long, default_value = ":1445", requires = "rt_proxy")]
+    pub listen: String,
+
+    /// Idle-тайм-аут соединения RuTracker-прокси.
+    #[arg(long = "timeout", default_value = "15m", requires = "rt_proxy")]
+    pub rt_timeout: String,
+
+    /// SO_MARK исходящих сокетов RuTracker-прокси (0 — не метить).
+    #[arg(long = "so-mark", default_value_t = 0, requires = "rt_proxy")]
+    pub rt_so_mark: u32,
+
+    /// Имя upstream HTTPS-CONNECT-прокси.
+    #[arg(
+        long = "proxy-host",
+        default_value = "ps1.blockme.site",
+        requires = "rt_proxy"
+    )]
+    pub rt_proxy_host: String,
+
+    /// Порт upstream HTTPS-CONNECT-прокси.
+    #[arg(long = "proxy-port", default_value_t = 443, requires = "rt_proxy")]
+    pub rt_proxy_port: u16,
+
+    /// Максимум одновременных клиентов RuTracker-прокси.
+    #[arg(long = "max-clients", default_value_t = 128, requires = "rt_proxy")]
+    pub rt_max_clients: usize,
+
+    /// Интервал health-check пула upstream.
+    #[arg(long = "health-interval", default_value = "90s", requires = "rt_proxy")]
+    pub rt_health_interval: String,
+
+    /// Разрешённые суффиксы для прямого fallback через запятую.
+    #[arg(
+        long = "direct-fallback-hosts",
+        default_value = "rutracker.org,rutracker.wiki,rutracker.cc,t-ru.org,cloudflare-ech.com",
+        requires = "rt_proxy"
+    )]
+    pub rt_direct_hosts: String,
+
+    /// Отключить прямой fallback RuTracker-прокси.
+    #[arg(long = "no-direct-fallback", requires = "rt_proxy")]
+    pub rt_no_direct_fallback: bool,
+
+    /// Пин SPKI цели health-check в base64 (пусто — не проверять).
+    #[arg(long = "health-spki-pin", requires = "rt_proxy")]
+    pub rt_health_spki_pin: Option<String>,
+
     /// Файл локальной идентичности установки с закрытым ключом Ed25519.
     #[arg(
         long,

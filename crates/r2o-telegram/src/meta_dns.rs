@@ -174,54 +174,256 @@ fn append_address(addresses: &mut Vec<Ipv4Addr>, address: Ipv4Addr) {
 }
 
 pub struct SystemNdm {
-    executable: OsString,
+    backend: NdmBackend,
+}
+
+enum NdmBackend {
+    Ndmc(OsString),
+    Dnsmasq,
 }
 
 impl Default for SystemNdm {
     fn default() -> Self {
-        Self {
-            executable: OsString::from("ndmc"),
+        if command_ok("ndmc", &["-c", "show version"]) {
+            Self {
+                backend: NdmBackend::Ndmc(OsString::from("ndmc")),
+            }
+        } else if command_ok("uci", &["-q", "show", "dhcp"])
+            && std::path::Path::new("/etc/init.d/dnsmasq").is_file()
+        {
+            Self {
+                backend: NdmBackend::Dnsmasq,
+            }
+        } else {
+            Self {
+                backend: NdmBackend::Ndmc(OsString::from("ndmc")),
+            }
         }
     }
 }
 
 impl Ndm for SystemNdm {
     fn running_config(&mut self) -> Result<String, String> {
-        let output = self.ndmc("show running-config")?;
-        let config = String::from_utf8(output.stdout)
-            .map_err(|_| "ndmc вернул конфигурацию в неподдерживаемой кодировке".to_string())?;
-        if !output.status.success() || config.trim().is_empty() {
-            return Err("ndmc вернул пустую конфигурацию или сообщил об ошибке чтения".into());
+        match &self.backend {
+            NdmBackend::Ndmc(executable) => {
+                let output = ndmc(executable, "show running-config")?;
+                let config = String::from_utf8(output.stdout).map_err(|_| {
+                    "ndmc вернул конфигурацию в неподдерживаемой кодировке".to_string()
+                })?;
+                if !output.status.success() || config.trim().is_empty() {
+                    return Err(
+                        "ndmc вернул пустую конфигурацию или сообщил об ошибке чтения".into(),
+                    );
+                }
+                Ok(config)
+            }
+            NdmBackend::Dnsmasq => dnsmasq_config(),
         }
-        Ok(config)
     }
 
     fn add(&mut self, host: &str, address: Ipv4Addr) -> Result<(), String> {
-        self.ndmc(&format!("ip host {host} {address}"))
-            .and_then(command_success("ndmc отклонил добавление DNS-записи"))
+        match &self.backend {
+            NdmBackend::Ndmc(executable) => ndmc(executable, &format!("ip host {host} {address}"))
+                .and_then(command_success("ndmc отклонил добавление DNS-записи")),
+            NdmBackend::Dnsmasq => dnsmasq_add(host, address),
+        }
     }
 
     fn remove(&mut self, host: &str, address: Ipv4Addr) -> Result<(), String> {
-        self.ndmc(&format!("no ip host {host} {address}"))
-            .and_then(command_success("ndmc отклонил удаление DNS-записи"))
+        match &self.backend {
+            NdmBackend::Ndmc(executable) => {
+                ndmc(executable, &format!("no ip host {host} {address}"))
+                    .and_then(command_success("ndmc отклонил удаление DNS-записи"))
+            }
+            NdmBackend::Dnsmasq => dnsmasq_remove(host, address),
+        }
     }
 
     fn save(&mut self) -> Result<(), String> {
-        self.ndmc("system configuration save")
-            .and_then(command_success(
-                "ndmc не смог сохранить конфигурацию роутера",
-            ))
+        match &self.backend {
+            NdmBackend::Ndmc(executable) => ndmc(executable, "system configuration save").and_then(
+                command_success("ndmc не смог сохранить конфигурацию роутера"),
+            ),
+            NdmBackend::Dnsmasq => dnsmasq_save(),
+        }
     }
 }
 
-impl SystemNdm {
-    fn ndmc(&self, command: &str) -> Result<std::process::Output, String> {
-        Command::new(&self.executable)
-            .env("LD_LIBRARY_PATH", "")
-            .args(["-c", command])
-            .output()
-            .map_err(|error| format!("не удалось запустить ndmc: {error}"))
+fn ndmc(executable: &OsString, command: &str) -> Result<std::process::Output, String> {
+    Command::new(executable)
+        .env("LD_LIBRARY_PATH", "")
+        .args(["-c", command])
+        .output()
+        .map_err(|error| format!("не удалось запустить ndmc: {error}"))
+}
+
+fn command_ok(program: &str, args: &[&str]) -> bool {
+    Command::new(program)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Текущие hostrecord из UCI в формате, который понимает NdmView.
+fn dnsmasq_config() -> Result<String, String> {
+    let output = Command::new("uci")
+        .args(["-q", "show", "dhcp"])
+        .output()
+        .map_err(|error| format!("не удалось запустить uci: {error}"))?;
+    if !output.status.success() {
+        return Err("uci не смог прочитать конфигурацию dhcp".to_string());
     }
+    let text = String::from_utf8(output.stdout)
+        .map_err(|_| "uci вернул конфигурацию в неподдерживаемой кодировке".to_string())?;
+    let mut pairs = std::collections::BTreeMap::<String, (Option<String>, Option<String>)>::new();
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let Some(rest) = key.strip_prefix("dhcp.") else {
+            continue;
+        };
+        let mut fields = rest.split('.');
+        let Some(section) = fields.next() else {
+            continue;
+        };
+        let value = value.trim().trim_matches('\'').to_string();
+        match fields.next() {
+            Some("name") => pairs.entry(section.to_string()).or_default().0 = Some(value),
+            Some("ip") => pairs.entry(section.to_string()).or_default().1 = Some(value),
+            _ => {}
+        }
+    }
+    let mut config = String::from("# dnsmasq hostrecords\n");
+    for (_, (name, ip)) in pairs {
+        if let (Some(name), Some(ip)) = (name, ip) {
+            config.push_str(&format!("ip host {name} {ip}\n"));
+        }
+    }
+    Ok(config)
+}
+
+fn dnsmasq_section(host: &str, address: Ipv4Addr) -> String {
+    let host = host
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect::<String>();
+    format!("r2o_meta_{host}_{}", address.to_string().replace('.', "_"))
+}
+
+fn uci_set_argument(key: &str, value: Option<&str>) -> String {
+    match value {
+        Some(value) => format!("{key}={value}"),
+        None => key.to_string(),
+    }
+}
+
+fn dnsmasq_add(host: &str, address: Ipv4Addr) -> Result<(), String> {
+    let section = dnsmasq_section(host, address);
+    for (key, value) in [
+        (format!("dhcp.{section}=hostrecord"), None),
+        (format!("dhcp.{section}.name"), Some(host.to_string())),
+        (format!("dhcp.{section}.ip"), Some(address.to_string())),
+    ] {
+        // uci принимает только форму key=value одним аргументом; форма
+        // `uci set key value` печатает usage и возвращает ошибку.
+        let argument = uci_set_argument(&key, value.as_deref());
+        let output = Command::new("uci")
+            .args(["set", &argument])
+            .output()
+            .map_err(|error| format!("не удалось запустить uci set: {error}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("uci отклонил запись {key}: {}", stderr.trim()));
+        }
+    }
+    Ok(())
+}
+
+fn dnsmasq_remove(host: &str, address: Ipv4Addr) -> Result<(), String> {
+    let output = Command::new("uci")
+        .args(["-q", "show", "dhcp"])
+        .output()
+        .map_err(|error| format!("не удалось запустить uci: {error}"))?;
+    let text = String::from_utf8(output.stdout)
+        .map_err(|_| "uci вернул конфигурацию в неподдерживаемой кодировке".to_string())?;
+    let wanted_ip = address.to_string();
+    let mut section = None;
+    let mut current = String::new();
+    let mut name = None;
+    let mut ip = None;
+    for line in text.lines().chain(std::iter::once("")) {
+        let Some((key, value)) = line.split_once('=') else {
+            if !current.is_empty()
+                && name.as_deref() == Some(host)
+                && ip.as_deref() == Some(wanted_ip.as_str())
+            {
+                section = Some(std::mem::take(&mut current));
+                break;
+            }
+            current.clear();
+            name = None;
+            ip = None;
+            continue;
+        };
+        let Some(rest) = key.strip_prefix("dhcp.") else {
+            continue;
+        };
+        let mut fields = rest.split('.');
+        let Some(found_section) = fields.next() else {
+            continue;
+        };
+        if found_section != current {
+            if !current.is_empty()
+                && name.as_deref() == Some(host)
+                && ip.as_deref() == Some(wanted_ip.as_str())
+            {
+                section = Some(std::mem::take(&mut current));
+                break;
+            }
+            current = found_section.to_string();
+            name = None;
+            ip = None;
+        }
+        let value = value.trim().trim_matches('\'').to_string();
+        match fields.next() {
+            Some("name") => name = Some(value),
+            Some("ip") => ip = Some(value),
+            _ => {}
+        }
+    }
+    let Some(section) = section else {
+        return Ok(());
+    };
+    let output = Command::new("uci")
+        .args(["delete", &format!("dhcp.{section}")])
+        .output()
+        .map_err(|error| format!("не удалось запустить uci delete: {error}"))?;
+    if !output.status.success() {
+        return Err(format!("uci не удалил запись {section}"));
+    }
+    Ok(())
+}
+
+fn dnsmasq_save() -> Result<(), String> {
+    let output = Command::new("uci")
+        .args(["commit", "dhcp"])
+        .output()
+        .map_err(|error| format!("не удалось запустить uci commit: {error}"))?;
+    if !output.status.success() {
+        return Err("uci не смог сохранить конфигурацию dhcp".to_string());
+    }
+    let output = Command::new("/etc/init.d/dnsmasq")
+        .arg("reload")
+        .output()
+        .map_err(|error| format!("не удалось перезагрузить dnsmasq: {error}"))?;
+    if !output.status.success() {
+        return Err("dnsmasq не перезагрузил конфигурацию".to_string());
+    }
+    Ok(())
 }
 
 fn command_success(
@@ -860,6 +1062,7 @@ pub fn remove_from_env() -> Result<(), String> {
 pub async fn run_scheduler() -> Result<(), String> {
     let mut scheduler = MetaDnsScheduler::from_env();
     let mut lists = crate::list_update::ListUpdater::from_env();
+    let meta_disabled = std::env::var("R2O_META_DNS_DISABLED").as_deref() == Ok("1");
     loop {
         if let Err(error) = lists.tick().await {
             append_log(
@@ -867,7 +1070,7 @@ pub async fn run_scheduler() -> Result<(), String> {
                 &format!("ошибка обновления списков: {error}"),
             );
         }
-        if let Err(error) = scheduler.tick().await {
+        if !meta_disabled && let Err(error) = scheduler.tick().await {
             append_log(
                 &scheduler.log,
                 &format!("ошибка планировщика Meta DNS: {error}"),
@@ -1551,7 +1754,7 @@ esac
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
 
         let mut ndm = SystemNdm {
-            executable: executable.into_os_string(),
+            backend: NdmBackend::Ndmc(executable.into_os_string()),
         };
         assert_eq!(ndm.running_config().unwrap(), "system name test-router\n");
         let address = "157.240.9.174".parse().unwrap();
@@ -1628,7 +1831,7 @@ esac
 
         let network = FakeNetwork::with_answers(BTreeMap::new());
         let ndm = SystemNdm {
-            executable: executable.into_os_string(),
+            backend: NdmBackend::Ndmc(executable.into_os_string()),
         };
         let mut manager = MetaDnsManager::new(network, ndm, paths.clone());
         manager.remove_owned().unwrap();
@@ -2365,5 +2568,19 @@ esac
         std::fs::write(&updated, "").unwrap();
         assert_eq!(default_meta_ranges_path(&dir), shipped);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn uci_set_argument_uses_equals_form() {
+        // `uci set key value` печатает usage: оба значения обязаны идти
+        // одним аргументом key=value.
+        assert_eq!(
+            uci_set_argument("dhcp.r2o_meta_x.name", Some("instagram.com")),
+            "dhcp.r2o_meta_x.name=instagram.com"
+        );
+        assert_eq!(
+            uci_set_argument("dhcp.r2o_meta_x=hostrecord", None),
+            "dhcp.r2o_meta_x=hostrecord"
+        );
     }
 }

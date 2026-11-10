@@ -62,6 +62,7 @@ PROBE_MARK=0x2e
 ONLY_MARK=0xffffaaa/0xffffff00
 R2O_FLOW_CAPACITY=64
 IPV6_ENABLED=1
+R2O_RT_PROXY=0
 EOF
 printf '2000 1\n2001 1\n' >"$r2o_temp/proc/net/netfilter/nfnetlink_queue"
 cat >"$r2o_temp/manager" <<'EOF'
@@ -257,6 +258,7 @@ IPV6_ENABLED=0
 PANEL_LISTEN=127.0.0.1:8090
 AUTOUPDATE=0
 TG_ENABLED=0
+R2O_RT_PROXY=0
 EOF
 : >"$r2o_temp/launches"
 r2o_run_service engine-start

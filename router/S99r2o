@@ -66,12 +66,12 @@ META_DNS_PID=$RUN/meta-dns-scheduler.pid
 # RuTracker rt-proxy: официальный HTTPS-CONNECT пул blockme.site, DNS-пины
 # на sentinel и nft REDIRECT на локальный порт. Отключается R2O_RT_PROXY=0.
 RT_PROXY_ENABLED=${R2O_RT_PROXY:-1}
-RT_PROXY_BIN=${R2O_RT_PROXY_BIN:-$ROOT/bin/z2k-rt-proxy}
+RT_PROXY_BIN=${R2O_RT_PROXY_BIN:-}
 RT_PROXY_PORT=${R2O_RT_PROXY_PORT:-1445}
 RT_PROXY_PID=$RUN/r2o-rt-proxy.pid
 RT_PROXY_LOG=$LOG/rt-proxy.log
 RT_SENTINEL=${R2O_RT_SENTINEL:-10.171.171.171}
-RT_DOMAINS=${R2O_RT_DOMAINS:-"rutracker.org rutracker.wiki api.rutracker.cc rep.rutracker.cc static.rutracker.cc"}
+RT_DOMAINS=${R2O_RT_DOMAINS:-"rutracker.org www.rutracker.org rutracker.wiki api.rutracker.cc rep.rutracker.cc static.rutracker.cc"}
 
 # shellcheck disable=SC1090  # конфигурация owner-managed, путь задаётся выше
 [ ! -r "$CONF" ] || . "$CONF"
@@ -629,16 +629,24 @@ meta_dns_scheduler_running() {
 }
 
 meta_dns_scheduler_start() {
-    command -v ndmc >/dev/null 2>&1 || return 0
-    case "$R2O_META_RANGES" in
-        '') ;; # путь по умолчанию выбирает state/lists или files
-        *)
-            [ -r "$R2O_META_RANGES" ] || {
-                say "нет списка диапазонов Meta $R2O_META_RANGES; планировщик DNS пропущен"
-                return 0
-            }
-            ;;
-    esac
+    if type ndmc >/dev/null 2>&1; then
+        export R2O_META_DNS_DISABLED=0
+        case "$R2O_META_RANGES" in
+            '') ;; # путь по умолчанию выбирает state/lists или files
+            *)
+                [ -r "$R2O_META_RANGES" ] || {
+                    say "нет списка диапазонов Meta $R2O_META_RANGES; планировщик DNS пропущен"
+                    return 0
+                }
+                ;;
+        esac
+    elif command -v uci >/dev/null 2>&1 && [ -x /etc/init.d/dnsmasq ]; then
+        # OpenWrt без ndmc: Meta DNS закрепляется через dnsmasq hostrecord.
+        export R2O_META_DNS_DISABLED=0
+    else
+        export R2O_META_DNS_DISABLED=1
+        say "нет ndmc/dnsmasq: Meta DNS пропускается, списки обновляются"
+    fi
     meta_dns_scheduler_running && return 0
     spawn_component r2o-telegram "$META_DNS_PID" "$LOG/instagram-dns-scheduler.log" \
         --meta-dns-scheduler
@@ -654,7 +662,7 @@ rt_proxy_running() {
     case "$rt_pid" in ''|*[!0-9]*) return 1 ;; esac
     kill -0 "$rt_pid" 2>/dev/null || return 1
     rt_cmdline=$(tr '\000' ' ' < "/proc/$rt_pid/cmdline" 2>/dev/null) || return 1
-    case "$rt_cmdline" in *z2k-rt-proxy*) return 0 ;; *) return 1 ;; esac
+    case "$rt_cmdline" in *--rt-proxy*|*z2k-rt-proxy*) return 0 ;; *) return 1 ;; esac
 }
 
 rt_nft_remove() {
@@ -676,6 +684,19 @@ rt_nft_apply() {
 rt_dns_apply() {
     command -v uci >/dev/null 2>&1 || return 1
     rt_changed=0
+    # AAAA убираем, потому что rt-proxy обслуживает IPv4 sentinel;
+    # иначе браузер уйдёт напрямую по IPv6. ECH не отключаем: Chrome
+    # с outer SNI cloudflare-ech.com уходит в direct fallback rt-proxy.
+    # Прежнее значение AAAA восстанавливает stop.
+    rt_filter_aaaa_saved=$RUN/r2o-rt-filter-aaaa.prev
+    rt_filter_aaaa=$(uci -q get dhcp.@dnsmasq[0].filter_aaaa 2>/dev/null || true)
+    if [ ! -f "$rt_filter_aaaa_saved" ]; then
+        printf '%s\n' "$rt_filter_aaaa" >"$rt_filter_aaaa_saved"
+    fi
+    if [ "$rt_filter_aaaa" != 1 ]; then
+        uci set dhcp.@dnsmasq[0].filter_aaaa=1 || return 1
+        rt_changed=1
+    fi
     for rt_domain in $RT_DOMAINS; do
         rt_section="r2o_rt_$(printf '%s' "$rt_domain" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9' '_')"
         if [ "$(uci -q get "dhcp.$rt_section" 2>/dev/null || true)" != hostrecord ] \
@@ -701,6 +722,19 @@ rt_dns_clear() {
         uci -q delete "dhcp.$rt_section" || true
         rt_changed=1
     done
+    rt_filter_aaaa_saved=$RUN/r2o-rt-filter-aaaa.prev
+    if [ -f "$rt_filter_aaaa_saved" ]; then
+        if [ "$(uci -q get dhcp.@dnsmasq[0].filter_aaaa 2>/dev/null || true)" = 1 ]; then
+            rt_filter_previous=$(cat "$rt_filter_aaaa_saved" 2>/dev/null || true)
+            if [ -n "$rt_filter_previous" ]; then
+                uci set "dhcp.@dnsmasq[0].filter_aaaa=$rt_filter_previous" || true
+            else
+                uci -q delete dhcp.@dnsmasq[0].filter_aaaa || true
+            fi
+            rt_changed=1
+        fi
+        rm -f "$rt_filter_aaaa_saved"
+    fi
     if [ "$rt_changed" = 1 ]; then
         uci commit dhcp || true
         /etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
@@ -730,17 +764,30 @@ rt_proxy_start() {
         rt_proxy_stop full
         return 0
     fi
-    if [ ! -x "$RT_PROXY_BIN" ]; then
-        say "rt-proxy RuTracker не найден: $RT_PROXY_BIN; DNS-пины не добавляю"
+    if [ -n "$RT_PROXY_BIN" ]; then
+        [ -x "$RT_PROXY_BIN" ] || {
+            say "rt-proxy RuTracker не найден: $RT_PROXY_BIN; DNS-пины не добавляю"
+            rt_proxy_stop full
+            return 1
+        }
+    elif [ ! -x "$MANAGER" ]; then
+        say "rt-proxy RuTracker: нет release manager $MANAGER"
         rt_proxy_stop full
         return 1
     fi
     rt_proxy_stop keep
     prepare_dirs
     case "$MARK" in 0x*|0X*) rt_mark=$(printf '%d' "$MARK") ;; *) rt_mark=$MARK ;; esac
+    if [ -n "$RT_PROXY_BIN" ]; then
+        # Совместимость с явно заданным внешним бинарником (старый Go-путь).
+        set -- "$RT_PROXY_BIN" --listen=:"$RT_PROXY_PORT" --timeout=15m --so-mark="$rt_mark"
+    else
+        # Штатный путь: тот же release-бинарник r2o-telegram в режиме rt-proxy.
+        set -- "$MANAGER" exec --root "$ROOT" --component r2o-telegram -- \
+            --rt-proxy --listen=:"$RT_PROXY_PORT" --timeout=15m --so-mark="$rt_mark"
+    fi
     start-stop-daemon -S -b -m -p "$RT_PROXY_PID" -x /bin/sh -- \
-        -c 'log=$1; shift; exec "$@" >> "$log" 2>&1' r2o-rt "$RT_PROXY_LOG" \
-        "$RT_PROXY_BIN" --listen=:"$RT_PROXY_PORT" --timeout=15m --so-mark="$rt_mark" || return 1
+        -c 'log=$1; shift; exec "$@" >> "$log" 2>&1' r2o-rt "$RT_PROXY_LOG" "$@" || return 1
     rt_attempt=0
     while [ "$rt_attempt" -lt 30 ]; do
         rt_proxy_running && break

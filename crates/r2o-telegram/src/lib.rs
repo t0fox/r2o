@@ -18,6 +18,7 @@ pub mod meta_edge;
 pub mod outbound;
 pub(crate) mod response_observer;
 pub mod routing;
+pub mod rt_proxy;
 pub mod runtime;
 pub mod server;
 pub mod splitter;
