@@ -72,6 +72,13 @@ RT_PROXY_PID=$RUN/r2o-rt-proxy.pid
 RT_PROXY_LOG=$LOG/rt-proxy.log
 RT_SENTINEL=${R2O_RT_SENTINEL:-10.171.171.171}
 RT_DOMAINS=${R2O_RT_DOMAINS:-"rutracker.org www.rutracker.org rutracker.wiki api.rutracker.cc rep.rutracker.cc static.rutracker.cc"}
+# Chrome получает HTTPS/SVCB-запись rutracker.org с ECH и ipv4hint
+# 104.21.32.39, который в этой сети не отвечает. Для основного домена
+# закрепляем рабочий Cloudflare-адрес и отвечаем на HTTPS-запрос локально
+# (NODATA), чтобы клиент шёл по A-записи и обычному SNI, а не по мёртвому
+# ipv4hint. Остальные зеркала продолжают идти через rt-proxy.
+RT_ECH_DIRECT_IP=${R2O_RT_ECH_DIRECT_IP:-172.67.182.196}
+RT_DIRECT_ECH_DOMAINS=${R2O_RT_DIRECT_ECH_DOMAINS:-"rutracker.org www.rutracker.org"}
 
 # shellcheck disable=SC1090  # конфигурация owner-managed, путь задаётся выше
 [ ! -r "$CONF" ] || . "$CONF"
@@ -699,12 +706,25 @@ rt_dns_apply() {
     fi
     for rt_domain in $RT_DOMAINS; do
         rt_section="r2o_rt_$(printf '%s' "$rt_domain" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9' '_')"
+        rt_pin_ip=$RT_SENTINEL
+        case " $RT_DIRECT_ECH_DOMAINS " in
+            *" $rt_domain "*) rt_pin_ip=$RT_ECH_DIRECT_IP ;;
+        esac
         if [ "$(uci -q get "dhcp.$rt_section" 2>/dev/null || true)" != hostrecord ] \
             || [ "$(uci -q get "dhcp.$rt_section.name" 2>/dev/null || true)" != "$rt_domain" ] \
-            || [ "$(uci -q get "dhcp.$rt_section.ip" 2>/dev/null || true)" != "$RT_SENTINEL" ]; then
+            || [ "$(uci -q get "dhcp.$rt_section.ip" 2>/dev/null || true)" != "$rt_pin_ip" ]; then
             uci set "dhcp.$rt_section=hostrecord" || return 1
             uci set "dhcp.$rt_section.name=$rt_domain" || return 1
-            uci set "dhcp.$rt_section.ip=$RT_SENTINEL" || return 1
+            uci set "dhcp.$rt_section.ip=$rt_pin_ip" || return 1
+            rt_changed=1
+        fi
+    done
+    # Отключаем пересылку HTTPS/SVCB для всех доменов RuTracker: иначе
+    # Chrome берёт ECH ipv4hint 104.21.32.39 и не доходит до рабочего IP.
+    for rt_domain in $RT_DOMAINS; do
+        rt_server="/$rt_domain/"
+        if ! uci -q get dhcp.@dnsmasq[0].server 2>/dev/null | tr ' ' '\n' | grep -qx "$rt_server"; then
+            uci add_list dhcp.@dnsmasq[0].server="$rt_server" || return 1
             rt_changed=1
         fi
     done
@@ -720,6 +740,11 @@ rt_dns_clear() {
     rt_changed=0
     for rt_section in $(uci show dhcp 2>/dev/null | sed -n 's/^dhcp\.\(r2o_rt_[A-Za-z0-9_]*\)=hostrecord$/\1/p'); do
         uci -q delete "dhcp.$rt_section" || true
+        rt_changed=1
+    done
+    for rt_domain in $RT_DOMAINS; do
+        rt_server="/$rt_domain/"
+        uci -q del_list dhcp.@dnsmasq[0].server="$rt_server" || true
         rt_changed=1
     done
     rt_filter_aaaa_saved=$RUN/r2o-rt-filter-aaaa.prev

@@ -34,6 +34,7 @@ use tokio_rustls::TlsConnector;
 
 const BUF_SIZE: usize = 33 * 1024;
 const TLS_RECORD_LIMIT: usize = 16_384;
+const MAX_CLIENT_HELLO: usize = 64 * 1024;
 const SO_MARK: libc::c_int = 36;
 const CLIENT_HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const DIAL_TIMEOUT: Duration = Duration::from_secs(8);
@@ -495,6 +496,29 @@ async fn handle_client(
     Err(format!("нет рабочего upstream для {sni}"))
 }
 
+/// ECH-клиент (Chrome) отправляет наружу SNI `cloudflare-ech.com`, а
+/// внутреннее имя остаётся зашифрованным. Через публичный CONNECT-пул нужно
+/// открыть туннель к настоящему хосту RuTracker, иначе ECH-приветствие уйдёт
+/// на чужой edge и рукопожатие не состоится. Проверенные адреса берём из
+/// `direct-fallback-hosts`, исключая сам внешний SNI.
+fn upstream_targets(sni: &str, direct_hosts: &[String]) -> Vec<String> {
+    if sni.eq_ignore_ascii_case("cloudflare-ech.com") {
+        let targets = direct_hosts
+            .iter()
+            .filter(|host| !host.eq_ignore_ascii_case(sni))
+            .map(|host| format!("{host}:443"))
+            .collect::<Vec<_>>();
+        if !targets.is_empty() {
+            return targets;
+        }
+    }
+    vec![format!("{sni}:443")]
+}
+
+fn is_ech_outer_sni(sni: &str) -> bool {
+    sni.eq_ignore_ascii_case("cloudflare-ech.com")
+}
+
 async fn dial_upstream(
     pool: &ProxyPool,
     sni: &str,
@@ -504,7 +528,7 @@ async fn dial_upstream(
     BufReader<tokio_rustls::client::TlsStream<TcpStream>>,
     Vec<u8>,
 )> {
-    let target = format!("{sni}:443");
+    let targets = upstream_targets(sni, &config.settings.direct_hosts);
     let deadline = Instant::now() + PICK_WAIT;
     let mut tries = 0_usize;
     let mut demoted = false;
@@ -516,25 +540,46 @@ async fn dial_upstream(
             sleep(Duration::from_millis(250)).await;
             continue;
         };
-        match open_tunnel(ip, &target, config).await {
-            Ok(mut up) => {
-                if timeout(remaining(deadline), up.get_mut().write_all(hello))
-                    .await
-                    .is_err()
-                {
-                    demote_once(pool, &mut demoted, ip, config);
-                } else if let Some(flight) =
-                    verify_first_flight(&mut up, FIRST_BYTE_TIMEOUT.min(remaining(deadline))).await
-                {
-                    return Some((up, flight));
-                } else {
-                    demote_once(pool, &mut demoted, ip, config);
+        let mut reachable = false;
+        let mut wrote_hello = false;
+        let mut verified = None;
+        for target in &targets {
+            if Instant::now() >= deadline {
+                break;
+            }
+            match open_tunnel(ip, target, config).await {
+                Ok(mut up) => {
+                    reachable = true;
+                    if timeout(remaining(deadline), up.get_mut().write_all(hello))
+                        .await
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    wrote_hello = true;
+                    if let Some(flight) =
+                        verify_first_flight(&mut up, FIRST_BYTE_TIMEOUT.min(remaining(deadline)))
+                            .await
+                    {
+                        verified = Some((up, flight));
+                        break;
+                    }
+                }
+                Err(OpenError::Unreachable) => {}
+                Err(OpenError::Rejected) => {
+                    reachable = true;
                 }
             }
-            Err(OpenError::Unreachable) => {
-                demote_once(pool, &mut demoted, ip, config);
-            }
-            Err(OpenError::Rejected) => {}
+        }
+        if let Some(result) = verified {
+            return Some(result);
+        }
+        // Для обычного SNI сохраняем прежнюю политику: неудача после
+        // отправленного ClientHello считается отказом upstream-адреса.
+        // Для ECH перебор внутренних имён не должен демотировать рабочий
+        // CONNECT-пул из-за неверного кандидата.
+        if !reachable || (!is_ech_outer_sni(sni) && wrote_hello) {
+            demote_once(pool, &mut demoted, ip, config);
         }
         tries += 1;
         if tries >= MAX_TRIES {
@@ -779,8 +824,8 @@ async fn drain_headers<R: AsyncBufRead + Unpin>(reader: &mut R, budget: Duration
     }
 }
 
-async fn verify_first_flight(
-    up: &mut BufReader<tokio_rustls::client::TlsStream<TcpStream>>,
+async fn verify_first_flight<R: AsyncRead + Unpin>(
+    up: &mut BufReader<R>,
     budget: Duration,
 ) -> Option<Vec<u8>> {
     let deadline = Instant::now() + budget;
@@ -798,20 +843,9 @@ async fn verify_first_flight(
     let mut body = vec![0_u8; length];
     read_exact_before(up, &mut body, remaining(deadline)).await?;
     flight.extend_from_slice(&body);
-
-    let mut header2 = [0_u8; 5];
-    read_exact_before(up, &mut header2, remaining(deadline)).await?;
-    flight.extend_from_slice(&header2);
-    if !matches!(header2[0], 0x14 | 0x16 | 0x17) {
-        return None;
-    }
-    let length2 = u16::from_be_bytes([header2[3], header2[4]]) as usize;
-    if length2 > TLS_RECORD_LIMIT {
-        return None;
-    }
-    let mut body2 = vec![0_u8; length2];
-    read_exact_before(up, &mut body2, remaining(deadline)).await?;
-    flight.extend_from_slice(&body2);
+    // TLS 1.3 HelloRetryRequest может состоять из одной записи ServerHello:
+    // сервер ждёт второй ClientHello и не присылает следующий record сразу.
+    // Раньше ожидание второй записи закрывало туннель Chrome до ответа.
     Some(flight)
 }
 
@@ -834,7 +868,7 @@ async fn read_exact_before<R: AsyncRead + Unpin>(
 // SNI
 // ---------------------------------------------------------------------------
 
-async fn peek_client_hello(client: &mut TcpStream) -> io::Result<(String, Vec<u8>)> {
+async fn peek_client_hello<R: AsyncRead + Unpin>(client: &mut R) -> io::Result<(String, Vec<u8>)> {
     let mut header = [0_u8; 5];
     client.read_exact(&mut header).await?;
     if header[0] != 0x16 {
@@ -855,7 +889,47 @@ async fn peek_client_hello(client: &mut TcpStream) -> io::Result<(String, Vec<u8
     let mut hello = Vec::with_capacity(5 + length);
     hello.extend_from_slice(&header);
     hello.extend_from_slice(&body);
-    Ok((parse_client_hello(&body).unwrap_or_default(), hello))
+
+    // Chrome может разбить ClientHello на несколько TLS-записей. Если
+    // отправить только первую и ждать ServerHello, сервер будет ждать
+    // остаток рукопожатия, а прокси — ответ: получается взаимная блокировка.
+    let mut handshake = body;
+    let mut hello_len = 0_usize;
+    if handshake.len() >= 4 && handshake[0] == 0x01 {
+        hello_len = 4
+            + (((handshake[1] as usize) << 16)
+                | ((handshake[2] as usize) << 8)
+                | handshake[3] as usize);
+    }
+    while hello_len > handshake.len() {
+        if hello_len > MAX_CLIENT_HELLO {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "слишком большой ClientHello",
+            ));
+        }
+        let mut next_header = [0_u8; 5];
+        client.read_exact(&mut next_header).await?;
+        if next_header[0] != 0x16 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "ClientHello продолжен не handshake-записью",
+            ));
+        }
+        let next_length = u16::from_be_bytes([next_header[3], next_header[4]]) as usize;
+        if next_length == 0 || next_length > TLS_RECORD_LIMIT {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "неверная длина продолжения ClientHello",
+            ));
+        }
+        let mut next_body = vec![0_u8; next_length];
+        client.read_exact(&mut next_body).await?;
+        hello.extend_from_slice(&next_header);
+        hello.extend_from_slice(&next_body);
+        handshake.extend_from_slice(&next_body);
+    }
+    Ok((parse_client_hello(&handshake).unwrap_or_default(), hello))
 }
 
 fn parse_client_hello(body: &[u8]) -> Option<String> {
@@ -1208,11 +1282,85 @@ mod tests {
     }
 
     #[test]
+    fn ech_outer_sni_uses_real_ru_tracker_hosts() {
+        let hosts = vec![
+            "rutracker.org".to_string(),
+            "rutracker.wiki".to_string(),
+            "cloudflare-ech.com".to_string(),
+        ];
+        assert_eq!(
+            upstream_targets("cloudflare-ech.com", &hosts),
+            vec!["rutracker.org:443", "rutracker.wiki:443"]
+        );
+        assert_eq!(
+            upstream_targets("CLOUDFLARE-ECH.COM", &hosts),
+            vec!["rutracker.org:443", "rutracker.wiki:443"]
+        );
+        assert_eq!(
+            upstream_targets("rutracker.org", &hosts),
+            vec!["rutracker.org:443"]
+        );
+        assert!(is_ech_outer_sni("cloudflare-ech.com"));
+        assert!(is_ech_outer_sni("Cloudflare-ECH.com"));
+        assert!(!is_ech_outer_sni("rutracker.org"));
+    }
+
+    #[test]
     fn loopback_and_private_direct_targets_are_rejected() {
         assert!(!routable_unicast("10.171.171.171".parse().unwrap()));
         assert!(!routable_unicast("127.0.0.1".parse().unwrap()));
         assert!(!routable_unicast("169.254.1.1".parse().unwrap()));
         assert!(routable_unicast("172.67.182.196".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn single_server_hello_record_is_a_complete_first_flight() {
+        let record = [0x16, 0x03, 0x03, 0x00, 0x02, 0xaa, 0xbb];
+        let mut reader = BufReader::new(&record[..]);
+        let flight = verify_first_flight(&mut reader, Duration::from_secs(1))
+            .await
+            .expect("одна запись ServerHello должна подтверждать туннель");
+        assert_eq!(flight, record);
+    }
+
+    fn test_client_hello(name: &str) -> Vec<u8> {
+        let mut body = vec![0x01, 0, 0, 0, 0x03, 0x03];
+        body.extend_from_slice(&[0_u8; 32]);
+        body.push(0); // session id
+        body.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]); // cipher suites
+        body.extend_from_slice(&[0x01, 0x00]); // compression
+        let name = name.as_bytes();
+        let mut extension = Vec::new();
+        extension.extend_from_slice(&[0x00, 0x00]); // server_name
+        let list_len = 1 + 2 + name.len();
+        extension.extend_from_slice(&((list_len + 2) as u16).to_be_bytes());
+        extension.extend_from_slice(&(list_len as u16).to_be_bytes());
+        extension.push(0);
+        extension.extend_from_slice(&(name.len() as u16).to_be_bytes());
+        extension.extend_from_slice(name);
+        body.extend_from_slice(&(extension.len() as u16).to_be_bytes());
+        body.extend_from_slice(&extension);
+        let payload_len = body.len() - 4;
+        body[1] = (payload_len >> 16) as u8;
+        body[2] = (payload_len >> 8) as u8;
+        body[3] = payload_len as u8;
+        body
+    }
+
+    #[tokio::test]
+    async fn fragmented_client_hello_is_forwarded_as_one_flight() {
+        let body = test_client_hello("rutracker.org");
+        let cut = body.len() / 2;
+        let mut wire = Vec::new();
+        for part in [&body[..cut], &body[cut..]] {
+            wire.extend_from_slice(&[0x16, 0x03, 0x01]);
+            wire.extend_from_slice(&(part.len() as u16).to_be_bytes());
+            wire.extend_from_slice(part);
+        }
+        let mut reader = &wire[..];
+        let (sni, hello) = peek_client_hello(&mut reader).await.unwrap();
+        assert_eq!(sni, "rutracker.org");
+        assert_eq!(hello, wire);
     }
 
     #[test]
