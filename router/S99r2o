@@ -70,7 +70,10 @@ RT_PROXY_BIN=${R2O_RT_PROXY_BIN:-}
 RT_PROXY_PORT=${R2O_RT_PROXY_PORT:-1445}
 RT_PROXY_PID=$RUN/r2o-rt-proxy.pid
 RT_PROXY_LOG=$LOG/rt-proxy.log
-RT_SENTINEL=${R2O_RT_SENTINEL:-10.171.171.171}
+# Публичный TEST-NET-3 адрес: Chrome считает его public и не блокирует
+# subresource-запросы публичной страницы правилом Local Network Access.
+# Реальный трафик на него перехватывает nft REDIRECT до маршрутизации.
+RT_SENTINEL=${R2O_RT_SENTINEL:-203.0.113.171}
 RT_DOMAINS=${R2O_RT_DOMAINS:-"rutracker.org www.rutracker.org rutracker.wiki api.rutracker.cc rep.rutracker.cc static.rutracker.cc"}
 # Chrome получает HTTPS/SVCB-запись rutracker.org с ECH и ipv4hint
 # 104.21.32.39, который в этой сети не отвечает. Для основного домена
@@ -706,9 +709,9 @@ rt_dns_apply() {
     fi
     for rt_domain in $RT_DOMAINS; do
         rt_section="r2o_rt_$(printf '%s' "$rt_domain" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9' '_')"
-        rt_pin_ip=$RT_SENTINEL
         case " $RT_DIRECT_ECH_DOMAINS " in
             *" $rt_domain "*) rt_pin_ip=$RT_ECH_DIRECT_IP ;;
+            *) rt_pin_ip=$RT_SENTINEL ;;
         esac
         if [ "$(uci -q get "dhcp.$rt_section" 2>/dev/null || true)" != hostrecord ] \
             || [ "$(uci -q get "dhcp.$rt_section.name" 2>/dev/null || true)" != "$rt_domain" ] \

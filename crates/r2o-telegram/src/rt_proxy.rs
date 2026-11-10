@@ -42,7 +42,8 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(12);
 const RECOVER_INTERVAL: Duration = Duration::from_secs(10);
 const PICK_WAIT: Duration = Duration::from_secs(15);
 const MAX_TRIES: usize = 4;
-const FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(4);
+const FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(8);
+const UPSTREAM_CONCURRENCY: usize = 1;
 const HEALTH_TARGET: &str = "rutracker.org:443";
 const PROBE_PATH: &str = "/forum/index.php";
 const PROBE_BYTES: usize = 8192;
@@ -154,6 +155,11 @@ pub async fn run(settings: RtProxySettings) -> Result<(), String> {
         ),
     );
     let semaphore = Arc::new(Semaphore::new(config.settings.max_clients));
+    // Публичный CONNECT-пул blockme.site не выдерживает пачку параллельных
+    // туннелей от Chrome: страница открывает 6+ соединений к static, пул
+    // отвечает только части, остальные получают ERR_FAILED. Ограничиваем
+    // одновременные upstream-сессии, чтобы ассеты грузились очередью.
+    let upstream_limit = Arc::new(Semaphore::new(UPSTREAM_CONCURRENCY));
     let mut refused = 0_u64;
     loop {
         let (client, peer) = match listener.accept().await {
@@ -183,9 +189,12 @@ pub async fn run(settings: RtProxySettings) -> Result<(), String> {
         };
         let pool = pool.clone();
         let config = config.clone();
+        let upstream_limit = upstream_limit.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            if let Err(error) = handle_client(client, peer, pool, config.clone()).await {
+            if let Err(error) =
+                handle_client(client, peer, pool, upstream_limit, config.clone()).await
+            {
                 if config.settings.verbose {
                     log(&config, &format!("{peer}: {error}"));
                 }
@@ -470,6 +479,7 @@ async fn handle_client(
     mut client: TcpStream,
     peer: SocketAddr,
     pool: Arc<ProxyPool>,
+    upstream_limit: Arc<Semaphore>,
     config: Arc<RtConfig>,
 ) -> Result<(), String> {
     let (sni, hello) = timeout(CLIENT_HELLO_TIMEOUT, peek_client_hello(&mut client))
@@ -479,6 +489,10 @@ async fn handle_client(
     if sni.is_empty() {
         return Err("в ClientHello нет SNI".to_string());
     }
+    let _upstream_permit = upstream_limit
+        .acquire()
+        .await
+        .map_err(|_| "upstream-лимит остановлен".to_string())?;
     if let Some((up, flight)) = dial_upstream(&pool, &sni, &hello, &config).await {
         if config.settings.verbose {
             log(&config, &format!("{peer} -> {sni}:443 через upstream"));
@@ -502,7 +516,7 @@ async fn handle_client(
 /// на чужой edge и рукопожатие не состоится. Проверенные адреса берём из
 /// `direct-fallback-hosts`, исключая сам внешний SNI.
 fn upstream_targets(sni: &str, direct_hosts: &[String]) -> Vec<String> {
-    if sni.eq_ignore_ascii_case("cloudflare-ech.com") {
+    if is_ech_outer_sni(sni) {
         let targets = direct_hosts
             .iter()
             .filter(|host| !host.eq_ignore_ascii_case(sni))
@@ -574,11 +588,12 @@ async fn dial_upstream(
         if let Some(result) = verified {
             return Some(result);
         }
-        // Для обычного SNI сохраняем прежнюю политику: неудача после
-        // отправленного ClientHello считается отказом upstream-адреса.
-        // Для ECH перебор внутренних имён не должен демотировать рабочий
-        // CONNECT-пул из-за неверного кандидата.
-        if !reachable || (!is_ech_outer_sni(sni) && wrote_hello) {
+        // Демотируем только при отказе соединения/CONNECT/записи. Тайм-аут
+        // первого ответа при параллельной нагрузке не должен выбивать живой
+        // upstream из общего пула: иначе пачка static-запросов опустошает пул
+        // и все соединения страницы падают. Для ECH неверный внутренний
+        // кандидат также не является отказом upstream-адреса.
+        if !reachable || !wrote_hello {
             demote_once(pool, &mut demoted, ip, config);
         }
         tries += 1;
