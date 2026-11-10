@@ -184,7 +184,7 @@ enum NdmBackend {
 
 impl Default for SystemNdm {
     fn default() -> Self {
-        if command_ok("ndmc", &["-c", "show version"]) {
+        if command_exists("ndmc") {
             Self {
                 backend: NdmBackend::Ndmc(OsString::from("ndmc")),
             }
@@ -265,6 +265,16 @@ fn command_ok(program: &str, args: &[&str]) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+/// Проверить наличие программы в PATH без запуска.
+/// `ndmc -c show version` нельзя использовать как probe: D2O не делает
+/// такого вызова, а differential-тест сравнивает точную трассу команд.
+fn command_exists(program: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|directory| directory.join(program).is_file())
 }
 
 /// Текущие hostrecord из UCI в формате, который понимает NdmView.
