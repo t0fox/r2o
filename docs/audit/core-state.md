@@ -828,7 +828,7 @@
 | `queued_pick` | 10703–10726 | 24 | выбор следующей задачи: TCP при parked QUIC, family recovery приоритет, иначе порядок | main.rs discovery queue pick | **E** | r2o-queue-order/family-queue differentials |
 | `queued_release` | 10728–10754 | 27 | запуск из очереди при наличии слота и соблюдении start-gap | main.rs discovery queue release | **E** | r2o-queue-order/worker-permit differentials |
 | `voice_pending_dispatch` | 10756–10782 | 27 | запустить отложенное voice-подозрение после текущего trial/watch | main.rs voice pending dispatch | **P** | discord lifecycle differential частично |
-| `d2k_sched_tick` | 10784–12364 | 1581 | главный тик: clock, ресурсы, wake, QUIC yield/deny, группы, sync, все состояния задач, очередь, voice, диагностика | main.rs R2oDiscoverySearches (7971)/ControlClient event loop + r2o_resource_limit | **P** | крупнейшая функция; scheduler/queue/cooldown/dead/own-first/resource/voice differentials покрывают основные ветви, полная матрица состояний — нет |
+| `d2k_sched_tick` | 10784–12364 | 1581 | главный тик: clock/admission, ресурсы, wake, QUIC yield/deny, группы, sync, все состояния задач (QUEUED/RESTING/lifetime/VOICE/ASKING/PROPS/VERIFY/TRIAL_SETTLE/PLANNING), очередь, voice, диагностика | `main.rs:7971 R2oDiscoverySearches`, `:12071` worker loop, `:12140` QUIC yield, `r2o_resource_limit`, `r2o_route`, `groups.rs`, `live.rs` | **P** | Блоки C: clock/report admission (10793-10807), `res_sample` (10809), wake drain (10812), `quic_yield_tick`/`quic_deny_tick` (10817-10818), group expiry 7 суток (10822-10830), sync/area retry (10831-10837), task loop (10840-12360). Rust: worker loop/queue/cooldown/dead/resource/route/voice, `r2o_quic_yield_waiting_for_tcp` (`:12140`), `groups.rs`; **не доказано:** полная матрица переходов и комбинации ECH+volume/addr+voice/QUIC-deny; `T_WATCHING` как фаза отсутствует; `yield_to_own_plan`/`shape_misses` не найдены. |
 
 ### `core/verdict.c`
 
@@ -1391,6 +1391,33 @@ volume-recovery (`:14628`) и каталог.
 **Итог:** ветви перенесены, но матрица «verifier × вход × состояние» и
 особые случаи (`volume_carried && CLEAR`, `ech_trial`, `own_first base`)
 не доказаны. P обоснован.
+
+## Углублённая сверка sched.c: d2k_sched_tick
+
+| C-блок | строки | Rust | статус/пробел |
+|---|---:|---|---|
+| clock/report admission | 10793–10807 | `Instant`, `R2oDiscoverySearches.queued_at` | P: привязка монотонных часов к стенным и допуск отчётов разнесены |
+| `res_sample`/`measure_limit_update` | 10809 | `r2o_resource_limit::R2oMeasurementGate` | P: снимок CPU/RSS/conntrack и лимит замеров иные |
+| wake drain | 10812–10813 | цикл `DiscoveryWorker` на condvar/канале | P: самопайп заменён очередью/condvar |
+| `quic_yield_tick`/`quic_deny_tick` | 10817–10818 | `r2o_quic_yield_waiting_for_tcp` (`:12140`), QUIC deny cache | P |
+| group expiry 7 суток | 10822–10830 | `groups.rs::expire_failures` | P |
+| sync/area retry | 10831–10837 | каталог/`R2oCatalogPersistence` | P |
+| `T_QUEUED` expiry/family | 10844–10865 | `R2oDiscoveryQueue::pop/expire/promote` | E/P: queue differentials |
+| `T_RESTING` | 10867–10869 | `R2oDiscoveryCooldownRing`/`R2oDeadAddressCache` | P: cooldown/dead differentials |
+| lifetime: SHAPE_WAIT/WATCHING/own_first=2/voice/ASKING | 10872–10944 | `R2O_DISCOVERY_TASK_LIFETIME`, phase, voice trial retire | P: `T_WATCHING`-фазы нет; `own_first`-срок и voice-retire разнесены |
+| `T_VOICE_MEASURE` | 10946–10955 | `R2oVoiceLatestQueue`, `r2o_measure_voice_for_flow` | P |
+| `T_VOICE_WATCH` | 10957–10979 | `r2o_take_silent_voice_trial`, `R2O_VOICE_PENDING_GRACE` | P |
+| `T_VOICE_TRIAL` | 10980–10992 | `R2oVoiceTrialContext`, `R2O_VOICE_TRIAL_RENEW_INTERVAL` | P |
+| `T_ASKING` | 10994–12360 | `r2o_classify_discovery_target...`, `r2o_discovery_ech_*`, `r2o_discovery_volume_*`, `r2o_discovery_client_shape_trial` | P: yield/addr/ECH/base/family/resources/snap/rx_volume/classify разнесены; полной матрицы нет |
+| `T_PROPS_CONTACT`/`T_PROPS_WAIT` | ~11530–11634 | raw-пробы discovery; control-опрос только CLI | **пробел слоя:** см. `prop_send_next` |
+| `T_VERIFY`/`T_VERIFY_WAIT` | ~11636–12042 | `r2o_run_discovery_candidate_trial*`, сбор APPLIED | P |
+| `T_TRIAL_SETTLE` | ~12044–12060 | `exchange_candidate_probe_with_settle` | E/P |
+| `T_PLANNING` | ~12063–12345 | установка кандидата/проверка | P |
+| `queued_release` | ~12360 | очередь | P |
+
+**Итог:** тик разложен на Rust-структуры, но полной матрицы
+«состояние × событие × таймаут» нет; `T_WATCHING`-фазы, `yield_to_own_plan`
+и `shape_misses` в Rust не найдены. P обоснован.
 
 ## Проверка полноты
 
