@@ -827,6 +827,44 @@ Inline-решения QUIC-зонда: суд этапа данных, stall-д�
   Это архитектурный пробел: R2O не исполняет UDP-плановые посылки с
   контроллера так, как C `d2k_udp_plan_send`, и не измеряет TTL ответа.
 
+## Углублённая сверка: tls13.c (23) и quicconn.c (36)
+
+- **TLS 1.3, C-стек:** `tls_dispose`, `say`, `now_ms`, `read_exact`,
+  `write_all`, `put16`, `get16`, `nonce_of`, `read_record`, `write_record`,
+  `traffic_keys` — собственный record layer и key schedule;
+  `tls_connect_internal` (265–524) — ClientHello/HRR/ServerHello/
+  EncryptedExtensions/Certificate/Finished, ECH и downgrade на TLS 1.2;
+  `d2k_tls_connect*`/`d2k_tls_connect_ech`, `d2k_tls_ech_accepted`,
+  `d2k_tls_write/read`, `d2k_tls_peer_name`, `d2k_tls_free`,
+  `d2k_tls_rx_wire_bytes`, `d2k_tls_rx_record_missing`, `d2k_tls_version`.
+  R2O заменяет это `rustls` (`r2o_tls.rs:53`, `r2o_tls13_client_hello`),
+  ECH — `ech.rs`/HPKE, счётчики — `R2oTlsRecordTracker`. **Пробелы P:**
+  построчного record layer/HRR/key update/session resumption/0-RTT нет;
+  коды ошибок, тайминги и close_notify-семантика C не сопоставлены;
+  ECH-путь проверяется `r2o-ech-rx-ladder-differential.sh`, но не
+  побайтово против C. Дифференциалы `r2o-tls-verify-differential.sh`
+  (16/16) и `test-controller-clienthello-differential.sh` (56) покрывают
+  исходы/ClientHello, не весь стек.
+- **QUIC, C-стек:** `qc_dispose`, `say`, `now_ms`, `crypto_put/ready`,
+  `build_ack`, `seal_level`, `send_level`, `tp_put_int`, `tp_build`,
+  `tp_server_parse/ee`, `frames_in`, `recv_dgram`, `crypto_frame`,
+  `first_flight`, `prepare_retry`, `d2k_qc_first_initial`,
+  `d2k_qc_connect`, `d2k_qc_stream_send/recv`, `d2k_qc_app_progress`,
+  `d2k_qc_peer_name/rx_wire_bytes/datagrams/handshake_done/rtt_ms/
+  dgrams/outbound/ping/fd/local/local_addr/release/close`. R2O использует
+  `quinn-proto`/`quinn` (`r2o_quic_http3.rs`, `quic_replay.rs`,
+  `r2k-core/src/quic.rs`). **Пробелы P:** C-ACK/loss/Retry/transport
+  params и `prepare_retry` не имеют построчного аналога — поведение
+  делегировано quinn; `d2k_qc_rtt_ms`/`outbound`/`dgrams` частично
+  соответствуют состоянию HTTP3-бюджета; 0-RTT и точные packet-number/
+  loss-правила не сверялись. Дифференциалы HTTP/3 18/18, app-bytes,
+  budget-init, short-control и retry-сценарии покрывают исходы, но не
+  внутреннюю state machine.
+- **Вывод:** 59 функций остаются P (не N): клиентский путь работает через
+  проверенные библиотеки, но C-стек не перенесён построчно. Это осознанная
+  замена, а не отсутствие функциональности; для E нужны адресные
+  differentials на record layer/ACK-loss/HRR/key update.
+
 ## Проверка полноты среза
 
 Сверка выполнена скриптом: для каждого заголовка `## <файл>` считается число строк таблицы, начинающихся с `| \`имя\``; результат сравнивается с числом функций файла в `slice-core-net.csv`.
