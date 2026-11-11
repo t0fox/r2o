@@ -84,14 +84,14 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 224 | 310 | 13 | 1 |
+| core-net | 548 | 226 | 308 | 13 | 1 |
 | core-state | 692 | 127 | 564 | 1 | 0 |
 | datapath-core | 400 | 120 | 269 | 11 | 0 |
 | datapath-plan | 183 | 108 | 69 | 5 | 1 |
 | detect | 159 | 49 | 100 | 10 | 0 |
-| **Итого** | **1982** | **628** | **1312** | **40** | **2** |
+| **Итого** | **1982** | **630** | **1310** | **40** | **2** |
 
-Это не оценка паритета: 1312 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 1310 P означают «код есть, доказательство ветвей
 неполное», 40 N — в основном диагностические/CLI-функции и несколько реальных
 расхождений (`SET_HTTPS` TTL, `ARM_SHAPE` UDP, `wire_udp` IPID_ZERO,
 `udpruntime` raw UDP, `tls12/tls13` record-layer).
@@ -182,12 +182,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 224 | 310 | 13 | 1 |
+| core-net | 548 | 226 | 308 | 13 | 1 |
 | core-state | 692 | 127 | 564 | 1 | 0 |
 | datapath-core | 400 | 120 | 269 | 11 | 0 |
 | datapath-plan | 183 | 108 | 69 | 5 | 1 |
 | detect | 159 | 49 | 100 | 10 | 0 |
-| **Итого** | **1982** | **628** | **1312** | **40** | **2** |
+| **Итого** | **1982** | **630** | **1310** | **40** | **2** |
 
 
 ---
@@ -282,12 +282,12 @@ P означает неполное доказательство ветвей, N
 | Показатель | Значение |
 |---|---:|
 | Всего функций в срезе | 548 |
-| `E` | 224 |
-| `P` | 310 |
+| `E` | 226 |
+| `P` | 308 |
 | `N` | 13 |
 | `?` | 1 |
 
-Доли: `E` — 40,88%, `P` — 56,57%, `N` — 2,37%, `?` — 0,18%.
+Доли: `E` — 41,24%, `P` — 56,20%, `N` — 2,37%, `?` — 0,18%.
 
 Переклассификация после `deep-core-net.md`: `first_flight`/`d2k_qc_first_initial`
 E→P, `d2k_qc_peer_name` E→N, `remember_live_failure` P→N,
@@ -1186,11 +1186,11 @@ Inline-решения QUIC-зонда: суд этапа данных, stall-д�
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| `d2k_quic_arm_data_judge` | 454-461 | 8 | handshake/status/bytes/complete → NO_HANDSHAKE/CUT/PASS | `quic.rs:31 r2k_quic_data_judge` | E | `tests/quic_data_judge.rs` + `test-quic-short-control-differential.sh` |
-| `d2k_quic_arm_data_judge_limited` | 466-470 | 5 | NOT_RUN при переполнении заголовков | `quic_replay.rs:433 r2o_quic_short_control_data_verdict` | P | headers_too_long-ветка в Rust не выделена; short-control differential её не покрывает |
-| `d2k_qstall_init` | 523-535 | 13 | stall: RTO=max(3×RTT,1000), отметки прогресса | `r2o_quic_http3.rs:600 R2oQuicHttp3Stall` | P | реализация есть, target-теста/дифференциала нет |
-| `d2k_qstall_sent` | 540-543 | 4 | запомнить PN отправленного PING | `R2oQuicHttp3Stall` (probes_sent) | P | то же |
-| `d2k_qstall_step` | 545-584 | 40 | GOING/PROBE/STALLED/ONEWAY по прогрессу/ACK/RTO | `r2o_quic_http3.rs:600` (`r2o_step`) | P | логика есть; границы и oneway не сверены |
+| `d2k_quic_arm_data_judge` | 454-461 | 8 | handshake/status/bytes/complete → NO_HANDSHAKE/CUT/PASS | `quic.rs:31-58 r2k_quic_data_judge` (соответствует `judge3`) | **P** | **Расхождение:** простой C-judge: `!handshake→NO_HANDSHAKE`; `status<=0 || 451→CUT`; `complete || bytes>=32768→PASS`; иначе CUT. Rust `r2k_quic_data_judge` — это `judge3`: при `status==0` без `headers_too_long` он возвращает `NotRun`, а не `CUT`. В production `verify.c:2127` проверяется только `== PASS`, поэтому pass/fail там совпадает; C-тест `test_quic_arm_data.c:319` ждёт CUT для `(1,0,3000,1)`, differential с Rust дал бы NotRun. |
+| `d2k_quic_arm_data_judge_limited` | 466-470 | 5 | NOT_RUN при переполнении заголовков, иначе простой judge | `quic.rs:31-58 r2k_quic_data_judge` | **P** | Заявленный пробел «headers_too_long-ветка не выделена» **неверен**: Rust содержит `status==0 && headers_too_long → NotRun` (`quic.rs:43-45`). Реальное отличие — `status==0` **без** `headers_too_long`: C возвращает `CUT`, Rust — `NotRun`. `judge_limited` используется только C-тестами (`test_quic_arm_data.c:326-332`), production идёт через `judge3`. |
+| `d2k_qstall_init` | 523-535 | 13 | stall: RTO=max(3×RTT,1000), отметки прогресса | `r2o_quic_http3.rs:600-620 R2oQuicHttp3Stall::r2o_initialize` | **E** | Совпадает: `rto=max(3*rtt,1s)`, `last_progress_at=now`, `probe_at=None`, `wire_at_probe=wire`, `probe_packet_number=None`, `unanswered=0`. Тесты `r2o_quic_ping_ack_сверяется_с_номером_пакета`, `...при_одновременном_росте_потока`, `...различает_обрыв_и_одностороннюю_передачу` (`r2o_quic_http3.rs:1435-1490`). |
+| `d2k_qstall_sent` | 540-543 | 4 | запомнить PN отправленного PING | `R2oQuicHttp3Stall::r2o_sent` (`:622-625`) | **E** | C `probe_pn/probe_pn_set`; Rust `probe_packet_number=Some`, `probes_sent++`. Те же тесты: PN 41/42 и ACK 40/41/42. |
+| `d2k_qstall_step` | 545-584 | 40 | GOING/PROBE/STALLED/ONEWAY по прогрессу/ACK/RTO | `r2o_quic_http3.rs:645-686 R2oQuicHttp3Stall::r2o_step` | **E** | Построчно: рост progress → reset/GOING; PING после RTO; `acked>=probe` закрывает вопрос; второе неподтверждение → `wire_seen!=wire_at_probe ? ONEWAY : STALLED`. Rust добавляет `probes_sent/probes_acked`. Тесты `:1435-1490` покрывают PN-ACK, одновременный рост и оба исхода. Отличие порядка: Rust `r2o_capture_ack` до проверки progress, C — после; влияет только на `probes_acked` при одновременном событии. |
 | `d2k_qbudget_init` | 616-620 | 5 | need=2×budget (25 по умолчанию) | `r2o_quic_http3.rs:548 r2o_quic_http3_budget_datagrams`, `R2oQuicHttp3Budget::r2o_initialize` | E | `test-quic-budget-init-differential.sh` (0/1/25/u32 max) |
 | `d2k_qbudget_ok` | 626-631 | 6 | бюджет набран, прогресс растёт, не stall | `R2oQuicHttp3Budget` | E | `d2o_quic_http3_differential.c` + full-stage differential |
 | `d2k_qbudget_grew` | 637-639 | 3 | упрощённая проверка роста | `R2oQuicHttp3Budget` (grew) | E | тот же differential |
