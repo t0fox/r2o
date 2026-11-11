@@ -751,7 +751,7 @@ Netlink/NFQUEUE кодек: итератор сообщений, атрибут�
 | `wn32` (static) | 32–35 | 4 | запись сетевого u32 | `to_be_bytes` (`:196`) | E | `:304` |
 | `d2k_nl_iter_init` | 37–43 | 7 | инициализация итератора | `MessageIter::new` (`:64`) | E | `:355` |
 | `d2k_nl_next` | 45–77 | 33 | следующее сообщение, битые длины → стоп | `MessageIter::next` (`:76`) | E | `:355` (unpadded/bad length) |
-| `d2k_nl_packet` | 79–161 | 83 | атрибуты NFQA: hdr/payload/cap/ts/mark/oif | `netlink.rs:125 QueuePacket::parse` | E | `:371`, `:403` |
+| `d2k_nl_packet` | 79–161 | 83 | атрибуты NFQA: hdr/payload/cap/ts/mark/oif | `netlink.rs:125 QueuePacket::parse` | **P** | Все поля совпадают: `PACKET_HDR` (id/hw_protocol/hook при vlen≥7), `PAYLOAD`, `CAP_LEN`, `SKB_INFO`, `MARK`, `TIMESTAMP` (sec/usec, границы), `IFINDEX_OUTDEV`. **Расхождение `truncated`:** C `out->truncated = cap_len > payload_len` даже при отсутствии `PAYLOAD` (`payload_len=0`), Rust `cap_len.zip(payload).is_some_and(cap>len)` — без `PAYLOAD` даёт `false`. Тесты `:371`, `:403` этот случай не покрывают. |
 | `d2k_nl_errno` | 163–176 | 14 | знаковый errno из NLMSG_ERROR | `netlink.rs:183 kernel_error` | E | `:429 kernel_error_reads...` |
 | `hdr_init` (static) | 181–197 | 17 | nlmsghdr+nfgenmsg | `netlink.rs:263 header` | E | `:332` |
 | `put_attr` (static) | 200–216 | 17 | атрибут + zero padding | `netlink.rs:274 push_attr` | E | `:321` |
@@ -759,6 +759,36 @@ Netlink/NFQUEUE кодек: итератор сообщений, атрибут�
 | `d2k_nl_verdict_payload` | 236–252 | 17 | VERDICT+PAYLOAD | `netlink.rs:203 verdict_payload` | E | `:321` |
 | `d2k_nl_cfg_cmd` | 254–273 | 20 | CONFIG BIND/UNBIND, ACK | `netlink.rs:219 config_command` | E | `:332` |
 | `d2k_nl_cfg_params` | 275–309 | 35 | PARAMS/MAXLEN/FLAGS/MASK | `netlink.rs:234 config_params` | E | `:332` |
+
+### nl.c: построчная сверка
+
+- **`align4/h16/h32/wh16/wh32/n16/n32/wn16/wn32` (10–35) ↔
+  `netlink.rs`:** C `align4` без проверки переполнения, Rust
+  `checked_add(3)`; для длин netlink-сообщений разница недостижима.
+  Host-endian поля — `memcpy` ↔ `from_ne_bytes/to_ne_bytes`, сетевые —
+  `n16/n32/wn16/wn32` ↔ `from_be_bytes/to_be_bytes`. E.
+- **`d2k_nl_iter_init`/`d2k_nl_next` (37–77) ↔ `MessageIter`
+  (`:64`):** C проверяет `left<hdr`, `mlen<16 || mlen>left`, берёт
+  type/flags/seq/pid/body, `step=align4(mlen)`, при `step>=left`
+  гасит итератор; Rust те же проверки, `step>=remaining` →
+  `bytes.len()`. Непакованный последний сообщение и битая длина
+  покрыты `:355`. E.
+- **`d2k_nl_packet` (79–161) ↔ `QueuePacket::parse` (`:125`):** все
+  атрибуты и границы совпадают, включая timestamp-границы
+  `sec!=0/17e9`, `usec<1e6`, `skb_info`, `outdev`, `mark`, `cap_len`.
+  **Отличие:** `truncated = cap_len > payload_len` в C считается и при
+  отсутствующем `PAYLOAD` (`payload_len=0`), Rust использует
+  `cap_len.zip(payload)` и без payload даёт `false`. P.
+- **`d2k_nl_errno` (163–176) ↔ `kernel_error` (`:183`):** C требует
+  `NLMSG_ERROR` и body≥4, читает host-endian signed i32; Rust то же.
+  E, `:429`.
+- **`hdr_init/put_attr/verdict/verdict_payload/cfg_cmd/cfg_params`
+  (181–309) ↔ `header/push_attr/verdict/verdict_payload/
+  config_command/config_params`:** заголовок 16+4, `nfgen_family=0`,
+  version 0, queue BE; `put_attr` выравнивает и зануляет padding;
+  verdict-attr 8 байт (action/id BE); payload ≤ `u16::MAX-4`; CFG
+  BIND/UNBIND с ACK, params copy_range+copy_mode, MAXLEN, FLAGS, MASK
+  (FAIL_OPEN|GSO). E, тесты `:304/321/332`.
 
 ## icmpguard.c (7 функций)
 
