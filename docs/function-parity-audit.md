@@ -2982,16 +2982,99 @@ R2O-владелец: `crates/r2o-datapath/src/main.rs` (`run`, `parse_options`,
 | `http80_io_rst` (static) | 757–768 | 12 | raw RST серверу после 307 | `raw.rs:147 send_packet` | P | D17 проверяет сборку RST, не отправку |
 | `http80_cut` (static) | 776–784 | 9 | событие обрыва ответа контроллеру | `hold.rs:255 sweep_http_responses`, `main.rs:3148` | P | `hold.rs:2082 incomplete_fixed_length...` |
 | `http80_step` (static) | 786–829 | 44 | диспетчер HTTP80: DROP/REPLACE/swap/лог | `main.rs:2006 build_http_redirect_packets`, `:2093 send_replacement`, `hold.rs` | P | D17 paired differential; ветви «raw нет» и «swap rejected» покрыты кодом |
-| `usage` (static) | 834–861 | 28 | текст помощи CLI | `main.rs:2952 print_help` | P | набор опций отличается (см. `main`) |
+| `usage` (static) | 834–861 | 28 | текст помощи CLI | `main.rs:2952 print_help` | **P** | **C:** `--health-file/--queue/--plan/--log/--control/--mark/--probe-mark/--only-mark/--udp-reverse-hook/--iface/--flows/--queue-len/--copy-range/--sched-slots/--journal/--idle/--stats/--duration/--no-fail-open/--mode`. **R2O:** те же основные, но **нет** `--log`, `--health-file`, `--duration`, `--sched-slots`; добавлены `--family`, `--check`, `--controller-only`, `--control-wire`, `--control-release-id`, `--rcvbuf`, `--both/--queue4/6/--control4/6`, `--r2o-flow-capacity`, `--r2o-udp-reverse-visible`. Текст и состав отличаются. |
 | `arg_u32` (static) | 863–871 | 9 | строгий разбор u32 | `main.rs:2911 parse_value` | P | общий `FromStr`; граничные тесты не выделены |
 | `port_of` (static) | 873–876 | 4 | big-endian u16 | `packet.rs`/`read_u16` (приватный) | P | тривиально; отдельного теста нет |
-| `print_stats` (static) | 878–1030 | 153 | периодическая сводка (потоки/счётчики/причины) | `main.rs:629–773 r2o_log_*` | P | состав строк иной; блока причин нет; `test-datapath-stats-timer-differential.sh` |
+| `print_stats` (static) | 878–1030 | 153 | периодическая сводка (процесс, HTTP80, hold, пакеты, ICMP, план, потоки, приветствия, sched, payload, NFQ, NAT, routed, UDP marked, raw, follow, shape misses, plan count, причины) | `main.rs:629-773` десять `r2o_log_*` | **P** | R2O печатает: процесс, очередь, TCP/UDP-таблицы, sched, session (reply_hidden/hello/sni/rst/HTTP keep-alive), payload (без capture), capture, hold, raw, udp_follow. **Не печатает:** HTTP80-статистику, владение приветствием (`hold_owned/resent/resend_fail`), план `applied/done/emitted/deferred/damaged/stale_deferred/sent_lost` (эти счётчики в R2O — N), NAT `ok/miss/none/retry`, routed flows, `udp_marked_kept`, `shape_misses` (всегда 0), `plan_count/capacity`, гистограмму причин (`count_reason` — N). ICMP печатается отдельно `icmp_guard.r2o_stats_line()` (`main.rs:1158`). `test-datapath-stats-timer-differential.sh` есть. |
 | `proto_name` (static) | 1039–1045 | 7 | имя протокола 6/17 | inline в `main.rs` | P | — |
 | `jrn_kind` (static) | 1050–1066 | 17 | код журнала → текст | `flow_journal.rs:85 c_name`, `:100 russian_name` | P | `flow_journal.rs:1027 journal_note_texts_match_d2o` |
 | `print_journal` (static) | 1070–1104 | 35 | печать журнала по записям | `main.rs:3006 format_journal_details` | P | формат отличается; D22 сверяет записи, не печать |
 | `refuse_of_errno` (static) | 1114–1116 | 3 | errno → код REFUSE | `flow_journal.rs:16-23` константы + `main.rs` | P | маппинг SEND/TOO_LONG разнесён по вызывающим |
 | `offline_self_check` (static) | 1118–1123 | 6 | `--offline-self-check` SHA-проверка | нет | N | опция отсутствует в `parse_options` |
-| `main` | 1125–2415 | 1291 | CLI, сокеты, NFQUEUE-цикл, sweep, hold/release, stats | `main.rs:884 run` (и `parse_options` `:2754`) | P | цикл и большинство ветвей есть; нет `--log`/`--duration`/`--health-file`/`--sched-slots`, добавлены `--family`/`--check`/`--controller-only`/`--control-wire`/`--rcvbuf` |
+| `main` | 1125–2415 | 1291 | CLI, сокеты, NFQUEUE-цикл, sweep, hold/release, stats | `main.rs:884 run` (и `parse_options` `:2754`) | **P** | Цикл и большинство ветвей есть: NFQUEUE, raw, sched, hold, HTTP80, ICMP, stats, signals, route/cap refresh. **Нет** `--log` (R2O пишет в stderr без freopen), `--health-file` (health-файл не пишется), `--duration` (нет остановки по времени), `--sched-slots` (ёмкость очереди отправки задаётся в коде `scheduler.rs`). C-проверки «apply требует plan или control», «apply требует mark≠0», «probe-mark≠mark» в R2O разнесены по `parse_options`/`run`; `--check` — R2O-расширение. |
+
+### Углублённая сверка d2kd.c (44 функции)
+
+- **Сигналы/время/стоимость:** `on_signal` (62) ставит
+  `volatile sig_atomic_t`; Rust — `install_signal_handlers` + `STOP`
+  (`main.rs:55,3762`), P. `now_ns` (112–116) — `CLOCK_MONOTONIC` в нс,
+  Rust `Instant`, P. `self_cost` (68–110) читает `/proc/self/stat` и
+  `statm`; Rust `r2o_process_cost_from_proc`/`r2o_process_cost`
+  (`main.rs:569,605`), P, differential `test-datapath-process-stats`.
+- **MTU/маршруты:** `tls_route_segment_cap` (123–151) — MTU минус
+  IP+32 только для TLS ClientHello (`0x16`, major 3); Rust
+  `raw.rs:130`/`:119`, P. `routes_routed` (278–280) — метка выбирает
+  политику; Rust `r2o_mark_is_routed` (`r2o_route.rs:175`), P.
+  `describe_oifs` (282–294) — имена egress; Rust
+  `r2o_egress_ifindices`, P. `routes_refresh` (302–370) — разбор
+  `ip rule`/маршрутов, лог смен, quiet 600 с; Rust `r2o_refresh`
+  (`r2o_route.rs:372`) по netlink-watch, quiet-окно не
+  воспроизведено, P. `cap_refresh` (372–415) — adopt MTU → grow
+  sched → greet; Rust `r2o_adopt_egress`/`grow_slot_size`/greet, P.
+- **Подсчёт причин:** `count_reason` (165–186) — гистограмма до 32
+  причин, печатается в сводке (1026–1028); в R2O аналога нет,
+  причины уходят событиями/журналом. **N.**
+- **ICMP:** `icmp_step` (220–248) — DROP только на свою фальшивку,
+  иначе ACCEPT; Rust `r2o_icmp_guard.rs:127 r2o_handle_at_hook`,
+  P + differential `test-icmp-guard-current-differential.sh`.
+- **Логи отказов:** `log_send_fail` (253–261) — лимит 16 строк для
+  busy; Rust `main.rs:186/192` eprintln без лимита, P.
+  `out_resend_failed` (651–671) — одна строка на поток, лимит
+  `D2K_UDP_REFUSED_LOG`; Rust `main.rs:287` без лимита/адресной
+  строки, P.
+- **Вердикты/отложенные:** `send_original_verdict` (417–427),
+  `send_delayed_verdict` (429–431), `delayed_verdict_done` (433–446)
+  — вердикт, счётчики accepted/dropped, complete→session_sent,
+  иначе exec_failed; Rust `nfqueue.rs:310`, `main.rs:411/319`,
+  P. `out_verdict`/`out_fail`/`out_marked`/`out_defer` (597–647) —
+  вердикт, errno, метка клиента, отложенный вердикт; Rust
+  `main.rs:4335`, `r2o_udp_hold.rs:291`, P.
+- **Hold/release:** `hold_owns` (484–489) — TLS-hold владеет ID, не
+  порт 80; Rust `hold.rs:298`/`batch_owned_originals`, P + D6.
+  `resend_original`/`resend_originals` (493–516) — raw-возврат
+  оригинала; Rust `r2o_resend_owned_originals`, P.
+  `release_original` (518–542) — таймаут, закрытие UDP-hold,
+  `note_unassembled`, observe, resend/ACCEPT; Rust `hold.rs:888`,
+  `r2o_release_damaged_tcp_hold`, P + D6.
+- **Conntrack:** `ct_query`/`ct_probe` (561–595) — ctnetlink GET и
+  одноразовая проба; Rust `conntrack.rs:297/309`, P;
+  `r2o-conntrack-ctget-differential.sh`.
+- **Отправка:** `out_send_now` (673–684) — raw send; Rust
+  `raw.rs:147`, P. `out_send_at`/`out_send_at_owned` (686–709) —
+  отложенная отправка без/с владением ID; Rust
+  `scheduler.rs:209/214`, P + D21. `refuse_of_errno` (1114–1116) —
+  EMSGSIZE→TOO_LONG, иначе SEND; Rust константы + вызывающие, P.
+- **HTTP80:** `http80_log` (717–728) — текст «вставка провайдера»;
+  Rust событие `send_http_portal_event`, P. `http80_io_payload`/
+  `http80_io_accept`/`http80_io_rst` (733–768) — ACCEPT с заменой,
+  ACCEPT, raw RST; Rust `nfqueue.rs:317/310`, `raw.rs:147`, E/P.
+  `http80_cut` (776–784) — событие обрыва; Rust
+  `hold.rs:255`/`main.rs:3148`, P. `http80_step` (786–829) —
+  DROP/REPLACE/swap; Rust `main.rs:2006/2093` + `hold.rs`, P + D17.
+- **CLI/вывод:** `usage` (834–861) — см. строку: R2O не имеет
+  `--log/--health-file/--duration/--sched-slots`, добавляет
+  `--family/--check/--controller-only/--control-wire/--rcvbuf/
+  --both`. `arg_u32` (863–871) — `strtoul(...,0)`; Rust
+  `parse_value`, P. `port_of` (873–876) — BE u16; Rust `read_u16`,
+  P. `print_stats` (878–1030) — см. строку: R2O не печатает HTTP80,
+  hold ownership, план applied/done/damaged/stale/sent_lost, NAT,
+  routed, udp_marked, shape_misses, plan count, гистограмму причин.
+  `proto_name` (1039–1045) — tcp/udp/?; Rust inline, P.
+  `jrn_kind` (1050–1066) — имена видов; Rust `c_name`/
+  `russian_name`, P. `print_journal` (1070–1104) — печать журнала;
+  Rust `format_journal_details`, P.
+- **Самопроверка:** `offline_self_check` (1118–1123) — SHA-256("abc")
+  и версия провода; Rust-опции `--offline-self-check` нет. **N.**
+- **`main` (1125–2415):** CLI, план, raw, NFQUEUE, control, session,
+  http80, sched, signals, цикл. Нет `--log`/`--health-file`/
+  `--duration`/`--sched-slots`; health-файл не пишется, остановки по
+  времени нет, лог не переоткрывается. Остальные ветви (apply
+  требует plan/control, mark≠0, probe-mark≠mark, SO_TIMESTAMP,
+  stats/idle/sched/hold/http80/routes/cap) перенесены — P.
+
+**Итог:** 44 функции; N — `count_reason`, `offline_self_check`
+(диагностика/CLI), остальные P/E с подтверждёнными пробелами
+CLI-логирования, health-файла, duration и состава сводки.
 
 ## session.c (107 функций)
 
