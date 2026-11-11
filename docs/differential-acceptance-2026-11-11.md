@@ -61,24 +61,45 @@ Cold-start приложения после перезагрузки дошёл �
 
 ```text
 [GatewaySocket] [CONNECTED] wss://gateway.discord.gg ... in 244 ms
-[GatewaySocket] [READY] took 1563ms, as 017dc4983e8e52e30e6f947823243c1f
-[GatewaySocket] [READY_SUPPLEMENTAL] took 1943ms
+[GatewaySocket] [READY] took 1021ms, as ccfd9db11edc1a80d3a787e399cba793
+[GatewaySocket] [READY_SUPPLEMENTAL] took 1238ms
 ```
 
-Предыдущая голосовая сессия до cold-start:
+Web-страница `discord.com/login` проверена в **обычном headed Chromium** с нормальным
+User-Agent: документ 200, `css: 359`, ошибок загрузки ассетов нет, отображается форма
+входа. В headless Chromium те же CSS-запросы получают `ERR_CONNECTION_RESET` — это
+anti-bot поведение Discord для headless-браузера, а не сетевое расхождение R2O.
+
+Голосовой RTC после cold-start подтверждён вручную:
 
 ```text
-RTC_CONNECTED
-RTC connected to media server: 104.29.149.39:19329
-Ping received ... rtt: 29
-Transport stats ... rtt: 29 [ms]
+07:26:00.683 RTC connection state: AWAITING_ENDPOINT => CONNECTING
+07:26:00.896 RTCControlSocket [READY] took 214 ms
+07:26:00.936 RTC_CONNECTING => RTC_CONNECTED
+07:26:00.939 RTC connected to media server: 104.29.149.20:19302
 ```
 
-Для повторной проверки голосового RTC после cold-start нужно вручную войти в голосовой канал: приложение не восстанавливает voice-сессию автоматически.
+RTP-метрики при этом:
+
+```text
+Ping received from 104.29.149.20:19302, seq: 38, rtt: 28
+Transport stats ... rtt: 28 [ms]
+packets sent: 402, received: 134, bytes sent: 19305, received: 6968
+```
+
+`--voice-list` на роутере видит живой поток:
+
+```text
+104.29.149.20:19302 <- 192.168.1.216:51775 пакетов 396
+```
+
+Отображаемые в Discord «5000 мс» не являются RTP-задержкой: фактический media RTT
+26–28 мс. Они совпадают с недоступным `latency.discord.media` (HTTP 520) и
+периодическими `RTCControlSocket HEARTBEAT ACK TIMEOUT`, то есть это метрика
+control/latency-канала, а не голосового медиапотока.
 
 ## Оставшиеся ограничения
 
-1. Web-страница `discord.com/login` отдаёт документ 200, но часть CSS-ассетов получает `ERR_CONNECTION_RESET`. Приложение Discord при этом работает и дошло до `READY`.
-2. `latency.discord.media` отдаёт HTTP 520 со всех Cloudflare-адресов даже при принудительном `--resolve`; это состояние endpoint на стороне Discord/Cloudflare, а не отказ обхода.
-3. Голосовой RTC после cold-start не проверен без ручного входа в голосовой канал.
-4. Физический long-running RTC-сеанс и аппаратные тайминги не входят в этот прогон.
+1. `latency.discord.media` отдаёт HTTP 520 со всех Cloudflare-адресов даже при принудительном `--resolve`; это состояние endpoint на стороне Discord/Cloudflare. Из-за него Discord может показывать 5000 мс, хотя RTP RTT 26–28 мс.
+2. `RTCControlSocket` периодически получает `HEARTBEAT ACK TIMEOUT` и переподключается; media RTP при этом продолжает идти.
+3. Физический long-running RTC-сеанс и аппаратные тайминги не входят в этот прогон.
