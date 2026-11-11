@@ -155,25 +155,25 @@
 | `ev_matches_flow` | 351–366 | 16 | сравнение события с потоком в обе стороны | main.rs flow match helpers | **P** | перенесено; direct unit/diff на C-функцию нет |
 | `wait_for_event3` | 397–421 | 25 | ожидание одного из трёх типов событий с code/filter/flow и дедлайном | main.rs ask event loop | **P** | реализовано в run_r2o_ask; C/Rust differential нет |
 | `wait_for_event` | 423–429 | 7 | ожидание одного типа события | main.rs ask event loop | **P** | обёртка; см. wait_for_event3 |
-| `props_bind_any` | 494–524 | 31 | bind локального TCP/UDP-порта с IPV6_V6ONLY | main.rs bind helpers | **P*** | static-хелпер |
-| `d2k_props_bind` | 526–528 | 3 | bind IPv4 TCP | main.rs ask/classify bind | **P*** | static-хелпер |
-| `d2k_props_bind_family` | 530–532 | 3 | bind TCP family 4/6 | main.rs bind helpers | **P*** | static-хелпер |
-| `d2k_props_bind_udp` | 534–536 | 3 | bind IPv4 UDP | main.rs bind helpers | **P*** | static-хелпер |
-| `d2k_props_bind_udp_family` | 538–540 | 3 | bind UDP family 4/6 | main.rs bind helpers | **P*** | static-хелпер |
-| `d2k_props_contact` | 542–545 | 4 | TCP-обращение к цели IPv4 с отправкой приветствия | CLI `run_r2o_ask` (`main.rs:332-737`) | **P** | Реализовано только в CLI-опросе; production-discovery R2O этим путём вопросы не задаёт (см. `prop_send_next`). C/Rust differential контакта нет. |
-| `d2k_props_contact_on` | 547–551 | 5 | то же с готовым fd | main.rs ask contact | **P*** | static-хелпер |
-| `d2k_props_contact_on_family` | 553–558 | 6 | то же для family 4/6 | main.rs ask contact | **P*** | static-хелпер |
-| `tcp_timestamps_read` | 567–578 | 12 | прочитать /proc/sys/net/ipv4/tcp_timestamps | main.rs tcp profile probe | **P*** | static-хелпер Linux |
-| `tcp_timestamps_write` | 580–588 | 9 | записать tcp_timestamps | main.rs tcp profile probe | **P*** | static-хелпер; глобальная запись под мьютексом |
-| `connect_with_tcp_profile` | 591–636 | 46 | connect при временно изменённом tcp_timestamps, восстановление | main.rs tcp profile connect | **P** | реализовано; C/Rust differential на гонку/восстановление нет |
-| `d2k_props_contact_on_family_tcp_profile` | 638–753 | 116 | полный TCP-contact: socket, mark, nonblock connect, local addr/port, отправка hello | main.rs ask contact + classify dial | **P** | основной путь; покрыт classifier/ask частично, отдельного C/Rust diff нет |
-| `build_fake_body` | 786–796 | 11 | тело fake: decoy-префикс + заполнитель 0f, длина 2*truth | ask::compose_badsum_fake_plan | **P*** | static-хелпер |
-| `d2k_props_question_plan` | 798–841 | 44 | план одного из 5 вопросов свойств (overlap/reorder/checksum/protocol/duplicates) | ask::question_plan | **P** | unit question_order_and_plan_parameters; C/Rust differential планов вопросов не найден |
-| `d2k_props_question_passed` | 845–864 | 20 | записать ответ вопроса в d2k_props (parse снимает checksum) | ask::record_question_passed | **P** | unit protocol_parse_requires_control_and_success_updates_only_its_proven_fields |
-| `question_retire` | 874–879 | 6 | снять пробный план вопроса с датапата | main.rs ask question retire | **P*** | static-хелпер |
+| `props_bind_any` | 494–524 | 31 | socket/bind/getsockname локального TCP/UDP-порта, IPv6 `IPV6_V6ONLY=1`, ошибка при `out_fd==NULL` | `main.rs:22501-22611 BoundTcpProbe::open` | **P** | Rust: socket, nonblock+CLOEXEC, `SO_MARK=0x2d` (C bind не метит), bind/getsockname, отказ при нулевом порту. **Отличия:** Rust **не ставит `IPV6_V6ONLY`**; C закрывает fd и возвращает -1 при `out_fd==NULL`; Rust всегда владеет `OwnedFd`. Для IPv4/обычного IPv6 bind эквивалентно. |
+| `d2k_props_bind` | 526–528 | 3 | bind IPv4 TCP | `BoundTcpProbe::open(4, ..)` | **P*** | Тонкая обёртка family=4. |
+| `d2k_props_bind_family` | 530–532 | 3 | bind TCP family 4/6 | `BoundTcpProbe::open` | **P*** | family 4/6; наследует отсутствие `IPV6_V6ONLY`. |
+| `d2k_props_bind_udp` | 534–536 | 3 | bind IPv4 UDP | нет прямого аналога | **P*** | UDP-bind для ask-вопросов не используется (вопросы TCP); отдельного Rust-хелпера нет. |
+| `d2k_props_bind_udp_family` | 538–540 | 3 | bind UDP family 4/6 | нет прямого аналога | **P*** | То же; C-обёртка над `props_bind_any(SOCK_DGRAM)`. |
+| `d2k_props_contact` | 542–545 | 4 | TCP-обращение к цели IPv4 с отправкой приветствия | CLI `run_r2o_ask` (`main.rs:493+`, `BoundTcpProbe`) | **P** | Реализовано только в CLI-опросе; production-discovery R2O этим путём вопросы не задаёт. C/Rust differential контакта нет. |
+| `d2k_props_contact_on` | 547–551 | 5 | то же с готовым fd | `BoundTcpProbe` (fd внутри) | **P*** | C принимает `use_fd`; Rust владеет сокетом с момента open, отдельного «готового fd» нет. |
+| `d2k_props_contact_on_family` | 553–558 | 6 | то же для family 4/6 | `BoundTcpProbe::connect` | **P*** | family 4/6; наследует отсутствие tcp-профиля. |
+| `tcp_timestamps_read` | 567–578 | 12 | прочитать `/proc/sys/net/ipv4/tcp_timestamps`, допустить '0'..'2' | `raw_probe.rs:676` (только для host_offers_ts) | **P** | Rust читает тот же файл, но **не для connect-профиля**: helper'а `tcp_timestamps_read/write` вокруг connect нет. Для `host_offers_ts` чтение и дефолт 1 совпадают. |
+| `tcp_timestamps_write` | 580–588 | 9 | записать tcp_timestamps | нет | **N** | Во всём `crates/` нет записи в `/proc/sys/net/ipv4/tcp_timestamps`; временное переключение sysctl не портировано. |
+| `connect_with_tcp_profile` | 591–636 | 46 | под мьютексом прочитать/переключить tcp_timestamps, connect, восстановить; -2 при сбое профиля | нет | **N** | Rust не меняет sysctl и не имеет кодов -2/восстановления; `BoundTcpProbe::connect` делает обычный неблокирующий connect. Профиль TCP-опций задаётся только параметром `client_tcp_has_timestamps` для уже снятого приветствия, а не настройкой ядра. |
+| `d2k_props_contact_on_family_tcp_profile` | 638–753 | 116 | полный TCP-contact: опции, nonblock connect, локальные адрес/порт, отправка hello, опциональный tcp-профиль | `main.rs:22501+ BoundTcpProbe`, `run_r2o_ask` | **P** | Перенесены socket/TCP_NODELAY/таймауты/неблокирующий connect/getsockname/отправка, но **параметр `tcp_timestamps` и sysctl-переключение отсутствуют**; C возвращает -3 при сбое профиля, Rust такого кода не имеет. `SO_NOSIGPIPE`-ветки macOS нет (Rust использует `MSG_NOSIGNAL`). |
+| `build_fake_body` | 786–796 | 11 | тело fake: decoy-префикс + заполнитель 0f, длина `2*truth` | classify_measured.rs `fake_len=n*2`, `append_measured_payload` | **E** | C `want=truth_len*2`, `memset(0f)`, decoy копируется в голову с обрезкой до want; Rust `fake_len = n.saturating_mul(2)`, `append_measured_payload(..., fake_len, decoy)` даёт те же байты (decoy/0f). Покрыто `tests/measured_plan.rs`. |
+| `d2k_props_question_plan` | 798–841 | 44 | TLV-план вопроса 0..4: overlap/reorder/checksum/protocol/duplicates | ask.rs:432 `question_plan` → `plan_text_for_poison` | **P** | Порядок вопросов и эффекты совпадают: q0 `0f`+seqovl, q1 split payload_start+1/sni_middle/reverse/pace 12000, q2 `0f`×`2*truth`, q3 decoy-hello (control, обрезка до `2*truth`)+badsum, q4 `0f`×`2*truth`+repeats 2/gap 20 мс. **Отличия формата:** C — TLV с id 1 для payload, Rust — текст `r2o-plan` с payload 2 у overlap; id плана C считает FNV-1a (`plan-%08x`), Rust принимает случайный `plan_id` от вызывающего. C/Rust differential планов вопросов нет; unit `question_order_and_plan_parameters` проверяет параметры, не байты. |
+| `d2k_props_question_passed` | 845–864 | 20 | ответ вопроса → d2k_props: overlap/reorder/checksum=NO, protocol→parses=YES+checksum=NO, duplicates=YES | ask.rs:492 `record_question_passed` | **E** | Ветви совпадают посимвольно; Rust-тест `protocol_parse_requires_control_and_success_updates_only_its_proven_fields` проверяет protocol и запись только по проходу. |
+| `question_retire` | 874–879 | 6 | снять пробный план: DEL_NAME_PROBE с transport 6, имя/shape/sport/family | `client.delete_name_probe(&sni, shape, family, source_port)` (`main.rs:528+`) | **P*** | Кадр DEL_NAME_PROBE тот же (см. link.c); C игнорирует ошибку снятия, Rust возвращает ошибку и в части ветвей прерывает опрос. |
 | `d2k_props_ask` | 881–884 | 4 | опрос свойств без трассировки | `run_r2o_ask` (`main.rs:332`), `ask::question_plan` | **P** | Обёртка существует только в CLI; в discovery C-опрос заменён raw-пробами (см. `prop_send_next`). |
-| `step_rc` | 889–898 | 10 | записать rc/err шага | ask::AskStep | **P*** | static-хелпер |
-| `d2k_props_ask_traced` | 900–1191 | 292 | 5 вопросов по очереди: bind порт, SET_NAME_PROBE, ACK, contact, EXCHANGE/APPLIED/REFUSED, остановка на первом прошедшем | main.rs run_r2o_ask + ask.rs | **P** | логика перенесена; CLI differential не сравнивает stdout, отдельные ветви NO_ACK/UNSENT/APPLIED проверены unit |
+| `step_rc` | 889–898 | 10 | записать `rc`/`err` шага трассы | `r2o_print_ask_trace`/`AskStep` (`main.rs`) | **P*** | C пишет в массив `d2k_props_step`; Rust печатает строку трассы, структуры шага нет. |
+| `d2k_props_ask_traced` | 900–1191 | 292 | 5 вопросов по очереди: bind порт, SET_NAME_PROBE, ACK, contact, EXCHANGE/APPLIED/REFUSED, остановка на первом прошедшем | main.rs:332-780 `run_r2o_ask` + ask.rs | **P** | **Совпадает:** 5 вопросов в одном порядке, bind до установки плана, SET_NAME_PROBE, ожидание ACK, contact, ожидание APPLIED+ServerHello, снятие непрошедшего вопроса, остановка на первом прошедшем. **Отличия:** (1) C id плана — FNV-1a TLV, Rust — случайный `plan_id`/`trial_id` (header, п. 17); (2) C не сверяет trial_id в ACK, Rust отвергает чужой trial; (3) C считает проход по `applied && server_hello` (exchange подразумевается hello), Rust требует ещё `exchange_seen`; (4) C при ошибке снятия плана игнорирует её, Rust возвращает ошибку и может прервать опрос; (5) CLI differential не сравнивает stdout, отдельные ветви NO_ACK/UNSENT/APPLIED покрыты unit. |
 | `append_fmt` | 1203–1213 | 11 | дописать форматированный текст | String::push_str | **E*** | static-хелпер |
 | `emit_header_proto` | 1221–1227 | 7 | заголовок d2k-plan/id/proto | compose_d2o::header | **E*** | static-хелпер; compose differential |
 | `emit_header` | 1229–1231 | 3 | заголовок tcp tls | compose_d2o::header | **E*** | static-хелпер |
@@ -190,8 +190,8 @@
 | `d2k_fallback_arms` | 1499–1501 | 3 | число запасных arm-ов донора | r2o_fallback::total | **E** | r2o-fallback-differential.sh |
 | `fb_arm_at` | 1504–1540 | 37 | arm по индексу: head/fake/ttl/seqovl/dup | r2o_fallback::arm | **E** | r2o-fallback-differential.sh |
 | `d2k_fallback_plan` | 1543–1550 | 8 | текст запасного плана по индексу | r2o_fallback::plan | **E** | r2o-fallback-differential.sh + unit fallback_plans_match_donor |
-| `d2k_arm_plan` | 1552–1751 | 200 | текст плана из arm (disorder/oob/seqovl/fake/ttl/tcpts) и проверки сочетаний | r2o_fallback::arm_plan / classify_measured | **P** | r2o-fallback-differential.sh покрывает 50 arm и 5 send_cap; произвольные сочетания arm не сравнивались |
-| `d2k_compose` | 1763–1799 | 37 | набор планов из вектора свойств, decoy и send_cap | compose_d2o::compose_plan_texts | **E** | d2o_compose_differential.c + compose_d2o unit |
+| `d2k_arm_plan` | 1552–1751 | 200 | общий текст плана из arm: disorder_pos, oob, seqovl/seqovl_hello, fake (badsum/ttl/tcpts/ipidzero/seq_out), between, repeats/gap, pace | `r2o_fallback::plan` (`:168`) для 49 fallback-arm; `classify_measured::plan_text_for_poison` для измеренных arm | **P** | C одна функция на оба входа. Rust разделён: `r2o_fallback::plan` жёстко берёт decoy `"disk.rzd.ru"` (совпадает с production `SCHED_DECOY`), `disorder_pos` печатает как `+2` (в fallback-списке только 2), не умеет `tcpts`/`ipidzero`; `plan_text_for_poison` умеет `tcpts`/`ipidzero`/`seqshift`/`split_pos` и произвольный `disorder_pos`. `r2o-fallback-differential.sh` покрывает 49 arm × 5 send_cap; произвольные сочетания arm и общий `d2k_arm_plan` одним differential не покрыты. |
+| `d2k_compose` | 1763–1799 | 37 | набор планов из вектора свойств: overlap, reorder, duplicates, checksum (если parse≠YES), protocol, fallback «всё сразу» | `compose_d2o::compose_plan_texts` (`:101`), production `ask::compose_plan_texts` (`:305`) | **E** | `d2o_compose_differential.c` + unit `compose_d2o`. Порядок и условия ветвей совпадают. `compose_d2o` — чистый побайтный порт `d2k-plan 1 1`; production `ask::compose_plan_texts` печатает `r2o-plan 1 10` (формат runtime R2O) с теми же эффектами; текст сравнивается через compose-дифференциал именно для `compose_d2o`. |
 
 ### `core/crypto.c`
 
@@ -1134,18 +1134,28 @@
   Rust собирает текст и компилирует `plan_text::compile_text`. Прямого
   TLV-differential нет, статус P.
 - **События/contact:** `ev_matches_flow`, `wait_for_event3`,
-  `wait_for_event`, `props_bind_any`, `d2k_props_bind*`,
-  `d2k_props_contact*`, `tcp_timestamps_read/write`,
-  `connect_with_tcp_profile`, `d2k_props_contact_on_family_tcp_profile`
-  перенесены в `main.rs`/`ask.rs`; C/Rust differential на все errno,
-  гонку tcp_timestamps и восстановление профиля не заявлен — P.
-- **Вопросы свойств:** `build_fake_body`, `d2k_props_question_plan`,
-  `d2k_props_question_passed`, `question_retire`, `d2k_props_ask`,
-  `step_rc`, `d2k_props_ask_traced` сверены с `ask.rs::question_plan/
-  record_question_passed` и `main.rs::run_r2o_ask`. Порядок пяти вопросов,
-  остановка на первом прошедшем, NO_ACK/UNSENT/APPLIED/REFUSED и снятие
-  плана перенесены; CLI differential не сравнивает stdout/exit, отдельные
-  ветви — unit. P.
+  `wait_for_event` — C-цикл по времени с фильтром типа/кода/ключа; Rust
+  `wait_for_ask_proof(trial_id, plan_id, expected_key)` и
+  `BoundTcpProbe`. `props_bind_any` ↔ `BoundTcpProbe::open`:
+  socket/bind/getsockname и отказ при нулевом порту совпадают, но Rust
+  **не ставит `IPV6_V6ONLY`** и не имеет ветви `out_fd==NULL`.
+  `tcp_timestamps_write` и `connect_with_tcp_profile` — **N**: Rust
+  нигде не пишет `/proc/sys/net/ipv4/tcp_timestamps`; `tcp_timestamps_read`
+  используется только для `host_offers_ts` (`raw_probe.rs:676`), не для
+  connect-профиля. `d2k_props_contact_on_family_tcp_profile` переносит
+  socket/TCP_NODELAY/таймауты/неблокирующий connect/getsockname/send, но
+  без параметра `tcp_timestamps`, кода -3 и восстановления sysctl; P.
+- **Вопросы свойств:** `build_fake_body` — E (те же `2*truth` байт
+  `0f`/decoy). `d2k_props_question_plan` — P: порядок и эффекты 5
+  вопросов совпадают (overlap `0f`+seqovl, reorder split+reverse+pace,
+  checksum `0f`×2n, protocol decoy+2n, duplicates 0f×2n+2/20 мс), но C
+  собирает TLV и считает FNV-1a id, Rust — текст `r2o-plan` с payload 2
+  у overlap и случайным `plan_id`. `d2k_props_question_passed` — E.
+  `question_retire`/`step_rc` — P (кадр тот же, трасса и обработка
+  ошибки снятия иные). `d2k_props_ask_traced` — P: C требует
+  `applied && server_hello`, Rust — `applied && exchange_seen &&
+  server_hello`; C не сверяет trial_id ACK, Rust отвергает чужой;
+  C игнорирует ошибку снятия плана, Rust может прервать опрос.
 - **Текстовые планы и fallback:** `append_fmt`, `emit_header*`,
   `append_hex`, `overlap_plan_text`, `reorder_plan_text`,
   `badsum_fake_plan_text`, `checksum_plan_text`, `build_decoy_hello`,
