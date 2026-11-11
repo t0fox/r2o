@@ -23,11 +23,11 @@
 |---|---:|
 | Всего функций в срезе | 548 |
 | `E` | 217 |
-| `P` | 318 |
-| `N` | 12 |
+| `P` | 317 |
+| `N` | 13 |
 | `?` | 1 |
 
-Доли: `E` — 39,60%, `P` — 58,03%, `N` — 2,19%, `?` — 0,18%.
+Доли: `E` — 39,60%, `P` — 57,85%, `N` — 2,37%, `?` — 0,18%.
 
 Переклассификация после `deep-core-net.md`: `first_flight`/`d2k_qc_first_initial`
 E→P, `d2k_qc_peer_name` E→N, `remember_live_failure` P→N,
@@ -326,7 +326,7 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `rec_find` | 468-475 | 8 | поиск записи host+family | `main.rs:4464 HttpSearchRecordCache` (HashMap) | P | структура заменена HashMap |
 | `rec_get` | 477-496 | 20 | создание записи с лимитами памяти/учётом отказов | `main.rs:4464 HttpSearchRecordCache` | P | лимиты `D2K_HS_RECORD_MAX_BYTES` не сопоставлены |
 | `same_program` | 500-508 | 9 | эквивалентность планов через TLV | `http_search.rs:775 candidate_program` | P | сравнение программ есть, TLV-путь иной; test только на алиасы |
-| `failed_live` | 510-519 | 10 | поиск живого отказа по ключу/адресу | `main.rs` HttpSearchRecord (failures) | P | структура и семантика `evidence_lost` не сверены |
+| `failed_live` | 510-519 | 10 | поиск живого отказа по ключу/адресу | нет | **N** | `HttpSearchRecord` (`main.rs:4468-4472`) содержит только `cut/repeat_path/repro_gap`; массива `failures` и полей addr/binding/execution/request_ms нет. `failed_http_programs` читает выключенные привязки каталога, а не живые отказы. N вместе с `remember_live_failure`. |
 | `remember_live_failure` | 520-550 | 31 | учёт живого отказа: addr/binding/execution/request_ms, лимиты байт | нет | **N** | `HttpSearchRecord` (`main.rs:4468-4472`) содержит только `cut/repeat_path/repro_gap`; полей `failures/addr/binding/execution/request_ms` и счётчиков нет. `HttpLiveFailures` строится из `failed_http_programs` (выключенные привязки каталога), а не из живых отказов; `r2o_catalog_mark_flow_unfit` ставит только `recheck_since`. |
 | `d2k_httpsearch_test_add_failures` | 553-566 | 14 | тестовый хук добавления отказов | нет | N | существует только под `D2K_HS_TESTING` |
 | `d2k_httpsearch_test_add_records` | 567-576 | 10 | тестовый хук добавления записей | нет | N | только под `D2K_HS_TESTING` |
@@ -338,7 +338,7 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `d2k_httpsearch_free` | 666-674 | 9 | освободить записи/очередь | RAII `Drop` | P | отдельной функции нет |
 | `d2k_httpsearch_busy` | 676-678 | 3 | есть ли активная задача | `main.rs` состояние задачи | P | булево состояние размазано |
 | `d2k_httpsearch_plan_of` | 680-683 | 4 | ключ плана для host+family | `HttpSearchRecordCache` lookup | P | отдельной функции нет |
-| `d2k_httpsearch_diagnostic_counts` | 687-706 | 20 | счётчики записей/очереди/отказов/лимитов | `diagnostics.rs:449-481` поля, `main.rs:16751` заполнение | P | часть счётчиков (`limit_hits`) не выставляется |
+| `d2k_httpsearch_diagnostic_counts` | 687-706 | 20 | счётчики записей/очереди/отказов/лимитов | `diagnostics.rs:449-481` поля, `main.rs:16751-16762` заполнение | P | `http_failure_bytes` жёстко 0 (`main.rs:16762`), а `http_failure_limit_hits/record_limit_hits/alloc_failures` остаются 0, потому что массивов отказов и счётчиков нет (`diagnostics.rs:474-481`). Часть полей заполняется, часть — нет. |
 | `d2k_httpsearch_diagnostics` | 707-709 | 3 | подключить observer диагностики | `diagnostics.rs` observer | P | API иное |
 | `diagnostic_end` | 710-721 | 12 | событие завершения (id/target/outcome/elapsed) | `main.rs:4864 r2o_http_search_diagnostic_event` | P | есть differential `d2o_http_diagnostic_differential.c`, но он не в `r2o-http-search-differential.sh`; прогон не подтверждён |
 | `finish` | 722-728 | 7 | завершить: diagnostic_end, закрыть сокет, PH_IDLE | `main.rs:19570 complete_http_search` | P | жизненный цикл переписан на задачи |
@@ -915,6 +915,58 @@ Inline-решения QUIC-зонда: суд этапа данных, stall-д�
 - **Вывод:** 67 функций; 9 h3 + 15 httpup + 13 hello + 7 tls13core — E,
   остальные P на ALPN/rename/without_sni/key schedule/ECH-байты.
   Новых N в блоке нет.
+
+## Углублённая сверка: httpsearch (66) и httpsprobe (22)
+
+- **`httpsearch.c`, E (22):** `d2k_hs_judge`, `hs_path_ok`,
+  `d2k_hs_probe_run`, `d2k_hs_candidate_count/key`, `poison_key_spec`,
+  `known_key`, `d2k_hs_candidate_text`, `stable_id`,
+  `d2k_httpsearch_measured_poison`, `d2k_hs_plan_poisons`,
+  `revoke_owned`, `all_failed`, `install`, `d2k_httpsearch_install_ack`,
+  `trial_executed`, `d2k_httpsearch_cut/portal/ack/applied/result/save`
+  — подтверждены `scripts/r2o-http-search-differential.sh`,
+  `tests/http_search.rs` и C-фикстурами (judge/baseline/no-executed/
+  applied/rollback/queue). Список кандидатов, точные тексты и
+  FNV-id совпадают.
+- **`httpsearch.c`, P:** `mono_ms`, `d2k_hs_answer_name`, `hs_read`
+  (тайминги/первый байт/префикс не сопоставлены побайтово), `fresh_id`
+  (нет fallback-ветки), `say`, `host_ok`, `rec_find/get` (HashMap вместо
+  C-массива, лимиты `D2K_HS_RECORD_MAX_BYTES` не сопоставлены),
+  `same_program` (TLV-сравнение иное), `d2k_httpsearch_new/free/busy/
+  plan_of`, `d2k_httpsearch_diagnostic_counts/diagnostics`,
+  `diagnostic_end/finish/open_job`, `confirmed`, `judge_trial`,
+  `next_candidate`, `add_cand/build_cands/build_fallback`, `start/
+  start_next`, `live_owner`, `d2k_httpsearch_bound_failure/control/tick/
+  push_all/load`, `runner_*`. Причины: состояние переписано на задачи,
+  часть переходов/таймеров не имеет C/Rust differential.
+- **`httpsearch.c`, N:** `remember_live_failure`, `failed_live`,
+  `d2k_httpsearch_test_add_failures`, `d2k_httpsearch_test_add_records`.
+  **Ключевой пробел:** `HttpSearchRecord` (`main.rs:4468-4472`) хранит
+  только `cut/repeat_path/repro_gap`; полей `failures/addr/binding/
+  execution/request_ms`, лимитов `D2K_HS_FAILURE_*` и счётчиков нет.
+  `HttpLiveFailures` строится из `failed_http_programs` (выключенные
+  привязки каталога), а не из живых отказов. Поэтому
+  `d2k_httpsearch_diagnostic_counts` P: `http_failure_bytes` жёстко 0
+  (`main.rs:16762`), `failure_limit_hits/record_limit_hits/
+  alloc_failures` остаются 0 (`diagnostics.rs:474-481`).
+- **`httpsprobe.c`, E:** `d2k_https_classify/upgrade/ttl/state_name`,
+  `host_ok`, `cache_find/put`, `d2k_httpsprobe_state`, `save`, `load`
+  — `test-controller-httpsprobe-differential.sh` (состояния, TTL,
+  capacity 130, bad-host, non-utf8, duplicates, upgrade-состояния).
+- **`httpsprobe.c`, P:** `mono_ms`, `https_connect`, `https_tls`,
+  `first_flight`, `d2k_https_probe_real`, `worker`,
+  `d2k_httpsprobe_new/free/wake_fd/portal/done`. Live-дифференциала
+  connect/TLS/lost нет; Rust использует канал/поток вместо pipe/fd,
+  `d2k_httpsprobe_done` отдаёт пачку иначе.
+- **`httpsprobe.c`, N:** `d2k_httpsprobe_lost` — счётчика потерянных
+  результатов нет. C инкрементирует `lost` только при переполнении
+  `done[]`; R2O `https_probe.rs:179` использует ограниченный
+  `SyncSender` и блокирующий `send`, то есть при переполнении воркер
+  блокируется, а не дропает; при закрытом канале результат теряется без
+  счётчика.
+- **Вывод:** HTTP-search — 22 E, 40 P, 4 N; основной пробел — живые
+  отказы/диагностика. HTTPS-probe — 10 E, 11 P, 1 N; основной пробел —
+  `lost` и live-тайминги.
 
 ## Проверка полноты среза
 
