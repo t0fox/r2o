@@ -354,15 +354,15 @@ C всё равно выдаёт кандидат «всё сразу», R2O е�
 | `d2k_parse_stale_rst_rule` | 121-124 | 110 | прежний вход разбора правила | — | N | нет |
 | `pid_alive` | 128-132 | 149 | жив ли владелец правила | raw_probe.rs:1791 libc::kill | P | inline, EPERM считается живым |
 | `d2k_rst_rule_stale` | 137-143 | 216 | брошенное ли правило по владельцу | — | N | нет классификации по владельцу |
-| `d2k_raw_supported` | 164-164 | 41 | есть ли сырой слой | raw_probe.rs:63 raw_supported | P | фактическая проба сокета вместо константы 1 |
-| `raw_rule_system` | 224-255 | 1285 | команда правила со сроком | raw_probe.rs:1285 run_command | P | без kill группы процессов, только ребёнок |
+| `d2k_raw_supported` | 164-164 | 41 | есть ли сырой слой (Linux) | raw_probe.rs:63 raw_supported | **P** | C Linux возвращает **1 безусловно** (`raw.c:164`); Rust `raw_supported` открывает `AF_INET/SOCK_RAW/IPPROTO_RAW` и при ошибке возвращает false. В непривилегированном процессе C считает слой доступным, Rust — нет; не-Linux C-заглушка возвращает 0. |
+| `raw_rule_system` | 224-255 | 1285 | fork/setpgid/exec sh, закрытие fd>2, deadline, kill группы | raw_probe.rs:1285 run_command | **P** | C создаёт процесс-группу, закрывает все fd кроме 0–2, по deadline `kill(-pid,SIGKILL)`; Rust `run_command` запускает program+args, `try_wait`, при таймауте убивает только child. Нет process-group kill и закрытия fd. |
 | `d2k_raw_rst_fail_count` | 262-262 | 74 | отказы вставки правила (поток) | raw_probe.rs:54 rst_rule_failure_count | E | raw_probe.rs:2770 rst_rule_failure_counts_are_per_worker_thread |
 | `d2k_raw_dial_count` | 263-263 | 62 | число сырых соединений (поток) | raw_probe.rs:58 raw_dial_count | P | теста счётчика нет |
 | `seed_init` | 265-269 | 153 | инициализация ГСЧ и порта | raw_probe.rs:1419 random_u32, :1439 OnceLock | P | getrandom вместо srandom |
 | `seed_once` | 271-274 | 74 | однократная инициализация | raw_probe.rs:1439 OnceLock | P | OnceLock |
-| `next_source_port` | 283-292 | 252 | исходный порт сырого зонда | raw_probe.rs:1441 next_source_port | P | диапазон 30000..54999 совпадает, теста нет |
+| `next_source_port` | 283-292 | 252 | `g_sport_counter++`, `30000 + counter % 25000` | raw_probe.rs:1441 next_source_port | **P** | Диапазон 30000..54999 совпадает. C seed `srandom(now_ms ^ pid)`, Rust `getrandom % 25000` + `AtomicU32.fetch_add`, теста нет. |
 | `rst_nft` | 313-317 | 108 | режим nftables | raw_probe.rs:1496 r2o_rst_uses_nft | P | переменная R2O_FW вместо D2K_FW |
-| `sweep_stale_rst_rules` | 319-348 | 992 | уборка брошенных правил | raw_probe.rs:1749 sweep_stale_iptables | P | только тег r2o-rst, без legacy-формы и диапазона портов |
+| `sweep_stale_rst_rules` | 319-348 | 992 | iptables/ip6tables -S OUTPUT → parse RST rule → -D для мёртвого владельца | raw_probe.rs:1749 sweep_stale_iptables | **P** | C разбирает `RST_PREFIX`, legacy suffix и owned `d2k-rst:<pid>`, порт только 30000..54999, снимает с тегом владельца. Rust фильтрует только `--comment r2o-rst:`, парсит pid/`--sport`, legacy-форму и диапазон не знает; `d2k_parse_rst_rule` — N. |
 | `rst_rule_cmd_form` | 382-400 | 1165 | команда вставки/снятия правила | raw_probe.rs:1561 nft_args, :1586 iptables_args | P | тег r2o-rst и таблица r2o_rst вместо d2k |
 | `rst_rule_cmd` | 402-405 | 113 | команда правила с текущей формой | raw_probe.rs:1561/1586 | P | отдельной функции нет |
 | `rc_exit1` | 407-410 | 91 | код «правила нет» | inline status.code()==Some(1) | P | inline |
@@ -390,7 +390,7 @@ C всё равно выдаёт кандидат «всё сразу», R2O е�
 | `build_ip_tcp` | 750-771 | 1183 | сборка IP/TCP любого семейства | raw_probe.rs:1350 (IPv4/IPv6) | E | raw_probe.rs:2550/2896 |
 | `raw_sendto` | 773-791 | 629 | отправка собранного пакета | raw_probe.rs:2002 send_ip_packet | P | сокетного теста нет |
 | `d2k_raw_set_segment_max` | 814-814 | 89 | потолок сегмента под датапат | — | N | **Production-вызов:** `core/d2kc.c:575,789` ставит `d2k_arm_segment(send_maxlen)`. R2O `classify_measured.rs:12,143` жёстко пишет `segment 1400`; discovery-split `main.rs:6300` считает `send_cap-72 min 1400`. На узком канале measured-poison план может быть отвергнут вместо нарезки. Сеттера нет. |
-| `raw_send` | 830-858 | 847 | запись нагрузки на провод | raw_probe.rs:1213 (план), :1195 (syn_data) | P | плановый путь E, syn_data шлётся одним пакетом вместо нарезки |
+| `raw_send` | 830-858 | 847 | SEQ+seq_shift, нарезка payload по `seg_max` (1400), sendto каждого сегмента | raw_probe.rs:1213 (план), :1195 (syn_data) | **P** | C режет нагрузку на `seg_max` (default 1400, setter `d2k_raw_set_segment_max`), seq+off. Rust plan-путь `emit_plan_packets` шлёт пакеты плана; syn_data-путь собирает **один** `build_control_packet` с `trigger.payload` и не режет по 1400. План E, syn_data — пробел. |
 | `raw_send_syn` | 864-896 | 1552 | SYN с профилем опций клиента | raw_probe.rs:723 raw_syn_options, :1953 SYN | E | scripts/r2o-raw-profile-differential.sh, RAW_SYN_PROFILE |
 | `raw_recv` | 900-949 | 1970 | приём и фильтрация сегмента | raw_probe.rs:2041 receive_segment | P | фильтрация строже (длины, фрагменты, локальный адрес) |
 | `raw_read_payload` | 952-988 | 1590 | ожидание данных с якорем seq | raw_probe.rs:2156 read_payload | P | якорь реализован, профильного теста нет |
@@ -411,6 +411,45 @@ C всё равно выдаёт кандидат «всё сразу», R2O е�
 | `d2k_raw_probe_handshake` | 1357-1361 | 256 | обёртка IPv4 | raw_probe.rs:1174 | P | отдельного символа нет |
 | `d2k_raw_probe_handshake_family` | 1364-1370 | 371 | рукопожатие с профилем метки | raw_probe.rs:1174/1841 | P | offer_ts всегда передаёт вызывающий |
 | `d2k_raw_probe_poison` | 1372-1377 | 305 | обёртка IPv4 | raw_probe.rs:1174 | P | отдельного символа нет |
+
+### raw.c: построчная сверка
+
+- **RST-правила (63–553):** `parse_long_exact` — точный разбор числа
+  (первый символ цифра, `strtol`, `errno`, конец строки), Rust inline
+  `parse::<u16>` без части проверок; `d2k_parse_rst_rule`/
+  `d2k_parse_stale_rst_rule` — N (R2O не разбирает строки iptables);
+  `pid_alive` — `kill(pid,0)||EPERM`, Rust `libc::kill`; `raw_supported`
+  — C 1, Rust реальная проба сокета; `raw_rule_system` — C
+  fork/setpgid/close fd/deadline/kill group, Rust `run_command` без
+  группы; `d2k_raw_rst_fail_count` E, `d2k_raw_dial_count` P;
+  `seed_init/seed_once` — srandom vs getrandom/OnceLock;
+  `next_source_port` — 30000..54999 совпадает; `rst_nft` — D2K_FW vs
+  R2O_FW; `sweep_stale_rst_rules` — C legacy+owned+range 30000..54999,
+  Rust только `r2o-rst`; `rst_rule_cmd_form/cmd` — d2k vs r2o теги;
+  `rst_delete_once` — C -C/-D, Rust nft-тест; `rst_remember/
+  retry_pending_releases/rst_release_locked/raw_flush_pending` — лимит
+  64/5 попыток; `d2k_raw_pending_count` N; `raw_atexit` — без trylock;
+  `rst_key_of` — поля на месте; `suppress_kernel_rst/
+  release_kernel_rst` — RstRule/RstGuard, нет снятия после таймаута
+  команды; `local_addr_for` — UDP connect. P/N по строкам.
+- **Сборка пакетов (556–771):** `local_addr_for` P; `rd16/rd32/
+  wr16/wr32/checksum/tcp_checksum/build_ipv4_tcp/tcp_checksum_family/
+  build_ip_tcp` — E, differential `raw_profile`/`measured_tcp_split`
+  и checksum-тесты.
+- **Отправка/приём/план (773–1321):** `raw_sendto` — C IPv4
+  `sin_port=dport`, IPv6 port 0, Rust `send_ip_packet` порт не
+  заполняет; сокетного теста нет. `d2k_raw_set_segment_max` — N
+  (production gap). `raw_send` — C нарезает по `seg_max` (1400),
+  Rust plan-путь E, syn_data одним пакетом. `raw_send_syn` — E,
+  `r2o-raw-profile-differential.sh`. `raw_recv` — Rust строже
+  фильтрует длины/фрагменты/локальный адрес; `raw_read_payload` —
+  якорь есть, теста нет; `raw_close` — Drop; `raw_handshake/raw_dial`
+  — RTO/эхо есть, полного сетевого теста нет; `d2k_raw_probe_
+  handshake_as` P; `raw_send_plan` E; `d2k_raw_probe_poison_family`
+  P — план покрыт, сетевой путь нет.
+- **Не-Linux ветки (1328–1377):** `d2k_raw_supported` false,
+  `d2k_raw_set_segment_max` N, counters P/E, `d2k_raw_pending_count`
+  N, `d2k_raw_probe_*` stubs P, обёртки IPv4 P.
 
 ## 7. detect/response.c — 7 функций
 
