@@ -130,6 +130,7 @@ P означает неполное доказательство ветвей, N
 | 20 | HTTP-search кандидаты | `CANDS[]`: split, disorder, fake-badsum, fake-seqshift (4) | 5 кандидатов, включая `fake-badsum-whole`, другой порядок | `deep-core-verify.md` |
 | 21 | HTTP-search save | файл `d2k-http-plans 1`, `fflush/fsync/rename` | JSON-каталог, отдельного файла/формата нет | `deep-core-verify.md` |
 | 22 | verify page budget | бюджетный повтор шлёт фактический `req`, дедлайн сбрасывается | повтор строит запрос из `options.path`, общий deadline; redirect только при `complete` | `deep-core-verify.md` |
+| 23 | detect mark | `D2K_BYPASS_MARK=0x40000000` (`detect/include/d2k_detect.h:34`) | `BYPASS_MARK=0x2d` (`raw_probe.rs:23`, `response.rs:71`) | `detect.md` |
 
 ### Остаточные P (не доказано, не значит «сломано»)
 

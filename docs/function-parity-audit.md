@@ -5652,21 +5652,21 @@ P не считается доказанным паритетом: это пок
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `d2k_verdict_name` | 57-72 | 604 | имя вердикта дерева | classify.rs:907 Verdict::as_str | E | прямой switch; tests/classify.rs:1025 проверяет clear/inconclusive |
-| `d2k_resp_name` | 74-82 | 255 | имя вердикта ответного направления | classify_json.rs:103-109, main.rs:1278-1283 | P | английские имена разнесены по двум местам, теста имён нет |
+| `d2k_resp_name` | 74-82 | 255 | имена `clear/blocked/flaky`, default `not_applicable` | classify_json.rs:103-109, main.rs:1278-1283 | **P** | C один switch с точными строками; Rust те же имена разнесены по `classify_json.rs` и `main.rs`, единой функции/теста имён нет. Нужна сверка default-ветви. |
 | `d2k_now_ms` | 86-91 | 188 | монотонное время в мс | Instant (classify.rs:1307, 1937) | P | инъекции d2k_clock_offset_ms нет |
 | `d2k_sleep_ms` | 96-105 | 194 | пауза между сегментами | thread::sleep (raw_probe.rs:1238, response.rs:856) | P | отдельного символа нет, семантика nanosleep совпадает |
 | `d2k_trigger_accepts` | 109-124 | 903 | критерий прохода по типу accept | classify.rs:543 trigger_accepts | E | tests/classify.rs:833 trigger_acceptance_matches_the_donor_rules |
 | `d2k_trigger_sni` | 126-134 | 236 | извлечь SNI из имени триггера | classify.rs:1461 strip_prefix("tls:") | P | inline strip_prefix; прямого теста нет, ответная ветка CLI-теста может не дойти |
 | `d2k_detect_stopped` | 136-139 | 92 | проверка отмены | classify.rs:1041 stopped, raw_probe.rs:641 is_cancelled | E | tests/classify.rs:818 и cancellation_after_* в classify.rs:2596+ |
-| `d2k_opts_defaults` | 141-162 | 815 | умолчания повторов, сроков и метки | classify.rs:860 Default, 1888 configured_options | P | метка по умолчанию 0x2d вместо 0x40000000 (datapath-detect-audit.md, п. 14) |
+| `d2k_opts_defaults` | 141-162 | 815 | умолчания: repeats 3, timeout 6000, write_gap 60, long_gap 700, mark `D2K_BYPASS_MARK` | classify.rs:860 Default, 1888 configured_options | **P** | **Подтверждено:** C `D2K_BYPASS_MARK=0x40000000` (`detect/include/d2k_detect.h:34`, `classify.c:160`); Rust `BYPASS_MARK=0x2d` (`raw_probe.rs:23`, `response.rs:71`). Числа повторов/сроков совпадают; метка зонда по умолчанию разная — влияет на policy-routing/SO_MARK. |
 | `d2k_opts_acceptable` | 164-170 | 153 | фильтр приемлемости находки | raw_probe.rs:1122 executable_poison_hit | P | общего колбэка accept нет; в CLI R2O фильтр плана включён всегда, в C CLI accept не задан |
 | `d2k_opts_skipped` | 172-181 | 206 | пропуск гипотезы по имени | classify.rs:885 poison_selected | P | --only/--skip сведены в одну функцию, профильного теста нет |
 | `d2k_trace_add` | 183-204 | 1018 | добавить наблюдение в трассу | classify.rs:1048 add_observation | E | tests/classify.rs:384 classifier_reports_each_question_and_probe_as_it_runs |
 | `obs_done` | 210-215 | 133 | объявить наблюдение наружу | classify.rs:1235 progress callback | E | tests/classify.rs:384; колбэк вызывается в measure |
-| `d2k_note` | 217-227 | 264 | добавить оговорку к результату | classify.rs:1248 append_reason | P | поля notes нет, текст уходит в reason |
+| `d2k_note` | 217-227 | 264 | до `D2K_NOTES_MAX` заметок в `res->notes[]` через `vsnprintf` | classify.rs:1248 append_reason | **P** | C хранит массив отдельных notes и счётчик; Rust `append_reason` дописывает текст в одно поле `reason`, массива/лимита notes нет. Для `note_gap_loss` отдельного аналога нет (N). |
 | `note_gap_loss` | 238-247 | 504 | предупреждение о потере паузы между копиями | — | N | такой оговорки в R2O нет |
 | `d2k_split_offsets` | 253-287 | 915 | точки разреза в диапазоны | classify.rs:28 split_offsets | E | tests/classify.rs:337, :349, :361 |
-| `dial_marked_mode` | 292-364 | 2591 | помеченное TCP-соединение | response.rs:723 dial_probe_target, :289 probe_socket | P | ветка require_mark и различение отказа SO_MARK отсутствуют |
+| `dial_marked_mode` | 292-364 | 2591 | TCP-connect с меткой: `require_mark`, различение отказа `SO_MARK` и обычного connect | response.rs:723 dial_probe_target, :289 probe_socket | **P** | C принимает `require_mark` и отдельно разбирает отказ установки метки; Rust `dial_probe_target`/`probe_socket` не имеют `require_mark` и различают только общий connect/SO_MARK error. P — нужен тест «SO_MARK запрещён». |
 | `d2k_dial_deadline_err` | 368-374 | 183 | признак нашего срока соединения | classify.rs:1244 is_dial_timeout_text, :575 ProbeError | E | tests/classify.rs:796 |
 | `dial_marked` | 376-380 | 217 | обёртка соединения без require_mark | response.rs:723 dial_probe_target | P | отдельной обёртки нет, поведение то же |
 | `once_probe` | 385-492 | 4437 | один зонд: запись триггера и ожидание ответа | response.rs:776 probe_trigger, :891 raw_split_enabled, raw_probe.rs:1140 probe_tcp_split | E | tests/classify.rs:957; response.rs:1476/1512 split/cancel; differentials meas_eintr |
@@ -5683,10 +5683,59 @@ P не считается доказанным паритетом: это пок
 | `raw_selftest` | 827-854 | 943 | самопроверка сырого слоя | raw_probe.rs:120-186 | P | цикл встроен в sweep, отдельного теста цикла нет |
 | `raw_doubted` | 860-863 | 141 | пора перепроверить кэш | raw_probe.rs:669 should_recheck | E | self-тест raw_probe.rs:2513 raw_selftest_recheck_requires_a_cached_check_and_zero_successes |
 | `raw_recheck` | 867-880 | 544 | немедленная перепроверка слоя | raw_probe.rs:746 raw_recheck | E | raw_probe.rs:2513 + R2O_RAW_RECHECK_C_OUTPUT |
-| `sweep_poisons` | 887-1076 | 8251 | перебор: свойства, сборка, список гипотез | raw_probe.rs:78 sweep_poisons | P | нет trace о непринятом RST-правиле, иной текст selftest, compose без контроля |
+| `sweep_poisons` | 887-1076 | 8251 | перебор: свойства, сборка, RST-правило, selftest, список гипотез, контроль | raw_probe.rs:78 sweep_poisons | **P** | C ведёт trace о непринятом RST-правиле, отдельный текст selftest и compose при `control=None`; Rust `sweep_poisons` часть диагностики не выносит, текст selftest иной, а `d2k_compose_from_props` при `control=None` ведёт себя иначе (header, п. 6). P. |
 | `cross_check_tls12` | 1084-1092 | 367 | проверка покрытия TLS 1.2 | — | N | C-заглушка не перенесена, поля covers_tls12 нет |
 | `d2k_classify_run` | 1095-1476 | 22179 | дерево зондов и вердикт | `classify.rs:1298` `run_with_backend_progress` | P | Нет notes/`covers_tls12`, иной счёт probes ответного направления. **Ключевое:** production-discovery использует `full_detect_semantics=false`, `confirm_clear=true` (`classify.rs:869-870`, `main.rs:15380-15391`), то есть не donor-семантику C: нет удвоенного dial-retry, иначе обрабатываются частичные transport-ошибки, control без `until_pass`, добавлен whole-confirm. Существующие дифференциалы идут с `full_detect_semantics=true` и этот путь не покрывают. |
-| `d2k_send_nosig` | 1481-1494 | 309 | запись без SIGPIPE | libc::send MSG_NOSIGNAL (response.rs:815/1100) | P | ветки SO_NOSIGPIPE для macOS нет |
+| `d2k_send_nosig` | 1481-1494 | 309 | `send` с `MSG_NOSIGNAL` (если есть) и `SO_NOSIGPIPE` (если есть) | libc::send `MSG_NOSIGNAL` (response.rs:815/1100) | **P** | C условно ставит оба флага; Rust использует только `MSG_NOSIGNAL`, macOS-ветка `SO_NOSIGPIPE` отсутствует. На Linux эквивалентно, на macOS — нет. |
+
+### classify.c: построчная сверка
+
+- **Имена/время/триггер (57–139):** `d2k_verdict_name` — точный
+  switch `clear/prefix/whole_packet/opaque/inconclusive/address/
+  poisonable/flaky/unreachable/response`, Rust `Verdict::as_str`
+  (`classify.rs:907`); `d2k_resp_name` — `clear/blocked/flaky/
+  not_applicable`, Rust разнесён по `classify_json.rs`/`main.rs`;
+  `d2k_now_ms` — `CLOCK_MONOTONIC + d2k_clock_offset_ms`, Rust
+  `Instant` без инъекции; `d2k_sleep_ms` — `nanosleep`, Rust
+  `thread::sleep`; `d2k_trigger_accepts` — ServerHello `16 03 .. 02`,
+  TLSRecord `16/15 03`, иначе `n>0`, Rust `trigger_accepts`; 
+  `d2k_trigger_sni` — `strip_prefix("tls:")`, Rust inline;
+  `d2k_detect_stopped` — callback, Rust `stopped/is_cancelled`.
+  E/P по строкам.
+- **Опции/трасса/заметки (141–247):** `d2k_opts_defaults` — repeats
+  3, timeout 6000, write 60, long 700, mark **0x40000000**; Rust
+  `configured_options` те же числа, но `BYPASS_MARK=0x2d` —
+  **подтверждённое расхождение**. `d2k_opts_acceptable` — callback,
+  Rust `executable_poison_hit`; `d2k_opts_skipped` — список skip,
+  Rust `poison_selected`; `d2k_trace_add` — до `D2K_TRACE_MAX`,
+  копия/обрезка, Rust `add_observation`; `obs_done` — callback,
+  Rust progress; `d2k_note` — массив notes/`vsnprintf`, Rust
+  `append_reason` в одно поле; `note_gap_loss` — N.
+- **split/dial/probe/measure (253–710):** `d2k_split_offsets` —
+  диапазоны, Rust `split_offsets`; `dial_marked_mode` — `require_mark`
+  и различение SO_MARK, Rust `dial_probe_target/probe_socket` без
+  `require_mark`; `d2k_dial_deadline_err` — текст/errno, Rust
+  `is_dial_timeout_text/ProbeError`; `dial_marked` — обёртка;
+  `once_probe` — запись/ответ, Rust `probe_trigger/raw_split/
+  probe_tcp_split`; `unacked_bytes` — TIOCOUTQ/SO_NWRITE;
+  `d2k_probe_data_ack` — neutral ack; `measure` — повторы. E/P.
+- **decoy/selftest (717–880):** `bind_decoy` — привязка разнесена;
+  `answered_by_props` — `answered + same_hypothesis`, теста нет;
+  `fam_ix` — inline; `self_ix` — `raw_selftest_index`;
+  `selftest_cached_age` — TTL 600 с; `selftest_store` —
+  `store_raw_selftest`; `d2k_raw_note_rc` — `note_raw_probe`;
+  `raw_selftest` — цикл встроен в sweep; `raw_doubted` —
+  `should_recheck`; `raw_recheck` — `raw_recheck`. E/P.
+- **sweep/classify (887–1494):** `sweep_poisons` — нет trace о
+  непринятом RST, иной текст selftest, compose без контроля;
+  `cross_check_tls12` — C-заглушка, Rust поля `covers_tls12` нет, N;
+  `d2k_classify_run` — полное дерево, но production-discovery
+  использует `full_detect_semantics=false`, `confirm_clear=true`
+  (`classify.rs:869-870`, `main.rs:15380-15391`): нет удвоенного
+  dial-retry, иначе обрабатываются частичные transport-ошибки,
+  control без `until_pass`, добавлен whole-confirm; дифференциалы
+  идут с `true` и этот путь не покрывают; `d2k_send_nosig` —
+  `MSG_NOSIGNAL` + `SO_NOSIGPIPE` в C, Rust только `MSG_NOSIGNAL`.
 
 ## 3. detect/main.c — 8 функций
 
