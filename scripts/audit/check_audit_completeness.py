@@ -15,7 +15,7 @@ ROOT = Path("/mnt/e/r2o")
 AUDIT = ROOT / "docs" / "audit"
 TOOL = Path("/mnt/e/r2o-tooling/audit")
 PARTS = ["core-net", "core-state", "datapath-core", "datapath-plan", "detect"]
-RANGE_RE = re.compile(r"(?P<start>\d+)\s*(?:\.\.|–|-|—)\s*(?P<end>\d+)")
+RANGE_RE = re.compile(r"^(?P<start>\d+)\s*(?:(?:\.\.|–|-|—)\s*(?P<end>\d+))?\s*$")
 
 
 def main() -> int:
@@ -29,21 +29,40 @@ def main() -> int:
             failed = True
             continue
         rows = list(csv.DictReader(csv_path.open(encoding="utf-8")))
-        expected = {(int(row["line"]), int(row["end_line"])) for row in rows}
+        expected: dict[tuple[int, int], int] = {}
+        for row in rows:
+            pair = (int(row["line"]), int(row["end_line"]))
+            expected[pair] = expected.get(pair, 0) + 1
         text = md_path.read_text(encoding="utf-8")
-        seen: set[tuple[int, int]] = set()
+        seen: dict[tuple[int, int], int] = {}
         for line in text.splitlines():
             if not line.lstrip().startswith("|"):
                 continue
-            match = RANGE_RE.search(line)
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if len(cells) < 6 or not re.match(
+                r"^`?[A-Za-z_][A-Za-z0-9_]*`?(?:\s|\||$)", cells[0]
+            ):
+                continue
+            match = RANGE_RE.match(cells[1])
             if not match:
                 continue
-            pair = (int(match.group("start")), int(match.group("end")))
-            seen.add(pair)
-        missing = sorted(expected - seen)
-        extra = sorted(seen - expected)
+            start = int(match.group("start"))
+            end = int(match.group("end")) if match.group("end") else start
+            pair = (start, end)
+            seen[pair] = seen.get(pair, 0) + 1
+        missing = sorted(
+            (pair, count - seen.get(pair, 0))
+            for pair, count in expected.items()
+            if seen.get(pair, 0) < count
+        )
+        extra = sorted(
+            (pair, count - expected.get(pair, 0))
+            for pair, count in seen.items()
+            if count > expected.get(pair, 0)
+        )
         print(
-            f"{part}: expected={len(expected)} seen={len(seen)} missing={len(missing)} extra={len(extra)}"
+            f"{part}: expected={len(rows)} seen={sum(seen.values())} "
+            f"missing={sum(count for _, count in missing)} extra={sum(count for _, count in extra)}"
         )
         if missing:
             print("  missing sample:", missing[:10])
