@@ -30,8 +30,8 @@ Static-хелперы наследуют статус владельца (вла
 
 | Статус | Кол-во |
 |---|---:|
-| E | 108 |
-| P | 69 |
+| E | 106 |
+| P | 71 |
 | N | 5 |
 | ? | 1 |
 | **Всего** | **183** |
@@ -40,7 +40,7 @@ Static-хелперы наследуют статус владельца (вла
 
 | Файл | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| datapath/plans.c | 75 | 37 | 36 | 1 | 1 |
+| datapath/plans.c | 75 | 35 | 38 | 1 | 1 |
 | datapath/routemark.c | 23 | 19 | 3 | 1 | 0 |
 | datapath/plan_parse.c | 17 | 14 | 3 | 0 | 0 |
 | datapath/raw.c | 17 | 8 | 9 | 0 | 0 |
@@ -337,14 +337,14 @@ legacy-`D2KP` принимается только через `parse_wire`, а п
 | d2k_plantab_set_name | 672-676 | 5 | legacy: поставить имя как grandfather | `control.rs:832` `set_name` (контроллер шлёт форму явно) | P | Legacy-входа без формы нет; совместимость обеспечивает shape=GRANDFATHER в ключе. |
 | d2k_plantab_set_addr | 678-681 | 4 | legacy: адрес как grandfather | `control.rs:891` `set_addr` (форма обязательна) | P | C legacy-вход только для тестов датапата; командой сокета не используется. В R2O такого входа нет. |
 | d2k_plantab_set_addr_family | 686-690 | 5 | legacy: адрес без формы → grandfather | `control.rs:891` `set_addr` | P | То же: форма обязательна (`valid_addr_shape`), grandfather по сокету не принимается — совпадает с C `ctlsrv`. |
-| d2k_plantab_set_addr_shaped | 692-721 | 30 | адресная привязка ровно (адрес, family, форма) | `control.rs:891` `set_addr` | E | `удаление_адреса_разделяет_формы...` (control.rs:2793): две формы одного IP, удаление одной. |
+| d2k_plantab_set_addr_shaped | 692-721 | 30 | адресная привязка ровно (адрес, family, форма); C отвергает только ANY/HTTP и HTTP-протокол плана | `control.rs:891-927` `set_addr` | **P** | **Расхождение на негодном входе:** Rust дополнительно требует `addr_plan_matches_shape` (MODERN/LEGACY/ECH→TCP TLS, QUIC→valid_quic, VOICE→UDP voice) и `r2o_plan_valid`; C такие планы принял бы. Для валидного входа эквивалентно. Тест `удаление_адреса_разделяет_формы...` (control.rs:2793) проверяет **удаление** двух форм, а не приём; отдельного теста set-валидации нет. |
+| d2k_plantab_del_name_probe_family | 813-828 | 16 | снять пробную запись по (имя, shape, порт, family); C shape не проверяет | `control.rs:1362-1388` `delete_name_probe` | **P** | Rust требует `valid_tcp_probe_shape(shape)`; C принимает любую shape (в т.ч. 0) и просто не находит запись. На валидном входе совпадает; на shape 0/неизвестной ACK различается. Тест `conditional_http_delete...` покрывает name-bound, не probe-delete. |
 | drop | 728-741 | 14 | static: снять запись, сохранив уплотнение | `HashMap::remove` (control.rs:1408, 1473, 1489) | E | `name_plan_table_evicts_lru_and_delete_releases_a_slot` (control.rs:2663). |
 | d2k_plantab_del_name | 743-745 | 3 | legacy: снять ВСЕ записи имени (v4) | `control.rs:1389` `delete_name` (одна форма) | P | Семантика разная: C legacy снимает все формы, R2O — только точный ключ (как v9 `DEL_NAME`). Широкого удаления в R2O нет. |
 | d2k_plantab_del_name_family | 747-765 | 19 | снять все формы имени в family | `control.rs:1389` `delete_name` | P | То же: удаляется один shape-ключ, а не все формы. |
 | d2k_plantab_del_name_shaped | 773-790 | 18 | снять постоянную запись (имя, транспорт, форма, family), пробы не трогать | `control.rs:1389` `delete_name` | E | `conditional_http_delete_preserves_replacements_and_removes_only_its_binding` (control.rs:3587). |
 | d2k_plantab_del_name_bound | 792-806 | 15 | условное снятие по identity (generation/epoch/kind) | `control.rs:1416` `delete_name_bound` | E | Тот же тест: замена с другой identity не удаляется. |
 | d2k_plantab_del_name_probe | 808-811 | 4 | снять пробную запись по порту | `control.rs:1362` `delete_name_probe` | E | `http_probe_plan...` (control.rs:3489) снимает пробу. |
-| d2k_plantab_del_name_probe_family | 813-828 | 16 | то же с family | `control.rs:1362` `delete_name_probe` | E | Тот же тест. |
 | d2k_plantab_del_addr | 830-832 | 3 | legacy: снять адрес целиком (все формы) | `control.rs:1479` `delete_addr` (одна форма) | P | Семантика разная: широкого удаления адреса в R2O нет (v7 шлёт форму). |
 | d2k_plantab_del_addr_family | 837-842 | 6 | снять все формы адреса | `control.rs:1479` `delete_addr` | P | То же: одна форма. |
 | d2k_plantab_del_addr_shaped | 844-848 | 5 | снять ровно форму адреса | `control.rs:1479` `delete_addr` | E | `удаление_адреса_разделяет_формы...` (control.rs:2793). |
@@ -372,7 +372,7 @@ legacy-`D2KP` принимается только через `parse_wire`, а п
 | d2k_plantab_set_name_trial | 1259-1267 | 9 | поставить пробный план с trial id | `control.rs:1092` `set_name_probe` (trial_id) | E | `http_probe_plan_matches_only_its_source_port_and_acknowledges_trial_id` (control.rs:3489). |
 | d2k_plantab_trial | 1268-1273 | 6 | trial id установленного временного плана | `control.rs:690` `binding_for_plan` (`PlanBinding.trial_id`) | E | `tls_probe_plan...reports_temporary_applied` (control.rs:3637), voice-тесты (control.rs:3239). |
 
-Итог по файлу: E 37, P 36, N 1, ? 1. Ключевые пробелы: счётчик промахов по форме мёртв;
+Итог по файлу: E 35, P 38, N 1, ? 1. Ключевые пробелы: счётчик промахов по форме мёртв;
 нет ECH-удержания; адресные опыты без тестов; префильтры кандидатов грубее C; legacy-удаления
 «все формы» отсутствуют; поиск ядра отличается набором ветвей.
 
@@ -631,6 +631,51 @@ Rtnetlink: дампы правил, одиночный поиск маршрут
   6. ECH→MODERN в `find_addr` **есть**; прежнее утверждение об
      отсутствии ECH-адресного fallback неверно.
   7. `d2k_plantab_has_ech_target` прямого аналога не имеет (`?`).
+
+## 9e. Углублённая сверка plans.c: set/del/binding
+
+- **`d2k_plantab_set_addr_shaped` (692–721) ↔ `control.rs:891-927
+  set_addr`:** C проверяет family 4/6, `shape != ANY/HTTP`,
+  `proto != HTTP`; затем `revision++`, поиск `(addr,shape)`,
+  вытеснение/вставка, `bind_context`. Rust дополнительно требует
+  `addr_plan_key` (канонический IPv4-хвост), `valid_addr_shape`,
+  `addr_plan_matches_shape` (MODERN/LEGACY/ECH→TCP TLS, QUIC→
+  `valid_quic`, VOICE→UDP voice) и `r2o_plan_valid`. **На негодном
+  входе R2O строже**; для валидного — эквивалентно. Тест
+  `control.rs:2793` проверяет удаление двух форм, не приём.
+- **`drop` (728–741) ↔ `HashMap::remove`:** C сохраняет
+  уплотнение переносом последней записи и `used--`; Rust
+  `HashMap` не требует уплотнения; `revision++`/освобождение
+  плана эквивалентны. E.
+- **`d2k_plantab_del_name_family` (747–765):** C снимает **все**
+  записи имени в family (все формы и пробы); Rust `delete_name`
+  (`control.rs:1389`) снимает один `(name, transport, shape,
+  family)`. Это legacy-API, control v9 ходит через
+  `del_name_shaped`; P.
+- **`d2k_plantab_del_name_shaped` (773–790):** C точно
+  `(name, family, shape, only_sport=0, transport)`; Rust
+  `delete_name` — тот же ключ. E; тест условного HTTP-удаления.
+- **`d2k_plantab_del_name_bound` (792–806):** C требует
+  `binding_known`, `kind==NAME`, `!temporary`, `binding_equal`;
+  Rust `delete_name_bound` (`:1416`) проверяет ключ и binding;
+  `is_known` не проверяет kind, но удаление проверяет отдельно. E.
+- **`d2k_plantab_del_name_probe_family` (813–828):** C не
+  проверяет shape; Rust требует `valid_tcp_probe_shape`. На
+  валидном входе совпадает, на shape 0/неизвестной ACK
+  различается. P.
+- **`d2k_plantab_del_addr_family`/`_shaped` (837–848):** C
+  `del_addr_family` снимает все формы, `del_addr_shaped` — одну;
+  Rust `delete_addr` (`:1479`) — одну. Control использует shaped;
+  broad-путь — P, shaped — E.
+- **`d2k_plantab_binding` (1246–1257):** C возвращает 0 при
+  `owner != t`, `!generation` или нулевом epoch; иначе
+  generation/kind/family/shape/temporary/epoch. Rust
+  `binding_for_plan` (`:690`) — pointer identity + generation/
+  shape/trial; E по тестам APPLIED/bound HTTP.
+- **`d2k_plantab_set_name_trial`/`trial` (1259–1273):** C ставит
+  `binding_trial_id` только при успехе и отдаёт его только для
+  temporary; Rust `set_name_probe`/`binding_for_plan` хранит
+  trial_id в `ProbePlan`; E.
 
 ## 10. Итоговые пробелы (что мешает ставить E)
 
