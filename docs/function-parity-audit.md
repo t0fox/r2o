@@ -217,10 +217,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 221 | 313 | 13 | 1 |
 | core-state | 692 | 127 | 564 | 1 | 0 |
-| datapath-core | 400 | 127 | 262 | 11 | 0 |
+| datapath-core | 400 | 126 | 263 | 11 | 0 |
 | datapath-plan | 183 | 105 | 72 | 5 | 1 |
 | detect | 159 | 49 | 100 | 10 | 0 |
-| **Итого** | **1982** | **629** | **1311** | **40** | **2** |
+| **Итого** | **1982** | **628** | **1312** | **40** | **2** |
 
 
 ---
@@ -3417,9 +3417,31 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
 | `same` (static) | 4–6 | 3 | сравнение ключей | `TcpFlowKey` `Eq` (`capture.rs:14`) | E | используется во всех capture-тестах |
 | `d2k_capture_forget` | 8–14 | 7 | сбросить слоты ключа | `capture.rs:650 forget` | E | `capture.rs:949` (требует forget/new generation) |
 | `reject` (static) | 16–20 | 5 | state=2, rejected++ | `capture.rs:662 reject_result` | E | `capture.rs:949` conflicting overlap |
-| `d2k_capture_feed_ready` | 22–107 | 86 | сборка по seq: TTL, generation, anchor, overlap, wrap, ready-callback | `capture.rs:514 feed_mode`, `:446 feed` | E | `capture.rs:989/1099 capture_*_traces_match_d2o`, `scripts/test-datapath-capture-lifecycle-differential.sh` (скрипт пинится на другой SHA D2O — ограничение) |
-| `tls_ready` (static) | 109–118 | 10 | критерий целой TLS-записи (1 запись, длины) | `capture.rs:673 tls_ready` | E | `capture.rs:1209 rejects_invalid_single_record_client_hellos...` |
-| `d2k_capture_feed` | 119–124 | 6 | feed с TLS-критерием | `capture.rs:446 feed` | E | те же трассы |
+| `d2k_capture_feed_ready` | 22–107 | 86 | сборка по seq: TTL, generation, anchor, overlap, wrap, ready-callback | `capture.rs:514 feed_mode`, `:446 feed`, `:480 feed_http` | **P** | TLS-путь совпадает построчно: TTL (`now<started`/`now-started>=TTL` ↔ `checked_duration_since`), generation, проверка anchor (`(int32_t)offset >= 0`, `< CAPTURE_BYTES`, `len <= CAPTURE_BYTES-offset`), `delta`, overlap-conflict, `high`, `contiguous`, `reject/full/completed`. **Отличия:** (1) Rust требует совпадения `mode` и освобождает слот при смене TLS↔HTTP, C режима не знает; (2) C при отсутствии anchor требует `bytes[0]==22` для **любого** ready-callback, Rust — только для TLS, HTTP без anchor принимает; (3) Rust `http_ready` использует `request_host_range`, C `d2k_http_request`: Rust требует полностью закрытые заголовки (`find_crlf`), C может вернуть 1 при завершённой строке Host без пустой строки; Rust отвергает `#` и target ≥2048, C — нет; Rust отвергает полный 4096-байтный буфер без `\r\n\r\n`, C оставляет слот до TTL; (4) статистика Rust гейтится `visible`, C считает всегда (R2O-расширение для controller probe). Trace-тесты `capture.rs:989/1099` есть, но `test-datapath-capture-lifecycle-differential.sh` пинится на другой SHA. |
+| `tls_ready` (static) | 109–118 | 10 | критерий целой TLS-записи (1 запись, длины) | `capture.rs:673 tls_ready` | **E** | Точное совпадение: `n>=2 && b[1]!=3`, `n>=6 && b[5]!=1`, `total=5+u16`, `9..=4096`, `high>total`, `hs+9==total`, `n==total`; тест `capture.rs:1209`. |
+| `d2k_capture_feed` | 119–124 | 6 | feed с TLS-критерием `tls_ready` | `capture.rs:446 feed` | **E** | Тонкая TLS-обёртка: C `feed_ready(..., tls_ready)`, Rust `feed(..., CaptureMode::Tls, visible=true)`. Для пользовательского TLS-трафика `feed_ready` эквивалентен; общий HTTP-путь — P (см. выше). |
+
+### capture.c: построчная сверка
+
+- **`same` (4–6) ↔ `TcpFlowKey: Eq`:** C `d2k_key_equal`, Rust
+  `capture.rs:14`. E; используется всеми capture-тестами.
+- **`d2k_capture_forget` (8–14) ↔ `capture.rs:650`:** оба проходят все
+  слоты и освобождают совпавший ключ, независимо от state. E;
+  `capture.rs:949` (новый generation/forget).
+- **`reject` (16–20) ↔ `capture.rs:662`:** C `state=2`, `rejected++`;
+  Rust `SlotState::Rejected` + `reject_result` с гейтом `visible`.
+  Для пользовательского трафика эквивалентно. E.
+- **`d2k_capture_feed_ready` (22–107) ↔ `feed_mode`:** TLS-путь
+  совпадает: TTL (`now<started` / `now-started>=TTL` ↔
+  `checked_duration_since`), generation, anchor
+  (`(int32_t)offset >= 0`, `< CAPTURE_BYTES`,
+  `len <= CAPTURE_BYTES-offset`), `delta`, overlap-conflict, `high`,
+  `contiguous`, `tls_ready`, счётчики. Отличия — mode/visibility,
+  HTTP-callback и полный буфер; подробно в строке таблицы. P.
+- **`tls_ready` (109–118) ↔ `capture.rs:673`:** точное совпадение всех
+  проверок; E, `capture.rs:1209`.
+- **`d2k_capture_feed` (119–124) ↔ `capture.rs:446`:** TLS-обёртка;
+  E для TLS, HTTP-путь наследует P `feed_ready`.
 
 ## hold.c (12 функций)
 
