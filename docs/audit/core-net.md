@@ -574,6 +574,47 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 | `prop_word` | 244-246 | 3 | текст «прошло/не прошло/ответа нет» | нет | N | текстовые формулировки не портированы |
 | `d2k_quic_strategy_arms` | 248-396 | 149 | лестница: TTL-lifetime → clearance → split → longer → frag → original | `quic_replay.rs:449 r2o_quic_discovery_candidates`, `:368 strategy_attempt_decision` | P | base decision покрыт differential; полная лестница и приоритеты — нет |
 
+## Углублённая сверка: quicprobe.c (56) и quicarms.c (8)
+
+- **E (провод/проверка):** `resolve_family`, `resolve_real`,
+  `d2k_quic_build_pool`, `qp_varint`, `qp_parse_hdr`, `qp_dcid_of`,
+  `qp_donor_unauth_reply`, `qp_verify_server_response`, `qp_head_of`,
+  `qp_verify_aead`, `qp_verify_bound`, `d2k_quic_verify_bound/response`,
+  `qp_neutral_control_sni`, `qp_pinned_or_next`, `qp_dyn_wait`,
+  `d2k_quic_base`, `d2k_quic_original_blob` — подтверждены
+  `test-controller-quic-pool-differential.sh`,
+  `test-quic-budget-init-differential.sh`, `d2o_quic_base_differential.c`
+  и RFC/unit-тестами `quic.rs` (Initial v1/v2, Retry, corrupted).
+- **P (провод есть, полного differential нет):** `qp_build_vn_trigger`
+  (Rust `r2o_quic_build_vn_probe`, побайтового diff нет); `qp_open_fresh`
+  (fresh-port 4096/480с есть, SO_MARK/удержание fd не сверены);
+  `qp_send_one`/`qp_send_fragmented` (отправка Initial/фрагментов
+  контроллером заменена прямым `UdpSocket`/датапатом, raw-плана нет);
+  `quic_ask_core` (асинхронный `r2o_quic_ask_donor_parallel`; refused/TTL/
+  счётчики не сверены); `d2k_quic_data_stage` (HTTP/3 stage 18/18, но
+  budget/reason-ветки иные); `quic_ask_*` обёртки
+  (`ttl/copies/srcport/split/longer/frames/control`) — TTL-prefix,
+  source-port, 2 CRYPTO-фрейма и target_len 100 не вынесены в Rust-API;
+  `budget_left`/`d2k_quic_budget_ms` — C бюджет в мс, Rust бюджет в
+  пакетах/дедлайнах, формула мс не портирована; `arm_budget_spent`
+  динамического бюджета arm нет; `qp_questions_step`/`classify_run` —
+  async-задача покрывает base/VN/HTTP3, но не все ветви opaque/residual/
+  arm; `quic_ask_arm`/`qp_arm_first_send`/`quic_arm_data` — arm-цикл и
+  plan-send иные; `reason_set/append` — тексты иные.
+- **N:** `qp_recv_ttl` (нет `recvmsg`/`IP_RECVTTL`/`IPV6_HOPLIMIT`;
+  TTL-плечо и residual TTL не получают ответный TTL);
+  `d2k_quic_props_findings` (текстовые выводы); `prop_word` (tri-state
+  текст).
+- **`quicarms.c`:** `d2k_quic_original_blob` E; `ask_q`, `ask_frag`,
+  `ask`, `d2k_quic_original_arms`, `strategy_ask`,
+  `d2k_quic_strategy_arms` — P: состав кандидатов/decision-функции есть,
+  но фактическая отправка фрагментов, порядок fake-split и retry-семантика
+  не сверены. `prop_word` — N.
+- **Ключевой архитектурный пробел:** контроллерный raw-путь QUIC-плана
+  (фрагменты/TTL-prefix/source-port/2 CRYPTO) не портирован; R2O применяет
+  план в датапате или шлёт обычный `UdpSocket`. Это P для отправки, но N
+  для `qp_recv_ttl` (обратный TTL не измеряется вовсе).
+
 ## core/quicconn.c (36 функций)
 
 Собственный QUIC-клиент D2O (Initial/Handshake/1-RTT, transport params, STREAM, ACK, Retry). В R2O построчного порта нет: соединение и кадры обеспечивает `quinn`, TLS — `rustls`; собственная сборка Initial осталась в `r2k-core/src/quic.rs` (`r2k_quic_initial_build`). Дифференциалы QUIC покрывают Initial/снимки/HTTP-3 (`r2o-quic-hello-differential.sh`, `test-quic-http3-full-stage-differential.sh`, `d2o_quic_base_differential.c`).
