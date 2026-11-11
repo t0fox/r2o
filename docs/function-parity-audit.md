@@ -2268,6 +2268,57 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
   `diagnostics`; полного CLI-паритета нет (см. флаги выше), `--serve`
   имеет другую форму.
 
+## Углублённая сверка: sched.c (282 функции)
+
+- **Карта состояний:** C `T_ASKING → T_PROPS_* → T_PLANNING →
+  T_TRIAL_SETTLE → T_VERIFY* → T_WATCHING`, очередь, cooldown, dead-address,
+  ECH-лестница и voice перенесены в `R2oDiscoverySearches`/
+  `R2oDiscoveryQueue`/`R2oDiscoveryCooldownRing`/`R2oDeadAddressCache`/
+  `R2oDiscoveryWorkerLife` (`main.rs:7971-9300`), `discovery.rs` и
+  `voice_*`. Основные ветви покрыты `r2o-scheduler-differential.sh`,
+  `r2o-scheduler-cooldown/dead-address/concurrent-endpoint`,
+  `r2o-queue-order/coalesce`, `r2o-own-first`, `r2o-ech-rx-ladder`,
+  `r2o-resource-limit`, `r2o-discord-*`; полной матрицы всех переходов и
+  редких комбинаций (ECH+volume, addr+voice, QUIC deny recheck) нет.
+- **`refuse_is_permanent` (301–309):** C считает постоянными `TOO_LONG`,
+  `NOT_APPLIED`, `FLOW_UNIT` и использует это в 4487/9901/10113. Rust
+  разложил это на `main.rs:19091-19095` (`TOO_LONG|NOT_APPLIED →
+  record_client_unfit`) и отдельную ветку `FLOW_UNFIT → каталог/повторный
+  замер` (`19097-19170`). Семантика постоянства сохранена, но единой
+  функции/таблицы нет — P.
+- **`refuse_is_damage` (320–322):** C `DAMAGED` используется при объяснении
+  недосланного (`4522`), чтобы в журнале было «поток повреждён», а не
+  «посылка не ушла». В Rust `flow_journal.rs` есть
+  `R2O_JOURNAL_REFUSE_DAMAGED`/`PlanDamaged`/текст, но в главном цикле
+  контроллера (`main.rs:19086-19175`) отдельной ветки `DAMAGED` нет — код
+  только печатается. Статус P, нужна проверка журнальной ветки.
+- **`verdict_to_plans` (5209–5551, 343 строки):** C собирает ECH trial,
+  QUIC arm, known plans, measured arm, RX-лестницу, split, fallback и
+  compose. Rust не имеет одной функции: это `discovery.rs::known_plans/
+  own_first_plans`, `main.rs::r2o_discovery_volume_known_plans`,
+  `r2o_fallback` и `compose_d2o`; differentials покрывают known/own-first/
+  fallback/QUIC, но не все комбинации. P.
+- **`on_suspect` (8181–8592):** E — `r2o-scheduler-differential.sh`,
+  cooldown/dead-address/queue-order/coalesce, `ControlClient::
+  r2o_queue_tcp_suspect` (`main.rs:20090`) + `R2oDiscoveryQueue::
+  queue_after_fresh_suspect` (`13534`).
+- **`verify_confirm` (9262–9653):** P — ECH/QUIC/форма/budget,
+  `bind_confirmed`, группа, адресный план, сеть, live/report, T_WATCHING
+  перенесены в `r2o_confirm_discovery_outcome` (`main.rs:5347`) +
+  `apply_discovery_outcome` (`21856`); ack-applied/budget/ECH differentials
+  покрывают часть, крупная функция целиком не сверена.
+- **`worker_run_body` (2741–3253, 513 строк):** P — VOICE/VERIFY/CONTACT/
+  addr-recheck/ECH/baseline/volume/classify и фиксация результата;
+  ветви покрыты differentials, но не все комбинации ECH/volume/addr.
+- **`d2k_sched_tick` (10784–12364, 1581 строка):** P — clock, ресурсы,
+  wake, QUIC yield/deny, группы, sync, все состояния задач, очередь, voice,
+  диагностика. `R2oDiscoverySearches`/`ControlClient`/`r2o_resource_limit`
+  покрывают основные ветви; полная матрица состояний не доказана.
+- **Остальные 274 функции:** статические хелперы (CPU/meminfo/conntrack,
+  cooldown/dead, fingerprint, task slots, worker args, plan ident/stamp,
+  close/reset) наследуют статус владельца; E/P выставлены по наличию
+  differential/unit, без полного C/Rust построчного diff.
+
 ## Проверка полноты
 
 Строк среза: 692. Строк в таблицах: 692. E=127, P=564, N=1, ?=0; E+P+N+?=692. `E*`/`P*` учтены в E/P соответственно (static-хелперы).
