@@ -143,6 +143,28 @@ P означает неполное доказательство ветвей, N
   покрываться общим hold) и ложное срабатывание парсера
   `d2k_props_contact_on_family_tcp_profile`.
 
+## Следующий этап: исправление подтверждённых расхождений
+
+После завершения аудита (все 1982 функции получили строку и глубокую сверку)
+перехожу к фиксу. Приоритет:
+
+1. **Packet-path/безопасность:** `wire_udp` IPID_ZERO/TOS; raw UDP/TTL
+   (`IP_NODEFRAG`, `qp_recv_ttl`); `ARM_SHAPE` transport 17; `SET_HTTPS`
+   7 суток vs 6 часов; `plan_apply` OOB `wire_profile` и qsplit `delay_us`;
+   `raw_set_segment_max`; полный `shape_opts`; HTTP80 capacity 128/1024;
+   ENOBUFS-дренаж только истёкших.
+2. **Данные/каталог:** `Binding.tcp_profile`; default `family=4`; FNV
+   `plan-%08x`; HTTP live failures/счётчики; QUIC `name_ok`; TLS 1.2
+   ALPN/P-384/открытый HTTP/`rx_record_missing`.
+3. **Диагностика/CLI:** `--log/--health-file/--duration/--sched-slots`;
+   группы `print_stats`; N-функции (`count_reason`, `offline_self_check`,
+   NAT/session-агрегаты, RST-парсеры).
+4. **Остаточные P:** record layer/HRR/key update/resumption, полная матрица
+   `sched`, HTTP-search transitions, TLS/QUIC live-тайминги.
+
+Правила фикса: каждый пункт — с тестом/дифференциалом; C-реализацию не
+удалять до подтверждения эквивалентности; после фикса пересчитать матрицу.
+
 ## Отчёты групп
 
 | Группа | Функций | Отчёт | Состояние |
@@ -4349,12 +4371,12 @@ legacy-`D2KP` принимается только через `parse_wire`, а п
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| bind_context | 94-102 | 9 | static: присвоить плану identity (owner, generation, kind/family/shape/temporary) | `control.rs:1592` `next_generation`, `:878-887`/`:915-924` вставка | P | Identity выдаётся при вставке в каждую таблицу; отдельной функции нет. Проверяется через `binding_for_plan` в тестах APPLIED. |
+| bind_context | 94-102 | 9 | static: owner, `generation=++next_binding` (пропуск 0 на UINT64_MAX), kind/family/shape/temporary, `trial_id=0` | `control.rs:1592 next_generation`, `:878-887`/`:915-924` вставка, `:690 binding_for_plan` | **P** | C generation — монотонный `next_binding`; Rust — `revision+1` на каждую вставку. Identity выдаётся при вставке, отдельной функции нет; проверяется через `binding_for_plan` в APPLIED-тестах. |
 | d2k_plantab_new | 104-130 | 27 | создать таблицу на cap записей и 16-байтовый epoch | `control.rs:146` `NamePlans::with_capacity` | E | `exact_name_addr_probe_tables_share_lru_capacity` (control.rs:2633). |
 | d2k_plantab_free | 132-149 | 18 | освободить планы и массивы | `Drop` (`HashMap<String, InstalledPlan>`) | E | Владение типами; утечек нет по построению. |
-| name_eq | 154-167 | 14 | static: сравнение имён без учёта регистра (ASCII) | `control.rs:2233` `canonical_name` (lowercase) + `String`-равенство | P | Регистронезависимость подтверждена для HTTPS-имён (`EXAMPLE.TEST`, control.rs:3167); теста на план, поставленный в верхнем регистре и найденный в нижнем, нет. |
-| shape_transport | 169-175 | 7 | static: форма→транспорт (QUIC 17, TLS 6, иначе 0) | нет функции; совместимость в `control.rs:859-868`, `:955-960`, `:1597-1603` | P | Правила размазаны по трём `match`; отдельного предиката нет. |
-| area_name_valid | 177-191 | 15 | static: валидация DNS-суффикса (метки, дефисы, 253) | `control.rs:2233` `canonical_name` | P | R2O строже: требует ≥2 метки и хотя бы одну нецифровую; C допускает односложное имя. Тест `исключение_снимает_suffix...` (control.rs:3075). |
+| name_eq | 154-167 | 14 | static: ASCII case-insensitive, равная длина | `control.rs:2233` `canonical_name` (lowercase) + `String`-равенство | **P** | C понижает A-Z по месту; Rust канонизирует имя при вставке. Эквивалентно для сохранённых имён; теста на план в верхнем регистре и поиск в нижнем нет (HTTPS-тест `EXAMPLE.TEST` — отдельный путь). |
+| shape_transport | 169-175 | 7 | static: QUIC→17; MODERN/LEGACY/ECH/контекст 8–13→6; иначе 0 | `control.rs:859-868`, `:955-960`, `:1597-1603` `valid_domain_area_context` | **P** | C-правило размазано по трём `match`; Rust `valid_domain_area_context` даёт TCP для 1/2/6/8–13 и QUIC для 3, VOICE не входит. Отдельного предиката нет. |
+| area_name_valid | 177-191 | 15 | static: DNS-суффикс: 1..253, метки 1..63, LDH, без ведущего/хвостового дефиса; **односложное и чисто цифровое допустимы** | `control.rs:2233` `canonical_name`, `domain.rs:8-58` | **P** | **Подтверждённое расхождение:** Rust `canonical_name` требует ≥2 метки и хотя бы один нецифровой символ; C принимает `localhost` и `12345`. `SET_SUFFIX`/`SET_BYPASS` с таким именем C примет, R2O вернёт `ACK_BAD_ARGS`. Тест control.rs:3075 это не покрывает. |
 | suffix_member | 193-197 | 5 | static: имя входит в суффикс по границе метки | `control.rs:1605` `domain_suffix_member` | E | `исключение_снимает_suffix_только_для_точного_имени...` (control.rs:3075): `other.googlevideo.com` получает план, `failed...` — нет. |
 | area_exact | 199-207 | 9 | static: найти запись площади по (имя, транспорт, форма, family) | ключ `SuffixPlanKey`/`DomainBypassKey` (control.rs:64-78, HashSet/HashMap) | E | Тест control.rs:3075 (установка/поиск/удаление). |
 | area_set | 209-226 | 18 | static: поставить план суффикса с проверкой формы/транспорта/family | `control.rs:928` `set_suffix` (и `:988` `set_domain_bypass`) | P | Тест control.rs:3075. Отличие: C принимает любой транспорт, равный `shape_transport(shape)`; R2O ограничивает набор форм TCP 1/2/6/8-13 и QUIC 3. |
@@ -4369,12 +4391,12 @@ legacy-`D2KP` принимается только через `parse_wire`, а п
 | d2k_plantab_has_ech_target | 288-314 | 27 | есть ли ECH-привязка имени/адреса для трёх ECH-форм, с учётом `only_sport` и BYPASS; затем суффиксы | — | **?** | Прямого предиката нет. C проверяет `ECH_TCP/ECH_NO_TS/ECH_TS`, точное имя/адрес, `only_sport==sport`, исключает BYPASS для не-точных записей и отдельно перебирает три ECH-суффикса (`plans.c:288-314`). R2O собирает неполный ClientHello общим путём `capture.rs`/`engine.rs`, без привязки к наличию ECH-target; адресного differential нет. Нужен тест «ECH-привязка есть → обрывок удерживается; нет → не удерживается». |
 | d2k_plantab_stream_candidate | 316-319 | 4 | префильтр: есть ли потоковый план по имени/адресу | `control.rs:612` `has_tls_candidate(family)` | P | R2O префильтр только по family, без имени/адреса/sport; используется в `main.rs:1699`. |
 | d2k_plantab_stream_candidate_family | 321-325 | 5 | то же с family | `control.rs:612` `has_tls_candidate` | P | То же: нет учёта имени и порта; тестов на точность префильтра нет. |
-| d2k_plantab_stream_candidate_target | 327-350 | 24 | то же по (имя, адрес, sport, family), включая суффиксы | `control.rs:612` `has_tls_candidate` | P | Отличие: R2O не различает sport и конкретную цель; суффиксы учитываются, но без имени. |
+| d2k_plantab_stream_candidate_target | 327-350 | 24 | family, bypass для не-точных, `stream_input`, `only_sport`, имя/адрес/sport, суффиксы transport 6 + stream_input + suffix_member + bypass | `control.rs:612-637` `has_tls_candidate` | **P** | **Расхождения:** Rust проверяет plans family + shape!=HTTP + `stream_input`, suffix transport 6/family/`stream_input`, addr shapes MODERN/LEGACY/ECH; **не проверяет bypass, имя/адрес/sport**. Поэтому `has_tls_candidate` может вернуть true для исключённого имени и не различает пробный порт; C для не-точных записей bypass учитывает. |
 | find_name_skip | 357-367 | 11 | static: запись имени без порта; опционально мимо HTTP | `control.rs:1493` `find` по `NamePlanKey{host,family,shape}` | P | HTTP-запись в R2O — отдельный shape-ключ, поэтому «пропустить HTTP» не нужно; но и «любая форма» одним поиском не выражается. |
 | find_name | 369-371 | 3 | static: запись имени без порта | `control.rs:1493` `find` | E | Выбор по имени в `tls_probe_plan...`/`http_probe_plan...` (control.rs:3489, 3637). |
 | find_name_shape_port | 385-395 | 11 | static: запись ровно (имя, форма, порт, family) | `control.rs:1493` `find` + `probes: NameProbeKey` | E | `tls_probe_plan_matches_only_its_source_port_and_reports_temporary_applied` (control.rs:3637). |
 | find_name_port | 401-412 | 12 | static: портовая запись имени при неизвестной форме | `control.rs:548-571` — поиск probe по `(host, family, shape)` и bridge-shape | E | `tls_probe_plan...` (control.rs:3637): проба находится по своему порту. |
-| d2k_plantab_http_candidate | 414-422 | 9 | префильтр HTTP: запись формы HTTP с точным портом и proto HTTP | `control.rs:624` `has_http_candidate(family)` | P | R2O проверяет только shape-ключ, без `proto==HTTP` и без sport; вызывается в `main.rs:1701`. |
+| d2k_plantab_http_candidate | 414-422 | 9 | префильтр HTTP: exact name+family+SHAPE_HTTP+`only_sport==sport`+`proto==HTTP` | `control.rs:624-628` `has_http_candidate(family)` | **P** | **Расхождение:** Rust проверяет только family+SHAPE_HTTP, без `sport` и `proto==HTTP`; префильтр шире C. C для неверного порта/прото вернёт 0, R2O — true. Вызывается `main.rs:1701`. |
 | d2k_plantab_find_http | 424-431 | 8 | план для HTTP-запроса: проба своего порта, иначе постоянная | `control.rs:495-509` (`select` + `NameProbeKey` для порта 80) | E | `http_probe_plan_matches_only_its_source_port_and_acknowledges_trial_id` (control.rs:3489). |
 | find_addr_shape | 439-450 | 12 | static: адресная запись ровно (адрес, family, форма) | `control.rs:1504` `find_addr` | E | `discord_voice_class_plan_matches_only_discord_voice_requests` (control.rs:3186), `удаление_адреса...` (control.rs:2793). |
 | find_addr | 452-454 | 3 | static: любая форма адреса (для снятия/учёта промаха) | `control.rs:1504` `find_addr` (с ECH-fallback) | E | Те же тесты; снятие адреса в control.rs:2793. |
@@ -4770,6 +4792,48 @@ Rtnetlink: дампы правил, одиночный поиск маршрут
 - **`d2k_plantab_probe_count` (1020–1022):** C считает все
   занятые `probes[]` (QUIC+VOICE); Rust `r2o_probe_count` — только
   неистёкшие `addr_probes`. P.
+
+## 9g. Углублённая сверка plans.c: area/stream/http
+
+- **`bind_context` (94–102) ↔ `control.rs:1592`:** C выдаёт
+  `generation=++next_binding` (пропуск 0 на UINT64_MAX), пишет
+  kind/family/shape/temporary и обнуляет trial_id. Rust
+  `next_generation = revision+1` на каждую вставку; identity
+  собирается в `binding_for_plan`. P.
+- **`name_eq` (154–167) ↔ `canonical_name`:** C ASCII
+  case-insensitive по месту; Rust канонизирует имя при вставке.
+  P; теста на верхний регистр в плане нет.
+- **`shape_transport` (169–175) ↔ `valid_domain_area_context`:**
+  C: QUIC→17, TLS/ECH/контекст 8–13→6, иначе 0; Rust: TCP для
+  1/2/6/8–13, QUIC для 3, VOICE не входит. P.
+- **`area_name_valid` (177–191) ↔ `canonical_name`:** C допускает
+  односложное и чисто цифровое имя (`localhost`, `12345`);
+  Rust требует ≥2 метки и нецифровой символ. **Подтверждённое
+  расхождение** для `SET_SUFFIX`/`SET_BYPASS`.
+- **`suffix_member`/`area_exact`/`area_bypassed`/`area_del`/
+  `set_suffix`/`set_bypass` ↔ `domain_suffix_member`/ключи/
+  `set_suffix`/`set_domain_bypass`/`delete_domain_area`:** логика
+  совпадает; E/P по строкам. `area_match` — точная shape/family,
+  самый длинный суффикс; P (тест одного суффикса).
+- **`has_ech_target` (288–314):** прямого Rust-предиката нет;
+  три ECH-формы, `only_sport`, BYPASS и суффиксы C не выражены
+  одной функцией. `?`.
+- **`stream_candidate_target` (327–350) ↔ `has_tls_candidate`:**
+  C учитывает bypass, `only_sport`, имя/адрес/sport; Rust —
+  только family/shape/`stream_input` и суффиксы/адрес без bypass
+  и без конкретной цели. P; возможен true для исключённого имени.
+- **`find_name_skip`/`find_name`/`find_name_shape_port`/
+  `find_name_port` (357–412) ↔ `NamePlanKey`/`NameProbeKey`:**
+  C линейные сканы, Rust HashMap; E/P по строкам.
+- **`http_candidate` (414–422) ↔ `has_http_candidate`:** C
+  требует exact name/family/HTTP/port/proto HTTP; Rust — только
+  family+HTTP. Префильтр R2O шире; P.
+- **`find_http` (424–431) ↔ HTTP-путь `select` + `NameProbeKey`:**
+  C проверяет `proto==HTTP`; Rust `set_name` для SHAPE_HTTP уже
+  требует `transport=6/proto=HTTP`, поэтому для валидных планов
+  эквивалентно. E.
+- **`revision`/`count`/`capacity`:** C `revision/used/cap`;
+  Rust `revision/plans.len()/capacity`. P.
 
 ## 10. Итоговые пробелы (что мешает ставить E)
 

@@ -143,6 +143,28 @@ P означает неполное доказательство ветвей, N
   покрываться общим hold) и ложное срабатывание парсера
   `d2k_props_contact_on_family_tcp_profile`.
 
+## Следующий этап: исправление подтверждённых расхождений
+
+После завершения аудита (все 1982 функции получили строку и глубокую сверку)
+перехожу к фиксу. Приоритет:
+
+1. **Packet-path/безопасность:** `wire_udp` IPID_ZERO/TOS; raw UDP/TTL
+   (`IP_NODEFRAG`, `qp_recv_ttl`); `ARM_SHAPE` transport 17; `SET_HTTPS`
+   7 суток vs 6 часов; `plan_apply` OOB `wire_profile` и qsplit `delay_us`;
+   `raw_set_segment_max`; полный `shape_opts`; HTTP80 capacity 128/1024;
+   ENOBUFS-дренаж только истёкших.
+2. **Данные/каталог:** `Binding.tcp_profile`; default `family=4`; FNV
+   `plan-%08x`; HTTP live failures/счётчики; QUIC `name_ok`; TLS 1.2
+   ALPN/P-384/открытый HTTP/`rx_record_missing`.
+3. **Диагностика/CLI:** `--log/--health-file/--duration/--sched-slots`;
+   группы `print_stats`; N-функции (`count_reason`, `offline_self_check`,
+   NAT/session-агрегаты, RST-парсеры).
+4. **Остаточные P:** record layer/HRR/key update/resumption, полная матрица
+   `sched`, HTTP-search transitions, TLS/QUIC live-тайминги.
+
+Правила фикса: каждый пункт — с тестом/дифференциалом; C-реализацию не
+удалять до подтверждения эквивалентности; после фикса пересчитать матрицу.
+
 ## Отчёты групп
 
 | Группа | Функций | Отчёт | Состояние |
