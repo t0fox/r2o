@@ -50,7 +50,7 @@ C-хелперы без собственного состояния наслед
 | Файл | E | P | N |
 |---|---:|---:|---:|
 | d2kd.c | 1 | 41 | 2 |
-| session.c | 3 | 97 | 7 |
+| session.c | 3 | 96 | 8 |
 | track.c | 3 | 15 | 0 |
 | capture.c | 6 | 0 | 0 |
 | hold.c | 5 | 7 | 0 |
@@ -222,7 +222,7 @@ R2O-владелец: `crates/r2o-datapath/src/main.rs` (`run`, `parse_options`,
 | `d2k_session_want_shape_family` | 2931–2960 | 30 | отдать last_hello или взвести ожидание по transport/family | там же; per-flow capture вместо сессионного слота | P | повторный запрос после утери потока снимок не вернёт |
 | `d2k_session_shape` | 2962–2964 | 3 | снимок формы TCP | `capture.rs:170 tcp_hello_from_packet`, `r2o_quic.rs:180 capture_hello` | P | снимок берётся из capture/события, не из сессионного буфера |
 | `d2k_session_shape_family` | 2966–2980 | 15 | снимок формы по family | `capture.rs:170`, `r2o_quic.rs:180` (family в ключе потока) | P | — |
-| `d2k_session_shape_tcp_options_family` | 2982–2990 | 9 | опции TCP к снимку | `control.rs HelloEvent.tcp_has_timestamp` (только флаг) | P | сырые байты опций не передаются |
+| `d2k_session_shape_tcp_options_family` | 2982–2990 | 9 | опции TCP к снимку | `control.rs ClientShapeEvent.tcp_has_timestamp` (только bool) | **N** | C хранит `shape_opts[4][40]` и отдаёт полный набор TCP-опций; R2O `ClientShapeEvent` несёт ClientHello + только булев `tcp_has_timestamp`, а v22 `CLIENT_TCP` уходит с пустыми TCP options. Произвольные опции (MD5/порядок TS и др.) не передаются; D2O-контроллер получает `NO_TS` для TS-клиента. |
 | `d2k_session_plans` | 2992–2994 | 3 | таблица планов | `control.rs` NamePlans | P | — |
 | `d2k_session_plan_count` | 2996–2998 | 3 | число планов | `control.rs` NamePlans len | P | — |
 | `d2k_session_plan_capacity` | 3000–3002 | 3 | ёмкость планов | `control.rs` MAX_* лимиты | P | — |
@@ -679,7 +679,7 @@ ECH, середина приветствия. R2O: `r2k-core/src/tls.rs`.
 | `d2k_packet_parse` (inline) | 24–70 | 47 | разбор IPv4/IPv6, опции, ext-заголовки, L4 | `packet.rs:69 PacketView::parse` | E | `r2k-core/tests/network.rs:36+` |
 | `d2k_key_equal` (inline) | 76–83 | 8 | равенство ключа | `#[derive(PartialEq)]` (`engine.rs:41`, `capture.rs:13`) | E | — |
 
-## Углублённая сверка: 10 N-функций
+## Углублённая сверка: 11 N-функций
 
 - **`count_reason` (static, 165–186):** гистограмма причин отказа по
   указателю/строке, до 32 записей, печатается в итоговой сводке `d2kd`.
@@ -708,8 +708,61 @@ ECH, середина приветствия. R2O: `r2k-core/src/tls.rs`.
   execution=... planned/raw_sent/queued/original/output_failed/reason`.
   R2O пишет события портала/ответа и flow journal, но не этот текстовый
   трейс; `grep "HTTP execution"` по R2O пуст. N — диагностика.
+- **`d2k_session_shape_tcp_options_family` (2982–2990):** C хранит
+  `shape_opts[4][40]`/`shape_opts_len[4]` и отдаёт полный набор TCP-опций
+  снимка. R2O `ClientShapeEvent` (`r2k-core/control.rs:421-433`) несёт
+  полный ClientHello и только булев `tcp_has_timestamp`; v22
+  `CLIENT_TCP` уходит с пустыми TCP options. Произвольные опции
+  (MD5/порядок TS и др.) не передаются, D2O-контроллер получает `NO_TS`
+  для TS-клиента. N — отсутствует сам API полного набора опций.
 
-**Итог:** все 10 N — диагностические/CLI-величины; ни одна не является
-ветвью packet-path. Счётчики событий в R2O есть на уровне событий/журнала,
-но не в виде сводных C-геттеров. Статусы N оставлены осознанно.
+**Итог:** 11 N: 10 диагностических/CLI-величин и один реальный
+packet-path-пробел (`shape_tcp_options_family`). Счётчики событий в R2O
+есть на уровне событий/журнала, но не в виде сводных C-геттеров.
+
+## Углублённая сверка: session/track/hold/capture/wire
+
+- **`session.c` (70+ функций):** `session_packet` (974 строки) и
+  `handle_udp` (791 строка) — TCP/UDP-путь: заголовки, направление,
+  capture, TLS/HTTP, план, сборка, ipfrag, NAT-fragment, voice/QUIC.
+  R2O — `engine.rs:1440 decide_with_session_mode`, `:1849 decide_tcp`,
+  `r2o_udp_sessions.rs`, `r2o_quic.rs`, `r2o_voice.rs`. Основные ветви
+  покрыты `test-datapath-default-mode-differential.sh`,
+  `r2o-udp-exchange-differential.sh`, `test-controller-udpplan-differential.sh`,
+  voice/quic differentials; полный набор ветвей C не доказан — P.
+  **Подтверждённый пробел TCP-опций:** C хранит
+  `shape_opts[4][40]`/`shape_opts_len[4]` (`session.c:142-143,2258-2259,2947-2949`)
+  и отдаёт их `d2k_session_shape_tcp_options_family` (2982–2990). R2O
+  `ClientShapeEvent` (`r2k-core/control.rs:421-433`) несёт полный
+  `client_hello` и только булев `tcp_has_timestamp`; полного набора
+  TCP-опций нет. `ARM_SHAPE`/повтор формы не может воспроизвести
+  произвольные опции клиента (MD5/TS-порядок и др.), только факт TS.
+  Это **N**, а не P: отсутствует сам API полного набора опций; базовый
+  TLS-путь работает, но точная форма TCP-опций не передаётся.
+- **`track.c`:** `d2k_key_make*`, `round_pow2`, `key_eq/key_hash`,
+  `d2k_track_new/find/get/new_connection/remove/walk/expire/remove_if/
+  count/capacity/refusals` сверены с `engine.rs` HashMap +
+  `flow_capacity.rs` (`try_with_capacity`, лимит 3/4 слота, округление
+  capacity). `d2k_track_new_connection` сбрасывает поля, сохраняя учёт
+  посылок; R2O создаёт новый `TcpSession`, а execution-идентификаторы
+  переносит через tickets. P, полного C/Rust differential таблицы нет.
+- **`hold.c`:** `d2k_hold_parse/new/free/flush/next/get_stats/verdicts/
+  feed` сверены с `hold.rs` (`HOLD_SLOTS=16`, `HOLD_PACKETS=8`,
+  `HOLD_PACKET_BYTES=1600`, `HOLD_WAIT=100ms`, `FeedResult`,
+  `r2o_hold_stats`). `d2k_hold_verdicts` — цикл `send(ctx,id,verdict)`;
+  R2O `send_verdicts` делает то же. D6 `test-datapath-hold-differential.sh`
+  и unit `hold.rs` покрывают lifecycle; P на редкие состояния/таймауты.
+- **`capture.c`:** `d2k_capture_forget/reject/feed_ready/feed` сверены с
+  `capture.rs` (`SlotState::{Free,Collecting,Rejected,Delivered}`,
+  `CAPTURE_WINDOW`, `try_*`), тесты capture lifecycle; P.
+- **`wire.c`:** `d2k_wire_build` (TCP: профили, MD5, TS, ts_up,
+  seq_shift, poison, суммы) — E: `wire.rs:18 build_tcp_packet`, 12 тестов
+  + `test-wire-ts-up-plan-differential.sh`. `d2k_wire_build_udp` — P:
+  R2O `wire.rs:213 build_udp_packet` отвергает **любой** poison, включая
+  `POISON_IPID_ZERO`, который C для IPv4 допускает (`wire_udp.c:75,136`),
+  и берёт TOS из пакета; `raw.rs:181` собирает пакет, но этот divergence
+  не покрыт.
+- **Вывод:** session/hold/capture/track — P с конкретными пробелами
+  (TCP options, полная таблица, редкие таймауты); wire TCP — E, wire UDP —
+  P из-за IPID_ZERO/TOS.
 

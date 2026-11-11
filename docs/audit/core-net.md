@@ -22,12 +22,17 @@
 | Показатель | Значение |
 |---|---:|
 | Всего функций в срезе | 548 |
-| `E` | 220 |
-| `P` | 311 |
-| `N` | 16 |
+| `E` | 217 |
+| `P` | 318 |
+| `N` | 12 |
 | `?` | 1 |
 
-Доли: `E` — 40,15%, `P` — 56,75%, `N` — 2,92%, `?` — 0,18%.
+Доли: `E` — 39,60%, `P` — 58,03%, `N` — 2,19%, `?` — 0,18%.
+
+Переклассификация после `deep-core-net.md`: `first_flight`/`d2k_qc_first_initial`
+E→P, `d2k_qc_peer_name` E→N, `remember_live_failure` P→N,
+`udp_raw_init/close/prepare/send`, `d2k_udp_plan_send`,
+`d2k_vol_verdict_name` N→P.
 
 Крупные владельцы Rust-кода: `r2o-controller/src/fetch.rs` (verify/volume/gateway), `r2o-controller/src/http_search.rs` + `main.rs` (HTTP search), `r2o-controller/src/quic_replay.rs` + `r2k-core/src/quic*.rs` (QUIC), `r2k-core/src/{tls,httpup,h3,stun,wire,http_response}.rs` (протокольные кодеки), `r2o-controller/src/{voice_*,https_probe,r2o_volume,r2o_tls,ech,hello}.rs`.
 
@@ -73,7 +78,7 @@ C-реализация минимального TLS 1.2 клиента (ECDHE+AE
 | `now_ms` | 110-114 | 5 | монотонное время, мс | `std::time::Instant` | P | хелпер; прямого аналога-функции нет |
 | `put16` | 116-116 | 1 | big-endian u16 | `u16::to_be_bytes` | P | хелпер записи заголовков |
 | `get16` | 117-117 | 1 | big-endian u16 | `u16::from_be_bytes` | P | хелпер чтения заголовков |
-| `read_exact` | 119-153 | 35 | дочитать n байт с дедлайном, учёт `rx_wire_bytes`/`rx_record_missing`, обработка EINTR/EOF | `fetch.rs:2464 R2oTlsTcpStream::read` + `R2oTlsRecordTracker` | P | эквивалент через `Read`+таймауты сокета; отдельная функция и точная семантика `rx_record_missing` не сопоставлены дифференциалом |
+| `read_exact` | 119-153 | 35 | дочитать n байт с дедлайном, учёт `rx_wire_bytes`/`rx_record_missing`, обработка EINTR/EOF | `fetch.rs:2464 R2oTlsTcpStream::read`, `:2975 set_deadline` | P | Абсолютный дедлайн в R2O есть: остаток пересчитывается на каждой итерации (`fetch.rs:963-986,1859-1901`), `WouldBlock/TimedOut/Interrupted` повторяются. Не совпадают poll-кванты ≤1 с, EINTR-семантика, тексты ошибок и точные `rx_wire_bytes`/`rx_record_missing`. |
 | `write_all` | 155-171 | 17 | дослать буфер с MSG_NOSIGNAL | `fetch.rs` запись через rustls `Stream` | P | эквивалент std/rustls; EINTR-ветка не воспроизведена |
 | `prf` | 183-212 | 30 | TLS 1.2 PRF (HMAC-SHA256, P_hash) | rustls (внутренний TLS1.2 PRF) | P | собственной функции нет; KAT C (`test_tls12.c`) в Rust не перенесён |
 | `d2k_tls12_prf_for_test` | 214-218 | 5 | тестовый экспорт PRF | нет | N | используется только `test_tls12.c:44,58`; Rust-аналога и векторов нет |
@@ -82,9 +87,9 @@ C-реализация минимального TLS 1.2 клиента (ECDHE+AE
 | `aad_of` | 235-242 | 8 | AAD записи TLS 1.2 (seq/type/version/len) | rustls/ring AEAD AAD | P | хелпер record-layer |
 | `send_plain` | 246-256 | 11 | отправить открытую запись | rustls `write_tls` | P | собственной функции нет |
 | `send_sealed` | 258-282 | 25 | зашифровать и отправить запись (explicit nonce, seq++) | rustls `write_tls` | P | cipher suite/группы совпадают с C, но формат записи проверяется только косвенно |
-| `read_record` | 287-345 | 59 | прочитать запись, распознать открытый HTTP/CCS/alert, расшифровать | rustls `read_tls` + `R2oTlsRecordTracker` | P | ключевая ветка «открытый HTTP вместо TLS» покрыта `fetch.rs`; побайтового differential нет |
+| `read_record` | 287-345 | 59 | прочитать запись, распознать открытый HTTP/CCS/alert, расшифровать | rustls `read_tls` + `R2oTlsRecordTracker` | P | **Ветка «открытый `HTTP/` вместо TLS» в fetch/replay не портирована явно:** rustls даёт общий `DecryptError`/`InvalidMessage`, а проверка `HTTP/` есть только в `response.rs:572` (HTTPS-проба). Проверки `rlen==0/>18432`, минимум 24 байта, CCS и AEAD-ошибки делегированы rustls с иными текстами. |
 | `hs_next` | 355-407 | 53 | собрать handshake-сообщения из записей, CCS/alert | rustls handshake driver | P | собственная state-machine отсутствует |
-| `ch12_build` | 415-485 | 71 | собрать TLS1.2 ClientHello (2 шифра, X25519/P-256, padding до `want_wire`) | rustls ClientHello + `r2o_client_hello_wire_len` (`r2o_tls.rs:53`, `fetch.rs:157 wire_len`) | P | длина CH сверяется дифференциалом `donor_and_r2o_candidate_probes_keep_the_client_hello_wire_length` (tls13-pad), для tls12 отдельного кейса нет; набор расширений rustls шире C |
+| `ch12_build` | 415-485 | 71 | собрать TLS1.2 ClientHello (2 шифра, X25519/P-256, padding до `want_wire`) | rustls ClientHello + `r2o_client_hello_wire_len` (`r2o_tls.rs:53`, `fetch.rs:157 wire_len`) | P | Длина CH сверяется differential (tls13-pad), для tls12 отдельного кейса нет. **Расхождения:** C не шлёт ALPN, R2O всегда шлёт `http/1.1` (`r2o_tls.rs:59,110`); C объявляет P-384, но отвергает SKE с ним, R2O разрешает `SECP384R1` (`:96`) и принимает то, что C отвергает; sigalg-список rustls шире C. |
 | `d2k_tls12_connect` | 492-522 | 31 | создать сессию, собрать/отправить CH, пройти handshake | `r2o_tls.rs:53 r2o_tls_client_connection(tls12=true)` | P | end-to-end TLS1.2 сверяется `donor_and_r2o_reject_short_tls12_server_finished` и `tests/fetch.rs` (TLS12-сервер); ветки ошибок C (группа/шифр) в rustls иные |
 | `d2k_tls12_resume` | 532-551 | 20 | продолжить handshake по сохранённому полёту сервера (downgrade из tls13.c) | rustls (автосогласование версии в одном соединении) | P | отдельного resume нет; downgrade-путь покрыт только косвенно |
 | `tls12_finish` | 556-748 | 193 | разбор ServerHello/Certificate/SKE/Done, ECDH, вывод ключей, CKE/CCS/Finished | rustls handshake | P | порт не построчный; поддерживаемые C группы/шифры воспроизведены конфигурацией rustls; ошибки «сервер требует клиентский сертификат» и выбор неподдерживаемой группы не имеют C/Rust differential |
@@ -104,12 +109,12 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `tls_dispose` | 83-85 | 3 | освободить сессию TLS1.3 и снять diag-учёт | `r2o_tls.rs` (rustls, RAII) | P | владелец `tls_connect_internal`; отдельной функции нет |
 | `say` | 87-93 | 7 | форматирование ошибки | нет (std `format!`) | P | инфраструктурный хелпер |
 | `now_ms` | 95-99 | 5 | монотонное время, мс | `std::time::Instant` | P | хелпер |
-| `read_exact` | 102-136 | 35 | дочитать n байт с дедлайном и учётом `rx_wire_bytes`/`rx_record_missing` | `fetch.rs:2464 R2oTlsTcpStream::read` | P | эквивалент через `Read`; точная семантика счётчиков не сопоставлена |
+| `read_exact` | 102-136 | 35 | дочитать n байт с дедлайном и учётом `rx_wire_bytes`/`rx_record_missing` | `fetch.rs:2464 R2oTlsTcpStream::read`, `:2975 set_deadline` | P | Абсолютный дедлайн есть; различаются poll-кванты, EINTR, тексты и точная семантика `uint32` счётчиков. |
 | `write_all` | 138-154 | 17 | дослать буфер с MSG_NOSIGNAL | `fetch.rs` rustls `Stream::write_all` | P | эквивалент std |
 | `put16` | 160-160 | 1 | big-endian u16 | `u16::to_be_bytes` | P | хелпер |
 | `get16` | 161-161 | 1 | big-endian u16 | `u16::from_be_bytes` | P | хелпер |
 | `nonce_of` | 165-170 | 6 | nonce = iv XOR seq | rustls/ring AEAD nonce | P | хелпер record-layer |
-| `read_record` | 175-234 | 60 | чтение записи, CCS/alert, снятие padding, расшифровка, внутренний тип | rustls `read_tls` + `R2oTlsRecordTracker` | P | ключевая ветка «открытый HTTP вместо TLS» перенесена; побайтового differential нет |
+| `read_record` | 175-234 | 60 | чтение записи, CCS/alert, снятие padding, расшифровка, внутренний тип | rustls `read_tls` + `R2oTlsRecordTracker` | P | Ветка открытого `HTTP/` в fetch явно не проверяется (только `response.rs:572`). **Расхождение:** C принимает открытый Handshake после установки ключей (206-212), rustls такой пакет отвергает. Padding/внутренний тип/AEAD — внутри rustls, тексты иные. |
 | `write_record` | 236-258 | 23 | зашифровать app data с внутренним типом и тегом | rustls `write_tls` | P | формат записи C не сравнивается с rustls побайтно |
 | `traffic_keys` | 260-263 | 4 | HKDF-Expand-Label key/iv | rustls (key schedule) | P | собственной функции нет |
 | `tls_connect_internal` | 265-523 | 259 | полный handshake TLS1.3: CH/ECH, ServerHello, X25519, расписание ключей, Certificate, Finished, app keys | `r2o_tls.rs:53 r2o_tls_client_connection`, `r2o_tls.rs:274 r2o_tls_ech_client_connection` | P | end-to-end сверяется `r2o-tls-verify-differential.sh`; ветки ошибок C (ECH not accepted, Finished mismatch, малая точка) заменены поведением rustls и не сравнивались |
@@ -322,7 +327,7 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `rec_get` | 477-496 | 20 | создание записи с лимитами памяти/учётом отказов | `main.rs:4464 HttpSearchRecordCache` | P | лимиты `D2K_HS_RECORD_MAX_BYTES` не сопоставлены |
 | `same_program` | 500-508 | 9 | эквивалентность планов через TLV | `http_search.rs:775 candidate_program` | P | сравнение программ есть, TLV-путь иной; test только на алиасы |
 | `failed_live` | 510-519 | 10 | поиск живого отказа по ключу/адресу | `main.rs` HttpSearchRecord (failures) | P | структура и семантика `evidence_lost` не сверены |
-| `remember_live_failure` | 520-550 | 31 | учёт живого отказа с лимитами байт | `main.rs` HttpSearchRecord | P | лимиты/флаги потерь не сопоставлены |
+| `remember_live_failure` | 520-550 | 31 | учёт живого отказа: addr/binding/execution/request_ms, лимиты байт | нет | **N** | `HttpSearchRecord` (`main.rs:4468-4472`) содержит только `cut/repeat_path/repro_gap`; полей `failures/addr/binding/execution/request_ms` и счётчиков нет. `HttpLiveFailures` строится из `failed_http_programs` (выключенные привязки каталога), а не из живых отказов; `r2o_catalog_mark_flow_unfit` ставит только `recheck_since`. |
 | `d2k_httpsearch_test_add_failures` | 553-566 | 14 | тестовый хук добавления отказов | нет | N | существует только под `D2K_HS_TESTING` |
 | `d2k_httpsearch_test_add_records` | 567-576 | 10 | тестовый хук добавления записей | нет | N | только под `D2K_HS_TESTING` |
 | `d2k_httpsearch_measured_poison` | 579-606 | 28 | регистрация измеренной poison-спеки | `http_search.rs:719 measured_poison_keys` | E | test `candidate_tests::measured_poison_requires_tls_and_an_actual_fake_reference` |
@@ -590,15 +595,15 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 | `frames_in` | 479-696 | 218 | разбор кадров: PADDING/ACK/CRYPTO/STREAM/MAX_*/NEW_CONNECTION_ID/PING/CLOSE | quinn | P | заменено зависимостью |
 | `recv_dgram` | 702-815 | 114 | приём датаграммы, определение уровня, открытие | quinn | P | заменено зависимостью |
 | `crypto_frame` | 820-829 | 10 | CRYPTO-кадр для первого полёта | `quic.rs:1085 append_crypto_frame` | E | хелпер; владелец `d2k_qc_first_initial`, RFC-тест |
-| `first_flight` | 836-892 | 57 | первый полёт: Initial + CRYPTO ClientHello | `r2k-core/src/quic.rs:261 r2k_quic_initial_build` | E | test `создаёт_аутентифицированный_quic_initial...` |
+| `first_flight` | 836-892 | 57 | первый полёт: Initial + CRYPTO ClientHello | `r2k-core/src/quic.rs:261 r2k_quic_initial_build` | P | Тест покрывает только запечатывание готового Initial; C собирает CH с `tp_build`/ALPN h3/`session_id=0`, R2O сырой путь использует снятый профиль, не TP. Построчной сборки CH из SNI+TP нет. |
 | `prepare_retry` | 898-926 | 29 | обработать Retry: новый DCID/token | quinn | P | заменено зависимостью; retry-проверка есть в `quic.rs:569` |
-| `d2k_qc_first_initial` | 928-954 | 27 | публичная сборка первого Initial | `quic.rs:261 r2k_quic_initial_build` | E | RFC/unit-тесты Initial |
+| `d2k_qc_first_initial` | 928-954 | 27 | публичная сборка первого Initial | `quic.rs:261 r2k_quic_initial_build` | P | Initial из готового CH собирается, но C-функция строит CH из SNI+TP; этой сборки в R2O нет. P, не E. |
 | `qc_no_sigpipe` | 956-964 | 9 | SO_NOSIGPIPE | `MSG_NOSIGNAL`/std | P | платформенный хелпер |
-| `d2k_qc_connect` | 966-1286 | 321 | полный QUIC handshake клиента, early data, 1-RTT | `quinn::Endpoint::connect` (`r2o_quic_http3.rs`) | P | заменено quinn; end-to-end сверяется HTTP/3 stage-дифференциалом, не handshake-байтами |
+| `d2k_qc_connect` | 966-1286 | 321 | полный QUIC handshake клиента, early data, 1-RTT | `quinn::Endpoint::connect` (`r2o_quic_http3.rs`) | P | Заменено quinn; HTTP/3 stage-дифференциал сверяет исход, не handshake-байты. **Расхождения:** C не проверяет цепочку/подпись сертификата (только имя, `quicconn.c:1195-1197`), R2O использует webpki-корни (`r2o_quic_http3.rs:890`) и рвёт handshake при mismatch; C-`tp_build` не портирован — действуют quinn defaults; нет классификации отказа по числу Initial/Handshake. |
 | `d2k_qc_stream_send` | 1288-1375 | 88 | отправить STREAM с контролем окна | quinn `SendStream` | P | заменено зависимостью |
 | `d2k_qc_stream_recv` | 1377-1423 | 47 | принять STREAM, вернуть stream_id/данные | quinn `RecvStream` | P | заменено зависимостью |
 | `d2k_qc_app_progress` | 1425-1428 | 4 | прогресс app-байт/complete | `r2o_quic_http3.rs:278 app_bytes_load` | P | счётчики counted-stream, семантика иная |
-| `d2k_qc_peer_name` | 1430-1430 | 1 | результат проверки имени сертификата | `fetch.rs peer_name_ok`, `response.rs:389` | E | differential `donor_and_r2o_tls_results_match_for_matching_and_mismatched_certificate_names` |
+| `d2k_qc_peer_name` | 1430-1430 | 1 | результат проверки имени сертификата | нет | **N** | В `R2oQuicHttp3Result` нет поля имени/`name_ok`; differential `donor_and_r2o_tls_results_match...` запускает TCP-хелпер `"tls13"`, а не QUIC. C возвращает `name_ok` и продолжает handshake; R2O проверяет цепочку/имя через webpki и при mismatch рвёт handshake. |
 | `d2k_qc_rx_wire_bytes` | 1431-1431 | 1 | принятые байты | `r2o_quic_http3.rs:1280 wire_bytes` | P | quinn stats, иная точка учёта |
 | `d2k_qc_datagrams` | 1432-1435 | 4 | счётчики tx/rx датаграмм | `r2o_quic_http3.rs:1272 datagrams` | P | quinn stats |
 | `d2k_qc_handshake_done` | 1436-1436 | 1 | завершён ли handshake | quinn `Connection` | P | заменено зависимостью |
@@ -688,9 +693,9 @@ Discord IP Discovery обход: разбор/сборка 20-байтового
 | `quic_plan_text` | 69-171 | 103 | полный текст QUIC-плана по arm (frag/udplen/blob/ttl/pace) | `quic_replay.rs:207` directives + `r2k-core/src/plan.rs` | P | директивы портированы по одной; побайтового differential текста нет |
 | `d2k_quic_arm_plan` | 173-186 | 14 | валидация arm → текст | `quic_replay.rs:207` | P | валидация в структуре Plan, не в эмиттере |
 | `d2k_quic_compose_plan` | 188-203 | 16 | выбор плана по arm/props (junk/longer) | `quic_replay.rs:449 r2o_quic_discovery_candidates` | P | выбор кандидатов есть, композиция текста иная |
-| `d2k_quic_delay_plan` | 205-217 | 13 | план `delay 500000` | `r2o_quic_deny.rs:203 r2o_delay` | P | директива есть, полный текст/проверки не сверены |
+| `d2k_quic_delay_plan` | 205-217 | 13 | план `delay 15000` (D2K_QUIC_DELAY_US = D2K_PACE_SETTLE_US) | разбор `plan_text.rs:444`, `r2k-core/plan.rs:47/286 REC_DELAY`, применение `main.rs:3604`, фикстура `main.rs:26066` | P | C печатает `d2k-plan 1 6 … delay 15000` (`test_quic_arms.c:373`). В R2O есть разбор/применение и тестовая фикстура `r2o-plan 1 11 … delay 15000`, но **нет продюсера** delay-плана. Ссылка на `r2o_quic_deny.rs:203 r2o_delay` была ложной — это backoff deny-кэша (10/30/60 мин). |
 | `d2k_voice_arm_plan` | 219-239 | 21 | текст voice-плана с приманкой и copies | `voice_measure.rs:269 r2o_measured_voice_arm_plan_text` | E | unit `measured_voice_arm_plan_preserves_payload_copy_count_and_voice_shape` |
-| `d2k_voice_plan` | 241-243 | 3 | voice-план с D2K_VOICE_DECOY_REPEATS | `voice_discovery.rs:8 r2o_voice_arm_plan_text` | E | используется `main.rs:17239`, тесты плана Discovery |
+| `d2k_voice_plan` | 241-243 | 3 | voice-план с D2K_VOICE_DECOY_REPEATS=10 | `voice_measure.rs:269 r2o_measured_voice_arm_plan_text`; `voice_discovery.rs:8` (copies=1) | E | Отдельной обёртки нет, но `test-controller-udpplan-differential.sh` вызывает C для copies=10 и сравнивает с Rust-текстом (шапка/id нормализуются); unit `measured_voice_arm_plan_preserves_payload_copy_count_and_voice_shape`. Тест есть, не перезапускался. |
 | `d2k_quic_question_plan` | 247-266 | 20 | текст плана по вопросу (udplen/split/frag/ttl/blob) | `quic_replay.rs` candidates + `r2k-core/src/plan.rs` | P | разбор вопроса в структуру есть, эмиттер текста отсутствует |
 
 ## core/udpruntime.c (8 функций)
@@ -702,11 +707,11 @@ Discord IP Discovery обход: разбор/сборка 20-байтового
 | `udp_next_fragment_id` | 22-30 | 9 | потокобезопасный IP id (random seed, инкремент) | `wire.rs` (случайный id) | P | глобального счётчика нет; id выбирается случайно на сборку |
 | `d2k_udp_batch_free` | 32-32 | 1 | освободить буфер пачки | RAII `Vec` | P | отдельной функции нет |
 | `d2k_udp_plan_build` | 33-93 | 61 | текст → TLV → план → emissions → IPv4/IPv6 пакеты/фрагменты | `r2k-core/src/plan/apply.rs` (apply emissions) | P | применение плана есть; сборка байтовой пачки из контроллера отсутствует |
-| `udp_raw_init` | 101-106 | 6 | инициализация raw-sink (IPv6 frag sender) | нет | N | raw UDP sink с IP_NODEFRAG в контроллере не найден |
-| `udp_raw_close` | 107-112 | 6 | закрыть raw-sink | нет | N | то же |
-| `udp_raw_prepare` | 113-130 | 18 | подготовить raw-сокет/IPv6 frag route | нет | N | то же; `raw_probe.rs` — TCP, не UDP-план |
-| `udp_raw_send` | 131-139 | 9 | sendto raw IPv4/IPv6 | нет | N | то же |
-| `d2k_udp_plan_send` | 147-190 | 44 | отправить план с сокета: TTL/hoplimit, задержки, фрагменты, восстановление TTL | нет (QUIC-датаграммы шлются напрямую) | N | UDP-plan runtime в контроллере отсутствует; датапат применяет план к проходящим пакетам |
+| `udp_raw_init` | 101-106 | 6 | инициализация raw-sink (IPv6 frag sender) | `r2o-datapath/src/raw.rs:48 RawSocket::open`, `:35-44 OwnedFd` | **P** | Контроллерного sink нет, но датапат открывает raw IPv4/IPv6; C-специфичный `d2k_ip6frag_sender` заменён IPv6-raw. |
+| `udp_raw_close` | 107-112 | 6 | закрыть raw-sink | `OwnedFd`/`Drop` (`raw.rs:35-44`) | **P** | RAII; отдельной функции нет. |
+| `udp_raw_prepare` | 113-130 | 18 | подготовить raw-сокет/IPv6 frag route | `raw.rs:48-93`, `:155-167` | **P** | `IP_HDRINCL`/`IPV6_HDRINCL`/`SO_MARK` есть (`raw.rs:75,77,80`); **`IP_NODEFRAG` во всём R2O отсутствует**, mark обязателен, IPv6-путь иной. |
+| `udp_raw_send` | 131-139 | 9 | sendto raw IPv4/IPv6 | `raw.rs:147-223` | **P** | Полный IP-пакет/фрагмент, `MSG_DONTWAIT`, EMSGSIZE-понижение MTU; C — блокирующий sendto, IPv6 через frag-sender. |
+| `d2k_udp_plan_send` | 147-190 | 44 | отправить план с сокета: TTL/hoplimit, задержки, фрагменты, восстановление TTL | датапат: `engine.rs:1753`, `main.rs:3604`, `wire.rs:109/132`, `raw.rs:147` | **P** | Контроллерного API нет; проводное поведение реализовано в датапате: фрагменты, задержка, TTL в заголовке, raw-send. Нет socket TTL get/set/restore и `ECONNREFUSED → -2`. |
 
 ## core/volume.c (19 функций)
 
@@ -719,7 +724,7 @@ Discord IP Discovery обход: разбор/сборка 20-байтового
 | `d2k_volume_rx_pair_agrees` | 78-83 | 6 | согласованы ли две partial-пробы | `r2o_volume.rs:80 r2o_volume_rx_pair_agrees` | E | `tests/r2o_volume.rs:49,63,96` |
 | `d2k_volume_rx_needs_repeat` | 103-109 | 7 | нужна ли третья проба | `r2o_volume.rs:112 r2o_volume_rx_needs_repeat` | E | `tests/r2o_volume.rs` |
 | `d2k_volume_rx_evidence` | 111-213 | 103 | evidence: wire/body cut, slack, пакетный бюджет, reason | `r2o_volume.rs:125 r2o_volume_rx_evidence` | E | `tests/r2o_volume.rs:50,75,80,91` |
-| `d2k_vol_verdict_name` | 215-222 | 8 | русское имя вердикта | нет | N | текст не портирован |
+| `d2k_vol_verdict_name` | 215-222 | 8 | русское имя вердикта | `fetch.rs:486-493 r2o_label`; `r2o-fetch.rs:232-236` | **P** | Четыре состояния; `Short/Cut/Passed` совпадают дословно, `Unreachable` — «цель не ответила» вместо «мишень не ответила» (в JSON-пути снова «мишень»). Функции/теста нет. |
 | `now_ms` | 224-228 | 5 | монотонное время | `Instant` | P | хелпер |
 | `nap_ms` | 230-235 | 6 | sleep мс | `std::thread::sleep` | P | хелпер |
 | `clamp_ms` | 237-241 | 5 | clamp int | `clamp` | P | хелпер |
@@ -910,65 +915,84 @@ mismatches: нет
 
 - `tls12.c`/`tls13.c`/`quicconn.c` — собственные стеки C заменены `rustls`/`quinn`; end-to-end исходы сверяются, но record-layer, коды ошибок и тайминги не имеют построчного паритета.
 - `quicprobe.c` — полная лестница `classify_run`/arm-стратегий переписана на async-задачи; дифференциалы покрывают base, пул, бюджет, HTTP/3-stage, но не все ветви `opaque`/`residual`/`arm`.
-- `udpruntime.c` — raw UDP-отправка планов из контроллера (`IP_HDRINCL`/`IP_NODEFRAG`) не портирована; в R2O план применяет датапат, а контроллер шлёт QUIC-датаграммы напрямую.
+- `udpruntime.c` — raw UDP-отправка планов из контроллера отдельным API не портирована, но проводное поведение есть в датапате: `IP_HDRINCL`/`IPV6_HDRINCL`/`SO_MARK` (`raw.rs:75,77,80`), фрагменты/задержка/TTL в заголовке. **`IP_NODEFRAG` отсутствует**, mark обязателен, socket TTL get/set/restore и `ECONNREFUSED → -2` не портированы — P, не N.
 - `udpplan.c` — QUIC-план в R2O представлен структурой и `directives`, а не полным текстом `d2k-plan`; побайтового differential текста нет.
 - `volume.c` — evidence-функции покрыты unit-тестами, но лестница HEAD/повторов и resource-retry сверяются только косвенно.
 - Диагностические тексты (`props_findings`, `verdict_name`, `prop_word`, `reason`-форматы) в Rust не воспроизведены дословно — это `N`/`P`, не влияющие на сетевой datapath, но влияющие на CLI/лог-паритет.
 
-## Углублённая сверка оставшихся 10 N
+## Углублённая сверка N-функций (финальные 12)
 
-- **`d2k_tls12_prf_for_test` (tls12.c 214–218):** тестовый экспорт
-  `prf`, используется только `test_tls12.c:44,58`. R2O использует
-  `rustls` TLS1.2 PRF; отдельного экспорта/вектора нет. N — тестовый хук.
-- **`d2k_verify_tcp_timestamps_get` (verify.c 829):** геттер глобального
-  `g_verify_tcp_timestamps`, используется `test_sched.c:409`. В R2O
-  профиль TS берётся из `PacketInput`/`tcp_profile_from_has_timestamp`,
-  глобального getter нет. N — диагностический/тестовый API.
+- **`d2k_tls12_prf_for_test` (tls12.c 214–218):** тестовый экспорт PRF,
+  используется `test_tls12.c:44,58`. R2O использует `rustls` TLS1.2 PRF;
+  отдельного экспорта/вектора нет. **Не под `#ifdef`** — это обычный
+  экспорт, а не только тестовая сборка. N — тестовый хук.
+- **`d2k_verify_tcp_timestamps_get` (verify.c 829):** геттер
+  thread-local `g_verify_tcp_timestamps`; `sched.c:2817-2819` ставит
+  профиль из триггера, `verify.c:1361,1514` передают его в
+  `d2k_props_contact_on_family_tcp_profile` → `compose.c:591-636`
+  временно пишет `/proc/sys/net/ipv4/tcp_timestamps`. Это **packet-path**,
+  не CLI: R2O fetch/replay используют обычный `TcpStream::connect`, а
+  per-call `Option<bool>` есть только в `raw_probe.rs:673`. N.
 - **`d2k_httpsprobe_lost` (httpsprobe.c 460–466):** счётчик потерянных
-  результатов HTTPS-проб, читается `d2kc.c:349` для сводки. В
-  `https_probe.rs` отдельного счётчика `lost` нет. N — диагностика.
-- **`d2k_httpsearch_test_add_failures` (httpsearch.c 555–566) и
-  `d2k_httpsearch_test_add_records` (569–576):** существуют только под
-  `D2K_HS_TESTING`, наполняют таблицу для тестов. В production R2O не
-  нужны; Rust-тесты создают состояние иначе. N — тестовые хуки.
-- **`d2k_qw_retry_build` (quicwire.c 481–521):** собирает серверный QUIC
-  Retry (version/DCID/SCID/token). R2O — клиентский datapath: он умеет
-  разбирать/учитывать Retry (`r2o_quic_http3`), но не строит серверный
-  Retry. N — серверная роль, не клиентский обход.
-- **`d2k_quic_props_findings` (quicprobe.c 2274–2323):** формирует
-  текстовые выводы по split/2 datagrams/v2/fixed bit/port и т.п. для
-  журнала планировщика (`sched.c:11506`). В R2O есть `ClassifyResult`/
-  `classify_json`, но отдельного генератора этих строк нет. N —
-  диагностический текст.
-- **`prop_word` (quicarms.c 244, static):** `prop_word()` переводит
-  tri-state в слово для лога. R2O использует свои строки в
-  `discovery`/`classify_json`; отдельной функции нет. N — диагностика.
-- **`d2k_vol_verdict_name` (volume.c 215):** текстовые имена вердиктов
-  `unreachable/cut/passed/short/unknown`, используются `d2kfetch`.
-  В R2O вердикты `VolumeVerdict` есть, но отдельного
-  `d2k_vol_verdict_name`/побайтового текста нет. N — CLI-текст.
-- **`voice_ask_real` (voice.c 365):** возвращает function pointer
-  `voice_ask` для подмены oracle в тестах (`test_voice.c:744`). R2O
-  `voice_measure` вызывает замер напрямую; N — тестовый seam, не
-  поведение.
+  результатов HTTPS-проб, читается `d2kc.c:349`. R2O использует
+  ограниченный `SyncSender` и блокирующий `send` (`https_probe.rs:179`):
+  при переполнении воркер блокируется, а не дропает; счётчика `lost` нет.
+  N — диагностика.
+- **`d2k_httpsearch_test_add_failures` (555–568) и
+  `d2k_httpsearch_test_add_records` (569–578):** только под
+  `D2K_HS_TESTING`, наполняют таблицу для тестов. Rust-тесты создают
+  состояние иначе. N — тестовые хуки.
+- **`d2k_qw_retry_build` (quicwire.c 481–521):** серверный QUIC Retry
+  (version/DCID/SCID/token). R2O умеет только проверять
+  `retry_integrity_valid` (`r2k-core/src/quic.rs:569`), не строит Retry.
+  N — серверная роль.
+- **`qp_recv_ttl` (quicprobe.c 937–997):** C читает TTL/hoplimit через
+  `recvmsg` (`IP_RECVTTL`/`IPV6_HOPLIMIT`) и отдаёт в `quic_ask_core`
+  (`ttl_in_out`, 1315-1329), питая TTL-плечо. Во всём R2O нет
+  `recvmsg`/`IP_RECVTTL`/`IPV6_HOPLIMIT`; quinn/`UdpSocket` TTL не
+  отдают. N — packet-path.
+- **`d2k_quic_props_findings` (2275–2324):** текстовые выводы по
+  split/2 datagrams/v2/fixed bit/port для журнала (`sched.c:11506`).
+  В R2O есть имена кандидатов (`quic_replay.rs:628`), но нет функции
+  выводов. N — диагностический текст.
+- **`prop_word` (quicarms.c 244, static):** tri-state → слово для лога.
+  R2O использует свои reason-строки; отдельной функции нет. N —
+  диагностика.
+- **`voice_ask_real` (voice.c 365):** function-pointer seam для подмены
+  oracle в тестах (`test_voice.c:744`). R2O `voice_measure` вызывает
+  замер напрямую (`voice_measure.rs:608`); API-шима нет, поведение не
+  страдает. N — тестовый seam.
+- **`d2k_qc_peer_name` (quicconn.c 1430):** C возвращает `name_ok` и
+  продолжает handshake. В `R2oQuicHttp3Result` нет поля имени/`name_ok`;
+  differential `donor_and_r2o_tls_results_match...` запускает TCP-хелпер
+  `"tls13"`, не QUIC. R2O проверяет цепочку/имя через webpki
+  (`r2o_quic_http3.rs:890`) и при mismatch рвёт handshake. N —
+  controller/QUIC-поведение.
+- **`remember_live_failure` (httpsearch.c 520–550):** C хранит
+  addr/binding/execution/request_ms и лимиты байт. `HttpSearchRecord`
+  (`main.rs:4468-4472`) содержит только `cut/repeat_path/repro_gap`;
+  `HttpLiveFailures` строится из `failed_http_programs` (выключенные
+  привязки каталога), а не из живых отказов. N — HTTP-search state.
 
-**Итог:** 10 N — 4 тестовых хука/экспорта, 5 диагностических текстов/
-счётчиков и 1 серверный Retry. Клиентский packet-path не затронут;
-архитектурные N остаются только 6 raw-UDP/TTL функций.
+Raw-UDP (`udp_raw_*`, `d2k_udp_plan_send`) после проверки — **P**:
+`IP_HDRINCL`/`IPV6_HDRINCL`/`SO_MARK` есть (`raw.rs:75,77,80`), но
+`IP_NODEFRAG` отсутствует, mark обязателен, socket TTL get/set/restore
+и `ECONNREFUSED → -2` не портированы. `d2k_vol_verdict_name` — P:
+`r2o_label` содержит те же состояния, отличается только «цель»/«мишень».
 
-## Классификация N (16 функций)
-
-Не все N означают пропущенный обход. Разбивка по влиянию:
+## Классификация N (12 функций)
 
 | Причина | Функции | Влияние на packet path |
 |---|---|---|
-| Тестовые хуки/экспорт | `d2k_tls12_prf_for_test`, `d2k_httpsearch_test_add_failures`, `d2k_httpsearch_test_add_records` | нет: существуют только под тестовой сборкой D2O |
-| Диагностика/тексты/счётчики | `d2k_verify_tcp_timestamps_get`, `d2k_httpsprobe_lost`, `d2k_quic_props_findings`, `prop_word`, `d2k_vol_verdict_name` | нет: CLI/лог-паритет, не сеть |
+| Тестовые хуки/экспорт | `d2k_tls12_prf_for_test`, `d2k_httpsearch_test_add_failures`, `d2k_httpsearch_test_add_records` | нет: тестовые/CLI-хуки |
+| Диагностика/тексты/счётчики | `d2k_httpsprobe_lost`, `d2k_quic_props_findings`, `prop_word` | нет: CLI/лог-паритет |
 | Серверная роль / C-API | `d2k_qw_retry_build`, `voice_ask_real` | нет: клиентский datapath не строит Retry и не отдаёт function pointer |
-| Архитектурный raw-UDP/TTL | `udp_raw_init`, `udp_raw_close`, `udp_raw_prepare`, `udp_raw_send`, `d2k_udp_plan_send`, `qp_recv_ttl` | **есть риск**: R2O шлёт QUIC-датаграммы обычным UDP-сокетом, raw IP_NODEFRAG/TTL-приём не портированы; нужен differential на фрагменты/TTL |
+| Packet-path | `d2k_verify_tcp_timestamps_get`, `qp_recv_ttl` | **есть риск**: профиль TCP TS не проброшен в fetch/replay; TTL/hoplimit ответа не принимается |
+| Controller/HTTP search | `d2k_qc_peer_name`, `remember_live_failure` | **есть риск**: нет `name_ok`/проверки цепочки как в C; нет живых отказов HTTP-search |
 
-Таким образом, реальных архитектурных пробелов в core-net — **6**, а не 16;
-остальные 10 — тестовые, диагностические или серверные функции.
+Итог: 12 N, из них 4 реально влияют на поведение (TCP TS, TTL, QUIC
+cert-name, HTTP live failures), остальные 8 — тестовые/диагностические/
+серверные. Raw-UDP/TTL-отправка теперь P, а не N.
 
 ## Проверки, выполненные в этой сессии
 
