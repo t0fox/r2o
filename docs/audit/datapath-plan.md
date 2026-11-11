@@ -311,9 +311,9 @@ legacy-`D2KP` принимается только через `parse_wire`, а п
 | d2k_plantab_del_suffix_family | 255-258 | 4 | снять суффикс | `control.rs:1021` `delete_domain_area(body, true)` | E | Тот же тест. |
 | d2k_plantab_del_bypass_family | 260-263 | 4 | снять исключение | `control.rs:1021` `delete_domain_area(body, false)` | E | Тот же тест. |
 | area_bypassed | 265-273 | 9 | static: имя исключено для (family, shape) | `control.rs:1557` `name_is_bypassed` | E | Тот же тест. |
-| area_match | 275-284 | 10 | static: самый длинный подходящий суффикс | `control.rs:1569` `find_in_domain` (`max_by_key(len)`) | P | Тест покрывает один суффикс; выбор самого длинного из нескольких не проверен. |
+| area_match | 275-284 | 10 | static: самый длинный подходящий суффикс при точном `(shape, family)` и `suffix_member` | `control.rs:1569-1590` `find_in_domain` (`max_by_key(len)`) | **P** | Логика совпадает: точные `transport/family/shape`, `domain_suffix_member`, максимум по длине суффикса. Тест покрывает один суффикс; выбор самого длинного из нескольких не проверен. |
 | d2k_plantab_revision | 286-286 | 1 | ревизия таблицы | `control.rs:586` `revision` | E | `conditional_http_delete...` (control.rs:3587) сверяет `revision` до/после. |
-| d2k_plantab_has_ech_target | 288-314 | 27 | есть ли ECH-привязка имени/адреса (для удержания фрагментов ECH) | — | ? | Прямого предиката с таким именем нет. R2O собирает неполный ClientHello общим путём `capture.rs`/`engine.rs` (не только при наличии ECH-привязки), поэтому поведение «фрагменты ECH удерживаются» может быть покрыто, но адресного differential на это правило нет. Нужен тест: ECH-привязка есть → обрывок удерживается; привязки нет → не удерживается. |
+| d2k_plantab_has_ech_target | 288-314 | 27 | есть ли ECH-привязка имени/адреса для трёх ECH-форм, с учётом `only_sport` и BYPASS; затем суффиксы | — | **?** | Прямого предиката нет. C проверяет `ECH_TCP/ECH_NO_TS/ECH_TS`, точное имя/адрес, `only_sport==sport`, исключает BYPASS для не-точных записей и отдельно перебирает три ECH-суффикса (`plans.c:288-314`). R2O собирает неполный ClientHello общим путём `capture.rs`/`engine.rs`, без привязки к наличию ECH-target; адресного differential нет. Нужен тест «ECH-привязка есть → обрывок удерживается; нет → не удерживается». |
 | d2k_plantab_stream_candidate | 316-319 | 4 | префильтр: есть ли потоковый план по имени/адресу | `control.rs:612` `has_tls_candidate(family)` | P | R2O префильтр только по family, без имени/адреса/sport; используется в `main.rs:1699`. |
 | d2k_plantab_stream_candidate_family | 321-325 | 5 | то же с family | `control.rs:612` `has_tls_candidate` | P | То же: нет учёта имени и порта; тестов на точность префильтра нет. |
 | d2k_plantab_stream_candidate_target | 327-350 | 24 | то же по (имя, адрес, sport, family), включая суффиксы | `control.rs:612` `has_tls_candidate` | P | Отличие: R2O не различает sport и конкретную цель; суффиксы учитываются, но без имени. |
@@ -326,8 +326,8 @@ legacy-`D2KP` принимается только через `parse_wire`, а п
 | find_addr_shape | 439-450 | 12 | static: адресная запись ровно (адрес, family, форма) | `control.rs:1504` `find_addr` | E | `discord_voice_class_plan_matches_only_discord_voice_requests` (control.rs:3186), `удаление_адреса...` (control.rs:2793). |
 | find_addr | 452-454 | 3 | static: любая форма адреса (для снятия/учёта промаха) | `control.rs:1504` `find_addr` (с ECH-fallback) | E | Те же тесты; снятие адреса в control.rs:2793. |
 | modern_shape_for_ech | 465-469 | 5 | static: ECH-форма → соответствующая MODERN-форма | `control.rs:534-539` `fallback_shape` в `select` | E | `tls_план_работает_для_sni_с_ech_...` (control.rs:2823). |
-| scan_name | 471-486 | 16 | static: один проход — shaped/modern/grandfather/any по имени | `control.rs:572-581` — цепочка `find` с fallback-формами | P | Порядок предпочтения сохранён, но R2O делает отдельные HashMap-поиски, а не один проход; ветка `h.any` (запись есть, формы нет) выражена иначе. |
-| scan_addr | 488-502 | 15 | static: один проход по адресу | `control.rs:1522` `find_addr_fallback` | P | Учтён ECH-fallback и bypass; счётчик промахов по форме не ведётся (см. `shape_misses`). |
+| scan_name | 471-486 | 16 | static: один проход — `any`/`shaped`/`modern(ECH)`/`grandfather` по имени, HTTP-запись пропускается | `control.rs:569-581` — цепочка `find(shape/bridge/fallback/grandfather)` + `find_in_domain` | **P** | C за один проход заполняет `h.any` (любая не-HTTP запись), `h.shaped` (точная `seen_shape`), `h.modern` (`modern_shape_for_ech(seen_shape)`) и `h.grandfather`. Rust делает отдельные поиски и **не имеет** ветки `h.any`/`SHAPE_ANY`: запись с формой 0 не будет найдена. R2O-контроллер такие планы не ставит (valid shapes 1/2/3/5/6), но C-путь шире. |
+| scan_addr | 488-502 | 15 | static: один проход по адресу — `any`/`shaped`/`modern(ECH)`/`grandfather` | `control.rs:1504-1520` `find_addr`, `:1522-1540` `find_addr_fallback` | **P** | C собирает `any`, `shaped` (если `seen_shape!=ANY`), `modern(ECH)`, `grandfather`. Rust `find_addr` ищет **только** точную форму и ECH→MODERN; grandfather/ANY-ветки нет. `find_addr_fallback` дополнительно проверяет `name_has_transport_binding`/`name_is_bypassed`, чего в C `scan_addr` нет (это в `find_target`). Счётчик `shape_misses` не ведётся. |
 | oldest | 518-529 | 12 | static: самая старая запись (LRU) | `control.rs:211` `exact_victim` | E | `name_plan_table_evicts_lru_and_delete_releases_a_slot` (control.rs:2663). |
 | take_free_or_evict | 541-569 | 29 | static: свободный слот или вытеснение LRU с уплотнением | `control.rs:234` `make_room_exact` | E | `exact_name_addr_probe_tables_share_lru_capacity` (control.rs:2633): общая ёмкость имя+адрес+проба. |
 | d2k_plantab_set_name_shaped | 571-574 | 4 | поставить план имени с формой | `control.rs:832` `set_name` (shape — часть ключа) | E | `условие_..._tls_форма` (control.rs:2844) и shape-тесты. |
@@ -359,13 +359,13 @@ legacy-`D2KP` принимается только через `parse_wire`, а п
 | d2k_plantab_find_addr_probe | 1008-1012 | 5 | поиск точного адресного опыта | `control.rs:804` `addr_probe_binding_at_hook` | P | Тестов нет; поиск дополнительно требует authenticated Initial и клиентского направления. |
 | d2k_plantab_find_voice_probe | 1014-1018 | 5 | поиск голосового опыта (wildcard клиентского порта) | `control.rs:764` `voice_address_binding` | E | `временная_voice_запись_соответствует_только_с_заданным_и_целым_адресом` (control.rs:3239), `stun_...` (3278). Ключ R2O не содержит клиентского порта — wildcard выражен структурно. |
 | d2k_plantab_probe_count | 1020-1022 | 3 | число адресных опытов | `control.rs:186` `r2o_probe_count` | P | Считает только неистёкшие `addr_probes`; тестов нет. |
-| shape_fits | 1044-1052 | 9 | static: подходит ли форма записи наблюдению (три исхода + ECH-перенос) | `control.rs:534-539, 572-581` — цепочка exact/bridge/fallback/grandfather | P | Логика расщеплена на цепочку поисков; отдельного предиката нет. ECH-перенос и grandfather покрыты тестами (control.rs:2823). |
-| shape_is_udp | 1054-1056 | 3 | static: QUIC/VOICE | `matches!(shape, SHAPE_QUIC \| SHAPE_VOICE)` в разных местах (control.rs:1404 и др.) | P | Отдельной функции нет; правило кросс-транспортного перехода C (UDP-наблюдение не блокируется TCP-записью) в R2O заменено общим fallback на адрес. |
+| shape_fits | 1044-1052 | 9 | static: grandfather→1; MODERN↔ECH_TCP, MODERN_NO_TS↔ECH_NO_TS, MODERN_TS↔ECH_TS; иначе `entry_shape!=0 && equal` | `control.rs:569-581` — цепочка exact/bridge/fallback/grandfather | **P** | C-предикат расщеплён на цепочку поисков; ECH-перенос и grandfather покрыты тестами (control.rs:2823). В C `entry_shape==0` (ANY) не проходит `shape_fits` — ANY используется отдельной ветвью `h.any`; в R2O отдельного предиката и ANY-ветки нет. |
+| shape_is_udp | 1054-1056 | 3 | static: QUIC/VOICE | `matches!(shape, SHAPE_QUIC \| SHAPE_VOICE)` + `find_addr_fallback` (`control.rs:1522-1540`) | **P** | **Одностороннее правило C:** при UDP-наблюдении и TCP-записи имени разрешается адресный fallback (`goto check_addr`, `plans.c:1190-1200`); при TCP-наблюдении и UDP-записи — нет (`shape_misses++`, NULL). Rust `find_addr_fallback` проверяет только наличие привязки **того же** транспорта, поэтому TCP-поток к имени, у которого есть только QUIC/VOICE-план, может получить адресный план, чего C не делает. |
 | d2k_plantab_shape_misses | 1058-1060 | 3 | счётчик «нашли, но форма не подошла» | `control.rs:193` `r2o_shape_misses` | N | Поле `shape_misses` объявлено и читается, но **нигде не инкрементируется** (grep по `shape_misses` — только объявление/инициализация/геттер) → всегда 0. |
 | d2k_plantab_find | 1062-1066 | 5 | поиск плана по имени, затем адресу | `control.rs:410` `select` | P | R2O `select` разбирает пакет и сам извлекает SNI/HTTP/QUIC; порядок «имя → суффикс → адрес» сохранён, но набор ветвей другой (см. `find_target`). |
 | d2k_plantab_find_sport | 1068-1072 | 5 | поиск с местным портом потока | `control.rs:410` `select` (`tcp.source_port` для проб) | P | Порт учитывается только для проб; отдельного входа с sport нет. |
 | d2k_plantab_find_family | 1074-1079 | 6 | поиск с family | `control.rs:410` `select` (`view.family`) | P | Family берётся из пакета; отдельного входа нет. |
-| d2k_plantab_find_target | 1081-1236 | 156 | ядро поиска: точный порт → своя форма → grandfather → суффикс → адрес; счёт промахов по форме | `control.rs:419` `select_with_quic_host_at_hook` | P | Тесты: TLS/ECH/QUIC/HTTP/voice/probe (control.rs:2823-3896). Отличия: (1) счётчик промахов не ведётся; (2) R2O добавляет TCP-контекст 8–13 и bridge-shape (control.rs:529-539); (3) кросс-транспортный переход UDP↔TCP в C отдельной ветвью (`goto check_addr`), в R2O — общим fallback; (4) ECH-fallback на адрес в R2O отсутствует. |
+| d2k_plantab_find_target | 1081-1236 | 156 | ядро поиска: probe-by-port при пустом имени → точная форма+порт → своя форма → grandfather → суффикс → адрес; счёт промахов | `control.rs:419-600 select_with_quic_host_at_hook`, `:1493-1590 find/find_addr/find_addr_fallback/find_in_domain` | **P** | Тесты TLS/ECH/QUIC/HTTP/voice/probe (control.rs:2823-3896). **Подтверждённые отличия:** (1) `shape_misses` C инкрементирует, R2O — нет; (2) R2O добавляет TCP-контекст 8–13 и bridge-shape (control.rs:529-539); (3) односторонний кросс-транспортный переход C (UDP→addr, TCP→NULL) заменён общим `find_addr_fallback`, который разрешает и TCP→addr; (4) C при пустом имени и `sport_be` ищет **name-probe по порту** (`plans.c:1093-1112`), R2O UDP-путь имеет только `addr_probe_binding_at_hook`, а TCP без SNI уходит в `find_addr`; (5) C имеет `h.any`/ANY и grandfather/ANY в `scan_addr`, R2O `find`/`find_addr` — только exact+ECH→MODERN; (6) ECH→MODERN в `find_addr` **есть** (`control.rs:1509-1517`), поэтому прежнее утверждение об отсутствии ECH-адресного fallback неверно; отсутствуют grandfather/ANY. |
 | d2k_plantab_count | 1238-1240 | 3 | число занятых записей | `control.rs:178` `r2o_plan_count` | E | `exact_name_addr_probe_tables_share_lru_capacity` (control.rs:2633) и eviction-тест сверяют counts. |
 | d2k_plantab_capacity | 1242-1244 | 3 | ёмкость таблицы | `control.rs:182` `r2o_plan_capacity` | E | `name_plan_table_evicts_lru...` (control.rs:2663) сверяет capacity. |
 | d2k_plantab_binding | 1246-1257 | 12 | identity установленного плана (generation/kind/family/shape/temporary/epoch) | `control.rs:380` `http_name_binding_context`, `:690` `binding_for_plan` | E | `bound_http_set_returns_its_trial_id_and_installed_binding` (control.rs:2700); APPLIED-фикстуры D2O (tests/control.rs:47). |
@@ -595,6 +595,42 @@ Rtnetlink: дампы правил, одиночный поиск маршрут
   body_bytes8 + request_no8. R2O `HttpResponseEvent::event_body`
   (`r2k-core/control.rs:852`); P: R2O всегда несёт хвост, C для
   портала без ответа его не шлёт; код ответа кодируется иначе.
+
+## 9d. Углублённая сверка plans.c: поиск плана
+
+- **Порядок C (`d2k_plantab_find_target`, 1081–1236):**
+  1. пустое имя + `sport_be`: name-probe по одному порту, при
+     неоднозначности — NULL (`:1093-1112`);
+  2. имя + порт: точная форма+порт, ECH→MODERN, ANY→name_port,
+     grandfather, затем `shape_fits`; иначе `shape_misses++`;
+  3. имя без порта: `scan_name` (shaped, ECH→modern, grandfather,
+     BYPASS, suffix, `h.any`), `shape_fits`; при UDP-наблюдении и
+     TCP-записи — `goto check_addr`; иначе `shape_misses++`/NULL;
+  4. адрес: `scan_addr` (shaped, ECH→modern, grandfather, any),
+     `shape_misses++` при несовпадении.
+- **Rust:** `select_with_quic_host_at_hook` (`control.rs:419-600`)
+  разбирает UDP/STUN/voice/QUIC и вызывает `addr_probe_binding_at_hook`,
+  `find`, `find_in_domain`, `find_addr_fallback`; TCP — probes по
+  `shape`/`bridge_shape` и порту, затем `find(shape/bridge/fallback/
+  grandfather)`, `find_in_domain`, `find_addr_fallback`.
+  `find` (`:1493`) — только точная форма; `find_addr` (`:1504`) —
+  точная + ECH→MODERN; `find_in_domain` (`:1569`) — точная форма,
+  `max_by_key(len)`; `find_addr_fallback` (`:1522`) — проверка
+  привязки/ BYPASS того же транспорта, затем `find_addr`.
+- **Подтверждённые различия:**
+  1. `shape_misses` C инкрементирует в двух ветвях, R2O — нигде (N).
+  2. R2O добавляет TCP-контекст 8–13 и bridge-shape — расширение,
+     не пробел.
+  3. Одностороннее правило C потеряно: TCP-поток к имени с
+     QUIC/VOICE-планом в R2O может получить адресный план, C
+     возвращает NULL.
+  4. C ищет name-probe по порту при пустом имени; R2O UDP-путь
+     имеет только addr-probe, TCP без SNI уходит в `find_addr`.
+  5. C `scan_addr` поддерживает grandfather/ANY; R2O `find_addr` —
+     только exact+ECH→MODERN.
+  6. ECH→MODERN в `find_addr` **есть**; прежнее утверждение об
+     отсутствии ECH-адресного fallback неверно.
+  7. `d2k_plantab_has_ech_target` прямого аналога не имеет (`?`).
 
 ## 10. Итоговые пробелы (что мешает ставить E)
 
