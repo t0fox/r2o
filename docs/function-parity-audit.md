@@ -206,10 +206,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 226 | 308 | 13 | 1 |
 | core-state | 692 | 127 | 564 | 1 | 0 |
-| datapath-core | 400 | 120 | 269 | 11 | 0 |
+| datapath-core | 400 | 122 | 267 | 11 | 0 |
 | datapath-plan | 183 | 105 | 72 | 5 | 1 |
 | detect | 159 | 49 | 100 | 10 | 0 |
-| **Итого** | **1982** | **627** | **1313** | **40** | **2** |
+| **Итого** | **1982** | **629** | **1311** | **40** | **2** |
 
 
 ---
@@ -3805,20 +3805,82 @@ ECH, середина приветствия. R2O: `r2k-core/src/tls.rs`.
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
-| `d2k_ctl_binding_write` (inline) | 86–90 | 5 | запись binding (generation/kind/family/shape/temporary/epoch) | `r2k-core/src/control.rs:333 AppliedEvent::event_body`, `BindingContext` `:305` | P | формат совпадает; отдельных unit на раскладку нет |
-| `d2k_ctl_binding_read` (inline) | 91–99 | 9 | чтение/валидация binding | `control.rs` decode applied/refused, `valid_binding` | P | — |
-| `d2k_http_request_stream_init` (inline) | 19–21 | 3 | инициализация потокового парсера запроса | `httpup.rs:63 R2oHttpRequestSequence::new` | P | — |
-| `d2k_http_request_stream_line` (inline) | 22–30 | 9 | завершение строки, лимиты | `httpup.rs:220 parse_request`, `:382 find_crlf` | P | — |
-| `d2k_http_request_stream_feed` (inline) | 31–86 | 56 | потоковый разбор заголовка, end/past_end/invalid | `httpup.rs:116 observe_detailed`, `:73 candidate` | P | `hold.rs:2401 split_http_request...` косвенно |
-| `d2k_hr_decimal` (inline) | 21–29 | 9 | десятичное число с ограничением | `http_response.rs:360 parse_decimal` | P | тестов в http_response.rs нет |
-| `d2k_hr_token` (inline) | 31–34 | 4 | допустимый token-байт | `httpup.rs:346 is_http_token` (заголовки — `:273 invalid_header_byte`) | P | — |
-| `d2k_hr_field` (inline) | 35–42 | 8 | валидация поля заголовка | `http_response.rs:281 parse_headers` | P | — |
-| `d2k_hr_extensions` (inline) | 43–70 | 28 | Transfer-Encoding/chunked/расширения | `:281 parse_headers`, `:372 parse_chunk_size` | P | `test-http-chunk-framing-differential.sh` |
-| `d2k_hr_headers` (inline) | 72–105 | 34 | разбор блока заголовков ответа | `:281 parse_headers` | P | — |
-| `d2k_http_response_feed` (inline) | 107–160 | 54 | потоковый разбор ответа (status/CL/chunk/fin) | `http_response.rs:55 feed` | P | `hold.rs:1719/1947/2082` косвенно |
-| `d2k_packet_u16` (inline) | 20–22 | 3 | big-endian u16 | `packet.rs:231 read_u16` | E | `packet.rs` тесты |
-| `d2k_packet_parse` (inline) | 24–70 | 47 | разбор IPv4/IPv6, опции, ext-заголовки, L4 | `packet.rs:69 PacketView::parse` | E | `r2k-core/tests/network.rs:36+` |
-| `d2k_key_equal` (inline) | 76–83 | 8 | равенство ключа | `#[derive(PartialEq)]` (`engine.rs:41`, `capture.rs:13`) | E | — |
+| `d2k_ctl_binding_write` (inline) | 86–90 | 5 | запись binding: BE u64 generation, kind/family/shape/temporary, 16-байтная epoch | `r2k-core/src/control.rs:330-347 AppliedEvent::event_body`, `:305 BindingContext`, `:2016/2051 encode_ack_with_binding` | **P** | Раскладка построчно совпадает (BE u64 + 4 байта + epoch). Roundtrip-тесты APPLIED/REFUSED/ACK (`:2528-2607`, `:2770+`, `:2168-2337`) проверяют кодирование/декодирование, но **C/Rust byte-differential отсутствует**; отдельного теста на все три места записи нет. |
+| `d2k_ctl_binding_read` (inline) | 91–99 | 9 | чтение/валидация binding: n=28, kind≤4, family 0/4/6, shape≤MAX, temporary≤1 | `control.rs:2373 decode_applied`, `:2445 decode_refused`, `:3104 valid_binding` | **P** | Валидации совпадают: `kind<=4`, `family in {0,4,6}`, `shape<=SHAPE_ECH_TS`, temporary только 0/1. Тесты: REFUSED roundtrip/truncated (`:2528-2607`), APPLIED; ветки `kind=5`, `family=1`, `shape>MAX` отдельным тестом не покрыты. |
+| `d2k_http_request_stream_init` (inline) | 19–21 | 3 | обнулить состояние, `start=next=seq`, `first=1` | `httpup.rs:64 R2oHttpRequestSequence::new` | **P** | Rust хранит только `first/next/checked/disabled`, без `start/head_len/end/length`; это другой уровень (трекер границ, не байтовый парсер). |
+| `d2k_http_request_stream_line` (inline) | 22–30 | 9 | завершение строки: ровно один Host, конец ≤0x7fffffff, CL с цифрами | `httpup.rs:231 parse_plan_request`, `:219 parse_request`, `:382 find_crlf` | **P** | C завершает строку инкрементально и валидирует `hosts==1`, `length`, 10 цифр CL; Rust разбирает весь буфер и проверяет Host через `Option`, а `header_len/end_offset` вычисляет в конце. Промежуточного состояния строки нет. |
+| `d2k_http_request_stream_feed` (inline) | 31–86 | 56 | потоковый разбор заголовка: CRLF, token, Host, CL, TE/Upgrade, end/past_end/invalid | `httpup.rs:116 observe_detailed`, `:73 candidate`, `:263-316 boundary_known` | **P** | **Расхождения:** C отвергает TE/Upgrade (`invalid`), Rust только `end_offset=None`; C отвергает управляющие байты и неверные имена полей, Rust помечает лишь `boundary_known=false` и продолжает; C ограничивает CL 10 цифрами, Rust — `usize`; C не валидирует DNS-значение Host, Rust требует `valid_dns_host`, снимает `:80` и точку. C игнорирует полностью старые байты, Rust — `candidate_state`; обе стороны считают `end<=0x7fffffff`. Отдельного C/Rust differential для потока нет. |
+| `d2k_hr_decimal` (inline) | 21–29 | 9 | десятичное число с проверкой переполнения | `http_response.rs:360 parse_decimal` | **E** | Совпадает: пусто/нецифра → ошибка, `checked_mul/checked_add`; тест `rejects_malformed...` с `18446744073709551616` (`tests/http_response.rs:229`). |
+| `d2k_hr_token` (inline) | 31–34 | 4 | допустимый token-байт RFC 7230 | `httpup.rs:346 is_http_token` | **E** | Набор символов совпадает; используется в `parse_plan_request` для имени заголовка запроса. В ответном парсере Rust этот предикат не применяется (см. `d2k_hr_field`). |
+| `d2k_hr_field` (inline) | 35–42 | 8 | валидация поля: непустое имя, token, допустимые байты значения | `http_response.rs:281 parse_headers` | **P** | **Неполно:** Rust ищет `:` и разбирает известные поля, но не отвергает строку без `:`, не проверяет token-символы имени и управляющие байты значения; C делает всё это через `d2k_hr_field`. |
+| `d2k_hr_extensions` (inline) | 43–70 | 28 | разбор chunk-extensions: `;token[=token/quoted]`, OWS, контрольные байты | `http_response.rs:372 parse_chunk_size` | **P** | **Неполно:** Rust отбрасывает всё после первого `;` и не валидирует extensions; C проверяет token, кавычки, escape и управляющие байты. Поэтому `1;\x01`, незакрытая кавычка и `1 ;x` дают разный исход. |
+| `d2k_hr_headers` (inline) | 72–105 | 34 | разбор status-line и заголовков, CL/TE, interim, 101/204/304 | `http_response.rs:281 parse_headers`, `:321 parse_status_line` | **P** | **Расхождения:** C `head[8192]`, Rust 64 КиБ; C принимает status-line ровно 12 байт, Rust требует 13-й символ; C валидирует каждое поле и отвергает дубли Content-Length, Rust пропускает строки без `:` и разрешает одинаковые CL; C отвергает управляющие байты в заголовках, Rust после status-line их не проверяет. Логика interim/101/204/304/CL+TE совпадает. |
+| `d2k_http_response_feed` (inline) | 107–160 | 54 | потоковый разбор ответа: header/fixed/chunk/trailer/close/fin | `http_response.rs:55 feed` | **P** | **Расхождения:** C при байтах после `complete` ставит `invalid`, Rust молча `break`; C `line[512]`, Rust 128; C валидирует trailer как поле и отвергает NUL, Rust принимает ведущий NUL как пустой trailer; C проверяет chunk-extensions, Rust игнорирует; C `head[8192]`, Rust 64 КиБ. Общая state-machine и `fin`-логика совпадают. |
+| `d2k_packet_u16` (inline) | 20–22 | 3 | big-endian u16 | `packet.rs:231 read_u16` | E | Построчно совпадает; используется в `parse_ipv4/parse_ipv6` с bounds-check. |
+| `d2k_packet_parse` (inline) | 24–70 | 47 | разбор IPv4/IPv6, fragment, extension headers, только Pad1/PadN, L4 minimum | `packet.rs:69 PacketView::parse`, `:152 parse_ipv4`, `:172 parse_ipv6`, `:203 has_only_padding_options` | E | IPv4: IHL/ total / fragment offset / ID / proto / TTL / TOS / адреса совпадают. IPv6: payload≠0, total=40+payload, TC/flow label, до 8 extension headers, Pad1/PadN; иные опции отвергаются. Тесты `r2k-core/tests/network.rs:36+`. |
+| `d2k_key_equal` (inline) | 76–83 | 8 | равенство ключа: proto/ports/family/адреса; family 0 и 4 эквивалентны | `#[derive(Eq, PartialEq)]` (`capture.rs:13 TcpFlowKey`, `engine.rs:41`, `r2o_udp_hold.rs`, `session`) | **E** | Для ключей, созданных R2O, поля сравниваются все; family 4/6 представлена `Address`, legacy family 0 не используется. C-ветка `family==0` и `family==4` с `low_ip` эквивалентна Rust-ключу IPv4. Отдельного differential нет. |
+
+### include/*.h (14 inline-функций)
+
+- **`d2k_ctl_binding_write` (86–90) ↔ `control.rs:330-347`:** C пишет
+  BE u64 generation, `kind/family/shape/temporary`, 16-байтную epoch.
+  Rust `AppliedEvent::event_body` и `encode_ack_with_binding` пишут те же
+  28 байт в том же порядке. Roundtrip-тесты APPLIED/REFUSED/ACK есть,
+  но C/Rust byte-differential отсутствует; P.
+- **`d2k_ctl_binding_read` (91–99) ↔ `control.rs:2373/2445/3104`:**
+  C проверяет `n==28`, `kind<=4`, `family in {0,4,6}`,
+  `shape<=D2K_TCP_SHAPE_MAX`, `temporary<=1`. Rust проверяет точные
+  длины событий, temporary только 0/1, `valid_binding` — те же
+  kind/family/shape. Ветки `kind=5`, `family=1`, `shape>MAX` не имеют
+  отдельного теста; P.
+- **`d2k_http_request_stream_init/line/feed` (19–86) ↔
+  `httpup.rs:64/116/231`:** это **не** построчный порт. C — байтовый
+  инкрементальный парсер с состояниями `cr/line/value/field/name`,
+  счётчиком Host, CL до 10 цифр, `past_end` и `invalid`. Rust
+  `R2oHttpRequestSequence` отслеживает только границы запросов, а
+  `parse_plan_request` разбирает уже собранный буфер. Отсюда:
+  TE/Upgrade C считает `invalid`, Rust — `end_offset=None`; управляющие
+  байты и неверные имена C отвергает, Rust только снимает
+  `boundary_known`; C не валидирует DNS-значение Host, Rust требует
+  `valid_dns_host` и снимает `:80`/точку. P.
+- **`d2k_hr_decimal` (21–29) ↔ `http_response.rs:360`:** эквивалентно,
+  включая переполнение; E.
+- **`d2k_hr_token` (31–34) ↔ `httpup.rs:346`:** набор token-байт
+  совпадает; в ответном парсере предикат не используется; E для
+  предиката, но не для ответной валидации.
+- **`d2k_hr_field` (35–42) ↔ `http_response.rs:281`:** C требует
+  непустое token-имя, `:` и допустимые байты значения; Rust ищет `:`,
+  но строку без `:` пропускает, token-символы имени и управляющие
+  байты значения не проверяет. P (частично).
+- **`d2k_hr_extensions` (43–70) ↔ `http_response.rs:372`:** C
+  валидирует `;token[=token/quoted]`, OWS, escape и control-байты;
+  Rust отбрасывает всё после первого `;`. `1;\x01`, незакрытая
+  кавычка и `1 ;x` дают разный исход. P (частично).
+- **`d2k_hr_headers` (72–105) ↔ `parse_headers/parse_status_line`:**
+  логика interim/101/204/304, CL+TE, TE=chunked совпадает. Отличия:
+  C `head[8192]` против 64 КиБ; C принимает status-line ровно 12
+  байт, Rust требует 13-й; C отвергает дубли Content-Length всегда,
+  Rust разрешает одинаковые; C валидирует все поля, Rust — нет.
+- **`d2k_http_response_feed` (107–160) ↔ `http_response.rs:55`:**
+  общая state-machine header/fixed/chunk/trailer/close/fin совпадает.
+  Отличия: C при байтах после `complete` ставит `invalid`, Rust
+  молча `break`; C `line[512]` против 128; C валидирует trailer и
+  отвергает NUL, Rust принимает ведущий NUL; C проверяет extensions,
+  Rust игнорирует. P.
+- **`d2k_packet_u16/parse` (20–70) ↔ `packet.rs:231/69`:** построчно
+  совпадает, включая IPv4 IHL/fragment/ID/TOS, IPv6 payload≠0,
+  TC/flow-label, до 8 extension headers и только Pad1/PadN. E,
+  `r2k-core/tests/network.rs:36+`.
+- **`d2k_key_equal` (76–83) ↔ derived `Eq`:** C сравнивает
+  proto/ports/family/адреса, family 0 и 4 эквивалентны; Rust-ключи
+  (`TcpFlowKey`, UDP/session) сравнивают все поля, family 4/6
+  представлена `Address`. Для созданных R2O ключей эквивалентно; E.
+- **Версионный дрейф:** `scripts/test-http-chunk-framing-differential.sh`
+  привязан к donor `a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe`, которого
+  нет в этом окружении. Ожидания Rust-теста `matches_d2o_http_header_...`
+  (64 КиБ/128, пропуск строк без `:`, bytes-after-complete) соответствуют
+  другой ревизии C, а не oracle `a378e230`. Поэтому E по
+  `http_response` против a378 не ставится; differential не перезапускался.
 
 ## Углублённая сверка: nat/ctq/sched/addr/tls/include
 
