@@ -2369,7 +2369,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `ladder_candidate` | 9185–9187 | 3 | текущий кандидат — лестница | main.rs discovery ladder_candidate | **P*** | static-хелпер |
 | `candidate_path` | 9189–9200 | 12 | источник кандидата: свой план/приём/RX/перебор/вывод | main.rs discovery candidate_path | **P*** | static-хелпер |
 | `search_report` | 9207–9260 | 54 | итог поиска в журнал и diagnostics (id/target/protocol/outcome/path/probes/elapsed/queue) | main.rs r2o_discovery_diagnostic_event + search report | **P** | r2o-diagnostics-differential.sh проверяет event_json частично |
-| `verify_confirm` | 9262–9653 | 392 | подтвердить кандидата: ECH/QUIC/форма/budget, bind_confirmed, группа, адресный план, сеть, live, report, T_WATCHING | main.rs r2o_confirm_discovery_outcome (5347) + apply_discovery_outcome (21856) | **P** | ack-applied/budget/ECH differentials покрывают часть; крупная функция |
+| `verify_confirm` | 9262–9653 | 392 | подтвердить кандидата: budget/лестница, bound-plan, ECH/QUIC replay, name_ok, split-unfit, unfit-список, bind_confirmed, группа, budget-mark, measure_path, by_addr, net-whitelist, report, T_WATCHING | `main.rs:5347 r2o_confirm_discovery_outcome`, `:21856 apply_discovery_outcome`, `:5321 r2o_family_recovery_decision`, `:21518 r2o_install_quic_candidate`, `:15322 r2o_discovery_ech_replay_required`, `:14628 r2o_discovery_volume_recovery` | **P** | Покрыто: полный HTTPS-ответ + APPLIED (`r2o_family_recovery_decision`), ECH accepted/peer_name/complete/application, Cloudflare/Blocked/LegalDenial, QUIC/ECH адресная привязка (`add_confirmed_quic_address_binding`), ECH replay (`r2o_discovery_ech_replay_required`), volume recovery. **Не найдено:** (1) pre-confirmation гейт по `unfit_seen` — FLOW_UNFIT обрабатывается только после события (`r2o_catalog_mark_flow_unfit`, main.rs:19097-19169), в подтверждении список не проверяется; (2) остановка других `T_ASKING` задач (`yield_to_own_plan`, sched.c:9622-9636) — в Rust не найдена; (3) `bd->budget` PASSED/UNCHECKED/CUT в `apply_discovery_outcome` не выставляется, хотя константы `R2O_D2K_CAT_BUDGET_*` есть; (4) `tcp_profile` отсутствует в `Binding` (подтверждено ранее), `verified_by`/`input` есть, `probe_path` сохраняется для QUIC. |
 | `partial_finish` | 9668–9689 | 22 | взять лучший частичный обход и подтвердить его | main.rs discovery partial_finish | **P** | budget differential частично |
 | `plan_id_is_ours` | 9691–9696 | 6 | plan_id события — наш ver_plan_id | main.rs discovery plan id check | **P*** | static-хелпер |
 | `applied_trial_is_ours` | 9700–9705 | 6 | trial_id события — trial кандидата | main.rs discovery trial match | **P*** | static-хелпер |
@@ -2877,6 +2877,40 @@ C-машина состояний: `task_state` (`sched.c:596-635`), 15 знач
   `R2oResourceMemory` (кэш/пути/вытеснение), а не сам сканер;
   отдельного C/Rust differential сканера нет. Поэтому статусы
   P/P*, а не E, несмотря на построчное совпадение.
+
+## Углублённая сверка sched.c: verify_confirm
+
+C-функция `verify_confirm` (`sched.c:9262-9653`) — 392 строки и 16 гейтов.
+Rust-подтверждение разложено на `r2o_family_recovery_decision` (`main.rs:5321`),
+`r2o_confirm_discovery_outcome` (`:5347`), `apply_discovery_outcome`
+(`:21856`), `r2o_install_quic_candidate` (`:21518`), ECH-replay (`:15322`),
+volume-recovery (`:14628`) и каталог.
+
+| C-гейт | строки | Rust | статус/пробел |
+|---|---:|---|---|
+| volume ladder budget | 9268–9285 | `r2o_discovery_volume_recovery` (`:14628`), `r2o_discovery_volume_ladder_decision` (`:3282`) | P: разные слои, полного differential нет |
+| bound plan без PASSED-бюджета | 9286–9298 | прямого аналога не найдено | **пробел:** C не переподтверждает план, под которым шёл поток подозрения, без PASSED |
+| QUIC ECH replay | 9299–9304 | `r2o_discovery_ech_replay_required` (`:15322`), `r2o_quic_data_proof_confirmed` | P: replay/APPLIED есть, уровня HANDSHAKE как отдельного условия нет |
+| ECH accepted/name_ok/application | 9305–9318 | `r2o_family_recovery_decision` (`:5321-5341`) | P: `ech_accepted`/`peer_name_ok`/`complete`/`application_verified`; C-ветка `ech_replay` выражена иначе |
+| name_ok=0 — только диагностика | 9330–9334 | не блокирует для не-ECH (`ech_accepted=None`) | эквивалентно |
+| QUIC split unfit | 9335–9345 | `split_applicable`/`valid_quic_plan` при генерации кандидатов | P |
+| `unfit_here` по plan_id | 9346–9365 | нет pre-confirm проверки; только `r2o_catalog_mark_flow_unfit` после FLOW_UNFIT (`:19097-19169`) | **пробел:** кандидат может подтвердиться, хотя тот же план уже не подошёл клиенту |
+| bind_confirmed: shape/input/verified_by/probe_path/tcp_profile | 9366–9427 | `add_measured_binding_with_fingerprint_in_box`, `add_confirmed_quic_address_binding` | P: `tcp_profile` в `Binding` отсутствует; `probe_path` для QUIC есть |
+| group_record BLOCKED_CONFIRMED | 9431–9432 | `groups.rs`/каталог | P: прямого вызова из `apply_discovery_outcome` не найдено |
+| budget mark PASSED/UNCHECKED/CUT | 9449–9474 | константы `R2O_D2K_CAT_BUDGET_*` есть, путь установки из подтверждения не найден | **пробел** |
+| measure_path | 9475–9488 | `probe_path` для QUIC; для name-binding не найден | P |
+| by_addr permanent plan | 9489–9506 | `r2o_install_quic_candidate`/`add_confirmed_quic_address_binding` для QUIC/ECH | P: общий адресный путь не найден |
+| net whitelist tx_only/searched | 9514–9536 | `r2o_discovery_record_network_whitelist` (`:2269`) | P |
+| T_WATCHING | 9621 | live-группы/`live.rs`; фазы «смотрим живой трафик» нет | P |
+| yield других T_ASKING | 9622–9636 | `yield_to_own_plan` в Rust не найден | **пробел** |
+| sync_pending | 9643 | очередь синхронизации каталога | P |
+| remeasure snapshot после trial | 9648–9652 | `r2o_discovery_client_shape_trial`/`r2o_capture_client_shape` | P |
+
+**Итог:** прямого аналога не найдено для четырёх гейтов (`bound plan`,
+`unfit_here`, `budget mark`, `yield`); остальное — P из-за разного слоя или
+отсутствия differential. Это не доказательство отсутствия поведения: часть
+может быть закрыта каталогом/live-слоем, но в `apply_discovery_outcome` и
+`r2o_confirm_discovery_outcome` соответствующих проверок нет.
 
 ## Проверка полноты
 
