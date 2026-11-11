@@ -22,12 +22,12 @@
 | Показатель | Значение |
 |---|---:|
 | Всего функций в срезе | 548 |
-| `E` | 217 |
-| `P` | 317 |
+| `E` | 224 |
+| `P` | 310 |
 | `N` | 13 |
 | `?` | 1 |
 
-Доли: `E` — 39,60%, `P` — 57,85%, `N` — 2,37%, `?` — 0,18%.
+Доли: `E` — 40,88%, `P` — 56,57%, `N` — 2,37%, `?` — 0,18%.
 
 Переклассификация после `deep-core-net.md`: `first_flight`/`d2k_qc_first_initial`
 E→P, `d2k_qc_peer_name` E→N, `remember_live_failure` P→N,
@@ -897,12 +897,12 @@ Inline-классификация HTTP-ответа: 451/2xx/3xx-портал, �
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| `d2k_http_lower` | 9-11 | 3 | ASCII lower | `fetch.rs:2941`/`response.rs:508 lower_ascii` | P | хелпер; владелец classify, прямого теста нет |
-| `d2k_http_equal` | 12-16 | 5 | регистронезависимое сравнение | `fetch.rs:2910 r2o_fetch_ascii_contains` | P | то же |
-| `d2k_http_hostchar` | 17-21 | 5 | символ host для границ в теле | `fetch.rs:2941 r2o_fetch_http_host_char` | P | то же |
-| `d2k_http_portal` | 22-26 | 5 | список 6 порталов по индексу | `fetch.rs:2873` (массив внутри) | P | список совпадает, отдельной функции нет |
-| `d2k_http_location_portal` | 27-52 | 26 | host портала из Location (userinfo/port/точка) | `fetch.rs:2873 r2o_fetch_portal_location` | P | построчный порт; target-теста нет |
-| `d2k_http_reply_classify` | 55-86 | 32 | HTTP 451/2xx/3xx/4xx → outcome+evidence | `fetch.rs:2836 r2o_fetch_http_outcome` | P | порт есть; покрыт косвенно `r2o-tls-verify-differential.sh`/page-тестами, не отдельным differential |
+| `d2k_http_lower` | 9-11 | 3 | ASCII lower | `fetch.rs:2910 r2o_fetch_ascii_contains` (`eq_ignore_ascii_case`) | **E*** | static-хелпер; владелец `r2o_fetch_http_outcome` покрыт тестами `fetch.rs:3486-3524` (регистр в фразе/портале). |
+| `d2k_http_equal` | 12-16 | 5 | регистронезависимое сравнение n байт | `fetch.rs:2910-2914 r2o_fetch_ascii_contains`, `:2934-2938 eq_ignore_ascii_case` | **E*** | static-хелпер; те же тесты: `Access Blocked By RKN`, `WARNING.RT.RU`. |
+| `d2k_http_hostchar` | 17-21 | 5 | символ host для границ в теле | `fetch.rs:2941-2943 r2o_fetch_http_host_char` | **E*** | static-хелпер; границы портала проверены `eais.rkn.gov.ru` vs `xnot-eais.rkn.gov.ru` (`fetch.rs:3508-3522`). |
+| `d2k_http_portal` | 22-26 | 5 | список 6 порталов по индексу | `fetch.rs:2873-2908` и `:2916-2932` (те же 6 хостов в том же порядке) | **E*** | static-таблица; порядок и имена совпадают, используются тестами `warning.rt.ru`/`eais.rkn.gov.ru`. |
+| `d2k_http_location_portal` | 27-52 | 26 | host портала из Location: схемы, userinfo, числовой порт, хвостовая точка, 6 имён | `fetch.rs:2873-2908 r2o_fetch_portal_location` | **E** | Построчный порт; тест `fetch.rs:3490-3500`: `https://user@WARNING.RT.RU.:443/blocked` → Blocked, `https://warning.rt.ru.evil.example/` → Neutral, `/login` → Positive. |
+| `d2k_http_reply_classify` | 55-86 | 32 | HTTP 451/2xx/3xx/4xx → outcome+evidence | `fetch.rs:2836-2871 r2o_fetch_http_outcome` | **E** | Тесты `fetch.rs:3486-3524`: 451→LegalDenial; 302 портал/evil/relative; 403 фраза/портал; граница `total>len` (15 neutral, 16 blocked); non-identity neutral; `xnot-eais` neutral. Формулы и границы совпадают. |
 
 ## core/include/d2k_ip6frag_send.h (9 функций)
 
