@@ -17,6 +17,11 @@
 | `core/httpsprobe.c::d2k_httpsprobe_done` | 430–449 (20) | `r2o-controller/src/https_probe.rs`, `response.rs::HttpsProbeState` (75) | **P** | Состояние/завершение HTTPS-пробы и кэш состояний есть; отдельного differential на `done`/persist нет. |
 | `datapath/routemark.c::d2k_routemark_describe` | 327–343 (17) | `r2o-datapath/src/r2o_route.rs` (`r2o_route_mark`, 175), `netlink.rs` | **P** | Маршрутная метка/ifindex и выбор egress есть; функция `describe` — диагностическое описание, отдельного аналога по имени нет. Проверить, нужна ли она панели/журналу. |
 | `core/quicconn.c::d2k_qc_dgrams` / `d2k_qc_ping` | 1438–1458 (8) | `r2o-controller/src/r2o_quic_http3.rs`, `quic_replay.rs` | **P** | Обмен датаграммами и ping/ack покрыты HTTP/3 full-stage 18/18; отдельных функций с теми же именами нет, поэтому построчная сверка ветвей не выполнена. |
+| `core/quicsnap.c::d2k_qsnap_form` | 91–105 (15) | `r2k-core/src/quic_snapshot.rs::r2k_quic_snapshot_parse` (50), `R2kQuicSnapshot::datagrams` (17) | **P** | Форма снимка (n, длина датаграммы, ClientHello) восстанавливается из `quic_snapshot`; отдельного differential именно на `form` нет. |
+| `datapath/nl.c::d2k_nl_errno` | 163–180 (18) | `r2o-datapath/src/netlink.rs::kernel_error` (183) | **E** | Разбор `NLMSG_ERROR` с отрицательным errno совпадает по коду; netlink-тесты и `test-nfq-*` покрывают ошибочные ответы. |
+| `datapath/nl.c::d2k_nl_cfg_cmd` | 254–275 (22) | `r2o-datapath/src/netlink.rs::config_command` (219), `config_params` (234) | **E** | Заголовок `nfgenmsg`, `NLM_F_ACK`, атрибут `NFQA_CFG_CMD` и `F_FAIL_OPEN/GSO` перенесены; netns-тесты queue bind. |
+| `datapath/http80.c::d2k_http80_delivered` | 267–281 (15) | `r2o-datapath/src/hold.rs::mark_http_response_answered` (239), `delivered` (276) | **P** | Учёт доставленных байт и `answered` есть; отдельного C/Rust differential на «ответ пришёл без портала» нет. |
+| `datapath/http80.c::d2k_http80_swap` | 527–545 (19) | `r2o-datapath/src/main.rs` (`response_delivered`, 2086–2123), `hold.rs` | **P** | Замена ответа и отправка RST/verdict-payload реализованы в main/hold; построчная сверка состояний `ST_SWAP/ST_ANSWERED` не выполнена. |
 
 ## Вывод по точечной сверке
 
