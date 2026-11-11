@@ -695,7 +695,7 @@
 | `forget_clear_target_bindings` | 5123–5172 | 50 | прямой проход: пометить/удалить привязки цели после двух независимых clear | main.rs discovery forget_clear_target_bindings | **P** | own-first/scheduler differentials частично |
 | `props_text` | 5178–5186 | 9 | текст вектора свойств | ask::DpiProps display | **P*** | static-хелпер |
 | `probes_word` | 5191–5201 | 11 | склонение «опыт/опыта/опытов» | main.rs discovery plural | **P*** | static-хелпер |
-| `verdict_to_plans` | 5209–5551 | 343 | по вердикту собрать кандидатов: ECH trial, QUIC arm, known plans, measured arm, RX-лестница, split, fallback, compose | main.rs discovery verdict_to_plans | **P** | крупная ветвистая функция; known/own-first/fallback/QUIC differentials покрывают часть |
+| `verdict_to_plans` | 5209–5551 | 343 | по вердикту собрать кандидатов: early-return, ECH trial, QUIC arm, volume fingerprint + known plans, measured arm, RX-лестница, PREFIX/WHOLE split, owned fallback, compose | `main.rs:14573 r2o_ech_rx_ladder_candidate`, `:3438 r2o_discovery_volume_known_plans`, `:6292 r2o_discovery_measured_split_plan`, `r2o_fallback`/`own_first_plans`, `compose_d2o`/`compose_from_props`, `quic_replay.rs:427 r2o_quic_discovery_candidates` | **P** | C-порядок: (1) CLEAR/UNREACHABLE/ADDRESS/RESPONSE/NO_QUIC/LOCAL_ADDRESS → пусто (`:5224-5234`); (2) ECH trial — known plans witness (`:5242-5262`); (3) QUIC — один план из arm+qprops, `arm_hash/arm_path`, `stall_cut`, `quic_split_unfit` (`:5264-5386`); (4) volume signal + `known_plans` (`:5390-5422`); (5) measured arm первым (`:5429-5459`); (6) RX-лестница: room по `rx_cut`, `net_probing`, `plan_boxes`, `rx_volume_candidate_pending` (`:5465-5517`); (7) PREFIX/WHOLE split (`:5519-5528`); (8) `owned_fallback`/`refill_from_fallback` (`:5539-5544`); (9) `d2k_compose` (`:5547-5550`). Rust покрывает источники отдельными функциями; **не найдено:** `arm_hash/arm_path`-атрибуция, `stall_cut`, `net_probe_name`/`plan_boxes`-раскладка, `rx_volume_candidate_pending` как очередь; полного differential порядка нет. |
 | `d2k_sched_new` | 5566–5610 | 45 | создать планировщик: defaults, wake-pipe, mutex/cond, QUIC hooks | main.rs R2oDiscoveryQueue (7883)/R2oDiscoverySearches (7971) constructors | **P** | process/serve tests; C/Rust diff нет |
 | `d2k_sched_set_measure_mark` | 5612–5614 | 3 | установить метку измерений | main.rs discovery measure_mark | **P*** | static-хелпер |
 | `json_str` | 5624–5632 | 9 | JSON-строка live.json | serde_json | **P*** | static-хелпер |
@@ -1349,6 +1349,25 @@ volume-recovery (`:14628`) и каталог.
 отсутствия differential. Это не доказательство отсутствия поведения: часть
 может быть закрыта каталогом/live-слоем, но в `apply_discovery_outcome` и
 `r2o_confirm_discovery_outcome` соответствующих проверок нет.
+
+## Углублённая сверка sched.c: verdict_to_plans
+
+| C-ветвь | строки | Rust | статус/пробел |
+|---|---:|---|---|
+| early-return CLEAR/UNREACHABLE/ADDRESS/RESPONSE/NO_QUIC/LOCAL_ADDRESS | 5224–5234 | отсев вердиктов в `r2o_discovery_*` | P: набор вердиктов тот же, единой функции нет |
+| ECH trial: known plans witness | 5242–5262 | `r2o_ech_rx_ladder_candidate` (`:14573`) | P: known-plan отбор и дедуп по тексту разнесены |
+| QUIC: один план из arm+qprops | 5264–5386 | `r2o_quic_discovery_candidates` (`quic_replay.rs:427`), `r2o_quic_trial_data_verdict` | P: Rust строит список кандидатов, C — один план; `arm_hash`/`arm_path`/`stall_cut` не найдены |
+| volume fingerprint + known plans | 5390–5422 | `r2o_discovery_volume_known_plans` (`:3438`) | P: сигнал `volume`/`rx-volume(-wire)` и повторный lookup есть, полного differential нет |
+| measured arm первым | 5429–5459 | `r2o_discovery_measured_split_plan` (`:6292`), `classify_measured` | P: `send_cap`/unfit-ветка есть; `arm_path`-атрибуция иная |
+| RX-лестница | 5465–5517 | `r2o_ech_rx_ladder_candidate`, `r2o_rx_volume` | P: room по `rx_cut`, `net_probing`, `plan_boxes`/`net_probe_name` и очередь `rx_volume_candidate_pending` не воспроизведены один-в-один |
+| PREFIX/WHOLE split | 5519–5528 | `r2o_discovery_measured_split_plan` | E/P: формула и differential `r2o-measured-split` покрывают split/gap/send_cap |
+| owned fallback | 5539–5544 | `r2o_fallback`/`own_first_plans` | P: список и условие входа есть, порядок refill не сверен |
+| `d2k_compose` | 5547–5550 | `compose_d2o::compose_plan_texts`/`compose_from_props` | P: состав и `send_cap` есть, полного C/Rust differential всех ветвей нет |
+
+**Итог:** источники кандидатов перенесены, но C-атрибуция (`arm_hash`,
+`arm_path`, `stall_cut`) и раскладка RX-лестницы (`plan_boxes`,
+`net_probe_name`, `rx_volume_candidate_pending`) в Rust не найдены в том же
+виде. Полной матрицы «вердикт × источник × порядок» нет — P обоснован.
 
 ## Проверка полноты
 
