@@ -679,3 +679,37 @@ ECH, середина приветствия. R2O: `r2k-core/src/tls.rs`.
 | `d2k_packet_parse` (inline) | 24–70 | 47 | разбор IPv4/IPv6, опции, ext-заголовки, L4 | `packet.rs:69 PacketView::parse` | E | `r2k-core/tests/network.rs:36+` |
 | `d2k_key_equal` (inline) | 76–83 | 8 | равенство ключа | `#[derive(PartialEq)]` (`engine.rs:41`, `capture.rs:13`) | E | — |
 
+## Углублённая сверка: 10 N-функций
+
+- **`count_reason` (static, 165–186):** гистограмма причин отказа по
+  указателю/строке, до 32 записей, печатается в итоговой сводке `d2kd`.
+  R2O причины передаёт в `RefusedEvent`/журнал, но агрегированной таблицы
+  и печати нет. N — диагностика, packet-path не меняет.
+- **`offline_self_check` (static, 1118–1123):** `--offline-self-check`
+  проверяет `D2K_CTL_PROTO_VERSION == D2K_RUNTIME_WIRE` и SHA-256("abc")
+  по эталону. R2O SHA-256 покрыт `test-core-crypto-differential.sh`, но
+  самой CLI-опции нет. N — CLI/self-check.
+- **`d2k_session_nat_stats` (650–656):** глобальные `nat_ok/miss/none/
+  retried`; R2O `proc_nat` эти счётчики не ведёт. N — диагностика NAT.
+- **`d2k_session_applied` (3541–3543):** агрегат `s->applied`; R2O
+  APPLIED отдаёт событием/журналом, сводного числа нет. N — диагностика.
+- **`d2k_session_done` (3545–3547):** агрегат `s->done`; аналог —
+  событие `PLAN_DONE`, сводного счётчика нет. N — диагностика.
+- **`d2k_session_damaged_count` (3549–3551):** `s->damaged_flows`; в R2O
+  есть флаг `damaged` на потоке, но не агрегат. N — диагностика.
+- **`d2k_session_sent_lost` (3553–3555):** «некому приписать отправку»;
+  в R2O счётчика нет. N — диагностика.
+- **`d2k_session_suspects` (3597–3599):** агрегат `s->suspects`;
+  в R2O SUSPECT — событие, сводного числа нет. N — диагностика.
+- **`d2k_session_exchanges` (3605–3607):** агрегат `s->exchanges`;
+  в R2O EXCHANGE — событие журнала, сводного числа нет. N — диагностика.
+- **`d2k_http_trace` (9–50):** строка `d2kd: HTTP execution host=...
+  hook=... mark=... outdev=... status=... prepared=... plan=...
+  execution=... planned/raw_sent/queued/original/output_failed/reason`.
+  R2O пишет события портала/ответа и flow journal, но не этот текстовый
+  трейс; `grep "HTTP execution"` по R2O пуст. N — диагностика.
+
+**Итог:** все 10 N — диагностические/CLI-величины; ни одна не является
+ветвью packet-path. Счётчики событий в R2O есть на уровне событий/журнала,
+но не в виде сводных C-геттеров. Статусы N оставлены осознанно.
+
