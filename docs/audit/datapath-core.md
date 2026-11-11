@@ -797,13 +797,38 @@ R2O: `r2o_icmp_guard.rs`.
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
-| `d2k_icmpguard_init` | 6–8 | 3 | обнулить кольцо 256 | `Default for R2oIcmpGuard` (`:32`) | E | — |
-| `u16` (static) | 10 | 1 | big-endian u16 | `r2o_icmp_guard.rs:257 r2o_u16` | E | — |
-| `parse_ip` (static) | 21–47 | 27 | IP-заголовок цитаты, отказ не-первому фрагменту | `:204 r2o_parse_icmp_quote` | P | — |
-| `d2k_icmpguard_note` | 49–69 | 21 | запомнить фальшивку: TTL ниже исходного, кортеж, l4word, ip_id | `:56 r2o_note` | P | `test-icmp-guard-current-differential.sh` |
-| `d2k_icmpguard_check` | 71–110 | 40 | ICMPv4 type 11/0, v6 type 3/0; сверка 7 полей, TTL ≤ | `:90 r2o_check`, `:175 r2o_icmp_quote_start` | P | те же; unit-тестов в модуле нет |
-| `d2k_icmpguard_dropped` | 112 | 1 | счётчик снятых | `:149 r2o_dropped` | E | — |
-| `d2k_icmpguard_noted` | 113 | 1 | счётчик запомненных | `:145 r2o_noted` | E | — |
+| `d2k_icmpguard_init` | 6–8 | 3 | обнулить кольцо 256 | `Default for R2oIcmpGuard` (`:32`) | **E** | C `memset`, Rust `[Slot::default(); 256]` + счётчики 0. |
+| `u16` (static) | 10 | 1 | big-endian u16 | `r2o_icmp_guard.rs:257 r2o_u16` | **E** | C `(p[0]<<8)|p[1]`; Rust `from_be_bytes` с проверкой границ через `get`. |
+| `parse_ip` (static) | 21–47 | 27 | IP-заголовок цитаты: IPv4/IPv6, proto 6/17, отказ non-first fragment, `n>=hl+8` | `:204 r2o_parse_icmp_quote` | **P** | Построчно совпадает: family по версии; IPv4 `n>=20`, `hl=(p[0]&15)*4>=20`, `fragment & 0x1fff == 0`; IPv6 `n>=40`, `ip_id=0`; proto 6/17; `transport=get(hl..hl+8)`. Rust checked-арифметика (`checked_add`) вместо C `n<hl+8`. Unit-тестов в модуле нет; differential `test-icmp-guard-current-differential.sh` есть. |
+| `d2k_icmpguard_note` | 49–69 | 21 | запомнить фальшивку: `ttl<orig_ttl`, ring 256, `at=now?now:1`, family/proto/ttl, src/dst, ports, l4word, ip_len, ip_id | `:56 r2o_note` | **P** | C для UDP копирует в `l4word` 2 байта (остаток занулён `memset`), Rust всегда копирует `transport[4..8]` (4 байта); `check` для UDP сравнивает только 2, поэтому на результат не влияет. `have_id = family==4 && ip_id!=0`, `at=max(now,1)`, ring 256 — совпадают. Differential `test-icmp-guard-current-differential.sh`. |
+| `d2k_icmpguard_check` | 71–110 | 40 | ICMPv4 type 11/0, v6 type 3/0; `fragment & 0x3fff`, цитата family, 7 полей, `q.ttl<=s.ttl`, dropped++ | `:90 r2o_check`, `:175 r2o_icmp_quote_start` | **P** | C и Rust совпадают: IPv4 len/ihl/proto 1/`0x3fff`/type 11 code 0; IPv6 len 48/proto 58/type 3 code 0; `quote_start=hl+8/48`; `parse_ip` цитаты; family match; слоты 256, `at!=0`, `now>=at`, `now-at<=5с`, family/proto, src/dst (4/16), sport/dport, l4word (TCP 4/UDP 2), ip_len, `have_id/ip_id`, `q.ttl<=slot.ttl`; иначе dropped++. Отличие только в представлении (`memcmp` ↔ срезы). Unit-тестов в модуле нет; differential есть. |
+| `d2k_icmpguard_dropped` | 112 | 1 | счётчик снятых | `:149 r2o_dropped` | **E** | Прямой getter; `u64` saturating/wrapping-add. |
+| `d2k_icmpguard_noted` | 113 | 1 | счётчик запомненных | `:145 r2o_noted` | **E** | Прямой getter; `u64` saturating/wrapping-add. |
+
+### icmpguard.c: построчная сверка
+
+- **`d2k_icmpguard_init`/`u16`/`dropped`/`noted` (6–10, 112–113):**
+  C `memset`, BE-u16, getters; Rust `Default`, `from_be_bytes`,
+  `u64`-счётчики. E.
+- **`parse_ip` (21–47) ↔ `r2o_parse_icmp_quote` (`:204`):** family
+  по версии; IPv4 `n>=20`, `hl=(p[0]&15)*4>=20`,
+  `fragment & 0x1fff == 0`; IPv6 `n>=40`, `ip_id=0`; proto 6/17;
+  `transport = get(hl..hl+8)`. Rust заменяет C-арифметику на
+  `checked_add`, результат тот же. P — unit-тестов в модуле нет,
+  есть `test-icmp-guard-current-differential.sh`.
+- **`d2k_icmpguard_note` (49–69) ↔ `r2o_note` (`:56`):** TTL ниже
+  исходного, ring 256, `at=max(now,1)`, family/proto/ttl, src/dst,
+  ports, `ip_len`, `have_id/ip_id` совпадают. **Отличие:** C для UDP
+  копирует в `l4word` только 2 байта, Rust — 4; `check` для UDP
+  сравнивает 2, поэтому результат тот же. P.
+- **`d2k_icmpguard_check` (71–110) ↔ `r2o_check` (`:90`):** ICMPv4
+  type 11/0, IPv6 type 3/0, `fragment & 0x3fff`, `quote_start`,
+  family-match, 7 полей, `q.ttl<=slot.ttl`, `dropped++` — совпадают.
+  Rust сравнивает срезы вместо `memcmp`. P — unit-тестов нет,
+  differential есть.
+- **R2O-расширения:** `r2o_handle_at_hook` (hook LOCAL_IN/FORWARD),
+  `r2o_seen`, `r2o_stats_line` не имеют отдельных C-функций в
+  `icmpguard.c`; в C их роль выполняет вызывающий код.
 
 ## http80.c (30 функций)
 
