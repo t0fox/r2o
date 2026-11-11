@@ -248,8 +248,8 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| `replay_now_ms` | 23-27 | 5 | монотонное время, мс | `Instant` | P | инфраструктурный хелпер |
-| `d2k_verify_quic_replay_on` | 29-127 | 99 | разобрать снимок, перешифровать DCID, отправить все датаграммы, ждать связанный ответ, вернуть уровень/replay_proof | `quic_replay.rs:647 QuicReplayProbe`, `quic_snapshot.rs:79 reseal`, `:116 verify_bound_response` | P | функции-аналоги есть и покрыты unit; отдельного C/Rust differential именно для verify-quic-replay нет |
+| `replay_now_ms` | 23-27 | 5 | монотонное время, мс | `std::time::Instant` | **P*** | static-хелпер; C `CLOCK_MONOTONIC` в мс, Rust `Instant` с `Duration` — монотонность та же, единицы пересчитываются. |
+| `d2k_verify_quic_replay_on` | 29-127 | 99 | разобрать снимок, перешифровать DCID, отправить все датаграммы, ждать связанный ответ, вернуть уровень/replay_proof | `quic_replay.rs:639-790 QuicReplayProbe::{prepare,from_socket,run,r2o_run_inner}`, `quic_snapshot.rs:79 reseal`, `:116 verify_bound_response` | **P** | Построчно совпадает: C `parse→reseal→parse`, Rust `reseal→parse` в `from_socket`; C family из IP и порт по умолчанию 443, Rust `SocketAddr` с проверкой `port!=0/ip!=unspecified`; C `connect+getsockname`, Rust `r2o_quic_http3_udp_socket` + `local_addr`; обе стороны шлют **все** датаграммы и требуют точную длину; C `poll/recv 1600`, Rust `recv` с `R2O_QUIC_REPLAY_MAX_RESPONSE`; обе проверяют `verify_bound` и дают уровень HANDSHAKE/replay_proof. **Отличия:** C принимает произвольный `deadline_ms` (по умолчанию 3000), Rust по умолчанию 3 с, но **обрезает до 10 с** (`R2O_QUIC_REPLAY_MAX_TIMEOUT`); C при ошибке разбора закрывает переданный `use_fd`, Rust владеет сокетом; тексты причин иные. Отдельного C/Rust differential именно для verify-quic-replay нет — P. |
 
 ## core/httpsprobe.c (22 функции)
 
@@ -940,7 +940,7 @@ Inline-решения QUIC-зонда: суд этапа данных, stall-д�
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| `d2k_arm_segment` | 78-83 | 6 | размер сегмента ARM с учётом send_cap | `r2k-core/src/plan/apply.rs:660 segment` (иная семантика) | P | расчёт размера посылки есть в плане; ARM-сегментация контроллера не вынесена, target-теста нет |
+| `d2k_arm_segment` | 78-83 | 6 | размер сегмента ARM с учётом send_cap | `main.rs:6292-6305` `r2o_discovery_measured_split_plan` | **E** | Формула совпадает: `send_cap==0 → 1400`; `send_cap<=72 → 0`; иначе `min(send_cap-72,1400)`. `scripts/r2o-measured-split-differential.sh` сравнивает C/Rust для `send_cap` 0/1492/1280/100/72, split 0/1/1024 и verdict prefix/whole; C-сторона — `d2k_tcp_split_plan`/`d2k_arm_segment`. |
 
 ## Углублённая сверка: udpplan.c и udpruntime.c (20 функций)
 

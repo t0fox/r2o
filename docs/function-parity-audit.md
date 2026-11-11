@@ -182,12 +182,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 217 | 317 | 13 | 1 |
+| core-net | 548 | 218 | 316 | 13 | 1 |
 | core-state | 692 | 127 | 564 | 1 | 0 |
 | datapath-core | 400 | 120 | 269 | 11 | 0 |
 | datapath-plan | 183 | 108 | 69 | 5 | 1 |
 | detect | 159 | 49 | 100 | 10 | 0 |
-| **Итого** | **1982** | **621** | **1319** | **40** | **2** |
+| **Итого** | **1982** | **622** | **1318** | **40** | **2** |
 
 
 ---
@@ -508,8 +508,8 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| `replay_now_ms` | 23-27 | 5 | монотонное время, мс | `Instant` | P | инфраструктурный хелпер |
-| `d2k_verify_quic_replay_on` | 29-127 | 99 | разобрать снимок, перешифровать DCID, отправить все датаграммы, ждать связанный ответ, вернуть уровень/replay_proof | `quic_replay.rs:647 QuicReplayProbe`, `quic_snapshot.rs:79 reseal`, `:116 verify_bound_response` | P | функции-аналоги есть и покрыты unit; отдельного C/Rust differential именно для verify-quic-replay нет |
+| `replay_now_ms` | 23-27 | 5 | монотонное время, мс | `std::time::Instant` | **P*** | static-хелпер; C `CLOCK_MONOTONIC` в мс, Rust `Instant` с `Duration` — монотонность та же, единицы пересчитываются. |
+| `d2k_verify_quic_replay_on` | 29-127 | 99 | разобрать снимок, перешифровать DCID, отправить все датаграммы, ждать связанный ответ, вернуть уровень/replay_proof | `quic_replay.rs:639-790 QuicReplayProbe::{prepare,from_socket,run,r2o_run_inner}`, `quic_snapshot.rs:79 reseal`, `:116 verify_bound_response` | **P** | Построчно совпадает: C `parse→reseal→parse`, Rust `reseal→parse` в `from_socket`; C family из IP и порт по умолчанию 443, Rust `SocketAddr` с проверкой `port!=0/ip!=unspecified`; C `connect+getsockname`, Rust `r2o_quic_http3_udp_socket` + `local_addr`; обе стороны шлют **все** датаграммы и требуют точную длину; C `poll/recv 1600`, Rust `recv` с `R2O_QUIC_REPLAY_MAX_RESPONSE`; обе проверяют `verify_bound` и дают уровень HANDSHAKE/replay_proof. **Отличия:** C принимает произвольный `deadline_ms` (по умолчанию 3000), Rust по умолчанию 3 с, но **обрезает до 10 с** (`R2O_QUIC_REPLAY_MAX_TIMEOUT`); C при ошибке разбора закрывает переданный `use_fd`, Rust владеет сокетом; тексты причин иные. Отдельного C/Rust differential именно для verify-quic-replay нет — P. |
 
 ## core/httpsprobe.c (22 функции)
 
@@ -1200,7 +1200,7 @@ Inline-решения QUIC-зонда: суд этапа данных, stall-д�
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| `d2k_arm_segment` | 78-83 | 6 | размер сегмента ARM с учётом send_cap | `r2k-core/src/plan/apply.rs:660 segment` (иная семантика) | P | расчёт размера посылки есть в плане; ARM-сегментация контроллера не вынесена, target-теста нет |
+| `d2k_arm_segment` | 78-83 | 6 | размер сегмента ARM с учётом send_cap | `main.rs:6292-6305` `r2o_discovery_measured_split_plan` | **E** | Формула совпадает: `send_cap==0 → 1400`; `send_cap<=72 → 0`; иначе `min(send_cap-72,1400)`. `scripts/r2o-measured-split-differential.sh` сравнивает C/Rust для `send_cap` 0/1492/1280/100/72, split 0/1/1024 и verdict prefix/whole; C-сторона — `d2k_tcp_split_plan`/`d2k_arm_segment`. |
 
 ## Углублённая сверка: udpplan.c и udpruntime.c (20 функций)
 
@@ -2412,12 +2412,12 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `d2k_resource_word` | 27–35 | 9 | сравнить слово в буфере (CSS-токен) | r2o_resource::r2o_resource_word | **P*** | static inline; unit r2o_resource |
-| `d2k_resource_space` | 36–38 | 3 | пробельный символ | r2o_resource::r2o_resource_space | **P*** | static inline |
-| `d2k_resource_path_ok` | 39–50 | 12 | допустимый публичный путь (не /, не query, длина) | r2o_resource::r2o_resource_path_ok | **P** | unit; отдельного C/Rust differential нет |
-| `d2k_resource_add` | 51–73 | 23 | добавить URL-подсказку в скан | R2oResourceScan::r2o_add_url | **P*** | static inline |
-| `d2k_resource_tag` | 74–113 | 40 | завершить тег и извлечь stylesheet | R2oResourceScan::r2o_finish_tag | **P*** | static inline |
-| `d2k_resource_feed` | 114–159 | 46 | потоковый разбор HTML на публичные пути | R2oResourceScan::feed | **P** | unit r2o_resource; C/Rust differential нет |
+| `d2k_resource_word` | 27–35 | 9 | сравнить слово в буфере (CSS-токен) без регистра | `r2o_resource.rs:407-413` `r2o_resource_word` | **P*** | Совпадает: равна длина и каждый байт `eq_ignore_ascii_case`. Отдельного теста хелпера нет. |
+| `d2k_resource_space` | 36–38 | 3 | пробельный символ | `r2o_resource.rs:415-417` `r2o_resource_space` | **P*** | Совпадает: `' '`, `\t`, `\r`, `\n`, `\x0c`. |
+| `d2k_resource_path_ok` | 39–50 | 12 | допустимый публичный путь: непустой, <512, `/`, не `//`, без `/../` и `/./`, только `[A-Za-z0-9/._-]`, кончается `.css` | `r2o_resource.rs:309-330` `r2o_resource_path_ok`/`path_bytes_ok` | **P** | Построчно совпадает (Rust использует `windows(4)`/`windows(3)` вместо `strstr`, `.css` — `eq_ignore_ascii_case`). Целевого C/Rust differential нет. |
+| `d2k_resource_add` | 51–73 | 23 | добавить абсолютную https/`//`-ссылку: публичный путь, хост <256, без ведущей/хвостовой точки, LDH+`.`, lower-case, один ресурс на хост, максимум 2 | `r2o_resource.rs:255-305` `r2o_add_url`/`r2o_add_url_bytes` | **P*** | Построчно совпадает; Rust дополнительно останавливает `feed` при `resources.len() >= 2`. |
+| `d2k_resource_tag` | 74–113 | 40 | завершить тег: raw `script`/`style`, `body` → лимит 32768, `link` с одним `href`/`rel=stylesheet`, href <1024 | `r2o_resource.rs:188-236` `r2o_finish_tag`, `:332-405` `r2o_link_stylesheet_href` | **P*** | Построчно совпадает, включая один `href`/`rel`, отказ при незакрытой кавычке и лимит 1024. |
+| `d2k_resource_feed` | 114–159 | 46 | потоковый разбор HTML: лимит 32768, сбор URL по `h`, теги/комментарии/кавычки, `>` завершает тег | `r2o_resource.rs:140-186` `R2oResourceScan::feed` | **P** | Построчно совпадает; Rust останавливается также по достижении 2 ресурсов (C — в `add`). Целевого C/Rust differential нет. |
 
 ## Углублённая сверка: domain/groups/match/net4/verdict/props (37 функций)
 
@@ -2825,6 +2825,38 @@ C-машина состояний: `task_state` (`sched.c:596-635`), 15 знач
 сбор APPLIED, `T_RESTING` → cooldown-ring/dead-address, `T_VOICE_*` →
 голосовые контексты. Полной матрицы «состояние × событие × таймаут» нет —
 статус P для `d2k_sched_tick` остаётся обоснованным.
+
+## Углублённая сверка: core/include/d2k_resource.h (6)
+
+- **`d2k_resource_word`/`d2k_resource_space`:** сравнение слова без
+  регистра и набор пробельных символов (` `, `\t`, `\r`, `\n`,
+  `\x0c`) совпадают с `r2o_resource_word`/`r2o_resource_space`
+  (`r2o_resource.rs:407-417`) построчно.
+- **`d2k_resource_path_ok`:** непустой путь, `<512`, начинается с
+  `/`, не `//`, без `/../` и `/./`, только
+  `[A-Za-z0-9/._-]`, оканчивается `.css` — всё то же в
+  `r2o_resource_path_ok`/`path_bytes_ok` (`:309-330`). Rust
+  использует `windows(4)`/`windows(3)` вместо `strstr`; для
+  корректных входов эквивалентно.
+- **`d2k_resource_add`:** принимает только `https://` и `//`,
+  путь проверяется `path_ok`, хост непустой `<256`, без ведущей и
+  хвостовой точки, только LDH и `.`, lower-case, один ресурс на
+  хост, максимум `D2K_RESOURCE_COUNT=2`. Rust
+  `r2o_add_url`/`r2o_add_url_bytes` (`:255-305`) делает то же;
+  дополнительно `feed` останавливается при достижении 2 ресурсов.
+- **`d2k_resource_tag`:** raw-режимы `script`/`style`,
+  `body → seen=32768`, `link` с одним `href` и одним
+  `rel=stylesheet`, href `<1024`, отказ при незакрытой кавычке.
+  Rust `r2o_finish_tag` + `r2o_link_stylesheet_href`
+  (`:188-236,332-405`) повторяет это построчно.
+- **`d2k_resource_feed`:** лимит 32768 байт, сбор URL по байту `h`,
+  теги/комментарии/кавычки, `>` завершает тег; Rust
+  `R2oResourceScan::feed` (`:140-186`) совпадает, плюс ранняя
+  остановка по 2 ресурсам.
+- **Ограничение:** тесты `r2o_resource.rs:594-662` покрывают
+  `R2oResourceMemory` (кэш/пути/вытеснение), а не сам сканер;
+  отдельного C/Rust differential сканера нет. Поэтому статусы
+  P/P*, а не E, несмотря на построчное совпадение.
 
 ## Проверка полноты
 

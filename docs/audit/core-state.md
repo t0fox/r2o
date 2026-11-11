@@ -160,7 +160,7 @@
 | `d2k_props_bind_family` | 530–532 | 3 | bind TCP family 4/6 | main.rs bind helpers | **P*** | static-хелпер |
 | `d2k_props_bind_udp` | 534–536 | 3 | bind IPv4 UDP | main.rs bind helpers | **P*** | static-хелпер |
 | `d2k_props_bind_udp_family` | 538–540 | 3 | bind UDP family 4/6 | main.rs bind helpers | **P*** | static-хелпер |
-| `d2k_props_contact` | 542–545 | 4 | TCP-обращение к цели IPv4 с отправкой приветствия | main.rs ask contact | **P** | перенесено; C/Rust differential нет |
+| `d2k_props_contact` | 542–545 | 4 | TCP-обращение к цели IPv4 с отправкой приветствия | CLI `run_r2o_ask` (`main.rs:332-737`) | **P** | Реализовано только в CLI-опросе; production-discovery R2O этим путём вопросы не задаёт (см. `prop_send_next`). C/Rust differential контакта нет. |
 | `d2k_props_contact_on` | 547–551 | 5 | то же с готовым fd | main.rs ask contact | **P*** | static-хелпер |
 | `d2k_props_contact_on_family` | 553–558 | 6 | то же для family 4/6 | main.rs ask contact | **P*** | static-хелпер |
 | `tcp_timestamps_read` | 567–578 | 12 | прочитать /proc/sys/net/ipv4/tcp_timestamps | main.rs tcp profile probe | **P*** | static-хелпер Linux |
@@ -171,7 +171,7 @@
 | `d2k_props_question_plan` | 798–841 | 44 | план одного из 5 вопросов свойств (overlap/reorder/checksum/protocol/duplicates) | ask::question_plan | **P** | unit question_order_and_plan_parameters; C/Rust differential планов вопросов не найден |
 | `d2k_props_question_passed` | 845–864 | 20 | записать ответ вопроса в d2k_props (parse снимает checksum) | ask::record_question_passed | **P** | unit protocol_parse_requires_control_and_success_updates_only_its_proven_fields |
 | `question_retire` | 874–879 | 6 | снять пробный план вопроса с датапата | main.rs ask question retire | **P*** | static-хелпер |
-| `d2k_props_ask` | 881–884 | 4 | опрос свойств без трассировки | ask::compose_plan_texts/run_r2o_ask | **P** | обёртка; см. d2k_props_ask_traced |
+| `d2k_props_ask` | 881–884 | 4 | опрос свойств без трассировки | `run_r2o_ask` (`main.rs:332`), `ask::question_plan` | **P** | Обёртка существует только в CLI; в discovery C-опрос заменён raw-пробами (см. `prop_send_next`). |
 | `step_rc` | 889–898 | 10 | записать rc/err шага | ask::AskStep | **P*** | static-хелпер |
 | `d2k_props_ask_traced` | 900–1191 | 292 | 5 вопросов по очереди: bind порт, SET_NAME_PROBE, ACK, contact, EXCHANGE/APPLIED/REFUSED, остановка на первом прошедшем | main.rs run_r2o_ask + ask.rs | **P** | логика перенесена; CLI differential не сравнивает stdout, отдельные ветви NO_ACK/UNSENT/APPLIED проверены unit |
 | `append_fmt` | 1203–1213 | 11 | дописать форматированный текст | String::push_str | **E*** | static-хелпер |
@@ -656,8 +656,8 @@
 | `box_injects_rst` | 3834–3840 | 7 | коробка имеет сигнал rst | main.rs discovery box_injects_rst | **P*** | static-хелпер |
 | `rst_guard_wanted` | 3842–3847 | 6 | нужен guard rst_alien для RST-триггеров | main.rs discovery rst_guard | **P*** | static-хелпер |
 | `plan_arm_rst_guard` | 3853–3860 | 8 | добавить guard rst_alien в план | plan_text guard | **P*** | static-хелпер; classifier tests |
-| `prop_send_next` | 3864–3970 | 107 | следующий вопрос свойств: план, bind, mark, SET_NAME, JOB_CONTACT | main.rs discovery prop_send_next | **P** | логика перенесена; ask/scheduler differentials частично |
-| `prop_finish` | 3974–3989 | 16 | завершить опрос свойств и запросить sync | main.rs discovery prop_finish | **P*** | static-хелпер |
+| `prop_send_next` | 3864–3970 | 107 | следующий вопрос свойств: план, bind, mark, SET_NAME, JOB_CONTACT | `ask::question_plan` + CLI `run_r2o_ask` (`main.rs:469`); discovery — `raw_probe::sweep_poisons` | **P** | **Расхождение слоя:** C вызывает это в production-discovery при `verdict==OPAQUE && transport==6 && !have_arm && !owns_search` (`sched.c:11462-11474`, `:12182-12200`) и ставит временный план через управляющий сокет; R2O discovery вопросов через control не задаёт — только raw-пробы (12 свойств, `raw_probe.rs:840`), а `question_plan`/`wait_for_ask_proof` есть лишь в CLI `--ask` (`main.rs:469,646`). На роутере без raw-сокета C всё равно получает вектор, R2O — нет. |
+| `prop_finish` | 3974–3989 | 16 | завершить опрос свойств: снять последний план вопроса, закрыть fd, sync | CLI `run_r2o_ask`: `question_retire` (`main.rs:737`); в discovery аналога нет | **P*** | static-хелпер; в production-discovery R2O снимать нечего, потому что control-план вопроса не ставится. Снятие временного плана после raw-пробы не требуется. |
 | `task_fail` | 3993–4030 | 38 | завершить задачу неудачей: join, report, cleanup, cooldown/rest | main.rs discovery task_fail | **P** | scheduler differentials покрывают основные ветви |
 | `quic_deny_find` | 4032–4038 | 7 | найти QUIC-deny слот | main.rs discovery quic deny ring | **P*** | static-хелпер |
 | `quic_deny_install` | 4040–4112 | 73 | поставить quicdeny-план, backoff и пометить привязки на recheck | main.rs discovery quic deny | **P** | есть QUIC-deny тесты; C/Rust differential частичный |
@@ -870,12 +870,12 @@
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `d2k_resource_word` | 27–35 | 9 | сравнить слово в буфере (CSS-токен) | r2o_resource::r2o_resource_word | **P*** | static inline; unit r2o_resource |
-| `d2k_resource_space` | 36–38 | 3 | пробельный символ | r2o_resource::r2o_resource_space | **P*** | static inline |
-| `d2k_resource_path_ok` | 39–50 | 12 | допустимый публичный путь (не /, не query, длина) | r2o_resource::r2o_resource_path_ok | **P** | unit; отдельного C/Rust differential нет |
-| `d2k_resource_add` | 51–73 | 23 | добавить URL-подсказку в скан | R2oResourceScan::r2o_add_url | **P*** | static inline |
-| `d2k_resource_tag` | 74–113 | 40 | завершить тег и извлечь stylesheet | R2oResourceScan::r2o_finish_tag | **P*** | static inline |
-| `d2k_resource_feed` | 114–159 | 46 | потоковый разбор HTML на публичные пути | R2oResourceScan::feed | **P** | unit r2o_resource; C/Rust differential нет |
+| `d2k_resource_word` | 27–35 | 9 | сравнить слово в буфере (CSS-токен) без регистра | `r2o_resource.rs:407-413` `r2o_resource_word` | **P*** | Совпадает: равна длина и каждый байт `eq_ignore_ascii_case`. Отдельного теста хелпера нет. |
+| `d2k_resource_space` | 36–38 | 3 | пробельный символ | `r2o_resource.rs:415-417` `r2o_resource_space` | **P*** | Совпадает: `' '`, `\t`, `\r`, `\n`, `\x0c`. |
+| `d2k_resource_path_ok` | 39–50 | 12 | допустимый публичный путь: непустой, <512, `/`, не `//`, без `/../` и `/./`, только `[A-Za-z0-9/._-]`, кончается `.css` | `r2o_resource.rs:309-330` `r2o_resource_path_ok`/`path_bytes_ok` | **P** | Построчно совпадает (Rust использует `windows(4)`/`windows(3)` вместо `strstr`, `.css` — `eq_ignore_ascii_case`). Целевого C/Rust differential нет. |
+| `d2k_resource_add` | 51–73 | 23 | добавить абсолютную https/`//`-ссылку: публичный путь, хост <256, без ведущей/хвостовой точки, LDH+`.`, lower-case, один ресурс на хост, максимум 2 | `r2o_resource.rs:255-305` `r2o_add_url`/`r2o_add_url_bytes` | **P*** | Построчно совпадает; Rust дополнительно останавливает `feed` при `resources.len() >= 2`. |
+| `d2k_resource_tag` | 74–113 | 40 | завершить тег: raw `script`/`style`, `body` → лимит 32768, `link` с одним `href`/`rel=stylesheet`, href <1024 | `r2o_resource.rs:188-236` `r2o_finish_tag`, `:332-405` `r2o_link_stylesheet_href` | **P*** | Построчно совпадает, включая один `href`/`rel`, отказ при незакрытой кавычке и лимит 1024. |
+| `d2k_resource_feed` | 114–159 | 46 | потоковый разбор HTML: лимит 32768, сбор URL по `h`, теги/комментарии/кавычки, `>` завершает тег | `r2o_resource.rs:140-186` `R2oResourceScan::feed` | **P** | Построчно совпадает; Rust останавливается также по достижении 2 ресурсов (C — в `add`). Целевого C/Rust differential нет. |
 
 ## Углублённая сверка: domain/groups/match/net4/verdict/props (37 функций)
 
@@ -1251,6 +1251,70 @@
   X25519 нет — P.
 - **Вывод:** 26 AES/SHA/HMAC/HKDF/GCM функций — E (кроме двух
   HKDF-границ P), 22 P-256 и 11 X25519 — P; N в блоке нет.
+
+## Карта состояний sched.c → Rust
+
+C-машина состояний: `task_state` (`sched.c:596-635`), 15 значений. R2O не имеет
+единого enum: состояние выражено очередью, фазой диагностики (`phase:
+&'static str`), задачами воркера, каталогом и голосовыми контекстами.
+
+| C-состояние | вход C | что означает | Rust-эквивалент | статус/пробел |
+|---|---|---|---|---|
+| `T_FREE` | `sched.c:597` | слот свободен | нет записи в `R2oDiscoverySearches.entries`/`task_slots` | P*: явного слота нет, память освобождает `HashMap` |
+| `T_QUEUED` | `sched.c:8053` | подозрение сохранено, ждёт безопасного слота; поля `queued_ms/queued_event/hot_event/hot_count` (`:663-673`) | `R2oDiscoveryQueue` (`main.rs:7883`): `enqueue_with_planned` (`:9004`), `promote_with_planned` (`:9085`), `pop_with_tcp_preference_and_planned` (`:9155-9180`, ключ `(Reverse(hot_event), queued_event)`), `r2o_expire` (`:9060`) | P: порядок «горячие→FIFO» и TTL совпадают; C отдельно считает безопасный слот по `measurements_in_flight`, R2O — через `R2O_DISCOVERY_TASK_CAPACITY` и permit-гейт |
+| `T_ASKING` | `sched.c:7287,7311` | сетевой оракул в потоке | `R2oDiscoverySearches::set_asking` (`main.rs:8112`), `searches.asking.contains` (`:9424`), фаза «распознаём поведение» | E/P: classifier differentials; отдельного состояния нет |
+| `T_SHAPE_WAIT` | `sched.c:7157` | QUIC: снимок заказан, ждём `EV_SHAPE`; событие — `:8994-9008` | `R2oPendingQuicDiscovery` + `r2o_take_ready_quic_discovery` (`main.rs:9182-9216`), `queued_quic_snapshots` (`:12753`) | P: отдельного состояния нет; ожидание выражено очередью+permit, `T_SHAPE_WAIT` существует только для QUIC |
+| `T_PROPS_CONTACT` | `sched.c:3962`, тик `:11530-11562` | план-вопрос отправлен, обращение к цели в потоке | `main.rs` discovery → `raw_probe::sweep_poisons`; control-путь `question_plan` только CLI (`main.rs:469`) | **P с пробелом:** C задаёт 5 вопросов через управляющий сокет при `OPAQUE && TCP && !have_arm && !owns_search` (`:11462-11474`, `:12182-12200`); R2O discovery делает только raw-пробы, control-опрос в production отсутствует |
+| `T_PROPS_WAIT` | `sched.c:11562` | обращение состоялось, ждём обмен по своему потоку | обработчик `sched.c:10260-10300`; в Rust — `wait_for_ask_proof` (`main.rs:20194`), но только в CLI `--ask` | **P:** в discovery нет ожидания APPLIED на потоке вопроса; критерий «ServerHello + APPLIED» из C не воспроизведён в control-слое |
+| `T_PLANNING` | `sched.c:4465,4503,9150,11526` | вектор собран, ставим планы | генерация кандидатов `main.rs:10892-11900` (`known_plans/own_first/compose`) | P: набор источников совпадает, единой `verdict_to_plans` нет |
+| `T_TRIAL_SETTLE` | `sched.c:12345` | план записан, ждём принятия датапатом; предел `SCHED_TRIAL_SETTLE_MS=50` | `exchange_candidate_probe_with_settle` (`main.rs:22209`), `D2O_TRIAL_SETTLE_MS=50` (`:141`) | E/P: тест `d2o_missing_candidate_ack_expires_after_settle_window` |
+| `T_VERIFY` | `sched.c:4534,12050` | кандидат стоит, зонд в потоке | `r2o_run_discovery_candidate_trial_with_retries` (`main.rs:5785`) | P: retry/bare-retry/arm-retry перенесены, полного differential нет |
+| `T_VERIFY_WAIT` | `sched.c:11805,11975` | зонд вернулся, ждём APPLIED его потока; предел `SCHED_VERIFY_STEP_MS=5000` | сбор APPLIED `r2o_collect_controller_applied_events_until` (`main.rs:5661`), сверка `r2o_family_applied_flow_matches` (`:5705`), `wait_for_ask_proof` (`:20194`) | P: APPLIED сверяется по plan/trial/key, но отдельного состояния/таймаута 5 с нет |
+| `T_WATCHING` | `sched.c:8144,9621` | подтверждено, смотрим живой трафик | привязка каталога + live-группы (`r2o_confirm_discovery_outcome`, `main.rs:5347`) | P: подтверждение/привязка есть, наблюдение живой цели — через `live.rs` |
+| `T_RESTING` | `sched.c:4025` | неудача, цель отдыхает | `R2oDiscoveryCooldownRing` (`main.rs:8509`), `R2oDeadAddressCache` (`:8312`), `r2o_record_discovery_cooldown` (`:12608`) | E/P: cooldown differentials |
+| `T_VOICE_MEASURE` | `sched.c:7502` | C voice/STUN замер в воркере | `R2oVoiceLatestQueue` (`main.rs:9552`), `r2o_measure_voice_for_flow`; правило «другие endpoint'ы отбрасываются» — `:9556` | P: очередь/дедуп/срок совпадают, C/Rust differential замера частичный |
+| `T_VOICE_TRIAL` | `sched.c:7603` | временный arm на конкретной пятёрке, lease | `R2oVoiceTrialContext` (`main.rs:9735`), `install_r2o_voice_trial` (`:16264`), продление `:16318-16327` | P: lease/продление/снятие перенесены, точные коды NAK/истечения — unit |
+| `T_VOICE_WATCH` | `sched.c:9784` | приём применился к разговору, ждём ответа/молчания | `r2o_take_silent_voice_trial` (`main.rs:10192`), `R2O_VOICE_PENDING_GRACE=120с` (`:9667`) | P: тишина/истечение есть, полного differential нет |
+
+**Итог по карте:** переходы C в основном воспроизведены, но не одним автоматом:
+`T_QUEUED/T_SHAPE_WAIT` → очередь и permit-гейт, `T_PROPS_*` → raw-пробы
+(control-путь только в CLI), `T_PLANNING` → генераторы кандидатов,
+`T_TRIAL_SETTLE/T_VERIFY*` → `exchange_candidate_probe_with_settle` +
+сбор APPLIED, `T_RESTING` → cooldown-ring/dead-address, `T_VOICE_*` →
+голосовые контексты. Полной матрицы «состояние × событие × таймаут» нет —
+статус P для `d2k_sched_tick` остаётся обоснованным.
+
+## Углублённая сверка: core/include/d2k_resource.h (6)
+
+- **`d2k_resource_word`/`d2k_resource_space`:** сравнение слова без
+  регистра и набор пробельных символов (` `, `\t`, `\r`, `\n`,
+  `\x0c`) совпадают с `r2o_resource_word`/`r2o_resource_space`
+  (`r2o_resource.rs:407-417`) построчно.
+- **`d2k_resource_path_ok`:** непустой путь, `<512`, начинается с
+  `/`, не `//`, без `/../` и `/./`, только
+  `[A-Za-z0-9/._-]`, оканчивается `.css` — всё то же в
+  `r2o_resource_path_ok`/`path_bytes_ok` (`:309-330`). Rust
+  использует `windows(4)`/`windows(3)` вместо `strstr`; для
+  корректных входов эквивалентно.
+- **`d2k_resource_add`:** принимает только `https://` и `//`,
+  путь проверяется `path_ok`, хост непустой `<256`, без ведущей и
+  хвостовой точки, только LDH и `.`, lower-case, один ресурс на
+  хост, максимум `D2K_RESOURCE_COUNT=2`. Rust
+  `r2o_add_url`/`r2o_add_url_bytes` (`:255-305`) делает то же;
+  дополнительно `feed` останавливается при достижении 2 ресурсов.
+- **`d2k_resource_tag`:** raw-режимы `script`/`style`,
+  `body → seen=32768`, `link` с одним `href` и одним
+  `rel=stylesheet`, href `<1024`, отказ при незакрытой кавычке.
+  Rust `r2o_finish_tag` + `r2o_link_stylesheet_href`
+  (`:188-236,332-405`) повторяет это построчно.
+- **`d2k_resource_feed`:** лимит 32768 байт, сбор URL по байту `h`,
+  теги/комментарии/кавычки, `>` завершает тег; Rust
+  `R2oResourceScan::feed` (`:140-186`) совпадает, плюс ранняя
+  остановка по 2 ресурсам.
+- **Ограничение:** тесты `r2o_resource.rs:594-662` покрывают
+  `R2oResourceMemory` (кэш/пути/вытеснение), а не сам сканер;
+  отдельного C/Rust differential сканера нет. Поэтому статусы
+  P/P*, а не E, несмотря на построчное совпадение.
 
 ## Проверка полноты
 
