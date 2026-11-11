@@ -1149,12 +1149,44 @@ flow-брони).
 | `wr16` (static) | 23–26 | 4 | big-endian u16 | `wire.rs:552 write_u16` | E | golden-тесты wire.rs |
 | `wr32` (static) | 28–33 | 6 | big-endian u32 | `:556 write_u32` | E | — |
 | `rd16` (static) | 35–37 | 3 | big-endian u16 | `u16::from_be_bytes` в `:436` | P | — |
-| `auto_ttl` (static) | 54–70 | 17 | TTL по rev_ttl: origin 64/128/255, delta, min/max, clamp | `plan/apply.rs:764 poison_ttl` | E | `engine.rs:2120 autottl_uses_the_observed_reverse_tcp_ttl...` |
-| `sum16` (static) | 73–82 | 10 | RFC1071 | `wire.rs:534 sum16` | E | wire golden |
-| `fold` (static) | 84–89 | 6 | свёртка | `:545 checksum_value` | E | — |
-| `pseudo_sum` (static) | 99–107 | 9 | псевдозаголовок TCP | `:516 pseudo_sum` | E | — |
-| `d2k_wire_build` | 109–277 | 169 | сборка TCP-пакета: профили, MD5, TS, ts_up, seq_shift, poison, суммы | `wire.rs:18 build_tcp_packet` | E | `wire.rs` 12 тестов (golden, template, ts_up, badsum, measured, MD5, v6, capacity) + `test-wire-ts-up-plan-differential.sh` |
-| `d2k_wire_tcp_checksum_ok` | 279–306 | 28 | проверка суммы IPv4/IPv6 | `wire.rs:436 tcp_checksum_ok` | E | `wire.rs` тесты + используется в http_replace |
+| `auto_ttl` (static) | 54–70 | 17 | TTL по rev_ttl: origin 64/128/255, delta, min/max, clamp 1..255; 0 если нельзя | `plan/apply.rs:764 poison_ttl` | **E** | Формула совпадает: первый `origin` из 64/128/255 ≥ rev_ttl, `hops=origin-rev_ttl`, `+delta`, `max`, `min`, `clamp(1,255)`. C при rev_ttl=0/нет origin возвращает 0, Rust `poison_ttl` — `poison.ttl`, далее `emission_ttl` даёт original/64; итог тот же. Тест `engine.rs:2120`. |
+| `sum16` (static) | 73–82 | 10 | RFC1071 | `wire.rs:534 sum16` | **E** | Пословное сложение BE с нечётным хвостом; golden wire. |
+| `fold` (static) | 84–89 | 6 | свёртка и инверсия | `:545 checksum_value` | **E** | Точное совпадение. |
+| `pseudo_sum` (static) | 99–107 | 9 | IPv4 псевдозаголовок TCP | `:516 pseudo_sum` | **E** | C строит 12-байтный ph, Rust складывает src/dst+6+len; для IPv4 эквивалентно. |
+| `d2k_wire_build` | 109–277 | 169 | сборка TCP: профили 0/DETECT/TEMPLATE, MD5, TS/TS-up, seq_shift, poison, суммы | `wire.rs:18 build_tcp_packet` | **P** | **Совпадает:** family 4/6, urgent, ipfrag/profile, MD5 только measured, native options ≤40/кратность 4, TS 8/10 уникальна, TS-back `-1000`, TS-up перенос 10 байт, IPv4 ID 0/random/native+1, measured DF=0/window=65535, IPv6 IPID_ZERO reject, MD5-байты 19/18/1/1, TS NOP/NOP/8/10, badsum measured `^0xbeef`/0x1234 vs legacy `~`/0xffff. **Отличия:** C берёт src/dst/ports/ack/window/ttl/ip_id/traffic_class/flow_label/options из `d2k_conn`, Rust — из входного `PacketView`/`TcpSegmentView`; C `measured` IP-ID — `random()%65535`, Rust — `getrandom()%u16::MAX` (разный источник); C допускает `family=0` как IPv4, Rust требует 4/6. 12 golden/дифференциалов покрывают шаблон/TS-up/badsum/measured/MD5/v6/capacity, но не равенство RNG и не conn-vs-input. |
+| `d2k_wire_tcp_checksum_ok` | 279–306 | 28 | IPv4: версия/proto/ihl/total; IPv6: len≥60/proto 6/base-only; сверка суммы | `wire.rs:436 tcp_checksum_ok` | **P** | Для базовых IPv4/IPv6-пакетов формула та же (`pseudo_sum`+`sum16`+`fold==0`). C IPv6 смотрит только основной заголовок (`pkt[6]==6`, len≥60), Rust `PacketView` допускает цепочку padding-extension headers; C `total<ihl`/ihl<20 — аналогично. Различается набор принимаемых ext-header пакетов; тесты wire/http_replace покрывают базовые. |
+
+### wire.c: построчная сверка
+
+- **`wr16/wr32/rd16` (23–37):** C BE-запись/чтение; Rust
+  `write_u16/write_u32`/`from_be_bytes`. E/P.
+- **`sum16/fold/pseudo_sum` (73–107):** C RFC1071, свёртка с
+  инверсией, 12-байтный IPv4 ph; Rust `sum16`/`checksum_value`/
+  `pseudo_sum`. Для IPv4 эквивалентно; golden wire. E.
+- **`auto_ttl` (54–70) ↔ `poison_ttl` (`apply.rs:764`):** formula
+  `origin∈{64,128,255}≥rev_ttl`, `hops=origin-rev_ttl`, `+delta`,
+  `max`, `min`, `clamp(1,255)` совпадает. C 0 при
+  `rev_ttl=0`/нет origin; Rust `poison.ttl`, затем `emission_ttl`
+  original/64 — итог тот же. E, `engine.rs:2120`.
+- **`d2k_wire_build` (109–277) ↔ `build_tcp_packet` (`wire.rs:18`):**
+  совпадают профили 0/DETECT/TEMPLATE, urgent, ipfrag, MD5-only-
+  measured, native options ≤40/кратность 4, TS 8/10 уникальна,
+  TS-back `-1000`, TS-up перенос 10 байт, IPv4 ID (0/random/native+1),
+  measured DF=0/window=65535, IPv6 IPID_ZERO reject, MD5 19/18/1/1,
+  TS NOP/NOP/8/10, badsum measured/legacy, суммы. **Отличия:**
+  C берёт адреса/порты/ack/window/TTL/ip_id/TOS/flow/options из
+  `d2k_conn`, Rust — из входного пакета; C measured IP-ID —
+  `random()%65535`, Rust — `getrandom()%u16::MAX`; C допускает
+  `family=0` как IPv4, Rust требует 4/6. P.
+- **`d2k_wire_tcp_checksum_ok` (279–306) ↔ `tcp_checksum_ok`
+  (`:436`):** для базовых IPv4/IPv6 формула та же; C IPv6 смотрит
+  только основной заголовок, Rust `PacketView` допускает
+  padding-extension headers. Набор принимаемых ext-header пакетов
+  различается. P.
+- **Доказательства:** 12 golden/дифференциалов `wire.rs`
+  (template, ts_up, badsum, measured, MD5, v6, capacity,
+  `test-wire-ts-up-plan-differential.sh`); они не покрывают RNG
+  и conn-vs-input.
 
 ## wire_udp.c (5 функций)
 
