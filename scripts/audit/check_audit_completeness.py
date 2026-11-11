@@ -19,8 +19,9 @@ RANGE_RE = re.compile(r"(?P<start>\d+)\s*(?:\.\.|–|-|—)\s*(?P<end>\d+)")
 
 
 def main() -> int:
+    parts = sys.argv[1:] or PARTS
     failed = False
-    for part in PARTS:
+    for part in parts:
         csv_path = TOOL / f"slice-{part}.csv"
         md_path = AUDIT / f"{part}.md"
         if not csv_path.exists() or not md_path.exists():

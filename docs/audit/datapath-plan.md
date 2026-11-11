@@ -1,0 +1,393 @@
+# Аудит паритета: datapath — планы и управляющий слой (D2O → R2O)
+
+Дата аудита: 2026-11-11. Работа только с исходниками: код не менялся, роутер не затрагивался.
+
+## Baseline
+
+- D2O (oracle): `E:\d2o-a378w`, SHA `a378e230947ebfd011439e1cac0f1e994d883aae`.
+- R2O: `E:\r2o`, HEAD `9272eafa7992e88dff99cd25056e93157008a3d5` (ветка `main`).
+- Срез: `E:\r2o-tooling\audit\slice-datapath-plan.csv` — **183 функции** из 9 файлов:
+  `datapath/plans.c` (75), `datapath/routemark.c` (23), `datapath/plan_parse.c` (17),
+  `datapath/raw.c` (17), `datapath/plan_apply.c` (15), `datapath/ctl.c` (14),
+  `datapath/ctlsrv.c` (12), `datapath/routemark_nl.c` (8), `datapath/include/d2k_plans.h` (2).
+- Метод: прочитано тело каждой функции по `line..end_line` из среза; для каждой найдена
+  конкретная Rust-функция (не совпадение имени), проверены ветви, состояния, коды ошибок и
+  побочные эффекты. Тесты цитируются только те, которые реально есть в дереве; номера строк —
+  по указанному HEAD.
+
+## Статусы
+
+- **E** — эквивалент подтверждён тестом/дифференциальной сверкой с D2O-фикстурами.
+- **P** — реализация есть, но не все ветви/отличия доказаны; отличие или пробел названы в
+  последней колонке.
+- **N** — реализации нет.
+- **?** — не установлено.
+
+Static-хелперы наследуют статус владельца (владелец указан в колонке «назначение»).
+«Размер» — число строк тела по срезу.
+
+## Сводка
+
+| Статус | Кол-во |
+|---|---:|
+| E | 108 |
+| P | 69 |
+| N | 5 |
+| ? | 1 |
+| **Всего** | **183** |
+
+По файлам:
+
+| Файл | Функций | E | P | N | ? |
+|---|---:|---:|---:|---:|---:|
+| datapath/plans.c | 75 | 37 | 36 | 1 | 1 |
+| datapath/routemark.c | 23 | 19 | 3 | 1 | 0 |
+| datapath/plan_parse.c | 17 | 14 | 3 | 0 | 0 |
+| datapath/raw.c | 17 | 8 | 9 | 0 | 0 |
+| datapath/plan_apply.c | 15 | 14 | 1 | 0 | 0 |
+| datapath/ctl.c | 14 | 8 | 3 | 3 | 0 |
+| datapath/ctlsrv.c | 12 | 6 | 6 | 0 | 0 |
+| datapath/routemark_nl.c | 8 | 2 | 6 | 0 | 0 |
+| datapath/include/d2k_plans.h | 2 | 0 | 2 | 0 | 0 |
+
+---
+
+## 1. datapath/ctl.c — 14 функций
+
+Транспорт управляющего сокета: открытие, один пир, кольцо исходящих кадров, разбор кадров.
+R2O-аналог — `crates/r2o-datapath/src/control.rs` (`ControlServer`), плюс цикл в
+`crates/r2o-datapath/src/main.rs` (вызывает `poll()` напрямую, без epoll-регистрации fd).
+
+| C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
+|---|---|---:|---|---|---|---|
+| say | 66-74 | 9 | static: форматирование текста ошибки (владелец — `d2k_ctl_open`) | `control.rs:1798` `ControlServer::open` — текст через `io::Error::new`/`format!` | P | Отдельного форматтера нет; тексты ошибок другие, поведение (причина названа) сохранено. |
+| set_nonblock | 76-79 | 4 | static: `O_NONBLOCK` на fd | `control.rs:1852` `listener.set_nonblocking(true)`, `:2088` `peer.set_nonblocking(true)` | E | `control_server_accepts_reconnect_pending_after_previous_peer_closes` (control.rs:2343): без nonblocking цикл `accept_peer` завис бы. |
+| d2k_ctl_open | 81-127 | 47 | создать AF_UNIX listener, снять старый файл, listen(1) | `control.rs:1798` `open`, `:1807` `open_with_profile` | P | `control_socket_is_private_to_its_owner` (control.rs:2325). Отличия: R2O не удаляет чужой не-сокет и занятый живой сокет, ставит права 0600, backlog по умолчанию. |
+| d2k_ctl_close | 129-141 | 13 | закрыть оба fd и снять свой файл сокета | `control.rs:2220` `impl Drop for ControlServer` | E | `control_socket_is_private_to_its_owner` проверяет удаление пути и права. |
+| d2k_ctl_listen_fd | 143-143 | 1 | вернуть listen fd для внешнего цикла | — | N | Цикл `main.rs:1388` вызывает `control.poll()` напрямую; дескриптор наружу не отдаётся. |
+| d2k_ctl_peer_fd | 144-144 | 1 | вернуть fd пира | — | N | То же: пир инкапсулирован в `ControlServer`. |
+| d2k_ctl_set_disconnect_hook | 146-150 | 5 | повесить hook на разрыв | `main.rs:1409-1415` — цикл сам вызывает `name_plans.clear_probes()` при `!is_connected()` | P | Hook в объекте отсутствует; эквивалент распределён по циклу. Тест `clearing_disconnected_http_probes_keeps_the_permanent_plan` (control.rs:3703) проверяет очистку. |
+| d2k_ctl_accept | 152-177 | 26 | принять одного пира, второго отвергнуть | `control.rs:2084` `accept_peer` | E | `control_server_accepts_reconnect_...` (control.rs:2343) — второй лишний пир закрывается, переподключение принимается. |
+| drop_peer | 179-188 | 10 | закрыть пир, очистить буферы, позвать hook | `control.rs:2210` `disconnect` | E | Тот же тест: после `drop(previous)` `is_connected()` ложно, затем принимается новый пир. |
+| d2k_ctl_flush | 190-215 | 26 | дослать кольцо, EAGAIN — на следующий раз | `control.rs:2176` `flush` | E | `control_server_sends_a_tls_hello_event_to_connected_controller` (control.rs:2460) читает кадр после `send_event`. |
+| d2k_ctl_event | 217-255 | 39 | положить кадр целиком или потерять и посчитать | `control.rs:1913` `send_event`, `:2164` `enqueue` | E | `control_server_counts_each_event_without_connected_peer_as_dropped_like_d2o` (control.rs:2434); `try_send_event_...outbox...` (control.rs:2552) — переполнение. |
+| d2k_ctl_poll | 257-313 | 57 | прочитать, разобрать кадры, рвать на невозможной длине | `control.rs:1883` `poll`, `:2110` `read_peer`, `:2138` `take_complete_frames` | E | Reconnect-тест читает `EVENT_PROTOCOL`; границы `FRAME_MAX` проверяются в `take_complete_frames`. |
+| d2k_ctl_dropped | 315-315 | 1 | счётчик потерянных кадров | `control.rs:1983` `dropped_events` | E | `control_server_counts_each_event_without_connected_peer...` (control.rs:2434) сверяет счётчик. |
+| d2k_ctl_sent | 316-316 | 1 | счётчик поставленных в кольцо кадров | — | N | Счётчика `sent` в R2O нет; есть только `dropped_events`. |
+
+Итог по файлу: E 8, P 3, N 3. Пробелы: нет доступа к fd (listen/peer), нет счётчика
+отправленных кадров, hook разрыва реализован в цикле, а не в объекте.
+
+---
+
+## 2. datapath/ctlsrv.c — 12 функций
+
+Смысл команд и событий управляющего протокола. R2O: `NamePlans::handle` +
+`ControlServer` (`crates/r2o-datapath/src/control.rs`), кодеки — `crates/r2k-core/src/control.rs`,
+журнал событий — `flow_journal.rs` и `main.rs`.
+
+| C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
+|---|---|---:|---|---|---|---|
+| put_key | 23-37 | 15 | static: ключ потока 38 байт полями (владелец — `ack`/`pump`) | `capture.rs:51` `TcpFlowKey::wire_key`, `control.rs:1644` `r2o_udp_flow_wire_key` | E | Побайтово тот же порядок (family, low 16, high 16, порты BE, proto). Сверка раскладки — `d2o_control_frames_match_donor_wire_decoding` (tests/control.rs:47, разбор APPLIED-фикстур D2O). |
+| d2k_plan_fits | 39-72 | 34 | отказ до установки: IPID=0 и длина посылки > предела | `control.rs:255` `r2o_plan_valid` (+`engine.rs:2091` запрет POISON_IPID_ZERO), `main.rs:986` проверка `max_emit` | P | Ветвь длины покрыта `name_plan_отклоняется_если_..._mtu` (control.rs:2766): `send_maxlen=1` — отказ, 1500 — успех. Ветвь `POISON_IPID_ZERO` реализована в `validate_runtime_plan`, но теста на неё нет. |
+| ack | 84-110 | 27 | static: подтверждение команды с trial/area/binding | `control.rs:1898` `send_ack`; `r2k-core/control.rs:1983` `encode_ack_with_identifiers_profile` | E | `v22_control_server_greets_with_profile_release_and_raw_bound_ack` (control.rs:2494); ACK-фикстуры D2O в tests/control.rs:47. |
+| ack_trial | 112-123 | 12 | static: ACK с trial ID (в т.ч. на отказ) | `control.rs:1898` (поле `Ack::trial_id`), `r2k-core/control.rs:1945` `encode_ack_for_trial` | E | `http_probe_plan_matches_only_its_source_port_and_acknowledges_trial_id` (control.rs:3489) и `encodes_http_probe_command_and_round_trips_its_correlated_ack` (tests/control.rs:493). |
+| d2k_ctlsrv_greet | 125-145 | 21 | первое событие: версия провода, maxlen, release | `control.rs:2093` `encode_greeting_profile` при accept | E | `v22_control_server_greets_...` (control.rs:2494) и `control_server_accepts_reconnect_...` (control.rs:2343) читают `EVENT_PROTOCOL`. |
+| d2k_ctlsrv_peer_closed | 147-150 | 4 | снять пробные планы при отключении контроллера | `main.rs:1415` `name_plans.clear_probes()`; `control.rs:600` `clear_probes` | E | `clearing_disconnected_http_probes_keeps_the_permanent_plan` (control.rs:3703). |
+| canonical_address | 152-157 | 6 | static: family 4 требует нулевой хвост 16-байтного адреса | `control.rs:1612` `addr_plan_key` | E | `удаление_адреса_разделяет_формы_и_удаляет_одну` (control.rs:2793): `body[5]=1` даёт `ACK_BAD_ARGS`. |
+| addr_shape_valid | 163-167 | 5 | допустимые формы адресной привязки (1,2,3,5,6) | `control.rs:1628` `valid_addr_shape`, `:1635` `addr_plan_matches_shape` | P | Валидные формы покрыты тестами адресов; отказа для недопустимой формы (0/4/7) в тестах не найдено. |
+| read_probe_flow | 169-187 | 19 | static: разобрать flow адресного опыта, отвергнуть неканонический IPv4 | `control.rs:1695` `r2o_udp_addr_probe_flow_key` + `r2k-core/control.rs:1701` `valid_udp_addr_probe_flow` | P | Код есть, тестов SET/DEL/FIND адресного опыта (COMMAND_*_ADDR_PROBE) в дереве не найдено. |
+| d2k_ctlsrv_command | 189-509 | 321 | диспетчер команд, разбор тел, ACK, установка в таблицу | `control.rs:260` `NamePlans::handle`; `main.rs:68` `handle_control_command` (stall budgets); `control.rs:1988` `arm_client_shape` | P | Покрыты SET_NAME/BOUND/PROBE/ADDR/SUFFIX/BYPASS/DEL_*/HTTPS/ARM_SHAPE (control.rs:2633-3896). Пробелы: C `SET_HTTPS` обрезает TTL до максимума, R2O отвергает (`ACK_BAD_ARGS`) — control.rs:1070; `arm_client_shape` отвергает транспорт 17 (control.rs:2002), C принимает 6/17; адресные опыты не тестированы. |
+| d2k_ctlsrv_pump | 511-694 | 184 | выгрузить новые записи журнала в события с раскладкой по типам | `main.rs:2728` `send_journal_updates`, `:2709` `send_journal_snapshot`; `flow_journal.rs:202` `to_event_frame` | P | `flow_journal` round-trip тесты и `d2o_control_frames_match_donor_wire_decoding` (tests/control.rs:47). Пробелы: v22-трансляция `EVENT_LEGACY_CLIENT_TCP` шлёт пустые TCP-опции (r2k-core/control.rs:1212-1215), C шлёт реальные; набор видов журнала уже C (нет отдельного CLIENT_TCP в v48). |
+| d2k_ctlsrv_http80_event | 697-731 | 35 | событие HTTP-портала/ответа с измерениями | `control.rs:3136` `send_http_portal_event`, `:3148` `send_http_response_event`; `r2k-core/control.rs:852` `HttpResponseEvent::event_body` | P | `decodes_r2o_http_response_context_and_measurements` (tests/control.rs:977), `control_decoder_accepts_http_portal_response_events` (tests/capture_shape.rs:150). Отличие: R2O кодирует `code 1..4` и всегда несёт хвост status/body/request_no; C для портала без ответа хвост не шлёт. |
+
+Итог по файлу: E 6, P 6, N 0. Пробелы: TTL HTTPS (обрезка vs отказ), ARM_SHAPE для
+UDP, пустые TCP-опции в v22 CLIENT_TCP, адресные опыты без тестов, формат HTTP-события.
+
+---
+
+## 3. datapath/include/d2k_plans.h — 2 функции
+
+| C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
+|---|---|---:|---|---|---|---|
+| d2k_binding_known | 98-102 | 5 | static inline: identity известна (generation, kind, epoch) | `r2k-core/control.rs:315` `BindingContext::is_known` + покомпонентные проверки в `control.rs:1446-1461` | P | `conditional_http_delete_preserves_replacements_and_removes_only_its_binding` (control.rs:3587). Отличие: R2O `is_known` не проверяет `kind`; `kind==1` проверяется отдельно в `delete_name_bound`. |
+| d2k_binding_equal | 103-108 | 6 | static inline: совпадение generation/kind/family/shape/temporary/epoch | `control.rs:1468-1475` (epoch, generation, transport, shape через ключ) | P | Тот же тест. Отдельной функции сравнения нет: `family` берётся из ключа, `kind` проверяется как `==1`, `temporary` — как `false`. |
+
+Итог: E 0, P 2, N 0. Обе функции — inline-предикаты identity; поведение распределено по
+`delete_name_bound` и `binding_for_plan`.
+
+---
+
+## 4. datapath/plan_apply.c — 15 функций
+
+Компиляция проверенного плана в список посылок. R2O: `crates/r2k-core/src/plan/apply.rs`
+(`impl Plan`, `Actions`, `Emission`).
+
+| C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
+|---|---|---:|---|---|---|---|
+| anchor_offset | 26-80 | 55 | static: вычислить якорь разреза или отказать | `plan/apply.rs:862` `anchor_offset` | E | `sni_middle_anchor_is_clamped_inside_short_payload_and_requires_sni` (tests/apply.rs:96). |
+| cmp_size | 82-85 | 4 | static: qsort-компаратор size_t | `plan/apply.rs:920` `points.sort_unstable()` | E | `split_owns_original_and_reverse_order_preserves_sequence_ranges` (tests/apply.rs) — порядок кусков. |
+| split_points | 90-118 | 29 | static: якорь+смещение, сортировка, дедуп, отброс краёв | `plan/apply.rs:908` `split_points` | E | Тот же тест: куски и их границы. |
+| tls_ch_layout | 120-154 | 35 | static: разметка ClientHello (rnd/session id), три разных отказа | `plan/apply.rs:970` `tls_client_hello_layout` | E | `tls_fake_modifiers_copy_session_id_randomize_and_keep_repeat_bytes_equal` (tests/apply.rs). |
+| random_bytes | 156-163 | 8 | static: 32 случайных байта из `/dev/urandom` | `plan/apply.rs:1019` `secure_random` (`getrandom`) | E | Тот же тест: `TLS_MOD_RND` меняет random/SID. |
+| wr16 | 165-167 | 3 | static: записать u16 BE | `plan/apply.rs:1036` `write_u16` | E | Наследует тест `tls_fake_modifiers...` (перезапись длин записи). |
+| wr24 | 168-171 | 4 | static: записать u24 BE | `plan/apply.rs:1041` `write_u24` | E | Тот же тест (длина рукопожатия). |
+| fake_tls_bytes | 173-237 | 65 | static: собрать копию приманки с правкой random/SID | `plan/apply.rs:531` `fake_tls_bytes` | E | `tls_fake_modifiers...` (tests/apply.rs) — оба профиля, DUPSID и RND. |
+| emit_fake | 239-266 | 28 | static: заполнить `d2k_emit` из приманки и порчи | `plan/apply.rs:486` `emit_fake` | E | `no_action_plan_passes_original_and_fake_only_plan_keeps_original`, `interleaved_fakes...` (tests/apply.rs). |
+| emit_vec_free | 268-272 | 5 | static: освободить массив посылок и owned_bytes | `plan/apply.rs:61` `Emission` (Vec) + `Drop` | E | Владение выражено типами (`Vec<u8>`, `Vec<Emission>`); утечек нет по построению, отдельный free не нужен. |
+| emit_overhead | 285-295 | 11 | static: заголовки IP+TCP/UDP, MD5/TS-опция | `plan/apply.rs:737` `emit_overhead` | E | `max_emit`-тест (tests/apply.rs:251) и `route_segment_cap...` (tests/apply.rs). |
+| d2k_plan_max_emit | 297-341 | 45 | верхняя оценка одной посылки плана | `plan/apply.rs:418` `Plan::max_emit` | E | `assert_eq!(plan.max_emit(), 171)` (tests/apply.rs:251); используется в `r2o_plan_valid`. |
+| d2k_plan_apply | 343-873 | 531 | превратить план+пакет в посылки, судьбу оригинала и причину отказа | `plan/apply.rs:155` `Plan::apply` | P | 17 тестов tests/apply.rs покрывают split/fake/overlay/order/pace/settle/delay/udplen/qsplit/qdeny/oob/metric. Пробелы: `MAX_EMISSIONS = 26` (apply.rs:9) против 65536 в C (`plan_apply.c:830`) — R2O отвергает раньше; однако D2O на выдаче в session тоже ограничивает 26 (`D2K_RESULT_MAX`, session.c:2517), поэтому наблюдаемый отказ совпадает, различаются слой и текст ошибки. В OOB-ветви `suffix.wire_profile` остаётся 0 (apply.rs:280-291), тогда как C проставляет профиль всем посылкам на `finalize`. |
+| d2k_actions_cancel | 891-921 | 31 | правила отмены недосланного исполнения | `plan/apply.rs:104` `Actions::cancel` | E | `cancellation_drops_only_after_payload_bytes_were_emitted` (tests/apply.rs). |
+| d2k_actions_free | 923-931 | 9 | освободить посылки | `plan/apply.rs:61` `Emission` + `Actions` (RAII) | E | Освобождение автоматическое; отдельных ошибок/утечек нет по типам. |
+
+Итог по файлу: E 14, P 1, N 0. Главные отличия — место отказа при >26 посылках (D2O тоже
+отказывает в session, но позже) и потеря `wire_profile` в OOB-суффиксе.
+у OOB-суффикса.
+
+---
+
+## 5. datapath/plan_parse.c — 17 функций
+
+Разбор канонического плана. R2O: `crates/r2k-core/src/plan.rs` (`Plan::parse`, `scan`,
+`check_references`), поля `Plan`.
+
+| C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
+|---|---|---:|---|---|---|---|
+| rd16 | 23-25 | 3 | static: u16 BE | `plan.rs:892` `read_u16` | E | `rejects_bad_header_lengths_records_and_unknown_versions` (tests/plan.rs). |
+| rd32 | 27-30 | 4 | static: u32 BE | `plan.rs:902` `read_u32` | E | Тот же тест. |
+| fail | 32-36 | 5 | static: записать текст ошибки | `plan.rs:67` `PlanError::new` | P | Тексты R2O другие; проверяется только факт отказа, не текст. |
+| scan | 45-220 | 176 | первый проход: счётчики, проверки типов/длин/minexec | `plan.rs:687` `scan` | E | `rejects_bad_header_lengths_records_and_unknown_versions`, `rejects_dangling_references_and_invalid_operation_combinations` (tests/plan.rs). |
+| check_refs | 224-325 | 102 | второй проход: ссылки, сочетания операций, порядок, одиночное перекрытие | `plan.rs:499` `check_references` | E | `rejects_dangling_references_and_invalid_operation_combinations` (tests/plan.rs). |
+| d2k_find_payload | 327-334 | 8 | найти приманку по id | `plan.rs` — `self.payloads.iter().find(...)` (apply.rs:611, :1287 и др.) | E | `parses_payload_fake_and_cross_references` (tests/plan.rs). |
+| d2k_find_poison | 336-343 | 8 | найти порчу по id | `plan.rs` — `self.poisons.iter().find(...)` (apply.rs:624, :744) | E | Тот же тест. |
+| d2k_plan_load | 345-566 | 222 | полная загрузка: заголовок, scan, записи, check_refs, транспорт | `plan.rs:190` `Plan::parse`, `:167` `parse_wire` | E | 7 тестов tests/plan.rs, включая legacy `D2KP` (`parses_legacy_d2kp_container_with_identical_body`). Отличия: magic `R2OP` (legacy `D2KP` только через `parse_wire`), повторный `autottl` в R2O — ошибка (`plan.rs:307`), в C — «последний побеждает» (plan_parse.c:482). |
+| d2k_plan_free | 568-581 | 14 | освободить план | `Drop` (`Vec<Payload>`, `vec!`) | E | Владение типами; утечек нет по построению. |
+| d2k_plan_poison_used | 583-592 | 10 | OR всех флагов порчи | `plan.rs:327` `poison_used` | E | `parses_payload_fake_and_cross_references` + `max_emit`-тест. |
+| d2k_plan_flow_needs | 594-599 | 6 | нужен ли потоку TCPTS (шаблон+TCPTS_BACK) | `engine.rs:1860-1869` — прямая проверка `wire_profile==TEMPLATE && POISON_TCPTS_BACK` и наличия TS-опции, иначе `FlowUnfit` | P | Логика перенесена в решатель, отдельной функции нет; тест на `FlowUnfit` по отсутствию TS-опции не найден. |
+| d2k_plan_quic_deny | 601-603 | 3 | флаг запрета QUIC | `plan.rs:333` `quic_deny` | E | `quic_deny_drops_without_sending_anything` (tests/apply.rs). |
+| d2k_plan_guards | 605-607 | 3 | байт защит TCP | `Plan::guards` (plan.rs:137), исполнение — `engine.rs:1453,1586-1594,2078-2089` | E | Тест `r2o_передний_сброс_чужой_rst_до_runtime_и_...` (main.rs:5961) с `GUARD_RST_ALIEN`. |
+| d2k_plan_transport | 609-611 | 3 | транспорт плана | `Plan::transport` (plan.rs:134) | E | `parses_measured_tcp_context_and_wire_contract`, `permits_http_only...` (tests/plan.rs). |
+| d2k_plan_proto | 613-615 | 3 | протокол плана | `Plan::proto` (plan.rs:135) | E | Те же тесты. |
+| d2k_plan_stream_input | 617-621 | 5 | потоковый вход: TCP + wire + input | `plan.rs:337` `stream_input` | P | Тело тождественно; используется в `control.rs:614-621`. Прямого теста на предикат нет — покрыт косвенно через `has_tls_candidate`. |
+| d2k_plan_id | 623-630 | 8 | id плана или NULL | `Plan::id` (plan.rs:133) | E | `round_trips_an_applied_http_probe_with_its_exact_binding_identity` (tests/control.rs:724). |
+
+Итог по файлу: E 14, P 3, N 0. Пробелы: текст ошибок, `flow_needs` как отдельная
+функция, прямой тест `stream_input`.
+
+## 6. datapath/plans.c — 75 функций
+
+Таблица планов по целям: ключи имя/адрес/суффикс, LRU-вытеснение, точные пробы, поиск на
+пакетном пути. R2O-аналог — `NamePlans` в `crates/r2o-datapath/src/control.rs`
+(`HashMap`-ключи вместо уплотнённого массива, `Cell<u64>`-часы вместо `last_used_ns`).
+
+| C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
+|---|---|---:|---|---|---|---|
+| bind_context | 94-102 | 9 | static: присвоить плану identity (owner, generation, kind/family/shape/temporary) | `control.rs:1592` `next_generation`, `:878-887`/`:915-924` вставка | P | Identity выдаётся при вставке в каждую таблицу; отдельной функции нет. Проверяется через `binding_for_plan` в тестах APPLIED. |
+| d2k_plantab_new | 104-130 | 27 | создать таблицу на cap записей и 16-байтовый epoch | `control.rs:146` `NamePlans::with_capacity` | E | `exact_name_addr_probe_tables_share_lru_capacity` (control.rs:2633). |
+| d2k_plantab_free | 132-149 | 18 | освободить планы и массивы | `Drop` (`HashMap<String, InstalledPlan>`) | E | Владение типами; утечек нет по построению. |
+| name_eq | 154-167 | 14 | static: сравнение имён без учёта регистра (ASCII) | `control.rs:2233` `canonical_name` (lowercase) + `String`-равенство | P | Регистронезависимость подтверждена для HTTPS-имён (`EXAMPLE.TEST`, control.rs:3167); теста на план, поставленный в верхнем регистре и найденный в нижнем, нет. |
+| shape_transport | 169-175 | 7 | static: форма→транспорт (QUIC 17, TLS 6, иначе 0) | нет функции; совместимость в `control.rs:859-868`, `:955-960`, `:1597-1603` | P | Правила размазаны по трём `match`; отдельного предиката нет. |
+| area_name_valid | 177-191 | 15 | static: валидация DNS-суффикса (метки, дефисы, 253) | `control.rs:2233` `canonical_name` | P | R2O строже: требует ≥2 метки и хотя бы одну нецифровую; C допускает односложное имя. Тест `исключение_снимает_suffix...` (control.rs:3075). |
+| suffix_member | 193-197 | 5 | static: имя входит в суффикс по границе метки | `control.rs:1605` `domain_suffix_member` | E | `исключение_снимает_suffix_только_для_точного_имени...` (control.rs:3075): `other.googlevideo.com` получает план, `failed...` — нет. |
+| area_exact | 199-207 | 9 | static: найти запись площади по (имя, транспорт, форма, family) | ключ `SuffixPlanKey`/`DomainBypassKey` (control.rs:64-78, HashSet/HashMap) | E | Тест control.rs:3075 (установка/поиск/удаление). |
+| area_set | 209-226 | 18 | static: поставить план суффикса с проверкой формы/транспорта/family | `control.rs:928` `set_suffix` (и `:988` `set_domain_bypass`) | P | Тест control.rs:3075. Отличие: C принимает любой транспорт, равный `shape_transport(shape)`; R2O ограничивает набор форм TCP 1/2/6/8-13 и QUIC 3. |
+| d2k_plantab_set_suffix_family | 228-237 | 10 | поставить план изученного суффикса | `control.rs:928` `set_suffix` | E | `исключение_снимает_suffix...` (control.rs:3075). |
+| d2k_plantab_set_bypass_family | 239-244 | 6 | поставить исключение семейства (bypass) | `control.rs:988` `set_domain_bypass` | E | Тот же тест: bypass подавляет суффикс, затем снимается. |
+| area_del | 246-253 | 8 | static: снять запись площади с уплотнением | `control.rs:1021` `delete_domain_area` | E | Тот же тест (DEL_BYPASS/DEL_SUFFIX). |
+| d2k_plantab_del_suffix_family | 255-258 | 4 | снять суффикс | `control.rs:1021` `delete_domain_area(body, true)` | E | Тот же тест. |
+| d2k_plantab_del_bypass_family | 260-263 | 4 | снять исключение | `control.rs:1021` `delete_domain_area(body, false)` | E | Тот же тест. |
+| area_bypassed | 265-273 | 9 | static: имя исключено для (family, shape) | `control.rs:1557` `name_is_bypassed` | E | Тот же тест. |
+| area_match | 275-284 | 10 | static: самый длинный подходящий суффикс | `control.rs:1569` `find_in_domain` (`max_by_key(len)`) | P | Тест покрывает один суффикс; выбор самого длинного из нескольких не проверен. |
+| d2k_plantab_revision | 286-286 | 1 | ревизия таблицы | `control.rs:586` `revision` | E | `conditional_http_delete...` (control.rs:3587) сверяет `revision` до/после. |
+| d2k_plantab_has_ech_target | 288-314 | 27 | есть ли ECH-привязка имени/адреса (для удержания фрагментов ECH) | — | ? | Прямого предиката с таким именем нет. R2O собирает неполный ClientHello общим путём `capture.rs`/`engine.rs` (не только при наличии ECH-привязки), поэтому поведение «фрагменты ECH удерживаются» может быть покрыто, но адресного differential на это правило нет. Нужен тест: ECH-привязка есть → обрывок удерживается; привязки нет → не удерживается. |
+| d2k_plantab_stream_candidate | 316-319 | 4 | префильтр: есть ли потоковый план по имени/адресу | `control.rs:612` `has_tls_candidate(family)` | P | R2O префильтр только по family, без имени/адреса/sport; используется в `main.rs:1699`. |
+| d2k_plantab_stream_candidate_family | 321-325 | 5 | то же с family | `control.rs:612` `has_tls_candidate` | P | То же: нет учёта имени и порта; тестов на точность префильтра нет. |
+| d2k_plantab_stream_candidate_target | 327-350 | 24 | то же по (имя, адрес, sport, family), включая суффиксы | `control.rs:612` `has_tls_candidate` | P | Отличие: R2O не различает sport и конкретную цель; суффиксы учитываются, но без имени. |
+| find_name_skip | 357-367 | 11 | static: запись имени без порта; опционально мимо HTTP | `control.rs:1493` `find` по `NamePlanKey{host,family,shape}` | P | HTTP-запись в R2O — отдельный shape-ключ, поэтому «пропустить HTTP» не нужно; но и «любая форма» одним поиском не выражается. |
+| find_name | 369-371 | 3 | static: запись имени без порта | `control.rs:1493` `find` | E | Выбор по имени в `tls_probe_plan...`/`http_probe_plan...` (control.rs:3489, 3637). |
+| find_name_shape_port | 385-395 | 11 | static: запись ровно (имя, форма, порт, family) | `control.rs:1493` `find` + `probes: NameProbeKey` | E | `tls_probe_plan_matches_only_its_source_port_and_reports_temporary_applied` (control.rs:3637). |
+| find_name_port | 401-412 | 12 | static: портовая запись имени при неизвестной форме | `control.rs:548-571` — поиск probe по `(host, family, shape)` и bridge-shape | E | `tls_probe_plan...` (control.rs:3637): проба находится по своему порту. |
+| d2k_plantab_http_candidate | 414-422 | 9 | префильтр HTTP: запись формы HTTP с точным портом и proto HTTP | `control.rs:624` `has_http_candidate(family)` | P | R2O проверяет только shape-ключ, без `proto==HTTP` и без sport; вызывается в `main.rs:1701`. |
+| d2k_plantab_find_http | 424-431 | 8 | план для HTTP-запроса: проба своего порта, иначе постоянная | `control.rs:495-509` (`select` + `NameProbeKey` для порта 80) | E | `http_probe_plan_matches_only_its_source_port_and_acknowledges_trial_id` (control.rs:3489). |
+| find_addr_shape | 439-450 | 12 | static: адресная запись ровно (адрес, family, форма) | `control.rs:1504` `find_addr` | E | `discord_voice_class_plan_matches_only_discord_voice_requests` (control.rs:3186), `удаление_адреса...` (control.rs:2793). |
+| find_addr | 452-454 | 3 | static: любая форма адреса (для снятия/учёта промаха) | `control.rs:1504` `find_addr` (с ECH-fallback) | E | Те же тесты; снятие адреса в control.rs:2793. |
+| modern_shape_for_ech | 465-469 | 5 | static: ECH-форма → соответствующая MODERN-форма | `control.rs:534-539` `fallback_shape` в `select` | E | `tls_план_работает_для_sni_с_ech_...` (control.rs:2823). |
+| scan_name | 471-486 | 16 | static: один проход — shaped/modern/grandfather/any по имени | `control.rs:572-581` — цепочка `find` с fallback-формами | P | Порядок предпочтения сохранён, но R2O делает отдельные HashMap-поиски, а не один проход; ветка `h.any` (запись есть, формы нет) выражена иначе. |
+| scan_addr | 488-502 | 15 | static: один проход по адресу | `control.rs:1522` `find_addr_fallback` | P | Учтён ECH-fallback и bypass; счётчик промахов по форме не ведётся (см. `shape_misses`). |
+| oldest | 518-529 | 12 | static: самая старая запись (LRU) | `control.rs:211` `exact_victim` | E | `name_plan_table_evicts_lru_and_delete_releases_a_slot` (control.rs:2663). |
+| take_free_or_evict | 541-569 | 29 | static: свободный слот или вытеснение LRU с уплотнением | `control.rs:234` `make_room_exact` | E | `exact_name_addr_probe_tables_share_lru_capacity` (control.rs:2633): общая ёмкость имя+адрес+проба. |
+| d2k_plantab_set_name_shaped | 571-574 | 4 | поставить план имени с формой | `control.rs:832` `set_name` (shape — часть ключа) | E | `условие_..._tls_форма` (control.rs:2844) и shape-тесты. |
+| d2k_plantab_set_name_probe | 576-580 | 4 | поставить пробный план имени на один порт | `control.rs:1092` `set_name_probe` | E | `http_probe_plan...` (control.rs:3489), `tls_probe_plan...` (control.rs:3637). |
+| probe_transport | 584-588 | 5 | static: транспорт пробы (из плана, иначе по форме) | `control.rs:1129` (`plan.transport != 6`), `:859-868` | P | Вывод транспорта из формы без плана в R2O не нужен: проба всегда TCP/proto 1/HTTP. |
+| d2k_plantab_set_name_family | 590-667 | 78 | основная установка имени: ключ (имя, форма, порт, family), замена пробы того же порта, grandfather-правило | `control.rs:832` `set_name`, `:1092` `set_name_probe` | P | Тесты shape/probe/bound (control.rs:2700-3896). Отличия: C при `sport` снимает прежнюю пробу того же (имя, family, порт, транспорт) — R2O `retain` по (host, family, port) без транспорта; C хранит `SHAPE_ANY` и grandfather в общем массиве — R2O различает их ключом. |
+| d2k_plantab_set_name | 672-676 | 5 | legacy: поставить имя как grandfather | `control.rs:832` `set_name` (контроллер шлёт форму явно) | P | Legacy-входа без формы нет; совместимость обеспечивает shape=GRANDFATHER в ключе. |
+| d2k_plantab_set_addr | 678-681 | 4 | legacy: адрес как grandfather | `control.rs:891` `set_addr` (форма обязательна) | P | C legacy-вход только для тестов датапата; командой сокета не используется. В R2O такого входа нет. |
+| d2k_plantab_set_addr_family | 686-690 | 5 | legacy: адрес без формы → grandfather | `control.rs:891` `set_addr` | P | То же: форма обязательна (`valid_addr_shape`), grandfather по сокету не принимается — совпадает с C `ctlsrv`. |
+| d2k_plantab_set_addr_shaped | 692-721 | 30 | адресная привязка ровно (адрес, family, форма) | `control.rs:891` `set_addr` | E | `удаление_адреса_разделяет_формы...` (control.rs:2793): две формы одного IP, удаление одной. |
+| drop | 728-741 | 14 | static: снять запись, сохранив уплотнение | `HashMap::remove` (control.rs:1408, 1473, 1489) | E | `name_plan_table_evicts_lru_and_delete_releases_a_slot` (control.rs:2663). |
+| d2k_plantab_del_name | 743-745 | 3 | legacy: снять ВСЕ записи имени (v4) | `control.rs:1389` `delete_name` (одна форма) | P | Семантика разная: C legacy снимает все формы, R2O — только точный ключ (как v9 `DEL_NAME`). Широкого удаления в R2O нет. |
+| d2k_plantab_del_name_family | 747-765 | 19 | снять все формы имени в family | `control.rs:1389` `delete_name` | P | То же: удаляется один shape-ключ, а не все формы. |
+| d2k_plantab_del_name_shaped | 773-790 | 18 | снять постоянную запись (имя, транспорт, форма, family), пробы не трогать | `control.rs:1389` `delete_name` | E | `conditional_http_delete_preserves_replacements_and_removes_only_its_binding` (control.rs:3587). |
+| d2k_plantab_del_name_bound | 792-806 | 15 | условное снятие по identity (generation/epoch/kind) | `control.rs:1416` `delete_name_bound` | E | Тот же тест: замена с другой identity не удаляется. |
+| d2k_plantab_del_name_probe | 808-811 | 4 | снять пробную запись по порту | `control.rs:1362` `delete_name_probe` | E | `http_probe_plan...` (control.rs:3489) снимает пробу. |
+| d2k_plantab_del_name_probe_family | 813-828 | 16 | то же с family | `control.rs:1362` `delete_name_probe` | E | Тот же тест. |
+| d2k_plantab_del_addr | 830-832 | 3 | legacy: снять адрес целиком (все формы) | `control.rs:1479` `delete_addr` (одна форма) | P | Семантика разная: широкого удаления адреса в R2O нет (v7 шлёт форму). |
+| d2k_plantab_del_addr_family | 837-842 | 6 | снять все формы адреса | `control.rs:1479` `delete_addr` | P | То же: одна форма. |
+| d2k_plantab_del_addr_shaped | 844-848 | 5 | снять ровно форму адреса | `control.rs:1479` `delete_addr` | E | `удаление_адреса_разделяет_формы...` (control.rs:2793). |
+| trial_id_valid | 850-855 | 6 | static: trial id не весь нулевой | inline `iter().all(\|b\| *b == 0)` (control.rs:1198, 1277, 1329) | P | Три копии вместо функции; тестов на нулевой id не найдено. |
+| probe_flow_valid | 860-874 | 15 | static: валидность flow опыта (UDP, dst port, family, ненулевые адреса) | `r2k-core/control.rs:1701` `valid_udp_addr_probe_flow` | P | R2O требует family 4/6 (C допускает 0) и ненулевой src-порт (C — wildcard 0 для голоса вынесен в отдельную таблицу). Тестов нет. |
+| probe_flow_equal | 876-887 | 12 | static: равенство flow | ключ `[u8; KEY_LEN]` в `HashMap` (control.rs:88) | P | Равенство по ключу тривиально, но адресные опыты не тестированы. |
+| probe_drop | 889-895 | 7 | static: снять запись опыта | `HashMap::remove`/`retain` (control.rs:607, 1291) | E | `clearing_disconnected_http_probes_keeps_the_permanent_plan` (control.rs:3703) — очистка проб. |
+| d2k_plantab_clear_probes | 897-910 | 14 | снять пробные записи и QUIC-запреты | `control.rs:600` `clear_probes` | E | Тот же тест. Отличие: R2O чистит `probes`, `voice_addr_probes`, `addr_probes`, но не записи с `qdeny` в основной таблице. |
+| d2k_plantab_set_addr_probe | 912-961 | 50 | временный план на точный flow с trial id и lease | `control.rs:1260` `set_addr_probe` | P | Реализация есть (lease, trial, отказ при чужой generation), но ни одного теста COMMAND_SET_ADDR_PROBE не найдено. |
+| d2k_plantab_del_addr_probe | 963-976 | 14 | снять ровно (flow, generation) | `control.rs:1318` `delete_addr_probe` | P | Тестов нет. |
+| find_probe | 978-1006 | 29 | static: поиск опыта, ленивое истечение, wildcard-порт только для голоса | `control.rs:804` `addr_probe_binding_at_hook`, `:764` `voice_address_binding` | P | Голосовая часть покрыта (`временная_voice_запись...`, control.rs:3239), адресная — нет. |
+| d2k_plantab_find_addr_probe | 1008-1012 | 5 | поиск точного адресного опыта | `control.rs:804` `addr_probe_binding_at_hook` | P | Тестов нет; поиск дополнительно требует authenticated Initial и клиентского направления. |
+| d2k_plantab_find_voice_probe | 1014-1018 | 5 | поиск голосового опыта (wildcard клиентского порта) | `control.rs:764` `voice_address_binding` | E | `временная_voice_запись_соответствует_только_с_заданным_и_целым_адресом` (control.rs:3239), `stun_...` (3278). Ключ R2O не содержит клиентского порта — wildcard выражен структурно. |
+| d2k_plantab_probe_count | 1020-1022 | 3 | число адресных опытов | `control.rs:186` `r2o_probe_count` | P | Считает только неистёкшие `addr_probes`; тестов нет. |
+| shape_fits | 1044-1052 | 9 | static: подходит ли форма записи наблюдению (три исхода + ECH-перенос) | `control.rs:534-539, 572-581` — цепочка exact/bridge/fallback/grandfather | P | Логика расщеплена на цепочку поисков; отдельного предиката нет. ECH-перенос и grandfather покрыты тестами (control.rs:2823). |
+| shape_is_udp | 1054-1056 | 3 | static: QUIC/VOICE | `matches!(shape, SHAPE_QUIC \| SHAPE_VOICE)` в разных местах (control.rs:1404 и др.) | P | Отдельной функции нет; правило кросс-транспортного перехода C (UDP-наблюдение не блокируется TCP-записью) в R2O заменено общим fallback на адрес. |
+| d2k_plantab_shape_misses | 1058-1060 | 3 | счётчик «нашли, но форма не подошла» | `control.rs:193` `r2o_shape_misses` | N | Поле `shape_misses` объявлено и читается, но **нигде не инкрементируется** (grep по `shape_misses` — только объявление/инициализация/геттер) → всегда 0. |
+| d2k_plantab_find | 1062-1066 | 5 | поиск плана по имени, затем адресу | `control.rs:410` `select` | P | R2O `select` разбирает пакет и сам извлекает SNI/HTTP/QUIC; порядок «имя → суффикс → адрес» сохранён, но набор ветвей другой (см. `find_target`). |
+| d2k_plantab_find_sport | 1068-1072 | 5 | поиск с местным портом потока | `control.rs:410` `select` (`tcp.source_port` для проб) | P | Порт учитывается только для проб; отдельного входа с sport нет. |
+| d2k_plantab_find_family | 1074-1079 | 6 | поиск с family | `control.rs:410` `select` (`view.family`) | P | Family берётся из пакета; отдельного входа нет. |
+| d2k_plantab_find_target | 1081-1236 | 156 | ядро поиска: точный порт → своя форма → grandfather → суффикс → адрес; счёт промахов по форме | `control.rs:419` `select_with_quic_host_at_hook` | P | Тесты: TLS/ECH/QUIC/HTTP/voice/probe (control.rs:2823-3896). Отличия: (1) счётчик промахов не ведётся; (2) R2O добавляет TCP-контекст 8–13 и bridge-shape (control.rs:529-539); (3) кросс-транспортный переход UDP↔TCP в C отдельной ветвью (`goto check_addr`), в R2O — общим fallback; (4) ECH-fallback на адрес в R2O отсутствует. |
+| d2k_plantab_count | 1238-1240 | 3 | число занятых записей | `control.rs:178` `r2o_plan_count` | E | `exact_name_addr_probe_tables_share_lru_capacity` (control.rs:2633) и eviction-тест сверяют counts. |
+| d2k_plantab_capacity | 1242-1244 | 3 | ёмкость таблицы | `control.rs:182` `r2o_plan_capacity` | E | `name_plan_table_evicts_lru...` (control.rs:2663) сверяет capacity. |
+| d2k_plantab_binding | 1246-1257 | 12 | identity установленного плана (generation/kind/family/shape/temporary/epoch) | `control.rs:380` `http_name_binding_context`, `:690` `binding_for_plan` | E | `bound_http_set_returns_its_trial_id_and_installed_binding` (control.rs:2700); APPLIED-фикстуры D2O (tests/control.rs:47). |
+| d2k_plantab_set_name_trial | 1259-1267 | 9 | поставить пробный план с trial id | `control.rs:1092` `set_name_probe` (trial_id) | E | `http_probe_plan_matches_only_its_source_port_and_acknowledges_trial_id` (control.rs:3489). |
+| d2k_plantab_trial | 1268-1273 | 6 | trial id установленного временного плана | `control.rs:690` `binding_for_plan` (`PlanBinding.trial_id`) | E | `tls_probe_plan...reports_temporary_applied` (control.rs:3637), voice-тесты (control.rs:3239). |
+
+Итог по файлу: E 37, P 36, N 1, ? 1. Ключевые пробелы: счётчик промахов по форме мёртв;
+нет ECH-удержания; адресные опыты без тестов; префильтры кандидатов грубее C; legacy-удаления
+«все формы» отсутствуют; поиск ядра отличается набором ветвей.
+
+---
+
+## 7. datapath/raw.c — 17 функций
+
+Сырой сокет: пределы длины, MTU маршрута, отправка без ожидания. R2O:
+`crates/r2o-datapath/src/raw.rs` (`RawSocket`).
+
+| C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
+|---|---|---:|---|---|---|---|
+| if_mtu | 64-81 | 18 | static: MTU интерфейса через `SIOCGIFMTU` | `raw.rs:301` `r2o_interface_mtu` (sysfs `/sys/class/net/<if>/mtu`) | P | Механизм другой (sysfs), ioctl-путь не проверен; теста на чтение MTU реального интерфейса нет. |
+| pick_maxlen | 92-116 | 25 | static: предел по named iface или наименьшему MTU поднятых (без loopback) | `raw.rs:270` `r2o_pick_maxlen` | P | `общий_предел_берёт_наименьший...` (raw.rs:836) тестирует выбор через инъекцию; сам обход sysfs и fallback 1500 против `D2K_RAW_MTU_FALLBACK` не сверены. |
+| route_mtu | 140-176 | 37 | static: MTU маршрута к адресу (UDP connect + `IP_MTU`/`IPV6_MTU`) | `raw.rs:484` `r2o_route_mtu` | P | Код тождествен по смыслу, но требует root/kernel; теста нет. |
+| say | 181-191 | 11 | static: текст ошибки с сохранением errno | `io::Error` + `eprintln!` | P | Формат другой; errno сохраняет `io::Error`. |
+| d2k_raw_open | 193-256 | 64 | открыть IPv4 raw, `IP_HDRINCL`, `SO_MARK`, вычислить maxlen | `raw.rs:48` `RawSocket::open` | P | Отличия: R2O требует ненулевой mark (C допускает 0), один объект — одно семейство (C держит IPv4+IPv6 вместе), нет ленивого fragment-сокета. Тестов open на живой системе нет. |
+| d2k_raw_close | 258-269 | 12 | закрыть fd/фрагментный сокет | `Drop for RawSocket` (`OwnedFd`) | E | Владение типами; утечек нет по построению. |
+| d2k_raw_limits | 271-273 | 3 | маска ограничений способа отправки (`CANT_IPID\|CANT_IPSUM`) | нет API; `engine.rs:2091` отвергает `POISON_IPID_ZERO` | P | `CANT_IPSUM` в R2O не выражен (суммы считает wire); маска как интерфейс отсутствует. |
+| d2k_raw_maxlen | 275-279 | 5 | предел посылки, никогда не 0 | `raw.rs:96` `maxlen` | E | `предел_маршрута_учитывает_объявленный_интерфейс...` (raw.rs:820). |
+| d2k_raw_adopt_egress | 281-303 | 23 | принять наименьший MTU выходных ifindex (если предел не объявлен) | `raw.rs:106` `r2o_adopt_egress` | E | `общий_предел_берёт_наименьший...` (raw.rs:836): фильтр `< FLOOR`, дубли, `None`. |
+| blend | 306-309 | 4 | static: маршрут против общего предела при объявленном iface | `raw.rs:351` `r2o_effective_route_maxlen` | E | `предел_маршрута_учитывает_объявленный_интерфейс_и_запасной_mtu` (raw.rs:820). |
+| d2k_raw_route_maxlen | 311-313 | 3 | MTU маршрута для dst[4] | `raw.rs:119` `packet_route_maxlen` | P | Вход — пакет, а не 4 байта; IPv6-путь и fallback на общий предел не сверены. |
+| d2k_raw_route_maxlen_family | 315-339 | 25 | кэш из 16 маршрутов, порог 1280/576, запись кольцом | `raw.rs:136` `r2o_route_maxlen`, `:367` `R2oRouteMtuCache` | E | `кэш_mtu_сохраняет_только_полезные_маршруты_и_ограничен` (raw.rs:786); порог и вытеснение. |
+| d2k_raw_prepare | 341-404 | 64 | ленивая подготовка IPv6/fragment-сокета, проверка длин и контекста фрагмента | `raw.rs:559` `outgoing_packet` (+`:591`/`:622` фрагменты) | P | R2O не открывает отдельный fragment-сокет с `IP_NODEFRAG` и не создаёт IPv6-сокет лениво (семейство задано при старте); валидация фрагментов есть (`raw_sender_accepts_only_well_formed...`, raw.rs:874). |
+| d2k_raw_send | 406-512 | 107 | `sendto(MSG_DONTWAIT)`, EINTR-повтор, EMSGSIZE → снизить предел | `raw.rs:147` `send_packet`, `:155` `send_packet_inner` | P | Логика EMSGSIZE/кэша и busy есть (raw.rs:208-219, `record_send_outcome`), но реальная отправка в тестах не выполнялась (нужен root). Тесты покрывают статистику и разбор. |
+| d2k_raw_sent | 514-516 | 3 | счётчик успешных посылок | `raw.rs:100` `send_stats().sent` | E | `raw_send_stats_count_success_and_busy_errors_like_d2o` (raw.rs:231). |
+| d2k_raw_errors | 518-520 | 3 | счётчик ошибок | `raw.rs:100` `send_stats().errors` | E | Тот же тест. |
+| d2k_raw_busy | 522-524 | 3 | счётчик EAGAIN/ENOBUFS | `raw.rs:100` `send_stats().busy` | E | Тот же тест. |
+
+Итог по файлу: E 8, P 9, N 0. Главные отличия: один сокет на семейство, обязательный
+mark, нет `IP_NODEFRAG`, нет ленивого открытия, нет маски ограничений.
+
+---
+
+## 8. datapath/routemark.c — 23 функции
+
+Сопоставление fwmark/выходных интерфейсов и политика Keenetic. R2O:
+`crates/r2o-datapath/src/r2o_route.rs` (`R2oRouteGate`, `R2oRoutePolicy`, парсеры).
+
+| C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
+|---|---|---:|---|---|---|---|
+| rd16h | 27-27 | 1 | static: u16 host order | `u16::from_ne_bytes` (r2o_route.rs:838 и др.) | E | `r2o_разбор_правил_учитывает_маску...` (r2o_route.rs:1109). |
+| rd32h | 28-28 | 1 | static: u32 host order | `u32::from_ne_bytes` | E | Те же тесты разбора. |
+| wr16h | 29-29 | 1 | static: записать u16 host order | `to_ne_bytes` (r2o_route.rs:683) | E | `r2o_запросы_содержат_семейство...` (r2o_route.rs:1086). |
+| wr32h | 30-30 | 1 | static: записать u32 host order | `to_ne_bytes` (r2o_route.rs:685) | E | Тот же тест. |
+| d2k_routemark_init | 32-34 | 3 | обнулить состояние | `impl Default for R2oRouteGate` (r2o_route.rs:108) | E | Все тесты создают `R2oRouteGate::default()`. |
+| d2k_routemark_request | 36-46 | 11 | собрать `RTM_GETRULE` dump-запрос | `r2o_route.rs:679` `r2o_route_rule_request` | E | `r2o_запросы_содержат_семейство_последовательность_и_адрес_поиска` (r2o_route.rs:1086). |
+| nl_error | 49-51 | 3 | static: errno из тела `NLMSG_ERROR` | `r2o_route.rs:863` `r2o_kernel_error` | E | `r2o_ошибки_и_повреждённые_сообщения...` (r2o_route.rs:1161). |
+| d2k_routemark_parse | 53-95 | 43 | разобрать дамп правил: fwmark/fwmask, invert, mask=0 | `r2o_route.rs:711` `r2o_route_parse_rules` | E | `r2o_разбор_правил_учитывает_маску_инверсию_и_завершение_дампа` (r2o_route.rs:1109). |
+| d2k_routemark_lookup_request | 103-120 | 18 | собрать одиночный `RTM_GETROUTE` к probe-адресу | `r2o_route.rs:691` `r2o_route_lookup_request` | E | `r2o_запросы_содержат...` (r2o_route.rs:1086). |
+| add_oif | 122-128 | 7 | static: добавить ifindex без дублей и нуля | `r2o_route.rs:950` `r2o_route_add_ifindex` | E | `r2o_разбор_маршрута_собирает_основной_и_multipath...` (r2o_route.rs:1137). |
+| route_oifs | 132-152 | 21 | static: обойти RTA_OIF и RTA_MULTIPATH | `r2o_route.rs:876` `r2o_route_attributes`, `:913` `r2o_route_parse_multipath` | E | Тот же тест: OIF+multipath+нулевой hop. |
+| d2k_routemark_lookup_parse | 154-173 | 20 | разобрать ответ маршрута, не-unicast → 2 | `r2o_route.rs:774` `r2o_route_parse_lookup` | E | Тот же тест + `r2o_ошибки_...` (r2o_route.rs:1161). |
+| d2k_routemark_watch_relevant | 175-190 | 16 | нужно ли обновление по уведомлению | `r2o_route.rs:806` `r2o_route_watch_relevant` | E | `r2o_уведомления_обновляют_состояние...` (r2o_route.rs:1189). |
+| d2k_routemark_clear_oifs | 192-199 | 8 | сбросить список устройств (маршрут без устройства) | `r2o_route.rs:131` `r2o_set_default_ifindices(family, None/Some(vec![]))` | P | В R2O нет флага `oifs_read`; `None` = неизвестно, `Some(empty)` = известно «нет устройств». Соответствие не проверено тестом на реальном маршруте без OIF. |
+| d2k_routemark_set_oifs | 201-213 | 13 | сохранить список устройств с признаком чтения | `r2o_route.rs:131` `r2o_set_default_ifindices` | E | `r2o_устройства_по_умолчанию_включают_multipath...` (r2o_route.rs:1053), `r2o_выходные_интерфейсы...` (r2o_route.rs:1074). |
+| d2k_routemark_set | 215-227 | 13 | заменить набор селекторов, вернуть изменение | `r2o_route.rs:119` `r2o_set_rules` | P | R2O не возвращает признак изменения и не хранит `rules_read*` в объекте (выражено `Option<Vec<...>>`); влияние на `revision`/удержания не проверено. |
+| d2k_routemark_merge | 229-267 | 39 | объединить v4/v6, сохранить прежнее семейство при ошибке | `r2o_route.rs:372` `r2o_refresh` (обновляет только успешное семейство) | P | Логика сохранения прежнего набора есть; `found`/`truncated` в статусе не перенесены (нет `d2k_routemark_status`). |
+| d2k_routemark_set_policy | 269-275 | 7 | включить политику (none/mark/mask) | `r2o_route.rs:170` `r2o_set_policy(Some/None)` + `R2oRoutePolicy::new` | E | `r2o_политика_отделяет_чужие_потоки...` (r2o_route.rs:1008). |
+| policy_match | 277-280 | 4 | static: метка подходит политике | `r2o_route.rs:93` `R2oRoutePolicy::r2o_matches` | E | Тот же тест. |
+| d2k_routemark_routed | 282-296 | 15 | уведена ли метка чужим ip rule (fail closed) | `r2o_route.rs:175` `r2o_mark_is_routed` | E | `r2o_метки_fwmark_учитывают_маску_семейство_и_неизвестные_правила` (r2o_route.rs:979). |
+| d2k_routemark_client | 298-302 | 5 | метка клиента, кроме probe/own | `r2o_route.rs:201` `r2o_route_mark` (первые ветви) | E | `r2o_политика_...` (r2o_route.rs:1008): свои метки 0x2d/0x2e не считаются клиентскими. |
+| d2k_routemark_gate | 304-325 | 22 | политика Keenetic + клиентская метка + проверка outdev | `r2o_route.rs:201` `r2o_route_mark` | E | `r2o_политика_...` (r2o_route.rs:1008) и `r2o_устройства_по_умолчанию...` (r2o_route.rs:1053). |
+| d2k_routemark_describe | 327-343 | 17 | текст «0xmark/0xmask v4, ...» для логов | — | N | Функции/строки описания набора правил в R2O нет. |
+
+Итог по файлу: E 19, P 3, N 1. Пробелы: статус merge (`found/truncated`), признак
+изменения набора правил, отсутствие текстового описания.
+
+---
+
+## 9. datapath/routemark_nl.c — 8 функций
+
+Rtnetlink: дампы правил, одиночный поиск маршрута, подписка на изменения. R2O:
+`R2oRouteMonitor` в `crates/r2o-datapath/src/r2o_route.rs`.
+
+| C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
+|---|---|---:|---|---|---|---|
+| parse_rules | 18-21 | 4 | static: адаптер сигнатуры под `d2k_routemark_parse` | `r2o_route.rs:402` замыкание `r2o_route_parse_rules` | E | `r2o_разбор_правил...` (r2o_route.rs:1109). |
+| dump | 27-59 | 33 | static: отправить запрос и читать до DONE, EAFNOSUPPORT = пусто | `r2o_route.rs:448` `r2o_receive_request` + `:398`/`:425` | P | Цикл 4096 и EINTR есть; обработка `-EAFNOSUPPORT/-EOPNOTSUPP` для правил только для IPv6 (r2o_route.rs:406), для IPv4 — ошибка; C трактует пустым для обоих. |
+| dump_rules | 61-67 | 7 | static: дамп правил family | `r2o_route.rs:398` `r2o_dump_rules` | P | Предел 32 правила (R2O_ROUTE_RULE_CAPACITY) против D2K_ROUTEMARK_MAX; тест на переполнение не найден. |
+| lookup_route | 72-110 | 39 | static: один `RTM_GETROUTE`, коды 0/2/3 | `r2o_route.rs:425` `r2o_lookup_default` | P | Коды C (2 = маршрут без устройства, 3 = нет маршрута) сведены к `R2oRouteLookup`; соответствие проверено только парсером, не живым ядром. |
+| dump_socket | 115-128 | 14 | static: netlink-сокет с `SO_RCVTIMEO` 200 мс | `r2o_route.rs:455-493` (socket + SO_RCVTIMEO в `r2o_receive_request`) | E | `r2o_монитор_читает_правила_и_маршрут_текущего_ядра` (r2o_route.rs:1240) проходит при доступном rtnetlink. |
+| d2k_routemark_load | 130-177 | 48 | загрузить правила v4/v6 + маршруты, каждую часть независимо | `r2o_route.rs:372` `r2o_refresh` | P | Независимость семейств есть; C пересоздаёт сокет после ошибки части, R2O создаёт новый сокет на каждый запрос; `routes4_ok/routes6_ok` наружу не отдаются. |
+| d2k_routemark_watch_open | 179-209 | 31 | подписка на 4 группы (IPv4 обязательны) | `r2o_route.rs:283` `r2o_open_watch` | P | `r2o_монитор_читает_правила...` (r2o_route.rs:1240) вызывает `r2o_open_watch`, но результат намеренно не проверяется (`let _watch_opened = ...is_ok()`); обязательность IPv4-групп тестом не подтверждена. |
+| d2k_routemark_watch_drain | 211-228 | 18 | ограниченный слив уведомлений, ENOBUFS → обновить | `r2o_route.rs:334` `r2o_drain_watch` | P | R2O: 256 чтений, ENOBUFS → `changed=true`, EAGAIN → выход; C при достижении предела возвращает 1. Поведение на границе не тестировано. |
+
+Итог по файлу: E 2, P 6, N 0. Пробелы: обработка `EAFNOSUPPORT` для IPv4-правил, лимит
+правил, внешние коды `load`, обязательность IPv4-групп подписки.
+
+---
+
+## 10. Итоговые пробелы (что мешает ставить E)
+
+1. **Счётчик промахов по форме мёртв.** `d2k_plantab_shape_misses` в R2O всегда 0 —
+   `shape_misses` не инкрементируется ни в одной ветви `select`. В C это отдельный
+   наблюдаемый факт («цель знаем, форма другая»), по которому контроллер отличает
+   незнакомую цель от несовместимой формы.
+2. **Предикат ECH-удержания не найден.** `d2k_plantab_has_ech_target` как отдельная
+   функция отсутствует; R2O собирает неполный ClientHello общим путём `capture.rs`/
+   `engine.rs`, поэтому поведение может быть покрыто, но адресного differential на
+   «ECH-привязка → удерживать, иначе не удерживать» нет. Статус `?`, не `N`.
+3. **Адресные опыты (`SET/DEL_ADDR_PROBE`) не покрыты тестами.** Реализация есть, но
+   ни одна ветвь (lease, чужая generation, точный flow, wildcard голоса) не проверена.
+4. **Префильтры кандидатов грубее.** `has_tls_candidate`/`has_http_candidate`/
+   `has_quic_candidate` смотрят только family/shape, тогда как C учитывает имя, адрес и
+   sport; возможны лишние удержания/захваты, но не пропуски планов.
+5. **`d2k_plan_apply` ограничен 26 посылками** (`MAX_EMISSIONS`) против 65536 в C;
+   D2O на выдаче в session тоже ограничивает 26 (`D2K_RESULT_MAX`, session.c:2517),
+   поэтому наблюдаемый отказ совпадает, различаются слой и текст ошибки. Это P, не N.
+6. **OOB-суффикс теряет `wire_profile`** в `Plan::apply` (apply.rs:280-291).
+7. **Legacy-удаления «все формы» отсутствуют**: `del_name`/`del_addr`/`del_*_family`
+   удаляют один shape-ключ; по сокету C тоже шлёт форму, но внутренние вызовы C шире.
+8. **Управляющий слой:** нет `listen_fd`/`peer_fd` и счётчика `sent`; disconnect-hook
+   реализован в цикле; `SET_HTTPS` отвергает TTL > max вместо обрезки; ARM_SHAPE не
+   обслуживает UDP; v22 CLIENT_TCP идёт с пустыми TCP-опциями.
+9. **raw:** один сокет на семейство, обязательный mark, нет `IP_NODEFRAG` и ленивого
+   fragment/IPv6-сокета; реальная отправка в тестах не выполнялась (нужен root).
+10. **routemark:** нет `describe`, нет `found/truncated` статуса merge и признака изменения
+    набора правил; `EAFNOSUPPORT` для IPv4-дампа правил трактуется как ошибка.
+
+## 11. Ограничения аудита
+
+- Проверка статическая: тела функций C прочитаны полностью, Rust-функции сопоставлены по
+  коду и вызовам. Differential-прогоны C↔Rust в рамках этого аудита не запускались;
+  цитируемые тесты — существующие тесты дерева R2O, а не новые.
+- Поведение на живом роутере (raw send, rtnetlink на конкретном ядре, NFQUEUE, MTU
+  маршрута) не проверялось: оборудование и root-доступ не предоставлялись.
+- `E` означает «эквивалент подтверждён существующим тестом/фикстурой», а не «проверено в
+  production». Пункты с оговорками в колонке «доказательство/пробел» остаются `P`.
+
