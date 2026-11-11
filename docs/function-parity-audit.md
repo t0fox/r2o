@@ -3441,6 +3441,52 @@ ECH, середина приветствия. R2O: `r2k-core/src/tls.rs`.
 | `d2k_packet_parse` (inline) | 24–70 | 47 | разбор IPv4/IPv6, опции, ext-заголовки, L4 | `packet.rs:69 PacketView::parse` | E | `r2k-core/tests/network.rs:36+` |
 | `d2k_key_equal` (inline) | 76–83 | 8 | равенство ключа | `#[derive(PartialEq)]` (`engine.rs:41`, `capture.rs:13`) | E | — |
 
+## Углублённая сверка: nat/ctq/sched/addr/tls/include
+
+- **`nat.c` (5):** `parse_ip4` — P (strict IPv4 без inet_pton,
+  `r2o-nat-proc-differential.sh`; unit на переполнение/хвост нет);
+  `field_after` — P (R2O парсит `key=value` токенами строже C);
+  `d2k_nat_outside`/`parse_address` — P* (обёртки);
+  `d2k_nat_outside_family` — E: проход файла, прямой/обратный кортеж,
+  best TTL, коды -1/0/1; differential + unit
+  `отличает_отсутствие_таблицы_от_отсутствия_записи`.
+- **`ctq.c` (20):** E — `align4`, `wr16h/wr32h/rd16h/rd64be/rd32be`,
+  `put`, `d2k_ct_get_req`, `counter`, `tcp_state`: encode test
+  `conntrack.rs:543`, counters `:487`, 32-bit `:529`. **P:**
+  `open_nest/close_nest` (length-prefix вместо отдельных функций),
+  `d2k_ct_info_parse` (C-коды -1/0/1/2 заменены `Option`/`info=None`),
+  `d2k_ct_counters_parse`, `d2k_ct_query_info_fd` (C: send + до 8 recv
+  без ожидания; Rust: `query_entry`/`receive_entry` с poll),
+  `d2k_ct_query_fd`, `reply_errno`, `d2k_ct_probe_fd`
+  (`r2o-conntrack-ctget-differential.sh`), `d2k_ct_open` (netlink
+  SOCK_NONBLOCK/bind). Не-Linux `d2k_ct_open` — E-заглушка.
+- **`sched.c` (16):** E — `d2k_sched_new` (ёмкость/freelist,
+  `scheduler.rs:89`), `free` (RAII), `earlier` (due,seq),
+  `d2k_sched_push`, `pop_due`, `next_ns`, `count`, `refusals`
+  (тесты `:526/:563`). **P:** `grow_slot_size` (Vec не копирует),
+  `sift_up/down` (отсортированный Vec), `push_serial` (execution →
+  ticket), `push_owned`, `pop_due_serial/ex` (ветка `OversizedOwned`
+  не тестирована; D21 покрывает базовый oversized).
+- **`addr.c` (3):** `d2k_addr_parse` — E (`addr.rs:11`, тесты
+  `network.rs:6/22`, включая `%zone`); `d2k_addr_text` — P (C
+  возвращает 0 при нехватке cap, Rust `Display` не усекает);
+  `d2k_addr_equal` — E (`PartialEq`, `network.rs:16`).
+- **`tls.c` (7):** все E — `rd16`, `skip_u8/u16_vec`, `has_ech_offer`,
+  `has_tls13`, `find_sni`, `d2k_tls_parse`: `tls.rs` тесты
+  (`:367-:525`), сверка с `tls_parser` (`:394`), fuzz-префиксы (`:503`).
+- **`include/*.h` (14):** E — `d2k_packet_u16/parse` (`packet.rs`,
+  `tests/network.rs:36+`), `d2k_key_equal` (`PartialEq`). **P:**
+  `d2k_ctl_binding_write/read` (формат совпадает, отдельного unit на
+  раскладку нет), `d2k_http_request_stream_init/line/feed`
+  (`httpup.rs`, `hold.rs:2401` косвенно), `d2k_hr_decimal/token/field/
+  extensions/headers` (`http_response.rs:281/360/372`;
+  `test-http-chunk-framing-differential.sh`),
+  `d2k_http_response_feed` (`http_response.rs:55`, `hold.rs` косвенно).
+- **Вывод:** 65 функций; E — nat main, ctq кодирование/счётчики,
+  sched базовые, addr parse/equal, весь tls, packet/key; P — CT-разбор/
+  query, sched owned/oversized, addr text, inline HTTP/binding.
+  Новых N нет.
+
 ## Углублённая сверка: 11 N-функций
 
 - **`count_reason` (static, 165–186):** гистограмма причин отказа по
@@ -4470,6 +4516,55 @@ production-сеттер `raw_set_segment_max`. Ни одна N не являет
   split_offsets, unacked_bytes, probe_data_ack, raw_recheck. Основные
   пробелы — RST-парсеры, `raw_set_segment_max`, `sweep_poisons` control=None,
   production `full_detect_semantics=false`, macOS send_nosig.
+
+## Углублённая сверка: bridge/main/poison/props/response/trigger
+
+- **`bridge.c` (17):** `d2k_detect_stop_all` — P (Drop
+  `DiscoveryWorker`), `plannable_hit` (`executable_poison_hit`),
+  `map_verdict`, `bridge_input`, `progress_seen`, `retry_base_timeout`,
+  `sched_tcp` (`d2k_detect_sched_tcp*`), `base_seen/base_stop`,
+  `d2k_detect_sched_tcp_ack/base` — P: оркестрация перенесена в
+  `main.rs` discovery/classify, но полного C/Rust differential на все
+  входы/выходы и retry-base-timeout нет. `trace_questions` — N
+  (qtrace-формат). Остальные E по base/queue differentials.
+- **`main.c` (8):** `usage`, `print_json_str`, `print_tri`,
+  `print_json`, `print_progress`, `tri_word`, `print_human`, `main` —
+  P: CLI/JSON/человеческий отчёт и коды выхода отличаются; endpoint
+  классификации покрыт `test-classifier-*`, но не побайтовым выводом.
+- **`poison.c` (12):** `d2k_poison_supports_family`,
+  `d2k_poison_has_fake`, `add`, `d2k_poison_same`, `already_listed`,
+  `init_poisons`, `d2k_poisons` — E/P: список гипотез и фильтры
+  сверены classifier/raw differentials; `d2k_note_props_hit/miss`,
+  `d2k_strategy_for_poison`, `d2k_strategy_for` — P (текст/порядок
+  свойств). **P:** `d2k_arm_from_poison` не выражает оси `autottl` и
+  `tcp_ts_up`; `d2k_poison_has_fake` для них тоже не учитывает.
+- **`props.c` (7):** `prop_probes`, `apply_set`,
+  `d2k_run_properties(_family)` — E/P: 5 вопросов и tri-state
+  перенесены в `raw_probe.rs`; `tri_no/tri_yes` — E*.
+  **P:** `d2k_compose_from_props` при `control=None` C выдаёт
+  «всё сразу» (`props.c:477-486`), R2O — нет
+  (`raw_probe.rs:1094-1096`).
+- **`response.c` (7):** `resp_timeout`, `d2k_resp_scan12`,
+  `d2k_resp_handshake12`, `count_handshakes`, `d2k_neutral_sni`,
+  `d2k_resp_decide`, `d2k_probe_response` — E/P. `scan12`/neutral/
+  decide/probe покрыты `test-classifier-white-decoy` и
+  `r2o-tls-verify`; **P:** `handshake12` (65 536-байтовый предел,
+  таймаут, legacy ClientHello без supported_versions) не имеет
+  адресного C/Rust differential; `count_handshakes` — косвенно.
+- **`trigger.c` (9):** `d2k_trigger_tls`, `hexval`,
+  `d2k_trigger_raw_hex`, `d2k_trigger_control`, `d2k_opts_decoy` —
+  E: `trigger.rs`/`hello.rs`, ClientHello differential, raw-hex
+  unit. **P:** `d2k_trigger_host_ts_override` (ось через
+  `ClassifyOptions.client_tcp_has_timestamps`, глобального сеттера/CLI
+  нет); `host_offers_ts`/`d2k_trigger_offers_ts` — R2O получает булев
+  признак из снятого профиля, а не разбирает TCP-опции триггера;
+  `d2k_trigger_allows_poison` — P (семейство/форма/TS-профиль, полного
+  differential нет).
+- **Вывод:** 60 функций; E — списки/парсеры триггеров, scan12,
+  neutral/decide/probe, tri-state; P — bridge-оркестрация, CLI-вывод,
+  autottl/tsup, control=None compose, handshake12, host_ts; N —
+  `trace_questions`, `note_gap_loss`, `cross_check_tls12`,
+  `d2k_raw_pending_count`, RST-парсеры, `set_segment_max` (см. выше).
 
 ## Главные пробелы (N)
 

@@ -410,6 +410,55 @@ production-сеттер `raw_set_segment_max`. Ни одна N не являет
   пробелы — RST-парсеры, `raw_set_segment_max`, `sweep_poisons` control=None,
   production `full_detect_semantics=false`, macOS send_nosig.
 
+## Углублённая сверка: bridge/main/poison/props/response/trigger
+
+- **`bridge.c` (17):** `d2k_detect_stop_all` — P (Drop
+  `DiscoveryWorker`), `plannable_hit` (`executable_poison_hit`),
+  `map_verdict`, `bridge_input`, `progress_seen`, `retry_base_timeout`,
+  `sched_tcp` (`d2k_detect_sched_tcp*`), `base_seen/base_stop`,
+  `d2k_detect_sched_tcp_ack/base` — P: оркестрация перенесена в
+  `main.rs` discovery/classify, но полного C/Rust differential на все
+  входы/выходы и retry-base-timeout нет. `trace_questions` — N
+  (qtrace-формат). Остальные E по base/queue differentials.
+- **`main.c` (8):** `usage`, `print_json_str`, `print_tri`,
+  `print_json`, `print_progress`, `tri_word`, `print_human`, `main` —
+  P: CLI/JSON/человеческий отчёт и коды выхода отличаются; endpoint
+  классификации покрыт `test-classifier-*`, но не побайтовым выводом.
+- **`poison.c` (12):** `d2k_poison_supports_family`,
+  `d2k_poison_has_fake`, `add`, `d2k_poison_same`, `already_listed`,
+  `init_poisons`, `d2k_poisons` — E/P: список гипотез и фильтры
+  сверены classifier/raw differentials; `d2k_note_props_hit/miss`,
+  `d2k_strategy_for_poison`, `d2k_strategy_for` — P (текст/порядок
+  свойств). **P:** `d2k_arm_from_poison` не выражает оси `autottl` и
+  `tcp_ts_up`; `d2k_poison_has_fake` для них тоже не учитывает.
+- **`props.c` (7):** `prop_probes`, `apply_set`,
+  `d2k_run_properties(_family)` — E/P: 5 вопросов и tri-state
+  перенесены в `raw_probe.rs`; `tri_no/tri_yes` — E*.
+  **P:** `d2k_compose_from_props` при `control=None` C выдаёт
+  «всё сразу» (`props.c:477-486`), R2O — нет
+  (`raw_probe.rs:1094-1096`).
+- **`response.c` (7):** `resp_timeout`, `d2k_resp_scan12`,
+  `d2k_resp_handshake12`, `count_handshakes`, `d2k_neutral_sni`,
+  `d2k_resp_decide`, `d2k_probe_response` — E/P. `scan12`/neutral/
+  decide/probe покрыты `test-classifier-white-decoy` и
+  `r2o-tls-verify`; **P:** `handshake12` (65 536-байтовый предел,
+  таймаут, legacy ClientHello без supported_versions) не имеет
+  адресного C/Rust differential; `count_handshakes` — косвенно.
+- **`trigger.c` (9):** `d2k_trigger_tls`, `hexval`,
+  `d2k_trigger_raw_hex`, `d2k_trigger_control`, `d2k_opts_decoy` —
+  E: `trigger.rs`/`hello.rs`, ClientHello differential, raw-hex
+  unit. **P:** `d2k_trigger_host_ts_override` (ось через
+  `ClassifyOptions.client_tcp_has_timestamps`, глобального сеттера/CLI
+  нет); `host_offers_ts`/`d2k_trigger_offers_ts` — R2O получает булев
+  признак из снятого профиля, а не разбирает TCP-опции триггера;
+  `d2k_trigger_allows_poison` — P (семейство/форма/TS-профиль, полного
+  differential нет).
+- **Вывод:** 60 функций; E — списки/парсеры триггеров, scan12,
+  neutral/decide/probe, tri-state; P — bridge-оркестрация, CLI-вывод,
+  autottl/tsup, control=None compose, handshake12, host_ts; N —
+  `trace_questions`, `note_gap_loss`, `cross_check_tls12`,
+  `d2k_raw_pending_count`, RST-парсеры, `set_segment_max` (см. выше).
+
 ## Главные пробелы (N)
 
 10 строк среза соответствуют 8 отсутствующим функциям: пары Linux/#else в `raw.c` дают дубли
