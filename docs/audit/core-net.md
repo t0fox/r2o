@@ -910,15 +910,35 @@ Inline-классификация HTTP-ответа: 451/2xx/3xx-портал, �
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| `d2k_ip6frag_sender_init` | 34-36 | 3 | сброс sender, fd=-1 | `raw.rs:46 RawSocket::open` (RAII) | P | контейнер иной; отдельной init нет |
-| `d2k_ip6frag_sender_close` | 37-40 | 4 | закрыть fd | `RawSocket` Drop | P | RAII |
-| `d2k_f6_now` | 41-45 | 5 | монотонное время, мс | `Instant` | P | хелпер |
-| `d2k_f6_attr` | 46-55 | 10 | rtattr в netlink-запрос | `r2o_route.rs:679/691` (сборка запросов) | P | отдельного attr-хелпера нет |
-| `d2k_f6_query` | 56-72 | 17 | netlink-запрос с таймаутом 200 мс | `r2o_route.rs` (netlink сокет) | P | реализация в датапате, API иной |
-| `d2k_f6_route` | 73-106 | 34 | RTM_GETROUTE IPv6 (src/dst/mark) → ifindex/gateway | `r2o_route.rs:691 r2o_route_lookup_request`, `:774 parse_lookup` | P | парсер запроса/ответа есть; контроллерный вызов отсутствует |
-| `d2k_f6_neighbor` | 107-154 | 48 | RTM_GETNEIGH → MAC шлюза | нет (резолв ядром) | P | механизм заменён: RawSocket шлёт через IPPROTO_RAW |
-| `d2k_ip6frag_prepare` | 155-195 | 41 | маршрут/MTU/MAC, AF_PACKET sendto, кеш | `raw.rs:484 r2o_route_mtu`, `:622 ipv6_udp_fragment` | P | функциональность в датапате; кеш/ошибки не сопоставлены |
-| `d2k_ip6frag_send` | 196-204 | 9 | sendto с EINTR-повтором | `RawSocket::send` | P | аналог есть, контракт иной |
+| `d2k_ip6frag_sender_init` | 34-36 | 3 | сброс sender, fd=-1 | `raw.rs:46-93 RawSocket::open` (RAII) | **P*** | Отдельной init нет; контейнер и владение fd заменены `OwnedFd`. |
+| `d2k_ip6frag_sender_close` | 37-40 | 4 | закрыть fd | `RawSocket` Drop | **P*** | RAII; отдельного close нет. |
+| `d2k_f6_now` | 41-45 | 5 | монотонное время, мс | `std::time::Instant` | **P*** | `CLOCK_MONOTONIC` в мс → `Instant`; единицы пересчитываются. |
+| `d2k_f6_attr` | 46-55 | 10 | rtattr в netlink-запрос с NLMSG_ALIGN/RTA_ALIGN | `r2o_route.rs:679-700` (сборка запросов) | **P** | Отдельного attr-хелпера нет; выравнивание/границы проверяются в сборщике. |
+| `d2k_f6_query` | 56-72 | 17 | AF_NETLINK/NETLINK_ROUTE, SO_RCVTIMEO 200 мс, проверка `nl_pid==0` | `r2o_route.rs` netlink-сокет | **P** | API и таймауты иные; контроллерного вызова нет. |
+| `d2k_f6_route` | 73-106 | 34 | RTM_GETROUTE IPv6 (src/dst/mark) → ifindex/gateway | `r2o_route.rs:691 r2o_route_lookup_request`, `:774 parse_lookup` | **P** | Парсер запроса/ответа есть, но это route-mark lookup, а не полный IPv6 src/dst/mark-запрос; контроллерный вызов отсутствует. |
+| `d2k_f6_neighbor` | 107-154 | 48 | RTM_GETNEIGH dump → MAC шлюза, NUD_* и NDA_DST/LLADDR | нет функции; резолв делегирован ядру | **P** | Осознанная замена: R2O шлёт через `IPPROTO_RAW`, ядро само резолвит neighbor; ручной AF_PACKET/MAC-путь не портирован. Это не N, потому что функциональность отправки закрыта. |
+| `d2k_ip6frag_prepare` | 155-195 | 41 | маршрут/MTU/MAC, AF_PACKET SOCK_DGRAM, SO_MARK, кеш 1 с, MTU≥1280 | `raw.rs:484 r2o_route_mtu`, `:622 ipv6_udp_fragment`, `wire.rs:294 build_udp_fragments` | **P** | Функциональность в датапате: IPv6-фрагменты строятся `build_udp_fragments`/`ipv6_udp_fragment` и шлются `IPPROTO_RAW`. **Не портированы:** AF_PACKET-путь, ручной neighbor/MAC, кеш `fd/mark/src/dst` 1 с, проверка `MTU≥1280` в том же месте; **`IP_NODEFRAG` отсутствует во всём R2O** (grep пуст). |
+| `d2k_ip6frag_send` | 196-204 | 9 | sendto с EINTR-повтором, точная длина, сброс кеша при ошибке | `raw.rs:147-219 RawSocket::send_packet`/`send_packet_inner` | **P** | EINTR-повтор есть (`raw.rs:207`), точная длина проверяется, EMSGSIZE понижает route-MTU (`:208-217`), `MSG_DONTWAIT` и `ENOBUFS` учитываются. Отличия: C — блокирующий AF_PACKET `sendto`, R2O — неблокирующий `IPPROTO_RAW`; C сбрасывает кеш при ошибке, R2O понижает `maxlen`. |
+
+### Углублённая сверка d2k_ip6frag_send.h (9)
+
+- **C-путь:** `AF_PACKET/SOCK_DGRAM/ETH_P_IPV6` + ручной
+  `RTM_GETROUTE` (src/dst/mark, `dst_len=src_len=128`) и
+  `RTM_GETNEIGH` (dump, `NUD_REACHABLE|STALE|DELAY|PROBE|PERMANENT`,
+  `NDA_DST`/`NDA_LLADDR`), кеш `fd/mark/src/dst` на 1 с, проверка
+  MTU≥1280, `SO_MARK`, EINTR-повтор и точная длина.
+- **R2O-путь:** `RawSocket` `AF_INET6/IPPROTO_RAW` + `IPV6_HDRINCL`
+  (`raw.rs:75-80`), `SO_MARK`, `r2o_route_mtu` (`:484`), IPv6-
+  фрагменты `ipv6_udp_fragment` (`:622`) и `build_udp_fragments`
+  (`wire.rs:294`), отправка `send_packet_inner` (`:147-219`):
+  EINTR-повтор, `MSG_DONTWAIT`, EMSGSIZE понижает route-MTU,
+  `ENOBUFS` — busy.
+- **Подтверждённые пробелы:** ручной neighbor/MAC и AF_PACKET-путь
+  не портированы; `IP_NODEFRAG` отсутствует во всём R2O (grep
+  пуст); контроллерного API `udp_raw_*` нет — датапат закрывает
+  отправку через `IPPROTO_RAW`. Кеш 1 с и проверка MTU≥1280
+  разнесены иначе. Отдельного C/Rust differential для IPv6-
+  фрагментного отправителя нет, поэтому статусы P.
 
 ## core/include/d2k_quicprobe.h (9 функций)
 
