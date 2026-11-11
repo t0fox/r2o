@@ -986,11 +986,33 @@ TTL, отличие «нет таблицы» от «нет записи». R2O:
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
-| `parse_ip4` (static) | 20–41 | 22 | строгий разбор IPv4 без inet_pton | `proc_nat.rs:145 parse_ipv4` | P | `r2o-nat-proc-differential.sh`; unit-теста на отказы (переполнение/хвост) нет |
-| `field_after` (static) | 46–63 | 18 | поле `name=` на границе слова | `proc_nat.rs:122 field_after`, `:113 fields` | P | R2O парсит токены `key=value` целиком — строже C |
-| `d2k_nat_outside` | 67–73 | 7 | IPv4-обёртка | `:20 lookup` с tuple family=4 | P | — |
-| `parse_address` (static) | 75–82 | 8 | IPv4/IPv6 литерал | `:134 parse_address` | P | — |
-| `d2k_nat_outside_family` | 84–194 | 111 | проход файла, прямой/обратный кортеж, best TTL, коды -1/0/1 | `:20 lookup` → `R2oProcNatLookup` | E | `:220 отличает_отсутствие_таблицы...` + `r2o-nat-proc-differential.sh` |
+| `parse_ip4` (static) | 20–41 | 22 | строгий IPv4: 4 десятичных октета 0..255, ровно точки и NUL | `proc_nat.rs:145 parse_ipv4` | **P** | C принимает ведущие нули (`001`→1), отвергает пустой октет, `>255`, лишние символы/точки. Rust `split('.')`, все ASCII-цифры, `checked_mul/checked_add`, `<=255`, ровно 4 части — эквивалентно. Unit-теста на отказы нет; differential есть. |
+| `field_after` (static) | 46–63 | 18 | найти `name=` на границе слова, вернуть значение до пробела/`\n`, сдвинуть `next` | `proc_nat.rs:122 field_after`, `:113 fields` | **P** | C `strstr` + проверка `p==s||p[-1]==' '` + `p[nl]=='='`, режет копию строки. Rust сначала токенизирует строку по ASCII-пробелам в `(key,value)`, затем ищет **точное** имя. Для нормальной строки эквивалентно; Rust строже к `src=` внутри значения другого поля. |
+| `d2k_nat_outside` | 67–73 | 7 | IPv4-обёртка: family=4, src/dst как 4 байта | `:20 lookup` с tuple family=4 | **P** | C передаёт указатели на `uint32_t` и family 4; Rust `R2oConntrackTuple.family=4`, адреса 16-байтные с нулевым хвостом. Эквивалентно. |
+| `parse_address` (static) | 75–82 | 8 | IPv4 через `parse_ip4`, IPv6 через `inet_pton`, out[16] занулён | `:134 parse_address` | **P** | C `memset(out,0,16)`, v6 `inet_pton(AF_INET6)`, v4 `parse_ip4` + 4 байта. Rust `Ipv6Addr::from_str` / `parse_ipv4`, 16-байтный массив. Оба не принимают `%zone`; unit-теста нет. |
+| `d2k_nat_outside_family` | 84–194 | 111 | fopen; 1 — нет таблицы, -1 — нет записи, 0 — найдено; строки >1022 пропуск; direct/reverse tuple; best TTL (3-е число) | `:20 lookup` → `R2oProcNatLookup` | **E** | C `fopen` fail → 1, Rust `TableMissing`; пустая/без записи → -1/Missing; найдено → 0/Found. Совпадают: `fgets(1024)` + drain длинной строки ↔ `read_until` + `content_len>1022`; `strstr(tcp/udp)`; direct `src/dst/sport/dport`; reverse `dst/dport`; `third_number`; `ttl<=best` skip; memcmp адресов/портов. Тест `:220 отличает_отсутствие_таблицы...` + `r2o-nat-proc-differential.sh`; в этом проходе не перезапускались. |
+
+### nat.c: построчная сверка
+
+- **`parse_ip4` (20–41) ↔ `proc_nat.rs:145`:** C 4 октета 0..255,
+  ровно точки/NUL, ведущие нули допустимы; Rust `split('.')` +
+  `checked_mul/add` + `<=255` + ровно 4 части. Эквивалентно; P —
+  unit-теста на отказы нет, differential есть.
+- **`field_after` (46–63) ↔ `field_after/fields`:** C `strstr` +
+  граница слова + `=` + резка значения до пробела/`\n`; Rust сначала
+  токенизирует `key=value`, затем ищет точное имя. Для нормальной
+  строки эквивалентно, Rust строже к вложенным `src=`. P.
+- **`d2k_nat_outside` (67–73):** IPv4-обёртка family=4; Rust tuple
+  family=4. P.
+- **`parse_address` (75–82) ↔ `:134`:** C v6 `inet_pton`, v4
+  `parse_ip4`; Rust `Ipv6Addr::from_str`/`parse_ipv4`. Оба без `%zone`.
+  P — unit-теста нет.
+- **`d2k_nat_outside_family` (84–194) ↔ `lookup`:** коды
+  `1/-1/0` ↔ `TableMissing/Missing/Found`; `fgets(1024)` + drain
+  длинной строки ↔ `read_until` + `content_len>1022`; `strstr(tcp/udp)`;
+  direct/reverse кортеж; третье число как TTL; `ttl<=best` skip;
+  memcmp адресов/портов. E; тест `:220` + `r2o-nat-proc-differential.sh`
+  (не перезапускались).
 
 ## ctq.c (20 функций)
 
@@ -1006,19 +1028,56 @@ ctnetlink: сборка GET, разбор счётчиков/состояния 
 | `rd64be` (static) | 21–25 | 5 | сетевой u64 | `u64::from_be_bytes` (`:214`) | E | `:487` тест счётчиков |
 | `rd32be` (static) | 26–28 | 3 | сетевой u32 | `u32::from_be_bytes` (`:224`) | E | `:529` 32-битные счётчики |
 | `put` (static) | 31–40 | 10 | атрибут с padding | `push_attribute` (`:254`) | E | `:543` |
-| `open_nest` (static) | 43–47 | 5 | вложенный атрибут | `push_attribute(kind с NLA_F_NESTED)` (`:114`) | P | — |
-| `close_nest` (static) | 48–50 | 3 | длина вложенного | length prefix в `push_attribute` | P | — |
+| `open_nest` (static) | 43–47 | 5 | вложенный атрибут: пишет `type \| NLA_F_NESTED`, длина позже | `push_attribute(kind с NLA_F_NESTED)` (`:114`) | **P** | C сначала пишет только заголовок, `close_nest` проставляет длину; Rust собирает вложенное значение в `Vec` и `push_attribute` сразу пишет длину+padding. Wire-формат совпадает, порядок сборки разный. |
+| `close_nest` (static) | 48–50 | 3 | проставить длину вложенного атрибута | length prefix в `push_attribute` | **P** | C `end-start` без padding; Rust `push_attribute` добавляет padding. Для кратности 4 результат тот же; отдельного теста нет. |
 | `d2k_ct_get_req` | 52–81 | 30 | GET orig-tuple (family/proto/ports) | `conntrack.rs:74 encode_get` | E | `:543 строит_запрос_по_кортежу_ipv4` |
 | `counter` (static) | 84–96 | 13 | packets из вложенного counters (64/32) | `:211 parse_counter` | E | `:487`, `:529` |
 | `tcp_state` (static) | 99–120 | 22 | состояние TCP (+1 enum) | `:156-160` из PROTOINFO | E | `:487` (state=3) |
-| `d2k_ct_info_parse` | 122–156 | 35 | разбор ответа: коды -1/0/1/2 | `:137 decode_entry`, `:133 decode_info` | P | коды заменены `Option`; «нет счётчиков» → `info=None` |
-| `d2k_ct_counters_parse` | 158–167 | 10 | только счётчики | `decode_info(...).map(...)` | P | — |
-| `d2k_ct_query_info_fd` | 169–186 | 18 | send GET + до 8 recv без ожидания | `:301 query_entry`, `:384 receive_entry` | P | — |
-| `d2k_ct_query_fd` | 188–197 | 10 | обёртка счётчиков | `:297 query` | P | — |
-| `reply_errno` (static) | 201–212 | 12 | errno из NLMSG_ERROR по seq | `kernel_error` + фильтр seq (`:350`) | P | — |
-| `d2k_ct_probe_fd` | 214–238 | 25 | проба ENOENT/запись → подсистема есть | `:309 probe` (100 мс poll) | P | `r2o-conntrack-ctget-differential.sh` |
-| `d2k_ct_open` (linux) | 243–253 | 11 | netlink socket + nonblock + bind | `:270 open` (SOCK_NONBLOCK) | P | — |
+| `d2k_ct_info_parse` | 122–156 | 35 | разбор ответа: -1 нет seq, 0 счётчики+state, 1 NLMSG_ERROR, 2 нет счётчиков; оба counters обязательны | `:137 decode_entry`, `:133 decode_info` | **P** | C различает четыре кода и требует **оба** `CTA_COUNTERS_ORIG/REPLY`; при отсутствии одного возвращает 2. Rust `decode_entry` возвращает `None` для нет seq/не CT_NEW, `Some(Entry{info:None})` при нехватке counters, NLMSG_ERROR не разбирает (это делает `probe`). `tcp_state`: C `+1` в helper и `-1` в info, Rust хранит enum как `Option<u8>`; итог совпадает. P — другой канал ошибок/«нет счётчиков». |
+| `d2k_ct_counters_parse` | 158–167 | 10 | обёртка: только orig/reply packets, код пробрасывается | `decode_info(...).map(...)` | **P** | C сохраняет код `info_parse`; Rust `decode_info` — `Option`, разделения 1/2 нет. |
+| `d2k_ct_query_info_fd` | 169–186 | 18 | send GET `MSG_DONTWAIT`, до 8 recv `MSG_DONTWAIT`, вернуть -1/0/1/2 | `:301 query_entry`, `:384 receive_entry` | **P** | C цикл 8 `recv`, `d2k_ct_info_parse` с seq; Rust `query_entry` send + `receive_entry` 8 циклов, возвращает `Option<Entry>`. Количество попыток/неблокирующий режим совпадают, коды/`Option` — нет. |
+| `d2k_ct_query_fd` | 188–197 | 10 | обёртка `query_info_fd` для счётчиков | `:297 query` | **P** | C возвращает код, Rust `query` — `Option<Info>`; эквивалентно только для успеха. |
+| `reply_errno` (static) | 201–212 | 12 | по seq: положительный errno, 0 — не ошибка, -1 — нет ответа | `kernel_error` + фильтр seq (`:350`) | **P** | C различает «нет ответа на seq» и «ответ не ошибка»; Rust `probe` проверяет только `NLMSG_ERROR == -ENOENT`, общего `reply_errno` нет. |
+| `d2k_ct_probe_fd` | 214–238 | 25 | zero-tuple GET, poll `wait_ms` до 8 раз, ENOENT(2) или запись(0) → подсистема есть | `:309 probe` (100 мс poll) | **P** | C принимает `wait_ms` и делает до 8 poll/recv; Rust `probe` фиксирован на 100 мс и **одном** recv, затем `decode_entry` или `NLMSG_ERROR == -ENOENT`. Параметр ожидания и повторные ответы не портированы. Дифференциал `r2o-conntrack-ctget-differential.sh`. |
+| `d2k_ct_open` (linux) | 243–253 | 11 | `SOCK_RAW \| SOCK_CLOEXEC`, fcntl O_NONBLOCK, bind; fd возвращается без проверки подсистемы | `:270 open` (`SOCK_NONBLOCK`) | **P** | C открывает сокет и не пробует conntrack; Rust `open` после bind вызывает `probe()` и возвращает `None`, если подсистема недоступна. Вызывающий C может отдельно вызвать `d2k_ct_probe_fd`; поведение API разное. |
 | `d2k_ct_open` (не linux) | 255 | 1 | заглушка -1 | `#[cfg(target_os="linux")]` | E | платформенная ветка |
+
+### ctq.c: построчная сверка
+
+- **`align4/wr16h/wr32h/rd16h/rd64be/rd32be/put` (16–40):** C
+  host-endian `memcpy`, BE-чтение, атрибут с padding; Rust
+  `to_ne/from_ne`, `from_be`, `push_attribute`. E; тесты `:543`,
+  `:487`, `:529`.
+- **`open_nest/close_nest` (43–50):** C пишет заголовок, длину
+  проставляет `close_nest`; Rust собирает вложенное значение и
+  `push_attribute` сразу пишет длину+padding. Wire-формат тот же,
+  порядок сборки разный. P.
+- **`d2k_ct_get_req` (52–81) ↔ `encode_get` (`:74`):** C:
+  nlmsghdr+4, family 2/10, nested `TUPLE_ORIG`→`TUPLE_IP`/`TUPLE_PROTO`,
+  V4/V6 src/dst, proto/ports BE, type `CT_GET`, seq; Rust то же через
+  `Vec`+`push_attribute`. E; `:543`.
+- **`counter`/`tcp_state` (84–120):** C nested counters 64/32 и
+  `PROTOINFO_TCP_STATE` с `+1` (0 — нет); Rust `parse_counter`/
+  `find_attribute` + `Option<u8>`; в `info_parse` C снова `-1`, итог
+  совпадает. E; `:487`, `:529`.
+- **`d2k_ct_info_parse` (122–156) ↔ `decode_entry`:** C коды
+  `-1/0/1/2`, требует оба counters; Rust `None`/`Some(Entry)` с
+  `info:None` при нехватке, NLMSG_ERROR обрабатывает `probe`.
+  **Разный канал ошибок и семантика «нет счётчиков».** P.
+- **`counters_parse/query_info_fd/query_fd` (158–197):** C
+  пробрасывает коды `info_parse`; Rust `decode_info`/`query` —
+  `Option`, успех эквивалентен, коды 1/2 не различаются. P.
+- **`reply_errno` (201–212):** C по seq различает положительный
+  errno, 0 и -1; Rust общего helper'а нет, `probe` проверяет только
+  `-ENOENT`. P.
+- **`d2k_ct_probe_fd` (214–238) ↔ `probe` (`:309`):** C принимает
+  `wait_ms`, делает до 8 poll/recv, успех при `ENOENT` или записи;
+  Rust фиксирует 100 мс и один recv, затем `decode_entry` или
+  `NLMSG_ERROR == -ENOENT`. P.
+- **`d2k_ct_open` (243–253) ↔ `R2oConntrackClient::open` (`:270`):**
+  C `SOCK_RAW|SOCK_CLOEXEC` + fcntl O_NONBLOCK + bind, fd отдаётся
+  без проверки подсистемы; Rust `SOCK_NONBLOCK` + bind + обязательный
+  `probe()`, иначе `None`. P; не-Linux C-заглушка — E.
 
 ## sched.c (16 функций)
 
