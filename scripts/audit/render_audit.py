@@ -20,22 +20,30 @@ PARTS = [
     ("datapath-plan", 183),
     ("detect", 159),
 ]
-STATUS_RE = re.compile(r"^\s*(?:\*\*)?([EPN?])(?:\*\*)?(?:\s|$|\(|—|-)")
+STATUS_RE = re.compile(r"^(?:\*\*)?([EPN?])(?:\*\*)?\*?$")
+CELL_SPLIT_RE = re.compile(r"(?<!\\)\|")
+
+
+def split_row(line: str) -> list[str]:
+    """Разделить markdown-строку по неэкранированным `|`."""
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|") and not stripped.endswith("\\|"):
+        stripped = stripped[:-1]
+    return [cell.strip().replace("\\|", "|") for cell in CELL_SPLIT_RE.split(stripped)]
 
 
 def table_status(line: str) -> str | None:
     if not line.lstrip().startswith("|"):
         return None
-    cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-    if len(cells) < 6 or not re.match(
+    cells = split_row(line)
+    if len(cells) < 7 or not re.match(
         r"^`?[A-Za-z_][A-Za-z0-9_]*`?(?:\s|\||$)", cells[0]
     ):
         return None
-    for cell in cells:
-        match = STATUS_RE.match(cell)
-        if match:
-            return match.group(1)
-    return None
+    match = STATUS_RE.match(cells[5])
+    return match.group(1) if match else None
 
 
 def main() -> int:

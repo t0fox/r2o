@@ -80,32 +80,35 @@ recheck 1982 1982 equal True
 
 ### Текущий прогресс (2026-11-11)
 
-Проверены четыре группы из пяти, **1290 из 1982** функций:
+Проверены все пять групп, **1982 из 1982** функций:
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 220 | 311 | 16 | 1 |
+| core-state | 692 | 126 | 565 | 1 | 0 |
 | datapath-core | 400 | 120 | 270 | 10 | 0 |
 | datapath-plan | 183 | 108 | 69 | 5 | 1 |
 | detect | 159 | 49 | 98 | 12 | 0 |
-| **Итого проверено** | **1290** | **497** | **748** | **43** | **2** |
-| core-state (в работе) | 692 | — | — | — | — |
+| **Итого** | **1982** | **623** | **1313** | **44** | **2** |
 
-Это не оценка паритета: 748 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 1313 P означают «код есть, доказательство ветвей
 неполное», 44 N — в основном диагностические/CLI-функции и несколько реальных
 расхождений (`SET_HTTPS` TTL, `ARM_SHAPE` UDP, `wire_udp` IPID_ZERO,
 `udpruntime` raw UDP, `tls12/tls13` record-layer).
+
+Статусы пересчитаны строго по колонке «статус»: описание вида «N цифр подряд»
+больше не считается статусом, экранированные `\|` не сдвигают колонки.
 
 
 ## Отчёты групп
 
 | Группа | Функций | Отчёт | Состояние |
 |---|---:|---|---|
-| core-net: TLS/HTTP/ECH/QUIC/voice/verify | 548 | `docs/audit/core-net.md` | готовится |
-| core-state: catalog/sched/diagnostics/link/… | 692 | `docs/audit/core-state.md` | готовится |
-| datapath-core: d2kd/session/hold/udp/nfq/… | 400 | `docs/audit/datapath-core.md` | готовится |
-| datapath-plan: plans/ctl/raw/route/… | 183 | `docs/audit/datapath-plan.md` | готовится |
-| detect: trigger/poison/raw/classify/response | 159 | `docs/audit/detect.md` | готовится |
+| core-net: TLS/HTTP/ECH/QUIC/voice/verify | 548 | `docs/audit/core-net.md` | готов |
+| core-state: catalog/sched/diagnostics/link/… | 692 | `docs/audit/core-state.md` | готов |
+| datapath-core: d2kd/session/hold/udp/nfq/… | 400 | `docs/audit/datapath-core.md` | готов |
+| datapath-plan: plans/ctl/raw/route/… | 183 | `docs/audit/datapath-plan.md` | готов |
+| detect: trigger/poison/raw/classify/response | 159 | `docs/audit/detect.md` | готов |
 
 ## Уже подтверждённые differential-контракты (контекст, не заменяет аудит)
 
