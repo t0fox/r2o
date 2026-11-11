@@ -1013,6 +1013,39 @@
 - `d2k_ev_outer_appdata`: бит 23 (`application data`) в `seen_types`;
   перенесён в `control::decode_*`, отдельного differential нет.
 
+## Углублённая сверка: diagnostics.c (41 функция)
+
+- **Ёмкости колец совпадают:** C `EVENTS=64`, `LIMIT_EVENTS=32`, `SAMPLES=120`,
+  `MEMORY_HISTORY=1440`, `ANOMALIES=8`, `GROWTH_POINTS=10`, `PROCESS_COUNT=3`;
+  Rust `EVENT_CAPACITY=64`, `LIMIT_CAPACITY=32`, `SAMPLE_CAPACITY=120`,
+  `MEMORY_HISTORY_CAPACITY=1440`, `ANOMALY_CAPACITY=8`, `GROWTH_CAPACITY=10`,
+  `D2O_PROCESS_CAPACITY=3`. `MADVISE_ERRNO_SLOTS=4` и
+  `MEMORY_SITE_COUNT=6` тоже совпадают.
+- **`copy`/`js`:** C `copy` обрезает строку по байтам и может разрезать
+  UTF-8; `js` затем экранирует невалидные байты как `\u00xx`. Rust
+  `truncate_utf8` отступает до границы символа, а строки из `/proc` читает
+  через `read_to_string` (невалидный UTF-8 → пустая строка/ошибка). Это
+  реальное различие для не-UTF-8 `comm`/`status`, но не для штатных ASCII
+  имён процессов; статусы P сохранены.
+- **`read_proc`/`read_detail`/`d2k_diag_sample`:** чтение pid-файлов,
+  `VmRSS/HWM/Anon/Threads/VmData/VmSwap`, `stat` starttime, fd_count,
+  `smaps_rollup`, 60-секундный сэмпл, история 1440 и детектор неучтённого
+  RSS-роста перенесены в `diagnostics.rs::process_memory/process_detail/
+  Recorder::tick`. Есть unit-тесты `process_memory_follows_pidfiles_and_restarts`,
+  `first_process_detail_survives_process_exit`,
+  `d2o_periodic_rss_sample_matches_c`; полного C/Rust differential всех полей нет.
+- **`d2k_diag_write`:** C вручную пишет `report.json` schema=1 с лимитом
+  448 КиБ; Rust сериализует `Recorder::write_report` через serde_json с тем же
+  `REPORT_MAX`. `r2o-diagnostics-differential.sh` сравнивает
+  `ring_bytes/event/snapshots/http_records`, остальные поля — unit-тесты, не
+  C-oracle. Порядок ключей JSON может отличаться, но JSON-объект от порядка
+  не зависит.
+- **`d2k_diag_record`/`record_limit`/`record_anomaly`/`write_anomalies`:**
+  кольца и счётчики `event_total/limit_total/anomaly_total/write_failures`
+  перенесены; `record_anomaly` пишет kind/code/rss_delta/accounted_delta/stage
+  в кольцо 8. Статусы P, отдельного C/Rust differential на переполнение колец
+  нет.
+
 ## Проверка полноты
 
 Строк среза: 692. Строк в таблицах: 692. E=127, P=564, N=1, ?=0; E+P+N+?=692. `E*`/`P*` учтены в E/P соответственно (static-хелперы).
