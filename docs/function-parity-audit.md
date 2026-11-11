@@ -1045,6 +1045,20 @@ mismatches: нет
 - `volume.c` — evidence-функции покрыты unit-тестами, но лестница HEAD/повторов и resource-retry сверяются только косвенно.
 - Диагностические тексты (`props_findings`, `verdict_name`, `prop_word`, `reason`-форматы) в Rust не воспроизведены дословно — это `N`/`P`, не влияющие на сетевой datapath, но влияющие на CLI/лог-паритет.
 
+## Классификация N (16 функций)
+
+Не все N означают пропущенный обход. Разбивка по влиянию:
+
+| Причина | Функции | Влияние на packet path |
+|---|---|---|
+| Тестовые хуки/экспорт | `d2k_tls12_prf_for_test`, `d2k_httpsearch_test_add_failures`, `d2k_httpsearch_test_add_records` | нет: существуют только под тестовой сборкой D2O |
+| Диагностика/тексты/счётчики | `d2k_verify_tcp_timestamps_get`, `d2k_httpsprobe_lost`, `d2k_quic_props_findings`, `prop_word`, `d2k_vol_verdict_name` | нет: CLI/лог-паритет, не сеть |
+| Серверная роль / C-API | `d2k_qw_retry_build`, `voice_ask_real` | нет: клиентский datapath не строит Retry и не отдаёт function pointer |
+| Архитектурный raw-UDP/TTL | `udp_raw_init`, `udp_raw_close`, `udp_raw_prepare`, `udp_raw_send`, `d2k_udp_plan_send`, `qp_recv_ttl` | **есть риск**: R2O шлёт QUIC-датаграммы обычным UDP-сокетом, raw IP_NODEFRAG/TTL-приём не портированы; нужен differential на фрагменты/TTL |
+
+Таким образом, реальных архитектурных пробелов в core-net — **6**, а не 16;
+остальные 10 — тестовые, диагностические или серверные функции.
+
 ## Проверки, выполненные в этой сессии
 
 Агент-аудитор тесты не запускал. Координатор дополнительно прогнал на
