@@ -4112,22 +4112,57 @@ flow-брони).
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
-| `d2k_sched_new` | 43–71 | 29 | ёмкость/slot_size, freelist | `scheduler.rs:89 with_limits` | E | `:563` тест ёмкости |
-| `d2k_sched_grow_slot_size` | 73–88 | 16 | увеличить слот, перенести данные | `:260 grow_slot_size` | P | копирование не нужно (Vec) |
-| `d2k_sched_free` | 90–98 | 9 | освобождение | `Drop` | E | RAII |
-| `earlier` (static) | 102–107 | 6 | (due,seq) порядок | сравнение `(due, order)` (`:195`) | E | `:526` порядок |
-| `sift_up` (static) | 109–120 | 12 | подъём кучи | вставка в отсортированный Vec (`:196`) | P | структура иная, порядок тот же |
-| `sift_down` (static) | 122–139 | 18 | спуск кучи | `remove(0)` (`:285`) | P | — |
-| `d2k_sched_push` | 141–144 | 4 | push без execution | `:209 push_raw` | E | `:526` |
-| `d2k_sched_push_serial` | 149–152 | 4 | push с execution/ключом | `:167 push_reserved` | P | execution → ticket |
-| `d2k_sched_push_owned` | 154–157 | 4 | push с владением ID | `:214 push_owned` | P | путь owned не покрыт unit-тестом |
-| `push` (static) | 159–190 | 32 | проверки len/cap, seq++, sift | `:223 push_owner` | P | — |
-| `d2k_sched_pop_due` | 192–196 | 5 | pop без execution | `:329 pop_due` | P | — |
-| `d2k_sched_pop_due_serial` | 198–202 | 5 | pop с execution | `:275 pop_due_ex` | P | — |
-| `d2k_sched_pop_due_ex` | 204–267 | 64 | pop; слишком длинная голова выбрасывается, owned отдаёт ID | `:275 pop_due_ex` (`ScheduledPop`) | P | `:526`/`:563` + D21; ветка `OversizedOwned` не тестирована |
-| `d2k_sched_next_ns` | 269–271 | 3 | ближайший due | `:298 next_due` | E | — |
-| `d2k_sched_count` | 273–275 | 3 | число в очереди | `:373 len` | E | — |
-| `d2k_sched_refusals` | 277–279 | 3 | отказы | `:377 refusals` | E | `:563` |
+| `d2k_sched_new` | 43–71 | 29 | ёмкость/slot_size, `slots*slot_size` overflow, mem/heap/freelist | `scheduler.rs:89 with_limits` | **E** | C `calloc` трёх массивов и freelist, отказ при 0/overflow; Rust `with_limits` проверяет 0, `Vec`/`HashMap` растут лениво, `capacity`/`refusals` тест `:563`. Ёмкость/отказы совпадают; профиль памяти/OOM иной. |
+| `d2k_sched_grow_slot_size` | 73–88 | 16 | новый `cap*slot_size`, копировать живые записи, free старый | `:260 grow_slot_size` | **P** | C физически копирует `e->len` каждого heap-entry в новый массив; Rust меняет только `slot_size`, потому что `WirePacket` владеет байтами. Коды 0/1/-1 и overflow-проверка совпадают. |
+| `d2k_sched_free` | 90–98 | 9 | free mem/heap/freelist/table | `Drop` | **E** | RAII. |
+| `earlier` (static) | 102–107 | 6 | порядок `(due_ns, seq)`, seq устойчив при равных сроках | `(due, order)` (`:195`) | **E** | C `due` затем `seq`; Rust `partition_point((due,order))`, тест `:526`. |
+| `sift_up` (static) | 109–120 | 12 | подъём двоичной кучи | вставка в отсортированный Vec (`:196`) | **P** | C куча с parent/swap; Rust `partition_point`+`Vec::insert`. Итоговый порядок `(due,order)` тот же, структура и стоимость иные. |
+| `sift_down` (static) | 122–139 | 18 | спуск кучи после изъятия головы | `remove(0)` (`:285`) | **P** | C меняет голову с последним и sift_down; Rust `Vec::remove(0)` сдвигает. Порядок тот же. |
+| `d2k_sched_push` | 141–144 | 4 | push без execution: serial(...,0) | `:209 push_raw` | **E** | Тонкая обёртка; тест `:526`. |
+| `d2k_sched_push_serial` | 149–152 | 4 | push с execution и ключом | `:167 push_reserved` | **P** | C хранит `execution`/`key` в entry; Rust `FlowTicket`+`Reservation` (batch/remaining), ключ потока в `flows`. Семантика брони иная, `push_reserved` проверяет ticket. |
+| `d2k_sched_push_owned` | 154–157 | 4 | push с владением NFQUEUE ID | `:214 push_owned` | **P** | C `owned=1`, `owner_id`; Rust `ScheduledOwner::Owned(id)`. Путь owned не покрыт unit-тестом. |
+| `push` (static) | 159–190 | 32 | `data/len` проверки, `len>slot_size`→refusals++ -2, full→refusals++ -1, freelist, seq++, sift | `:223 push_owner` | **P** | C: пустой пакет → -2 без счётчика; слишком длинный → refusals++ -2; full → refusals++ -1; `next_seq++`, freelist. Rust: empty → Err без счётчика; len>slot_size/full → refusals++ Err; sorted insert, `next_order++`. Коды C (-2/-1) заменены `Err`, порядок/отказы совпадают; `reserved_packets`/`flows` — расширение Rust. |
+| `d2k_sched_pop_due` | 192–196 | 5 | pop без execution: serial(...,NULL) | `:329 pop_due` | **P** | C обёртка; Rust `pop_due` возвращает `(WirePacket,FlowTicket)` и `expire(now)`. |
+| `d2k_sched_pop_due_serial` | 198–202 | 5 | pop с execution: pop_due_ex | `:275 pop_due_ex` | **P** | C обёртка; Rust `pop_due_ex` с `ScheduledPop`. |
+| `d2k_sched_pop_due_ex` | 204–267 | 64 | пусто/не созрело→0; слишком длинная голова: refusals++, owned→ID, freelist, sift; иначе copy out/len/key/execution/owned/ID→1 | `:275 pop_due_ex` (`ScheduledPop`) | **P** | C коды 0/1/-1, `out==NULL`→0; Rust `Empty/Dropped/OversizedOwned/Emitted`, `outcap`; **C owned-oversized возвращает -1 и owner_id, Rust `OversizedOwned{owner_id}`**; C `expire` нет (вызывающий), Rust `expire(now)` чистит flows. Ветка `OversizedOwned` не тестирована; D21. |
+| `d2k_sched_next_ns` | 269–271 | 3 | due головы или 0 | `:298 next_due` | **E** | C absolute ns/0, Rust `Option<Instant>`. Для вызывающего эквивалентно. |
+| `d2k_sched_count` | 273–275 | 3 | n | `:373 len` | **E** | Прямой getter. |
+| `d2k_sched_refusals` | 277–279 | 3 | refusals | `:377 refusals` | **E** | Тест `:563`. |
+
+### sched.c: построчная сверка
+
+- **`d2k_sched_new/grow_slot_size/free` (43–98) ↔
+  `with_limits/grow_slot_size/Drop`:** C выделяет `mem/heap/freelist`
+  и при grow копирует живые записи в новый `cap*slot_size`; Rust
+  `Vec`/`HashMap` растут лениво, grow меняет только `slot_size`
+  (байты принадлежат `WirePacket`). Коды 0/1/-1 и overflow-проверки
+  совпадают; профиль памяти иной. E/P.
+- **`earlier` (102–107) ↔ `(due,order)`:** C сортирует по
+  `(due_ns, seq)`, Rust — `(due, order)` через `partition_point`.
+  E.
+- **`sift_up/sift_down` (109–139):** C двоичная куча с parent/swap;
+  Rust вставка в отсортированный `Vec` и `remove(0)`. Итоговый
+  порядок тот же, структура и стоимость иные. P.
+- **`d2k_sched_push`/`push_serial`/`push_owned`/`push` (141–190):**
+  C хранит `key/execution/owned/owner_id` в entry, freelist и
+  `next_seq`; проверки: пустой пакет -2 без счётчика, длинный
+  refusals++ -2, full refusals++ -1; Rust `push_owner` — empty Err
+  без счётчика, len/full refusals++ Err, `ScheduledOwner`
+  (`Flow/Owned/Raw`), `Reservation`/`reserved_packets`, `next_order`.
+  Коды C заменены `Err`, отказы совпадают; брони/flow — расширение.
+  P.
+- **`d2k_sched_pop_due/pop_due_serial/pop_due_ex` (192–267) ↔
+  `pop_due/pop_due_ex`:** C: пусто/не созрело → 0; длинная голова —
+  refusals++, owned → `owned=1/owner_id`, freelist+sift, return -1
+  для owned и 0 для обычной; иначе copy out/len/key/execution/
+  owned/ID, return 1. Rust: `Empty/Dropped/OversizedOwned/Emitted`,
+  `expire(now)` чистит flows. **`OversizedOwned` не тестирован**;
+  код возврата C -1/0/1 заменён enum. P.
+- **`next_ns/count/refusals` (269–279):** C absolute ns/0, n,
+  refusals; Rust `Option<Instant>`, `len`, `refusals`. E.
+- **R2O-расширения:** `reserve`/`push_reserved`/`observe`/`cancel`/
+  `expire`/`has_pending`/`timeout_ms` не имеют отдельных C-функций в
+  `sched.c`; в C брони и очистка потоков живут в вызывающем коде.
 
 ## wire.c (9 функций)
 
