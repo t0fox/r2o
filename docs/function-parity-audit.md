@@ -3714,18 +3714,49 @@ R2O: `nfqueue.rs`, `netlink.rs`.
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
-| `say` (static) | 33–41 | 9 | форматирование ошибки в буфер | `io::Error`/`format!` | P | иной механизм, контракт тот же |
-| `nl_write` (static) | 43–57 | 15 | sendto с EINTR-retry | `nfqueue.rs:416 send_to_kernel` | E | `netlink` тесты + код |
-| `await_ack` (static) | 61–109 | 49 | poll 8×1 с, разбор NLMSG_ERROR | `nfqueue.rs:342 await_ack`, `:366 await_ack_with` | E | `nfqueue.rs:480 await_ack_stops_after_first_timeout` |
-| `send_and_ack` (static) | 111–122 | 12 | запись + ACK | `nfqueue.rs:336 configure` | P | — |
-| `set_rcvbuf` (static) | 127–145 | 19 | RCVBUFFORCE → RCVBUF, вернуть effective | `nfqueue.rs:13 set_receive_buffer_with` | E | `:512`/`:535`/`:563` три теста |
-| `d2k_nfq_open` | 147–230 | 84 | socket/bind/BIND/PARAMS(fail_open,GSO off) | `nfqueue.rs:115 open` | P | параметры и ACK совпадают; AF_INET6 добавлен |
-| `d2k_nfq_close` | 232–248 | 17 | UNBIND без ACK + close | `nfqueue.rs:404 Drop` | P | — |
-| `d2k_nfq_fd` | 250–252 | 3 | fd | `nfqueue.rs` `AsRawFd` | P | — |
-| `d2k_nfq_recv` | 254–274 | 21 | recv; EAGAIN/EINTR→0, ENOBUFS→-2 lost | `nfqueue.rs:190 receive`, `:195 receive_timeout` | P | EINTR→`ReceiveError::Wait`, а не 0 |
-| `d2k_nfq_verdict` | 276–292 | 17 | вердикт | `nfqueue.rs:310 send_verdict` | E | `netlink.rs:304 verdict_bytes...` |
-| `d2k_nfq_verdict_payload` | 294–311 | 18 | вердикт с заменой | `nfqueue.rs:317 send_replacement` | E | `netlink.rs:321 replacement_verdict...` |
-| `d2k_nfq_lost` | 313–315 | 3 | счётчик потерь | `nfqueue.rs:271 lost_packets` | E | `nfqueue.rs:492 record_lost_packet...` |
+| `say` (static) | 33–41 | 9 | `vsnprintf` ошибки в буфер `err/cap` | `io::Error`/`format!` | **P** | C пишет текст в переданный буфер; Rust возвращает `io::Error`/`Display`, вызывающий логирует. Контракт «не падать, отдать причину» тот же, тексты не сверяются. |
+| `nl_write` (static) | 43–57 | 15 | `sendto` с EINTR-retry; короткая запись → -1 | `nfqueue.rs:416 send_to_kernel` | **E** | Оба повторяют `sendto` на EINTR и отвергают короткую запись (C -1, Rust `WriteZero`). |
+| `await_ack` (static) | 61–109 | 49 | poll 1000 мс × 8, EINTR-retry, разбор `NLMSG_ERROR`, сверка seq | `nfqueue.rs:342 await_ack`, `:366 await_ack_with` | **E** | C `poll(...,1000)` ×8, `recv`, `d2k_nl_iter`, `m.seq`, `d2k_nl_errno`; Rust `ACK_TIMEOUT_MS=1000`, `ACK_ATTEMPTS=8`, `MessageIter`, `message.sequence`, `kernel_error`. Тест `nfqueue.rs:480`. |
+| `send_and_ack` (static) | 111–122 | 12 | len==0 → ошибка; `nl_write`; `await_ack(seq)` | `nfqueue.rs:336 configure` | **P** | C принимает seq параметром; Rust извлекает seq из netlink-заголовка (`message[8..12]`), затем `send_to_kernel` + `await_ack`. Эквивалентно; отдельного теста `configure` нет. |
+| `set_rcvbuf` (static) | 127–145 | 19 | `SO_RCVBUFFORCE` → `SO_RCVBUF`, `getsockopt`; 0/1/-1 | `nfqueue.rs:13 set_receive_buffer_with` | **E** | C возвращает 0 при `effective>=requested`, 1 при cap, -1 при ошибке; Rust возвращает effective, `open` сравнивает и логирует. Тесты `:512`, `:535`, `:563`. |
+| `d2k_nfq_open` | 147–230 | 84 | socket/bind/BIND+ACK/PARAMS(fail_open,GSO off), rcvbuf | `nfqueue.rs:115 open` | **P** | C: `AF_NETLINK/SOCK_RAW`, bind pid0, `BIND AF_INET`, `PARAMS` с `fail_open` и маской GSO. Rust: `SOCK_CLOEXEC`, `bind`, `config_command(BIND, protocol_family)`, `config_params(fail_open)`, rcvbuf; **добавлены family 2/10 и валидация copy_range≥64/max_len≠0**, C фиксирован на AF_INET. GSO-маска в Rust задаётся в `netlink::config_params` (проверить построчно). P. |
+| `d2k_nfq_close` | 232–248 | 17 | UNBIND без ACK, close, free | `nfqueue.rs:404 Drop` | **P** | Оба посылают UNBIND без ожидания ACK; C делает `close/free`, Rust `OwnedFd` + Drop. Эквивалентно, отдельного close-API нет. |
+| `d2k_nfq_fd` | 250–252 | 3 | fd или -1 | `nfqueue.rs` `AsRawFd` | **P** | C отдаёт `-1` для NULL; Rust `AsRawFd` всегда валиден (OwnedFd). Для непустого объекта эквивалентно. |
+| `d2k_nfq_recv` | 254–274 | 21 | recv; EAGAIN/EWOULDBLOCK/EINTR→0, ENOBUFS→lost++, -2, иначе -1 | `nfqueue.rs:190 receive`, `:195 receive_timeout` | **P** | **Расхождение:** C `recv` при EINTR/EAGAIN/EWOULDBLOCK возвращает 0 (wait); Rust `receive_timeout_with_fd` маппит ENOBUFS в `LostPackets`, а прочие ошибки `recv` — в `ReceiveError::Io`; `ReceiveError::Wait` используется для ошибок `poll`, не для EINTR/EAGAIN `recv`. Вызывающий `main.rs` может по-разному трактовать wait/io. ENOBUFS-счётчик совпадает. |
+| `d2k_nfq_verdict` | 276–292 | 17 | вердикт без payload | `nfqueue.rs:310 send_verdict` | **E** | C `d2k_nl_verdict` + `nl_write`; Rust `verdict` + `send_to_kernel`, плюс `record_verdict`. Тесты `netlink.rs:304`. |
+| `d2k_nfq_verdict_payload` | 294–311 | 18 | вердикт с заменой до 2048 байт | `nfqueue.rs:317 send_replacement` | **E** | C `d2k_nl_verdict_payload` + `nl_write`; Rust `verdict_payload(NF_ACCEPT)` + `send_to_kernel`; лимит буфера 64+2048. Тесты `netlink.rs:321`. |
+| `d2k_nfq_lost` | 313–315 | 3 | счётчик потерянных пакетов | `nfqueue.rs:271 lost_packets` | **E** | C `q->lost`, Rust `Cell<u64>` с saturating_add; тест `:492`. |
+
+### nfq.c: построчная сверка
+
+- **`say` (33–41) ↔ `io::Error`:** C `vsnprintf` в `err/cap`;
+  Rust возвращает ошибку, вызывающий логирует. P — текст не сверяется.
+- **`nl_write` (43–57) ↔ `send_to_kernel` (`nfqueue.rs:416`):**
+  EINTR-retry и отказ короткой записи совпадают. E.
+- **`await_ack` (61–109) ↔ `await_ack_with` (`:366`):** C
+  `poll(1000)` ×8, `recv`, `d2k_nl_iter`, `seq`, `d2k_nl_errno`;
+  Rust `ACK_TIMEOUT_MS=1000`, `ACK_ATTEMPTS=8`, `MessageIter`,
+  `sequence`, `kernel_error`. E, тест `:480`.
+- **`send_and_ack`/`set_rcvbuf`:** C `send_and_ack` + `await_ack`;
+  Rust `configure` извлекает seq из заголовка. C `set_rcvbuf` даёт
+  0/1/-1, Rust `set_receive_buffer_with` — effective, `open`
+  сравнивает и логирует. P/E.
+- **`d2k_nfq_open` (147–230) ↔ `QueueSocket::open` (`:115`):** C
+  фиксирован на `AF_INET`, Rust принимает family 2/10 и валидирует
+  `copy_range>=64`, `max_len!=0`; оба делают bind pid0, BIND+ACK,
+  PARAMS с `fail_open`; GSO выключается через `netlink::config_params`.
+  P — набор family/валидаций шире.
+- **`close`/`fd`:** C UNBIND без ACK + `close/free`, `fd` или -1;
+  Rust `Drop` + `OwnedFd`/`AsRawFd`. P — API иной, поведение то же.
+- **`d2k_nfq_recv` (254–274) ↔ `receive_timeout_with_fd`:** C
+  EAGAIN/EWOULDBLOCK/EINTR → 0 (wait), ENOBUFS → `lost++`, -2;
+  Rust ENOBUFS → `LostPackets`, а EINTR/EAGAIN `recv` → `Io`, не
+  `Wait`. `Wait` используется для ошибок `poll`. P — вызывающий может
+  по-разному трактовать wait/io; ENOBUFS-счётчик совпадает.
+- **`verdict`/`verdict_payload`/`lost`:** C `d2k_nl_verdict*` +
+  `nl_write`, `q->lost`; Rust `verdict*` + `send_to_kernel` +
+  `record_verdict`, `Cell<u64>`. E, тесты `netlink.rs:304/321`,
+  `nfqueue.rs:492`.
 
 ## nl.c (19 функций)
 
