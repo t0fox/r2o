@@ -102,7 +102,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-11)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 626 / P 1314 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 624 / P 1316 /
 N 40 / ? 2**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -4223,8 +4223,8 @@ flow-брони).
 | `wr16` (static) | 22–25 | 4 | big-endian u16 | `wire.rs:552 write_u16` | E | — |
 | `sum16` (static) | 31–40 | 10 | RFC1071 | `:534 sum16` | E | — |
 | `fold` (static) | 42–47 | 6 | свёртка | `:545 checksum_value` | E | — |
-| `pseudo_sum` (static) | 57–65 | 9 | псевдозаголовок UDP | `build_udp_packet` внутри (`:271-285`) | P | вынесенной функции нет |
-| `d2k_wire_build_udp` | 67–207 | 141 | сборка UDP, запрет pre/seq_shift/TS/BADSUM, сумма всегда | `wire.rs:213-305 build_udp_packet` | **P** | **Подтверждённые расхождения:** (1) C для IPv4 допускает `POISON_IPID_ZERO` и пишет ID=0 (`wire_udp.c:136-137`), для IPv6 отвергает (`:75`); R2O отвергает **любой** `emission.poison != 0` (`wire.rs:222-231`), то есть IPv4 IPID_ZERO не поддерживается. (2) C ставит TOS=0 (`wire_udp.c:130`), R2O копирует `view.traffic_class` (`wire.rs:244`). (3) C отвергает только `TCPTS_BACK|BADSUM` (`:106-109`) и молча игнорирует TS_UP/MD5; R2O отвергает все poison-биты. TTL: C `e->ttl ?: c->ttl ?: 64` (`:148`), R2O `emission_ttl(emission, view.hop_limit)` (`wire.rs:425-433`) — эквивалентно, если `c->ttl` снят из пакета. Сумма всегда, 0→0xffff, проверки длины и IPv6-запрет IPID_ZERO совпадают. `crates/r2o-datapath/tests/raw.rs:181` собирает пакет, но divergence не покрывает. |
+| `pseudo_sum` (static) | 57–65 | 9 | IPv4 UDP ph: src/dst, 0, proto 17, udp_len; 12 байт | `build_udp_packet` внутри (`:265-285`) | **P** | C отдельная функция только для IPv4 (IPv6 считает `sum16(out+8,32,len+17)`); Rust `pseudo_sum` для TCP и inline-сумма для UDP: IPv4 `sum16(out[12..20]) + 17 + udp_len`, IPv6 адреса+длина. Для IPv4 эквивалентно, отдельного символа нет. |
+| `d2k_wire_build_udp` | 67–207 | 141 | сборка UDP: family 0/4/6, IPv6 IPID_ZERO reject, запрет pre/seq_shift/TCPTS_BACK/BADSUM, TOS=0, IP-ID, TTL, сумма всегда | `wire.rs:213-305 build_udp_packet` | **P** | **Подтверждённые расхождения:** (1) C для IPv4 допускает `POISON_IPID_ZERO` и пишет ID=0 (`:136-137`), для IPv6 отвергает (`:75`); R2O отвергает **любой** `emission.poison != 0` (`:222-231`), включая IPv4 IPID_ZERO, MD5 и TS_UP. (2) C ставит TOS=0 (`:130`), R2O копирует `view.traffic_class` (`:244`). (3) C отвергает только `TCPTS_BACK|BADSUM` (`:106-109`), а `urgent/urgent_ptr` и prefix не проверяет; R2O дополнительно требует `urgent==false`, `urgent_ptr==0`, `prefix.is_empty()`, `wire_profile==0`, `ipfrag==0`. (4) TTL: C `e->ttl ?: c->ttl ?: 64` (`:148`), R2O `emission_ttl(emission, view.hop_limit)` (`:425-433`) — эквивалентно, если `c->ttl` снят из пакета. (5) C допускает `family=0` как IPv4 и берёт адреса/порты/ip_id/TOS/flow из `d2k_conn`; Rust требует `PacketView` family 4/6, `proto17`, `total_len==input.len()`, `udp_payload_range`, и берёт поля из input. Сумма всегда, `0→0xffff`, длины и IPv6-запрет IPID_ZERO совпадают. `tests/raw.rs:181` собирает пакет, но divergence не покрывает. |
 
 ## Углублённая сверка: journal/nl/icmpguard/wire_udp
 
@@ -4272,6 +4272,10 @@ flow-брони).
   `TCPTS_BACK|BADSUM`, R2O все) и TTL (C `c->ttl`, R2O
   `view.hop_limit`; эквивалентно при снятом TTL). Сумма всегда,
   `0→0xffff`, длины и IPv6-запрет IPID_ZERO совпадают.
+  Дополнительно Rust отвергает `urgent/urgent_ptr` и `prefix`, требует
+  `PacketView` `proto17/total_len==len/udp_payload_range` и берёт
+  TOS/адреса/порты/ip_id из input; C берёт их из `d2k_conn` и
+  допускает `family=0`.
 
 ## addr.c (3 функции)
 

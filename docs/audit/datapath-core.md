@@ -1256,9 +1256,23 @@ flow-брони).
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
-| `d2k_addr_parse` | 5–18 | 14 | IPv4/IPv6 литерал, отказ `%zone` | `r2k-core/src/addr.rs:11 Address::parse` | E | `r2k-core/tests/network.rs:6`, `:22` (включая `fe80::1%eth0`) |
-| `d2k_addr_text` | 20–30 | 11 | текст адреса, 0 при cap==0/нехватке | `addr.rs:49 Display` | P | контракт «не влезло → 0» не нужен: `format!` не усекает |
-| `d2k_addr_equal` | 32–36 | 5 | равенство family+bytes | `addr.rs:5 PartialEq` | E | `network.rs:16` |
+| `d2k_addr_parse` | 5–18 | 14 | IPv4/IPv6 литерал, отказ `%zone`, family 4/6 | `r2k-core/src/addr.rs:11 Address::parse` | **E** | C отвергает NULL и любой `%`, `inet_pton(AF_INET)` затем `AF_INET6`, family 4/6. Rust `IpAddr::parse` отвергает host/zone, те же семейства; `network.rs:6`, `:22` (включая `fe80::1%eth0`). Форматы ввода совпадают. |
+| `d2k_addr_text` | 20–30 | 11 | `inet_ntop`, отказ при неизвестной family; `n>=cap`→0, иначе копия+`\0`, вернуть n | `addr.rs:49 Display` | **P** | C пишет в буфер `out/cap`, проверяет `n>=cap` и возвращает длину; Rust `Display`/`format!` не имеет буфера и не усекает, вызывающий сам выделяет строку. Текст IPv4/IPv6 совпадает, контракт «не влезло → 0» не портирован. |
+| `d2k_addr_equal` | 32–36 | 5 | family совпадает, `memcmp` 4/16; неизвестная family → 0 | `addr.rs:5 PartialEq` | **E** | C сравнивает family+bytes, family 0/иная → 0; Rust derived `Eq` на `IpAddr` (V4/V6 — разные варианты). `network.rs:16`. |
+
+### addr.c: построчная сверка
+
+- **`d2k_addr_parse` (5–18) ↔ `Address::parse` (`addr.rs:11`):** C
+  отвергает NULL и любой `%`, затем `inet_pton(AF_INET)` /
+  `AF_INET6`; Rust `IpAddr::parse` отвергает host/zone и даёт V4/V6.
+  E; `network.rs:6/22`.
+- **`d2k_addr_text` (20–30) ↔ `Display` (`:49`):** C `inet_ntop` в
+  `out/cap`, `n>=cap`→0, возвращает n; Rust `Display`/`format!` не
+  имеет буфера/усечения. Текст IPv4/IPv6 совпадает, контракт
+  «не влезло → 0» не портирован. P.
+- **`d2k_addr_equal` (32–36) ↔ `PartialEq`:** C family+`memcmp` 4/16,
+  неизвестная family→0; Rust derived `Eq` на `IpAddr` (V4/V6 разные
+  варианты). E; `network.rs:16`.
 
 ## tls.c (7 функций)
 
