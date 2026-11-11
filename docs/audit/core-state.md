@@ -1217,6 +1217,40 @@
   close/reset) наследуют статус владельца; E/P выставлены по наличию
   differential/unit, без полного C/Rust построчного diff.
 
+## Углублённая сверка: crypto.c / p256.c / x25519.c (61 функция)
+
+- **AES-128/ECB:** `xtime`, `d2k_aes_sbox_byte`, `aes128_key_expand`,
+  `sub_bytes`, `shift_rows`, `mix_columns`, `add_round_key`,
+  `aes128_encrypt_block`, `d2k_aes128_ecb` заменены crate `aes`/`Aes128`;
+  `scripts/test-core-crypto-differential.sh` сравнивает FIPS-197 вектор
+  `aes128-ecb`. `d2k_aes128_ecb` production-используется для QUIC header
+  protection (`quicwire.c:388,404`), R2O — `quic.rs`/quinn; E.
+- **SHA-256/HMAC/HKDF:** `rotr32`, `sha256_compress/init/update/final`,
+  `d2k_sha256`, `d2k_hmac_sha256`, `d2k_hkdf_extract` покрыты
+  `sha2`/`hmac`/`hkdf` и differential-кейсами `sha256-abc`, `sha256-100`,
+  `hmac-*`, `hkdf-extract`, `hkdf-client-in`, `hkdf-quic-key` — E.
+  `d2k_hkdf_expand_label`/`_ctx` — P: границы `label>249`/`ctx>32` в
+  Rust-обёртке не сравнивались.
+- **AES-128-GCM:** `gf128_h_table`, `gf128_mul_fast`, `ghash`,
+  `d2k_ghash_for_test`, `inc32`, `gctr`, `consttime_eq16`,
+  `d2k_aes128_gcm_encrypt/decrypt` заменены `aes-gcm`; differential
+  сравнивает `gcm-ciphertext`, `gcm-tag`, `gcm-opened`, `gcm-bad-tag` — E.
+- **P-256:** `fe_*`, `pt_*`, `scalar_ok` — статические хелперы, своей
+  арифметики в R2O нет (P*). **`d2k_p256_public`/`keypair`/`ecdh`
+  production-используются:** `core/tls12.c:650-655` вызывает
+  `d2k_p256_keypair`/`d2k_p256_ecdh` для ECDHE secp256r1. R2O делегирует
+  `ring`; прямых C/Rust-векторов P-256, проверки точки не на кривой и
+  retry-политики 16 попыток нет — P. Это не N.
+- **X25519:** `car25519`, `sel25519`, `pack25519`, `unpack25519`, `A`,
+  `Z`, `M`, `S`, `inv25519` — статические хелперы (P*);
+  `d2k_x25519`/`d2k_x25519_base` production-используются в QUIC
+  (`quicconn.c:851,1159`, `quichello.c:247`), TLS 1.2/1.3
+  (`tls12.c:650`, `tls13.c:279,395`) и ECH/HPKE. R2O — `x25519-dalek`/
+  `ring`/`hpke`; ECH/QUIC differentials косвенные, прямых C-векторов
+  X25519 нет — P.
+- **Вывод:** 26 AES/SHA/HMAC/HKDF/GCM функций — E (кроме двух
+  HKDF-границ P), 22 P-256 и 11 X25519 — P; N в блоке нет.
+
 ## Проверка полноты
 
 Строк среза: 692. Строк в таблицах: 692. E=127, P=564, N=1, ?=0; E+P+N+?=692. `E*`/`P*` учтены в E/P соответственно (static-хелперы).
