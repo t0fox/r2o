@@ -367,6 +367,49 @@ C всё равно выдаёт кандидат «всё сразу», R2O е�
 production-сеттер `raw_set_segment_max`. Ни одна N не является ветвью
 классификации пакета, кроме последствий `segment_max` для measured-планов.
 
+## Углублённая сверка classify/raw
+
+- **`classify.c` (36 функций):** `d2k_verdict_name`, `d2k_resp_name`,
+  `d2k_now_ms`, `d2k_sleep_ms`, `d2k_trigger_accepts`, `d2k_trigger_sni`,
+  `d2k_detect_stopped`, `d2k_opts_defaults/acceptable/skipped`,
+  `d2k_trace_add`, `obs_done`, `d2k_note`, `d2k_split_offsets`,
+  `dial_marked*`, `d2k_dial_deadline_err`, `once_probe`, `unacked_bytes`,
+  `d2k_probe_data_ack`, `D2K_DATA_ACK_PROBE`, `measure`, `bind_decoy`,
+  `answered_by_props`, `fam_ix/self_ix/selftest_*`, `d2k_raw_note_rc`,
+  `raw_selftest`, `raw_doubted`, `raw_recheck`, `sweep_poisons`,
+  `cross_check_tls12`, `d2k_classify_run`, `d2k_send_nosig` сверены с
+  `classify.rs`/`raw_probe.rs`/`response.rs`.
+  **Подтверждено E:** `d2k_split_offsets` = `classify.rs:28`
+  (фильтр 0<cut<n, первые 8, сортировка, dedup, спаны; тесты
+  `tests/classify.rs:337/349/361`); `unacked_bytes` = `response.rs:953/963`
+  (TIOCOUTQ/SO_NWRITE); `d2k_probe_data_ack` = `response.rs:898
+  probe_neutral_ack` (нейтральный байт, TIOCOUTQ, poll, «любое событие =
+  не тишина»; тест `live_neutral_ack_confirms_delivery_even_when_control_is_silent`);
+  `raw_recheck` = `raw_probe.rs:746` + C/Rust recheck-тест.
+  **P:** `raw_selftest` — цикл встроен в `sweep`, отдельного теста цикла
+  нет; `sweep_poisons` — `control=None` C выдаёт «всё сразу», R2O нет;
+  `d2k_classify_run` — production-discovery `full_detect_semantics=false`,
+  `confirm_clear=true`, дифференциалы идут с `true`; `d2k_send_nosig` —
+  macOS-ветка `SO_NOSIGPIPE` не перенесена; `d2k_trigger_sni`/`trace_add`/
+  `opts_*` — P на форматы/лимиты.
+- **`raw.c` (62 функции):** разбор RST-правил (`d2k_parse_rst_rule`,
+  `d2k_parse_stale_rst_rule`, `d2k_rst_rule_stale`) — N (R2O создаёт nft
+  rule, но чужой/legacy текст не разбирает); nft lifecycle
+  (`rst_nft`, `rst_rule_cmd*`, `rst_delete_once`, `retry_pending_releases`,
+  `d2k_raw_flush_pending`) — P; packet build/checksum
+  (`build_ipv4_tcp`, `tcp_checksum*`, `build_ip_tcp`) — E по
+  `raw_probe.rs` тестам; `raw_send` — P (`syn_data` одним пакетом вместо
+  нарезки по `seg_max`); `raw_send_syn/raw_recv/raw_read_payload/
+  raw_close/raw_handshake/raw_dial` — P (RTO/эхо/сеть не покрыты полным
+  differential); `d2k_raw_set_segment_max` — N, production-вызов
+  `d2kc.c:575,789`, R2O measured-план жёстко 1400 (см. N-раздел);
+  non-Linux stubs — N/P. `d2k_raw_supported` — E; `d2k_raw_probe_*` —
+  P (плановая часть покрыта, сетевой путь — нет).
+- **Вывод:** classify/raw — 98 функций; новые подтверждённые E:
+  split_offsets, unacked_bytes, probe_data_ack, raw_recheck. Основные
+  пробелы — RST-парсеры, `raw_set_segment_max`, `sweep_poisons` control=None,
+  production `full_detect_semantics=false`, macOS send_nosig.
+
 ## Главные пробелы (N)
 
 10 строк среза соответствуют 8 отсутствующим функциям: пары Linux/#else в `raw.c` дают дубли
