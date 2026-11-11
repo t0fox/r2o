@@ -791,6 +791,62 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 | `prop_word` | 244-246 | 3 | текст «прошло/не прошло/ответа нет» | нет | N | текстовые формулировки не портированы |
 | `d2k_quic_strategy_arms` | 248-396 | 149 | лестница: TTL-lifetime → clearance → split → longer → frag → original | `quic_replay.rs:449 r2o_quic_discovery_candidates`, `:368 strategy_attempt_decision` | P | base decision покрыт differential; полная лестница и приоритеты — нет |
 
+## Углублённая сверка: verify/volume/voice (114)
+
+- **`verify.c` (74):** E — `ech_dns_name`/`d2k_ech_resolve` (DNS),
+  `find_hdr_end/eol`, `lower_ascii`, `has_cf_challenge`, `body_feed/
+  byte/exact/line`, `read_http_body`, `redirect_path`,
+  `https_redirect_response`, `gateway_*`, `request_page_budget`,
+  `verify_probe13_internal/on`, `d2k_verify_replay_on`,
+  `d2k_verify_probe_on/alpn_on`, `verify_probe12_internal/on`:
+  подтверждены `r2o-tls-verify-differential.sh` (16/16),
+  `test-http-chunk-framing-differential.sh`,
+  `donor_and_r2o_send_the_same_default_verification_request`,
+  `donor_and_r2o_validate_the_discord_gateway_websocket_like_d2o`,
+  replay/ECH differentials. **P:** `read_status_buf/rd` (1xx/101/
+  дубликаты Location/Connection не все сверены); `d2k_verify_budget_set/
+  get` (C глобальный бюджет, Rust `FetchOptions.budget_packets`);
+  `d2k_verify_tcp_timestamps_set` (нет глобального переключателя);
+  `d2k_verify_quic_form_set` (форма передаётся явно, не глобально);
+  `d2k_verify_tcp_data_packets` (TCP_INFO поля есть, ioctl/структура не
+  сверены); `budget_tcp`/`read_eof`/`fd_peer_spoke`/`fd_packets` (бюджет
+  и хуки не сопоставлены с C-оракулом); `d2k_verify_probe_ech_on/
+  ech_origin_on` (живой ECH-зонд, дифференциал только replay/RX);
+  `d2k_verify_probe_identity/gzip/path/baseline` (композиция параметров);
+  `d2k_verify_probe_quic`, `quic_app_silent`, `h3_read_headers`,
+  `budget_quic` (QUIC/H3-исходы покрыты stage-дифференциалом, не
+  построчно). **N:** `d2k_verify_tcp_timestamps_get` — глобального
+  профиля TS нет; это packet-path (см. N-раздел). Строка
+  `d2k_props_contact_on_family_tcp_profile` 1360-1361 — ложное
+  срабатывание парсера (хвост вызова), помечена `?`.
+- **`volume.c` (19):** E — `rx_wire_partial`, `d2k_volume_rx_partial/
+  pair_agrees/needs_repeat/evidence`, `rx_probe`:
+  `tests/r2o_volume.rs` + `d2o_verify_differential` rx-volume. **P:**
+  `d2k_vol_verdict_name` (текст «цель»/«мишень»), `now_ms`, `nap_ms`,
+  `clamp_ms`, `fill_pad` (алфавит/фолбэк), `connect_bounded`
+  (TCP_NODELAY/errno), `drain_head_tls/plain`, `resource_retry_path`,
+  `measure_response_volume`, `probe_response_volume`,
+  `d2k_volume_probe_path/probe` (лестница HEAD 0..7, таймауты×3 и
+  resource-retry не сверены побайтово). N нет.
+- **`voice.c` (14):** E — `is_voice_port`, `field_val`,
+  `d2k_voice_targets`, `send_one`, `voice_ask`, `voice_resolve`,
+  `voice_alive`, `voice_ask_arms`, `d2k_voice_run`:
+  `test-voice-list-differential.sh` + 15+ unit `voice_measure.rs`
+  (копии/частичный ответ/локальная ошибка/verdicts). **P:**
+  `ms_since`, `voice_blob_load` (путь/env-фолбэк и «лишний байт»),
+  `say_reason`/`add_reason` (тексты). **N:** `voice_ask_real` —
+  function-pointer seam не нужен/не портирован.
+- **`voice_discovery.c` (7):** E — `nibble`, `d2k_voice_discovery_prefix`,
+  `d2k_discovery_response`, `discovery_probe`,
+  `d2k_voice_discovery_search`: `r2o-discord-discovery-differential.sh`
+  + `test-discord-voice-discovery-arm-differential.sh`, unit STUN/
+  prefix. **P:** `milliseconds` (Instant), `local_failure` (ветка внутри
+  evaluate, отдельной функции нет). N нет.
+- **Вывод:** verify/volume/voice — 114 функций; E покрывает HTTP/TLS/
+  Gateway, volume-evidence и голосовые вердикты; P — глобальные
+  budget/TS/QUIC-form, живой ECH, volume-ladder/resource-retry,
+  voice-blob/тексты; N — `tcp_timestamps_get` и `voice_ask_real`.
+
 ## Углублённая сверка: quicprobe.c (56) и quicarms.c (8)
 
 - **E (провод/проверка):** `resolve_family`, `resolve_real`,
