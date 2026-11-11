@@ -776,6 +776,61 @@ Discord IP Discovery обход: разбор/сборка 20-байтового
 | `local_failure` | 102-109 | 8 | локальная ошибка/mark → UNMEASURED | `voice_discovery.rs:475 r2o_probe_shape_is_valid` | P | ветка есть в evaluate; отдельной функции нет |
 | `d2k_voice_discovery_search` | 110-159 | 50 | поиск границы ответов, подтверждение STUN-префиксом, вердикт | `voice_discovery.rs:484 r2o_search_discovery_endpoint` | E | дифференциалы Discovery + arm |
 
+## Углублённая сверка: quicsnap/quicwire/quic/ipfrag/stun/quichello (83)
+
+- **`quicsnap.c` (6):** `d2k_qsnap_is/parse/pack/client_hello/sni` — E:
+  `r2k-core/src/quic_snapshot.rs` (`pack/parse`) + `quic.rs`
+  (`initial_client_hello_from_datagrams`, SNI), тесты
+  `tests/quic_snapshot.rs` (round-trip, ≤4 датаграммы, лимиты).
+  `d2k_qsnap_form` — P: отдельной структуры `form` нет; `n` и длины
+  выводятся из снимка, `ch_len` — из ClientHello, адресного differential
+  на форму нет.
+- **`quicsnap_reseal.c` (2):** `reseal_one`, `d2k_qsnap_recid` — E:
+  `quic_snapshot.rs:79 r2k_quic_snapshot_reseal`,
+  `quic.rs:338 r2k_quic_initial_reseal_for_dcid`; форма/длина
+  сохраняются, тесты snapshot + reseal.
+- **`quicwire.c` (28):** E — `salt_for`, `label_key/iv/hp`, varint read/
+  len/write, `long_type_v1/wire`, long header без token, `d2k_qw_hdr_parse`,
+  `d2k_qw_pn_decode`, `initial_secret`, `keys_from_secret`, `nonce_of`,
+  `d2k_qw_seal/open`, `d2k_qw_retry_verify`: RFC 9001/9369, corrupted
+  Initial/Retry, split-тесты. **P:** `d2k_qw_varint_write_w` (Rust не
+  поддерживает принудительную ширину), `d2k_qw_long_hdr_token(_w)`
+  (0-RTT/Retry-сборка не портирована), `d2k_qw_pn_len` (Rust фиксирует
+  pn_len=4), `d2k_qw_ranges_*` (пересборка делегирована quinn).
+  **N:** `d2k_qw_retry_build` — серверный Retry, клиенту не нужен.
+- **`quic.c` (21):** E — `rd16`, `read_varint`, `parse_initial_header`,
+  `d2k_quic_is_initial` (строже C: проверяет AEAD),
+  `decrypt_initial`, `collect_crypto_frames`, `skip_u8/u16_vec`,
+  `find_sni`, `find_client_hello_sni`, `crypto_stream_of`,
+  `d2k_quic_client_hello/dgrams_hello/hello_name/sni`,
+  `put_split_frame`, `d2k_quic_initial_split_crypto`: RFC-тесты,
+  `r2o-quic-hello-differential.sh`, split v1/v2. **P:**
+  `d2k_quic_hello_incomplete` (Rust собирает до `crypto_end`, отдельного
+  предиката нет), `d2k_quic_assembly_init/feed/complete` (batch-API
+  `..._from_datagrams` вместо инкрементального состояния).
+- **`ipfrag.c` (8):** все E — `d2k_ipfrag_shape/cuts`, `wr16`, `sum16`,
+  `fold`, `d2k_udpfrag_build_ex/build`, `d2k_udpfrag6_build_ex`:
+  `wire.rs:299 build_udp_fragments_with_capacity`, differential
+  `d2o_ipfrag_builder_matches_r2o_on_ipv4_ipv6_shapes`
+  (C-оракул `tests/d2o_ipfrag_oracle.c`).
+- **`stun.c` (5):** все E — `rd16/rd32`, `d2k_stun_request`,
+  `parse_xor_mapped`, `d2k_stun_parse_response`:
+  `r2k-core/src/stun.rs`, RFC 5769 + C-векторы Discovery
+  (`tests/stun.rs`).
+- **`quichello.c` (13):** E — `select_probe_profile`, `split_point`,
+  `put_crypto`, `prepare`, `seal_one`, `probe_initial_sized`,
+  `d2k_quic_probe_initial`, `d2k_quic_hello_rename`,
+  `d2k_quic_hello_recid`: профиль/rename/reseal/build, RFC/тесты
+  `quic.rs`, `quic_snapshot.rs`. **P:** `d2k_quic_probe_initial_longer`
+  (Rust-обёртка всегда 1200), `d2k_quic_prepare_target` (композиция в
+  `quic_replay.rs`, fallback-порядок не тестирован),
+  `d2k_quic_hello_ask` (v2/clear-fixed-bit не вынесены),
+  `d2k_quic_hello_split` (две датаграммы; `initial_split_crypto` даёт
+  один пакет).
+- **Вывод:** 83 функции; 63 E, 19 P, 1 N. Основные пробелы —
+  quinn-замены ranges/pn_len, 0-RTT/Retry-сборка, длинный Initial,
+  двухдатаграммный split и form-снимок.
+
 ## core/udpplan.c (12 функций)
 
 Генерация текста плана `d2k-plan` для UDP-проб: QUIC arm (blob/copies/ttl/frag/split/udplen), delay, voice-приманка, вопрос. В R2O план представлен структурой `r2k_core::plan::Plan`, а не текстом; QUIC-кандидаты несут `directives` (`r2o-controller/src/quic_replay.rs:207 R2oQuicDiscoveryCandidate.directives`), voice-текст — `voice_discovery.rs:8 r2o_voice_arm_plan_text`, `voice_measure.rs:269 r2o_measured_voice_arm_plan_text`.
